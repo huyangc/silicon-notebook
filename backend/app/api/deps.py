@@ -1,6 +1,6 @@
 """请求级依赖：单例仓库 + 当前用户解析 + notebook 访问守卫。"""
 from functools import lru_cache
-from typing import AsyncIterator
+from typing import AsyncIterator, cast
 
 from fastapi import Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
@@ -8,7 +8,7 @@ from starlette.concurrency import run_in_threadpool
 from app.core.config import get_settings
 from app.core.request_context import set_request_user, reset_request_user
 from app.models.schemas import UserProfile
-from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, SourceRepository, AskStreamPort
+from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, SourceRepository, AskStreamPort, AskStateStorePort, MemoryRepository
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -37,7 +37,6 @@ def source_repository() -> SourceRepository:
 def ask_stream_repository() -> AskStreamPort:
     return repository()
 
-
 def _bearer_token(request: Request) -> str:
     header = request.headers.get("Authorization", "")
     if header.lower().startswith("bearer "):
@@ -59,7 +58,7 @@ async def get_current_user(request: Request) -> AsyncIterator[UserProfile]:
         if user is None:
             raise HTTPException(status_code=401, detail="invalid or expired session")
     elif settings.auth_optional:
-        user = repo.current_user()  # ContextVar 未设 → seeded admin
+        user = await run_in_threadpool(repo.current_user)  # ContextVar 未设 → seeded admin
     else:
         raise HTTPException(status_code=401, detail="authentication required")
 
@@ -96,3 +95,15 @@ async def require_notebook_read(
 
 # 向后兼容别名:老代码/未分类路由默认仍是 owner-only(默认最严兜底)。
 require_notebook_access = require_notebook_write
+
+
+def memory_service() -> MemoryRepository:
+    return cast(MemoryRepository, repository())
+
+
+def ask_state_repository() -> AskStateStorePort:
+    return cast(AskStateStorePort, repository())
+
+
+def memory_preview_client():
+    return repository().llm_client  # type: ignore[attr-defined]

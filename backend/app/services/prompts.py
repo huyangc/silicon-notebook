@@ -13,6 +13,19 @@ DESCRIPTION_SCHEMA_HINT = '{"description":""}'
 
 CONCEPT_DESC_SCHEMA_HINT = '{"description":""}'
 
+MEMORY_PREVIEW_SCHEMA_HINT = '{"title":"","content_md":"","tags":[""]}'
+
+
+def memory_preview_prompt(question: str, answer: str) -> str:
+    return (
+        "Create a concise, reusable personal Memory card from this Ask exchange. "
+        "Keep the content faithful to the answer, preserve Markdown and formulas, "
+        "and omit display-only citation markers. Use the question's language. "
+        "Return JSON only with title (at most 80 characters), content_md, and a "
+        "short list of topical tags.\n\n"
+        f"Question:\n{question}\n\nAnswer:\n{answer}"
+    )
+
 
 def concept_description_prompt(name: str, evidence_block: str) -> str:
     return (

@@ -1239,6 +1239,304 @@
           "title": "KnowledgeUpdate",
           "type": "object"
         },
+        "MemoryCreateFromAnswer": {
+          "additionalProperties": false,
+          "properties": {
+            "answer_id": {
+              "title": "Answer Id",
+              "type": "string"
+            },
+            "content_md": {
+              "title": "Content Md",
+              "type": "string"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Tags",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "answer_id",
+            "title",
+            "content_md"
+          ],
+          "title": "MemoryCreateFromAnswer",
+          "type": "object"
+        },
+        "MemoryPreview": {
+          "properties": {
+            "content_md": {
+              "title": "Content Md",
+              "type": "string"
+            },
+            "provenance_summary": {
+              "additionalProperties": true,
+              "title": "Provenance Summary",
+              "type": "object"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Tags",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "content_md"
+          ],
+          "title": "MemoryPreview",
+          "type": "object"
+        },
+        "MemoryRecord": {
+          "properties": {
+            "agent_profile_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Profile Id"
+            },
+            "confirmed_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Confirmed At"
+            },
+            "confirmed_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Confirmed By"
+            },
+            "content_md": {
+              "title": "Content Md",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "created_by": {
+              "title": "Created By",
+              "type": "string"
+            },
+            "embedding_error": {
+              "default": "",
+              "title": "Embedding Error",
+              "type": "string"
+            },
+            "embedding_status": {
+              "default": "pending",
+              "title": "Embedding Status",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "origin": {
+              "enum": [
+                "ask_answer",
+                "external_agent"
+              ],
+              "title": "Origin",
+              "type": "string"
+            },
+            "promotion_state": {
+              "default": "none",
+              "enum": [
+                "none",
+                "proposed",
+                "approved",
+                "rejected"
+              ],
+              "title": "Promotion State",
+              "type": "string"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "title": "Provenance",
+              "type": "object"
+            },
+            "source_answer_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Answer Id"
+            },
+            "status": {
+              "enum": [
+                "candidate",
+                "confirmed",
+                "rejected",
+                "deprecated"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Tags",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "created_by",
+            "origin",
+            "status",
+            "title",
+            "content_md",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "MemoryRecord",
+          "type": "object"
+        },
+        "MemoryReviewRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "content_md": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Content Md"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Reason"
+            },
+            "tags": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tags"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title"
+            }
+          },
+          "title": "MemoryReviewRequest",
+          "type": "object"
+        },
+        "MemoryUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "content_md": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Content Md"
+            },
+            "tags": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tags"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title"
+            }
+          },
+          "title": "MemoryUpdate",
+          "type": "object"
+        },
         "MergeRequest": {
           "properties": {
             "into_id": {
@@ -2147,6 +2445,37 @@
             "limit"
           ],
           "title": "PaginatedKnowledge",
+          "type": "object"
+        },
+        "PaginatedMemories": {
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/MemoryRecord"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            },
+            "offset": {
+              "title": "Offset",
+              "type": "integer"
+            },
+            "total_count": {
+              "title": "Total Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total_count",
+            "offset",
+            "limit"
+          ],
+          "title": "PaginatedMemories",
           "type": "object"
         },
         "PaginatedSources": {
@@ -3412,6 +3741,45 @@
           "summary": "Submit Feedback"
         }
       },
+      "/api/answers/{answer_id}/memory-preview": {
+        "post": {
+          "operationId": "preview_answer_memory_api_answers__answer_id__memory_preview_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "answer_id",
+              "required": true,
+              "schema": {
+                "title": "Answer Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryPreview"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Preview Answer Memory"
+        }
+      },
       "/api/ask-modes": {
         "get": {
           "description": "User-facing ask modes (single source: app/services/ask_modes.py).\nCopy/labels live in the frontend; this exposes ids + behavioural flags.",
@@ -4345,6 +4713,347 @@
             }
           },
           "summary": "Me Pending Stream"
+        }
+      },
+      "/api/memories": {
+        "get": {
+          "operationId": "list_all_memories_api_memories_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "notebook_id",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Notebook Id"
+              }
+            },
+            {
+              "in": "query",
+              "name": "status",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "candidate",
+                      "confirmed",
+                      "rejected",
+                      "deprecated"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Status"
+              }
+            },
+            {
+              "in": "query",
+              "name": "origin",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "ask_answer",
+                      "external_agent"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Origin"
+              }
+            },
+            {
+              "in": "query",
+              "name": "query",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PaginatedMemories"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List All Memories"
+        }
+      },
+      "/api/memories/{memory_id}": {
+        "get": {
+          "operationId": "get_memory_api_memories__memory_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Memory"
+        },
+        "patch": {
+          "operationId": "update_memory_api_memories__memory_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Memory"
+        }
+      },
+      "/api/memories/{memory_id}/confirm": {
+        "post": {
+          "operationId": "confirm_memory_api_memories__memory_id__confirm_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/MemoryReviewRequest"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Payload"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Confirm Memory"
+        }
+      },
+      "/api/memories/{memory_id}/deprecate": {
+        "post": {
+          "operationId": "deprecate_memory_api_memories__memory_id__deprecate_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Deprecate Memory"
+        }
+      },
+      "/api/memories/{memory_id}/reject": {
+        "post": {
+          "operationId": "reject_memory_api_memories__memory_id__reject_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Reject Memory"
         }
       },
       "/api/notebook-templates": {
@@ -5820,6 +6529,169 @@
             }
           },
           "summary": "Leave Notebook Route"
+        }
+      },
+      "/api/notebooks/{notebook_id}/memories": {
+        "get": {
+          "operationId": "list_notebook_memories_api_notebooks__notebook_id__memories_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "status",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "candidate",
+                      "confirmed",
+                      "rejected",
+                      "deprecated"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Status"
+              }
+            },
+            {
+              "in": "query",
+              "name": "origin",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "ask_answer",
+                      "external_agent"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Origin"
+              }
+            },
+            {
+              "in": "query",
+              "name": "query",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PaginatedMemories"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Notebook Memories"
+        }
+      },
+      "/api/notebooks/{notebook_id}/memories/from-answer": {
+        "post": {
+          "operationId": "create_memory_from_answer_api_notebooks__notebook_id__memories_from_answer_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryCreateFromAnswer"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "201": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Memory From Answer"
         }
       },
       "/api/notebooks/{notebook_id}/objects/{object_id}/context": {

@@ -1,0 +1,345 @@
+from __future__ import annotations
+
+from fastapi.testclient import TestClient
+
+from app.models.schemas import AskResponse
+
+
+def _register(client: TestClient, username: str) -> tuple[dict, str]:
+    response = client.post(
+        "/api/auth/register", json={"username": username, "password": "pw"}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    return {"Authorization": f"Bearer {body['token']}"}, body["user"]["id"]
+
+
+def _client(tmp_path, monkeypatch) -> TestClient:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'memory-api.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import create_app
+
+    return TestClient(create_app())
+
+
+def _answer(repo, notebook_id: str, question: str = "What remains stable?") -> str:
+    return repo._runtime.ask_state.save_answer(
+        notebook_id,
+        None,
+        question,
+        AskResponse(
+            conclusion="The loop remains stable [1].",
+            answer="The loop remains stable [1].",
+            mode="chunk",
+            llm_mode="test-model",
+            evidence_level="grounded",
+        ),
+        "unused-by-storage",
+    )
+
+
+def test_owner_memory_crud_is_private_and_bounded(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_headers, _owner_id = _register(client, "a00100001")
+    foreign_headers, _foreign_id = _register(client, "b00100002")
+    notebook_id = client.post(
+        "/api/notebooks", headers=owner_headers, json={"name": "Memory API"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    answer_id = _answer(repository(), notebook_id)
+    created = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=owner_headers,
+        json={
+            "answer_id": answer_id,
+            "title": "Stable loop",
+            "content_md": "Saved body",
+            "tags": ["analog"],
+        },
+    )
+    assert created.status_code == 201, created.text
+    memory = created.json()
+
+    listed = client.get("/api/memories?limit=1&offset=0", headers=owner_headers)
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["items"]] == [memory["id"]]
+    assert listed.json()["limit"] == 1
+    assert client.get("/api/memories?status=bogus", headers=owner_headers).status_code == 422
+    assert client.get("/api/memories?origin=bogus", headers=owner_headers).status_code == 422
+
+    got = client.get(f"/api/memories/{memory['id']}", headers=owner_headers)
+    assert got.status_code == 200
+    assert client.get(
+        f"/api/memories/{memory['id']}", headers=foreign_headers
+    ).status_code == 404
+    assert client.get("/api/memories", headers=foreign_headers).json()["items"] == []
+
+    updated = client.patch(
+        f"/api/memories/{memory['id']}",
+        headers=owner_headers,
+        json={"title": "Edited"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["title"] == "Edited"
+    deprecated = client.post(
+        f"/api/memories/{memory['id']}/deprecate", headers=owner_headers
+    )
+    assert deprecated.status_code == 200
+    assert deprecated.json()["status"] == "deprecated"
+
+
+def test_reader_can_save_own_private_memory_and_answer_save_is_idempotent(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner_headers, _owner_id = _register(client, "c00100003")
+    reader_headers, reader_id = _register(client, "d00100004")
+    notebook_id = client.post(
+        "/api/notebooks", headers=owner_headers, json={"name": "Shared"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+    repo.add_member(notebook_id, reader_id)
+    answer_id = _answer(repo, notebook_id, "How should it be compensated?")
+
+    payload = {
+        "answer_id": answer_id,
+        "title": "Edited preview",
+        "content_md": "Reader-owned body",
+        "tags": [],
+    }
+    first = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=reader_headers,
+        json=payload,
+    )
+    second = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=reader_headers,
+        json={**payload, "title": "Ignored duplicate"},
+    )
+    assert first.status_code == second.status_code == 201
+    assert first.json()["id"] == second.json()["id"]
+    assert first.json()["created_by"] == reader_id
+    assert first.json()["status"] == "confirmed"
+    assert second.json()["title"] == "Edited preview"
+    assert first.json()["provenance"] == {
+        "answer_id": answer_id,
+        "question": "How should it be compensated?",
+        "answer": "The loop remains stable [1].",
+        "conversation_id": None,
+        "mode": "chunk",
+        "model": "test-model",
+        "evidence_level": "grounded",
+        "anchors": [],
+        "citations": [],
+    }
+    assert client.get(
+        f"/api/notebooks/{notebook_id}/memories", headers=owner_headers
+    ).json()["items"] == []
+
+
+def test_foreign_notebook_and_memory_are_not_disclosed(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_headers, _owner_id = _register(client, "e00100005")
+    foreign_headers, _foreign_id = _register(client, "f00100006")
+    notebook_id = client.post(
+        "/api/notebooks", headers=owner_headers, json={"name": "Private"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    answer_id = _answer(repository(), notebook_id)
+    assert client.get(
+        f"/api/notebooks/{notebook_id}/memories", headers=foreign_headers
+    ).status_code == 404
+    assert client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=foreign_headers,
+        json={
+            "answer_id": answer_id,
+            "title": "No",
+            "content_md": "No",
+            "tags": [],
+        },
+    ).status_code == 404
+    assert client.post(
+        f"/api/answers/{answer_id}/memory-preview", headers=foreign_headers
+    ).status_code == 404
+
+
+def test_save_after_preview_returns_conflict_when_answer_was_deleted(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    headers, _user_id = _register(client, "i00100009")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Deleted answer"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+    answer_id = _answer(repo, notebook_id)
+    assert client.post(
+        f"/api/answers/{answer_id}/memory-preview", headers=headers
+    ).status_code == 200
+    with repo._write() as db:
+        db.execute("DELETE FROM answers WHERE id=?", (answer_id,))
+
+    saved = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=headers,
+        json={
+            "answer_id": answer_id,
+            "title": "Draft",
+            "content_md": "Keep this editable",
+            "tags": [],
+        },
+    )
+    assert saved.status_code == 409
+
+
+def test_answer_deleted_during_save_rolls_back_memory(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    headers, _user_id = _register(client, "j00100010")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Delete race"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+    answer_id = _answer(repo, notebook_id)
+    store = repo._runtime.memory_store
+    original = store.create_answer_with_initial_revision
+
+    def delete_before_atomic_create(write, changed_by, reason):
+        with repo._write() as db:
+            db.execute("DELETE FROM answers WHERE id=?", (answer_id,))
+        return original(write, changed_by, reason)
+
+    monkeypatch.setattr(
+        store, "create_answer_with_initial_revision", delete_before_atomic_create
+    )
+    saved = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=headers,
+        json={
+            "answer_id": answer_id,
+            "title": "Draft",
+            "content_md": "Body",
+            "tags": [],
+        },
+    )
+    assert saved.status_code == 409
+    assert client.get("/api/memories", headers=headers).json()["total_count"] == 0
+
+
+def test_answer_save_returns_before_background_embedding_runs(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    headers, _user_id = _register(client, "k00100011")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Async embedding"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+    answer_id = _answer(repo, notebook_id)
+    scheduled = []
+    repo._runtime.memory_service.embedding_scheduler = (
+        lambda fn, item: scheduled.append((fn, item))
+    )
+
+    saved = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=headers,
+        json={
+            "answer_id": answer_id,
+            "title": "Async",
+            "content_md": "Body",
+            "tags": [],
+        },
+    )
+    assert saved.status_code == 201
+    assert saved.json()["embedding_status"] == "pending"
+    assert len(scheduled) == 1
+
+
+def test_replay_after_answer_deleted_returns_existing_memory(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    headers, _user_id = _register(client, "l00100012")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Idempotent replay"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+    answer_id = _answer(repo, notebook_id)
+    payload = {
+        "answer_id": answer_id,
+        "title": "Saved",
+        "content_md": "Body",
+        "tags": [],
+    }
+    first = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=headers,
+        json=payload,
+    )
+    assert first.status_code == 201
+    with repo._write() as db:
+        db.execute("DELETE FROM answers WHERE id=?", (answer_id,))
+
+    replay = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=headers,
+        json={**payload, "title": "Ignored replay edit"},
+    )
+    assert replay.status_code == 201
+    assert replay.json()["id"] == first.json()["id"]
+    assert replay.json()["title"] == "Saved"
+
+
+def test_answer_idempotency_does_not_cross_notebook_path(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    headers, _user_id = _register(client, "m00100013")
+    notebook_a = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Notebook A"}
+    ).json()["id"]
+    notebook_b = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Notebook B"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    answer_id = _answer(repository(), notebook_a)
+    payload = {
+        "answer_id": answer_id,
+        "title": "Saved in A",
+        "content_md": "Body",
+        "tags": [],
+    }
+    first = client.post(
+        f"/api/notebooks/{notebook_a}/memories/from-answer",
+        headers=headers,
+        json=payload,
+    )
+    assert first.status_code == 201
+
+    crossed = client.post(
+        f"/api/notebooks/{notebook_b}/memories/from-answer",
+        headers=headers,
+        json=payload,
+    )
+    assert crossed.status_code == 409
+    assert crossed.json() != first.json()

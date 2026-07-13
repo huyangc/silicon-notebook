@@ -1,7 +1,7 @@
 """Owner-private Memory lifecycle orchestration over typed repository ports."""
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from app.core.event_logging import EventLogger
 from app.models.memory import MemoryRevision, MemoryWrite
@@ -24,6 +24,7 @@ class MemoryService:
         event_log: EventLogger,
         new_id,
         now,
+        embedding_scheduler: Callable[[Callable[[MemoryRecord], MemoryRecord], MemoryRecord], Any] | None = None,
     ) -> None:
         self.store = store
         self.ask_state = ask_state
@@ -32,6 +33,7 @@ class MemoryService:
         self.event_log = event_log
         self.new_id = new_id
         self.now = now
+        self.embedding_scheduler = embedding_scheduler or (lambda fn, item: fn(item))
 
     @staticmethod
     def _patch(patch: MemoryUpdate | Mapping[str, Any] | None) -> tuple[dict, str]:
@@ -101,6 +103,19 @@ class MemoryService:
             )
             return refreshed
 
+    def _schedule_embed(self, item: MemoryRecord) -> MemoryRecord:
+        try:
+            self.embedding_scheduler(self._embed, item)
+        except Exception as exc:
+            self.store.mark_embedding_failed(item.id, type(exc).__name__)
+            self._event(
+                "memory_embedding",
+                item,
+                embedding_status="failed",
+                error_type=type(exc).__name__,
+            )
+        return item
+
     def create_candidate(
         self,
         notebook_id: str,
@@ -162,13 +177,19 @@ class MemoryService:
         tags: Sequence[str],
     ) -> MemoryRecord:
         self._require_notebook(notebook_id, user_id)
-        if self.ask_state.answer_notebook_id(answer_id) != notebook_id:
+        existing = self.store.memory_by_answer(user_id, answer_id)
+        if existing is not None:
+            if existing.notebook_id != notebook_id:
+                raise KeyError(answer_id)
+            return existing
+        try:
+            source = self.ask_state.answer_memory_source(answer_id)
+        except KeyError:
+            raise KeyError(answer_id)
+        if source["notebook_id"] != notebook_id:
             raise KeyError(answer_id)
         if not self.notebooks.user_can_read_answer(answer_id, user_id):
             raise PermissionError(answer_id)
-        existing = self.store.memory_by_answer(user_id, answer_id)
-        if existing is not None:
-            return existing
         now = self.now()
         write = MemoryWrite(
             id=self.new_id("memory"),
@@ -184,7 +205,20 @@ class MemoryService:
             confirmed_at=now,
             created_at=now,
             updated_at=now,
-            provenance={"answer_id": answer_id},
+            provenance={
+                key: source[key]
+                for key in (
+                    "answer_id",
+                    "question",
+                    "answer",
+                    "conversation_id",
+                    "mode",
+                    "model",
+                    "evidence_level",
+                    "anchors",
+                    "citations",
+                )
+            },
         )
         item = self.store.create_answer_with_initial_revision(
             write, user_id, "created"
@@ -192,7 +226,7 @@ class MemoryService:
         if item.id != write.id:
             return item
         self._event("memory_lifecycle", item, action="answer_confirmed")
-        return self._embed(item)
+        return self._schedule_embed(item)
 
     def update(
         self, memory_id: str, user_id: str, patch: MemoryUpdate | Mapping[str, Any]
@@ -212,7 +246,7 @@ class MemoryService:
             reason=reason or "updated",
         )
         self._event("memory_lifecycle", item, action="updated")
-        return self._embed(item) if item.status == "confirmed" else item
+        return self._schedule_embed(item) if item.status == "confirmed" else item
 
     def confirm(
         self,
@@ -231,7 +265,7 @@ class MemoryService:
             reason=reason or "confirmed",
         )
         self._event("memory_lifecycle", item, action="confirmed")
-        return self._embed(item)
+        return self._schedule_embed(item)
 
     def reject(self, memory_id: str, user_id: str) -> MemoryRecord:
         item = self.store.transition_with_revision(

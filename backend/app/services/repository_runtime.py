@@ -33,6 +33,7 @@ from app.services.evidence_context import EvidenceContextService
 from app.services.graph_retrieval import GraphRetrievalService
 from app.services.model_provider import RuntimeModelProvider
 from app.services.memory_service import MemoryService
+from app.services.kg import scheduler as kg_scheduler
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.report_execution import (
@@ -303,6 +304,7 @@ class RepositoryRuntime:
             self.event_log,
             self.seams.new_id,
             self.seams.now,
+            embedding_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
         )
         return self.memory_service
 

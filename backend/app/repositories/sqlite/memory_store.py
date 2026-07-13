@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from typing import Any, Mapping, Sequence
 
 from app.models.memory import MemoryRevision, MemoryWrite
@@ -154,25 +155,35 @@ class MemoryStore:
     ) -> MemoryRecord:
         with self.database.write() as db:
             item, created = self._insert_memory_on(db, write)
-            has_revision = db.execute(
-                "SELECT 1 FROM memory_revisions WHERE memory_id=? LIMIT 1",
-                (item.id,),
-            ).fetchone()
-            if created or has_revision is None:
-                self._append_revision_on(
-                    db,
-                    item.id,
-                    {
-                        "title": item.title,
-                        "content_md": item.content_md,
-                        "tags": item.tags,
-                        "status": item.status,
-                        "promotion_state": item.promotion_state,
-                    },
-                    changed_by,
-                    reason,
-                )
+            self._ensure_initial_revision_on(db, item, created, changed_by, reason)
         return item
+
+    def _ensure_initial_revision_on(
+        self,
+        db: sqlite3.Connection,
+        item: MemoryRecord,
+        created: bool,
+        changed_by: str,
+        reason: str,
+    ) -> None:
+        has_revision = db.execute(
+            "SELECT 1 FROM memory_revisions WHERE memory_id=? LIMIT 1",
+            (item.id,),
+        ).fetchone()
+        if created or has_revision is None:
+            self._append_revision_on(
+                db,
+                item.id,
+                {
+                    "title": item.title,
+                    "content_md": item.content_md,
+                    "tags": item.tags,
+                    "status": item.status,
+                    "promotion_state": item.promotion_state,
+                },
+                changed_by,
+                reason,
+            )
 
     def create_candidate_with_initial_revision(
         self, write: MemoryWrite, changed_by: str, reason: str
@@ -182,7 +193,46 @@ class MemoryStore:
     def create_answer_with_initial_revision(
         self, write: MemoryWrite, changed_by: str, reason: str
     ) -> MemoryRecord:
-        return self._create_with_initial_revision(write, changed_by, reason)
+        if not write.source_answer_id:
+            raise KeyError("source_answer_id")
+        with self.database.write() as db:
+            # Lock writers before reading the answer so deletion cannot commit
+            # between the trusted snapshot and the Memory/provenance insert.
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                f"SELECT {self._select_columns()} FROM memory_items m "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "WHERE m.created_by=? AND m.source_answer_id=?",
+                (write.created_by, write.source_answer_id),
+            ).fetchone()
+            if existing is not None:
+                item = self._record(existing)
+                if item.notebook_id != write.notebook_id:
+                    raise KeyError(write.source_answer_id)
+                return item
+            row = db.execute(
+                "SELECT question,payload,conversation_id FROM answers WHERE id=?",
+                (write.source_answer_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(write.source_answer_id)
+            payload = _json_object(row["payload"])
+            provenance = {
+                "answer_id": write.source_answer_id,
+                "question": row["question"] or "",
+                "answer": str(payload.get("answer") or payload.get("conclusion") or ""),
+                "conversation_id": row["conversation_id"],
+                "mode": str(payload.get("mode") or ""),
+                "model": str(payload.get("llm_mode") or ""),
+                "evidence_level": str(payload.get("evidence_level") or "inferred"),
+                "anchors": payload.get("anchors") if isinstance(payload.get("anchors"), list) else [],
+                "citations": payload.get("citations") if isinstance(payload.get("citations"), list) else [],
+            }
+            item, created = self._insert_memory_on(
+                db, replace(write, provenance=provenance)
+            )
+            self._ensure_initial_revision_on(db, item, created, changed_by, reason)
+        return item
 
     def memory_for_user(self, memory_id: str, user_id: str) -> MemoryRecord:
         with self.database.connect() as db:

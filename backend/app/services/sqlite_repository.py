@@ -1071,6 +1071,9 @@ class SQLiteRepository:
     # Owner-private Memory lifecycle.  The facade remains a one-hop
     # compatibility adapter; orchestration lives in MemoryService and SQL in
     # MemoryStore.
+    def answer_memory_source(self, answer_id: str) -> dict:
+        return self._runtime.ask_state.answer_memory_source(answer_id)
+
     def create_memory_candidate(
         self,
         notebook_id: str,
