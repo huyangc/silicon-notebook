@@ -52,6 +52,10 @@ def test_index_status_kg_pending_matches_summary(repo):
                    ("s1", nb.id, "t", "md", "ready", now, now))
         db.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,created_at) VALUES (?,?,?,?,?,?)",
                    ("e1", "s1", "paragraph", "loc", "hello", now))
+    # Raw insert bypasses the pipeline's kg_mutation_seq bump; drop the seq-gated
+    # pending memo (create_notebook warmed it at seq 0) so the read recomputes.
+    from app.repositories.sqlite import knowledge_counts_cache
+    knowledge_counts_cache.invalidate(nb.id)
     out = repo.index_status(nb.id)
     summary = repo.get_notebook(nb.id)
     assert out["kg"]["pending_sources"] == summary.kg_pending_sources

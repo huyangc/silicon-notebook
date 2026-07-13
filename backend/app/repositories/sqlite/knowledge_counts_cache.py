@@ -1,4 +1,4 @@
-"""Per-notebook knowledge-object count cache, gated on ``kg_mutation_seq``.
+"""Per-notebook open-path count caches, gated on ``kg_mutation_seq``.
 
 The per-type / active COUNT(*) GROUP BY over ``knowledge_objects`` is reached on
 every notebook open, board (analytics), KG-overview render and status poll
@@ -24,6 +24,19 @@ in-place status/type edit must invalidate (1s-resolution ``updated_at`` would
 miss it). Rebuild deliberately keeps ``kg_mutation_seq`` stable, which is correct
 here: a rebuild re-clusters but does not add/remove/re-status objects, so counts
 are unchanged across it.
+
+Two sibling open-path scans share the SAME seq gate and ``invalidate`` (so the
+existing invalidate hooks cover them for free):
+  * ``chunk_count`` — ``COUNT(*) FROM chunks`` (``/scale-index/status`` open path).
+    Sound on ``kg_mutation_seq`` because the sole chunk writer
+    (``build_chunks_for_source``) and ``delete_source`` (FK cascade) both bump it.
+  * ``pending_source_count`` — the "N sources pending KG" correlated count
+    (``from_row`` on every open, ~2s cold at 48k sources). Sound because a bare
+    source add is element-less (never pending) and every real transition (parse,
+    extract, source/KG delete) bumps the seq or hits ``invalidate``.
+Sources COUNT / ``source_ids`` are deliberately NOT cached here: ``create_source``
+inserts a row without bumping the seq, so a seq-keyed memo would drift — and they
+are cheap (covering index), not the cold-open bottleneck.
 """
 from __future__ import annotations
 
@@ -38,6 +51,9 @@ from typing import Dict, Optional, Tuple
 _DEPRECATED = "deprecated"
 
 _MEMO: "OrderedDict[str, Tuple[int, Dict[Tuple[str, str], int]]]" = OrderedDict()
+# Sibling int memos sharing _LOCK / _MAX_NOTEBOOKS / the kg_mutation_seq gate.
+_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
+_CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _LOCK = threading.Lock()
 _MAX_NOTEBOOKS = 512  # bounded LRU; counts dict per notebook is tiny (types×statuses)
 
@@ -108,12 +124,88 @@ def active_object_count(db: sqlite3.Connection, notebook_id: str) -> int:
     return sum(c for (_ot, status), c in raw.items() if status != _DEPRECATED)
 
 
+def object_type_total(
+    db: sqlite3.Connection,
+    notebook_id: str,
+    object_type: str,
+    status: "Optional[str]" = None,
+) -> int:
+    """The ``/knowledge`` list-pagination total for one ``object_type`` — served
+    as a slice of the seq-gated ``type_status_counts`` memo instead of a fresh
+    per-request ``COUNT(*)``. A falsy ``status`` counts ALL statuses (including
+    deprecated), identical to the bare ``WHERE notebook_id=? AND object_type=?``
+    count it replaces; a truthy status is one dict lookup."""
+    raw = type_status_counts(db, notebook_id)
+    if status:
+        return raw.get((object_type, status), 0)
+    return sum(c for (ot, _st), c in raw.items() if ot == object_type)
+
+
+def pending_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
+    """Count of parsed sources (>=1 ``source_elements`` row) that have no KG
+    object yet — the "N sources pending KG" badge on ``from_row``. Memoized on
+    ``(notebook_id, kg_mutation_seq)``. Cold it is a 2-predicate correlated scan
+    over every source (~2s at 48k sources); warm it is one PK seq read."""
+    seq = _mutation_seq(db, notebook_id)
+    with _LOCK:
+        hit = _PENDING.get(notebook_id)
+        if hit is not None and hit[0] == seq:
+            _PENDING.move_to_end(notebook_id)
+            return hit[1]
+
+    row = db.execute(
+        "SELECT COUNT(*) FROM sources s WHERE s.notebook_id = ? "
+        "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id) "
+        "AND NOT EXISTS (SELECT 1 FROM knowledge_objects k "
+        "WHERE k.source_id = s.id AND k.source_id != '')",
+        (notebook_id,),
+    ).fetchone()
+    count = int(row[0])
+
+    with _LOCK:
+        _PENDING[notebook_id] = (seq, count)
+        _PENDING.move_to_end(notebook_id)
+        while len(_PENDING) > _MAX_NOTEBOOKS:
+            _PENDING.popitem(last=False)
+    return count
+
+
+def chunk_count(db: sqlite3.Connection, notebook_id: str) -> int:
+    """``COUNT(*)`` of the notebook's chunks (``/scale-index/status`` open path),
+    memoized on ``(notebook_id, kg_mutation_seq)``. Cold it is a full covering
+    scan over millions of chunk leaf entries; warm it is one PK seq read."""
+    seq = _mutation_seq(db, notebook_id)
+    with _LOCK:
+        hit = _CHUNKS.get(notebook_id)
+        if hit is not None and hit[0] == seq:
+            _CHUNKS.move_to_end(notebook_id)
+            return hit[1]
+
+    row = db.execute(
+        "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?",
+        (notebook_id,),
+    ).fetchone()
+    count = int(row["c"])
+
+    with _LOCK:
+        _CHUNKS[notebook_id] = (seq, count)
+        _CHUNKS.move_to_end(notebook_id)
+        while len(_CHUNKS) > _MAX_NOTEBOOKS:
+            _CHUNKS.popitem(last=False)
+    return count
+
+
 def invalidate(notebook_id: "Optional[str]" = None) -> None:
-    """Drop cached counts (a whole notebook, or everything). Not required for
-    correctness — the seq gate self-invalidates — but a cheap safety valve for
-    tests and for any future write path that lands before its seq bump commits."""
+    """Drop cached counts (a whole notebook, or everything) across ALL three
+    memos. Not required for correctness — the seq gate self-invalidates — but a
+    cheap safety valve for tests and for any write path that lands before its seq
+    bump commits (extraction begin, notebook-KG delete, test inserts)."""
     with _LOCK:
         if notebook_id is None:
             _MEMO.clear()
+            _PENDING.clear()
+            _CHUNKS.clear()
         else:
             _MEMO.pop(notebook_id, None)
+            _PENDING.pop(notebook_id, None)
+            _CHUNKS.pop(notebook_id, None)

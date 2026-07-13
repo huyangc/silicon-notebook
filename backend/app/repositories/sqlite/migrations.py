@@ -11,7 +11,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -995,6 +995,14 @@ class SqliteMigrator:
             db.execute("CREATE INDEX IF NOT EXISTS idx_element_embeddings_source ON element_embeddings(source_id)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_review ON knowledge_relations(notebook_id, review_status)")
             db.execute("CREATE INDEX IF NOT EXISTS idx_comentions_nb_b ON concept_comentions(notebook_id, canonical_b)")
+
+    def _migration_12(self) -> None:
+        """/analytics parse_status GROUP BY covering index. Deployed DBs at
+        user_version>=1 short-circuit _migration_1, so this needs its own step;
+        sources is a secondary table so it cannot perturb rebuild's ORDER BY
+        rowid canonical order."""
+        with self._connect() as db:
+            db.execute("CREATE INDEX IF NOT EXISTS idx_sources_nb_parse_status ON sources(notebook_id, parse_status)")
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，

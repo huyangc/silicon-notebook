@@ -18,17 +18,38 @@ def _db() -> sqlite3.Connection:
     db = sqlite3.connect(":memory:")
     db.row_factory = sqlite3.Row
     db.executescript(
-        "CREATE TABLE knowledge_objects(id TEXT, notebook_id TEXT, object_type TEXT, status TEXT);"
+        "CREATE TABLE knowledge_objects(id TEXT, notebook_id TEXT, object_type TEXT, status TEXT, source_id TEXT DEFAULT '');"
         "CREATE TABLE unified_kg_state(notebook_id TEXT PRIMARY KEY, kg_mutation_seq INTEGER);"
+        "CREATE TABLE chunks(id TEXT, notebook_id TEXT, source_id TEXT);"
+        "CREATE TABLE sources(id TEXT, notebook_id TEXT);"
+        "CREATE TABLE source_elements(id TEXT, source_id TEXT);"
     )
     return db
 
 
 def _add(db, nb, ot, st, n, start=0):
     db.executemany(
-        "INSERT INTO knowledge_objects VALUES(?,?,?,?)",
+        "INSERT INTO knowledge_objects(id,notebook_id,object_type,status) VALUES(?,?,?,?)",
         [(f"{nb}-{ot}-{st}-{start + i}", nb, ot, st) for i in range(n)],
     )
+
+
+def _add_chunks(db, nb, n, start=0):
+    db.executemany(
+        "INSERT INTO chunks(id,notebook_id,source_id) VALUES(?,?,?)",
+        [(f"{nb}-ch-{start + i}", nb, f"{nb}-s1") for i in range(n)],
+    )
+
+
+def _add_source(db, nb, sid, *, parsed=True, has_kg=False):
+    db.execute("INSERT INTO sources(id,notebook_id) VALUES(?,?)", (sid, nb))
+    if parsed:
+        db.execute("INSERT INTO source_elements(id,source_id) VALUES(?,?)",
+                   (f"el-{sid}", sid))
+    if has_kg:
+        db.execute(
+            "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,source_id) "
+            "VALUES(?,?,?,?,?)", (f"ko-{sid}", nb, "concept", "approved", sid))
 
 
 def _set_seq(db, nb, seq):
@@ -130,3 +151,85 @@ def test_invalidate_forces_recompute_without_seq_change():
     assert kcc.active_object_count(db, nb) == 2  # cached
     kcc.invalidate(nb)
     assert kcc.active_object_count(db, nb) == 3  # recomputed after explicit drop
+
+
+def test_chunk_count_memo_and_seq_invalidation():
+    db = _db()
+    nb = "nbc"
+    _add_chunks(db, nb, 4)
+    _set_seq(db, nb, 1)
+    db.commit()
+    assert kcc.chunk_count(db, nb) == 4
+
+    # add chunks WITHOUT bumping the seq -> served from memo (stale by design)
+    _add_chunks(db, nb, 6, start=100)
+    db.commit()
+    assert kcc.chunk_count(db, nb) == 4
+
+    # bump seq (what build_chunks_for_source / delete_source do) -> recompute
+    _set_seq(db, nb, 2)
+    db.commit()
+    assert kcc.chunk_count(db, nb) == 10
+
+
+def test_pending_source_count_predicate_and_seq_gate():
+    db = _db()
+    nb = "nbp"
+    # parsed + no KG -> pending; parsed + KG -> not pending; unparsed -> not pending
+    _add_source(db, nb, "s-pending", parsed=True, has_kg=False)
+    _add_source(db, nb, "s-haskg", parsed=True, has_kg=True)
+    _add_source(db, nb, "s-unparsed", parsed=False, has_kg=False)
+    _set_seq(db, nb, 1)
+    db.commit()
+    assert kcc.pending_source_count(db, nb) == 1
+
+    # give the pending source a KG object WITHOUT bumping -> memo hit, still 1
+    db.execute(
+        "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,source_id) "
+        "VALUES('ko-late',?, 'concept','approved','s-pending')", (nb,))
+    db.commit()
+    assert kcc.pending_source_count(db, nb) == 1
+    # bump -> recompute -> now 0 pending
+    _set_seq(db, nb, 2)
+    db.commit()
+    assert kcc.pending_source_count(db, nb) == 0
+
+
+def test_pending_source_count_empty_source_id_does_not_satisfy():
+    db = _db()
+    nb = "nbp2"
+    _add_source(db, nb, "s1", parsed=True, has_kg=False)
+    # a KO with empty source_id must NOT clear the source's pending status
+    db.execute(
+        "INSERT INTO knowledge_objects(id,notebook_id,object_type,status,source_id) "
+        "VALUES('ko-empty',?, 'concept','approved','')", (nb,))
+    _set_seq(db, nb, 1)
+    db.commit()
+    assert kcc.pending_source_count(db, nb) == 1
+
+
+def test_object_type_total_all_vs_status_slice():
+    db = _db()
+    nb = "nbo"
+    _add(db, nb, "claim", "approved", 5)
+    _add(db, nb, "claim", "deprecated", 2)
+    _add(db, nb, "concept", "approved", 3)
+    _set_seq(db, nb, 1)
+    db.commit()
+    # falsy status = ALL statuses (incl deprecated), matching the bare COUNT
+    assert kcc.object_type_total(db, nb, "claim") == 7
+    assert kcc.object_type_total(db, nb, "claim", "") == 7
+    # truthy status = single bucket
+    assert kcc.object_type_total(db, nb, "claim", "approved") == 5
+    assert kcc.object_type_total(db, nb, "claim", "deprecated") == 2
+    # unknown type/status -> 0
+    assert kcc.object_type_total(db, nb, "missing") == 0
+    assert kcc.object_type_total(db, nb, "claim", "draft") == 0
+
+    # status flip that bumps the seq -> value refreshes (invalidation contract)
+    db.execute("UPDATE knowledge_objects SET status='deprecated' "
+               "WHERE notebook_id=? AND object_type='concept'", (nb,))
+    _set_seq(db, nb, 2)
+    db.commit()
+    assert kcc.object_type_total(db, nb, "concept", "approved") == 0
+    assert kcc.object_type_total(db, nb, "concept") == 3  # all-status still 3

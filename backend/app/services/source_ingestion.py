@@ -520,6 +520,12 @@ class SourceIngestionService:
                 self.chunking.build_chunks_for_source(source_id)
             except Exception:
                 self.event_log.logger.exception("chunk build failed for %s", source_id)
+                # Chunk build may have committed chunks (source now parsed =>
+                # pending KG) then failed before its kg_mutation_seq bump; with
+                # auto-extract off no later write bumps it. Drop the seq-gated
+                # chunk/pending memos so the next open recomputes, not serves stale.
+                from app.repositories.sqlite import knowledge_counts_cache
+                knowledge_counts_cache.invalidate(notebook_id)
 
             # Element embedding (best-effort semantic recall) runs in the BACKGROUND,
             # concurrent with KG extraction, so a large doc's slow embed never blocks

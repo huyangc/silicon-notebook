@@ -130,11 +130,11 @@ class IndexProjectionStore:
             return knowledge_counts_cache.active_object_count(db, notebook_id)
 
     def total_chunk_count(self, notebook_id: str) -> int:
+        # Seq-gated memo: the chunks COUNT fires on every /scale-index/status
+        # (i.e. every notebook open) and is cold-page-bound at millions of rows.
+        from app.repositories.sqlite import knowledge_counts_cache
         with self.connect() as db:
-            count = db.execute(
-                "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?",
-                (notebook_id,)).fetchone()["c"]
-        return int(count)
+            return knowledge_counts_cache.chunk_count(db, notebook_id)
 
     def source_ids(self, notebook_id: str) -> List[str]:
         with self.connect() as db:
