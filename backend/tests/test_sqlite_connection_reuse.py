@@ -171,3 +171,10 @@ def test_facade_close_local(tmp_path, monkeypatch):  # facade delegate
     repo.close_local()
     c2 = repo._connect()
     assert c2 is not c1
+
+
+def test_no_bare_close_on_reused_conn_in_knowledge_lifecycle():  # INV-7
+    import pathlib
+    src = (pathlib.Path(__file__).resolve().parent.parent
+           / "app" / "services" / "knowledge_lifecycle.py").read_text(encoding="utf-8")
+    assert "scan_db.close()" not in src, "复用连接不得裸 close;用 self._close_local()"

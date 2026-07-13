@@ -452,6 +452,7 @@ class SQLiteRepository:
         # (Task 17); the viz-building set is passed BY IDENTITY (no copies).
         self._runtime.wire_knowledge_lifecycle(
             connect=lambda: self._connect(),
+            close_local=lambda: self.close_local(),
             write=lambda: self._write(),
             get_notebook=lambda notebook_id: self.get_notebook(notebook_id),
             invalidate_unified_cache=lambda notebook_id: (
