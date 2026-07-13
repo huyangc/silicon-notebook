@@ -46,20 +46,28 @@ class OfficialMcpClient:
         self.manage_lifespan = manage_lifespan
         self.stack = AsyncExitStack()
         self.session = None
+        self.http = None
+        self.mcp_session_id = ""
 
     async def __aenter__(self):
         if self.manage_lifespan:
             await self.stack.enter_async_context(
                 self.app.router.lifespan_context(self.app)
             )
+        async def capture_session_id(response: httpx.Response):
+            if value := response.headers.get("mcp-session-id"):
+                self.mcp_session_id = value
+
         http = await self.stack.enter_async_context(
             httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=self.app),
                 base_url="http://127.0.0.1",
                 headers={"Authorization": f"Bearer {self.token}"},
                 follow_redirects=True,
+                event_hooks={"response": [capture_session_id]},
             )
         )
+        self.http = http
         read, write, _ = await self.stack.enter_async_context(
             streamable_http_client(
                 "http://127.0.0.1/mcp",
@@ -92,6 +100,9 @@ def mcp_env(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "")
     monkeypatch.setenv("EMBED_PROVIDER", "")
+    # Startup declares the public deployment as HTTPS. Runtime transport must
+    # still reject a remote client that actually reaches ASGI over plain HTTP.
+    monkeypatch.setenv("MCP_PUBLIC_URL", "https://memory.example.test/mcp")
     get_settings.cache_clear()
     repository.cache_clear()
 
@@ -211,7 +222,23 @@ async def test_candidate_is_agent_recallable_across_owner_profiles_but_not_noteb
                 "evidence_refs": [],
                 "client_request_id": "request-1",
             }))
+            repeated = _payload(await creator.call("propose_memory", {
+                "title": "A changed retry title",
+                "content_md": "A changed retry body",
+                "tags": ["retry"],
+                "reason": "Retry of the same logical request",
+                "task_context": {"task": "different"},
+                "evidence_refs": [{"source_id": "ignored-on-retry"}],
+                "client_request_id": "request-1",
+            }))
             memory_id = created["memory_id"]
+            assert repeated["memory_id"] == memory_id
+            memories = mcp_env["service"].list_memories(
+                mcp_env["alice"].id,
+                notebook_id=notebook_id,
+                status="candidate",
+            )
+            assert [item.id for item in memories.items].count(memory_id) == 1
             assert created["status"] == "candidate"
             detail = _payload(await creator.call(
                 "get_memory", {"memory_id": memory_id}
@@ -283,6 +310,41 @@ async def test_access_is_rechecked_after_revoke_and_membership_loss(mcp_env):
 
 
 @pytest.mark.anyio
+async def test_same_profile_lower_scope_token_cannot_reuse_an_initialized_session(mcp_env):
+    app = mcp_env["app"]
+    notebook_id = mcp_env["notebook"].id
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["token_b"].token, manage_lifespan=False
+        ) as client:
+            _payload(await client.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            ))
+            assert client.http is not None
+            assert client.mcp_session_id
+            response = await client.http.post(
+                "/mcp",
+                headers={
+                    "Authorization": f"Bearer {mcp_env['restricted'].token}",
+                    "Mcp-Session-Id": client.mcp_session_id,
+                    "MCP-Protocol-Version": "2025-11-25",
+                    "content-type": "application/json",
+                    "accept": "application/json, text/event-stream",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 77,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "search_notebook_context",
+                        "arguments": {"query": "must not use the old scope snapshot"},
+                    },
+                },
+            )
+            assert response.status_code == 404
+
+
+@pytest.mark.anyio
 async def test_ask_tool_reuses_formal_ask_and_rejects_experimental_graph(mcp_env):
     async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
         _payload(await client.call(
@@ -319,7 +381,7 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         "budget-request-confirmed",
         "Budget marker confirmed",
         "budget-marker " + ("private-data " * 1000),
-        [],
+        [(f"tag-{index}-" + "sensitive-tag-data-" * 100) for index in range(30)],
         "test",
     )
     mcp_env["service"].confirm_memory(confirmed.id, mcp_env["alice"].id)
@@ -336,6 +398,12 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         )
         assert len(confirmed_hit["content"]) <= 2_000
         assert len(recalled["items"]) <= 20
+        detail = _payload(await client.call(
+            "get_memory", {"memory_id": confirmed.id}
+        ))
+        assert isinstance(detail["tags"], list)
+        assert all(len(tag) <= 200 for tag in detail["tags"])
+        assert len(json.dumps(detail, ensure_ascii=False)) <= 12_000
         assert (await client.call(
             "search_notebook_context", {"query": "budget-marker"}
         )).isError
@@ -407,3 +475,58 @@ async def test_transport_rejects_missing_token_and_untrusted_origin(mcp_env):
             )
     assert missing.status_code == 401
     assert hostile.status_code == 403
+
+
+@pytest.mark.anyio
+async def test_runtime_transport_requires_https_only_for_remote_clients(mcp_env):
+    app = mcp_env["app"]
+    request = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-11-25",
+            "capabilities": {},
+            "clientInfo": {"name": "transport-test", "version": "1"},
+        },
+    }
+    headers = {
+        "Authorization": f"Bearer {mcp_env['token_a'].token}",
+        "accept": "application/json, text/event-stream",
+    }
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app, client=("198.51.100.23", 43123)
+            ),
+            base_url="http://127.0.0.1",
+            follow_redirects=True,
+        ) as remote_http:
+            rejected = await remote_http.post(
+                "/mcp",
+                headers={**headers, "X-Forwarded-Proto": "https"},
+                json=request,
+            )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app, client=("198.51.100.23", 43123)
+            ),
+            base_url="https://127.0.0.1",
+            follow_redirects=True,
+        ) as remote_https:
+            accepted_remote = await remote_https.post(
+                "/mcp", headers=headers, json=request
+            )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(
+                app=app, client=("127.0.0.1", 43123)
+            ),
+            base_url="http://127.0.0.1",
+            follow_redirects=True,
+        ) as loopback_http:
+            accepted_loopback = await loopback_http.post(
+                "/mcp", headers=headers, json=request
+            )
+    assert rejected.status_code == 403
+    assert accepted_remote.status_code == 200
+    assert accepted_loopback.status_code == 200

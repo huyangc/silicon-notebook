@@ -198,27 +198,47 @@ class MemoryService:
         expected_hash = str(row["token_hash"]) if row else "0" * 64
         if not hmac.compare_digest(supplied_hash, expected_hash) or row is None:
             return None
-        now = self.now()
-        if (
-            row["profile_status"] != "active"
-            or row["revoked_at"] is not None
-            or _is_expired(row["expires_at"], now)
-        ):
+        principal = self._principal_from_auth_row(token_id, row)
+        if principal is None:
             return None
-        scopes = [str(scope) for scope in json.loads(row["scopes_json"] or "[]")]
-        principal = AgentPrincipal(
-            profile_id=row["agent_profile_id"],
-            profile_name=row["profile_name"],
-            owner_id=row["owner_id"],
-            scopes=scopes,
-            default_notebook_id=row["default_notebook_id"],
-            notebook_ids=list(row["notebook_ids"]),
-            token_id=token_id,
-        )
+        now = self.now()
         current = _parse_time(now)
         touch_before = (current - timedelta(seconds=_TOKEN_TOUCH_SECONDS)).isoformat()
         self.store.touch_agent_token(token_id, now, touch_before)
         return principal
+
+    def refresh_agent_principal(self, token_id: str) -> AgentPrincipal | None:
+        """Refresh live state for an already bearer-authenticated token id.
+
+        This does not authenticate a raw credential. It is only for a transport
+        that has already verified and bound the opaque token to its session.
+        """
+        return self._principal_from_auth_row(
+            token_id, self.store.agent_token_auth_row(token_id)
+        )
+
+    def _principal_from_auth_row(
+        self, token_id: str, row: Mapping[str, Any] | None
+    ) -> AgentPrincipal | None:
+        now = self.now()
+        if (
+            row is None
+            or row["profile_status"] != "active"
+            or row["revoked_at"] is not None
+            or _is_expired(row["expires_at"], now)
+        ):
+            return None
+        return AgentPrincipal(
+            profile_id=row["agent_profile_id"],
+            profile_name=row["profile_name"],
+            owner_id=row["owner_id"],
+            scopes=[
+                str(scope) for scope in json.loads(row["scopes_json"] or "[]")
+            ],
+            default_notebook_id=row["default_notebook_id"],
+            notebook_ids=list(row["notebook_ids"]),
+            token_id=token_id,
+        )
 
     def require_agent_access(
         self, principal: AgentPrincipal, scope: str, notebook_id: str

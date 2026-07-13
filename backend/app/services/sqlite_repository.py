@@ -1131,6 +1131,9 @@ class SQLiteRepository:
     def resolve_agent_token(self, raw_token: str) -> "AgentPrincipal | None":
         return self._runtime.memory_service.resolve_agent_token(raw_token)
 
+    def refresh_agent_principal(self, token_id: str) -> "AgentPrincipal | None":
+        return self._runtime.memory_service.refresh_agent_principal(token_id)
+
     def require_agent_access(
         self, principal: AgentPrincipal, scope: str, notebook_id: str
     ) -> None:

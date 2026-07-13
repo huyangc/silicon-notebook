@@ -16,8 +16,9 @@ seven public tools:
 Agent Bearer tokens are resolved through the existing Memory service. The MCP
 SDK binds each transport session to the authenticated non-secret token id, and
 the selected notebook is stored on that MCP session object rather than in
-process-global state. Data tools require an explicit selection and then recheck
-the live token/profile, scope, notebook allowlist, and current notebook access.
+process-global state. Every tool refreshes the live token/profile state; data
+tools require an explicit selection and then recheck scope, notebook allowlist,
+and current notebook access.
 
 The two retrieval planes remain separate:
 
@@ -37,15 +38,18 @@ reuses the existing Ask implementation and exposes only `chunk` and
 
 - Missing, expired, revoked, tampered, or profile-disabled Agent tokens fail
   authentication.
-- Stateful sessions are credential-bound by the official MCP SDK.
+- Stateful sessions are credential-bound by placing the non-secret token id in
+  the SDK-compared `client_id`; the SDK does not compare `AccessToken.token`.
 - Origin and Host validation use the SDK transport-security middleware.
 - Non-loopback deployment configuration fails unless `MCP_PUBLIC_URL` is
   HTTPS; local loopback HTTP remains available for local Agent clients.
+- Runtime ASGI requests independently require `scope.scheme == "https"` for
+  non-loopback clients. Forwarded headers are not trusted by the adapter.
 - Raw Agent tokens are never stored in MCP session state, tool results, or
   logs. Only the token id is passed to the SDK's authenticated user identity.
-- Result count, text, nested provenance, Ask answer, and Ask anchor output are
-  bounded. Retrieved text is labelled untrusted evidence/data, not an
-  instruction.
+- Result count, text, tags, nested provenance, complete `get_memory` responses,
+  Ask answers, and Ask anchor output are bounded. Retrieved text is labelled
+  untrusted evidence/data, not an instruction.
 - FastAPI explicitly composes the MCP session-manager lifespan because mounted
   Starlette application lifespans do not start automatically.
 
@@ -53,8 +57,12 @@ reuses the existing Ask implementation and exposes only `chunk` and
 
 Added the consumer-specific `McpMemoryRepository` Protocol. The MCP adapter
 contains no SQL and does not reach private repository/runtime state. Existing
-public facade delegates are reused, with one new one-hop
-`agent_memory_hits()` delegate to the established two-plane MemoryRetriever.
+public facade delegates are reused, with two new one-hop delegates:
+`agent_memory_hits()` calls the established two-plane MemoryRetriever, while
+`refresh_agent_principal()` reloads live token/profile, scope, and notebook
+allowlist state after transport authentication. The initialization ContextVar
+contributes only the session-bound token id.
+
 Synchronous repository/model work runs in AnyIO worker threads, with the
 authenticated owner request context scoped and reset inside each worker call.
 
@@ -73,15 +81,30 @@ behavior, Origin/auth rejection, and bounded output. A final budget RED failed
 because `_bounded()` did not yet accept a per-response budget; the Ask anchor
 projection now uses a smaller aggregate budget.
 
+Independent review produced three additional protocol RED failures:
+
+- a lower-scope token for the same Agent profile reused an initialized session
+  because the SDK compares client/issuer/subject rather than token value;
+- remote plain-HTTP ASGI traffic was accepted when startup configuration named
+  an HTTPS public URL;
+- `get_memory` returned unbounded individual tag strings.
+
+The focused run showed `3 failed, 8 passed`; the live-principal service test
+also failed first because no refresh boundary existed. The fixes bind sessions
+to token id, refresh every tool from live storage, validate actual ASGI scheme
+and client address, and enforce an exact serialized `get_memory` budget. A
+same-`client_request_id` retry test also confirms `propose_memory` returns the
+same Memory id without inserting a duplicate.
+
 ## Verification
 
-- Official MCP contract tests: `9 passed`.
-- Repository/architecture/focused MCP guards: `75 passed in 10.93s`.
+- Official MCP + Agent-token focused tests: `20 passed in 3.77s`.
+- Repository/architecture guards: `49 passed in 6.23s`.
 - Official-client offline smoke:
   `memory MCP smoke: OK (7 tools, session isolation, candidate plane isolation)`.
-- Related Auth/Memory/Ask/Sharing/OpenAPI regression: `148 passed in 13.42s`.
+- Related Auth/Agent-token/Memory/Ask regression: `199 passed in 17.30s`.
 - `git diff --check`: clean.
-- Exact backend suite: `2887 passed, 1 skipped in 246.13s`.
+- Exact backend suite: `2890 passed, 1 skipped in 251.81s`.
 
 The first exact backend run produced `2883 passed, 1 skipped, 3 failed`; all
 three failures identified the same new private `repository()._runtime` access
@@ -92,8 +115,12 @@ consumer-specific Protocol. The architecture and caller guards then passed.
 
 - Confirmed the selected notebook lives on `Context.session` and two sessions
   using the same token do not share selection.
+- Confirmed a different token for the same profile cannot reuse that session,
+  and initialization-time scopes/allowlists are not used for authorization.
 - Confirmed every data operation carries the selected notebook into existing
   services and rechecks live authorization.
+- Confirmed remote HTTP is rejected from the ASGI scope while remote HTTPS and
+  loopback HTTP remain usable.
 - Confirmed candidates remain same-owner/same-notebook Agent evidence until
   user confirmation, and rejected/deprecated Memory cannot be read.
 - Confirmed no MCP write tool can confirm, reject, deprecate, delete, or

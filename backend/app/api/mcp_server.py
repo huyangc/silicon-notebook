@@ -115,10 +115,71 @@ def _safe_data(value: Any, *, char_budget: int = 2_000) -> Any:
     return visit(value, 0)
 
 
+def _bounded_strings(
+    values: Sequence[Any], *, limit: int, item_limit: int, char_budget: int
+) -> list[str]:
+    result: list[str] = []
+    used = 0
+    for value in values[:limit]:
+        clipped = _clip(value, item_limit)
+        encoded_size = len(json.dumps(clipped, ensure_ascii=False))
+        if result and used + encoded_size > char_budget:
+            break
+        if encoded_size > char_budget:
+            clipped = _clip(clipped, max(1, char_budget // 2))
+            encoded_size = len(json.dumps(clipped, ensure_ascii=False))
+        used += encoded_size
+        result.append(clipped)
+    return result
+
+
+def _fit_response(
+    value: dict[str, Any], *, char_budget: int, shrink_fields: Sequence[str]
+) -> dict[str, Any]:
+    """Enforce an exact serialized response budget after field-level clipping."""
+    result = dict(value)
+    while len(json.dumps(result, ensure_ascii=False, default=str)) > char_budget:
+        changed = False
+        for field in shrink_fields:
+            current = result.get(field)
+            if isinstance(current, Mapping):
+                if current and current != {"truncated": True}:
+                    result[field] = {"truncated": True}
+                    changed = True
+                    break
+            elif isinstance(current, list):
+                if current:
+                    result[field] = current[:-1]
+                    changed = True
+                    break
+            elif isinstance(current, str) and len(current) > 1:
+                excess = len(
+                    json.dumps(result, ensure_ascii=False, default=str)
+                ) - char_budget
+                keep = max(1, len(current) - max(1, excess))
+                result[field] = current[:keep] + (
+                    "…" if keep < len(current) else ""
+                )
+                changed = True
+                break
+        if not changed:
+            raise ValueError("MCP response metadata exceeds output budget")
+    return result
+
+
 def _principal() -> AgentPrincipal:
     principal = _MCP_PRINCIPAL.get()
     if principal is None:
         raise PermissionError("Agent authentication required")
+    return principal
+
+
+def _live_principal(repo: Any) -> AgentPrincipal:
+    # The ContextVar is inherited when the stateful SDK session task starts;
+    # use it only for the bound token id, never as an authorization snapshot.
+    principal = repo.refresh_agent_principal(_principal().token_id)
+    if principal is None:
+        raise PermissionError("Agent token or profile is no longer active")
     return principal
 
 
@@ -152,6 +213,15 @@ class AgentBearerMiddleware:
         if scope["type"] == "lifespan":
             await self.app(scope, receive, send)
             return
+        client = scope.get("client")
+        client_host = str(client[0]) if client else ""
+        if str(scope.get("scheme", "http")).lower() != "https" and not _is_loopback(
+            client_host
+        ):
+            await JSONResponse(
+                {"detail": "remote MCP transport requires HTTPS"}, status_code=403
+            )(scope, receive, send)
+            return
         headers = {
             key.decode("latin-1").lower(): value.decode("latin-1")
             for key, value in scope.get("headers", [])
@@ -178,7 +248,9 @@ class AgentBearerMiddleware:
         authenticated_scope["user"] = AuthenticatedUser(
             AccessToken(
                 token=principal.token_id,
-                client_id=principal.profile_id,
+                # Stateful owner comparison ignores AccessToken.token. Bind
+                # the session with a field the SDK actually compares.
+                client_id=principal.token_id,
                 subject=principal.owner_id,
                 scopes=list(principal.scopes),
             )
@@ -191,7 +263,7 @@ class AgentBearerMiddleware:
 
 
 def _selected_notebook(ctx: Context, repo: Any, scope: str) -> tuple[AgentPrincipal, str]:
-    principal = _principal()
+    principal = _live_principal(repo)
     notebook_id = getattr(ctx.session, _SELECTED_ATTR, "")
     if not notebook_id:
         raise ValueError("select_notebook must be called before this tool")
@@ -255,9 +327,9 @@ def create_memory_mcp(
     )
 
     @server.tool(description="List live notebooks in this Agent token's allowlist.")
-    async def list_notebooks(limit: int = RESULT_LIMIT) -> dict[str, Any]:
-        principal = _principal()
+    async def list_notebooks(ctx: Context, limit: int = RESULT_LIMIT) -> dict[str, Any]:
         repo = repository_provider()
+        principal = await anyio.to_thread.run_sync(_live_principal, repo)
 
         def load() -> list[dict[str, Any]]:
             rows: list[dict[str, Any]] = []
@@ -289,8 +361,8 @@ def create_memory_mcp(
 
     @server.tool(description="Select one allowlisted notebook for this MCP session.")
     async def select_notebook(notebook_id: str, ctx: Context) -> dict[str, Any]:
-        principal = _principal()
         repo = repository_provider()
+        principal = await anyio.to_thread.run_sync(_live_principal, repo)
         if notebook_id not in principal.notebook_ids:
             raise PermissionError("notebook is outside the token allowlist")
 
@@ -449,12 +521,14 @@ def create_memory_mcp(
             profiles = _profile_names(
                 repo, principal.owner_id
             )
-            return {
+            return _fit_response({
                 "memory_id": item.id,
                 "notebook_id": item.notebook_id,
                 "title": _clip(item.title, 300),
                 "content": _clip(item.content_md, 6_000),
-                "tags": list(item.tags[:20]),
+                "tags": _bounded_strings(
+                    item.tags, limit=20, item_limit=200, char_budget=1_500
+                ),
                 "status": item.status,
                 "unconfirmed": item.status == "candidate",
                 "formal_notebook_conclusion": item.status == "confirmed",
@@ -463,7 +537,9 @@ def create_memory_mcp(
                 ),
                 "provenance": _safe_data(item.provenance),
                 "content_is_untrusted_evidence": True,
-            }
+            }, char_budget=TOTAL_TEXT_LIMIT, shrink_fields=(
+                "provenance", "content", "tags", "title"
+            ))
 
         return await anyio.to_thread.run_sync(load)
 

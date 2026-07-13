@@ -163,6 +163,26 @@ def test_rotation_keeps_new_token_usable_after_old_token_is_revoked(token_contex
     assert principal.profile_id == profile.id
 
 
+def test_live_principal_refresh_uses_token_id_and_rejects_revoked_or_disabled_state(
+    token_context,
+):
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Live MCP session", "")
+    issued = _issue(service, alice, profile, notebook)
+
+    refreshed = service.refresh_agent_principal(issued.id)
+    assert refreshed is not None
+    assert refreshed.token_id == issued.id
+    assert refreshed.scopes == ["memory:read", "memory:read_candidates"]
+
+    service.revoke_agent_token(alice.id, issued.id)
+    assert service.refresh_agent_principal(issued.id) is None
+
+    replacement = _issue(service, alice, profile, notebook)
+    service.update_agent_profile(profile.id, alice.id, {"status": "revoked"})
+    assert service.refresh_agent_principal(replacement.id) is None
+
+
 def test_last_used_touch_is_throttled(token_context):
     service, alice, _bob, notebook, _other = token_context
     profile = service.create_agent_profile(alice.id, "Touch", "")

@@ -1531,16 +1531,19 @@ TASK6_MEMORY_ALLOWED_NEW_MEMBERS = {
 # facade delegates.  It adds one source-checked one-hop delegate for the
 # two-plane Memory retriever; no SQL or private runtime state is exposed.
 TASK7_MEMORY_ALLOWED_CONSUMERS = {
-    ("user_can_read_notebook", "backend/app/api/mcp_server.py:266"),
-    ("get_notebook", "backend/app/api/mcp_server.py:271"),
-    ("user_can_read_notebook", "backend/app/api/mcp_server.py:298"),
-    ("get_notebook", "backend/app/api/mcp_server.py:303"),
-    ("unified_kg_status", "backend/app/api/mcp_server.py:304"),
-    ("agent_memory_hits", "backend/app/api/mcp_server.py:348"),
-    ("search_notebook", "backend/app/api/mcp_server.py:399"),
-    ("ask", "backend/app/api/mcp_server.py:485"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:338"),
+    ("get_notebook", "backend/app/api/mcp_server.py:343"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:370"),
+    ("get_notebook", "backend/app/api/mcp_server.py:375"),
+    ("unified_kg_status", "backend/app/api/mcp_server.py:376"),
+    ("agent_memory_hits", "backend/app/api/mcp_server.py:420"),
+    ("search_notebook", "backend/app/api/mcp_server.py:471"),
+    ("ask", "backend/app/api/mcp_server.py:561"),
 }
-TASK7_MEMORY_ALLOWED_NEW_MEMBERS = {"agent_memory_hits"}
+TASK7_MEMORY_ALLOWED_NEW_MEMBERS = {
+    "agent_memory_hits",
+    "refresh_agent_principal",
+}
 
 # Task 26: the consolidated facade delegates its last SQL bodies to the
 # stores, so two facade-internal helper call sites disappear (_in_batches
