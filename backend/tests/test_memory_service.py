@@ -101,6 +101,166 @@ def test_agent_candidate_is_private_to_owner_but_shared_across_owner_profiles(
         _candidate(memory_service, notebook, users.alice, "agent-bob", "req-3")
 
 
+def test_candidate_provenance_snapshots_agent_and_validates_every_evidence_ref(
+    repo, memory_service, users, notebook
+):
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,parse_status,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES ('source-live',?,'Live source','markdown','extracted','parsed',"
+            "'live.md','',0,'','','note','t','t')",
+            (notebook.id,),
+        )
+        db.execute(
+            "INSERT INTO source_elements "
+            "(id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES ('element-live','source-live','paragraph','p1','Evidence','{}','t')"
+        )
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,payload,status,source_id,evidence,created_at,updated_at) "
+            "VALUES ('knowledge-live',?,'claim','{\"name\":\"Live claim\"}',"
+            "'approved','source-live','[]','t','t')",
+            (notebook.id,),
+        )
+
+    prior = memory_service.create_candidate(
+        notebook.id, users.alice.id, "agent-a", "req-prior",
+        "Prior", "Prior body", [], "reason", {}, [],
+    )
+    prior = memory_service.confirm(prior.id, users.alice.id)
+    created = memory_service.create_candidate(
+        notebook.id,
+        users.alice.id,
+        "agent-a",
+        "safe-request-42",
+        "  Candidate title  ",
+        "  Candidate body  ",
+        [" analog ", "analog"],
+        "  reusable finding  ",
+        {"task": "review"},
+        [
+            {"source_id": "source-live", "element_id": "element-live"},
+            {"knowledge_id": "knowledge-live"},
+            {"memory_id": prior.id},
+            {"source_id": "missing-source"},
+            {"kind": "url", "url": "https://example.invalid"},
+        ],
+    )
+
+    assert created.title == "Candidate title"
+    assert created.content_md == "Candidate body"
+    assert created.tags == ["analog"]
+    assert created.provenance["agent_profile"] == {
+        "id": "agent-a",
+        "name": "Agent A",
+    }
+    assert created.provenance["client_request_id"] == "safe-request-42"
+    assert "token" not in created.provenance
+    refs = created.provenance["evidence_refs"]
+    assert len(refs) == 5
+    assert [ref["validation"]["status"] for ref in refs] == [
+        "validated", "validated", "validated", "invalid", "invalid"
+    ]
+    assert [ref["trusted"] for ref in refs] == [True, True, True, False, False]
+    assert refs[0]["type"] == "source_element"
+    assert refs[1]["type"] == "knowledge"
+    assert refs[2]["type"] == "memory"
+    assert refs[3]["validation"]["reason"] == "missing_or_cross_notebook"
+    assert refs[4]["validation"]["reason"] == "unsupported_reference"
+
+
+def test_candidate_evidence_rejects_cross_notebook_and_cross_owner_records(
+    repo, memory_service, users, notebook
+):
+    token = set_request_user(users.bob)
+    try:
+        other = repo.create_notebook(NotebookCreate(name="Foreign evidence"))
+    finally:
+        reset_request_user(token)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources "
+            "(id,notebook_id,title,source_type,status,parse_status,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES ('source-foreign',?,'Foreign','markdown','extracted','parsed',"
+            "'foreign.md','',0,'','','note','t','t')",
+            (other.id,),
+        )
+    memory_service.notebooks.add_member(other.id, users.alice.id)
+    foreign_memory = memory_service.create_candidate(
+        other.id, users.bob.id, None, "foreign-memory", "Foreign", "Body", [],
+        "reason", {}, [],
+    )
+    foreign_memory = memory_service.confirm(foreign_memory.id, users.bob.id)
+
+    item = memory_service.create_candidate(
+        notebook.id, users.alice.id, "agent-a", "cross-evidence", "Title", "Body",
+        [], "reason", {}, [
+            {"source_id": "source-foreign"},
+            {"memory_id": foreign_memory.id},
+        ],
+    )
+
+    assert [ref["trusted"] for ref in item.provenance["evidence_refs"]] == [False, False]
+    assert item.provenance["evidence_refs"][1]["validation"]["reason"] == "missing_or_cross_owner"
+
+
+def test_memory_service_enforces_shared_input_limits_and_normalization(
+    memory_service, users, notebook
+):
+    from app.services.memory_inputs import (
+        MEMORY_CONTENT_MAX_CHARS,
+        MEMORY_EVIDENCE_MAX_COUNT,
+        MEMORY_EVIDENCE_MAX_SERIALIZED_BYTES,
+        MEMORY_REASON_MAX_CHARS,
+        MEMORY_TAG_MAX_COUNT,
+        MEMORY_TASK_CONTEXT_MAX_SERIALIZED_BYTES,
+        MEMORY_TITLE_MAX_CHARS,
+    )
+
+    bad_calls = [
+        {"title": " ", "content_md": "Body"},
+        {"title": "T" * (MEMORY_TITLE_MAX_CHARS + 1), "content_md": "Body"},
+        {"title": "Title", "content_md": "X" * (MEMORY_CONTENT_MAX_CHARS + 1)},
+        {"title": "Title", "content_md": "Body", "tags": [f"x{i}" for i in range(MEMORY_TAG_MAX_COUNT + 1)]},
+        {"title": "Title", "content_md": "Body", "reason": "r" * (MEMORY_REASON_MAX_CHARS + 1)},
+        {"title": "Title", "content_md": "Body", "evidence_refs": [{}] * (MEMORY_EVIDENCE_MAX_COUNT + 1)},
+        {"title": "Title", "content_md": "Body", "task_context": {"text": "x" * MEMORY_TASK_CONTEXT_MAX_SERIALIZED_BYTES}},
+        {"title": "Title", "content_md": "Body", "evidence_refs": [{"source_id": "x" * MEMORY_EVIDENCE_MAX_SERIALIZED_BYTES}]},
+    ]
+    for index, values in enumerate(bad_calls):
+        with pytest.raises(ValueError):
+            memory_service.create_candidate(
+                notebook.id,
+                users.alice.id,
+                "agent-a",
+                f"limit-{index}",
+                values.get("title", "Title"),
+                values.get("content_md", "Body"),
+                values.get("tags", []),
+                values.get("reason", "reason"),
+                values.get("task_context", {}),
+                values.get("evidence_refs", []),
+            )
+    with pytest.raises(ValueError):
+        memory_service.create_candidate(
+            notebook.id, users.alice.id, "agent-a", "bad-json", "Title", "Body",
+            [], "reason", {"not_json": object()}, [],
+        )
+    assert memory_service.list_memories(users.alice.id).owner_total_count == 0
+
+    valid = memory_service.create_candidate(
+        notebook.id, users.alice.id, "agent-a", "valid-after-limits", "Title",
+        "Body", [], "reason", {}, [],
+    )
+    with pytest.raises(ValueError):
+        memory_service.update(valid.id, users.alice.id, {"content_md": "   "})
+    assert memory_service.get(valid.id, users.alice.id).content_md == "Body"
+
+
 def test_duplicate_agent_request_is_idempotent(
     memory_service, users, notebook, monkeypatch
 ):
@@ -654,9 +814,80 @@ def test_global_memory_access_filter_uses_fixed_query_count(
     ]
     assert [item.id for item in page.items] == [accessible.id]
     assert page.total_count == 1
-    assert len(memory_queries) == 2
+    # Two filtered page queries plus one owner-wide aggregate and one bounded
+    # grouped notebook-option query; this remains fixed as notebook count grows.
+    assert len(memory_queries) == 4
     assert all("EXISTS (SELECT 1 FROM notebooks access_nb" in sql for sql in memory_queries)
     assert per_notebook_queries == []
+
+
+def test_global_memory_totals_and_notebook_options_ignore_current_filters(
+    repo, memory_service, users, notebook
+):
+    token = set_request_user(users.alice)
+    try:
+        other = repo.create_notebook(NotebookCreate(name="Other Memory notebook"))
+    finally:
+        reset_request_user(token)
+    first = _candidate(memory_service, notebook, users.alice, "agent-a", "stats-1")
+    memory_service.confirm(first.id, users.alice.id)
+    _candidate(memory_service, notebook, users.alice, "agent-a", "stats-2")
+    _candidate(memory_service, other, users.alice, None, "stats-3")
+
+    page = memory_service.list_memories(
+        users.alice.id,
+        notebook_id=notebook.id,
+        status="candidate",
+        query="Title",
+    )
+
+    assert page.total_count == 1
+    assert page.owner_total_count == 3
+    assert page.owner_pending_count == 2
+    assert {
+        option.notebook_id: (option.name, option.memory_count, option.pending_count)
+        for option in page.notebook_options
+    } == {
+        notebook.id: (notebook.name, 2, 1),
+        other.id: (other.name, 1, 1),
+    }
+
+
+def test_answer_save_rechecks_live_membership_inside_atomic_store_write(
+    repo, memory_service, users, monkeypatch
+):
+    token = set_request_user(users.bob)
+    try:
+        shared = repo.create_notebook(NotebookCreate(name="Concurrent revoke"))
+    finally:
+        reset_request_user(token)
+    memory_service.notebooks.add_member(shared.id, users.alice.id)
+    answer_id = repo._runtime.ask_state.save_answer(
+        shared.id,
+        None,
+        "Shared answer?",
+        AskResponse(conclusion="Shared", answer="Shared"),
+        users.bob.id,
+    )
+    store = repo._runtime.memory_store
+    original = store.create_answer_with_initial_revision
+
+    def revoke_before_atomic_create(write, changed_by, reason):
+        memory_service.notebooks.remove_member(shared.id, users.alice.id)
+        return original(write, changed_by, reason)
+
+    monkeypatch.setattr(
+        store, "create_answer_with_initial_revision", revoke_before_atomic_create
+    )
+    with pytest.raises((KeyError, PermissionError)):
+        memory_service.create_from_answer(
+            shared.id, users.alice.id, answer_id, "Saved", "Body", []
+        )
+
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) FROM memory_items").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM memory_revisions").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM memory_provenance").fetchone()[0] == 0
 
 
 def test_legacy_store_mutations_do_not_land_after_membership_revocation(

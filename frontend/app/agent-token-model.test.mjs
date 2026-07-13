@@ -11,6 +11,7 @@ import {
   agentTokenRequest,
   canIssueAgentToken,
   mergeAgentPage,
+  localDateTimeToUtcIso,
 } from "./agent-token-model.ts";
 
 test("new token drafts stay least-privileged and default to one notebook", () => {
@@ -32,6 +33,14 @@ test("token request always includes its default notebook exactly once", () => {
   assert.deepEqual(payload.notebook_ids, ["notebook-1", "notebook-2"]);
   assert.deepEqual(payload.scopes, ["memory:read"]);
   assert.equal(payload.agent_profile_id, "profile-1");
+  assert.equal(payload.expires_at, new Date("2030-01-02T03:04:05").toISOString());
+});
+
+test("datetime-local expiry is converted from a non-UTC browser zone to UTC", () => {
+  assert.equal(
+    localDateTimeToUtcIso("2030-01-02T03:04:05", -480),
+    "2030-01-01T19:04:05.000Z",
+  );
 });
 
 test("issue validation requires a profile, default notebook, scopes, and expiry", () => {

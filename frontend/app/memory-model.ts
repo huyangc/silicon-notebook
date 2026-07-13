@@ -2,6 +2,38 @@ import type { MemoryOrigin, MemoryPromotionState, MemoryStatus } from "./workspa
 
 export type MemoryScope = "global" | "notebook";
 
+export const MEMORY_INPUT_LIMITS = {
+  titleMaxChars: 80,
+  contentMaxChars: 40_000,
+  tagMaxCount: 20,
+  tagMaxChars: 80,
+} as const;
+
+export function validateMemoryDraft(draft: {
+  title: string;
+  content_md: string;
+  tags: string[];
+}): string {
+  const title = draft.title.trim();
+  const content = draft.content_md.trim();
+  if (!title) return "标题不能为空";
+  if (title.length > MEMORY_INPUT_LIMITS.titleMaxChars) {
+    return `标题不能超过 ${MEMORY_INPUT_LIMITS.titleMaxChars} 个字符`;
+  }
+  if (!content) return "内容不能为空";
+  if (content.length > MEMORY_INPUT_LIMITS.contentMaxChars) {
+    return `内容不能超过 ${MEMORY_INPUT_LIMITS.contentMaxChars} 个字符`;
+  }
+  const tags = Array.from(new Set(draft.tags.map((tag) => tag.trim()).filter(Boolean)));
+  if (tags.length > MEMORY_INPUT_LIMITS.tagMaxCount) {
+    return `标签不能超过 ${MEMORY_INPUT_LIMITS.tagMaxCount} 个`;
+  }
+  if (tags.some((tag) => tag.length > MEMORY_INPUT_LIMITS.tagMaxChars)) {
+    return `单个标签不能超过 ${MEMORY_INPUT_LIMITS.tagMaxChars} 个字符`;
+  }
+  return "";
+}
+
 type MemoryMeta = { label: string; tone: string };
 
 const STATUS_META: Record<MemoryStatus, MemoryMeta> = {
@@ -122,6 +154,7 @@ export function memoryListPath({
   const params = new URLSearchParams();
   if (status !== "all") params.set("status", status);
   if (origin !== "all") params.set("origin", origin);
+  if (scope === "global" && notebookId) params.set("notebook_id", notebookId);
   if (query.trim()) params.set("query", query.trim());
   params.set("offset", String(offset));
   params.set("limit", String(limit));
@@ -140,6 +173,7 @@ function contextSummary(value: unknown): string {
 export function memoryProvenanceRows(memory: {
   origin: MemoryOrigin;
   provenance: Record<string, unknown>;
+  agent_profile_id?: string | null;
 }): Array<[string, string]> {
   const provenance = memory.provenance ?? {};
   if (memory.origin === "ask_answer") {
@@ -152,11 +186,53 @@ export function memoryProvenanceRows(memory: {
     ];
     return rows.filter(([, value]) => Boolean(value));
   }
-  const evidenceRefs = Array.isArray(provenance.evidence_refs) ? provenance.evidence_refs.length : 0;
+  const profile = provenance.agent_profile && typeof provenance.agent_profile === "object"
+    ? provenance.agent_profile as Record<string, unknown>
+    : null;
+  const profileName = String(profile?.name ?? "");
+  const profileId = String(profile?.id ?? memory.agent_profile_id ?? "");
   const rows: Array<[string, string]> = [
+    ["创建 Agent", profileName ? `${profileName}${profileId ? ` (${profileId})` : ""}` : profileId],
+    ["客户端请求", String(provenance.client_request_id ?? "")],
     ["提议原因", String(provenance.reason ?? "")],
     ["任务上下文", contextSummary(provenance.task_context)],
-    ["证据引用", `${evidenceRefs} 条`],
   ];
   return rows.filter(([, value]) => Boolean(value));
+}
+
+export type MemoryEvidenceRow = {
+  type: string;
+  identity: string;
+  status: string;
+  reason: string;
+  trusted: boolean;
+};
+
+export function memoryEvidenceRows(memory: {
+  origin: MemoryOrigin;
+  provenance: Record<string, unknown>;
+}): MemoryEvidenceRow[] {
+  if (memory.origin !== "external_agent") return [];
+  const refs = Array.isArray(memory.provenance?.evidence_refs)
+    ? memory.provenance.evidence_refs
+    : [];
+  return refs.map((raw) => {
+    const ref = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+    const validation = ref.validation && typeof ref.validation === "object"
+      ? ref.validation as Record<string, unknown>
+      : {};
+    const identity = [
+      ref.source_id,
+      ref.element_id,
+      ref.knowledge_id,
+      ref.memory_id,
+    ].filter(Boolean).map(String).join(" / ") || `#${Number(ref.index ?? 0) + 1}`;
+    return {
+      type: String(ref.type ?? "unsupported"),
+      identity,
+      status: String(validation.status ?? "invalid"),
+      reason: String(validation.reason ?? "unverified"),
+      trusted: ref.trusted === true,
+    };
+  });
 }

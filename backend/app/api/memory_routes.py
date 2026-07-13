@@ -37,6 +37,7 @@ from app.models.schemas import (
 )
 from app.repositories.ports import AskStateStorePort, MemoryRepository
 from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prompt
+from app.services.memory_inputs import MemoryInputError
 
 
 memory_router = APIRouter()
@@ -175,6 +176,8 @@ async def _memory_call(call, *args):
         return await run_in_threadpool(call, *args)
     except (KeyError, PermissionError):
         raise _not_found()
+    except MemoryInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 

@@ -7,7 +7,13 @@ from dataclasses import replace
 from typing import Any, Mapping, Sequence
 
 from app.models.memory import MemoryRevision, MemoryWrite
-from app.models.schemas import AgentProfile, AgentTokenSummary, MemoryRecord, PaginatedMemories
+from app.models.schemas import (
+    AgentProfile,
+    AgentTokenSummary,
+    MemoryNotebookOption,
+    MemoryRecord,
+    PaginatedMemories,
+)
 from app.repositories.sqlite.database import SqliteDatabase
 from app.services.vector_index import encode_vector
 
@@ -391,7 +397,140 @@ class MemoryStore:
     def create_candidate_with_initial_revision(
         self, write: MemoryWrite, changed_by: str, reason: str
     ) -> MemoryRecord:
-        return self._create_with_initial_revision(write, changed_by, reason)
+        with self.database.write() as db:
+            db.execute("BEGIN IMMEDIATE")
+            access = db.execute(
+                "SELECT 1 FROM notebooks nb WHERE nb.id=? AND "
+                "(nb.created_by=? OR EXISTS (SELECT 1 FROM notebook_members nm "
+                "WHERE nm.notebook_id=nb.id AND nm.user_id=?))",
+                (write.notebook_id, write.created_by, write.created_by),
+            ).fetchone()
+            if access is None:
+                raise PermissionError(write.notebook_id)
+            agent_profile = None
+            if write.agent_profile_id:
+                profile = db.execute(
+                    "SELECT id,name FROM agent_profiles "
+                    "WHERE id=? AND owner_id=? AND status='active'",
+                    (write.agent_profile_id, write.created_by),
+                ).fetchone()
+                if profile is None:
+                    raise PermissionError(write.agent_profile_id)
+                agent_profile = {"id": profile["id"], "name": profile["name"]}
+            provenance = dict(write.provenance or {})
+            submitted_refs = provenance.get("evidence_refs")
+            provenance["agent_profile"] = agent_profile
+            provenance["evidence_refs"] = [
+                self._validate_evidence_ref_on(
+                    db,
+                    reference,
+                    index=index,
+                    notebook_id=write.notebook_id,
+                    user_id=write.created_by,
+                )
+                for index, reference in enumerate(
+                    submitted_refs if isinstance(submitted_refs, list) else []
+                )
+            ]
+            item, created = self._insert_memory_on(
+                db, replace(write, provenance=provenance)
+            )
+            self._ensure_initial_revision_on(db, item, created, changed_by, reason)
+        return item
+
+    @staticmethod
+    def _validation(
+        normalized: dict[str, Any], *, trusted: bool, reason: str
+    ) -> dict[str, Any]:
+        return {
+            **normalized,
+            "trusted": trusted,
+            "validation": {
+                "status": "validated" if trusted else "invalid",
+                "reason": reason,
+            },
+        }
+
+    def _validate_evidence_ref_on(
+        self,
+        db: sqlite3.Connection,
+        reference: Mapping[str, Any],
+        *,
+        index: int,
+        notebook_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        source_id = str(reference.get("source_id") or "").strip()
+        element_id = str(reference.get("element_id") or "").strip()
+        knowledge_id = str(
+            reference.get("knowledge_id") or reference.get("object_id") or ""
+        ).strip()
+        memory_id = str(reference.get("memory_id") or "").strip()
+        base: dict[str, Any] = {"index": index}
+        if source_id and element_id:
+            normalized = {
+                **base,
+                "type": "source_element",
+                "source_id": source_id,
+                "element_id": element_id,
+            }
+            row = db.execute(
+                "SELECT 1 FROM sources s JOIN source_elements e ON e.source_id=s.id "
+                "WHERE s.id=? AND e.id=? AND s.notebook_id=?",
+                (source_id, element_id, notebook_id),
+            ).fetchone()
+            return self._validation(
+                normalized,
+                trusted=row is not None,
+                reason="live_source_element" if row else "missing_or_cross_notebook",
+            )
+        if source_id:
+            normalized = {**base, "type": "source", "source_id": source_id}
+            row = db.execute(
+                "SELECT 1 FROM sources WHERE id=? AND notebook_id=?",
+                (source_id, notebook_id),
+            ).fetchone()
+            return self._validation(
+                normalized,
+                trusted=row is not None,
+                reason="live_source" if row else "missing_or_cross_notebook",
+            )
+        if knowledge_id:
+            normalized = {
+                **base,
+                "type": "knowledge",
+                "knowledge_id": knowledge_id,
+            }
+            row = db.execute(
+                "SELECT 1 FROM knowledge_objects WHERE id=? AND notebook_id=? "
+                "AND status!='deprecated'",
+                (knowledge_id, notebook_id),
+            ).fetchone()
+            return self._validation(
+                normalized,
+                trusted=row is not None,
+                reason="live_knowledge_object" if row else "missing_or_cross_notebook",
+            )
+        if memory_id:
+            normalized = {**base, "type": "memory", "memory_id": memory_id}
+            row = db.execute(
+                "SELECT 1 FROM memory_items WHERE id=? AND notebook_id=? "
+                "AND created_by=? AND status='confirmed'",
+                (memory_id, notebook_id, user_id),
+            ).fetchone()
+            return self._validation(
+                normalized,
+                trusted=row is not None,
+                reason="live_owner_memory" if row else "missing_or_cross_owner",
+            )
+        submitted_type = str(
+            reference.get("type") or reference.get("kind") or "unsupported"
+        ).strip()[:80]
+        return self._validation(
+            {**base, "type": submitted_type or "unsupported"},
+            trusted=False,
+            reason="unsupported_reference",
+        )
 
     def create_answer_with_initial_revision(
         self, write: MemoryWrite, changed_by: str, reason: str
@@ -414,8 +553,17 @@ class MemoryStore:
                     raise KeyError(write.source_answer_id)
                 return item
             row = db.execute(
-                "SELECT question,payload,conversation_id FROM answers WHERE id=?",
-                (write.source_answer_id,),
+                "SELECT a.question,a.payload,a.conversation_id FROM answers a "
+                "JOIN notebooks nb ON nb.id=a.notebook_id "
+                "WHERE a.id=? AND a.notebook_id=? AND "
+                "(nb.created_by=? OR EXISTS (SELECT 1 FROM notebook_members nm "
+                "WHERE nm.notebook_id=nb.id AND nm.user_id=?))",
+                (
+                    write.source_answer_id,
+                    write.notebook_id,
+                    write.created_by,
+                    write.created_by,
+                ),
             ).fetchone()
             if row is None:
                 raise KeyError(write.source_answer_id)
@@ -1087,6 +1235,23 @@ class MemoryStore:
             params.append(origin)
         where = " AND ".join(clauses)
         with self.database.connect() as db:
+            aggregate = db.execute(
+                "SELECT COUNT(*) AS total_count,"
+                "COALESCE(SUM(CASE WHEN m.status='candidate' THEN 1 ELSE 0 END),0) "
+                "AS pending_count FROM memory_items m WHERE m.created_by=? AND "
+                f"{self._read_access_clause()}",
+                (user_id, user_id, user_id),
+            ).fetchone()
+            option_rows = db.execute(
+                "SELECT m.notebook_id,nb.name,COUNT(*) AS memory_count,"
+                "COALESCE(SUM(CASE WHEN m.status='candidate' THEN 1 ELSE 0 END),0) "
+                "AS pending_count FROM memory_items m "
+                "JOIN notebooks nb ON nb.id=m.notebook_id "
+                "WHERE m.created_by=? AND "
+                f"{self._read_access_clause()} "
+                "GROUP BY m.notebook_id,nb.name ORDER BY nb.name,m.notebook_id LIMIT 200",
+                (user_id, user_id, user_id),
+            ).fetchall()
             total = db.execute(
                 f"SELECT COUNT(*) AS c FROM memory_items m {joins} WHERE {where}",
                 params,
@@ -1101,6 +1266,17 @@ class MemoryStore:
             total_count=int(total),
             offset=offset,
             limit=limit,
+            owner_total_count=int(aggregate["total_count"]),
+            owner_pending_count=int(aggregate["pending_count"]),
+            notebook_options=[
+                MemoryNotebookOption(
+                    notebook_id=row["notebook_id"],
+                    name=row["name"],
+                    memory_count=int(row["memory_count"]),
+                    pending_count=int(row["pending_count"]),
+                )
+                for row in option_rows
+            ],
         )
 
     def embedding_revision(

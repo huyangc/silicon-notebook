@@ -227,7 +227,9 @@ the user may edit it, and only the final confirmation writes a `confirmed` Memor
 preview model is unavailable or fails, the preview deterministically uses the question as
 the title and the answer with display citations removed. The global Memory page aggregates
 only the signed-in user's records; a notebook's count and Memory tab are the same data
-filtered to that notebook.
+filtered to that notebook. Its owner-wide total and pending counts do not change when
+status, search, or notebook filters change; the notebook selector comes from a bounded
+owner aggregate rather than per-notebook queries.
 
 The lifecycle is `candidate | confirmed | rejected | deprecated`. An Agent can create only
 `candidate`; all authorized Agent profiles belonging to the same user and selected notebook
@@ -238,6 +240,22 @@ deprecated records are excluded from both planes. Retrieval first requires relev
 authority only resolves equally relevant/conflicting evidence in this order:
 `candidate < personal source < confirmed Memory < base KG/base source`.
 
+Candidate provenance snapshots the creating Agent profile id/name and every submitted
+evidence reference, but never the bearer token. The server validates each reference against
+the candidate's owner and notebook and records a per-reference `validated` or `invalid`
+result with a bounded reason. Legacy/unverified and invalid references remain visible to the
+owner but are never marked trusted or eligible promotion evidence. Candidate review and
+provenance remain owner-only. Saving an Ask answer rechecks live owner/member access inside
+the same `BEGIN IMMEDIATE` transaction that writes the Memory, revision, and provenance, so
+a concurrent share revocation cannot leave a partial Memory.
+
+Memory inputs are normalized and fail closed at both API and service boundaries. Titles and
+content must be nonblank after trimming. Current caps are: title 80 characters, content
+40,000 characters, at most 20 tags of 80 characters each, review/candidate reason 1,000
+characters, task context 8,192 serialized UTF-8 bytes, at most 50 evidence references and
+32,768 serialized UTF-8 bytes, and client request id 200 characters. HTTP validation errors
+return 422; MCP/internal calls use the same service validation.
+
 The Memory page's **Agent access** area creates stable Agent profiles and one-time plaintext
 tokens. A token has an expiry, a default notebook, a notebook allowlist, and the smallest
 needed subset of `knowledge:read`, `memory:read`, `memory:read_candidates`,
@@ -246,6 +264,9 @@ requirements (which include the official `mcp>=1.26.0` client/server SDK), start
 then connect to the Streamable HTTP server at `/mcp` (`/mcp/` is handled through redirect).
 Local use may use loopback HTTP; any remote deployment must expose an HTTPS URL and set
 `MCP_PUBLIC_URL` to that public `/mcp` URL.
+Expiry values must include an explicit timezone offset; the browser converts its local
+datetime input to UTC and the backend stores a normalized UTC instant. Naive datetimes are
+rejected rather than interpreted in the server's local timezone.
 
 For Codex, place the issued token in an environment variable and register the server:
 

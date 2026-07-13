@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -131,7 +131,7 @@ def test_expired_revoked_disabled_and_tampered_tokens_do_not_resolve(token_conte
         alice,
         profile,
         notebook,
-        expires_at=(datetime.now() - timedelta(minutes=1)).replace(microsecond=0).isoformat(),
+        expires_at=(datetime.now(timezone.utc) - timedelta(minutes=1)).replace(microsecond=0).isoformat(),
     )
     active = _issue(service, alice, profile, notebook)
 
@@ -147,6 +147,24 @@ def test_expired_revoked_disabled_and_tampered_tokens_do_not_resolve(token_conte
     replacement = _issue(service, alice, profile, notebook)
     service.update_agent_profile(profile.id, alice.id, {"status": "revoked"})
     assert service.resolve_agent_token(replacement.token) is None
+
+
+def test_expiry_requires_offset_and_is_normalized_to_utc(token_context):
+    service, alice, _bob, notebook, _other = token_context
+    profile = service.create_agent_profile(alice.id, "Timezone", "")
+
+    with pytest.raises(ValueError, match="timezone offset"):
+        _issue(service, alice, profile, notebook, expires_at="2030-01-02T03:04:05")
+
+    issued = _issue(
+        service,
+        alice,
+        profile,
+        notebook,
+        expires_at="2030-01-02T03:04:05+08:00",
+    )
+    assert issued.expires_at == "2030-01-01T19:04:05Z"
+    assert service.list_agent_tokens(alice.id)[0].expires_at == "2030-01-01T19:04:05Z"
 
 
 def test_rotation_keeps_new_token_usable_after_old_token_is_revoked(token_context):
@@ -326,3 +344,15 @@ def test_token_api_rejects_unknown_scope_and_default_outside_allowlist(
         },
     )
     assert invalid_expiry.status_code == 422
+    naive_expiry = client.post(
+        f"/api/agent-profiles/{profile_id}/tokens",
+        headers=headers,
+        json={
+            "agent_profile_id": profile_id,
+            "scopes": ["memory:read"],
+            "default_notebook_id": notebook_id,
+            "notebook_ids": [notebook_id],
+            "expires_at": "2030-01-02T03:04:05",
+        },
+    )
+    assert naive_expiry.status_code == 422

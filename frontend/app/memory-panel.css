@@ -58,7 +58,7 @@
 
 .memory-filterbar {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) auto auto;
+  grid-template-columns: minmax(240px, 1fr) repeat(3, minmax(120px, auto));
   align-items: end;
   gap: 12px;
   border: 1px solid #dce1e9;
@@ -247,6 +247,43 @@
 
 .memory-provenance dt { color: #7a8392; }
 .memory-provenance dd { margin: 0; color: #364152; overflow-wrap: anywhere; }
+
+.memory-evidence-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.memory-evidence-list article {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #e3e7ee;
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #f8fafc;
+  font-size: 11px;
+}
+
+.memory-evidence-list article.validated {
+  border-color: #b9e3d1;
+  background: #f0fbf6;
+}
+
+.memory-evidence-list article.invalid {
+  border-color: #ebc7bd;
+  background: #fff7f4;
+}
+
+.memory-evidence-list code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.memory-evidence-list span { color: #697386; }
 
 .memory-card-footer {
   align-items: center;

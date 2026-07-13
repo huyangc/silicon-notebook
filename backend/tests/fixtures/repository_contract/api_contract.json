@@ -2804,8 +2804,25 @@
               "title": "Limit",
               "type": "integer"
             },
+            "notebook_options": {
+              "items": {
+                "$ref": "#/components/schemas/MemoryNotebookOption"
+              },
+              "title": "Notebook Options",
+              "type": "array"
+            },
             "offset": {
               "title": "Offset",
+              "type": "integer"
+            },
+            "owner_pending_count": {
+              "default": 0,
+              "title": "Owner Pending Count",
+              "type": "integer"
+            },
+            "owner_total_count": {
+              "default": 0,
+              "title": "Owner Total Count",
               "type": "integer"
             },
             "total_count": {
@@ -2820,6 +2837,34 @@
             "limit"
           ],
           "title": "PaginatedMemories",
+          "type": "object"
+        },
+        "MemoryNotebookOption": {
+          "properties": {
+            "memory_count": {
+              "title": "Memory Count",
+              "type": "integer"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "pending_count": {
+              "title": "Pending Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "notebook_id",
+            "name",
+            "memory_count",
+            "pending_count"
+          ],
+          "title": "MemoryNotebookOption",
           "type": "object"
         },
         "PaginatedSources": {

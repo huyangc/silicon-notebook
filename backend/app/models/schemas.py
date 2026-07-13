@@ -1,6 +1,13 @@
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.services.memory_inputs import (
+    normalize_content,
+    normalize_reason,
+    normalize_tags,
+    normalize_title,
+)
 
 
 class UserProfile(BaseModel):
@@ -59,11 +66,21 @@ class MemoryHit(BaseModel):
         return self.memory_id
 
 
+class MemoryNotebookOption(BaseModel):
+    notebook_id: str
+    name: str
+    memory_count: int
+    pending_count: int
+
+
 class PaginatedMemories(BaseModel):
     items: List[MemoryRecord]
     total_count: int
     offset: int
     limit: int
+    owner_total_count: int = 0
+    owner_pending_count: int = 0
+    notebook_options: List[MemoryNotebookOption] = Field(default_factory=list)
 
 
 class MemoryPreview(BaseModel):
@@ -80,6 +97,10 @@ class MemoryCreateFromAnswer(BaseModel):
     title: str
     content_md: str
     tags: List[str] = Field(default_factory=list)
+
+    _normalize_title = field_validator("title")(normalize_title)
+    _normalize_content = field_validator("content_md")(normalize_content)
+    _normalize_tags = field_validator("tags")(normalize_tags)
 
 
 class AnswerMemoryLinksRequest(BaseModel):
@@ -99,9 +120,29 @@ class MemoryUpdate(BaseModel):
     content_md: Optional[str] = None
     tags: Optional[List[str]] = None
 
+    @field_validator("title")
+    @classmethod
+    def _normalize_optional_title(cls, value):
+        return normalize_title(value) if value is not None else None
+
+    @field_validator("content_md")
+    @classmethod
+    def _normalize_optional_content(cls, value):
+        return normalize_content(value) if value is not None else None
+
+    @field_validator("tags")
+    @classmethod
+    def _normalize_optional_tags(cls, value):
+        return normalize_tags(value) if value is not None else None
+
 
 class MemoryReviewRequest(MemoryUpdate):
     reason: Optional[str] = None
+
+    @field_validator("reason")
+    @classmethod
+    def _normalize_optional_reason(cls, value):
+        return normalize_reason(value) if value is not None else None
 
 
 class AgentProfile(BaseModel):

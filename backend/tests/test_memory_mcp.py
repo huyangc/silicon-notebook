@@ -381,7 +381,7 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         "budget-request-confirmed",
         "Budget marker confirmed",
         "budget-marker " + ("private-data " * 1000),
-        [(f"tag-{index}-" + "sensitive-tag-data-" * 100) for index in range(30)],
+        [(f"tag-{index}-" + "sensitive-data-" * 4) for index in range(20)],
         "test",
     )
     mcp_env["service"].confirm_memory(confirmed.id, mcp_env["alice"].id)

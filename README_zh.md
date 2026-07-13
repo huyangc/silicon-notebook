@@ -207,7 +207,9 @@ Memory 必须由用户手动选择、归创建者私有，并且始终绑定到�
 在 Ask 回答上点击“保存到 Memory”后，后端先生成标题、正文和标签预览，用户可编辑，
 只有最终确认才写入 `confirmed` Memory。预览模型未配置或失败时，系统确定性地用问题作
 标题，并用移除显示引用后的回答作正文。总 Memory 页面只聚合当前登录用户的数据；
-notebook 卡片数量和 notebook Memory 标签是同一份数据的 notebook 局部视图。
+notebook 卡片数量和 notebook Memory 标签是同一份数据的 notebook 局部视图。总数与待确认数
+始终按 owner 全量统计，不随状态、搜索或 notebook 筛选变化；notebook 筛选项来自有界的 owner
+聚合查询，不做逐 notebook 查询。
 
 生命周期为 `candidate | confirmed | rejected | deprecated`。Agent 只能创建 `candidate`；
 token 具备 `memory:read_candidates` 时，同一用户、当前所选 notebook 下获授权的所有 Agent
@@ -216,12 +218,26 @@ profile 都可检索它。Candidate 永远不会进入正式 notebook Ask、note
 平面都排除。检索先判断相关性，权威只在同等相关或冲突证据间生效：
 `candidate < personal 原始证据 < confirmed Memory < base KG/base 原始证据`。
 
+Candidate provenance 会保存创建它的 Agent profile id/name 与每一条提交的 evidence ref，但绝不
+保存 bearer token。服务端逐条按 candidate 的 owner 与 notebook 校验，并保存 `validated` 或
+`invalid` 状态及有界原因；历史未验证或无效引用仍可由 owner 查看，但绝不会标成 trusted 或成为
+可晋升 evidence。Candidate 详情、审核与 provenance API/UI 都只对 owner 开放。把 Ask 回答保存为
+Memory 时，后端会在写 Memory、revision、provenance 的同一个 `BEGIN IMMEDIATE` 事务内再次校验
+owner/member 实时权限，因此并发撤销分享不会留下半写入 Memory。
+
+Memory 输入在 API 与 service 两层统一归一化并 fail-closed：title/content 去除首尾空白后必须非空。
+当前上限为 title 80 字符、content 40,000 字符、tag 最多 20 个且每个 80 字符、审核/candidate
+reason 1,000 字符、task context 序列化 UTF-8 8,192 bytes、evidence 最多 50 条且序列化 UTF-8
+32,768 bytes、client request id 200 字符。HTTP 违规返回 422；MCP/内部调用也经过同一 service 校验。
+
 总 Memory 页的“Agent 接入”可创建稳定 Agent profile，以及明文只显示一次的 token。
 Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的
 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
 `ask:execute` 子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
 SDK。启动后，Streamable HTTP 服务位于 `/mcp`（到 `/mcp/` 的 redirect 已处理）。本机可用
 loopback HTTP；远程部署必须使用 HTTPS，并把 `MCP_PUBLIC_URL` 设为公开的 `/mcp` URL。
+过期时间必须带明确时区偏移；浏览器把本地 `datetime-local` 转成 UTC，后端按 UTC 瞬间归一化保存。
+无时区 datetime 会被拒绝，不会按服务端本地时区猜测。
 
 Codex 推荐把签发的 token 放入环境变量，再注册服务：
 

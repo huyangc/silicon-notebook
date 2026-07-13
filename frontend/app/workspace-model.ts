@@ -55,6 +55,14 @@ export type PaginatedMemories = {
   total_count: number;
   offset: number;
   limit: number;
+  owner_total_count: number;
+  owner_pending_count: number;
+  notebook_options: Array<{
+    notebook_id: string;
+    name: string;
+    memory_count: number;
+    pending_count: number;
+  }>;
 };
 
 export type MemoryPreview = {

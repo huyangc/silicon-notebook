@@ -9,6 +9,9 @@ import {
   memoryOriginMeta,
   memoryProvenanceRows,
   memoryStatusMeta,
+  memoryEvidenceRows,
+  MEMORY_INPUT_LIMITS,
+  validateMemoryDraft,
 } from "./memory-model.ts";
 
 test("session abort tears down active Memory reads and writes synchronously", () => {
@@ -89,6 +92,21 @@ test("memory list paths preserve pagination and encode filters", () => {
   );
 });
 
+test("global memory list paths include the selected notebook filter", () => {
+  assert.equal(
+    memoryListPath({
+      scope: "global",
+      notebookId: "nb/1",
+      status: "all",
+      origin: "all",
+      query: "",
+      offset: 0,
+      limit: 20,
+    }),
+    "/memories?notebook_id=nb%2F1&offset=0&limit=20",
+  );
+});
+
 test("only live candidate and confirmed memories are editable", () => {
   assert.equal(canEditMemory("candidate"), true);
   assert.equal(canEditMemory("confirmed"), true);
@@ -96,22 +114,85 @@ test("only live candidate and confirmed memories are editable", () => {
   assert.equal(canEditMemory("deprecated"), false);
 });
 
-test("provenance rows summarize evidence without exposing owner identities", () => {
+test("candidate provenance exposes safe agent and client identities", () => {
   const rows = memoryProvenanceRows({
     origin: "external_agent",
     provenance: {
       reason: "Reusable constraint",
       task_context: { task: "review" },
-      evidence_refs: [{ source: "spec.md" }, { source: "notes.pdf" }],
+      agent_profile: { id: "profile-1", name: "Codex" },
+      client_request_id: "request-safe-1",
+      evidence_refs: [],
       created_by: "private-user-id",
       agent_profile_id: "private-agent-id",
     },
   });
   assert.deepEqual(rows, [
+    ["创建 Agent", "Codex (profile-1)"],
+    ["客户端请求", "request-safe-1"],
     ["提议原因", "Reusable constraint"],
     ["任务上下文", "task: review"],
-    ["证据引用", "2 条"],
   ]);
   assert.equal(JSON.stringify(rows).includes("private-user-id"), false);
   assert.equal(JSON.stringify(rows).includes("private-agent-id"), false);
+});
+
+test("candidate review exposes every normalized evidence ref and validation result", () => {
+  const rows = memoryEvidenceRows({
+    origin: "external_agent",
+    provenance: {
+      evidence_refs: [
+        {
+          type: "source_element",
+          source_id: "source-1",
+          element_id: "element-1",
+          trusted: true,
+          validation: { status: "validated", reason: "live_source_element" },
+        },
+        {
+          type: "memory",
+          memory_id: "memory-missing",
+          trusted: false,
+          validation: { status: "invalid", reason: "missing_or_cross_owner" },
+        },
+      ],
+    },
+  });
+  assert.deepEqual(rows, [
+    {
+      type: "source_element",
+      identity: "source-1 / element-1",
+      status: "validated",
+      reason: "live_source_element",
+      trusted: true,
+    },
+    {
+      type: "memory",
+      identity: "memory-missing",
+      status: "invalid",
+      reason: "missing_or_cross_owner",
+      trusted: false,
+    },
+  ]);
+});
+
+test("frontend Memory validation mirrors server title content and tag limits", () => {
+  assert.equal(validateMemoryDraft({ title: " ", content_md: "Body", tags: [] }), "标题不能为空");
+  assert.equal(
+    validateMemoryDraft({
+      title: "Title",
+      content_md: "x".repeat(MEMORY_INPUT_LIMITS.contentMaxChars + 1),
+      tags: [],
+    }),
+    `内容不能超过 ${MEMORY_INPUT_LIMITS.contentMaxChars} 个字符`,
+  );
+  assert.equal(
+    validateMemoryDraft({
+      title: "Title",
+      content_md: "Body",
+      tags: Array.from({ length: MEMORY_INPUT_LIMITS.tagMaxCount + 1 }, (_, index) => `t${index}`),
+    }),
+    `标签不能超过 ${MEMORY_INPUT_LIMITS.tagMaxCount} 个`,
+  );
+  assert.equal(validateMemoryDraft({ title: " Title ", content_md: " Body ", tags: [" analog "] }), "");
 });

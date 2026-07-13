@@ -19,12 +19,15 @@ import {
   canEditMemory,
   canPromoteMemory,
   memoryListPath,
+  memoryEvidenceRows,
   memoryOriginMeta,
   memoryPromotionLabel,
   memoryPromotionPath,
   memoryProvenanceRows,
   memoryStatusMeta,
   subscribeMemorySessionAbort,
+  MEMORY_INPUT_LIMITS,
+  validateMemoryDraft,
   type MemoryScope,
 } from "./memory-model";
 import { Pagination } from "./Pagination";
@@ -60,7 +63,11 @@ async function memoryApi<T>(path: string, options: RequestInit = {}): Promise<T>
     let detail = "";
     try {
       const body = await response.clone().json();
-      detail = typeof body?.detail === "string" ? body.detail : "";
+      detail = typeof body?.detail === "string"
+        ? body.detail
+        : Array.isArray(body?.detail)
+          ? body.detail.map((item: { msg?: unknown }) => String(item?.msg ?? "")).filter(Boolean).join("；")
+          : "";
     } catch {
       detail = await response.text().catch(() => "");
     }
@@ -100,7 +107,7 @@ function MemoryEditor({
         标题
         <input
           autoFocus
-          maxLength={80}
+          maxLength={MEMORY_INPUT_LIMITS.titleMaxChars}
           value={draft.title}
           onChange={(event) => setDraft({ ...draft, title: event.target.value })}
         />
@@ -109,6 +116,7 @@ function MemoryEditor({
         内容
         <textarea
           rows={8}
+          maxLength={MEMORY_INPUT_LIMITS.contentMaxChars}
           value={draft.content_md}
           onChange={(event) => setDraft({ ...draft, content_md: event.target.value })}
         />
@@ -116,6 +124,7 @@ function MemoryEditor({
       <label>
         标签（逗号分隔）
         <input
+          maxLength={MEMORY_INPUT_LIMITS.tagMaxCount * (MEMORY_INPUT_LIMITS.tagMaxChars + 2)}
           value={draft.tags}
           onChange={(event) => setDraft({ ...draft, tags: event.target.value })}
         />
@@ -444,6 +453,10 @@ export function MemoryPanel({
 }) {
   const [items, setItems] = useState<MemoryRecord[]>([]);
   const [total, setTotal] = useState(0);
+  const [ownerTotal, setOwnerTotal] = useState(0);
+  const [ownerPending, setOwnerPending] = useState(0);
+  const [notebookOptions, setNotebookOptions] = useState<PaginatedMemories["notebook_options"]>([]);
+  const [notebookFilter, setNotebookFilter] = useState("");
   const [page, setPage] = useState(0);
   const [status, setStatus] = useState<MemoryStatus | "all">("all");
   const [origin, setOrigin] = useState<MemoryOrigin | "all">("all");
@@ -483,7 +496,7 @@ export function MemoryPanel({
     setError("");
     memoryApi<PaginatedMemories>(memoryListPath({
       scope,
-      notebookId,
+      notebookId: scope === "global" ? notebookFilter || null : notebookId,
       status,
       origin,
       query,
@@ -494,6 +507,9 @@ export function MemoryPanel({
         if (listRequestEpochRef.current !== epoch) return;
         setItems(result.items);
         setTotal(result.total_count);
+        setOwnerTotal(result.owner_total_count);
+        setOwnerPending(result.owner_pending_count);
+        setNotebookOptions(result.notebook_options);
       })
       .catch((cause) => {
         if (controller.signal.aborted || listRequestEpochRef.current !== epoch) return;
@@ -507,7 +523,7 @@ export function MemoryPanel({
       if (listControllerRef.current === controller) listControllerRef.current = null;
       if (listRequestEpochRef.current === epoch) listRequestEpochRef.current += 1;
     };
-  }, [notebookId, origin, page, query, refresh, scope, sessionSignal, status]);
+  }, [notebookFilter, notebookId, origin, page, query, refresh, scope, sessionSignal, status]);
 
   function beginEdit(memory: MemoryRecord) {
     setEditingId(memory.id);
@@ -521,6 +537,15 @@ export function MemoryPanel({
     setBusyId(memory.id);
     setError("");
     try {
+      const validationError = validateMemoryDraft({
+        title: draft.title,
+        content_md: draft.content_md,
+        tags: tagsFromDraft(draft.tags),
+      });
+      if ((action === "save" || action === "confirm") && validationError) {
+        setError(validationError);
+        return;
+      }
       const payload = {
         title: draft.title.trim(),
         content_md: draft.content_md.trim(),
@@ -585,7 +610,9 @@ export function MemoryPanel({
           <h1>{scope === "global" ? "Memory" : "Notebook Memory"}</h1>
           <p>{scope === "global" ? "跨笔记本管理你主动保存和待审核的私有记忆。" : "只显示你自己绑定到当前笔记本的私有 Memory。"}</p>
         </div>
-        <span className="memory-total">{total} 条</span>
+        <span className="memory-total">
+          {scope === "global" ? `${ownerTotal} 条 · ${ownerPending} 条待确认` : `${total} 条`}
+        </span>
       </header>
 
       {scope === "global" && <AgentAccessManager sessionSignal={sessionSignal} />}
@@ -601,6 +628,19 @@ export function MemoryPanel({
           />
           <button type="submit">搜索</button>
         </form>
+        {scope === "global" && (
+          <label>
+            Notebook
+            <select value={notebookFilter} onChange={(event) => { setNotebookFilter(event.target.value); setPage(0); }}>
+              <option value="">全部 notebook</option>
+              {notebookOptions.map((option) => (
+                <option key={option.notebook_id} value={option.notebook_id}>
+                  {option.name}（{option.memory_count}）
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label>
           状态
           <select value={status} onChange={(event) => { setStatus(event.target.value as MemoryStatus | "all"); setPage(0); }}>
@@ -638,6 +678,7 @@ export function MemoryPanel({
             const editing = editingId === memory.id;
             const busy = busyId === memory.id;
             const provenanceRows = memoryProvenanceRows(memory);
+            const evidenceRows = memoryEvidenceRows(memory);
             return (
               <article className={`memory-card memory-${memory.status}`} key={memory.id}>
                 <div className="memory-card-head">
@@ -676,6 +717,20 @@ export function MemoryPanel({
                         <div key={label}><dt>{label}</dt><dd>{value}</dd></div>
                       ))}
                     </dl>
+                  </details>
+                )}
+                {evidenceRows.length > 0 && (
+                  <details className="memory-provenance memory-evidence-review" open={memory.status === "candidate" && editing}>
+                    <summary><ChevronDown size={14} /> Agent 证据引用（{evidenceRows.length}）</summary>
+                    <div className="memory-evidence-list">
+                      {evidenceRows.map((evidence, index) => (
+                        <article key={`${memory.id}-evidence-${index}`} className={evidence.trusted ? "validated" : "invalid"}>
+                          <strong>{index + 1}. {evidence.type}</strong>
+                          <code>{evidence.identity}</code>
+                          <span>{evidence.status} · {evidence.reason}</span>
+                        </article>
+                      ))}
+                    </div>
                   </details>
                 )}
 
@@ -799,6 +854,15 @@ export function MemorySaveDialog({
     setSaving(true);
     setError("");
     try {
+      const validationError = validateMemoryDraft({
+        title: draft.title,
+        content_md: draft.content_md,
+        tags: tagsFromDraft(draft.tags),
+      });
+      if (validationError) {
+        setError(validationError);
+        return;
+      }
       const memory = await memoryApi<MemoryRecord>(`/notebooks/${encodeURIComponent(notebookId)}/memories/from-answer`, {
         method: "POST",
         body: JSON.stringify({

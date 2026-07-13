@@ -26,6 +26,29 @@ export function agentTokenDraft(defaultNotebookId = ""): AgentTokenDraft {
   };
 }
 
+export function localDateTimeToUtcIso(
+  value: string,
+  timezoneOffsetMinutes?: number,
+): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
+  if (!match) throw new Error("过期时间格式无效");
+  if (timezoneOffsetMinutes === undefined) {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) throw new Error("过期时间格式无效");
+    return parsed.toISOString();
+  }
+  const [, year, month, day, hour, minute, second = "0"] = match;
+  const utcMillis = Date.UTC(
+    Number(year),
+    Number(month) - 1,
+    Number(day),
+    Number(hour),
+    Number(minute),
+    Number(second),
+  ) + timezoneOffsetMinutes * 60_000;
+  return new Date(utcMillis).toISOString();
+}
+
 export function agentTokenRequest(profileId: string, draft: AgentTokenDraft) {
   const notebookIds = Array.from(new Set([
     draft.default_notebook_id,
@@ -36,7 +59,7 @@ export function agentTokenRequest(profileId: string, draft: AgentTokenDraft) {
     scopes: Array.from(new Set(draft.scopes)),
     default_notebook_id: draft.default_notebook_id,
     notebook_ids: notebookIds,
-    expires_at: draft.expires_at || null,
+    expires_at: draft.expires_at ? localDateTimeToUtcIso(draft.expires_at) : null,
   };
 }
 

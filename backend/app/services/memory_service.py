@@ -7,7 +7,7 @@ import json
 import re
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from app.core.event_logging import EventLogger
@@ -27,6 +27,15 @@ from app.repositories.ports import (
     NotebookAccessRepository,
 )
 from app.services.embedding import Embedder
+from app.services.memory_inputs import (
+    normalize_client_request_id,
+    normalize_content,
+    normalize_evidence_refs,
+    normalize_reason,
+    normalize_tags,
+    normalize_task_context,
+    normalize_title,
+)
 
 
 @dataclass(frozen=True)
@@ -55,13 +64,37 @@ def _parse_time(value: str) -> datetime:
 def _is_expired(expires_at: str | None, now: str) -> bool:
     if not expires_at:
         return False
-    expiry = _parse_time(expires_at)
-    current = _parse_time(now)
-    if expiry.tzinfo is None and current.tzinfo is not None:
-        expiry = expiry.replace(tzinfo=current.tzinfo)
-    elif expiry.tzinfo is not None and current.tzinfo is None:
-        current = current.replace(tzinfo=expiry.tzinfo)
-    return expiry <= current
+    try:
+        expiry = _parse_time(expires_at)
+        current = _parse_time(now)
+    except (TypeError, ValueError):
+        return True
+    if (
+        expiry.tzinfo is None
+        or expiry.utcoffset() is None
+        or current.tzinfo is None
+        or current.utcoffset() is None
+    ):
+        return True
+    return expiry.astimezone(timezone.utc) <= current.astimezone(timezone.utc)
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
+def _normalize_expiry(value: str) -> str:
+    try:
+        parsed = _parse_time(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("expires_at must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("expires_at must include a timezone offset")
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 class MemoryService:
@@ -218,10 +251,7 @@ class MemoryService:
         if not default_notebook_id or default_notebook_id not in clean_notebooks:
             raise ValueError("default notebook must be in notebook allowlist")
         if expires_at:
-            try:
-                _parse_time(expires_at)
-            except (TypeError, ValueError) as exc:
-                raise ValueError("expires_at must be an ISO-8601 timestamp") from exc
+            expires_at = _normalize_expiry(expires_at)
         for notebook_id in clean_notebooks:
             if not self.notebooks.user_can_read_notebook(notebook_id, owner_id):
                 raise PermissionError(notebook_id)
@@ -272,9 +302,11 @@ class MemoryService:
         principal = self._principal_from_auth_row(token_id, row)
         if principal is None:
             return None
-        now = self.now()
+        now = _utc_now()
         current = _parse_time(now)
-        touch_before = (current - timedelta(seconds=_TOKEN_TOUCH_SECONDS)).isoformat()
+        touch_before = (
+            current - timedelta(seconds=_TOKEN_TOUCH_SECONDS)
+        ).isoformat().replace("+00:00", "Z")
         self.store.touch_agent_token(token_id, now, touch_before)
         return principal
 
@@ -291,7 +323,7 @@ class MemoryService:
     def _principal_from_auth_row(
         self, token_id: str, row: Mapping[str, Any] | None
     ) -> AgentPrincipal | None:
-        now = self.now()
+        now = _utc_now()
         if (
             row is None
             or row["profile_status"] != "active"
@@ -321,7 +353,7 @@ class MemoryService:
             or row["agent_profile_id"] != principal.profile_id
             or row["profile_status"] != "active"
             or row["revoked_at"] is not None
-            or _is_expired(row["expires_at"], self.now())
+            or _is_expired(row["expires_at"], _utc_now())
         ):
             raise PermissionError(notebook_id)
         current_scopes = {
@@ -345,10 +377,16 @@ class MemoryService:
             values = patch.model_dump(exclude_none=True)
         else:
             values = dict(patch)
-        reason = str(values.pop("reason", "") or "")
+        reason = normalize_reason(values.pop("reason", "") or "")
         unknown = set(values) - {"title", "content_md", "tags"}
         if unknown:
             raise ValueError(f"unsupported memory fields: {sorted(unknown)}")
+        if "title" in values:
+            values["title"] = normalize_title(values["title"])
+        if "content_md" in values:
+            values["content_md"] = normalize_content(values["content_md"])
+        if "tags" in values:
+            values["tags"] = normalize_tags(values["tags"])
         return values, reason
 
     @staticmethod
@@ -443,6 +481,13 @@ class MemoryService:
         task_context: Mapping[str, Any] | None = None,
         evidence_refs: Sequence[Mapping[str, Any]] | None = None,
     ) -> MemoryRecord:
+        title = normalize_title(title)
+        content_md = normalize_content(content_md)
+        tags = normalize_tags(tags)
+        reason = normalize_reason(reason)
+        client_request_id = normalize_client_request_id(client_request_id)
+        task_context = normalize_task_context(task_context)
+        evidence_refs = normalize_evidence_refs(evidence_refs)
         self._require_notebook(notebook_id, user_id)
         if agent_profile_id and not self.store.agent_profile_belongs_to(
             agent_profile_id, user_id
@@ -469,8 +514,8 @@ class MemoryService:
             provenance={
                 "client_request_id": client_request_id,
                 "reason": reason,
-                "task_context": dict(task_context or {}),
-                "evidence_refs": list(evidence_refs or []),
+                "task_context": task_context,
+                "evidence_refs": evidence_refs,
             },
         )
         item = self.store.create_candidate_with_initial_revision(
@@ -490,6 +535,9 @@ class MemoryService:
         content_md: str,
         tags: Sequence[str],
     ) -> MemoryRecord:
+        title = normalize_title(title)
+        content_md = normalize_content(content_md)
+        tags = normalize_tags(tags)
         self._require_notebook(notebook_id, user_id)
         existing = self.store.memory_by_answer(user_id, answer_id)
         if existing is not None:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 
 from app.models.schemas import AskResponse
@@ -343,6 +345,98 @@ def test_answer_save_returns_before_background_embedding_runs(tmp_path, monkeypa
     assert saved.status_code == 201
     assert saved.json()["embedding_status"] == "pending"
     assert len(scheduled) == 1
+
+
+def test_memory_api_rejects_blank_and_oversized_inputs_with_422(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    headers, _user_id = _register(client, "z00100019")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Input limits"}
+    ).json()["id"]
+    from app.api.deps import repository
+    from app.services.memory_inputs import MEMORY_CONTENT_MAX_CHARS, MEMORY_REASON_MAX_CHARS
+
+    answer_id = _answer(repository(), notebook_id)
+    blank = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=headers,
+        json={"answer_id": answer_id, "title": "   ", "content_md": "Body", "tags": []},
+    )
+    oversized = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=headers,
+        json={
+            "answer_id": answer_id,
+            "title": "Title",
+            "content_md": "x" * (MEMORY_CONTENT_MAX_CHARS + 1),
+            "tags": [],
+        },
+    )
+    assert blank.status_code == 422
+    assert oversized.status_code == 422
+    repo = repository()
+    candidate = repo.create_memory_candidate(
+        notebook_id, _user_id, None, "api-limits", "Candidate", "Body", [],
+        "reason", {}, [],
+    )
+    blank_update = client.patch(
+        f"/api/memories/{candidate.id}",
+        headers=headers,
+        json={"content_md": "   "},
+    )
+    oversized_review_reason = client.post(
+        f"/api/memories/{candidate.id}/confirm",
+        headers=headers,
+        json={"reason": "r" * (MEMORY_REASON_MAX_CHARS + 1)},
+    )
+    assert blank_update.status_code == 422
+    assert oversized_review_reason.status_code == 422
+
+
+def test_memory_api_returns_global_stats_and_candidate_review_identity(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    headers, user_id = _register(client, "y00100018")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Review details"}
+    ).json()["id"]
+    from app.api.deps import repository
+
+    repo = repository()
+    profile = repo.create_agent_profile(user_id, "Codex review", "")
+    item = repo.create_memory_candidate(
+        notebook_id,
+        user_id,
+        profile.id,
+        "client-safe-1",
+        "Candidate",
+        "Body",
+        [],
+        "Review this",
+        {"task": "audit"},
+        [{"source_id": "missing"}],
+    )
+    response = client.get("/api/memories?status=candidate", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["owner_total_count"] == 1
+    assert body["owner_pending_count"] == 1
+    assert body["notebook_options"] == [
+        {
+            "notebook_id": notebook_id,
+            "name": "Review details",
+            "memory_count": 1,
+            "pending_count": 1,
+        }
+    ]
+    returned = body["items"][0]
+    assert returned["id"] == item.id
+    assert returned["provenance"]["agent_profile"] == {
+        "id": profile.id,
+        "name": "Codex review",
+    }
+    assert returned["provenance"]["client_request_id"] == "client-safe-1"
+    assert returned["provenance"]["evidence_refs"][0]["validation"]["status"] == "invalid"
+    assert "token" not in json.dumps(returned["provenance"])
 
 
 def test_replay_after_answer_deleted_returns_existing_memory(tmp_path, monkeypatch):
