@@ -646,26 +646,19 @@ class KnowledgeStore:
 
     @staticmethod
     def count_active_objects(db: sqlite3.Connection, notebook_id: str) -> int:
-        return int(db.execute(
-            "SELECT COUNT(*) c FROM knowledge_objects "
-            "WHERE notebook_id=? AND status!='deprecated'", (notebook_id,)
-        ).fetchone()["c"])
+        from app.repositories.sqlite import knowledge_counts_cache
+        return knowledge_counts_cache.active_object_count(db, notebook_id)
 
     @staticmethod
     def type_counts(
         db: sqlite3.Connection, notebook_id: str
     ) -> "tuple[Dict[str, int], Dict[str, str]]":
-        rows = db.execute(
-            "SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
-            "WHERE notebook_id = ? AND status != 'deprecated' "
-            "GROUP BY object_type",
-            (notebook_id,),
-        ).fetchall()
+        from app.repositories.sqlite import knowledge_counts_cache
+        counts = knowledge_counts_cache.type_counts(db, notebook_id)  # non-deprecated
         label_rows = db.execute(
             "SELECT object_type, label FROM object_schemas"
         ).fetchall()
         labels = {r["object_type"]: (r["label"] or r["object_type"]) for r in label_rows}
-        counts = {row["object_type"]: int(row["c"]) for row in rows}
         return counts, labels
 
     # --------------------------------------------------------------- list

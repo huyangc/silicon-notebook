@@ -754,6 +754,12 @@ class SourceIngestionService:
         # One write transaction: reset the source's prior KG artefacts and open
         # its extraction_runs row (temporary facade callback — Task 13/15 target).
         self.begin_extraction_run(source_id, source.notebook_id, run_id, now)
+        # begin_extraction_run committed a DELETE of this source's prior KG objects
+        # in its own transaction; the kg_mutation_seq bump only lands later in
+        # store_kg (success path). Invalidate the count cache here so the no-llm
+        # early-return and the exception path can't keep serving pre-delete counts.
+        from app.repositories.sqlite import knowledge_counts_cache
+        knowledge_counts_cache.invalidate(source.notebook_id)
         try:
             kg_llm_client = self.kg_llm()
             if not getattr(kg_llm_client, "configured", False):

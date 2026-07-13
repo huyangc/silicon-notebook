@@ -144,3 +144,25 @@
 
 - **已确认（代码 + 本地 EXPLAIN 实测）**：热点是 `knowledge_objects` GROUP BY / COUNT；均走覆盖索引非全表 SCAN；`!=` 与 `IN` planner 计划一致；打开路径 `from_row` ×2；`version_facts` 已被 seq memo、其余五个计数点无任何缓存；`distinct_cluster_count` 无条件重复且不覆盖 `canonical_id`；前端无客户端缓存、看板每点必重取重算、index-status 前端串行于 analytics 之后。
 - **需 diag 在生产验证**：该 nb 各热表**真实行数**与 2.15M 的分布；每条查询在生产磁盘/页缓存下的**绝对 ms**（本地 0.5-2s 估算 vs 生产 5-6s 的差距来自冷页/多用户争用，需实测）；`kg_mutation_seq` 是否被**所有**改 object 的写路径 bump（缓存正确性）；index-status 冷 memo 触发频率（进程重启/mutation 节奏）。
+
+---
+
+## 6. 本 PR 实现状态（全库热路径审计后)
+
+在上面三条症状之外，做了一次**全系统「每次请求全表/无缓存扫描」审计**(5 路 tracer + 逐条对抗验证，refute 2 条误报)，本 PR 落地下列**已确认安全**的修复:
+
+| 修复 | 对应 | 做法 | 效果 |
+|---|---|---|---|
+| **A 计数缓存** | F1(+K2/K3/K4/K6) | 新 `knowledge_counts_cache`:`{(type,status):count}` per-nb memo,键 `(nb, kg_mutation_seq)`;5 站点(from_row/analytics/type_counts/count_active_objects/effective_object_count)改走它 | 打开/看板/概览的 2M GROUP BY 从每请求重扫 → seq 不变时 O(1);**已核所有改 object 写路径都 bump seq 或删 state 行**(store_kg/update_knowledge/merge/promotion/conflict/relink/delete_source/delete_notebook_kg) |
+| **B 删冗余 DISTINCT** | F3 | `unified_kg_status` 仅在持久 `cluster_count` 为空时才跑 `COUNT(DISTINCT canonical_id)`(纯删浪费,byte 一致) | index-status 每 poll 少一次全成员行 temp-btree 扫 |
+| **D 去打开 ×2 fan-out** | F2 | `scale_artifact_runtime.status()` 只读 `notebook_tier()`(PK)而非重建整个 from_row summary | 打开时 `/scale-index/status` 不再触发第二遍 from_row |
+
+**A 缓存失效硬化(opus 对抗评审抓出,已修)**:计数缓存的正确性依赖「所有改 object 的写路径 bump `kg_mutation_seq` 或删 state 行」。评审枚举全部写路径,发现两处漏洞并已修:①**重抽**(`begin_extraction_run` 先在独立事务 DELETE 旧 object,no-llm/异常路径不再走 `store_kg` 的 bump)→ 在 `run_extraction` 里 begin 后立即 `knowledge_counts_cache.invalidate`;②**`delete_notebook_kg`** 删 state 行使 seq→0,与「无 state 行」哨兵 0 混叠(copy→open→delete-KG 可复现)→ 显式 `invalidate`。其余写路径(store_kg/update_knowledge/merge/promotion/conflict/relink/delete_source)均已核实 bump。
+
+**刻意暂缓(非丢弃,列明理由,建议独立 PR):**
+- **F 补覆盖索引**(`element_embeddings(source_id)` 修 DELETE 全表扫 + `knowledge_relations(nb,review_status)` + `concept_comentions(nb,canonical_b)`):需 `_migration_11` + bump `SCHEMA_VERSION`,牵连大量**冻结 schema 快照**维护(migration-manifest / v9 fixture golden / snapshot-verifier 行号钉死),且 `review_status` 列在已部署库缺专用 backfill 迁移(评审 Should-fix 2:_migration_11 须先 `add_column_if_missing` 再建索引)。这些属**schema 演进**、与本批「读侧缓存」正交,单独 PR 做 + 专门验证更稳,不与打开/看板症状混。
+- **E graph/PPR 版本探针 → seq 闸**:`ppr_version_rows`/`graph_version_rows`/`cluster_version_row` 每次 graph/PPR 检索(含缓存命中)全 nb 聚合扫描重算缓存键 → 应换单行 seq 读。属**per-ask 检索热路径**、med 风险(缓存键换错 → 检索结果陈旧),值得独立 PR + 专门验证,不与本批(打开/看板症状)混。
+- **搜索 LIKE `%q%`**(`query_store` notebook 搜索,前端每键 250ms debounce × 全 notebook fan-out):前导通配非 sargable,**加索引无效,须上 FTS5**——大改、独立 staleness 面,单独 PR。
+- **已 refute(不动)**:`kwtok-probe`(仅 copyable ≤5000 行库可达,非 2M)、`conversations-n1`(已索引且改写有 latest-answer 语义陷阱)。
+
+**C(index-status chunk 计数复用 version_facts)试做后回退**:version() 的 chunk 计数按 version_signal 记忆,当写路径未 bump 信号时会滞后于实时 chunk 数(state-machine 测试证实),收益(一条已索引 COUNT)不抵风险,故不做。

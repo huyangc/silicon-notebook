@@ -125,11 +125,9 @@ class IndexProjectionStore:
     # ─────────────────────────────────────────────────── count snapshots ──
     def effective_object_count(self, notebook_id: str) -> int:
         """Non-deprecated knowledge-object count (viz sync-vs-background gate)."""
+        from app.repositories.sqlite import knowledge_counts_cache
         with self.connect() as db:
-            count = db.execute(
-                "SELECT COUNT(*) c FROM knowledge_objects WHERE notebook_id=? AND status!='deprecated'",
-                (notebook_id,)).fetchone()["c"]
-        return int(count)
+            return knowledge_counts_cache.active_object_count(db, notebook_id)
 
     def total_chunk_count(self, notebook_id: str) -> int:
         with self.connect() as db:
@@ -149,6 +147,15 @@ class IndexProjectionStore:
                 "SELECT created_by FROM notebooks WHERE id = ?", (notebook_id,)
             ).fetchone()
         return row["created_by"] if row else None
+
+    def notebook_tier(self, notebook_id: str) -> "str | None":
+        """Cheap PK read of just the tier column — for hot status polls that
+        need only tier and must not rebuild the full NotebookSummary (from_row)."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT tier FROM notebooks WHERE id = ?", (notebook_id,)
+            ).fetchone()
+        return row["tier"] if row else None
 
     def notebook_name(self, notebook_id: str) -> str:
         with self.connect() as db:
