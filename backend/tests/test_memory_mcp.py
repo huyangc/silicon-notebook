@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import AsyncExitStack
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -17,7 +18,7 @@ from app.api.deps import (
 )
 from app.core.config import get_settings
 from app.core.request_context import reset_request_user, set_request_user
-from app.models.schemas import NotebookCreate
+from app.models.schemas import MemoryHit, NotebookCreate
 
 
 PUBLIC_TOOLS = {
@@ -29,6 +30,7 @@ PUBLIC_TOOLS = {
     "ask_notebook",
     "propose_memory",
 }
+MCP_OUTPUT_BUDGET = 12_000
 
 
 def _payload(result):
@@ -37,6 +39,18 @@ def _payload(result):
         return result.structuredContent
     assert len(result.content) == 1
     return json.loads(result.content[0].text)
+
+
+def _assert_budgeted(payload: dict) -> None:
+    serialized = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    assert len(serialized.encode("utf-8")) <= MCP_OUTPUT_BUDGET
+    assert payload["truncation"]["budget_chars"] == MCP_OUTPUT_BUDGET
+    assert isinstance(payload["truncation"]["truncated"], bool)
+    assert "private-budget-sentinel" not in json.dumps(
+        payload["truncation"], ensure_ascii=False
+    )
 
 
 class OfficialMcpClient:
@@ -423,6 +437,299 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         )).isError
 
 
+@pytest.mark.anyio
+async def test_all_seven_official_client_tool_responses_have_strict_serialized_budgets(
+    mcp_env, monkeypatch
+):
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    sentinel = "私密-private-budget-sentinel"
+    huge_counts = {
+        f"custom-object-type-{index}-{sentinel}-" + ("k" * 80): index
+        for index in range(500)
+    }
+    huge_counts.update({
+        "sources": 7,
+        "memories": 3,
+        "rules": 10 ** 5_000,
+    })
+    huge_summary = mcp_env["notebook"].model_copy(
+        update={
+            "name": "Notebook " + (sentinel * 2_000),
+            "purpose": "Purpose " + (sentinel * 2_000),
+            "counts": huge_counts,
+        }
+    )
+    monkeypatch.setattr(service, "get_notebook", lambda _notebook_id: huge_summary)
+    monkeypatch.setattr(
+        service,
+        "unified_kg_status",
+        lambda _notebook_id: {
+            "dirty": True,
+            "objects": 42,
+            **{
+                f"custom-status-{index}-{sentinel}-" + ("s" * 80): sentinel * 100
+                for index in range(500)
+            },
+        },
+    )
+
+    record = service.create_memory_candidate(
+        notebook_id,
+        mcp_env["alice"].id,
+        mcp_env["profile_a"].id,
+        "strict-budget-record",
+        "Original",
+        "Original",
+        [],
+        "test",
+    ).model_copy(
+        update={
+            "title": sentinel * 2_000,
+            "content_md": sentinel * 4_000,
+            "tags": [sentinel * 500 for _ in range(100)],
+            "provenance": {
+                f"private-key-{index}-{sentinel}": {
+                    "nested": [sentinel * 200 for _ in range(100)]
+                }
+                for index in range(100)
+            },
+        }
+    )
+    stale_hit = MemoryHit(
+        memory_id=record.id,
+        title=record.title,
+        text=record.content_md,
+        status="candidate",
+        authority=1,
+        score=1.0,
+        provenance=record.provenance,
+    )
+    monkeypatch.setattr(service, "agent_memory_hits", lambda *args, **kwargs: [stale_hit])
+    monkeypatch.setattr(service, "get_memory", lambda *args, **kwargs: record)
+    monkeypatch.setattr(
+        service,
+        "search_notebook",
+        lambda *args, **kwargs: SimpleNamespace(
+            hits=[
+                SimpleNamespace(
+                    memory_id="",
+                    scope="Source",
+                    label=sentinel * 500,
+                    text=sentinel * 2_000,
+                    source_id=f"source-{index}",
+                    element_id=f"element-{index}",
+                    provenance={"nested": [sentinel * 100 for _ in range(100)]},
+                )
+                for index in range(20)
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "ask",
+        lambda *args, **kwargs: SimpleNamespace(
+            answer_id="answer-budget-id-" + ("a" * 20_000),
+            answer=sentinel * 4_000,
+            conclusion=sentinel * 2_000,
+            grounded=True,
+            evidence_level="source",
+            mode="chunk",
+            anchors=[
+                SimpleNamespace(
+                    key=f"k_{index}",
+                    object_id=f"object-{index}",
+                    object_type="custom-" + ("t" * 1_000),
+                    label=sentinel * 500,
+                    source_title=sentinel * 500,
+                    location_label=sentinel * 500,
+                    tier="personal",
+                    provenance={"nested": [sentinel * 100 for _ in range(100)]},
+                )
+                for index in range(20)
+            ],
+        ),
+    )
+    proposal_record = record.model_copy(update={
+        "id": "memory-" + ("m" * 20_000),
+        "notebook_id": "notebook-" + ("n" * 20_000),
+    })
+    monkeypatch.setattr(
+        service, "create_memory_candidate", lambda *args, **kwargs: proposal_record
+    )
+
+    async with OfficialMcpClient(
+        mcp_env["app"], mcp_env["token_a"].token
+    ) as client:
+        responses = {
+            "list_notebooks": _payload(await client.call("list_notebooks")),
+            "select_notebook": _payload(await client.call(
+                "select_notebook", {"notebook_id": notebook_id}
+            )),
+            "search_agent_memory": _payload(await client.call(
+                "search_agent_memory", {"query": "budget", "limit": 20}
+            )),
+            "search_notebook_context": _payload(await client.call(
+                "search_notebook_context", {"query": "budget", "limit": 20}
+            )),
+            "get_memory": _payload(await client.call(
+                "get_memory", {"memory_id": record.id}
+            )),
+            "ask_notebook": _payload(await client.call(
+                "ask_notebook", {"question": "budget", "mode": "chunk"}
+            )),
+            "propose_memory": _payload(await client.call(
+                "propose_memory",
+                {
+                    "title": "Bounded proposal",
+                    "content_md": "Bounded content",
+                    "tags": ["bounded"],
+                    "reason": "Bounded reason",
+                    "task_context": {"task": "budget"},
+                    "evidence_refs": [],
+                    "client_request_id": "strict-budget-proposal",
+                },
+            )),
+        }
+
+    assert set(responses) == PUBLIC_TOOLS
+    assert responses["list_notebooks"]["items"][0]["counts"]["sources"] == 7
+    assert responses["list_notebooks"]["items"][0]["counts"]["memories"] == 3
+    assert responses["select_notebook"]["kg_status"]["dirty"] is True
+    assert responses["select_notebook"]["kg_status"]["objects"] == 42
+    for name, payload in responses.items():
+        _assert_budgeted(payload)
+        assert payload["truncation"]["truncated"] is True, name
+
+
+@pytest.mark.anyio
+async def test_search_agent_memory_hydrates_fresh_records_and_drops_terminal_races(
+    mcp_env, monkeypatch
+):
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    stale_hits = []
+    fresh_records = {}
+    for suffix, fresh_status in (
+        ("live", "confirmed"),
+        ("rejected", "rejected"),
+        ("deprecated", "deprecated"),
+        ("deleted", None),
+    ):
+        item = service.create_memory_candidate(
+            notebook_id,
+            mcp_env["alice"].id,
+            mcp_env["profile_a"].id,
+            f"race-{suffix}",
+            f"stored-{suffix}",
+            f"stored-{suffix}",
+            [],
+            "test",
+        )
+        stale_hits.append(MemoryHit(
+            memory_id=item.id,
+            title=f"stale-title-{suffix}",
+            text=f"stale-content-{suffix}",
+            status="candidate",
+            authority=1,
+            score=0.9,
+            provenance={"version": f"stale-{suffix}"},
+        ))
+        if fresh_status is not None:
+            fresh_records[item.id] = item.model_copy(update={
+                "status": fresh_status,
+                "title": f"fresh-title-{suffix}",
+                "content_md": f"fresh-content-{suffix}",
+                "provenance": {"version": f"fresh-{suffix}"},
+            })
+
+    def fresh_get(memory_id, _owner_id):
+        if memory_id not in fresh_records:
+            raise KeyError(memory_id)
+        return fresh_records[memory_id]
+
+    monkeypatch.setattr(service, "agent_memory_hits", lambda *args, **kwargs: stale_hits)
+    monkeypatch.setattr(service, "get_memory", fresh_get)
+
+    async with OfficialMcpClient(
+        mcp_env["app"], mcp_env["token_a"].token
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        result = _payload(await client.call(
+            "search_agent_memory", {"query": "race", "limit": 20}
+        ))
+
+    assert len(result["items"]) == 1
+    assert result["items"][0]["status"] == "confirmed"
+    assert result["items"][0]["title"] == "fresh-title-live"
+    assert result["items"][0]["content"] == "fresh-content-live"
+    assert result["items"][0]["provenance"] == {"version": "fresh-live"}
+    assert result["items"][0]["unconfirmed"] is False
+    assert result["items"][0]["formal_notebook_conclusion"] is True
+
+
+@pytest.mark.anyio
+async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_work(
+    mcp_env, monkeypatch
+):
+    service = mcp_env["service"]
+    notebook_id = mcp_env["notebook"].id
+    base = {
+        "title": "Proposal title",
+        "content_md": "Proposal content",
+        "tags": ["tag"],
+        "reason": "Proposal reason",
+        "task_context": {"task": "bounded"},
+        "evidence_refs": [],
+        "client_request_id": "bounded-request",
+    }
+    invalid_overrides = [
+        {"title": "   "},
+        {"content_md": "\n\t"},
+        {"reason": "   "},
+        {"task_context": {}},
+        {"tags": [" "]},
+        {"title": "t" * 100_000},
+        {"content_md": "c" * 100_000},
+        {"tags": ["tag"] * 1_000},
+        {"tags": ["t" * 100_000]},
+        {"reason": "r" * 100_000},
+        {"task_context": {"private": "x" * 100_000}},
+        {"task_context": {"private": "证" * 3_000}},
+        {"evidence_refs": [{"source_id": str(index)} for index in range(1_000)]},
+        {"evidence_refs": [{"quote": "x" * 100_000}]},
+        {"evidence_refs": [{"quote": "证" * 5_000}]},
+        {"client_request_id": "r" * 100_000},
+    ]
+
+    async with OfficialMcpClient(
+        mcp_env["app"], mcp_env["token_a"].token
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        original_refresh = service.refresh_agent_principal
+        live_calls = 0
+        create_calls = 0
+
+        def refresh_spy(*args, **kwargs):
+            nonlocal live_calls
+            live_calls += 1
+            return original_refresh(*args, **kwargs)
+
+        def create_spy(*args, **kwargs):
+            nonlocal create_calls
+            create_calls += 1
+            raise AssertionError("invalid proposal reached Memory service")
+
+        monkeypatch.setattr(service, "refresh_agent_principal", refresh_spy)
+        monkeypatch.setattr(service, "create_memory_candidate", create_spy)
+        for override in invalid_overrides:
+            result = await client.call("propose_memory", {**base, **override})
+            assert result.isError, override.keys()
+
+    assert live_calls == 0
+    assert create_calls == 0
+
+
 def test_nonlocal_plain_http_mcp_configuration_is_rejected():
     from app.api.mcp_server import validate_mcp_deployment
 
@@ -438,6 +745,7 @@ def test_bounded_mcp_collections_accept_a_smaller_per_response_budget():
     rows = [{"text": "x" * 80}, {"text": "y" * 80}, {"text": "z" * 80}]
     bounded = _bounded(rows, 20, char_budget=180)
     assert len(bounded) == 1
+    assert _bounded([{"text": "x" * 1_000}], 20, char_budget=180) == []
 
 
 @pytest.mark.anyio

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import math
 from contextlib import contextmanager
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse
@@ -36,6 +37,21 @@ PUBLIC_TOOLS = (
 RESULT_LIMIT = 20
 TEXT_LIMIT = 2_000
 TOTAL_TEXT_LIMIT = 12_000
+OUTPUT_SCALAR_LIMIT = 6_000
+OUTPUT_KEY_LIMIT = 120
+OUTPUT_MAPPING_LIMIT = 20
+OUTPUT_DEPTH_LIMIT = 5
+OUTPUT_INTEGER_LIMIT = 9_999_999_999_999_999
+PROPOSAL_TITLE_LIMIT = 300
+PROPOSAL_CONTENT_LIMIT = 20_000
+PROPOSAL_TAG_LIMIT = 20
+PROPOSAL_TAG_TEXT_LIMIT = 200
+PROPOSAL_TAGS_JSON_LIMIT = 2_000
+PROPOSAL_REASON_LIMIT = 2_000
+PROPOSAL_TASK_CONTEXT_JSON_LIMIT = 8_000
+PROPOSAL_EVIDENCE_LIMIT = 20
+PROPOSAL_EVIDENCE_JSON_LIMIT = 12_000
+PROPOSAL_CLIENT_REQUEST_ID_LIMIT = 200
 _SELECTED_ATTR = "_silicon_notebook_selected_notebook"
 _MCP_PRINCIPAL: contextvars.ContextVar[AgentPrincipal | None] = (
     contextvars.ContextVar("mcp_agent_principal", default=None)
@@ -57,11 +73,6 @@ def validate_mcp_deployment(bind_host: str, public_url: str) -> None:
         raise RuntimeError("remote MCP deployment requires HTTPS")
 
 
-def _clip(value: Any, limit: int = TEXT_LIMIT) -> str:
-    text = str(value or "")
-    return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
 def _bounded(
     items: Sequence[dict[str, Any]],
     limit: int,
@@ -72,99 +83,324 @@ def _bounded(
     used = 0
     for item in items[: max(1, min(int(limit), RESULT_LIMIT))]:
         text_size = len(json.dumps(item, ensure_ascii=False, default=str))
-        if result and used + text_size > char_budget:
+        if used + text_size > char_budget:
             break
         used += text_size
         result.append(item)
     return result
 
 
-def _safe_data(value: Any, *, char_budget: int = 2_000) -> Any:
-    """Recursively bound provenance without changing its evidence structure."""
-    remaining = [max(0, int(char_budget))]
-
-    def visit(item: Any, depth: int) -> Any:
-        if remaining[0] <= 0:
-            return "…"
-        if isinstance(item, str):
-            size = min(len(item), remaining[0], 500)
-            remaining[0] -= size
-            return item[:size] + ("…" if size < len(item) else "")
-        if item is None or isinstance(item, (bool, int, float)):
-            return item
-        if depth >= 4:
-            text = _clip(item, min(200, remaining[0]))
-            remaining[0] -= len(text)
-            return text
-        if isinstance(item, Mapping):
-            return {
-                _clip(key, 100): visit(child, depth + 1)
-                for key, child in list(item.items())[:20]
-                if remaining[0] > 0
-            }
-        if isinstance(item, Sequence) and not isinstance(item, (bytes, bytearray)):
-            return [
-                visit(child, depth + 1)
-                for child in list(item)[:20]
-                if remaining[0] > 0
-            ]
-        text = _clip(item, min(200, remaining[0]))
-        remaining[0] -= len(text)
-        return text
-
-    return visit(value, 0)
+def _serialized_size(value: Any) -> int:
+    # Use the roomier standard separators so the bound also covers callers that
+    # do not use a compact JSON encoder. Sorting makes the calculation stable.
+    return len(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, default=str
+    ).encode("utf-8"))
 
 
-def _bounded_strings(
-    values: Sequence[Any], *, limit: int, item_limit: int, char_budget: int
-) -> list[str]:
-    result: list[str] = []
-    used = 0
-    for value in values[:limit]:
-        clipped = _clip(value, item_limit)
-        encoded_size = len(json.dumps(clipped, ensure_ascii=False))
-        if result and used + encoded_size > char_budget:
-            break
-        if encoded_size > char_budget:
-            clipped = _clip(clipped, max(1, char_budget // 2))
-            encoded_size = len(json.dumps(clipped, ensure_ascii=False))
-        used += encoded_size
-        result.append(clipped)
-    return result
+def _mark_truncated(
+    stats: dict[str, Any], *, items: int = 0, map_entries: int = 0,
+    characters: int = 0, fields: int = 0,
+) -> None:
+    stats["truncated"] = True
+    stats["omitted_items"] += max(0, int(items))
+    stats["omitted_map_entries"] += max(0, int(map_entries))
+    stats["omitted_characters"] += max(0, int(characters))
+    stats["omitted_fields"] += max(0, int(fields))
 
 
-def _fit_response(
-    value: dict[str, Any], *, char_budget: int, shrink_fields: Sequence[str]
+def _sanitize_output(
+    value: Any,
+    stats: dict[str, Any],
+    depth: int = 0,
+    *,
+    field: str = "",
+    field_limits: Mapping[str, int] | None = None,
+) -> Any:
+    """Deterministically bound arbitrary adapter data before final packing."""
+    if isinstance(value, str):
+        limit = max(1, int((field_limits or {}).get(field, OUTPUT_SCALAR_LIMIT)))
+        if len(value) <= limit:
+            return value
+        _mark_truncated(stats, characters=len(value) - limit + 1)
+        return value[: limit - 1] + "…"
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if abs(value) <= OUTPUT_INTEGER_LIMIT:
+            return value
+        _mark_truncated(stats, characters=1)
+        return OUTPUT_INTEGER_LIMIT if value > 0 else -OUTPUT_INTEGER_LIMIT
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        _mark_truncated(stats, fields=1)
+        return None
+    if depth >= OUTPUT_DEPTH_LIMIT:
+        _mark_truncated(stats, fields=1)
+        return "…"
+    if isinstance(value, Mapping):
+        result: dict[str, Any] = {}
+        priorities = {
+            "counts": (
+                "sources", "memories", "rules", "cases", "checklist_items",
+                "methods", "risks", "glossary",
+            ),
+            "kg_status": (
+                "dirty", "last_rebuild_at", "objects", "relations", "clusters",
+                "viz_building",
+            ),
+        }.get(field, ())
+        priority_index = {key: index for index, key in enumerate(priorities)}
+        entries = sorted(
+            value.items(),
+            key=lambda item: (
+                0 if str(item[0]) in priority_index else 1,
+                priority_index.get(str(item[0]), 0),
+                str(item[0]),
+            ),
+        )
+        if len(entries) > OUTPUT_MAPPING_LIMIT:
+            _mark_truncated(stats, map_entries=len(entries) - OUTPUT_MAPPING_LIMIT)
+        for raw_key, child in entries[:OUTPUT_MAPPING_LIMIT]:
+            key = str(raw_key)
+            if len(key) > OUTPUT_KEY_LIMIT:
+                _mark_truncated(stats, characters=len(key) - OUTPUT_KEY_LIMIT + 1)
+                key = key[: OUTPUT_KEY_LIMIT - 1] + "…"
+            # Avoid a clipped-key collision silently replacing earlier data.
+            if key in result:
+                _mark_truncated(stats, map_entries=1)
+                continue
+            result[key] = _sanitize_output(
+                child,
+                stats,
+                depth + 1,
+                field=key,
+                field_limits=field_limits,
+            )
+        return result
+    if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        entries = list(value)
+        if len(entries) > RESULT_LIMIT:
+            _mark_truncated(stats, items=len(entries) - RESULT_LIMIT)
+        return [
+            _sanitize_output(
+                child,
+                stats,
+                depth + 1,
+                field=field,
+                field_limits=field_limits,
+            )
+            for child in entries[:RESULT_LIMIT]
+        ]
+    text = str(value)
+    return _sanitize_output(text, stats, depth)
+
+
+def _iter_output_strings(value: Any, *, parent_key: str = ""):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "truncation":
+                continue
+            if isinstance(child, str):
+                yield value, key, child, str(key)
+            else:
+                yield from _iter_output_strings(child, parent_key=str(key))
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_output_strings(child, parent_key=parent_key)
+
+
+def _shrink_longest_string(
+    value: dict[str, Any], stats: dict[str, Any], *, identifiers: bool = False
+) -> bool:
+    candidates = list(_iter_output_strings(value))
+    if not candidates:
+        return False
+    identifier_fields = {
+        "notebook_id", "selected_notebook_id", "memory_id", "answer_id",
+        "object_id", "source_id", "element_id", "key",
+    }
+    # Preserve ordinary identifiers exactly. They become shrinkable only if a
+    # compromised downstream producer supplied an identifier large enough to
+    # make the response otherwise impossible to serialize within the budget.
+    pool = [
+        item for item in candidates
+        if (
+            (item[3] in identifier_fields and len(item[2]) > 8)
+            if identifiers
+            else (item[3] not in identifier_fields and len(item[2]) > 32)
+        )
+    ]
+    if not pool:
+        return False
+    parent, key, current, _field = max(pool, key=lambda item: len(item[2]))
+    minimum = 8 if identifiers else 32
+    if len(current) <= minimum:
+        return False
+    keep = max(minimum, len(current) // 2)
+    parent[key] = current[: max(1, keep - 1)] + "…"
+    _mark_truncated(stats, characters=len(current) - len(parent[key]))
+    return True
+
+
+def _iter_reducible_maps(value: Any, *, field: str = ""):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "truncation":
+                continue
+            if isinstance(child, dict):
+                if key in {"counts", "kg_status", "provenance"} and child:
+                    yield child
+                yield from _iter_reducible_maps(child, field=str(key))
+            elif isinstance(child, list):
+                yield from _iter_reducible_maps(child, field=str(key))
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_reducible_maps(child, field=field)
+
+
+def _drop_map_entry(value: dict[str, Any], stats: dict[str, Any]) -> bool:
+    candidates = list(_iter_reducible_maps(value))
+    if not candidates:
+        return False
+    target = max(candidates, key=len)
+    target.pop(next(reversed(target)))
+    _mark_truncated(stats, map_entries=1)
+    return True
+
+
+def _iter_reducible_lists(value: Any):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "truncation":
+                continue
+            if isinstance(child, list):
+                if len(child) > 1:
+                    yield child
+                yield from _iter_reducible_lists(child)
+            elif isinstance(child, dict):
+                yield from _iter_reducible_lists(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _iter_reducible_lists(child)
+
+
+def _drop_list_item(value: dict[str, Any], stats: dict[str, Any]) -> bool:
+    candidates = list(_iter_reducible_lists(value))
+    if not candidates:
+        return False
+    max(candidates, key=len).pop()
+    _mark_truncated(stats, items=1)
+    return True
+
+
+def _budget_response(
+    value: Mapping[str, Any], *, initial_omitted_items: int = 0,
+    field_limits: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
-    """Enforce an exact serialized response budget after field-level clipping."""
-    result = dict(value)
-    while len(json.dumps(result, ensure_ascii=False, default=str)) > char_budget:
-        changed = False
-        for field in shrink_fields:
-            current = result.get(field)
-            if isinstance(current, Mapping):
-                if current and current != {"truncated": True}:
-                    result[field] = {"truncated": True}
-                    changed = True
-                    break
-            elif isinstance(current, list):
-                if current:
-                    result[field] = current[:-1]
-                    changed = True
-                    break
-            elif isinstance(current, str) and len(current) > 1:
-                excess = len(
-                    json.dumps(result, ensure_ascii=False, default=str)
-                ) - char_budget
-                keep = max(1, len(current) - max(1, excess))
-                result[field] = current[:keep] + (
-                    "…" if keep < len(current) else ""
-                )
-                changed = True
-                break
-        if not changed:
-            raise ValueError("MCP response metadata exceeds output budget")
+    """Return a useful response that strictly fits the public MCP JSON budget."""
+    stats: dict[str, Any] = {
+        "budget_chars": TOTAL_TEXT_LIMIT,
+        "truncated": False,
+        "omitted_items": 0,
+        "omitted_map_entries": 0,
+        "omitted_characters": 0,
+        "omitted_fields": 0,
+    }
+    if initial_omitted_items:
+        _mark_truncated(stats, items=initial_omitted_items)
+    result = _sanitize_output(dict(value), stats, field_limits=field_limits)
+    result["truncation"] = stats
+    while _serialized_size(result) > TOTAL_TEXT_LIMIT:
+        # Prefer retaining the first useful record: shrink evidence text/maps,
+        # then extra records. Identifiers are the last scalar class reduced.
+        if _shrink_longest_string(result, stats):
+            continue
+        if _drop_map_entry(result, stats):
+            continue
+        if _drop_list_item(result, stats):
+            continue
+        if _shrink_longest_string(result, stats, identifiers=True):
+            continue
+        raise ValueError("MCP response metadata exceeds output budget")
     return result
+
+
+def _proposal_json_size(value: Any, field: str) -> int:
+    try:
+        return len(json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must contain JSON data") from exc
+
+
+def _validate_proposal_input(
+    title: str,
+    content_md: str,
+    tags: Sequence[str] | None,
+    reason: str,
+    task_context: Mapping[str, Any],
+    evidence_refs: Sequence[Mapping[str, Any]],
+    client_request_id: str,
+) -> tuple[str, str, list[str], str, dict[str, Any], list[dict[str, Any]], str]:
+    """Validate the MCP write envelope before any repository/service lookup."""
+    clean_title = str(title).strip()
+    clean_content = str(content_md).strip()
+    clean_reason = str(reason).strip()
+    clean_request_id = str(client_request_id).strip()
+    if not clean_title or not clean_content or not clean_reason or not clean_request_id:
+        raise ValueError(
+            "title, content_md, reason, and client_request_id must be nonblank"
+        )
+    for field, value, limit in (
+        ("title", clean_title, PROPOSAL_TITLE_LIMIT),
+        ("content_md", clean_content, PROPOSAL_CONTENT_LIMIT),
+        ("reason", clean_reason, PROPOSAL_REASON_LIMIT),
+        ("client_request_id", clean_request_id, PROPOSAL_CLIENT_REQUEST_ID_LIMIT),
+    ):
+        if len(value) > limit:
+            raise ValueError(f"{field} exceeds {limit} characters")
+
+    clean_tags = [str(tag).strip() for tag in (tags or [])]
+    if len(clean_tags) > PROPOSAL_TAG_LIMIT:
+        raise ValueError(f"tags exceeds {PROPOSAL_TAG_LIMIT} items")
+    if any(not tag for tag in clean_tags):
+        raise ValueError("tags must not contain blank values")
+    if any(len(tag) > PROPOSAL_TAG_TEXT_LIMIT for tag in clean_tags):
+        raise ValueError(
+            f"tag exceeds {PROPOSAL_TAG_TEXT_LIMIT} characters"
+        )
+    if _proposal_json_size(clean_tags, "tags") > PROPOSAL_TAGS_JSON_LIMIT:
+        raise ValueError("tags serialized payload is too large")
+
+    clean_task_context = dict(task_context)
+    if not clean_task_context:
+        raise ValueError("task_context must be nonblank")
+    if (
+        _proposal_json_size(clean_task_context, "task_context")
+        > PROPOSAL_TASK_CONTEXT_JSON_LIMIT
+    ):
+        raise ValueError("task_context serialized payload is too large")
+
+    if len(evidence_refs) > PROPOSAL_EVIDENCE_LIMIT:
+        raise ValueError(f"evidence_refs exceeds {PROPOSAL_EVIDENCE_LIMIT} items")
+    clean_evidence = [dict(reference) for reference in evidence_refs]
+    if (
+        _proposal_json_size(clean_evidence, "evidence_refs")
+        > PROPOSAL_EVIDENCE_JSON_LIMIT
+    ):
+        raise ValueError("evidence_refs serialized payload is too large")
+    return (
+        clean_title,
+        clean_content,
+        clean_tags,
+        clean_reason,
+        clean_task_context,
+        clean_evidence,
+        clean_request_id,
+    )
 
 
 def _principal() -> AgentPrincipal:
@@ -346,8 +582,8 @@ def create_memory_mcp(
                     rows.append(
                         {
                             "notebook_id": item.id,
-                            "name": _clip(item.name, 200),
-                            "purpose": _clip(item.purpose, 500),
+                            "name": item.name,
+                            "purpose": item.purpose,
                             "tier": item.tier,
                             "access": item.access,
                             "counts": dict(item.counts),
@@ -357,7 +593,12 @@ def create_memory_mcp(
             return rows
 
         rows = await anyio.to_thread.run_sync(load)
-        return {"items": _bounded(rows, limit), "selected_notebook_id": ""}
+        cap = max(1, min(int(limit), RESULT_LIMIT))
+        return _budget_response(
+            {"items": rows[:cap], "selected_notebook_id": ""},
+            initial_omitted_items=max(0, len(rows) - cap),
+            field_limits={"name": 200, "purpose": 500},
+        )
 
     @server.tool(description="Select one allowlisted notebook for this MCP session.")
     async def select_notebook(notebook_id: str, ctx: Context) -> dict[str, Any]:
@@ -378,10 +619,10 @@ def create_memory_mcp(
 
         summary, kg_status = await anyio.to_thread.run_sync(load)
         setattr(ctx.session, _SELECTED_ATTR, notebook_id)
-        return {
+        return _budget_response({
             "notebook_id": summary.id,
-            "name": _clip(summary.name, 200),
-            "purpose": _clip(summary.purpose, 500),
+            "name": summary.name,
+            "purpose": summary.purpose,
             "tier": summary.tier,
             "counts": dict(summary.counts),
             "kg_status": (
@@ -393,7 +634,7 @@ def create_memory_mcp(
                 "agent_memory": "candidate+confirmed when scoped",
                 "notebook_context": "confirmed only",
             },
-        }
+        }, field_limits={"name": 200, "purpose": 500})
 
     @server.tool(
         description=(
@@ -429,28 +670,46 @@ def create_memory_mcp(
             )
             rows: list[dict[str, Any]] = []
             for hit in hits:
-                record = repo.get_memory(hit.memory_id, principal.owner_id)
+                try:
+                    record = repo.get_memory(hit.memory_id, principal.owner_id)
+                except (KeyError, PermissionError):
+                    # Retrieval and hydration are separate reads. A lifecycle
+                    # transition/delete/access loss between them must fail
+                    # closed for this hit without aborting the whole search.
+                    continue
+                if record.notebook_id != notebook_id or record.status not in {
+                    "candidate", "confirmed"
+                }:
+                    continue
+                if record.status == "candidate" and not include_candidates:
+                    continue
                 rows.append(
                     {
-                        "memory_id": hit.memory_id,
-                        "title": _clip(hit.title, 300),
-                        "content": _clip(hit.text),
-                        "status": hit.status,
-                        "unconfirmed": hit.status == "candidate",
-                        "formal_notebook_conclusion": hit.status == "confirmed",
+                        "memory_id": record.id,
+                        "title": record.title,
+                        "content": record.content_md,
+                        "status": record.status,
+                        "unconfirmed": record.status == "candidate",
+                        "formal_notebook_conclusion": record.status == "confirmed",
                         "created_by_agent": profiles.get(
                             record.agent_profile_id or "", ""
                         ),
                         "score": round(float(hit.score), 6),
                         "authority": int(hit.authority),
-                        "provenance": _safe_data(hit.provenance),
+                        "provenance": record.provenance,
                         "content_is_untrusted_evidence": True,
                     }
                 )
             return rows
 
         rows = await anyio.to_thread.run_sync(load)
-        return {"notebook_id": notebook_id, "items": _bounded(rows, limit)}
+        cap = max(1, min(int(limit), RESULT_LIMIT))
+        return _budget_response(
+            {"notebook_id": notebook_id, "items": rows[:cap]},
+            initial_omitted_items=max(0, len(rows) - cap),
+            field_limits={"title": 300, "content": TEXT_LIMIT,
+                          "created_by_agent": 200},
+        )
 
     @server.tool(
         description=(
@@ -483,22 +742,28 @@ def create_memory_mcp(
                 rows.append(
                     {
                         "type": "memory" if hit.memory_id else hit.scope.lower(),
-                        "label": _clip(hit.label, 300),
-                        "text": _clip(hit.text),
+                        "label": hit.label,
+                        "text": hit.text,
                         "memory_id": hit.memory_id,
                         "source_id": hit.source_id,
                         "element_id": hit.element_id,
                         "authority": (
                             "confirmed_memory" if hit.memory_id else "notebook_evidence"
                         ),
-                        "provenance": _safe_data(hit.provenance),
+                        "provenance": hit.provenance,
                         "content_is_untrusted_evidence": True,
                     }
                 )
             return rows
 
         rows = await anyio.to_thread.run_sync(load)
-        return {"notebook_id": notebook_id, "items": _bounded(rows, limit)}
+        cap = max(1, min(int(limit), RESULT_LIMIT))
+        return _budget_response(
+            {"notebook_id": notebook_id, "items": rows[:cap]},
+            initial_omitted_items=max(0, len(rows) - cap),
+            field_limits={"type": 100, "label": 300, "text": TEXT_LIMIT,
+                          "authority": 100},
+        )
 
     @server.tool(description="Get one owner-private Memory from the selected notebook.")
     async def get_memory(memory_id: str, ctx: Context) -> dict[str, Any]:
@@ -521,25 +786,22 @@ def create_memory_mcp(
             profiles = _profile_names(
                 repo, principal.owner_id
             )
-            return _fit_response({
+            return _budget_response({
                 "memory_id": item.id,
                 "notebook_id": item.notebook_id,
-                "title": _clip(item.title, 300),
-                "content": _clip(item.content_md, 6_000),
-                "tags": _bounded_strings(
-                    item.tags, limit=20, item_limit=200, char_budget=1_500
-                ),
+                "title": item.title,
+                "content": item.content_md,
+                "tags": list(item.tags),
                 "status": item.status,
                 "unconfirmed": item.status == "candidate",
                 "formal_notebook_conclusion": item.status == "confirmed",
                 "created_by_agent": profiles.get(
                     item.agent_profile_id or "", ""
                 ),
-                "provenance": _safe_data(item.provenance),
+                "provenance": item.provenance,
                 "content_is_untrusted_evidence": True,
-            }, char_budget=TOTAL_TEXT_LIMIT, shrink_fields=(
-                "provenance", "content", "tags", "title"
-            ))
+            }, field_limits={"title": 300, "content": 6_000, "tags": 200,
+                             "created_by_agent": 200})
 
         return await anyio.to_thread.run_sync(load)
 
@@ -568,24 +830,27 @@ def create_memory_mcp(
                 "key": anchor.key,
                 "object_id": anchor.object_id,
                 "object_type": anchor.object_type,
-                "label": _clip(anchor.label, 300),
-                "source_title": _clip(anchor.source_title, 300),
-                "location_label": _clip(anchor.location_label, 300),
+                "label": anchor.label,
+                "source_title": anchor.source_title,
+                "location_label": anchor.location_label,
                 "tier": anchor.tier,
-                "provenance": _safe_data(anchor.provenance, char_budget=500),
+                "provenance": anchor.provenance,
             }
             for anchor in answer.anchors[:RESULT_LIMIT]
         ]
-        return {
+        return _budget_response({
             "notebook_id": notebook_id,
             "answer_id": answer.answer_id,
-            "answer": _clip(answer.answer or answer.conclusion, 6_000),
-            "conclusion": _clip(answer.conclusion, 1_000),
+            "answer": answer.answer or answer.conclusion,
+            "conclusion": answer.conclusion,
             "grounded": answer.grounded,
             "evidence_level": answer.evidence_level,
             "mode": answer.mode,
-            "anchors": _bounded(anchor_rows, RESULT_LIMIT, char_budget=3_500),
-        }
+            "anchors": anchor_rows,
+        }, initial_omitted_items=max(0, len(answer.anchors) - RESULT_LIMIT),
+            field_limits={"answer": 6_000, "conclusion": 1_000,
+                          "object_type": 100, "label": 300,
+                          "source_title": 300, "location_label": 300})
 
     @server.tool(
         description=(
@@ -603,12 +868,27 @@ def create_memory_mcp(
         ctx: Context,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
+        (
+            title,
+            content_md,
+            clean_tags,
+            reason,
+            clean_task_context,
+            clean_evidence_refs,
+            client_request_id,
+        ) = _validate_proposal_input(
+            title,
+            content_md,
+            tags,
+            reason,
+            task_context,
+            evidence_refs,
+            client_request_id,
+        )
         repo = repository_provider()
         principal, notebook_id = await anyio.to_thread.run_sync(
             _selected_notebook, ctx, repo, "memory:propose"
         )
-        if not title.strip() or not content_md.strip() or not client_request_id.strip():
-            raise ValueError("title, content_md, and client_request_id are required")
 
         item = await anyio.to_thread.run_sync(
             repo.create_memory_candidate,
@@ -618,19 +898,19 @@ def create_memory_mcp(
             client_request_id,
             title,
             content_md,
-            list(tags or []),
+            clean_tags,
             reason,
-            dict(task_context),
-            list(evidence_refs),
+            clean_task_context,
+            clean_evidence_refs,
         )
-        return {
+        return _budget_response({
             "memory_id": item.id,
             "notebook_id": item.notebook_id,
             "status": item.status,
-            "title": _clip(item.title, 300),
+            "title": item.title,
             "created_by_agent": principal.profile_name,
             "requires_user_confirmation": True,
-        }
+        }, field_limits={"title": 300, "created_by_agent": 200})
 
     app = AgentBearerMiddleware(server.streamable_http_app(), repository_provider)
     return server, app
