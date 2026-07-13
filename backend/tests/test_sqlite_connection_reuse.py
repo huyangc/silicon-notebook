@@ -145,3 +145,15 @@ def test_write_lock_serialization_preserved(db):  # 回归 write() 语义
         list(ex.map(worker, range(200)))
     rows = _rows_from_other_thread(db, "SELECT COUNT(*) AS n FROM t")
     assert rows[0]["n"] == 200
+
+
+def test_write_uses_independent_connection(db):  # INV-8
+    with db.connect() as c:
+        c.execute("CREATE TABLE t(x INTEGER)")
+    with db.connect() as outer:                 # outer read connection (reused)
+        with db.write() as w:                   # inner write: independent conn
+            assert w is not outer
+            w.execute("INSERT INTO t VALUES (1)")
+        # inner write already committed independently → visible from a 3rd
+        # connection while the outer read `with` is still open
+        assert [r["x"] for r in _rows_from_other_thread(db, "SELECT x FROM t")] == [1]

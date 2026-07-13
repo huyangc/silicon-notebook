@@ -19,7 +19,7 @@ def test_connect_sets_performance_pragmas(repo):
         assert db.execute("PRAGMA synchronous").fetchone()[0] == 1        # NORMAL
         assert db.execute("PRAGMA temp_store").fetchone()[0] == 2         # MEMORY
         assert db.execute("PRAGMA mmap_size").fetchone()[0] == 268435456  # 256MB
-        assert db.execute("PRAGMA cache_size").fetchone()[0] == -65536    # 64MB
+        assert db.execute("PRAGMA cache_size").fetchone()[0] == -16384    # 16MB
 
 
 def test_concurrent_store_kg_no_database_locked(repo):

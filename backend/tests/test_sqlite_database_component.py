@@ -34,7 +34,7 @@ def test_connection_pragmas(settings, tmp_path):
         assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == settings.db_busy_timeout_ms
         assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
-        assert conn.execute("PRAGMA cache_size").fetchone()[0] == -65536
+        assert conn.execute("PRAGMA cache_size").fetchone()[0] == -16384
         assert conn.execute("PRAGMA temp_store").fetchone()[0] == 2
         assert conn.execute("PRAGMA mmap_size").fetchone()[0] == 268435456
 
