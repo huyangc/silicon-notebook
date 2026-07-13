@@ -98,6 +98,7 @@ class KnowledgeLifecycleService:
         new_id: Callable[[str], str],
         now: Callable[[], str],
         connect: Callable[[], sqlite3.Connection],
+        close_local: Callable[[], None],
         write: Callable[[], Any],
         get_notebook: Callable[[str], Any],
         invalidate_unified_cache: Callable[[str], None],
@@ -136,6 +137,7 @@ class KnowledgeLifecycleService:
         self._new_id = new_id
         self._now = now
         self._connect = connect
+        self._close_local = close_local
         self._write = write
         self.get_notebook = get_notebook
         self._invalidate_unified_cache = invalidate_unified_cache
@@ -1842,7 +1844,7 @@ class KnowledgeLifecycleService:
                         for c in canons:
                             d.setdefault(c, alias)   # 同 canonical 多别名命中只记首个
             finally:
-                scan_db.close()
+                self._close_local()   # 关连接(临时表蒸发)+清 thread-local(下次 connect 重建)
         if dropped > 0:
             self.event_log.emit({"kind": "mention_alias_df_dropped",
                                  "notebook_id": notebook_id, "dropped": dropped})
