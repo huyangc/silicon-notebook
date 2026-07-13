@@ -731,9 +731,16 @@ async def test_propose_memory_preserves_legitimate_nested_null_and_sdk_normaliza
             "nested": [{"value": None}],
             "optional": None,
         }
-        assert detail["provenance"]["evidence_refs"] == [
-            {"score": None, "source_id": "source-null"}
-        ]
+        assert detail["provenance"]["evidence_refs"] == [{
+            "index": 0,
+            "source_id": "source-null",
+            "trusted": False,
+            "type": "source",
+            "validation": {
+                "reason": "missing_or_cross_notebook",
+                "status": "invalid",
+            },
+        }]
 
         # The official SDK serializes non-finite Python floats as JSON null.
         # The server cannot distinguish that normalization from legitimate null,
@@ -751,7 +758,15 @@ async def test_propose_memory_preserves_legitimate_nested_null_and_sdk_normaliza
             "get_memory", {"memory_id": normalized["memory_id"]}
         ))
         assert normalized_detail["provenance"]["task_context"]["value"] is None
-        assert normalized_detail["provenance"]["evidence_refs"][0]["score"] is None
+        assert normalized_detail["provenance"]["evidence_refs"] == [{
+            "index": 0,
+            "trusted": False,
+            "type": "unsupported",
+            "validation": {
+                "reason": "unsupported_reference",
+                "status": "invalid",
+            },
+        }]
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), 1e9999])
