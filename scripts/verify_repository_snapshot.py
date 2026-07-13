@@ -103,12 +103,20 @@ EXPECTED_KG_REBUILD_CHECKPOINT_SQL = """CREATE TABLE kg_rebuild_checkpoint (
 # sqlite_master SQL.  An absent hop means that this verifier does not know how
 # to prove that migration and must fail closed.
 MIGRATION_MANIFEST = {
-    (9, 10): {
-        "tables": {
+    # Cumulative delta from the v9 fixture to the current SCHEMA_VERSION.
+    (9, 11): {
+        "tables": {  # _migration_10
             "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
         },
         "columns": {},
-        "indexes": {},
+        "indexes": {  # _migration_11 — scale hot-path index coverage
+            "idx_element_embeddings_source":
+                "CREATE INDEX idx_element_embeddings_source ON element_embeddings(source_id)",
+            "idx_knowledge_relations_nb_review":
+                "CREATE INDEX idx_knowledge_relations_nb_review ON knowledge_relations(notebook_id, review_status)",
+            "idx_comentions_nb_b":
+                "CREATE INDEX idx_comentions_nb_b ON concept_comentions(notebook_id, canonical_b)",
+        },
         "triggers": {},
         "views": {},
     },
