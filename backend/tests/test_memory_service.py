@@ -236,6 +236,21 @@ class _RevisionInsertFailure:
         return getattr(self.connection, name)
 
 
+class _ProvenanceInsertFailure:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, sql, *args, **kwargs):
+        if "INSERT INTO memory_provenance" in sql:
+            from sqlite3 import IntegrityError
+
+            raise IntegrityError("injected provenance failure")
+        return self.connection.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+
 def test_revision_failure_rolls_back_confirm_patch_and_status(
     memory_service, users, notebook, repo, monkeypatch
 ):
@@ -261,6 +276,134 @@ def test_revision_failure_rolls_back_confirm_patch_and_status(
     assert current.status == "candidate"
     assert current.title == "Title"
     assert current.content_md == "Body"
+
+
+def test_initial_revision_failure_rolls_back_agent_candidate_and_retry_is_idempotent(
+    memory_service, users, notebook, repo, monkeypatch
+):
+    real_write = repo._runtime.database.write
+
+    @contextmanager
+    def failing_write():
+        with real_write() as db:
+            yield _RevisionInsertFailure(db)
+
+    monkeypatch.setattr(repo._runtime.database, "write", failing_write)
+    with pytest.raises(RuntimeError, match="injected revision failure"):
+        _candidate(
+            memory_service,
+            notebook,
+            users.alice,
+            "agent-a",
+            "req-create-rollback",
+        )
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM memory_items WHERE created_by=? AND notebook_id=?",
+            (users.alice.id, notebook.id),
+        ).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM memory_provenance").fetchone()[0] == 0
+
+    monkeypatch.setattr(repo._runtime.database, "write", real_write)
+    retry = _candidate(
+        memory_service,
+        notebook,
+        users.alice,
+        "agent-a",
+        "req-create-rollback",
+    )
+    duplicate = _candidate(
+        memory_service,
+        notebook,
+        users.alice,
+        "agent-a",
+        "req-create-rollback",
+        title="ignored retry",
+    )
+    assert duplicate.id == retry.id
+    assert len(memory_service.revisions(retry.id, users.alice.id)) == 1
+
+
+def test_initial_revision_failure_rolls_back_answer_memory_and_retry_is_idempotent(
+    memory_service, saved_answer, users, repo, monkeypatch
+):
+    real_write = repo._runtime.database.write
+
+    @contextmanager
+    def failing_write():
+        with real_write() as db:
+            yield _RevisionInsertFailure(db)
+
+    monkeypatch.setattr(repo._runtime.database, "write", failing_write)
+    with pytest.raises(RuntimeError, match="injected revision failure"):
+        memory_service.create_from_answer(
+            saved_answer.notebook_id,
+            users.alice.id,
+            saved_answer.id,
+            "Answer memory",
+            "Answer body",
+            [],
+        )
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM memory_items WHERE created_by=? AND source_answer_id=?",
+            (users.alice.id, saved_answer.id),
+        ).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM memory_provenance").fetchone()[0] == 0
+
+    monkeypatch.setattr(repo._runtime.database, "write", real_write)
+    retry = memory_service.create_from_answer(
+        saved_answer.notebook_id,
+        users.alice.id,
+        saved_answer.id,
+        "Answer memory",
+        "Answer body",
+        [],
+    )
+    duplicate = memory_service.create_from_answer(
+        saved_answer.notebook_id,
+        users.alice.id,
+        saved_answer.id,
+        "ignored retry",
+        "ignored retry",
+        [],
+    )
+    assert duplicate.id == retry.id
+    assert len(memory_service.revisions(retry.id, users.alice.id)) == 1
+
+
+def test_provenance_failure_rolls_back_answer_memory(
+    memory_service, saved_answer, users, repo, monkeypatch
+):
+    from sqlite3 import IntegrityError
+
+    real_write = repo._runtime.database.write
+
+    @contextmanager
+    def failing_write():
+        with real_write() as db:
+            yield _ProvenanceInsertFailure(db)
+
+    monkeypatch.setattr(repo._runtime.database, "write", failing_write)
+    with pytest.raises(IntegrityError, match="injected provenance failure"):
+        memory_service.create_from_answer(
+            saved_answer.notebook_id,
+            users.alice.id,
+            saved_answer.id,
+            "Answer memory",
+            "Answer body",
+            [],
+        )
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM memory_items WHERE created_by=? AND source_answer_id=?",
+            (users.alice.id, saved_answer.id),
+        ).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM memory_revisions").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM memory_provenance").fetchone()[0] == 0
 
 
 def test_confirm_patch_cannot_land_after_expected_state_is_rejected(

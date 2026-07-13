@@ -70,72 +70,119 @@ class MemoryStore:
 
     def insert_memory(self, write: MemoryWrite) -> MemoryRecord:
         with self.database.write() as db:
-            client_request_id = (write.provenance or {}).get("client_request_id")
-            if write.origin == "external_agent" and client_request_id:
-                existing = db.execute(
-                    f"SELECT {self._select_columns()} FROM memory_items m "
-                    "JOIN memory_provenance p ON p.memory_id=m.id "
-                    "WHERE m.created_by=? AND m.notebook_id=? "
-                    "AND m.origin='external_agent' "
-                    "AND m.agent_profile_id IS ? "
-                    "AND json_extract(p.payload_json,'$.client_request_id')=? "
-                    "ORDER BY m.created_at LIMIT 1",
-                    (
-                        write.created_by,
-                        write.notebook_id,
-                        write.agent_profile_id,
-                        client_request_id,
-                    ),
-                ).fetchone()
-                if existing is not None:
-                    return self._record(existing)
-            try:
-                db.execute(
-                    "INSERT INTO memory_items "
-                    "(id,notebook_id,created_by,agent_profile_id,source_answer_id,origin,"
-                    "status,title,content_md,tags_json,confirmed_by,confirmed_at,created_at,updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        write.id,
-                        write.notebook_id,
-                        write.created_by,
-                        write.agent_profile_id,
-                        write.source_answer_id,
-                        write.origin,
-                        write.status,
-                        write.title,
-                        write.content_md,
-                        json.dumps(list(write.tags), ensure_ascii=False),
-                        write.confirmed_by,
-                        write.confirmed_at,
-                        write.created_at,
-                        write.updated_at,
-                    ),
+            item, _created = self._insert_memory_on(db, write)
+        return item
+
+    def _insert_memory_on(
+        self, db: sqlite3.Connection, write: MemoryWrite
+    ) -> tuple[MemoryRecord, bool]:
+        client_request_id = (write.provenance or {}).get("client_request_id")
+        if write.origin == "external_agent" and client_request_id:
+            existing = db.execute(
+                f"SELECT {self._select_columns()} FROM memory_items m "
+                "JOIN memory_provenance p ON p.memory_id=m.id "
+                "WHERE m.created_by=? AND m.notebook_id=? "
+                "AND m.origin='external_agent' "
+                "AND m.agent_profile_id IS ? "
+                "AND json_extract(p.payload_json,'$.client_request_id')=? "
+                "ORDER BY m.created_at LIMIT 1",
+                (
+                    write.created_by,
+                    write.notebook_id,
+                    write.agent_profile_id,
+                    client_request_id,
+                ),
+            ).fetchone()
+            if existing is not None:
+                return self._record(existing), False
+        try:
+            db.execute(
+                "INSERT INTO memory_items "
+                "(id,notebook_id,created_by,agent_profile_id,source_answer_id,origin,"
+                "status,title,content_md,tags_json,confirmed_by,confirmed_at,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    write.id,
+                    write.notebook_id,
+                    write.created_by,
+                    write.agent_profile_id,
+                    write.source_answer_id,
+                    write.origin,
+                    write.status,
+                    write.title,
+                    write.content_md,
+                    json.dumps(list(write.tags), ensure_ascii=False),
+                    write.confirmed_by,
+                    write.confirmed_at,
+                    write.created_at,
+                    write.updated_at,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            if write.source_answer_id is None:
+                raise
+            existing = db.execute(
+                f"SELECT {self._select_columns()} FROM memory_items m "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "WHERE m.created_by=? AND m.source_answer_id=?",
+                (write.created_by, write.source_answer_id),
+            ).fetchone()
+            if existing is None:
+                raise
+            return self._record(existing), False
+        db.execute(
+            "INSERT INTO memory_provenance "
+            "(id,memory_id,origin,payload_json,created_at) VALUES (?,?,?,?,?)",
+            (
+                self.new_id("memprov"),
+                write.id,
+                write.origin,
+                json.dumps(dict(write.provenance or {}), ensure_ascii=False),
+                write.created_at,
+            ),
+        )
+        row = db.execute(
+            f"SELECT {self._select_columns()} FROM memory_items m "
+            "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+            "WHERE m.id=? AND m.created_by=?",
+            (write.id, write.created_by),
+        ).fetchone()
+        return self._record(row), True
+
+    def _create_with_initial_revision(
+        self, write: MemoryWrite, changed_by: str, reason: str
+    ) -> MemoryRecord:
+        with self.database.write() as db:
+            item, created = self._insert_memory_on(db, write)
+            has_revision = db.execute(
+                "SELECT 1 FROM memory_revisions WHERE memory_id=? LIMIT 1",
+                (item.id,),
+            ).fetchone()
+            if created or has_revision is None:
+                self._append_revision_on(
+                    db,
+                    item.id,
+                    {
+                        "title": item.title,
+                        "content_md": item.content_md,
+                        "tags": item.tags,
+                        "status": item.status,
+                        "promotion_state": item.promotion_state,
+                    },
+                    changed_by,
+                    reason,
                 )
-                db.execute(
-                    "INSERT INTO memory_provenance "
-                    "(id,memory_id,origin,payload_json,created_at) VALUES (?,?,?,?,?)",
-                    (
-                        self.new_id("memprov"),
-                        write.id,
-                        write.origin,
-                        json.dumps(dict(write.provenance or {}), ensure_ascii=False),
-                        write.created_at,
-                    ),
-                )
-            except sqlite3.IntegrityError:
-                if write.source_answer_id is None:
-                    raise
-                row = db.execute(
-                    f"SELECT {self._select_columns()} FROM memory_items m "
-                    "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
-                    "WHERE m.created_by=? AND m.source_answer_id=?",
-                    (write.created_by, write.source_answer_id),
-                ).fetchone()
-                if row is None:
-                    raise
-                return self._record(row)
-        return self.memory_for_user(write.id, write.created_by)
+        return item
+
+    def create_candidate_with_initial_revision(
+        self, write: MemoryWrite, changed_by: str, reason: str
+    ) -> MemoryRecord:
+        return self._create_with_initial_revision(write, changed_by, reason)
+
+    def create_answer_with_initial_revision(
+        self, write: MemoryWrite, changed_by: str, reason: str
+    ) -> MemoryRecord:
+        return self._create_with_initial_revision(write, changed_by, reason)
 
     def memory_for_user(self, memory_id: str, user_id: str) -> MemoryRecord:
         with self.database.connect() as db:

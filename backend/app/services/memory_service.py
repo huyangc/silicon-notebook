@@ -144,10 +144,11 @@ class MemoryService:
                 "evidence_refs": list(evidence_refs or []),
             },
         )
-        item = self.store.insert_memory(write)
+        item = self.store.create_candidate_with_initial_revision(
+            write, user_id, "created"
+        )
         if item.id != write.id:
             return item
-        self.store.append_revision(item.id, self._snapshot(item), user_id, "created")
         self._event("memory_lifecycle", item, action="candidate_created")
         return item
 
@@ -185,10 +186,11 @@ class MemoryService:
             updated_at=now,
             provenance={"answer_id": answer_id},
         )
-        item = self.store.insert_memory(write)
+        item = self.store.create_answer_with_initial_revision(
+            write, user_id, "created"
+        )
         if item.id != write.id:
             return item
-        self.store.append_revision(item.id, self._snapshot(item), user_id, "created")
         self._event("memory_lifecycle", item, action="answer_confirmed")
         return self._embed(item)
 

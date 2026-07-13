@@ -25,6 +25,8 @@ def _imports(path: Path) -> set[str]:
 def test_memory_ports_expose_store_and_lifecycle_contracts():
     store_methods = {
         "insert_memory",
+        "create_candidate_with_initial_revision",
+        "create_answer_with_initial_revision",
         "memory_for_user",
         "append_revision",
         "transition",
