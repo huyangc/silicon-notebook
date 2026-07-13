@@ -19,6 +19,11 @@ class _Conn(sqlite3.Connection):
     一个逻辑事务边界"的原语义,让 233 处调用点零改动、语义等价。
 
     不 override __init__(用 getattr 惰性属性),以兼容 sqlite3.connect(factory=)。
+
+    ⚠ 写务必走 SqliteDatabase.write():本守卫使嵌套 `with` 只最外层提交,且内层异常会
+    污染最外层事务(整体 rollback)。因此**不得在 connect() 返回的复用(读)连接上直接执行
+    写并在外层捕获内层异常**——会静默丢写 / 破坏增量提交(INV-8)。生产中复用连接实际只读,
+    所有写经 write()(独立连接、每次独立提交)。
     """
 
     def __enter__(self) -> "_Conn":

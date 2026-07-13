@@ -1843,6 +1843,9 @@ class KnowledgeLifecycleService:
                         d = claim_hits.setdefault(claim_id, {})
                         for c in canons:
                             d.setdefault(c, alias)   # 同 canonical 多别名命中只记首个
+                # ⚠ precondition: _close_local() 关闭整个线程的复用连接,故本扫描不得在任何
+                # open `with self._connect() as db:` 块内调用(会使该 db 中途失效→ProgrammingError)。
+                # 当前两处调用点均在 depth 0(无外层 open connect)。
             finally:
                 self._close_local()   # 关连接(临时表蒸发)+清 thread-local(下次 connect 重建)
         if dropped > 0:
