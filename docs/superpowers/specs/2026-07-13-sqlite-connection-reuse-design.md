@@ -83,7 +83,9 @@ class _Conn(sqlite3.Connection):
         return False   # 不吞异常(与 sqlite3.Connection.__exit__ 一致)
 ```
 
-**语义等价论证**：现状每个 `with connect() as db:` 是独立连接独立事务——成功 commit、异常 rollback；嵌套调用是不同连接，各自回滚。复用 + 深度守卫后：最外层成功 commit、最外层异常 rollback；内层异常置 `_txn_failed` → 冒泡到最外层整体 rollback。两种模型下"写在异常时都被回滚、成功时都被提交"，对外可观察结果一致（复用模型在嵌套失败时的原子性更强，不弱于现状）。
+**语义等价论证（读路径）**：现状每个 `with connect() as db:` 是独立连接独立事务——成功 commit、异常 rollback；嵌套调用是不同连接，各自回滚。复用 + 深度守卫后：最外层成功 commit、最外层异常 rollback；内层异常置 `_txn_failed` → 冒泡到最外层整体 rollback。两种模型下"写在异常时都被回滚、成功时都被提交"，对外可观察结果一致。**深度守卫只作用于 `connect()`（读路径）复用连接**。
+
+**⚠反例与写路径例外（关键修正）**：上述"等价"在**写路径**有一个反例——**嵌套增量提交的崩溃恢复**。现状节点向量 backfill 是「外层 `with connect() as db:` 遍历（读连接 A） + 内层每批 `write()` flush（独立连接 B，立即提交）」；外层若中途崩溃，B 已提交的前几批**保留**、可续跑（见 `test_node_embed_incremental`、[[resumable-rebuild-stages-state]]、[[offline-batch-ingest-state]] PR#132）。若让读、写**共用**一条复用连接 + 深度守卫，内层 write 变 depth≥2 → 不再独立提交 → 外层崩则**全丢**。因此 **`write()` 必须用独立连接、不复用读连接**（见 §4.4），使每个 `write()` 保持独立提交语义。深度守卫仅用于 `connect()`（读嵌套无害、偶有 connect-写嵌套时防提前提交）。
 
 ### 4.2 `connect()` —— thread-local 复用
 
@@ -137,17 +139,25 @@ def close_local(self) -> None:
 
 facade `SqliteRepository` 增一个薄 delegate `close_local(self)` → `self._runtime.database.close_local()`，供服务层短命池 worker 调用。
 
-### 4.4 `write()` —— 不变（复用连接 + write_lock）
+### 4.4 `write()` —— 独立连接（保留增量提交崩溃恢复）
 
 ```python
 @contextmanager
 def write(self):
-    with self.write_lock:            # RLock,进程内写串行(不变)
-        with self.connect() as db:   # 复用连接;深度守卫→最外层提交
-            yield db
+    """写事务:进程内写串行(write_lock)。每次用**独立新连接**(非线程复用读连接),
+    使每个 write() 独立提交——保留嵌套增量提交(节点向量 backfill 每批 flush 独立
+    落库、中断可续跑)的崩溃恢复语义(见 §4.1 反例)。用完即 close:写经 write_lock
+    串行,写连接峰值 = 嵌套写深度(极小),fd 用完即还。"""
+    with self.write_lock:
+        conn = self._new_connection()
+        try:
+            with conn:               # _Conn 单层 depth0 → 独立 commit/rollback
+                yield conn
+        finally:
+            conn.close()
 ```
 
-`write()` 拿到的是同一条 thread-local 复用连接。`write_lock` 保证跨线程写串行；同线程重入写（`RLock`）由深度守卫收敛到最外层一次提交。
+**为何写不复用**：复用读连接会把内层 `write()` 卷进外层 `connect()` 的事务深度，使增量 flush 不再独立提交（§4.1 反例）。独立连接使每个 `write()`（无论被什么外层包裹、是否嵌套）都独立提交，**完全保留现状写语义**。`write_lock`（RLock）保证跨线程写串行；写连接峰值 = 同线程嵌套写深度（极小），用完 `close()`、不泄漏。写路径 fd/PRAGMA 开销不降，但写相对读少、且写串行 + fsync 主导，PRAGMA 开销可接受；fd 大头是读（233 处 `with connect()`），由 §4.2 复用消除。
 
 ## 5. 关键不变量（测试守护）
 
@@ -158,6 +168,7 @@ def write(self):
 - **INV-5 嵌套原子**：嵌套 `with` 只最外层提交；任一层异常 → 最外层整体回滚，无提前提交。
 - **INV-6 短命回收**：短命线程 `close_local()` 后其连接被关闭、fd 归还。
 - **INV-7 禁止裸 close**：任何代码都**不得对 `connect()` 返回的连接调裸 `.close()`**（会关闭复用连接却不清 `_local.conn` → 下次 `connect()` 返回坏连接）；释放一律走 `close_local()`（同时清 thread-local）。
+- **INV-8 写独立提交（增量崩溃恢复）**：`write()` 用独立连接，每个 `write()` 独立提交，即使被外层 `with connect()`（读）包裹或与其它 `write()` 嵌套——外层中途崩溃时已提交的增量 flush 必须保留、可续跑（回归 `test_node_embed_incremental`）。深度守卫**不作用于** `write()`。
 
 ## 6. 连接生命周期
 
@@ -209,8 +220,13 @@ def write(self):
 6. **test_nested_inner_failure_rolls_back_all（INV-5b）**：外层写 + 内层 `with` 抛异常冒泡，断言外层写被整体回滚。
 7. **test_close_local_releases（INV-6）**：`connect()` 后 `close_local()`，断言底层连接已关闭（对其 `execute` 抛 `ProgrammingError`），再 `connect()` 重建新连接。
 8. **test_write_lock_serialization_preserved**：并发多线程 `write()` INSERT，断言无 `database is locked`、数据全部落库（回归 write_lock 语义）。
+9. **test_write_uses_independent_connection（INV-8）**：外层 `with connect() as a:` 内嵌 `write()`（拿到连接 b），断言 `a is not b`；且外层 `with` 尚未退出时，内层 `write()` 已提交的行可从**第三条连接**（另一线程）读到（证明 write 独立提交、不被外层读连接的事务深度卷入）。增量崩溃恢复由既有 `test_node_embed_incremental` 回归守护（改独立连接后应恢复绿）。
 
-回归：跑 `backend/` 全量 pytest（现状约 2000+ 用例）确保零破坏，重点 `test_*repository*` / ingest / kg / ask。
+**受本改动影响、需同步更新的既有测试**（连接层默认值/语义变更的直接 fallout，非弱化）：
+- `test_sqlite_write_optimization.py::test_connect_sets_performance_pragmas` 与 `test_sqlite_database_component.py::test_connection_pragmas`：断言 `PRAGMA cache_size == -65536` → 改为 `-16384`（Task 1/2 把默认从 64MB 降到 16MB 并读 `settings.sqlite_cache_size_kb`）。
+- `test_node_context_steps.py::test_node_context_legacy_fallback_query_is_bound_by_section_path`：靠 monkeypatch 模块级 `sqlite3.connect` 拦截每次连接来断言 SQL；连接复用后每线程只建一次连接，拦截失效 → 改为对 `repo._connect()` 直接 `set_trace_callback(...)`（等价断言绑定的 SQL，不弱化）。
+
+回归：跑 `backend/` 全量 pytest（现状约 2800+ 用例）确保零破坏，重点 `test_*repository*` / ingest / kg / ask / `test_node_embed_incremental`。
 
 ## 11. 风险与缓解
 
