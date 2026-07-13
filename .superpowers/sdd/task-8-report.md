@@ -38,6 +38,13 @@ Rejection leaves the Memory private and confirmed while recording the curator
 reason. Losing notebook access between the service preflight and the proposal
 transaction also fails closed through a transaction-local access recheck.
 
+The approval transaction independently revalidates that the promotion
+candidate's notebook matches the Memory notebook and that the Memory creator
+is still either the notebook owner or a current notebook member. If a
+read-only member loses access after proposing, approval raises before any
+Base object, promotion status, Memory revision, or provenance mutation. A
+candidate/Memory notebook mismatch follows the same fail-closed boundary.
+
 ## Base KG Approval and Idempotency
 
 Admin approval creates or merges approved Base KG objects for the supported
@@ -78,14 +85,14 @@ hydrates only SourceElement-validated evidence before review.
 
 ## Verification
 
-- Focused Memory promotion: `11 passed`.
-- Promotion/governance/phase/failure/surface/API-contract regression:
-  `106 passed in 9.50s`.
+- Focused Memory promotion after review fix: `13 passed`.
+- Promotion/governance/Memory access/sharing/phase/failure/surface/API-contract
+  regression after review fix: `146 passed in 14.19s`.
 - Frontend all tests: `182 passed`.
 - Frontend TypeScript: `npx tsc --noEmit` passed.
 - Frontend production build: `npm run build` passed.
 - `git diff --check`: clean.
-- Exact backend suite: `2901 passed, 1 skipped in 250.23s`.
+- Exact backend suite after review fix: `2903 passed, 1 skipped in 249.67s`.
 
 The first broader regression run had 5 failures: four frozen facade/surface
 guards and the intentional OpenAPI delta. Root cause was the temporary change
@@ -111,6 +118,8 @@ added, and only the intentional OpenAPI schema/path fixture was regenerated.
   the new Memory REST endpoint.
 - Confirmed the existing Knowledge promotion behavior and frozen facade
   signatures remain compatible.
+- Confirmed member removal and candidate-notebook corruption both abort inside
+  the approval write transaction before any durable side effect.
 
 ## Remaining Concerns
 

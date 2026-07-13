@@ -165,6 +165,131 @@ def test_admin_cannot_approve_after_owner_deprecates_proposed_memory(
     assert count == 0
 
 
+def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):
+    notebook_owner = repo.create_user("s00108004", "pw")
+    memory_owner = repo.create_user("t00108005", "pw")
+    token = set_request_user(notebook_owner)
+    try:
+        notebook = repo.create_notebook(NotebookCreate(name="Shared promotion"))
+    finally:
+        reset_request_user(token)
+    base = repo.create_notebook(NotebookCreate(name="Shared promotion base"))
+    repo.mark_notebook_base(base.id)
+    repo.add_member(notebook.id, memory_owner.id)
+    memory = repo.create_memory_candidate(
+        notebook.id,
+        memory_owner.id,
+        None,
+        "member-promotion",
+        "Member claim",
+        "A member-owned confirmed claim.",
+        [],
+        "reason",
+        {},
+        [],
+    )
+    memory = repo.confirm_memory(memory.id, memory_owner.id)
+    proposal = repo.propose_memory_promotion(memory.id, memory_owner.id)
+    with repo._connect() as db:
+        before_revision_count = db.execute(
+            "SELECT COUNT(*) AS c FROM memory_revisions WHERE memory_id=?",
+            (memory.id,),
+        ).fetchone()["c"]
+        before_provenance = db.execute(
+            "SELECT payload_json FROM memory_provenance WHERE memory_id=?",
+            (memory.id,),
+        ).fetchone()["payload_json"]
+
+    repo.remove_member(notebook.id, memory_owner.id)
+    with pytest.raises(PermissionError):
+        repo.approve_promotion(proposal["id"])
+
+    with repo._connect() as db:
+        promotion = db.execute(
+            "SELECT status FROM promotion_candidates WHERE id=?", (proposal["id"],)
+        ).fetchone()
+        stored_memory = db.execute(
+            "SELECT status,promotion_state,notebook_id,created_by "
+            "FROM memory_items WHERE id=?", (memory.id,),
+        ).fetchone()
+        revision_count = db.execute(
+            "SELECT COUNT(*) AS c FROM memory_revisions WHERE memory_id=?",
+            (memory.id,),
+        ).fetchone()["c"]
+        provenance = db.execute(
+            "SELECT payload_json FROM memory_provenance WHERE memory_id=?",
+            (memory.id,),
+        ).fetchone()["payload_json"]
+        base_count = db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
+            (base.id,),
+        ).fetchone()["c"]
+    assert promotion["status"] == "proposed"
+    assert dict(stored_memory) == {
+        "status": "confirmed",
+        "promotion_state": "proposed",
+        "notebook_id": notebook.id,
+        "created_by": memory_owner.id,
+    }
+    assert revision_count == before_revision_count
+    assert provenance == before_provenance
+    assert base_count == 0
+
+
+def test_admin_approval_fails_closed_on_candidate_memory_notebook_mismatch(
+    repo, promotion_setup
+):
+    owner, _other, _notebook, base, memory = promotion_setup
+    token = set_request_user(owner)
+    try:
+        other_notebook = repo.create_notebook(NotebookCreate(name="Wrong notebook"))
+    finally:
+        reset_request_user(token)
+    proposal = repo.propose_memory_promotion(memory.id, owner.id)
+    with repo._write() as db:
+        db.execute(
+            "UPDATE promotion_candidates SET notebook_id=? WHERE id=?",
+            (other_notebook.id, proposal["id"]),
+        )
+    with repo._connect() as db:
+        before_revision_count = db.execute(
+            "SELECT COUNT(*) AS c FROM memory_revisions WHERE memory_id=?",
+            (memory.id,),
+        ).fetchone()["c"]
+        before_provenance = db.execute(
+            "SELECT payload_json FROM memory_provenance WHERE memory_id=?",
+            (memory.id,),
+        ).fetchone()["payload_json"]
+
+    with pytest.raises(ValueError, match="notebook"):
+        repo.approve_promotion(proposal["id"])
+
+    with repo._connect() as db:
+        promotion_status = db.execute(
+            "SELECT status FROM promotion_candidates WHERE id=?", (proposal["id"],)
+        ).fetchone()["status"]
+        memory_state = db.execute(
+            "SELECT promotion_state FROM memory_items WHERE id=?", (memory.id,)
+        ).fetchone()["promotion_state"]
+        revision_count = db.execute(
+            "SELECT COUNT(*) AS c FROM memory_revisions WHERE memory_id=?",
+            (memory.id,),
+        ).fetchone()["c"]
+        provenance = db.execute(
+            "SELECT payload_json FROM memory_provenance WHERE memory_id=?",
+            (memory.id,),
+        ).fetchone()["payload_json"]
+        base_count = db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
+            (base.id,),
+        ).fetchone()["c"]
+    assert promotion_status == "proposed"
+    assert memory_state == "proposed"
+    assert revision_count == before_revision_count
+    assert provenance == before_provenance
+    assert base_count == 0
+
+
 def test_memory_promotion_dedupes_into_existing_base_object(repo, promotion_setup):
     owner, _other, _notebook, base, memory = promotion_setup
     existing = repo._test_insert_object(

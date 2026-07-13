@@ -1557,10 +1557,10 @@ TASK8_MEMORY_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_memory_promotion.py", name)
     for name in {
         "SQLiteRepository", "_connect", "_runtime", "_test_insert_object", "_write",
-        "approve_promotion", "confirm_memory", "create_memory_candidate",
+        "add_member", "approve_promotion", "confirm_memory", "create_memory_candidate",
         "create_notebook", "create_user", "deprecate_memory", "get_memory",
         "list_promotion_queue", "mark_notebook_base", "memory_revisions",
-        "propose_memory_promotion", "reject_memory", "reject_promotion",
+        "propose_memory_promotion", "reject_memory", "reject_promotion", "remove_member",
         "reset_request_user", "set_request_user",
     }
 } | {

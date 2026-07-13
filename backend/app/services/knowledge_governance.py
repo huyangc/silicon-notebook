@@ -1141,6 +1141,9 @@ class KnowledgeGovernanceService:
                         "base_object_ids": existing_ids,
                         "merged_into": cand["base_match_id"] or "",
                     }
+                self.memory_store.validate_promotion_approval_access_on(
+                    db, memory.id, cand["notebook_id"]
+                )
                 if memory.status != "confirmed":
                     raise ValueError("Memory is no longer confirmed")
                 reviewer = reviewer_id or self.governance_store.first_admin_user_id(db)

@@ -787,6 +787,28 @@ class MemoryStore:
         base_ids = [str(value) for value in raw_ids] if isinstance(raw_ids, list) else []
         return item, candidates, base_ids
 
+    @staticmethod
+    def validate_promotion_approval_access_on(
+        db: sqlite3.Connection,
+        memory_id: str,
+        candidate_notebook_id: str,
+    ) -> None:
+        """Revalidate Memory scope and creator access inside approval's write txn."""
+        row = db.execute(
+            "SELECT m.notebook_id,m.created_by,n.created_by AS notebook_owner,"
+            "EXISTS(SELECT 1 FROM notebook_members nm "
+            "WHERE nm.notebook_id=m.notebook_id AND nm.user_id=m.created_by) "
+            "AS is_member FROM memory_items m "
+            "JOIN notebooks n ON n.id=m.notebook_id WHERE m.id=?",
+            (memory_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(memory_id)
+        if row["notebook_id"] != candidate_notebook_id:
+            raise ValueError("promotion candidate notebook does not match Memory notebook")
+        if row["created_by"] != row["notebook_owner"] and not bool(row["is_member"]):
+            raise PermissionError(memory_id)
+
     def record_promotion_decision_on(
         self,
         db: sqlite3.Connection,
