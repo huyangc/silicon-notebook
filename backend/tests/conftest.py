@@ -29,3 +29,13 @@ def _reset_singleton_caches(tmp_path, monkeypatch):
     yield
     get_settings.cache_clear()
     repository_factory.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _mark_service_ready():
+    """The readiness gate 503s every app route until startup warm-up flips ready.
+    Tests drive the app via TestClient WITHOUT the lifespan (which is what runs
+    warm-up), so mark ready up-front; test_readiness_gate toggles it explicitly."""
+    from app.core import readiness
+    readiness.mark_ready()
+    yield

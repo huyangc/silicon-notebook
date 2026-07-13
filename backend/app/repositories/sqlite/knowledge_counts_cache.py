@@ -195,6 +195,43 @@ def chunk_count(db: sqlite3.Connection, notebook_id: str) -> int:
     return count
 
 
+def warm_all(db: sqlite3.Connection, progress=None) -> int:
+    """Prime all three per-notebook open-path memos (``type_status_counts`` /
+    ``pending_source_count`` / ``chunk_count``) for every live notebook, so the
+    first open / board / status-poll after a fresh process start is served warm
+    instead of paying the cold GROUP BY + correlated scans (see module docstring).
+
+    Called once at startup behind the readiness gate by the facade
+    ``warm_open_path_caches``. The notebook-id query lives HERE (store-owned SQL)
+    so the application-service facade stays SQL-free. Best-effort: a per-notebook
+    ``sqlite3.Error`` is swallowed (a warm miss only costs a later lazy recompute,
+    never correctness). ``progress`` — when given — is invoked as
+    ``progress(done, total)`` after EACH notebook (1-based ``done``) so the
+    readiness screen can render "N/M 笔记本". Returns the notebook total.
+
+    'copying' notebooks are skipped: a half-materialized deep-copy has no stable
+    counts to warm and is not yet openable.
+    """
+    ids = [
+        r["id"]
+        for r in db.execute(
+            "SELECT id FROM notebooks WHERE status != 'copying'"
+        ).fetchall()
+    ]
+    total = len(ids)
+    for i, notebook_id in enumerate(ids, start=1):
+        try:
+            type_status_counts(db, notebook_id)
+            pending_source_count(db, notebook_id)
+            chunk_count(db, notebook_id)
+        except sqlite3.Error:
+            continue
+        finally:
+            if progress is not None:
+                progress(i, total)
+    return total
+
+
 def invalidate(notebook_id: "Optional[str]" = None) -> None:
     """Drop cached counts (a whole notebook, or everything) across ALL three
     memos. Not required for correctness — the seq gate self-invalidates — but a

@@ -1,20 +1,47 @@
 import logging
 import os
+import threading
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.auth_routes import auth_router
 from app.api.debug_logs import router as debug_logs_router
 from app.api.deps import get_current_user, repository
 from app.api.routes import router
+from app.core import readiness
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
 from app.services.pending_bus import pending_bus
 
 logger = logging.getLogger("silicon_notebook.startup")
+
+# Routes reachable BEFORE warm-up finishes (everything else 503s until ready):
+# the anonymous liveness/readiness probes + API docs. CORS preflight (OPTIONS)
+# is always allowed so the browser can even learn about the 503.
+_READINESS_OPEN_PATHS = frozenset(
+    {"/", "/api/ready", "/docs", "/redoc", "/openapi.json", "/favicon.ico"}
+)
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Run migration + cache warm-up OFF the event loop (daemon thread) so uvicorn
+    # binds and serves /api/ready immediately; the readiness gate keeps app routes
+    # at 503 until run_startup() flips readiness. See app/services/startup_warmup.
+    from app.services.startup_warmup import run_startup
+
+    # Tests mark readiness ready up-front (conftest) and drive the app without a
+    # real warm-up; skip spawning the thread there so it can't touch a torn-down
+    # tmp DB. In production readiness starts not-ready, so the thread runs.
+    if not readiness.is_ready():
+        readiness.set_phase("starting", "后端启动中")
+        threading.Thread(target=run_startup, name="startup-warmup", daemon=True).start()
+    yield
 
 
 def _env_file_preflight() -> None:
@@ -77,6 +104,7 @@ def create_app() -> FastAPI:
         title="silicon-notebook API",
         version="0.1.0",
         description="Local beta API for semiconductor knowhow notebooks.",
+        lifespan=_lifespan,
     )
 
     request_log = EventLogger(settings, channel="requests")
@@ -121,6 +149,33 @@ def create_app() -> FastAPI:
         response.headers["X-Request-Id"] = request_id
         return response
 
+    @app.middleware("http")
+    async def readiness_gate(request: Request, call_next):
+        # Until startup warm-up finishes, every app route (incl. login) returns
+        # 503 so the frontend shows a "服务启动中" screen instead of hanging on a
+        # cold path — and no request constructs the repo mid-migration. Fast path
+        # once ready (the overwhelmingly common case) is a single flag read.
+        if (
+            readiness.is_ready()
+            or request.method == "OPTIONS"          # CORS preflight
+            or request.url.path in _READINESS_OPEN_PATHS
+        ):
+            return await call_next(request)
+        snap = readiness.snapshot()
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "service starting",
+                "ready": False,
+                "phase": snap["phase"],
+                "progress": snap.get("detail", ""),
+                "warmed_notebooks": snap.get("warmed_notebooks", 0),
+                "total_notebooks": snap.get("total_notebooks", 0),
+                "error": snap.get("error"),
+            },
+            headers={"Retry-After": "2"},
+        )
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -138,6 +193,14 @@ def create_app() -> FastAPI:
             "docs": "/docs",
             "api": "/api",
         }
+
+    @app.get("/api/ready")
+    def ready() -> dict:
+        """Anonymous readiness probe the frontend polls before showing the app.
+        Reports migration / warm-up progress; ``{"ready": true}`` once fully
+        warm. Never constructs the repository (reads the process readiness flag),
+        so it answers instantly even while migration is still running."""
+        return readiness.snapshot()
 
     app.include_router(auth_router, prefix="/api")  # 公开：注册/登录/登出
     app.include_router(

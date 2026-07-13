@@ -2962,6 +2962,11 @@ class SQLiteRepository:
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
         return self._runtime.catalog.notebook_analytics(notebook_id)
 
+    def warm_open_path_caches(
+        self, progress: Optional[Callable[[int, int], None]] = None
+    ) -> int:
+        return self._runtime.catalog.warm_open_path_caches(progress)
+
     # object_type -> counts-dict key mapping (C5 batched GROUP BY projection).
     # Canonical map lives on NotebookSummaryQuery; the facade keeps the frozen
     # compatibility name pointing at the same object.

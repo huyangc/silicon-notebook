@@ -326,6 +326,80 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   return response.json();
 }
 
+// ---- 启动就绪门 ----
+// 后端重启后会在后台先跑迁移 + 缓存预热,期间对所有应用路由(含登录/ /me)返回 503。
+// 匿名探针 /api/ready 恒返回就绪快照;就绪前展示「服务启动中」而非登录表单或空白挂起。
+type ReadySnapshot = {
+  ready: boolean;
+  phase: "starting" | "migrating" | "warming" | "ready" | "error";
+  detail?: string;
+  warmed_notebooks?: number;
+  total_notebooks?: number;
+  error?: string | null;
+};
+
+// 探针绝不抛错:网络异常 / 非 2xx(503) / 解析失败一律视为「未就绪,继续轮询」。
+// URL 复用 API_BASE(已含 /api),命中 `${API_BASE}/ready` = .../api/ready(不会产生 /api/api)。
+async function probeReady(): Promise<ReadySnapshot | null> {
+  try {
+    const res = await fetch(`${API_BASE}/ready`, {
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+    });
+    let body: Partial<ReadySnapshot> | null = null;
+    try { body = await res.json(); } catch { body = null; }
+    if (!res.ok || !body) {
+      // 503(应用路由仍在预热)或解析失败:尽量沿用 body 中的进度字段。
+      return {
+        ready: false,
+        phase: (body?.phase as ReadySnapshot["phase"]) ?? "starting",
+        detail: body?.detail,
+        warmed_notebooks: body?.warmed_notebooks,
+        total_notebooks: body?.total_notebooks,
+        error: body?.error ?? null,
+      };
+    }
+    return body as ReadySnapshot;
+  } catch {
+    return null;   // 网络错误:后端还没起来,继续轮询
+  }
+}
+
+// 依据就绪快照给出一句克制、不惊扰的中文阶段文案。
+function startupPhaseText(snap: ReadySnapshot | null): string {
+  const phase = snap?.phase ?? "starting";
+  if (phase === "migrating") return "正在迁移数据库…";
+  if (phase === "warming") {
+    const warmed = snap?.warmed_notebooks ?? 0;
+    const total = snap?.total_notebooks ?? 0;
+    return `正在预热 (${warmed}/${total} 笔记本)…`;
+  }
+  if (phase === "error") return snap?.error?.trim() || "启动时遇到问题，正在重试…";
+  return "服务启动中…";
+}
+
+// 就绪前的启动屏:复用 auth-gate / auth-card 样式,居中卡片 + 旋转指示 + 阶段文案。
+function StartingScreen({ snapshot, onRetry }: { snapshot: ReadySnapshot | null; onRetry: () => void }) {
+  const isError = snapshot?.phase === "error";
+  return (
+    <div className="auth-gate">
+      <div className="auth-card startup-card">
+        <div className="auth-brand">silicon-notebook</div>
+        <div className={`startup-spinner${isError ? " error" : ""}`} aria-hidden />
+        <div className="startup-phase">{startupPhaseText(snapshot)}</div>
+        {isError ? (
+          <>
+            <div className="startup-sub">将自动重试，也可手动重试。</div>
+            <button type="button" className="auth-submit startup-retry" onClick={onRetry}>重试</button>
+          </>
+        ) : (
+          <div className="startup-sub">首次启动需迁移与预热，请稍候…</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 async function readAskStream<TResponse>(
   path: string,
   payload: unknown,
@@ -700,6 +774,10 @@ function accountInitials(username: string): string {
 }
 
 export default function Home() {
+  // 启动就绪门:后端预热完成前(serviceReady=false)遮住登录/加载,轮询 /api/ready。
+  const [serviceReady, setServiceReady] = useState(false);
+  const [readySnapshot, setReadySnapshot] = useState<ReadySnapshot | null>(null);
+  const [readyRetry, setReadyRetry] = useState(0);
   const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [health, setHealth] = useState<Health | null>(null);
@@ -1167,13 +1245,32 @@ export default function Home() {
   // 收到分享的 token 缓存 —— 挂载时从 URL 抓到后立即清掉 ?share,故拷贝时从这里取。
   const shareTokenRef = useRef<string | null>(null);
 
+  // 启动就绪轮询:挂载即探 /api/ready,未就绪则每 ~1.5s 重探,直到显式 {ready:true}。
+  // 探针永不抛错(见 probeReady),故预热期的 503/网络错都只是「继续等」,不会掉进登录态。
   useEffect(() => {
+    if (serviceReady) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const tick = async () => {
+      const snap = await probeReady();
+      if (cancelled) return;
+      if (snap) setReadySnapshot(snap);
+      if (snap?.ready) { setServiceReady(true); return; }   // 就绪:停止轮询,放行既有流程
+      timer = window.setTimeout(tick, 1500);
+    };
+    tick();
+    return () => { cancelled = true; if (timer !== undefined) window.clearTimeout(timer); };
+  }, [serviceReady, readyRetry]);
+
+  // 既有的挂载认证流程:仅在服务就绪后运行,预热期的 503 才不会把用户弹回登录页。
+  useEffect(() => {
+    if (!serviceReady) return;
     if (!getToken()) { setAuthChecked(true); return; }
     fetchMe()
       .then((u) => { setCurrentUser(u); return loadNotebookCollection(); })
       .catch(() => { clearToken(); })
       .finally(() => setAuthChecked(true));
-  }, []);
+  }, [serviceReady]);
 
   // 接收分享:挂载时读 ?share=shr-xxx,先清掉参数(避免刷新重弹),再预览打开弹窗。
   // 预览需登录(Bearer),故等 authChecked + 有 token 再拉。
@@ -2926,6 +3023,8 @@ export default function Home() {
     ? notebooks.find((item) => item.id === menuNotebookId) ?? null
     : null;
 
+  // 启动就绪门:在认证/加载分支之前拦截。未就绪时只展示启动屏,绝不露出登录表单或空白挂起。
+  if (!serviceReady) return <StartingScreen snapshot={readySnapshot} onRetry={() => setReadyRetry((n) => n + 1)} />;
   if (!authChecked) return <div className="auth-gate"><div className="auth-card">加载中…</div></div>;
   if (!currentUser) {
     return <AuthGate onAuthenticated={(u) => {
