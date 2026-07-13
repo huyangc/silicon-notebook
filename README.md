@@ -362,6 +362,7 @@ tracking. Only turn it on if you have understood and accounted for both costs.
 
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout in ms (default 30000)
+SQLITE_CACHE_SIZE_KB    # Per-connection SQLite page cache in KB (negative = KB). Connections are reused per-thread; total memory ≈ threads × |value| (default -16384)
 DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
 ```
