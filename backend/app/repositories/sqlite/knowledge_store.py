@@ -680,9 +680,12 @@ class KnowledgeStore:
             base_query += " AND status = ?"
             params.append(status)
 
-        total = db.execute(
-            f"SELECT COUNT(*) c {base_query}", params
-        ).fetchone()["c"]
+        # Pagination total = a slice of the seq-gated type/status count memo
+        # (from_row already warmed it this request), not a fresh per-page COUNT.
+        from app.repositories.sqlite import knowledge_counts_cache
+        total = knowledge_counts_cache.object_type_total(
+            db, notebook_id, object_type, status
+        )
         rows = db.execute(
             f"SELECT * {base_query} ORDER BY created_at ASC, id ASC LIMIT ? OFFSET ?",
             (*params, limit, offset),

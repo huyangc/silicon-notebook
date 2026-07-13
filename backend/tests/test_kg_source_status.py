@@ -50,6 +50,11 @@ def _insert_source(repo: SQLiteRepository, notebook_id: str, *,
                    VALUES (?, ?, 'paragraph', 'p1', 'Some content.', '{}', ?)""",
                 (elem_id, source_id, now),
             )
+    # Raw insert bypasses the pipeline's kg_mutation_seq bump; drop the seq-gated
+    # pending/chunk memo so pending-count assertions recompute (mirrors the
+    # insert_test_object precedent in knowledge_query.py).
+    from app.repositories.sqlite import knowledge_counts_cache
+    knowledge_counts_cache.invalidate(notebook_id)
     return source_id
 
 

@@ -63,16 +63,10 @@ class QueryStore:
 
     @staticmethod
     def pending_kg_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
-        row = db.execute(
-            """
-            SELECT COUNT(*) FROM sources s
-            WHERE s.notebook_id = ?
-              AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)
-              AND NOT EXISTS (SELECT 1 FROM knowledge_objects k WHERE k.source_id = s.id AND k.source_id != '')
-            """,
-            (notebook_id,),
-        ).fetchone()
-        return int(row[0])
+        # Served from the seq-gated count cache (one correlated scan per
+        # kg_mutation_seq instead of ~2s per open at 48k sources).
+        from app.repositories.sqlite import knowledge_counts_cache
+        return knowledge_counts_cache.pending_source_count(db, notebook_id)
 
     @staticmethod
     def base_notebook_info_row(db: sqlite3.Connection):

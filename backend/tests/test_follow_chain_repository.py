@@ -272,8 +272,8 @@ def test_follow_chain_does_not_change_v10_schema(repo):
         version = db.execute("PRAGMA user_version").fetchone()[0]
         indexes = {row["name"] for row in db.execute(
             "PRAGMA index_list(knowledge_relations)").fetchall()}
-    # SCHEMA_VERSION 随迁移推进(_migration_11 加 scale 热路径索引 → 11);本测试守的是
-    # follow-chain 特性自身不动 schema(不加 follow 索引),故只钉「DB 版本==代码版本」
-    # 且 follow-chain 没留索引,期望值随全局 schema 走。
-    assert version == sr.SCHEMA_VERSION == 11
+    # SCHEMA_VERSION 随迁移推进(_migration_12 加 /analytics parse_status 覆盖索引 → 12);
+    # 本测试守的是 follow-chain 特性自身不动 schema(不加 follow 索引),故只钉「DB 版本==
+    # 代码版本」且 follow-chain 没留索引,期望值随全局 schema 走。
+    assert version == sr.SCHEMA_VERSION == 12
     assert not any("follow" in name for name in indexes)

@@ -104,18 +104,20 @@ EXPECTED_KG_REBUILD_CHECKPOINT_SQL = """CREATE TABLE kg_rebuild_checkpoint (
 # to prove that migration and must fail closed.
 MIGRATION_MANIFEST = {
     # Cumulative delta from the v9 fixture to the current SCHEMA_VERSION.
-    (9, 11): {
+    (9, 12): {
         "tables": {  # _migration_10
             "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
         },
         "columns": {},
-        "indexes": {  # _migration_11 — scale hot-path index coverage
+        "indexes": {  # _migration_11/_migration_12 — scale hot-path index coverage
             "idx_element_embeddings_source":
                 "CREATE INDEX idx_element_embeddings_source ON element_embeddings(source_id)",
             "idx_knowledge_relations_nb_review":
                 "CREATE INDEX idx_knowledge_relations_nb_review ON knowledge_relations(notebook_id, review_status)",
             "idx_comentions_nb_b":
                 "CREATE INDEX idx_comentions_nb_b ON concept_comentions(notebook_id, canonical_b)",
+            "idx_sources_nb_parse_status":
+                "CREATE INDEX idx_sources_nb_parse_status ON sources(notebook_id, parse_status)",
         },
         "triggers": {},
         "views": {},

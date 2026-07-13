@@ -121,17 +121,17 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
     **{
         site: "snapshot verifier reads only its backup/probe database"
         for site in {
-            ("scripts/verify_repository_snapshot.py", 366, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 373, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 395, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 399, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 424, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 425, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 442, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 454, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 781, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 788, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 817, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 368, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 375, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 397, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 401, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 426, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 427, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 444, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 456, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 783, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 790, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 819, "probe.execute"),
         }
     },
 }
@@ -316,19 +316,19 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ("scripts/generate_repository_contract_fixtures.py", 1650, "sqlite3.connect"): (
         "contract fixture generator opens disposable fixture databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 420, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 422, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 421, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 423, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 775, "sqlite3.connect"): (
-        "snapshot verifier reads only backup/probe databases"
-    ),
-    ("scripts/verify_repository_snapshot.py", 922, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 777, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
     ("scripts/verify_repository_snapshot.py", 924, "sqlite3.connect"): (
+        "snapshot verifier reads only backup/probe databases"
+    ),
+    ("scripts/verify_repository_snapshot.py", 926, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
 }

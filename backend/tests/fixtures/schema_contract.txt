@@ -379,6 +379,7 @@ idx_relation_embeddings_nb
 idx_reports_nb_created
 idx_source_elements_source
 idx_source_elements_source_created
+idx_sources_nb_parse_status
 idx_sources_notebook_created
 idx_sources_notebook_status
 idx_users_username
