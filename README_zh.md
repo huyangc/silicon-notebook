@@ -247,8 +247,10 @@ Claude Code 可能把这段原始 header 保存到本机配置。应使用最小
 服务端会在数据调用时重新检查 scope、allowlist、token 状态和 notebook 权限；返回文本是
 不可信 evidence，不是可执行的 Agent 指令。
 
-只有 `confirmed` Memory 可发起 KG 晋升。创建者提交后由 admin 在既有 promotion queue
-审核；批准复用 KG dedupe/merge，创建或合并 base object，但不会改变或暴露原私有 Memory。
+只有 `confirmed` Memory 可发起 KG 晋升。创建者提交后，admin queue 展示脱敏后的结构化提取
+候选与服务端验证过的 evidence，而不是原始 Memory revision/provenance 浏览器。批准时会重新校验
+Memory 当前仍为 confirmed 且创建者仍有访问权，再复用 KG dedupe/merge 创建或合并一个或多个
+Base KG 对象；API 与晋升审计记录完整的 `base_object_ids`。这一过程不会改变或暴露原私有 Memory。
 删除 notebook 会级联删除所有成员绑定到它的私有 Memory，因此删除弹窗会提示这一生命周期
 后果，但不会泄露成员身份或数量。
 

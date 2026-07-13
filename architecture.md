@@ -140,8 +140,10 @@ Deep Report 与 `search_notebook_context` 只投影 confirmed；rejected/depreca
 
 MCP 以 scoped opaque Agent token 认证，每个 session 必须先 `select_notebook`。数据工具每次重新检查
 token 是否撤销/过期、profile 状态、scope、allowlist 与用户当前 notebook 访问权，不能仅信 session
-缓存。Memory→KG 由创建者提案、admin 审核、既有 dedupe/merge 批准成独立 base object；私有
-Memory 行仍归原创建者。
+缓存。Memory→KG 由创建者提案；admin queue 只展示脱敏后的结构化提取候选与服务端验证过的
+evidence，不提供原始 revision/provenance 浏览。批准前会重新校验 Memory 当前仍为 confirmed 且
+创建者仍有访问权，再经既有 dedupe/merge 创建或合并一个或多个 Base KG 对象，并在 API/审计中
+保存完整 `base_object_ids`；私有 Memory 行仍归原创建者。
 
 ### 3.5 KG 与索引维护
 

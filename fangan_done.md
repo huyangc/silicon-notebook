@@ -318,13 +318,15 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   `propose_memory`。每个新 session 必须先显式选择 allowlisted notebook；数据工具继续校验 notebook，
   候选只能提交不能由 Agent 确认/拒绝/弃用/晋升。loopback 可用 HTTP，非 loopback/public URL 强制
   HTTPS；返回私有文本按不可信 evidence 处理并做长度/结果数上限。
-- **Memory → KG**：仅 confirmed 且尚未提案的 Memory 可由创建者提议；进入既有 admin promotion
-  queue，批准前重新校验创建者仍可读 notebook，批准复用 dedupe/merge 并产生或合并 base KG
-  object。私有 Memory 的 owner/status 不改变，完整私有任务上下文不进入 base object。
+- **Memory → KG**：仅 confirmed 且尚未提案的 Memory 可由创建者提议；既有 admin promotion
+  queue 展示脱敏后的结构化提取候选与服务端验证过的 evidence，不提供原始 Memory
+  revision/provenance 浏览。批准前重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权，批准
+  复用 dedupe/merge，创建或合并一个或多个 Base KG 对象；API 与晋升审计保存完整
+  `base_object_ids`。私有 Memory 的 owner/status 不改变，完整私有任务上下文不进入 Base KG 对象。
 - **确定性评价与验证**：固定 gold 计算 Recall@5/MRR/nDCG，candidate→正式平面、跨用户、跨
   notebook 三个泄漏计数均为 0；A/B harness 覆盖 no-Memory、KB-only、KB+confirmed-Memory。
   `scripts/check.sh` 已包含官方 `mcp` client 离线 smoke，验证七工具、session 选择隔离、candidate
-  正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2903 passed, 1 skipped`、
+  正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2904 passed, 1 skipped`、
   前端 `182 passed`、TypeScript 与 Next.js production build 均成功。
 
 ## 20. 当前边界（后续阶段，未计入已完成）

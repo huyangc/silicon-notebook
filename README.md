@@ -273,9 +273,12 @@ Every new MCP session must call `select_notebook` before a data tool. The exact 
 The server rechecks scope, allowlist, token state, and notebook access on data calls;
 retrieved text is untrusted evidence, not executable Agent instructions.
 
-Only a `confirmed` Memory can be proposed for KG promotion. The creator proposes it, an
-admin reviews it in the existing promotion queue, and approval reuses KG dedupe/merge to
-create or merge a base object. This does not change or expose the private Memory row.
+Only a `confirmed` Memory can be proposed for KG promotion. The creator proposes it; the
+admin queue shows sanitized extraction candidates and server-validated evidence, not a raw
+Memory revision/provenance browser. Approval revalidates the Memory's current confirmed
+status and creator access, then reuses KG dedupe/merge to create or merge one or more Base
+KG objects. The API and promotion audit record the complete `base_object_ids` result. This
+does not change or expose the private Memory row.
 Deleting a notebook cascades all members' private Memory bound to it, so the delete dialog
 warns about that lifecycle consequence without exposing member identities or counts.
 

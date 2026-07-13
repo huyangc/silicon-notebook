@@ -38,8 +38,11 @@ The documents now cover:
 - Local loopback HTTP at `http://127.0.0.1:8000/mcp`, remote HTTPS with
   `MCP_PUBLIC_URL`, Codex's bearer-token environment-variable command, and the
   current Claude Code HTTP/header command with the raw-header persistence warning.
-- Confirmed-only creator proposal → existing admin promotion review → dedupe/
-  merge into a Base KG object without changing or exposing the private Memory.
+- Confirmed-only creator proposal → admin review of sanitized extraction
+  candidates and server-validated evidence → approval-time current status/access
+  revalidation → dedupe/merge into one or more Base KG objects. The API/audit
+  retains the complete `base_object_ids` without changing or exposing the
+  private Memory.
 - Recall@5/MRR/nDCG, no-Memory/KB-only/KB+confirmed A/B, and the three zero-leak
   counters for formal candidate, cross-user, and cross-notebook leakage.
 
@@ -57,6 +60,15 @@ their historical three-tab text. `architecture.md` was synchronized as a live
 architecture document. The focused contract suite then passed 14/14 before the
 full final gate was rerun.
 
+The independent review then found three documentation-contract gaps: the live
+docs were not all guarded against a return to the three-tab workspace, one
+product-spec sentence incorrectly implied that admin browses raw Memory
+revision/provenance, and the promotion result was described as a singular Base
+object even though one Memory proposal may emit multiple object types. A new
+whitespace-insensitive live-section contract first failed (`1 failed, 14
+passed`), then passed (`15 passed`) after all current documents were corrected.
+Dated 2026-07-10 plan/spec text remains intentionally historical.
+
 ## Verification
 
 Final fresh command:
@@ -71,7 +83,8 @@ Results:
 
 - Official SDK Memory MCP smoke: passed (7 tools, session isolation, candidate
   plane isolation and same-owner/same-notebook cross-Agent recall).
-- Backend: `2903 passed, 1 skipped in 258.35s`.
+- Focused live-document contract: RED `1 failed, 14 passed`; GREEN `15 passed`.
+- Backend: `2904 passed, 1 skipped in 259.79s`.
 - Frontend tests: `182 passed`, `0 failed`.
 - TypeScript: `tsc --noEmit` passed.
 - Production build inside `scripts/check.sh`: passed.

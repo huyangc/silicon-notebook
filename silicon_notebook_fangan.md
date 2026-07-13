@@ -1342,10 +1342,12 @@ chunk 或 knowledge object。
 
 ## 19.4 Memory → KG 治理
 
-只有 confirmed Memory 可由创建者提议提升到 KG。提案进入现有管理员 promotion queue；管理员
-审核 Memory revision 与经过验证的 provenance，批准时复用既有 dedupe/merge，创建或合并 base
-KG object。批准不会把私有 Memory 改为 base，也不会暴露完整私有任务上下文；二者仅通过审核结果
-关联。
+只有 confirmed Memory 可由创建者提议提升到 KG。提案进入现有管理员 promotion queue；队列
+展示脱敏后的结构化提取候选与服务端验证过的 evidence，不提供原始 Memory revision/provenance
+浏览。批准前会重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权，再复用既有
+dedupe/merge，创建或合并一个或多个 Base KG 对象，并由 API 与晋升审计记录完整
+`base_object_ids`。批准不会把私有 Memory 改为 base，也不会暴露完整私有任务上下文；二者仅通过
+审核结果关联。
 
 ## 19.5 评价与发布门槛
 

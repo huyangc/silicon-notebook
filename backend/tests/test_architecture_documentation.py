@@ -45,6 +45,12 @@ def _read(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
 
 
+def _between(name: str, start: str, end: str | None = None) -> str:
+    text = _read(name)
+    section = text.split(start, 1)[1]
+    return section.split(end, 1)[0] if end else section
+
+
 def _assert_phrases(expected: dict[str, str]) -> None:
     for name, phrase in expected.items():
         assert phrase in _read(name), f"{name} is missing contract phrase: {phrase}"
@@ -128,6 +134,7 @@ def test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions():
             "AGENTS.md": "four tabs: **Ask**, **Knowledge**, **Memory**, and **Deep Report**",
             "architecture.md": "Ask / Knowledge / Memory / Deep Report 四个 tab",
             "fangan_done.md": "Ask / Knowledge / Memory / Deep Report 四个 tab",
+            "silicon_notebook_fangan.md": "Ask | Knowledge | Memory | Deep Report",
         }
     )
     _assert_phrases(
@@ -163,6 +170,76 @@ def test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions():
         assert "Mind Map" not in text
         assert "Infographic" not in text
         assert "派生规则审核" not in text
+
+
+def test_current_memory_docs_describe_sanitized_multi_object_promotion_contract():
+    sections = {
+        "README.md": _between("README.md", "## Memory and Agent MCP", "## KG extraction trigger"),
+        "README_zh.md": _between("README_zh.md", "## Memory 与 Agent MCP", "## KG 抽取触发"),
+        "AGENTS.md": _read("AGENTS.md"),
+        "architecture.md": _between("architecture.md", "### 3.4 Memory 与 Agent MCP", "### 3.5 KG 与索引维护"),
+        "silicon_notebook_fangan.md": _between("silicon_notebook_fangan.md", "# 19. Agent Memory 系统"),
+        "fangan_done.md": _between("fangan_done.md", "## 27. Agent Memory 与 MCP", "## 20. 当前边界"),
+    }
+    expected = {
+        "README.md": (
+            "sanitized extraction candidates and server-validated evidence",
+            "revalidates the Memory's current confirmed status and creator access",
+            "one or more Base KG objects",
+            "`base_object_ids`",
+        ),
+        "README_zh.md": (
+            "脱敏后的结构化提取候选与服务端验证过的 evidence",
+            "重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权",
+            "一个或多个 Base KG 对象",
+            "`base_object_ids`",
+        ),
+        "AGENTS.md": (
+            "sanitized extraction candidates and server-validated evidence",
+            "revalidates current confirmed status and creator access",
+            "one or more Base KG objects",
+            "`base_object_ids`",
+        ),
+        "architecture.md": (
+            "脱敏后的结构化提取候选与服务端验证过的 evidence",
+            "重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权",
+            "一个或多个 Base KG 对象",
+            "`base_object_ids`",
+        ),
+        "silicon_notebook_fangan.md": (
+            "脱敏后的结构化提取候选与服务端验证过的 evidence",
+            "重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权",
+            "一个或多个 Base KG 对象",
+            "`base_object_ids`",
+        ),
+        "fangan_done.md": (
+            "脱敏后的结构化提取候选与服务端验证过的 evidence",
+            "重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权",
+            "一个或多个 Base KG 对象",
+            "`base_object_ids`",
+        ),
+    }
+    for name, phrases in expected.items():
+        compact_section = "".join(sections[name].split())
+        for phrase in phrases:
+            assert "".join(phrase.split()) in compact_section, (
+                f"{name} is missing Memory promotion phrase: {phrase}"
+            )
+
+    for name, section in sections.items():
+        compact_section = "".join(section.split())
+        for stale in (
+            "three tabs",
+            "三个 tab",
+            "审核 Memory revision 与经过验证的 provenance",
+            "reviews the Memory revision and provenance",
+            "create or merge a Base KG object",
+            "create or merge a base object",
+            "创建或合并 base object",
+        ):
+            assert "".join(stale.split()) not in compact_section, (
+                f"{name} retains stale Memory wording: {stale}"
+            )
 
 
 def test_source_cleanup_documentation_matches_reparse_and_delete_boundaries():
