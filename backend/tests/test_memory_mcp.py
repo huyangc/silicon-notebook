@@ -789,6 +789,16 @@ def test_proposal_helper_rejects_actual_nonfinite_nested_values(value):
 async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_work(
     mcp_env, monkeypatch
 ):
+    from app.services.memory_inputs import (
+        MEMORY_CONTENT_MAX_CHARS,
+        MEMORY_EVIDENCE_MAX_COUNT,
+        MEMORY_EVIDENCE_MAX_SERIALIZED_BYTES,
+        MEMORY_REASON_MAX_CHARS,
+        MEMORY_TAG_MAX_CHARS,
+        MEMORY_TASK_CONTEXT_MAX_SERIALIZED_BYTES,
+        MEMORY_TITLE_MAX_CHARS,
+    )
+
     service = mcp_env["service"]
     notebook_id = mcp_env["notebook"].id
     base = {
@@ -817,6 +827,26 @@ async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_wo
         {"evidence_refs": [{"quote": "x" * 100_000}]},
         {"evidence_refs": [{"quote": "证" * 5_000}]},
         {"client_request_id": "r" * 100_000},
+        {"title": "t" * (MEMORY_TITLE_MAX_CHARS + 1)},
+        {"content_md": "c" * (MEMORY_CONTENT_MAX_CHARS + 1)},
+        {"tags": ["t" * (MEMORY_TAG_MAX_CHARS + 1)]},
+        {"reason": "r" * (MEMORY_REASON_MAX_CHARS + 1)},
+        {
+            "task_context": {
+                "private": "x" * MEMORY_TASK_CONTEXT_MAX_SERIALIZED_BYTES
+            }
+        },
+        {
+            "evidence_refs": [
+                {"source_id": str(index)}
+                for index in range(MEMORY_EVIDENCE_MAX_COUNT + 1)
+            ]
+        },
+        {
+            "evidence_refs": [
+                {"quote": "x" * MEMORY_EVIDENCE_MAX_SERIALIZED_BYTES}
+            ]
+        },
     ]
 
     async with OfficialMcpClient(

@@ -229,6 +229,7 @@ Memory 输入在 API 与 service 两层统一归一化并 fail-closed：title/co
 当前上限为 title 80 字符、content 40,000 字符、tag 最多 20 个且每个 80 字符、审核/candidate
 reason 1,000 字符、task context 序列化 UTF-8 8,192 bytes、evidence 最多 50 条且序列化 UTF-8
 32,768 bytes、client request id 200 字符。HTTP 违规返回 422；MCP/内部调用也经过同一 service 校验。
+嵌套 NaN、正负 Infinity 会在持久化前被拒绝，合法 JSON null 则保持原样往返。
 
 总 Memory 页的“Agent 接入”可创建稳定 Agent profile，以及明文只显示一次的 token。
 Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的
@@ -265,8 +266,8 @@ Claude Code 可能把这段原始 header 保存到本机配置。应使用最小
 
 只有 `confirmed` Memory 可发起 KG 晋升。创建者提交后，admin queue 展示脱敏后的结构化提取
 候选与服务端验证过的 evidence，而不是原始 Memory revision/provenance 浏览器。提案会固定精确的
-来源 revision、脱敏候选快照和审核所见 evidence；编辑审核中的 Memory 会在同一事务中废止旧提案并
-把晋升状态重置为可重新提交。批准时会重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权，
+来源 revision、脱敏候选快照和审核所见 evidence；编辑或弃用审核中的 Memory 会在同一事务中废止
+旧提案并重置晋升状态，编辑后可重新提交。批准时会重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权，
 并在写事务内校验固定 revision 与 notebook，再复用 KG dedupe/merge 创建或合并一个或多个 Base KG 对象；批准/拒绝会记录当前登录的
 admin reviewer，API 与晋升审计记录完整的 `base_object_ids`。这一过程不会改变或暴露原私有 Memory。
 删除 notebook 会级联删除所有成员绑定到它的私有 Memory，因此删除弹窗会提示这一生命周期

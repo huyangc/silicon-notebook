@@ -261,6 +261,68 @@ def test_memory_service_enforces_shared_input_limits_and_normalization(
     assert memory_service.get(valid.id, users.alice.id).content_md == "Body"
 
 
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize("field", ["task_context", "evidence_refs"])
+def test_memory_service_rejects_nested_nonfinite_json_without_persisting(
+    repo, memory_service, users, notebook, nonfinite, field
+):
+    task_context = {"optional": None, "nested": [{"score": nonfinite}]}
+    evidence_refs = [{"source_id": "missing", "score": nonfinite}]
+    if field == "task_context":
+        evidence_refs = [{"source_id": "missing", "score": None}]
+    else:
+        task_context = {"optional": None, "nested": [{"score": None}]}
+
+    with pytest.raises(ValueError, match="JSON serializable|non-finite"):
+        memory_service.create_candidate(
+            notebook.id,
+            users.alice.id,
+            "agent-a",
+            f"nonfinite-{field}-{nonfinite!r}",
+            "Nonfinite",
+            "Must not persist",
+            [],
+            "regression",
+            task_context,
+            evidence_refs,
+        )
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS count FROM memory_items WHERE created_by=?",
+            (users.alice.id,),
+        ).fetchone()["count"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS count FROM memory_provenance"
+        ).fetchone()["count"] == 0
+    assert memory_service.list_memories(users.alice.id).items == []
+
+
+def test_memory_service_nested_json_null_roundtrips_through_sqlite(
+    memory_service, users, notebook
+):
+    created = memory_service.create_candidate(
+        notebook.id,
+        users.alice.id,
+        "agent-a",
+        "nested-null-core",
+        "Nested null",
+        "Null is legitimate JSON",
+        [],
+        "regression",
+        {"optional": None, "nested": [{"value": None}]},
+        [{"source_id": "missing", "score": None}],
+    )
+
+    hydrated = memory_service.get(created.id, users.alice.id)
+    assert hydrated.provenance["task_context"] == {
+        "optional": None,
+        "nested": [{"value": None}],
+    }
+    assert hydrated.provenance["evidence_refs"][0]["trusted"] is False
+    assert memory_service.list_memories(users.alice.id).items[0].id == created.id
+
+
 def test_duplicate_agent_request_is_idempotent(
     memory_service, users, notebook, monkeypatch
 ):

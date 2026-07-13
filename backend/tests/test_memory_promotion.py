@@ -306,7 +306,30 @@ def test_admin_cannot_approve_after_owner_deprecates_proposed_memory(
 ):
     owner, _other, _notebook, base, memory = promotion_setup
     proposal = repo.propose_memory_promotion(memory.id, owner.id)
-    repo.deprecate_memory(memory.id, owner.id)
+    before = repo.memory_revisions(memory.id, owner.id)
+    deprecated = repo.deprecate_memory(memory.id, owner.id)
+
+    assert deprecated.status == "deprecated"
+    assert deprecated.promotion_state == "none"
+    assert deprecated.provenance["kg_promotion"]["state"] == "superseded"
+    assert deprecated.provenance["kg_promotion"]["proposal_id"] == proposal["id"]
+    assert deprecated.provenance["kg_promotion_snapshots"][proposal["id"]][
+        "source_revision"
+    ] == proposal["source_revision"]
+    with repo._connect() as db:
+        candidate = dict(db.execute(
+            "SELECT status,reason,reviewed_by FROM promotion_candidates WHERE id=?",
+            (proposal["id"],),
+        ).fetchone())
+    assert candidate == {
+        "status": "rejected",
+        "reason": "superseded_by_memory_terminal_status",
+        "reviewed_by": owner.id,
+    }
+    assert len(repo.memory_revisions(memory.id, owner.id)) == len(before) + 1
+    assert not any(
+        item["id"] == proposal["id"] for item in repo.list_promotion_queue()
+    )
 
     with pytest.raises(ValueError):
         repo.approve_promotion(proposal["id"])
@@ -316,6 +339,85 @@ def test_admin_cannot_approve_after_owner_deprecates_proposed_memory(
             (base.id,),
         ).fetchone()["c"]
     assert count == 0
+
+
+def test_owner_cannot_reject_proposed_confirmed_memory_or_mutate_its_queue(
+    repo, promotion_setup
+):
+    owner, _other, _notebook, base, memory = promotion_setup
+    proposal = repo.propose_memory_promotion(memory.id, owner.id)
+
+    with pytest.raises(ValueError, match="confirmed -> rejected"):
+        repo.reject_memory(memory.id, owner.id)
+
+    current = repo.get_memory(memory.id, owner.id)
+    assert current.status == "confirmed"
+    assert current.promotion_state == "proposed"
+    assert current.provenance["kg_promotion"]["state"] == "proposed"
+    with repo._connect() as db:
+        candidate = dict(db.execute(
+            "SELECT status,reason,reviewed_by FROM promotion_candidates WHERE id=?",
+            (proposal["id"],),
+        ).fetchone())
+        base_count = db.execute(
+            "SELECT COUNT(*) AS count FROM knowledge_objects WHERE notebook_id=?",
+            (base.id,),
+        ).fetchone()["count"]
+    assert candidate == {
+        "status": "proposed",
+        "reason": "",
+        "reviewed_by": "",
+    }
+    assert base_count == 0
+    assert any(
+        item["id"] == proposal["id"] for item in repo.list_promotion_queue()
+    )
+
+
+def test_deprecate_transition_and_approval_race_is_atomic(repo, promotion_setup):
+    owner, _other, _notebook, base, memory = promotion_setup
+    proposal = repo.propose_memory_promotion(memory.id, owner.id)
+    barrier = threading.Barrier(2)
+
+    def approve():
+        barrier.wait()
+        try:
+            return ("approved", repo.approve_promotion(proposal["id"]))
+        except ValueError as exc:
+            return ("approval_rejected", str(exc))
+
+    def terminate():
+        barrier.wait()
+        return ("terminal", repo.deprecate_memory(memory.id, owner.id))
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        approval_future = pool.submit(approve)
+        terminal_future = pool.submit(terminate)
+        approval_result = approval_future.result(timeout=10)
+        terminal_result = terminal_future.result(timeout=10)
+
+    current = repo.get_memory(memory.id, owner.id)
+    with repo._connect() as db:
+        candidate = dict(db.execute(
+            "SELECT status,reason FROM promotion_candidates WHERE id=?",
+            (proposal["id"],),
+        ).fetchone())
+        base_count = db.execute(
+            "SELECT COUNT(*) AS count FROM knowledge_objects WHERE notebook_id=?",
+            (base.id,),
+        ).fetchone()["count"]
+    assert terminal_result[0] == "terminal"
+    assert current.status == "deprecated"
+    if candidate["status"] == "rejected":
+        assert candidate["reason"] == "superseded_by_memory_terminal_status"
+        assert current.promotion_state == "none"
+        assert base_count == 0
+        assert approval_result[0] == "approval_rejected"
+    else:
+        assert candidate["status"] == "approved"
+        assert current.promotion_state == "approved"
+        assert base_count > 0
+        assert approval_result[0] == "approved"
 
 
 def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):

@@ -23,6 +23,17 @@ from starlette.responses import JSONResponse
 
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.schemas import AgentPrincipal, AskRequest, UserProfile
+from app.services.memory_inputs import (
+    MEMORY_EVIDENCE_MAX_COUNT,
+    MEMORY_TAG_MAX_COUNT,
+    normalize_client_request_id,
+    normalize_content,
+    normalize_evidence_refs,
+    normalize_reason,
+    normalize_tags,
+    normalize_task_context,
+    normalize_title,
+)
 
 
 PUBLIC_TOOLS = (
@@ -42,16 +53,10 @@ OUTPUT_KEY_LIMIT = 120
 OUTPUT_MAPPING_LIMIT = 20
 OUTPUT_DEPTH_LIMIT = 5
 OUTPUT_INTEGER_LIMIT = 9_999_999_999_999_999
-PROPOSAL_TITLE_LIMIT = 300
-PROPOSAL_CONTENT_LIMIT = 20_000
-PROPOSAL_TAG_LIMIT = 20
-PROPOSAL_TAG_TEXT_LIMIT = 200
 PROPOSAL_TAGS_JSON_LIMIT = 2_000
-PROPOSAL_REASON_LIMIT = 2_000
 PROPOSAL_TASK_CONTEXT_JSON_LIMIT = 8_000
-PROPOSAL_EVIDENCE_LIMIT = 20
+PROPOSAL_EVIDENCE_LIMIT = min(20, MEMORY_EVIDENCE_MAX_COUNT)
 PROPOSAL_EVIDENCE_JSON_LIMIT = 12_000
-PROPOSAL_CLIENT_REQUEST_ID_LIMIT = 200
 _SELECTED_ATTR = "_silicon_notebook_selected_notebook"
 _MCP_PRINCIPAL: contextvars.ContextVar[AgentPrincipal | None] = (
     contextvars.ContextVar("mcp_agent_principal", default=None)
@@ -418,24 +423,6 @@ def _proposal_json_size(value: Any, field: str) -> int:
         raise ValueError(f"{field} must contain JSON data") from exc
 
 
-def _validate_finite_json(value: Any, field: str) -> None:
-    # Null is valid JSON and may represent legitimate optional metadata. Actual
-    # non-finite floats are rejected here when the stack delivers them, with
-    # allow_nan=False providing the same fail-closed guard during serialization.
-    if value is None:
-        return
-    if isinstance(value, float) and not math.isfinite(value):
-        raise ValueError(f"{field} must not contain non-finite numbers")
-    if isinstance(value, Mapping):
-        for child in value.values():
-            _validate_finite_json(child, field)
-    elif isinstance(value, Sequence) and not isinstance(
-        value, (str, bytes, bytearray)
-    ):
-        for child in value:
-            _validate_finite_json(child, field)
-
-
 def _validate_proposal_input(
     title: str,
     content_md: str,
@@ -446,39 +433,25 @@ def _validate_proposal_input(
     client_request_id: str,
 ) -> tuple[str, str, list[str], str, dict[str, Any], list[dict[str, Any]], str]:
     """Validate the MCP write envelope before any repository/service lookup."""
-    clean_title = str(title).strip()
-    clean_content = str(content_md).strip()
-    clean_reason = str(reason).strip()
-    clean_request_id = str(client_request_id).strip()
-    if not clean_title or not clean_content or not clean_reason or not clean_request_id:
-        raise ValueError(
-            "title, content_md, reason, and client_request_id must be nonblank"
-        )
-    for field, value, limit in (
-        ("title", clean_title, PROPOSAL_TITLE_LIMIT),
-        ("content_md", clean_content, PROPOSAL_CONTENT_LIMIT),
-        ("reason", clean_reason, PROPOSAL_REASON_LIMIT),
-        ("client_request_id", clean_request_id, PROPOSAL_CLIENT_REQUEST_ID_LIMIT),
-    ):
-        if len(value) > limit:
-            raise ValueError(f"{field} exceeds {limit} characters")
+    clean_title = normalize_title(title)
+    clean_content = normalize_content(content_md)
+    clean_reason = normalize_reason(reason)
+    clean_request_id = normalize_client_request_id(client_request_id)
+    if not clean_reason:
+        raise ValueError("reason must be nonblank")
 
-    clean_tags = [str(tag).strip() for tag in (tags or [])]
-    if len(clean_tags) > PROPOSAL_TAG_LIMIT:
-        raise ValueError(f"tags exceeds {PROPOSAL_TAG_LIMIT} items")
-    if any(not tag for tag in clean_tags):
+    raw_tags = list(tags or [])
+    if len(raw_tags) > MEMORY_TAG_MAX_COUNT:
+        raise ValueError(f"tags exceeds {MEMORY_TAG_MAX_COUNT} items")
+    if any(not isinstance(tag, str) or not tag.strip() for tag in raw_tags):
         raise ValueError("tags must not contain blank values")
-    if any(len(tag) > PROPOSAL_TAG_TEXT_LIMIT for tag in clean_tags):
-        raise ValueError(
-            f"tag exceeds {PROPOSAL_TAG_TEXT_LIMIT} characters"
-        )
+    clean_tags = normalize_tags(raw_tags)
     if _proposal_json_size(clean_tags, "tags") > PROPOSAL_TAGS_JSON_LIMIT:
         raise ValueError("tags serialized payload is too large")
 
-    clean_task_context = dict(task_context)
+    clean_task_context = normalize_task_context(task_context)
     if not clean_task_context:
         raise ValueError("task_context must be nonblank")
-    _validate_finite_json(clean_task_context, "task_context")
     if (
         _proposal_json_size(clean_task_context, "task_context")
         > PROPOSAL_TASK_CONTEXT_JSON_LIMIT
@@ -487,8 +460,7 @@ def _validate_proposal_input(
 
     if len(evidence_refs) > PROPOSAL_EVIDENCE_LIMIT:
         raise ValueError(f"evidence_refs exceeds {PROPOSAL_EVIDENCE_LIMIT} items")
-    clean_evidence = [dict(reference) for reference in evidence_refs]
-    _validate_finite_json(clean_evidence, "evidence_refs")
+    clean_evidence = normalize_evidence_refs(evidence_refs)
     if (
         _proposal_json_size(clean_evidence, "evidence_refs")
         > PROPOSAL_EVIDENCE_JSON_LIMIT

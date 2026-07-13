@@ -15,6 +15,7 @@ from app.models.schemas import (
     PaginatedMemories,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.services.memory_inputs import strict_json_dumps
 from app.services.vector_index import encode_vector
 
 
@@ -321,7 +322,7 @@ class MemoryStore:
                     write.status,
                     write.title,
                     write.content_md,
-                    json.dumps(list(write.tags), ensure_ascii=False),
+                    strict_json_dumps(list(write.tags), field="tags"),
                     write.confirmed_by,
                     write.confirmed_at,
                     write.created_at,
@@ -347,7 +348,9 @@ class MemoryStore:
                 self.new_id("memprov"),
                 write.id,
                 write.origin,
-                json.dumps(dict(write.provenance or {}), ensure_ascii=False),
+                strict_json_dumps(
+                    dict(write.provenance or {}), field="memory provenance"
+                ),
                 write.created_at,
             ),
         )
@@ -734,38 +737,23 @@ class MemoryStore:
             status = target or row["status"]
             now = self.now()
             promotion_state = str(row["promotion_state"])
-            if values and promotion_state == "proposed":
-                provenance = json.loads(row["payload_json"] or "{}")
-                promotion = provenance.get("kg_promotion")
-                proposal_id = (
-                    str(promotion.get("proposal_id") or "")
-                    if isinstance(promotion, dict)
-                    else ""
+            invalidates_proposal = bool(values) or target in {
+                "rejected",
+                "deprecated",
+            }
+            if invalidates_proposal and promotion_state == "proposed":
+                supersede_reason = (
+                    "superseded_by_memory_edit"
+                    if values
+                    else "superseded_by_memory_terminal_status"
                 )
-                if not proposal_id:
-                    raise ValueError("proposed Memory is missing its promotion snapshot")
-                cursor = db.execute(
-                    "UPDATE promotion_candidates SET status='rejected',reason=?,"
-                    "reviewed_by=?,updated_at=? WHERE id=? AND object_id=? "
-                    "AND status IN ('proposed','under_review')",
-                    (
-                        "superseded_by_memory_edit",
-                        changed_by,
-                        now,
-                        proposal_id,
-                        memory_id,
-                    ),
-                )
-                if cursor.rowcount != 1:
-                    raise ValueError("active Memory promotion could not be superseded")
-                provenance["kg_promotion"] = {
-                    **promotion,
-                    "state": "superseded",
-                    "superseded_at": now,
-                }
-                db.execute(
-                    "UPDATE memory_provenance SET payload_json=? WHERE memory_id=?",
-                    (json.dumps(provenance, ensure_ascii=False), memory_id),
+                self._supersede_active_promotion_on(
+                    db,
+                    memory_id,
+                    changed_by,
+                    now,
+                    _json_object(row["payload_json"]),
+                    reason=supersede_reason,
                 )
                 promotion_state = "none"
             assignments = [
@@ -814,6 +802,47 @@ class MemoryStore:
                 reason,
             )
         return self.memory_for_user(memory_id, user_id)
+
+    @staticmethod
+    def _supersede_active_promotion_on(
+        db: sqlite3.Connection,
+        memory_id: str,
+        changed_by: str,
+        now: str,
+        provenance: dict[str, Any],
+        *,
+        reason: str,
+    ) -> None:
+        """Reject one active pinned proposal inside the caller's Memory write."""
+        promotion = provenance.get("kg_promotion")
+        proposal_id = (
+            str(promotion.get("proposal_id") or "")
+            if isinstance(promotion, dict)
+            else ""
+        )
+        if not proposal_id:
+            raise ValueError("proposed Memory is missing its promotion snapshot")
+        cursor = db.execute(
+            "UPDATE promotion_candidates SET status='rejected',reason=?,"
+            "reviewed_by=?,updated_at=? WHERE id=? AND object_id=? "
+            "AND status IN ('proposed','under_review')",
+            (reason, changed_by, now, proposal_id, memory_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("active Memory promotion could not be superseded")
+        provenance["kg_promotion"] = {
+            **promotion,
+            "state": "superseded",
+            "superseded_at": now,
+            "superseded_reason": reason,
+        }
+        db.execute(
+            "UPDATE memory_provenance SET payload_json=? WHERE memory_id=?",
+            (
+                strict_json_dumps(provenance, field="memory provenance"),
+                memory_id,
+            ),
+        )
 
     def update_with_revision(
         self,
@@ -944,7 +973,10 @@ class MemoryStore:
         }
         db.execute(
             "UPDATE memory_provenance SET payload_json=? WHERE memory_id=?",
-            (json.dumps(provenance, ensure_ascii=False), memory_id),
+            (
+                strict_json_dumps(provenance, field="memory provenance"),
+                memory_id,
+            ),
         )
         db.execute(
             "UPDATE memory_items SET promotion_state='proposed',updated_at=? "
@@ -1111,7 +1143,10 @@ class MemoryStore:
         provenance["kg_promotion"] = promotion
         db.execute(
             "UPDATE memory_provenance SET payload_json=? WHERE memory_id=?",
-            (json.dumps(provenance, ensure_ascii=False), memory_id),
+            (
+                strict_json_dumps(provenance, field="memory provenance"),
+                memory_id,
+            ),
         )
         db.execute(
             "UPDATE memory_items SET promotion_state=?,updated_at=? "
