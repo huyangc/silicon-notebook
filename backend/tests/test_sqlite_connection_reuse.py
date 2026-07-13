@@ -157,3 +157,17 @@ def test_write_uses_independent_connection(db):  # INV-8
         # inner write already committed independently → visible from a 3rd
         # connection while the outer read `with` is still open
         assert [r["x"] for r in _rows_from_other_thread(db, "SELECT x FROM t")] == [1]
+
+
+def test_facade_close_local(tmp_path, monkeypatch):  # facade delegate
+    from app.core.config import Settings
+    from app.services.sqlite_repository import SQLiteRepository
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'facade.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    repo = SQLiteRepository(Settings())
+    c1 = repo._connect()
+    repo.close_local()
+    c2 = repo._connect()
+    assert c2 is not c1

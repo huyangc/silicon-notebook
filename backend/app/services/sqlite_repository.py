@@ -890,6 +890,11 @@ class SQLiteRepository:
     def _connect(self) -> sqlite3.Connection:
         return self._runtime.database.connect()
 
+    def close_local(self) -> None:
+        """关闭并清除当前线程的复用 DB 连接(短命线程/大扫描/临时表清理)。
+        委托 runtime-owned SqliteDatabase。见 [[sqlite 连接复用]] INV-6/7。"""
+        self._runtime.database.close_local()
+
     @contextmanager
     def _write(self):
         """串行化写事务：进程内同一时刻只有一个写者进 SQLite，并发写线程在
