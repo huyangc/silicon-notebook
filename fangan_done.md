@@ -71,7 +71,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - Notebook 顶栏保持紧凑：标题下不再渲染 description，description 在没有对话时进入问答欢迎态；顶部分析工具栏具备横向 overflow 保护，桌面宽度下动作标签不会被截断。
 - source card 可打开 source detail，查看元素级文本，支持手动重解析。
 - **来源状态轮询**：上传后对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`（~3min 上限），实时展示 queued→parsing→parsed→extracting→extracted/failed；到达 extracted 自动刷新候选数与 counts。
-- **主栏当前 tab**：问答 / 知识库 / 深度报告；Scenario / Case / Checklist 已退役。
+- **主栏当前 tab**：Ask / Knowledge / Memory / Deep Report；Scenario / Case / Checklist 已退役。
   - 问答：自由提问走 `/ask`（已移除写死 scenario）；支持多个 conversation/session，会话历史通过顶部紧凑上下文栏 + 可展开会话管理面板切换/新建/重命名/删除，避免把主问答区长期切成更窄的左右两栏；欢迎区标题与 prompt chips 会根据 notebook 已导入来源的标题/摘要生成，并触发真实 ask。输入框支持 `Enter` 发送、`Shift+Enter` 换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制并恢复草稿问题。
   - 深度报告：两阶段后台 job，先审阅大纲再生成各节；支持实时进度、取消、删除、Markdown 与批量 zip 导出。
   - **知识库（多类型浏览）**：前端从 `/knowledge-types` 动态获取对象类型，再用 `/knowledge?type=...` 浏览任意类型（Concept / Claim / Formula / Procedure 以及 legacy/custom 类型）；卡片含状态徽标 + 状态下拉（reviewed/approved/deprecated/conflict/project_specific）+ owner 内联编辑 → `PATCH /knowledge/{id}`；按状态过滤；「查重」「冲突」面板（重复组带合并按钮、冲突对展示）。
@@ -326,7 +326,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **确定性评价与验证**：固定 gold 计算 Recall@5/MRR/nDCG，candidate→正式平面、跨用户、跨
   notebook 三个泄漏计数均为 0；A/B harness 覆盖 no-Memory、KB-only、KB+confirmed-Memory。
   `scripts/check.sh` 已包含官方 `mcp` client 离线 smoke，验证七工具、session 选择隔离、candidate
-  正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2904 passed, 1 skipped`、
+  正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2905 passed, 1 skipped`、
   前端 `182 passed`、TypeScript 与 Next.js production build 均成功。
 
 ## 20. 当前边界（后续阶段，未计入已完成）

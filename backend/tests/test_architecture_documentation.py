@@ -1,4 +1,5 @@
 import inspect
+import re
 from pathlib import Path
 
 from app.repositories.ports import (
@@ -170,6 +171,46 @@ def test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions():
         assert "Mind Map" not in text
         assert "Infographic" not in text
         assert "派生规则审核" not in text
+
+
+def test_live_workspace_docs_have_no_memory_omitting_tab_contracts():
+    """Current docs must not retain a pre-Memory tab list.
+
+    Dated 2026-07-10 history is intentionally preserved; the matching historical
+    plan/spec phrases remain guarded by the preceding test.
+    """
+    live_docs = (
+        "README.md",
+        "README_zh.md",
+        "AGENTS.md",
+        "architecture.md",
+        "fangan_done.md",
+        "silicon_notebook_fangan.md",
+    )
+    for name in live_docs:
+        current_lines = [
+            line
+            for line in _read(name).splitlines()
+            if "2026-07-10" not in line
+        ]
+        current = "\n".join(current_lines)
+        assert re.search(r"\bthree[- ]tabs?\b", current, re.I) is None, (
+            f"{name} retains a current three-tab workspace phrase"
+        )
+        assert "三个 tab" not in current
+
+        for match in re.finditer(
+            r"Ask.{0,80}Knowledge.{0,80}Deep Report", current, re.I
+        ):
+            assert "Memory" in match.group(0), (
+                f"{name} has a current English tab list without Memory: {match.group(0)}"
+            )
+        for match in re.finditer(
+            r"问答.{0,80}知识库.{0,80}深度报告", current
+        ):
+            assert "Memory" in match.group(0) or "记忆" in match.group(0), (
+                f"{name} has a current Chinese tab list without Memory: {match.group(0)}"
+            )
 
 
 def test_current_memory_docs_describe_sanitized_multi_object_promotion_contract():

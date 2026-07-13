@@ -69,6 +69,15 @@ whitespace-insensitive live-section contract first failed (`1 failed, 14
 passed`), then passed (`15 passed`) after all current documents were corrected.
 Dated 2026-07-10 plan/spec text remains intentionally historical.
 
+A follow-up review found that the positive four-tab assertions still allowed a
+separate live `three-tab` sentence and a second current capability/tab list that
+omitted Memory. The new live-doc scanner first failed on the hyphenated AGENTS
+phrase (`1 failed, 15 passed`), then exposed and drove the remaining AGENTS and
+`fangan_done.md` list fixes. It rejects `three-tab`/`three tabs`/`三个 tab` and
+English or Chinese current tab sequences that omit Memory, while filtering
+lines explicitly marked as 2026-07-10 history. The focused suite now passes
+16/16.
+
 ## Verification
 
 Final fresh command:
@@ -84,7 +93,8 @@ Results:
 - Official SDK Memory MCP smoke: passed (7 tools, session isolation, candidate
   plane isolation and same-owner/same-notebook cross-Agent recall).
 - Focused live-document contract: RED `1 failed, 14 passed`; GREEN `15 passed`.
-- Backend: `2904 passed, 1 skipped in 259.79s`.
+- Final live-tab contract: RED `1 failed, 15 passed`; GREEN `16 passed`.
+- Backend: `2905 passed, 1 skipped in 261.15s`.
 - Frontend tests: `182 passed`, `0 failed`.
 - TypeScript: `tsc --noEmit` passed.
 - Production build inside `scripts/check.sh`: passed.

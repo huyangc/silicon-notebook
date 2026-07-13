@@ -194,7 +194,7 @@ Repository 侧的 persistence 与业务编排已按上表分层完成；当前�
 
 整改按已批准设计分六个阶段；Repository 相关的阶段 2、4、6 已合并为一个保持行为不变的 Repository composition refactor 交付（设计见 `docs/superpowers/specs/2026-07-10-repository-composition-refactor-design.md`），每阶段仍单独提交/PR、同步最新 `master` 并运行完整门禁：
 
-1. **行为契约与文档对齐**（已完成）：修正 Ask disconnect、mode-specific federation/tier 排序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移，重写本文并加入文档契约测试；不改运行时代码。
+1. **2026-07-10 历史记录——行为契约与文档对齐**（已完成）：当时修正 Ask disconnect、mode-specific federation/tier 排序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移，重写本文并加入文档契约测试；不改运行时代码。当前 workspace 已扩展为四 tab，见上文实时边界。
 2. **Notebook 规模策略与 Repository ports**（已随 composition refactor 交付）：中性 `NotebookScaleProfile` 让 copy 与 retrieval 分别消费自己的策略；巨型 repository Protocol 拆成 `app/repositories/ports.py` 的领域小 Protocol，保留兼容组合类型。
 3. **FastAPI routers 与前端 API client**（计划项）：按 notebook/source/ask/knowledge/report/admin 拆 router；统一前端 JSON、NDJSON、Blob、认证和错误解析。
 4. **SQLite migrations 与模型边界**（migration 部分已随 composition refactor 交付）：migration registry、DDL 与 schema helper 已迁入 `app/repositories/sqlite/migrations.py`，schema snapshot/旧库兼容测试已就位；按领域拆 Pydantic 模型并从 `schemas.py` re-export 旧符号仍延后为独立工作。
