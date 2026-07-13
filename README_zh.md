@@ -459,6 +459,9 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 脚本除汇总请求、事件和 LLM 延迟外，还会基于 DB 聚合与 scale-index manifest 输出
 strict reasoning / PPR 路径审计，用来判断大库是否只走 indexed core、chunk/relation ANN
 是否齐全、delta 策略是否会放开未索引部分，以及跨 base 的路径是否可能触碰 active 全量向量。
+该报告同时是统一诊断入口 `scripts/diag.py` 的 `slow` 子命令（`diag.py slow | latency | base-recall`）——
+把三个「分析慢现象」的工具收敛到一个命令：离线的 `slow` / `latency` 子命令保持纯 stdlib、不 import app，
+可在裸机上直接跑；`base-recall` 才懒加载 app，用于诊断深度报告为何不引用 base 库。
 
 **日志可视化页面 — `/dev/logs`。** 针对上述 JSONL 通道的只读 debug 页面（v1 聚焦 LLM 通道）。左侧列表可按 kind / status / model 过滤并全文搜索；详情区完整展示发给 LLM 的内容（`system` / `user` 消息与 `schema_hint`）以及模型回复、token 用量、耗时。由门控的后端接口 `/api/debug/logs/...` 提供，需显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启（默认关闭——完整 LLM 记录可能包含私有来源材料）。
 

@@ -506,7 +506,11 @@ For deployment slow-path triage, run `python3 scripts/diag_slow.py` on the host 
 `.local/`. Besides request/event/LLM summaries, it prints a strict-reasoning / PPR audit
 from DB aggregates and scale-index manifests so large libraries can be checked for
 indexed-core coverage, chunk/relation ANN availability, delta policy, and cross-base paths
-that may still touch full active vectors.
+that may still touch full active vectors. This report is also the `slow` subcommand of the
+unified diagnostics entry `scripts/diag.py` (`diag.py slow | latency | base-recall`), which
+gathers the three slow-phenomenon tools under one command — the offline `slow` / `latency`
+subcommands stay stdlib-only and app-free so they run on a bare host, while `base-recall`
+lazily loads the app to diagnose why deep reports skip the base library.
 
 **Log viewer — `/dev/logs`.** A read-only debug page that visualizes these JSONL channels (LLM channel in v1). The left list is filterable by kind / status / model with full-text search; the detail pane shows exactly what was sent to the LLM (the `system` / `user` messages and the `schema_hint`) alongside the model's response, token usage, and latency. It is served by gated backend endpoints under `/api/debug/logs/...` — set `DEBUG_LOGS_ENABLED=false` to hide them.
 
