@@ -707,6 +707,70 @@ async def test_search_agent_memory_hydrates_fresh_records_and_drops_terminal_rac
 
 
 @pytest.mark.anyio
+async def test_propose_memory_preserves_legitimate_nested_null_and_sdk_normalization(
+    mcp_env,
+):
+    notebook_id = mcp_env["notebook"].id
+    async with OfficialMcpClient(
+        mcp_env["app"], mcp_env["token_a"].token
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        created = _payload(await client.call("propose_memory", {
+            "title": "Nested null",
+            "content_md": "Legitimate optional values remain null.",
+            "tags": ["null"],
+            "reason": "Optional evidence metadata",
+            "task_context": {"optional": None, "nested": [{"value": None}]},
+            "evidence_refs": [{"source_id": "source-null", "score": None}],
+            "client_request_id": "nested-null-request",
+        }))
+        detail = _payload(await client.call(
+            "get_memory", {"memory_id": created["memory_id"]}
+        ))
+        assert detail["provenance"]["task_context"] == {
+            "nested": [{"value": None}],
+            "optional": None,
+        }
+        assert detail["provenance"]["evidence_refs"] == [
+            {"score": None, "source_id": "source-null"}
+        ]
+
+        # The official SDK serializes non-finite Python floats as JSON null.
+        # The server cannot distinguish that normalization from legitimate null,
+        # but no non-standard Infinity token reaches persistence or output.
+        normalized = _payload(await client.call("propose_memory", {
+            "title": "SDK normalized numeric",
+            "content_md": "The official client emits null, not Infinity.",
+            "tags": ["normalization"],
+            "reason": "Protocol normalization probe",
+            "task_context": {"value": float("inf")},
+            "evidence_refs": [{"score": 1e9999}],
+            "client_request_id": "normalized-nonfinite-request",
+        }))
+        normalized_detail = _payload(await client.call(
+            "get_memory", {"memory_id": normalized["memory_id"]}
+        ))
+        assert normalized_detail["provenance"]["task_context"]["value"] is None
+        assert normalized_detail["provenance"]["evidence_refs"][0]["score"] is None
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), 1e9999])
+def test_proposal_helper_rejects_actual_nonfinite_nested_values(value):
+    from app.api.mcp_server import _validate_proposal_input
+
+    with pytest.raises(ValueError, match="JSON data|non-finite"):
+        _validate_proposal_input(
+            "Title",
+            "Content",
+            ["tag"],
+            "Reason",
+            {"nested": [{"value": value}]},
+            [{"score": value}],
+            "actual-nonfinite-request",
+        )
+
+
+@pytest.mark.anyio
 async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_work(
     mcp_env, monkeypatch
 ):
@@ -737,10 +801,6 @@ async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_wo
         {"evidence_refs": [{"source_id": str(index)} for index in range(1_000)]},
         {"evidence_refs": [{"quote": "x" * 100_000}]},
         {"evidence_refs": [{"quote": "证" * 5_000}]},
-        {"task_context": {"nested": {"value": float("nan")}}},
-        {"task_context": {"nested": [float("inf")]}},
-        {"task_context": {"nested": [float("-inf")]}},
-        {"evidence_refs": [{"score": 1e9999}]},
         {"client_request_id": "r" * 100_000},
     ]
 

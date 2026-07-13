@@ -419,11 +419,11 @@ def _proposal_json_size(value: Any, field: str) -> int:
 
 
 def _validate_finite_json(value: Any, field: str) -> None:
-    # Pydantic's JSON serializer represents NaN/Infinity as null. Reject null
-    # in these strict nested proposal envelopes too, so an official client
-    # cannot normalize a non-finite number into accepted persisted data.
+    # Null is valid JSON and may represent legitimate optional metadata. Actual
+    # non-finite floats are rejected here when the stack delivers them, with
+    # allow_nan=False providing the same fail-closed guard during serialization.
     if value is None:
-        raise ValueError(f"{field} must not contain null or non-finite numbers")
+        return
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError(f"{field} must not contain non-finite numbers")
     if isinstance(value, Mapping):

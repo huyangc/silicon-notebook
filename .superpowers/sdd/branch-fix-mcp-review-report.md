@@ -36,6 +36,13 @@ and four nested non-finite proposals (`NaN`, positive/negative infinity, and
 `1e9999`) reached live-principal refresh. The focused tests returned GREEN only
 after sub-budget packing and strict non-finite validation were added.
 
+A final null-regression probe was observed RED when legitimate nested JSON nulls
+were rejected. The implementation now preserves null recursively. Direct helper
+tests continue to reject actual `NaN` and positive/negative infinity values;
+official-client tests also record that the SDK normalizes those Python values
+(including `1e9999`) to JSON null before the tool sees them, so no non-standard
+`Infinity` token reaches persistence.
+
 ## Implementation
 
 ### Output budget
@@ -77,9 +84,11 @@ after sub-budget packing and strict non-finite validation were added.
 - Evidence count is independently capped. Validated normalized values alone are
   passed to the existing service, keeping the guard compatible with later shared
   service-level limits.
-- Nested task context and evidence use `allow_nan=False` plus recursive finite
-  validation. Null is rejected in these strict nested envelopes because the
-  official client serializes non-finite floats as null.
+- Nested task context and evidence preserve legitimate JSON null recursively,
+  reject actual non-finite floats when passed directly to the validation helper,
+  and retain `allow_nan=False` at serialization. The official SDK normalizes
+  Python non-finite floats to JSON null before dispatch; those values therefore
+  persist and return as standard JSON null, never as non-standard `Infinity`.
 
 ## Self-Review
 
@@ -97,9 +106,9 @@ after sub-budget packing and strict non-finite validation were added.
 
 ## Verification
 
-- Focused official MCP client after follow-up cleanup: `13 passed`.
+- Focused official MCP client after null-regression cleanup: `18 passed`.
 - Offline MCP smoke: `memory MCP smoke: OK (7 tools, session isolation, candidate plane isolation)`.
-- Final MCP/Auth/architecture regression slice: `100 passed`.
+- Final MCP/Auth/architecture regression slice: `105 passed`.
 - Architecture manifest failure found during the first full run was corrected and
   its focused guard reran `56 passed`.
-- Final exact backend suite after follow-up cleanup: `2912 passed, 1 skipped in 273.10s`.
+- Final exact backend suite after null-regression cleanup: `2917 passed, 1 skipped in 261.34s`.
