@@ -216,6 +216,9 @@ class Settings(BaseSettings):
     embed_rate_limit_base_delay: float = Field(2.0, validation_alias="EMBED_RATE_LIMIT_BASE_DELAY")
     # SQLite 忙等待超时（毫秒），配合 WAL 支持后台向量化与抽取并发写。
     db_busy_timeout_ms: int = Field(30000, validation_alias="DB_BUSY_TIMEOUT_MS")
+    # 复用连接下每条连接长期持有 page cache;总内存 = 连接数 × |cache_size|。
+    # 负值=KB。默认 16MB(低于旧 64MB)以在 O(线程数) 条连接下控总内存;可按部署上调。
+    sqlite_cache_size_kb: int = Field(-16384, validation_alias="SQLITE_CACHE_SIZE_KB")
     # 检索：top-N 知识对象。旧默认 12 是 6 月从 scored[:12] 魔数原样抬入、从未校准;
     # 提到 20 给简单/单方面题更多深度余量(对比题在此 floor 之上再按方面数自适应扩容)。
     retrieval_top_n: int = Field(20, validation_alias="RETRIEVAL_TOP_N")
