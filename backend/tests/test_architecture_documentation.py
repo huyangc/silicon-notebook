@@ -120,14 +120,18 @@ def test_retrieval_documentation_scopes_federation_and_tier_tie_break_by_path():
         assert "remains score-only" not in _read(name)
 
 
-def test_workspace_documentation_names_three_tabs_and_actual_toolbar_actions():
+def test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions():
     _assert_phrases(
         {
-            "README.md": "three tabs — **Ask**, **Knowledge**, and **Deep Report**",
-            "README_zh.md": "三个 tab——**问答**、**知识库**、**深度报告**",
-            "AGENTS.md": "three tabs: **Ask**, **Knowledge**, and **Deep Report**",
-            "architecture.md": "问答 / 知识库 / 深度报告三个 tab",
-            "fangan_done.md": "问答 / 知识库 / 深度报告三个 tab",
+            "README.md": "four tabs — **Ask**, **Knowledge**, **Memory**, and **Deep Report**",
+            "README_zh.md": "四个 tab——**Ask**、**Knowledge**、**Memory**、**Deep Report**",
+            "AGENTS.md": "four tabs: **Ask**, **Knowledge**, **Memory**, and **Deep Report**",
+            "architecture.md": "Ask / Knowledge / Memory / Deep Report 四个 tab",
+            "fangan_done.md": "Ask / Knowledge / Memory / Deep Report 四个 tab",
+        }
+    )
+    _assert_phrases(
+        {
             "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md":
                 "问答 / 知识库 / 深度报告三个 tab",
             "docs/superpowers/plans/2026-07-10-architecture-contract-alignment.md":
@@ -220,7 +224,7 @@ def test_current_docs_describe_reports_and_sharing_without_retired_article_contr
     assert "There is no live collaborative editing or change-password flow" in agents
     assert "Single-user mode for now" not in agents
     assert "no change-password / sharing / collaboration" not in agents
-    assert "更新日期：2026-07-12" in fangan_done
+    assert "更新日期：2026-07-13" in fangan_done
     assert "历史记录：Article Studio（已退役）" in fangan_done
     assert "历史记录（已退役）：Derived Rule Candidate" in fangan_done
 

@@ -1292,3 +1292,64 @@ notebook 活跃使用率
 # 18. 最终方案一句话
 
 > **构建一个面向半导体研发团队的用户自建 knowhow notebook 平台：用户上传历史规则、经验文档、案例、checklist 和技术文章后，系统自动抽取规则、方法、风险、案例和文章 claim，并支持基于具体工程场景的问答、方法推荐、风险提醒、历史案例检索、review checklist 生成，以及基于新文章的技术推演和候选规则沉淀。**
+
+---
+
+# 19. Agent Memory 系统（2026-07-13 已实施）
+
+本节是当前产品对早期“用户记忆”概念的正式设计，详细契约见
+`docs/superpowers/specs/2026-07-13-agent-memory-system-design.md`。它新增独立的 Memory
+层，不恢复已退役的 Studio、Article 或 KG candidate queue，也不把 Memory 伪装成 source、
+chunk 或 knowledge object。
+
+## 19.1 形成、隐私与页面
+
+- 每条 Memory 必须绑定一个 `notebook_id` 和一个创建者，归创建者私有；总 Memory 页面只是
+  当前用户跨 notebook 聚合，notebook 卡片数量和 `Ask | Knowledge | Memory | Deep Report`
+  中的 Memory 标签是 notebook 局部视图。
+- Ask 回答底部提供“保存到 Memory”。系统先生成不落库的标题/Markdown/标签预览，用户可编辑，
+  确认后直接形成 `confirmed`。LLM 未配置或预览失败时，确定性使用问题作标题、清理显示引用后的
+  回答作正文；预览后原 answer 被删除则拒绝保存可信 Ask Memory。
+- Agent 经 MCP 只能写入 `candidate`。生命周期为
+  `candidate | confirmed | rejected | deprecated`，所有修改与审核保留 revision/provenance。
+  用户确认后 candidate 才成为正式 notebook Memory；拒绝或弃用后不再召回。
+- 即使 notebook 通过链接共享，成员的 Memory 仍互不可见。Notebook 删除会按生命周期级联删除
+  所有成员绑定在该 notebook 的私有 Memory；删除提示只说明后果，不展示成员身份、内容或数量。
+
+## 19.2 两个检索平面与权威
+
+- Agent 候选平面允许同一用户、同一 notebook 下获授权的所有 Agent profile 读取 candidate 和
+  confirmed；必须具备 `memory:read_candidates` 才能读取 candidate。不同用户、不同 notebook、
+  rejected/deprecated 均严格排除。
+- Notebook 正式平面只有 confirmed，可进入网页 Ask、notebook 搜索、Deep Report 和 MCP
+  `search_notebook_context`；candidate 没有临时绕过开关。
+- 混合检索先用关键词/向量相关性形成候选，再以权威处理等分或冲突，固定次序为
+  `candidate < personal 原始证据 < confirmed Memory < base KG/base 原始证据`。
+  Memory 引用保留独立 provenance，不伪造 source/element id。
+
+## 19.3 Agent profile、token 与 MCP
+
+- 用户在总 Memory 页创建稳定 Agent profile，并签发明文只显示一次的 opaque token。Token 配置
+  过期时间、默认 notebook、notebook allowlist 和最小 scope；可即时撤销。可用 scope 只有
+  `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
+  `ask:execute`。
+- MCP 使用官方 SDK 的 Streamable HTTP `/mcp`。本机只允许 loopback HTTP；远程必须 HTTPS。
+  每个新 session 先显式调用 `select_notebook`，服务端在后续每次数据调用重新校验 token、scope、
+  allowlist、所选 notebook 和用户当前访问权。
+- 精确工具集为 `list_notebooks`、`select_notebook`、`search_agent_memory`、
+  `search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory`。
+  Agent 不能确认、拒绝、弃用或晋升 Memory；返回内容始终作为不可信 evidence/data，不作为指令。
+
+## 19.4 Memory → KG 治理
+
+只有 confirmed Memory 可由创建者提议提升到 KG。提案进入现有管理员 promotion queue；管理员
+审核 Memory revision 与经过验证的 provenance，批准时复用既有 dedupe/merge，创建或合并 base
+KG object。批准不会把私有 Memory 改为 base，也不会暴露完整私有任务上下文；二者仅通过审核结果
+关联。
+
+## 19.5 评价与发布门槛
+
+固定 gold 计算 Recall@5、MRR、nDCG，并以三项零容忍计数守卫 candidate→正式平面、跨用户、
+跨 notebook 泄漏；另有 A/B harness 对比 no-Memory、KB-only、KB+confirmed-Memory。发布门槛
+还包含官方 MCP client 离线 smoke：七工具契约、session 选择隔离、candidate 不进入正式上下文，
+以及同用户同 notebook 的跨 Agent candidate 召回。

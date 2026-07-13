@@ -22,6 +22,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - Two-tier knowledge base: each notebook has a `tier` (`base` | `personal`, default `personal`). Baseline `chunk` retrieval reads chunks from the active notebook only; optional KG overlay/PPR can add federated KG context and base-backed chunks, while `graph` and `reasoning` use federated KG paths. The exact-score `base` tie-break applies only to knowledge-object hits returned by `federated_retrieve()`: scores stay unchanged and a higher-scoring personal hit still wins. `federated_retrieve_relations()` remains score-only. Separately, when base and personal evidence contradict during answer synthesis, the answer defers to the base position and surfaces the discrepancy. Citations carry their tier (`AnswerAnchor.tier`) and Ask renders a `base`/`personal` badge per cited anchor.
 - **User accounts**: self-service registration (username rule: a single letter + `00` + 6 digits, e.g. `a00123456`; stored lower-cased) + password login with opaque Bearer session tokens. Each notebook is owned by its creator; a user's library contains owned notebooks plus large shared notebooks they explicitly joined read-only. On first boot the built-in `admin` account is created (login `admin`, password from `SILICON_NOTEBOOK_ADMIN_PASSWORD`, local default `admin`; production/non-loopback startup requires changing it); the admin owns pre-existing notebooks and is the only user who can mark a notebook as the base KG. Base notebooks are hidden from regular users' lists but are still used as authoritative retrieval context at ask time. Set `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` for local/no-auth testing. The frontend shows a login/register gate on first load; the topbar displays the logged-in username and a logout button.
 - **Share links**: owners can publish an opaque notebook link. Small notebooks are copied into the recipient's account; large notebooks are joined as read-only membership. Write access stays with the owner, and there is no live collaborative editing or change-password flow.
+- **Notebook-bound private Memory**: users can manually turn an Ask answer into an editable preview and confirm it as reusable Memory. The collection has a user-level Memory page; notebook cards show the current user's count, and each workspace exposes **Ask | Knowledge | Memory | Deep Report**. External Agents can submit `candidate` Memory through MCP; candidates are shared only among that same user's authorized Agents in the same notebook and do not enter formal Ask/search/report retrieval until the user confirms them.
 - Optional graph-reasoning Ask mode (`mode="graph"`, opt-in/experimental): a rustworkx in-memory graph built from `knowledge_relations` is traversed for bounded multi-hop derivation/support chains, with answer-time adversarial chain verification and a weakest-link `chain_trust` score (the default Ask mode stays `chunk`)
 - Deep report (two-phase background job): a notebook-level "深度报告" action turns one question into a multi-section technical report. **Phase 1 (seconds)**: a STORM-style multi-perspective planner — grounded in a zero-LLM corpus scout (source titles + KG hits + chunk provenance, so the outline is not planned blind) — pre-writes an outline where each section carries its expert perspectives, cross-perspective tensions, and an evidence-sufficiency verdict (充足/薄弱/缺失 + gap note, from a zero-LLM retrieval probe + a Judge on the rewrite model); the user reviews/edits it in an outline editor before committing. **Phase 2 (minutes, on confirm)**: each section runs a full `reasoning` deep-dive independently (sections run in parallel, each with its own retrieval budget), each is drafted with a three-tier evidence discipline (`[k]` in-corpus citation / `（推断）` in-corpus inference / `【通识】` general-knowledge, marked and flagged unverified), then a summary pass adds an executive summary, references, and — only when a section lacked in-corpus support — a one-line limitation note. A depth control (five named levels 概览/标准/深入/详尽/穷尽, default 标准 — the per-section reflect-step budget, popover next to the generate button) trades thoroughness for latency; sections deep-dive in parallel up to `KG_JOB_CONCURRENCY`, and the UI shows live per-section progress (`section_status`). Runs as a cancellable background job; each report downloads as `.md`, or multi-select for a `reports.zip`
 - Edge trust & curation: per-edge trust signals (evidence / corroboration / type-validity) plus a curator review queue; reviewer-rejected edges are excluded from graph reasoning
@@ -210,13 +211,78 @@ Inside a notebook:
 
 - Header: the editable notebook title stays compact by itself; the notebook description is shown in the Ask welcome state when no conversation is active, and toolbar actions keep their labels intact across desktop widths.
 - Left column: user-imported source files with live parse-status (green = `extracted` only; others shown in amber while processing), detail previews, and delete actions. Network source search is disabled for now.
-- Main column: three tabs — **Ask**, **Knowledge**, and **Deep Report**. Ask provides grounded Q&A with clickable `[k_i]` sentence citations, three retrieval modes, multi-turn conversations, a live expandable reasoning trace, and feedback. Knowledge browses and governs dynamic object types. Deep Report exposes the two-stage report lifecycle, outline review, progress, export, cancellation, and deletion. In Ask, `Enter` submits, `Shift+Enter` keeps a newline, and while a model response is running the input/mode controls are locked while the send button becomes an interrupt control. A transport disconnect stops delivery to that client only; navigation, refresh, or transport loss leaves the detached Ask job running and it may persist its final answer. Clicking interrupt is a distinct cancellation action: the client calls `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel`, which sets the backend cancellation event so the worker/LLM path stops and does not save a cancelled final answer. The workspace remains two columns and has no fixed Studio sidebar.
+- Main column: four tabs — **Ask**, **Knowledge**, **Memory**, and **Deep Report**. Ask provides grounded Q&A with clickable `[k_i]` sentence citations, three retrieval modes, multi-turn conversations, a live expandable reasoning trace, and feedback. Knowledge browses and governs dynamic object types. Memory shows only the current user's private records bound to this notebook. Deep Report exposes the two-stage report lifecycle, outline review, progress, export, cancellation, and deletion. In Ask, `Enter` submits, `Shift+Enter` keeps a newline, and while a model response is running the input/mode controls are locked while the send button becomes an interrupt control. A transport disconnect stops delivery to that client only; navigation, refresh, or transport loss leaves the detached Ask job running and it may persist its final answer. Clicking interrupt is a distinct cancellation action: the client calls `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel`, which sets the backend cancellation event so the worker/LLM path stops and does not save a cancelled final answer. The workspace remains two columns and has no fixed Studio sidebar.
 - Knowledge Graph opens as a full-screen overlay: object-level KG nodes (Concept / Claim / Formula / Procedure) with type-specific shapes, edge relationship labels, multi-select type filters, and a type-grouped side panel that focuses the canvas on selection. The side panel renders source excerpts as structured evidence cards so long titles, locations, formulas, and mixed Chinese/English text wrap inside the panel.
 - The Analysis menu itself contains only the promotion queue (admin), mark-base / mark-personal tier toggle (admin), and edge-review queue. Dashboard, Schema, and the full-screen Knowledge Graph are separate top-toolbar actions; no retired content-generation or derived-rule actions are exposed.
 
 Reparse preserves the source row and original file: it replaces source elements/chunks and their embeddings, and removes extraction runs plus source-derived knowledge before rebuilding. Delete performs the same source-derived cleanup, then deletes the source row (cascading source-owned records) and the local file.
 
 The notebook workspace hides the global collection top bar and keeps an engineering-console visual treatment.
+
+## Memory and Agent MCP
+
+Memory is manual opt-in, creator-private, and always bound to exactly one notebook. From
+an Ask answer, choose **Save to Memory**: the backend prepares a title/body/tag preview,
+the user may edit it, and only the final confirmation writes a `confirmed` Memory. If the
+preview model is unavailable or fails, the preview deterministically uses the question as
+the title and the answer with display citations removed. The global Memory page aggregates
+only the signed-in user's records; a notebook's count and Memory tab are the same data
+filtered to that notebook.
+
+The lifecycle is `candidate | confirmed | rejected | deprecated`. An Agent can create only
+`candidate`; all authorized Agent profiles belonging to the same user and selected notebook
+may retrieve it when the token includes `memory:read_candidates`. A candidate is never
+returned by formal notebook Ask, notebook search, Deep Report, or
+`search_notebook_context`. Confirmation moves it into that formal plane. Rejected and
+deprecated records are excluded from both planes. Retrieval first requires relevance;
+authority only resolves equally relevant/conflicting evidence in this order:
+`candidate < personal source < confirmed Memory < base KG/base source`.
+
+The Memory page's **Agent access** area creates stable Agent profiles and one-time plaintext
+tokens. A token has an expiry, a default notebook, a notebook allowlist, and the smallest
+needed subset of `knowledge:read`, `memory:read`, `memory:read_candidates`,
+`memory:propose`, and `ask:execute`; it can be revoked immediately. Install the backend
+requirements (which include the official `mcp>=1.26.0` client/server SDK), start the backend,
+then connect to the Streamable HTTP server at `/mcp` (`/mcp/` is handled through redirect).
+Local use may use loopback HTTP; any remote deployment must expose an HTTPS URL and set
+`MCP_PUBLIC_URL` to that public `/mcp` URL.
+
+For Codex, place the issued token in an environment variable and register the server:
+
+```bash
+export SILICON_NOTEBOOK_AGENT_TOKEN='<one-time-issued-token>'
+codex mcp add silicon-notebook --url http://127.0.0.1:8000/mcp \
+  --bearer-token-env-var SILICON_NOTEBOOK_AGENT_TOKEN
+```
+
+For Claude Code, the currently installed CLI accepts an HTTP transport and an explicit
+Authorization header:
+
+```bash
+claude mcp add --transport http silicon-notebook http://127.0.0.1:8000/mcp \
+  --header "Authorization: Bearer <one-time-issued-token>"
+```
+
+Claude Code may persist that raw header in its local configuration. Use least-privilege
+scopes, a short expiry, protect the local config, and revoke/rotate the token after use.
+Do not assume shell environment interpolation in that header.
+
+Every new MCP session must call `select_notebook` before a data tool. The exact tool set is:
+`list_notebooks`, `select_notebook`, `search_agent_memory`,
+`search_notebook_context`, `get_memory`, `ask_notebook`, and `propose_memory`.
+The server rechecks scope, allowlist, token state, and notebook access on data calls;
+retrieved text is untrusted evidence, not executable Agent instructions.
+
+Only a `confirmed` Memory can be proposed for KG promotion. The creator proposes it, an
+admin reviews it in the existing promotion queue, and approval reuses KG dedupe/merge to
+create or merge a base object. This does not change or expose the private Memory row.
+Deleting a notebook cascades all members' private Memory bound to it, so the delete dialog
+warns about that lifecycle consequence without exposing member identities or counts.
+
+The committed deterministic Memory evaluation reports Recall@5, MRR, nDCG, and three
+zero-tolerance counters: candidate-to-formal-plane leakage, cross-user leakage, and
+cross-notebook leakage. The A/B harness compares no-Memory, KB-only, and
+KB+confirmed-Memory retrieval.
 
 ## KG extraction trigger
 
@@ -271,6 +337,8 @@ Key local beta APIs:
 - `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel` — explicit interrupt endpoint; sets the cancellation event and stops the worker before a cancelled final answer is saved
 - `GET /api/notebooks/{id}/conversations`, `GET|PATCH|DELETE /api/conversations/{id}`
 - `POST /api/answers/{answer_id}/feedback`
+- Memory: `GET /api/memories`, `GET /api/notebooks/{id}/memories`, `GET|PATCH /api/memories/{memory_id}`, `POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`, `POST /api/answers/{answer_id}/memory-preview`, `POST /api/notebooks/{id}/memories/from-answer`
+- Agent access: `GET|POST /api/agent-profiles`, `PATCH /api/agent-profiles/{profile_id}`, `POST /api/agent-profiles/{profile_id}/tokens`, `GET /api/agent-tokens`, `DELETE /api/agent-tokens/{token_id}`; Streamable HTTP MCP is mounted at `/mcp`
 - Unified KG: `POST .../unified-kg/rebuild`, `GET .../unified-kg`, `GET .../unified-kg/pending-merges`, `POST .../unified-kg/merges/{id}/confirm|reject`
 - `GET .../concepts/{canonical_id}/detail`, `GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`, `POST /api/object-schemas`, `PATCH /api/object-schemas/{type}`, `DELETE /api/object-schemas/{type}`
