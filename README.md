@@ -40,9 +40,9 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 11. The committed v9 compatibility fixture
-upgrades through the existing v10 migration and the v11 Memory/Agent migration,
-and remains readable.
+The current schema version is 13. The committed v9 compatibility fixture
+upgrades through the existing v10 migration, the v11/v12 SQLite hot-path index
+migrations, and the v13 Memory/Agent migration, and remains readable.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, and graph/answer type marks share `kg-type-mark.tsx`.
 - Boundary regression tests prevent these responsibilities from being copied back into the monoliths. Future extraction should follow the same incremental pattern: preserve endpoints and user behavior, move one cohesive domain, then run the complete offline gate.
 
@@ -194,6 +194,40 @@ bash scripts/check.sh                        # hermetic smoke + full pytest + fr
 
 The backend writes structured JSONL logs under `.local/logs/` (`requests` / `events` /
 `llm`); see [Observability](#observability) to follow an upload or diagnose a stuck source.
+
+### 5 · Offline packaging (target has no npm/node)
+
+To deploy onto a machine with **no npm/node**, only a Python package index, and **no root**,
+build a self-contained bundle on a host that *does* have Node — and whose **OS/CPU
+architecture matches the target** — then ship a single tarball:
+
+```bash
+bash scripts/pack.sh          # → dist/silicon_notebook_<version>_<os>-<arch>.tar.gz
+```
+
+`pack.sh` builds the frontend as a Next.js **standalone** server, bundles a **portable Node
+runtime** (matching the build host's arch) to run it, and prebuilds a **wheelhouse** of every
+Python dependency — so compiled packages like `hnswlib` / `scipy` need no compiler on the
+target. Because the build host and target share OS/arch, every bundled binary runs as-is.
+
+On the target — no npm/node, no root:
+
+```bash
+tar xzf silicon_notebook_<version>_<os>-<arch>.tar.gz
+cd    silicon_notebook_<version>_<os>-<arch>
+./install.sh    # user-local venv; installs deps offline from wheelhouse
+                # (falls back to the pip index for anything missing); writes .env
+vi .env         # fill in model-service URLs (same as step 2 · Configure)
+./start.sh      # portable-node standalone frontend + venv uvicorn backend
+./stop.sh       # stop both
+```
+
+Build-host knobs: `NODE_VERSION` / `NODE_DIST_URL` / `NODE_TARBALL` (portable-Node source),
+`SKIP_WHEELHOUSE=1` (target installs deps online instead), `PIP_INDEX_URL`, `PACK_PYTHON`.
+Target knobs: `PYTHON_BIN`, `PIP_INDEX_URL`, `FRONTEND_HOST` / `FRONTEND_PORT` / `BACKEND_HOST`
+/ `PORT`. The build host's Python **minor** version should match the target's, or the prebuilt
+wheels won't install (install.sh then falls back to the index). The bundle's `DEPLOY.md` has
+target-side details.
 
 ## Product Flow
 
@@ -462,6 +496,7 @@ tracking. Only turn it on if you have understood and accounted for both costs.
 
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout in ms (default 30000)
+SQLITE_CACHE_SIZE_KB    # Per-connection SQLite page cache in KB (negative = KB). Connections are reused per-thread; total memory ≈ threads × |value| (default -16384)
 DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
 ```
@@ -606,7 +641,11 @@ For deployment slow-path triage, run `python3 scripts/diag_slow.py` on the host 
 `.local/`. Besides request/event/LLM summaries, it prints a strict-reasoning / PPR audit
 from DB aggregates and scale-index manifests so large libraries can be checked for
 indexed-core coverage, chunk/relation ANN availability, delta policy, and cross-base paths
-that may still touch full active vectors.
+that may still touch full active vectors. This report is also the `slow` subcommand of the
+unified diagnostics entry `scripts/diag.py` (`diag.py slow | latency | base-recall`), which
+gathers the three slow-phenomenon tools under one command — the offline `slow` / `latency`
+subcommands stay stdlib-only and app-free so they run on a bare host, while `base-recall`
+lazily loads the app to diagnose why deep reports skip the base library.
 
 **Log viewer — `/dev/logs`.** A read-only debug page that visualizes these JSONL channels (LLM channel in v1). The left list is filterable by kind / status / model with full-text search; the detail pane shows exactly what was sent to the LLM (the `system` / `user` messages and the `schema_hint`) alongside the model's response, token usage, and latency. It is served by gated backend endpoints under `/api/debug/logs/...` — set `DEBUG_LOGS_ENABLED=false` to hide them.
 

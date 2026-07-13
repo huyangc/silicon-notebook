@@ -137,15 +137,17 @@ class GraphRetrievalService(_RetrievalState):
             # concept_clusters part means a rebuild_unified_kg on ANY participant
             # (which rewrites clusters without touching relations) invalidates
             # the federated graph, so the cross-doc hubs are rebuilt.
+            # O(1) monotonic seq triple per participant instead of per-nb
+            # COUNT/MAX scans over relations+objects+clusters, recomputed on
+            # every call (even cache HIT). kg_mutation_seq covers relation +
+            # object writes AND edge-review flips (set_edge_review bumps it —
+            # replaces the old per-status n_rej/n_ver columns);
+            # cluster_mutation_seq covers rebuild_unified_kg. invalidate_kg
+            # evicts every :fed_rxgraph entry (belt-and-braces incl. the
+            # delete+reingest seq-reset case).
             version_parts = []
             for nb_id, _ in participants:
-                rel_ver, obj_ver = self.knowledge.graph_version_rows(db, nb_id)
-                clu_ver = self.unified_kg.cluster_version_row(db, nb_id)
-                version_parts.append(
-                    (nb_id, rel_ver["c"], rel_ver["ts"],
-                     rel_ver["n_rej"], rel_ver["n_ver"],
-                     obj_ver["c"], obj_ver["ts"],
-                     clu_ver["c"], clu_ver["ts"]))
+                version_parts.append((nb_id,) + self.unified_kg.graph_seq_row(db, nb_id))
             version = ("fed_rxgraph", tuple(version_parts))
 
             tier_map = {nb_id: nb_tier for nb_id, nb_tier in participants}
@@ -203,15 +205,16 @@ class GraphRetrievalService(_RetrievalState):
         from app.services.kg.ppr import build_ppr_graph
         with self._connect() as db:
             participants = self.notebooks.participant_ids(db, notebook_id)
+            # O(1) monotonic seq triple (kg_mutation_seq, cluster_mutation_seq,
+            # mention_seq) per participant instead of 5 COUNT/MAX scans over
+            # relations/objects/chunks/clusters + the mention read. kg_mutation_seq
+            # covers object/relation/chunk writes; cluster_mutation_seq the
+            # rebuild; mention_seq the co-mention bridge. invalidate_kg evicts
+            # every :ppr_graph entry (belt-and-braces for the delete+reingest
+            # seq-reset case where a base participant could collide on the triple).
             version_parts = []
             for nb in participants:
-                rel_ver, obj_ver, chunk_ver, clu_ver, men_ver = \
-                    self.unified_kg.ppr_version_rows(db, nb)
-                # mention_seq(P2 共提桥):派生 mention_edges 上次重建时的 kg_mutation_seq。
-                # O(1) unified_kg_state 单行读——mention 数据变更(重建/flag/权重)须让图缓存失效。
-                version_parts.append((nb, obj_ver["c"], obj_ver["ts"], rel_ver["c"], rel_ver["ts"],
-                                      chunk_ver["c"], chunk_ver["ts"], clu_ver["c"], clu_ver["ts"],
-                                      men_ver["ms"] if men_ver else -1))
+                version_parts.append((nb,) + self.unified_kg.graph_seq_row(db, nb))
         # runtime_dim 入键(T3/R4):emb_synonym 边由向量矩阵派生,切
         # EMBED_RUNTIME_DIM 后旧空间算出的图不能再服役。
         from app.services.vector_index import resolve_runtime_dim

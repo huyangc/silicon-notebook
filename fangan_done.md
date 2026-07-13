@@ -293,7 +293,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 ## 27. Agent Memory 与 MCP（方案 §19；Agent Memory 设计 §4～§13）
 
-- **独立 Memory 层**：schema v11 增加 `memory_items`、revision、provenance、embedding/FTS、
+- **独立 Memory 层**：schema v13 增加 `memory_items`、revision、provenance、embedding/FTS、
   Agent profile/token/allowlist 表。每条 Memory 同时绑定 `created_by` 与一个 notebook；总 Memory
   页面只聚合当前用户，notebook 卡片以批量 summary query 显示当前用户数量，工作区标签为
   `Ask | Knowledge | Memory | Deep Report`。共享 notebook 不共享成员 Memory。

@@ -98,6 +98,7 @@ class KnowledgeLifecycleService:
         new_id: Callable[[str], str],
         now: Callable[[], str],
         connect: Callable[[], sqlite3.Connection],
+        close_local: Callable[[], None],
         write: Callable[[], Any],
         get_notebook: Callable[[str], Any],
         invalidate_unified_cache: Callable[[str], None],
@@ -136,6 +137,7 @@ class KnowledgeLifecycleService:
         self._new_id = new_id
         self._now = now
         self._connect = connect
+        self._close_local = close_local
         self._write = write
         self.get_notebook = get_notebook
         self._invalidate_unified_cache = invalidate_unified_cache
@@ -180,6 +182,12 @@ class KnowledgeLifecycleService:
         with self._write() as db:
             counts = self.knowledge.delete_notebook_graph_rows(db, notebook_id)
         self._invalidate_unified_cache(notebook_id)
+        # delete_notebook_graph_rows drops the unified_kg_state row, so the count
+        # cache's seq reads 0 afterward — which ALIASES with a genuine seq 0 (e.g.
+        # a freshly copy_notebook'd nb whose counts were cached at seq 0). Drop the
+        # entry explicitly so post-delete counts (0) aren't masked by a seq-0 hit.
+        from app.repositories.sqlite import knowledge_counts_cache
+        knowledge_counts_cache.invalidate(notebook_id)
         return counts
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],
@@ -803,7 +811,15 @@ class KnowledgeLifecycleService:
         self.get_notebook(notebook_id)
         with self._connect() as db:
             row = self.unified_kg.state_row(db, notebook_id)
-            clusters = self.unified_kg.distinct_cluster_count(db, notebook_id)
+            # cluster_count is persisted at rebuild end (finish_rebuild_state); the
+            # live COUNT(DISTINCT canonical_id) is only a null-fallback (see the
+            # `row["cluster_count"] or clusters` below). Compute it ONLY when the
+            # persisted value is absent — otherwise we scanned all member rows
+            # (temp b-tree over concept_clusters, ~1 row/member) on every status
+            # poll for a value that gets thrown away. Byte-identical result.
+            clusters = 0
+            if row is None or not row["cluster_count"]:
+                clusters = self.unified_kg.distinct_cluster_count(db, notebook_id)
         viz = self.scale_artifacts.viz_probe(notebook_id)
         viz_building = notebook_id in self.scale_artifacts.viz_building
         if row is None:
@@ -1827,8 +1843,11 @@ class KnowledgeLifecycleService:
                         d = claim_hits.setdefault(claim_id, {})
                         for c in canons:
                             d.setdefault(c, alias)   # 同 canonical 多别名命中只记首个
+                # ⚠ precondition: _close_local() 关闭整个线程的复用连接,故本扫描不得在任何
+                # open `with self._connect() as db:` 块内调用(会使该 db 中途失效→ProgrammingError)。
+                # 当前两处调用点均在 depth 0(无外层 open connect)。
             finally:
-                scan_db.close()
+                self._close_local()   # 关连接(临时表蒸发)+清 thread-local(下次 connect 重建)
         if dropped > 0:
             self.event_log.emit({"kind": "mention_alias_df_dropped",
                                  "notebook_id": notebook_id, "dropped": dropped})

@@ -54,7 +54,39 @@ KG 对象向量在 `store_kg` 入库时嵌入;并发过高被限流漏掉的,用
 
 ---
 
-## 三、其它(评测 / 迁移 / 一次性,按需)
+## 三、慢因诊断(分析"慢的现象")
+
+### `diag.py` —— 统一入口(一个命令 + 子命令)
+```bash
+python3 scripts/diag.py                 # 裸跑 = slow(部署机慢因全量报告)
+python3 scripts/diag.py slow --since 24 --deep
+python3 scripts/diag.py latency --log .local/logs/events.jsonl --last 500
+python3 scripts/diag.py base-recall [active_notebook_id] [查询词]
+```
+把散在三处、三种跑法的慢因诊断收敛到一个入口。三个子命令各委托一个既有引擎(引擎本身保持原样、仍可单独运行,老路径/cron 不受影响):
+
+| 子命令 | 干什么 | 运行要求 | 委托 |
+|--------|--------|----------|------|
+| `slow` | 离线从 `.local` 日志/工件捞慢因证据(请求延迟分位 / 事故观测事件 / LLM 延迟 / 规模画像 / reasoning-PPR 审计 / env),出**可直接粘贴**的文本报告 | **纯 stdlib、只读、脱敏**,可在持有 `.local/` 的**部署机**上跑,不 import app | `diag_slow.py` |
+| `latency` | 从 `events.jsonl` 的 `ask_stage` 事件出**每阶段 P50/P95/max**(自动并入 per-user 子目录) | 纯 stdlib,不 import app | 聚合口径与 `app/eval/ask_latency.py` 一致(有漂移守卫测试) |
+| `base-recall` | 活体连真实库/env,诊断「深度报告 / reasoning 为何不引用 base 库」(常见根因=base 未建 scale 索引→语义召回恒 0) | **需 import app**(懒加载:仅此子命令拉起 app),在能加载真实 `.env`+库的机器上跑 | `diag_base_report.py` |
+
+**离线纯净性是硬约束**:`slow` / `latency` 绝不 import app(`diag.py` 自身零 DB 调用、零 app 依赖),这样在裸机上随手就能跑;只有 `base-recall` 才懒加载 app。
+
+### `diag_open_latency.py` —— 打开大 notebook 仍卡几秒的残余定位
+```bash
+python3 scripts/diag_open_latency.py                 # 自动取最大 notebook
+python3 scripts/diag_open_latency.py --notebook nb-xxx
+```
+主机侧只读诊断(纯 stdlib、mode=ro、不 import app,与 `diag_slow.py` 同款)。计数缓存等读侧修复落地后,若打开最大库仍卡几秒,它把残余定位到:计数缓存**冷成本**(首开/每次 KG 变更后重付)、`from_row` 里未缓存的子查询(`pending_kg_source_count` 相关子查询)、以及**生产请求日志里各端点的真实 P50/P95/max**(哪个 HTTP 请求真的是秒级)+ `dirty`/seq churn(缓存是否被后台变更反复冲掉)。
+
+> 兼容:三个引擎脚本(`diag_slow.py` / `diag_base_report.py` / `app/eval/ask_latency.py`)**未改动、仍可单独运行**——`python3 scripts/diag_slow.py --since 24` 等老命令继续有效。`diag.py` 只是新增的统一入口。
+>
+> 区分:`bench_sqlite_writes.py`(合成写吞吐**基准**)与 `replay_retrieval.py`(检索**回归对照**)不属于"慢因诊断",见下表。
+
+---
+
+## 四、其它(评测 / 迁移 / 一次性,按需)
 
 | 脚本 | 用途 |
 |------|------|
@@ -62,7 +94,8 @@ KG 对象向量在 `store_kg` 入库时嵌入;并发过高被限流漏掉的,用
 | `denoise_reextract_nb.py` | 去噪重抽一个 notebook(**需先停后端**,单写者) |
 | `reextract_notebook.py` | 重抽一个 notebook 的所有 source |
 | `compare_kg_dbs.py` | 对比去噪前后的 KG,评估成效 |
-| `bench_sqlite_writes.py` | 离线 SQLite 写吞吐基准(无 LLM/嵌入) |
+| `bench_sqlite_writes.py` | 离线 SQLite 写吞吐**基准**(无 LLM/嵌入);非慢因诊断 |
+| `replay_retrieval.py` | 检索**回归对照**:固定问题集跑检索管线出 JSON,`--compare` 逐问题 diff,验收"优化前后检索不变";非慢因诊断 |
 | `kg_goldgen.py` / `kg_goldgen_all.py` | 为测试章节生成 gold KG 草稿 |
 | `kg_product_smoke.py` | 用真实产品抽取链路对样例 source 冒烟 |
 | `kg_strip_attrs.py` | 一次性迁移:从 gold 草稿去掉 `attrs` |

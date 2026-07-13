@@ -99,7 +99,7 @@ EXPECTED_KG_REBUILD_CHECKPOINT_SQL = """CREATE TABLE kg_rebuild_checkpoint (
                     PRIMARY KEY (notebook_id, input_version, stage, item_key)
                 )"""
 
-EXPECTED_V11_TABLES = {
+EXPECTED_MEMORY_TABLES = {
     "agent_profiles": """CREATE TABLE agent_profiles (
                   id TEXT PRIMARY KEY,
                   owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -203,7 +203,7 @@ EXPECTED_V11_TABLES = {
     "memory_items_fts_config": "CREATE TABLE 'memory_items_fts_config'(k PRIMARY KEY, v) WITHOUT ROWID",
 }
 
-EXPECTED_V11_INDEXES = {
+EXPECTED_MEMORY_INDEXES = {
     "idx_agent_profiles_owner_status": """CREATE INDEX idx_agent_profiles_owner_status
                   ON agent_profiles(owner_id, status, updated_at DESC)""",
     "idx_agent_tokens_profile": """CREATE INDEX idx_agent_tokens_profile
@@ -223,7 +223,7 @@ EXPECTED_V11_INDEXES = {
                   ON memory_embeddings(model, dimension)""",
 }
 
-EXPECTED_V11_TRIGGERS = {
+EXPECTED_MEMORY_TRIGGERS = {
     "memory_items_fts_insert": """CREATE TRIGGER memory_items_fts_insert
                 AFTER INSERT ON memory_items BEGIN
                   INSERT INTO memory_items_fts(rowid, title, content_md, tags_json)
@@ -245,9 +245,9 @@ EXPECTED_V11_TRIGGERS = {
 
 # FTS5 initializes these shadow tables with index metadata even when the
 # external-content table has no rows. Their exact definitions are still
-# guarded by EXPECTED_V11_TABLES; non-empty state here is structural, not user
+# guarded by EXPECTED_MEMORY_TABLES; non-empty state here is structural, not user
 # data introduced by the migration.
-V11_FTS_SHADOW_TABLES = frozenset(
+MEMORY_FTS_SHADOW_TABLES = frozenset(
     {
         "memory_items_fts_config",
         "memory_items_fts_data",
@@ -259,31 +259,60 @@ V11_FTS_SHADOW_TABLES = frozenset(
 # Every schema object accepted for one version hop is named here with its exact
 # sqlite_master SQL.  An absent hop means that this verifier does not know how
 # to prove that migration and must fail closed.
+MASTER_SCALE_INDEXES = {
+    "idx_element_embeddings_source":
+        "CREATE INDEX idx_element_embeddings_source ON element_embeddings(source_id)",
+    "idx_knowledge_relations_nb_review":
+        "CREATE INDEX idx_knowledge_relations_nb_review ON knowledge_relations(notebook_id, review_status)",
+    "idx_comentions_nb_b":
+        "CREATE INDEX idx_comentions_nb_b ON concept_comentions(notebook_id, canonical_b)",
+    "idx_sources_nb_parse_status":
+        "CREATE INDEX idx_sources_nb_parse_status ON sources(notebook_id, parse_status)",
+}
+
 MIGRATION_MANIFEST = {
-    (9, 10): {
+    # Cumulative delta from the frozen v9 fixture to merged schema v13.
+    (9, 13): {
         "tables": {
             "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
+            **EXPECTED_MEMORY_TABLES,
         },
         "columns": {},
-        "indexes": {},
+        "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES},
+        "triggers": EXPECTED_MEMORY_TRIGGERS,
+        "views": {},
+    },
+    (10, 13): {
+        "tables": EXPECTED_MEMORY_TABLES,
+        "columns": {},
+        "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES},
+        "triggers": EXPECTED_MEMORY_TRIGGERS,
+        "views": {},
+    },
+    # Both branches independently used v11 before merge. Select the exact
+    # lineage below from the source schema, then admit only the missing objects.
+    (11, 13, "memory"): {
+        "tables": {},
+        "columns": {},
+        "indexes": MASTER_SCALE_INDEXES,
         "triggers": {},
         "views": {},
     },
-    (9, 11): {
-        "tables": {
-            "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
-            **EXPECTED_V11_TABLES,
-        },
+    (11, 13, "master"): {
+        "tables": EXPECTED_MEMORY_TABLES,
         "columns": {},
-        "indexes": EXPECTED_V11_INDEXES,
-        "triggers": EXPECTED_V11_TRIGGERS,
+        "indexes": {
+            "idx_sources_nb_parse_status": MASTER_SCALE_INDEXES["idx_sources_nb_parse_status"],
+            **EXPECTED_MEMORY_INDEXES,
+        },
+        "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (10, 11): {
-        "tables": EXPECTED_V11_TABLES,
+    (12, 13): {
+        "tables": EXPECTED_MEMORY_TABLES,
         "columns": {},
-        "indexes": EXPECTED_V11_INDEXES,
-        "triggers": EXPECTED_V11_TRIGGERS,
+        "indexes": EXPECTED_MEMORY_INDEXES,
+        "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
 }
@@ -788,9 +817,15 @@ def compare_snapshots(
             "tables": {}, "columns": {}, "indexes": {}, "triggers": {}, "views": {}
         }
     else:
-        migration_manifest = MIGRATION_MANIFEST.get(
-            (pre.user_version, post.user_version), {}
-        )
+        manifest_key: tuple[Any, ...] = (pre.user_version, post.user_version)
+        if pre.user_version == 11 and post.user_version == 13:
+            lineage = (
+                "memory"
+                if "memory_items" in pre.schema_objects.get("table", {})
+                else "master"
+            )
+            manifest_key = (*manifest_key, lineage)
+        migration_manifest = MIGRATION_MANIFEST.get(manifest_key, {})
         if not migration_manifest:
             discrepancies.append(
                 "migration-manifest-missing="
@@ -840,7 +875,7 @@ def compare_snapshots(
                     )
                 continue
             if kind == "table":
-                if post.tables[name].row_count and name not in V11_FTS_SHADOW_TABLES:
+                if post.tables[name].row_count and name not in MEMORY_FTS_SHADOW_TABLES:
                     note(name, "migration-added-table-not-empty")
                 else:
                     migration_added.append(name)

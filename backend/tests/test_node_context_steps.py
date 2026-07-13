@@ -49,29 +49,27 @@ def test_node_context_legacy_fallback_only_returns_same_section_siblings(repo):
     assert "step C" not in names
 
 
-def test_node_context_legacy_fallback_query_is_bound_by_section_path(repo, monkeypatch):
+def test_node_context_legacy_fallback_query_is_bound_by_section_path(repo):
     """When the target node has a non-empty section_path, the SQL query itself
     filters on it (not just a Python post-filter over every procedure row in
     the notebook) — verified by spying on the executed SQL text via sqlite3's
-    per-connection trace callback. node_context opens its own _connect(), so
-    the callback is attached to every NEW connection by wrapping sqlite3.connect
-    itself (the module-level function, unlike Connection, is a plain Python
-    attribute and can be monkeypatched)."""
+    per-connection trace callback. Connections are now reused per-thread
+    (SqliteDatabase.connect() caches one connection per thread), so
+    node_context()'s internal _connect() call returns the SAME connection
+    object already live on this (the test's) thread — attach the trace
+    callback directly to that connection instead of trying to intercept a
+    fresh sqlite3.connect() call that reuse means will never happen."""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     pid = repo._test_insert_object(nb.id, "procedure",
                                    {"name": "old step", "section_path": "1 > X"})
 
-    import app.services.sqlite_repository as repo_mod
     seen_sql = []
-    orig_connect = repo_mod.sqlite3.connect
-
-    def spy_connect(*args, **kwargs):
-        conn = orig_connect(*args, **kwargs)
-        conn.set_trace_callback(lambda sql: seen_sql.append(sql))
-        return conn
-
-    monkeypatch.setattr(repo_mod.sqlite3, "connect", spy_connect)
-    repo.node_context(nb.id, pid)
+    conn = repo._connect()  # same thread-local connection node_context() will use
+    conn.set_trace_callback(lambda sql: seen_sql.append(sql))
+    try:
+        repo.node_context(nb.id, pid)
+    finally:
+        conn.set_trace_callback(None)
 
     fallback_queries = [
         s for s in seen_sql

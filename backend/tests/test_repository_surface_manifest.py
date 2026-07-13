@@ -210,7 +210,7 @@ TASK27_ALLOWED_IMPORTS = {
     ("scripts/kg_product_smoke.py", 16, "app.services.sqlite_repository", "SQLiteRepository"),
     ("scripts/backfill_kg_embeddings.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
     ("scripts/replay_retrieval.py", 40, "app.services.sqlite_repository", "SQLiteRepository"),
-    ("backend/tests/test_repository_callers_static.py", 666, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_repository_callers_static.py", 670, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -1397,21 +1397,21 @@ TASK28_ALLOWED_IMPORTS = {
     ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "set_request_user"),
 }
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:988"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:981"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:966"),
-    ("get_report", "scripts/verify_repository_snapshot.py:993"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:969"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:978"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:972"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:990"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:967"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:928"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:932"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:934"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:959"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1002"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:976"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1023"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1016"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1001"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1028"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1004"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1013"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1007"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1025"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1002"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:964"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:968"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:970"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:995"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1037"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1011"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -1436,6 +1436,13 @@ TASK1_MEMORY_ALLOWED_CONSUMERS = {
     ("_write", "backend/tests/test_memory_migration.py:91"),
     ("_write", "backend/tests/test_memory_migration.py:101"),
     ("_write", "backend/tests/test_memory_migration.py:131"),
+}
+TASK1_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_migration.py", name)
+    for name in {
+        "SQLiteRepository", "SCHEMA_VERSION", "_connect", "_write",
+        "close_local", "settings",
+    }
 }
 
 # Task 2 (Memory): the lifecycle service/store tests intentionally exercise
@@ -1573,6 +1580,37 @@ TASK8_MEMORY_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/memory_routes.py", "propose_memory_promotion"),
     ("backend/app/api/routes.py", "approve_promotion_as_reviewer"),
     ("backend/app/api/routes.py", "reject_promotion_as_reviewer"),
+}
+
+# sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
+# new close_local member + new test_sqlite_connection_reuse.py consumers.
+# close_local is a brand-new facade delegate (SqliteDatabase.close_local()
+# wired through wire_knowledge_lifecycle); exempt it from the consumer-scan
+# comparison entirely, exactly like TASK3_ALLOWED_NEW_MEMBERS does for other
+# never-frozen members, instead of trying to match its consumer sites against
+# a fixture that predates it.
+SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS = {"close_local"}
+# startup readiness: warm_open_path_caches is a brand-new facade delegate
+# (knowledge_counts_cache.warm_all wired through the startup daemon) that primes
+# the per-process open-path count caches for every notebook behind the readiness
+# gate. Its sole consumer (app/services/startup_warmup.py) postdates the frozen
+# facade_surface fixture, so exempt the member from the consumer-scan comparison
+# entirely — exactly like SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS does for
+# close_local — instead of regenerating the frozen golden.
+STARTUP_READINESS_ALLOWED_NEW_MEMBERS = {"warm_open_path_caches"}
+# The startup-readiness unit test drives the real repository through two frozen
+# public/test-only members (create_notebook to seed notebooks, _test_insert_object
+# to seed a KO); those consumer sites postdate the frozen fixture, so drop them
+# from the consumer-scan comparison exactly like the other component test files
+# above (warm_open_path_caches itself is handled by the NEW_MEMBERS pop).
+STARTUP_READINESS_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_startup_warmup.py", name)
+    for name in {"create_notebook", "_test_insert_object"}
+}
+# The new connection-reuse test suite imports the frozen compatibility facade
+# at a fresh site to exercise the close_local delegate end-to-end.
+SQLITE_CONN_REUSE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_sqlite_connection_reuse.py", 164, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 
 # Task 26: the consolidated facade delegates its last SQL bodies to the
@@ -1861,6 +1899,11 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/app/api/deps.py",
     "backend/app/api/auth_routes.py",
     "backend/app/api/routes.py",
+    # FastAPI composition root: the startup-readiness lifespan + gate middleware
+    # add ~60 lines above its sole facade consumer (repository().pending_actions),
+    # shifting that call's line without changing the surface. Like the other API
+    # entry files above, main.py's internal line numbers are not API surface.
+    "backend/app/main.py",
     "backend/tests/test_architecture_module_boundaries.py",
     "backend/tests/test_repository_runtime.py",
     # Task 27 migrates every production caller onto ports / repo.maintenance —
@@ -1884,6 +1927,7 @@ LINE_NUMBER_INSENSITIVE_FILES = {
 
 ALL_TASK_ALLOWED_MEMBER_FILES = (
     TASK2_ALLOWED_MEMBER_FILES
+    | TASK1_MEMORY_ALLOWED_MEMBER_FILES
     | TASK2_MEMORY_ALLOWED_MEMBER_FILES
     | TASK3_MEMORY_ALLOWED_MEMBER_FILES
     | TASK5_MEMORY_ALLOWED_MEMBER_FILES
@@ -1913,6 +1957,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK25_ALLOWED_MEMBER_FILES
     | TASK26_ALLOWED_MEMBER_FILES
     | TASK27_ALLOWED_MEMBER_FILES
+    | STARTUP_READINESS_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2010,6 +2055,25 @@ REVIEW_FIX_ALLOWED_CONSUMERS = {
     ),
 }
 
+# sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
+# new close_local member + new test_sqlite_connection_reuse.py consumers.
+# These are exact new test consumers; the frozen production surface and its
+# coordinates stay intact. create_notebook/_test_insert_object/node_context
+# land on their new post-rewrite lines inside
+# test_node_context_legacy_fallback_query_is_bound_by_section_path (the old
+# recorded coordinates are filtered via FROZEN_ONLY_MOVED_CONSUMERS below);
+# _connect gains three fresh call sites spying on the reused thread-local
+# connection (node_context's own _connect() call plus the new facade
+# close_local delegate test).
+SQLITE_CONN_REUSE_ALLOWED_CONSUMERS = {
+    ("create_notebook", "backend/tests/test_node_context_steps.py:62"),
+    ("_test_insert_object", "backend/tests/test_node_context_steps.py:63"),
+    ("_connect", "backend/tests/test_node_context_steps.py:67"),
+    ("node_context", "backend/tests/test_node_context_steps.py:70"),
+    ("_connect", "backend/tests/test_sqlite_connection_reuse.py:170"),
+    ("_connect", "backend/tests/test_sqlite_connection_reuse.py:172"),
+}
+
 FROZEN_ONLY_MOVED_CONSUMERS = {
     # Authenticated promotion routes now call explicit reviewer-aware adapters;
     # the frozen facade methods retain their original signatures for callers.
@@ -2039,6 +2103,15 @@ FROZEN_ONLY_MOVED_CONSUMERS = {
     ("ask_graph", "backend/tests/test_ask_modes.py:24"),
     ("ask_reasoning", "backend/tests/test_ask_modes.py:24"),
     ("ask_chunk", "backend/tests/test_chunk_retrieval.py:240"),
+    # sqlite connection reuse: Change 4 rewrote
+    # test_node_context_legacy_fallback_query_is_bound_by_section_path to spy
+    # via conn.set_trace_callback() on the reused thread-local connection
+    # instead of monkeypatching sqlite3.connect, shifting these three frozen-
+    # recorded call sites down to :62/:63/:70 (new sites registered in
+    # SQLITE_CONN_REUSE_ALLOWED_CONSUMERS above).
+    ("create_notebook", "backend/tests/test_node_context_steps.py:60"),
+    ("_test_insert_object", "backend/tests/test_node_context_steps.py:61"),
+    ("node_context", "backend/tests/test_node_context_steps.py:74"),
 }
 
 
@@ -2450,11 +2523,12 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK25_ALLOWED_IMPORTS
                     or site in TASK26_ALLOWED_IMPORTS
                     or site in TASK27_ALLOWED_IMPORTS
-                        or site in TASK28_ALLOWED_IMPORTS
-                        or site in TASK2_MEMORY_ALLOWED_IMPORTS
-                            or site in TASK5_MEMORY_ALLOWED_IMPORTS
-                            or site in TASK6_MEMORY_ALLOWED_IMPORTS
-                            or site in TASK8_MEMORY_ALLOWED_IMPORTS
+                    or site in TASK28_ALLOWED_IMPORTS
+                    or site in TASK2_MEMORY_ALLOWED_IMPORTS
+                    or site in TASK5_MEMORY_ALLOWED_IMPORTS
+                    or site in TASK6_MEMORY_ALLOWED_IMPORTS
+                    or site in TASK8_MEMORY_ALLOWED_IMPORTS
+                    or site in SQLITE_CONN_REUSE_ALLOWED_IMPORTS
                 )
 
 
@@ -2658,9 +2732,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-            for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
@@ -2694,19 +2768,15 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     for name in TASK25_ALLOWED_NEW_MEMBERS | TASK27_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
-    for name in TASK2_MEMORY_ALLOWED_NEW_MEMBERS:
-        actual.pop(name, None)
-        recorded.pop(name, None)
-    for name in TASK3_MEMORY_ALLOWED_NEW_MEMBERS:
-        actual.pop(name, None)
-        recorded.pop(name, None)
-    for name in TASK6_MEMORY_ALLOWED_NEW_MEMBERS:
-        actual.pop(name, None)
-        recorded.pop(name, None)
-    for name in TASK7_MEMORY_ALLOWED_NEW_MEMBERS:
-        actual.pop(name, None)
-        recorded.pop(name, None)
-    for name in TASK8_MEMORY_ALLOWED_NEW_MEMBERS:
+    for name in (
+        TASK2_MEMORY_ALLOWED_NEW_MEMBERS
+        | TASK3_MEMORY_ALLOWED_NEW_MEMBERS
+        | TASK6_MEMORY_ALLOWED_NEW_MEMBERS
+        | TASK7_MEMORY_ALLOWED_NEW_MEMBERS
+        | TASK8_MEMORY_ALLOWED_NEW_MEMBERS
+        | SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS
+        | STARTUP_READINESS_ALLOWED_NEW_MEMBERS
+    ):
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual

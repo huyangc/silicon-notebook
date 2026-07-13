@@ -354,7 +354,14 @@ class ScaleArtifactRuntime:
     # ------------------------------ status and scheduling
 
     def status(self, notebook_id: str) -> dict:
-        notebook = self.get_notebook(notebook_id)
+        # status() consumes ONLY the notebook's tier; read it with a cheap PK
+        # query instead of rebuilding the full NotebookSummary (from_row's 5
+        # subqueries). On notebook open this endpoint (/scale-index/status) fired
+        # a SECOND from_row on top of GET /notebooks/{id}; this removes it.
+        # Preserve get_notebook's missing-notebook contract (KeyError).
+        tier = self.projections.notebook_tier(notebook_id)
+        if tier is None:
+            raise KeyError(notebook_id)
         out_dir = self.artifacts.scale_dir(notebook_id)
         building = notebook_id in self.building
         exists = (out_dir / "manifest.json").exists()
@@ -362,7 +369,7 @@ class ScaleArtifactRuntime:
         total_chunks = self.projections.total_chunk_count(notebook_id)
         eligible = self.eligible(
             notebook_id,
-            tier=notebook.tier,
+            tier=tier,
             exists=exists,
             total_chunks=total_chunks,
         )

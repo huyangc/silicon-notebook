@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Product/project name remains `silicon-notebook`; do not add a Chinese product name.
-- Bump `SCHEMA_VERSION` from 10 to 11 with `_migration_11`; v9 fixture replay must still upgrade and load.
+- On the merged branch, bump `SCHEMA_VERSION` from master v12 to v13 with `_migration_13`; master v11/v12 retain their SQLite hot-path indexes, and v9 fixture replay must still upgrade and load. (The feature branch originally used v11 before those master migrations landed.)
 - Every Memory has exactly one `notebook_id` and one `created_by`; no global orphan Memory and no cross-notebook Memory retrieval.
 - Memory is creator-private even in shared notebooks; Agent candidates are shared only among the same user’s authorized Agents in the same notebook.
 - Candidate Memory never enters Ask, Notebook Search, Deep Report, or `search_notebook_context`; only user-confirmed Memory does.
@@ -39,7 +39,7 @@
 
 ---
 
-### Task 1: Schema v11 and Memory Models
+### Task 1: Schema v13 and Memory Models
 
 **Files:**
 - Modify: `backend/app/repositories/sqlite/migrations.py`
@@ -68,14 +68,14 @@ def test_v11_memory_schema_has_privacy_and_agent_indexes(repo):
 
 Run: `cd backend && python -m pytest tests/test_memory_migration.py tests/test_legacy_db_compat.py -q`
 
-Expected: FAIL because schema version 11 and Memory tables/models do not exist.
+Expected: FAIL because schema version 13 and Memory tables/models do not exist.
 
-- [ ] **Step 3: Add `_migration_11`, constraints, indexes, and models**
+- [ ] **Step 3: Add `_migration_13`, constraints, indexes, and models**
 
 ```python
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
-def _migration_11(self) -> None:
+def _migration_13(self) -> None:
     with self._connect() as db:
         db.executescript("""
         CREATE TABLE memory_items (
@@ -109,13 +109,13 @@ Create dependent tables before `memory_items` or split the script so `agent_prof
 
 Run: `cd backend && python -m pytest tests/test_memory_migration.py tests/test_legacy_db_compat.py tests/test_repository_v9_fixture.py -q`
 
-Expected: PASS; upgraded DB reports user_version 11.
+Expected: PASS; upgraded DB reports user_version 13.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add backend/app/repositories/sqlite/migrations.py backend/app/models/schemas.py backend/tests/test_memory_migration.py backend/tests/test_legacy_db_compat.py
-git commit -m "feat(memory): add v11 memory schema"
+git commit -m "feat(memory): add v13 memory schema"
 ```
 
 ### Task 2: Memory Store, Ports, and Lifecycle Service

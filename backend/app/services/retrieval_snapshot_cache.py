@@ -80,9 +80,17 @@ class RetrievalSnapshotCache:
         # same-second in-place edits that leave the version tuple unchanged.
         for key in [k for k in self.vector_cache.keys() if k.endswith(":fed_rxgraph")]:
             self.vector_cache.invalidate(key)
-        # PPR graph (concept_clusters + knowledge_objects + chunks → HippoRAG graph) —
-        # evict so a same-second KG edit with an unchanged version tuple cannot serve stale.
-        self.vector_cache.invalidate(f"{notebook_id}:ppr_graph")
+        # PPR graph (concept_clusters + knowledge_objects + chunks → HippoRAG graph).
+        # Like fed_rxgraph, a PPR graph is keyed on the ACTIVE nb but includes base
+        # participant(s), so a change/delete in THIS (possibly base) nb must evict
+        # every dependent :ppr_graph, not just this notebook's own. Also guards the
+        # seq-reset case: the graph version key is the (kg/cluster/mention)
+        # mutation-seq triple, which RESETS to (0,0,-1) when delete_notebook_kg
+        # drops the state row and re-climbs from 0 on re-ingest — so a
+        # delete+reingest of a base participant can collide on an identical triple
+        # with different content; evict all, don't rely on the key.
+        for key in [k for k in self.vector_cache.keys() if k.endswith(":ppr_graph")]:
+            self.vector_cache.invalidate(key)
         # entity->chunk / element->chunk reverse maps (P0-5) — evict so a same-second
         # in-place evidence/element_ids edit with an unchanged version tuple cannot
         # serve a stale membership map to the PPR-fallback / chunk-overlay paths.

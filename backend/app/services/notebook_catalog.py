@@ -232,6 +232,16 @@ class NotebookCatalogService:
     def list_notebooks(self) -> list[NotebookSummary]:
         return self._summaries.list_for_user(self._identity.current_user().id)
 
+    def warm_open_path_caches(self, progress=None) -> int:
+        """Prime the per-process open-path count caches (``knowledge_counts_cache``
+        — the per-type GROUP BY, the pending-source correlated count and the chunk
+        count) for every notebook so the first login after a restart is served
+        warm instead of paying the cold recompute. Called by the startup-readiness
+        warm-up; best-effort per notebook inside ``warm_all``. Returns the count."""
+        from app.repositories.sqlite import knowledge_counts_cache
+        with self._summaries.database.connect() as db:
+            return knowledge_counts_cache.warm_all(db, progress)
+
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary:
         user_id = self._identity.current_user().id
         notebook_id = self._store.create_row(payload, user_id)

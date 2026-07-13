@@ -428,6 +428,9 @@ def test_agent_request_idempotency_is_scoped_to_notebook(
 def test_confirm_writes_revision_and_duplicate_answer_is_idempotent(
     memory_service, saved_answer, users, repo
 ):
+    # This test asserts the durable embedding result, so do not race the
+    # production background scheduler. Other tests cover queued/stale jobs.
+    memory_service.embedding_scheduler = lambda fn, job: fn(job)
     first = memory_service.create_from_answer(
         saved_answer.notebook_id,
         users.alice.id,
@@ -1072,23 +1075,6 @@ def test_notebook_summary_memory_counts_are_grouped_once(
         db.set_trace_callback(statements.append)
         counts = repo._runtime.notebook_summaries.list_for_user(users.alice.id)
         db.set_trace_callback(None)
-    # The list call owns its own connection, so trace the shared database via a
-    # temporary connect wrapper instead of relying on this probe connection.
-    real_connect = repo._runtime.database.connect
-
-    @contextmanager
-    def traced_connect():
-        with real_connect() as db:
-            db.set_trace_callback(statements.append)
-            yield db
-            db.set_trace_callback(None)
-
-    repo._runtime.database.connect = traced_connect
-    try:
-        counts = repo._runtime.notebook_summaries.list_for_user(users.alice.id)
-    finally:
-        repo._runtime.database.connect = real_connect
-
     by_id = {item.id: item.counts["memories"] for item in counts}
     grouped = [
         sql

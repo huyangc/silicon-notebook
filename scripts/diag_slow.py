@@ -776,6 +776,138 @@ def report_env(root):
           "只在低峰 2-6 点建索引、CHUNK_ANN_ENABLED=true、SCALE_SEARCH_INCLUDE_DELTA=false)")
 
 
+# USABLE_STATUSES 谓词(knowledge_contracts.USABLE_STATUSES);from_row/analytics 的
+# per-type GROUP BY 用它。与 status!='deprecated' 并列打印,实证 planner 计划一致。
+_USABLE_STATUSES = ("approved", "reviewed", "project_specific", "conflict")
+
+
+def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
+    """打开 / 看板 / 索引状态卡顿的逐条自证(仅 --deep,因本段会真跑几条 2M 级扫描)。
+
+    这些计数在每次「打开 notebook」「点看板」「取索引状态」时被同步重算、且无缓存
+    (计数只在 ingest/rebuild 变,却每次请求重扫 ~2M 覆盖索引条目)。本段对最大(或
+    --notebook 指定的)notebook 逐条跑 EXPLAIN QUERY PLAN + 实测执行一次,报告:
+    用了哪个索引 / 是否全表 SCAN / 是否 TEMP B-TREE 排序 / 耗时 ms / 计数结果,
+    并核对关键覆盖索引存在性。只读(mode=ro)、无 DML。脱敏:只打计数/计划/ms,绝不
+    打 object 文本或名。参见 docs/large-notebook-latency-analysis.md。"""
+    if not deep:
+        section("notebook 计数热路径(加 --deep 逐条 EXPLAIN+计时,会真跑 2M 级扫描)")
+        print("(跳过:未加 --deep — 本段会执行几条 ~2M 行覆盖扫描,单核秒级)")
+        return
+    section("notebook 计数热路径(打开/看板/索引状态卡顿逐条自证)")
+    db = os.path.join(local_dir, "silicon_notebook.db")
+    if not os.path.exists(db):
+        print(f"(缺 {db})")
+        return
+    try:
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=60)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        print(f"(DB 只读打开失败: {exc})")
+        return
+    try:
+        def _run(sql, params=()):
+            return conn.execute(sql, params)   # 唯一 conn.execute 站点(允许表钉死)
+
+        def _timed(sql, params=()):
+            t0 = datetime.now()
+            rows = _run(sql, params).fetchall()
+            return rows, (datetime.now() - t0).total_seconds() * 1000.0
+
+        nb = notebook_id
+        if not nb:
+            try:
+                r = _run("SELECT notebook_id nb, COUNT(*) c FROM knowledge_objects "
+                         "GROUP BY 1 ORDER BY c DESC LIMIT 1").fetchone()
+                nb = r["nb"] if r else ""
+            except sqlite3.Error as exc:
+                print(f"(选最大 notebook 失败: {exc})")
+                return
+        if not nb:
+            print("(库中无 knowledge_objects)")
+            return
+        print(f"目标 notebook = {nb}  (用 --notebook <id> 指定)")
+
+        ph = ",".join("?" for _ in _USABLE_STATUSES)
+        hot = [
+            ("type_counts[status IN usable]",   # from_row(打开)/概览
+             f"SELECT object_type, COUNT(*) c FROM knowledge_objects "
+             f"WHERE notebook_id=? AND status IN ({ph}) GROUP BY object_type",
+             (nb, *_USABLE_STATUSES)),
+            ("type_counts[status!=deprecated]",  # analytics(看板)
+             "SELECT object_type, COUNT(*) c FROM knowledge_objects "
+             "WHERE notebook_id=? AND status!='deprecated' GROUP BY object_type",
+             (nb,)),
+            ("relation_count",
+             "SELECT COUNT(*) c, MAX(created_at) m FROM knowledge_relations WHERE notebook_id=?",
+             (nb,)),
+            ("embedding_count",
+             "SELECT COUNT(*) c, MAX(created_at) m FROM knowledge_embeddings WHERE notebook_id=?",
+             (nb,)),
+            ("cluster_distinct_canonical",       # index-status,无缓存 O(N) DISTINCT
+             "SELECT COUNT(DISTINCT canonical_id) c FROM concept_clusters WHERE notebook_id=?",
+             (nb,)),
+            ("community_count[cheap ctrl]",      # 命中 idx_communities_nb_level,便宜对照
+             "SELECT COUNT(*) c FROM communities WHERE notebook_id=?",
+             (nb,)),
+            ("chunk_total",                      # index-status
+             "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?",
+             (nb,)),
+        ]
+        print("\n  [逐条: EXPLAIN QUERY PLAN + 实测执行一次]")
+        print(f"    {'query':32} {'ms':>9}  plan / 计数")
+        ms_by = {}
+        for name, sql, params in hot:
+            try:
+                plan_rows = _run("EXPLAIN QUERY PLAN " + sql, params).fetchall()
+                details = [str(r["detail"]) for r in plan_rows]
+            except sqlite3.Error as exc:
+                print(f"    {name:32} plan? ({exc})")
+                continue
+            full = any(d.strip().startswith("SCAN") and "USING" not in d for d in details)
+            sort = any("TEMP B-TREE" in d.upper() for d in details)
+            flag = ("⚠全表SCAN" if full else "idx") + ("+排序" if sort else "")
+            try:
+                rows, ms = _timed(sql, params)
+                ms_by[name] = ms
+                if rows and "object_type" in rows[0].keys():
+                    res = ",".join(f"{r['object_type']}={r['c']}" for r in rows)
+                elif rows:
+                    res = " ".join(f"{k}={rows[0][k]}" for k in rows[0].keys())
+                else:
+                    res = "(空)"
+                mstr = _fmt_ms(ms)
+            except sqlite3.Error as exc:
+                mstr, res = f"err:{exc}", ""
+            print(f"    {name:32} {mstr:>9}  [{flag}] {'; '.join(details)}  → {res}")
+
+        # 复合放大:一次「打开」= from_row 跑 2 遍(GET /notebooks/{id} 与
+        # /scale-index/status→get_notebook 各一次);感知开销 ≈ 2× type_counts。
+        base = ms_by.get("type_counts[status IN usable]")
+        if base is not None:
+            print(f"\n  打开路径 from_row ×2(GET /notebooks/{{id}} + /scale-index/status)"
+                  f" → 单次打开 ≈ {_fmt_ms(base * 2)}(且 KG 构建中每 6s 轮询再乘一轮)")
+
+        print("\n  [关键覆盖索引存在性]")
+        have = set()
+        try:
+            for r in _run("SELECT name FROM sqlite_master WHERE type='index'").fetchall():
+                have.add(r["name"])
+        except sqlite3.Error:
+            pass
+        want = [
+            ("idx_knowledge_objects_nb_type_status", "打开/看板 count-by-type 覆盖(应命中)"),
+            ("idx_knowledge_objects_nb_status", "status 过滤"),
+            ("idx_chunks_nb", "chunk 计数"),
+            ("idx_clusters_nb", "cluster(仅 notebook_id,不含 canonical_id→DISTINCT 扫全成员行)"),
+            ("idx_communities_nb_level", "community 计数(便宜对照)"),
+        ]
+        for name, why in want:
+            print(f"    [{'✓' if name in have else '缺'}] {name}  — {why}")
+    finally:
+        conn.close()
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -784,7 +916,9 @@ def main():
     ap.add_argument("--since", type=float, default=48, help="回看小时数(默认 48)")
     ap.add_argument("--slow-ms", type=int, default=3000, help="慢请求阈值 ms(默认 3000)")
     ap.add_argument("--deep", action="store_true",
-                    help="额外做 DB 检查(typeof 全表扫,大库分钟级,只读)")
+                    help="额外做 DB 检查(typeof 全表扫 + 计数热路径 EXPLAIN/计时,大库分钟级,只读)")
+    ap.add_argument("--notebook", default="",
+                    help="计数热路径诊断的目标 notebook id(默认自动取最大)")
     args = ap.parse_args()
     root = os.path.abspath(args.root)
     since = timedelta(hours=args.since)
@@ -797,6 +931,7 @@ def main():
     report_scale_profile(local_dir, runtime_dim=_read_env_int(root, "EMBED_RUNTIME_DIM"))
     report_reasoning_ppr_audit(local_dir, root)
     report_artifacts(local_dir, args.deep)
+    report_notebook_count_hotpaths(local_dir, notebook_id=args.notebook, deep=args.deep)
     report_env(root)
     print("\n=== 完 — 把以上整段输出贴回即可 " + "=" * 40)
     return 0

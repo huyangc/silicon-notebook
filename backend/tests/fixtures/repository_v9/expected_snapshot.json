@@ -1116,6 +1116,11 @@
         "type": "index"
       },
       {
+        "name": "idx_comentions_nb_b",
+        "sql_sha256": "eb6feecd2fc87c4beb7c7c45ffa7484fbb8e0fa42ae12f6995306df44566d2af",
+        "type": "index"
+      },
+      {
         "name": "idx_commmem_nb_can",
         "sql_sha256": "0a8ae63a7724db967d2836fe9693ff47408e376b40f1e7a2a2c020bfb6fe5c52",
         "type": "index"
@@ -1143,6 +1148,11 @@
       {
         "name": "idx_element_embeddings_nb",
         "sql_sha256": "05c09d46a07cb2fb0025a1a9239d8ac8cc44704ace57d9b73c4f09e966c5b293",
+        "type": "index"
+      },
+      {
+        "name": "idx_element_embeddings_source",
+        "sql_sha256": "1b8dd5c3a3b9639247543190697ab3d4e4c1de935b7805502cf3c7c9dac759cd",
         "type": "index"
       },
       {
@@ -1203,6 +1213,11 @@
       {
         "name": "idx_knowledge_relations_nb_created",
         "sql_sha256": "5165d9983806ae726dda31d8119beb2dfb57cd90b5af1165b51d3a9fd40a0c96",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowledge_relations_nb_review",
+        "sql_sha256": "4913b08e73f2c9517be36410528956570882f2cb5ef0d81cf0bc1f1e92f1a592",
         "type": "index"
       },
       {
@@ -1308,6 +1323,11 @@
       {
         "name": "idx_source_elements_source_created",
         "sql_sha256": "955ecda9b187b810f32409dbae4770fafead611ecaff0f16e19c71829a297e69",
+        "type": "index"
+      },
+      {
+        "name": "idx_sources_nb_parse_status",
+        "sql_sha256": "39ce7a2518e30fd9602a3e3b853b6aa1cbc0156f0714d064cb79c9822794f408",
         "type": "index"
       },
       {
@@ -1646,6 +1666,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 11
+    "user_version": 13
   }
 }

@@ -104,9 +104,14 @@ def read_ask_stage_records(
 
     parsed: list[dict] = []
     for p in expand_channel_paths(Path(path)):
+        # Defensive read (mirrors scripts/diag.py::_read_ask_stage): a path in
+        # the read-set may be a directory (a subdir literally named like the log
+        # basename -> IsADirectoryError) or hold non-UTF8 bytes; skip/replace
+        # rather than crashing the whole aggregation. IsADirectoryError and
+        # FileNotFoundError are OSError subclasses; listed explicitly for clarity.
         try:
-            raw_lines = p.read_text(encoding="utf-8").splitlines()
-        except FileNotFoundError:
+            raw_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except (FileNotFoundError, IsADirectoryError, OSError):
             continue
         for line in raw_lines:
             line = line.strip()

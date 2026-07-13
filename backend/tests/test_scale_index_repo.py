@@ -691,6 +691,10 @@ def test_scale_index_status_state_machine(repo, monkeypatch):
                 v = repo.embedder.embed_texts([cid])[0]
                 db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                            (cid, nb.id, json.dumps(v), now))
+        # Raw chunk insert bypasses build_chunks_for_source's seq bump; drop the
+        # seq-gated chunk-count memo so status() recomputes the new chunk total.
+        from app.repositories.sqlite import knowledge_counts_cache
+        knowledge_counts_cache.invalidate(nb.id)
     # 小库 → unindexed
     add_source("s1", ["c1"], 1)
     assert repo.scale_index_status(nb.id)["state"] == "unindexed"

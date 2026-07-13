@@ -413,12 +413,14 @@ idx_chunks_source
 idx_clusters_member
 idx_clusters_nb
 idx_clusters_nb_created
+idx_comentions_nb_b
 idx_commmem_nb_can
 idx_commmem_nb_comm
 idx_communities_nb_level
 idx_conflict_candidates_nb_status
 idx_conversations_created_by
 idx_element_embeddings_nb
+idx_element_embeddings_source
 idx_extraction_runs_source_created
 idx_feedback_answer
 idx_feedback_nb_rating
@@ -431,6 +433,7 @@ idx_knowledge_objects_nb_type_status
 idx_knowledge_objects_nb_updated
 idx_knowledge_objects_source
 idx_knowledge_relations_nb_created
+idx_knowledge_relations_nb_review
 idx_knowledge_relations_nb_source
 idx_knowledge_relations_nb_target
 idx_knowledge_relations_source
@@ -452,6 +455,7 @@ idx_relation_embeddings_nb
 idx_reports_nb_created
 idx_source_elements_source
 idx_source_elements_source_created
+idx_sources_nb_parse_status
 idx_sources_notebook_created
 idx_sources_notebook_status
 idx_users_username

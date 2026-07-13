@@ -45,14 +45,13 @@ class QueryStore:
     @staticmethod
     def knowledge_type_count_rows(
         db: sqlite3.Connection, notebook_id: str, statuses: tuple[str, ...]
-    ) -> list[sqlite3.Row]:
-        placeholders = ",".join("?" for _ in statuses)
-        return db.execute(
-            f"SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
-            f"WHERE notebook_id = ? AND status IN ({placeholders}) "
-            f"GROUP BY object_type",
-            (notebook_id, *statuses),
-        ).fetchall()
+    ) -> "list[dict]":
+        # Served from the seq-gated count cache (one GROUP BY per kg_mutation_seq
+        # instead of per open/list/poll). Returns row-like dicts with the same
+        # ["object_type"] / ["c"] keys the callers read.
+        from app.repositories.sqlite import knowledge_counts_cache
+        counts = knowledge_counts_cache.type_counts(db, notebook_id, statuses)
+        return [{"object_type": ot, "c": c} for ot, c in counts.items()]
 
     @staticmethod
     def notebook_has_kg(db: sqlite3.Connection, notebook_id: str) -> bool:
@@ -64,16 +63,10 @@ class QueryStore:
 
     @staticmethod
     def pending_kg_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
-        row = db.execute(
-            """
-            SELECT COUNT(*) FROM sources s
-            WHERE s.notebook_id = ?
-              AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id)
-              AND NOT EXISTS (SELECT 1 FROM knowledge_objects k WHERE k.source_id = s.id AND k.source_id != '')
-            """,
-            (notebook_id,),
-        ).fetchone()
-        return int(row[0])
+        # Served from the seq-gated count cache (one correlated scan per
+        # kg_mutation_seq instead of ~2s per open at 48k sources).
+        from app.repositories.sqlite import knowledge_counts_cache
+        return knowledge_counts_cache.pending_source_count(db, notebook_id)
 
     @staticmethod
     def base_notebook_info_row(db: sqlite3.Connection):
@@ -273,14 +266,9 @@ class QueryStore:
                     (notebook_id,),
                 ).fetchall()
             ]
-            knowledge_counts = {
-                row["object_type"]: int(row["c"])
-                for row in db.execute(
-                    "SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
-                    "WHERE notebook_id = ? AND status != 'deprecated' GROUP BY object_type",
-                    (notebook_id,),
-                ).fetchall()
-            }
+            # seq-gated count cache (non-deprecated) — same GROUP BY, memoized.
+            from app.repositories.sqlite import knowledge_counts_cache
+            knowledge_counts = knowledge_counts_cache.type_counts(db, notebook_id)
             source_status_counts = {
                 row["parse_status"]: int(row["c"])
                 for row in db.execute(

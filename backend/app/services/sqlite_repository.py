@@ -208,7 +208,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 
 @dataclass(frozen=True)
@@ -462,6 +462,7 @@ class SQLiteRepository:
         # (Task 17); the viz-building set is passed BY IDENTITY (no copies).
         self._runtime.wire_knowledge_lifecycle(
             connect=lambda: self._connect(),
+            close_local=lambda: self.close_local(),
             write=lambda: self._write(),
             get_notebook=lambda notebook_id: self.get_notebook(notebook_id),
             invalidate_unified_cache=lambda notebook_id: (
@@ -899,6 +900,11 @@ class SQLiteRepository:
 
     def _connect(self) -> sqlite3.Connection:
         return self._runtime.database.connect()
+
+    def close_local(self) -> None:
+        """关闭并清除当前线程的复用 DB 连接(短命线程/大扫描/临时表清理)。
+        委托 runtime-owned SqliteDatabase。见 [[sqlite 连接复用]] INV-6/7。"""
+        self._runtime.database.close_local()
 
     @contextmanager
     def _write(self):
@@ -3136,6 +3142,11 @@ class SQLiteRepository:
 
     def notebook_analytics(self, notebook_id: str) -> NotebookAnalytics:
         return self._runtime.catalog.notebook_analytics(notebook_id)
+
+    def warm_open_path_caches(
+        self, progress: Optional[Callable[[int, int], None]] = None
+    ) -> int:
+        return self._runtime.catalog.warm_open_path_caches(progress)
 
     # object_type -> counts-dict key mapping (C5 batched GROUP BY projection).
     # Canonical map lives on NotebookSummaryQuery; the facade keeps the frozen

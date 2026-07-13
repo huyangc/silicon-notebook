@@ -43,8 +43,8 @@
 
 本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
 
-此后 Agent Memory 功能新增 v11 migration；当前 schema 版本为 11，冻结 v9 fixture 会继续经过
-v10 与 v11 升级并保持可读。
+此后 master 先以 v11/v12 增加 SQLite 热路径索引，Agent Memory 在合并后使用 v13
+migration；当前 schema 版本为 13，冻结 v9 fixture 会继续经过 v10～v13 升级并保持可读。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。
 

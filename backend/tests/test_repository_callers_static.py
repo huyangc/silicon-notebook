@@ -70,6 +70,8 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
             ("scripts/diag_slow.py", 550, "conn.execute"),
             ("scripts/diag_slow.py", 556, "conn.execute"),
             ("scripts/diag_slow.py", 713, "conn.execute"),
+            ("scripts/diag_slow.py", 810, "conn.execute"),
+            ("scripts/diag_open_latency.py", 74, "conn.execute"),
         }
     },
     # Baseline fixture generator writes only disposable fixture databases.
@@ -119,17 +121,17 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
     **{
         site: "snapshot verifier reads only its backup/probe database"
         for site in {
-            ("scripts/verify_repository_snapshot.py", 532, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 539, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 561, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 565, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 591, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 561, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 568, "digest_conn.execute"),
             ("scripts/verify_repository_snapshot.py", 590, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 608, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 594, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 619, "meta_conn.execute"),
             ("scripts/verify_repository_snapshot.py", 620, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 947, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 954, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 983, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 637, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 649, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 982, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 989, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1018, "probe.execute"),
         }
     },
 }
@@ -306,25 +308,27 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ("scripts/diag_slow.py", 396, "sqlite3.connect"): "host diagnostic opens mode=ro",
     ("scripts/diag_slow.py", 544, "sqlite3.connect"): "host diagnostic opens mode=ro",
     ("scripts/diag_slow.py", 708, "sqlite3.connect"): "host diagnostic opens mode=ro",
+    ("scripts/diag_slow.py", 803, "sqlite3.connect"): "host diagnostic opens mode=ro",
+    ("scripts/diag_open_latency.py", 67, "sqlite3.connect"): "host diagnostic opens mode=ro",
     ("scripts/generate_repository_contract_fixtures.py", 1649, "sqlite3.connect"): (
         "contract fixture generator opens disposable fixture databases"
     ),
     ("scripts/generate_repository_contract_fixtures.py", 1650, "sqlite3.connect"): (
         "contract fixture generator opens disposable fixture databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 587, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 615, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 586, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 616, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 941, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 976, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1088, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1123, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1090, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1125, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
 }

@@ -11,7 +11,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -970,9 +970,22 @@ class SqliteMigrator:
         """Rebuild the external-content Memory index without scanning in queries."""
         db.execute("INSERT INTO memory_items_fts(memory_items_fts) VALUES ('rebuild')")
 
-    def _migration_11(self) -> None:
-        """Creator-private notebook Memory, revision history, and Agent access."""
+    def _migration_13(self) -> None:
+        """Creator-private notebook Memory, revision history, and Agent access.
+
+        The Memory branch originally used version 11 while master independently
+        used v11/v12 for scale indexes.  Keep Memory as the new v13 hop and
+        idempotently ensure the master indexes so a database produced by either
+        pre-merge v11 lineage converges to the same schema.
+        """
         with self._connect() as db:
+            self.add_column_if_missing(
+                db, "knowledge_relations", "review_status", "TEXT NOT NULL DEFAULT 'pending'"
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_element_embeddings_source ON element_embeddings(source_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_review ON knowledge_relations(notebook_id, review_status)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_comentions_nb_b ON concept_comentions(notebook_id, canonical_b)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_sources_nb_parse_status ON sources(notebook_id, parse_status)")
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS agent_profiles (
@@ -1116,6 +1129,44 @@ class SqliteMigrator:
                 """
             )
             self._rebuild_memory_fts(db)
+    def _migration_11(self) -> None:
+        """Scale hot-path index coverage (per-request full scans → index seeks).
+        Separate migration (not a _migration_1 baseline edit) so already-deployed
+        libraries at user_version>=1 actually get them; a fresh DB runs the whole
+        1..N loop so it picks these up too. All three target derived/secondary
+        tables (NOT knowledge_objects), so they can't perturb rebuild's
+        ORDER BY rowid canonical insertion order. Single-line CREATE INDEX so the
+        stored sqlite_master.sql is stable (snapshot verifier matches it exactly).
+
+        - element_embeddings(source_id): `DELETE FROM element_embeddings WHERE
+          source_id=?` (source re-extract / clear) was a full-table scan over
+          EVERY notebook's element vectors — only idx_element_embeddings_nb
+          (notebook_id) existed and this DELETE has no notebook_id predicate.
+        - knowledge_relations(notebook_id, review_status): the pending-edge bell
+          count (`... WHERE notebook_id IN (...) AND review_status='pending'`)
+          seeked by notebook then row-fetched every relation to test review_status.
+        - concept_comentions(notebook_id, canonical_b): comention_peers filters
+          `(canonical_a=? OR canonical_b=?)`; PK (notebook_id,canonical_a,
+          canonical_b) served only the canonical_a arm.
+
+        review_status is added by _migration_1's add_column_if_missing (line ~741),
+        which does NOT re-run on a deployed DB at user_version=10 (the loop runs
+        only _migration_11). So guard the column here before indexing it, or a
+        deployed DB that never got the column would fail with `no such column`."""
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "knowledge_relations", "review_status", "TEXT NOT NULL DEFAULT 'pending'")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_element_embeddings_source ON element_embeddings(source_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_review ON knowledge_relations(notebook_id, review_status)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_comentions_nb_b ON concept_comentions(notebook_id, canonical_b)")
+
+    def _migration_12(self) -> None:
+        """/analytics parse_status GROUP BY covering index. Deployed DBs at
+        user_version>=1 short-circuit _migration_1, so this needs its own step;
+        sources is a secondary table so it cannot perturb rebuild's ORDER BY
+        rowid canonical order."""
+        with self._connect() as db:
+            db.execute("CREATE INDEX IF NOT EXISTS idx_sources_nb_parse_status ON sources(notebook_id, parse_status)")
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，

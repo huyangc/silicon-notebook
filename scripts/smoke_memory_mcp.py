@@ -87,6 +87,7 @@ async def run() -> None:
             notebook_catalog_repository,
             repository,
         )
+        from app.core import readiness
         from app.core.config import get_settings
         from app.core.request_context import reset_request_user, set_request_user
         from app.main import create_app
@@ -94,6 +95,10 @@ async def run() -> None:
 
         get_settings.cache_clear()
         repository.cache_clear()
+        # MCP transport behavior is the subject of this smoke. Startup warm-up
+        # and its 503 readiness gate have dedicated tests, so keep this isolated
+        # official-client check deterministic like the pytest MCP suite.
+        readiness.mark_ready()
         app = create_app()
         identity = identity_repository()
         catalog = notebook_catalog_repository()

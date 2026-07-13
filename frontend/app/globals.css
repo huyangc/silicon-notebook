@@ -5137,6 +5137,16 @@ button.chat-session-card {
 .auth-error { font-size: 13px; color: #ef5350; }
 .auth-submit { margin-top: 6px; padding: 10px; border: 0; border-radius: 8px; background: #2f6df6; color: #fff; cursor: pointer; }
 .auth-submit:disabled { opacity: .6; cursor: default; }
+/* 启动就绪门:复用 auth-card 外壳,居中的旋转指示 + 阶段文案。 */
+.startup-card { align-items: center; text-align: center; gap: 16px; }
+.startup-spinner { width: 34px; height: 34px; margin: 6px 0; border-radius: 50%;
+  border: 3px solid rgba(255,255,255,.14); border-top-color: #2f6df6;
+  animation: startup-spin .9s linear infinite; }
+.startup-spinner.error { border-top-color: #e0a042; animation-duration: 1.4s; }
+.startup-phase { font-size: 14px; font-weight: 600; color: #e7ecf3; }
+.startup-sub { font-size: 12px; color: #9aa6b5; line-height: 1.5; }
+.startup-retry { align-self: stretch; margin-top: 2px; }
+@keyframes startup-spin { to { transform: rotate(360deg); } }
 .topbar-right { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .user-menu {
   position: relative;

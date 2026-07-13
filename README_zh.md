@@ -40,7 +40,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
-当前 schema 版本为 11。已提交的 v9 兼容 fixture 会经由既有 v10 migration 与 v11 Memory/Agent migration 升级，并保持可读。
+当前 schema 版本为 13。已提交的 v9 兼容 fixture 会经由既有 v10 migration、v11/v12 SQLite 热路径索引 migration 与 v13 Memory/Agent migration 升级，并保持可读。
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，图谱和答案共用的类型标记位于 `kg-type-mark.tsx`。
 - 结构回归测试会阻止这些职责重新复制回巨型文件。后续拆分沿用同一增量方式：保持端点与用户行为不变，每次只迁移一个高内聚领域，然后运行完整离线门禁。
 
@@ -176,6 +176,37 @@ bash scripts/check.sh                        # hermetic smoke + 全量 pytest + 
 
 后端会把结构化 JSONL 日志写入 `.local/logs/`(`requests` / `events` / `llm`);跟踪一次
 上传或排查卡住的 source 见[可观测性 / 日志](#可观测性--日志)。
+
+### 5 · 离线打包(目标机没有 npm/node)
+
+要部署到一台**没有 npm/node**、只有 Python 包索引、且**无 root** 的机器:在一台**有 Node、
+且 OS/CPU 架构与目标机一致**的打包机上产出自包含 tar 包,再拷过去一键装:
+
+```bash
+bash scripts/pack.sh          # → dist/silicon_notebook_<version>_<os>-<arch>.tar.gz
+```
+
+`pack.sh` 把前端构建成 Next.js **standalone** 服务,捆绑一份**便携 Node 运行时**(匹配打包机
+架构)来跑它,并预编译一个包含全部 Python 依赖的 **wheelhouse**——这样 `hnswlib` / `scipy`
+等编译型包在目标机上无需编译器。因为打包机与目标机同 OS/同架构,包内每个二进制都能直接运行。
+
+目标机上——无需 npm/node、无需 root:
+
+```bash
+tar xzf silicon_notebook_<version>_<os>-<arch>.tar.gz
+cd    silicon_notebook_<version>_<os>-<arch>
+./install.sh    # 建用户态 venv;优先用 wheelhouse 离线装依赖
+                # (缺的再从 pip 源在线补);生成 .env
+vi .env         # 填模型服务 URL(同 2 · 配置)
+./start.sh      # 便携 node 跑 standalone 前端 + venv 的 uvicorn 后端
+./stop.sh       # 停止两者
+```
+
+打包机可配置项:`NODE_VERSION` / `NODE_DIST_URL` / `NODE_TARBALL`(便携 Node 来源)、
+`SKIP_WHEELHOUSE=1`(改为目标机在线装依赖)、`PIP_INDEX_URL`、`PACK_PYTHON`。目标机可配置项:
+`PYTHON_BIN`、`PIP_INDEX_URL`、`FRONTEND_HOST` / `FRONTEND_PORT` / `BACKEND_HOST` / `PORT`。
+打包机的 Python **小版本**应与目标机一致,否则预编译 wheel 装不上(install.sh 会自动回退在线
+安装)。目标侧细节见包内 `DEPLOY.md`。
 
 ## 产品流程
 
@@ -418,6 +449,7 @@ worker。每多一个 worker 就多一份内存中的状态（大型 KG/ANN 索�
 
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout（毫秒，默认 30000）
+SQLITE_CACHE_SIZE_KB    # 每连接 SQLite 页缓存(KB,负值=KB)。连接按线程复用,总内存≈线程数×|值|（默认 -16384）
 DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
 SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
 ```
@@ -541,6 +573,9 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 脚本除汇总请求、事件和 LLM 延迟外，还会基于 DB 聚合与 scale-index manifest 输出
 strict reasoning / PPR 路径审计，用来判断大库是否只走 indexed core、chunk/relation ANN
 是否齐全、delta 策略是否会放开未索引部分，以及跨 base 的路径是否可能触碰 active 全量向量。
+该报告同时是统一诊断入口 `scripts/diag.py` 的 `slow` 子命令（`diag.py slow | latency | base-recall`）——
+把三个「分析慢现象」的工具收敛到一个命令：离线的 `slow` / `latency` 子命令保持纯 stdlib、不 import app，
+可在裸机上直接跑；`base-recall` 才懒加载 app，用于诊断深度报告为何不引用 base 库。
 
 **日志可视化页面 — `/dev/logs`。** 针对上述 JSONL 通道的只读 debug 页面（v1 聚焦 LLM 通道）。左侧列表可按 kind / status / model 过滤并全文搜索；详情区完整展示发给 LLM 的内容（`system` / `user` 消息与 `schema_hint`）以及模型回复、token 用量、耗时。由门控的后端接口 `/api/debug/logs/...` 提供，需显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启（默认关闭——完整 LLM 记录可能包含私有来源材料）。
 

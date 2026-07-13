@@ -29,8 +29,8 @@ def _names(db: sqlite3.Connection, kind: str) -> set[str]:
     }
 
 
-def test_v11_memory_schema_has_privacy_and_agent_indexes(repo):
-    assert sr.SCHEMA_VERSION == 11
+def test_v13_memory_schema_has_privacy_and_agent_indexes(repo):
+    assert sr.SCHEMA_VERSION == 13
     with repo._connect() as db:
         tables = _names(db, "table")
         assert {
@@ -58,7 +58,58 @@ def test_v11_memory_schema_has_privacy_and_agent_indexes(repo):
         assert default_notebook_fk["on_delete"] == "CASCADE"
 
 
-def test_v11_memory_schema_enforces_lifecycle_and_answer_idempotency(repo):
+def test_master_v12_database_upgrades_to_v13_memory_schema(repo):
+    """Master reached v12 without Memory before the branches were merged."""
+    with repo._write() as db:
+        db.execute("DROP TABLE memory_items_fts")
+        for table in (
+            "memory_embeddings",
+            "memory_provenance",
+            "memory_revisions",
+            "memory_items",
+            "agent_token_notebooks",
+            "agent_access_tokens",
+            "agent_profiles",
+        ):
+            db.execute(f"DROP TABLE {table}")
+        db.execute("PRAGMA user_version = 12")
+    repo.close_local()
+
+    upgraded = sr.SQLiteRepository(repo.settings)
+    with upgraded._connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert {
+            "memory_items",
+            "memory_revisions",
+            "memory_provenance",
+            "memory_embeddings",
+            "agent_profiles",
+            "agent_access_tokens",
+            "agent_token_notebooks",
+        } <= _names(db, "table")
+
+
+def test_feature_v11_database_upgrades_to_v13_master_indexes(repo):
+    """The pre-merge Memory branch used v11 without master's later indexes."""
+    master_indexes = {
+        "idx_element_embeddings_source",
+        "idx_knowledge_relations_nb_review",
+        "idx_comentions_nb_b",
+        "idx_sources_nb_parse_status",
+    }
+    with repo._write() as db:
+        for index in master_indexes:
+            db.execute(f"DROP INDEX {index}")
+        db.execute("PRAGMA user_version = 11")
+    repo.close_local()
+
+    upgraded = sr.SQLiteRepository(repo.settings)
+    with upgraded._connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 13
+        assert master_indexes <= _names(db, "index")
+
+
+def test_v13_memory_schema_enforces_lifecycle_and_answer_idempotency(repo):
     with repo._write() as db:
         db.execute(
             "INSERT INTO notebooks (id,name,created_by,created_at,updated_at) "
@@ -97,7 +148,7 @@ def test_v11_memory_schema_enforces_lifecycle_and_answer_idempotency(repo):
             )
 
 
-def test_v11_memory_fts_tracks_insert_update_and_delete(repo):
+def test_v13_memory_fts_tracks_insert_update_and_delete(repo):
     with repo._write() as db:
         db.execute(
             "INSERT INTO notebooks (id,name,created_by,created_at,updated_at) "
@@ -127,7 +178,7 @@ def test_v11_memory_fts_tracks_insert_update_and_delete(repo):
         ).fetchone()
 
 
-def test_v11_memory_fts_finds_unsegmented_chinese_substring(repo):
+def test_v13_memory_fts_finds_unsegmented_chinese_substring(repo):
     with repo._write() as db:
         db.execute(
             "INSERT INTO notebooks (id,name,created_by,created_at,updated_at) "
