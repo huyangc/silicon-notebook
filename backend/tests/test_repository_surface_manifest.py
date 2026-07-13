@@ -1549,10 +1549,14 @@ TASK7_MEMORY_ALLOWED_NEW_MEMBERS = {
 # facade delegate and a focused full-stack test that intentionally composes
 # established repository seams. The immutable manifest predates Memory.
 TASK8_MEMORY_ALLOWED_IMPORTS = {
-    ("backend/tests/test_memory_promotion.py", 10, "app.services.sqlite_repository", name)
+    ("backend/tests/test_memory_promotion.py", 12, "app.services.sqlite_repository", name)
     for name in {"SQLiteRepository", "reset_request_user", "set_request_user"}
 }
-TASK8_MEMORY_ALLOWED_NEW_MEMBERS = {"propose_memory_promotion"}
+TASK8_MEMORY_ALLOWED_NEW_MEMBERS = {
+    "propose_memory_promotion",
+    "approve_promotion_as_reviewer",
+    "reject_promotion_as_reviewer",
+}
 TASK8_MEMORY_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_memory_promotion.py", name)
     for name in {
@@ -1561,10 +1565,14 @@ TASK8_MEMORY_ALLOWED_MEMBER_FILES = {
         "create_notebook", "create_user", "deprecate_memory", "get_memory",
         "list_promotion_queue", "mark_notebook_base", "memory_revisions",
         "propose_memory_promotion", "reject_memory", "reject_promotion", "remove_member",
+        "approve_promotion_as_reviewer",
+        "propose_promotion",
         "reset_request_user", "set_request_user",
     }
 } | {
     ("backend/app/api/memory_routes.py", "propose_memory_promotion"),
+    ("backend/app/api/routes.py", "approve_promotion_as_reviewer"),
+    ("backend/app/api/routes.py", "reject_promotion_as_reviewer"),
 }
 
 # Task 26: the consolidated facade delegates its last SQL bodies to the
@@ -2003,6 +2011,10 @@ REVIEW_FIX_ALLOWED_CONSUMERS = {
 }
 
 FROZEN_ONLY_MOVED_CONSUMERS = {
+    # Authenticated promotion routes now call explicit reviewer-aware adapters;
+    # the frozen facade methods retain their original signatures for callers.
+    ("approve_promotion", "backend/app/api/routes.py:<line>"),
+    ("reject_promotion", "backend/app/api/routes.py:<line>"),
     # Task 1 adds ownership imports above this test module's own facade import.
     ("SQLiteRepository", "backend/tests/test_repository_surface_manifest.py:13"),
     ("_augment_notebook_meta", "backend/app/services/sqlite_repository.py:<line>"),

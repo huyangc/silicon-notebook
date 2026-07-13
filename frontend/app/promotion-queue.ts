@@ -24,6 +24,7 @@ export type PromotionCandidate = {
   }>;
   source_kind: "knowledge" | "memory";
   memory_id: string;
+  source_revision: number;
 };
 
 export type PromotionApproveResult = {

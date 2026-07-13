@@ -1300,7 +1300,9 @@ def approve_promotion(candidate_id: str, user: UserProfile = Depends(get_current
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可管理晋升队列")
     try:
-        return PromotionApproveResult(**repository().approve_promotion(candidate_id))
+        return PromotionApproveResult(
+            **repository().approve_promotion_as_reviewer(candidate_id, user.id)
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Promotion candidate not found")
     except ValueError as exc:
@@ -1316,7 +1318,9 @@ def reject_promotion(candidate_id: str, payload: PromotionRejectRequest, user: U
         raise HTTPException(status_code=403, detail="仅管理员可管理晋升队列")
     try:
         return PromotionCandidate(
-            **repository().reject_promotion(candidate_id, reason=payload.reason)
+            **repository().reject_promotion_as_reviewer(
+                candidate_id, payload.reason, user.id
+            )
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Promotion candidate not found")

@@ -787,7 +787,11 @@ class GovernanceStore:
         }
 
     def approve_promotion_in_transaction(
-        self, connection: sqlite3.Connection, candidate_id: str, now: str
+        self,
+        connection: sqlite3.Connection,
+        candidate_id: str,
+        now: str,
+        reviewer_id: str = "curator",
     ) -> PromotionApproval:
         """The in-transaction body of approve_promotion: copy the personal
         object into the base corpus, deduplicating against existing base
@@ -883,9 +887,9 @@ class GovernanceStore:
 
         connection.execute(
             "UPDATE promotion_candidates "
-            "SET status='approved', base_match_id=?, reviewed_by='curator', updated_at=? "
+            "SET status='approved', base_match_id=?, reviewed_by=?, updated_at=? "
             "WHERE id=?",
-            (base_match_id, now, candidate_id),
+            (base_match_id, reviewer_id or "curator", now, candidate_id),
         )
         return PromotionApproval(
             candidate_id=candidate_id,

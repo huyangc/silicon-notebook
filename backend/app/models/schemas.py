@@ -816,6 +816,8 @@ class PromotionCandidate(BaseModel):
     evidence: List[Evidence] = Field(default_factory=list)
     source_kind: Literal["knowledge", "memory"] = "knowledge"
     memory_id: str = ""
+    # Memory-backed proposals are reviewed against this immutable source revision.
+    source_revision: int = 0
 
 
 class PromotionApproveResult(BaseModel):

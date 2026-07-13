@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -111,6 +113,157 @@ def test_proposal_reuses_queue_without_exposing_private_provenance(repo, promoti
     queued = next(item for item in queue if item["id"] == proposal["id"])
     assert queued["source_kind"] == "memory"
     assert queued["notebook_id"] == notebook.id
+
+
+def test_memory_promotion_pins_revision_snapshot_for_queue(repo, promotion_setup):
+    owner, _other, _notebook, _base, memory = promotion_setup
+
+    proposal = repo.propose_memory_promotion(memory.id, owner.id)
+    queue_item = next(
+        item for item in repo.list_promotion_queue() if item["id"] == proposal["id"]
+    )
+
+    assert proposal["source_revision"] > 0
+    assert queue_item["source_revision"] == proposal["source_revision"]
+    assert queue_item["payload"] == proposal["payload"]
+    assert queue_item["payload"]["candidates"]
+
+
+def test_editing_proposed_memory_supersedes_snapshot_and_allows_reproposal(
+    repo, promotion_setup
+):
+    owner, _other, _notebook, _base, memory = promotion_setup
+    original = repo.propose_memory_promotion(memory.id, owner.id)
+
+    edited = repo.update_memory(
+        memory.id,
+        owner.id,
+        {"title": "Updated RC compensation", "content_md": "Updated claim."},
+    )
+
+    assert edited.status == "confirmed"
+    assert edited.promotion_state == "none"
+    with repo._connect() as db:
+        old_row = db.execute(
+            "SELECT status,reason,reviewed_by FROM promotion_candidates WHERE id=?",
+            (original["id"],),
+        ).fetchone()
+    assert dict(old_row) == {
+        "status": "rejected",
+        "reason": "superseded_by_memory_edit",
+        "reviewed_by": owner.id,
+    }
+
+    replacement = repo.propose_memory_promotion(memory.id, owner.id)
+    assert replacement["id"] != original["id"]
+    assert replacement["source_revision"] > original["source_revision"]
+    assert replacement["payload"]["candidates"] != original["payload"]["candidates"]
+
+    old_queue = next(
+        item
+        for item in repo.list_promotion_queue(status_filter="rejected")
+        if item["id"] == original["id"]
+    )
+    assert old_queue["source_revision"] == original["source_revision"]
+    assert old_queue["payload"] == original["payload"]
+
+
+def test_approval_fails_without_side_effect_when_pinned_revision_mismatches(
+    repo, promotion_setup
+):
+    owner, _other, _notebook, base, memory = promotion_setup
+    proposal = repo.propose_memory_promotion(memory.id, owner.id)
+    with repo._write() as db:
+        db.execute(
+            "UPDATE memory_items SET content_md='tampered without invalidation' WHERE id=?",
+            (memory.id,),
+        )
+    with repo._connect() as db:
+        before_candidate = dict(
+            db.execute(
+                "SELECT status,reviewed_by,base_match_id FROM promotion_candidates WHERE id=?",
+                (proposal["id"],),
+            ).fetchone()
+        )
+        before_revisions = db.execute(
+            "SELECT COUNT(*) AS c FROM memory_revisions WHERE memory_id=?",
+            (memory.id,),
+        ).fetchone()["c"]
+
+    with pytest.raises(ValueError, match="revision|snapshot"):
+        repo.approve_promotion_as_reviewer(proposal["id"], "admin-reviewer")
+
+    with repo._connect() as db:
+        after_candidate = dict(
+            db.execute(
+                "SELECT status,reviewed_by,base_match_id FROM promotion_candidates WHERE id=?",
+                (proposal["id"],),
+            ).fetchone()
+        )
+        after_revisions = db.execute(
+            "SELECT COUNT(*) AS c FROM memory_revisions WHERE memory_id=?",
+            (memory.id,),
+        ).fetchone()["c"]
+        base_count = db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
+            (base.id,),
+        ).fetchone()["c"]
+    assert after_candidate == before_candidate
+    assert after_revisions == before_revisions
+    assert base_count == 0
+
+
+def test_edit_and_approval_race_has_only_a_fully_approved_or_superseded_outcome(
+    repo, promotion_setup
+):
+    owner, _other, _notebook, base, memory = promotion_setup
+    proposal = repo.propose_memory_promotion(memory.id, owner.id)
+    barrier = threading.Barrier(2)
+
+    def approve():
+        barrier.wait()
+        try:
+            return ("approved", repo.approve_promotion(proposal["id"]))
+        except ValueError as exc:
+            return ("approval_rejected", str(exc))
+
+    def edit():
+        barrier.wait()
+        return (
+            "edited",
+            repo.update_memory(
+                memory.id,
+                owner.id,
+                {"content_md": "Concurrent edit must not change a pinned review."},
+            ),
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = [pool.submit(approve), pool.submit(edit)]
+        results = [future.result(timeout=10) for future in outcomes]
+
+    with repo._connect() as db:
+        candidate = db.execute(
+            "SELECT status,reason FROM promotion_candidates WHERE id=?",
+            (proposal["id"],),
+        ).fetchone()
+        base_count = db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
+            (base.id,),
+        ).fetchone()["c"]
+    current = repo.get_memory(memory.id, owner.id)
+    if candidate["status"] == "approved":
+        assert base_count > 0
+        assert current.promotion_state == "approved"
+        assert results[0][0] == "approved"
+    else:
+        assert dict(candidate) == {
+            "status": "rejected",
+            "reason": "superseded_by_memory_edit",
+        }
+        assert base_count == 0
+        assert current.promotion_state == "none"
+        assert results[0][0] == "approval_rejected"
 
 
 def test_admin_approval_is_idempotent_and_keeps_memory_private(repo, promotion_setup):
@@ -422,3 +575,99 @@ def test_memory_promotion_api_is_owner_only_and_admin_queue_reuses_existing_rout
     assert response.status_code == 201, response.text
     assert response.json()["source_kind"] == "memory"
     assert client.get("/api/promotion-queue", headers=headers).status_code == 403
+
+
+def test_promotion_routes_record_the_authenticated_admin_reviewer(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'reviewers.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import create_app
+    from app.api.deps import repository
+
+    client = TestClient(create_app())
+    owner_session = client.post(
+        "/api/auth/register", json={"username": "u00108101", "password": "pw"}
+    ).json()
+    reviewer_a = client.post(
+        "/api/auth/register", json={"username": "v00108102", "password": "pw"}
+    ).json()
+    reviewer_b = client.post(
+        "/api/auth/register", json={"username": "w00108103", "password": "pw"}
+    ).json()
+    owner_headers = {"Authorization": f"Bearer {owner_session['token']}"}
+    reviewer_a_headers = {"Authorization": f"Bearer {reviewer_a['token']}"}
+    reviewer_b_headers = {"Authorization": f"Bearer {reviewer_b['token']}"}
+    notebook_id = client.post(
+        "/api/notebooks", headers=owner_headers, json={"name": "Reviewer attribution"}
+    ).json()["id"]
+    repo_api = repository()
+    base = repo_api.create_notebook(NotebookCreate(name="Reviewer base"))
+    repo_api.mark_notebook_base(base.id)
+    with repo_api._write() as db:
+        db.execute(
+            "UPDATE users SET role='admin' WHERE id IN (?,?)",
+            (reviewer_a["user"]["id"], reviewer_b["user"]["id"]),
+        )
+
+    approve_memory = repo_api.create_memory_candidate(
+        notebook_id, owner_session["user"]["id"], None, "approve-reviewer",
+        "Approve", "Approved reviewer claim", [], "", {}, [],
+    )
+    approve_memory = repo_api.confirm_memory(
+        approve_memory.id, owner_session["user"]["id"]
+    )
+    approve_proposal = repo_api.propose_memory_promotion(
+        approve_memory.id, owner_session["user"]["id"]
+    )
+    approve_response = client.post(
+        f"/api/promotion-queue/{approve_proposal['id']}/approve",
+        headers=reviewer_a_headers,
+    )
+    assert approve_response.status_code == 200, approve_response.text
+
+    reject_memory = repo_api.create_memory_candidate(
+        notebook_id, owner_session["user"]["id"], None, "reject-reviewer",
+        "Reject", "Rejected reviewer claim", [], "", {}, [],
+    )
+    reject_memory = repo_api.confirm_memory(
+        reject_memory.id, owner_session["user"]["id"]
+    )
+    reject_proposal = repo_api.propose_memory_promotion(
+        reject_memory.id, owner_session["user"]["id"]
+    )
+    reject_response = client.post(
+        f"/api/promotion-queue/{reject_proposal['id']}/reject",
+        headers=reviewer_b_headers,
+        json={"reason": "not canonical"},
+    )
+    assert reject_response.status_code == 200, reject_response.text
+
+    knowledge_id = repo_api._test_insert_object(
+        notebook_id, "concept", {"name": "Authenticated reviewer"}
+    )
+    knowledge_proposal = repo_api.propose_promotion(notebook_id, knowledge_id)
+    knowledge_response = client.post(
+        f"/api/promotion-queue/{knowledge_proposal['id']}/approve",
+        headers=reviewer_b_headers,
+    )
+    assert knowledge_response.status_code == 200, knowledge_response.text
+
+    with repo_api._connect() as db:
+        reviewed = {
+            row["id"]: row["reviewed_by"]
+            for row in db.execute(
+                "SELECT id,reviewed_by FROM promotion_candidates WHERE id IN (?,?,?)",
+                (
+                    approve_proposal["id"],
+                    reject_proposal["id"],
+                    knowledge_proposal["id"],
+                ),
+            ).fetchall()
+        }
+    assert reviewed == {
+        approve_proposal["id"]: reviewer_a["user"]["id"],
+        reject_proposal["id"]: reviewer_b["user"]["id"],
+        knowledge_proposal["id"]: reviewer_b["user"]["id"],
+    }

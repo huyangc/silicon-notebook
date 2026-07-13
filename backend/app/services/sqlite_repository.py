@@ -2230,6 +2230,14 @@ class SQLiteRepository:
         unchanged). Frozen-signature delegate."""
         return self._runtime.knowledge_governance.approve_promotion(candidate_id)
 
+    def approve_promotion_as_reviewer(
+        self, candidate_id: str, reviewer_id: str
+    ) -> dict:
+        """Authenticated adapter; preserves the frozen legacy facade signature."""
+        return self._runtime.knowledge_governance.approve_promotion(
+            candidate_id, reviewer_id=reviewer_id
+        )
+
     @staticmethod
     def _seed_fn_for(object_type: str):
         """Return the kg_merge seed function for a KG object type."""
@@ -2254,6 +2262,14 @@ class SQLiteRepository:
         orchestration (Task 16). Frozen-signature delegate."""
         return self._runtime.knowledge_governance.reject_promotion(
             candidate_id, reason
+        )
+
+    def reject_promotion_as_reviewer(
+        self, candidate_id: str, reason: str, reviewer_id: str
+    ) -> dict:
+        """Authenticated adapter; preserves the frozen legacy facade signature."""
+        return self._runtime.knowledge_governance.reject_promotion(
+            candidate_id, reason, reviewer_id=reviewer_id
         )
 
     def update_knowledge(

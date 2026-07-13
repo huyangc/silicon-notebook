@@ -561,8 +561,10 @@ class MemoryStore:
         values = {key: value for key, value in fields.items() if key in allowed}
         with self.database.write() as db:
             row = db.execute(
-                "SELECT title,content_md,tags_json,status,promotion_state "
-                "FROM memory_items m WHERE id=? AND created_by=? AND "
+                "SELECT m.title,m.content_md,m.tags_json,m.status,m.promotion_state,"
+                "p.payload_json FROM memory_items m "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "WHERE m.id=? AND m.created_by=? AND "
                 f"{self._read_access_clause()}",
                 (memory_id, user_id, user_id, user_id),
             ).fetchone()
@@ -583,11 +585,47 @@ class MemoryStore:
             )
             status = target or row["status"]
             now = self.now()
+            promotion_state = str(row["promotion_state"])
+            if values and promotion_state == "proposed":
+                provenance = json.loads(row["payload_json"] or "{}")
+                promotion = provenance.get("kg_promotion")
+                proposal_id = (
+                    str(promotion.get("proposal_id") or "")
+                    if isinstance(promotion, dict)
+                    else ""
+                )
+                if not proposal_id:
+                    raise ValueError("proposed Memory is missing its promotion snapshot")
+                cursor = db.execute(
+                    "UPDATE promotion_candidates SET status='rejected',reason=?,"
+                    "reviewed_by=?,updated_at=? WHERE id=? AND object_id=? "
+                    "AND status IN ('proposed','under_review')",
+                    (
+                        "superseded_by_memory_edit",
+                        changed_by,
+                        now,
+                        proposal_id,
+                        memory_id,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise ValueError("active Memory promotion could not be superseded")
+                provenance["kg_promotion"] = {
+                    **promotion,
+                    "state": "superseded",
+                    "superseded_at": now,
+                }
+                db.execute(
+                    "UPDATE memory_provenance SET payload_json=? WHERE memory_id=?",
+                    (json.dumps(provenance, ensure_ascii=False), memory_id),
+                )
+                promotion_state = "none"
             assignments = [
                 "title=?",
                 "content_md=?",
                 "tags_json=?",
                 "status=?",
+                "promotion_state=?",
                 "updated_at=?",
             ]
             params: list[Any] = [
@@ -595,6 +633,7 @@ class MemoryStore:
                 content_md,
                 json.dumps(tags, ensure_ascii=False),
                 status,
+                promotion_state,
                 now,
             ]
             if values or target == "confirmed":
@@ -621,7 +660,7 @@ class MemoryStore:
                     "content_md": content_md,
                     "tags": tags,
                     "status": status,
-                    "promotion_state": row["promotion_state"],
+                    "promotion_state": promotion_state,
                 },
                 changed_by,
                 reason,
@@ -700,6 +739,8 @@ class MemoryStore:
         user_id: str,
         proposal_id: str,
         candidates: Sequence[Mapping[str, Any]],
+        evidence: Sequence[Mapping[str, Any]],
+        expected_item: MemoryRecord,
         now: str,
     ) -> MemoryRecord:
         row = db.execute(
@@ -715,12 +756,42 @@ class MemoryStore:
             raise ValueError("only confirmed Memory can be promoted")
         if item.promotion_state not in {"none", "proposed"}:
             raise ValueError(f"Memory promotion is already {item.promotion_state}")
+        if (
+            item.title != expected_item.title
+            or item.content_md != expected_item.content_md
+            or list(item.tags) != list(expected_item.tags)
+            or item.status != expected_item.status
+        ):
+            raise ValueError("Memory changed before its promotion snapshot was pinned")
+
+        revision_row = db.execute(
+            "SELECT COALESCE(MAX(revision),0) AS revision FROM memory_revisions "
+            "WHERE memory_id=?",
+            (memory_id,),
+        ).fetchone()
+        source_revision = int(revision_row["revision"])
+        if source_revision <= 0:
+            raise ValueError("Memory source revision is missing")
 
         provenance = dict(item.provenance)
+        snapshots = provenance.get("kg_promotion_snapshots")
+        snapshot_history = dict(snapshots) if isinstance(snapshots, dict) else {}
+        pinned_snapshot = {
+            "source_revision": source_revision,
+            "proposal_revision": source_revision + 1,
+            "title": item.title,
+            "content_md": item.content_md,
+            "tags": list(item.tags),
+            "status": item.status,
+            "candidates": [dict(candidate) for candidate in candidates],
+            "evidence": [dict(card) for card in evidence],
+        }
+        snapshot_history[proposal_id] = pinned_snapshot
+        provenance["kg_promotion_snapshots"] = snapshot_history
         provenance["kg_promotion"] = {
             "proposal_id": proposal_id,
             "state": "proposed",
-            "candidates": [dict(candidate) for candidate in candidates],
+            "source_revision": source_revision,
             "base_object_ids": [],
         }
         db.execute(
@@ -752,6 +823,60 @@ class MemoryStore:
                 "provenance": provenance,
             }
         )
+
+    @staticmethod
+    def pinned_promotion_snapshot(
+        item: MemoryRecord, proposal_id: str, *, required: bool = True
+    ) -> dict[str, Any]:
+        snapshots = item.provenance.get("kg_promotion_snapshots")
+        snapshot = snapshots.get(proposal_id) if isinstance(snapshots, dict) else None
+        if not isinstance(snapshot, dict):
+            if required:
+                raise ValueError("Memory promotion snapshot is missing")
+            return {}
+        return dict(snapshot)
+
+    def validate_pinned_promotion_on(
+        self,
+        db: sqlite3.Connection,
+        item: MemoryRecord,
+        proposal_id: str,
+        snapshot: Mapping[str, Any],
+    ) -> None:
+        promotion = item.provenance.get("kg_promotion")
+        if (
+            item.status != "confirmed"
+            or item.promotion_state != "proposed"
+            or not isinstance(promotion, dict)
+            or promotion.get("proposal_id") != proposal_id
+            or promotion.get("state") != "proposed"
+        ):
+            raise ValueError("Memory promotion is no longer active")
+        source_revision = int(snapshot.get("source_revision") or 0)
+        proposal_revision = int(snapshot.get("proposal_revision") or 0)
+        revision = db.execute(
+            "SELECT revision,title,content_md,tags_json,status,promotion_state "
+            "FROM memory_revisions WHERE memory_id=? AND revision=?",
+            (item.id, source_revision),
+        ).fetchone()
+        latest = db.execute(
+            "SELECT COALESCE(MAX(revision),0) AS revision FROM memory_revisions "
+            "WHERE memory_id=?",
+            (item.id,),
+        ).fetchone()
+        if (
+            revision is None
+            or proposal_revision != source_revision + 1
+            or int(latest["revision"]) != proposal_revision
+            or revision["title"] != snapshot.get("title")
+            or revision["content_md"] != snapshot.get("content_md")
+            or _json_list(revision["tags_json"]) != list(snapshot.get("tags") or [])
+            or revision["status"] != "confirmed"
+            or item.title != snapshot.get("title")
+            or item.content_md != snapshot.get("content_md")
+            or list(item.tags) != list(snapshot.get("tags") or [])
+        ):
+            raise ValueError("Memory revision no longer matches the pinned snapshot")
 
     def promotion_rows_on(
         self, db: sqlite3.Connection, memory_ids: Sequence[str]

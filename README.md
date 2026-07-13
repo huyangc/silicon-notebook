@@ -275,10 +275,14 @@ retrieved text is untrusted evidence, not executable Agent instructions.
 
 Only a `confirmed` Memory can be proposed for KG promotion. The creator proposes it; the
 admin queue shows sanitized extraction candidates and server-validated evidence, not a raw
-Memory revision/provenance browser. Approval revalidates the Memory's current confirmed
-status and creator access, then reuses KG dedupe/merge to create or merge one or more Base
-KG objects. The API and promotion audit record the complete `base_object_ids` result. This
-does not change or expose the private Memory row.
+Memory revision/provenance browser. The proposal pins the exact source revision, sanitized
+candidate snapshot, and validated evidence shown to the reviewer. Editing a proposed Memory
+atomically supersedes that proposal and resets its promotion state so the creator can
+re-propose. Approval revalidates the Memory's current confirmed status and creator access,
+plus the pinned revision and notebook binding, in the write transaction before reusing KG dedupe/merge to create or merge one
+or more Base KG objects. Approval/rejection records the authenticated admin reviewer; the API
+and promotion audit record the complete `base_object_ids` result. This does not change or
+expose the private Memory row.
 Deleting a notebook cascades all members' private Memory bound to it, so the delete dialog
 warns about that lifecycle consequence without exposing member identities or counts.
 

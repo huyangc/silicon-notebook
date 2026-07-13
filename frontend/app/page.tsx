@@ -26,6 +26,7 @@ import {
   rejectPromotion,
   type PromotionCandidate,
 } from "./promotion-queue";
+import { promotionReviewSections } from "./promotion-review";
 import { setNotebookTier, tierActionState } from "./notebook-tier";
 import {
   describeScaleIndex, scaleIndexOpConfirm, SCALE_OP_MODE,
@@ -4890,25 +4891,53 @@ export default function Home() {
                 <p className="tool-hint">暂无待审晋升请求。</p>
               ) : (
                 <div className="stack">
-                  {(promoQueue ?? []).map((cand) => (
+                  {(promoQueue ?? []).map((cand) => {
+                    const review = promotionReviewSections(cand);
+                    return (
                     <article className="item" key={cand.id}>
                       <div className="tag-row">
                         <span className="tag">{cand.status}</span>
                         <span className="tag">{cand.object_type}</span>
                         {cand.source_kind === "memory" && <span className="tag">Memory 提取候选</span>}
+                        {cand.source_kind === "memory" && review.sourceRevision > 0 && (
+                          <span className="tag">固定修订 #{review.sourceRevision}</span>
+                        )}
                         {cand.base_match_id && (
                           <span className="tag conflict">去重匹配: {cand.base_match_id.slice(0, 10)}</span>
                         )}
                       </div>
                       <h3>{String((cand.payload as Record<string, unknown>).name ?? (cand.payload as Record<string, unknown>).title ?? cand.object_id)}</h3>
-                      {cand.source_kind === "memory" && Array.isArray(cand.payload.candidates) && (
-                        <p className="tool-hint">
-                          待审对象：{cand.payload.candidates.map((item) => String((item as Record<string, unknown>).object_type ?? "")).filter(Boolean).join(" · ")}
-                        </p>
+                      {cand.source_kind === "memory" && review.candidates.length > 0 && (
+                        <div className="stack" aria-label="Memory 待审知识对象">
+                          {review.candidates.map((item, index) => (
+                            <section className="item" key={`${cand.id}-${item.objectType}-${index}`}>
+                              <strong>{item.objectType}</strong>
+                              {item.fields.map(([label, value]) => (
+                                <div key={label}>
+                                  <span className="tool-hint">{label}</span>
+                                  <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{value}</div>
+                                </div>
+                              ))}
+                            </section>
+                          ))}
+                        </div>
                       )}
                       <p className="tool-hint">来源笔记本: {cand.notebook_id.slice(0, 10)}</p>
-                      {cand.evidence.length > 0 && (
-                        <p><strong>证据：</strong>{cand.evidence[0].quoted_span ?? ""}</p>
+                      {review.evidence.length > 0 && (
+                        <div className="stack" aria-label="服务端校验证据">
+                          <strong>证据</strong>
+                          {review.evidence.map((evidence, index) => (
+                            <article className="item" key={`${cand.id}-evidence-${index}`}>
+                              <div className="tool-hint">
+                                {evidence.sourceTitle || "来源"}
+                                {evidence.locationLabel ? ` · ${evidence.locationLabel}` : ""}
+                              </div>
+                              <div style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                                {evidence.quotedSpan}
+                              </div>
+                            </article>
+                          ))}
+                        </div>
                       )}
                       {cand.base_match_id && (
                         <p className="conflict-note">基准库中已有相似节点 — 批准后将合并去重。</p>
@@ -4932,7 +4961,8 @@ export default function Home() {
                         </div>
                       )}
                     </article>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

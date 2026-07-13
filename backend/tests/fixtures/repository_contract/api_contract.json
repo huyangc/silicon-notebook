@@ -2948,6 +2948,11 @@
               "title": "Source Kind",
               "type": "string"
             },
+            "source_revision": {
+              "default": 0,
+              "title": "Source Revision",
+              "type": "integer"
+            },
             "status": {
               "title": "Status",
               "type": "string"
