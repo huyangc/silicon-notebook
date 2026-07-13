@@ -24,10 +24,12 @@ export function validateMemoryDraft(draft: {
   if (content.length > MEMORY_INPUT_LIMITS.contentMaxChars) {
     return `内容不能超过 ${MEMORY_INPUT_LIMITS.contentMaxChars} 个字符`;
   }
-  const tags = Array.from(new Set(draft.tags.map((tag) => tag.trim()).filter(Boolean)));
-  if (tags.length > MEMORY_INPUT_LIMITS.tagMaxCount) {
+  if (draft.tags.length > MEMORY_INPUT_LIMITS.tagMaxCount) {
     return `标签不能超过 ${MEMORY_INPUT_LIMITS.tagMaxCount} 个`;
   }
+  const normalizedTags = draft.tags.map((tag) => tag.trim());
+  if (normalizedTags.some((tag) => !tag)) return "标签不能为空";
+  const tags = Array.from(new Set(normalizedTags));
   if (tags.some((tag) => tag.length > MEMORY_INPUT_LIMITS.tagMaxChars)) {
     return `单个标签不能超过 ${MEMORY_INPUT_LIMITS.tagMaxChars} 个字符`;
   }

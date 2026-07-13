@@ -231,6 +231,7 @@ reason 1,000 字符、task context 序列化 UTF-8 8,192 bytes、evidence 最多
 32,768 bytes、client request id 200 字符。HTTP 违规返回 422；MCP/内部调用也经过同一 service 校验。
 嵌套 NaN、正负 Infinity 会在持久化前被拒绝，合法 JSON null 则保持原样往返。
 MCP 提案严格使用这些 Core 上限，不再叠加更窄的重复限制。
+tag 原始列表会先按 20 条限额校验，再 trim/去重；空白 tag 直接拒绝。
 
 总 Memory 页的“Agent 接入”可创建稳定 Agent profile，以及明文只显示一次的 token。
 Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的

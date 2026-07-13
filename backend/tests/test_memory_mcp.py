@@ -819,6 +819,7 @@ async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_wo
         {"title": "t" * 100_000},
         {"content_md": "c" * 100_000},
         {"tags": ["tag"] * 1_000},
+        {"tags": ["duplicate"] * 21},
         {"tags": ["t" * 100_000]},
         {"reason": "r" * 100_000},
         {"task_context": {"private": "x" * 100_000}},
@@ -908,6 +909,42 @@ async def test_propose_memory_accepts_payloads_within_exact_core_json_limits(mcp
         }))
 
     assert created["status"] == "candidate"
+
+
+@pytest.mark.anyio
+async def test_propose_memory_delegates_exact_tag_normalization_to_core(mcp_env):
+    notebook_id = mcp_env["notebook"].id
+    raw_tags = [" analog ", "analog"] + [f"tag-{index}" for index in range(18)]
+    async with OfficialMcpClient(
+        mcp_env["app"], mcp_env["token_a"].token
+    ) as client:
+        _payload(await client.call("select_notebook", {"notebook_id": notebook_id}))
+        created = _payload(await client.call("propose_memory", {
+            "title": "Shared tag contract",
+            "content_md": "Twenty raw values deduplicate after the raw cap.",
+            "tags": raw_tags,
+            "reason": "Tag parity regression",
+            "task_context": {"task": "tag parity"},
+            "evidence_refs": [],
+            "client_request_id": "shared-tag-contract",
+        }))
+        detail = _payload(await client.call(
+            "get_memory", {"memory_id": created["memory_id"]}
+        ))
+
+    assert detail["tags"] == [
+        "analog", *[f"tag-{index}" for index in range(18)]
+    ]
+
+
+def test_mcp_proposal_does_not_duplicate_shared_tag_policy():
+    import inspect
+    from app.api import mcp_server
+
+    source = inspect.getsource(mcp_server._validate_proposal_input)
+    assert "MEMORY_TAG_MAX_COUNT" not in source
+    assert "tags must not contain blank values" not in source
+    assert source.count("normalize_tags(") == 1
 
 
 def test_nonlocal_plain_http_mcp_configuration_is_rejected():

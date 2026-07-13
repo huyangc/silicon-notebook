@@ -13,6 +13,9 @@ A follow-up final review additionally required pointer-free superseded
 provenance, neutral Core ownership of JSON safety, and exact (not narrower)
 MCP/Core acceptance limits.
 
+The final narrow review required tag-count/blank semantics to live exclusively
+in the same shared normalizer.
+
 No MCP tool, lifecycle state, schema, or frontend capability was added.
 
 ## TDD evidence
@@ -33,6 +36,8 @@ No MCP tool, lifecycle state, schema, or frontend capability was added.
   `MemoryStore` depended on `app.services.memory_inputs`, and a valid proposal
   above the former MCP-only 8,000-byte/20-item/12,000-byte sub-budgets was
   rejected despite fitting the Core contract.
+- Final tag RED proved 21 duplicate tags bypassed the shared post-dedup count,
+  the real API persisted them, and MCP enforced count/blank rules locally.
 
 ### GREEN
 
@@ -41,6 +46,8 @@ No MCP tool, lifecycle state, schema, or frontend capability was added.
 - Promotion terminal/illegal-reject/race focused regression: `3 passed`.
 - Follow-up pointer/architecture/exact-MCP RED tests: `1 + 1 + 1` failed first,
   then passed after the narrow fixes.
+- Final tag Core/service, real API, and MCP-delegation regressions failed first,
+  then passed (`1 + 1 + 3` focused GREEN).
 
 ## Implementation
 
@@ -68,6 +75,10 @@ sub-budgets were removed: MCP accepts the exact Core 8,192-byte task context,
 still occurs before `_selected_notebook`, so just-over-Core
 input performs no live token refresh and no service call. The exact seven-tool
 surface and every response budget are unchanged.
+
+`normalize_tags` now caps the raw sequence at 20 before trim/dedup and rejects
+every blank tag. Pydantic, service/internal callers, and MCP all delegate to
+that one rule; MCP contains no duplicate raw-count or blank-tag policy.
 
 ### Promotion terminal transaction
 
@@ -98,11 +109,14 @@ non-finite/null handling and proposed-Memory deprecation. Updated
 
 ## Verification
 
-- Broader Memory/API/MCP/promotion/architecture suite: `156 passed`.
-- Exact full backend: `2935 passed, 1 skipped` in `258.81s`.
+- Final broader Memory/API/MCP/promotion/architecture suite: `125 passed`.
+- Exact full backend: `2939 passed, 1 skipped` in `264.64s`.
+- Focused frontend Memory model regression: `13 passed`.
 - Frontend tests: `189 passed`.
 - TypeScript: `npm run lint` passed.
 - Next.js production build: `npm run build` passed.
+- Repository gate: `scripts/check.sh` passed (including `2939 passed, 1 skipped`,
+  `189` frontend tests, TypeScript, and production build).
 - `git diff --check`: passed.
 
 ## Self-review

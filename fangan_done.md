@@ -305,6 +305,8 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   用户、同一 notebook 下由具备 `memory:read_candidates` 的所有 Agent profile 共享；不同用户、
   不同 notebook、rejected/deprecated 均排除。用户丢失 notebook 访问权时 Memory 暂不可读/检索；
   notebook 删除按 FK 生命周期级联成员绑定的私有 Memory，前端删除确认已有不泄露成员明细的警告。
+- **输入合同**：Pydantic/API、service/internal 与 MCP 共用同一 Memory normalizer；tag 原始序列先
+  校验最多 20 条，再 trim/去重，空白 tag fail-closed 拒绝，避免重复/空白绕过数量上限。
 - **两个检索平面**：candidate+confirmed 只进入 scoped Agent Memory 平面；正式 notebook Ask、
   notebook 搜索、Deep Report 与 `search_notebook_context` 只接收 confirmed。Memory 命中使用独立
   anchor/provenance，不伪造 source/element id。排序先判相关性，只有等分/冲突再应用
@@ -327,7 +329,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **确定性评价与验证**：固定 gold 计算 Recall@5/MRR/nDCG，candidate→正式平面、跨用户、跨
   notebook 三个泄漏计数均为 0；A/B harness 覆盖 no-Memory、KB-only、KB+confirmed-Memory。
   `scripts/check.sh` 已包含官方 `mcp` client 离线 smoke，验证七工具、session 选择隔离、candidate
-  正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2935 passed, 1 skipped`、
+  正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2939 passed, 1 skipped`、
   前端 `189 passed`、TypeScript 与 Next.js production build 均成功。
 
 ## 20. 当前边界（后续阶段，未计入已完成）

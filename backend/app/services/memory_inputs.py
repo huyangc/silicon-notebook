@@ -69,20 +69,21 @@ def normalize_client_request_id(value: Any) -> str:
 def normalize_tags(value: Any) -> list[str]:
     if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
         raise MemoryInputError("tags must be a list")
+    raw_values = list(value)
+    if len(raw_values) > MEMORY_TAG_MAX_COUNT:
+        raise MemoryInputError(
+            f"tags may contain at most {MEMORY_TAG_MAX_COUNT} values"
+        )
     normalized: list[str] = []
     seen: set[str] = set()
-    for raw in value:
+    for raw in raw_values:
         tag = normalize_text(
-            raw, field="tag", max_chars=MEMORY_TAG_MAX_CHARS, required=False
+            raw, field="tag", max_chars=MEMORY_TAG_MAX_CHARS
         )
-        if not tag or tag in seen:
+        if tag in seen:
             continue
         seen.add(tag)
         normalized.append(tag)
-        if len(normalized) > MEMORY_TAG_MAX_COUNT:
-            raise MemoryInputError(
-                f"tags may contain at most {MEMORY_TAG_MAX_COUNT} values"
-            )
     return normalized
 
 

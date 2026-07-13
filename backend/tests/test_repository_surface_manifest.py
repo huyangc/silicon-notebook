@@ -1531,14 +1531,14 @@ TASK6_MEMORY_ALLOWED_NEW_MEMBERS = {
 # facade delegates.  It adds one source-checked one-hop delegate for the
 # two-plane Memory retriever; no SQL or private runtime state is exposed.
 TASK7_MEMORY_ALLOWED_CONSUMERS = {
-    ("user_can_read_notebook", "backend/app/api/mcp_server.py:615"),
-    ("get_notebook", "backend/app/api/mcp_server.py:620"),
-    ("user_can_read_notebook", "backend/app/api/mcp_server.py:652"),
-    ("get_notebook", "backend/app/api/mcp_server.py:657"),
-    ("unified_kg_status", "backend/app/api/mcp_server.py:658"),
-    ("agent_memory_hits", "backend/app/api/mcp_server.py:702"),
-    ("search_notebook", "backend/app/api/mcp_server.py:772"),
-    ("ask", "backend/app/api/mcp_server.py:868"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:609"),
+    ("get_notebook", "backend/app/api/mcp_server.py:614"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:646"),
+    ("get_notebook", "backend/app/api/mcp_server.py:651"),
+    ("unified_kg_status", "backend/app/api/mcp_server.py:652"),
+    ("agent_memory_hits", "backend/app/api/mcp_server.py:696"),
+    ("search_notebook", "backend/app/api/mcp_server.py:766"),
+    ("ask", "backend/app/api/mcp_server.py:862"),
 }
 TASK7_MEMORY_ALLOWED_NEW_MEMBERS = {
     "agent_memory_hits",

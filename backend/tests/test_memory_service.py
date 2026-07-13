@@ -261,6 +261,54 @@ def test_memory_service_enforces_shared_input_limits_and_normalization(
     assert memory_service.get(valid.id, users.alice.id).content_md == "Body"
 
 
+def test_shared_tag_normalizer_caps_raw_input_and_rejects_blanks_before_dedup(
+    memory_service, users, notebook
+):
+    from app.services.memory_inputs import MEMORY_TAG_MAX_COUNT, normalize_tags
+
+    with pytest.raises(ValueError, match="at most 20"):
+        normalize_tags(["duplicate"] * (MEMORY_TAG_MAX_COUNT + 1))
+    with pytest.raises(ValueError, match="blank"):
+        normalize_tags(["valid", "  "])
+
+    raw = [" analog ", "analog"] + [f"tag-{index}" for index in range(18)]
+    normalized = normalize_tags(raw)
+    assert len(raw) == MEMORY_TAG_MAX_COUNT
+    assert normalized == ["analog", *[f"tag-{index}" for index in range(18)]]
+
+    accepted = memory_service.create_candidate(
+        notebook.id,
+        users.alice.id,
+        "agent-a",
+        "raw-tag-cap-valid",
+        "Valid tags",
+        "Twenty raw tags are accepted",
+        raw,
+        "regression",
+        {},
+        [],
+    )
+    assert accepted.tags == normalized
+    for request_id, tags in (
+        ("raw-tag-cap-duplicate-overflow", ["duplicate"] * 21),
+        ("raw-tag-cap-blank", ["valid", " "]),
+    ):
+        with pytest.raises(ValueError):
+            memory_service.create_candidate(
+                notebook.id,
+                users.alice.id,
+                "agent-a",
+                request_id,
+                "Invalid tags",
+                "Must not persist",
+                tags,
+                "regression",
+                {},
+                [],
+            )
+    assert memory_service.list_memories(users.alice.id).owner_total_count == 1
+
+
 @pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), float("-inf")])
 @pytest.mark.parametrize("field", ["task_context", "evidence_refs"])
 def test_memory_service_rejects_nested_nonfinite_json_without_persisting(

@@ -24,7 +24,6 @@ from starlette.responses import JSONResponse
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.schemas import AgentPrincipal, AskRequest, UserProfile
 from app.services.memory_inputs import (
-    MEMORY_TAG_MAX_COUNT,
     normalize_client_request_id,
     normalize_content,
     normalize_evidence_refs,
@@ -422,12 +421,7 @@ def _validate_proposal_input(
     if not clean_reason:
         raise ValueError("reason must be nonblank")
 
-    raw_tags = list(tags or [])
-    if len(raw_tags) > MEMORY_TAG_MAX_COUNT:
-        raise ValueError(f"tags exceeds {MEMORY_TAG_MAX_COUNT} items")
-    if any(not isinstance(tag, str) or not tag.strip() for tag in raw_tags):
-        raise ValueError("tags must not contain blank values")
-    clean_tags = normalize_tags(raw_tags)
+    clean_tags = normalize_tags(tags or [])
 
     clean_task_context = normalize_task_context(task_context)
     if not clean_task_context:

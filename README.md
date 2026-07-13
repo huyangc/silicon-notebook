@@ -257,6 +257,7 @@ characters, task context 8,192 serialized UTF-8 bytes, at most 50 evidence refer
 return 422; MCP/internal calls use the same service validation. Nested NaN or positive/negative
 infinity is rejected before persistence, while legitimate JSON null round-trips unchanged.
 The MCP proposal envelope uses these exact Core limits and does not impose narrower duplicates.
+The raw tag list is capped before trimming/deduplication, and blank tags are rejected.
 
 The Memory page's **Agent access** area creates stable Agent profiles and one-time plaintext
 tokens. A token has an expiry, a default notebook, a notebook allowlist, and the smallest

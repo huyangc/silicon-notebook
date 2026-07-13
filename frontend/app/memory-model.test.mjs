@@ -194,5 +194,25 @@ test("frontend Memory validation mirrors server title content and tag limits", (
     }),
     `标签不能超过 ${MEMORY_INPUT_LIMITS.tagMaxCount} 个`,
   );
+  assert.equal(
+    validateMemoryDraft({
+      title: "Title",
+      content_md: "Body",
+      tags: Array.from({ length: MEMORY_INPUT_LIMITS.tagMaxCount + 1 }, () => "duplicate"),
+    }),
+    `标签不能超过 ${MEMORY_INPUT_LIMITS.tagMaxCount} 个`,
+  );
+  assert.equal(
+    validateMemoryDraft({ title: "Title", content_md: "Body", tags: ["valid", "  "] }),
+    "标签不能为空",
+  );
+  assert.equal(
+    validateMemoryDraft({
+      title: "Title",
+      content_md: "Body",
+      tags: [" analog ", "analog", ...Array.from({ length: 18 }, (_, index) => `tag-${index}`)],
+    }),
+    "",
+  );
   assert.equal(validateMemoryDraft({ title: " Title ", content_md: " Body ", tags: [" analog "] }), "");
 });

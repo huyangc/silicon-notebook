@@ -95,6 +95,54 @@ def test_owner_memory_crud_is_private_and_bounded(tmp_path, monkeypatch):
     assert deprecated.json()["status"] == "deprecated"
 
 
+def test_answer_memory_api_uses_shared_raw_tag_and_blank_contract(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    headers, _owner_id = _register(client, "v00100021")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Tag API"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+    invalid = (
+        (_answer(repo, notebook_id, "Duplicate overflow?"), ["dup"] * 21),
+        (_answer(repo, notebook_id, "Blank tag?"), ["valid", "  "]),
+    )
+    for answer_id, tags in invalid:
+        response = client.post(
+            f"/api/notebooks/{notebook_id}/memories/from-answer",
+            headers=headers,
+            json={
+                "answer_id": answer_id,
+                "title": "Tag boundary",
+                "content_md": "Must fail before persistence",
+                "tags": tags,
+            },
+        )
+        assert response.status_code == 422, response.text
+
+    valid_answer = _answer(repo, notebook_id, "Twenty tags?")
+    raw_tags = [" analog ", "analog"] + [f"tag-{index}" for index in range(18)]
+    accepted = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=headers,
+        json={
+            "answer_id": valid_answer,
+            "title": "Tag boundary",
+            "content_md": "Twenty raw values are allowed",
+            "tags": raw_tags,
+        },
+    )
+    assert accepted.status_code == 201, accepted.text
+    assert accepted.json()["tags"] == [
+        "analog", *[f"tag-{index}" for index in range(18)]
+    ]
+    assert client.get("/api/memories", headers=headers).json()["total_count"] == 1
+
+
 def test_reader_can_save_own_private_memory_and_answer_save_is_idempotent(
     tmp_path, monkeypatch
 ):
