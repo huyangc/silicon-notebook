@@ -1,7 +1,7 @@
 # Agent Memory System：回答沉淀、用户私有记忆与 MCP 接入
 
 - 日期：2026-07-13
-- 状态：设计已确认，待实施计划
+- 状态：设计修订待用户复核
 - 产品：`silicon-notebook`
 - 范围：Ask 回答保存为 Memory、用户级与 notebook 级 Memory 页面、Memory 检索融合、Agent MCP 接入、候选审核、Memory → KG 晋升
 
@@ -38,6 +38,10 @@ Memory 的可见性由 `(created_by, notebook_id)` 共同约束。即使多个�
 
 第一版不做无确认的正式 Memory 自动写入。Agent 只有在用户显式开启 `memory:propose` 后才能主动提交候选。
 
+Agent candidate 形成后立即进入**创建它的 Agent 私有记忆平面**，同一 Agent 可以跨任务、跨 token 轮换检索和消费。它不会进入 Notebook 正式检索平面；只有用户确认成 `confirmed` 后，网页 Ask、Notebook 搜索、`search_notebook_context` 和其他获授权 Agent 才能使用。
+
+“同一 Agent”由用户账号下稳定的 `agent_profile` 标识，而不是由可撤销、可轮换的 token 标识。其他 Agent profile 不能读取该 Agent 未确认的 candidate。
+
 ### 2.4 Memory 是独立产品页面
 
 Memory 不再作为 Knowledge 中的 `note` 类型重复展示：
@@ -71,7 +75,7 @@ Memory service 负责生命周期与权限；retrieval service 负责把合格 M
 
 `memory_items.status`：
 
-- `candidate`：Agent 已提交、用户未确认；默认不参与检索；
+- `candidate`：Agent 已提交、用户未确认；仅创建它的 Agent 私有记忆检索可见，不参与 Notebook 正式检索；
 - `confirmed`：用户已确认，可参与正式检索；
 - `rejected`：用户拒绝，保留审计但永不参与检索；
 - `deprecated`：曾确认但已弃用，不再参与检索。
@@ -111,6 +115,7 @@ Memory service 负责生命周期与权限；retrieval service 负责把合格 M
 - `status`
 - `promotion_state`
 - `source_answer_id`：Ask 来源时非空
+- `agent_profile_id`：Agent 来源时非空，用于隔离未确认的 Agent 私有记忆
 - `confirmed_by`、`confirmed_at`
 - `created_at`、`updated_at`
 - `embedding_status`、`embedding_error`
@@ -147,13 +152,13 @@ Memory service 负责生命周期与权限；retrieval service 负责把合格 M
 
 Memory 不写入 `chunks` 或 `source_elements`。短卡片第一版每条生成一个 embedding，保存 model、dimension、vector 和更新时间。关键词索引与 embedding 独立，embedding 失败时仍可使用关键词检索。
 
-### 5.5 Agent token 表
+### 5.5 Agent profile 与 token 表
 
-`agent_access_tokens` 保存 token hash、用户、scopes、默认 notebook、过期、撤销和 last-used 时间；`agent_token_notebooks` 保存 allowlist。明文 token 只在签发时显示一次。
+`agent_profiles` 是用户创建的稳定 Agent 身份，保存名称、说明、owner 和状态。`agent_access_tokens` 绑定一个 profile，保存 token hash、scopes、默认 notebook、过期、撤销和 last-used 时间；`agent_token_notebooks` 保存 allowlist。明文 token 只在签发时显示一次。轮换 token 不改变 profile，因此不影响该 Agent 对自己历史 candidate 的读取。
 
-### 5.6 用户设置
+### 5.6 Agent 私有召回配置
 
-`user_memory_settings` 以 `user_id` 为主键，第一版保存 `include_candidates_default=false`。网页 Ask 与 MCP 检索读取同一设置；单次调用可以显式开启 Candidate，但不能改变持久默认值。
+Notebook 正式检索没有“包含 candidate”开关：candidate 在用户确认前始终禁止进入。Agent 接入配置通过 profile token scope 控制是否允许回忆自己的 candidate；授予 `memory:read_own_candidates` 后允许，撤销该 scope 后立即停止返回，不需要另建用户级 Candidate 检索设置表。
 
 ## 6. Ask 回答保存流程
 
@@ -184,7 +189,7 @@ Memory 不写入 `chunks` 或 `source_elements`。短卡片第一版每条生成
 - 待确认队列；
 - 编辑、确认、拒绝、弃用、提升 KG；
 - Agent 接入、token 创建、撤销与 scope 管理；
-- Candidate 检索默认设置。
+- Agent profile 与“允许回忆自身候选记忆”设置。
 
 ### 7.2 Notebook Memory 页面
 
@@ -217,19 +222,25 @@ Agent candidate 详情必须展示：
 - `POST /api/memories/{id}/promote`
 - `POST /api/answers/{answer_id}/memory-preview`
 - `POST /api/notebooks/{id}/memories/from-answer`
-- `GET /api/memory-settings`
-- `PATCH /api/memory-settings`
 - Agent token 的 list/create/revoke endpoints
 
 所有列表支持有界分页。总列表只聚合当前用户数据；notebook 列表还要求用户当前可读该 notebook。API schema 必须禁止客户端写入 `created_by`、确认者、provenance、promotion result 等服务端字段。
 
 ## 9. 检索与权威
 
-### 9.1 Eligibility
+### 9.1 两个检索平面
 
-- `confirmed` 可进入正式检索；
-- `candidate` 默认排除，只有用户全局设置或单次调用显式开启时进入；
-- `rejected/deprecated` 永远排除；
+**Agent 私有记忆平面**：
+
+- `candidate` 只有创建它的 `agent_profile_id` 可读取；
+- 要求 token 同时具备 `memory:read_own_candidates`，并且当前 notebook 在 allowlist；
+- `confirmed` 也可作为该 Agent 的长期记忆返回；
+- `rejected/deprecated` 永远排除。
+
+**Notebook 正式检索平面**：
+
+- 只有 `confirmed` 可进入网页 Ask、Notebook 搜索、Deep Report 和 MCP notebook context；
+- `candidate/rejected/deprecated` 始终排除，不提供单次绕过参数；
 - 所有 Memory 必须匹配当前用户与当前 notebook；
 - 第一版不做跨 notebook Memory 检索。
 
@@ -240,7 +251,7 @@ Agent candidate 详情必须展示：
 冲突优先级：
 
 ```text
-candidate（显式开启时）
+candidate（仅 Agent 私有记忆平面）
   < personal 原始证据
   < confirmed Memory
   < base KG / base 原始证据
@@ -264,7 +275,8 @@ Confirmed Memory 表示用户明确接受的个人结论，因此在 personal �
 
 - 选择默认 notebook；
 - 选择 token notebook allowlist，第一版默认只允许默认 notebook；
-- 选择 `knowledge:read`、`memory:read`、`memory:propose`、`ask:execute` scopes；
+- 创建或选择稳定的 Agent profile；
+- 选择 `knowledge:read`、`memory:read`、`memory:read_own_candidates`、`memory:propose`、`ask:execute` scopes；
 - “允许 Agent 主动提交候选 Memory”默认关闭；开启后才授予 propose scope；
 - 设置过期时间并签发可撤销 token。
 
@@ -272,10 +284,13 @@ Confirmed Memory 表示用户明确接受的个人结论，因此在 personal �
 
 - `list_notebooks`：仅列 allowlist 内 notebook；
 - `select_notebook`：明确选中当前 notebook，返回摘要、Memory 数量、KG 状态与检索设置；
-- `search_context`：搜索当前 notebook 的 source、KG 与合格 Memory，返回类型、权威层、引用和 provenance；
-- `get_memory`：读取当前用户自己的 Memory；
+- `search_agent_memory`：检索当前 Agent profile 在当前 notebook 创建的 candidate，以及当前用户已确认的 Memory；candidate 结果明确标记为未确认且不代表 notebook 正式结论；
+- `search_notebook_context`：搜索当前 notebook 的 source、KG 与 confirmed Memory，返回类型、权威层、引用和 provenance；永不返回 candidate；
+- `get_memory`：读取当前用户的 confirmed Memory；读取 candidate 时还必须是创建它的 Agent profile；
 - `ask_notebook`：需要 `ask:execute`，复用现有 Ask，支持 `chunk` / `reasoning`，不默认使用实验性 `graph`；
 - `propose_memory`：提交标题、正文、理由、任务上下文、evidence references 与 `client_request_id`，只能创建 candidate；同一 token 重试同一 request id 返回已有候选，不重复写入。
+
+`propose_memory` 成功后，该 candidate 立即可由同一 Agent profile 的 `search_agent_memory` 找到，不等待用户确认。用户确认后，它同时进入 Notebook 正式检索平面；拒绝后立即从 Agent 私有检索消失。
 
 每个数据工具在服务端继续携带并校验 notebook id，不能只相信 MCP session 中的 active notebook。远程重连恢复默认 notebook，但第一笔数据操作仍必须经过有效 notebook 选择。禁止单次跨库搜索。
 
@@ -306,6 +321,7 @@ Claude Code 官方支持 MCP 的 stdio、HTTP 与 SSE 配置；MCP 当前标准�
 
 - 所有 Memory 读取同时验证创建者和 notebook 访问；
 - 共享 notebook 不共享 Memory；
+- 未确认 Agent candidate 还必须匹配调用 token 的 `agent_profile_id`；同一用户下不同 Agent 也不能互读；
 - 用户失去共享 notebook 访问权后，其绑定 Memory 暂不可见、不可检索；数据保留，重新获得访问权后恢复；
 - notebook 被 owner 删除时，绑定该 notebook 的所有用户 Memory 随 notebook 生命周期级联删除；删除确认界面必须明确提示会删除成员关联的私有 Memory，但不泄露成员身份、内容或数量；
 - source 删除或重解析不删除已确认 Memory；历史 provenance 作为生成时快照保留，已不存在的 source/element 只显示不可跳转的归档出处；
@@ -330,15 +346,15 @@ Claude Code 官方支持 MCP 的 stdio、HTTP 与 SSE 配置；MCP 当前标准�
 
 建立覆盖以下场景的固定评价集：
 
-- confirmed Memory 直接与语义改写命中；
-- candidate 默认不可见、显式开启后可见；
+- confirmed Memory 在 Notebook 正式检索中直接与语义改写命中；
+- Agent candidate 可被创建它的 Agent 私有检索命中，但不能被 Notebook 正式检索或其他 Agent 命中；
 - rejected/deprecated 不可见；
 - 共享 notebook 中用户隔离；
 - personal source vs confirmed Memory 冲突；
 - confirmed Memory vs base 冲突；
 - provenance 与引用链正确。
 
-指标包括 Recall@5、MRR、nDCG、引用正确率。Candidate 默认泄漏、跨用户泄漏、跨 notebook 泄漏必须为 0；冲突优先级固定用 100% 通过的确定性 guard。
+指标包括 Recall@5、MRR、nDCG、引用正确率。Candidate 向 Notebook 正式检索或其他 Agent profile 的泄漏、跨用户泄漏、跨 notebook 泄漏必须为 0；冲突优先级固定用 100% 通过的确定性 guard。
 
 ### 13.3 Agent A/B
 
@@ -350,6 +366,8 @@ Claude Code 官方支持 MCP 的 stdio、HTTP 与 SSE 配置；MCP 当前标准�
 - allowlist 外访问拒绝；
 - Claude Code 与 Codex 共享工具 schema；
 - propose 只能生成 candidate；
+- candidate 创建后可由同一 Agent profile 立即 recall，token 轮换后仍可读取；
+- candidate 不得从 `search_notebook_context`、网页 Ask 或其他 Agent profile 泄漏；
 - confirm/reject/deprecate/promote 不暴露为 MCP 写工具；
 - token 撤销、过期与 scope 缺失立即生效；
 - 输出预算有界。
@@ -370,7 +388,7 @@ Claude Code 官方支持 MCP 的 stdio、HTTP 与 SSE 配置；MCP 当前标准�
 2. 总 Memory 页面、Notebook Memory 页面与 Ask 保存闭环；
 3. Memory 检索融合、权威冲突规则与 gold eval；
 4. Agent token 管理与 MCP read tools；
-5. `propose_memory`、候选审核与 Candidate 配置；
+5. `propose_memory`、Agent 私有 recall 与候选审核；
 6. Memory → KG 晋升、管理员审核和完整端到端验证。
 
 每一期必须保持后端与前端一致，不允许只提供 endpoint 或只提供 UI。
