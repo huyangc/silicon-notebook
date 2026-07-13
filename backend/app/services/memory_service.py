@@ -94,28 +94,26 @@ class MemoryService:
             )
             if not applied:
                 return item
-            refreshed = self.store.memory_for_user(item.id, item.created_by)
             self._event(
                 "memory_embedding",
-                refreshed,
+                item,
                 embedding_status="ready",
                 dimension=len(vectors[0]),
             )
-            return refreshed
+            return item
         except Exception as exc:  # best-effort: Memory remains usable as text
             applied = self.store.mark_embedding_failed(
                 item.id, job.revision, type(exc).__name__
             )
             if not applied:
                 return item
-            refreshed = self.store.memory_for_user(item.id, item.created_by)
             self._event(
                 "memory_embedding",
-                refreshed,
+                item,
                 embedding_status="failed",
                 error_type=type(exc).__name__,
             )
-            return refreshed
+            return item
 
     def _schedule_embed(self, item: MemoryRecord) -> MemoryRecord:
         revision = self.store.embedding_revision(item.id, item)

@@ -492,11 +492,12 @@ class MemoryStore:
             assignments.append(f"{column}=?")
             params.append(json.dumps(list(value), ensure_ascii=False) if key == "tags" else value)
         assignments.extend(["embedding_status='pending'", "embedding_error=''", "updated_at=?"])
-        params.extend([self.now(), memory_id, user_id])
+        params.extend([self.now(), memory_id, user_id, user_id, user_id])
         with self.database.write() as db:
             cursor = db.execute(
                 f"UPDATE memory_items SET {','.join(assignments)} "
-                "WHERE id=? AND created_by=?",
+                "WHERE id=? AND created_by=? AND "
+                f"{self._read_access_clause('memory_items')}",
                 params,
             )
             if cursor.rowcount != 1:
@@ -520,17 +521,21 @@ class MemoryStore:
         params: list[Any] = [target, now]
         if target == "confirmed":
             params.extend([user_id, now])
-        params.extend([memory_id, user_id, *sorted(expected)])
+        params.extend([memory_id, user_id, user_id, user_id, *sorted(expected)])
         with self.database.write() as db:
             cursor = db.execute(
                 f"UPDATE memory_items SET status=?,updated_at=?{confirmation} "
-                f"WHERE id=? AND created_by=? AND status IN ({placeholders})",
+                "WHERE id=? AND created_by=? AND "
+                f"{self._read_access_clause('memory_items')} "
+                f"AND status IN ({placeholders})",
                 params,
             )
             if cursor.rowcount != 1:
                 exists = db.execute(
-                    "SELECT status FROM memory_items WHERE id=? AND created_by=?",
-                    (memory_id, user_id),
+                    "SELECT status FROM memory_items m "
+                    "WHERE id=? AND created_by=? AND "
+                    f"{self._read_access_clause()}",
+                    (memory_id, user_id, user_id, user_id),
                 ).fetchone()
                 if exists is None:
                     raise KeyError(memory_id)

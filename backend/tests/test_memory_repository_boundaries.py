@@ -31,6 +31,7 @@ def test_memory_ports_expose_store_and_lifecycle_contracts():
         "append_revision",
         "transition",
         "transition_with_revision",
+        "update_fields",
         "update_with_revision",
         "list_memories",
     }

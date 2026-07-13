@@ -268,6 +268,67 @@ def test_stale_embedding_error_cannot_mark_newer_memory_failed(
     assert current.embedding_error == ""
 
 
+def test_embedding_completion_stays_ready_when_notebook_access_is_revoked(
+    repo, memory_service, users
+):
+    token = set_request_user(users.bob)
+    try:
+        shared = repo.create_notebook(NotebookCreate(name="Embedding revoke"))
+    finally:
+        reset_request_user(token)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+            "VALUES (?,?,'reader','t')",
+            (shared.id, users.alice.id),
+        )
+    answer_id = repo._runtime.ask_state.save_answer(
+        shared.id,
+        None,
+        "Question",
+        AskResponse(conclusion="Answer", answer="Answer"),
+        users.bob.id,
+    )
+    scheduled = []
+    memory_service.embedding_scheduler = lambda fn, job: scheduled.append((fn, job))
+
+    class RevokeEmbedder:
+        dim = 2
+
+        def embed_texts(self, texts):
+            return [[0.25, 0.75]]
+
+    memory_service.embedder = RevokeEmbedder()
+    created = memory_service.create_from_answer(
+        shared.id, users.alice.id, answer_id, "Remember", "Body", []
+    )
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            (shared.id, users.alice.id),
+        )
+
+    scheduled[0][0](scheduled[0][1])
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT m.embedding_status,m.embedding_error,e.vector "
+            "FROM memory_items m LEFT JOIN memory_embeddings e ON e.memory_id=m.id "
+            "WHERE m.id=?",
+            (created.id,),
+        ).fetchone()
+    assert row["embedding_status"] == "ready"
+    assert row["embedding_error"] == ""
+    assert row["vector"] is not None
+
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+            "VALUES (?,?,'reader','t')",
+            (shared.id, users.alice.id),
+        )
+    assert memory_service.get(created.id, users.alice.id).embedding_status == "ready"
+
+
 def test_candidate_lifecycle_updates_snapshots_and_rejects_invalid_transition(
     memory_service, users, notebook
 ):
@@ -596,6 +657,51 @@ def test_global_memory_access_filter_uses_fixed_query_count(
     assert len(memory_queries) == 2
     assert all("EXISTS (SELECT 1 FROM notebooks access_nb" in sql for sql in memory_queries)
     assert per_notebook_queries == []
+
+
+def test_legacy_store_mutations_do_not_land_after_membership_revocation(
+    repo, memory_service, users, notebook
+):
+    token = set_request_user(users.bob)
+    try:
+        shared = repo.create_notebook(NotebookCreate(name="Legacy mutation revoke"))
+    finally:
+        reset_request_user(token)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+            "VALUES (?,?,'reader','t')",
+            (shared.id, users.alice.id),
+        )
+    update_item = _candidate(
+        memory_service, shared, users.alice, "agent-a", "req-legacy-update"
+    )
+    transition_item = _candidate(
+        memory_service, shared, users.alice, "agent-a", "req-legacy-transition"
+    )
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            (shared.id, users.alice.id),
+        )
+
+    store = repo._runtime.memory_store
+    with pytest.raises(KeyError):
+        store.update_fields(update_item.id, users.alice.id, {"title": "Must not land"})
+    with pytest.raises(KeyError):
+        store.transition(
+            transition_item.id, users.alice.id, {"candidate"}, "confirmed"
+        )
+
+    with repo._connect() as db:
+        updated = db.execute(
+            "SELECT title FROM memory_items WHERE id=?", (update_item.id,)
+        ).fetchone()
+        transitioned = db.execute(
+            "SELECT status FROM memory_items WHERE id=?", (transition_item.id,)
+        ).fetchone()
+    assert updated["title"] == "Title"
+    assert transitioned["status"] == "candidate"
 
 
 def test_notebook_summary_memory_counts_are_grouped_once(

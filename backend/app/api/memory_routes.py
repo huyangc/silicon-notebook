@@ -40,7 +40,7 @@ _PROTECTED_MARKDOWN_RE = re.compile(
 
 def _clean_plain_answer(text: str) -> str:
     cleaned = re.sub(
-        r"(?<!\w)\[(?:k\d+|\d+(?:\s*,\s*\d+)*)\]",
+        r"\[k\d+\]|\[\d+(?:\s*,\s*\d+)+\]|(?<!\w)\[\d+\]",
         "",
         text,
         flags=re.I,

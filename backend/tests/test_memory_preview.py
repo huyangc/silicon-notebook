@@ -29,6 +29,19 @@ def test_citation_cleanup_preserves_backslash_delimited_formulas():
     )
 
 
+def test_citation_cleanup_strips_adjacent_prose_markers_but_keeps_indexes():
+    from app.api.memory_routes import _clean_answer
+
+    text = (
+        "English[k1] 中文[k2] grouped[1, 2] 分组[3,4]. "
+        "Keep a[1] and x[1]. `code[k3]` $math[2, 3]$."
+    )
+    assert _clean_answer(text) == (
+        "English 中文 grouped 分组. "
+        "Keep a[1] and x[1]. `code[k3]` $math[2, 3]$."
+    )
+
+
 def test_preview_falls_back_deterministically_without_persisting(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'preview.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
