@@ -356,10 +356,20 @@ class SqliteDatabase:
 
     @contextmanager
     def write(self) -> Iterator[sqlite3.Connection]:
+        """写事务:进程内写串行(write_lock)。每次用**独立新连接**(非线程复用读连接),
+        使每个 write() 独立提交 —— 保留嵌套增量提交(节点向量 backfill 每批 flush
+        独立落库、中断可续跑)的崩溃恢复语义(INV-8)。用完即 close(写串行,写连接峰值
+        = 嵌套写深度、fd 用完即还)。深度守卫不作用于 write()。"""
         with self.write_lock:
-            with self.connect() as db:
-                yield db
+            conn = self._new_connection()
+            try:
+                with conn:
+                    yield conn
+            finally:
+                conn.close()
 ```
+
+> **⚠ 关键(Task 2 fix 已并入)**：`write()` 必须用**独立连接**、不复用读连接。若读写共用一条复用连接 + 深度守卫，节点向量 backfill 的「外层 `with connect()` 读 + 内层 `write()` 增量 flush」会被卷进同一事务、内层不再独立提交 → 外层中途崩溃则增量全丢（`test_node_embed_incremental` 失败）。独立连接保留每-write-独立-提交。INV-5 深度守卫只作用于 `connect()`（读路径）。
 
 - [ ] **Step 4: 跑测试确认通过**
 
