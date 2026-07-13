@@ -31,14 +31,34 @@ from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prom
 
 
 memory_router = APIRouter()
-_DISPLAY_CITATION_RE = re.compile(r"\[(?:k\d+|\d+(?:\s*,\s*\d+)*)\]", re.I)
+_PROTECTED_MARKDOWN_RE = re.compile(
+    r"```[^\n]*\n.*?```|~~~[^\n]*\n.*?~~~|`[^`\n]*`|"
+    r"\\\(.*?\\\)|\\\[.*?\\\]|\$\$.*?\$\$|\$(?:\\.|[^$\n])+\$",
+    re.DOTALL,
+)
+
+
+def _clean_plain_answer(text: str) -> str:
+    cleaned = re.sub(
+        r"(?<!\w)\[(?:k\d+|\d+(?:\s*,\s*\d+)*)\]",
+        "",
+        text,
+        flags=re.I,
+    )
+    cleaned = re.sub(r"[ \t]+([,.;:!?，。；：！？])", r"\1", cleaned)
+    return re.sub(r"[ \t]{2,}", " ", cleaned)
 
 
 def _clean_answer(text: str) -> str:
-    cleaned = _DISPLAY_CITATION_RE.sub("", text or "")
-    cleaned = re.sub(r"[ \t]+([,.;:!?，。；：！？])", r"\1", cleaned)
-    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-    return cleaned.strip()
+    value = text or ""
+    parts: list[str] = []
+    cursor = 0
+    for match in _PROTECTED_MARKDOWN_RE.finditer(value):
+        parts.append(_clean_plain_answer(value[cursor:match.start()]))
+        parts.append(match.group(0))
+        cursor = match.end()
+    parts.append(_clean_plain_answer(value[cursor:]))
+    return "".join(parts).strip()
 
 
 def _not_found(detail: str = "Memory not found") -> HTTPException:

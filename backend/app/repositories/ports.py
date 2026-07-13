@@ -731,10 +731,16 @@ class MemoryStorePort(Protocol):
     def revisions_for_user(
         self, memory_id: str, user_id: str
     ) -> list[MemoryRevision]: ...
+    def embedding_revision(
+        self, memory_id: str, item: MemoryRecord
+    ) -> int | None: ...
     def replace_embedding(
-        self, memory_id: str, model: str, vector: Sequence[float]
-    ) -> None: ...
-    def mark_embedding_failed(self, memory_id: str, error: str) -> None: ...
+        self, memory_id: str, expected_revision: int, model: str,
+        vector: Sequence[float],
+    ) -> bool: ...
+    def mark_embedding_failed(
+        self, memory_id: str, expected_revision: int, error: str
+    ) -> bool: ...
 
 
 class ReportSourceQueryPort(Protocol):

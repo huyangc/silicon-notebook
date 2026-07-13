@@ -5,6 +5,30 @@ from fastapi.testclient import TestClient
 from app.models.schemas import AskResponse
 
 
+def test_citation_cleanup_preserves_code_math_and_array_indexes():
+    from app.api.memory_routes import _clean_answer
+
+    text = (
+        "Result [1]. `lookup[2]` and $a[3] + b[4]$ stay. a[5] stays.\n"
+        "```python\nvalues[6] = lookup[7]\n```\n"
+        "Conclusion [2, 3] and [k4]."
+    )
+    assert _clean_answer(text) == (
+        "Result. `lookup[2]` and $a[3] + b[4]$ stay. a[5] stays.\n"
+        "```python\nvalues[6] = lookup[7]\n```\n"
+        "Conclusion and."
+    )
+
+
+def test_citation_cleanup_preserves_backslash_delimited_formulas():
+    from app.api.memory_routes import _clean_answer
+
+    text = r"Inline \(x + [2]\) and display \[y = table[3]\] stay; cite [4]."
+    assert _clean_answer(text) == (
+        r"Inline \(x + [2]\) and display \[y = table[3]\] stay; cite."
+    )
+
+
 def test_preview_falls_back_deterministically_without_persisting(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'preview.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))

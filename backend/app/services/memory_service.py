@@ -1,6 +1,7 @@
 """Owner-private Memory lifecycle orchestration over typed repository ports."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Sequence
 
 from app.core.event_logging import EventLogger
@@ -14,6 +15,12 @@ from app.repositories.ports import (
 from app.services.embedding import Embedder
 
 
+@dataclass(frozen=True)
+class MemoryEmbeddingJob:
+    item: MemoryRecord
+    revision: int
+
+
 class MemoryService:
     def __init__(
         self,
@@ -24,7 +31,7 @@ class MemoryService:
         event_log: EventLogger,
         new_id,
         now,
-        embedding_scheduler: Callable[[Callable[[MemoryRecord], MemoryRecord], MemoryRecord], Any] | None = None,
+        embedding_scheduler: Callable[[Callable[[MemoryEmbeddingJob], MemoryRecord], MemoryEmbeddingJob], Any] | None = None,
     ) -> None:
         self.store = store
         self.ask_state = ask_state
@@ -76,14 +83,17 @@ class MemoryService:
             }
         )
 
-    def _embed(self, item: MemoryRecord) -> MemoryRecord:
+    def _embed(self, job: MemoryEmbeddingJob) -> MemoryRecord:
+        item = job.item
         try:
             vectors = self.embedder.embed_texts([f"{item.title}\n{item.content_md}"])
             if len(vectors) != 1 or len(vectors[0]) != int(self.embedder.dim):
                 raise ValueError("embedding dimension mismatch")
-            self.store.replace_embedding(
-                item.id, type(self.embedder).__name__, vectors[0]
+            applied = self.store.replace_embedding(
+                item.id, job.revision, type(self.embedder).__name__, vectors[0]
             )
+            if not applied:
+                return item
             refreshed = self.store.memory_for_user(item.id, item.created_by)
             self._event(
                 "memory_embedding",
@@ -93,7 +103,11 @@ class MemoryService:
             )
             return refreshed
         except Exception as exc:  # best-effort: Memory remains usable as text
-            self.store.mark_embedding_failed(item.id, type(exc).__name__)
+            applied = self.store.mark_embedding_failed(
+                item.id, job.revision, type(exc).__name__
+            )
+            if not applied:
+                return item
             refreshed = self.store.memory_for_user(item.id, item.created_by)
             self._event(
                 "memory_embedding",
@@ -104,16 +118,23 @@ class MemoryService:
             return refreshed
 
     def _schedule_embed(self, item: MemoryRecord) -> MemoryRecord:
+        revision = self.store.embedding_revision(item.id, item)
+        if revision is None:
+            return item
+        job = MemoryEmbeddingJob(item=item, revision=revision)
         try:
-            self.embedding_scheduler(self._embed, item)
+            self.embedding_scheduler(self._embed, job)
         except Exception as exc:
-            self.store.mark_embedding_failed(item.id, type(exc).__name__)
-            self._event(
-                "memory_embedding",
-                item,
-                embedding_status="failed",
-                error_type=type(exc).__name__,
+            applied = self.store.mark_embedding_failed(
+                item.id, job.revision, type(exc).__name__
             )
+            if applied:
+                self._event(
+                    "memory_embedding",
+                    item,
+                    embedding_status="failed",
+                    error_type=type(exc).__name__,
+                )
         return item
 
     def create_candidate(

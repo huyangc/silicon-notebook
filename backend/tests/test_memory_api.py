@@ -343,3 +343,59 @@ def test_answer_idempotency_does_not_cross_notebook_path(tmp_path, monkeypatch):
     )
     assert crossed.status_code == 409
     assert crossed.json() != first.json()
+
+
+def test_revoked_reader_loses_all_memory_read_and_mutation_access(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner_headers, _owner_id = _register(client, "n00100014")
+    reader_headers, reader_id = _register(client, "o00100015")
+    notebook_id = client.post(
+        "/api/notebooks", headers=owner_headers, json={"name": "Revoked"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+    repo.add_member(notebook_id, reader_id)
+    answer_id = _answer(repo, notebook_id)
+    confirmed = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=reader_headers,
+        json={
+            "answer_id": answer_id,
+            "title": "Private after revoke",
+            "content_md": "Body",
+            "tags": [],
+        },
+    ).json()
+    candidate_a = repo.create_memory_candidate(
+        notebook_id, reader_id, None, "revoke-a", "A", "Body", [], "review"
+    )
+    candidate_b = repo.create_memory_candidate(
+        notebook_id, reader_id, None, "revoke-b", "B", "Body", [], "review"
+    )
+    repo.remove_member(notebook_id, reader_id)
+
+    assert client.get("/api/memories", headers=reader_headers).json()["items"] == []
+    assert client.get(
+        f"/api/notebooks/{notebook_id}/memories", headers=reader_headers
+    ).status_code == 404
+    assert client.get(
+        f"/api/memories/{confirmed['id']}", headers=reader_headers
+    ).status_code == 404
+    assert client.patch(
+        f"/api/memories/{confirmed['id']}",
+        headers=reader_headers,
+        json={"title": "Must not land"},
+    ).status_code == 404
+    assert client.post(
+        f"/api/memories/{confirmed['id']}/deprecate", headers=reader_headers
+    ).status_code == 404
+    assert client.post(
+        f"/api/memories/{candidate_a.id}/confirm", headers=reader_headers
+    ).status_code == 404
+    assert client.post(
+        f"/api/memories/{candidate_b.id}/reject", headers=reader_headers
+    ).status_code == 404

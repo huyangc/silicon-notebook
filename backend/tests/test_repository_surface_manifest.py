@@ -1478,7 +1478,7 @@ TASK2_MEMORY_ALLOWED_MEMBER_FILES = {
 TASK3_MEMORY_ALLOWED_NEW_MEMBERS = {"answer_memory_source"}
 TASK3_MEMORY_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_memory_api.py", name)
-    for name in {"_runtime", "_write", "add_member"}
+    for name in {"_runtime", "_write", "add_member", "remove_member"}
 } | {
     ("backend/tests/test_memory_preview.py", name)
     for name in {"_runtime", "llm_client"}

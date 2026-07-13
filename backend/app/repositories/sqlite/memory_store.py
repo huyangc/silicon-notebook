@@ -69,6 +69,15 @@ class MemoryStore:
             f"{alias}.created_at,{alias}.updated_at,p.payload_json"
         )
 
+    @staticmethod
+    def _read_access_clause(alias: str = "m") -> str:
+        return (
+            "EXISTS (SELECT 1 FROM notebooks access_nb "
+            f"WHERE access_nb.id={alias}.notebook_id AND "
+            "(access_nb.created_by=? OR EXISTS (SELECT 1 FROM notebook_members access_nm "
+            "WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=?)))"
+        )
+
     def insert_memory(self, write: MemoryWrite) -> MemoryRecord:
         with self.database.write() as db:
             item, _created = self._insert_memory_on(db, write)
@@ -239,8 +248,8 @@ class MemoryStore:
             row = db.execute(
                 f"SELECT {self._select_columns()} FROM memory_items m "
                 "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
-                "WHERE m.id=? AND m.created_by=?",
-                (memory_id, user_id),
+                f"WHERE m.id=? AND m.created_by=? AND {self._read_access_clause()}",
+                (memory_id, user_id, user_id, user_id),
             ).fetchone()
         if row is None:
             raise KeyError(memory_id)
@@ -338,8 +347,9 @@ class MemoryStore:
         with self.database.write() as db:
             row = db.execute(
                 "SELECT title,content_md,tags_json,status,promotion_state "
-                "FROM memory_items WHERE id=? AND created_by=?",
-                (memory_id, user_id),
+                "FROM memory_items m WHERE id=? AND created_by=? AND "
+                f"{self._read_access_clause()}",
+                (memory_id, user_id, user_id, user_id),
             ).fetchone()
             if row is None:
                 raise KeyError(memory_id)
@@ -541,8 +551,8 @@ class MemoryStore:
         offset = max(0, int(offset))
         limit = max(1, min(200, int(limit)))
         joins = "LEFT JOIN memory_provenance p ON p.memory_id=m.id"
-        clauses = ["m.created_by=?"]
-        params: list[Any] = [user_id]
+        clauses = ["m.created_by=?", self._read_access_clause()]
+        params: list[Any] = [user_id, user_id, user_id]
         clean_query = (query or "").strip()
         if clean_query:
             joins += " JOIN memory_items_fts f ON f.rowid=m.rowid"
@@ -575,25 +585,57 @@ class MemoryStore:
             limit=limit,
         )
 
+    def embedding_revision(
+        self, memory_id: str, item: MemoryRecord
+    ) -> int | None:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT (SELECT COALESCE(MAX(revision),0) FROM memory_revisions "
+                "WHERE memory_id=m.id) AS revision FROM memory_items m "
+                "WHERE m.id=? AND m.title=? AND m.content_md=? AND m.tags_json=? "
+                "AND m.status=?",
+                (
+                    memory_id,
+                    item.title,
+                    item.content_md,
+                    json.dumps(list(item.tags), ensure_ascii=False),
+                    item.status,
+                ),
+            ).fetchone()
+        return int(row["revision"]) if row is not None else None
+
     def replace_embedding(
-        self, memory_id: str, model: str, vector: Sequence[float]
-    ) -> None:
+        self, memory_id: str, expected_revision: int, model: str,
+        vector: Sequence[float],
+    ) -> bool:
         with self.database.write() as db:
+            current = db.execute(
+                "SELECT COALESCE(MAX(revision),0) AS revision "
+                "FROM memory_revisions WHERE memory_id=?",
+                (memory_id,),
+            ).fetchone()
+            if int(current["revision"]) != int(expected_revision):
+                return False
             db.execute(
                 "INSERT OR REPLACE INTO memory_embeddings "
                 "(memory_id,model,dimension,vector,updated_at) VALUES (?,?,?,?,?)",
                 (memory_id, model, len(vector), encode_vector(vector), self.now()),
             )
             db.execute(
-                "UPDATE memory_items SET embedding_status='ready',embedding_error='',updated_at=? "
+                "UPDATE memory_items SET embedding_status='ready',embedding_error='' "
                 "WHERE id=?",
-                (self.now(), memory_id),
+                (memory_id,),
             )
+        return True
 
-    def mark_embedding_failed(self, memory_id: str, error: str) -> None:
+    def mark_embedding_failed(
+        self, memory_id: str, expected_revision: int, error: str
+    ) -> bool:
         with self.database.write() as db:
-            db.execute(
-                "UPDATE memory_items SET embedding_status='failed',embedding_error=?,updated_at=? "
-                "WHERE id=?",
-                (error[:500], self.now(), memory_id),
+            cursor = db.execute(
+                "UPDATE memory_items SET embedding_status='failed',embedding_error=? "
+                "WHERE id=? AND (SELECT COALESCE(MAX(revision),0) "
+                "FROM memory_revisions WHERE memory_id=?)=?",
+                (error[:500], memory_id, memory_id, int(expected_revision)),
             )
+        return cursor.rowcount == 1

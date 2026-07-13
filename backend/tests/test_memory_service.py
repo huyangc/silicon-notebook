@@ -190,6 +190,84 @@ def test_confirm_writes_revision_and_duplicate_answer_is_idempotent(
     assert embedded["size"] == repo.embedder.dim * 4
 
 
+def test_stale_embedding_job_cannot_overwrite_newer_memory_version(
+    memory_service, saved_answer, users, repo
+):
+    scheduled = []
+    memory_service.embedding_scheduler = lambda fn, job: scheduled.append((fn, job))
+
+    class ContentEmbedder:
+        dim = 2
+
+        def embed_texts(self, texts):
+            return [[1.0, 0.0] if "Old body" in texts[0] else [0.0, 1.0]]
+
+    memory_service.embedder = ContentEmbedder()
+    created = memory_service.create_from_answer(
+        saved_answer.notebook_id,
+        users.alice.id,
+        saved_answer.id,
+        "Versioned",
+        "Old body",
+        [],
+    )
+    memory_service.update(
+        created.id, users.alice.id, MemoryUpdate(content_md="New body")
+    )
+    assert len(scheduled) == 2
+
+    newest_fn, newest_job = scheduled[1]
+    oldest_fn, oldest_job = scheduled[0]
+    newest_fn(newest_job)
+    oldest_fn(oldest_job)
+
+    from app.services.vector_index import decode_vector
+
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT vector FROM memory_embeddings WHERE memory_id=?", (created.id,)
+        ).fetchone()
+    assert decode_vector(row["vector"]).tolist() == [0.0, 1.0]
+    current = memory_service.get(created.id, users.alice.id)
+    assert current.embedding_status == "ready"
+    assert current.content_md == "New body"
+
+
+def test_stale_embedding_error_cannot_mark_newer_memory_failed(
+    memory_service, saved_answer, users
+):
+    scheduled = []
+    memory_service.embedding_scheduler = lambda fn, job: scheduled.append((fn, job))
+
+    class OldFailureEmbedder:
+        dim = 2
+
+        def embed_texts(self, texts):
+            if "Old body" in texts[0]:
+                raise RuntimeError("old job failed")
+            return [[0.0, 1.0]]
+
+    memory_service.embedder = OldFailureEmbedder()
+    created = memory_service.create_from_answer(
+        saved_answer.notebook_id,
+        users.alice.id,
+        saved_answer.id,
+        "Versioned",
+        "Old body",
+        [],
+    )
+    memory_service.update(
+        created.id, users.alice.id, MemoryUpdate(content_md="New body")
+    )
+
+    scheduled[1][0](scheduled[1][1])
+    scheduled[0][0](scheduled[0][1])
+
+    current = memory_service.get(created.id, users.alice.id)
+    assert current.embedding_status == "ready"
+    assert current.embedding_error == ""
+
+
 def test_candidate_lifecycle_updates_snapshots_and_rejects_invalid_transition(
     memory_service, users, notebook
 ):
@@ -464,6 +542,60 @@ def test_reject_is_owner_scoped_and_list_filters_search_and_paginates(
     assert memory_service.list_memories(users.bob.id).total_count == 0
     with pytest.raises(KeyError):
         memory_service.reject(first.id, users.bob.id)
+
+
+def test_global_memory_access_filter_uses_fixed_query_count(
+    repo, memory_service, users, notebook
+):
+    token = set_request_user(users.bob)
+    try:
+        shared = repo.create_notebook(NotebookCreate(name="Revoked shared notebook"))
+    finally:
+        reset_request_user(token)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO notebook_members (notebook_id,user_id,role,added_at) "
+            "VALUES (?,?,'reader','t')",
+            (shared.id, users.alice.id),
+        )
+
+    accessible = _candidate(
+        memory_service, notebook, users.alice, "agent-a", "req-accessible"
+    )
+    _candidate(memory_service, shared, users.alice, "agent-a", "req-revoked")
+    with repo._write() as db:
+        db.execute(
+            "DELETE FROM notebook_members WHERE notebook_id=? AND user_id=?",
+            (shared.id, users.alice.id),
+        )
+
+    statements = []
+    real_connect = repo._runtime.database.connect
+
+    @contextmanager
+    def traced_connect():
+        with real_connect() as db:
+            db.set_trace_callback(statements.append)
+            yield db
+            db.set_trace_callback(None)
+
+    repo._runtime.database.connect = traced_connect
+    try:
+        page = memory_service.list_memories(users.alice.id)
+    finally:
+        repo._runtime.database.connect = real_connect
+
+    memory_queries = [
+        sql for sql in statements if sql.startswith("SELECT") and "memory_items m" in sql
+    ]
+    per_notebook_queries = [
+        sql for sql in statements if sql.startswith("SELECT created_by FROM notebooks")
+    ]
+    assert [item.id for item in page.items] == [accessible.id]
+    assert page.total_count == 1
+    assert len(memory_queries) == 2
+    assert all("EXISTS (SELECT 1 FROM notebooks access_nb" in sql for sql in memory_queries)
+    assert per_notebook_queries == []
 
 
 def test_notebook_summary_memory_counts_are_grouped_once(
