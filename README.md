@@ -194,6 +194,40 @@ bash scripts/check.sh                        # hermetic smoke + full pytest + fr
 The backend writes structured JSONL logs under `.local/logs/` (`requests` / `events` /
 `llm`); see [Observability](#observability) to follow an upload or diagnose a stuck source.
 
+### 5 · Offline packaging (target has no npm/node)
+
+To deploy onto a machine with **no npm/node**, only a Python package index, and **no root**,
+build a self-contained bundle on a host that *does* have Node — and whose **OS/CPU
+architecture matches the target** — then ship a single tarball:
+
+```bash
+bash scripts/pack.sh          # → dist/silicon_notebook_<version>_<os>-<arch>.tar.gz
+```
+
+`pack.sh` builds the frontend as a Next.js **standalone** server, bundles a **portable Node
+runtime** (matching the build host's arch) to run it, and prebuilds a **wheelhouse** of every
+Python dependency — so compiled packages like `hnswlib` / `scipy` need no compiler on the
+target. Because the build host and target share OS/arch, every bundled binary runs as-is.
+
+On the target — no npm/node, no root:
+
+```bash
+tar xzf silicon_notebook_<version>_<os>-<arch>.tar.gz
+cd    silicon_notebook_<version>_<os>-<arch>
+./install.sh    # user-local venv; installs deps offline from wheelhouse
+                # (falls back to the pip index for anything missing); writes .env
+vi .env         # fill in model-service URLs (same as step 2 · Configure)
+./start.sh      # portable-node standalone frontend + venv uvicorn backend
+./stop.sh       # stop both
+```
+
+Build-host knobs: `NODE_VERSION` / `NODE_DIST_URL` / `NODE_TARBALL` (portable-Node source),
+`SKIP_WHEELHOUSE=1` (target installs deps online instead), `PIP_INDEX_URL`, `PACK_PYTHON`.
+Target knobs: `PYTHON_BIN`, `PIP_INDEX_URL`, `FRONTEND_HOST` / `FRONTEND_PORT` / `BACKEND_HOST`
+/ `PORT`. The build host's Python **minor** version should match the target's, or the prebuilt
+wheels won't install (install.sh then falls back to the index). The bundle's `DEPLOY.md` has
+target-side details.
+
 ## Product Flow
 
 The outer page is a notebook collection/library (KG-native pipeline):

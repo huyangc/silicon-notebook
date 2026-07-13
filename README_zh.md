@@ -176,6 +176,37 @@ bash scripts/check.sh                        # hermetic smoke + 全量 pytest + 
 后端会把结构化 JSONL 日志写入 `.local/logs/`(`requests` / `events` / `llm`);跟踪一次
 上传或排查卡住的 source 见[可观测性 / 日志](#可观测性--日志)。
 
+### 5 · 离线打包(目标机没有 npm/node)
+
+要部署到一台**没有 npm/node**、只有 Python 包索引、且**无 root** 的机器:在一台**有 Node、
+且 OS/CPU 架构与目标机一致**的打包机上产出自包含 tar 包,再拷过去一键装:
+
+```bash
+bash scripts/pack.sh          # → dist/silicon_notebook_<version>_<os>-<arch>.tar.gz
+```
+
+`pack.sh` 把前端构建成 Next.js **standalone** 服务,捆绑一份**便携 Node 运行时**(匹配打包机
+架构)来跑它,并预编译一个包含全部 Python 依赖的 **wheelhouse**——这样 `hnswlib` / `scipy`
+等编译型包在目标机上无需编译器。因为打包机与目标机同 OS/同架构,包内每个二进制都能直接运行。
+
+目标机上——无需 npm/node、无需 root:
+
+```bash
+tar xzf silicon_notebook_<version>_<os>-<arch>.tar.gz
+cd    silicon_notebook_<version>_<os>-<arch>
+./install.sh    # 建用户态 venv;优先用 wheelhouse 离线装依赖
+                # (缺的再从 pip 源在线补);生成 .env
+vi .env         # 填模型服务 URL(同 2 · 配置)
+./start.sh      # 便携 node 跑 standalone 前端 + venv 的 uvicorn 后端
+./stop.sh       # 停止两者
+```
+
+打包机可配置项:`NODE_VERSION` / `NODE_DIST_URL` / `NODE_TARBALL`(便携 Node 来源)、
+`SKIP_WHEELHOUSE=1`(改为目标机在线装依赖)、`PIP_INDEX_URL`、`PACK_PYTHON`。目标机可配置项:
+`PYTHON_BIN`、`PIP_INDEX_URL`、`FRONTEND_HOST` / `FRONTEND_PORT` / `BACKEND_HOST` / `PORT`。
+打包机的 Python **小版本**应与目标机一致,否则预编译 wheel 装不上(install.sh 会自动回退在线
+安装)。目标侧细节见包内 `DEPLOY.md`。
+
 ## 产品流程
 
 外层页面为 notebook 集合页（KG-native 管线）：

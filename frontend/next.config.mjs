@@ -4,9 +4,18 @@
 // BACKEND_PROXY_TARGET 可覆盖后端地址（默认本机 127.0.0.1:8000）。
 const backendTarget = process.env.BACKEND_PROXY_TARGET ?? "http://127.0.0.1:8000";
 
+// 离线打包(scripts/pack.sh)时设 NEXT_OUTPUT_STANDALONE=1：next build 额外产出
+// .next/standalone —— 一个自带精简 node_modules 的 server.js，可用便携 node 直接
+// `node server.js` 运行，无需 npm、无需全量 node_modules、无需 `next` CLI。
+// 不设该变量时行为与从前完全一致(npm run dev / next start 不受影响)。
+// standalone 服务器仍会加载下面的 rewrites，`/api/*` 同源反代照旧生效。
+const output =
+  process.env.NEXT_OUTPUT_STANDALONE === "1" ? "standalone" : undefined;
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   typedRoutes: true,
+  output,
   async rewrites() {
     return [
       { source: "/api/:path*", destination: `${backendTarget}/api/:path*` },
