@@ -3,44 +3,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from app.models.memory import MemoryRevision, MemoryWrite
 from app.models.schemas import MemoryRecord, PaginatedMemories
 from app.repositories.sqlite.database import SqliteDatabase
 from app.services.vector_index import encode_vector
-
-
-@dataclass(frozen=True)
-class MemoryWrite:
-    id: str
-    notebook_id: str
-    created_by: str
-    origin: str
-    status: str
-    title: str
-    content_md: str
-    tags: Sequence[str]
-    created_at: str
-    updated_at: str
-    agent_profile_id: str | None = None
-    source_answer_id: str | None = None
-    confirmed_by: str | None = None
-    confirmed_at: str | None = None
-    provenance: Mapping[str, Any] | None = None
-
-
-@dataclass(frozen=True)
-class MemoryRevision:
-    revision: int
-    title: str
-    content_md: str
-    tags: list[str]
-    status: str
-    promotion_state: str
-    changed_by: str
-    change_reason: str
-    created_at: str
 
 
 def _json_object(raw: Any) -> dict[str, Any]:
@@ -107,11 +75,17 @@ class MemoryStore:
                 existing = db.execute(
                     f"SELECT {self._select_columns()} FROM memory_items m "
                     "JOIN memory_provenance p ON p.memory_id=m.id "
-                    "WHERE m.created_by=? AND m.origin='external_agent' "
+                    "WHERE m.created_by=? AND m.notebook_id=? "
+                    "AND m.origin='external_agent' "
                     "AND m.agent_profile_id IS ? "
                     "AND json_extract(p.payload_json,'$.client_request_id')=? "
                     "ORDER BY m.created_at LIMIT 1",
-                    (write.created_by, write.agent_profile_id, client_request_id),
+                    (
+                        write.created_by,
+                        write.notebook_id,
+                        write.agent_profile_id,
+                        client_request_id,
+                    ),
                 ).fetchone()
                 if existing is not None:
                     return self._record(existing)
@@ -186,17 +160,22 @@ class MemoryStore:
         return self._record(row) if row is not None else None
 
     def memory_by_agent_request(
-        self, user_id: str, agent_profile_id: str | None, client_request_id: str
+        self,
+        user_id: str,
+        notebook_id: str,
+        agent_profile_id: str | None,
+        client_request_id: str,
     ) -> MemoryRecord | None:
         with self.database.connect() as db:
             row = db.execute(
                 f"SELECT {self._select_columns()} FROM memory_items m "
                 "JOIN memory_provenance p ON p.memory_id=m.id "
-                "WHERE m.created_by=? AND m.origin='external_agent' "
+                "WHERE m.created_by=? AND m.notebook_id=? "
+                "AND m.origin='external_agent' "
                 "AND m.agent_profile_id IS ? "
                 "AND json_extract(p.payload_json,'$.client_request_id')=? "
                 "ORDER BY m.created_at LIMIT 1",
-                (user_id, agent_profile_id, client_request_id),
+                (user_id, notebook_id, agent_profile_id, client_request_id),
             ).fetchone()
         return self._record(row) if row is not None else None
 
@@ -212,29 +191,161 @@ class MemoryStore:
         self, memory_id: str, snapshot: dict, changed_by: str, reason: str
     ) -> None:
         with self.database.write() as db:
+            self._append_revision_on(db, memory_id, snapshot, changed_by, reason)
+
+    def _append_revision_on(
+        self,
+        db: sqlite3.Connection,
+        memory_id: str,
+        snapshot: Mapping[str, Any],
+        changed_by: str,
+        reason: str,
+    ) -> None:
+        row = db.execute(
+            "SELECT COALESCE(MAX(revision),0)+1 AS revision "
+            "FROM memory_revisions WHERE memory_id=?",
+            (memory_id,),
+        ).fetchone()
+        db.execute(
+            "INSERT INTO memory_revisions "
+            "(id,memory_id,revision,title,content_md,tags_json,status,promotion_state,"
+            "changed_by,change_reason,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                self.new_id("memrev"),
+                memory_id,
+                int(row["revision"]),
+                snapshot["title"],
+                snapshot["content_md"],
+                json.dumps(snapshot.get("tags", []), ensure_ascii=False),
+                snapshot["status"],
+                snapshot.get("promotion_state", "none"),
+                changed_by,
+                reason,
+                self.now(),
+            ),
+        )
+
+    def _mutate_with_revision(
+        self,
+        memory_id: str,
+        user_id: str,
+        *,
+        fields: Mapping[str, Any],
+        expected: set[str],
+        target: str | None,
+        changed_by: str,
+        reason: str,
+    ) -> MemoryRecord:
+        allowed = {"title", "content_md", "tags"}
+        values = {key: value for key, value in fields.items() if key in allowed}
+        with self.database.write() as db:
             row = db.execute(
-                "SELECT COALESCE(MAX(revision),0)+1 AS revision "
-                "FROM memory_revisions WHERE memory_id=?",
-                (memory_id,),
+                "SELECT title,content_md,tags_json,status,promotion_state "
+                "FROM memory_items WHERE id=? AND created_by=?",
+                (memory_id, user_id),
             ).fetchone()
-            db.execute(
-                "INSERT INTO memory_revisions "
-                "(id,memory_id,revision,title,content_md,tags_json,status,promotion_state,"
-                "changed_by,change_reason,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    self.new_id("memrev"),
-                    memory_id,
-                    int(row["revision"]),
-                    snapshot["title"],
-                    snapshot["content_md"],
-                    json.dumps(snapshot.get("tags", []), ensure_ascii=False),
-                    snapshot["status"],
-                    snapshot.get("promotion_state", "none"),
-                    changed_by,
-                    reason,
-                    self.now(),
-                ),
+            if row is None:
+                raise KeyError(memory_id)
+            if row["status"] not in expected:
+                destination = target or row["status"]
+                raise ValueError(
+                    f"invalid memory transition: {row['status']} -> {destination}"
+                )
+
+            title = values.get("title", row["title"])
+            content_md = values.get("content_md", row["content_md"])
+            tags = (
+                [str(item) for item in values["tags"]]
+                if "tags" in values
+                else _json_list(row["tags_json"])
             )
+            status = target or row["status"]
+            now = self.now()
+            assignments = [
+                "title=?",
+                "content_md=?",
+                "tags_json=?",
+                "status=?",
+                "updated_at=?",
+            ]
+            params: list[Any] = [
+                title,
+                content_md,
+                json.dumps(tags, ensure_ascii=False),
+                status,
+                now,
+            ]
+            if values or target == "confirmed":
+                assignments.extend(
+                    ["embedding_status='pending'", "embedding_error=''"]
+                )
+            if target == "confirmed":
+                assignments.extend(["confirmed_by=?", "confirmed_at=?"])
+                params.extend([user_id, now])
+            placeholders = ",".join("?" for _ in expected)
+            params.extend([memory_id, user_id, *sorted(expected)])
+            cursor = db.execute(
+                f"UPDATE memory_items SET {','.join(assignments)} "
+                f"WHERE id=? AND created_by=? AND status IN ({placeholders})",
+                params,
+            )
+            if cursor.rowcount != 1:  # pragma: no cover - shared write lock guard
+                raise ValueError(f"concurrent memory transition for {memory_id}")
+            self._append_revision_on(
+                db,
+                memory_id,
+                {
+                    "title": title,
+                    "content_md": content_md,
+                    "tags": tags,
+                    "status": status,
+                    "promotion_state": row["promotion_state"],
+                },
+                changed_by,
+                reason,
+            )
+        return self.memory_for_user(memory_id, user_id)
+
+    def update_with_revision(
+        self,
+        memory_id: str,
+        user_id: str,
+        fields: Mapping[str, Any],
+        *,
+        expected: set[str],
+        changed_by: str,
+        reason: str,
+    ) -> MemoryRecord:
+        return self._mutate_with_revision(
+            memory_id,
+            user_id,
+            fields=fields,
+            expected=expected,
+            target=None,
+            changed_by=changed_by,
+            reason=reason,
+        )
+
+    def transition_with_revision(
+        self,
+        memory_id: str,
+        user_id: str,
+        expected: set[str],
+        target: str,
+        *,
+        fields: Mapping[str, Any] | None,
+        changed_by: str,
+        reason: str,
+    ) -> MemoryRecord:
+        return self._mutate_with_revision(
+            memory_id,
+            user_id,
+            fields=fields or {},
+            expected=expected,
+            target=target,
+            changed_by=changed_by,
+            reason=reason,
+        )
 
     def revisions_for_user(self, memory_id: str, user_id: str) -> list[MemoryRevision]:
         self.memory_for_user(memory_id, user_id)

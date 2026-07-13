@@ -28,6 +28,8 @@ def test_memory_ports_expose_store_and_lifecycle_contracts():
         "memory_for_user",
         "append_revision",
         "transition",
+        "transition_with_revision",
+        "update_with_revision",
         "list_memories",
     }
     service_methods = {
@@ -63,6 +65,11 @@ def test_memory_store_owns_sql_and_service_never_imports_facade():
         module.startswith("app.services.repository_runtime")
         for module in _imports(service_path)
     )
+    assert "app.repositories.sqlite.memory_store" not in _imports(service_path)
+    ports_path = ROOT / "app" / "repositories" / "ports.py"
+    assert "app.repositories.sqlite.memory_store" not in _imports(ports_path)
+    assert "app.models.memory" in _imports(service_path)
+    assert "app.models.memory" in _imports(ports_path)
 
 
 def test_runtime_owns_memory_components_and_facade_has_explicit_delegates(tmp_path):

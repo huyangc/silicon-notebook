@@ -683,10 +683,9 @@ class AskStateStorePort(Protocol):
     def answer_notebook_id(self, answer_id: str) -> str | None: ...
 
 
-# Memory's write value and revision projection live at the concrete store's
-# implementation home, like PreparedAskTurn above.  The port remains
-# consumer-owned and structural; it contains no SQLite behavior.
-from app.repositories.sqlite.memory_store import (  # noqa: E402
+# Memory write/revision values are storage-neutral domain types.  The port
+# remains consumer-owned and has no dependency on a concrete repository.
+from app.models.memory import (  # noqa: E402
     MemoryRevision,
     MemoryWrite,
 )
@@ -707,11 +706,20 @@ class MemoryStorePort(Protocol):
     ) -> PaginatedMemories: ...
     def memory_by_answer(self, user_id: str, answer_id: str) -> MemoryRecord | None: ...
     def memory_by_agent_request(
-        self, user_id: str, agent_profile_id: str | None, client_request_id: str
+        self, user_id: str, notebook_id: str, agent_profile_id: str | None,
+        client_request_id: str,
     ) -> MemoryRecord | None: ...
     def agent_profile_belongs_to(self, agent_profile_id: str, user_id: str) -> bool: ...
     def update_fields(
         self, memory_id: str, user_id: str, fields: Mapping[str, Any]
+    ) -> MemoryRecord: ...
+    def update_with_revision(
+        self, memory_id: str, user_id: str, fields: Mapping[str, Any], *,
+        expected: set[str], changed_by: str, reason: str,
+    ) -> MemoryRecord: ...
+    def transition_with_revision(
+        self, memory_id: str, user_id: str, expected: set[str], target: str, *,
+        fields: Mapping[str, Any] | None, changed_by: str, reason: str,
     ) -> MemoryRecord: ...
     def revisions_for_user(
         self, memory_id: str, user_id: str

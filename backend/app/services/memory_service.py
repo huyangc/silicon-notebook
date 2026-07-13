@@ -4,13 +4,13 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from app.core.event_logging import EventLogger
+from app.models.memory import MemoryRevision, MemoryWrite
 from app.models.schemas import MemoryRecord, MemoryUpdate, PaginatedMemories
 from app.repositories.ports import (
     AskStateStorePort,
     MemoryStorePort,
     NotebookAccessRepository,
 )
-from app.repositories.sqlite.memory_store import MemoryRevision, MemoryWrite
 from app.services.embedding import Embedder
 
 
@@ -120,7 +120,7 @@ class MemoryService:
         ):
             raise PermissionError(agent_profile_id)
         existing = self.store.memory_by_agent_request(
-            user_id, agent_profile_id, client_request_id
+            user_id, notebook_id, agent_profile_id, client_request_id
         )
         if existing is not None:
             return existing
@@ -201,9 +201,13 @@ class MemoryService:
         values, reason = self._patch(patch)
         if not values:
             return current
-        item = self.store.update_fields(memory_id, user_id, values)
-        self.store.append_revision(
-            item.id, self._snapshot(item), user_id, reason or "updated"
+        item = self.store.update_with_revision(
+            memory_id,
+            user_id,
+            values,
+            expected={"candidate", "confirmed"},
+            changed_by=user_id,
+            reason=reason or "updated",
         )
         self._event("memory_lifecycle", item, action="updated")
         return self._embed(item) if item.status == "confirmed" else item
@@ -214,30 +218,42 @@ class MemoryService:
         user_id: str,
         patch: MemoryUpdate | Mapping[str, Any] | None = None,
     ) -> MemoryRecord:
-        current = self.get(memory_id, user_id)
-        if current.status != "candidate":
-            raise ValueError(
-                f"invalid memory transition: {current.status} -> confirmed"
-            )
         values, reason = self._patch(patch)
-        if values:
-            self.store.update_fields(memory_id, user_id, values)
-        item = self.store.transition(memory_id, user_id, {"candidate"}, "confirmed")
-        self.store.append_revision(
-            item.id, self._snapshot(item), user_id, reason or "confirmed"
+        item = self.store.transition_with_revision(
+            memory_id,
+            user_id,
+            {"candidate"},
+            "confirmed",
+            fields=values,
+            changed_by=user_id,
+            reason=reason or "confirmed",
         )
         self._event("memory_lifecycle", item, action="confirmed")
         return self._embed(item)
 
     def reject(self, memory_id: str, user_id: str) -> MemoryRecord:
-        item = self.store.transition(memory_id, user_id, {"candidate"}, "rejected")
-        self.store.append_revision(item.id, self._snapshot(item), user_id, "rejected")
+        item = self.store.transition_with_revision(
+            memory_id,
+            user_id,
+            {"candidate"},
+            "rejected",
+            fields=None,
+            changed_by=user_id,
+            reason="rejected",
+        )
         self._event("memory_lifecycle", item, action="rejected")
         return item
 
     def deprecate(self, memory_id: str, user_id: str) -> MemoryRecord:
-        item = self.store.transition(memory_id, user_id, {"confirmed"}, "deprecated")
-        self.store.append_revision(item.id, self._snapshot(item), user_id, "deprecated")
+        item = self.store.transition_with_revision(
+            memory_id,
+            user_id,
+            {"confirmed"},
+            "deprecated",
+            fields=None,
+            changed_by=user_id,
+            reason="deprecated",
+        )
         self._event("memory_lifecycle", item, action="deprecated")
         return item
 

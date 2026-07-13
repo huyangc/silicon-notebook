@@ -124,6 +124,37 @@ def test_duplicate_agent_request_is_idempotent(
     assert second.title == "Title"
 
 
+def test_agent_request_idempotency_is_scoped_to_notebook(
+    repo, memory_service, users, notebook
+):
+    token = set_request_user(users.alice)
+    try:
+        other = repo.create_notebook(NotebookCreate(name="Other memory notebook"))
+    finally:
+        reset_request_user(token)
+
+    first = _candidate(
+        memory_service, notebook, users.alice, "agent-a", "req-cross-notebook"
+    )
+    second = _candidate(
+        memory_service, other, users.alice, "agent-a", "req-cross-notebook"
+    )
+    duplicate = _candidate(
+        memory_service,
+        other,
+        users.alice,
+        "agent-a",
+        "req-cross-notebook",
+        title="Ignored duplicate",
+    )
+
+    assert first.id != second.id
+    assert first.notebook_id == notebook.id
+    assert second.notebook_id == other.id
+    assert duplicate.id == second.id
+    assert duplicate.title == "Title"
+
+
 def test_confirm_writes_revision_and_duplicate_answer_is_idempotent(
     memory_service, saved_answer, users, repo
 ):
@@ -190,6 +221,66 @@ def test_candidate_lifecycle_updates_snapshots_and_rejects_invalid_transition(
             item.id, users.alice.id, MemoryUpdate(title="must not be saved")
         )
     assert memory_service.get(item.id, users.alice.id).title == "Edited"
+
+
+class _RevisionInsertFailure:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def execute(self, sql, *args, **kwargs):
+        if "INSERT INTO memory_revisions" in sql:
+            raise RuntimeError("injected revision failure")
+        return self.connection.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+
+def test_revision_failure_rolls_back_confirm_patch_and_status(
+    memory_service, users, notebook, repo, monkeypatch
+):
+    item = _candidate(
+        memory_service, notebook, users.alice, "agent-a", "req-rollback"
+    )
+    real_write = repo._runtime.database.write
+
+    @contextmanager
+    def failing_write():
+        with real_write() as db:
+            yield _RevisionInsertFailure(db)
+
+    monkeypatch.setattr(repo._runtime.database, "write", failing_write)
+    with pytest.raises(RuntimeError, match="injected revision failure"):
+        memory_service.confirm(
+            item.id,
+            users.alice.id,
+            MemoryUpdate(title="must roll back", content_md="must roll back"),
+        )
+
+    current = memory_service.get(item.id, users.alice.id)
+    assert current.status == "candidate"
+    assert current.title == "Title"
+    assert current.content_md == "Body"
+
+
+def test_confirm_patch_cannot_land_after_expected_state_is_rejected(
+    memory_service, users, notebook
+):
+    item = _candidate(
+        memory_service, notebook, users.alice, "agent-a", "req-rejected-race"
+    )
+    memory_service.reject(item.id, users.alice.id)
+
+    with pytest.raises(ValueError, match="rejected -> confirmed"):
+        memory_service.confirm(
+            item.id,
+            users.alice.id,
+            MemoryUpdate(title="must not land"),
+        )
+
+    current = memory_service.get(item.id, users.alice.id)
+    assert current.status == "rejected"
+    assert current.title == "Title"
 
 
 def test_reject_is_owner_scoped_and_list_filters_search_and_paginates(
