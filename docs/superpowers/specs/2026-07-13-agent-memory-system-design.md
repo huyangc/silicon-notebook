@@ -1,7 +1,7 @@
 # Agent Memory System：回答沉淀、用户私有记忆与 MCP 接入
 
 - 日期：2026-07-13
-- 状态：设计修订待用户复核
+- 状态：设计已批准，进入实施计划
 - 产品：`silicon-notebook`
 - 范围：Ask 回答保存为 Memory、用户级与 notebook 级 Memory 页面、Memory 检索融合、Agent MCP 接入、候选审核、Memory → KG 晋升
 
