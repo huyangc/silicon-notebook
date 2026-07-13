@@ -703,6 +703,8 @@ This checks backend syntax (`py_compile`), a hermetic offline smoke path (`smoke
 
 For every new feature development task, create a new git worktree by default, start a new feature branch inside that worktree, complete the work there, and open a PR from that branch. Do not switch branches directly in the main local checkout for feature work. If the current directory is already an isolated linked worktree, keep working there.
 
+For approved multi-step implementation plans, use subagent-driven development by default: assign each task to a fresh implementation subagent and require task-scoped specification and code-quality review before moving on. Research, design, status, and review-only work does not require a worktree or subagents.
+
 ## Documentation Maintenance
 
 When product behavior, setup, architecture, or development constraints change, update all of these files together:

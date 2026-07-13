@@ -301,6 +301,7 @@ http://localhost:3000
 ## Git And File Safety
 
 - For every new feature development task, create a new git worktree by default and do the work there on a new feature branch. Do not switch branches directly in the main local checkout for feature work. If the current directory is already an isolated linked worktree, continue there; otherwise create a worktree first, then branch, develop, verify, and open the PR from that branch.
+- Execute approved multi-step implementation plans with subagent-driven development by default: use a fresh implementation subagent per task, then run task-scoped specification and code-quality review before advancing. Pure research, design, status, and review-only work does not require a worktree or subagents.
 - Do not revert user changes.
 - Do not remove generated or user-provided files unless the user explicitly asks.
 - Keep changes scoped to the requested product or engineering task.
