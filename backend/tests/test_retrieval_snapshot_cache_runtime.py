@@ -101,11 +101,13 @@ def test_snapshot_cache_get_peek_invalidate_delegate_to_vector_cache(repo):
 
 def test_invalidate_kg_evicts_the_frozen_key_families(repo):
     """invalidate_kg preserves the Task-14 eviction exactly: the embedding
-    matrices (all four embedding tables), kwtok, EVERY fed_rxgraph entry (keyed by the
-    ACTIVE notebook, so all participants sweep it), ppr_graph, entchunk,
-    elemchunk, edge_centrality, clustermap and copystats families plus this
-    notebook's unified-cache entries. `edge_support` stays out (versioned by
-    canonical_rel_seq) and other notebooks' per-nb entries survive."""
+    matrices (all four embedding tables), kwtok, EVERY fed_rxgraph AND ppr_graph
+    entry (both keyed by the ACTIVE notebook but including base participants, so a
+    change in ANY participant must sweep them all — guards the seq-triple reset on
+    delete+reingest), entchunk, elemchunk, edge_centrality, clustermap and
+    copystats families plus this notebook's unified-cache entries. `edge_support`
+    stays out (versioned by canonical_rel_seq) and other notebooks' OTHER per-nb
+    entries survive."""
     snapshots = repo._runtime.retrieval_snapshots
     nb, other = "nb-a", "nb-b"
     families = [
@@ -124,6 +126,10 @@ def test_invalidate_kg_evicts_the_frozen_key_families(repo):
     for key in families:
         snapshots.get(key, ("v", 1), lambda: {})
     snapshots.get(f"{other}:fed_rxgraph", ("v", 1), lambda: {})
+    # A DIFFERENT notebook's ppr_graph that depends on `nb` as a base participant
+    # must also be evicted (the seq-triple key can collide after nb's
+    # delete+reingest) — mirrors the fed_rxgraph all-evict.
+    snapshots.get(f"{other}:ppr_graph", ("v", 1), lambda: {})
     snapshots.get(f"{nb}:edge_support", ("edge_support", 1), lambda: {})
     snapshots.get(f"{other}:kwtok", ("v", 1), lambda: {})
     snapshots.unified_cache[(nb, "concept")] = {"g": 1}
@@ -134,6 +140,7 @@ def test_invalidate_kg_evicts_the_frozen_key_families(repo):
     for key in families:
         assert not snapshots.peek(key, ("v", 1)), key
     assert not snapshots.peek(f"{other}:fed_rxgraph", ("v", 1))
+    assert not snapshots.peek(f"{other}:ppr_graph", ("v", 1))
     assert snapshots.peek(f"{nb}:edge_support", ("edge_support", 1))
     assert snapshots.peek(f"{other}:kwtok", ("v", 1))
     assert (nb, "concept") not in snapshots.unified_cache

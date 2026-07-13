@@ -230,6 +230,39 @@ class UnifiedKgStore:
         return rel, obj, chunk, cluster, mention
 
     @staticmethod
+    def graph_seq_row(db: sqlite3.Connection, notebook_id: str) -> "tuple[int, int, int]":
+        """O(1) single-row monotonic seq triple for the graph/PPR version keys:
+        (kg_mutation_seq, cluster_mutation_seq, mention_seq). Replaces the
+        per-request COUNT/MAX aggregate scans (ppr_version_rows /
+        graph_version_rows / cluster_version_row) that ran on EVERY graph/PPR
+        retrieval, even on a cache HIT. Coverage of every production write path
+        (adversarially verified):
+          - kg_mutation_seq: object writes (create/status/payload/delete via
+            store_kg/update_knowledge/merge/promotion/conflict/relink/delete_source),
+            edge-review flips (set_edge_review), and chunk writes
+            (build_chunks_for_source) all bump it.
+          - cluster_mutation_seq: concept_clusters writes (write_clusters /
+            append_clusters / rebuild — which DELIBERATELY keeps kg_mutation_seq
+            stable) advance this instead.
+          - mention_seq: the co-mention bridge rebuild.
+        A monotonic counter is STRICTLY more sensitive than (COUNT, MAX ts): it
+        also catches a same-second in-place edit that a 1s-resolution timestamp
+        would miss. Absent row -> (0, 0, -1), matching version_signal's sentinel.
+
+        NOTE: the seq RESETS on delete_notebook_kg (which drops the state row),
+        so a delete+reingest of a participant can re-climb to a colliding triple
+        — retrieval_snapshot_cache.invalidate_kg therefore evicts ALL :ppr_graph
+        and :fed_rxgraph entries (not just self) as the belt-and-braces."""
+        row = db.execute(
+            "SELECT COALESCE(kg_mutation_seq,0) AS ks, COALESCE(cluster_mutation_seq,0) AS cs, "
+            "COALESCE(mention_seq,-1) AS ms FROM unified_kg_state WHERE notebook_id=?",
+            (notebook_id,),
+        ).fetchone()
+        if row is None:
+            return (0, 0, -1)
+        return (int(row["ks"]), int(row["cs"]), int(row["ms"]))
+
+    @staticmethod
     def mention_rows(db: sqlite3.Connection, notebook_id: str):
         return db.execute(
             "SELECT claim_object_id, concept_canonical_id FROM mention_edges "

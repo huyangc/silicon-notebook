@@ -77,6 +77,10 @@ def _add_cluster(repo, notebook_id, canonical_id, members, cc_prefix="cc"):
                 "VALUES (?,?,?,?,?,?,?,?)",
                 (f"{cc_prefix}-{i}", notebook_id, canonical_id, m,
                  canonical_id, "concept", "", _NOW))
+        # Production cluster writes bump cluster_mutation_seq (the graph/PPR
+        # version key gates on it); mirror that so this raw-insert helper is
+        # faithful and the seq-keyed federated cache invalidates.
+        repo._bump_cluster_mutation_seq(db, notebook_id)
 
 
 # ── 1: _federated_rx_graph aggregates clusters across participants ───────────

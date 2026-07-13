@@ -159,9 +159,11 @@
 
 **A 缓存失效硬化(opus 对抗评审抓出,已修)**:计数缓存的正确性依赖「所有改 object 的写路径 bump `kg_mutation_seq` 或删 state 行」。评审枚举全部写路径,发现两处漏洞并已修:①**重抽**(`begin_extraction_run` 先在独立事务 DELETE 旧 object,no-llm/异常路径不再走 `store_kg` 的 bump)→ 在 `run_extraction` 里 begin 后立即 `knowledge_counts_cache.invalidate`;②**`delete_notebook_kg`** 删 state 行使 seq→0,与「无 state 行」哨兵 0 混叠(copy→open→delete-KG 可复现)→ 显式 `invalidate`。其余写路径(store_kg/update_knowledge/merge/promotion/conflict/relink/delete_source)均已核实 bump。
 
+**F 补覆盖索引=已实现**:`_migration_11`(SCHEMA_VERSION 10→11)加 `element_embeddings(source_id)`(修 DELETE 全表扫)/`knowledge_relations(nb,review_status)`/`concept_comentions(nb,canonical_b)`,均派生表不扰 rebuild canonical 序;评审 Should-fix=`_migration_11` 先 `add_column_if_missing(review_status)` 再建索引(已部署库 user_version=10 不重跑 _migration_1)。同步全部冻结 schema 快照(SCHEMA_VERSION 守卫 / snapshot-verifier manifest / v9 fixture golden / legacy schema_contract / caller-static+surface-manifest 行号)。
+
+**E graph/PPR 版本探针 → seq 闸=已实现**:`graph_seq_row` 单行读 (kg/cluster/mention mutation_seq) 替 `ppr_version_rows`/`graph_version_rows`/`cluster_version_row` 每次检索(含缓存命中)的全 nb COUNT/MAX 聚合扫。对抗评审逐条枚举全部图输入写路径确认都 bump 对应 seq(add_relations 不 bump 但仅测试可达);Should-fix=seq 三元组在 `delete_notebook_kg` 后 reset,delete+reingest 某 base 参与者可撞相同三元组 → `invalidate_kg` 改为**全 evict 所有 `:ppr_graph`**(对称 `:fed_rxgraph`),回归测试钉住。
+
 **刻意暂缓(非丢弃,列明理由,建议独立 PR):**
-- **F 补覆盖索引**(`element_embeddings(source_id)` 修 DELETE 全表扫 + `knowledge_relations(nb,review_status)` + `concept_comentions(nb,canonical_b)`):需 `_migration_11` + bump `SCHEMA_VERSION`,牵连大量**冻结 schema 快照**维护(migration-manifest / v9 fixture golden / snapshot-verifier 行号钉死),且 `review_status` 列在已部署库缺专用 backfill 迁移(评审 Should-fix 2:_migration_11 须先 `add_column_if_missing` 再建索引)。这些属**schema 演进**、与本批「读侧缓存」正交,单独 PR 做 + 专门验证更稳,不与打开/看板症状混。
-- **E graph/PPR 版本探针 → seq 闸**:`ppr_version_rows`/`graph_version_rows`/`cluster_version_row` 每次 graph/PPR 检索(含缓存命中)全 nb 聚合扫描重算缓存键 → 应换单行 seq 读。属**per-ask 检索热路径**、med 风险(缓存键换错 → 检索结果陈旧),值得独立 PR + 专门验证,不与本批(打开/看板症状)混。
 - **搜索 LIKE `%q%`**(`query_store` notebook 搜索,前端每键 250ms debounce × 全 notebook fan-out):前导通配非 sargable,**加索引无效,须上 FTS5**——大改、独立 staleness 面,单独 PR。
 - **已 refute(不动)**:`kwtok-probe`(仅 copyable ≤5000 行库可达,非 2M)、`conversations-n1`(已索引且改写有 latest-answer 语义陷阱)。
 
