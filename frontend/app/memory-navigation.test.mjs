@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 import { memoryHash, parseMemoryHash } from "./memory-model.ts";
+import { CHAT_MODES } from "./workspace-model.ts";
 
 const page = await readFile(new URL("./page.tsx", import.meta.url), "utf8");
 const panel = await readFile(new URL("./memory-panel.tsx", import.meta.url), "utf8");
@@ -18,6 +19,15 @@ test("memory count deep-link targets the notebook memory tab", () => {
 test("global Memory has a stable outer-page location", () => {
   assert.equal(memoryHash(null), "#memory");
   assert.deepEqual(parseMemoryHash("#memory"), { scope: "global", notebookId: null });
+});
+
+test("workspace tabs keep Ask, Knowledge, Memory, Deep Report in exact order", () => {
+  assert.deepEqual(CHAT_MODES, [
+    ["ask", "Ask"],
+    ["rules", "Knowledge"],
+    ["memory", "Memory"],
+    ["reports", "Deep Report"],
+  ]);
 });
 
 test("an inaccessible notebook Memory deep-link falls back without invalidating login", () => {

@@ -44,6 +44,16 @@ export function parseMemoryHash(hash: string): { scope: MemoryScope; notebookId:
   return null;
 }
 
+export function answerIdBatches(answerIds: string[], batchSize = 200): string[][] {
+  const uniqueIds = Array.from(new Set(answerIds.map((answerId) => answerId.trim()).filter(Boolean)));
+  const size = Math.max(1, Math.min(200, Math.floor(batchSize) || 200));
+  const batches: string[][] = [];
+  for (let offset = 0; offset < uniqueIds.length; offset += size) {
+    batches.push(uniqueIds.slice(offset, offset + size));
+  }
+  return batches;
+}
+
 export function memoryListPath({
   scope,
   notebookId,

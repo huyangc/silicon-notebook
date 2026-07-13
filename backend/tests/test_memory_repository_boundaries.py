@@ -34,6 +34,7 @@ def test_memory_ports_expose_store_and_lifecycle_contracts():
         "update_fields",
         "update_with_revision",
         "list_memories",
+        "answer_memory_links",
     }
     service_methods = {
         "create_memory_candidate",
@@ -44,6 +45,7 @@ def test_memory_ports_expose_store_and_lifecycle_contracts():
         "deprecate_memory",
         "get_memory",
         "list_memories",
+        "answer_memory_links",
         "memory_revisions",
     }
     assert store_methods <= set(ports.MemoryStorePort.__dict__)
@@ -102,6 +104,7 @@ def test_runtime_owns_memory_components_and_facade_has_explicit_delegates(tmp_pa
         "deprecate_memory",
         "get_memory",
         "list_memories",
+        "answer_memory_links",
         "memory_revisions",
     ):
         assert name in SQLiteRepository.__dict__

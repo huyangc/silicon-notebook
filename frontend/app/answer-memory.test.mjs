@@ -31,3 +31,35 @@ test("workspace tracks saved answers and closes stale save dialogs on navigation
   assert.match(page, /<MemorySaveDialog/);
   assert.ok((page.match(/setMemoryAnswerId\(null\);/g) ?? []).length >= 2);
 });
+
+test("list requests and Memory mutations have independent abort lifecycles", () => {
+  assert.match(memoryPanel, /const listRequestEpochRef = useRef\(0\);/);
+  assert.match(memoryPanel, /const mutationControllersRef = useRef\(new Set<AbortController>\(\)\);/);
+  assert.match(memoryPanel, /mutationControllersRef\.current\.forEach\(\(controller\) => controller\.abort\(\)\);/);
+  assert.match(memoryPanel, /async function updateMemory[\s\S]*const controller = new AbortController\(\);[\s\S]*signal: controller\.signal/);
+  const mutationStart = memoryPanel.indexOf("async function updateMemory");
+  const mutationEnd = memoryPanel.indexOf("\n  function submitSearch", mutationStart);
+  const mutationBody = memoryPanel.slice(mutationStart, mutationEnd);
+  assert.match(mutationBody, /finally \{[\s\S]*setBusyId\(null\);/);
+  assert.equal(mutationBody.includes("listRequestEpochRef.current ==="), false);
+});
+
+test("answer save is abortable and its dialog cannot close while saving", () => {
+  const saveStart = memoryPanel.indexOf("async function save()");
+  const saveEnd = memoryPanel.indexOf("\n  return (", saveStart);
+  const saveBody = memoryPanel.slice(saveStart, saveEnd);
+  assert.match(saveBody, /const controller = new AbortController\(\);/);
+  assert.match(saveBody, /signal: controller\.signal/);
+  assert.match(memoryPanel, /saveControllerRef\.current\?\.abort\(\);/);
+  assert.match(memoryPanel, /className="memory-close"[\s\S]*disabled=\{saving\}/);
+  assert.match(memoryPanel, /<button type="button" disabled=\{saving\} onClick=\{onClose\}>取消<\/button>/);
+});
+
+test("workspace hydrates saved answers with bounded notebook batches and epoch guards", () => {
+  assert.match(page, /answerIdBatches\(turns\.map\(\(turn\) => turn\.response\.answer_id\)\)/);
+  assert.match(page, /`\/notebooks\/\$\{notebookId\}\/answer-memory-links`/);
+  assert.match(page, /body: JSON\.stringify\(\{ answer_ids: batch \}\)/);
+  assert.match(page, /memoryLinksAbortRef\.current\?\.abort\(\);/);
+  assert.match(page, /workspaceEpochRef\.current !== workspaceEpoch/);
+  assert.match(page, /setMemorySavedAnswers[\s\S]*Object\.entries\(result\.links\)/);
+});

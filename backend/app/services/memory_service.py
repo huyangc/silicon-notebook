@@ -339,3 +339,14 @@ class MemoryService:
             offset=offset,
             limit=limit,
         )
+
+    def answer_memory_links(
+        self, notebook_id: str, user_id: str, answer_ids: Sequence[str]
+    ) -> dict[str, str]:
+        unique_ids = list(
+            dict.fromkeys(str(answer_id) for answer_id in answer_ids if answer_id)
+        )
+        if len(unique_ids) > 200:
+            raise ValueError("answer_ids may contain at most 200 unique values")
+        self._require_notebook(notebook_id, user_id)
+        return self.store.answer_memory_links(notebook_id, user_id, unique_ids)

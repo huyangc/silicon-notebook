@@ -166,6 +166,9 @@ class MemoryRepository(Protocol):
         status: str | None = None, origin: str | None = None, query: str = "",
         offset: int = 0, limit: int = 50,
     ) -> PaginatedMemories: ...
+    def answer_memory_links(
+        self, notebook_id: str, user_id: str, answer_ids: Sequence[str]
+    ) -> dict[str, str]: ...
     def memory_revisions(self, memory_id: str, user_id: str) -> list[Any]: ...
 
 
@@ -711,6 +714,9 @@ class MemoryStorePort(Protocol):
         self, user_id: str, *, notebook_id: str | None, status: str | None,
         origin: str | None, query: str, offset: int, limit: int,
     ) -> PaginatedMemories: ...
+    def answer_memory_links(
+        self, notebook_id: str, user_id: str, answer_ids: Sequence[str]
+    ) -> dict[str, str]: ...
     def memory_by_answer(self, user_id: str, answer_id: str) -> MemoryRecord | None: ...
     def memory_by_agent_request(
         self, user_id: str, notebook_id: str, agent_profile_id: str | None,

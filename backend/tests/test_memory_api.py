@@ -146,6 +146,77 @@ def test_reader_can_save_own_private_memory_and_answer_save_is_idempotent(
     ).json()["items"] == []
 
 
+def test_answer_memory_links_are_bounded_owner_private_and_notebook_scoped(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner_headers, owner_id = _register(client, "q00100017")
+    reader_headers, reader_id = _register(client, "r00100018")
+    notebook_a = client.post(
+        "/api/notebooks", headers=owner_headers, json={"name": "Links A"}
+    ).json()["id"]
+    notebook_b = client.post(
+        "/api/notebooks", headers=owner_headers, json={"name": "Links B"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+    repo.add_member(notebook_a, reader_id)
+    answer_a = _answer(repo, notebook_a, "Owner saved?")
+    answer_reader = _answer(repo, notebook_a, "Reader saved?")
+    answer_b = _answer(repo, notebook_b, "Wrong notebook?")
+
+    def save(headers, notebook_id, answer_id, title):
+        response = client.post(
+            f"/api/notebooks/{notebook_id}/memories/from-answer",
+            headers=headers,
+            json={
+                "answer_id": answer_id,
+                "title": title,
+                "content_md": "Body",
+                "tags": [],
+            },
+        )
+        assert response.status_code == 201, response.text
+        return response.json()
+
+    owner_memory = save(owner_headers, notebook_a, answer_a, "Owner")
+    reader_memory = save(reader_headers, notebook_a, answer_reader, "Reader")
+    save(owner_headers, notebook_b, answer_b, "Other notebook")
+
+    owner_links = client.post(
+        f"/api/notebooks/{notebook_a}/answer-memory-links",
+        headers=owner_headers,
+        json={"answer_ids": [answer_a, answer_reader, answer_b, "missing", answer_a]},
+    )
+    assert owner_links.status_code == 200, owner_links.text
+    assert owner_links.json() == {"links": {answer_a: owner_memory["id"]}}
+
+    reader_links = client.post(
+        f"/api/notebooks/{notebook_a}/answer-memory-links",
+        headers=reader_headers,
+        json={"answer_ids": [answer_a, answer_reader]},
+    )
+    assert reader_links.status_code == 200
+    assert reader_links.json() == {"links": {answer_reader: reader_memory["id"]}}
+    assert owner_memory["created_by"] == owner_id
+
+    too_many = client.post(
+        f"/api/notebooks/{notebook_a}/answer-memory-links",
+        headers=owner_headers,
+        json={"answer_ids": [f"answer-{index}" for index in range(201)]},
+    )
+    assert too_many.status_code == 422
+
+    repo.remove_member(notebook_a, reader_id)
+    assert client.post(
+        f"/api/notebooks/{notebook_a}/answer-memory-links",
+        headers=reader_headers,
+        json={"answer_ids": [answer_reader]},
+    ).status_code == 404
+
+
 def test_foreign_notebook_and_memory_are_not_disclosed(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_headers, _owner_id = _register(client, "e00100005")

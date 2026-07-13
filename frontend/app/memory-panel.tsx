@@ -126,11 +126,22 @@ export function MemoryPanel({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<MemoryDraft>({ title: "", content_md: "", tags: "" });
   const [busyId, setBusyId] = useState<string | null>(null);
-  const requestEpochRef = useRef(0);
+  const listRequestEpochRef = useRef(0);
+  const mountedRef = useRef(true);
+  const mutationControllersRef = useRef(new Set<AbortController>());
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      mutationControllersRef.current.forEach((controller) => controller.abort());
+      mutationControllersRef.current.clear();
+    };
+  }, []);
 
   useEffect(() => {
     if (scope === "notebook" && !notebookId) return;
-    const epoch = ++requestEpochRef.current;
+    const epoch = ++listRequestEpochRef.current;
     const controller = new AbortController();
     setLoading(true);
     setError("");
@@ -144,20 +155,20 @@ export function MemoryPanel({
       limit: MEMORY_PAGE_SIZE,
     }), { signal: controller.signal })
       .then((result) => {
-        if (requestEpochRef.current !== epoch) return;
+        if (listRequestEpochRef.current !== epoch) return;
         setItems(result.items);
         setTotal(result.total_count);
       })
       .catch((cause) => {
-        if (controller.signal.aborted || requestEpochRef.current !== epoch) return;
+        if (controller.signal.aborted || listRequestEpochRef.current !== epoch) return;
         setError(cause instanceof Error ? cause.message : String(cause));
       })
       .finally(() => {
-        if (requestEpochRef.current === epoch) setLoading(false);
+        if (listRequestEpochRef.current === epoch) setLoading(false);
       });
     return () => {
       controller.abort();
-      if (requestEpochRef.current === epoch) requestEpochRef.current += 1;
+      if (listRequestEpochRef.current === epoch) listRequestEpochRef.current += 1;
     };
   }, [notebookId, origin, page, query, refresh, scope, status]);
 
@@ -167,7 +178,9 @@ export function MemoryPanel({
   }
 
   async function updateMemory(memory: MemoryRecord, action: "save" | "confirm" | "reject" | "deprecate") {
-    const epoch = requestEpochRef.current;
+    if (busyId) return;
+    const controller = new AbortController();
+    mutationControllersRef.current.add(controller);
     setBusyId(memory.id);
     setError("");
     try {
@@ -182,16 +195,18 @@ export function MemoryPanel({
       await memoryApi<MemoryRecord>(path, {
         method: action === "save" ? "PATCH" : "POST",
         body: action === "save" || action === "confirm" ? JSON.stringify(payload) : undefined,
+        signal: controller.signal,
       });
-      if (requestEpochRef.current !== epoch) return;
+      if (controller.signal.aborted || !mountedRef.current) return;
       setEditingId(null);
       setRefresh((value) => value + 1);
     } catch (cause) {
-      if (requestEpochRef.current === epoch) {
+      if (!controller.signal.aborted && mountedRef.current) {
         setError(cause instanceof Error ? cause.message : String(cause));
       }
     } finally {
-      if (requestEpochRef.current === epoch) setBusyId(null);
+      mutationControllersRef.current.delete(controller);
+      if (mountedRef.current) setBusyId(null);
     }
   }
 
@@ -348,6 +363,17 @@ export function MemorySaveDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const requestEpochRef = useRef(0);
+  const mountedRef = useRef(true);
+  const saveControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      saveControllerRef.current?.abort();
+      saveControllerRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     const epoch = ++requestEpochRef.current;
@@ -378,7 +404,8 @@ export function MemorySaveDialog({
 
   async function save() {
     if (saving || !draft.title.trim() || !draft.content_md.trim()) return;
-    const epoch = requestEpochRef.current;
+    const controller = new AbortController();
+    saveControllerRef.current = controller;
     setSaving(true);
     setError("");
     try {
@@ -390,12 +417,16 @@ export function MemorySaveDialog({
           content_md: draft.content_md.trim(),
           tags: tagsFromDraft(draft.tags),
         }),
+        signal: controller.signal,
       });
-      if (requestEpochRef.current === epoch) onSaved(memory);
+      if (!controller.signal.aborted && mountedRef.current) onSaved(memory);
     } catch (cause) {
-      if (requestEpochRef.current === epoch) setError(cause instanceof Error ? cause.message : String(cause));
+      if (!controller.signal.aborted && mountedRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     } finally {
-      if (requestEpochRef.current === epoch) setSaving(false);
+      if (saveControllerRef.current === controller) saveControllerRef.current = null;
+      if (mountedRef.current) setSaving(false);
     }
   }
 
@@ -408,7 +439,7 @@ export function MemorySaveDialog({
             <h2>保存到 Memory</h2>
             <p>先预览并编辑；只有点击确认后才会写入你的私有 Memory。</p>
           </div>
-          <button type="button" className="memory-close" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+          <button type="button" className="memory-close" onClick={onClose} aria-label="关闭" disabled={saving}><X size={18} /></button>
         </header>
         {loading ? <div className="memory-empty compact">正在生成预览…</div> : (
           <>
@@ -422,7 +453,7 @@ export function MemorySaveDialog({
         )}
         {error && <div className="memory-error" role="alert">{error}</div>}
         <footer className="memory-dialog-actions">
-          <button type="button" onClick={onClose}>取消</button>
+          <button type="button" disabled={saving} onClick={onClose}>取消</button>
           <button type="button" className="primary" disabled={loading || saving || !draft.title.trim() || !draft.content_md.trim()} onClick={() => save()}>
             <Check size={15} /> {saving ? "保存中…" : "确认保存"}
           </button>

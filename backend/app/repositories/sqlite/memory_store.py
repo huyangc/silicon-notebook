@@ -265,6 +265,27 @@ class MemoryStore:
             ).fetchone()
         return self._record(row) if row is not None else None
 
+    def answer_memory_links(
+        self, notebook_id: str, user_id: str, answer_ids: Sequence[str]
+    ) -> dict[str, str]:
+        unique_ids = list(
+            dict.fromkeys(str(answer_id) for answer_id in answer_ids if answer_id)
+        )
+        if not unique_ids:
+            return {}
+        if len(unique_ids) > 200:
+            raise ValueError("answer_ids may contain at most 200 unique values")
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT m.source_answer_id,m.id FROM memory_items m "
+                "WHERE m.notebook_id=? AND m.created_by=? "
+                f"AND m.source_answer_id IN ({placeholders}) "
+                f"AND {self._read_access_clause()}",
+                (notebook_id, user_id, *unique_ids, user_id, user_id),
+            ).fetchall()
+        return {str(row["source_answer_id"]): str(row["id"]) for row in rows}
+
     def memory_by_agent_request(
         self,
         user_id: str,

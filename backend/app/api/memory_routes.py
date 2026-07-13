@@ -16,6 +16,8 @@ from app.api.deps import (
     require_notebook_read,
 )
 from app.models.schemas import (
+    AnswerMemoryLinksRequest,
+    AnswerMemoryLinksResponse,
     MemoryCreateFromAnswer,
     MemoryOrigin,
     MemoryPreview,
@@ -120,6 +122,22 @@ async def list_notebook_memories(
         offset,
         limit,
     )
+
+
+@memory_router.post(
+    "/notebooks/{notebook_id}/answer-memory-links",
+    response_model=AnswerMemoryLinksResponse,
+)
+async def answer_memory_links(
+    payload: AnswerMemoryLinksRequest,
+    notebook_id: str = Depends(require_notebook_read),
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> AnswerMemoryLinksResponse:
+    links = await _memory_call(
+        service.answer_memory_links, notebook_id, user.id, payload.answer_ids
+    )
+    return AnswerMemoryLinksResponse(links=links)
 
 
 @memory_router.get("/memories/{memory_id}", response_model=MemoryRecord)

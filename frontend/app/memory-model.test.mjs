@@ -2,12 +2,24 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  answerIdBatches,
   canEditMemory,
   memoryListPath,
   memoryOriginMeta,
   memoryProvenanceRows,
   memoryStatusMeta,
 } from "./memory-model.ts";
+
+test("answer-link hydration uses bounded batches without per-answer requests", () => {
+  const ids = Array.from({ length: 405 }, (_, index) => `answer-${index}`);
+  const batches = answerIdBatches(ids);
+  assert.deepEqual(batches.map((batch) => batch.length), [200, 200, 5]);
+  assert.equal(new Set(batches.flat()).size, 405);
+});
+
+test("answer-link hydration deduplicates answer ids before batching", () => {
+  assert.deepEqual(answerIdBatches(["a", "a", "", "b"]), [["a", "b"]]);
+});
 
 test("candidate labels remain distinct from confirmed", () => {
   assert.equal(memoryStatusMeta("candidate").label, "待确认");

@@ -255,6 +255,34 @@
           "title": "AnswerAnchor",
           "type": "object"
         },
+        "AnswerMemoryLinksRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "answer_ids": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 200,
+              "title": "Answer Ids",
+              "type": "array"
+            }
+          },
+          "title": "AnswerMemoryLinksRequest",
+          "type": "object"
+        },
+        "AnswerMemoryLinksResponse": {
+          "properties": {
+            "links": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Links",
+              "type": "object"
+            }
+          },
+          "title": "AnswerMemoryLinksResponse",
+          "type": "object"
+        },
         "AskRequest": {
           "properties": {
             "conversation_id": {
@@ -5311,6 +5339,55 @@
             }
           },
           "summary": "Notebook Analytics"
+        }
+      },
+      "/api/notebooks/{notebook_id}/answer-memory-links": {
+        "post": {
+          "operationId": "answer_memory_links_api_notebooks__notebook_id__answer_memory_links_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnswerMemoryLinksRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AnswerMemoryLinksResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Answer Memory Links"
         }
       },
       "/api/notebooks/{notebook_id}/ask": {

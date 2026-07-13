@@ -62,6 +62,16 @@ class MemoryCreateFromAnswer(BaseModel):
     tags: List[str] = Field(default_factory=list)
 
 
+class AnswerMemoryLinksRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    answer_ids: List[str] = Field(default_factory=list, max_length=200)
+
+
+class AnswerMemoryLinksResponse(BaseModel):
+    links: Dict[str, str] = Field(default_factory=dict)
+
+
 class MemoryUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

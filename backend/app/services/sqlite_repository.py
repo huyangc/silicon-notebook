@@ -1136,6 +1136,13 @@ class SQLiteRepository:
             user_id, notebook_id, status, origin, query, offset, limit
         )
 
+    def answer_memory_links(
+        self, notebook_id: str, user_id: str, answer_ids: List[str]
+    ) -> dict[str, str]:
+        return self._runtime.memory_service.answer_memory_links(
+            notebook_id, user_id, answer_ids
+        )
+
     def memory_revisions(self, memory_id: str, user_id: str) -> list:
         return self._runtime.memory_service.revisions(memory_id, user_id)
 

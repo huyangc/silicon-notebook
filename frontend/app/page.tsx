@@ -8,7 +8,7 @@ import dynamic from "next/dynamic";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
-import { memoryHash, parseMemoryHash } from "./memory-model";
+import { answerIdBatches, memoryHash, parseMemoryHash } from "./memory-model";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
   ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
@@ -1111,6 +1111,7 @@ export default function Home() {
   const sourcesRef = useRef<SourceSummary[]>([]);
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
+  const memoryLinksAbortRef = useRef<AbortController | null>(null);
   const askJobIdRef = useRef<string | null>(null);
   const askNotebookIdRef = useRef<string | null>(null);
   // Every notebook/session transition advances the workspace epoch. Async
@@ -1125,6 +1126,44 @@ export default function Home() {
   // reconnectConvIdRef 记正在重连的会话 id,供轮询跑完后 openSession 重载拿最终答案。
   const [reconnectJob, setReconnectJob] = useState<{ jobId: string; seen: number } | null>(null);
   const reconnectConvIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    memoryLinksAbortRef.current?.abort();
+    const notebookId = currentNotebookId;
+    const batches = answerIdBatches(turns.map((turn) => turn.response.answer_id));
+    if (!notebookId || batches.length === 0) {
+      setMemorySavedAnswers({});
+      return;
+    }
+    const workspaceEpoch = workspaceEpochRef.current;
+    const controller = new AbortController();
+    memoryLinksAbortRef.current = controller;
+    Promise.all(batches.map((batch) => api<{ links: Record<string, string> }>(
+      `/notebooks/${notebookId}/answer-memory-links`,
+      {
+        method: "POST",
+        body: JSON.stringify({ answer_ids: batch }),
+        signal: controller.signal,
+      },
+    )))
+      .then((results) => {
+        if (
+          controller.signal.aborted
+          || activeNotebookIdRef.current !== notebookId
+          || workspaceEpochRef.current !== workspaceEpoch
+        ) return;
+        setMemorySavedAnswers(Object.fromEntries(
+          results.flatMap((result) => Object.entries(result.links).map(([answerId]) => [answerId, true])),
+        ));
+      })
+      .catch((error) => {
+        if (!isAbortError(error)) reportError(error);
+      })
+      .finally(() => {
+        if (memoryLinksAbortRef.current === controller) memoryLinksAbortRef.current = null;
+      });
+    return () => controller.abort();
+  }, [currentNotebookId, turns]);
   // 重连轮询:重开一个仍在跑的会话时,每 1.5s 拉 ask_job 详情,增量追加轨迹;
   // 跑完则重载会话显示最终答案,取消/中断则提示并收起在途 turn。
   useEffect(() => {
@@ -1748,6 +1787,8 @@ export default function Home() {
   async function openNotebook(notebookId: string): Promise<boolean> {
     const workspaceEpoch = ++workspaceEpochRef.current;
     askRunEpochRef.current += 1;
+    memoryLinksAbortRef.current?.abort();
+    memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
     setAsking(false);
     setPendingQuestion("");
@@ -1755,6 +1796,7 @@ export default function Home() {
     setPendingTrace([]);
     setReconnectJob(null);
     setMemoryAnswerId(null);
+    setMemorySavedAnswers({});
     const [notebook, sourcesPage] = await Promise.all([
       api<NotebookSummary>(`/notebooks/${notebookId}`),
       api<PaginatedSources>(`/notebooks/${notebookId}/sources?offset=0&limit=${SOURCES_PAGE_SIZE}`)
@@ -1830,6 +1872,8 @@ export default function Home() {
   function showCollection() {
     workspaceEpochRef.current += 1;
     askRunEpochRef.current += 1;
+    memoryLinksAbortRef.current?.abort();
+    memoryLinksAbortRef.current = null;
     activeNotebookIdRef.current = null;
     setCurrentNotebookId(null);
     setCurrentNotebook(null);
@@ -1844,6 +1888,7 @@ export default function Home() {
     setPendingTrace([]);
     setReconnectJob(null);
     setMemoryAnswerId(null);
+    setMemorySavedAnswers({});
     setOuterView("notebooks");
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
     window.scrollTo(0, 0);
@@ -2206,8 +2251,11 @@ export default function Home() {
   async function openSession(id: string) {
     const workspaceEpoch = ++workspaceEpochRef.current;
     askRunEpochRef.current += 1;
+    memoryLinksAbortRef.current?.abort();
+    memoryLinksAbortRef.current = null;
     setAsking(false);
     setReconnectJob(null);
+    setMemoryAnswerId(null);
     const detail = await api<ConversationDetail>(`/conversations/${id}`);
     if (workspaceEpochRef.current !== workspaceEpoch) return;
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
@@ -2241,11 +2289,15 @@ export default function Home() {
   function startNewSession() {
     workspaceEpochRef.current += 1;
     askRunEpochRef.current += 1;
+    memoryLinksAbortRef.current?.abort();
+    memoryLinksAbortRef.current = null;
     setAsking(false);
     setReconnectJob(null);
+    setMemoryAnswerId(null);
     askJobIdRef.current = null;
     askNotebookIdRef.current = null;
     setTurns([]);
+    setMemorySavedAnswers({});
     setConversationId(null);
     setAskMode(DEFAULT_ASK_MODE);
     setPendingQuestion("");
@@ -2897,6 +2949,9 @@ export default function Home() {
     askRunEpochRef.current += 1;
     activeNotebookIdRef.current = null;
     askAbortRef.current?.abort();
+    memoryLinksAbortRef.current?.abort();
+    memoryLinksAbortRef.current = null;
+    setMemoryAnswerId(null);
     await logoutUser();
     setCurrentUser(null);
     window.location.reload();

@@ -187,10 +187,10 @@ export type ConversationDetail = {
 
 export type ChatMode = "ask" | "rules" | "reports" | "memory";
 export const CHAT_MODES: Array<[ChatMode, string]> = [
-  ["ask", "问答"],
-  ["rules", "知识库"],
-  ["reports", "深度报告"],
+  ["ask", "Ask"],
+  ["rules", "Knowledge"],
   ["memory", "Memory"],
+  ["reports", "Deep Report"],
 ];
 
 export type KnowledgeKind = string;
