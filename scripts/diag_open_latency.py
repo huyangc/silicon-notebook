@@ -10,8 +10,8 @@
 
 把整段输出贴回来即可。测量「打开一个 notebook」真实触发的关键查询耗时 + 生产请求
 日志里各端点的真实 P50/P95/max,用来定位 A(计数缓存)之后剩下的几秒是:①计数缓存
-【冷未命中】的 2M GROUP BY 成本(重启后 / 该 nb 每次 KG 变更后首开重付);②from_row 里
-A 没缓存的子查询(pending_kg_source_count 相关子查询等);③别的端点在吃秒;④后台在建/
+【冷未命中】的 2M GROUP BY 成本(重启后 / 该 nb 每次 KG 变更后首开重付);②打开必发的
+scale-index/status 数 chunks 全表 + sources 物化 + pending 相关子查询(均未缓存);③别的端点吃秒;④后台在建/
 摄取导致 kg_mutation_seq 一直变、缓存永远命不中(每次都冷算)。
 
 复用 diag_slow.py 的 .local 定位 / 日志迭代 / 分位数助手(同目录,纯 stdlib)。"""
@@ -120,28 +120,82 @@ def main() -> int:
         print(f"    GROUP BY object_type,status(A 缓存的原始查询): {_fmt(t_in)}"
               + ("   ⚠冷成本高:若你「每次都卡」看上面 dirty 与下面 seq churn" if t_in >= 1000 else ""))
 
-        # [2] from_row 里 A 没覆盖的残余子查询
-        print("\n[2] from_row 残余子查询(A 只缓存了 type_counts,以下每次打开仍现算)")
-        residual = [
-            ("sources COUNT", "SELECT COUNT(*) c FROM sources WHERE notebook_id=?", (nb,)),
-            ("pending_kg_source_count(相关子查询·头号嫌疑)",
-             "SELECT COUNT(*) c FROM sources s WHERE s.notebook_id=? "
-             "AND EXISTS(SELECT 1 FROM source_elements e WHERE e.source_id=s.id) "
-             "AND NOT EXISTS(SELECT 1 FROM knowledge_objects k WHERE k.source_id=s.id AND k.source_id!='')",
-             (nb,)),
-            ("base_notebook_info(全局 tier=base)",
-             "SELECT nb.name, EXISTS(SELECT 1 FROM knowledge_objects ko JOIN notebooks b "
-             "ON b.id=ko.notebook_id WHERE b.tier='base') FROM notebooks nb WHERE nb.tier='base' "
-             "ORDER BY nb.created_at ASC LIMIT 1", ()),
-            ("has_kg EXISTS", "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE notebook_id=?)", (nb,)),
-        ]
-        for label, sql, params in residual:
+        # [2] 打开/看板/知识库各面真正触发的查询逐条计时(faithful mirror 生产 SQL,只读)。
+        #     ⚠OPEN=选中 notebook 必付(与 rebuild 无关、每次都冷算);其余按点击面分组。
+        print("\n[2] 各面真实查询计时(mirror 生产 SQL;⚠OPEN=每次打开必付)")
+
+        def _row(label, sql, params=(), flag=""):
             try:
                 _, t = _timed(sql, params)
-                mstr, flag = _fmt(t), ("  ⚠残余大头" if t >= 500 else "")
+                mstr = _fmt(t)
+                if not flag and t >= 500:
+                    flag = "  ⚠秒级"
             except sqlite3.Error as exc:
                 mstr, flag = f"err:{exc}", ""
-            print(f"    {label:44} {mstr:>9}{flag}")
+            print(f"    {label:54} {mstr:>9}{flag}")
+
+        _PENDING = ("SELECT COUNT(*) c FROM sources s WHERE s.notebook_id=? "
+                    "AND EXISTS(SELECT 1 FROM source_elements e WHERE e.source_id=s.id) "
+                    "AND NOT EXISTS(SELECT 1 FROM knowledge_objects k "
+                    "WHERE k.source_id=s.id AND k.source_id!='')")
+        _PAGE50 = ("(SELECT id FROM sources WHERE notebook_id=? "
+                   "ORDER BY created_at ASC LIMIT 50)")
+
+        print("  ── OPEN:每次打开必付(openNotebook + [currentNotebookId] effect)──")
+        _row("scale-index/status: chunks COUNT(*)  ←头号",
+             "SELECT COUNT(*) c FROM chunks WHERE notebook_id=?", (nb,), "  ⚠OPEN")
+        _row(f"scale-index/status: sources id 全量物化(N={n_src})",
+             "SELECT id FROM sources WHERE notebook_id=?", (nb,), "  ⚠OPEN")
+        _row("notebooks/{id}: pending_kg_source_count(相关子查询)",
+             _PENDING, (nb,), "  ⚠OPEN")
+        _row("notebooks/{id}+sources: sources COUNT",
+             "SELECT COUNT(*) c FROM sources WHERE notebook_id=?", (nb,))
+        _row("sources: kg_extracted 水合(最新50源→KO DISTINCT)",
+             "SELECT DISTINCT source_id FROM knowledge_objects "
+             "WHERE source_id IN " + _PAGE50 + " AND source_id!=''", (nb,))
+
+        print("  ── OPEN·冷簇:重启后 / 该 nb 每次 KG 写后首开重付,之后 memo 命中 ──")
+        _row("version_facts: knowledge_objects COUNT+MAX",
+             "SELECT COUNT(*) c, COALESCE(MAX(updated_at),'') ts "
+             "FROM knowledge_objects WHERE notebook_id=?", (nb,))
+        _row("version_facts: concept_clusters COUNT+MAX",
+             "SELECT COUNT(*) c, COALESCE(MAX(created_at),'') ts "
+             "FROM concept_clusters WHERE notebook_id=?", (nb,))
+        print("    (chunks 冷簇再数一遍见上;[1] 的 GROUP BY 是另一条冷聚合)")
+
+        print("  ── 看板:点「看板」才发(非打开)──")
+        _row("analytics: sources parse_status GROUP BY",
+             "SELECT parse_status, COUNT(*) c FROM sources WHERE notebook_id=? "
+             "GROUP BY parse_status", (nb,), "  ⚠无(nb,parse_status)索引")
+        # COUNT(DISTINCT canonical_id):线上仅当 unified_kg_state.cluster_count 未持久化才付
+        # (55min 元凶);已持久化(非0)线上跳过。concept_clusters 巨大时 diag 不实跑(会挂几十秒~分钟)。
+        try:
+            _ccrow = _run("SELECT COALESCE(cluster_count,0) cc FROM unified_kg_state "
+                          "WHERE notebook_id=?", (nb,)).fetchone()
+            _cc = _ccrow["cc"] if _ccrow else 0
+        except sqlite3.Error:
+            _cc = 0
+        try:
+            _members = _run("SELECT COUNT(*) c FROM concept_clusters WHERE notebook_id=?",
+                            (nb,)).fetchone()["c"]
+        except sqlite3.Error:
+            _members = 0
+        _lbl = "index-status→unified_kg: COUNT(DISTINCT canonical_id)"
+        if _cc:
+            print(f"    {_lbl}  (线上跳过:cluster_count={_cc} 已持久化)")
+        elif _members >= 1_000_000:
+            print(f"    {_lbl}  ⚠未持久化·线上每次全跑于 {_members} 行(=55min 元凶);"
+                  "diag 不实跑(会挂)")
+        else:
+            _row(_lbl + " ←55min元凶",
+                 "SELECT COUNT(DISTINCT canonical_id) c FROM concept_clusters "
+                 "WHERE notebook_id=?", (nb,), "  ⚠未持久化·线上每次付")
+
+        print("  ── 知识库 tab:点「知识库」才发(非打开)──")
+        for _ot in ("concept", "claim"):
+            _row(f"knowledge: list COUNT object_type={_ot}",
+                 "SELECT COUNT(*) c FROM knowledge_objects "
+                 "WHERE notebook_id=? AND object_type=?", (nb, _ot))
 
         # [3] 生产请求日志真相 —— 该 nb 各端点 P50/P95/max(你实际体验到的)
         print("\n[3] 生产请求日志(requests.jsonl)—— 该 notebook 各端点真实延迟")
@@ -171,10 +225,13 @@ def main() -> int:
                       f"{_fmt(diag_slow._pct(v,95)):>8} {_fmt(v[-1]):>9}")
 
         print("\n判别提示:")
-        print("  · [1] 冷成本大 + [3] 里 GET /notebooks/{id} 的 P95 也是秒级 + dirty=1/seq 常变")
-        print("    → 缓存被后台 KG 变更反复冲掉,每次打开都冷算;根治=让 kg_mutation_seq 稳定/物化计数")
-        print("  · [2] pending_kg_source_count 是残余大头 → 那条相关子查询(A 未缓存)是下一刀")
-        print("  · [3] 秒级的不是 /notebooks/{id} 而是别的端点 → 打那个端点(/analytics /index-status /graph …)")
+        print("  · 「每次打开都卡 5-6s、rebuild 完照样卡」= [2] 的 ⚠OPEN 几条之和")
+        print("    (chunks COUNT + sources 物化 + pending_kg_source_count);无缓存、只随规模走,")
+        print("    与 rebuild 无关;根治=给这几条按 kg_mutation_seq 上计数缓存(同 A),非加索引")
+        print("  · 「点看板卡」= [2] 看板组:parse_status GROUP BY 缺 (nb,parse_status) 索引;")
+        print("    COUNT(DISTINCT canonical_id) 未持久化时=55min 元凶(finish_rebuild 落 cluster_count 才免)")
+        print("  · 「点知识库卡」= [2] 知识库组 list COUNT(concept 桶最大)")
+        print("  · [3] 用生产真实 P50/P95 对照:哪个端点秒级先打哪个")
     finally:
         conn.close()
     print("\n=== 完 — 把以上整段贴回即可 " + "=" * 34)
