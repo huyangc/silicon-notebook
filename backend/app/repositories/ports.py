@@ -38,7 +38,7 @@ from app.models.schemas import (
     ConversationSummary, DuplicateGroup, FeedbackRequest, FeedbackResponse,
     KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
     NotebookAnalytics, NotebookCreate, NotebookSearchResponse, NotebookSummary,
-    AgentPrincipal, AgentProfile, AgentTokenIssued, AgentTokenSummary, MemoryRecord, MemoryUpdate, PaginatedMemories, NotebookTemplate, NotebookUpdate, ObjectSchemaCreate, ObjectSchemaModel,
+    AgentPrincipal, AgentProfile, AgentTokenIssued, AgentTokenSummary, MemoryHit, MemoryRecord, MemoryUpdate, PaginatedMemories, NotebookTemplate, NotebookUpdate, ObjectSchemaCreate, ObjectSchemaModel,
     ObjectSchemaUpdate, PaginatedKnowledge, PaginatedSources, RuleCard,
     SourceDetail, SourceElement, SourceImportRequest, SourceSummary, UserProfile,
 )
@@ -353,6 +353,26 @@ class AskExecutionPort(Protocol):
     def ask_chunk(self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None) -> AskResponse: ...
     def ask_reasoning(self, notebook_id: str, payload: AskRequest, on_trace: Callable[[Any], None] | None = None, cancel_event: CancelEvent = None) -> AskResponse: ...
     def ask_graph(self, notebook_id: str, payload: AskRequest, seed_ids: list[str] | None = None, cancel_event: CancelEvent = None) -> AskResponse: ...
+
+
+class McpMemoryRepository(
+    MemoryRepository,
+    NotebookAccessRepository,
+    NotebookCatalogRepository,
+    KnowledgeLifecycleRepository,
+    AskExecutionPort,
+    Protocol,
+):
+    """Consumer-owned MCP contract over existing composed services."""
+
+    def agent_memory_hits(
+        self,
+        user_id: str,
+        notebook_id: str,
+        query: str,
+        include_candidates: bool,
+        limit: int = 8,
+    ) -> list[MemoryHit]: ...
 
 
 class NotebookStorePort(Protocol):

@@ -1527,6 +1527,21 @@ TASK6_MEMORY_ALLOWED_NEW_MEMBERS = {
     "update_agent_profile",
 }
 
+# Task 7 (Memory): the MCP adapter is a new consumer of established public
+# facade delegates.  It adds one source-checked one-hop delegate for the
+# two-plane Memory retriever; no SQL or private runtime state is exposed.
+TASK7_MEMORY_ALLOWED_CONSUMERS = {
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:266"),
+    ("get_notebook", "backend/app/api/mcp_server.py:271"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:298"),
+    ("get_notebook", "backend/app/api/mcp_server.py:303"),
+    ("unified_kg_status", "backend/app/api/mcp_server.py:304"),
+    ("agent_memory_hits", "backend/app/api/mcp_server.py:348"),
+    ("search_notebook", "backend/app/api/mcp_server.py:399"),
+    ("ask", "backend/app/api/mcp_server.py:485"),
+}
+TASK7_MEMORY_ALLOWED_NEW_MEMBERS = {"agent_memory_hits"}
+
 # Task 26: the consolidated facade delegates its last SQL bodies to the
 # stores, so two facade-internal helper call sites disappear (_in_batches
 # now feeds retrieval_objects as a batch size; storage_dir is the runtime
@@ -2606,7 +2621,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         (member, f"{file}:{line}")
             for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
@@ -2647,6 +2662,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual.pop(name, None)
         recorded.pop(name, None)
     for name in TASK6_MEMORY_ALLOWED_NEW_MEMBERS:
+        actual.pop(name, None)
+        recorded.pop(name, None)
+    for name in TASK7_MEMORY_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual

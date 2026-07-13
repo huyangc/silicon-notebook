@@ -1138,6 +1138,18 @@ class SQLiteRepository:
             principal, scope, notebook_id
         )
 
+    def agent_memory_hits(
+        self,
+        user_id: str,
+        notebook_id: str,
+        query: str,
+        include_candidates: bool,
+        limit: int = 8,
+    ) -> list:
+        return self._runtime.memory_retriever.agent_memory_hits(
+            user_id, notebook_id, query, include_candidates, limit
+        )
+
     def answer_memory_source(self, answer_id: str) -> dict:
         return self._runtime.ask_state.answer_memory_source(answer_id)
 

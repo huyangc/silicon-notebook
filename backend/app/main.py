@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
@@ -8,7 +9,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth_routes import auth_router
 from app.api.debug_logs import router as debug_logs_router
-from app.api.deps import get_current_user, repository
+from app.api.deps import get_current_user, mcp_memory_repository, repository
+from app.api.mcp_server import create_memory_mcp, validate_mcp_deployment
 from app.api.routes import router
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
@@ -42,6 +44,26 @@ def _env_file_preflight() -> None:
 def create_app() -> FastAPI:
     _env_file_preflight()
     settings = get_settings()
+
+    bind_host = os.environ.get("BACKEND_HOST", os.environ.get("HOST", "127.0.0.1"))
+    mcp_public_url = os.environ.get(
+        "MCP_PUBLIC_URL", f"http://{bind_host}:8000/mcp"
+    )
+    validate_mcp_deployment(bind_host, mcp_public_url)
+    mcp_server, mcp_app = create_memory_mcp(
+        mcp_memory_repository,
+        allowed_origins=settings.cors_origins,
+        public_url=mcp_public_url,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # Mounted Starlette applications do not have their lifespan entered by
+        # FastAPI automatically.  Explicit composition is required by the MCP
+        # SDK's stateful Streamable HTTP session manager.
+        inner = mcp_server.streamable_http_app()
+        async with inner.router.lifespan_context(inner):
+            yield
 
     # 日志归档：启动时后台扫一遍「非今天」的天文件并 gzip，best-effort、不阻塞启动。
     from app.core.event_logging import archive_stale_days, _archive_pool
@@ -77,6 +99,7 @@ def create_app() -> FastAPI:
         title="silicon-notebook API",
         version="0.1.0",
         description="Local beta API for semiconductor knowhow notebooks.",
+        lifespan=lifespan,
     )
 
     request_log = EventLogger(settings, channel="requests")
@@ -144,6 +167,7 @@ def create_app() -> FastAPI:
         router, prefix="/api", dependencies=[Depends(get_current_user)]
     )  # 其余全部需登录（router 级依赖：零逐路由遗漏）
     app.include_router(debug_logs_router, prefix="/api")
+    app.mount("/mcp", mcp_app, name="memory-mcp")
 
     # 待确认中心事件总线：注入 recompute，供后台 job（mark_dirty）与流式端点
     # 复用同一份快照计算口径（app.api.routes 里初始 snapshot 直接调
@@ -154,4 +178,3 @@ def create_app() -> FastAPI:
 
 
 app = create_app()
-
