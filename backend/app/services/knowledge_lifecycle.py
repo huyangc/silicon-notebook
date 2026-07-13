@@ -180,6 +180,12 @@ class KnowledgeLifecycleService:
         with self._write() as db:
             counts = self.knowledge.delete_notebook_graph_rows(db, notebook_id)
         self._invalidate_unified_cache(notebook_id)
+        # delete_notebook_graph_rows drops the unified_kg_state row, so the count
+        # cache's seq reads 0 afterward — which ALIASES with a genuine seq 0 (e.g.
+        # a freshly copy_notebook'd nb whose counts were cached at seq 0). Drop the
+        # entry explicitly so post-delete counts (0) aren't masked by a seq-0 hit.
+        from app.repositories.sqlite import knowledge_counts_cache
+        knowledge_counts_cache.invalidate(notebook_id)
         return counts
 
     def store_kg(self, notebook_id: str, source_id: Optional[str],
@@ -803,7 +809,15 @@ class KnowledgeLifecycleService:
         self.get_notebook(notebook_id)
         with self._connect() as db:
             row = self.unified_kg.state_row(db, notebook_id)
-            clusters = self.unified_kg.distinct_cluster_count(db, notebook_id)
+            # cluster_count is persisted at rebuild end (finish_rebuild_state); the
+            # live COUNT(DISTINCT canonical_id) is only a null-fallback (see the
+            # `row["cluster_count"] or clusters` below). Compute it ONLY when the
+            # persisted value is absent — otherwise we scanned all member rows
+            # (temp b-tree over concept_clusters, ~1 row/member) on every status
+            # poll for a value that gets thrown away. Byte-identical result.
+            clusters = 0
+            if row is None or not row["cluster_count"]:
+                clusters = self.unified_kg.distinct_cluster_count(db, notebook_id)
         viz = self.scale_artifacts.viz_probe(notebook_id)
         viz_building = notebook_id in self.scale_artifacts.viz_building
         if row is None:

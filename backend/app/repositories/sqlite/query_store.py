@@ -45,14 +45,13 @@ class QueryStore:
     @staticmethod
     def knowledge_type_count_rows(
         db: sqlite3.Connection, notebook_id: str, statuses: tuple[str, ...]
-    ) -> list[sqlite3.Row]:
-        placeholders = ",".join("?" for _ in statuses)
-        return db.execute(
-            f"SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
-            f"WHERE notebook_id = ? AND status IN ({placeholders}) "
-            f"GROUP BY object_type",
-            (notebook_id, *statuses),
-        ).fetchall()
+    ) -> "list[dict]":
+        # Served from the seq-gated count cache (one GROUP BY per kg_mutation_seq
+        # instead of per open/list/poll). Returns row-like dicts with the same
+        # ["object_type"] / ["c"] keys the callers read.
+        from app.repositories.sqlite import knowledge_counts_cache
+        counts = knowledge_counts_cache.type_counts(db, notebook_id, statuses)
+        return [{"object_type": ot, "c": c} for ot, c in counts.items()]
 
     @staticmethod
     def notebook_has_kg(db: sqlite3.Connection, notebook_id: str) -> bool:
@@ -253,14 +252,9 @@ class QueryStore:
                     (notebook_id,),
                 ).fetchall()
             ]
-            knowledge_counts = {
-                row["object_type"]: int(row["c"])
-                for row in db.execute(
-                    "SELECT object_type, COUNT(*) AS c FROM knowledge_objects "
-                    "WHERE notebook_id = ? AND status != 'deprecated' GROUP BY object_type",
-                    (notebook_id,),
-                ).fetchall()
-            }
+            # seq-gated count cache (non-deprecated) — same GROUP BY, memoized.
+            from app.repositories.sqlite import knowledge_counts_cache
+            knowledge_counts = knowledge_counts_cache.type_counts(db, notebook_id)
             source_status_counts = {
                 row["parse_status"]: int(row["c"])
                 for row in db.execute(

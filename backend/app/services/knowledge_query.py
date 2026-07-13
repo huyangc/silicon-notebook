@@ -354,9 +354,15 @@ class KnowledgeQueryService:
         self, notebook_id: str, object_type: str, payload: dict, source_id: str = ""
     ) -> str:
         with self.database.write() as db:
-            return self.knowledge.insert_test_object(
+            oid = self.knowledge.insert_test_object(
                 db, notebook_id, object_type, payload, source_id
             )
+        # Test-only raw insert bypasses store_kg's kg_mutation_seq bump (which is
+        # what invalidates the seq-gated count cache in production). Drop the
+        # cache entry so tests that seed via this helper see fresh counts.
+        from app.repositories.sqlite import knowledge_counts_cache
+        knowledge_counts_cache.invalidate(notebook_id)
+        return oid
 
     @staticmethod
     def rule_card(item: RetrievedKnowledge) -> RuleCard:
