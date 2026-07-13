@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from app.eval.memory_agent_ab import run_agent_ab
+import json
+import re
+
+from app.eval.memory_agent_ab import run_agent_ab, run_fixed_agent_ab
 from app.eval.memory_retrieval import evaluate_cases, run_fixed_gold
 from app.models.schemas import MemoryHit
 from app.services.memory_retrieval import authority_rank, rerank_eligible_memory_hits
+from app.services.prompts import answer_prompt
 
 
 def _hit(memory_id: str, status: str, score: float) -> MemoryHit:
@@ -47,25 +51,25 @@ def test_conflict_authority_hierarchy_is_deterministic():
 
 
 def test_fixed_eval_has_zero_tolerance_leakage_guards():
+    confirmed = _hit("confirmed", "confirmed", 0.9)
     cases = [
         {
             "id": "safe",
             "expected": ["confirmed"],
-            "returned": [
-                {
-                    "memory_id": "confirmed",
-                    "status": "confirmed",
-                    "created_by": "alice",
-                    "notebook_id": "nb-a",
-                }
-            ],
+            "returned": [confirmed],
             "user_id": "alice",
             "notebook_id": "nb-a",
             "plane": "notebook",
         }
     ]
 
-    metrics = evaluate_cases(cases, k=5)
+    metrics = evaluate_cases(
+        cases,
+        k=5,
+        item_scope={
+            "confirmed": {"created_by": "alice", "notebook_id": "nb-a"}
+        },
+    )
 
     assert metrics["candidate_to_notebook_leaks"] == 0
     assert metrics["cross_user_leaks"] == 0
@@ -75,7 +79,32 @@ def test_fixed_eval_has_zero_tolerance_leakage_guards():
     assert metrics["ndcg"] == 1.0
 
 
+def test_fixed_eval_detects_candidate_owner_and_notebook_leaks_from_fixture_metadata():
+    leaked = _hit("candidate-leak", "candidate", 0.9)
+    metrics = evaluate_cases(
+        [{
+            "expected": [],
+            "returned": [leaked],
+            "user_id": "alice",
+            "notebook_id": "nb-a",
+            "plane": "notebook",
+        }],
+        item_scope={
+            "candidate-leak": {"created_by": "bob", "notebook_id": "nb-b"}
+        },
+    )
+
+    assert metrics["candidate_to_notebook_leaks"] == 1
+    assert metrics["cross_user_leaks"] == 1
+    assert metrics["cross_notebook_leaks"] == 1
+
+
 def test_committed_gold_has_zero_tolerance_leakage_and_quality_floor():
+    from app.eval import memory_retrieval
+
+    payload = json.loads(memory_retrieval._gold_path().read_text(encoding="utf-8"))
+    assert all("returned" not in case for case in payload["cases"])
+
     metrics = run_fixed_gold()
 
     assert metrics["candidate_to_notebook_leaks"] == 0
@@ -84,6 +113,24 @@ def test_committed_gold_has_zero_tolerance_leakage_and_quality_floor():
     assert metrics["recall_at_5"] >= 0.8
     assert metrics["mrr"] >= 0.8
     assert metrics["ndcg"] >= 0.8
+
+
+def test_fixed_gold_invokes_real_memory_retriever(monkeypatch):
+    from app.services.memory_retrieval import MemoryRetriever
+
+    calls = []
+    original = MemoryRetriever.notebook_memory_hits
+
+    def tracked(self, user_id, notebook_id, query, limit=8):
+        calls.append((user_id, notebook_id, query, limit))
+        return original(self, user_id, notebook_id, query, limit)
+
+    monkeypatch.setattr(MemoryRetriever, "notebook_memory_hits", tracked)
+
+    metrics = run_fixed_gold()
+
+    assert calls
+    assert metrics["candidate_to_notebook_leaks"] == 0
 
 
 def test_agent_ab_runs_identical_tasks_in_all_three_modes():
@@ -116,3 +163,31 @@ def test_agent_ab_runs_identical_tasks_in_all_three_modes():
         "token_count": 40,
         "citation_validity": 1.0,
     }
+
+
+def test_fixed_agent_ab_runs_mode_harness_and_real_confirmed_memory_retrieval(monkeypatch):
+    from app.services.memory_retrieval import MemoryRetriever
+
+    calls = []
+    original = MemoryRetriever.notebook_memory_hits
+
+    def tracked(self, user_id, notebook_id, query, limit=8):
+        calls.append((user_id, notebook_id, query, limit))
+        return original(self, user_id, notebook_id, query, limit)
+
+    monkeypatch.setattr(MemoryRetriever, "notebook_memory_hits", tracked)
+
+    result = run_fixed_agent_ab()
+
+    assert calls
+    assert result["kb_confirmed_memory"]["success_rate"] > result["kb_only"][
+        "success_rate"
+    ]
+    assert result["kb_confirmed_memory"]["citation_validity"] == 1.0
+
+
+def test_answer_prompt_rule_numbers_are_unique_and_sequential():
+    prompt = answer_prompt("question", "(none)")
+    numbers = [int(value) for value in re.findall(r"(?m)^(\d+)\. ", prompt)]
+
+    assert numbers == list(range(1, 11))

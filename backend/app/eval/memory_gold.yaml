@@ -5,31 +5,25 @@
       "plane": "notebook",
       "user_id": "alice",
       "notebook_id": "timing",
-      "expected": ["memory-confirmed-timing"],
-      "returned": [
-        {"memory_id": "memory-confirmed-timing", "status": "confirmed", "created_by": "alice", "notebook_id": "timing"}
-      ]
+      "query": "timing closure",
+      "expected": ["memory-confirmed-timing"]
     },
     {
       "id": "agent-candidate-same-owner",
       "plane": "agent",
       "user_id": "alice",
       "notebook_id": "timing",
-      "expected": ["memory-candidate-constraint"],
-      "returned": [
-        {"memory_id": "memory-candidate-constraint", "status": "candidate", "created_by": "alice", "notebook_id": "timing"},
-        {"memory_id": "memory-confirmed-timing", "status": "confirmed", "created_by": "alice", "notebook_id": "timing"}
-      ]
+      "query": "agent constraint candidate",
+      "include_candidates": true,
+      "expected": ["memory-candidate-constraint"]
     },
     {
       "id": "notebook-isolation",
       "plane": "notebook",
       "user_id": "bob",
       "notebook_id": "power",
-      "expected": ["memory-bob-power"],
-      "returned": [
-        {"memory_id": "memory-bob-power", "status": "confirmed", "created_by": "bob", "notebook_id": "power"}
-      ]
+      "query": "power integrity",
+      "expected": ["memory-bob-power"]
     }
   ]
 }

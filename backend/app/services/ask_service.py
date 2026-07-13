@@ -66,6 +66,32 @@ _MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
 _LOOSE_MARKER_GROUP_RE = re.compile(r"\[\s*k\d+(?:\s*,\s*k\d+)*\s*\]")
 
 
+def _graph_classification_hits(
+    *, top_hits, memory_hits, anchors, neighbour_relevance: float, notebook_id: str
+):
+    """Build graph-mode classifier evidence without inflating Memory scores.
+
+    Graph nodes reached through a verified chain may inherit discounted seed
+    relevance. Memory anchors already have their own retrieval score and must
+    never be mistaken for graph neighbours.
+    """
+    hits = list(top_hits) + list(memory_hits)
+    scored_oids = {hit.object_id for hit in hits}
+    for anchor in anchors:
+        if anchor.object_id in scored_oids or anchor.object_type == "memory":
+            continue
+        scored_oids.add(anchor.object_id)
+        hits.append(RetrievedKnowledge(
+            object_id=anchor.object_id,
+            object_type=anchor.object_type,
+            payload={"name": anchor.name},
+            relevance=neighbour_relevance,
+            tier=getattr(anchor, "tier", "personal"),
+            notebook_id=notebook_id,
+        ))
+    return hits
+
+
 def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
     """Normalise the `[k…]`-shaped tokens in `answer` against `bound_keys` (the
     keys that actually resolved to an anchor):
@@ -922,7 +948,8 @@ class AskService:
             return self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "reasoning", user_id=user_id)
 
-        if not (self.candidates.has_kg(notebook_id)
+        if not memory_hits and not (
+                self.candidates.has_kg(notebook_id)
                 or self.candidates.any_base_has_kg()):
             response = AskResponse(
                 answer_id="",
@@ -1101,7 +1128,8 @@ class AskService:
             return self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "graph", user_id=user_id)
 
-        if not (self.candidates.has_kg(notebook_id)
+        if not memory_hits and not (
+                self.candidates.has_kg(notebook_id)
                 or self.candidates.any_base_has_kg()):
             response = AskResponse(
                 answer_id="",
@@ -1457,20 +1485,16 @@ class AskService:
             # neighbour a relevance inherited from the strongest seed, discounted by
             # chain_trust (the verifier's weakest-link confidence), so a trusted
             # chain can reach "grounded" while a flagged/weak one still falls back.
-            hits_for_classify = list(top_hits) + list(memory_hits)
             raise_if_cancelled(cancel_event)
-            if anchors:
-                scored_oids = {h.object_id for h in top_hits}
-                seed_rel = max((h.relevance for h in top_hits), default=0.0)
-                neighbour_rel = seed_rel * float(verify_result.get("chain_trust", 1.0))
-                for a in anchors:
-                    if a.object_id in scored_oids:
-                        continue
-                    scored_oids.add(a.object_id)
-                    hits_for_classify.append(RetrievedKnowledge(
-                        object_id=a.object_id, object_type=a.object_type,
-                        payload={"name": a.name}, relevance=neighbour_rel,
-                        tier=getattr(a, "tier", "personal"), notebook_id=notebook_id))
+            seed_rel = max((h.relevance for h in top_hits), default=0.0)
+            neighbour_rel = seed_rel * float(verify_result.get("chain_trust", 1.0))
+            hits_for_classify = _graph_classification_hits(
+                top_hits=top_hits,
+                memory_hits=memory_hits,
+                anchors=anchors,
+                neighbour_relevance=neighbour_rel,
+                notebook_id=notebook_id,
+            )
 
             evidence_level, top_relevance = classify_evidence(
                 hits_for_classify, anchors, llm_grounded,

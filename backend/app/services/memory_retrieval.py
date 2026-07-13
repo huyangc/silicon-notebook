@@ -40,6 +40,11 @@ def rerank_eligible_memory_hits(hits: Iterable[MemoryHit]) -> list[MemoryHit]:
 class MemoryRetriever:
     LEXICAL_CANDIDATES = 64
     VECTOR_CANDIDATES = 256
+    # Memory is supplemental prompt evidence, not an unbounded transcript dump.
+    # These deterministic character caps apply after retrieval/ranking; the
+    # full provenance and content remain available in the anchor map.
+    CONTEXT_HIT_CHAR_LIMIT = 1200
+    CONTEXT_TOTAL_CHAR_LIMIT = 6000
 
     def __init__(self, store: MemoryStorePort, embedder: Embedder) -> None:
         self.store = store
@@ -125,9 +130,16 @@ class MemoryRetriever:
         id_map: dict[str, dict] = {}
         for index, hit in enumerate(hits, 1):
             key = f"k{id_offset + index}"
-            lines.append(
-                f"{key}: [memory][personal][confirmed] {hit.title} — {hit.text}"
+            line = f"{key}: [memory][personal][confirmed] {hit.title} — {hit.text}"
+            if len(line) > MemoryRetriever.CONTEXT_HIT_CHAR_LIMIT:
+                line = line[: MemoryRetriever.CONTEXT_HIT_CHAR_LIMIT - 1] + "…"
+            separator_chars = 1 if lines else 0
+            remaining = MemoryRetriever.CONTEXT_TOTAL_CHAR_LIMIT - (
+                sum(len(item) for item in lines) + max(0, len(lines) - 1)
             )
+            if len(line) + separator_chars > remaining:
+                break
+            lines.append(line)
             id_map[key] = {
                 "object_id": hit.memory_id,
                 "object_type": "memory",

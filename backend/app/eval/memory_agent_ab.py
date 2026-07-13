@@ -1,17 +1,36 @@
-"""Three-way Agent evaluation over identical task fixtures."""
+"""Three-way deterministic Agent harness over identical task fixtures."""
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping
 import json
 from typing import Any
 
+from app.eval.memory_retrieval import _fixture_retriever
+from app.services.retrieval import keyword_score
+
 
 MODES = ("no_memory", "kb_only", "kb_confirmed_memory")
 FIXED_TASKS = (
-    {"id": "reuse-confirmed-timing", "kb_succeeds": False, "memory_succeeds": True},
-    {"id": "answer-from-kb", "kb_succeeds": True, "memory_succeeds": True},
-    {"id": "avoid-repeated-investigation", "kb_succeeds": False, "memory_succeeds": True},
+    {
+        "id": "reuse-confirmed-timing",
+        "query": "timing closure",
+        "expected": ["memory-confirmed-timing"],
+    },
+    {
+        "id": "answer-from-kb",
+        "query": "clock uncertainty",
+        "expected": ["kb-clock-uncertainty"],
+    },
+    {
+        "id": "avoid-repeated-investigation",
+        "query": "avoid repeated investigation",
+        "expected": ["memory-confirmed-repeat"],
+    },
 )
+
+_FIXTURE_KB = {
+    "kb-clock-uncertainty": "Clock uncertainty must be included in setup analysis.",
+}
 
 
 def run_agent_ab(
@@ -34,23 +53,49 @@ def run_agent_ab(
     return result
 
 
-def _fixed_runner(task: Mapping[str, Any], mode: str) -> Mapping[str, Any]:
-    success = (
-        bool(task.get("kb_succeeds")) if mode == "kb_only"
-        else bool(task.get("memory_succeeds")) if mode == "kb_confirmed_memory"
-        else False
-    )
-    return {
-        "success": success,
-        "tool_calls": 1 if success else 2,
-        "repeated_steps": 0 if success else 1,
-        "token_count": 80 if success else 140,
-        "citation_valid": True,
-    }
+class _FixtureAgentHarness:
+    def __init__(self) -> None:
+        self.memory_retriever, _scope = _fixture_retriever()
+
+    @staticmethod
+    def _kb_hits(query: str) -> list[tuple[str, str]]:
+        return [
+            (item_id, text)
+            for item_id, text in _FIXTURE_KB.items()
+            if keyword_score(query, text) > 0
+        ]
+
+    def run(self, task: Mapping[str, Any], mode: str) -> Mapping[str, Any]:
+        query = str(task["query"])
+        evidence: list[tuple[str, str]] = []
+        tool_calls = 0
+        if mode in {"kb_only", "kb_confirmed_memory"}:
+            evidence.extend(self._kb_hits(query))
+            tool_calls += 1
+        if mode == "kb_confirmed_memory":
+            memory_hits = self.memory_retriever.notebook_memory_hits(
+                "alice", "timing", query, 5
+            )
+            evidence.extend((hit.memory_id, hit.text) for hit in memory_hits)
+            tool_calls += 1
+
+        available_ids = {item_id for item_id, _text in evidence}
+        expected = {str(item) for item in task.get("expected", [])}
+        cited_ids = sorted(expected.intersection(available_ids))
+        success = bool(cited_ids)
+        token_count = sum((len(text) + 3) // 4 for _item_id, text in evidence)
+        return {
+            "success": success,
+            "tool_calls": tool_calls,
+            "repeated_steps": 0 if success else 1,
+            "token_count": token_count,
+            "citation_valid": all(item_id in available_ids for item_id in cited_ids),
+        }
 
 
 def run_fixed_agent_ab() -> dict[str, dict[str, float | int]]:
-    return run_agent_ab(FIXED_TASKS, runner=_fixed_runner)
+    harness = _FixtureAgentHarness()
+    return run_agent_ab(FIXED_TASKS, runner=harness.run)
 
 
 if __name__ == "__main__":  # pragma: no cover - manual evaluation entrypoint

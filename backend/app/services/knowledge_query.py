@@ -173,9 +173,9 @@ class KnowledgeQueryService:
         merged = merge_search_hits(lexical, semantic, limit)
         hydrated = self.hydrate_search_hits(notebook_id, merged)
         result = self.fold_hits_to_canonical(notebook_id, hydrated, limit)
-        if self.memory_retriever is not None and len(result) < limit:
+        if self.memory_retriever is not None:
             memories = self.memory_retriever.notebook_memory_hits(
-                self.current_user_id(), notebook_id, query, limit - len(result)
+                self.current_user_id(), notebook_id, query, limit
             )
             result.extend({
                 "object_id": hit.memory_id,
@@ -184,7 +184,12 @@ class KnowledgeQueryService:
                 "score": hit.score,
                 "match": "memory",
             } for hit in memories)
-            result.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+            result.sort(
+                key=lambda item: (
+                    float(item.get("score", 0.0)), str(item.get("object_id", ""))
+                ),
+                reverse=True,
+            )
         return result[:limit]
 
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:

@@ -1489,7 +1489,7 @@ TASK3_MEMORY_ALLOWED_MEMBER_FILES = {
 # database. Keep these new test-only compatibility consumers out of the frozen
 # pre-Memory surface comparison.
 TASK5_MEMORY_ALLOWED_IMPORTS = {
-    ("backend/tests/test_memory_retrieval.py", 9, "app.services.sqlite_repository", name)
+    ("backend/tests/test_memory_retrieval.py", 10, "app.services.sqlite_repository", name)
     for name in {"SQLiteRepository", "reset_request_user", "set_request_user"}
 }
 TASK5_MEMORY_ALLOWED_MEMBER_FILES = {

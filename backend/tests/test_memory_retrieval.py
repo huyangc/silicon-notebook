@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.config import Settings
-from app.models.schemas import AskRequest, AskResponse, NotebookCreate
+from app.models.schemas import AskRequest, AskResponse, MemoryHit, NotebookCreate
+from app.services.memory_retrieval import MemoryRetriever
 from app.services.sqlite_repository import (
     SQLiteRepository,
     reset_request_user,
@@ -234,12 +235,35 @@ def test_reasoning_synthesis_projects_confirmed_memory_as_first_class_anchor(mem
     assert data.candidate.title not in llm.prompts[-1]
 
 
+def test_reasoning_consumes_confirmed_memory_when_no_kg_exists(memory_data, monkeypatch):
+    data = memory_data
+    llm = _MemoryAnswerLLM()
+    data.repo.llm_client = llm
+    data.repo._reasoning_llm_client = llm
+    service = data.repo._runtime.ask_service()
+    monkeypatch.setattr(service.candidates, "has_kg", lambda _nb: False)
+    monkeypatch.setattr(service.candidates, "any_base_has_kg", lambda: False)
+
+    response = service.ask_reasoning(
+        data.notebook.id,
+        AskRequest(question="timing closure", mode="reasoning"),
+        user_id=data.alice.id,
+    )
+
+    assert response.kg_required is False
+    assert [(item.object_type, item.object_id) for item in response.anchors] == [
+        ("memory", data.confirmed.id)
+    ]
+    assert response.citations[0].memory_id == data.confirmed.id
+
+
 def test_graph_memory_only_answer_does_not_build_or_walk_the_graph(memory_data, monkeypatch):
     data = memory_data
     llm = _MemoryAnswerLLM()
     data.repo.llm_client = llm
     service = data.repo._runtime.ask_service()
-    monkeypatch.setattr(service.candidates, "has_kg", lambda _nb: True)
+    monkeypatch.setattr(service.candidates, "has_kg", lambda _nb: False)
+    monkeypatch.setattr(service.candidates, "any_base_has_kg", lambda: False)
     monkeypatch.setattr(service.retrieval, "federated_retrieve", lambda *_a, **_k: [])
     monkeypatch.setattr(
         service.graph,
@@ -262,6 +286,39 @@ def test_graph_memory_only_answer_does_not_build_or_walk_the_graph(memory_data, 
     assert response.citations[0].memory_id == data.confirmed.id
 
 
+def test_graph_classifier_never_synthesizes_relevance_for_memory_anchor():
+    from app.models.schemas import AnswerAnchor
+    from app.services.ask_service import _graph_classification_hits
+
+    memory = MemoryHit(
+        memory_id="memory-low",
+        title="Memory",
+        text="Relevant but weak",
+        status="confirmed",
+        authority=3,
+        score=0.2,
+        provenance={"origin": "answer"},
+    )
+    anchor = AnswerAnchor(
+        key="k3001",
+        object_id=memory.memory_id,
+        object_type="memory",
+        label="Memory",
+        name="Memory",
+    )
+
+    hits = _graph_classification_hits(
+        top_hits=[],
+        memory_hits=[memory],
+        anchors=[anchor],
+        neighbour_relevance=0.95,
+        notebook_id="nb-a",
+    )
+
+    assert len(hits) == 1
+    assert hits[0] is memory
+
+
 def test_knowledge_search_projects_confirmed_memory_only(memory_data):
     data = memory_data
     token = set_request_user(data.alice)
@@ -277,6 +334,66 @@ def test_knowledge_search_projects_confirmed_memory_only(memory_data):
     }
     assert memory_ids == {data.confirmed.id}
     assert data.candidate.id not in memory_ids
+
+
+def test_knowledge_search_unions_memory_before_limit_even_when_kg_fills_limit(
+    memory_data, monkeypatch
+):
+    data = memory_data
+    service = data.repo._runtime.knowledge_query
+    monkeypatch.setattr(
+        service.knowledge,
+        "fts_search",
+        lambda _db, _nb, _query, _limit: [
+            {
+                "object_id": "ko-low",
+                "name": "Low KG hit",
+                "object_type": "claim",
+                "score": 0.01,
+                "match": "lexical",
+            }
+        ],
+    )
+    monkeypatch.setattr(service, "semantic_search", lambda *_args: [])
+    monkeypatch.setattr(service, "hydrate_search_hits", lambda _nb, hits: hits)
+    monkeypatch.setattr(
+        service, "fold_hits_to_canonical", lambda _nb, hits, _limit: hits
+    )
+
+    token = set_request_user(data.alice)
+    try:
+        hits = service.search(data.notebook.id, "timing closure", limit=1)
+    finally:
+        reset_request_user(token)
+
+    assert len(hits) == 1
+    assert hits[0]["object_type"] == "memory"
+    assert hits[0]["object_id"] == data.confirmed.id
+
+
+def test_memory_prompt_context_has_per_hit_and_total_caps_without_losing_provenance():
+    hits = [
+        MemoryHit(
+            memory_id=f"memory-{index}",
+            title="T" * 500,
+            text=(str(index) * 5000),
+            status="confirmed",
+            authority=3,
+            score=1.0 - index / 100,
+            provenance={"full": "P" * 2000},
+        )
+        for index in range(8)
+    ]
+
+    block, id_map = MemoryRetriever.context(hits)
+
+    assert len(block) <= MemoryRetriever.CONTEXT_TOTAL_CHAR_LIMIT
+    assert all(
+        len(line) <= MemoryRetriever.CONTEXT_HIT_CHAR_LIMIT
+        for line in block.splitlines()
+    )
+    assert id_map["k3001"]["provenance"] == hits[0].provenance
+    assert id_map["k3001"]["definition"] == hits[0].text
 
 
 def test_notebook_search_projects_confirmed_memory_without_fake_source_ids(memory_data):
