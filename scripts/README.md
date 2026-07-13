@@ -73,6 +73,13 @@ python3 scripts/diag.py base-recall [active_notebook_id] [查询词]
 
 **离线纯净性是硬约束**:`slow` / `latency` 绝不 import app(`diag.py` 自身零 DB 调用、零 app 依赖),这样在裸机上随手就能跑;只有 `base-recall` 才懒加载 app。
 
+### `diag_open_latency.py` —— 打开大 notebook 仍卡几秒的残余定位
+```bash
+python3 scripts/diag_open_latency.py                 # 自动取最大 notebook
+python3 scripts/diag_open_latency.py --notebook nb-xxx
+```
+主机侧只读诊断(纯 stdlib、mode=ro、不 import app,与 `diag_slow.py` 同款)。计数缓存等读侧修复落地后,若打开最大库仍卡几秒,它把残余定位到:计数缓存**冷成本**(首开/每次 KG 变更后重付)、`from_row` 里未缓存的子查询(`pending_kg_source_count` 相关子查询)、以及**生产请求日志里各端点的真实 P50/P95/max**(哪个 HTTP 请求真的是秒级)+ `dirty`/seq churn(缓存是否被后台变更反复冲掉)。
+
 > 兼容:三个引擎脚本(`diag_slow.py` / `diag_base_report.py` / `app/eval/ask_latency.py`)**未改动、仍可单独运行**——`python3 scripts/diag_slow.py --since 24` 等老命令继续有效。`diag.py` 只是新增的统一入口。
 >
 > 区分:`bench_sqlite_writes.py`(合成写吞吐**基准**)与 `replay_retrieval.py`(检索**回归对照**)不属于"慢因诊断",见下表。
