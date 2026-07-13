@@ -1414,6 +1414,20 @@ TASK28_ALLOWED_CONSUMERS = {
     ("unified_kg_status", "scripts/verify_repository_snapshot.py:810"),
 }
 
+# sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
+# new close_local member + new test_sqlite_connection_reuse.py consumers.
+# close_local is a brand-new facade delegate (SqliteDatabase.close_local()
+# wired through wire_knowledge_lifecycle); exempt it from the consumer-scan
+# comparison entirely, exactly like TASK3_ALLOWED_NEW_MEMBERS does for other
+# never-frozen members, instead of trying to match its consumer sites against
+# a fixture that predates it.
+SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS = {"close_local"}
+# The new connection-reuse test suite imports the frozen compatibility facade
+# at a fresh site to exercise the close_local delegate end-to-end.
+SQLITE_CONN_REUSE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_sqlite_connection_reuse.py", 164, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+
 # Task 26: the consolidated facade delegates its last SQL bodies to the
 # stores, so two facade-internal helper call sites disappear (_in_batches
 # now feeds retrieval_objects as a batch size; storage_dir is the runtime
@@ -1840,6 +1854,25 @@ REVIEW_FIX_ALLOWED_CONSUMERS = {
     ),
 }
 
+# sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
+# new close_local member + new test_sqlite_connection_reuse.py consumers.
+# These are exact new test consumers; the frozen production surface and its
+# coordinates stay intact. create_notebook/_test_insert_object/node_context
+# land on their new post-rewrite lines inside
+# test_node_context_legacy_fallback_query_is_bound_by_section_path (the old
+# recorded coordinates are filtered via FROZEN_ONLY_MOVED_CONSUMERS below);
+# _connect gains three fresh call sites spying on the reused thread-local
+# connection (node_context's own _connect() call plus the new facade
+# close_local delegate test).
+SQLITE_CONN_REUSE_ALLOWED_CONSUMERS = {
+    ("create_notebook", "backend/tests/test_node_context_steps.py:62"),
+    ("_test_insert_object", "backend/tests/test_node_context_steps.py:63"),
+    ("_connect", "backend/tests/test_node_context_steps.py:67"),
+    ("node_context", "backend/tests/test_node_context_steps.py:70"),
+    ("_connect", "backend/tests/test_sqlite_connection_reuse.py:170"),
+    ("_connect", "backend/tests/test_sqlite_connection_reuse.py:172"),
+}
+
 FROZEN_ONLY_MOVED_CONSUMERS = {
     # Task 1 adds ownership imports above this test module's own facade import.
     ("SQLiteRepository", "backend/tests/test_repository_surface_manifest.py:13"),
@@ -1865,6 +1898,15 @@ FROZEN_ONLY_MOVED_CONSUMERS = {
     ("ask_graph", "backend/tests/test_ask_modes.py:24"),
     ("ask_reasoning", "backend/tests/test_ask_modes.py:24"),
     ("ask_chunk", "backend/tests/test_chunk_retrieval.py:240"),
+    # sqlite connection reuse: Change 4 rewrote
+    # test_node_context_legacy_fallback_query_is_bound_by_section_path to spy
+    # via conn.set_trace_callback() on the reused thread-local connection
+    # instead of monkeypatching sqlite3.connect, shifting these three frozen-
+    # recorded call sites down to :62/:63/:70 (new sites registered in
+    # SQLITE_CONN_REUSE_ALLOWED_CONSUMERS above).
+    ("create_notebook", "backend/tests/test_node_context_steps.py:60"),
+    ("_test_insert_object", "backend/tests/test_node_context_steps.py:61"),
+    ("node_context", "backend/tests/test_node_context_steps.py:74"),
 }
 
 
@@ -2277,6 +2319,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK26_ALLOWED_IMPORTS
                     or site in TASK27_ALLOWED_IMPORTS
                     or site in TASK28_ALLOWED_IMPORTS
+                    or site in SQLITE_CONN_REUSE_ALLOWED_IMPORTS
                 )
 
 
@@ -2480,9 +2523,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
+    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
@@ -2514,6 +2557,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual.pop(name, None)
         recorded.pop(name, None)
     for name in TASK25_ALLOWED_NEW_MEMBERS | TASK27_ALLOWED_NEW_MEMBERS:
+        actual.pop(name, None)
+        recorded.pop(name, None)
+    for name in SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual
