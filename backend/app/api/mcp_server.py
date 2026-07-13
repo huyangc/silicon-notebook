@@ -73,29 +73,22 @@ def validate_mcp_deployment(bind_host: str, public_url: str) -> None:
         raise RuntimeError("remote MCP deployment requires HTTPS")
 
 
-def _bounded(
-    items: Sequence[dict[str, Any]],
-    limit: int,
-    *,
-    char_budget: int = TOTAL_TEXT_LIMIT,
-) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    used = 0
-    for item in items[: max(1, min(int(limit), RESULT_LIMIT))]:
-        text_size = len(json.dumps(item, ensure_ascii=False, default=str))
-        if used + text_size > char_budget:
-            break
-        used += text_size
-        result.append(item)
-    return result
-
-
 def _serialized_size(value: Any) -> int:
     # Use the roomier standard separators so the bound also covers callers that
     # do not use a compact JSON encoder. Sorting makes the calculation stable.
     return len(json.dumps(
         value, ensure_ascii=False, sort_keys=True, default=str
     ).encode("utf-8"))
+
+
+def _serialized_chars(value: Any) -> int:
+    return len(json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+        separators=(",", ":"),
+    ))
 
 
 def _mark_truncated(
@@ -295,9 +288,66 @@ def _drop_list_item(value: dict[str, Any], stats: dict[str, Any]) -> bool:
     return True
 
 
+def _fit_value_to_chars(
+    value: Any, *, field: str, char_budget: int, stats: dict[str, Any]
+) -> Any:
+    """Fit one already-sanitized field without copying private data to metadata."""
+    wrapper = {field: value}
+    while _serialized_chars(wrapper[field]) > char_budget:
+        if _shrink_longest_string(wrapper, stats):
+            continue
+        if _drop_map_entry(wrapper, stats):
+            continue
+        if _drop_list_item(wrapper, stats):
+            continue
+        if _shrink_longest_string(wrapper, stats, identifiers=True):
+            continue
+        raise ValueError(f"MCP {field} metadata exceeds sub-budget")
+    return wrapper[field]
+
+
+def _field_parents(value: Any, field: str) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        if field in value:
+            result.append(value)
+        for key, child in value.items():
+            if key != "truncation":
+                result.extend(_field_parents(child, field))
+    elif isinstance(value, list):
+        for child in value:
+            result.extend(_field_parents(child, field))
+    return result
+
+
+def _fit_aggregate_field_to_chars(
+    value: dict[str, Any], *, field: str, char_budget: int,
+    stats: dict[str, Any],
+) -> None:
+    parents = _field_parents(value, field)
+    while sum(_serialized_chars(parent[field]) for parent in parents) > char_budget:
+        parent = max(parents, key=lambda item: _serialized_chars(item[field]))
+        current_size = _serialized_chars(parent[field])
+        total_size = sum(_serialized_chars(item[field]) for item in parents)
+        target = max(2, current_size - (total_size - char_budget))
+        fitted = _fit_value_to_chars(
+            parent[field], field=field, char_budget=target, stats=stats
+        )
+        if _serialized_chars(fitted) >= current_size:
+            if fitted == {}:
+                raise ValueError(f"MCP aggregate {field} exceeds sub-budget")
+            fitted = {}
+            _mark_truncated(stats, fields=1)
+        parent[field] = fitted
+
+
 def _budget_response(
     value: Mapping[str, Any], *, initial_omitted_items: int = 0,
     field_limits: Mapping[str, int] | None = None,
+    provenance_budget_chars: int | None = None,
+    tags_budget_chars: int | None = None,
+    anchors_budget_chars: int | None = None,
+    anchor_provenance_budget_chars: int | None = None,
 ) -> dict[str, Any]:
     """Return a useful response that strictly fits the public MCP JSON budget."""
     stats: dict[str, Any] = {
@@ -311,6 +361,34 @@ def _budget_response(
     if initial_omitted_items:
         _mark_truncated(stats, items=initial_omitted_items)
     result = _sanitize_output(dict(value), stats, field_limits=field_limits)
+    anchors = result.get("anchors")
+    if anchor_provenance_budget_chars is not None and isinstance(anchors, list):
+        for anchor in anchors:
+            if isinstance(anchor, dict) and "provenance" in anchor:
+                anchor["provenance"] = _fit_value_to_chars(
+                    anchor["provenance"],
+                    field="provenance",
+                    char_budget=anchor_provenance_budget_chars,
+                    stats=stats,
+                )
+    if provenance_budget_chars is not None:
+        _fit_aggregate_field_to_chars(
+            result,
+            field="provenance",
+            char_budget=provenance_budget_chars,
+            stats=stats,
+        )
+    if tags_budget_chars is not None and "tags" in result:
+        result["tags"] = _fit_value_to_chars(
+            result["tags"], field="tags", char_budget=tags_budget_chars, stats=stats
+        )
+    if anchors_budget_chars is not None and isinstance(anchors, list):
+        result["anchors"] = _fit_value_to_chars(
+            anchors,
+            field="anchors",
+            char_budget=anchors_budget_chars,
+            stats=stats,
+        )
     result["truncation"] = stats
     while _serialized_size(result) > TOTAL_TEXT_LIMIT:
         # Prefer retaining the first useful record: shrink evidence text/maps,
@@ -330,10 +408,32 @@ def _budget_response(
 def _proposal_json_size(value: Any, field: str) -> int:
     try:
         return len(json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         ).encode("utf-8"))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field} must contain JSON data") from exc
+
+
+def _validate_finite_json(value: Any, field: str) -> None:
+    # Pydantic's JSON serializer represents NaN/Infinity as null. Reject null
+    # in these strict nested proposal envelopes too, so an official client
+    # cannot normalize a non-finite number into accepted persisted data.
+    if value is None:
+        raise ValueError(f"{field} must not contain null or non-finite numbers")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"{field} must not contain non-finite numbers")
+    if isinstance(value, Mapping):
+        for child in value.values():
+            _validate_finite_json(child, field)
+    elif isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        for child in value:
+            _validate_finite_json(child, field)
 
 
 def _validate_proposal_input(
@@ -378,6 +478,7 @@ def _validate_proposal_input(
     clean_task_context = dict(task_context)
     if not clean_task_context:
         raise ValueError("task_context must be nonblank")
+    _validate_finite_json(clean_task_context, "task_context")
     if (
         _proposal_json_size(clean_task_context, "task_context")
         > PROPOSAL_TASK_CONTEXT_JSON_LIMIT
@@ -387,6 +488,7 @@ def _validate_proposal_input(
     if len(evidence_refs) > PROPOSAL_EVIDENCE_LIMIT:
         raise ValueError(f"evidence_refs exceeds {PROPOSAL_EVIDENCE_LIMIT} items")
     clean_evidence = [dict(reference) for reference in evidence_refs]
+    _validate_finite_json(clean_evidence, "evidence_refs")
     if (
         _proposal_json_size(clean_evidence, "evidence_refs")
         > PROPOSAL_EVIDENCE_JSON_LIMIT
@@ -709,6 +811,7 @@ def create_memory_mcp(
             initial_omitted_items=max(0, len(rows) - cap),
             field_limits={"title": 300, "content": TEXT_LIMIT,
                           "created_by_agent": 200},
+            provenance_budget_chars=2_000,
         )
 
     @server.tool(
@@ -763,6 +866,7 @@ def create_memory_mcp(
             initial_omitted_items=max(0, len(rows) - cap),
             field_limits={"type": 100, "label": 300, "text": TEXT_LIMIT,
                           "authority": 100},
+            provenance_budget_chars=2_000,
         )
 
     @server.tool(description="Get one owner-private Memory from the selected notebook.")
@@ -801,7 +905,9 @@ def create_memory_mcp(
                 "provenance": item.provenance,
                 "content_is_untrusted_evidence": True,
             }, field_limits={"title": 300, "content": 6_000, "tags": 200,
-                             "created_by_agent": 200})
+                             "created_by_agent": 200},
+                provenance_budget_chars=2_000,
+                tags_budget_chars=1_500)
 
         return await anyio.to_thread.run_sync(load)
 
@@ -850,7 +956,9 @@ def create_memory_mcp(
         }, initial_omitted_items=max(0, len(answer.anchors) - RESULT_LIMIT),
             field_limits={"answer": 6_000, "conclusion": 1_000,
                           "object_type": 100, "label": 300,
-                          "source_title": 300, "location_label": 300})
+                          "source_title": 300, "location_label": 300},
+            anchors_budget_chars=3_500,
+            anchor_provenance_budget_chars=500)
 
     @server.tool(
         description=(

@@ -53,6 +53,25 @@ def _assert_budgeted(payload: dict) -> None:
     )
 
 
+def _json_chars(value) -> int:
+    return len(json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ))
+
+
+def _omitted_total(payload: dict) -> int:
+    metadata = payload["truncation"]
+    return sum(
+        int(metadata[key])
+        for key in (
+            "omitted_items",
+            "omitted_map_entries",
+            "omitted_characters",
+            "omitted_fields",
+        )
+    )
+
+
 class OfficialMcpClient:
     def __init__(self, app, token: str, *, manage_lifespan: bool = True):
         self.app = app
@@ -597,9 +616,28 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
     assert responses["list_notebooks"]["items"][0]["counts"]["memories"] == 3
     assert responses["select_notebook"]["kg_status"]["dirty"] is True
     assert responses["select_notebook"]["kg_status"]["objects"] == 42
+    agent_items = responses["search_agent_memory"]["items"]
+    assert sum(_json_chars(item["provenance"]) for item in agent_items) <= 2_000
+    assert agent_items[0]["memory_id"] == record.id
+    context_items = responses["search_notebook_context"]["items"]
+    assert sum(_json_chars(item["provenance"]) for item in context_items) <= 2_000
+    assert context_items[0]["source_id"] == "source-0"
+    assert context_items[0]["element_id"] == "element-0"
+    detail = responses["get_memory"]
+    assert _json_chars(detail["provenance"]) <= 2_000
+    assert _json_chars(detail["tags"]) <= 1_500
+    assert detail["memory_id"] == record.id
+    assert detail["notebook_id"] == notebook_id
+    ask = responses["ask_notebook"]
+    assert _json_chars(ask["anchors"]) <= 3_500
+    assert ask["anchors"]
+    assert all(_json_chars(anchor["provenance"]) <= 500 for anchor in ask["anchors"])
+    assert ask["anchors"][0]["key"] == "k_0"
+    assert ask["anchors"][0]["object_id"] == "object-0"
     for name, payload in responses.items():
         _assert_budgeted(payload)
         assert payload["truncation"]["truncated"] is True, name
+        assert _omitted_total(payload) > 0, name
 
 
 @pytest.mark.anyio
@@ -699,6 +737,10 @@ async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_wo
         {"evidence_refs": [{"source_id": str(index)} for index in range(1_000)]},
         {"evidence_refs": [{"quote": "x" * 100_000}]},
         {"evidence_refs": [{"quote": "证" * 5_000}]},
+        {"task_context": {"nested": {"value": float("nan")}}},
+        {"task_context": {"nested": [float("inf")]}},
+        {"task_context": {"nested": [float("-inf")]}},
+        {"evidence_refs": [{"score": 1e9999}]},
         {"client_request_id": "r" * 100_000},
     ]
 
@@ -737,15 +779,6 @@ def test_nonlocal_plain_http_mcp_configuration_is_rejected():
     validate_mcp_deployment("0.0.0.0", "https://memory.example.test/mcp")
     with pytest.raises(RuntimeError, match="HTTPS"):
         validate_mcp_deployment("0.0.0.0", "http://memory.example.test/mcp")
-
-
-def test_bounded_mcp_collections_accept_a_smaller_per_response_budget():
-    from app.api.mcp_server import _bounded
-
-    rows = [{"text": "x" * 80}, {"text": "y" * 80}, {"text": "z" * 80}]
-    bounded = _bounded(rows, 20, char_budget=180)
-    assert len(bounded) == 1
-    assert _bounded([{"text": "x" * 1_000}], 20, char_budget=180) == []
 
 
 @pytest.mark.anyio

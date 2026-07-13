@@ -30,6 +30,12 @@ The first GREEN pass reached 14/14 focused tests. A self-review added UTF-8 byte
 budget cases and multibyte nested proposal payloads; those tests were observed
 RED before byte-aware accounting was implemented, then returned GREEN.
 
+A follow-up review restored the earlier field sub-budgets. Official-client probes
+were observed RED with 4,061 serialized tag characters against the 1,500 cap,
+and four nested non-finite proposals (`NaN`, positive/negative infinity, and
+`1e9999`) reached live-principal refresh. The focused tests returned GREEN only
+after sub-budget packing and strict non-finite validation were added.
+
 ## Implementation
 
 ### Output budget
@@ -44,7 +50,12 @@ RED before byte-aware accounting was implemented, then returned GREEN.
 - Each response includes fixed-shape `truncation` metadata containing only the
   budget and aggregate omitted item/map/character/field counts. It never copies
   private keys, paths, or values into metadata.
-- `_bounded` now rejects an oversized first item rather than accepting it.
+- Search/get provenance has a 2,000-character aggregate budget, get tags have a
+  1,500-character aggregate budget, Ask anchor provenance is limited to 500
+  characters per anchor, and the full Ask anchor collection is limited to 3,500
+  characters. The real-tool probes verify these limits and retained identifiers.
+- The superseded private `_bounded` helper and its helper-only unit test were
+  removed; public behavior remains covered through the official MCP client.
 
 ### Hydration race
 
@@ -66,6 +77,9 @@ RED before byte-aware accounting was implemented, then returned GREEN.
 - Evidence count is independently capped. Validated normalized values alone are
   passed to the existing service, keeping the guard compatible with later shared
   service-level limits.
+- Nested task context and evidence use `allow_nan=False` plus recursive finite
+  validation. Null is rejected in these strict nested envelopes because the
+  official client serializes non-finite floats as null.
 
 ## Self-Review
 
@@ -83,10 +97,9 @@ RED before byte-aware accounting was implemented, then returned GREEN.
 
 ## Verification
 
-- Focused official MCP client: `14 passed`.
+- Focused official MCP client after follow-up cleanup: `13 passed`.
 - Offline MCP smoke: `memory MCP smoke: OK (7 tools, session isolation, candidate plane isolation)`.
-- MCP/Auth/architecture regression slice: `100 passed` before UTF-8 hardening;
-  final focused/Auth/architecture rerun: `88 passed`.
+- Final MCP/Auth/architecture regression slice: `100 passed`.
 - Architecture manifest failure found during the first full run was corrected and
   its focused guard reran `56 passed`.
-- Final exact backend suite: `2913 passed, 1 skipped in 276.08s`.
+- Final exact backend suite after follow-up cleanup: `2912 passed, 1 skipped in 273.10s`.
