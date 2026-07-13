@@ -665,3 +665,63 @@ class MemoryStore:
                 (error[:500], memory_id, memory_id, int(expected_revision)),
             )
         return cursor.rowcount == 1
+
+    def memory_retrieval_rows(
+        self,
+        user_id: str,
+        notebook_id: str,
+        statuses: Sequence[str],
+        query: str,
+        *,
+        lexical_limit: int,
+        vector_limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded lexical union embedding pool for one owner/notebook.
+
+        The embedding side is deliberately capped and index-ordered.  It never
+        turns an Ask into a whole-Memory scan or an embedding backfill.
+        """
+        allowed = tuple(
+            status for status in dict.fromkeys(str(item) for item in statuses)
+            if status in {"candidate", "confirmed"}
+        )
+        clean_query = (query or "").strip()
+        if not allowed or not clean_query:
+            return []
+        lexical_limit = max(1, min(int(lexical_limit), 200))
+        vector_limit = max(1, min(int(vector_limit), 500))
+        placeholders = ",".join("?" for _ in allowed)
+        common_params = (user_id, notebook_id, *allowed, user_id, user_id)
+        select = self._select_columns()
+        with self.database.connect() as db:
+            lexical_rows = db.execute(
+                f"SELECT {select},me.vector AS retrieval_vector "
+                "FROM memory_items m "
+                "JOIN memory_items_fts f ON f.rowid=m.rowid "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "LEFT JOIN memory_embeddings me ON me.memory_id=m.id "
+                "WHERE m.created_by=? AND m.notebook_id=? "
+                f"AND m.status IN ({placeholders}) "
+                f"AND {self._read_access_clause()} "
+                "AND memory_items_fts MATCH ? "
+                "ORDER BY bm25(memory_items_fts),m.updated_at DESC LIMIT ?",
+                (*common_params, '"' + clean_query.replace('"', '""') + '"', lexical_limit),
+            ).fetchall()
+            vector_rows = db.execute(
+                f"SELECT {select},me.vector AS retrieval_vector "
+                "FROM memory_items m "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "JOIN memory_embeddings me ON me.memory_id=m.id "
+                "WHERE m.created_by=? AND m.notebook_id=? "
+                f"AND m.status IN ({placeholders}) "
+                f"AND {self._read_access_clause()} "
+                "ORDER BY m.updated_at DESC,m.id LIMIT ?",
+                (*common_params, vector_limit),
+            ).fetchall()
+        rows: dict[str, dict[str, Any]] = {}
+        for row in [*lexical_rows, *vector_rows]:
+            rows.setdefault(
+                str(row["id"]),
+                {"record": self._record(row), "vector": row["retrieval_vector"]},
+            )
+        return list(rows.values())

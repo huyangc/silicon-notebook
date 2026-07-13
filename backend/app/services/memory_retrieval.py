@@ -1,0 +1,142 @@
+"""Bounded two-plane retrieval for owner-private notebook Memory."""
+from __future__ import annotations
+
+from typing import Iterable, Sequence
+
+from app.models.schemas import MemoryHit
+from app.repositories.ports import MemoryStorePort
+from app.services.embedding import Embedder
+from app.services.retrieval import RELEVANCE_FLOOR, _fuse, cosine, keyword_score
+from app.services.vector_index import decode_vector
+
+
+MEMORY_AUTHORITY = {"candidate": 1, "confirmed": 3}
+AUTHORITY_RANK = {
+    "candidate": 1,
+    "personal_source": 2,
+    "confirmed_memory": 3,
+    "base": 4,
+}
+MEMORY_SEMANTIC_ELIGIBILITY = 0.80
+
+
+def authority_rank(kind: str) -> int:
+    """Return the fixed conflict rank after relevance eligibility is proven."""
+    try:
+        return AUTHORITY_RANK[kind]
+    except KeyError as exc:
+        raise ValueError(f"unknown evidence authority: {kind}") from exc
+
+
+def rerank_eligible_memory_hits(hits: Iterable[MemoryHit]) -> list[MemoryHit]:
+    """Rank by relevance, using authority only for an exact relevance tie."""
+    return sorted(
+        hits,
+        key=lambda hit: (float(hit.score), int(hit.authority), hit.memory_id),
+        reverse=True,
+    )
+
+
+class MemoryRetriever:
+    LEXICAL_CANDIDATES = 64
+    VECTOR_CANDIDATES = 256
+
+    def __init__(self, store: MemoryStorePort, embedder: Embedder) -> None:
+        self.store = store
+        self.embedder = embedder
+
+    def replace_embedder(self, embedder: Embedder) -> None:
+        self.embedder = embedder
+
+    def _hits(
+        self,
+        user_id: str,
+        notebook_id: str,
+        query: str,
+        statuses: Sequence[str],
+        limit: int,
+    ) -> list[MemoryHit]:
+        clean_query = (query or "").strip()
+        limit = max(1, min(int(limit), 50))
+        if not clean_query:
+            return []
+        rows = self.store.memory_retrieval_rows(
+            user_id,
+            notebook_id,
+            statuses,
+            clean_query,
+            lexical_limit=self.LEXICAL_CANDIDATES,
+            vector_limit=self.VECTOR_CANDIDATES,
+        )
+        try:
+            query_vector = self.embedder.embed_query(clean_query)
+        except Exception:
+            query_vector = None
+        hits: list[MemoryHit] = []
+        for row in rows:
+            item = row["record"]
+            text = f"{item.title}\n{item.content_md}\n{' '.join(item.tags)}"
+            lexical = keyword_score(clean_query, text)
+            vector = decode_vector(row.get("vector"))
+            has_vector = query_vector is not None and vector is not None
+            semantic = cosine(query_vector, vector.tolist()) if has_vector else 0.0
+            # Eligibility is decided from relevance signals before authority is
+            # consulted.  The semantic floor also rejects uncalibrated hash-vector
+            # background similarity while retaining strong vector-only matches.
+            if lexical <= 0.0 and semantic < MEMORY_SEMANTIC_ELIGIBILITY:
+                continue
+            relevance = _fuse(lexical, semantic, has_vector)
+            if relevance < RELEVANCE_FLOOR:
+                continue
+            hits.append(
+                MemoryHit(
+                    memory_id=item.id,
+                    title=item.title,
+                    text=item.content_md,
+                    status=item.status,
+                    authority=MEMORY_AUTHORITY[item.status],
+                    score=relevance,
+                    provenance=dict(item.provenance),
+                )
+            )
+        return rerank_eligible_memory_hits(hits)[:limit]
+
+    def notebook_memory_hits(
+        self, user_id: str, notebook_id: str, query: str, limit: int = 8
+    ) -> list[MemoryHit]:
+        return self._hits(user_id, notebook_id, query, ("confirmed",), limit)
+
+    def agent_memory_hits(
+        self,
+        user_id: str,
+        notebook_id: str,
+        query: str,
+        include_candidates: bool,
+        limit: int = 8,
+    ) -> list[MemoryHit]:
+        statuses = ("confirmed", "candidate") if include_candidates else ("confirmed",)
+        return self._hits(user_id, notebook_id, query, statuses, limit)
+
+    @staticmethod
+    def context(
+        hits: Sequence[MemoryHit], *, id_offset: int = 3000
+    ) -> tuple[str, dict[str, dict]]:
+        lines: list[str] = []
+        id_map: dict[str, dict] = {}
+        for index, hit in enumerate(hits, 1):
+            key = f"k{id_offset + index}"
+            lines.append(
+                f"{key}: [memory][personal][confirmed] {hit.title} — {hit.text}"
+            )
+            id_map[key] = {
+                "object_id": hit.memory_id,
+                "object_type": "memory",
+                "name": hit.title,
+                "definition": hit.text,
+                "snippet": hit.text[:300],
+                "source_title": "",
+                "location_label": "Memory",
+                "tier": "personal",
+                "provenance": dict(hit.provenance),
+            }
+        return ("\n".join(lines) if lines else "(none)"), id_map

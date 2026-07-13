@@ -747,6 +747,10 @@ class MemoryStorePort(Protocol):
     def mark_embedding_failed(
         self, memory_id: str, expected_revision: int, error: str
     ) -> bool: ...
+    def memory_retrieval_rows(
+        self, user_id: str, notebook_id: str, statuses: Sequence[str], query: str,
+        *, lexical_limit: int, vector_limit: int,
+    ) -> list[dict[str, Any]]: ...
 
 
 class ReportSourceQueryPort(Protocol):

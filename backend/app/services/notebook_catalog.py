@@ -12,6 +12,7 @@ from app.models.schemas import (
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
+    SearchHit,
 )
 # Canonical implementation lives with the SourceFileStore (Task 11); the
 # private alias keeps this module's delete_notebook cleanup call sites and
@@ -223,6 +224,7 @@ class NotebookCatalogService:
         self._queries = queries
         self._identity = identity
         self.kg_building: set = set()
+        self.memory_retriever = None
 
     def list_notebook_templates(self) -> list[NotebookTemplate]:
         return [NotebookTemplate(**t) for t in NOTEBOOK_TEMPLATES]
@@ -270,4 +272,25 @@ class NotebookCatalogService:
     def search_notebook(
         self, notebook_id: str, query: str
     ) -> NotebookSearchResponse:
-        return self._queries.search_notebook(notebook_id, query)
+        response = self._queries.search_notebook(notebook_id, query)
+        if self.memory_retriever is None:
+            return response
+        memories = self.memory_retriever.notebook_memory_hits(
+            self._identity.current_user().id, notebook_id, query, 8
+        )
+        memory_hits = [SearchHit(
+            scope="Memory",
+            notebook_id=notebook_id,
+            label=item.title,
+            text=item.text[:400],
+            source_id="",
+            element_id="",
+            memory_id=item.memory_id,
+            provenance=dict(item.provenance),
+        ) for item in memories]
+        if not memory_hits:
+            return response
+        return NotebookSearchResponse(
+            query=response.query,
+            hits=[*response.hits[: max(0, 20 - len(memory_hits))], *memory_hits][:20],
+        )

@@ -224,6 +224,11 @@
               "title": "Object Type",
               "type": "string"
             },
+            "provenance": {
+              "additionalProperties": true,
+              "title": "Provenance",
+              "type": "object"
+            },
             "snippet": {
               "anyOf": [
                 {
@@ -502,6 +507,16 @@
             "location_label": {
               "title": "Location Label",
               "type": "string"
+            },
+            "memory_id": {
+              "default": "",
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "title": "Provenance",
+              "type": "object"
             },
             "quoted_span": {
               "title": "Quoted Span",
@@ -2977,9 +2992,19 @@
               "title": "Label",
               "type": "string"
             },
+            "memory_id": {
+              "default": "",
+              "title": "Memory Id",
+              "type": "string"
+            },
             "notebook_id": {
               "title": "Notebook Id",
               "type": "string"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "title": "Provenance",
+              "type": "object"
             },
             "scope": {
               "title": "Scope",

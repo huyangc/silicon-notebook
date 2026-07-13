@@ -220,6 +220,7 @@ class CandidateRetrievalService(_RetrievalState):
         database,
         embedder,
         notebook_languages,
+        memory_retriever=None,
     ) -> None:
         super().__init__(
             database=database,
@@ -244,6 +245,26 @@ class CandidateRetrievalService(_RetrievalState):
         self.model_clients = model_clients
         self.model_error_sink = model_error_sink
         self.database = database
+        self.memory_retriever = memory_retriever
+
+    def notebook_memory_hits(
+        self, user_id: str, notebook_id: str, query: str, limit: int = 8
+    ):
+        if self.memory_retriever is None:
+            return []
+        return self.memory_retriever.notebook_memory_hits(
+            user_id, notebook_id, query, limit
+        )
+
+    def agent_memory_hits(
+        self, user_id: str, notebook_id: str, query: str,
+        include_candidates: bool, limit: int = 8,
+    ):
+        if self.memory_retriever is None:
+            return []
+        return self.memory_retriever.agent_memory_hits(
+            user_id, notebook_id, query, include_candidates, limit
+        )
 
     def _notebook_langs(self, notebook_id: str) -> List[str]:
         """Cheap, cached probe of a notebook's corpus languages (subset of

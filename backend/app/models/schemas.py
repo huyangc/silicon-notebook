@@ -39,6 +39,26 @@ class MemoryRecord(BaseModel):
     provenance: Dict[str, Any] = Field(default_factory=dict)
 
 
+class MemoryHit(BaseModel):
+    """A retrieval projection with relevance and authority kept separate."""
+
+    memory_id: str
+    title: str
+    text: str
+    status: Literal["candidate", "confirmed"]
+    authority: int
+    score: float
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def relevance(self) -> float:
+        return self.score
+
+    @property
+    def object_id(self) -> str:
+        return self.memory_id
+
+
 class PaginatedMemories(BaseModel):
     items: List[MemoryRecord]
     total_count: int
@@ -369,6 +389,10 @@ class Citation(BaseModel):
     # user notes). Mirrors AnswerAnchor.tier — lets the "来源分布" badge count
     # citations, not just anchors.
     tier: str = "personal"
+    memory_id: str = Field(default="", exclude_if=lambda value: not value)
+    provenance: Dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
 
 class TraceStep(BaseModel):
@@ -399,6 +423,9 @@ class AnswerAnchor(BaseModel):
     # Source tier: 'base' (authoritative reference KG) or 'personal' (default,
     # user notes). Lets the UI surface authority + supports conflict precedence.
     tier: str = "personal"
+    provenance: Dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
 
 class ModelError(BaseModel):
@@ -475,6 +502,10 @@ class SearchHit(BaseModel):
     text: str
     source_id: str = ""
     element_id: str = ""
+    memory_id: str = Field(default="", exclude_if=lambda value: not value)
+    provenance: Dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
 
 class NotebookSearchResponse(BaseModel):

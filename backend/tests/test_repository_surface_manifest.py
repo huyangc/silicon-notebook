@@ -1484,6 +1484,23 @@ TASK3_MEMORY_ALLOWED_MEMBER_FILES = {
     for name in {"_runtime", "llm_client"}
 }
 
+# Task 5 (Memory): retrieval integration tests intentionally compose the real
+# facade so notebook/Ask/report projections share one request identity and
+# database. Keep these new test-only compatibility consumers out of the frozen
+# pre-Memory surface comparison.
+TASK5_MEMORY_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_retrieval.py", 9, "app.services.sqlite_repository", name)
+    for name in {"SQLiteRepository", "reset_request_user", "set_request_user"}
+}
+TASK5_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_retrieval.py", name)
+    for name in {
+        "SQLiteRepository", "_reasoning_llm_client", "_runtime", "_write",
+        "add_member", "create_notebook", "create_user", "llm_client",
+        "reset_request_user", "retrieval", "set_request_user", "settings",
+    }
+}
+
 # Task 26: the consolidated facade delegates its last SQL bodies to the
 # stores, so two facade-internal helper call sites disappear (_in_batches
 # now feeds retrieval_objects as a batch size; storage_dir is the runtime
@@ -1795,6 +1812,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     TASK2_ALLOWED_MEMBER_FILES
     | TASK2_MEMORY_ALLOWED_MEMBER_FILES
     | TASK3_MEMORY_ALLOWED_MEMBER_FILES
+    | TASK5_MEMORY_ALLOWED_MEMBER_FILES
     | TASK4_ALLOWED_MEMBER_FILES
     | TASK5_ALLOWED_MEMBER_FILES
     | TASK6_ALLOWED_MEMBER_FILES
@@ -2354,6 +2372,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK27_ALLOWED_IMPORTS
                         or site in TASK28_ALLOWED_IMPORTS
                         or site in TASK2_MEMORY_ALLOWED_IMPORTS
+                        or site in TASK5_MEMORY_ALLOWED_IMPORTS
                 )
 
 
@@ -2557,7 +2576,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
     }
     allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):

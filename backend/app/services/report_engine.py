@@ -65,6 +65,7 @@ class ReportEngineDependencies:
     communities: "CommunityQueryPort"
     settings: "Settings"
     event_log: Any
+    memory_retriever: Any = None
 
 
 class ReportEngine:
@@ -152,6 +153,19 @@ class ReportEngine:
             if chunks:
                 parts.append("相关原文所在(来源·章节,不含正文):\n" + "\n".join(
                     f"- {c.source_title} · {c.section_path}" for c in chunks))
+        except Exception:
+            pass
+        try:
+            memories = (
+                deps.memory_retriever.notebook_memory_hits(
+                    self.user_id, notebook_id, question, 8
+                )
+                if deps.memory_retriever is not None else []
+            )
+            if memories:
+                parts.append("用户已确认 Memory:\n" + "\n".join(
+                    f"- {item.title}: {item.text[:240]}" for item in memories
+                ))
         except Exception:
             pass
         return ("\n\n".join(parts))[:4000] if parts else "(语料侦察无结果)"
@@ -286,8 +300,26 @@ class ReportEngine:
                 result.chains, id_offset=2000)
             if chain_block and chain_block != "(none)":
                 context_block = f"{context_block}\n\n{chain_block}"
+        memory_map = {}
+        try:
+            memories = (
+                deps.memory_retriever.notebook_memory_hits(
+                    self.user_id, notebook_id,
+                    f"{question} {section['title']} {' '.join(section['sub_queries'])}",
+                    8,
+                )
+                if deps.memory_retriever is not None else []
+            )
+            memory_block, memory_map = (
+                deps.memory_retriever.context(memories, id_offset=3000)
+                if memories else ("(none)", {})
+            )
+            if memory_block and memory_block != "(none)":
+                context_block = f"{context_block}\n\n[Confirmed Memory]\n{memory_block}"
+        except Exception:
+            memory_map = {}
         client = deps.model_clients.reasoning_llm_client
-        id_map = {**chunk_map, **kg_map, **chain_map}
+        id_map = {**chunk_map, **kg_map, **chain_map, **memory_map}
         # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,被
         # _stream_chat_content 丢弃)上 → content 空 → chat_json 兜底 "{}" → markdown 空
         # (不抛异常)。原先空 markdown 会让本节在 _assemble 里静默消失(无标题/无提示)。
@@ -493,6 +525,7 @@ class ReportEngine:
                             "source_title": str(ctx.get("source_title") or ""),
                             "location_label": str(ctx.get("location_label") or ""),
                             "tier": str(ctx.get("tier") or "personal"),
+                            "provenance": dict(ctx.get("provenance") or {}),
                         })
                     _gk = f"k{ref_pos[dk]}"
                     if _gk not in out_keys:

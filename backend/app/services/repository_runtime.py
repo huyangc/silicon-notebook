@@ -33,6 +33,7 @@ from app.services.evidence_context import EvidenceContextService
 from app.services.graph_retrieval import GraphRetrievalService
 from app.services.model_provider import RuntimeModelProvider
 from app.services.memory_service import MemoryService
+from app.services.memory_retrieval import MemoryRetriever
 from app.services.kg import scheduler as kg_scheduler
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
@@ -135,6 +136,7 @@ class RepositoryRuntime:
             self.database, new_id=seams.new_id, now=seams.now
         )
         self.memory_service: "MemoryService | None" = None
+        self.memory_retriever: "MemoryRetriever | None" = None
         # Source file persistence resolves storage_dir through the database
         # boundary's resolve_path — no facade seams, so construction is eager.
         self.source_files = SourceFileStore(
@@ -290,6 +292,8 @@ class RepositoryRuntime:
             self.retrieval.replace_embedder(value)
         if self.memory_service is not None:
             self.memory_service.embedder = value
+        if self.memory_retriever is not None:
+            self.memory_retriever.replace_embedder(value)
 
     def wire_memory(self, *, embedder: Any) -> MemoryService:
         """Compose owner-private Memory after sharing/access and embedding exist."""
@@ -306,6 +310,8 @@ class RepositoryRuntime:
             self.seams.now,
             embedding_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
         )
+        self.memory_retriever = MemoryRetriever(self.memory_store, self.embedder)
+        self.catalog.memory_retriever = self.memory_retriever
         return self.memory_service
 
     @property
@@ -382,7 +388,9 @@ class RepositoryRuntime:
             )
             from app.services.communities import CommunityQueryService
 
-            candidates = CandidateRetrievalService(**common)
+            candidates = CandidateRetrievalService(
+                **common, memory_retriever=self.memory_retriever
+            )
             graph = GraphRetrievalService(**common)
             retrieval = RetrievalService(
                 candidates=candidates,
@@ -735,6 +743,8 @@ class RepositoryRuntime:
             schemas=self.schema_registry,
             snapshots=self.retrieval_snapshots,
             notebook_languages=lambda: self.notebook_languages,
+            memory_retriever=self.memory_retriever,
+            current_user_id=lambda: self.identity.current_user().id,
         )
         self.pending_actions_service = PendingActionsService(
             self.queries,
@@ -934,6 +944,7 @@ class RepositoryRuntime:
                 communities=retrieval_port.community_queries(engine_settings),
                 settings=engine_settings,
                 event_log=self.event_log,
+                memory_retriever=self.memory_retriever,
             )
             return ReportEngine(
                 dependencies, user_id=user_id, cancel_event=cancel_event
@@ -1008,6 +1019,7 @@ class RepositoryRuntime:
                     lambda nb: self.knowledge_lifecycle.get_community_reports(nb)
                 ),
                 source_titles=self.source_store.source_titles,
+                memory_retriever=self.memory_retriever,
                 current_user_id=lambda: self.identity.current_user().id,
                 cancellations=self.ask_cancellations,
             )
