@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as memoryModel from "./memory-model.ts";
 
 import {
   answerIdBatches,
@@ -9,6 +10,43 @@ import {
   memoryProvenanceRows,
   memoryStatusMeta,
 } from "./memory-model.ts";
+
+test("session abort tears down active Memory reads and writes synchronously", () => {
+  const session = new AbortController();
+  const list = new AbortController();
+  const mutation = new AbortController();
+  const unsubscribe = memoryModel.subscribeMemorySessionAbort(session.signal, () => {
+    list.abort();
+    mutation.abort();
+  });
+
+  session.abort();
+
+  assert.equal(list.signal.aborted, true);
+  assert.equal(mutation.signal.aborted, true);
+  unsubscribe();
+});
+
+test("aborted deferred hydration cannot clear a just-saved answer flag", async () => {
+  const controller = new AbortController();
+  let resolveBatch;
+  const deferredBatch = new Promise((resolve) => { resolveBatch = resolve; });
+  let savedFlags = {};
+  const hydration = memoryModel.collectSavedAnswerFlags(
+    [["answer-1"]],
+    () => deferredBatch,
+    controller.signal,
+  );
+
+  controller.abort();
+  savedFlags = { ...savedFlags, "answer-1": true };
+  resolveBatch({ links: {} });
+  const hydratedFlags = await hydration;
+  if (hydratedFlags) savedFlags = hydratedFlags;
+
+  assert.deepEqual(savedFlags, { "answer-1": true });
+  assert.equal(hydratedFlags, null);
+});
 
 test("answer-link hydration uses bounded batches without per-answer requests", () => {
   const ids = Array.from({ length: 405 }, (_, index) => `answer-${index}`);

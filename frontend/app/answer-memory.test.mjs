@@ -61,5 +61,29 @@ test("workspace hydrates saved answers with bounded notebook batches and epoch g
   assert.match(page, /body: JSON\.stringify\(\{ answer_ids: batch \}\)/);
   assert.match(page, /memoryLinksAbortRef\.current\?\.abort\(\);/);
   assert.match(page, /workspaceEpochRef\.current !== workspaceEpoch/);
-  assert.match(page, /setMemorySavedAnswers[\s\S]*Object\.entries\(result\.links\)/);
+  assert.match(page, /collectSavedAnswerFlags\(/);
+});
+
+test("logout synchronously broadcasts Memory teardown before awaiting session logout", () => {
+  assert.match(memoryPanel, /sessionSignal: AbortSignal/);
+  assert.match(memoryPanel, /subscribeMemorySessionAbort\(sessionSignal/);
+  assert.match(memoryPanel, /listControllerRef\.current\?\.abort\(\);/);
+  const mutationAbort = /mutationControllersRef\.current\.forEach\(\(controller\) => controller\.abort\(\)\);/;
+  assert.match(memoryPanel, mutationAbort);
+  assert.equal((page.match(/sessionSignal=\{memorySessionAbortRef\.current\.signal\}/g) ?? []).length, 3);
+
+  const start = page.indexOf("async function handleLogout() {");
+  const end = page.indexOf("\n  }", start);
+  const body = page.slice(start, end);
+  assert.ok(body.indexOf("memorySessionAbortRef.current.abort()") > -1);
+  assert.ok(body.indexOf("memorySessionAbortRef.current.abort()") < body.indexOf("await logoutUser()"));
+});
+
+test("saving an answer invalidates hydration before merging the saved flag", () => {
+  const start = page.indexOf("async function handleMemorySaved(memory: MemoryRecord) {");
+  const end = page.indexOf("\n  }", start);
+  const body = page.slice(start, end);
+  assert.ok(body.indexOf("memoryLinksAbortRef.current?.abort()") > -1);
+  assert.ok(body.indexOf("memoryLinksAbortRef.current?.abort()") < body.indexOf("setMemorySavedAnswers"));
+  assert.ok(body.includes("memoryLinksAbortRef.current = null"));
 });

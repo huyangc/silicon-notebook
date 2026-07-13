@@ -8,7 +8,12 @@ import dynamic from "next/dynamic";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
-import { answerIdBatches, memoryHash, parseMemoryHash } from "./memory-model";
+import {
+  answerIdBatches,
+  collectSavedAnswerFlags,
+  memoryHash,
+  parseMemoryHash,
+} from "./memory-model";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
   ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
@@ -1112,6 +1117,7 @@ export default function Home() {
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
+  const memorySessionAbortRef = useRef(new AbortController());
   const askJobIdRef = useRef<string | null>(null);
   const askNotebookIdRef = useRef<string | null>(null);
   // Every notebook/session transition advances the workspace epoch. Async
@@ -1138,23 +1144,26 @@ export default function Home() {
     const workspaceEpoch = workspaceEpochRef.current;
     const controller = new AbortController();
     memoryLinksAbortRef.current = controller;
-    Promise.all(batches.map((batch) => api<{ links: Record<string, string> }>(
-      `/notebooks/${notebookId}/answer-memory-links`,
-      {
-        method: "POST",
-        body: JSON.stringify({ answer_ids: batch }),
-        signal: controller.signal,
-      },
-    )))
-      .then((results) => {
+    collectSavedAnswerFlags(
+      batches,
+      (batch) => api<{ links: Record<string, string> }>(
+        `/notebooks/${notebookId}/answer-memory-links`,
+        {
+          method: "POST",
+          body: JSON.stringify({ answer_ids: batch }),
+          signal: controller.signal,
+        },
+      ),
+      controller.signal,
+    )
+      .then((savedFlags) => {
         if (
-          controller.signal.aborted
+          savedFlags === null
+          || controller.signal.aborted
           || activeNotebookIdRef.current !== notebookId
           || workspaceEpochRef.current !== workspaceEpoch
         ) return;
-        setMemorySavedAnswers(Object.fromEntries(
-          results.flatMap((result) => Object.entries(result.links).map(([answerId]) => [answerId, true])),
-        ));
+        setMemorySavedAnswers(savedFlags);
       })
       .catch((error) => {
         if (!isAbortError(error)) reportError(error);
@@ -1902,7 +1911,10 @@ export default function Home() {
 
   async function handleMemorySaved(memory: MemoryRecord) {
     if (!memoryAnswerId || memory.notebook_id !== currentNotebookId) return;
-    setMemorySavedAnswers((previous) => ({ ...previous, [memoryAnswerId]: true }));
+    const savedAnswerId = memoryAnswerId;
+    memoryLinksAbortRef.current?.abort();
+    memoryLinksAbortRef.current = null;
+    setMemorySavedAnswers((previous) => ({ ...previous, [savedAnswerId]: true }));
     setMemoryAnswerId(null);
     setToast("已保存到 Memory");
     await loadNotebookCollection();
@@ -2949,6 +2961,7 @@ export default function Home() {
     askRunEpochRef.current += 1;
     activeNotebookIdRef.current = null;
     askAbortRef.current?.abort();
+    memorySessionAbortRef.current.abort();
     memoryLinksAbortRef.current?.abort();
     memoryLinksAbortRef.current = null;
     setMemoryAnswerId(null);
@@ -3218,7 +3231,7 @@ export default function Home() {
 
       {!isWorkspace && outerView === "memory" && (
         <main className="page memory-view">
-          <MemoryPanel scope="global" notebookId={null} />
+          <MemoryPanel scope="global" notebookId={null} sessionSignal={memorySessionAbortRef.current.signal} />
         </main>
       )}
 
@@ -3730,7 +3743,7 @@ export default function Home() {
                 )}
 
                 {chatMode === "memory" && currentNotebookId && (
-                  <MemoryPanel scope="notebook" notebookId={currentNotebookId} />
+                  <MemoryPanel scope="notebook" notebookId={currentNotebookId} sessionSignal={memorySessionAbortRef.current.signal} />
                 )}
               </div>
               {chatMode === "ask" && (
@@ -4137,6 +4150,7 @@ export default function Home() {
         <MemorySaveDialog
           answerId={memoryAnswerId}
           notebookId={currentNotebookId}
+          sessionSignal={memorySessionAbortRef.current.signal}
           onClose={() => setMemoryAnswerId(null)}
           onSaved={(memory) => handleMemorySaved(memory).catch(reportError)}
         />

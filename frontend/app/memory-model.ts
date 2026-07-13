@@ -54,6 +54,31 @@ export function answerIdBatches(answerIds: string[], batchSize = 200): string[][
   return batches;
 }
 
+export function subscribeMemorySessionAbort(
+  signal: AbortSignal,
+  abortRequests: () => void,
+): () => void {
+  if (signal.aborted) {
+    abortRequests();
+    return () => undefined;
+  }
+  signal.addEventListener("abort", abortRequests, { once: true });
+  return () => signal.removeEventListener("abort", abortRequests);
+}
+
+export async function collectSavedAnswerFlags(
+  batches: string[][],
+  loadBatch: (answerIds: string[]) => Promise<{ links: Record<string, string> }>,
+  signal: AbortSignal,
+): Promise<Record<string, boolean> | null> {
+  if (signal.aborted) return null;
+  const results = await Promise.all(batches.map((batch) => loadBatch(batch)));
+  if (signal.aborted) return null;
+  return Object.fromEntries(
+    results.flatMap((result) => Object.keys(result.links).map((answerId) => [answerId, true])),
+  );
+}
+
 export function memoryListPath({
   scope,
   notebookId,

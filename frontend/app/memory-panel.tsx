@@ -11,6 +11,7 @@ import {
   memoryOriginMeta,
   memoryProvenanceRows,
   memoryStatusMeta,
+  subscribeMemorySessionAbort,
   type MemoryScope,
 } from "./memory-model";
 import { Pagination } from "./Pagination";
@@ -109,9 +110,11 @@ function MemoryEditor({
 export function MemoryPanel({
   scope,
   notebookId,
+  sessionSignal,
 }: {
   scope: MemoryScope;
   notebookId: string | null;
+  sessionSignal: AbortSignal;
 }) {
   const [items, setItems] = useState<MemoryRecord[]>([]);
   const [total, setTotal] = useState(0);
@@ -127,8 +130,14 @@ export function MemoryPanel({
   const [draft, setDraft] = useState<MemoryDraft>({ title: "", content_md: "", tags: "" });
   const [busyId, setBusyId] = useState<string | null>(null);
   const listRequestEpochRef = useRef(0);
+  const listControllerRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
   const mutationControllersRef = useRef(new Set<AbortController>());
+
+  useEffect(() => subscribeMemorySessionAbort(sessionSignal, () => {
+    listControllerRef.current?.abort();
+    mutationControllersRef.current.forEach((controller) => controller.abort());
+  }), [sessionSignal]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -140,9 +149,10 @@ export function MemoryPanel({
   }, []);
 
   useEffect(() => {
-    if (scope === "notebook" && !notebookId) return;
+    if (sessionSignal.aborted || (scope === "notebook" && !notebookId)) return;
     const epoch = ++listRequestEpochRef.current;
     const controller = new AbortController();
+    listControllerRef.current = controller;
     setLoading(true);
     setError("");
     memoryApi<PaginatedMemories>(memoryListPath({
@@ -168,9 +178,10 @@ export function MemoryPanel({
       });
     return () => {
       controller.abort();
+      if (listControllerRef.current === controller) listControllerRef.current = null;
       if (listRequestEpochRef.current === epoch) listRequestEpochRef.current += 1;
     };
-  }, [notebookId, origin, page, query, refresh, scope, status]);
+  }, [notebookId, origin, page, query, refresh, scope, sessionSignal, status]);
 
   function beginEdit(memory: MemoryRecord) {
     setEditingId(memory.id);
@@ -178,7 +189,7 @@ export function MemoryPanel({
   }
 
   async function updateMemory(memory: MemoryRecord, action: "save" | "confirm" | "reject" | "deprecate") {
-    if (busyId) return;
+    if (busyId || sessionSignal.aborted) return;
     const controller = new AbortController();
     mutationControllersRef.current.add(controller);
     setBusyId(memory.id);
@@ -351,11 +362,13 @@ export function MemorySaveDialog({
   notebookId,
   onClose,
   onSaved,
+  sessionSignal,
 }: {
   answerId: string;
   notebookId: string;
   onClose: () => void;
   onSaved: (memory: MemoryRecord) => void;
+  sessionSignal: AbortSignal;
 }) {
   const [draft, setDraft] = useState<MemoryDraft>({ title: "", content_md: "", tags: "" });
   const [provenance, setProvenance] = useState<Record<string, unknown>>({});
@@ -364,7 +377,13 @@ export function MemorySaveDialog({
   const [error, setError] = useState("");
   const requestEpochRef = useRef(0);
   const mountedRef = useRef(true);
+  const previewControllerRef = useRef<AbortController | null>(null);
   const saveControllerRef = useRef<AbortController | null>(null);
+
+  useEffect(() => subscribeMemorySessionAbort(sessionSignal, () => {
+    previewControllerRef.current?.abort();
+    saveControllerRef.current?.abort();
+  }), [sessionSignal]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -376,8 +395,10 @@ export function MemorySaveDialog({
   }, []);
 
   useEffect(() => {
+    if (sessionSignal.aborted) return;
     const epoch = ++requestEpochRef.current;
     const controller = new AbortController();
+    previewControllerRef.current = controller;
     setLoading(true);
     memoryApi<MemoryPreview>(`/answers/${encodeURIComponent(answerId)}/memory-preview`, {
       method: "POST",
@@ -398,12 +419,13 @@ export function MemorySaveDialog({
       });
     return () => {
       controller.abort();
+      if (previewControllerRef.current === controller) previewControllerRef.current = null;
       if (requestEpochRef.current === epoch) requestEpochRef.current += 1;
     };
-  }, [answerId]);
+  }, [answerId, sessionSignal]);
 
   async function save() {
-    if (saving || !draft.title.trim() || !draft.content_md.trim()) return;
+    if (saving || sessionSignal.aborted || !draft.title.trim() || !draft.content_md.trim()) return;
     const controller = new AbortController();
     saveControllerRef.current = controller;
     setSaving(true);
