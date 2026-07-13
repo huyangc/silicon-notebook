@@ -210,7 +210,7 @@ TASK27_ALLOWED_IMPORTS = {
     ("scripts/kg_product_smoke.py", 16, "app.services.sqlite_repository", "SQLiteRepository"),
     ("scripts/backfill_kg_embeddings.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
     ("scripts/replay_retrieval.py", 40, "app.services.sqlite_repository", "SQLiteRepository"),
-    ("backend/tests/test_repository_callers_static.py", 668, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_repository_callers_static.py", 670, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)

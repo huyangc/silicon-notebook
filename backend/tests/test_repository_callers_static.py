@@ -71,6 +71,7 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
             ("scripts/diag_slow.py", 556, "conn.execute"),
             ("scripts/diag_slow.py", 713, "conn.execute"),
             ("scripts/diag_slow.py", 810, "conn.execute"),
+            ("scripts/diag_open_latency.py", 74, "conn.execute"),
         }
     },
     # Baseline fixture generator writes only disposable fixture databases.
@@ -308,6 +309,7 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ("scripts/diag_slow.py", 544, "sqlite3.connect"): "host diagnostic opens mode=ro",
     ("scripts/diag_slow.py", 708, "sqlite3.connect"): "host diagnostic opens mode=ro",
     ("scripts/diag_slow.py", 803, "sqlite3.connect"): "host diagnostic opens mode=ro",
+    ("scripts/diag_open_latency.py", 67, "sqlite3.connect"): "host diagnostic opens mode=ro",
     ("scripts/generate_repository_contract_fixtures.py", 1649, "sqlite3.connect"): (
         "contract fixture generator opens disposable fixture databases"
     ),
