@@ -181,3 +181,25 @@ class TestReadAskStageRecords:
             json.dumps({"kind": "ask_stage", "stage": "score", "latency_ms": 20}) + "\n")
         recs = list(read_ask_stage_records(str(tmp_path / "events.jsonl")))
         assert sorted(r["latency_ms"] for r in recs) == [10, 20]
+
+    def test_survives_directory_in_read_set(self, tmp_path):
+        """A path in the read-set that is a *directory* (e.g. a per-user subdir
+        holding a dir literally named events.jsonl) must be skipped, not crash
+        the whole aggregation with IsADirectoryError."""
+        (tmp_path / "events.jsonl").write_text(
+            json.dumps({"kind": "ask_stage", "stage": "score", "latency_ms": 10}) + "\n")
+        # <log_dir>/user-x/events.jsonl exists but is a directory -> glob yields it
+        (tmp_path / "user-x").mkdir()
+        (tmp_path / "user-x" / "events.jsonl").mkdir()
+        recs = list(read_ask_stage_records(str(tmp_path / "events.jsonl")))
+        assert sorted(r["latency_ms"] for r in recs) == [10]
+
+    def test_survives_non_utf8_bytes(self, tmp_path):
+        """A non-UTF8 byte in a log line must not raise UnicodeDecodeError; the
+        offending line is dropped (non-JSON after replacement) and valid lines
+        are still read."""
+        p = tmp_path / "events.jsonl"
+        good = json.dumps({"kind": "ask_stage", "stage": "score", "latency_ms": 5})
+        p.write_bytes(good.encode("utf-8") + b"\n\xff\xfe not valid utf8\n")
+        recs = list(read_ask_stage_records(str(p)))
+        assert [r["latency_ms"] for r in recs] == [5]
