@@ -275,6 +275,13 @@ class AskStateStore:
     # answers
     # ------------------------------------------------------------------
 
+    def answer_notebook_id(self, answer_id: str) -> "str | None":
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT notebook_id FROM answers WHERE id=?", (answer_id,)
+            ).fetchone()
+        return row["notebook_id"] if row is not None else None
+
     def save_answer(
         self,
         notebook_id: str,

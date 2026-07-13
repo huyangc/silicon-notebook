@@ -1438,6 +1438,39 @@ TASK1_MEMORY_ALLOWED_CONSUMERS = {
     ("_write", "backend/tests/test_memory_migration.py:131"),
 }
 
+# Task 2 (Memory): the lifecycle service/store tests intentionally exercise
+# the new facade delegates and existing composition seams.  They post-date the
+# immutable pre-Memory facade fixture, so keep these exact new test consumers
+# out of the historical comparison while still checking them in the dedicated
+# Memory boundary contract.
+TASK2_MEMORY_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_service.py", 10, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_memory_service.py", 10, "app.services.sqlite_repository", "reset_request_user"),
+    ("backend/tests/test_memory_service.py", 10, "app.services.sqlite_repository", "set_request_user"),
+    ("backend/tests/test_memory_repository_boundaries.py", 9, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK2_MEMORY_ALLOWED_NEW_MEMBERS = {
+    "confirm_memory",
+    "create_memory_candidate",
+    "create_memory_from_answer",
+    "deprecate_memory",
+    "get_memory",
+    "list_memories",
+    "memory_revisions",
+    "reject_memory",
+    "update_memory",
+}
+TASK2_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_service.py", name)
+    for name in {
+        "SQLiteRepository", "_connect", "_runtime", "_write", "create_notebook",
+        "create_user", "embedder", "reset_request_user", "set_request_user",
+    }
+} | {
+    ("backend/tests/test_memory_repository_boundaries.py", name)
+    for name in {"SQLiteRepository", "_runtime", "embedder"}
+}
+
 # Task 26: the consolidated facade delegates its last SQL bodies to the
 # stores, so two facade-internal helper call sites disappear (_in_batches
 # now feeds retrieval_objects as a batch size; storage_dir is the runtime
@@ -1742,10 +1775,12 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "scripts/replay_retrieval.py",
     "scripts/smoke_backend.py",
     "backend/tests/test_sqlite_write_optimization.py",
+    "backend/tests/test_notebook_counts_batched.py",
 }
 
 ALL_TASK_ALLOWED_MEMBER_FILES = (
     TASK2_ALLOWED_MEMBER_FILES
+    | TASK2_MEMORY_ALLOWED_MEMBER_FILES
     | TASK4_ALLOWED_MEMBER_FILES
     | TASK5_ALLOWED_MEMBER_FILES
     | TASK6_ALLOWED_MEMBER_FILES
@@ -2300,7 +2335,8 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK25_ALLOWED_IMPORTS
                     or site in TASK26_ALLOWED_IMPORTS
                     or site in TASK27_ALLOWED_IMPORTS
-                    or site in TASK28_ALLOWED_IMPORTS
+                        or site in TASK28_ALLOWED_IMPORTS
+                        or site in TASK2_MEMORY_ALLOWED_IMPORTS
                 )
 
 
@@ -2504,7 +2540,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
     }
     allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
@@ -2538,6 +2574,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual.pop(name, None)
         recorded.pop(name, None)
     for name in TASK25_ALLOWED_NEW_MEMBERS | TASK27_ALLOWED_NEW_MEMBERS:
+        actual.pop(name, None)
+        recorded.pop(name, None)
+    for name in TASK2_MEMORY_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual

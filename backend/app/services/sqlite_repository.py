@@ -114,6 +114,7 @@ from app.services.prompts import (
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
+from app.models.schemas import MemoryRecord, MemoryUpdate, PaginatedMemories
 from app.services.knowledge_query import KnowledgeQueryService
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.schema_registry import SchemaRegistryService
@@ -271,6 +272,7 @@ class SQLiteRepository:
         )
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
+        self._runtime.wire_memory(embedder=self.embedder)
         self.mineru_client = MinerUClient(settings)
         self.mineru_cloud_client = MinerUCloudClient(settings)
         self.event_log = self._runtime.event_log
@@ -1065,6 +1067,74 @@ class SQLiteRepository:
 
     def delete_notebook(self, notebook_id: str) -> None:
         return self._runtime.catalog.delete_notebook(notebook_id)
+
+    # Owner-private Memory lifecycle.  The facade remains a one-hop
+    # compatibility adapter; orchestration lives in MemoryService and SQL in
+    # MemoryStore.
+    def create_memory_candidate(
+        self,
+        notebook_id: str,
+        user_id: str,
+        agent_profile_id: "str | None",
+        client_request_id: str,
+        title: str,
+        content_md: str,
+        tags: List[str],
+        reason: str,
+        task_context: "dict | None" = None,
+        evidence_refs: "List[dict] | None" = None,
+    ) -> MemoryRecord:
+        return self._runtime.memory_service.create_candidate(
+            notebook_id, user_id, agent_profile_id, client_request_id, title,
+            content_md, tags, reason, task_context, evidence_refs
+        )
+
+    def create_memory_from_answer(
+        self, notebook_id: str, user_id: str, answer_id: str, title: str,
+        content_md: str, tags: List[str],
+    ) -> MemoryRecord:
+        return self._runtime.memory_service.create_from_answer(
+            notebook_id, user_id, answer_id, title, content_md, tags
+        )
+
+    def update_memory(
+        self, memory_id: str, user_id: str, patch: MemoryUpdate
+    ) -> MemoryRecord:
+        return self._runtime.memory_service.update(memory_id, user_id, patch)
+
+    def confirm_memory(
+        self,
+        memory_id: str,
+        user_id: str,
+        patch: "MemoryUpdate | None" = None,
+    ) -> MemoryRecord:
+        return self._runtime.memory_service.confirm(memory_id, user_id, patch)
+
+    def reject_memory(self, memory_id: str, user_id: str) -> MemoryRecord:
+        return self._runtime.memory_service.reject(memory_id, user_id)
+
+    def deprecate_memory(self, memory_id: str, user_id: str) -> MemoryRecord:
+        return self._runtime.memory_service.deprecate(memory_id, user_id)
+
+    def get_memory(self, memory_id: str, user_id: str) -> MemoryRecord:
+        return self._runtime.memory_service.get(memory_id, user_id)
+
+    def list_memories(
+        self,
+        user_id: str,
+        notebook_id: "str | None" = None,
+        status: "str | None" = None,
+        origin: "str | None" = None,
+        query: str = "",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> PaginatedMemories:
+        return self._runtime.memory_service.list_memories(
+            user_id, notebook_id, status, origin, query, offset, limit
+        )
+
+    def memory_revisions(self, memory_id: str, user_id: str) -> list:
+        return self._runtime.memory_service.revisions(memory_id, user_id)
 
     # ------------------------------------------------------------------
     # Sharing / membership / deep-copy domain (Task 9): composed

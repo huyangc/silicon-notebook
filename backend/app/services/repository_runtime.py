@@ -18,6 +18,7 @@ from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
+from app.repositories.sqlite.memory_store import MemoryStore
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
 from app.repositories.sqlite.report_store import ReportStore
@@ -31,6 +32,7 @@ from app.services.knowledge_query import KnowledgeQueryService
 from app.services.evidence_context import EvidenceContextService
 from app.services.graph_retrieval import GraphRetrievalService
 from app.services.model_provider import RuntimeModelProvider
+from app.services.memory_service import MemoryService
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.report_execution import (
@@ -128,6 +130,10 @@ class RepositoryRuntime:
         # stored, never evaluated, so construction is eager and seam-free.
         # Cancel-event registry + fail-open trace logging stay facade-side.
         self.ask_state = AskStateStore(self.database, seams)
+        self.memory_store = MemoryStore(
+            self.database, new_id=seams.new_id, now=seams.now
+        )
+        self.memory_service: "MemoryService | None" = None
         # Source file persistence resolves storage_dir through the database
         # boundary's resolve_path — no facade seams, so construction is eager.
         self.source_files = SourceFileStore(
@@ -281,6 +287,24 @@ class RepositoryRuntime:
         self._embedder = value
         if self.retrieval is not None:
             self.retrieval.replace_embedder(value)
+        if self.memory_service is not None:
+            self.memory_service.embedder = value
+
+    def wire_memory(self, *, embedder: Any) -> MemoryService:
+        """Compose owner-private Memory after sharing/access and embedding exist."""
+        if self.sharing is None:
+            raise RuntimeError("wire_memory requires wire_sharing first")
+        self.set_embedder(embedder)
+        self.memory_service = MemoryService(
+            self.memory_store,
+            self.ask_state,
+            self.sharing,
+            self.embedder,
+            self.event_log,
+            self.seams.new_id,
+            self.seams.now,
+        )
+        return self.memory_service
 
     @property
     def notebook_languages(self) -> dict[str, list[str]]:

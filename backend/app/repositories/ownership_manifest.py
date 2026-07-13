@@ -448,6 +448,15 @@ _RUNTIME_COMPONENT_OWNER_ALIASES: Mapping[str, str] = {
 
 
 DELEGATE_OWNER_OVERRIDES: Mapping[str, str] = {
+    'confirm_memory': 'MemoryService',
+    'create_memory_candidate': 'MemoryService',
+    'create_memory_from_answer': 'MemoryService',
+    'deprecate_memory': 'MemoryService',
+    'get_memory': 'MemoryService',
+    'list_memories': 'MemoryService',
+    'memory_revisions': 'MemoryService',
+    'reject_memory': 'MemoryService',
+    'update_memory': 'MemoryService',
     '_NOTEBOOK_COUNT_TYPES': 'NotebookSummaryQuery',
     '_active_kg_delta': 'RetrievalService',
     '_add_column_if_missing': 'SqliteDatabase',

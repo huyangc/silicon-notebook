@@ -111,6 +111,26 @@ class QueryStore:
             (user_id,),
         ).fetchall()
 
+    @staticmethod
+    def memory_counts_by_owner_notebook(
+        db: sqlite3.Connection, user_id: str
+    ) -> dict[tuple[str, str], int]:
+        """One owner-scoped grouped query for every notebook card.
+
+        Memory is private to ``created_by`` even when the notebook is shared;
+        grouping by both privacy key and notebook id makes that scope explicit
+        and avoids a per-card query.
+        """
+        rows = db.execute(
+            "SELECT created_by, notebook_id, COUNT(*) AS c FROM memory_items "
+            "WHERE created_by=? GROUP BY created_by, notebook_id",
+            (user_id,),
+        ).fetchall()
+        return {
+            (row["created_by"], row["notebook_id"]): int(row["c"])
+            for row in rows
+        }
+
     def list_user_usage(self) -> list[dict[str, Any]]:
         with self.database.connect() as db:
             users = db.execute(
