@@ -112,6 +112,7 @@
 .memory-actions button,
 .memory-dialog-actions button,
 .memory-icon-action,
+.memory-promote-action,
 .memory-close {
   display: inline-flex;
   align-items: center;
@@ -257,6 +258,28 @@
   color: #87909e;
   font-size: 11px;
 }
+
+.memory-promote-action {
+  min-height: 32px;
+  padding: 0 10px;
+  border-color: #c9c1f2;
+  color: #5140b8;
+  font-size: 12px;
+}
+
+.memory-promote-action:disabled { opacity: .5; cursor: not-allowed; }
+
+.memory-promotion-state {
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: #f1f3f7;
+  color: #667085;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.memory-promotion-state.state-approved { background: #eaf7ef; color: #247443; }
+.memory-promotion-state.state-rejected { background: #f8eeee; color: #a14747; }
 
 .memory-editor {
   display: grid;

@@ -2859,6 +2859,13 @@
               "title": "Base Object Id",
               "type": "string"
             },
+            "base_object_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Base Object Ids",
+              "type": "array"
+            },
             "candidate_id": {
               "title": "Candidate Id",
               "type": "string"
@@ -2900,6 +2907,11 @@
               "title": "Id",
               "type": "string"
             },
+            "memory_id": {
+              "default": "",
+              "title": "Memory Id",
+              "type": "string"
+            },
             "notebook_id": {
               "title": "Notebook Id",
               "type": "string"
@@ -2925,6 +2937,15 @@
             "reviewed_by": {
               "default": "",
               "title": "Reviewed By",
+              "type": "string"
+            },
+            "source_kind": {
+              "default": "knowledge",
+              "enum": [
+                "knowledge",
+                "memory"
+              ],
+              "title": "Source Kind",
               "type": "string"
             },
             "status": {
@@ -5656,6 +5677,45 @@
             }
           },
           "summary": "Deprecate Memory"
+        }
+      },
+      "/api/memories/{memory_id}/promote": {
+        "post": {
+          "operationId": "promote_memory_api_memories__memory_id__promote_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "201": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PromotionCandidate"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Promote Memory"
         }
       },
       "/api/memories/{memory_id}/reject": {

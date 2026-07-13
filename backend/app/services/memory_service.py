@@ -84,6 +84,77 @@ class MemoryService:
         self.new_id = new_id
         self.now = now
         self.embedding_scheduler = embedding_scheduler or (lambda fn, item: fn(item))
+        self.promotion_service: Any | None = None
+
+    def set_promotion_service(self, service: Any) -> None:
+        self.promotion_service = service
+
+    @staticmethod
+    def _promotion_candidates(item: MemoryRecord) -> list[dict[str, Any]]:
+        """Derive review candidates from shareable Memory text, never provenance."""
+        candidates: list[dict[str, Any]] = []
+        seen_concepts: set[str] = set()
+        for raw_tag in item.tags[:8]:
+            name = str(raw_tag).strip()
+            normalized = name.casefold()
+            if name and normalized not in seen_concepts:
+                seen_concepts.add(normalized)
+                candidates.append(
+                    {"object_type": "concept", "payload": {"name": name}}
+                )
+
+        candidates.append(
+            {
+                "object_type": "claim",
+                "payload": {
+                    "name": item.title.strip() or item.content_md.strip()[:120],
+                    "statement": item.content_md.strip(),
+                },
+            }
+        )
+
+        formula_matches = re.findall(
+            r"\$\$(.+?)\$\$|\\\[(.+?)\\\]|(?<!\$)\$([^\n$]+)\$(?!\$)",
+            item.content_md,
+            flags=re.DOTALL,
+        )
+        formulas = [next(part for part in match if part).strip() for match in formula_matches]
+        for index, expression in enumerate(formulas[:4], start=1):
+            candidates.append(
+                {
+                    "object_type": "formula",
+                    "payload": {
+                        "name": item.title if len(formulas) == 1 else f"{item.title} {index}",
+                        "expression": expression,
+                    },
+                }
+            )
+
+        steps = [
+            match.group(1).strip()
+            for line in item.content_md.splitlines()
+            if (match := re.match(r"^\s*(?:\d+[.)]|[-*])\s+(.+?)\s*$", line))
+        ]
+        if len(steps) >= 2:
+            candidates.append(
+                {
+                    "object_type": "procedure",
+                    "payload": {"name": item.title, "steps": steps[:20]},
+                }
+            )
+        return candidates
+
+    def propose_promotion(self, memory_id: str, user_id: str) -> dict:
+        item = self.get(memory_id, user_id)
+        if item.status != "confirmed":
+            raise ValueError("only confirmed Memory can be promoted")
+        if item.promotion_state not in {"none", "proposed"}:
+            raise ValueError(f"Memory promotion is already {item.promotion_state}")
+        if self.promotion_service is None:
+            raise RuntimeError("Memory promotion service is not wired")
+        return self.promotion_service.propose_memory_promotion(
+            item, self._promotion_candidates(item), user_id
+        )
 
     def create_agent_profile(
         self, owner_id: str, name: str, description: str = ""

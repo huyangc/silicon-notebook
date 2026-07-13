@@ -4881,7 +4881,7 @@ export default function Home() {
             <div className="source-modal-header">
               <div>
                 <h2>晋升队列</h2>
-                <p>个人 KG 节点申请晋升到基准语料。批准后会执行去重并加入基准库。</p>
+                <p>个人 KG 节点与 Memory 提取候选申请晋升到基准语料。批准后会执行去重并加入基准库。</p>
               </div>
               <button className="icon-button" onClick={() => setPromoOpen(false)} title="Close">×</button>
             </div>
@@ -4895,11 +4895,17 @@ export default function Home() {
                       <div className="tag-row">
                         <span className="tag">{cand.status}</span>
                         <span className="tag">{cand.object_type}</span>
+                        {cand.source_kind === "memory" && <span className="tag">Memory 提取候选</span>}
                         {cand.base_match_id && (
                           <span className="tag conflict">去重匹配: {cand.base_match_id.slice(0, 10)}</span>
                         )}
                       </div>
                       <h3>{String((cand.payload as Record<string, unknown>).name ?? (cand.payload as Record<string, unknown>).title ?? cand.object_id)}</h3>
+                      {cand.source_kind === "memory" && Array.isArray(cand.payload.candidates) && (
+                        <p className="tool-hint">
+                          待审对象：{cand.payload.candidates.map((item) => String((item as Record<string, unknown>).object_type ?? "")).filter(Boolean).join(" · ")}
+                        </p>
+                      )}
                       <p className="tool-hint">来源笔记本: {cand.notebook_id.slice(0, 10)}</p>
                       {cand.evidence.length > 0 && (
                         <p><strong>证据：</strong>{cand.evidence[0].quoted_span ?? ""}</p>

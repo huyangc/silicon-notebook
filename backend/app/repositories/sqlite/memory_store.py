@@ -693,6 +693,157 @@ class MemoryStore:
             for row in rows
         ]
 
+    def propose_promotion_on(
+        self,
+        db: sqlite3.Connection,
+        memory_id: str,
+        user_id: str,
+        proposal_id: str,
+        candidates: Sequence[Mapping[str, Any]],
+        now: str,
+    ) -> MemoryRecord:
+        row = db.execute(
+            f"SELECT {self._select_columns()} FROM memory_items m "
+            "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+            f"WHERE m.id=? AND m.created_by=? AND {self._read_access_clause()}",
+            (memory_id, user_id, user_id, user_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(memory_id)
+        item = self._record(row)
+        if item.status != "confirmed":
+            raise ValueError("only confirmed Memory can be promoted")
+        if item.promotion_state not in {"none", "proposed"}:
+            raise ValueError(f"Memory promotion is already {item.promotion_state}")
+
+        provenance = dict(item.provenance)
+        provenance["kg_promotion"] = {
+            "proposal_id": proposal_id,
+            "state": "proposed",
+            "candidates": [dict(candidate) for candidate in candidates],
+            "base_object_ids": [],
+        }
+        db.execute(
+            "UPDATE memory_provenance SET payload_json=? WHERE memory_id=?",
+            (json.dumps(provenance, ensure_ascii=False), memory_id),
+        )
+        db.execute(
+            "UPDATE memory_items SET promotion_state='proposed',updated_at=? "
+            "WHERE id=? AND created_by=? AND status='confirmed'",
+            (now, memory_id, user_id),
+        )
+        self._append_revision_on(
+            db,
+            memory_id,
+            {
+                "title": item.title,
+                "content_md": item.content_md,
+                "tags": item.tags,
+                "status": item.status,
+                "promotion_state": "proposed",
+            },
+            user_id,
+            "kg_promotion_proposed",
+        )
+        return item.model_copy(
+            update={
+                "promotion_state": "proposed",
+                "updated_at": now,
+                "provenance": provenance,
+            }
+        )
+
+    def promotion_rows_on(
+        self, db: sqlite3.Connection, memory_ids: Sequence[str]
+    ) -> dict[str, MemoryRecord]:
+        if not memory_ids:
+            return {}
+        placeholders = ",".join("?" for _ in memory_ids)
+        rows = db.execute(
+            f"SELECT {self._select_columns()} FROM memory_items m "
+            "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+            f"WHERE m.id IN ({placeholders})",
+            list(memory_ids),
+        ).fetchall()
+        return {str(row["id"]): self._record(row) for row in rows}
+
+    def promotion_data_on(
+        self, db: sqlite3.Connection, memory_id: str
+    ) -> tuple[MemoryRecord, list[dict[str, Any]], list[str]]:
+        records = self.promotion_rows_on(db, [memory_id])
+        item = records.get(memory_id)
+        if item is None:
+            raise KeyError(memory_id)
+        promotion = item.provenance.get("kg_promotion")
+        if not isinstance(promotion, dict):
+            raise ValueError("Memory promotion payload is missing")
+        raw_candidates = promotion.get("candidates")
+        candidates = [
+            dict(candidate)
+            for candidate in raw_candidates
+            if isinstance(candidate, dict)
+        ] if isinstance(raw_candidates, list) else []
+        raw_ids = promotion.get("base_object_ids")
+        base_ids = [str(value) for value in raw_ids] if isinstance(raw_ids, list) else []
+        return item, candidates, base_ids
+
+    def record_promotion_decision_on(
+        self,
+        db: sqlite3.Connection,
+        memory_id: str,
+        state: str,
+        changed_by: str,
+        now: str,
+        *,
+        base_object_ids: Sequence[str] = (),
+        reason: str = "",
+    ) -> MemoryRecord:
+        item, candidates, _existing_ids = self.promotion_data_on(db, memory_id)
+        provenance = dict(item.provenance)
+        current = provenance.get("kg_promotion")
+        promotion = dict(current) if isinstance(current, dict) else {}
+        promotion.update(
+            {
+                "state": state,
+                "candidates": candidates,
+                "base_object_ids": list(base_object_ids),
+            }
+        )
+        if reason:
+            promotion["reason"] = reason
+        else:
+            promotion.pop("reason", None)
+        provenance["kg_promotion"] = promotion
+        db.execute(
+            "UPDATE memory_provenance SET payload_json=? WHERE memory_id=?",
+            (json.dumps(provenance, ensure_ascii=False), memory_id),
+        )
+        db.execute(
+            "UPDATE memory_items SET promotion_state=?,updated_at=? "
+            "WHERE id=? AND status='confirmed'",
+            (state, now, memory_id),
+        )
+        self._append_revision_on(
+            db,
+            memory_id,
+            {
+                "title": item.title,
+                "content_md": item.content_md,
+                "tags": item.tags,
+                "status": item.status,
+                "promotion_state": state,
+            },
+            changed_by,
+            f"kg_promotion_{state}",
+        )
+        return item.model_copy(
+            update={
+                "promotion_state": state,
+                "updated_at": now,
+                "provenance": provenance,
+            }
+        )
+
     def update_fields(
         self, memory_id: str, user_id: str, fields: Mapping[str, Any]
     ) -> MemoryRecord:

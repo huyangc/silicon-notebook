@@ -826,7 +826,10 @@ class RepositoryRuntime:
             as_retrieved=as_retrieved,
             rule_card=rule_card,
             set_conflict_status=set_conflict_status,
+            memory_store=self.memory_store,
         )
+        if self.memory_service is not None:
+            self.memory_service.set_promotion_service(self.knowledge_governance)
         if self.scale_artifacts is None:
             raise RuntimeError(
                 "wire_knowledge_lifecycle requires wire_scale_runtime() first"

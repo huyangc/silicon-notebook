@@ -32,6 +32,7 @@ from app.models.schemas import (
     MemoryStatus,
     MemoryUpdate,
     PaginatedMemories,
+    PromotionCandidate,
     UserProfile,
 )
 from app.repositories.ports import AskStateStorePort, MemoryRepository
@@ -287,6 +288,19 @@ async def deprecate_memory(
     service: MemoryRepository = Depends(memory_service),
 ) -> MemoryRecord:
     return await _memory_call(service.deprecate_memory, memory_id, user.id)
+
+
+@memory_router.post(
+    "/memories/{memory_id}/promote",
+    response_model=PromotionCandidate,
+    status_code=status.HTTP_201_CREATED,
+)
+async def promote_memory(
+    memory_id: str,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> PromotionCandidate:
+    return await _memory_call(service.propose_memory_promotion, memory_id, user.id)
 
 
 @memory_router.post("/answers/{answer_id}/memory-preview", response_model=MemoryPreview)

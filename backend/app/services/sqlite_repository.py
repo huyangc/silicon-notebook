@@ -1228,6 +1228,9 @@ class SQLiteRepository:
     def memory_revisions(self, memory_id: str, user_id: str) -> list:
         return self._runtime.memory_service.revisions(memory_id, user_id)
 
+    def propose_memory_promotion(self, memory_id: str, user_id: str) -> dict:
+        return self._runtime.memory_service.propose_promotion(memory_id, user_id)
+
     # ------------------------------------------------------------------
     # Sharing / membership / deep-copy domain (Task 9): composed
     # NotebookSharingService + NotebookCopyService + SharingStore delegates.

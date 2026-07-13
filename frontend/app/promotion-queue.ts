@@ -22,11 +22,14 @@ export type PromotionCandidate = {
     confidence?: number;
     [k: string]: unknown;
   }>;
+  source_kind: "knowledge" | "memory";
+  memory_id: string;
 };
 
 export type PromotionApproveResult = {
   candidate_id: string;
   base_object_id: string;
+  base_object_ids: string[];
   merged_into: string;
 };
 

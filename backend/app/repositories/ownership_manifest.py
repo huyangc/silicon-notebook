@@ -456,6 +456,7 @@ DELEGATE_OWNER_OVERRIDES: Mapping[str, str] = {
     'get_memory': 'MemoryService',
     'list_memories': 'MemoryService',
     'memory_revisions': 'MemoryService',
+    'propose_memory_promotion': 'MemoryService',
     'reject_memory': 'MemoryService',
     'update_memory': 'MemoryService',
     '_NOTEBOOK_COUNT_TYPES': 'NotebookSummaryQuery',

@@ -1,4 +1,4 @@
-import type { MemoryOrigin, MemoryStatus } from "./workspace-model";
+import type { MemoryOrigin, MemoryPromotionState, MemoryStatus } from "./workspace-model";
 
 export type MemoryScope = "global" | "notebook";
 
@@ -26,6 +26,26 @@ export function memoryOriginMeta(origin: MemoryOrigin): MemoryMeta {
 
 export function canEditMemory(status: MemoryStatus): boolean {
   return status === "candidate" || status === "confirmed";
+}
+
+export function canPromoteMemory(memory: {
+  status: MemoryStatus;
+  promotion_state: MemoryPromotionState;
+}): boolean {
+  return memory.status === "confirmed" && memory.promotion_state === "none";
+}
+
+export function memoryPromotionPath(memoryId: string): string {
+  return `/memories/${encodeURIComponent(memoryId)}/promote`;
+}
+
+export function memoryPromotionLabel(state: MemoryPromotionState): string {
+  return {
+    none: "提升到 KG",
+    proposed: "KG 审核中",
+    approved: "已进入 Base KG",
+    rejected: "KG 晋升已拒绝",
+  }[state];
 }
 
 export function memoryHash(notebookId: string | null): string {

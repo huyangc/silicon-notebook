@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Bot, Check, ChevronDown, Copy, Edit3, KeyRound, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowUpCircle, Bot, Check, ChevronDown, Copy, Edit3, KeyRound, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 
 import { AnswerMarkdown } from "./answer-markdown";
 import {
@@ -17,8 +17,11 @@ import {
 import { API_BASE, authHeaders, clearToken, getToken } from "./auth";
 import {
   canEditMemory,
+  canPromoteMemory,
   memoryListPath,
   memoryOriginMeta,
+  memoryPromotionLabel,
+  memoryPromotionPath,
   memoryProvenanceRows,
   memoryStatusMeta,
   subscribeMemorySessionAbort,
@@ -544,6 +547,30 @@ export function MemoryPanel({
     }
   }
 
+  async function promoteMemory(memory: MemoryRecord) {
+    if (busyId || sessionSignal.aborted || !canPromoteMemory(memory)) return;
+    const controller = new AbortController();
+    mutationControllersRef.current.add(controller);
+    setBusyId(memory.id);
+    setError("");
+    try {
+      await memoryApi(memoryPromotionPath(memory.id), {
+        method: "POST",
+        signal: controller.signal,
+      });
+      if (!controller.signal.aborted && mountedRef.current) {
+        setRefresh((value) => value + 1);
+      }
+    } catch (cause) {
+      if (!controller.signal.aborted && mountedRef.current) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    } finally {
+      mutationControllersRef.current.delete(controller);
+      if (mountedRef.current) setBusyId(null);
+    }
+  }
+
   function submitSearch(event: FormEvent) {
     event.preventDefault();
     setPage(0);
@@ -654,6 +681,22 @@ export function MemoryPanel({
 
                 <footer className="memory-card-footer">
                   <time dateTime={memory.updated_at}>更新于 {new Date(memory.updated_at).toLocaleString("zh-CN")}</time>
+                  {!editing && memory.status === "confirmed" && (
+                    canPromoteMemory(memory) ? (
+                      <button
+                        type="button"
+                        className="memory-promote-action"
+                        disabled={busy}
+                        onClick={() => promoteMemory(memory)}
+                      >
+                        <ArrowUpCircle size={14} /> 提升到 KG
+                      </button>
+                    ) : (
+                      <span className={`memory-promotion-state state-${memory.promotion_state}`}>
+                        {memoryPromotionLabel(memory.promotion_state)}
+                      </span>
+                    )
+                  )}
                   {editing && (
                     <div className="memory-actions">
                       <button type="button" disabled={busy} onClick={() => setEditingId(null)}><X size={14} /> 取消</button>

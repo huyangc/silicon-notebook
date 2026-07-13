@@ -1545,6 +1545,28 @@ TASK7_MEMORY_ALLOWED_NEW_MEMBERS = {
     "refresh_agent_principal",
 }
 
+# Task 8 (Memory): governed Memory-to-KG promotion adds one owner-scoped
+# facade delegate and a focused full-stack test that intentionally composes
+# established repository seams. The immutable manifest predates Memory.
+TASK8_MEMORY_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_promotion.py", 10, "app.services.sqlite_repository", name)
+    for name in {"SQLiteRepository", "reset_request_user", "set_request_user"}
+}
+TASK8_MEMORY_ALLOWED_NEW_MEMBERS = {"propose_memory_promotion"}
+TASK8_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_promotion.py", name)
+    for name in {
+        "SQLiteRepository", "_connect", "_runtime", "_test_insert_object", "_write",
+        "approve_promotion", "confirm_memory", "create_memory_candidate",
+        "create_notebook", "create_user", "deprecate_memory", "get_memory",
+        "list_promotion_queue", "mark_notebook_base", "memory_revisions",
+        "propose_memory_promotion", "reject_memory", "reject_promotion",
+        "reset_request_user", "set_request_user",
+    }
+} | {
+    ("backend/app/api/memory_routes.py", "propose_memory_promotion"),
+}
+
 # Task 26: the consolidated facade delegates its last SQL bodies to the
 # stores, so two facade-internal helper call sites disappear (_in_batches
 # now feeds retrieval_objects as a batch size; storage_dir is the runtime
@@ -1858,6 +1880,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK3_MEMORY_ALLOWED_MEMBER_FILES
     | TASK5_MEMORY_ALLOWED_MEMBER_FILES
     | TASK6_MEMORY_ALLOWED_MEMBER_FILES
+    | TASK8_MEMORY_ALLOWED_MEMBER_FILES
     | TASK4_ALLOWED_MEMBER_FILES
     | TASK5_ALLOWED_MEMBER_FILES
     | TASK6_ALLOWED_MEMBER_FILES
@@ -2419,6 +2442,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                         or site in TASK2_MEMORY_ALLOWED_IMPORTS
                             or site in TASK5_MEMORY_ALLOWED_IMPORTS
                             or site in TASK6_MEMORY_ALLOWED_IMPORTS
+                            or site in TASK8_MEMORY_ALLOWED_IMPORTS
                 )
 
 
@@ -2622,7 +2646,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-            for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
+            for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS
     }
     allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
@@ -2668,6 +2692,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         actual.pop(name, None)
         recorded.pop(name, None)
     for name in TASK7_MEMORY_ALLOWED_NEW_MEMBERS:
+        actual.pop(name, None)
+        recorded.pop(name, None)
+    for name in TASK8_MEMORY_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual

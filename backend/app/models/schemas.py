@@ -814,11 +814,14 @@ class PromotionCandidate(BaseModel):
     # Denormalised fields populated by the repo from knowledge_objects:
     payload: dict = Field(default_factory=dict)
     evidence: List[Evidence] = Field(default_factory=list)
+    source_kind: Literal["knowledge", "memory"] = "knowledge"
+    memory_id: str = ""
 
 
 class PromotionApproveResult(BaseModel):
     candidate_id: str
     base_object_id: str
+    base_object_ids: List[str] = Field(default_factory=list)
     merged_into: str = ""   # non-empty if deduped into an existing base object
 
 
