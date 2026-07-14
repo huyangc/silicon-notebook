@@ -721,89 +721,115 @@ class SourceIngestionService:
         self, notebook_id: str, memory_id: str, title: str, content_md: str
     ) -> Optional[str]:
         """Memory→隐藏合成源→真实抽取管线（对象/关系/证据/增量融合，与上传逐字
-        同一条 run_extraction）。在调用方的 job 线程内同步运行；任何失败都落
-        parse_status='failed'+error_message，从不向外抛（Memory 本体不受影响）。
+        同一条 run_extraction）。在调用方的 job 线程内同步运行。
+
+        失败语义：notebook 不存在直接 KeyError（调用方兜——那是调用方 bug，不该
+        留下孤儿 failed 源）；其余从 insert 到抽取的**任何**失败都落
+        parse_status='failed'+error_message 并清空 file_hash（指纹只代表
+        「成功摄取过的内容」——不清掉，指纹仍匹配会把同内容重调短路进坏源、
+        永不重试），从不向外抛（Memory 本体不受影响）。
 
         不建 chunk——Memory 文本已经由 MemoryRetriever 直接注入 prompt，建 chunk
         会造成双份注入。只建 elements + element embedding。
 
         指纹 = sha256(title + "\\n" + content_md)：内容未变（如仅改 tags）零代价
         跳过，不重抽；变化时清掉该源之前的抽取产物（KG 对象/关系/embeddings/
-        extraction_runs）后重新解析+重抽，从不追加。
+        extraction_runs）后重新解析+重抽（title 在指纹内，重抽时一并刷新），
+        从不追加。
         """
+        # KeyError guard stays OUTSIDE the failure boundary below: same intake
+        # contract as import_sources/upload_sources, and there is no source
+        # row to mark 'failed' yet.
+        self.notebooks.get_row(notebook_id)
         fingerprint = hashlib.sha256(
             f"{title}\n{content_md}".encode("utf-8")
         ).hexdigest()
-        existing_id = self.sources.source_id_for_memory(memory_id)
-        if existing_id is not None:
-            if self.sources.get_source(existing_id).file_hash == fingerprint:
-                return existing_id  # content unchanged (e.g. only tags edited)
-            source_id = existing_id
-        else:
-            source_id = self.new_id("src")
-            self.sources.insert_source(
-                source_id=source_id,
-                notebook_id=notebook_id,
-                title=title,
-                source_type="memory",
-                status="active",
-                parse_status="parsed",
-                file_name="",
-                file_path="",
-                file_size=0,
-                file_hash=fingerprint,
-                summary="",
-                doc_type="",
-                memory_id=memory_id,
-            )
-
-        from app.services.parsers import parse_markdown_text
-
-        elements = parse_markdown_text(source_id, content_md)
-        now = self.now()
-        with self.write() as db:
+        source_id: Optional[str] = None
+        try:
+            existing_id = self.sources.source_id_for_memory(memory_id)
             if existing_id is not None:
-                # Reparse semantics: drop this source's prior extraction
-                # derivatives (KG objects/relations/embeddings/extraction
-                # runs) in the SAME transaction as the element swap below —
-                # mirrors process_source's parse-stage invariant exactly.
-                self.clear_source_extraction_state(
+                source_id = existing_id
+                if self.sources.get_source(existing_id).file_hash == fingerprint:
+                    return existing_id  # content unchanged (e.g. only tags edited)
+            else:
+                source_id = self.new_id("src")
+                self.sources.insert_source(
+                    source_id=source_id,
+                    notebook_id=notebook_id,
+                    title=title,
+                    source_type="memory",
+                    status="active",
+                    parse_status="parsed",
+                    file_name="",
+                    file_path="",
+                    file_size=0,
+                    file_hash=fingerprint,
+                    summary="",
+                    doc_type="",
+                    memory_id=memory_id,
+                )
+
+            from app.services.parsers import parse_markdown_text
+
+            elements = parse_markdown_text(source_id, content_md)
+            now = self.now()
+            with self.write() as db:
+                if existing_id is not None:
+                    # Reparse semantics: drop this source's prior extraction
+                    # derivatives (KG objects/relations/embeddings/extraction
+                    # runs) in the SAME transaction as the element swap below —
+                    # mirrors process_source's parse-stage invariant exactly.
+                    self.clear_source_extraction_state(
+                        db,
+                        source_id,
+                        notebook_id,
+                        clear_embeddings=True,
+                    )
+                    # title rides the fingerprint (sha256(title+content)), so
+                    # a title change re-lands here: refresh it together with
+                    # the fingerprint in the same UPDATE.
+                    self.sources.update_file_hash(
+                        source_id, fingerprint, title=title, connection=db
+                    )
+                self.sources.replace_elements(
                     db,
                     source_id,
-                    notebook_id,
-                    clear_embeddings=True,
+                    [
+                        SourceElementWrite(
+                            id=f"el-{source_id}-{index:04d}",
+                            element_type=element.element_type,
+                            location_label=element.location_label,
+                            text=element.text,
+                            metadata=element.metadata,
+                        )
+                        for index, element in enumerate(elements, start=1)
+                    ],
+                    created_at=now,
                 )
-                self.sources.update_file_hash(source_id, fingerprint, connection=db)
-            self.sources.replace_elements(
-                db,
-                source_id,
-                [
-                    SourceElementWrite(
-                        id=f"el-{source_id}-{index:04d}",
-                        element_type=element.element_type,
-                        location_label=element.location_label,
-                        text=element.text,
-                        metadata=element.metadata,
-                    )
-                    for index, element in enumerate(elements, start=1)
-                ],
-                created_at=now,
-            )
 
-        try:
-            # Deliberately embed_source only — NEVER embed_chunks_for_source,
-            # since no chunks are ever built for a memory-derived source.
-            self.embedding.embed_source(source_id)
-        except Exception:
-            self.event_log.logger.exception(
-                "memory source embed failed for %s", source_id
-            )
+            try:
+                # Deliberately embed_source only — NEVER embed_chunks_for_source,
+                # since no chunks are ever built for a memory-derived source.
+                # Best-effort, like the upload pipeline's background embed.
+                self.embedding.embed_source(source_id)
+            except Exception:
+                self.event_log.logger.exception(
+                    "memory source embed failed for %s", source_id
+                )
 
-        try:
             self.sources.set_status(source_id, "extracting")
             self.run_extraction(source_id)
             self.sources.set_status(source_id, "extracted")
-            self.kg_mutations.mark_unified_kg_dirty(notebook_id)
+            # Mirror process_source: the dirty bump is a real DB write that
+            # runs AFTER 'extracted' is recorded (the KG objects are already
+            # stored) — its failure is log-only and must never flip an
+            # actually-extracted source back to 'failed'.
+            try:
+                self.kg_mutations.mark_unified_kg_dirty(notebook_id)
+            except Exception:
+                self.event_log.logger.exception(
+                    "unified-KG dirty mark failed for source %s", source_id
+                )
             self.event_log.emit({
                 "kind": "memory_kg",
                 "source_id": source_id,
@@ -812,15 +838,29 @@ class SourceIngestionService:
                 "status": "extracted",
             })
         except Exception as exc:
-            self.sources.set_status(
-                source_id, "failed", error_message=f"{type(exc).__name__}: {exc}"
-            )
             self.event_log.logger.exception(
-                "memory KG extraction failed for %s", source_id
+                "memory source ingestion failed for %s", source_id or memory_id
             )
+            if source_id is not None:
+                try:
+                    # The fingerprint means "successfully ingested content":
+                    # clear it FIRST so an identical retry re-runs instead of
+                    # fingerprint-skipping into the broken row forever —
+                    # retryability outranks status labeling if the second
+                    # UPDATE below were itself to fail.
+                    self.sources.update_file_hash(source_id, "")
+                    self.sources.set_status(
+                        source_id, "failed",
+                        error_message=f"{type(exc).__name__}: {exc}",
+                    )
+                except Exception:
+                    # The failure fallback itself must never raise.
+                    self.event_log.logger.exception(
+                        "failed-state bookkeeping failed for %s", source_id
+                    )
             self.event_log.emit({
                 "kind": "memory_kg",
-                "source_id": source_id,
+                "source_id": source_id or "",
                 "notebook_id": notebook_id,
                 "memory_id": memory_id,
                 "status": "failed",

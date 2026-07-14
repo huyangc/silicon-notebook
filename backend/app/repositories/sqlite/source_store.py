@@ -326,16 +326,29 @@ class SourceStore:
         self,
         source_id: str,
         file_hash: str,
+        *,
+        title: "str | None" = None,
         connection: "sqlite3.Connection | None" = None,
     ) -> None:
         """Persist a recomputed fingerprint (Memory-derived source reparse:
         insert_source already carries the fingerprint for a brand-new row;
-        this is the update half for an existing row whose content changed).
+        this is the update half for an existing row whose content changed —
+        and the failure path's clear-to-'' so a broken row is never
+        fingerprint-skipped into on retry).
+
+        ``title``: the memory fingerprint covers sha256(title+content), so a
+        title change re-lands here too — pass it to refresh sources.title in
+        the same UPDATE (None leaves the stored title untouched).
         Pass ``connection`` to ride the caller's write transaction (the
         memory reparse path folds this into the same commit as
         clear_source_extraction_state + replace_elements)."""
-        statement = "UPDATE sources SET file_hash = ?, updated_at = ? WHERE id = ?"
-        values = (file_hash, self.now(), source_id)
+        fields = ["file_hash = ?", "updated_at = ?"]
+        params: List[object] = [file_hash, self.now()]
+        if title is not None:
+            fields.insert(0, "title = ?")
+            params.insert(0, title)
+        statement = f"UPDATE sources SET {', '.join(fields)} WHERE id = ?"
+        values = (*params, source_id)
         if connection is not None:
             connection.execute(statement, values)
             return
