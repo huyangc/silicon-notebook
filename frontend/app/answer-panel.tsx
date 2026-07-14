@@ -189,7 +189,11 @@ function CitationPopover({
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
-    const onScroll = () => onClose();
+    const onScroll = (event: Event) => {
+      // 浮层内部滚动(查看长内容)不应关闭;只有外部页面/祖先滚动导致脱锚时才关。
+      if (ref.current && ref.current.contains(event.target as Node)) return;
+      onClose();
+    };
     window.addEventListener("pointerdown", onDown, true);
     window.addEventListener("keydown", onKey);
     window.addEventListener("scroll", onScroll, true);

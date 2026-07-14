@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowUpCircle, Bookmark, Bot, Check, ChevronDown, Copy, Edit3, KeyRound, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowUpCircle, Bookmark, Bot, Check, ChevronDown, Copy, Edit3, KeyRound, LayoutGrid, List, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 
 import { AnswerMarkdown } from "./answer-markdown";
 import {
@@ -468,6 +468,8 @@ export function MemoryPanel({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<MemoryDraft>({ title: "", content_md: "", tags: "" });
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [layout, setLayout] = useState<"grid" | "list">("grid");
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const listRequestEpochRef = useRef(0);
   const listControllerRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
@@ -486,6 +488,21 @@ export function MemoryPanel({
       mutationControllersRef.current.clear();
     };
   }, []);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("memory-layout");
+    if (saved === "list" || saved === "grid") setLayout(saved);
+  }, []);
+  useEffect(() => {
+    window.localStorage.setItem("memory-layout", layout);
+  }, [layout]);
+
+  const toggleExpanded = (id: string) => setExpandedIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
 
   useEffect(() => {
     if (sessionSignal.aborted || (scope === "notebook" && !notebookId)) return;
@@ -660,6 +677,13 @@ export function MemoryPanel({
         </label>
       </div>
 
+      <div className="memory-toolbar">
+        <div className="memory-layout-switch" role="group" aria-label="布局方式">
+          <button type="button" className={layout === "grid" ? "active" : ""} aria-pressed={layout === "grid"} title="网格视图" onClick={() => setLayout("grid")}><LayoutGrid size={16} /></button>
+          <button type="button" className={layout === "list" ? "active" : ""} aria-pressed={layout === "list"} title="列表视图" onClick={() => setLayout("list")}><List size={16} /></button>
+        </div>
+      </div>
+
       {error && <div className="memory-error" role="alert">{error}</div>}
       {loading ? (
         <div className="memory-empty">正在读取你的 Memory…</div>
@@ -670,7 +694,7 @@ export function MemoryPanel({
           <p>可在 Ask 回答下方手动保存，Agent 提议则会先进入待确认状态。</p>
         </div>
       ) : (
-        <div className="memory-list">
+        <div className={`memory-list ${layout === "list" ? "is-list" : ""}`}>
           {items.map((memory) => {
             const statusMeta = memoryStatusMeta(memory.status);
             const originMeta = memoryOriginMeta(memory.origin);
@@ -678,36 +702,9 @@ export function MemoryPanel({
             const busy = busyId === memory.id;
             const provenanceRows = memoryProvenanceRows(memory);
             const evidenceRows = memoryEvidenceRows(memory);
-            return (
-              <article className={`memory-card memory-${memory.status}`} key={memory.id}>
-                <div className="memory-card-head">
-                  <div className="memory-card-badges">
-                    <span className={`memory-badge tone-${statusMeta.tone}`}>{statusMeta.label}</span>
-                    <span className={`memory-badge tone-${originMeta.tone}`}>
-                      {memory.origin === "external_agent" ? <Bot size={13} /> : <Sparkles size={13} />}
-                      {originMeta.label}
-                    </span>
-                  </div>
-                  {canEditMemory(memory.status) && !editing && (
-                    <button type="button" className="memory-icon-action" onClick={() => beginEdit(memory)}>
-                      <Edit3 size={15} /> {memory.status === "candidate" ? "审核" : "编辑"}
-                    </button>
-                  )}
-                </div>
-
-                {editing ? (
-                  <MemoryEditor draft={draft} setDraft={setDraft} />
-                ) : (
-                  <>
-                    <h2>{memory.title}</h2>
-                    <MemoryBody content={memory.content_md} />
-                  </>
-                )}
-
-                {memory.tags.length > 0 && !editing && (
-                  <div className="memory-tags">{memory.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div>
-                )}
-
+            const isExpanded = expandedIds.has(memory.id);
+            const detailBlocks = (
+              <>
                 {provenanceRows.length > 0 && (
                   <details className="memory-provenance">
                     <summary><ChevronDown size={14} /> 来源与依据</summary>
@@ -731,6 +728,52 @@ export function MemoryPanel({
                       ))}
                     </div>
                   </details>
+                )}
+              </>
+            );
+            return (
+              <article className={`memory-card memory-${memory.status}`} key={memory.id}>
+                <div className="memory-card-head">
+                  <div className="memory-card-badges">
+                    <span className={`memory-badge tone-${statusMeta.tone}`}>{statusMeta.label}</span>
+                    <span className={`memory-badge tone-${originMeta.tone}`}>
+                      {memory.origin === "external_agent" ? <Bot size={13} /> : <Sparkles size={13} />}
+                      {originMeta.label}
+                    </span>
+                  </div>
+                  {canEditMemory(memory.status) && !editing && (
+                    <button type="button" className="memory-icon-action" onClick={() => beginEdit(memory)}>
+                      <Edit3 size={15} /> {memory.status === "candidate" ? "审核" : "编辑"}
+                    </button>
+                  )}
+                </div>
+
+                {editing ? (
+                  <>
+                    <MemoryEditor draft={draft} setDraft={setDraft} />
+                    {detailBlocks}
+                  </>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="memory-card-title"
+                      aria-expanded={isExpanded}
+                      onClick={() => toggleExpanded(memory.id)}
+                    >
+                      <h2>{memory.title}</h2>
+                      <ChevronDown size={18} className="memory-card-caret" aria-hidden="true" />
+                    </button>
+                    {memory.tags.length > 0 && (
+                      <div className="memory-tags">{memory.tags.map((tag) => <span key={tag}>#{tag}</span>)}</div>
+                    )}
+                    {isExpanded && (
+                      <>
+                        <MemoryBody content={memory.content_md} />
+                        {detailBlocks}
+                      </>
+                    )}
+                  </>
                 )}
 
                 <footer className="memory-card-footer">

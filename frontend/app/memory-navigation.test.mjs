@@ -21,12 +21,12 @@ test("global Memory has a stable outer-page location", () => {
   assert.deepEqual(parseMemoryHash("#memory"), { scope: "global", notebookId: null });
 });
 
-test("workspace tabs keep Ask, Knowledge, Memory, Deep Report in exact order", () => {
+test("workspace tabs keep 问答, 知识库, 记忆, 深度报告 in exact order", () => {
   assert.deepEqual(CHAT_MODES, [
-    ["ask", "Ask"],
-    ["rules", "Knowledge"],
-    ["memory", "Memory"],
-    ["reports", "Deep Report"],
+    ["ask", "问答"],
+    ["rules", "知识库"],
+    ["memory", "记忆"],
+    ["reports", "深度报告"],
   ]);
 });
 
