@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 
 from app.models.schemas import AskResponse
@@ -86,6 +88,7 @@ def test_preview_falls_back_deterministically_without_persisting(tmp_path, monke
             "evidence_level": "inferred",
             "citation_count": 0,
         },
+        "kg_extract_eligible": False,
     }
     assert client.get("/api/memories", headers=headers).json()["total_count"] == 0
 
@@ -129,3 +132,85 @@ def test_preview_llm_failure_uses_same_fallback(tmp_path, monkeypatch):
     assert preview.status_code == 200
     assert preview.json()["title"] == "Fallback title"
     assert preview.json()["content_md"] == "Fallback body"
+    assert preview.json()["kg_extract_eligible"] is False
+
+
+def test_preview_reflects_kg_extract_eligible_gate_including_llm_success_path(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'preview-eligibility.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("SILICON_NOTEBOOK_AUTH_OPTIONAL", "false")
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from app.main import create_app
+
+    client = TestClient(create_app())
+    registered = client.post(
+        "/api/auth/register", json={"username": "w00100023", "password": "pw"}
+    ).json()
+    headers = {"Authorization": f"Bearer {registered['token']}"}
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Eligibility preview"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+
+    answer_before = repo._runtime.ask_state.save_answer(
+        notebook_id,
+        None,
+        "Before KG?",
+        AskResponse(conclusion="Body before", answer="Body before"),
+        registered["user"]["id"],
+    )
+    before = client.post(
+        f"/api/answers/{answer_before}/memory-preview", headers=headers
+    )
+    assert before.status_code == 200, before.text
+    assert before.json()["kg_extract_eligible"] is False
+
+    # Cheapest row that flips notebook_has_kg -> True (mirrors
+    # test_memory_kg_lifecycle.py's end-to-end gate-opening insert).
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?)",
+            ("ko-preview-gate", notebook_id, "concept", "t", "t"),
+        )
+
+    answer_after = repo._runtime.ask_state.save_answer(
+        notebook_id,
+        None,
+        "After KG?",
+        AskResponse(conclusion="Body after", answer="Body after"),
+        registered["user"]["id"],
+    )
+    after = client.post(f"/api/answers/{answer_after}/memory-preview", headers=headers)
+    assert after.status_code == 200, after.text
+    assert after.json()["kg_extract_eligible"] is True
+
+    class SuccessfulClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return json.dumps(
+                {"title": "LLM title", "content_md": "LLM body", "tags": ["llm"]}
+            )
+
+    repo.llm_client = SuccessfulClient()
+    llm_answer = repo._runtime.ask_state.save_answer(
+        notebook_id,
+        None,
+        "LLM path?",
+        AskResponse(conclusion="Body llm", answer="Body llm"),
+        registered["user"]["id"],
+    )
+    llm_preview = client.post(
+        f"/api/answers/{llm_answer}/memory-preview", headers=headers
+    )
+    assert llm_preview.status_code == 200, llm_preview.text
+    assert llm_preview.json()["title"] == "LLM title"
+    assert llm_preview.json()["kg_extract_eligible"] is True

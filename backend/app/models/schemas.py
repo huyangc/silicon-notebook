@@ -81,6 +81,9 @@ class PaginatedMemories(BaseModel):
     owner_total_count: int = 0
     owner_pending_count: int = 0
     notebook_options: List[MemoryNotebookOption] = Field(default_factory=list)
+    # Notebook-scoped listing only (the gate needs a single notebook to
+    # evaluate); the cross-notebook user-level listing leaves this None.
+    kg_extract_eligible: Optional[bool] = None
 
 
 class MemoryPreview(BaseModel):
@@ -88,6 +91,7 @@ class MemoryPreview(BaseModel):
     content_md: str
     tags: List[str] = Field(default_factory=list)
     provenance_summary: Dict[str, Any] = Field(default_factory=dict)
+    kg_extract_eligible: bool = False
 
 
 class MemoryCreateFromAnswer(BaseModel):

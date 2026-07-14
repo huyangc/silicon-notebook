@@ -1653,6 +1653,11 @@
               "title": "Content Md",
               "type": "string"
             },
+            "kg_extract_eligible": {
+              "default": false,
+              "title": "Kg Extract Eligible",
+              "type": "boolean"
+            },
             "provenance_summary": {
               "additionalProperties": true,
               "title": "Provenance Summary",
@@ -2843,6 +2848,17 @@
               },
               "title": "Items",
               "type": "array"
+            },
+            "kg_extract_eligible": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kg Extract Eligible"
             },
             "limit": {
               "title": "Limit",

@@ -1642,6 +1642,21 @@ TASK3_MEMORY_KG_ALLOWED_MEMBER_FILES = {
 }
 TASK3_MEMORY_KG_ALLOWED_NEW_MEMBERS = {"memory_kg_eligible"}
 
+# Task 4 (memory-kg-extract): the API-surface tests extend two pre-existing
+# Memory route test files (test_memory_api.py / test_memory_preview.py, from
+# the earlier agent-memory feature) rather than adding new ones. Their new
+# eligibility-gate assertions reach two facade members for the first time in
+# those specific files: test_memory_api.py's new notebook-listing test calls
+# mark_notebook_base (previously only exercised via routes.py / other test
+# files), and test_memory_preview.py's new eligibility test is the first in
+# that file to seed KG state via repo._write() directly (its existing tests
+# only ever read/patch repo.llm_client). Both are ordinary frozen facade
+# members whose consumer set simply grows by one file, not new members.
+TASK4_MEMORY_KG_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_api.py", "mark_notebook_base"),
+    ("backend/tests/test_memory_preview.py", "_write"),
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2021,6 +2036,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK1_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK2_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK3_MEMORY_KG_ALLOWED_MEMBER_FILES
+    | TASK4_MEMORY_KG_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately

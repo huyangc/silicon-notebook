@@ -219,7 +219,7 @@ async def list_notebook_memories(
     user: UserProfile = Depends(get_current_user),
     service: MemoryRepository = Depends(memory_service),
 ) -> PaginatedMemories:
-    return await _memory_call(
+    page = await _memory_call(
         service.list_memories,
         user.id,
         notebook_id,
@@ -229,6 +229,10 @@ async def list_notebook_memories(
         offset,
         limit,
     )
+    page.kg_extract_eligible = await run_in_threadpool(
+        service.memory_kg_eligible, notebook_id
+    )
+    return page
 
 
 @memory_router.post(
@@ -336,6 +340,7 @@ async def preview_answer_memory(
     user: UserProfile = Depends(get_current_user),
     ask_state: AskStateStorePort = Depends(ask_state_repository),
     llm_client=Depends(memory_preview_client),
+    service: MemoryRepository = Depends(memory_service),
 ) -> MemoryPreview:
     can_read = await run_in_threadpool(
         notebook_access_repository().user_can_read_answer, answer_id, user.id
@@ -347,6 +352,9 @@ async def preview_answer_memory(
     except KeyError:
         raise _not_found("Answer not found")
 
+    kg_extract_eligible = await run_in_threadpool(
+        service.memory_kg_eligible, source["notebook_id"]
+    )
     fallback = MemoryPreview(
         title=source["question"][:80],
         content_md=_clean_answer(source["answer"]),
@@ -357,6 +365,7 @@ async def preview_answer_memory(
             "evidence_level": source["evidence_level"],
             "citation_count": len(source["citations"]),
         },
+        kg_extract_eligible=kg_extract_eligible,
     )
     if not getattr(llm_client, "configured", False):
         return fallback
@@ -378,6 +387,7 @@ async def preview_answer_memory(
             content_md=content_md,
             tags=tags,
             provenance_summary=fallback.provenance_summary,
+            kg_extract_eligible=kg_extract_eligible,
         )
     except Exception:
         return fallback
@@ -403,6 +413,7 @@ async def create_memory_from_answer(
             payload.title,
             payload.content_md,
             payload.tags,
+            payload.extract_kg,
         )
     except PermissionError:
         raise _not_found()
