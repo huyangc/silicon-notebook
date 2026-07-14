@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Trash2, Upload, X } from "lucide-react";
+import { BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -3323,11 +3323,16 @@ export default function Home() {
                     </button>
                     <div className="notebook-card-footer">
                       <p>{notebook.created_label} · {notebook.counts.sources ?? 0} 个来源</p>
-                      <button
-                        type="button"
-                        className="notebook-memory-link"
-                        onClick={() => openNotebookMemory(notebook.id).catch(reportError)}
-                      >{notebook.counts.memories ?? 0} Memory</button>
+                      <div className="notebook-card-footer-actions">
+                        {notebook.access !== "reader" && notebook.is_shared && (
+                          <span className="notebook-shared-badge" title="已分享" aria-label="已分享"><User size={14} /></span>
+                        )}
+                        <button
+                          type="button"
+                          className="notebook-memory-link"
+                          onClick={() => openNotebookMemory(notebook.id).catch(reportError)}
+                        >{notebook.counts.memories ?? 0} Memory</button>
+                      </div>
                     </div>
                   </article>
                 ))}
