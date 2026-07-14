@@ -175,11 +175,14 @@ class SourceStore:
     def report_source_rows(self, notebook_id: str) -> List[Dict[str, str]]:
         """Report corpus-map recon (Task 25): source titles in creation order,
         LIMIT 20 — the deep-report engine's scout cap.  SQL frozen from the
-        facade's inline query; strip/filter formatting stays engine-side."""
+        facade's inline query; strip/filter formatting stays engine-side.
+        memory-kg-extract: excludes source_type='memory' so a hidden Memory-
+        derived title is never shown to the report planner as a source doc
+        (its KG objects still participate via knowledge_objects)."""
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT title FROM sources WHERE notebook_id=? "
-                "ORDER BY created_at LIMIT 20",
+                "AND source_type != 'memory' ORDER BY created_at LIMIT 20",
                 (notebook_id,),
             ).fetchall()
         return [{"title": row["title"]} for row in rows]
@@ -535,10 +538,13 @@ class SourceStore:
         db: sqlite3.Connection, notebook_id: str, pending_source_id: str = ""
     ) -> List[dict]:
         """Title/doc_type/summary rows feeding notebook metadata augmentation
-        (Task 26: moved verbatim from the facade's `_notebook_meta_sources`)."""
+        (Task 26: moved verbatim from the facade's `_notebook_meta_sources`).
+        memory-kg-extract: excludes source_type='memory' so a hidden Memory-
+        derived source never contributes its title or inflates the count baked
+        into the auto-generated notebook name/description."""
         rows = db.execute(
-            "SELECT title, doc_type, summary FROM sources "
-            "WHERE notebook_id = ? AND (status = 'extracted' OR id = ?) "
+            "SELECT title, doc_type, summary FROM sources WHERE notebook_id = ? "
+            "AND source_type != 'memory' AND (status = 'extracted' OR id = ?) "
             "ORDER BY created_at ASC",
             (notebook_id, pending_source_id),
         ).fetchall()
