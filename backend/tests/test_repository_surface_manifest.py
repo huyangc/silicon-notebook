@@ -210,9 +210,10 @@ TASK27_ALLOWED_IMPORTS = {
     ("scripts/kg_product_smoke.py", 16, "app.services.sqlite_repository", "SQLiteRepository"),
     ("scripts/backfill_kg_embeddings.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
     ("scripts/replay_retrieval.py", 40, "app.services.sqlite_repository", "SQLiteRepository"),
-    # Line shifted 670->675 by Task 1 (memory-kg-extract)'s comments on the
+    # Line shifted 670->675 by Task 1 (memory-kg-extract)'s comments, then
+    # 675->677 by Task 5's two-line comment expansions on the same
     # verify_repository_snapshot.py line-number allowlist entries below it.
-    ("backend/tests/test_repository_callers_static.py", 675, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_repository_callers_static.py", 677, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -1399,23 +1400,25 @@ TASK28_ALLOWED_IMPORTS = {
     ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "set_request_user"),
 }
 # Line numbers shifted +32 by Task 1 (memory-kg-extract)'s MIGRATION_MANIFEST
-# v14 additions (incl. the (13, 14) deployed-DB hop) + compare exemption.
+# v14 additions, then a further +28 by Task 5's v15 additions
+# (SOURCES_PARSE_STATUS_TYPE_INDEX + every hop terminal bumped to 15 with that
+# index + the new (14, 15) hop).
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1055"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:1048"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:1033"),
-    ("get_report", "scripts/verify_repository_snapshot.py:1060"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:1036"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:1045"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:1039"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:1057"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:1034"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:996"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1000"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1002"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1027"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1069"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1043"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1083"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1076"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1061"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1088"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1064"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1073"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1067"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1085"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1062"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1024"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1028"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1030"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1055"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1097"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1071"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -1666,13 +1669,14 @@ TASK4_MEMORY_KG_ALLOWED_MEMBER_FILES = {
 # resolving them. Test-only compatibility consumers added after the frozen
 # pre-Memory-KG facade manifest.
 TASK5_MEMORY_KG_ALLOWED_IMPORTS = {
-    ("backend/tests/test_memory_source_visibility.py", 26, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_memory_source_visibility.py", 33, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK5_MEMORY_KG_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_memory_source_visibility.py", name)
     for name in {
-        "SQLiteRepository", "_runtime", "create_notebook", "get_notebook",
-        "notebook_analytics",
+        "SQLiteRepository", "_runtime", "_write", "create_notebook",
+        "get_notebook", "notebook_analytics", "search_notebook",
+        "shared_preview",
     }
 }
 
@@ -2017,6 +2021,12 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "scripts/smoke_backend.py",
     "backend/tests/test_sqlite_write_optimization.py",
     "backend/tests/test_notebook_counts_batched.py",
+    # Task 5 (memory-kg-extract) adds a covering-index EXPLAIN test + a new
+    # index existence assertion here, shifting the internal line numbers of its
+    # many facade-consumer sites (_connect / _write / create_notebook /
+    # notebook_analytics / _extraction_warning ...) without changing which
+    # members it exercises. Line numbers here are not API surface.
+    "backend/tests/test_sqlite_indexes.py",
 }
 
 ALL_TASK_ALLOWED_MEMBER_FILES = (

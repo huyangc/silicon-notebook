@@ -36,7 +36,12 @@ existing invalidate hooks cover them for free):
     extract, source/KG delete) bumps the seq or hits ``invalidate``.
 Sources COUNT / ``source_ids`` are deliberately NOT cached here: ``create_source``
 inserts a row without bumping the seq, so a seq-keyed memo would drift — and they
-are cheap (covering index), not the cold-open bottleneck.
+stay cheap without a memo. The user-facing source count
+(``QueryStore.visible_source_count``, ``AND source_type != 'memory'``) and the
+/analytics parse_status GROUP BY are both covering-only scans via
+``idx_sources_nb_parse_status_type`` (notebook_id, parse_status, source_type;
+migration 15), so neither回表s to the sources base table nor tops the cold-open
+budget.
 """
 from __future__ import annotations
 

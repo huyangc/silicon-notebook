@@ -11,7 +11,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1197,6 +1197,37 @@ class SqliteMigrator:
             db.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_memory_id "
                 "ON sources(memory_id) WHERE memory_id IS NOT NULL AND memory_id != ''"
+            )
+
+    def _migration_15(self) -> None:
+        """Covering index for the memory-filtered user-facing source counts.
+
+        memory-kg-extract Task 5 added `AND source_type != 'memory'` to the
+        /analytics parse_status GROUP BY (QueryStore.notebook_analytics) and to
+        NotebookSummary's per-open source COUNT (QueryStore.visible_source_count).
+        source_type is NOT in #249's idx_sources_nb_parse_status(notebook_id,
+        parse_status), so both queries lost their covering-only property and now
+        do a per-row rowid lookup on sources (48k rows at scale, on every board
+        open / list_notebooks). This 3-col index restores covering-only scans
+        for BOTH: (notebook_id, parse_status, source_type) keeps parse_status
+        2nd so the GROUP BY is still index-ordered (no transient sort) while
+        source_type rides along in the index for the != filter. Column order
+        confirmed by EXPLAIN QUERY PLAN (both queries USING COVERING INDEX, no
+        TEMP B-TREE); (notebook_id, source_type, parse_status) was rejected —
+        it forces USE TEMP B-TREE FOR GROUP BY.
+
+        Deployed DBs at user_version>=1 short-circuit _migration_1, so this
+        needs its own step; a fresh DB runs it too in the same migrate() sweep,
+        so fresh == upgraded (the idx is created here only, mirroring Task 1's
+        _migration_14). sources is a secondary table, so a new index on it
+        cannot perturb rebuild's ORDER BY rowid canonical ordering. The older
+        2-col idx_sources_nb_parse_status is left in place (a strict prefix,
+        frozen into several schema-contract goldens); the planner deterministically
+        prefers this covering superset for the filtered queries."""
+        with self._connect() as db:
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sources_nb_parse_status_type "
+                "ON sources(notebook_id, parse_status, source_type)"
             )
 
     def _recover_interrupted_jobs(self) -> None:

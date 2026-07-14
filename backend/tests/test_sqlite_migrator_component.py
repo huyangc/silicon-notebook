@@ -13,11 +13,12 @@ def test_initialize_orders_migrate_recover_seed():
     assert calls == ["migrate", "recover", "seed"]
 
 
-def test_schema_version_constant_is_v14():
-    # master v11/v12 hot-path indexes、Memory / Agent v13 migration 与 Task 1
-    # 的 sources.memory_id v14 migration 均保留；与 facade 模块级 SCHEMA_VERSION、
-    # test_follow_chain 守卫同步。
-    assert SCHEMA_VERSION == 14
+def test_schema_version_constant_is_v15():
+    # master v11/v12 hot-path indexes、Memory / Agent v13 migration、Task 1 的
+    # sources.memory_id v14 migration 与 Task 5 的 parse_status/source_type 覆盖
+    # 索引 v15 migration 均保留；与 facade 模块级 SCHEMA_VERSION、test_follow_chain
+    # 守卫同步。
+    assert SCHEMA_VERSION == 15
 
 
 def test_add_column_guard_on_missing_table(tmp_path):
