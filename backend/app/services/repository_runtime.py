@@ -309,6 +309,7 @@ class RepositoryRuntime:
             self.seams.new_id,
             self.seams.now,
             embedding_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
+            kg_ingest_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
         )
         self.memory_retriever = MemoryRetriever(self.memory_store, self.embedder)
         self.catalog.memory_retriever = self.memory_retriever
@@ -543,6 +544,13 @@ class RepositoryRuntime:
             apply_notebook_meta=apply_notebook_meta,
             maybe_enqueue_scale_fold=self.scale_artifacts.maybe_enqueue_fold,
         )
+        # Memory-KG bridge (memory-kg-extract Task 3): MemoryService is wired
+        # earlier (wire_memory, before wire_knowledge_lifecycle), but
+        # source_ingestion only exists from this point on — this is the first
+        # seam where both components are ready, mirroring the defensive
+        # set_promotion_service call in wire_knowledge_lifecycle.
+        if self.memory_service is not None:
+            self.memory_service.set_memory_kg_service(self.source_ingestion)
         return self.source_ingestion
 
     def wire_kg_mutations(

@@ -1619,6 +1619,29 @@ TASK2_MEMORY_KG_ALLOWED_MEMBER_FILES = {
     }
 }
 
+# Task 3 (memory-kg-extract): the MemoryService lifecycle-hook tests compose
+# the real facade + runtime directly (same repo fixture pattern as the Task
+# 1/2 files above) to prove confirm/create_from_answer/update/deprecate
+# scheduling a `_KgStub` in place of the real SourceIngestionService. New
+# facade member `memory_kg_eligible` (one-hop delegate to
+# `self._runtime.source_ingestion.memory_kg_eligible`) postdates the frozen
+# facade_surface fixture, so it is exempted from the consumer-scan
+# comparison entirely — exactly like STARTUP_READINESS_ALLOWED_NEW_MEMBERS
+# does for warm_open_path_caches — instead of regenerating the frozen golden.
+TASK3_MEMORY_KG_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_kg_lifecycle.py", 32, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_memory_kg_lifecycle.py", 32, "app.services.sqlite_repository", "reset_request_user"),
+    ("backend/tests/test_memory_kg_lifecycle.py", 32, "app.services.sqlite_repository", "set_request_user"),
+}
+TASK3_MEMORY_KG_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_kg_lifecycle.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "create_notebook", "create_user",
+        "reset_request_user", "set_request_user",
+    }
+}
+TASK3_MEMORY_KG_ALLOWED_NEW_MEMBERS = {"memory_kg_eligible"}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -1997,6 +2020,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | STARTUP_READINESS_ALLOWED_MEMBER_FILES
     | TASK1_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK2_MEMORY_KG_ALLOWED_MEMBER_FILES
+    | TASK3_MEMORY_KG_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2570,6 +2594,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in SQLITE_CONN_REUSE_ALLOWED_IMPORTS
                     or site in TASK1_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK2_MEMORY_KG_ALLOWED_IMPORTS
+                    or site in TASK3_MEMORY_KG_ALLOWED_IMPORTS
                 )
 
 
@@ -2817,6 +2842,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | TASK8_MEMORY_ALLOWED_NEW_MEMBERS
         | SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS
         | STARTUP_READINESS_ALLOWED_NEW_MEMBERS
+        | TASK3_MEMORY_KG_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)

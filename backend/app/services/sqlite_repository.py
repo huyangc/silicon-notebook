@@ -1182,11 +1182,14 @@ class SQLiteRepository:
 
     def create_memory_from_answer(
         self, notebook_id: str, user_id: str, answer_id: str, title: str,
-        content_md: str, tags: List[str],
+        content_md: str, tags: List[str], extract_kg: bool = True,
     ) -> MemoryRecord:
         return self._runtime.memory_service.create_from_answer(
-            notebook_id, user_id, answer_id, title, content_md, tags
+            notebook_id, user_id, answer_id, title, content_md, tags, extract_kg
         )
+
+    def memory_kg_eligible(self, notebook_id: str) -> bool:
+        return self._runtime.source_ingestion.memory_kg_eligible(notebook_id)
 
     def update_memory(
         self, memory_id: str, user_id: str, patch: MemoryUpdate

@@ -108,6 +108,7 @@ class MemoryService:
         new_id,
         now,
         embedding_scheduler: Callable[[Callable[[MemoryEmbeddingJob], MemoryRecord], MemoryEmbeddingJob], Any] | None = None,
+        kg_ingest_scheduler: Callable[[Callable[[tuple[str, str]], None], tuple[str, str]], Any] | None = None,
     ) -> None:
         self.store = store
         self.ask_state = ask_state
@@ -117,10 +118,37 @@ class MemoryService:
         self.new_id = new_id
         self.now = now
         self.embedding_scheduler = embedding_scheduler or (lambda fn, item: fn(item))
+        self.kg_ingest_scheduler = kg_ingest_scheduler or (lambda fn, item: fn(item))
         self.promotion_service: Any | None = None
+        self.memory_kg: Any | None = None
 
     def set_promotion_service(self, service: Any) -> None:
         self.promotion_service = service
+
+    def set_memory_kg_service(self, service: Any) -> None:
+        self.memory_kg = service
+
+    def _maybe_schedule_kg(self, item: MemoryRecord, extract_kg: bool) -> None:
+        if (
+            self.memory_kg is None
+            or not extract_kg
+            or not self.memory_kg.memory_kg_eligible(item.notebook_id)
+        ):
+            return
+        self.kg_ingest_scheduler(self._kg_ingest_job, (item.id, item.created_by))
+
+    def _kg_ingest_job(self, key: tuple[str, str]) -> None:
+        memory_id, user_id = key
+        try:
+            item = self.store.memory_for_user(memory_id, user_id)
+        except KeyError:
+            return
+        if item.status != "confirmed":
+            return  # deprecated/rejected race: converges on its own
+        self.memory_kg.ingest_memory_source(
+            item.notebook_id, item.id, item.title, item.content_md
+        )
+        self._event("memory_kg", item, action="ingested")
 
     @staticmethod
     def _promotion_candidates(item: MemoryRecord) -> list[dict[str, Any]]:
@@ -378,6 +406,7 @@ class MemoryService:
         else:
             values = dict(patch)
         reason = normalize_reason(values.pop("reason", "") or "")
+        values.pop("extract_kg", None)
         unknown = set(values) - {"title", "content_md", "tags"}
         if unknown:
             raise ValueError(f"unsupported memory fields: {sorted(unknown)}")
@@ -534,6 +563,7 @@ class MemoryService:
         title: str,
         content_md: str,
         tags: Sequence[str],
+        extract_kg: bool = True,
     ) -> MemoryRecord:
         title = normalize_title(title)
         content_md = normalize_content(content_md)
@@ -588,6 +618,7 @@ class MemoryService:
         if item.id != write.id:
             return item
         self._event("memory_lifecycle", item, action="answer_confirmed")
+        self._maybe_schedule_kg(item, extract_kg)
         return self._schedule_embed(item)
 
     def update(
@@ -608,7 +639,14 @@ class MemoryService:
             reason=reason or "updated",
         )
         self._event("memory_lifecycle", item, action="updated")
-        return self._schedule_embed(item) if item.status == "confirmed" else item
+        if item.status != "confirmed":
+            return item
+        if (
+            self.memory_kg is not None
+            and self.memory_kg.memory_source_id(item.id) is not None
+        ):
+            self.kg_ingest_scheduler(self._kg_ingest_job, (item.id, item.created_by))
+        return self._schedule_embed(item)
 
     def confirm(
         self,
@@ -616,6 +654,7 @@ class MemoryService:
         user_id: str,
         patch: MemoryUpdate | Mapping[str, Any] | None = None,
     ) -> MemoryRecord:
+        extract_kg = getattr(patch, "extract_kg", None)
         values, reason = self._patch(patch)
         item = self.store.transition_with_revision(
             memory_id,
@@ -627,6 +666,7 @@ class MemoryService:
             reason=reason or "confirmed",
         )
         self._event("memory_lifecycle", item, action="confirmed")
+        self._maybe_schedule_kg(item, extract_kg is not False)
         return self._schedule_embed(item)
 
     def reject(self, memory_id: str, user_id: str) -> MemoryRecord:
@@ -653,6 +693,8 @@ class MemoryService:
             reason="deprecated",
         )
         self._event("memory_lifecycle", item, action="deprecated")
+        if self.memory_kg is not None:
+            self.memory_kg.remove_memory_source(item.id)
         return item
 
     def delete(self, memory_id: str, user_id: str) -> None:

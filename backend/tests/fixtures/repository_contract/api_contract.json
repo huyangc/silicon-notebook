@@ -1594,6 +1594,11 @@
               "title": "Content Md",
               "type": "string"
             },
+            "extract_kg": {
+              "default": true,
+              "title": "Extract Kg",
+              "type": "boolean"
+            },
             "tags": {
               "items": {
                 "type": "string"
@@ -1612,6 +1617,34 @@
             "content_md"
           ],
           "title": "MemoryCreateFromAnswer",
+          "type": "object"
+        },
+        "MemoryNotebookOption": {
+          "properties": {
+            "memory_count": {
+              "title": "Memory Count",
+              "type": "integer"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "pending_count": {
+              "title": "Pending Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "notebook_id",
+            "name",
+            "memory_count",
+            "pending_count"
+          ],
+          "title": "MemoryNotebookOption",
           "type": "object"
         },
         "MemoryPreview": {
@@ -1797,6 +1830,17 @@
                 }
               ],
               "title": "Content Md"
+            },
+            "extract_kg": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Extract Kg"
             },
             "reason": {
               "anyOf": [
@@ -2837,34 +2881,6 @@
             "limit"
           ],
           "title": "PaginatedMemories",
-          "type": "object"
-        },
-        "MemoryNotebookOption": {
-          "properties": {
-            "memory_count": {
-              "title": "Memory Count",
-              "type": "integer"
-            },
-            "name": {
-              "title": "Name",
-              "type": "string"
-            },
-            "notebook_id": {
-              "title": "Notebook Id",
-              "type": "string"
-            },
-            "pending_count": {
-              "title": "Pending Count",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "notebook_id",
-            "name",
-            "memory_count",
-            "pending_count"
-          ],
-          "title": "MemoryNotebookOption",
           "type": "object"
         },
         "PaginatedSources": {
