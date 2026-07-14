@@ -13,7 +13,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { ArrowDown, ArrowLeft, ArrowUp, CheckSquare, Download, Plus, Sparkles, Square, Trash2, X } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, Check, CheckSquare, Copy, Download, Plus, Sparkles, Square, Trash2, X } from "lucide-react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -125,6 +125,23 @@ function downloadMd(r: ReportDetailT) {
   a.download = `report-${r.id}.md`;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+// 复制正文到剪贴板:优先 navigator.clipboard,回退到隐藏 textarea + execCommand。
+async function copyReportContent(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +502,7 @@ export function ReportsPanel({
 }: ReportsPanelProps) {
   const [reports, setReports] = useState<ReportSummaryT[] | null>(null);
   const [active, setActive] = useState<ReportDetailT | null>(null);
+  const [copied, setCopied] = useState(false);
   const [question, setQuestion] = useState("");
   const [depthIdx, setDepthIdx] = useState(1); // 默认「标准」(depth=2)
   const [depthOpen, setDepthOpen] = useState(false);
@@ -750,6 +768,19 @@ export function ReportsPanel({
                 onClick={() => void requestCancel()}
               >
                 <Square size={12} /> {active.status === "planning" ? "取消规划" : "取消生成"}
+              </button>
+            )}
+            {active.content_md && (
+              <button
+                className="report-action"
+                type="button"
+                onClick={() => {
+                  copyReportContent(active.content_md)
+                    .then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1600); })
+                    .catch(() => undefined);
+                }}
+              >
+                {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "已复制" : "复制"}
               </button>
             )}
             {active.content_md && (
