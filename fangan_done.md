@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-07-12
+更新日期：2026-07-13
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -19,6 +19,9 @@
 -> 混合检索（关键词 + 向量余弦，含 payload 级向量）
 -> KG-native Ask（chunk / graph / reasoning，带 citation 校验）
 -> Knowledge 浏览与治理
+-> Ask 回答手动保存 / Agent candidate 审核 -> 私有 notebook-bound Memory
+-> confirmed Memory 融入 Ask / notebook 搜索 / Deep Report
+-> scoped Agent token -> Streamable HTTP MCP 使用 notebook 知识与候选记忆
 -> Deep Report 两阶段规划 / 生成 / 导出
 -> 用户反馈 useful / not useful
 ```
@@ -63,12 +66,12 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 ## 5. Notebook 工作区界面
 
-- 两列工作区：左 Source Stack / 右侧主区域；主区域为问答 / 知识库 / 深度报告三个 tab，固定 Studio 右栏已移除。
+- 两列工作区：左 Source Stack / 右侧主区域；主区域为 Ask / Knowledge / Memory / Deep Report 四个 tab，固定 Studio 右栏已移除。
 - 左上角 notebook 名称可编辑保存；左栏显示来源数量、仅显示用户导入文件；网络来源检索保留为 disabled affordance。
 - Notebook 顶栏保持紧凑：标题下不再渲染 description，description 在没有对话时进入问答欢迎态；顶部分析工具栏具备横向 overflow 保护，桌面宽度下动作标签不会被截断。
 - source card 可打开 source detail，查看元素级文本，支持手动重解析。
 - **来源状态轮询**：上传后对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`（~3min 上限），实时展示 queued→parsing→parsed→extracting→extracted/failed；到达 extracted 自动刷新候选数与 counts。
-- **主栏当前 tab**：问答 / 知识库 / 深度报告；Scenario / Case / Checklist 已退役。
+- **主栏当前 tab**：Ask / Knowledge / Memory / Deep Report；Scenario / Case / Checklist 已退役。
   - 问答：自由提问走 `/ask`（已移除写死 scenario）；支持多个 conversation/session，会话历史通过顶部紧凑上下文栏 + 可展开会话管理面板切换/新建/重命名/删除，避免把主问答区长期切成更窄的左右两栏；欢迎区标题与 prompt chips 会根据 notebook 已导入来源的标题/摘要生成，并触发真实 ask。输入框支持 `Enter` 发送、`Shift+Enter` 换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制并恢复草稿问题。
   - 深度报告：两阶段后台 job，先审阅大纲再生成各节；支持实时进度、取消、删除、Markdown 与批量 zip 导出。
   - **知识库（多类型浏览）**：前端从 `/knowledge-types` 动态获取对象类型，再用 `/knowledge?type=...` 浏览任意类型（Concept / Claim / Formula / Procedure 以及 legacy/custom 类型）；卡片含状态徽标 + 状态下拉（reviewed/approved/deprecated/conflict/project_specific）+ owner 内联编辑 → `PATCH /knowledge/{id}`；按状态过滤；「查重」「冲突」面板（重复组带合并按钮、冲突对展示）。
@@ -287,6 +290,47 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **配置旋钮**：新增 `kg_window_target_chars/overlap`、`kg_extract_workers`、`kg_window_warn_threshold`、`embed_concurrency/batch_size/truncate_chars/persist_chunk`、`db_busy_timeout_ms`、`retrieval_top_n`。
 - **死代码清理（历史记录修正）**：当时先移除了 `/case-search`、`/checklist`、`/sources/{id}/extract` 等 legacy；其后 articles / derived-rules 也已从当前 runtime 移除。当前保留的是通用 knowledge 治理、duplicates/merge/conflicts、reports 与图谱治理路径。
 - **验证**：`bash scripts/check.sh` 通过（py_compile + KG-native smoke + 前端 `tsc --noEmit`）。
+
+## 27. Agent Memory 与 MCP（方案 §19；Agent Memory 设计 §4～§13）
+
+- **独立 Memory 层**：schema v13 增加 `memory_items`、revision、provenance、embedding/FTS、
+  Agent profile/token/allowlist 表。每条 Memory 同时绑定 `created_by` 与一个 notebook；总 Memory
+  页面只聚合当前用户，notebook 卡片以批量 summary query 显示当前用户数量，工作区标签为
+  `Ask | Knowledge | Memory | Deep Report`。共享 notebook 不共享成员 Memory。
+- **手动回答沉淀**：Ask 回答提供“保存到 Memory”，先调用 preview、允许编辑，再由用户确认写入
+  confirmed Memory 和可信 answer/citation provenance。同一用户重复保存同一 answer 幂等返回已有
+  Memory；预览后 answer 删除则保存返回冲突。未配置或调用失败的 LLM 使用问题标题 + 清理显示引用
+  后的回答作为确定性 fallback。
+- **生命周期与权限**：Agent 只能创建 candidate；用户可编辑、确认、拒绝、弃用。Candidate 在同一
+  用户、同一 notebook 下由具备 `memory:read_candidates` 的所有 Agent profile 共享；不同用户、
+  不同 notebook、rejected/deprecated 均排除。用户丢失 notebook 访问权时 Memory 暂不可读/检索；
+  notebook 删除按 FK 生命周期级联成员绑定的私有 Memory，前端删除确认已有不泄露成员明细的警告。
+- **输入合同**：Pydantic/API、service/internal 与 MCP 共用同一 Memory normalizer；tag 原始序列先
+  校验最多 20 条，再 trim/去重，空白 tag fail-closed 拒绝，避免重复/空白绕过数量上限。
+- **两个检索平面**：candidate+confirmed 只进入 scoped Agent Memory 平面；正式 notebook Ask、
+  notebook 搜索、Deep Report 与 `search_notebook_context` 只接收 confirmed。Memory 命中使用独立
+  anchor/provenance，不伪造 source/element id。排序先判相关性，只有等分/冲突再应用
+  `candidate < personal source < confirmed Memory < base KG/base source` 权威规则。
+- **Agent 接入 UI 与 token**：总 Memory 页可创建/停用稳定 Agent profile，签发明文只显示一次的
+  opaque token，配置默认 notebook、notebook allowlist、过期时间与最小 scope，并列出、撤销 token。
+  Scope 为 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
+  `ask:execute`；撤销、过期、profile 停用或 notebook 权限变化会在后续调用重新校验并立即生效。
+- **官方 MCP Streamable HTTP**：`/mcp` 提供精确七工具 `list_notebooks`、`select_notebook`、
+  `search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、
+  `propose_memory`。每个新 session 必须先显式选择 allowlisted notebook；数据工具继续校验 notebook，
+  候选只能提交不能由 Agent 确认/拒绝/弃用/晋升。loopback 可用 HTTP，非 loopback/public URL 强制
+  HTTPS；返回私有文本按不可信 evidence 处理并做长度/结果数上限。
+- **Memory → KG**：仅 confirmed 且尚未提案的 Memory 可由创建者提议；既有 admin promotion
+  queue 展示脱敏后的结构化提取候选与服务端验证过的 evidence，不提供原始 Memory
+  revision/provenance 浏览。编辑或弃用 proposed Memory 会在同一事务中拒绝活跃队列项、保留固定
+  快照审计、清除当前 proposal 指针与 promotion 状态。批准前重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权，批准
+  复用 dedupe/merge，创建或合并一个或多个 Base KG 对象；API 与晋升审计保存完整
+  `base_object_ids`。私有 Memory 的 owner/status 不改变，完整私有任务上下文不进入 Base KG 对象。
+- **确定性评价与验证**：固定 gold 计算 Recall@5/MRR/nDCG，candidate→正式平面、跨用户、跨
+  notebook 三个泄漏计数均为 0；A/B harness 覆盖 no-Memory、KB-only、KB+confirmed-Memory。
+  `scripts/check.sh` 已包含官方 `mcp` client 离线 smoke，验证七工具、session 选择隔离、candidate
+  正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2939 passed, 1 skipped`、
+  前端 `189 passed`、TypeScript 与 Next.js production build 均成功。
 
 ## 20. 当前边界（后续阶段，未计入已完成）
 

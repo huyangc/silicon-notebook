@@ -58,6 +58,8 @@ PY
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/smoke_backend.py"
 
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/smoke_memory_mcp.py"
+
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/check_ask_modes_contract.py"
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -m pytest -p no:cacheprovider "$ROOT_DIR/backend/tests"

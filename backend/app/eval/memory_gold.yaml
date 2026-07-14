@@ -1,0 +1,29 @@
+{
+  "cases": [
+    {
+      "id": "notebook-confirmed-only",
+      "plane": "notebook",
+      "user_id": "alice",
+      "notebook_id": "timing",
+      "query": "timing closure",
+      "expected": ["memory-confirmed-timing"]
+    },
+    {
+      "id": "agent-candidate-same-owner",
+      "plane": "agent",
+      "user_id": "alice",
+      "notebook_id": "timing",
+      "query": "agent constraint candidate",
+      "include_candidates": true,
+      "expected": ["memory-candidate-constraint"]
+    },
+    {
+      "id": "notebook-isolation",
+      "plane": "notebook",
+      "user_id": "bob",
+      "notebook_id": "power",
+      "query": "power integrity",
+      "expected": ["memory-bob-power"]
+    }
+  ]
+}

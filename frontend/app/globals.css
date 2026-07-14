@@ -63,6 +63,32 @@ button {
   border-bottom: 1px solid #e2e5f0;
 }
 
+.outer-nav {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #d9deea;
+  border-radius: 999px;
+  padding: 3px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.outer-nav button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 15px;
+  background: transparent;
+  color: #5d6675;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.outer-nav button.active {
+  background: #151922;
+  color: #fff;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -294,7 +320,7 @@ button {
 
 .notebook-card-main {
   width: 100%;
-  min-height: 100%;
+  min-height: 0;
   display: grid;
   align-content: start;
   gap: 16px;
@@ -367,9 +393,25 @@ button {
 .notebook-card-footer {
   display: flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: space-between;
   gap: 8px;
   margin-top: 6px;
+}
+
+.notebook-memory-link {
+  flex: 0 0 auto;
+  border: 1px solid rgba(75, 83, 99, .2);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: rgba(255, 255, 255, .58);
+  color: #4d4bb4;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.notebook-memory-link:hover {
+  border-color: #6965d8;
+  background: #fff;
 }
 
 .card-search-hits {
@@ -432,7 +474,7 @@ button {
 .notebook-list-header,
 .notebook-list-row {
   display: grid;
-  grid-template-columns: minmax(320px, 1.7fr) minmax(130px, 0.75fr) minmax(150px, 0.95fr) minmax(110px, 0.65fr) 42px;
+  grid-template-columns: minmax(300px, 1.6fr) minmax(110px, .7fr) minmax(100px, .6fr) minmax(140px, .85fr) minmax(90px, .55fr) 42px;
   align-items: center;
   column-gap: 22px;
 }
@@ -461,6 +503,14 @@ button {
   background: transparent;
   color: #25292f;
   text-align: left;
+}
+
+.notebook-list-cell.notebook-memory-link {
+  align-self: center;
+  min-height: 34px;
+  justify-content: flex-start;
+  width: max-content;
+  padding: 0 10px;
 }
 
 .notebook-list-title {
@@ -4313,7 +4363,7 @@ button.chat-session-card {
 @media (max-width: 1100px) {
   .notebook-list-header,
   .notebook-list-row {
-    grid-template-columns: minmax(260px, 1.4fr) 120px 140px 90px 42px;
+    grid-template-columns: minmax(240px, 1.3fr) 110px 95px 130px 80px 42px;
     column-gap: 16px;
   }
 
@@ -4332,6 +4382,20 @@ button.chat-session-card {
 }
 
 @media (max-width: 760px) {
+  .topbar {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 56px;
+    gap: 8px;
+    padding-block: 8px;
+  }
+
+  .outer-nav {
+    order: 3;
+    width: 100%;
+    justify-content: center;
+  }
+
   .library-toolbar {
     display: grid;
   }

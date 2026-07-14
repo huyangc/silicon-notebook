@@ -66,6 +66,32 @@ _MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
 _LOOSE_MARKER_GROUP_RE = re.compile(r"\[\s*k\d+(?:\s*,\s*k\d+)*\s*\]")
 
 
+def _graph_classification_hits(
+    *, top_hits, memory_hits, anchors, neighbour_relevance: float, notebook_id: str
+):
+    """Build graph-mode classifier evidence without inflating Memory scores.
+
+    Graph nodes reached through a verified chain may inherit discounted seed
+    relevance. Memory anchors already have their own retrieval score and must
+    never be mistaken for graph neighbours.
+    """
+    hits = list(top_hits) + list(memory_hits)
+    scored_oids = {hit.object_id for hit in hits}
+    for anchor in anchors:
+        if anchor.object_id in scored_oids or anchor.object_type == "memory":
+            continue
+        scored_oids.add(anchor.object_id)
+        hits.append(RetrievedKnowledge(
+            object_id=anchor.object_id,
+            object_type=anchor.object_type,
+            payload={"name": anchor.name},
+            relevance=neighbour_relevance,
+            tier=getattr(anchor, "tier", "personal"),
+            notebook_id=notebook_id,
+        ))
+    return hits
+
+
 def _strip_unbound_markers(answer: str, bound_keys: set) -> str:
     """Normalise the `[k…]`-shaped tokens in `answer` against `bound_keys` (the
     keys that actually resolved to an anchor):
@@ -125,6 +151,7 @@ class AskService:
     # mix 合成的 KG 段编号基点 / prompt 结构预留 token(与 facade 冻结常量同值)。
     _MIX_KG_KEY_BASE = 1000
     _MIX_PROMPT_BUFFER_TOKENS = 2000
+    _MEMORY_KEY_BASE = 3000
 
     def __init__(
         self,
@@ -145,6 +172,7 @@ class AskService:
         schemas,
         community_reports: Callable[[str], list],
         source_titles: Callable[[List[str]], Dict[str, str]],
+        memory_retriever=None,
         current_user_id: Callable[[], str] = lambda: "",
         cancellations=None,
     ) -> None:
@@ -164,6 +192,7 @@ class AskService:
         self.schemas = schemas
         self.community_reports = community_reports
         self.source_titles = source_titles
+        self.memory_retriever = memory_retriever
         self.current_user_id = current_user_id
         self.cancellations = cancellations
 
@@ -325,6 +354,43 @@ class AskService:
     def _parse_answer_anchors(self, answer: str, id_map: dict) -> list:
         return self.evidence_context.parse_anchors(answer, id_map)
 
+    def _memory_hits(self, user_id: str, notebook_id: str, query: str):
+        if self.memory_retriever is None:
+            return []
+        return self.memory_retriever.notebook_memory_hits(
+            user_id, notebook_id, query, 8
+        )
+
+    def _append_memory_context(self, context_block: str, id_map: dict, hits):
+        if not hits:
+            return context_block, id_map
+        block, memory_map = self.memory_retriever.context(
+            hits, id_offset=self._MEMORY_KEY_BASE
+        )
+        if block and block != "(none)":
+            context_block = f"{context_block}\n\n[Confirmed Memory]\n{block}"
+        return context_block, {**id_map, **memory_map}
+
+    @staticmethod
+    def _memory_citations(anchors, hits) -> list[Citation]:
+        by_id = {hit.memory_id: hit for hit in hits}
+        out: list[Citation] = []
+        for anchor in anchors:
+            hit = by_id.get(anchor.object_id) if anchor.object_type == "memory" else None
+            if hit is None:
+                continue
+            out.append(Citation(
+                label=f"Memory · {hit.title}",
+                source_id="",
+                element_id="",
+                location_label="Memory",
+                quoted_span=hit.text[:200],
+                tier="personal",
+                memory_id=hit.memory_id,
+                provenance=dict(hit.provenance),
+            ))
+        return out
+
     def _needs_index(self, notebook_id: str) -> bool:
         """大库且磁盘完全无 scale 索引(从未建过)→ True。用于 AskResponse.index_required:
         大库检索强制走索引,无索引时检索降级(FTS/skip/refuse),需提示用户手动建索引。
@@ -365,6 +431,7 @@ class AskService:
         history="",
         cancel_event: CancelEvent = None,
         notebook_id: str = "",
+        memory_hits=None,
     ) -> tuple:
         """长上下文综合:把 MMR 精选的 chunk 原文喂给答案 LLM。返回
         (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。
@@ -372,6 +439,9 @@ class AskService:
         chunk 自带 notebook_id(跨库召回)优先,这只是单库 chunk 的回退值。"""
         raise_if_cancelled(cancel_event)
         context_block, id_map = self._chunk_answer_context(chunks, notebook_id=notebook_id)
+        context_block, id_map = self._append_memory_context(
+            context_block, id_map, memory_hits or []
+        )
         llm_client = self.model_clients.llm_client
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
@@ -397,6 +467,7 @@ class AskService:
         history="",
         cancel_event: CancelEvent = None,
         notebook_id: str = "",
+        memory_hits=None,
     ) -> tuple:
         """mix 长上下文综合:chunk 段(k1..kN)+ KG 段(k1001+),统一 id_map。
         chunk 段不再二次预算(选择阶段已 token 预算),故 budget_chars 给极大值。
@@ -414,6 +485,9 @@ class AskService:
         else:
             context_block = chunk_block
         id_map = {**chunk_id_map, **kg_id_map}
+        context_block, id_map = self._append_memory_context(
+            context_block, id_map, memory_hits or []
+        )
         llm_client = self.model_clients.llm_client
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
@@ -536,6 +610,7 @@ class AskService:
         cancel_event: CancelEvent = None,
         chunks=None,
         chains=None,
+        memory_hits=None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -562,6 +637,9 @@ class AskService:
             id_map = {**chunk_id_map, **kg_id_map}
         else:
             context_block, id_map = self._answer_context(notebook_id, top_hits)
+        context_block, id_map = self._append_memory_context(
+            context_block, id_map, memory_hits or []
+        )
         if chains:
             from app.services.kg.follow_chain import render_follow_chain_context
             chain_block, chain_id_map = render_follow_chain_context(chains, id_offset=2000)
@@ -640,6 +718,7 @@ class AskService:
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
         retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
+        memory_hits = self._memory_hits(user_id, notebook_id, retrieval_query)
 
         _err_sink: list = []
         _err_token = _ASK_MODEL_ERRORS.set(_err_sink)
@@ -748,16 +827,17 @@ class AskService:
             synth_failed = False
             _t = time.perf_counter()
             raise_if_cancelled(cancel_event)
-            if self.model_clients.llm_client.configured and (selected or kg_id_map):
+            if self.model_clients.llm_client.configured and (selected or kg_id_map or memory_hits):
                 # 空 content 有界重试 + 诚实降级 + 可观测(见 _answer_with_retry docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     lambda: (self._answer_mix(
                                  question, selected, kg_block, kg_id_map, history,
-                                 cancel_event=cancel_event, notebook_id=notebook_id)
+                                 cancel_event=cancel_event, notebook_id=notebook_id,
+                                 memory_hits=memory_hits)
                              if overlay_on else
                              self._answer_chunks(
                                  question, selected, history, cancel_event=cancel_event,
-                                 notebook_id=notebook_id)),
+                                 notebook_id=notebook_id, memory_hits=memory_hits)),
                     getattr(self.model_clients.llm_client, "model", None)
                     or self.settings.openai_compat_model)
                 synth_failed = not _ok
@@ -794,9 +874,10 @@ class AskService:
                         source_id=c.source_id, element_id=eid,
                         location_label=c.section_path, quoted_span=c.text[:200],
                         tier=_chunk_tier(c)))
+            citations.extend(self._memory_citations(anchors, memory_hits))
 
             # grounding 在 chunk∪KG 合并集上;各项用其融合 relevance(rerank 分不参与)。
-            combined_hits = list(selected) + list(kg_hits)
+            combined_hits = list(selected) + list(kg_hits) + list(memory_hits)
             evidence_level, top_relevance = classify_evidence(
                 combined_hits, anchors, llm_grounded,
                 self.settings.evidence_tau_low, self.settings.evidence_tau_high)
@@ -861,12 +942,14 @@ class AskService:
             notebook_id, payload.conversation_id, question, user_id)
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
+        memory_hits = self._memory_hits(user_id, notebook_id, question)
 
         if self._primary_llm_unconfigured():
             return self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "reasoning", user_id=user_id)
 
-        if not (self.candidates.has_kg(notebook_id)
+        if not memory_hits and not (
+                self.candidates.has_kg(notebook_id)
                 or self.candidates.any_base_has_kg()):
             response = AskResponse(
                 answer_id="",
@@ -936,12 +1019,13 @@ class AskService:
             synth_failed = False
             raise_if_cancelled(cancel_event)
             if self.model_clients.reasoning_llm_client.configured and (
-                    top_hits or elements or chunks or chains):
+                    top_hits or elements or chunks or chains or memory_hits):
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     lambda: self._answer_reasoning(
                         notebook_id, question, top_hits, elements, history,
-                        cancel_event=cancel_event, chunks=chunks, chains=chains),
+                        cancel_event=cancel_event, chunks=chunks, chains=chains,
+                        memory_hits=memory_hits),
                     self.settings.reasoning_llm_model or self.settings.openai_compat_model)
                 synth_failed = not _ok
 
@@ -957,7 +1041,10 @@ class AskService:
             chain_evidence = [SimpleNamespace(
                 object_id=relation_id, relevance=relevance,
             ) for relation_id, relevance in relation_relevances.items()]
-            evidence_pool = list(top_hits) + list(chunks) + chain_evidence
+            citations.extend(self._memory_citations(anchors, memory_hits))
+            evidence_pool = (
+                list(top_hits) + list(chunks) + chain_evidence + list(memory_hits)
+            )
             evidence_level, top_relevance = classify_evidence(
                 evidence_pool, anchors, llm_grounded,
                 self.settings.evidence_tau_low, self.settings.evidence_tau_high)
@@ -1035,12 +1122,14 @@ class AskService:
             notebook_id, payload.conversation_id, question, user_id)
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
+        memory_hits = self._memory_hits(user_id, notebook_id, question)
 
         if self._primary_llm_unconfigured():
             return self._unconfigured_model_response(
                 notebook_id, question, conversation_id, "graph", user_id=user_id)
 
-        if not (self.candidates.has_kg(notebook_id)
+        if not memory_hits and not (
+                self.candidates.has_kg(notebook_id)
                 or self.candidates.any_base_has_kg()):
             response = AskResponse(
                 answer_id="",
@@ -1064,14 +1153,49 @@ class AskService:
                 notebook_id, question)[:self.settings.retrieval_top_n]
             raise_if_cancelled(cancel_event)
             if not top_hits and not seed_ids:
-                response = AskResponse(
-                    answer_id="",
-                    conclusion="The notebook does not yet contain approved knowledge "
-                               "that matches this question. Upload and review sources "
-                               "to build coverage.",
-                    conversation_id=conversation_id, retrieval_query=question,
-                    llm_mode="deterministic",
-                )
+                if not memory_hits:
+                    response = AskResponse(
+                        answer_id="",
+                        conclusion="The notebook does not yet contain approved knowledge "
+                                   "that matches this question. Upload and review sources "
+                                   "to build coverage.",
+                        conversation_id=conversation_id, retrieval_query=question,
+                        llm_mode="deterministic",
+                    )
+                else:
+                    answer, llm_grounded, anchors, ok = self._answer_with_retry(
+                        lambda: self._answer_chunks(
+                            question, [], history, cancel_event=cancel_event,
+                            notebook_id=notebook_id, memory_hits=memory_hits,
+                        ),
+                        getattr(self.model_clients.llm_client, "model", None)
+                        or self.settings.openai_compat_model,
+                    )
+                    evidence_level, top_relevance = classify_evidence(
+                        memory_hits, anchors, llm_grounded,
+                        self.settings.evidence_tau_low,
+                        self.settings.evidence_tau_high,
+                    )
+                    response = AskResponse(
+                        answer_id="",
+                        conclusion=(
+                            _MARKER_GROUP_RE.sub("", answer).strip()
+                            if answer else
+                            "Confirmed Memory matched, but answer synthesis failed."
+                        ),
+                        answer=answer,
+                        grounded=evidence_level == "grounded",
+                        evidence_level=evidence_level,
+                        anchors=anchors,
+                        citations=self._memory_citations(anchors, memory_hits),
+                        conversation_id=conversation_id,
+                        retrieval_query=question,
+                        top_relevance=top_relevance,
+                        llm_mode=(
+                            "grounded" if evidence_level == "grounded"
+                            else "ungrounded" if ok else "synthesis_failed"
+                        ),
+                    )
                 response.mode = "graph"
                 response.model_errors = [ModelError(**e) for e in _err_sink]
                 raise_if_cancelled(cancel_event)
@@ -1101,7 +1225,7 @@ class AskService:
                         answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                             lambda: self._answer_chunks(
                                 question, ppr_chunks, history, cancel_event=cancel_event,
-                                notebook_id=notebook_id),
+                                notebook_id=notebook_id, memory_hits=memory_hits),
                             getattr(self.model_clients.llm_client, "model", None)
                             or self.settings.openai_compat_model)
                         synth_failed = not _ok
@@ -1120,8 +1244,9 @@ class AskService:
                                 source_id=c.source_id, element_id=eid,
                                 location_label=c.section_path, quoted_span=c.text[:200],
                                 tier=ppr_tier_map.get(c.notebook_id or notebook_id, "personal")))
+                    citations.extend(self._memory_citations(anchors, memory_hits))
                     evidence_level, top_relevance = classify_evidence(
-                        ppr_chunks, anchors, llm_grounded,
+                        list(ppr_chunks) + list(memory_hits), anchors, llm_grounded,
                         self.settings.evidence_tau_low, self.settings.evidence_tau_high)
                     grounded = evidence_level == "grounded"
                     if answer:
@@ -1257,7 +1382,8 @@ class AskService:
                     answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                         lambda: self._answer_mix(
                             question, src_chunks, mix_kg_block, mix_id_map, history,
-                            cancel_event=cancel_event, notebook_id=notebook_id),
+                            cancel_event=cancel_event, notebook_id=notebook_id,
+                            memory_hits=memory_hits),
                         getattr(self.model_clients.llm_client, "model", None)
                         or self.settings.openai_compat_model)
                     synth_failed = not _ok
@@ -1277,8 +1403,9 @@ class AskService:
                             source_id=c.source_id, element_id=eid,
                             location_label=c.section_path, quoted_span=c.text[:200],
                             tier=src_chunk_tier))
+                citations.extend(self._memory_citations(anchors, memory_hits))
                 evidence_level, top_relevance = classify_evidence(
-                    src_chunks, anchors, llm_grounded,
+                    list(src_chunks) + list(memory_hits), anchors, llm_grounded,
                     self.settings.evidence_tau_low, self.settings.evidence_tau_high)
                 grounded = evidence_level == "grounded"
                 if answer:
@@ -1309,6 +1436,9 @@ class AskService:
                 return resp
 
             # Synthesise the answer through the existing LLM + grounding path.
+            context_block, id_map = self._append_memory_context(
+                context_block, id_map, memory_hits
+            )
             context_block = self._refine_context(
                 question, context_block, self.model_clients.llm_client, cancel_event)
             answer, llm_grounded, anchors = "", False, []
@@ -1355,26 +1485,25 @@ class AskService:
             # neighbour a relevance inherited from the strongest seed, discounted by
             # chain_trust (the verifier's weakest-link confidence), so a trusted
             # chain can reach "grounded" while a flagged/weak one still falls back.
-            hits_for_classify = list(top_hits)
             raise_if_cancelled(cancel_event)
-            if anchors:
-                scored_oids = {h.object_id for h in top_hits}
-                seed_rel = max((h.relevance for h in top_hits), default=0.0)
-                neighbour_rel = seed_rel * float(verify_result.get("chain_trust", 1.0))
-                for a in anchors:
-                    if a.object_id in scored_oids:
-                        continue
-                    scored_oids.add(a.object_id)
-                    hits_for_classify.append(RetrievedKnowledge(
-                        object_id=a.object_id, object_type=a.object_type,
-                        payload={"name": a.name}, relevance=neighbour_rel,
-                        tier=getattr(a, "tier", "personal"), notebook_id=notebook_id))
+            seed_rel = max((h.relevance for h in top_hits), default=0.0)
+            neighbour_rel = seed_rel * float(verify_result.get("chain_trust", 1.0))
+            hits_for_classify = _graph_classification_hits(
+                top_hits=top_hits,
+                memory_hits=memory_hits,
+                anchors=anchors,
+                neighbour_relevance=neighbour_rel,
+                notebook_id=notebook_id,
+            )
 
             evidence_level, top_relevance = classify_evidence(
                 hits_for_classify, anchors, llm_grounded,
                 self.settings.evidence_tau_low, self.settings.evidence_tau_high)
             # Report the genuine seed relevance, not the synthetic neighbour value.
-            top_relevance = max((h.relevance for h in top_hits), default=top_relevance)
+            top_relevance = max(
+                (h.relevance for h in [*top_hits, *memory_hits]),
+                default=top_relevance,
+            )
             grounded = evidence_level == "grounded"
             if answer:
                 conclusion = _MARKER_GROUP_RE.sub("", answer).strip()
@@ -1403,7 +1532,7 @@ class AskService:
             response = AskResponse(
                 answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
                 evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
-                citations=[], llm_mode=llm_mode,
+                citations=self._memory_citations(anchors, memory_hits), llm_mode=llm_mode,
                 conversation_id=conversation_id, retrieval_query=question,
                 top_relevance=top_relevance, reasoning_trace=graph_trace,
             )

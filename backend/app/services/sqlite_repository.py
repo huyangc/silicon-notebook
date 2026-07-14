@@ -114,6 +114,15 @@ from app.services.prompts import (
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
+from app.models.schemas import (
+    AgentPrincipal,
+    AgentProfile,
+    AgentTokenIssued,
+    AgentTokenSummary,
+    MemoryRecord,
+    MemoryUpdate,
+    PaginatedMemories,
+)
 from app.services.knowledge_query import KnowledgeQueryService
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.schema_registry import SchemaRegistryService
@@ -199,7 +208,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 @dataclass(frozen=True)
@@ -271,6 +280,7 @@ class SQLiteRepository:
         )
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
+        self._runtime.wire_memory(embedder=self.embedder)
         self.mineru_client = MinerUClient(settings)
         self.mineru_cloud_client = MinerUCloudClient(settings)
         self.event_log = self._runtime.event_log
@@ -1071,6 +1081,161 @@ class SQLiteRepository:
 
     def delete_notebook(self, notebook_id: str) -> None:
         return self._runtime.catalog.delete_notebook(notebook_id)
+
+    # Owner-private Memory lifecycle.  The facade remains a one-hop
+    # compatibility adapter; orchestration lives in MemoryService and SQL in
+    # MemoryStore.
+    def create_agent_profile(
+        self, owner_id: str, name: str, description: str = ""
+    ) -> AgentProfile:
+        return self._runtime.memory_service.create_agent_profile(
+            owner_id, name, description
+        )
+
+    def list_agent_profiles(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentProfile]:
+        return self._runtime.memory_service.list_agent_profiles(
+            owner_id, offset, limit
+        )
+
+    def update_agent_profile(
+        self, profile_id: str, owner_id: str, patch: Any
+    ) -> AgentProfile:
+        return self._runtime.memory_service.update_agent_profile(
+            profile_id, owner_id, patch
+        )
+
+    def issue_agent_token(
+        self,
+        owner_id: str,
+        agent_profile_id: str,
+        scopes: List[str],
+        default_notebook_id: str,
+        notebook_ids: List[str],
+        expires_at: "str | None",
+    ) -> AgentTokenIssued:
+        return self._runtime.memory_service.issue_agent_token(
+            owner_id,
+            agent_profile_id,
+            scopes,
+            default_notebook_id,
+            notebook_ids,
+            expires_at,
+        )
+
+    def list_agent_tokens(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentTokenSummary]:
+        return self._runtime.memory_service.list_agent_tokens(owner_id, offset, limit)
+
+    def revoke_agent_token(
+        self, owner_id: str, token_id: str
+    ) -> AgentTokenSummary:
+        return self._runtime.memory_service.revoke_agent_token(owner_id, token_id)
+
+    def resolve_agent_token(self, raw_token: str) -> "AgentPrincipal | None":
+        return self._runtime.memory_service.resolve_agent_token(raw_token)
+
+    def refresh_agent_principal(self, token_id: str) -> "AgentPrincipal | None":
+        return self._runtime.memory_service.refresh_agent_principal(token_id)
+
+    def require_agent_access(
+        self, principal: AgentPrincipal, scope: str, notebook_id: str
+    ) -> None:
+        return self._runtime.memory_service.require_agent_access(
+            principal, scope, notebook_id
+        )
+
+    def agent_memory_hits(
+        self,
+        user_id: str,
+        notebook_id: str,
+        query: str,
+        include_candidates: bool,
+        limit: int = 8,
+    ) -> list:
+        return self._runtime.memory_retriever.agent_memory_hits(
+            user_id, notebook_id, query, include_candidates, limit
+        )
+
+    def answer_memory_source(self, answer_id: str) -> dict:
+        return self._runtime.ask_state.answer_memory_source(answer_id)
+
+    def create_memory_candidate(
+        self,
+        notebook_id: str,
+        user_id: str,
+        agent_profile_id: "str | None",
+        client_request_id: str,
+        title: str,
+        content_md: str,
+        tags: List[str],
+        reason: str,
+        task_context: "dict | None" = None,
+        evidence_refs: "List[dict] | None" = None,
+    ) -> MemoryRecord:
+        return self._runtime.memory_service.create_candidate(
+            notebook_id, user_id, agent_profile_id, client_request_id, title,
+            content_md, tags, reason, task_context, evidence_refs
+        )
+
+    def create_memory_from_answer(
+        self, notebook_id: str, user_id: str, answer_id: str, title: str,
+        content_md: str, tags: List[str],
+    ) -> MemoryRecord:
+        return self._runtime.memory_service.create_from_answer(
+            notebook_id, user_id, answer_id, title, content_md, tags
+        )
+
+    def update_memory(
+        self, memory_id: str, user_id: str, patch: MemoryUpdate
+    ) -> MemoryRecord:
+        return self._runtime.memory_service.update(memory_id, user_id, patch)
+
+    def confirm_memory(
+        self,
+        memory_id: str,
+        user_id: str,
+        patch: "MemoryUpdate | None" = None,
+    ) -> MemoryRecord:
+        return self._runtime.memory_service.confirm(memory_id, user_id, patch)
+
+    def reject_memory(self, memory_id: str, user_id: str) -> MemoryRecord:
+        return self._runtime.memory_service.reject(memory_id, user_id)
+
+    def deprecate_memory(self, memory_id: str, user_id: str) -> MemoryRecord:
+        return self._runtime.memory_service.deprecate(memory_id, user_id)
+
+    def get_memory(self, memory_id: str, user_id: str) -> MemoryRecord:
+        return self._runtime.memory_service.get(memory_id, user_id)
+
+    def list_memories(
+        self,
+        user_id: str,
+        notebook_id: "str | None" = None,
+        status: "str | None" = None,
+        origin: "str | None" = None,
+        query: str = "",
+        offset: int = 0,
+        limit: int = 50,
+    ) -> PaginatedMemories:
+        return self._runtime.memory_service.list_memories(
+            user_id, notebook_id, status, origin, query, offset, limit
+        )
+
+    def answer_memory_links(
+        self, notebook_id: str, user_id: str, answer_ids: List[str]
+    ) -> dict[str, str]:
+        return self._runtime.memory_service.answer_memory_links(
+            notebook_id, user_id, answer_ids
+        )
+
+    def memory_revisions(self, memory_id: str, user_id: str) -> list:
+        return self._runtime.memory_service.revisions(memory_id, user_id)
+
+    def propose_memory_promotion(self, memory_id: str, user_id: str) -> dict:
+        return self._runtime.memory_service.propose_promotion(memory_id, user_id)
 
     # ------------------------------------------------------------------
     # Sharing / membership / deep-copy domain (Task 9): composed
@@ -2071,6 +2236,14 @@ class SQLiteRepository:
         unchanged). Frozen-signature delegate."""
         return self._runtime.knowledge_governance.approve_promotion(candidate_id)
 
+    def approve_promotion_as_reviewer(
+        self, candidate_id: str, reviewer_id: str
+    ) -> dict:
+        """Authenticated adapter; preserves the frozen legacy facade signature."""
+        return self._runtime.knowledge_governance.approve_promotion(
+            candidate_id, reviewer_id=reviewer_id
+        )
+
     @staticmethod
     def _seed_fn_for(object_type: str):
         """Return the kg_merge seed function for a KG object type."""
@@ -2095,6 +2268,14 @@ class SQLiteRepository:
         orchestration (Task 16). Frozen-signature delegate."""
         return self._runtime.knowledge_governance.reject_promotion(
             candidate_id, reason
+        )
+
+    def reject_promotion_as_reviewer(
+        self, candidate_id: str, reason: str, reviewer_id: str
+    ) -> dict:
+        """Authenticated adapter; preserves the frozen legacy facade signature."""
+        return self._runtime.knowledge_governance.reject_promotion(
+            candidate_id, reason, reviewer_id=reviewer_id
         )
 
     def update_knowledge(

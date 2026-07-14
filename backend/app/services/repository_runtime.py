@@ -18,6 +18,7 @@ from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
+from app.repositories.sqlite.memory_store import MemoryStore
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
 from app.repositories.sqlite.report_store import ReportStore
@@ -31,6 +32,9 @@ from app.services.knowledge_query import KnowledgeQueryService
 from app.services.evidence_context import EvidenceContextService
 from app.services.graph_retrieval import GraphRetrievalService
 from app.services.model_provider import RuntimeModelProvider
+from app.services.memory_service import MemoryService
+from app.services.memory_retrieval import MemoryRetriever
+from app.services.kg import scheduler as kg_scheduler
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 from app.services.notebook_sharing import NotebookCopyService, NotebookSharingService
 from app.services.report_execution import (
@@ -128,6 +132,11 @@ class RepositoryRuntime:
         # stored, never evaluated, so construction is eager and seam-free.
         # Cancel-event registry + fail-open trace logging stay facade-side.
         self.ask_state = AskStateStore(self.database, seams)
+        self.memory_store = MemoryStore(
+            self.database, new_id=seams.new_id, now=seams.now
+        )
+        self.memory_service: "MemoryService | None" = None
+        self.memory_retriever: "MemoryRetriever | None" = None
         # Source file persistence resolves storage_dir through the database
         # boundary's resolve_path — no facade seams, so construction is eager.
         self.source_files = SourceFileStore(
@@ -281,6 +290,29 @@ class RepositoryRuntime:
         self._embedder = value
         if self.retrieval is not None:
             self.retrieval.replace_embedder(value)
+        if self.memory_service is not None:
+            self.memory_service.embedder = value
+        if self.memory_retriever is not None:
+            self.memory_retriever.replace_embedder(value)
+
+    def wire_memory(self, *, embedder: Any) -> MemoryService:
+        """Compose owner-private Memory after sharing/access and embedding exist."""
+        if self.sharing is None:
+            raise RuntimeError("wire_memory requires wire_sharing first")
+        self.set_embedder(embedder)
+        self.memory_service = MemoryService(
+            self.memory_store,
+            self.ask_state,
+            self.sharing,
+            self.embedder,
+            self.event_log,
+            self.seams.new_id,
+            self.seams.now,
+            embedding_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
+        )
+        self.memory_retriever = MemoryRetriever(self.memory_store, self.embedder)
+        self.catalog.memory_retriever = self.memory_retriever
+        return self.memory_service
 
     @property
     def notebook_languages(self) -> dict[str, list[str]]:
@@ -356,7 +388,9 @@ class RepositoryRuntime:
             )
             from app.services.communities import CommunityQueryService
 
-            candidates = CandidateRetrievalService(**common)
+            candidates = CandidateRetrievalService(
+                **common, memory_retriever=self.memory_retriever
+            )
             graph = GraphRetrievalService(**common)
             retrieval = RetrievalService(
                 candidates=candidates,
@@ -709,6 +743,8 @@ class RepositoryRuntime:
             schemas=self.schema_registry,
             snapshots=self.retrieval_snapshots,
             notebook_languages=lambda: self.notebook_languages,
+            memory_retriever=self.memory_retriever,
+            current_user_id=lambda: self.identity.current_user().id,
         )
         self.pending_actions_service = PendingActionsService(
             self.queries,
@@ -791,7 +827,10 @@ class RepositoryRuntime:
             as_retrieved=as_retrieved,
             rule_card=rule_card,
             set_conflict_status=set_conflict_status,
+            memory_store=self.memory_store,
         )
+        if self.memory_service is not None:
+            self.memory_service.set_promotion_service(self.knowledge_governance)
         if self.scale_artifacts is None:
             raise RuntimeError(
                 "wire_knowledge_lifecycle requires wire_scale_runtime() first"
@@ -910,6 +949,7 @@ class RepositoryRuntime:
                 communities=retrieval_port.community_queries(engine_settings),
                 settings=engine_settings,
                 event_log=self.event_log,
+                memory_retriever=self.memory_retriever,
             )
             return ReportEngine(
                 dependencies, user_id=user_id, cancel_event=cancel_event
@@ -984,6 +1024,7 @@ class RepositoryRuntime:
                     lambda nb: self.knowledge_lifecycle.get_community_reports(nb)
                 ),
                 source_titles=self.source_store.source_titles,
+                memory_retriever=self.memory_retriever,
                 current_user_id=lambda: self.identity.current_user().id,
                 cancellations=self.ask_cancellations,
             )

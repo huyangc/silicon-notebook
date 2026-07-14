@@ -90,9 +90,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
         "context",
         "ask_metadata",
     }
-    # 快照 = 冻结的 v9 baseline.db 被【当前代码】打开后的状态:代码 schema 现为 v12
-    # (_migration_12 加 /analytics parse_status 覆盖索引),老库打开即被合法升级——期望值随之为 12。
-    assert snapshot["schema"]["user_version"] == 12
+    # 快照 = 冻结的 v9 baseline.db 被【当前代码】打开后的状态：经 master
+    # v10-v12 与 v13 Memory / Agent migration 合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 13
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

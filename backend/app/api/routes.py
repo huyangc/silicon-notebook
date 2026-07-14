@@ -88,8 +88,10 @@ from app.services.kg import scheduler as kg_scheduler
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.pending_bus import pending_bus
 from app.repositories.ports import AskStreamPort, UploadedSourceFile
+from app.api.memory_routes import memory_router
 
 router = APIRouter()
+router.include_router(memory_router)
 
 SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
 MAX_SOURCE_UPLOAD_BYTES = 50 * 1024 * 1024
@@ -1298,7 +1300,9 @@ def approve_promotion(candidate_id: str, user: UserProfile = Depends(get_current
     if user.role != "admin":
         raise HTTPException(status_code=403, detail="仅管理员可管理晋升队列")
     try:
-        return PromotionApproveResult(**repository().approve_promotion(candidate_id))
+        return PromotionApproveResult(
+            **repository().approve_promotion_as_reviewer(candidate_id, user.id)
+        )
     except KeyError:
         raise HTTPException(status_code=404, detail="Promotion candidate not found")
     except ValueError as exc:
@@ -1314,7 +1318,9 @@ def reject_promotion(candidate_id: str, payload: PromotionRejectRequest, user: U
         raise HTTPException(status_code=403, detail="仅管理员可管理晋升队列")
     try:
         return PromotionCandidate(
-            **repository().reject_promotion(candidate_id, reason=payload.reason)
+            **repository().reject_promotion_as_reviewer(
+                candidate_id, payload.reason, user.id
+            )
         )
     except KeyError:
         raise HTTPException(status_code=404, detail="Promotion candidate not found")

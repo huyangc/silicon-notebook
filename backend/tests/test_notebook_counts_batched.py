@@ -35,6 +35,7 @@ def _oracle_notebook_summary(repo, notebook_id):
         row = db.execute("SELECT * FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
         counts = {
             "sources": repo._count(db, "sources", "notebook_id", row["id"]),
+            "memories": 0,
             "rules": repo._count_knowledge(db, row["id"], "rule"),
             "cases": repo._count_knowledge(db, row["id"], "case"),
             "checklist_items": repo._count_knowledge(db, row["id"], "checklist"),
@@ -53,7 +54,7 @@ def test_notebook_counts_equal_oracle(repo):
     oracle = _oracle_notebook_summary(repo, nb.id)
     assert summary.counts == oracle
     assert summary.counts == {
-        "sources": 0, "rules": 2, "cases": 3, "checklist_items": 1,
+        "sources": 0, "memories": 0, "rules": 2, "cases": 3, "checklist_items": 1,
         "methods": 0, "risks": 4, "glossary": 5,
     }
 

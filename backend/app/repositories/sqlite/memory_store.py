@@ -1,0 +1,1429 @@
+"""Owner-scoped persistence for manually confirmed and agent-proposed Memory."""
+from __future__ import annotations
+
+import json
+import sqlite3
+from dataclasses import replace
+from typing import Any, Mapping, Sequence
+
+from app.models.memory import MemoryRevision, MemoryWrite
+from app.models.schemas import (
+    AgentProfile,
+    AgentTokenSummary,
+    MemoryNotebookOption,
+    MemoryRecord,
+    PaginatedMemories,
+)
+from app.core.json_safety import strict_json_dumps
+from app.repositories.sqlite.database import SqliteDatabase
+from app.services.vector_index import encode_vector
+
+
+def _json_object(raw: Any) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _json_list(raw: Any) -> list[str]:
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, ValueError):
+        return []
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+class MemoryStore:
+    def __init__(self, database: SqliteDatabase, *, new_id, now) -> None:
+        self.database = database
+        self.new_id = new_id
+        self.now = now
+
+    @staticmethod
+    def _profile(row: sqlite3.Row) -> AgentProfile:
+        return AgentProfile(
+            id=row["id"],
+            owner_id=row["owner_id"],
+            name=row["name"],
+            description=row["description"],
+            status=row["status"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _token(row: sqlite3.Row, notebook_ids: Sequence[str]) -> AgentTokenSummary:
+        return AgentTokenSummary(
+            id=row["id"],
+            agent_profile_id=row["agent_profile_id"],
+            profile_name=row["profile_name"],
+            scopes=_json_list(row["scopes_json"]),
+            default_notebook_id=row["default_notebook_id"],
+            notebook_ids=list(notebook_ids),
+            expires_at=row["expires_at"],
+            revoked_at=row["revoked_at"],
+            last_used_at=row["last_used_at"],
+            created_at=row["created_at"],
+        )
+
+    def create_agent_profile(
+        self, owner_id: str, name: str, description: str
+    ) -> AgentProfile:
+        now = self.now()
+        profile_id = self.new_id("agent")
+        with self.database.write() as db:
+            db.execute(
+                "INSERT INTO agent_profiles "
+                "(id,owner_id,name,description,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,'active',?,?)",
+                (profile_id, owner_id, name, description, now, now),
+            )
+            row = db.execute(
+                "SELECT * FROM agent_profiles WHERE id=?", (profile_id,)
+            ).fetchone()
+        return self._profile(row)
+
+    def list_agent_profiles(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentProfile]:
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT * FROM agent_profiles WHERE owner_id=? "
+                "ORDER BY updated_at DESC,id DESC LIMIT ? OFFSET ?",
+                (owner_id, limit, offset),
+            ).fetchall()
+        return [self._profile(row) for row in rows]
+
+    def update_agent_profile(
+        self, profile_id: str, owner_id: str, fields: Mapping[str, Any]
+    ) -> AgentProfile:
+        assignments = [f"{key}=?" for key in fields]
+        values = list(fields.values())
+        assignments.append("updated_at=?")
+        values.append(self.now())
+        with self.database.write() as db:
+            cursor = db.execute(
+                f"UPDATE agent_profiles SET {','.join(assignments)} "
+                "WHERE id=? AND owner_id=?",
+                (*values, profile_id, owner_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(profile_id)
+            row = db.execute(
+                "SELECT * FROM agent_profiles WHERE id=? AND owner_id=?",
+                (profile_id, owner_id),
+            ).fetchone()
+        return self._profile(row)
+
+    @staticmethod
+    def _token_notebooks_on(db: sqlite3.Connection, token_id: str) -> list[str]:
+        return [
+            str(row["notebook_id"])
+            for row in db.execute(
+                "SELECT notebook_id FROM agent_token_notebooks "
+                "WHERE token_id=? ORDER BY notebook_id",
+                (token_id,),
+            ).fetchall()
+        ]
+
+    def create_agent_token(
+        self,
+        token_id: str,
+        owner_id: str,
+        agent_profile_id: str,
+        token_hash: str,
+        scopes: Sequence[str],
+        default_notebook_id: str,
+        notebook_ids: Sequence[str],
+        expires_at: str | None,
+    ) -> AgentTokenSummary:
+        now = self.now()
+        with self.database.write() as db:
+            profile = db.execute(
+                "SELECT name FROM agent_profiles "
+                "WHERE id=? AND owner_id=? AND status='active'",
+                (agent_profile_id, owner_id),
+            ).fetchone()
+            if profile is None:
+                raise KeyError(agent_profile_id)
+            db.execute(
+                "INSERT INTO agent_access_tokens "
+                "(id,agent_profile_id,token_hash,scopes_json,default_notebook_id,"
+                "expires_at,created_at) VALUES (?,?,?,?,?,?,?)",
+                (
+                    token_id,
+                    agent_profile_id,
+                    token_hash,
+                    json.dumps(list(scopes), ensure_ascii=False),
+                    default_notebook_id,
+                    expires_at,
+                    now,
+                ),
+            )
+            db.executemany(
+                "INSERT INTO agent_token_notebooks (token_id,notebook_id) VALUES (?,?)",
+                [(token_id, notebook_id) for notebook_id in notebook_ids],
+            )
+            row = db.execute(
+                "SELECT t.*,p.name AS profile_name FROM agent_access_tokens t "
+                "JOIN agent_profiles p ON p.id=t.agent_profile_id WHERE t.id=?",
+                (token_id,),
+            ).fetchone()
+        return self._token(row, notebook_ids)
+
+    def list_agent_tokens(
+        self, owner_id: str, offset: int = 0, limit: int = 100
+    ) -> list[AgentTokenSummary]:
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT t.*,p.name AS profile_name FROM agent_access_tokens t "
+                "JOIN agent_profiles p ON p.id=t.agent_profile_id "
+                "WHERE p.owner_id=? ORDER BY t.created_at DESC,t.id DESC "
+                "LIMIT ? OFFSET ?",
+                (owner_id, limit, offset),
+            ).fetchall()
+            return [
+                self._token(row, self._token_notebooks_on(db, row["id"]))
+                for row in rows
+            ]
+
+    def revoke_agent_token(
+        self, token_id: str, owner_id: str
+    ) -> AgentTokenSummary:
+        now = self.now()
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE agent_access_tokens SET revoked_at=COALESCE(revoked_at,?) "
+                "WHERE id=? AND EXISTS (SELECT 1 FROM agent_profiles p "
+                "WHERE p.id=agent_access_tokens.agent_profile_id AND p.owner_id=?)",
+                (now, token_id, owner_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(token_id)
+            row = db.execute(
+                "SELECT t.*,p.name AS profile_name FROM agent_access_tokens t "
+                "JOIN agent_profiles p ON p.id=t.agent_profile_id WHERE t.id=?",
+                (token_id,),
+            ).fetchone()
+            notebooks = self._token_notebooks_on(db, token_id)
+        return self._token(row, notebooks)
+
+    def agent_token_auth_row(self, token_id: str) -> dict[str, Any] | None:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT t.*,p.owner_id,p.name AS profile_name,p.status AS profile_status "
+                "FROM agent_access_tokens t JOIN agent_profiles p "
+                "ON p.id=t.agent_profile_id WHERE t.id=?",
+                (token_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            result["notebook_ids"] = self._token_notebooks_on(db, token_id)
+        return result
+
+    def touch_agent_token(
+        self, token_id: str, used_at: str, touch_before: str
+    ) -> None:
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE agent_access_tokens SET last_used_at=? WHERE id=? "
+                "AND revoked_at IS NULL AND "
+                "(last_used_at IS NULL OR last_used_at<=?)",
+                (used_at, token_id, touch_before),
+            )
+
+    @staticmethod
+    def _record(row: sqlite3.Row) -> MemoryRecord:
+        keys = row.keys()
+        return MemoryRecord(
+            id=row["id"],
+            notebook_id=row["notebook_id"],
+            created_by=row["created_by"],
+            agent_profile_id=row["agent_profile_id"],
+            source_answer_id=row["source_answer_id"],
+            origin=row["origin"],
+            status=row["status"],
+            promotion_state=row["promotion_state"],
+            title=row["title"],
+            content_md=row["content_md"],
+            tags=_json_list(row["tags_json"]),
+            confirmed_by=row["confirmed_by"],
+            confirmed_at=row["confirmed_at"],
+            embedding_status=row["embedding_status"],
+            embedding_error=row["embedding_error"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+            provenance=_json_object(row["payload_json"] if "payload_json" in keys else "{}"),
+        )
+
+    @staticmethod
+    def _select_columns(alias: str = "m") -> str:
+        return (
+            f"{alias}.id,{alias}.notebook_id,{alias}.created_by,"
+            f"{alias}.agent_profile_id,{alias}.source_answer_id,{alias}.origin,"
+            f"{alias}.status,{alias}.promotion_state,{alias}.title,"
+            f"{alias}.content_md,{alias}.tags_json,{alias}.confirmed_by,"
+            f"{alias}.confirmed_at,{alias}.embedding_status,{alias}.embedding_error,"
+            f"{alias}.created_at,{alias}.updated_at,p.payload_json"
+        )
+
+    @staticmethod
+    def _read_access_clause(alias: str = "m") -> str:
+        return (
+            "EXISTS (SELECT 1 FROM notebooks access_nb "
+            f"WHERE access_nb.id={alias}.notebook_id AND "
+            "(access_nb.created_by=? OR EXISTS (SELECT 1 FROM notebook_members access_nm "
+            "WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=?)))"
+        )
+
+    def insert_memory(self, write: MemoryWrite) -> MemoryRecord:
+        with self.database.write() as db:
+            item, _created = self._insert_memory_on(db, write)
+        return item
+
+    def _insert_memory_on(
+        self, db: sqlite3.Connection, write: MemoryWrite
+    ) -> tuple[MemoryRecord, bool]:
+        client_request_id = (write.provenance or {}).get("client_request_id")
+        if write.origin == "external_agent" and client_request_id:
+            existing = db.execute(
+                f"SELECT {self._select_columns()} FROM memory_items m "
+                "JOIN memory_provenance p ON p.memory_id=m.id "
+                "WHERE m.created_by=? AND m.notebook_id=? "
+                "AND m.origin='external_agent' "
+                "AND m.agent_profile_id IS ? "
+                "AND json_extract(p.payload_json,'$.client_request_id')=? "
+                "ORDER BY m.created_at LIMIT 1",
+                (
+                    write.created_by,
+                    write.notebook_id,
+                    write.agent_profile_id,
+                    client_request_id,
+                ),
+            ).fetchone()
+            if existing is not None:
+                return self._record(existing), False
+        try:
+            db.execute(
+                "INSERT INTO memory_items "
+                "(id,notebook_id,created_by,agent_profile_id,source_answer_id,origin,"
+                "status,title,content_md,tags_json,confirmed_by,confirmed_at,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    write.id,
+                    write.notebook_id,
+                    write.created_by,
+                    write.agent_profile_id,
+                    write.source_answer_id,
+                    write.origin,
+                    write.status,
+                    write.title,
+                    write.content_md,
+                    strict_json_dumps(list(write.tags), field="tags"),
+                    write.confirmed_by,
+                    write.confirmed_at,
+                    write.created_at,
+                    write.updated_at,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            if write.source_answer_id is None:
+                raise
+            existing = db.execute(
+                f"SELECT {self._select_columns()} FROM memory_items m "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "WHERE m.created_by=? AND m.source_answer_id=?",
+                (write.created_by, write.source_answer_id),
+            ).fetchone()
+            if existing is None:
+                raise
+            return self._record(existing), False
+        db.execute(
+            "INSERT INTO memory_provenance "
+            "(id,memory_id,origin,payload_json,created_at) VALUES (?,?,?,?,?)",
+            (
+                self.new_id("memprov"),
+                write.id,
+                write.origin,
+                strict_json_dumps(
+                    dict(write.provenance or {}), field="memory provenance"
+                ),
+                write.created_at,
+            ),
+        )
+        row = db.execute(
+            f"SELECT {self._select_columns()} FROM memory_items m "
+            "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+            "WHERE m.id=? AND m.created_by=?",
+            (write.id, write.created_by),
+        ).fetchone()
+        return self._record(row), True
+
+    def _create_with_initial_revision(
+        self, write: MemoryWrite, changed_by: str, reason: str
+    ) -> MemoryRecord:
+        with self.database.write() as db:
+            item, created = self._insert_memory_on(db, write)
+            self._ensure_initial_revision_on(db, item, created, changed_by, reason)
+        return item
+
+    def _ensure_initial_revision_on(
+        self,
+        db: sqlite3.Connection,
+        item: MemoryRecord,
+        created: bool,
+        changed_by: str,
+        reason: str,
+    ) -> None:
+        has_revision = db.execute(
+            "SELECT 1 FROM memory_revisions WHERE memory_id=? LIMIT 1",
+            (item.id,),
+        ).fetchone()
+        if created or has_revision is None:
+            self._append_revision_on(
+                db,
+                item.id,
+                {
+                    "title": item.title,
+                    "content_md": item.content_md,
+                    "tags": item.tags,
+                    "status": item.status,
+                    "promotion_state": item.promotion_state,
+                },
+                changed_by,
+                reason,
+            )
+
+    def create_candidate_with_initial_revision(
+        self, write: MemoryWrite, changed_by: str, reason: str
+    ) -> MemoryRecord:
+        with self.database.write() as db:
+            db.execute("BEGIN IMMEDIATE")
+            access = db.execute(
+                "SELECT 1 FROM notebooks nb WHERE nb.id=? AND "
+                "(nb.created_by=? OR EXISTS (SELECT 1 FROM notebook_members nm "
+                "WHERE nm.notebook_id=nb.id AND nm.user_id=?))",
+                (write.notebook_id, write.created_by, write.created_by),
+            ).fetchone()
+            if access is None:
+                raise PermissionError(write.notebook_id)
+            agent_profile = None
+            if write.agent_profile_id:
+                profile = db.execute(
+                    "SELECT id,name FROM agent_profiles "
+                    "WHERE id=? AND owner_id=? AND status='active'",
+                    (write.agent_profile_id, write.created_by),
+                ).fetchone()
+                if profile is None:
+                    raise PermissionError(write.agent_profile_id)
+                agent_profile = {"id": profile["id"], "name": profile["name"]}
+            provenance = dict(write.provenance or {})
+            submitted_refs = provenance.get("evidence_refs")
+            provenance["agent_profile"] = agent_profile
+            provenance["evidence_refs"] = [
+                self._validate_evidence_ref_on(
+                    db,
+                    reference,
+                    index=index,
+                    notebook_id=write.notebook_id,
+                    user_id=write.created_by,
+                )
+                for index, reference in enumerate(
+                    submitted_refs if isinstance(submitted_refs, list) else []
+                )
+            ]
+            item, created = self._insert_memory_on(
+                db, replace(write, provenance=provenance)
+            )
+            self._ensure_initial_revision_on(db, item, created, changed_by, reason)
+        return item
+
+    @staticmethod
+    def _validation(
+        normalized: dict[str, Any], *, trusted: bool, reason: str
+    ) -> dict[str, Any]:
+        return {
+            **normalized,
+            "trusted": trusted,
+            "validation": {
+                "status": "validated" if trusted else "invalid",
+                "reason": reason,
+            },
+        }
+
+    def _validate_evidence_ref_on(
+        self,
+        db: sqlite3.Connection,
+        reference: Mapping[str, Any],
+        *,
+        index: int,
+        notebook_id: str,
+        user_id: str,
+    ) -> dict[str, Any]:
+        source_id = str(reference.get("source_id") or "").strip()
+        element_id = str(reference.get("element_id") or "").strip()
+        knowledge_id = str(
+            reference.get("knowledge_id") or reference.get("object_id") or ""
+        ).strip()
+        memory_id = str(reference.get("memory_id") or "").strip()
+        base: dict[str, Any] = {"index": index}
+        if source_id and element_id:
+            normalized = {
+                **base,
+                "type": "source_element",
+                "source_id": source_id,
+                "element_id": element_id,
+            }
+            row = db.execute(
+                "SELECT 1 FROM sources s JOIN source_elements e ON e.source_id=s.id "
+                "WHERE s.id=? AND e.id=? AND s.notebook_id=?",
+                (source_id, element_id, notebook_id),
+            ).fetchone()
+            return self._validation(
+                normalized,
+                trusted=row is not None,
+                reason="live_source_element" if row else "missing_or_cross_notebook",
+            )
+        if source_id:
+            normalized = {**base, "type": "source", "source_id": source_id}
+            row = db.execute(
+                "SELECT 1 FROM sources WHERE id=? AND notebook_id=?",
+                (source_id, notebook_id),
+            ).fetchone()
+            return self._validation(
+                normalized,
+                trusted=row is not None,
+                reason="live_source" if row else "missing_or_cross_notebook",
+            )
+        if knowledge_id:
+            normalized = {
+                **base,
+                "type": "knowledge",
+                "knowledge_id": knowledge_id,
+            }
+            row = db.execute(
+                "SELECT 1 FROM knowledge_objects WHERE id=? AND notebook_id=? "
+                "AND status!='deprecated'",
+                (knowledge_id, notebook_id),
+            ).fetchone()
+            return self._validation(
+                normalized,
+                trusted=row is not None,
+                reason="live_knowledge_object" if row else "missing_or_cross_notebook",
+            )
+        if memory_id:
+            normalized = {**base, "type": "memory", "memory_id": memory_id}
+            row = db.execute(
+                "SELECT 1 FROM memory_items WHERE id=? AND notebook_id=? "
+                "AND created_by=? AND status='confirmed'",
+                (memory_id, notebook_id, user_id),
+            ).fetchone()
+            return self._validation(
+                normalized,
+                trusted=row is not None,
+                reason="live_owner_memory" if row else "missing_or_cross_owner",
+            )
+        submitted_type = str(
+            reference.get("type") or reference.get("kind") or "unsupported"
+        ).strip()[:80]
+        return self._validation(
+            {**base, "type": submitted_type or "unsupported"},
+            trusted=False,
+            reason="unsupported_reference",
+        )
+
+    def create_answer_with_initial_revision(
+        self, write: MemoryWrite, changed_by: str, reason: str
+    ) -> MemoryRecord:
+        if not write.source_answer_id:
+            raise KeyError("source_answer_id")
+        with self.database.write() as db:
+            # Lock writers before reading the answer so deletion cannot commit
+            # between the trusted snapshot and the Memory/provenance insert.
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                f"SELECT {self._select_columns()} FROM memory_items m "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "WHERE m.created_by=? AND m.source_answer_id=?",
+                (write.created_by, write.source_answer_id),
+            ).fetchone()
+            if existing is not None:
+                item = self._record(existing)
+                if item.notebook_id != write.notebook_id:
+                    raise KeyError(write.source_answer_id)
+                return item
+            row = db.execute(
+                "SELECT a.question,a.payload,a.conversation_id FROM answers a "
+                "JOIN notebooks nb ON nb.id=a.notebook_id "
+                "WHERE a.id=? AND a.notebook_id=? AND "
+                "(nb.created_by=? OR EXISTS (SELECT 1 FROM notebook_members nm "
+                "WHERE nm.notebook_id=nb.id AND nm.user_id=?))",
+                (
+                    write.source_answer_id,
+                    write.notebook_id,
+                    write.created_by,
+                    write.created_by,
+                ),
+            ).fetchone()
+            if row is None:
+                raise KeyError(write.source_answer_id)
+            payload = _json_object(row["payload"])
+            provenance = {
+                "answer_id": write.source_answer_id,
+                "question": row["question"] or "",
+                "answer": str(payload.get("answer") or payload.get("conclusion") or ""),
+                "conversation_id": row["conversation_id"],
+                "mode": str(payload.get("mode") or ""),
+                "model": str(payload.get("llm_mode") or ""),
+                "evidence_level": str(payload.get("evidence_level") or "inferred"),
+                "anchors": payload.get("anchors") if isinstance(payload.get("anchors"), list) else [],
+                "citations": payload.get("citations") if isinstance(payload.get("citations"), list) else [],
+            }
+            item, created = self._insert_memory_on(
+                db, replace(write, provenance=provenance)
+            )
+            self._ensure_initial_revision_on(db, item, created, changed_by, reason)
+        return item
+
+    def memory_for_user(self, memory_id: str, user_id: str) -> MemoryRecord:
+        with self.database.connect() as db:
+            row = db.execute(
+                f"SELECT {self._select_columns()} FROM memory_items m "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                f"WHERE m.id=? AND m.created_by=? AND {self._read_access_clause()}",
+                (memory_id, user_id, user_id, user_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(memory_id)
+        return self._record(row)
+
+    def memory_by_answer(self, user_id: str, answer_id: str) -> MemoryRecord | None:
+        with self.database.connect() as db:
+            row = db.execute(
+                f"SELECT {self._select_columns()} FROM memory_items m "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "WHERE m.created_by=? AND m.source_answer_id=?",
+                (user_id, answer_id),
+            ).fetchone()
+        return self._record(row) if row is not None else None
+
+    def answer_memory_links(
+        self, notebook_id: str, user_id: str, answer_ids: Sequence[str]
+    ) -> dict[str, str]:
+        unique_ids = list(
+            dict.fromkeys(str(answer_id) for answer_id in answer_ids if answer_id)
+        )
+        if not unique_ids:
+            return {}
+        if len(unique_ids) > 200:
+            raise ValueError("answer_ids may contain at most 200 unique values")
+        placeholders = ",".join("?" for _ in unique_ids)
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT m.source_answer_id,m.id FROM memory_items m "
+                "WHERE m.notebook_id=? AND m.created_by=? "
+                f"AND m.source_answer_id IN ({placeholders}) "
+                f"AND {self._read_access_clause()}",
+                (notebook_id, user_id, *unique_ids, user_id, user_id),
+            ).fetchall()
+        return {str(row["source_answer_id"]): str(row["id"]) for row in rows}
+
+    def memory_by_agent_request(
+        self,
+        user_id: str,
+        notebook_id: str,
+        agent_profile_id: str | None,
+        client_request_id: str,
+    ) -> MemoryRecord | None:
+        with self.database.connect() as db:
+            row = db.execute(
+                f"SELECT {self._select_columns()} FROM memory_items m "
+                "JOIN memory_provenance p ON p.memory_id=m.id "
+                "WHERE m.created_by=? AND m.notebook_id=? "
+                "AND m.origin='external_agent' "
+                "AND m.agent_profile_id IS ? "
+                "AND json_extract(p.payload_json,'$.client_request_id')=? "
+                "ORDER BY m.created_at LIMIT 1",
+                (user_id, notebook_id, agent_profile_id, client_request_id),
+            ).fetchone()
+        return self._record(row) if row is not None else None
+
+    def agent_profile_belongs_to(self, agent_profile_id: str, user_id: str) -> bool:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM agent_profiles WHERE id=? AND owner_id=? AND status='active'",
+                (agent_profile_id, user_id),
+            ).fetchone()
+        return row is not None
+
+    def append_revision(
+        self, memory_id: str, snapshot: dict, changed_by: str, reason: str
+    ) -> None:
+        with self.database.write() as db:
+            self._append_revision_on(db, memory_id, snapshot, changed_by, reason)
+
+    def _append_revision_on(
+        self,
+        db: sqlite3.Connection,
+        memory_id: str,
+        snapshot: Mapping[str, Any],
+        changed_by: str,
+        reason: str,
+    ) -> None:
+        row = db.execute(
+            "SELECT COALESCE(MAX(revision),0)+1 AS revision "
+            "FROM memory_revisions WHERE memory_id=?",
+            (memory_id,),
+        ).fetchone()
+        db.execute(
+            "INSERT INTO memory_revisions "
+            "(id,memory_id,revision,title,content_md,tags_json,status,promotion_state,"
+            "changed_by,change_reason,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                self.new_id("memrev"),
+                memory_id,
+                int(row["revision"]),
+                snapshot["title"],
+                snapshot["content_md"],
+                json.dumps(snapshot.get("tags", []), ensure_ascii=False),
+                snapshot["status"],
+                snapshot.get("promotion_state", "none"),
+                changed_by,
+                reason,
+                self.now(),
+            ),
+        )
+
+    def _mutate_with_revision(
+        self,
+        memory_id: str,
+        user_id: str,
+        *,
+        fields: Mapping[str, Any],
+        expected: set[str],
+        target: str | None,
+        changed_by: str,
+        reason: str,
+    ) -> MemoryRecord:
+        allowed = {"title", "content_md", "tags"}
+        values = {key: value for key, value in fields.items() if key in allowed}
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT m.title,m.content_md,m.tags_json,m.status,m.promotion_state,"
+                "p.payload_json FROM memory_items m "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "WHERE m.id=? AND m.created_by=? AND "
+                f"{self._read_access_clause()}",
+                (memory_id, user_id, user_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(memory_id)
+            if row["status"] not in expected:
+                destination = target or row["status"]
+                raise ValueError(
+                    f"invalid memory transition: {row['status']} -> {destination}"
+                )
+
+            title = values.get("title", row["title"])
+            content_md = values.get("content_md", row["content_md"])
+            tags = (
+                [str(item) for item in values["tags"]]
+                if "tags" in values
+                else _json_list(row["tags_json"])
+            )
+            status = target or row["status"]
+            now = self.now()
+            promotion_state = str(row["promotion_state"])
+            invalidates_proposal = bool(values) or target in {
+                "rejected",
+                "deprecated",
+            }
+            if invalidates_proposal and promotion_state == "proposed":
+                supersede_reason = (
+                    "superseded_by_memory_edit"
+                    if values
+                    else "superseded_by_memory_terminal_status"
+                )
+                self._supersede_active_promotion_on(
+                    db,
+                    memory_id,
+                    changed_by,
+                    now,
+                    _json_object(row["payload_json"]),
+                    reason=supersede_reason,
+                )
+                promotion_state = "none"
+            assignments = [
+                "title=?",
+                "content_md=?",
+                "tags_json=?",
+                "status=?",
+                "promotion_state=?",
+                "updated_at=?",
+            ]
+            params: list[Any] = [
+                title,
+                content_md,
+                json.dumps(tags, ensure_ascii=False),
+                status,
+                promotion_state,
+                now,
+            ]
+            if values or target == "confirmed":
+                assignments.extend(
+                    ["embedding_status='pending'", "embedding_error=''"]
+                )
+            if target == "confirmed":
+                assignments.extend(["confirmed_by=?", "confirmed_at=?"])
+                params.extend([user_id, now])
+            placeholders = ",".join("?" for _ in expected)
+            params.extend([memory_id, user_id, *sorted(expected)])
+            cursor = db.execute(
+                f"UPDATE memory_items SET {','.join(assignments)} "
+                f"WHERE id=? AND created_by=? AND status IN ({placeholders})",
+                params,
+            )
+            if cursor.rowcount != 1:  # pragma: no cover - shared write lock guard
+                raise ValueError(f"concurrent memory transition for {memory_id}")
+            self._append_revision_on(
+                db,
+                memory_id,
+                {
+                    "title": title,
+                    "content_md": content_md,
+                    "tags": tags,
+                    "status": status,
+                    "promotion_state": promotion_state,
+                },
+                changed_by,
+                reason,
+            )
+        return self.memory_for_user(memory_id, user_id)
+
+    @staticmethod
+    def _supersede_active_promotion_on(
+        db: sqlite3.Connection,
+        memory_id: str,
+        changed_by: str,
+        now: str,
+        provenance: dict[str, Any],
+        *,
+        reason: str,
+    ) -> None:
+        """Reject one active pinned proposal inside the caller's Memory write."""
+        promotion = provenance.get("kg_promotion")
+        proposal_id = (
+            str(promotion.get("proposal_id") or "")
+            if isinstance(promotion, dict)
+            else ""
+        )
+        if not proposal_id:
+            raise ValueError("proposed Memory is missing its promotion snapshot")
+        cursor = db.execute(
+            "UPDATE promotion_candidates SET status='rejected',reason=?,"
+            "reviewed_by=?,updated_at=? WHERE id=? AND object_id=? "
+            "AND status IN ('proposed','under_review')",
+            (reason, changed_by, now, proposal_id, memory_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("active Memory promotion could not be superseded")
+        provenance["kg_promotion"] = {
+            "state": "superseded",
+            "superseded_at": now,
+            "superseded_reason": reason,
+        }
+        db.execute(
+            "UPDATE memory_provenance SET payload_json=? WHERE memory_id=?",
+            (
+                strict_json_dumps(provenance, field="memory provenance"),
+                memory_id,
+            ),
+        )
+
+    def update_with_revision(
+        self,
+        memory_id: str,
+        user_id: str,
+        fields: Mapping[str, Any],
+        *,
+        expected: set[str],
+        changed_by: str,
+        reason: str,
+    ) -> MemoryRecord:
+        return self._mutate_with_revision(
+            memory_id,
+            user_id,
+            fields=fields,
+            expected=expected,
+            target=None,
+            changed_by=changed_by,
+            reason=reason,
+        )
+
+    def transition_with_revision(
+        self,
+        memory_id: str,
+        user_id: str,
+        expected: set[str],
+        target: str,
+        *,
+        fields: Mapping[str, Any] | None,
+        changed_by: str,
+        reason: str,
+    ) -> MemoryRecord:
+        return self._mutate_with_revision(
+            memory_id,
+            user_id,
+            fields=fields or {},
+            expected=expected,
+            target=target,
+            changed_by=changed_by,
+            reason=reason,
+        )
+
+    def revisions_for_user(self, memory_id: str, user_id: str) -> list[MemoryRevision]:
+        self.memory_for_user(memory_id, user_id)
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT revision,title,content_md,tags_json,status,promotion_state,"
+                "changed_by,change_reason,created_at FROM memory_revisions "
+                "WHERE memory_id=? ORDER BY revision",
+                (memory_id,),
+            ).fetchall()
+        return [
+            MemoryRevision(
+                revision=int(row["revision"]),
+                title=row["title"],
+                content_md=row["content_md"],
+                tags=_json_list(row["tags_json"]),
+                status=row["status"],
+                promotion_state=row["promotion_state"],
+                changed_by=row["changed_by"],
+                change_reason=row["change_reason"],
+                created_at=row["created_at"],
+            )
+            for row in rows
+        ]
+
+    def propose_promotion_on(
+        self,
+        db: sqlite3.Connection,
+        memory_id: str,
+        user_id: str,
+        proposal_id: str,
+        candidates: Sequence[Mapping[str, Any]],
+        evidence: Sequence[Mapping[str, Any]],
+        expected_item: MemoryRecord,
+        now: str,
+    ) -> MemoryRecord:
+        row = db.execute(
+            f"SELECT {self._select_columns()} FROM memory_items m "
+            "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+            f"WHERE m.id=? AND m.created_by=? AND {self._read_access_clause()}",
+            (memory_id, user_id, user_id, user_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(memory_id)
+        item = self._record(row)
+        if item.status != "confirmed":
+            raise ValueError("only confirmed Memory can be promoted")
+        if item.promotion_state not in {"none", "proposed"}:
+            raise ValueError(f"Memory promotion is already {item.promotion_state}")
+        if (
+            item.title != expected_item.title
+            or item.content_md != expected_item.content_md
+            or list(item.tags) != list(expected_item.tags)
+            or item.status != expected_item.status
+        ):
+            raise ValueError("Memory changed before its promotion snapshot was pinned")
+
+        revision_row = db.execute(
+            "SELECT COALESCE(MAX(revision),0) AS revision FROM memory_revisions "
+            "WHERE memory_id=?",
+            (memory_id,),
+        ).fetchone()
+        source_revision = int(revision_row["revision"])
+        if source_revision <= 0:
+            raise ValueError("Memory source revision is missing")
+
+        provenance = dict(item.provenance)
+        snapshots = provenance.get("kg_promotion_snapshots")
+        snapshot_history = dict(snapshots) if isinstance(snapshots, dict) else {}
+        pinned_snapshot = {
+            "source_revision": source_revision,
+            "proposal_revision": source_revision + 1,
+            "title": item.title,
+            "content_md": item.content_md,
+            "tags": list(item.tags),
+            "status": item.status,
+            "candidates": [dict(candidate) for candidate in candidates],
+            "evidence": [dict(card) for card in evidence],
+        }
+        snapshot_history[proposal_id] = pinned_snapshot
+        provenance["kg_promotion_snapshots"] = snapshot_history
+        provenance["kg_promotion"] = {
+            "proposal_id": proposal_id,
+            "state": "proposed",
+            "source_revision": source_revision,
+            "base_object_ids": [],
+        }
+        db.execute(
+            "UPDATE memory_provenance SET payload_json=? WHERE memory_id=?",
+            (
+                strict_json_dumps(provenance, field="memory provenance"),
+                memory_id,
+            ),
+        )
+        db.execute(
+            "UPDATE memory_items SET promotion_state='proposed',updated_at=? "
+            "WHERE id=? AND created_by=? AND status='confirmed'",
+            (now, memory_id, user_id),
+        )
+        self._append_revision_on(
+            db,
+            memory_id,
+            {
+                "title": item.title,
+                "content_md": item.content_md,
+                "tags": item.tags,
+                "status": item.status,
+                "promotion_state": "proposed",
+            },
+            user_id,
+            "kg_promotion_proposed",
+        )
+        return item.model_copy(
+            update={
+                "promotion_state": "proposed",
+                "updated_at": now,
+                "provenance": provenance,
+            }
+        )
+
+    @staticmethod
+    def pinned_promotion_snapshot(
+        item: MemoryRecord, proposal_id: str, *, required: bool = True
+    ) -> dict[str, Any]:
+        snapshots = item.provenance.get("kg_promotion_snapshots")
+        snapshot = snapshots.get(proposal_id) if isinstance(snapshots, dict) else None
+        if not isinstance(snapshot, dict):
+            if required:
+                raise ValueError("Memory promotion snapshot is missing")
+            return {}
+        return dict(snapshot)
+
+    def validate_pinned_promotion_on(
+        self,
+        db: sqlite3.Connection,
+        item: MemoryRecord,
+        proposal_id: str,
+        snapshot: Mapping[str, Any],
+    ) -> None:
+        promotion = item.provenance.get("kg_promotion")
+        if (
+            item.status != "confirmed"
+            or item.promotion_state != "proposed"
+            or not isinstance(promotion, dict)
+            or promotion.get("proposal_id") != proposal_id
+            or promotion.get("state") != "proposed"
+        ):
+            raise ValueError("Memory promotion is no longer active")
+        source_revision = int(snapshot.get("source_revision") or 0)
+        proposal_revision = int(snapshot.get("proposal_revision") or 0)
+        revision = db.execute(
+            "SELECT revision,title,content_md,tags_json,status,promotion_state "
+            "FROM memory_revisions WHERE memory_id=? AND revision=?",
+            (item.id, source_revision),
+        ).fetchone()
+        latest = db.execute(
+            "SELECT COALESCE(MAX(revision),0) AS revision FROM memory_revisions "
+            "WHERE memory_id=?",
+            (item.id,),
+        ).fetchone()
+        if (
+            revision is None
+            or proposal_revision != source_revision + 1
+            or int(latest["revision"]) != proposal_revision
+            or revision["title"] != snapshot.get("title")
+            or revision["content_md"] != snapshot.get("content_md")
+            or _json_list(revision["tags_json"]) != list(snapshot.get("tags") or [])
+            or revision["status"] != "confirmed"
+            or item.title != snapshot.get("title")
+            or item.content_md != snapshot.get("content_md")
+            or list(item.tags) != list(snapshot.get("tags") or [])
+        ):
+            raise ValueError("Memory revision no longer matches the pinned snapshot")
+
+    def promotion_rows_on(
+        self, db: sqlite3.Connection, memory_ids: Sequence[str]
+    ) -> dict[str, MemoryRecord]:
+        if not memory_ids:
+            return {}
+        placeholders = ",".join("?" for _ in memory_ids)
+        rows = db.execute(
+            f"SELECT {self._select_columns()} FROM memory_items m "
+            "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+            f"WHERE m.id IN ({placeholders})",
+            list(memory_ids),
+        ).fetchall()
+        return {str(row["id"]): self._record(row) for row in rows}
+
+    def promotion_data_on(
+        self, db: sqlite3.Connection, memory_id: str
+    ) -> tuple[MemoryRecord, list[dict[str, Any]], list[str]]:
+        records = self.promotion_rows_on(db, [memory_id])
+        item = records.get(memory_id)
+        if item is None:
+            raise KeyError(memory_id)
+        promotion = item.provenance.get("kg_promotion")
+        if not isinstance(promotion, dict):
+            raise ValueError("Memory promotion payload is missing")
+        raw_candidates = promotion.get("candidates")
+        candidates = [
+            dict(candidate)
+            for candidate in raw_candidates
+            if isinstance(candidate, dict)
+        ] if isinstance(raw_candidates, list) else []
+        raw_ids = promotion.get("base_object_ids")
+        base_ids = [str(value) for value in raw_ids] if isinstance(raw_ids, list) else []
+        return item, candidates, base_ids
+
+    @staticmethod
+    def validate_promotion_approval_access_on(
+        db: sqlite3.Connection,
+        memory_id: str,
+        candidate_notebook_id: str,
+    ) -> None:
+        """Revalidate Memory scope and creator access inside approval's write txn."""
+        row = db.execute(
+            "SELECT m.notebook_id,m.created_by,n.created_by AS notebook_owner,"
+            "EXISTS(SELECT 1 FROM notebook_members nm "
+            "WHERE nm.notebook_id=m.notebook_id AND nm.user_id=m.created_by) "
+            "AS is_member FROM memory_items m "
+            "JOIN notebooks n ON n.id=m.notebook_id WHERE m.id=?",
+            (memory_id,),
+        ).fetchone()
+        if row is None:
+            raise KeyError(memory_id)
+        if row["notebook_id"] != candidate_notebook_id:
+            raise ValueError("promotion candidate notebook does not match Memory notebook")
+        if row["created_by"] != row["notebook_owner"] and not bool(row["is_member"]):
+            raise PermissionError(memory_id)
+
+    def record_promotion_decision_on(
+        self,
+        db: sqlite3.Connection,
+        memory_id: str,
+        state: str,
+        changed_by: str,
+        now: str,
+        *,
+        base_object_ids: Sequence[str] = (),
+        reason: str = "",
+    ) -> MemoryRecord:
+        item, candidates, _existing_ids = self.promotion_data_on(db, memory_id)
+        provenance = dict(item.provenance)
+        current = provenance.get("kg_promotion")
+        promotion = dict(current) if isinstance(current, dict) else {}
+        promotion.update(
+            {
+                "state": state,
+                "candidates": candidates,
+                "base_object_ids": list(base_object_ids),
+            }
+        )
+        if reason:
+            promotion["reason"] = reason
+        else:
+            promotion.pop("reason", None)
+        provenance["kg_promotion"] = promotion
+        db.execute(
+            "UPDATE memory_provenance SET payload_json=? WHERE memory_id=?",
+            (
+                strict_json_dumps(provenance, field="memory provenance"),
+                memory_id,
+            ),
+        )
+        db.execute(
+            "UPDATE memory_items SET promotion_state=?,updated_at=? "
+            "WHERE id=? AND status='confirmed'",
+            (state, now, memory_id),
+        )
+        self._append_revision_on(
+            db,
+            memory_id,
+            {
+                "title": item.title,
+                "content_md": item.content_md,
+                "tags": item.tags,
+                "status": item.status,
+                "promotion_state": state,
+            },
+            changed_by,
+            f"kg_promotion_{state}",
+        )
+        return item.model_copy(
+            update={
+                "promotion_state": state,
+                "updated_at": now,
+                "provenance": provenance,
+            }
+        )
+
+    def update_fields(
+        self, memory_id: str, user_id: str, fields: Mapping[str, Any]
+    ) -> MemoryRecord:
+        allowed = {"title", "content_md", "tags"}
+        values = {key: value for key, value in fields.items() if key in allowed}
+        if not values:
+            return self.memory_for_user(memory_id, user_id)
+        assignments: list[str] = []
+        params: list[Any] = []
+        for key, value in values.items():
+            column = "tags_json" if key == "tags" else key
+            assignments.append(f"{column}=?")
+            params.append(json.dumps(list(value), ensure_ascii=False) if key == "tags" else value)
+        assignments.extend(["embedding_status='pending'", "embedding_error=''", "updated_at=?"])
+        params.extend([self.now(), memory_id, user_id, user_id, user_id])
+        with self.database.write() as db:
+            cursor = db.execute(
+                f"UPDATE memory_items SET {','.join(assignments)} "
+                "WHERE id=? AND created_by=? AND "
+                f"{self._read_access_clause('memory_items')}",
+                params,
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(memory_id)
+        return self.memory_for_user(memory_id, user_id)
+
+    def transition(
+        self,
+        memory_id: str,
+        user_id: str,
+        expected: set[str],
+        target: str,
+    ) -> MemoryRecord:
+        now = self.now()
+        placeholders = ",".join("?" for _ in expected)
+        confirmation = (
+            ",confirmed_by=?,confirmed_at=?,embedding_status='pending',embedding_error=''"
+            if target == "confirmed"
+            else ""
+        )
+        params: list[Any] = [target, now]
+        if target == "confirmed":
+            params.extend([user_id, now])
+        params.extend([memory_id, user_id, user_id, user_id, *sorted(expected)])
+        with self.database.write() as db:
+            cursor = db.execute(
+                f"UPDATE memory_items SET status=?,updated_at=?{confirmation} "
+                "WHERE id=? AND created_by=? AND "
+                f"{self._read_access_clause('memory_items')} "
+                f"AND status IN ({placeholders})",
+                params,
+            )
+            if cursor.rowcount != 1:
+                exists = db.execute(
+                    "SELECT status FROM memory_items m "
+                    "WHERE id=? AND created_by=? AND "
+                    f"{self._read_access_clause()}",
+                    (memory_id, user_id, user_id, user_id),
+                ).fetchone()
+                if exists is None:
+                    raise KeyError(memory_id)
+                raise ValueError(f"invalid memory transition: {exists['status']} -> {target}")
+        return self.memory_for_user(memory_id, user_id)
+
+    def list_memories(
+        self,
+        user_id: str,
+        *,
+        notebook_id: str | None,
+        status: str | None,
+        origin: str | None,
+        query: str,
+        offset: int,
+        limit: int,
+    ) -> PaginatedMemories:
+        offset = max(0, int(offset))
+        limit = max(1, min(200, int(limit)))
+        joins = "LEFT JOIN memory_provenance p ON p.memory_id=m.id"
+        clauses = ["m.created_by=?", self._read_access_clause()]
+        params: list[Any] = [user_id, user_id, user_id]
+        clean_query = (query or "").strip()
+        if clean_query:
+            joins += " JOIN memory_items_fts f ON f.rowid=m.rowid"
+            clauses.append("memory_items_fts MATCH ?")
+            params.append('"' + clean_query.replace('"', '""') + '"')
+        if notebook_id:
+            clauses.append("m.notebook_id=?")
+            params.append(notebook_id)
+        if status:
+            clauses.append("m.status=?")
+            params.append(status)
+        if origin:
+            clauses.append("m.origin=?")
+            params.append(origin)
+        where = " AND ".join(clauses)
+        with self.database.connect() as db:
+            aggregate = db.execute(
+                "SELECT COUNT(*) AS total_count,"
+                "COALESCE(SUM(CASE WHEN m.status='candidate' THEN 1 ELSE 0 END),0) "
+                "AS pending_count FROM memory_items m WHERE m.created_by=? AND "
+                f"{self._read_access_clause()}",
+                (user_id, user_id, user_id),
+            ).fetchone()
+            option_rows = db.execute(
+                "SELECT m.notebook_id,nb.name,COUNT(*) AS memory_count,"
+                "COALESCE(SUM(CASE WHEN m.status='candidate' THEN 1 ELSE 0 END),0) "
+                "AS pending_count FROM memory_items m "
+                "JOIN notebooks nb ON nb.id=m.notebook_id "
+                "WHERE m.created_by=? AND "
+                f"{self._read_access_clause()} "
+                "GROUP BY m.notebook_id,nb.name ORDER BY nb.name,m.notebook_id LIMIT 200",
+                (user_id, user_id, user_id),
+            ).fetchall()
+            total = db.execute(
+                f"SELECT COUNT(*) AS c FROM memory_items m {joins} WHERE {where}",
+                params,
+            ).fetchone()["c"]
+            rows = db.execute(
+                f"SELECT {self._select_columns()} FROM memory_items m {joins} "
+                f"WHERE {where} ORDER BY m.updated_at DESC,m.id LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        return PaginatedMemories(
+            items=[self._record(row) for row in rows],
+            total_count=int(total),
+            offset=offset,
+            limit=limit,
+            owner_total_count=int(aggregate["total_count"]),
+            owner_pending_count=int(aggregate["pending_count"]),
+            notebook_options=[
+                MemoryNotebookOption(
+                    notebook_id=row["notebook_id"],
+                    name=row["name"],
+                    memory_count=int(row["memory_count"]),
+                    pending_count=int(row["pending_count"]),
+                )
+                for row in option_rows
+            ],
+        )
+
+    def embedding_revision(
+        self, memory_id: str, item: MemoryRecord
+    ) -> int | None:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT (SELECT COALESCE(MAX(revision),0) FROM memory_revisions "
+                "WHERE memory_id=m.id) AS revision FROM memory_items m "
+                "WHERE m.id=? AND m.title=? AND m.content_md=? AND m.tags_json=? "
+                "AND m.status=?",
+                (
+                    memory_id,
+                    item.title,
+                    item.content_md,
+                    json.dumps(list(item.tags), ensure_ascii=False),
+                    item.status,
+                ),
+            ).fetchone()
+        return int(row["revision"]) if row is not None else None
+
+    def replace_embedding(
+        self, memory_id: str, expected_revision: int, model: str,
+        vector: Sequence[float],
+    ) -> bool:
+        with self.database.write() as db:
+            current = db.execute(
+                "SELECT COALESCE(MAX(revision),0) AS revision "
+                "FROM memory_revisions WHERE memory_id=?",
+                (memory_id,),
+            ).fetchone()
+            if int(current["revision"]) != int(expected_revision):
+                return False
+            db.execute(
+                "INSERT OR REPLACE INTO memory_embeddings "
+                "(memory_id,model,dimension,vector,updated_at) VALUES (?,?,?,?,?)",
+                (memory_id, model, len(vector), encode_vector(vector), self.now()),
+            )
+            db.execute(
+                "UPDATE memory_items SET embedding_status='ready',embedding_error='' "
+                "WHERE id=?",
+                (memory_id,),
+            )
+        return True
+
+    def mark_embedding_failed(
+        self, memory_id: str, expected_revision: int, error: str
+    ) -> bool:
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE memory_items SET embedding_status='failed',embedding_error=? "
+                "WHERE id=? AND (SELECT COALESCE(MAX(revision),0) "
+                "FROM memory_revisions WHERE memory_id=?)=?",
+                (error[:500], memory_id, memory_id, int(expected_revision)),
+            )
+        return cursor.rowcount == 1
+
+    def memory_retrieval_rows(
+        self,
+        user_id: str,
+        notebook_id: str,
+        statuses: Sequence[str],
+        query: str,
+        *,
+        lexical_limit: int,
+        vector_limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return a bounded lexical union embedding pool for one owner/notebook.
+
+        The embedding side is deliberately capped and index-ordered.  It never
+        turns an Ask into a whole-Memory scan or an embedding backfill.
+        """
+        allowed = tuple(
+            status for status in dict.fromkeys(str(item) for item in statuses)
+            if status in {"candidate", "confirmed"}
+        )
+        clean_query = (query or "").strip()
+        if not allowed or not clean_query:
+            return []
+        lexical_limit = max(1, min(int(lexical_limit), 200))
+        vector_limit = max(1, min(int(vector_limit), 500))
+        placeholders = ",".join("?" for _ in allowed)
+        common_params = (user_id, notebook_id, *allowed, user_id, user_id)
+        select = self._select_columns()
+        with self.database.connect() as db:
+            lexical_rows = db.execute(
+                f"SELECT {select},me.vector AS retrieval_vector "
+                "FROM memory_items m "
+                "JOIN memory_items_fts f ON f.rowid=m.rowid "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "LEFT JOIN memory_embeddings me ON me.memory_id=m.id "
+                "WHERE m.created_by=? AND m.notebook_id=? "
+                f"AND m.status IN ({placeholders}) "
+                f"AND {self._read_access_clause()} "
+                "AND memory_items_fts MATCH ? "
+                "ORDER BY bm25(memory_items_fts),m.updated_at DESC LIMIT ?",
+                (*common_params, '"' + clean_query.replace('"', '""') + '"', lexical_limit),
+            ).fetchall()
+            vector_rows = db.execute(
+                f"SELECT {select},me.vector AS retrieval_vector "
+                "FROM memory_items m "
+                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                "JOIN memory_embeddings me ON me.memory_id=m.id "
+                "WHERE m.created_by=? AND m.notebook_id=? "
+                f"AND m.status IN ({placeholders}) "
+                f"AND {self._read_access_clause()} "
+                "ORDER BY m.updated_at DESC,m.id LIMIT ?",
+                (*common_params, vector_limit),
+            ).fetchall()
+        rows: dict[str, dict[str, Any]] = {}
+        for row in [*lexical_rows, *vector_rows]:
+            rows.setdefault(
+                str(row["id"]),
+                {"record": self._record(row), "vector": row["retrieval_vector"]},
+            )
+        return list(rows.values())

@@ -1,4 +1,5 @@
 import inspect
+import re
 from pathlib import Path
 
 from app.repositories.ports import (
@@ -43,6 +44,12 @@ REMEDIATION_DOCS = (
 
 def _read(name: str) -> str:
     return (ROOT / name).read_text(encoding="utf-8")
+
+
+def _between(name: str, start: str, end: str | None = None) -> str:
+    text = _read(name)
+    section = text.split(start, 1)[1]
+    return section.split(end, 1)[0] if end else section
 
 
 def _assert_phrases(expected: dict[str, str]) -> None:
@@ -120,14 +127,19 @@ def test_retrieval_documentation_scopes_federation_and_tier_tie_break_by_path():
         assert "remains score-only" not in _read(name)
 
 
-def test_workspace_documentation_names_three_tabs_and_actual_toolbar_actions():
+def test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions():
     _assert_phrases(
         {
-            "README.md": "three tabs — **Ask**, **Knowledge**, and **Deep Report**",
-            "README_zh.md": "三个 tab——**问答**、**知识库**、**深度报告**",
-            "AGENTS.md": "three tabs: **Ask**, **Knowledge**, and **Deep Report**",
-            "architecture.md": "问答 / 知识库 / 深度报告三个 tab",
-            "fangan_done.md": "问答 / 知识库 / 深度报告三个 tab",
+            "README.md": "four tabs — **Ask**, **Knowledge**, **Memory**, and **Deep Report**",
+            "README_zh.md": "四个 tab——**Ask**、**Knowledge**、**Memory**、**Deep Report**",
+            "AGENTS.md": "four tabs: **Ask**, **Knowledge**, **Memory**, and **Deep Report**",
+            "architecture.md": "Ask / Knowledge / Memory / Deep Report 四个 tab",
+            "fangan_done.md": "Ask / Knowledge / Memory / Deep Report 四个 tab",
+            "silicon_notebook_fangan.md": "Ask | Knowledge | Memory | Deep Report",
+        }
+    )
+    _assert_phrases(
+        {
             "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md":
                 "问答 / 知识库 / 深度报告三个 tab",
             "docs/superpowers/plans/2026-07-10-architecture-contract-alignment.md":
@@ -159,6 +171,116 @@ def test_workspace_documentation_names_three_tabs_and_actual_toolbar_actions():
         assert "Mind Map" not in text
         assert "Infographic" not in text
         assert "派生规则审核" not in text
+
+
+def test_live_workspace_docs_have_no_memory_omitting_tab_contracts():
+    """Current docs must not retain a pre-Memory tab list.
+
+    Dated 2026-07-10 history is intentionally preserved; the matching historical
+    plan/spec phrases remain guarded by the preceding test.
+    """
+    live_docs = (
+        "README.md",
+        "README_zh.md",
+        "AGENTS.md",
+        "architecture.md",
+        "fangan_done.md",
+        "silicon_notebook_fangan.md",
+    )
+    for name in live_docs:
+        current_lines = [
+            line
+            for line in _read(name).splitlines()
+            if "2026-07-10" not in line
+        ]
+        current = "\n".join(current_lines)
+        assert re.search(r"\bthree[- ]tabs?\b", current, re.I) is None, (
+            f"{name} retains a current three-tab workspace phrase"
+        )
+        assert "三个 tab" not in current
+
+        for match in re.finditer(
+            r"Ask.{0,80}Knowledge.{0,80}Deep Report", current, re.I
+        ):
+            assert "Memory" in match.group(0), (
+                f"{name} has a current English tab list without Memory: {match.group(0)}"
+            )
+        for match in re.finditer(
+            r"问答.{0,80}知识库.{0,80}深度报告", current
+        ):
+            assert "Memory" in match.group(0) or "记忆" in match.group(0), (
+                f"{name} has a current Chinese tab list without Memory: {match.group(0)}"
+            )
+
+
+def test_current_memory_docs_describe_sanitized_multi_object_promotion_contract():
+    sections = {
+        "README.md": _between("README.md", "## Memory and Agent MCP", "## KG extraction trigger"),
+        "README_zh.md": _between("README_zh.md", "## Memory 与 Agent MCP", "## KG 抽取触发"),
+        "AGENTS.md": _read("AGENTS.md"),
+        "architecture.md": _between("architecture.md", "### 3.4 Memory 与 Agent MCP", "### 3.5 KG 与索引维护"),
+        "silicon_notebook_fangan.md": _between("silicon_notebook_fangan.md", "# 19. Agent Memory 系统"),
+        "fangan_done.md": _between("fangan_done.md", "## 27. Agent Memory 与 MCP", "## 20. 当前边界"),
+    }
+    expected = {
+        "README.md": (
+            "sanitized extraction candidates and server-validated evidence",
+            "revalidates the Memory's current confirmed status and creator access",
+            "one or more Base KG objects",
+            "`base_object_ids`",
+        ),
+        "README_zh.md": (
+            "脱敏后的结构化提取候选与服务端验证过的 evidence",
+            "重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权",
+            "一个或多个 Base KG 对象",
+            "`base_object_ids`",
+        ),
+        "AGENTS.md": (
+            "sanitized extraction candidates and server-validated evidence",
+            "revalidates current confirmed status and creator access",
+            "one or more Base KG objects",
+            "`base_object_ids`",
+        ),
+        "architecture.md": (
+            "脱敏后的结构化提取候选与服务端验证过的 evidence",
+            "重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权",
+            "一个或多个 Base KG 对象",
+            "`base_object_ids`",
+        ),
+        "silicon_notebook_fangan.md": (
+            "脱敏后的结构化提取候选与服务端验证过的 evidence",
+            "重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权",
+            "一个或多个 Base KG 对象",
+            "`base_object_ids`",
+        ),
+        "fangan_done.md": (
+            "脱敏后的结构化提取候选与服务端验证过的 evidence",
+            "重新校验 Memory 当前仍为 confirmed 且创建者仍有访问权",
+            "一个或多个 Base KG 对象",
+            "`base_object_ids`",
+        ),
+    }
+    for name, phrases in expected.items():
+        compact_section = "".join(sections[name].split())
+        for phrase in phrases:
+            assert "".join(phrase.split()) in compact_section, (
+                f"{name} is missing Memory promotion phrase: {phrase}"
+            )
+
+    for name, section in sections.items():
+        compact_section = "".join(section.split())
+        for stale in (
+            "three tabs",
+            "三个 tab",
+            "审核 Memory revision 与经过验证的 provenance",
+            "reviews the Memory revision and provenance",
+            "create or merge a Base KG object",
+            "create or merge a base object",
+            "创建或合并 base object",
+        ):
+            assert "".join(stale.split()) not in compact_section, (
+                f"{name} retains stale Memory wording: {stale}"
+            )
 
 
 def test_source_cleanup_documentation_matches_reparse_and_delete_boundaries():
@@ -220,7 +342,7 @@ def test_current_docs_describe_reports_and_sharing_without_retired_article_contr
     assert "There is no live collaborative editing or change-password flow" in agents
     assert "Single-user mode for now" not in agents
     assert "no change-password / sharing / collaboration" not in agents
-    assert "更新日期：2026-07-12" in fangan_done
+    assert "更新日期：2026-07-13" in fangan_done
     assert "历史记录：Article Studio（已退役）" in fangan_done
     assert "历史记录（已退役）：Derived Rule Candidate" in fangan_done
 
@@ -463,19 +585,24 @@ def test_report_cancellation_is_the_documented_process_global_runtime_exception(
 
 
 def test_repository_schema_baseline_wording_is_exact_and_not_stale():
-    english = (
-        "The refactor does not change the schema version present on its master "
-        "baseline\n(SCHEMA_VERSION = 10). The committed v9 compatibility fixture "
-        "upgrades through\nthe existing v10 migration and remains readable."
+    english_current = (
+        "The current schema version is 13. The committed v9 compatibility fixture\n"
+        "upgrades through the existing v10 migration, the v11/v12 SQLite hot-path index\n"
+        "migrations, and the v13 Memory/Agent migration, and remains readable."
     )
-    chinese = (
+    chinese_current = (
+        "当前 schema 版本为 13。已提交的 v9 兼容 fixture 会经由既有 v10 migration、"
+        "v11/v12 SQLite 热路径索引 migration 与 v13 Memory/Agent migration 升级，并保持可读。"
+    )
+    historical_chinese = (
         "本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。"
         "已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。"
     )
     for name in ("README.md", "AGENTS.md"):
-        assert english in _read(name), f"{name} is missing the exact schema statement"
-    for name in ("README_zh.md", "architecture.md", "fangan_done.md") + COMPOSITION_HISTORY_DOCS:
-        assert chinese in _read(name), f"{name} is missing the schema statement"
+        assert english_current in _read(name), f"{name} is missing the exact schema statement"
+    assert chinese_current in _read("README_zh.md")
+    for name in ("architecture.md", "fangan_done.md") + COMPOSITION_HISTORY_DOCS:
+        assert historical_chinese in _read(name), f"{name} is missing the historical schema statement"
 
     for name in COMPOSITION_HISTORY_DOCS:
         text = _read(name)

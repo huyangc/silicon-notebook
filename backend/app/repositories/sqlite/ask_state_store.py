@@ -275,6 +275,40 @@ class AskStateStore:
     # answers
     # ------------------------------------------------------------------
 
+    def answer_notebook_id(self, answer_id: str) -> "str | None":
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT notebook_id FROM answers WHERE id=?", (answer_id,)
+            ).fetchone()
+        return row["notebook_id"] if row is not None else None
+
+    def answer_memory_source(self, answer_id: str) -> dict:
+        """Return the durable, server-owned Ask fields used by Memory capture."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT notebook_id,question,payload,conversation_id "
+                "FROM answers WHERE id=?",
+                (answer_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(answer_id)
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        return {
+            "answer_id": answer_id,
+            "notebook_id": row["notebook_id"],
+            "question": row["question"] or "",
+            "answer": str(payload.get("answer") or payload.get("conclusion") or ""),
+            "conversation_id": row["conversation_id"],
+            "mode": str(payload.get("mode") or ""),
+            "model": str(payload.get("llm_mode") or ""),
+            "evidence_level": str(payload.get("evidence_level") or "inferred"),
+            "anchors": payload.get("anchors") if isinstance(payload.get("anchors"), list) else [],
+            "citations": payload.get("citations") if isinstance(payload.get("citations"), list) else [],
+        }
+
     def save_answer(
         self,
         notebook_id: str,

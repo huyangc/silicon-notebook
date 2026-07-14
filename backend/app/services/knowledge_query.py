@@ -35,6 +35,8 @@ class KnowledgeQueryService:
         schemas,
         snapshots,
         notebook_languages: Callable[[], dict],
+        memory_retriever=None,
+        current_user_id: Callable[[], str] = lambda: "",
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -48,6 +50,8 @@ class KnowledgeQueryService:
         self.schemas = schemas
         self.snapshots = snapshots
         self.notebook_languages = notebook_languages
+        self.memory_retriever = memory_retriever
+        self.current_user_id = current_user_id
 
     def backfill_kg_fts(self, notebook_id: str) -> int:
         self.catalog.get_notebook(notebook_id)
@@ -168,7 +172,25 @@ class KnowledgeQueryService:
         semantic = self.semantic_search(notebook_id, query, limit)
         merged = merge_search_hits(lexical, semantic, limit)
         hydrated = self.hydrate_search_hits(notebook_id, merged)
-        return self.fold_hits_to_canonical(notebook_id, hydrated, limit)
+        result = self.fold_hits_to_canonical(notebook_id, hydrated, limit)
+        if self.memory_retriever is not None:
+            memories = self.memory_retriever.notebook_memory_hits(
+                self.current_user_id(), notebook_id, query, limit
+            )
+            result.extend({
+                "object_id": hit.memory_id,
+                "name": hit.title,
+                "object_type": "memory",
+                "score": hit.score,
+                "match": "memory",
+            } for hit in memories)
+            result.sort(
+                key=lambda item: (
+                    float(item.get("score", 0.0)), str(item.get("object_id", ""))
+                ),
+                reverse=True,
+            )
+        return result[:limit]
 
     def knowledge_types(self, notebook_id: str) -> List[KnowledgeTypeCount]:
         self.catalog.get_notebook(notebook_id)

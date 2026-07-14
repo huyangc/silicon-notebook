@@ -11,7 +11,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -965,6 +965,170 @@ class SqliteMigrator:
                 """
             )
 
+    @staticmethod
+    def _rebuild_memory_fts(db: sqlite3.Connection) -> None:
+        """Rebuild the external-content Memory index without scanning in queries."""
+        db.execute("INSERT INTO memory_items_fts(memory_items_fts) VALUES ('rebuild')")
+
+    def _migration_13(self) -> None:
+        """Creator-private notebook Memory, revision history, and Agent access.
+
+        The Memory branch originally used version 11 while master independently
+        used v11/v12 for scale indexes.  Keep Memory as the new v13 hop and
+        idempotently ensure the master indexes so a database produced by either
+        pre-merge v11 lineage converges to the same schema.
+        """
+        with self._connect() as db:
+            self.add_column_if_missing(
+                db, "knowledge_relations", "review_status", "TEXT NOT NULL DEFAULT 'pending'"
+            )
+            db.execute("CREATE INDEX IF NOT EXISTS idx_element_embeddings_source ON element_embeddings(source_id)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_knowledge_relations_nb_review ON knowledge_relations(notebook_id, review_status)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_comentions_nb_b ON concept_comentions(notebook_id, canonical_b)")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_sources_nb_parse_status ON sources(notebook_id, parse_status)")
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS agent_profiles (
+                  id TEXT PRIMARY KEY,
+                  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                  name TEXT NOT NULL,
+                  description TEXT NOT NULL DEFAULT '',
+                  status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active','revoked')),
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_profiles_owner_status
+                  ON agent_profiles(owner_id, status, updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS agent_access_tokens (
+                  id TEXT PRIMARY KEY,
+                  agent_profile_id TEXT NOT NULL
+                    REFERENCES agent_profiles(id) ON DELETE CASCADE,
+                  token_hash TEXT NOT NULL UNIQUE,
+                  scopes_json TEXT NOT NULL DEFAULT '[]',
+                  default_notebook_id TEXT NOT NULL
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
+                  expires_at TEXT,
+                  revoked_at TEXT,
+                  last_used_at TEXT,
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_tokens_profile
+                  ON agent_access_tokens(agent_profile_id, revoked_at, expires_at);
+
+                CREATE TABLE IF NOT EXISTS agent_token_notebooks (
+                  token_id TEXT NOT NULL
+                    REFERENCES agent_access_tokens(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
+                  PRIMARY KEY (token_id, notebook_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_token_notebooks_notebook
+                  ON agent_token_notebooks(notebook_id, token_id);
+
+                CREATE TABLE IF NOT EXISTS memory_items (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL
+                    REFERENCES notebooks(id) ON DELETE CASCADE,
+                  created_by TEXT NOT NULL
+                    REFERENCES users(id) ON DELETE CASCADE,
+                  agent_profile_id TEXT
+                    REFERENCES agent_profiles(id) ON DELETE SET NULL,
+                  source_answer_id TEXT,
+                  origin TEXT NOT NULL
+                    CHECK(origin IN ('ask_answer','external_agent')),
+                  status TEXT NOT NULL
+                    CHECK(status IN ('candidate','confirmed','rejected','deprecated')),
+                  promotion_state TEXT NOT NULL DEFAULT 'none'
+                    CHECK(promotion_state IN ('none','proposed','approved','rejected')),
+                  title TEXT NOT NULL,
+                  content_md TEXT NOT NULL,
+                  tags_json TEXT NOT NULL DEFAULT '[]',
+                  confirmed_by TEXT REFERENCES users(id),
+                  confirmed_at TEXT,
+                  embedding_status TEXT NOT NULL DEFAULT 'pending',
+                  embedding_error TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_answer_once
+                  ON memory_items(created_by, source_answer_id)
+                  WHERE source_answer_id IS NOT NULL;
+                CREATE INDEX IF NOT EXISTS idx_memory_owner_notebook_status
+                  ON memory_items(created_by, notebook_id, status, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_memory_agent_candidate
+                  ON memory_items(created_by, notebook_id, status, agent_profile_id);
+
+                CREATE TABLE IF NOT EXISTS memory_revisions (
+                  id TEXT PRIMARY KEY,
+                  memory_id TEXT NOT NULL
+                    REFERENCES memory_items(id) ON DELETE CASCADE,
+                  revision INTEGER NOT NULL CHECK(revision > 0),
+                  title TEXT NOT NULL,
+                  content_md TEXT NOT NULL,
+                  tags_json TEXT NOT NULL DEFAULT '[]',
+                  status TEXT NOT NULL
+                    CHECK(status IN ('candidate','confirmed','rejected','deprecated')),
+                  promotion_state TEXT NOT NULL
+                    CHECK(promotion_state IN ('none','proposed','approved','rejected')),
+                  changed_by TEXT NOT NULL REFERENCES users(id),
+                  change_reason TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  UNIQUE(memory_id, revision)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_revisions_memory
+                  ON memory_revisions(memory_id, revision DESC);
+
+                CREATE TABLE IF NOT EXISTS memory_provenance (
+                  id TEXT PRIMARY KEY,
+                  memory_id TEXT NOT NULL UNIQUE
+                    REFERENCES memory_items(id) ON DELETE CASCADE,
+                  origin TEXT NOT NULL
+                    CHECK(origin IN ('ask_answer','external_agent')),
+                  payload_json TEXT NOT NULL DEFAULT '{}',
+                  created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS memory_embeddings (
+                  memory_id TEXT PRIMARY KEY
+                    REFERENCES memory_items(id) ON DELETE CASCADE,
+                  model TEXT NOT NULL,
+                  dimension INTEGER NOT NULL CHECK(dimension > 0),
+                  vector BLOB NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_embeddings_model
+                  ON memory_embeddings(model, dimension);
+
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_items_fts USING fts5(
+                  title,
+                  content_md,
+                  tags_json,
+                  content='memory_items',
+                  content_rowid='rowid',
+                  tokenize='trigram'
+                );
+                CREATE TRIGGER IF NOT EXISTS memory_items_fts_insert
+                AFTER INSERT ON memory_items BEGIN
+                  INSERT INTO memory_items_fts(rowid, title, content_md, tags_json)
+                  VALUES (new.rowid, new.title, new.content_md, new.tags_json);
+                END;
+                CREATE TRIGGER IF NOT EXISTS memory_items_fts_delete
+                AFTER DELETE ON memory_items BEGIN
+                  INSERT INTO memory_items_fts(memory_items_fts, rowid, title, content_md, tags_json)
+                  VALUES ('delete', old.rowid, old.title, old.content_md, old.tags_json);
+                END;
+                CREATE TRIGGER IF NOT EXISTS memory_items_fts_update
+                AFTER UPDATE OF title, content_md, tags_json ON memory_items BEGIN
+                  INSERT INTO memory_items_fts(memory_items_fts, rowid, title, content_md, tags_json)
+                  VALUES ('delete', old.rowid, old.title, old.content_md, old.tags_json);
+                  INSERT INTO memory_items_fts(rowid, title, content_md, tags_json)
+                  VALUES (new.rowid, new.title, new.content_md, new.tags_json);
+                END;
+                """
+            )
+            self._rebuild_memory_fts(db)
     def _migration_11(self) -> None:
         """Scale hot-path index coverage (per-request full scans → index seeks).
         Separate migration (not a _migration_1 baseline edit) so already-deployed

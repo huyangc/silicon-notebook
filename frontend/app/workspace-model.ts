@@ -25,6 +25,80 @@ export type NotebookSummary = {
   shared_from?: string;
 };
 
+export type MemoryOrigin = "ask_answer" | "external_agent";
+export type MemoryStatus = "candidate" | "confirmed" | "rejected" | "deprecated";
+export type MemoryPromotionState = "none" | "proposed" | "approved" | "rejected";
+
+export type MemoryRecord = {
+  id: string;
+  notebook_id: string;
+  created_by: string;
+  agent_profile_id?: string | null;
+  source_answer_id?: string | null;
+  origin: MemoryOrigin;
+  status: MemoryStatus;
+  promotion_state: MemoryPromotionState;
+  title: string;
+  content_md: string;
+  tags: string[];
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
+  embedding_status: string;
+  embedding_error: string;
+  created_at: string;
+  updated_at: string;
+  provenance: Record<string, unknown>;
+};
+
+export type PaginatedMemories = {
+  items: MemoryRecord[];
+  total_count: number;
+  offset: number;
+  limit: number;
+  owner_total_count: number;
+  owner_pending_count: number;
+  notebook_options: Array<{
+    notebook_id: string;
+    name: string;
+    memory_count: number;
+    pending_count: number;
+  }>;
+};
+
+export type MemoryPreview = {
+  title: string;
+  content_md: string;
+  tags: string[];
+  provenance_summary: Record<string, unknown>;
+};
+
+export type AgentProfile = {
+  id: string;
+  owner_id: string;
+  name: string;
+  description: string;
+  status: "active" | "revoked";
+  created_at: string;
+  updated_at: string;
+};
+
+export type AgentTokenSummary = {
+  id: string;
+  agent_profile_id: string;
+  profile_name: string;
+  scopes: string[];
+  default_notebook_id: string;
+  notebook_ids: string[];
+  expires_at?: string | null;
+  revoked_at?: string | null;
+  last_used_at?: string | null;
+  created_at: string;
+};
+
+export type AgentTokenIssued = Omit<AgentTokenSummary, "profile_name" | "revoked_at" | "last_used_at"> & {
+  token: string;
+};
+
 export type SourceSummary = {
   id: string;
   notebook_id: string;
@@ -146,11 +220,12 @@ export type ConversationDetail = {
   active_job?: { job_id: string; question: string; mode: string; trace: ReasoningTraceStep[] };
 };
 
-export type ChatMode = "ask" | "rules" | "reports";
+export type ChatMode = "ask" | "rules" | "reports" | "memory";
 export const CHAT_MODES: Array<[ChatMode, string]> = [
-  ["ask", "问答"],
-  ["rules", "知识库"],
-  ["reports", "深度报告"],
+  ["ask", "Ask"],
+  ["rules", "Knowledge"],
+  ["memory", "Memory"],
+  ["reports", "Deep Report"],
 ];
 
 export type KnowledgeKind = string;

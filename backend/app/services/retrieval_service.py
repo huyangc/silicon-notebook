@@ -37,6 +37,12 @@ class RetrievalService:
         """按 query 检索 source_elements → List[RetrievedElement]。"""
         return self.candidates.retrieve_elements(*args, **kwargs)
 
+    def notebook_memory_hits(self, *args, **kwargs):
+        return self.candidates.notebook_memory_hits(*args, **kwargs)
+
+    def agent_memory_hits(self, *args, **kwargs):
+        return self.candidates.agent_memory_hits(*args, **kwargs)
+
     def ppr_retrieve(self, *args, **kwargs):
         """HippoRAG 式 PPR 跨文档传播检索 → List[RetrievedChunk]。"""
         return self.graph.ppr_retrieve(*args, **kwargs)

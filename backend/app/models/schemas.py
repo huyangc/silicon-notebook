@@ -1,6 +1,13 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.services.memory_inputs import (
+    normalize_content,
+    normalize_reason,
+    normalize_tags,
+    normalize_title,
+)
 
 
 class UserProfile(BaseModel):
@@ -11,6 +18,200 @@ class UserProfile(BaseModel):
     username: str = ""
     memory_mode: str = "manual"
     domain_focus: List[str] = Field(default_factory=list)
+
+
+MemoryOrigin = Literal["ask_answer", "external_agent"]
+MemoryStatus = Literal["candidate", "confirmed", "rejected", "deprecated"]
+MemoryPromotionState = Literal["none", "proposed", "approved", "rejected"]
+
+
+class MemoryRecord(BaseModel):
+    id: str
+    notebook_id: str
+    created_by: str
+    agent_profile_id: Optional[str] = None
+    source_answer_id: Optional[str] = None
+    origin: MemoryOrigin
+    status: MemoryStatus
+    promotion_state: MemoryPromotionState = "none"
+    title: str
+    content_md: str
+    tags: List[str] = Field(default_factory=list)
+    confirmed_by: Optional[str] = None
+    confirmed_at: Optional[str] = None
+    embedding_status: str = "pending"
+    embedding_error: str = ""
+    created_at: str
+    updated_at: str
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryHit(BaseModel):
+    """A retrieval projection with relevance and authority kept separate."""
+
+    memory_id: str
+    title: str
+    text: str
+    status: Literal["candidate", "confirmed"]
+    authority: int
+    score: float
+    provenance: Dict[str, Any] = Field(default_factory=dict)
+
+    @property
+    def relevance(self) -> float:
+        return self.score
+
+    @property
+    def object_id(self) -> str:
+        return self.memory_id
+
+
+class MemoryNotebookOption(BaseModel):
+    notebook_id: str
+    name: str
+    memory_count: int
+    pending_count: int
+
+
+class PaginatedMemories(BaseModel):
+    items: List[MemoryRecord]
+    total_count: int
+    offset: int
+    limit: int
+    owner_total_count: int = 0
+    owner_pending_count: int = 0
+    notebook_options: List[MemoryNotebookOption] = Field(default_factory=list)
+
+
+class MemoryPreview(BaseModel):
+    title: str
+    content_md: str
+    tags: List[str] = Field(default_factory=list)
+    provenance_summary: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MemoryCreateFromAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    answer_id: str
+    title: str
+    content_md: str
+    tags: List[str] = Field(default_factory=list)
+
+    _normalize_title = field_validator("title")(normalize_title)
+    _normalize_content = field_validator("content_md")(normalize_content)
+    _normalize_tags = field_validator("tags")(normalize_tags)
+
+
+class AnswerMemoryLinksRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    answer_ids: List[str] = Field(default_factory=list, max_length=200)
+
+
+class AnswerMemoryLinksResponse(BaseModel):
+    links: Dict[str, str] = Field(default_factory=dict)
+
+
+class MemoryUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: Optional[str] = None
+    content_md: Optional[str] = None
+    tags: Optional[List[str]] = None
+
+    @field_validator("title")
+    @classmethod
+    def _normalize_optional_title(cls, value):
+        return normalize_title(value) if value is not None else None
+
+    @field_validator("content_md")
+    @classmethod
+    def _normalize_optional_content(cls, value):
+        return normalize_content(value) if value is not None else None
+
+    @field_validator("tags")
+    @classmethod
+    def _normalize_optional_tags(cls, value):
+        return normalize_tags(value) if value is not None else None
+
+
+class MemoryReviewRequest(MemoryUpdate):
+    reason: Optional[str] = None
+
+    @field_validator("reason")
+    @classmethod
+    def _normalize_optional_reason(cls, value):
+        return normalize_reason(value) if value is not None else None
+
+
+class AgentProfile(BaseModel):
+    id: str
+    owner_id: str
+    name: str
+    description: str = ""
+    status: Literal["active", "revoked"] = "active"
+    created_at: str
+    updated_at: str
+
+
+class AgentProfileCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=80)
+    description: str = Field(default="", max_length=500)
+
+
+class AgentProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Optional[str] = Field(default=None, min_length=1, max_length=80)
+    description: Optional[str] = Field(default=None, max_length=500)
+    status: Optional[Literal["active", "revoked"]] = None
+
+
+class AgentTokenCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    agent_profile_id: str
+    scopes: List[str] = Field(default_factory=list)
+    default_notebook_id: str = Field(min_length=1)
+    notebook_ids: List[str] = Field(default_factory=list)
+    expires_at: Optional[str] = None
+
+
+class AgentTokenSummary(BaseModel):
+    id: str
+    agent_profile_id: str
+    profile_name: str
+    scopes: List[str] = Field(default_factory=list)
+    default_notebook_id: str = Field(min_length=1)
+    notebook_ids: List[str] = Field(default_factory=list)
+    expires_at: Optional[str] = None
+    revoked_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+    created_at: str
+
+
+class AgentTokenIssued(BaseModel):
+    id: str
+    token: str
+    agent_profile_id: str
+    scopes: List[str] = Field(default_factory=list)
+    default_notebook_id: str = Field(min_length=1)
+    notebook_ids: List[str] = Field(default_factory=list)
+    expires_at: Optional[str] = None
+    created_at: str
+
+
+class AgentPrincipal(BaseModel):
+    profile_id: str
+    profile_name: str
+    owner_id: str
+    scopes: List[str] = Field(default_factory=list)
+    default_notebook_id: str = Field(min_length=1)
+    notebook_ids: List[str] = Field(default_factory=list)
+    token_id: str
 
 
 class AuthRequest(BaseModel):
@@ -267,6 +468,10 @@ class Citation(BaseModel):
     # user notes). Mirrors AnswerAnchor.tier — lets the "来源分布" badge count
     # citations, not just anchors.
     tier: str = "personal"
+    memory_id: str = Field(default="", exclude_if=lambda value: not value)
+    provenance: Dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
 
 class TraceStep(BaseModel):
@@ -297,6 +502,9 @@ class AnswerAnchor(BaseModel):
     # Source tier: 'base' (authoritative reference KG) or 'personal' (default,
     # user notes). Lets the UI surface authority + supports conflict precedence.
     tier: str = "personal"
+    provenance: Dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
 
 class ModelError(BaseModel):
@@ -373,6 +581,10 @@ class SearchHit(BaseModel):
     text: str
     source_id: str = ""
     element_id: str = ""
+    memory_id: str = Field(default="", exclude_if=lambda value: not value)
+    provenance: Dict[str, Any] = Field(
+        default_factory=dict, exclude_if=lambda value: not value
+    )
 
 
 class NotebookSearchResponse(BaseModel):
@@ -643,11 +855,16 @@ class PromotionCandidate(BaseModel):
     # Denormalised fields populated by the repo from knowledge_objects:
     payload: dict = Field(default_factory=dict)
     evidence: List[Evidence] = Field(default_factory=list)
+    source_kind: Literal["knowledge", "memory"] = "knowledge"
+    memory_id: str = ""
+    # Memory-backed proposals are reviewed against this immutable source revision.
+    source_revision: int = 0
 
 
 class PromotionApproveResult(BaseModel):
     candidate_id: str
     base_object_id: str
+    base_object_ids: List[str] = Field(default_factory=list)
     merged_into: str = ""   # non-empty if deduped into an existing base object
 
 

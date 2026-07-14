@@ -12,6 +12,7 @@ from app.models.schemas import (
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
+    SearchHit,
 )
 # Canonical implementation lives with the SourceFileStore (Task 11); the
 # private alias keeps this module's delete_notebook cleanup call sites and
@@ -101,12 +102,17 @@ class NotebookSummaryQuery:
         return (row[0] or "", bool(row[1]))
 
     def from_row(
-        self, connection: sqlite3.Connection, row: sqlite3.Row
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        memory_count: int = 0,
     ) -> NotebookSummary:
         # 注意:kg_building 仅经 get(kg_building=...) 回填为真值;list_for_user 等走
         # from_row 的路径恒为 False（当前无消费方读列表里的该字段）。
         counts = {
             "sources": self.count(connection, "sources", "notebook_id", row["id"]),
+            "memories": memory_count,
             **self.knowledge_type_counts(connection, row["id"]),
         }
         keys = row.keys()
@@ -142,7 +148,11 @@ class NotebookSummaryQuery:
         )
 
     def get(
-        self, notebook_id: str, *, kg_building: bool = False
+        self,
+        notebook_id: str,
+        *,
+        kg_building: bool = False,
+        user_id: str | None = None,
     ) -> NotebookSummary:
         """status='copying' rows (copy_notebook's in-progress sentinel, P1-4)
         are treated as not-yet-existing: every catalog mutation guards with
@@ -152,7 +162,16 @@ class NotebookSummaryQuery:
             row = self.queries.summary_notebook_row(db, notebook_id)
             if row is None:
                 raise KeyError(notebook_id)
-            summary = self.from_row(db, row)
+            memory_counts = (
+                self.queries.memory_counts_by_owner_notebook(db, user_id)
+                if user_id is not None
+                else {}
+            )
+            summary = self.from_row(
+                db,
+                row,
+                memory_count=memory_counts.get((user_id, notebook_id), 0),
+            )
         summary.kg_building = kg_building
         return summary
 
@@ -164,14 +183,23 @@ class NotebookSummaryQuery:
         """
         out: List[NotebookSummary] = []
         with self.database.connect() as db:
+            memory_counts = self.queries.memory_counts_by_owner_notebook(db, user_id)
             rows = self.queries.owned_notebook_rows(db, user_id)
             for row in rows:
-                nb = self.from_row(db, row)
+                nb = self.from_row(
+                    db,
+                    row,
+                    memory_count=memory_counts.get((user_id, row["id"]), 0),
+                )
                 nb.access = "owner"
                 out.append(nb)
             joined = self.queries.joined_notebook_rows(db, user_id)
             for row in joined:
-                nb = self.from_row(db, row)
+                nb = self.from_row(
+                    db,
+                    row,
+                    memory_count=memory_counts.get((user_id, row["id"]), 0),
+                )
                 nb.access = "reader"
                 nb.shared_from = row["_owner_username"] or ""
                 out.append(nb)
@@ -196,6 +224,7 @@ class NotebookCatalogService:
         self._queries = queries
         self._identity = identity
         self.kg_building: set = set()
+        self.memory_retriever = None
 
     def list_notebook_templates(self) -> list[NotebookTemplate]:
         return [NotebookTemplate(**t) for t in NOTEBOOK_TEMPLATES]
@@ -214,14 +243,15 @@ class NotebookCatalogService:
             return knowledge_counts_cache.warm_all(db, progress)
 
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary:
-        notebook_id = self._store.create_row(
-            payload, self._identity.current_user().id
-        )
-        return self._summaries.get(notebook_id)
+        user_id = self._identity.current_user().id
+        notebook_id = self._store.create_row(payload, user_id)
+        return self._summaries.get(notebook_id, user_id=user_id)
 
     def get_notebook(self, notebook_id: str) -> NotebookSummary:
         return self._summaries.get(
-            notebook_id, kg_building=notebook_id in self.kg_building
+            notebook_id,
+            kg_building=notebook_id in self.kg_building,
+            user_id=self._identity.current_user().id,
         )
 
     def update_notebook(
@@ -252,4 +282,25 @@ class NotebookCatalogService:
     def search_notebook(
         self, notebook_id: str, query: str
     ) -> NotebookSearchResponse:
-        return self._queries.search_notebook(notebook_id, query)
+        response = self._queries.search_notebook(notebook_id, query)
+        if self.memory_retriever is None:
+            return response
+        memories = self.memory_retriever.notebook_memory_hits(
+            self._identity.current_user().id, notebook_id, query, 8
+        )
+        memory_hits = [SearchHit(
+            scope="Memory",
+            notebook_id=notebook_id,
+            label=item.title,
+            text=item.text[:400],
+            source_id="",
+            element_id="",
+            memory_id=item.memory_id,
+            provenance=dict(item.provenance),
+        ) for item in memories]
+        if not memory_hits:
+            return response
+        return NotebookSearchResponse(
+            query=response.query,
+            hits=[*response.hits[: max(0, 20 - len(memory_hits))], *memory_hits][:20],
+        )

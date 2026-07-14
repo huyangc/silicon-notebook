@@ -512,6 +512,57 @@ class GovernanceStore:
         ).fetchall()
 
     @staticmethod
+    def safe_memory_evidence(
+        connection: sqlite3.Connection, notebook_id: str, provenance: dict
+    ) -> List[dict]:
+        """Resolve trusted Ask citations to current source elements.
+
+        Agent-supplied evidence references are intentionally ignored here:
+        confirmation accepts the Memory text, not unverified source claims.
+        Returned quotes come from stored elements rather than request payloads.
+        """
+        citations = provenance.get("citations")
+        if not isinstance(citations, list):
+            return []
+        pairs: list[tuple[str, str]] = []
+        for citation in citations[:50]:
+            if not isinstance(citation, dict):
+                continue
+            source_id = str(citation.get("source_id") or "")
+            element_id = str(citation.get("element_id") or "")
+            if source_id and element_id:
+                pairs.append((source_id, element_id))
+        if not pairs:
+            return []
+        out: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for source_id, element_id in pairs:
+            if (source_id, element_id) in seen:
+                continue
+            seen.add((source_id, element_id))
+            row = connection.execute(
+                "SELECT s.id AS source_id,s.title AS source_title,e.id AS element_id,"
+                "e.element_type,e.location_label,e.text FROM sources s "
+                "JOIN source_elements e ON e.source_id=s.id "
+                "WHERE s.id=? AND e.id=? AND s.notebook_id=?",
+                (source_id, element_id, notebook_id),
+            ).fetchone()
+            if row is None:
+                continue
+            out.append(
+                {
+                    "source_id": row["source_id"],
+                    "source_title": row["source_title"],
+                    "element_id": row["element_id"],
+                    "element_type": row["element_type"],
+                    "location_label": row["location_label"],
+                    "quoted_span": str(row["text"] or "")[:500],
+                    "confidence": 1.0,
+                }
+            )
+        return out
+
+    @staticmethod
     def object_payload_row(
         connection: sqlite3.Connection, object_id: str
     ) -> "sqlite3.Row | None":
@@ -600,6 +651,13 @@ class GovernanceStore:
         ).fetchone()
 
     @staticmethod
+    def first_admin_user_id(connection: sqlite3.Connection) -> str:
+        row = connection.execute(
+            "SELECT id FROM users WHERE role='admin' ORDER BY created_at,id LIMIT 1"
+        ).fetchone()
+        return str(row["id"]) if row is not None else ""
+
+    @staticmethod
     def approved_base_object_id(
         connection: sqlite3.Connection, base_notebook_id: str, candidate_id: str
     ) -> "sqlite3.Row | None":
@@ -610,8 +668,130 @@ class GovernanceStore:
             (base_notebook_id, candidate_id),
         ).fetchone()
 
+    @staticmethod
+    def approved_memory_base_object_ids(
+        connection: sqlite3.Connection, base_notebook_id: str, candidate_id: str
+    ) -> List[str]:
+        return [
+            str(row["id"])
+            for row in connection.execute(
+                "SELECT id FROM knowledge_objects "
+                "WHERE notebook_id=? AND source_candidate_id=? ORDER BY id",
+                (base_notebook_id, candidate_id),
+            ).fetchall()
+        ]
+
+    def approve_memory_promotion_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        candidate_id: str,
+        candidates: List[dict],
+        evidence: List[dict],
+        reviewer_id: str,
+        now: str,
+    ) -> dict:
+        """Promote a sanitized Memory extraction through the normal base dedupe path."""
+        cand = self.promotion_candidate_row(connection, candidate_id)
+        if cand is None:
+            raise KeyError(candidate_id)
+        if cand["status"] == "rejected":
+            raise ValueError("cannot approve a rejected promotion candidate")
+        base_row = self.first_base_notebook_row(connection)
+        if base_row is None:
+            raise ValueError("no base notebook — mark one with mark_notebook_base() first")
+        base_nb_id = str(base_row["id"])
+        if cand["status"] == "approved":
+            return {
+                "base_notebook_id": base_nb_id,
+                "base_object_ids": self.approved_memory_base_object_ids(
+                    connection, base_nb_id, candidate_id
+                ),
+                "created_object_ids": [],
+                "merged_object_ids": [],
+            }
+
+        base_object_ids: list[str] = []
+        created_object_ids: list[str] = []
+        merged_object_ids: list[str] = []
+        for extracted in candidates:
+            object_type = str(extracted.get("object_type") or "")
+            payload = extracted.get("payload")
+            if object_type not in {"concept", "claim", "formula", "procedure"}:
+                continue
+            if not isinstance(payload, dict) or not payload:
+                continue
+            base_objs = connection.execute(
+                "SELECT id,payload,evidence FROM knowledge_objects "
+                "WHERE notebook_id=? AND object_type=? AND status IN ({})".format(
+                    ",".join("?" for _ in USABLE_STATUSES)
+                ),
+                (base_nb_id, object_type, *USABLE_STATUSES),
+            ).fetchall()
+            base_match_id = find_base_dedup_match(object_type, payload, base_objs)
+            if base_match_id:
+                matched = next(row for row in base_objs if row["id"] == base_match_id)
+                merged_evidence = merge_evidence_lists(
+                    json.loads(matched["evidence"] or "[]"), evidence
+                )
+                connection.execute(
+                    "UPDATE knowledge_objects SET evidence=?,updated_at=? WHERE id=?",
+                    (json.dumps(merged_evidence, ensure_ascii=False), now, base_match_id),
+                )
+                KnowledgeStore.replace_object_sources(
+                    connection,
+                    base_match_id,
+                    base_nb_id,
+                    json.dumps(merged_evidence, ensure_ascii=False),
+                )
+                base_object_id = base_match_id
+                merged_object_ids.append(base_object_id)
+            else:
+                base_object_id = self.seams.new_id("ko")
+                connection.execute(
+                    "INSERT INTO knowledge_objects "
+                    "(id,notebook_id,object_type,status,owner,payload,evidence,"
+                    "source_candidate_id,source_id,created_at,updated_at) "
+                    "VALUES (?,?,?,'approved','',?,?,?,'',?,?)",
+                    (
+                        base_object_id,
+                        base_nb_id,
+                        object_type,
+                        json.dumps(payload, ensure_ascii=False),
+                        json.dumps(evidence, ensure_ascii=False),
+                        candidate_id,
+                        now,
+                        now,
+                    ),
+                )
+                KnowledgeStore.replace_object_sources(
+                    connection,
+                    base_object_id,
+                    base_nb_id,
+                    json.dumps(evidence, ensure_ascii=False),
+                )
+                created_object_ids.append(base_object_id)
+            base_object_ids.append(base_object_id)
+
+        if not base_object_ids:
+            raise ValueError("Memory produced no supported KG candidates")
+        connection.execute(
+            "UPDATE promotion_candidates SET status='approved',base_match_id=?,"
+            "reviewed_by=?,updated_at=? WHERE id=?",
+            (merged_object_ids[0] if merged_object_ids else "", reviewer_id, now, candidate_id),
+        )
+        return {
+            "base_notebook_id": base_nb_id,
+            "base_object_ids": base_object_ids,
+            "created_object_ids": created_object_ids,
+            "merged_object_ids": merged_object_ids,
+        }
+
     def approve_promotion_in_transaction(
-        self, connection: sqlite3.Connection, candidate_id: str, now: str
+        self,
+        connection: sqlite3.Connection,
+        candidate_id: str,
+        now: str,
+        reviewer_id: str = "curator",
     ) -> PromotionApproval:
         """The in-transaction body of approve_promotion: copy the personal
         object into the base corpus, deduplicating against existing base
@@ -707,9 +887,9 @@ class GovernanceStore:
 
         connection.execute(
             "UPDATE promotion_candidates "
-            "SET status='approved', base_match_id=?, reviewed_by='curator', updated_at=? "
+            "SET status='approved', base_match_id=?, reviewed_by=?, updated_at=? "
             "WHERE id=?",
-            (base_match_id, now, candidate_id),
+            (base_match_id, reviewer_id or "curator", now, candidate_id),
         )
         return PromotionApproval(
             candidate_id=candidate_id,
@@ -722,13 +902,17 @@ class GovernanceStore:
 
     @staticmethod
     def set_promotion_rejected(
-        connection: sqlite3.Connection, candidate_id: str, reason: str, now: str
+        connection: sqlite3.Connection,
+        candidate_id: str,
+        reason: str,
+        now: str,
+        reviewer_id: str = "curator",
     ) -> None:
         connection.execute(
             "UPDATE promotion_candidates "
-            "SET status='rejected', reason=?, reviewed_by='curator', updated_at=? "
+            "SET status='rejected', reason=?, reviewed_by=?, updated_at=? "
             "WHERE id=?",
-            (reason, now, candidate_id),
+            (reason, reviewer_id, now, candidate_id),
         )
 
     # -------------------------------------------------- knowledge mutation

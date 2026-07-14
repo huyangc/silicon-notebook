@@ -185,6 +185,307 @@
           "title": "AdminUserUsage",
           "type": "object"
         },
+        "AgentProfile": {
+          "properties": {
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "owner_id": {
+              "title": "Owner Id",
+              "type": "string"
+            },
+            "status": {
+              "default": "active",
+              "enum": [
+                "active",
+                "revoked"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "owner_id",
+            "name",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "AgentProfile",
+          "type": "object"
+        },
+        "AgentProfileCreate": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "default": "",
+              "maxLength": 500,
+              "title": "Description",
+              "type": "string"
+            },
+            "name": {
+              "maxLength": 80,
+              "minLength": 1,
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "title": "AgentProfileCreate",
+          "type": "object"
+        },
+        "AgentProfileUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "description": {
+              "anyOf": [
+                {
+                  "maxLength": 500,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Description"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "maxLength": 80,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Name"
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "active",
+                    "revoked"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          "title": "AgentProfileUpdate",
+          "type": "object"
+        },
+        "AgentTokenCreate": {
+          "additionalProperties": false,
+          "properties": {
+            "agent_profile_id": {
+              "title": "Agent Profile Id",
+              "type": "string"
+            },
+            "default_notebook_id": {
+              "minLength": 1,
+              "title": "Default Notebook Id",
+              "type": "string"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            },
+            "scopes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "agent_profile_id",
+            "default_notebook_id"
+          ],
+          "title": "AgentTokenCreate",
+          "type": "object"
+        },
+        "AgentTokenIssued": {
+          "properties": {
+            "agent_profile_id": {
+              "title": "Agent Profile Id",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "default_notebook_id": {
+              "minLength": 1,
+              "title": "Default Notebook Id",
+              "type": "string"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            },
+            "scopes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            },
+            "token": {
+              "title": "Token",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "token",
+            "agent_profile_id",
+            "default_notebook_id",
+            "created_at"
+          ],
+          "title": "AgentTokenIssued",
+          "type": "object"
+        },
+        "AgentTokenSummary": {
+          "properties": {
+            "agent_profile_id": {
+              "title": "Agent Profile Id",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "default_notebook_id": {
+              "minLength": 1,
+              "title": "Default Notebook Id",
+              "type": "string"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "last_used_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last Used At"
+            },
+            "notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Notebook Ids",
+              "type": "array"
+            },
+            "profile_name": {
+              "title": "Profile Name",
+              "type": "string"
+            },
+            "revoked_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Revoked At"
+            },
+            "scopes": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "agent_profile_id",
+            "profile_name",
+            "default_notebook_id",
+            "created_at"
+          ],
+          "title": "AgentTokenSummary",
+          "type": "object"
+        },
         "AnswerAnchor": {
           "properties": {
             "definition": {
@@ -224,6 +525,11 @@
               "title": "Object Type",
               "type": "string"
             },
+            "provenance": {
+              "additionalProperties": true,
+              "title": "Provenance",
+              "type": "object"
+            },
             "snippet": {
               "anyOf": [
                 {
@@ -253,6 +559,34 @@
             "label"
           ],
           "title": "AnswerAnchor",
+          "type": "object"
+        },
+        "AnswerMemoryLinksRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "answer_ids": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 200,
+              "title": "Answer Ids",
+              "type": "array"
+            }
+          },
+          "title": "AnswerMemoryLinksRequest",
+          "type": "object"
+        },
+        "AnswerMemoryLinksResponse": {
+          "properties": {
+            "links": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Links",
+              "type": "object"
+            }
+          },
+          "title": "AnswerMemoryLinksResponse",
           "type": "object"
         },
         "AskRequest": {
@@ -474,6 +808,16 @@
             "location_label": {
               "title": "Location Label",
               "type": "string"
+            },
+            "memory_id": {
+              "default": "",
+              "title": "Memory Id",
+              "type": "string"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "title": "Provenance",
+              "type": "object"
             },
             "quoted_span": {
               "title": "Quoted Span",
@@ -1237,6 +1581,304 @@
             }
           },
           "title": "KnowledgeUpdate",
+          "type": "object"
+        },
+        "MemoryCreateFromAnswer": {
+          "additionalProperties": false,
+          "properties": {
+            "answer_id": {
+              "title": "Answer Id",
+              "type": "string"
+            },
+            "content_md": {
+              "title": "Content Md",
+              "type": "string"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Tags",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "answer_id",
+            "title",
+            "content_md"
+          ],
+          "title": "MemoryCreateFromAnswer",
+          "type": "object"
+        },
+        "MemoryPreview": {
+          "properties": {
+            "content_md": {
+              "title": "Content Md",
+              "type": "string"
+            },
+            "provenance_summary": {
+              "additionalProperties": true,
+              "title": "Provenance Summary",
+              "type": "object"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Tags",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "content_md"
+          ],
+          "title": "MemoryPreview",
+          "type": "object"
+        },
+        "MemoryRecord": {
+          "properties": {
+            "agent_profile_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agent Profile Id"
+            },
+            "confirmed_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Confirmed At"
+            },
+            "confirmed_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Confirmed By"
+            },
+            "content_md": {
+              "title": "Content Md",
+              "type": "string"
+            },
+            "created_at": {
+              "title": "Created At",
+              "type": "string"
+            },
+            "created_by": {
+              "title": "Created By",
+              "type": "string"
+            },
+            "embedding_error": {
+              "default": "",
+              "title": "Embedding Error",
+              "type": "string"
+            },
+            "embedding_status": {
+              "default": "pending",
+              "title": "Embedding Status",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "origin": {
+              "enum": [
+                "ask_answer",
+                "external_agent"
+              ],
+              "title": "Origin",
+              "type": "string"
+            },
+            "promotion_state": {
+              "default": "none",
+              "enum": [
+                "none",
+                "proposed",
+                "approved",
+                "rejected"
+              ],
+              "title": "Promotion State",
+              "type": "string"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "title": "Provenance",
+              "type": "object"
+            },
+            "source_answer_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source Answer Id"
+            },
+            "status": {
+              "enum": [
+                "candidate",
+                "confirmed",
+                "rejected",
+                "deprecated"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "tags": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Tags",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "created_by",
+            "origin",
+            "status",
+            "title",
+            "content_md",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "MemoryRecord",
+          "type": "object"
+        },
+        "MemoryReviewRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "content_md": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Content Md"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Reason"
+            },
+            "tags": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tags"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title"
+            }
+          },
+          "title": "MemoryReviewRequest",
+          "type": "object"
+        },
+        "MemoryUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "content_md": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Content Md"
+            },
+            "tags": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Tags"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title"
+            }
+          },
+          "title": "MemoryUpdate",
           "type": "object"
         },
         "MergeRequest": {
@@ -2149,6 +2791,82 @@
           "title": "PaginatedKnowledge",
           "type": "object"
         },
+        "PaginatedMemories": {
+          "properties": {
+            "items": {
+              "items": {
+                "$ref": "#/components/schemas/MemoryRecord"
+              },
+              "title": "Items",
+              "type": "array"
+            },
+            "limit": {
+              "title": "Limit",
+              "type": "integer"
+            },
+            "notebook_options": {
+              "items": {
+                "$ref": "#/components/schemas/MemoryNotebookOption"
+              },
+              "title": "Notebook Options",
+              "type": "array"
+            },
+            "offset": {
+              "title": "Offset",
+              "type": "integer"
+            },
+            "owner_pending_count": {
+              "default": 0,
+              "title": "Owner Pending Count",
+              "type": "integer"
+            },
+            "owner_total_count": {
+              "default": 0,
+              "title": "Owner Total Count",
+              "type": "integer"
+            },
+            "total_count": {
+              "title": "Total Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "items",
+            "total_count",
+            "offset",
+            "limit"
+          ],
+          "title": "PaginatedMemories",
+          "type": "object"
+        },
+        "MemoryNotebookOption": {
+          "properties": {
+            "memory_count": {
+              "title": "Memory Count",
+              "type": "integer"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "pending_count": {
+              "title": "Pending Count",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "notebook_id",
+            "name",
+            "memory_count",
+            "pending_count"
+          ],
+          "title": "MemoryNotebookOption",
+          "type": "object"
+        },
         "PaginatedSources": {
           "properties": {
             "items": {
@@ -2185,6 +2903,13 @@
             "base_object_id": {
               "title": "Base Object Id",
               "type": "string"
+            },
+            "base_object_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Base Object Ids",
+              "type": "array"
             },
             "candidate_id": {
               "title": "Candidate Id",
@@ -2227,6 +2952,11 @@
               "title": "Id",
               "type": "string"
             },
+            "memory_id": {
+              "default": "",
+              "title": "Memory Id",
+              "type": "string"
+            },
             "notebook_id": {
               "title": "Notebook Id",
               "type": "string"
@@ -2253,6 +2983,20 @@
               "default": "",
               "title": "Reviewed By",
               "type": "string"
+            },
+            "source_kind": {
+              "default": "knowledge",
+              "enum": [
+                "knowledge",
+                "memory"
+              ],
+              "title": "Source Kind",
+              "type": "string"
+            },
+            "source_revision": {
+              "default": 0,
+              "title": "Source Revision",
+              "type": "integer"
             },
             "status": {
               "title": "Status",
@@ -2620,9 +3364,19 @@
               "title": "Label",
               "type": "string"
             },
+            "memory_id": {
+              "default": "",
+              "title": "Memory Id",
+              "type": "string"
+            },
             "notebook_id": {
               "title": "Notebook Id",
               "type": "string"
+            },
+            "provenance": {
+              "additionalProperties": true,
+              "title": "Provenance",
+              "type": "object"
             },
             "scope": {
               "title": "Scope",
@@ -3363,6 +4117,293 @@
           "summary": "List Admin User Notebooks"
         }
       },
+      "/api/agent-profiles": {
+        "get": {
+          "operationId": "list_agent_profiles_api_agent_profiles_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 100,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/AgentProfile"
+                    },
+                    "title": "Response List Agent Profiles Api Agent Profiles Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Agent Profiles"
+        },
+        "post": {
+          "operationId": "create_agent_profile_api_agent_profiles_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProfileCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "201": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentProfile"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Agent Profile"
+        }
+      },
+      "/api/agent-profiles/{profile_id}": {
+        "patch": {
+          "operationId": "update_agent_profile_api_agent_profiles__profile_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "profile_id",
+              "required": true,
+              "schema": {
+                "title": "Profile Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentProfileUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentProfile"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Agent Profile"
+        }
+      },
+      "/api/agent-profiles/{profile_id}/tokens": {
+        "post": {
+          "operationId": "issue_agent_token_api_agent_profiles__profile_id__tokens_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "profile_id",
+              "required": true,
+              "schema": {
+                "title": "Profile Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentTokenCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "201": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentTokenIssued"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Issue Agent Token"
+        }
+      },
+      "/api/agent-tokens": {
+        "get": {
+          "operationId": "list_agent_tokens_api_agent_tokens_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 100,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/AgentTokenSummary"
+                    },
+                    "title": "Response List Agent Tokens Api Agent Tokens Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Agent Tokens"
+        }
+      },
+      "/api/agent-tokens/{token_id}": {
+        "delete": {
+          "operationId": "revoke_agent_token_api_agent_tokens__token_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "token_id",
+              "required": true,
+              "schema": {
+                "title": "Token Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AgentTokenSummary"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Revoke Agent Token"
+        }
+      },
       "/api/answers/{answer_id}/feedback": {
         "post": {
           "operationId": "submit_feedback_api_answers__answer_id__feedback_post",
@@ -3410,6 +4451,45 @@
             }
           },
           "summary": "Submit Feedback"
+        }
+      },
+      "/api/answers/{answer_id}/memory-preview": {
+        "post": {
+          "operationId": "preview_answer_memory_api_answers__answer_id__memory_preview_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "answer_id",
+              "required": true,
+              "schema": {
+                "title": "Answer Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryPreview"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Preview Answer Memory"
         }
       },
       "/api/ask-modes": {
@@ -4347,6 +5427,386 @@
           "summary": "Me Pending Stream"
         }
       },
+      "/api/memories": {
+        "get": {
+          "operationId": "list_all_memories_api_memories_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "notebook_id",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Notebook Id"
+              }
+            },
+            {
+              "in": "query",
+              "name": "status",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "candidate",
+                      "confirmed",
+                      "rejected",
+                      "deprecated"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Status"
+              }
+            },
+            {
+              "in": "query",
+              "name": "origin",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "ask_answer",
+                      "external_agent"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Origin"
+              }
+            },
+            {
+              "in": "query",
+              "name": "query",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PaginatedMemories"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List All Memories"
+        }
+      },
+      "/api/memories/{memory_id}": {
+        "get": {
+          "operationId": "get_memory_api_memories__memory_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Memory"
+        },
+        "patch": {
+          "operationId": "update_memory_api_memories__memory_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Memory"
+        }
+      },
+      "/api/memories/{memory_id}/confirm": {
+        "post": {
+          "operationId": "confirm_memory_api_memories__memory_id__confirm_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/MemoryReviewRequest"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Payload"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Confirm Memory"
+        }
+      },
+      "/api/memories/{memory_id}/deprecate": {
+        "post": {
+          "operationId": "deprecate_memory_api_memories__memory_id__deprecate_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Deprecate Memory"
+        }
+      },
+      "/api/memories/{memory_id}/promote": {
+        "post": {
+          "operationId": "promote_memory_api_memories__memory_id__promote_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "201": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PromotionCandidate"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Promote Memory"
+        }
+      },
+      "/api/memories/{memory_id}/reject": {
+        "post": {
+          "operationId": "reject_memory_api_memories__memory_id__reject_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "memory_id",
+              "required": true,
+              "schema": {
+                "title": "Memory Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Reject Memory"
+        }
+      },
       "/api/notebook-templates": {
         "get": {
           "operationId": "list_notebook_templates_api_notebook_templates_get",
@@ -4602,6 +6062,55 @@
             }
           },
           "summary": "Notebook Analytics"
+        }
+      },
+      "/api/notebooks/{notebook_id}/answer-memory-links": {
+        "post": {
+          "operationId": "answer_memory_links_api_notebooks__notebook_id__answer_memory_links_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnswerMemoryLinksRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AnswerMemoryLinksResponse"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Answer Memory Links"
         }
       },
       "/api/notebooks/{notebook_id}/ask": {
@@ -5820,6 +7329,169 @@
             }
           },
           "summary": "Leave Notebook Route"
+        }
+      },
+      "/api/notebooks/{notebook_id}/memories": {
+        "get": {
+          "operationId": "list_notebook_memories_api_notebooks__notebook_id__memories_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "status",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "candidate",
+                      "confirmed",
+                      "rejected",
+                      "deprecated"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Status"
+              }
+            },
+            {
+              "in": "query",
+              "name": "origin",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "enum": [
+                      "ask_answer",
+                      "external_agent"
+                    ],
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Origin"
+              }
+            },
+            {
+              "in": "query",
+              "name": "query",
+              "required": false,
+              "schema": {
+                "default": "",
+                "title": "Query",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "offset",
+              "required": false,
+              "schema": {
+                "default": 0,
+                "minimum": 0,
+                "title": "Offset",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "maximum": 100,
+                "minimum": 1,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/PaginatedMemories"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Notebook Memories"
+        }
+      },
+      "/api/notebooks/{notebook_id}/memories/from-answer": {
+        "post": {
+          "operationId": "create_memory_from_answer_api_notebooks__notebook_id__memories_from_answer_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryCreateFromAnswer"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "201": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MemoryRecord"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Memory From Answer"
         }
       },
       "/api/notebooks/{notebook_id}/objects/{object_id}/context": {
@@ -8120,6 +9792,7 @@
         "cases": 0,
         "checklist_items": 0,
         "glossary": 0,
+        "memories": 0,
         "methods": 0,
         "risks": 0,
         "rules": 0,

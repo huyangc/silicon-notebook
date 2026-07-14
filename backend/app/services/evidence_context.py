@@ -195,6 +195,7 @@ class EvidenceContextService:
                     source_title=str(context.get("source_title", "")),
                     location_label=str(context.get("location_label", "")),
                     tier=str(context.get("tier", "personal")),
+                    provenance=dict(context.get("provenance") or {}),
                 ))
         return anchors
 

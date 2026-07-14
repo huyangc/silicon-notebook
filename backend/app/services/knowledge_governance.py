@@ -48,6 +48,7 @@ from app.models.schemas import (
 )
 from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
+from app.repositories.sqlite.memory_store import MemoryStore
 from app.services.retrieval import cosine, keyword_score
 
 
@@ -56,7 +57,9 @@ from app.services.retrieval import cosine, keyword_score
 _IN_CHUNK = 900
 
 
-def promotion_row_to_dict(row: sqlite3.Row, *, payload=None, evidence=None) -> dict:
+def promotion_row_to_dict(
+    row: sqlite3.Row, *, payload=None, evidence=None, source_revision: int = 0
+) -> dict:
     """Map a promotion_candidates row to the PromotionCandidate-shaped dict.
     payload/evidence are denormalised from knowledge_objects when listing."""
     return {
@@ -71,6 +74,9 @@ def promotion_row_to_dict(row: sqlite3.Row, *, payload=None, evidence=None) -> d
         "created_at": row["created_at"],
         "payload": payload if payload is not None else {},
         "evidence": evidence if evidence is not None else [],
+        "source_kind": "memory" if row["object_type"] == "memory" else "knowledge",
+        "memory_id": row["object_id"] if row["object_type"] == "memory" else "",
+        "source_revision": int(source_revision),
     }
 
 
@@ -137,6 +143,7 @@ class KnowledgeGovernanceService:
         as_retrieved: Callable[[dict, str], Any],
         rule_card: Callable[[Any], RuleCard],
         set_conflict_status: Callable[[str, str, str], None],
+        memory_store: MemoryStore,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -158,6 +165,7 @@ class KnowledgeGovernanceService:
         self._as_retrieved = as_retrieved
         self._rule_card = rule_card
         self._set_conflict_status = set_conflict_status
+        self.memory_store = memory_store
 
     @staticmethod
     def promotion_dict(row, *, payload=None, evidence=None) -> dict:
@@ -982,6 +990,62 @@ class KnowledgeGovernanceService:
     # Governance: promotion state machine (Track F)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _memory_promotion_payload(item, snapshot: Optional[dict] = None) -> dict:
+        pinned = snapshot or {}
+        candidates = pinned.get("candidates", [])
+        return {
+            "name": str(pinned.get("title") or item.title),
+            "title": str(pinned.get("title") or item.title),
+            "memory_id": item.id,
+            "candidates": candidates if isinstance(candidates, list) else [],
+        }
+
+    def propose_memory_promotion(
+        self, item, candidates: List[dict], user_id: str
+    ) -> dict:
+        """Place a creator-owned confirmed Memory into the existing curator queue."""
+        self.get_notebook(item.notebook_id)
+        if item.created_by != user_id:
+            raise KeyError(item.id)
+        if item.status != "confirmed":
+            raise ValueError("only confirmed Memory can be promoted")
+        now = self._now()
+        with self._write() as db:
+            existing = self.governance_store.active_promotion_for_object(db, item.id)
+            if existing is not None:
+                current = self.memory_store.promotion_rows_on(db, [item.id])[item.id]
+                snapshot = self.memory_store.pinned_promotion_snapshot(
+                    current, str(existing["id"]), required=False
+                )
+                return promotion_row_to_dict(
+                    existing,
+                    payload=self._memory_promotion_payload(current, snapshot),
+                    evidence=[Evidence(**card) for card in snapshot.get("evidence", [])],
+                    source_revision=int(snapshot.get("source_revision") or 0),
+                )
+            cand_id = self._new_id("promo")
+            current = self.memory_store.promotion_rows_on(db, [item.id]).get(item.id)
+            if current is None:
+                raise KeyError(item.id)
+            evidence = self.governance_store.safe_memory_evidence(
+                db, current.notebook_id, current.provenance
+            )
+            self.governance_store.insert_promotion_candidate(
+                db, cand_id, item.notebook_id, item.id, "memory", now
+            )
+            current = self.memory_store.propose_promotion_on(
+                db, item.id, user_id, cand_id, candidates, evidence, item, now
+            )
+            snapshot = self.memory_store.pinned_promotion_snapshot(current, cand_id)
+            row = self.governance_store.promotion_candidate_row(db, cand_id)
+        return promotion_row_to_dict(
+            row,
+            payload=self._memory_promotion_payload(current, snapshot),
+            evidence=[Evidence(**card) for card in snapshot.get("evidence", [])],
+            source_revision=int(snapshot.get("source_revision") or 0),
+        )
+
     def propose_promotion(self, notebook_id: str, object_id: str) -> dict:
         """Propose a personal-KG object for promotion into the base corpus.
 
@@ -1022,14 +1086,47 @@ class KnowledgeGovernanceService:
         SELECT — was N+1 (one round-trip per candidate)."""
         with self._connect() as db:
             rows = self.governance_store.promotion_queue_rows(db, status_filter)
-            object_ids = list(dict.fromkeys(r["object_id"] for r in rows))
+            object_ids = list(dict.fromkeys(
+                r["object_id"] for r in rows if r["object_type"] != "memory"
+            ))
+            memory_ids = list(dict.fromkeys(
+                r["object_id"] for r in rows if r["object_type"] == "memory"
+            ))
             obj_by_id: Dict[str, sqlite3.Row] = {}
             for i in range(0, len(object_ids), _IN_CHUNK):
                 batch = object_ids[i:i + _IN_CHUNK]
                 for r in self.governance_store.promotion_object_rows(db, batch):
                     obj_by_id[r["id"]] = r
+            memory_by_id = self.memory_store.promotion_rows_on(db, memory_ids)
             out: List[dict] = []
             for row in rows:
+                memory = memory_by_id.get(row["object_id"])
+                if row["object_type"] == "memory":
+                    snapshot = (
+                        self.memory_store.pinned_promotion_snapshot(
+                            memory, str(row["id"]), required=False
+                        )
+                        if memory
+                        else {}
+                    )
+                    safe_evidence = [
+                        Evidence(**evidence)
+                        for evidence in snapshot.get("evidence", [])
+                        if isinstance(evidence, dict)
+                    ]
+                    out.append(
+                        promotion_row_to_dict(
+                            row,
+                            payload=(
+                                self._memory_promotion_payload(memory, snapshot)
+                                if memory
+                                else {}
+                            ),
+                            evidence=safe_evidence,
+                            source_revision=int(snapshot.get("source_revision") or 0),
+                        )
+                    )
+                    continue
                 obj = obj_by_id.get(row["object_id"])
                 payload = json.loads(obj["payload"] or "{}") if obj else {}
                 evidence = (
@@ -1042,7 +1139,7 @@ class KnowledgeGovernanceService:
                 )
         return out
 
-    def approve_promotion(self, candidate_id: str) -> dict:
+    def approve_promotion(self, candidate_id: str, reviewer_id: str = "") -> dict:
         """Approve a promotion: copy the personal object into the base corpus,
         deduplicating against existing base objects of the same type via the
         kg_merge seed clustering. Idempotent. Raises KeyError if the candidate
@@ -1055,29 +1152,110 @@ class KnowledgeGovernanceService:
                 raise KeyError(candidate_id)
             if cand["status"] == "rejected":
                 raise ValueError("cannot approve a rejected promotion candidate")
-            was_approved = cand["status"] == "approved"
-            src_payload = (
-                json.loads(
-                    (self.governance_store.object_payload_row(
-                        db, cand["object_id"]
-                    ) or {"payload": None})["payload"]
-                    or "{}"
+            if cand["object_type"] == "memory":
+                memory, _legacy_candidates, existing_ids = (
+                    self.memory_store.promotion_data_on(db, cand["object_id"])
                 )
-                if not was_approved
-                else {}
-            )
-            approval = self.governance_store.approve_promotion_in_transaction(
-                db, candidate_id, now
-            )
+                if cand["status"] == "approved" and existing_ids:
+                    return {
+                        "candidate_id": candidate_id,
+                        "base_object_id": existing_ids[0],
+                        "base_object_ids": existing_ids,
+                        "merged_into": cand["base_match_id"] or "",
+                    }
+                self.memory_store.validate_promotion_approval_access_on(
+                    db, memory.id, cand["notebook_id"]
+                )
+                snapshot = self.memory_store.pinned_promotion_snapshot(
+                    memory, candidate_id
+                )
+                self.memory_store.validate_pinned_promotion_on(
+                    db, memory, candidate_id, snapshot
+                )
+                extracted = [
+                    dict(candidate)
+                    for candidate in snapshot.get("candidates", [])
+                    if isinstance(candidate, dict)
+                ]
+                reviewer = reviewer_id or self.governance_store.first_admin_user_id(db)
+                if not reviewer:
+                    raise ValueError("no administrator available for Memory review")
+                evidence = [
+                    dict(card)
+                    for card in snapshot.get("evidence", [])
+                    if isinstance(card, dict)
+                ]
+                approval = self.governance_store.approve_memory_promotion_in_transaction(
+                    db, candidate_id, extracted, evidence, reviewer, now
+                )
+                base_ids = approval["base_object_ids"] or existing_ids
+                if memory.promotion_state != "approved":
+                    self.memory_store.record_promotion_decision_on(
+                        db,
+                        memory.id,
+                        "approved",
+                        reviewer,
+                        now,
+                        base_object_ids=base_ids,
+                    )
+                memory_approval = (approval, list(base_ids))
+            else:
+                memory_approval = None
+            if memory_approval is not None:
+                pass
+            else:
+                was_approved = cand["status"] == "approved"
+                src_payload = (
+                    json.loads(
+                        (self.governance_store.object_payload_row(
+                            db, cand["object_id"]
+                        ) or {"payload": None})["payload"]
+                        or "{}"
+                    )
+                    if not was_approved
+                    else {}
+                )
+                if reviewer_id:
+                    approval = self.governance_store.approve_promotion_in_transaction(
+                        db, candidate_id, now, reviewer_id
+                    )
+                else:
+                    approval = self.governance_store.approve_promotion_in_transaction(
+                        db, candidate_id, now
+                    )
             # Idempotency: an already-approved candidate returns the existing
             # base object with NO post-commit hooks — exactly the old
             # early-return-inside-the-transaction behavior.
-            if was_approved:
+            if memory_approval is None and was_approved:
                 return {
                     "candidate_id": candidate_id,
                     "base_object_id": approval.base_object_id,
+                    "base_object_ids": [approval.base_object_id] if approval.base_object_id else [],
                     "merged_into": cand["base_match_id"] or "",
                 }
+
+        if memory_approval is not None:
+            memory_result, base_ids = memory_approval
+            for object_id in memory_result["created_object_ids"]:
+                with self._connect() as db:
+                    payload_row = self.governance_store.object_payload_row(db, object_id)
+                if payload_row is not None:
+                    self._embed_knowledge(
+                        object_id,
+                        memory_result["base_notebook_id"],
+                        json.loads(payload_row["payload"] or "{}"),
+                    )
+            self._invalidate_unified_cache(memory_result["base_notebook_id"])
+            self._mark_unified_kg_dirty(memory_result["base_notebook_id"])
+            return {
+                "candidate_id": candidate_id,
+                "base_object_id": base_ids[0] if base_ids else "",
+                "base_object_ids": base_ids,
+                "merged_into": (
+                    memory_result["merged_object_ids"][0]
+                    if memory_result["merged_object_ids"] else ""
+                ),
+            }
 
         # Embed the new base object's payload (best-effort; outside the txn so a
         # failing embedder never blocks approval). Only for freshly-inserted ones.
@@ -1090,10 +1268,13 @@ class KnowledgeGovernanceService:
         return {
             "candidate_id": candidate_id,
             "base_object_id": approval.base_object_id,
+            "base_object_ids": [approval.base_object_id] if approval.base_object_id else [],
             "merged_into": "" if approval.created_new_object else approval.base_object_id,
         }
 
-    def reject_promotion(self, candidate_id: str, reason: str = "") -> dict:
+    def reject_promotion(
+        self, candidate_id: str, reason: str = "", reviewer_id: str = ""
+    ) -> dict:
         """Reject a promotion candidate. The personal object is left untouched.
         Raises KeyError if missing; ValueError if already approved."""
         now = self._now()
@@ -1103,9 +1284,28 @@ class KnowledgeGovernanceService:
                 raise KeyError(candidate_id)
             if cand["status"] == "approved":
                 raise ValueError("cannot reject an approved promotion candidate")
-            self.governance_store.set_promotion_rejected(
-                db, candidate_id, reason, now
+            if cand["status"] == "rejected":
+                return promotion_row_to_dict(cand)
+            reviewer = (
+                reviewer_id
+                or (
+                    self.governance_store.first_admin_user_id(db)
+                    if cand["object_type"] == "memory"
+                    else "curator"
+                )
             )
+            self.governance_store.set_promotion_rejected(
+                db, candidate_id, reason, now, reviewer
+            )
+            if cand["object_type"] == "memory":
+                self.memory_store.record_promotion_decision_on(
+                    db,
+                    cand["object_id"],
+                    "rejected",
+                    reviewer,
+                    now,
+                    reason=reason,
+                )
             row = self.governance_store.promotion_candidate_row(db, candidate_id)
         return promotion_row_to_dict(row)
 

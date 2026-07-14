@@ -1397,21 +1397,189 @@ TASK28_ALLOWED_IMPORTS = {
     ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "set_request_user"),
 }
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:824"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:817"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:802"),
-    ("get_report", "scripts/verify_repository_snapshot.py:829"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:805"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:814"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:808"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:826"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:803"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:765"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:769"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:771"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:796"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:838"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:812"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1023"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1016"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1001"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1028"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1004"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1013"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1007"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1025"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1002"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:964"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:968"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:970"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:995"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1037"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1011"),
+}
+
+# Task 1 (Memory): schema-version and migration tests add new compatibility
+# facade consumers, while inserting the v11 assertion shifts the frozen legacy
+# test sites. Keep both old and live exact sites out of the immutable baseline
+# comparison.
+TASK1_MEMORY_ALLOWED_CONSUMERS = {
+    ("SCHEMA_VERSION", "backend/tests/test_legacy_db_compat.py:82"),
+    ("SCHEMA_VERSION", "backend/tests/test_legacy_db_compat.py:88"),
+    ("SCHEMA_VERSION", "backend/tests/test_memory_migration.py:33"),
+    ("SQLiteRepository", "backend/tests/test_memory_migration.py:15"),
+    ("_connect", "backend/tests/test_legacy_db_compat.py:58"),
+    ("_connect", "backend/tests/test_legacy_db_compat.py:81"),
+    ("_connect", "backend/tests/test_legacy_db_compat.py:87"),
+    ("_connect", "backend/tests/test_memory_migration.py:34"),
+    ("_migrate", "backend/tests/test_legacy_db_compat.py:80"),
+    ("_migrate", "backend/tests/test_legacy_db_compat.py:86"),
+    ("_write", "backend/tests/test_legacy_db_compat.py:65"),
+    ("_write", "backend/tests/test_legacy_db_compat.py:71"),
+    ("_write", "backend/tests/test_memory_migration.py:52"),
+    ("_write", "backend/tests/test_memory_migration.py:62"),
+    ("_write", "backend/tests/test_memory_migration.py:91"),
+    ("_write", "backend/tests/test_memory_migration.py:101"),
+    ("_write", "backend/tests/test_memory_migration.py:131"),
+}
+TASK1_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_migration.py", name)
+    for name in {
+        "SQLiteRepository", "SCHEMA_VERSION", "_connect", "_write",
+        "close_local", "settings",
+    }
+}
+
+# Task 2 (Memory): the lifecycle service/store tests intentionally exercise
+# the new facade delegates and existing composition seams.  They post-date the
+# immutable pre-Memory facade fixture, so keep these exact new test consumers
+# out of the historical comparison while still checking them in the dedicated
+# Memory boundary contract.
+TASK2_MEMORY_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_service.py", 10, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_memory_service.py", 10, "app.services.sqlite_repository", "reset_request_user"),
+    ("backend/tests/test_memory_service.py", 10, "app.services.sqlite_repository", "set_request_user"),
+    ("backend/tests/test_memory_repository_boundaries.py", 9, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK2_MEMORY_ALLOWED_NEW_MEMBERS = {
+    "confirm_memory",
+    "create_memory_candidate",
+    "create_memory_from_answer",
+    "deprecate_memory",
+    "get_memory",
+    "list_memories",
+    "memory_revisions",
+    "reject_memory",
+    "update_memory",
+}
+TASK2_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_service.py", name)
+    for name in {
+        "SQLiteRepository", "_connect", "_runtime", "_write", "create_notebook",
+        "create_user", "embedder", "reset_request_user", "set_request_user",
+    }
+} | {
+    ("backend/tests/test_memory_repository_boundaries.py", name)
+    for name in {"SQLiteRepository", "_runtime", "embedder"}
+}
+
+# Task 3 (Memory): API-level tests compose real Ask rows and shared membership
+# through the compatibility facade.  The new answer projection is a public
+# one-hop adapter used by the Memory API; all other lifecycle members were
+# already admitted by Task 2.
+TASK3_MEMORY_ALLOWED_NEW_MEMBERS = {"answer_memory_source"}
+TASK3_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_api.py", name)
+    for name in {"_runtime", "_write", "add_member", "remove_member"}
+} | {
+    ("backend/tests/test_memory_preview.py", name)
+    for name in {"_runtime", "llm_client"}
+}
+
+# Task 5 (Memory): retrieval integration tests intentionally compose the real
+# facade so notebook/Ask/report projections share one request identity and
+# database. Keep these new test-only compatibility consumers out of the frozen
+# pre-Memory surface comparison.
+TASK5_MEMORY_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_retrieval.py", 10, "app.services.sqlite_repository", name)
+    for name in {"SQLiteRepository", "reset_request_user", "set_request_user"}
+}
+TASK5_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_retrieval.py", name)
+    for name in {
+        "SQLiteRepository", "_reasoning_llm_client", "_runtime", "_write",
+        "add_member", "create_notebook", "create_user", "llm_client",
+        "reset_request_user", "retrieval", "set_request_user", "settings",
+    }
+}
+
+# Task 6 (Memory): Agent token tests compose a real repository/runtime to prove
+# owner isolation and notebook membership revocation across the service/store
+# boundary. These are test-only compatibility consumers added after the frozen
+# pre-Memory facade manifest.
+TASK6_MEMORY_ALLOWED_IMPORTS = {
+    ("backend/tests/test_agent_tokens.py", 11, "app.services.sqlite_repository", name)
+    for name in {"SQLiteRepository", "reset_request_user", "set_request_user"}
+}
+TASK6_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_agent_tokens.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "create_notebook", "create_user",
+        "reset_request_user", "set_request_user",
+    }
+}
+TASK6_MEMORY_ALLOWED_NEW_MEMBERS = {
+    "create_agent_profile",
+    "issue_agent_token",
+    "list_agent_profiles",
+    "list_agent_tokens",
+    "require_agent_access",
+    "resolve_agent_token",
+    "revoke_agent_token",
+    "update_agent_profile",
+}
+
+# Task 7 (Memory): the MCP adapter is a new consumer of established public
+# facade delegates.  It adds one source-checked one-hop delegate for the
+# two-plane Memory retriever; no SQL or private runtime state is exposed.
+TASK7_MEMORY_ALLOWED_CONSUMERS = {
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:609"),
+    ("get_notebook", "backend/app/api/mcp_server.py:614"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:646"),
+    ("get_notebook", "backend/app/api/mcp_server.py:651"),
+    ("unified_kg_status", "backend/app/api/mcp_server.py:652"),
+    ("agent_memory_hits", "backend/app/api/mcp_server.py:696"),
+    ("search_notebook", "backend/app/api/mcp_server.py:766"),
+    ("ask", "backend/app/api/mcp_server.py:862"),
+}
+TASK7_MEMORY_ALLOWED_NEW_MEMBERS = {
+    "agent_memory_hits",
+    "refresh_agent_principal",
+}
+
+# Task 8 (Memory): governed Memory-to-KG promotion adds one owner-scoped
+# facade delegate and a focused full-stack test that intentionally composes
+# established repository seams. The immutable manifest predates Memory.
+TASK8_MEMORY_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_promotion.py", 12, "app.services.sqlite_repository", name)
+    for name in {"SQLiteRepository", "reset_request_user", "set_request_user"}
+}
+TASK8_MEMORY_ALLOWED_NEW_MEMBERS = {
+    "propose_memory_promotion",
+    "approve_promotion_as_reviewer",
+    "reject_promotion_as_reviewer",
+}
+TASK8_MEMORY_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_promotion.py", name)
+    for name in {
+        "SQLiteRepository", "_connect", "_runtime", "_test_insert_object", "_write",
+        "add_member", "approve_promotion", "confirm_memory", "create_memory_candidate",
+        "create_notebook", "create_user", "deprecate_memory", "get_memory",
+        "list_promotion_queue", "mark_notebook_base", "memory_revisions",
+        "propose_memory_promotion", "reject_memory", "reject_promotion", "remove_member",
+        "approve_promotion_as_reviewer",
+        "propose_promotion",
+        "reset_request_user", "set_request_user",
+    }
+} | {
+    ("backend/app/api/memory_routes.py", "propose_memory_promotion"),
+    ("backend/app/api/routes.py", "approve_promotion_as_reviewer"),
+    ("backend/app/api/routes.py", "reject_promotion_as_reviewer"),
 }
 
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
@@ -1754,10 +1922,17 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "scripts/replay_retrieval.py",
     "scripts/smoke_backend.py",
     "backend/tests/test_sqlite_write_optimization.py",
+    "backend/tests/test_notebook_counts_batched.py",
 }
 
 ALL_TASK_ALLOWED_MEMBER_FILES = (
     TASK2_ALLOWED_MEMBER_FILES
+    | TASK1_MEMORY_ALLOWED_MEMBER_FILES
+    | TASK2_MEMORY_ALLOWED_MEMBER_FILES
+    | TASK3_MEMORY_ALLOWED_MEMBER_FILES
+    | TASK5_MEMORY_ALLOWED_MEMBER_FILES
+    | TASK6_MEMORY_ALLOWED_MEMBER_FILES
+    | TASK8_MEMORY_ALLOWED_MEMBER_FILES
     | TASK4_ALLOWED_MEMBER_FILES
     | TASK5_ALLOWED_MEMBER_FILES
     | TASK6_ALLOWED_MEMBER_FILES
@@ -1803,6 +1978,9 @@ ACTIVE_PRODUCTION_MEMBER_SITES = {
     ("_runtime", "backend/app/api/deps.py:32"),
     ("resolve_session", "backend/app/api/deps.py:58"),
     ("current_user", "backend/app/api/deps.py:62"),
+    ("resolve_session", "backend/app/api/deps.py:57"),
+    ("current_user", "backend/app/api/deps.py:61"),
+    ("llm_client", "backend/app/api/deps.py:109"),
     ("upload_sources", "backend/app/eval/speed.py:80"),
     ("parse_source", "backend/app/eval/speed.py:82"),
     ("delete_notebook", "backend/app/eval/speed.py:90"),
@@ -1897,6 +2075,10 @@ SQLITE_CONN_REUSE_ALLOWED_CONSUMERS = {
 }
 
 FROZEN_ONLY_MOVED_CONSUMERS = {
+    # Authenticated promotion routes now call explicit reviewer-aware adapters;
+    # the frozen facade methods retain their original signatures for callers.
+    ("approve_promotion", "backend/app/api/routes.py:<line>"),
+    ("reject_promotion", "backend/app/api/routes.py:<line>"),
     # Task 1 adds ownership imports above this test module's own facade import.
     ("SQLiteRepository", "backend/tests/test_repository_surface_manifest.py:13"),
     ("_augment_notebook_meta", "backend/app/services/sqlite_repository.py:<line>"),
@@ -2342,6 +2524,10 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK26_ALLOWED_IMPORTS
                     or site in TASK27_ALLOWED_IMPORTS
                     or site in TASK28_ALLOWED_IMPORTS
+                    or site in TASK2_MEMORY_ALLOWED_IMPORTS
+                    or site in TASK5_MEMORY_ALLOWED_IMPORTS
+                    or site in TASK6_MEMORY_ALLOWED_IMPORTS
+                    or site in TASK8_MEMORY_ALLOWED_IMPORTS
                     or site in SQLITE_CONN_REUSE_ALLOWED_IMPORTS
                 )
 
@@ -2546,9 +2732,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
@@ -2582,10 +2768,15 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     for name in TASK25_ALLOWED_NEW_MEMBERS | TASK27_ALLOWED_NEW_MEMBERS:
         actual.pop(name, None)
         recorded.pop(name, None)
-    for name in SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS:
-        actual.pop(name, None)
-        recorded.pop(name, None)
-    for name in STARTUP_READINESS_ALLOWED_NEW_MEMBERS:
+    for name in (
+        TASK2_MEMORY_ALLOWED_NEW_MEMBERS
+        | TASK3_MEMORY_ALLOWED_NEW_MEMBERS
+        | TASK6_MEMORY_ALLOWED_NEW_MEMBERS
+        | TASK7_MEMORY_ALLOWED_NEW_MEMBERS
+        | TASK8_MEMORY_ALLOWED_NEW_MEMBERS
+        | SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS
+        | STARTUP_READINESS_ALLOWED_NEW_MEMBERS
+    ):
         actual.pop(name, None)
         recorded.pop(name, None)
     assert recorded == actual

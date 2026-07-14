@@ -13,6 +13,19 @@ DESCRIPTION_SCHEMA_HINT = '{"description":""}'
 
 CONCEPT_DESC_SCHEMA_HINT = '{"description":""}'
 
+MEMORY_PREVIEW_SCHEMA_HINT = '{"title":"","content_md":"","tags":[""]}'
+
+
+def memory_preview_prompt(question: str, answer: str) -> str:
+    return (
+        "Create a concise, reusable personal Memory card from this Ask exchange. "
+        "Keep the content faithful to the answer, preserve Markdown and formulas, "
+        "and omit display-only citation markers. Use the question's language. "
+        "Return JSON only with title (at most 80 characters), content_md, and a "
+        "short list of topical tags.\n\n"
+        f"Question:\n{question}\n\nAnswer:\n{answer}"
+    )
+
 
 def concept_description_prompt(name: str, evidence_block: str) -> str:
     return (
@@ -169,7 +182,11 @@ def answer_prompt(question: str, context_block: str, history_block: str = "") ->
         "item contradicts a base item, defer to the base item's position and "
         "briefly note the discrepancy (e.g. '(note: your notebook states X, but "
         "the base reference says Y)').\n"
-        "6. Typeset ALL math as LaTeX so the UI can render it; never write math "
+        "6. Items tagged [memory][personal][confirmed] are conclusions the user "
+        "explicitly accepted. For relevant conflicts within the personal tier, "
+        "prefer confirmed Memory over personal raw passages; base evidence still "
+        "wins over both. Authority never makes an unrelated item relevant.\n"
+        "7. Typeset ALL math as LaTeX so the UI can render it; never write math "
         "as plain text. Wrap inline expressions, variables and symbols in single "
         "dollar signs — e.g. $A_{dm}$, $\\mathrm{CMRR}=|A_{dm}/A_{cm}|$, "
         "$\\Delta V_{OS}$ — and put a standalone equation on its OWN line wrapped "
@@ -179,18 +196,18 @@ def answer_prompt(question: str, context_block: str, history_block: str = "") ->
         "do NOT emit plain forms like A_dm or V_OS1. Inline $...$ must stay on one "
         "line with no '$' inside it. Keep [k] markers OUTSIDE the math (after the "
         "sentence), never inside $...$.\n"
-        "7. For a question that asks for a multi-layer mechanism or derivation, "
+        "8. For a question that asks for a multi-layer mechanism or derivation, "
         "organize the answer layer by layer (e.g. circuit principle -> device "
         "physics -> statistical/solid-state physics -> quantum/lattice origin -> "
         "engineering practice) and keep the derivation chain complete within each "
         "layer; where the knowledge items lack a link of the chain, bridge it "
         "explicitly as （推断）.\n"
-        "8. Keep formulas dimensionally consistent and prefer the circuit-"
+        "9. Keep formulas dimensionally consistent and prefer the circuit-"
         "realizable form the sources use (e.g. $\\Delta V_{BE}=V_T\\ln N$ rather "
         "than an abstract $K\\cdot V_T$); when converting between energy and "
         "voltage, state the conversion (e.g. $E_g=qV_{G0}$) — as a （推断） note "
         "if the items use a different notation.\n"
-        "9. When a specific numeric value comes from a single source, attribute "
+        "10. When a specific numeric value comes from a single source, attribute "
         "it as that source's stated value; you may add the typical engineering "
         "range or the factors that shift it, marked as （推断）.\n\n"
         f"{history_section}"
@@ -482,7 +499,10 @@ def report_section_prompt(section_title: str, section_scope: str, question: str,
         "item contradicts a base item, defer to the base item's position and "
         "briefly note the discrepancy. Relevance comes first: cite a [base] item "
         "ONLY when it actually supports THIS section — if a base item is not "
-        "relevant to this section, do NOT force it in.\n\n"
+        "relevant to this section, do NOT force it in.\n"
+        "9. Items tagged [memory][personal][confirmed] are user-accepted "
+        "conclusions. For relevant personal-tier conflicts, prefer confirmed "
+        "Memory over raw personal passages; base evidence remains final.\n\n"
         f"Knowledge items (id: [type][tier] name — context):\n{context_block}\n\n"
         'Return JSON only: {"markdown":"","grounded":true|false}'
     )

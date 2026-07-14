@@ -525,11 +525,16 @@ def check_api_layer() -> None:
             }
         )
         from app.api.routes import repository as route_repository
+        from app.core import readiness
         from app.core.config import get_settings
         from app.main import create_app
 
         get_settings.cache_clear()
         route_repository.cache_clear()
+        # This route smoke intentionally drives TestClient without its lifespan,
+        # just like the pytest API suite. Startup/readiness warm-up has dedicated
+        # tests; mark this isolated throwaway app ready before exercising routes.
+        readiness.mark_ready()
         client = TestClient(create_app())
 
         def ok(method: str, path: str, **kw):
