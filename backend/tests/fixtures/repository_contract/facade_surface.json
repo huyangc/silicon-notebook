@@ -348,8 +348,8 @@
     "consumers": [
       "backend/app/services/sqlite_notebook_sharing.py:30",
       "backend/tests/test_architecture_module_boundaries.py:76",
-      "backend/tests/test_notebook_share_copy.py:275",
-      "backend/tests/test_notebook_share_copy.py:336",
+      "backend/tests/test_notebook_share_copy.py:339",
+      "backend/tests/test_notebook_share_copy.py:400",
       "compatibility:app.services.sqlite_repository"
     ],
     "kind": "constant",
@@ -362,14 +362,14 @@
         "base": "sr",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_notebook_share_copy.py",
-        "line": 275,
+        "line": 339,
         "target": "_COPY_CHUNK"
       },
       {
         "base": "sr",
         "compatibility": "production-compatible",
         "file": "backend/tests/test_notebook_share_copy.py",
-        "line": 336,
+        "line": 400,
         "target": "_COPY_CHUNK"
       }
     ],
@@ -2562,10 +2562,10 @@
     "consumers": [
       "backend/app/services/sqlite_notebook_sharing.py:258",
       "backend/app/services/sqlite_notebook_sharing.py:286",
-      "backend/tests/test_notebook_share_copy.py:279",
-      "backend/tests/test_notebook_share_copy.py:291",
-      "backend/tests/test_notebook_share_copy.py:339",
-      "backend/tests/test_notebook_share_copy.py:347"
+      "backend/tests/test_notebook_share_copy.py:343",
+      "backend/tests/test_notebook_share_copy.py:355",
+      "backend/tests/test_notebook_share_copy.py:403",
+      "backend/tests/test_notebook_share_copy.py:411"
     ],
     "kind": "private_wrapper",
     "owner": "QueryStore",
@@ -2574,14 +2574,14 @@
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_notebook_share_copy.py",
-        "line": 291,
+        "line": 355,
         "target": "_insert_row"
       },
       {
         "base": "repo",
         "compatibility": "test-only",
         "file": "backend/tests/test_notebook_share_copy.py",
-        "line": 347,
+        "line": 411,
         "target": "_insert_row"
       }
     ],
