@@ -18,6 +18,7 @@ python-igraph>=0.11    # 社区检测 scale 路径(整数边表+C 核,10^6-10^7 
 rustworkx>=0.15.0
 pyyaml>=6.0
 pytest>=8.0
+pytest-xdist>=3.6
 hnswlib>=0.8.0
 scipy>=1.11
 orjson>=3

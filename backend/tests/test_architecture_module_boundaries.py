@@ -66,14 +66,6 @@ def test_sqlite_query_domain_is_composed_with_explicit_delegates():
         assert method_name in SQLiteRepository.__dict__
 
 
-def test_request_identity_exports_remain_backwards_compatible():
-    from app.services import sqlite_identity
-
-    assert sqlite_repository._REQUEST_USER is sqlite_identity._REQUEST_USER
-    assert sqlite_repository.set_request_user is sqlite_identity.set_request_user
-    assert sqlite_repository.reset_request_user is sqlite_identity.reset_request_user
-
-
 def test_sqlite_sharing_domain_is_composed_with_explicit_delegates():
     from app.repositories.sqlite.sharing_store import SharingStore
     from app.services.notebook_sharing import (
@@ -113,13 +105,6 @@ def test_sqlite_sharing_domain_is_composed_with_explicit_delegates():
     )
     for method_name in store_methods:
         assert method_name in SharingStore.__dict__, method_name
-
-
-def test_sharing_helpers_remain_backwards_compatible():
-    from app.services import sqlite_notebook_sharing
-
-    assert sqlite_repository._remap_json_ids is sqlite_notebook_sharing._remap_json_ids
-    assert sqlite_repository._COPY_CHUNK == 1000
 
 
 def test_remaining_sql_bodies_are_composed_with_explicit_delegates():

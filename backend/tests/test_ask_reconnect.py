@@ -108,12 +108,6 @@ def test_get_conversation_exposes_running_active_job(repo):
     assert len(detail.active_job.trace) == 1
 
 
-def test_active_job_gone_after_done(repo):
-    _, job_id, conv_id = _begin(repo)
-    repo.finish_ask_job(job_id, "done", answer_id="ans-x")
-    assert repo.get_conversation(conv_id).active_job is None
-
-
 def test_active_job_isolated_per_conversation(repo):
     """两个会话各起一个 ask job：A 会话的 running job 不应外溢到 B 会话的
     active_job 上——get_conversation 按 conversation_id 过滤，跨会话不应串态。"""

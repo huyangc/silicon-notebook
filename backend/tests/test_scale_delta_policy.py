@@ -165,3 +165,9 @@ def test_schema_round_trips_new_fields():
     d = ScaleIndexStatus(exists=False, stale=False, building=False, eligible=False)
     assert d.unindexed_sources == 0
     assert d.delta_searchable is False
+
+
+# Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.
+# Skip them with `pytest -m "not slow"`; full runs (default) still include them.
+import pytest as _pytest_slow  # noqa: E402
+pytestmark = _pytest_slow.mark.slow

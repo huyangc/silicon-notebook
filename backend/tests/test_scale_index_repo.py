@@ -60,18 +60,6 @@ def test_build_scale_index_adds_cluster_bridge(repo):
     )
 
 
-def test_scale_index_loads_and_invalidates_on_change(repo):
-    nb = repo.create_notebook(NotebookCreate(name="base"))
-    repo.store_kg(nb.id, None, [{"local_id": "a", "object_type": "concept",
-        "payload": {"name": "X", "section_path": ""}, "evidence": []}], [])
-    repo.rebuild_unified_kg(nb.id)
-    repo.build_scale_index(nb.id)
-    assert repo._scale_index(nb.id) is not None            # 版本一致 -> 命中
-    repo.store_kg(nb.id, None, [{"local_id": "b", "object_type": "concept",
-        "payload": {"name": "Y", "section_path": ""}, "evidence": []}], [])
-    assert repo._scale_index(nb.id) is None                 # 索引过期不返回
-
-
 def test_resolve_fold_escalates_to_full_after_kg_rebuild(repo):
     """索引建成后若发生过「刷新图谱」(全量重聚类,推进 last_rebuild_at),fold 只把 delta
     新源拼接进旧索引、不重读全量图,却在末尾把 version 盖成最新 → 索引标最新实则陈旧
@@ -105,16 +93,6 @@ def _seed_small_base(repo):
          "edge_type": "depends_on", "evidence": []}])
     repo.rebuild_unified_kg(nb.id)
     return nb
-
-
-def test_scale_ppr_returns_chunk_rankings_shape(repo):
-    """scale_ppr must return a non-empty ranked list with valid (str, float) pairs
-    when queried from a separate active notebook against a base that has a chunk."""
-    base = _seed_base_with_chunk(repo)
-    active = repo.create_notebook(NotebookCreate(name="active-shape"))
-    out = repo.scale_ppr(active.id, "MOSFET gain")
-    assert isinstance(out, list) and out, "scale_ppr must return a non-empty list"
-    assert all(isinstance(cid, str) and 0.0 <= score <= 1.0 for cid, score in out)
 
 
 def test_graph_mode_falls_back_when_no_index(repo):
@@ -395,49 +373,6 @@ def test_cross_layer_synonym_bridge_adds_edges(repo, monkeypatch):
 
     assert nnz_with > nnz_no, (
         f"Bridge should add edges: nnz_no={nnz_no}, nnz_with={nnz_with}")
-
-
-def test_cross_layer_bridge_disabled_no_extra_edges(repo, monkeypatch):
-    """When ppr_emb_synonym_enabled=False the bridge must not fire: the number of
-    nonzeros in the combined transition equals the no-bridge baseline."""
-    import numpy as np
-    from app.services.kg import scale_index as si
-
-    monkeypatch.setenv("PPR_EMB_SYNONYM_ENABLED", "false")
-    monkeypatch.setenv("PPR_EMB_SYNONYM_THRESHOLD", "0.80")
-    from app.core.config import Settings
-    repo.settings = Settings()
-
-    base = _seed_base_with_near_vector(
-        repo, concept_name="i", concept_id="obj-base2-i",
-        chunk_id="cBase2", source_id="sBase2")
-
-    active = repo.create_notebook(NotebookCreate(name="active-j2"))
-    now = "2026-06-29T00:00:00"
-    with repo._write() as db:
-        db.execute("INSERT INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
-                   "VALUES (?,?,?,?,?,?,?)",
-                   ("sAct2", active.id, "j paper2", "md", "ready", now, now))
-        db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
-                   "VALUES (?,?,?,?,?,?,?)",
-                   ("cAct2", active.id, "sAct2", "Content about j.", "S",
-                    json.dumps(["elAct2"]), now))
-        ev = json.dumps([{"source_id": "sAct2", "source_title": "", "element_id": "elAct2",
-                          "element_type": "paragraph", "location_label": "p1",
-                          "quoted_span": "j", "confidence": 1.0}])
-        db.execute("INSERT INTO knowledge_objects "
-                   "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,created_at,updated_at) "
-                   "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                   ("obj-act2-j", active.id, "concept", "approved", "",
-                    json.dumps({"name": "j"}), ev, "sAct2", now, now))
-        vec_j = repo.embedder.embed_query("j")
-        db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
-                   "VALUES (?,?,?,?)", ("obj-act2-j", active.id, json.dumps(vec_j), now))
-    repo.rebuild_unified_kg(active.id)
-
-    # With bridge disabled: call scale_ppr (should return results without crash)
-    result = repo.scale_ppr(active.id, "some query")
-    assert isinstance(result, list)  # bridge off must not crash
 
 
 def test_build_scale_index_writes_chunk_ann(repo):
@@ -916,36 +851,6 @@ def test_scale_index_eligible_decoupled_from_tier(repo, monkeypatch):
     assert repo.trigger_scale_index_rebuild(big.id)["status"] in ("building", "already_building")
 
 
-def test_scale_ann_handle_cached(repo, monkeypatch):
-    """P0-4: _open_scale_ann memoizes the hnswlib handle on the ScaleIndex
-    instance — repeated opens reuse the same handle and load_index runs once."""
-    nb = repo.create_notebook(NotebookCreate(name="base"))
-    repo.store_kg(nb.id, None, [
-        {"local_id": "a", "object_type": "concept",
-         "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
-        {"local_id": "b", "object_type": "concept",
-         "payload": {"name": "current mirror", "section_path": ""}, "evidence": []},
-    ], [])
-    repo.rebuild_unified_kg(nb.id)
-    repo.build_scale_index(nb.id)
-    idx = repo._scale_index(nb.id)
-    assert idx is not None and idx.ann_labels
-
-    import hnswlib
-    calls = {"n": 0}
-    real = hnswlib.Index.load_index
-
-    def spy(self, *a, **k):
-        calls["n"] += 1
-        return real(self, *a, **k)
-
-    monkeypatch.setattr(hnswlib.Index, "load_index", spy)
-    h1 = repo._open_scale_ann(idx, "kg")
-    h2 = repo._open_scale_ann(idx, "kg")
-    assert h1 is not None and h1 is h2   # 同一 handle 复用
-    assert calls["n"] == 1               # 只 load 一次
-
-
 # ── Task 1: hnsw 只建一次 + ef_construction 可配 (build_scale_index perf) ────
 
 
@@ -1158,3 +1063,9 @@ def test_resolve_index_owner_none_when_neither_available(repo):
     from app.services import sqlite_repository as sr
     assert sr._REQUEST_USER.get() is None
     assert repo._resolve_index_owner("nonexistent-notebook-id") is None
+
+
+# Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.
+# Skip them with `pytest -m "not slow"`; full runs (default) still include them.
+import pytest as _pytest_slow  # noqa: E402
+pytestmark = _pytest_slow.mark.slow

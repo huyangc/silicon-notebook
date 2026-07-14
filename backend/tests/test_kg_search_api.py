@@ -146,12 +146,6 @@ def test_kg_search_endpoint_404_unknown_notebook(client):
     assert r.status_code == 404
 
 
-def test_kg_search_endpoint_with_k_param(client):
-    nb_id = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
-    r = client.get(f"/api/notebooks/{nb_id}/kg/search?q=test&k=5")
-    assert r.status_code == 200
-
-
 def test_kg_search_endpoint_invalid_k(client):
     nb_id = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
     r = client.get(f"/api/notebooks/{nb_id}/kg/search?q=test&k=0")

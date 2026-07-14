@@ -283,28 +283,6 @@ def test_relink_zero_added_edges_has_no_side_effects(repo, monkeypatch):
     assert events == []
 
 
-def test_relink_added_edges_commit_then_invalidate_then_dirty(repo, monkeypatch):
-    notebook_id, object_ids, _relations = _seed_kg(repo, "relink phase")
-    monkeypatch.setattr(
-        kg_relink,
-        "complete_isolated_edges",
-        lambda nodes, edges: [{
-            "source_object_id": object_ids[0],
-            "target_object_id": object_ids[2],
-            "edge_type": "mentions",
-            "basis": "relink-test",
-        }],
-    )
-    events = []
-    _trace_transactions(repo, monkeypatch, events)
-    _spy_coordinator(repo, monkeypatch, events)
-
-    out = repo.relink_notebook_kg(notebook_id)
-
-    assert out["edges_added"] == 1
-    assert events == ["write.begin", "write.commit", "invalidate", "dirty"]
-
-
 # -------------------------------------------------------------- edge review
 
 

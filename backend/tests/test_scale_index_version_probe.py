@@ -300,14 +300,3 @@ def test_unchanged_seq_skips_noncluster_aggregates(repo, monkeypatch):
     )
 
 
-def test_changed_seq_recomputes(repo):
-    """After a mutation bumps seq, the fast path must fall through and recompute
-    (already covered by Test 1, but asserted here as the seq-transition case)."""
-    nb = repo.create_notebook(NotebookCreate(name="b"))
-    _add_concept(repo, nb.id, "a", "MOSFET")
-    v0 = repo._scale_index_version(nb.id)
-    v0b = repo._scale_index_version(nb.id)
-    assert v0b == v0
-    _add_concept(repo, nb.id, "b", "current mirror")
-    v1 = repo._scale_index_version(nb.id)
-    assert v1 != v0

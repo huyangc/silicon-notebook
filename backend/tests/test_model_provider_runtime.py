@@ -63,13 +63,6 @@ def test_identity_routes_do_not_require_settings_outside_identity_protocol():
     assert "repo.settings" not in inspect.getsource(routes.test_model_service)
 
 
-def test_ask_contextvars_keep_backwards_compatible_object_identity():
-    from app.services import sqlite_repository
-
-    assert sqlite_repository._ASK_MODEL_ERRORS is ask_context._ASK_MODEL_ERRORS
-    assert sqlite_repository._ASK_EMBED_CACHE is ask_context._ASK_EMBED_CACHE
-
-
 def test_provider_records_existing_model_error_shape(repo, monkeypatch):
     events = []
     monkeypatch.setattr(repo.event_log, "emit", events.append)

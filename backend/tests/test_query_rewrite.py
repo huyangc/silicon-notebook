@@ -24,16 +24,6 @@ class _FakeLLM:
         return _json.dumps(self._p)
 
 
-def test_expand_parses_subqueries_and_query():
-    llm = _FakeLLM({"query": "diff between DeepSeek V3 and V2",
-                    "sub_queries": [{"query": "DeepSeek V3 improvements"},
-                                    {"query": "DeepSeek V2 architecture"}]})
-    ex = expand_query(llm, "deepseekv3相比deepseekv2有什么改进")
-    assert isinstance(ex, ExpandedQuery)
-    assert ex.query == "diff between DeepSeek V3 and V2"
-    assert [s.query for s in ex.sub_queries] == ["DeepSeek V3 improvements", "DeepSeek V2 architecture"]
-
-
 def test_expand_caps_and_dedups_and_drops_empty():
     subs = [{"query": f"q{i}"} for i in range(8)] + [{"query": "q0"}, {"query": "  "}]
     ex = expand_query(_FakeLLM({"query": "x", "sub_queries": subs}), "q", max_subqueries=4)

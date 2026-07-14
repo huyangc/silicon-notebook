@@ -2032,6 +2032,43 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "scripts/smoke_backend.py",
     "backend/tests/test_sqlite_write_optimization.py",
     "backend/tests/test_notebook_counts_batched.py",
+    "backend/tests/test_ask_reconnect.py",
+    "backend/tests/test_ask_redesign.py",
+    "backend/tests/test_conversations.py",
+    "backend/tests/test_cross_tier_reasoning.py",
+    "backend/tests/test_followup_retrieval_grounding.py",
+    "backend/tests/test_graph_src_chunks.py",
+    "backend/tests/test_indexed_only_principle.py",
+    "backend/tests/test_kg_mutation_phase_matrix.py",
+    "backend/tests/test_kg_repository.py",
+    "backend/tests/test_kg_search_api.py",
+    "backend/tests/test_knowledge_governance_delegation.py",
+    "backend/tests/test_knowledge_store_contract.py",
+    "backend/tests/test_model_provider_runtime.py",
+    "backend/tests/test_notebook_copy_service.py",
+    "backend/tests/test_notebook_summary_query.py",
+    "backend/tests/test_overlay_guard_order.py",
+    "backend/tests/test_p4_kg_shrink.py",
+    "backend/tests/test_reasoning_ppr.py",
+    "backend/tests/test_rebuild_cache.py",
+    "backend/tests/test_rebuild_desc_cache.py",
+    "backend/tests/test_rebuild_streaming.py",
+    "backend/tests/test_relation_ann.py",
+    "backend/tests/test_report_engine.py",
+    "backend/tests/test_repository_callers_static.py",
+    "backend/tests/test_repository_ports.py",
+    "backend/tests/test_retrieval_service.py",
+    "backend/tests/test_runtime_dim_scale_index.py",
+    "backend/tests/test_scale_builder_failure_boundaries.py",
+    "backend/tests/test_scale_delta_policy.py",
+    "backend/tests/test_scale_idx_disk_cache.py",
+    "backend/tests/test_scale_index_repo.py",
+    "backend/tests/test_scale_index_version_probe.py",
+    "backend/tests/test_scale_version_probe.py",
+    "backend/tests/test_scale_xlayer_bridge_delta.py",
+    "backend/tests/test_trackF_governance_promotion.py",
+    "backend/tests/test_two_tier_federated.py",
+    "backend/tests/test_viz_index_wire.py",
     # Task 5 (memory-kg-extract) adds a covering-index EXPLAIN test + a new
     # index existence assertion here, shifting the internal line numbers of its
     # many facade-consumer sites (_connect / _write / create_notebook /
@@ -2207,6 +2244,19 @@ SQLITE_CONN_REUSE_ALLOWED_CONSUMERS = {
 }
 
 FROZEN_ONLY_MOVED_CONSUMERS = {
+    # Test-suite cleanup: deleted redundant tests removed these monkeypatch/consumer sites
+    # from the frozen fixture's recorded set (member+file coverage retained by kept tests).
+    ('USABLE_STATUSES', 'backend/tests/test_cross_tier_reasoning.py:<line>'),
+    ('_COPY_CHUNK', 'backend/tests/test_architecture_module_boundaries.py:<line>'),
+    ('_REQUEST_USER', 'backend/tests/test_architecture_module_boundaries.py:<line>'),
+    ('_connect', 'backend/tests/test_two_tier_federated.py:<line>'),
+    ('_open_scale_ann', 'backend/tests/test_scale_index_repo.py:<line>'),
+    ('_remap_json_ids', 'backend/tests/test_architecture_module_boundaries.py:<line>'),
+    ('_scale_idx_cache', 'backend/tests/test_scale_idx_disk_cache.py:<line>'),
+    ('_viz_index_dir', 'backend/tests/test_viz_index_wire.py:<line>'),
+    ('notebook_copy_stats', 'backend/tests/test_notebook_share_copy.py:<line>'),
+    ('reset_request_user', 'backend/tests/test_architecture_module_boundaries.py:<line>'),
+    ('set_request_user', 'backend/tests/test_architecture_module_boundaries.py:<line>'),
     # Authenticated promotion routes now call explicit reviewer-aware adapters;
     # the frozen facade methods retain their original signatures for callers.
     ("approve_promotion", "backend/app/api/routes.py:<line>"),
@@ -2600,6 +2650,16 @@ def test_every_patch_target_has_a_migration_record():
         }
 
 
+# Test-suite cleanup: deleting redundant tests shifted these compat-import lines.
+TEST_CLEANUP_SHIFTED_IMPORTS = {
+    ('backend/tests/test_notebook_share_copy.py', 60, 'app.services.sqlite_repository', '_remap_json_ids'),
+    ('backend/tests/test_notebook_share_copy.py', 86, 'app.services.sqlite_repository', '_now'),
+    ('backend/tests/test_kg_repository.py', 367, 'app.services.sqlite_repository', '_now'),
+    ('backend/tests/test_repository_callers_static.py', 656, 'app.services.sqlite_repository', 'SQLiteRepository'),
+    ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
+}
+
+
 def test_compatibility_exports_and_import_consumers_are_complete():
     surface = _surface()
 
@@ -2661,6 +2721,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK6_MEMORY_ALLOWED_IMPORTS
                     or site in TASK8_MEMORY_ALLOWED_IMPORTS
                     or site in SQLITE_CONN_REUSE_ALLOWED_IMPORTS
+                    or site in TEST_CLEANUP_SHIFTED_IMPORTS
                     or site in TASK1_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK2_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK3_MEMORY_KG_ALLOWED_IMPORTS
@@ -2670,18 +2731,15 @@ def test_compatibility_exports_and_import_consumers_are_complete():
 
 EXPECTED_PATCH_DELTAS = {
     'recorded_only': {
-        ('backend/tests/test_ask_modes.py', 24, 'ask_chunk', 'repo'),
-        ('backend/tests/test_ask_modes.py', 24, 'ask_graph', 'repo'),
-        ('backend/tests/test_ask_modes.py', 24, 'ask_reasoning', 'repo'),
-        ('backend/tests/test_chunk_retrieval.py', 240, 'ask_chunk', 'repo'),
-        ('backend/tests/test_pending_actions.py', 104, 'scale_index_status', 'repo'),
-        ('backend/tests/test_pending_actions.py', 116, 'scale_index_status', 'repo'),
         ('backend/tests/test_answer_context_budget.py', 29, '_concept_cluster_id', 'repo'),
         ('backend/tests/test_answer_context_budget.py', 30, 'node_context', 'repo'),
         ('backend/tests/test_answer_context_budget.py', 44, '_concept_cluster_id', 'repo'),
         ('backend/tests/test_answer_context_budget.py', 45, 'node_context', 'repo'),
         ('backend/tests/test_architecture_hardening.py', 55, '_retrieve_chunks', 'repo'),
         ('backend/tests/test_architecture_hardening.py', 102, 'notebook_copy_stats', 'repo'),
+        ('backend/tests/test_ask_modes.py', 24, 'ask_chunk', 'repo'),
+        ('backend/tests/test_ask_modes.py', 24, 'ask_graph', 'repo'),
+        ('backend/tests/test_ask_modes.py', 24, 'ask_reasoning', 'repo'),
         ('backend/tests/test_ask_vector_matrix.py', 125, '_backfill_knowledge_embeddings', 'repo'),
         ('backend/tests/test_auto_scale_index.py', 55, 'trigger_scale_index_rebuild', 'repo'),
         ('backend/tests/test_auto_scale_index.py', 67, 'trigger_scale_index_rebuild', 'repo'),
@@ -2711,6 +2769,7 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_chunk_bruteforce_guard.py', 73, '_gather_chunks', 'repo'),
         ('backend/tests/test_chunk_bruteforce_guard.py', 134, '_embed_query', 'repo'),
         ('backend/tests/test_chunk_embed.py', 99, '_run_extraction', 'repo'),
+        ('backend/tests/test_chunk_retrieval.py', 240, 'ask_chunk', 'repo'),
         ('backend/tests/test_chunk_retrieval_characterization.py', 124, '_mix_retrieve', 'repo'),
         ('backend/tests/test_chunk_retrieval_characterization.py', 125, '_retrieve_chunks_multi', 'repo'),
         ('backend/tests/test_chunk_retrieval_characterization.py', 126, '_retrieve_chunks', 'repo'),
@@ -2745,12 +2804,18 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_language_policy.py', 289, '_keyword_chunk_candidates', 'repo'),
         ('backend/tests/test_large_lib_index_required.py', 46, '_gather_chunks', 'repo'),
         ('backend/tests/test_notebook_counts_batched.py', 115, '_connect', 'repo'),
+        ('backend/tests/test_notebook_share_copy.py', 339, '_COPY_CHUNK', 'sr'),
+        ('backend/tests/test_notebook_share_copy.py', 355, '_insert_row', 'repo'),
+        ('backend/tests/test_notebook_share_copy.py', 400, '_COPY_CHUNK', 'sr'),
+        ('backend/tests/test_notebook_share_copy.py', 411, '_insert_row', 'repo'),
         ('backend/tests/test_overlay_guard_order.py', 63, 'federated_retrieve', 'repo'),
         ('backend/tests/test_overlay_guard_order.py', 63, 'federated_retrieve_relations', 'repo'),
         ('backend/tests/test_overlay_guard_order.py', 71, 'notebook_copy_stats', 'repo'),
         ('backend/tests/test_overlay_guard_order.py', 93, 'notebook_copy_stats', 'repo'),
         ('backend/tests/test_p4_kg_shrink.py', 82, '_run_extraction', 'repo'),
         ('backend/tests/test_p4_kg_shrink.py', 96, '_run_extraction', 'repo'),
+        ('backend/tests/test_pending_actions.py', 104, 'scale_index_status', 'repo'),
+        ('backend/tests/test_pending_actions.py', 116, 'scale_index_status', 'repo'),
         ('backend/tests/test_ppr_fallback_guard.py', 108, 'scale_ppr', 'repo'),
         ('backend/tests/test_ppr_fallback_guard.py', 109, 'notebook_copy_stats', 'repo'),
         ('backend/tests/test_ppr_fallback_guard.py', 118, '_ppr_graph', 'repo'),
@@ -2770,6 +2835,7 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_ppr_fallback_guard.py', 372, '_vector_matrix', 'repo'),
         ('backend/tests/test_query_hotpath_cache.py', 168, '_connect', 'repo'),
         ('backend/tests/test_rebuild_cache.py', 69, '_stream_seed_reps', 'repo'),
+        ('backend/tests/test_rebuild_cache.py', 222, '_now', 'repo_mod'),
         ('backend/tests/test_rebuild_checkpoint.py', 224, '_write_cluster_map_streamed', 'repo'),
         ('backend/tests/test_rebuild_checkpoint.py', 243, '_write_cluster_map_streamed', 'repo'),
         ('backend/tests/test_rebuild_communities.py', 195, '_scale_index', 'repo'),
@@ -2802,8 +2868,10 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_scale_delta_policy.py', 115, '_ensure_scale_scheduler', 'repo'),
         ('backend/tests/test_scale_delta_policy.py', 127, '_ensure_scale_scheduler', 'repo'),
         ('backend/tests/test_scale_idx_disk_cache.py', 190, '_index_delta', 'repo'),
+        ('backend/tests/test_scale_index_repo.py', 231, 'rebuild_unified_kg', 'repo'),
         ('backend/tests/test_scale_index_repo.py', 871, 'fold_scale_index_delta', 'repo'),
         ('backend/tests/test_scale_index_repo.py', 872, 'build_scale_index', 'repo'),
+        ('backend/tests/test_scale_version_probe.py', 79, '_connect', 'repo'),
         ('backend/tests/test_scale_xlayer_bridge_delta.py', 188, '_vector_matrix', 'repo'),
         ('backend/tests/test_scale_xlayer_bridge_delta.py', 221, '_vector_matrix', 'repo'),
         ('backend/tests/test_scale_xlayer_bridge_delta.py', 222, '_delta_vector_matrix', 'repo'),
@@ -2813,16 +2881,22 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_viz_bounded.py', 118, '_unified_graph_full', 'repo'),
     },
     'actual_only': {
-        ('backend/tests/test_in_batching.py', 85, '_IN_CHUNK', 'SQLiteRepository'),
         ('backend/tests/test_embedding_store_component.py', 59, '_write', 'repo'),
         ('backend/tests/test_embedding_store_component.py', 135, '_write', 'repo'),
+        ('backend/tests/test_in_batching.py', 85, '_IN_CHUNK', 'SQLiteRepository'),
         ('backend/tests/test_knowledge_governance_delegation.py', 131, 'set_conflict_status', 'repo'),
-        ('backend/tests/test_notebook_copy_service.py', 115, '_new_id', 'sqlite_repository'),
-        ('backend/tests/test_notebook_copy_service.py', 140, '_COPY_CHUNK', 'sqlite_repository'),
-        ('backend/tests/test_notebook_copy_service.py', 168, '_insert_row', 'repo'),
-        ('backend/tests/test_notebook_copy_service.py', 189, '_COPY_CHUNK', 'sqlite_repository'),
-        ('backend/tests/test_notebook_copy_service.py', 199, '_insert_row', 'repo'),
+        ('backend/tests/test_notebook_copy_service.py', 93, '_new_id', 'sqlite_repository'),
+        ('backend/tests/test_notebook_copy_service.py', 118, '_COPY_CHUNK', 'sqlite_repository'),
+        ('backend/tests/test_notebook_copy_service.py', 146, '_insert_row', 'repo'),
+        ('backend/tests/test_notebook_copy_service.py', 167, '_COPY_CHUNK', 'sqlite_repository'),
+        ('backend/tests/test_notebook_copy_service.py', 177, '_insert_row', 'repo'),
+        ('backend/tests/test_notebook_share_copy.py', 318, '_COPY_CHUNK', 'sr'),
+        ('backend/tests/test_notebook_share_copy.py', 334, '_insert_row', 'repo'),
+        ('backend/tests/test_notebook_share_copy.py', 379, '_COPY_CHUNK', 'sr'),
+        ('backend/tests/test_notebook_share_copy.py', 390, '_insert_row', 'repo'),
+        ('backend/tests/test_rebuild_cache.py', 215, '_now', 'repo_mod'),
         ('backend/tests/test_repository_runtime.py', 19, '_now', 'sqlite_repository'),
+        ('backend/tests/test_scale_index_repo.py', 209, 'rebuild_unified_kg', 'repo'),
         ('backend/tests/test_schema_registry_service.py', 157, 'llm_client', 'repo'),
         ('backend/tests/test_schema_registry_service.py', 177, 'llm_client', 'repo'),
         ('backend/tests/test_schema_registry_service.py', 180, 'llm_client', 'repo'),
@@ -2833,7 +2907,7 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_source_ingestion_service.py', 155, 'parse_source_file', 'facade_mod'),
         ('backend/tests/test_source_ingestion_service.py', 253, 'parse_source_file', 'facade_mod'),
         ('backend/tests/test_source_ingestion_service.py', 332, 'parse_source_file', 'facade_mod'),
-        ('backend/tests/test_sqlite_write_optimization.py', 136, '_write', 'embed_repo'),
+        ('backend/tests/test_sqlite_write_optimization.py', 128, '_write', 'embed_repo'),
     },
 }
 

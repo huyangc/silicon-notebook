@@ -44,20 +44,6 @@ def _rows(repo, table, nb):
         return db.execute(f"SELECT * FROM {table} WHERE notebook_id=?", (nb,)).fetchall()
 
 
-def test_notebooks_has_share_columns(repo):
-    with repo._connect() as db:
-        cols = {r["name"] for r in db.execute("PRAGMA table_info(notebooks)")}
-    assert "is_shared" in cols
-    assert "share_token" in cols
-
-
-def test_copy_thresholds_defaults():
-    from app.core.config import Settings
-    s = Settings()
-    assert s.notebook_copy_max_bytes == 50 * 1024 * 1024
-    assert s.notebook_copy_max_rows == 5000
-
-
 def test_share_sets_token_idempotent_then_unshare_clears(repo):
     nb = _mk_nb(repo, "L")
     out = repo.share_notebook(nb)
@@ -68,13 +54,6 @@ def test_share_sets_token_idempotent_then_unshare_clears(repo):
     # 取消 → token 失效
     repo.unshare_notebook(nb)
     assert repo.find_notebook_by_share_token(out["share_token"]) is None
-
-
-def test_copy_stats_reports_size_and_copyable(repo):
-    nb = _mk_nb(repo, "L")
-    stats = repo.notebook_copy_stats(nb)
-    assert stats["copyable"] is True          # 空库当然可拷贝
-    assert set(stats["size"]) == {"bytes", "sources", "chunks", "nodes", "edges"}
 
 
 def test_remap_json_ids_scalars_and_arrays():

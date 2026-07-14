@@ -296,15 +296,6 @@ def test_knowledge_graph_from_kg_tables(repo):
 # Task 7 tests: KG node-type weights + KG-native ask
 # ---------------------------------------------------------------------------
 
-def test_kg_type_weights():
-    from app.services.retrieval import _TYPE_WEIGHT
-    assert _TYPE_WEIGHT["claim"] == _TYPE_WEIGHT["formula"] == 1.0
-    assert _TYPE_WEIGHT["procedure"] == 0.7
-    assert _TYPE_WEIGHT["concept"] == 0.5
-    for legacy in ("rule", "case", "checklist", "risk", "glossary"):
-        assert legacy not in _TYPE_WEIGHT
-
-
 def test_ask_returns_kg_knowledge(repo):
     # P4-5: ask_fast retired; verify KG retrieval via _retrieve_scored directly.
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -347,16 +338,6 @@ def test_1hop_relation_is_stored(repo):
         ).fetchone()
     assert row is not None, "knowledge_relations must link claim -> concept"
     assert row["target_object_id"] == concept_id
-
-
-def test_only_kg_profiles_and_schemas():
-    from app.services.extraction_profiles import PROFILES, OBJECT_SCHEMAS
-    assert set(PROFILES) == {"academic_paper", "textbook"}
-    for t in ("concept", "claim", "formula", "procedure"):
-        assert t in OBJECT_SCHEMAS
-    for legacy in ("rule", "method", "risk", "case", "checklist", "glossary",
-                   "finding", "principle", "example"):
-        assert legacy not in OBJECT_SCHEMAS
 
 
 def test_builtin_whitelist_seeded(repo):

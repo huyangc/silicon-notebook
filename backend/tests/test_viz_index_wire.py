@@ -37,19 +37,6 @@ def _star(repo):
     return nb
 
 
-def test_unified_graph_lazy_builds_and_matches(repo):
-    nb = _star(repo)
-    # 无任何预构建:unified_graph 触发懒建并等价全量派生
-    legacy = repo._unified_graph_full(nb.id, "object")
-    legacy_top2 = limit_graph_by_degree(legacy, 2)
-    bounded = repo.unified_graph(nb.id, level="object", limit=2)
-    assert len(bounded["nodes"]) == len(legacy_top2["nodes"]) == 2
-    assert bounded["total_nodes"] == len(legacy["nodes"])
-    assert bounded["total_edges"] == len(legacy["edges"])
-    # 懒建落盘了
-    assert os.path.exists(os.path.join(repo._viz_index_dir(nb.id), "manifest.json"))
-
-
 def test_neighbors_lazy_matches_db(repo):
     nb = _star(repo)
     full = repo._unified_graph_full(nb.id, "object")

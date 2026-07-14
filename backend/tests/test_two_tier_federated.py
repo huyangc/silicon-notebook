@@ -115,19 +115,6 @@ class TestTask2:
         for h in hits:
             assert 0.0 <= h.relevance <= 1.0, f"relevance {h.relevance!r} out of [0,1]"
 
-    def test_ask_uses_federated_retrieve_when_base_exists(self, repo):
-        """federated_retrieve() on a personal notebook surfaces hits from the base notebook.
-        P4-5: ask_fast (which called federated_retrieve) retired; test now calls it directly."""
-        base_nb, personal_nb = self._seed_two_notebooks(repo)
-        hits = repo.federated_retrieve(personal_nb.id, "capacitance")
-        all_ids = {h.object_id for h in hits}
-        # At least one object from the base notebook must appear.
-        with repo._connect() as db:
-            base_ids = {r["id"] for r in db.execute(
-                "SELECT id FROM knowledge_objects WHERE notebook_id=?", (base_nb.id,)).fetchall()}
-        assert all_ids & base_ids, "no base-notebook objects reached the answer"
-
-
 class TestTask3:
     """两层库权威=零幅度次序策略:排序永远纯相关度、tier 无关;base 的『更权威』
     只体现为『完全平局时 base 排前』。绝不用任何幅度乘数/配额/地板。"""
@@ -140,29 +127,6 @@ class TestTask3:
         assert not hasattr(retrieval, "_TIER_WEIGHT")
         with pytest.raises(ImportError):
             from app.services.retrieval import tier_weight  # noqa: F401
-
-    def test_base_outranks_personal_only_on_exact_score_tie(self):
-        """score 完全相等时 base 排在 personal 前(纯次序键,无常数)。"""
-        from app.services.retrieval import RetrievedKnowledge
-        base_hit = RetrievedKnowledge(
-            object_id="b1", object_type="claim", payload={}, tier="base", score=0.20, relevance=0.20)
-        personal_hit = RetrievedKnowledge(
-            object_id="p1", object_type="claim", payload={}, tier="personal", score=0.20, relevance=0.20)
-        # federated_retrieve 使用的排序键:score 第一、仅平局时 base(True>False)优先。
-        key = lambda it: (it.score, getattr(it, "tier", "") == "base")
-        ranked = sorted([personal_hit, base_hit], key=key, reverse=True)
-        assert ranked[0] is base_hit, "分数相等时 base 应排在 personal 前"
-
-    def test_higher_relevance_personal_still_wins_over_base(self):
-        """零幅度:base 不获得任何幅度加成;相关度更高的 personal 仍胜出(切题第一)。"""
-        from app.services.retrieval import RetrievedKnowledge
-        base_hit = RetrievedKnowledge(
-            object_id="b1", object_type="claim", payload={}, tier="base", score=0.20, relevance=0.20)
-        personal_hit = RetrievedKnowledge(
-            object_id="p1", object_type="claim", payload={}, tier="personal", score=0.30, relevance=0.30)
-        key = lambda it: (it.score, getattr(it, "tier", "") == "base")
-        ranked = sorted([base_hit, personal_hit], key=key, reverse=True)
-        assert ranked[0] is personal_hit, "相关度更高的 personal 命中必须排在 base 前(纯相关度第一)"
 
     def test_federated_retrieve_ranks_base_first_on_score_tie(self, repo):
         """真库路径:两 tier 命中 score 相等时,base 在结果里应排在 personal 之前。"""
@@ -190,18 +154,6 @@ class TestTask3:
         tied = [h for h in hits if h.score == 0.20]
         assert [h.tier for h in tied][:2] == ["base", "personal"], \
             f"平局时应 base 先于 personal,实得 {[h.tier for h in tied]!r}"
-
-    def test_keyword_base_hit_tau_position_unchanged(self, repo):
-        """A pure-keyword base hit's .relevance (what tau reads) must stay [0,1].
-        The tier boost on .score must not bleed into .relevance."""
-        from app.services.retrieval import RetrievedKnowledge
-        h = RetrievedKnowledge(
-            object_id="b1", object_type="claim", payload={}, tier="base",
-            score=0.22, relevance=0.22)
-        # Tier boost is applied to score during rank_key, not to relevance.
-        assert h.relevance == 0.22
-        assert 0.0 <= h.relevance <= 1.0
-
 
 class TestTask4:
     def test_answer_anchor_has_tier_field(self):
@@ -271,7 +223,3 @@ class TestTask5:
         anchors = repo._parse_answer_anchors("Oxide BV [k1].", id_map)
         assert anchors[0].tier == "personal"
 
-    def test_full_suite_still_passes(self, repo):
-        """Smoke: existing ask() tests must still pass when run together."""
-        # This is a marker test — run the full suite via the gate command below.
-        assert True

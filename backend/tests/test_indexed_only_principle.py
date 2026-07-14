@@ -337,3 +337,9 @@ def test_flag_on_big_delta_multibatch_no_sql_variable_blowup(repo, monkeypatch):
     hit_ids = {h.object_id for h in hits}
     assert set(oids) <= hit_ids
     assert 2 in observed_batch_sizes
+
+
+# Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.
+# Skip them with `pytest -m "not slow"`; full runs (default) still include them.
+import pytest as _pytest_slow  # noqa: E402
+pytestmark = _pytest_slow.mark.slow

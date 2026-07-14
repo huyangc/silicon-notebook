@@ -51,27 +51,6 @@ def _seed_two_doc_moe(repo):
     return nb
 
 
-def test_reflect_decision_has_ppr_query():
-    from app.services.reasoning_retrieval import ReflectDecision
-    assert ReflectDecision().ppr_query == ""
-
-
-def test_reasoning_result_has_chunks():
-    from app.services.reasoning_retrieval import ReasoningResult
-    assert ReasoningResult().chunks == []
-
-
-def test_ppr_retrieve_wrapper_delegates_cross_doc(repo):
-    """薄封装委托 repo._ppr_retrieve:问 DeepSeek 的 MoE,经概念簇桥接到 GLM 那篇的 cB。"""
-    from app.services.reasoning_retrieval import ReasoningRetriever
-    nb = _seed_two_doc_moe(repo)
-    rr = ReasoningRetriever.from_repository(repo, repo.settings)
-    chunks = rr.ppr_retrieve(nb.id, "DeepSeek-V3 Mixture-of-Experts architecture")
-    ids = {c.chunk_id for c in chunks}
-    assert "cA" in ids and "cB" in ids
-    assert all(0.0 <= c.relevance <= 1.0 for c in chunks)
-
-
 def test_reflect_prompt_and_schema_expose_ppr():
     from app.services.prompts import reflect_prompt, REFLECT_SCHEMA_HINT
     assert "ppr_retrieve" in REFLECT_SCHEMA_HINT

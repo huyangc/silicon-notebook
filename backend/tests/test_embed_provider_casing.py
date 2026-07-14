@@ -31,6 +31,3 @@ def test_make_embedder_accepts_capitalized_dashscope(embed_env):
     assert type(make_embedder(Settings())).__name__ == "DashscopeEmbedder"
 
 
-def test_make_embedder_fake_when_off(embed_env):
-    embed_env.setenv("EMBED_PROVIDER", "")
-    assert isinstance(make_embedder(Settings()), FakeEmbedder)

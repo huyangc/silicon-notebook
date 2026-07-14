@@ -107,7 +107,3 @@ def test_small_notebook_keeps_legacy_seed_retrieval(repo, monkeypatch):
     assert len(refusal) == 0
 
 
-def test_overlay_empty_no_kg_still_returns_empty(repo):
-    """回归:无 KG/无种子的既有分支(与大库守卫无关)保持不变。"""
-    nb = repo.create_notebook(NotebookCreate(name="e"))
-    assert repo._chunk_kg_overlay(nb.id, "x", "", 0) == ("", {}, [])

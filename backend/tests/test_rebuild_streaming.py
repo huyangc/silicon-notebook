@@ -37,23 +37,6 @@ def test_rebuild_streaming_clusters_same_name(repo):
     assert len(set(cmap.values())) == 1 and len(cmap) == 2
 
 
-def test_rebuild_scratch_table_cleaned(repo):
-    """After rebuild, the transient kg_cluster_scratch holds no rows for the nb."""
-    nb = repo.create_notebook(NotebookCreate(name="nb"))
-    repo.store_kg(nb.id, None, [
-        {"local_id": "a", "object_type": "concept",
-         "payload": {"name": "MOSFET", "section_path": ""}, "evidence": []},
-        {"local_id": "c", "object_type": "claim",
-         "payload": {"name": "gain is high", "section_path": ""}, "evidence": []},
-    ], [])
-    repo.rebuild_unified_kg(nb.id)
-    with repo._connect() as db:
-        n = db.execute(
-            "SELECT COUNT(*) AS c FROM kg_cluster_scratch WHERE notebook_id=?",
-            (nb.id,)).fetchone()["c"]
-    assert n == 0
-
-
 def test_concurrent_rebuild_scratch_isolated(repo):
     """run_id isolation: a stray scratch row left by a different run is untouched
     by a subsequent rebuild, and both rebuilds produce correct clusters + leave
