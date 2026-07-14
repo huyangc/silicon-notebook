@@ -97,6 +97,7 @@ class MemoryCreateFromAnswer(BaseModel):
     title: str
     content_md: str
     tags: List[str] = Field(default_factory=list)
+    extract_kg: bool = True
 
     _normalize_title = field_validator("title")(normalize_title)
     _normalize_content = field_validator("content_md")(normalize_content)
@@ -142,6 +143,7 @@ class MemoryUpdate(BaseModel):
 
 class MemoryReviewRequest(MemoryUpdate):
     reason: Optional[str] = None
+    extract_kg: Optional[bool] = None
 
     @field_validator("reason")
     @classmethod
