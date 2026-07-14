@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
+  BookmarkPlus,
   Check,
   ChevronDown,
   ChevronRight,
@@ -386,36 +387,38 @@ export function AnswerView({
       )}
       <div className="answer-feedback">
         <button
-          aria-label="有用"
-          className={`answer-action ${feedbackSent === "useful" ? "selected" : ""}`}
-          disabled={Boolean(feedbackSent)}
-          onClick={() => onFeedback("useful")}
-          title="有用"
-          type="button"
-        ><ThumbsUp size={16} /></button>
-        <button
-          aria-label="需改进"
-          className={`answer-action ${feedbackSent === "not_useful" ? "selected" : ""}`}
-          disabled={Boolean(feedbackSent)}
-          onClick={() => onFeedback("not_useful")}
-          title="需改进"
-          type="button"
-        ><ThumbsDown size={16} /></button>
-        <button
-          aria-label={copied ? "已复制" : "复制回答"}
-          className={`answer-action ${copied ? "selected" : ""}`}
-          onClick={() => copyAnswer().catch(() => undefined)}
-          title={copied ? "已复制" : "复制回答"}
-          type="button"
-        >{copied ? <Check size={16} /> : <Copy size={16} />}</button>
-        <button
           aria-label={memorySaved ? "已保存到 Memory" : "保存到 Memory"}
-          className={`answer-action ${memorySaved ? "selected" : ""}`}
+          className={`answer-memory-save ${memorySaved ? "is-saved" : ""}`}
           disabled={memorySaved}
           onClick={() => onSaveMemory(answer.answer_id)}
           title={memorySaved ? "已保存到 Memory" : "保存到 Memory"}
           type="button"
-        >{memorySaved ? <Check size={16} /> : <Sparkles size={16} />}</button>
+        >{memorySaved ? <Check size={15} /> : <BookmarkPlus size={15} />}<span>{memorySaved ? "已保存到 Memory" : "保存到 Memory"}</span></button>
+        <div className="answer-feedback-actions">
+          <button
+            aria-label="有用"
+            className={`answer-action ${feedbackSent === "useful" ? "selected" : ""}`}
+            disabled={Boolean(feedbackSent)}
+            onClick={() => onFeedback("useful")}
+            title="有用"
+            type="button"
+          ><ThumbsUp size={16} /></button>
+          <button
+            aria-label="需改进"
+            className={`answer-action ${feedbackSent === "not_useful" ? "selected" : ""}`}
+            disabled={Boolean(feedbackSent)}
+            onClick={() => onFeedback("not_useful")}
+            title="需改进"
+            type="button"
+          ><ThumbsDown size={16} /></button>
+          <button
+            aria-label={copied ? "已复制" : "复制回答"}
+            className={`answer-action ${copied ? "selected" : ""}`}
+            onClick={() => copyAnswer().catch(() => undefined)}
+            title={copied ? "已复制" : "复制回答"}
+            type="button"
+          >{copied ? <Check size={16} /> : <Copy size={16} />}</button>
+        </div>
       </div>
     </div>
   );

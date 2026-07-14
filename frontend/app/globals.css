@@ -2616,8 +2616,41 @@ button.chat-session-card {
 
 .answer-feedback {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.answer-feedback-actions {
+  display: flex;
   gap: 6px;
+}
+
+.answer-memory-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid #c9d6f7;
+  border-radius: 999px;
+  background: #f2f6ff;
+  color: #1b4fcb;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.answer-memory-save:hover:not(:disabled) {
+  border-color: var(--blue);
+  background: #e9f0ff;
+}
+
+.answer-memory-save.is-saved {
+  border-color: #cbe6d8;
+  background: #eefaf3;
+  color: var(--green);
+  cursor: default;
 }
 
 .answer-action {
