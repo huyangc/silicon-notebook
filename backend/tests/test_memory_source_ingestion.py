@@ -169,6 +169,147 @@ def test_remove_memory_source(repo, monkeypatch):
     svc.remove_memory_source("no-such-memory")
 
 
+def test_ingest_parse_failure_lands_failed_and_never_raises(repo, monkeypatch):
+    """Review Critical: a failure in the pre-extraction segment (parse /
+    element replacement) must land parse_status='failed' + error_message on
+    the already-inserted row — never propagate out of ingest_memory_source —
+    and must clear the stored fingerprint so the row can be retried."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    svc = _svc(repo)
+    extract_calls = []
+    monkeypatch.setattr(svc, "run_extraction", lambda sid: extract_calls.append(sid))
+
+    def boom(*a, **k):
+        raise RuntimeError("replace boom")
+
+    monkeypatch.setattr(svc.sources, "replace_elements", boom)
+    sid = svc.ingest_memory_source(nb, "memory-1", "标题", "正文")  # must not raise
+
+    assert sid is not None
+    src = svc.sources.get_source(sid)
+    assert src.parse_status == "failed"
+    assert "replace boom" in src.error_message
+    assert src.file_hash == "", "fingerprint must not survive a failed ingest"
+    assert extract_calls == []
+
+
+def test_ingest_failure_then_same_content_retry_succeeds(repo, monkeypatch):
+    """Review Critical (retryability): after a failed ingest the SAME content
+    must re-run in full — a matching stored fingerprint must never
+    short-circuit callers into the broken row forever."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    svc = _svc(repo)
+    extract_calls = []
+    monkeypatch.setattr(svc, "run_extraction", lambda sid: extract_calls.append(sid))
+    original_replace = svc.sources.replace_elements
+    replace_calls = []
+
+    def flaky_replace(*a, **k):
+        replace_calls.append(1)
+        if len(replace_calls) == 1:
+            raise RuntimeError("first replace boom")
+        return original_replace(*a, **k)
+
+    monkeypatch.setattr(svc.sources, "replace_elements", flaky_replace)
+
+    sid1 = svc.ingest_memory_source(nb, "memory-1", "标题", "正文")
+    assert svc.sources.get_source(sid1).parse_status == "failed"
+    assert extract_calls == []
+
+    sid2 = svc.ingest_memory_source(nb, "memory-1", "标题", "正文")  # identical content
+
+    assert sid2 == sid1
+    assert len(replace_calls) == 2, "same-content retry must re-run, not fingerprint-skip"
+    assert extract_calls == [sid1]
+    src = svc.sources.get_source(sid1)
+    assert src.parse_status == "extracted"
+    expected_fp = hashlib.sha256("标题\n正文".encode("utf-8")).hexdigest()
+    assert src.file_hash == expected_fp
+    assert [e.text for e in svc.sources.source_elements(sid1)] == ["正文"]
+
+
+def test_ingest_extraction_failure_lands_failed_and_retries(repo, monkeypatch):
+    """Review Critical, extraction leg: run_extraction blowing up lands
+    'failed' + clears the fingerprint, and an identical retry re-extracts."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    svc = _svc(repo)
+    extract_calls = []
+
+    def flaky_extract(sid):
+        extract_calls.append(sid)
+        if len(extract_calls) == 1:
+            raise RuntimeError("extract boom")
+
+    monkeypatch.setattr(svc, "run_extraction", flaky_extract)
+
+    sid1 = svc.ingest_memory_source(nb, "memory-1", "标题", "正文")
+    src = svc.sources.get_source(sid1)
+    assert src.parse_status == "failed"
+    assert "extract boom" in src.error_message
+    assert src.file_hash == ""
+
+    sid2 = svc.ingest_memory_source(nb, "memory-1", "标题", "正文")
+    assert sid2 == sid1
+    assert extract_calls == [sid1, sid1]
+    assert svc.sources.get_source(sid1).parse_status == "extracted"
+
+
+def test_ingest_title_change_refreshes_stored_title(repo, monkeypatch):
+    """Review Important 1: title rides the fingerprint, so a title-only edit
+    re-ingests — and must refresh sources.title rather than leave it pinned
+    at the first-ever value."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    svc = _svc(repo)
+    calls = []
+    monkeypatch.setattr(svc, "run_extraction", lambda sid: calls.append(sid))
+
+    sid1 = svc.ingest_memory_source(nb, "memory-1", "旧标题", "正文")
+    assert svc.sources.get_source(sid1).title == "旧标题"
+
+    sid2 = svc.ingest_memory_source(nb, "memory-1", "新标题", "正文")
+
+    assert sid2 == sid1
+    src = svc.sources.get_source(sid1)
+    assert src.title == "新标题"
+    expected_fp = hashlib.sha256("新标题\n正文".encode("utf-8")).hexdigest()
+    assert src.file_hash == expected_fp
+    assert calls == [sid1, sid1], "title change alters the fingerprint => re-extract"
+
+
+def test_dirty_mark_failure_does_not_flip_extracted_to_failed(repo, monkeypatch):
+    """Review Important 2: mark_unified_kg_dirty is a real DB write that runs
+    AFTER 'extracted' is recorded (KG objects are already stored). Its failure
+    is log-only — mirroring process_source — and must never overwrite the
+    extracted status with 'failed'."""
+    nb = repo.create_notebook(NotebookCreate(name="nb")).id
+    svc = _svc(repo)
+    monkeypatch.setattr(svc, "run_extraction", lambda sid: None)
+
+    def boom(notebook_id):
+        raise RuntimeError("dirty boom")
+
+    monkeypatch.setattr(svc.kg_mutations, "mark_unified_kg_dirty", boom)
+    sid = svc.ingest_memory_source(nb, "memory-1", "标题", "正文")  # must not raise
+
+    src = svc.sources.get_source(sid)
+    assert src.parse_status == "extracted"
+    assert src.error_message == ""
+    expected_fp = hashlib.sha256("标题\n正文".encode("utf-8")).hexdigest()
+    assert src.file_hash == expected_fp, "successful ingest keeps its fingerprint"
+
+
+def test_ingest_unknown_notebook_raises_keyerror_and_creates_nothing(repo):
+    """Review Minor: a bad notebook_id is a caller bug — fail fast with
+    KeyError (same guard as import_sources) BEFORE inserting anything, rather
+    than surfacing an IntegrityError or a swallowed orphan 'failed' source.
+    Deliberately NOT converted to a failed source: there is no source to mark,
+    and Task 3's job wrapper handles the KeyError."""
+    svc = _svc(repo)
+    with pytest.raises(KeyError):
+        svc.ingest_memory_source("nb-does-not-exist", "memory-1", "标题", "正文")
+    assert svc.memory_source_id("memory-1") is None
+
+
 def test_ingest_no_llm_marks_failed_not_fabricate(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb")).id
     svc = _svc(repo)
