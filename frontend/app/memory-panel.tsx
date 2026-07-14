@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowUpCircle, Bot, Check, ChevronDown, Copy, Edit3, KeyRound, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowUpCircle, Bookmark, Bot, Check, ChevronDown, Copy, Edit3, KeyRound, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 
 import { AnswerMarkdown } from "./answer-markdown";
 import {
@@ -606,7 +606,6 @@ export function MemoryPanel({
     <section className={`memory-panel memory-panel-${scope}`} aria-label={scope === "global" ? "全部 Memory" : "笔记本 Memory"}>
       <header className="memory-panel-heading">
         <div>
-          <span className="memory-eyebrow"><Sparkles size={14} /> PRIVATE MEMORY</span>
           <h1>{scope === "global" ? "Memory" : "Notebook Memory"}</h1>
           <p>{scope === "global" ? "跨笔记本管理你主动保存和待审核的私有记忆。" : "只显示你自己绑定到当前笔记本的私有 Memory。"}</p>
         </div>
@@ -888,10 +887,12 @@ export function MemorySaveDialog({
     <section className="utility-modal memory-save-modal" role="dialog" aria-modal="true" aria-label="保存回答到 Memory">
       <div className="utility-modal-card memory-save-card">
         <header>
-          <div>
-            <span className="memory-eyebrow"><Sparkles size={14} /> MANUAL OPT-IN</span>
-            <h2>保存到 Memory</h2>
-            <p>先预览并编辑；只有点击确认后才会写入你的私有 Memory。</p>
+          <div className="memory-save-title">
+            <span className="memory-save-icon"><Bookmark size={16} /></span>
+            <div>
+              <h2>保存到 Memory</h2>
+              <p>预览并编辑后，确认才会写入你的私有 Memory。</p>
+            </div>
           </div>
           <button type="button" className="memory-close" onClick={onClose} aria-label="关闭" disabled={saving}><X size={18} /></button>
         </header>
