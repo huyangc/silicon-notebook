@@ -222,10 +222,10 @@ export type ConversationDetail = {
 
 export type ChatMode = "ask" | "rules" | "reports" | "memory";
 export const CHAT_MODES: Array<[ChatMode, string]> = [
-  ["ask", "Ask"],
-  ["rules", "Knowledge"],
-  ["memory", "Memory"],
-  ["reports", "Deep Report"],
+  ["ask", "问答"],
+  ["rules", "知识库"],
+  ["memory", "记忆"],
+  ["reports", "深度报告"],
 ];
 
 export type KnowledgeKind = string;
