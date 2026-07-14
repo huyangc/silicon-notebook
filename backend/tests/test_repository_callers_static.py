@@ -121,20 +121,20 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
     **{
         site: "snapshot verifier reads only its backup/probe database"
         for site in {
-            # Line numbers shifted by Task 1 (memory-kg-extract)'s
-            # MIGRATION_MANIFEST v14 additions + compare_snapshots column-vs-
-            # table-SQL exemption (+21 net lines above these call sites).
-            ("scripts/verify_repository_snapshot.py", 573, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 580, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 602, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 606, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 631, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 632, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 649, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 661, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 1003, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1010, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1039, "probe.execute"),
+            # Line numbers shifted +32 by Task 1 (memory-kg-extract)'s
+            # MIGRATION_MANIFEST v14 additions (incl. the (13, 14) deployed-DB
+            # hop) + compare_snapshots column-vs-table-SQL exemption.
+            ("scripts/verify_repository_snapshot.py", 584, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 591, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 613, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 617, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 642, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 643, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 660, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 672, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 1014, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1021, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1050, "probe.execute"),
         }
     },
 }
@@ -319,21 +319,21 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ("scripts/generate_repository_contract_fixtures.py", 1650, "sqlite3.connect"): (
         "contract fixture generator opens disposable fixture databases"
     ),
-    # Line numbers shifted by Task 1 (memory-kg-extract)'s MIGRATION_MANIFEST
-    # v14 additions + compare_snapshots exemption (+21 net lines above these).
-    ("scripts/verify_repository_snapshot.py", 627, "sqlite3.connect"): (
+    # Line numbers shifted +32 by Task 1 (memory-kg-extract)'s v14 manifest
+    # entries (incl. the (13, 14) deployed-DB hop) + compare exemption.
+    ("scripts/verify_repository_snapshot.py", 638, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 628, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 639, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 997, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1008, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1144, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1155, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1146, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1157, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
 }
