@@ -69,6 +69,22 @@ class QueryStore:
         return knowledge_counts_cache.pending_source_count(db, notebook_id)
 
     @staticmethod
+    def visible_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
+        """NotebookSummary's user-facing source count — excludes Memory-derived
+        synthetic sources (source_type='memory'): an internal Memory<->KG
+        extraction link with no independent user-visible content, which would
+        otherwise double-count next to the Memory panel's own count. Internal
+        paths (pending_kg_source_count above, copy materialization,
+        scale-index scans) keep counting the true full set and must NOT reuse
+        this method."""
+        row = db.execute(
+            "SELECT COUNT(*) AS count FROM sources "
+            "WHERE notebook_id = ? AND source_type != 'memory'",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["count"])
+
+    @staticmethod
     def base_notebook_info_row(db: sqlite3.Connection):
         return db.execute(
             "SELECT nb.name, "
@@ -269,11 +285,15 @@ class QueryStore:
             # seq-gated count cache (non-deprecated) — same GROUP BY, memoized.
             from app.repositories.sqlite import knowledge_counts_cache
             knowledge_counts = knowledge_counts_cache.type_counts(db, notebook_id)
+            # Memory-derived synthetic sources (source_type='memory') are
+            # excluded — this feeds the /analytics 看板 parse_status
+            # distribution, a user-facing surface; see visible_source_count.
             source_status_counts = {
                 row["parse_status"]: int(row["c"])
                 for row in db.execute(
                     "SELECT parse_status, COUNT(*) AS c FROM sources "
-                    "WHERE notebook_id = ? GROUP BY parse_status",
+                    "WHERE notebook_id = ? AND source_type != 'memory' "
+                    "GROUP BY parse_status",
                     (notebook_id,),
                 ).fetchall()
             }
