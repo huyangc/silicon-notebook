@@ -272,8 +272,8 @@ def test_follow_chain_does_not_add_schema_objects(repo):
         version = db.execute("PRAGMA user_version").fetchone()[0]
         indexes = {row["name"] for row in db.execute(
             "PRAGMA index_list(knowledge_relations)").fetchall()}
-    # SCHEMA_VERSION 随迁移推进(master v11/v12 索引 + v13 Memory / Agent schema);
-    # 本测试守的是 follow-chain 特性自身不动 schema(不加 follow 索引),故只钉「DB 版本==
-    # 代码版本」且 follow-chain 没留索引,期望值随全局 schema 走。
-    assert version == sr.SCHEMA_VERSION == 13
+    # SCHEMA_VERSION 随迁移推进(v11-14 索引/Memory/memory_id schema);本测试守的
+    # 是 follow-chain 自身不动 schema,故只钉「DB 版本==代码版本」不硬编码字面量
+    # (硬编码曾在 v13→v14 假红)且 follow-chain 没留索引。
+    assert version == sr.SCHEMA_VERSION
     assert not any("follow" in name for name in indexes)

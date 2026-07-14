@@ -30,7 +30,9 @@ def _names(db: sqlite3.Connection, kind: str) -> set[str]:
 
 
 def test_v13_memory_schema_has_privacy_and_agent_indexes(repo):
-    assert sr.SCHEMA_VERSION == 13
+    # >= 而非 ==:后续迁移(如 Task 1 的 _migration_14)会继续推高 SCHEMA_VERSION,
+    # 这里只断言 Memory/Agent 那一步(_migration_13)已落地,不锁死为全局当前版本号。
+    assert sr.SCHEMA_VERSION >= 13
     with repo._connect() as db:
         tables = _names(db, "table")
         assert {
@@ -77,7 +79,8 @@ def test_master_v12_database_upgrades_to_v13_memory_schema(repo):
 
     upgraded = sr.SQLiteRepository(repo.settings)
     with upgraded._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 13
+        # 非硬编码字面量:落到当前 SCHEMA_VERSION,防后续新迁移使断言假红。
+        assert db.execute("PRAGMA user_version").fetchone()[0] == sr.SCHEMA_VERSION
         assert {
             "memory_items",
             "memory_revisions",
@@ -105,7 +108,8 @@ def test_feature_v11_database_upgrades_to_v13_master_indexes(repo):
 
     upgraded = sr.SQLiteRepository(repo.settings)
     with upgraded._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 13
+        # 非硬编码字面量:落到当前 SCHEMA_VERSION,防后续新迁移使断言假红。
+        assert db.execute("PRAGMA user_version").fetchone()[0] == sr.SCHEMA_VERSION
         assert master_indexes <= _names(db, "index")
 
 

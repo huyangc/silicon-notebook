@@ -256,32 +256,52 @@ class SourceStore:
         summary: str,
         doc_type: str,
         source_url: str = "",
+        memory_id: str = "",
         connection: "sqlite3.Connection | None" = None,
     ) -> None:
         """Insert one sources row (created_at/updated_at minted via the ``now``
         seam). Pass ``connection`` to join a caller-owned write transaction —
         batch imports keep their all-or-nothing semantics; without it the row
-        commits in its own write transaction."""
+        commits in its own write transaction.
+
+        ``memory_id`` links a Memory-derived synthetic source (source_type=
+        'memory') back to its origin Memory row; the default "" leaves
+        ordinary sources out of the partial unique index
+        (idx_sources_memory_id caps this at one derived source per Memory)."""
         now = self.now()
         statement = (
             """
             INSERT INTO sources
             (id, notebook_id, title, source_type, status, parse_status, file_name,
              file_path, source_url, file_size, file_hash, summary, doc_type,
-             created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             memory_id, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         )
         values = (
             source_id, notebook_id, title, source_type, status, parse_status,
             file_name, file_path, source_url, file_size, file_hash, summary,
-            doc_type, now, now,
+            doc_type, memory_id, now, now,
         )
         if connection is not None:
             connection.execute(statement, values)
             return
         with self.database.write() as db:
             db.execute(statement, values)
+
+    def source_id_for_memory(self, memory_id: str) -> Optional[str]:
+        """Id of the synthetic source derived from a Memory, if any (at most
+        one per the idx_sources_memory_id partial unique index). Guards the
+        "" sentinel explicitly — ordinary (non-memory) sources all default
+        their memory_id column to "", so a bare equality lookup would
+        otherwise match an unrelated source instead of reporting no link."""
+        if not memory_id:
+            return None
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT id FROM sources WHERE memory_id = ?", (memory_id,)
+            ).fetchone()
+        return str(row["id"]) if row else None
 
     def set_status(
         self,

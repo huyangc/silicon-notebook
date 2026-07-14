@@ -121,17 +121,20 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
     **{
         site: "snapshot verifier reads only its backup/probe database"
         for site in {
-            ("scripts/verify_repository_snapshot.py", 561, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 568, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 590, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 594, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 619, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 620, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 637, "meta_conn.execute"),
+            # Line numbers shifted by Task 1 (memory-kg-extract)'s
+            # MIGRATION_MANIFEST v14 additions + compare_snapshots column-vs-
+            # table-SQL exemption (+21 net lines above these call sites).
+            ("scripts/verify_repository_snapshot.py", 573, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 580, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 602, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 606, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 631, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 632, "meta_conn.execute"),
             ("scripts/verify_repository_snapshot.py", 649, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 982, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 989, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1018, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 661, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 1003, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1010, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1039, "probe.execute"),
         }
     },
 }
@@ -316,19 +319,21 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ("scripts/generate_repository_contract_fixtures.py", 1650, "sqlite3.connect"): (
         "contract fixture generator opens disposable fixture databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 615, "sqlite3.connect"): (
+    # Line numbers shifted by Task 1 (memory-kg-extract)'s MIGRATION_MANIFEST
+    # v14 additions + compare_snapshots exemption (+21 net lines above these).
+    ("scripts/verify_repository_snapshot.py", 627, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 616, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 628, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 976, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 997, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1123, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1144, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1125, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1146, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
 }

@@ -11,7 +11,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -106,6 +106,19 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
                 );
+                -- memory_id is intentionally NOT listed here (Task 1):
+                -- _migration_1 still runs the doc_type add_column_if_missing
+                -- call below (line ~699) for every truly-fresh DB, appending
+                -- doc_type AFTER whatever this literal ends with. If memory_id
+                -- were listed here it would land BEFORE doc_type on a fresh
+                -- DB, but _migration_14's ALTER lands it AFTER doc_type on any
+                -- already-deployed DB (doc_type already exists there) --
+                -- a column-order mismatch the schema_contract.txt golden
+                -- would catch. Leaving sources' literal untouched and adding
+                -- memory_id solely via _migration_14 (which every fresh DB
+                -- also runs, in the same migrate() sweep) makes fresh and
+                -- upgraded DBs land on the identical [..., doc_type,
+                -- memory_id] order.
 
                 CREATE TABLE IF NOT EXISTS source_elements (
                   id TEXT PRIMARY KEY,
@@ -1167,6 +1180,24 @@ class SqliteMigrator:
         rowid canonical order."""
         with self._connect() as db:
             db.execute("CREATE INDEX IF NOT EXISTS idx_sources_nb_parse_status ON sources(notebook_id, parse_status)")
+
+    def _migration_14(self) -> None:
+        """Memory 派生源：sources.memory_id 关联列 + 每 Memory 至多一条派生源。
+
+        Deployed DBs at user_version>=1 short-circuit _migration_1, so the
+        column/index need their own step here. A truly fresh DB runs this
+        same step too (migrate() sweeps 1..SCHEMA_VERSION), so memory_id ends
+        up appended after sources' existing last column (doc_type) on both
+        paths — deliberately NOT duplicated into _migration_1's baseline
+        CREATE TABLE, which would instead land memory_id BEFORE doc_type on a
+        fresh DB only (_migration_1's own doc_type add_column_if_missing runs
+        after its CREATE TABLE), breaking fresh/upgraded column-order parity."""
+        with self._connect() as db:
+            self.add_column_if_missing(db, "sources", "memory_id", "TEXT")
+            db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_sources_memory_id "
+                "ON sources(memory_id) WHERE memory_id IS NOT NULL AND memory_id != ''"
+            )
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
