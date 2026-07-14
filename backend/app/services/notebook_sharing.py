@@ -105,6 +105,14 @@ class NotebookCopyService:
                 data["notebook_id"] = new_id
                 if data.get("file_path"):
                     data["file_path"] = str(destination_dir / Path(data["file_path"]).name)
+                # Task 6: memory_id is NOT an id that gets remapped — it points
+                # at a Memory row that is owner-private and never travels with
+                # a copy. Force it empty (insert_source's own "no link"
+                # default) so the copy doesn't dangle-reference a Memory the
+                # recipient can't see, and doesn't collide with the global
+                # partial unique index idx_sources_memory_id (which the
+                # source row's own unchanged memory_id still occupies).
+                data["memory_id"] = ""
                 sources_out.append(data)
             self._store.insert_copy_rows("sources", sources_out, chunk_size=chunk_size)
 

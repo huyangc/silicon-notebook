@@ -1680,6 +1680,17 @@ TASK5_MEMORY_KG_ALLOWED_MEMBER_FILES = {
     }
 }
 
+# Task 6 (memory-kg-extract): the deep-copy-clears-memory_id tests add two new
+# repo._runtime.source_store reaches in test_notebook_share_copy.py (seeding a
+# genuine memory-derived source row via insert_source, same accessor pattern
+# Task 2/5 already use in their own files) — the first "_runtime" reaches in
+# this specific file, so the pre-existing exact-line REVIEW_FIX_ALLOWED_CONSUMERS
+# entry for this member+file (a single stale call site) is superseded by this
+# broad allowance, robust to this file's line numbers shifting again later.
+TASK6_MEMORY_KG_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_notebook_share_copy.py", "_runtime"),
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2027,6 +2038,14 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     # notebook_analytics / _extraction_warning ...) without changing which
     # members it exercises. Line numbers here are not API surface.
     "backend/tests/test_sqlite_indexes.py",
+    # Task 6 (memory-kg-extract) adds two copy_notebook tests (deep copy must
+    # null out sources.memory_id) to this file, shifting the internal line
+    # numbers of its many facade-consumer sites (copy_notebook / share_notebook
+    # / notebook_copy_stats / ...) without changing which members it
+    # exercises. The _COPY_CHUNK / _insert_row patch_targets are hand-remapped
+    # in facade_surface.json instead (that scan has no line-insensitivity
+    # lever). Line numbers here are not API surface.
+    "backend/tests/test_notebook_share_copy.py",
 }
 
 ALL_TASK_ALLOWED_MEMBER_FILES = (
@@ -2067,6 +2086,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK3_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK4_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK5_MEMORY_KG_ALLOWED_MEMBER_FILES
+    | TASK6_MEMORY_KG_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2125,7 +2145,10 @@ ACTIVE_PRODUCTION_MEMBER_SITES = {
     ("_runtime", "backend/app/api/routes.py:605"),
 }
 REVIEW_FIX_ALLOWED_CONSUMERS = {
-    ("_runtime", "backend/tests/test_notebook_share_copy.py:431"),
+    # ("_runtime", test_notebook_share_copy.py) formerly pinned this one exact
+    # (now stale, line-shifted) call site; Task 6 (memory-kg-extract) replaced
+    # it with the broad TASK6_MEMORY_KG_ALLOWED_MEMBER_FILES allowance above,
+    # which stays correct across future edits to this file.
     ("share_notebook", "backend/tests/test_notebook_share_copy.py:441"),
     (
         "find_notebook_by_share_token",

@@ -179,6 +179,70 @@ def test_copy_notebook_deep_copies_and_remaps(repo):
     assert len(_rows(repo, "knowledge_objects", src)) == 2
 
 
+def test_copy_notebook_clears_memory_id(repo):
+    """Task 6: Memory 记录本身 owner 私有,不随 notebook 深拷贝走——副本源退化为
+    普通内容源。若原样搬 memory_id 会悬空引用接收方看不到的 Memory,原 owner 再拷
+    一次时还会撞 idx_sources_memory_id 分区唯一索引(两行同一 memory_id)。"""
+    nb = _mk_nb(repo, "MemSrc")
+    store = repo._runtime.source_store
+    store.insert_source(
+        source_id="src-mem-1",
+        notebook_id=nb,
+        title="Memory: foo",
+        source_type="memory",
+        status="ready",
+        parse_status="ready",
+        file_name="",
+        file_path="",
+        file_size=0,
+        file_hash="",
+        summary="",
+        doc_type="memory",
+        memory_id="mem-x",
+    )
+    _mk_user(repo, "user-memcopy")
+    new = repo.copy_notebook(nb, new_owner_id="user-memcopy")
+    copied = _rows(repo, "sources", new.id)
+    assert len(copied) == 1
+    row = copied[0]
+    assert not row["memory_id"]  # 清空,而非原样带走 'mem-x'
+    assert row["title"] == "Memory: foo"  # 其余字段完整
+    assert row["source_type"] == "memory"
+    assert row["doc_type"] == "memory"
+    # 原库不受影响
+    orig = _rows(repo, "sources", nb)[0]
+    assert orig["memory_id"] == "mem-x"
+
+
+def test_copy_notebook_twice_no_memory_id_unique_index_collision(repo):
+    """同一 owner 对同一源库连拷两次,历史上不会撞 idx_sources_memory_id——两份
+    副本的 memory_id 都已清空为空串,分区唯一索引豁免空值(WHERE memory_id IS NOT
+    NULL AND memory_id != '')。"""
+    nb = _mk_nb(repo, "MemSrc2")
+    store = repo._runtime.source_store
+    store.insert_source(
+        source_id="src-mem-2",
+        notebook_id=nb,
+        title="Memory: bar",
+        source_type="memory",
+        status="ready",
+        parse_status="ready",
+        file_name="",
+        file_path="",
+        file_size=0,
+        file_hash="",
+        summary="",
+        doc_type="memory",
+        memory_id="mem-y",
+    )
+    _mk_user(repo, "user-memcopy2")
+    new1 = repo.copy_notebook(nb, new_owner_id="user-memcopy2")
+    new2 = repo.copy_notebook(nb, new_owner_id="user-memcopy2")
+    assert new1.id != new2.id
+    for nid in (new1.id, new2.id):
+        assert not _rows(repo, "sources", nid)[0]["memory_id"]
+
+
 def test_share_preview_copy_end_to_end(repo, client):
     src = _seed_full_notebook(repo, owner="user-local")  # 归 seeded admin(=API 调用者)
     # 分享
