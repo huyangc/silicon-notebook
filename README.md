@@ -40,9 +40,10 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 13. The committed v9 compatibility fixture
+The current schema version is 15. The committed v9 compatibility fixture
 upgrades through the existing v10 migration, the v11/v12 SQLite hot-path index
-migrations, and the v13 Memory/Agent migration, and remains readable.
+migrations, the v13 Memory/Agent migration, and the v14/v15 Memory-derived
+source link/index migrations, and remains readable.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, and graph/answer type marks share `kg-type-mark.tsx`.
 - Boundary regression tests prevent these responsibilities from being copied back into the monoliths. Future extraction should follow the same incremental pattern: preserve endpoints and user behavior, move one cohesive domain, then run the complete offline gate.
 
@@ -259,7 +260,13 @@ Memory is manual opt-in, creator-private, and always bound to exactly one notebo
 an Ask answer, choose **Save to Memory**: the backend prepares a title/body/tag preview,
 the user may edit it, and only the final confirmation writes a `confirmed` Memory. If the
 preview model is unavailable or fails, the preview deterministically uses the question as
-the title and the answer with display citations removed. The global Memory page aggregates
+the title and the answer with display citations removed. When that Memory's notebook
+already extracts a knowledge graph (the same eligibility gate as uploaded sources) and is
+not a base library, confirmation — and the Save-to-Memory dialog — shows a default-on
+checkbox that also ingests the confirmed Memory into that notebook's own KG through the
+same extraction pipeline as an upload, recorded as a hidden synthetic source that never
+appears in user-facing source lists or counts; it can be unchecked per confirmation, and
+base libraries reach the KG only through the promotion review below. The global Memory page aggregates
 only the signed-in user's records; a notebook's count and Memory tab are the same data
 filtered to that notebook. Its owner-wide total and pending counts do not change when
 status, search, or notebook filters change; the notebook selector comes from a bounded
