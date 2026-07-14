@@ -20,6 +20,9 @@ def test_notebook_scale_indexes_exist(tmp_path, monkeypatch):
 
     assert "idx_sources_notebook_status" in _index_names(repo, "sources")
     assert "idx_sources_nb_parse_status" in _index_names(repo, "sources")
+    # migration 15: covering index for the memory-filtered analytics GROUP BY
+    # and NotebookSummary source COUNT (both carry source_type != 'memory').
+    assert "idx_sources_nb_parse_status_type" in _index_names(repo, "sources")
     assert "idx_source_elements_source" in _index_names(repo, "source_elements")
     assert "idx_knowledge_objects_nb_type_status" in _index_names(repo, "knowledge_objects")
     assert "idx_knowledge_objects_nb_status" in _index_names(repo, "knowledge_objects")
@@ -103,27 +106,51 @@ def test_knowledge_embeddings_version_aggregate_uses_covering_index(repo):
 
 
 # ---------------------------------------------------------------------------
-# /analytics 看板 parse_status tally: SELECT parse_status, COUNT(*) FROM sources
-# WHERE notebook_id=? GROUP BY parse_status ran a full sources table walk per
-# board open (48,836 rows at scale) because idx_sources_notebook_status covers
-# (notebook_id, status) not parse_status. idx_sources_nb_parse_status makes it
-# index-only AND serves the GROUP BY from index order (no transient sort).
+# /analytics 看板 parse_status tally + NotebookSummary source count. Both now
+# carry `AND source_type != 'memory'` (memory-kg-extract Task 5 hides Memory-
+# derived synthetic sources from user-facing surfaces). That filter references
+# a column NOT in idx_sources_nb_parse_status(notebook_id, parse_status), so
+# with only that 2-col index the queries lose their #249 covering-only property
+# and fall back to a per-row rowid lookup on the sources table (48,836 rows at
+# scale). idx_sources_nb_parse_status_type(notebook_id, parse_status,
+# source_type) — migration 15 — restores covering-only scans for BOTH the
+# GROUP BY (parse_status stays 2nd so index order still serves GROUP BY, no
+# transient sort) and the plain COUNT, verified below by EXPLAIN QUERY PLAN.
+# The SQL strings here mirror QueryStore.notebook_analytics /
+# QueryStore.visible_source_count verbatim so a divergence red-flags here.
 # ---------------------------------------------------------------------------
 
 def test_sources_parse_status_group_by_uses_covering_index(repo):
     with repo._connect() as db:
         plan = _plan(
             db,
-            "SELECT parse_status, COUNT(*) FROM sources WHERE notebook_id=? "
+            "SELECT parse_status, COUNT(*) AS c FROM sources "
+            "WHERE notebook_id = ? AND source_type != 'memory' "
             "GROUP BY parse_status",
             ("nb-1",),
         )
-    assert "idx_sources_nb_parse_status" in plan, plan
+    assert "idx_sources_nb_parse_status_type" in plan, plan
     # Covering index scan: the tally never falls back to the sources base table.
     assert "COVERING INDEX" in plan, plan
-    # (notebook_id, parse_status) order serves GROUP BY directly, so SQLite
+    # (notebook_id, parse_status, ...) order serves GROUP BY directly, so SQLite
     # builds no transient sort b-tree.
     assert "TEMP B-TREE" not in plan.upper(), plan
+
+
+def test_visible_source_count_uses_covering_index(repo):
+    """NotebookSummary's per-open source count (QueryStore.visible_source_count)
+    runs on every list_notebooks/get_notebook. The memory-hiding filter must
+    not cost it a rowid回表 at 48k sources — the 3-col covering index answers
+    the COUNT purely from the index."""
+    with repo._connect() as db:
+        plan = _plan(
+            db,
+            "SELECT COUNT(*) AS count FROM sources "
+            "WHERE notebook_id = ? AND source_type != 'memory'",
+            ("nb-1",),
+        )
+    assert "idx_sources_nb_parse_status_type" in plan, plan
+    assert "COVERING INDEX" in plan, plan
 
 
 # ---------------------------------------------------------------------------

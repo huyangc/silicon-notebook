@@ -281,60 +281,88 @@ SOURCES_MEMORY_ID_INDEX = {
         "ON sources(memory_id) WHERE memory_id IS NOT NULL AND memory_id != ''",
 }
 
+# v15 (Task 5, memory-kg-extract): covering index for the memory-filtered
+# user-facing source counts (analytics parse_status GROUP BY +
+# NotebookSummary.visible_source_count, both `AND source_type != 'memory'`).
+# _migration_15 adds only this index — no new table/column/trigger. Any DB at
+# a version below 15 gains it on the way to current, so it belongs in every
+# hop's index allowlist (harmless where a constructed source already carries
+# it: it simply won't appear in the after-before added set).
+SOURCES_PARSE_STATUS_TYPE_INDEX = {
+    "idx_sources_nb_parse_status_type":
+        "CREATE INDEX idx_sources_nb_parse_status_type "
+        "ON sources(notebook_id, parse_status, source_type)",
+}
+
 MIGRATION_MANIFEST = {
-    # Cumulative delta from the frozen v9 fixture to merged schema v14.
-    (9, 14): {
+    # Cumulative delta from the frozen v9 fixture to merged schema v15.
+    (9, 15): {
         "tables": {
             "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
             **EXPECTED_MEMORY_TABLES,
         },
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
-        "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES, **SOURCES_MEMORY_ID_INDEX},
+        "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES,
+                    **SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (10, 14): {
+    (10, 15): {
         "tables": EXPECTED_MEMORY_TABLES,
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
-        "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES, **SOURCES_MEMORY_ID_INDEX},
+        "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES,
+                    **SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
     # Both branches independently used v11 before merge. Select the exact
     # lineage below from the source schema, then admit only the missing objects.
-    (11, 14, "memory"): {
+    (11, 15, "memory"): {
         "tables": {},
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
-        "indexes": {**MASTER_SCALE_INDEXES, **SOURCES_MEMORY_ID_INDEX},
+        "indexes": {**MASTER_SCALE_INDEXES, **SOURCES_MEMORY_ID_INDEX,
+                    **SOURCES_PARSE_STATUS_TYPE_INDEX},
         "triggers": {},
         "views": {},
     },
-    (11, 14, "master"): {
+    (11, 15, "master"): {
         "tables": EXPECTED_MEMORY_TABLES,
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {
             "idx_sources_nb_parse_status": MASTER_SCALE_INDEXES["idx_sources_nb_parse_status"],
             **EXPECTED_MEMORY_INDEXES,
             **SOURCES_MEMORY_ID_INDEX,
+            **SOURCES_PARSE_STATUS_TYPE_INDEX,
         },
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (12, 14): {
+    (12, 15): {
         "tables": EXPECTED_MEMORY_TABLES,
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
-        "indexes": {**EXPECTED_MEMORY_INDEXES, **SOURCES_MEMORY_ID_INDEX},
+        "indexes": {**EXPECTED_MEMORY_INDEXES, **SOURCES_MEMORY_ID_INDEX,
+                    **SOURCES_PARSE_STATUS_TYPE_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    # The hop every deployed production database actually takes: v13 was the
-    # shipping schema before Task 1 (memory-kg-extract). _migration_14 adds
-    # only the sources.memory_id column + its partial unique index — no new
-    # tables or triggers.
-    (13, 14): {
+    # v13 -> current: v13 was the shipping schema before Task 1
+    # (memory-kg-extract). _migration_14 adds the sources.memory_id column + its
+    # partial unique index; _migration_15 adds the parse_status/source_type
+    # covering index — no new tables or triggers on either hop.
+    (13, 15): {
         "tables": {},
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
-        "indexes": SOURCES_MEMORY_ID_INDEX,
+        "indexes": {**SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX},
+        "triggers": {},
+        "views": {},
+    },
+    # The v14 -> v15 hop (Task 5): a database already carrying sources.memory_id
+    # gains only the parse_status/source_type covering index. No new
+    # table/column/trigger — mirrors Task 1's single-object (13, 14) entry.
+    (14, 15): {
+        "tables": {},
+        "columns": {},
+        "indexes": SOURCES_PARSE_STATUS_TYPE_INDEX,
         "triggers": {},
         "views": {},
     },

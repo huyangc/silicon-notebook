@@ -304,23 +304,28 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
-def test_deployed_v13_database_verifies_through_migration_14(tmp_path):
-    """The (13, 14) hop is the one EVERY currently-deployed production
-    database takes: v13 was the shipping schema before Task 1 added
-    sources.memory_id. The v9-fixture tests above only exercise the (9, 14)
-    manifest key, so a missing (13, 14) MIGRATION_MANIFEST entry would make
-    the backup verifier fail closed (migration-manifest-missing +
-    unmanifested column/index + schema-sql-changed) on every real upgrade
-    while staying green in CI. Build the v13 shape by upgrading the fixture
-    copy to current and rolling back exactly what _migration_14 adds."""
+def test_deployed_v13_database_verifies_through_migrations_14_15(tmp_path):
+    """The v13 hop is the one EVERY currently-deployed production database
+    takes: v13 was the shipping schema before the memory-kg-extract feature.
+    Post-v13 migrations are _migration_14 (sources.memory_id column + its
+    partial unique index) and _migration_15 (the parse_status/source_type
+    covering index, Task 5). The v9-fixture tests above only exercise the
+    (9, SCHEMA_VERSION) manifest key, so a missing (13, SCHEMA_VERSION) entry
+    would make the backup verifier fail closed (migration-manifest-missing +
+    unmanifested column/index) on every real upgrade while staying green in CI.
+    Build the faithful v13 shape by upgrading the fixture copy to current and
+    rolling back EXACTLY what every post-v13 migration adds — including
+    _migration_15's index, or the constructed 'v13' would retain it and the
+    hop would under-report its additions."""
     from app.core.config import Settings
 
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
     # One real open migrates the copy 9 -> current and applies the startup
-    # normalizations once, so the verification open below is a pure 13 -> 14
-    # migration replay (scratch storage keeps the fixture storage pristine).
+    # normalizations once, so the verification open below is a pure 13 ->
+    # current migration replay (scratch storage keeps the fixture storage
+    # pristine).
     upgraded = module.SQLiteRepository(
         Settings(
             database_url=f"sqlite:///{database}",
@@ -330,8 +335,9 @@ def test_deployed_v13_database_verifies_through_migration_14(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
-        rollback.execute("DROP INDEX idx_sources_memory_id")
-        rollback.execute("ALTER TABLE sources DROP COLUMN memory_id")
+        rollback.execute("DROP INDEX idx_sources_nb_parse_status_type")  # _migration_15
+        rollback.execute("DROP INDEX idx_sources_memory_id")             # _migration_14
+        rollback.execute("ALTER TABLE sources DROP COLUMN memory_id")    # _migration_14
         rollback.execute("PRAGMA user_version = 13")
         rollback.commit()
     finally:

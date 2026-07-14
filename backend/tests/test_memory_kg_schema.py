@@ -50,8 +50,8 @@ def test_fresh_db_has_sources_memory_id(repo):
     assert idx is not None and "WHERE memory_id" in idx["sql"]
 
 
-def test_schema_version_is_14():
-    assert sr.SCHEMA_VERSION == 14
+def test_schema_version_is_15():
+    assert sr.SCHEMA_VERSION == 15
 
 
 def test_deployed_v13_db_upgrades_via_migration_14(repo):

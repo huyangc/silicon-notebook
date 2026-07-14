@@ -11,6 +11,12 @@ RED-first contracts:
 - NotebookSummary's counts["sources"] aggregate excludes them;
 - notebook_analytics' source_status_counts (parse_status distribution, the
   /analytics 看板) excludes them;
+- search_notebook (GET /notebooks/{id}/search, the front-end search box)
+  surfaces neither a scope="Source" hit nor a scope="Element" hit for a
+  memory-derived source (both the source_rows and the source_elements JOIN
+  legs are filtered);
+- shared_preview (GET /shared/{token}, shown to a would-be copier/joiner)
+  omits memory-derived titles from its source_titles list;
 - get_source still resolves a memory-derived source by id — the evidence
   round-trip path must not be filtered.
 
@@ -23,6 +29,7 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
+from app.repositories.sqlite.source_store import SourceElementWrite
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -105,3 +112,69 @@ def test_get_source_still_resolves_memory_source_by_id(store, notebook_id):
     detail = store.get_source("src-memory")
     assert detail.id == "src-memory"
     assert detail.type == "memory"
+
+
+# ---------------------------------------------------------------------------
+# Reviewer follow-up: two MORE user-facing read paths leak the synthetic
+# source, both discovered because the original brief's grep scope was too
+# narrow. Search (GET /notebooks/{id}/search) surfaces it as a Source/Element
+# hit; shared preview (GET /shared/{token}) lists its title to a prospective
+# copier/joiner. Both must go dark, same as the list/count/analytics surfaces.
+# ---------------------------------------------------------------------------
+
+_NEEDLE = "ZZSECRETMEMZZ"  # unlikely to collide with any seeded/default text
+
+
+def _insert_memory_with_searchable_content(repo, store, notebook_id):
+    """A memory-derived source whose TITLE and one ELEMENT's text both contain
+    _NEEDLE — a leak in either search_notebook leg (source_rows on title, or
+    the source_elements JOIN sources on element text) would surface it."""
+    _insert(
+        store, notebook_id, "src-mem-search",
+        title=f"{_NEEDLE} memory title", source_type="memory",
+        doc_type="memory", memory_id="mem-search",
+    )
+    with repo._write() as db:
+        store.replace_elements(
+            db, "src-mem-search",
+            [SourceElementWrite("el-mem-1", "paragraph", "p1", f"{_NEEDLE} in body", {})],
+            created_at="2026-01-01T00:00:00",
+        )
+
+
+def test_search_notebook_excludes_memory_source_and_its_elements(repo, store, notebook_id):
+    # A normal source that also matches _NEEDLE (title + element), so the test
+    # proves search still returns real hits — the memory row alone goes dark.
+    _insert(store, notebook_id, "src-normal-search", title=f"{_NEEDLE} normal title")
+    with repo._write() as db:
+        store.replace_elements(
+            db, "src-normal-search",
+            [SourceElementWrite("el-norm-1", "paragraph", "p1", f"{_NEEDLE} normal body", {})],
+            created_at="2026-01-01T00:00:00",
+        )
+    _insert_memory_with_searchable_content(repo, store, notebook_id)
+
+    resp = repo.search_notebook(notebook_id, _NEEDLE)
+
+    # The memory-derived source must not appear under ANY scope (source_rows
+    # would carry scope="Source", the element JOIN would carry scope="Element";
+    # both set source_id to the memory source id).
+    assert all(h.source_id != "src-mem-search" for h in resp.hits), [
+        (h.scope, h.source_id) for h in resp.hits
+    ]
+    # Search is still functional: the normal source is found (both legs).
+    hit_source_ids = {h.source_id for h in resp.hits}
+    assert "src-normal-search" in hit_source_ids
+
+
+def test_shared_preview_titles_exclude_memory_source(repo, notebook_id, store):
+    """GET /shared/{token} preview (the copy/join modal) lists source_titles
+    to another user — memory-derived titles must not leak into it."""
+    _insert(store, notebook_id, "src-normal", title="Normal Doc")
+    _insert(
+        store, notebook_id, "src-memory", title="Memory Doc",
+        source_type="memory", doc_type="memory", memory_id="mem-1",
+    )
+    preview = repo.shared_preview(notebook_id)
+    assert "Memory Doc" not in preview["source_titles"]
+    assert "Normal Doc" in preview["source_titles"]

@@ -440,8 +440,11 @@ class QueryStore:
                             element_id="",
                         )
                     )
+            # source_type != 'memory' keeps Memory-derived synthetic sources out
+            # of the search box (GET /notebooks/{id}/search) — same user-facing
+            # hide as list_sources; they surface only via the Memory panel.
             source_rows = db.execute(
-                "SELECT * FROM sources WHERE notebook_id = ? AND "
+                "SELECT * FROM sources WHERE notebook_id = ? AND source_type != 'memory' AND "
                 "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(file_name) LIKE ?) "
                 "ORDER BY created_at ASC LIMIT ?",
                 (notebook_id, like, like, like, cap),
@@ -459,9 +462,12 @@ class QueryStore:
                         element_id="",
                     )
                 )
+            # Same hide on the element leg: a memory source's element text must
+            # not leak in as a scope="Element" hit either.
             element_rows = db.execute(
                 "SELECT se.*, s.title AS source_title FROM source_elements se "
-                "JOIN sources s ON s.id = se.source_id WHERE s.notebook_id = ? AND "
+                "JOIN sources s ON s.id = se.source_id "
+                "WHERE s.notebook_id = ? AND s.source_type != 'memory' AND "
                 "(LOWER(se.text) LIKE ? OR LOWER(se.location_label) LIKE ? OR LOWER(s.title) LIKE ?) "
                 "LIMIT ?",
                 (notebook_id, like, like, like, cap),

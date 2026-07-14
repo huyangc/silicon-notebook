@@ -30,7 +30,16 @@ def _seed_notebook_with_knowledge(repo, name, type_counts: dict):
 
 
 def _oracle_notebook_summary(repo, notebook_id):
-    """Verbatim pre-fix computation: 6 separate _count_knowledge calls."""
+    """Knowledge-count oracle: the 6 per-type counts via 6 separate
+    _count_knowledge calls (the C5 batched-GROUP-BY equivalence target).
+
+    NOTE: the ``sources`` field here uses the generic unfiltered
+    ``_count(db, "sources", ...)`` helper, which counts ALL rows including
+    Memory-derived synthetic sources. Production now counts sources via
+    ``QueryStore.visible_source_count`` (``AND source_type != 'memory'``,
+    memory-kg-extract Task 5). The two agree only because these fixtures seed
+    no memory sources; this oracle is asserted against solely for the knowledge
+    type counts, not as a sources-count contract."""
     with repo._connect() as db:
         row = db.execute("SELECT * FROM notebooks WHERE id=?", (notebook_id,)).fetchone()
         counts = {

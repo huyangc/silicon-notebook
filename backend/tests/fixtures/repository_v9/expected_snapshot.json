@@ -1337,6 +1337,11 @@
         "type": "index"
       },
       {
+        "name": "idx_sources_nb_parse_status_type",
+        "sql_sha256": "1e48ac0b35627f22b3b8d4ab75e7426756a276b87b7f163f1271ab753bab8687",
+        "type": "index"
+      },
+      {
         "name": "idx_sources_notebook_created",
         "sql_sha256": "06f4f2a4ff466cbb5d3ef988cab9444c404dc252b3d887ab2acf5d1dccf9f675",
         "type": "index"
@@ -1672,6 +1677,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 14
+    "user_version": 15
   }
 }
