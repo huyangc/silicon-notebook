@@ -78,10 +78,12 @@ def parse_xlsx(source_id: str, path: Path) -> List[SourceElement]:
     return elements
 
 
-def parse_markdown(source_id: str, path: Path) -> List[SourceElement]:
+def parse_markdown_text(source_id: str, text: str) -> List[SourceElement]:
+    """parse_markdown 的无文件版本：直接解析给定 markdown 文本（Memory 派生源等
+    没有磁盘文件的调用方复用）。逐字复用 parse_markdown 原先内嵌的 parse_blocks
+    调用与元素装配逻辑，仅将「从文件读文本」换成「拿到手的文本」。"""
     from app.services.structural_markdown import parse_blocks
 
-    text = path.read_text(encoding="utf-8", errors="replace")
     blocks = parse_blocks(text)
     elements: List[SourceElement] = []
     counters: Dict[str, int] = {}
@@ -113,7 +115,27 @@ def parse_markdown(source_id: str, path: Path) -> List[SourceElement]:
                 metadata,
             )
         )
-    return elements or parse_plain_text(source_id, path, "markdown")
+    if elements:
+        return elements
+    # No structured blocks (e.g. blank input): same blank-line paragraph
+    # fallback as parse_plain_text, minus the file read.
+    chunks = [chunk.strip() for chunk in re.split(r"\n\s*\n", text) if chunk.strip()]
+    return [
+        _element(
+            source_id,
+            "paragraph",
+            f"Text paragraph {index}",
+            " ".join(chunk.split()),
+            {"parser": "markdown", "paragraph_index": index},
+        )
+        for index, chunk in enumerate(chunks, start=1)
+    ]
+
+
+def parse_markdown(source_id: str, path: Path) -> List[SourceElement]:
+    return parse_markdown_text(
+        source_id, path.read_text(encoding="utf-8", errors="replace")
+    )
 
 
 def parse_plain_text(source_id: str, path: Path, parser_name: str) -> List[SourceElement]:

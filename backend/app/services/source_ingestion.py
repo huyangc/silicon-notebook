@@ -708,6 +708,132 @@ class SourceIngestionService:
         self.kg_mutations.invalidate_unified_cache(source.notebook_id)
         hooks.mark_unified_dirty(source.notebook_id)
 
+    # ------------------------------------------------------ memory-derived
+    def memory_kg_eligible(self, notebook_id: str) -> bool:
+        """Memory 确认后是否自动抽 KG：与上传同门（should_extract_kg）+ base 库
+        排除（进 base 走晋升人审，从不自动抽取）。"""
+        return self.should_extract_kg(notebook_id) and self.notebook_tier(notebook_id) != "base"
+
+    def memory_source_id(self, memory_id: str) -> Optional[str]:
+        return self.sources.source_id_for_memory(memory_id)
+
+    def ingest_memory_source(
+        self, notebook_id: str, memory_id: str, title: str, content_md: str
+    ) -> Optional[str]:
+        """Memory→隐藏合成源→真实抽取管线（对象/关系/证据/增量融合，与上传逐字
+        同一条 run_extraction）。在调用方的 job 线程内同步运行；任何失败都落
+        parse_status='failed'+error_message，从不向外抛（Memory 本体不受影响）。
+
+        不建 chunk——Memory 文本已经由 MemoryRetriever 直接注入 prompt，建 chunk
+        会造成双份注入。只建 elements + element embedding。
+
+        指纹 = sha256(title + "\\n" + content_md)：内容未变（如仅改 tags）零代价
+        跳过，不重抽；变化时清掉该源之前的抽取产物（KG 对象/关系/embeddings/
+        extraction_runs）后重新解析+重抽，从不追加。
+        """
+        fingerprint = hashlib.sha256(
+            f"{title}\n{content_md}".encode("utf-8")
+        ).hexdigest()
+        existing_id = self.sources.source_id_for_memory(memory_id)
+        if existing_id is not None:
+            if self.sources.get_source(existing_id).file_hash == fingerprint:
+                return existing_id  # content unchanged (e.g. only tags edited)
+            source_id = existing_id
+        else:
+            source_id = self.new_id("src")
+            self.sources.insert_source(
+                source_id=source_id,
+                notebook_id=notebook_id,
+                title=title,
+                source_type="memory",
+                status="active",
+                parse_status="parsed",
+                file_name="",
+                file_path="",
+                file_size=0,
+                file_hash=fingerprint,
+                summary="",
+                doc_type="",
+                memory_id=memory_id,
+            )
+
+        from app.services.parsers import parse_markdown_text
+
+        elements = parse_markdown_text(source_id, content_md)
+        now = self.now()
+        with self.write() as db:
+            if existing_id is not None:
+                # Reparse semantics: drop this source's prior extraction
+                # derivatives (KG objects/relations/embeddings/extraction
+                # runs) in the SAME transaction as the element swap below —
+                # mirrors process_source's parse-stage invariant exactly.
+                self.clear_source_extraction_state(
+                    db,
+                    source_id,
+                    notebook_id,
+                    clear_embeddings=True,
+                )
+                self.sources.update_file_hash(source_id, fingerprint, connection=db)
+            self.sources.replace_elements(
+                db,
+                source_id,
+                [
+                    SourceElementWrite(
+                        id=f"el-{source_id}-{index:04d}",
+                        element_type=element.element_type,
+                        location_label=element.location_label,
+                        text=element.text,
+                        metadata=element.metadata,
+                    )
+                    for index, element in enumerate(elements, start=1)
+                ],
+                created_at=now,
+            )
+
+        try:
+            # Deliberately embed_source only — NEVER embed_chunks_for_source,
+            # since no chunks are ever built for a memory-derived source.
+            self.embedding.embed_source(source_id)
+        except Exception:
+            self.event_log.logger.exception(
+                "memory source embed failed for %s", source_id
+            )
+
+        try:
+            self.sources.set_status(source_id, "extracting")
+            self.run_extraction(source_id)
+            self.sources.set_status(source_id, "extracted")
+            self.kg_mutations.mark_unified_kg_dirty(notebook_id)
+            self.event_log.emit({
+                "kind": "memory_kg",
+                "source_id": source_id,
+                "notebook_id": notebook_id,
+                "memory_id": memory_id,
+                "status": "extracted",
+            })
+        except Exception as exc:
+            self.sources.set_status(
+                source_id, "failed", error_message=f"{type(exc).__name__}: {exc}"
+            )
+            self.event_log.logger.exception(
+                "memory KG extraction failed for %s", source_id
+            )
+            self.event_log.emit({
+                "kind": "memory_kg",
+                "source_id": source_id,
+                "notebook_id": notebook_id,
+                "memory_id": memory_id,
+                "status": "failed",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+        return source_id
+
+    def remove_memory_source(self, memory_id: str) -> None:
+        """弃用 Memory 派生源：无派生源（从未抽取过，或已被移除）时幂等 no-op。"""
+        source_id = self.sources.source_id_for_memory(memory_id)
+        if source_id is not None:
+            self.delete_source(source_id, self.pipeline_hooks())
+
     # ----------------------------------------------------------- extraction
     def relink_extra_relations(
         self, objects: List[dict], relations: List[dict], source_id: str
