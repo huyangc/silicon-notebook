@@ -1601,6 +1601,24 @@ TASK1_MEMORY_KG_ALLOWED_MEMBER_FILES = {
     }
 }
 
+# Task 2 (memory-kg-extract): the source_ingestion-domain memory-derived
+# source primitive tests compose the real facade + runtime directly (same
+# repo/repo_factory pattern as test_source_ingestion_service.py) to prove
+# memory_kg_eligible / ingest_memory_source / remove_memory_source against a
+# real SourceIngestionService instance. Test-only compatibility consumers
+# added after the frozen pre-Memory-KG facade manifest.
+TASK2_MEMORY_KG_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_source_ingestion.py", 33, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_memory_source_ingestion.py", 33, "app.services.sqlite_repository", "_now"),
+}
+TASK2_MEMORY_KG_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_source_ingestion.py", name)
+    for name in {
+        "SQLiteRepository", "_now", "_runtime", "_write",
+        "create_notebook", "mark_notebook_base",
+    }
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -1978,6 +1996,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK27_ALLOWED_MEMBER_FILES
     | STARTUP_READINESS_ALLOWED_MEMBER_FILES
     | TASK1_MEMORY_KG_ALLOWED_MEMBER_FILES
+    | TASK2_MEMORY_KG_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2550,6 +2569,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK8_MEMORY_ALLOWED_IMPORTS
                     or site in SQLITE_CONN_REUSE_ALLOWED_IMPORTS
                     or site in TASK1_MEMORY_KG_ALLOWED_IMPORTS
+                    or site in TASK2_MEMORY_KG_ALLOWED_IMPORTS
                 )
 
 

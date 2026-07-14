@@ -322,6 +322,26 @@ class SourceStore:
                 (*params, source_id),
             )
 
+    def update_file_hash(
+        self,
+        source_id: str,
+        file_hash: str,
+        connection: "sqlite3.Connection | None" = None,
+    ) -> None:
+        """Persist a recomputed fingerprint (Memory-derived source reparse:
+        insert_source already carries the fingerprint for a brand-new row;
+        this is the update half for an existing row whose content changed).
+        Pass ``connection`` to ride the caller's write transaction (the
+        memory reparse path folds this into the same commit as
+        clear_source_extraction_state + replace_elements)."""
+        statement = "UPDATE sources SET file_hash = ?, updated_at = ? WHERE id = ?"
+        values = (file_hash, self.now(), source_id)
+        if connection is not None:
+            connection.execute(statement, values)
+            return
+        with self.database.write() as db:
+            db.execute(statement, values)
+
     def replace_elements(
         self,
         connection: sqlite3.Connection,
