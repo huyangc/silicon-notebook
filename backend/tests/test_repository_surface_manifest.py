@@ -2207,6 +2207,19 @@ SQLITE_CONN_REUSE_ALLOWED_CONSUMERS = {
 }
 
 FROZEN_ONLY_MOVED_CONSUMERS = {
+    # Retired the frozen byte-equality contract snapshot tests (openapi/serialization
+    # replay); their _runtime_serialization helper was the only live consumer of these
+    # facade members from this file, so the frozen fixture's recorded sites are now stale.
+    ('_connect', 'backend/tests/test_repository_api_contract.py:253'),
+    ('append_ask_trace', 'backend/tests/test_repository_api_contract.py:180'),
+    ('begin_ask_job', 'backend/tests/test_repository_api_contract.py:177'),
+    ('create_report', 'backend/tests/test_repository_api_contract.py:191'),
+    ('finish_ask_job', 'backend/tests/test_repository_api_contract.py:189'),
+    ('process_source', 'backend/tests/test_repository_api_contract.py:120'),
+    ('source_elements', 'backend/tests/test_repository_api_contract.py:121'),
+    ('store_kg', 'backend/tests/test_repository_api_contract.py:133'),
+    ('update_report', 'backend/tests/test_repository_api_contract.py:192'),
+    ('upload_sources', 'backend/tests/test_repository_api_contract.py:109'),
     # Authenticated promotion routes now call explicit reviewer-aware adapters;
     # the frozen facade methods retain their original signatures for callers.
     ("approve_promotion", "backend/app/api/routes.py:<line>"),

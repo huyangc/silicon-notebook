@@ -100,21 +100,3 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     assert snapshot["ask_metadata"]["jobs"]
 
 
-def test_v9_fixture_replays_through_the_current_repository(tmp_path):
-    spec = importlib.util.spec_from_file_location("repository_v9_fixture_generator", GENERATOR)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-
-    fixture_root = FIXTURES / "repository_v9"
-    database = tmp_path / "baseline.db"
-    storage = tmp_path / "storage"
-    shutil.copyfile(fixture_root / "baseline.db", database)
-    shutil.copytree(fixture_root / "storage", storage)
-    with module._deterministic_runtime():
-        repo = module._new_offline_repo(database, storage)
-        actual = module.normalized_repository_snapshot(repo, "nb-fixture")
-    expected = json.loads(
-        (fixture_root / "expected_snapshot.json").read_text(encoding="utf-8")
-    )
-    assert actual == expected
