@@ -178,3 +178,39 @@ def test_shared_preview_titles_exclude_memory_source(repo, notebook_id, store):
     preview = repo.shared_preview(notebook_id)
     assert "Memory Doc" not in preview["source_titles"]
     assert "Normal Doc" in preview["source_titles"]
+
+
+# ---------------------------------------------------------------------------
+# Whole-branch review follow-up: two MORE sources read paths (neither in the
+# original T5 grep scope) present a memory-derived title as if it were a real
+# source document. Both feed LLM/auto-generated user-visible text, so the
+# synthetic source must go dark on them too.
+# ---------------------------------------------------------------------------
+
+def test_report_source_rows_excludes_memory_source(store, notebook_id):
+    """report_source_rows → report_engine._build_corpus_map → the STORM
+    deep-report planner prompt ("本 notebook 来源文件:\\n- <title>"). A
+    memory-derived title must not be presented to the planner as a source
+    document (its KG objects still participate via knowledge_objects)."""
+    _insert(store, notebook_id, "src-normal", title="Normal Doc")
+    _insert(
+        store, notebook_id, "src-memory", title="Memory Doc",
+        source_type="memory", doc_type="memory", memory_id="mem-1",
+    )
+    titles = [r["title"] for r in store.report_source_rows(notebook_id)]
+    assert "Memory Doc" not in titles
+    assert "Normal Doc" in titles
+
+
+def test_meta_sources_excludes_memory_source(store, notebook_id):
+    """meta_sources → augment_notebook_metadata (notebook auto-naming). A
+    hidden memory source (status='extracted') must not contribute its title or
+    inflate the source count baked into the auto-generated name/description."""
+    _insert(store, notebook_id, "src-normal", title="Normal Doc")
+    _insert(
+        store, notebook_id, "src-memory", title="Memory Doc",
+        source_type="memory", doc_type="memory", memory_id="mem-1",
+    )
+    titles = [r["title"] for r in store.meta_sources(notebook_id)]
+    assert "Memory Doc" not in titles
+    assert "Normal Doc" in titles

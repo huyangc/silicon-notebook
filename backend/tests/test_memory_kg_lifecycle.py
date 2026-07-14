@@ -191,6 +191,30 @@ def test_update_reingests_when_derived_source_exists_else_stays_silent(
     assert kg.calls == []
 
 
+# 3b) update() must NOT re-extract into a notebook that became ineligible after
+#     the derived source was created (e.g. a personal->base transition): the
+#     "base never auto-extracts" gate applies to edit re-ingest, not just to the
+#     confirm hook. Whole-branch review follow-up.
+def test_update_skips_reingest_when_notebook_became_ineligible(
+    memory_service, owner, notebook
+):
+    kg = _KgStub(eligible=True)
+    memory_service.set_memory_kg_service(kg)
+    memory_service.kg_ingest_scheduler = lambda fn, item: fn(item)
+
+    item = _candidate(memory_service, notebook.id, owner.id, "req-update-base-transition")
+    memory_service.confirm(item.id, owner.id)
+    assert kg.calls == [("ingest", item.id)]
+    assert kg.memory_source_id(item.id) is not None  # derived source now exists
+    kg.calls.clear()
+
+    kg._eligible = False  # notebook flips to base / KG turned off afterwards
+    memory_service.update(
+        item.id, owner.id, MemoryUpdate(content_md="Edited after base transition")
+    )
+    assert kg.calls == []  # no re-ingest into a now-ineligible notebook
+
+
 # 4) deprecate() synchronously calls remove_memory_source.
 def test_deprecate_removes_derived_source(memory_service, owner, notebook):
     kg = _KgStub(eligible=True)

@@ -653,7 +653,12 @@ class MemoryService:
         if (
             self.memory_kg is not None
             and self.memory_kg.memory_source_id(item.id) is not None
+            and self.memory_kg.memory_kg_eligible(item.notebook_id)
         ):
+            # Re-extract edited content, but only while the notebook is still
+            # eligible: if it became base (or KG was turned off) after the
+            # source was created, "base never auto-extracts" bars re-ingest —
+            # the stale derived source is left untouched until a rebuild.
             self.kg_ingest_scheduler(self._kg_ingest_job, (item.id, item.created_by))
         return self._schedule_embed(item)
 
