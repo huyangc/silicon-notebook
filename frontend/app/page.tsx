@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Trash2, Upload, X } from "lucide-react";
+import { BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -3259,12 +3259,11 @@ export default function Home() {
               </div>
               <div className="segmented" aria-label="View mode">
                 {[
-                  ["grid", "✓", "卡片视图"],
-                  ["compact", "▦", "紧凑视图"],
-                  ["list", "☰", "列表视图"]
-                ].map(([id, label, title]) => (
-                  <button key={id} className={viewMode === id ? "active" : ""} title={title} onClick={() => setViewMode(id)}>
-                    {label}
+                  { id: "grid", icon: <LayoutGrid size={16} />, title: "卡片视图" },
+                  { id: "list", icon: <ListIcon size={16} />, title: "列表视图" },
+                ].map(({ id, icon, title }) => (
+                  <button key={id} className={viewMode === id ? "active" : ""} title={title} aria-label={title} onClick={() => setViewMode(id)}>
+                    {icon}
                   </button>
                 ))}
               </div>
@@ -3322,12 +3321,17 @@ export default function Home() {
                       <SearchHits hits={hits} compact={false} />
                     </button>
                     <div className="notebook-card-footer">
-                      <p>{notebook.created_label} · {notebook.counts.sources ?? 0} 个来源</p>
-                      <button
-                        type="button"
-                        className="notebook-memory-link"
-                        onClick={() => openNotebookMemory(notebook.id).catch(reportError)}
-                      >{notebook.counts.memories ?? 0} Memory</button>
+                      <p className="notebook-card-meta">{notebook.created_label} · {notebook.counts.sources ?? 0} 个来源</p>
+                      <div className="notebook-card-footer-actions">
+                        {notebook.access !== "reader" && notebook.is_shared && (
+                          <span className="notebook-shared-badge" title="已分享" aria-label="已分享"><User size={14} /></span>
+                        )}
+                        <button
+                          type="button"
+                          className="notebook-memory-link"
+                          onClick={() => openNotebookMemory(notebook.id).catch(reportError)}
+                        >{notebook.counts.memories ?? 0} Memory</button>
+                      </div>
                     </div>
                   </article>
                 ))}

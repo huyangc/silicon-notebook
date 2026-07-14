@@ -369,6 +369,10 @@ class NotebookSummary(BaseModel):
     access: str = "owner"
     # reader 时 = 原 owner 的用户名(前端展示「来自 X」);owner 时空串。
     shared_from: str = ""
+    # owner 视角:本 notebook 是否已开启分享(存在有效 share_token 或 notebook_members)。
+    # 驱动前端卡片右下角的「已分享」小人徽标(仿 NotebookLM);reader 看到的原库 is_shared
+    # 也为 True,但 reader 卡片本身已带「来自 X」不再重复标记。
+    is_shared: bool = False
 
 
 class ShareResponse(BaseModel):
