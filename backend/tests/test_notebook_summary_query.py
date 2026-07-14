@@ -139,17 +139,23 @@ def test_base_notebook_projection_survives_the_move(repo):
 # ---------------------------------------------------------------------------
 
 
-def test_t4deleg_count_rows_delegate(repo, monkeypatch):
+def test_t4deleg_visible_source_count_delegate(repo, monkeypatch):
+    """memory-kg-extract Task 5 retargets the counts["sources"] projection
+    from the generic count_rows(table, column, value) primitive to the
+    dedicated visible_source_count(notebook_id) — it excludes Memory-derived
+    synthetic sources (source_type='memory'), which count_rows cannot express
+    since it is a table-agnostic helper still used elsewhere (the facade's
+    _count re-export). The delegation-proof spy moves with it."""
     notebook = repo.create_notebook(NotebookCreate(name="count-rows"))
     calls = []
 
-    def spy(db, table, column, value):
-        calls.append((table, column, value))
+    def spy(db, notebook_id):
+        calls.append(notebook_id)
         return 0
 
-    monkeypatch.setattr(repo._runtime.queries, "count_rows", spy)
+    monkeypatch.setattr(repo._runtime.queries, "visible_source_count", spy)
     repo.get_notebook(notebook.id)
-    assert calls and calls[0] == ("sources", "notebook_id", notebook.id)  # MUT
+    assert calls and calls[0] == notebook.id  # MUT
 
 
 def test_t4deleg_knowledge_type_count_rows_delegate(repo, monkeypatch):

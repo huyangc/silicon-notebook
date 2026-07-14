@@ -50,9 +50,17 @@ class SourceStore:
 
     # ------------------------------------------------------------------ reads
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
+        """User-facing source list — excludes Memory-derived synthetic rows
+        (source_type='memory'): those are an internal Memory<->KG extraction
+        link with no independent user-visible content, and would otherwise
+        double-count right next to the Memory panel. Internal paths
+        (get_source, pending_kg_source_count, copy materialization,
+        scale-index scans) deliberately keep the true full set — do not add
+        this filter there."""
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT * FROM sources WHERE notebook_id = ? ORDER BY created_at ASC",
+                "SELECT * FROM sources WHERE notebook_id = ? AND source_type != 'memory' "
+                "ORDER BY created_at ASC",
                 (notebook_id,),
             ).fetchall()
             return self.sources_from_rows(db, rows)
@@ -60,11 +68,12 @@ class SourceStore:
     def list_sources_page(self, notebook_id: str, offset: int = 0, limit: int = 50,
                           q: str = "") -> PaginatedSources:
         """分页 + 可选 q(按 title/file_name 服务端过滤)。万级 source 安全:只取一页 +
-        一次 COUNT,不全量进内存。"""
+        一次 COUNT,不全量进内存。同 list_sources 排除 source_type='memory' 的合成源
+        (含 total_count),内部真集路径(get_source/pending_kg/copy/scale-index)不受影响。"""
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
         needle = (q or "").strip().lower()
-        where = "WHERE notebook_id = ?"
+        where = "WHERE notebook_id = ? AND source_type != 'memory'"
         params: List[object] = [notebook_id]
         if needle:
             where += " AND (LOWER(title) LIKE ? OR LOWER(file_name) LIKE ?)"

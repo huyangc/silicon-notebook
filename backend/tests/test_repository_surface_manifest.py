@@ -1657,6 +1657,25 @@ TASK4_MEMORY_KG_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_memory_preview.py", "_write"),
 }
 
+# Task 5 (memory-kg-extract): the source-visibility filter tests compose the
+# real facade + runtime directly (same repo fixture pattern as the Task 1-3
+# files above) to prove list_sources / list_sources_page / NotebookSummary's
+# source count / notebook_analytics' parse_status distribution all exclude
+# source_type='memory' synthetic sources, while get_source (a SourceStore
+# method reached via repo._runtime.source_store, not a facade member) keeps
+# resolving them. Test-only compatibility consumers added after the frozen
+# pre-Memory-KG facade manifest.
+TASK5_MEMORY_KG_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_source_visibility.py", 26, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK5_MEMORY_KG_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_source_visibility.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "create_notebook", "get_notebook",
+        "notebook_analytics",
+    }
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2037,6 +2056,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK2_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK3_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK4_MEMORY_KG_ALLOWED_MEMBER_FILES
+    | TASK5_MEMORY_KG_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2611,6 +2631,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK1_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK2_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK3_MEMORY_KG_ALLOWED_IMPORTS
+                    or site in TASK5_MEMORY_KG_ALLOWED_IMPORTS
                 )
 
 

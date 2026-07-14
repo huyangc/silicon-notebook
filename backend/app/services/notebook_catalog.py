@@ -77,6 +77,16 @@ class NotebookSummaryQuery:
     def has_kg(self, db: sqlite3.Connection, notebook_id: str) -> bool:
         return self.queries.notebook_has_kg(db, notebook_id)
 
+    def visible_source_count(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> int:
+        """NotebookSummary's counts["sources"] — excludes Memory-derived
+        synthetic sources (source_type='memory'); see
+        QueryStore.visible_source_count. The generic ``count`` helper above
+        stays unfiltered (it is a table-agnostic primitive shared with the
+        facade's ``_count`` re-export / its equivalence-oracle test)."""
+        return self.queries.visible_source_count(db, notebook_id)
+
     def count_pending_kg_sources(
         self, db: sqlite3.Connection, notebook_id: str
     ) -> int:
@@ -111,7 +121,7 @@ class NotebookSummaryQuery:
         # 注意:kg_building 仅经 get(kg_building=...) 回填为真值;list_for_user 等走
         # from_row 的路径恒为 False（当前无消费方读列表里的该字段）。
         counts = {
-            "sources": self.count(connection, "sources", "notebook_id", row["id"]),
+            "sources": self.visible_source_count(connection, row["id"]),
             "memories": memory_count,
             **self.knowledge_type_counts(connection, row["id"]),
         }
