@@ -269,3 +269,130 @@ def test_lifecycle_is_unaffected_when_no_kg_service_is_injected(
 
     deprecated = memory_service.deprecate(confirmed.id, owner.id)
     assert deprecated.status == "deprecated"
+
+
+# 8) Review Important 1: deprecate landing WHILE ingest_memory_source is
+#    still running (seconds-long in production). At that instant deprecate's
+#    remove_memory_source is a no-op — the derived source doesn't exist yet —
+#    and confirmed->deprecated is one-way so deprecate can never fire again.
+#    Without a post-ingest re-check the job then creates a permanently
+#    orphaned derived source.
+def test_kg_job_cleans_up_derived_source_when_deprecate_lands_mid_ingest(
+    memory_service, owner, notebook
+):
+    class _MidIngestDeprecate(_KgStub):
+        def __init__(self, service, user_id):
+            super().__init__(eligible=True)
+            self._service = service
+            self._user_id = user_id
+
+        def ingest_memory_source(self, notebook_id, memory_id, title, content_md):
+            # The user deprecates while extraction is still running: the
+            # remove below fires against a not-yet-created source (no-op),
+            # then the ingest completes and creates it.
+            self._service.deprecate(memory_id, self._user_id)
+            return super().ingest_memory_source(
+                notebook_id, memory_id, title, content_md
+            )
+
+    kg = _MidIngestDeprecate(memory_service, owner.id)
+    memory_service.set_memory_kg_service(kg)
+    memory_service.kg_ingest_scheduler = lambda fn, item: fn(item)
+
+    item = _candidate(memory_service, notebook.id, owner.id, "req-mid-ingest-race")
+    memory_service.confirm(item.id, owner.id)
+
+    # deprecate's no-op remove, the ingest that outraced it, then the job's
+    # own post-ingest cleanup — the derived source must not leak.
+    assert kg.calls == [
+        ("remove", item.id),
+        ("ingest", item.id),
+        ("remove", item.id),
+    ]
+    assert kg.memory_source_id(item.id) is None
+    assert memory_service.get(item.id, owner.id).status == "deprecated"
+
+
+# 9) Review Minor 4: ingest_memory_source's documented notebook-not-found
+#    KeyError (its guard precedes any insert, so nothing was created) must be
+#    swallowed by the same job guard as the memory lookup — never crash the
+#    scheduler thread / the synchronous caller.
+def test_kg_job_tolerates_ingest_notebook_keyerror(memory_service, owner, notebook):
+    class _NotebookGone(_KgStub):
+        def ingest_memory_source(self, notebook_id, memory_id, title, content_md):
+            self.calls.append(("ingest", memory_id))
+            raise KeyError(notebook_id)
+
+    kg = _NotebookGone(eligible=True)
+    memory_service.set_memory_kg_service(kg)
+    memory_service.kg_ingest_scheduler = lambda fn, item: fn(item)
+
+    item = _candidate(memory_service, notebook.id, owner.id, "req-nb-gone")
+    confirmed = memory_service.confirm(item.id, owner.id)  # must not raise
+
+    assert confirmed.status == "confirmed"
+    assert kg.calls == [("ingest", item.id)]
+
+
+# 10) Review Minor 3: confirm()'s extract_kg read must see dict patches too
+#     (the signature accepts Mapping), not only pydantic models.
+def test_confirm_reads_extract_kg_from_mapping_patch(memory_service, owner, notebook):
+    kg = _KgStub(eligible=True)
+    memory_service.set_memory_kg_service(kg)
+    memory_service.kg_ingest_scheduler = lambda fn, item: fn(item)
+
+    optout = _candidate(memory_service, notebook.id, owner.id, "req-dict-optout")
+    memory_service.confirm(
+        optout.id, owner.id, {"extract_kg": False, "title": "Edited via dict"}
+    )
+    assert kg.calls == []
+    assert memory_service.get(optout.id, owner.id).title == "Edited via dict"
+
+    default = _candidate(memory_service, notebook.id, owner.id, "req-dict-default")
+    memory_service.confirm(default.id, owner.id, {"reason": "looks right"})
+    assert kg.calls == [("ingest", default.id)]
+
+
+# 11) Review Minor 5a: the real runtime injects the real SourceIngestionService
+#     instance (identity, not a wrapper) as MemoryService's kg bridge.
+def test_runtime_wires_source_ingestion_as_memory_kg_service(repo):
+    assert repo._runtime.memory_service.memory_kg is repo._runtime.source_ingestion
+
+
+# 12) Review Minor 5b: end-to-end offline smoke through the REAL services (no
+#     stub): confirm -> derived source_type='memory' row via the real
+#     ingest pipeline; offline no-llm may land extracted or failed; and no
+#     chunks are ever built for a memory-derived source.
+def test_confirm_end_to_end_builds_memory_derived_source_offline(
+    repo, memory_service, owner, notebook
+):
+    # Open the auto-extract gate exactly like test_memory_source_ingestion's
+    # truth table: one KG object flips should_extract_kg via notebook_has_kg.
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,created_at,updated_at) "
+            "VALUES ('ko-e2e-gate',?,'concept','t','t')",
+            (notebook.id,),
+        )
+    # Real MemoryService + real SourceIngestionService; only the schedulers
+    # are made synchronous (the constructor kwarg's documented test mode) so
+    # assertions don't race background threads.
+    memory_service.kg_ingest_scheduler = lambda fn, item: fn(item)
+    memory_service.embedding_scheduler = lambda fn, job: fn(job)
+
+    item = _candidate(
+        memory_service, notebook.id, owner.id, "req-e2e-offline", body="正文内容"
+    )
+    memory_service.confirm(item.id, owner.id)
+
+    source_id = repo._runtime.source_ingestion.memory_source_id(item.id)
+    assert source_id is not None
+    src = repo._runtime.source_ingestion.sources.get_source(source_id)
+    assert src.type == "memory"
+    assert src.parse_status in ("extracted", "failed")  # offline no-llm: either
+    with repo._runtime.database.connect() as db:
+        (n_chunks,) = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE source_id=?", (source_id,)
+        ).fetchone()
+    assert n_chunks == 0
