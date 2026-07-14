@@ -63,6 +63,8 @@ export type PaginatedMemories = {
     memory_count: number;
     pending_count: number;
   }>;
+  /** True only for a notebook-scoped list whose KG can absorb Memory; null/undefined for the global list. */
+  kg_extract_eligible?: boolean;
 };
 
 export type MemoryPreview = {
@@ -70,6 +72,7 @@ export type MemoryPreview = {
   content_md: string;
   tags: string[];
   provenance_summary: Record<string, unknown>;
+  kg_extract_eligible?: boolean;
 };
 
 export type AgentProfile = {

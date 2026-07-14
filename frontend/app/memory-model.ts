@@ -36,6 +36,49 @@ export function validateMemoryDraft(draft: {
   return "";
 }
 
+/**
+ * Confirm-request body. `extract_kg` is included only when the notebook's KG is
+ * eligible; otherwise the key is omitted entirely because the backend model uses
+ * `extra="forbid"` and an unknown field would be rejected with 422.
+ */
+export function confirmMemoryBody(input: {
+  title: string;
+  content_md: string;
+  tags: string[];
+  eligible: boolean;
+  extractKg: boolean;
+}): { title: string; content_md: string; tags: string[]; extract_kg?: boolean } {
+  const body: { title: string; content_md: string; tags: string[]; extract_kg?: boolean } = {
+    title: input.title,
+    content_md: input.content_md,
+    tags: input.tags,
+  };
+  if (input.eligible) body.extract_kg = input.extractKg;
+  return body;
+}
+
+/**
+ * From-answer capture body. Same eligibility gate on `extract_kg` as
+ * {@link confirmMemoryBody}; `answerId` is mapped to the wire field `answer_id`.
+ */
+export function fromAnswerMemoryBody(input: {
+  answerId: string;
+  title: string;
+  content_md: string;
+  tags: string[];
+  eligible: boolean;
+  extractKg: boolean;
+}): { answer_id: string; title: string; content_md: string; tags: string[]; extract_kg?: boolean } {
+  const body: { answer_id: string; title: string; content_md: string; tags: string[]; extract_kg?: boolean } = {
+    answer_id: input.answerId,
+    title: input.title,
+    content_md: input.content_md,
+    tags: input.tags,
+  };
+  if (input.eligible) body.extract_kg = input.extractKg;
+  return body;
+}
+
 type MemoryMeta = { label: string; tone: string };
 
 const STATUS_META: Record<MemoryStatus, MemoryMeta> = {

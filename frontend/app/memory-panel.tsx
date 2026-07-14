@@ -18,6 +18,8 @@ import { API_BASE, authHeaders, clearToken, getToken } from "./auth";
 import {
   canEditMemory,
   canPromoteMemory,
+  confirmMemoryBody,
+  fromAnswerMemoryBody,
   memoryListPath,
   memoryEvidenceRows,
   memoryOriginMeta,
@@ -467,6 +469,8 @@ export function MemoryPanel({
   const [refresh, setRefresh] = useState(0);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<MemoryDraft>({ title: "", content_md: "", tags: "" });
+  const [kgEligible, setKgEligible] = useState(false);
+  const [extractKg, setExtractKg] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [layout, setLayout] = useState<"grid" | "list">("grid");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
@@ -588,6 +592,7 @@ export function MemoryPanel({
         setOwnerTotal(result.owner_total_count);
         setOwnerPending(result.owner_pending_count);
         setNotebookOptions(result.notebook_options);
+        setKgEligible(result.kg_extract_eligible ?? false);
       })
       .catch((cause) => {
         if (controller.signal.aborted || listRequestEpochRef.current !== epoch) return;
@@ -606,6 +611,7 @@ export function MemoryPanel({
   function beginEdit(memory: MemoryRecord) {
     setEditingId(memory.id);
     setDraft(draftFor(memory));
+    setExtractKg(true);
   }
 
   async function updateMemory(memory: MemoryRecord, action: "save" | "confirm" | "reject" | "deprecate") {
@@ -624,7 +630,7 @@ export function MemoryPanel({
         setError(validationError);
         return;
       }
-      const payload = {
+      const fields = {
         title: draft.title.trim(),
         content_md: draft.content_md.trim(),
         tags: tagsFromDraft(draft.tags),
@@ -632,9 +638,15 @@ export function MemoryPanel({
       const path = action === "save"
         ? `/memories/${encodeURIComponent(memory.id)}`
         : `/memories/${encodeURIComponent(memory.id)}/${action}`;
+      // save (PATCH → MemoryUpdate) must never carry extract_kg; only confirm may.
+      const body = action === "confirm"
+        ? JSON.stringify(confirmMemoryBody({ ...fields, eligible: kgEligible, extractKg }))
+        : action === "save"
+          ? JSON.stringify(fields)
+          : undefined;
       await memoryApi<MemoryRecord>(path, {
         method: action === "save" ? "PATCH" : "POST",
-        body: action === "save" || action === "confirm" ? JSON.stringify(payload) : undefined,
+        body,
         signal: controller.signal,
       });
       if (controller.signal.aborted || !mountedRef.current) return;
@@ -845,6 +857,16 @@ export function MemoryPanel({
                 {editing ? (
                   <>
                     <MemoryEditor draft={draft} setDraft={setDraft} />
+                    {memory.status === "candidate" && kgEligible && (
+                      <label className="agent-check">
+                        <input
+                          type="checkbox"
+                          checked={extractKg}
+                          onChange={(event) => setExtractKg(event.target.checked)}
+                        />
+                        同时抽取到知识图谱
+                      </label>
+                    )}
                     {detailBlocks}
                   </>
                 ) : (
@@ -955,6 +977,8 @@ export function MemorySaveDialog({
 }) {
   const [draft, setDraft] = useState<MemoryDraft>({ title: "", content_md: "", tags: "" });
   const [provenance, setProvenance] = useState<Record<string, unknown>>({});
+  const [previewEligible, setPreviewEligible] = useState(false);
+  const [extractKg, setExtractKg] = useState(true);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -991,6 +1015,7 @@ export function MemorySaveDialog({
         if (requestEpochRef.current !== epoch) return;
         setDraft(draftFor(preview));
         setProvenance(preview.provenance_summary);
+        setPreviewEligible(preview.kg_extract_eligible ?? false);
       })
       .catch((cause) => {
         if (!controller.signal.aborted && requestEpochRef.current === epoch) {
@@ -1025,12 +1050,14 @@ export function MemorySaveDialog({
       }
       const memory = await memoryApi<MemoryRecord>(`/notebooks/${encodeURIComponent(notebookId)}/memories/from-answer`, {
         method: "POST",
-        body: JSON.stringify({
-          answer_id: answerId,
+        body: JSON.stringify(fromAnswerMemoryBody({
+          answerId,
           title: draft.title.trim(),
           content_md: draft.content_md.trim(),
           tags: tagsFromDraft(draft.tags),
-        }),
+          eligible: previewEligible,
+          extractKg,
+        })),
         signal: controller.signal,
       });
       if (!controller.signal.aborted && mountedRef.current) onSaved(memory);
@@ -1060,6 +1087,18 @@ export function MemorySaveDialog({
         {loading ? <div className="memory-empty compact">正在生成预览…</div> : (
           <>
             <MemoryEditor draft={draft} setDraft={setDraft} />
+            {previewEligible && (
+              <div className="memory-preview-provenance">
+                <label className="agent-check">
+                  <input
+                    type="checkbox"
+                    checked={extractKg}
+                    onChange={(event) => setExtractKg(event.target.checked)}
+                  />
+                  同时抽取到知识图谱
+                </label>
+              </div>
+            )}
             <div className="memory-preview-provenance">
               <strong>来源摘要</strong>
               <span>证据等级：{String(provenance.evidence_level ?? "未知")}</span>
