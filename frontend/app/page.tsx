@@ -836,7 +836,7 @@ export default function Home() {
   const [modelPanelOpen, setModelPanelOpen] = useState(false);
   const [modelForms, setModelForms] = useState<Record<ModelRole, ServiceForm> | null>(null);
   const [modelTesting, setModelTesting] = useState<Record<string, string>>({});
-  const [statusText, setStatusText] = useState("connecting");
+  const [statusText, setStatusText] = useState("连接中");
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
   const [feedbackSent, setFeedbackSent] = useState<Record<string, string>>({});
@@ -1559,7 +1559,7 @@ export default function Home() {
     // Immediate feedback (the first fetch is one `delay` away).
     const first = sourcesRef.current.filter((s) => !["extracted", "failed"].includes(s.parse_status));
     if (first.length) {
-      setStatusText(`处理中（已 ${Math.round((pollCountRef.current * 1500) / 1000)}s）：${first.map((s) => `${s.file_name || s.title}: ${s.parse_status}`).join("，")}`);
+      setStatusText(`正在处理来源（已 ${Math.round((pollCountRef.current * 1500) / 1000)}s · ${first.length} 个）`);
     }
     const tick = async () => {
       if (cancelled) return;
@@ -1571,12 +1571,12 @@ export default function Home() {
         return; // done — nothing to poll
       }
       if (pollCountRef.current > 120) {
-        setStatusText("处理超时：来源长时间未完成，请查看后端日志 .local/logs/events.jsonl");
+        setStatusText("处理超时：部分来源长时间未完成，请稍后重试");
         return; // ~3min safety cap
       }
       pollCountRef.current += 1;
       const elapsedSec = Math.round((pollCountRef.current * 1500) / 1000);
-      setStatusText(`处理中（已 ${elapsedSec}s）：${pending.map((s) => `${s.file_name || s.title}: ${s.parse_status}`).join("，")}`);
+      setStatusText(`正在处理来源（已 ${elapsedSec}s · ${pending.length} 个）`);
       try {
         const updated = await Promise.all(
           pending.map((source) => api<SourceSummary>(`/sources/${source.id}`))
@@ -3050,7 +3050,7 @@ export default function Home() {
 
   function reportError(error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    setStatusText(`API error: ${message}`);
+    setStatusText(`服务异常：${message}`);
   }
 
   async function handleLogout() {
