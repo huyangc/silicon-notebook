@@ -1398,24 +1398,24 @@ TASK28_ALLOWED_IMPORTS = {
     ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "reset_request_user"),
     ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "set_request_user"),
 }
-# Line numbers shifted by Task 1 (memory-kg-extract)'s MIGRATION_MANIFEST v14
-# additions + compare_snapshots exemption (+21 net lines above these sites).
+# Line numbers shifted +32 by Task 1 (memory-kg-extract)'s MIGRATION_MANIFEST
+# v14 additions (incl. the (13, 14) deployed-DB hop) + compare exemption.
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1044"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:1037"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:1022"),
-    ("get_report", "scripts/verify_repository_snapshot.py:1049"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:1025"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:1034"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:1028"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:1046"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:1023"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:985"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:989"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:991"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1016"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1058"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1032"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1055"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1048"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1033"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1060"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1036"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1045"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1039"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1057"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1034"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:996"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1000"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1002"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1027"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1069"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1043"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility

@@ -327,6 +327,17 @@ MIGRATION_MANIFEST = {
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
+    # The hop every deployed production database actually takes: v13 was the
+    # shipping schema before Task 1 (memory-kg-extract). _migration_14 adds
+    # only the sources.memory_id column + its partial unique index — no new
+    # tables or triggers.
+    (13, 14): {
+        "tables": {},
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+        "indexes": SOURCES_MEMORY_ID_INDEX,
+        "triggers": {},
+        "views": {},
+    },
 }
 
 _BUILTIN_WHITELIST = (
