@@ -43,6 +43,18 @@ def _answer(repo, notebook_id: str, question: str = "What remains stable?") -> s
     )
 
 
+def _seed_kg_object(repo, notebook_id: str, object_id: str = "ko-eligibility-gate") -> None:
+    """Cheapest possible row that flips notebook_has_kg -> True (mirrors
+    test_memory_kg_lifecycle.py's end-to-end gate-opening insert)."""
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?)",
+            (object_id, notebook_id, "concept", "t", "t"),
+        )
+
+
 def test_owner_memory_crud_is_private_and_bounded(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_headers, _owner_id = _register(client, "a00100001")
@@ -681,3 +693,103 @@ def test_owner_can_hard_delete_single_and_bulk_memories(tmp_path, monkeypatch):
     assert client.get(
         f"/api/memories/{foreign_memory}", headers=foreign_headers
     ).status_code == 200
+
+
+def test_from_answer_extract_kg_false_skips_derived_source_when_eligible(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    headers, _user_id = _register(client, "s00100020")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "KG opt-out"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+    _seed_kg_object(repo, notebook_id)
+    assert repo.memory_kg_eligible(notebook_id) is True
+    # KG ingest normally fires on a real background thread pool
+    # (kg_scheduler.submit_job, fire-and-forget); make it synchronous so a
+    # missing/failed extract_kg=False thread-through would show up as a
+    # created source immediately, instead of a timing-dependent false pass.
+    repo._runtime.memory_service.kg_ingest_scheduler = lambda fn, item: fn(item)
+
+    answer_id = _answer(repo, notebook_id, "Opt out of KG?")
+    saved = client.post(
+        f"/api/notebooks/{notebook_id}/memories/from-answer",
+        headers=headers,
+        json={
+            "answer_id": answer_id,
+            "title": "No KG please",
+            "content_md": "Body",
+            "tags": [],
+            "extract_kg": False,
+        },
+    )
+    assert saved.status_code == 201, saved.text
+    assert repo._runtime.source_ingestion.memory_source_id(saved.json()["id"]) is None
+
+
+def test_notebook_memories_list_reports_kg_extract_eligible_gate(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    headers, _user_id = _register(client, "t00100021")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Eligibility gate"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+
+    ineligible = client.get(
+        f"/api/notebooks/{notebook_id}/memories", headers=headers
+    )
+    assert ineligible.status_code == 200, ineligible.text
+    assert ineligible.json()["kg_extract_eligible"] is False
+
+    _seed_kg_object(repo, notebook_id)
+    eligible = client.get(f"/api/notebooks/{notebook_id}/memories", headers=headers)
+    assert eligible.status_code == 200
+    assert eligible.json()["kg_extract_eligible"] is True
+
+    repo.mark_notebook_base(notebook_id)
+    based = client.get(f"/api/notebooks/{notebook_id}/memories", headers=headers)
+    assert based.status_code == 200
+    assert based.json()["kg_extract_eligible"] is False
+
+    # user-level (cross-notebook) listing has no single notebook to gate on.
+    user_level = client.get("/api/memories", headers=headers)
+    assert user_level.status_code == 200
+    assert user_level.json()["kg_extract_eligible"] is None
+
+
+def test_confirm_extract_kg_false_is_accepted_and_skips_derived_source(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    headers, user_id = _register(client, "u00100022")
+    notebook_id = client.post(
+        "/api/notebooks", headers=headers, json={"name": "Confirm opt-out"}
+    ).json()["id"]
+
+    from app.api.deps import repository
+
+    repo = repository()
+    _seed_kg_object(repo, notebook_id)
+    assert repo.memory_kg_eligible(notebook_id) is True
+    # Same non-racy rationale as the from-answer opt-out test above.
+    repo._runtime.memory_service.kg_ingest_scheduler = lambda fn, item: fn(item)
+
+    candidate = repo.create_memory_candidate(
+        notebook_id, user_id, None, "confirm-optout", "Candidate", "Body", [],
+        "reason", {}, [],
+    )
+    confirmed = client.post(
+        f"/api/memories/{candidate.id}/confirm",
+        headers=headers,
+        json={"extract_kg": False},
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["status"] == "confirmed"
+    assert repo._runtime.source_ingestion.memory_source_id(candidate.id) is None
