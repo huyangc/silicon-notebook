@@ -210,7 +210,9 @@ TASK27_ALLOWED_IMPORTS = {
     ("scripts/kg_product_smoke.py", 16, "app.services.sqlite_repository", "SQLiteRepository"),
     ("scripts/backfill_kg_embeddings.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
     ("scripts/replay_retrieval.py", 40, "app.services.sqlite_repository", "SQLiteRepository"),
-    ("backend/tests/test_repository_callers_static.py", 670, "app.services.sqlite_repository", "SQLiteRepository"),
+    # Line shifted 670->675 by Task 1 (memory-kg-extract)'s comments on the
+    # verify_repository_snapshot.py line-number allowlist entries below it.
+    ("backend/tests/test_repository_callers_static.py", 675, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -1396,22 +1398,24 @@ TASK28_ALLOWED_IMPORTS = {
     ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "reset_request_user"),
     ("scripts/verify_repository_snapshot.py", 59, "app.services.sqlite_repository", "set_request_user"),
 }
+# Line numbers shifted by Task 1 (memory-kg-extract)'s MIGRATION_MANIFEST v14
+# additions + compare_snapshots exemption (+21 net lines above these sites).
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1023"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:1016"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:1001"),
-    ("get_report", "scripts/verify_repository_snapshot.py:1028"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:1004"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:1013"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:1007"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:1025"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:1002"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:964"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:968"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:970"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:995"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1037"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1011"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1044"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1037"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1022"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1049"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1025"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1034"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1028"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1046"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1023"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:985"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:989"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:991"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1016"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1058"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1032"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -1580,6 +1584,21 @@ TASK8_MEMORY_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/memory_routes.py", "propose_memory_promotion"),
     ("backend/app/api/routes.py", "approve_promotion_as_reviewer"),
     ("backend/app/api/routes.py", "reject_promotion_as_reviewer"),
+}
+
+# Task 1 (memory-kg-extract, a distinct later feature branch from the Memory
+# tasks above): the sources.memory_id migration/schema test composes the real
+# facade + migrator directly to prove fresh-DB and upgraded-DB (v13->v14)
+# schema convergence. Test-only compatibility consumers added after the
+# frozen pre-Memory-KG facade manifest.
+TASK1_MEMORY_KG_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_kg_schema.py", 17, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK1_MEMORY_KG_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_kg_schema.py", name)
+    for name in {
+        "SCHEMA_VERSION", "SQLiteRepository", "_connect", "_migrate", "_runtime", "_write",
+    }
 }
 
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
@@ -1958,6 +1977,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK26_ALLOWED_MEMBER_FILES
     | TASK27_ALLOWED_MEMBER_FILES
     | STARTUP_READINESS_ALLOWED_MEMBER_FILES
+    | TASK1_MEMORY_KG_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2529,6 +2549,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK6_MEMORY_ALLOWED_IMPORTS
                     or site in TASK8_MEMORY_ALLOWED_IMPORTS
                     or site in SQLITE_CONN_REUSE_ALLOWED_IMPORTS
+                    or site in TASK1_MEMORY_KG_ALLOWED_IMPORTS
                 )
 
 

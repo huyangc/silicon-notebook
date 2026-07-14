@@ -928,6 +928,7 @@
         "file_path": "<fixture-storage>/notebooks/nb-fixture/fixture-source.md",
         "file_size": 113,
         "id": "<src-id-1>",
+        "memory_id": null,
         "notebook_id": "<nb-id-1>",
         "parse_status": "parsed",
         "source_type": "markdown",
@@ -1326,6 +1327,11 @@
         "type": "index"
       },
       {
+        "name": "idx_sources_memory_id",
+        "sql_sha256": "d78fb168a9a353f96b63a5117d60334ba4398552d97a43ff2ec244713671c759",
+        "type": "index"
+      },
+      {
         "name": "idx_sources_nb_parse_status",
         "sql_sha256": "39ce7a2518e30fd9602a3e3b853b6aa1cbc0156f0714d064cb79c9822794f408",
         "type": "index"
@@ -1632,7 +1638,7 @@
       },
       {
         "name": "sources",
-        "sql_sha256": "6e739f01d08fdb894e46a36c27d0a2c905c6605e742ff93642c574f785372eb1",
+        "sql_sha256": "3b8f75cf9e142ccdd166aceb99c71b99f8ec581434256352df4a96190a5aa628",
         "type": "table"
       },
       {
@@ -1666,6 +1672,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 13
+    "user_version": 14
   }
 }

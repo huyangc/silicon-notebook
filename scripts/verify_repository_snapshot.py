@@ -270,48 +270,60 @@ MASTER_SCALE_INDEXES = {
         "CREATE INDEX idx_sources_nb_parse_status ON sources(notebook_id, parse_status)",
 }
 
+# v14 (Task 1, memory-kg-extract): sources.memory_id link column + its partial
+# unique index (at most one Memory-derived synthetic source per Memory).
+SOURCES_MEMORY_ID_COLUMN = {
+    "memory_id": ("memory_id", "TEXT", 0, None, 0),
+}
+SOURCES_MEMORY_ID_INDEX = {
+    "idx_sources_memory_id":
+        "CREATE UNIQUE INDEX idx_sources_memory_id "
+        "ON sources(memory_id) WHERE memory_id IS NOT NULL AND memory_id != ''",
+}
+
 MIGRATION_MANIFEST = {
-    # Cumulative delta from the frozen v9 fixture to merged schema v13.
-    (9, 13): {
+    # Cumulative delta from the frozen v9 fixture to merged schema v14.
+    (9, 14): {
         "tables": {
             "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
             **EXPECTED_MEMORY_TABLES,
         },
-        "columns": {},
-        "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES},
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+        "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES, **SOURCES_MEMORY_ID_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (10, 13): {
+    (10, 14): {
         "tables": EXPECTED_MEMORY_TABLES,
-        "columns": {},
-        "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES},
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+        "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES, **SOURCES_MEMORY_ID_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
     # Both branches independently used v11 before merge. Select the exact
     # lineage below from the source schema, then admit only the missing objects.
-    (11, 13, "memory"): {
+    (11, 14, "memory"): {
         "tables": {},
-        "columns": {},
-        "indexes": MASTER_SCALE_INDEXES,
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+        "indexes": {**MASTER_SCALE_INDEXES, **SOURCES_MEMORY_ID_INDEX},
         "triggers": {},
         "views": {},
     },
-    (11, 13, "master"): {
+    (11, 14, "master"): {
         "tables": EXPECTED_MEMORY_TABLES,
-        "columns": {},
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {
             "idx_sources_nb_parse_status": MASTER_SCALE_INDEXES["idx_sources_nb_parse_status"],
             **EXPECTED_MEMORY_INDEXES,
+            **SOURCES_MEMORY_ID_INDEX,
         },
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (12, 13): {
+    (12, 14): {
         "tables": EXPECTED_MEMORY_TABLES,
-        "columns": {},
-        "indexes": EXPECTED_MEMORY_INDEXES,
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+        "indexes": {**EXPECTED_MEMORY_INDEXES, **SOURCES_MEMORY_ID_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
@@ -818,7 +830,7 @@ def compare_snapshots(
         }
     else:
         manifest_key: tuple[Any, ...] = (pre.user_version, post.user_version)
-        if pre.user_version == 11 and post.user_version == 13:
+        if pre.user_version == 11 and post.user_version == SCHEMA_VERSION:
             lineage = (
                 "memory"
                 if "memory_items" in pre.schema_objects.get("table", {})
@@ -851,6 +863,15 @@ def compare_snapshots(
             if before[name] == after[name]:
                 continue
             if kind == "table":
+                if name in migration_manifest.get("columns", {}):
+                    # A manifested bare-column ALTER (e.g. sources.memory_id)
+                    # rewrites sqlite_master's stored CREATE TABLE text, so the
+                    # raw before/after SQL always differs here. The per-column
+                    # loop below re-derives the exact added-column set against
+                    # this same manifest entry and fails closed on anything
+                    # beyond it, so defer to that stricter check instead of
+                    # flagging the expected text delta as unexplained.
+                    continue
                 note(name, "schema-sql-changed")
             else:
                 discrepancies.append(
