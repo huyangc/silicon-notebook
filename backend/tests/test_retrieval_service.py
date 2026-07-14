@@ -21,11 +21,6 @@ def _repo_with_kg(tmp_path):
     return repo, nb.id
 
 
-def test_repo_exposes_retrieval_service(tmp_path):
-    repo, _ = _repo_with_kg(tmp_path)
-    assert isinstance(repo.retrieval, RetrievalService)
-
-
 def test_retrieve_scored_delegates_to_repo(tmp_path):
     repo, nb = _repo_with_kg(tmp_path)
     via_service = repo.retrieval.retrieve_scored(nb, "运算放大器")

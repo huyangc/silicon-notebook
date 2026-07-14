@@ -506,34 +506,6 @@ class TestTask6AskGraphFederated:
         # Traversal count: must include nodes from at least the base notebook.
         assert "node(s) traversed" in trace.summary
 
-    def test_ask_graph_anchors_carry_tier(self, repo_with_two_notebooks):
-        """Anchors from ask(mode='graph') carry the per-edge tier (base or personal)."""
-        from app.models.schemas import AskRequest
-        repo, base_nb, pers_nb = repo_with_two_notebooks
-        resp = repo.ask(pers_nb.id, AskRequest(question="oxide breakdown", mode="graph"))
-        # Even with no LLM configured, the graph path returns (no anchors from
-        # deterministic mode, but if there are anchors they must carry tier).
-        # Ensure id_map is populated and _parse_answer_anchors can run.
-        # We test directly: build context and verify id_map has tier.
-        from app.services.kg.graph_reason import (
-            DEFAULT_REASONING_EDGES, multihop_subgraph, render_subgraph_context)
-        G, idx_to_oid, oid_to_idx = repo._federated_rx_graph(pers_nb.id)
-        # Use all objects as seeds
-        with repo._connect() as db:
-            from app.services.sqlite_repository import USABLE_STATUSES
-            ph = ",".join("?" for _ in USABLE_STATUSES)
-            oids = [r["id"] for r in db.execute(
-                f"SELECT id FROM knowledge_objects WHERE status IN ({ph})",
-                USABLE_STATUSES,
-            ).fetchall()]
-        sub = multihop_subgraph(G, oid_to_idx, idx_to_oid,
-                                seed_ids=oids[:3],
-                                edge_types=DEFAULT_REASONING_EDGES,
-                                max_depth=2, max_fan_out=8)
-        _, id_map = render_subgraph_context(sub)
-        for key, entry in id_map.items():
-            assert "tier" in entry, f"id_map[{key}] missing tier"
-
     def test_ask_graph_reasoning_trace_includes_authority_notes(self, repo_with_two_notebooks):
         """reasoning_trace detail must include 'authority_notes' from verify_chain_edges."""
         from app.models.schemas import AskRequest

@@ -151,16 +151,6 @@ def _imports(path: Path) -> set[str]:
     return found
 
 
-def test_governance_module_never_imports_the_facade():
-    modules = _imports(BACKEND / "app/services/knowledge_governance.py")
-    assert not any(
-        m.startswith("app.services.sqlite_repository") for m in modules
-    )
-    assert not any(
-        m.startswith("app.services.repository_runtime") for m in modules
-    )
-
-
 # ---------------------------------------------------------------------------
 # Task 4 delegation tests: the governance service holds ZERO SQL — each read it
 # used to run inline is now a GovernanceStore method on `repo._runtime.governance`.

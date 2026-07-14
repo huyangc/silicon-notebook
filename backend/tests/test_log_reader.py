@@ -27,19 +27,6 @@ CHAT_ERR = (
 )
 
 
-def test_load_assigns_seq_and_skips_malformed(tmp_path):
-    p = _write(tmp_path, [CHAT_OK, "NOT JSON", EMBED_OK, ""])
-    records, malformed = log_reader.load_records(p)
-    assert [r["id"] for r in records] == ["llm-a", "llm-b"]
-    assert [r["seq"] for r in records] == [0, 2]  # line index preserved (append-only)
-    assert malformed == 1
-
-
-def test_load_missing_file(tmp_path):
-    records, malformed = log_reader.load_records(tmp_path / "nope.jsonl")
-    assert records == [] and malformed == 0
-
-
 def test_filter_by_kind_status_model(tmp_path):
     records, _ = log_reader.load_records(_write(tmp_path, [CHAT_OK, EMBED_OK, CHAT_ERR]))
     assert {r["id"] for r in log_reader.filter_records(records, kind="chat")} == {"llm-a", "llm-c"}

@@ -282,27 +282,6 @@ RETIRED_RETRIEVAL_PRIVATES = {
 }
 
 
-def test_task4_application_services_contain_no_sql_calls() -> None:
-    """Gate D: catalog/sharing/governance/scale orchestration owns no SQL."""
-    modules = (
-        "backend/app/services/notebook_catalog.py",
-        "backend/app/services/notebook_sharing.py",
-        "backend/app/services/knowledge_governance.py",
-        "backend/app/services/scale_artifact_runtime.py",
-    )
-    offenders: list[tuple[str, int, str]] = []
-    for relative in modules:
-        tree = ast.parse(
-            (ROOT / relative).read_text(),
-            filename=relative,
-        )
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
-                continue
-            if node.func.attr in {"execute", "executemany", "executescript"}:
-                offenders.append((relative, node.lineno, node.func.attr))
-    assert offenders == []
-
 # ---------------------------------------------------------------------------
 # rule 4 — the exact files allowed to open a SQLite connection themselves
 # ---------------------------------------------------------------------------

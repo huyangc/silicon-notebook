@@ -346,3 +346,9 @@ def test_builder_stage_callback_order_and_failure_isolation(repo):
         "total",
     ]
     assert manifest["n_nodes"] >= 2
+
+
+# Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.
+# Skip them with `pytest -m "not slow"`; full runs (default) still include them.
+import pytest as _pytest_slow  # noqa: E402
+pytestmark = _pytest_slow.mark.slow

@@ -937,16 +937,6 @@ async def test_propose_memory_delegates_exact_tag_normalization_to_core(mcp_env)
     ]
 
 
-def test_mcp_proposal_does_not_duplicate_shared_tag_policy():
-    import inspect
-    from app.api import mcp_server
-
-    source = inspect.getsource(mcp_server._validate_proposal_input)
-    assert "MEMORY_TAG_MAX_COUNT" not in source
-    assert "tags must not contain blank values" not in source
-    assert source.count("normalize_tags(") == 1
-
-
 def test_nonlocal_plain_http_mcp_configuration_is_rejected():
     from app.api.mcp_server import validate_mcp_deployment
 

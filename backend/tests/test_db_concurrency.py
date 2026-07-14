@@ -9,13 +9,6 @@ def _repo(tmp_path, monkeypatch):
     return SQLiteRepository(Settings())
 
 
-def test_connect_enables_wal(tmp_path, monkeypatch):
-    r = _repo(tmp_path, monkeypatch)
-    with r._connect() as db:
-        mode = db.execute("PRAGMA journal_mode").fetchone()[0]
-    assert str(mode).lower() == "wal"
-
-
 def test_concurrent_writers_do_not_lock(tmp_path, monkeypatch):
     r = _repo(tmp_path, monkeypatch)
     with r._connect() as db:

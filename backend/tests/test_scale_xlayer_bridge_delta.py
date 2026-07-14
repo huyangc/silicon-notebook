@@ -258,3 +258,9 @@ def test_scale_combined_graph_passes_delta_node_ids(repo, monkeypatch):
     assert captured.get("active_node_ids") is not None, (
         "_scale_combined_graph must pass the delta node id set, not rely on the "
         "None-fallback full-table load")
+
+
+# Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.
+# Skip them with `pytest -m "not slow"`; full runs (default) still include them.
+import pytest as _pytest_slow  # noqa: E402
+pytestmark = _pytest_slow.mark.slow

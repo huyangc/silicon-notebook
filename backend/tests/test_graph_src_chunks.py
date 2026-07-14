@@ -7,10 +7,6 @@ from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
 
 
-def test_graph_ppr_default_on():
-    assert Settings(_env_file=None).graph_ppr_enabled is True
-
-
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")

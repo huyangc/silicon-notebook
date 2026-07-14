@@ -178,3 +178,9 @@ def test_chunk_ann_dim_mismatch_emits_event(repo, monkeypatch):
     assert out is None
     dm = [e for e in events if e.get("kind") == "dim_mismatch" and e.get("site") == "chunk_ann"]
     assert len(dm) == 1 and dm[0]["manifest_dim"] == 32 and dm[0]["query_dim"] == 16
+
+
+# Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.
+# Skip them with `pytest -m "not slow"`; full runs (default) still include them.
+import pytest as _pytest_slow  # noqa: E402
+pytestmark = _pytest_slow.mark.slow

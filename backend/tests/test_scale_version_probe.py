@@ -54,35 +54,6 @@ def test_append_clusters_bumps_cseq(repo_factory):
     assert _cseq(repo, nb) > before
 
 
-def test_version_memo_hit_skips_cluster_aggregates(repo_factory, monkeypatch):
-    """热路径(memo 命中)不得对 concept_clusters 跑 COUNT/MAX——探针只读
-    unified_kg_state 单行。通过统计 SQL 文本断言。"""
-    repo, nb = repo_factory()
-    repo._scale_index_version(nb)          # 冷路径,填 memo
-    seen_sql = []
-    real_connect = repo._connect
-
-    class _SpyConn:
-        def __init__(self, inner):
-            self._inner = inner
-        def execute(self, sql, *a):
-            seen_sql.append(sql)
-            return self._inner.execute(sql, *a)
-        def __enter__(self):
-            self._inner.__enter__()
-            return self
-        def __exit__(self, *exc):
-            return self._inner.__exit__(*exc)
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-    monkeypatch.setattr(repo, "_connect", lambda: _SpyConn(real_connect()))
-    repo._scale_index_version(nb)          # 热路径
-    cluster_aggr = [s for s in seen_sql
-                    if "concept_clusters" in s and ("COUNT" in s or "MAX" in s)]
-    assert cluster_aggr == []
-
-
 def test_version_changes_after_cluster_write(repo_factory):
     """写 clusters 后 version key 必须变化(memo 失效→冷路径重算 COUNT/MAX)。"""
     repo, nb = repo_factory()

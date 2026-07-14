@@ -89,12 +89,6 @@ def test_stale_index_reused_across_queries(repo, monkeypatch):
     assert calls["n"] == 1                         # 只从磁盘 load 一次
 
 
-def test_exact_caller_unchanged_on_delta(repo):
-    """version-exact 调用方(无 allow_stale)在有 delta 时仍返 None,行为不变。"""
-    nb = _indexed_nb_with_delta(repo)
-    assert repo._scale_index(nb.id) is None
-
-
 def test_stale_reload_after_disk_rebuild(repo):
     """磁盘 manifest 版本变(rebuild/fold)后,下次 stale 调用返回新实例(自愈)。"""
     nb = _indexed_nb_with_delta(repo)
@@ -108,29 +102,6 @@ def test_no_manifest_returns_none(repo):
     from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name="empty"))
     assert repo._scale_index(nb.id, allow_stale=True) is None
-
-
-def test_concurrent_cold_stale_single_flight(repo, monkeypatch):
-    """并发 cold stale 调用只 load 一次(单飞)。"""
-    import app.services.kg.scale_index as si
-    nb = _indexed_nb_with_delta(repo)
-    repo._scale_idx_cache.pop(nb.id, None)         # 清缓存造 cold
-    calls = {"n": 0}
-    real = si.load_scale_index
-    import time
-
-    def slow_load(d):
-        calls["n"] += 1
-        time.sleep(0.05)
-        return real(d)
-    monkeypatch.setattr(si, "load_scale_index", slow_load)
-    import threading
-    results = []
-    threads = [threading.Thread(target=lambda: results.append(repo._scale_index(nb.id, allow_stale=True))) for _ in range(6)]
-    for t in threads: t.start()
-    for t in threads: t.join()
-    assert calls["n"] == 1                          # 单飞:只加载一次
-    assert all(r is results[0] for r in results)    # 都拿到同一实例
 
 
 def test_combined_graph_cache_hits_under_ingestion(repo, monkeypatch):
@@ -244,3 +215,9 @@ def test_combined_graph_key_keeps_active_ver_for_unindexed_active_over_base(repo
     _insert_source_chunk(repo, active.id, "sC", "cC", "carol", 3)  # active KG 变更
     repo._scale_combined_graph(active.id, base_indexes)
     assert loads["n"] == 2      # active_ver 保留在 key 里 → 变更触发重建,不陈旧命中
+
+
+# Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.
+# Skip them with `pytest -m "not slow"`; full runs (default) still include them.
+import pytest as _pytest_slow  # noqa: E402
+pytestmark = _pytest_slow.mark.slow

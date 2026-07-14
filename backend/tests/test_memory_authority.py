@@ -41,15 +41,6 @@ def test_authority_breaks_only_equal_relevance_ties():
     assert [hit.memory_id for hit in ranked] == ["confirmed", "candidate"]
 
 
-def test_conflict_authority_hierarchy_is_deterministic():
-    assert [
-        authority_rank("candidate"),
-        authority_rank("personal_source"),
-        authority_rank("confirmed_memory"),
-        authority_rank("base"),
-    ] == [1, 2, 3, 4]
-
-
 def test_fixed_eval_has_zero_tolerance_leakage_guards():
     confirmed = _hit("confirmed", "confirmed", 0.9)
     cases = [

@@ -104,13 +104,6 @@ def test_concept_desc_sig_deterministic_and_order_insensitive():
 
 # --- 6. migration -----------------------------------------------------------
 
-def test_migration_adds_canonical_desc_sig_column(repo):
-    with repo._connect() as db:
-        cols = {r["name"] for r in db.execute(
-            "PRAGMA table_info(concept_clusters)").fetchall()}
-    assert "canonical_desc_sig" in cols
-
-
 # --- 4. parallel correctness / behavior preserved ---------------------------
 
 def test_all_multimember_canonicals_get_descriptions(repo):

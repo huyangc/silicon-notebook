@@ -525,32 +525,6 @@ def verify_chain_edges(
 # These are ADDITIVE functions; they do not modify any existing function.
 # ---------------------------------------------------------------------------
 
-def compute_centrality(
-    G: rx.PyDiGraph,
-    idx_to_oid: Dict[int, str],
-) -> dict:
-    """Compute node-level betweenness and pagerank over the graph.
-
-    Returns:
-        {
-          "betweenness": {object_id: float, ...},   # digraph betweenness centrality
-          "pagerank":    {object_id: float, ...},   # PageRank (alpha=0.85)
-        }
-
-    Both metrics are keyed by object_id (string), not node index.
-    Empty graph returns {"betweenness": {}, "pagerank": {}}.
-    """
-    if G.num_nodes() == 0:
-        return {"betweenness": {}, "pagerank": {}}
-
-    btwn_raw: Dict[int, float] = rx.digraph_betweenness_centrality(G, normalized=True)
-    pr_raw: Dict[int, float] = rx.pagerank(G, alpha=0.85)
-
-    betweenness = {idx_to_oid[idx]: v for idx, v in btwn_raw.items() if idx in idx_to_oid}
-    pagerank    = {idx_to_oid[idx]: v for idx, v in pr_raw.items()   if idx in idx_to_oid}
-    return {"betweenness": betweenness, "pagerank": pagerank}
-
-
 def compute_edge_centrality(G: rx.PyDiGraph) -> Dict[str, float]:
     """Compute edge betweenness centrality for each edge in the graph.
 

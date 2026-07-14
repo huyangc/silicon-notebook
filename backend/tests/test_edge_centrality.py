@@ -34,52 +34,6 @@ def chain_graph():
 
 # ── compute_centrality ────────────────────────────────────────────────────────
 
-def test_compute_centrality_returns_node_dicts(chain_graph):
-    from app.services.kg.graph_reason import compute_centrality
-    G, idx_to_oid, oid_to_idx = chain_graph
-    result = compute_centrality(G, idx_to_oid)
-    assert "betweenness" in result and "pagerank" in result
-    assert set(result["betweenness"].keys()) == {"A", "B", "C", "D"}
-    assert set(result["pagerank"].keys()) == {"A", "B", "C", "D"}
-
-
-def test_compute_centrality_middle_node_highest_betweenness(chain_graph):
-    """In a 4-node linear chain, B and C are on all shortest paths between
-    pairs that span the chain, so they should have higher betweenness than A or D."""
-    from app.services.kg.graph_reason import compute_centrality
-    G, idx_to_oid, oid_to_idx = chain_graph
-    result = compute_centrality(G, idx_to_oid)
-    btwn = result["betweenness"]
-    # A is a source (betweenness=0 for normalized digraph betweenness when no paths pass through it)
-    # D is a sink (same reason). B and C are strictly in the middle.
-    assert btwn["B"] > btwn["A"]
-    assert btwn["C"] > btwn["D"]
-
-
-def test_compute_centrality_pagerank_all_positive(chain_graph):
-    from app.services.kg.graph_reason import compute_centrality
-    G, idx_to_oid, oid_to_idx = chain_graph
-    result = compute_centrality(G, idx_to_oid)
-    for v in result["pagerank"].values():
-        assert v > 0.0
-
-
-def test_compute_centrality_pagerank_sums_to_approx_one(chain_graph):
-    """Pagerank of all nodes in a connected graph should sum to ~1.0."""
-    from app.services.kg.graph_reason import compute_centrality
-    G, idx_to_oid, oid_to_idx = chain_graph
-    result = compute_centrality(G, idx_to_oid)
-    assert abs(sum(result["pagerank"].values()) - 1.0) < 0.01
-
-
-def test_compute_centrality_empty_graph():
-    """Empty graph (no nodes) must return empty dicts without error."""
-    from app.services.kg.graph_reason import compute_centrality
-    G = rx.PyDiGraph()
-    result = compute_centrality(G, {})
-    assert result == {"betweenness": {}, "pagerank": {}}
-
-
 # ── compute_edge_centrality ───────────────────────────────────────────────────
 
 def test_compute_edge_centrality_returns_rel_id_dict(chain_graph):

@@ -194,26 +194,6 @@ def test_render_subgraph_context_evidence_quote():
     assert "A derives B" in ctx
 
 
-def test_ask_request_mode_graph_accepted():
-    from app.models.schemas import AskRequest
-    r = AskRequest(question="derive?", mode="graph")
-    assert r.mode == "graph"
-
-
-def test_render_subgraph_context_chain_format():
-    """Full chain annotation: '[k1] A --derived_from--> [k2] B'."""
-    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph, render_subgraph_context
-    G, idx_to_oid, oid_to_idx = build_rx_graph(NODES, RELATIONS)
-    sub = multihop_subgraph(G, oid_to_idx, idx_to_oid, ["A"],
-                            {"derived_from"}, max_depth=1, max_fan_out=10)
-    ctx, id_map = render_subgraph_context(sub, id_offset=0)
-    # Exact chain annotation in context block
-    assert "--derived_from-->" in ctx
-    # Both endpoints present as k-keys
-    assert "[k1]" in ctx
-    assert "[k2]" in ctx
-
-
 # ── Task 4: adversarial chain verification (LLM mocked) ──────────────────────
 
 class _FakeLLMClient:

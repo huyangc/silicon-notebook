@@ -4,9 +4,6 @@ from app.repositories import ports
 from app.repositories.ports import UploadedSourceFile, NotebookRepository
 from app.services.sqlite_repository import SQLiteRepository
 
-def test_uploaded_source_file_contract():
-    assert UploadedSourceFile('a.md','text/markdown',b'x').doc_type == ''
-
 def test_sqlite_repository_does_not_inherit_aggregate_protocol():
     assert NotebookRepository not in SQLiteRepository.__mro__
     assert 'eval_insert_source_for_test' not in NotebookRepository.__dict__

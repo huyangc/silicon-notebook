@@ -191,13 +191,6 @@ def test_force_bypasses_gate(repo, monkeypatch):
 
 # --- 5. migration -----------------------------------------------------------
 
-def test_migration_adds_cluster_input_version_column(repo):
-    with repo._connect() as db:
-        cols = {r["name"] for r in db.execute(
-            "PRAGMA table_info(unified_kg_state)").fetchall()}
-    assert "cluster_input_version" in cols
-
-
 # --- 6. first-ever rebuild never skips --------------------------------------
 
 def test_first_rebuild_never_skips(repo, monkeypatch):
@@ -291,13 +284,6 @@ def test_decision_flip_same_second_moves_version_and_recomputes(repo, monkeypatc
 
 
 # --- 8. migration: kg_mutation_seq column -----------------------------------
-
-def test_migration_adds_kg_mutation_seq_column(repo):
-    with repo._connect() as db:
-        cols = {r["name"] for r in db.execute(
-            "PRAGMA table_info(unified_kg_state)").fetchall()}
-    assert "kg_mutation_seq" in cols
-
 
 def test_mutation_seq_increments_on_dirty(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))

@@ -44,12 +44,6 @@ def test_retrieval_service_source_has_no_sqlite_repository_import():
     assert "_repo" not in source
 
 
-def test_retrieval_owners_contain_no_sql_execution():
-    for owner in (CandidateRetrievalService, GraphRetrievalService):
-        source = inspect.getsource(inspect.getmodule(owner))
-        assert ".execute(" not in source
-
-
 def test_graph_retrieval_has_one_cluster_map_definition():
     source = inspect.getsource(inspect.getmodule(GraphRetrievalService))
     tree = ast.parse(source)

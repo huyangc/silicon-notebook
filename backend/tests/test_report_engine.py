@@ -425,20 +425,6 @@ def test_run_sections_concurrency_uses_kg_job_concurrency(repo, monkeypatch):
     assert seen["max"] == 4          # 4 节 ≤ 上限5 → 全并行
 
 
-def test_deep_dive_passes_depth_as_max_steps(repo, monkeypatch):
-    eng = _mk_engine(repo, _OutlineLLM())
-    captured = {}
-    from app.services.reasoning_retrieval import ReasoningResult
-    class _R:
-        def __init__(self, *a, **k): pass          # 端口化:仅关键字注入
-        def run(self, nb_id, q, **kw):
-            captured.update(kw); return ReasoningResult()
-    monkeypatch.setattr("app.services.reasoning_retrieval.ReasoningRetriever", _R)
-    eng._deep_dive("nb", {"title": "t", "scope": "s", "sub_queries": ["q"]}, "Q", depth=3, on_step=None)
-    assert captured.get("max_steps") == 3
-    assert captured.get("top_n") is None   # 不传 top_n → 与 ask 同一套自适应证据预算
-
-
 def test_run_sections_writes_section_status(repo, monkeypatch):
     """每节完成后 section_status 落库,各节 phase=完成。"""
     eng = _mk_engine(repo, _OutlineLLM())

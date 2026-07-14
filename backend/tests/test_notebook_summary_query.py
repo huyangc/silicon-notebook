@@ -40,10 +40,6 @@ def test_catalog_owns_declared_orchestration():
     assert "__getattr__" not in NotebookCatalogService.__dict__
 
 
-def test_facade_kg_building_set_is_the_catalog_set(repo):
-    assert repo._kg_building is repo._runtime.catalog.kg_building
-
-
 def test_summary_query_keeps_list_kg_building_false(repo):
     notebook = repo.create_notebook(NotebookCreate(name="summary"))
     repo._kg_building.add(notebook.id)

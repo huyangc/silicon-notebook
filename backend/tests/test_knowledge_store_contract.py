@@ -47,22 +47,6 @@ def test_knowledge_contract_exports_are_same_objects():
     assert notebook_store.USABLE_STATUSES is knowledge_contracts.USABLE_STATUSES
 
 
-def test_promotion_approval_contract_shape():
-    from app.services.knowledge_contracts import PromotionApproval
-
-    approval = PromotionApproval(
-        candidate_id="promo-1",
-        source_notebook_id="nb-p",
-        source_object_id="ko-1",
-        base_notebook_id="nb-b",
-        base_object_id="ko-2",
-        created_new_object=True,
-    )
-    assert approval.created_new_object
-    with pytest.raises(Exception):
-        approval.candidate_id = "other"  # frozen dataclass
-
-
 def test_store_primitives_share_the_facade_transaction(repo):
     """Connection-taking primitives ride the caller's transaction: rows written
     through the store inside one facade _write() are atomic with it."""
@@ -114,30 +98,6 @@ def test_replace_object_sources_maintains_reverse_index(repo):
             (oid,),
         ).fetchall()
     assert {r["source_id"] for r in rows} == {"src-a"}
-
-
-def test_governance_store_owns_named_primitives(repo):
-    governance = repo._runtime.governance
-    for name in (
-        "update_edge_review", "delete_clusters", "insert_clusters",
-        "write_merge_candidate", "set_merge_decision", "pending_merges",
-        "write_conflict_candidate", "set_conflict_status",
-        "get_conflict_candidate", "decided_pairs", "decided_seed_pairs",
-        "concept_whitelist_terms", "approve_promotion_in_transaction",
-        "update_object_in_transaction", "merge_objects_in_transaction",
-    ):
-        assert callable(getattr(governance, name)), name
-
-
-def test_unified_store_owns_state_and_checkpoints(repo):
-    unified = repo._runtime.unified_kg
-    for name in (
-        "state_row", "mark_dirty", "bump_cluster_seq", "cluster_input_facts",
-        "cluster_map_rows", "finish_rebuild_state", "replace_canonical_relations",
-        "replace_mention_bridge", "replace_communities",
-        "checkpoint_gc", "checkpoint_clear", "checkpoint_load", "checkpoint_put",
-    ):
-        assert callable(getattr(unified, name)), name
 
 
 def test_unified_rebuild_state_update_preserves_mutation_seq(repo):

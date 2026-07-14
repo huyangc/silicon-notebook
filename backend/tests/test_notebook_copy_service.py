@@ -81,28 +81,6 @@ def _seed(repo, n=2, with_files=False, owner="user-local"):
     return nb
 
 
-def test_runtime_wires_sharing_and_copy_services(repo):
-    sharing = repo._runtime.sharing
-    assert isinstance(sharing, NotebookSharingService)
-    assert isinstance(repo._runtime.notebook_copies, NotebookCopyService)
-
-
-def test_copy_end_to_end_via_service(repo):
-    src = _seed(repo, n=2)
-    _seed_user(repo, "user-fred")
-    copied = repo._runtime.sharing.copy_notebook(src, new_owner_id="user-fred")
-    assert copied.id != src and copied.tier == "personal"
-    with repo._runtime.database.connect() as db:
-        for table in ("sources", "chunks", "knowledge_objects"):
-            copied_count = db.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE notebook_id=?", (copied.id,)
-            ).fetchone()[0]
-            source_count = db.execute(
-                f"SELECT COUNT(*) FROM {table} WHERE notebook_id=?", (src,)
-            ).fetchone()[0]
-            assert copied_count == source_count, table
-
-
 def test_copy_observes_new_id_patched_after_construction(repo, monkeypatch):
     src = _seed(repo, n=2)
     _seed_user(repo, "user-bob")

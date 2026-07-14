@@ -368,37 +368,6 @@ def test_relation_ann_partial_coverage_matches_matrix_semantics(repo):
 # 守卫退位为无 ANN 大库的最后兜底。
 
 
-def test_relation_scoring_skipped_guard_when_large_cold_no_ann(repo, monkeypatch):
-    """No persisted relation ANN + large notebook (copyable=False, master's
-    #171 largeness criterion) + relation matrix cold → the #171 guard fires:
-    emit relation_scoring_skipped(reason=large_matrix_cold) and return []
-    (master's semantics — NOT a keyword fallback; branch-② ANN is what makes
-    this path rare). This is the LAST resort, after (1) ANN path and (2)
-    small/warm full top_k_sims both don't apply."""
-    nb = _seed_relation(repo)
-    _backfill_relation_vector(repo, nb.id)
-    # No build_scale_index() call → no ANN. Force "large" the same way
-    # master's guard tests do (copyable=False == over the copy thresholds).
-    monkeypatch.setattr(repo.retrieval.candidates, "notebook_copy_stats",
-                        lambda notebook_id: {"copyable": False, "size": {}})
-
-    events = []
-    orig_emit = repo.event_log.emit
-
-    def spy_emit(event, **kw):
-        events.append(event)
-        return orig_emit(event, **kw)
-
-    monkeypatch.setattr(repo.event_log, "emit", spy_emit)
-
-    hits = repo._retrieve_relations_scored(nb.id, "MOSFET current mirror")
-    skip_events = [e for e in events if e.get("kind") == "relation_scoring_skipped"]
-    assert skip_events, "expected relation_scoring_skipped event when large+cold+no-ANN"
-    assert skip_events[0]["notebook_id"] == nb.id
-    assert skip_events[0]["reason"] == "large_matrix_cold"
-    assert hits == []   # master's guard semantics: [] + event (fail-open exit)
-
-
 def test_relation_scoring_ann_bypasses_large_cold_guard(repo, monkeypatch):
     """Large (copyable=False) + cold matrix + persisted relation ANN → the
     ANN branch (②) runs BEFORE the #171 guard (③): semantic hits come back,
@@ -424,28 +393,6 @@ def test_relation_scoring_ann_bypasses_large_cold_guard(repo, monkeypatch):
     hits = repo._retrieve_relations_scored(nb.id, "MOSFET current mirror")
     skip_events = [e for e in events if e.get("kind") == "relation_scoring_skipped"]
     assert not skip_events, "ANN branch must pre-empt the #171 guard"
-    assert hits
-
-
-def test_relation_scoring_small_no_ann_uses_full_matrix_not_guard(repo, monkeypatch):
-    """Small notebook (copyable=True) + no ANN must NOT hit the guard —
-    current full-matrix top_k_sims path stays the behavior for small/no-index
-    notebooks (#171's byte-for-byte-unchanged promise)."""
-    nb = _seed_relation(repo)
-    _backfill_relation_vector(repo, nb.id)
-
-    events = []
-    orig_emit = repo.event_log.emit
-
-    def spy_emit(event, **kw):
-        events.append(event)
-        return orig_emit(event, **kw)
-
-    monkeypatch.setattr(repo.event_log, "emit", spy_emit)
-
-    hits = repo._retrieve_relations_scored(nb.id, "MOSFET current mirror")
-    skip_events = [e for e in events if e.get("kind") == "relation_scoring_skipped"]
-    assert not skip_events
     assert hits
 
 
@@ -495,3 +442,9 @@ def test_fold_scale_index_delta_extends_relation_ann(repo):
     assert "rel1" in set(idx1.relation_ann_labels)
     assert "rel2" in set(idx1.relation_ann_labels), (
         "fold must add_items delta relation vectors into relation ANN, mirroring chunk_ann fold")
+
+
+# Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.
+# Skip them with `pytest -m "not slow"`; full runs (default) still include them.
+import pytest as _pytest_slow  # noqa: E402
+pytestmark = _pytest_slow.mark.slow

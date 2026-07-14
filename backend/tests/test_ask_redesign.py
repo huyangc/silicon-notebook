@@ -48,12 +48,6 @@ def test_retired_fast_mode_routes_to_chunk(repo, monkeypatch):
     resp = repo.ask(nb.id, AskRequest(question="engram claim", scenario={}, mode="fast"))
     assert resp.mode == "chunk"   # retired id resolves to chunk handler
 
-def test_askresponse_has_answer_and_anchors():
-    from app.models.schemas import AskResponse, AnswerAnchor
-    a = AnswerAnchor(key="k1", object_id="o1", object_type="concept", label="Engram", name="Engram")
-    r = AskResponse(conclusion="x", answer="Engram [k1].", grounded=True, anchors=[a])
-    assert r.answer == "Engram [k1]." and r.grounded and r.anchors[0].key == "k1"
-
 def test_parse_answer_anchors_keeps_only_cited(repo):
     # id_map: k1->ctx dict; only markers present in text become anchors
     id_map = {

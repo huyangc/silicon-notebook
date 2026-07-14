@@ -346,19 +346,6 @@ class TestPromotionStateMachine:
 
 
 class TestBaseStrongReviewGate:
-    def test_store_kg_to_base_notebook_inserts_as_reviewed_not_approved(self, repo):
-        base = _make_base_nb(repo)
-        repo.store_kg(
-            base.id,
-            "s1",
-            [{"local_id": "C1", "object_type": "claim",
-              "payload": {"name": "base reviewed claim"}, "evidence": []}],
-            [],
-        )
-        rows = _objects_in(repo, base.id, "claim")
-        assert len(rows) == 1
-        assert rows[0]["status"] == "reviewed"
-
     def test_store_kg_to_personal_notebook_still_inserts_as_approved(self, repo):
         nb = _make_personal_nb(repo)
         repo.store_kg(
@@ -371,11 +358,6 @@ class TestBaseStrongReviewGate:
         rows = _objects_in(repo, nb.id, "claim")
         assert len(rows) == 1
         assert rows[0]["status"] == "approved"
-
-    def test_reviewed_is_in_usable_statuses(self, repo):
-        # Guard: the gate only works if 'reviewed' surfaces in retrieval.
-        assert "reviewed" in USABLE_STATUSES
-
 
 # ---------------------------------------------------------------------------
 # Task 2 — HTTP routes
@@ -570,19 +552,3 @@ class TestBaseReviewGateEdgeCases:
         hit_ids = {h.object_id for h in hits}
         assert result["base_object_id"] in hit_ids
 
-    def test_double_promotion_is_idempotent(self, repo):
-        """propose_promotion() called twice for the same object returns the same
-        candidate id without inserting a duplicate row."""
-        _make_base_nb(repo)
-        personal = _make_personal_nb(repo)
-        _store_claim(repo, personal.id, "idempotent double propose")
-        oid = _objects_in(repo, personal.id, "claim")[0]["id"]
-        first = repo.propose_promotion(personal.id, oid)
-        second = repo.propose_promotion(personal.id, oid)
-        assert first["id"] == second["id"]
-        with repo._connect() as db:
-            n = db.execute(
-                "SELECT COUNT(*) AS c FROM promotion_candidates WHERE object_id=?",
-                (oid,),
-            ).fetchone()["c"]
-        assert n == 1

@@ -119,3 +119,9 @@ def test_evicted_viz_index_reloads_correctly(repo, monkeypatch):
     assert reloaded is not None
     assert reloaded.manifest.get("version") == manifest_a["version"]
     assert nb_a.id in repo._viz_idx_cache
+
+
+# Fast inner-loop opt-out: these tests build real HNSW/ANN scale indexes.
+# Skip them with `pytest -m "not slow"`; full runs (default) still include them.
+import pytest as _pytest_slow  # noqa: E402
+pytestmark = _pytest_slow.mark.slow
