@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { ArrowUpCircle, Bookmark, Bot, Check, ChevronDown, Copy, Edit3, KeyRound, LayoutGrid, List, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
+import { ArrowUpCircle, Bookmark, Bot, Check, CheckSquare, ChevronDown, Copy, Edit3, KeyRound, LayoutGrid, List, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
 
 import { AnswerMarkdown } from "./answer-markdown";
 import {
@@ -470,6 +470,9 @@ export function MemoryPanel({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [layout, setLayout] = useState<"grid" | "list">("grid");
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [pendingDelete, setPendingDelete] = useState<{ kind: "single"; memory: MemoryRecord } | { kind: "bulk" } | null>(null);
   const listRequestEpochRef = useRef(0);
   const listControllerRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
@@ -503,6 +506,64 @@ export function MemoryPanel({
     else next.add(id);
     return next;
   });
+
+  const toggleSelected = (id: string) => setSelectedIds((prev) => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    return next;
+  });
+
+  async function deleteMemory(memory: MemoryRecord) {
+    if (busyId || sessionSignal.aborted) return;
+    const controller = new AbortController();
+    mutationControllersRef.current.add(controller);
+    setBusyId(memory.id);
+    setError("");
+    try {
+      await memoryApi(`/memories/${encodeURIComponent(memory.id)}`, { method: "DELETE", signal: controller.signal });
+      if (controller.signal.aborted || !mountedRef.current) return;
+      setSelectedIds((prev) => { const next = new Set(prev); next.delete(memory.id); return next; });
+      setRefresh((value) => value + 1);
+    } catch (cause) {
+      if (!controller.signal.aborted && mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      mutationControllersRef.current.delete(controller);
+      if (mountedRef.current) setBusyId(null);
+    }
+  }
+
+  async function bulkDeleteMemories(ids: string[]) {
+    if (busyId || sessionSignal.aborted || ids.length === 0) return;
+    const controller = new AbortController();
+    mutationControllersRef.current.add(controller);
+    setBusyId("__bulk__");
+    setError("");
+    try {
+      await memoryApi("/memories/bulk-delete", {
+        method: "POST",
+        body: JSON.stringify({ memory_ids: ids }),
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || !mountedRef.current) return;
+      setSelectedIds(new Set());
+      setSelectionMode(false);
+      setRefresh((value) => value + 1);
+    } catch (cause) {
+      if (!controller.signal.aborted && mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      mutationControllersRef.current.delete(controller);
+      if (mountedRef.current) setBusyId(null);
+    }
+  }
+
+  function confirmDelete() {
+    const target = pendingDelete;
+    setPendingDelete(null);
+    if (!target) return;
+    if (target.kind === "single") void deleteMemory(target.memory);
+    else void bulkDeleteMemories(Array.from(selectedIds));
+  }
 
   useEffect(() => {
     if (sessionSignal.aborted || (scope === "notebook" && !notebookId)) return;
@@ -678,11 +739,35 @@ export function MemoryPanel({
       </div>
 
       <div className="memory-toolbar">
+        <button
+          type="button"
+          className={`memory-select-toggle ${selectionMode ? "active" : ""}`}
+          aria-pressed={selectionMode}
+          onClick={() => { setSelectionMode((value) => !value); setSelectedIds(new Set()); }}
+        >
+          <CheckSquare size={15} /> {selectionMode ? "退出选择" : "批量选择"}
+        </button>
         <div className="memory-layout-switch" role="group" aria-label="布局方式">
           <button type="button" className={layout === "grid" ? "active" : ""} aria-pressed={layout === "grid"} title="网格视图" onClick={() => setLayout("grid")}><LayoutGrid size={16} /></button>
           <button type="button" className={layout === "list" ? "active" : ""} aria-pressed={layout === "list"} title="列表视图" onClick={() => setLayout("list")}><List size={16} /></button>
         </div>
       </div>
+
+      {selectionMode && (
+        <div className="memory-bulk-bar">
+          <span>已选 {selectedIds.size} / {items.length} 项</span>
+          <button type="button" onClick={() => setSelectedIds(new Set(items.map((item) => item.id)))}>全选本页</button>
+          <button type="button" onClick={() => setSelectedIds(new Set())}>清空</button>
+          <button
+            type="button"
+            className="danger memory-bulk-delete"
+            disabled={selectedIds.size === 0 || Boolean(busyId)}
+            onClick={() => setPendingDelete({ kind: "bulk" })}
+          >
+            <Trash2 size={14} /> 删除选中（{selectedIds.size}）
+          </button>
+        </div>
+      )}
 
       {error && <div className="memory-error" role="alert">{error}</div>}
       {loading ? (
@@ -734,6 +819,15 @@ export function MemoryPanel({
             return (
               <article className={`memory-card memory-${memory.status}`} key={memory.id}>
                 <div className="memory-card-head">
+                  {selectionMode && (
+                    <input
+                      type="checkbox"
+                      className="memory-select-box"
+                      checked={selectedIds.has(memory.id)}
+                      onChange={() => toggleSelected(memory.id)}
+                      aria-label={`选择「${memory.title}」`}
+                    />
+                  )}
                   <div className="memory-card-badges">
                     <span className={`memory-badge tone-${statusMeta.tone}`}>{statusMeta.label}</span>
                     <span className={`memory-badge tone-${originMeta.tone}`}>
@@ -778,21 +872,33 @@ export function MemoryPanel({
 
                 <footer className="memory-card-footer">
                   <time dateTime={memory.updated_at}>更新于 {new Date(memory.updated_at).toLocaleString("zh-CN")}</time>
-                  {!editing && memory.status === "confirmed" && (
-                    canPromoteMemory(memory) ? (
+                  {!editing && (
+                    <div className="memory-card-actions">
+                      {memory.status === "confirmed" && (
+                        canPromoteMemory(memory) ? (
+                          <button
+                            type="button"
+                            className="memory-promote-action"
+                            disabled={busy}
+                            onClick={() => promoteMemory(memory)}
+                          >
+                            <ArrowUpCircle size={14} /> 提升到 KG
+                          </button>
+                        ) : (
+                          <span className={`memory-promotion-state state-${memory.promotion_state}`}>
+                            {memoryPromotionLabel(memory.promotion_state)}
+                          </span>
+                        )
+                      )}
                       <button
                         type="button"
-                        className="memory-promote-action"
+                        className="memory-delete-action"
                         disabled={busy}
-                        onClick={() => promoteMemory(memory)}
+                        onClick={() => setPendingDelete({ kind: "single", memory })}
                       >
-                        <ArrowUpCircle size={14} /> 提升到 KG
+                        <Trash2 size={14} /> 删除
                       </button>
-                    ) : (
-                      <span className={`memory-promotion-state state-${memory.promotion_state}`}>
-                        {memoryPromotionLabel(memory.promotion_state)}
-                      </span>
-                    )
+                    </div>
                   )}
                   {editing && (
                     <div className="memory-actions">
@@ -818,6 +924,18 @@ export function MemoryPanel({
         </div>
       )}
       <Pagination page={page} pageSize={MEMORY_PAGE_SIZE} total={total} busy={loading} onPage={setPage} />
+      {pendingDelete && (
+        <div className="utility-modal utility-modal-top" role="dialog" aria-modal="true" aria-label="确认删除">
+          <div className="utility-modal-card memory-confirm-card">
+            <h3>{pendingDelete.kind === "bulk" ? `删除选中的 ${selectedIds.size} 条 Memory？` : "删除这条 Memory？"}</h3>
+            <p>删除后不可恢复。</p>
+            <div className="memory-dialog-actions">
+              <button type="button" disabled={Boolean(busyId)} onClick={() => setPendingDelete(null)}>取消</button>
+              <button type="button" className="danger" disabled={Boolean(busyId)} onClick={confirmDelete}>删除</button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

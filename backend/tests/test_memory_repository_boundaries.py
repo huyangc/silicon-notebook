@@ -35,6 +35,8 @@ def test_memory_ports_expose_store_and_lifecycle_contracts():
         "update_with_revision",
         "list_memories",
         "answer_memory_links",
+        "delete_memory",
+        "bulk_delete_memories",
     }
     service_methods = {
         "create_memory_candidate",
@@ -43,6 +45,8 @@ def test_memory_ports_expose_store_and_lifecycle_contracts():
         "confirm_memory",
         "reject_memory",
         "deprecate_memory",
+        "delete_memory",
+        "bulk_delete_memories",
         "get_memory",
         "list_memories",
         "answer_memory_links",
@@ -105,6 +109,8 @@ def test_runtime_owns_memory_components_and_facade_has_explicit_delegates(tmp_pa
         "confirm_memory",
         "reject_memory",
         "deprecate_memory",
+        "delete_memory",
+        "bulk_delete_memories",
         "get_memory",
         "list_memories",
         "answer_memory_links",

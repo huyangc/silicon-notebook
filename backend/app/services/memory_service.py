@@ -655,6 +655,14 @@ class MemoryService:
         self._event("memory_lifecycle", item, action="deprecated")
         return item
 
+    def delete(self, memory_id: str, user_id: str) -> None:
+        item = self.get(memory_id, user_id)
+        self.store.delete_memory(memory_id, user_id)
+        self._event("memory_lifecycle", item, action="deleted")
+
+    def bulk_delete(self, user_id: str, memory_ids: Sequence[str]) -> int:
+        return self.store.bulk_delete_memories(user_id, memory_ids)
+
     def get(self, memory_id: str, user_id: str) -> MemoryRecord:
         return self.store.memory_for_user(memory_id, user_id)
 

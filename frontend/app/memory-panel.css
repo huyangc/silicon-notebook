@@ -140,8 +140,108 @@
 
 .memory-toolbar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
+
+.memory-select-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: #fff;
+  color: #3f4857;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.memory-select-toggle.active { border-color: #1b4fcb; background: #eef3ff; color: var(--blue); }
+
+.memory-bulk-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #d8dee6;
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: #f7f9fc;
+}
+
+.memory-bulk-bar > span { font-size: 13px; font-weight: 700; color: #3f4857; }
+
+.memory-bulk-bar button {
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: #3f4857;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.memory-bulk-bar button.memory-bulk-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  border-color: #e4b1b1;
+  background: #fbeaea;
+  color: #a52d2d;
+  font-weight: 700;
+}
+
+.memory-bulk-bar button:disabled { opacity: .5; cursor: not-allowed; }
+
+.memory-select-box {
+  flex: 0 0 auto;
+  width: 17px;
+  height: 17px;
+  margin-top: 2px;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+.memory-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.memory-delete-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid #e4c0c0;
+  border-radius: 9px;
+  background: #fff;
+  color: #a52d2d;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.memory-delete-action:hover:not(:disabled) { background: #fbeaea; }
+.memory-delete-action:disabled { opacity: .5; cursor: not-allowed; }
+
+.memory-confirm-card {
+  width: min(420px, calc(100vw - 32px));
+  padding: 22px 24px;
+  display: grid;
+  gap: 10px;
+}
+
+.memory-confirm-card h3 { margin: 0; font-size: 17px; color: #18212f; }
+.memory-confirm-card > p { margin: 0; color: var(--muted); font-size: 13px; }
+.memory-confirm-card .memory-dialog-actions { margin-top: 8px; padding: 0; border-top: 0; justify-content: flex-end; }
+.memory-confirm-card .memory-dialog-actions button.danger { border-color: #c0392b; background: #c0392b; color: #fff; }
+.memory-confirm-card .memory-dialog-actions button.danger:disabled { opacity: .6; }
 
 .memory-layout-switch {
   display: inline-flex;

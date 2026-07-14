@@ -453,6 +453,8 @@ DELEGATE_OWNER_OVERRIDES: Mapping[str, str] = {
     'create_memory_from_answer': 'MemoryService',
     'answer_memory_links': 'MemoryService',
     'deprecate_memory': 'MemoryService',
+    'delete_memory': 'MemoryService',
+    'bulk_delete_memories': 'MemoryService',
     'get_memory': 'MemoryService',
     'list_memories': 'MemoryService',
     'memory_revisions': 'MemoryService',

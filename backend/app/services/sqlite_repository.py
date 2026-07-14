@@ -1207,6 +1207,12 @@ class SQLiteRepository:
     def deprecate_memory(self, memory_id: str, user_id: str) -> MemoryRecord:
         return self._runtime.memory_service.deprecate(memory_id, user_id)
 
+    def delete_memory(self, memory_id: str, user_id: str) -> None:
+        return self._runtime.memory_service.delete(memory_id, user_id)
+
+    def bulk_delete_memories(self, user_id: str, memory_ids) -> int:
+        return self._runtime.memory_service.bulk_delete(user_id, memory_ids)
+
     def get_memory(self, memory_id: str, user_id: str) -> MemoryRecord:
         return self._runtime.memory_service.get(memory_id, user_id)
 

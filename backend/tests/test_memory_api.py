@@ -612,3 +612,72 @@ def test_revoked_reader_loses_all_memory_read_and_mutation_access(
     assert client.post(
         f"/api/memories/{candidate_b.id}/reject", headers=reader_headers
     ).status_code == 404
+
+
+def test_owner_can_hard_delete_single_and_bulk_memories(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_headers, _owner_id = _register(client, "s00100031")
+    foreign_headers, _foreign_id = _register(client, "t00100032")
+
+    from app.api.deps import repository
+
+    repo = repository()
+    notebook_id = client.post(
+        "/api/notebooks", headers=owner_headers, json={"name": "Delete me"}
+    ).json()["id"]
+
+    def make(headers, notebook, question, title):
+        answer_id = _answer(repo, notebook, question)
+        created = client.post(
+            f"/api/notebooks/{notebook}/memories/from-answer",
+            headers=headers,
+            json={
+                "answer_id": answer_id,
+                "title": title,
+                "content_md": "Body",
+                "tags": [],
+            },
+        )
+        assert created.status_code == 201, created.text
+        return created.json()["id"]
+
+    # Single hard delete removes the row entirely (204 then 404 on re-read).
+    solo = make(owner_headers, notebook_id, "Solo?", "Solo")
+    deleted = client.delete(f"/api/memories/{solo}", headers=owner_headers)
+    assert deleted.status_code == 204, deleted.text
+    assert client.get(
+        f"/api/memories/{solo}", headers=owner_headers
+    ).status_code == 404
+
+    # A non-owner delete is a 404 and must leave the row intact.
+    guarded = make(owner_headers, notebook_id, "Guarded?", "Guarded")
+    assert client.delete(
+        f"/api/memories/{guarded}", headers=foreign_headers
+    ).status_code == 404
+    assert client.get(
+        f"/api/memories/{guarded}", headers=owner_headers
+    ).status_code == 200
+
+    # Bulk delete counts only the caller's own live rows; foreign/missing/dupes
+    # never inflate the count and foreign rows survive.
+    first = make(owner_headers, notebook_id, "First?", "First")
+    second = make(owner_headers, notebook_id, "Second?", "Second")
+    foreign_nb = client.post(
+        "/api/notebooks", headers=foreign_headers, json={"name": "Foreign"}
+    ).json()["id"]
+    foreign_memory = make(foreign_headers, foreign_nb, "Foreign?", "Foreign")
+
+    result = client.post(
+        "/api/memories/bulk-delete",
+        headers=owner_headers,
+        json={"memory_ids": [first, second, guarded, foreign_memory, "missing", first]},
+    )
+    assert result.status_code == 200, result.text
+    assert result.json() == {"deleted": 3}
+    for gone in (first, second, guarded):
+        assert client.get(
+            f"/api/memories/{gone}", headers=owner_headers
+        ).status_code == 404
+    assert client.get(
+        f"/api/memories/{foreign_memory}", headers=foreign_headers
+    ).status_code == 200

@@ -24,6 +24,7 @@ from app.models.schemas import (
     AgentTokenSummary,
     AnswerMemoryLinksRequest,
     AnswerMemoryLinksResponse,
+    MemoryBulkDeleteRequest,
     MemoryCreateFromAnswer,
     MemoryOrigin,
     MemoryPreview,
@@ -244,6 +245,29 @@ async def answer_memory_links(
         service.answer_memory_links, notebook_id, user.id, payload.answer_ids
     )
     return AnswerMemoryLinksResponse(links=links)
+
+
+@memory_router.post("/memories/bulk-delete")
+async def bulk_delete_memories(
+    payload: MemoryBulkDeleteRequest,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> dict[str, int]:
+    deleted = await _memory_call(
+        service.bulk_delete_memories, user.id, payload.memory_ids
+    )
+    return {"deleted": deleted}
+
+
+@memory_router.delete(
+    "/memories/{memory_id}", status_code=status.HTTP_204_NO_CONTENT
+)
+async def delete_memory(
+    memory_id: str,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> None:
+    await _memory_call(service.delete_memory, memory_id, user.id)
 
 
 @memory_router.get("/memories/{memory_id}", response_model=MemoryRecord)
