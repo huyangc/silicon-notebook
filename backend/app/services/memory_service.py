@@ -138,17 +138,26 @@ class MemoryService:
         self.kg_ingest_scheduler(self._kg_ingest_job, (item.id, item.created_by))
 
     def _kg_ingest_job(self, key: tuple[str, str]) -> None:
+        # Task 2's ingest_memory_source emits its own precise memory_kg
+        # events (extracted/failed); this job adds no duplicate event.
         memory_id, user_id = key
         try:
             item = self.store.memory_for_user(memory_id, user_id)
+            if item.status != "confirmed":
+                return  # deprecated/rejected before we ran: nothing created
+            self.memory_kg.ingest_memory_source(
+                item.notebook_id, item.id, item.title, item.content_md
+            )
+            # deprecate can land WHILE the (seconds-long) ingest above runs:
+            # its remove_memory_source was a no-op — the derived source did
+            # not exist yet — and confirmed->deprecated is one-way, so it can
+            # never fire again. Re-check and clean up the source just built.
+            if self.store.memory_for_user(memory_id, user_id).status != "confirmed":
+                self.memory_kg.remove_memory_source(memory_id)
         except KeyError:
+            # Memory gone/cross-owner, or ingest's documented notebook-
+            # not-found guard (raised BEFORE any insert): nothing to clean up.
             return
-        if item.status != "confirmed":
-            return  # deprecated/rejected race: converges on its own
-        self.memory_kg.ingest_memory_source(
-            item.notebook_id, item.id, item.title, item.content_md
-        )
-        self._event("memory_kg", item, action="ingested")
 
     @staticmethod
     def _promotion_candidates(item: MemoryRecord) -> list[dict[str, Any]]:
@@ -654,7 +663,13 @@ class MemoryService:
         user_id: str,
         patch: MemoryUpdate | Mapping[str, Any] | None = None,
     ) -> MemoryRecord:
-        extract_kg = getattr(patch, "extract_kg", None)
+        # dict-or-model read, mirroring _patch's normalization (the signature
+        # accepts a plain Mapping, where getattr would be blind).
+        extract_kg = (
+            patch.get("extract_kg")
+            if isinstance(patch, Mapping)
+            else getattr(patch, "extract_kg", None)
+        )
         values, reason = self._patch(patch)
         item = self.store.transition_with_revision(
             memory_id,

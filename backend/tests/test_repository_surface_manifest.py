@@ -1636,8 +1636,8 @@ TASK3_MEMORY_KG_ALLOWED_IMPORTS = {
 TASK3_MEMORY_KG_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_memory_kg_lifecycle.py", name)
     for name in {
-        "SQLiteRepository", "_runtime", "create_notebook", "create_user",
-        "reset_request_user", "set_request_user",
+        "SQLiteRepository", "_runtime", "_write", "create_notebook",
+        "create_user", "reset_request_user", "set_request_user",
     }
 }
 TASK3_MEMORY_KG_ALLOWED_NEW_MEMBERS = {"memory_kg_eligible"}
