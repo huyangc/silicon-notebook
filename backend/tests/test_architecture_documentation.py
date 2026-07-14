@@ -586,13 +586,14 @@ def test_report_cancellation_is_the_documented_process_global_runtime_exception(
 
 def test_repository_schema_baseline_wording_is_exact_and_not_stale():
     english_current = (
-        "The current schema version is 13. The committed v9 compatibility fixture\n"
+        "The current schema version is 15. The committed v9 compatibility fixture\n"
         "upgrades through the existing v10 migration, the v11/v12 SQLite hot-path index\n"
-        "migrations, and the v13 Memory/Agent migration, and remains readable."
+        "migrations, the v13 Memory/Agent migration, and the v14/v15 Memory-derived\n"
+        "source link/index migrations, and remains readable."
     )
     chinese_current = (
-        "当前 schema 版本为 13。已提交的 v9 兼容 fixture 会经由既有 v10 migration、"
-        "v11/v12 SQLite 热路径索引 migration 与 v13 Memory/Agent migration 升级，并保持可读。"
+        "当前 schema 版本为 15。已提交的 v9 兼容 fixture 会经由既有 v10 migration、"
+        "v11/v12 SQLite 热路径索引 migration、v13 Memory/Agent migration 与 v14/v15 Memory 派生源 link/index migration 升级，并保持可读。"
     )
     historical_chinese = (
         "本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。"
