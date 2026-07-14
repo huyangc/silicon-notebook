@@ -87,3 +87,15 @@ test("saving an answer invalidates hydration before merging the saved flag", () 
   assert.ok(body.indexOf("memoryLinksAbortRef.current?.abort()") < body.indexOf("setMemorySavedAnswers"));
   assert.ok(body.includes("memoryLinksAbortRef.current = null"));
 });
+
+test("memory list supports single and bulk hard delete behind a confirm dialog", () => {
+  assert.match(memoryPanel, /async function deleteMemory\(/);
+  assert.match(memoryPanel, /method: "DELETE"/);
+  assert.match(memoryPanel, /"\/memories\/bulk-delete"/);
+  assert.match(memoryPanel, /memory_ids: ids/);
+  assert.match(memoryPanel, /function confirmDelete\(\)/);
+  assert.match(memoryPanel, /删除后不可恢复/);
+  assert.match(memoryPanel, /const \[selectionMode/);
+  assert.match(memoryPanel, /className="memory-select-box"/);
+  assert.match(memoryPanel, /className="memory-delete-action"/);
+});

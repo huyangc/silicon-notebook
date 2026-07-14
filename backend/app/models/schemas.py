@@ -113,6 +113,10 @@ class AnswerMemoryLinksResponse(BaseModel):
     links: Dict[str, str] = Field(default_factory=dict)
 
 
+class MemoryBulkDeleteRequest(BaseModel):
+    memory_ids: List[str] = Field(default_factory=list, max_length=200)
+
+
 class MemoryUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

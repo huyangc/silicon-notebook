@@ -1237,6 +1237,34 @@ class MemoryStore:
                 raise ValueError(f"invalid memory transition: {exists['status']} -> {target}")
         return self.memory_for_user(memory_id, user_id)
 
+    def delete_memory(self, memory_id: str, user_id: str) -> None:
+        with self.database.write() as db:
+            cursor = db.execute(
+                "DELETE FROM memory_items WHERE id=? AND created_by=?",
+                (memory_id, user_id),
+            )
+        if cursor.rowcount != 1:
+            raise KeyError(memory_id)
+
+    def bulk_delete_memories(self, user_id: str, memory_ids: Sequence[str]) -> int:
+        unique = list(dict.fromkeys(str(m) for m in memory_ids if m))
+        if not unique:
+            return 0
+        if len(unique) > 200:
+            raise ValueError("memory_ids may contain at most 200 unique values")
+        placeholders = ",".join("?" for _ in unique)
+        with self.database.write() as db:
+            rows = db.execute(
+                f"SELECT id FROM memory_items WHERE created_by=? AND id IN ({placeholders})",
+                (user_id, *unique),
+            ).fetchall()
+            ids = [r["id"] for r in rows]
+            db.executemany(
+                "DELETE FROM memory_items WHERE id=? AND created_by=?",
+                [(i, user_id) for i in ids],
+            )
+        return len(ids)
+
     def list_memories(
         self,
         user_id: str,
