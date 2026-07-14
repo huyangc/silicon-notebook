@@ -176,6 +176,102 @@ test("candidate review exposes every normalized evidence ref and validation resu
   ]);
 });
 
+test("confirm body includes extract_kg when the notebook KG is eligible", () => {
+  const checked = memoryModel.confirmMemoryBody({
+    title: "Rail budget",
+    content_md: "Keep IR drop under 5%",
+    tags: ["power", "rail"],
+    eligible: true,
+    extractKg: true,
+  });
+  assert.deepEqual(checked, {
+    title: "Rail budget",
+    content_md: "Keep IR drop under 5%",
+    tags: ["power", "rail"],
+    extract_kg: true,
+  });
+
+  const unchecked = memoryModel.confirmMemoryBody({
+    title: "Rail budget",
+    content_md: "Keep IR drop under 5%",
+    tags: ["power", "rail"],
+    eligible: true,
+    extractKg: false,
+  });
+  assert.equal(unchecked.extract_kg, false);
+});
+
+test("confirm body omits extract_kg entirely when the notebook is not KG-eligible", () => {
+  const body = memoryModel.confirmMemoryBody({
+    title: "Rail budget",
+    content_md: "Keep IR drop under 5%",
+    tags: ["power"],
+    eligible: false,
+    extractKg: true,
+  });
+  assert.ok(!("extract_kg" in body));
+  assert.deepEqual(body, {
+    title: "Rail budget",
+    content_md: "Keep IR drop under 5%",
+    tags: ["power"],
+  });
+});
+
+test("from-answer body maps answer_id and gates extract_kg on eligibility", () => {
+  const eligible = memoryModel.fromAnswerMemoryBody({
+    answerId: "answer-9",
+    title: "Rail budget",
+    content_md: "Keep IR drop under 5%",
+    tags: ["power"],
+    eligible: true,
+    extractKg: false,
+  });
+  assert.deepEqual(eligible, {
+    answer_id: "answer-9",
+    title: "Rail budget",
+    content_md: "Keep IR drop under 5%",
+    tags: ["power"],
+    extract_kg: false,
+  });
+
+  const notEligible = memoryModel.fromAnswerMemoryBody({
+    answerId: "answer-9",
+    title: "Rail budget",
+    content_md: "Keep IR drop under 5%",
+    tags: ["power"],
+    eligible: false,
+    extractKg: true,
+  });
+  assert.ok(!("extract_kg" in notEligible));
+  assert.equal(notEligible.answer_id, "answer-9");
+});
+
+test("memory bodies pass title, content, and tags through untouched", () => {
+  const tags = ["a", "b"];
+  const confirmBody = memoryModel.confirmMemoryBody({
+    title: "Trimmed title",
+    content_md: "Trimmed body",
+    tags,
+    eligible: true,
+    extractKg: true,
+  });
+  assert.equal(confirmBody.title, "Trimmed title");
+  assert.equal(confirmBody.content_md, "Trimmed body");
+  assert.deepEqual(confirmBody.tags, ["a", "b"]);
+
+  const fromAnswerBody = memoryModel.fromAnswerMemoryBody({
+    answerId: "answer-1",
+    title: "Trimmed title",
+    content_md: "Trimmed body",
+    tags,
+    eligible: false,
+    extractKg: false,
+  });
+  assert.equal(fromAnswerBody.title, "Trimmed title");
+  assert.equal(fromAnswerBody.content_md, "Trimmed body");
+  assert.deepEqual(fromAnswerBody.tags, ["a", "b"]);
+});
+
 test("frontend Memory validation mirrors server title content and tag limits", () => {
   assert.equal(validateMemoryDraft({ title: " ", content_md: "Body", tags: [] }), "标题不能为空");
   assert.equal(
