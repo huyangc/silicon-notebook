@@ -215,7 +215,7 @@ button {
 
 .segmented {
   display: grid;
-  grid-template-columns: repeat(3, 44px);
+  grid-template-columns: repeat(2, 44px);
   overflow: hidden;
   border: 1px solid #cdd2da;
   border-radius: 999px;
@@ -223,12 +223,14 @@ button {
 }
 
 .segmented button {
+  display: grid;
+  place-items: center;
   border: 0;
   border-right: 1px solid #d7dbe2;
   background: transparent;
   min-height: 42px;
   color: #22272e;
-  font-size: 19px;
+  cursor: pointer;
 }
 
 .segmented button:last-child {
@@ -272,11 +274,6 @@ button {
   gap: 18px;
 }
 
-.notebook-grid.view-compact {
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
-}
-
 .notebook-grid.view-list {
   grid-template-columns: 1fr;
   gap: 0;
@@ -290,8 +287,8 @@ button {
   box-shadow: none;
   padding: 28px 28px 24px;
   min-height: 194px;
-  display: grid;
-  align-content: start;
+  display: flex;
+  flex-direction: column;
   gap: 16px;
   position: relative;
 }
@@ -299,6 +296,7 @@ button {
 .notebook-card-main {
   width: 100%;
   min-height: 0;
+  flex: 1 1 auto;
   display: grid;
   align-content: start;
   gap: 16px;
@@ -370,10 +368,34 @@ button {
 
 .notebook-card-footer {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
-  margin-top: 6px;
+  margin-top: auto;
+}
+
+.notebook-card-meta {
+  margin: 0;
+  color: #78808c;
+  font-size: 13px;
+}
+
+.notebook-card-footer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.notebook-shared-badge {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .58);
+  color: #4d4bb4;
+  border: 1px solid rgba(75, 83, 99, .2);
 }
 
 .notebook-memory-link {
@@ -410,19 +432,6 @@ button {
 .card-search-hits p {
   font-size: 12px;
   line-height: 1.35;
-}
-
-.notebook-grid.view-compact .notebook-card {
-  min-height: 148px;
-  padding: 20px;
-}
-
-.notebook-grid.view-compact .card-icon {
-  font-size: 32px;
-}
-
-.notebook-grid.view-compact .notebook-card h2 {
-  font-size: 20px;
 }
 
 .empty-state {

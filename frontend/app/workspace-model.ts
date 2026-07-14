@@ -23,6 +23,7 @@ export type NotebookSummary = {
   kg_pending_sources?: number;
   access?: "owner" | "reader";
   shared_from?: string;
+  is_shared?: boolean;
 };
 
 export type MemoryOrigin = "ask_answer" | "external_agent";

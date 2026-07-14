@@ -145,6 +145,7 @@ class NotebookSummaryQuery:
             base_kg_available=base_has_kg,
             base_notebook_name=base_name,
             kg_pending_sources=self.count_pending_kg_sources(connection, row["id"]),
+            is_shared=bool(row["is_shared"]) if "is_shared" in keys else False,
         )
 
     def get(
