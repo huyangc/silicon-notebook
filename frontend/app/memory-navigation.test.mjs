@@ -40,9 +40,9 @@ test("an inaccessible notebook Memory deep-link falls back without invalidating 
 
 test("workspace orchestration exposes global and notebook Memory surfaces", () => {
   assert.match(page, /import \{ MemoryPanel, MemorySaveDialog \} from "\.\/memory-panel";/);
-  assert.match(page, /className="outer-nav"/);
-  assert.match(page, />Notebooks</);
-  assert.match(page, />Memory</);
+  assert.doesNotMatch(page, /className="outer-nav"/);
+  assert.match(page, /<span>私有 Memory<\/span>/);
+  assert.match(page, /setAccountMenuOpen\(false\); showGlobalMemory\(\);/);
   assert.match(page, /function openNotebookMemory\(notebookId: string\)/);
   assert.match(page, /<MemoryPanel scope="global" notebookId=\{null\}/);
   assert.match(page, /<MemoryPanel scope="notebook" notebookId=\{currentNotebookId\}/);

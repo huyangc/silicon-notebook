@@ -63,32 +63,6 @@ button {
   border-bottom: 1px solid #e2e5f0;
 }
 
-.outer-nav {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  border: 1px solid #d9deea;
-  border-radius: 999px;
-  padding: 3px;
-  background: rgba(255, 255, 255, 0.72);
-}
-
-.outer-nav button {
-  min-height: 32px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 15px;
-  background: transparent;
-  color: #5d6675;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.outer-nav button.active {
-  background: #151922;
-  color: #fff;
-}
-
 .brand {
   display: flex;
   align-items: center;
@@ -133,6 +107,10 @@ button {
   border-radius: 50%;
   background: #55d68b;
 }
+
+.status-dot.warn { background: #e0a83b; }
+.status-dot.bad { background: #d95757; }
+.status-dot.connecting { background: #b8c0cc; }
 
 .page {
   padding: 44px 24px;

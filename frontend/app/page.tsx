@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Trash2, Upload, X } from "lucide-react";
+import { BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Trash2, Upload, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -1845,7 +1845,13 @@ export default function Home() {
     const healthResponse = await api<Health>("/health");
     const notebookResponse = await api<NotebookSummary[]>("/notebooks");
     setHealth(healthResponse);
-    setStatusText(`API ${healthResponse.status}; LLM configured: ${healthResponse.llm_configured}`);
+    setStatusText(
+      healthResponse.status !== "ok"
+        ? "服务连接异常"
+        : healthResponse.llm_configured
+          ? "服务正常"
+          : "服务正常 · 模型未配置",
+    );
     setNotebooks(notebookResponse);
     if (docTypeOptions.length === 0) {
       api<Array<{ id: string; label: string }>>("/doc-types")
@@ -3172,12 +3178,11 @@ export default function Home() {
             <div className="brand-subtitle">{isWorkspace ? "Notebook workspace" : outerView === "memory" ? "Private Memory" : "Notebook collection"}</div>
           </div>
         </div>
-        <nav className="outer-nav" aria-label="Primary">
-          <button type="button" className={outerView === "notebooks" ? "active" : ""} onClick={showCollection}>Notebooks</button>
-          <button type="button" className={outerView === "memory" ? "active" : ""} onClick={showGlobalMemory}>Memory</button>
-        </nav>
         <div className="topbar-right">
-          <div className="status"><span className="status-dot" /><span>{statusText}</span></div>
+          <div className="status" title={health ? `API ${health.status} · 模型${health.llm_configured ? "已配置" : "未配置"}` : "正在连接服务…"}>
+            <span className={`status-dot ${!health ? "connecting" : health.status !== "ok" ? "bad" : !health.llm_configured ? "warn" : ""}`} />
+            <span>{statusText}</span>
+          </div>
           <PendingBell
             snapshot={pending.snapshot}
             doneItems={pending.doneItems}
@@ -3208,6 +3213,15 @@ export default function Home() {
                     <small>{accountRole}</small>
                   </div>
                 </div>
+                <button
+                  className={`user-logout ${outerView === "memory" ? "active" : ""}`}
+                  type="button"
+                  role="menuitem"
+                  onClick={() => { setAccountMenuOpen(false); showGlobalMemory(); }}
+                >
+                  <Bookmark size={16} />
+                  <span>私有 Memory</span>
+                </button>
                 {canSeeAdminUsage(currentUser.role) && (
                   <a className="user-logout" role="menuitem" href="/admin/usage" title="用户使用总览">
                     <BarChart3 size={16} />
