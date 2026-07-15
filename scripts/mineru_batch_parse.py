@@ -56,8 +56,33 @@ def _sleep(seconds: float) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _parse_dotenv_value(raw_value: str) -> str:
+    """解析 `KEY=VALUE` 右侧的原始字符串：去首尾空白 → 处理引号 / 行内注释。
+
+    - 带引号（`"..."`/`'...'`）：取到匹配的闭合引号为止，引号内的 `#` 一律
+      保留、不当注释处理；没有闭合引号时退化为只剥掉那个引号字符。
+    - 不带引号：先去掉左侧空白，若整体以 `#` 开头，说明这一段全是注释（值
+      为空字符串）；否则只把「空格+`#`」当作行内注释起点并截断——`#` 前必须
+      紧邻空白，因此贴在其他字符上的 `#`（如 URL fragment
+      `http://h/x#frag`、密码里的 `#`）不受影响。
+    """
+    value = raw_value.strip()
+    if not value:
+        return value
+    if value[0] in ("'", '"'):
+        quote = value[0]
+        end = value.find(quote, 1)
+        return value[1:end] if end != -1 else value[1:]
+    if value.startswith("#"):
+        return ""
+    idx = value.find(" #")
+    if idx != -1:
+        value = value[:idx]
+    return value.strip()
+
+
 def load_dotenv(path) -> None:
-    """极简 .env 解析：KEY=VALUE，忽略空行/`#`注释，去除首尾引号。
+    """极简 .env 解析：KEY=VALUE，忽略空行/`#`注释，去除首尾引号/行内注释。
 
     只在 os.environ 里**尚未设置**该 key 时才写入——真实环境变量始终优先。
     文件不存在则静默跳过（`.env` 是可选的便利文件，不是必需配置源）。
@@ -73,11 +98,9 @@ def load_dotenv(path) -> None:
             continue
         if "=" not in stripped:
             continue
-        key, _, value = stripped.partition("=")
+        key, _, raw_value = stripped.partition("=")
         key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-            value = value[1:-1]
+        value = _parse_dotenv_value(raw_value)
         if key and key not in os.environ:
             os.environ[key] = value
 
@@ -298,7 +321,7 @@ class MinerUServer:
 def process_file(server: MinerUServer, pdf_path, cfg: Config, out_md) -> dict:
     pdf_path = Path(pdf_path)
     out_md = Path(out_md)
-    rel = os.path.relpath(pdf_path, cfg.src_dir) if cfg.src_dir else str(pdf_path)
+    rel = _rel(pdf_path, cfg.src_dir)
     try:
         size_kb = round(pdf_path.stat().st_size / 1024, 1)
     except OSError:
@@ -325,6 +348,7 @@ def process_file(server: MinerUServer, pdf_path, cfg: Config, out_md) -> dict:
     with server.semaphore:
         for attempt in range(1, max(1, cfg.retry_max) + 1):
             record["attempts"] = attempt
+            record["task_id"] = ""  # 每次尝试重置，避免 submit() 失败时残留上一次尝试的 task_id
             try:
                 task_id = server.submit(pdf_path)
                 record["task_id"] = task_id
@@ -454,8 +478,11 @@ def run(cfg: Config, servers: List[MinerUServer]) -> dict:
         record = process_file(server, pdf_path, cfg, out_md)
         nonlocal done_count
         with manifest_lock:
-            with open(manifest_path, "a", encoding="utf-8") as fh:
-                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            try:
+                with open(manifest_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except OSError as exc:  # 磁盘满/权限错误等：告警但不让单条 manifest 写入拖垮整个 run
+                print(f"警告: 追加 manifest 失败（{manifest_path}）：{exc}", file=sys.stderr)
             stats[record["status"]] = stats.get(record["status"], 0) + 1
             if record["status"] == "fail":
                 fail_rels.append(record["rel"])
