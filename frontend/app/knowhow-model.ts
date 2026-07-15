@@ -554,9 +554,11 @@ export const deleteCellCode = (rowId: string, columnId: string): Promise<void> =
 // 行标题自动合成(展示用，记录型/无行标题列的表用来在网格/抽屉里显示一个可读
 // 的行标签；后端 textops.compose_row_title 同规则孪生实现——见设计文档④)：
 // 按 cells 顺序(调用方保证按列 position 传入)取前 <= maxSegments 个「非空
-// 首行」，每段截断到 <= 16 字(截断加省略号，省略号本身计入 16)，用 " · "
-// 连接。首行为空白的格子视为空、跳过继续找下一个非空格子(不提前中止扫描)。
-// 全部为空(或 cells 为空数组)时返回空串——由调用方兜底展示为「行 N」。
+// 首行」，每段截断到 <= 16 字——**纯 slice，不加省略号**（与 node_name 不同：
+// 本函数拼接的是多个已截断的短片段，每段都叠一个省略号只会更花哨、不会更
+// 清楚，后端孪生实现同理不加），用 " · " 连接。首行为空白的格子视为空、跳过
+// 继续找下一个非空格子(不提前中止扫描)。全部为空(或 cells 为空数组)时返回
+// 空串——由调用方兜底展示为「行 N」。
 export function composeRowTitle(cells: string[], maxSegments: number = 3): string {
   const segments: string[] = [];
   for (const cell of cells ?? []) {
@@ -568,9 +570,11 @@ export function composeRowTitle(cells: string[], maxSegments: number = 3): strin
   return segments.join(" · ");
 }
 
+// 与后端 textops.compose_row_title 的 `first_line[:_ROW_TITLE_SEGMENT_LIMIT]`
+// 严格同规则：纯 slice，本身就是恒等幂等(<=maxLen 时原样返回)，不额外 trim/
+// 加省略号（省略号是 node_name 的记号，composeRowTitle 的合成标题不用）。
 function truncateSegment(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return text.slice(0, Math.max(0, maxLen - 1)).trimEnd() + "…";
+  return text.slice(0, maxLen);
 }
 
 // 仅匹配「图片链接」且目标协议为 asset:// 的情形；非图片文本、非 asset 协议的

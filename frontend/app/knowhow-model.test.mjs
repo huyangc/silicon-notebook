@@ -117,12 +117,12 @@ test("composeRowTitle: 空数组返回空串", () => {
   assert.strictEqual(composeRowTitle([]), "");
 });
 
-test("composeRowTitle: 每段截断到 <=16 字并加省略号（省略号计入 16）", () => {
+test("composeRowTitle: 每段截断到 <=16 字，纯 slice 不加省略号（与后端 textops.compose_row_title 同规则——省略号是 node_name 的记号，不用于本合成标题）", () => {
   const longCell = "一二三四五六七八九十一二三四五六七八九十"; // 20 字
   const out = composeRowTitle([longCell]);
   assert.strictEqual(out.length, 16);
-  assert.ok(out.endsWith("…"));
-  assert.strictEqual(out, "一二三四五六七八九十一二三四五…");
+  assert.ok(!out.includes("…"));
+  assert.strictEqual(out, "一二三四五六七八九十一二三四五六");
 });
 
 test("composeRowTitle: 恰好 16 字时不截断、不加省略号", () => {
