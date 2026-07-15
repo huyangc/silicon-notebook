@@ -51,10 +51,10 @@ function bodyOf(call) {
 
 // --- KIND_LABELS / ROLE_LABELS -------------------------------------------------
 
-test("KIND_LABELS: 恰好三项内容类型，文案与规格①一致（方法步骤/工具·事物/普通）", () => {
+test("KIND_LABELS: 恰好三项内容类型，文案与规格①一致（方法步骤/工具/事物/普通）", () => {
   assert.deepStrictEqual(KIND_LABELS, {
     procedure: "方法步骤",
-    entity: "工具·事物",
+    entity: "工具/事物",
     attribute: "普通",
   });
 });
@@ -73,7 +73,7 @@ test("ROLE_LABELS(deprecated): 覆盖全部四个 CellKind 值，含 anchor='行
   assert.deepStrictEqual(ROLE_LABELS, {
     anchor: "行标题",
     procedure: "方法步骤",
-    entity: "工具·事物",
+    entity: "工具/事物",
     attribute: "普通",
   });
 });

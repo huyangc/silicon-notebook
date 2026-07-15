@@ -41,7 +41,7 @@ export function deriveDefaultTitle(filename: string): string {
 export type RoleOption = { value: Role; label: string };
 
 // 角色下拉选项：顺序与 ROLE_LABELS 一致（deprecated：ROLE_LABELS 2026-07-15
-// 起收窄为四值 CellKind——行标题(anchor)/方法步骤/工具·事物/普通，见
+// 起收窄为四值 CellKind——行标题(anchor)/方法步骤/工具/事物/普通，见
 // knowhow-model.ts 的定义与顶部注释）。单一事实来源——词表变化只需改
 // knowhow-model.ts 一处，本文件自动同步。Task 5 会把行标题的选择迁移到独立
 // 的表级 anchorColumnId 选择器，届时本下拉可收窄为只剩 KIND_LABELS 三项。

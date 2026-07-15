@@ -18,7 +18,7 @@ import { authHeaders } from "./auth.ts";
 
 // 格子级节点模型（规格 2026-07-15 修订）：列的「角色」改名为域中立的内容类型
 // kind，四值：anchor(行标题，表级单选，不进列 kind 下拉) / procedure(方法
-// 步骤) / entity(工具·事物) / attribute(普通)。
+// 步骤) / entity(工具/事物) / attribute(普通)。
 export type CellKind = "anchor" | "procedure" | "entity" | "attribute";
 
 // 列 kind 下拉只提供三种「内容类型」——anchor(行标题) 不是列 kind 下拉的可选
@@ -27,11 +27,11 @@ export type CellKind = "anchor" | "procedure" | "entity" | "attribute";
 // set_knowhow_anchor_column 写入，规格①）。
 export type ColumnKind = Exclude<CellKind, "anchor">;
 
-// 三种内容类型下拉文案，顺序与规格①一致：方法步骤/工具·事物/普通，各自在
+// 三种内容类型下拉文案，顺序与规格①一致：方法步骤/工具/事物/普通，各自在
 // UI 上还带一行提示语(由消费方渲染，本文件只提供徽章/选项文案本身)。
 export const KIND_LABELS: Record<ColumnKind, string> = {
   procedure: "方法步骤",
-  entity: "工具·事物",
+  entity: "工具/事物",
   attribute: "普通",
 };
 

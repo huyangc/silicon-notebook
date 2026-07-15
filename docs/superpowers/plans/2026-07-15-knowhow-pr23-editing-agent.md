@@ -18,7 +18,7 @@
 - 后台任务只经 `background_jobs.submit(fn,*args,name=,notify_pending=)`（services/background_jobs.py:37，自带 copy_context）；严禁裸线程。
 - Agent scope 两处同步：`AGENT_SCOPES`（memory_service.py:47）+ `AGENT_SCOPE_OPTIONS`（agent-token-model.ts:1）。
 - 后端测试 backend/ 下 `${PYTHON_BIN:-/opt/homebrew/Caskroom/miniconda/base/bin/python} -m pytest ... -q`；前端顶层 `*.test.mjs` + `npx tsc --noEmit`；已知外围失败=`test_repository_api_contract.py::test_serialization...`（master 级）。不启服务、不禁 sandbox。
-- 文案中文友好无黑话（UI 字符串以规格①为准：行标题列/方法步骤/工具·事物/普通）；page.tsx 弯引号红线（diff 检查=0）；id 用 `new_id(prefix)`；效率一等（无轮询、嵌入仅增量）。
+- 文案中文友好无黑话（UI 字符串以规格①为准：行标题列/方法步骤/工具/事物/普通）；page.tsx 弯引号红线（diff 检查=0）；id 用 `new_id(prefix)`；效率一等（无轮询、嵌入仅增量）。
 
 ## 波次（编排者用；改路由任务加粗、互不同波）
 
@@ -73,7 +73,7 @@ A: T1 ∥ T4 · B: T2 ∥ **T3** ∥ T5 · C: **T6** ∥ T7 ∥ T14 · D: **T8**
 
 **Files:** Modify `frontend/app/knowhow-model.ts`、`frontend/app/knowhow-model.test.mjs`；`frontend/app/agent-token-model.ts`（+knowhow:code 选项，与 T10 后端同步字符串）
 
-**Interfaces (Produces，T5/T7/T9/T11/T12 逐字 import)：** `CellKind = "anchor"|"procedure"|"entity"|"attribute"`；`KIND_LABELS`（方法步骤/工具·事物/普通——anchor 不在列下拉，UI 走表级 anchorColumnId）；`KnowhowTableDetail.anchorColumnId: string|null`；fetchers：`patchKnowhowTable(nb,t,{title?,description?,anchorColumnId?})`、`addKnowhowColumn/patchKnowhowColumn/deleteKnowhowColumn`、`addKnowhowRow/deleteKnowhowRow`、`patchKnowhowCell(nb,t,row,col,md)`、`knowhowTemplateUrl(nb,t)`、`appendKnowhowPreview/appendKnowhowCommit`、`optimizeKnowhowCell(nb,t,row,col)->{suggestionMd}`、`getCellCode/putCellCode/deleteCellCode`（status:"implemented"|"stale"|"none"）、`CitationKnowhowRef {tableId,rowId}`；`composeRowTitle(cells,columns)`（与后端同规则，网格/抽屉标题用）。wire 映射 snake_case↔camelCase 照旧收敛在 mapper。
+**Interfaces (Produces，T5/T7/T9/T11/T12 逐字 import)：** `CellKind = "anchor"|"procedure"|"entity"|"attribute"`；`KIND_LABELS`（方法步骤/工具/事物/普通——anchor 不在列下拉，UI 走表级 anchorColumnId）；`KnowhowTableDetail.anchorColumnId: string|null`；fetchers：`patchKnowhowTable(nb,t,{title?,description?,anchorColumnId?})`、`addKnowhowColumn/patchKnowhowColumn/deleteKnowhowColumn`、`addKnowhowRow/deleteKnowhowRow`、`patchKnowhowCell(nb,t,row,col,md)`、`knowhowTemplateUrl(nb,t)`、`appendKnowhowPreview/appendKnowhowCommit`、`optimizeKnowhowCell(nb,t,row,col)->{suggestionMd}`、`getCellCode/putCellCode/deleteCellCode`（status:"implemented"|"stale"|"none"）、`CitationKnowhowRef {tableId,rowId}`；`composeRowTitle(cells,columns)`（与后端同规则，网格/抽屉标题用）。wire 映射 snake_case↔camelCase 照旧收敛在 mapper。
 
 - [ ] TDD（纯逻辑：composeRowTitle 规则、payload 组装、KIND_LABELS 覆盖、code status 映射）→ 实现 → `node --test` 全绿+tsc。
 - [ ] Commit：`feat(knowhow): frontend model layer for editing/template/optimize/code/citation`

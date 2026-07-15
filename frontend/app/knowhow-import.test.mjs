@@ -80,15 +80,15 @@ test("deriveDefaultTitle: 空文件名返回空串", () => {
 });
 
 // --- ROLE_OPTIONS ------------------------------------------------------------------
-// 注：角色词表 2026-07-15 由六值收窄为四值 CellKind（行标题/方法步骤/工具·
-// 事物/普通），ROLE_OPTIONS 派生自 knowhow-model.ts 的 ROLE_LABELS，随之从
+// 注：角色词表 2026-07-15 由六值收窄为四值 CellKind（行标题/方法步骤/
+// 工具/事物/普通），ROLE_OPTIONS 派生自 knowhow-model.ts 的 ROLE_LABELS，随之从
 // 6 项变为 4 项——这不是本文件测的逻辑本身变化，只是词表收窄的必然结果。
 
 test("ROLE_OPTIONS: 覆盖全部四个 CellKind 值", () => {
   assert.strictEqual(ROLE_OPTIONS.length, 4);
 });
 
-test("ROLE_OPTIONS: 顺序与规格一致（行标题/方法步骤/工具·事物/普通）", () => {
+test("ROLE_OPTIONS: 顺序与规格一致（行标题/方法步骤/工具/事物/普通）", () => {
   assert.deepStrictEqual(
     ROLE_OPTIONS.map((option) => option.value),
     ["anchor", "procedure", "entity", "attribute"],
