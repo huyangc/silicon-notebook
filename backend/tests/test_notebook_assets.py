@@ -137,3 +137,27 @@ def test_cross_notebook_asset_id_returns_404(tmp_path, monkeypatch):
     # to nb1, so requesting it through nb2's path must still 404.
     cross = client.get(f"/api/notebooks/{nb2}/assets/{asset['id']}", headers=owner_h)
     assert cross.status_code == 404
+
+
+# Appended at EOF (rather than interleaved above) so this addition can't shift
+# any other test's line number out from under
+# test_repository_surface_manifest.py's line-pinned consumer-site guard (see
+# that file's FROZEN_ONLY_MOVED_CONSUMERS / the "surface manifest line-shift"
+# lesson from prior knowhow-tables commits).
+def test_upload_svg_rejected_as_stored_xss_vector(tmp_path, monkeypatch):
+    # SVG is deliberately not in the whitelist (unsanitized SVG served
+    # same-origin can carry inline <script>/event handlers — a stored-XSS
+    # vector for shared notebooks). Must 400 with the same friendly Chinese
+    # copy as any other unsupported mime, not a raw exception dump.
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000309")
+    nb = _mk_notebook(client, owner_h)
+
+    svg = b"<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>"
+    resp = _upload(
+        client, owner_h, nb, filename="evil.svg", content=svg, content_type="image/svg+xml"
+    )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert "不支持" in detail
+    assert any("一" <= ch <= "鿿" for ch in detail)

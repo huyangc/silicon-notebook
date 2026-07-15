@@ -33,7 +33,7 @@ ALLOWED_MIME_EXTENSIONS: dict[str, str] = {
     "image/jpeg": "jpg",
     "image/gif": "gif",
     "image/webp": "webp",
-    "image/svg+xml": "svg",
+    # image/svg+xml intentionally excluded: unsanitized SVG served same-origin is a stored-XSS vector (inline <script>/event-handler attrs); pasted screenshots are always raster.
 }
 
 
@@ -54,7 +54,7 @@ def validate_asset(mime: str, size: int) -> None:
     """
     if mime not in ALLOWED_MIME_EXTENSIONS:
         raise AssetValidationError(
-            "图片类型不支持，仅支持 PNG/JPEG/GIF/WebP/SVG 格式"
+            "图片类型不支持，仅支持 PNG/JPEG/GIF/WebP 格式"
         )
     if size > MAX_ASSET_BYTES:
         raise AssetValidationError("图片过大，最大支持 10MB")

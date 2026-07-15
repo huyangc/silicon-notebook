@@ -3888,7 +3888,7 @@
           "type": "object"
         },
         "TraceStep": {
-          "description": "\u63a8\u7406\u6a21\u5f0f agent \u7684\u4e00\u6b65\u8f68\u8ff9(\u4f9b\u524d\u7aef\u6298\u53e0\u5c55\u793a)\u3002",
+          "description": "推理模式 agent 的一步轨迹(供前端折叠展示)。",
           "properties": {
             "detail": {
               "additionalProperties": true,
@@ -4096,7 +4096,7 @@
       },
       "/api/admin/online": {
         "get": {
-          "description": "\u5f53\u524d\u5728\u7ebf\u7528\u6237 id \u96c6\u5408(\u6301\u6709\u5b9e\u65f6\u6d41\u8fde\u63a5)\u3002\u4ec5 admin,\u7eaf\u8bfb\u5185\u5b58\u96f6 DB\u3002",
+          "description": "当前在线用户 id 集合(持有实时流连接)。仅 admin,纯读内存零 DB。",
           "operationId": "list_online_users_api_admin_online_get",
           "responses": {
             "200": {
@@ -4117,7 +4117,7 @@
       },
       "/api/admin/users": {
         "get": {
-          "description": "\u7ba1\u7406\u5458\u7528\u6237\u4f7f\u7528\u603b\u89c8:\u6240\u6709\u7528\u6237 + \u7528\u91cf\u7edf\u8ba1 + \u5f53\u524d\u5728\u7ebf\u3002\u4ec5 admin\u3002\n\u91cd\u7684\u7528\u91cf\u805a\u5408\u653e\u7ebf\u7a0b\u6c60,\u56de loop \u7ebf\u7a0b\u8bfb pending_bus(\u514d\u9501\u5feb\u7167)\u3002",
+          "description": "管理员用户使用总览:所有用户 + 用量统计 + 当前在线。仅 admin。\n重的用量聚合放线程池,回 loop 线程读 pending_bus(免锁快照)。",
           "operationId": "list_admin_users_api_admin_users_get",
           "responses": {
             "200": {
@@ -4140,7 +4140,7 @@
       },
       "/api/admin/users/{user_id}/notebooks": {
         "get": {
-          "description": "\u67d0\u7528\u6237\u540d\u4e0b\u7b14\u8bb0\u672c\u8be6\u60c5\u3002\u4ec5 admin\u3002",
+          "description": "某用户名下笔记本详情。仅 admin。",
           "operationId": "list_admin_user_notebooks_api_admin_users__user_id__notebooks_get",
           "parameters": [
             {
@@ -4621,7 +4621,7 @@
       },
       "/api/auth/logout": {
         "post": {
-          "description": "logout \u987b\u62ff\u5230\u539f\u59cb token \u624d\u80fd\u5220 session\uff0c\u6545\u76f4\u63a5\u8bfb Authorization \u5934\n\uff08\u4e0d\u8d70 get_current_user\uff0c\u907f\u514d token \u5df2\u5931\u6548\u65f6\u65e0\u6cd5\u767b\u51fa\uff09\u3002",
+          "description": "logout 须拿到原始 token 才能删 session，故直接读 Authorization 头\n（不走 get_current_user，避免 token 已失效时无法登出）。",
           "operationId": "logout_api_auth_logout_post",
           "responses": {
             "204": {
@@ -4865,7 +4865,7 @@
               }
             },
             {
-              "description": "YYYY-MM-DD\uff1b\u7f3a\u7701=\u4eca\u5929",
+              "description": "YYYY-MM-DD；缺省=今天",
               "in": "query",
               "name": "date",
               "required": false,
@@ -4878,7 +4878,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "YYYY-MM-DD\uff1b\u7f3a\u7701=\u4eca\u5929",
+                "description": "YYYY-MM-DD；缺省=今天",
                 "title": "Date"
               }
             },
@@ -5116,7 +5116,7 @@
               }
             },
             {
-              "description": "YYYY-MM-DD\uff1b\u7f3a\u7701=\u4eca\u5929",
+              "description": "YYYY-MM-DD；缺省=今天",
               "in": "query",
               "name": "date",
               "required": false,
@@ -5129,12 +5129,12 @@
                     "type": "null"
                   }
                 ],
-                "description": "YYYY-MM-DD\uff1b\u7f3a\u7701=\u4eca\u5929",
+                "description": "YYYY-MM-DD；缺省=今天",
                 "title": "Date"
               }
             },
             {
-              "description": "\u660e\u6587\u6587\u4ef6\u5185\u7684\u5b57\u8282\u504f\u79fb\uff1b\u8df3\u8fc7\u6309 id \u67e5\u627e",
+              "description": "明文文件内的字节偏移；跳过按 id 查找",
               "in": "query",
               "name": "seq",
               "required": false,
@@ -5147,7 +5147,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "\u660e\u6587\u6587\u4ef6\u5185\u7684\u5b57\u8282\u504f\u79fb\uff1b\u8df3\u8fc7\u6309 id \u67e5\u627e",
+                "description": "明文文件内的字节偏移；跳过按 id 查找",
                 "title": "Seq"
               }
             }
@@ -5180,7 +5180,7 @@
       },
       "/api/detect-doc-types": {
         "post": {
-          "description": "Best-effort document-type detection from leading text samples, batched\n(one request for many files). Used by the upload picker to pre-fill each\nfile's type; doc_type_id '' means undetected so the UI shows '\u81ea\u52a8\u68c0\u6d4b'.",
+          "description": "Best-effort document-type detection from leading text samples, batched\n(one request for many files). Used by the upload picker to pre-fill each\nfile's type; doc_type_id '' means undetected so the UI shows '自动检测'.",
           "operationId": "detect_doc_types_api_detect_doc_types_post",
           "requestBody": {
             "content": {
@@ -5456,7 +5456,7 @@
       },
       "/api/me/pending-actions": {
         "get": {
-          "description": "\u5f53\u524d\u7528\u6237\u7684\u5f85\u529e\u5feb\u7167\uff1a\u6df1\u5ea6\u62a5\u544a\u5f85\u786e\u8ba4 + \u6cbb\u7406\u4e09\u961f\u5217 + \u7d22\u5f15\u72b6\u6001\uff0c\u4f9b\u94c3\u94db\u4f7f\u7528\u3002\n\u53ea\u8bfb\u8f6c\u8c03 repository().pending_actions\uff1b\u805a\u5408\u903b\u8f91\u4e0e\u4e09\u6e90\u8986\u76d6\u89c1\u8be5\u65b9\u6cd5\u672c\u8eab\n\uff08Task 1 \u5df2\u6709\u4e13\u95e8\u5355\u6d4b\uff09\uff0c\u6b64\u5904\u53ea\u505a HTTP \u8584\u5305\u88c5\u3002",
+          "description": "当前用户的待办快照：深度报告待确认 + 治理三队列 + 索引状态，供铃铛使用。\n只读转调 repository().pending_actions；聚合逻辑与三源覆盖见该方法本身\n（Task 1 已有专门单测），此处只做 HTTP 薄包装。",
           "operationId": "me_pending_actions_api_me_pending_actions_get",
           "responses": {
             "200": {
@@ -5477,7 +5477,7 @@
       },
       "/api/me/pending-actions/stream": {
         "get": {
-          "description": "\u5f85\u786e\u8ba4\u4e2d\u5fc3\u7684\u5b9e\u65f6\u63a8\u9001\u901a\u9053\uff08NDJSON\uff09\uff1a\u5148\u8865\u53d1\u79bb\u7ebf\u671f\u95f4\u7f13\u51b2\u7684\u77ac\u65f6\u4e8b\u4ef6\uff0c\n\u518d\u53d1\u4e00\u5e27\u521d\u59cb snapshot\uff0c\u518d\u6302\u8fdb pending_bus \u5faa\u73af\u7b49\u5f85\u540e\u7eed\u63a8\u9001\uff1b15s \u65e0\u6d88\u606f\u53d1\nkeepalive \u6ce8\u91ca\u5e27\uff08\u524d\u7aef\u6309 `:` \u524d\u7f00\u8df3\u8fc7\uff0c\u975e JSON \u884c\uff09\u3002",
+          "description": "待确认中心的实时推送通道（NDJSON）：先补发离线期间缓冲的瞬时事件，\n再发一帧初始 snapshot，再挂进 pending_bus 循环等待后续推送；15s 无消息发\nkeepalive 注释帧（前端按 `:` 前缀跳过，非 JSON 行）。",
           "operationId": "me_pending_stream_api_me_pending_actions_stream_get",
           "responses": {
             "200": {
@@ -6736,7 +6736,7 @@
       },
       "/api/notebooks/{notebook_id}/edge-review-queue": {
         "get": {
-          "description": "Return edges ranked by review priority (high centrality \u00d7 low trust) desc.\nExcludes already-rejected edges.",
+          "description": "Return edges ranked by review priority (high centrality × low trust) desc.\nExcludes already-rejected edges.",
           "operationId": "edge_review_queue_api_notebooks__notebook_id__edge_review_queue_get",
           "parameters": [
             {
@@ -6829,7 +6829,7 @@
       },
       "/api/notebooks/{notebook_id}/index-status": {
         "get": {
-          "description": "\u4e09\u7cfb\u7edf\u6784\u5efa\u72b6\u6001\u805a\u5408(kg/unified_kg/scale_index)\u3002\u7eaf\u8bfb:\u4e0e /analytics\u3001\n/unified-kg/status \u4e00\u81f4\u7528 read \u5b88\u536b\u2014\u2014\u53ea\u8bfb\u6210\u5458\u4e5f\u8981\u80fd\u770b\u9762\u677f\u91cc\u7684\u72b6\u6001\u4f4d,\n\u5199\u64cd\u4f5c(build/rebuild/cancel)\u5404\u81ea\u4ecd\u662f require_notebook_access \u4e14\u524d\u7aef\u6309 !isReader \u9690\u85cf\u6309\u94ae\u3002",
+          "description": "三系统构建状态聚合(kg/unified_kg/scale_index)。纯读:与 /analytics、\n/unified-kg/status 一致用 read 守卫——只读成员也要能看面板里的状态位,\n写操作(build/rebuild/cancel)各自仍是 require_notebook_access 且前端按 !isReader 隐藏按钮。",
           "operationId": "index_status_api_notebooks__notebook_id__index_status_get",
           "parameters": [
             {
@@ -6871,7 +6871,7 @@
       },
       "/api/notebooks/{notebook_id}/kg/build": {
         "post": {
-          "description": "\u6309\u9700\u89e6\u53d1\u8be5 notebook \u7684 KG \u5efa\u56fe(\u540e\u53f0\u7ebf\u7a0b,\u5e42\u7b49)\u3002\n\u5df2\u6709 knowledge_objects \u7684 source \u4f1a\u8df3\u8fc7\u3002\u9700 LLM \u5df2\u914d\u7f6e,\u5426\u5219 409\u3002",
+          "description": "按需触发该 notebook 的 KG 建图(后台线程,幂等)。\n已有 knowledge_objects 的 source 会跳过。需 LLM 已配置,否则 409。",
           "operationId": "build_kg_api_notebooks__notebook_id__kg_build_post",
           "parameters": [
             {
@@ -7099,7 +7099,7 @@
       },
       "/api/notebooks/{notebook_id}/kg/rebuild": {
         "post": {
-          "description": "Full re-extract: clears all KG artefacts then re-extracts ALL sources\n(background thread). Requires LLM configured (409 if not), 404 if notebook\nmissing \u2014 same guards as build_kg.",
+          "description": "Full re-extract: clears all KG artefacts then re-extracts ALL sources\n(background thread). Requires LLM configured (409 if not), 404 if notebook\nmissing — same guards as build_kg.",
           "operationId": "rebuild_kg_api_notebooks__notebook_id__kg_rebuild_post",
           "parameters": [
             {
@@ -7183,7 +7183,7 @@
       },
       "/api/notebooks/{notebook_id}/kg/search": {
         "get": {
-          "description": "\u8bcd\u6cd5(FTS5)\u222a\u8bed\u4e49(ANN)\u641c\u7d22 KG \u8282\u70b9,\u6309 score \u964d\u5e8f\u8fd4\u56de k \u6761\u3002",
+          "description": "词法(FTS5)∪语义(ANN)搜索 KG 节点,按 score 降序返回 k 条。",
           "operationId": "kg_search_api_notebooks__notebook_id__kg_search_get",
           "parameters": [
             {
@@ -7534,7 +7534,7 @@
       },
       "/api/notebooks/{notebook_id}/membership": {
         "delete": {
-          "description": "\u9000\u51fa\u53ea\u8bfb\u5171\u4eab:\u53ea\u5220\u81ea\u5df1\u7684\u6210\u5458\u8bb0\u5f55(\u5e42\u7b49,\u4e0d\u5f71\u54cd\u4ed6\u4eba)\u3002",
+          "description": "退出只读共享:只删自己的成员记录(幂等,不影响他人)。",
           "operationId": "leave_notebook_route_api_notebooks__notebook_id__membership_delete",
           "parameters": [
             {
@@ -7776,7 +7776,7 @@
       },
       "/api/notebooks/{notebook_id}/objects/{object_id}/neighbors": {
         "get": {
-          "description": "\u6298\u53e0\u56fe\u4e2d\u67d0\u8282\u70b9\u7684 1-hop \u90bb\u57df(\u6709\u754c);\u4e0e unified-kg \u540c\u5f62(nodes/edges)\u3002",
+          "description": "折叠图中某节点的 1-hop 邻域(有界);与 unified-kg 同形(nodes/edges)。",
           "operationId": "object_neighbors_api_notebooks__notebook_id__objects__object_id__neighbors_get",
           "parameters": [
             {
@@ -7798,13 +7798,13 @@
               }
             },
             {
-              "description": "\u6700\u591a\u8fd4\u56de\u7684 1-hop \u90bb\u5c45\u6570",
+              "description": "最多返回的 1-hop 邻居数",
               "in": "query",
               "name": "cap",
               "required": false,
               "schema": {
                 "default": 50,
-                "description": "\u6700\u591a\u8fd4\u56de\u7684 1-hop \u90bb\u5c45\u6570",
+                "description": "最多返回的 1-hop 邻居数",
                 "minimum": 1,
                 "title": "Cap",
                 "type": "integer"
@@ -8306,7 +8306,7 @@
       },
       "/api/notebooks/{notebook_id}/scale-index/cancel": {
         "post": {
-          "description": "\u53d6\u6d88\u68c0\u7d22\u7d22\u5f15:\u6392\u961f\u4e2d\u2192\u51fa\u961f;\u6784\u5efa\u4e2d\u2192\u62d2\u7edd(\u4e0d\u53ef\u6253\u65ad)\u3002",
+          "description": "取消检索索引:排队中→出队;构建中→拒绝(不可打断)。",
           "operationId": "cancel_scale_index_api_notebooks__notebook_id__scale_index_cancel_post",
           "parameters": [
             {
@@ -8348,7 +8348,7 @@
       },
       "/api/notebooks/{notebook_id}/scale-index/rebuild": {
         "post": {
-          "description": "\u5728\u7ebf\u91cd\u5efa scale \u68c0\u7d22\u7d22\u5f15(base-tier / \u5df2\u5efa\u8fc7)\u3002when=now \u7acb\u5373\u540e\u53f0/idle \u4f4e\u5cf0\u8c03\u5ea6;\nmode=auto(fold/full \u81ea\u9009)|fold|full\u3002400 \u82e5\u53c2\u6570\u975e\u6cd5,409 \u82e5\u4e0d\u5408\u683c,404 \u82e5\u7f3a\u3002",
+          "description": "在线重建 scale 检索索引(base-tier / 已建过)。when=now 立即后台/idle 低峰调度;\nmode=auto(fold/full 自选)|fold|full。400 若参数非法,409 若不合格,404 若缺。",
           "operationId": "rebuild_scale_index_api_notebooks__notebook_id__scale_index_rebuild_post",
           "parameters": [
             {
@@ -8900,7 +8900,7 @@
               }
             },
             {
-              "description": "\u53ea\u8fd4\u56de\u8fde\u63a5\u5ea6\u6700\u9ad8\u7684\u524d N \u4e2a\u8282\u70b9(\u6838\u5fc3\u5b50\u56fe);\u7701\u7565=\u5168\u91cf",
+              "description": "只返回连接度最高的前 N 个节点(核心子图);省略=全量",
               "in": "query",
               "name": "limit",
               "required": false,
@@ -8914,7 +8914,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "\u53ea\u8fd4\u56de\u8fde\u63a5\u5ea6\u6700\u9ad8\u7684\u524d N \u4e2a\u8282\u70b9(\u6838\u5fc3\u5b50\u56fe);\u7701\u7565=\u5168\u91cf",
+                "description": "只返回连接度最高的前 N 个节点(核心子图);省略=全量",
                 "title": "Limit"
               }
             }
@@ -9670,7 +9670,7 @@
       },
       "/api/shared/{token}/join": {
         "post": {
-          "description": "\u5927\u5e93\u53ea\u8bfb\u52a0\u5165:\u51ed share_token \u6210\u4e3a\u53ea\u8bfb\u6210\u5458\u3002\u5c0f\u5e93\u5e94\u8d70 copy \u800c\u975e join\u3002",
+          "description": "大库只读加入:凭 share_token 成为只读成员。小库应走 copy 而非 join。",
           "operationId": "join_shared_route_api_shared__token__join_post",
           "parameters": [
             {
@@ -9890,7 +9890,7 @@
       "citations": [
         {
           "element_id": "el-src-api-0002",
-          "label": "fixture.md \u00b7 Gain",
+          "label": "fixture.md · Gain",
           "location_label": "Gain",
           "quoted_span": "[Gain] Source degeneration stabilizes fixture gain.",
           "source_id": "src-api",
@@ -9929,7 +9929,7 @@
             "citations": [
               {
                 "element_id": "el-src-api-0002",
-                "label": "fixture.md \u00b7 Gain",
+                "label": "fixture.md · Gain",
                 "location_label": "Gain",
                 "quoted_span": "[Gain] Source degeneration stabilizes fixture gain.",
                 "source_id": "src-api",
@@ -9958,7 +9958,7 @@
     "errors": {
       "graph_too_large_413": {
         "body": {
-          "detail": "notebook nb-api has 2 objects (> 1); the legacy /graph endpoint has no bounded fallback for large notebooks \u2014 use /notebooks/{id}/unified-kg instead (bounded/paginated)."
+          "detail": "notebook nb-api has 2 objects (> 1); the legacy /graph endpoint has no bounded fallback for large notebooks — use /notebooks/{id}/unified-kg instead (bounded/paginated)."
         },
         "status_code": 413
       },
@@ -10073,7 +10073,7 @@
       "section_count": 1,
       "section_status": [
         {
-          "phase": "\u6392\u961f",
+          "phase": "排队",
           "step": 0,
           "title": "Evidence"
         }
