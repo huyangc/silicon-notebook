@@ -218,6 +218,12 @@ class _MinimalEvidence:
     def parse_anchors(self, answer, evidence_by_id):
         return []
 
+    def knowhow_refs_for(self, element_ids):
+        # Task 12b: the four chunk/graph inline Citation(...) sites now call
+        # this once per answer to enrich .knowhow — a newly-declared port
+        # call this minimal boundary fixture must implement to stay reachable.
+        return {}
+
 
 def _minimal_ask_service():
     return AskService(

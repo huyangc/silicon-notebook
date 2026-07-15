@@ -125,7 +125,10 @@ function SelectedReferenceDetail({
   const tier = reference.anchor?.tier || "";
   const isRelationReference = objectType === "relation";
   const canLocateInGraph = Boolean(reference.anchor?.object_id) && !isRelationReference;
-  const knowhowRef = mapCitationKnowhowRef(reference.citation?.knowhow);
+  // Task 12b（引用跳转扩面）：citation 优先，anchor 兜底——两者理论上不会同时
+  // 出现在同一条 reference 上（buildAnswerReferences 二选一），但顺序仍按
+  // "更具体的赢"的既有惯例书写，与 knowhow-citation.test.mjs 的显式断言一致。
+  const knowhowRef = mapCitationKnowhowRef(reference.citation?.knowhow ?? reference.anchor?.knowhow);
   return (
     <aside className="cite-detail-card" aria-live="polite">
       <div className="cite-detail-head">

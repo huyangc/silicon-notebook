@@ -2278,6 +2278,11 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/tests/test_notebook_counts_batched.py",
     "backend/tests/test_ask_reconnect.py",
     "backend/tests/test_ask_redesign.py",
+    # Task 12b (knowhow citation-jump widening) adds a `knowhow_refs_for`
+    # method to _MinimalEvidence (the AskService port-boundary fixture),
+    # shifting this file's later facade-consumer call sites without changing
+    # the surface.
+    "backend/tests/test_ask_service_boundary.py",
     "backend/tests/test_conversations.py",
     "backend/tests/test_cross_tier_reasoning.py",
     "backend/tests/test_followup_retrieval_grounding.py",
@@ -3006,6 +3011,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK14_KNOWHOW_PR23_ALLOWED_IMPORTS
                     or site in TASK8_KNOWHOW_PR23_ALLOWED_IMPORTS
                     or site in TASK13_KNOWHOW_PR23_ALLOWED_IMPORTS
+                    or site in TASK12B_KNOWHOW_PR23_ALLOWED_IMPORTS
                 )
 
 
@@ -3582,3 +3588,35 @@ TASK15_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
     for name in {"_connect", "_retrieve_chunks", "_citations_from"}
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK15_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
+
+# PR-2+3 Task 12b (citation-jump widening: chunk/graph modes + anchor path).
+# test_knowhow_citation.py, previously a pure-fake unit test file (no facade
+# at all — _Notebooks/_Knowledge/_SpySources fakes only), gains two real-
+# SQLite integration tests mirroring test_knowhow_projection.py's own
+# repo/embedder/projector fixture convention (chunk-mode: create_notebook +
+# a fresh SQLiteRepository + embedder + create_knowhow_table/add_knowhow_row
+# via repo._runtime.knowhow_store, then repo.ask_chunk) and
+# test_graph_src_chunks.py's raw-SQL-seed + stub-LLM convention (graph-mode:
+# repo._write for the seed rows, repo.settings/repo.llm_client/
+# repo._reasoning_llm_client, then repo.ask_graph) — plus a small
+# repo._runtime.source_store.evidence_elements call-count spy shared by both,
+# reached via repo._runtime the same way TASK6_KNOWHOW_ALLOWED_CONSUMERS'
+# build_projector helper already does. Its own import of SQLiteRepository is
+# a genuinely NEW site (T12's original file never imported it), so — unlike
+# Task 15's file above — this DOES need an ALLOWED_IMPORTS entry too, wired
+# into the OR-chain inside test_compatibility_exports_and_import_consumers_
+# are_complete (a function-body edit, safe: nothing outside this guard file
+# tracks ITS OWN internal line numbers). Appended at EOF for the same
+# zero-line-shift reason as every other TASKN_KNOWHOW_PR23_* block.
+TASK12B_KNOWHOW_PR23_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_citation.py", 45, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK12B_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_citation.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "_write", "ask_chunk", "ask_graph",
+        "create_notebook", "embedder", "llm_client", "_reasoning_llm_client",
+        "settings",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK12B_KNOWHOW_PR23_ALLOWED_MEMBER_FILES

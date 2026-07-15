@@ -84,10 +84,14 @@ def test_evidence_context_knowledge_golden_matches_master():
     )
     block, evidence = _service().knowledge_context("active", [hit])
     assert block == "k1: [concept][base] Cascode — def: stable definition"
+    # Task 12b: non-knowhow payload (no table_id/rows) resolves knowhow to
+    # None — present as a key so downstream .get("knowhow") reads it, but
+    # never populated for ordinary KG concepts/claims.
     assert evidence["k1"] == {
         "object_id": "o1", "object_type": "concept", "name": "Cascode",
         "definition": "stable definition", "snippet": "source excerpt",
         "source_title": "Source A", "location_label": "§1", "tier": "base",
+        "knowhow": None,
     }
 
 

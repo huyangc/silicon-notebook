@@ -553,6 +553,14 @@ class AnswerAnchor(BaseModel):
     provenance: Dict[str, Any] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
+    # Task 12b（引用跳转扩面）: 与 Citation.knowhow 同一 exclude_if 惯例——只有
+    # 命中单行 knowhow 格子的知识对象锚点才有值（evidence_context.py
+    # knowledge_context/parse_anchors 填充），合并多行/非 knowhow 锚点整体从
+    # JSON 缺席。这是「答案 [k] 标记命中」这条主路径（reasoning 模式）的引用
+    # 跳转入口，与 Citation 侧的回退列表入口互补。
+    knowhow: Optional[CitationKnowhowRef] = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 class ModelError(BaseModel):

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from app.core.config import Settings
 from app.models.schemas import AnswerAnchor, Citation, CitationKnowhowRef
@@ -38,6 +38,25 @@ def _knowhow_ref(element_row: Mapping[str, Any] | None) -> CitationKnowhowRef | 
     if not table_id or not row_id:
         return None
     return CitationKnowhowRef(table_id=table_id, row_id=row_id)
+
+
+def _knowhow_ref_from_payload(payload: Mapping[str, Any]) -> CitationKnowhowRef | None:
+    """Task 12b（引用跳转扩面，锚点侧）: 从知识对象（KO）的 payload 里取
+    `table_id`/`rows`（`KnowhowProjector._ko_object_row` 写入的 §④ payload
+    shape，见 projection.py 同名 docstring）算出锚点的 knowhow 定位。
+
+    合并行规则（controller 决策，T12b brief）: 只有 `len(rows) == 1` 时才有
+    唯一无歧义的行——被多行共提合并的同一个 KO（例如被 10 行同时引用的"该
+    工具"）没有单一行可跳，此时诚实地留 None（前端不出「在表格中查看」按钮），
+    不猜第一行。非 knowhow KO（payload 里没有 rows/table_id）同样安全返回
+    None——从不抛异常，镜像 `_knowhow_ref` 的防御风格。"""
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or len(rows) != 1:
+        return None
+    table_id, row_id = payload.get("table_id"), rows[0]
+    if not table_id or not row_id:
+        return None
+    return CitationKnowhowRef(table_id=str(table_id), row_id=str(row_id))
 
 
 class EvidenceContextService:
@@ -156,6 +175,10 @@ class EvidenceContextService:
                 "source_title": occurrences[0].get("source_title", "") if occurrences else "",
                 "location_label": occurrences[0].get("section_path", "") if occurrences else "",
                 "tier": tier,
+                # Task 12b（引用跳转扩面，锚点侧）: KO payload 已在内存里（同
+                # 上面 hit.payload.get("name","") 的零额外查询惯例），命中单行
+                # knowhow 格子才有值，其余（非 knowhow KO/合并多行）为 None。
+                "knowhow": _knowhow_ref_from_payload(hit.payload),
             }
 
         object_to_key = {value["object_id"]: key for key, value in evidence_by_id.items()}
@@ -216,8 +239,32 @@ class EvidenceContextService:
                     location_label=str(context.get("location_label", "")),
                     tier=str(context.get("tier", "personal")),
                     provenance=dict(context.get("provenance") or {}),
+                    # Task 12b: 只有 knowledge_context 建的 evidence_by_id 才带
+                    # "knowhow" 键；chunk_context/记忆上下文没有这个键，`.get`
+                    # 安全回退 None（既有 exclude_if 惯例下从 JSON 整体缺席）。
+                    knowhow=context.get("knowhow"),
                 ))
         return anchors
+
+    def knowhow_refs_for(self, element_ids: Iterable[str]) -> dict[str, CitationKnowhowRef]:
+        """Task 12b（引用跳转扩面）: `citations_from` 与 ask_service.py 四个
+        chunk/graph 内联 `Citation(...)` 构造点共用的批量 knowhow 定位查询——
+        不管调用方一次要建多少条引用，只发生一次 `evidence_elements()` 读取
+        (运行效率是一等约束，见仓库 memory)。入参可以带空串/重复 id（各内联
+        调用点直接从 `c.element_ids[0] if c.element_ids else ""` 取值，不必
+        先自行过滤），本方法自己去重 + 丢弃假值。返回 {element_id: ref} 映射，
+        只收命中的——调用方对未命中的 element_id 用 `.get(eid)` 拿回 None，
+        与既有 `Citation.knowhow`/`exclude_if` 惯例一致。"""
+        ids = list(dict.fromkeys(eid for eid in element_ids if eid))
+        if not ids:
+            return {}
+        elements = self.sources.evidence_elements(ids)
+        refs: dict[str, CitationKnowhowRef] = {}
+        for eid in ids:
+            ref = _knowhow_ref(elements.get(eid))
+            if ref is not None:
+                refs[eid] = ref
+        return refs
 
     def citations_from(
         self,
@@ -235,10 +282,9 @@ class EvidenceContextService:
 
         # Task 12（引用跳转）: 批量按 element_id 查一次 knowhow 定位标签，不管
         # 本次要建多少条引用——绝不逐条引用各查一次(运行效率是一等约束)。
-        element_ids = list(dict.fromkeys(
-            evidence.element_id for _tier, evidence in filtered if evidence.element_id
-        ))
-        elements = self.sources.evidence_elements(element_ids) if element_ids else {}
+        knowhow_refs = self.knowhow_refs_for(
+            evidence.element_id for _tier, evidence in filtered
+        )
 
         citations: list[Citation] = []
         for tier, evidence in filtered:
@@ -249,7 +295,7 @@ class EvidenceContextService:
                 location_label=evidence.location_label,
                 quoted_span=evidence.quoted_span,
                 tier=tier,
-                knowhow=_knowhow_ref(elements.get(evidence.element_id)),
+                knowhow=knowhow_refs.get(evidence.element_id),
             ))
         return citations
 

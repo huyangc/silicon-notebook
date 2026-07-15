@@ -503,6 +503,16 @@
               "title": "Key",
               "type": "string"
             },
+            "knowhow": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CitationKnowhowRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "label": {
               "title": "Label",
               "type": "string"
