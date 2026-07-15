@@ -1827,6 +1827,21 @@ TASK6_KNOWHOW_ALLOWED_CONSUMERS = {
     ("settings", "backend/app/services/knowhow/api.py:87"),
 }
 
+# Task 10 (knowhow-tables-pr1): the end-to-end projection -> retrieval
+# integration test composes the real facade the same way Task 5/6's sibling
+# tests do — except it grabs the APP's own repository singleton (mirrors
+# test_trackF_governance_promotion.py's `client._repo = repository()` trick,
+# needed so the background projection job's embedder swap is visible to the
+# app) rather than constructing a fresh SQLiteRepository. It reaches
+# `_runtime`/`_connect` for direct-DB assertions plus the pre-existing frozen
+# `_retrieve_chunks`/`ask_chunk` retrieval entry points this task exists to
+# prove knowhow content actually flows through. Same broad (file, member)
+# allowance style as TASK5/TASK6_KNOWHOW_ALLOWED_MEMBER_FILES.
+TASK10_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_retrieval.py", name)
+    for name in {"_runtime", "_connect", "_retrieve_chunks", "ask_chunk"}
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2271,6 +2286,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK4_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK5_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK6_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK10_KNOWHOW_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
