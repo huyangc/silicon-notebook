@@ -4,7 +4,7 @@
 // 与可重试判定 / 抽屉标题解析 / 图片鉴权判定 这些可测纯逻辑单独抽出。
 // knowhow-panel.tsx 只调用本文件导出的函数，不重复实现判断逻辑。
 
-import type { KnowhowColumn, KnowhowRow, ProjectionStatus } from "./knowhow-model.ts";
+import { composeRowTitle, type KnowhowColumn, type KnowhowRow, type ProjectionStatus } from "./knowhow-model.ts";
 
 // --- 行过滤（顶部过滤框：按概念/全文包含过滤）---------------------------------
 
@@ -66,14 +66,19 @@ export function isRetryableProjectionStatus(status: ProjectionStatus): boolean {
 // --- 行详情抽屉标题 -------------------------------------------------------------
 
 // 抽屉标题取「行标题」列的原始格子文本（未截断，组件侧再套 cellSummary 截断
-// 显示）；行内没有行标题列时退化为 position 最小的列（通常即首列），一列都
-// 没有时返回空串交给组件侧兜底文案。
+// 显示）；行内没有行标题列（记录型表）时改用 composeRowTitle 合成多格标题
+// （按 position 顺序取前 3 个非空格子首行拼接，与后端 textops.compose_row_title
+// 同规则）——不再退化为"只看首列原文"：记录型表的首列恰好是长文本、图片
+// 说明或与行无关的字段时，裸露首列会产生误导性的行标签，合成标题综合多个
+// 格子的信息更能代表这一行。composeRowTitle 对全空行返回空串，与旧行为一致
+// 地交给调用方按既有约定兜底展示为「行 N」（rowFallbackTitle），本函数不做
+// 这一层兜底。
 // 注：同上，"concept" 角色已改名为 "anchor"（行标题），本函数随之最小改名。
 export function resolveRowTitleText(row: KnowhowRow, columns: KnowhowColumn[]): string {
   const ordered = sortColumnsByPosition(columns);
-  const anchorColumn = ordered.find((column) => column.role === "anchor") ?? ordered[0];
-  if (!anchorColumn) return "";
-  return row.cells[anchorColumn.id] ?? "";
+  const anchorColumn = ordered.find((column) => column.role === "anchor");
+  if (anchorColumn) return row.cells[anchorColumn.id] ?? "";
+  return composeRowTitle(ordered.map((column) => row.cells[column.id] ?? ""));
 }
 
 // --- 图片鉴权判定 ---------------------------------------------------------------

@@ -172,13 +172,27 @@ test("resolveRowTitleText: 取行标题列(anchor)原始文本", () => {
   assert.strictEqual(resolveRowTitleText(r, columns), "时序违例");
 });
 
-test("resolveRowTitleText: 无行标题列(记录型表)时退化为 position 最小的列", () => {
+test("resolveRowTitleText: 无行标题列(记录型表)时用 composeRowTitle 按 position 顺序合成多格标题（非仅首列原文）", () => {
   const noAnchor = [
     { id: "c-fix", name: "修复方法", role: "procedure", position: 1 },
     { id: "c-tool", name: "依赖工具", role: "entity", position: 0 },
   ];
   const r = row("r1", { "c-tool": "innovus", "c-fix": "xxx" });
-  assert.strictEqual(resolveRowTitleText(r, noAnchor), "innovus");
+  assert.strictEqual(resolveRowTitleText(r, noAnchor), "innovus · xxx");
+});
+
+test("resolveRowTitleText: 合成标题跳过首个空格子，取下一个非空格子", () => {
+  const noAnchor = [
+    { id: "c-a", name: "A", role: "attribute", position: 0 },
+    { id: "c-b", name: "B", role: "attribute", position: 1 },
+  ];
+  const r = row("r1", { "c-a": "", "c-b": "第二格内容" });
+  assert.strictEqual(resolveRowTitleText(r, noAnchor), "第二格内容");
+});
+
+test("resolveRowTitleText: 无行标题列且全部格子为空时返回空串（兜底「行 N」由调用方处理，非本函数职责）", () => {
+  const noAnchor = [{ id: "c-a", name: "A", role: "attribute", position: 0 }];
+  assert.strictEqual(resolveRowTitleText(row("r1", { "c-a": "" }), noAnchor), "");
 });
 
 test("resolveRowTitleText: 无列时返回空串", () => {
