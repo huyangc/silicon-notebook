@@ -25,7 +25,11 @@ through the existing ``delete_by_ids``/``insert_rows`` pair (no new store
 method, no raw SQL), and the row's still-valid embedding is carried over
 (read via ``EmbeddingStore.rows_by_ids`` before the delete, re-persisted via
 ``SourceEmbeddingService.vectors.replace_chunk_vectors`` after the
-transaction commits) instead of being recomputed or silently lost.
+transaction commits) instead of being recomputed or silently lost. The same
+pre-delete probe doubles as a self-heal: any text-unchanged chunk found with
+NO vector at all (an earlier post-commit persist window interrupted) is
+queued for a fresh embed, so reprojecting a row repairs vector gaps instead
+of skipping the "unchanged" cell forever.
 """
 from __future__ import annotations
 
@@ -299,13 +303,13 @@ class KnowhowProjector:
     def _write_chunks(self, db, source_id, notebook_id, table, row_id, columns,
                       cell_nets, concept, now) -> "tuple[List[dict], List[tuple]]":
         """Returns ``(embed_targets, carry_over_vectors)``:
-        ``embed_targets`` (``[{"id","text"}, ...]``) is unchanged from
-        before — chunks whose TEXT actually changed, which genuinely need a
-        fresh embedder call. ``carry_over_vectors`` (``[(chunk_id, ndarray),
-        ...]``) is new: chunks whose text did NOT change but whose row still
-        had to be rewritten (section_path moved — see below), paired with
-        their OLD vector so the caller can re-persist it post-commit without
-        recomputing it."""
+        ``embed_targets`` (``[{"id","text"}, ...]``) — chunks whose TEXT
+        actually changed, which genuinely need a fresh embedder call, PLUS
+        any text-unchanged chunk the self-heal probe below finds vector-less.
+        ``carry_over_vectors`` (``[(chunk_id, ndarray), ...]``) — chunks
+        whose text did NOT change but whose row still had to be rewritten
+        (section_path moved — see below), paired with their OLD vector so
+        the caller can re-persist it post-commit without recomputing it."""
         row_hash = _chunk_row_hash(row_id)
         id_prefix = f"chunk-kh-{row_hash}-"
         old_rows = self.chunks.rows_by_id_prefix(db, source_id, id_prefix)
@@ -320,6 +324,10 @@ class KnowhowProjector:
         to_delete_ids: List[str] = []
         to_insert: List[ChunkWrite] = []
         reprint_only_ids: List[str] = []  # text unchanged, section_path moved
+        # Every chunk id whose TEXT survives this pass unchanged (kept fully
+        # in place OR reprint-only rewritten), mapped to that current text —
+        # the probe population for the self-heal check below.
+        unchanged_text_chunks: dict = {}
         embed_targets: List[dict] = []
         for column in columns:
             col_pos = column["position"]
@@ -331,7 +339,11 @@ class KnowhowProjector:
             old_group = old_by_col.get(col_pos, [])
             old_specs = [(r["text"], r["section_path"]) for r in old_group]
             if old_specs == new_specs:
-                continue  # unchanged cell — zero deletes/inserts/embeds
+                # unchanged cell — zero deletes/inserts, and zero embeds in
+                # steady state; still recorded for the self-heal probe.
+                for r in old_group:
+                    unchanged_text_chunks[r["id"]] = r["text"]
+                continue
             # Text-only equality (ignoring section_path) — e.g. this is a
             # SIBLING of the cell that actually changed: every column's
             # section_path embeds the row's concept, so editing the concept
@@ -351,6 +363,7 @@ class KnowhowProjector:
                 ))
                 if text_only_changed:
                     reprint_only_ids.append(cid)
+                    unchanged_text_chunks[cid] = part_text
                 else:
                     embed_targets.append({"id": cid, "text": part_text})
 
@@ -365,23 +378,39 @@ class KnowhowProjector:
             if col_pos not in live_col_positions:
                 to_delete_ids.extend(r["id"] for r in group)
 
-        # Read the reprint-only ids' CURRENT vectors before delete_by_ids
-        # cascades them away (chunk_embeddings.chunk_id is FK ON DELETE
-        # CASCADE onto chunks(id), and reprint_only_ids reuse their exact
-        # old chunk id — same row/column/split slot, only section_path
-        # moved). This is a plain SELECT on the transaction's own
-        # connection, so it safely sees pre-delete state regardless of
-        # ordering — it just has to run before the delete below.
+        # Self-heal vector probe — ONE id-keyed SELECT over every chunk whose
+        # text is not changing this pass (kept-unchanged + reprint-only), run
+        # before delete_by_ids below (the reprint-only rows' embeddings are
+        # about to be cascade-deleted; kept rows are unaffected, but one
+        # probe covers both):
+        #   - vector present + reprint-only -> carry it over (re-persisted
+        #     post-commit by the caller, zero embedder calls);
+        #   - vector present + kept         -> nothing to do (steady state);
+        #   - vector ABSENT (or undecodable) -> append to embed_targets with
+        #     its current text. Without this, a text-unchanged chunk that
+        #     lost its vector (a previous pass's post-commit carry-over/embed
+        #     window interrupted by a crash or a raise) stayed vector-less
+        #     FOREVER — every later pass hit `old_specs == new_specs ->
+        #     continue` and nothing else re-embeds knowhow chunks. Now a
+        #     per-row reproject/retry is a real recovery path.
         carry_over_vectors: List[tuple] = []
-        if reprint_only_ids:
-            existing = EmbeddingStore.rows_by_ids(
-                db, "chunk_embeddings", "chunk_id", reprint_only_ids
+        if unchanged_text_chunks:
+            reprint_set = set(reprint_only_ids)
+            have: set = set()
+            for r in EmbeddingStore.rows_by_ids(
+                db, "chunk_embeddings", "chunk_id", list(unchanged_text_chunks)
+            ):
+                vec = decode_vector(r["vector"])
+                if vec is None:
+                    continue  # undecodable counts as missing -> re-embed below
+                have.add(r["vid"])
+                if r["vid"] in reprint_set:
+                    carry_over_vectors.append((r["vid"], vec))
+            embed_targets.extend(
+                {"id": cid, "text": text}
+                for cid, text in unchanged_text_chunks.items()
+                if cid not in have
             )
-            carry_over_vectors = [
-                (r["vid"], vec)
-                for r in existing
-                if (vec := decode_vector(r["vector"])) is not None
-            ]
 
         self.chunks.delete_by_ids(db, to_delete_ids)
         self.chunks.insert_rows(db, notebook_id, source_id, to_insert, created_at=now)

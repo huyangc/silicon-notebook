@@ -392,6 +392,51 @@ def test_reprojecting_unchanged_row_makes_zero_additional_embed_calls(repo, proj
     assert embedder.call_count == 1  # nothing changed -> zero additional embed calls
 
 
+def test_reproject_self_heals_a_missing_chunk_vector(repo, projector, table_id, embedder):
+    """Review hardening: the carry-over window (structural transaction
+    committed, vector re-persist did NOT happen — process death or
+    replace_chunk_vectors raising in between) used to leave a text-unchanged
+    chunk vector-less FOREVER: the next project_row saw
+    ``old_specs == new_specs`` and skipped the cell entirely, and nothing
+    else ever re-embeds a knowhow chunk. project_row must probe its
+    text-unchanged chunks' vectors and re-embed exactly the missing ones —
+    making a per-row retry a real recovery path, at zero embed calls (one
+    id-keyed SELECT) in the all-present steady state (pinned by
+    test_reprojecting_unchanged_row_makes_zero_additional_embed_calls
+    above)."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_role(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["concept"]: "过冲问题",
+        cols["identify"]: "- 观察上升沿过冲",
+        cols["fix"]: "1. 增加阻尼电阻",
+    })
+
+    projector.project_row(table_id, row_id)
+    assert embedder.call_count == 1
+    chunks = _row_chunk_texts(repo, row_id)
+    assert len(chunks) == 3
+    target_id = next(cid for cid, text in chunks.items() if text == "- 观察上升沿过冲")
+    other_ids = set(chunks) - {target_id}
+
+    # Simulate the interrupted gap: vector row gone, chunk row fully intact.
+    with repo._connect() as db:
+        db.execute("DELETE FROM chunk_embeddings WHERE chunk_id=?", (target_id,))
+    assert _chunk_embedding_vectors(repo, {target_id}) == {}
+    vectors_before = _chunk_embedding_vectors(repo, other_ids)
+    assert set(vectors_before) == other_ids
+
+    projector.project_row(table_id, row_id)  # NO cell edits
+
+    # Exactly one extra embed call, carrying exactly the vector-less chunk's
+    # current text — the two chunks that still had vectors were not re-sent.
+    assert embedder.call_count == 2
+    assert embedder.calls[-1] == ["- 观察上升沿过冲"]
+    assert set(_chunk_embedding_vectors(repo, {target_id})) == {target_id}
+    assert _chunk_embedding_vectors(repo, other_ids) == vectors_before
+    assert _row_projection_status(repo, table_id, row_id) == "synced"
+
+
 def test_concept_cell_edit_moves_sibling_section_paths_without_reembedding(
     repo, projector, table_id, embedder
 ):
