@@ -261,3 +261,74 @@ def test_source_delete_cascades(repo, store, notebook_id):
         assert db.execute(
             "SELECT COUNT(*) c FROM source_authors WHERE source_id=?", ("src-a",)
         ).fetchone()["c"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (review findings on cf5df12): marker-row hydration at every
+# model call site, and sources_missing_paper_meta filter variety.
+# ---------------------------------------------------------------------------
+
+
+def test_marker_row_hydrates_empty_everywhere_and_is_unsearchable(store, notebook_id):
+    """A marker row (is_paper=False, upserted once the paper-check LLM ran
+    and decided "not a paper") must hydrate consistently at every call site
+    that touches paper meta: list_sources_page rows show empty/None paper
+    fields (not stale or omitted), get_source still returns a PaperMeta
+    object (is_paper False — the row DOES exist, so this must not collapse
+    to None the way "no row at all" does), and the marker must never surface
+    via the paper-metadata search dimensions (author name / paper_title)
+    that a real paper's meta row would match on."""
+    _insert_source(store, notebook_id, "src-marker", title="Marker Source Doc")
+    marker = {
+        "is_paper": False, "paper_title": None, "venue": None, "pub_year": None,
+        "doi": None, "keywords": [], "model": "m1",
+        "raw_json": '{"llm":{"is_paper":false},"dropped":{}}',
+        "authors": [],
+    }
+    store.upsert_paper_meta("src-marker", notebook_id, marker)
+    _insert_source(store, notebook_id, "src-real", title="Real Paper Doc")
+    store.upsert_paper_meta("src-real", notebook_id, META)
+
+    page = store.list_sources_page(notebook_id)
+    marker_row = next(i for i in page.items if i.id == "src-marker")
+    assert marker_row.authors == []
+    assert marker_row.pub_year is None
+    assert marker_row.venue is None
+
+    detail = store.get_source("src-marker")
+    assert detail.paper_meta is not None
+    assert detail.paper_meta.is_paper is False
+
+    # Search on the paper-metadata dimensions (author name / paper_title):
+    # the marker's source_paper_meta row exists but every field is
+    # None/empty, so it must never be the match — only src-real (which
+    # carries the real META) should come back.
+    by_author = store.list_sources_page(notebook_id, q="alice wu")
+    assert by_author.total_count == 1
+    assert by_author.items[0].id == "src-real"
+
+    by_title = store.list_sources_page(notebook_id, q="finfet scaling study")
+    assert by_title.total_count == 1
+    assert by_title.items[0].id == "src-real"
+
+
+def test_sources_missing_paper_meta_parse_status_and_source_type_variety(
+    store, notebook_id
+):
+    """extracting/extracted 与 parsed 同样是"已有解析产物"应命中补抽;
+    source_type='knowhow' 与 'memory' 同样是隐藏合成源应排除(现有
+    test_sources_missing_paper_meta 只覆盖了 parsed/memory/doc_type,这里补
+    parse_status 的另外两档 + knowhow 这个 source_type)。"""
+    _insert_source(
+        store, notebook_id, "src-extracting", doc_type="", parse_status="extracting"
+    )
+    _insert_source(
+        store, notebook_id, "src-extracted", doc_type="", parse_status="extracted"
+    )
+    _insert_source(
+        store, notebook_id, "src-knowhow", source_type="knowhow", doc_type="",
+        parse_status="parsed",
+    )
+
+    missing = store.sources_missing_paper_meta(notebook_id)
+    assert set(missing) == {"src-extracting", "src-extracted"}
