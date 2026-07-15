@@ -13,6 +13,7 @@ import {
   isRetryableProjectionStatus,
   resolveRowTitleText,
   isInternalAssetUrl,
+  appendRowOptimistically,
 } from "./knowhow-panel-logic.ts";
 
 // --- fixtures ------------------------------------------------------------------
@@ -202,6 +203,26 @@ test("resolveRowTitleText: 无列时返回空串", () => {
 test("resolveRowTitleText: 行标题列存在但该行缺少该单元格时返回空串", () => {
   const r = row("r1", { "c-fix": "xxx" });
   assert.strictEqual(resolveRowTitleText(r, columns), "");
+});
+
+// --- appendRowOptimistically（T7 复审 Important 修复：添加行乐观更新）----------
+
+test("appendRowOptimistically: 把新行拼到数组末尾", () => {
+  const rows = [row("r1", { a: "1" }), row("r2", { a: "2" })];
+  const newRow = row("r3", {});
+  assert.deepStrictEqual(appendRowOptimistically(rows, newRow), [rows[0], rows[1], newRow]);
+});
+
+test("appendRowOptimistically: 空数组拼接后只剩新行", () => {
+  const newRow = row("r1", {});
+  assert.deepStrictEqual(appendRowOptimistically([], newRow), [newRow]);
+});
+
+test("appendRowOptimistically: 不修改原数组", () => {
+  const rows = [row("r1", { a: "1" })];
+  const copy = [...rows];
+  appendRowOptimistically(rows, row("r2", {}));
+  assert.deepStrictEqual(rows, copy);
 });
 
 // --- isInternalAssetUrl -----------------------------------------------------------

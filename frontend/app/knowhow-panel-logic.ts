@@ -81,6 +81,24 @@ export function resolveRowTitleText(row: KnowhowRow, columns: KnowhowColumn[]): 
   return composeRowTitle(ordered.map((column) => row.cells[column.id] ?? ""));
 }
 
+// --- 「添加行」乐观更新（T7 复审 Important 修复） -------------------------------
+
+// 把新建的行本地拼进 rows 数组末尾——addKnowhowRow 的「不传 position 时总是
+// 追加」语义与此处的数组末尾拼接一致。抽成纯函数只为可测：组件侧的 addRow()
+// 在拿到新行后立即
+// `setDetail((prev) => prev ? { ...prev, rows: appendRowOptimistically(prev.rows, newRow) } : prev)`，
+// 让随后的 openCellEdit(newRow.id, ...) 在这次渲染里就能在 detail.rows 里
+// 找到这一行——不依赖背景 loadDetail(selectedTableId) 那次异步整表重拉是否
+// 已经落地。旧写法只调用 loadDetail 而不本地拼接：KnowhowCellEditor 靠
+// `table.rows.find(r => r.id === rowId)!` 定位行，重拉一旦比这次渲染慢（网络
+// 正常延迟）或失败（网络错误），编辑器压根不会出现——行已经在服务端建好，
+// 用户却看不到任何编辑器，也没有任何错误提示（addKnowhowRow 本身是成功的），
+// 只会一头雾水地留在网格上。loadDetail 仍然保留在组件侧、照常调用，作为
+// 「核对服务端真实状态」的后台校准，不再是编辑器出现的前提条件。
+export function appendRowOptimistically(rows: KnowhowRow[], newRow: KnowhowRow): KnowhowRow[] {
+  return [...rows, newRow];
+}
+
 // --- 图片鉴权判定 ---------------------------------------------------------------
 
 // 鉴权 token 只存在 localStorage（见 auth.ts），从不随 <img src> 请求自动带上。

@@ -51,6 +51,7 @@ import {
   PROJECTION_STATUS_TONE,
   isRetryableProjectionStatus,
   resolveRowTitleText,
+  appendRowOptimistically,
 } from "./knowhow-panel-logic.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
 import { rowFallbackTitle } from "./knowhow-cell-editor-logic.ts";
@@ -99,8 +100,10 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
 
   // 格子浮窗顶层状态机（Task 7）：null=未打开；mode="preview"=已填格子的只读
   // 预览态（右上「编辑」切到 edit）；mode="edit"=编辑态。行标题列格子（网格
-  // 首列）不走这里——它点击时仍走既有的 onOpenRow 打开整行抽屉，与规格⑤
-  // 「点行首/概念列打开」行详情抽屉的既有约定一致。
+  // 首列）仅在「已填」时不走这里——那时仍走既有的 onOpenRow 打开整行抽屉，
+  // 与规格⑤「点行首/概念列打开」行详情抽屉的既有约定一致；该格为空时和其余
+  // 空格子一样直接进本状态机的编辑态（规格②路A「空格子直接进编辑态」），见
+  // 下方 KnowhowTableGrid 的 `opensRowDrawer = index === 0 && filled` 判定。
   const [cellModal, setCellModal] = useState<{ rowId: string; columnId: string; mode: "preview" | "edit" } | null>(
     null,
   );
@@ -212,6 +215,15 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     setActionError(null);
     try {
       const newRow = await addKnowhowRow(notebookId, selectedTableId, { cells: {} });
+      // 乐观地把新行拼进本地 detail.rows 再打开编辑器（T7 复审 Important
+      // 修复）：openCellEdit 之后 KnowhowCellEditor 靠
+      // `table.rows.find(r => r.id === rowId)!` 定位这一行——若只等下面的
+      // loadDetail 那次后台整表重拉来补上它，重拉一旦比这次渲染慢（正常网络
+      // 延迟）或失败，编辑器就永远不会出现：行已经在服务端建好，用户却看不
+      // 到任何编辑器，也没有错误提示（addKnowhowRow 本身成功了）。本地拼接
+      // 让这一步纯同步、不依赖网络往返；loadDetail 仍然保留，作为核对服务端
+      // 真实状态的后台校准，不再是编辑器出现的前提条件。
+      setDetail((prev) => (prev ? { ...prev, rows: appendRowOptimistically(prev.rows, newRow) } : prev));
       loadDetail(selectedTableId);
       loadTables();
       const firstColumnId = detail ? orderColumnsForGrid(detail.columns)[0]?.id : undefined;
@@ -343,6 +355,7 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
           canEdit={canEdit}
           onEditCell={openCellEdit}
           onClose={() => setOpenRowId(null)}
+          cellModalOpen={cellModal !== null}
         />
       )}
 
@@ -1380,10 +1393,16 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
           cursor: not-allowed;
         }
 
-        .kh-primary-button {
-          background: var(--blue) !important;
-          border-color: var(--blue) !important;
-          color: #fff !important;
+        /* 复合选择器而非 !important：.kh-footer-actions button 的 (0,1,1)
+           特异度本会盖过裸的 .kh-primary-button (0,1,0)；两个类叠加成
+           (0,2,0) 天然胜出，不需要 !important 这把大锤（也不会连累其它
+           容器里若出现同名类时的可覆盖性）。本类目前只在 .kh-footer-actions
+           内使用（KnowhowCellEditor 的「保存并下一格」/优化对照的「接受」、
+           KnowhowRowOptimizeModal 的「接受」）。 */
+        .kh-footer-actions .kh-primary-button {
+          background: var(--blue);
+          border-color: var(--blue);
+          color: #fff;
         }
 
         .kh-close-guard {
@@ -1412,10 +1431,12 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
           cursor: pointer;
         }
 
-        .kh-danger-button {
-          border-color: #f0c0c0 !important;
-          background: #fef2f2 !important;
-          color: #b91c1c !important;
+        /* 同上，复合选择器而非 !important：本类目前只在
+           .kh-close-guard-actions 内使用（「放弃并关闭」）。 */
+        .kh-close-guard-actions .kh-danger-button {
+          border-color: #f0c0c0;
+          background: #fef2f2;
+          color: #b91c1c;
         }
 
         @media (max-width: 720px) {
@@ -1750,6 +1771,7 @@ function KnowhowRowDrawer({
   canEdit,
   onEditCell,
   onClose,
+  cellModalOpen,
 }: {
   row: KnowhowRow;
   columns: KnowhowColumn[];
@@ -1761,14 +1783,23 @@ function KnowhowRowDrawer({
    * 该列对应格子的编辑态，不经预览态中转——用户已经明确点了「编辑」。 */
   onEditCell: (rowId: string, columnId: string) => void;
   onClose: () => void;
+  /** 格子浮窗（编辑态/预览态）当前是否堆叠在本抽屉之上（T7 复审 Important
+   * 修复）：为 true 时本抽屉的 Esc 监听器短路、不关闭抽屉——两者独立的
+   * window keydown 监听器按注册顺序（抽屉先挂载，先注册）依次响应同一次
+   * 按键，若不在这里短路，一次 Esc 会先无条件关闭本抽屉（它自己没有"未保存
+   * 内容"的概念），格子浮窗随后可能因为有未保存内容改为弹出"确认放弃"而不
+   * 真正关闭——结果抽屉已经消失、浮窗却还留着，用户之后关掉浮窗时会发现连
+   * "返回这一行"的抽屉上下文都丢了。真正想关的是最顶层的格子浮窗，Esc 应该
+   * 只作用于它，抽屉留到浮窗自己关闭之后再响应下一次 Esc。 */
+  cellModalOpen: boolean;
 }) {
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !cellModalOpen) onClose();
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+  }, [onClose, cellModalOpen]);
 
   const orderedColumns = useMemo(() => sortColumnsByPosition(columns), [columns]);
   const titleText = cellSummary(resolveRowTitleText(row, columns), 200) || "行详情";

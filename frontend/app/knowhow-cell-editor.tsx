@@ -40,6 +40,7 @@ import {
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -222,9 +223,22 @@ export function KnowhowCellPreview({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
+  // 背景点击关闭（镜像 knowhow-import.tsx 的 handleBackdropClick /
+  // knowhow-manage.tsx 的 ManageModalShell 既有习语）：只读预览态没有未保存
+  // 内容的概念，点背景直接关闭，不需要经过任何确认层。
+  function handleBackdropClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (event.currentTarget === event.target) onClose();
+  }
+
   return (
-    <div className="kh-modal-overlay">
-      <div className="kh-modal-card" role="dialog" aria-modal="true" aria-label={`${rowTitle} › ${column.name}`}>
+    <div className="kh-modal-overlay" onClick={handleBackdropClick}>
+      <div
+        className="kh-modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${rowTitle} › ${column.name}`}
+        onClick={(event) => event.stopPropagation()}
+      >
         <header className="kh-modal-header">
           <div className="kh-modal-header-top">
             <div className="kh-modal-breadcrumb">
@@ -542,13 +556,21 @@ export function KnowhowCellEditor({
     setDragActive(false);
   }
 
+  // 背景点击关闭（镜像 knowhow-import.tsx / knowhow-manage.tsx 既有习语）：
+  // 编辑态可能有未保存内容，走与 Esc/关闭按钮相同的 requestClose 守卫
+  // （未保存时弹「确认放弃」而不是直接关闭），不能像预览态那样直接 onClose。
+  function handleBackdropClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (event.currentTarget === event.target) requestClose();
+  }
+
   return (
-    <div className="kh-modal-overlay">
+    <div className="kh-modal-overlay" onClick={handleBackdropClick}>
       <div
         className="kh-modal-card kh-modal-card--editor"
         role="dialog"
         aria-modal="true"
         aria-label={`${rowTitle} › ${column.name}`}
+        onClick={(event) => event.stopPropagation()}
       >
         <header className="kh-modal-header">
           <div className="kh-modal-header-top">
