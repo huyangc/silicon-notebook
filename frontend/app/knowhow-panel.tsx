@@ -16,27 +16,26 @@
  * 视图，一个写按钮都不出现（规格⑦「只读成员可看」）。
  *
  * 编辑入口的分工：建表向导 + 表/列/行管理在 knowhow-manage.tsx；导入向导在
- * knowhow-import.tsx；格子内容编辑浮窗属 Task 7（本文件网格暂仍只读展示格子
- * 内容）。本文件对这些 modal 只做「打开/关闭 + 完成后刷新」的接线。
+ * knowhow-import.tsx；格子内容编辑浮窗（预览态 KnowhowCellPreview / 编辑态
+ * KnowhowCellEditor）在 knowhow-cell-editor.tsx（Task 7），本文件只持有
+ * 「当前打开的是哪一格 + 预览还是编辑」这一顶层状态机（cellModal）与三个click
+ * 路由入口：网格非行标题列格子点击、行详情抽屉分节「编辑」按钮、「添加行」
+ * 建空行后自动打开首格编辑态。本文件对这些 modal 只做「打开/关闭 + 完成后
+ * 刷新」的接线，不重复实现格子编辑器内部的任何逻辑。
  */
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import ReactMarkdown, { type Components } from "react-markdown";
-import remarkGfm from "remark-gfm";
-import remarkMath from "remark-math";
-import rehypeKatex from "rehype-katex";
-import "katex/dist/katex.min.css";
-import { ChevronLeft, ListPlus, Plus, RefreshCw, Search, Settings2, Trash2, Upload, X } from "lucide-react";
+import { ChevronLeft, Edit3, ListPlus, Plus, RefreshCw, Search, Settings2, Trash2, Upload, X } from "lucide-react";
 import {
   ROLE_LABELS,
-  rewriteAssetUrls,
   cellSummary,
   fetchKnowhowTables,
   fetchKnowhowTable,
   deleteKnowhowTable,
   reprojectKnowhowTable,
   addKnowhowRow,
+  patchKnowhowCell,
   type KnowhowTableSummary,
   type KnowhowTableDetail,
   type KnowhowRow,
@@ -52,12 +51,12 @@ import {
   PROJECTION_STATUS_TONE,
   isRetryableProjectionStatus,
   resolveRowTitleText,
-  isInternalAssetUrl,
 } from "./knowhow-panel-logic.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
-import { authHeaders } from "./auth.ts";
+import { rowFallbackTitle } from "./knowhow-cell-editor-logic.ts";
 import { KnowhowImportWizard } from "./knowhow-import.tsx";
 import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
+import { KnowhowMarkdown, KnowhowCellPreview, KnowhowCellEditor } from "./knowhow-cell-editor.tsx";
 
 // ---------------------------------------------------------------------------
 // KnowhowPanel — 顶层：全屏 dialog 外壳 + 三层状态机
@@ -98,6 +97,14 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
   const [retryingReproject, setRetryingReproject] = useState(false);
   const [addingRow, setAddingRow] = useState(false);
 
+  // 格子浮窗顶层状态机（Task 7）：null=未打开；mode="preview"=已填格子的只读
+  // 预览态（右上「编辑」切到 edit）；mode="edit"=编辑态。行标题列格子（网格
+  // 首列）不走这里——它点击时仍走既有的 onOpenRow 打开整行抽屉，与规格⑤
+  // 「点行首/概念列打开」行详情抽屉的既有约定一致。
+  const [cellModal, setCellModal] = useState<{ rowId: string; columnId: string; mode: "preview" | "edit" } | null>(
+    null,
+  );
+
   const loadTables = useCallback(() => {
     setTablesLoading(true);
     setTablesError(null);
@@ -136,6 +143,7 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     setActionError(null);
     setQuery("");
     setOpenRowId(null);
+    setCellModal(null);
     setConfirmDelete(false);
     setManageOpen(false);
     setCreateOpen(false);
@@ -148,6 +156,7 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     setActionError(null);
     setQuery("");
     setOpenRowId(null);
+    setCellModal(null);
     setConfirmDelete(false);
     setManageOpen(false);
   }
@@ -159,6 +168,7 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     setActionError(null);
     setQuery("");
     setOpenRowId(null);
+    setCellModal(null);
     setConfirmDelete(false);
     setManageOpen(false);
   }
@@ -192,16 +202,20 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     }
   }
 
-  // 「添加行」：建空行后重拉详情。逐格填写浮窗（点空格直入编辑）属 Task 7，
-  // 落地后新行的引导自然衔接到编辑态；当前先把「行出现在网格里」这一步走通。
+  // 「添加行」：建空行 + 自动打开首格（网格列顺序的第一列）编辑态——规格②
+  // 路A「新增行 = 建空行 + 自动打开首格浮窗，一路「保存并下一格」即天然填写
+  // 向导」。用 addKnowhowRow 直接返回的新行 id 打开编辑器，不必等 loadDetail
+  // 的整表重拉——列表不受影响，用旧的 detail.columns 算首列 id 即可。
   async function addRow() {
     if (!selectedTableId || addingRow) return;
     setAddingRow(true);
     setActionError(null);
     try {
-      await addKnowhowRow(notebookId, selectedTableId, { cells: {} });
+      const newRow = await addKnowhowRow(notebookId, selectedTableId, { cells: {} });
       loadDetail(selectedTableId);
       loadTables();
+      const firstColumnId = detail ? orderColumnsForGrid(detail.columns)[0]?.id : undefined;
+      if (firstColumnId) openCellEdit(newRow.id, firstColumnId);
     } catch (err) {
       setActionError(extractErrorMessage(err, "添加行失败，请重试"));
     } finally {
@@ -216,7 +230,53 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     loadTables();
   }
 
+  // 直接以编辑态打开某一格——供「添加行」引导、行详情抽屉「编辑」按钮、
+  // 「保存并下一格」的下一格跳转共用（这三处都已经知道自己要的是编辑态，
+  // 不需要走 openCellAuto 的「按是否已填内容」判定）。
+  function openCellEdit(rowId: string, columnId: string) {
+    setCellModal({ rowId, columnId, mode: "edit" });
+  }
+
+  // 网格里点某一格（非行标题列）：按该格是否已有内容自动决定预览还是编辑态
+  // （规格②路A「空格子直接进编辑态；已填格子先进渲染预览态」）。canEdit=false
+  // 且格子为空时什么也不做——只读成员看不到可点的空格（见 KnowhowTableGrid
+  // 的 clickable 判定），这里的 !canEdit 分支只是防御性兜底。
+  function openCellAuto(rowId: string, columnId: string) {
+    const row = detail?.rows.find((item) => item.id === rowId);
+    const content = row?.cells[columnId] ?? "";
+    if (!content.trim() && !canEdit) return;
+    setCellModal({ rowId, columnId, mode: content.trim() ? "preview" : "edit" });
+  }
+
+  // 格子浮窗「保存」：真正调用 patchKnowhowCell + 把结果合并回 detail 状态
+  // （只更新命中的那一格与其行的 projectionStatus，不必整表重拉——patch
+  // 端点本身就返回了更新后的值，见 knowhow-model.ts patchKnowhowCell 的
+  // 注释）。失败时把异常原样往上抛，编辑器组件在原地展示错误、不关闭浮窗。
+  async function handleCellSave(rowId: string, columnId: string, contentMd: string) {
+    if (!selectedTableId) return;
+    const result = await patchKnowhowCell(notebookId, selectedTableId, rowId, columnId, contentMd);
+    setDetail((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        rows: prev.rows.map((row) =>
+          row.id === result.rowId
+            ? { ...row, cells: { ...row.cells, [result.columnId]: result.contentMd }, projectionStatus: result.projectionStatus }
+            : row,
+        ),
+      };
+    });
+  }
+
   const openRow = detail?.rows.find((row) => row.id === openRowId) ?? null;
+  const cellModalRow = cellModal ? detail?.rows.find((row) => row.id === cellModal.rowId) ?? null : null;
+  const cellModalColumn = cellModal ? detail?.columns.find((column) => column.id === cellModal.columnId) ?? null : null;
+  // 行标题面包屑文本：与行详情抽屉标题同规则(resolveRowTitleText + 截断)，
+  // 保证同一行在抽屉/格子浮窗两处显示完全一致的行标签；空/无行标题列时退回
+  // 「行 N」（规格①「全空则「行 N」」）。
+  const cellModalRowTitle = cellModalRow && detail
+    ? cellSummary(resolveRowTitleText(cellModalRow, detail.columns), 60) || rowFallbackTitle(cellModalRow.position)
+    : "";
 
   return (
     <section className="knowhow-view" role="dialog" aria-modal="true">
@@ -258,6 +318,7 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
             query={query}
             onQueryChange={setQuery}
             onOpenRow={setOpenRowId}
+            onOpenCell={openCellAuto}
             onBack={backToList}
             confirmDelete={confirmDelete}
             onRequestDelete={() => setConfirmDelete(true)}
@@ -279,8 +340,38 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
           columns={detail.columns}
           notebookId={notebookId}
           apiBase={apiBase}
+          canEdit={canEdit}
+          onEditCell={openCellEdit}
           onClose={() => setOpenRowId(null)}
         />
+      )}
+
+      {cellModal && cellModalRow && cellModalColumn && detail && (
+        cellModal.mode === "edit" ? (
+          <KnowhowCellEditor
+            key={`${cellModal.rowId}:${cellModal.columnId}`}
+            notebookId={notebookId}
+            apiBase={apiBase}
+            table={detail}
+            rowId={cellModal.rowId}
+            columnId={cellModal.columnId}
+            rowTitle={cellModalRowTitle}
+            onSave={handleCellSave}
+            onNavigate={(rowId, columnId) => setCellModal({ rowId, columnId, mode: "edit" })}
+            onClose={() => setCellModal(null)}
+          />
+        ) : (
+          <KnowhowCellPreview
+            rowTitle={cellModalRowTitle}
+            column={cellModalColumn}
+            contentMd={cellModalRow.cells[cellModal.columnId] ?? ""}
+            notebookId={notebookId}
+            apiBase={apiBase}
+            canEdit={canEdit}
+            onEdit={() => setCellModal((current) => (current ? { ...current, mode: "edit" } : current))}
+            onClose={() => setCellModal(null)}
+          />
+        )
       )}
 
       {importOpen && canEdit && (
@@ -911,6 +1002,433 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
             width: 100vw;
           }
         }
+
+        /* 网格空格「+」浅色占位（规格②路A「空格显浅色占位」）：复用
+           .knowhow-cell-open 的布局/hover，只覆盖颜色与字重，与已填格子的
+           蓝色粗体形成「有内容/待填写」的视觉区分。 */
+        .knowhow-cell-open--empty {
+          color: var(--muted);
+          font-weight: 400;
+        }
+
+        /* 行详情抽屉——分节「编辑」按钮（Task 7：每节打开同一个格子浮窗的
+           编辑态）。 */
+        .knowhow-drawer-edit-button {
+          margin-left: auto;
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          padding: 3px 10px;
+          font-size: 12px;
+          font-weight: 600;
+          color: var(--blue);
+          background: #fff;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .knowhow-drawer-edit-button:hover {
+          border-color: var(--blue);
+          background: #eef2ff;
+        }
+
+        /* -------------------------------------------------------------------
+           kh-* — 格子浮窗（knowhow-cell-editor.tsx 的 KnowhowCellPreview /
+           KnowhowCellEditor 共用；命名空间独立于上面的 knowhow-* 前缀，避免
+           与既有网格/抽屉样式混淆）。登记在这里而非那个文件自己的 style jsx
+           标签里，是因为 styled-jsx 的 global 样式注入绑定「声明该标签的
+           组件是否渲染过」——KnowhowPanel 是本特性唯一保证任何时候都已经
+           挂载的容器，预览态/编辑态两者谁先渲染都不会缺样式。
+           ------------------------------------------------------------------- */
+
+        .kh-modal-overlay {
+          position: fixed;
+          inset: 0;
+          z-index: 65;
+          display: grid;
+          place-items: center;
+          padding: 24px;
+          background: rgba(17, 24, 32, 0.36);
+        }
+
+        .kh-modal-card {
+          width: min(880px, 100%);
+          max-height: 80vh;
+          background: #fff;
+          border-radius: 16px;
+          box-shadow: 0 24px 70px rgba(24, 39, 75, 0.24);
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+        }
+
+        .kh-modal-header {
+          flex: 0 0 auto;
+          padding: 16px 20px;
+          border-bottom: 1px solid var(--line);
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+
+        .kh-modal-header-top {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+
+        .kh-modal-breadcrumb {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+          font-size: 15px;
+          font-weight: 600;
+          color: var(--ink);
+        }
+
+        .kh-modal-row-title {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          max-width: 320px;
+        }
+
+        .kh-modal-sep {
+          color: var(--muted);
+          font-weight: 400;
+        }
+
+        .kh-modal-col-name {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .kh-modal-header-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex: 0 0 auto;
+        }
+
+        .kh-row-context-toggle {
+          align-self: flex-start;
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          border: 0;
+          background: transparent;
+          color: var(--muted);
+          font-size: 12px;
+          font-weight: 600;
+          cursor: pointer;
+          padding: 0;
+        }
+
+        .kh-row-context-toggle svg {
+          transition: transform 0.15s ease;
+        }
+
+        .kh-row-context-toggle svg.kh-chevron-open {
+          transform: rotate(180deg);
+        }
+
+        .kh-row-context-body {
+          display: grid;
+          gap: 6px;
+          padding: 10px 12px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          background: var(--soft);
+          font-size: 12px;
+        }
+
+        .kh-row-context-item {
+          display: flex;
+          align-items: baseline;
+          gap: 8px;
+          min-width: 0;
+        }
+
+        .kh-row-context-item strong {
+          flex: 0 0 auto;
+          color: var(--ink);
+        }
+
+        .kh-row-context-text {
+          flex: 1 1 auto;
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: var(--muted);
+        }
+
+        .kh-row-context-empty {
+          margin: 0;
+          color: var(--muted);
+        }
+
+        .kh-modal-body {
+          flex: 1 1 auto;
+          min-height: 0;
+          overflow-y: auto;
+          padding: 16px 20px;
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .kh-draft-banner {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          padding: 8px 14px;
+          border: 1px solid #c7d6ff;
+          border-radius: 8px;
+          background: #eef2ff;
+          color: #1f5eff;
+          font-size: 13px;
+        }
+
+        .kh-draft-banner-actions {
+          display: flex;
+          gap: 8px;
+          flex: 0 0 auto;
+        }
+
+        .kh-draft-banner-actions button {
+          border: 1px solid #c7d6ff;
+          background: #fff;
+          border-radius: 999px;
+          padding: 4px 12px;
+          font-size: 12px;
+          font-weight: 600;
+          color: #1f5eff;
+          cursor: pointer;
+        }
+
+        .kh-procedure-hint {
+          margin: 0;
+          padding: 8px 12px;
+          border-radius: 8px;
+          background: #fdf4e6;
+          border: 1px solid #f0dab3;
+          color: #9a5b00;
+          font-size: 12.5px;
+        }
+
+        .kh-toolbar {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .kh-toolbar-button {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          background: #fff;
+          padding: 5px 10px;
+          font-size: 12.5px;
+          color: var(--ink);
+          cursor: pointer;
+        }
+
+        .kh-toolbar-button:hover {
+          border-color: var(--blue);
+          color: var(--blue);
+        }
+
+        .kh-toolbar-button:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .kh-toolbar-status {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 12.5px;
+          color: var(--muted);
+        }
+
+        .kh-hidden-file-input {
+          display: none;
+        }
+
+        .kh-inline-error {
+          color: #ba2d2d;
+          font-size: 12.5px;
+          margin: 0 auto 0 0;
+        }
+
+        .kh-split {
+          flex: 1 1 auto;
+          min-height: 260px;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 14px;
+        }
+
+        .kh-editor-pane {
+          display: flex;
+          min-width: 0;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          transition: border-color 0.15s ease, background 0.15s ease;
+        }
+
+        .kh-editor-pane--drag {
+          border-color: var(--blue);
+          background: #eef2ff;
+        }
+
+        .kh-textarea {
+          flex: 1 1 auto;
+          width: 100%;
+          min-height: 220px;
+          border: 0;
+          border-radius: 8px;
+          padding: 10px 12px;
+          font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          color: var(--ink);
+          background: transparent;
+          resize: none;
+          box-sizing: border-box;
+        }
+
+        .kh-textarea:focus {
+          outline: none;
+        }
+
+        .kh-textarea:disabled {
+          opacity: 0.6;
+        }
+
+        .kh-preview-pane {
+          min-width: 0;
+          overflow-y: auto;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          padding: 10px 12px;
+        }
+
+        .kh-preview-body {
+          min-height: 120px;
+        }
+
+        .kh-preview-edit-button {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          border: 1px solid var(--line);
+          border-radius: 999px;
+          padding: 5px 12px;
+          font-size: 12.5px;
+          font-weight: 600;
+          color: var(--blue);
+          background: #fff;
+          cursor: pointer;
+        }
+
+        .kh-preview-edit-button:hover {
+          border-color: var(--blue);
+          background: #eef2ff;
+        }
+
+        .kh-modal-footer {
+          flex: 0 0 auto;
+          padding: 14px 20px;
+          border-top: 1px solid var(--line);
+          display: flex;
+          align-items: center;
+          justify-content: flex-end;
+          gap: 12px;
+        }
+
+        .kh-footer-actions {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+
+        .kh-footer-actions button {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          padding: 8px 14px;
+          font-size: 13px;
+          font-weight: 600;
+          background: #fff;
+          color: var(--ink);
+          cursor: pointer;
+        }
+
+        .kh-footer-actions button:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .kh-primary-button {
+          background: var(--blue) !important;
+          border-color: var(--blue) !important;
+          color: #fff !important;
+        }
+
+        .kh-close-guard {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          width: 100%;
+          font-size: 13px;
+          color: #ba2d2d;
+        }
+
+        .kh-close-guard-actions {
+          display: flex;
+          gap: 8px;
+          flex: 0 0 auto;
+        }
+
+        .kh-close-guard-actions button {
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          padding: 6px 12px;
+          font-size: 12.5px;
+          font-weight: 600;
+          background: #fff;
+          cursor: pointer;
+        }
+
+        .kh-danger-button {
+          border-color: #f0c0c0 !important;
+          background: #fef2f2 !important;
+          color: #b91c1c !important;
+        }
+
+        @media (max-width: 720px) {
+          .kh-modal-card {
+            width: 100vw;
+            max-height: 100vh;
+            border-radius: 0;
+          }
+
+          .kh-split {
+            grid-template-columns: 1fr;
+          }
+        }
       `}</style>
     </section>
   );
@@ -1006,6 +1524,7 @@ function KnowhowTableGrid({
   query,
   onQueryChange,
   onOpenRow,
+  onOpenCell,
   onBack,
   confirmDelete,
   onRequestDelete,
@@ -1028,6 +1547,9 @@ function KnowhowTableGrid({
   query: string;
   onQueryChange: (value: string) => void;
   onOpenRow: (rowId: string) => void;
+  /** 非行标题列格子点击（规格②路A「点格子弹浮窗」）：panel 按该格是否已有
+   * 内容自动决定预览还是编辑态。 */
+  onOpenCell: (rowId: string, columnId: string) => void;
   onBack: () => void;
   confirmDelete: boolean;
   onRequestDelete: () => void;
@@ -1161,21 +1683,29 @@ function KnowhowTableGrid({
                   <tr key={row.id}>
                     {orderedColumns.map((column, index) => {
                       const text = cellSummary(row.cells[column.id] ?? "");
+                      const filled = Boolean(text);
+                      // 行标题列（网格首列，规格②路A）填了内容后仍走既有的
+                      // 整行抽屉入口（规格⑤「点行首/概念列打开」）；空的话
+                      // 直接进格子编辑态更有引导性（规格②路A「空格子直接进
+                      // 编辑态」），而不是打开一个几乎全空的抽屉。其余列
+                      // （或空的行标题列）一律走格子浮窗，由 panel 按内容
+                      // 有无决定预览/编辑。空格 + 只读成员没有可点的入口
+                      // （规格⑦「只读成员可看」——没什么可填，也没什么可读）。
+                      const opensRowDrawer = index === 0 && filled;
+                      const clickable = opensRowDrawer || filled || canEdit;
                       return (
                         <td key={column.id}>
-                          {index === 0 ? (
+                          {clickable ? (
                             <button
                               type="button"
-                              className="knowhow-cell-open"
-                              onClick={() => onOpenRow(row.id)}
-                              title={text || "打开行详情"}
+                              className={`knowhow-cell-open${filled ? "" : " knowhow-cell-open--empty"}`}
+                              onClick={() => (opensRowDrawer ? onOpenRow(row.id) : onOpenCell(row.id, column.id))}
+                              title={filled ? text : "点击填写这一格"}
                             >
-                              {text || "—"}
+                              {filled ? text : "+"}
                             </button>
                           ) : (
-                            <span className="knowhow-cell-text" title={text || undefined}>
-                              {text || "—"}
-                            </span>
+                            <span className="knowhow-cell-text">—</span>
                           )}
                         </td>
                       );
@@ -1217,12 +1747,19 @@ function KnowhowRowDrawer({
   columns,
   notebookId,
   apiBase,
+  canEdit,
+  onEditCell,
   onClose,
 }: {
   row: KnowhowRow;
   columns: KnowhowColumn[];
   notebookId: string;
   apiBase: string;
+  /** 只读成员不出现分节「编辑」按钮（规格⑦「只读成员可看」）。 */
+  canEdit: boolean;
+  /** 分节「编辑」按钮（规格⑤「每节「编辑」按钮打开同一个格子浮窗」）：打开
+   * 该列对应格子的编辑态，不经预览态中转——用户已经明确点了「编辑」。 */
+  onEditCell: (rowId: string, columnId: string) => void;
   onClose: () => void;
 }) {
   useEffect(() => {
@@ -1252,6 +1789,15 @@ function KnowhowRowDrawer({
               <div className="knowhow-drawer-section-head">
                 <h4>{column.name}</h4>
                 <RoleBadge role={column.role} />
+                {canEdit && (
+                  <button
+                    type="button"
+                    className="knowhow-drawer-edit-button"
+                    onClick={() => onEditCell(row.id, column.id)}
+                  >
+                    <Edit3 size={13} /> 编辑
+                  </button>
+                )}
               </div>
               <KnowhowMarkdown md={row.cells[column.id] ?? ""} notebookId={notebookId} apiBase={apiBase} />
             </section>
@@ -1304,100 +1850,7 @@ function ProjectionStatusBadge({
   );
 }
 
-// ---------------------------------------------------------------------------
-// KnowhowMarkdown — 复用 answer-markdown.tsx 的 GFM+KaTeX 渲染管线
-// ---------------------------------------------------------------------------
-//
-// 未直接复用 AnswerMarkdown 组件本身：它耦合了引用徽章体系（必填
-// onReferenceClick、anchors/citations→referenceByCitationKey 映射、
-// remarkCitations 插件），knowhow 格子内容没有引用概念，硬套空数组
-// /空回调既别扭又会在格子文本恰好出现「[k1]」字样时误当引用扫描。
-// 因此这里只复刻其 remark/rehype 管线本身（remarkGfm+remarkMath+
-// rehypeKatex）、pre/table 的包装 class、以及 <a> 强制新标签打开
-// （target="_blank" rel="noreferrer"，同 answer-markdown.tsx 的普通外链
-// 分支——没有 cite: 引用徽章分支，因为本组件压根不产生 cite: 链接），
-// 行为对齐、无引用负担。
-
-function KnowhowMarkdown({ md, notebookId, apiBase }: { md: string; notebookId: string; apiBase: string }) {
-  const content = rewriteAssetUrls(md ?? "", notebookId, apiBase);
-
-  const components = useMemo<Components>(
-    () => ({
-      // 格子内容可能包含普通链接（如工具文档 URL）；不强制新标签打开的话
-      // 点击会在同一个 SPA 标签页里跳走，丢失当前 notebook/knowhow 视图上下文。
-      a({ href, children }) {
-        return (
-          <a href={href} target="_blank" rel="noreferrer">
-            {children}
-          </a>
-        );
-      },
-      pre({ children }) {
-        return <pre className="answer-code">{children}</pre>;
-      },
-      table({ children }) {
-        return (
-          <div className="answer-table-wrap">
-            <table className="answer-table">{children}</table>
-          </div>
-        );
-      },
-      img({ src, alt }) {
-        return <KnowhowImage src={typeof src === "string" ? src : undefined} alt={alt} apiBase={apiBase} />;
-      },
-    }),
-    [apiBase],
-  );
-
-  if (!content.trim()) {
-    return <p className="knowhow-empty-cell">（空）</p>;
-  }
-
-  return (
-    <div className="answer-markdown knowhow-markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={components}>
-        {content}
-      </ReactMarkdown>
-    </div>
-  );
-}
-
-// 鉴权 token 只存在 localStorage，从不随 <img src> 请求自动带上（见
-// knowhow-panel-logic.ts 的 isInternalAssetUrl 注释）。本站资产 URL 走
-// fetch+blob 带 Authorization 头；其余来源(外链图片等)走普通 <img src>。
-function KnowhowImage({ src, alt, apiBase }: { src?: string; alt?: string; apiBase: string }) {
-  const needsAuth = Boolean(src) && isInternalAssetUrl(src ?? "", apiBase);
-  const [blobUrl, setBlobUrl] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    if (!needsAuth || !src) return;
-    let cancelled = false;
-    let created: string | null = null;
-    setFailed(false);
-    setBlobUrl(null);
-    fetch(src, { headers: authHeaders() })
-      .then((res) => {
-        if (!res.ok) throw new Error(String(res.status));
-        return res.blob();
-      })
-      .then((blob) => {
-        if (cancelled) return;
-        created = URL.createObjectURL(blob);
-        setBlobUrl(created);
-      })
-      .catch(() => {
-        if (!cancelled) setFailed(true);
-      });
-    return () => {
-      cancelled = true;
-      if (created) URL.revokeObjectURL(created);
-    };
-  }, [src, needsAuth]);
-
-  if (!src) return null;
-  if (!needsAuth) return <img src={src} alt={alt ?? ""} className="knowhow-image" />;
-  if (failed) return <span className="knowhow-image-fallback">（图片加载失败{alt ? `：${alt}` : ""}）</span>;
-  if (!blobUrl) return <span className="knowhow-image-loading">（图片加载中…）</span>;
-  return <img src={blobUrl} alt={alt ?? ""} className="knowhow-image" />;
-}
+// KnowhowMarkdown（复用 answer-markdown.tsx 的 GFM+KaTeX 渲染管线，供本文件
+// 的行详情抽屉 与 knowhow-cell-editor.tsx 的格子浮窗预览/编辑分栏共用）随格子
+// 浮窗一起挪到了 knowhow-cell-editor.tsx——见该文件头注释；本文件已在顶部
+// import 使用，不再在此重复定义。

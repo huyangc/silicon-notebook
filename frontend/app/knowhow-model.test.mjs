@@ -24,6 +24,7 @@ import {
   putCellCode,
   deleteCellCode,
   mapCitationKnowhowRef,
+  uploadNotebookAsset,
 } from "./knowhow-model.ts";
 
 // --- fetch stub helper（镜像 edge-review-queue.test.mjs 的 withFetchStub，
@@ -473,6 +474,23 @@ test("deleteCellCode: DELETE .../rows/{row}/cells/{col}/code", () => {
     await deleteCellCode("r1", "c1");
     assert.match(calls[0].url, /\/agent\/knowhow\/rows\/r1\/cells\/c1\/code$/);
     assert.strictEqual(calls[0].init.method, "DELETE");
+  });
+});
+
+// --- uploadNotebookAsset（Task 7；补 Task 4 起草本文件时遗漏的 asset 上传
+// fetcher——端点是 PR-1 既有的 POST /notebooks/{nb}/assets）-----------------------
+
+test("uploadNotebookAsset: POST multipart 到 /notebooks/{nb}/assets，响应 {id,url} 原样返回（无 snake_case 字段需转换）", () => {
+  const wireAsset = { id: "a1", url: "/api/notebooks/nb-1/assets/a1" };
+  return withFetchStub(wireAsset, async (calls) => {
+    const file = new Blob(["binary-image-bytes"]);
+    const asset = await uploadNotebookAsset("nb-1", file);
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/assets$/);
+    assert.strictEqual(calls[0].init.method, "POST");
+    const form = calls[0].init.body;
+    assert.ok(form instanceof FormData);
+    assert.ok(form.get("file") instanceof Blob, "file 字段应作为二进制内容附着");
+    assert.deepStrictEqual(asset, wireAsset);
   });
 });
 

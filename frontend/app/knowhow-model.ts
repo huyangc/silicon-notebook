@@ -549,6 +549,21 @@ export const putCellCode = (
 export const deleteCellCode = (rowId: string, columnId: string): Promise<void> =>
   apiFetch<void>(`/agent/knowhow/rows/${rowId}/cells/${columnId}/code`, { method: "DELETE" });
 
+// --- Notebook 资产上传（Task 7；端点本身是 PR-1 既有的
+// `POST /notebooks/{nb}/assets`——起草本文件时 Task 4 遗漏了这个 fetcher，
+// Task 7 格子编辑器的图片粘贴/拖拽/工具栏插入都需要它，在此补上）----------------
+
+// 响应 {id,url} 本身就是合法 camelCase（两个字段名都不含下划线），没有
+// snake_case 字段需要转换，故不另设 WireXxx+mapXxx——直接把响应体类型当
+// UploadedAsset 用（本文件其余 fetcher 遇到 snake_case 字段时才需要那一层）。
+export type UploadedAsset = { id: string; url: string };
+
+export const uploadNotebookAsset = (notebookId: string, file: File | Blob): Promise<UploadedAsset> => {
+  const form = new FormData();
+  form.append("file", file);
+  return apiFetch<UploadedAsset>(`/notebooks/${notebookId}/assets`, { method: "POST", body: form });
+};
+
 // --- 纯 helper(单测) ------------------------------------------------------------
 
 // 行标题自动合成(展示用，记录型/无行标题列的表用来在网格/抽屉里显示一个可读
