@@ -19,13 +19,16 @@ PAPER_META_SCHEMA_HINT = (
 )
 
 _DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
-# 年份接地用:先挖空疑似 DOI 的 token,防年份候选命中 DOI 数字游程(如
-# 10.1109/ABCD.2031.999999 里的 2031)。
+# 年份接地用:先挖空疑似 DOI / arXiv-ID 的 token,防年份候选命中其中的数字
+# 游程(如 10.1109/ABCD.2031.999999 里的 2031、arXiv:2007.12345v2 里的 2007)。
 _DOI_BLANK_RE = re.compile(r"10\.\d{4,9}/\S+")
-# DOI 接地用:抽取头部文本里完整的 DOI token(不含引号/尖括号),再逐个去
-# 尾部常见标点后与候选值精确比对——避免子串匹配把截断前缀误判为已接地。
-_DOI_TOKEN_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>]+")
-_DOI_TRAILING_PUNCT = ".,;:)]}>\"'"
+_ARXIV_ID_BLANK_RE = re.compile(r"\b\d{4}\.\d{4,5}(?:v\d+)?\b")
+# DOI 接地用:抽取头部文本里完整的 DOI token(ASCII 与常见 Unicode 引号/括号
+# /句读都算 token 边界),再逐个去尾部标点后与候选值精确比对——避免子串匹配
+# 把截断前缀误判为已接地。
+_DOI_EDGE_PUNCT = "\"'<>“”‘’«»‹›〈〉《》「」『』【】（）［］｛｝。，、；：！？"
+_DOI_TOKEN_RE = re.compile(r"10\.\d{4,9}/[^\s" + re.escape(_DOI_EDGE_PUNCT) + r"]+")
+_DOI_TRAILING_PUNCT = ".,;:)]}" + _DOI_EDGE_PUNCT
 
 
 def paper_meta_prompt(head_text: str) -> str:
@@ -76,8 +79,9 @@ def author_grounded(name: str, head_norm: str) -> bool:
     return any(grounded("".join(cand), head_norm) for cand in candidates)
 
 
-def _blank_doi_tokens(text: str) -> str:
-    return _DOI_BLANK_RE.sub(" ", text)
+def _blank_id_tokens(text: str) -> str:
+    """挖空 DOI / arXiv-ID 形状的 token,年份接地只在剩余文本上搜索。"""
+    return _ARXIV_ID_BLANK_RE.sub(" ", _DOI_BLANK_RE.sub(" ", text))
 
 
 def _doi_tokens(text: str) -> List[str]:
@@ -93,7 +97,9 @@ def _doi_tokens(text: str) -> List[str]:
 def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[str, Any]:
     """接地校验:返回可直接交给 SourceStore.upsert_paper_meta 的 meta dict。
     不在头部文本中的字段不落库;丢弃明细记入 raw_json 审计信封
-    {"llm": 原始返回, "dropped": {...}} 并以 "dropped" 键回传给调用方记事件。"""
+    {"llm": 原始返回, "dropped": {...}} 并以 "dropped" 键回传给调用方记事件。
+    畸形形状的值(非预期类型的 authors/keywords/affiliations 等)静默降级、绝不
+    raise:原始值完整保留在 raw_json["llm"],dropped 只记录接地拒绝(非形状降级)。"""
     head_text = head_text or ""
     head_norm = _norm(head_text)
     dropped: Dict[str, Any] = {}
@@ -117,12 +123,12 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
             candidate = int(float(str(raw_year).strip()))
         except (ValueError, TypeError, OverflowError):
             candidate = 0
-        # 年份必须以独立数字串出现在文本里,且不能落在 DOI token 内部——先挖
-        # 空疑似 DOI 的片段,防止 DOI 尾部数字游程(如 .../ABCD.2031.999999
-        # 里的 2031)被误判为已接地的出版年。
-        head_sans_doi = _blank_doi_tokens(head_text)
+        # 年份必须以独立数字串出现在文本里,且不能落在 DOI / arXiv-ID token
+        # 内部——先挖空这些片段,防止其中的数字游程(如 .../ABCD.2031.999999
+        # 里的 2031、arXiv:2007.12345 里的 2007)被误判为已接地的出版年。
+        head_sans_ids = _blank_id_tokens(head_text)
         if 1900 <= candidate <= 2100 and re.search(
-            rf"(?<!\d){candidate}(?!\d)", head_sans_doi
+            rf"(?<!\d){candidate}(?!\d)", head_sans_ids
         ):
             year = candidate
         else:
@@ -177,11 +183,13 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
         if not author_grounded(name, head_norm):
             dropped_authors.append(name)
             continue
-        affiliations = [
-            str(a).strip()
-            for a in raw_author.get("affiliations") or []
-            if str(a).strip()
-        ]
+        raw_affs = raw_author.get("affiliations")
+        if isinstance(raw_affs, str):
+            # 纯字符串当单机构列表,防按字符迭代成「字符汤」混过接地闸门。
+            raw_affs = [raw_affs]
+        elif not isinstance(raw_affs, list):
+            raw_affs = []  # 其它非 list 形状(数字/None/…)一律当空。
+        affiliations = [str(a).strip() for a in raw_affs if str(a).strip()]
         kept = [a for a in affiliations if grounded(a, head_norm)]
         cleared_affiliations.extend(a for a in affiliations if a not in kept)
         authors.append(
