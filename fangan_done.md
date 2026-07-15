@@ -318,8 +318,9 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **官方 MCP Streamable HTTP**：`/mcp` 提供精确七工具 `list_notebooks`、`select_notebook`、
   `search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、
   `propose_memory`。每个新 session 必须先显式选择 allowlisted notebook；数据工具继续校验 notebook，
-  候选只能提交不能由 Agent 确认/拒绝/弃用/晋升。loopback 可用 HTTP，非 loopback/public URL 强制
-  HTTPS；返回私有文本按不可信 evidence 处理并做长度/结果数上限。
+  候选只能提交不能由 Agent 确认/拒绝/弃用/晋升。loopback 可用 HTTP，非 loopback/public URL 默认
+  允许明文 HTTP（放宽 Host/Origin 校验并打印启动告警），设 `MCP_REQUIRE_HTTPS=1` 恢复强制 HTTPS；
+  返回私有文本按不可信 evidence 处理并做长度/结果数上限。
 - **Memory → KG**：仅 confirmed 且尚未提案的 Memory 可由创建者提议；既有 admin promotion
   queue 展示脱敏后的结构化提取候选与服务端验证过的 evidence，不提供原始 Memory
   revision/provenance 浏览。编辑或弃用 proposed Memory 会在同一事务中拒绝活跃队列项、保留固定
