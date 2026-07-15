@@ -3271,6 +3271,24 @@ class SQLiteRepository:
     def get_notebook_asset(self, asset_id: str) -> Optional[dict]:
         return self._runtime.knowhow_store.get_notebook_asset(asset_id)
 
+    # ---------------------------------------------------- paper metadata
+    def get_paper_meta(self, source_id: str) -> Optional[dict]:
+        return self._runtime.source_store.get_paper_meta(source_id)
+
+    def sources_missing_paper_meta(
+        self, notebook_id: str, include_existing: bool = False
+    ) -> List[str]:
+        return self._runtime.source_store.sources_missing_paper_meta(
+            notebook_id, include_existing
+        )
+
+    def backfill_paper_metadata(
+        self, notebook_id: str, force: bool = False, progress=None
+    ) -> dict:
+        return self._runtime.source_ingestion.backfill_paper_metadata(
+            notebook_id, force=force, progress=progress
+        )
+
 
 def _now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()

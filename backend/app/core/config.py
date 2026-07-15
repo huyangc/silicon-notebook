@@ -142,6 +142,11 @@ class Settings(BaseSettings):
     kg_llm_api_key: str = Field("", validation_alias="KG_LLM_API_KEY")
     kg_llm_model: str = Field("", validation_alias="KG_LLM_MODEL")
 
+    # --- 论文元数据抽取(paper-metadata):对 academic_paper 源的文档头部做一次小
+    # LLM 调用,接地校验后入库(source_paper_meta/source_authors)。
+    paper_meta_enabled: bool = Field(True, validation_alias="PAPER_META_ENABLED")
+    paper_meta_head_chars: int = Field(4000, validation_alias="PAPER_META_HEAD_CHARS")
+
     embed_provider: str = Field("", validation_alias="EMBED_PROVIDER")          # ""(off) | dashscope
     embed_model: str = Field("", validation_alias="EMBED_MODEL")
     embed_base_url: str = Field("", validation_alias="EMBED_BASE_URL")
