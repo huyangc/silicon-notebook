@@ -513,3 +513,59 @@ def test_copy_failure_compensation_removes_assets_dir(repo, monkeypatch):
         assert db.execute(
             "SELECT COUNT(*) FROM notebook_assets WHERE notebook_id=?", (nb,)
         ).fetchone()[0] == 1
+
+
+# NOTE: appended at EOF on purpose — the failure-compensation test above has
+# its _new_id/_insert_row monkeypatch sites line-pinned in
+# test_repository_surface_manifest.py's EXPECTED_PATCH_DELTAS; inserting a
+# test before it would shift those pins.
+def test_schedule_failure_after_publish_never_compensates(
+    repo, projector, embedder, monkeypatch
+):
+    """Review fix (post-publish corruption): publish_copy flips the sentinel
+    off 'copying', after which compensate_copy can no longer reap the
+    notebooks row (its DELETE is `WHERE status='copying'` only,
+    sharing_store.py) — running fallible code after publish INSIDE the
+    compensation try/except would, on a raise, delete the published copy's
+    chunks_fts/kg_objects_fts/knowledge_embeddings rows and rmtree its files
+    while the row itself SURVIVES: a persistent, silently-corrupted copy that
+    sweep_stale_copies never reaps. So a projection-scheduling failure AFTER
+    publish (realistic trigger: threading.Timer.start() RuntimeError under
+    thread/fd exhaustion) must be logged and swallowed, NOT compensated:
+    copy_notebook returns normally and every row/index/file of the published
+    copy stays intact."""
+    nb = _notebook(repo)
+    table_id, row_id, cols = _mk_table_with_row(repo, nb)
+    projector.project_table(table_id)
+    AssetService(repo).save(nb, "pic.png", "image/png", b"keep-bytes", "user-local")
+    _mk_user(repo, "user-schedfail")
+
+    def boom(new_table_id):
+        raise RuntimeError("simulated Timer.start failure under thread exhaustion")
+
+    monkeypatch.setattr(repo._runtime.notebook_copies, "_schedule_projection", boom)
+
+    new_nb = repo.copy_notebook(nb, new_owner_id="user-schedfail")  # must NOT raise
+
+    with repo._connect() as db:
+        row = db.execute(
+            "SELECT status FROM notebooks WHERE id=?", (new_nb.id,)
+        ).fetchone()
+        assert row is not None, "published copy row must survive a scheduling failure"
+        assert row["status"] != "copying"  # published, not a reapable sentinel
+        # Business rows intact.
+        assert db.execute(
+            "SELECT COUNT(*) FROM knowhow_tables WHERE notebook_id=?", (new_nb.id,)
+        ).fetchone()[0] == 1
+        # The index rows compensate_copy would have deleted are all present.
+        chunk_count = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE notebook_id=?", (new_nb.id,)
+        ).fetchone()[0]
+        fts_count = db.execute(
+            "SELECT COUNT(*) FROM chunks_fts WHERE notebook_id=?", (new_nb.id,)
+        ).fetchone()[0]
+        assert chunk_count > 0
+        assert fts_count == chunk_count
+    # Files intact (compensation would have rmtree'd the assets tree).
+    assets_dir = Path(repo.storage_dir) / "assets" / new_nb.id
+    assert assets_dir.is_dir() and any(assets_dir.iterdir())

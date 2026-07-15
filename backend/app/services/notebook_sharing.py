@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import secrets
 import shutil
@@ -16,6 +17,8 @@ from app.services.notebook_catalog import NotebookCatalogService, NotebookSummar
 
 if TYPE_CHECKING:  # runtime import would be circular (runtime constructs us)
     from app.services.repository_runtime import RepositoryCompatibilitySeams
+
+_log = logging.getLogger("silicon_notebook.sharing")
 
 
 # PR-2+3 Task 13: a knowhow cell's content_md embeds pasted images as
@@ -345,6 +348,17 @@ class NotebookCopyService:
                     # with unchanged text+section_path is what makes the
                     # post-copy project_table pass see "nothing changed".
                     old_element_ids = json.loads(data.get("element_ids") or "[]")
+                    if not old_element_ids:
+                        # Defensive only — the projector always writes exactly
+                        # one element id per knowhow chunk (_write_chunks).
+                        # Failing loud INSIDE the try means a genuinely
+                        # malformed source row compensates the whole copy
+                        # instead of silently producing a chunk whose id the
+                        # post-copy reprojection could never reconcile.
+                        raise ValueError(
+                            f"copy_notebook: knowhow chunk {old_chunk_id} "
+                            "缺 element_ids，无法重算稳定 id"
+                        )
                     new_row_id = element_row_new[old_element_ids[0]]
                     part = int(old_chunk_id.rsplit("-", 1)[-1])
                     new_chunk_id = cell_chunk_id(new_row_id, part)
@@ -478,17 +492,6 @@ class NotebookCopyService:
 
             self._store.validate_copy(source_notebook_id, new_id)
             self._store.publish_copy(new_id, source_notebook.status)
-            # PR-2+3 Task 13: schedule ONE structural reprojection per copied
-            # knowhow table (khtbl_map.values() are all NEW table ids; empty
-            # for a notebook with no knowhow tables, so this is a zero-cost
-            # no-op for the overwhelmingly common case). The chunks/vectors
-            # already sitting in the copy are byte-identical to what
-            # project_table will independently recompute, so this rebuilds
-            # the KO/edge graph (dynamic column-name types) without a single
-            # additional embedder call — see element_id/cell_chunk_id above.
-            for new_table_id in khtbl_map.values():
-                self._schedule_projection(new_table_id)
-            return self._catalog.get_notebook(new_id)
         except Exception:
             self._store.compensate_copy(new_id)
             if copied_files:
@@ -496,6 +499,40 @@ class NotebookCopyService:
             if assets_copied:
                 shutil.rmtree(assets_dest_dir, ignore_errors=True)
             raise
+        # Success-only path — publish_copy above flipped the sentinel off
+        # 'copying', and compensate_copy can no longer reap the notebooks row
+        # (its DELETE is `WHERE status = 'copying'` only, sharing_store.py).
+        # NOTHING fallible past publish may live inside the try/except: a
+        # raise here used to run compensation that deleted the published
+        # copy's chunks_fts/kg_objects_fts/knowledge_embeddings rows and
+        # rmtree'd its files while the (already published) row SURVIVED — a
+        # persistent, silently-corrupted copy sweep_stale_copies never reaps.
+        #
+        # PR-2+3 Task 13: schedule ONE structural reprojection per copied
+        # knowhow table (khtbl_map.values() are all NEW table ids, still in
+        # scope from the completed try; empty for a notebook with no knowhow
+        # tables, so this is a zero-cost no-op for the common case). The
+        # chunks/vectors already sitting in the copy are byte-identical to
+        # what project_table will independently recompute, so this rebuilds
+        # the KO/edge graph (dynamic column-name types) without a single
+        # additional embedder call — see element_id/cell_chunk_id above. A
+        # scheduling failure (realistic: threading.Timer.start() RuntimeError
+        # under thread/fd exhaustion — this codebase has documented history
+        # there) is LOGGED, never compensated: the copy itself is complete
+        # and valid; the table's manual 重建投影 button (or any later edit,
+        # which schedules the same full pass) covers a missed schedule.
+        for new_table_id in khtbl_map.values():
+            try:
+                self._schedule_projection(new_table_id)
+            except Exception:  # noqa: BLE001 — published copy must survive a scheduling failure
+                _log.warning(
+                    "copy_notebook: 副本 %s 的 knowhow 表 %s 投影调度失败"
+                    "（副本数据完整，可在表内手动重建投影）",
+                    new_id,
+                    new_table_id,
+                    exc_info=True,
+                )
+        return self._catalog.get_notebook(new_id)
 
 
 class NotebookSharingService:
