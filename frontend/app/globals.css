@@ -4296,6 +4296,15 @@ button.chat-session-card {
   gap: 8px;
 }
 
+.source-detail-paper { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
+.source-detail-paper .paper-title { font-weight: 600; line-height: 1.4; }
+.source-detail-paper .paper-authors { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.source-detail-paper .paper-author { cursor: default; text-decoration: underline dotted transparent; }
+.source-detail-paper .paper-author[title]:not([title=""]) { text-decoration-color: currentColor; opacity: .92; }
+.source-detail-paper .paper-venue, .source-detail-paper .paper-doi { font-size: 12px; opacity: .75; }
+.source-detail-paper .paper-doi { width: fit-content; }
+.source-detail-paper .paper-keywords { display: flex; flex-wrap: wrap; gap: 4px; }
+
 .source-element-stack {
   display: grid;
   gap: 12px;
