@@ -439,6 +439,9 @@ test("getCellCode: GET .../rows/{row}/cells/{col}/code，status=implemented 时�
       language: "python",
       status: "implemented",
       updatedAt: "2026-07-15T00:00:00Z",
+      // 单格端点刻意不带 updated_by（后端 wire 契约）——mapper 恒填 null，
+      // 溯源只经行级 map（fetchKnowhowRowCodeByColumn）进入展示层。
+      updatedBy: null,
     });
   });
 });
@@ -455,7 +458,7 @@ test("getCellCode: status=none 时无附件，codeText/language 兜底为空串"
   const wireCode = { code_text: null, language: null, status: "none", updated_at: null };
   return withFetchStub(wireCode, async () => {
     const code = await getCellCode("r1", "c1");
-    assert.deepStrictEqual(code, { codeText: "", language: "", status: "none", updatedAt: null });
+    assert.deepStrictEqual(code, { codeText: "", language: "", status: "none", updatedAt: null, updatedBy: null });
   });
 });
 
@@ -495,8 +498,8 @@ test("fetchKnowhowRowCodeByColumn: GET .../agent/knowhow/rows/{row}（无 /code 
     assert.match(calls[0].url, /\/agent\/knowhow\/rows\/r1$/);
     assert.ok(!calls[0].url.includes("/cells/"), "不应带 cells 段——这是行级端点，不是单格端点");
     assert.deepStrictEqual(map, {
-      c1: { codeText: "print(1)", language: "python", status: "implemented", updatedAt: "2026-07-15T00:00:00Z" },
-      c2: { codeText: "set x 1", language: "tcl", status: "stale", updatedAt: "2026-07-01T00:00:00Z" },
+      c1: { codeText: "print(1)", language: "python", status: "implemented", updatedAt: "2026-07-15T00:00:00Z", updatedBy: "u1" },
+      c2: { codeText: "set x 1", language: "tcl", status: "stale", updatedAt: "2026-07-01T00:00:00Z", updatedBy: "agent-1" },
     });
   });
 });

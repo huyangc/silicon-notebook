@@ -57,6 +57,7 @@ import {
   NO_LANGUAGE_TAG_TEXT,
   SAVE_CODE_LABEL,
   codeEditorIsDirty,
+  codeProvenanceSuffix,
   codeSaveDisabledReason,
   normalizeLanguageInput,
   resolveCopyStrategy,
@@ -326,7 +327,10 @@ export function KnowhowCodeModal({
               <div className="kh-code-lang-row">
                 <span className="kh-code-lang-tag">{code.language || NO_LANGUAGE_TAG_TEXT}</span>
                 {code.updatedAt && (
-                  <span className="kh-code-updated">最近更新：{new Date(code.updatedAt).toLocaleString("zh-CN")}</span>
+                  <span className="kh-code-updated">
+                    最近更新：{new Date(code.updatedAt).toLocaleString("zh-CN")}
+                    {codeProvenanceSuffix(code.updatedBy)}
+                  </span>
                 )}
               </div>
               <pre className="kh-code-block">

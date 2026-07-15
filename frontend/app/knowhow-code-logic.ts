@@ -65,7 +65,7 @@ export function shouldShowCodeChip(status: CellCodeStatus, canEdit: boolean): bo
 // 3. 行级 code map 缺席补 none 占位
 // ===========================================================================
 
-const NONE_CODE_VIEW: KnowhowCellCode = { codeText: "", language: "", status: "none", updatedAt: null };
+const NONE_CODE_VIEW: KnowhowCellCode = { codeText: "", language: "", status: "none", updatedAt: null, updatedBy: null };
 
 // 从 knowhow-model.ts 的 fetchKnowhowRowCodeByColumn 拿到的按列索引 map 里取
 // 某一格的展示状态：命中则原样返回；缺席时合成一个 none 占位值——与后端
@@ -108,6 +108,20 @@ export function codeEditorIsDirty(
     hasUnsavedChanges(codeText, saved.codeText) ||
     normalizeLanguageInput(language) !== normalizeLanguageInput(saved.language)
   );
+}
+
+// ===========================================================================
+// 4b. 查看态「最近更新」溯源后缀（收尾修复：updated_by 展示）
+// ===========================================================================
+
+// 查看态头部「最近更新：{时间}」之后的来源后缀（含前导分隔符，直接拼接）：
+// updatedBy 非空时返回 " · 来自 {updatedBy}"，否则空串。行级端点带
+// updated_by（Agent 名/用户名），单格 GET/PUT 端点刻意不带（wire 契约，见
+// knowhow-model.ts KnowhowCellCode 的类型注释）——后者场景下这里拿到 null，
+// 只显示时间、不合成假来源。
+export function codeProvenanceSuffix(updatedBy: string | null | undefined): string {
+  const name = (updatedBy ?? "").trim();
+  return name ? ` · 来自 ${name}` : "";
 }
 
 // ===========================================================================

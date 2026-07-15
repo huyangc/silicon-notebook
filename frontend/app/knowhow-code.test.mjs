@@ -13,6 +13,7 @@ import {
   CODE_EMPTY_ERROR,
   shouldShowCodeChip,
   resolveCellCodeView,
+  codeProvenanceSuffix,
   codeSaveDisabledReason,
   normalizeLanguageInput,
   codeEditorIsDirty,
@@ -88,18 +89,37 @@ test("resolveCellCodeView: 命中时原样返回该列的代码视图", () => {
   assert.deepStrictEqual(resolveCellCodeView(map, "c1"), map.c1);
 });
 
-test("resolveCellCodeView: 缺席时合成 none 占位（codeText/language 空串、updatedAt=null）", () => {
+test("resolveCellCodeView: 缺席时合成 none 占位（codeText/language 空串、updatedAt/updatedBy=null）", () => {
   assert.deepStrictEqual(resolveCellCodeView({}, "c-missing"), {
     codeText: "",
     language: "",
     status: "none",
     updatedAt: null,
+    updatedBy: null,
   });
 });
 
 test("resolveCellCodeView: map 里其它列命中不影响这一列的缺席判定", () => {
   const map = { other: { codeText: "x", language: "", status: "implemented", updatedAt: "2026-07-01T00:00:00Z" } };
   assert.strictEqual(resolveCellCodeView(map, "c1").status, "none");
+});
+
+// --- 3b. 查看态「最近更新」溯源后缀（收尾修复：updated_by 展示）--------------------
+
+test("codeProvenanceSuffix: updatedBy 非空时返回带前导分隔符的「 · 来自 {名字}」", () => {
+  assert.strictEqual(codeProvenanceSuffix("CodeAgent"), " · 来自 CodeAgent");
+  assert.strictEqual(codeProvenanceSuffix("a00123456"), " · 来自 a00123456");
+});
+
+test("codeProvenanceSuffix: null/undefined/空串/纯空白一律返回空串（不合成假来源）", () => {
+  assert.strictEqual(codeProvenanceSuffix(null), "");
+  assert.strictEqual(codeProvenanceSuffix(undefined), "");
+  assert.strictEqual(codeProvenanceSuffix(""), "");
+  assert.strictEqual(codeProvenanceSuffix("   "), "");
+});
+
+test("codeProvenanceSuffix: 名字首尾空白被裁剪后再拼接", () => {
+  assert.strictEqual(codeProvenanceSuffix("  agent-1  "), " · 来自 agent-1");
 });
 
 // --- 4. 保存前校验 + language 归一化 + 脏检测 --------------------------------------
