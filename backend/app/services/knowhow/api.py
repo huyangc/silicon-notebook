@@ -595,6 +595,113 @@ def commit_append(
     return len(aligned_rows)
 
 
+# --- PR-2+3 Task 8: LLM cell rewrite (design doc §③, explicit trigger only) -
+#
+# This is the feature's ONLY new LLM call (design doc: "绝不自动触发" — no
+# automatic projection/import/reproject path ever calls this). Suggestion-
+# only: optimize_cell never writes to the store itself and never schedules a
+# reprojection — the caller (routes.py) hands the suggestion back for an
+# original/suggested side-by-side preview, and the user's own explicit
+# accept re-uses the EXISTING PATCH cell endpoint to write it (that endpoint,
+# not this one, is what schedules reprojection).
+#
+# Appended here, after commit_append/before __all__, for the identical zero-
+# line-shift reason documented in the Task 6 section above: build_projector's
+# `_runtime`/`settings` reaches are pinned at their own exact lines in
+# test_repository_callers_static.py/test_repository_surface_manifest.py;
+# inserting anything ABOVE them would shift those pins. This section needs
+# its OWN, SECOND `_runtime` reach (repo._runtime.models, to resolve the
+# per-user rewrite LLM client + note_model_error) — registered as a new,
+# separate entry in both guards (see task-8-report-pr23.md), not folded into
+# the existing build_projector registration.
+
+
+class KnowhowOptimizeUnavailable(RuntimeError):
+    """Raised when the rewrite LLM is reached but the call itself fails
+    (network/timeout/malformed response) — as opposed to simply not being
+    configured (``ModelNotConfiguredError``, mapped to 400 by routes.py just
+    like every other validation ``ValueError``) or the cell being empty
+    (plain ``ValueError``, also 400). routes.py maps THIS one to 502."""
+
+
+_OPTIMIZE_SCHEMA_HINT = '{"suggestion_md": ""}'
+
+
+def _optimize_cell_prompt(content_md: str, column_name: str, kind: str) -> str:
+    """Fixed prompt template (design doc §③): preserve meaning/language, tidy
+    structure/wording, keep ``asset://`` image refs verbatim, reply with ONLY
+    the rewritten markdown body — no explanation, no fences. The ordered-
+    list-of-steps clause is included iff this column's kind is ``procedure``
+    (design doc: "markdown 列表化步骤"); the caller resolves ``kind`` from the
+    store (``to_wire_column``'s own value) before calling this."""
+    procedure_clause = (
+        "- 这一列的内容类型是「方法步骤」，请将改写结果整理为有序 markdown 列表"
+        "（1. 2. 3. ...），每个步骤单独一行。\n"
+        if kind == "procedure"
+        else ""
+    )
+    return (
+        f"你是表格型知识库的编辑助手。下面是「{column_name}」列某个格子的当前内容，"
+        "请在完全保持原意和原语言的前提下，规整表达的结构与措辞，使其更清晰、更专业。\n"
+        "规则：\n"
+        "- 保持原意与原语言，不得翻译成其他语言，不得编造原文没有的信息。\n"
+        f"{procedure_clause}"
+        "- 若原文包含形如 `![说明](asset://...)` 的图片引用，必须原样保留，不得改写、"
+        "删除或挪动位置。\n"
+        "- 只输出重写后的 markdown 正文本身，不要添加任何解释、前后缀、标题或代码"
+        "围栏。\n\n"
+        f"当前内容：\n{content_md}\n\n"
+        '严格按此 JSON 格式返回：{"suggestion_md": "<重写后的 markdown 正文>"}'
+    )
+
+
+def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> str:
+    """LLM 表达优化（design doc §③）：格子浮窗「优化表达」/行详情抽屉「优化整行」
+    的共享后端。**显式触发、suggestion-only、绝不写库**——回填走既有 PATCH cell
+    端点（那才触发重投影）。是本特性唯一的新增 LLM 调用。
+
+    走 notebook 既有 LLM 配置（``repo._runtime.models.rewrite_llm_client``，
+    已含 per-user 模型配置解析——不同用户可各自配置改写模型），``cap_kwargs``
+    复用全局生成 max_tokens 上限（不新增专属预算旋钮——效率一等约束）。失败经
+    ``repo._runtime.models.note_model_error`` 走既有 model_error 可观测链路
+    （events.jsonl；本调用不在 ask 上下文内，L2 sink 不适用，仅 L1 emit）。
+
+    Raises ``ValueError`` for an empty cell (400, "格子为空，无需优化") and,
+    from inside the try below, for a well-formed-but-empty LLM reply (folds
+    into the generic-failure path since ``except Exception`` below re-wraps
+    it); ``ModelNotConfiguredError`` when the resolved client isn't configured
+    (400, same friendly message the ``.configured`` pre-check itself raises);
+    ``KnowhowOptimizeUnavailable`` for every other failure (network/timeout/
+    bad response) AFTER logging it via ``note_model_error`` (502) — routes.py
+    maps each to its own status code."""
+    from app.core.llm import cap_kwargs
+    from app.services.model_config import ModelNotConfiguredError
+
+    if not content_md.strip():
+        raise ValueError("格子为空，无需优化")
+    models = repo._runtime.models  # type: ignore[attr-defined]
+    client = models.rewrite_llm_client
+    if not client.configured:
+        raise ModelNotConfiguredError("尚未配置模型，无法优化表达")
+    model_label = getattr(client, "model", "") or ""
+    try:
+        raw = client.chat_json(
+            [{"role": "user", "content": _optimize_cell_prompt(content_md, column_name, kind)}],
+            _OPTIMIZE_SCHEMA_HINT,
+            **cap_kwargs(client, "openai_compat_max_tokens"),
+        )
+        data = json.loads(raw)
+        suggestion = str(data.get("suggestion_md", "")).strip() if isinstance(data, dict) else ""
+        if not suggestion:
+            raise ValueError("模型未返回有效的重写结果")
+        return suggestion
+    except ModelNotConfiguredError:
+        raise
+    except Exception as exc:
+        models.note_model_error("knowhow_optimize", model_label, exc)
+        raise KnowhowOptimizeUnavailable("优化服务暂时不可用，请稍后再试") from exc
+
+
 __all__ = [
     "VALID_KINDS",
     "preview_import",
@@ -610,4 +717,6 @@ __all__ = [
     "build_template_xlsx",
     "preview_append",
     "commit_append",
+    "KnowhowOptimizeUnavailable",
+    "optimize_cell",
 ]

@@ -207,6 +207,16 @@ INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
         "import/table API composition constructs the plain KnowhowProjector "
         "service directly, mirroring deps.py's narrow-runtime-port extraction"
     ),
+    # PR-2+3 Task 8: optimize_cell resolves the per-user rewrite LLM client +
+    # note_model_error the same "extract a narrow runtime port" way
+    # build_projector (line 138 above) already does — a second, independent
+    # call site in the same file, appended at EOF specifically so it cannot
+    # shift build_projector's own pinned line.
+    ("backend/app/services/knowhow/api.py", 682, "_runtime"): (
+        "LLM cell rewrite resolves the per-user rewrite LLM client + "
+        "note_model_error via the same narrow-runtime-port extraction "
+        "build_projector uses, a second independent call site"
+    ),
     **{
         site: "contract fixture generator operates on a disposable fixture database"
         for site in {

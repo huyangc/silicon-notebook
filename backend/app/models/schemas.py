@@ -1130,3 +1130,12 @@ class KnowhowAppendPreview(BaseModel):
 
 class KnowhowAppendResult(BaseModel):
     added: int
+
+
+# --- PR-2+3 Task 8: LLM cell rewrite (explicit trigger, suggestion-only) -----
+# POST .../optimize returns only the suggestion — never writes the cell
+# itself (design doc §③: 用户逐格确认 → 回填走既有 PATCH cell 端点).
+
+
+class KnowhowCellOptimizeResult(BaseModel):
+    suggestion_md: str

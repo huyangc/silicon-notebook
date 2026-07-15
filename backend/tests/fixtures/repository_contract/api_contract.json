@@ -1490,6 +1490,19 @@
           "title": "KnowhowAppendResult",
           "type": "object"
         },
+        "KnowhowCellOptimizeResult": {
+          "properties": {
+            "suggestion_md": {
+              "title": "Suggestion Md",
+              "type": "string"
+            }
+          },
+          "required": [
+            "suggestion_md"
+          ],
+          "title": "KnowhowCellOptimizeResult",
+          "type": "object"
+        },
         "KnowhowCellPatch": {
           "properties": {
             "content_md": {
@@ -8822,6 +8835,72 @@
             }
           },
           "summary": "Patch Knowhow Cell"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/optimize": {
+        "post": {
+          "operationId": "optimize_knowhow_cell_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__optimize_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowCellOptimizeResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Optimize Knowhow Cell"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/template": {

@@ -95,6 +95,7 @@ from app.models.schemas import (
     UserProfile,
     KnowhowAppendPreview,
     KnowhowAppendResult,
+    KnowhowCellOptimizeResult,
 )
 from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
@@ -102,6 +103,7 @@ from app.services.kg import scheduler as kg_scheduler
 from app.services.knowhow import api as knowhow_api
 from app.services.knowhow.assets import AssetService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
+from app.services.model_config import ModelNotConfiguredError
 from app.services.pending_bus import pending_bus
 from app.repositories.ports import AskStreamPort, UploadedSourceFile
 from app.api.memory_routes import memory_router
@@ -895,6 +897,51 @@ async def append_knowhow_rows(
         raise HTTPException(status_code=400, detail=str(exc))
     knowhow_api.get_scheduler(repo).schedule(table_id)
     return {"added": added}
+
+
+# --- knowhow-tables PR-2+3 Task 8: LLM cell rewrite (design doc §③, explicit
+# trigger only, suggestion-only). Write-gated like every other knowhow
+# mutation (require_notebook_access) even though it never writes the store
+# itself — this is an authoring affordance (the cell-editor's "优化表达"
+# button), not a read. Never schedules a reprojection either: the user's own
+# explicit accept goes through the EXISTING PATCH cell endpoint, which is
+# what writes + schedules. ValueError/ModelNotConfiguredError -> 400 (both
+# validation-shaped, friendly Chinese message as-is); KnowhowOptimizeUnavailable
+# (the LLM call itself failed after being reached, already logged via
+# note_model_error inside optimize_cell) -> 502.
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/optimize",
+    response_model=KnowhowCellOptimizeResult,
+    dependencies=[Depends(require_notebook_access)],
+)
+def optimize_knowhow_cell(
+    notebook_id: str, table_id: str, row_id: str, column_id: str
+) -> dict:
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    if (
+        not any(row["id"] == row_id for row in table["rows"])
+        or not any(column["id"] == column_id for column in table["columns"])
+    ):
+        raise HTTPException(status_code=400, detail="格子定位不合法")
+    try:
+        repo.validate_cell_target(row_id, column_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    row = next(r for r in table["rows"] if r["id"] == row_id)
+    column = next(c for c in table["columns"] if c["id"] == column_id)
+    content_md = row["cells"].get(column_id, "")
+    try:
+        suggestion_md = knowhow_api.optimize_cell(repo, content_md, column["name"], column["kind"])
+    except ModelNotConfiguredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except knowhow_api.KnowhowOptimizeUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"suggestion_md": suggestion_md}
 
 
 @router.get(
