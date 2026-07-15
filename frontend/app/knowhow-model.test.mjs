@@ -15,6 +15,7 @@ import {
   addKnowhowRow,
   deleteKnowhowRow,
   patchKnowhowCell,
+  createKnowhowTable,
   knowhowTemplateUrl,
   appendKnowhowPreview,
   appendKnowhowCommit,
@@ -328,6 +329,42 @@ test("patchKnowhowCell: PATCH 请求体为 {content_md}，响应 snake_case 映�
       contentMd: "新内容",
       projectionStatus: "syncing",
     });
+  });
+});
+
+// --- createKnowhowTable（建表向导；wire lands with T3）------------------------------
+
+test("createKnowhowTable: POST 到 /notebooks/{nb}/knowhow，body 为 {title,columns,anchor_index}（anchorIndex null 也显式保留）", () => {
+  const wire = wireTable({
+    columns: [{ id: "c0", name: "违例概念", position: 0, kind: "anchor" }],
+    anchorColumnId: "c0",
+  });
+  return withFetchStub(wire, async (calls) => {
+    const detail = await createKnowhowTable("nb-1", {
+      title: "时序修复",
+      columns: [
+        { name: "违例概念", kind: "attribute" },
+        { name: "修复方法", kind: "procedure" },
+      ],
+      anchorIndex: 0,
+    });
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow$/);
+    assert.strictEqual(calls[0].init.method, "POST");
+    assert.deepStrictEqual(bodyOf(calls[0]), {
+      title: "时序修复",
+      columns: [
+        { name: "违例概念", kind: "attribute" },
+        { name: "修复方法", kind: "procedure" },
+      ],
+      anchor_index: 0,
+    });
+    assert.strictEqual(detail.anchorColumnId, "c0");
+
+    // 不设行标题列：anchor_index 显式 null 保留在请求体里（与 undefined 丢键区分）。
+    await createKnowhowTable("nb-1", { title: "旅行日志", columns: [{ name: "日期", kind: "attribute" }], anchorIndex: null });
+    const body = bodyOf(calls[1]);
+    assert.ok("anchor_index" in body);
+    assert.strictEqual(body.anchor_index, null);
   });
 });
 

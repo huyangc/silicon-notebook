@@ -6,21 +6,26 @@
  * 渲染本组件；本组件不知道、也不关心自己被谁挂载）。
  *
  *   ① 选文件（.xlsx/.csv/.md，拖拽或点击）
- *   ② 预览 + 角色映射（前 5 行预览；每列一个角色下拉，默认 guessedRole；
- *      表标题输入框默认=文件名去后缀；concept 必须恰好一列，否则禁用提交
- *      并给出中文提示）
+ *   ② 预览 + 列设置（前 5 行预览；每列一个内容类型下拉——三项：方法步骤/
+ *      工具/事物/普通，默认取后端猜测；表级「行标题列：[某列 ▾ / 不设置]」
+ *      选择器带规格①提示语，预选取后端建议（无建议则不设置，无首列兜底）；
+ *      表标题输入框默认=文件名去后缀；行标题 0..1 由单选选择器天然保证，
+ *      不再有「恰好一列」校验）
  *   ③ 提交（进度态；后端错误中文原样展示；成功后调用 onDone 回调——由
  *      面板负责刷新表列表 + 关闭向导）
  *
  * 步骤②③在实现上共用同一屏（预览表格 + 提交按钮），"提交中"只是这屏的一个
  * 子状态（submitting=true 时输入禁用+按钮显示进度文案），而非跳转到另一个
- * 页面——避免用户在等待期间看到界面跳变、丢失已核对的角色映射上下文。
+ * 页面——避免用户在等待期间看到界面跳变、丢失已核对的列设置上下文。
  * 顶部步骤指示器仍按①②③三态展示，视觉上保留"三步"心智模型。
  *
- * 纯逻辑（payload 组装/concept 校验/角色选项/默认标题/文件类型校验/错误
- * 文案抽取）都在 knowhow-import-logic.ts 里（无 JSX，供
- * knowhow-import.test.mjs 直接 import——Node 原生 TS 类型剥离不支持
- * .tsx，只能拆到 .ts，镜像 knowhow-panel.tsx 的既有拆分方式）。
+ * 纯逻辑分两处（都无 JSX）：文件类型校验/默认标题/错误文案抽取仍在
+ * knowhow-import-logic.ts；内容类型选项与提示语/猜测预选映射（legacy
+ * guessed_role → 三值 kind + 行标题建议）/选择器版 payload 组装在
+ * knowhow-manage-logic.ts（Task 5 起与建表向导共用，单测见
+ * knowhow-manage.test.mjs）。knowhow-import-logic.ts 里被取代的
+ * ROLE_OPTIONS/conceptValidationError/assembleImportColumns/canSubmitImport
+ * 已注明 deprecated，等 Task 3 wire 落地后统一清理。
  *
  * 样式：namespaced `knowhow-import-*` class + `<style jsx global>`，消费
  * knowhow-panel.tsx 已经在用的同一套 CSS 变量（--panel/--ink/--line/
@@ -30,20 +35,28 @@
  */
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { ChevronLeft, Loader2, Upload, X } from "lucide-react";
-import { cellSummary, importKnowhow, importKnowhowPreview, type KnowhowImportPreview, type Role } from "./knowhow-model.ts";
+import { cellSummary, importKnowhow, importKnowhowPreview, type ColumnKind, type KnowhowImportPreview } from "./knowhow-model.ts";
 import {
   IMPORT_ACCEPT,
   IMPORT_ACCEPT_EXTENSIONS,
-  ROLE_OPTIONS,
-  assembleImportColumns,
-  canSubmitImport,
-  conceptValidationError,
   deriveDefaultTitle,
   extractErrorMessage,
+  isBlankTitle,
   isSupportedImportFile,
 } from "./knowhow-import-logic.ts";
+import {
+  KIND_HINTS,
+  KIND_OPTIONS,
+  ANCHOR_SELECTOR_LABEL,
+  ANCHOR_NONE_LABEL,
+  ANCHOR_SET_HINT,
+  anchorHint,
+  deriveImportSelection,
+  assembleImportColumnsWithAnchor,
+} from "./knowhow-manage-logic.ts";
+import { KindLegend } from "./knowhow-manage.tsx";
 
 export interface KnowhowImportWizardProps {
   notebookId: string;
@@ -68,7 +81,9 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<KnowhowImportPreview | null>(null);
   const [title, setTitle] = useState("");
-  const [roles, setRoles] = useState<Role[]>([]);
+  // 每列内容类型（三值，不含 anchor）+ 表级行标题列下标（null=不设置）。
+  const [kinds, setKinds] = useState<ColumnKind[]>([]);
+  const [anchorIndex, setAnchorIndex] = useState<number | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -109,8 +124,9 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     // 变化时才重新订阅监听器，而不是每次渲染都重新订阅。
   }, [onClose, submitting]);
 
-  const conceptError = useMemo(() => (step === "map" ? conceptValidationError(roles) : null), [step, roles]);
-  const submitDisabled = submitting || !canSubmitImport(title, roles);
+  // 行标题列 0..1 由单选选择器天然保证（规格①「至多一」）；唯一的提交前置
+  // 校验只剩「标题非空」。
+  const submitDisabled = submitting || isBlankTitle(title);
 
   async function handleFileSelected(selected: File) {
     if (!isSupportedImportFile(selected.name)) {
@@ -124,7 +140,11 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
       if (!mountedRef.current) return;
       setFile(selected);
       setPreview(result);
-      setRoles(result.columns.map((column) => column.guessedRole));
+      // 猜测预选：legacy guessed_role → 三值 kind + 行标题建议（Task 3 起
+      // 后端直接给三值 kind + anchor_suggestion，映射函数自动透传）。
+      const selection = deriveImportSelection(result);
+      setKinds(selection.kinds);
+      setAnchorIndex(selection.anchorIndex);
       setTitle(deriveDefaultTitle(selected.name));
       setStep("map");
     } catch (err) {
@@ -145,14 +165,15 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     setStep("select");
     setFile(null);
     setPreview(null);
-    setRoles([]);
+    setKinds([]);
+    setAnchorIndex(null);
     setTitle("");
     setPreviewError(null);
     setSubmitError(null);
   }
 
-  function setRoleAt(index: number, role: Role) {
-    setRoles((prev) => prev.map((current, i) => (i === index ? role : current)));
+  function setKindAt(index: number, kind: ColumnKind) {
+    setKinds((prev) => prev.map((current, i) => (i === index ? kind : current)));
   }
 
   async function handleSubmit() {
@@ -160,7 +181,11 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const columns = assembleImportColumns(preview.columns, roles);
+      const columns = assembleImportColumnsWithAnchor(
+        preview.columns.map((column) => column.name),
+        kinds,
+        anchorIndex,
+      );
       await importKnowhow(notebookId, file, title.trim(), columns);
       if (!mountedRef.current) return;
       onDone();
@@ -216,9 +241,10 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
               preview={preview}
               title={title}
               onTitleChange={setTitle}
-              roles={roles}
-              onRoleChange={setRoleAt}
-              conceptError={conceptError}
+              kinds={kinds}
+              onKindChange={setKindAt}
+              anchorIndex={anchorIndex}
+              onAnchorChange={setAnchorIndex}
               submitting={submitting}
               submitError={submitError}
               onDismissSubmitError={() => setSubmitError(null)}
@@ -240,7 +266,7 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
 
 const STEP_LABELS: [1 | 2 | 3, string][] = [
   [1, "选文件"],
-  [2, "预览与角色映射"],
+  [2, "预览与列设置"],
   [3, "提交"],
 ];
 
@@ -286,7 +312,7 @@ function SelectFileStep({
 }
 
 // ---------------------------------------------------------------------------
-// 步骤②③ — 预览 + 角色映射 + 提交
+// 步骤②③ — 预览 + 列设置（内容类型 + 行标题列）+ 提交
 // ---------------------------------------------------------------------------
 
 function MapStep({
@@ -294,9 +320,10 @@ function MapStep({
   preview,
   title,
   onTitleChange,
-  roles,
-  onRoleChange,
-  conceptError,
+  kinds,
+  onKindChange,
+  anchorIndex,
+  onAnchorChange,
   submitting,
   submitError,
   onDismissSubmitError,
@@ -308,9 +335,10 @@ function MapStep({
   preview: KnowhowImportPreview;
   title: string;
   onTitleChange: (value: string) => void;
-  roles: Role[];
-  onRoleChange: (index: number, role: Role) => void;
-  conceptError: string | null;
+  kinds: ColumnKind[];
+  onKindChange: (index: number, kind: ColumnKind) => void;
+  anchorIndex: number | null;
+  onAnchorChange: (anchorIndex: number | null) => void;
   submitting: boolean;
   submitError: string | null;
   onDismissSubmitError: () => void;
@@ -340,7 +368,24 @@ function MapStep({
         />
       </label>
 
-      {conceptError && <p className="knowhow-import-warning">{conceptError}</p>}
+      <div className="knowhow-import-anchor-row">
+        <label className="knowhow-import-anchor-label">
+          <span>{ANCHOR_SELECTOR_LABEL}</span>
+          <select
+            value={anchorIndex === null ? "" : String(anchorIndex)}
+            onChange={(event) => onAnchorChange(event.target.value === "" ? null : Number(event.target.value))}
+            disabled={submitting}
+          >
+            <option value="">{ANCHOR_NONE_LABEL}</option>
+            {preview.columns.map((column, index) => (
+              <option key={index} value={String(index)}>
+                {column.name || `列 ${index + 1}`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className={`knowhow-import-anchor-hint${anchorIndex === null ? " is-none" : ""}`}>{anchorHint(anchorIndex)}</p>
+      </div>
 
       <div className="knowhow-import-preview-scroll">
         <table className="knowhow-import-preview-table">
@@ -352,17 +397,24 @@ function MapStep({
                     <span className="knowhow-import-col-name" title={column.name}>
                       {column.name}
                     </span>
-                    <select
-                      value={roles[index]}
-                      onChange={(event) => onRoleChange(index, event.target.value as Role)}
-                      disabled={submitting}
-                    >
-                      {ROLE_OPTIONS.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
+                    {index === anchorIndex ? (
+                      <span className="knowhow-import-anchor-badge" title={ANCHOR_SET_HINT}>
+                        行标题
+                      </span>
+                    ) : (
+                      <select
+                        value={kinds[index]}
+                        title={KIND_HINTS[kinds[index] ?? "attribute"]}
+                        onChange={(event) => onKindChange(index, event.target.value as ColumnKind)}
+                        disabled={submitting}
+                      >
+                        {KIND_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value} title={option.hint}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
                 </th>
               ))}
@@ -386,6 +438,8 @@ function MapStep({
       </div>
 
       <p className="knowhow-import-meta">{`共 ${preview.totalRows} 行，预览前 ${preview.rowsPreview.length} 行`}</p>
+
+      <KindLegend />
 
       {submitError && (
         <div className="knowhow-import-submit-error">
@@ -651,6 +705,67 @@ function ImportWizardStyles() {
         .knowhow-import-field input:disabled {
           background: var(--soft);
           color: var(--muted);
+        }
+
+        .knowhow-import-anchor-row {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+        }
+
+        .knowhow-import-anchor-label {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--ink);
+        }
+
+        .knowhow-import-anchor-label span {
+          flex: 0 0 auto;
+        }
+
+        .knowhow-import-anchor-label select {
+          box-sizing: border-box;
+          max-width: 280px;
+          padding: 8px 8px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          background: #fff;
+          color: var(--ink);
+          font-size: 13px;
+          font-weight: 400;
+        }
+
+        .knowhow-import-anchor-label select:disabled {
+          background: var(--soft);
+          color: var(--muted);
+        }
+
+        .knowhow-import-anchor-hint {
+          margin: 0;
+          font-size: 12px;
+          color: var(--muted);
+          line-height: 1.5;
+        }
+
+        .knowhow-import-anchor-hint.is-none {
+          color: #9a5b00;
+        }
+
+        .knowhow-import-anchor-badge {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 12px;
+          font-weight: 600;
+          padding: 4px 8px;
+          border-radius: 999px;
+          border: 1px solid #c7d6ff;
+          background: #eef2ff;
+          color: #1f5eff;
+          white-space: nowrap;
         }
 
         .knowhow-import-preview-scroll {

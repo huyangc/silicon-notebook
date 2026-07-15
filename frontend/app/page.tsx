@@ -5059,7 +5059,7 @@ export default function Home() {
       )}
 
       {knowhowOpen && currentNotebookId && (
-        <KnowhowPanel notebookId={currentNotebookId} apiBase={API_BASE} onClose={() => setKnowhowOpen(false)} />
+        <KnowhowPanel notebookId={currentNotebookId} apiBase={API_BASE} canEdit={!isReader} onClose={() => setKnowhowOpen(false)} />
       )}
 
       {promoOpen && (

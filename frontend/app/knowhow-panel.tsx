@@ -1,19 +1,23 @@
 /**
  * knowhow-panel.tsx
  *
- * 「Knowhow 表」只读总览：表列表 → 表格网格 → 行详情抽屉 三层，外加导入向导
- * 的挂载点。page.tsx 只负责接线（导航按钮 + `<KnowhowPanel notebookId
- * apiBase onClose />` 一处挂载），面板自身的状态机与渲染都集中在这里。
+ * 「Knowhow 表」总览：表列表 → 表格网格 → 行详情抽屉 三层，外加导入向导 /
+ * 建表向导 / 表管理三个 modal 的挂载点。page.tsx 只负责接线（导航按钮 +
+ * `<KnowhowPanel notebookId apiBase canEdit onClose />` 一处挂载），面板自身
+ * 的状态机与渲染都集中在这里。
  *
  * 纯逻辑（行过滤 / 列序 / 状态徽标映射 / 抽屉标题 / 图片鉴权判定）都在
  * knowhow-panel-logic.ts 里（无 JSX，供 knowhow-panel.test.mjs 直接 import——
  * Node 原生 TS 类型剥离不支持 .tsx，只能拆到 .ts）。
  *
- * 编辑（表格行/格内容的增删改，PR-2 范围）不在本文件：本文件对表格内容本身
- * 仍是只读。导入向导（Task 9，knowhow-import.tsx 的 `KnowhowImportWizard`）
- * 已接入：`importOpen` 内部状态控制其显隐，点击表列表页的「导入表格」打开，
- * 成功后 `onDone` 回调刷新表列表并收起向导——向导自身的状态机/校验/提交都
- * 封装在 knowhow-import.tsx 里，本文件只做「打开/关闭 + 刷新」这一跳接线。
+ * 权限（PR-2+3 Task 5）：`canEdit`（= notebook 写权限，page.tsx 传
+ * `!isReader`）统一门控**全部写入口**——新建表 / 导入表格 / 添加行 / 管理 /
+ * 重建投影 / 删除表 / 失败行「重试」。只读成员（canEdit=false）看到纯浏览
+ * 视图，一个写按钮都不出现（规格⑦「只读成员可看」）。
+ *
+ * 编辑入口的分工：建表向导 + 表/列/行管理在 knowhow-manage.tsx；导入向导在
+ * knowhow-import.tsx；格子内容编辑浮窗属 Task 7（本文件网格暂仍只读展示格子
+ * 内容）。本文件对这些 modal 只做「打开/关闭 + 完成后刷新」的接线。
  */
 "use client";
 
@@ -23,7 +27,7 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
-import { ChevronLeft, Plus, RefreshCw, Search, Trash2, X } from "lucide-react";
+import { ChevronLeft, ListPlus, Plus, RefreshCw, Search, Settings2, Trash2, Upload, X } from "lucide-react";
 import {
   ROLE_LABELS,
   rewriteAssetUrls,
@@ -32,6 +36,7 @@ import {
   fetchKnowhowTable,
   deleteKnowhowTable,
   reprojectKnowhowTable,
+  addKnowhowRow,
   type KnowhowTableSummary,
   type KnowhowTableDetail,
   type KnowhowRow,
@@ -49,8 +54,10 @@ import {
   resolveRowTitleText,
   isInternalAssetUrl,
 } from "./knowhow-panel-logic.ts";
+import { extractErrorMessage } from "./knowhow-import-logic.ts";
 import { authHeaders } from "./auth.ts";
 import { KnowhowImportWizard } from "./knowhow-import.tsx";
+import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
 
 // ---------------------------------------------------------------------------
 // KnowhowPanel — 顶层：全屏 dialog 外壳 + 三层状态机
@@ -59,19 +66,24 @@ import { KnowhowImportWizard } from "./knowhow-import.tsx";
 export interface KnowhowPanelProps {
   notebookId: string;
   apiBase: string;
+  /** notebook 写权限（page.tsx 传 `!isReader`）：false=只读成员，隐藏全部
+   * 写入口（新建/导入/添加行/管理/重建投影/删除表/失败重试）。 */
+  canEdit: boolean;
   /** 关闭整个面板（page.tsx 用于收起挂载它的 knowhowOpen 态）。 */
   onClose: () => void;
 }
 
-export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps) {
+export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowPanelProps) {
   const [tables, setTables] = useState<KnowhowTableSummary[] | null>(null);
   const [tablesLoading, setTablesLoading] = useState(false);
   const [tablesError, setTablesError] = useState<string | null>(null);
 
-  // 导入向导（Task 9）显隐：面板自持状态，不经 page.tsx 转发——page.tsx 当前
-  // 挂载 <KnowhowPanel> 时只传 notebookId/apiBase/onClose 三个 prop，导入
-  // 入口完全由本文件内部驱动。
+  // 三个 modal 的显隐：面板自持状态，不经 page.tsx 转发——page.tsx 挂载
+  // <KnowhowPanel> 时只传 notebookId/apiBase/canEdit/onClose 四个 prop，
+  // 导入/新建/管理入口完全由本文件内部驱动。
   const [importOpen, setImportOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
 
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
   const [detail, setDetail] = useState<KnowhowTableDetail | null>(null);
@@ -84,6 +96,7 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [retryingReproject, setRetryingReproject] = useState(false);
+  const [addingRow, setAddingRow] = useState(false);
 
   const loadTables = useCallback(() => {
     setTablesLoading(true);
@@ -124,6 +137,8 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
     setQuery("");
     setOpenRowId(null);
     setConfirmDelete(false);
+    setManageOpen(false);
+    setCreateOpen(false);
   }, [notebookId]);
 
   function openTable(tableId: string) {
@@ -134,6 +149,7 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
     setQuery("");
     setOpenRowId(null);
     setConfirmDelete(false);
+    setManageOpen(false);
   }
 
   function backToList() {
@@ -144,6 +160,7 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
     setQuery("");
     setOpenRowId(null);
     setConfirmDelete(false);
+    setManageOpen(false);
   }
 
   async function confirmDeleteTable() {
@@ -175,6 +192,30 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
     }
   }
 
+  // 「添加行」：建空行后重拉详情。逐格填写浮窗（点空格直入编辑）属 Task 7，
+  // 落地后新行的引导自然衔接到编辑态；当前先把「行出现在网格里」这一步走通。
+  async function addRow() {
+    if (!selectedTableId || addingRow) return;
+    setAddingRow(true);
+    setActionError(null);
+    try {
+      await addKnowhowRow(notebookId, selectedTableId, { cells: {} });
+      loadDetail(selectedTableId);
+      loadTables();
+    } catch (err) {
+      setActionError(extractErrorMessage(err, "添加行失败，请重试"));
+    } finally {
+      setAddingRow(false);
+    }
+  }
+
+  // 管理 modal 里任一写操作成功：重拉表详情（modal 拿到新 detail prop 原地
+  // 刷新）+ 表列表（标题/行数在列表卡片上要跟着变）。
+  function handleManageChanged() {
+    if (selectedTableId) loadDetail(selectedTableId);
+    loadTables();
+  }
+
   const openRow = detail?.rows.find((row) => row.id === openRowId) ?? null;
 
   return (
@@ -182,7 +223,11 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
       <div className="knowhow-view-header">
         <div>
           <h2>Knowhow 表</h2>
-          <p>结构化经验表：Excel / CSV / Markdown 导入的问题排查知识，按行浏览与核对（只读）。</p>
+          <p>
+            {canEdit
+              ? "结构化经验表：可导入、新建与在线维护，逐行沉淀问题排查知识。"
+              : "结构化经验表：按行浏览与核对（只读共享，不可修改）。"}
+          </p>
         </div>
         <button className="icon-button" onClick={onClose} title="关闭">
           <X size={20} />
@@ -195,9 +240,11 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
             tables={tables}
             loading={tablesLoading}
             error={tablesError}
+            canEdit={canEdit}
             onRetry={loadTables}
             onOpen={openTable}
             onImportClick={() => setImportOpen(true)}
+            onCreateClick={() => setCreateOpen(true)}
           />
         ) : (
           <KnowhowTableGrid
@@ -205,6 +252,7 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
             loading={detailLoading}
             error={detailError}
             actionError={actionError}
+            canEdit={canEdit}
             onDismissActionError={() => setActionError(null)}
             onRetryLoad={() => loadDetail(selectedTableId)}
             query={query}
@@ -218,6 +266,9 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
             deleting={deleting}
             onRetryReproject={retryReproject}
             retryingReproject={retryingReproject}
+            onOpenManage={() => setManageOpen(true)}
+            onAddRow={addRow}
+            addingRow={addingRow}
           />
         )}
       </div>
@@ -232,7 +283,7 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
         />
       )}
 
-      {importOpen && (
+      {importOpen && canEdit && (
         <KnowhowImportWizard
           notebookId={notebookId}
           apiBase={apiBase}
@@ -241,6 +292,29 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
             setImportOpen(false);
             loadTables();
           }}
+        />
+      )}
+
+      {createOpen && canEdit && (
+        <KnowhowCreateWizard
+          notebookId={notebookId}
+          onClose={() => setCreateOpen(false)}
+          onCreated={(created) => {
+            setCreateOpen(false);
+            loadTables();
+            // 建表向导承诺的下一步（规格②）：创建后直接打开网格，用「添加行」
+            // 开始填值。
+            openTable(created.id);
+          }}
+        />
+      )}
+
+      {manageOpen && canEdit && detail && (
+        <KnowhowManageModal
+          notebookId={notebookId}
+          detail={detail}
+          onClose={() => setManageOpen(false)}
+          onChanged={handleManageChanged}
         />
       )}
 
@@ -290,6 +364,12 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
           align-items: center;
           justify-content: space-between;
           gap: 12px;
+        }
+
+        .knowhow-toolbar-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
         }
 
         .knowhow-import-button {
@@ -641,32 +721,27 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
           white-space: nowrap;
         }
 
-        .knowhow-role-badge--concept {
+        /* 徽章配色随词表收窄为四值 kind（迁移 17 起后端只返回这四值）：
+           行标题=蓝、方法步骤=琥珀、工具/事物=绿、普通=中性。 */
+        .knowhow-role-badge--anchor {
           color: #1f5eff;
           border-color: #c7d6ff;
           background: #eef2ff;
         }
 
-        .knowhow-role-badge--identify {
+        .knowhow-role-badge--procedure {
           color: #9a5b00;
           border-color: #f0dab3;
           background: #fdf4e6;
         }
 
-        .knowhow-role-badge--root_cause {
-          color: #ba2d2d;
-          border-color: #f0c0c0;
-          background: #fef2f2;
-        }
-
-        .knowhow-role-badge--fix {
+        .knowhow-role-badge--entity {
           color: #177a55;
           border-color: #b7e4cf;
           background: #f0faf5;
         }
 
-        .knowhow-role-badge--tool,
-        .knowhow-role-badge--plain {
+        .knowhow-role-badge--attribute {
           color: var(--muted);
           border-color: var(--line);
           background: var(--soft);
@@ -849,24 +924,35 @@ function KnowhowTableList({
   tables,
   loading,
   error,
+  canEdit,
   onRetry,
   onOpen,
   onImportClick,
+  onCreateClick,
 }: {
   tables: KnowhowTableSummary[] | null;
   loading: boolean;
   error: string | null;
+  canEdit: boolean;
   onRetry: () => void;
   onOpen: (tableId: string) => void;
   onImportClick: () => void;
+  onCreateClick: () => void;
 }) {
   return (
     <>
       <div className="knowhow-toolbar">
         <span className="panel-count">{tables && tables.length > 0 ? `${tables.length} 张表` : ""}</span>
-        <button type="button" className="sort-button knowhow-import-button" onClick={onImportClick}>
-          <Plus size={16} /> 导入表格
-        </button>
+        {canEdit && (
+          <div className="knowhow-toolbar-actions">
+            <button type="button" className="sort-button knowhow-import-button" onClick={onCreateClick}>
+              <Plus size={16} /> 新建表
+            </button>
+            <button type="button" className="sort-button knowhow-import-button" onClick={onImportClick}>
+              <Upload size={16} /> 导入表格
+            </button>
+          </div>
+        )}
       </div>
 
       {loading ? (
@@ -882,7 +968,7 @@ function KnowhowTableList({
         <div className="knowhow-empty">
           <div className="knowhow-empty-icon">▦</div>
           <strong>还没有 knowhow 表</strong>
-          <p>可从 Excel/CSV/Markdown 导入</p>
+          <p>{canEdit ? "可从 Excel/CSV/Markdown 导入，或新建空表现场定表头" : "当前为只读访问"}</p>
         </div>
       ) : (
         <div className="knowhow-table-cards">
@@ -914,6 +1000,7 @@ function KnowhowTableGrid({
   loading,
   error,
   actionError,
+  canEdit,
   onDismissActionError,
   onRetryLoad,
   query,
@@ -927,11 +1014,15 @@ function KnowhowTableGrid({
   deleting,
   onRetryReproject,
   retryingReproject,
+  onOpenManage,
+  onAddRow,
+  addingRow,
 }: {
   detail: KnowhowTableDetail | null;
   loading: boolean;
   error: string | null;
   actionError: string | null;
+  canEdit: boolean;
   onDismissActionError: () => void;
   onRetryLoad: () => void;
   query: string;
@@ -945,6 +1036,9 @@ function KnowhowTableGrid({
   deleting: boolean;
   onRetryReproject: () => void;
   retryingReproject: boolean;
+  onOpenManage: () => void;
+  onAddRow: () => void;
+  addingRow: boolean;
 }) {
   const orderedColumns = useMemo(() => (detail ? orderColumnsForGrid(detail.columns) : []), [detail]);
   const filteredRows = useMemo(() => (detail ? filterRows(detail.rows, query) : []), [detail, query]);
@@ -959,36 +1053,60 @@ function KnowhowTableGrid({
           <h3 title={detail?.title}>{detail?.title ?? ""}</h3>
           {detail?.description && <p>{detail.description}</p>}
         </div>
-        <div className="knowhow-grid-toolbar-actions">
-          {/* 表级「重建投影」逃生口(spec 要求)：整表重投影，后台执行。区别于
-              失败行徽标上的行内「重试」——那只在某行 failed 时出现，这个入口
-              任何时候都在，供用户在整表走样时一键重建。进行中禁用防重复触发。 */}
-          <button
-            type="button"
-            className="sort-button knowhow-reproject-button"
-            onClick={onRetryReproject}
-            disabled={retryingReproject || deleting || !detail}
-            title="重新投影整张表（后台执行）"
-          >
-            <RefreshCw size={14} className={retryingReproject ? "knowhow-spin" : undefined} />
-            {retryingReproject ? "重建中…" : "重建投影"}
-          </button>
-          {confirmDelete ? (
-            <span className="knowhow-confirm">
-              <span>删除这张表？行、格与投影产物将一并删除</span>
-              <button type="button" className="knowhow-confirm-yes" disabled={deleting} onClick={onConfirmDelete}>
-                {deleting ? "删除中…" : "确认删除"}
-              </button>
-              <button type="button" className="knowhow-confirm-no" onClick={onCancelDelete}>
-                取消
-              </button>
-            </span>
-          ) : (
-            <button type="button" className="icon-button" title="删除表" onClick={onRequestDelete}>
-              <Trash2 size={18} />
+        {/* 全部写入口（添加行/管理/重建投影/删除表）只对 canEdit 出现；只读
+            成员的工具栏只剩返回与标题（规格⑦）。 */}
+        {canEdit && (
+          <div className="knowhow-grid-toolbar-actions">
+            <button
+              type="button"
+              className="sort-button knowhow-reproject-button"
+              onClick={onAddRow}
+              disabled={addingRow || deleting || !detail}
+              title="在表末尾添加一行"
+            >
+              <ListPlus size={14} />
+              {addingRow ? "添加中…" : "添加行"}
             </button>
-          )}
-        </div>
+            <button
+              type="button"
+              className="sort-button knowhow-reproject-button"
+              onClick={onOpenManage}
+              disabled={!detail || deleting}
+              title="表信息、行标题列、列与行管理"
+            >
+              <Settings2 size={14} />
+              管理
+            </button>
+            {/* 表级「重建投影」逃生口(spec 要求)：整表重投影，后台执行。区别于
+                失败行徽标上的行内「重试」——那只在某行 failed 时出现，这个入口
+                任何时候都在，供用户在整表走样时一键重建。进行中禁用防重复触发。 */}
+            <button
+              type="button"
+              className="sort-button knowhow-reproject-button"
+              onClick={onRetryReproject}
+              disabled={retryingReproject || deleting || !detail}
+              title="重新投影整张表（后台执行）"
+            >
+              <RefreshCw size={14} className={retryingReproject ? "knowhow-spin" : undefined} />
+              {retryingReproject ? "重建中…" : "重建投影"}
+            </button>
+            {confirmDelete ? (
+              <span className="knowhow-confirm">
+                <span>删除这张表？行、格与投影产物将一并删除</span>
+                <button type="button" className="knowhow-confirm-yes" disabled={deleting} onClick={onConfirmDelete}>
+                  {deleting ? "删除中…" : "确认删除"}
+                </button>
+                <button type="button" className="knowhow-confirm-no" onClick={onCancelDelete}>
+                  取消
+                </button>
+              </span>
+            ) : (
+              <button type="button" className="icon-button" title="删除表" onClick={onRequestDelete}>
+                <Trash2 size={18} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {actionError && (
@@ -1016,7 +1134,7 @@ function KnowhowTableGrid({
             <input
               className="knowhow-filter-input"
               type="search"
-              placeholder="按概念/全文过滤行…"
+              placeholder="按行标题/全文过滤行…"
               value={query}
               onChange={(event) => onQueryChange(event.target.value)}
             />
@@ -1065,6 +1183,7 @@ function KnowhowTableGrid({
                     <td>
                       <ProjectionStatusBadge
                         status={row.projectionStatus}
+                        canRetry={canEdit}
                         onRetry={onRetryReproject}
                         retrying={retryingReproject}
                       />
@@ -1075,7 +1194,11 @@ function KnowhowTableGrid({
             </table>
             {filteredRows.length === 0 && (
               <p className="knowhow-no-match">
-                {detail.rows.length === 0 ? "这张表还没有行。" : `没有匹配「${query}」的行。`}
+                {detail.rows.length === 0
+                  ? canEdit
+                    ? "这张表还没有行，点上方「添加行」开始填写。"
+                    : "这张表还没有行。"
+                  : `没有匹配「${query}」的行。`}
               </p>
             )}
           </div>
@@ -1149,15 +1272,19 @@ function RoleBadge({ role }: { role: Role }) {
 
 function ProjectionStatusBadge({
   status,
+  canRetry,
   onRetry,
   retrying,
 }: {
   status: ProjectionStatus;
+  /** 「重试」按 canEdit 门控：重试=触发整表重投影，是写操作，只读成员只看
+   * 状态文案不见按钮。 */
+  canRetry: boolean;
   onRetry: () => void;
   retrying: boolean;
 }) {
   const tone = PROJECTION_STATUS_TONE[status];
-  const retryable = isRetryableProjectionStatus(status);
+  const retryable = isRetryableProjectionStatus(status) && canRetry;
   return (
     <span className={`knowhow-status-badge knowhow-status-badge--${tone}`}>
       {retryable && retrying ? "重新同步中…" : PROJECTION_STATUS_LABELS[status]}
