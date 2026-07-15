@@ -1839,7 +1839,17 @@ TASK6_KNOWHOW_ALLOWED_CONSUMERS = {
 # allowance style as TASK5/TASK6_KNOWHOW_ALLOWED_MEMBER_FILES.
 TASK10_KNOWHOW_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_knowhow_retrieval.py", name)
-    for name in {"_runtime", "_connect", "_retrieve_chunks", "ask_chunk"}
+    for name in {
+        "_runtime", "_connect", "_retrieve_chunks", "ask_chunk",
+        # Final-review blocker regression (kg/rebuild must not touch the
+        # knowhow projection): the two new tests drive the real rebuild path —
+        # delete_notebook_kg (the wipe) and rebuild_notebook_kg (delete+build)
+        # with _run_extraction stubbed to a recorder and llm_client forced
+        # configured — mirroring test_kg_rebuild_relink_api.py's own facade
+        # consumption. Same broad (file, member) allowance style as the four
+        # frozen members above.
+        "delete_notebook_kg", "rebuild_notebook_kg", "llm_client", "_run_extraction",
+    }
 }
 
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +

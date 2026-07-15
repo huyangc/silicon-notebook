@@ -33,10 +33,36 @@ class KnowledgeStore:
     # ------------------------------------------------ lifecycle projections
     @staticmethod
     def delete_notebook_graph_rows(db: sqlite3.Connection, notebook_id: str) -> dict[str, int]:
+        """Wipe a notebook's KG artefacts for a full rebuild — but PRESERVE the
+        deterministic knowhow-table projection (case/procedure/tool objects and
+        their edges under a ``source_type='knowhow'`` hidden source). Those rows
+        are KnowhowProjector's zero-LLM output, not extraction output: a KG
+        rebuild must neither delete them (row-scoped reprojection, not this
+        wipe, owns their lifecycle — and the knowhow table stays marked synced)
+        nor free the hidden source to be re-extracted by the LLM (see
+        ``source_build_rows``). ``knowledge_objects.source_id`` is NOT NULL
+        DEFAULT '' so a plain ``NOT IN`` excludes knowhow while still deleting
+        ordinary ('' or real-source) rows; ``knowledge_relations.source_id`` is
+        nullable, so that guard also keeps NULL-source (non-knowhow) rows
+        deletable. The remaining tables never hold knowhow rows (the projector
+        writes no embeddings/clusters/extraction_runs and no kg_objects_fts for
+        its objects), so they wipe whole."""
         counts: dict[str, int] = {}
+        knowhow_sources = "SELECT id FROM sources WHERE source_type = 'knowhow'"
+        cur = db.execute(
+            f"DELETE FROM knowledge_objects WHERE notebook_id = ? "
+            f"AND source_id NOT IN ({knowhow_sources})",
+            (notebook_id,),
+        )
+        counts["knowledge_objects"] = cur.rowcount
+        cur = db.execute(
+            f"DELETE FROM knowledge_relations WHERE notebook_id = ? "
+            f"AND (source_id IS NULL OR source_id NOT IN ({knowhow_sources}))",
+            (notebook_id,),
+        )
+        counts["knowledge_relations"] = cur.rowcount
         for table in (
-            "knowledge_objects", "knowledge_relations", "concept_clusters",
-            "concept_merge_candidates", "knowledge_embeddings",
+            "concept_clusters", "concept_merge_candidates", "knowledge_embeddings",
             "extraction_runs", "unified_kg_state",
         ):
             cur = db.execute(f"DELETE FROM {table} WHERE notebook_id = ?", (notebook_id,))
@@ -122,9 +148,19 @@ class KnowledgeStore:
 
     @staticmethod
     def source_build_rows(db: sqlite3.Connection, notebook_id: str):
+        """Sources eligible for LLM KG extraction (build/rebuild) plus the
+        subset that already has KG objects. Excludes ``source_type='knowhow'``
+        hidden sources: their KG objects are KnowhowProjector's deterministic
+        zero-LLM output, so a knowhow hidden source (whose KOs a rebuild wipe
+        deliberately preserves — see ``delete_notebook_graph_rows``) must never
+        be handed to the extraction pipeline as a target, and even a knowhow
+        table not yet projected (elements present, zero KOs) must not become an
+        empty-KG extraction target — either would fabricate LLM-derived
+        case/procedure objects, violating the feature's zero-LLM invariant."""
         source_ids = [
             row["id"] for row in db.execute(
-                "SELECT id FROM sources WHERE notebook_id = ?", (notebook_id,)
+                "SELECT id FROM sources WHERE notebook_id = ? "
+                "AND source_type != 'knowhow'", (notebook_id,)
             ).fetchall()
         ]
         kg_source_ids = {

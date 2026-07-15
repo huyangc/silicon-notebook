@@ -428,3 +428,108 @@ def test_delete_table_clears_chunk_fts_vector_and_ko_so_query_no_longer_hits(cli
 
     resp = repo.ask_chunk(nb, AskRequest(question=UNIQUE_TERM))
     assert not any(UNIQUE_TERM in c.quoted_span for c in resp.citations)
+
+
+# ---------------------------------------------------------------------------
+# Assertion 5 (final-review blocker): a KG rebuild must NOT touch the knowhow
+# projection — it must neither wipe the projected case/procedure/tool objects
+# and their edges, nor re-extract the hidden source with the LLM (the feature's
+# zero-LLM invariant). Two seams enforce this: delete_notebook_graph_rows (the
+# wipe) preserves knowhow-sourced rows, and source_build_rows (the extraction
+# target picker) excludes the hidden source.
+# ---------------------------------------------------------------------------
+
+
+def _seed_real_source_with_kg(repo, nb):
+    """Insert a normal (non-knowhow) source plus one KG object and one relation
+    for it, so a rebuild wipe has a genuine extraction-derived target to remove
+    (and re-target) — the control group that proves the wipe still fires for
+    everything that ISN'T knowhow."""
+    src_id = "src-real-doc-1"
+    repo._runtime.source_store.insert_source(
+        source_id=src_id, notebook_id=nb, title="真实文档", source_type="pdf",
+        status="active", parse_status="parsed", file_name="", file_path="",
+        file_size=0, file_hash="", summary="", doc_type="",
+    )
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects (id, notebook_id, object_type, status, "
+            "owner, payload, evidence, source_candidate_id, source_id, created_at, updated_at) "
+            "VALUES (?,?,?,?,'','{}','[]',NULL,?,?,?)",
+            ("ko-real-1", nb, "concept", "approved", src_id, "2026-01-01", "2026-01-01"),
+        )
+        db.execute(
+            "INSERT INTO knowledge_relations (id, notebook_id, source_id, "
+            "source_object_id, target_object_id, edge_type, evidence, created_at) "
+            "VALUES (?,?,?,?,?,?,'[]',?)",
+            ("rel-real-1", nb, src_id, "ko-real-1", "ko-real-1", "relates_to", "2026-01-01"),
+        )
+    return src_id
+
+
+def _knowhow_kg_ids(repo, hidden_source_id):
+    with repo._connect() as db:
+        kos = {r["id"] for r in db.execute(
+            "SELECT id FROM knowledge_objects WHERE source_id=?", (hidden_source_id,)
+        ).fetchall()}
+        rels = {r["id"] for r in db.execute(
+            "SELECT id FROM knowledge_relations WHERE source_id=?", (hidden_source_id,)
+        ).fetchall()}
+    return kos, rels
+
+
+def test_kg_delete_wipe_preserves_knowhow_projection_but_wipes_real_kg(client, imported):
+    repo = client._repo
+    nb = imported["nb"]
+    hidden_source_id = imported["hidden_source_id"]
+
+    kh_kos_before, kh_rels_before = _knowhow_kg_ids(repo, hidden_source_id)
+    assert kh_kos_before and kh_rels_before  # sanity: projection produced KOs+edges
+    _seed_real_source_with_kg(repo, nb)
+
+    # The wipe phase of a rebuild (delete_notebook_kg -> delete_notebook_graph_rows).
+    repo.delete_notebook_kg(nb)
+
+    kh_kos_after, kh_rels_after = _knowhow_kg_ids(repo, hidden_source_id)
+    # Knowhow projection survived the wipe unchanged (same id sets)...
+    assert kh_kos_after == kh_kos_before
+    assert kh_rels_after == kh_rels_before
+    # ...while the genuine extraction-derived KG for the real source is gone.
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE id='ko-real-1'"
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_relations WHERE id='rel-real-1'"
+        ).fetchone()["c"] == 0
+
+
+def test_kg_rebuild_never_extracts_hidden_knowhow_source(client, imported):
+    from unittest.mock import MagicMock
+
+    repo = client._repo
+    nb = imported["nb"]
+    hidden_source_id = imported["hidden_source_id"]
+    real_src = _seed_real_source_with_kg(repo, nb)
+    kh_kos_before, _ = _knowhow_kg_ids(repo, hidden_source_id)
+
+    # Drive the real rebuild path (delete + build) with the extraction call
+    # faked to a recorder — proves which sources the picker actually targets,
+    # without a live LLM/embedder for the "extraction" itself.
+    targeted: list[str] = []
+    repo._run_extraction = lambda sid: targeted.append(sid)
+    repo.llm_client = MagicMock(configured=True)
+
+    repo.rebuild_notebook_kg(nb)
+
+    # The hidden knowhow source was NEVER an extraction target; the real source was.
+    assert hidden_source_id not in targeted
+    assert real_src in targeted
+    # No extraction_runs row was opened against the hidden source, and its
+    # projected KG objects survived the rebuild's wipe intact.
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM extraction_runs WHERE source_id=?", (hidden_source_id,)
+        ).fetchone()["c"] == 0
+    kh_kos_after, _ = _knowhow_kg_ids(repo, hidden_source_id)
+    assert kh_kos_after == kh_kos_before
