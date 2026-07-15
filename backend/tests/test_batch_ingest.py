@@ -1293,3 +1293,137 @@ def test_maintenance_extraction_routes_through_ingestion_service(repo, monkeypat
     repo.maintenance.run_extraction("src-1")
     repo.maintenance.set_source_status("src-1", "extracting")
     assert calls == [("run", "src-1"), ("status", "src-1", "extracting")]
+
+
+# ── Task 6: metadata phase (offline paper-metadata bulk backfill) ───────────
+
+import threading
+
+from app.repositories.sqlite.source_store import SourceElementWrite
+
+_META_HEAD_TEXT = ("Systolic Arrays Revisited\nJane Doe\nMIT\nISCA 2025\n"
+                    "Abstract: a survey of dataflow variants ...")
+_META_PAYLOAD = {
+    "is_paper": True, "title": "Systolic Arrays Revisited",
+    "authors": [{"name": "Jane Doe", "affiliations": ["MIT"]}],
+    "venue": "ISCA", "year": 2025, "doi": "", "keywords": [],
+}
+
+
+class _FakeMetaLLM:
+    """chat_json 返回同一 payload 的 JSON 序列化;calls 加锁(backfill 用线程池
+    并发调用同一实例,镜像 test_paper_meta_service.py::_FakeKgLLM)。构造后即
+    configured=True,签名上不依赖 OpenAICompatibleClient 的真实构造参数——见
+    _patch_fake_llm 的工厂 lambda 如何把它套进去。"""
+
+    def __init__(self):
+        self.configured = True
+        self.model = "fake-meta"
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def chat_json(self, messages, schema_hint, **kwargs):
+        with self._lock:
+            self.calls += 1
+        return json.dumps(_META_PAYLOAD)
+
+
+def _patch_fake_llm(monkeypatch) -> _FakeMetaLLM:
+    """main() 内部自建新 SQLiteRepository 实例,其 RuntimeModelProvider 在
+    __init__ 里无条件构造 system 主 client = OpenAICompatibleClient(settings)
+    (kg/reasoning/rewrite 各自的专属 client 视 *_configured 决定是否再构造一个,
+    否则回落到这个 system 主 client)。故在工厂类级打桩,而非 fixture 的 repo
+    实例属性——镜像 test_main_embed_end_to_end_zeroes_missing 对 make_embedder
+    的做法(instance 级属性对 main() 自建的实例不可见)。同一 fake 会同时顶替
+    repo.llm_client 与 repo.kg_llm_client 的解析结果(system 回落链),两个都
+    configured=True,足以通过 run_metadata 的门控并支撑实际抽取调用。"""
+    fake = _FakeMetaLLM()
+    monkeypatch.setattr("app.services.model_provider.OpenAICompatibleClient",
+                        lambda settings, **kw: fake)
+    return fake
+
+
+def _insert_meta_source(repo, notebook_id, source_id):
+    """建一个 parsed 状态的 academic_paper 源(doc_type='' 落 academic_paper 默认
+    分支),文本走 source_elements(file_path 用 .pdf 扩展名,故 read_source_text
+    走 element 拼接分支,不依赖真实磁盘文件)。镜像 test_paper_meta_service.py
+    ::_insert_source。"""
+    store = repo._runtime.source_store
+    store.insert_source(
+        source_id=source_id, notebook_id=notebook_id, title=f"Doc {source_id}",
+        source_type="document", status="parsed", parse_status="parsed",
+        file_name=f"{source_id}.pdf", file_path=f"/tmp/{source_id}.pdf",
+        file_size=0, file_hash=f"h-{source_id}", summary="", doc_type="",
+    )
+    with repo._write() as db:
+        store.replace_elements(
+            db, source_id,
+            [SourceElementWrite(id=f"el-{source_id}-0001", element_type="text",
+                                 location_label="", text=_META_HEAD_TEXT, metadata={})],
+            created_at="2026-01-01T00:00:00",
+        )
+
+
+def test_metadata_phase_requires_llm(repo, capsys):
+    """kg_llm 与 llm 均未配置(fixture 默认环境,未打桩)→ main 返回 2,stderr 含
+    「LLM 未配置」,且门控先于 --notebook-id 检查(即便给了合法 notebook 也拦)。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-meta")
+
+    rc = bi.main(["metadata", "--notebook-id", nb_id])
+
+    assert rc == 2
+    assert "LLM 未配置" in capsys.readouterr().err
+
+
+def test_metadata_phase_requires_notebook(repo, monkeypatch, capsys):
+    """LLM 已配但未给 --notebook-id → 返回 2,且绝不新建 notebook。"""
+    _patch_fake_llm(monkeypatch)
+    with repo._connect() as db:
+        before = db.execute("SELECT COUNT(*) c FROM notebooks").fetchone()["c"]
+
+    rc = bi.main(["metadata"])
+
+    assert rc == 2
+    assert "--notebook-id" in capsys.readouterr().err
+    with repo._connect() as db:
+        after = db.execute("SELECT COUNT(*) c FROM notebooks").fetchone()["c"]
+    assert after == before
+
+
+def test_metadata_phase_backfills(repo, monkeypatch, capsys):
+    """FakeLLM + 2 个缺 meta 源 → 返回 0;两源 get_paper_meta 非 None;再跑一次
+    (幂等续跑)输出 total 0。"""
+    _patch_fake_llm(monkeypatch)
+    nb_id = bi.ensure_notebook(repo, None, "nb-meta")
+    _insert_meta_source(repo, nb_id, "src-1")
+    _insert_meta_source(repo, nb_id, "src-2")
+
+    rc = bi.main(["metadata", "--notebook-id", nb_id])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "[meta done]" in out
+    assert repo.get_paper_meta("src-1") is not None
+    assert repo.get_paper_meta("src-2") is not None
+
+    rc2 = bi.main(["metadata", "--notebook-id", nb_id])
+
+    assert rc2 == 0
+    out2 = capsys.readouterr().out
+    assert '"total": 0' in out2
+
+
+def test_metadata_phase_force(repo, monkeypatch, capsys):
+    """--force → 已有元数据行的源也重抽(fake.calls 增加)。"""
+    fake = _patch_fake_llm(monkeypatch)
+    nb_id = bi.ensure_notebook(repo, None, "nb-meta")
+    _insert_meta_source(repo, nb_id, "src-1")
+    rc = bi.main(["metadata", "--notebook-id", nb_id])
+    assert rc == 0
+    calls_after_first = fake.calls
+    assert calls_after_first >= 1
+
+    rc2 = bi.main(["metadata", "--notebook-id", nb_id, "--force"])
+
+    assert rc2 == 0
+    assert fake.calls > calls_after_first
