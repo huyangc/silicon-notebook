@@ -3002,6 +3002,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK3_PAPER_META_ALLOWED_IMPORTS
                     or site in TASK4_PAPER_META_ALLOWED_IMPORTS
                     or site in TASK3_KNOWHOW_PR23_ALLOWED_IMPORTS
+                    or site in TASK14_KNOWHOW_PR23_ALLOWED_IMPORTS
                 )
 
 
@@ -3441,3 +3442,25 @@ TASK3_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
 # this file, at the cost of one extra rebinding statement instead of an
 # inline union.
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK3_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
+
+# PR-2+3 Task 14 (asset GC): its own test composes the real facade the same
+# way Task 1/2/3/4/5/6's sibling tests do — repo.create_notebook to seed
+# fixtures, repo.delete_notebook to exercise the notebook-delete asset-dir
+# sweep (both pre-existing frozen members; new call sites here are registered
+# as a broad allowance rather than pinned to exact lines, same style as
+# TASK2_KNOWHOW_ALLOWED_MEMBER_FILES/TASK5_KNOWHOW_ALLOWED_MEMBER_FILES
+# above). sweep_orphan_assets itself lives on SQLiteMaintenanceAdapter
+# (backend/app/repositories/sqlite/maintenance.py), reached only through
+# repo.maintenance.sweep_orphan_assets(...) — the `maintenance` property
+# Task 27 already exempted wholesale (TASK27_ALLOWED_NEW_MEMBERS), and
+# sweep_orphan_assets is never itself a SQLiteRepository member, so nothing
+# new to register for that half. Appended at EOF for the same zero-line-shift
+# reason as TASK3_KNOWHOW_PR23_ALLOWED_IMPORTS above.
+TASK14_KNOWHOW_PR23_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_asset_gc.py", 25, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK14_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_asset_gc.py", name)
+    for name in {"SQLiteRepository", "create_notebook", "delete_notebook"}
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK14_KNOWHOW_PR23_ALLOWED_MEMBER_FILES

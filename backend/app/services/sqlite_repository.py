@@ -1080,7 +1080,12 @@ class SQLiteRepository:
         return self._runtime.catalog.set_notebook_personal(notebook_id)
 
     def delete_notebook(self, notebook_id: str) -> None:
-        return self._runtime.catalog.delete_notebook(notebook_id)
+        # storage_dir forwarded so NotebookCatalogService can also sweep the
+        # notebook's asset directory (knowhow-tables PR-2+3 Task 14) — the
+        # facade is the only caller that actually owns a live storage_dir.
+        return self._runtime.catalog.delete_notebook(
+            notebook_id, storage_dir=self.storage_dir
+        )
 
     # Owner-private Memory lifecycle.  The facade remains a one-hop
     # compatibility adapter; orchestration lives in MemoryService and SQL in

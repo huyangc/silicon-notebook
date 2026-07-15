@@ -644,6 +644,76 @@ class SQLiteMaintenanceAdapter:
         with self._runtime.database.write() as db:
             self._runtime.knowledge.mark_source_index_backfilled(db, notebook_id)
 
+    # -- knowhow-table assets (PR-2+3 Task 14) ---------------------------------
+
+    def sweep_orphan_assets(self, notebook_id: str) -> dict:
+        """Delete every ``notebook_assets`` row (+ on-disk file) in this
+        notebook that no knowhow cell references any more, returning
+        ``{"removed": n}``.
+
+        Reference scope is deliberately narrow: an asset counts as "kept"
+        only if its id appears as an ``asset://<id>`` substring inside a
+        ``knowhow_cells.content_md`` belonging to one of THIS notebook's
+        tables. ``knowhow_cell_code`` (per-cell code attachments, migration
+        17) is source-code text, not rendered markdown — an ``asset://``
+        substring showing up there (e.g. in a comment) is NOT treated as a
+        keeper reference. If that boundary ever proves wrong in practice
+        (some real workflow renders code-attachment text as an image
+        reference), widen the scan to include it then; until observed, cells
+        are the only place an image actually gets embedded/displayed.
+
+        Table sizes here are small (per-notebook assets/cells), so a plain
+        per-asset ``LIKE`` scan is used rather than a single mega-query —
+        matches this module's existing style for the other per-notebook
+        maintenance scans above.
+
+        File deletion happens BEFORE the row delete (opposite of
+        ``delete_notebook``'s DB-first convention): unlike a notebook
+        deletion — where the row's own data (e.g. ``sources.file_path``)
+        would otherwise vanish via cascade before it could be read — an
+        orphan asset's file path is always re-derivable from just its id, so
+        deleting the file first and the row second makes a crash mid-sweep
+        self-healing: a re-run finds the same still-orphaned row, no-ops the
+        (already gone) file glob, and finishes the row delete. Missing files
+        are tolerated silently either way (``glob`` simply finds nothing) —
+        the row is always removed once determined orphaned, never blocked on
+        disk state.
+        """
+        from pathlib import Path
+
+        with self._runtime.database.connect() as db:
+            assets = db.execute(
+                "SELECT id FROM notebook_assets WHERE notebook_id=?",
+                (notebook_id,),
+            ).fetchall()
+            orphan_ids = [
+                row["id"]
+                for row in assets
+                if db.execute(
+                    "SELECT 1 FROM knowhow_cells c "
+                    "JOIN knowhow_rows r ON r.id = c.row_id "
+                    "JOIN knowhow_tables t ON t.id = r.table_id "
+                    "WHERE t.notebook_id = ? AND c.content_md LIKE ? LIMIT 1",
+                    (notebook_id, f"%asset://{row['id']}%"),
+                ).fetchone()
+                is None
+            ]
+        if not orphan_ids:
+            return {"removed": 0}
+
+        asset_dir = Path(self._runtime.storage_dir) / "assets" / notebook_id
+        for asset_id in orphan_ids:
+            for stale_file in asset_dir.glob(f"{asset_id}.*"):
+                if stale_file.is_file():
+                    stale_file.unlink()
+
+        with self._runtime.database.write() as db:
+            db.executemany(
+                "DELETE FROM notebook_assets WHERE id=?",
+                [(asset_id,) for asset_id in orphan_ids],
+            )
+        return {"removed": len(orphan_ids)}
+
 
 class ReadOnlySQLiteInspector:
     """Arbitrary-path, ``mode=ro`` SQLite reader for eval/validation tools.

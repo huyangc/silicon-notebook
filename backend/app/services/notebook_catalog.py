@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List
 
 from app.models.schemas import (
@@ -31,6 +33,29 @@ def _created_label(value: str) -> str:
     except ValueError:
         dt = datetime.now()
     return f"{dt.year}年{dt.month}月{dt.day}日"
+
+
+def _delete_notebook_asset_dir(storage_dir: Path, notebook_id: str) -> None:
+    """Remove the whole per-notebook pasted-image-asset directory
+    (``storage_dir/assets/<notebook_id>/`` — see
+    ``app.services.knowhow.assets.AssetService.path_for`` for the same path
+    formula).
+
+    ``notebook_assets`` ROWS need no explicit delete here: the column is
+    ``notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE``
+    (migration 16) and every connection runs with ``PRAGMA foreign_keys = ON``
+    (``SqliteDatabase._new_connection``), so they disappear automatically the
+    moment ``delete_row_and_orphan_embeddings`` deletes the ``notebooks`` row
+    above — verified empirically (knowhow-tables PR-2+3 Task 14): unlike
+    ``knowledge_embeddings`` (which has no FK and needs the explicit delete a
+    few lines up), ``notebook_assets`` cascades cleanly. Only the on-disk
+    FILES need this explicit cleanup (cascade never touches the filesystem).
+    Mirrors ``_delete_source_file``'s exists-before-touch tolerance so a
+    notebook that never had an asset uploaded (directory never created)
+    deletes cleanly."""
+    asset_dir = Path(storage_dir) / "assets" / notebook_id
+    if asset_dir.exists():
+        shutil.rmtree(asset_dir, ignore_errors=True)
 
 
 class NotebookSummaryQuery:
@@ -272,12 +297,20 @@ class NotebookCatalogService:
         self._store.update_row(notebook_id, payload)
         return self.get_notebook(notebook_id)
 
-    def delete_notebook(self, notebook_id: str) -> None:
+    def delete_notebook(
+        self, notebook_id: str, *, storage_dir: "Path | None" = None
+    ) -> None:
+        """``storage_dir`` (knowhow-tables PR-2+3 Task 14): the facade passes
+        its live ``storage_dir`` so the notebook's pasted-image-asset
+        directory is swept alongside source files; ``None`` (any other
+        direct caller) just skips that step rather than guessing a path."""
         self.get_notebook(notebook_id)  # raises KeyError if missing
         file_paths = self._store.delete_row_and_orphan_embeddings(notebook_id)
         # DB deletion is committed above; only then remove files on disk.
         for file_path in file_paths:
             _delete_source_file(file_path)
+        if storage_dir is not None:
+            _delete_notebook_asset_dir(storage_dir, notebook_id)
 
     def mark_notebook_base(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing
