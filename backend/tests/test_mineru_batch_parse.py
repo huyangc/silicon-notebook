@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import sys
+import threading
 
 import pytest
 import requests
@@ -275,3 +276,189 @@ def test_process_file_fail_record_does_not_leak_stale_task_id(tmp_path):
     assert record["status"] == "fail"
     assert record["attempts"] == 2
     assert record["task_id"] == ""
+
+
+def test_process_file_completed_with_empty_markdown_fails_without_burning_retries(tmp_path):
+    """server 报 terminal completed，但 extract_md 只拿到空白 markdown（扫描件/
+    图片 PDF，或未识别的结果形状）：这是确定性结果——必须立刻判 fail、不写文件、
+    不再重试消耗剩余 attempts（重试不会让扫描件突然出现文字）。"""
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake pdf content")
+    out_md = tmp_path / "out" / "a.md"
+
+    script = {
+        "/tasks": FakeResponse({"task_id": "task-empty"}, status_code=202),
+        "/tasks/task-empty": FakeResponse({"status": "completed", "error": ""}),
+        "/tasks/task-empty/result": FakeResponse(
+            {"results": {"a.pdf": {"md_content": "   \n  "}}}
+        ),
+    }
+    session = FakeSession(script)
+    server = _make_server(session)
+    cfg = mbp.Config(src_dir=str(tmp_path), retry_max=3)
+
+    record = mbp.process_file(server, pdf, cfg, out_md)
+
+    assert record["status"] == "fail"
+    assert record["attempts"] == 1  # 确定性失败：不应该烧掉 retry_max=3 的其余尝试
+    assert "empty markdown" in record["error"]
+    assert not out_md.exists()
+    posts = [c for c in session.calls if c[0] == "POST"]
+    assert len(posts) == 1  # 只 submit 了一次，没有重试
+
+
+# ---------------------------------------------------------------------------
+# 6. _select_files —— 续跑过滤："done" 只等于 {"ok"}，fail/cancelled 都要重跑
+# ---------------------------------------------------------------------------
+
+
+def test_select_files_retries_cancelled_and_fail_but_not_ok(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        (src / name).write_bytes(b"%PDF-1.4 fake pdf content")
+    out = tmp_path / "out"
+    out.mkdir()
+    manifest = out / "_manifest.jsonl"
+    manifest.write_text(
+        "\n".join(
+            json.dumps(rec)
+            for rec in (
+                {"rel": "a.pdf", "status": "ok"},
+                {"rel": "b.pdf", "status": "cancelled"},
+                {"rel": "c.pdf", "status": "fail"},
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    cfg = mbp.Config(src_dir=str(src), out_dir=str(out))
+
+    files = mbp._select_files(cfg)
+
+    rels = {mbp._rel(p, cfg.src_dir) for p in files}
+    assert rels == {"b.pdf", "c.pdf"}  # 'ok' 被排除续跑队列；cancelled/fail 都要重跑
+
+
+# ---------------------------------------------------------------------------
+# 7. run() —— 编排级覆盖（补 M4 缺口，同时钉住 Important #1 / #2）
+# ---------------------------------------------------------------------------
+
+
+def test_run_processes_multiple_files_and_writes_manifest_and_md(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        (src / name).write_bytes(b"%PDF-1.4 fake pdf content")
+    out = tmp_path / "out"
+
+    # 所有文件共享同一个（stateless、线程安全的）fake task：三个文件并发跑，
+    # 谁先谁后不重要，每次 submit/poll/fetch 都返回同样的终态响应。
+    script = {
+        "/tasks": FakeResponse({"task_id": "task-shared"}, status_code=202),
+        "/tasks/task-shared": FakeResponse({"status": "completed", "error": ""}),
+        "/tasks/task-shared/result": FakeResponse(
+            {"results": {"x": {"md_content": "# Parsed OK"}}}
+        ),
+    }
+    session = FakeSession(script)
+    server = _make_server(session, capacity=2)
+    cfg = mbp.Config(src_dir=str(src), out_dir=str(out), retry_max=2)
+
+    stats = mbp.run(cfg, [server])
+
+    assert stats == {"total": 3, "ok": 3, "skip": 0, "fail": 0, "cancelled": 0}
+
+    manifest_lines = (out / "_manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(manifest_lines) == 3
+    records = [json.loads(line) for line in manifest_lines]
+    assert {r["rel"] for r in records} == {"a.pdf", "b.pdf", "c.pdf"}
+    assert {r["status"] for r in records} == {"ok"}
+
+    for name in ("a.pdf", "b.pdf", "c.pdf"):
+        md_path = (out / name).with_suffix(".md")
+        assert md_path.read_text(encoding="utf-8") == "# Parsed OK"
+
+    assert not (out / "failed.txt").exists()
+
+
+def test_run_with_preset_stop_event_dispatches_no_new_work(tmp_path):
+    """stop_event 在 run() 开跑前就已经 set()（模拟 Ctrl-C 已经落地）：所有文件
+    都必须被短路成 cancelled——绝不发起任何 HTTP 调用、绝不写任何 .md 输出，但
+    manifest 里每个文件仍然要有一条 cancelled 记录（可审计）。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    for name in ("a.pdf", "b.pdf"):
+        (src / name).write_bytes(b"%PDF-1.4 fake pdf content")
+    out = tmp_path / "out"
+
+    session = FakeSession({})  # 任何 HTTP 调用都应报错——不该发生
+    server = _make_server(session, capacity=2)
+    cfg = mbp.Config(src_dir=str(src), out_dir=str(out), retry_max=2)
+
+    stop_event = threading.Event()
+    stop_event.set()
+
+    stats = mbp.run(cfg, [server], stop_event=stop_event)
+
+    assert stats == {"total": 2, "ok": 0, "skip": 0, "fail": 0, "cancelled": 2}
+    assert session.calls == []  # 没有发起任何 HTTP 调用
+
+    manifest_lines = (out / "_manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in manifest_lines]
+    assert len(records) == 2
+    assert {r["rel"] for r in records} == {"a.pdf", "b.pdf"}
+    assert {r["status"] for r in records} == {"cancelled"}
+
+    assert not list(out.rglob("*.md"))  # 没有写出任何输出文件
+    assert not (out / "failed.txt").exists()  # cancelled 不是 failure，不入账 failed.txt
+
+
+def test_run_marks_completed_empty_markdown_as_fail_in_manifest_and_failed_txt(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.pdf").write_bytes(b"%PDF-1.4 fake pdf content")
+    out = tmp_path / "out"
+
+    script = {
+        "/tasks": FakeResponse({"task_id": "task-empty"}, status_code=202),
+        "/tasks/task-empty": FakeResponse({"status": "completed", "error": ""}),
+        "/tasks/task-empty/result": FakeResponse({"results": {"a.pdf": {"md_content": "   "}}}),
+    }
+    session = FakeSession(script)
+    server = _make_server(session, capacity=1)
+    cfg = mbp.Config(src_dir=str(src), out_dir=str(out), retry_max=3)
+
+    stats = mbp.run(cfg, [server])
+
+    assert stats == {"total": 1, "ok": 0, "skip": 0, "fail": 1, "cancelled": 0}
+
+    manifest_lines = (out / "_manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    records = [json.loads(line) for line in manifest_lines]
+    assert len(records) == 1
+    assert records[0]["status"] == "fail"
+    assert "empty markdown" in records[0]["error"]
+    assert records[0]["attempts"] == 1  # 确定性失败，没有烧掉 retry_max=3
+
+    assert not (out / "a.md").exists()
+
+    failed_txt = (out / "failed.txt").read_text(encoding="utf-8")
+    assert "a.pdf" in failed_txt
+
+
+# ---------------------------------------------------------------------------
+# 8. Config.from_env_and_args —— 非法整数环境变量给清晰报错，而不是裸 traceback
+# ---------------------------------------------------------------------------
+
+
+def test_from_env_and_args_bad_int_env_reports_key_and_exits(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("MINERU_BATCH_POLL_INTERVAL", "not-a-number")
+    args = mbp._parse_args(["--src", str(tmp_path / "src"), "--out", str(tmp_path / "out")])
+
+    with pytest.raises(SystemExit) as exc_info:
+        mbp.Config.from_env_and_args(args)
+
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "MINERU_BATCH_POLL_INTERVAL" in err
+    assert "not-a-number" in err

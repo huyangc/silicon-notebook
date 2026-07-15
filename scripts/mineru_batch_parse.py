@@ -146,6 +146,19 @@ class Config:
         def env(key: str, default: str) -> str:
             return os.environ.get(key, default)
 
+        def int_env(key: str, default: str) -> int:
+            """int(env(key, default))，值非法（空白/非数字）时点名 key 报清晰错误
+            并退出，而不是让裸 ValueError/traceback 炸到用户面前。"""
+            raw = env(key, default)
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                print(
+                    f"错误: 环境变量 {key} 的值不是合法整数: {raw!r}",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+
         servers_raw = args.servers or env("MINERU_BATCH_SERVERS", "http://mineru-host:8000")
         servers = [s.strip() for s in servers_raw.split(",") if s.strip()]
 
@@ -173,12 +186,12 @@ class Config:
             lang=env("MINERU_BATCH_LANG", "ch"),
             formula_enable=_as_bool(env("MINERU_BATCH_FORMULA_ENABLE", "true")),
             table_enable=_as_bool(env("MINERU_BATCH_TABLE_ENABLE", "true")),
-            concurrency_per_server=int(env("MINERU_BATCH_CONCURRENCY_PER_SERVER", "0")),
-            poll_interval=int(env("MINERU_BATCH_POLL_INTERVAL", "10")),
-            max_poll_seconds=int(env("MINERU_BATCH_MAX_POLL_SECONDS", "1800")),
-            retry_max=int(env("MINERU_BATCH_RETRY_MAX", "3")),
-            submit_timeout=int(env("MINERU_BATCH_SUBMIT_TIMEOUT", "120")),
-            result_timeout=int(env("MINERU_BATCH_RESULT_TIMEOUT", "120")),
+            concurrency_per_server=int_env("MINERU_BATCH_CONCURRENCY_PER_SERVER", "0"),
+            poll_interval=int_env("MINERU_BATCH_POLL_INTERVAL", "10"),
+            max_poll_seconds=int_env("MINERU_BATCH_MAX_POLL_SECONDS", "1800"),
+            retry_max=int_env("MINERU_BATCH_RETRY_MAX", "3"),
+            submit_timeout=int_env("MINERU_BATCH_SUBMIT_TIMEOUT", "120"),
+            result_timeout=int_env("MINERU_BATCH_RESULT_TIMEOUT", "120"),
             manifest=manifest,
             list_file=getattr(args, "list_file", None) or "",
             dry_run=bool(getattr(args, "dry_run", False)),
@@ -359,6 +372,14 @@ def process_file(server: MinerUServer, pdf_path, cfg: Config, out_md) -> dict:
                     if status_l in _TERMINAL_OK:
                         payload = server.result(task_id)
                         md = extract_md(payload)
+                        if not md.strip():
+                            # server 报"完成"但拿不到正文（扫描件/图片 PDF，或未识别
+                            # 的结果形状）：这是确定性结果，重试不会变——不写空文件、
+                            # 不再消耗剩余 retry，直接判 fail 交给人工核查/--only-failed。
+                            record["status"] = "fail"
+                            record["error"] = "completed but empty markdown (no md_content)"
+                            record["seconds"] = round(time.monotonic() - start, 1)
+                            return record
                         out_md.parent.mkdir(parents=True, exist_ok=True)
                         out_md.write_text(md, encoding="utf-8")
                         record["status"] = "ok"
@@ -432,6 +453,9 @@ def _select_files(cfg: Config) -> List[Path]:
     elif prev:
         # 常规续跑优化：manifest 里已经 ok 的文件不必再排进队列
         # （process_file 自己的"输出已存在"检查也会兜底，这里只是提前过滤）。
+        # "done" 只等于 {"ok"}——fail/cancelled/skip 都必须留在队列里重跑：
+        # fail/cancelled 显然没产出；skip 则由 process_file 的"输出已存在"检查
+        # 兜底重新判定为 skip，不会真的重新解析。
         files = [p for p in files if prev.get(_rel(p, cfg.src_dir)) != "ok"]
 
     if cfg.limit and cfg.limit > 0:
@@ -445,11 +469,23 @@ def _select_files(cfg: Config) -> List[Path]:
 # ---------------------------------------------------------------------------
 
 
-def run(cfg: Config, servers: List[MinerUServer]) -> dict:
+def run(
+    cfg: Config,
+    servers: List[MinerUServer],
+    *,
+    stop_event: Optional[threading.Event] = None,
+) -> dict:
+    """编排一整批文件。
+
+    `stop_event` 默认 None → 内部新建一个全新 Event（生产路径，main() 就是这么
+    调的，行为与此前完全一致）。测试可以传入一个提前 set() 好的 Event，模拟
+    "Ctrl-C 已经落地"而不必真的发信号——用于验证已经派发进线程池、但 worker 线程
+    还没真正取到手的任务会被短路成 cancelled、绝不发起任何 HTTP 调用。
+    """
     files = _select_files(cfg)
     total = len(files)
 
-    stats = {"total": total, "ok": 0, "skip": 0, "fail": 0}
+    stats = {"total": total, "ok": 0, "skip": 0, "fail": 0, "cancelled": 0}
     if total == 0:
         print("没有待处理的 PDF 文件。")
         return stats
@@ -457,7 +493,8 @@ def run(cfg: Config, servers: List[MinerUServer]) -> dict:
     manifest_path = cfg.manifest_path
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_lock = threading.Lock()
-    stop_event = threading.Event()
+    if stop_event is None:
+        stop_event = threading.Event()
     fail_rels: List[str] = []
 
     def _on_sigint(signum, frame):  # noqa: ARG001
@@ -473,9 +510,31 @@ def run(cfg: Config, servers: List[MinerUServer]) -> dict:
         rel = _rel(pdf_path, cfg.src_dir)
         return (Path(cfg.out_dir) / rel).with_suffix(".md")
 
+    def _cancelled_record(pdf_path: Path, server: MinerUServer) -> dict:
+        """stop_event 已置位：不发起任何 HTTP 调用、不写输出文件，只留一条可审计
+        的 manifest 记录——"这个文件本该轮到它，但 run 已经在收尾"。"""
+        return {
+            "rel": _rel(pdf_path, cfg.src_dir),
+            "status": "cancelled",
+            "server": server.base_url,
+            "task_id": "",
+            "size_kb": 0.0,
+            "attempts": 0,
+            "seconds": 0.0,
+            "error": "",
+        }
+
     def _run_one(pdf_path: Path, server: MinerUServer) -> dict:
-        out_md = _out_md_for(pdf_path)
-        record = process_file(server, pdf_path, cfg, out_md)
+        # 派发循环早把所有文件塞进了线程池（毫秒级完成，见模块顶部说明）；真正决定
+        # "要不要开始干活"的检查点在这里——每个 worker 线程从池里取到任务、真正开始
+        # 执行的那一刻。已经在 process_file 里跑着的任务不受影响（跑完为止：finish
+        # in-flight）；还没轮到、worker 线程刚要认领的任务在这里短路成 cancelled
+        # （start no new work），但依然落一条 manifest 记录，run 全程可审计。
+        if stop_event.is_set():
+            record = _cancelled_record(pdf_path, server)
+        else:
+            out_md = _out_md_for(pdf_path)
+            record = process_file(server, pdf_path, cfg, out_md)
         nonlocal done_count
         with manifest_lock:
             try:
@@ -502,8 +561,6 @@ def run(cfg: Config, servers: List[MinerUServer]) -> dict:
         with ThreadPoolExecutor(max_workers=max(1, sum(s.capacity for s in servers))) as pool:
             futures = []
             for i, pdf_path in enumerate(files):
-                if stop_event.is_set():
-                    break
                 server = servers[i % len(servers)]
                 futures.append(pool.submit(_run_one, pdf_path, server))
             for fut in as_completed(futures):
@@ -516,8 +573,8 @@ def run(cfg: Config, servers: List[MinerUServer]) -> dict:
         failed_txt.write_text("\n".join(fail_rels) + "\n", encoding="utf-8")
 
     print(
-        f"完成: {stats['ok']} 成功, {stats['skip']} 跳过, {stats['fail']} 失败 "
-        f"(共 {total})"
+        f"完成: {stats['ok']} 成功, {stats['skip']} 跳过, {stats['fail']} 失败, "
+        f"{stats['cancelled']} 已取消 (共 {total})"
     )
     return stats
 
