@@ -1,16 +1,19 @@
 /**
  * knowhow-panel.tsx
  *
- * 「Knowhow 表」只读总览：表列表 → 表格网格 → 行详情抽屉 三层。
- * page.tsx 只负责接线（导航按钮 + `<KnowhowPanel notebookId apiBase onClose
- * onImportClick? />` 一处挂载），面板自身的状态机与渲染都集中在这里。
+ * 「Knowhow 表」只读总览：表列表 → 表格网格 → 行详情抽屉 三层，外加导入向导
+ * 的挂载点。page.tsx 只负责接线（导航按钮 + `<KnowhowPanel notebookId
+ * apiBase onClose />` 一处挂载），面板自身的状态机与渲染都集中在这里。
  *
  * 纯逻辑（行过滤 / 列序 / 状态徽标映射 / 抽屉标题 / 图片鉴权判定）都在
  * knowhow-panel-logic.ts 里（无 JSX，供 knowhow-panel.test.mjs 直接 import——
  * Node 原生 TS 类型剥离不支持 .tsx，只能拆到 .ts）。
  *
- * 编辑（PR-2 范围）与导入向导（Task 9）都不在本文件：本文件只读，
- * `onImportClick` 是留给 Task 9 的挂载点，未接线时导入按钮不渲染。
+ * 编辑（表格行/格内容的增删改，PR-2 范围）不在本文件：本文件对表格内容本身
+ * 仍是只读。导入向导（Task 9，knowhow-import.tsx 的 `KnowhowImportWizard`）
+ * 已接入：`importOpen` 内部状态控制其显隐，点击表列表页的「导入表格」打开，
+ * 成功后 `onDone` 回调刷新表列表并收起向导——向导自身的状态机/校验/提交都
+ * 封装在 knowhow-import.tsx 里，本文件只做「打开/关闭 + 刷新」这一跳接线。
  */
 "use client";
 
@@ -47,6 +50,7 @@ import {
   isInternalAssetUrl,
 } from "./knowhow-panel-logic.ts";
 import { authHeaders } from "./auth.ts";
+import { KnowhowImportWizard } from "./knowhow-import.tsx";
 
 // ---------------------------------------------------------------------------
 // KnowhowPanel — 顶层：全屏 dialog 外壳 + 三层状态机
@@ -57,14 +61,17 @@ export interface KnowhowPanelProps {
   apiBase: string;
   /** 关闭整个面板（page.tsx 用于收起挂载它的 knowhowOpen 态）。 */
   onClose: () => void;
-  /** 导入入口挂载点：Task 9 的导入向导接上后按钮才出现，未接线时不渲染。 */
-  onImportClick?: () => void;
 }
 
-export function KnowhowPanel({ notebookId, apiBase, onClose, onImportClick }: KnowhowPanelProps) {
+export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps) {
   const [tables, setTables] = useState<KnowhowTableSummary[] | null>(null);
   const [tablesLoading, setTablesLoading] = useState(false);
   const [tablesError, setTablesError] = useState<string | null>(null);
+
+  // 导入向导（Task 9）显隐：面板自持状态，不经 page.tsx 转发——page.tsx 当前
+  // 挂载 <KnowhowPanel> 时只传 notebookId/apiBase/onClose 三个 prop，导入
+  // 入口完全由本文件内部驱动。
+  const [importOpen, setImportOpen] = useState(false);
 
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
   const [detail, setDetail] = useState<KnowhowTableDetail | null>(null);
@@ -190,7 +197,7 @@ export function KnowhowPanel({ notebookId, apiBase, onClose, onImportClick }: Kn
             error={tablesError}
             onRetry={loadTables}
             onOpen={openTable}
-            onImportClick={onImportClick}
+            onImportClick={() => setImportOpen(true)}
           />
         ) : (
           <KnowhowTableGrid
@@ -222,6 +229,18 @@ export function KnowhowPanel({ notebookId, apiBase, onClose, onImportClick }: Kn
           notebookId={notebookId}
           apiBase={apiBase}
           onClose={() => setOpenRowId(null)}
+        />
+      )}
+
+      {importOpen && (
+        <KnowhowImportWizard
+          notebookId={notebookId}
+          apiBase={apiBase}
+          onClose={() => setImportOpen(false)}
+          onDone={() => {
+            setImportOpen(false);
+            loadTables();
+          }}
         />
       )}
 
@@ -827,17 +846,15 @@ function KnowhowTableList({
   error: string | null;
   onRetry: () => void;
   onOpen: (tableId: string) => void;
-  onImportClick?: () => void;
+  onImportClick: () => void;
 }) {
   return (
     <>
       <div className="knowhow-toolbar">
         <span className="panel-count">{tables && tables.length > 0 ? `${tables.length} 张表` : ""}</span>
-        {onImportClick && (
-          <button type="button" className="sort-button knowhow-import-button" onClick={onImportClick}>
-            <Plus size={16} /> 导入表格
-          </button>
-        )}
+        <button type="button" className="sort-button knowhow-import-button" onClick={onImportClick}>
+          <Plus size={16} /> 导入表格
+        </button>
       </div>
 
       {loading ? (
