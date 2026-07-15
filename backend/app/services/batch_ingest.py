@@ -862,6 +862,31 @@ def run_backfill_source_index(repo: BatchIngestRepository, notebook_id: Optional
     return {"notebooks": results, "objects": total_objects, "rows": total_rows}
 
 
+def run_metadata(repo, args) -> int:
+    """phase=metadata:补抽 notebook 内缺论文元数据的源(幂等可续跑;--force 重抽)。
+    只作用于已解析的 academic_paper 源;原始 PDF 缺失也可跑(读 DB 内 elements)。"""
+    if not (
+        getattr(repo.kg_llm_client, "configured", False)
+        or getattr(repo.llm_client, "configured", False)
+    ):
+        print("error: LLM 未配置 → 无法抽取论文元数据。配置 OPENAI_COMPAT_* 或 "
+              "KG_LLM_* 后重试(CLI 不静默降级)。", file=sys.stderr)
+        return 2
+    if not args.notebook_id:
+        print("error: --phase metadata 需要 --notebook-id(本 phase 不新建 notebook)。",
+              file=sys.stderr)
+        return 2
+
+    def _progress(done: int, total: int, source_id: str, status: str) -> None:
+        print(f"[meta {done}/{total}] {source_id} {status}", flush=True)
+
+    counts = repo.backfill_paper_metadata(
+        args.notebook_id, force=args.force, progress=_progress
+    )
+    print(f"[meta done] {json.dumps(counts, ensure_ascii=False)}", flush=True)
+    return 0
+
+
 def _make_logger(manifest_path: Optional[Path]) -> LogFn:
     if manifest_path is None:
         return lambda _e: None
@@ -883,7 +908,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="batch_ingest", description="离线批量摄取目录 → 项目 KG/向量库")
     p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob",
-                                      "backfill-source-index"])
+                                      "backfill-source-index", "metadata"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
     p.add_argument("--all-notebooks", action="store_true",
@@ -913,6 +938,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         "数据没变的场景)。")
     p.add_argument("--allow-no-embed", action="store_true",
                    help="EMBED 未配置时显式允许无向量降级(默认拒绝,防静默产出无向量库)")
+    p.add_argument("--force", action="store_true",
+                   help="metadata phase: 已有元数据行的源也重抽(prompt/校验升级后刷新)")
     p.add_argument("--pool-report-interval", type=int, default=15,
                    help="每 N 秒自报线程池占用(KG-LLM/源/embed);0 关闭。all/kg 阶段生效")
     p.add_argument("--dry-run", action="store_true", help="只扫描+报告,不写库")
@@ -983,6 +1010,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         r = run_backfill_source_index(repo, args.notebook_id, all_notebooks=args.all_notebooks)
         print(f"backfill-source-index done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
         return 0
+
+    if args.phase == "metadata":
+        return run_metadata(repo, args)
 
     # embed 子命令就是补向量:EMBED 未配直接报错,忽略 --allow-no-embed。
     allow_no_embed = args.allow_no_embed and args.phase != "embed"

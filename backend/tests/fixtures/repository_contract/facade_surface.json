@@ -1318,6 +1318,8 @@
       "backend/tests/test_batch_ingest.py:1153",
       "backend/tests/test_batch_ingest.py:119",
       "backend/tests/test_batch_ingest.py:126",
+      "backend/tests/test_batch_ingest.py:1381",
+      "backend/tests/test_batch_ingest.py:1388",
       "backend/tests/test_batch_ingest.py:152",
       "backend/tests/test_batch_ingest.py:165",
       "backend/tests/test_batch_ingest.py:227",
@@ -5631,6 +5633,7 @@
       "backend/tests/test_auto_scale_index.py:36",
       "backend/tests/test_batch_ingest.py:1044",
       "backend/tests/test_batch_ingest.py:116",
+      "backend/tests/test_batch_ingest.py:1358",
       "backend/tests/test_batch_ingest.py:238",
       "backend/tests/test_batch_ingest.py:271",
       "backend/tests/test_batch_ingest.py:369",
@@ -8405,6 +8408,7 @@
   "kg_llm_client": {
     "consumers": [
       "backend/app/api/routes.py:1585",
+      "backend/app/services/batch_ingest.py:869",
       "backend/app/services/sqlite_repository.py:2977",
       "backend/app/services/sqlite_repository.py:2994",
       "backend/app/services/sqlite_repository.py:5208",
