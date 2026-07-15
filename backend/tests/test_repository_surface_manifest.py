@@ -1864,7 +1864,7 @@ TASK10_KNOWHOW_ALLOWED_MEMBER_FILES = {
 # test. Test-only compatibility consumer added after the frozen
 # pre-knowhow-tables facade manifest.
 TASK1_PAPER_META_ALLOWED_IMPORTS = {
-    ("backend/tests/test_paper_meta_schema.py", 15, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_paper_meta_schema.py", 13, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK1_PAPER_META_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_paper_meta_schema.py", name)
