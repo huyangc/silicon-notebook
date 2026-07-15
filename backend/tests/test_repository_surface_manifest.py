@@ -1702,6 +1702,23 @@ TASK6_MEMORY_KG_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_notebook_share_copy.py", "_runtime"),
 }
 
+# Task 1 (knowhow-tables-pr1, a distinct later feature branch from the
+# Memory-KG tasks above): the knowhow-tables schema-migration test composes
+# the real facade + migrator directly to prove fresh-DB and upgraded-DB
+# (v15->v16) schema convergence for the five new knowhow_*/notebook_assets
+# tables — same pattern as TASK1_MEMORY_KG_ALLOWED_IMPORTS above. Test-only
+# compatibility consumer added after the frozen pre-Memory-KG facade
+# manifest.
+TASK1_KNOWHOW_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_schema.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK1_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_schema.py", name)
+    for name in {
+        "SCHEMA_VERSION", "SQLiteRepository", "_connect", "_migrate", "_write",
+    }
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2141,6 +2158,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK4_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK5_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK6_MEMORY_KG_ALLOWED_MEMBER_FILES
+    | TASK1_KNOWHOW_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2743,6 +2761,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK2_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK3_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK5_MEMORY_KG_ALLOWED_IMPORTS
+                    or site in TASK1_KNOWHOW_ALLOWED_IMPORTS
                 )
 
 
