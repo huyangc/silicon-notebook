@@ -151,6 +151,9 @@ npm run dev
 ```bash
 # 生产 —— 先 build 前端,再同时提供两个服务(后端单进程)
 npm run start
+
+# 停止前后端(可从任意终端执行,无需回到 start 进程 Ctrl-C)
+npm run stop
 ```
 
 `npm run start` 调用 `scripts/prod.sh`:前端 `next build` + `next start`,后端
@@ -158,6 +161,12 @@ npm run start
 的 `frontend/.next`(如预构建镜像场景)。可用 `BACKEND_HOST` / `PORT` / `FRONTEND_PORT`
 覆盖监听地址/端口。后端默认只监听 `127.0.0.1`；显式绑定非 loopback 地址时必须
 配置非默认 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，否则启动直接失败。
+
+`npm run stop` 调用 `scripts/stop.sh`:停掉正在监听后端 `PORT` 与前端 `FRONTEND_PORT`
+(缺省 `8000` / `3000`)的进程。它与 start 一样先 source 仓库根 `.env` 解析端口,所以若
+你用自定义 `PORT` / `FRONTEND_PORT` 启动,停止时也传同样的值。脚本先发 `SIGTERM`,等待
+后再对残留进程 `SIGKILL`;没有服务在跑时是空操作。定位监听进程优先用 `ss`(Ubuntu/Linux
+的 iproute2 基础包自带),回落 `lsof`(macOS 默认有)再回落 `fuser`——三者至少有其一即可。
 
 > **一次性迁移注意**——如果你此前用 `npm run dev`(或手动 `cd backend && uvicorn ...`)
 > 在路径锚定上线之前的版本启动过,数据可能落在 `backend/.local` 而非仓库根的

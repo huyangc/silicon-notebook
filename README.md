@@ -167,6 +167,9 @@ npm run dev
 ```bash
 # Production — builds the frontend, then serves both (single backend worker)
 npm run start
+
+# Stop both services (from any terminal — no need to Ctrl-C the start process)
+npm run stop
 ```
 
 `npm run start` runs `scripts/prod.sh`: `next build` + `next start` for the frontend,
@@ -175,6 +178,14 @@ to reuse an already-built `frontend/.next` (e.g. a prebuilt image). Override
 `BACKEND_HOST` / `PORT` / `FRONTEND_PORT` to change bind address/ports. The backend
 defaults to `127.0.0.1`; binding it to a non-loopback address requires a non-default
 `SILICON_NOTEBOOK_ADMIN_PASSWORD` and fails fast otherwise.
+
+`npm run stop` runs `scripts/stop.sh`, which terminates whatever is listening on the
+backend `PORT` and frontend `FRONTEND_PORT` (default `8000` / `3000`) — it sources the
+repo-root `.env` for those ports just like start, so if you launched with a custom
+`PORT` / `FRONTEND_PORT` set the same value when stopping. It sends `SIGTERM`, waits, then
+`SIGKILL`s any survivor, and is a no-op if nothing is running. It locates the listeners
+with `ss` (shipped by iproute2 on Ubuntu/Linux), falling back to `lsof` (default on macOS)
+and then `fuser` — at least one must be available.
 
 > **One-time migration** — if you previously launched with `npm run dev` (or manually `cd
 > backend && uvicorn ...`) on a version before path-anchoring landed, your data may be
