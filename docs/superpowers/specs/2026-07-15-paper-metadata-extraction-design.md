@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS source_paper_meta (
     pub_year    INTEGER,
     doi         TEXT,
     keywords    TEXT,                          -- JSON array 字符串
-    raw_json    TEXT,                          -- LLM 完整返回，向前兼容
+    raw_json    TEXT,                          -- 审计信封 {"llm": 原始返回, "dropped": 接地校验丢弃明细}
     model       TEXT,                          -- 抽取用模型（溯源）
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
@@ -79,8 +79,8 @@ CREATE INDEX IF NOT EXISTS idx_source_authors_nb ON source_authors(notebook_id);
  "venue": "...", "year": 2024, "doi": "...", "keywords": ["..."]}
 ```
 
-  要求：只依据给定文本、不编造；非学术论文（网页、手册等）返回 `is_paper=false` 其余留空；作者按署名顺序；机构按上标/排版关联，不确定给空数组；DOI/arXiv 号出现才填。
-- 调用：`kg_llm()`（缺省回退主 LLM 的现有语义）`chat_json` + `cap_kwargs(client, "openai_compat_max_tokens")`，低 temperature。输入 = 文档头部文本（在手 elements 取前若干元素 join，否则 `read_source_text` 截前 `paper_meta_head_chars` 字符）。
+  要求：**只依据给定文本抽取，即使模型「认识」这篇论文也不得用记忆补全**；非学术论文（网页、手册等）返回 `is_paper=false` 其余留空；作者按署名顺序；机构按上标/排版关联，不确定给空数组；DOI/arXiv 号出现才填。
+- 调用：`kg_llm()`（缺省回退主 LLM 的现有语义）`chat_json` + `cap_kwargs(client, "openai_compat_max_tokens")`，`temperature=0.0`。输入 = 文档头部文本（在手 elements 取前若干元素 join，否则 `read_source_text` 截前 `paper_meta_head_chars` 字符；`read_source_text` 对历史源回退用 DB 内 elements 重建，原始文件缺失亦可用）。
 
 ### 5.2 挂载点（`ensure_paper_metadata(source, *, elements=None, force=False)`）
 
@@ -93,7 +93,27 @@ Gate（全部满足才调 LLM）：`settings.paper_meta_enabled`、`doc_type == 
 
 失败语义：best-effort——`logger.exception` + `event_log.emit`（pipeline 侧惯例），**不写行**（下次可重试）、不碰 `extraction_runs`/`extraction_warning`、不阻断流水线。摄取侧不用 `note_model_error`（那是 Ask 链路的 sink）。
 
-### 5.3 成本账（效率一等约束）
+### 5.3 真实性：接地校验层（零 LLM，写库前强制）
+
+风险：LLM 见过大量论文，可能对「认识的」论文用参数记忆补全作者/机构/venue——即使头部文本残缺。防线两道：
+
+1. **Prompt 侧**（弱防线）：明示只准依据给定文本、不得用记忆补全；`temperature=0.0`。
+2. **接地校验**（强防线，确定性代码）：`_grounded(value, head_text)` = 双方归一化（lowercase、去变音符、去空白/标点）后子串包含判定。逐字段策略：
+
+| 字段 | 校验 | 未通过处置 |
+| --- | --- | --- |
+| 作者 name | 归一化包含于头部文本 | **丢弃该作者行**（假作者比漏作者更伤搜索可信度） |
+| 作者 affiliation | 归一化包含（容忍缩写不匹配） | 置空字符串（保留作者，不保留不可验证的机构） |
+| paper_title | 归一化包含 | 置 NULL |
+| venue | 归一化包含（预印本常无 venue，宁缺毋滥） | 置 NULL |
+| pub_year | 4 位数字原样出现于文本 且 1900≤y≤2100 | 置 NULL |
+| doi | 匹配 `^10\.\d{4,9}/\S+$` 且原样出现于文本 | 置 NULL |
+| keyword | 归一化包含 | 丢弃该关键词 |
+
+- 审计：`raw_json` 存信封 `{"llm": <原始返回>, "dropped": <丢弃明细>}`；有丢弃时 `event_log.emit(kind="paper_meta", ...)` 记一条——「校验挡掉了什么」可追溯。
+- **刻意不加第二次 LLM refine pass**：成本×2 违反效率约束；接地校验已确定性堵死「记忆补全」主通道。
+
+### 5.4 成本账（效率一等约束）
 
 每个新 paper 源 +1 次小调用（输入 ~4000 字符 ≈1-2k tokens，输出 ~300 tokens）。相对每源已有 1 次 summary + 每窗数千 tokens 的多窗口 KG 抽取，增量 <2%。曾考虑并入 `summarize` 调用省一次——但 catch-up 路径仍需独立调用（双实现更复杂）、且两者 gate 不同（summary 全类型 / meta 仅论文），收益不抵复杂度，采用独立调用 + 严格 gate + 幂等。
 
@@ -101,7 +121,8 @@ Gate（全部满足才调 LLM）：`settings.paper_meta_enabled`、`doc_type == 
 
 - `schemas.py`：新增 `PaperAuthor{name, affiliation}`、`PaperMeta{is_paper, title, venue, year, doi, keywords, authors}`；`SourceSummary` 增 `authors: List[str] = []`（姓名，按署名序）、`pub_year: Optional[int]`、`venue: Optional[str]`；`SourceDetail` 增 `paper_meta: Optional[PaperMeta]`。
 - 水合：`sources_from_rows` 批量路径加一次分批 IN 查询；详情路径 `get_paper_meta`。
-- 无新端点。api_contract.json golden 按既定流程 regen（先例 b7985e8 / knowhow PR）。
+- 新端点一个：`POST /notebooks/{notebook_id}/paper-meta/backfill` → `{"queued": int}`——见第 9 节应用内补抽；owner/admin 门控沿用现有 notebook 写权限守卫。
+- api_contract.json golden 按既定流程 regen（先例 b7985e8 / knowhow PR）。
 
 ## 7. 搜索（按作者/论文标题）
 
@@ -123,19 +144,25 @@ notebook 内源数量级（数千～万级）下相关子查询开销毫秒级�
 1. TS 类型补新字段。
 2. **来源详情 modal**（`source-detail-meta` 区）新增「论文信息」块，仅 `paper_meta?.is_paper` 时显示：论文标题、作者列（机构以次行小字或 hover title）、venue · 年份、DOI（链接 `https://doi.org/...`）、关键词 chips。对齐精致、省略号截断（UI 质量基线）。
 3. **搜索框 placeholder**：「搜索来源（标题/作者/文件名）」。
-4. 列表行不动（侧栏行高保持紧凑）。
+4. **补抽入口**（owner 可见）：来源面板现有工具区/菜单加「补抽论文元数据」，调 backfill 端点，toast 显示「已提交 N 篇补抽」；文案友好不暴露技术细节。
+5. 列表行不动（侧栏行高保持紧凑）。
 
 注意：API 路径不带 `/api` 前缀（双 /api 404 坑）；新增中文文案沿用现有弯引号风格，不做批量引号替换。
 
 轮询兼容：poll merge 仅在 `parse_status` 变化时刷新对象——两个挂载点都在终态转换**之前**落库，元数据随终态转换自然到达前端；禁止终态之后异步补写 meta。
 
-## 9. 批量回填 CLI
+## 9. 历史文章补抽（三通道，均幂等可续跑）
 
-`scripts/batch_ingest.py`（→ `backend/app/services/batch_ingest.py`）新增 phase `metadata`：
+存量库是主要资产，补抽是一等路径。三通道共用同一 `ensure_paper_metadata`，幂等键 = meta 行存在（含 `is_paper=0` 标记行），中断重跑天然从断点继续。历史源**原始 PDF 缺失也可补抽**：`read_source_text` 回退用 DB 内 `source_elements` 重建头部文本。
 
-- 目标 notebook 内 `sources_missing_paper_meta` 的源逐个 `ensure_paper_metadata`（复用现有有界并发），进度日志 N/M。
-- LLM 未配置 → **报错退出**（CLI 不静默降级）。
-- README.md + README_zh.md 同 PR 写用法（通用口径，不含机器路径）。
+1. **CLI（批量主通道，管理员）**：`scripts/batch_ingest.py --phase metadata [--force]`
+   - 目标 notebook 内 `sources_missing_paper_meta` 逐源补抽（复用现有有界并发），进度日志 N/M + 收尾统计（成功/非论文/失败）。
+   - `--force` 对已有行重抽（prompt/校验升级后刷新用）。
+   - LLM 未配置 → **报错退出**（CLI 不静默降级）；失败源不落行，下次重跑自动重试。
+2. **应用内（notebook owner，无 shell 也能补）**：来源面板「补抽论文元数据」入口（按入口收拢惯例放现有菜单/工具区）→ `POST /notebooks/{id}/paper-meta/backfill` → `background_jobs.submit` 后台逐源补抽，立即返回 `{"queued": N}`，前端 toast 提示已提交；完成情况经事件日志可查，用户刷新列表可见。
+3. **自动 catch-up**：`run_extraction` 开头（5.2 节挂载点②）——历史源将来重抽 KG 时顺带补上。
+
+README.md + README_zh.md 同 PR 写 CLI 用法（通用口径，不含机器路径）。
 
 ## 10. 配置（pydantic-settings v2，字段名即环境变量名，无需 alias）
 
@@ -149,6 +176,8 @@ notebook 内源数量级（数千～万级）下相关子查询开销毫秒级�
 - 迁移：全新库建表；**user_version=16 已部署库补建**（版本闸短路教训）；`schema_contract.txt` golden。
 - store：upsert/get/批量水合/missing 列表/级联删除/IN 分批。
 - 服务：FakeLLM 成功落库；`is_paper=false` 落标记行；幂等 skip；LLM 未配 skip 不抛；memory 派生源被 gate。
+- **接地校验**：幻觉作者被丢弃（名字不在文本）；机构不可验证置空；venue/年份/DOI 不在文本置 NULL；DOI 格式非法拒收；归一化匹配容忍大小写/空白/变音符差异；dropped 明细入 raw_json 信封。
+- 补抽：backfill 端点（owner 门控、queued 计数、幂等跳过已有行）；CLI phase（missing 选取、--force 重抽、LLM 未配报错退出）。
 - 搜索：q 按作者名、论文标题命中。
 - 契约波及：SCHEMA_VERSION bump ripple（test_sqlite_migrator_component / test_legacy_db_compat / test_repository_facade_contract 等）、surface manifest、api_contract regen。
 
@@ -161,4 +190,6 @@ notebook 内源数量级（数千～万级）下相关子查询开销毫秒级�
 | surface manifest 行号敏感 | 按测试输出对齐 consumers；只增不删不移现有行为 |
 | 已部署库漏建表 | 新表只走 `_migration_17`，测试覆盖 v16→v17 升级路径 |
 | 非论文源反复调 LLM | `is_paper=0` 标记行 + 幂等 skip |
-| 回填成本失控 | 不自动回填；显式 CLI phase，用户掌控 |
+| 回填成本失控 | 不自动回填；CLI/应用内均显式触发，幂等可续跑，用户掌控 |
+| LLM 记忆补全（张冠李戴作者/机构） | 接地校验层（5.3）：不在头部文本中的字段不落库 + raw_json 审计信封 + 事件日志 |
+| 解析噪声致真作者被校验误杀 | 归一化匹配（大小写/空白/标点/变音符不敏感）；丢弃明细可审计，prompt/校验升级后 `--force` 重抽 |
