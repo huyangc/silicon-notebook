@@ -1748,6 +1748,31 @@ TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS = {
     "bump_knowhow_mutation_seq", "insert_notebook_asset", "get_notebook_asset",
 }
 
+# Task 4 (knowhow-tables-pr1): the asset-store/authed-serving routes' own test
+# composes the real facade the same way Task 1/2's sibling tests do — seeding
+# a notebook via HTTP then a read-only member via direct repo.add_member
+# (there is no HTTP "add member by id" endpoint) — same pattern as
+# TASK1_KNOWHOW_ALLOWED_IMPORTS/TASK2_KNOWHOW_ALLOWED_IMPORTS above. Unlike
+# Task 2's brand-new facade members, `add_member`/`storage_dir` are
+# pre-existing frozen members with real recorded consumers, so their new call
+# sites here (AssetService mirrors SourceFileStore's storage_dir convention)
+# are registered as allowed consumers rather than exempted wholesale.
+TASK4_KNOWHOW_ALLOWED_IMPORTS = {
+    ("backend/tests/test_notebook_assets.py", 12, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK4_KNOWHOW_ALLOWED_CONSUMERS = {
+    ("add_member", "backend/tests/test_notebook_assets.py:110"),
+    ("storage_dir", "backend/app/services/knowhow/assets.py:73"),
+}
+# The facade-import consumer scan (test_static_repository_consumer_scan_
+# matches_manifest_exactly) tracks SQLiteRepository itself as a member with
+# its own recorded consumer sites; Task 1/2's sibling test files clear it via
+# the broad (file, member) allowance below rather than TASK4_KNOWHOW_ALLOWED_
+# IMPORTS above (that set only feeds the separate compatibility-exports scan).
+TASK4_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_notebook_assets.py", "SQLiteRepository"),
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2189,6 +2214,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK6_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK1_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK2_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK4_KNOWHOW_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2796,6 +2822,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK5_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK1_KNOWHOW_ALLOWED_IMPORTS
                     or site in TASK2_KNOWHOW_ALLOWED_IMPORTS
+                    or site in TASK4_KNOWHOW_ALLOWED_IMPORTS
                 )
 
 
@@ -3014,7 +3041,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         (member, f"{file}:{line}")
         for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.api.deps import (
     admin_query_repository, identity_repository,
@@ -85,6 +85,7 @@ from app.models.schemas import (
 from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
 from app.services.kg import scheduler as kg_scheduler
+from app.services.knowhow.assets import AssetService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.pending_bus import pending_bus
 from app.repositories.ports import AskStreamPort, UploadedSourceFile
@@ -95,6 +96,10 @@ router.include_router(memory_router)
 
 SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
 MAX_SOURCE_UPLOAD_BYTES = 50 * 1024 * 1024
+
+
+def _asset_service() -> AssetService:
+    return AssetService(repository())
 
 
 def _validate_source_file(file_name: str, content_size: int | None = None) -> None:
@@ -403,6 +408,42 @@ def delete_source(source_id: str, user: UserProfile = Depends(get_current_user))
     except KeyError:
         raise HTTPException(status_code=404, detail="Source not found")
 
+
+# --- knowhow-tables PR-1 Task 4: notebook image assets (pasted table-cell
+# images). Guards mirror the source endpoints above exactly: POST needs
+# write access (like upload_sources), GET needs read access (like
+# get_source/source_elements) — both 404 on denial, never 403, matching this
+# codebase's "don't leak existence" convention. Route bodies stay thin
+# (param parsing / guard / orchestration only); validation + disk I/O live
+# in AssetService.
+@router.post("/notebooks/{notebook_id}/assets", dependencies=[Depends(require_notebook_access)])
+async def upload_notebook_asset(notebook_id: str, file: UploadFile = File(...)) -> dict:
+    repo = repository()
+    content = await file.read()
+    try:
+        asset = _asset_service().save(
+            notebook_id,
+            file.filename or "asset",
+            file.content_type or "",
+            content,
+            repo.current_user().id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"id": asset["id"], "url": f"/api/notebooks/{notebook_id}/assets/{asset['id']}"}
+
+
+@router.get("/notebooks/{notebook_id}/assets/{asset_id}", dependencies=[Depends(require_notebook_read)])
+def get_notebook_asset_file(notebook_id: str, asset_id: str) -> FileResponse:
+    asset = repository().get_notebook_asset(asset_id)
+    if asset is None or asset["notebook_id"] != notebook_id:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    path = _asset_service().path_for(asset)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Asset not found")
+    return FileResponse(
+        path, media_type=asset["mime"], headers={"Cache-Control": "private, max-age=86400"}
+    )
 
 
 @router.get(
