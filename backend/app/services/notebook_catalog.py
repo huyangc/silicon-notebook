@@ -5,7 +5,7 @@ import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List
 
 from app.models.schemas import (
     NotebookAnalytics,
@@ -254,11 +254,23 @@ class NotebookCatalogService:
         summaries: NotebookSummaryQuery,
         queries: QueryStore,
         identity: IdentityStore,
+        storage_dir: Callable[[], Path],
     ) -> None:
+        """``storage_dir`` is a zero-arg callable resolving the LIVE storage
+        root (knowhow-tables PR-2+3 Task 14) — a callable rather than a Path
+        snapshot because the facade's ``storage_dir`` is a mutable property
+        (tests monkeypatch it per instance), exactly the convention
+        ``NotebookCopyService`` already uses for the same collaborator.
+        ``delete_notebook`` reads it to sweep the notebook's pasted-image
+        asset directory; injected at construction so EVERY caller gets the
+        cleanup — routes reach this service directly via
+        ``deps.notebook_catalog_repository()`` (``repo._runtime.catalog``),
+        never through the facade delegate."""
         self._store = store
         self._summaries = summaries
         self._queries = queries
         self._identity = identity
+        self._storage_dir = storage_dir
         self.kg_building: set = set()
         self.memory_retriever = None
 
@@ -297,20 +309,18 @@ class NotebookCatalogService:
         self._store.update_row(notebook_id, payload)
         return self.get_notebook(notebook_id)
 
-    def delete_notebook(
-        self, notebook_id: str, *, storage_dir: "Path | None" = None
-    ) -> None:
-        """``storage_dir`` (knowhow-tables PR-2+3 Task 14): the facade passes
-        its live ``storage_dir`` so the notebook's pasted-image-asset
-        directory is swept alongside source files; ``None`` (any other
-        direct caller) just skips that step rather than guessing a path."""
+    def delete_notebook(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing
         file_paths = self._store.delete_row_and_orphan_embeddings(notebook_id)
-        # DB deletion is committed above; only then remove files on disk.
+        # DB deletion is committed above; only then remove files on disk —
+        # source files first, then the notebook's pasted-image asset
+        # directory (knowhow-tables PR-2+3 Task 14; unconditional, from the
+        # construction-injected live storage root, so the real HTTP delete
+        # route — which reaches this service directly, not via the facade —
+        # gets the cleanup too).
         for file_path in file_paths:
             _delete_source_file(file_path)
-        if storage_dir is not None:
-            _delete_notebook_asset_dir(storage_dir, notebook_id)
+        _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
 
     def mark_notebook_base(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing

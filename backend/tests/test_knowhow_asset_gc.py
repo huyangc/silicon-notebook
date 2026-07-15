@@ -196,3 +196,59 @@ def test_sweep_is_scoped_to_the_given_notebook(repo):
 def test_sweep_on_notebook_with_no_assets_returns_zero(repo):
     nb = _mk_notebook(repo)
     assert repo.maintenance.sweep_orphan_assets(nb) == {"removed": 0}
+
+
+# ---------------------------------------------------------------------------
+# real HTTP delete route (review fix)
+# ---------------------------------------------------------------------------
+# The DELETE /api/notebooks/{id} route reaches NotebookCatalogService DIRECTLY
+# via deps.notebook_catalog_repository() (repo._runtime.catalog) — it never
+# goes through the SQLiteRepository facade the fixture-level tests above use.
+# The first cut of this task wired the asset-dir cleanup as a facade-forwarded
+# kwarg, which left the real route without it (review-reproduced live: 204 but
+# file left on disk). The cleanup now rides construction injection, so BOTH
+# entry points get it; this test pins the actual HTTP path end to end.
+# Client/login idioms mirror test_notebook_assets.py.
+
+
+def _client(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+    return TestClient(app)
+
+
+def _login(client, username, password="pw123456"):
+    client.post("/api/auth/register", json={"username": username, "password": password})
+    tok = client.post(
+        "/api/auth/login", json={"username": username, "password": password}
+    ).json()["token"]
+    return {"Authorization": f"Bearer {tok}"}
+
+
+def test_http_delete_notebook_route_removes_asset_file_and_dir(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00001401")
+    nb = client.post("/api/notebooks", json={"name": "N"}, headers=owner_h).json()["id"]
+
+    upload = client.post(
+        f"/api/notebooks/{nb}/assets",
+        headers=owner_h,
+        files={"file": ("a.png", PNG_BYTES, "image/png")},
+    )
+    assert upload.status_code == 200, upload.text
+    asset_id = upload.json()["id"]
+
+    asset_dir = tmp_path / "s" / "assets" / nb
+    asset_file = asset_dir / f"{asset_id}.png"
+    assert asset_file.is_file()  # guard: upload really landed on disk
+
+    resp = client.delete(f"/api/notebooks/{nb}", headers=owner_h)
+
+    assert resp.status_code == 204, resp.text
+    assert not asset_file.exists()
+    assert not asset_dir.exists()

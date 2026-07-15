@@ -97,6 +97,13 @@ class RepositoryRuntime:
             summaries=self.notebook_summaries,
             queries=self.queries,
             identity=self.identity,
+            # Lazy: self.storage_dir (the property below) reads
+            # self.source_files, which is constructed a few lines further
+            # down — the callable only evaluates at delete_notebook time,
+            # and stays live across the facade's mutable storage_dir setter
+            # (same Callable[[], Path] convention as wire_sharing's
+            # NotebookCopyService).
+            storage_dir=lambda: self.storage_dir,
         )
         self.source_store = SourceStore(self.database, now=seams.now)
         self.chunk_store = ChunkStore(self.database)
