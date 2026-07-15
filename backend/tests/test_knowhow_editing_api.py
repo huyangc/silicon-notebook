@@ -685,6 +685,51 @@ def test_readonly_member_gets_404_on_every_mutating_endpoint(tmp_path, monkeypat
     # Reads still succeed for the read-only member.
     assert client.get(f"/api/notebooks/{nb}/knowhow/{t}", headers=bob_h).status_code == 200
 
+    # --- T15 permission-matrix extension (PR-2/3 safety net): T6/T8/T10 ---
+    # endpoints were never added to this matrix when their own tasks landed.
+    # Extending, never weakening, the existing assertions above.
+
+    # T6 template download is a READ endpoint (require_notebook_read) — the
+    # read-only member succeeds exactly like the table GET above.
+    assert client.get(f"/api/notebooks/{nb}/knowhow/{t}/template", headers=bob_h).status_code == 200
+
+    # T6 append is write-gated (require_notebook_access) regardless of mode —
+    # the dependency runs before the handler even reads the `mode` field.
+    import io
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.active.append(["现象"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    xlsx_bytes = buf.getvalue()
+    for mode in ("preview", "commit"):
+        resp = client.post(
+            f"/api/notebooks/{nb}/knowhow/{t}/append", headers=bob_h,
+            files={"file": ("x.xlsx", xlsx_bytes,
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            data={"mode": mode},
+        )
+        assert resp.status_code == 404, (mode, resp.text)
+
+    # T8 optimize is write-gated too (an authoring affordance, not a read).
+    assert client.post(
+        f"/api/notebooks/{nb}/knowhow/{t}/rows/{row['id']}/cells/{column_id}/optimize",
+        headers=bob_h,
+    ).status_code == 404
+
+    # T10 agent-surface code-attachment writes, reached via SESSION auth
+    # (not an agent token) — a read-only member is exactly a "reader", so
+    # the write=True/"knowhow:code" scope check 404s the same way every
+    # other write does here (GET on this same URL stays 200 for a reader —
+    # proven separately by test_knowhow_agent_api.py's own Group B coverage,
+    # not re-asserted here to keep this matrix focused on WRITES).
+    code_url = f"/api/agent/knowhow/rows/{row['id']}/cells/{column_id}/code"
+    assert client.put(
+        code_url, headers=bob_h, json={"code_text": "x", "language": ""}
+    ).status_code == 404
+    assert client.delete(code_url, headers=bob_h).status_code == 404
+
 
 def test_stranger_gets_404_on_every_mutating_endpoint(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
@@ -692,6 +737,9 @@ def test_stranger_gets_404_on_every_mutating_endpoint(tmp_path, monkeypatch):
     nb = _mk_notebook(client, owner_h)
     table = _mk_table(client, owner_h, nb)
     column_id = table["columns"][1]["id"]
+    row = client.post(
+        f"/api/notebooks/{nb}/knowhow/{table['id']}/rows", headers=owner_h, json={"cells": {}},
+    ).json()
 
     stranger_h = _login(client, "c00001081")
     t = table["id"]
@@ -699,6 +747,19 @@ def test_stranger_gets_404_on_every_mutating_endpoint(tmp_path, monkeypatch):
     assert client.post(f"/api/notebooks/{nb}/knowhow/{t}/columns", headers=stranger_h, json={"name": "x", "kind": "attribute"}).status_code == 404
     assert client.delete(f"/api/notebooks/{nb}/knowhow/{t}/columns/{column_id}", headers=stranger_h).status_code == 404
     assert client.get(f"/api/notebooks/{nb}/knowhow/{t}", headers=stranger_h).status_code == 404
+
+    # --- T15 permission-matrix extension (PR-2/3 safety net), mirroring the
+    # read-only-member matrix above.
+    assert client.get(f"/api/notebooks/{nb}/knowhow/{t}/template", headers=stranger_h).status_code == 404
+    assert client.post(
+        f"/api/notebooks/{nb}/knowhow/{t}/rows/{row['id']}/cells/{column_id}/optimize",
+        headers=stranger_h,
+    ).status_code == 404
+    code_url = f"/api/agent/knowhow/rows/{row['id']}/cells/{column_id}/code"
+    assert client.put(
+        code_url, headers=stranger_h, json={"code_text": "x", "language": ""}
+    ).status_code == 404
+    assert client.delete(code_url, headers=stranger_h).status_code == 404
 
 
 # ===========================================================================

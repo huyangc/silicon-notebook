@@ -3554,3 +3554,31 @@ TASK13_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
     }
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK13_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
+
+# PR-2+3 Task 15 (cross-task safety net: code-isolation guard + PR-2/3
+# integration tests + permission-matrix extension). Its two new test files
+# both mirror test_knowhow_retrieval.py's own fixture — the app's real
+# repository singleton via app.api.routes.repository(), never a freshly
+# constructed SQLiteRepository (needed so a background projection job, which
+# runs against that SAME singleton, actually sees the fake/recording
+# embedder installed on it) — so, unlike Task 13's file, no
+# SQLiteRepository/_now import registration is needed here at all; only the
+# direct facade calls each file makes for its own DB-level assertions:
+# repo._connect (raw peeks at source_elements/chunks/knowledge_objects/
+# knowledge_relations/knowhow_cell_code), repo._retrieve_chunks +
+# repo._runtime.knowledge.chunk_fts_search + repo.ask_chunk (the isolation
+# file's "ask 上下文组装" surface), and repo._citations_from (the
+# integration file's real-element citation-enrichment scenario). Its
+# companion edit to test_knowhow_editing_api.py's permission matrix (same
+# commit) adds zero NEW facade-member call sites — only TestClient HTTP
+# verbs plus a local openpyxl import — so it needs no new registration
+# beyond its own pre-existing Task 3 entry above. Appended at EOF for the
+# same zero-line-shift reason as every other TASKN_KNOWHOW_PR23_* block.
+TASK15_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_code_isolation.py", name)
+    for name in {"_connect", "_retrieve_chunks", "_runtime", "ask_chunk"}
+} | {
+    ("backend/tests/test_knowhow_pr23_integration.py", name)
+    for name in {"_connect", "_retrieve_chunks", "_citations_from"}
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK15_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
