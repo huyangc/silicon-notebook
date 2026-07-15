@@ -18,6 +18,13 @@ from app.models.schemas import (
 from app.repositories.sqlite.database import SqliteDatabase
 
 
+# Sentinel distinguishing "paper_meta not passed" (source_from_row should
+# fetch it itself) from an explicit `paper_meta=None` ("caller already
+# fetched — there is no meta row"). A plain `None` default couldn't tell
+# those two cases apart.
+_UNSET = object()
+
+
 def _created_label(value: str) -> str:
     try:
         dt = datetime.fromisoformat(value)
@@ -107,14 +114,18 @@ class SourceStore:
             row = db.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
             if row is None:
                 raise KeyError(source_id)
-            summary = self.source_from_row(db, row)
+            # Fetch paper-meta ONCE and thread it into source_from_row (which
+            # also needs it for authors/pub_year/venue) instead of letting it
+            # fetch its own copy — SourceDetail needs the raw dict here too
+            # (for paper_meta_model), so a shared local avoids a second
+            # paper_meta_for_sources round trip for the same source_id.
+            pm = self.paper_meta_for_sources(db, [source_id]).get(source_id)
+            summary = self.source_from_row(db, row, paper_meta=pm)
             return SourceDetail(
                 **summary.model_dump(),
                 file_path=row["file_path"],
                 error_message=row["error_message"],
-                paper_meta=self.paper_meta_model(
-                    self.paper_meta_for_sources(db, [source_id]).get(source_id)
-                ),
+                paper_meta=self.paper_meta_model(pm),
             )
 
     def source_elements(self, source_id: str) -> List[SourceElement]:
@@ -479,10 +490,26 @@ class SourceStore:
         )
 
     # -------------------------------------------------------------- hydration
-    def source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:
-        """Single-row path (get_source) — 3 point queries. list_sources /
-        list_sources_page use the batched sources_from_rows sibling instead
-        (C5: was 3 queries * N rows per page — now 3 total per page)."""
+    def source_from_row(
+        self,
+        db: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        paper_meta: Optional[dict] = _UNSET,  # type: ignore[assignment]
+    ) -> SourceSummary:
+        """Single-row path (get_source) — 4 point queries (source_elements
+        COUNT, knowledge_objects EXISTS, extraction_runs latest
+        error_message, paper-meta hydration). list_sources / list_sources_page
+        use the batched sources_from_rows sibling instead (C5: was 3 queries *
+        N rows per page — now 3 total per page; the paper-meta lookup landed
+        later as the 4th).
+
+        ``paper_meta``: get_source already fetches this dict for
+        SourceDetail.paper_meta, so it passes the SAME dict here instead of
+        letting this method fetch its own copy of the same source_id — the
+        ``_UNSET`` sentinel default (as opposed to a plain ``None``, which
+        means "already fetched, no meta row exists") is what makes every
+        other caller still fetch it here."""
         element_count = int(db.execute(
             "SELECT COUNT(*) AS count FROM source_elements WHERE source_id = ?",
             (row["id"],),
@@ -491,7 +518,10 @@ class SourceStore:
             "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE source_id = ? AND source_id != '')",
             (row["id"],),
         ).fetchone()[0])
-        pm = self.paper_meta_for_sources(db, [row["id"]]).get(row["id"])
+        pm = (
+            self.paper_meta_for_sources(db, [row["id"]]).get(row["id"])
+            if paper_meta is _UNSET else paper_meta
+        )
         return SourceSummary(
             id=row["id"],
             notebook_id=row["notebook_id"],
@@ -516,10 +546,11 @@ class SourceStore:
 
     def sources_from_rows(self, db: sqlite3.Connection, rows: List[sqlite3.Row]) -> List[SourceSummary]:
         """Batched sibling of source_from_row for a PAGE of source rows (house
-        pattern, see _hydrate_search_hits): the 3 per-row lookups
+        pattern, see _hydrate_search_hits): the 4 per-row lookups
         (source_elements COUNT, latest extraction_runs error_message,
-        knowledge_objects EXISTS) each become ONE `id IN (...)` query for the
-        whole page instead of one query per row — was 3*N round-trips.
+        knowledge_objects EXISTS, paper-meta hydration) each become batched
+        `id IN (...)` queries for the whole page instead of one query per
+        row — was 4*N round-trips.
 
         extraction_warning tie-break equivalence: when two extraction_runs
         rows for the same source share `created_at` (rare but possible at
