@@ -513,12 +513,16 @@ def run(
     def _cancelled_record(pdf_path: Path, server: MinerUServer) -> dict:
         """stop_event 已置位：不发起任何 HTTP 调用、不写输出文件，只留一条可审计
         的 manifest 记录——"这个文件本该轮到它，但 run 已经在收尾"。"""
+        try:  # 源 PDF 已在盘上，size_kb 与 process_file 口径一致（输入 PDF 大小）
+            size_kb = round(pdf_path.stat().st_size / 1024, 1)
+        except OSError:
+            size_kb = 0.0
         return {
             "rel": _rel(pdf_path, cfg.src_dir),
             "status": "cancelled",
             "server": server.base_url,
             "task_id": "",
-            "size_kb": 0.0,
+            "size_kb": size_kb,
             "attempts": 0,
             "seconds": 0.0,
             "error": "",
