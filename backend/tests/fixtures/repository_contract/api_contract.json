@@ -3241,6 +3241,94 @@
           "title": "PaginatedSources",
           "type": "object"
         },
+        "PaperAuthor": {
+          "properties": {
+            "affiliation": {
+              "default": "",
+              "title": "Affiliation",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "title": "PaperAuthor",
+          "type": "object"
+        },
+        "PaperMeta": {
+          "description": "论文元数据(接地校验后)。非论文源/未抽取时整个对象缺省。",
+          "properties": {
+            "authors": {
+              "items": {
+                "$ref": "#/components/schemas/PaperAuthor"
+              },
+              "title": "Authors",
+              "type": "array"
+            },
+            "doi": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Doi"
+            },
+            "is_paper": {
+              "default": false,
+              "title": "Is Paper",
+              "type": "boolean"
+            },
+            "keywords": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Keywords",
+              "type": "array"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title"
+            },
+            "venue": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Venue"
+            },
+            "year": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Year"
+            }
+          },
+          "title": "PaperMeta",
+          "type": "object"
+        },
         "PromotionApproveResult": {
           "properties": {
             "base_object_id": {
@@ -3887,6 +3975,13 @@
         },
         "SourceDetail": {
           "properties": {
+            "authors": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Authors",
+              "type": "array"
+            },
             "created_label": {
               "default": "",
               "title": "Created Label",
@@ -3950,10 +4045,31 @@
               "title": "Notebook Id",
               "type": "string"
             },
+            "paper_meta": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/PaperMeta"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "parse_status": {
               "default": "",
               "title": "Parse Status",
               "type": "string"
+            },
+            "pub_year": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pub Year"
             },
             "source_url": {
               "default": "",
@@ -3975,6 +4091,17 @@
             "type": {
               "title": "Type",
               "type": "string"
+            },
+            "venue": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Venue"
             }
           },
           "required": [
@@ -4073,6 +4200,13 @@
         },
         "SourceSummary": {
           "properties": {
+            "authors": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Authors",
+              "type": "array"
+            },
             "created_label": {
               "default": "",
               "title": "Created Label",
@@ -4131,6 +4265,17 @@
               "title": "Parse Status",
               "type": "string"
             },
+            "pub_year": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pub Year"
+            },
             "source_url": {
               "default": "",
               "title": "Source Url",
@@ -4151,6 +4296,17 @@
             "type": {
               "title": "Type",
               "type": "string"
+            },
+            "venue": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Venue"
             }
           },
           "required": [
@@ -10687,6 +10843,7 @@
       }
     },
     "source_detail": {
+      "authors": [],
       "created_label": "fixture-date",
       "doc_type": "",
       "element_count": 2,
@@ -10699,12 +10856,15 @@
       "id": "src-api",
       "kg_extracted": true,
       "notebook_id": "nb-api",
+      "paper_meta": null,
       "parse_status": "extracted",
+      "pub_year": null,
       "source_url": "",
       "status": "extracted",
       "summary": "2 parsed text element(s). Gain Source degeneration stabilizes fixture gain.",
       "title": "fixture.md",
-      "type": "markdown"
+      "type": "markdown",
+      "venue": null
     }
   },
   "source_commit": "3334626"

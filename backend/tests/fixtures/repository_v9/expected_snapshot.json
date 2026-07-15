@@ -444,6 +444,7 @@
       }
     },
     "source_detail": {
+      "authors": [],
       "created_label": "2024年1月2日",
       "doc_type": "textbook",
       "element_count": 2,
@@ -456,12 +457,15 @@
       "id": "<src-id-1>",
       "kg_extracted": true,
       "notebook_id": "<nb-id-1>",
+      "paper_meta": null,
       "parse_status": "parsed",
+      "pub_year": null,
       "source_url": "",
       "status": "extracted",
       "summary": "A deterministic mixed-format repository fixture.",
       "title": "Fixture amplifier notes",
-      "type": "markdown"
+      "type": "markdown",
+      "venue": null
     },
     "source_elements": [
       {
@@ -490,6 +494,7 @@
     ],
     "sources": [
       {
+        "authors": [],
         "created_label": "2024年1月2日",
         "doc_type": "textbook",
         "element_count": 2,
@@ -501,11 +506,13 @@
         "kg_extracted": true,
         "notebook_id": "<nb-id-1>",
         "parse_status": "parsed",
+        "pub_year": null,
         "source_url": "",
         "status": "extracted",
         "summary": "A deterministic mixed-format repository fixture.",
         "title": "Fixture amplifier notes",
-        "type": "markdown"
+        "type": "markdown",
+        "venue": null
       }
     ]
   },

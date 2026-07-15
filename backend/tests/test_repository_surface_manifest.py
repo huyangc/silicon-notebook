@@ -1873,6 +1873,19 @@ TASK1_PAPER_META_ALLOWED_MEMBER_FILES = {
     }
 }
 
+# Task 3 (paper-metadata-extraction): the new SourceStore persistence/
+# hydration/search test file constructs the real facade directly (same
+# fixture shape as test_source_store_component.py's TASK10_ALLOWED_MEMBER_
+# FILES entry) — SQLiteRepository(...), repo._runtime.source_store,
+# repo.create_notebook(...), repo._write() for the cascade-delete test.
+TASK3_PAPER_META_ALLOWED_IMPORTS = {
+    ("backend/tests/test_paper_meta_store.py", 9, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK3_PAPER_META_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_paper_meta_store.py", name)
+    for name in {"SQLiteRepository", "create_notebook", "_runtime", "_write"}
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2319,6 +2332,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK6_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK10_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK1_PAPER_META_ALLOWED_MEMBER_FILES
+    | TASK3_PAPER_META_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2935,6 +2949,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK5_KNOWHOW_ALLOWED_IMPORTS
                     or site in TASK6_KNOWHOW_ALLOWED_IMPORTS
                     or site in TASK1_PAPER_META_ALLOWED_IMPORTS
+                    or site in TASK3_PAPER_META_ALLOWED_IMPORTS
                 )
 
 
