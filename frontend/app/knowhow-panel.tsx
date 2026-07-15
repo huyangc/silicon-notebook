@@ -1122,7 +1122,7 @@ function ProjectionStatusBadge({
           title="重新投影整张表（后台执行）"
         >
           <RefreshCw size={12} className={retrying ? "knowhow-spin" : undefined} />
-          重试
+          {!retrying && "重试"}
         </button>
       )}
     </span>
