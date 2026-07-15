@@ -160,8 +160,11 @@ git commit -m "$(printf 'feat(mcp): validate_mcp_deployment gains opt-in require
 ### Task 2: request guard + DNS-rebinding toggle (`AgentBearerMiddleware`, `create_memory_mcp`)
 
 **Files:**
-- Modify: `backend/app/api/mcp_server.py` (`create_memory_mcp` at 555+, `TransportSecuritySettings` at ~567, `AgentBearerMiddleware` at 476-495, instantiation at ~956)
+- Modify: `backend/app/api/mcp_server.py` (`create_memory_mcp`, `TransportSecuritySettings`, `AgentBearerMiddleware`, instantiation)
 - Modify: `backend/tests/test_mcp_https_policy.py`
+- Modify: `backend/tests/test_repository_surface_manifest.py` (re-pin `TASK7_MEMORY_ALLOWED_CONSUMERS` exact lines after this task shifts them)
+
+> **Line-number note:** Task 1 already inserted ~21 lines into `mcp_server.py` (a `logging` import + module logger). The literal line numbers written in Step 3 below ("currently lines 479-481" etc.) are the *pre-Task-1* coordinates — locate each construct by name, not by the stated line number.
 
 **Interfaces:**
 - Consumes: `logger`, `validate_mcp_deployment` (Task 1).
@@ -308,10 +311,25 @@ def create_memory_mcp(
 Run: `cd backend && python -m pytest tests/test_mcp_https_policy.py -q`
 Expected: PASS (all).
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Re-pin the surface manifest (exact lines — do NOT use `:<line>`)**
+
+This task inserts a few lines into `mcp_server.py` above the facade call sites tracked by `TASK7_MEMORY_ALLOWED_CONSUMERS` in `backend/tests/test_repository_surface_manifest.py`, so its 8 exact-line tuples go stale.
+
+Run: `cd backend && python -m pytest tests/test_repository_surface_manifest.py -q`
+
+If it fails (`test_static_repository_consumer_scan_matches_manifest_exactly`), the assertion diff lists the current `backend/app/api/mcp_server.py:<N>` sites for each member. Update the 8 tuples to those new line numbers (map by member: `user_can_read_notebook` ×2, `get_notebook` ×2, `unified_kg_status`, `agent_memory_hits`, `search_notebook`, `ask`), and update the trailing "shifting … by exactly N lines" note in the comment above the set to the new delta. You can also read the new lines directly, e.g. `grep -n "user_can_read_notebook\|\.get_notebook\|unified_kg_status\|agent_memory_hits\|search_notebook(\|\.ask(" backend/app/api/mcp_server.py`.
+
+**Do NOT** convert these tuples to the `:<line>` placeholder. That was tried and rejected in review: because `mcp_server.py` has no entries in `ACTIVE_PRODUCTION_MEMBER_SITES`, a `:<line>` entry would match unlimited occurrences and silently hide a genuinely new call site to any of those 6 facade members in this externally-authenticated adapter. Keep exact line pins so new consumers stay detectable.
+
+Re-run until green:
+
+Run: `cd backend && python -m pytest tests/test_repository_surface_manifest.py -q`
+Expected: PASS (all).
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add backend/app/api/mcp_server.py backend/tests/test_mcp_https_policy.py
+git add backend/app/api/mcp_server.py backend/tests/test_mcp_https_policy.py backend/tests/test_repository_surface_manifest.py
 git commit -m "$(printf 'feat(mcp): gate request-guard + DNS-rebinding on require_https\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
