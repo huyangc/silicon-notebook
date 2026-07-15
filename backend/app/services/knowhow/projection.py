@@ -423,6 +423,14 @@ class KnowhowProjector:
         self.knowledge.delete_relations_by_source_object(db, notebook_id, row_case_id)
         self.knowledge.delete_objects_by_source_and_row(db, source_id, row_id)
 
+        # A row with no content in ANY cell projects NO case KO (belt-and-braces
+        # with grid_parser dropping all-empty rows at import — this covers the
+        # edit path, e.g. a row whose every cell was cleared). The delete calls
+        # above already ran, so an emptied row correctly leaves zero KOs behind
+        # rather than a phantom empty-fields case.
+        if not any(cell_nets.values()):
+            return
+
         object_rows: List[tuple] = []
         relation_rows: List[tuple] = []
 

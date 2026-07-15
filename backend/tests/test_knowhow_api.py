@@ -204,6 +204,18 @@ def test_import_missing_concept_role_returns_friendly_400(tmp_path, monkeypatch)
     assert "concept" in detail or "概念" in detail
 
 
+def test_import_empty_title_returns_friendly_400(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000508")
+    nb = _mk_notebook(client, owner_h)
+
+    # Valid grid + roles, but a whitespace-only title: create_knowhow_table's
+    # ValueError must surface through routes.py's existing 400 idiom.
+    resp = _import_xlsx(client, owner_h, nb, title="   ")
+    assert resp.status_code == 400, resp.text
+    assert "表标题不能为空" in resp.json()["detail"]
+
+
 def test_import_grid_parse_error_passthrough_400(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00000507")

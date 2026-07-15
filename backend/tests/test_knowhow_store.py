@@ -119,6 +119,21 @@ def test_create_table_error_messages_are_chinese_friendly(store, notebook_id):
         assert any("一" <= ch <= "鿿" for ch in message), message
 
 
+@pytest.mark.parametrize("bad_title", ["", "   ", "\t\n"])
+def test_create_table_rejects_empty_or_whitespace_title(store, notebook_id, bad_title):
+    with pytest.raises(ValueError) as exc:
+        store.create_knowhow_table(notebook_id, bad_title, "", BASE_COLUMNS)
+    message = str(exc.value)
+    assert "表标题不能为空" in message
+    # Nothing written on failure.
+    assert store.list_knowhow_tables(notebook_id) == []
+
+
+def test_create_table_strips_stored_title(store, notebook_id):
+    table_id = store.create_knowhow_table(notebook_id, "  时序修复  ", "", BASE_COLUMNS)
+    assert store.get_knowhow_table(table_id)["title"] == "时序修复"
+
+
 def test_create_table_writes_nothing_on_validation_failure(store, notebook_id):
     with pytest.raises(ValueError):
         store.create_knowhow_table(

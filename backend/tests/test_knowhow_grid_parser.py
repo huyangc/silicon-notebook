@@ -259,6 +259,76 @@ def test_parse_grid_xlsx_corrupted_bytes_raise_friendly_error():
     assert str(excinfo.value) == "无法读取 Excel 文件，请确认文件未损坏且为 .xlsx 格式"
 
 
+def test_parse_grid_xlsx_zero_worksheet_workbook_raises_friendly_error(monkeypatch):
+    # openpyxl refuses to SAVE a worksheet-less workbook ("At least one sheet
+    # must be visible"), so a real fixture can't be built — monkeypatch
+    # load_workbook to hand back one whose .worksheets is empty. The guard must
+    # turn the would-be bare IndexError into the friendly corrupt/invalid message.
+    import openpyxl
+
+    class _NoSheetWorkbook:
+        worksheets: list = []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(openpyxl, "load_workbook", lambda *a, **k: _NoSheetWorkbook())
+
+    with pytest.raises(GridParseError) as excinfo:
+        parse_grid("rules.xlsx", b"PK\x03\x04 pretend-valid-zip")
+
+    assert str(excinfo.value) == "无法读取 Excel 文件，请确认文件未损坏且为 .xlsx 格式"
+
+
+# --- all-empty-row dropping (across all three formats) ----------------------
+
+
+def test_parse_grid_xlsx_drops_trailing_all_empty_rows():
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["h1", "h2", "h3"])
+    ws.append(["a1", "a2", "a3"])
+    ws.append(["", "", ""])        # formatted-but-empty trailing row
+    ws.append([None, None, None])  # truly blank trailing row
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    grid = parse_grid("rules.xlsx", buf.getvalue())
+
+    assert grid.columns == ["h1", "h2", "h3"]
+    # Both phantom trailing rows are dropped; total_rows stays honest.
+    assert grid.rows == [["a1", "a2", "a3"]]
+
+
+def test_parse_grid_csv_drops_all_empty_rows():
+    text = "h1,h2\na,b\n,\n   ,   \n"
+    grid = parse_grid("rules.csv", text.encode("utf-8"))
+
+    assert grid.columns == ["h1", "h2"]
+    assert grid.rows == [["a", "b"]]
+
+
+def test_parse_grid_md_drops_all_empty_rows():
+    text = (
+        "| h1 | h2 |\n"
+        "| --- | --- |\n"
+        "| a | b |\n"
+        "|   |   |\n"
+    )
+    grid = parse_grid("rules.md", text.encode("utf-8"))
+
+    assert grid.columns == ["h1", "h2"]
+    assert grid.rows == [["a", "b"]]
+
+
+def test_parse_grid_all_blank_data_rows_raise_no_data_error():
+    # Header present but every data row is blank -> nothing survives the drop.
+    text = "h1,h2\n,\n   ,   \n"
+    with pytest.raises(GridParseError) as excinfo:
+        parse_grid("rules.csv", text.encode("utf-8"))
+    _assert_chinese_message(excinfo.value)
+
+
 # --- guess_roles -------------------------------------------------------------
 
 

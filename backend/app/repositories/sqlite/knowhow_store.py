@@ -48,11 +48,15 @@ class KnowhowStore:
     ) -> str:
         """Create a table + its column definitions (position = list order).
 
-        Validates: every column name is non-empty and unique, and exactly one
-        column carries the ``concept`` role (the row-anchor Task 5's
-        projector keys on). Violations raise ``ValueError`` with a
-        Chinese-friendly message — nothing is written on failure.
+        Validates: a non-empty (whitespace-stripped) title; every column name
+        is non-empty and unique; and exactly one column carries the ``concept``
+        role (the row-anchor Task 5's projector keys on). Violations raise
+        ``ValueError`` with a Chinese-friendly message — nothing is written on
+        failure. The stored title is the stripped form.
         """
+        title = str(title or "").strip()
+        if not title:
+            raise ValueError("表标题不能为空")
         names = [str(column.get("name", "")).strip() for column in columns]
         if any(not name for name in names):
             raise ValueError("列名不能为空")

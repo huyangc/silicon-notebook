@@ -619,6 +619,41 @@ def test_tool_deduped_within_table_across_rows(repo, projector, table_id, embedd
     assert _table_object_type_counts(repo, table_id).get("tool") == 2
 
 
+def test_row_with_no_nonempty_cells_projects_no_case_ko(repo, projector, table_id, embedder):
+    """Belt-and-braces with grid_parser's all-empty-row drop: a row whose only
+    cell is whitespace has no net content, so project_row must write NO case KO
+    (not a phantom empty-fields case) — and still settle 'synced'."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_role(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {cols["concept"]: "   "})
+
+    projector.project_row(table_id, row_id)
+
+    assert _row_object_ids(repo, row_id) == set()
+    assert _row_projection_status(repo, table_id, row_id) == "synced"
+
+
+def test_clearing_all_cells_removes_the_previously_projected_case_ko(
+    repo, projector, table_id, embedder
+):
+    """The delete-then-skip path: a row that HAD content, then had every cell
+    cleared, must end with zero row-scoped KOs — its prior case/procedure
+    objects swept and no new phantom empty case written in their place."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_role(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["concept"]: "过冲问题", cols["fix"]: "1. 增加阻尼电阻",
+    })
+    projector.project_row(table_id, row_id)
+    assert _row_object_ids(repo, row_id)  # sanity: content projected a case + procedure
+
+    store.update_knowhow_cell(row_id, cols["concept"], "")
+    store.update_knowhow_cell(row_id, cols["fix"], "")
+    projector.project_row(table_id, row_id)
+
+    assert _row_object_ids(repo, row_id) == set()
+
+
 # ---------------------------------------------------------------------------
 # project_table: full-rebuild escape hatch
 # ---------------------------------------------------------------------------

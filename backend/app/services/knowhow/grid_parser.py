@@ -15,8 +15,13 @@ from pathlib import Path
 
 
 class GridParseError(ValueError):
-    """A grid failed structural validation: empty header, duplicate column
-    names, or zero data rows. Carries a user-facing Chinese message."""
+    """A grid could not be parsed into a valid table. Raised for: an empty
+    header (empty file, or a first row with no column names); duplicate column
+    names; zero data rows (nothing after the header, OR every data row blank);
+    an unsupported file suffix; text (csv/md) that decodes as neither UTF-8
+    (BOM-tolerant) nor GBK; or an xlsx openpyxl cannot open (corrupt / not a
+    real .xlsx) or that contains no worksheet. Carries a user-facing Chinese
+    message."""
 
 
 @dataclass
@@ -64,18 +69,24 @@ def _build_grid(raw_rows: list[list[str]]) -> ParsedGrid:
             raise GridParseError(f"表头存在重复列名：{name!r}")
         seen.add(name)
 
-    data_rows = raw_rows[1:]
-    if not data_rows:
-        raise GridParseError("表格没有数据行：表头之后未找到任何数据")
-
     width = len(columns)
     normalized_rows: list[list[str]] = []
-    for row in data_rows:
+    for row in raw_rows[1:]:
         if len(row) < width:
             row = row + [""] * (width - len(row))
         elif len(row) > width:
             row = row[:width]
+        # Drop rows with no content in ANY cell. A trailing formatted-but-empty
+        # row is common in xlsx exports (openpyxl yields it as all-"" cells) and
+        # would otherwise become a phantom data row — and, downstream, a phantom
+        # case KO. Checked AFTER pad/truncate so a short all-blank row is caught
+        # too; total_rows stays honest (only real rows counted).
+        if not any(cell.strip() for cell in row):
+            continue
         normalized_rows.append(row)
+
+    if not normalized_rows:
+        raise GridParseError("表格没有数据行：表头之后未找到任何数据")
 
     return ParsedGrid(columns=columns, rows=normalized_rows)
 
@@ -88,6 +99,11 @@ def _extract_xlsx_rows(data: bytes) -> list[list[str]]:
     except Exception as exc:
         raise GridParseError("无法读取 Excel 文件，请确认文件未损坏且为 .xlsx 格式") from exc
     try:
+        # A workbook openpyxl opens but that carries no worksheet at all —
+        # worksheets[0] would raise a bare IndexError; surface the same
+        # friendly corrupt/invalid message instead.
+        if not workbook.worksheets:
+            raise GridParseError("无法读取 Excel 文件，请确认文件未损坏且为 .xlsx 格式")
         sheet = workbook.worksheets[0]
         return [
             ["" if cell is None else str(cell) for cell in row]
