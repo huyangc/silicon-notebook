@@ -7,7 +7,6 @@ from app.services.knowhow.grid_parser import (
     GridParseError,
     ParsedGrid,
     guess_kinds,
-    guess_roles,
     parse_grid,
 )
 
@@ -392,19 +391,3 @@ def test_guess_kinds_kind_and_anchor_are_independent():
     kinds, anchor_idx = guess_kinds(["分析方法名称", "备注"])
     assert kinds == ["procedure", "attribute"]
     assert anchor_idx == 0
-
-
-# --- guess_roles (transitional shim over guess_kinds, removed by Task 3) -----
-
-
-def test_guess_roles_shim_maps_kinds_back_to_legacy_strings():
-    columns = ["违例概念", "现象识别方法", "根因分析动作", "修复方法", "依赖工具"]
-    # anchor suggestion -> 'concept'; procedure -> 'identify' (the sub-role
-    # distinction no longer exists); entity -> 'tool'.
-    assert guess_roles(columns) == ["concept", "identify", "identify", "identify", "tool"]
-
-
-def test_guess_roles_shim_no_anchor_means_no_concept():
-    # No first-column fallback anymore — the legacy "always exactly one
-    # concept" guarantee is deliberately gone with it.
-    assert guess_roles(["列一", "列二", "列三"]) == ["plain", "plain", "plain"]

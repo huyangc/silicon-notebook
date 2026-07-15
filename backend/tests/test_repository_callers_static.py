@@ -203,7 +203,7 @@ INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
     # composition root. build_projector() constructs one directly, mirroring
     # app/api/deps.py's own "extract a narrow runtime port" precedent above
     # (and Task 5's own test fixture, test_knowhow_projection.py::projector).
-    ("backend/app/services/knowhow/api.py", 85, "_runtime"): (
+    ("backend/app/services/knowhow/api.py", 138, "_runtime"): (
         "import/table API composition constructs the plain KnowhowProjector "
         "service directly, mirroring deps.py's narrow-runtime-port extraction"
     ),

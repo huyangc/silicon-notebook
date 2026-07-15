@@ -200,24 +200,3 @@ def guess_kinds(columns: list[str]) -> tuple[list[str], "int | None"]:
             anchor_index = index
             break
     return kinds, anchor_index
-
-
-# transitional shim, removed by Task 3 (which rewires the preview endpoint to
-# emit guessed_kind + anchor_suggestion directly): maps guess_kinds' output
-# back onto the legacy wire strings the untouched PR-1 preview endpoint still
-# returns, so the openapi golden stays byte-identical this task. The legacy
-# identify/root_cause/fix distinction no longer exists — every procedure
-# column maps to 'identify'.
-_LEGACY_ROLE_BY_KIND = {
-    "procedure": "identify",
-    "entity": "tool",
-    "attribute": "plain",
-}
-
-
-def guess_roles(columns: list[str]) -> list[str]:
-    kinds, anchor_index = guess_kinds(columns)
-    roles = [_LEGACY_ROLE_BY_KIND[kind] for kind in kinds]
-    if anchor_index is not None:
-        roles[anchor_index] = "concept"
-    return roles

@@ -365,11 +365,10 @@ export const importKnowhow = (
   }).then(mapDetail);
 };
 
-// 建空表（建表向导「定表头」提交，Task 5 消费）：标题 + 列定义(名+内容类型
-// 三值) + 行标题列下标(null=不设置)。wire lands with T3：
-// `POST /notebooks/{nb}/knowhow`，JSON body {title, columns:[{name,kind}],
-// anchor_index}——镜像导入 commit 的 wire（columns_json + anchor_index）
-// 去掉文件段；端点由 Task 3 交付，落地时若字段名有出入在此一处收敛。
+// 建空表（建表向导「定表头」提交）：标题 + 列定义(名+内容类型三值) + 行标题列
+// 下标(null=不设置)。`POST /notebooks/{nb}/knowhow`，JSON body
+// {title, columns:[{name,kind}], anchor_index}——镜像导入 commit 的 wire
+// （columns_json + anchor_index）去掉文件段。
 export type KnowhowCreateTableInput = {
   title: string;
   columns: { name: string; kind: ColumnKind }[];

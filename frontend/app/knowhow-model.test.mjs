@@ -332,7 +332,7 @@ test("patchKnowhowCell: PATCH 请求体为 {content_md}，响应 snake_case 映�
   });
 });
 
-// --- createKnowhowTable（建表向导；wire lands with T3）------------------------------
+// --- createKnowhowTable（建表向导）--------------------------------------------------
 
 test("createKnowhowTable: POST 到 /notebooks/{nb}/knowhow，body 为 {title,columns,anchor_index}（anchorIndex null 也显式保留）", () => {
   const wire = wireTable({

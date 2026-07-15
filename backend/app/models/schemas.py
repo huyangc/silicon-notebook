@@ -974,18 +974,23 @@ class AdminUserNotebook(BaseModel):
     updated_at: str
 
 
-# --- knowhow-tables PR-1 Task 6: import/table API response models ----------
+# --- knowhow-tables PR-1 Task 6 + PR-2+3 Task 3: import/table + editing API
+# response models -------------------------------------------------------------
 # Field names are snake_case verbatim (mirrors the store's own dict shapes in
-# app/repositories/sqlite/knowhow_store.py) — the already-delivered frontend
-# model layer (frontend/app/knowhow-model.ts) maps these exact wire keys
-# (projection_status/row_count/guessed_role/rows_preview/total_rows/
-# columns_json) to its own camelCase types, so the wire must stay snake_case.
+# app/repositories/sqlite/knowhow_store.py) with ONE deliberate exception:
+# a column's ``role`` DB/store field is exposed on the wire as ``kind`` (PR-2+3
+# Task 3 renames the wire field to match the behavior-kind vocabulary; the
+# already-delivered frontend model layer, frontend/app/knowhow-model.ts,
+# already reads ``kind`` preferentially over the legacy ``role`` name). The
+# reshaping (store dict role -> wire dict kind, table-level anchor_column_id
+# derivation) lives in services/knowhow/api.py's to_wire_table/to_wire_column
+# — these are pure wire shapes with no business logic of their own.
 
 
 class KnowhowColumn(BaseModel):
     id: str
     name: str
-    role: str
+    kind: str
     position: int
 
 
@@ -1020,14 +1025,83 @@ class KnowhowTableDetail(BaseModel):
     updated_at: str = ""
     columns: List[KnowhowColumn] = Field(default_factory=list)
     rows: List[KnowhowRow] = Field(default_factory=list)
+    # Table-level row-title-column designation (design doc §①: at most one,
+    # optional). None = no anchor column (a "record-shaped" table that only
+    # participates in retrieval, never the KG) — a real, load-bearing state,
+    # not merely "field absent", so it is always present on the wire.
+    anchor_column_id: Optional[str] = None
 
 
 class KnowhowPreviewColumn(BaseModel):
     name: str
-    guessed_role: str
+    guessed_kind: str
 
 
 class KnowhowImportPreview(BaseModel):
     columns: List[KnowhowPreviewColumn]
     rows_preview: List[List[str]]
     total_rows: int
+    anchor_suggestion: Optional[int] = None
+
+
+# --- PR-2+3 Task 3: editing API request/response models -----------------------
+# Every PATCH body field is Optional with a None default so FastAPI/pydantic
+# populates ``model_fields_set`` with exactly the keys the client actually
+# sent — the routes read that set (not the values) to distinguish "field
+# omitted" from "field explicitly set to null", which matters for
+# anchor_column_id's clear-vs-leave-alone semantics (see routes.py).
+
+
+class KnowhowTablePatch(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    anchor_column_id: Optional[str] = None
+
+
+class KnowhowColumnCreate(BaseModel):
+    name: str
+    kind: str
+    position: Optional[int] = None
+
+
+class KnowhowColumnPatch(BaseModel):
+    name: Optional[str] = None
+    kind: Optional[str] = None
+
+
+class KnowhowRowCreate(BaseModel):
+    cells: Dict[str, str] = Field(default_factory=dict)
+    position: Optional[int] = None
+
+
+class KnowhowCellPatch(BaseModel):
+    content_md: str
+
+
+class KnowhowCellPatchResult(BaseModel):
+    row_id: str
+    column_id: str
+    content_md: str
+    projection_status: str
+
+
+# --- PR-2+3 Task 3: create-empty-table wizard backend --------------------------
+# Mirrors the import endpoint's column/anchor wire shape exactly
+# (columns:[{name,kind}] + a separate anchor_index) but as a JSON body
+# instead of import's multipart form, and with no grid/rows to parse.
+
+
+class KnowhowNewColumnInput(BaseModel):
+    name: str
+    # Optional (unlike the single-column editing endpoint's KnowhowColumnCreate.
+    # kind, which IS required): this feeds services.knowhow.api's
+    # _columns_with_anchor merge, shared with the import wire, which defaults
+    # an omitted kind to 'attribute' rather than erroring — the same
+    # leniency PR-1's import wire always had for an unspecified role.
+    kind: Optional[str] = None
+
+
+class KnowhowTableCreate(BaseModel):
+    title: str
+    columns: List[KnowhowNewColumnInput] = Field(default_factory=list)
+    anchor_index: Optional[int] = None
