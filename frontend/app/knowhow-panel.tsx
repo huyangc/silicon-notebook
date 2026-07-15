@@ -210,32 +210,55 @@ export function KnowhowPanel({
     loadTables();
   }, [loadTables]);
 
+  // stale-response guard（收尾修复）：loadDetail / loadRowCode 都可能被快速
+  // 连续触发（连点两张表卡片、连开两行抽屉、操作后的手动刷新），旧请求的
+  // 响应后到会覆盖新目标的状态。修法=单调递增请求号：发起时领号，落地前
+  // 校验「自己仍是最新一次请求」，否则整批丢弃；目标变化/组件卸载时（effect
+  // cleanup）再 bump 一次，把已无归属的 in-flight 响应一并作废。guard 放在
+  // load 回调内部而非仅 effect 内，让 effect 触发与操作后的手动刷新（addRow/
+  // retryReproject/handleManageChanged/handleCellSave 等）共用同一套防倒灌。
+  const detailRequestRef = useRef(0);
   const loadDetail = useCallback(
     (tableId: string) => {
+      const requestId = ++detailRequestRef.current;
       setDetailLoading(true);
       setDetailError(null);
       fetchKnowhowTable(notebookId, tableId)
-        .then((data) => setDetail(data))
-        .catch(() => setDetailError("加载表格详情失败，请重试"))
-        .finally(() => setDetailLoading(false));
+        .then((data) => {
+          if (detailRequestRef.current === requestId) setDetail(data);
+        })
+        .catch(() => {
+          if (detailRequestRef.current === requestId) setDetailError("加载表格详情失败，请重试");
+        })
+        .finally(() => {
+          if (detailRequestRef.current === requestId) setDetailLoading(false);
+        });
     },
     [notebookId],
   );
 
   useEffect(() => {
     if (selectedTableId) loadDetail(selectedTableId);
+    return () => {
+      detailRequestRef.current += 1; // 切表/回列表/卸载：作废 in-flight 的旧表详情
+    };
   }, [selectedTableId, loadDetail]);
 
   // Task 11：行详情抽屉展开的这一行的代码状态——独立于 loadDetail（整表结构/
   // 内容），只在抽屉真正打开时才发起，避免网格视图本身多背一次网络请求。
+  const rowCodeRequestRef = useRef(0);
   const loadRowCode = useCallback((rowId: string) => {
+    const requestId = ++rowCodeRequestRef.current;
     setRowCodeError(null);
     fetchKnowhowRowCodeByColumn(rowId)
       .then((map) => {
+        if (rowCodeRequestRef.current !== requestId) return; // 已切行/关抽屉：丢弃旧行响应
         setRowCodeByColumn(map);
         setRowCodeLoaded(true);
       })
-      .catch(() => setRowCodeError(CODE_STATUS_LOAD_ERROR));
+      .catch(() => {
+        if (rowCodeRequestRef.current === requestId) setRowCodeError(CODE_STATUS_LOAD_ERROR);
+      });
   }, []);
 
   useEffect(() => {
@@ -247,6 +270,9 @@ export function KnowhowPanel({
     }
     setRowCodeLoaded(false);
     loadRowCode(openRowId);
+    return () => {
+      rowCodeRequestRef.current += 1; // 切行/关抽屉：作废 in-flight 的旧行代码状态
+    };
   }, [openRowId, loadRowCode]);
 
   // notebook 切换时(理论上面板会被 page.tsx 一并卸载，这里仅作兜底)整体复位，
@@ -459,6 +485,13 @@ export function KnowhowPanel({
         ),
       };
     });
+    // 收尾修复（浏览器 QA 实测）：格子内容一变，该格挂着的代码派生在后端立即
+    // 转 stale——而保存成功路径此前只合并了格子内容，抽屉 chip / 代码浮层会
+    // 一直停留在「已实现」直到重开抽屉。保存的行恰好是当前展开行时，立即重取
+    // 行级代码状态，让 stale chip 无需重开抽屉即浮现（优化整行的 onAcceptCell
+    // 也走本函数，同样受益）。loadRowCode 自带请求号 guard，与快速切行/连续
+    // 保存并存时旧响应不会倒灌。
+    if (openRowId === result.rowId) loadRowCode(result.rowId);
   }
 
   // Task 11：打开代码浮层（抽屉 chip 的 onOpen，及"添加代码"安静入口共用同
