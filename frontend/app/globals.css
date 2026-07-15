@@ -61,6 +61,9 @@ button {
   background: #f4f5ff;
   color: #1f2329;
   border-bottom: 1px solid #e2e5f0;
+  position: sticky;
+  top: 0;
+  z-index: 40;
 }
 
 .brand {
