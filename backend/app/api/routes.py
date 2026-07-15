@@ -1587,10 +1587,6 @@ def backfill_paper_metadata(notebook_id: str) -> dict:
     )
     if not llm_ready:
         raise HTTPException(status_code=409, detail="LLM not configured")
-    try:
-        repo.get_notebook(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
     queued = len(repo.sources_missing_paper_meta(notebook_id))
     if queued:
         background_jobs.submit(

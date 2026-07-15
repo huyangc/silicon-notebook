@@ -928,7 +928,10 @@ class SourceIngestionService:
     def run_extraction(self, source_id: str) -> None:
         source: SourceDetail = self.sources.get_source(source_id)
         elements = self.source_elements(source_id)
-        # 历史源 catch-up:补论文元数据(幂等,有行即跳;失败不影响 KG 抽取)。
+        # 历史源 catch-up:补论文元数据(幂等,有行即跳)。ensure_paper_metadata 的
+        # try/except 包住幂等读之后的整个方法体(不止 LLM 调用),保证它绝不向外
+        # 抛异常——失败真正不影响 KG 抽取(不会中断下面紧接着的抽取流程),而不只
+        # 是注释里的一句希望。
         self.ensure_paper_metadata(source, elements=elements, force=False)
         now = self.now()
         run_id = self.new_id("run")
@@ -1044,20 +1047,29 @@ class SourceIngestionService:
         )
         if doc_type != "academic_paper":
             return "skipped"
-        if not force and self.sources.get_paper_meta(source.id) is not None:
-            return "skipped"
-        client = self.kg_llm()
-        if not getattr(client, "configured", False):
-            return "no_llm"
-        if elements is None:
-            elements = self.source_elements(source.id)
-        head_chars = int(getattr(self.settings, "paper_meta_head_chars", 4000))
-        head_text = self.source_files.read_source_text(
-            getattr(source, "file_path", "") or "", elements
-        )[:head_chars]
-        if not head_text.strip():
-            return "no_text"
+        # From here on EVERYTHING is inside the try: the idempotency read,
+        # the LLM-configured probe, element/text hydration and the LLM call
+        # itself. Any of these can raise (a store read, a config resolution
+        # bug, a file-read error) and must degrade to "failed" the same as an
+        # LLM error — this method must NEVER escape an exception, because its
+        # two mount points (process_source, run_extraction's historical-source
+        # catch-up) both run KG extraction immediately afterward and an
+        # uncaught exception here would abort that call chain before KG
+        # extraction ever runs.
         try:
+            if not force and self.sources.get_paper_meta(source.id) is not None:
+                return "skipped"
+            client = self.kg_llm()
+            if not getattr(client, "configured", False):
+                return "no_llm"
+            if elements is None:
+                elements = self.source_elements(source.id)
+            head_chars = int(getattr(self.settings, "paper_meta_head_chars", 4000))
+            head_text = self.source_files.read_source_text(
+                getattr(source, "file_path", "") or "", elements
+            )[:head_chars]
+            if not head_text.strip():
+                return "no_text"
             raw = client.chat_json(
                 [{"role": "user", "content": paper_meta_prompt(head_text)}],
                 PAPER_META_SCHEMA_HINT,
