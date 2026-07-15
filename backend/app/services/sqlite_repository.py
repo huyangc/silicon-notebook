@@ -208,7 +208,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 
 @dataclass(frozen=True)
@@ -3216,6 +3216,60 @@ class SQLiteRepository:
         return self._runtime.ask_execution.start(
             notebook_id, payload, mode, user_id=user_id
         )
+
+    # --- knowhow-tables PR-1 Task 2: one-hop delegates onto the runtime-
+    # --- owned KnowhowStore. Task 5 (projector) and Task 6 (import/table
+    # --- API) build directly on these exact names/signatures.
+    def create_knowhow_table(
+        self, notebook_id: str, title: str, description: str, columns: list
+    ) -> str:
+        return self._runtime.knowhow_store.create_knowhow_table(
+            notebook_id, title, description, columns
+        )
+
+    def list_knowhow_tables(self, notebook_id: str) -> list:
+        return self._runtime.knowhow_store.list_knowhow_tables(notebook_id)
+
+    def get_knowhow_table(self, table_id: str) -> dict:
+        return self._runtime.knowhow_store.get_knowhow_table(table_id)
+
+    def add_knowhow_row(
+        self, table_id: str, cells: dict, position: Optional[int] = None
+    ) -> str:
+        return self._runtime.knowhow_store.add_knowhow_row(
+            table_id, cells, position
+        )
+
+    def update_knowhow_cell(
+        self, row_id: str, column_id: str, content_md: str
+    ) -> None:
+        return self._runtime.knowhow_store.update_knowhow_cell(
+            row_id, column_id, content_md
+        )
+
+    def delete_knowhow_table(self, table_id: str) -> dict:
+        return self._runtime.knowhow_store.delete_knowhow_table(table_id)
+
+    def set_knowhow_row_projection(self, row_id: str, status: str) -> None:
+        return self._runtime.knowhow_store.set_knowhow_row_projection(row_id, status)
+
+    def set_knowhow_hidden_source(self, table_id: str, source_id: str) -> None:
+        return self._runtime.knowhow_store.set_knowhow_hidden_source(
+            table_id, source_id
+        )
+
+    def bump_knowhow_mutation_seq(self, table_id: str) -> int:
+        return self._runtime.knowhow_store.bump_knowhow_mutation_seq(table_id)
+
+    def insert_notebook_asset(
+        self, notebook_id: str, filename: str, mime: str, size: int, created_by: str
+    ) -> str:
+        return self._runtime.knowhow_store.insert_notebook_asset(
+            notebook_id, filename, mime, size, created_by
+        )
+
+    def get_notebook_asset(self, asset_id: str) -> Optional[dict]:
+        return self._runtime.knowhow_store.get_notebook_asset(asset_id)
 
 
 def _now() -> str:

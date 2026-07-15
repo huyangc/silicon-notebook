@@ -53,10 +53,10 @@ def test_fresh_schema_matches_committed_contract(tmp_path):
         "否则说明重构意外改动了表结构，会破坏既有库加载。")
 
 
-def test_v15_schema_version_is_current(tmp_path):
+def test_v16_schema_version_is_current(tmp_path):
     repo = _repo(tmp_path)
     with repo._connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 15
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 16
 
 
 def test_legacy_unversioned_db_loads_without_data_loss(tmp_path):

@@ -346,6 +346,7 @@
         "Why is gain stable?"
       ],
       "id": "<nb-id-1>",
+      "is_shared": true,
       "kg_building": false,
       "kg_pending_sources": 0,
       "kg_ready": true,
@@ -1177,6 +1178,26 @@
         "type": "index"
       },
       {
+        "name": "idx_knowhow_cells_row",
+        "sql_sha256": "4489d7ad333ba96b0192add418c3be60001a11ed7862b2141eb105c7a080a313",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowhow_columns_table",
+        "sql_sha256": "cd16d874c9db46a33aef415cff7eb033d1a3f09b008c2a40106ba6f6cb0b8d2e",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowhow_rows_table",
+        "sql_sha256": "b8c808563d70f803e81f419e4b7733216c2e514f63614d7d6277422735e97f5a",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowhow_tables_nb",
+        "sql_sha256": "7a935e24211f15d472c30f6fb85189f98d36e3a420f6fa49f8d458eb34465df4",
+        "type": "index"
+      },
+      {
         "name": "idx_knowledge_embeddings_nb",
         "sql_sha256": "cc4f740d660bed770b5b2434ca4ba1d2dce477e6a6e4327dc2f9f3f801b34c90",
         "type": "index"
@@ -1274,6 +1295,11 @@
       {
         "name": "idx_memory_revisions_memory",
         "sql_sha256": "24e85de2609cdecc614aadb88879f1ebadd5509393012e94c2c2c1ff9685a368",
+        "type": "index"
+      },
+      {
+        "name": "idx_notebook_assets_nb",
+        "sql_sha256": "d3dd45174a942f0b41549825dcee482ab88dc93cd39b4da488b1ad67ed07cd86",
         "type": "index"
       },
       {
@@ -1532,6 +1558,26 @@
         "type": "table"
       },
       {
+        "name": "knowhow_cells",
+        "sql_sha256": "4d4c6c244bea9f6ac9de8c5089c473d1eb5e57a7721c092ad94223da5ef22cbd",
+        "type": "table"
+      },
+      {
+        "name": "knowhow_columns",
+        "sql_sha256": "1225567bf734ae454346b42afa1b0ff07f3b5ec854350a6d217333d8051b9307",
+        "type": "table"
+      },
+      {
+        "name": "knowhow_rows",
+        "sql_sha256": "beb4c42f27f4d4983d99800d23917a1b7acc30d21d35a407d153e8dc631e80a9",
+        "type": "table"
+      },
+      {
+        "name": "knowhow_tables",
+        "sql_sha256": "be3e5e29036844a7a828bf2f56e11eb86d28c0c036a3b6243b5053931f343315",
+        "type": "table"
+      },
+      {
         "name": "knowledge_embeddings",
         "sql_sha256": "ec82054bf35efa642fe95d10f654f161a62c751c89777cfe4d422323b19a9e46",
         "type": "table"
@@ -1607,6 +1653,11 @@
         "type": "table"
       },
       {
+        "name": "notebook_assets",
+        "sql_sha256": "62f4e1b825664d3c912e3938f6334171f41a612aa5c73a35fb4279d4ad7f37d7",
+        "type": "table"
+      },
+      {
         "name": "notebook_members",
         "sql_sha256": "86957dac313deb2ff589f331611d907888c21c00bafb0e79bf95af846697442e",
         "type": "table"
@@ -1677,6 +1728,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 15
+    "user_version": 16
   }
 }

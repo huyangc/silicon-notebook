@@ -1402,23 +1402,25 @@ TASK28_ALLOWED_IMPORTS = {
 # Line numbers shifted +32 by Task 1 (memory-kg-extract)'s MIGRATION_MANIFEST
 # v14 additions, then a further +28 by Task 5's v15 additions
 # (SOURCES_PARSE_STATUS_TYPE_INDEX + every hop terminal bumped to 15 with that
-# index + the new (14, 15) hop).
+# index + the new (14, 15) hop), then a further +83 by knowhow-tables Task 1's
+# MIGRATION_MANIFEST v16 additions (KNOWHOW_TABLES + KNOWHOW_INDEXES +
+# every hop terminal bumped to 16 with those objects + the new (15, 16) hop).
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1083"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:1076"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:1061"),
-    ("get_report", "scripts/verify_repository_snapshot.py:1088"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:1064"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:1073"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:1067"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:1085"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:1062"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1024"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1028"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1030"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1055"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1097"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1071"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1166"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1159"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1144"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1171"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1147"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1156"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1150"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1168"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1145"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1107"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1111"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1113"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1138"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1180"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1154"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -1700,6 +1702,154 @@ TASK5_MEMORY_KG_ALLOWED_MEMBER_FILES = {
 # broad allowance, robust to this file's line numbers shifting again later.
 TASK6_MEMORY_KG_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_notebook_share_copy.py", "_runtime"),
+}
+
+# Task 1 (knowhow-tables-pr1, a distinct later feature branch from the
+# Memory-KG tasks above): the knowhow-tables schema-migration test composes
+# the real facade + migrator directly to prove fresh-DB and upgraded-DB
+# (v15->v16) schema convergence for the five new knowhow_*/notebook_assets
+# tables — same pattern as TASK1_MEMORY_KG_ALLOWED_IMPORTS above. Test-only
+# compatibility consumer added after the frozen pre-Memory-KG facade
+# manifest.
+TASK1_KNOWHOW_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_schema.py", 21, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK1_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_schema.py", name)
+    for name in {
+        "SCHEMA_VERSION", "SQLiteRepository", "_connect", "_migrate", "_write",
+    }
+}
+
+# Task 2 (knowhow-tables-pr1): the new knowhow_store repository module's own
+# test composes the real facade (to prove the one-hop delegates reach the
+# SAME runtime-owned KnowhowStore) alongside direct-store tests, and reuses
+# create_notebook to seed a notebook_id fixture — same pattern as
+# TASK1_KNOWHOW_ALLOWED_IMPORTS/_MEMBER_FILES above for the sibling schema
+# test. The eleven new facade members themselves (create_knowhow_table /
+# list_knowhow_tables / get_knowhow_table / add_knowhow_row /
+# update_knowhow_cell / delete_knowhow_table / set_knowhow_row_projection /
+# set_knowhow_hidden_source / bump_knowhow_mutation_seq /
+# insert_notebook_asset / get_notebook_asset) predate no frozen fixture, so
+# they are exempted from the consumer-scan comparison entirely below (exactly
+# like SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS does for close_local) rather than
+# pinned to exact lines.
+TASK2_KNOWHOW_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_store.py", 15, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK2_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_store.py", name)
+    for name in {"SQLiteRepository", "_runtime", "create_notebook"}
+}
+TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS = {
+    "create_knowhow_table", "list_knowhow_tables", "get_knowhow_table",
+    "add_knowhow_row", "update_knowhow_cell", "delete_knowhow_table",
+    "set_knowhow_row_projection", "set_knowhow_hidden_source",
+    "bump_knowhow_mutation_seq", "insert_notebook_asset", "get_notebook_asset",
+}
+
+# Task 4 (knowhow-tables-pr1): the asset-store/authed-serving routes' own test
+# composes the real facade the same way Task 1/2's sibling tests do — seeding
+# a notebook via HTTP then a read-only member via direct repo.add_member
+# (there is no HTTP "add member by id" endpoint) — same pattern as
+# TASK1_KNOWHOW_ALLOWED_IMPORTS/TASK2_KNOWHOW_ALLOWED_IMPORTS above. Unlike
+# Task 2's brand-new facade members, `add_member`/`storage_dir` are
+# pre-existing frozen members with real recorded consumers, so their new call
+# sites here (AssetService mirrors SourceFileStore's storage_dir convention)
+# are registered as allowed consumers rather than exempted wholesale.
+TASK4_KNOWHOW_ALLOWED_IMPORTS = {
+    ("backend/tests/test_notebook_assets.py", 12, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK4_KNOWHOW_ALLOWED_CONSUMERS = {
+    ("add_member", "backend/tests/test_notebook_assets.py:110"),
+    ("storage_dir", "backend/app/services/knowhow/assets.py:73"),
+}
+# The facade-import consumer scan (test_static_repository_consumer_scan_
+# matches_manifest_exactly) tracks SQLiteRepository itself as a member with
+# its own recorded consumer sites; Task 1/2's sibling test files clear it via
+# the broad (file, member) allowance below rather than TASK4_KNOWHOW_ALLOWED_
+# IMPORTS above (that set only feeds the separate compatibility-exports scan).
+TASK4_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_notebook_assets.py", "SQLiteRepository"),
+}
+
+# Task 5 (knowhow-tables-pr1): the deterministic projector's own test composes
+# the real facade the same way Task 1/2/4's sibling tests do — seeding a
+# notebook via create_notebook, reaching into _runtime for the stores/services
+# KnowhowProjector is constructed from directly (it is a plain service, not
+# itself a facade member — Task 6's import/table API is what will eventually
+# wire it onto the facade), swapping in a fake embedder via the `embedder`
+# setter (mirrors test_ask_embed_cache.py), and using `_connect`/`settings`
+# for direct-DB assertions and the embedder_configured probe. Same broad
+# (file, member) allowance style as TASK2_KNOWHOW_ALLOWED_MEMBER_FILES rather
+# than pinning exact lines.
+TASK5_KNOWHOW_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_projection.py", 18, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK5_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_projection.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "create_notebook", "_connect",
+        "embedder", "settings",
+    }
+}
+
+# Task 6 (knowhow-tables-pr1): the import/table API's own HTTP-level test
+# composes the real facade the same way Task 1/2/4/5's sibling tests do —
+# seeding notebooks/members via the real facade (create_notebook happens
+# through HTTP here; add_member has no HTTP equivalent) and reaching
+# `_connect` for direct-DB cascade-delete assertions (chunks/knowledge_
+# objects/sources rows are actually gone, not just "the API says so"). Same
+# broad (file, member) allowance style as TASK5_KNOWHOW_ALLOWED_MEMBER_FILES.
+# `add_member`/`_connect` are pre-existing frozen members (unlike Task 2's
+# brand-new facade members) but — unlike Task 4's exact-consumer choice for
+# THIS SAME pair of members — this test file's calls are exempted via the
+# broad file allowance, which is equally valid for test files (frozen=True
+# and frozen=False both resolve through the same ALL_TASK_ALLOWED_MEMBER_
+# FILES broad_match for a backend/tests/ path — see _member_file_site_
+# allowed's `path.startswith("backend/tests/")` branch).
+TASK6_KNOWHOW_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_api.py", 23, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK6_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_api.py", name)
+    for name in {"SQLiteRepository", "_connect", "add_member"}
+}
+# app/services/knowhow/api.py (Task 6's orchestration module, a PRODUCTION
+# file) reaches two pre-existing frozen members building the plain
+# KnowhowProjector directly (see test_repository_callers_static.py's
+# INDEPENDENT_PRIVATE_SITES for the sibling `_runtime` registration there) —
+# `settings` isn't private so it only needs registering HERE, and `_runtime`
+# is registered both places since the two guards scan independently.
+# Mirrors Task 4's exact-consumer choice for `storage_dir` in assets.py.
+TASK6_KNOWHOW_ALLOWED_CONSUMERS = {
+    ("_runtime", "backend/app/services/knowhow/api.py:85"),
+    ("settings", "backend/app/services/knowhow/api.py:87"),
+}
+
+# Task 10 (knowhow-tables-pr1): the end-to-end projection -> retrieval
+# integration test composes the real facade the same way Task 5/6's sibling
+# tests do — except it grabs the APP's own repository singleton (mirrors
+# test_trackF_governance_promotion.py's `client._repo = repository()` trick,
+# needed so the background projection job's embedder swap is visible to the
+# app) rather than constructing a fresh SQLiteRepository. It reaches
+# `_runtime`/`_connect` for direct-DB assertions plus the pre-existing frozen
+# `_retrieve_chunks`/`ask_chunk` retrieval entry points this task exists to
+# prove knowhow content actually flows through. Same broad (file, member)
+# allowance style as TASK5/TASK6_KNOWHOW_ALLOWED_MEMBER_FILES.
+TASK10_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_retrieval.py", name)
+    for name in {
+        "_runtime", "_connect", "_retrieve_chunks", "ask_chunk",
+        # Final-review blocker regression (kg/rebuild must not touch the
+        # knowhow projection): the two new tests drive the real rebuild path —
+        # delete_notebook_kg (the wipe) and rebuild_notebook_kg (delete+build)
+        # with _run_extraction stubbed to a recorder and llm_client forced
+        # configured — mirroring test_kg_rebuild_relink_api.py's own facade
+        # consumption. Same broad (file, member) allowance style as the four
+        # frozen members above.
+        "delete_notebook_kg", "rebuild_notebook_kg", "llm_client", "_run_extraction",
+    }
 }
 
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
@@ -2141,6 +2291,12 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK4_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK5_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK6_MEMORY_KG_ALLOWED_MEMBER_FILES
+    | TASK1_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK2_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK4_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK5_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK6_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK10_KNOWHOW_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2672,7 +2828,12 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
     ('backend/tests/test_notebook_share_copy.py', 60, 'app.services.sqlite_repository', '_remap_json_ids'),
     ('backend/tests/test_notebook_share_copy.py', 86, 'app.services.sqlite_repository', '_now'),
     ('backend/tests/test_kg_repository.py', 367, 'app.services.sqlite_repository', '_now'),
-    ('backend/tests/test_repository_callers_static.py', 656, 'app.services.sqlite_repository', 'SQLiteRepository'),
+    # 656->661: knowhow-tables Task 1's MIGRATION_MANIFEST v16 comment
+    # expansions (INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES, +5 net lines)
+    # in test_repository_callers_static.py shift this import site further.
+    # 661->670: knowhow-tables Task 6's new INDEPENDENT_PRIVATE_SITES entry
+    # (the api.py `_runtime` registration, +9 net lines) shifts it again.
+    ('backend/tests/test_repository_callers_static.py', 670, 'app.services.sqlite_repository', 'SQLiteRepository'),
     ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
 }
 
@@ -2743,6 +2904,11 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK2_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK3_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK5_MEMORY_KG_ALLOWED_IMPORTS
+                    or site in TASK1_KNOWHOW_ALLOWED_IMPORTS
+                    or site in TASK2_KNOWHOW_ALLOWED_IMPORTS
+                    or site in TASK4_KNOWHOW_ALLOWED_IMPORTS
+                    or site in TASK5_KNOWHOW_ALLOWED_IMPORTS
+                    or site in TASK6_KNOWHOW_ALLOWED_IMPORTS
                 )
 
 
@@ -2961,7 +3127,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         (member, f"{file}:{line}")
         for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
@@ -3004,6 +3170,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS
         | STARTUP_READINESS_ALLOWED_NEW_MEMBERS
         | TASK3_MEMORY_KG_ALLOWED_NEW_MEMBERS
+        | TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)

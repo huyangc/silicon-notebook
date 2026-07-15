@@ -50,8 +50,10 @@ def test_fresh_db_has_sources_memory_id(repo):
     assert idx is not None and "WHERE memory_id" in idx["sql"]
 
 
-def test_schema_version_is_15():
-    assert sr.SCHEMA_VERSION == 15
+def test_schema_version_is_16():
+    # knowhow-tables PR-1 Task 1's _migration_16 (five new knowhow_*/
+    # notebook_assets tables) bumped this past Task 5's v15.
+    assert sr.SCHEMA_VERSION == 16
 
 
 def test_deployed_v13_db_upgrades_via_migration_14(repo):

@@ -951,3 +951,62 @@ class AdminUserNotebook(BaseModel):
     reports: int
     created_at: str
     updated_at: str
+
+
+# --- knowhow-tables PR-1 Task 6: import/table API response models ----------
+# Field names are snake_case verbatim (mirrors the store's own dict shapes in
+# app/repositories/sqlite/knowhow_store.py) — the already-delivered frontend
+# model layer (frontend/app/knowhow-model.ts) maps these exact wire keys
+# (projection_status/row_count/guessed_role/rows_preview/total_rows/
+# columns_json) to its own camelCase types, so the wire must stay snake_case.
+
+
+class KnowhowColumn(BaseModel):
+    id: str
+    name: str
+    role: str
+    position: int
+
+
+class KnowhowRow(BaseModel):
+    id: str
+    position: int
+    projection_status: str
+    created_at: str = ""
+    updated_at: str = ""
+    cells: Dict[str, str] = Field(default_factory=dict)
+
+
+class KnowhowTableSummary(BaseModel):
+    id: str
+    notebook_id: str
+    title: str
+    description: str = ""
+    row_count: int = 0
+    created_at: str = ""
+    updated_at: str = ""
+
+
+class KnowhowTableDetail(BaseModel):
+    id: str
+    notebook_id: str
+    title: str
+    description: str = ""
+    mutation_seq: int = 0
+    hidden_source_id: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: str = ""
+    updated_at: str = ""
+    columns: List[KnowhowColumn] = Field(default_factory=list)
+    rows: List[KnowhowRow] = Field(default_factory=list)
+
+
+class KnowhowPreviewColumn(BaseModel):
+    name: str
+    guessed_role: str
+
+
+class KnowhowImportPreview(BaseModel):
+    columns: List[KnowhowPreviewColumn]
+    rows_preview: List[List[str]]
+    total_rows: int

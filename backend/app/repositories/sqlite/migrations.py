@@ -11,7 +11,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1230,10 +1230,84 @@ class SqliteMigrator:
                 "ON sources(notebook_id, parse_status, source_type)"
             )
 
+    def _migration_16(self) -> None:
+        """Knowhow 表骨架(knowhow-tables PR-1 Task 1):五张新表。
+
+        knowhow_tables/knowhow_columns/knowhow_rows/knowhow_cells 是整表导入
+        后的编辑真相源(表→列→行→格);notebook_assets 是行内嵌图片的上传元数据
+        (Task 4 落地读写路由)。role 默认 'plain'、projection_status 默认
+        'pending'(Task 5 的确定性投影状态机从这里起步)、mutation_seq 默认 0。
+
+        已部署库(user_version>=1 时 _migration_1 短路)靠本迁移补建——与
+        _migration_8/_migration_9/_migration_10 同款两层写法(仅新建表,不改
+        _migration_1 baseline;全新表没有历史行,不存在 _migration_14 那种列序
+        /存量数据顾虑,故无需像 memory_id 列那样纠结 baseline 是否重复声明)。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS knowhow_tables (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  title TEXT NOT NULL,
+                  description TEXT NOT NULL DEFAULT '',
+                  mutation_seq INTEGER NOT NULL DEFAULT 0,
+                  hidden_source_id TEXT,
+                  created_by TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowhow_tables_nb ON knowhow_tables(notebook_id);
+
+                CREATE TABLE IF NOT EXISTS knowhow_columns (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  name TEXT NOT NULL,
+                  role TEXT NOT NULL DEFAULT 'plain',
+                  position INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowhow_columns_table ON knowhow_columns(table_id);
+
+                CREATE TABLE IF NOT EXISTS knowhow_rows (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  position INTEGER NOT NULL,
+                  projection_status TEXT NOT NULL DEFAULT 'pending',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowhow_rows_table ON knowhow_rows(table_id);
+
+                CREATE TABLE IF NOT EXISTS knowhow_cells (
+                  id TEXT PRIMARY KEY,
+                  row_id TEXT NOT NULL REFERENCES knowhow_rows(id) ON DELETE CASCADE,
+                  column_id TEXT NOT NULL REFERENCES knowhow_columns(id) ON DELETE CASCADE,
+                  content_md TEXT NOT NULL DEFAULT '',
+                  updated_at TEXT NOT NULL,
+                  UNIQUE(row_id, column_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowhow_cells_row ON knowhow_cells(row_id);
+
+                CREATE TABLE IF NOT EXISTS notebook_assets (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  filename TEXT NOT NULL,
+                  mime TEXT NOT NULL,
+                  size INTEGER NOT NULL,
+                  created_by TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_notebook_assets_nb ON notebook_assets(notebook_id);
+                """
+            )
+
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
         的行定义上就是上次崩溃/重启遗留的陈旧行，否则会永久卡死该 notebook 的单飞守卫。
+        knowhow 行投影同理：background_jobs 不跨进程存活，重启后仍处 'syncing'/'pending'
+        的行定义上是被遗弃的（没有任何代码路径会再回访它们），置 'failed' 以暴露前端的
+        「重投影」重试入口，而非让它们看起来永久「同步中/待处理」。
         幂等——safe every boot。"""
         with self._connect() as db:
             db.execute(
@@ -1242,6 +1316,9 @@ class SqliteMigrator:
             db.execute(
                 "UPDATE ask_jobs SET status='interrupted', "
                 "error='中断:服务重启' WHERE status='running'")
+            db.execute(
+                "UPDATE knowhow_rows SET projection_status='failed' "
+                "WHERE projection_status IN ('syncing','pending')")
 
     def _seed(self) -> None:
         now = _now()

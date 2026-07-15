@@ -770,6 +770,58 @@
           "title": "AuthResult",
           "type": "object"
         },
+        "Body_import_knowhow_table_api_notebooks__notebook_id__knowhow_import_post": {
+          "properties": {
+            "columns_json": {
+              "title": "Columns Json",
+              "type": "string"
+            },
+            "file": {
+              "contentMediaType": "application/octet-stream",
+              "title": "File",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "file",
+            "title",
+            "columns_json"
+          ],
+          "title": "Body_import_knowhow_table_api_notebooks__notebook_id__knowhow_import_post",
+          "type": "object"
+        },
+        "Body_preview_knowhow_import_api_notebooks__notebook_id__knowhow_import_preview_post": {
+          "properties": {
+            "file": {
+              "contentMediaType": "application/octet-stream",
+              "title": "File",
+              "type": "string"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "title": "Body_preview_knowhow_import_api_notebooks__notebook_id__knowhow_import_preview_post",
+          "type": "object"
+        },
+        "Body_upload_notebook_asset_api_notebooks__notebook_id__assets_post": {
+          "properties": {
+            "file": {
+              "contentMediaType": "application/octet-stream",
+              "title": "File",
+              "type": "string"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "title": "Body_upload_notebook_asset_api_notebooks__notebook_id__assets_post",
+          "type": "object"
+        },
         "Body_upload_sources_api_notebooks__notebook_id__sources_post": {
           "properties": {
             "doc_types": {
@@ -1337,6 +1389,246 @@
             "hits"
           ],
           "title": "KgSearchResponse",
+          "type": "object"
+        },
+        "KnowhowColumn": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "position": {
+              "title": "Position",
+              "type": "integer"
+            },
+            "role": {
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "role",
+            "position"
+          ],
+          "title": "KnowhowColumn",
+          "type": "object"
+        },
+        "KnowhowImportPreview": {
+          "properties": {
+            "columns": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowPreviewColumn"
+              },
+              "title": "Columns",
+              "type": "array"
+            },
+            "rows_preview": {
+              "items": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Rows Preview",
+              "type": "array"
+            },
+            "total_rows": {
+              "title": "Total Rows",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "columns",
+            "rows_preview",
+            "total_rows"
+          ],
+          "title": "KnowhowImportPreview",
+          "type": "object"
+        },
+        "KnowhowPreviewColumn": {
+          "properties": {
+            "guessed_role": {
+              "title": "Guessed Role",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "guessed_role"
+          ],
+          "title": "KnowhowPreviewColumn",
+          "type": "object"
+        },
+        "KnowhowRow": {
+          "properties": {
+            "cells": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Cells",
+              "type": "object"
+            },
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "position": {
+              "title": "Position",
+              "type": "integer"
+            },
+            "projection_status": {
+              "title": "Projection Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "position",
+            "projection_status"
+          ],
+          "title": "KnowhowRow",
+          "type": "object"
+        },
+        "KnowhowTableDetail": {
+          "properties": {
+            "columns": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowColumn"
+              },
+              "title": "Columns",
+              "type": "array"
+            },
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "created_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Created By"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "hidden_source_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Hidden Source Id"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "mutation_seq": {
+              "default": 0,
+              "title": "Mutation Seq",
+              "type": "integer"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "rows": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowRow"
+              },
+              "title": "Rows",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "title"
+          ],
+          "title": "KnowhowTableDetail",
+          "type": "object"
+        },
+        "KnowhowTableSummary": {
+          "properties": {
+            "created_at": {
+              "default": "",
+              "title": "Created At",
+              "type": "string"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "notebook_id": {
+              "title": "Notebook Id",
+              "type": "string"
+            },
+            "row_count": {
+              "default": 0,
+              "title": "Row Count",
+              "type": "integer"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "notebook_id",
+            "title"
+          ],
+          "title": "KnowhowTableSummary",
           "type": "object"
         },
         "KnowledgeEdge": {
@@ -2388,6 +2680,11 @@
             "id": {
               "title": "Id",
               "type": "string"
+            },
+            "is_shared": {
+              "default": false,
+              "title": "Is Shared",
+              "type": "boolean"
             },
             "kg_building": {
               "default": false,
@@ -6427,6 +6724,103 @@
           "summary": "Ask Stream"
         }
       },
+      "/api/notebooks/{notebook_id}/assets": {
+        "post": {
+          "operationId": "upload_notebook_asset_api_notebooks__notebook_id__assets_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_upload_notebook_asset_api_notebooks__notebook_id__assets_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Upload Notebook Asset Api Notebooks  Notebook Id  Assets Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Upload Notebook Asset"
+        }
+      },
+      "/api/notebooks/{notebook_id}/assets/{asset_id}": {
+        "get": {
+          "operationId": "get_notebook_asset_file_api_notebooks__notebook_id__assets__asset_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "asset_id",
+              "required": true,
+              "schema": {
+                "title": "Asset Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Notebook Asset File"
+        }
+      },
       "/api/notebooks/{notebook_id}/concepts/{canonical_id}/detail": {
         "get": {
           "operationId": "get_concept_detail_api_notebooks__notebook_id__concepts__canonical_id__detail_get",
@@ -7124,6 +7518,287 @@
             }
           },
           "summary": "Kg Search"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow": {
+        "get": {
+          "operationId": "list_knowhow_tables_api_notebooks__notebook_id__knowhow_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/KnowhowTableSummary"
+                    },
+                    "title": "Response List Knowhow Tables Api Notebooks  Notebook Id  Knowhow Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Knowhow Tables"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/import": {
+        "post": {
+          "description": "Parse -> validate -> create table -> insert every row -> launch a\nbackground full-table projection (mirrors build_kg's background_jobs.\nsubmit pattern, including copy_context propagation of the per-user model\ncontext) -> return the FULL table detail immediately. Rows carry\nprojection_status='pending'/'syncing' until the background job advances\nthem to 'synced'/'failed'. The frontend does NOT poll the detail endpoint —\na row's settled status is observed the next time the table is (re)opened or\nthe caller explicitly refreshes it.",
+          "operationId": "import_knowhow_table_api_notebooks__notebook_id__knowhow_import_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_import_knowhow_table_api_notebooks__notebook_id__knowhow_import_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowTableDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Import Knowhow Table"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/import/preview": {
+        "post": {
+          "operationId": "preview_knowhow_import_api_notebooks__notebook_id__knowhow_import_preview_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_preview_knowhow_import_api_notebooks__notebook_id__knowhow_import_preview_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowImportPreview"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Preview Knowhow Import"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}": {
+        "delete": {
+          "description": "Cascade-delete (task brief: \"连投影产物+隐藏源\"). Ordering: fetch+\ncross-notebook-check first (404 without touching anything), THEN the\nprojector's cleanup of everything ever derived from the hidden source\n(relations/objects/chunks/elements/the source row itself — safe no-op when\nhidden_source_id is None, e.g. a table created but never projected), and\nONLY THEN the store's own cascade delete (columns/rows/cells via ON DELETE\nCASCADE). Projection-teardown-first so a crash BETWEEN the two phases\nleaves a still-deletable table whose projection is already clean, rather\nthan an orphaned hidden source with no table left to trigger its cleanup.",
+          "operationId": "delete_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Knowhow Table"
+        },
+        "get": {
+          "operationId": "get_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowTableDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Knowhow Table"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/reproject": {
+        "post": {
+          "description": "Full-rebuild escape hatch (task brief: \"全量重投影逃生口，后台执行\") —\nlaunches KnowhowProjector.project_table (NEVER the seq-gated incremental\npath) in the background and responds immediately with a status body,\nmirroring build_kg/rebuild_kg's synchronous-response-then-background-work\nshape exactly.",
+          "operationId": "reproject_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__reproject_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Reproject Knowhow Table Api Notebooks  Notebook Id  Knowhow  Table Id  Reproject Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Reproject Knowhow Table"
         }
       },
       "/api/notebooks/{notebook_id}/knowledge": {
