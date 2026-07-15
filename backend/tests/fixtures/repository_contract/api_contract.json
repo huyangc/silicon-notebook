@@ -2389,6 +2389,11 @@
               "title": "Id",
               "type": "string"
             },
+            "is_shared": {
+              "default": false,
+              "title": "Is Shared",
+              "type": "boolean"
+            },
             "kg_building": {
               "default": false,
               "title": "Kg Building",
@@ -9919,6 +9924,7 @@
       "created_label": "fixture-date",
       "expected_questions": [],
       "id": "nb-api",
+      "is_shared": true,
       "kg_building": false,
       "kg_pending_sources": 0,
       "kg_ready": true,
