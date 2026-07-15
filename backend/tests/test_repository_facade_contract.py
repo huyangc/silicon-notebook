@@ -49,6 +49,7 @@ RUNTIME_COMPONENT_OWNERS = {
     "identity": "IdentityStore",
     "index_projections": "IndexProjectionStore",
     "kg_mutations": "KgMutationCoordinator",
+    "knowhow_store": "KnowhowStore",
     "knowledge": "KnowledgeStore",
     "knowledge_governance": "KnowledgeGovernanceService",
     "knowledge_lifecycle": "KnowledgeLifecycleService",

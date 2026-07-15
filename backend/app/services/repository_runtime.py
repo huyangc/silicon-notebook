@@ -17,6 +17,7 @@ from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
+from app.repositories.sqlite.knowhow_store import KnowhowStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.memory_store import MemoryStore
 from app.repositories.sqlite.notebook_store import NotebookStore
@@ -266,6 +267,16 @@ class RepositoryRuntime:
         # lazily wired by the facade `maintenance` property (it needs the
         # embedder-bound retrieval provider, exactly like `ask` above).
         self.maintenance: Any = None
+        # knowhow-tables PR-1 Task 2: row persistence for the Task-1 schema
+        # (knowhow_tables/columns/rows/cells + notebook_assets). Seam-free
+        # (only new_id/now, like notebook_store above), so construction is
+        # eager. Task 5's projector and Task 6's import/table API depend on
+        # the facade's one-hop delegates over this exact instance.
+        self.knowhow_store = KnowhowStore(
+            self.database,
+            new_id=seams.new_id,
+            now=seams.now,
+        )
 
     @property
     def storage_dir(self) -> Path:

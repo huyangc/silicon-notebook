@@ -1719,6 +1719,33 @@ TASK1_KNOWHOW_ALLOWED_MEMBER_FILES = {
     }
 }
 
+# Task 2 (knowhow-tables-pr1): the new knowhow_store repository module's own
+# test composes the real facade (to prove the one-hop delegates reach the
+# SAME runtime-owned KnowhowStore) alongside direct-store tests, and reuses
+# create_notebook to seed a notebook_id fixture — same pattern as
+# TASK1_KNOWHOW_ALLOWED_IMPORTS/_MEMBER_FILES above for the sibling schema
+# test. The eleven new facade members themselves (create_knowhow_table /
+# list_knowhow_tables / get_knowhow_table / add_knowhow_row /
+# update_knowhow_cell / delete_knowhow_table / set_knowhow_row_projection /
+# set_knowhow_hidden_source / bump_knowhow_mutation_seq /
+# insert_notebook_asset / get_notebook_asset) predate no frozen fixture, so
+# they are exempted from the consumer-scan comparison entirely below (exactly
+# like SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS does for close_local) rather than
+# pinned to exact lines.
+TASK2_KNOWHOW_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_store.py", 15, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK2_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_store.py", name)
+    for name in {"SQLiteRepository", "_runtime", "create_notebook"}
+}
+TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS = {
+    "create_knowhow_table", "list_knowhow_tables", "get_knowhow_table",
+    "add_knowhow_row", "update_knowhow_cell", "delete_knowhow_table",
+    "set_knowhow_row_projection", "set_knowhow_hidden_source",
+    "bump_knowhow_mutation_seq", "insert_notebook_asset", "get_notebook_asset",
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2159,6 +2186,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK5_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK6_MEMORY_KG_ALLOWED_MEMBER_FILES
     | TASK1_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK2_KNOWHOW_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2762,6 +2790,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK3_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK5_MEMORY_KG_ALLOWED_IMPORTS
                     or site in TASK1_KNOWHOW_ALLOWED_IMPORTS
+                    or site in TASK2_KNOWHOW_ALLOWED_IMPORTS
                 )
 
 
@@ -3023,6 +3052,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS
         | STARTUP_READINESS_ALLOWED_NEW_MEMBERS
         | TASK3_MEMORY_KG_ALLOWED_NEW_MEMBERS
+        | TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)
