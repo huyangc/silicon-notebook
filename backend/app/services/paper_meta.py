@@ -19,6 +19,13 @@ PAPER_META_SCHEMA_HINT = (
 )
 
 _DOI_RE = re.compile(r"^10\.\d{4,9}/\S+$")
+# 年份接地用:先挖空疑似 DOI 的 token,防年份候选命中 DOI 数字游程(如
+# 10.1109/ABCD.2031.999999 里的 2031)。
+_DOI_BLANK_RE = re.compile(r"10\.\d{4,9}/\S+")
+# DOI 接地用:抽取头部文本里完整的 DOI token(不含引号/尖括号),再逐个去
+# 尾部常见标点后与候选值精确比对——避免子串匹配把截断前缀误判为已接地。
+_DOI_TOKEN_RE = re.compile(r"10\.\d{4,9}/[^\s\"'<>]+")
+_DOI_TRAILING_PUNCT = ".,;:)]}>\"'"
 
 
 def paper_meta_prompt(head_text: str) -> str:
@@ -54,13 +61,33 @@ def grounded(value: str, head_norm: str) -> bool:
 
 
 def author_grounded(name: str, head_norm: str) -> bool:
-    """姓名接地:直接匹配,或 2+ token 时容忍「姓,名」/「名 姓」次序翻转。"""
+    """姓名接地:直接匹配,或 2+ token 时容忍常见次序变体——全翻转、末 token
+    前移(容纳「姓, 名 中间名」这类署名行)、首 token 后移(有界,非阶乘全排列)。"""
     if grounded(name, head_norm):
         return True
     tokens = [t for t in re.split(r"[\s,]+", name or "") if t]
-    if len(tokens) >= 2:
-        return grounded("".join(reversed(tokens)), head_norm)
-    return False
+    if len(tokens) < 2:
+        return False
+    candidates = (
+        list(reversed(tokens)),  # 全翻转:名 姓 -> 姓 名
+        [tokens[-1], *tokens[:-1]],  # 末 token 前移:名 中 姓 -> 姓 名 中
+        [*tokens[1:], tokens[0]],  # 首 token 后移:名 中 姓 -> 中 姓 名
+    )
+    return any(grounded("".join(cand), head_norm) for cand in candidates)
+
+
+def _blank_doi_tokens(text: str) -> str:
+    return _DOI_BLANK_RE.sub(" ", text)
+
+
+def _doi_tokens(text: str) -> List[str]:
+    """抽取头部文本里完整的 DOI token,去掉尾部常见标点(句号/引号等)。"""
+    tokens = []
+    for m in _DOI_TOKEN_RE.finditer(text):
+        token = m.group(0).rstrip(_DOI_TRAILING_PUNCT)
+        if token:
+            tokens.append(token)
+    return tokens
 
 
 def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[str, Any]:
@@ -86,22 +113,44 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
     raw_year = data.get("year")
     if raw_year is not None and str(raw_year).strip():
         try:
-            candidate = int(str(raw_year).strip())
-        except ValueError:
+            # float() 先行:容忍 LLM 把年份吐成 JSON 浮点(2017.0)。
+            candidate = int(float(str(raw_year).strip()))
+        except (ValueError, TypeError, OverflowError):
             candidate = 0
-        if 1900 <= candidate <= 2100 and str(candidate) in head_text:
+        # 年份必须以独立数字串出现在文本里,且不能落在 DOI token 内部——先挖
+        # 空疑似 DOI 的片段,防止 DOI 尾部数字游程(如 .../ABCD.2031.999999
+        # 里的 2031)被误判为已接地的出版年。
+        head_sans_doi = _blank_doi_tokens(head_text)
+        if 1900 <= candidate <= 2100 and re.search(
+            rf"(?<!\d){candidate}(?!\d)", head_sans_doi
+        ):
             year = candidate
         else:
             dropped["year"] = raw_year
 
     doi = str(data.get("doi") or "").strip() or None
-    if doi and not (_DOI_RE.match(doi) and doi.lower() in head_text.lower()):
-        dropped["doi"] = doi
-        doi = None
+    if doi:
+        if _DOI_RE.match(doi):
+            # 子串包含会把截断前缀(10.5555/329 ⊂ 10.5555/3295222)误判为已
+            # 接地;改为抽取头部文本里的完整 DOI token,要求候选值与某个
+            # token(去尾部标点后)大小写不敏感地完全相等。
+            head_doi_tokens = {tok.lower() for tok in _doi_tokens(head_text)}
+            if doi.lower() not in head_doi_tokens:
+                dropped["doi"] = doi
+                doi = None
+        else:
+            dropped["doi"] = doi
+            doi = None
 
     keywords: List[str] = []
     dropped_keywords: List[str] = []
-    for raw_kw in data.get("keywords") or []:
+    raw_keywords = data.get("keywords")
+    if not isinstance(raw_keywords, list):
+        raw_keywords = []  # 非 list(字符串/数字/…)一律当空列表,原样保留在
+        # raw_json 的 "llm" 键里,不在此处二次审计。
+    for raw_kw in raw_keywords:
+        if not isinstance(raw_kw, (str, int, float)):
+            continue  # dict/list/None 等形状跳过,不参与接地判定。
         keyword = str(raw_kw).strip()
         if not keyword:
             continue
@@ -113,8 +162,16 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
     dropped_authors: List[str] = []
     cleared_affiliations: List[str] = []
     position = 0
-    for raw_author in data.get("authors") or []:
-        name = str((raw_author or {}).get("name") or "").strip()
+    raw_authors = data.get("authors")
+    if not isinstance(raw_authors, list):
+        raw_authors = []  # 非 list 一律当空列表(同 keywords)。
+    for raw_author in raw_authors:
+        if isinstance(raw_author, str):
+            # LLM 偶尔把 authors 吐成纯字符串数组;补上标准形状再走原逻辑。
+            raw_author = {"name": raw_author, "affiliations": []}
+        elif not isinstance(raw_author, dict):
+            continue  # 其它形状(数字/list/None/…)跳过。
+        name = str(raw_author.get("name") or "").strip()
         if not name:
             continue
         if not author_grounded(name, head_norm):
@@ -122,7 +179,7 @@ def verify_paper_meta(data: Dict[str, Any], head_text: str, model: str) -> Dict[
             continue
         affiliations = [
             str(a).strip()
-            for a in (raw_author or {}).get("affiliations") or []
+            for a in raw_author.get("affiliations") or []
             if str(a).strip()
         ]
         kept = [a for a in affiliations if grounded(a, head_norm)]

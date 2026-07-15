@@ -97,3 +97,75 @@ def test_not_paper_blanks_everything():
 def test_prompt_forbids_memory_fill():
     p = paper_meta_prompt("some text")
     assert "do NOT" in p and "memory" in p and "some text" in p
+
+
+# --- Fix round 1: malformed-shape guards, anchored year/DOI, byline rotations ---
+
+
+def test_authors_as_plain_strings_grounded():
+    meta = verify_paper_meta(
+        _base(authors=["Ashish Vaswani", "Noam Shazeer"]), HEAD, model="m"
+    )
+    assert [a["name"] for a in meta["authors"]] == ["Ashish Vaswani", "Noam Shazeer"]
+    assert meta["authors"][0]["position"] == 0
+    assert meta["authors"][1]["position"] == 1
+    assert meta["authors"][0]["affiliation"] == ""
+    assert meta["authors"][1]["affiliation"] == ""
+
+
+def test_malformed_shapes_degrade_without_crashing():
+    for bad_authors in ("garbage", 123):
+        meta = verify_paper_meta(_base(authors=bad_authors), HEAD, model="m")
+        assert meta["authors"] == []
+    for bad_keywords in ("transformer", 123):
+        meta = verify_paper_meta(_base(keywords=bad_keywords), HEAD, model="m")
+        assert meta["keywords"] == []
+
+
+def test_year_as_float_coerced():
+    meta = verify_paper_meta(_base(year=2017.0), HEAD, model="m")
+    assert meta["pub_year"] == 2017
+
+
+def test_year_inside_doi_not_grounded_but_standalone_is():
+    head = "X paper\ndoi:10.1109/ABCD.2031.999999\n"
+    meta = verify_paper_meta(_base(year=2031), head, model="m")
+    assert meta["pub_year"] is None
+    assert meta["dropped"]["year"] == 2031
+
+    head_with_year = head + "Published in 2031.\n"
+    meta2 = verify_paper_meta(_base(year=2031), head_with_year, model="m")
+    assert meta2["pub_year"] == 2031
+
+
+def test_doi_requires_exact_token_match_not_prefix():
+    meta = verify_paper_meta(_base(doi="10.5555/329"), HEAD, model="m")
+    assert meta["doi"] is None
+    assert meta["dropped"]["doi"] == "10.5555/329"
+
+    meta_exact = verify_paper_meta(_base(doi="10.5555/3295222"), HEAD, model="m")
+    assert meta_exact["doi"] == "10.5555/3295222"
+
+    head_trailing = "Some text\ndoi:10.9999/abc.def.\n"
+    meta_trailing = verify_paper_meta(
+        _base(doi="10.9999/abc.def"), head_trailing, model="m"
+    )
+    assert meta_trailing["doi"] == "10.9999/abc.def"
+
+
+def test_author_name_rotation_handles_last_first_middle_byline():
+    head = "Vaswani, Ashish Noam"
+    meta = verify_paper_meta(
+        {
+            "is_paper": True,
+            "title": "",
+            "venue": "",
+            "year": None,
+            "authors": [{"name": "Ashish Noam Vaswani", "affiliations": []}],
+            "doi": "",
+            "keywords": [],
+        },
+        head,
+        model="m",
+    )
+    assert [a["name"] for a in meta["authors"]] == ["Ashish Noam Vaswani"]
