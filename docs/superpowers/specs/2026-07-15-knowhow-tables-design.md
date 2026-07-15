@@ -36,7 +36,8 @@
 
 - `knowhow_tables`：`id, notebook_id, title, description, mutation_seq(单调计数器), created_by, created_at, updated_at`
 - `knowhow_columns`：`id, table_id, name, role, position`
-  - **角色=域中立「行为类型」**（2026-07-15 重设计：原五角色只是时序修复域的实例，误固化为全量词表，用户纠正）：`role ∈ {anchor(锚点，每表恰一列) | procedure(方法步骤) | entity(实体引用) | attribute(普通属性)}`
+  - **角色=域中立「行为类型」**（2026-07-15 重设计：原五角色只是时序修复域的实例，误固化为全量词表，用户纠正）：`role ∈ {anchor | procedure | entity | attribute}`
+  - **界面文案不用技术词**（用户 2026-07-15 反馈「锚点」看不懂）：anchor=「主题」（提示：这一列是每行知识的主题，一张表选一列）、procedure=「方法步骤」（写做法/流程的列，自动识别有序步骤）、entity=「工具/事物」（列出的名称自动归并：工具、命令、文档等）、attribute=「普通」（仅作为内容参与检索）；下拉选项下带一行提示语。机器侧/API/存储仍用英文枚举。
   - 领域语义住在**列名**（自由文本）：投影边标签用列名原文（源语言保留），procedure KO 的 payload 带 `method_label=列名`；行为类型只决定机器行为——anchor→行身份/case KO/判别键，procedure→procedure KO+steps 解析+指向锚点的边，entity→去重实体 KO+关联边，attribute→payload+chunk 不成节点。
   - 兼容迁移：存量 concept→anchor、identify/root_cause/fix→procedure、tool→entity、plain→attribute；迁移后全表结构性重投影（文本未变→chunk/向量原位保留，零 LLM 零重嵌入）。
 - `knowhow_rows`：`id, table_id, position, created_at, updated_at`
