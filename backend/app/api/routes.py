@@ -829,7 +829,11 @@ def _template_content_disposition(filename: str) -> str:
     ascii_fallback = re.sub(
         r'[\\"/\r\n\x00-\x1f]', "_", filename.encode("ascii", "ignore").decode("ascii")
     ).strip() or "template.xlsx"
-    encoded = quote(filename)
+    # safe="" so a literal "/" in a table title is %2F-escaped too — quote's
+    # default (safe="/") would leave it raw, which violates RFC 5987's
+    # attr-char grammar and is inconsistent with the fallback branch above,
+    # which DOES strip "/".
+    encoded = quote(filename, safe="")
     return f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded}'
 
 

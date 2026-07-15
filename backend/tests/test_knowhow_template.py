@@ -177,6 +177,26 @@ def test_template_unknown_table_404(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_template_slash_in_title_is_percent_escaped_in_filename_star(tmp_path, monkeypatch):
+    """A literal "/" in a table title must come out as %2F inside the RFC 5987
+    filename*= value (quote's DEFAULT safe="/" would leave it raw — invalid
+    attr-char, and inconsistent with the ASCII fallback branch, which strips
+    "/") while still round-tripping back to the real title via unquote."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00002005")
+    nb = _mk_notebook(client, owner_h)
+    table = _create_table(client, owner_h, nb, title="输入/输出对照表")
+
+    resp = client.get(f"/api/notebooks/{nb}/knowhow/{table['id']}/template", headers=owner_h)
+    assert resp.status_code == 200, resp.text
+    disposition = resp.headers["content-disposition"]
+    marker = "filename*=UTF-8''"
+    encoded_name = disposition[disposition.index(marker) + len(marker):]
+    assert "%2F" in encoded_name
+    assert "/" not in encoded_name  # no raw slash anywhere in the encoded form
+    assert _decoded_filename_star(disposition) == "输入/输出对照表-template.xlsx"
+
+
 # ===========================================================================
 # POST /notebooks/{nb}/knowhow/{t}/append (mode=preview)
 # ===========================================================================
