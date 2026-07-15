@@ -11,7 +11,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1344,6 +1344,66 @@ class SqliteMigrator:
                   ON source_authors(source_id);
                 CREATE INDEX IF NOT EXISTS idx_source_authors_nb
                   ON source_authors(notebook_id);
+                """
+            )
+
+    def _migration_18(self) -> None:
+        """Knowhow 表 PR-2+3 Task 1:cell_code 新表 + role 词表重映射。
+
+        `knowhow_cell_code`——格子级代码附件（design doc §⑥-4/§①「格子级节点模
+        型」的代码存储部分):Agent 把某格判别/修复方法生成并验证过的代码本体
+        存回来，与该格 `content_md` 分离、每格至多一份(UNIQUE(row_id,
+        column_id))。`cell_content_hash` 是写入时刻该格净文本(剥图后)的
+        sha256——读取时与格子当前 hash 比对推导新鲜度(implemented/stale)，本
+        迁移不建任何"新鲜度"列，推导逻辑完全在读侧(Task 10)。语言/更新者留
+        白默认(未知语言/系统写入)。
+
+        role 词表重映射(design doc §①「角色词表(2026-07-15 修订)」)：PR-1 的
+        五个时序修复域实例角色(concept/identify/root_cause/fix/tool)重铸为四
+        个域中立行为类型(anchor/procedure/entity/attribute)——领域语义此后住
+        在列名(自由文本)而非角色词表。identify/root_cause/fix 三个"步骤类"
+        角色全部收敛到 procedure(它们的原始子类型信息在这次重映射后不可逆
+        地丢失——这是设计决定的代价，见 task brief 的"至多一"放宽同一处决
+        策)。ELSE 分支兜底 plain(唯一未被前四个 WHEN 覆盖的存量值)以及任何
+        未来才可能出现的杂散值，一律落 attribute。CASE 表达式对全表一次
+        UPDATE，不知道列语义、不读表结构，纯值到值映射。注意本 UPDATE **不
+        幂等**——重跑会把已重映射的 anchor/procedure/entity 经 ELSE 分支打成
+        attribute；恰好执行一次由迁移框架的版本闸保证(user_version 17→18 跑
+        一遍后短路)，与历次含存量数据回填的迁移同款约束。
+
+        已部署库(user_version<18 时 _migration_1..17 陆续短路)靠本迁移一次
+        补齐 cell_code 表 + 完成存量 role 重映射——与 _migration_16 同款：
+        CREATE TABLE IF NOT EXISTS 对全新库和已部署库都跑一次，全新库这里没
+        有任何 knowhow_columns 行可重映射，UPDATE 是空操作，无害。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS knowhow_cell_code (
+                  id TEXT PRIMARY KEY,
+                  row_id TEXT NOT NULL REFERENCES knowhow_rows(id) ON DELETE CASCADE,
+                  column_id TEXT NOT NULL REFERENCES knowhow_columns(id) ON DELETE CASCADE,
+                  code_text TEXT NOT NULL,
+                  language TEXT NOT NULL DEFAULT '',
+                  updated_by TEXT NOT NULL DEFAULT '',
+                  cell_content_hash TEXT NOT NULL,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  UNIQUE(row_id, column_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowhow_cell_code_row ON knowhow_cell_code(row_id);
+                """
+            )
+            db.execute(
+                """
+                UPDATE knowhow_columns SET role = CASE role
+                    WHEN 'concept' THEN 'anchor'
+                    WHEN 'identify' THEN 'procedure'
+                    WHEN 'root_cause' THEN 'procedure'
+                    WHEN 'fix' THEN 'procedure'
+                    WHEN 'tool' THEN 'entity'
+                    ELSE 'attribute'
+                END
                 """
             )
 

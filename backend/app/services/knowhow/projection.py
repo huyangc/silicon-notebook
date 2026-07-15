@@ -50,11 +50,18 @@ from app.services.vector_index import decode_vector
 
 # Column roles that become a `procedure` object per non-empty cell, and their
 # case->procedure edge_type (design doc §④ / task brief step 4).
-PROCEDURE_ROLES = ("identify", "root_cause", "fix")
+# transitional (PR-2+3 Task 1), replaced by Task 2's cell-level node model:
+# migration 17 remaps stored roles to the behavior-kind vocabulary
+# (anchor/procedure/entity/attribute), so this projector's read sites accept
+# BOTH vocabularies until Task 2 rewrites the semantics. The legacy
+# identify/root_cause/fix sub-role distinction no longer exists in storage —
+# a 'procedure' column takes the identify branch (one uniform edge type).
+PROCEDURE_ROLES = ("identify", "root_cause", "fix", "procedure")
 _EDGE_BY_ROLE = {
     "identify": "identified_by",
     "root_cause": "diagnosed_by",
     "fix": "fixed_by",
+    "procedure": "identified_by",  # transitional, see note above
 }
 
 _CHUNK_CHAR_LIMIT = 4000
@@ -220,7 +227,11 @@ class KnowhowProjector:
         position = row["position"]
 
         # ① concept = concept cell's net-text FIRST LINE, else "行{position+1}"
-        concept_column = next((c for c in columns if c["role"] == "concept"), None)
+        # transitional (PR-2+3 Task 1): 'anchor' is migration 17's name for the
+        # row-title column; accepted alongside 'concept' until Task 2's rework.
+        concept_column = next(
+            (c for c in columns if c["role"] in ("concept", "anchor")), None
+        )
         concept_raw = (
             textops.strip_images(cells.get(concept_column["id"], "")).strip()
             if concept_column is not None else ""
@@ -484,7 +495,9 @@ class KnowhowProjector:
             ))
 
         for column in columns:
-            if column["role"] != "tool":
+            # transitional (PR-2+3 Task 1): 'entity' is migration 17's name
+            # for the old 'tool' role; accepted alongside it until Task 2.
+            if column["role"] not in ("tool", "entity"):
                 continue
             text = cell_nets[column["id"]]
             if not text:

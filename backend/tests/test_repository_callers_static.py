@@ -130,18 +130,20 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
             # terminal bumped to 16 + the new (15, 16) hop), then a further
             # +65 by paper-metadata Task 1's MIGRATION_MANIFEST v17 additions
             # (PAPER_META_TABLES + PAPER_META_INDEXES + every hop's terminal
-            # bumped to 17 + the new (16, 17) hop).
-            ("scripts/verify_repository_snapshot.py", 760, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 767, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 789, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 793, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 818, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 819, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 836, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 848, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 1190, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1197, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1226, "probe.execute"),
+            # bumped to 17 + the new (16, 17) hop), then a further +45 by
+            # knowhow-tables PR-2+3 Task 1's v18 additions (KNOWHOW_CELL_CODE_
+            # TABLE/_INDEX + terminals bumped to 18 + the new (17, 18) hop).
+            ("scripts/verify_repository_snapshot.py", 805, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 812, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 834, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 838, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 863, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 864, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 881, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 893, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 1235, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1242, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1271, "probe.execute"),
         }
     },
 }
@@ -321,20 +323,22 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     # (KNOWHOW_TABLES + KNOWHOW_INDEXES + terminals bumped to 16 + (15, 16) hop),
     # then a further +65 by paper-metadata Task 1's v17 manifest additions
     # (PAPER_META_TABLES + PAPER_META_INDEXES + terminals bumped to 17 +
-    # (16, 17) hop).
-    ("scripts/verify_repository_snapshot.py", 814, "sqlite3.connect"): (
+    # (16, 17) hop), then a further +45 by PR-2+3 Task 1's v18 manifest
+    # additions (KNOWHOW_CELL_CODE_TABLE/_INDEX + terminals bumped to 18 +
+    # (17, 18) hop).
+    ("scripts/verify_repository_snapshot.py", 859, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 815, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 860, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1184, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1229, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1331, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1376, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1333, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1378, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
 }

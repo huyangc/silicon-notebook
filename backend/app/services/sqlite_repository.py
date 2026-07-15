@@ -208,7 +208,7 @@ _COPY_CHUNK = 1000
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 
 @dataclass(frozen=True)
@@ -3221,10 +3221,11 @@ class SQLiteRepository:
     # --- owned KnowhowStore. Task 5 (projector) and Task 6 (import/table
     # --- API) build directly on these exact names/signatures.
     def create_knowhow_table(
-        self, notebook_id: str, title: str, description: str, columns: list
+        self, notebook_id: str, title: str, description: str, columns: list,
+        created_by: str = "",
     ) -> str:
         return self._runtime.knowhow_store.create_knowhow_table(
-            notebook_id, title, description, columns
+            notebook_id, title, description, columns, created_by
         )
 
     def list_knowhow_tables(self, notebook_id: str) -> list:
@@ -3288,6 +3289,63 @@ class SQLiteRepository:
         return self._runtime.source_ingestion.backfill_paper_metadata(
             notebook_id, force=force, progress=progress
         )
+
+    # --- knowhow-tables PR-2+3 Task 1: editing/code-attachment one-hop
+    # --- delegates onto the same runtime-owned KnowhowStore (editing API,
+    # --- projection scheduler, and the agent surface build on these).
+    def update_knowhow_table_meta(
+        self, table_id: str, title: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> None:
+        return self._runtime.knowhow_store.update_knowhow_table_meta(
+            table_id, title, description
+        )
+
+    def set_knowhow_anchor_column(
+        self, table_id: str, column_id: Optional[str]
+    ) -> Optional[str]:
+        return self._runtime.knowhow_store.set_knowhow_anchor_column(
+            table_id, column_id
+        )
+
+    def add_knowhow_column(
+        self, table_id: str, name: str, kind: str, position: Optional[int] = None
+    ) -> str:
+        return self._runtime.knowhow_store.add_knowhow_column(
+            table_id, name, kind, position
+        )
+
+    def rename_knowhow_column(self, column_id: str, name: str) -> None:
+        return self._runtime.knowhow_store.rename_knowhow_column(column_id, name)
+
+    def set_knowhow_column_kind(self, column_id: str, kind: str) -> None:
+        return self._runtime.knowhow_store.set_knowhow_column_kind(column_id, kind)
+
+    def delete_knowhow_column(self, column_id: str) -> None:
+        return self._runtime.knowhow_store.delete_knowhow_column(column_id)
+
+    def delete_knowhow_row(self, row_id: str) -> None:
+        return self._runtime.knowhow_store.delete_knowhow_row(row_id)
+
+    def validate_cell_target(self, row_id: str, column_id: str) -> None:
+        return self._runtime.knowhow_store.validate_cell_target(row_id, column_id)
+
+    def upsert_knowhow_cell_code(
+        self, row_id: str, column_id: str, code_text: str, language: str,
+        updated_by: str, cell_content_hash: str,
+    ) -> str:
+        return self._runtime.knowhow_store.upsert_knowhow_cell_code(
+            row_id, column_id, code_text, language, updated_by, cell_content_hash
+        )
+
+    def get_knowhow_cell_code(self, row_id: str, column_id: str) -> Optional[dict]:
+        return self._runtime.knowhow_store.get_knowhow_cell_code(row_id, column_id)
+
+    def delete_knowhow_cell_code(self, row_id: str, column_id: str) -> None:
+        return self._runtime.knowhow_store.delete_knowhow_cell_code(row_id, column_id)
+
+    def list_knowhow_cell_code(self, table_id: str) -> list:
+        return self._runtime.knowhow_store.list_knowhow_cell_code(table_id)
 
 
 def _now() -> str:

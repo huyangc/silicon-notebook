@@ -38,12 +38,12 @@ EMBED_DIM = 16
 
 # Time-series-fix-up domain column names, verbatim from the task brief
 # ("列名用时序修复域：违例概念/现象识别方法/根因分析动作/修复方法/依赖工具") —
-# chosen so that grid_parser.guess_roles's own keyword table would derive
-# the same roles unassisted (concept/identify/root_cause/fix/tool), though
-# the import call below still passes them explicitly (mirrors Task 6's
+# roles updated to the PR-2+3 behavior-kind vocabulary (anchor/procedure/
+# entity/attribute; migration 17 remapped the legacy five-role instance
+# vocabulary), passed explicitly on import (mirrors Task 6's
 # confirmed-mapping contract).
 HEADER = ["违例概念", "现象识别方法", "根因分析动作", "修复方法", "依赖工具"]
-ROLES = ["concept", "identify", "root_cause", "fix", "tool"]
+ROLES = ["anchor", "procedure", "procedure", "procedure", "entity"]
 TABLE_TITLE = "时序修复表"
 
 # A rare Latin/digit token embedded in ONE row's fix cell only — CJK-run
@@ -309,7 +309,7 @@ def test_fts_and_retrieval_hit_knowhow_chunk_with_element_backtrace(client, impo
 # ---------------------------------------------------------------------------
 # Assertion 3: the hidden source never appears in GET /sources, but KO type
 # counts and the knowledge graph include the projected case/procedure/tool
-# objects and their identified_by/fixed_by/requires_tool edges.
+# objects and their identified_by/requires_tool edges.
 # ---------------------------------------------------------------------------
 
 
@@ -327,8 +327,8 @@ def test_hidden_source_excluded_but_ko_counts_and_graph_include_projection(clien
     types_resp = client.get(f"/api/notebooks/{nb}/knowledge-types", headers=headers)
     assert types_resp.status_code == 200, types_resp.text
     counts = {t["object_type"]: t["count"] for t in types_resp.json()}
-    # 3 rows -> 3 cases; 3 procedure-role columns (identify/root_cause/fix)
-    # filled every row -> 9 procedures; tool column values "示波器"/"万用
+    # 3 rows -> 3 cases; 3 procedure-kind columns (识别/根因/修复)
+    # filled every row -> 9 procedures; entity column values "示波器"/"万用
     # 表"/"示波器" dedup by casefolded name within the table -> 2 tools.
     assert counts.get("case") == len(DATA_ROWS)
     assert counts.get("procedure") == len(DATA_ROWS) * 3
@@ -340,7 +340,9 @@ def test_hidden_source_excluded_but_ko_counts_and_graph_include_projection(clien
     node_types = {n["object_type"] for n in graph["nodes"]}
     assert {"case", "procedure", "tool"} <= node_types
     edge_relations = {e["relation"] for e in graph["edges"]}
-    assert {"identified_by", "fixed_by", "requires_tool"} <= edge_relations
+    # transitional (PR-2+3 Task 1): all procedure columns emit identified_by
+    # until Task 2's `about` edge rework lands.
+    assert {"identified_by", "requires_tool"} <= edge_relations
 
 
 # ---------------------------------------------------------------------------

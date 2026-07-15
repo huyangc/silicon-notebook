@@ -1185,6 +1185,11 @@
         "type": "index"
       },
       {
+        "name": "idx_knowhow_cell_code_row",
+        "sql_sha256": "3e0d3d7b8b2da455b201f938d9c602dc97e17aa38fdd60a01f8a72e5649d2a0f",
+        "type": "index"
+      },
+      {
         "name": "idx_knowhow_cells_row",
         "sql_sha256": "4489d7ad333ba96b0192add418c3be60001a11ed7862b2141eb105c7a080a313",
         "type": "index"
@@ -1577,6 +1582,11 @@
       {
         "name": "kg_rebuild_checkpoint",
         "sql_sha256": "0495aef2131e8270aff7c1f666433bb092aa0d44f8c3b91a68d3bade0dbbbd41",
+        "type": "table"
+      },
+      {
+        "name": "knowhow_cell_code",
+        "sql_sha256": "63308fdaacad03332d451cdc2845a846ed39a45c40e63f635730986d4afa560f",
         "type": "table"
       },
       {

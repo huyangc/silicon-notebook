@@ -438,6 +438,20 @@ SURFACE_MEMBERS = (
  SurfaceMember('bump_knowhow_mutation_seq', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3261', 'backend/tests/test_knowhow_store.py:443')),
  SurfaceMember('insert_notebook_asset', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3264', 'backend/tests/test_knowhow_store.py:446')),
  SurfaceMember('get_notebook_asset', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3271', 'backend/tests/test_knowhow_store.py:447')),
+ # knowhow-tables PR-2+3 Task 1: editing/code-attachment one-hop delegates
+ # (editing API, projection scheduler, and the agent surface build on these).
+ SurfaceMember('update_knowhow_table_meta', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3278', 'backend/tests/test_knowhow_store.py:505', 'backend/tests/test_knowhow_store.py:925')),
+ SurfaceMember('set_knowhow_anchor_column', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3286', 'backend/tests/test_knowhow_store.py:549', 'backend/tests/test_knowhow_store.py:930')),
+ SurfaceMember('add_knowhow_column', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3293', 'backend/tests/test_knowhow_store.py:613', 'backend/tests/test_knowhow_store.py:933')),
+ SurfaceMember('rename_knowhow_column', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3300', 'backend/tests/test_knowhow_store.py:678', 'backend/tests/test_knowhow_store.py:934')),
+ SurfaceMember('set_knowhow_column_kind', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3303', 'backend/tests/test_knowhow_store.py:709', 'backend/tests/test_knowhow_store.py:935')),
+ SurfaceMember('delete_knowhow_column', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3306', 'backend/tests/test_knowhow_store.py:742', 'backend/tests/test_knowhow_store.py:949')),
+ SurfaceMember('delete_knowhow_row', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3309', 'backend/tests/test_knowhow_store.py:765', 'backend/tests/test_knowhow_store.py:951')),
+ SurfaceMember('validate_cell_target', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3312', 'backend/tests/test_knowhow_store.py:784', 'backend/tests/test_knowhow_store.py:941')),
+ SurfaceMember('upsert_knowhow_cell_code', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3315', 'backend/tests/test_knowhow_store.py:813', 'backend/tests/test_knowhow_store.py:943')),
+ SurfaceMember('get_knowhow_cell_code', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3323', 'backend/tests/test_knowhow_store.py:818', 'backend/tests/test_knowhow_store.py:944')),
+ SurfaceMember('delete_knowhow_cell_code', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3326', 'backend/tests/test_knowhow_store.py:857', 'backend/tests/test_knowhow_store.py:946')),
+ SurfaceMember('list_knowhow_cell_code', 'KnowhowStore', 'method', ('backend/app/services/sqlite_repository.py:3329', 'backend/tests/test_knowhow_store.py:877', 'backend/tests/test_knowhow_store.py:945')),
 )
 def _unique_nonempty_owners(
     members: tuple[SurfaceMember, ...],

@@ -101,11 +101,11 @@ def notebook_id(repo) -> str:
 
 
 COLUMNS = [
-    {"name": "违例类型", "role": "concept"},
-    {"name": "现象识别", "role": "identify"},
-    {"name": "根因分析", "role": "root_cause"},
-    {"name": "修复方法", "role": "fix"},
-    {"name": "依赖工具", "role": "tool"},
+    {"name": "违例类型", "role": "anchor"},
+    {"name": "现象识别", "role": "procedure"},
+    {"name": "根因分析", "role": "procedure"},
+    {"name": "修复方法", "role": "procedure"},
+    {"name": "依赖工具", "role": "entity"},
 ]
 
 
@@ -116,9 +116,9 @@ def table_id(repo, notebook_id) -> str:
     )
 
 
-def _cols_by_role(repo, table_id: str) -> dict[str, str]:
+def _cols_by_name(repo, table_id: str) -> dict[str, str]:
     detail = repo._runtime.knowhow_store.get_knowhow_table(table_id)
-    return {c["role"]: c["id"] for c in detail["columns"]}
+    return {c["name"]: c["id"] for c in detail["columns"]}
 
 
 def _row_element_ids(repo, row_id: str) -> set[str]:
@@ -287,13 +287,13 @@ def test_hidden_source_excluded_from_source_listing(repo, projector, table_id, n
 
 def test_project_row_twice_produces_identical_id_sets(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题",
-        cols["identify"]: "- 观察上升沿过冲\n- 测量峰值电压",
-        cols["root_cause"]: "1. 检查电源阻抗\n2. 排查寄生电感",
-        cols["fix"]: "1. 增加阻尼电阻\n2. 调整走线",
-        cols["tool"]: "- 示波器\n- 万用表",
+        cols["违例类型"]: "过冲问题",
+        cols["现象识别"]: "- 观察上升沿过冲\n- 测量峰值电压",
+        cols["根因分析"]: "1. 检查电源阻抗\n2. 排查寄生电感",
+        cols["修复方法"]: "1. 增加阻尼电阻\n2. 调整走线",
+        cols["依赖工具"]: "- 示波器\n- 万用表",
     })
 
     projector.project_row(table_id, row_id)
@@ -313,9 +313,9 @@ def test_project_row_twice_produces_identical_id_sets(repo, projector, table_id,
 
 def test_derived_ids_use_the_contracted_prefixes(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "问题A", cols["identify"]: "现象说明", cols["tool"]: "示波器",
+        cols["违例类型"]: "问题A", cols["现象识别"]: "现象说明", cols["依赖工具"]: "示波器",
     })
     projector.project_row(table_id, row_id)
     source_id = projector.ensure_hidden_source(table_id)
@@ -345,11 +345,11 @@ def test_derived_ids_use_the_contracted_prefixes(repo, projector, table_id, embe
 
 def test_single_cell_edit_rebuilds_only_that_chunk_and_embeds_once(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题",
-        cols["identify"]: "- 观察上升沿过冲",
-        cols["fix"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题",
+        cols["现象识别"]: "- 观察上升沿过冲",
+        cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
     projector.project_row(table_id, row_id)
@@ -357,7 +357,7 @@ def test_single_cell_edit_rebuilds_only_that_chunk_and_embeds_once(repo, project
     chunks_before = _row_chunk_texts(repo, row_id)
     assert len(chunks_before) == 3  # concept + identify + fix, one chunk each
 
-    store.update_knowhow_cell(row_id, cols["fix"], "1. 更换更大电容")
+    store.update_knowhow_cell(row_id, cols["修复方法"], "1. 更换更大电容")
     projector.project_row(table_id, row_id)
 
     assert embedder.call_count == 2
@@ -379,10 +379,10 @@ def test_single_cell_edit_rebuilds_only_that_chunk_and_embeds_once(repo, project
 
 def test_reprojecting_unchanged_row_makes_zero_additional_embed_calls(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题",
-        cols["fix"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题",
+        cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
     projector.project_row(table_id, row_id)
@@ -405,11 +405,11 @@ def test_reproject_self_heals_a_missing_chunk_vector(repo, projector, table_id, 
     test_reprojecting_unchanged_row_makes_zero_additional_embed_calls
     above)."""
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题",
-        cols["identify"]: "- 观察上升沿过冲",
-        cols["fix"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题",
+        cols["现象识别"]: "- 观察上升沿过冲",
+        cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
     projector.project_row(table_id, row_id)
@@ -449,11 +449,11 @@ def test_concept_cell_edit_moves_sibling_section_paths_without_reembedding(
     split) its existing embedding must survive, not get cascade-deleted by a
     delete+reinsert that nothing then re-embeds."""
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题",
-        cols["identify"]: "- 观察上升沿过冲",
-        cols["fix"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题",
+        cols["现象识别"]: "- 观察上升沿过冲",
+        cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
     projector.project_row(table_id, row_id)
@@ -466,7 +466,7 @@ def test_concept_cell_edit_moves_sibling_section_paths_without_reembedding(
 
     concept_chunk_id = next(cid for cid, text in chunks_before.items() if text == "过冲问题")
 
-    store.update_knowhow_cell(row_id, cols["concept"], "过冲新问题")
+    store.update_knowhow_cell(row_id, cols["违例类型"], "过冲新问题")
     projector.project_row(table_id, row_id)
 
     # Exactly 1 new embed call, for exactly the concept cell's OWN new text —
@@ -507,11 +507,11 @@ def test_project_row_sweeps_chunks_for_a_column_removed_from_the_table(
     reinsert reconciliation (that one already deletes by row_id and
     reinserts only current columns, so it never had this bug)."""
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题",
-        cols["identify"]: "- 观察上升沿过冲",
-        cols["fix"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题",
+        cols["现象识别"]: "- 观察上升沿过冲",
+        cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
     projector.project_row(table_id, row_id)
@@ -530,7 +530,7 @@ def test_project_row_sweeps_chunks_for_a_column_removed_from_the_table(
     # endpoint would have from get_knowhow_table's point of view (it simply
     # stops returning the column).
     with repo._connect() as db:
-        db.execute("DELETE FROM knowhow_columns WHERE id=?", (cols["fix"],))
+        db.execute("DELETE FROM knowhow_columns WHERE id=?", (cols["修复方法"],))
 
     projector.project_row(table_id, row_id)
 
@@ -553,11 +553,11 @@ def test_project_row_sweeps_chunks_for_a_column_removed_from_the_table(
 
 def test_overlong_cell_splits_into_multiple_chunk_parts(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     long_text = "\n\n".join(["甲" * 2500, "乙" * 2500, "丙" * 2500])
     assert len(long_text) > 4000
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "长文本问题", cols["fix"]: long_text,
+        cols["违例类型"]: "长文本问题", cols["修复方法"]: long_text,
     })
 
     projector.project_row(table_id, row_id)
@@ -573,13 +573,13 @@ def test_overlong_cell_splits_into_multiple_chunk_parts(repo, projector, table_i
 
 def test_case_procedure_tool_counts_and_edge_types(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题",
-        cols["identify"]: "- 观察上升沿过冲",
-        cols["root_cause"]: "1. 检查电源阻抗",
-        cols["fix"]: "1. 增加阻尼电阻",
-        cols["tool"]: "- 示波器\n- 万用表",
+        cols["违例类型"]: "过冲问题",
+        cols["现象识别"]: "- 观察上升沿过冲",
+        cols["根因分析"]: "1. 检查电源阻抗",
+        cols["修复方法"]: "1. 增加阻尼电阻",
+        cols["依赖工具"]: "- 示波器\n- 万用表",
     })
 
     projector.project_row(table_id, row_id)
@@ -589,19 +589,22 @@ def test_case_procedure_tool_counts_and_edge_types(repo, projector, table_id, em
 
     case_id = _row_case_id(repo, row_id)
     assert case_id is not None
+    # transitional (PR-2+3 Task 1): every 'procedure' column takes the old
+    # identify branch — one uniform edge type until Task 2's `about` rework.
     assert _edge_types_from(repo, case_id) == [
-        "diagnosed_by", "fixed_by", "identified_by", "requires_tool", "requires_tool",
+        "identified_by", "identified_by", "identified_by",
+        "requires_tool", "requires_tool",
     ]
 
 
 def test_tool_deduped_within_table_across_rows(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_a = store.add_knowhow_row(table_id, {
-        cols["concept"]: "问题A", cols["tool"]: "示波器",
+        cols["违例类型"]: "问题A", cols["依赖工具"]: "示波器",
     })
     row_b = store.add_knowhow_row(table_id, {
-        cols["concept"]: "问题B", cols["tool"]: "Oscilloscope",  # different casing/spelling on purpose
+        cols["违例类型"]: "问题B", cols["依赖工具"]: "Oscilloscope",  # different casing/spelling on purpose
     })
     projector.project_row(table_id, row_a)
     projector.project_row(table_id, row_b)
@@ -611,7 +614,7 @@ def test_tool_deduped_within_table_across_rows(repo, projector, table_id, embedd
     assert _table_object_type_counts(repo, table_id).get("tool") == 2
 
     row_c = store.add_knowhow_row(table_id, {
-        cols["concept"]: "问题C", cols["tool"]: "OSCILLOSCOPE",  # same name, different case
+        cols["违例类型"]: "问题C", cols["依赖工具"]: "OSCILLOSCOPE",  # same name, different case
     })
     projector.project_row(table_id, row_c)
     # Same normalized name as row_b's tool -> dedup to the SAME tool object,
@@ -624,8 +627,8 @@ def test_row_with_no_nonempty_cells_projects_no_case_ko(repo, projector, table_i
     cell is whitespace has no net content, so project_row must write NO case KO
     (not a phantom empty-fields case) — and still settle 'synced'."""
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
-    row_id = store.add_knowhow_row(table_id, {cols["concept"]: "   "})
+    cols = _cols_by_name(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {cols["违例类型"]: "   "})
 
     projector.project_row(table_id, row_id)
 
@@ -640,15 +643,15 @@ def test_clearing_all_cells_removes_the_previously_projected_case_ko(
     cleared, must end with zero row-scoped KOs — its prior case/procedure
     objects swept and no new phantom empty case written in their place."""
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题", cols["fix"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻",
     })
     projector.project_row(table_id, row_id)
     assert _row_object_ids(repo, row_id)  # sanity: content projected a case + procedure
 
-    store.update_knowhow_cell(row_id, cols["concept"], "")
-    store.update_knowhow_cell(row_id, cols["fix"], "")
+    store.update_knowhow_cell(row_id, cols["违例类型"], "")
+    store.update_knowhow_cell(row_id, cols["修复方法"], "")
     projector.project_row(table_id, row_id)
 
     assert _row_object_ids(repo, row_id) == set()
@@ -667,10 +670,10 @@ def test_added_row_with_no_mutation_seq_bump_is_still_projected_by_project_table
     discover rows by full enumeration, never by a seq-delta gate, or a
     freshly-added row would be silently skipped."""
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     seq_before = store.get_knowhow_table(table_id)["mutation_seq"]
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "新行", cols["fix"]: "1. 处理方法",
+        cols["违例类型"]: "新行", cols["修复方法"]: "1. 处理方法",
     })
     seq_after_add = store.get_knowhow_table(table_id)["mutation_seq"]
     assert seq_after_add == seq_before  # confirms the store-level precondition this test pins
@@ -685,14 +688,14 @@ def test_project_table_sweeps_orphaned_tool_no_longer_referenced_by_any_row(
     repo, projector, table_id, embedder
 ):
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "问题A", cols["tool"]: "示波器",
+        cols["违例类型"]: "问题A", cols["依赖工具"]: "示波器",
     })
     projector.project_row(table_id, row_id)
     assert _table_object_type_counts(repo, table_id).get("tool") == 1
 
-    store.update_knowhow_cell(row_id, cols["tool"], "")  # clear the only reference
+    store.update_knowhow_cell(row_id, cols["依赖工具"], "")  # clear the only reference
     projector.project_row(table_id, row_id)
     # project_row alone is row-scoped: it does NOT clean up the now-orphaned
     # tool object (by design — see delete_objects_by_source_and_row).
@@ -711,9 +714,9 @@ def test_project_table_sweeps_orphaned_tool_no_longer_referenced_by_any_row(
 
 def test_delete_table_projection_clears_all_artifacts(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题", cols["fix"]: "1. 增加阻尼电阻", cols["tool"]: "示波器",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻", cols["依赖工具"]: "示波器",
     })
     projector.project_row(table_id, row_id)
     source_id = projector.ensure_hidden_source(table_id)
@@ -755,9 +758,9 @@ def test_delete_table_projection_is_a_noop_for_none_or_missing_id(repo, projecto
 
 def test_embedding_failure_marks_row_failed_without_raising(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题", cols["fix"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻",
     })
     embedder.fail_next = True
 
@@ -775,9 +778,9 @@ def test_embedding_failure_emits_through_model_error_channel(repo, projector, ta
         lambda stage, model, exc: calls.append((stage, model, type(exc).__name__))
     )
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题", cols["fix"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻",
     })
     embedder.fail_next = True
 
@@ -807,9 +810,9 @@ def test_structural_write_failure_marks_row_failed_and_reraises(
     propagate — unlike the embed-failure path above, this is NOT a
     best-effort/no-raise case."""
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题", cols["fix"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
     def _boom(*args, **kwargs):
@@ -864,9 +867,9 @@ def test_unconfigured_embedder_is_not_a_failure(tmp_path, monkeypatch):
         now=rt.seams.now,
     )
     store = repo._runtime.knowhow_store
-    cols = _cols_by_role(repo, table_id)
+    cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["concept"]: "过冲问题", cols["fix"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
     projector.project_row(table_id, row_id)

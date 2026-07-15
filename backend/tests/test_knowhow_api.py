@@ -63,7 +63,7 @@ def _mk_notebook(client, headers, name="N"):
 
 
 HEADER = ["违例类型", "现象识别", "根因分析", "修复方法", "依赖工具"]
-ROLES = ["concept", "identify", "root_cause", "fix", "tool"]
+ROLES = ["anchor", "procedure", "procedure", "procedure", "entity"]
 DATA_ROWS = [
     ["过冲问题", "上升沿观察到过冲", "电源阻抗过高", "增加阻尼电阻", "示波器"],
     ["欠冲问题", "下降沿观察到欠冲", "寄生电感过大", "调整走线拓扑", "万用表"],
@@ -123,7 +123,14 @@ def test_preview_xlsx_guesses_roles_and_returns_rows_preview(tmp_path, monkeypat
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert [c["name"] for c in body["columns"]] == HEADER
-    assert [c["guessed_role"] for c in body["columns"]] == ROLES
+    # transitional (PR-2+3 Task 1): the preview endpoint still speaks the
+    # legacy wire via the guess_roles shim — guess_kinds' anchor suggestion
+    # (违例类型 hits 类型) reads back as 'concept', every procedure column as
+    # 'identify', entity as 'tool'. Task 3 rewires this endpoint to
+    # guessed_kind + anchor_suggestion and regenerates the golden.
+    assert [c["guessed_role"] for c in body["columns"]] == [
+        "concept", "identify", "identify", "identify", "tool",
+    ]
     assert body["rows_preview"] == DATA_ROWS
     assert body["total_rows"] == len(DATA_ROWS)
 
@@ -185,23 +192,36 @@ def test_import_illegal_role_value_returns_friendly_400(tmp_path, monkeypatch):
     owner_h = _login(client, "a00000505")
     nb = _mk_notebook(client, owner_h)
 
-    bad_roles = ["concept", "identify", "root_cause", "fix", "not_a_real_role"]
+    bad_roles = ["anchor", "procedure", "procedure", "procedure", "not_a_real_role"]
     resp = _import_xlsx(client, owner_h, nb, columns_json=_columns_json(roles=bad_roles))
     assert resp.status_code == 400, resp.text
     detail = resp.json()["detail"]
     assert any("一" <= ch <= "鿿" for ch in detail)
 
 
-def test_import_missing_concept_role_returns_friendly_400(tmp_path, monkeypatch):
+def test_import_without_anchor_column_succeeds(tmp_path, monkeypatch):
+    """PR-2+3 Task 1: the PR-1 "exactly one concept column" rule is relaxed to
+    at-most-one anchor — a record-shaped table with NO anchor column imports
+    fine (it will only ever participate in retrieval, never the KG)."""
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00000506")
     nb = _mk_notebook(client, owner_h)
 
-    no_concept_roles = ["plain", "identify", "root_cause", "fix", "tool"]
-    resp = _import_xlsx(client, owner_h, nb, columns_json=_columns_json(roles=no_concept_roles))
+    no_anchor_roles = ["attribute", "procedure", "procedure", "procedure", "entity"]
+    resp = _import_xlsx(client, owner_h, nb, columns_json=_columns_json(roles=no_anchor_roles))
+    assert resp.status_code == 200, resp.text
+    assert [c["role"] for c in resp.json()["columns"]] == no_anchor_roles
+
+
+def test_import_second_anchor_column_returns_friendly_400(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000522")
+    nb = _mk_notebook(client, owner_h)
+
+    two_anchor_roles = ["anchor", "anchor", "procedure", "procedure", "entity"]
+    resp = _import_xlsx(client, owner_h, nb, columns_json=_columns_json(roles=two_anchor_roles))
     assert resp.status_code == 400, resp.text
-    detail = resp.json()["detail"]
-    assert "concept" in detail or "概念" in detail
+    assert "至多一列" in resp.json()["detail"]
 
 
 def test_import_empty_title_returns_friendly_400(tmp_path, monkeypatch):

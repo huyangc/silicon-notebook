@@ -3,7 +3,13 @@ import io
 import pytest
 from openpyxl import Workbook
 
-from app.services.knowhow.grid_parser import GridParseError, ParsedGrid, guess_roles, parse_grid
+from app.services.knowhow.grid_parser import (
+    GridParseError,
+    ParsedGrid,
+    guess_kinds,
+    guess_roles,
+    parse_grid,
+)
 
 
 def _xlsx_bytes(sheets: list[list[list[str]]]) -> bytes:
@@ -329,20 +335,76 @@ def test_parse_grid_all_blank_data_rows_raise_no_data_error():
     _assert_chinese_message(excinfo.value)
 
 
-# --- guess_roles -------------------------------------------------------------
+# --- guess_kinds (PR-2+3 Task 1: behavior kinds + anchor suggestion) ---------
 
 
-def test_guess_roles_full_role_set():
+def test_guess_kinds_timing_fixup_five_columns():
+    """The canonical time-series-fixup header: 识别/分析/修复 columns are all
+    procedure now (one behavior kind, no sub-roles), 工具 is entity, and the
+    违例概念 column is kind attribute but nominated as the anchor suggestion
+    (概念 is an anchor-NAME keyword, not a content-kind keyword)."""
     columns = ["违例概念", "现象识别方法", "根因分析动作", "修复方法", "依赖工具"]
-    assert guess_roles(columns) == ["concept", "identify", "root_cause", "fix", "tool"]
+    kinds, anchor_idx = guess_kinds(columns)
+    assert kinds == ["attribute", "procedure", "procedure", "procedure", "entity"]
+    assert anchor_idx == 0
 
 
-def test_guess_roles_no_match_promotes_first_column_to_concept():
-    columns = ["列一", "列二", "列三"]
-    assert guess_roles(columns) == ["concept", "plain", "plain"]
+def test_guess_kinds_travel_log_gets_all_attribute_and_no_anchor():
+    """The record-shaped table that motivated dropping the first-column
+    fallback (design doc §① 旅行日志实证): nothing matches a kind keyword and
+    no column NAME suggests an identity — every column stays attribute and
+    the anchor suggestion is None, NOT column 0."""
+    columns = ["日期", "出发地", "目的地", "交通", "住宿", "花费", "天气", "同行人", "备注"]
+    kinds, anchor_idx = guess_kinds(columns)
+    assert kinds == ["attribute"] * 9
+    assert anchor_idx is None
 
 
-def test_guess_roles_keeps_only_first_concept_candidate():
-    columns = ["违例类型", "根因分析", "概念说明"]
-    # 1st and 3rd both hit "concept" keywords; only the first should stay "concept".
-    assert guess_roles(columns) == ["concept", "root_cause", "plain"]
+def test_guess_kinds_anchor_keywords_pick_first_match_only():
+    columns = ["工艺名称", "器件类型", "说明"]
+    kinds, anchor_idx = guess_kinds(columns)
+    assert kinds == ["attribute", "attribute", "attribute"]
+    assert anchor_idx == 0  # 名称 hits first; the later 类型 hit is not consumed
+
+
+def test_guess_kinds_english_anchor_keywords_and_casefold():
+    columns = ["Violation Name", "Fix Steps", "Tools"]
+    kinds, anchor_idx = guess_kinds(columns)
+    # "Fix Steps"/"Tools" carry no CHINESE kind keyword (the kind vocabulary
+    # is deliberately the brief's exact list); the anchor list does include
+    # English identity words, matched casefolded.
+    assert anchor_idx == 0
+    assert kinds[0] == "attribute"
+
+
+def test_guess_kinds_procedure_beats_entity_on_double_hit():
+    # 修复(procedure) and 工具(entity) both present: procedure wins (listed
+    # first — same priority-by-order convention the old guess_roles used).
+    kinds, anchor_idx = guess_kinds(["修复工具"])
+    assert kinds == ["procedure"]
+    assert anchor_idx is None
+
+
+def test_guess_kinds_kind_and_anchor_are_independent():
+    """A column can match BOTH a kind keyword and an anchor-name keyword —
+    the kind guess and the anchor suggestion are separate outputs (anchor is
+    not a kind), so it keeps its content kind AND gets nominated."""
+    kinds, anchor_idx = guess_kinds(["分析方法名称", "备注"])
+    assert kinds == ["procedure", "attribute"]
+    assert anchor_idx == 0
+
+
+# --- guess_roles (transitional shim over guess_kinds, removed by Task 3) -----
+
+
+def test_guess_roles_shim_maps_kinds_back_to_legacy_strings():
+    columns = ["违例概念", "现象识别方法", "根因分析动作", "修复方法", "依赖工具"]
+    # anchor suggestion -> 'concept'; procedure -> 'identify' (the sub-role
+    # distinction no longer exists); entity -> 'tool'.
+    assert guess_roles(columns) == ["concept", "identify", "identify", "identify", "tool"]
+
+
+def test_guess_roles_shim_no_anchor_means_no_concept():
+    # No first-column fallback anymore — the legacy "always exactly one
+    # concept" guarantee is deliberately gone with it.
+    assert guess_roles(["列一", "列二", "列三"]) == ["plain", "plain", "plain"]

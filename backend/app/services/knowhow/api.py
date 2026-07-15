@@ -21,13 +21,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from app.services.knowhow.grid_parser import ParsedGrid, ROLE_KEYWORDS, guess_roles, parse_grid
+from app.services.knowhow.grid_parser import ParsedGrid, guess_roles, parse_grid
 from app.services.knowhow.projection import KnowhowProjector
 
-# Legal column roles: the five keyword-driven roles guess_roles() assigns,
-# plus the "plain" default it falls back to. Single source of truth so this
-# validation can never silently drift from grid_parser's own role vocabulary.
-VALID_ROLES = {role for role, _ in ROLE_KEYWORDS} | {"plain"}
+# Legal column kinds (PR-2+3 Task 1): the post-migration-17 behavior-kind
+# vocabulary (anchor allowed at most once — enforced downstream by
+# create_knowhow_table itself). Task 3 rewires the wire to kind+anchor_index.
+VALID_ROLES = {"anchor", "procedure", "entity", "attribute"}
 
 
 def preview_import(filename: str, data: bytes) -> dict:

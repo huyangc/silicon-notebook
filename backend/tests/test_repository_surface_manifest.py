@@ -1407,23 +1407,25 @@ TASK28_ALLOWED_IMPORTS = {
 # every hop terminal bumped to 16 with those objects + the new (15, 16) hop),
 # then a further +65 by paper-metadata Task 1's MIGRATION_MANIFEST v17
 # additions (PAPER_META_TABLES + PAPER_META_INDEXES + every hop terminal
-# bumped to 17 with those objects + the new (16, 17) hop).
+# bumped to 17 with those objects + the new (16, 17) hop), then a further +45
+# by knowhow-tables PR-2+3 Task 1's v18 additions (KNOWHOW_CELL_CODE_TABLE/
+# _INDEX folded into every hop, terminals bumped to 18, + the new (17, 18) hop).
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1231"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:1224"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:1209"),
-    ("get_report", "scripts/verify_repository_snapshot.py:1236"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:1212"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:1221"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:1215"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:1233"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:1210"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1172"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1176"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1178"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1203"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1245"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1219"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1276"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1269"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1254"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1281"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1257"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1266"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1260"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1278"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1255"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1217"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1221"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1223"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1248"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1290"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1264"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -1749,6 +1751,17 @@ TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS = {
     "add_knowhow_row", "update_knowhow_cell", "delete_knowhow_table",
     "set_knowhow_row_projection", "set_knowhow_hidden_source",
     "bump_knowhow_mutation_seq", "insert_notebook_asset", "get_notebook_asset",
+}
+# Task 1 (knowhow-tables PR-2+3): twelve more KnowhowStore one-hop delegates
+# (table-meta/anchor/column/row editing + cell-code CRUD). Brand-new facade
+# members predating no frozen fixture — exempted from the consumer-scan
+# comparison entirely, exactly like TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS above.
+TASK1_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS = {
+    "update_knowhow_table_meta", "set_knowhow_anchor_column",
+    "add_knowhow_column", "rename_knowhow_column", "set_knowhow_column_kind",
+    "delete_knowhow_column", "delete_knowhow_row", "validate_cell_target",
+    "upsert_knowhow_cell_code", "get_knowhow_cell_code",
+    "delete_knowhow_cell_code", "list_knowhow_cell_code",
 }
 
 # Task 4 (knowhow-tables-pr1): the asset-store/authed-serving routes' own test
@@ -2901,10 +2914,11 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
     # in test_repository_callers_static.py shift this import site further.
     # 661->670: knowhow-tables Task 6's new INDEPENDENT_PRIVATE_SITES entry
     # (the api.py `_runtime` registration, +9 net lines) shifts it again.
-    # 670->676: paper-metadata Task 1's MIGRATION_MANIFEST v17 comment
-    # expansions (INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES, +6 net lines)
-    # in test_repository_callers_static.py shift this import site further.
-    ('backend/tests/test_repository_callers_static.py', 676, 'app.services.sqlite_repository', 'SQLiteRepository'),
+    # 670->680: paper-metadata Task 1's v17 comment expansions plus knowhow-
+    # tables PR-2+3 Task 1's v18 regenerated line pins (INDEPENDENT_SQL_SITES +
+    # SQLITE_CONNECT_SITES) in test_repository_callers_static.py shift this
+    # import site further.
+    ('backend/tests/test_repository_callers_static.py', 680, 'app.services.sqlite_repository', 'SQLiteRepository'),
     ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
 }
 
@@ -3246,6 +3260,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | TASK3_MEMORY_KG_ALLOWED_NEW_MEMBERS
         | TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS
         | TASK4_PAPER_META_ALLOWED_NEW_MEMBERS
+        | TASK1_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)
