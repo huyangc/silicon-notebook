@@ -103,6 +103,21 @@ export type AgentTokenIssued = Omit<AgentTokenSummary, "profile_name" | "revoked
   token: string;
 };
 
+export type PaperAuthor = {
+  name: string;
+  affiliation: string;
+};
+
+export type PaperMeta = {
+  is_paper: boolean;
+  title?: string | null;
+  venue?: string | null;
+  year?: number | null;
+  doi?: string | null;
+  keywords: string[];
+  authors: PaperAuthor[];
+};
+
 export type SourceSummary = {
   id: string;
   notebook_id: string;
@@ -119,6 +134,10 @@ export type SourceSummary = {
   error_message?: string;
   extraction_warning?: string | null;
   kg_extracted?: boolean;
+  authors?: string[];
+  pub_year?: number | null;
+  venue?: string | null;
+  paper_meta?: PaperMeta | null;
 };
 
 export type PaginatedSources = {

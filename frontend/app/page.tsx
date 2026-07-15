@@ -3489,6 +3489,29 @@ export default function Home() {
                     <Plus size={20} strokeWidth={2.7} /> 添加来源
                   </button>
                 )}
+                {!isReader && (
+                  <button
+                    type="button"
+                    className="button secondary"
+                    title="为已上传的论文补齐作者、机构等信息"
+                    onClick={async () => {
+                      if (!currentNotebookId) return;
+                      try {
+                        const res = await api<{ queued: number }>(
+                          `/notebooks/${currentNotebookId}/paper-meta/backfill`,
+                          { method: "POST" }
+                        );
+                        setToast(res.queued > 0
+                          ? `已提交 ${res.queued} 篇论文的信息补全`
+                          : "论文信息已是最新，无需补全");
+                      } catch (err) {
+                        reportError(err);
+                      }
+                    }}
+                  >
+                    补全论文信息
+                  </button>
+                )}
                 {!isReader && currentNotebookId && sources.length > 0 && (
                   currentNotebook?.kg_ready
                     ? (
@@ -3572,7 +3595,7 @@ export default function Home() {
                 <input
                   className="source-search"
                   type="search"
-                  placeholder="搜索来源（标题/文件名）"
+                  placeholder="搜索来源（标题/作者/文件名）"
                   value={sourceQuery}
                   onChange={(e) => setSourceQuery(e.target.value)}
                   onKeyDown={(e) => {
@@ -4415,6 +4438,42 @@ export default function Home() {
                 <span className="tag">{formatFileSize(sourceDetail.file_size)}</span>
                 <span className="tag">{sourceElements.length} 个元素</span>
               </div>
+              {sourceDetail.paper_meta?.is_paper && (
+                <div className="source-detail-paper">
+                  {sourceDetail.paper_meta.title && (
+                    <p className="paper-title">{sourceDetail.paper_meta.title}</p>
+                  )}
+                  {sourceDetail.paper_meta.authors.length > 0 && (
+                    <p className="paper-authors">
+                      {sourceDetail.paper_meta.authors.map((a) => (
+                        <span key={a.name} className="paper-author"
+                              title={a.affiliation || undefined}>
+                          {a.name}
+                        </span>
+                      ))}
+                    </p>
+                  )}
+                  {(sourceDetail.paper_meta.venue || sourceDetail.paper_meta.year) && (
+                    <p className="paper-venue">
+                      {[sourceDetail.paper_meta.venue, sourceDetail.paper_meta.year]
+                        .filter(Boolean).join(" · ")}
+                    </p>
+                  )}
+                  {sourceDetail.paper_meta.doi && (
+                    <a className="paper-doi" target="_blank" rel="noreferrer"
+                       href={`https://doi.org/${sourceDetail.paper_meta.doi}`}>
+                      DOI: {sourceDetail.paper_meta.doi}
+                    </a>
+                  )}
+                  {sourceDetail.paper_meta.keywords.length > 0 && (
+                    <p className="paper-keywords">
+                      {sourceDetail.paper_meta.keywords.map((k) => (
+                        <span key={k} className="tag">{k}</span>
+                      ))}
+                    </p>
+                  )}
+                </div>
+              )}
               {sourceDetail.extraction_warning && (
                 <p className="tag" style={{color:"var(--color-warning,#b45309)",background:"var(--color-warning-bg,#fef3c7)",border:"1px solid var(--color-warning-border,#fcd34d)",borderRadius:4,padding:"4px 8px",marginTop:4}}>⚠ {sourceDetail.extraction_warning}</p>
               )}
