@@ -1155,13 +1155,25 @@ function ProjectionStatusBadge({
 // remarkCitations 插件），knowhow 格子内容没有引用概念，硬套空数组
 // /空回调既别扭又会在格子文本恰好出现「[k1]」字样时误当引用扫描。
 // 因此这里只复刻其 remark/rehype 管线本身（remarkGfm+remarkMath+
-// rehypeKatex）与 pre/table 的包装 class，行为对齐、无引用负担。
+// rehypeKatex）、pre/table 的包装 class、以及 <a> 强制新标签打开
+// （target="_blank" rel="noreferrer"，同 answer-markdown.tsx 的普通外链
+// 分支——没有 cite: 引用徽章分支，因为本组件压根不产生 cite: 链接），
+// 行为对齐、无引用负担。
 
 function KnowhowMarkdown({ md, notebookId, apiBase }: { md: string; notebookId: string; apiBase: string }) {
   const content = rewriteAssetUrls(md ?? "", notebookId, apiBase);
 
   const components = useMemo<Components>(
     () => ({
+      // 格子内容可能包含普通链接（如工具文档 URL）；不强制新标签打开的话
+      // 点击会在同一个 SPA 标签页里跳走，丢失当前 notebook/knowhow 视图上下文。
+      a({ href, children }) {
+        return (
+          <a href={href} target="_blank" rel="noreferrer">
+            {children}
+          </a>
+        );
+      },
       pre({ children }) {
         return <pre className="answer-code">{children}</pre>;
       },
