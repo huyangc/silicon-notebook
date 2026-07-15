@@ -68,26 +68,46 @@ def _is_loopback(host: str) -> bool:
 def validate_mcp_deployment(
     bind_host: str, public_url: str, *, require_https: bool = True
 ) -> None:
-    """Guard a remotely reachable MCP endpoint that would serve plain HTTP.
+    """Guard a remotely reachable MCP endpoint against silent posture loss.
 
     Fail closed by default. When ``require_https`` is False (the product's
     intranet default, wired in ``app.main.create_app``) keep serving but log a
-    prominent warning: the Agent Bearer token then crosses the network in
-    cleartext, so this is only safe on a trusted private network.
+    prominent warning naming every protection relaxed for remote clients:
+    ``create_memory_mcp`` disables Host/Origin (DNS-rebinding) validation, and
+    over plain HTTP the Agent Bearer token additionally crosses the network in
+    cleartext. Only safe on a trusted private network.
     """
     parsed = urlparse(public_url)
     public_host = parsed.hostname or ""
     remotely_reachable = not _is_loopback(bind_host) or (
         public_host and not _is_loopback(public_host)
     )
-    if remotely_reachable and parsed.scheme.lower() != "https":
-        if require_https:
+    if not remotely_reachable:
+        return
+    is_plain_http = parsed.scheme.lower() != "https"
+    if require_https:
+        if is_plain_http:
             raise RuntimeError("remote MCP deployment requires HTTPS")
+        return
+    # require_https is False: create_memory_mcp disables Host/Origin
+    # (DNS-rebinding) validation for these remote clients. Warn either way, and
+    # name the extra cleartext-token exposure when the transport is plain HTTP.
+    if is_plain_http:
         logger.warning(
-            "MCP is serving remote clients over plain HTTP (bind_host=%s "
-            "public_url=%s): the Agent Bearer token crosses the network in "
-            "cleartext. Only do this on a trusted private network; set "
-            "MCP_REQUIRE_HTTPS=1 to enforce HTTPS.",
+            "MCP is serving remote clients over plain HTTP with Host/Origin "
+            "(DNS-rebinding) validation disabled (bind_host=%s public_url=%s): "
+            "the Agent Bearer token crosses the network in cleartext. Only do "
+            "this on a trusted private network; set MCP_REQUIRE_HTTPS=1 to "
+            "enforce HTTPS and restore Host/Origin validation.",
+            bind_host,
+            public_url,
+        )
+    else:
+        logger.warning(
+            "MCP has Host/Origin (DNS-rebinding) validation disabled for remote "
+            "clients (bind_host=%s public_url=%s) because MCP_REQUIRE_HTTPS is "
+            "not set. Transport is HTTPS; set MCP_REQUIRE_HTTPS=1 to also "
+            "restore Host/Origin validation.",
             bind_host,
             public_url,
         )
