@@ -4302,7 +4302,7 @@ button.chat-session-card {
 .source-detail-paper .paper-author { cursor: default; text-decoration: underline dotted transparent; }
 .source-detail-paper .paper-author[title]:not([title=""]) { text-decoration-color: currentColor; opacity: .92; }
 .source-detail-paper .paper-venue, .source-detail-paper .paper-doi { font-size: 12px; opacity: .75; }
-.source-detail-paper .paper-doi { width: fit-content; }
+.source-detail-paper .paper-doi { width: fit-content; color: var(--blue); text-decoration: none; }
 .source-detail-paper .paper-keywords { display: flex; flex-wrap: wrap; gap: 4px; }
 
 .source-element-stack {
