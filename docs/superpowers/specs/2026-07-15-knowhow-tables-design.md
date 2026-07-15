@@ -18,6 +18,7 @@
 | --- | --- |
 | 进入方式 | 导入存量文件 + 在线维护（持续沉淀演进） |
 | 通用性 | 通用机制：列自定义 + 列角色标签，时序修复只是第一张表 |
+| 角色词表（2026-07-15 修订） | 五角色仅为时序修复实例、不锁定词表；改为四种域中立**行为类型**（锚点/方法步骤/实体引用/普通属性），领域语义由列名承载、边标签用列名原文；判别集 API 泛化为按列返回 `{column_name, kind, text}` |
 | 规模 | 单表百行内；单格几百字到几屏富文本；无需虚拟滚动/分页 |
 | 图片 | 只给人看：展示层保留，KG/向量化/机器输出一律剥离，零 VLM 成本 |
 | Agent 形态 | 外部 Agent 走 HTTP/MCP；notebook 不存代码、不执行代码 |
@@ -35,8 +36,9 @@
 
 - `knowhow_tables`：`id, notebook_id, title, description, mutation_seq(单调计数器), created_by, created_at, updated_at`
 - `knowhow_columns`：`id, table_id, name, role, position`
-  - `role ∈ {concept(概念锚点，每表恰一列) | identify(现象识别) | root_cause(根因分析) | fix(修复方法) | tool(依赖工具) | plain(普通)}`
-  - 角色驱动投影语义与 Agent API 字段命名；列名本身自由。
+  - **角色=域中立「行为类型」**（2026-07-15 重设计：原五角色只是时序修复域的实例，误固化为全量词表，用户纠正）：`role ∈ {anchor(锚点，每表恰一列) | procedure(方法步骤) | entity(实体引用) | attribute(普通属性)}`
+  - 领域语义住在**列名**（自由文本）：投影边标签用列名原文（源语言保留），procedure KO 的 payload 带 `method_label=列名`；行为类型只决定机器行为——anchor→行身份/case KO/判别键，procedure→procedure KO+steps 解析+指向锚点的边，entity→去重实体 KO+关联边，attribute→payload+chunk 不成节点。
+  - 兼容迁移：存量 concept→anchor、identify/root_cause/fix→procedure、tool→entity、plain→attribute；迁移后全表结构性重投影（文本未变→chunk/向量原位保留，零 LLM 零重嵌入）。
 - `knowhow_rows`：`id, table_id, position, created_at, updated_at`
 - `knowhow_cells`：`id, row_id, column_id, content_md(原始 markdown，含 asset:// 图片引用), updated_at`
 - `notebook_assets`：`id, notebook_id, filename, mime, size, created_by, created_at`；文件落根 `.local/assets/<notebook_id>/`
@@ -106,7 +108,7 @@ Notebook 页内新增「Knowhow 表」区块：
 沿用 Agent Bearer token（scope `knowledge:read`）+ notebook 白名单：
 
 1. `list_knowhow_tables(notebook)` → 表清单 + 列/角色定义 + 行数。
-2. `get_discrimination_set(table_id)` → **判别集一次取全**：所有行的 `{row_id, concept, identify_text}`；「净文本」= 剥图后的 markdown（结构保留，图片替换为占位）；一行有多个 identify 角色列时按列序合并、以列名作小标题。供 Agent 离线批量生成判别代码或运行时遍历判别。
+2. `get_discrimination_set(table_id)` → **判别集一次取全**（随行为类型泛化）：所有行的 `{row_id, anchor, methods:[{column_name, kind, text}]}`（methods=该行全部 procedure 类型列，按列序）；「净文本」= 剥图后的 markdown（结构保留，图片替换为占位）。Agent 按列名自行挑选判别列——词表不锁定。供离线批量生成判别代码或运行时遍历判别。
 3. `get_knowhow_row(row_id)` → 单行机器视图：逐列的角色+列名+净文本 + `steps[]` + 工具列表；判别命中后取修复方案生成代码。
 
 4. `put/get/delete_cell_code(row_id, column_id, ...)` → **格子级代码附件**：Agent 外部实现完某格方法的代码后，把**代码本体**存回 notebook（`knowhow_cell_code` 表，PR-3 自带迁移；每格一份：`{id, row_id, column_id, code_text, language, updated_by, cell_content_hash(存入时该格净文本 hash), created_at, updated_at}`，UNIQUE(row_id, column_id)）。**隔离不变量：代码永不进 element/chunk/embedding/FTS/KG 投影，ask 上下文组装不含它**——在 notebook 内不可被检索，只能经格子定位查看（投影只读 `content_md`，天然满足，另加投影不受附件影响的守护测试）。新鲜度读取时推导：附件 hash==格子当前 hash → `implemented`；不一致 → `stale`（知识已更新待重审）；无附件 → `none`。行详情机器视图**直接带代码本体**（判别命中后 Agent 一次取走方法+现成代码）；判别集只带 `code_status` 三态不带代码（控体积）。写入走新增 scope `knowhow:code`（用户界面走会话鉴权）；UI：格子/行「代码」徽章（三态）→ 点击浮层查看（等宽、复制、语言标记），用户可编辑保存（同 PR 交付）。notebook 不执行代码、**不做 LLM 语义审代码**。
@@ -144,8 +146,8 @@ Notebook 页内新增「Knowhow 表」区块：
 ## 交付切分（每 PR 前后端同 PR 交付）
 
 1. **PR-1 骨架**：数据模型+迁移、一次性整表导入（xlsx/csv/md+角色映射向导）、总览网格+行详情抽屉（只读）、资产存储与鉴权路由、确定性投影+检索接通。
-2. **PR-2 维护**：格子浮窗（预览/编辑双态、保存并下一格、图片粘贴上传、自动草稿）、建表向导（定表头→填值）、Excel 模板往返、LLM 表达优化（按钮/对照/确认回填）、ask 引用命中 knowhow 时跳转行详情抽屉。
-3. **PR-3 Agent 面**：HTTP 端点 + MCP 工具（表清单/判别集/行详情/**格子代码附件读写删**）、`knowhow_cell_code` 迁移、代码徽章+查看编辑浮层 UI、投影隔离守护测试、README 与 README_zh 用法文档（通用口径）。
+2. **PR-2 维护**（与 PR-3 合并为同一 PR 交付，2026-07-15 用户决定）：格子浮窗（预览/编辑双态、保存并下一格、图片粘贴上传、自动草稿）、建表向导（定表头→填值）、Excel 模板往返、LLM 表达优化（按钮/对照/确认回填）、ask 引用命中 knowhow 时跳转行详情抽屉；另含 PR-1 终审携带项：格子编辑 API 列归属校验、资产 GC、只读成员权限感知、引用标签「表›概念」形态、投影单飞防抖、完整表深拷贝（id 重映射，替代 PR-1 的拷贝排除）、created_by 归属。
+3. **PR-3 Agent 面**（并入同一 PR）：HTTP 端点 + MCP 工具（表清单/判别集/行详情/**格子代码附件读写删**）、`knowhow_cell_code` 迁移、代码徽章+查看编辑浮层 UI、投影隔离守护测试、README 与 README_zh 用法文档（通用口径）。
 
 ## 默认值清单（随规格一并审阅）
 
