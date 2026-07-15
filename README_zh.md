@@ -241,6 +241,18 @@ vi .env         # 填模型服务 URL(同 2 · 配置)
 
 notebook 工作区隐藏集合页全局上边栏，采用偏工程风格的视觉治理。
 
+## Knowhow 表
+
+notebook 内的 **Knowhow 表** 动作（与知识图谱并列，单开一个面板）管理 **knowhow 表**：把领域经验沉淀成一行行经验记录，列名自由命名。首个实例是半导体时序违例排查（行=违例类型；列=现象识别、根因分析、修复方法、依赖工具），但列名完全是用户自定义文本，不锁定词表。建表可以从**导入**开始（xlsx/csv/Markdown，预览时给出列→内容类型的映射建议），也可以用**建表向导**从零搭建（先定列名表头，再填行）。填值两条路可自由混用：应用内经**格子编辑器**（markdown 编辑/预览分栏、图片粘贴或拖拽即可上传、自动本地草稿、保存并下一格连续录入），或线下走 **Excel 模板往返**：按当前表头下载 `.xlsx` 模板（表头行冻结），批量填写后上传追加（提交前会预览未匹配列，以及行标题与已有行重名的提示）。
+
+至多一列可被指定为整张表的**行标题列**（表级设置，不是逐列打标）。设置后，表中每个非空格子都会成为知识图谱节点——节点的类型就是所在列名——并用 `about` 边连回该行的行标题格；同一列里不同行出现的相同值会归并成一个节点（十行都引用同一个工具，就是一个工具节点带十条入边）。不设置行标题列，整张表就只参与检索——格子照常切成 chunk 供问答使用，但不建任何图谱节点，适合每行是一条记录而非一个具名概念的流水型表格。
+
+每列还带一个**内容类型**——仅作确定性解析提示，从不调用 LLM：**方法步骤**列解析成有序步骤列表，**工具/事物**列按列表项/换行拆分并去重成多个节点，**普通**列整格作为一个节点。格子编辑器与行详情抽屉都提供显式的**优化表达**按钮（绝不自动触发）：调用 notebook 已配置的 LLM，在保持原意的前提下规整结构与措辞，原文与建议对照展示，只有逐格确认后才会回填。
+
+Ask 引用命中 knowhow 格子时会直接跳转到该行的详情抽屉，而非通用来源视图。知识库深拷贝会把 knowhow 表完整带过去——表、列、行、格子、代码附件在副本里全部重新映射 id——且不重跑 embedding，未变化的格子文本在副本里复用原向量。
+
+外部 Agent 接入面（HTTP + MCP、判别集、代码附件）见 [Memory 与 Agent MCP](#memory-与-agent-mcp)；HTTP 路径清单见 [API](#api)。
+
 ## Memory 与 Agent MCP
 
 Memory 必须由用户手动选择、归创建者私有，并且始终绑定到且只绑定到一个 notebook。
@@ -280,7 +292,7 @@ tag 原始列表会先按 20 条限额校验，再 trim/去重；空白 tag 直�
 总 Memory 页的“Agent 接入”可创建稳定 Agent profile，以及明文只显示一次的 token。
 Token 有过期时间、默认 notebook、notebook allowlist，并只授予所需的
 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
-`ask:execute` 子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
+`ask:execute`、`knowhow:code` 子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
 SDK。启动后，Streamable HTTP 服务位于 `/mcp`（到 `/mcp/` 的 redirect 已处理）。本机可用
 loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebinding）校验，供可信内网使用，
 启动会打印明文告警（Agent token 明文过网）。公网部署请设 `MCP_REQUIRE_HTTPS=1` 强制 HTTPS
@@ -306,11 +318,27 @@ claude mcp add --transport http silicon-notebook http://127.0.0.1:8000/mcp \
 Claude Code 可能把这段原始 header 保存到本机配置。应使用最小 scope、短有效期，保护
 本机配置，并在使用后撤销/轮换；不要假设该 header 会做 shell 环境变量插值。
 
-每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。精确的七个工具是：
+每个新 MCP session 必须先调用 `select_notebook`，再调用数据工具。精确的十一个工具是：
 `list_notebooks`、`select_notebook`、`search_agent_memory`、
-`search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory`。
+`search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory`、
+`list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row`、
+`put_knowhow_cell_code`。
 服务端会在数据调用时重新检查 scope、allowlist、token 状态和 notebook 权限；返回文本是
 不可信 evidence，不是可执行的 Agent 指令。
+
+四个 knowhow 工具与 `/api/agent/knowhow/...` 下的 HTTP 端点（见 [API](#api)）共用同一套
+service 函数，HTTP 与 MCP 不会在响应形状上走样。`list_knowhow_tables`、
+`get_knowhow_discrimination`、`get_knowhow_row` 需要 `knowledge:read`；
+`get_knowhow_discrimination` 对设有行标题列的表按行返回标题，以及每个方法步骤列的
+`{column_id, column_name, text, code_status}`（表未设行标题列则返回 400），供 Agent
+据此跑自己的判别逻辑挑选适用的修复方法。`get_knowhow_row` 返回一行的完整格子文本
+（方法步骤/工具事物列另带 `steps`/`items`）及该行全部**代码附件**的代码本体。代码附件
+是外部 Agent 针对某格方法已经写好的代码——notebook 从不生成也不执行，也从不进
+embedding/chunk/索引/KG 投影——其新鲜度（`implemented`/`stale`/`none`）在读取时用格子
+当前内容的 hash 与附件保存时的 hash 比对推导；判别集只带这个三态，不带代码本体，以控制
+体积。读代码依然只需要 `knowledge:read`；只有写入（`put_knowhow_cell_code`，以及对应的
+HTTP `PUT`/`DELETE .../code`）才需要 `knowhow:code`——一个既要读现有代码又要写新版本的
+token，两个 scope 都要授予。
 
 只有 `confirmed` Memory 可发起 KG 晋升。创建者提交后，admin queue 展示脱敏后的结构化提取
 候选与服务端验证过的 evidence，而不是原始 Memory revision/provenance 浏览器。提案会固定精确的
@@ -372,6 +400,7 @@ KB+confirmed-Memory 三种检索条件。
 - `GET /api/sources/{id}`、`DELETE /api/sources/{id}`、`POST /api/sources/{id}/parse`、`GET /api/sources/{id}/elements`
 - `GET /api/notebooks/{id}/knowledge-types`、`GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`、`PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
+- Knowhow 表：`GET|POST /api/notebooks/{id}/knowhow`、`GET|PATCH|DELETE .../knowhow/{table_id}`、`POST .../knowhow/{table_id}/reproject`——另有导入（`POST .../knowhow/import/preview`、`POST .../knowhow/import`）、列/行/格编辑（`POST .../knowhow/{table_id}/columns`、`PATCH|DELETE .../columns/{column_id}`、`POST .../knowhow/{table_id}/rows`、`DELETE .../rows/{row_id}`、`PATCH .../rows/{row_id}/cells/{column_id}`）、Excel 模板往返（`GET .../knowhow/{table_id}/template`、`POST .../knowhow/{table_id}/append` 配 `mode=preview|commit`），以及显式的建议式 LLM 表达优化（`POST .../rows/{row_id}/cells/{column_id}/optimize`）
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask` — 接地问答（逐句 `[k_i]` 引用；`mode`：默认 `chunk` | `graph` | `reasoning`；联合范围遵循上文各 mode 的边界）
 - `POST /api/notebooks/{id}/ask/stream` — Ask 进度的 NDJSON stream（先发带 `job_id` 的 `started` 事件，再发进度/最终事件）；transport 断开连接只会停止当前客户端继续接收，后台 job 仍继续并可保存回答
@@ -381,6 +410,7 @@ KB+confirmed-Memory 三种检索条件。
 - `POST /api/answers/{answer_id}/feedback`
 - Memory：`GET /api/memories`、`GET /api/notebooks/{id}/memories`、`GET|PATCH /api/memories/{memory_id}`、`POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`、`POST /api/answers/{answer_id}/memory-preview`、`POST /api/notebooks/{id}/memories/from-answer`
 - Agent 接入：`GET|POST /api/agent-profiles`、`PATCH /api/agent-profiles/{profile_id}`、`POST /api/agent-profiles/{profile_id}/tokens`、`GET /api/agent-tokens`、`DELETE /api/agent-tokens/{token_id}`；Streamable HTTP MCP 挂载在 `/mcp`
+- Knowhow agent 接入面：`GET /api/agent/knowhow/tables?notebook_id=`、`GET /api/agent/knowhow/tables/{table_id}/discrimination`、`GET /api/agent/knowhow/rows/{row_id}`、`GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code`——session 或 Agent Bearer token 均可访问；读需要 `knowledge:read`，代码写入需要 `knowhow:code`（见 [Memory 与 Agent MCP](#memory-与-agent-mcp)）
 - 统一 KG：`POST .../unified-kg/rebuild`、`GET .../unified-kg`、`GET .../unified-kg/pending-merges`、`POST .../unified-kg/merges/{id}/confirm|reject`
 - `GET .../concepts/{canonical_id}/detail`、`GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`、`POST /api/object-schemas`、`PATCH /api/object-schemas/{type}`、`DELETE /api/object-schemas/{type}`
