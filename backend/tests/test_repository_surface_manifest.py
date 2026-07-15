@@ -1544,15 +1544,18 @@ TASK6_MEMORY_ALLOWED_NEW_MEMBERS = {
 # Task 7 (Memory): the MCP adapter is a new consumer of established public
 # facade delegates.  It adds one source-checked one-hop delegate for the
 # two-plane Memory retriever; no SQL or private runtime state is exposed.
+# MCP HTTPS opt-in Task 1 adds a stdlib `logging` import plus a module logger
+# above these call sites (see LINE_NUMBER_INSENSITIVE_FILES), shifting every
+# one of them down by exactly 21 lines; re-pinned to their current lines.
 TASK7_MEMORY_ALLOWED_CONSUMERS = {
-    ("user_can_read_notebook", "backend/app/api/mcp_server.py:609"),
-    ("get_notebook", "backend/app/api/mcp_server.py:614"),
-    ("user_can_read_notebook", "backend/app/api/mcp_server.py:646"),
-    ("get_notebook", "backend/app/api/mcp_server.py:651"),
-    ("unified_kg_status", "backend/app/api/mcp_server.py:652"),
-    ("agent_memory_hits", "backend/app/api/mcp_server.py:696"),
-    ("search_notebook", "backend/app/api/mcp_server.py:766"),
-    ("ask", "backend/app/api/mcp_server.py:862"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:630"),
+    ("get_notebook", "backend/app/api/mcp_server.py:635"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:667"),
+    ("get_notebook", "backend/app/api/mcp_server.py:672"),
+    ("unified_kg_status", "backend/app/api/mcp_server.py:673"),
+    ("agent_memory_hits", "backend/app/api/mcp_server.py:717"),
+    ("search_notebook", "backend/app/api/mcp_server.py:787"),
+    ("ask", "backend/app/api/mcp_server.py:883"),
 }
 TASK7_MEMORY_ALLOWED_NEW_MEMBERS = {
     "agent_memory_hits",
@@ -2008,6 +2011,12 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/app/api/deps.py",
     "backend/app/api/auth_routes.py",
     "backend/app/api/routes.py",
+    # MCP HTTPS opt-in (MCP_REQUIRE_HTTPS): validate_mcp_deployment +
+    # create_memory_mcp + AgentBearerMiddleware gain a require_https param and a
+    # module logger above this file's facade consumers, shifting those call
+    # sites' lines without changing the surface. Internal line numbers here are
+    # not API surface.
+    "backend/app/api/mcp_server.py",
     # FastAPI composition root: the startup-readiness lifespan + gate middleware
     # add ~60 lines above its sole facade consumer (repository().pending_actions),
     # shifting that call's line without changing the surface. Like the other API
