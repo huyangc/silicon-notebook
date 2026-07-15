@@ -77,7 +77,7 @@ notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 
 - embedding：`EMBED_PROVIDER`、`EMBED_BASE_URL`、`EMBED_API_KEY`、`EMBED_MODEL`、`EMBED_DIM`。
 - PDF：`MINERU_MODE`、`MINERU_API_URL`、`MINERU_BACKEND`、`MINERU_PARSE_METHOD`、`MINERU_LANG`、`MINERU_TIMEOUT_SECONDS`。
 - KG / index 调度：`KG_AUTO_EXTRACT`、`KG_EXTRACT_WORKERS`、`KG_JOB_CONCURRENCY`、`SCALE_INDEX_AUTO_ENABLED`、`SCALE_INDEX_AUTO_WHEN`。
-- Agent MCP：`MCP_PUBLIC_URL`；本机可用 loopback HTTP，非 loopback 的 public URL 必须是 HTTPS。
+- Agent MCP：`MCP_PUBLIC_URL`；默认允许远程明文 HTTP 并放宽 Host/Origin 校验（仅可信内网），启动会打印明文告警；公网部署设 `MCP_REQUIRE_HTTPS=1` 恢复强制 HTTPS + DNS-rebinding 保护。
 
 新增可由环境覆盖的 pydantic v2 setting 必须使用 `validation_alias`；列表类值按现有 `NoDecode` 约定解析。
 

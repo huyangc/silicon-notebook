@@ -49,6 +49,7 @@ vi .env                 # 必填:模型服务 URL(OPENAI_COMPAT_* / EMBED_* / RE
 | `FRONTEND_HOST` | `127.0.0.1` | 前端监听地址;设 `0.0.0.0` 对外暴露 |
 | `FRONTEND_PORT` | `3000` | 前端端口 |
 | `BACKEND_HOST` | `127.0.0.1` | 后端监听地址 |
+| `MCP_REQUIRE_HTTPS` | `0` | MCP 是否强制 HTTPS。默认关(允许内网明文+放宽 Host 校验);公网设 `1` |
 | `PORT` | `8000` | 后端端口 |
 | `SILICON_NOTEBOOK_ADMIN_PASSWORD` | — | 对外暴露(非 loopback)时**必须**设为非默认值,否则拒绝启动 |
 | `ALLOW_NO_ENV_FILE` | `0` | 设 `1` 则允许无 `.env`、仅用系统环境变量启动 |
