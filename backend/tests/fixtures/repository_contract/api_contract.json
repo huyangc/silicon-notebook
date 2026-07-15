@@ -770,6 +770,25 @@
           "title": "AuthResult",
           "type": "object"
         },
+        "Body_append_knowhow_rows_api_notebooks__notebook_id__knowhow__table_id__append_post": {
+          "properties": {
+            "file": {
+              "contentMediaType": "application/octet-stream",
+              "title": "File",
+              "type": "string"
+            },
+            "mode": {
+              "default": "preview",
+              "title": "Mode",
+              "type": "string"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "title": "Body_append_knowhow_rows_api_notebooks__notebook_id__knowhow__table_id__append_post",
+          "type": "object"
+        },
         "Body_import_knowhow_table_api_notebooks__notebook_id__knowhow_import_post": {
           "properties": {
             "anchor_index": {
@@ -1400,6 +1419,75 @@
             "hits"
           ],
           "title": "KgSearchResponse",
+          "type": "object"
+        },
+        "KnowhowAppendDuplicateTitle": {
+          "properties": {
+            "row_index": {
+              "title": "Row Index",
+              "type": "integer"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "row_index",
+            "title"
+          ],
+          "title": "KnowhowAppendDuplicateTitle",
+          "type": "object"
+        },
+        "KnowhowAppendPreview": {
+          "properties": {
+            "duplicate_titles": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowAppendDuplicateTitle"
+              },
+              "title": "Duplicate Titles",
+              "type": "array"
+            },
+            "rows_preview": {
+              "items": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Rows Preview",
+              "type": "array"
+            },
+            "total_rows": {
+              "title": "Total Rows",
+              "type": "integer"
+            },
+            "unmatched_columns": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Unmatched Columns",
+              "type": "array"
+            }
+          },
+          "required": [
+            "rows_preview",
+            "total_rows"
+          ],
+          "title": "KnowhowAppendPreview",
+          "type": "object"
+        },
+        "KnowhowAppendResult": {
+          "properties": {
+            "added": {
+              "title": "Added",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "added"
+          ],
+          "title": "KnowhowAppendResult",
           "type": "object"
         },
         "KnowhowCellPatch": {
@@ -8260,6 +8348,73 @@
           "summary": "Patch Knowhow Table"
         }
       },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/append": {
+        "post": {
+          "description": "Excel append import (design doc §② 路B): matches the uploaded file's\nheader BY COLUMN NAME against the table's existing columns (never by\nposition — see knowhow_api._align_rows_to_table_columns). mode=preview\nparses+aligns without writing anything, reporting what commit WOULD do\n(rows_preview/total_rows/unmatched_columns/duplicate_titles); mode=commit\nperforms the identical alignment, actually appends the rows, and\nschedules a debounced reprojection exactly like every other mutating\nknowhow endpoint.",
+          "operationId": "append_knowhow_rows_api_notebooks__notebook_id__knowhow__table_id__append_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_append_knowhow_rows_api_notebooks__notebook_id__knowhow__table_id__append_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/KnowhowAppendPreview"
+                      },
+                      {
+                        "$ref": "#/components/schemas/KnowhowAppendResult"
+                      }
+                    ],
+                    "title": "Response Append Knowhow Rows Api Notebooks  Notebook Id  Knowhow  Table Id  Append Post"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Append Knowhow Rows"
+        }
+      },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/columns": {
         "post": {
           "operationId": "add_knowhow_column_api_notebooks__notebook_id__knowhow__table_id__columns_post",
@@ -8667,6 +8822,53 @@
             }
           },
           "summary": "Patch Knowhow Cell"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/template": {
+        "get": {
+          "description": "Excel template download (design doc §② 路B): the table's CURRENT\ncolumn header (+ per-column kind hint / row-title annotation), generated\nfresh on every request — never cached, so it always reflects whatever\ncolumns exist right now. Mirrors export_reports_endpoint's\nStreamingResponse+BytesIO(via knowhow_api.build_template_xlsx)+\nContent-Disposition idiom above; see _template_content_disposition for\nwhy the filename needs the RFC 5987 `filename*=` form.",
+          "operationId": "download_knowhow_template_api_notebooks__notebook_id__knowhow__table_id__template_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Download Knowhow Template"
         }
       },
       "/api/notebooks/{notebook_id}/knowledge": {

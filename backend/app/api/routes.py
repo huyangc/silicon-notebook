@@ -4,7 +4,7 @@ import json
 import queue
 import zipfile
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -93,6 +93,8 @@ from app.models.schemas import (
     ScaleIndexStatus,
     UnifiedKgStatus,
     UserProfile,
+    KnowhowAppendPreview,
+    KnowhowAppendResult,
 )
 from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
@@ -798,6 +800,97 @@ def patch_knowhow_cell(
         "content_md": row["cells"].get(column_id, ""),
         "projection_status": row["projection_status"],
     }
+
+
+# --- knowhow-tables PR-2+3 Task 6: Excel template round-trip (design doc §②
+# 路B). GET needs read access (mirrors every other knowhow GET); POST needs
+# write access (mirrors every other knowhow mutation) and — like every other
+# mutating knowhow endpoint — schedules a debounced reprojection via
+# knowhow_api.get_scheduler(repo).schedule(table_id) after a successful
+# commit, never a raw background_jobs.submit call. mode=preview never
+# writes; mode=commit is the only branch that does, using the identical
+# parse+align step preview already ran once for the user to review.
+
+
+def _template_content_disposition(filename: str) -> str:
+    """RFC 5987/6266 Content-Disposition value for a (possibly non-ASCII)
+    download filename: an ASCII-sanitized `filename=` fallback for clients
+    that don't understand the extended form, plus the real UTF-8 name via
+    `filename*=` (what every modern browser actually uses). Needed because
+    Starlette encodes header VALUES as latin-1 (Response.init_headers) — a
+    raw Chinese table title in a bare `filename="..."` alone would 500
+    (UnicodeEncodeError) the instant a real (non-ASCII) table title reached
+    this response. export_reports_endpoint's sibling zip download above
+    never needed this: "reports.zip" is a fixed ASCII literal, never a
+    user-supplied title."""
+    import re
+    from urllib.parse import quote
+
+    ascii_fallback = re.sub(
+        r'[\\"/\r\n\x00-\x1f]', "_", filename.encode("ascii", "ignore").decode("ascii")
+    ).strip() or "template.xlsx"
+    encoded = quote(filename)
+    return f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded}'
+
+
+@router.get(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/template",
+    dependencies=[Depends(require_notebook_read)],
+)
+def download_knowhow_template(notebook_id: str, table_id: str) -> StreamingResponse:
+    """Excel template download (design doc §② 路B): the table's CURRENT
+    column header (+ per-column kind hint / row-title annotation), generated
+    fresh on every request — never cached, so it always reflects whatever
+    columns exist right now. Mirrors export_reports_endpoint's
+    StreamingResponse+BytesIO(via knowhow_api.build_template_xlsx)+
+    Content-Disposition idiom above; see _template_content_disposition for
+    why the filename needs the RFC 5987 `filename*=` form."""
+    repo = repository()
+    try:
+        table = knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+    data = knowhow_api.build_template_xlsx(table)
+    filename = f"{table['title']}-template.xlsx"
+    return StreamingResponse(
+        iter([data]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": _template_content_disposition(filename)},
+    )
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/append",
+    response_model=Union[KnowhowAppendPreview, KnowhowAppendResult],
+    dependencies=[Depends(require_notebook_access)],
+)
+async def append_knowhow_rows(
+    notebook_id: str,
+    table_id: str,
+    file: UploadFile = File(...),
+    mode: str = Form("preview"),
+) -> dict:
+    """Excel append import (design doc §② 路B): matches the uploaded file's
+    header BY COLUMN NAME against the table's existing columns (never by
+    position — see knowhow_api._align_rows_to_table_columns). mode=preview
+    parses+aligns without writing anything, reporting what commit WOULD do
+    (rows_preview/total_rows/unmatched_columns/duplicate_titles); mode=commit
+    performs the identical alignment, actually appends the rows, and
+    schedules a debounced reprojection exactly like every other mutating
+    knowhow endpoint."""
+    if mode not in ("preview", "commit"):
+        raise HTTPException(status_code=400, detail="mode 必须是 preview 或 commit")
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    data = await file.read()
+    try:
+        if mode == "preview":
+            return knowhow_api.preview_append(table, file.filename or "append", data)
+        added = knowhow_api.commit_append(repo, table_id, table, file.filename or "append", data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    knowhow_api.get_scheduler(repo).schedule(table_id)
+    return {"added": added}
 
 
 @router.get(

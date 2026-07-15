@@ -1105,3 +1105,28 @@ class KnowhowTableCreate(BaseModel):
     title: str
     columns: List[KnowhowNewColumnInput] = Field(default_factory=list)
     anchor_index: Optional[int] = None
+
+
+# --- PR-2+3 Task 6: Excel template round-trip (append preview/commit) --------
+# GET .../template streams raw xlsx bytes (StreamingResponse — see routes.py),
+# so it has no response model of its own. POST .../append's response shape
+# depends on the ``mode`` form field: preview returns KnowhowAppendPreview,
+# commit returns KnowhowAppendResult — the route's response_model is their
+# Union; the two models share no field names, so a given response is never
+# ambiguous about which one it actually is.
+
+
+class KnowhowAppendDuplicateTitle(BaseModel):
+    row_index: int
+    title: str
+
+
+class KnowhowAppendPreview(BaseModel):
+    rows_preview: List[List[str]]
+    total_rows: int
+    unmatched_columns: List[str] = Field(default_factory=list)
+    duplicate_titles: List[KnowhowAppendDuplicateTitle] = Field(default_factory=list)
+
+
+class KnowhowAppendResult(BaseModel):
+    added: int

@@ -383,6 +383,218 @@ def get_scheduler(repo: Any) -> ProjectionScheduler:
         return scheduler
 
 
+# --- PR-2+3 Task 6: Excel template round-trip (design doc §② 路B) ----------
+#
+# Template download (build_template_xlsx) and append import (preview_append/
+# commit_append) share one alignment core (_align_rows_to_table_columns):
+# match the uploaded grid's header BY COLUMN NAME against the TARGET table's
+# own (already-created) columns — never by position, unlike import_table's
+# brand-new-table wire (which has no pre-existing schema to align against).
+# Both raise ValueError (GridParseError, a subclass, included) on a
+# structurally bad file, flowing through routes.py's existing 400 idiom
+# unchanged, exactly like every other function in this module.
+#
+# Deliberately appended here, AFTER build_projector/ProjectionScheduler/
+# get_scheduler rather than interleaved earlier in the file: this file's
+# lines 133-152 (build_projector's body) are EXACT-LINE pinned by
+# test_repository_callers_static.py's INDEPENDENT_PRIVATE_SITES (`_runtime`
+# at line 138) and test_repository_surface_manifest.py's
+# TASK6_KNOWHOW_ALLOWED_CONSUMERS (`_runtime`/`settings` at lines 138/140 —
+# from the PRE-EXISTING PR-1 Task 6, a different task under the same number;
+# see that constant's own docstring). Inserting anything ABOVE those lines
+# would shift them and break both guards; appending at EOF is the zero-risk
+# option (task-3-report-pr23.md documents the identical reasoning for why
+# ITS OWN test-file registration went to EOF instead of interleaved).
+
+
+_TEMPLATE_KIND_HINTS: dict[str, str] = {
+    # Copied verbatim from the frontend's single source of truth
+    # (frontend/app/knowhow-manage-logic.ts KIND_HINTS/ANCHOR_SET_HINT,
+    # frontend/app/knowhow-model.ts ROLE_LABELS) so the xlsx template and the
+    # in-app column-kind legend never drift apart in wording.
+    "anchor": "行标题：用作每行的标题；设置后每行作为一个节点进入知识图谱，节点名取自该列",
+    "procedure": "方法步骤：写做法/流程的列，自动识别有序步骤",
+    "entity": "工具/事物：列出的名称自动归并：工具、命令、文档等",
+    "attribute": "普通：仅作为内容参与检索",
+}
+
+
+def build_template_xlsx(table: dict) -> bytes:
+    """Build the downloadable xlsx template for filling in new rows offline
+    (design doc §② 路B "按当前表头生成 xlsx 模板下载"): row 1 = the table's
+    current column names (bold + light fill — a visual "this is the header,
+    not data" cue), row 2 = a one-line kind hint per column — including the
+    row-title annotation for whichever column is currently the table's
+    anchor column, since ``to_wire_table`` already surfaces THAT column's own
+    ``kind`` as the literal string ``"anchor"`` (see ``to_wire_column`` — no
+    separate anchor_column_id lookup needed here). Both rows are frozen
+    (``freeze_panes = "A3"``) so they stay visible while the user scrolls
+    through however many rows they fill in below.
+
+    Deliberately does NOT enable xlsx cell/sheet protection: openpyxl's
+    ``SheetProtection`` flags mirror OOXML's own inverted-boolean attributes
+    (e.g. ``formatCells=True`` means "protected", i.e. disallowed) — easy to
+    get backwards, not meaningfully verifiable through an openpyxl-only test
+    (enforcement is entirely up to the Excel client, never the file's own
+    metadata), and a wrong guess risks locking the user out of legitimate
+    operations (inserting an extra row, widening a column). The task brief's
+    "锁定" is delivered as a visual affordance only — a deliberate scope cut,
+    not an oversight (see the task report).
+
+    ``table`` is the wire-shaped detail (``to_wire_table`` output — columns
+    carry ``kind``, never the store's ``role``); column order follows
+    ``table["columns"]`` (already position-ordered by ``get_knowhow_table``).
+    Round-trips losslessly through ``grid_parser.parse_grid`` (same column
+    names, same order) — which is exactly why ``preview_append``/
+    ``commit_append`` below match the re-uploaded file BY COLUMN NAME rather
+    than assuming a fixed row/column offset: the hint row and however much
+    data the user fills in both come back to that parser as ordinary data
+    rows, no different from any other grid upload."""
+    import io
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    columns = table.get("columns", [])
+    wb = Workbook()
+    ws = wb.active
+
+    header_font = Font(bold=True)
+    header_fill = PatternFill("solid", fgColor="DDEBF7")
+    hint_font = Font(italic=True, size=9, color="FF666666")
+    hint_alignment = Alignment(wrap_text=True, vertical="top")
+
+    for index, column in enumerate(columns, start=1):
+        name_cell = ws.cell(row=1, column=index, value=column["name"])
+        name_cell.font = header_font
+        name_cell.fill = header_fill
+
+        hint_cell = ws.cell(
+            row=2, column=index, value=_TEMPLATE_KIND_HINTS.get(column.get("kind"), "")
+        )
+        hint_cell.font = hint_font
+        hint_cell.alignment = hint_alignment
+
+        letter = get_column_letter(index)
+        ws.column_dimensions[letter].width = min(40, max(16, len(column["name"]) * 2 + 4))
+
+    ws.row_dimensions[2].height = 32
+    ws.freeze_panes = "A3"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _align_rows_to_table_columns(
+    table_columns: list[dict], grid: ParsedGrid
+) -> "tuple[list[list[str]], list[str]]":
+    """Shared alignment core for both append preview and commit (design doc
+    §② 路B: "按表头名匹配列...未识别/缺失列报告"): reshapes the uploaded
+    grid's rows into the TARGET TABLE's own column order, matching BY NAME.
+    A table column absent from the file contributes ``""`` for every row
+    (missing = blank, never an error); a file column absent from the table is
+    dropped from the aligned rows and surfaced separately as
+    ``unmatched_columns`` (in the file's own column order) so nothing is ever
+    silently discarded without being reported (design doc §⑦: "模板上传列不
+    匹配给差异报告而非静默丢弃").
+
+    Returns ``(aligned_rows, unmatched_columns)`` where ``aligned_rows[i][j]``
+    is the value for ``table_columns[j]`` in the file's data row ``i``."""
+    file_index = {name: position for position, name in enumerate(grid.columns)}
+    table_names = {column["name"] for column in table_columns}
+    unmatched_columns = [name for name in grid.columns if name not in table_names]
+    aligned_rows = [
+        [
+            row[file_index[column["name"]]] if column["name"] in file_index else ""
+            for column in table_columns
+        ]
+        for row in grid.rows
+    ]
+    return aligned_rows, unmatched_columns
+
+
+def preview_append(table: dict, filename: str, data: bytes) -> dict:
+    """Append preview (design doc §② 路B + task brief): parses the uploaded
+    file and aligns it to the TABLE's existing columns by name (see
+    ``_align_rows_to_table_columns``) — never writes anything, only reports
+    what a subsequent ``commit_append`` call WOULD do.
+
+    ``duplicate_titles`` is populated ONLY when the table has a row-title
+    (anchor) column (design doc: "仅设行标题列时按其值对比现有行标") — an
+    anchor-less ("record-shaped") table has no notion of a row "title" to
+    compare, so it is unconditionally ``[]`` there. When there IS an anchor
+    column, EVERY incoming row (the full file, not just the 5-row preview
+    window below — a naming collision past row 5 is exactly as worth
+    surfacing) whose aligned, stripped anchor-column value is non-empty AND
+    matches an EXISTING row's own (stripped) anchor value is flagged — a
+    blank title never counts as a "duplicate" of another blank title (that
+    would just be preview noise, not a real naming collision). Deliberately
+    compares only against EXISTING rows, never row-vs-row WITHIN the same
+    incoming batch — the design doc's own wording ("对比现有行标") scopes it
+    that way. ``row_index`` is the 0-based position within the file's OWN
+    data rows (``grid.rows``), the same "index is 0-based" convention this
+    module already uses for ``anchor_index`` elsewhere."""
+    grid = parse_grid(filename, data)
+    table_columns = table.get("columns", [])
+    aligned_rows, unmatched_columns = _align_rows_to_table_columns(table_columns, grid)
+
+    duplicate_titles: list[dict] = []
+    anchor_position = next(
+        (i for i, column in enumerate(table_columns) if column["kind"] == "anchor"), None
+    )
+    if anchor_position is not None:
+        anchor_column_id = table_columns[anchor_position]["id"]
+        existing_titles = {
+            (row["cells"].get(anchor_column_id, "") or "").strip()
+            for row in table.get("rows", [])
+        }
+        existing_titles.discard("")
+        for row_index, aligned_row in enumerate(aligned_rows):
+            title = aligned_row[anchor_position].strip()
+            if title and title in existing_titles:
+                duplicate_titles.append({"row_index": row_index, "title": title})
+
+    return {
+        "rows_preview": aligned_rows[:5],
+        "total_rows": len(grid.rows),
+        "unmatched_columns": unmatched_columns,
+        "duplicate_titles": duplicate_titles,
+    }
+
+
+def commit_append(
+    repo: Any, table_id: str, table: dict, filename: str, data: bytes
+) -> int:
+    """Append commit (design doc §② 路B "确认后追加导入"): re-parses and
+    re-aligns the file (deliberately not trusting a client-supplied preview
+    payload — the file itself stays the single source of truth, and this
+    keeps commit callable on its own without ever having called preview
+    first), then inserts one row per file data row via the store's existing
+    ``add_knowhow_row`` (position omitted -> always appends, mirroring
+    ``import_table``'s own per-row loop), skipping empty cells (mirrors
+    ``import_table``'s ``if value`` filter — a blank/missing-column cell is
+    simply absent, never an empty-string placeholder, matching
+    ``get_knowhow_table``'s "no cell row = never edited" contract) — then
+    bumps ``mutation_seq`` ONCE for the whole batch (not per row), exactly
+    like ``import_table``. Does NOT itself call the scheduler — routes.py
+    does that after this returns, exactly like every other mutating knowhow
+    endpoint. Returns the number of rows added (never raises for duplicate
+    titles or unmatched columns — those are ``preview_append``'s advisory-
+    only warnings; by the time a client calls commit, the human has already
+    decided to proceed, design doc: "确认后追加导入")."""
+    grid = parse_grid(filename, data)
+    table_columns = table.get("columns", [])
+    aligned_rows, _unmatched_columns = _align_rows_to_table_columns(table_columns, grid)
+    column_ids = [column["id"] for column in table_columns]
+    for aligned_row in aligned_rows:
+        cells = {column_ids[i]: value for i, value in enumerate(aligned_row) if value}
+        repo.add_knowhow_row(table_id, cells)
+    repo.bump_knowhow_mutation_seq(table_id)
+    return len(aligned_rows)
+
+
 __all__ = [
     "VALID_KINDS",
     "preview_import",
@@ -395,4 +607,7 @@ __all__ = [
     "to_wire_table",
     "ProjectionScheduler",
     "get_scheduler",
+    "build_template_xlsx",
+    "preview_append",
+    "commit_append",
 ]
