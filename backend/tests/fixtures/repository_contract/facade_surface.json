@@ -8663,6 +8663,7 @@
   "list_sources_page": {
     "consumers": [
       "backend/app/api/routes.py:298",
+      "backend/tests/test_notebook_share_copy.py:636",
       "backend/tests/test_sources_page_batched.py:110",
       "backend/tests/test_sources_page_batched.py:184",
       "backend/tests/test_sources_pagination.py:42",

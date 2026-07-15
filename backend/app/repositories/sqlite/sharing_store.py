@@ -26,6 +26,21 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("notebooks", "SELECT * FROM notebooks WHERE id = ?"),
     ("sources", "SELECT * FROM sources WHERE notebook_id = ? AND source_type != 'knowhow'"),
     (
+        # 1:1 with sources (PK = source_id) — joined the same way as the
+        # sibling per-source tables below rather than filtered on its own
+        # notebook_id column, so the knowhow exclusion predicate stays
+        # identical everywhere (a knowhow hidden source never gets paper
+        # meta in practice, but this keeps the filter style uniform).
+        "source_paper_meta",
+        "SELECT spm.* FROM source_paper_meta spm JOIN sources s ON s.id = spm.source_id "
+        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'",
+    ),
+    (
+        "source_authors",
+        "SELECT sa.* FROM source_authors sa JOIN sources s ON s.id = sa.source_id "
+        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'",
+    ),
+    (
         "source_elements",
         "SELECT se.* FROM source_elements se JOIN sources s ON s.id = se.source_id "
         "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'",
@@ -71,6 +86,8 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
 # (which never received knowhow rows) and the real filter on the source.
 _COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
     ("sources", "AND source_type != 'knowhow'"),
+    ("source_paper_meta", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("source_authors", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("chunks", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_objects", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_relations", f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))"),
