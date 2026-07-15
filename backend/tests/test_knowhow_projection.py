@@ -1,10 +1,16 @@
-"""Task 5 (knowhow-tables PR-1): KnowhowProjector — deterministic, zero-LLM
-projection of knowhow-table rows into knowledge_objects/knowledge_relations/
-chunks/source_elements, so existing ask/reasoning/KG retrieval covers knowhow
-content for free. Real SQLite (via a full SQLiteRepository, mirroring
-test_knowhow_store.py's fixture convention) + a fake embedder that records
-call counts/texts (mirroring test_ask_embed_cache.py's fixture convention).
-See docs/superpowers/plans/2026-07-15-knowhow-tables-pr1.md Task 5.
+"""knowhow-tables PR-2+3 Task 2: KnowhowProjector — the cell-level node model
+(design doc §④/§①, docs/superpowers/specs/2026-07-15-knowhow-tables-design.md)
+replacing PR-1's fixed case/procedure/tool vocabulary end to end. Real SQLite
+(via a full SQLiteRepository, mirroring test_knowhow_store.py's fixture
+convention) + a fake embedder that records call counts/texts (mirroring
+test_ask_embed_cache.py's fixture convention).
+
+``project_table`` is now the SOLE projection entry point (``project_row`` is
+gone — see projection.py's module docstring for why cross-row merging forces
+a whole-table view). The per-cell chunk-diff/embed-call-count/self-heal
+machinery ported from PR-1 is UNCHANGED in spirit — only renamed call sites
+(``project_row(table_id, row_id)`` -> ``project_table(table_id)``) and the
+`concept` -> `row_title` vocabulary shift.
 """
 from __future__ import annotations
 
@@ -14,7 +20,7 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
-from app.services.knowhow.projection import KnowhowProjector
+from app.services.knowhow.projection import KnowhowProjector, find_legacy_projected_table_ids
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -165,8 +171,8 @@ def _row_chunk_texts(repo, row_id: str) -> dict[str, str]:
 def _row_chunk_section_paths(repo, row_id: str) -> dict[str, str]:
     """{chunk_id: section_path} for this row's chunks — companion to
     _row_chunk_texts for tests that need to see the human-readable
-    "table › concept › column" breadcrumb move without the chunk's text
-    changing (concept-cell edits move every sibling's section_path)."""
+    "table › title › column" breadcrumb move without the chunk's text
+    changing (row-title-cell edits move every sibling's section_path)."""
     element_ids = _row_element_ids(repo, row_id)
     if not element_ids:
         return {}
@@ -211,31 +217,16 @@ def _chunk_embedding_vectors(repo, chunk_ids) -> dict[str, bytes]:
 
 
 def _row_object_ids(repo, row_id: str) -> set[str]:
+    """KO ids whose payload.rows LIST contains row_id (replaces PR-1's
+    payload.row_id scalar lookup — a merged KO's payload.rows accumulates
+    every contributing row, design doc §④ "evidence 累积各来源格")."""
     with repo._connect() as db:
         rows = db.execute(
-            "SELECT id FROM knowledge_objects WHERE json_extract(payload,'$.row_id')=?",
+            "SELECT DISTINCT ko.id FROM knowledge_objects ko, "
+            "json_each(ko.payload, '$.rows') je WHERE je.value = ?",
             (row_id,),
         ).fetchall()
     return {r["id"] for r in rows}
-
-
-def _row_case_id(repo, row_id: str) -> "str | None":
-    with repo._connect() as db:
-        row = db.execute(
-            "SELECT id FROM knowledge_objects WHERE object_type='case' "
-            "AND json_extract(payload,'$.row_id')=?",
-            (row_id,),
-        ).fetchone()
-    return row["id"] if row else None
-
-
-def _edge_types_from(repo, source_object_id: str) -> list[str]:
-    with repo._connect() as db:
-        rows = db.execute(
-            "SELECT edge_type FROM knowledge_relations WHERE source_object_id=?",
-            (source_object_id,),
-        ).fetchall()
-    return sorted(r["edge_type"] for r in rows)
 
 
 def _table_object_type_counts(repo, table_id: str) -> dict[str, int]:
@@ -248,10 +239,68 @@ def _table_object_type_counts(repo, table_id: str) -> dict[str, int]:
     return {r["object_type"]: r["n"] for r in rows}
 
 
+def _kos_by_type(repo, table_id: str, object_type: str) -> list[dict]:
+    """Every KO of a given object_type (=column name) belonging to this
+    table, with parsed payload/evidence — table-scoped via payload.table_id."""
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT id, payload, evidence FROM knowledge_objects "
+            "WHERE object_type = ? AND json_extract(payload,'$.table_id') = ?",
+            (object_type, table_id),
+        ).fetchall()
+    return [
+        {"id": r["id"], "payload": json.loads(r["payload"]), "evidence": json.loads(r["evidence"])}
+        for r in rows
+    ]
+
+
+def _ko_by_name(repo, table_id: str, object_type: str, name: str) -> dict:
+    matches = [k for k in _kos_by_type(repo, table_id, object_type) if k["payload"]["name"] == name]
+    assert len(matches) == 1, (name, matches)
+    return matches[0]
+
+
+def _edges_from(repo, source_ko_id: str) -> list[dict]:
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT id, target_object_id, edge_type FROM knowledge_relations "
+            "WHERE source_object_id = ?", (source_ko_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _edges_to(repo, target_ko_id: str) -> list[dict]:
+    with repo._connect() as db:
+        rows = db.execute(
+            "SELECT id, source_object_id, edge_type FROM knowledge_relations "
+            "WHERE target_object_id = ?", (target_ko_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def _row_projection_status(repo, table_id: str, row_id: str) -> str:
     detail = repo._runtime.knowhow_store.get_knowhow_table(table_id)
     row = next(r for r in detail["rows"] if r["id"] == row_id)
     return row["projection_status"]
+
+
+def _insert_legacy_ko(repo, source_id: str, notebook_id: str, table_id: str,
+                      object_type: str = "case", suffix: str = "1") -> str:
+    """Simulate a PR-1-era KO surviving in storage (object_type one of the
+    fixed legacy strings, id carrying knowhow's own ko-kh- prefix) — the
+    exact shape find_legacy_projected_table_ids/reproject_legacy_tables must
+    detect and replace."""
+    ko_id = f"ko-kh-legacy{suffix}"
+    now = "2020-01-01T00:00:00"
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects (id, notebook_id, object_type, status, owner, "
+            "payload, evidence, source_candidate_id, source_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'approved', '', ?, '[]', NULL, ?, ?, ?)",
+            (ko_id, notebook_id, object_type,
+             json.dumps({"table_id": table_id}), source_id, now, now),
+        )
+    return ko_id
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +330,11 @@ def test_hidden_source_excluded_from_source_listing(repo, projector, table_id, n
 
 
 # ---------------------------------------------------------------------------
-# project_row: idempotency
+# project_table: idempotency + id prefixes
 # ---------------------------------------------------------------------------
 
 
-def test_project_row_twice_produces_identical_id_sets(repo, projector, table_id, embedder):
+def test_project_table_twice_produces_identical_id_sets(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
@@ -296,12 +345,12 @@ def test_project_row_twice_produces_identical_id_sets(repo, projector, table_id,
         cols["依赖工具"]: "- 示波器\n- 万用表",
     })
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
     elements_1 = _row_element_ids(repo, row_id)
     chunks_1 = _row_chunk_ids(repo, row_id)
     objects_1 = _row_object_ids(repo, row_id)
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
     elements_2 = _row_element_ids(repo, row_id)
     chunks_2 = _row_chunk_ids(repo, row_id)
     objects_2 = _row_object_ids(repo, row_id)
@@ -317,7 +366,7 @@ def test_derived_ids_use_the_contracted_prefixes(repo, projector, table_id, embe
     row_id = store.add_knowhow_row(table_id, {
         cols["违例类型"]: "问题A", cols["现象识别"]: "现象说明", cols["依赖工具"]: "示波器",
     })
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
     source_id = projector.ensure_hidden_source(table_id)
 
     with repo._connect() as db:
@@ -339,7 +388,8 @@ def test_derived_ids_use_the_contracted_prefixes(repo, projector, table_id, embe
 
 
 # ---------------------------------------------------------------------------
-# project_row: incremental chunk diff + embedding call counts
+# project_table: incremental chunk diff + embedding call counts (PR-1
+# machinery, preserved verbatim under the new whole-table entry point)
 # ---------------------------------------------------------------------------
 
 
@@ -352,13 +402,13 @@ def test_single_cell_edit_rebuilds_only_that_chunk_and_embeds_once(repo, project
         cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
     assert embedder.call_count == 1
     chunks_before = _row_chunk_texts(repo, row_id)
-    assert len(chunks_before) == 3  # concept + identify + fix, one chunk each
+    assert len(chunks_before) == 3  # anchor + identify + fix, one chunk each
 
     store.update_knowhow_cell(row_id, cols["修复方法"], "1. 更换更大电容")
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
 
     assert embedder.call_count == 2
     # ONLY the changed cell's net text (chunk text is the cell's whole net
@@ -377,32 +427,32 @@ def test_single_cell_edit_rebuilds_only_that_chunk_and_embeds_once(repo, project
     assert chunks_after[next(iter(changed_ids))] == "1. 更换更大电容"
 
 
-def test_reprojecting_unchanged_row_makes_zero_additional_embed_calls(repo, projector, table_id, embedder):
+def test_reprojecting_unchanged_table_makes_zero_additional_embed_calls(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
-    row_id = store.add_knowhow_row(table_id, {
+    store.add_knowhow_row(table_id, {
         cols["违例类型"]: "过冲问题",
         cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
     assert embedder.call_count == 1
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
     assert embedder.call_count == 1  # nothing changed -> zero additional embed calls
 
 
 def test_reproject_self_heals_a_missing_chunk_vector(repo, projector, table_id, embedder):
-    """Review hardening: the carry-over window (structural transaction
-    committed, vector re-persist did NOT happen — process death or
-    replace_chunk_vectors raising in between) used to leave a text-unchanged
-    chunk vector-less FOREVER: the next project_row saw
+    """Review hardening (ported from PR-1): the carry-over window (structural
+    transaction committed, vector re-persist did NOT happen — process death
+    or replace_chunk_vectors raising in between) used to leave a
+    text-unchanged chunk vector-less FOREVER: the next project_table saw
     ``old_specs == new_specs`` and skipped the cell entirely, and nothing
-    else ever re-embeds a knowhow chunk. project_row must probe its
+    else ever re-embeds a knowhow chunk. project_table must probe its
     text-unchanged chunks' vectors and re-embed exactly the missing ones —
-    making a per-row retry a real recovery path, at zero embed calls (one
+    making a reproject a real recovery path, at zero embed calls (one
     id-keyed SELECT) in the all-present steady state (pinned by
-    test_reprojecting_unchanged_row_makes_zero_additional_embed_calls
+    test_reprojecting_unchanged_table_makes_zero_additional_embed_calls
     above)."""
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
@@ -412,7 +462,7 @@ def test_reproject_self_heals_a_missing_chunk_vector(repo, projector, table_id, 
         cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
     assert embedder.call_count == 1
     chunks = _row_chunk_texts(repo, row_id)
     assert len(chunks) == 3
@@ -426,7 +476,7 @@ def test_reproject_self_heals_a_missing_chunk_vector(repo, projector, table_id, 
     vectors_before = _chunk_embedding_vectors(repo, other_ids)
     assert set(vectors_before) == other_ids
 
-    projector.project_row(table_id, row_id)  # NO cell edits
+    projector.project_table(table_id)  # NO cell edits
 
     # Exactly one extra embed call, carrying exactly the vector-less chunk's
     # current text — the two chunks that still had vectors were not re-sent.
@@ -437,17 +487,23 @@ def test_reproject_self_heals_a_missing_chunk_vector(repo, projector, table_id, 
     assert _row_projection_status(repo, table_id, row_id) == "synced"
 
 
-def test_concept_cell_edit_moves_sibling_section_paths_without_reembedding(
+def test_anchor_cell_edit_moves_sibling_section_paths_without_reembedding(
     repo, projector, table_id, embedder
 ):
-    """Review finding: section_path bakes in the row's concept (`f"{table} ›
-    {concept} › {column}"`), so editing ONLY the concept cell changes every
-    SIBLING chunk's section_path too even though their text never changed.
-    The chunk row must still be rewritten (section_path has to move) but must
-    NOT be re-embedded — and (chunk_embeddings.chunk_id is ON DELETE CASCADE
-    onto chunks(id), and this chunk's id is stable for the same row/column/
-    split) its existing embedding must survive, not get cascade-deleted by a
-    delete+reinsert that nothing then re-embeds."""
+    """Review finding (ported from PR-1, now against the anchor/row-title
+    cell): section_path bakes in the row's title (`f"{table} › {row_title} ›
+    {column}"`), so editing ONLY the anchor cell changes every SIBLING
+    chunk's section_path too even though their text never changed. The chunk
+    row must still be rewritten (section_path has to move) but must NOT be
+    re-embedded — and (chunk_embeddings.chunk_id is ON DELETE CASCADE onto
+    chunks(id), and this chunk's id is stable for the same row/column/split)
+    its existing embedding must survive, not get cascade-deleted by a
+    delete+reinsert that nothing then re-embeds. This is also the exact
+    machinery class that must carry the global "concept -> row_title"
+    section_path formula change safely across a legacy-table reproject
+    (design doc §① migration note) — a text-unchanged cell must never pay
+    for a re-embed just because the SURROUNDING title-resolution logic
+    changed, only because the section_path VALUE happened to move."""
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
@@ -456,7 +512,7 @@ def test_concept_cell_edit_moves_sibling_section_paths_without_reembedding(
         cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
     assert embedder.call_count == 1
     chunks_before = _row_chunk_texts(repo, row_id)
     assert len(chunks_before) == 3
@@ -464,12 +520,12 @@ def test_concept_cell_edit_moves_sibling_section_paths_without_reembedding(
     vectors_before = _chunk_embedding_vectors(repo, set(chunks_before))
     assert set(vectors_before) == set(chunks_before)  # all 3 embedded on first projection
 
-    concept_chunk_id = next(cid for cid, text in chunks_before.items() if text == "过冲问题")
+    anchor_chunk_id = next(cid for cid, text in chunks_before.items() if text == "过冲问题")
 
     store.update_knowhow_cell(row_id, cols["违例类型"], "过冲新问题")
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
 
-    # Exactly 1 new embed call, for exactly the concept cell's OWN new text —
+    # Exactly 1 new embed call, for exactly the anchor cell's OWN new text —
     # zero re-embeds for the two sibling cells whose text never changed.
     assert embedder.call_count == 2
     assert embedder.calls[-1] == ["过冲新问题"]
@@ -479,11 +535,11 @@ def test_concept_cell_edit_moves_sibling_section_paths_without_reembedding(
     assert set(chunks_after) == set(chunks_before)  # same 3 stable chunk-id slots
 
     changed_text_ids = {cid for cid in chunks_before if chunks_before[cid] != chunks_after[cid]}
-    assert changed_text_ids == {concept_chunk_id}
-    assert chunks_after[concept_chunk_id] == "过冲新问题"
-    sibling_ids = set(chunks_before) - {concept_chunk_id}
+    assert changed_text_ids == {anchor_chunk_id}
+    assert chunks_after[anchor_chunk_id] == "过冲新问题"
+    sibling_ids = set(chunks_before) - {anchor_chunk_id}
 
-    # ALL 3 chunks' section_path reflects the NEW concept — including the two
+    # ALL 3 chunks' section_path reflects the NEW title — including the two
     # siblings whose own text is untouched.
     for cid in chunks_after:
         assert "过冲新问题" in paths_after[cid]
@@ -496,16 +552,16 @@ def test_concept_cell_edit_moves_sibling_section_paths_without_reembedding(
     assert vectors_after == {cid: vectors_before[cid] for cid in sibling_ids}
 
 
-def test_project_row_sweeps_chunks_for_a_column_removed_from_the_table(
+def test_project_table_sweeps_chunks_for_a_column_removed_from_the_table(
     repo, projector, table_id, embedder
 ):
-    """Review finding: _write_chunks only ever walked the table's CURRENT
-    columns, so a column removed from the table left its old chunk group
-    (+chunks_fts +chunk_embeddings) behind forever, retrievable even though
-    the column is gone. project_row alone must be self-healing for column
-    deletes/reorders — mirroring _write_elements' existing delete-all-then-
-    reinsert reconciliation (that one already deletes by row_id and
-    reinserts only current columns, so it never had this bug)."""
+    """Review finding (ported from PR-1): _write_chunks only ever walked the
+    table's CURRENT columns, so a column removed from the table left its old
+    chunk group (+chunks_fts +chunk_embeddings) behind forever, retrievable
+    even though the column is gone. project_table alone must be self-healing
+    for column deletes/reorders — mirroring _write_elements' existing
+    delete-all-then-reinsert reconciliation (that one already deletes by
+    row_id and reinserts only current columns, so it never had this bug)."""
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
@@ -514,7 +570,7 @@ def test_project_row_sweeps_chunks_for_a_column_removed_from_the_table(
         cols["修复方法"]: "1. 增加阻尼电阻",
     })
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
     source_id = projector.ensure_hidden_source(table_id)
     chunks_before = {
         c["id"]: c["text"] for c in repo._runtime.chunk_store.source_chunks(source_id)
@@ -524,15 +580,13 @@ def test_project_row_sweeps_chunks_for_a_column_removed_from_the_table(
     assert _chunk_fts_ids(repo, {fix_chunk_id}) == {fix_chunk_id}
     assert set(_chunk_embedding_vectors(repo, {fix_chunk_id})) == {fix_chunk_id}
 
-    # Simulate "delete one column via the store": KnowhowStore has no
-    # column-delete API yet (that lands with Task 6's table-editing routes)
-    # — drop the knowhow_columns row directly, the same net effect such an
-    # endpoint would have from get_knowhow_table's point of view (it simply
-    # stops returning the column).
+    # Simulate "delete one column via the store" directly (column-delete API
+    # lives in KnowhowStore, out of this task's scope) — same net effect from
+    # get_knowhow_table's point of view (it simply stops returning the column).
     with repo._connect() as db:
         db.execute("DELETE FROM knowhow_columns WHERE id=?", (cols["修复方法"],))
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
 
     chunks_after = {
         c["id"]: c["text"] for c in repo._runtime.chunk_store.source_chunks(source_id)
@@ -560,131 +614,328 @@ def test_overlong_cell_splits_into_multiple_chunk_parts(repo, projector, table_i
         cols["违例类型"]: "长文本问题", cols["修复方法"]: long_text,
     })
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
 
     chunk_ids = _row_chunk_ids(repo, row_id)
-    assert len(chunk_ids) == 4  # concept(1) + fix(3 paragraph-bounded parts)
+    assert len(chunk_ids) == 4  # anchor(1) + fix(3 paragraph-bounded parts)
 
 
 # ---------------------------------------------------------------------------
-# project_row: KO/edge shape
+# project_table: cell-level node model (design doc §④ — object_type=column
+# name, cross-row value merge, about edges)
 # ---------------------------------------------------------------------------
 
 
-def test_case_procedure_tool_counts_and_edge_types(repo, projector, table_id, embedder):
+def test_ko_object_type_equals_column_name_for_every_filled_cell(
+    repo, projector, table_id, embedder
+):
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
-    row_id = store.add_knowhow_row(table_id, {
+    store.add_knowhow_row(table_id, {
         cols["违例类型"]: "过冲问题",
-        cols["现象识别"]: "- 观察上升沿过冲",
-        cols["根因分析"]: "1. 检查电源阻抗",
-        cols["修复方法"]: "1. 增加阻尼电阻",
-        cols["依赖工具"]: "- 示波器\n- 万用表",
+        cols["现象识别"]: "上升沿过冲",
+        cols["根因分析"]: "电源阻抗过高",
+        cols["修复方法"]: "增加阻尼电阻",
+        cols["依赖工具"]: "示波器",
     })
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
 
     counts = _table_object_type_counts(repo, table_id)
-    assert counts == {"case": 1, "procedure": 3, "tool": 2}
-
-    case_id = _row_case_id(repo, row_id)
-    assert case_id is not None
-    # transitional (PR-2+3 Task 1): every 'procedure' column takes the old
-    # identify branch — one uniform edge type until Task 2's `about` rework.
-    assert _edge_types_from(repo, case_id) == [
-        "identified_by", "identified_by", "identified_by",
-        "requires_tool", "requires_tool",
-    ]
+    # Every column name is its own dynamic object_type — no fixed
+    # case/procedure/tool vocabulary survives.
+    assert counts == {
+        "违例类型": 1, "现象识别": 1, "根因分析": 1, "修复方法": 1, "依赖工具": 1,
+    }
+    assert "case" not in counts and "procedure" not in counts and "tool" not in counts
 
 
-def test_tool_deduped_within_table_across_rows(repo, projector, table_id, embedder):
+def test_same_value_in_same_column_across_two_rows_merges_with_two_evidence_and_two_edges(
+    repo, projector, table_id, embedder
+):
+    """Design doc §④ "同列同值跨行归并": two DIFFERENT rows (different
+    anchors) whose 根因分析 cell holds the exact same text merge onto ONE
+    knowledge object, accumulating both rows' evidence — and each row's own
+    about-edge to ITS OWN row-title KO survives (2 distinct edges, since the
+    two rows have different anchors)."""
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_a = store.add_knowhow_row(table_id, {
-        cols["违例类型"]: "问题A", cols["依赖工具"]: "示波器",
+        cols["违例类型"]: "过冲问题", cols["根因分析"]: "电源阻抗过高",
     })
     row_b = store.add_knowhow_row(table_id, {
-        cols["违例类型"]: "问题B", cols["依赖工具"]: "Oscilloscope",  # different casing/spelling on purpose
+        cols["违例类型"]: "欠冲问题", cols["根因分析"]: "电源阻抗过高",
     })
-    projector.project_row(table_id, row_a)
-    projector.project_row(table_id, row_b)
 
-    # "示波器" is a distinct name from "Oscilloscope" (no cross-language dedup —
-    # dedup is casefold on the SAME literal name), so this table has 2 tools.
-    assert _table_object_type_counts(repo, table_id).get("tool") == 2
+    projector.project_table(table_id)
 
-    row_c = store.add_knowhow_row(table_id, {
-        cols["违例类型"]: "问题C", cols["依赖工具"]: "OSCILLOSCOPE",  # same name, different case
+    assert _table_object_type_counts(repo, table_id).get("根因分析") == 1
+    ko = _ko_by_name(repo, table_id, "根因分析", "电源阻抗过高")
+    assert set(ko["payload"]["rows"]) == {row_a, row_b}
+    assert len(ko["evidence"]) == 2
+
+    # This non-anchor KO is the SOURCE of its about-edges (design doc §④:
+    # non-row-title cell KO --about--> row-title cell KO), so its edges are
+    # found via _edges_from, not _edges_to (which would look for edges
+    # pointing AT it — never the case for a non-anchor cell).
+    edges = _edges_from(repo, ko["id"])
+    assert len(edges) == 2
+    assert {e["edge_type"] for e in edges} == {"about"}
+    anchor_a = _ko_by_name(repo, table_id, "违例类型", "过冲问题")
+    anchor_b = _ko_by_name(repo, table_id, "违例类型", "欠冲问题")
+    assert {e["target_object_id"] for e in edges} == {anchor_a["id"], anchor_b["id"]}
+
+
+def test_entity_cell_splits_into_multiple_kos_by_list_item(repo, projector, table_id, embedder):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["依赖工具"]: "- 示波器\n- 万用表",
     })
-    projector.project_row(table_id, row_c)
-    # Same normalized name as row_b's tool -> dedup to the SAME tool object,
-    # table-wide count stays at 2 (not 3).
-    assert _table_object_type_counts(repo, table_id).get("tool") == 2
+
+    projector.project_table(table_id)
+
+    assert _table_object_type_counts(repo, table_id).get("依赖工具") == 2
+    names = {k["payload"]["name"] for k in _kos_by_type(repo, table_id, "依赖工具")}
+    assert names == {"示波器", "万用表"}
 
 
-def test_row_with_no_nonempty_cells_projects_no_case_ko(repo, projector, table_id, embedder):
-    """Belt-and-braces with grid_parser's all-empty-row drop: a row whose only
-    cell is whitespace has no net content, so project_row must write NO case KO
-    (not a phantom empty-fields case) — and still settle 'synced'."""
+def test_entity_value_merges_across_rows(repo, projector, table_id, embedder):
+    """Design doc §④ Innovus example ("entity 拆分跨行归并"): the same tool
+    name cited by two DIFFERENT rows' 依赖工具 cell collapses to ONE node
+    with an about-edge to EACH row's own row-title KO."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    row_a = store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["依赖工具"]: "Innovus",
+    })
+    row_b = store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "欠冲问题", cols["依赖工具"]: "Innovus",
+    })
+
+    projector.project_table(table_id)
+
+    assert _table_object_type_counts(repo, table_id).get("依赖工具") == 1
+    ko = _ko_by_name(repo, table_id, "依赖工具", "Innovus")
+    assert set(ko["payload"]["rows"]) == {row_a, row_b}
+    # A non-anchor KO is the SOURCE of its about-edges, not the target.
+    assert len(_edges_from(repo, ko["id"])) == 2
+
+
+def test_about_edge_direction_is_cell_ko_to_row_title_ko(repo, projector, table_id, embedder):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
+    })
+
+    projector.project_table(table_id)
+
+    anchor_ko = _ko_by_name(repo, table_id, "违例类型", "过冲问题")
+    fix_ko = _ko_by_name(repo, table_id, "修复方法", "增加阻尼电阻")
+    assert _edges_from(repo, fix_ko["id"]) and _edges_from(repo, fix_ko["id"])[0]["target_object_id"] == anchor_ko["id"]
+    assert _edges_from(repo, anchor_ko["id"]) == []  # nothing points FROM the row-title KO
+
+
+def test_row_title_cell_gets_no_self_edge(repo, projector, table_id, embedder):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
+
+    projector.project_table(table_id)
+
+    anchor_ko = _ko_by_name(repo, table_id, "违例类型", "过冲问题")
+    assert _edges_from(repo, anchor_ko["id"]) == []
+    assert _edges_to(repo, anchor_ko["id"]) == []
+
+
+def test_about_edges_dedup_when_two_rows_share_both_anchor_and_value(
+    repo, projector, table_id, embedder
+):
+    """Two rows with the SAME anchor value (merging their row-title KOs too)
+    AND the same cited tool must not attempt to insert the identical
+    (src, about, dst) edge id twice — it collapses to ONE relation row."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["依赖工具"]: "示波器",
+    })
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["依赖工具"]: "示波器",
+    })
+
+    projector.project_table(table_id)  # must not raise (duplicate relation id)
+
+    anchor_ko = _ko_by_name(repo, table_id, "违例类型", "过冲问题")
+    tool_ko = _ko_by_name(repo, table_id, "依赖工具", "示波器")
+    assert set(anchor_ko["payload"]["rows"])  # merged from both rows
+    assert len(anchor_ko["payload"]["rows"]) == 2
+    edges = _edges_to(repo, anchor_ko["id"])
+    assert len(edges) == 1
+    assert edges[0]["source_object_id"] == tool_ko["id"]
+
+
+def test_procedure_cell_payload_carries_parsed_steps(repo, projector, table_id, embedder):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题",
+        cols["现象识别"]: "1. 观察上升沿\n2. 测量峰值",
+    })
+
+    projector.project_table(table_id)
+
+    ko = _kos_by_type(repo, table_id, "现象识别")[0]
+    assert ko["payload"]["steps"] == ["观察上升沿", "测量峰值"]
+
+
+def test_non_procedure_cell_payload_has_no_steps_key(repo, projector, table_id, embedder):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["依赖工具"]: "示波器",
+    })
+
+    projector.project_table(table_id)
+
+    anchor_ko = _ko_by_name(repo, table_id, "违例类型", "过冲问题")
+    tool_ko = _ko_by_name(repo, table_id, "依赖工具", "示波器")
+    assert "steps" not in anchor_ko["payload"]
+    assert "steps" not in tool_ko["payload"]
+
+
+def test_evidence_location_label_uses_each_contributing_rows_own_title(
+    repo, projector, table_id, embedder
+):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["根因分析"]: "共同根因",
+    })
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "欠冲问题", cols["根因分析"]: "共同根因",
+    })
+
+    projector.project_table(table_id)
+
+    ko = _ko_by_name(repo, table_id, "根因分析", "共同根因")
+    labels = {e["location_label"] for e in ko["evidence"]}
+    assert labels == {"过冲问题 › 根因分析", "欠冲问题 › 根因分析"}
+
+
+# ---------------------------------------------------------------------------
+# project_table: no-anchor ("记录型") tables project zero KOs/edges
+# ---------------------------------------------------------------------------
+
+
+def test_table_without_anchor_column_projects_zero_kos_but_chunks_exist(
+    repo, notebook_id, projector, embedder
+):
+    store = repo._runtime.knowhow_store
+    columns = [
+        {"name": "日期", "role": "attribute"},
+        {"name": "记录", "role": "attribute"},
+    ]
+    record_table_id = store.create_knowhow_table(notebook_id, "巡检日志", "", columns)
+    cols = _cols_by_name(repo, record_table_id)
+    store.add_knowhow_row(record_table_id, {
+        cols["日期"]: "2026-01-01", cols["记录"]: "一切正常",
+    })
+
+    projector.project_table(record_table_id)
+
+    source_id = projector.ensure_hidden_source(record_table_id)
+    with repo._connect() as db:
+        object_count = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?", (source_id,)
+        ).fetchone()["c"]
+        relation_count = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_relations WHERE source_id=?", (source_id,)
+        ).fetchone()["c"]
+        chunk_count = db.execute(
+            "SELECT COUNT(*) c FROM chunks WHERE source_id=?", (source_id,)
+        ).fetchone()["c"]
+    assert object_count == 0
+    assert relation_count == 0
+    assert chunk_count == 2  # both cells still become chunks — retrieval-only
+
+
+def test_anchor_removed_after_being_set_clears_all_kos_on_reproject(
+    repo, projector, table_id, embedder
+):
+    """design doc §① transitional case: a table that HAD an anchor column,
+    then had it cleared (set_knowhow_anchor_column(table_id, None) — T1
+    store method), must end with ZERO KOs/edges on the next projection —
+    the "从有到无的转换清理" the brief calls out explicitly."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
+    })
+    projector.project_table(table_id)
+    assert _table_object_type_counts(repo, table_id)  # sanity: something was projected
+
+    store.set_knowhow_anchor_column(table_id, None)
+    projector.project_table(table_id)
+
+    assert _table_object_type_counts(repo, table_id) == {}
+    source_id = projector.ensure_hidden_source(table_id)
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_relations WHERE source_id=?", (source_id,)
+        ).fetchone()["c"] == 0
+        # chunks are untouched by the anchor removal — still a valid
+        # retrieval-only table.
+        assert db.execute(
+            "SELECT COUNT(*) c FROM chunks WHERE source_id=?", (source_id,)
+        ).fetchone()["c"] > 0
+
+
+def test_row_with_blank_anchor_cell_contributes_no_kos_but_chunks_still_written(
+    repo, projector, table_id, embedder
+):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["修复方法"]: "增加阻尼电阻",  # anchor column ("违例类型") left blank
+    })
+
+    projector.project_table(table_id)
+
+    assert _row_object_ids(repo, row_id) == set()
+    assert _table_object_type_counts(repo, table_id) == {}
+    assert _row_chunk_ids(repo, row_id)  # the fix cell still became a chunk
+    assert _row_projection_status(repo, table_id, row_id) == "synced"
+
+
+def test_row_with_no_nonempty_cells_projects_no_kos(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {cols["违例类型"]: "   "})
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
 
     assert _row_object_ids(repo, row_id) == set()
     assert _row_projection_status(repo, table_id, row_id) == "synced"
 
 
-def test_clearing_all_cells_removes_the_previously_projected_case_ko(
-    repo, projector, table_id, embedder
-):
-    """The delete-then-skip path: a row that HAD content, then had every cell
-    cleared, must end with zero row-scoped KOs — its prior case/procedure
-    objects swept and no new phantom empty case written in their place."""
+def test_clearing_all_cells_removes_previously_projected_kos(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
     })
-    projector.project_row(table_id, row_id)
-    assert _row_object_ids(repo, row_id)  # sanity: content projected a case + procedure
+    projector.project_table(table_id)
+    assert _row_object_ids(repo, row_id)  # sanity: content projected KOs
 
     store.update_knowhow_cell(row_id, cols["违例类型"], "")
     store.update_knowhow_cell(row_id, cols["修复方法"], "")
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
 
     assert _row_object_ids(repo, row_id) == set()
 
 
-# ---------------------------------------------------------------------------
-# project_table: full-rebuild escape hatch
-# ---------------------------------------------------------------------------
-
-
-def test_added_row_with_no_mutation_seq_bump_is_still_projected_by_project_table(
-    repo, projector, table_id, embedder
-):
-    """Controller-adjudicated pin: add_knowhow_row deliberately does NOT bump
-    mutation_seq (only update_knowhow_cell does) — project_table must
-    discover rows by full enumeration, never by a seq-delta gate, or a
-    freshly-added row would be silently skipped."""
-    store = repo._runtime.knowhow_store
-    cols = _cols_by_name(repo, table_id)
-    seq_before = store.get_knowhow_table(table_id)["mutation_seq"]
-    row_id = store.add_knowhow_row(table_id, {
-        cols["违例类型"]: "新行", cols["修复方法"]: "1. 处理方法",
-    })
-    seq_after_add = store.get_knowhow_table(table_id)["mutation_seq"]
-    assert seq_after_add == seq_before  # confirms the store-level precondition this test pins
-
-    projector.project_table(table_id)
-
-    assert _row_projection_status(repo, table_id, row_id) == "synced"
-    assert _row_object_ids(repo, row_id)
-
-
-def test_project_table_sweeps_orphaned_tool_no_longer_referenced_by_any_row(
+def test_project_table_sweeps_orphaned_value_no_longer_referenced_by_any_row(
     repo, projector, table_id, embedder
 ):
     store = repo._runtime.knowhow_store
@@ -692,67 +943,91 @@ def test_project_table_sweeps_orphaned_tool_no_longer_referenced_by_any_row(
     row_id = store.add_knowhow_row(table_id, {
         cols["违例类型"]: "问题A", cols["依赖工具"]: "示波器",
     })
-    projector.project_row(table_id, row_id)
-    assert _table_object_type_counts(repo, table_id).get("tool") == 1
+    projector.project_table(table_id)
+    assert _table_object_type_counts(repo, table_id).get("依赖工具") == 1
 
     store.update_knowhow_cell(row_id, cols["依赖工具"], "")  # clear the only reference
-    projector.project_row(table_id, row_id)
-    # project_row alone is row-scoped: it does NOT clean up the now-orphaned
-    # tool object (by design — see delete_objects_by_source_and_row).
-    assert _table_object_type_counts(repo, table_id).get("tool") == 1
-
     projector.project_table(table_id)
-    # project_table's full rebuild wipes + recomputes from scratch, so an
-    # unreferenced tool does not survive.
-    assert _table_object_type_counts(repo, table_id).get("tool", 0) == 0
+
+    # Every project_table call fully rebuilds the KO/edge model from current
+    # content — an unreferenced value never survives to the next pass.
+    assert _table_object_type_counts(repo, table_id).get("依赖工具", 0) == 0
 
 
 # ---------------------------------------------------------------------------
-# delete_table_projection
+# project_table: synthesized section_path (design doc §① compose_row_title)
 # ---------------------------------------------------------------------------
 
 
-def test_delete_table_projection_clears_all_artifacts(repo, projector, table_id, embedder):
+def test_section_path_uses_anchor_value_when_anchor_cell_has_content(
+    repo, projector, table_id, embedder
+):
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻", cols["依赖工具"]: "示波器",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
     })
-    projector.project_row(table_id, row_id)
-    source_id = projector.ensure_hidden_source(table_id)
-    notebook_id = repo._runtime.source_store.get_source(source_id).notebook_id
 
-    projector.delete_table_projection(source_id)
+    projector.project_table(table_id)
 
-    with repo._connect() as db:
-        assert db.execute(
-            "SELECT COUNT(*) c FROM sources WHERE id=?", (source_id,)
-        ).fetchone()["c"] == 0
-        assert db.execute(
-            "SELECT COUNT(*) c FROM source_elements WHERE source_id=?", (source_id,)
-        ).fetchone()["c"] == 0
-        assert db.execute(
-            "SELECT COUNT(*) c FROM chunks WHERE source_id=?", (source_id,)
-        ).fetchone()["c"] == 0
-        assert db.execute(
-            "SELECT COUNT(*) c FROM chunks_fts WHERE notebook_id=?", (notebook_id,)
-        ).fetchone()["c"] == 0
-        assert db.execute(
-            "SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?", (source_id,)
-        ).fetchone()["c"] == 0
-        assert db.execute(
-            "SELECT COUNT(*) c FROM knowledge_relations WHERE source_id=?", (source_id,)
-        ).fetchone()["c"] == 0
+    paths = set(_row_chunk_section_paths(repo, row_id).values())
+    assert paths == {"时序修复 › 过冲问题 › 违例类型", "时序修复 › 过冲问题 › 修复方法"}
 
 
-def test_delete_table_projection_is_a_noop_for_none_or_missing_id(repo, projector):
-    projector.delete_table_projection(None)  # must not raise
-    projector.delete_table_projection("")  # must not raise
-    projector.delete_table_projection("src-does-not-exist")  # must not raise
+def test_section_path_uses_composed_title_when_anchor_cell_is_blank(
+    repo, projector, table_id, embedder
+):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["现象识别"]: "上升沿过冲", cols["修复方法"]: "增加阻尼电阻",
+    })
+
+    projector.project_table(table_id)
+
+    paths = _row_chunk_section_paths(repo, row_id)
+    fix_path = next(p for cid, p in paths.items()
+                    if _row_chunk_texts(repo, row_id)[cid] == "增加阻尼电阻")
+    assert fix_path == "时序修复 › 上升沿过冲 · 增加阻尼电阻 › 修复方法"
+
+
+def test_section_path_uses_composed_title_when_no_anchor_column(
+    repo, notebook_id, projector, embedder
+):
+    store = repo._runtime.knowhow_store
+    columns = [
+        {"name": "日期", "role": "attribute"},
+        {"name": "记录", "role": "attribute"},
+    ]
+    record_table_id = store.create_knowhow_table(notebook_id, "巡检日志", "", columns)
+    cols = _cols_by_name(repo, record_table_id)
+    row_id = store.add_knowhow_row(record_table_id, {
+        cols["日期"]: "2026-01-01", cols["记录"]: "一切正常",
+    })
+
+    projector.project_table(record_table_id)
+
+    paths = set(_row_chunk_section_paths(repo, row_id).values())
+    assert paths == {
+        "巡检日志 › 2026-01-01 · 一切正常 › 日期",
+        "巡检日志 › 2026-01-01 · 一切正常 › 记录",
+    }
+
+
+def test_resolve_row_title_falls_back_to_positional_label_when_every_cell_blank():
+    """Direct unit pin for the one _resolve_row_title branch that is
+    unobservable end to end (an all-blank row projects zero chunks/elements
+    to inspect a section_path on at all — see projection.py's docstring)."""
+    from app.services.knowhow.projection import _resolve_row_title
+
+    columns = [{"id": "c1", "name": "A", "position": 0}, {"id": "c2", "name": "B", "position": 1}]
+    cell_nets = {"c1": "", "c2": "   "}
+    assert _resolve_row_title(None, columns, cell_nets, 4) == "行5"
+    assert _resolve_row_title(columns[0], columns, cell_nets, 4) == "行5"
 
 
 # ---------------------------------------------------------------------------
-# embedding failure
+# project_table: embedding failure (best-effort, never raises)
 # ---------------------------------------------------------------------------
 
 
@@ -760,11 +1035,11 @@ def test_embedding_failure_marks_row_failed_without_raising(repo, projector, tab
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
     })
     embedder.fail_next = True
 
-    projector.project_row(table_id, row_id)  # must not raise
+    projector.project_table(table_id)  # must not raise
 
     assert _row_projection_status(repo, table_id, row_id) == "failed"
     # Structural artifacts are still written even though embedding failed —
@@ -779,12 +1054,12 @@ def test_embedding_failure_emits_through_model_error_channel(repo, projector, ta
     )
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
-    row_id = store.add_knowhow_row(table_id, {
-        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻",
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
     })
     embedder.fail_next = True
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
 
     assert len(calls) == 1
     stage, _model, exc_type = calls[0]
@@ -792,43 +1067,61 @@ def test_embedding_failure_emits_through_model_error_channel(repo, projector, ta
     assert exc_type == "RuntimeError"
 
 
-# ---------------------------------------------------------------------------
-# structural-write failure (distinct from embedding failure above: this one
-# MUST raise — a structural-write bug is a programming error, not a flaky
-# network call, and must not be silently swallowed)
-# ---------------------------------------------------------------------------
-
-
-def test_structural_write_failure_marks_row_failed_and_reraises(
-    repo, projector, table_id, embedder, monkeypatch
-):
-    """Review finding: project_row sets 'syncing' then runs the structural
-    database.write() block (elements/chunks/KOs); an exception raised inside
-    that block used to propagate straight out with the row never leaving
-    'syncing' (no code path ever flips it again). The row must land on
-    'failed' (an honest terminal state) and the exception must still
-    propagate — unlike the embed-failure path above, this is NOT a
-    best-effort/no-raise case."""
+def test_embed_false_skips_embedding_entirely(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
     })
 
-    def _boom(*args, **kwargs):
-        raise RuntimeError("boom-structural")
+    projector.project_table(table_id, embed=False)
 
-    # insert_relation_chunk is the LAST store call inside _write_knowledge —
-    # patching it lets everything else in the structural block run first,
-    # so this also proves the whole transaction rolls back on failure (no
-    # half-written case KO survives).
-    monkeypatch.setattr(projector.knowledge, "insert_relation_chunk", _boom)
+    assert embedder.call_count == 0
+    assert _row_projection_status(repo, table_id, row_id) == "synced"
+    assert _row_object_ids(repo, row_id)  # structural writes still happened
+
+
+# ---------------------------------------------------------------------------
+# structural-write failure (distinct from embedding failure above: this one
+# MUST raise — a structural-write bug is a programming error, not a flaky
+# network call, and must not be silently swallowed). Also proves the KO/edge
+# rebuild is atomic across the WHOLE table: a mid-pass failure leaves the
+# prior successful projection's KG untouched, rather than half torn down.
+# ---------------------------------------------------------------------------
+
+
+def test_structural_write_failure_marks_row_failed_and_reraises_leaving_prior_kg_untouched(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "问题A", cols["修复方法"]: "方法A",
+    })
+    projector.project_table(table_id)  # a clean prior pass — establishes a baseline KG
+    prior_kos = _table_object_type_counts(repo, table_id)
+    assert prior_kos  # sanity: something was projected
+
+    row_b = store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "问题B", cols["修复方法"]: "方法B",
+    })
+
+    real_insert_elements = repo._runtime.source_store.insert_elements
+
+    def _boom(db, source_id, writes, *, created_at):
+        if any(w.metadata.get("knowhow", {}).get("row_id") == row_b for w in writes):
+            raise RuntimeError("boom-structural")
+        return real_insert_elements(db, source_id, writes, created_at=created_at)
+
+    monkeypatch.setattr(repo._runtime.source_store, "insert_elements", _boom)
 
     with pytest.raises(RuntimeError, match="boom-structural"):
-        projector.project_row(table_id, row_id)
+        projector.project_table(table_id)
 
-    assert _row_projection_status(repo, table_id, row_id) == "failed"
-    assert not _row_object_ids(repo, row_id)  # transaction rolled back, not half-applied
+    assert _row_projection_status(repo, table_id, row_b) == "failed"
+    # The KO/edge rebuild never reached its final step this pass (the loop
+    # raised first) — the prior, still-consistent KG survives untouched.
+    assert _table_object_type_counts(repo, table_id) == prior_kos
 
 
 def test_unconfigured_embedder_is_not_a_failure(tmp_path, monkeypatch):
@@ -869,9 +1162,183 @@ def test_unconfigured_embedder_is_not_a_failure(tmp_path, monkeypatch):
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     row_id = store.add_knowhow_row(table_id, {
-        cols["违例类型"]: "过冲问题", cols["修复方法"]: "1. 增加阻尼电阻",
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
     })
 
-    projector.project_row(table_id, row_id)
+    projector.project_table(table_id)
 
     assert _row_projection_status(repo, table_id, row_id) == "synced"
+
+
+# ---------------------------------------------------------------------------
+# delete_table_projection
+# ---------------------------------------------------------------------------
+
+
+def test_delete_table_projection_clears_all_artifacts(repo, projector, table_id, embedder):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻", cols["依赖工具"]: "示波器",
+    })
+    projector.project_table(table_id)
+    source_id = projector.ensure_hidden_source(table_id)
+    notebook_id = repo._runtime.source_store.get_source(source_id).notebook_id
+
+    projector.delete_table_projection(source_id)
+
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) c FROM sources WHERE id=?", (source_id,)
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM source_elements WHERE source_id=?", (source_id,)
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM chunks WHERE source_id=?", (source_id,)
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM chunks_fts WHERE notebook_id=?", (notebook_id,)
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?", (source_id,)
+        ).fetchone()["c"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) c FROM knowledge_relations WHERE source_id=?", (source_id,)
+        ).fetchone()["c"] == 0
+
+
+def test_delete_table_projection_is_a_noop_for_none_or_missing_id(repo, projector):
+    projector.delete_table_projection(None)  # must not raise
+    projector.delete_table_projection("")  # must not raise
+    projector.delete_table_projection("src-does-not-exist")  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# legacy-model startup migration bridge (find_legacy_projected_table_ids +
+# KnowhowProjector.reproject_legacy_tables — wired into app.services.
+# startup_warmup post-readiness, design doc §① compatibility migration note)
+# ---------------------------------------------------------------------------
+
+
+def test_find_legacy_projected_table_ids_detects_legacy_object_types(repo, projector, table_id):
+    source_id = projector.ensure_hidden_source(table_id)
+    notebook_id = repo._runtime.knowhow_store.get_knowhow_table(table_id)["notebook_id"]
+    _insert_legacy_ko(repo, source_id, notebook_id, table_id, object_type="procedure")
+
+    with repo._connect() as db:
+        found = find_legacy_projected_table_ids(db)
+    assert found == [table_id]
+
+
+def test_find_legacy_projected_table_ids_ignores_dynamic_type_kos(repo, projector, table_id, embedder):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
+    projector.project_table(table_id)  # normal cell-level projection only
+
+    with repo._connect() as db:
+        assert find_legacy_projected_table_ids(db) == []
+
+
+def test_find_legacy_projected_table_ids_ignores_non_knowhow_id_prefix(repo, table_id):
+    """A 'case'-typed object from some OTHER pipeline (not knowhow's own
+    ko-kh- id prefix) must not false-positive this migration scan."""
+    notebook_id = repo._runtime.knowhow_store.get_knowhow_table(table_id)["notebook_id"]
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO knowledge_objects (id, notebook_id, object_type, status, owner, "
+            "payload, evidence, source_candidate_id, source_id, created_at, updated_at) "
+            "VALUES (?,?,?,?,'',?,?,NULL,?,?,?)",
+            ("ko-not-knowhow-1", notebook_id, "case", "approved",
+             json.dumps({"table_id": table_id}), "[]", "src-x", "2020-01-01", "2020-01-01"),
+        )
+    with repo._connect() as db:
+        assert find_legacy_projected_table_ids(db) == []
+
+
+def test_find_legacy_projected_table_ids_empty_db_returns_empty_list(repo):
+    with repo._connect() as db:
+        assert find_legacy_projected_table_ids(db) == []
+
+
+def test_reproject_legacy_tables_returns_empty_and_submits_nothing_when_none_found(
+    repo, projector, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        "app.services.knowhow.projection.background_jobs.submit",
+        lambda fn, *a, **kw: calls.append((fn, a, kw)),
+    )
+    assert projector.reproject_legacy_tables() == []
+    assert calls == []
+
+
+def test_reproject_legacy_tables_dispatches_via_background_jobs_submit_not_inline(
+    repo, projector, table_id, monkeypatch
+):
+    source_id = projector.ensure_hidden_source(table_id)
+    notebook_id = repo._runtime.knowhow_store.get_knowhow_table(table_id)["notebook_id"]
+    legacy_id = _insert_legacy_ko(repo, source_id, notebook_id, table_id)
+
+    calls = []
+    monkeypatch.setattr(
+        "app.services.knowhow.projection.background_jobs.submit",
+        lambda fn, *a, **kw: calls.append((fn, a, kw)),
+    )
+
+    result = projector.reproject_legacy_tables()
+
+    assert result == [table_id]
+    assert len(calls) == 1
+    fn, args, kwargs = calls[0]
+    assert fn == projector.project_table
+    assert args == (table_id,)
+    assert kwargs.get("name") == f"knowhow-legacy-reproject-{table_id}"
+    # The spy never actually RAN project_table -> the legacy KO is still
+    # there, proving dispatch really goes through background_jobs.submit
+    # (not an inline/synchronous call that would have already replaced it).
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT 1 FROM knowledge_objects WHERE id=?", (legacy_id,)
+        ).fetchone() is not None
+
+
+def test_reproject_legacy_tables_end_to_end_replaces_legacy_kos_with_dynamic_types(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
+    })
+    source_id = projector.ensure_hidden_source(table_id)
+    notebook_id = store.get_knowhow_table(table_id)["notebook_id"]
+    legacy_id = _insert_legacy_ko(repo, source_id, notebook_id, table_id)
+
+    def _run_synchronously(fn, *args, **kwargs):
+        # Mirrors the REAL background_jobs.submit(fn, *args, name=,
+        # notify_pending=, **kwargs): those two are submit's OWN named
+        # params, never forwarded to fn — a fake that forwarded them
+        # verbatim would call fn(table_id, name=...) and blow up on an
+        # unexpected kwarg fn never asked for.
+        kwargs.pop("name", None)
+        kwargs.pop("notify_pending", None)
+        return fn(*args, **kwargs)
+
+    monkeypatch.setattr(
+        "app.services.knowhow.projection.background_jobs.submit",
+        _run_synchronously,
+    )
+
+    result = projector.reproject_legacy_tables()
+
+    assert result == [table_id]
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT 1 FROM knowledge_objects WHERE id=?", (legacy_id,)
+        ).fetchone() is None  # legacy KO gone — project_table tore it down
+    counts = _table_object_type_counts(repo, table_id)
+    assert counts.get("case", 0) == 0
+    assert counts.get("违例类型") == 1  # dynamic type in its place
+    assert counts.get("修复方法") == 1

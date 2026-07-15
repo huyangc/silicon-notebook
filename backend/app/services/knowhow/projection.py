@@ -1,13 +1,33 @@
 """Deterministic, zero-LLM projection of knowhow-table rows into the
-notebook's knowledge machinery (Task 5, knowhow-tables PR-1).
+notebook's knowledge machinery (knowhow-tables PR-1 Task 5, replaced end to
+end by PR-2+3 Task 2 with the finalized **cell-level node model**, design doc
+§④/§① — docs/superpowers/specs/2026-07-15-knowhow-tables-design.md).
+
+Model (design doc §④, "格子级节点模型"): a table with a row-title (anchor)
+column projects **every non-empty cell** to a knowledge object (KO) whose
+``object_type`` is that cell's COLUMN NAME (a dynamic type, same standing as
+Concept/Claim — domain semantics live on the column, not on a fixed
+case/procedure/tool vocabulary). Same-column-same-value cells MERGE across
+rows into one KO (identity = ``(table_id, column_name, value_key(text))`` —
+``value_key`` normalizes casing/whitespace/punctuation, design doc "同列同值
+跨行归并"), accumulating one evidence item and one ``payload.rows`` entry per
+contributing row. Row structure becomes a star of ``about`` edges: every
+non-row-title cell's KO points ``--about-->`` the row's row-title-cell KO
+(edge id also content-derived, so the SAME edge from two rows sharing both
+endpoints collapses to one row, not a duplicate insert). A table with NO
+anchor column (a "记录型" record table) projects **zero KOs/edges** — it only
+ever participates in chunk/FTS retrieval, never the graph — including the
+transitional case of a table whose anchor was REMOVED after having been set
+(the next projection pass tears every previously-projected KO/edge down and
+rebuilds nothing in their place).
 
 ``KnowhowProjector`` mirrors ``kg_ingest.build_records``'s knowledge_objects/
-knowledge_relations shape (design doc §④) but writes with STABLE, content-
-derived ids instead of store_kg's fresh-id-per-call allocation — reprojecting
-a row is an idempotent in-place rewrite, not an append, which is what makes
-"edit one cell -> only that cell's derivatives change" possible at all.
+knowledge_relations shape but writes with STABLE, content-derived ids instead
+of store_kg's fresh-id-per-call allocation — reprojecting a table is an
+idempotent in-place rewrite, not an append, which is what makes "edit one
+cell -> only that cell's derivatives change" possible at all.
 
-Every row's derived artifacts hang off ONE hidden synthetic source (mirrors
+Every table's derived artifacts hang off ONE hidden synthetic source (mirrors
 the Memory<->KG hidden-source pattern in ``source_ingestion.ingest_memory_
 source`` — ``source_type="knowhow"``, excluded from user-facing source
 listings the same way ``source_type="memory"`` already is). Composition rules
@@ -16,20 +36,35 @@ import, no raw SQL here — every write goes through an injected store method,
 and this service owns its own ``database.write()`` transaction boundary for
 the structural (non-embedding) part of a projection.
 
-One nuance worth flagging up front: ``_write_chunks`` sometimes needs to
-rewrite a chunk row whose TEXT never changed (only its ``section_path``
-did — see that method's docstring). ``chunk_embeddings.chunk_id`` is ``ON
-DELETE CASCADE`` onto ``chunks(id)`` and ChunkStore has no in-place "update
-one column" primitive, only delete/insert — so that rewrite still goes
-through the existing ``delete_by_ids``/``insert_rows`` pair (no new store
-method, no raw SQL), and the row's still-valid embedding is carried over
-(read via ``EmbeddingStore.rows_by_ids`` before the delete, re-persisted via
-``SourceEmbeddingService.vectors.replace_chunk_vectors`` after the
-transaction commits) instead of being recomputed or silently lost. The same
-pre-delete probe doubles as a self-heal: any text-unchanged chunk found with
-NO vector at all (an earlier post-commit persist window interrupted) is
-queued for a fresh embed, so reprojecting a row repairs vector gaps instead
-of skipping the "unchanged" cell forever.
+``project_table`` is the SOLE projection entry point (the PR-1/Task-1-era
+per-row ``project_row`` is gone — cross-row merging inherently needs a
+whole-table view, so per-cell chunk/element diffing now runs in a per-row
+loop INSIDE one ``project_table`` pass while KOs/edges accumulate in memory
+across that same loop and get torn down + rebuilt in ONE final atomic write
+AFTER every row has been visited). Two nuances worth flagging up front:
+
+1. ``_write_chunks`` sometimes needs to rewrite a chunk row whose TEXT never
+   changed (only its ``section_path`` did — see that method's docstring).
+   ``chunk_embeddings.chunk_id`` is ``ON DELETE CASCADE`` onto ``chunks(id)``
+   and ChunkStore has no in-place "update one column" primitive, only
+   delete/insert — so that rewrite still goes through the existing
+   ``delete_by_ids``/``insert_rows`` pair (no new store method, no raw SQL),
+   and the row's still-valid embedding is carried over (read via
+   ``EmbeddingStore.rows_by_ids`` before the delete, re-persisted via
+   ``SourceEmbeddingService.vectors.replace_chunk_vectors`` after the
+   transaction commits) instead of being recomputed or silently lost. The
+   same pre-delete probe doubles as a self-heal: any text-unchanged chunk
+   found with NO vector at all (an earlier post-commit persist window
+   interrupted) is queued for a fresh embed, so reprojecting a table repairs
+   vector gaps instead of skipping the "unchanged" cell forever.
+
+2. The KO/edge rebuild is DELIBERATELY the LAST thing ``project_table`` does,
+   not the first: if any row's structural write raises (a genuine
+   programming bug, not network I/O — see the embed-vs-structural failure
+   split below), the exception propagates OUT of the row loop before the
+   final teardown+rebuild step ever runs, so a table's derived knowledge
+   graph either advances to a fully-consistent new state or is left exactly
+   as it was after the last SUCCESSFUL pass — never partially torn down.
 """
 from __future__ import annotations
 
@@ -44,25 +79,10 @@ from app.repositories.sqlite.embedding_store import EmbeddingStore
 from app.repositories.sqlite.knowhow_store import KnowhowStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
+from app.services import background_jobs
 from app.services.knowhow import textops
 from app.services.source_embedding import SourceEmbeddingService
 from app.services.vector_index import decode_vector
-
-# Column roles that become a `procedure` object per non-empty cell, and their
-# case->procedure edge_type (design doc §④ / task brief step 4).
-# transitional (PR-2+3 Task 1), replaced by Task 2's cell-level node model:
-# migration 17 remaps stored roles to the behavior-kind vocabulary
-# (anchor/procedure/entity/attribute), so this projector's read sites accept
-# BOTH vocabularies until Task 2 rewrites the semantics. The legacy
-# identify/root_cause/fix sub-role distinction no longer exists in storage —
-# a 'procedure' column takes the identify branch (one uniform edge type).
-PROCEDURE_ROLES = ("identify", "root_cause", "fix", "procedure")
-_EDGE_BY_ROLE = {
-    "identify": "identified_by",
-    "root_cause": "diagnosed_by",
-    "fix": "fixed_by",
-    "procedure": "identified_by",  # transitional, see note above
-}
 
 _CHUNK_CHAR_LIMIT = 4000
 # `part = column.position * _COLUMN_PART_STRIDE + split_index` gives every
@@ -72,6 +92,11 @@ _CHUNK_CHAR_LIMIT = 4000
 # would collide, which a "few hundred to a few screens of text" cell (design
 # doc §, "百行内...几百字到几屏富文本") never approaches.
 _COLUMN_PART_STRIDE = 100
+
+# One-shot startup migration bridge (see find_legacy_projected_table_ids /
+# KnowhowProjector.reproject_legacy_tables at the bottom of this file): the
+# PR-1 fixed-vocabulary object types this cell-level model replaces.
+_LEGACY_OBJECT_TYPES = ("case", "procedure", "tool")
 
 
 def _h(*parts: str) -> str:
@@ -83,16 +108,15 @@ def _h(*parts: str) -> str:
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
-def _case_id(row_id: str) -> str:
-    return f"ko-kh-{_h('case', row_id)[:32]}"
-
-
-def _procedure_id(row_id: str, column_id: str) -> str:
-    return f"ko-kh-{_h('proc', row_id, column_id)[:32]}"
-
-
-def _tool_id(table_id: str, norm_name: str) -> str:
-    return f"ko-kh-{_h('tool', table_id, norm_name)[:32]}"
+def _cell_ko_id(table_id: str, column_name: str, val_key: str) -> str:
+    """A knowledge object's id (design doc §④): identity = (table, COLUMN
+    NAME, normalized value) — column NAME, not column_id, so renaming a
+    column re-keys its cells' KOs onto a fresh identity (correct: per the
+    model, a column's name IS its object_type, so renaming it is a type
+    change, not a cosmetic edit). Two rows with the same column + the same
+    ``value_key`` collide onto this SAME id — that collision is the entire
+    "同列同值跨行归并" merge mechanism, not a bug to guard against."""
+    return f"ko-kh-{_h(table_id, column_name, val_key)[:32]}"
 
 
 def _element_id(row_id: str, column_id: str) -> str:
@@ -105,6 +129,25 @@ def _chunk_row_hash(row_id: str) -> str:
 
 def _relation_id(source_object_id: str, edge_type: str, target_object_id: str) -> str:
     return f"kr-kh-{_h(source_object_id, edge_type, target_object_id)[:32]}"
+
+
+def _resolve_row_title(anchor_column, columns, cell_nets, position: int) -> str:
+    """The row's display title used for section_path/evidence labels (design
+    doc §① "行标题自动合成"), independent of whether this row ends up
+    contributing any KO at all: the anchor cell's own ``node_name`` when the
+    table has an anchor column AND this row's anchor cell has content;
+    otherwise a synthesized title from up to 3 of this row's other non-empty
+    cells (``textops.compose_row_title`` — covers BOTH "no anchor column"
+    tables and an anchor-having table's occasional row whose anchor cell
+    itself is blank); "行{position+1}" when every cell is empty (the only
+    fallback ``compose_row_title`` itself does not apply, since it has no
+    notion of the row's position — see that function's own docstring)."""
+    if anchor_column is not None:
+        anchor_text = cell_nets[anchor_column["id"]]
+        if anchor_text:
+            return textops.node_name(anchor_text)
+    composed = textops.compose_row_title([cell_nets[c["id"]] for c in columns])
+    return composed or f"行{position + 1}"
 
 
 def _split_long_text(text: str, limit: int = _CHUNK_CHAR_LIMIT) -> List[str]:
@@ -144,6 +187,28 @@ def _evidence(source_id: str, source_title: str, element_id: str, element_type: 
     }
 
 
+def find_legacy_projected_table_ids(db) -> "list[str]":
+    """Pure detection query for the one-shot startup migration bridge
+    (``KnowhowProjector.reproject_legacy_tables`` below, wired in by
+    ``app.services.startup_warmup``): every table_id that still has at least
+    one PR-1-model KO — ``object_type`` one of the fixed legacy strings
+    (``case``/``procedure``/``tool``) AND an id carrying knowhow's own
+    ``ko-kh-`` prefix (excludes a same-named object_type from some other
+    pipeline, e.g. generic LLM extraction's own "concept"/"claim"/"procedure"
+    types, which never share this prefix). A plain SELECT (delegated to
+    ``KnowledgeStore.legacy_typed_table_ids`` — this codebase's SQL-ownership
+    rule keeps the actual query text in the store, not here) — this function
+    performs no mutation and takes no lock; the caller owns scheduling.
+
+    Self-extinguishing by construction: once a table is reprojected under the
+    cell-level model its KOs' ``object_type`` becomes that cell's COLUMN
+    NAME, which only accidentally re-matches this query if a user's own
+    column happens to be literally named "case"/"procedure"/"tool" — an
+    accepted, harmless false positive (reprojecting an already-current table
+    is an idempotent no-op, not a correctness bug)."""
+    return KnowledgeStore.legacy_typed_table_ids(db, _LEGACY_OBJECT_TYPES, "ko-kh-")
+
+
 class KnowhowProjector:
     def __init__(
         self,
@@ -177,11 +242,11 @@ class KnowhowProjector:
     # ------------------------------------------------------- hidden source
     def ensure_hidden_source(self, table_id: str) -> str:
         """Idempotent: returns the table's existing hidden source if one is
-        already recorded and still resolves, else mints one. ``project_row``
+        already recorded and still resolves, else mints one. ``project_table``
         calls this itself (its own signature carries no source_id), so a
-        table's very first cell edit transparently creates its hidden
+        table's very first projection transparently creates its hidden
         source — callers never need to sequence ensure_hidden_source before
-        project_row by hand."""
+        project_table by hand."""
         table = self.knowhow.get_knowhow_table(table_id)
         existing = table.get("hidden_source_id")
         if existing:
@@ -209,87 +274,121 @@ class KnowhowProjector:
         return source_id
 
     # ------------------------------------------------------------- project
-    def project_row(self, table_id: str, row_id: str) -> None:
-        """Idempotent, per-row projection (task brief step ①-⑤). Only the
-        embedding call is failure-tolerant (network I/O) — everything else
-        either succeeds or raises normally (a genuine bug shouldn't be
-        silently swallowed and mis-reported as an "embedding failure")."""
-        table = self.knowhow.get_knowhow_table(table_id)
-        row = next((r for r in table["rows"] if r["id"] == row_id), None)
-        if row is None:
-            return  # deleted mid-flight — nothing left to project
+    def project_table(self, table_id: str, *, embed: bool = True) -> None:
+        """THE projection entry point (single-flight full-table pass): for
+        every row, rewrite its elements + diff/rewrite its chunks (existing
+        per-cell diff machinery, untouched — only a genuinely changed cell's
+        chunk gets a fresh embed) and accumulate this row's contribution to
+        the table-wide KO/edge model in memory; ONLY AFTER every row has been
+        visited, atomically tear down and rebuild every KO/edge this table's
+        hidden source owns from the accumulated result (see the module
+        docstring's point 2 for why this ordering matters on a mid-pass
+        failure). A table with no anchor column (or whose anchor was cleared)
+        naturally accumulates nothing, so this same rebuild step correctly
+        reduces to "wipe, insert nothing" for it (design doc §① "记录型...
+        不建任何图谱节点" and the anchor-removed transition case).
 
-        self.knowhow.set_knowhow_row_projection(row_id, "syncing")
+        ``embed=False`` skips the embedding-attempt block entirely (still
+        settles every row's status) — for a caller that has already put
+        correct vectors in place through some other path (e.g. a future
+        deep-copy that remaps ids via raw SQL) and wants a fast structural-
+        only KO/edge rebuild with a hard guarantee of zero embedder calls,
+        not merely "none turned out to be necessary".
+
+        Only the embedding call is failure-tolerant (network I/O) — every
+        structural write either succeeds or raises normally (a genuine bug
+        must not be silently swallowed and mis-reported as an "embedding
+        failure"); see ``_write_elements``/``_write_chunks`` and the per-row
+        try/except below."""
+        table = self.knowhow.get_knowhow_table(table_id)
         notebook_id = table["notebook_id"]
         source_id = self.ensure_hidden_source(table_id)
         columns = table["columns"]
-        cells = row["cells"]
-        position = row["position"]
-
-        # ① concept = concept cell's net-text FIRST LINE, else "行{position+1}"
-        # transitional (PR-2+3 Task 1): 'anchor' is migration 17's name for the
-        # row-title column; accepted alongside 'concept' until Task 2's rework.
-        concept_column = next(
-            (c for c in columns if c["role"] in ("concept", "anchor")), None
-        )
-        concept_raw = (
-            textops.strip_images(cells.get(concept_column["id"], "")).strip()
-            if concept_column is not None else ""
-        )
-        concept = (concept_raw.splitlines()[0].strip() if concept_raw else "") or (
-            f"行{position + 1}"
-        )
-        cell_nets = {
-            column["id"]: textops.strip_images(cells.get(column["id"], "")).strip()
-            for column in columns
-        }
-
+        anchor_column = next((c for c in columns if c["role"] == "anchor"), None)
         now = self.now()
 
-        try:
-            with self.database.write() as db:
-                self._write_elements(db, source_id, table_id, row_id, columns, cell_nets, concept, now)
-                embed_targets, carry_over_vectors = self._write_chunks(
-                    db, source_id, notebook_id, table, row_id, columns, cell_nets, concept, now
-                )
-                self._write_knowledge(
-                    db, source_id, notebook_id, table, table_id, row_id, columns, cell_nets, concept, now
-                )
-        except Exception:
-            # Structural writes (elements/chunks/KOs) are a programming
-            # surface, not network I/O — unlike the embed call below, a
-            # failure here is a genuine bug and must fail loud (re-raise).
-            # But the row must not be left claiming 'syncing' forever: no
-            # other code path ever revisits it, so a silent-'syncing' row
-            # would look perpetually in-progress instead of honestly failed.
-            self.knowhow.set_knowhow_row_projection(row_id, "failed")
-            raise
+        # Table-wide KO/edge accumulation — merging is inherently cross-row,
+        # so this can only be resolved once every row has been walked (see
+        # module docstring point 2 for why the actual DB rebuild waits until
+        # after the loop, not just this accumulation).
+        ko_acc: dict = {}
+        edge_rows: List[tuple] = []
+        edge_ids_seen: set = set()
 
-        failed = False
-        if embed_targets or carry_over_vectors:
+        for row in table["rows"]:
+            row_id = row["id"]
+            self.knowhow.set_knowhow_row_projection(row_id, "syncing")
+            cells = row["cells"]
+            cell_nets = {
+                column["id"]: textops.strip_images(cells.get(column["id"], "")).strip()
+                for column in columns
+            }
+            row_title = _resolve_row_title(anchor_column, columns, cell_nets, row["position"])
+
             try:
-                # Carry-over first: it's a plain re-persist of an already-
-                # computed vector (no embedder call, must run once the
-                # structural transaction above has committed — chunk_
-                # embeddings' FK target must exist first), independent of
-                # whatever embed_chunk_ids below does.
-                if carry_over_vectors:
-                    self.embedding.vectors.replace_chunk_vectors(
-                        notebook_id, carry_over_vectors, created_at=now
+                with self.database.write() as db:
+                    self._write_elements(
+                        db, source_id, table_id, row_id, columns, cell_nets, row_title, now
                     )
-                if embed_targets:
-                    self.embedding.embed_chunk_ids(notebook_id, embed_targets)
-            except Exception as exc:  # noqa: BLE001 — surfaced via model_error, never raised
-                failed = True
-                self.note_model_error("knowhow_embed", self.settings.embed_model, exc)
+                    embed_targets, carry_over_vectors = self._write_chunks(
+                        db, source_id, notebook_id, table, row_id, columns, cell_nets,
+                        row_title, now,
+                    )
+                    if anchor_column is not None:
+                        self._accumulate_row_knowledge(
+                            ko_acc, edge_rows, edge_ids_seen, notebook_id, source_id,
+                            table_id, table, row_id, columns, cell_nets, anchor_column,
+                            row_title, now,
+                        )
+            except Exception:
+                # Structural writes (elements/chunks/in-memory KO accumulation)
+                # are a programming surface, not network I/O — unlike the
+                # embed call below, a failure here is a genuine bug and must
+                # fail loud (re-raise). But the row must not be left claiming
+                # 'syncing' forever: no other code path ever revisits it, so a
+                # silent-'syncing' row would look perpetually in-progress
+                # instead of honestly failed.
+                self.knowhow.set_knowhow_row_projection(row_id, "failed")
+                raise
 
-        self.knowhow.set_knowhow_row_projection(row_id, "failed" if failed else "synced")
+            failed = False
+            if embed and (embed_targets or carry_over_vectors):
+                try:
+                    # Carry-over first: it's a plain re-persist of an already-
+                    # computed vector (no embedder call, must run once the
+                    # structural transaction above has committed — chunk_
+                    # embeddings' FK target must exist first), independent of
+                    # whatever embed_chunk_ids below does.
+                    if carry_over_vectors:
+                        self.embedding.vectors.replace_chunk_vectors(
+                            notebook_id, carry_over_vectors, created_at=now
+                        )
+                    if embed_targets:
+                        self.embedding.embed_chunk_ids(notebook_id, embed_targets)
+                except Exception as exc:  # noqa: BLE001 — surfaced via model_error, never raised
+                    failed = True
+                    self.note_model_error("knowhow_embed", self.settings.embed_model, exc)
+
+            self.knowhow.set_knowhow_row_projection(row_id, "failed" if failed else "synced")
+
+        object_rows = [
+            self._ko_object_row(notebook_id, source_id, ko_id, entry, now)
+            for ko_id, entry in ko_acc.items()
+        ]
+        with self.database.write() as db:
+            self.knowledge.delete_relations_by_source(db, source_id)
+            self.knowledge.delete_objects_by_source(db, source_id)
+            if object_rows:
+                self.knowledge.insert_object_chunk(db, object_rows)
+            if edge_rows:
+                self.knowledge.insert_relation_chunk(db, edge_rows)
+
         self.knowhow.bump_knowhow_mutation_seq(table_id)
         self.invalidate_unified_cache(notebook_id)
         self.mark_unified_dirty(notebook_id)
 
-    # --- step 2: elements --------------------------------------------------
-    def _write_elements(self, db, source_id, table_id, row_id, columns, cell_nets, concept, now):
+    # --- elements ------------------------------------------------------
+    def _write_elements(self, db, source_id, table_id, row_id, columns, cell_nets, row_title, now):
         self.sources.delete_elements_by_knowhow_row(db, source_id, row_id)
         writes = []
         for column in columns:
@@ -300,19 +399,19 @@ class KnowhowProjector:
             writes.append(SourceElementWrite(
                 id=_element_id(row_id, column["id"]),
                 element_type="knowhow_cell",
-                location_label=f"{concept} › {column['name']}",
+                location_label=f"{row_title} › {column['name']}",
                 text=text,
                 metadata={"knowhow": {
                     "table_id": table_id, "row_id": row_id, "column_id": column["id"],
                     "role": column["role"], "column_name": column["name"],
-                    "concept": concept, "content_hash": content_hash,
+                    "row_title": row_title, "content_hash": content_hash,
                 }},
             ))
         self.sources.insert_elements(db, source_id, writes, created_at=now)
 
-    # --- step 3: chunks (per-cell diff) ------------------------------------
+    # --- chunks (per-cell diff) -----------------------------------------
     def _write_chunks(self, db, source_id, notebook_id, table, row_id, columns,
-                      cell_nets, concept, now) -> "tuple[List[dict], List[tuple]]":
+                      cell_nets, row_title, now) -> "tuple[List[dict], List[tuple]]":
         """Returns ``(embed_targets, carry_over_vectors)``:
         ``embed_targets`` (``[{"id","text"}, ...]``) — chunks whose TEXT
         actually changed, which genuinely need a fresh embedder call, PLUS
@@ -344,7 +443,7 @@ class KnowhowProjector:
             col_pos = column["position"]
             live_col_positions.add(col_pos)
             text = cell_nets[column["id"]]
-            section_path = f"{table['title']} › {concept} › {column['name']}"
+            section_path = f"{table['title']} › {row_title} › {column['name']}"
             parts_text = _split_long_text(text) if text else []
             new_specs = [(t, section_path) for t in parts_text]
             old_group = old_by_col.get(col_pos, [])
@@ -357,11 +456,12 @@ class KnowhowProjector:
                 continue
             # Text-only equality (ignoring section_path) — e.g. this is a
             # SIBLING of the cell that actually changed: every column's
-            # section_path embeds the row's concept, so editing the concept
-            # cell alone moves every sibling's path even though their own
-            # text is untouched. The row must still be rewritten (path
-            # moved), but nothing here should pay for a redundant embedder
-            # call on text that hasn't changed.
+            # section_path embeds the row's title, so editing the row-title
+            # cell alone (or, for an anchor-less/blank-anchor row, any cell
+            # feeding compose_row_title) moves every sibling's path even
+            # though their own text is untouched. The row must still be
+            # rewritten (path moved), but nothing here should pay for a
+            # redundant embedder call on text that hasn't changed.
             text_only_changed = [t for t, _ in old_specs] == [t for t, _ in new_specs]
             to_delete_ids.extend(r["id"] for r in old_group)
             if not text:
@@ -381,7 +481,7 @@ class KnowhowProjector:
         # A column removed (or renumbered away) from the table since the
         # last projection leaves its old chunk group unvisited by the loop
         # above (it only walks CURRENT columns) — sweep every old group
-        # whose position no longer belongs to a live column so project_row
+        # whose position no longer belongs to a live column so project_table
         # alone stays self-healing for column deletes/reorders, the same
         # delete-all-then-reinsert reconciliation _write_elements already
         # does by row_id.
@@ -427,137 +527,145 @@ class KnowhowProjector:
         self.chunks.insert_rows(db, notebook_id, source_id, to_insert, created_at=now)
         return embed_targets, carry_over_vectors
 
-    # --- step 4: KO / edges -------------------------------------------------
-    def _write_knowledge(self, db, source_id, notebook_id, table, table_id, row_id,
-                         columns, cell_nets, concept, now) -> None:
-        row_case_id = _case_id(row_id)
-        self.knowledge.delete_relations_by_source_object(db, notebook_id, row_case_id)
-        self.knowledge.delete_objects_by_source_and_row(db, source_id, row_id)
-
-        # A row with no content in ANY cell projects NO case KO (belt-and-braces
-        # with grid_parser dropping all-empty rows at import — this covers the
-        # edit path, e.g. a row whose every cell was cleared). The delete calls
-        # above already ran, so an emptied row correctly leaves zero KOs behind
-        # rather than a phantom empty-fields case.
-        if not any(cell_nets.values()):
+    # --- KO/edge accumulation (in-memory; written once at the end) --------
+    def _accumulate_row_knowledge(self, ko_acc, edge_rows, edge_ids_seen, notebook_id,
+                                  source_id, table_id, table, row_id, columns, cell_nets,
+                                  anchor_column, row_title, now) -> None:
+        """This row's contribution to the table-wide KO/edge model (design
+        doc §④): the row-title (anchor) cell's own KO, then every OTHER
+        non-empty cell's KO with an ``about`` edge pointing at it. A row
+        whose anchor cell itself has NO content contributes NOTHING —
+        neither a row-title KO (a KO's identity is a real column value; an
+        empty cell has none, matching the universal "每个非空格子→KO" rule
+        applied to the anchor column too) nor, therefore, any edges for its
+        other cells (there is no target to point at). Those other cells are
+        NOT silently dropped from the graph forever, though: if the SAME
+        value recurs in a row whose anchor IS filled, it merges into that
+        occurrence's KO and picks up an edge there. Entity-kind cells split
+        into one KO per list item (``textops.split_tools``); procedure-kind
+        cells attach their parsed ``steps[]``; everything else is one KO for
+        the whole cell's net text."""
+        anchor_text = cell_nets[anchor_column["id"]]
+        if not anchor_text:
             return
-
-        object_rows: List[tuple] = []
-        relation_rows: List[tuple] = []
-
-        fields: dict = {}
-        case_evidence = []
+        row_title_ko_id = self._merge_cell(
+            ko_acc, table_id, anchor_column, anchor_text, row_id, row_title, source_id, table, now,
+        )
         for column in columns:
-            text = cell_nets[column["id"]]
-            if not text:
-                continue
-            fields[column["role"]] = text
-            case_evidence.append(_evidence(
-                source_id, table["title"], _element_id(row_id, column["id"]),
-                "knowhow_cell", f"{concept} › {column['name']}", text,
-            ))
-        case_payload = {"title": concept, "table_id": table_id, "row_id": row_id, "fields": fields}
-        object_rows.append((
-            row_case_id, notebook_id, "case", "approved",
-            json.dumps(case_payload, ensure_ascii=False),
-            json.dumps(case_evidence, ensure_ascii=False),
-            source_id, now, now,
-        ))
-
-        for column in columns:
-            if column["role"] not in PROCEDURE_ROLES:
+            if column["id"] == anchor_column["id"]:
                 continue
             text = cell_nets[column["id"]]
             if not text:
                 continue
-            proc_id = _procedure_id(row_id, column["id"])
-            proc_payload = {
-                "method_kind": column["role"],
-                "name": f"{concept}·{column['name']}",
-                "table_id": table_id, "row_id": row_id, "column_id": column["id"],
-                "steps": textops.parse_steps(text),
+            if column["role"] == "entity":
+                for item in textops.split_tools(text):
+                    item_ko_id = self._merge_cell(
+                        ko_acc, table_id, column, item, row_id, row_title, source_id, table, now,
+                    )
+                    self._add_about_edge(
+                        edge_rows, edge_ids_seen, notebook_id, source_id,
+                        item_ko_id, row_title_ko_id, now,
+                    )
+            else:
+                steps = textops.parse_steps(text) if column["role"] == "procedure" else None
+                cell_ko_id = self._merge_cell(
+                    ko_acc, table_id, column, text, row_id, row_title, source_id, table, now,
+                    steps=steps,
+                )
+                self._add_about_edge(
+                    edge_rows, edge_ids_seen, notebook_id, source_id,
+                    cell_ko_id, row_title_ko_id, now,
+                )
+
+    @staticmethod
+    def _merge_cell(ko_acc, table_id, column, text, row_id, row_title, source_id, table,
+                    now, *, steps=None) -> str:
+        """Merge one cell's value into the accumulator, returning its KO id.
+        FIRST occurrence wins for the stored name/text/steps (mirrors
+        ``textops.split_tools``'s own "keeps first-seen spelling/casing"
+        convention, and the PR-1 tool-merge precedent it replaces) — a later
+        occurrence only ever ADDS a row_id + an evidence item, never
+        overwrites. Evidence's location_label uses THIS row's OWN row_title
+        (not the merged KO's stored name) — section_path/evidence are a
+        per-row display concern, independent of which literal text a
+        cross-row merge happened to see first."""
+        val_key = textops.value_key(text)
+        ko_id = _cell_ko_id(table_id, column["name"], val_key)
+        evidence_item = _evidence(
+            source_id, table["title"], _element_id(row_id, column["id"]),
+            "knowhow_cell", f"{row_title} › {column['name']}", text,
+        )
+        entry = ko_acc.get(ko_id)
+        if entry is None:
+            ko_acc[ko_id] = {
+                "object_type": column["name"],
+                "name": textops.node_name(text),
                 "text": text,
+                "table_id": table_id,
+                "column_id": column["id"],
+                "rows": [row_id],
+                "evidence": [evidence_item],
+                "steps": steps,
             }
-            proc_evidence = [_evidence(
-                source_id, table["title"], _element_id(row_id, column["id"]),
-                "knowhow_cell", f"{concept} › {column['name']}", text,
-            )]
-            object_rows.append((
-                proc_id, notebook_id, "procedure", "approved",
-                json.dumps(proc_payload, ensure_ascii=False),
-                json.dumps(proc_evidence, ensure_ascii=False),
-                source_id, now, now,
-            ))
-            edge_type = _EDGE_BY_ROLE[column["role"]]
-            relation_rows.append((
-                _relation_id(row_case_id, edge_type, proc_id), notebook_id, source_id,
-                row_case_id, proc_id, edge_type, "[]", now,
-            ))
+        else:
+            if row_id not in entry["rows"]:
+                entry["rows"].append(row_id)
+            entry["evidence"].append(evidence_item)
+        return ko_id
 
-        for column in columns:
-            # transitional (PR-2+3 Task 1): 'entity' is migration 17's name
-            # for the old 'tool' role; accepted alongside it until Task 2.
-            if column["role"] not in ("tool", "entity"):
-                continue
-            text = cell_nets[column["id"]]
-            if not text:
-                continue
-            for name in textops.split_tools(text):
-                norm_name = name.strip().casefold()
-                t_id = _tool_id(table_id, norm_name)
-                tool_payload = {"name": name, "table_id": table_id}
-                tool_evidence = [_evidence(
-                    source_id, table["title"], _element_id(row_id, column["id"]),
-                    "knowhow_cell", f"{concept} › {column['name']}", name,
-                )]
-                self.knowledge.insert_object_if_missing(db, (
-                    t_id, notebook_id, "tool", "approved",
-                    json.dumps(tool_payload, ensure_ascii=False),
-                    json.dumps(tool_evidence, ensure_ascii=False),
-                    source_id, now, now,
-                ))
-                relation_rows.append((
-                    _relation_id(row_case_id, "requires_tool", t_id), notebook_id, source_id,
-                    row_case_id, t_id, "requires_tool", "[]", now,
-                ))
+    @staticmethod
+    def _add_about_edge(edge_rows, edge_ids_seen, notebook_id, source_id,
+                        src_ko_id, dst_ko_id, now) -> None:
+        """Append one ``about`` edge (cell-KO --about--> row-title-KO),
+        deduped by its own content-derived id: two rows that share BOTH
+        endpoints (same cell value AND same row-title value) produce the
+        exact same edge id, and inserting it twice in one ``executemany``
+        batch would violate ``knowledge_relations.id``'s primary key — so
+        this collapses to a single row instead, exactly matching "同列同值
+        跨行归并" applied to edges. The row-title cell's own KO never calls
+        this for itself (the accumulation loop above only invokes it for
+        OTHER cells), so no self-edge is possible."""
+        edge_id = _relation_id(src_ko_id, "about", dst_ko_id)
+        if edge_id in edge_ids_seen:
+            return
+        edge_ids_seen.add(edge_id)
+        edge_rows.append(
+            (edge_id, notebook_id, source_id, src_ko_id, dst_ko_id, "about", "[]", now)
+        )
 
-        self.knowledge.insert_object_chunk(db, object_rows)
-        self.knowledge.insert_relation_chunk(db, relation_rows)
-
-    # -------------------------------------------------- full-table rebuild
-    def project_table(self, table_id: str) -> None:
-        """Full-rebuild escape hatch (task brief: "全量重建=逃生口，顺带清孤儿
-        tool KO"): wipe every object/relation/chunk/element this table's
-        hidden source has ever produced — including tool objects no row
-        references anymore — then reproject every current row from scratch.
-        Deliberately more expensive than project_row's incremental per-cell
-        diff (every chunk gets rebuilt+re-embedded); this is a user-triggered
-        "when in doubt, reset" button (design doc: role/column changes are
-        rare, and the table is capped at ~100 rows, so brute-force is cheap
-        at this scale), not a per-edit hot path."""
-        source_id = self.ensure_hidden_source(table_id)
-        table = self.knowhow.get_knowhow_table(table_id)
-        notebook_id = table["notebook_id"]
-        now = self.now()
-        with self.database.write() as db:
-            self.knowledge.delete_relations_by_source(db, source_id)
-            self.knowledge.delete_objects_by_source(db, source_id)
-            self.sources.replace_elements(db, source_id, [], created_at=now)
-        self.chunks.replace_source_chunks(source_id, notebook_id, [], created_at=now)
-        for row in table["rows"]:
-            self.project_row(table_id, row["id"])
-        self.invalidate_unified_cache(notebook_id)
-        self.mark_unified_dirty(notebook_id)
+    @staticmethod
+    def _ko_object_row(notebook_id, source_id, ko_id, entry, now) -> tuple:
+        """Render one accumulated KO entry into ``insert_object_chunk``'s row
+        tuple (design doc §④ payload shape: name/text/table_id/rows/
+        column_id/column_name, plus ``steps`` only for procedure-kind
+        cells)."""
+        payload = {
+            "name": entry["name"],
+            "text": entry["text"],
+            "table_id": entry["table_id"],
+            "rows": entry["rows"],
+            "column_id": entry["column_id"],
+            "column_name": entry["object_type"],
+        }
+        if entry["steps"] is not None:
+            payload["steps"] = entry["steps"]
+        return (
+            ko_id, notebook_id, entry["object_type"], "approved",
+            json.dumps(payload, ensure_ascii=False),
+            json.dumps(entry["evidence"], ensure_ascii=False),
+            source_id, now, now,
+        )
 
     # ------------------------------------------------------------- delete
     def delete_table_projection(self, hidden_source_id: "str | None") -> None:
         """Cleanup companion to KnowhowStore.delete_knowhow_table: that call
         cascades away the table/columns/rows/cells and hands back the
         (possibly None) hidden_source_id; this removes everything the
-        projector ever derived from it — relations, objects (case/procedure/
-        tool), chunks(+FTS), elements, and the hidden source row itself.
-        Idempotent no-op for a falsy or already-gone id (this codebase's
-        zero-row UPDATE/DELETE convention — see KnowhowStore's docstring).
+        projector ever derived from it — relations, objects (every dynamic
+        per-column type this table ever produced), chunks(+FTS), elements,
+        and the hidden source row itself. Idempotent no-op for a falsy or
+        already-gone id (this codebase's zero-row UPDATE/DELETE convention —
+        see KnowhowStore's docstring).
 
         Ordering note: chunks are wiped (replace_source_chunks, which cleans
         chunks_fts via a `chunks WHERE source_id=?` subquery) BEFORE the
@@ -581,5 +689,32 @@ class KnowhowProjector:
         self.invalidate_unified_cache(notebook_id)
         self.mark_unified_dirty(notebook_id)
 
+    # ------------------------------------------- legacy-model migration
+    def reproject_legacy_tables(self) -> "list[str]":
+        """One-shot startup catch-up (PR-2+3 Task 2's migration bridge, wired
+        in by ``app.services.startup_warmup``): find every knowhow table
+        still carrying PR-1's fixed-vocabulary KOs (see
+        ``find_legacy_projected_table_ids``) and submit ONE background
+        ``project_table`` job per table via ``app.services.background_jobs``
+        (governance constraint: background work only ever goes through
+        ``background_jobs.submit`` — never a bare thread), replacing them
+        with the cell-level dynamic-type model. Structural rebuild only —
+        any cell whose text hasn't changed keeps its existing chunk/vector
+        (the same per-cell diff ``project_table`` always does), so this
+        migration costs zero LLM/embedder calls per already-embedded cell.
+        Self-extinguishing: once reprojected, a table's KOs no longer match
+        the legacy detection query, so a later call (e.g. the next process
+        restart) finds nothing left to do. Returns the table_ids it
+        scheduled, for test assertions/logging — the caller decides whether
+        and how to report that."""
+        with self.database.connect() as db:
+            table_ids = find_legacy_projected_table_ids(db)
+        for table_id in table_ids:
+            background_jobs.submit(
+                self.project_table, table_id,
+                name=f"knowhow-legacy-reproject-{table_id}",
+            )
+        return table_ids
 
-__all__ = ["KnowhowProjector"]
+
+__all__ = ["KnowhowProjector", "find_legacy_projected_table_ids"]

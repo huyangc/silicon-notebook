@@ -9,7 +9,10 @@ see a "服务启动中" screen instead of a multi-second hang.
 
 Robustness: migration failure keeps the service not-ready (an un-migrated schema
 is unusable); per-notebook warm failures are best-effort inside
-``warm_open_path_caches`` and never abort readiness.
+``warm_open_path_caches`` and never abort readiness. The one-shot knowhow
+legacy-model reprojection sweep below runs strictly AFTER ``mark_ready()`` (it
+is a background catch-up, not a readiness precondition) and is itself
+exception-safe, so it can never flip a successful startup back to "error".
 """
 from __future__ import annotations
 
@@ -41,6 +44,36 @@ def run_startup() -> None:
         total = repo.warm_open_path_caches(progress=_progress)
         readiness.mark_ready()
         logger.info("startup: READY — %d notebook(s) warmed", total)
+        _reproject_legacy_knowhow_tables(repo)
     except Exception as exc:  # noqa: BLE001 — surface via readiness, never crash
         readiness.mark_error(f"{type(exc).__name__}: {exc}")
         logger.exception("startup FAILED — service stays not-ready")
+
+
+def _reproject_legacy_knowhow_tables(repo) -> None:
+    """One-shot post-readiness migration bridge (knowhow-tables PR-2+3 Task 2,
+    design doc §① compatibility note): schedule a background cell-level
+    reprojection for every knowhow table still carrying PR-1's fixed
+    case/procedure/tool KOs (``KnowhowProjector.reproject_legacy_tables`` —
+    see ``app.services.knowhow.projection`` for the detection query and the
+    actual ``background_jobs.submit`` dispatch). Deliberately minimal here:
+    all the real logic/tests live with the projector; this is just the wire-
+    up call, mirroring how the migrate/warm steps above are themselves this
+    module's own one-line calls into their owning services.
+
+    Runs strictly AFTER ``mark_ready()`` (never delays the readiness gate —
+    scale is bounded, ~100 rows/table, but there is no reason to make a
+    first-request-after-restart wait on it either) and swallows every
+    exception itself so a bug here can never be mistaken for a migration/
+    warm-up failure by the caller's own try/except."""
+    try:
+        from app.services.knowhow.api import build_projector
+
+        table_ids = build_projector(repo).reproject_legacy_tables()
+        if table_ids:
+            logger.info(
+                "startup: scheduled cell-model reprojection for %d legacy "
+                "knowhow table(s)", len(table_ids),
+            )
+    except Exception:  # noqa: BLE001 — best-effort, must never affect readiness
+        logger.exception("startup: legacy knowhow reprojection scan failed (non-fatal)")

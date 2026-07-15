@@ -1799,8 +1799,12 @@ TASK4_KNOWHOW_ALLOWED_MEMBER_FILES = {
 # for direct-DB assertions and the embedder_configured probe. Same broad
 # (file, member) allowance style as TASK2_KNOWHOW_ALLOWED_MEMBER_FILES rather
 # than pinning exact lines.
+# Line 18->24: PR-2+3 Task 2 rewrites this test file end to end for the
+# cell-level node model (case/procedure/tool -> dynamic per-column types),
+# expanding the module docstring/imports above this exact import line by 6
+# net lines. Not itself API surface — the member/file pair is unchanged.
 TASK5_KNOWHOW_ALLOWED_IMPORTS = {
-    ("backend/tests/test_knowhow_projection.py", 18, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_knowhow_projection.py", 24, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK5_KNOWHOW_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_knowhow_projection.py", name)
@@ -1839,8 +1843,8 @@ TASK6_KNOWHOW_ALLOWED_MEMBER_FILES = {
 # is registered both places since the two guards scan independently.
 # Mirrors Task 4's exact-consumer choice for `storage_dir` in assets.py.
 TASK6_KNOWHOW_ALLOWED_CONSUMERS = {
-    ("_runtime", "backend/app/services/knowhow/api.py:85"),
-    ("settings", "backend/app/services/knowhow/api.py:87"),
+    ("_runtime", "backend/app/services/knowhow/api.py:138"),
+    ("settings", "backend/app/services/knowhow/api.py:140"),
 }
 
 # Task 10 (knowhow-tables-pr1): the end-to-end projection -> retrieval
@@ -2997,6 +3001,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK1_PAPER_META_ALLOWED_IMPORTS
                     or site in TASK3_PAPER_META_ALLOWED_IMPORTS
                     or site in TASK4_PAPER_META_ALLOWED_IMPORTS
+                    or site in TASK3_KNOWHOW_PR23_ALLOWED_IMPORTS
                 )
 
 
@@ -3407,3 +3412,32 @@ def test_snapshot_generator_annotation_resolves_to_the_facade_type():
         "notebook_id": str,
         "return": dict[str, object],
     }
+
+
+# PR-2+3 Task 3 (knowhow-tables editing API + ProjectionScheduler): its own
+# HTTP-level test composes the real facade the same way Task 1/2/4/5/6's
+# sibling tests do (register/login via HTTP, then `repo.add_member` directly
+# for the read-only-member fixture — there is no HTTP "add member by id"
+# endpoint — and `repo._connect` for direct knowledge_objects-count
+# assertions). Appended at EOF (not interleaved into the existing
+# TASK*_KNOWHOW blocks above) so this registration cannot shift any of the
+# other exact-line-pinned entries already in this very large file — see
+# TASK6_KNOWHOW_ALLOWED_CONSUMERS above, whose own line numbers this task
+# already had to bump once for exactly that reason.
+TASK3_KNOWHOW_PR23_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_editing_api.py", 23, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK3_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_editing_api.py", name)
+    for name in {"SQLiteRepository", "_connect", "add_member"}
+}
+# ALL_TASK_ALLOWED_MEMBER_FILES (defined far above, near the other
+# TASKn_ALLOWED_MEMBER_FILES unions) is a plain module-level tuple-expression
+# assignment evaluated at import time — it cannot forward-reference a name
+# defined here at EOF the way the OR-chain inside a function body can (that
+# one resolves lazily, at call time). Re-binding it here, AFTER this
+# constant exists, keeps this task's registration a pure EOF append with
+# zero risk of shifting any of the many exact-line-pinned entries earlier in
+# this file, at the cost of one extra rebinding statement instead of an
+# inline union.
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK3_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
