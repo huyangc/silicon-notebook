@@ -201,7 +201,9 @@ export const reprojectKnowhowTable = (notebookId: string, tableId: string): Prom
 
 // 仅匹配「图片链接」且目标协议为 asset:// 的情形；非图片文本、非 asset 协议的
 // 图片/链接一律不动(仅替换图片链接目标，不做全文 asset:// 字符串替换)。
-const IMAGE_ASSET_URL_RE = /!\[([^\]]*)\]\(asset:\/\/([^)\s]+)\)/g;
+// id 段收紧为 `[A-Za-z0-9_-]+`(资产 id 的真实字符集)：既避免把 `asset://../..`
+// 之类含 `.`/`/` 的路径穿越写成受信 API URL(纵深防御)，也让不合法 id 原样保留。
+const IMAGE_ASSET_URL_RE = /!\[([^\]]*)\]\(asset:\/\/([A-Za-z0-9_-]+)\)/g;
 
 // 格子 markdown 中 `![alt](asset://<id>)` → 带鉴权的资产 API URL，供渲染态直接
 // 当 <img src> 使用。写死协议为 asset:// 才改写，其余 URL(http/相对路径等)原样保留。

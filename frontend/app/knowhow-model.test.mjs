@@ -49,6 +49,23 @@ test("rewriteAssetUrls: 非 asset 协议的图片/链接不动", () => {
   assert.strictEqual(rewriteAssetUrls(md, "nb-1", "http://api.test/api"), md);
 });
 
+test("rewriteAssetUrls: 合法 id(含连字符/下划线)改写", () => {
+  const md = "![截图](asset://asset-9f3a_bc-01)";
+  const out = rewriteAssetUrls(md, "nb-1", "http://api.test/api");
+  assert.strictEqual(out, "![截图](http://api.test/api/notebooks/nb-1/assets/asset-9f3a_bc-01)");
+});
+
+test("rewriteAssetUrls: 路径穿越/含斜杠或点的 id 不改写(纵深防御)", () => {
+  for (const md of [
+    "![x](asset://../../etc/passwd)",
+    "![x](asset://a1/b2)",
+    "![x](asset://a.b)",
+    "![x](asset://%2e%2e/secret)",
+  ]) {
+    assert.strictEqual(rewriteAssetUrls(md, "nb-1", "http://api.test/api"), md, md);
+  }
+});
+
 test("rewriteAssetUrls: 空字符串原样返回", () => {
   assert.strictEqual(rewriteAssetUrls("", "nb-1", "http://api.test/api"), "");
 });

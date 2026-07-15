@@ -76,9 +76,16 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
   // 向导可能在请求进行中被关闭（用户点 X/Esc）；卸载后忽略迟到的
   // then/catch，避免对已卸载组件 setState（镜像 knowhow-panel.tsx 里
   // KnowhowImage 组件的同类 cancelled 守卫写法）。
+  // 必须在 effect 体里把 mountedRef 置 true（而非只靠 useRef(true) 初值）：
+  // React 18 StrictMode 的 dev 双调用会 mount→unmount→mount，cleanup 已把
+  // ref 置 false，若 remount 不重置，ref 会永久停在 false——之后预览请求
+  // resolve 时被 `!mountedRef.current` 当作「已卸载」丢弃，界面卡在「解析中…」。
   const mountedRef = useRef(true);
-  useEffect(() => () => {
-    mountedRef.current = false;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   // 提交中（真正建表的请求，不可撤销/不可取消）时不允许关闭向导：Esc/背景点击
@@ -222,6 +229,7 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
           ) : null}
         </div>
       </section>
+      <ImportWizardStyles />
     </div>
   );
 }
@@ -394,8 +402,20 @@ function MapStep({
           {submitting ? "导入中…" : "确认导入"}
         </button>
       </div>
+    </div>
+  );
+}
 
-      <style jsx global>{`
+// ---------------------------------------------------------------------------
+// 样式：namespaced `knowhow-import-*` + `<style jsx global>`。必须挂在**始终
+// 渲染**的顶层 KnowhowImportWizard 里，而非某个按步骤条件渲染的子组件——否则
+// 「选文件」这一步（MapStep 尚未挂载）拿不到任何 .knowhow-import-* 规则，
+// modal 会以无样式的文档流原样铺开（背景/卡片/步骤 chip/隐藏原生 input 全失效）。
+// ---------------------------------------------------------------------------
+
+function ImportWizardStyles() {
+  return (
+    <style jsx global>{`
         .knowhow-import-backdrop {
           position: fixed;
           inset: 0;
@@ -756,6 +776,5 @@ function MapStep({
           cursor: not-allowed;
         }
       `}</style>
-    </div>
   );
 }

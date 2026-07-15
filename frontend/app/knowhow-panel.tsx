@@ -419,6 +419,18 @@ export function KnowhowPanel({ notebookId, apiBase, onClose }: KnowhowPanelProps
           gap: 8px;
         }
 
+        .knowhow-reproject-button {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          white-space: nowrap;
+        }
+
+        .knowhow-reproject-button:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
         .knowhow-confirm {
           display: inline-flex;
           align-items: center;
@@ -875,7 +887,13 @@ function KnowhowTableList({
       ) : (
         <div className="knowhow-table-cards">
           {tables.map((table) => (
-            <button type="button" key={table.id} className="knowhow-table-card" onClick={() => onOpen(table.id)}>
+            <button
+              type="button"
+              key={table.id}
+              className="knowhow-table-card"
+              aria-label={`打开表格：${table.title}`}
+              onClick={() => onOpen(table.id)}
+            >
               <strong title={table.title}>{table.title}</strong>
               {table.description && <p>{table.description}</p>}
               <span className="knowhow-table-card-meta">{table.rowCount} 行</span>
@@ -942,6 +960,19 @@ function KnowhowTableGrid({
           {detail?.description && <p>{detail.description}</p>}
         </div>
         <div className="knowhow-grid-toolbar-actions">
+          {/* 表级「重建投影」逃生口(spec 要求)：整表重投影，后台执行。区别于
+              失败行徽标上的行内「重试」——那只在某行 failed 时出现，这个入口
+              任何时候都在，供用户在整表走样时一键重建。进行中禁用防重复触发。 */}
+          <button
+            type="button"
+            className="sort-button knowhow-reproject-button"
+            onClick={onRetryReproject}
+            disabled={retryingReproject || deleting || !detail}
+            title="重新投影整张表（后台执行）"
+          >
+            <RefreshCw size={14} className={retryingReproject ? "knowhow-spin" : undefined} />
+            {retryingReproject ? "重建中…" : "重建投影"}
+          </button>
           {confirmDelete ? (
             <span className="knowhow-confirm">
               <span>删除这张表？行、格与投影产物将一并删除</span>
