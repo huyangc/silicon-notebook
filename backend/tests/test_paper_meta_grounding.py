@@ -169,3 +169,44 @@ def test_author_name_rotation_handles_last_first_middle_byline():
         model="m",
     )
     assert [a["name"] for a in meta["authors"]] == ["Ashish Noam Vaswani"]
+
+
+# --- Fix round 2: nested affiliations shape, arXiv-ID year blanking, unicode DOI punct ---
+
+
+def test_affiliations_as_plain_string_treated_as_single_entry():
+    meta = verify_paper_meta(
+        _base(authors=[{"name": "Ashish Vaswani", "affiliations": "Google Brain"}]),
+        HEAD,
+        model="m",
+    )
+    assert meta["authors"][0]["name"] == "Ashish Vaswani"
+    assert meta["authors"][0]["affiliation"] == "Google Brain"
+
+
+def test_affiliations_as_int_degrades_to_empty_without_crashing():
+    meta = verify_paper_meta(
+        _base(authors=[{"name": "Ashish Vaswani", "affiliations": 7}]),
+        HEAD,
+        model="m",
+    )
+    assert meta["authors"][0]["name"] == "Ashish Vaswani"
+    assert meta["authors"][0]["affiliation"] == ""
+
+
+def test_year_inside_arxiv_id_not_grounded_but_standalone_is():
+    head = "Y paper\narXiv:2007.12345v2\n"
+    meta = verify_paper_meta(_base(year=2007), head, model="m")
+    assert meta["pub_year"] is None
+    assert meta["dropped"]["year"] == 2007
+
+    meta2 = verify_paper_meta(
+        _base(year=2007), head + "Published in 2007.\n", model="m"
+    )
+    assert meta2["pub_year"] == 2007
+
+
+def test_doi_wrapped_in_unicode_quotes_accepted():
+    head = "Some text\n“10.9999/abc”\n"
+    meta = verify_paper_meta(_base(doi="10.9999/abc"), head, model="m")
+    assert meta["doi"] == "10.9999/abc"
