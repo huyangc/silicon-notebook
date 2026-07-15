@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
 import math
 from contextlib import contextmanager
 from typing import Any, Callable, Mapping, Sequence
@@ -32,6 +33,9 @@ from app.services.memory_inputs import (
     normalize_task_context,
     normalize_title,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 PUBLIC_TOOLS = (
@@ -61,15 +65,32 @@ def _is_loopback(host: str) -> bool:
     return host.lower().strip("[]") in {"127.0.0.1", "localhost", "::1"}
 
 
-def validate_mcp_deployment(bind_host: str, public_url: str) -> None:
-    """Fail closed when a remotely reachable MCP endpoint is plain HTTP."""
+def validate_mcp_deployment(
+    bind_host: str, public_url: str, *, require_https: bool = True
+) -> None:
+    """Guard a remotely reachable MCP endpoint that would serve plain HTTP.
+
+    Fail closed by default. When ``require_https`` is False (the product's
+    intranet default, wired in ``app.main.create_app``) keep serving but log a
+    prominent warning: the Agent Bearer token then crosses the network in
+    cleartext, so this is only safe on a trusted private network.
+    """
     parsed = urlparse(public_url)
     public_host = parsed.hostname or ""
     remotely_reachable = not _is_loopback(bind_host) or (
         public_host and not _is_loopback(public_host)
     )
     if remotely_reachable and parsed.scheme.lower() != "https":
-        raise RuntimeError("remote MCP deployment requires HTTPS")
+        if require_https:
+            raise RuntimeError("remote MCP deployment requires HTTPS")
+        logger.warning(
+            "MCP is serving remote clients over plain HTTP (bind_host=%s "
+            "public_url=%s): the Agent Bearer token crosses the network in "
+            "cleartext. Only do this on a trusted private network; set "
+            "MCP_REQUIRE_HTTPS=1 to enforce HTTPS.",
+            bind_host,
+            public_url,
+        )
 
 
 def _serialized_size(value: Any) -> int:
