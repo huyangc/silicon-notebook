@@ -193,6 +193,15 @@ INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
     ("scripts/bench_sqlite_writes.py", 85, "_connect"): (
         "synthetic temporary write benchmark; never opens the product database"
     ),
+    # knowhow-tables PR-1 Task 6: KnowhowProjector (Task 5) is a plain
+    # service, deliberately not wired onto the facade/RepositoryRuntime
+    # composition root. build_projector() constructs one directly, mirroring
+    # app/api/deps.py's own "extract a narrow runtime port" precedent above
+    # (and Task 5's own test fixture, test_knowhow_projection.py::projector).
+    ("backend/app/services/knowhow/api.py", 85, "_runtime"): (
+        "import/table API composition constructs the plain KnowhowProjector "
+        "service directly, mirroring deps.py's narrow-runtime-port extraction"
+    ),
     **{
         site: "contract fixture generator operates on a disposable fixture database"
         for site in {

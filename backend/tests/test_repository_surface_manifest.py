@@ -1794,6 +1794,39 @@ TASK5_KNOWHOW_ALLOWED_MEMBER_FILES = {
     }
 }
 
+# Task 6 (knowhow-tables-pr1): the import/table API's own HTTP-level test
+# composes the real facade the same way Task 1/2/4/5's sibling tests do —
+# seeding notebooks/members via the real facade (create_notebook happens
+# through HTTP here; add_member has no HTTP equivalent) and reaching
+# `_connect` for direct-DB cascade-delete assertions (chunks/knowledge_
+# objects/sources rows are actually gone, not just "the API says so"). Same
+# broad (file, member) allowance style as TASK5_KNOWHOW_ALLOWED_MEMBER_FILES.
+# `add_member`/`_connect` are pre-existing frozen members (unlike Task 2's
+# brand-new facade members) but — unlike Task 4's exact-consumer choice for
+# THIS SAME pair of members — this test file's calls are exempted via the
+# broad file allowance, which is equally valid for test files (frozen=True
+# and frozen=False both resolve through the same ALL_TASK_ALLOWED_MEMBER_
+# FILES broad_match for a backend/tests/ path — see _member_file_site_
+# allowed's `path.startswith("backend/tests/")` branch).
+TASK6_KNOWHOW_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_api.py", 23, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK6_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_api.py", name)
+    for name in {"SQLiteRepository", "_connect", "add_member"}
+}
+# app/services/knowhow/api.py (Task 6's orchestration module, a PRODUCTION
+# file) reaches two pre-existing frozen members building the plain
+# KnowhowProjector directly (see test_repository_callers_static.py's
+# INDEPENDENT_PRIVATE_SITES for the sibling `_runtime` registration there) —
+# `settings` isn't private so it only needs registering HERE, and `_runtime`
+# is registered both places since the two guards scan independently.
+# Mirrors Task 4's exact-consumer choice for `storage_dir` in assets.py.
+TASK6_KNOWHOW_ALLOWED_CONSUMERS = {
+    ("_runtime", "backend/app/services/knowhow/api.py:85"),
+    ("settings", "backend/app/services/knowhow/api.py:87"),
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2237,6 +2270,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK2_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK4_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK5_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK6_KNOWHOW_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2771,7 +2805,9 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
     # 656->661: knowhow-tables Task 1's MIGRATION_MANIFEST v16 comment
     # expansions (INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES, +5 net lines)
     # in test_repository_callers_static.py shift this import site further.
-    ('backend/tests/test_repository_callers_static.py', 661, 'app.services.sqlite_repository', 'SQLiteRepository'),
+    # 661->670: knowhow-tables Task 6's new INDEPENDENT_PRIVATE_SITES entry
+    # (the api.py `_runtime` registration, +9 net lines) shifts it again.
+    ('backend/tests/test_repository_callers_static.py', 670, 'app.services.sqlite_repository', 'SQLiteRepository'),
     ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
 }
 
@@ -2846,6 +2882,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK2_KNOWHOW_ALLOWED_IMPORTS
                     or site in TASK4_KNOWHOW_ALLOWED_IMPORTS
                     or site in TASK5_KNOWHOW_ALLOWED_IMPORTS
+                    or site in TASK6_KNOWHOW_ALLOWED_IMPORTS
                 )
 
 
@@ -3064,7 +3101,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         (member, f"{file}:{line}")
         for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites

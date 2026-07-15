@@ -35,6 +35,9 @@ from app.models.schemas import (
     FeedbackRequest,
     FeedbackResponse,
     KgSearchResponse,
+    KnowhowImportPreview,
+    KnowhowTableDetail,
+    KnowhowTableSummary,
     KnowledgeGraph,
     KnowledgeRecord,
     KnowledgeTypeCount,
@@ -85,6 +88,7 @@ from app.models.schemas import (
 from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
 from app.services.kg import scheduler as kg_scheduler
+from app.services.knowhow import api as knowhow_api
 from app.services.knowhow.assets import AssetService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.pending_bus import pending_bus
@@ -444,6 +448,127 @@ def get_notebook_asset_file(notebook_id: str, asset_id: str) -> FileResponse:
     return FileResponse(
         path, media_type=asset["mime"], headers={"Cache-Control": "private, max-age=86400"}
     )
+
+
+# --- knowhow-tables PR-1 Task 6: table/import API. Guards mirror the asset
+# routes above exactly: POST/DELETE need write access (owner-only via
+# require_notebook_access, 404 on denial), GET needs read access (owner ∪
+# read-only member via require_notebook_read, 404 on denial). Routes stay
+# thin (param parsing / guard / dispatch + background-job launch); parsing,
+# validation and row/table orchestration live in app.services.knowhow.api;
+# GridParseError (a ValueError subclass) and the store's own ValueErrors
+# (duplicate/empty column names, concept-count != 1) all flow through the
+# same `except ValueError` 400 translation used throughout this file.
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/import/preview",
+    response_model=KnowhowImportPreview,
+    dependencies=[Depends(require_notebook_access)],
+)
+async def preview_knowhow_import(notebook_id: str, file: UploadFile = File(...)) -> KnowhowImportPreview:
+    data = await file.read()
+    try:
+        return knowhow_api.preview_import(file.filename or "import", data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/import",
+    response_model=KnowhowTableDetail,
+    dependencies=[Depends(require_notebook_access)],
+)
+async def import_knowhow_table(
+    notebook_id: str,
+    file: UploadFile = File(...),
+    title: str = Form(...),
+    columns_json: str = Form(...),
+) -> KnowhowTableDetail:
+    """Parse -> validate -> create table -> insert every row -> launch a
+    background full-table projection (mirrors build_kg's background_jobs.
+    submit pattern, including copy_context propagation of the per-user model
+    context) -> return the FULL table detail immediately. Rows carry
+    projection_status='pending'/'syncing' until the background job advances
+    them to 'synced' — the frontend (knowhow-model.ts's importKnowhow) polls
+    the detail endpoint to observe that settle, mirroring how build_kg's
+    callers poll notebook/index status."""
+    repo = repository()
+    data = await file.read()
+    try:
+        table_id = knowhow_api.import_table(
+            repo, notebook_id, file.filename or "import", data, title, columns_json
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    background_jobs.submit(
+        knowhow_api.build_projector(repo).project_table, table_id,
+        name=f"knowhow-import-{table_id}", notify_pending=True,
+    )
+    return repo.get_knowhow_table(table_id)
+
+
+@router.get(
+    "/notebooks/{notebook_id}/knowhow",
+    response_model=List[KnowhowTableSummary],
+    dependencies=[Depends(require_notebook_read)],
+)
+def list_knowhow_tables(notebook_id: str) -> List[dict]:
+    return repository().list_knowhow_tables(notebook_id)
+
+
+@router.get(
+    "/notebooks/{notebook_id}/knowhow/{table_id}",
+    response_model=KnowhowTableDetail,
+    dependencies=[Depends(require_notebook_read)],
+)
+def get_knowhow_table(notebook_id: str, table_id: str) -> dict:
+    try:
+        return knowhow_api.get_table_in_notebook(repository(), notebook_id, table_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+
+
+@router.delete(
+    "/notebooks/{notebook_id}/knowhow/{table_id}",
+    status_code=204,
+    dependencies=[Depends(require_notebook_access)],
+)
+def delete_knowhow_table(notebook_id: str, table_id: str) -> None:
+    """Cascade-delete (task brief: "连投影产物+隐藏源"). Ordering: fetch+
+    cross-notebook-check first (404 without touching anything), then the
+    store's own cascade delete (columns/rows/cells via ON DELETE CASCADE,
+    returns the possibly-null hidden_source_id), THEN the projector's cleanup
+    of everything ever derived from that hidden source (relations/objects/
+    chunks/elements/the source row itself) — safe no-op when
+    hidden_source_id is None (a table created but never projected)."""
+    repo = repository()
+    try:
+        knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+    result = repo.delete_knowhow_table(table_id)
+    knowhow_api.build_projector(repo).delete_table_projection(result.get("hidden_source_id"))
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/reproject",
+    dependencies=[Depends(require_notebook_access)],
+)
+def reproject_knowhow_table(notebook_id: str, table_id: str) -> dict:
+    """Full-rebuild escape hatch (task brief: "全量重投影逃生口，后台执行") —
+    launches KnowhowProjector.project_table (NEVER the seq-gated incremental
+    path) in the background and responds immediately with a status body,
+    mirroring build_kg/rebuild_kg's synchronous-response-then-background-work
+    shape exactly."""
+    repo = repository()
+    try:
+        knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+    background_jobs.submit(
+        knowhow_api.build_projector(repo).project_table, table_id,
+        name=f"knowhow-reproject-{table_id}", notify_pending=True,
+    )
+    return {"status": "reprojecting", "table_id": table_id}
 
 
 @router.get(
