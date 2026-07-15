@@ -1551,15 +1551,19 @@ TASK6_MEMORY_ALLOWED_NEW_MEMBERS = {
 # `AgentBearerMiddleware.__init__` (+4 lines) and its `__call__` scheme check
 # (+2 lines), both also above these call sites, shifting every one of them
 # down by exactly 6 more lines; re-pinned to their current lines.
+# Whole-branch review fix (MCP_REQUIRE_HTTPS Important finding) widens
+# `validate_mcp_deployment`'s warning to fire whenever Host/Origin validation
+# is relaxed, not just over plain HTTP, adding 20 net lines above these call
+# sites; re-pinned to their current lines.
 TASK7_MEMORY_ALLOWED_CONSUMERS = {
-    ("user_can_read_notebook", "backend/app/api/mcp_server.py:636"),
-    ("get_notebook", "backend/app/api/mcp_server.py:641"),
-    ("user_can_read_notebook", "backend/app/api/mcp_server.py:673"),
-    ("get_notebook", "backend/app/api/mcp_server.py:678"),
-    ("unified_kg_status", "backend/app/api/mcp_server.py:679"),
-    ("agent_memory_hits", "backend/app/api/mcp_server.py:723"),
-    ("search_notebook", "backend/app/api/mcp_server.py:793"),
-    ("ask", "backend/app/api/mcp_server.py:889"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:656"),
+    ("get_notebook", "backend/app/api/mcp_server.py:661"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:693"),
+    ("get_notebook", "backend/app/api/mcp_server.py:698"),
+    ("unified_kg_status", "backend/app/api/mcp_server.py:699"),
+    ("agent_memory_hits", "backend/app/api/mcp_server.py:743"),
+    ("search_notebook", "backend/app/api/mcp_server.py:813"),
+    ("ask", "backend/app/api/mcp_server.py:909"),
 }
 TASK7_MEMORY_ALLOWED_NEW_MEMBERS = {
     "agent_memory_hits",

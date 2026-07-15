@@ -34,6 +34,16 @@ def test_validate_allows_plain_http_when_not_required(caplog):
     assert any("cleartext" in r.getMessage() for r in caplog.records)
 
 
+def test_validate_warns_host_origin_when_https_but_not_required(caplog):
+    with caplog.at_level(logging.WARNING, logger="app.api.mcp_server"):
+        validate_mcp_deployment(
+            "0.0.0.0", "https://memory.example.test/mcp", require_https=False
+        )
+    msgs = " ".join(r.getMessage() for r in caplog.records)
+    assert "Host/Origin" in msgs          # names the relaxed control
+    assert "cleartext" not in msgs        # https → no cleartext-token claim
+
+
 def test_validate_loopback_never_warns_or_raises(caplog):
     with caplog.at_level(logging.WARNING, logger="app.api.mcp_server"):
         # loopback bind + loopback public url: not remotely reachable
@@ -87,6 +97,14 @@ async def test_request_guard_blocks_remote_http_when_required():
 async def test_request_guard_allows_remote_http_when_not_required():
     # scheme check skipped → reaches token resolution → 401 (bad token), not 403
     status = await _drive_middleware(False, "http", "198.51.100.9")
+    assert status == 401
+
+
+@pytest.mark.anyio
+async def test_request_guard_exempts_loopback_http_even_when_required():
+    # require_https=True but loopback client over http → NOT 403; falls through
+    # to token resolution → 401 (bad token).
+    status = await _drive_middleware(True, "http", "127.0.0.1")
     assert status == 401
 
 
