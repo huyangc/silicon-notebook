@@ -23,6 +23,7 @@ import {
   getCellCode,
   putCellCode,
   deleteCellCode,
+  fetchKnowhowRowCodeByColumn,
   mapCitationKnowhowRef,
   uploadNotebookAsset,
 } from "./knowhow-model.ts";
@@ -474,6 +475,43 @@ test("deleteCellCode: DELETE .../rows/{row}/cells/{col}/code", () => {
     await deleteCellCode("r1", "c1");
     assert.match(calls[0].url, /\/agent\/knowhow\/rows\/r1\/cells\/c1\/code$/);
     assert.strictEqual(calls[0].init.method, "DELETE");
+  });
+});
+
+// --- fetchKnowhowRowCodeByColumn（Task 11 抽屉；GET 行详情只取 code[]，按
+// column_id 建索引——一次请求换全行代码状态，见 knowhow-model.ts 头注释）------
+
+test("fetchKnowhowRowCodeByColumn: GET .../agent/knowhow/rows/{row}（无 /code 后缀），按 column_id 建索引", () => {
+  const wireRowDetail = {
+    title: "过冲问题",
+    cells: [{ column_id: "c1", column_name: "修复方法", kind: "procedure", text: "增大电容" }],
+    code: [
+      { column_id: "c1", language: "python", code_text: "print(1)", status: "implemented", updated_at: "2026-07-15T00:00:00Z", updated_by: "u1" },
+      { column_id: "c2", language: "tcl", code_text: "set x 1", status: "stale", updated_at: "2026-07-01T00:00:00Z", updated_by: "agent-1" },
+    ],
+  };
+  return withFetchStub(wireRowDetail, async (calls) => {
+    const map = await fetchKnowhowRowCodeByColumn("r1");
+    assert.match(calls[0].url, /\/agent\/knowhow\/rows\/r1$/);
+    assert.ok(!calls[0].url.includes("/cells/"), "不应带 cells 段——这是行级端点，不是单格端点");
+    assert.deepStrictEqual(map, {
+      c1: { codeText: "print(1)", language: "python", status: "implemented", updatedAt: "2026-07-15T00:00:00Z" },
+      c2: { codeText: "set x 1", language: "tcl", status: "stale", updatedAt: "2026-07-01T00:00:00Z" },
+    });
+  });
+});
+
+test("fetchKnowhowRowCodeByColumn: code 为空数组时返回空 map（这一行没有任何代码附件）", () => {
+  return withFetchStub({ title: "t", cells: [], code: [] }, async () => {
+    const map = await fetchKnowhowRowCodeByColumn("r1");
+    assert.deepStrictEqual(map, {});
+  });
+});
+
+test("fetchKnowhowRowCodeByColumn: code 字段整个缺失时也返回空 map（不抛异常）", () => {
+  return withFetchStub({ title: "t", cells: [] }, async () => {
+    const map = await fetchKnowhowRowCodeByColumn("r1");
+    assert.deepStrictEqual(map, {});
   });
 });
 

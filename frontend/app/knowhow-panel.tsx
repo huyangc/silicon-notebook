@@ -60,10 +60,12 @@ import {
   patchKnowhowCell,
   knowhowTemplateUrl,
   optimizeKnowhowCell,
+  fetchKnowhowRowCodeByColumn,
   type KnowhowTableSummary,
   type KnowhowTableDetail,
   type KnowhowRow,
   type KnowhowColumn,
+  type KnowhowCellCode,
   type Role,
   type ProjectionStatus,
 } from "./knowhow-model.ts";
@@ -82,6 +84,8 @@ import { rowFallbackTitle } from "./knowhow-cell-editor-logic.ts";
 import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
 import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
 import { KnowhowMarkdown, KnowhowCellPreview, KnowhowCellEditor } from "./knowhow-cell-editor.tsx";
+import { KnowhowCodeChip, KnowhowCodeModal } from "./knowhow-code.tsx";
+import { resolveCellCodeView, CODE_STATUS_LOAD_ERROR } from "./knowhow-code-logic.ts";
 import {
   ACCEPT_SUGGESTION_LABEL,
   OPTIMIZE_ORIGINAL_LABEL,
@@ -180,6 +184,19 @@ export function KnowhowPanel({
     null,
   );
 
+  // Task 11（代码附件）：当前打开的代码查看/编辑浮层——与 cellModal/
+  // optimizeRowId 平级的另一个顶层 modal 状态，堆叠在行详情抽屉之上。
+  const [codeModal, setCodeModal] = useState<{ rowId: string; columnId: string } | null>(null);
+  // 当前展开行的「按列索引代码状态」map——抽屉打开时一次性拉取（见
+  // knowhow-model.ts 的 fetchKnowhowRowCodeByColumn 头注释：GET 一次行详情
+  // 换全行代码状态，不随网格/抽屉渲染逐格 GET）。rowCodeLoaded 只在成功加载
+  // 后才置 true；加载失败时保持 false 且不合成任何 map——宁可"暂时不显示
+  // chip"也不能在数据不确定时显示可能误导的"添加代码"（明明有代码却因为这
+  // 次请求失败而提示"添加"）。
+  const [rowCodeByColumn, setRowCodeByColumn] = useState<Record<string, KnowhowCellCode>>({});
+  const [rowCodeLoaded, setRowCodeLoaded] = useState(false);
+  const [rowCodeError, setRowCodeError] = useState<string | null>(null);
+
   const loadTables = useCallback(() => {
     setTablesLoading(true);
     setTablesError(null);
@@ -209,6 +226,29 @@ export function KnowhowPanel({
     if (selectedTableId) loadDetail(selectedTableId);
   }, [selectedTableId, loadDetail]);
 
+  // Task 11：行详情抽屉展开的这一行的代码状态——独立于 loadDetail（整表结构/
+  // 内容），只在抽屉真正打开时才发起，避免网格视图本身多背一次网络请求。
+  const loadRowCode = useCallback((rowId: string) => {
+    setRowCodeError(null);
+    fetchKnowhowRowCodeByColumn(rowId)
+      .then((map) => {
+        setRowCodeByColumn(map);
+        setRowCodeLoaded(true);
+      })
+      .catch(() => setRowCodeError(CODE_STATUS_LOAD_ERROR));
+  }, []);
+
+  useEffect(() => {
+    if (!openRowId) {
+      setRowCodeByColumn({});
+      setRowCodeLoaded(false);
+      setRowCodeError(null);
+      return;
+    }
+    setRowCodeLoaded(false);
+    loadRowCode(openRowId);
+  }, [openRowId, loadRowCode]);
+
   // notebook 切换时(理论上面板会被 page.tsx 一并卸载，这里仅作兜底)整体复位，
   // 避免残留上一个 notebook 的表选中态。
   useEffect(() => {
@@ -224,6 +264,7 @@ export function KnowhowPanel({
     setCreateOpen(false);
     setAppendOpen(false);
     setOptimizeRowId(null);
+    setCodeModal(null);
   }, [notebookId]);
 
   // Task 12（引用跳转）：挂载时（或 initialTableId/initialRowId 变化时——面板
@@ -267,6 +308,7 @@ export function KnowhowPanel({
     setManageOpen(false);
     setAppendOpen(false);
     setOptimizeRowId(null);
+    setCodeModal(null);
   }
 
   function backToList() {
@@ -281,6 +323,7 @@ export function KnowhowPanel({
     setManageOpen(false);
     setAppendOpen(false);
     setOptimizeRowId(null);
+    setCodeModal(null);
   }
 
   async function confirmDeleteTable() {
@@ -418,6 +461,29 @@ export function KnowhowPanel({
     });
   }
 
+  // Task 11：打开代码浮层（抽屉 chip 的 onOpen，及"添加代码"安静入口共用同
+  // 一个打开函数——两者的区别只在于 KnowhowCodeModal 内部按 code.status 是
+  // 否为 none 决定初始 mode 是 view 还是 edit，本函数不需要关心这一点）。
+  function openCodeModal(rowId: string, columnId: string) {
+    setCodeModal({ rowId, columnId });
+  }
+
+  // 代码保存成功：把最新代码视图合并进行级 map——不必整行重拉（putCellCode
+  // 本身已返回更新后的值，见 knowhow-model.ts）。
+  function handleCodeSaved(columnId: string, entry: KnowhowCellCode) {
+    setRowCodeByColumn((prev) => ({ ...prev, [columnId]: entry }));
+  }
+
+  // 代码删除成功：从行级 map 里摘除这一列——摘除后 resolveCellCodeView 会
+  // 合成 none 占位，chip 自然回落到「添加代码」（或 canEdit=false 时不显示）。
+  function handleCodeDeleted(columnId: string) {
+    setRowCodeByColumn((prev) => {
+      const next = { ...prev };
+      delete next[columnId];
+      return next;
+    });
+  }
+
   const openRow = detail?.rows.find((row) => row.id === openRowId) ?? null;
   const cellModalRow = cellModal ? detail?.rows.find((row) => row.id === cellModal.rowId) ?? null : null;
   const cellModalColumn = cellModal ? detail?.columns.find((column) => column.id === cellModal.columnId) ?? null : null;
@@ -432,6 +498,14 @@ export function KnowhowPanel({
   const optimizeRow = detail?.rows.find((row) => row.id === optimizeRowId) ?? null;
   const optimizeRowTitle = optimizeRow && detail
     ? cellSummary(resolveRowTitleText(optimizeRow, detail.columns), 60) || rowFallbackTitle(optimizeRow.position)
+    : "";
+
+  // Task 11「代码附件」浮层当前作用的行/列——与 cellModalRow/cellModalColumn
+  // 同一套查找方式。
+  const codeModalRow = codeModal ? detail?.rows.find((row) => row.id === codeModal.rowId) ?? null : null;
+  const codeModalColumn = codeModal ? detail?.columns.find((column) => column.id === codeModal.columnId) ?? null : null;
+  const codeModalRowTitle = codeModalRow && detail
+    ? cellSummary(resolveRowTitleText(codeModalRow, detail.columns), 60) || rowFallbackTitle(codeModalRow.position)
     : "";
 
   return (
@@ -511,8 +585,13 @@ export function KnowhowPanel({
           canEdit={canEdit}
           onEditCell={openCellEdit}
           onClose={() => setOpenRowId(null)}
-          cellModalOpen={cellModal !== null || optimizeRowId !== null}
+          cellModalOpen={cellModal !== null || optimizeRowId !== null || codeModal !== null}
           onOptimizeRow={() => setOptimizeRowId(openRow.id)}
+          codeByColumn={rowCodeByColumn}
+          codeLoaded={rowCodeLoaded}
+          codeError={rowCodeError}
+          onRetryCode={() => loadRowCode(openRow.id)}
+          onOpenCode={openCodeModal}
         />
       )}
 
@@ -603,6 +682,21 @@ export function KnowhowPanel({
           rowTitle={optimizeRowTitle}
           onAcceptCell={handleCellSave}
           onClose={() => setOptimizeRowId(null)}
+        />
+      )}
+
+      {codeModal && codeModalRow && codeModalColumn && (
+        <KnowhowCodeModal
+          key={`${codeModal.rowId}:${codeModal.columnId}`}
+          rowId={codeModal.rowId}
+          columnId={codeModal.columnId}
+          rowTitle={codeModalRowTitle}
+          columnName={codeModalColumn.name}
+          code={resolveCellCodeView(rowCodeByColumn, codeModal.columnId)}
+          canEdit={canEdit}
+          onSaved={handleCodeSaved}
+          onDeleted={handleCodeDeleted}
+          onClose={() => setCodeModal(null)}
         />
       )}
 
@@ -1090,6 +1184,15 @@ export function KnowhowPanel({
           color: #ba2d2d;
           border-color: #f0c0c0;
           background: #fef2f2;
+        }
+
+        /* Task 11（代码附件新鲜度"知识已更新"）新增色调——与
+           .knowhow-role-badge--procedure / .kh-procedure-hint 同一套琥珀，
+           视觉上"需要留意但不是错误"，区别于 --danger 的红。 */
+        .knowhow-status-badge--warning {
+          color: #9a5b00;
+          border-color: #f0dab3;
+          background: #fdf4e6;
         }
 
         .knowhow-status-retry {
@@ -1766,6 +1869,132 @@ export function KnowhowPanel({
           color: #b91c1c;
         }
 
+        /* -------------------------------------------------------------------
+           Task 11（代码附件 UI，knowhow-code.tsx 的 KnowhowCodeChip /
+           KnowhowCodeModal 共用）——登记在这里而非 knowhow-code.tsx 自己的
+           <style jsx> 里，理由同上方 kh-modal-* 一段注释：这是本特性唯一
+           保证任何时候都已挂载的样式容器。
+           ------------------------------------------------------------------- */
+
+        /* chip 本身是 <button>，这里只重置 UA 默认按钮观感（字体/指针），
+           配色完全交给叠加的 .knowhow-status-badge--{tone} 类。 */
+        .kh-code-chip {
+          font: inherit;
+          cursor: pointer;
+        }
+
+        /* "添加代码"安静入口（none 态 + canEdit）：虚线 + 弱化配色，与三态
+           里 implemented/stale 的实心徽章形成"待完成 vs 已完成"的视觉区分，
+           不与其它徽章抢注意力。 */
+        .kh-code-chip--add {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          border: 1px dashed var(--line);
+          border-radius: 999px;
+          padding: 2px 8px;
+          font-size: 11px;
+          color: var(--muted);
+          background: transparent;
+        }
+
+        .kh-code-chip--add:hover {
+          border-color: var(--blue);
+          color: var(--blue);
+        }
+
+        .kh-code-explain {
+          margin: 0;
+          color: var(--muted);
+          font-size: 13px;
+        }
+
+        .kh-code-lang-row {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          flex-wrap: wrap;
+        }
+
+        .kh-code-lang-tag {
+          display: inline-flex;
+          align-items: center;
+          font-size: 11px;
+          font-weight: 600;
+          padding: 2px 8px;
+          border-radius: 999px;
+          border: 1px solid var(--line);
+          background: var(--soft);
+          color: var(--muted);
+          white-space: nowrap;
+        }
+
+        .kh-code-updated {
+          font-size: 12px;
+          color: var(--muted);
+        }
+
+        .kh-code-lang-input {
+          width: 100%;
+          max-width: 320px;
+          box-sizing: border-box;
+          padding: 6px 10px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          font-size: 13px;
+          color: var(--ink);
+          background: #fff;
+        }
+
+        .kh-code-lang-input:disabled {
+          opacity: 0.6;
+        }
+
+        /* 等宽代码块（规格⑥-4"点击浮层查看（等宽...）"）：只读展示，不经
+           KnowhowMarkdown——代码是原样文本，不是 markdown。 */
+        .kh-code-block {
+          flex: 1 1 auto;
+          min-height: 160px;
+          max-height: 50vh;
+          overflow: auto;
+          margin: 0;
+          padding: 12px 14px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          background: var(--soft);
+          font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+          color: var(--ink);
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+
+        .kh-code-textarea {
+          flex: 1 1 auto;
+          min-height: 240px;
+        }
+
+        /* 行详情抽屉：本行代码状态加载失败的轻量内联提示（不阻塞整行其余内容
+           渲染——只影响代码 chip 这一小块辅助信息）。 */
+        .kh-code-status-error {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin: 0 0 4px;
+          font-size: 12.5px;
+          color: var(--muted);
+        }
+
+        .kh-code-status-error button {
+          border: 0;
+          background: transparent;
+          color: var(--blue);
+          font-size: 12.5px;
+          font-weight: 600;
+          text-decoration: underline;
+          cursor: pointer;
+          padding: 0;
+        }
+
         @media (max-width: 720px) {
           .kh-modal-card {
             width: 100vw;
@@ -2135,6 +2364,11 @@ function KnowhowRowDrawer({
   onClose,
   onOptimizeRow,
   cellModalOpen,
+  codeByColumn,
+  codeLoaded,
+  codeError,
+  onRetryCode,
+  onOpenCode,
 }: {
   row: KnowhowRow;
   columns: KnowhowColumn[];
@@ -2148,16 +2382,29 @@ function KnowhowRowDrawer({
   onClose: () => void;
   /** 「优化整行」入口（Task 9，规格③）：打开批量优化弹窗，堆叠在本抽屉之上。 */
   onOptimizeRow: () => void;
-  /** 任何堆叠在本抽屉之上的顶层弹窗（格子浮窗编辑态/预览态，或 Task 9 的
-   * KnowhowRowOptimizeModal）当前是否打开（T7 复审 Important 修复）：为
-   * true 时本抽屉的 Esc 监听器短路、不关闭抽屉——各自独立的 window keydown
-   * 监听器按注册顺序（抽屉先挂载，先注册）依次响应同一次按键，若不在这里
-   * 短路，一次 Esc 会先无条件关闭本抽屉（它自己没有"未保存内容"的概念），
-   * 顶层弹窗随后可能因为有未保存内容/进行中的操作改为弹出确认层而不真正
-   * 关闭——结果抽屉已经消失、弹窗却还留着，用户之后关掉弹窗时会发现连
-   * "返回这一行"的抽屉上下文都丢了。真正想关的是最顶层的弹窗，Esc 应该只
-   * 作用于它，抽屉留到弹窗自己关闭之后再响应下一次 Esc。 */
+  /** 任何堆叠在本抽屉之上的顶层弹窗（格子浮窗编辑态/预览态，Task 9 的
+   * KnowhowRowOptimizeModal，或 Task 11 的 KnowhowCodeModal）当前是否打开
+   * （T7 复审 Important 修复）：为 true 时本抽屉的 Esc 监听器短路、不关闭
+   * 抽屉——各自独立的 window keydown 监听器按注册顺序（抽屉先挂载，先注册）
+   * 依次响应同一次按键，若不在这里短路，一次 Esc 会先无条件关闭本抽屉（它
+   * 自己没有"未保存内容"的概念），顶层弹窗随后可能因为有未保存内容/进行中
+   * 的操作改为弹出确认层而不真正关闭——结果抽屉已经消失、弹窗却还留着，
+   * 用户之后关掉弹窗时会发现连"返回这一行"的抽屉上下文都丢了。真正想关的
+   * 是最顶层的弹窗，Esc 应该只作用于它，抽屉留到弹窗自己关闭之后再响应下
+   * 一次 Esc。 */
   cellModalOpen: boolean;
+  /** Task 11：本行按列索引的代码状态 map（父组件在抽屉打开时一次性拉取，见
+   * knowhow-panel.tsx 顶层的 loadRowCode）。 */
+  codeByColumn: Record<string, KnowhowCellCode>;
+  /** 是否已成功加载过 codeByColumn——false 时（含加载失败）任何分节都不渲染
+   * chip，宁可暂时不显示也不能显示可能误导的"添加代码"。 */
+  codeLoaded: boolean;
+  /** 非 null 时在抽屉正文顶部渲染一条轻量内联提示 + 「重试」。 */
+  codeError: string | null;
+  onRetryCode: () => void;
+  /** 打开某一格的代码查看/编辑浮层（chip 本身，及 canEdit 时的"添加代码"
+   * 安静入口共用同一个回调）。 */
+  onOpenCode: (rowId: string, columnId: string) => void;
 }) {
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
@@ -2189,11 +2436,28 @@ function KnowhowRowDrawer({
           </div>
         </div>
         <div className="knowhow-drawer-body">
+          {/* Task 11：本行代码状态加载失败的轻量提示——不阻塞其余分节的正常
+              渲染，只影响代码 chip 这一小块辅助信息。 */}
+          {codeError && (
+            <p className="kh-code-status-error">
+              <span>{codeError}</span>
+              <button type="button" onClick={onRetryCode}>
+                重试
+              </button>
+            </p>
+          )}
           {orderedColumns.map((column) => (
             <section key={column.id}>
               <div className="knowhow-drawer-section-head">
                 <h4>{column.name}</h4>
                 <RoleBadge role={column.role} />
+                {codeLoaded && (
+                  <KnowhowCodeChip
+                    code={resolveCellCodeView(codeByColumn, column.id)}
+                    canEdit={canEdit}
+                    onOpen={() => onOpenCode(row.id, column.id)}
+                  />
+                )}
                 {canEdit && (
                   <button
                     type="button"

@@ -4,7 +4,7 @@ export const AGENT_SCOPE_OPTIONS = [
   { value: "memory:read_candidates", label: "读取待确认候选" },
   { value: "memory:propose", label: "主动提交候选 Memory" },
   { value: "ask:execute", label: "执行 Notebook Ask" },
-  { value: "knowhow:code", label: "Knowhow 代码附件读写" },
+  { value: "knowhow:code", label: "Knowhow 代码附件写入" },
 ] as const;
 
 export const AGENT_ACCESS_PAGE_SIZE = 25;

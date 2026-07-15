@@ -549,6 +549,44 @@ export const putCellCode = (
 export const deleteCellCode = (rowId: string, columnId: string): Promise<void> =>
   apiFetch<void>(`/agent/knowhow/rows/${rowId}/cells/${columnId}/code`, { method: "DELETE" });
 
+// 行级代码列表（Task 11 抽屉用）：抽屉展开一行时，若为该行每一列逐格 GET
+// .../cells/{col}/code 会是 N 次网络往返；GET /agent/knowhow/rows/{row_id}
+// （Task 10 已实现、同一套 user_or_agent_scope 会话分支即可访问，见
+// knowhow_agent_routes.py）一次性返回这一行全部已存在的代码附件（`code[]`，
+// 没有附件的列不会出现在里面——后端"缺席即 none"的既有约定，build_row_detail
+// 的文档串原话），一次请求换全行状态，是"最省成本的正确数据路径"（任务简报
+// 原话）。本文件只消费该端点的 code 字段、按 column_id 建索引成 map，不映射
+// title/cells——那些字段服务于 Agent 判别场景，抽屉自己已有 KnowhowRow.cells
+// 可用，没有理由为同一份数据再建一套重复的展示模型。
+type WireKnowhowRowCodeEntry = {
+  column_id: string;
+  language: string;
+  code_text: string;
+  status: CellCodeStatus;
+  updated_at: string;
+  updated_by: string;
+};
+
+type WireKnowhowRowDetailCode = {
+  code?: WireKnowhowRowCodeEntry[];
+};
+
+function mapRowCodeByColumn(entries: WireKnowhowRowCodeEntry[] | undefined): Record<string, KnowhowCellCode> {
+  const result: Record<string, KnowhowCellCode> = {};
+  for (const entry of entries ?? []) {
+    result[entry.column_id] = {
+      codeText: entry.code_text,
+      language: entry.language,
+      status: entry.status,
+      updatedAt: entry.updated_at,
+    };
+  }
+  return result;
+}
+
+export const fetchKnowhowRowCodeByColumn = (rowId: string): Promise<Record<string, KnowhowCellCode>> =>
+  apiFetch<WireKnowhowRowDetailCode>(`/agent/knowhow/rows/${rowId}`).then((wire) => mapRowCodeByColumn(wire.code));
+
 // --- Notebook 资产上传（Task 7；端点本身是 PR-1 既有的
 // `POST /notebooks/{nb}/assets`——起草本文件时 Task 4 遗漏了这个 fetcher，
 // Task 7 格子编辑器的图片粘贴/拖拽/工具栏插入都需要它，在此补上）----------------
