@@ -19,7 +19,7 @@
 - **不把作者/机构建成 KG 节点**：按作者搜索是结构化查询，走关系表；进图会污染概念聚类、牵连 `CLUSTER_ALGO_VERSION` 语义。
 - **不抽 abstract**：LLM 逐字复制浪费 token，已有 `summary` 承担概览职能。
 - **不抽邮箱等个人联系方式**。
-- **不自动回填存量源**：回填是显式 CLI 动作（成本由用户掌控）。
+- **不自动回填存量源**：回填是显式动作（CLI 或应用内按钮，成本由用户掌控；见第 9 节三通道）。
 
 ## 3. 数据模型（`_migration_17`，SCHEMA_VERSION 16→17）
 
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS source_paper_meta (
 CREATE INDEX IF NOT EXISTS idx_source_paper_meta_nb ON source_paper_meta(notebook_id);
 
 CREATE TABLE IF NOT EXISTS source_authors (
-    id          TEXT PRIMARY KEY,              -- _new_id("sauth")，满 128bit
+    id          TEXT PRIMARY KEY,              -- 确定性复合键 f"{source_id}:auth:{position:03d}"（source 限定，无碰撞面，重抽稳定）
     source_id   TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
     notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
     position    INTEGER NOT NULL,              -- 署名顺序，0 起
