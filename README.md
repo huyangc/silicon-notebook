@@ -317,8 +317,11 @@ needed subset of `knowledge:read`, `memory:read`, `memory:read_candidates`,
 `memory:propose`, and `ask:execute`; it can be revoked immediately. Install the backend
 requirements (which include the official `mcp>=1.26.0` client/server SDK), start the backend,
 then connect to the Streamable HTTP server at `/mcp` (`/mcp/` is handled through redirect).
-Local use may use loopback HTTP; any remote deployment must expose an HTTPS URL and set
-`MCP_PUBLIC_URL` to that public `/mcp` URL.
+By default MCP allows remote plain HTTP and relaxes Host/Origin (DNS-rebinding)
+checks — intended for a trusted private network — and prints a startup warning
+because the Agent token then travels in cleartext. On any public deployment set
+`MCP_REQUIRE_HTTPS=1` to enforce HTTPS (and restore Host/Origin validation), and
+set `MCP_PUBLIC_URL` to the public HTTPS `/mcp` URL.
 Expiry values must include an explicit timezone offset; the browser converts its local
 datetime input to UTC and the backend stores a normalized UTC instant. Naive datetimes are
 rejected rather than interpreted in the server's local timezone.

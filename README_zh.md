@@ -282,7 +282,9 @@ Token 有过期时间、默认 notebook、notebook allowlist，并只授予所�
 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
 `ask:execute` 子集；可即时撤销。后端 requirements 已包含官方 `mcp>=1.26.0` client/server
 SDK。启动后，Streamable HTTP 服务位于 `/mcp`（到 `/mcp/` 的 redirect 已处理）。本机可用
-loopback HTTP；远程部署必须使用 HTTPS，并把 `MCP_PUBLIC_URL` 设为公开的 `/mcp` URL。
+loopback HTTP；默认允许远程明文 HTTP 并放宽 Host/Origin（DNS-rebinding）校验，供可信内网使用，
+启动会打印明文告警（Agent token 明文过网）。公网部署请设 `MCP_REQUIRE_HTTPS=1` 强制 HTTPS
+（并恢复 Host/Origin 校验），并把 `MCP_PUBLIC_URL` 设为公开的 HTTPS `/mcp` URL。
 过期时间必须带明确时区偏移；浏览器把本地 `datetime-local` 转成 UTC，后端按 UTC 瞬间归一化保存。
 无时区 datetime 会被拒绝，不会按服务端本地时区猜测。
 
