@@ -1,13 +1,14 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Trash2, Upload, User, X } from "lucide-react";
+import { BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
 import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
+import { KnowhowPanel } from "./knowhow-panel";
 import {
   answerIdBatches,
   collectSavedAnswerFlags,
@@ -878,6 +879,7 @@ export default function Home() {
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
   const [kgViewOpen, setKgViewOpen] = useState(false);
+  const [knowhowOpen, setKnowhowOpen] = useState(false);
   const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
   // 大库首次可视化索引在后台构建时，GET /unified-kg 返回占位 viz_building:true；
   // 这里驱动图区「构建中」提示 + 轮询，直到索引建好后自动换真图。
@@ -3437,6 +3439,10 @@ export default function Home() {
                   <Network size={17} />
                   <span>知识图谱</span>
                 </button>
+                <button className="workspace-nav-button" onClick={() => setKnowhowOpen(true)}>
+                  <Table2 size={17} />
+                  <span>Knowhow 表</span>
+                </button>
                 {!isReader && (
                   <button className="workspace-nav-button" disabled={shareBusy} onClick={() => openShareModal().catch(reportError)}>
                     <Share2 size={17} />
@@ -4986,6 +4992,10 @@ export default function Home() {
             </aside>
           </div>
         </section>
+      )}
+
+      {knowhowOpen && currentNotebookId && (
+        <KnowhowPanel notebookId={currentNotebookId} apiBase={API_BASE} onClose={() => setKnowhowOpen(false)} />
       )}
 
       {promoOpen && (
