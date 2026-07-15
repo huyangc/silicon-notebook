@@ -35,9 +35,11 @@ def parse_grid(filename: str, data: bytes) -> ParsedGrid:
     """Parse xlsx/xlsm/csv/md bytes into a ParsedGrid, dispatched by suffix.
 
     Raises GridParseError for an empty header, duplicate column names, zero
-    data rows, or an unsupported file suffix. Data rows shorter than the
-    header are padded with "" to header length; longer rows are truncated —
-    neither case raises.
+    data rows, an unsupported file suffix, text that decodes as neither
+    UTF-8 (with optional BOM) nor GBK (csv/md), or xlsx bytes that are
+    corrupted/not a valid Excel file. Data rows shorter than the header are
+    padded with "" to header length; longer rows are truncated — neither
+    case raises.
     """
     suffix = Path(filename).suffix.lower()
     if suffix in (".xlsx", ".xlsm"):
@@ -81,7 +83,10 @@ def _build_grid(raw_rows: list[list[str]]) -> ParsedGrid:
 def _extract_xlsx_rows(data: bytes) -> list[list[str]]:
     from openpyxl import load_workbook
 
-    workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception as exc:
+        raise GridParseError("无法读取 Excel 文件，请确认文件未损坏且为 .xlsx 格式") from exc
     try:
         sheet = workbook.worksheets[0]
         return [
@@ -92,13 +97,30 @@ def _extract_xlsx_rows(data: bytes) -> list[list[str]]:
         workbook.close()
 
 
+def _decode_text(data: bytes) -> str:
+    """Decode bytes as UTF-8 (BOM-tolerant), falling back to GBK.
+
+    Chinese Excel exports CSV as GBK/ANSI by default rather than UTF-8, so
+    the fallback is a deliberate accommodation for that common real-world
+    case, not just a defensive catch-all.
+    """
+    try:
+        return data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        pass
+    try:
+        return data.decode("gbk")
+    except UnicodeDecodeError as exc:
+        raise GridParseError("无法识别文件编码，请将文件另存为 UTF-8 编码后重试") from exc
+
+
 def _extract_csv_rows(data: bytes) -> list[list[str]]:
-    text = data.decode("utf-8-sig")
+    text = _decode_text(data)
     return [list(row) for row in csv.reader(io.StringIO(text))]
 
 
 def _extract_markdown_rows(data: bytes) -> list[list[str]]:
-    text = data.decode("utf-8-sig")
+    text = _decode_text(data)
     rows: list[list[str]] = []
     for line in text.splitlines():
         stripped = line.strip()

@@ -229,6 +229,36 @@ def test_parse_grid_unsupported_suffix_raises():
         parse_grid("rules.txt", b"whatever")
 
 
+def test_parse_grid_csv_gbk_encoded_chinese_falls_back_and_decodes():
+    # Chinese Excel exports CSV as GBK/ANSI by default, not UTF-8.
+    text = "概念,说明\n违例,超标\n"
+    data = text.encode("gbk")
+
+    grid = parse_grid("rules.csv", data)
+
+    assert grid.columns == ["概念", "说明"]
+    assert grid.rows == [["违例", "超标"]]
+
+
+def test_parse_grid_csv_undecodable_bytes_raise_friendly_error():
+    # Fails both utf-8-sig and gbk decoding.
+    data = b"\xff\xff\xff\xff"
+
+    with pytest.raises(GridParseError) as excinfo:
+        parse_grid("rules.csv", data)
+
+    assert str(excinfo.value) == "无法识别文件编码，请将文件另存为 UTF-8 编码后重试"
+
+
+def test_parse_grid_xlsx_corrupted_bytes_raise_friendly_error():
+    data = b"this is not a real xlsx file, just garbage bytes"
+
+    with pytest.raises(GridParseError) as excinfo:
+        parse_grid("rules.xlsx", data)
+
+    assert str(excinfo.value) == "无法读取 Excel 文件，请确认文件未损坏且为 .xlsx 格式"
+
+
 # --- guess_roles -------------------------------------------------------------
 
 
