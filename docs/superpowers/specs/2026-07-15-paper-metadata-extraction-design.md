@@ -32,9 +32,9 @@ CREATE TABLE IF NOT EXISTS source_paper_meta (
     venue       TEXT,
     pub_year    INTEGER,
     doi         TEXT,
-    keywords    TEXT,                          -- JSON array 字符串
-    raw_json    TEXT,                          -- 审计信封 {"llm": 原始返回, "dropped": 接地校验丢弃明细}
-    model       TEXT,                          -- 抽取用模型（溯源）
+    keywords    TEXT NOT NULL DEFAULT '[]',    -- JSON array 字符串
+    raw_json    TEXT NOT NULL DEFAULT '{}',    -- 审计信封 {"llm": 原始返回, "dropped": 接地校验丢弃明细}
+    model       TEXT NOT NULL DEFAULT '',      -- 抽取用模型（溯源）
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
@@ -59,20 +59,22 @@ CREATE INDEX IF NOT EXISTS idx_source_authors_nb ON source_authors(notebook_id);
 
 ## 4. 仓储层（owner = SourceStore，无新 runtime 组件）
 
-新方法放 `backend/app/repositories/sqlite/source_store.py`（sources 域），facade 一跳委托 + `ownership_manifest.SURFACE_MEMBERS` 登记：
+新方法放 `backend/app/repositories/sqlite/source_store.py`（sources 域）：
 
-- `upsert_paper_meta(source_id, notebook_id, meta: dict) -> None` — 单写事务：upsert 元数据行 + delete/insert 作者行。
-- `get_paper_meta(source_id) -> Optional[dict]` — 元数据 + 按 `position` 排序的作者。
-- `paper_meta_for_sources(source_ids) -> Dict[str, dict]` — 列表页批量水合；**IN 必须分批**（SQLite 变量上限教训）。
-- `sources_missing_paper_meta(notebook_id) -> List[str]` — 回填用：doc_type=academic_paper、有解析文本、无 meta 行、非 memory 派生。
+- `upsert_paper_meta(source_id, notebook_id, meta: dict) -> None` — 单写事务：upsert 元数据行 + delete/insert 作者行。**store 内部**：调用方（`ensure_paper_metadata`）经注入的 `self.sources` 直达，不过 facade，不登记 `ownership_manifest.SURFACE_MEMBERS`。
+- `get_paper_meta(source_id) -> Optional[dict]` — 元数据 + 按 `position` 排序的作者。facade 一跳委托 + `ownership_manifest.SURFACE_MEMBERS` 登记。
+- `paper_meta_for_sources(source_ids) -> Dict[str, dict]` — 列表页批量水合；**IN 必须分批**（SQLite 变量上限教训）。**store 内部**：`get_paper_meta`/`sources_from_rows` 的私有水合帮手，同 `upsert_paper_meta` 不过 facade、不登记。
+- `sources_missing_paper_meta(notebook_id) -> List[str]` — 回填用：doc_type=academic_paper、有解析文本、无 meta 行、非 memory 派生。facade 一跳委托 + `ownership_manifest.SURFACE_MEMBERS` 登记。
 
-守卫：`test_repository_surface_manifest` 静态扫描按 file:line 精确比对——新增成员按测试输出对齐 consumers 清单；`RUNTIME_COMPONENT_OWNERS` 无需改（SourceStore 已注册）。
+即：四个 store 方法里只有 `get_paper_meta`、`sources_missing_paper_meta` 经 facade 暴露；`upsert_paper_meta`、`paper_meta_for_sources` 留在 store 内部。
+
+守卫：`test_repository_surface_manifest` 静态扫描按 file:line 精确比对（仅覆盖经 facade 暴露的两个成员）——新增消费点按测试输出对齐 consumers 清单；`RUNTIME_COMPONENT_OWNERS` 无需改（SourceStore 已注册）。
 
 ## 5. 抽取流程
 
 ### 5.1 Prompt 与调用
 
-- `prompts.py` 新增 `paper_meta_prompt(head_text)` + schema hint：
+- `app/services/paper_meta.py` 新增 `paper_meta_prompt(head_text)` + `PAPER_META_SCHEMA_HINT`（与 5.3 节的零 LLM 接地校验 `verify_paper_meta` 同文件，而非 `prompts.py`——纯函数、无 DB/网络依赖，`source_ingestion.py` 直接 import）：
 
 ```json
 {"is_paper": true, "title": "...", "authors": [{"name": "...", "affiliations": ["..."]}],

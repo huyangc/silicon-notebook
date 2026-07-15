@@ -270,6 +270,33 @@ def test_llm_exception_is_swallowed(repo, notebook_id, service):
     assert repo.get_paper_meta("src-1") is None
 
 
+def test_setup_phase_exception_is_swallowed(repo, notebook_id, service, monkeypatch):
+    """Final-review Fix 2: the try/except must cover the whole body from the
+    get_paper_meta idempotency read onward, not just the chat_json call —
+    ANY internal failure (not only an LLM error) must degrade to "failed"
+    with no row and no escaping exception, so a setup-phase bug can never
+    propagate out of ensure_paper_metadata and interrupt its callers
+    (process_source / run_extraction's historical-source catch-up, which
+    both run KG extraction right after this call)."""
+    fake = _FakeKgLLM(PAYLOAD)
+    repo._kg_llm_client = fake
+    source = _insert_source(repo, notebook_id, "src-1")
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("boom in idempotency read")
+
+    monkeypatch.setattr(service.sources, "get_paper_meta", _boom)
+
+    status = service.ensure_paper_metadata(source)
+
+    assert status == "failed"
+    assert fake.calls == 0  # never reached the LLM
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM source_paper_meta WHERE source_id=?", ("src-1",)
+        ).fetchone()[0] == 0
+
+
 def test_ensure_non_object_json_fails_without_row(repo, notebook_id, service):
     """Controller amendment: safe_json() 契约是「总返回 dict」,对顶层是数组/
     标量的畸形输出会静默折叠成 {}。若把这个 {} 直接喂给 verify_paper_meta,会

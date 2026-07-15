@@ -2458,6 +2458,11 @@ REVIEW_FIX_ALLOWED_CONSUMERS = {
         "backfill_chunk_fts",
         "backend/tests/test_retrieval_snapshot_cache_runtime.py:78",
     ),
+    # Final-review Fix 2 (paper-metadata): ensure_paper_metadata's try/except
+    # now wraps the whole body; the new setup-phase-failure test checks
+    # source_paper_meta directly (rather than via repo.get_paper_meta, which
+    # is monkeypatched in that test) — a fresh repo._connect() consumer site.
+    ("_connect", "backend/tests/test_paper_meta_service.py:294"),
 }
 
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +

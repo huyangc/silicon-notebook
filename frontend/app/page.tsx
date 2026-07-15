@@ -4466,7 +4466,7 @@ export default function Home() {
                   )}
                   {sourceDetail.paper_meta.doi && (
                     <a className="paper-doi" target="_blank" rel="noreferrer"
-                       href={`https://doi.org/${sourceDetail.paper_meta.doi}`}>
+                       href={`https://doi.org/${sourceDetail.paper_meta.doi.split("/").map(encodeURIComponent).join("/")}`}>
                       DOI: {sourceDetail.paper_meta.doi}
                     </a>
                   )}
