@@ -1402,23 +1402,25 @@ TASK28_ALLOWED_IMPORTS = {
 # Line numbers shifted +32 by Task 1 (memory-kg-extract)'s MIGRATION_MANIFEST
 # v14 additions, then a further +28 by Task 5's v15 additions
 # (SOURCES_PARSE_STATUS_TYPE_INDEX + every hop terminal bumped to 15 with that
-# index + the new (14, 15) hop).
+# index + the new (14, 15) hop), then a further +83 by knowhow-tables Task 1's
+# MIGRATION_MANIFEST v16 additions (KNOWHOW_TABLES + KNOWHOW_INDEXES +
+# every hop terminal bumped to 16 with those objects + the new (15, 16) hop).
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1083"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:1076"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:1061"),
-    ("get_report", "scripts/verify_repository_snapshot.py:1088"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:1064"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:1073"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:1067"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:1085"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:1062"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1024"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1028"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1030"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1055"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1097"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1071"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1166"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1159"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1144"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1171"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1147"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1156"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1150"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1168"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1145"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1107"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1111"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1113"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1138"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1180"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1154"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -2718,7 +2720,10 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
     ('backend/tests/test_notebook_share_copy.py', 60, 'app.services.sqlite_repository', '_remap_json_ids'),
     ('backend/tests/test_notebook_share_copy.py', 86, 'app.services.sqlite_repository', '_now'),
     ('backend/tests/test_kg_repository.py', 367, 'app.services.sqlite_repository', '_now'),
-    ('backend/tests/test_repository_callers_static.py', 656, 'app.services.sqlite_repository', 'SQLiteRepository'),
+    # 656->661: knowhow-tables Task 1's MIGRATION_MANIFEST v16 comment
+    # expansions (INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES, +5 net lines)
+    # in test_repository_callers_static.py shift this import site further.
+    ('backend/tests/test_repository_callers_static.py', 661, 'app.services.sqlite_repository', 'SQLiteRepository'),
     ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
 }
 
