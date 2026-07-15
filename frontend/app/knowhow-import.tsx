@@ -81,13 +81,26 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     mountedRef.current = false;
   }, []);
 
+  // 提交中（真正建表的请求，不可撤销/不可取消）时不允许关闭向导：Esc/背景点击
+  // /右上角 X 一律经这道守卫。否则用户提前关闭后，导入仍可能在后台悄悄成功，
+  // 但面板既不会收到 onDone 也就不会刷新列表——用户会看不到新表，一头雾水。
+  // 预览阶段（previewLoading）不受此限：预览是纯读请求，提前关闭没有副作用。
+  function requestClose() {
+    if (submitting) return;
+    onClose();
+  }
+
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") requestClose();
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- requestClose 是
+    // 组件内的普通函数（未 useCallback），依赖数组直接列它没有意义（每次渲染
+    // 都是新引用）；改列它实际捕获的值，effect 才会在 submitting/onClose 真
+    // 变化时才重新订阅监听器，而不是每次渲染都重新订阅。
+  }, [onClose, submitting]);
 
   const conceptError = useMemo(() => (step === "map" ? conceptValidationError(roles) : null), [step, roles]);
   const submitDisabled = submitting || !canSubmitImport(title, roles);
@@ -153,7 +166,7 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
   }
 
   function handleBackdropClick(event: ReactMouseEvent<HTMLDivElement>) {
-    if (event.currentTarget === event.target) onClose();
+    if (event.currentTarget === event.target) requestClose();
   }
 
   const stepNumber = step === "select" ? 1 : submitting ? 3 : 2;
@@ -172,7 +185,13 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
             <h2>导入 Knowhow 表</h2>
             <ImportStepIndicator current={stepNumber} />
           </div>
-          <button type="button" className="icon-button" onClick={onClose} title="关闭">
+          <button
+            type="button"
+            className="icon-button"
+            onClick={requestClose}
+            disabled={submitting}
+            title={submitting ? "导入进行中，请稍候" : "关闭"}
+          >
             <X size={20} />
           </button>
         </div>
@@ -370,7 +389,8 @@ function MapStep({
       )}
 
       <div className="knowhow-import-actions">
-        <button type="button" className="new-pill" disabled={submitDisabled} onClick={onSubmit}>
+        <button type="button" className="new-pill knowhow-import-submit-button" disabled={submitDisabled} onClick={onSubmit}>
+          {submitting && <Loader2 size={14} className="knowhow-import-spin" />}
           {submitting ? "导入中…" : "确认导入"}
         </button>
       </div>
@@ -411,6 +431,11 @@ function MapStep({
         .knowhow-import-header h2 {
           margin: 0 0 10px;
           font-size: 20px;
+        }
+
+        .knowhow-import-header .icon-button:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
         }
 
         .knowhow-import-steps {
@@ -718,6 +743,17 @@ function MapStep({
           justify-content: flex-end;
           gap: 10px;
           padding-top: 4px;
+        }
+
+        .knowhow-import-submit-button {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+        }
+
+        .knowhow-import-submit-button:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
         }
       `}</style>
     </div>
