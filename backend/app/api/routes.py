@@ -1572,3 +1572,29 @@ async def me_pending_stream(
             pending_bus.unregister(uid, q)
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+@router.post(
+    "/notebooks/{notebook_id}/paper-meta/backfill",
+    dependencies=[Depends(require_notebook_access)],
+)
+def backfill_paper_metadata(notebook_id: str) -> dict:
+    """补抽该 notebook 缺论文元数据的源(后台线程,幂等可续跑)。返回排队数;
+    LLM 未配置 409。owner 门控由 require_notebook_access 承担(非 owner 404)。"""
+    repo = repository()
+    llm_ready = getattr(repo.kg_llm_client, "configured", False) or getattr(
+        repo.llm_client, "configured", False
+    )
+    if not llm_ready:
+        raise HTTPException(status_code=409, detail="LLM not configured")
+    try:
+        repo.get_notebook(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    queued = len(repo.sources_missing_paper_meta(notebook_id))
+    if queued:
+        background_jobs.submit(
+            repo.backfill_paper_metadata, notebook_id,
+            name=f"papermeta-{notebook_id}",
+        )
+    return {"queued": queued}
