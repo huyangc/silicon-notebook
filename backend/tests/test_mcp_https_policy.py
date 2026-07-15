@@ -102,3 +102,47 @@ def test_create_memory_mcp_toggles_dns_rebinding(monkeypatch):
     mcp_server.create_memory_mcp(lambda: _StubRepo(), require_https=False)
     mcp_server.create_memory_mcp(lambda: _StubRepo(), require_https=True)
     assert captured == [False, True]
+
+
+from app.api.deps import repository as _repository_module
+from app.core.config import get_settings
+
+
+def _min_app_env(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'app.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("BACKEND_HOST", "0.0.0.0")
+    monkeypatch.setenv("MCP_PUBLIC_URL", "http://10.0.0.5:8000/mcp")
+    get_settings.cache_clear()
+    _repository_module.cache_clear()
+
+
+def test_create_app_defaults_to_open(monkeypatch, tmp_path):
+    _min_app_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("MCP_REQUIRE_HTTPS", raising=False)
+    from app.main import create_app
+
+    app = create_app()  # must NOT raise despite 0.0.0.0 + http
+    assert app is not None
+
+
+def test_create_app_require_https_restores_failclosed(monkeypatch, tmp_path):
+    _min_app_env(monkeypatch, tmp_path)
+    monkeypatch.setenv("MCP_REQUIRE_HTTPS", "1")
+
+    # NOTE: `app/main.py` has a module-level `app = create_app()` (the
+    # `uvicorn app.main:app` entrypoint idiom) that fires once per process on
+    # the *first* import of `app.main` — using whatever env is ambient right
+    # then. Under this project's parallelized (xdist) test suite that first
+    # import can land in either this test or a sibling test's *own* worker
+    # process, so whether the RuntimeError is raised by that module-level
+    # statement or by the explicit `create_app()` call below is
+    # order-dependent. Importing inside the `pytest.raises` block catches it
+    # either way instead of depending on import-cache luck (see the same
+    # landmine documented in test_notebook_share_copy.py::test_copy_refuses_too_large).
+    with pytest.raises(RuntimeError, match="requires HTTPS"):
+        from app.main import create_app
+
+        create_app()

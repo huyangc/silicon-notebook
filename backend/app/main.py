@@ -75,11 +75,20 @@ def create_app() -> FastAPI:
     mcp_public_url = os.environ.get(
         "MCP_PUBLIC_URL", f"http://{bind_host}:8000/mcp"
     )
-    validate_mcp_deployment(bind_host, mcp_public_url)
+    # Product default: DO NOT require HTTPS for MCP. This is an intranet-friendly
+    # default — remote plain HTTP is allowed and Host/Origin (DNS-rebinding)
+    # checks are relaxed — accompanied by a loud startup warning. Set
+    # MCP_REQUIRE_HTTPS=1 on any public deployment to restore the fail-closed
+    # guard (HTTPS enforced + Host/Origin validated).
+    require_https = os.environ.get("MCP_REQUIRE_HTTPS", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    validate_mcp_deployment(bind_host, mcp_public_url, require_https=require_https)
     mcp_server, mcp_app = create_memory_mcp(
         mcp_memory_repository,
         allowed_origins=settings.cors_origins,
         public_url=mcp_public_url,
+        require_https=require_https,
     )
 
     @asynccontextmanager

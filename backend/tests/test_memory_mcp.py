@@ -133,9 +133,12 @@ def mcp_env(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "")
     monkeypatch.setenv("EMBED_PROVIDER", "")
-    # Startup declares the public deployment as HTTPS. Runtime transport must
-    # still reject a remote client that actually reaches ASGI over plain HTTP.
+    # Startup declares the public deployment as HTTPS and pins the strict
+    # (fail-closed) policy so the runtime transport still rejects a remote
+    # client that reaches ASGI over plain HTTP. The product default is now
+    # open (MCP_REQUIRE_HTTPS unset); these tests exercise the strict path.
     monkeypatch.setenv("MCP_PUBLIC_URL", "https://memory.example.test/mcp")
+    monkeypatch.setenv("MCP_REQUIRE_HTTPS", "1")
     get_settings.cache_clear()
     repository.cache_clear()
 
