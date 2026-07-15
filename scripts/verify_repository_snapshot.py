@@ -294,75 +294,158 @@ SOURCES_PARSE_STATUS_TYPE_INDEX = {
         "ON sources(notebook_id, parse_status, source_type)",
 }
 
+# v16 (knowhow-tables Task 1): five new tables for the editable-grid truth
+# source (knowhow_tables/knowhow_columns/knowhow_rows/knowhow_cells) plus
+# notebook_assets (row-embedded image upload metadata), each with its own
+# FK-index. _migration_16 adds only these tables/indexes — no new column,
+# trigger, or view, and no existing table is altered. Any DB below 16 gains
+# them on the way to current, so they belong in every hop's tables/indexes
+# allowlist (harmless where a constructed source already carries them: they
+# simply won't appear in the after-before added set).
+KNOWHOW_TABLES = {
+    "knowhow_cells": """CREATE TABLE knowhow_cells (
+                  id TEXT PRIMARY KEY,
+                  row_id TEXT NOT NULL REFERENCES knowhow_rows(id) ON DELETE CASCADE,
+                  column_id TEXT NOT NULL REFERENCES knowhow_columns(id) ON DELETE CASCADE,
+                  content_md TEXT NOT NULL DEFAULT '',
+                  updated_at TEXT NOT NULL,
+                  UNIQUE(row_id, column_id)
+                )""",
+    "knowhow_columns": """CREATE TABLE knowhow_columns (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  name TEXT NOT NULL,
+                  role TEXT NOT NULL DEFAULT 'plain',
+                  position INTEGER NOT NULL
+                )""",
+    "knowhow_rows": """CREATE TABLE knowhow_rows (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  position INTEGER NOT NULL,
+                  projection_status TEXT NOT NULL DEFAULT 'pending',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+    "knowhow_tables": """CREATE TABLE knowhow_tables (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  title TEXT NOT NULL,
+                  description TEXT NOT NULL DEFAULT '',
+                  mutation_seq INTEGER NOT NULL DEFAULT 0,
+                  hidden_source_id TEXT,
+                  created_by TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                )""",
+    "notebook_assets": """CREATE TABLE notebook_assets (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  filename TEXT NOT NULL,
+                  mime TEXT NOT NULL,
+                  size INTEGER NOT NULL,
+                  created_by TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL
+                )""",
+}
+KNOWHOW_INDEXES = {
+    "idx_knowhow_cells_row":
+        "CREATE INDEX idx_knowhow_cells_row ON knowhow_cells(row_id)",
+    "idx_knowhow_columns_table":
+        "CREATE INDEX idx_knowhow_columns_table ON knowhow_columns(table_id)",
+    "idx_knowhow_rows_table":
+        "CREATE INDEX idx_knowhow_rows_table ON knowhow_rows(table_id)",
+    "idx_knowhow_tables_nb":
+        "CREATE INDEX idx_knowhow_tables_nb ON knowhow_tables(notebook_id)",
+    "idx_notebook_assets_nb":
+        "CREATE INDEX idx_notebook_assets_nb ON notebook_assets(notebook_id)",
+}
+
 MIGRATION_MANIFEST = {
-    # Cumulative delta from the frozen v9 fixture to merged schema v15.
-    (9, 15): {
+    # Cumulative delta from the frozen v9 fixture to merged schema v16.
+    (9, 16): {
         "tables": {
             "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
             **EXPECTED_MEMORY_TABLES,
+            **KNOWHOW_TABLES,
         },
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES,
-                    **SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX},
+                    **SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX,
+                    **KNOWHOW_INDEXES},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (10, 15): {
-        "tables": EXPECTED_MEMORY_TABLES,
+    (10, 16): {
+        "tables": {**EXPECTED_MEMORY_TABLES, **KNOWHOW_TABLES},
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES,
-                    **SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX},
+                    **SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX,
+                    **KNOWHOW_INDEXES},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
     # Both branches independently used v11 before merge. Select the exact
     # lineage below from the source schema, then admit only the missing objects.
-    (11, 15, "memory"): {
-        "tables": {},
+    (11, 16, "memory"): {
+        "tables": KNOWHOW_TABLES,
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {**MASTER_SCALE_INDEXES, **SOURCES_MEMORY_ID_INDEX,
-                    **SOURCES_PARSE_STATUS_TYPE_INDEX},
+                    **SOURCES_PARSE_STATUS_TYPE_INDEX, **KNOWHOW_INDEXES},
         "triggers": {},
         "views": {},
     },
-    (11, 15, "master"): {
-        "tables": EXPECTED_MEMORY_TABLES,
+    (11, 16, "master"): {
+        "tables": {**EXPECTED_MEMORY_TABLES, **KNOWHOW_TABLES},
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {
             "idx_sources_nb_parse_status": MASTER_SCALE_INDEXES["idx_sources_nb_parse_status"],
             **EXPECTED_MEMORY_INDEXES,
             **SOURCES_MEMORY_ID_INDEX,
             **SOURCES_PARSE_STATUS_TYPE_INDEX,
+            **KNOWHOW_INDEXES,
         },
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (12, 15): {
-        "tables": EXPECTED_MEMORY_TABLES,
+    (12, 16): {
+        "tables": {**EXPECTED_MEMORY_TABLES, **KNOWHOW_TABLES},
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {**EXPECTED_MEMORY_INDEXES, **SOURCES_MEMORY_ID_INDEX,
-                    **SOURCES_PARSE_STATUS_TYPE_INDEX},
+                    **SOURCES_PARSE_STATUS_TYPE_INDEX, **KNOWHOW_INDEXES},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
     # v13 -> current: v13 was the shipping schema before Task 1
     # (memory-kg-extract). _migration_14 adds the sources.memory_id column + its
     # partial unique index; _migration_15 adds the parse_status/source_type
-    # covering index — no new tables or triggers on either hop.
-    (13, 15): {
-        "tables": {},
+    # covering index; _migration_16 adds the five knowhow/notebook_assets
+    # tables + their indexes — no new triggers on any hop.
+    (13, 16): {
+        "tables": KNOWHOW_TABLES,
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
-        "indexes": {**SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX},
+        "indexes": {**SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX,
+                    **KNOWHOW_INDEXES},
         "triggers": {},
         "views": {},
     },
-    # The v14 -> v15 hop (Task 5): a database already carrying sources.memory_id
-    # gains only the parse_status/source_type covering index. No new
-    # table/column/trigger — mirrors Task 1's single-object (13, 14) entry.
-    (14, 15): {
-        "tables": {},
+    # The v14 -> v16 hop (Task 5 + knowhow-tables Task 1): a database already
+    # carrying sources.memory_id gains the parse_status/source_type covering
+    # index plus the five knowhow/notebook_assets tables. No new
+    # column/trigger — mirrors Task 1's single-object (13, 14) entry.
+    (14, 16): {
+        "tables": KNOWHOW_TABLES,
         "columns": {},
-        "indexes": SOURCES_PARSE_STATUS_TYPE_INDEX,
+        "indexes": {**SOURCES_PARSE_STATUS_TYPE_INDEX, **KNOWHOW_INDEXES},
+        "triggers": {},
+        "views": {},
+    },
+    # The v15 -> v16 hop (knowhow-tables Task 1): a database already at v15
+    # gains only the five knowhow/notebook_assets tables + their indexes. No
+    # new column/trigger/view — mirrors Task 5's single-object (14, 15) entry.
+    (15, 16): {
+        "tables": KNOWHOW_TABLES,
+        "columns": {},
+        "indexes": KNOWHOW_INDEXES,
         "triggers": {},
         "views": {},
     },
