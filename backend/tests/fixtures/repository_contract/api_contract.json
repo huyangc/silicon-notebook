@@ -883,6 +883,16 @@
               "title": "Element Id",
               "type": "string"
             },
+            "knowhow": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CitationKnowhowRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "label": {
               "title": "Label",
               "type": "string"
@@ -923,6 +933,25 @@
             "quoted_span"
           ],
           "title": "Citation",
+          "type": "object"
+        },
+        "CitationKnowhowRef": {
+          "description": "Locator for a citation that resolves to a knowhow table cell (Task 12:\n引用跳转). Populated only when the cited element's\n``source_elements.metadata`` carries a ``knowhow`` tag (written by\n``KnowhowProjector._write_elements``) — lets the frontend jump straight\ninto that row's drawer instead of a dead/hidden source link.",
+          "properties": {
+            "row_id": {
+              "title": "Row Id",
+              "type": "string"
+            },
+            "table_id": {
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "table_id",
+            "row_id"
+          ],
+          "title": "CitationKnowhowRef",
           "type": "object"
         },
         "ConceptWhitelistAdd": {

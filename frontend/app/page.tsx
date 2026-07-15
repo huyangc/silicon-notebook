@@ -880,6 +880,9 @@ export default function Home() {
   const [graphOpen, setGraphOpen] = useState(false);
   const [kgViewOpen, setKgViewOpen] = useState(false);
   const [knowhowOpen, setKnowhowOpen] = useState(false);
+  // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
+  // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
+  const [knowhowJumpTarget, setKnowhowJumpTarget] = useState<{ tableId: string; rowId: string } | null>(null);
   const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
   // 大库首次可视化索引在后台构建时，GET /unified-kg 返回占位 viz_building:true；
   // 这里驱动图区「构建中」提示 + 轮询，直到索引建好后自动换真图。
@@ -2639,6 +2642,14 @@ export default function Home() {
     setGraph(response);
   }
 
+  // Task 12（引用跳转）：ask 引用命中 knowhow 格子时「在表格中查看」的落点——
+  // 打开 Knowhow 面板并记下目标表/行，KnowhowPanel 自己负责挂载后定位到该
+  // 行的抽屉（含目标表/行已被删除时的兜底提示，见 knowhow-panel.tsx）。
+  function openKnowhowAt(tableId: string, rowId: string) {
+    setKnowhowJumpTarget({ tableId, rowId });
+    setKnowhowOpen(true);
+  }
+
   async function openKgView(
     targetNodeId?: string,
     notebookId: string | null = currentNotebookId,
@@ -3827,6 +3838,7 @@ export default function Home() {
                             feedbackSent={feedbackSent[turn.response.answer_id] ?? ""}
                             onFeedback={(rating) => submitFeedback(turn.response.answer_id, rating, "").catch(reportError)}
                             onOpenKnowledgeGraph={(objectId) => openKgView(objectId)}
+                            onOpenKnowhowRow={openKnowhowAt}
                             notebookId={currentNotebookId}
                             onBuildScaleIndex={() => runScaleIndexOp("build")}
                             buildingScaleIndex={buildingScaleIndex}
@@ -5059,7 +5071,14 @@ export default function Home() {
       )}
 
       {knowhowOpen && currentNotebookId && (
-        <KnowhowPanel notebookId={currentNotebookId} apiBase={API_BASE} canEdit={!isReader} onClose={() => setKnowhowOpen(false)} />
+        <KnowhowPanel
+          notebookId={currentNotebookId}
+          apiBase={API_BASE}
+          canEdit={!isReader}
+          onClose={() => { setKnowhowOpen(false); setKnowhowJumpTarget(null); }}
+          initialTableId={knowhowJumpTarget?.tableId}
+          initialRowId={knowhowJumpTarget?.rowId}
+        />
       )}
 
       {promoOpen && (

@@ -6,11 +6,12 @@ its collaborators are narrow read stores only.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Mapping, Sequence
 
 from app.core.config import Settings
-from app.models.schemas import AnswerAnchor, Citation
+from app.models.schemas import AnswerAnchor, Citation, CitationKnowhowRef
 from app.repositories.ports import (
     EvidenceKnowledgeContextPort, NotebookStorePort, SourceStorePort,
 )
@@ -18,6 +19,25 @@ from app.services.retrieval import RetrievedChunk, RetrievedKnowledge, est_token
 
 
 _MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
+
+
+def _knowhow_ref(element_row: Mapping[str, Any] | None) -> CitationKnowhowRef | None:
+    """Task 12（引用跳转）: 从 `evidence_elements()` 返回的一行里取出
+    `metadata.knowhow.{table_id,row_id}`，命中才建 ref，其余（非 knowhow 元素/
+    元素已不存在/metadata 解析失败）一律安全返回 None——从不抛异常。"""
+    if not element_row:
+        return None
+    try:
+        metadata = json.loads(element_row.get("metadata") or "{}")
+    except (TypeError, ValueError):
+        return None
+    knowhow = metadata.get("knowhow") if isinstance(metadata, dict) else None
+    if not isinstance(knowhow, dict):
+        return None
+    table_id, row_id = knowhow.get("table_id"), knowhow.get("row_id")
+    if not table_id or not row_id:
+        return None
+    return CitationKnowhowRef(table_id=table_id, row_id=row_id)
 
 
 class EvidenceContextService:
@@ -205,20 +225,32 @@ class EvidenceContextService:
         valid_element_ids: set[str],
         label: str,
     ) -> list[Citation]:
-        citations: list[Citation] = []
+        filtered: list[tuple[str, Any]] = []
         for hit in hits:
             tier = getattr(hit, "tier", "personal") or "personal"
             for evidence in hit.evidence:
                 if evidence.element_id and evidence.element_id not in valid_element_ids:
                     continue
-                citations.append(Citation(
-                    label=label,
-                    source_id=evidence.source_id,
-                    element_id=evidence.element_id,
-                    location_label=evidence.location_label,
-                    quoted_span=evidence.quoted_span,
-                    tier=tier,
-                ))
+                filtered.append((tier, evidence))
+
+        # Task 12（引用跳转）: 批量按 element_id 查一次 knowhow 定位标签，不管
+        # 本次要建多少条引用——绝不逐条引用各查一次(运行效率是一等约束)。
+        element_ids = list(dict.fromkeys(
+            evidence.element_id for _tier, evidence in filtered if evidence.element_id
+        ))
+        elements = self.sources.evidence_elements(element_ids) if element_ids else {}
+
+        citations: list[Citation] = []
+        for tier, evidence in filtered:
+            citations.append(Citation(
+                label=label,
+                source_id=evidence.source_id,
+                element_id=evidence.element_id,
+                location_label=evidence.location_label,
+                quoted_span=evidence.quoted_span,
+                tier=tier,
+                knowhow=_knowhow_ref(elements.get(evidence.element_id)),
+            ))
         return citations
 
     @staticmethod

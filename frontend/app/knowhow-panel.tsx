@@ -3,8 +3,14 @@
  *
  * 「Knowhow 表」总览：表列表 → 表格网格 → 行详情抽屉 三层，外加导入向导 /
  * 建表向导 / 表管理三个 modal 的挂载点。page.tsx 只负责接线（导航按钮 +
- * `<KnowhowPanel notebookId apiBase canEdit onClose />` 一处挂载），面板自身
- * 的状态机与渲染都集中在这里。
+ * `<KnowhowPanel notebookId apiBase canEdit onClose />` 一处挂载，外加 Task 12
+ * 引用跳转用的可选 `initialTableId`/`initialRowId`），面板自身的状态机与渲染
+ * 都集中在这里。
+ *
+ * 引用跳转（Task 12）：ask 回答里命中 knowhow 格子的引用点「在表格中查看」
+ * 时，page.tsx 打开本面板并传入 `initialTableId`/`initialRowId`——挂载（或这
+ * 两个 prop 变化）时自动选中该表并展开该行的抽屉；目标表/行已被删除等陈旧
+ * id 会给出内联提示并回退到列表/整表视图，而不是卡在一个死胡同式的错误。
  *
  * 纯逻辑（行过滤 / 列序 / 状态徽标映射 / 抽屉标题 / 图片鉴权判定）都在
  * knowhow-panel-logic.ts 里（无 JSX，供 knowhow-panel.test.mjs 直接 import——
@@ -118,9 +124,16 @@ export interface KnowhowPanelProps {
   canEdit: boolean;
   /** 关闭整个面板（page.tsx 用于收起挂载它的 knowhowOpen 态）。 */
   onClose: () => void;
+  /** Task 12（引用跳转）：非空时挂载（或这两个 prop 变化时）自动打开该表，
+   * 若 initialRowId 也给了，进一步展开该行的抽屉。目标已不存在时面板自己
+   * 给出内联提示并回退，不需要调用方处理。 */
+  initialTableId?: string | null;
+  initialRowId?: string | null;
 }
 
-export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowPanelProps) {
+export function KnowhowPanel({
+  notebookId, apiBase, canEdit, onClose, initialTableId, initialRowId,
+}: KnowhowPanelProps) {
   const [tables, setTables] = useState<KnowhowTableSummary[] | null>(null);
   const [tablesLoading, setTablesLoading] = useState(false);
   const [tablesError, setTablesError] = useState<string | null>(null);
@@ -145,6 +158,10 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Task 12（引用跳转）：跳转目标（表/行）已不存在时的友好提示——与
+  // actionError 分开是因为这不是「操作失败」，是「引用陈旧」，文案与触发
+  // 时机都不同（见下方两个 initialTableId/initialRowId 相关 effect）。
+  const [jumpNotice, setJumpNotice] = useState<string | null>(null);
 
   const [query, setQuery] = useState("");
   const [openRowId, setOpenRowId] = useState<string | null>(null);
@@ -208,6 +225,35 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     setAppendOpen(false);
     setOptimizeRowId(null);
   }, [notebookId]);
+
+  // Task 12（引用跳转）：挂载时（或 initialTableId/initialRowId 变化时——面板
+  // 已开着又点了另一条引用）选中目标表并预置目标行 id。openTable 本身会把
+  // openRowId 清空，这里在它之后再设一次——同一批 effect 里对同一个 setState
+  // 的最后一次调用生效，最终 openRowId 落地为 initialRowId，selectedTableId
+  // 落地为 openTable 设的 initialTableId，两者都不会被互相打架。
+  useEffect(() => {
+    if (!initialTableId) return;
+    setJumpNotice(null);
+    openTable(initialTableId);
+    if (initialRowId) setOpenRowId(initialRowId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialTableId, initialRowId]);
+
+  // Task 12：目标表/行是否陈旧——只在「当前选中的表就是这次跳转的目标表」时
+  // 判定，避免用户跳转后又手动切到别的表时被这两个陈旧的 prop 值误伤。
+  useEffect(() => {
+    if (!initialTableId || selectedTableId !== initialTableId) return;
+    if (detailError) {
+      // 表本身加载失败，大概率已被删除——回退列表而不是留在一个「重试」也
+      // 无法恢复的死胡同页面。
+      setJumpNotice("未能定位到引用指向的表格，它可能已被删除。");
+      backToList();
+      return;
+    }
+    if (detail && initialRowId && !detail.rows.some((row) => row.id === initialRowId)) {
+      setJumpNotice("引用指向的行未找到，可能已被删除或调整，已为你展开整表内容。");
+    }
+  }, [detail, detailError, initialRowId, initialTableId, selectedTableId]);
 
   function openTable(tableId: string) {
     setSelectedTableId(tableId);
@@ -403,6 +449,15 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
           <X size={20} />
         </button>
       </div>
+
+      {jumpNotice && (
+        <div className="knowhow-jump-notice">
+          <span>{jumpNotice}</span>
+          <button type="button" onClick={() => setJumpNotice(null)} title="关闭">
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       <div className="knowhow-view-body">
         {selectedTableId === null ? (
@@ -797,6 +852,32 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
         }
 
         .knowhow-action-error button {
+          border: 0;
+          background: transparent;
+          color: inherit;
+          font-size: 16px;
+          line-height: 1;
+          cursor: pointer;
+        }
+
+        /* Task 12（引用跳转）：陈旧引用提示——信息性而非报错，用中性蓝而非
+           .knowhow-action-error 的红，避免"引用的行已不在了"这种平常情况看
+           起来像一次操作失败。 */
+        .knowhow-jump-notice {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          margin: 12px 20px 0;
+          padding: 8px 14px;
+          border: 1px solid #bfdbfe;
+          border-radius: 8px;
+          background: #eff6ff;
+          color: #1d4ed8;
+          font-size: 13px;
+        }
+
+        .knowhow-jump-notice button {
           border: 0;
           background: transparent;
           color: inherit;

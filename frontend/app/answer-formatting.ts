@@ -18,6 +18,12 @@ export type CitationLike = {
   location_label: string;
   quoted_span: string;
   tier?: string;
+  // Task 12（引用跳转）：命中 knowhow 格子的引用才有此字段（后端
+  // `Citation.knowhow`，非 knowhow 引用整体缺席，见 evidence_context.py
+  // citations_from 的 exclude_if 惯例）。字段名保持后端线上 snake_case——
+  // 本类型本就是 wire 形状的镜像，camelCase 映射统一交给
+  // knowhow-model.ts 的 mapCitationKnowhowRef 在使用侧做。
+  knowhow?: { table_id: string; row_id: string } | null;
 };
 
 export type AnswerReference = {

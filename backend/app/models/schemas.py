@@ -493,6 +493,16 @@ class RuleCard(BaseModel):
     evidence: List[Evidence]
 
 
+class CitationKnowhowRef(BaseModel):
+    """Locator for a citation that resolves to a knowhow table cell (Task 12:
+    引用跳转). Populated only when the cited element's
+    ``source_elements.metadata`` carries a ``knowhow`` tag (written by
+    ``KnowhowProjector._write_elements``) — lets the frontend jump straight
+    into that row's drawer instead of a dead/hidden source link."""
+    table_id: str
+    row_id: str
+
+
 class Citation(BaseModel):
     label: str
     source_id: str
@@ -506,6 +516,9 @@ class Citation(BaseModel):
     memory_id: str = Field(default="", exclude_if=lambda value: not value)
     provenance: Dict[str, Any] = Field(
         default_factory=dict, exclude_if=lambda value: not value
+    )
+    knowhow: Optional[CitationKnowhowRef] = Field(
+        default=None, exclude_if=lambda value: value is None
     )
 
 
