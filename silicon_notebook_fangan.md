@@ -1333,7 +1333,7 @@ chunk 或 knowledge object。
   过期时间、默认 notebook、notebook allowlist 和最小 scope；可即时撤销。可用 scope 只有
   `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
   `ask:execute`。
-- MCP 使用官方 SDK 的 Streamable HTTP `/mcp`。本机只允许 loopback HTTP；远程必须 HTTPS。
+- MCP 使用官方 SDK 的 Streamable HTTP `/mcp`。本机只允许 loopback HTTP；远程默认允许明文 HTTP（可信内网默认：放宽 Host/Origin 校验并打印启动告警），设 `MCP_REQUIRE_HTTPS=1` 恢复强制 HTTPS 与 DNS-rebinding 保护。
   每个新 session 先显式调用 `select_notebook`，服务端在后续每次数据调用重新校验 token、scope、
   allowlist、所选 notebook 和用户当前访问权。
 - 精确工具集为 `list_notebooks`、`select_notebook`、`search_agent_memory`、
