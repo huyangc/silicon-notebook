@@ -162,6 +162,54 @@ def _row_chunk_texts(repo, row_id: str) -> dict[str, str]:
     return out
 
 
+def _row_chunk_section_paths(repo, row_id: str) -> dict[str, str]:
+    """{chunk_id: section_path} for this row's chunks — companion to
+    _row_chunk_texts for tests that need to see the human-readable
+    "table › concept › column" breadcrumb move without the chunk's text
+    changing (concept-cell edits move every sibling's section_path)."""
+    element_ids = _row_element_ids(repo, row_id)
+    if not element_ids:
+        return {}
+    with repo._connect() as db:
+        rows = db.execute("SELECT id, section_path, element_ids FROM chunks").fetchall()
+    out: dict[str, str] = {}
+    for r in rows:
+        eids = json.loads(r["element_ids"] or "[]")
+        if any(eid in element_ids for eid in eids):
+            out[r["id"]] = r["section_path"]
+    return out
+
+
+def _chunk_fts_ids(repo, chunk_ids) -> set[str]:
+    ids = list(chunk_ids)
+    if not ids:
+        return set()
+    placeholders = ",".join("?" for _ in ids)
+    with repo._connect() as db:
+        rows = db.execute(
+            f"SELECT chunk_id FROM chunks_fts WHERE chunk_id IN ({placeholders})", ids,
+        ).fetchall()
+    return {r["chunk_id"] for r in rows}
+
+
+def _chunk_embedding_vectors(repo, chunk_ids) -> dict[str, bytes]:
+    """{chunk_id: raw vector blob} for whichever of chunk_ids currently have
+    a chunk_embeddings row — existence (not just content) is the signal
+    tests need: chunk_embeddings.chunk_id is ON DELETE CASCADE onto
+    chunks(id), so a chunk row that gets deleted+reinserted (rather than
+    updated in place) silently loses this row even if its id is reused."""
+    ids = list(chunk_ids)
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    with repo._connect() as db:
+        rows = db.execute(
+            f"SELECT chunk_id, vector FROM chunk_embeddings WHERE chunk_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+    return {r["chunk_id"]: r["vector"] for r in rows}
+
+
 def _row_object_ids(repo, row_id: str) -> set[str]:
     with repo._connect() as db:
         rows = db.execute(
@@ -342,6 +390,120 @@ def test_reprojecting_unchanged_row_makes_zero_additional_embed_calls(repo, proj
 
     projector.project_row(table_id, row_id)
     assert embedder.call_count == 1  # nothing changed -> zero additional embed calls
+
+
+def test_concept_cell_edit_moves_sibling_section_paths_without_reembedding(
+    repo, projector, table_id, embedder
+):
+    """Review finding: section_path bakes in the row's concept (`f"{table} ›
+    {concept} › {column}"`), so editing ONLY the concept cell changes every
+    SIBLING chunk's section_path too even though their text never changed.
+    The chunk row must still be rewritten (section_path has to move) but must
+    NOT be re-embedded — and (chunk_embeddings.chunk_id is ON DELETE CASCADE
+    onto chunks(id), and this chunk's id is stable for the same row/column/
+    split) its existing embedding must survive, not get cascade-deleted by a
+    delete+reinsert that nothing then re-embeds."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_role(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["concept"]: "过冲问题",
+        cols["identify"]: "- 观察上升沿过冲",
+        cols["fix"]: "1. 增加阻尼电阻",
+    })
+
+    projector.project_row(table_id, row_id)
+    assert embedder.call_count == 1
+    chunks_before = _row_chunk_texts(repo, row_id)
+    assert len(chunks_before) == 3
+    paths_before = _row_chunk_section_paths(repo, row_id)
+    vectors_before = _chunk_embedding_vectors(repo, set(chunks_before))
+    assert set(vectors_before) == set(chunks_before)  # all 3 embedded on first projection
+
+    concept_chunk_id = next(cid for cid, text in chunks_before.items() if text == "过冲问题")
+
+    store.update_knowhow_cell(row_id, cols["concept"], "过冲新问题")
+    projector.project_row(table_id, row_id)
+
+    # Exactly 1 new embed call, for exactly the concept cell's OWN new text —
+    # zero re-embeds for the two sibling cells whose text never changed.
+    assert embedder.call_count == 2
+    assert embedder.calls[-1] == ["过冲新问题"]
+
+    chunks_after = _row_chunk_texts(repo, row_id)
+    paths_after = _row_chunk_section_paths(repo, row_id)
+    assert set(chunks_after) == set(chunks_before)  # same 3 stable chunk-id slots
+
+    changed_text_ids = {cid for cid in chunks_before if chunks_before[cid] != chunks_after[cid]}
+    assert changed_text_ids == {concept_chunk_id}
+    assert chunks_after[concept_chunk_id] == "过冲新问题"
+    sibling_ids = set(chunks_before) - {concept_chunk_id}
+
+    # ALL 3 chunks' section_path reflects the NEW concept — including the two
+    # siblings whose own text is untouched.
+    for cid in chunks_after:
+        assert "过冲新问题" in paths_after[cid]
+        assert paths_after[cid] != paths_before[cid]
+
+    # The siblings' embeddings are the SAME rows as before: still present
+    # (not cascade-deleted) and byte-identical (reused, not recomputed).
+    vectors_after = _chunk_embedding_vectors(repo, sibling_ids)
+    assert set(vectors_after) == sibling_ids
+    assert vectors_after == {cid: vectors_before[cid] for cid in sibling_ids}
+
+
+def test_project_row_sweeps_chunks_for_a_column_removed_from_the_table(
+    repo, projector, table_id, embedder
+):
+    """Review finding: _write_chunks only ever walked the table's CURRENT
+    columns, so a column removed from the table left its old chunk group
+    (+chunks_fts +chunk_embeddings) behind forever, retrievable even though
+    the column is gone. project_row alone must be self-healing for column
+    deletes/reorders — mirroring _write_elements' existing delete-all-then-
+    reinsert reconciliation (that one already deletes by row_id and
+    reinserts only current columns, so it never had this bug)."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_role(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["concept"]: "过冲问题",
+        cols["identify"]: "- 观察上升沿过冲",
+        cols["fix"]: "1. 增加阻尼电阻",
+    })
+
+    projector.project_row(table_id, row_id)
+    source_id = projector.ensure_hidden_source(table_id)
+    chunks_before = {
+        c["id"]: c["text"] for c in repo._runtime.chunk_store.source_chunks(source_id)
+    }
+    assert len(chunks_before) == 3
+    fix_chunk_id = next(cid for cid, text in chunks_before.items() if text == "1. 增加阻尼电阻")
+    assert _chunk_fts_ids(repo, {fix_chunk_id}) == {fix_chunk_id}
+    assert set(_chunk_embedding_vectors(repo, {fix_chunk_id})) == {fix_chunk_id}
+
+    # Simulate "delete one column via the store": KnowhowStore has no
+    # column-delete API yet (that lands with Task 6's table-editing routes)
+    # — drop the knowhow_columns row directly, the same net effect such an
+    # endpoint would have from get_knowhow_table's point of view (it simply
+    # stops returning the column).
+    with repo._connect() as db:
+        db.execute("DELETE FROM knowhow_columns WHERE id=?", (cols["fix"],))
+
+    projector.project_row(table_id, row_id)
+
+    chunks_after = {
+        c["id"]: c["text"] for c in repo._runtime.chunk_store.source_chunks(source_id)
+    }
+    assert set(chunks_after.values()) == {"过冲问题", "- 观察上升沿过冲"}
+    assert fix_chunk_id not in chunks_after
+    assert len(chunks_after) == 2
+
+    # The removed column's chunk row, its chunks_fts row, AND its
+    # chunk_embeddings row are ALL gone — a real leak, not just filtered out
+    # of some element-scoped view.
+    assert _chunk_fts_ids(repo, {fix_chunk_id}) == set()
+    assert _chunk_embedding_vectors(repo, {fix_chunk_id}) == {}
+
+    # The remaining two cells' own chunks are untouched.
+    assert set(chunks_after) == set(chunks_before) - {fix_chunk_id}
 
 
 def test_overlong_cell_splits_into_multiple_chunk_parts(repo, projector, table_id, embedder):
@@ -545,6 +707,45 @@ def test_embedding_failure_emits_through_model_error_channel(repo, projector, ta
     stage, _model, exc_type = calls[0]
     assert stage == "knowhow_embed"
     assert exc_type == "RuntimeError"
+
+
+# ---------------------------------------------------------------------------
+# structural-write failure (distinct from embedding failure above: this one
+# MUST raise — a structural-write bug is a programming error, not a flaky
+# network call, and must not be silently swallowed)
+# ---------------------------------------------------------------------------
+
+
+def test_structural_write_failure_marks_row_failed_and_reraises(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """Review finding: project_row sets 'syncing' then runs the structural
+    database.write() block (elements/chunks/KOs); an exception raised inside
+    that block used to propagate straight out with the row never leaving
+    'syncing' (no code path ever flips it again). The row must land on
+    'failed' (an honest terminal state) and the exception must still
+    propagate — unlike the embed-failure path above, this is NOT a
+    best-effort/no-raise case."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_role(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["concept"]: "过冲问题", cols["fix"]: "1. 增加阻尼电阻",
+    })
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("boom-structural")
+
+    # insert_relation_chunk is the LAST store call inside _write_knowledge —
+    # patching it lets everything else in the structural block run first,
+    # so this also proves the whole transaction rolls back on failure (no
+    # half-written case KO survives).
+    monkeypatch.setattr(projector.knowledge, "insert_relation_chunk", _boom)
+
+    with pytest.raises(RuntimeError, match="boom-structural"):
+        projector.project_row(table_id, row_id)
+
+    assert _row_projection_status(repo, table_id, row_id) == "failed"
+    assert not _row_object_ids(repo, row_id)  # transaction rolled back, not half-applied
 
 
 def test_unconfigured_embedder_is_not_a_failure(tmp_path, monkeypatch):

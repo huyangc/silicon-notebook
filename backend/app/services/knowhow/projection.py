@@ -15,6 +15,17 @@ mirror ``KnowledgeLifecycleService``/``SourceChunkingService``: no facade
 import, no raw SQL here — every write goes through an injected store method,
 and this service owns its own ``database.write()`` transaction boundary for
 the structural (non-embedding) part of a projection.
+
+One nuance worth flagging up front: ``_write_chunks`` sometimes needs to
+rewrite a chunk row whose TEXT never changed (only its ``section_path``
+did — see that method's docstring). ``chunk_embeddings.chunk_id`` is ``ON
+DELETE CASCADE`` onto ``chunks(id)`` and ChunkStore has no in-place "update
+one column" primitive, only delete/insert — so that rewrite still goes
+through the existing ``delete_by_ids``/``insert_rows`` pair (no new store
+method, no raw SQL), and the row's still-valid embedding is carried over
+(read via ``EmbeddingStore.rows_by_ids`` before the delete, re-persisted via
+``SourceEmbeddingService.vectors.replace_chunk_vectors`` after the
+transaction commits) instead of being recomputed or silently lost.
 """
 from __future__ import annotations
 
@@ -25,11 +36,13 @@ from typing import Callable, List
 from app.core.config import Settings
 from app.repositories.sqlite.chunk_store import ChunkStore, ChunkWrite
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.embedding_store import EmbeddingStore
 from app.repositories.sqlite.knowhow_store import KnowhowStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
 from app.services.knowhow import textops
 from app.services.source_embedding import SourceEmbeddingService
+from app.services.vector_index import decode_vector
 
 # Column roles that become a `procedure` object per non-empty cell, and their
 # case->procedure edge_type (design doc §④ / task brief step 4).
@@ -218,19 +231,39 @@ class KnowhowProjector:
 
         now = self.now()
 
-        with self.database.write() as db:
-            self._write_elements(db, source_id, table_id, row_id, columns, cell_nets, concept, now)
-            embed_targets = self._write_chunks(
-                db, source_id, notebook_id, table, row_id, columns, cell_nets, concept, now
-            )
-            self._write_knowledge(
-                db, source_id, notebook_id, table, table_id, row_id, columns, cell_nets, concept, now
-            )
+        try:
+            with self.database.write() as db:
+                self._write_elements(db, source_id, table_id, row_id, columns, cell_nets, concept, now)
+                embed_targets, carry_over_vectors = self._write_chunks(
+                    db, source_id, notebook_id, table, row_id, columns, cell_nets, concept, now
+                )
+                self._write_knowledge(
+                    db, source_id, notebook_id, table, table_id, row_id, columns, cell_nets, concept, now
+                )
+        except Exception:
+            # Structural writes (elements/chunks/KOs) are a programming
+            # surface, not network I/O — unlike the embed call below, a
+            # failure here is a genuine bug and must fail loud (re-raise).
+            # But the row must not be left claiming 'syncing' forever: no
+            # other code path ever revisits it, so a silent-'syncing' row
+            # would look perpetually in-progress instead of honestly failed.
+            self.knowhow.set_knowhow_row_projection(row_id, "failed")
+            raise
 
         failed = False
-        if embed_targets:
+        if embed_targets or carry_over_vectors:
             try:
-                self.embedding.embed_chunk_ids(notebook_id, embed_targets)
+                # Carry-over first: it's a plain re-persist of an already-
+                # computed vector (no embedder call, must run once the
+                # structural transaction above has committed — chunk_
+                # embeddings' FK target must exist first), independent of
+                # whatever embed_chunk_ids below does.
+                if carry_over_vectors:
+                    self.embedding.vectors.replace_chunk_vectors(
+                        notebook_id, carry_over_vectors, created_at=now
+                    )
+                if embed_targets:
+                    self.embedding.embed_chunk_ids(notebook_id, embed_targets)
             except Exception as exc:  # noqa: BLE001 — surfaced via model_error, never raised
                 failed = True
                 self.note_model_error("knowhow_embed", self.settings.embed_model, exc)
@@ -264,7 +297,15 @@ class KnowhowProjector:
 
     # --- step 3: chunks (per-cell diff) ------------------------------------
     def _write_chunks(self, db, source_id, notebook_id, table, row_id, columns,
-                      cell_nets, concept, now) -> List[dict]:
+                      cell_nets, concept, now) -> "tuple[List[dict], List[tuple]]":
+        """Returns ``(embed_targets, carry_over_vectors)``:
+        ``embed_targets`` (``[{"id","text"}, ...]``) is unchanged from
+        before — chunks whose TEXT actually changed, which genuinely need a
+        fresh embedder call. ``carry_over_vectors`` (``[(chunk_id, ndarray),
+        ...]``) is new: chunks whose text did NOT change but whose row still
+        had to be rewritten (section_path moved — see below), paired with
+        their OLD vector so the caller can re-persist it post-commit without
+        recomputing it."""
         row_hash = _chunk_row_hash(row_id)
         id_prefix = f"chunk-kh-{row_hash}-"
         old_rows = self.chunks.rows_by_id_prefix(db, source_id, id_prefix)
@@ -275,11 +316,14 @@ class KnowhowProjector:
         for group in old_by_col.values():
             group.sort(key=lambda r: int(str(r["id"]).rsplit("-", 1)[-1]))
 
+        live_col_positions: set = set()
         to_delete_ids: List[str] = []
         to_insert: List[ChunkWrite] = []
+        reprint_only_ids: List[str] = []  # text unchanged, section_path moved
         embed_targets: List[dict] = []
         for column in columns:
             col_pos = column["position"]
+            live_col_positions.add(col_pos)
             text = cell_nets[column["id"]]
             section_path = f"{table['title']} › {concept} › {column['name']}"
             parts_text = _split_long_text(text) if text else []
@@ -288,6 +332,14 @@ class KnowhowProjector:
             old_specs = [(r["text"], r["section_path"]) for r in old_group]
             if old_specs == new_specs:
                 continue  # unchanged cell — zero deletes/inserts/embeds
+            # Text-only equality (ignoring section_path) — e.g. this is a
+            # SIBLING of the cell that actually changed: every column's
+            # section_path embeds the row's concept, so editing the concept
+            # cell alone moves every sibling's path even though their own
+            # text is untouched. The row must still be rewritten (path
+            # moved), but nothing here should pay for a redundant embedder
+            # call on text that hasn't changed.
+            text_only_changed = [t for t, _ in old_specs] == [t for t, _ in new_specs]
             to_delete_ids.extend(r["id"] for r in old_group)
             if not text:
                 continue
@@ -297,10 +349,43 @@ class KnowhowProjector:
                 to_insert.append(ChunkWrite(
                     id=cid, text=part_text, section_path=section_path, element_ids=(eid,),
                 ))
-                embed_targets.append({"id": cid, "text": part_text})
+                if text_only_changed:
+                    reprint_only_ids.append(cid)
+                else:
+                    embed_targets.append({"id": cid, "text": part_text})
+
+        # A column removed (or renumbered away) from the table since the
+        # last projection leaves its old chunk group unvisited by the loop
+        # above (it only walks CURRENT columns) — sweep every old group
+        # whose position no longer belongs to a live column so project_row
+        # alone stays self-healing for column deletes/reorders, the same
+        # delete-all-then-reinsert reconciliation _write_elements already
+        # does by row_id.
+        for col_pos, group in old_by_col.items():
+            if col_pos not in live_col_positions:
+                to_delete_ids.extend(r["id"] for r in group)
+
+        # Read the reprint-only ids' CURRENT vectors before delete_by_ids
+        # cascades them away (chunk_embeddings.chunk_id is FK ON DELETE
+        # CASCADE onto chunks(id), and reprint_only_ids reuse their exact
+        # old chunk id — same row/column/split slot, only section_path
+        # moved). This is a plain SELECT on the transaction's own
+        # connection, so it safely sees pre-delete state regardless of
+        # ordering — it just has to run before the delete below.
+        carry_over_vectors: List[tuple] = []
+        if reprint_only_ids:
+            existing = EmbeddingStore.rows_by_ids(
+                db, "chunk_embeddings", "chunk_id", reprint_only_ids
+            )
+            carry_over_vectors = [
+                (r["vid"], vec)
+                for r in existing
+                if (vec := decode_vector(r["vector"])) is not None
+            ]
+
         self.chunks.delete_by_ids(db, to_delete_ids)
         self.chunks.insert_rows(db, notebook_id, source_id, to_insert, created_at=now)
-        return embed_targets
+        return embed_targets, carry_over_vectors
 
     # --- step 4: KO / edges -------------------------------------------------
     def _write_knowledge(self, db, source_id, notebook_id, table, table_id, row_id,
