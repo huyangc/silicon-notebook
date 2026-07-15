@@ -244,6 +244,22 @@ class Evidence(BaseModel):
     confidence: float
 
 
+class PaperAuthor(BaseModel):
+    name: str
+    affiliation: str = ""  # 多机构以 "; " 连接;接地校验不过则为空
+
+
+class PaperMeta(BaseModel):
+    """论文元数据(接地校验后)。非论文源/未抽取时整个对象缺省。"""
+    is_paper: bool = False
+    title: Optional[str] = None
+    venue: Optional[str] = None
+    year: Optional[int] = None
+    doi: Optional[str] = None
+    keywords: List[str] = Field(default_factory=list)
+    authors: List[PaperAuthor] = Field(default_factory=list)
+
+
 class SourceElement(BaseModel):
     id: str
     source_id: str
@@ -273,6 +289,10 @@ class SourceSummary(BaseModel):
     extraction_warning: Optional[str] = None
     # 该 source 是否已抽取 KG / 已入图
     kg_extracted: bool = False
+    # 论文元数据投影:作者姓名按署名序;非论文/未抽取为空(paper-metadata)。
+    authors: List[str] = Field(default_factory=list)
+    pub_year: Optional[int] = None
+    venue: Optional[str] = None
 
 
 class PaginatedSources(BaseModel):
@@ -310,6 +330,7 @@ class AddUrlSourcesResult(BaseModel):
 class SourceDetail(SourceSummary):
     file_path: str = ""
     error_message: str = ""
+    paper_meta: Optional[PaperMeta] = None
 
 
 class NotebookCreate(BaseModel):

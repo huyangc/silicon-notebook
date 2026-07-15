@@ -9,6 +9,8 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from app.models.schemas import (
     PaginatedSources,
+    PaperAuthor,
+    PaperMeta,
     SourceDetail,
     SourceElement,
     SourceSummary,
@@ -71,19 +73,25 @@ class SourceStore:
 
     def list_sources_page(self, notebook_id: str, offset: int = 0, limit: int = 50,
                           q: str = "") -> PaginatedSources:
-        """分页 + 可选 q(按 title/file_name 服务端过滤)。万级 source 安全:只取一页 +
-        一次 COUNT,不全量进内存。同 list_sources 排除 source_type IN ('memory',
-        'knowhow') 的隐藏合成源(含 total_count),内部真集路径(get_source/
-        pending_kg/copy/scale-index)不受影响。"""
+        """分页 + 可选 q(按 title/file_name/作者名/论文标题 服务端过滤)。万级 source
+        安全:只取一页 + 一次 COUNT,不全量进内存。同 list_sources 排除 source_type
+        IN ('memory', 'knowhow') 的隐藏合成源(含 total_count),内部真集路径
+        (get_source/pending_kg/copy/scale-index)不受影响。"""
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
         needle = (q or "").strip().lower()
         where = "WHERE notebook_id = ? AND source_type NOT IN ('memory', 'knowhow')"
         params: List[object] = [notebook_id]
         if needle:
-            where += " AND (LOWER(title) LIKE ? OR LOWER(file_name) LIKE ?)"
+            where += (
+                " AND (LOWER(title) LIKE ? OR LOWER(file_name) LIKE ?"
+                " OR EXISTS(SELECT 1 FROM source_authors a"
+                "    WHERE a.source_id = sources.id AND LOWER(a.name) LIKE ?)"
+                " OR EXISTS(SELECT 1 FROM source_paper_meta m"
+                "    WHERE m.source_id = sources.id AND LOWER(m.paper_title) LIKE ?))"
+            )
             like = f"%{needle}%"
-            params += [like, like]
+            params += [like, like, like, like]
         with self.database.connect() as db:
             total = db.execute(
                 f"SELECT COUNT(*) c FROM sources {where}", params).fetchone()["c"]
@@ -104,6 +112,9 @@ class SourceStore:
                 **summary.model_dump(),
                 file_path=row["file_path"],
                 error_message=row["error_message"],
+                paper_meta=self.paper_meta_model(
+                    self.paper_meta_for_sources(db, [source_id]).get(source_id)
+                ),
             )
 
     def source_elements(self, source_id: str) -> List[SourceElement]:
@@ -480,6 +491,7 @@ class SourceStore:
             "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE source_id = ? AND source_id != '')",
             (row["id"],),
         ).fetchone()[0])
+        pm = self.paper_meta_for_sources(db, [row["id"]]).get(row["id"])
         return SourceSummary(
             id=row["id"],
             notebook_id=row["notebook_id"],
@@ -497,6 +509,9 @@ class SourceStore:
             source_url=row["source_url"] if "source_url" in row.keys() else "",
             extraction_warning=self.extraction_warning(db, row["id"]),
             kg_extracted=kg_extracted,
+            authors=[a["name"] for a in pm["authors"]] if pm else [],
+            pub_year=pm["pub_year"] if pm else None,
+            venue=pm["venue"] if pm else None,
         )
 
     def sources_from_rows(self, db: sqlite3.Connection, rows: List[sqlite3.Row]) -> List[SourceSummary]:
@@ -519,6 +534,7 @@ class SourceStore:
         if not rows:
             return []
         source_ids = [r["id"] for r in rows]
+        paper_meta = self.paper_meta_for_sources(db, source_ids)
         element_counts: Dict[str, int] = {}
         kg_extracted_ids: set = set()
         latest_error: Dict[str, str] = {}
@@ -574,6 +590,10 @@ class SourceStore:
                 source_url=row["source_url"] if "source_url" in row.keys() else "",
                 extraction_warning=_warning(sid),
                 kg_extracted=sid in kg_extracted_ids,
+                authors=[a["name"] for a in paper_meta[sid]["authors"]]
+                    if sid in paper_meta else [],
+                pub_year=paper_meta[sid]["pub_year"] if sid in paper_meta else None,
+                venue=paper_meta[sid]["venue"] if sid in paper_meta else None,
             ))
         return out
 
@@ -622,3 +642,130 @@ class SourceStore:
     ) -> List[dict]:
         with self.database.connect() as db:
             return self.meta_source_rows(db, notebook_id, pending_source_id)
+
+    # ------------------------------------------------------- paper metadata
+    def upsert_paper_meta(self, source_id: str, notebook_id: str, meta: dict) -> None:
+        """写入/覆盖论文元数据(单写事务):source_paper_meta upsert + source_authors
+        整组 delete+insert。meta 形状 = paper_meta.verify_paper_meta 的返回(已接地
+        校验);行存在即「已尝试」,is_paper=0 是「已判定非论文」标记(幂等防重调 LLM)。
+        作者行 id 取 source_id 限定的确定性复合键(重抽稳定,无碰撞面)。"""
+        now = self.now()
+        with self.database.write() as db:
+            db.execute(
+                """
+                INSERT INTO source_paper_meta
+                  (source_id, notebook_id, is_paper, paper_title, venue, pub_year,
+                   doi, keywords, raw_json, model, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_id) DO UPDATE SET
+                  is_paper=excluded.is_paper, paper_title=excluded.paper_title,
+                  venue=excluded.venue, pub_year=excluded.pub_year, doi=excluded.doi,
+                  keywords=excluded.keywords, raw_json=excluded.raw_json,
+                  model=excluded.model, updated_at=excluded.updated_at
+                """,
+                (
+                    source_id, notebook_id, 1 if meta.get("is_paper") else 0,
+                    meta.get("paper_title"), meta.get("venue"), meta.get("pub_year"),
+                    meta.get("doi"),
+                    json.dumps(meta.get("keywords") or [], ensure_ascii=False),
+                    str(meta.get("raw_json") or "{}"), str(meta.get("model") or ""),
+                    now, now,
+                ),
+            )
+            db.execute("DELETE FROM source_authors WHERE source_id = ?", (source_id,))
+            for author in meta.get("authors") or []:
+                position = int(author.get("position", 0))
+                db.execute(
+                    "INSERT INTO source_authors "
+                    "(id, source_id, notebook_id, position, name, affiliation, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        f"{source_id}:auth:{position:03d}", source_id, notebook_id,
+                        position, str(author.get("name") or "").strip(),
+                        str(author.get("affiliation") or "").strip(), now,
+                    ),
+                )
+
+    @staticmethod
+    def _paper_meta_dict(row: sqlite3.Row, authors: List[sqlite3.Row]) -> dict:
+        return {
+            "source_id": row["source_id"],
+            "is_paper": bool(row["is_paper"]),
+            "paper_title": row["paper_title"],
+            "venue": row["venue"],
+            "pub_year": row["pub_year"],
+            "doi": row["doi"],
+            "keywords": json.loads(row["keywords"] or "[]"),
+            "model": row["model"],
+            "authors": [
+                {"position": a["position"], "name": a["name"],
+                 "affiliation": a["affiliation"]}
+                for a in authors
+            ],
+        }
+
+    @staticmethod
+    def paper_meta_model(meta: Optional[dict]) -> Optional[PaperMeta]:
+        """store dict → API 模型(SourceDetail.paper_meta)。标记行(is_paper=0)也
+        返回对象(is_paper False),前端按 is_paper 门控显示。"""
+        if meta is None:
+            return None
+        return PaperMeta(
+            is_paper=meta["is_paper"], title=meta["paper_title"],
+            venue=meta["venue"], year=meta["pub_year"], doi=meta["doi"],
+            keywords=list(meta["keywords"]),
+            authors=[
+                PaperAuthor(name=a["name"], affiliation=a["affiliation"])
+                for a in meta["authors"]
+            ],
+        )
+
+    def get_paper_meta(self, source_id: str) -> Optional[dict]:
+        with self.database.connect() as db:
+            return self.paper_meta_for_sources(db, [source_id]).get(source_id)
+
+    def paper_meta_for_sources(self, db: sqlite3.Connection,
+                               source_ids: Sequence[str]) -> Dict[str, dict]:
+        """批量水合(IN 分批守 999 变量上限,同 sources_from_rows 惯例)。
+        无 meta 行的源不在返回里。"""
+        meta_rows: Dict[str, sqlite3.Row] = {}
+        author_rows: Dict[str, List[sqlite3.Row]] = {}
+        ids = list(source_ids)
+        for i in range(0, len(ids), self.IN_CHUNK):
+            batch = ids[i:i + self.IN_CHUNK]
+            ph = ",".join("?" for _ in batch)
+            for row in db.execute(
+                f"SELECT * FROM source_paper_meta WHERE source_id IN ({ph})", batch,
+            ).fetchall():
+                meta_rows[row["source_id"]] = row
+            for a in db.execute(
+                f"SELECT source_id, position, name, affiliation FROM source_authors "
+                f"WHERE source_id IN ({ph}) ORDER BY source_id, position ASC", batch,
+            ).fetchall():
+                author_rows.setdefault(a["source_id"], []).append(a)
+        return {
+            sid: self._paper_meta_dict(row, author_rows.get(sid, []))
+            for sid, row in meta_rows.items()
+        }
+
+    def sources_missing_paper_meta(self, notebook_id: str,
+                                   include_existing: bool = False) -> List[str]:
+        """补抽目标源:doc_type 为 academic_paper(含 ''=默认,与 run_extraction 的
+        `or "academic_paper"` 语义一致)、已有解析产物(parsed 及之后)、非 memory/
+        knowhow 合成源;默认排除已有 meta 行(幂等续跑),include_existing=True
+        (--force)全量。"""
+        missing = (
+            "" if include_existing else
+            " AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id)"
+        )
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT s.id FROM sources s "
+                "WHERE s.notebook_id = ? "
+                "  AND s.source_type NOT IN ('memory', 'knowhow') "
+                "  AND s.doc_type IN ('', 'academic_paper') "
+                "  AND s.parse_status IN ('parsed', 'extracting', 'extracted') "
+                f"{missing} ORDER BY s.created_at ASC",
+                (notebook_id,),
+            ).fetchall()
+        return [r["id"] for r in rows]
