@@ -19,8 +19,9 @@ export const ROLE_LABELS: Record<Role, string> = {
   plain: "普通",
 };
 
-// 行投影状态：pending=同步中，synced=已同步，failed=失败可重试。
-export type ProjectionStatus = "pending" | "synced" | "failed";
+// 行投影状态：pending=待投影，syncing=同步中(投影器正在(重)投影)，
+// synced=已同步，failed=失败可重试。
+export type ProjectionStatus = "pending" | "syncing" | "synced" | "failed";
 
 // --- 领域类型（camelCase，供组件消费）------------------------------------------
 
@@ -219,8 +220,12 @@ const CODE_FENCE_RE = /```[a-zA-Z0-9_-]*\n?/g;
 const INLINE_CODE_RE = /`([^`]+)`/g;
 const BOLD_STAR_RE = /\*\*([^*]+)\*\*/g;
 const BOLD_UNDERSCORE_RE = /__([^_]+)__/g;
-const ITALIC_STAR_RE = /\*([^*]+)\*/g;
-const ITALIC_UNDERSCORE_RE = /_([^_]+)_/g;
+// 星号斜体：内容首尾不得是空白，避免把「2 * 3 * 4」这类乘号表达式误吃成斜体
+// (星号紧邻空格时不算强调标记)。真正的 `*emphasis*` 内容首尾无空格，仍会剥离。
+const ITALIC_STAR_RE = /\*(\S(?:[^*]*\S)?)\*/g;
+// 注意：故意不做下划线斜体剥离(CommonMark 对词中下划线不视为强调)。EDA/硅仿真
+// 场景中下划线标识符(place_opt_design、clk_out_en 等 innovus 命令/信号名)是
+// 常态，比中文「_斜体_」写法常见得多，必须原样保留、不被当成 `_x_` 斜体吃掉。
 const STRIKE_RE = /~~([^~]+)~~/g;
 const HEADER_RE = /^#{1,6}\s+/gm;
 const BLOCKQUOTE_RE = /^>\s?/gm;
@@ -245,7 +250,6 @@ function stripMarkdownMarks(text: string): string {
     .replace(BOLD_STAR_RE, "$1")
     .replace(BOLD_UNDERSCORE_RE, "$1")
     .replace(ITALIC_STAR_RE, "$1")
-    .replace(ITALIC_UNDERSCORE_RE, "$1")
     .replace(STRIKE_RE, "$1")
     .replace(HEADER_RE, "")
     .replace(BLOCKQUOTE_RE, "")

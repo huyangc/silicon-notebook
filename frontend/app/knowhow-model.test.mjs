@@ -108,3 +108,27 @@ test("cellSummary: 空格子（空串/纯空白）返回空串", () => {
   assert.strictEqual(cellSummary(""), "");
   assert.strictEqual(cellSummary("   \n   "), "");
 });
+
+// --- cellSummary: 下划线标识符（EDA/silicon 场景，innovus 命令/信号名）不应被误伤 ---
+
+test("cellSummary: 下划线标识符原样保留，不被当作斜体剥离", () => {
+  assert.strictEqual(cellSummary("用 place_opt_design 修复"), "用 place_opt_design 修复");
+});
+
+test("cellSummary: 反引号包裹的下划线标识符去反引号但保留下划线", () => {
+  assert.strictEqual(cellSummary("先跑 `place_opt_design` 再查"), "先跑 place_opt_design 再查");
+});
+
+test("cellSummary: 句中的下划线标识符存活", () => {
+  assert.strictEqual(cellSummary("信号 clk_out_en 需要检查"), "信号 clk_out_en 需要检查");
+});
+
+// --- cellSummary: 星号斜体守卫不应误伤空格相邻的乘号场景 ---
+
+test("cellSummary: 空格相邻的星号（乘号）不被当作斜体剥离", () => {
+  assert.strictEqual(cellSummary("2 * 3 * 4"), "2 * 3 * 4");
+});
+
+test("cellSummary: 真斜体（无内部首尾空格）仍被剥离", () => {
+  assert.strictEqual(cellSummary("*强调*"), "强调");
+});
