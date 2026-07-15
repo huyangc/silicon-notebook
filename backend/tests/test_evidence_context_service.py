@@ -70,10 +70,13 @@ def test_evidence_context_chunk_golden_matches_master():
     block, evidence = _service().chunk_context(chunks, notebook_id="active")
     assert block == "k1: active text\nk2: base text"
     assert list(evidence) == ["k1", "k2"]
+    # Task 12b review fix: chunk anchors resolve knowhow too (grounded-path
+    # button reachability). These chunks carry no element_ids, so the field
+    # is present-but-None and no store lookup fires at all.
     assert evidence["k1"] == {
         "object_id": "c-active", "object_type": "chunk", "name": "1.1",
         "definition": None, "snippet": "active text", "source_title": "Paper A",
-        "location_label": "1.1", "tier": "personal",
+        "location_label": "1.1", "tier": "personal", "knowhow": None,
     }
 
 

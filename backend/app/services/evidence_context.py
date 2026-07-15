@@ -93,6 +93,18 @@ class EvidenceContextService:
         )
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
+        # Task 12b 评审修复（grounded 主路径可达性）：chunk 锚点也要带 knowhow。
+        # 前端 buildAnswerReferences 是 anchor 优先的全有全无——答案里只要有
+        # 一个 [k] 命中，引用列表就整体走 anchor 分支，citation.knowhow 永远
+        # 被遮蔽；而 chunk 锚点（所有模式 grounded 答案的主体）此前从不带
+        # knowhow → grounded 的 chunk 模式答案（answer_prompt 要求每句有据
+        # 都标 [k]）里「在表格中查看」按钮永远不出现。这里沿用共享的
+        # knowhow_refs_for 按 element_id 批量解一次（每次组装恰好一次 store
+        # 读取，PK 上的有界 IN 查询，条数 ≤ 本次入选 chunk 数——运行效率是
+        # 一等约束）。只对单 element 的 chunk 生效：knowhow 投影的格子 chunk
+        # 恒为单 element（projection.py 每格一元素），多 element 的普通文档
+        # chunk 天然不可能是 knowhow 格子，防御性跳过。
+        single_element_keys: dict[str, str] = {}
         used = 0
         for index, chunk in enumerate(chunks, 1):
             if used >= budget and lines:
@@ -111,7 +123,15 @@ class EvidenceContextService:
                 "source_title": chunk.source_title,
                 "location_label": chunk.section_path,
                 "tier": tiers.get(origin, "personal"),
+                "knowhow": None,
             }
+            element_ids = getattr(chunk, "element_ids", None) or []
+            if len(element_ids) == 1:
+                single_element_keys[key] = element_ids[0]
+        if single_element_keys:
+            refs = self.knowhow_refs_for(single_element_keys.values())
+            for key, element_id in single_element_keys.items():
+                evidence_by_id[key]["knowhow"] = refs.get(element_id)
         return ("\n".join(lines) if lines else "(none)"), evidence_by_id
 
     def knowledge_context(

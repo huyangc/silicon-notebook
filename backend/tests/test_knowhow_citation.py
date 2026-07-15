@@ -407,24 +407,18 @@ def _spy_on_evidence_elements(repo, monkeypatch) -> list:
     return calls
 
 
-def test_ask_chunk_citations_carry_knowhow_and_the_batch_query_still_fires_once(
-    repo, projector, monkeypatch,
-):
-    """T12b 主场景：chunk 模式（默认模式，brief 明确指出此前从未富化过）对一张
-    projected knowhow 表提问，返回的 citations 应带上 .knowhow；且不管这次
-    命中几条引用，knowhow 定位只应触发一次 evidence_elements() 批量读取。"""
+def _seed_projected_table(repo, projector) -> dict:
+    """Create + project the shared 3-row fixture table. UNIQUE_TERM
+    deliberately appears in TWO different rows' 修复方法 cell — so one ask
+    hits two distinct element_ids/citations/anchors, proving the batch
+    lookups cover N>1 hits in a single store round trip each."""
     notebook_id = repo.create_notebook(NotebookCreate(name="kh")).id
-    table_id = repo._runtime.knowhow_store.create_knowhow_table(
-        notebook_id, TABLE_TITLE, "", COLUMNS,
-    )
+    store = repo._runtime.knowhow_store
+    table_id = store.create_knowhow_table(notebook_id, TABLE_TITLE, "", COLUMNS)
     cols = {
         c["name"]: c["id"]
-        for c in repo._runtime.knowhow_store.get_knowhow_table(table_id)["columns"]
+        for c in store.get_knowhow_table(table_id)["columns"]
     }
-    store = repo._runtime.knowhow_store
-    # UNIQUE_TERM deliberately appears in TWO different rows' 修复方法 cell —
-    # so one ask hits two distinct element_ids/citations, proving the batch
-    # covers N>1 hits in a single store round trip (not once per citation).
     row_a = store.add_knowhow_row(table_id, {
         cols["违例类型"]: "过冲问题", cols["修复方法"]: f"增大去耦电容 {UNIQUE_TERM}",
         cols["依赖工具"]: "示波器",
@@ -438,9 +432,24 @@ def test_ask_chunk_citations_carry_knowhow_and_the_batch_query_still_fires_once(
         cols["依赖工具"]: "示波器",
     })
     projector.project_table(table_id)
+    return {
+        "notebook_id": notebook_id, "table_id": table_id,
+        "row_a": row_a, "row_c": row_c,
+    }
+
+
+def test_ask_chunk_citations_carry_knowhow_and_the_batch_query_still_fires_once(
+    repo, projector, monkeypatch,
+):
+    """T12b 主场景：chunk 模式（默认模式，brief 明确指出此前从未富化过）对一张
+    projected knowhow 表提问，返回的 citations 应带上 .knowhow；且不管这次
+    命中几条引用，knowhow 定位只应触发一次 evidence_elements() 批量读取。
+    本测试无 LLM（deterministic 回退，anchors 恒空）——这是 citation 回退
+    列表这条腿；grounded 主路径（anchor 腿）见下一个测试。"""
+    seeded = _seed_projected_table(repo, projector)
     calls = _spy_on_evidence_elements(repo, monkeypatch)
 
-    resp = repo.ask_chunk(notebook_id, AskRequest(question=UNIQUE_TERM))
+    resp = repo.ask_chunk(seeded["notebook_id"], AskRequest(question=UNIQUE_TERM))
 
     assert resp.citations, "ask_chunk 未产出引用"
     # Every citation in this fixture comes from a knowhow-projected cell (the
@@ -450,9 +459,68 @@ def test_ask_chunk_citations_carry_knowhow_and_the_batch_query_still_fires_once(
     ]
     term_citations = [c for c in resp.citations if UNIQUE_TERM in c.quoted_span]
     assert len(term_citations) >= 2, [c.quoted_span for c in resp.citations]
-    assert {c.knowhow.row_id for c in term_citations} == {row_a, row_c}
-    assert all(c.knowhow.table_id == table_id for c in term_citations)
+    assert {c.knowhow.row_id for c in term_citations} == {seeded["row_a"], seeded["row_c"]}
+    assert all(c.knowhow.table_id == seeded["table_id"] for c in term_citations)
+    # 无 LLM → 答案合成不跑 → chunk_context（anchor 侧批量）不触发，只剩
+    # citation 侧的一次批量。
     assert len(calls) == 1, calls
+
+
+class _ChunkAnswerLLM:
+    """Grounded-path answer stub for ask_chunk: reads the context block and
+    cites EVERY k-line that contains UNIQUE_TERM with a [k] marker — so
+    anchors RESOLVE, and (per buildAnswerReferences' anchor-first
+    all-or-nothing precedence) the citation fallback list is shadowed in the
+    UI. String-parsing only (no re import — keeps this file's import block,
+    and the surface manifest's exact-line registration of line 45, frozen)."""
+    configured = True
+    model = "fake-chunk-answer-llm"
+
+    def chat_json(self, messages, schema_hint, **kw):
+        text = messages[0]["content"]
+        keys = []
+        for line in text.splitlines():
+            head, sep, _rest = line.partition(":")
+            if sep and head.startswith("k") and head[1:].isdigit() and UNIQUE_TERM in line:
+                keys.append(head)
+        markers = "".join(f"[{k}]" for k in keys)
+        return json.dumps(
+            {"answer": f"修复方法见 {markers}。", "grounded": True},
+            ensure_ascii=False,
+        )
+
+
+def test_grounded_chunk_answer_puts_knowhow_on_the_chunk_anchor(
+    repo, projector, monkeypatch,
+):
+    """T12b 评审修复的钉子测试（评审原话 "the one that would have caught
+    this"）：grounded 主路径——LLM 已配置且答案按 answer_prompt 的要求带
+    [k] 标记时，前端 buildAnswerReferences 是 anchor 优先的全有全无（引用
+    列表整体走 anchor 分支，citation.knowhow 被遮蔽），所以 knowhow 定位
+    必须出现在 chunk 型 ANCHOR 上，否则「在表格中查看」按钮在最主流的问答
+    形态里永远不出现。此前的 e2e 只测了无 LLM 的回退路径（anchors 恒空），
+    正好错过这条腿。"""
+    seeded = _seed_projected_table(repo, projector)
+    repo.llm_client = _ChunkAnswerLLM()
+    calls = _spy_on_evidence_elements(repo, monkeypatch)
+
+    resp = repo.ask_chunk(seeded["notebook_id"], AskRequest(question=UNIQUE_TERM))
+
+    assert resp.answer, (resp.conclusion, resp.model_errors)  # 合成真的跑了
+    chunk_anchors = [a for a in resp.anchors if a.object_type == "chunk"]
+    assert chunk_anchors, (resp.answer, resp.anchors)
+    knowhow_anchors = [a for a in chunk_anchors if a.knowhow is not None]
+    # 两个含 UNIQUE_TERM 的格子各自的 chunk 锚点都带上了各自行的定位。
+    assert {a.knowhow.row_id for a in knowhow_anchors} == {seeded["row_a"], seeded["row_c"]}
+    assert all(a.knowhow.table_id == seeded["table_id"] for a in knowhow_anchors)
+    # JSON 形状：命中的锚点带 {table_id,row_id}（exclude_if 只隐藏 None）。
+    dumped = knowhow_anchors[0].model_dump(mode="json")
+    assert dumped["knowhow"]["table_id"] == seeded["table_id"]
+    # citations 仍然照旧富化（回退腿保持绿），只是 UI 上被 anchor 分支遮蔽。
+    assert resp.citations and all(c.knowhow is not None for c in resp.citations)
+    # 批量口径：anchor 侧（chunk_context）一次 + citation 侧一次 = 恰好 2 次
+    # store 读取，与锚点/引用数量无关。
+    assert len(calls) == 2, calls
 
 
 class _GraphAnswerLLM:
@@ -533,4 +601,9 @@ def test_ask_graph_src_chunk_citation_carries_knowhow(repo, monkeypatch):
     assert kh_citations[0].knowhow is not None
     assert kh_citations[0].knowhow.table_id == "tbl-1"
     assert kh_citations[0].knowhow.row_id == "row-1"
-    assert len(calls) == 1, calls
+    # 评审修复后 graph mix 路径固定两次批量：anchor 侧（_answer_mix →
+    # chunk_context，让 [k] 命中的 chunk 锚点也带 knowhow）+ citation 侧
+    # 一次，与锚点/引用数量无关。锚点侧也真的带上了定位：
+    anchor = next(a for a in resp.anchors if a.object_type == "chunk")
+    assert anchor.knowhow is not None and anchor.knowhow.row_id == "row-1"
+    assert len(calls) == 2, calls

@@ -155,3 +155,27 @@ test("Task 12b：citation 与 anchor 都没有 knowhow——回落表达式映�
   const ref = mapCitationKnowhowRef(reference.citation?.knowhow ?? reference.anchor?.knowhow);
   assert.equal(ref, null);
 });
+
+test("Task 12b 评审修复（grounded 主路径）：chunk 型 anchor 自带 knowhow、citation 被 anchor 分支整体遮蔽时，按钮判定仍解析出跳转参数", () => {
+  // 评审复现的关键形态：LLM 按 answer_prompt 要求给每句有据的话标 [k] →
+  // buildAnswerReferences 的 anchor 优先全有全无让 citation（哪怕带
+  // knowhow）整体让位——此时 knowhow 必须来自 chunk 型 anchor 本身（后端
+  // chunk_context 的评审修复），否则「在表格中查看」在最主流的问答形态里
+  // 永远不出现。
+  const anchors = [
+    {
+      key: "k1", object_id: "chunk-kh-1", object_type: "chunk",
+      label: "时序修复表 › 过冲问题 › 修复方法", tier: "personal",
+      knowhow: { table_id: "tbl-1", row_id: "row-1" },
+    },
+  ];
+  const references = buildAnswerReferences("修复方法见 [k1]。", anchors, [knowhowCitation()]);
+
+  assert.equal(references.length, 1);
+  assert.equal(references[0].anchor?.object_type, "chunk");
+  assert.equal(references[0].citation, undefined); // citation 被 anchor 分支遮蔽
+  assert.deepEqual(
+    mapCitationKnowhowRef(references[0].citation?.knowhow ?? references[0].anchor?.knowhow),
+    { tableId: "tbl-1", rowId: "row-1" },
+  );
+});
