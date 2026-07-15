@@ -8404,6 +8404,7 @@
   },
   "kg_llm_client": {
     "consumers": [
+      "backend/app/api/routes.py:1585",
       "backend/app/services/sqlite_repository.py:2977",
       "backend/app/services/sqlite_repository.py:2994",
       "backend/app/services/sqlite_repository.py:5208",
@@ -8809,6 +8810,8 @@
       "backend/tests/test_notebook_meta.py:44",
       "backend/tests/test_p4_kg_shrink.py:102",
       "backend/tests/test_p4_kg_shrink.py:73",
+      "backend/tests/test_paper_meta_api.py:40",
+      "backend/tests/test_paper_meta_api.py:61",
       "backend/tests/test_pipeline_concurrency.py:67",
       "backend/tests/test_ppr_retrieve.py:198",
       "backend/tests/test_ppr_retrieve.py:402",

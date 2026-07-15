@@ -8553,6 +8553,48 @@
           "summary": "Object Neighbors"
         }
       },
+      "/api/notebooks/{notebook_id}/paper-meta/backfill": {
+        "post": {
+          "description": "补抽该 notebook 缺论文元数据的源(后台线程,幂等可续跑)。返回排队数;\nLLM 未配置 409。owner 门控由 require_notebook_access 承担(非 owner 404)。",
+          "operationId": "backfill_paper_metadata_api_notebooks__notebook_id__paper_meta_backfill_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Backfill Paper Metadata Api Notebooks  Notebook Id  Paper Meta Backfill Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Backfill Paper Metadata"
+        }
+      },
       "/api/notebooks/{notebook_id}/relations/{rel_id}/review": {
         "post": {
           "description": "Mark an edge as 'verified', 'rejected', or 'pending'.\nRejected edges are excluded from all future graph-reasoning traversals.",
