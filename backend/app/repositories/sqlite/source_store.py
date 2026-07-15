@@ -50,16 +50,20 @@ class SourceStore:
 
     # ------------------------------------------------------------------ reads
     def list_sources(self, notebook_id: str) -> List[SourceSummary]:
-        """User-facing source list — excludes Memory-derived synthetic rows
-        (source_type='memory'): those are an internal Memory<->KG extraction
-        link with no independent user-visible content, and would otherwise
-        double-count right next to the Memory panel. Internal paths
-        (get_source, pending_kg_source_count, copy materialization,
+        """User-facing source list — excludes Memory-derived AND knowhow-table
+        hidden synthetic rows (source_type IN ('memory', 'knowhow')): both are
+        internal derivation links with no independent user-visible content
+        (memory-kg-extract Task 3; knowhow-tables PR-1 Task 5's hidden
+        projection source, mirroring the SAME mechanism rather than inventing
+        a second one), and would otherwise double-count right next to the
+        Memory panel / show a phantom "Knowhow 表：…" source card. Internal
+        paths (get_source, pending_kg_source_count, copy materialization,
         scale-index scans) deliberately keep the true full set — do not add
         this filter there."""
         with self.database.connect() as db:
             rows = db.execute(
-                "SELECT * FROM sources WHERE notebook_id = ? AND source_type != 'memory' "
+                "SELECT * FROM sources WHERE notebook_id = ? "
+                "AND source_type NOT IN ('memory', 'knowhow') "
                 "ORDER BY created_at ASC",
                 (notebook_id,),
             ).fetchall()
@@ -68,12 +72,13 @@ class SourceStore:
     def list_sources_page(self, notebook_id: str, offset: int = 0, limit: int = 50,
                           q: str = "") -> PaginatedSources:
         """分页 + 可选 q(按 title/file_name 服务端过滤)。万级 source 安全:只取一页 +
-        一次 COUNT,不全量进内存。同 list_sources 排除 source_type='memory' 的合成源
-        (含 total_count),内部真集路径(get_source/pending_kg/copy/scale-index)不受影响。"""
+        一次 COUNT,不全量进内存。同 list_sources 排除 source_type IN ('memory',
+        'knowhow') 的隐藏合成源(含 total_count),内部真集路径(get_source/
+        pending_kg/copy/scale-index)不受影响。"""
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 200))
         needle = (q or "").strip().lower()
-        where = "WHERE notebook_id = ? AND source_type != 'memory'"
+        where = "WHERE notebook_id = ? AND source_type NOT IN ('memory', 'knowhow')"
         params: List[object] = [notebook_id]
         if needle:
             where += " AND (LOWER(title) LIKE ? OR LOWER(file_name) LIKE ?)"
@@ -176,13 +181,16 @@ class SourceStore:
         """Report corpus-map recon (Task 25): source titles in creation order,
         LIMIT 20 — the deep-report engine's scout cap.  SQL frozen from the
         facade's inline query; strip/filter formatting stays engine-side.
-        memory-kg-extract: excludes source_type='memory' so a hidden Memory-
-        derived title is never shown to the report planner as a source doc
-        (its KG objects still participate via knowledge_objects)."""
+        Excludes source_type IN ('memory', 'knowhow') so a hidden Memory- or
+        knowhow-projection-derived title is never shown to the report planner
+        as a source doc (their KG objects/chunks still participate via
+        knowledge_objects/chunks — same "hidden container, visible content"
+        split as the other memory-kg-extract sites in this file)."""
         with self.database.connect() as db:
             rows = db.execute(
                 "SELECT title FROM sources WHERE notebook_id=? "
-                "AND source_type != 'memory' ORDER BY created_at LIMIT 20",
+                "AND source_type NOT IN ('memory', 'knowhow') "
+                "ORDER BY created_at LIMIT 20",
                 (notebook_id,),
             ).fetchall()
         return [{"title": row["title"]} for row in rows]
@@ -405,6 +413,60 @@ class SourceStore:
     ) -> None:
         connection.execute("DELETE FROM sources WHERE id = ?", (source_id,))
 
+    # ------------------------------------------------- knowhow projection
+    # (Task 5, knowhow-tables PR-1): the deterministic projector writes one
+    # source_elements row per non-empty cell of a knowhow-table row, tagged
+    # with metadata.knowhow.row_id — these two primitives are ROW-scoped
+    # (unlike replace_elements above, which wipes an entire source), so
+    # reprojecting one row never disturbs sibling rows' elements sharing the
+    # same hidden source.
+    def insert_elements(
+        self,
+        connection: sqlite3.Connection,
+        source_id: str,
+        elements: Sequence[SourceElementWrite],
+        *,
+        created_at: str,
+    ) -> None:
+        """Insert-only half of ``replace_elements`` (no delete-all first) —
+        the projector does its own row-scoped delete via
+        ``delete_elements_by_knowhow_row`` beforehand."""
+        connection.executemany(
+            """
+            INSERT INTO source_elements
+            (id, source_id, element_type, location_label, text, metadata, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    element.id,
+                    source_id,
+                    element.element_type,
+                    element.location_label,
+                    element.text,
+                    json.dumps(dict(element.metadata), ensure_ascii=False),
+                    created_at,
+                )
+                for element in elements
+            ],
+        )
+
+    def delete_elements_by_knowhow_row(
+        self, connection: sqlite3.Connection, source_id: str, row_id: str
+    ) -> None:
+        """Delete this row's PRIOR knowhow-cell elements (any column), keyed
+        by ``metadata.knowhow.row_id`` — not by id prefix, since element ids
+        are ``el-kh-{hash(row_id, column_id)}`` and carry no shared per-row
+        substring. Row-scoped (not source-scoped) so it never touches
+        sibling rows' elements under the same hidden source. json_extract on
+        an un-indexed TEXT column is a per-source_id scan, acceptable at this
+        feature's bounded scale (single knowhow table, ~100s of elements)."""
+        connection.execute(
+            "DELETE FROM source_elements WHERE source_id = ? "
+            "AND json_extract(metadata, '$.knowhow.row_id') = ?",
+            (source_id, row_id),
+        )
+
     # -------------------------------------------------------------- hydration
     def source_from_row(self, db: sqlite3.Connection, row: sqlite3.Row) -> SourceSummary:
         """Single-row path (get_source) — 3 point queries. list_sources /
@@ -539,12 +601,14 @@ class SourceStore:
     ) -> List[dict]:
         """Title/doc_type/summary rows feeding notebook metadata augmentation
         (Task 26: moved verbatim from the facade's `_notebook_meta_sources`).
-        memory-kg-extract: excludes source_type='memory' so a hidden Memory-
-        derived source never contributes its title or inflates the count baked
-        into the auto-generated notebook name/description."""
+        Excludes source_type IN ('memory', 'knowhow') so a hidden Memory- or
+        knowhow-projection-derived source never contributes its title or
+        inflates the count baked into the auto-generated notebook
+        name/description."""
         rows = db.execute(
             "SELECT title, doc_type, summary FROM sources WHERE notebook_id = ? "
-            "AND source_type != 'memory' AND (status = 'extracted' OR id = ?) "
+            "AND source_type NOT IN ('memory', 'knowhow') "
+            "AND (status = 'extracted' OR id = ?) "
             "ORDER BY created_at ASC",
             (notebook_id, pending_source_id),
         ).fetchall()

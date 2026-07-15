@@ -1773,6 +1773,27 @@ TASK4_KNOWHOW_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_notebook_assets.py", "SQLiteRepository"),
 }
 
+# Task 5 (knowhow-tables-pr1): the deterministic projector's own test composes
+# the real facade the same way Task 1/2/4's sibling tests do — seeding a
+# notebook via create_notebook, reaching into _runtime for the stores/services
+# KnowhowProjector is constructed from directly (it is a plain service, not
+# itself a facade member — Task 6's import/table API is what will eventually
+# wire it onto the facade), swapping in a fake embedder via the `embedder`
+# setter (mirrors test_ask_embed_cache.py), and using `_connect`/`settings`
+# for direct-DB assertions and the embedder_configured probe. Same broad
+# (file, member) allowance style as TASK2_KNOWHOW_ALLOWED_MEMBER_FILES rather
+# than pinning exact lines.
+TASK5_KNOWHOW_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_projection.py", 18, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK5_KNOWHOW_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_projection.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "create_notebook", "_connect",
+        "embedder", "settings",
+    }
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2215,6 +2236,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK1_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK2_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK4_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK5_KNOWHOW_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2823,6 +2845,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK1_KNOWHOW_ALLOWED_IMPORTS
                     or site in TASK2_KNOWHOW_ALLOWED_IMPORTS
                     or site in TASK4_KNOWHOW_ALLOWED_IMPORTS
+                    or site in TASK5_KNOWHOW_ALLOWED_IMPORTS
                 )
 
 

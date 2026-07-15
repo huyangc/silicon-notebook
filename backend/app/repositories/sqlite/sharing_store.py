@@ -129,10 +129,11 @@ class SharingStore:
     def shared_preview_rows(self, notebook_id: str) -> "tuple[str, list[str]]":
         """(owner_display, first-50 source titles) for the share preview.
 
-        Excludes Memory-derived synthetic sources (source_type='memory'): this
-        title list is shown to a prospective copier/joiner in the /shared/{token}
-        modal — a user-facing surface, hidden the same as list_sources. (The
-        preview's numeric source_count comes from notebook_copy_stats, the
+        Excludes Memory-derived AND knowhow-table hidden synthetic sources
+        (source_type IN ('memory', 'knowhow')): this title list is shown to a
+        prospective copier/joiner in the /shared/{token} modal — a
+        user-facing surface, hidden the same as list_sources. (The preview's
+        numeric source_count comes from notebook_copy_stats, the
         copy-materialization true set, deliberately unfiltered.)"""
         with self.database.connect() as db:
             owner = db.execute(
@@ -143,7 +144,8 @@ class SharingStore:
             titles = [
                 row["title"]
                 for row in db.execute(
-                    "SELECT title FROM sources WHERE notebook_id = ? AND source_type != 'memory' "
+                    "SELECT title FROM sources WHERE notebook_id = ? "
+                    "AND source_type NOT IN ('memory', 'knowhow') "
                     "ORDER BY created_at LIMIT 50",
                     (notebook_id,),
                 ).fetchall()

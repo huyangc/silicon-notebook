@@ -71,15 +71,17 @@ class QueryStore:
     @staticmethod
     def visible_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
         """NotebookSummary's user-facing source count — excludes Memory-derived
-        synthetic sources (source_type='memory'): an internal Memory<->KG
-        extraction link with no independent user-visible content, which would
-        otherwise double-count next to the Memory panel's own count. Internal
-        paths (pending_kg_source_count above, copy materialization,
-        scale-index scans) keep counting the true full set and must NOT reuse
-        this method."""
+        AND knowhow-table hidden synthetic sources (source_type IN ('memory',
+        'knowhow')): both are internal derivation links with no independent
+        user-visible content, which would otherwise double-count next to the
+        Memory panel's own count / inflate the count past what list_sources
+        shows (SourceStore.list_sources carries the SAME exclusion — see its
+        docstring). Internal paths (pending_kg_source_count above, copy
+        materialization, scale-index scans) keep counting the true full set
+        and must NOT reuse this method."""
         row = db.execute(
             "SELECT COUNT(*) AS count FROM sources "
-            "WHERE notebook_id = ? AND source_type != 'memory'",
+            "WHERE notebook_id = ? AND source_type NOT IN ('memory', 'knowhow')",
             (notebook_id,),
         ).fetchone()
         return int(row["count"])
@@ -285,14 +287,15 @@ class QueryStore:
             # seq-gated count cache (non-deprecated) — same GROUP BY, memoized.
             from app.repositories.sqlite import knowledge_counts_cache
             knowledge_counts = knowledge_counts_cache.type_counts(db, notebook_id)
-            # Memory-derived synthetic sources (source_type='memory') are
-            # excluded — this feeds the /analytics 看板 parse_status
-            # distribution, a user-facing surface; see visible_source_count.
+            # Memory-derived AND knowhow-projection hidden synthetic sources
+            # (source_type IN ('memory', 'knowhow')) are excluded — this feeds
+            # the /analytics 看板 parse_status distribution, a user-facing
+            # surface; see visible_source_count.
             source_status_counts = {
                 row["parse_status"]: int(row["c"])
                 for row in db.execute(
                     "SELECT parse_status, COUNT(*) AS c FROM sources "
-                    "WHERE notebook_id = ? AND source_type != 'memory' "
+                    "WHERE notebook_id = ? AND source_type NOT IN ('memory', 'knowhow') "
                     "GROUP BY parse_status",
                     (notebook_id,),
                 ).fetchall()
@@ -440,11 +443,16 @@ class QueryStore:
                             element_id="",
                         )
                     )
-            # source_type != 'memory' keeps Memory-derived synthetic sources out
-            # of the search box (GET /notebooks/{id}/search) — same user-facing
-            # hide as list_sources; they surface only via the Memory panel.
+            # source_type NOT IN ('memory', 'knowhow') keeps Memory-derived AND
+            # knowhow-projection hidden synthetic sources out of the search box
+            # (GET /notebooks/{id}/search) — same user-facing hide as
+            # list_sources; a knowhow hidden source's title ("Knowhow 表：…")
+            # would otherwise surface as a dead-end "Source" hit with no
+            # coherent source view to jump to (citation-jump to the row detail
+            # drawer is PR-2 scope, per the design spec).
             source_rows = db.execute(
-                "SELECT * FROM sources WHERE notebook_id = ? AND source_type != 'memory' AND "
+                "SELECT * FROM sources WHERE notebook_id = ? "
+                "AND source_type NOT IN ('memory', 'knowhow') AND "
                 "(LOWER(title) LIKE ? OR LOWER(summary) LIKE ? OR LOWER(file_name) LIKE ?) "
                 "ORDER BY created_at ASC LIMIT ?",
                 (notebook_id, like, like, like, cap),
@@ -462,12 +470,15 @@ class QueryStore:
                         element_id="",
                     )
                 )
-            # Same hide on the element leg: a memory source's element text must
-            # not leak in as a scope="Element" hit either.
+            # Same hide on the element leg: a memory source's or knowhow
+            # hidden source's element text must not leak in as a
+            # scope="Element" hit either (a knowhow cell's own element would
+            # otherwise show up here with the same dead-end-navigation issue
+            # as the "Source" leg above).
             element_rows = db.execute(
                 "SELECT se.*, s.title AS source_title FROM source_elements se "
                 "JOIN sources s ON s.id = se.source_id "
-                "WHERE s.notebook_id = ? AND s.source_type != 'memory' AND "
+                "WHERE s.notebook_id = ? AND s.source_type NOT IN ('memory', 'knowhow') AND "
                 "(LOWER(se.text) LIKE ? OR LOWER(se.location_label) LIKE ? OR LOWER(s.title) LIKE ?) "
                 "LIMIT ?",
                 (notebook_id, like, like, like, cap),

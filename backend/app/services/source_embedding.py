@@ -206,6 +206,36 @@ class SourceEmbeddingService:
             notebook_id, rows, created_at=self.now()
         )
 
+    def embed_chunk_ids(self, notebook_id: str, rows: List[dict]) -> None:
+        """Incremental embed for an EXPLICIT list of chunks — knowhow-tables
+        PR-1 Task 5's projector calls this with ONLY the row/cell's chunk(s)
+        it just (re)wrote, never a whole source (embed_chunks_for_source
+        would recompute vectors for every chunk under the source, undoing
+        the "only the changed cell re-embeds" invariant project_row needs).
+
+        Reuses the SAME single vector write path as the batch methods above
+        (``vectors.replace_chunk_vectors``), but unlike embed_chunks_batch/
+        embed_source (best-effort: log a warning and swallow per batch), this
+        lets an embedder exception PROPAGATE to the caller. Knowhow
+        projection needs to know SYNCHRONOUSLY whether embedding succeeded so
+        it can flip the row's projection_status to 'failed' and emit a
+        model_error event at the exact point of failure — best-effort
+        silence would hide that from the row-status UI entirely.
+
+        ``rows``: ``[{"id": chunk_id, "text": chunk_text}, ...]``. No-op (and
+        no exception) if no embedder is configured or ``rows`` is empty —
+        "embedder not set up" is a normal, non-failure state for this app,
+        distinct from "embedder configured but the call failed"."""
+        if not self.settings.embedder_configured or not rows:
+            return
+        trunc = self.settings.embed_truncate_chars
+        texts = [r["text"][:trunc] for r in rows]
+        embedder = self.embedder()
+        self._warm_up(embedder)
+        vectors = embedder.embed_texts(texts)  # intentionally NOT try/except-wrapped
+        pairs = [(r["id"], vector) for r, vector in zip(rows, vectors)]
+        self.vectors.replace_chunk_vectors(notebook_id, pairs, created_at=self.now())
+
     def embed_chunks_for_source(self, source_id: str) -> None:
         """给一个 source 已写入的 chunk 补向量(并发+429退避)。无网络则 no-op。"""
         if not self.settings.embedder_configured:

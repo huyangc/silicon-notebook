@@ -806,6 +806,88 @@ class KnowledgeStore:
             rows,
         )
 
+    # ------------------------------------------------- knowhow projection
+    # (Task 5, knowhow-tables PR-1): the deterministic projector writes
+    # case/procedure/tool objects and their edges directly (bypassing
+    # store_kg's fresh-id-per-call allocation — knowhow ids are STABLE
+    # hashes of row_id/column_id/table_id so reprojection is idempotent, not
+    # append-only), reusing insert_object_chunk/insert_relation_chunk above
+    # for the actual INSERTs. These primitives cover the row/table-scoped
+    # DELETEs that pattern needs and are absent from the plain store_kg path.
+    @staticmethod
+    def delete_objects_by_source_and_row(
+        connection: sqlite3.Connection, source_id: str, row_id: str
+    ) -> None:
+        """Delete this row's PRIOR case+procedure objects (any column) under
+        the knowhow hidden source, keyed by ``payload.row_id`` — NOT tool
+        objects (table-scoped, deduped across rows, so they carry no
+        ``row_id`` key and are correctly left untouched here; project_table's
+        full rebuild is what sweeps orphaned tools). json_extract on payload
+        is unindexed but source_id narrows the scan first (idx_knowledge_
+        objects_source), acceptable at this feature's bounded scale."""
+        connection.execute(
+            "DELETE FROM knowledge_objects WHERE source_id = ? "
+            "AND json_extract(payload, '$.row_id') = ?",
+            (source_id, row_id),
+        )
+
+    @staticmethod
+    def delete_objects_by_source(
+        connection: sqlite3.Connection, source_id: str
+    ) -> None:
+        """Full wipe of every object (case+procedure+tool) a knowhow table's
+        hidden source has ever produced — project_table's escape-hatch
+        rebuild and delete_table_projection's cleanup both use this rather
+        than the row-scoped variant above, so a stale/orphaned tool (or a
+        procedure whose column has since been deleted) never survives a full
+        rebuild."""
+        connection.execute(
+            "DELETE FROM knowledge_objects WHERE source_id = ?", (source_id,)
+        )
+
+    @staticmethod
+    def delete_relations_by_source_object(
+        connection: sqlite3.Connection, notebook_id: str, source_object_id: str
+    ) -> None:
+        """Delete every edge OUT of one case object (identified_by/
+        diagnosed_by/fixed_by/requires_tool all have the case as source, per
+        the knowhow projection spec) — one call cleans all of a row's prior
+        edges regardless of which cell changed. Uses idx_knowledge_relations_
+        nb_source (notebook_id, source_object_id)."""
+        connection.execute(
+            "DELETE FROM knowledge_relations WHERE notebook_id = ? "
+            "AND source_object_id = ?",
+            (notebook_id, source_object_id),
+        )
+
+    @staticmethod
+    def delete_relations_by_source(
+        connection: sqlite3.Connection, source_id: str
+    ) -> None:
+        """Full wipe of every relation a knowhow table's hidden source has
+        ever produced (project_table / delete_table_projection). Uses
+        idx_knowledge_relations_source."""
+        connection.execute(
+            "DELETE FROM knowledge_relations WHERE source_id = ?", (source_id,)
+        )
+
+    @staticmethod
+    def insert_object_if_missing(
+        connection: sqlite3.Connection, row: tuple
+    ) -> None:
+        """Upsert-by-absence for tool objects: a tool's id is a stable hash of
+        (table_id, normalized name), so the SAME tool referenced by multiple
+        rows always maps to the SAME id — the first row to mention it creates
+        the row, later rows are a no-op (INSERT OR IGNORE on the id PRIMARY
+        KEY) rather than a second, redundant insert attempt."""
+        connection.execute(
+            "INSERT OR IGNORE INTO knowledge_objects "
+            "(id, notebook_id, object_type, status, owner, payload, evidence, "
+            "source_candidate_id, source_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, '', ?, ?, NULL, ?, ?, ?)",
+            row,
+        )
+
     def get_object_row(
         self, notebook_id: str, object_id: str
     ) -> "sqlite3.Row | None":

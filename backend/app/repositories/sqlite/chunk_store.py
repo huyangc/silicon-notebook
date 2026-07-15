@@ -63,6 +63,67 @@ class ChunkStore:
             "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
             rows)
 
+    # ------------------------------------------------- knowhow projection
+    # (Task 5, knowhow-tables PR-1): the deterministic projector diffs and
+    # rewrites chunks PER KNOWHOW ROW (and, within a row, per cell) — never
+    # the whole source at once like replace_source_chunks above, since many
+    # rows share one hidden source and a single-cell edit must not touch its
+    # siblings' chunks (idempotency + "only the changed chunk gets
+    # re-embedded" both depend on this).
+    def rows_by_id_prefix(
+        self, connection: sqlite3.Connection, source_id: str, id_prefix: str
+    ) -> list:
+        """This row's PRIOR chunks (any cell/part), by id LIKE prefix — chunk
+        ids are ``chunk-kh-{hash(row_id)}-{part}``, so every part for one row
+        shares this literal prefix (unlike element/KO ids, which hash
+        row_id+column_id and so carry no shared per-row substring)."""
+        return connection.execute(
+            "SELECT id, text, section_path FROM chunks "
+            "WHERE source_id = ? AND id LIKE ? ORDER BY id",
+            (source_id, f"{id_prefix}%"),
+        ).fetchall()
+
+    def delete_by_ids(
+        self, connection: sqlite3.Connection, chunk_ids: Sequence[str]
+    ) -> None:
+        """Delete an EXPLICIT chunk id list (+ their chunks_fts rows first,
+        same FTS-before-base ordering as replace_source_chunks — chunks_fts
+        has no FK cascade of its own). Precise per-cell deletion, as opposed
+        to replace_source_chunks' whole-source wipe."""
+        ids = list(chunk_ids)
+        if not ids:
+            return
+        placeholders = ",".join("?" for _ in ids)
+        connection.execute(
+            f"DELETE FROM chunks_fts WHERE chunk_id IN ({placeholders})", ids
+        )
+        connection.execute(
+            f"DELETE FROM chunks WHERE id IN ({placeholders})", ids
+        )
+
+    def insert_rows(
+        self,
+        connection: sqlite3.Connection,
+        notebook_id: str,
+        source_id: str,
+        rows: Sequence[ChunkWrite],
+        *,
+        created_at: str,
+    ) -> None:
+        """Insert-only half of replace_source_chunks (no delete-all first) —
+        the projector does its own precise ``delete_by_ids`` beforehand."""
+        values = [
+            (c.id, notebook_id, source_id, c.text,
+             c.section_path, json.dumps(list(c.element_ids)), created_at)
+            for c in rows
+        ]
+        if not values:
+            return
+        connection.executemany(
+            "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
+            "VALUES (?,?,?,?,?,?,?)", values)
+        self._insert_fts_rows(connection, [(v[0], v[1], v[3]) for v in values])
+
     def source_chunks(self, source_id: str) -> list:
         with self.database.connect() as db:
             rows = db.execute(
