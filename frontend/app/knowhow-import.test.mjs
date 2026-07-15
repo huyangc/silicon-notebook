@@ -80,15 +80,18 @@ test("deriveDefaultTitle: 空文件名返回空串", () => {
 });
 
 // --- ROLE_OPTIONS ------------------------------------------------------------------
+// 注：角色词表 2026-07-15 由六值收窄为四值 CellKind（行标题/方法步骤/工具·
+// 事物/普通），ROLE_OPTIONS 派生自 knowhow-model.ts 的 ROLE_LABELS，随之从
+// 6 项变为 4 项——这不是本文件测的逻辑本身变化，只是词表收窄的必然结果。
 
-test("ROLE_OPTIONS: 覆盖全部六个角色", () => {
-  assert.strictEqual(ROLE_OPTIONS.length, 6);
+test("ROLE_OPTIONS: 覆盖全部四个 CellKind 值", () => {
+  assert.strictEqual(ROLE_OPTIONS.length, 4);
 });
 
-test("ROLE_OPTIONS: 顺序与规格一致（概念/现象识别/根因分析/修复方法/依赖工具/普通）", () => {
+test("ROLE_OPTIONS: 顺序与规格一致（行标题/方法步骤/工具·事物/普通）", () => {
   assert.deepStrictEqual(
     ROLE_OPTIONS.map((option) => option.value),
-    ["concept", "identify", "root_cause", "fix", "tool", "plain"],
+    ["anchor", "procedure", "entity", "attribute"],
   );
 });
 
@@ -102,27 +105,27 @@ test("ROLE_OPTIONS: 每项 label 为非空中文文案", () => {
 
 test("assembleImportColumns: 按文件列序对齐组装 name+role", () => {
   const columns = [
-    { name: "违例类型", guessedRole: "concept" },
-    { name: "现象", guessedRole: "identify" },
-    { name: "备注", guessedRole: "plain" },
+    { name: "违例类型", guessedRole: "anchor" },
+    { name: "现象", guessedRole: "procedure" },
+    { name: "备注", guessedRole: "attribute" },
   ];
-  const roles = ["concept", "root_cause", "fix"];
+  const roles = ["anchor", "procedure", "procedure"];
   assert.deepStrictEqual(assembleImportColumns(columns, roles), [
-    { name: "违例类型", role: "concept" },
-    { name: "现象", role: "root_cause" },
-    { name: "备注", role: "fix" },
+    { name: "违例类型", role: "anchor" },
+    { name: "现象", role: "procedure" },
+    { name: "备注", role: "procedure" },
   ]);
 });
 
 test("assembleImportColumns: roles 数组比 columns 短时缺失项兜底为该列 guessedRole", () => {
   const columns = [
-    { name: "A", guessedRole: "concept" },
-    { name: "B", guessedRole: "plain" },
+    { name: "A", guessedRole: "anchor" },
+    { name: "B", guessedRole: "attribute" },
   ];
-  const roles = ["identify"];
+  const roles = ["procedure"];
   assert.deepStrictEqual(assembleImportColumns(columns, roles), [
-    { name: "A", role: "identify" },
-    { name: "B", role: "plain" },
+    { name: "A", role: "procedure" },
+    { name: "B", role: "attribute" },
   ]);
 });
 
@@ -131,8 +134,8 @@ test("assembleImportColumns: 空列数组返回空数组", () => {
 });
 
 test("assembleImportColumns: 不修改传入的 columns/roles 数组", () => {
-  const columns = [{ name: "A", guessedRole: "concept" }];
-  const roles = ["concept"];
+  const columns = [{ name: "A", guessedRole: "anchor" }];
+  const roles = ["anchor"];
   const columnsCopy = JSON.parse(JSON.stringify(columns));
   const rolesCopy = [...roles];
   assembleImportColumns(columns, roles);
@@ -141,32 +144,35 @@ test("assembleImportColumns: 不修改传入的 columns/roles 数组", () => {
 });
 
 // --- countConceptRoles / conceptValidationError -------------------------------------
+// 注：角色词表收窄后，原 "concept" 值已改名为 "anchor"（行标题）；本节校验
+// 规则本身（恰好一列）暂未改动——放宽为「至多一列」是 Task 5 随独立行标题
+// 列选择器一并落地的产品决策，不在本任务范围内。
 
-test("countConceptRoles: 统计 concept 角色数量", () => {
-  assert.strictEqual(countConceptRoles(["concept", "plain", "fix"]), 1);
-  assert.strictEqual(countConceptRoles(["concept", "concept", "plain"]), 2);
-  assert.strictEqual(countConceptRoles(["plain", "fix", "tool"]), 0);
+test("countConceptRoles: 统计 anchor(行标题) 角色数量", () => {
+  assert.strictEqual(countConceptRoles(["anchor", "attribute", "procedure"]), 1);
+  assert.strictEqual(countConceptRoles(["anchor", "anchor", "attribute"]), 2);
+  assert.strictEqual(countConceptRoles(["attribute", "procedure", "entity"]), 0);
   assert.strictEqual(countConceptRoles([]), 0);
 });
 
-test("conceptValidationError: 恰好一列 concept 时返回 null", () => {
-  assert.strictEqual(conceptValidationError(["concept", "plain", "fix"]), null);
+test("conceptValidationError: 恰好一列 anchor 时返回 null", () => {
+  assert.strictEqual(conceptValidationError(["anchor", "attribute", "procedure"]), null);
 });
 
-test("conceptValidationError: 零列 concept 时返回中文提示", () => {
-  const message = conceptValidationError(["plain", "fix", "tool"]);
+test("conceptValidationError: 零列 anchor 时返回中文提示", () => {
+  const message = conceptValidationError(["attribute", "procedure", "entity"]);
   assert.ok(typeof message === "string" && message.length > 0);
-  assert.ok(message.includes("概念"));
+  assert.ok(message.includes("行标题"));
 });
 
-test("conceptValidationError: 多列 concept 时返回中文提示且提及数量", () => {
-  const message = conceptValidationError(["concept", "concept", "plain"]);
+test("conceptValidationError: 多列 anchor 时返回中文提示且提及数量", () => {
+  const message = conceptValidationError(["anchor", "anchor", "attribute"]);
   assert.ok(typeof message === "string" && message.length > 0);
-  assert.ok(message.includes("概念"));
+  assert.ok(message.includes("行标题"));
   assert.ok(message.includes("2"));
 });
 
-test("conceptValidationError: 空角色数组视为零列 concept", () => {
+test("conceptValidationError: 空角色数组视为零列 anchor", () => {
   assert.notStrictEqual(conceptValidationError([]), null);
 });
 
@@ -183,17 +189,17 @@ test("isBlankTitle: 含非空白内容视为非空", () => {
   assert.strictEqual(isBlankTitle("  我的表  "), false);
 });
 
-test("canSubmitImport: 标题非空且恰好一列 concept 时可提交", () => {
-  assert.strictEqual(canSubmitImport("我的表", ["concept", "plain"]), true);
+test("canSubmitImport: 标题非空且恰好一列 anchor 时可提交", () => {
+  assert.strictEqual(canSubmitImport("我的表", ["anchor", "attribute"]), true);
 });
 
 test("canSubmitImport: 标题为空时不可提交", () => {
-  assert.strictEqual(canSubmitImport("   ", ["concept", "plain"]), false);
+  assert.strictEqual(canSubmitImport("   ", ["anchor", "attribute"]), false);
 });
 
-test("canSubmitImport: concept 列数不为一时不可提交", () => {
-  assert.strictEqual(canSubmitImport("我的表", ["plain", "plain"]), false);
-  assert.strictEqual(canSubmitImport("我的表", ["concept", "concept"]), false);
+test("canSubmitImport: anchor 列数不为一时不可提交", () => {
+  assert.strictEqual(canSubmitImport("我的表", ["attribute", "attribute"]), false);
+  assert.strictEqual(canSubmitImport("我的表", ["anchor", "anchor"]), false);
 });
 
 // --- extractErrorMessage ------------------------------------------------------------

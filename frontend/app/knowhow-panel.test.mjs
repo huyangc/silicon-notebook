@@ -18,10 +18,10 @@ import {
 // --- fixtures ------------------------------------------------------------------
 
 const columns = [
-  { id: "c-tool", name: "依赖工具", role: "tool", position: 3 },
-  { id: "c-concept", name: "概念", role: "concept", position: 0 },
-  { id: "c-fix", name: "修复方法", role: "fix", position: 2 },
-  { id: "c-identify", name: "现象识别", role: "identify", position: 1 },
+  { id: "c-tool", name: "依赖工具", role: "entity", position: 3 },
+  { id: "c-concept", name: "概念", role: "anchor", position: 0 },
+  { id: "c-fix", name: "修复方法", role: "procedure", position: 2 },
+  { id: "c-identify", name: "现象识别", role: "procedure", position: 1 },
 ];
 
 function row(id, cells) {
@@ -101,36 +101,36 @@ test("sortColumnsByPosition: 空数组返回空数组", () => {
 
 // --- orderColumnsForGrid ---------------------------------------------------------
 
-test("orderColumnsForGrid: 概念列钉首列，其余按 position 跟随", () => {
+test("orderColumnsForGrid: 行标题列(anchor)钉首列，其余按 position 跟随", () => {
   const out = orderColumnsForGrid(columns);
   assert.deepStrictEqual(out.map((c) => c.id), ["c-concept", "c-identify", "c-fix", "c-tool"]);
 });
 
-test("orderColumnsForGrid: 概念列不在 position 0 时仍钉首列", () => {
+test("orderColumnsForGrid: 行标题列不在 position 0 时仍钉首列", () => {
   const shuffled = [
-    { id: "c-identify", name: "现象识别", role: "identify", position: 0 },
-    { id: "c-concept", name: "概念", role: "concept", position: 1 },
-    { id: "c-fix", name: "修复方法", role: "fix", position: 2 },
+    { id: "c-identify", name: "现象识别", role: "procedure", position: 0 },
+    { id: "c-concept", name: "概念", role: "anchor", position: 1 },
+    { id: "c-fix", name: "修复方法", role: "procedure", position: 2 },
   ];
   const out = orderColumnsForGrid(shuffled);
   assert.deepStrictEqual(out.map((c) => c.id), ["c-concept", "c-identify", "c-fix"]);
 });
 
-test("orderColumnsForGrid: 概念列已在首位时保持不变", () => {
+test("orderColumnsForGrid: 行标题列已在首位时保持不变", () => {
   const alreadyFirst = [
-    { id: "c-concept", name: "概念", role: "concept", position: 0 },
-    { id: "c-fix", name: "修复方法", role: "fix", position: 1 },
+    { id: "c-concept", name: "概念", role: "anchor", position: 0 },
+    { id: "c-fix", name: "修复方法", role: "procedure", position: 1 },
   ];
   const out = orderColumnsForGrid(alreadyFirst);
   assert.deepStrictEqual(out.map((c) => c.id), ["c-concept", "c-fix"]);
 });
 
-test("orderColumnsForGrid: 无概念角色列时退化为纯 position 排序", () => {
-  const noConcept = [
-    { id: "c-fix", name: "修复方法", role: "fix", position: 1 },
-    { id: "c-tool", name: "依赖工具", role: "tool", position: 0 },
+test("orderColumnsForGrid: 无行标题列(记录型表)时退化为纯 position 排序", () => {
+  const noAnchor = [
+    { id: "c-fix", name: "修复方法", role: "procedure", position: 1 },
+    { id: "c-tool", name: "依赖工具", role: "entity", position: 0 },
   ];
-  const out = orderColumnsForGrid(noConcept);
+  const out = orderColumnsForGrid(noAnchor);
   assert.deepStrictEqual(out.map((c) => c.id), ["c-tool", "c-fix"]);
 });
 
@@ -167,25 +167,25 @@ test("isRetryableProjectionStatus: 仅 failed 可重试", () => {
 
 // --- resolveRowTitleText ---------------------------------------------------------
 
-test("resolveRowTitleText: 取概念列原始文本", () => {
+test("resolveRowTitleText: 取行标题列(anchor)原始文本", () => {
   const r = row("r1", { "c-concept": "时序违例", "c-fix": "调整约束" });
   assert.strictEqual(resolveRowTitleText(r, columns), "时序违例");
 });
 
-test("resolveRowTitleText: 无概念角色列时退化为 position 最小的列", () => {
-  const noConcept = [
-    { id: "c-fix", name: "修复方法", role: "fix", position: 1 },
-    { id: "c-tool", name: "依赖工具", role: "tool", position: 0 },
+test("resolveRowTitleText: 无行标题列(记录型表)时退化为 position 最小的列", () => {
+  const noAnchor = [
+    { id: "c-fix", name: "修复方法", role: "procedure", position: 1 },
+    { id: "c-tool", name: "依赖工具", role: "entity", position: 0 },
   ];
   const r = row("r1", { "c-tool": "innovus", "c-fix": "xxx" });
-  assert.strictEqual(resolveRowTitleText(r, noConcept), "innovus");
+  assert.strictEqual(resolveRowTitleText(r, noAnchor), "innovus");
 });
 
 test("resolveRowTitleText: 无列时返回空串", () => {
   assert.strictEqual(resolveRowTitleText(row("r1", {}), []), "");
 });
 
-test("resolveRowTitleText: 概念列存在但该行缺少该单元格时返回空串", () => {
+test("resolveRowTitleText: 行标题列存在但该行缺少该单元格时返回空串", () => {
   const r = row("r1", { "c-fix": "xxx" });
   assert.strictEqual(resolveRowTitleText(r, columns), "");
 });

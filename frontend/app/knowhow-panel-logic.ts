@@ -27,14 +27,17 @@ export function sortColumnsByPosition(columns: KnowhowColumn[]): KnowhowColumn[]
   return [...columns].sort((a, b) => a.position - b.position);
 }
 
-// 网格列头顺序：概念列钉首列（组件侧配合 sticky 定位，横向滚动时概念列保持
-// 可见），其余列按 position 升序跟随。无概念角色列时退化为纯 position 排序。
+// 网格列头顺序：行标题列钉首列（组件侧配合 sticky 定位，横向滚动时行标题列
+// 保持可见），其余列按 position 升序跟随。无行标题列时退化为纯 position 排序。
+// 注：role 词表 2026-07-15 由六值 Role 收窄为四值 CellKind，"concept" 角色
+// 已改名为 "anchor"（行标题），本函数随之最小改名；Task 5 会把行标题选择
+// 迁移到独立的表级 anchorColumnId 选择器。
 export function orderColumnsForGrid(columns: KnowhowColumn[]): KnowhowColumn[] {
   const sorted = sortColumnsByPosition(columns);
-  const conceptIndex = sorted.findIndex((column) => column.role === "concept");
-  if (conceptIndex <= 0) return sorted;
-  const concept = sorted[conceptIndex];
-  return [concept, ...sorted.slice(0, conceptIndex), ...sorted.slice(conceptIndex + 1)];
+  const anchorIndex = sorted.findIndex((column) => column.role === "anchor");
+  if (anchorIndex <= 0) return sorted;
+  const anchor = sorted[anchorIndex];
+  return [anchor, ...sorted.slice(0, anchorIndex), ...sorted.slice(anchorIndex + 1)];
 }
 
 // --- 行投影状态徽标 -------------------------------------------------------------
@@ -62,14 +65,15 @@ export function isRetryableProjectionStatus(status: ProjectionStatus): boolean {
 
 // --- 行详情抽屉标题 -------------------------------------------------------------
 
-// 抽屉标题取「概念」列的原始格子文本（未截断，组件侧再套 cellSummary 截断显
-// 示）；行内没有概念角色列时退化为 position 最小的列（通常即首列），一列都
+// 抽屉标题取「行标题」列的原始格子文本（未截断，组件侧再套 cellSummary 截断
+// 显示）；行内没有行标题列时退化为 position 最小的列（通常即首列），一列都
 // 没有时返回空串交给组件侧兜底文案。
+// 注：同上，"concept" 角色已改名为 "anchor"（行标题），本函数随之最小改名。
 export function resolveRowTitleText(row: KnowhowRow, columns: KnowhowColumn[]): string {
   const ordered = sortColumnsByPosition(columns);
-  const conceptColumn = ordered.find((column) => column.role === "concept") ?? ordered[0];
-  if (!conceptColumn) return "";
-  return row.cells[conceptColumn.id] ?? "";
+  const anchorColumn = ordered.find((column) => column.role === "anchor") ?? ordered[0];
+  if (!anchorColumn) return "";
+  return row.cells[anchorColumn.id] ?? "";
 }
 
 // --- 图片鉴权判定 ---------------------------------------------------------------

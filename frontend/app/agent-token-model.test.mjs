@@ -64,6 +64,7 @@ test("scope options expose all and only the approved capabilities", () => {
     "memory:read_candidates",
     "memory:propose",
     "ask:execute",
+    "knowhow:code",
   ]);
 });
 
