@@ -24,6 +24,10 @@
 | LLM 表达优化 | 显式按钮触发（绝不自动），优化结果对照预览、用户确认后回填 |
 | 建表流程 | 先定表头（列名用户现场定+打角色），再填值；填值支持应用内逐格 + Excel 模板往返 |
 | 填值交互 | 网格为画布，点格子弹浮窗编辑，「保存并下一格」推进 |
+| 检索权重 | knowhow chunk 与普通文档 chunk **同池同权**上线，真机对照后再调（metadata 已带 role/table 标记，加权是纯增量） |
+| 判别预筛 | **不做**语义预筛端点：判别集全量返回，Agent 侧跑代码判别为主；规模上去再加 query 参数 |
+| 引用跳转 | ask 引用命中 knowhow chunk 时跳**表格行详情抽屉**（非普通源视图），排 PR-2 |
+| 代码实现回执 | Agent 外部实现完代码后回报 notebook 记账；新鲜度=回执 hash vs 格子当前 hash 推导；notebook 不做 LLM 语义审代码；排 PR-3 |
 
 ## ① 数据模型
 
@@ -105,7 +109,10 @@ Notebook 页内新增「Knowhow 表」区块：
 2. `get_discrimination_set(table_id)` → **判别集一次取全**：所有行的 `{row_id, concept, identify_text}`；「净文本」= 剥图后的 markdown（结构保留，图片替换为占位）；一行有多个 identify 角色列时按列序合并、以列名作小标题。供 Agent 离线批量生成判别代码或运行时遍历判别。
 3. `get_knowhow_row(row_id)` → 单行机器视图：逐列的角色+列名+净文本 + `steps[]` + 工具列表；判别命中后取修复方案生成代码。
 
-- MCP 侧同名三工具，与 HTTP 端点共用同一 service 层；响应受既有 `_budget_response` 预算约束（判别集只含概念+识别列，行详情按行取，天然可控）。
+4. `report_code_receipt(row_id, column_id, impl_ref)` → **代码实现回执**：Agent 外部实现完某行某方法格的代码后回报；notebook 记录 `{impl_ref, content_hash(该格当时净文本), agent, 时间}`（`knowhow_code_receipts` 表，PR-3 自带迁移）。新鲜度**读取时推导**：回执 hash==格子当前 hash → `implemented`；不一致 → `stale`（知识已更新待重审）；无回执 → `none`。判别集与行详情响应均带 `code_status`（按方法格给出三态+impl_ref），Agent 由此知道哪些行缺代码/哪些代码已失效。回执需写类 scope（新增 `knowhow:report`）；UI 在网格行与行详情抽屉显示实现状态徽章（同 PR 交付）。notebook 只记账+判新鲜度，**不做 LLM 语义审代码**。
+
+- MCP 侧同名工具，与 HTTP 端点共用同一 service 层；响应受既有 `_budget_response` 预算约束（判别集只含概念+识别列，行详情按行取，天然可控）。
+- 判别集**全量返回、不做语义预筛**（Agent 侧跑代码判别为主；单表百行内无预筛必要，规模上去再以可选 query 参数增量补）。
 - notebook 不存储、不执行代码；Agent 生成的代码若值得沉淀，走既有 `propose_memory` 候选通道回流，零新机制。
 - 既有 `ask_notebook`/`search_notebook_context` 因 chunk/KO 投影自动覆盖 knowhow 内容，无需改动。
 
@@ -135,8 +142,8 @@ Notebook 页内新增「Knowhow 表」区块：
 ## 交付切分（每 PR 前后端同 PR 交付）
 
 1. **PR-1 骨架**：数据模型+迁移、一次性整表导入（xlsx/csv/md+角色映射向导）、总览网格+行详情抽屉（只读）、资产存储与鉴权路由、确定性投影+检索接通。
-2. **PR-2 维护**：格子浮窗（预览/编辑双态、保存并下一格、图片粘贴上传、自动草稿）、建表向导（定表头→填值）、Excel 模板往返、LLM 表达优化（按钮/对照/确认回填）。
-3. **PR-3 Agent 面**：三个 HTTP 端点 + MCP 工具、README 与 README_zh 用法文档（通用口径）。
+2. **PR-2 维护**：格子浮窗（预览/编辑双态、保存并下一格、图片粘贴上传、自动草稿）、建表向导（定表头→填值）、Excel 模板往返、LLM 表达优化（按钮/对照/确认回填）、ask 引用命中 knowhow 时跳转行详情抽屉。
+3. **PR-3 Agent 面**：四个 HTTP 端点 + MCP 工具（判别集/行详情/表清单/代码实现回执）、`knowhow_code_receipts` 迁移与 code_status 徽章 UI、README 与 README_zh 用法文档（通用口径）。
 
 ## 默认值清单（随规格一并审阅）
 
