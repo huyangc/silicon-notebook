@@ -39,7 +39,7 @@
   - **角色=域中立「行为类型」**（2026-07-15 重设计：原五角色只是时序修复域的实例，误固化为全量词表，用户纠正）：`role ∈ {anchor | procedure | entity | attribute}`
   - **界面文案不用技术词**（用户 2026-07-15 两轮反馈：「锚点」「主题」都别扭——本体论叫法对「hold 和 setup 打架」这类值必然别扭，改用纯功能性叫法）：anchor=**「行标题」且不进每列下拉**，改为表级独立选择器「行标题列：[某列 ▾ / 不设置]」（提示：用作每行的标题；设置后每行作为一个节点进入知识图谱，节点名取自该列）；每列下拉只剩三个内容类型：procedure=「方法步骤」（写做法/流程的列，自动识别有序步骤）、entity=「工具/事物」（列出的名称自动归并：工具、命令、文档等）、attribute=「普通」（仅作为内容参与检索），各带一行提示语。机器侧/API/存储仍用英文枚举（anchor 仍是列上的标记）。
   - **主题列可选（0..1，2026-07-15 用户以旅行日志表实证修正）**：表分两类形态——实体型（有主题列：行节点入图谱、判别集可用、行标题=主题值）与记录型（无主题列：每行是一条记录、行身份复合）。记录型**只做检索投影**（格子照常成 chunk 进向量/FTS，问答全覆盖），**不建任何图谱节点**（日期/流水记录不该成为知识实体）；判别集 API 对无主题表返回明确提示。**行标题自动合成**（展示用）：前几个非空格子短值以「 · 」拼接（截断），全空则「行 N」。**主题猜测只认列名命中，取消首列兜底**（默认普通）。向导无主题时提示「未选主题列：本表仅参与问答检索，不构建图谱节点」。存量「恰一」校验放宽为「至多一」。
-  - 领域语义住在**列名**（自由文本）：投影边标签用列名原文（源语言保留），procedure KO 的 payload 带 `method_label=列名`；行为类型只决定机器行为——anchor→行身份/case KO/判别键，procedure→procedure KO+steps 解析+指向锚点的边，entity→去重实体 KO+关联边，attribute→payload+chunk 不成节点。
+  - **格子级节点模型**（2026-07-15 用户定稿：每个格子都是节点，列名是实体类型，行是具体实例的连接）：领域语义住在**列名**（自由文本）——**列名即节点类型**（`object_type=列名`，与 Concept/Claim 平级的动态类型），**每个非空格子→节点**（名=格值，长文本取首行截断，全文在 payload+chunk），**行=以行标题格为主语的星形连接**（主语格→同行其他格，边标签=目标列名；不做两两全连）。内容类型降为**解析提示**：procedure=格内 md 列表解析 `steps[]`、entity=**一格拆多节点**（按列表项/换行）、attribute=原样单节点——三者都建节点。**同列同值跨行归并**：节点身份=（列名，归一化值），短值自然归并（十行的 Innovus 是一个节点十条边），长文本按内容哈希独立。
   - 兼容迁移：存量 concept→anchor、identify/root_cause/fix→procedure、tool→entity、plain→attribute；迁移后全表结构性重投影（文本未变→chunk/向量原位保留，零 LLM 零重嵌入）。
 - `knowhow_rows`：`id, table_id, position, created_at, updated_at`
 - `knowhow_cells`：`id, row_id, column_id, content_md(原始 markdown，含 asset:// 图片引用), updated_at`
@@ -84,10 +84,9 @@
 
 每张 knowhow 表挂一个**隐藏合成源**（复用 memory 确认入 KG 的既有模式），行级变更后异步重投影（防抖），产物全部挂在该源下：
 
-- **行 → `case` KO**：标题=概念格文本；payload 按角色收纳各格净文本 + `table_id/row_id` 回链。
-- **identify/root_cause/fix 格 → `procedure` KO**：payload 带 `method_kind ∈ {identify|root_cause|fix}`；格内 markdown 有序/无序列表**确定性解析**为现成 `steps[]`（无列表结构则 steps 为空、整段作正文）。不动 LLM。
-- **tool 格 → `tool` KO**：按列表项/换行拆分多工具，表内按归一化名去重。
-- **结构化边直写 `knowledge_relations`**：`case --identified_by--> procedure(identify)`、`case --diagnosed_by--> procedure(root_cause)`、`case --fixed_by--> procedure(fix)`、`case --requires_tool--> tool`。
+- **格子级节点投影**（PR-2+3 替换 PR-1 的 case/procedure/tool 三类模型，随迁移全量重投影）：**每个非空格子 → KO**，`object_type=列名`（动态类型）、名=格值首行截断、payload 带全文净文本 + `table_id/row_id/column_id` 回链；procedure 提示列的格子解析 `steps[]`（md 有序/无序列表，确定性、不动 LLM）；entity 提示列**一格拆多 KO**（列表项/换行拆分）。
+- **同列同值跨行归并**：KO 身份=（列名，归一化值/长文哈希），evidence 累积各行来源格。
+- **边直写 `knowledge_relations`**：行标题格 KO --（目标列名原文）--> 同行其他格 KO（主语星形）；无行标题的表不建任何 KO/边（只做检索投影）。
 - **每个非空格子 → chunk**（section 标签=`表名 › 行概念 › 列名`；超长格子按现有 chunker 续切），进向量/FTS 索引——现有 ask/reasoning/外部检索免费吃到；引用标签显示 `表名 › 行概念` 而非隐藏源文件名。
 - **机器侧剥图**：`![alt](asset://…)` → `（图示：alt）`。
 - **幂等与增量**：派生对象 id = 稳定函数 `f(row_id, column_id, kind)`，编辑=原地更新无 id 抖动；仅变更格子重算 embedding；每次投影 bump 表 `mutation_seq` 与 notebook `kg_mutation_seq`（计数缓存正确失效）。
