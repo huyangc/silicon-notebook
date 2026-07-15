@@ -102,13 +102,15 @@ Gate（全部满足才调 LLM）：`settings.paper_meta_enabled`、`doc_type == 
 
 | 字段 | 校验 | 未通过处置 |
 | --- | --- | --- |
-| 作者 name | 归一化包含于头部文本 | **丢弃该作者行**（假作者比漏作者更伤搜索可信度） |
-| 作者 affiliation | 归一化包含（容忍缩写不匹配） | 置空字符串（保留作者，不保留不可验证的机构） |
+| 作者 name | 归一化包含于头部文本（容忍「姓, 名」次序翻转与有界 token 旋转，非全排列） | **丢弃该作者行**（假作者比漏作者更伤搜索可信度） |
+| 作者 affiliation | 归一化包含（容忍缩写不匹配；非列表形状按单元素/空容错，不崩溃） | 置空字符串（保留作者，不保留不可验证的机构） |
 | paper_title | 归一化包含 | 置 NULL |
 | venue | 归一化包含（预印本常无 venue，宁缺毋滥） | 置 NULL |
-| pub_year | 4 位数字原样出现于文本 且 1900≤y≤2100 | 置 NULL |
-| doi | 匹配 `^10\.\d{4,9}/\S+$` 且原样出现于文本 | 置 NULL |
+| pub_year | 4 位数字独立出现于文本（DOI/arXiv 号内的数字段先被抹除不算数）且 1900≤y≤2100；JSON 浮点年份容错取整 | 置 NULL |
+| doi | 匹配 `^10\.\d{4,9}/\S+$` 且与文本中提取出的完整 DOI token **精确相等**（大小写不敏感；容忍首尾 ASCII/Unicode 标点包裹）——子串包含不算，堵前缀截断漏洞 | 置 NULL |
 | keyword | 归一化包含 | 丢弃该关键词 |
+
+畸形 LLM 输出（authors/keywords 非列表、条目非 dict/str、顶层非对象 JSON 等）一律**优雅降级不崩溃**：字段级降级为空（原始输出仍在 raw_json.llm 里可审计）；顶层非对象 JSON 视作抽取失败（不落行、可重试），不落 `is_paper=0` 标记行以免错误压制重试。
 
 - 审计：`raw_json` 存信封 `{"llm": <原始返回>, "dropped": <丢弃明细>}`；有丢弃时 `event_log.emit(kind="paper_meta", ...)` 记一条——「校验挡掉了什么」可追溯。
 - **刻意不加第二次 LLM refine pass**：成本×2 违反效率约束；接地校验已确定性堵死「记忆补全」主通道。
@@ -144,7 +146,7 @@ notebook 内源数量级（数千～万级）下相关子查询开销毫秒级�
 1. TS 类型补新字段。
 2. **来源详情 modal**（`source-detail-meta` 区）新增「论文信息」块，仅 `paper_meta?.is_paper` 时显示：论文标题、作者列（机构以次行小字或 hover title）、venue · 年份、DOI（链接 `https://doi.org/...`）、关键词 chips。对齐精致、省略号截断（UI 质量基线）。
 3. **搜索框 placeholder**：「搜索来源（标题/作者/文件名）」。
-4. **补抽入口**（owner 可见）：来源面板现有工具区/菜单加「补抽论文元数据」，调 backfill 端点，toast 显示「已提交 N 篇补抽」；文案友好不暴露技术细节。
+4. **补抽入口**（owner 可见）：来源面板 add-source 按钮同区加次级按钮「补全论文信息」（in-flight 防重：请求期间禁用并显示「补全中…」），调 backfill 端点，toast 显示「已提交 N 篇论文的信息补全」/「论文信息已是最新，无需补全」；文案友好不暴露技术细节。
 5. 列表行不动（侧栏行高保持紧凑）。
 
 注意：API 路径不带 `/api` 前缀（双 /api 404 坑）；新增中文文案沿用现有弯引号风格，不做批量引号替换。
@@ -164,10 +166,10 @@ notebook 内源数量级（数千～万级）下相关子查询开销毫秒级�
 
 README.md + README_zh.md 同 PR 写 CLI 用法（通用口径，不含机器路径）。
 
-## 10. 配置（pydantic-settings v2，字段名即环境变量名，无需 alias）
+## 10. 配置（pydantic-settings v2，按仓库惯例显式 validation_alias）
 
-- `paper_meta_enabled: bool = True`
-- `paper_meta_head_chars: int = 4000`
+- `paper_meta_enabled: bool = True`（env `PAPER_META_ENABLED`）
+- `paper_meta_head_chars: int = 4000`（env `PAPER_META_HEAD_CHARS`）
 
 不新增 token 上限旋钮（复用全局 `openai_compat_max_tokens` cap）。
 
