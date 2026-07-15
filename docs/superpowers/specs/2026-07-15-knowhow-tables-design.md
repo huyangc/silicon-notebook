@@ -86,7 +86,7 @@
 
 - **格子级节点投影**（PR-2+3 替换 PR-1 的 case/procedure/tool 三类模型，随迁移全量重投影）：**每个非空格子 → KO**，`object_type=列名`（动态类型）、名=格值首行截断、payload 带全文净文本 + `table_id/row_id/column_id` 回链；procedure 提示列的格子解析 `steps[]`（md 有序/无序列表，确定性、不动 LLM）；entity 提示列**一格拆多 KO**（列表项/换行拆分）。
 - **同列同值跨行归并**：KO 身份=（列名，归一化值/长文哈希），evidence 累积各行来源格。
-- **边直写 `knowledge_relations`**：行标题格 KO --（目标列名原文）--> 同行其他格 KO（主语星形）；无行标题的表不建任何 KO/边（只做检索投影）。
+- **边直写 `knowledge_relations`**（2026-07-15 用户指出「边标签=列名」与「节点类型=列名」冗余，去重）：行内关系统一用既有 **`about`**——同行各格 KO --about--> 行标题格 KO；语义全在节点类型上，边只表达行结构。副产品：与文献图谱同构（claim/procedure --about--> concept），下游 PPR/权重/视图零特判；「X 的修复方法」=X 邻居按类型筛。无行标题的表不建任何 KO/边（只做检索投影）。
 - **每个非空格子 → chunk**（section 标签=`表名 › 行概念 › 列名`；超长格子按现有 chunker 续切），进向量/FTS 索引——现有 ask/reasoning/外部检索免费吃到；引用标签显示 `表名 › 行概念` 而非隐藏源文件名。
 - **机器侧剥图**：`![alt](asset://…)` → `（图示：alt）`。
 - **幂等与增量**：派生对象 id = 稳定函数 `f(row_id, column_id, kind)`，编辑=原地更新无 id 抖动；仅变更格子重算 embedding；每次投影 bump 表 `mutation_seq` 与 notebook `kg_mutation_seq`（计数缓存正确失效）。
