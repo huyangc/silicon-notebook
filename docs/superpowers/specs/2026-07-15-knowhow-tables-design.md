@@ -27,7 +27,7 @@
 | 检索权重 | knowhow chunk 与普通文档 chunk **同池同权**上线，真机对照后再调（metadata 已带 role/table 标记，加权是纯增量） |
 | 判别预筛 | **不做**语义预筛端点：判别集全量返回，Agent 侧跑代码判别为主；规模上去再加 query 参数 |
 | 引用跳转 | ask 引用命中 knowhow chunk 时跳**表格行详情抽屉**（非普通源视图），排 PR-2 |
-| 代码实现回执 | Agent 外部实现完代码后回报 notebook 记账；新鲜度=回执 hash vs 格子当前 hash 推导；notebook 不做 LLM 语义审代码；排 PR-3 |
+| 格子级代码附件 | notebook **存代码本体**（挂格子上、与 content_md 分离，每格一份）；代码**永不进 embedding/chunk/FTS/KG**、不可被检索，仅按钮查看/编辑；用户界面改、Agent API 改；新鲜度=附件存储的格子净文本 hash vs 当前 hash 推导；notebook 不执行、不 LLM 审；排 PR-3 |
 
 ## ① 数据模型
 
@@ -109,7 +109,7 @@ Notebook 页内新增「Knowhow 表」区块：
 2. `get_discrimination_set(table_id)` → **判别集一次取全**：所有行的 `{row_id, concept, identify_text}`；「净文本」= 剥图后的 markdown（结构保留，图片替换为占位）；一行有多个 identify 角色列时按列序合并、以列名作小标题。供 Agent 离线批量生成判别代码或运行时遍历判别。
 3. `get_knowhow_row(row_id)` → 单行机器视图：逐列的角色+列名+净文本 + `steps[]` + 工具列表；判别命中后取修复方案生成代码。
 
-4. `report_code_receipt(row_id, column_id, impl_ref)` → **代码实现回执**：Agent 外部实现完某行某方法格的代码后回报；notebook 记录 `{impl_ref, content_hash(该格当时净文本), agent, 时间}`（`knowhow_code_receipts` 表，PR-3 自带迁移）。新鲜度**读取时推导**：回执 hash==格子当前 hash → `implemented`；不一致 → `stale`（知识已更新待重审）；无回执 → `none`。判别集与行详情响应均带 `code_status`（按方法格给出三态+impl_ref），Agent 由此知道哪些行缺代码/哪些代码已失效。回执需写类 scope（新增 `knowhow:report`）；UI 在网格行与行详情抽屉显示实现状态徽章（同 PR 交付）。notebook 只记账+判新鲜度，**不做 LLM 语义审代码**。
+4. `put/get/delete_cell_code(row_id, column_id, ...)` → **格子级代码附件**：Agent 外部实现完某格方法的代码后，把**代码本体**存回 notebook（`knowhow_cell_code` 表，PR-3 自带迁移；每格一份：`{id, row_id, column_id, code_text, language, updated_by, cell_content_hash(存入时该格净文本 hash), created_at, updated_at}`，UNIQUE(row_id, column_id)）。**隔离不变量：代码永不进 element/chunk/embedding/FTS/KG 投影，ask 上下文组装不含它**——在 notebook 内不可被检索，只能经格子定位查看（投影只读 `content_md`，天然满足，另加投影不受附件影响的守护测试）。新鲜度读取时推导：附件 hash==格子当前 hash → `implemented`；不一致 → `stale`（知识已更新待重审）；无附件 → `none`。行详情机器视图**直接带代码本体**（判别命中后 Agent 一次取走方法+现成代码）；判别集只带 `code_status` 三态不带代码（控体积）。写入走新增 scope `knowhow:code`（用户界面走会话鉴权）；UI：格子/行「代码」徽章（三态）→ 点击浮层查看（等宽、复制、语言标记），用户可编辑保存（同 PR 交付）。notebook 不执行代码、**不做 LLM 语义审代码**。
 
 - MCP 侧同名工具，与 HTTP 端点共用同一 service 层；响应受既有 `_budget_response` 预算约束（判别集只含概念+识别列，行详情按行取，天然可控）。
 - 判别集**全量返回、不做语义预筛**（Agent 侧跑代码判别为主；单表百行内无预筛必要，规模上去再以可选 query 参数增量补）。
@@ -143,7 +143,7 @@ Notebook 页内新增「Knowhow 表」区块：
 
 1. **PR-1 骨架**：数据模型+迁移、一次性整表导入（xlsx/csv/md+角色映射向导）、总览网格+行详情抽屉（只读）、资产存储与鉴权路由、确定性投影+检索接通。
 2. **PR-2 维护**：格子浮窗（预览/编辑双态、保存并下一格、图片粘贴上传、自动草稿）、建表向导（定表头→填值）、Excel 模板往返、LLM 表达优化（按钮/对照/确认回填）、ask 引用命中 knowhow 时跳转行详情抽屉。
-3. **PR-3 Agent 面**：四个 HTTP 端点 + MCP 工具（判别集/行详情/表清单/代码实现回执）、`knowhow_code_receipts` 迁移与 code_status 徽章 UI、README 与 README_zh 用法文档（通用口径）。
+3. **PR-3 Agent 面**：HTTP 端点 + MCP 工具（表清单/判别集/行详情/**格子代码附件读写删**）、`knowhow_cell_code` 迁移、代码徽章+查看编辑浮层 UI、投影隔离守护测试、README 与 README_zh 用法文档（通用口径）。
 
 ## 默认值清单（随规格一并审阅）
 
@@ -154,7 +154,7 @@ Notebook 页内新增「Knowhow 表」区块：
 
 ## 不做的事（明确出界）
 
-- notebook 侧代码生成/存储/执行与代码审核生命周期（代码归外部 Agent）。
+- notebook 侧代码**生成**与**执行**，以及 LLM 语义审代码（生成/执行/正确性把关归外部 Agent；notebook 只做格子级代码附件的存储/展示/编辑与 hash 新鲜度记账，见⑥-4）。
 - 图片 VLM 理解（全量与打标按需均不做，除非未来显式立项）。
 - LLM 抽取器接入 `object_schemas`（从非结构化文档抽 knowhow 是独立演进项，不绑本特性）。
 - 表格协同编辑/冲突合并（单编辑者假设，百行内规模冲突概率可忽略；写权限已由成员机制约束）。
