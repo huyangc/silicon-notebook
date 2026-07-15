@@ -153,6 +153,29 @@ def test_load_dotenv_missing_file_is_noop(tmp_path):
     mbp.load_dotenv(tmp_path / "does_not_exist.env")  # 不应抛异常
 
 
+@pytest.mark.parametrize(
+    "line,key,expected",
+    [
+        # 无引号值 + 行内注释（# 前有空格）→ 注释被截掉
+        ("MINERU_BATCH_CONCURRENCY_PER_SERVER=0   # 0 = auto from health", "MINERU_BATCH_CONCURRENCY_PER_SERVER", "0"),
+        # 值全是空白 + 注释（等号右边只有注释）→ 空字符串，而不是字面 "# ..."
+        ("MINERU_BATCH_MANIFEST=   # empty -> default path", "MINERU_BATCH_MANIFEST", ""),
+        # 带引号的值内部的 # 必须原样保留，不当注释处理
+        ('MINERU_BATCH_LANG="a # b"', "MINERU_BATCH_LANG", "a # b"),
+        # 不带引号但 # 前面没有空白（紧贴在其他字符上，如 URL fragment）→ 保留原样
+        ("MINERU_BATCH_SRC_DIR=http://h/x#frag", "MINERU_BATCH_SRC_DIR", "http://h/x#frag"),
+    ],
+)
+def test_load_dotenv_strips_inline_comments(tmp_path, monkeypatch, line, key, expected):
+    env_file = tmp_path / ".env"
+    env_file.write_text(line + "\n", encoding="utf-8")
+    monkeypatch.delenv(key, raising=False)
+
+    mbp.load_dotenv(env_file)
+
+    assert os.environ[key] == expected
+
+
 # ---------------------------------------------------------------------------
 # 3/4/5. process_file —— happy path / skip / fail
 # ---------------------------------------------------------------------------
@@ -226,3 +249,29 @@ def test_process_file_fails_after_retry_max_exhausted(tmp_path):
     assert record["attempts"] == 3
     assert "解析引擎崩溃" in record["error"]
     assert not out_md.exists()
+
+
+def test_process_file_fail_record_does_not_leak_stale_task_id(tmp_path):
+    """attempt 1 拿到 task_id 后轮询报 failed；attempt 2 的 submit() 本身抛异常
+    （从未拿到新 task_id）。最终 fail 记录的 task_id 必须是空串，不能残留
+    attempt 1 的旧 task_id——否则账本会误导人去查一个早已作废的 task。"""
+    pdf = tmp_path / "a.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake pdf content")
+    out_md = tmp_path / "out" / "a.md"
+
+    script = {
+        "/tasks": [
+            FakeResponse({"task_id": "task-1"}, status_code=202),
+            FakeResponse({}, status_code=500, text="boom"),
+        ],
+        "/tasks/task-1": FakeResponse({"status": "failed", "error": "engine crashed"}),
+    }
+    session = FakeSession(script)
+    server = _make_server(session)
+    cfg = mbp.Config(src_dir=str(tmp_path), retry_max=2)
+
+    record = mbp.process_file(server, pdf, cfg, out_md)
+
+    assert record["status"] == "fail"
+    assert record["attempts"] == 2
+    assert record["task_id"] == ""
