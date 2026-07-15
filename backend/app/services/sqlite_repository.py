@@ -206,6 +206,21 @@ _KG_TYPES = ("claim", "formula", "procedure", "concept")
 _COPY_CHUNK = 1000
 
 
+def _schedule_knowhow_projection(repo: "SQLiteRepository", table_id: str) -> None:
+    """knowhow-tables PR-2+3 Task 13: the ``schedule_projection`` seam
+    ``wire_sharing`` hands to ``NotebookCopyService`` — deferred import (the
+    same idiom ``sqlite_notebook_sharing._repository_new_id`` already uses
+    for its own late-bound compatibility helper) so this facade module need
+    not import ``app.services.knowhow.api`` at load time. Routes through the
+    SAME per-repo debounced ``ProjectionScheduler`` every editing endpoint
+    already uses (Task 3), not a bespoke synchronous call — a copy with many
+    knowhow tables collapses duplicate schedule() calls exactly the same
+    way a burst of edits does."""
+    from app.services.knowhow.api import get_scheduler
+
+    get_scheduler(repo).schedule(table_id)
+
+
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
 SCHEMA_VERSION = 18
@@ -264,6 +279,14 @@ class SQLiteRepository:
             insert_row=lambda db, table, data: self._insert_row(db, table, data),
             copy_stats=lambda notebook_id: self.notebook_copy_stats(notebook_id),
             storage_dir=lambda: self._runtime.storage_dir,
+            # PR-2+3 Task 13: deferred import (mirrors sqlite_notebook_sharing.
+            # _repository_new_id's own deferred-import comment) — knowhow.api
+            # never imports sqlite_repository back, so this is not actually
+            # circular, but resolving it at CALL time (not module-load time)
+            # keeps this file's own import order irrelevant either way.
+            schedule_projection=lambda table_id: _schedule_knowhow_projection(
+                self, table_id
+            ),
         )
         # Task 10: vector flushes stay on the facade's `_write` seat (resolved
         # per call) so transaction-counting/failure-injection monkeypatches

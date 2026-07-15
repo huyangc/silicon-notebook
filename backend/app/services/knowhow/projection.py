@@ -119,12 +119,36 @@ def _cell_ko_id(table_id: str, column_name: str, val_key: str) -> str:
     return f"ko-kh-{_h(table_id, column_name, val_key)[:32]}"
 
 
-def _element_id(row_id: str, column_id: str) -> str:
+def element_id(row_id: str, column_id: str) -> str:
+    """A knowhow cell's ``source_elements`` id. Exported (no leading
+    underscore — PR-2+3 Task 13, pure rename/no behavior change) so
+    ``notebook_sharing.NotebookCopyService`` can recompute the SAME id for a
+    remapped ``(row_id, column_id)`` pair during a deep copy instead of
+    duplicating this one-line formula: the copy's freshly-inserted element
+    row then lands on EXACTLY the id ``_write_elements`` will independently
+    recompute the first time it reprojects the copied table."""
     return f"el-kh-{_h(row_id, column_id)[:32]}"
 
 
 def _chunk_row_hash(row_id: str) -> str:
     return _h(row_id)[:16]
+
+
+def cell_chunk_id(row_id: str, part: int) -> str:
+    """Public counterpart to ``_write_chunks``'s own inline chunk-id formula
+    (``f"chunk-kh-{row_hash}-{part}"``) — exported (PR-2+3 Task 13) so a deep
+    copy can recompute a knowhow chunk's id for a REMAPPED ``row_id`` without
+    duplicating the row-hash/part-number scheme. ``part``
+    (``col_pos * _COLUMN_PART_STRIDE + split_idx``) is already encoded in the
+    OLD chunk id's own trailing segment; a copy that preserves column
+    ``position`` values (it always does — columns are never reordered by a
+    copy) reads that integer straight off the old id and passes it through
+    unchanged, so only the row-hash segment (a pure function of ``row_id``)
+    ever needs recomputing. Landing on the exact id ``_write_chunks`` will
+    independently recompute for the same (row, column-position) is what lets
+    the post-copy ``project_table`` pass see ``old_specs == new_specs`` and
+    skip straight past the embedder for every untouched cell."""
+    return f"chunk-kh-{_chunk_row_hash(row_id)}-{part}"
 
 
 def _relation_id(source_object_id: str, edge_type: str, target_object_id: str) -> str:
@@ -397,7 +421,7 @@ class KnowhowProjector:
                 continue
             content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
             writes.append(SourceElementWrite(
-                id=_element_id(row_id, column["id"]),
+                id=element_id(row_id, column["id"]),
                 element_type="knowhow_cell",
                 location_label=f"{row_title} › {column['name']}",
                 text=text,
@@ -466,7 +490,7 @@ class KnowhowProjector:
             to_delete_ids.extend(r["id"] for r in old_group)
             if not text:
                 continue
-            eid = _element_id(row_id, column["id"])
+            eid = element_id(row_id, column["id"])
             for split_idx, part_text in enumerate(parts_text, start=1):
                 cid = f"chunk-kh-{row_hash}-{col_pos * _COLUMN_PART_STRIDE + split_idx}"
                 to_insert.append(ChunkWrite(
@@ -592,7 +616,7 @@ class KnowhowProjector:
         val_key = textops.value_key(text)
         ko_id = _cell_ko_id(table_id, column["name"], val_key)
         evidence_item = _evidence(
-            source_id, table["title"], _element_id(row_id, column["id"]),
+            source_id, table["title"], element_id(row_id, column["id"]),
             "knowhow_cell", f"{row_title} › {column['name']}", text,
         )
         entry = ko_acc.get(ko_id)
@@ -717,4 +741,9 @@ class KnowhowProjector:
         return table_ids
 
 
-__all__ = ["KnowhowProjector", "find_legacy_projected_table_ids"]
+__all__ = [
+    "KnowhowProjector",
+    "find_legacy_projected_table_ids",
+    "element_id",
+    "cell_chunk_id",
+]

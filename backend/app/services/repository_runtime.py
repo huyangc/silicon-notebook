@@ -903,11 +903,16 @@ class RepositoryRuntime:
         insert_row: Callable[..., None],
         copy_stats: Callable[[str], dict],
         storage_dir: Callable[[], Path],
+        schedule_projection: Callable[[str], None],
     ) -> NotebookSharingService:
         """Compose the sharing domain (Task 9) once the facade-bound seams
         exist: ``insert_row`` = the facade's ``_insert_row`` compatibility
         seat, ``copy_stats`` = the facade's memoized ``notebook_copy_stats``,
-        ``storage_dir`` resolves the live storage root."""
+        ``storage_dir`` resolves the live storage root, ``schedule_projection``
+        (PR-2+3 Task 13) is the facade's
+        ``knowhow_api.get_scheduler(repo).schedule`` — late-bound the same way
+        as the other three seams, so it always resolves against the fully
+        constructed facade even though wire_sharing runs mid-``__init__``."""
         self.sharing_store = SharingStore(
             self.database,
             self.settings,
@@ -919,6 +924,7 @@ class RepositoryRuntime:
             catalog=self.catalog,
             seams=self.seams,
             storage_dir=storage_dir,
+            schedule_projection=schedule_projection,
         )
         self.sharing = NotebookSharingService(
             store=self.sharing_store,

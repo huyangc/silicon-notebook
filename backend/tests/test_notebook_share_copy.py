@@ -492,19 +492,38 @@ def test_share_returns_transaction_token_if_concurrent_unshare_wins(repo, monkey
 # patch/consumer sites the repository_surface_manifest guard pins for the
 # _COPY_CHUNK / _insert_row seams below this file's earlier tests.
 def _seed_knowhow_into_notebook(repo, nb, owner="user-local"):
-    """Seed a projected knowhow table into an existing notebook via raw SQL,
-    mirroring KnowhowProjector's output shape: a source_type='knowhow' hidden
-    source and its derived element/chunk(+embedding)/case-procedure-tool KOs +
-    an edge. Returns the hidden source id. Deliberately raw (like
-    _seed_full_notebook) so this stays projector-independent and adds no new
-    facade consumers. The knowhow chunk carries an embedding on purpose: it is
-    exactly the row that, unfiltered, would KeyError on chunk_map during copy —
-    so a clean copy proves the chunk_embeddings leg is excluded in lockstep."""
+    """Seed a knowhow table (one real column+row+cell) into an existing
+    notebook, plus its projected element/chunk(+embedding) and PR-1-vocabulary
+    KOs+edge — mostly raw SQL (mirrors _seed_full_notebook's own style), but
+    with REAL knowhow_columns/knowhow_rows rows underneath the element's
+    metadata (PR-2+3 Task 13's copy resolves metadata.knowhow.{row_id,
+    column_id} through khrow_map/khcol_map, built from the ACTUAL business
+    rows — a bare source_type='knowhow' hidden source is no longer enough,
+    unlike PR-1's blanket-exclusion era this fixture used to test). Returns
+    (hidden_source_id, table_id). The knowledge_objects/knowledge_relations
+    rows stay hand-rolled with PR-1's retired case/procedure/tool vocabulary
+    on purpose — Task 13 still EXCLUDES them from the copy (rebuilt by
+    project_table instead, see test_knowhow_copy.py for that contract), so
+    their exact shape is irrelevant here, only their PRESENCE/count is."""
+    # Deferred import (keeps this EOF-appended block's own line count from
+    # perturbing any earlier test's pinned _COPY_CHUNK/_insert_row usage
+    # line — see test_repository_surface_manifest.py's EXPECTED_PATCH_DELTAS;
+    # a top-of-file import shifts EVERY later line by one).
+    from app.services.knowhow.projection import cell_chunk_id
+
     now = _now()
     hs = f"src-kh-{uuid.uuid4().hex[:6]}"
     tbl = f"khtbl-{uuid.uuid4().hex[:6]}"
+    col = f"khcol-{uuid.uuid4().hex[:6]}"
+    row = f"khrow-{uuid.uuid4().hex[:6]}"
+    cel = f"khcel-{uuid.uuid4().hex[:6]}"
     el = f"el-kh-{uuid.uuid4().hex[:8]}"
-    ck = f"chunk-kh-{uuid.uuid4().hex[:8]}"
+    # Real chunk-id shape (app.services.knowhow.projection.cell_chunk_id):
+    # "chunk-kh-{row_hash}-{part}" — the trailing "-{part}" integer is what
+    # copy_notebook's chunks_out loop parses back off with rsplit("-", 1), so
+    # a fixture id missing it would ValueError there (caught by an earlier,
+    # less realistic version of this fixture).
+    ck = cell_chunk_id(row, 1)
     case = f"ko-kh-{uuid.uuid4().hex[:8]}"
     proc = f"ko-kh-{uuid.uuid4().hex[:8]}"
     tool = f"ko-kh-{uuid.uuid4().hex[:8]}"
@@ -514,8 +533,22 @@ def _seed_knowhow_into_notebook(repo, nb, owner="user-local"):
                    "VALUES (?,?,?,?,?,?,?)", (hs, nb, "Knowhow 表：时序修复", "knowhow", "parsed", now, now))
         db.execute("INSERT INTO knowhow_tables (id,notebook_id,title,hidden_source_id,created_by,created_at,updated_at) "
                    "VALUES (?,?,?,?,?,?,?)", (tbl, nb, "时序修复", hs, owner, now, now))
-        db.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,created_at) "
-                   "VALUES (?,?,?,?,?,?)", (el, hs, "knowhow_cell", "过冲问题 › 修复方法", "增加阻尼电阻", now))
+        db.execute("INSERT INTO knowhow_columns (id,table_id,name,role,position) VALUES (?,?,?,?,?)",
+                   (col, tbl, "修复方法", "procedure", 0))
+        db.execute("INSERT INTO knowhow_rows (id,table_id,position,created_at,updated_at) VALUES (?,?,?,?,?)",
+                   (row, tbl, 0, now, now))
+        db.execute("INSERT INTO knowhow_cells (id,row_id,column_id,content_md,updated_at) VALUES (?,?,?,?,?)",
+                   (cel, row, col, "增加阻尼电阻", now))
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (el, hs, "knowhow_cell", "过冲问题 › 修复方法", "增加阻尼电阻",
+             json.dumps({"knowhow": {
+                 "table_id": tbl, "row_id": row, "column_id": col,
+                 "role": "procedure", "column_name": "修复方法",
+                 "row_title": "过冲问题", "content_hash": "deadbeef",
+             }}), now),
+        )
         db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,element_ids,created_at) "
                    "VALUES (?,?,?,?,?,?)", (ck, nb, hs, "增加阻尼电阻", json.dumps([el]), now))
         db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
@@ -530,18 +563,23 @@ def _seed_knowhow_into_notebook(repo, nb, owner="user-local"):
                        (oid, nb, otype, hs, json.dumps(payload), json.dumps([{"element_id": el, "source_id": hs}]), now, now))
         db.execute("INSERT INTO knowledge_relations (id,notebook_id,source_id,source_object_id,target_object_id,edge_type,evidence,created_at) "
                    "VALUES (?,?,?,?,?,?,?,?)", (rel, nb, hs, case, proc, "fixed_by", json.dumps([]), now))
-    return hs
+    return hs, tbl
 
 
-def test_copy_notebook_excludes_all_knowhow_content(repo):
-    """Final-review decision: knowhow content is excluded from a deep copy (full
-    table copy is PR-2). A copy of a knowhow-bearing notebook has zero knowhow
-    sources/chunks/KOs and an empty knowhow-table list; the ordinary content
-    still copies; the original is untouched. The knowhow chunk carrying an
-    embedding also proves the copy no longer KeyErrors on a knowhow chunk_map
-    miss (validate_copy passing is implicit in copy_notebook returning)."""
-    src = _seed_full_notebook(repo)           # 1 normal source, 2 concept KOs, 1 chunk(+emb), 1 rel, 1 cluster
-    hidden = _seed_knowhow_into_notebook(repo, src)  # + knowhow: 3 KOs, 1 chunk(+emb), 1 rel, 1 table
+def test_copy_notebook_includes_knowhow_content_with_remap(repo):
+    """PR-2+3 Task 13 supersedes PR-1's blanket knowhow exclusion this test
+    used to assert (see git history for the prior
+    test_copy_notebook_excludes_all_knowhow_content): the hidden source, its
+    elements/chunks(+vectors), and the five knowhow business tables now
+    travel with a copy, ids fully remapped. knowledge_objects/knowledge_
+    relations derived from a knowhow hidden source stay excluded either way
+    (rebuilt by project_table, never copied directly — see
+    test_knowhow_copy.py for the full zero-re-embed/dynamic-type contract);
+    this test's job is only telling those two apart, not re-covering
+    ordinary-content copy semantics (test_copy_notebook_deep_copies_and_remaps
+    above already does that)."""
+    src = _seed_full_notebook(repo)  # 1 normal source, 2 concept KOs, 1 chunk(+emb), 1 rel, 1 cluster
+    hidden, table_id = _seed_knowhow_into_notebook(repo, src)  # + knowhow: 3 KOs, 1 chunk(+emb), 1 rel, 1 table+col+row+cell
     with repo._connect() as db:  # sanity: the ORIGINAL really has knowhow content
         assert db.execute("SELECT COUNT(*) FROM knowledge_objects WHERE source_id=?", (hidden,)).fetchone()[0] == 3
         assert db.execute("SELECT COUNT(*) FROM knowhow_tables WHERE notebook_id=?", (src,)).fetchone()[0] == 1
@@ -550,15 +588,30 @@ def test_copy_notebook_excludes_all_knowhow_content(repo):
     new = repo.copy_notebook(src, new_owner_id="user-copykh")  # must NOT raise
 
     with repo._connect() as db:
-        # No knowhow remnants of ANY kind in the copy.
-        assert db.execute("SELECT COUNT(*) FROM sources WHERE notebook_id=? AND source_type='knowhow'", (new.id,)).fetchone()[0] == 0
+        # KOs/relations derived from the knowhow source stay excluded (still
+        # rebuilt by project_table, never copied directly).
         assert db.execute("SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=? AND object_type IN ('case','procedure','tool')", (new.id,)).fetchone()[0] == 0
-        assert db.execute("SELECT COUNT(*) FROM knowhow_tables WHERE notebook_id=?", (new.id,)).fetchone()[0] == 0
+        # Everything else DOES travel now, remapped.
+        assert db.execute("SELECT COUNT(*) FROM sources WHERE notebook_id=? AND source_type='knowhow'", (new.id,)).fetchone()[0] == 1
+        new_table = db.execute(
+            "SELECT id, hidden_source_id FROM knowhow_tables WHERE notebook_id=?", (new.id,)
+        ).fetchone()
+        assert new_table is not None
+        assert new_table["id"] != table_id
+        assert new_table["hidden_source_id"] not in (None, hidden)
+        new_hidden = new_table["hidden_source_id"]
+        new_chunks = db.execute(
+            "SELECT id, text FROM chunks WHERE source_id=?", (new_hidden,)
+        ).fetchall()
+        assert len(new_chunks) == 1
+        assert new_chunks[0]["text"] == "增加阻尼电阻"
+        assert db.execute(
+            "SELECT COUNT(*) FROM chunk_embeddings WHERE chunk_id=?", (new_chunks[0]["id"],)
+        ).fetchone()[0] == 1
         # The ordinary (non-knowhow) content copied intact.
-        assert db.execute("SELECT COUNT(*) FROM sources WHERE notebook_id=?", (new.id,)).fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM sources WHERE notebook_id=? AND source_type!='knowhow'", (new.id,)).fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id=?", (new.id,)).fetchone()[0] == 2
-        assert db.execute("SELECT COUNT(*) FROM chunks WHERE notebook_id=?", (new.id,)).fetchone()[0] == 1
-        assert db.execute("SELECT COUNT(*) FROM chunk_embeddings WHERE notebook_id=?", (new.id,)).fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM chunks WHERE notebook_id=?", (new.id,)).fetchone()[0] == 2  # 1 ordinary + 1 knowhow
     # Original untouched: knowhow table + hidden source + its 3 KOs still present.
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM sources WHERE notebook_id=? AND source_type='knowhow'", (src,)).fetchone()[0] == 1
