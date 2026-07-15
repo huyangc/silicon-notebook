@@ -116,6 +116,29 @@ class NotebookCopyService:
                 sources_out.append(data)
             self._store.insert_copy_rows("sources", sources_out, chunk_size=chunk_size)
 
+            paper_meta_out = []
+            for data in snapshot["source_paper_meta"]:
+                data["source_id"] = source_map[data["source_id"]]
+                data["notebook_id"] = new_id
+                paper_meta_out.append(data)
+            self._store.insert_copy_rows(
+                "source_paper_meta", paper_meta_out, chunk_size=chunk_size
+            )
+
+            authors_out = []
+            for data in snapshot["source_authors"]:
+                new_source_id = source_map[data["source_id"]]
+                # Deterministic id scheme mirrors SourceStore.upsert_paper_meta's
+                # write-time convention exactly, so a copy's author rows are
+                # indistinguishable from freshly-extracted ones.
+                data["id"] = f"{new_source_id}:auth:{int(data['position']):03d}"
+                data["source_id"] = new_source_id
+                data["notebook_id"] = new_id
+                authors_out.append(data)
+            self._store.insert_copy_rows(
+                "source_authors", authors_out, chunk_size=chunk_size
+            )
+
             elements_out = []
             for data in snapshot["source_elements"]:
                 data["id"] = element_map.setdefault(data["id"], remapped_id(data["id"]))

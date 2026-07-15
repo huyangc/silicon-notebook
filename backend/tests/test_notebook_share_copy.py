@@ -563,3 +563,87 @@ def test_copy_notebook_excludes_all_knowhow_content(repo):
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM sources WHERE notebook_id=? AND source_type='knowhow'", (src,)).fetchone()[0] == 1
         assert db.execute("SELECT COUNT(*) FROM knowledge_objects WHERE source_id=?", (hidden,)).fetchone()[0] == 3
+
+
+# NOTE: appended at EOF for the same line-pin reason as the block above.
+def test_copy_notebook_carries_paper_metadata(repo):
+    """Final-review Fix 1 (merge blocker): notebook deep-copy must carry
+    source_paper_meta + source_authors alongside the source they describe —
+    without this a copied notebook silently loses author search + paper
+    display, and re-extraction would re-spend LLM calls (efficiency
+    mandate). Mirrors the established per-table copy pattern: source_id
+    remapped via the existing source map, notebook_id -> new notebook,
+    source_authors.id regenerated with the same deterministic
+    f"{source_id}:auth:{position:03d}" scheme upsert_paper_meta uses at
+    write time, every other column carried verbatim."""
+    src = _seed_full_notebook(repo)
+    store = repo._runtime.source_store
+    orig_source_id = _rows(repo, "sources", src)[0]["id"]
+    store.upsert_paper_meta(orig_source_id, src, {
+        "is_paper": True,
+        "paper_title": "Gate Sizing Under Variability",
+        "venue": "DAC",
+        "pub_year": 2025,
+        "doi": "10.1234/abcd.5678",
+        "keywords": ["timing", "variability"],
+        "authors": [
+            {"position": 0, "name": "Chen Hao", "affiliation": "Fudan University"},
+            {"position": 1, "name": "Li Wei", "affiliation": "Tsinghua University; SJTU"},
+        ],
+        "model": "fake-kg",
+        "raw_json": json.dumps({"llm": {"is_paper": True}, "dropped": {}}),
+    })
+
+    _mk_user(repo, "user-papercopy")
+    new = repo.copy_notebook(src, new_owner_id="user-papercopy")
+
+    new_source_id = _rows(repo, "sources", new.id)[0]["id"]
+    assert new_source_id != orig_source_id
+
+    copied_meta = repo.get_paper_meta(new_source_id)
+    assert copied_meta is not None
+    assert copied_meta["paper_title"] == "Gate Sizing Under Variability"
+    assert copied_meta["venue"] == "DAC"
+    assert copied_meta["pub_year"] == 2025
+    assert copied_meta["doi"] == "10.1234/abcd.5678"
+    assert copied_meta["keywords"] == ["timing", "variability"]
+    assert copied_meta["model"] == "fake-kg"
+    assert [a["name"] for a in copied_meta["authors"]] == ["Chen Hao", "Li Wei"]
+    assert copied_meta["authors"][0]["affiliation"] == "Fudan University"
+    assert copied_meta["authors"][1]["affiliation"] == "Tsinghua University; SJTU"
+
+    # author row ids follow the new source id's deterministic scheme (not the
+    # original source id's), and raw_json/model/created_at carry verbatim.
+    with repo._connect() as db:
+        author_ids = [r["id"] for r in db.execute(
+            "SELECT id FROM source_authors WHERE source_id=? ORDER BY position",
+            (new_source_id,),
+        ).fetchall()]
+        orig_row = db.execute(
+            "SELECT raw_json, model, created_at FROM source_paper_meta WHERE source_id=?",
+            (orig_source_id,),
+        ).fetchone()
+        new_row = db.execute(
+            "SELECT raw_json, model, created_at FROM source_paper_meta WHERE source_id=?",
+            (new_source_id,),
+        ).fetchone()
+    assert author_ids == [f"{new_source_id}:auth:000", f"{new_source_id}:auth:001"]
+    assert new_row["raw_json"] == orig_row["raw_json"]
+    assert new_row["model"] == orig_row["model"]
+    assert new_row["created_at"] == orig_row["created_at"]
+
+    # author-name search hits the copy via list_sources_page(q=...)
+    page = repo.list_sources_page(new.id, q="Chen Hao")
+    assert any(s.id == new_source_id for s in page.items)
+
+    # original untouched
+    orig_meta = repo.get_paper_meta(orig_source_id)
+    assert orig_meta is not None
+    assert orig_meta["paper_title"] == "Gate Sizing Under Variability"
+    assert [a["name"] for a in orig_meta["authors"]] == ["Chen Hao", "Li Wei"]
+    with repo._connect() as db:
+        orig_author_ids = [r["id"] for r in db.execute(
+            "SELECT id FROM source_authors WHERE source_id=? ORDER BY position",
+            (orig_source_id,),
+        ).fetchall()]
+    assert orig_author_ids == [f"{orig_source_id}:auth:000", f"{orig_source_id}:auth:001"]

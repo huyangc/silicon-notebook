@@ -172,7 +172,8 @@ def test_snapshot_insert_and_compensate_primitives(store):
     assert [row["id"] for row in snapshot["notebooks"]] == [src]
     assert [row["id"] for row in snapshot["sources"]] == ["src-snap"]
     assert set(snapshot) == {
-        "notebooks", "sources", "source_elements", "chunks",
+        "notebooks", "sources", "source_paper_meta", "source_authors",
+        "source_elements", "chunks",
         "knowledge_objects", "knowledge_relations", "chunk_embeddings",
         "element_embeddings", "knowledge_embeddings", "relation_embeddings",
         "concept_clusters",
