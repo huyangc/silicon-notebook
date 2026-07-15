@@ -657,6 +657,22 @@ def test_patch_cell_unknown_row_400(tmp_path, monkeypatch):
 # ===========================================================================
 
 
+def _tiny_xlsx_bytes() -> bytes:
+    """Minimal one-column xlsx for the append permission checks below — the
+    write guard (the require_notebook_access dependency) rejects before the
+    handler ever parses the file, so the payload only needs to be
+    structurally valid, not meaningful."""
+    import io
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.active.append(["现象"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def test_readonly_member_gets_404_on_every_mutating_endpoint(tmp_path, monkeypatch, repo):
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00001080")
@@ -695,18 +711,10 @@ def test_readonly_member_gets_404_on_every_mutating_endpoint(tmp_path, monkeypat
 
     # T6 append is write-gated (require_notebook_access) regardless of mode —
     # the dependency runs before the handler even reads the `mode` field.
-    import io
-    from openpyxl import Workbook
-
-    wb = Workbook()
-    wb.active.append(["现象"])
-    buf = io.BytesIO()
-    wb.save(buf)
-    xlsx_bytes = buf.getvalue()
     for mode in ("preview", "commit"):
         resp = client.post(
             f"/api/notebooks/{nb}/knowhow/{t}/append", headers=bob_h,
-            files={"file": ("x.xlsx", xlsx_bytes,
+            files={"file": ("x.xlsx", _tiny_xlsx_bytes(),
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
             data={"mode": mode},
         )
@@ -751,6 +759,14 @@ def test_stranger_gets_404_on_every_mutating_endpoint(tmp_path, monkeypatch):
     # --- T15 permission-matrix extension (PR-2/3 safety net), mirroring the
     # read-only-member matrix above.
     assert client.get(f"/api/notebooks/{nb}/knowhow/{t}/template", headers=stranger_h).status_code == 404
+    for mode in ("preview", "commit"):
+        resp = client.post(
+            f"/api/notebooks/{nb}/knowhow/{t}/append", headers=stranger_h,
+            files={"file": ("x.xlsx", _tiny_xlsx_bytes(),
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            data={"mode": mode},
+        )
+        assert resp.status_code == 404, (mode, resp.text)
     assert client.post(
         f"/api/notebooks/{nb}/knowhow/{t}/rows/{row['id']}/cells/{column_id}/optimize",
         headers=stranger_h,

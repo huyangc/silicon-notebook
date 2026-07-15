@@ -9,7 +9,11 @@ surface PUT endpoint (`PUT /agent/knowhow/rows/{row}/cells/{col}/code`),
 then proves the marker text is absent from EVERY machine-consumption
 surface a real, freshly-run projection pass touches: source_elements
 (text + metadata), chunks, chunks_fts, knowledge_objects/knowledge_relations
-payloads, every embedder call recorded during that pass, and the
+payloads, every embedder input recorded during a pass that GENUINELY embeds
+(the code-bearing cell is edited to new content AFTER the code attach, so
+the per-cell chunk diff cannot short-circuit the embed step — see
+test_marker_never_reaches_any_embedder_call's own docstring for why a pass
+over unchanged cells would make that assertion vacuous), and the
 ask/chunk-retrieval surface for a query built from the marker itself. Also
 covers the brief's two companion invariants: a cell EDIT after the code was
 attached leaves the code attachment itself byte-for-byte untouched (only
@@ -55,10 +59,14 @@ MARKER = "ZQKH99_SECRET_CODE_PAYLOAD_MUST_NOT_LEAK"
 
 class RecordingEmbedder(FakeEmbedder):
     """Wraps FakeEmbedder to record every text ever handed to embed_texts/
-    embed_query — the isolation test's strongest claim: not merely "no
-    vector-table row carries the marker" (which would already be true, and
-    uninteresting, once the marker never reaches a chunk row) but "no
-    embedding call was ever GIVEN the marker as input text at all"."""
+    embed_query — enabling the embed-input claim: not merely "no vector-table
+    row carries the marker" (already true, and uninteresting, once the marker
+    never reaches a chunk row) but "no embedding call was ever GIVEN the
+    marker as input text". That claim is only non-vacuous on a projection
+    pass that actually CALLS the embedder — a pass over unchanged cells
+    short-circuits at the per-cell chunk diff and embeds nothing — so the
+    test asserting it first edits the code-bearing cell to force a real
+    embed (see test_marker_never_reaches_any_embedder_call)."""
 
     def __init__(self, dim: int = EMBED_DIM) -> None:
         super().__init__(dim=dim)
@@ -254,10 +262,45 @@ def test_marker_absent_from_elements_chunks_ko_and_relations_after_projection(cl
 
 
 def test_marker_never_reaches_any_embedder_call(client, seeded):
-    """The strongest claim in this file: not merely "no persisted vector row
-    carries it" but "no embed_texts/embed_query call was ever GIVEN it"."""
-    _project_table_directly(client, seeded["table_id"])
-    assert client._recorder.embedded_texts  # sanity: embedding really ran
+    """The embed-input claim: no embed_texts/embed_query call is ever GIVEN
+    the marker. Crucially, this must be asserted over a pass that GENUINELY
+    embeds — a forced pass over UNCHANGED cells short-circuits at the
+    per-cell chunk diff (``old_specs == new_specs -> continue``) and never
+    calls the embedder at all, so asserting over such a pass would only
+    inherit the recorder's marker-free state from the seeded fixture's
+    original pre-attachment projection (vacuous — caught in review). So:
+    with the marker-bearing code attached, PATCH the code-bearing cell to
+    NEW (non-marker) content, scope the recorder to what follows, force a
+    synchronous pass, and prove BOTH that a real embed call happened on
+    THIS pass (the new content is in the recorder) AND that no embed input
+    ever carried the marker."""
+    headers = seeded["headers"]
+    nb = seeded["nb"]
+    table_id = seeded["table_id"]
+    row_id = seeded["row_id"]
+    col_id = seeded["procedure_column_id"]
+
+    patch_resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/rows/{row_id}/cells/{col_id}",
+        headers=headers, json={"content_md": "1. 改用新的观测方法\n2. 复测阻抗曲线"},
+    )
+    assert patch_resp.status_code == 200, patch_resp.text
+    # Sanity: the marker-bearing attachment is still present for the pass below.
+    assert MARKER in client.get(seeded["code_url"], headers=headers).json()["code_text"]
+
+    # Scope the recorder to ONLY the forced pass below — the seeded fixture's
+    # own initial projection already recorded (marker-free) texts, and
+    # inheriting those would prove nothing about a pass that runs WHILE the
+    # code attachment exists.
+    client._recorder.embedded_texts.clear()
+
+    _project_table_directly(client, table_id)
+
+    # A genuine embed call happened on THIS pass (the edited cell's new text)...
+    assert any("改用新的观测方法" in text for text in client._recorder.embedded_texts), (
+        client._recorder.embedded_texts
+    )
+    # ...and no embed input ever carried the code attachment's marker.
     assert not any(MARKER in text for text in client._recorder.embedded_texts)
 
 
