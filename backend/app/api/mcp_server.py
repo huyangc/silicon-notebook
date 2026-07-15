@@ -497,9 +497,13 @@ def _owner_request_context(principal: AgentPrincipal):
 class AgentBearerMiddleware:
     """Authenticate opaque Agent Bearer tokens without retaining raw values."""
 
-    def __init__(self, app, repository_provider: Callable[[], Any]) -> None:
+    def __init__(
+        self, app, repository_provider: Callable[[], Any], *,
+        require_https: bool = True,
+    ) -> None:
         self.app = app
         self.repository_provider = repository_provider
+        self.require_https = require_https
 
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] == "lifespan":
@@ -507,8 +511,10 @@ class AgentBearerMiddleware:
             return
         client = scope.get("client")
         client_host = str(client[0]) if client else ""
-        if str(scope.get("scheme", "http")).lower() != "https" and not _is_loopback(
-            client_host
+        if (
+            self.require_https
+            and str(scope.get("scheme", "http")).lower() != "https"
+            and not _is_loopback(client_host)
         ):
             await JSONResponse(
                 {"detail": "remote MCP transport requires HTTPS"}, status_code=403
@@ -575,7 +581,7 @@ def _profile_names(service: Any, owner_id: str) -> dict[str, str]:
 
 def create_memory_mcp(
     repository_provider: Callable[[], Any], *, allowed_origins: Sequence[str] = (),
-    public_url: str = "http://127.0.0.1:8000/mcp",
+    public_url: str = "http://127.0.0.1:8000/mcp", require_https: bool = True,
 ) -> tuple[FastMCP, Any]:
     """Build one FastMCP/session-manager instance per FastAPI application."""
     parsed_public = urlparse(public_url)
@@ -586,7 +592,7 @@ def create_memory_mcp(
         else ""
     )
     security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=True,
+        enable_dns_rebinding_protection=require_https,
         allowed_hosts=list(dict.fromkeys([
             "127.0.0.1", "127.0.0.1:*", "localhost", "localhost:*", "testserver",
             *([public_host] if public_host else []),
@@ -974,5 +980,8 @@ def create_memory_mcp(
             "requires_user_confirmation": True,
         }, field_limits={"title": 300, "created_by_agent": 200})
 
-    app = AgentBearerMiddleware(server.streamable_http_app(), repository_provider)
+    app = AgentBearerMiddleware(
+        server.streamable_http_app(), repository_provider,
+        require_https=require_https,
+    )
     return server, app
