@@ -1404,23 +1404,26 @@ TASK28_ALLOWED_IMPORTS = {
 # (SOURCES_PARSE_STATUS_TYPE_INDEX + every hop terminal bumped to 15 with that
 # index + the new (14, 15) hop), then a further +83 by knowhow-tables Task 1's
 # MIGRATION_MANIFEST v16 additions (KNOWHOW_TABLES + KNOWHOW_INDEXES +
-# every hop terminal bumped to 16 with those objects + the new (15, 16) hop).
+# every hop terminal bumped to 16 with those objects + the new (15, 16) hop),
+# then a further +65 by paper-metadata Task 1's MIGRATION_MANIFEST v17
+# additions (PAPER_META_TABLES + PAPER_META_INDEXES + every hop terminal
+# bumped to 17 with those objects + the new (16, 17) hop).
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1166"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:1159"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:1144"),
-    ("get_report", "scripts/verify_repository_snapshot.py:1171"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:1147"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:1156"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:1150"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:1168"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:1145"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1107"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1111"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1113"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1138"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1180"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1154"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1231"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1224"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1209"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1236"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1212"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1221"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1215"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1233"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1210"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1172"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1176"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1178"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1203"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1245"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1219"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -1849,6 +1852,24 @@ TASK10_KNOWHOW_ALLOWED_MEMBER_FILES = {
         # consumption. Same broad (file, member) allowance style as the four
         # frozen members above.
         "delete_notebook_kg", "rebuild_notebook_kg", "llm_client", "_run_extraction",
+    }
+}
+
+# Task 1 (paper-metadata-extraction, a distinct later feature branch from the
+# knowhow-tables tasks above): the paper-metadata schema-migration test
+# composes the real facade + migrator directly to prove fresh-DB and
+# upgraded-DB (v16->v17) schema convergence for the two new
+# source_paper_meta/source_authors tables — same pattern as
+# TASK1_KNOWHOW_ALLOWED_IMPORTS/_MEMBER_FILES above for the sibling schema
+# test. Test-only compatibility consumer added after the frozen
+# pre-knowhow-tables facade manifest.
+TASK1_PAPER_META_ALLOWED_IMPORTS = {
+    ("backend/tests/test_paper_meta_schema.py", 15, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK1_PAPER_META_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_paper_meta_schema.py", name)
+    for name in {
+        "SCHEMA_VERSION", "SQLiteRepository", "_connect", "_migrate", "_write",
     }
 }
 
@@ -2297,6 +2318,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK5_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK6_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK10_KNOWHOW_ALLOWED_MEMBER_FILES
+    | TASK1_PAPER_META_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2833,7 +2855,10 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
     # in test_repository_callers_static.py shift this import site further.
     # 661->670: knowhow-tables Task 6's new INDEPENDENT_PRIVATE_SITES entry
     # (the api.py `_runtime` registration, +9 net lines) shifts it again.
-    ('backend/tests/test_repository_callers_static.py', 670, 'app.services.sqlite_repository', 'SQLiteRepository'),
+    # 670->676: paper-metadata Task 1's MIGRATION_MANIFEST v17 comment
+    # expansions (INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES, +6 net lines)
+    # in test_repository_callers_static.py shift this import site further.
+    ('backend/tests/test_repository_callers_static.py', 676, 'app.services.sqlite_repository', 'SQLiteRepository'),
     ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
 }
 
@@ -2909,6 +2934,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK4_KNOWHOW_ALLOWED_IMPORTS
                     or site in TASK5_KNOWHOW_ALLOWED_IMPORTS
                     or site in TASK6_KNOWHOW_ALLOWED_IMPORTS
+                    or site in TASK1_PAPER_META_ALLOWED_IMPORTS
                 )
 
 

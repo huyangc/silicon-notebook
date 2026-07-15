@@ -127,18 +127,21 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
             # terminal bumped to 15 with that index + the new (14, 15) hop),
             # then a further +83 by knowhow-tables Task 1's MIGRATION_MANIFEST
             # v16 additions (KNOWHOW_TABLES + KNOWHOW_INDEXES + every hop's
-            # terminal bumped to 16 + the new (15, 16) hop).
-            ("scripts/verify_repository_snapshot.py", 695, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 702, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 724, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 728, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 753, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 754, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 771, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 783, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 1125, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1132, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1161, "probe.execute"),
+            # terminal bumped to 16 + the new (15, 16) hop), then a further
+            # +65 by paper-metadata Task 1's MIGRATION_MANIFEST v17 additions
+            # (PAPER_META_TABLES + PAPER_META_INDEXES + every hop's terminal
+            # bumped to 17 + the new (16, 17) hop).
+            ("scripts/verify_repository_snapshot.py", 760, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 767, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 789, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 793, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 818, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 819, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 836, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 848, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 1190, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1197, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1226, "probe.execute"),
         }
     },
 }
@@ -315,20 +318,23 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     # entries, then a further +28 by Task 5's v15 manifest additions
     # (SOURCES_PARSE_STATUS_TYPE_INDEX + terminals bumped to 15 + (14, 15) hop),
     # then a further +83 by knowhow-tables Task 1's v16 manifest additions
-    # (KNOWHOW_TABLES + KNOWHOW_INDEXES + terminals bumped to 16 + (15, 16) hop).
-    ("scripts/verify_repository_snapshot.py", 749, "sqlite3.connect"): (
+    # (KNOWHOW_TABLES + KNOWHOW_INDEXES + terminals bumped to 16 + (15, 16) hop),
+    # then a further +65 by paper-metadata Task 1's v17 manifest additions
+    # (PAPER_META_TABLES + PAPER_META_INDEXES + terminals bumped to 17 +
+    # (16, 17) hop).
+    ("scripts/verify_repository_snapshot.py", 814, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 750, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 815, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1119, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1184, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1266, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1331, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1268, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1333, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
 }

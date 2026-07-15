@@ -11,7 +11,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1298,6 +1298,52 @@ class SqliteMigrator:
                   created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_notebook_assets_nb ON notebook_assets(notebook_id);
+                """
+            )
+
+    def _migration_17(self) -> None:
+        """论文元数据两表(paper-metadata Task 1):source_paper_meta(1:1;行存在=
+        已尝试,is_paper=0 为「已判定非论文」标记行,防对同一源反复调 LLM)+
+        source_authors(1:N;position=署名序,affiliation 多机构以 '; ' 连接)。
+        接地校验后的数据才落库(app/services/paper_meta.py)。
+
+        已部署库(user_version>=1 时 _migration_1 短路)靠本迁移补建——与
+        _migration_16 同款两层写法(仅新建表,不改 _migration_1 baseline;
+        全新表无历史行,无列序顾虑)。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS source_paper_meta (
+                  source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  is_paper INTEGER NOT NULL DEFAULT 0,
+                  paper_title TEXT,
+                  venue TEXT,
+                  pub_year INTEGER,
+                  doi TEXT,
+                  keywords TEXT NOT NULL DEFAULT '[]',
+                  raw_json TEXT NOT NULL DEFAULT '{}',
+                  model TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_source_paper_meta_nb
+                  ON source_paper_meta(notebook_id);
+
+                CREATE TABLE IF NOT EXISTS source_authors (
+                  id TEXT PRIMARY KEY,
+                  source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  position INTEGER NOT NULL,
+                  name TEXT NOT NULL,
+                  affiliation TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_source_authors_source
+                  ON source_authors(source_id);
+                CREATE INDEX IF NOT EXISTS idx_source_authors_nb
+                  ON source_authors(notebook_id);
                 """
             )
 
