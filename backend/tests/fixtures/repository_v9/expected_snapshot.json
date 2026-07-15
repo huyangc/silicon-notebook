@@ -1343,6 +1343,16 @@
         "type": "index"
       },
       {
+        "name": "idx_source_authors_nb",
+        "sql_sha256": "f7eb219af72748c765a4f359b426e46bc8338f76ed1f031e0766e50d5cd3dc73",
+        "type": "index"
+      },
+      {
+        "name": "idx_source_authors_source",
+        "sql_sha256": "713d2dee39b4555131ca11873f7fb4992c6319fda440ec87435280af1d82be49",
+        "type": "index"
+      },
+      {
         "name": "idx_source_elements_source",
         "sql_sha256": "9a9faabe675ef91b0009936a4e01a0e58e61e7af2ffe8b0f5f23bbf9fc171567",
         "type": "index"
@@ -1350,6 +1360,11 @@
       {
         "name": "idx_source_elements_source_created",
         "sql_sha256": "955ecda9b187b810f32409dbae4770fafead611ecaff0f16e19c71829a297e69",
+        "type": "index"
+      },
+      {
+        "name": "idx_source_paper_meta_nb",
+        "sql_sha256": "abb231c48578b560f95e890b45ae80a7ee5de30a54ecec7c42d88d316373f91c",
         "type": "index"
       },
       {
@@ -1688,8 +1703,18 @@
         "type": "table"
       },
       {
+        "name": "source_authors",
+        "sql_sha256": "099bc6d4b257a6c6e60016a4b408efd86b342776db78cf16a91d83cdf2d7bb5f",
+        "type": "table"
+      },
+      {
         "name": "source_elements",
         "sql_sha256": "e79aec288e1bebd3e99e27ced8ab43d03fa82cf4be1be4602a512b7968fc7b5e",
+        "type": "table"
+      },
+      {
+        "name": "source_paper_meta",
+        "sql_sha256": "ee65024db0a0e34acea8b46d808ea88dd67600f157bb78f8e624aca158207180",
         "type": "table"
       },
       {
@@ -1728,6 +1753,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 16
+    "user_version": 17
   }
 }
