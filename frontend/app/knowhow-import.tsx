@@ -35,9 +35,19 @@
  */
 "use client";
 
-import { useEffect, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { ChevronLeft, Loader2, Upload, X } from "lucide-react";
-import { cellSummary, importKnowhow, importKnowhowPreview, type ColumnKind, type KnowhowImportPreview } from "./knowhow-model.ts";
+import {
+  appendKnowhowCommit,
+  appendKnowhowPreview,
+  cellSummary,
+  importKnowhow,
+  importKnowhowPreview,
+  type ColumnKind,
+  type KnowhowAppendPreview,
+  type KnowhowColumn,
+  type KnowhowImportPreview,
+} from "./knowhow-model.ts";
 import {
   IMPORT_ACCEPT,
   IMPORT_ACCEPT_EXTENSIONS,
@@ -57,6 +67,12 @@ import {
   assembleImportColumnsWithAnchor,
 } from "./knowhow-manage-logic.ts";
 import { KindLegend } from "./knowhow-manage.tsx";
+import { sortColumnsByPosition } from "./knowhow-panel-logic.ts";
+import {
+  formatUnmatchedColumnsMessage,
+  isAppendPreviewRowDuplicate,
+  mapAppendDuplicatesForDisplay,
+} from "./knowhow-optimize-logic.ts";
 
 export interface KnowhowImportWizardProps {
   notebookId: string;
@@ -270,10 +286,25 @@ const STEP_LABELS: [1 | 2 | 3, string][] = [
   [3, "提交"],
 ];
 
-function ImportStepIndicator({ current }: { current: 1 | 2 | 3 }) {
+// Task 9「追加导入」复用同一套指示器壳，但没有"列设置"这一步（目标表结构
+// 已固定，只按表头名匹配，见 KnowhowAppendWizard 头部注释）。
+const APPEND_STEP_LABELS: [1 | 2 | 3, string][] = [
+  [1, "选文件"],
+  [2, "预览"],
+  [3, "提交"],
+];
+
+function ImportStepIndicator({
+  current,
+  labels = STEP_LABELS,
+}: {
+  current: 1 | 2 | 3;
+  /** 默认取建表导入的三步文案；Task 9 的追加导入传入 APPEND_STEP_LABELS。 */
+  labels?: [1 | 2 | 3, string][];
+}) {
   return (
     <ol className="knowhow-import-steps">
-      {STEP_LABELS.map(([n, label]) => (
+      {labels.map(([n, label]) => (
         <li key={n} className={n === current ? "is-active" : n < current ? "is-done" : undefined}>
           <span className="knowhow-import-step-num">{n}</span>
           <span>{label}</span>
@@ -454,6 +485,297 @@ function MapStep({
         <button type="button" className="new-pill knowhow-import-submit-button" disabled={submitDisabled} onClick={onSubmit}>
           {submitting && <Loader2 size={14} className="knowhow-import-spin" />}
           {submitting ? "导入中…" : "确认导入"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// KnowhowAppendWizard — 追加导入（Task 9，规格②路B「用户线下批量填写后
+// 上传...给出导入预览...确认后追加导入」）：复用本文件的向导壳（backdrop/
+// card/步骤指示器/选文件步骤/整套 knowhow-import-* 样式），只把「预览+列
+// 设置」换成「预览+重名/未匹配列提示」——追加导入的目标表结构已经固定，不
+// 需要再选内容类型或行标题列，按表头名匹配是后端 preview_append/
+// commit_append 的既有职责，本组件只负责把匹配结果讲清楚给用户看。
+// ---------------------------------------------------------------------------
+
+export interface KnowhowAppendWizardProps {
+  notebookId: string;
+  tableId: string;
+  /** 当前表的列——渲染预览表头用 position 顺序（须与后端
+   * `_align_rows_to_table_columns` 产出的 `aligned_rows[i][j]` 对齐的
+   * table_columns 顺序完全一致；那是 get_knowhow_table 已排好的纯 position
+   * 序，不是网格展示用的「行标题列钉首」序——两者只在行标题列不在
+   * position 0 时才会不同，用错顺序会让预览表头与实际列错位）。 */
+  columns: KnowhowColumn[];
+  /** 用户主动取消/关闭向导（未完成追加）：面板据此仅收起向导，不重新拉表。 */
+  onClose: () => void;
+  /** 追加成功后触发：面板据此重拉表详情+表列表并收起向导。 */
+  onDone: () => void;
+}
+
+type AppendStep = "select" | "preview";
+
+export function KnowhowAppendWizard({ notebookId, tableId, columns, onClose, onDone }: KnowhowAppendWizardProps) {
+  const [step, setStep] = useState<AppendStep>("select");
+
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+
+  const [file, setFile] = useState<File | null>(null);
+  const [preview, setPreview] = useState<KnowhowAppendPreview | null>(null);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // 卸载后忽略迟到的 then/catch（镜像 KnowhowImportWizard 的 mountedRef 守卫，
+  // 含 StrictMode remount 重置——见该组件同一处注释）。
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // 追加提交中（真正落库、不可撤销）时不允许关闭：镜像 KnowhowImportWizard
+  // 的同名守卫，理由完全一致（提前关闭后追加仍可能在后台悄悄成功，面板却
+  // 收不到 onDone 也就不会刷新，用户看不到新增的行）。预览阶段可随时关闭。
+  function requestClose() {
+    if (submitting) return;
+    onClose();
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") requestClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onClose, submitting]);
+
+  async function handleFileSelected(selected: File) {
+    if (!isSupportedImportFile(selected.name)) {
+      setPreviewError(`不支持的文件类型，请选择 ${IMPORT_ACCEPT_EXTENSIONS.join(" / ")} 文件`);
+      return;
+    }
+    setPreviewError(null);
+    setPreviewLoading(true);
+    try {
+      const result = await appendKnowhowPreview(notebookId, tableId, selected);
+      if (!mountedRef.current) return;
+      setFile(selected);
+      setPreview(result);
+      setStep("preview");
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setPreviewError(extractErrorMessage(err, "解析文件失败，请重试"));
+    } finally {
+      if (mountedRef.current) setPreviewLoading(false);
+    }
+  }
+
+  function handleFileInputChange(event: ChangeEvent<HTMLInputElement>) {
+    const picked = event.target.files?.[0];
+    event.target.value = "";
+    if (picked) handleFileSelected(picked);
+  }
+
+  function backToSelect() {
+    setStep("select");
+    setFile(null);
+    setPreview(null);
+    setPreviewError(null);
+    setSubmitError(null);
+  }
+
+  async function handleSubmit() {
+    if (!file || submitting) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await appendKnowhowCommit(notebookId, tableId, file);
+      if (!mountedRef.current) return;
+      onDone();
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setSubmitError(extractErrorMessage(err, "追加导入失败，请重试"));
+    } finally {
+      if (mountedRef.current) setSubmitting(false);
+    }
+  }
+
+  function handleBackdropClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (event.currentTarget === event.target) requestClose();
+  }
+
+  const stepNumber = step === "select" ? 1 : submitting ? 3 : 2;
+  // 预览表头顺序：见上方 columns prop 的注释——必须是纯 position 序。
+  const orderedColumns = useMemo(() => sortColumnsByPosition(columns), [columns]);
+
+  return (
+    <div className="knowhow-import-backdrop" onClick={handleBackdropClick}>
+      <section
+        className="knowhow-import-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label="追加导入 Knowhow 表"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="knowhow-import-header">
+          <div>
+            <h2>追加导入</h2>
+            <ImportStepIndicator current={stepNumber} labels={APPEND_STEP_LABELS} />
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={requestClose}
+            disabled={submitting}
+            title={submitting ? "追加进行中，请稍候" : "关闭"}
+          >
+            <X size={20} />
+          </button>
+        </div>
+
+        <div className="knowhow-import-body">
+          {step === "select" ? (
+            <SelectFileStep loading={previewLoading} error={previewError} onFileInputChange={handleFileInputChange} />
+          ) : preview ? (
+            <AppendPreviewStep
+              fileName={file?.name ?? ""}
+              preview={preview}
+              columns={orderedColumns}
+              submitting={submitting}
+              submitError={submitError}
+              onDismissSubmitError={() => setSubmitError(null)}
+              onBack={backToSelect}
+              onSubmit={handleSubmit}
+            />
+          ) : null}
+        </div>
+      </section>
+      <ImportWizardStyles />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 追加导入 — 预览步骤（重名标黄 + 未匹配列提示；无内容类型/行标题列选择——
+// 目标表结构已固定，见 KnowhowAppendWizard 头部注释）。
+// ---------------------------------------------------------------------------
+
+function AppendPreviewStep({
+  fileName,
+  preview,
+  columns,
+  submitting,
+  submitError,
+  onDismissSubmitError,
+  onBack,
+  onSubmit,
+}: {
+  fileName: string;
+  preview: KnowhowAppendPreview;
+  columns: KnowhowColumn[];
+  submitting: boolean;
+  submitError: string | null;
+  onDismissSubmitError: () => void;
+  onBack: () => void;
+  onSubmit: () => void;
+}) {
+  // 未匹配列提示：文件里存在、当前表却没有的列（信息性提示，不阻止提交——
+  // 后端 preview_append/commit_append 对这些列的处理完全一致，都是"报告后
+  // 丢弃"，不是校验失败）。
+  const unmatchedMessage = formatUnmatchedColumnsMessage(preview.unmatchedColumns);
+  // 重名展示映射：把后端 0-based row_index 转成用户看的 1-based 行号，并
+  // 标记该重名是否落在下方预览表格的前 5 行窗口内——duplicate_titles 是对
+  // 整份上传文件算的，可能命中预览窗口之外的行，那部分只能靠下面的文字
+  // 列表提醒，无法在预览表格里高亮对应行。
+  const duplicateDisplay = mapAppendDuplicatesForDisplay(preview.duplicateTitles, preview.rowsPreview.length);
+
+  return (
+    <div className="knowhow-import-map-step">
+      <div className="knowhow-import-file-row">
+        <span className="knowhow-import-file-name" title={fileName}>
+          {fileName}
+        </span>
+        <button type="button" className="sort-button" onClick={onBack} disabled={submitting}>
+          <ChevronLeft size={14} /> 重新选择文件
+        </button>
+      </div>
+
+      {unmatchedMessage && <p className="knowhow-import-warning">{unmatchedMessage}</p>}
+
+      <div className="knowhow-import-preview-scroll">
+        <table className="knowhow-import-preview-table">
+          <thead>
+            <tr>
+              {columns.map((column) => (
+                <th key={column.id}>
+                  <span className="knowhow-import-col-name" title={column.name}>
+                    {column.name}
+                  </span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {preview.rowsPreview.map((row, rowIndex) => (
+              <tr
+                key={rowIndex}
+                className={
+                  isAppendPreviewRowDuplicate(preview.duplicateTitles, rowIndex)
+                    ? "knowhow-import-row-duplicate"
+                    : undefined
+                }
+              >
+                {row.map((cell, cellIndex) => {
+                  const text = cellSummary(cell ?? "");
+                  return (
+                    <td key={cellIndex} title={text || undefined}>
+                      <span className="knowhow-import-cell-text">{text || "—"}</span>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="knowhow-import-meta">{`共 ${preview.totalRows} 行，预览前 ${preview.rowsPreview.length} 行`}</p>
+
+      {duplicateDisplay.length > 0 && (
+        <div className="knowhow-import-warning">
+          <p className="knowhow-import-duplicate-lead">
+            以下 {duplicateDisplay.length} 行标题与现有行重复（追加后仍会写入，仅作提醒）：
+          </p>
+          <ul className="knowhow-import-duplicate-list">
+            {duplicateDisplay.map((item, index) => (
+              <li key={index}>
+                第 {item.displayIndex} 行「{item.title}」{!item.inPreviewWindow && "（不在上方预览范围内）"}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {submitError && (
+        <div className="knowhow-import-submit-error">
+          <span>{submitError}</span>
+          <button type="button" onClick={onDismissSubmitError} title="关闭">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
+      <div className="knowhow-import-actions">
+        <button type="button" className="new-pill knowhow-import-submit-button" disabled={submitting} onClick={onSubmit}>
+          {submitting && <Loader2 size={14} className="knowhow-import-spin" />}
+          {submitting ? "追加中…" : `确认追加 ${preview.totalRows} 行`}
         </button>
       </div>
     </div>
@@ -659,6 +981,21 @@ function ImportWizardStyles() {
           font-size: 13px;
         }
 
+        /* Task 9：追加导入重名提示列表——.knowhow-import-warning 这个外壳同时
+           被单行(未匹配列)与"提示语+列表"(重名标题)两种内容复用。 */
+        .knowhow-import-duplicate-lead {
+          margin: 0 0 6px;
+        }
+
+        .knowhow-import-duplicate-list {
+          margin: 0;
+          padding: 0;
+          list-style: none;
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+        }
+
         .knowhow-import-map-step {
           display: flex;
           flex-direction: column;
@@ -803,6 +1140,12 @@ function ImportWizardStyles() {
           position: sticky;
           top: 0;
           z-index: 1;
+        }
+
+        /* Task 9：追加导入预览里与现有行标题重名的行标黄提醒（规格②路B
+           「概念列与已有行重名标黄提醒」）。 */
+        .knowhow-import-row-duplicate td {
+          background: #fdf4e6;
         }
 
         .knowhow-import-col-head {

@@ -47,11 +47,12 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
-import { ArrowRight, Check, ChevronDown, Code, Edit3, ImagePlus, List, Loader2, X } from "lucide-react";
+import { ArrowRight, Check, ChevronDown, Code, Edit3, ImagePlus, List, Loader2, Sparkles, X } from "lucide-react";
 import { authHeaders } from "./auth.ts";
 import {
   ROLE_LABELS,
   cellSummary,
+  optimizeKnowhowCell,
   rewriteAssetUrls,
   uploadNotebookAsset,
   type KnowhowColumn,
@@ -87,6 +88,21 @@ import {
   sortRowsByPosition,
   type TextareaSelection,
 } from "./knowhow-cell-editor-logic.ts";
+import {
+  ACCEPT_SUGGESTION_LABEL,
+  CELL_OPTIMIZE_IDLE,
+  DISCARD_SUGGESTION_LABEL,
+  OPTIMIZE_CELL_BUTTON_LABEL,
+  OPTIMIZE_ORIGINAL_LABEL,
+  OPTIMIZE_SUGGESTION_LABEL,
+  beginCellOptimize,
+  dismissCellOptimize,
+  failCellOptimize,
+  isCellOptimizeLoading,
+  optimizeCellDisabledReason,
+  resolveCellOptimizeSuggestion,
+  type CellOptimizeState,
+} from "./knowhow-optimize-logic.ts";
 
 // ---------------------------------------------------------------------------
 // KnowhowMarkdown — 复用 answer-markdown.tsx 的 GFM+KaTeX 渲染管线（原属
@@ -322,6 +338,7 @@ export function KnowhowCellEditor({
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [closeGuard, setCloseGuard] = useState(false);
   const [dragActive, setDragActive] = useState(false);
+  const [optimizeState, setOptimizeState] = useState<CellOptimizeState>(CELL_OPTIMIZE_IDLE);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingCursorRef = useRef<number | null>(null);
@@ -456,12 +473,19 @@ export function KnowhowCellEditor({
       }
       if (event.key === "Escape") {
         event.preventDefault();
+        // 正在看优化对照时，Esc 先退出对照回到编辑视图，而不是直接关闭整个
+        // 浮窗——用户此刻的注意力在"要不要接受这条建议"上，不在"要不要放弃
+        // 整格编辑"上，两次不同意图不该共用同一次按键的最终效果。
+        if (optimizeState.status === "ready") {
+          setOptimizeState(dismissCellOptimize());
+          return;
+        }
         requestClose();
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [runSave, requestClose]);
+  }, [runSave, requestClose, optimizeState]);
 
   function handleRestoreDraft() {
     if (draftText !== null) setContent(draftText);
@@ -556,6 +580,37 @@ export function KnowhowCellEditor({
     setDragActive(false);
   }
 
+  // 「优化表达」（规格③，显式触发）：optimize_cell 读的是已保存的格子内容
+  // （store 里的值），不是这里可能还没保存的 content 草稿——若两者不一致仍
+  // 允许触发，用户会看到"原文"对不上自己刚打的字，分不清是不是 bug，所以
+  // optimizeCellDisabledReason 在有未保存修改时就把按钮挡住，不悄悄用旧内容
+  // 生成一份令人费解的建议。
+  const optimizeDisabledReason = optimizeCellDisabledReason(content, savedContent, optimizeState);
+
+  async function handleOptimize() {
+    if (optimizeDisabledReason) return;
+    setOptimizeState(beginCellOptimize);
+    try {
+      const result = await optimizeKnowhowCell(notebookId, table.id, rowId, columnId);
+      setOptimizeState((state) => resolveCellOptimizeSuggestion(state, result.suggestionMd));
+    } catch (err) {
+      setOptimizeState((state) => failCellOptimize(state, extractErrorMessage(err, "优化失败，请重试")));
+    }
+  }
+
+  // 「接受」：规格③「接受(填入编辑框)」——只把建议填进编辑框的 content 草稿，
+  // 不直接调用 patchKnowhowCell；用户仍需走既有的「保存」/「保存并下一格」
+  // 才会真正落库+触发重投影，与格子浮窗其余编辑路径完全一致。
+  function handleAcceptSuggestion() {
+    if (optimizeState.status !== "ready") return;
+    setContent(optimizeState.suggestionMd);
+    setOptimizeState(dismissCellOptimize());
+  }
+
+  function handleDiscardSuggestion() {
+    setOptimizeState(dismissCellOptimize());
+  }
+
   // 背景点击关闭（镜像 knowhow-import.tsx / knowhow-manage.tsx 既有习语）：
   // 编辑态可能有未保存内容，走与 Esc/关闭按钮相同的 requestClose 守卫
   // （未保存时弹「确认放弃」而不是直接关闭），不能像预览态那样直接 onClose。
@@ -633,73 +688,107 @@ export function KnowhowCellEditor({
             </div>
           )}
 
-          {column.role === "procedure" && <p className="kh-procedure-hint">{PROCEDURE_HINT_TEXT}</p>}
-
-          <div className="kh-toolbar">
-            <button
-              type="button"
-              className="kh-toolbar-button"
-              title={TOOLBAR_LIST_LABEL}
-              onClick={handleListClick}
-              disabled={uploading}
-            >
-              <List size={15} /> {TOOLBAR_LIST_LABEL}
-            </button>
-            <button
-              type="button"
-              className="kh-toolbar-button"
-              title={TOOLBAR_CODE_LABEL}
-              onClick={handleCodeClick}
-              disabled={uploading}
-            >
-              <Code size={15} /> {TOOLBAR_CODE_LABEL}
-            </button>
-            <button
-              type="button"
-              className="kh-toolbar-button"
-              title={TOOLBAR_IMAGE_LABEL}
-              onClick={handleImageButtonClick}
-              disabled={uploading}
-            >
-              <ImagePlus size={15} /> {TOOLBAR_IMAGE_LABEL}
-            </button>
-            {uploading && (
-              <span className="kh-toolbar-status">
-                <Loader2 size={14} className="knowhow-spin" /> 图片上传中…
-              </span>
-            )}
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              className="kh-hidden-file-input"
-              onChange={handleFileInputChange}
-            />
-          </div>
-
-          {uploadError && <p className="kh-inline-error">{uploadError}</p>}
-
-          <div className="kh-split">
-            <div
-              className={`kh-editor-pane${dragActive ? " kh-editor-pane--drag" : ""}`}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              onDrop={handleDrop}
-            >
-              <textarea
-                ref={textareaRef}
-                className="kh-textarea"
-                value={content}
-                disabled={uploading}
-                onChange={(event) => setContent(event.target.value)}
-                onPaste={handlePaste}
-                placeholder="输入 markdown 内容…"
-              />
+          {optimizeState.status === "ready" ? (
+            <div className="kh-optimize-compare">
+              <div className="kh-optimize-pane">
+                <h5>{OPTIMIZE_ORIGINAL_LABEL}</h5>
+                <div className="kh-optimize-pane-body">
+                  <KnowhowMarkdown md={savedContent} notebookId={notebookId} apiBase={apiBase} />
+                </div>
+              </div>
+              <div className="kh-optimize-pane kh-optimize-pane--suggestion">
+                <h5>{OPTIMIZE_SUGGESTION_LABEL}</h5>
+                <div className="kh-optimize-pane-body">
+                  <KnowhowMarkdown md={optimizeState.suggestionMd} notebookId={notebookId} apiBase={apiBase} />
+                </div>
+              </div>
             </div>
-            <div className="kh-preview-pane">
-              <KnowhowMarkdown md={content} notebookId={notebookId} apiBase={apiBase} />
-            </div>
-          </div>
+          ) : (
+            <>
+              {column.role === "procedure" && <p className="kh-procedure-hint">{PROCEDURE_HINT_TEXT}</p>}
+
+              <div className="kh-toolbar">
+                <button
+                  type="button"
+                  className="kh-toolbar-button"
+                  title={TOOLBAR_LIST_LABEL}
+                  onClick={handleListClick}
+                  disabled={uploading}
+                >
+                  <List size={15} /> {TOOLBAR_LIST_LABEL}
+                </button>
+                <button
+                  type="button"
+                  className="kh-toolbar-button"
+                  title={TOOLBAR_CODE_LABEL}
+                  onClick={handleCodeClick}
+                  disabled={uploading}
+                >
+                  <Code size={15} /> {TOOLBAR_CODE_LABEL}
+                </button>
+                <button
+                  type="button"
+                  className="kh-toolbar-button"
+                  title={TOOLBAR_IMAGE_LABEL}
+                  onClick={handleImageButtonClick}
+                  disabled={uploading}
+                >
+                  <ImagePlus size={15} /> {TOOLBAR_IMAGE_LABEL}
+                </button>
+                <button
+                  type="button"
+                  className="kh-toolbar-button kh-toolbar-button--optimize"
+                  title={optimizeDisabledReason ?? OPTIMIZE_CELL_BUTTON_LABEL}
+                  onClick={handleOptimize}
+                  disabled={optimizeDisabledReason !== null || uploading || savingMode !== null}
+                >
+                  {isCellOptimizeLoading(optimizeState) ? (
+                    <Loader2 size={15} className="knowhow-spin" />
+                  ) : (
+                    <Sparkles size={15} />
+                  )}
+                  {isCellOptimizeLoading(optimizeState) ? "优化中…" : OPTIMIZE_CELL_BUTTON_LABEL}
+                </button>
+                {uploading && (
+                  <span className="kh-toolbar-status">
+                    <Loader2 size={14} className="knowhow-spin" /> 图片上传中…
+                  </span>
+                )}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="kh-hidden-file-input"
+                  onChange={handleFileInputChange}
+                />
+              </div>
+
+              {uploadError && <p className="kh-inline-error">{uploadError}</p>}
+              {optimizeState.status === "error" && <p className="kh-inline-error">{optimizeState.message}</p>}
+
+              <div className="kh-split">
+                <div
+                  className={`kh-editor-pane${dragActive ? " kh-editor-pane--drag" : ""}`}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                >
+                  <textarea
+                    ref={textareaRef}
+                    className="kh-textarea"
+                    value={content}
+                    disabled={uploading}
+                    onChange={(event) => setContent(event.target.value)}
+                    onPaste={handlePaste}
+                    placeholder="输入 markdown 内容…"
+                  />
+                </div>
+                <div className="kh-preview-pane">
+                  <KnowhowMarkdown md={content} notebookId={notebookId} apiBase={apiBase} />
+                </div>
+              </div>
+            </>
+          )}
         </div>
 
         <footer className="kh-modal-footer">
@@ -714,6 +803,15 @@ export function KnowhowCellEditor({
                   {CLOSE_GUARD_DISCARD_LABEL}
                 </button>
               </div>
+            </div>
+          ) : optimizeState.status === "ready" ? (
+            <div className="kh-footer-actions">
+              <button type="button" onClick={handleDiscardSuggestion}>
+                {DISCARD_SUGGESTION_LABEL}
+              </button>
+              <button type="button" className="kh-primary-button" onClick={handleAcceptSuggestion}>
+                <Check size={14} /> {ACCEPT_SUGGESTION_LABEL}
+              </button>
             </div>
           ) : (
             <>

@@ -25,8 +25,24 @@
  */
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronLeft, Edit3, ListPlus, Plus, RefreshCw, Search, Settings2, Trash2, Upload, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import {
+  Check,
+  ChevronLeft,
+  Download,
+  Edit3,
+  ListPlus,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Search,
+  Settings2,
+  Sparkles,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
+import { authHeaders } from "./auth.ts";
 import {
   ROLE_LABELS,
   cellSummary,
@@ -36,6 +52,8 @@ import {
   reprojectKnowhowTable,
   addKnowhowRow,
   patchKnowhowCell,
+  knowhowTemplateUrl,
+  optimizeKnowhowCell,
   type KnowhowTableSummary,
   type KnowhowTableDetail,
   type KnowhowRow,
@@ -55,9 +73,38 @@ import {
 } from "./knowhow-panel-logic.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
 import { rowFallbackTitle } from "./knowhow-cell-editor-logic.ts";
-import { KnowhowImportWizard } from "./knowhow-import.tsx";
+import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
 import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
 import { KnowhowMarkdown, KnowhowCellPreview, KnowhowCellEditor } from "./knowhow-cell-editor.tsx";
+import {
+  ACCEPT_SUGGESTION_LABEL,
+  OPTIMIZE_ORIGINAL_LABEL,
+  OPTIMIZE_SUGGESTION_LABEL,
+  ROW_OPTIMIZE_ABORT_LABEL,
+  ROW_OPTIMIZE_BUTTON_LABEL,
+  ROW_OPTIMIZE_CLOSE_LABEL,
+  ROW_OPTIMIZE_DONE_TEXT,
+  ROW_OPTIMIZE_EMPTY_TEXT,
+  ROW_OPTIMIZE_RETRY_LABEL,
+  ROW_OPTIMIZE_SKIP_LABEL,
+  ROW_OPTIMIZE_STATUS_LABELS,
+  abortQueue,
+  applyError,
+  applySuggestion,
+  beginAcceptCurrent,
+  completeAcceptCurrent,
+  currentRowOptimizeItem,
+  failAcceptCurrent,
+  initRowOptimizeQueue,
+  isRowOptimizeQueueFinished,
+  markCurrentInProgress,
+  retryCurrent,
+  rowOptimizeProgress,
+  skipCurrent,
+  templateDownloadFilename,
+  type RowOptimizeItem,
+  type RowOptimizeQueueState,
+} from "./knowhow-optimize-logic.ts";
 
 // ---------------------------------------------------------------------------
 // KnowhowPanel — 顶层：全屏 dialog 外壳 + 三层状态机
@@ -78,12 +125,20 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
   const [tablesLoading, setTablesLoading] = useState(false);
   const [tablesError, setTablesError] = useState<string | null>(null);
 
-  // 三个 modal 的显隐：面板自持状态，不经 page.tsx 转发——page.tsx 挂载
+  // modal 的显隐：面板自持状态，不经 page.tsx 转发——page.tsx 挂载
   // <KnowhowPanel> 时只传 notebookId/apiBase/canEdit/onClose 四个 prop，
-  // 导入/新建/管理入口完全由本文件内部驱动。
+  // 导入/新建/管理/追加入口完全由本文件内部驱动。
   const [importOpen, setImportOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  // Task 9：追加导入向导显隐 + 模板下载进行中标记（工具栏「下载模板」按钮
+  // 自身的 loading 态，不走 actionError/detailError 那一套整表级错误）。
+  const [appendOpen, setAppendOpen] = useState(false);
+  const [templateDownloading, setTemplateDownloading] = useState(false);
+  // Task 9：行详情抽屉「优化整行」批量弹窗——null=未打开，否则是正在批量
+  // 优化的行 id（与 cellModal 平级的另一个顶层 modal 状态，堆叠在抽屉之上，
+  // 镜像 cellModal 自己的挂载方式）。
+  const [optimizeRowId, setOptimizeRowId] = useState<string | null>(null);
 
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
   const [detail, setDetail] = useState<KnowhowTableDetail | null>(null);
@@ -150,6 +205,8 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     setConfirmDelete(false);
     setManageOpen(false);
     setCreateOpen(false);
+    setAppendOpen(false);
+    setOptimizeRowId(null);
   }, [notebookId]);
 
   function openTable(tableId: string) {
@@ -162,6 +219,8 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     setCellModal(null);
     setConfirmDelete(false);
     setManageOpen(false);
+    setAppendOpen(false);
+    setOptimizeRowId(null);
   }
 
   function backToList() {
@@ -174,6 +233,8 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     setCellModal(null);
     setConfirmDelete(false);
     setManageOpen(false);
+    setAppendOpen(false);
+    setOptimizeRowId(null);
   }
 
   async function confirmDeleteTable() {
@@ -242,6 +303,37 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
     loadTables();
   }
 
+  // 「下载模板」（Task 9，规格②路B）：模板端点走既有 session 鉴权（Bearer
+  // header），不能像普通静态资源那样直接 `<a href>` 导航——浏览器原生导航
+  // 不会带上 localStorage 里的 token。镜像 KnowhowImage（knowhow-cell-
+  // editor.tsx）的认证 fetch 习语：带鉴权头 fetch → blob → createObjectURL →
+  // 点一个隐藏的 <a download> → 用完撤销 URL。blob: URL 不携带原始响应的
+  // Content-Disposition 头，下载文件名必须显式给 download 属性
+  // （templateDownloadFilename，与后端 f"{table['title']}-template.xlsx"
+  // 同规则），否则浏览器会给出形如 "template" 的裸文件名。
+  async function downloadTemplate() {
+    if (!selectedTableId || !detail || templateDownloading) return;
+    setTemplateDownloading(true);
+    setActionError(null);
+    try {
+      const res = await fetch(knowhowTemplateUrl(notebookId, selectedTableId), { headers: authHeaders() });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = templateDownloadFilename(detail.title);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      setActionError(extractErrorMessage(err, "下载模板失败，请重试"));
+    } finally {
+      setTemplateDownloading(false);
+    }
+  }
+
   // 直接以编辑态打开某一格——供「添加行」引导、行详情抽屉「编辑」按钮、
   // 「保存并下一格」的下一格跳转共用（这三处都已经知道自己要的是编辑态，
   // 不需要走 openCellAuto 的「按是否已填内容」判定）。
@@ -288,6 +380,12 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
   // 「行 N」（规格①「全空则「行 N」」）。
   const cellModalRowTitle = cellModalRow && detail
     ? cellSummary(resolveRowTitleText(cellModalRow, detail.columns), 60) || rowFallbackTitle(cellModalRow.position)
+    : "";
+
+  // Task 9「优化整行」批量弹窗当前作用的行——与 cellModalRow 同一套查找方式。
+  const optimizeRow = detail?.rows.find((row) => row.id === optimizeRowId) ?? null;
+  const optimizeRowTitle = optimizeRow && detail
+    ? cellSummary(resolveRowTitleText(optimizeRow, detail.columns), 60) || rowFallbackTitle(optimizeRow.position)
     : "";
 
   return (
@@ -342,6 +440,9 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
             onOpenManage={() => setManageOpen(true)}
             onAddRow={addRow}
             addingRow={addingRow}
+            onDownloadTemplate={downloadTemplate}
+            templateDownloading={templateDownloading}
+            onAppendClick={() => setAppendOpen(true)}
           />
         )}
       </div>
@@ -355,7 +456,8 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
           canEdit={canEdit}
           onEditCell={openCellEdit}
           onClose={() => setOpenRowId(null)}
-          cellModalOpen={cellModal !== null}
+          cellModalOpen={cellModal !== null || optimizeRowId !== null}
+          onOptimizeRow={() => setOptimizeRowId(openRow.id)}
         />
       )}
 
@@ -419,6 +521,33 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
           detail={detail}
           onClose={() => setManageOpen(false)}
           onChanged={handleManageChanged}
+        />
+      )}
+
+      {appendOpen && canEdit && detail && selectedTableId && (
+        <KnowhowAppendWizard
+          notebookId={notebookId}
+          tableId={selectedTableId}
+          columns={detail.columns}
+          onClose={() => setAppendOpen(false)}
+          onDone={() => {
+            setAppendOpen(false);
+            loadDetail(selectedTableId);
+            loadTables();
+          }}
+        />
+      )}
+
+      {optimizeRowId && optimizeRow && detail && selectedTableId && (
+        <KnowhowRowOptimizeModal
+          notebookId={notebookId}
+          apiBase={apiBase}
+          tableId={selectedTableId}
+          row={optimizeRow}
+          columns={detail.columns}
+          rowTitle={optimizeRowTitle}
+          onAcceptCell={handleCellSave}
+          onClose={() => setOptimizeRowId(null)}
         />
       )}
 
@@ -959,6 +1088,13 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
           overflow-wrap: anywhere;
         }
 
+        .knowhow-drawer-header-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex: 0 0 auto;
+        }
+
         .knowhow-drawer-body {
           flex: 1 1 auto;
           min-height: 0;
@@ -1358,6 +1494,116 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
           background: #eef2ff;
         }
 
+        /* Task 9：「优化表达」工具栏按钮——与列表/代码/图片同款按钮外壳，配一个
+           淡紫色调把它跟纯排版操作区分开(LLM 触发的动作，不是格式化)。 */
+        .kh-toolbar-button--optimize {
+          border-color: #d9c7ff;
+          color: #6d3fd1;
+        }
+
+        .kh-toolbar-button--optimize:hover:not(:disabled) {
+          border-color: #6d3fd1;
+          background: #f5f0ff;
+        }
+
+        /* Task 9：单格「优化表达」原文/建议对照（规格③）与「优化整行」队列
+           里当前格的对照复用同一套 .kh-optimize-* 样式。 */
+        .kh-optimize-compare {
+          flex: 1 1 auto;
+          min-height: 220px;
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 14px;
+        }
+
+        .kh-optimize-pane {
+          display: flex;
+          flex-direction: column;
+          min-width: 0;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          overflow: hidden;
+        }
+
+        .kh-optimize-pane h5 {
+          margin: 0;
+          padding: 8px 12px;
+          font-size: 12px;
+          font-weight: 700;
+          color: var(--muted);
+          background: var(--soft);
+          border-bottom: 1px solid var(--line);
+        }
+
+        .kh-optimize-pane--suggestion h5 {
+          color: #6d3fd1;
+          background: #f5f0ff;
+        }
+
+        .kh-optimize-pane-body {
+          flex: 1 1 auto;
+          min-height: 0;
+          overflow-y: auto;
+          padding: 10px 12px;
+        }
+
+        .kh-optimize-queue-list {
+          margin: 0;
+          padding: 0;
+          list-style: none;
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .kh-optimize-queue-item {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 6px 10px;
+          border-radius: 8px;
+          font-size: 12.5px;
+          color: var(--muted);
+        }
+
+        .kh-optimize-queue-item--current {
+          background: var(--soft);
+          color: var(--ink);
+          font-weight: 600;
+        }
+
+        .kh-optimize-queue-col {
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          min-width: 0;
+        }
+
+        .kh-optimize-queue-status {
+          flex: 0 0 auto;
+          font-size: 11.5px;
+          font-weight: 600;
+        }
+
+        .kh-optimize-queue-status--ready,
+        .kh-optimize-queue-status--in_progress {
+          color: #1f5eff;
+        }
+
+        .kh-optimize-queue-status--accepted {
+          color: #177a55;
+        }
+
+        .kh-optimize-queue-status--error {
+          color: #ba2d2d;
+        }
+
+        .kh-optimize-queue-status--skipped,
+        .kh-optimize-queue-status--waiting {
+          color: var(--muted);
+        }
+
         .kh-modal-footer {
           flex: 0 0 auto;
           padding: 14px 20px;
@@ -1447,6 +1693,10 @@ export function KnowhowPanel({ notebookId, apiBase, canEdit, onClose }: KnowhowP
           }
 
           .kh-split {
+            grid-template-columns: 1fr;
+          }
+
+          .kh-optimize-compare {
             grid-template-columns: 1fr;
           }
         }
@@ -1557,6 +1807,9 @@ function KnowhowTableGrid({
   onOpenManage,
   onAddRow,
   addingRow,
+  onDownloadTemplate,
+  templateDownloading,
+  onAppendClick,
 }: {
   detail: KnowhowTableDetail | null;
   loading: boolean;
@@ -1582,6 +1835,11 @@ function KnowhowTableGrid({
   onOpenManage: () => void;
   onAddRow: () => void;
   addingRow: boolean;
+  /** 「下载模板」（Task 9，规格②路B）：按当前表头下载 xlsx 模板。 */
+  onDownloadTemplate: () => void;
+  templateDownloading: boolean;
+  /** 「追加导入」（Task 9，规格②路B）：打开追加导入向导。 */
+  onAppendClick: () => void;
 }) {
   const orderedColumns = useMemo(() => (detail ? orderColumnsForGrid(detail.columns) : []), [detail]);
   const filteredRows = useMemo(() => (detail ? filterRows(detail.rows, query) : []), [detail, query]);
@@ -1596,8 +1854,8 @@ function KnowhowTableGrid({
           <h3 title={detail?.title}>{detail?.title ?? ""}</h3>
           {detail?.description && <p>{detail.description}</p>}
         </div>
-        {/* 全部写入口（添加行/管理/重建投影/删除表）只对 canEdit 出现；只读
-            成员的工具栏只剩返回与标题（规格⑦）。 */}
+        {/* 全部写入口（添加行/下载模板/追加导入/管理/重建投影/删除表）只对
+            canEdit 出现；只读成员的工具栏只剩返回与标题（规格⑦）。 */}
         {canEdit && (
           <div className="knowhow-grid-toolbar-actions">
             <button
@@ -1609,6 +1867,29 @@ function KnowhowTableGrid({
             >
               <ListPlus size={14} />
               {addingRow ? "添加中…" : "添加行"}
+            </button>
+            {/* 「下载模板」+「追加导入」（Task 9，规格②路B）：前者按当前表头
+                下载 xlsx 模板供线下批量填写，后者把填好的文件追加导入回这
+                张表——两个入口紧邻，模板下载天然是追加导入的前置步骤。 */}
+            <button
+              type="button"
+              className="sort-button knowhow-reproject-button"
+              onClick={onDownloadTemplate}
+              disabled={!detail || templateDownloading}
+              title="按当前表头下载 Excel 模板，线下批量填写"
+            >
+              {templateDownloading ? <Loader2 size={14} className="knowhow-spin" /> : <Download size={14} />}
+              {templateDownloading ? "下载中…" : "下载模板"}
+            </button>
+            <button
+              type="button"
+              className="sort-button knowhow-reproject-button"
+              onClick={onAppendClick}
+              disabled={!detail || deleting}
+              title="从填好的 Excel/CSV/Markdown 追加导入行"
+            >
+              <Upload size={14} />
+              追加导入
             </button>
             <button
               type="button"
@@ -1771,6 +2052,7 @@ function KnowhowRowDrawer({
   canEdit,
   onEditCell,
   onClose,
+  onOptimizeRow,
   cellModalOpen,
 }: {
   row: KnowhowRow;
@@ -1783,14 +2065,17 @@ function KnowhowRowDrawer({
    * 该列对应格子的编辑态，不经预览态中转——用户已经明确点了「编辑」。 */
   onEditCell: (rowId: string, columnId: string) => void;
   onClose: () => void;
-  /** 格子浮窗（编辑态/预览态）当前是否堆叠在本抽屉之上（T7 复审 Important
-   * 修复）：为 true 时本抽屉的 Esc 监听器短路、不关闭抽屉——两者独立的
-   * window keydown 监听器按注册顺序（抽屉先挂载，先注册）依次响应同一次
-   * 按键，若不在这里短路，一次 Esc 会先无条件关闭本抽屉（它自己没有"未保存
-   * 内容"的概念），格子浮窗随后可能因为有未保存内容改为弹出"确认放弃"而不
-   * 真正关闭——结果抽屉已经消失、浮窗却还留着，用户之后关掉浮窗时会发现连
-   * "返回这一行"的抽屉上下文都丢了。真正想关的是最顶层的格子浮窗，Esc 应该
-   * 只作用于它，抽屉留到浮窗自己关闭之后再响应下一次 Esc。 */
+  /** 「优化整行」入口（Task 9，规格③）：打开批量优化弹窗，堆叠在本抽屉之上。 */
+  onOptimizeRow: () => void;
+  /** 任何堆叠在本抽屉之上的顶层弹窗（格子浮窗编辑态/预览态，或 Task 9 的
+   * KnowhowRowOptimizeModal）当前是否打开（T7 复审 Important 修复）：为
+   * true 时本抽屉的 Esc 监听器短路、不关闭抽屉——各自独立的 window keydown
+   * 监听器按注册顺序（抽屉先挂载，先注册）依次响应同一次按键，若不在这里
+   * 短路，一次 Esc 会先无条件关闭本抽屉（它自己没有"未保存内容"的概念），
+   * 顶层弹窗随后可能因为有未保存内容/进行中的操作改为弹出确认层而不真正
+   * 关闭——结果抽屉已经消失、弹窗却还留着，用户之后关掉弹窗时会发现连
+   * "返回这一行"的抽屉上下文都丢了。真正想关的是最顶层的弹窗，Esc 应该只
+   * 作用于它，抽屉留到弹窗自己关闭之后再响应下一次 Esc。 */
   cellModalOpen: boolean;
 }) {
   useEffect(() => {
@@ -1810,9 +2095,17 @@ function KnowhowRowDrawer({
       <section className="knowhow-drawer" role="dialog" aria-modal="true" aria-label={titleText}>
         <div className="knowhow-drawer-header">
           <h2>{titleText}</h2>
-          <button className="icon-button" onClick={onClose} title="关闭">
-            <X size={20} />
-          </button>
+          <div className="knowhow-drawer-header-actions">
+            {/* 「优化整行」批量入口（Task 9，规格③）——只读成员看不到（规格⑦）。 */}
+            {canEdit && (
+              <button type="button" className="knowhow-drawer-edit-button" onClick={onOptimizeRow}>
+                <Sparkles size={13} /> {ROW_OPTIMIZE_BUTTON_LABEL}
+              </button>
+            )}
+            <button className="icon-button" onClick={onClose} title="关闭">
+              <X size={20} />
+            </button>
+          </div>
         </div>
         <div className="knowhow-drawer-body">
           {orderedColumns.map((column) => (
@@ -1836,6 +2129,268 @@ function KnowhowRowDrawer({
         </div>
       </section>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// KnowhowRowOptimizeModal — 行详情抽屉「优化整行」批量弹窗（Task 9，规格③ +
+// 任务简报：非空格子逐格顺序调用、每格接受/跳过、进度与错误逐格显示）。
+//
+// 堆叠在 KnowhowRowDrawer 之上（复用同一套 kh-modal-* 视觉语言——与格子浮窗
+// 同款外壳），抽屉本身留在背后不关闭，方便用户随时看行全貌；本弹窗只在这
+// 一行的格子间推进，不涉及切行，交互形态与面向单格的 KnowhowCellEditor 不
+// 同，故不复用那个组件，而是自己按 knowhow-optimize-logic.ts 的队列状态机
+// 驱动渲染。
+//
+// 队列的推进方式：每次「当前格」从 waiting 变为其它状态后，若还有下一格且
+// 未中止，本地算出下一格状态后立即触发它的 optimizeKnowhowCell 调用——不
+// 依赖 useEffect 监听状态变化去自动推进（避免 React 18 StrictMode 开发期
+// 双调用导致同一格重复发起请求那一整套额外复杂度），纯靠事件处理函数内部
+// 显式串联「计算下一状态 -> setQueue -> 若有下一格则手动触发」。唯一的
+// useEffect 只负责"挂载时启动队列首格"这一次性动作，用 startedRef 闩防
+// StrictMode 双调用重复触发首格请求。
+// ---------------------------------------------------------------------------
+
+interface KnowhowRowOptimizeModalProps {
+  notebookId: string;
+  apiBase: string;
+  tableId: string;
+  row: KnowhowRow;
+  columns: KnowhowColumn[];
+  rowTitle: string;
+  /** 接受：真正落库(patchKnowhowCell)+把结果合并回 detail 状态——复用面板
+   * 自己的 handleCellSave，与格子浮窗保存走同一条路径，不重复实现。 */
+  onAcceptCell: (rowId: string, columnId: string, contentMd: string) => Promise<void>;
+  onClose: () => void;
+}
+
+function KnowhowRowOptimizeModal({
+  notebookId,
+  apiBase,
+  tableId,
+  row,
+  columns,
+  rowTitle,
+  onAcceptCell,
+  onClose,
+}: KnowhowRowOptimizeModalProps) {
+  const [queue, setQueue] = useState<RowOptimizeQueueState>(() => initRowOptimizeQueue(row, columns));
+  const [acceptBusy, setAcceptBusy] = useState(false);
+  const startedRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const current = currentRowOptimizeItem(queue);
+
+  async function fireOptimizeFor(item: RowOptimizeItem) {
+    setQueue((state) => markCurrentInProgress(state));
+    try {
+      const result = await optimizeKnowhowCell(notebookId, tableId, row.id, item.columnId);
+      if (!mountedRef.current) return;
+      setQueue((state) => applySuggestion(state, result.suggestionMd));
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setQueue((state) => applyError(state, extractErrorMessage(err, "优化失败，请重试")));
+    }
+  }
+
+  // 挂载时启动队列首格（若队列非空）；ref 闩防 StrictMode 开发期双调用
+  // 重复发起同一格的请求（本组件不像 KnowhowImage 那样有天然的
+  // cancelled 闭包变量可用——这里的请求会经过好几次 setState 才落地，用一次
+  // 性 ref 闩更直接）。
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    if (current) void fireOptimizeFor(current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function requestClose() {
+    if (acceptBusy) return;
+    onClose();
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") requestClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [acceptBusy]);
+
+  function handleBackdropClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (event.currentTarget === event.target) requestClose();
+  }
+
+  // 「接受」：begin(标记进行中，复用同一状态展示 PATCH 落库这个短暂过程)
+  // -> await onAcceptCell -> 成功则 complete(落地+推进游标)并立即触发下一格，
+  // 失败则 fail(出错，游标不动，允许跳过或重试)。begin/complete 都基于同一个
+  // 本地 `queue` 快照顺序计算(游标在这期间不会被其它操作改动——acceptBusy
+  // 已经把接受按钮和跳过按钮都禁用)，不依赖异步 setQueue 是否已经落地。
+  async function handleAccept() {
+    if (!current || current.status !== "ready" || acceptBusy) return;
+    setAcceptBusy(true);
+    const busyState = beginAcceptCurrent(queue);
+    setQueue(busyState);
+    try {
+      await onAcceptCell(row.id, current.columnId, current.suggestionMd ?? "");
+      if (!mountedRef.current) return;
+      const advanced = completeAcceptCurrent(busyState);
+      setQueue(advanced);
+      const next = currentRowOptimizeItem(advanced);
+      if (next && !advanced.aborted) void fireOptimizeFor(next);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      setQueue((state) => failAcceptCurrent(state, extractErrorMessage(err, "保存失败，请重试")));
+    } finally {
+      if (mountedRef.current) setAcceptBusy(false);
+    }
+  }
+
+  function handleSkip() {
+    if (!current || acceptBusy) return;
+    const advanced = skipCurrent(queue);
+    if (advanced === queue) return; // 无操作（当前格不在 ready/error）
+    setQueue(advanced);
+    const next = currentRowOptimizeItem(advanced);
+    if (next && !advanced.aborted) void fireOptimizeFor(next);
+  }
+
+  function handleRetry() {
+    if (!current || acceptBusy) return;
+    const retried = retryCurrent(queue);
+    if (retried === queue) return; // 无操作（当前格不在 error）
+    setQueue(retried);
+    const retryItem = currentRowOptimizeItem(retried);
+    if (retryItem) void fireOptimizeFor(retryItem);
+  }
+
+  function handleAbort() {
+    setQueue((state) => abortQueue(state));
+  }
+
+  const finished = isRowOptimizeQueueFinished(queue);
+  const progress = rowOptimizeProgress(queue);
+
+  return (
+    <div className="kh-modal-overlay" onClick={handleBackdropClick}>
+      <div
+        className="kh-modal-card"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${ROW_OPTIMIZE_BUTTON_LABEL} · ${rowTitle}`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="kh-modal-header">
+          <div className="kh-modal-header-top">
+            <div className="kh-modal-breadcrumb">
+              <span className="kh-modal-row-title" title={rowTitle}>
+                {rowTitle}
+              </span>
+              <span className="kh-modal-sep">›</span>
+              <span className="kh-modal-col-name">{ROW_OPTIMIZE_BUTTON_LABEL}</span>
+              {queue.items.length > 0 && (
+                <span className="knowhow-status-badge">{`${progress.done}/${progress.total}`}</span>
+              )}
+            </div>
+            <div className="kh-modal-header-actions">
+              {!finished && !queue.aborted && (
+                <button type="button" className="kh-preview-edit-button" onClick={handleAbort}>
+                  {ROW_OPTIMIZE_ABORT_LABEL}
+                </button>
+              )}
+              <button
+                type="button"
+                className="icon-button"
+                title="关闭"
+                onClick={requestClose}
+                disabled={acceptBusy}
+              >
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div className="kh-modal-body">
+          {queue.items.length === 0 ? (
+            <p className="kh-row-context-empty">{ROW_OPTIMIZE_EMPTY_TEXT}</p>
+          ) : (
+            <>
+              <ul className="kh-optimize-queue-list">
+                {queue.items.map((item, index) => (
+                  <li
+                    key={item.columnId}
+                    className={`kh-optimize-queue-item${index === queue.cursor ? " kh-optimize-queue-item--current" : ""}`}
+                  >
+                    <span className="kh-optimize-queue-col">{item.columnName}</span>
+                    <span className={`kh-optimize-queue-status kh-optimize-queue-status--${item.status}`}>
+                      {ROW_OPTIMIZE_STATUS_LABELS[item.status]}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+
+              {current && current.status === "ready" && (
+                <div className="kh-optimize-compare">
+                  <div className="kh-optimize-pane">
+                    <h5>{OPTIMIZE_ORIGINAL_LABEL}</h5>
+                    <div className="kh-optimize-pane-body">
+                      <KnowhowMarkdown md={current.originalMd} notebookId={notebookId} apiBase={apiBase} />
+                    </div>
+                  </div>
+                  <div className="kh-optimize-pane kh-optimize-pane--suggestion">
+                    <h5>{OPTIMIZE_SUGGESTION_LABEL}</h5>
+                    <div className="kh-optimize-pane-body">
+                      <KnowhowMarkdown md={current.suggestionMd ?? ""} notebookId={notebookId} apiBase={apiBase} />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {current && current.status === "error" && <p className="kh-inline-error">{current.errorMessage}</p>}
+
+              {finished && <p className="kh-row-context-empty">{ROW_OPTIMIZE_DONE_TEXT}</p>}
+            </>
+          )}
+        </div>
+
+        <footer className="kh-modal-footer">
+          {current && current.status === "ready" ? (
+            <div className="kh-footer-actions">
+              <button type="button" onClick={handleSkip} disabled={acceptBusy}>
+                {ROW_OPTIMIZE_SKIP_LABEL}
+              </button>
+              <button type="button" className="kh-primary-button" onClick={handleAccept} disabled={acceptBusy}>
+                <Check size={14} /> {acceptBusy ? "保存中…" : ACCEPT_SUGGESTION_LABEL}
+              </button>
+            </div>
+          ) : current && current.status === "error" ? (
+            <div className="kh-footer-actions">
+              <button type="button" onClick={handleSkip}>
+                {ROW_OPTIMIZE_SKIP_LABEL}
+              </button>
+              <button type="button" onClick={handleRetry}>
+                {ROW_OPTIMIZE_RETRY_LABEL}
+              </button>
+            </div>
+          ) : (
+            <div className="kh-footer-actions">
+              <button type="button" onClick={requestClose} disabled={acceptBusy}>
+                {ROW_OPTIMIZE_CLOSE_LABEL}
+              </button>
+            </div>
+          )}
+        </footer>
+      </div>
+    </div>
   );
 }
 
