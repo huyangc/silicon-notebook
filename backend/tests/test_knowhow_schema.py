@@ -134,6 +134,50 @@ def test_fresh_db_has_knowhow_tables(repo):
             )
 
 
+def test_startup_recovery_marks_orphaned_knowhow_rows_failed(tmp_path):
+    """Post-restart, knowhow rows still 'syncing'/'pending' are orphaned in the
+    single-process model (background_jobs don't survive a restart, and no other
+    code path ever revisits them) — startup recovery (_recover_interrupted_jobs,
+    re-run on every construction) must flip BOTH to 'failed' so the retry
+    affordance surfaces, while leaving already-settled rows untouched."""
+    settings = Settings(
+        database_url=f"sqlite:///{tmp_path}/recover.db",
+        storage_dir=str(tmp_path / "storage"),
+    )
+    repo = SQLiteRepository(settings)
+    _mk_notebook(repo)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowhow_tables (id, notebook_id, title, created_at, updated_at) "
+            "VALUES ('kt1', 'nb1', 'T', 't', 't')"
+        )
+        db.execute(
+            "INSERT INTO knowhow_columns (id, table_id, name, position) "
+            "VALUES ('kc1', 'kt1', '概念', 0)"
+        )
+        for rid, status in (
+            ("r-sync", "syncing"), ("r-pend", "pending"),
+            ("r-done", "synced"), ("r-fail", "failed"),
+        ):
+            db.execute(
+                "INSERT INTO knowhow_rows (id, table_id, position, projection_status, created_at, updated_at) "
+                "VALUES (?, 'kt1', 0, ?, 't', 't')",
+                (rid, status),
+            )
+
+    # Reopen on the same DB — construction re-runs _recover_interrupted_jobs.
+    repo2 = SQLiteRepository(settings)
+    with repo2._connect() as db:
+        statuses = {
+            r["id"]: r["projection_status"]
+            for r in db.execute("SELECT id, projection_status FROM knowhow_rows").fetchall()
+        }
+    assert statuses["r-sync"] == "failed"   # orphaned syncing -> failed
+    assert statuses["r-pend"] == "failed"   # orphaned pending -> failed
+    assert statuses["r-done"] == "synced"   # already settled -> untouched
+    assert statuses["r-fail"] == "failed"   # already failed -> stays failed
+
+
 def test_v15_db_upgraded_gets_knowhow_tables(repo):
     """已部署库(user_version=15,即本任务之前)重启后必须由 _migration_16 补齐
     五张 knowhow 表 + 其索引(schema-migration-convention 教训用例:回退状态 +

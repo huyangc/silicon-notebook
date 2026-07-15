@@ -488,9 +488,9 @@ async def import_knowhow_table(
     submit pattern, including copy_context propagation of the per-user model
     context) -> return the FULL table detail immediately. Rows carry
     projection_status='pending'/'syncing' until the background job advances
-    them to 'synced' — the frontend (knowhow-model.ts's importKnowhow) polls
-    the detail endpoint to observe that settle, mirroring how build_kg's
-    callers poll notebook/index status."""
+    them to 'synced'/'failed'. The frontend does NOT poll the detail endpoint —
+    a row's settled status is observed the next time the table is (re)opened or
+    the caller explicitly refreshes it."""
     repo = repository()
     data = await file.read()
     try:
@@ -534,19 +534,21 @@ def get_knowhow_table(notebook_id: str, table_id: str) -> dict:
 )
 def delete_knowhow_table(notebook_id: str, table_id: str) -> None:
     """Cascade-delete (task brief: "连投影产物+隐藏源"). Ordering: fetch+
-    cross-notebook-check first (404 without touching anything), then the
-    store's own cascade delete (columns/rows/cells via ON DELETE CASCADE,
-    returns the possibly-null hidden_source_id), THEN the projector's cleanup
-    of everything ever derived from that hidden source (relations/objects/
-    chunks/elements/the source row itself) — safe no-op when
-    hidden_source_id is None (a table created but never projected)."""
+    cross-notebook-check first (404 without touching anything), THEN the
+    projector's cleanup of everything ever derived from the hidden source
+    (relations/objects/chunks/elements/the source row itself — safe no-op when
+    hidden_source_id is None, e.g. a table created but never projected), and
+    ONLY THEN the store's own cascade delete (columns/rows/cells via ON DELETE
+    CASCADE). Projection-teardown-first so a crash BETWEEN the two phases
+    leaves a still-deletable table whose projection is already clean, rather
+    than an orphaned hidden source with no table left to trigger its cleanup."""
     repo = repository()
     try:
-        knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
+        detail = knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Table not found")
-    result = repo.delete_knowhow_table(table_id)
-    knowhow_api.build_projector(repo).delete_table_projection(result.get("hidden_source_id"))
+    knowhow_api.build_projector(repo).delete_table_projection(detail.get("hidden_source_id"))
+    repo.delete_knowhow_table(table_id)
 
 
 @router.post(

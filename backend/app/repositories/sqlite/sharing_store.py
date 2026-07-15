@@ -7,39 +7,74 @@ from typing import Callable, Sequence
 from app.core.config import Settings
 from app.repositories.sqlite.database import SqliteDatabase
 
-# Deep-copy row snapshot: table -> the exact SELECT the former mixin issued.
-# "notebooks" carries the single source row that the copy service rewrites
-# into the destination's hidden 'copying' sentinel.  Order matters only for
-# readability; the INSERT order (FK-safe) is owned by NotebookCopyService.
+# knowhow-table content is deliberately EXCLUDED from a deep copy: a
+# source_type='knowhow' hidden source and everything the deterministic
+# projector derived from it (elements/chunks/case-procedure-tool KOs+edges and
+# their vectors) do not travel with a copy — a copied notebook has NO knowhow
+# remnants (clean silent absence; full knowhow-table copy is PR-2). Each
+# dependent leg below is filtered by however it keys back to that hidden
+# source; validate_copy applies the SAME per-table filter to its source-side
+# parity counts so the deliberate omission is never mistaken for a copy error.
+_KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
+
+# Deep-copy row snapshot: table -> the exact SELECT the former mixin issued
+# (now knowhow-filtered).  "notebooks" carries the single source row that the
+# copy service rewrites into the destination's hidden 'copying' sentinel.
+# Order matters only for readability; the INSERT order (FK-safe) is owned by
+# NotebookCopyService.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("notebooks", "SELECT * FROM notebooks WHERE id = ?"),
-    ("sources", "SELECT * FROM sources WHERE notebook_id = ?"),
+    ("sources", "SELECT * FROM sources WHERE notebook_id = ? AND source_type != 'knowhow'"),
     (
         "source_elements",
         "SELECT se.* FROM source_elements se JOIN sources s ON s.id = se.source_id "
-        "WHERE s.notebook_id = ?",
+        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'",
     ),
-    ("chunks", "SELECT * FROM chunks WHERE notebook_id = ?"),
-    ("knowledge_objects", "SELECT * FROM knowledge_objects WHERE notebook_id = ?"),
-    ("knowledge_relations", "SELECT * FROM knowledge_relations WHERE notebook_id = ?"),
-    ("chunk_embeddings", "SELECT * FROM chunk_embeddings WHERE notebook_id = ?"),
+    (
+        "chunks",
+        f"SELECT * FROM chunks WHERE notebook_id = ? "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
+    ),
+    (
+        "knowledge_objects",
+        f"SELECT * FROM knowledge_objects WHERE notebook_id = ? "
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
+    ),
+    (
+        "knowledge_relations",
+        f"SELECT * FROM knowledge_relations WHERE notebook_id = ? "
+        f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
+    ),
+    (
+        # chunk_embeddings has no source_id of its own — key on its chunk's
+        # source (1:1 via the chunk_id PK) so knowhow chunk vectors are dropped
+        # in lockstep with their (excluded) chunks, keeping chunk_map complete.
+        "chunk_embeddings",
+        "SELECT ce.* FROM chunk_embeddings ce JOIN chunks c ON c.id = ce.chunk_id "
+        f"WHERE ce.notebook_id = ? AND c.source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
+    ),
     (
         "element_embeddings",
         "SELECT ee.* FROM element_embeddings ee JOIN sources s ON s.id = ee.source_id "
-        "WHERE s.notebook_id = ?",
+        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'",
     ),
+    # knowledge_embeddings / relation_embeddings / concept_clusters never hold
+    # knowhow rows (the projector writes none), so they need no knowhow filter.
     ("knowledge_embeddings", "SELECT * FROM knowledge_embeddings WHERE notebook_id = ?"),
     ("relation_embeddings", "SELECT * FROM relation_embeddings WHERE notebook_id = ?"),
     ("concept_clusters", "SELECT * FROM concept_clusters WHERE notebook_id = ?"),
 )
 
-# Tables copy_notebook validates row-parity on after the copy completes.
-_COPY_VALIDATED_TABLES = (
-    "sources",
-    "chunks",
-    "knowledge_objects",
-    "knowledge_relations",
-    "concept_clusters",
+# Tables copy_notebook validates row-parity on after the copy completes, each
+# with the knowhow-exclusion predicate that matches its snapshot query above.
+# Applied to BOTH source and destination counts: a no-op on the destination
+# (which never received knowhow rows) and the real filter on the source.
+_COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
+    ("sources", "AND source_type != 'knowhow'"),
+    ("chunks", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_objects", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("knowledge_relations", f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))"),
+    ("concept_clusters", ""),
 )
 
 
@@ -284,12 +319,13 @@ class SharingStore:
         """Post-copy integrity self-check: row parity per table + no dangling
         relation endpoints.  Raises RuntimeError (copy is then compensated)."""
         with self.database.connect() as db:
-            for table in _COPY_VALIDATED_TABLES:
+            for table, extra in _COPY_VALIDATED_TABLES:
                 copied_count = db.execute(
-                    f"SELECT COUNT(*) FROM {table} WHERE notebook_id = ?", (new_id,)
+                    f"SELECT COUNT(*) FROM {table} WHERE notebook_id = ? {extra}",
+                    (new_id,),
                 ).fetchone()[0]
                 source_count = db.execute(
-                    f"SELECT COUNT(*) FROM {table} WHERE notebook_id = ?",
+                    f"SELECT COUNT(*) FROM {table} WHERE notebook_id = ? {extra}",
                     (source_notebook_id,),
                 ).fetchone()[0]
                 if copied_count != source_count:

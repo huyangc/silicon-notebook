@@ -1305,6 +1305,9 @@ class SqliteMigrator:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
         的行定义上就是上次崩溃/重启遗留的陈旧行，否则会永久卡死该 notebook 的单飞守卫。
+        knowhow 行投影同理：background_jobs 不跨进程存活，重启后仍处 'syncing'/'pending'
+        的行定义上是被遗弃的（没有任何代码路径会再回访它们），置 'failed' 以暴露前端的
+        「重投影」重试入口，而非让它们看起来永久「同步中/待处理」。
         幂等——safe every boot。"""
         with self._connect() as db:
             db.execute(
@@ -1313,6 +1316,9 @@ class SqliteMigrator:
             db.execute(
                 "UPDATE ask_jobs SET status='interrupted', "
                 "error='中断:服务重启' WHERE status='running'")
+            db.execute(
+                "UPDATE knowhow_rows SET projection_status='failed' "
+                "WHERE projection_status IN ('syncing','pending')")
 
     def _seed(self) -> None:
         now = _now()

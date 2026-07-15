@@ -7565,7 +7565,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/import": {
         "post": {
-          "description": "Parse -> validate -> create table -> insert every row -> launch a\nbackground full-table projection (mirrors build_kg's background_jobs.\nsubmit pattern, including copy_context propagation of the per-user model\ncontext) -> return the FULL table detail immediately. Rows carry\nprojection_status='pending'/'syncing' until the background job advances\nthem to 'synced' — the frontend (knowhow-model.ts's importKnowhow) polls\nthe detail endpoint to observe that settle, mirroring how build_kg's\ncallers poll notebook/index status.",
+          "description": "Parse -> validate -> create table -> insert every row -> launch a\nbackground full-table projection (mirrors build_kg's background_jobs.\nsubmit pattern, including copy_context propagation of the per-user model\ncontext) -> return the FULL table detail immediately. Rows carry\nprojection_status='pending'/'syncing' until the background job advances\nthem to 'synced'/'failed'. The frontend does NOT poll the detail endpoint —\na row's settled status is observed the next time the table is (re)opened or\nthe caller explicitly refreshes it.",
           "operationId": "import_knowhow_table_api_notebooks__notebook_id__knowhow_import_post",
           "parameters": [
             {
@@ -7664,7 +7664,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}": {
         "delete": {
-          "description": "Cascade-delete (task brief: \"连投影产物+隐藏源\"). Ordering: fetch+\ncross-notebook-check first (404 without touching anything), then the\nstore's own cascade delete (columns/rows/cells via ON DELETE CASCADE,\nreturns the possibly-null hidden_source_id), THEN the projector's cleanup\nof everything ever derived from that hidden source (relations/objects/\nchunks/elements/the source row itself) — safe no-op when\nhidden_source_id is None (a table created but never projected).",
+          "description": "Cascade-delete (task brief: \"连投影产物+隐藏源\"). Ordering: fetch+\ncross-notebook-check first (404 without touching anything), THEN the\nprojector's cleanup of everything ever derived from the hidden source\n(relations/objects/chunks/elements/the source row itself — safe no-op when\nhidden_source_id is None, e.g. a table created but never projected), and\nONLY THEN the store's own cascade delete (columns/rows/cells via ON DELETE\nCASCADE). Projection-teardown-first so a crash BETWEEN the two phases\nleaves a still-deletable table whose projection is already clean, rather\nthan an orphaned hidden source with no table left to trigger its cleanup.",
           "operationId": "delete_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__delete",
           "parameters": [
             {
