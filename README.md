@@ -725,6 +725,21 @@ PDF parsing is decoupled from the GPU. The backend never imports torch; it talks
 
 MinerU output maps to structured `SourceElement`s: formulas become `formula` elements (LaTeX preserved), tables become `table` elements (HTML kept in metadata), and headings keep their level. The frontend renders these in the source detail view — formulas via KaTeX, tables from their HTML — so equations show typeset rather than as raw LaTeX. If MinerU is unreachable or errors, ingestion degrades to pypdf so uploads never block, while pipeline logs and the source `error_message` keep the fallback diagnostic; a PDF that parses to zero text (e.g. a scanned/image PDF) is flagged with a hint instead of looking like an empty success.
 
+### Batch PDF→Markdown parsing (`scripts/mineru_batch_parse.py`)
+
+A standalone, backend-independent CLI for bulk/offline pre-parsing of a whole PDF directory (e.g. a book corpus) against your own MinerU deployment, feeding the offline ingestion below: PDF directory → `mineru_batch_parse.py` → Markdown directory → `batch_ingest.py` → KG. It recursively finds PDFs under `--src`, submits each to an internal MinerU server's **async** `/tasks` API (submit → poll → fetch result), distributing files round-robin across the configured servers with a per-server concurrency limit, and writes a mirrored tree of `.md` files under `--out`. This is separate from the app's inline per-upload parsing above (`MINERU_MODE=http`, MinerU's synchronous `/file_parse` endpoint) and from the mineru.net cloud path — point it at your own async-capable MinerU server(s).
+
+Configure via `.env` (`MINERU_BATCH_*`, see `.env.example`); any key can be overridden per invocation with a matching flag (`--servers`, `--src`, `--out`, `--env-file`, `--list <file>` for an explicit path list instead of a recursive scan, `--limit N` to cap the file count). Re-running skips `.md` files already produced, and every file's outcome (`ok`/`skip`/`fail`) is appended to a JSONL manifest (default `{MINERU_BATCH_OUT_DIR}/_manifest.jsonl`) so a run can be resumed or audited; `--only-failed` re-processes just the files the last run recorded as `fail` (also listed in `failed.txt`).
+
+```bash
+# config in .env (MINERU_BATCH_SERVERS / _SRC_DIR / _OUT_DIR ...)
+python scripts/mineru_batch_parse.py --dry-run      # preview the server assignment
+python scripts/mineru_batch_parse.py                # run
+python scripts/mineru_batch_parse.py --only-failed  # retry failures from the last run
+```
+
+The script imports no backend code — only the standard library plus `requests` (already a backend dependency) — and talks to the MinerU server(s) over plain HTTP, so it needs no GPU/torch on the machine that runs it.
+
 ### Offline batch ingestion (directory → KG)
 
 Ingest a directory of Markdown (and the occasional PDF) through the existing

@@ -650,6 +650,21 @@ PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 
 
 MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级。前端在 source detail 里渲染它们——公式用 KaTeX、表格用其 HTML——所以公式是排版后的样子而不是原始 LaTeX。若 MinerU 不可达或出错，摄取会降级到 pypdf，保证上传不被阻塞，同时 pipeline log 和 source `error_message` 会保留回退诊断；若某 PDF 解析出 0 文本（如扫描/图片型 PDF），会给出提示而不是看起来"空成功"。
 
+### 批量 PDF→Markdown 解析(`scripts/mineru_batch_parse.py`)
+
+独立于 backend 之外的部署侧 CLI,用于批量/离线预解析一整个 PDF 目录(如一批书),对接你自己的 MinerU 部署,产出供下面「离线批量摄取」消费:PDF 目录 → `mineru_batch_parse.py` → Markdown 目录 → `batch_ingest.py` → KG。它递归扫描 `--src` 下的 PDF,把每个文件提交到内网 MinerU server 的**异步** `/tasks` API(提交→轮询→取结果),轮流分派到各配置的 server(每台各自有并发上限),产出与源目录同构的 `.md` 文件树到 `--out`。这与上面应用内联的单文件上传解析(`MINERU_MODE=http`,MinerU 同步的 `/file_parse` 接口)以及 mineru.net 云端路径都是独立的两条路——请指向你自己的、支持异步 API 的 MinerU server。
+
+配置走 `.env`(`MINERU_BATCH_*`,见 `.env.example`);每个 key 都可用对应的命令行参数按次覆盖(`--servers`、`--src`、`--out`、`--env-file`、`--list <文件>` 显式给路径列表而非递归扫描、`--limit N` 限制处理文件数)。重跑会跳过已生成的 `.md`;每个文件的结果(`ok`/`skip`/`fail`)都会追加进一份 JSONL manifest(默认 `{MINERU_BATCH_OUT_DIR}/_manifest.jsonl`),可续跑、可审计;`--only-failed` 只重跑上次记为 `fail` 的文件(也会列在 `failed.txt` 里)。
+
+```bash
+# .env 里配好(MINERU_BATCH_SERVERS / _SRC_DIR / _OUT_DIR ...)
+python scripts/mineru_batch_parse.py --dry-run      # 预览 server 分配
+python scripts/mineru_batch_parse.py                # 正式跑
+python scripts/mineru_batch_parse.py --only-failed  # 只重跑上次失败的文件
+```
+
+脚本不 import 任何 backend 代码——只依赖标准库和 `requests`(backend 已有此依赖)——通过普通 HTTP 与 MinerU server 通信,运行它的机器因此不需要 GPU/torch。
+
 ### 离线批量摄取(目录 → KG)
 
 把一个目录里的 Markdown(及偶发 PDF)离线复用现有管线灌进库。分两阶段:
