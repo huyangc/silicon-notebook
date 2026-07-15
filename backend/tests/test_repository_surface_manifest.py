@@ -1886,6 +1886,32 @@ TASK3_PAPER_META_ALLOWED_MEMBER_FILES = {
     for name in {"SQLiteRepository", "create_notebook", "_runtime", "_write"}
 }
 
+# Task 4 (paper-metadata-extraction): the new service-integration test file
+# constructs the real facade directly (same fixture shape as
+# test_batch_ingest.py / test_kg_llm_client.py) — SQLiteRepository(...),
+# repo.embedder, repo._runtime.{source_store,source_ingestion}, repo.
+# create_notebook(...), repo._write() for the element-seeding helper,
+# repo.settings (toggling paper_meta_enabled), repo._kg_llm_client (faking
+# the KG LLM seam) and repo._run_extraction (driving the historical-source
+# catch-up mount). get_paper_meta/sources_missing_paper_meta/backfill_paper_
+# metadata are brand-new facade delegates this task adds — their only
+# consumer is this test file, which postdates the frozen fixture, so they go
+# in TASK4_PAPER_META_ALLOWED_NEW_MEMBERS below instead (exempt entirely,
+# same as SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS did for close_local).
+TASK4_PAPER_META_ALLOWED_IMPORTS = {
+    ("backend/tests/test_paper_meta_service.py", 18, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK4_PAPER_META_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_paper_meta_service.py", name)
+    for name in {
+        "SQLiteRepository", "create_notebook", "_runtime", "_write", "embedder",
+        "settings", "_kg_llm_client", "_run_extraction",
+    }
+}
+TASK4_PAPER_META_ALLOWED_NEW_MEMBERS = {
+    "get_paper_meta", "sources_missing_paper_meta", "backfill_paper_metadata",
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2333,6 +2359,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK10_KNOWHOW_ALLOWED_MEMBER_FILES
     | TASK1_PAPER_META_ALLOWED_MEMBER_FILES
     | TASK3_PAPER_META_ALLOWED_MEMBER_FILES
+    | TASK4_PAPER_META_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -2950,6 +2977,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK6_KNOWHOW_ALLOWED_IMPORTS
                     or site in TASK1_PAPER_META_ALLOWED_IMPORTS
                     or site in TASK3_PAPER_META_ALLOWED_IMPORTS
+                    or site in TASK4_PAPER_META_ALLOWED_IMPORTS
                 )
 
 
@@ -3212,6 +3240,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | STARTUP_READINESS_ALLOWED_NEW_MEMBERS
         | TASK3_MEMORY_KG_ALLOWED_NEW_MEMBERS
         | TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS
+        | TASK4_PAPER_META_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)

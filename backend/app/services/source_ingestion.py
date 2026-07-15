@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import contextvars
 import hashlib
 import json
@@ -13,6 +14,7 @@ from typing import Any, Callable, ContextManager, Iterable, List, Optional
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
+from app.core.llm import cap_kwargs
 from app.models.schemas import (
     AddUrlSourcesResult,
     RejectedUrl,
@@ -27,9 +29,15 @@ from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
 from app.services import kg_ingest, remote_sources
 from app.services.extraction_profiles import PROFILES, get_profile
+from app.services.kg.client import safe_json
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
+from app.services.paper_meta import (
+    PAPER_META_SCHEMA_HINT,
+    paper_meta_prompt,
+    verify_paper_meta,
+)
 from app.services.parsers import mineru_content_list_to_elements
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 from app.services.source_chunking import SourceChunkingService
@@ -514,6 +522,10 @@ class SourceIngestionService:
                 )
             self.set_source_status(source_id, "parsed", summary=summary)
 
+            # 论文元数据(best-effort):初次上传即抽,re-parse 时 force 刷新;
+            # 失败不阻塞流水线。落库在终态转换前,前端轮询随状态变化带到。
+            self.ensure_paper_metadata(source, elements=elements, force=True)
+
             # chunk-native 基础: 合并 element 成检索 chunk(纯写库无网络, query 立即可用)。
             # best-effort: 失败不阻塞既有 parse->extract 流水线。
             try:
@@ -916,6 +928,8 @@ class SourceIngestionService:
     def run_extraction(self, source_id: str) -> None:
         source: SourceDetail = self.sources.get_source(source_id)
         elements = self.source_elements(source_id)
+        # 历史源 catch-up:补论文元数据(幂等,有行即跳;失败不影响 KG 抽取)。
+        self.ensure_paper_metadata(source, elements=elements, force=False)
         now = self.now()
         run_id = self.new_id("run")
         doc_type_id = (
@@ -1004,3 +1018,145 @@ class SourceIngestionService:
         except Exception as exc:
             self.finish_extraction_run(run_id, "failed", str(exc))
             raise
+
+    # ---------------------------------------------------- paper metadata
+    def ensure_paper_metadata(
+        self,
+        source: "SourceSummary | SourceDetail",
+        elements: Optional[List[SourceElement]] = None,
+        force: bool = False,
+    ) -> str:
+        """单源论文元数据抽取(best-effort,幂等)。返回状态串 stored/not_paper/
+        skipped/disabled/no_llm/no_text/failed,仅供调用方统计,不进状态机。
+        挂载点:process_source(force=True,re-parse 即刷新)与 run_extraction 开头
+        (force=False,历史源 catch-up);批量走 backfill_paper_metadata。
+        成本:每源一次 chat_json(头部 ~paper_meta_head_chars 字符,输出~300 token);
+        gate=paper_meta_enabled ∧ doc_type∈{'',academic_paper} ∧ 非合成源 ∧ LLM
+        已配 ∧ 有文本 ∧ (force ∨ 无行)。失败不写行(下次可重试)、不碰
+        extraction_runs、不阻断流水线(摄取侧惯例,不用 note_model_error)。"""
+        if not getattr(self.settings, "paper_meta_enabled", True):
+            return "disabled"
+        if source.type in ("memory", "knowhow"):
+            return "skipped"
+        doc_type = (
+            self.normalize_doc_type(getattr(source, "doc_type", "") or "")
+            or "academic_paper"
+        )
+        if doc_type != "academic_paper":
+            return "skipped"
+        if not force and self.sources.get_paper_meta(source.id) is not None:
+            return "skipped"
+        client = self.kg_llm()
+        if not getattr(client, "configured", False):
+            return "no_llm"
+        if elements is None:
+            elements = self.source_elements(source.id)
+        head_chars = int(getattr(self.settings, "paper_meta_head_chars", 4000))
+        head_text = self.source_files.read_source_text(
+            getattr(source, "file_path", "") or "", elements
+        )[:head_chars]
+        if not head_text.strip():
+            return "no_text"
+        try:
+            raw = client.chat_json(
+                [{"role": "user", "content": paper_meta_prompt(head_text)}],
+                PAPER_META_SCHEMA_HINT,
+                temperature=0.0,
+                **cap_kwargs(client, "openai_compat_max_tokens"),
+            )
+            # safe_json() always coerces to a dict (its contract), silently
+            # swallowing whatever the true top-level JSON shape was — an
+            # empty-dict result is then indistinguishable from a genuine
+            # LLM {} response. That matters here specifically: verify_
+            # paper_meta({}, ...) yields a *valid* is_paper=False marker,
+            # which upsert_paper_meta persists as "already tried, not a
+            # paper" and permanently suppresses retries. A model that
+            # emits array-wrapped/scalar garbage (e.g. "[]") must NOT get
+            # that treatment — it should fail this attempt and stay
+            # retryable. So probe the raw JSON's real top-level shape
+            # first (json.loads, no cleanup) and only fall back to
+            # safe_json's think-tag/code-fence stripping when the direct
+            # parse fails outright.
+            try:
+                parsed = json.loads(raw)
+            except (ValueError, TypeError):
+                parsed = safe_json(raw)
+            if (
+                isinstance(parsed, list)
+                and len(parsed) == 1
+                and isinstance(parsed[0], dict)
+            ):
+                parsed = parsed[0]  # single-object-in-array: unwrap, don't discard
+            if not isinstance(parsed, dict):
+                raise ValueError("paper-meta LLM returned non-object JSON")
+            meta = verify_paper_meta(
+                parsed, head_text,
+                model=str(getattr(client, "model", "") or ""),
+            )
+            self.sources.upsert_paper_meta(source.id, source.notebook_id, meta)
+            self.event_log.emit({
+                "kind": "paper_meta",
+                "source_id": source.id,
+                "notebook_id": source.notebook_id,
+                "is_paper": bool(meta["is_paper"]),
+                "authors": len(meta["authors"]),
+                "dropped": meta["dropped"],
+            })
+            return "stored" if meta["is_paper"] else "not_paper"
+        except Exception:
+            self.event_log.logger.exception(
+                "paper metadata extraction failed for %s", source.id
+            )
+            return "failed"
+
+    def backfill_paper_metadata(
+        self,
+        notebook_id: str,
+        force: bool = False,
+        progress: Optional[Callable[[int, int, str, str], None]] = None,
+    ) -> dict:
+        """批量补抽缺论文元数据的源(CLI phase=metadata 与应用内端点共用)。
+        幂等键=meta 行存在;失败源不落行,重跑自动重试(断点续跑)。有界并发
+        (≤8,受 kg_extract_workers 约束),任务级 copy_context 传播 per-user
+        模型配置。返回 {"total": N, "<status>": n, ...} 计数。"""
+        self.notebooks.get_row(notebook_id)  # KeyError if missing
+        targets = self.sources.sources_missing_paper_meta(
+            notebook_id, include_existing=force
+        )
+        counts: dict = {"total": len(targets)}
+        if not targets:
+            return counts
+        workers = max(1, min(8, int(getattr(self.settings, "kg_extract_workers", 4))))
+        lock = threading.Lock()
+        done = 0
+
+        def _one(source_id: str) -> None:
+            nonlocal done
+            try:
+                row = self.sources.get_source(source_id)
+                status = self.ensure_paper_metadata(row, force=force)
+            except Exception:
+                status = "failed"
+                self.event_log.logger.exception(
+                    "paper metadata backfill failed for %s", source_id
+                )
+            with lock:
+                done += 1
+                counts[status] = counts.get(status, 0) + 1
+                current = done
+            if progress is not None:
+                progress(current, len(targets), source_id, status)
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="paper-meta"
+        ) as pool:
+            futures = [
+                pool.submit(contextvars.copy_context().run, _one, sid)
+                for sid in targets
+            ]
+            for future in concurrent.futures.as_completed(futures):
+                future.result()
+        self.event_log.emit(
+            {"kind": "paper_meta", "notebook_id": notebook_id, "backfill": counts}
+        )
+        return counts
