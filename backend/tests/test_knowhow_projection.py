@@ -1342,3 +1342,34 @@ def test_reproject_legacy_tables_end_to_end_replaces_legacy_kos_with_dynamic_typ
     assert counts.get("case", 0) == 0
     assert counts.get("违例类型") == 1  # dynamic type in its place
     assert counts.get("修复方法") == 1
+
+
+# ---------------------------------------------------------------------------
+# get_scheduler registry hygiene (PR-2+3 收尾 fix)
+# ---------------------------------------------------------------------------
+
+
+def test_get_scheduler_entry_does_not_pin_repo(repo_factory):
+    """The _SCHEDULERS WeakKeyDictionary's VALUE must not strongly reference
+    its KEY: get_scheduler's project_fn holds only a ``weakref.ref(repo)``
+    (see the _SCHEDULERS comment block in knowhow/api.py) — a plain closure
+    over ``repo`` would pin every entry alive forever, silently defeating the
+    weak keying.  Mirrors test_scale_artifact_runtime's retention-test shape
+    (weakref + del + gc.collect + death assertion)."""
+    import gc
+    import weakref
+
+    from app.services.knowhow import api as knowhow_api
+
+    repo = repo_factory()
+    scheduler = knowhow_api.get_scheduler(repo)
+    assert knowhow_api.get_scheduler(repo) is scheduler  # registry hit
+    repo_ref = weakref.ref(repo)
+    del repo
+    gc.collect()
+
+    assert repo_ref() is None  # the scheduler's project_fn must not pin it
+    assert len(knowhow_api._SCHEDULERS) == 0  # entry died with its key
+    # A late-firing debounced run against the collected repo is a no-op, not
+    # an explosion: project_fn resolves its weakref per run.
+    scheduler._project_fn("table-anything")

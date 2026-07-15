@@ -210,9 +210,9 @@ INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
     # PR-2+3 Task 8: optimize_cell resolves the per-user rewrite LLM client +
     # note_model_error the same "extract a narrow runtime port" way
     # build_projector (line 138 above) already does — a second, independent
-    # call site in the same file, appended at EOF specifically so it cannot
-    # shift build_projector's own pinned line.
-    ("backend/app/services/knowhow/api.py", 682, "_runtime"): (
+    # call site in the same file (682->693: the get_scheduler weakref fix
+    # added lines ABOVE optimize_cell; build_projector's 138 is unshifted).
+    ("backend/app/services/knowhow/api.py", 693, "_runtime"): (
         "LLM cell rewrite resolves the per-user rewrite LLM client + "
         "note_model_error via the same narrow-runtime-port extraction "
         "build_projector uses, a second independent call site"

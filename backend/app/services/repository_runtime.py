@@ -92,18 +92,33 @@ class RepositoryRuntime:
             now=seams.now,
         )
         self.notebook_summaries = NotebookSummaryQuery(self.database, self.queries)
+        # Source file persistence resolves storage_dir through the database
+        # boundary's resolve_path — no facade seams, so construction is eager.
+        # Constructed BEFORE the catalog below so the catalog's storage_dir
+        # callable can bind THIS store directly.
+        self.source_files = SourceFileStore(
+            self.database.resolve_path(settings.storage_dir),
+            resolve_path=self.database.resolve_path,
+        )
         self.catalog = NotebookCatalogService(
             store=self.notebook_store,
             summaries=self.notebook_summaries,
             queries=self.queries,
             identity=self.identity,
-            # Lazy: self.storage_dir (the property below) reads
-            # self.source_files, which is constructed a few lines further
-            # down — the callable only evaluates at delete_notebook time,
-            # and stays live across the facade's mutable storage_dir setter
-            # (same Callable[[], Path] convention as wire_sharing's
-            # NotebookCopyService).
-            storage_dir=lambda: self.storage_dir,
+            # Lazy: resolves the LIVE storage root only at delete_notebook
+            # time.  Deliberately default-bound to the eager SourceFileStore
+            # above — NOT ``lambda: self.storage_dir`` — because closing over
+            # the runtime would chain catalog -> runtime -> facade-bound seam
+            # closures -> SQLiteRepository, keeping the whole facade alive for
+            # as long as anything retains the catalog (ScaleArtifactRuntime
+            # holds it as ``notebooks``; see
+            # test_retained_scale_runtime_does_not_transitively_retain_repository).
+            # Liveness is preserved: the facade's mutable storage_dir setter
+            # chain (sqlite_repository.storage_dir -> runtime.set_storage_dir)
+            # mutates source_files.storage_dir IN PLACE, so this callable
+            # observes every post-construction swap (same Callable[[], Path]
+            # convention as wire_sharing's NotebookCopyService).
+            storage_dir=lambda source_files=self.source_files: source_files.storage_dir,
         )
         self.source_store = SourceStore(self.database, now=seams.now)
         self.chunk_store = ChunkStore(self.database)
@@ -145,12 +160,6 @@ class RepositoryRuntime:
         )
         self.memory_service: "MemoryService | None" = None
         self.memory_retriever: "MemoryRetriever | None" = None
-        # Source file persistence resolves storage_dir through the database
-        # boundary's resolve_path — no facade seams, so construction is eager.
-        self.source_files = SourceFileStore(
-            self.database.resolve_path(settings.storage_dir),
-            resolve_path=self.database.resolve_path,
-        )
         self._embedder: Any = None
         self._notebook_languages: dict[str, list[str]] = {}
         # Task 18: scale/viz artifact FILE persistence is seam-free (raw

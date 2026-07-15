@@ -364,7 +364,12 @@ class ProjectionScheduler:
 # scoped correctly for test isolation (the production process only ever
 # constructs ONE repo, via ``app.api.deps.repository``'s own ``lru_cache``,
 # so in production this is indistinguishable from a bare module-global
-# singleton).
+# singleton).  For the WeakKeyDictionary to actually deliver that promise,
+# the VALUE must not strongly reference the KEY: the scheduler's project_fn
+# holds only a ``weakref.ref(repo)`` (resolved per run, no-op once the repo
+# is collected) — a plain ``lambda: build_projector(repo)...`` closure would
+# pin the key alive through its own value and the entry would never die
+# (see test_knowhow_projection.py::test_get_scheduler_entry_does_not_pin_repo).
 _SCHEDULERS: "weakref.WeakKeyDictionary[Any, ProjectionScheduler]" = weakref.WeakKeyDictionary()
 _SCHEDULERS_LOCK = threading.Lock()
 
@@ -376,9 +381,15 @@ def get_scheduler(repo: Any) -> ProjectionScheduler:
     with _SCHEDULERS_LOCK:
         scheduler = _SCHEDULERS.get(repo)
         if scheduler is None:
-            scheduler = ProjectionScheduler(
-                lambda table_id: build_projector(repo).project_table(table_id)
-            )
+            repo_ref = weakref.ref(repo)
+
+            def _project(table_id: str) -> None:
+                target = repo_ref()
+                if target is None:
+                    return  # repo already collected — nothing to project into
+                build_projector(target).project_table(table_id)
+
+            scheduler = ProjectionScheduler(_project)
             _SCHEDULERS[repo] = scheduler
         return scheduler
 

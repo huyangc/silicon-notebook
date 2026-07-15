@@ -730,7 +730,14 @@ class KnowhowProjector:
         the legacy detection query, so a later call (e.g. the next process
         restart) finds nothing left to do. Returns the table_ids it
         scheduled, for test assertions/logging — the caller decides whether
-        and how to report that."""
+        and how to report that.
+
+        Deliberately bypasses ProjectionScheduler's per-table single-flight
+        (direct ``background_jobs.submit``): racing a concurrent user edit
+        costs at most ONE duplicate ``project_table`` pass, and that is
+        safe — per-row delete+insert runs in one transaction and the final
+        KG swap is atomic, so whichever pass finishes last leaves the same
+        deterministic full-table result, never a corrupted mix."""
         with self.database.connect() as db:
             table_ids = find_legacy_projected_table_ids(db)
         for table_id in table_ids:

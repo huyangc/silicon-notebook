@@ -3516,9 +3516,9 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK14_KNOWHOW_P
 # note_model_error — the same narrow-runtime-port pattern build_projector's
 # own `_runtime`/`settings` registration (TASK6_KNOWHOW_ALLOWED_CONSUMERS
 # above) already uses. `settings` isn't re-reached here so only `_runtime`
-# needs a new entry.
+# needs a new entry. 682->693: the get_scheduler weakref fix added lines above.
 TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS = {
-    ("_runtime", "backend/app/services/knowhow/api.py:682"),
+    ("_runtime", "backend/app/services/knowhow/api.py:693"),
 }
 # Its own HTTP-level test reaches the live app repository singleton via
 # app.api.deps.repository() (not a freshly constructed SQLiteRepository) to
