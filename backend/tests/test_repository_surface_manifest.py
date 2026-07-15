@@ -1547,15 +1547,19 @@ TASK6_MEMORY_ALLOWED_NEW_MEMBERS = {
 # MCP HTTPS opt-in Task 1 adds a stdlib `logging` import plus a module logger
 # above these call sites (see LINE_NUMBER_INSENSITIVE_FILES), shifting every
 # one of them down by exactly 21 lines; re-pinned to their current lines.
+# MCP HTTPS opt-in Task 2 threads `require_https` through
+# `AgentBearerMiddleware.__init__` (+4 lines) and its `__call__` scheme check
+# (+2 lines), both also above these call sites, shifting every one of them
+# down by exactly 6 more lines; re-pinned to their current lines.
 TASK7_MEMORY_ALLOWED_CONSUMERS = {
-    ("user_can_read_notebook", "backend/app/api/mcp_server.py:630"),
-    ("get_notebook", "backend/app/api/mcp_server.py:635"),
-    ("user_can_read_notebook", "backend/app/api/mcp_server.py:667"),
-    ("get_notebook", "backend/app/api/mcp_server.py:672"),
-    ("unified_kg_status", "backend/app/api/mcp_server.py:673"),
-    ("agent_memory_hits", "backend/app/api/mcp_server.py:717"),
-    ("search_notebook", "backend/app/api/mcp_server.py:787"),
-    ("ask", "backend/app/api/mcp_server.py:883"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:636"),
+    ("get_notebook", "backend/app/api/mcp_server.py:641"),
+    ("user_can_read_notebook", "backend/app/api/mcp_server.py:673"),
+    ("get_notebook", "backend/app/api/mcp_server.py:678"),
+    ("unified_kg_status", "backend/app/api/mcp_server.py:679"),
+    ("agent_memory_hits", "backend/app/api/mcp_server.py:723"),
+    ("search_notebook", "backend/app/api/mcp_server.py:793"),
+    ("ask", "backend/app/api/mcp_server.py:889"),
 }
 TASK7_MEMORY_ALLOWED_NEW_MEMBERS = {
     "agent_memory_hits",
