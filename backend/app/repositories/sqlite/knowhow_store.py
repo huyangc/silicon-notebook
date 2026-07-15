@@ -602,6 +602,29 @@ class KnowhowStore:
                 (row_id, column_id),
             )
 
+    def get_knowhow_row_location(self, row_id: str) -> "dict | None":
+        """Resolve a bare ``row_id`` to its owning ``table_id`` + that
+        table's ``notebook_id`` (PR-2+3 Task 10: the agent surface's row/
+        cell-scoped HTTP endpoints — ``GET/PUT/DELETE .../rows/{row}...`` —
+        carry ONLY ``row_id``/``column_id`` in their URL, no ``notebook_id``
+        or ``table_id`` segment at all, unlike every session-facing knowhow
+        route. The request's notebook-access guard must resolve
+        row -> table -> notebook BEFORE it can even check access, since
+        there is no other source of that information in the request).
+        Returns ``None`` when the row does not exist — mirrors
+        ``get_notebook_asset``'s "auxiliary lookup, caller decides" contract
+        rather than ``get_knowhow_table``'s KeyError-on-missing convention
+        (this is a lookup a caller is expected to probe defensively, not one
+        that assumes its target already exists)."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT r.table_id AS table_id, t.notebook_id AS notebook_id "
+                "FROM knowhow_rows r JOIN knowhow_tables t ON t.id = r.table_id "
+                "WHERE r.id = ?",
+                (row_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def list_knowhow_cell_code(self, table_id: str) -> list[dict]:
         """Every code attachment in one table, in (row position, column
         position) order — the grid's own reading order, so UI badge

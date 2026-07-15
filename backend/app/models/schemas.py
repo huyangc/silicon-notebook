@@ -1139,3 +1139,89 @@ class KnowhowAppendResult(BaseModel):
 
 class KnowhowCellOptimizeResult(BaseModel):
     suggestion_md: str
+
+
+# --- PR-2+3 Task 10: Agent surface (HTTP+MCP shared core) --------------------
+# The agent-facing read/write surface — table list, discrimination set, row
+# detail, and cell-level code attachments — served under /agent/knowhow/...
+# by knowhow_agent_routes.py, reachable by EITHER a signed-in session or an
+# Agent Bearer token carrying the knowledge:read (reads) / knowhow:code (code
+# writes) scope (see app.api.deps.require_user_or_agent/user_or_agent_scope).
+# MCP tools in app.api.mcp_server share the exact same
+# app.services.knowhow.api functions and wrap their dict output in
+# _budget_response instead of validating it against these response models.
+
+
+class KnowhowAgentColumn(BaseModel):
+    id: str
+    name: str
+    kind: str
+
+
+class KnowhowAgentTable(BaseModel):
+    id: str
+    title: str
+    description: str = ""
+    row_count: int = 0
+    anchor_column_id: Optional[str] = None
+    columns: List[KnowhowAgentColumn] = Field(default_factory=list)
+
+
+class KnowhowDiscriminationMethod(BaseModel):
+    column_id: str
+    column_name: str
+    text: str
+    # Design doc §⑥-4's three-state freshness derivation, surfaced per method
+    # so a batch code-generation agent can skip already-implemented/non-stale
+    # cells without a separate get_knowhow_row round trip per row. Not part
+    # of the task brief's terse endpoint-shape listing, but explicitly called
+    # for by the design doc's own "判别集只带 code_status 三态不带代码（控体
+    # 积）" — included here (never the code body itself, keeping the
+    # discrimination payload lean).
+    code_status: str
+
+
+class KnowhowDiscriminationRow(BaseModel):
+    row_id: str
+    title: str
+    methods: List[KnowhowDiscriminationMethod] = Field(default_factory=list)
+
+
+class KnowhowDiscriminationSet(BaseModel):
+    rows: List[KnowhowDiscriminationRow] = Field(default_factory=list)
+
+
+class KnowhowRowCell(BaseModel):
+    column_id: str
+    column_name: str
+    kind: str
+    text: str
+    steps: Optional[List[str]] = None
+    items: Optional[List[str]] = None
+
+
+class KnowhowRowCode(BaseModel):
+    column_id: str
+    language: str
+    code_text: str
+    status: str
+    updated_at: str
+    updated_by: str
+
+
+class KnowhowRowDetail(BaseModel):
+    title: str
+    cells: List[KnowhowRowCell] = Field(default_factory=list)
+    code: List[KnowhowRowCode] = Field(default_factory=list)
+
+
+class KnowhowCellCodePut(BaseModel):
+    code_text: str
+    language: str = ""
+
+
+class KnowhowCellCodeResult(BaseModel):
+    code_text: Optional[str] = None
+    language: Optional[str] = None
+    status: str
+    updated_at: Optional[str] = None

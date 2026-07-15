@@ -702,6 +702,289 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
         raise KnowhowOptimizeUnavailable("优化服务暂时不可用，请稍后再试") from exc
 
 
+# --- PR-2+3 Task 10: Agent surface (HTTP+MCP shared core, design doc §⑥) ----
+#
+# Every function below is a PURE transform over an already-fetched wire-shaped
+# table dict (``to_wire_table`` output) plus, where needed, an already-fetched
+# code-attachment list — the ROUTE (knowhow_agent_routes.py) and the MCP tools
+# (mcp_server.py) each do their OWN repo reads (needed anyway for their own
+# notebook-membership auth check) and hand the result in here, so HTTP and MCP
+# share 100% of this module's logic and never re-diverge on shape/rules. The
+# three cell-code CRUD functions are the one exception (they DO take ``repo``
+# directly) — a PUT must read the CURRENT cell text and write a new hash in
+# the same call, which cannot be expressed as a pure pre-fetched-dict
+# transform.
+#
+# ``hashlib``/``textops`` are imported HERE (not hoisted to the file's own
+# top-of-module import block) for the same zero-line-shift reason documented
+# above build_template_xlsx/optimize_cell: build_projector's body is EXACT-
+# LINE pinned (lines 133-152) by test_repository_callers_static.py's
+# INDEPENDENT_PRIVATE_SITES and test_repository_surface_manifest.py's
+# TASK6_KNOWHOW_ALLOWED_CONSUMERS; inserting anything above those lines
+# (including a top-of-file import) would shift them and break both guards.
+import hashlib
+
+from app.services.knowhow import textops
+
+
+def cell_net_text(content_md: "str | None") -> str:
+    """A cell's net (markup-stripped) display text. MUST mirror
+    ``KnowhowProjector._write_elements``'s own ``cell_nets`` formula EXACTLY
+    (``textops.strip_images(cells.get(column['id'], '')).strip()`` — see
+    ``projection.py``'s ``project_table`` loop) so the agent surface's
+    displayed text and ``cell_content_hash``'s basis never diverge from what
+    the projector itself computed for the SAME cell. Divergence here would
+    silently corrupt every code-attachment freshness derivation (design doc
+    §⑥-4) into false-stale or false-implemented."""
+    return textops.strip_images(content_md or "").strip()
+
+
+def cell_content_hash(content_md: "str | None") -> str:
+    """sha256 hex of a cell's net text — MUST mirror
+    ``KnowhowProjector._write_elements``'s own ``content_hash`` formula
+    exactly (``hashlib.sha256(text.encode('utf-8')).hexdigest()`` where
+    ``text`` is ``cell_net_text``'s own output), so a code attachment's
+    stored ``cell_content_hash`` (computed via THIS function at PUT time)
+    compares correctly against the CURRENT cell hash at read time."""
+    return hashlib.sha256(cell_net_text(content_md).encode("utf-8")).hexdigest()
+
+
+def _cell_nets(columns: list[dict], cells: dict[str, str]) -> dict[str, str]:
+    return {column["id"]: cell_net_text(cells.get(column["id"], "")) for column in columns}
+
+
+def _row_title(
+    anchor_column_id: "str | None", columns: list[dict],
+    cell_nets: dict[str, str], position: int,
+) -> str:
+    """Mirrors ``projection.py``'s private ``_resolve_row_title`` (design doc
+    §① "行标题自动合成") as a deliberate, documented TWIN rather than a
+    cross-module reach-in onto that function's own leading-underscore name —
+    projection.py is not in this task's file list, and both twins are built
+    from the exact same public ``textops`` primitives (``node_name``/
+    ``compose_row_title``), so there is nothing project-specific left to
+    import: the anchor cell's own ``node_name`` when the table has an anchor
+    column AND this row's anchor cell has content; otherwise a synthesized
+    ``textops.compose_row_title``; ``"行{position+1}"`` when every cell is
+    empty."""
+    if anchor_column_id:
+        anchor_text = cell_nets.get(anchor_column_id, "")
+        if anchor_text:
+            return textops.node_name(anchor_text)
+    composed = textops.compose_row_title([cell_nets[c["id"]] for c in columns])
+    return composed or f"行{position + 1}"
+
+
+def _code_status(
+    cells: dict[str, str], column_id: str, attachment: "dict | None",
+) -> str:
+    """Design doc §⑥-4's three-state freshness derivation: no attachment ->
+    ``none``; attachment's stored hash matches the cell's CURRENT hash ->
+    ``implemented``; anything else (the cell changed since the attachment was
+    saved) -> ``stale``. Never persisted — always recomputed at read time."""
+    if attachment is None:
+        return "none"
+    current_hash = cell_content_hash(cells.get(column_id, ""))
+    return "implemented" if attachment["cell_content_hash"] == current_hash else "stale"
+
+
+def _find_by_id(items: list[dict], item_id: str) -> "dict | None":
+    return next((item for item in items if item["id"] == item_id), None)
+
+
+def agent_table_summary(table: dict) -> dict:
+    """One ``to_wire_table``-shaped table -> the agent tables-list shape
+    (task brief: "概要+列(kind)+行数+anchor_column_id")."""
+    return {
+        "id": table["id"],
+        "title": table["title"],
+        "description": table.get("description") or "",
+        "row_count": len(table.get("rows", [])),
+        "anchor_column_id": table.get("anchor_column_id"),
+        "columns": [
+            {"id": column["id"], "name": column["name"], "kind": column["kind"]}
+            for column in table["columns"]
+        ],
+    }
+
+
+def list_tables_for_agent(repo: Any, notebook_id: str) -> list[dict]:
+    """Agent-surface tables-list (design doc §⑥-1 / task brief): every
+    column's kind + row_count + anchor_column_id per table — richer than
+    ``list_knowhow_tables``'s own cheap batched-count summary (title/
+    description/row_count only), so this re-fetches each table's FULL detail
+    (``to_wire_table``) rather than reusing that summary. A notebook's
+    knowhow table COUNT is small (a handful, not hundreds — design doc's
+    "百行内" scale ceiling is per-TABLE row count, not table count), so one
+    extra SELECT per table here is not a real cost."""
+    summaries = repo.list_knowhow_tables(notebook_id)
+    return [
+        agent_table_summary(to_wire_table(repo.get_knowhow_table(summary["id"])))
+        for summary in summaries
+    ]
+
+
+def build_discrimination_set(table: dict, code_attachments: list[dict]) -> dict:
+    """Pure transform: ``table`` is a ``to_wire_table``-shaped detail already
+    scoped to the right notebook by the caller; ``code_attachments`` is that
+    table's full ``list_knowhow_cell_code`` result. Design doc §⑥-2/§⑥-4 +
+    task brief: every row's title + its procedure-kind columns' net text +
+    per-method code_status, in column order; raises ``ValueError`` (friendly
+    Chinese, routes.py's existing 400 idiom) for a table with no anchor
+    (row-title) column — a "记录型" table has no row identity to discriminate
+    by."""
+    anchor_column_id = table.get("anchor_column_id")
+    if not anchor_column_id:
+        raise ValueError("该表未设置行标题列，不支持判别集")
+    columns = table["columns"]
+    procedure_columns = [column for column in columns if column["kind"] == "procedure"]
+    code_by_row_column = {
+        (attachment["row_id"], attachment["column_id"]): attachment
+        for attachment in code_attachments
+    }
+    rows_out = []
+    for row in table["rows"]:
+        cells = row["cells"]
+        cell_nets = _cell_nets(columns, cells)
+        title = _row_title(anchor_column_id, columns, cell_nets, row["position"])
+        methods = [
+            {
+                "column_id": column["id"],
+                "column_name": column["name"],
+                "text": cell_nets[column["id"]],
+                "code_status": _code_status(
+                    cells, column["id"],
+                    code_by_row_column.get((row["id"], column["id"])),
+                ),
+            }
+            for column in procedure_columns
+        ]
+        rows_out.append({"row_id": row["id"], "title": title, "methods": methods})
+    return {"rows": rows_out}
+
+
+def build_row_detail(table: dict, row_id: str, code_attachments: list[dict]) -> dict:
+    """Pure transform: ``table`` is a ``to_wire_table``-shaped detail already
+    scoped to the right notebook; ``code_attachments`` is that table's full
+    ``list_knowhow_cell_code`` result (filtered to this row below). Design doc
+    §⑥-3/§⑥-4 + task brief: every column's kind/net-text (+ ``steps`` for a
+    procedure column, ``items`` for an entity column), plus this row's
+    existing code attachments (never a synthetic 'none' placeholder entry —
+    absence from ``code`` IS the 'none' state). Raises ``KeyError`` if
+    ``row_id`` is not one of ``table``'s rows."""
+    row = _find_by_id(table["rows"], row_id)
+    if row is None:
+        raise KeyError(row_id)
+    columns = table["columns"]
+    cells_raw = row["cells"]
+    cell_nets = _cell_nets(columns, cells_raw)
+    title = _row_title(table.get("anchor_column_id"), columns, cell_nets, row["position"])
+    cells = []
+    for column in columns:
+        text = cell_nets[column["id"]]
+        entry = {
+            "column_id": column["id"], "column_name": column["name"],
+            "kind": column["kind"], "text": text,
+        }
+        if column["kind"] == "procedure":
+            entry["steps"] = textops.parse_steps(text)
+        elif column["kind"] == "entity":
+            entry["items"] = textops.split_tools(text)
+        cells.append(entry)
+    code = [
+        {
+            "column_id": attachment["column_id"],
+            "language": attachment["language"],
+            "code_text": attachment["code_text"],
+            "status": _code_status(cells_raw, attachment["column_id"], attachment),
+            "updated_at": attachment["updated_at"],
+            "updated_by": attachment["updated_by"],
+        }
+        for attachment in code_attachments
+        if attachment["row_id"] == row_id
+    ]
+    return {"title": title, "cells": cells, "code": code}
+
+
+def cell_code_view(
+    cells: dict[str, str], column_id: str, attachment: "dict | None",
+) -> dict:
+    """Shared response shape for GET/PUT's single-cell code endpoint (design
+    doc §⑥-4): the three-state freshness derivation plus the attachment's own
+    fields, or an all-``None``/``'none'`` shape when no attachment exists yet
+    (a legitimate 200, never a 404 — "no code yet" is a normal state, not an
+    error)."""
+    if attachment is None:
+        return {"code_text": None, "language": None, "status": "none", "updated_at": None}
+    return {
+        "code_text": attachment["code_text"],
+        "language": attachment["language"],
+        "status": _code_status(cells, column_id, attachment),
+        "updated_at": attachment["updated_at"],
+    }
+
+
+def get_cell_code(repo: Any, row_id: str, column_id: str) -> dict:
+    """GET .../cells/{col}/code service core. Raises ``KeyError`` for an
+    unknown row, ``ValueError`` ("格子定位不合法") for a column that does not
+    belong to this row's table (``validate_cell_target``'s own contract) —
+    routes.py's existing 400 idiom for the latter, matching every other
+    knowhow cell-scoped endpoint (PATCH cell, optimize)."""
+    location = repo.get_knowhow_row_location(row_id)
+    if location is None:
+        raise KeyError(row_id)
+    repo.validate_cell_target(row_id, column_id)
+    table = repo.get_knowhow_table(location["table_id"])
+    row = _find_by_id(table["rows"], row_id)
+    if row is None:
+        raise KeyError(row_id)
+    attachment = repo.get_knowhow_cell_code(row_id, column_id)
+    return cell_code_view(row["cells"], column_id, attachment)
+
+
+def put_cell_code(
+    repo: Any, row_id: str, column_id: str, code_text: str, language: str,
+    updated_by: str,
+) -> dict:
+    """PUT .../cells/{col}/code service core (design doc §⑥-4): computes and
+    stores ``cell_content_hash`` at save time from the CURRENT cell's net
+    text (never the possibly-stale last-projected element hash — the
+    projector's background debounce means the two can transiently differ
+    right after an edit). Raises ``ValueError`` for blank ``code_text``
+    ("代码内容不能为空") or a cross-table (row, column) pair
+    ("格子定位不合法"), ``KeyError`` for an unknown row."""
+    if not str(code_text or "").strip():
+        raise ValueError("代码内容不能为空")
+    location = repo.get_knowhow_row_location(row_id)
+    if location is None:
+        raise KeyError(row_id)
+    repo.validate_cell_target(row_id, column_id)
+    table = repo.get_knowhow_table(location["table_id"])
+    row = _find_by_id(table["rows"], row_id)
+    if row is None:
+        raise KeyError(row_id)
+    content_hash = cell_content_hash(row["cells"].get(column_id, ""))
+    repo.upsert_knowhow_cell_code(
+        row_id, column_id, code_text, language or "", updated_by, content_hash,
+    )
+    attachment = repo.get_knowhow_cell_code(row_id, column_id)
+    return cell_code_view(row["cells"], column_id, attachment)
+
+
+def delete_cell_code(repo: Any, row_id: str, column_id: str) -> None:
+    """DELETE .../cells/{col}/code service core. Idempotent (the store's own
+    delete is a silent no-op when nothing exists to delete) — but an unknown
+    ROW or a cross-table (row, column) pair still fails loud (``KeyError``/
+    ``ValueError``), consistent with every other cell-scoped endpoint's
+    validation, rather than silently no-op-ing an address that was never
+    valid in the first place."""
+    location = repo.get_knowhow_row_location(row_id)
+    if location is None:
+        raise KeyError(row_id)
+    repo.validate_cell_target(row_id, column_id)
+    repo.delete_knowhow_cell_code(row_id, column_id)
+
+
 __all__ = [
     "VALID_KINDS",
     "preview_import",
@@ -719,4 +1002,14 @@ __all__ = [
     "commit_append",
     "KnowhowOptimizeUnavailable",
     "optimize_cell",
+    "cell_net_text",
+    "cell_content_hash",
+    "agent_table_summary",
+    "list_tables_for_agent",
+    "build_discrimination_set",
+    "build_row_detail",
+    "cell_code_view",
+    "get_cell_code",
+    "put_cell_code",
+    "delete_cell_code",
 ]

@@ -1000,8 +1000,159 @@ def create_memory_mcp(
             "requires_user_confirmation": True,
         }, field_limits={"title": 300, "created_by_agent": 200})
 
+    # --- knowhow-tables PR-2+3 Task 10: agent surface (design doc §⑥) ------
+    # Same service core as app.api.knowhow_agent_routes's HTTP endpoints
+    # (app.services.knowhow.api) — imported here (not hoisted to this file's
+    # own top-of-module import block) to avoid shifting this file's own
+    # EXACT-LINE-pinned consumer sites above (user_can_read_notebook:656,
+    # get_notebook:661/698, unified_kg_status:699, agent_memory_hits:743,
+    # search_notebook:813, ask:909 — see
+    # test_repository_surface_manifest.py); every tool below reuses
+    # _selected_notebook exactly like search_notebook_context/ask_notebook,
+    # so no bespoke auth flow is needed here even though this feature's HTTP
+    # side has no notebook_id in its URL at all.
+    from app.services.knowhow import api as knowhow_api
+
+    @server.tool(
+        description="List knowhow tables (structured tabular knowledge) in the selected notebook."
+    )
+    async def list_knowhow_tables(ctx: Context, limit: int = RESULT_LIMIT) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "knowledge:read"
+        )
+
+        def load() -> list[dict[str, Any]]:
+            with _owner_request_context(principal):
+                return knowhow_api.list_tables_for_agent(repo, notebook_id)
+
+        rows = await anyio.to_thread.run_sync(load)
+        cap = max(1, min(int(limit), RESULT_LIMIT))
+        return _budget_response(
+            {"notebook_id": notebook_id, "items": rows[:cap]},
+            initial_omitted_items=max(0, len(rows) - cap),
+            field_limits={"title": 300, "description": 500, "name": 200, "kind": 60},
+        )
+
+    @server.tool(
+        description=(
+            "Get the discrimination set for one knowhow table: every row's "
+            "title plus its procedure/method columns' net text and "
+            "code_status (implemented/stale/none), for picking which "
+            "rows/methods still need generated code. The table must have a "
+            "row-title (anchor) column configured."
+        )
+    )
+    async def get_knowhow_discrimination(table_id: str, ctx: Context) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "knowledge:read"
+        )
+
+        def load() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                table = repo.get_knowhow_table(table_id)
+                if table["notebook_id"] != notebook_id:
+                    raise KeyError(table_id)
+                wire_table = knowhow_api.to_wire_table(table)
+                code_attachments = repo.list_knowhow_cell_code(table_id)
+                return knowhow_api.build_discrimination_set(wire_table, code_attachments)
+
+        return _budget_response(
+            await anyio.to_thread.run_sync(load),
+            field_limits={
+                "title": 200, "column_name": 200, "text": TEXT_LIMIT,
+                "code_status": 20,
+            },
+        )
+
+    @server.tool(
+        description=(
+            "Get one knowhow row's full machine view: every column's "
+            "kind/net-text (plus steps for a procedure column, items for an "
+            "entity column), plus any existing code attachments for its "
+            "columns."
+        )
+    )
+    async def get_knowhow_row(row_id: str, ctx: Context) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "knowledge:read"
+        )
+
+        def load() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                location = repo.get_knowhow_row_location(row_id)
+                if location is None or location["notebook_id"] != notebook_id:
+                    raise KeyError(row_id)
+                table = knowhow_api.to_wire_table(
+                    repo.get_knowhow_table(location["table_id"])
+                )
+                code_attachments = repo.list_knowhow_cell_code(location["table_id"])
+                return knowhow_api.build_row_detail(table, row_id, code_attachments)
+
+        return _budget_response(
+            await anyio.to_thread.run_sync(load),
+            field_limits={
+                "title": 200, "column_name": 200, "kind": 30, "text": TEXT_LIMIT,
+                "language": 60, "code_text": TEXT_LIMIT, "status": 20,
+                "updated_by": 200, "updated_at": 60,
+            },
+        )
+
+    @server.tool(
+        description=(
+            "Save a code attachment for one knowhow cell (design doc §⑥-4): "
+            "the code body itself, stored alongside the cell — never "
+            "indexed, embedded, or retrievable as notebook knowledge. "
+            "Requires the knowhow:code scope."
+        )
+    )
+    async def put_knowhow_cell_code(
+        row_id: str, column_id: str, code_text: str, ctx: Context, language: str = "",
+    ) -> dict[str, Any]:
+        repo = repository_provider()
+        principal, notebook_id = await anyio.to_thread.run_sync(
+            _selected_notebook, ctx, repo, "knowhow:code"
+        )
+
+        def run() -> dict[str, Any]:
+            with _owner_request_context(principal):
+                location = repo.get_knowhow_row_location(row_id)
+                if location is None or location["notebook_id"] != notebook_id:
+                    raise KeyError(row_id)
+                return knowhow_api.put_cell_code(
+                    repo, row_id, column_id, code_text, language,
+                    principal.profile_name,
+                )
+
+        return _budget_response(
+            await anyio.to_thread.run_sync(run),
+            field_limits={"language": 60, "code_text": TEXT_LIMIT, "status": 20},
+        )
+
     app = AgentBearerMiddleware(
         server.streamable_http_app(), repository_provider,
         require_https=require_https,
     )
     return server, app
+
+
+# knowhow-tables PR-2+3 Task 10: extend the public tool manifest with the
+# four new tools registered above. Appended here — reassigning the module-
+# level name rather than editing the original 7-tuple literal near the top
+# of the file — to avoid shifting THIS FILE's own exact-line-pinned consumer
+# sites (user_can_read_notebook:656, get_notebook:661/698,
+# unified_kg_status:699, agent_memory_hits:743, search_notebook:813, ask:909;
+# see test_repository_surface_manifest.py): inserting anything above line 909
+# would renumber every one of them. PUBLIC_TOOLS is a pure documentation/
+# test-assertion manifest (never consulted by create_memory_mcp itself to
+# drive registration — that happens via the literal @server.tool decorators
+# above), so reassigning it here, after the function that populates the
+# actual server, is equivalent to editing it in place.
+PUBLIC_TOOLS = PUBLIC_TOOLS + (
+    "list_knowhow_tables",
+    "get_knowhow_discrimination",
+    "get_knowhow_row",
+    "put_knowhow_cell_code",
+)

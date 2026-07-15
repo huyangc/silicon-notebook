@@ -1421,6 +1421,75 @@
           "title": "KgSearchResponse",
           "type": "object"
         },
+        "KnowhowAgentColumn": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "kind"
+          ],
+          "title": "KnowhowAgentColumn",
+          "type": "object"
+        },
+        "KnowhowAgentTable": {
+          "properties": {
+            "anchor_column_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anchor Column Id"
+            },
+            "columns": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowAgentColumn"
+              },
+              "title": "Columns",
+              "type": "array"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "row_count": {
+              "default": 0,
+              "title": "Row Count",
+              "type": "integer"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "title": "KnowhowAgentTable",
+          "type": "object"
+        },
         "KnowhowAppendDuplicateTitle": {
           "properties": {
             "row_index": {
@@ -1488,6 +1557,70 @@
             "added"
           ],
           "title": "KnowhowAppendResult",
+          "type": "object"
+        },
+        "KnowhowCellCodePut": {
+          "properties": {
+            "code_text": {
+              "title": "Code Text",
+              "type": "string"
+            },
+            "language": {
+              "default": "",
+              "title": "Language",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code_text"
+          ],
+          "title": "KnowhowCellCodePut",
+          "type": "object"
+        },
+        "KnowhowCellCodeResult": {
+          "properties": {
+            "code_text": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code Text"
+            },
+            "language": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Language"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Updated At"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "title": "KnowhowCellCodeResult",
           "type": "object"
         },
         "KnowhowCellOptimizeResult": {
@@ -1629,6 +1762,72 @@
           "title": "KnowhowColumnPatch",
           "type": "object"
         },
+        "KnowhowDiscriminationMethod": {
+          "properties": {
+            "code_status": {
+              "title": "Code Status",
+              "type": "string"
+            },
+            "column_id": {
+              "title": "Column Id",
+              "type": "string"
+            },
+            "column_name": {
+              "title": "Column Name",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "column_id",
+            "column_name",
+            "text",
+            "code_status"
+          ],
+          "title": "KnowhowDiscriminationMethod",
+          "type": "object"
+        },
+        "KnowhowDiscriminationRow": {
+          "properties": {
+            "methods": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowDiscriminationMethod"
+              },
+              "title": "Methods",
+              "type": "array"
+            },
+            "row_id": {
+              "title": "Row Id",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "row_id",
+            "title"
+          ],
+          "title": "KnowhowDiscriminationRow",
+          "type": "object"
+        },
+        "KnowhowDiscriminationSet": {
+          "properties": {
+            "rows": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowDiscriminationRow"
+              },
+              "title": "Rows",
+              "type": "array"
+            }
+          },
+          "title": "KnowhowDiscriminationSet",
+          "type": "object"
+        },
         "KnowhowImportPreview": {
           "properties": {
             "anchor_suggestion": {
@@ -1754,6 +1953,100 @@
           "title": "KnowhowRow",
           "type": "object"
         },
+        "KnowhowRowCell": {
+          "properties": {
+            "column_id": {
+              "title": "Column Id",
+              "type": "string"
+            },
+            "column_name": {
+              "title": "Column Name",
+              "type": "string"
+            },
+            "items": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Items"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "steps": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Steps"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "column_id",
+            "column_name",
+            "kind",
+            "text"
+          ],
+          "title": "KnowhowRowCell",
+          "type": "object"
+        },
+        "KnowhowRowCode": {
+          "properties": {
+            "code_text": {
+              "title": "Code Text",
+              "type": "string"
+            },
+            "column_id": {
+              "title": "Column Id",
+              "type": "string"
+            },
+            "language": {
+              "title": "Language",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            },
+            "updated_by": {
+              "title": "Updated By",
+              "type": "string"
+            }
+          },
+          "required": [
+            "column_id",
+            "language",
+            "code_text",
+            "status",
+            "updated_at",
+            "updated_by"
+          ],
+          "title": "KnowhowRowCode",
+          "type": "object"
+        },
         "KnowhowRowCreate": {
           "properties": {
             "cells": {
@@ -1776,6 +2069,33 @@
             }
           },
           "title": "KnowhowRowCreate",
+          "type": "object"
+        },
+        "KnowhowRowDetail": {
+          "properties": {
+            "cells": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowRowCell"
+              },
+              "title": "Cells",
+              "type": "array"
+            },
+            "code": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowRowCode"
+              },
+              "title": "Code",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "title": "KnowhowRowDetail",
           "type": "object"
         },
         "KnowhowTableCreate": {
@@ -5251,6 +5571,270 @@
             }
           },
           "summary": "Revoke Agent Token"
+        }
+      },
+      "/api/agent/knowhow/rows/{row_id}": {
+        "get": {
+          "operationId": "get_agent_row_api_agent_knowhow_rows__row_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowRowDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Agent Row"
+        }
+      },
+      "/api/agent/knowhow/rows/{row_id}/cells/{column_id}/code": {
+        "delete": {
+          "operationId": "delete_agent_cell_code_api_agent_knowhow_rows__row_id__cells__column_id__code_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Agent Cell Code"
+        },
+        "get": {
+          "operationId": "get_agent_cell_code_api_agent_knowhow_rows__row_id__cells__column_id__code_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowCellCodeResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Agent Cell Code"
+        },
+        "put": {
+          "operationId": "put_agent_cell_code_api_agent_knowhow_rows__row_id__cells__column_id__code_put",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowCellCodePut"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowCellCodeResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Put Agent Cell Code"
+        }
+      },
+      "/api/agent/knowhow/tables": {
+        "get": {
+          "operationId": "list_agent_tables_api_agent_knowhow_tables_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/KnowhowAgentTable"
+                    },
+                    "title": "Response List Agent Tables Api Agent Knowhow Tables Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Agent Tables"
+        }
+      },
+      "/api/agent/knowhow/tables/{table_id}/discrimination": {
+        "get": {
+          "operationId": "get_agent_discrimination_api_agent_knowhow_tables__table_id__discrimination_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowDiscriminationSet"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Agent Discrimination"
         }
       },
       "/api/answers/{answer_id}/feedback": {

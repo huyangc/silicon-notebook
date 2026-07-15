@@ -3370,6 +3370,10 @@ class SQLiteRepository:
     def list_knowhow_cell_code(self, table_id: str) -> list:
         return self._runtime.knowhow_store.list_knowhow_cell_code(table_id)
 
+    # --- knowhow-tables PR-2+3 Task 10: agent surface one-hop delegate ----
+    def get_knowhow_row_location(self, row_id: str) -> Optional[dict]:
+        return self._runtime.knowhow_store.get_knowhow_row_location(row_id)
+
 
 def _now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()

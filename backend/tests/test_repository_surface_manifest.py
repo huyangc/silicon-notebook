@@ -3216,6 +3216,34 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     ) not in recorded
 
 
+# Task 10 (knowhow-tables PR-2+3): the agent surface. get_knowhow_row_location
+# is a brand-new facade delegate (KnowhowStore.get_knowhow_row_location,
+# resolving a bare row_id to its {table_id, notebook_id} for the new
+# session-or-agent-token HTTP/MCP surface, which carries no notebook_id/
+# table_id in its own URL at all) — exempt its consumer-site comparison
+# entirely, exactly like TASK1_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS does for the
+# sibling store methods Task 1 added (its own many call sites, across
+# knowhow_agent_routes.py/mcp_server.py/services/knowhow/api.py, need no
+# per-site registration once the member itself is popped from comparison).
+TASK10_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS = {"get_knowhow_row_location"}
+# app.api.deps's new _resolve_session_user (the "session OR Agent token"
+# dependency's session branch, appended at EOF of deps.py — see that file's
+# own Task 10 section header) reaches two PRE-EXISTING frozen members
+# (resolve_session/current_user) a SECOND time, at new lines distinct from
+# get_current_user's own already-registered call sites. deps.py is itself
+# line-number-insensitive (LINE_NUMBER_INSENSITIVE_FILES above), but that
+# only governs the FINAL normalized-string comparison — the raw exact-line
+# pre-filter (_member_file_site_allowed's frozen=False branch, production
+# files require an exact ACTIVE_PRODUCTION_MEMBER_SITES/allowed_sites match)
+# still needs this SECOND real-line pin registered, mirroring the pattern
+# TASK6_KNOWHOW_ALLOWED_CONSUMERS uses for api.py's own _runtime/settings
+# reaches.
+TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS = {
+    ("resolve_session", "backend/app/api/deps.py:142"),
+    ("current_user", "backend/app/api/deps.py:147"),
+}
+
+
 def test_static_repository_consumer_scan_matches_manifest_exactly():
     recorded = {
         name: set(record["consumers"]) for name, record in _surface().items()
@@ -3230,7 +3258,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         (member, f"{file}:{line}")
         for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS | TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS | TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS | TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
@@ -3276,6 +3304,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS
         | TASK4_PAPER_META_ALLOWED_NEW_MEMBERS
         | TASK1_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
+        | TASK10_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)
