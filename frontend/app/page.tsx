@@ -896,6 +896,7 @@ export default function Home() {
   const [kgRefreshBusy, setKgRefreshBusy] = useState(false);
   const [kgRangeBusy, setKgRangeBusy] = useState(false);
   const [buildingKg, setBuildingKg] = useState(false);
+  const [backfillingMeta, setBackfillingMeta] = useState(false);
   const [relinkingKg, setRelinkingKg] = useState(false);
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
   const [scaleIndexStatus, setScaleIndexStatus] = useState<ScaleIndexStatus | null>(null);
@@ -3493,9 +3494,11 @@ export default function Home() {
                   <button
                     type="button"
                     className="button secondary"
+                    disabled={backfillingMeta}
                     title="为已上传的论文补齐作者、机构等信息"
                     onClick={async () => {
-                      if (!currentNotebookId) return;
+                      if (!currentNotebookId || backfillingMeta) return;
+                      setBackfillingMeta(true);
                       try {
                         const res = await api<{ queued: number }>(
                           `/notebooks/${currentNotebookId}/paper-meta/backfill`,
@@ -3506,10 +3509,12 @@ export default function Home() {
                           : "论文信息已是最新，无需补全");
                       } catch (err) {
                         reportError(err);
+                      } finally {
+                        setBackfillingMeta(false);
                       }
                     }}
                   >
-                    补全论文信息
+                    {backfillingMeta ? "补全中…" : "补全论文信息"}
                   </button>
                 )}
                 {!isReader && currentNotebookId && sources.length > 0 && (

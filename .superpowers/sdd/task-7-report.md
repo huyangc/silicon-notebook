@@ -103,3 +103,41 @@ every other button in this panel, which all declare it explicitly.
 ## Commit
 
 `feat(frontend): paper metadata display, author search hint + backfill entry`
+
+## Fix round 1 (reviewer findings)
+
+Two Important issues fixed, both mirroring one-line precedents in the same
+files:
+
+1. **Backfill button in-flight guard** (`frontend/app/page.tsx`): added
+   `const [backfillingMeta, setBackfillingMeta] = useState(false);` next to
+   the sibling `buildingKg` state (`:898-899`). Button now has
+   `disabled={backfillingMeta}`, an `onClick` early-return
+   (`!currentNotebookId || backfillingMeta`), `setBackfillingMeta(true)`
+   before the POST, reset in `finally`, and a sibling-consistent in-flight
+   label swap: `{backfillingMeta ? "补全中…" : "补全论文信息"}` (same
+   verb+中… pattern as `补抽中…`/`全量构建中…` at `:3529`/`:3555`).
+   Repeated clicks can no longer stack duplicate backfill POSTs (each of
+   which would have spawned a fresh background LLM batch — backend submit
+   has no dedup). Guarding the round-trip is sufficient per the reviewer;
+   the backend job itself is fire-and-forget.
+
+2. **`.paper-doi` link theming** (`frontend/app/globals.css:4305`): the
+   anchor previously inherited browser-default styling (no global `a` reset
+   exists). Added `color: var(--blue); text-decoration: none;` to the
+   existing rule, matching the app's own link convention
+   `.source-link-button` (`:3465-3473`). Hover check as instructed: NO
+   sibling uses hover underline — `.link-button` is always-underlined with
+   hover color-darken (`:2868-2887`), `.source-link-button:hover` is a
+   background tint on a 30px icon button (`:3475-3477`),
+   `.notebook-memory-link:hover` changes border/background (`:415-418`) —
+   so no hover-underline rule was added; base properties only, per
+   "check and match".
+
+Verification (fix round): `npx tsc --noEmit` → 0 errors, exit 0;
+`npm test` → 281/281 pass; curly-quote deletion check with explicit
+codepoints `git diff frontend/app/page.tsx | grep -cP
+'^-.*[\x{201C}\x{201D}]'` → **0** (the one `-` line touching the button
+label contains no curly quotes). Diff contains exactly the two fixes.
+
+Commit: `fix(frontend): backfill button in-flight guard + DOI link theme styling`
