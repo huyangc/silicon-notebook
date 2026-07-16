@@ -522,7 +522,7 @@ class SourceStore:
             self.paper_meta_for_sources(db, [row["id"]]).get(row["id"])
             if paper_meta is _UNSET else paper_meta
         )
-        return SourceSummary(
+        summary = SourceSummary(
             id=row["id"],
             notebook_id=row["notebook_id"],
             title=row["title"],
@@ -543,6 +543,8 @@ class SourceStore:
             pub_year=pm["pub_year"] if pm else None,
             venue=pm["venue"] if pm else None,
         )
+        summary.paper_meta_status = self._paper_meta_status_for(row, pm)
+        return summary
 
     def sources_from_rows(self, db: sqlite3.Connection, rows: List[sqlite3.Row]) -> List[SourceSummary]:
         """Batched sibling of source_from_row for a PAGE of source rows (house
@@ -604,7 +606,8 @@ class SourceStore:
         out: List[SourceSummary] = []
         for row in rows:
             sid = row["id"]
-            out.append(SourceSummary(
+            pm = paper_meta.get(sid)
+            summary = SourceSummary(
                 id=sid,
                 notebook_id=row["notebook_id"],
                 title=row["title"],
@@ -621,11 +624,12 @@ class SourceStore:
                 source_url=row["source_url"] if "source_url" in row.keys() else "",
                 extraction_warning=_warning(sid),
                 kg_extracted=sid in kg_extracted_ids,
-                authors=[a["name"] for a in paper_meta[sid]["authors"]]
-                    if sid in paper_meta else [],
-                pub_year=paper_meta[sid]["pub_year"] if sid in paper_meta else None,
-                venue=paper_meta[sid]["venue"] if sid in paper_meta else None,
-            ))
+                authors=[a["name"] for a in pm["authors"]] if pm else [],
+                pub_year=pm["pub_year"] if pm else None,
+                venue=pm["venue"] if pm else None,
+            )
+            summary.paper_meta_status = self._paper_meta_status_for(row, pm)
+            out.append(summary)
         return out
 
     def extraction_warning(self, db: sqlite3.Connection, source_id: str) -> Optional[str]:
@@ -734,6 +738,28 @@ class SourceStore:
                 for a in authors
             ],
         }
+
+    @staticmethod
+    def _paper_meta_status_for(row: sqlite3.Row, meta: Optional[dict]) -> Optional[str]:
+        """纯函数:从 sources 行 + 可选 meta 字典派生四态。零 DB 访问(调用方已经
+        通过 paper_meta_for_sources 拿到了 meta,这里只做分类,不再查库)。
+
+        meta 不为 None(source_paper_meta 行存在,含标记行)时按 is_paper 分流
+        has_meta/not_paper;meta 为 None 时区分"合规但未抽取"(missing)与
+        "不适用"(None) —— 后者涵盖隐藏合成源(memory/knowhow)、非论文
+        doc_type、以及尚未解析完成的源,同 sources_missing_paper_meta 的候选口径。"""
+        if meta is not None:
+            return "has_meta" if meta.get("is_paper") else "not_paper"
+        source_type = row["source_type"] if "source_type" in row.keys() else ""
+        doc_type = row["doc_type"] if "doc_type" in row.keys() else ""
+        parse_status = row["parse_status"] if "parse_status" in row.keys() else ""
+        if source_type in ("memory", "knowhow"):
+            return None
+        if doc_type not in ("", "academic_paper"):
+            return None
+        if parse_status not in ("parsed", "extracting", "extracted"):
+            return None
+        return "missing"
 
     @staticmethod
     def paper_meta_model(meta: Optional[dict]) -> Optional[PaperMeta]:

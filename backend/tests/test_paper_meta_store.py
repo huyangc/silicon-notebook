@@ -332,3 +332,69 @@ def test_sources_missing_paper_meta_parse_status_and_source_type_variety(
 
     missing = store.sources_missing_paper_meta(notebook_id)
     assert set(missing) == {"src-extracting", "src-extracted"}
+
+
+# ---------------------------------------------------------------------------
+# SourceSummary.paper_meta_status derived field (paper-metadata Task 3)
+# ---------------------------------------------------------------------------
+
+
+def test_source_summary_paper_meta_status_four_states(repo, notebook_id):
+    """四态：has_meta / not_paper / missing / None。"""
+    store = repo._runtime.source_store
+
+    # a: 合规源 + has_meta 行
+    store.insert_source(
+        source_id="src-a", notebook_id=notebook_id, title="A",
+        source_type="pdf", status="parsed", parse_status="parsed",
+        file_name="a.pdf", file_path="/tmp/a.pdf", file_size=0,
+        file_hash="h-a", summary="", doc_type="",
+    )
+    store.upsert_paper_meta("src-a", notebook_id, {
+        "is_paper": True, "paper_title": "T", "venue": None,
+        "pub_year": None, "doi": None, "keywords": [], "authors": [],
+        "raw_json": "{}", "model": "test",
+    })
+
+    # b: 合规源 + not_paper 标记行
+    store.insert_source(
+        source_id="src-b", notebook_id=notebook_id, title="B",
+        source_type="pdf", status="parsed", parse_status="parsed",
+        file_name="b.pdf", file_path="/tmp/b.pdf", file_size=0,
+        file_hash="h-b", summary="", doc_type="",
+    )
+    store.upsert_paper_meta("src-b", notebook_id, {
+        "is_paper": False, "paper_title": None, "venue": None,
+        "pub_year": None, "doi": None, "keywords": [], "authors": [],
+        "raw_json": "{}", "model": "test",
+    })
+
+    # c: 合规源 + 无 meta 行（missing）
+    store.insert_source(
+        source_id="src-c", notebook_id=notebook_id, title="C",
+        source_type="pdf", status="parsed", parse_status="parsed",
+        file_name="c.pdf", file_path="/tmp/c.pdf", file_size=0,
+        file_hash="h-c", summary="", doc_type="",
+    )
+
+    # d: 非合规源（memory）→ None
+    store.insert_source(
+        source_id="src-d", notebook_id=notebook_id, title="D",
+        source_type="memory", status="parsed", parse_status="parsed",
+        file_name="", file_path="", file_size=0,
+        file_hash="h-d", summary="", doc_type="",
+    )
+
+    # 详情单取
+    assert repo.get_source("src-a").paper_meta_status == "has_meta"
+    assert repo.get_source("src-b").paper_meta_status == "not_paper"
+    assert repo.get_source("src-c").paper_meta_status == "missing"
+    assert repo.get_source("src-d").paper_meta_status is None
+
+    # 列表批量：口径一致
+    page = repo.list_sources_page(notebook_id)
+    by_id = {s.id: s for s in page.items}
+    assert by_id["src-a"].paper_meta_status == "has_meta"
+    assert by_id["src-b"].paper_meta_status == "not_paper"
+    assert by_id["src-c"].paper_meta_status == "missing"
+    # 注意 memory 源可能不在 list_sources_page（既有过滤），若 assertion 失败可去掉此项

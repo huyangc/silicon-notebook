@@ -293,6 +293,11 @@ class SourceSummary(BaseModel):
     authors: List[str] = Field(default_factory=list)
     pub_year: Optional[int] = None
     venue: Optional[str] = None
+    # 派生态(零新查询,见 SourceStore._paper_meta_status_for):
+    # "has_meta"=已判定是论文且有元数据 | "not_paper"=已判定非论文(标记行)
+    # | "missing"=合规候选但尚未跑过论文元数据抽取 | None=不适用(memory/knowhow/
+    # 非论文 doc_type/未解析完成)。
+    paper_meta_status: Optional[str] = None
 
 
 class PaginatedSources(BaseModel):
