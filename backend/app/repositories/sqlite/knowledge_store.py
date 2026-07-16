@@ -172,6 +172,19 @@ class KnowledgeStore:
         return source_ids, kg_source_ids
 
     @staticmethod
+    def sources_with_elements(db: sqlite3.Connection, notebook_id: str) -> set:
+        """该 notebook 下已产出 source_elements(已成功 parse)的 source_id 集合。
+        build_notebook_kg 用它把无 elements 的源(parse 未落地)排除出抽取 targets——
+        否则接地校验(build_records)没有 element 可绑,抽出的节点被整源丢弃、objects=0。"""
+        return {
+            row["source_id"] for row in db.execute(
+                "SELECT DISTINCT e.source_id FROM source_elements e "
+                "JOIN sources s ON s.id = e.source_id WHERE s.notebook_id = ?",
+                (notebook_id,),
+            ).fetchall()
+        }
+
+    @staticmethod
     def active_object_count(db: sqlite3.Connection, notebook_id: str) -> int:
         return int(db.execute(
             "SELECT COUNT(*) c FROM knowledge_objects "

@@ -234,3 +234,24 @@ def test_url_local_parse_never_falls_back_to_cloud(local_repo, monkeypatch):
     # → zero elements) — parsed to empty is surfaced, never a cloud fallback.
     assert src.parse_status == "extracted"
     assert "No extractable text" in src.error_message
+
+
+def test_elements_land_even_if_summary_llm_fails(repo, monkeypatch):
+    """摘要(LLM)在 elements 落地之后:即便 summarize 抛错(模拟 LLM 超时/hang 被打断),
+    该源的 source_elements 也已写入——避免 all 导入遇端点抽风集体丢 elements、KG 无从接地。"""
+    _patch_parse(monkeypatch, [_element("body text")])
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = _seed_queued_source(repo, nb.id)
+
+    def _boom(*a, **k):
+        raise RuntimeError("summary llm hang")
+    monkeypatch.setattr(repo._runtime.source_ingestion, "summarize_source", _boom)
+
+    repo.process_source(sid)   # summarize 抛被 except 记 failed,不外抛
+
+    with repo._connect() as db:
+        n_el = db.execute(
+            "SELECT COUNT(*) c FROM source_elements WHERE source_id=?", (sid,)
+        ).fetchone()["c"]
+    assert n_el > 0                                        # elements 已落地(摘要挪到写库之后)
+    assert repo.get_source(sid).parse_status == "failed"  # summarize 抛 → 源 failed,但 elements 保住

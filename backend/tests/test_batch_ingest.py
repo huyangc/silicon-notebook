@@ -276,6 +276,10 @@ def _seed_sources(repo, nb_id, n, prefix):
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sid, nb_id, f"S{i}", "document", f"s{i}.md", f"/tmp/s{i}.md",
                  0, f"h{i}", "", "", "parsed", now, now))
+            db.execute(   # 有 elements = 已成功 parse(build_notebook_kg 才会把它当抽取目标)
+                "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+                "text,metadata,created_at) VALUES (?,?,'paragraph','p1','body','{}',?)",
+                (f"el-{sid}", sid, now))
     return sids
 
 
@@ -1535,3 +1539,34 @@ def test_main_reparse_backfills_missing_elements(repo, tmp_path, monkeypatch):
         n_el = db.execute(
             "SELECT COUNT(*) c FROM source_elements WHERE source_id='src-x'").fetchone()["c"]
     assert n_el > 0                                 # reparse 真的 parse 了 → 有 elements
+
+
+def test_run_reparse_disables_incremental_fusion_during_run(repo, tmp_path, monkeypatch):
+    """run_reparse 批量期必须关 per-source 增量融合。否则每源抽完都触发
+    incremental_fuse_source(加载整库 cluster_map + 写 concept_clusters),几万源的库
+    O(N²) 卡死;收尾的 rebuild_unified_kg 已做一次全量融合(同 run_all/run_kg)。结束恢复原值。"""
+    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    nb_id = bi.ensure_notebook(repo, None, "nb-fuse")
+    now = "2026-01-01T00:00:00"
+    p = tmp_path / "a.md"
+    p.write_text("# A\n\nBody paragraph " + "z" * 200, encoding="utf-8")
+    with repo._write() as db:   # 无 elements 源 → reparse target → 走到末尾 rebuild
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-f", nb_id, "F", "document", p.name, str(p), 0, "hf", "", "", "parsed", now, now))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda s: None)
+    seen = {}
+
+    def _spy_rebuild(nb, progress=None, force=False, fresh=False):
+        seen["fusion_during"] = repo.settings.kg_incremental_fusion_enabled
+        return 0
+    monkeypatch.setattr(repo, "rebuild_unified_kg", _spy_rebuild)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+    orig = repo.settings.kg_incremental_fusion_enabled
+
+    bi.run_reparse(repo, nb_id, conc=1)
+
+    assert seen["fusion_during"] is False                        # 批量期关了 per-source 融合
+    assert repo.settings.kg_incremental_fusion_enabled == orig   # 结束恢复原值

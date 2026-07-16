@@ -241,7 +241,7 @@ LIFECYCLE_STORE_CALLS = {
         "insert_kg_fts_rows", "insert_object_chunk", "insert_object_source_rows",
         "insert_relation_chunk", "neighbor_relation_rows", "notebook_tier_row",
         "object_meta_rows_for_notebook", "relink_rows", "source_build_rows",
-        "unified_graph_rows",
+        "sources_with_elements", "unified_graph_rows",
     },
     "governance_store": {
         "delete_clusters", "delete_pending_merges", "incremental_cluster_rows",

@@ -179,3 +179,23 @@ def test_ingestion_service_shares_the_per_user_event_logger(tmp_path):
         event_log_dir=str(tmp_path / "logs"),
     ))
     assert repo._runtime.source_ingestion.event_log is repo.event_log
+
+
+def test_auto_console_translates_source_status_to_plain_chinese():
+    """源处理状态事件的 console 摘要(给人看的日志行)用中文阶段名,不暴露 parsing/
+    parsed/extracting 等内部状态值;jsonl 里写入的原始 status 值不受影响。"""
+    cases = [("queued", "排队中"), ("parsing", "解析文档中"), ("parsed", "解析完成"),
+             ("extracting", "抽取知识图谱中"), ("extracted", "处理完成"), ("failed", "失败")]
+    for status, expect in cases:
+        line = EventLogger._auto_console({"kind": "status", "status": status, "source_id": "s1"})
+        assert expect in line, (status, line)
+        assert status not in line          # 英文状态值不出现在给人看的摘要
+    # kind="status" 这个技术词本身也不该进摘要(翻译后的中文已自解释)
+    assert "status" not in EventLogger._auto_console({"kind": "status", "status": "parsing"})
+
+
+def test_auto_console_keeps_non_source_status_verbatim():
+    """非源状态事件(如 pipeline stage)的 console 摘要保持原样,只翻源状态词。"""
+    line = EventLogger._auto_console({"kind": "pipeline", "stage": "parse", "status": "start",
+                                      "latency_ms": 12})
+    assert "pipeline" in line and "parse" in line and "start" in line

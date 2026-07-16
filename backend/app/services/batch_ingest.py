@@ -577,8 +577,13 @@ def run_reparse(repo: BatchIngestRepository, notebook_id: str,
 
     log = log or (lambda _e: None)
     orig_auto = repo.settings.kg_auto_extract
+    orig_fusion = repo.settings.kg_incremental_fusion_enabled
     orig_embed_conc = repo.settings.embed_concurrency
     repo.settings.kg_auto_extract = True                 # process_source 走到 extract
+    # 批量期关 per-source 增量融合:否则每源抽完都触发 incremental_fuse_source,要加载整个
+    # notebook 的 cluster_map + 写 concept_clusters,巨型库(几万源)O(N²) 会卡死(16 路争
+    # vector_cache/写锁)。收尾的 rebuild_unified_kg 会做一次全量融合(与 run_all/run_kg 一致)。
+    repo.settings.kg_incremental_fusion_enabled = False
     repo.settings.embed_concurrency = conc
     _sched_mod.configure(job_workers=max(1, conc))
 
@@ -623,6 +628,7 @@ def run_reparse(repo: BatchIngestRepository, notebook_id: str,
         return res
     finally:
         repo.settings.kg_auto_extract = orig_auto
+        repo.settings.kg_incremental_fusion_enabled = orig_fusion
         repo.settings.embed_concurrency = orig_embed_conc
 
 

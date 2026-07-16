@@ -497,7 +497,7 @@ class SourceIngestionService:
                 actual_parsers=element_parsers,
                 mineru_error=mineru_error[:500],
             )
-            summary = self.summarize_source(source.title, elements)
+            # elements 先落地(parse 的核心产物,不依赖 LLM):先清旧态再写 elements。
             with self.write() as db:
                 self.clear_source_extraction_state(
                     db,
@@ -520,6 +520,9 @@ class SourceIngestionService:
                     ],
                     created_at=now,
                 )
+            # 摘要(best-effort LLM)挪到 elements 落地之后:放在写库前会让 LLM 超时/失败/
+            # hang 把 elements 一起拖没——几万源集体丢 elements、KG 无从接地的根子。
+            summary = self.summarize_source(source.title, elements)
             self.set_source_status(source_id, "parsed", summary=summary)
 
             # 论文元数据(best-effort):初次上传即抽,re-parse 时 force 刷新;
