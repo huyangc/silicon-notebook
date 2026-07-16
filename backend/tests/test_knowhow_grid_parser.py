@@ -508,3 +508,49 @@ def test_guess_kinds_kind_and_anchor_are_independent():
     kinds, anchor_idx = guess_kinds(["分析方法名称", "备注"])
     assert kinds == ["procedure", "attribute"]
     assert anchor_idx == 0
+
+
+# --- forward_fill_column（anchor 分组列填充）-------------------------------
+from app.services.knowhow.grid_parser import forward_fill_column
+
+
+def test_forward_fill_column_fills_blanks_below_first_value():
+    # 分组列"只写一次"：首行有值，后续空 → 全部继承。
+    rows = [["hold&setup", "case-A"], ["", "case-B"], ["", "case-C"]]
+    assert forward_fill_column(rows, 0) == [
+        ["hold&setup", "case-A"],
+        ["hold&setup", "case-B"],
+        ["hold&setup", "case-C"],
+    ]
+
+
+def test_forward_fill_column_restarts_at_next_nonempty():
+    # 多概念分段：每遇到新非空值就换继承源。
+    rows = [["A", "1"], ["", "2"], ["B", "3"], ["", "4"]]
+    assert forward_fill_column(rows, 0) == [
+        ["A", "1"], ["A", "2"], ["B", "3"], ["B", "4"],
+    ]
+
+
+def test_forward_fill_column_leading_blanks_stay_blank():
+    # 开头就空（前面无非空可继承）→ 保持空。
+    rows = [["", "1"], ["A", "2"], ["", "3"]]
+    assert forward_fill_column(rows, 0) == [["", "1"], ["A", "2"], ["A", "3"]]
+
+
+def test_forward_fill_column_only_target_column():
+    # 只填目标列；其他列的空是真空，不动。
+    rows = [["A", "x"], ["", ""], ["", "z"]]
+    assert forward_fill_column(rows, 0) == [["A", "x"], ["A", ""], ["A", "z"]]
+
+
+def test_forward_fill_column_does_not_mutate_input():
+    rows = [["A", "1"], ["", "2"]]
+    forward_fill_column(rows, 0)
+    assert rows == [["A", "1"], ["", "2"]]  # 原 list 不变
+
+
+def test_forward_fill_column_whitespace_only_counts_as_blank():
+    # 纯空白视为空（与 _build_grid 的 strip 判空一致）。
+    rows = [["A", "1"], ["   ", "2"]]
+    assert forward_fill_column(rows, 0) == [["A", "1"], ["A", "2"]]

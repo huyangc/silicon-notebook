@@ -156,6 +156,33 @@ def _expand_merged_ranges(rows: list[list[str]], ranges) -> None:
                 row[c] = top_left
 
 
+def forward_fill_column(rows: list[list[str]], col_index: int) -> list[list[str]]:
+    """Forward-fill ONE column: each blank cell inherits the last non-blank
+    value above it in that column. Applied to the anchor column at import
+    time (see ``app.services.knowhow.api.import_table``) so a "分组只写一次"
+    concept column — its value written once on a group's first row, blank on
+    the sibling rows below — becomes a fully-populated column that the
+    projector (``projection.py``: anchor-blank rows are dropped) and the grid
+    can both treat as one concept per group.
+
+    Only fills DOWN from a value already seen: a LEADING blank (no non-blank
+    above it yet) stays blank, handled downstream as an unnamed/independent
+    row. Whitespace-only is blank (matches ``_build_grid``'s strip test).
+    Returns a NEW list of NEW rows; never mutates the input."""
+    result: list[list[str]] = []
+    last = ""
+    for row in rows:
+        new_row = list(row)
+        if col_index < len(new_row):
+            cell = new_row[col_index]
+            if cell.strip():
+                last = cell
+            elif last:
+                new_row[col_index] = last
+        result.append(new_row)
+    return result
+
+
 def _decode_text(data: bytes) -> str:
     """Decode bytes as UTF-8 (BOM-tolerant), falling back to GBK.
 
