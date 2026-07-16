@@ -87,3 +87,23 @@ def test_get_notebook_reflects_paper_meta_backfilling(repo):
         with svc._paper_meta_backfilling_lock:
             svc._paper_meta_backfilling.pop(nb.id, None)
     assert repo.get_notebook(nb.id).paper_meta_backfilling is False
+
+
+def test_paper_meta_backfilling_guard_when_source_ingestion_missing(repo):
+    """catalog.source_ingestion 未接线（尚未 wire_source_ingestion）时,
+    _paper_meta_backfilling helper 走 `is not None` 短路→安全返回 False,
+    不能 AttributeError."""
+    import weakref
+    nb = repo.create_notebook(NotebookCreate(name="t"))
+    catalog = repo._runtime.catalog
+    catalog.source_ingestion = None                       # 未接线分支
+    assert repo.get_notebook(nb.id).paper_meta_backfilling is False
+
+    class _Doomed:
+        pass
+    d = _Doomed()
+    dead_ref = weakref.ref(d)
+    del d
+    assert dead_ref() is None                             # 确认 GC 掉了
+    catalog.source_ingestion = dead_ref                   # 弱引用已死分支
+    assert repo.get_notebook(nb.id).paper_meta_backfilling is False
