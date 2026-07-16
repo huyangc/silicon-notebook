@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
+import weakref
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List
@@ -143,8 +144,9 @@ class NotebookSummaryQuery:
         *,
         memory_count: int = 0,
     ) -> NotebookSummary:
-        # 注意:kg_building 仅经 get(kg_building=...) 回填为真值;list_for_user 等走
-        # from_row 的路径恒为 False（当前无消费方读列表里的该字段）。
+        # 注意:kg_building/paper_meta_backfilling 仅经 get(kg_building=...,
+        # paper_meta_backfilling=...) 回填为真值;list_for_user 等走 from_row 的
+        # 路径恒为 False（当前无消费方读列表里的该字段）。
         counts = {
             "sources": self.visible_source_count(connection, row["id"]),
             "memories": memory_count,
@@ -188,6 +190,7 @@ class NotebookSummaryQuery:
         notebook_id: str,
         *,
         kg_building: bool = False,
+        paper_meta_backfilling: bool = False,
         user_id: str | None = None,
     ) -> NotebookSummary:
         """status='copying' rows (copy_notebook's in-progress sentinel, P1-4)
@@ -209,6 +212,7 @@ class NotebookSummaryQuery:
                 memory_count=memory_counts.get((user_id, notebook_id), 0),
             )
         summary.kg_building = kg_building
+        summary.paper_meta_backfilling = paper_meta_backfilling
         return summary
 
     def list_for_user(self, user_id: str) -> list[NotebookSummary]:
@@ -246,7 +250,10 @@ class NotebookCatalogService:
     """Notebook catalog orchestration over the row store, the summary
     projection and the Task-7 query adapter.  Owns the in-process
     kg_building flag set (进程内; 重启后天然为空=未构建, 无需 reconcile) that
-    get_notebook reflects into NotebookSummary.kg_building."""
+    get_notebook reflects into NotebookSummary.kg_building. Mirrors the same
+    reflect-into-summary wiring for paper_meta_backfilling, sourced from the
+    injected source_ingestion service's own in-process dict (see
+    NotebookSummary.paper_meta_backfilling)."""
 
     def __init__(
         self,
@@ -272,7 +279,24 @@ class NotebookCatalogService:
         self._identity = identity
         self._storage_dir = storage_dir
         self.kg_building: set = set()
+        # Injected post-construction by RepositoryRuntime.wire_source_ingestion()
+        # once SourceIngestionService exists (mirrors memory_retriever below —
+        # this class is constructed before source ingestion is wired). Held as
+        # a WEAKREF, not a strong ref: SourceIngestionService closes over the
+        # facade (`self._write`, `self.source_elements`, ...) for its own
+        # wiring, so a strong ref here would let anything that holds `catalog`
+        # (e.g. ScaleArtifactRuntime, which callbacks into
+        # catalog.get_notebook) transitively keep the whole facade alive —
+        # exactly what test_scale_artifact_runtime's retention tests guard
+        # against. The service outlives every real request, so the weakref
+        # is always live in practice; it only reads as dead in that same
+        # deliberate GC/retention test.
+        self.source_ingestion: "weakref.ReferenceType | None" = None
         self.memory_retriever = None
+
+    def _paper_meta_backfilling(self, notebook_id: str) -> bool:
+        service = self.source_ingestion() if self.source_ingestion is not None else None
+        return False if service is None else service.paper_meta_backfilling(notebook_id)
 
     def list_notebook_templates(self) -> list[NotebookTemplate]:
         return [NotebookTemplate(**t) for t in NOTEBOOK_TEMPLATES]
@@ -299,6 +323,7 @@ class NotebookCatalogService:
         return self._summaries.get(
             notebook_id,
             kg_building=notebook_id in self.kg_building,
+            paper_meta_backfilling=self._paper_meta_backfilling(notebook_id),
             user_id=self._identity.current_user().id,
         )
 

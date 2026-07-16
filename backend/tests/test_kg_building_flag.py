@@ -69,3 +69,21 @@ def test_kg_building_set_during_rebuild_delete_phase(repo, monkeypatch):
     assert seen["during_delete"] is True          # delete 阶段标志已置位
     assert nb.id not in repo._kg_building           # rebuild 结束后清位
     assert repo.get_notebook(nb.id).kg_building is False
+
+
+def test_get_notebook_reflects_paper_meta_backfilling(repo):
+    """summary.paper_meta_backfilling 镜像 kg_building 的 wiring：反映
+    SourceIngestionService 进程内 _paper_meta_backfilling dict 的 membership
+    （paper-meta backfill status Task 1 建的 dict + facade delegate；Task 2 把它
+    接进 NotebookSummary，get_notebook 实时回填）。"""
+    nb = repo.create_notebook(NotebookCreate(name="t"))
+    svc = repo._runtime.source_ingestion
+    assert repo.get_notebook(nb.id).paper_meta_backfilling is False
+    with svc._paper_meta_backfilling_lock:
+        svc._paper_meta_backfilling[nb.id] = {"total": 3, "done": 1}
+    try:
+        assert repo.get_notebook(nb.id).paper_meta_backfilling is True
+    finally:
+        with svc._paper_meta_backfilling_lock:
+            svc._paper_meta_backfilling.pop(nb.id, None)
+    assert repo.get_notebook(nb.id).paper_meta_backfilling is False

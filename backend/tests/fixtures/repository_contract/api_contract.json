@@ -3440,6 +3440,11 @@
               "title": "Name",
               "type": "string"
             },
+            "paper_meta_backfilling": {
+              "default": false,
+              "title": "Paper Meta Backfilling",
+              "type": "boolean"
+            },
             "primary_domain": {
               "title": "Primary Domain",
               "type": "string"
@@ -12502,6 +12507,7 @@
       "kg_pending_sources": 0,
       "kg_ready": true,
       "name": "API fixture",
+      "paper_meta_backfilling": false,
       "primary_domain": "Semiconductor",
       "purpose": "Freeze serialization",
       "shared_from": "",

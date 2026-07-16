@@ -351,6 +351,7 @@
       "kg_pending_sources": 0,
       "kg_ready": true,
       "name": "Repository contract fixture",
+      "paper_meta_backfilling": false,
       "primary_domain": "Analog IC",
       "purpose": "Freeze schema-v9 repository composition behavior.",
       "shared_from": "",
