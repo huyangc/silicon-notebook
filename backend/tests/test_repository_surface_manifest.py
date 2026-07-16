@@ -1946,6 +1946,20 @@ TASK4_PAPER_META_ALLOWED_NEW_MEMBERS = {
     "get_paper_meta", "sources_missing_paper_meta", "backfill_paper_metadata",
 }
 
+# Task 1 (paper-meta-status-dashboard, a later feature building on the
+# paper-metadata-extraction work above): paper_meta_backfilling /
+# paper_meta_backfill_progress are brand-new one-hop facade delegates onto
+# the SourceIngestionService in-memory backfill-progress dict (nb_id ->
+# {"total","done"}), added so later tasks (NotebookSummary field / pending-
+# actions surfacing / frontend polling) can observe an in-flight backfill.
+# Their only consumers today are the new test_paper_meta_service.py runtime
+# tests, which postdate the frozen facade_surface fixture — exempt both
+# members from the consumer-scan comparison entirely, same as
+# TASK4_PAPER_META_ALLOWED_NEW_MEMBERS did for backfill_paper_metadata et al.
+PAPER_META_STATUS_ALLOWED_NEW_MEMBERS = {
+    "paper_meta_backfilling", "paper_meta_backfill_progress",
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -3419,6 +3433,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | TASK10_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
         | TASK3_SOURCE_ASSET_ALLOWED_NEW_MEMBERS
         | FOLLOWUP_A_ALLOWED_NEW_MEMBERS
+        | PAPER_META_STATUS_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)

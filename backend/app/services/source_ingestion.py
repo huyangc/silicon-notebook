@@ -167,6 +167,10 @@ class SourceIngestionService:
         self.notebook_meta_sources = notebook_meta_sources
         self.apply_notebook_meta = apply_notebook_meta
         self.maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
+        # 论文元数据 backfill 进程内状态镜像 kg_building（重启即清）
+        # nb_id → {"total": N, "done": k}
+        self._paper_meta_backfilling: dict[str, dict] = {}
+        self._paper_meta_backfilling_lock = threading.Lock()
 
     def pipeline_hooks(self) -> SourcePipelineHooks:
         return SourcePipelineHooks(
@@ -1187,33 +1191,56 @@ class SourceIngestionService:
         lock = threading.Lock()
         done = 0
 
-        def _one(source_id: str) -> None:
-            nonlocal done
-            try:
-                row = self.sources.get_source(source_id)
-                status = self.ensure_paper_metadata(row, force=force)
-            except Exception:
-                status = "failed"
-                self.event_log.logger.exception(
-                    "paper metadata backfill failed for %s", source_id
-                )
-            with lock:
-                done += 1
-                counts[status] = counts.get(status, 0) + 1
-                current = done
-            if progress is not None:
-                progress(current, len(targets), source_id, status)
+        # 注册状态（重复 backfill 同一 nb 会覆盖，符合"最新一次"语义）
+        with self._paper_meta_backfilling_lock:
+            self._paper_meta_backfilling[notebook_id] = {
+                "total": len(targets), "done": 0
+            }
+        try:
+            def _one(source_id: str) -> None:
+                nonlocal done
+                try:
+                    row = self.sources.get_source(source_id)
+                    status = self.ensure_paper_metadata(row, force=force)
+                except Exception:
+                    status = "failed"
+                    self.event_log.logger.exception(
+                        "paper metadata backfill failed for %s", source_id
+                    )
+                with lock:
+                    done += 1
+                    counts[status] = counts.get(status, 0) + 1
+                    current = done
+                # 同步进度到 backfilling dict（供 pending-actions 读）
+                with self._paper_meta_backfilling_lock:
+                    if notebook_id in self._paper_meta_backfilling:
+                        self._paper_meta_backfilling[notebook_id]["done"] = current
+                if progress is not None:
+                    progress(current, len(targets), source_id, status)
 
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=workers, thread_name_prefix="paper-meta"
-        ) as pool:
-            futures = [
-                pool.submit(contextvars.copy_context().run, _one, sid)
-                for sid in targets
-            ]
-            for future in concurrent.futures.as_completed(futures):
-                future.result()
-        self.event_log.emit(
-            {"kind": "paper_meta", "notebook_id": notebook_id, "backfill": counts}
-        )
-        return counts
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="paper-meta"
+            ) as pool:
+                futures = [
+                    pool.submit(contextvars.copy_context().run, _one, sid)
+                    for sid in targets
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    future.result()
+            self.event_log.emit(
+                {"kind": "paper_meta", "notebook_id": notebook_id, "backfill": counts}
+            )
+            return counts
+        finally:
+            with self._paper_meta_backfilling_lock:
+                self._paper_meta_backfilling.pop(notebook_id, None)
+
+    def paper_meta_backfilling(self, notebook_id: str) -> bool:
+        """O(1) 内存 membership；重启后天然为 False（未在跑）。"""
+        return notebook_id in self._paper_meta_backfilling
+
+    def paper_meta_backfill_progress(self, notebook_id: str) -> Optional[dict]:
+        """返回 {"total","done"} 的浅拷贝或 None（未在跑）。锁内取快照。"""
+        with self._paper_meta_backfilling_lock:
+            prog = self._paper_meta_backfilling.get(notebook_id)
+            return dict(prog) if prog else None

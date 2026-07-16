@@ -3419,6 +3419,15 @@ class SQLiteRepository:
     def get_knowhow_row_location(self, row_id: str) -> Optional[dict]:
         return self._runtime.knowhow_store.get_knowhow_row_location(row_id)
 
+    # --- paper-meta status: backfill progress one-hop delegates ----------
+    def paper_meta_backfilling(self, notebook_id: str) -> bool:
+        """O(1) 内存 membership；重启后天然为 False（未在跑）。"""
+        return self._runtime.source_ingestion.paper_meta_backfilling(notebook_id)
+
+    def paper_meta_backfill_progress(self, notebook_id: str) -> Optional[dict]:
+        """返回 {"total","done"} 的浅拷贝或 None（未在跑）。锁内取快照。"""
+        return self._runtime.source_ingestion.paper_meta_backfill_progress(notebook_id)
+
 
 def _now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
