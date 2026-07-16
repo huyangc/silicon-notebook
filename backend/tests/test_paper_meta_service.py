@@ -438,7 +438,6 @@ def test_backfill_counts_and_progress(repo, notebook_id):
 def test_backfill_runtime_registers_and_pops_progress(repo, notebook_id, service, monkeypatch):
     """job 期间 facade paper_meta_backfilling(nb)=True + progress dict 反映 done/total；
     结束后（正常/异常）自动 pop 为 False/None。"""
-    from unittest.mock import patch
     _insert_source(repo, notebook_id, "src-a")
     _insert_source(repo, notebook_id, "src-b")
     fake = _FakeKgLLM(PAYLOAD)
@@ -470,7 +469,8 @@ def test_backfill_runtime_registers_and_pops_progress(repo, notebook_id, service
 
 
 def test_backfill_runtime_pops_on_exception(repo, notebook_id, service, monkeypatch):
-    """异常也 pop——finally 保证；exception 从 as_completed 冒出到调用侧。"""
+    """每个 source 内异常被 _one 内 try 吞成 status=failed；finally 保证
+    dict pop、counts 累加 failed。"""
     _insert_source(repo, notebook_id, "src-c")
     repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
 
@@ -492,3 +492,43 @@ def test_backfill_empty_no_registration(repo, notebook_id):
     assert counts == {"total": 0}
     assert repo.paper_meta_backfilling(notebook_id) is False
     assert repo.paper_meta_backfill_progress(notebook_id) is None
+
+
+def test_backfill_generation_guard_protects_foreign_entry(
+    repo, notebook_id, service, monkeypatch
+):
+    """同 nb 并发 backfill 的 clobber race：先来者 A 注册后被后来者 B
+    覆盖 entry；A 若在 finally 无脑 pop 会把 B 的 live entry 弹掉。构造
+    A 的 finally 路径命中"当前 entry 属于别人（_gen 不匹配）"分支，断言
+    A 不会 pop 掉这个"外来" entry。做法：monkeypatch ensure_paper_metadata
+    在处理时抢先把 dict 里 A 的 entry 覆写成 _gen=999 的假 entry（模拟 B
+    已经覆盖），然后让 A 的 backfill 走完 finally——外来 entry 必须仍在。
+    附带断言 paper_meta_backfill_progress 剥掉 _gen（对外只暴露 total/done）。
+    """
+    _insert_source(repo, notebook_id, "src-race")
+    repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
+
+    def _clobber_then_delegate(source, **kw):
+        # 模拟"后来者 B 已经覆盖 A 的 entry"：把整条 entry 换成外来 _gen
+        with service._paper_meta_backfilling_lock:
+            service._paper_meta_backfilling[notebook_id] = {
+                "total": 42, "done": 7, "_gen": 999,
+            }
+        # ensure_paper_metadata 本身不关心 dict；直接返回 "skipped" 让
+        # backfill 记 counts 后自然收尾走进 finally 的世代校验分支
+        return "skipped"
+
+    monkeypatch.setattr(service, "ensure_paper_metadata", _clobber_then_delegate)
+    counts = service.backfill_paper_metadata(notebook_id)
+    assert counts["total"] == 1
+
+    # 关键断言：A 的 finally 校验 entry._gen != my_gen（999 vs A's real
+    # gen），跳过 pop——外来 entry 仍在 dict 里
+    assert repo.paper_meta_backfilling(notebook_id) is True
+    prog = repo.paper_meta_backfill_progress(notebook_id)
+    assert prog == {"total": 42, "done": 7}
+    assert "_gen" not in prog
+
+    # 清理，避免污染其它测试（fixture 隔离，防御性）
+    with service._paper_meta_backfilling_lock:
+        service._paper_meta_backfilling.pop(notebook_id, None)
