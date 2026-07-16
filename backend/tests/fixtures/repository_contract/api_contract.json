@@ -4795,6 +4795,17 @@
                 }
               ]
             },
+            "paper_meta_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Paper Meta Status"
+            },
             "parse_status": {
               "default": "",
               "title": "Parse Status",
@@ -4999,6 +5010,17 @@
             "notebook_id": {
               "title": "Notebook Id",
               "type": "string"
+            },
+            "paper_meta_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Paper Meta Status"
             },
             "parse_status": {
               "default": "",
@@ -12610,6 +12632,7 @@
       "kg_extracted": true,
       "notebook_id": "nb-api",
       "paper_meta": null,
+      "paper_meta_status": "missing",
       "parse_status": "extracted",
       "pub_year": null,
       "source_url": "",
