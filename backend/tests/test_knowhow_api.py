@@ -288,6 +288,48 @@ def test_import_grid_parse_error_passthrough_400(tmp_path, monkeypatch):
     assert any("一" <= ch <= "鿿" for ch in detail)
 
 
+def test_import_table_forward_fills_anchor_column(tmp_path, monkeypatch, repo):
+    """anchor 分组显示 Task 2: a 转置/合并型 source table's concept column is
+    written once per group in the source file (vertical-merge-style "写一
+    次" convention) and left blank on the sibling branch rows below.
+    import_table must forward-fill the anchor column before insert so every
+    branch row shares the SAME anchor value — the downstream cell-level
+    projector groups rows by anchor value into one concept KO
+    (projection.py); an unfilled blank would silently orphan each branch as
+    its own concept instead of merging them. Calls import_table directly
+    (not through the HTTP route) against the `repo` fixture's DB, using a
+    notebook created via the HTTP client (mirrors
+    test_delete_never_projected_table_is_a_safe_noop_for_projection's mix of
+    HTTP-created notebook + direct repo/service calls)."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000525")
+    nb = _mk_notebook(client, owner_h)
+
+    from app.services.knowhow.api import import_table
+
+    data = _xlsx_bytes(
+        ["违例概念", "根因", "修复"],
+        [
+            ["hold&setup", "inst 变化", "换 VT"],
+            ["", "cell delay", "底层走线"],
+            ["", "noise", "提高 victim"],
+        ],
+    )
+    columns_json = json.dumps([
+        {"name": "违例概念", "kind": "attribute"},
+        {"name": "根因", "kind": "procedure"},
+        {"name": "修复", "kind": "procedure"},
+    ])
+    table_id = import_table(
+        repo, nb, "t.xlsx", data, "违例表", columns_json, anchor_index=0,
+    )
+
+    detail = repo.get_knowhow_table(table_id)
+    anchor_col_id = detail["columns"][0]["id"]
+    anchor_values = [r["cells"].get(anchor_col_id, "") for r in detail["rows"]]
+    assert anchor_values == ["hold&setup", "hold&setup", "hold&setup"]
+
+
 # ---------------------------------------------------------------------------
 # Projection: background job eventually settles rows to synced + writes
 # chunks/knowledge_objects that ask/reasoning retrieval already covers.

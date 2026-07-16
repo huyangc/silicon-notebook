@@ -39,7 +39,7 @@ from typing import Any, Callable
 
 from app.repositories.sqlite.knowhow_store import VALID_KINDS as _STORE_KINDS
 from app.services import background_jobs
-from app.services.knowhow.grid_parser import ParsedGrid, guess_kinds, parse_grid
+from app.services.knowhow.grid_parser import ParsedGrid, guess_kinds, parse_grid, forward_fill_column
 from app.services.knowhow.projection import KnowhowProjector
 
 # Legal column KINDS a client may name directly on the wire (PR-2+3 Task 3):
@@ -195,7 +195,11 @@ def import_table(
     columns = parse_import_columns(columns_json, grid, anchor_index)
     table_id = repo.create_knowhow_table(notebook_id, title, "", columns)
     column_ids = [c["id"] for c in repo.get_knowhow_table(table_id)["columns"]]
-    for row in grid.rows:
+    # 分组型表：anchor 列可能是"只写一次"的分组列（转置/合并型表的
+    # 违例概念列），落库前 forward-fill 使同概念分支行共享 anchor 值，
+    # 下游 cell-level 投影据此归并成一个概念 KO（见 projection.py）。
+    rows = forward_fill_column(grid.rows, anchor_index) if anchor_index is not None else grid.rows
+    for row in rows:
         cells = {column_ids[i]: value for i, value in enumerate(row) if value}
         repo.add_knowhow_row(table_id, cells)
     repo.bump_knowhow_mutation_seq(table_id)
