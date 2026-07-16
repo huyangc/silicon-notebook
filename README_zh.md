@@ -691,7 +691,7 @@ python scripts/mineru_probe.py /path/to/paper.pdf
 python scripts/mineru_probe.py /path/to/paper.pdf --dump /tmp/content_list.json
 ```
 
-它会先打印从仓库根 `.env` 读到的生效 MinerU 配置，再给出原始块数/类型分布，以及映射后的结构化元素数。退出码 `0`=解析成功(≥1 个元素)；`1`=根本没发请求(MinerU 未开/配置缺失，或文件不存在)；`2`=已发送但失败(不可达、超时、HTTP 错、或返回空/映射为 0 元素)，每种都附一句分类排障提示。它会 import backend 并读仓库根 `.env`，请从主 checkout 根目录运行。本探针只覆盖内联 `MINERU_MODE` 路径——不含 mineru.net 云端(URL 来源)与下面的异步 `/tasks` 批量端点。
+它会先打印从仓库根 `.env` 读到的生效 MinerU 配置——含 `http_proxy`/`no_proxy` 对 MinerU URL 的解析结果（内网调用被正向代理静默接管是 `504` 的常见根因；注意 `no_proxy` 不识别 `10.0.0.0/8` 这类 CIDR 网段，只认精确主机）——再给出原始块数/类型分布，以及映射后的结构化元素数。退出码 `0`=解析成功(≥1 个元素)；`1`=根本没发请求(MinerU 未开/配置缺失，或文件不存在)；`2`=已发送但失败(不可达、超时、HTTP 错、或返回空/映射为 0 元素)，每种都附一句分类排障提示。它会 import backend 并读仓库根 `.env`，请从主 checkout 根目录运行。本探针只覆盖内联 `MINERU_MODE` 路径——不含 mineru.net 云端(URL 来源)与下面的异步 `/tasks` 批量端点。
 
 ### 批量 PDF→Markdown 解析(`scripts/mineru_batch_parse.py`)
 

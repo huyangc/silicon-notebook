@@ -124,6 +124,33 @@ def _http_error_body(exc: BaseException) -> str:
     return ""
 
 
+def resolve_proxy(url: str) -> Dict[str, Any]:
+    """报告 urllib 对该 URL 的代理决策：环境代理表 / no_proxy / 是否绕过 / 实际会用的代理。
+
+    用 urllib 自己的 `getproxies()` + `proxy_bypass()`，与内网调用默认 opener 同口径，
+    因此能一眼看出「环境里有代理、且 no_proxy 没覆盖这个主机」这类会导致 504 的配置——
+    尤其是 `no_proxy` 写成 CIDR 网段（如 `10.0.0.0/8`）时 urllib 并不识别、不会绕过。
+    """
+    import urllib.request
+    from urllib.parse import urlsplit
+
+    proxies = urllib.request.getproxies()
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    scheme = parts.scheme or "http"
+    bypassed = bool(host) and bool(urllib.request.proxy_bypass(host))
+    effective = None
+    if not bypassed:
+        effective = proxies.get(scheme) or proxies.get("http")
+    return {
+        "env_proxies": {k: v for k, v in proxies.items() if k != "no"},
+        "no_proxy": proxies.get("no", ""),
+        "host": host,
+        "bypassed": bypassed,
+        "effective_proxy": effective,
+    }
+
+
 # ---------------------------------------------------------------------------
 # 输出小工具
 # ---------------------------------------------------------------------------
@@ -158,6 +185,22 @@ def _print_config(settings: Any) -> None:
     _kv("timeout_seconds", settings.mineru_timeout_seconds)
     if mode == "cli":
         _kv("model_source", settings.mineru_model_source)
+
+    # http 模式：暴露 urllib 对该 URL 的环境代理决策。内网调用被正向代理接管、
+    # 又没被 no_proxy 绕过时会回 504（no_proxy 写成 CIDR 网段 urllib 不认）。
+    if mode == "http" and settings.mineru_api_url:
+        info = resolve_proxy(settings.mineru_api_url)
+        if not info["env_proxies"]:
+            _kv("环境代理", "(无 — 直连)")
+        else:
+            _kv("环境代理", ", ".join(f"{k}={v}" for k, v in sorted(info["env_proxies"].items())))
+            _kv("no_proxy", info["no_proxy"] or "(空)")
+            if info["effective_proxy"]:
+                _kv("⚠ 该URL会走代理", f"{info['effective_proxy']}（host={info['host']} 未被 no_proxy 绕过）")
+                print("      ↑ 内网调用经正向代理是 504 的典型根因；本探针已在代码层绕过，")
+                print("        但请把 no_proxy 改成裸 IP（CIDR 网段 urllib 不识别）以修正环境。")
+            else:
+                _kv("该URL代理", f"绕过直连（host={info['host']}）")
 
 
 def main(argv: List[str] | None = None) -> int:
