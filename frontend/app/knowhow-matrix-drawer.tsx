@@ -38,7 +38,7 @@
  */
 "use client";
 
-import { type MouseEvent as ReactMouseEvent } from "react";
+import { type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { X } from "lucide-react";
 import { buildConceptMatrix, type AnchorGroup } from "./knowhow-grouping-logic.ts";
 import { KnowhowMarkdown } from "./knowhow-cell-editor.tsx";
@@ -78,6 +78,30 @@ export function KnowhowMatrixDrawer({
   // 已经填了内容的格子，看不到 spec 要求的全文。
   function isClickable(text: string): boolean {
     return canEdit || Boolean(text.trim());
+  }
+
+  // 可点格子的可聚焦/键盘属性。格子内容是 KnowhowMarkdown（可能渲染
+  // <a>/<img>/<p> 等块级或交互元素），不能像 G2 网格
+  // （knowhow-panel.tsx 的 .knowhow-cell-open）那样用 <button> 包一层——
+  // button 内嵌块级/交互元素是非法 HTML。这里改为把可点的 <td> 本身做成
+  // role="button" 的可聚焦控件：Enter/Space 触发与鼠标 onClick 相同的
+  // onEditCell(rowId, columnId)，两处共用同一个 activate 闭包，不用各写一遍
+  // 该格的 (rowId, columnId)。不可点的格子（isClickable 为假）返回空对象，
+  // 不挂 role/tabIndex/事件——保持"不可点=纯展示、不出现在 tab 顺序里"。
+  function clickableCellProps(clickable: boolean, rowId: string, columnId: string) {
+    if (!clickable) return {};
+    const activate = () => onEditCell(rowId, columnId);
+    return {
+      role: "button" as const,
+      tabIndex: 0,
+      onClick: activate,
+      onKeyDown: (event: ReactKeyboardEvent<HTMLTableCellElement>) => {
+        if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+          event.preventDefault();
+          activate();
+        }
+      },
+    };
   }
 
   function handleBackdropClick(event: ReactMouseEvent<HTMLDivElement>) {
@@ -133,11 +157,7 @@ export function KnowhowMatrixDrawer({
                     <td
                       className="kh-matrix-shared"
                       colSpan={matrix.branchRowIds.length}
-                      onClick={
-                        isClickable(attr.values[0])
-                          ? () => onEditCell(matrix.branchRowIds[0], attr.columnId)
-                          : undefined
-                      }
+                      {...clickableCellProps(isClickable(attr.values[0]), matrix.branchRowIds[0], attr.columnId)}
                     >
                       <KnowhowMarkdown md={attr.values[0]} notebookId={notebookId} apiBase={apiBase} />
                     </td>
@@ -148,7 +168,7 @@ export function KnowhowMatrixDrawer({
                         <td
                           key={rid}
                           className={rid === highlightRowId ? "kh-matrix-cell--hi" : undefined}
-                          onClick={isClickable(value) ? () => onEditCell(rid, attr.columnId) : undefined}
+                          {...clickableCellProps(isClickable(value), rid, attr.columnId)}
                         >
                           <KnowhowMarkdown md={value} notebookId={notebookId} apiBase={apiBase} />
                         </td>

@@ -2198,6 +2198,22 @@ export function KnowhowPanel({
           vertical-align: top;
         }
 
+        /* 可点格子（knowhow-matrix-drawer.tsx clickableCellProps 挂了
+           role="button" 的共享格/分支格，isClickable 为真才有）：cursor
+           提示两种格子共用；hover 底色只覆盖分支格，用 :not(.kh-matrix-
+           shared) 与下方共享格的琥珀 hover 互斥，两条规则各管一半格子、
+           不必比拼选择器优先级。不可点的格子没有 role="button"，不受影响。
+           分支格 hover 呼应 G2 网格 .knowhow-grid-table tbody tr:hover td
+           的浅蓝底语义，这里限定单格而非整行——矩阵同一行内每个分支格是
+           各自独立的点击目标。 */
+        .kh-matrix [role="button"] {
+          cursor: pointer;
+        }
+
+        .kh-matrix td[role="button"]:not(.kh-matrix-shared):hover {
+          background: #f4f7ff;
+        }
+
         .kh-matrix thead th {
           background: var(--soft);
           color: var(--muted);
@@ -2224,6 +2240,14 @@ export function KnowhowPanel({
         .kh-matrix-shared {
           background: #fdf4e6;
           vertical-align: middle;
+        }
+
+        /* 共享格 hover：可点时保持琥珀色系而非上面分支格的浅蓝——复用既有
+           琥珀边框色 #f0dab3（同 .knowhow-status-badge--warning 一套）当加
+           深一档的 hover 底色，不新开色值，选择器与上方分支格 hover 互斥
+           不会互相盖掉。 */
+        .kh-matrix-shared[role="button"]:hover {
+          background: #f0dab3;
         }
 
         /* 命中分支高亮（spec §4.5，ask 引用跳转 Task 11 接线）：表头文字变蓝
