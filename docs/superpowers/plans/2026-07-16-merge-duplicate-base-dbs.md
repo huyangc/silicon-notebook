@@ -944,8 +944,38 @@ def test_cli_refuses_existing_out_without_force(tmp_path):
             "--keep-base", "a", "--out", str(pa2),
             "--out-storage", str(tp / "mstore2"), "--assume-same-users",
         ])
+
+
+def _cli_argv(tp, out="merged.db", mstore="mstore", extra=()):
+    return [
+        "--db-a", str(tp / "a.db"), "--storage-a", str(tp / "sa"),
+        "--db-b", str(tp / "b.db"), "--storage-b", str(tp / "sb"),
+        "--keep-base", "a", "--out", str(tp / out),
+        "--out-storage", str(tp / mstore), "--assume-same-users", *extra,
+    ]
+
+
+def test_cli_dry_run_not_blocked_by_existing_out(tmp_path):
+    """dry-run 即使 --out 已存在也应放行(它不写 out), 且不改动那个已存在的文件。"""
+    rc, tp = _run_cli(tmp_path)  # 先产出一个 merged.db
+    assert rc == 0
+    before = (tp / "merged.db").stat().st_mtime_ns
+    rc2 = md.main(_cli_argv(tp, extra=("--dry-run",)))  # 无 --force
+    assert rc2 == 0
+    assert (tp / "merged.db").stat().st_mtime_ns == before  # 原文件未被动过
+
+def test_cli_force_overwrites_existing_out(tmp_path):
+    """--force 应覆盖已存在的 --out 并成功产出。"""
+    rc, tp = _run_cli(tmp_path)
+    assert rc == 0
+    rc2 = md.main(_cli_argv(tp, mstore="mstore2", extra=("--force",)))
+    assert rc2 == 0
+    conn = sqlite3.connect(tp / "merged.db")
+    nb = {r[0] for r in conn.execute("SELECT id FROM notebooks")}
+    conn.close()
+    assert nb == {BASE, "nb-a11111111", "nb-b22222222"}
 ```
-> 注：v15/v16 库经 `--db-a/--db-b` 传入时 `main` 会先 `migrate_to_current` 迁到 17；本测试用 `_seed_pair`（已是 17）直接验证编排；迁移路径由 Task 2 单测覆盖。
+> 注：v15/v16 库经 `--db-a/--db-b` 传入时 `main` 会先 `migrate_to_current` 迁到 17；本测试用 `_seed_pair`（已是 17）直接验证编排；真实 v15+v16 迁移端到端见 `test_cli_end_to_end_migrates_v15_and_v16_inputs`。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -974,7 +1004,8 @@ def _parse_args(argv):
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     out = Path(args.out)
-    if out.exists() and not args.force:
+    # dry-run 不写 out, 不该被"输出已存在"挡住(它就是拿来预览计划的); 只在真跑时早退。
+    if out.exists() and not args.force and not args.dry_run:
         raise SystemExit(f"输出已存在: {out}(加 --force 覆盖或换路径)")
 
     # primary = keep-base 那侧
