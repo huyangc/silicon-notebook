@@ -12,7 +12,18 @@ export interface AnchorGroup {
 
 /** 按 anchor 列值把行分组：同值聚成一组（组顺序 = 该值首次出现顺序，组内
  * 保持原相对顺序）。空 anchor 值不聚合——每个空行单独成组（anchorValue=""），
- * 保留在其自然位置，不并入任何概念（spec §4.2.2）。 */
+ * 保留在其自然位置，不并入任何概念（spec §4.2.2）。
+ *
+ * 同值判定只用 `.trim()`（去首尾空白），比后端 KG 合并用的
+ * `textops.value_key`（backend/app/services/knowhow/textops.py：casefold +
+ * 整体剔除所有空白/标点 run，不止首尾）更细——这是刻意的分歧，不是遗漏的
+ * 对齐项：trim 相等 ⟹ value_key 相等（对同一段字面量做 casefold/去标点是
+ * 纯函数，输入相同输出必相同），反之不然——如"示波器"/"示波器。"/"示波器 "
+ * 三者 value_key 相同（KG 视为同一概念），但 trim 后仍是三个不同字符串，
+ * 这里会分成三组。分歧只在异构手写输入时出现，且方向恒安全：网格里合并
+ * 显示的两行，KG 必然也把它们合并成同一概念（更细的分组是更粗的分组的
+ * 加细），所以网格绝不会显示一个 KG 里其实不存在的合并；反过来 KG 合并了
+ * 而网格没合并，只是显示更保守，不会误导用户。 */
 export function groupRowsByAnchor(rows: KnowhowRow[], anchorColumnId: string): AnchorGroup[] {
   const groups: AnchorGroup[] = [];
   const indexByValue = new Map<string, number>();
@@ -120,7 +131,9 @@ export function groupCellWriteTargets(group: AnchorGroup, _columnId: string): st
 /** 该列在这个概念组内是否是「合并共享格」（spec §4.4：组内多于一行、且该列
  * 所有行的值 trim 后完全相同）——与 buildConceptMatrix 的 sharedSpan 同一套
  * 判定标准，供 panel 决定编辑一格是批量写整组还是只写这一行。单行组没有
- * 「其他分支」可言，恒 false（即便技术上"全同值"，语义上不构成共享）。 */
+ * 「其他分支」可言，恒 false（即便技术上"全同值"，语义上不构成共享）。
+ * 同值判定同样只用 `.trim()`——与 groupRowsByAnchor 用的是同一套「比后端 KG
+ * value_key 更细、分歧方向恒安全」的刻意选择，理由见该函数注释，不在此重复。 */
 export function isSharedColumn(group: AnchorGroup, columnId: string): boolean {
   if (group.rows.length <= 1) return false;
   const first = (group.rows[0].cells[columnId] ?? "").trim();

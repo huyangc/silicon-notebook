@@ -374,8 +374,16 @@ export function KnowhowPanel({
   // Task 11（引用命中→跳概念矩阵抽屉 + 高亮，规格 §4.5）：detail 加载后按
   // anchorColumnId 分流——有 anchor 的表定位 initialRowId 所在的概念组，打开
   // 矩阵抽屉并高亮该分支列；记录型表（无 anchor）保持原有的行抽屉。找不到组
-  // （行已被删除、或恰好加载到的这一批 detail 还不包含它）时什么也不做，
-  // 交给下面「目标表/行是否陈旧」的 effect 出内联提示，不在这里重复处理。
+  // （行已被删除、或恰好加载到的这一批 detail 还不包含它），或找到的组恰好是
+  // 「空 anchor」组（group.anchorValue === ""）时，回退到行抽屉——空 anchor
+  // 行是 groupRowsByAnchor 里"每个空行各自成组"的产物，同一批空行会有多个
+  // anchorValue 恒为 "" 的组，靠 anchorValue 反查（openConceptValue ===
+  // g.anchorValue）必然命中第一个而非这次命中的那行，会开错抽屉，故不能像
+  // 非空概念那样走概念矩阵分支（final-review fix, Important 2）。「行已被
+  // 删除」的情形下 setOpenRowId 指向一个 detail.rows 里已不存在的 id 同样安
+  // 全——openRow 反查 `?? null` 后仅 `{openRow && ...}` 才渲染，等效于什么
+  // 也不做；下面「目标表/行是否陈旧」的 effect 仍按 detail.rows 是否含
+  // initialRowId 单独出内联提示，两者不冲突。
   // jumpRoutedRef 短路见上方声明处注释——没有它，用户关掉跳转打开的抽屉后
   // 随手编辑一格（几乎任何写操作都会替换 detail 的对象引用），这个 effect
   // 会对同一个 initialRowId 重新路由一遍，把刚关掉的抽屉又弹回来。
@@ -386,9 +394,11 @@ export function KnowhowPanel({
     if (detail.anchorColumnId) {
       const group = groupRowsByAnchor(detail.rows, detail.anchorColumnId)
         .find((g) => g.rows.some((r) => r.id === initialRowId));
-      if (group) {
+      if (group && group.anchorValue) {
         setOpenConceptValue(group.anchorValue);
         setHighlightRowId(initialRowId);
+      } else {
+        setOpenRowId(initialRowId); // 空 anchor 行(或没找到组)：回退行抽屉，同记录型
       }
     } else {
       setOpenRowId(initialRowId); // 记录型表：原行抽屉
