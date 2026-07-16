@@ -168,9 +168,13 @@ class SourceIngestionService:
         self.apply_notebook_meta = apply_notebook_meta
         self.maybe_enqueue_scale_fold = maybe_enqueue_scale_fold
         # 论文元数据 backfill 进程内状态镜像 kg_building（重启即清）
-        # nb_id → {"total": N, "done": k}
+        # nb_id → {"total": N, "done": k, "_gen": G}
         self._paper_meta_backfilling: dict[str, dict] = {}
         self._paper_meta_backfilling_lock = threading.Lock()
+        # 同一 nb 并发 backfill 的世代守卫：后来者覆盖先来者的 entry 后，
+        # 先来者的 finally 不能把后来者的 entry 弹掉；_one 里的 done 更新也
+        # 只能改属于自己 gen 的 entry，避免"最新一次"语义下的 done 串扰。
+        self._paper_meta_generation = 0
 
     def pipeline_hooks(self) -> SourcePipelineHooks:
         return SourcePipelineHooks(
@@ -1191,10 +1195,14 @@ class SourceIngestionService:
         lock = threading.Lock()
         done = 0
 
-        # 注册状态（重复 backfill 同一 nb 会覆盖，符合"最新一次"语义）
+        # 注册状态（重复 backfill 同一 nb 会覆盖，符合"最新一次"语义；
+        # 生成 gen token 供 _one/finally 世代校验，避免先来者的 finally 弹
+        # 掉后来者的 entry / 先来者的晚 worker 串写后来者的 done）
         with self._paper_meta_backfilling_lock:
+            self._paper_meta_generation += 1
+            my_gen = self._paper_meta_generation
             self._paper_meta_backfilling[notebook_id] = {
-                "total": len(targets), "done": 0
+                "total": len(targets), "done": 0, "_gen": my_gen,
             }
         try:
             def _one(source_id: str) -> None:
@@ -1211,10 +1219,13 @@ class SourceIngestionService:
                     done += 1
                     counts[status] = counts.get(status, 0) + 1
                     current = done
-                # 同步进度到 backfilling dict（供 pending-actions 读）
+                # 同步进度到 backfilling dict（供 pending-actions 读）；只
+                # 改属于本次调用 gen 的 entry，避免"最新一次"覆盖后先来者
+                # 的晚 worker 污染新一批的 done
                 with self._paper_meta_backfilling_lock:
-                    if notebook_id in self._paper_meta_backfilling:
-                        self._paper_meta_backfilling[notebook_id]["done"] = current
+                    entry = self._paper_meta_backfilling.get(notebook_id)
+                    if entry is not None and entry.get("_gen") == my_gen:
+                        entry["done"] = current
                 if progress is not None:
                     progress(current, len(targets), source_id, status)
 
@@ -1232,15 +1243,21 @@ class SourceIngestionService:
             )
             return counts
         finally:
+            # 只 pop 属于本次调用 gen 的 entry；后来者已覆盖时先来者不动手
             with self._paper_meta_backfilling_lock:
-                self._paper_meta_backfilling.pop(notebook_id, None)
+                entry = self._paper_meta_backfilling.get(notebook_id)
+                if entry is not None and entry.get("_gen") == my_gen:
+                    self._paper_meta_backfilling.pop(notebook_id, None)
 
     def paper_meta_backfilling(self, notebook_id: str) -> bool:
         """O(1) 内存 membership；重启后天然为 False（未在跑）。"""
         return notebook_id in self._paper_meta_backfilling
 
     def paper_meta_backfill_progress(self, notebook_id: str) -> Optional[dict]:
-        """返回 {"total","done"} 的浅拷贝或 None（未在跑）。锁内取快照。"""
+        """返回 {"total","done"} 的浅拷贝或 None（未在跑）。锁内取快照，
+        并剥掉下划线内部字段（如 _gen 世代 token）不外泄给消费者。"""
         with self._paper_meta_backfilling_lock:
             prog = self._paper_meta_backfilling.get(notebook_id)
-            return dict(prog) if prog else None
+            if not prog:
+                return None
+            return {k: v for k, v in prog.items() if not k.startswith("_")}
