@@ -14,6 +14,7 @@
 - **迁移只调 `SqliteMigrator(db, settings).migrate()`，绝不调 `.initialize()`/`.seed()`**——`_seed()` 会插 `user-local`、按 `settings.admin_password` **重置 admin 密码**、种 whitelist/object_schemas，会篡改源库数据。
 - **非破坏性**：两个源库文件全程只读，只操作其临时副本；产出独立 `--out` + `--out-storage`。
 - **fail-loud，绝不静默降级**（[[cli-no-silent-degradation]]）：任一 preflight 校验失败即打印原因 + 非零退出、不产出。
+- **分类清单是超集，两向不对称**：迁移上来的老库常残留已废弃功能的遗留表（如 `articles`/`article_claims`/`derived_rule_candidates`/`extraction_candidates`，PR#110 删功能不 DROP 表；全新 v17 库没有）。守卫对"已分类但本库缺失"只提示、merge 时按表存在性跳过；对"本库有却未分类"致命中止（防静默漏拷）。**不要为了匹配全新库而从清单删表。** 守卫对两个输入库都跑。
 - **所有跨库 INSERT 用显式列清单**（`PRAGMA table_info` 生成，排除隐式 rowid），让 SQLite 重分配 rowid。
 - **FTS**：`chunks_fts`/`kg_objects_fts` 是独立内容 FTS（带 `notebook_id UNINDEXED`、无触发器）→ 按 `notebook_id` 列清单拷行；`memory_items_fts` 是外部内容 FTS（`content='memory_items'`+触发器）→ 导入后 `rebuild`；`*_fts_{config,content,data,docsize,idx}` 影子表绝不直接碰。
 - **CLI 运行约定**：`PYTHONPATH=backend python scripts/merge_dbs.py ...`（同 `scripts/batch_ingest.py`）。
@@ -77,6 +78,15 @@ def test_taxonomy_guard_fails_on_unclassified_table(tmp_path):
     conn.commit()
     with pytest.raises(SystemExit):
         md.assert_taxonomy_complete(conn)
+
+
+def test_taxonomy_tolerates_classified_table_absent(tmp_path):
+    """已分类但本库缺失的表(如全新库没有的废弃表)只提示、不致命。"""
+    conn = _fresh_db(tmp_path / "a.db")
+    # 删掉一张确定存在且已分类的表, 模拟"清单里有、本库没有"
+    conn.execute("DROP TABLE IF EXISTS notebook_assets")
+    conn.commit()
+    md.assert_taxonomy_complete(conn)  # 不应 raise
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -173,7 +183,13 @@ def discover_tables(conn: sqlite3.Connection) -> tuple[set[str], set[str]]:
 
 
 def assert_taxonomy_complete(conn: sqlite3.Connection) -> None:
-    """守卫: 每张业务表/FTS 虚表都被显式归类; 否则 fail-loud。"""
+    """守卫: DB 中每张业务表/FTS 虚表都必须被显式归类, 否则 fail-loud(防静默丢数据)。
+
+    分类清单是**超集**: 允许清单里的表在某个库里不存在——schema 随版本演进, 迁移上来
+    的老库常残留已废弃功能的遗留表(如 articles/article_claims/derived_rule_candidates/
+    extraction_candidates, PR#110 删了功能但不 DROP 表), 全新库则没有。这类"已分类但
+    本库缺失"只提示、不致命(merge 时按表存在性跳过)。真正致命的是"本库有、但未分类"
+    的表: 那会在合并时静默漏拷该表数据。"""
     business, virtual = discover_tables(conn)
     classified_business = (
         {NOTEBOOKS_TABLE}
@@ -183,15 +199,18 @@ def assert_taxonomy_complete(conn: sqlite3.Connection) -> None:
         | set(SKIP_SECONDARY_TABLES)
     )
     classified_virtual = set(FTS_NOTEBOOK_TABLES) | set(EXTERNAL_FTS_TABLES)
-    missing_b = business - classified_business
-    extra_b = classified_business - business
-    missing_v = virtual - classified_virtual
-    if missing_b or extra_b or missing_v:
+    unclassified_b = business - classified_business
+    unclassified_v = virtual - classified_virtual
+    absent = classified_business - business  # 已分类但本库没有 —— 容忍
+    if absent:
+        print(f"[提示] 分类清单含本库不存在的表(容忍, merge 时跳过): {sorted(absent)}",
+              file=sys.stderr)
+    if unclassified_b or unclassified_v:
         raise SystemExit(
-            "表分类不完整, 拒绝合并(防静默丢数据):\n"
-            f"  未归类业务表: {sorted(missing_b)}\n"
-            f"  清单里但库中没有的表: {sorted(extra_b)}\n"
-            f"  未归类 FTS 虚表: {sorted(missing_v)}"
+            "发现未分类的表, 拒绝合并(防静默丢数据):\n"
+            f"  未分类业务表: {sorted(unclassified_b)}\n"
+            f"  未分类 FTS 虚表: {sorted(unclassified_v)}\n"
+            "请把它们加进 scripts/merge_dbs.py 的对应分类清单后重跑。"
         )
 
 
@@ -206,7 +225,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cd backend && python -m pytest tests/test_merge_dbs.py -q`
-Expected: PASS（2 passed）。若 `test_taxonomy_covers_every_business_table` 报 `未归类业务表` → 按报告把缺的表补进对应清单，再跑至通过（守卫的预期用途）。
+Expected: PASS（3 passed）。若 `test_taxonomy_covers_every_business_table` 报 `未分类业务表` → 按报告把缺的表补进对应清单，再跑至通过（守卫的预期用途）。注意：清单里的表在全新 v17 库中不存在是**正常**的（如 articles 等 PR#110 废弃表，只在迁移上来的老库里残留），守卫容忍这种"已分类但本库缺失"、只打印提示，不要因此删清单里的表。
 
 - [ ] **Step 5: 提交**
 
@@ -463,6 +482,10 @@ def _user_version(conn: sqlite3.Connection) -> int:
 
 def preflight(conn_a: sqlite3.Connection, conn_b: sqlite3.Connection,
               assume_same_users: bool) -> str:
+    # 0) 两库都跑分类守卫: 被导入的副库若有未分类表, 会在 merge 时静默漏拷其数据,
+    #    所以两侧都要检查(不只 primary)。
+    assert_taxonomy_complete(conn_a)
+    assert_taxonomy_complete(conn_b)
     # 1) 版本一致且为 17
     va, vb = _user_version(conn_a), _user_version(conn_b)
     if not (va == vb == 17):
@@ -572,6 +595,34 @@ def test_merge_core_clears_kg_state_for_imported(tmp_path):
     assert conn.execute(
         "SELECT count(*) FROM unified_kg_state WHERE notebook_id='nb-b22222222'").fetchone()[0] == 0
     conn.close()
+
+
+def _add_knowhow(conn, nb_id, tbl_id, cell_text):
+    """一张 knowhow 表: 1 列 1 行 1 格(覆盖二级子表 cells->rows->tables)。"""
+    conn.execute("INSERT INTO knowhow_tables(id,notebook_id,title,created_at,updated_at) "
+                 "VALUES(?,?,?,?,?)", (tbl_id, nb_id, "T", NOW, NOW))
+    conn.execute("INSERT INTO knowhow_columns(id,table_id,name,position) VALUES(?,?,?,0)",
+                 (tbl_id + "-c", tbl_id, "col"))
+    conn.execute("INSERT INTO knowhow_rows(id,table_id,position,created_at,updated_at) "
+                 "VALUES(?,?,0,?,?)", (tbl_id + "-r", tbl_id, NOW, NOW))
+    conn.execute("INSERT INTO knowhow_cells(id,row_id,column_id,content_md,updated_at) "
+                 "VALUES(?,?,?,?,?)", (tbl_id + "-cell", tbl_id + "-r", tbl_id + "-c",
+                                       cell_text, NOW))
+
+
+def test_merge_core_grandchild_excludes_secondary_base_knowhow(tmp_path):
+    """knowhow_cells 是二级子表: secondary base 的 cells 不得被带入(否则 row_id 悬挂)。"""
+    pa, pb, ca, cb = _seed_pair(tmp_path)
+    _add_knowhow(cb, BASE, "kt-b-base", "BASE-CELL")          # secondary base 的 knowhow
+    _add_knowhow(cb, "nb-b22222222", "kt-b-personal", "P-CELL")  # secondary personal 的 knowhow
+    cb.commit(); ca.close(); cb.close()
+    out = tmp_path / "merged.db"
+    md.merge_core(out, pa, pb, shared_base=BASE)
+    conn = sqlite3.connect(out)
+    cells = {r[0] for r in conn.execute("SELECT content_md FROM knowhow_cells")}
+    assert "P-CELL" in cells and "BASE-CELL" not in cells
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []  # 无悬挂
+    conn.close()
 ```
 > 注：`unified_kg_state` 若有额外 NOT NULL 列，测试 INSERT 需补列——运行时按报错补齐。
 
@@ -590,6 +641,12 @@ def _col_list(conn: sqlite3.Connection, table: str) -> str:
     return ", ".join(table_columns(conn, table))
 
 
+def _table_exists(conn: sqlite3.Connection, table: str, schema: str = "main") -> bool:
+    return conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
 def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
                shared_base: str) -> dict:
     if out_db.exists():
@@ -599,66 +656,77 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
     conn = sqlite3.connect(out_db)
     try:
         assert_taxonomy_complete(conn)
-        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("PRAGMA foreign_keys = OFF")  # 导入期不校验; 结束后统一 foreign_key_check
         conn.execute("ATTACH DATABASE ? AS sec", (str(secondary_db),))
 
         sec_nb = [r[0] for r in conn.execute(
             "SELECT id FROM sec.notebooks WHERE id != ?", (shared_base,)).fetchall()]
-        placeholders = ",".join("?" for _ in sec_nb) or "NULL"
+        ph = ",".join("?" for _ in sec_nb) or "NULL"  # sec_nb 为空时 IN (NULL) 匹配 0 行
+
+        # 子表 -> 限定 FK 落在"以 sec_nb 为界的已导入父行"内(每个子句恰含一个 IN ({ph}))。
+        # knowhow_cells 是二级子表(cells->rows->tables.notebook_id), 必须两层下钻,
+        # 否则会带入 secondary base 的 cells -> row_id 悬挂 -> FK 失败。
+        child_scopes = {
+            "source_elements": f"source_id IN (SELECT id FROM sec.sources WHERE notebook_id IN ({ph}))",
+            "knowhow_columns": f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
+            "knowhow_rows":    f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
+            "knowhow_cells":   (f"row_id IN (SELECT id FROM sec.knowhow_rows WHERE table_id IN "
+                                f"(SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph})))"),
+            "memory_provenance": f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
+            "memory_revisions":  f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
+            "memory_embeddings": f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
+            "ask_trace_steps":   f"job_id IN (SELECT id FROM sec.ask_jobs WHERE notebook_id IN ({ph}))",
+        }
+        missing = {c for (c, *_r) in CHILD_TABLES} - set(child_scopes)
+        if missing:  # 新增子表却没定义导入范围 -> fail-loud
+            raise SystemExit(f"子表缺少导入范围定义: {sorted(missing)}")
 
         row_counts: dict[str, int] = {}
 
-        def _run(table: str, where: str, params: tuple):
+        def _run(table: str, where: str) -> None:
+            # 两库都得有该表才能跨库 INSERT; 版本演进导致某库缺表则跳过(见守卫容忍逻辑)。
+            if not (_table_exists(conn, table, "main") and _table_exists(conn, table, "sec")):
+                return
             cols = _col_list(conn, table)
-            sql = f"INSERT INTO main.{table} ({cols}) SELECT {cols} FROM sec.{table} WHERE {where}"
-            cur = conn.execute(sql, params)
+            cur = conn.execute(
+                f"INSERT INTO main.{table} ({cols}) SELECT {cols} FROM sec.{table} WHERE {where}",
+                tuple(sec_nb))  # where 恰含一个 IN ({ph}) -> 一份 sec_nb 参数
             row_counts[table] = row_counts.get(table, 0) + cur.rowcount
 
-        with conn:  # 单事务
-            # notebooks 自身(按 id)
-            _run(NOTEBOOKS_TABLE, f"id IN ({placeholders})", tuple(sec_nb))
-            # A 类 + FTS-with-notebook_id(都按 notebook_id)
-            for t in NOTEBOOK_SCOPED_TABLES + FTS_NOTEBOOK_TABLES:
-                _run(t, f"notebook_id IN ({placeholders})", tuple(sec_nb))
-            # B 类: 按父行集合筛
-            for child, parent, fk, pk in CHILD_TABLES:
-                cols = _col_list(conn, child)
-                # 父表最终归属仍看 notebook_id(父表都在 A 类或 notebooks)
-                parent_scope = (
-                    f"SELECT {pk} FROM sec.{parent} WHERE notebook_id IN ({placeholders})"
-                    if "notebook_id" in table_columns(conn, parent)
-                    else f"SELECT {pk} FROM sec.{parent}"  # 父表本身是子表(knowhow_cells→rows)
-                )
-                sql = (f"INSERT INTO main.{child} ({cols}) SELECT {cols} FROM sec.{child} "
-                       f"WHERE {fk} IN ({parent_scope})")
-                cur = conn.execute(sql, tuple(sec_nb))
-                row_counts[child] = cur.rowcount
-            # C 类: 主库优先并集
-            for t in GLOBAL_UNION_TABLES:
+        with conn:  # 单事务(FK off 期间, 顺序无关)
+            _run(NOTEBOOKS_TABLE, f"id IN ({ph})")                       # notebooks 自身按 id
+            for t in NOTEBOOK_SCOPED_TABLES + FTS_NOTEBOOK_TABLES:        # A 类 + 独立 FTS
+                _run(t, f"notebook_id IN ({ph})")
+            for child, *_rest in CHILD_TABLES:                            # B 类: 显式范围
+                _run(child, child_scopes[child])
+            for t in GLOBAL_UNION_TABLES:                                # C 类: 主库优先并集
+                if not (_table_exists(conn, t, "main") and _table_exists(conn, t, "sec")):
+                    continue
                 cols = _col_list(conn, t)
                 conn.execute(
                     f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM sec.{t}")
-            # 清导入 notebook 的 KG 构建状态
-            for t in KG_STATE_TABLES:
-                conn.execute(
-                    f"DELETE FROM main.{t} WHERE notebook_id IN ({placeholders})", tuple(sec_nb))
+            for t in KG_STATE_TABLES:                                    # 清导入 notebook 的 KG 状态
+                if _table_exists(conn, t, "main"):
+                    conn.execute(
+                        f"DELETE FROM main.{t} WHERE notebook_id IN ({ph})", tuple(sec_nb))
 
-        # 外部内容 FTS rebuild
+        # 外部内容 FTS rebuild(在自己的事务里), 提交后再 DETACH(DETACH 不能在事务中)。
         for t in EXTERNAL_FTS_TABLES:
-            conn.execute(f"INSERT INTO main.{t}({t}) VALUES('rebuild')")
+            if _table_exists(conn, t, "main"):
+                conn.execute(f"INSERT INTO main.{t}({t}) VALUES('rebuild')")
+        conn.commit()
 
-        conn.execute("DETACH DATABASE sec")
-        # FK 完整性(重新开 FK 后检查)
-        conn.execute("PRAGMA foreign_keys = ON")
         dangling = conn.execute("PRAGMA foreign_key_check").fetchall()
         if dangling:
             raise SystemExit(f"合并后存在悬挂外键, 已中止: {dangling[:20]}")
+
+        conn.execute("DETACH DATABASE sec")
         conn.commit()
         return {"imported_notebooks": sec_nb, "row_counts": row_counts}
     finally:
         conn.close()
 ```
-> `knowhow_cells` 的父表 `knowhow_rows` 无 `notebook_id`，走 `else` 分支取 sec 全量 row id——因 secondary 已按 notebook 隔离、其 knowhow_rows 只属于 secondary 的 notebook（base 无 knowhow 行时天然安全）。若担心 base 的 knowhow 行被带入，见 Task 6 的端到端断言复核；本 fixture 不含 base knowhow，测试已覆盖。
+> 说明：`child_scopes` 对每张子表显式给出"限定在 sec_nb 内的父行"WHERE 子句，`knowhow_cells` 二级下钻到 `knowhow_tables.notebook_id`，避免带入 secondary base 的 cells。`_table_exists` 让所有循环对"清单里有、本库没有"的表（如全新库缺的 articles 等废弃表）安全跳过，与 Task 1 守卫的超集容忍一致。`foreign_key_check` 是最终正确性保证（导入期 FK off 只为免除插入顺序约束）。
 
 - [ ] **Step 4: 跑测试确认通过**
 
