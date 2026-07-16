@@ -217,12 +217,31 @@ class EventLogger:
         except Exception:  # pragma: no cover - 归档入队绝不破坏 emit
             pass
 
+    # 源处理流水线状态 → 给人看的中文阶段名。仅用于 console 摘要(logger 输出);
+    # jsonl 里写入的仍是原始 status 值,前端/DB 状态机不受影响。不在表内的 status
+    # (如 pipeline 的 start/done/ok)保持原样。
+    _STATUS_LABELS = {
+        "queued": "排队中",
+        "parsing": "解析文档中",
+        "parsed": "解析完成",
+        "extracting": "抽取知识图谱中",
+        "extracted": "处理完成",
+        "failed": "失败",
+    }
+
     @staticmethod
     def _auto_console(event: Dict[str, Any]) -> str:
         parts = []
         for key in ("kind", "stage", "method", "path", "status", "status_code"):
             if key in event and event[key] not in (None, ""):
-                parts.append(str(event[key]))
+                val = event[key]
+                # 源状态事件(kind=status): 略去技术性 kind, status 值译成中文阶段名,
+                # 让日志对人可读(如「解析文档中」而非「status parsing」)。
+                if key == "kind" and val == "status":
+                    continue
+                if key == "status":
+                    val = EventLogger._STATUS_LABELS.get(val, val)
+                parts.append(str(val))
         if "latency_ms" in event:
             parts.append(f"{event['latency_ms']}ms")
         if event.get("error"):
