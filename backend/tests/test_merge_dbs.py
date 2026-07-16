@@ -397,3 +397,34 @@ def test_cli_refuses_existing_out_without_force(tmp_path):
             "--keep-base", "a", "--out", str(pa2),
             "--out-storage", str(tp / "mstore2"), "--assume-same-users",
         ])
+
+
+def _cli_argv(tp, out="merged.db", mstore="mstore", extra=()):
+    return [
+        "--db-a", str(tp / "a.db"), "--storage-a", str(tp / "sa"),
+        "--db-b", str(tp / "b.db"), "--storage-b", str(tp / "sb"),
+        "--keep-base", "a", "--out", str(tp / out),
+        "--out-storage", str(tp / mstore), "--assume-same-users", *extra,
+    ]
+
+
+def test_cli_dry_run_not_blocked_by_existing_out(tmp_path):
+    """dry-run 即使 --out 已存在也应放行(它不写 out), 且不改动那个已存在的文件。"""
+    rc, tp = _run_cli(tmp_path)
+    assert rc == 0
+    before = (tp / "merged.db").stat().st_mtime_ns
+    rc2 = md.main(_cli_argv(tp, extra=("--dry-run",)))
+    assert rc2 == 0
+    assert (tp / "merged.db").stat().st_mtime_ns == before
+
+
+def test_cli_force_overwrites_existing_out(tmp_path):
+    """--force 应覆盖已存在的 --out 并成功产出。"""
+    rc, tp = _run_cli(tmp_path)
+    assert rc == 0
+    rc2 = md.main(_cli_argv(tp, mstore="mstore2", extra=("--force",)))
+    assert rc2 == 0
+    conn = sqlite3.connect(tp / "merged.db")
+    nb = {r[0] for r in conn.execute("SELECT id FROM notebooks")}
+    conn.close()
+    assert nb == {BASE, "nb-a11111111", "nb-b22222222"}

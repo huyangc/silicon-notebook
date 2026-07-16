@@ -322,7 +322,8 @@ def _parse_args(argv):
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     out = Path(args.out)
-    if out.exists() and not args.force:
+    # dry-run 不写 out, 不该被"输出已存在"挡住(它就是拿来预览计划的); 只在真跑时早退。
+    if out.exists() and not args.force and not args.dry_run:
         raise SystemExit(f"输出已存在: {out}(加 --force 覆盖或换路径)")
 
     # primary = keep-base 那侧
