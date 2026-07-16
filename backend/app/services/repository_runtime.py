@@ -597,6 +597,20 @@ class RepositoryRuntime:
         # holds `catalog` (e.g. ScaleArtifactRuntime) keep the whole facade
         # alive — see test_scale_artifact_runtime's retention tests.
         self.catalog.source_ingestion = weakref.ref(self.source_ingestion)
+        # paper-meta backfill in the pending-actions bell (Task 5): same
+        # deferred-seam problem as catalog above (pending_actions_service is
+        # constructed in wire_query_services(), before this method runs), but
+        # a PLAIN STRONG ref here, not weakref — pending_actions_service has
+        # no back-edge equivalent to ScaleArtifactRuntime.notebooks=catalog:
+        # nothing holds a PendingActionsService instance beyond its owning
+        # facade (it's only ever reached via repository()._runtime, and
+        # pending_bus's recompute closure re-resolves repository() fresh on
+        # every call instead of retaining one), so there is no path for a
+        # long-lived external holder to transitively pin the facade alive
+        # through it the way test_retained_scale_runtime_does_not_transitively_retain_repository
+        # guards against for scale_artifacts/catalog.
+        if self.pending_actions_service is not None:
+            self.pending_actions_service.source_ingestion = self.source_ingestion
         return self.source_ingestion
 
     def wire_kg_mutations(
@@ -803,6 +817,10 @@ class RepositoryRuntime:
         self.pending_actions_service = PendingActionsService(
             self.queries,
             scale_runtime=self.scale_artifacts,
+            # source_ingestion doesn't exist yet at this point in the wiring
+            # sequence (wire_source_ingestion runs after this) — backfilled
+            # below once it's built, same seam as catalog.source_ingestion.
+            source_ingestion=self.source_ingestion,
         )
 
     def wire_knowledge_lifecycle(
