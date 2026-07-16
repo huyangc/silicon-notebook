@@ -4718,6 +4718,23 @@ export default function Home() {
               <div className="tag-row">
                 {Object.entries(analytics.source_status_counts).map(([k, v]) => <span className="tag" key={k}>{label(PARSE_STATUS, k, "其他")} {v}</span>)}
               </div>
+              {analytics.paper_meta_counts && (
+                <>
+                  <p className="section-title">论文元数据</p>
+                  <div className="tag-row">
+                    <span className="tag" style={{ color: "var(--color-ok, #1a7f5a)" }}>有元数据 {analytics.paper_meta_counts.has_meta}</span>
+                    {analytics.paper_meta_counts.missing > 0 && (
+                      <span className="tag" style={{ color: "var(--color-warn, #b97a00)" }}>缺失 {analytics.paper_meta_counts.missing}</span>
+                    )}
+                    {analytics.paper_meta_counts.marker > 0 && (
+                      <span className="tag" style={{ opacity: 0.6 }}>非论文 {analytics.paper_meta_counts.marker}</span>
+                    )}
+                    {analytics.paper_meta_counts.has_meta === 0 && analytics.paper_meta_counts.missing === 0 && analytics.paper_meta_counts.marker === 0 && (
+                      <span className="tool-hint">暂无论文来源</span>
+                    )}
+                  </div>
+                </>
+              )}
               <p className="section-title">索引与构建</p>
               {indexStatus ? (
                 <div className="stack">
