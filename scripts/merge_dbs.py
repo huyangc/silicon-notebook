@@ -17,6 +17,7 @@ import argparse
 import sqlite3
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 # --- 表分类(SCHEMA_VERSION=17) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
@@ -113,6 +114,18 @@ def assert_taxonomy_complete(conn: sqlite3.Connection) -> None:
             f"  未分类 FTS 虚表: {sorted(unclassified_v)}\n"
             "请把它们加进 scripts/merge_dbs.py 的对应分类清单后重跑。"
         )
+
+
+def migrate_to_current(db_path: Path) -> list[int]:
+    """把 db_path 就地迁到 SCHEMA_VERSION。只 migrate(), 不 seed。"""
+    # 延迟 import: 让 Task 1 的纯 sqlite 测试无需 app 依赖即可跑。
+    from app.core.config import Settings
+    from app.repositories.sqlite.database import SqliteDatabase
+    from app.repositories.sqlite.migrations import SqliteMigrator
+
+    settings = Settings(database_url=f"sqlite:///{db_path}")
+    database = SqliteDatabase(settings, root_dir=db_path.parent)
+    return SqliteMigrator(database, settings).migrate()
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - filled in Task 6
