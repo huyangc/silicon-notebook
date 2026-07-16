@@ -294,3 +294,25 @@ def test_merge_core_grandchild_excludes_secondary_base_knowhow(tmp_path):
     assert "P-CELL" in cells and "BASE-CELL" not in cells
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []  # 无悬挂
     conn.close()
+
+
+def test_merge_storage_copies_primary_whole_and_secondary_imported(tmp_path):
+    ps = tmp_path / "pstore"; ss = tmp_path / "sstore"; out = tmp_path / "outstore"
+    # primary storage: base + a1 目录, 外加可再生 kg_index
+    (ps / "notebooks" / BASE).mkdir(parents=True)
+    (ps / "notebooks" / BASE / "f.pdf").write_text("base-primary")
+    (ps / "notebooks" / "nb-a11111111").mkdir(parents=True)
+    (ps / "notebooks" / "nb-a11111111" / "a.pdf").write_text("a-src")
+    (ps / "kg_index").mkdir(); (ps / "kg_index" / "ann.bin").write_text("regenerable")
+    # secondary storage: base(应忽略) + b1(应拷)
+    (ss / "notebooks" / BASE).mkdir(parents=True)
+    (ss / "notebooks" / BASE / "f.pdf").write_text("base-secondary-SHOULD-NOT-WIN")
+    (ss / "notebooks" / "nb-b22222222").mkdir(parents=True)
+    (ss / "notebooks" / "nb-b22222222" / "b.pdf").write_text("b-src")
+
+    md.merge_storage(out, ps, ss, imported_notebooks=["nb-b22222222"])
+
+    assert (out / "notebooks" / BASE / "f.pdf").read_text() == "base-primary"
+    assert (out / "notebooks" / "nb-a11111111" / "a.pdf").read_text() == "a-src"
+    assert (out / "notebooks" / "nb-b22222222" / "b.pdf").read_text() == "b-src"
+    assert not (out / "kg_index").exists()  # 可再生, 不搬

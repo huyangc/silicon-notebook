@@ -286,6 +286,25 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
         conn.close()
 
 
+def merge_storage(out_storage: Path, primary_storage: Path,
+                  secondary_storage: Path, imported_notebooks: list[str]) -> None:
+    out_nb = out_storage / "notebooks"
+    out_nb.mkdir(parents=True, exist_ok=True)
+    # primary 的 notebooks/ 整份(不含 kg_index / kg_viz)
+    prim_nb = primary_storage / "notebooks"
+    if prim_nb.is_dir():
+        shutil.copytree(prim_nb, out_nb, dirs_exist_ok=True)
+    # secondary 的每个导入 notebook 目录
+    for nb_id in imported_notebooks:
+        src = secondary_storage / "notebooks" / nb_id
+        if not src.is_dir():
+            continue
+        dst = out_nb / nb_id
+        if dst.exists():
+            raise SystemExit(f"storage 目录撞车(不应发生): {dst}")
+        shutil.copytree(src, dst)
+
+
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - filled in Task 6
     raise NotImplementedError
 
