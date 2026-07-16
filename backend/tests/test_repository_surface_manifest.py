@@ -212,8 +212,11 @@ TASK27_ALLOWED_IMPORTS = {
     ("scripts/replay_retrieval.py", 40, "app.services.sqlite_repository", "SQLiteRepository"),
     # Line shifted 670->675 by Task 1 (memory-kg-extract)'s comments, then
     # 675->677 by Task 5's two-line comment expansions on the same
-    # verify_repository_snapshot.py line-number allowlist entries below it.
-    ("backend/tests/test_repository_callers_static.py", 677, "app.services.sqlite_repository", "SQLiteRepository"),
+    # verify_repository_snapshot.py line-number allowlist entries below it,
+    # then ->690 by later manifest-version comment growth, and finally ->731
+    # by the merge_dbs INDEPENDENT_SQL_SITES / SQLITE_CONNECT_SITES additions
+    # in that same file (this PR: +41 lines above this deferred import).
+    ("backend/tests/test_repository_callers_static.py", 731, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -1960,6 +1963,14 @@ SQLITE_CONN_REUSE_ALLOWED_IMPORTS = {
     ("backend/tests/test_sqlite_connection_reuse.py", 164, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 
+# merge_dbs (PR#276): the offline two-DB merge tool's test builds a fresh
+# current-schema fixture DB through the facade (_fresh_db constructs
+# SQLiteRepository, then close_local()s to flush WAL before copying the file).
+# A single import consumer, mirroring test_sqlite_connection_reuse above.
+MERGE_DBS_ALLOWED_IMPORTS = {
+    ("backend/tests/test_merge_dbs.py", 30, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+
 # Task 26: the consolidated facade delegates its last SQL bodies to the
 # stores, so two facade-internal helper call sites disappear (_in_batches
 # now feeds retrieval_objects as a batch size; storage_dir is the runtime
@@ -3016,6 +3027,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK8_KNOWHOW_PR23_ALLOWED_IMPORTS
                     or site in TASK13_KNOWHOW_PR23_ALLOWED_IMPORTS
                     or site in TASK12B_KNOWHOW_PR23_ALLOWED_IMPORTS
+                    or site in MERGE_DBS_ALLOWED_IMPORTS
                 )
 
 
@@ -3310,7 +3322,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS | MERGE_DBS_ALLOWED_IMPORTS
     }
     allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS | TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS | TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
