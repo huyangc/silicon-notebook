@@ -598,10 +598,29 @@ def commit_append(
     endpoint. Returns the number of rows added (never raises for duplicate
     titles or unmatched columns — those are ``preview_append``'s advisory-
     only warnings; by the time a client calls commit, the human has already
-    decided to proceed, design doc: "确认后追加导入")."""
+    decided to proceed, design doc: "确认后追加导入").
+
+    final-review fix (Important 1): forward-fills the EXISTING table's anchor
+    column across the aligned rows before insert, mirroring import_table's
+    own forward-fill (same ``forward_fill_column`` helper) — located via
+    ``table_columns``' ``kind`` field exactly like ``preview_append`` above
+    already locates ITS anchor column (this function's ``table`` param is
+    always the wire-shaped detail, never the store's raw ``role`` shape), not
+    a separate ``anchor_index`` (append has no such wire field; the anchor
+    column is whichever one the pre-existing table already designates). A
+    user filling in the downloaded template follows the identical "分组列只
+    写一次，兄弟行留空" convention as a fresh import; without this, every
+    appended sibling row's still-blank anchor cell would silently orphan it
+    out of the KG (``forward_fill_column``'s own docstring, and
+    ``projection.py``'s "anchor-blank rows are dropped")."""
     grid = parse_grid(filename, data)
     table_columns = table.get("columns", [])
     aligned_rows, _unmatched_columns = _align_rows_to_table_columns(table_columns, grid)
+    anchor_position = next(
+        (i for i, column in enumerate(table_columns) if column["kind"] == "anchor"), None
+    )
+    if anchor_position is not None:
+        aligned_rows = forward_fill_column(aligned_rows, anchor_position)
     column_ids = [column["id"] for column in table_columns]
     for aligned_row in aligned_rows:
         cells = {column_ids[i]: value for i, value in enumerate(aligned_row) if value}
