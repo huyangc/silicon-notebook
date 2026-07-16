@@ -12,7 +12,7 @@ PR#271 交付了论文元数据抽取 + 三通道补抽。真机使用暴露两�
 1. **补抽按钮「点了没反应」**：`POST /paper-meta/backfill` 是 fire-and-forget——前端只在 HTTP 往返期间禁用按钮、弹一次 toast，之后无任何持久状态。补抽不改 `parse_status`，来源轮询（parse_status-only）不刷新，用户除非手动打开某篇详情，否则完全感知不到 job 做了事。诊断实据：08:50 的点击 POST 200、3 篇 8 秒全部入库、事件日志 `kind=paper_meta` 齐全——功能正常，纯反馈缺失。
 2. **看板看不到整体状态**：无法一眼知道一个 notebook 里多少来源有论文元数据、多少缺失、多少非论文。
 
-目标：把补抽做成**和「索引构建/KG 构建」一样的有状态长任务**（进行中/篇数/完成可见，且在头像旁铃铛「待确认中心」里出现），并在知识分析看板加一个论文元数据总览区块。
+目标：把补抽做成**和「索引构建/KG 构建」一样的有状态长任务**（进行中/篇数/完成可见，且在头像旁铃铛「待确认中心」里出现），在知识分析看板加一个论文元数据总览区块，并让**每一篇来源都能追踪自身的抽取状态**（已抽取/待补全/非论文，列表行 + 详情）。
 
 ## 2. 非目标
 
@@ -71,6 +71,20 @@ PR#271 交付了论文元数据抽取 + 三通道补抽。真机使用暴露两�
   - 全 0（无合规来源）时区块可整体隐藏或显示「暂无论文来源」。
 - 文案友好、对齐精致（UI 质量基线）。
 
+### 4.3 每源抽取状态追踪（列表行 + 详情）
+
+用户诉求：不仅整体总览，**每一篇来源都能追踪自身抽取状态**。
+
+- **后端派生字段**：`SourceSummary` 加 `paper_meta_status: Optional[str]`，纯派生（不落表、不加迁移），四态：
+  - `"has_meta"`：`source_paper_meta` 有行且 `is_paper=1`。
+  - `"not_paper"`：`source_paper_meta` 有行且 `is_paper=0`（LLM 判定非论文的标记行）。
+  - `"missing"`：无 meta 行，但源符合抽取资格（`source_type NOT IN ('memory','knowhow') AND doc_type IN ('','academic_paper') AND parse_status IN ('parsed','extracting','extracted')`）。
+  - `None`：非合规源（memory/knowhow/未解析/非论文类型），不该出现「补全论文信息」的暗示。
+- **水合口径**：复用 PR#271 的 `paper_meta_for_sources` 批量水合（列表页）与 `get_paper_meta` 单取（详情），派生逻辑同源共用一个内部 helper——**零新增查询**（列表页依旧一次批量 IN，详情依旧一次点查）。
+- **前端展示**：
+  - 列表行右侧现有 `.tag` 徽章位（同「已入图」旁）按状态渲染小徽章：`has_meta`→省略（已入图占位足够）或极浅 muted「有元数据」；`not_paper`→muted「非论文」；`missing`→warn「待补全」；`None`→不显示。**默认不显示 has_meta 徽章**（信噪比低，只标提醒/告知性状态）——这是最终定案。
+  - 详情「论文信息」块（PR#271 已有）在 `has_meta` 时展开为完整卡；`not_paper` 时显示 muted 一行「该来源非学术论文」；`missing` 时显示 warn 一行「论文信息未补全（点击上方"补全论文信息"）」；`None` 时不渲染。
+
 ## 5. 效率账（一等约束）
 
 - **零迁移、零新表、零新端点。**
@@ -81,8 +95,8 @@ PR#271 交付了论文元数据抽取 + 三通道补抽。真机使用暴露两�
 
 ## 6. 前端触点清单（同 PR 交付）
 
-1. `workspace-model.ts`：`NotebookSummary.paper_meta_backfilling?: boolean`；`NotebookAnalytics.paper_meta_counts`；`PendingItem` union 加 `paper_meta`。
-2. `page.tsx`：完成轮询块（克隆 buildingKg，不弹 toast）；resume 钩子；看板「论文元数据」区块；按钮完成语义升级。
+1. `workspace-model.ts`：`NotebookSummary.paper_meta_backfilling?: boolean`；`NotebookAnalytics.paper_meta_counts`；`SourceSummary.paper_meta_status?: "has_meta"|"not_paper"|"missing"|null`；`PendingItem` union 加 `paper_meta`。
+2. `page.tsx`：完成轮询块（克隆 buildingKg，不弹 toast）；resume 钩子；看板「论文元数据」区块；来源列表行的 `paper_meta_status` 徽章（missing→warn「待补全」、not_paper→muted「非论文」）；详情块按四态渲染；按钮完成语义升级。
 3. `pending-center.tsx`：`paper_meta` 待办项渲染 + 分组「论文元数据」+ 跳转；`paper_meta_done` done toast 分支；泛化既有 index 专属 DoneToast/PendingToast 文案为按事件类型取。
 4. 中文文案沿用弯引号风格，不批量替换直引号（`git diff | grep -c '^-.*[“”]'` = 0）。
 5. API 路径不带 `/api` 前缀（双前缀 404 坑）。
@@ -92,6 +106,7 @@ PR#271 交付了论文元数据抽取 + 三通道补抽。真机使用暴露两�
 - **后端**：
   - `NotebookSummary.paper_meta_backfilling`：dict 有/无成员时布尔正确；`backfill_paper_metadata` 期间为真、结束（含异常路径）pop 为假。
   - `paper_meta_counts`：构造 has_meta/marker/missing/非合规（memory/knowhow）混合来源，断言三键计数精确；空库全 0。
+  - `SourceSummary.paper_meta_status` 每源派生：同一批混合来源里 has_meta/not_paper/missing/null 四态逐源正确；列表批量水合路径与详情单取路径口径一致；零新增查询（复用 PR#271 water 化）。
   - 计数不误用 seq 缓存：meta 写入后立即查得新计数（无 stale）。
   - 铃铛待办项：补抽进行中 `list_for_user(owner)` 含 `type=paper_meta,state=building` 且 progress 反映内存 dict；per-user 过滤正确（非 owner 看不到）；job 结束项消失。
   - 完成事件：`backfill_paper_metadata` finally 成功路径 emit `paper_meta_done`（带 stored 计数）；异常/零队列路径的事件语义明确（零队列不 emit done）。
