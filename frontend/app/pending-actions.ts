@@ -8,16 +8,20 @@ import type { PendingItem, DoneToast } from "./pending-center";
 export function itemSig(it: PendingItem): string {
   if (it.type === "report_outline") return `report:${it.report_id ?? it.notebook_id ?? ""}`;
   if (it.type === "governance") return `gov:${it.notebook_id}:${it.subtype ?? ""}:${it.count ?? 0}`;
+  if (it.type === "paper_meta") return `paper_meta:${it.notebook_id}:${it.state ?? ""}`;
   return `index:${it.notebook_id}:${it.state ?? ""}`;
 }
 
-export function doneSig(notebookId: string): string {
-  return `done:${notebookId}`;
+// kind 可选,省略时与旧签名(仅 notebook_id)保持一致(向后兼容)。传入 kind 供两种完成
+// 事件(index_done / paper_meta_done)在同一 notebook 上共存时各自拥有独立签名——否则
+// 两者会撞签名,导致「已读/剪枝」把其中一个误当另一个的状态处理。
+export function doneSig(notebookId: string, kind?: string): string {
+  return kind ? `done:${notebookId}:${kind}` : `done:${notebookId}`;
 }
 
 // 当前快照里全部项的签名(含 done),用于「开面板标记已读」与剪枝存储。
 export function currentSigs(items: PendingItem[], done: DoneToast[]): string[] {
-  return [...items.map(itemSig), ...done.map((d) => doneSig(d.notebook_id))];
+  return [...items.map(itemSig), ...done.map((d) => doneSig(d.notebook_id, d.kind))];
 }
 
 // 把存储的签名集合剪到「当前仍存在」的子集:限制大小 + 让已消失/已变化的项复活。
@@ -43,6 +47,6 @@ export function pendingView(
   const visibleItems = items.filter((it) => !dismSet.has(itemSig(it)));
   const unread =
     visibleItems.filter((it) => !seenSet.has(itemSig(it))).length +
-    done.filter((d) => !seenSet.has(doneSig(d.notebook_id))).length;
+    done.filter((d) => !seenSet.has(doneSig(d.notebook_id, d.kind))).length;
   return { visibleItems, visibleDone: done, unread };
 }
