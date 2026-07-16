@@ -2167,6 +2167,78 @@ export function KnowhowPanel({
           padding: 0;
         }
 
+        /* -------------------------------------------------------------------
+           Task 7（C 概念矩阵抽屉，knowhow-matrix-drawer.tsx 的
+           KnowhowMatrixDrawer 专用）——登记在这里而非该组件自己的
+           <style jsx>，理由同上方 kh-modal-* / kh-code-* 两段注释：这是本
+           特性唯一保证任何时候都已挂载的样式容器。
+           矩阵语义（spec §4.3）：属性为行、分支为列，是主网格 G2（属性为列、
+           概念为行，见上方 .knowhow-cell-merged 一段）的转置视图。
+           ------------------------------------------------------------------- */
+
+        /* 矩阵比普通格子浮窗（880px）宽——属性名列 + 多个分支列并排，880px
+           在 3 个以上分支时会太挤。放在 .kh-modal-card 之后、mobile 断点
+           媒体查询之前，窄屏时仍会被下方 @media (max-width: 720px) 里的
+           .kh-modal-card 规则（源码序在后，同优先级取后者）压回 100vw。 */
+        .kh-matrix-card {
+          width: min(1040px, 96vw);
+        }
+
+        .kh-matrix {
+          width: 100%;
+          border-collapse: collapse;
+          font-size: 13px;
+        }
+
+        .kh-matrix th,
+        .kh-matrix td {
+          border: 1px solid var(--line);
+          padding: 8px 12px;
+          text-align: left;
+          vertical-align: top;
+        }
+
+        .kh-matrix thead th {
+          background: var(--soft);
+          color: var(--muted);
+          font-weight: 600;
+          white-space: nowrap;
+          min-width: 140px;
+        }
+
+        /* 属性名列（行头）：灰底与表头呼应，纵向居中避免长文本内容把它挤到
+           顶部——同一令牌 var(--soft)，与 G2 的 .knowhow-cell-merged / 表头
+           视觉同源，强化"这一列是结构性标签，不是内容"的区分。 */
+        .kh-matrix-rowhead {
+          background: var(--soft);
+          color: var(--ink);
+          font-weight: 600;
+          white-space: nowrap;
+          vertical-align: middle;
+        }
+
+        /* 全分支同值的共享属性格（MatrixAttrRow.sharedSpan）：琥珀底，与本
+           文件既有的 procedure 徽章 / kh-modal-card--editor 左边条 /
+           status-badge--warning 同一套琥珀语义（"这一格代表多个分支共享的
+           同一个值"，不是不同分支各自的内容）。 */
+        .kh-matrix-shared {
+          background: #fdf4e6;
+          vertical-align: middle;
+        }
+
+        /* 命中分支高亮（spec §4.5，ask 引用跳转 Task 11 接线）：表头文字变蓝
+           + 内嵌蓝框标记整列/该格。用 inset box-shadow 而非 border——
+           border-collapse: collapse 会让相邻格子的边框互相吃掉，box-shadow
+           不参与折叠、能在合并边框表格里稳定画出完整的一圈高亮。 */
+        .kh-matrix-branch--hi {
+          color: var(--blue);
+          box-shadow: inset 0 0 0 2px var(--blue);
+        }
+
+        .kh-matrix-cell--hi {
+          box-shadow: inset 0 0 0 2px var(--blue);
+        }
+
         @media (max-width: 720px) {
           .kh-modal-card {
             width: 100vw;
