@@ -14,7 +14,7 @@ const saveSigs = (key: string, v: string[]) => {
 };
 
 export type PendingItem = {
-  type: "report_outline" | "governance" | "index";
+  type: "report_outline" | "governance" | "index" | "paper_meta";
   notebook_id: string;
   notebook_name: string;
   subtype?: "merge" | "edge" | "promotion";
@@ -22,12 +22,19 @@ export type PendingItem = {
   title?: string;
   count?: number;
   state?: string;
-  progress?: number;
+  progress?: number | { done: number; total: number };  // index 是 %，paper_meta 是 {done,total}
   _key?: string;  // 客户端 done 项用
 };
-export type DoneToast = { notebook_id: string; notebook_name: string; ts: number };
+export type DoneToast = { notebook_id: string; notebook_name: string; ts: number; kind?: string; text?: string };
 
 export type Snapshot = { count: number; items: PendingItem[] };
+
+// 完成事件 → toast 文案分派表。index_done 与既有硬编码文案保持字节级一致(向后兼容，
+// 见 PendingToast 渲染处的回落文案)；paper_meta_done 补充对应文案。
+const DONE_MESSAGES: Record<string, (msg: any) => string> = {
+  index_done: (m) => `「${m.notebook_name || ""}」索引构建完成,点击查看`,
+  paper_meta_done: (m) => `「${m.notebook_name || "该笔记本"}」论文信息补全完成,已补全 ${m.stored ?? 0} 篇,点击查看`,
+};
 
 export function usePendingActions(enabled: boolean) {
   const [snapshot, setSnapshot] = useState<Snapshot>({ count: 0, items: [] });
@@ -84,9 +91,17 @@ export function usePendingActions(enabled: boolean) {
             try { msg = JSON.parse(line); } catch { continue; }
             if (msg.kind === "snapshot") {
               setSnapshot(msg.data as Snapshot);
-            } else if (msg.kind === "event" && msg.event === "index_done") {
-              const d: DoneToast = { notebook_id: msg.notebook_id, notebook_name: msg.notebook_name || "", ts: Date.now() };
-              setDoneItems((xs) => [d, ...xs.filter((x) => x.notebook_id !== d.notebook_id)]);
+            } else if (msg.kind === "event" && msg.event && DONE_MESSAGES[msg.event]) {
+              const d: DoneToast = {
+                notebook_id: msg.notebook_id,
+                notebook_name: msg.notebook_name || "",
+                ts: Date.now(),
+                kind: msg.event,
+                text: DONE_MESSAGES[msg.event](msg),
+              };
+              // 去重键含 kind:同一 notebook 的 index_done 与 paper_meta_done 各自独立展示，
+              // 互不覆盖(旧逻辑仅按 notebook_id 去重，会丢掉先到的另一种完成事件)。
+              setDoneItems((xs) => [d, ...xs.filter((x) => x.notebook_id !== d.notebook_id || x.kind !== d.kind)]);
               setToast(d);
             }
           }
@@ -189,6 +204,7 @@ export function PendingBell(props: {
     { key: "report_outline", label: "深度报告待确认", items: view.visibleItems.filter((i) => i.type === "report_outline") },
     { key: "governance", label: "治理待办", items: view.visibleItems.filter((i) => i.type === "governance") },
     { key: "index", label: "索引状态", items: view.visibleItems.filter((i) => i.type === "index") },
+    { key: "paper_meta", label: "论文元数据", items: view.visibleItems.filter((i) => i.type === "paper_meta") },
   ];
 
   const labelFor = (it: PendingItem): string => {
@@ -196,6 +212,10 @@ export function PendingBell(props: {
     if (it.type === "governance") {
       const n = it.subtype === "merge" ? "待合并" : it.subtype === "edge" ? "边审" : "晋升";
       return `${it.notebook_name} · ${n} ${it.count}`;
+    }
+    if (it.type === "paper_meta") {
+      const p = it.progress as { done: number; total: number } | undefined;
+      return `${it.notebook_name} · 论文信息补全中 · ${p?.done ?? 0}/${p?.total ?? 0}`;
     }
     const s = it.state === "building" ? (it.progress != null ? `索引构建中(${it.progress}%)` : "索引构建中")
       : it.state === "suggested" ? "建议建立索引" : "建议重建索引";
@@ -248,7 +268,7 @@ export function PendingBell(props: {
               {view.visibleDone.map((d) => (
                 <button className="pending-row pending-row-done" key={d.notebook_id}
                         onClick={() => { setOpen(false); onOpenDone(d); onDismissDone(d.notebook_id); }}>
-                  <span className="pending-row-main"><span className="pending-row-label">{d.notebook_name} · 索引构建完成</span></span>
+                  <span className="pending-row-main"><span className="pending-row-label">{d.notebook_name} · {d.kind === "paper_meta_done" ? "论文信息补全完成" : "索引构建完成"}</span></span>
                   <span className="pending-row-x" title="关掉" onClick={(e) => { e.stopPropagation(); onDismissDone(d.notebook_id); }}>×</span>
                 </button>
               ))}
@@ -270,7 +290,7 @@ export function PendingToast(props: { toast: DoneToast | null; onClose: () => vo
   if (!toast) return null;
   return (
     <div className="pending-toast" onClick={() => { onClick(); onClose(); }}>
-      「{toast.notebook_name}」索引构建完成,点击查看
+      {toast.text ?? `「${toast.notebook_name}」索引构建完成,点击查看`}
     </div>
   );
 }
