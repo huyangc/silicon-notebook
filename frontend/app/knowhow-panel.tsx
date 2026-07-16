@@ -61,6 +61,7 @@ import {
   knowhowTemplateUrl,
   optimizeKnowhowCell,
   fetchKnowhowRowCodeByColumn,
+  patchKnowhowColumn,
   type KnowhowTableSummary,
   type KnowhowTableDetail,
   type KnowhowRow,
@@ -418,6 +419,28 @@ export function KnowhowPanel({
     loadTables();
   }
 
+  // 网格表头列名 inline 改名：双击列名进入编辑框（见 KnowhowTableGrid），
+  // 回车/失焦时把新名字丢给这里。走既有 patchKnowhowColumn 端点——同一个
+  // 管理 modal 里那个改名走的也是它，语义完全等价，只是入口 UX 更近。改名
+  // 成功后本地就地合并到 detail（避免闪一下的重拉），后台再拉一次 detail
+  // 校准服务端权威（后端可能对同名/空名做拒绝，若失败会经 actionError 报
+  // 出来，本地 optimistic 会被后台重拉推回真实值）。
+  async function handleRenameColumn(columnId: string, name: string) {
+    if (!selectedTableId) return;
+    setActionError(null);
+    try {
+      const updated = await patchKnowhowColumn(notebookId, selectedTableId, columnId, { name });
+      setDetail((prev) =>
+        prev
+          ? { ...prev, columns: prev.columns.map((c) => (c.id === columnId ? { ...c, name: updated.name } : c)) }
+          : prev,
+      );
+      loadTables();
+    } catch (err) {
+      setActionError(extractErrorMessage(err, "改名失败，请重试"));
+    }
+  }
+
   // 「下载模板」（Task 9，规格②路B）：模板端点走既有 session 鉴权（Bearer
   // header），不能像普通静态资源那样直接 `<a href>` 导航——浏览器原生导航
   // 不会带上 localStorage 里的 token。镜像 KnowhowImage（knowhow-cell-
@@ -605,6 +628,7 @@ export function KnowhowPanel({
             onDownloadTemplate={downloadTemplate}
             templateDownloading={templateDownloading}
             onAppendClick={() => setAppendOpen(true)}
+            onRenameColumn={handleRenameColumn}
           />
         )}
       </div>
@@ -652,6 +676,8 @@ export function KnowhowPanel({
             canEdit={canEdit}
             onEdit={() => setCellModal((current) => (current ? { ...current, mode: "edit" } : current))}
             onClose={() => setCellModal(null)}
+            table={detail ?? undefined}
+            rowId={cellModal.rowId}
           />
         )
       )}
@@ -1121,6 +1147,34 @@ export function KnowhowPanel({
           min-width: 0;
         }
 
+        /* canEdit=true 时的可改名列名：hover 时提示这里可以双击改名（虚线
+           下划线 + cursor 变文本），不给太重的边框以免污染只读观感。 */
+        .knowhow-col-name--editable {
+          cursor: text;
+          border-bottom: 1px dashed transparent;
+        }
+        .knowhow-col-name--editable:hover {
+          border-bottom-color: var(--line);
+        }
+
+        /* inline 改名输入框：贴合列头字号，去掉浏览器默认外框，只在 focus
+           时用蓝色边框强调正在编辑，不改变表格布局。 */
+        .knowhow-col-name-input {
+          font: inherit;
+          color: inherit;
+          background: #fff;
+          border: 1px solid var(--blue);
+          border-radius: 4px;
+          padding: 2px 6px;
+          min-width: 0;
+          width: 100%;
+          box-sizing: border-box;
+        }
+        .knowhow-col-name-input:focus {
+          outline: none;
+          box-shadow: 0 0 0 2px rgba(31, 94, 255, 0.15);
+        }
+
         .knowhow-cell-open {
           display: -webkit-box;
           -webkit-line-clamp: 2;
@@ -1428,7 +1482,60 @@ export function KnowhowPanel({
           display: flex;
           flex-direction: column;
           overflow: hidden;
+          /* 左侧色条是查看/编辑态的第一眼视觉标记（见 --preview / --editor 修饰
+             类），通过内边距让 header/body 内容与色条错开。 */
+          border-left: 4px solid transparent;
         }
+
+        /* 只读预览态：中性灰蓝左边条 + 白底 header 无强调。 */
+        .kh-modal-card--preview {
+          border-left-color: #c7d1de;
+        }
+
+        /* 编辑态：琥珀色左边条，与 procedure hint / role-badge--procedure 同一套
+           琥珀语义（内容处在活跃编辑状态时的一致强调色）。 */
+        .kh-modal-card--editor {
+          border-left-color: #d99a3b;
+        }
+
+        /* 全屏切换：kh-modal-overlay 的 padding 已经把卡片缩进 24px，全屏时把
+           overlay padding 归零由卡片自己撑满，同时把圆角 / 阴影去掉——真实全屏
+           质感（不是「更大一点」）。 */
+        .kh-modal-overlay:has(> .kh-modal-card--fullscreen) {
+          padding: 0;
+        }
+        .kh-modal-card--fullscreen {
+          width: 100vw;
+          max-height: 100vh;
+          height: 100vh;
+          border-radius: 0;
+          box-shadow: none;
+        }
+
+        /* header 里紧跟面包屑的小态标（「查看」/「编辑中」）——用同一支
+           .kh-mode-tag，靠 --preview / --editor 修饰类换色调，让编辑/查看态在
+           header 里也有明确文本标注（不只靠左侧色条）。 */
+        .kh-mode-tag {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          padding: 2px 8px;
+          font-size: 11px;
+          font-weight: 600;
+          border-radius: 999px;
+          border: 1px solid var(--line);
+          background: var(--soft);
+          color: var(--muted);
+          white-space: nowrap;
+        }
+        .kh-mode-tag--editor {
+          border-color: #f0dab3;
+          background: #fdf4e6;
+          color: #9a5b00;
+        }
+
+        /* 全屏切换按钮：复用 icon-button 尺寸/交互，只是有独立 title/图标；不
+           需要单独样式，此注释只标记它在 header-actions 里的位置。 */
 
         .kh-modal-header {
           flex: 0 0 auto;
@@ -1518,6 +1625,28 @@ export function KnowhowPanel({
           align-items: baseline;
           gap: 8px;
           min-width: 0;
+          padding: 4px 8px;
+          border-radius: 6px;
+          border: 1px solid transparent;
+        }
+
+        /* 高亮当前浮层对应的那一行——用户打开浮层后能一眼看到「我在整行的
+           哪个位置」，无需在浮层和网格之间来回对照。琥珀色与 editor 左边条
+           /kh-procedure-hint 同一色系，保持整套编辑体验的一致强调色。 */
+        .kh-row-context-item--current {
+          background: #fff7e6;
+          border-color: #f0dab3;
+        }
+
+        .kh-row-context-current-tag {
+          flex: 0 0 auto;
+          padding: 1px 6px;
+          font-size: 10.5px;
+          font-weight: 700;
+          letter-spacing: 0.4px;
+          border-radius: 999px;
+          background: #d99a3b;
+          color: #fff;
         }
 
         .kh-row-context-item strong {
@@ -2153,6 +2282,7 @@ function KnowhowTableGrid({
   onDownloadTemplate,
   templateDownloading,
   onAppendClick,
+  onRenameColumn,
 }: {
   detail: KnowhowTableDetail | null;
   loading: boolean;
@@ -2183,6 +2313,9 @@ function KnowhowTableGrid({
   templateDownloading: boolean;
   /** 「追加导入」（Task 9，规格②路B）：打开追加导入向导。 */
   onAppendClick: () => void;
+  /** 表头列名 inline 改名（canEdit 时启用）：双击列名进入编辑框，回车/失焦
+   * 时把新名字丢回来落库。用户不必再翻「管理」抽屉找列改名——就地改。 */
+  onRenameColumn: (columnId: string, name: string) => void;
 }) {
   const orderedColumns = useMemo(() => (detail ? orderColumnsForGrid(detail.columns) : []), [detail]);
   const filteredRows = useMemo(() => (detail ? filterRows(detail.rows, query) : []), [detail, query]);
@@ -2313,9 +2446,11 @@ function KnowhowTableGrid({
                   {orderedColumns.map((column) => (
                     <th key={column.id}>
                       <div className="knowhow-col-header">
-                        <span className="knowhow-col-name" title={column.name}>
-                          {column.name}
-                        </span>
+                        <ColumnNameCell
+                          column={column}
+                          canEdit={canEdit}
+                          onRename={(name) => onRenameColumn(column.id, name)}
+                        />
                         <RoleBadge role={column.role} />
                       </div>
                     </th>
@@ -2777,7 +2912,91 @@ function KnowhowRowOptimizeModal({
 // ---------------------------------------------------------------------------
 
 function RoleBadge({ role }: { role: Role }) {
+  // `attribute` 是列的默认类型，标签「普通」对用户零信息量；渲染成灰底灰字的
+  // 小胶囊反而是视觉噪音（用户报告为「空胶囊 bug」）。只对具备独立语义的
+  // anchor(行标题)/procedure(方法步骤)/entity(工具/事物) 三值显示徽章。
+  if (role === "attribute") return null;
   return <span className={`knowhow-role-badge knowhow-role-badge--${role}`}>{ROLE_LABELS[role]}</span>;
+}
+
+// 表头列名 inline 改名（canEdit=true 时启用）：双击列名切编辑框，Enter/失焦
+// 保存（改动才落库，同名不落），Esc 取消。落库经父组件 onRename 走既有
+// patchKnowhowColumn；本组件只负责 UX 状态机与键盘/焦点管理。
+function ColumnNameCell({
+  column,
+  canEdit,
+  onRename,
+}: {
+  column: KnowhowColumn;
+  canEdit: boolean;
+  onRename: (name: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(column.name);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  // 外部（其他会话/管理面板/reproject 后）改动了列名：只要不在本地编辑中就
+  // 跟着刷新草稿——避免旧草稿覆盖新值。
+  useEffect(() => {
+    if (!editing) setDraft(column.name);
+  }, [column.name, editing]);
+
+  function commit() {
+    const trimmed = draft.trim();
+    setEditing(false);
+    if (!trimmed || trimmed === column.name) {
+      setDraft(column.name);
+      return;
+    }
+    onRename(trimmed);
+  }
+
+  if (!canEdit) {
+    return (
+      <span className="knowhow-col-name" title={column.name}>
+        {column.name}
+      </span>
+    );
+  }
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        className="knowhow-col-name-input"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            commit();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            setDraft(column.name);
+            setEditing(false);
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <span
+      className="knowhow-col-name knowhow-col-name--editable"
+      title={`${column.name}（双击改名）`}
+      onDoubleClick={() => setEditing(true)}
+    >
+      {column.name}
+    </span>
+  );
 }
 
 function ProjectionStatusBadge({
