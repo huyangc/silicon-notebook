@@ -398,3 +398,47 @@ def test_source_summary_paper_meta_status_four_states(repo, notebook_id):
     assert by_id["src-b"].paper_meta_status == "not_paper"
     assert by_id["src-c"].paper_meta_status == "missing"
     # 注意 memory 源可能不在 list_sources_page（既有过滤），若 assertion 失败可去掉此项
+
+
+def test_paper_meta_status_none_when_doc_type_is_non_paper(repo, notebook_id):
+    """None 分支 (二): 非隐藏合成源 + 非论文 doc_type(如 textbook) + 已解析,
+    无 meta 行 —— 单取/批量两条路径都必须返回 None(而非 missing:doc_type 门
+    先拦住)。四态测试里的 memory 源覆盖不了这条,且它被 list_sources_page 过滤
+    掉,批量路径的 None 分支实际没被那测试断言过。"""
+    store = repo._runtime.source_store
+    store.insert_source(
+        source_id="src-textbook", notebook_id=notebook_id, title="Textbook",
+        source_type="pdf", status="parsed", parse_status="parsed",
+        file_name="tb.pdf", file_path="/tmp/tb.pdf", file_size=0,
+        file_hash="h-tb", summary="", doc_type="textbook",
+    )
+
+    # 详情单取
+    assert repo.get_source("src-textbook").paper_meta_status is None
+
+    # 列表批量:pdf 源不被 list_sources_page 的 memory/knowhow 过滤拦截,
+    # 批量装配路径的 None 分支这里才真正被走到并断言。
+    page = repo.list_sources_page(notebook_id)
+    by_id = {s.id: s for s in page.items}
+    assert "src-textbook" in by_id
+    assert by_id["src-textbook"].paper_meta_status is None
+
+
+def test_paper_meta_status_none_when_parse_status_not_eligible(repo, notebook_id):
+    """None 分支 (三): 合规 doc_type(默认 '')但 parse_status 尚未落到
+    parsed/extracting/extracted 之前(pending)—— 同样两路径都返回 None,验证
+    parse_status 门在 doc_type 门通过之后仍能独立否决。"""
+    store = repo._runtime.source_store
+    store.insert_source(
+        source_id="src-pending", notebook_id=notebook_id, title="Pending",
+        source_type="pdf", status="pending", parse_status="pending",
+        file_name="p.pdf", file_path="/tmp/p.pdf", file_size=0,
+        file_hash="h-p", summary="", doc_type="",
+    )
+
+    assert repo.get_source("src-pending").paper_meta_status is None
+
+    page = repo.list_sources_page(notebook_id)
+    by_id = {s.id: s for s in page.items}
+    assert "src-pending" in by_id
+    assert by_id["src-pending"].paper_meta_status is None
