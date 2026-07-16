@@ -29,7 +29,8 @@ NOTEBOOK_SCOPED_TABLES = [
     "canonical_relations", "communities", "community_members", "mention_edges",
     "relation_embeddings", "unified_kg_state", "kg_rebuild_checkpoint",
     "kg_cluster_scratch", "kg_conflict_candidates", "merge_review_jobs",
-    "promotion_candidates", "extraction_runs", "conversations",
+    "promotion_candidates", "derived_rule_candidates", "extraction_runs",
+    "extraction_candidates", "articles", "article_claims", "conversations",
     "answers", "feedback", "ask_jobs", "reports", "memory_items",
     "knowhow_tables", "notebook_assets", "notebook_members", "agent_token_notebooks",
 ]
@@ -83,7 +84,13 @@ def discover_tables(conn: sqlite3.Connection) -> tuple[set[str], set[str]]:
 
 
 def assert_taxonomy_complete(conn: sqlite3.Connection) -> None:
-    """守卫: 每张业务表/FTS 虚表都被显式归类; 否则 fail-loud。"""
+    """守卫: DB 中每张业务表/FTS 虚表都必须被显式归类, 否则 fail-loud(防静默丢数据)。
+
+    分类清单是**超集**: 允许清单里的表在某个库里不存在——schema 随版本演进, 迁移上来
+    的老库常残留已废弃功能的遗留表(如 articles/article_claims/derived_rule_candidates/
+    extraction_candidates, PR#110 删了功能但不 DROP 表), 全新库则没有。这类"已分类但
+    本库缺失"只提示、不致命(merge 时按表存在性跳过)。真正致命的是"本库有、但未分类"
+    的表: 那会在合并时静默漏拷该表数据。"""
     business, virtual = discover_tables(conn)
     classified_business = (
         {NOTEBOOKS_TABLE}
@@ -93,15 +100,18 @@ def assert_taxonomy_complete(conn: sqlite3.Connection) -> None:
         | set(SKIP_SECONDARY_TABLES)
     )
     classified_virtual = set(FTS_NOTEBOOK_TABLES) | set(EXTERNAL_FTS_TABLES)
-    missing_b = business - classified_business
-    extra_b = classified_business - business
-    missing_v = virtual - classified_virtual
-    if missing_b or extra_b or missing_v:
+    unclassified_b = business - classified_business
+    unclassified_v = virtual - classified_virtual
+    absent = classified_business - business  # 已分类但本库没有 —— 容忍
+    if absent:
+        print(f"[提示] 分类清单含本库不存在的表(容忍, merge 时跳过): {sorted(absent)}",
+              file=sys.stderr)
+    if unclassified_b or unclassified_v:
         raise SystemExit(
-            "表分类不完整, 拒绝合并(防静默丢数据):\n"
-            f"  未归类业务表: {sorted(missing_b)}\n"
-            f"  清单里但库中没有的表: {sorted(extra_b)}\n"
-            f"  未归类 FTS 虚表: {sorted(missing_v)}"
+            "发现未分类的表, 拒绝合并(防静默丢数据):\n"
+            f"  未分类业务表: {sorted(unclassified_b)}\n"
+            f"  未分类 FTS 虚表: {sorted(unclassified_v)}\n"
+            "请把它们加进 scripts/merge_dbs.py 的对应分类清单后重跑。"
         )
 
 

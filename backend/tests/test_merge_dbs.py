@@ -35,3 +35,12 @@ def test_taxonomy_guard_fails_on_unclassified_table(tmp_path):
     conn.commit()
     with pytest.raises(SystemExit):
         md.assert_taxonomy_complete(conn)
+
+
+def test_taxonomy_tolerates_classified_table_absent(tmp_path):
+    """已分类但本库缺失的表(如全新库没有的废弃表)只提示、不致命。"""
+    conn = _fresh_db(tmp_path / "a.db")
+    # 删掉一张确定存在且已分类的表, 模拟"清单里有、本库没有"
+    conn.execute("DROP TABLE IF EXISTS notebook_assets")
+    conn.commit()
+    md.assert_taxonomy_complete(conn)  # 不应 raise
