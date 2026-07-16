@@ -47,7 +47,22 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
-import { ArrowRight, Check, ChevronDown, Code, Edit3, ImagePlus, List, Loader2, Sparkles, X } from "lucide-react";
+import {
+  ArrowRight,
+  Check,
+  ChevronDown,
+  Code,
+  Edit3,
+  Eye,
+  ImagePlus,
+  List,
+  Loader2,
+  Maximize2,
+  Minimize2,
+  Pencil,
+  Sparkles,
+  X,
+} from "lucide-react";
 import { authHeaders } from "./auth.ts";
 import {
   ROLE_LABELS,
@@ -204,6 +219,108 @@ function KnowhowImage({ src, alt, apiBase }: { src?: string; alt?: string; apiBa
 }
 
 // ---------------------------------------------------------------------------
+// 浮窗全屏切换（查看/编辑共用）：sessionStorage 记住本会话选择，避免用户每
+// 开一格都要再点一次。跨会话不持久（不进 localStorage）——用户可能只是当次
+// 阅读长内容想全屏，不代表长期偏好。
+// ---------------------------------------------------------------------------
+
+const FULLSCREEN_STORAGE_KEY = "knowhow.cellModal.fullscreen";
+const FULLSCREEN_LABEL = "全屏";
+const RESTORE_SIZE_LABEL = "还原大小";
+const PREVIEW_MODE_TAG = "查看";
+const EDITING_MODE_TAG = "编辑中";
+
+function useFullscreenToggle(): [boolean, () => void] {
+  const [fullscreen, setFullscreen] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return window.sessionStorage.getItem(FULLSCREEN_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggle = useCallback(() => {
+    setFullscreen((current) => {
+      const next = !current;
+      try {
+        if (typeof window !== "undefined") {
+          window.sessionStorage.setItem(FULLSCREEN_STORAGE_KEY, next ? "1" : "0");
+        }
+      } catch {
+        // sessionStorage 不可用（隐私模式等）时静默——只是记不住本会话选择，
+        // 不影响功能本身。
+      }
+      return next;
+    });
+  }, []);
+  return [fullscreen, toggle];
+}
+
+// ---------------------------------------------------------------------------
+// KnowhowRowContext — 本行其他格子分节（查看/编辑共用）：默认展开，包含当前
+// 列并高亮，方便用户一眼看到当前格子在整行中的位置。
+// ---------------------------------------------------------------------------
+
+function KnowhowRowContext({
+  table,
+  rowId,
+  currentColumnId,
+  defaultOpen = true,
+}: {
+  table: KnowhowTableDetail;
+  rowId: string;
+  currentColumnId: string;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState<boolean>(defaultOpen);
+  const row = table.rows.find((item) => item.id === rowId);
+  const orderedColumns = useMemo(() => sortColumnsByPosition(table.columns), [table.columns]);
+  if (!row) return null;
+  return (
+    <>
+      <button
+        type="button"
+        className="kh-row-context-toggle"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+      >
+        {ROW_CONTEXT_TOGGLE_LABEL}
+        <ChevronDown size={14} className={open ? "kh-chevron-open" : ""} />
+      </button>
+      {open && (
+        <div className="kh-row-context-body">
+          {orderedColumns.length === 0 ? (
+            <p className="kh-row-context-empty">这一行只有这一格。</p>
+          ) : (
+            orderedColumns.map((sibling) => {
+              const isCurrent = sibling.id === currentColumnId;
+              return (
+                <div
+                  key={sibling.id}
+                  className={`kh-row-context-item${isCurrent ? " kh-row-context-item--current" : ""}`}
+                  aria-current={isCurrent ? "true" : undefined}
+                >
+                  {isCurrent && <span className="kh-row-context-current-tag">当前格</span>}
+                  {sibling.role !== "attribute" && (
+                    <span className={`knowhow-role-badge knowhow-role-badge--${sibling.role}`}>
+                      {ROLE_LABELS[sibling.role]}
+                    </span>
+                  )}
+                  <strong>{sibling.name}</strong>
+                  <span className="kh-row-context-text">
+                    {cellSummary(row.cells[sibling.id] ?? "", 120) || "（空）"}
+                  </span>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // KnowhowCellPreview — 格子浮窗预览态（规格②路A「已填格子先进渲染预览态」+
 // ⑤「单格长内容的快速阅读入口」）：只读渲染 + 右上「编辑」(canEdit) + 关闭。
 // ---------------------------------------------------------------------------
@@ -219,6 +336,12 @@ export interface KnowhowCellPreviewProps {
   canEdit: boolean;
   onEdit: () => void;
   onClose: () => void;
+  /** 整表详情——用来渲染「本行其他格子」定位区（含当前列高亮）。仅读，本
+   * 组件不改。传入后浮层就能显示行内其他列的摘要，用户一眼看到当前格子在
+   * 整行的哪个位置。可选（个别调用方 table 尚未加载完全时不传，此时不显示
+   * 定位区）。 */
+  table?: KnowhowTableDetail;
+  rowId?: string;
 }
 
 export function KnowhowCellPreview({
@@ -230,7 +353,10 @@ export function KnowhowCellPreview({
   canEdit,
   onEdit,
   onClose,
+  table,
+  rowId,
 }: KnowhowCellPreviewProps) {
+  const [fullscreen, toggleFullscreen] = useFullscreenToggle();
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape") onClose();
@@ -249,7 +375,7 @@ export function KnowhowCellPreview({
   return (
     <div className="kh-modal-overlay" onClick={handleBackdropClick}>
       <div
-        className="kh-modal-card"
+        className={`kh-modal-card kh-modal-card--preview${fullscreen ? " kh-modal-card--fullscreen" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={`${rowTitle} › ${column.name}`}
@@ -263,8 +389,13 @@ export function KnowhowCellPreview({
               </span>
               <span className="kh-modal-sep">›</span>
               <span className="kh-modal-col-name">{column.name}</span>
-              <span className={`knowhow-role-badge knowhow-role-badge--${column.role}`}>
-                {ROLE_LABELS[column.role]}
+              {column.role !== "attribute" && (
+                <span className={`knowhow-role-badge knowhow-role-badge--${column.role}`}>
+                  {ROLE_LABELS[column.role]}
+                </span>
+              )}
+              <span className="kh-mode-tag">
+                <Eye size={11} /> {PREVIEW_MODE_TAG}
               </span>
             </div>
             <div className="kh-modal-header-actions">
@@ -273,11 +404,23 @@ export function KnowhowCellPreview({
                   <Edit3 size={14} /> {EDIT_LABEL}
                 </button>
               )}
+              <button
+                type="button"
+                className="icon-button"
+                title={fullscreen ? RESTORE_SIZE_LABEL : FULLSCREEN_LABEL}
+                aria-label={fullscreen ? RESTORE_SIZE_LABEL : FULLSCREEN_LABEL}
+                onClick={toggleFullscreen}
+              >
+                {fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+              </button>
               <button type="button" className="icon-button" title="关闭" onClick={onClose}>
                 <X size={18} />
               </button>
             </div>
           </div>
+          {table && rowId && (
+            <KnowhowRowContext table={table} rowId={rowId} currentColumnId={column.id} />
+          )}
         </header>
         <div className="kh-modal-body kh-preview-body">
           <KnowhowMarkdown md={contentMd} notebookId={notebookId} apiBase={apiBase} />
@@ -321,6 +464,7 @@ export function KnowhowCellEditor({
   onNavigate,
   onClose,
 }: KnowhowCellEditorProps) {
+  const [fullscreen, toggleFullscreen] = useFullscreenToggle();
   // panel 只在 row/column 都存在时才会挂载本组件（见 knowhow-panel.tsx 的
   // cellModalRow/cellModalColumn 守卫），加上 key={rowId+columnId} 保证切格
   // 时整个组件重新挂载——这里的非空断言在该前提下是安全的。
@@ -331,7 +475,6 @@ export function KnowhowCellEditor({
   const [content, setContent] = useState<string>(savedContent);
   const [draftText, setDraftText] = useState<string | null>(null);
   const [showRestoreBanner, setShowRestoreBanner] = useState(false);
-  const [rowContextOpen, setRowContextOpen] = useState(false);
   const [savingMode, setSavingMode] = useState<"save" | "next" | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -342,11 +485,6 @@ export function KnowhowCellEditor({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingCursorRef = useRef<number | null>(null);
-
-  const siblingColumns = useMemo(
-    () => sortColumnsByPosition(table.columns).filter((item) => item.id !== columnId),
-    [table.columns, columnId],
-  );
 
   // 一次性(mount 时)检查本格是否有未保存草稿——组件靠 panel 给的
   // key={rowId+columnId} 保证每次切格都是全新挂载，故空依赖数组等价于「每次
@@ -621,7 +759,7 @@ export function KnowhowCellEditor({
   return (
     <div className="kh-modal-overlay" onClick={handleBackdropClick}>
       <div
-        className="kh-modal-card kh-modal-card--editor"
+        className={`kh-modal-card kh-modal-card--editor${fullscreen ? " kh-modal-card--fullscreen" : ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={`${rowTitle} › ${column.name}`}
@@ -635,42 +773,31 @@ export function KnowhowCellEditor({
               </span>
               <span className="kh-modal-sep">›</span>
               <span className="kh-modal-col-name">{column.name}</span>
-              <span className={`knowhow-role-badge knowhow-role-badge--${column.role}`}>
-                {ROLE_LABELS[column.role]}
+              {column.role !== "attribute" && (
+                <span className={`knowhow-role-badge knowhow-role-badge--${column.role}`}>
+                  {ROLE_LABELS[column.role]}
+                </span>
+              )}
+              <span className="kh-mode-tag kh-mode-tag--editor">
+                <Pencil size={11} /> {EDITING_MODE_TAG}
               </span>
             </div>
-            <button type="button" className="icon-button" title="关闭" onClick={requestClose}>
-              <X size={18} />
-            </button>
-          </div>
-          <button
-            type="button"
-            className="kh-row-context-toggle"
-            onClick={() => setRowContextOpen((value) => !value)}
-            aria-expanded={rowContextOpen}
-          >
-            {ROW_CONTEXT_TOGGLE_LABEL}
-            <ChevronDown size={14} className={rowContextOpen ? "kh-chevron-open" : ""} />
-          </button>
-          {rowContextOpen && (
-            <div className="kh-row-context-body">
-              {siblingColumns.length === 0 ? (
-                <p className="kh-row-context-empty">这一行只有这一格。</p>
-              ) : (
-                siblingColumns.map((sibling) => (
-                  <div key={sibling.id} className="kh-row-context-item">
-                    <span className={`knowhow-role-badge knowhow-role-badge--${sibling.role}`}>
-                      {ROLE_LABELS[sibling.role]}
-                    </span>
-                    <strong>{sibling.name}</strong>
-                    <span className="kh-row-context-text">
-                      {cellSummary(row.cells[sibling.id] ?? "", 120) || "（空）"}
-                    </span>
-                  </div>
-                ))
-              )}
+            <div className="kh-modal-header-actions">
+              <button
+                type="button"
+                className="icon-button"
+                title={fullscreen ? RESTORE_SIZE_LABEL : FULLSCREEN_LABEL}
+                aria-label={fullscreen ? RESTORE_SIZE_LABEL : FULLSCREEN_LABEL}
+                onClick={toggleFullscreen}
+              >
+                {fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+              </button>
+              <button type="button" className="icon-button" title="关闭" onClick={requestClose}>
+                <X size={18} />
+              </button>
             </div>
-          )}
+          </div>
+          <KnowhowRowContext table={table} rowId={rowId} currentColumnId={columnId} />
         </header>
 
         <div className="kh-modal-body">
