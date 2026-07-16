@@ -93,3 +93,63 @@ def test_cli_pdf_still_uses_do_parse_script(monkeypatch, tmp_path):
     assert FakePopen.captured_cmd[0] != "mineru"  # [python, run_mineru_parse.py, config.json]
     assert FakePopen.captured_cmd[1].endswith("run_mineru_parse.py")
     assert out == [{"type": "text", "text": "ok", "page_idx": 0}]
+
+
+def test_http_parse_bypasses_environment_proxy(monkeypatch, tmp_path):
+    """内网 MinerU 调用必须绕过环境代理(http_proxy/no_proxy),否则正向代理够不到
+    内网主机会回 504。见 mineru-504-noproxy-cidr。"""
+    import urllib.request
+
+    payload = json.dumps([{"type": "text", "text": "ok", "page_idx": 0}])
+    captured: dict = {}
+
+    class _Resp:
+        def read(self):
+            return payload.encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _FakeOpener:
+        def __init__(self, proxies):
+            captured["proxies"] = proxies
+
+        def open(self, request, timeout=None):
+            captured["via"] = "opener"
+            captured["url"] = request.full_url
+            captured["timeout"] = timeout
+            return _Resp()
+
+    def _fake_build_opener(*handlers):
+        proxies = None
+        for handler in handlers:
+            if isinstance(handler, urllib.request.ProxyHandler):
+                proxies = handler.proxies
+        return _FakeOpener(proxies)
+
+    def _default_urlopen(*a, **k):
+        # 默认 opener 会读环境代理 —— 内网调用绝不该落到这里。
+        captured["via"] = "urlopen"
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "build_opener", _fake_build_opener)
+    monkeypatch.setattr(urllib.request, "urlopen", _default_urlopen)
+    # 即便环境里配了代理,也必须绕过。
+    monkeypatch.setenv("http_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("https_proxy", "http://127.0.0.1:9")
+    monkeypatch.setenv("MINERU_MODE", "http")
+    monkeypatch.setenv("MINERU_API_URL", "http://10.155.112.15:8000")
+    monkeypatch.setenv("MINERU_TIMEOUT_SECONDS", "42")
+
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    out = MinerUClient(Settings()).parse(str(pdf), "x.pdf")
+
+    assert out == [{"type": "text", "text": "ok", "page_idx": 0}]
+    assert captured.get("via") == "opener", "http 解析必须走显式 opener,而非会读环境代理的默认 urlopen"
+    assert captured.get("proxies") == {}, "opener 必须带空 ProxyHandler({}) 以绕过所有环境代理"
+    assert captured["url"].endswith("/file_parse")
+    assert captured["timeout"] == 42
