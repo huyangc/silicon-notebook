@@ -7,10 +7,13 @@
  * 引用跳转用的可选 `initialTableId`/`initialRowId`），面板自身的状态机与渲染
  * 都集中在这里。
  *
- * 引用跳转（Task 12）：ask 回答里命中 knowhow 格子的引用点「在表格中查看」
- * 时，page.tsx 打开本面板并传入 `initialTableId`/`initialRowId`——挂载（或这
- * 两个 prop 变化）时自动选中该表并展开该行的抽屉；目标表/行已被删除等陈旧
- * id 会给出内联提示并回退到列表/整表视图，而不是卡在一个死胡同式的错误。
+ * 引用跳转（Task 12，跳转目标 Task 11 改）：ask 回答里命中 knowhow 格子的
+ * 引用点「在表格中查看」时，page.tsx 打开本面板并传入
+ * `initialTableId`/`initialRowId`——挂载（或这两个 prop 变化）时自动选中该
+ * 表；detail 加载后按该表有没有 anchor 列分流展开目标：有 anchor 定位命中行
+ * 所在的概念组，打开矩阵抽屉并高亮该分支列（规格 §4.5）；记录型表（无
+ * anchor）仍展开原有的行详情抽屉。目标表/行已被删除等陈旧 id 会给出内联
+ * 提示并回退到列表/整表视图，而不是卡在一个死胡同式的错误。
  *
  * 纯逻辑（行过滤 / 列序 / 状态徽标映射 / 抽屉标题 / 图片鉴权判定）都在
  * knowhow-panel-logic.ts 里（无 JSX，供 knowhow-panel.test.mjs 直接 import——
@@ -138,8 +141,10 @@ export interface KnowhowPanelProps {
   /** 关闭整个面板（page.tsx 用于收起挂载它的 knowhowOpen 态）。 */
   onClose: () => void;
   /** Task 12（引用跳转）：非空时挂载（或这两个 prop 变化时）自动打开该表，
-   * 若 initialRowId 也给了，进一步展开该行的抽屉。目标已不存在时面板自己
-   * 给出内联提示并回退，不需要调用方处理。 */
+   * 若 initialRowId 也给了、且该表有 anchor 列，进一步定位命中行所在的概念
+   * 组并打开矩阵抽屉高亮该分支列（Task 11，规格 §4.5）；无 anchor 的记录型
+   * 表仍展开该行的行详情抽屉。目标已不存在时面板自己给出内联提示并回退，
+   * 不需要调用方处理。 */
   initialTableId?: string | null;
   initialRowId?: string | null;
 }
@@ -198,6 +203,16 @@ export function KnowhowPanel({
   // KnowhowMatrixDrawer（与 cellModal/codeModal 平级的另一个顶层 modal 状态，
   // 堆叠在网格之上）。
   const [openConceptValue, setOpenConceptValue] = useState<string | null>(null);
+
+  // Task 11（引用命中→跳概念矩阵抽屉+高亮，规格 §4.5）：ask 引用跳转命中的
+  // 分支（行 id）——null=无高亮；非空时传给 KnowhowMatrixDrawer 的
+  // highlightRowId prop，抽屉据此高亮该分支列（表头 + 该行全部格子）。只在
+  // 「有 anchor 的表被引用跳转命中」时非空，其余打开方式（点概念格/加分支/
+  // 加概念）不设置，恒为 null——与 openConceptValue 同生命周期但不完全同步：
+  // openConceptValue 变化时不逐一清空这个值（那样会清掉刚设好的高亮，见下方
+  // 引用跳转 effect 的注释），只在关闭抽屉/切表/返回列表等「离开当前概念」
+  // 的位置与 openConceptValue 并列清零。
+  const [highlightRowId, setHighlightRowId] = useState<string | null>(null);
 
   // Task 10（删概念）：矩阵抽屉「删除整个概念」二次确认态——镜像表级
   // confirmDelete/deleting 那一对状态（KnowhowTableGrid 消费的同名 prop），
@@ -309,6 +324,17 @@ export function KnowhowPanel({
     };
   }, [openRowId, loadRowCode]);
 
+  // Task 11（引用命中→跳概念矩阵抽屉+高亮，规格 §4.5）：记住「当前这个跳转
+  // 目标（initialRowId）是否已经落地过一次路由」——detail 是整表状态，后面
+  // 几乎任何写操作（编辑格子/加行/改名/重新投影……）都会替换它的对象引用；
+  // 下面依赖 detail 的引用跳转 effect 若不加这层记忆，用户关掉跳转打开的
+  // 抽屉后随手做一次这类操作，detail 一变就会把同一个 initialRowId 重新
+  // 路由一遍，把刚关掉的抽屉又弹回来。只在 initialTableId/initialRowId 真正
+  // 变化（真的换了一次跳转目标）时清空，允许新目标再落地一次；notebook 切换
+  // 这个兜底重置也顺带清空（下方 effect），避免残留上一个 notebook 里一个
+  // 几乎不可能撞上、但理论上可能存在的陈旧 rowId。
+  const jumpRoutedRef = useRef<string | null>(null);
+
   // notebook 切换时(理论上面板会被 page.tsx 一并卸载，这里仅作兜底)整体复位，
   // 避免残留上一个 notebook 的表选中态。
   useEffect(() => {
@@ -320,26 +346,54 @@ export function KnowhowPanel({
     setOpenRowId(null);
     setCellModal(null);
     setOpenConceptValue(null); // Task 8：与 openTable/backToList 同理一并清空
+    setHighlightRowId(null); // Task 11：与 openConceptValue 并列一并清空
     setConfirmDelete(false);
     setManageOpen(false);
     setCreateOpen(false);
     setAppendOpen(false);
     setOptimizeRowId(null);
     setCodeModal(null);
+    jumpRoutedRef.current = null; // Task 11：兜底一并重置，理由见上方声明处注释
   }, [notebookId]);
 
   // Task 12（引用跳转）：挂载时（或 initialTableId/initialRowId 变化时——面板
-  // 已开着又点了另一条引用）选中目标表并预置目标行 id。openTable 本身会把
-  // openRowId 清空，这里在它之后再设一次——同一批 effect 里对同一个 setState
-  // 的最后一次调用生效，最终 openRowId 落地为 initialRowId，selectedTableId
-  // 落地为 openTable 设的 initialTableId，两者都不会被互相打架。
+  // 已开着又点了另一条引用）选中目标表。openTable 会把 openRowId/
+  // openConceptValue/highlightRowId 等全部顶层 modal 状态清零；具体展开成
+  // 「行抽屉」还是「概念矩阵抽屉 + 高亮命中分支」要等 detail 加载完、拿到
+  // anchorColumnId 才能判定（Task 11，规格 §4.5），交给下面依赖 detail 的
+  // 另一个 effect——这里不再像改动前那样直接 setOpenRowId（那一行已经搬过
+  // 去，且要等 detail 到位才能决定该开哪个抽屉）。
   useEffect(() => {
     if (!initialTableId) return;
     setJumpNotice(null);
     openTable(initialTableId);
-    if (initialRowId) setOpenRowId(initialRowId);
+    jumpRoutedRef.current = null; // 新的跳转目标：允许下面的 effect 再次落地一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialTableId, initialRowId]);
+
+  // Task 11（引用命中→跳概念矩阵抽屉 + 高亮，规格 §4.5）：detail 加载后按
+  // anchorColumnId 分流——有 anchor 的表定位 initialRowId 所在的概念组，打开
+  // 矩阵抽屉并高亮该分支列；记录型表（无 anchor）保持原有的行抽屉。找不到组
+  // （行已被删除、或恰好加载到的这一批 detail 还不包含它）时什么也不做，
+  // 交给下面「目标表/行是否陈旧」的 effect 出内联提示，不在这里重复处理。
+  // jumpRoutedRef 短路见上方声明处注释——没有它，用户关掉跳转打开的抽屉后
+  // 随手编辑一格（几乎任何写操作都会替换 detail 的对象引用），这个 effect
+  // 会对同一个 initialRowId 重新路由一遍，把刚关掉的抽屉又弹回来。
+  useEffect(() => {
+    if (!initialRowId || !detail) return;
+    if (jumpRoutedRef.current === initialRowId) return;
+    jumpRoutedRef.current = initialRowId;
+    if (detail.anchorColumnId) {
+      const group = groupRowsByAnchor(detail.rows, detail.anchorColumnId)
+        .find((g) => g.rows.some((r) => r.id === initialRowId));
+      if (group) {
+        setOpenConceptValue(group.anchorValue);
+        setHighlightRowId(initialRowId);
+      }
+    } else {
+      setOpenRowId(initialRowId); // 记录型表：原行抽屉
+    }
+  }, [initialRowId, detail]);
 
   // Task 12：目标表/行是否陈旧——只在「当前选中的表就是这次跳转的目标表」时
   // 判定，避免用户跳转后又手动切到别的表时被这两个陈旧的 prop 值误伤。
@@ -372,6 +426,7 @@ export function KnowhowPanel({
     // 普通 useMemo，detail 一变就重算，不经用户交互）。与其余顶层 modal 状态
     // 一起在切表/返回列表时清空。
     setOpenConceptValue(null);
+    setHighlightRowId(null); // Task 11：与 openConceptValue 并列一并清空
     setConfirmDelete(false);
     setManageOpen(false);
     setAppendOpen(false);
@@ -388,6 +443,7 @@ export function KnowhowPanel({
     setOpenRowId(null);
     setCellModal(null);
     setOpenConceptValue(null);
+    setHighlightRowId(null); // Task 11：与 openConceptValue 并列一并清空
     setConfirmDelete(false);
     setManageOpen(false);
     setAppendOpen(false);
@@ -523,6 +579,7 @@ export function KnowhowPanel({
       await Promise.all(openConceptGroup.rows.map((row) => deleteKnowhowRow(notebookId, selectedTableId, row.id)));
       setDeletingConcept(false);
       setOpenConceptValue(null);
+      setHighlightRowId(null); // Task 11：概念连同其全部分支已删除，没有可高亮的行了
       loadDetail(selectedTableId);
       loadTables();
     } catch {
@@ -861,8 +918,9 @@ export function KnowhowPanel({
           notebookId={notebookId}
           apiBase={apiBase}
           canEdit={canEdit}
+          highlightRowId={highlightRowId}
           onEditCell={(rowId, columnId) => openCellAuto(rowId, columnId)}
-          onClose={() => setOpenConceptValue(null)}
+          onClose={() => { setOpenConceptValue(null); setHighlightRowId(null); }}
           error={conceptDrawerError}
           onAddBranch={() => addBranch(openConceptGroup.anchorValue)}
           addingBranch={addingRow}
