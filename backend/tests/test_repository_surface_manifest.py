@@ -3213,6 +3213,8 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_batch_ingest.py', 1464, 'rebuild_unified_kg', 'repo'),
         ('backend/tests/test_batch_ingest.py', 1480, 'llm_client', 'repo'),
         ('backend/tests/test_batch_ingest.py', 1499, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1548, 'llm_client', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1565, 'rebuild_unified_kg', 'repo'),
         ('backend/tests/test_embedding_store_component.py', 59, '_write', 'repo'),
         ('backend/tests/test_embedding_store_component.py', 135, '_write', 'repo'),
         ('backend/tests/test_in_batching.py', 85, '_IN_CHUNK', 'SQLiteRepository'),
