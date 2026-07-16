@@ -812,6 +812,30 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 
 退出码即验收结果,可直接接入 CI/脚本判定:`0` 成功(记录模式)或 `--compare` 全部一致;`1` `--compare` 发现不一致(两次运行结果有差异);`2` 对照发生前的前置条件失败(EMBED 未配置、notebook 不存在、或属主用户不存在)——CLI **直接报错退出**,绝不用零向量静默跑出误导性的"零召回"对照结果。
 
+### 合并两个共享 base 库的部署(`scripts/merge_dbs.py`)
+
+离线、非破坏性工具,用于把两个各自独立部署、但**共享同一个 base 库**(同一个 base notebook id)的 silicon-notebook 实例合并成一个。保留哪侧的 base 由 `--keep-base` 指定(通常选更全的那侧)——运行时会先打印两侧 base 的统计(`sources`/`chunks`/`knowledge_objects` 计数)供核对;两侧其余(个人)notebook 原样全部并入。源库的 `.db`/storage 文件只读,工具始终写出全新的 `--out` / `--out-storage`。两侧输入允许是旧 schema 版本——合并前会先各自迁移到最新(在私有临时副本上进行,不改动源文件)。
+
+```bash
+PYTHONPATH=backend python scripts/merge_dbs.py \
+  --db-a A/silicon_notebook.db --storage-a A/storage \
+  --db-b B/silicon_notebook.db --storage-b B/storage \
+  --keep-base a \
+  --out merged/silicon_notebook.db --out-storage merged/storage \
+  --assume-same-users
+```
+
+- `--keep-base a|b` —— 保留哪侧的 base notebook(通常选更全的那侧)。
+- `--assume-same-users` —— 两库存在相同 user id 时必须加此项,用于确认两侧确实是同一个人的账号,否则工具会中止以避免内容归属错乱。
+- `--dry-run` —— 只迁移+校验+打印将会导入哪些 notebook,不产出任何文件;即使 `--out` 已存在也能预览。
+- `--force` —— 覆盖已存在的 `--out` 文件。
+
+前提条件:除共享的 base 外,两库的 notebook id 不得重叠——一旦撞车,工具会中止并列出冲突的 id。
+
+**重要提醒:** `--db-a`/`--db-b` 要指向已静置(先停服务)的数据库文件。工具只拷贝 `.db` 文件本身,正在运行的部署若有未落盘的 `-wal` sidecar 不会被带上——直接对着运行中的实例合并可能静默丢失最近的写入。(工具自身做 schema 迁移时的写入会在使用前 checkpoint 回 `.db`,这部分是安全的;这条提醒针对的是你提供的源文件本身。)
+
+合并完成后,把 `merged/` 产出(db + storage)部署到要保留下来的那台主机,首次启动后在 app 内触发一次索引重建(「重建索引」/「刷新图谱」)以重新生成 `kg_index`/`kg_viz`/ANN 等未被拷贝的产物。
+
 ## 当前限制
 
 - 检索使用 SQLite 关键词（CJK bi-gram）+ float32 矩阵语义检索（每 notebook 独立缓存）。内存占用有界（约百 MB，旧版 Python list 约 1.3 GB）。BM25/FTS5 和 pgvector 放量方向后续再做。
