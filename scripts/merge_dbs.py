@@ -17,7 +17,6 @@ import argparse
 import sqlite3
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 # --- 表分类(SCHEMA_VERSION=17) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
@@ -126,6 +125,63 @@ def migrate_to_current(db_path: Path) -> list[int]:
     settings = Settings(database_url=f"sqlite:///{db_path}")
     database = SqliteDatabase(settings, root_dir=db_path.parent)
     return SqliteMigrator(database, settings).migrate()
+
+
+def notebook_ids(conn: sqlite3.Connection) -> dict[str, str]:
+    return {r[0]: r[1] for r in conn.execute("SELECT id, tier FROM notebooks").fetchall()}
+
+
+def base_id(conn: sqlite3.Connection) -> str:
+    ids = [r[0] for r in conn.execute("SELECT id FROM notebooks WHERE tier='base'").fetchall()]
+    if len(ids) != 1:
+        raise SystemExit(f"期望恰好 1 个 base 库, 实得 {len(ids)} 个: {ids}")
+    return ids[0]
+
+
+def base_stats(conn: sqlite3.Connection, nb_id: str) -> dict[str, int]:
+    out = {}
+    for t in ("sources", "chunks", "knowledge_objects"):
+        out[t] = conn.execute(
+            f"SELECT count(*) FROM {t} WHERE notebook_id=?", (nb_id,)
+        ).fetchone()[0]
+    return out
+
+
+def _user_version(conn: sqlite3.Connection) -> int:
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
+
+
+def preflight(conn_a: sqlite3.Connection, conn_b: sqlite3.Connection,
+              assume_same_users: bool) -> str:
+    # 0) 两库都跑分类守卫: 被导入的副库若有未分类表, 会在 merge 时静默漏拷其数据,
+    #    所以两侧都要检查(不只 primary)。
+    assert_taxonomy_complete(conn_a)
+    assert_taxonomy_complete(conn_b)
+    # 1) 版本一致且为 17
+    va, vb = _user_version(conn_a), _user_version(conn_b)
+    if not (va == vb == 17):
+        raise SystemExit(f"schema 版本必须都为 17, 实得 A={va} B={vb}")
+    # 2) 各恰好一个 base 且 id 相同
+    ba, bb = base_id(conn_a), base_id(conn_b)
+    if ba != bb:
+        raise SystemExit(f"两库 base id 不同: A={ba} B={bb}; 无法认定为同一 base")
+    # 3) notebook id 交集恰好只有 base
+    ids_a, ids_b = set(notebook_ids(conn_a)), set(notebook_ids(conn_b))
+    overlap = (ids_a & ids_b) - {ba}
+    if overlap:
+        raise SystemExit(f"除 base 外 notebook id 撞车, 无法安全移植: {sorted(overlap)}")
+    # 4) users 交集
+    ua = {r[0] for r in conn_a.execute("SELECT id FROM users")}
+    ub = {r[0] for r in conn_b.execute("SELECT id FROM users")}
+    u_overlap = ua & ub
+    if u_overlap and not assume_same_users:
+        raise SystemExit(
+            f"两库有相同 user id: {sorted(u_overlap)}。若确为同一人, 加 --assume-same-users; "
+            "否则请先在源库侧改 id 避免归属错乱。")
+    # 5) 打印 base 统计供核对
+    print(f"[base 统计] A({ba}): {base_stats(conn_a, ba)}", file=sys.stderr)
+    print(f"[base 统计] B({bb}): {base_stats(conn_b, bb)}", file=sys.stderr)
+    return ba
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - filled in Task 6
