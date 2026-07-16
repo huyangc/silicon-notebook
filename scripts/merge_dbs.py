@@ -117,7 +117,13 @@ def assert_taxonomy_complete(conn: sqlite3.Connection) -> None:
 
 
 def migrate_to_current(db_path: Path) -> list[int]:
-    """把 db_path 就地迁到 SCHEMA_VERSION。只 migrate(), 不 seed。"""
+    """把 db_path 就地迁到 SCHEMA_VERSION。只 migrate(), 不 seed。
+
+    迁移用的是 WAL 模式连接; 迁移写入先落在 -wal sidecar, 不 checkpoint 就返回的话,
+    调用方后续对 db_path 做 shutil.copy2 / ATTACH 只读 .db 主文件, 会看不到这些写入
+    (静默丢数据)。所以这里必须显式 checkpoint(TRUNCATE) 把 -wal 合并回 .db 并截断,
+    再关闭本线程连接, 才能保证 db_path 单文件即完整状态。
+    """
     # 延迟 import: 让 Task 1 的纯 sqlite 测试无需 app 依赖即可跑。
     from app.core.config import Settings
     from app.repositories.sqlite.database import SqliteDatabase
@@ -125,7 +131,12 @@ def migrate_to_current(db_path: Path) -> list[int]:
 
     settings = Settings(database_url=f"sqlite:///{db_path}")
     database = SqliteDatabase(settings, root_dir=db_path.parent)
-    return SqliteMigrator(database, settings).migrate()
+    applied = SqliteMigrator(database, settings).migrate()
+    try:  # WAL 落盘: 把 -wal 合并回 .db 并截断, 保证后续 copy/ATTACH 看到完整数据
+        database.connect().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        database.close_local()  # 关闭本线程 WAL 连接
+    return applied
 
 
 def notebook_ids(conn: sqlite3.Connection) -> dict[str, str]:

@@ -159,6 +159,32 @@ def test_migrate_does_not_seed_user_local(tmp_path):
     assert n == 0, "migrate() 不应 seed 用户"
 
 
+def test_migrate_checkpoints_wal_so_file_copy_is_complete(tmp_path):
+    """migrate_to_current 必须 checkpoint WAL: 迁移后只拷 .db 文件(不含 -wal),
+    副本里必须已含迁移写入(否则 WAL 未落盘, main() 的 copy/ATTACH 会静默丢数据)。"""
+    import shutil
+    p = tmp_path / "old.db"
+    _fresh_db(p).close()
+    conn = sqlite3.connect(p)
+    for t in ("knowhow_cells", "knowhow_rows", "knowhow_columns", "knowhow_tables",
+              "notebook_assets", "source_paper_meta", "source_authors"):
+        conn.execute(f"DROP TABLE IF EXISTS {t}")
+    conn.execute("PRAGMA user_version = 15")
+    conn.commit()
+    conn.close()
+
+    md.migrate_to_current(p)
+
+    p2 = tmp_path / "copied.db"           # 只拷 .db, 模拟 main() 的 shutil.copy2
+    shutil.copy2(p, p2)
+    conn = sqlite3.connect(p2)
+    ver = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert ver == 17
+    assert {"knowhow_tables", "source_paper_meta", "source_authors"} <= names
+
+
 def test_preflight_ok_returns_shared_base(tmp_path):
     pa, pb, ca, cb = _seed_pair(tmp_path)
     assert md.preflight(ca, cb, assume_same_users=True) == BASE
