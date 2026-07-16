@@ -23,6 +23,9 @@ from pathlib import Path
 # --- 表分类(SCHEMA_VERSION=17) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
+# 注: object_schemas 主键是全局 object_type(非 notebook 隔离); builtin 行 notebook_id=''
+# 被 IN (secondary_nb) 排除, 但两库若各自建了同名 object_type 的自定义类型会 UNIQUE 冲突
+# -> merge_core 整体中止并删 out_db(fail-loud, 不会静默损坏)。
 NOTEBOOK_SCOPED_TABLES = [
     "sources", "source_authors", "source_paper_meta", "chunks", "chunk_embeddings",
     "element_embeddings", "knowledge_objects", "knowledge_embeddings",
@@ -282,6 +285,8 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
 
         conn.execute("DETACH DATABASE sec")
         conn.commit()
+        # WAL 落盘: 保证 merged.db 是自洽单文件, 运维单独拷 .db 部署时不会漏 -wal 数据。
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         return {"imported_notebooks": sec_nb, "row_counts": row_counts}
     finally:
         conn.close()
