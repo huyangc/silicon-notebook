@@ -745,8 +745,13 @@ class CandidateRetrievalService(_RetrievalState):
                 chunk_to_element[row["id"]] = element_ids[0]
         if not chunk_to_element:
             return {}
-        vector_rows = self.embeddings.vector_rows_for_ids(
-            db, notebook_id, "chunk_embeddings", "chunk_id", list(chunk_to_element))
+        # Batch the IN-clause like every other candidate fetch here: knowhow is
+        # <100 rows/table by design, but a notebook accumulating many tables can
+        # still push the chunk-id list past SQLite's variable limit.
+        vector_rows: list = []
+        for batch in self._in_batches(list(chunk_to_element)):
+            vector_rows.extend(self.embeddings.vector_rows_for_ids(
+                db, notebook_id, "chunk_embeddings", "chunk_id", batch))
         elements = self.sources.evidence_elements(
             list(dict.fromkeys(chunk_to_element.values())))
         return knowhow_ko_candidates(
@@ -1301,7 +1306,12 @@ class CandidateRetrievalService(_RetrievalState):
         docs: List[tuple] = []
         id_to_obj: Dict[str, dict] = {}
         id_to_type: Dict[str, str] = {}
-        for t in kg_objs:
+        # Iterate the four fixed types FIRST (their historical, caller-order-
+        # independent sequence — preserves byte-identical tie-break ordering when
+        # the feature is off / for any _KG_TYPES-only call), then append any
+        # dynamic knowhow column-name types the widening added. `kg_objs.get(t)`
+        # tolerates a fixed type the widened type_list happened to drop.
+        for t in [*_KG_TYPES, *[k for k in kg_objs if k not in _KG_TYPES]]:
             for obj in (kg_objs.get(t) or []):
                 oid = obj["id"]
                 payload = obj.get("payload", {})

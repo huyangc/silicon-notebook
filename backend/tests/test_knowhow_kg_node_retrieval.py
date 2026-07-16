@@ -258,3 +258,40 @@ def test_retrieve_scored_surfaces_knowhow_ko_bounded_fts_fallback(client, import
     ids_off = {h.object_id for h in off}
     assert base_oid in ids_off                     # base still there (same bounded path)
     assert expected not in ids_off                 # knowhow KO gone with flag off
+
+
+# --------------------------------------------------------------------------
+# flag-off byte-identity of the widened _rrf_scored loop (review hardening)
+# --------------------------------------------------------------------------
+def test_rrf_tie_break_ordering_follows_kg_types_not_caller_order(client):
+    """Regression guard for the widened ``_rrf_scored`` loop. Gate i lets the
+    reasoning planner hand ``_retrieve_scored`` a ``types`` list in the LLM's
+    order, and RRF resolves a genuine score tie by ``docs`` insertion order =
+    loop order. The loop MUST iterate the fixed ``_KG_TYPES`` sequence first (not
+    the caller's order) so tie-breaks stay byte-identical to the pre-feature
+    code — reordering ``types`` must not reorder equally-scored hits. Two
+    identical-payload doc KOs of different fixed types force that tie; both
+    reordered calls must agree and be ``_KG_TYPES``-ordered."""
+    from app.models.schemas import NotebookCreate
+
+    cand = _candidates(client)
+    assert cand.settings.knowhow_kg_node_retrieval_enabled is False  # off: pure pre-feature path
+    nb = client._repo.create_notebook(NotebookCreate(name="rrf-tie-order"))
+    payload = {"name": "时序收敛要点", "section_path": "1"}  # identical ⇒ identical score
+    client._repo.store_kg(nb.id, None, [
+        {"local_id": "C1", "object_type": "claim", "payload": dict(payload), "evidence": []},
+        {"local_id": "K1", "object_type": "concept", "payload": dict(payload), "evidence": []},
+    ], [])
+    prev = cand.settings.retrieval_rrf_enabled
+    cand.settings.retrieval_rrf_enabled = True
+    try:
+        fwd = [h.object_type for h in cand._retrieve_scored(
+            nb.id, "时序收敛要点", types=["claim", "concept"])]
+        rev = [h.object_type for h in cand._retrieve_scored(
+            nb.id, "时序收敛要点", types=["concept", "claim"])]
+    finally:
+        cand.settings.retrieval_rrf_enabled = prev
+    # Pre-fix (`for t in kg_objs`) leaked caller order → fwd=[claim,concept],
+    # rev=[concept,claim]. Post-fix both are _KG_TYPES-ordered (claim<concept).
+    assert fwd == rev, f"tie-break order leaked caller `types` order: {fwd} vs {rev}"
+    assert fwd == ["claim", "concept"], fwd
