@@ -1183,8 +1183,10 @@ class SourceIngestionService:
         """批量补抽缺论文元数据的源(CLI phase=metadata 与应用内端点共用)。
         幂等键=meta 行存在;失败源不落行,重跑自动重试(断点续跑)。有界并发
         (≤8,受 kg_extract_workers 约束),任务级 copy_context 传播 per-user
-        模型配置。返回 {"total": N, "<status>": n, ...} 计数。"""
-        self.notebooks.get_row(notebook_id)  # KeyError if missing
+        模型配置。返回 {"total": N, "<status>": n, ...} 计数。成功收尾
+        (stored>0)经 pending_bus 广播 paper_meta_done 铃铛事件,见
+        _notify_paper_meta_done。"""
+        nb_row = self.notebooks.get_row(notebook_id)  # KeyError if missing
         targets = self.sources.sources_missing_paper_meta(
             notebook_id, include_existing=force
         )
@@ -1241,6 +1243,9 @@ class SourceIngestionService:
             self.event_log.emit(
                 {"kind": "paper_meta", "notebook_id": notebook_id, "backfill": counts}
             )
+            stored = int(counts.get("stored", 0))
+            if stored > 0:
+                self._notify_paper_meta_done(notebook_id, nb_row, stored)
             return counts
         finally:
             # 只 pop 属于本次调用 gen 的 entry；后来者已覆盖时先来者不动手
@@ -1248,6 +1253,36 @@ class SourceIngestionService:
                 entry = self._paper_meta_backfilling.get(notebook_id)
                 if entry is not None and entry.get("_gen") == my_gen:
                     self._paper_meta_backfilling.pop(notebook_id, None)
+
+    def _notify_paper_meta_done(
+        self, notebook_id: str, nb_row: Any, stored: int
+    ) -> None:
+        """backfill 成功收尾的铃铛通知,完全对照
+        scale_artifact_runtime.notify_index_done 的模板:owner 优先取当前
+        请求用户 ContextVar,退化到 notebook 的 created_by(nb_row 复用
+        backfill_paper_metadata 开头已取的行,免二次查库);fail-open——通知
+        本身出错绝不能让已经跑完的 backfill 抛异常/丢 counts。"""
+        try:
+            from app.core.request_context import request_user_id
+            from app.services.pending_bus import pending_bus
+
+            uid = request_user_id() or nb_row["created_by"]
+            if not uid:
+                return
+            pending_bus.emit(uid, {
+                "event": "paper_meta_done",
+                "notebook_id": notebook_id,
+                "notebook_name": nb_row["name"],
+                "stored": stored,
+            })
+            pending_bus.mark_dirty(uid)
+        except Exception:  # noqa: BLE001 - notification is fail-open
+            try:
+                self.event_log.logger.exception(
+                    "paper_meta_done notify failed for %s", notebook_id
+                )
+            except Exception:
+                pass
 
     def paper_meta_backfilling(self, notebook_id: str) -> bool:
         """O(1) 内存 membership；重启后天然为 False（未在跑）。"""

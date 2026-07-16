@@ -2017,5 +2017,6 @@ def backfill_paper_metadata(notebook_id: str) -> dict:
         background_jobs.submit(
             repo.backfill_paper_metadata, notebook_id,
             name=f"papermeta-{notebook_id}",
+            notify_pending=True,   # 兜底刷新 pending 快照
         )
     return {"queued": queued}

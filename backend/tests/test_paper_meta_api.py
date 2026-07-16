@@ -84,3 +84,27 @@ def test_backfill_owner_gate(client):
     bob_h = _login(client, "p00000002")
     r = client.post(f"/api/notebooks/{nb}/paper-meta/backfill", headers=bob_h)
     assert r.status_code == 404
+
+
+def test_backfill_endpoint_submits_notify_pending(client, monkeypatch):
+    """兜底刷新：端点提交 job 时带 notify_pending=True（Task 6，铃铛集成 §3.3）。"""
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import deps, routes as routes_mod
+
+    real_repo = deps.repository()
+    real_repo.llm_client = MagicMock(configured=True)
+    real_repo.sources_missing_paper_meta = MagicMock(return_value=["src-1"])
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    calls = []
+    monkeypatch.setattr(
+        routes_mod.background_jobs, "submit",
+        lambda *a, **k: calls.append(k),
+    )
+
+    r = client.post(f"/api/notebooks/{nb}/paper-meta/backfill")
+    assert r.status_code == 200
+    assert r.json() == {"queued": 1}
+    assert len(calls) == 1
+    assert calls[0].get("notify_pending") is True
