@@ -220,14 +220,16 @@ def test_url_local_parse_never_falls_back_to_cloud(local_repo, monkeypatch):
 
     monkeypatch.setattr(remote_sources, "download_pdf", fake_download)
     monkeypatch.setattr(
-        repo.mineru_client, "parse",
+        repo.mineru_client, "parse_with_images",
         lambda path, name: (_ for _ in ()).throw(RuntimeError("mineru down")),
     )
 
     def cloud_forbidden(*a, **k):
         raise AssertionError("local-first URL parse must NEVER touch the cloud")
 
-    monkeypatch.setattr(repo.mineru_cloud_client, "parse_url", cloud_forbidden)
+    monkeypatch.setattr(
+        repo.mineru_cloud_client, "parse_url_with_images", cloud_forbidden
+    )
     repo.process_source(sid)
     src = repo.get_source(sid)
     # Local MinerU failed → pypdf fallback on the downloaded file (blank page

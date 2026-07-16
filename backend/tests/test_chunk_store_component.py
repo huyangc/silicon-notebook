@@ -151,7 +151,40 @@ def test_source_elements_for_chunking_orders_by_zero_padded_id(chunk_store, sour
         "id": f"el-{source_id}-0001",
         "element_type": "paragraph",
         "text": "text 1",
+        "caption": "",   # fixture's metadata is "{}" — no caption key inside
     }
+
+
+def test_source_elements_for_chunking_surfaces_caption_from_metadata(
+    repo, chunk_store, notebook_id
+):
+    """Task 7b: MinerU 带图注的 image 元素把 caption 存在 metadata JSON 里
+    (Task 7),build_chunks 靠 source_elements_for_chunking 带出的 caption
+    字段判断是否放行该元素进检索(caption-bearing image 应保留)。"""
+    sid = "src-cap"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, notebook_id, "S2", "markdown", "s2.md", "/tmp/s2.md",
+             0, "h2", "", "", "parsed", NOW, NOW),
+        )
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+            "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            (f"el-{sid}-0001", sid, "image", "img1", "Figure 1: the layout",
+             json.dumps({"caption": "Figure 1: the layout"}), NOW),
+        )
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+            "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            (f"el-{sid}-0002", sid, "paragraph", "p1", "Body text", "{}", NOW),
+        )
+    elements = chunk_store.source_elements_for_chunking(sid)
+    by_id = {e["id"]: e for e in elements}
+    assert by_id[f"el-{sid}-0001"]["caption"] == "Figure 1: the layout"
+    assert by_id[f"el-{sid}-0002"]["caption"] == ""
 
 
 def test_source_chunks_returns_id_and_text(chunk_store, source_id):

@@ -117,6 +117,36 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
             ("scripts/generate_repository_contract_fixtures.py", 1992, "db.execute"),
         }
     },
+    # Offline dual-DB merge tool (scripts/merge_dbs.py, added by #276): every
+    # execute-shaped call operates on shutil-copied temporary files of two
+    # already-exported SQLite databases (see migrate_to_current/merge_core),
+    # never the live product database the running app serves.
+    **{
+        site: "offline merge tool operates on temporary copies of exported databases"
+        for site in {
+            ("scripts/merge_dbs.py", 78, "conn.execute"),
+            ("scripts/merge_dbs.py", 83, "conn.execute"),
+            ("scripts/merge_dbs.py", 141, "execute"),
+            ("scripts/merge_dbs.py", 148, "conn.execute"),
+            ("scripts/merge_dbs.py", 152, "conn.execute"),
+            ("scripts/merge_dbs.py", 161, "conn.execute"),
+            ("scripts/merge_dbs.py", 168, "conn.execute"),
+            ("scripts/merge_dbs.py", 193, "conn_a.execute"),
+            ("scripts/merge_dbs.py", 194, "conn_b.execute"),
+            ("scripts/merge_dbs.py", 211, "conn.execute"),
+            ("scripts/merge_dbs.py", 225, "conn.execute"),
+            ("scripts/merge_dbs.py", 226, "conn.execute"),
+            ("scripts/merge_dbs.py", 228, "conn.execute"),
+            ("scripts/merge_dbs.py", 259, "conn.execute"),
+            ("scripts/merge_dbs.py", 274, "conn.execute"),
+            ("scripts/merge_dbs.py", 278, "conn.execute"),
+            ("scripts/merge_dbs.py", 284, "conn.execute"),
+            ("scripts/merge_dbs.py", 287, "conn.execute"),
+            ("scripts/merge_dbs.py", 291, "conn.execute"),
+            ("scripts/merge_dbs.py", 294, "conn.execute"),
+            ("scripts/merge_dbs.py", 359, "conn_s.execute"),
+        }
+    },
     # Snapshot verifier attaches only to a private backup/probe opened ro.
     **{
         site: "snapshot verifier reads only its backup/probe database"
@@ -132,18 +162,21 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
             # (PAPER_META_TABLES + PAPER_META_INDEXES + every hop's terminal
             # bumped to 17 + the new (16, 17) hop), then a further +45 by
             # knowhow-tables PR-2+3 Task 1's v18 additions (KNOWHOW_CELL_CODE_
-            # TABLE/_INDEX + terminals bumped to 18 + the new (17, 18) hop).
-            ("scripts/verify_repository_snapshot.py", 805, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 812, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 834, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 838, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 863, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 864, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 881, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 893, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 1235, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1242, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1271, "probe.execute"),
+            # TABLE/_INDEX + terminals bumped to 18 + the new (17, 18) hop),
+            # then a further +57 by source-asset-linking Task 2's v19
+            # additions (NOTEBOOK_ASSETS_SOURCE_ID_COLUMN/_INDEX + every hop's
+            # terminal bumped to 19 + the new (18, 19) hop).
+            ("scripts/verify_repository_snapshot.py", 862, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 869, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 891, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 895, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 920, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 921, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 938, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 950, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 1292, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1299, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1328, "probe.execute"),
         }
     },
     # Offline two-DB merge tool (PR#276): every statement runs against temp-dir
@@ -358,6 +391,12 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ("scripts/generate_repository_contract_fixtures.py", 1650, "sqlite3.connect"): (
         "contract fixture generator opens disposable fixture databases"
     ),
+    ("scripts/merge_dbs.py", 222, "sqlite3.connect"): (
+        "offline merge tool opens a temporary copy of the merge output/primary database"
+    ),
+    ("scripts/merge_dbs.py", 356, "sqlite3.connect"): (
+        "offline merge tool opens temporary copies of both source databases"
+    ),
     # Line numbers shifted +32 by Task 1 (memory-kg-extract)'s v14 manifest
     # entries, then a further +28 by Task 5's v15 manifest additions
     # (SOURCES_PARSE_STATUS_TYPE_INDEX + terminals bumped to 15 + (14, 15) hop),
@@ -367,20 +406,22 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     # (PAPER_META_TABLES + PAPER_META_INDEXES + terminals bumped to 17 +
     # (16, 17) hop), then a further +45 by PR-2+3 Task 1's v18 manifest
     # additions (KNOWHOW_CELL_CODE_TABLE/_INDEX + terminals bumped to 18 +
-    # (17, 18) hop).
-    ("scripts/verify_repository_snapshot.py", 859, "sqlite3.connect"): (
+    # (17, 18) hop), then a further +57 by source-asset-linking Task 2's v19
+    # manifest additions (NOTEBOOK_ASSETS_SOURCE_ID_COLUMN/_INDEX + every hop
+    # terminal bumped to 19 + the new (18, 19) hop).
+    ("scripts/verify_repository_snapshot.py", 916, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 860, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 917, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1229, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1286, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1376, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1433, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1378, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1435, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
     # Offline two-DB merge tool (PR#276) opens temp-dir copies of the two source

@@ -1315,6 +1315,11 @@
         "type": "index"
       },
       {
+        "name": "idx_notebook_assets_source",
+        "sql_sha256": "3c98ae52160e4a1ac3f6f0ae11a4757a37b2ea1683ba7d2baa8032b432583e22",
+        "type": "index"
+      },
+      {
         "name": "idx_notebook_members_user",
         "sql_sha256": "d19d04e75eb1ca890f435ea4508b7da01eae29fa1214df4b76a9f8ed5d7cf6b1",
         "type": "index"
@@ -1686,7 +1691,7 @@
       },
       {
         "name": "notebook_assets",
-        "sql_sha256": "62f4e1b825664d3c912e3938f6334171f41a612aa5c73a35fb4279d4ad7f37d7",
+        "sql_sha256": "34c671c7927db6a9aa142d813d4742c472e87977e7c2dfc3ce5cdaef0796eb14",
         "type": "table"
       },
       {
@@ -1770,6 +1775,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 18
+    "user_version": 19
   }
 }

@@ -176,6 +176,7 @@
       "backend/tests/test_legacy_graph_guard.py:11",
       "backend/tests/test_max_tokens.py:12",
       "backend/tests/test_mention_bridge.py:7",
+      "backend/tests/test_merge_dbs.py:30",
       "backend/tests/test_merge_rebuild_exclude.py:5",
       "backend/tests/test_merge_review_deferred.py:4",
       "backend/tests/test_merge_review_job.py:112",
@@ -7494,6 +7495,7 @@
     "consumers": [
       "backend/app/api/routes.py:400",
       "backend/tests/test_knowledge_governance_boundaries.py:106",
+      "backend/tests/test_source_ingestion_service.py:541",
       "backend/tests/test_source_reverse_index.py:253",
       "scripts/smoke_backend.py:1199"
     ],
@@ -8298,8 +8300,8 @@
       "backend/tests/test_pipeline_concurrency.py:87",
       "backend/tests/test_pipeline_concurrency.py:96",
       "backend/tests/test_source_url_persist.py:27",
-      "backend/tests/test_url_sources.py:129",
-      "backend/tests/test_url_sources.py:144",
+      "backend/tests/test_url_sources.py:131",
+      "backend/tests/test_url_sources.py:146",
       "backend/tests/test_url_sources.py:94",
       "scripts/smoke_backend.py:1197",
       "scripts/smoke_backend.py:67",
@@ -9044,6 +9046,8 @@
       "backend/app/services/sqlite_repository.py:2643",
       "backend/app/services/sqlite_repository.py:2744",
       "backend/app/services/sqlite_repository.py:322",
+      "backend/tests/test_source_ingestion_service.py:432",
+      "backend/tests/test_source_ingestion_service.py:485",
       "backend/tests/test_url_sources.py:119"
     ],
     "kind": "instance_attribute",
@@ -9058,8 +9062,8 @@
       "backend/app/services/sqlite_repository.py:2632",
       "backend/app/services/sqlite_repository.py:2636",
       "backend/app/services/sqlite_repository.py:323",
-      "backend/tests/test_url_sources.py:126",
-      "backend/tests/test_url_sources.py:142",
+      "backend/tests/test_url_sources.py:127",
+      "backend/tests/test_url_sources.py:144",
       "backend/tests/test_url_sources.py:90"
     ],
     "kind": "instance_attribute",
@@ -9317,7 +9321,7 @@
       }
     ],
     "scope": "module",
-    "signature": "(source_id: 'str', file_path: 'str', file_name: 'str', mineru_client: 'Any' = None) -> 'List[SourceElement]'"
+    "signature": "(source_id: 'str', file_path: 'str', file_name: 'str', mineru_client: 'Any' = None, persist_image: 'Any' = None) -> 'List[SourceElement]'"
   },
   "pending_actions": {
     "consumers": [
@@ -9405,8 +9409,8 @@
       "backend/tests/test_chunk_embed.py:107",
       "backend/tests/test_pipeline_concurrency.py:76",
       "backend/tests/test_repository_api_contract.py:120",
-      "backend/tests/test_url_sources.py:128",
-      "backend/tests/test_url_sources.py:143",
+      "backend/tests/test_url_sources.py:130",
+      "backend/tests/test_url_sources.py:145",
       "backend/tests/test_url_sources.py:93",
       "scripts/smoke_backend.py:1194"
     ],
@@ -11061,7 +11065,8 @@
       "backend/app/services/sqlite_repository.py:3055",
       "backend/tests/test_kg_llm_client.py:52",
       "backend/tests/test_repository_api_contract.py:121",
-      "backend/tests/test_url_sources.py:132",
+      "backend/tests/test_source_ingestion_service.py:453",
+      "backend/tests/test_url_sources.py:134",
       "backend/tests/test_url_sources.py:96",
       "scripts/smoke_backend.py:1056",
       "scripts/smoke_backend.py:1059",

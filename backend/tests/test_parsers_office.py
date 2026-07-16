@@ -28,6 +28,41 @@ def test_mapper_custom_prefix_for_office():
     assert els[1].element_type == "paragraph"
 
 
+def test_image_block_persists_asset_and_keeps_caption():
+    content = [{"type": "image", "img_path": "images/fig1.jpg",
+                "image_caption": ["Figure 1: layout"], "page_idx": 0}]
+    saved = {}
+    def persist(b, name):
+        saved[name] = b
+        return "asset-xyz"
+    els = mineru_content_list_to_elements("s1", content, images={"fig1.jpg": b"J"}, persist_image=persist)
+    img = [e for e in els if e.element_type == "image"]
+    assert len(img) == 1
+    assert img[0].metadata["asset_id"] == "asset-xyz"
+    assert "Figure 1: layout" in img[0].text
+    assert saved == {"fig1.jpg": b"J"}
+
+
+def test_image_block_without_caption_is_not_dropped():
+    content = [{"type": "image", "img_path": "images/x.png", "page_idx": 2}]
+    els = mineru_content_list_to_elements("s1", content, images={"x.png": b"P"},
+                                          persist_image=lambda b, n: "a1")
+    img = [e for e in els if e.element_type == "image"]
+    assert len(img) == 1                      # 旧行为会 continue 丢弃
+    assert img[0].metadata["asset_id"] == "a1"
+    assert img[0].text.strip()                # 占位文本非空
+
+
+def test_image_block_no_persist_degrades_to_caption_text_only():
+    content = [{"type": "image", "img_path": "images/x.png",
+                "image_caption": ["cap"], "page_idx": 0}]
+    els = mineru_content_list_to_elements("s1", content)   # 无 images/persist
+    img = [e for e in els if e.element_type == "image"]
+    assert len(img) == 1
+    assert "asset_id" not in img[0].metadata
+    assert "cap" in img[0].text
+
+
 class FakeMineru:
     """模式无关的假 MinerU 客户端：按构造参数返回 content_list / 抛错 / 报未配置。"""
 
@@ -39,12 +74,15 @@ class FakeMineru:
         self.last_error = ""
 
     def parse(self, file_path, file_name):
+        return self.parse_with_images(file_path, file_name)[0]
+
+    def parse_with_images(self, file_path, file_name):
         # 故意不在抛出前预设 last_error：让生产代码的 "not last_error → 设置" 分支
         # 真正被执行（否则该分支被测试 fake 短路，删了也察觉不到）。
         self.last_error = ""
         if self._raises is not None:
             raise self._raises
-        return self._content_list
+        return self._content_list, {}
 
 
 def _make_docx(path: Path) -> Path:

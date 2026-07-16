@@ -11,7 +11,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1405,6 +1405,23 @@ class SqliteMigrator:
                     ELSE 'attribute'
                 END
                 """
+            )
+
+    def _migration_19(self) -> None:
+        """来源内嵌图片资产：notebook_assets 加可空 source_id 列 + 索引。
+
+        MinerU 从 pdf/docx/pptx 抽出的内嵌图片以 source_id 关联到来源，供来源
+        视图渲染 + 源删除/重解析级联清理；knowhow 粘贴图片 source_id 为 NULL。
+        已部署库(user_version>=1 时 _migration_1 短路)靠本迁移 ALTER 补列——
+        与 _migration_2/_migration_4 同款独立迁移；ALTER ADD COLUMN 若列已存在
+        会报错，故带 PRAGMA table_info 列存在性守卫，保证可重入。"""
+        with self._connect() as db:
+            cols = {row[1] for row in db.execute("PRAGMA table_info(notebook_assets)").fetchall()}
+            if "source_id" not in cols:
+                db.execute("ALTER TABLE notebook_assets ADD COLUMN source_id TEXT")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notebook_assets_source "
+                "ON notebook_assets(source_id)"
             )
 
     def _recover_interrupted_jobs(self) -> None:

@@ -4379,6 +4379,26 @@ button.chat-session-card {
   font-weight: 650;
 }
 
+.element-image-figure {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+}
+
+.element-image {
+  max-width: 100%;
+  height: auto;
+  border-radius: 6px;
+  border: 1px solid #e3e7ed;
+}
+
+.element-image-figure figcaption {
+  font-size: 13px;
+  color: #6b7280;
+  line-height: 1.5;
+}
+
 .toast {
   position: fixed;
   right: 24px;

@@ -87,8 +87,8 @@ def test_process_source_url_branch_parses_via_cloud(cloud_repo, monkeypatch):
     nb = cloud_repo.create_notebook(NotebookCreate(name="n"))
     sid = _make_url_source(cloud_repo, monkeypatch, nb.id)
     monkeypatch.setattr(
-        cloud_repo.mineru_cloud_client, "parse_url",
-        lambda url, **kw: [{"type": "text", "text": "Hello world", "page_idx": 0}],
+        cloud_repo.mineru_cloud_client, "parse_url_with_images",
+        lambda url, **kw: ([{"type": "text", "text": "Hello world", "page_idx": 0}], {}),
     )
     cloud_repo.process_source(sid)
     detail = cloud_repo.get_source(sid)
@@ -116,14 +116,16 @@ def test_process_source_url_prefers_local_over_cloud(local_repo, monkeypatch):
         lambda url, dest, **kw: (downloaded.append(url), open(dest, "wb").write(b"%PDF-"))[0],
     )
     monkeypatch.setattr(
-        local_repo.mineru_client, "parse",
-        lambda path, name: [{"type": "text", "text": "Local parsed", "page_idx": 0}],
+        local_repo.mineru_client, "parse_with_images",
+        lambda path, name: ([{"type": "text", "text": "Local parsed", "page_idx": 0}], {}),
     )
 
     def cloud_must_not_run(url, **kw):
         raise AssertionError("本地优先时不得触达云端 mineru.net")
 
-    monkeypatch.setattr(local_repo.mineru_cloud_client, "parse_url", cloud_must_not_run)
+    monkeypatch.setattr(
+        local_repo.mineru_cloud_client, "parse_url_with_images", cloud_must_not_run
+    )
 
     local_repo.process_source(sid)
     detail = local_repo.get_source(sid)
@@ -139,7 +141,7 @@ def test_process_source_url_branch_failure_marks_failed(cloud_repo, monkeypatch)
     def boom(url, **kw):
         raise RuntimeError("MinerU 云端解析失败: 超过页数")
 
-    monkeypatch.setattr(cloud_repo.mineru_cloud_client, "parse_url", boom)
+    monkeypatch.setattr(cloud_repo.mineru_cloud_client, "parse_url_with_images", boom)
     cloud_repo.process_source(sid)
     detail = cloud_repo.get_source(sid)
     assert detail.parse_status == "failed"

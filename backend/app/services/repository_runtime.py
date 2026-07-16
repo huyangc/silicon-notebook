@@ -513,6 +513,8 @@ class RepositoryRuntime:
         notebook_meta_row: Callable[[str], Any],
         notebook_meta_sources: Callable[..., list],
         apply_notebook_meta: Callable[..., None],
+        make_persist_image: Callable[..., Any],
+        delete_source_images: Callable[..., Any],
     ) -> SourceIngestionService:
         """Compose the source ingestion orchestration (Task 12) once the
         facade-bound seams exist.  ``write`` is the facade's ``_write``
@@ -521,8 +523,11 @@ class RepositoryRuntime:
         ``source_elements``/``summarize_source``/``parse_file`` and the model
         client seams stay facade/module late-bound so frozen patch targets
         (repo.source_elements, repo._summarize_source, module
-        parse_source_file, per-user llm/kg_llm properties) keep working; the
-        remaining callables are TEMPORARY facade-owned KG/catalog callbacks —
+        parse_source_file, per-user llm/kg_llm properties) keep working;
+        ``make_persist_image``/``delete_source_images`` are the per-source
+        image-persistence factory and the per-source image cascade-delete
+        seam (embedded-image retention); the remaining callables are
+        TEMPORARY facade-owned KG/catalog callbacks —
         Task 16+ move them with their domains.  The Gate-4 KG hooks are gone
         (Task 15): extraction persists through the runtime-owned
         KnowledgeLifecycleService and delete-side cache eviction goes through
@@ -570,6 +575,8 @@ class RepositoryRuntime:
             notebook_meta_sources=notebook_meta_sources,
             apply_notebook_meta=apply_notebook_meta,
             maybe_enqueue_scale_fold=self.scale_artifacts.maybe_enqueue_fold,
+            make_persist_image=make_persist_image,
+            delete_source_images=delete_source_images,
         )
         # Memory-KG bridge (memory-kg-extract Task 3): MemoryService is wired
         # earlier (wire_memory, before wire_knowledge_lifecycle), but

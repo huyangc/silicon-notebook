@@ -302,6 +302,15 @@ SOURCES_PARSE_STATUS_TYPE_INDEX = {
 # them on the way to current, so they belong in every hop's tables/indexes
 # allowlist (harmless where a constructed source already carries them: they
 # simply won't appear in the after-before added set).
+#
+# NOTE (v19, source-asset-linking Task 2): notebook_assets' literal below
+# already carries the `, source_id TEXT)` tail that _migration_19 appends via
+# ALTER TABLE ADD COLUMN. Every hop that creates notebook_assets fresh (any
+# pre-version below 16) migrates straight through to current SCHEMA_VERSION
+# in one migrate() pass, so only the POST-_migration_19 shape is ever
+# observed for those hops — see NOTEBOOK_ASSETS_SOURCE_ID_COLUMN below for the
+# hops (16+) where the table already exists and the column is a genuine
+# before/after ALTER instead.
 KNOWHOW_TABLES = {
     "knowhow_cells": """CREATE TABLE knowhow_cells (
                   id TEXT PRIMARY KEY,
@@ -345,7 +354,7 @@ KNOWHOW_TABLES = {
                   size INTEGER NOT NULL,
                   created_by TEXT NOT NULL DEFAULT '',
                   created_at TEXT NOT NULL
-                )""",
+                , source_id TEXT)""",
 }
 KNOWHOW_INDEXES = {
     "idx_knowhow_cells_row":
@@ -433,9 +442,29 @@ KNOWHOW_CELL_CODE_INDEX = {
         "CREATE INDEX idx_knowhow_cell_code_row ON knowhow_cell_code(row_id)",
 }
 
+# v19 (source-asset-linking Task 2): notebook_assets gains a nullable
+# source_id column — links a MinerU-extracted embedded image back to its
+# originating source (source-view rendering + delete/reparse cascade
+# cleanup); knowhow paste-in images leave it NULL — plus its lookup index.
+# _migration_19 ALTERs the already-existing table (mirrors the v14
+# sources.memory_id column pattern) — no new table/trigger/view. Any DB below
+# 19 gains the column + index on the way to current, so
+# NOTEBOOK_ASSETS_SOURCE_INDEX belongs in every hop's index allowlist; the
+# COLUMN dict only applies to hops whose pre-version is >= 16 (notebook_assets
+# already exists there as a real before/after ALTER) — see the NOTE beside
+# KNOWHOW_TABLES above for why hops below 16 fold source_id straight into that
+# table's CREATE literal instead.
+NOTEBOOK_ASSETS_SOURCE_ID_COLUMN = {
+    "source_id": ("source_id", "TEXT", 0, None, 0),
+}
+NOTEBOOK_ASSETS_SOURCE_INDEX = {
+    "idx_notebook_assets_source":
+        "CREATE INDEX idx_notebook_assets_source ON notebook_assets(source_id)",
+}
+
 MIGRATION_MANIFEST = {
-    # Cumulative delta from the frozen v9 fixture to merged schema v18.
-    (9, 18): {
+    # Cumulative delta from the frozen v9 fixture to merged schema v19.
+    (9, 19): {
         "tables": {
             "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
             **EXPECTED_MEMORY_TABLES,
@@ -446,32 +475,35 @@ MIGRATION_MANIFEST = {
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES,
                     **SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX,
-                    **KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX},
+                    **KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (10, 18): {
+    (10, 19): {
         "tables": {**EXPECTED_MEMORY_TABLES, **KNOWHOW_TABLES, **PAPER_META_TABLES,
                    **KNOWHOW_CELL_CODE_TABLE},
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES,
                     **SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX,
-                    **KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX},
+                    **KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
     # Both branches independently used v11 before merge. Select the exact
     # lineage below from the source schema, then admit only the missing objects.
-    (11, 18, "memory"): {
+    (11, 19, "memory"): {
         "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE},
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {**MASTER_SCALE_INDEXES, **SOURCES_MEMORY_ID_INDEX,
                     **SOURCES_PARSE_STATUS_TYPE_INDEX, **KNOWHOW_INDEXES,
-                    **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX},
+                    **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
         "triggers": {},
         "views": {},
     },
-    (11, 18, "master"): {
+    (11, 19, "master"): {
         "tables": {**EXPECTED_MEMORY_TABLES, **KNOWHOW_TABLES, **PAPER_META_TABLES,
                    **KNOWHOW_CELL_CODE_TABLE},
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
@@ -483,17 +515,19 @@ MIGRATION_MANIFEST = {
             **KNOWHOW_INDEXES,
             **PAPER_META_INDEXES,
             **KNOWHOW_CELL_CODE_INDEX,
+            **NOTEBOOK_ASSETS_SOURCE_INDEX,
         },
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (12, 18): {
+    (12, 19): {
         "tables": {**EXPECTED_MEMORY_TABLES, **KNOWHOW_TABLES, **PAPER_META_TABLES,
                    **KNOWHOW_CELL_CODE_TABLE},
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {**EXPECTED_MEMORY_INDEXES, **SOURCES_MEMORY_ID_INDEX,
                     **SOURCES_PARSE_STATUS_TYPE_INDEX, **KNOWHOW_INDEXES,
-                    **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX},
+                    **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
@@ -503,59 +537,82 @@ MIGRATION_MANIFEST = {
     # covering index; _migration_16 adds the five knowhow/notebook_assets
     # tables + their indexes; _migration_17 adds the two paper-metadata
     # tables + their indexes; _migration_18 adds the knowhow_cell_code table +
-    # its index — no new triggers on any hop.
-    (13, 18): {
+    # its index; _migration_19 adds notebook_assets.source_id + its index —
+    # no new triggers on any hop.
+    (13, 19): {
         "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE},
         "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
         "indexes": {**SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX,
-                    **KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX},
+                    **KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
         "triggers": {},
         "views": {},
     },
-    # The v14 -> v18 hop (Task 5 + knowhow-tables PR-1 Task 1 + paper-metadata
-    # Task 1 + cell-code Task 1): a database already carrying sources.memory_id
-    # gains the parse_status/source_type covering index, the five knowhow/
-    # notebook_assets tables, the two paper-metadata tables, and the
-    # knowhow_cell_code table. No new column/trigger — mirrors Task 1's
-    # single-object (13, 14) entry.
-    (14, 18): {
+    # The v14 -> current hop (Task 5 + knowhow-tables PR-1 Task 1 +
+    # paper-metadata Task 1 + cell-code Task 1 + source-asset-linking Task 2):
+    # a database already carrying sources.memory_id gains the parse_status/
+    # source_type covering index, the five knowhow/notebook_assets tables, the
+    # two paper-metadata tables, the knowhow_cell_code table, and
+    # notebook_assets.source_id's index. No new column/trigger — mirrors
+    # Task 1's single-object (13, 14) entry.
+    (14, 19): {
         "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE},
         "columns": {},
         "indexes": {**SOURCES_PARSE_STATUS_TYPE_INDEX, **KNOWHOW_INDEXES,
-                    **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX},
+                    **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
         "triggers": {},
         "views": {},
     },
-    # The v15 -> v18 hop (knowhow-tables PR-1 Task 1 + paper-metadata Task 1 +
-    # cell-code Task 1): a database already at v15 gains the five knowhow/
-    # notebook_assets tables, the two paper-metadata tables, and the
-    # knowhow_cell_code table, plus their indexes. No new column/trigger/view —
-    # mirrors Task 5's single-object (14, 15) entry.
-    (15, 18): {
+    # The v15 -> current hop (knowhow-tables PR-1 Task 1 + paper-metadata
+    # Task 1 + cell-code Task 1 + source-asset-linking Task 2): a database
+    # already at v15 gains the five knowhow/notebook_assets tables, the two
+    # paper-metadata tables, the knowhow_cell_code table, and
+    # notebook_assets.source_id's index, plus their indexes. No new
+    # column/trigger/view — mirrors Task 5's single-object (14, 15) entry.
+    (15, 19): {
         "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE},
         "columns": {},
-        "indexes": {**KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX},
+        "indexes": {**KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
         "triggers": {},
         "views": {},
     },
-    # The v16 -> v18 hop (paper-metadata Task 1 + cell-code Task 1): a database
-    # already at v16 (carrying the five knowhow/notebook_assets tables) gains
-    # the two paper-metadata tables and the knowhow_cell_code table + their
-    # indexes. No new column/trigger/view.
-    (16, 18): {
+    # The v16 -> current hop (paper-metadata Task 1 + cell-code Task 1 +
+    # source-asset-linking Task 2): a database already at v16 (carrying the
+    # five knowhow/notebook_assets tables — notebook_assets WITHOUT source_id)
+    # gains the two paper-metadata tables, the knowhow_cell_code table, and —
+    # unlike the below-16 hops above — a genuine before/after ALTER on the
+    # already-existing notebook_assets table, so its column belongs in
+    # "columns" here rather than folded into a "tables" CREATE literal.
+    (16, 19): {
         "tables": {**PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE},
-        "columns": {},
-        "indexes": {**PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX},
+        "columns": {"notebook_assets": NOTEBOOK_ASSETS_SOURCE_ID_COLUMN},
+        "indexes": {**PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
         "triggers": {},
         "views": {},
     },
-    # The v17 -> v18 hop (knowhow-tables PR-2+3 Task 1): a database already at
-    # v17 gains only the cell-code table + its index — _migration_18's role
-    # remap rewrites row VALUES, not schema objects, so it has no entry here.
-    (17, 18): {
+    # The v17 -> current hop (knowhow-tables PR-2+3 Task 1 + source-asset-
+    # linking Task 2): a database already at v17 gains the cell-code table +
+    # its index — _migration_18's role remap rewrites row VALUES, not schema
+    # objects, so it has no entry here — plus notebook_assets.source_id (a
+    # genuine before/after ALTER, same reasoning as the v16 hop above).
+    (17, 19): {
         "tables": KNOWHOW_CELL_CODE_TABLE,
-        "columns": {},
-        "indexes": KNOWHOW_CELL_CODE_INDEX,
+        "columns": {"notebook_assets": NOTEBOOK_ASSETS_SOURCE_ID_COLUMN},
+        "indexes": {**KNOWHOW_CELL_CODE_INDEX, **NOTEBOOK_ASSETS_SOURCE_INDEX},
+        "triggers": {},
+        "views": {},
+    },
+    # The v18 -> v19 hop (source-asset-linking Task 2): a database already at
+    # v18 gains only notebook_assets.source_id (before/after ALTER, same
+    # reasoning as the v16/v17 hops above) + its lookup index — no new
+    # table/trigger/view.
+    (18, 19): {
+        "tables": {},
+        "columns": {"notebook_assets": NOTEBOOK_ASSETS_SOURCE_ID_COLUMN},
+        "indexes": NOTEBOOK_ASSETS_SOURCE_INDEX,
         "triggers": {},
         "views": {},
     },

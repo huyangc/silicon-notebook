@@ -15,7 +15,8 @@
 - 干净起点：全新数据库只初始化本机用户，不预置 demo 笔记本或合成来源
 - 支持 PDF、Markdown、DOCX、PPTX、CSV、XLSX 的 multipart 文件上传（经共享 KG job scheduler 异步执行）
 - **KG-native 摄取**：结构化 Markdown 解析 → 贪心窗口化 KG 抽取（Concept / Claim / Formula / Procedure）并发 embedding → 抽取优先状态（`extracted` = KG 就绪，不等 embedding）
-- PDF 走 MinerU（公式/表格/版面）；本机或未配置时回退 pypdf
+- PDF/DOCX/PPTX 走 MinerU（公式/表格/版面、内嵌图片）；本机或未配置时回退 pypdf（仅纯文本）
+- MinerU 抽取的内嵌图片在来源正文内联展示；图注与文字保持可搜索
 - 混合检索：CJK 感知 bi-gram 关键词 + float32 矩阵语义检索（每 notebook 独立缓存）
 - KG-native 接地问答：逐句 `[k_i]` 引用（渲染为紧凑编号引用；模型直接输出的数字复合引用如 `[1, 2, 3]` 在能映射到已知引用时也可点击）、多轮会话、1-hop KG 邻居扩展，推理模式实时显示可展开的一行 agent 轨迹
 - **推理模式的类型化查询期推导：** agent 可调用 `follow_chain`，把有证据的两跳 `A→B→C` 临时组合成 `A→C`；首版只允许 `derived_from / kind_of / prerequisite_of / precedes / part_of`。两条直接关系各自保留可引用的关系证据；被拒绝、无 quote、类型或 `validity_scope` 冲突的路径 fail-closed；推论明确标作「推断」，且绝不写回 KG。该能力不新增 migration、索引或历史回填；查询只对既有 source/target 索引做有界抽样，高度节点无法在预算内确认时直接放弃推论。
@@ -589,6 +590,9 @@ MINERU_MODEL_SOURCE     # huggingface | modelscope
 MINERU_TIMEOUT_SECONDS  # MinerU 调用超时
 MINERU_FORMULA_ENABLE   # true/false
 MINERU_TABLE_ENABLE     # true/false
+MINERU_RETURN_IMAGES    # 是否保留 PDF/DOCX/PPTX 文档中的内嵌图片（默认开 true；设 0/false 仅保留文字与图注）
+MINERU_MAX_IMAGE_BYTES  # 单张内嵌图片大小上限（默认 5MB，超出丢弃）
+MINERU_MAX_IMAGES_PER_SOURCE # 每个来源最多保留的内嵌图片张数（默认 200）
 ```
 
 **日志：**

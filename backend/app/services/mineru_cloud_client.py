@@ -13,6 +13,7 @@ import math
 import time
 import urllib.request
 import zipfile
+from pathlib import Path
 from typing import List, Optional
 
 from app.core.config import Settings
@@ -32,9 +33,20 @@ class MinerUCloudClient:
         return self.settings.mineru_cloud_enabled
 
     def parse_url(self, url: str, *, data_id: str = "") -> List[dict]:
-        """提交 PDF URL 给云端并返回 content_list。
+        """提交 PDF URL 给云端并返回 content_list(向后兼容，委托 parse_url_with_images)。
 
         未配置 token → MinerUCloudNotConfigured；云端失败/超时/结果不可用 → RuntimeError。
+        """
+        return self.parse_url_with_images(url, data_id=data_id)[0]
+
+    def parse_url_with_images(
+        self, url: str, *, data_id: str = ""
+    ) -> tuple[List[dict], dict[str, bytes]]:
+        """提交 PDF URL 给云端，返回 (content_list, {basename: 图片字节})。
+
+        图片从同一份结果 ZIP 中抽取(仅当 settings.mineru_return_images 开启)，
+        不产生额外网络请求。未配置 token → MinerUCloudNotConfigured；
+        云端失败/超时/结果不可用 → RuntimeError。
         """
         self.last_error = ""
         if not self.configured:
@@ -46,7 +58,8 @@ class MinerUCloudClient:
             content_list = self._content_list_from_zip(zip_bytes)
             if not content_list:
                 raise RuntimeError("MinerU 云端结果为空 content_list")
-            return content_list
+            images = _images_from_zip(zip_bytes) if self.settings.mineru_return_images else {}
+            return content_list, images
         except Exception as exc:
             if not self.last_error:
                 self.last_error = str(exc)
@@ -130,6 +143,28 @@ class MinerUCloudClient:
 
     def _api(self, path: str) -> str:
         return self.settings.mineru_api_base.rstrip("/") + path
+
+
+def _images_from_zip(zip_bytes: bytes) -> dict[str, bytes]:
+    """从结果 ZIP 中抽取 `images/` 目录下的图片，按 basename 为键。
+
+    与 `_content_list_from_zip` 复用同一份 zip_bytes，不产生额外网络请求；
+    跳过目录条目，仅匹配路径中含 `images` 目录分量的文件(含子目录)。
+    单张图片条目损坏(BadZipFile/CRC 校验失败等)会被跳过而非抛出——
+    与 HTTP 路径的 `_extract_images` 保持一致的“绝不因图片异常拖垮正文”语义。
+    """
+    images: dict[str, bytes] = {}
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+        for name in archive.namelist():
+            if name.endswith("/"):
+                continue
+            parts = name.split("/")
+            if "images" in parts[:-1]:
+                try:
+                    images[Path(name).name] = archive.read(name)
+                except Exception:
+                    continue   # 单张图损坏不影响其余图与已抽取的正文
+    return images
 
 
 def _content_list_from_markdown(text: str) -> List[dict]:

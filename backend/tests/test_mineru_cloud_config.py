@@ -16,3 +16,19 @@ def test_cloud_disabled_without_token(monkeypatch):
     monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
     s = Settings()
     assert s.mineru_cloud_enabled is False
+
+
+def test_mineru_image_retention_defaults(monkeypatch):
+    from app.core.config import Settings
+    for k in ("MINERU_RETURN_IMAGES", "MINERU_MAX_IMAGE_BYTES", "MINERU_MAX_IMAGES_PER_SOURCE"):
+        monkeypatch.delenv(k, raising=False)
+    s = Settings()
+    assert s.mineru_return_images is True
+    assert s.mineru_max_image_bytes == 5 * 1024 * 1024
+    assert s.mineru_max_images_per_source == 200
+
+
+def test_mineru_return_images_env_off(monkeypatch):
+    from app.core.config import Settings
+    monkeypatch.setenv("MINERU_RETURN_IMAGES", "0")
+    assert Settings().mineru_return_images is False

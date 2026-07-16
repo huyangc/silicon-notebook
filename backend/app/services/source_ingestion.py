@@ -108,6 +108,8 @@ class SourceIngestionService:
         summarize_source: Callable[[str, List[SourceElement]], str],
         source_type_from_name: Callable[[str], str],
         parse_file: Callable[..., List[SourceElement]],
+        make_persist_image: Callable[[str, str, str], Any],
+        delete_source_images: Callable[[str], None],
         mineru_client: Callable[[], Any],
         mineru_cloud_client: Callable[[], Any],
         llm: Callable[[], Any],
@@ -144,6 +146,8 @@ class SourceIngestionService:
         self.summarize_source = summarize_source
         self.source_type_from_name = source_type_from_name
         self.parse_file = parse_file
+        self.make_persist_image = make_persist_image
+        self.delete_source_images = delete_source_images
         self.mineru_client = mineru_client
         self.mineru_cloud_client = mineru_cloud_client
         self.llm = llm
@@ -400,12 +404,13 @@ class SourceIngestionService:
         return self.settings.kg_auto_extract or self.notebook_has_kg(notebook_id)
 
     def parse_url_via_local(
-        self, source_id: str, url: str, file_name: str
+        self, source_id: str, url: str, file_name: str, persist_image: Any = None
     ) -> List[SourceElement]:
         """下载 URL 到临时文件，走本地 MinerU(http/cli)/pypdf 解析（数据不出网）。
 
         复用 parse_source_file 的「本地 MinerU 失败→pypdf 兜底」路径，与文件上传一致；
-        全程不触达 mineru.net 云端。解析后无论成败都清理临时文件。
+        全程不触达 mineru.net 云端。解析后无论成败都清理临时文件。`persist_image`
+        (Task 8) 与文件上传路径同款透传给 parse_source_file/parse_pdf。
         """
         fd, tmp = tempfile.mkstemp(suffix=".pdf")
         os.close(fd)
@@ -413,7 +418,8 @@ class SourceIngestionService:
         try:
             remote_sources.download_pdf(url, tmp_path)
             return self.parse_file(
-                source_id, str(tmp_path), file_name or "source.pdf", self.mineru_client()
+                source_id, str(tmp_path), file_name or "source.pdf", self.mineru_client(),
+                persist_image=persist_image,
             )
         finally:
             try:
@@ -455,6 +461,16 @@ class SourceIngestionService:
         try:
             t = time.perf_counter()
             stage("parse", "start", t)
+            # Task 9: 清掉这个源之前遗留的 MinerU 图片资产(行+盘)——必须在下面
+            # 任何新图片持久化之前执行,否则会把刚写的新图也一并删掉。首次解析时
+            # 这是无害的空操作(还没有图片);重新解析时清出一个干净的起点,避免
+            # 每次重解析都在 notebook_assets 里累积孤儿行/文件。
+            self.delete_source_images(source_id)
+            # Task 8: per-source 图片持久化闭包(张数/尺寸/mime 护栏由工厂内置，
+            # mineru_return_images 关时为 None——三条解析路径都能安全接受 None)。
+            persist_image = self.make_persist_image(
+                source.notebook_id, source_id, getattr(source, "created_by", "") or ""
+            )
             # URL 来源：本地 MinerU 已配置则优先本地（下载到临时文件，数据不出网），
             # 否则走 mineru.net 云端；本地文件来源走 MinerU(http/cli)/pypdf。
             # 本地优先时绝不静默回落云端——内网部署不能把内部 PDF 外发。
@@ -462,22 +478,25 @@ class SourceIngestionService:
                 mineru_client = self.mineru_client()
                 if mineru_client.configured:
                     elements = self.parse_url_via_local(
-                        source_id, source.source_url, source.file_name
+                        source_id, source.source_url, source.file_name, persist_image
                     )
                     mineru_error = str(getattr(mineru_client, "last_error", "") or "")
                     parser_mode = f"mineru_local({mineru_client.mode})"
                 else:
                     cloud_client = self.mineru_cloud_client()
-                    content_list = cloud_client.parse_url(
+                    content_list, images = cloud_client.parse_url_with_images(
                         source.source_url, data_id=source_id
                     )
-                    elements = mineru_content_list_to_elements(source_id, content_list)
+                    elements = mineru_content_list_to_elements(
+                        source_id, content_list, images=images, persist_image=persist_image
+                    )
                     mineru_error = str(getattr(cloud_client, "last_error", "") or "")
                     parser_mode = "mineru_cloud"
             else:
                 mineru_client = self.mineru_client()
                 elements = self.parse_file(
-                    source_id, source.file_path, source.file_name, mineru_client
+                    source_id, source.file_path, source.file_name, mineru_client,
+                    persist_image=persist_image,
                 )
                 mineru_error = str(getattr(mineru_client, "last_error", "") or "")
                 parser_mode = str(getattr(mineru_client, "mode", ""))
@@ -720,6 +739,7 @@ class SourceIngestionService:
             )
             self.sources.delete_source_row(db, source_id)
         self.source_files.delete(source.file_path)
+        self.delete_source_images(source_id)  # Task 9: cascade-clean MinerU image assets
         self.kg_mutations.invalidate_unified_cache(source.notebook_id)
         hooks.mark_unified_dirty(source.notebook_id)
 

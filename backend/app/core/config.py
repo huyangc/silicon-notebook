@@ -437,6 +437,12 @@ class Settings(BaseSettings):
     mineru_formula_enable: bool = Field(True, validation_alias="MINERU_FORMULA_ENABLE")
     mineru_table_enable: bool = Field(True, validation_alias="MINERU_TABLE_ENABLE")
 
+    # MinerU 内嵌图片保留（pdf/docx/pptx 抽图落盘为可见资产）。默认开；护栏
+    # 让内网 mineru-api 回传载荷与磁盘占用有界，可整体关停回到「只文字」。
+    mineru_return_images: bool = Field(True, validation_alias="MINERU_RETURN_IMAGES")
+    mineru_max_image_bytes: int = Field(5 * 1024 * 1024, validation_alias="MINERU_MAX_IMAGE_BYTES")
+    mineru_max_images_per_source: int = Field(200, validation_alias="MINERU_MAX_IMAGES_PER_SOURCE")
+
     # MinerU.net cloud (v4) — parse a public PDF URL via the hosted service.
     # 独立于上面的 MINERU_MODE(off/http/cli)；仅用于 URL 来源的 PDF。
     mineru_api_token: str = Field("", validation_alias="MINERU_API_TOKEN")

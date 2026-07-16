@@ -371,3 +371,175 @@ def test_pipeline_status_and_event_order_equals_transaction_phases(repo, monkeyp
     assert index("pipeline:extract:done") < index("status:extracted")
     assert index("pipeline:embed:done") < index("pipeline:pipeline:done")
     assert labels[-1] == "pipeline:pipeline:done"
+
+
+def test_make_persist_image_enforces_guardrails(monkeypatch, tmp_path):
+    # facade 工厂：超尺寸/超张数被挡；关配置时整体返回 None。
+    from app.core.config import Settings
+    from app.services.knowhow.assets import AssetService
+
+    class _Repo:
+        storage_dir = tmp_path
+        def __init__(self): self.saved = []
+        def insert_notebook_asset(self, nb, fn, mime, size, by, source_id=None):
+            aid = f"a{len(self.saved)}"; self.saved.append(aid); return aid
+        def get_notebook_asset(self, aid): return {"id": aid, "notebook_id": "nb", "mime": "image/png"}
+
+    # 直接测工厂逻辑：构造与 facade._make_persist_image 等价的闭包工厂
+    from app.services.source_image_persist import make_persist_image_factory  # Task 引入的纯函数
+    repo = _Repo()
+    settings = Settings(MINERU_RETURN_IMAGES="1", MINERU_MAX_IMAGE_BYTES="10",
+                        MINERU_MAX_IMAGES_PER_SOURCE="1")
+    factory = make_persist_image_factory(settings, lambda: AssetService(repo))
+    persist = factory("nb", "src-1", "u")
+    assert persist(b"x" * 5, "a.png") == "a0"      # 通过
+    assert persist(b"x" * 50, "b.png") is None      # 超尺寸被挡
+    assert persist(b"x" * 5, "c.png") is None        # 超张数(上限1)被挡
+
+    off = Settings(MINERU_RETURN_IMAGES="0")
+    assert make_persist_image_factory(off, lambda: AssetService(repo))("nb", "s", "u") is None
+
+
+def test_process_source_persists_mineru_local_image_to_source_assets(tmp_path, monkeypatch):
+    """Task 8 end-to-end: an image block returned by (fake) local MinerU,
+    flowing through the REAL facade (process_source -> make_persist_image ->
+    parse_file -> parse_pdf -> mineru_content_list_to_elements ->
+    AssetService.save_source_image), actually lands as a notebook_assets row
+    tagged with this source's id AND a real file on disk with matching
+    bytes — the behavior this whole task exists to wire up, beyond the
+    guardrail-only unit test above."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("MINERU_MODE", "http")
+    monkeypatch.setenv("MINERU_API_URL", "http://localhost:8888")
+    repo = SQLiteRepository(Settings())
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = f"src-{uuid4().hex[:10]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb.id, "Doc", "pdf", "queued", "queued",
+             "doc.pdf", "/tmp/doc.pdf", 0, "", "", "academic_paper", now, now))
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+    monkeypatch.setattr(
+        repo.mineru_client, "parse_with_images",
+        lambda path, name: (
+            [{"type": "image", "img_path": "fig1.png",
+              "image_caption": ["Figure 1."], "page_idx": 0}],
+            {"fig1.png": png_bytes},
+        ),
+    )
+    repo.process_source(sid)
+
+    detail = repo.get_source(sid)
+    assert detail.parse_status == "extracted"
+    asset_ids = repo.source_asset_ids(sid)
+    assert len(asset_ids) == 1
+    asset = repo.get_notebook_asset(asset_ids[0])
+    assert asset["notebook_id"] == nb.id
+
+    from app.services.knowhow.assets import AssetService
+    on_disk = AssetService(repo).path_for(asset)
+    assert on_disk.is_file()
+    assert on_disk.read_bytes() == png_bytes
+
+    elements = repo.source_elements(sid)
+    image_el = next(e for e in elements if e.element_type == "image")
+    assert image_el.metadata.get("asset_id") == asset_ids[0]
+
+
+def _seed_source_with_mineru_image(tmp_path, monkeypatch):
+    """Shared setup (Task 8's e2e style): a real facade + a queued pdf source
+    whose (fake) local MinerU parse yields one image block, so process_source
+    persists exactly one notebook_assets row + on-disk file. Used by both
+    Task 9 tests below (re-parse cleanup / delete cleanup) to get to a
+    just-parsed source with a real image asset in one shared call."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("MINERU_MODE", "http")
+    monkeypatch.setenv("MINERU_API_URL", "http://localhost:8888")
+    repo = SQLiteRepository(Settings())
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = f"src-{uuid4().hex[:10]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb.id, "Doc", "pdf", "queued", "queued",
+             "doc.pdf", "/tmp/doc.pdf", 0, "", "", "academic_paper", now, now))
+
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+    monkeypatch.setattr(
+        repo.mineru_client, "parse_with_images",
+        lambda path, name: (
+            [{"type": "image", "img_path": "fig1.png",
+              "image_caption": ["Figure 1."], "page_idx": 0}],
+            {"fig1.png": png_bytes},
+        ),
+    )
+    return repo, sid
+
+
+def test_process_source_reparse_clears_stale_source_images(tmp_path, monkeypatch):
+    """Task 9: re-parsing the SAME source (parse_status already 'extracted')
+    must not accumulate MinerU image assets across runs. process_source now
+    calls delete_source_images(source_id) before the new parse persists its
+    own images, so a second process_source call leaves exactly ONE asset row
+    (the fresh one) — never two (stale + fresh) — and the stale row/file are
+    actually gone, not merely uncounted."""
+    repo, sid = _seed_source_with_mineru_image(tmp_path, monkeypatch)
+
+    repo.process_source(sid)
+    first_ids = repo.source_asset_ids(sid)
+    assert len(first_ids) == 1
+
+    from app.services.knowhow.assets import AssetService
+    asset_svc = AssetService(repo)
+    first_asset = repo.get_notebook_asset(first_ids[0])
+    first_path = asset_svc.path_for(first_asset)
+    assert first_path.is_file()
+
+    # Re-parse the same source (e.g. user clicks "重新解析"). Without the
+    # Task 9 cascade-delete this would append a second row/file and double
+    # the count.
+    repo.process_source(sid)
+    second_ids = repo.source_asset_ids(sid)
+    assert len(second_ids) == 1
+    assert second_ids != first_ids  # old row replaced, not appended to
+
+    assert repo.get_notebook_asset(first_ids[0]) is None  # stale row gone
+    assert not first_path.is_file()  # stale file gone, not just orphaned
+
+
+def test_delete_source_cleans_images(tmp_path, monkeypatch):
+    """Task 9: deleting a source must cascade-delete its MinerU image assets
+    (notebook_assets rows + on-disk files) alongside its elements/file,
+    otherwise every deleted source with embedded images leaves orphaned
+    asset rows and files behind forever."""
+    repo, sid = _seed_source_with_mineru_image(tmp_path, monkeypatch)
+    repo.process_source(sid)
+    asset_ids = repo.source_asset_ids(sid)
+    assert len(asset_ids) == 1
+
+    from app.services.knowhow.assets import AssetService
+    asset = repo.get_notebook_asset(asset_ids[0])
+    on_disk = AssetService(repo).path_for(asset)
+    assert on_disk.is_file()
+
+    repo.delete_source(sid)
+
+    assert repo.source_asset_ids(sid) == []
+    assert repo.get_notebook_asset(asset_ids[0]) is None
+    assert not on_disk.is_file()

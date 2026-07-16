@@ -304,24 +304,28 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
-def test_deployed_v13_database_verifies_through_migrations_14_15_16_17_18(tmp_path):
+def test_deployed_v13_database_verifies_through_migrations_14_15_16_17_18_19(tmp_path):
     """The v13 hop is the one EVERY currently-deployed production database
     takes: v13 was the shipping schema before the memory-kg-extract feature.
     Post-v13 migrations are _migration_14 (sources.memory_id column + its
     partial unique index), _migration_15 (the parse_status/source_type
     covering index, Task 5), _migration_16 (the five knowhow/notebook_assets
     tables + their indexes, knowhow-tables PR-1 Task 1), _migration_17 (the
-    two paper-metadata tables + their indexes, paper-metadata Task 1), and
+    two paper-metadata tables + their indexes, paper-metadata Task 1),
     _migration_18 (the knowhow_cell_code table + its index, knowhow-tables
-    PR-2+3 Task 1 — its role-value remap is row data, invisible here). The
-    v9-fixture tests above only exercise the (9, SCHEMA_VERSION) manifest
-    key, so a missing (13, SCHEMA_VERSION) entry would make the backup
-    verifier fail closed (migration-manifest-missing + unmanifested
+    PR-2+3 Task 1 — its role-value remap is row data, invisible here), and
+    _migration_19 (notebook_assets.source_id column + its index, MinerU
+    image-retention Task 2 — dropping notebook_assets below for
+    _migration_16 already clears both, so no extra rollback step is
+    needed). The v9-fixture tests above only exercise the (9, SCHEMA_VERSION)
+    manifest key, so a missing (13, SCHEMA_VERSION) entry would make the
+    backup verifier fail closed (migration-manifest-missing + unmanifested
     column/index/table) on every real upgrade while staying green in CI.
     Build the faithful v13 shape by upgrading the fixture copy to current and
     rolling back EXACTLY what every post-v13 migration adds — including
-    _migration_15's index, _migration_16's tables, _migration_17's tables,
-    and _migration_18's table, or the constructed 'v13' would retain them and
+    _migration_15's index, _migration_16's tables (which also absorb
+    _migration_19's column + index), _migration_17's tables, and
+    _migration_18's table, or the constructed 'v13' would retain them and
     the hop would under-report its additions."""
     from app.core.config import Settings
 

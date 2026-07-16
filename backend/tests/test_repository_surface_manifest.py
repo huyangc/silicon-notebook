@@ -189,7 +189,10 @@ TASK18_ALLOWED_IMPORTS = {
 # compatibility facade to assemble an end-to-end runtime fixture.
 TASK19_ALLOWED_IMPORTS = {
     ("backend/tests/test_scale_builder_failure_boundaries.py", 9, "app.services.sqlite_repository", "SQLiteRepository"),
-    ("backend/app/services/sqlite_repository.py", 116, "app.services.repository", "UploadedSourceFile"),
+    # MinerU embedded-image-retention Task 8 adds two facade-module imports
+    # (AssetService, make_persist_image_factory) above this compatibility
+    # re-export, shifting it from line 116 to 118.
+    ("backend/app/services/sqlite_repository.py", 118, "app.services.repository", "UploadedSourceFile"),
 }
 # Task 26: the two consolidation contract suites (facade surface + runtime
 # identity) import the compatibility facade at fresh sites.
@@ -213,10 +216,15 @@ TASK27_ALLOWED_IMPORTS = {
     # Line shifted 670->675 by Task 1 (memory-kg-extract)'s comments, then
     # 675->677 by Task 5's two-line comment expansions on the same
     # verify_repository_snapshot.py line-number allowlist entries below it,
-    # then ->690 by later manifest-version comment growth, and finally ->731
+    # then ->690 by later manifest-version comment growth, then ->731
     # by the merge_dbs INDEPENDENT_SQL_SITES / SQLITE_CONNECT_SITES additions
-    # in that same file (this PR: +41 lines above this deferred import).
-    ("backend/tests/test_repository_callers_static.py", 731, "app.services.sqlite_repository", "SQLiteRepository"),
+    # in that same file, and finally ->772 when the MinerU
+    # embedded-image-retention feature branch was rebased onto that master
+    # tip: the feature's own Task 8 additions to this file (AssetService /
+    # make_persist_image_factory INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES
+    # entries) land on top of the already-merged merge_dbs.py reconciliation,
+    # pushing this deferred import down by +41 more lines.
+    ("backend/tests/test_repository_callers_static.py", 772, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -1412,23 +1420,26 @@ TASK28_ALLOWED_IMPORTS = {
 # additions (PAPER_META_TABLES + PAPER_META_INDEXES + every hop terminal
 # bumped to 17 with those objects + the new (16, 17) hop), then a further +45
 # by knowhow-tables PR-2+3 Task 1's v18 additions (KNOWHOW_CELL_CODE_TABLE/
-# _INDEX folded into every hop, terminals bumped to 18, + the new (17, 18) hop).
+# _INDEX folded into every hop, terminals bumped to 18, + the new (17, 18)
+# hop), then a further +57 by source-asset-linking Task 2's v19 additions
+# (NOTEBOOK_ASSETS_SOURCE_ID_COLUMN/_INDEX folded into every hop, terminals
+# bumped to 19, + the new (18, 19) hop).
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1276"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:1269"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:1254"),
-    ("get_report", "scripts/verify_repository_snapshot.py:1281"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:1257"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:1266"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:1260"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:1278"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:1255"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1217"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1221"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1223"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1248"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1290"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1264"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1333"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1326"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1311"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1338"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1314"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1323"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1317"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1335"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1312"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1274"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1278"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1280"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1305"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1347"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1321"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -2943,7 +2954,22 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
     # SQLITE_CONNECT_SITES), and PR-2+3 Task 8's new INDEPENDENT_PRIVATE_SITES
     # entry (the api.py optimize_cell `_runtime` registration) in
     # test_repository_callers_static.py cumulatively shift this import site.
-    ('backend/tests/test_repository_callers_static.py', 690, 'app.services.sqlite_repository', 'SQLiteRepository'),
+    # 690->695: source-asset-linking Task 2's v19 comment expansions in
+    # test_repository_callers_static.py (SQLITE_CONNECT_SITES +2 net lines,
+    # then INDEPENDENT_SQL_SITES' verify_repository_snapshot.py allowlist +3
+    # net lines) cumulatively shift it again.
+    # 695->731: MinerU embedded-image-retention's merge_dbs.py reconciliation
+    # adds a new INDEPENDENT_SQL_SITES entry (scripts/merge_dbs.py's 21
+    # execute-shaped call sites, +30 net lines) and two new SQLITE_CONNECT_SITES
+    # entries (+6 net lines) to test_repository_callers_static.py, cumulatively
+    # shifting this import site by +36.
+    # 731->772: rebasing the MinerU embedded-image-retention feature branch
+    # onto that master tip replays the feature's own Task 8 additions to this
+    # file (source-asset-linking's AssetService / make_persist_image_factory
+    # INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES entries) on top of the
+    # already-merged merge_dbs.py reconciliation, adding +41 more lines above
+    # this deferred import.
+    ('backend/tests/test_repository_callers_static.py', 772, 'app.services.sqlite_repository', 'SQLiteRepository'),
     ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
 }
 
@@ -3028,6 +3054,8 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK13_KNOWHOW_PR23_ALLOWED_IMPORTS
                     or site in TASK12B_KNOWHOW_PR23_ALLOWED_IMPORTS
                     or site in MERGE_DBS_ALLOWED_IMPORTS
+                    or site in TASK2_SOURCE_ASSET_ALLOWED_IMPORTS
+                    or site in TASK3_SOURCE_ASSET_ALLOWED_IMPORTS
                 )
 
 
@@ -3371,6 +3399,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | TASK4_PAPER_META_ALLOWED_NEW_MEMBERS
         | TASK1_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
         | TASK10_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
+        | TASK3_SOURCE_ASSET_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)
@@ -3697,3 +3726,56 @@ TASK12B_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_knowhow_graph_anchor.py", "SQLiteRepository"),
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK12B_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
+
+# source-asset-linking Task 2 (_migration_19: notebook_assets.source_id):
+# test_source_asset_migration.py is a genuinely NEW test file (new facade
+# import site), constructed via the same repo(tmp_path)-style fixture
+# convention as test_knowhow_schema.py / test_memory_kg_schema.py — an
+# explicit `from app.services.sqlite_repository import SCHEMA_VERSION,
+# SQLiteRepository` (line 18) plus repo._connect()/._write()/._migrate()
+# calls. Wired into the OR-chain inside
+# test_compatibility_exports_and_import_consumers_are_complete (function-body
+# edit, appended at EOF here for the same zero-line-shift reason as every
+# other TASKN_* block above).
+TASK2_SOURCE_ASSET_ALLOWED_IMPORTS = {
+    ("backend/tests/test_source_asset_migration.py", 18, "app.services.sqlite_repository", "SCHEMA_VERSION"),
+    ("backend/tests/test_source_asset_migration.py", 18, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK2_SOURCE_ASSET_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_source_asset_migration.py", name)
+    for name in {"SCHEMA_VERSION", "SQLiteRepository", "_connect", "_migrate", "_write"}
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK2_SOURCE_ASSET_ALLOWED_MEMBER_FILES
+
+# source-asset-linking Task 3 (KnowhowStore.insert_notebook_asset gains a
+# source_id param + two new one-hop delegates, source_asset_ids/
+# delete_source_asset_rows, for per-source query/delete of MinerU-extracted
+# embedded-image asset rows): test_source_asset_store.py is a genuinely NEW
+# test file exercising the real facade the same way test_knowhow_store.py's
+# sibling Task 2 (knowhow-tables-pr1) test does above
+# (TASK2_KNOWHOW_ALLOWED_IMPORTS/_MEMBER_FILES/_NEW_MEMBERS) — an explicit
+# `from app.services.sqlite_repository import SQLiteRepository` (line 17)
+# plus create_notebook to seed a notebook_id fixture. insert_notebook_asset/
+# get_notebook_asset are also called here but need no new allowance of their
+# own: they are already wholesale-exempted from the consumer-scan comparison
+# by TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS (their signature/consumer set was
+# never added to the frozen facade_surface.json fixture in the first place).
+# source_asset_ids/delete_source_asset_rows are brand-new members that
+# likewise predate no frozen fixture, so they get the same wholesale
+# consumer-scan exemption here. Wired into the OR-chain inside
+# test_compatibility_exports_and_import_consumers_are_complete and the
+# ALLOWED_NEW_MEMBERS pop-loop inside
+# test_static_repository_consumer_scan_matches_manifest_exactly (both
+# function-body edits, appended at EOF here for the same zero-line-shift
+# reason as every other TASKN_* block above).
+TASK3_SOURCE_ASSET_ALLOWED_IMPORTS = {
+    ("backend/tests/test_source_asset_store.py", 17, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK3_SOURCE_ASSET_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_source_asset_store.py", name)
+    for name in {"SQLiteRepository", "create_notebook"}
+}
+TASK3_SOURCE_ASSET_ALLOWED_NEW_MEMBERS = {
+    "source_asset_ids", "delete_source_asset_rows",
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK3_SOURCE_ASSET_ALLOWED_MEMBER_FILES
