@@ -17,6 +17,7 @@ import argparse
 import shutil
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 # --- 表分类(SCHEMA_VERSION=17) --------------------------------------------
@@ -305,8 +306,72 @@ def merge_storage(out_storage: Path, primary_storage: Path,
         shutil.copytree(src, dst)
 
 
-def main(argv: list[str] | None = None) -> int:  # pragma: no cover - filled in Task 6
-    raise NotImplementedError
+def _parse_args(argv):
+    ap = argparse.ArgumentParser(description="离线合并两个共享 base 的 silicon_notebook 库")
+    ap.add_argument("--db-a", required=True); ap.add_argument("--storage-a", required=True)
+    ap.add_argument("--db-b", required=True); ap.add_argument("--storage-b", required=True)
+    ap.add_argument("--keep-base", required=True, choices=["a", "b"],
+                    help="保留哪侧的 base(= 该侧为容器/primary)")
+    ap.add_argument("--out", required=True); ap.add_argument("--out-storage", required=True)
+    ap.add_argument("--assume-same-users", action="store_true")
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--force", action="store_true")
+    return ap.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv if argv is not None else sys.argv[1:])
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        raise SystemExit(f"输出已存在: {out}(加 --force 覆盖或换路径)")
+
+    # primary = keep-base 那侧
+    if args.keep_base == "a":
+        prim_db, prim_store = Path(args.db_a), Path(args.storage_a)
+        sec_db, sec_store = Path(args.db_b), Path(args.storage_b)
+    else:
+        prim_db, prim_store = Path(args.db_b), Path(args.storage_b)
+        sec_db, sec_store = Path(args.db_a), Path(args.storage_a)
+
+    with tempfile.TemporaryDirectory(prefix="merge_dbs_") as tmp:
+        tmp = Path(tmp)
+        prim_copy, sec_copy = tmp / "primary.db", tmp / "secondary.db"
+        shutil.copy2(prim_db, prim_copy); shutil.copy2(sec_db, sec_copy)
+
+        ap_applied = migrate_to_current(prim_copy)
+        bp_applied = migrate_to_current(sec_copy)
+        print(f"[迁移] primary applied={ap_applied} secondary applied={bp_applied}", file=sys.stderr)
+
+        conn_p, conn_s = sqlite3.connect(prim_copy), sqlite3.connect(sec_copy)
+        try:
+            shared_base = preflight(conn_p, conn_s, args.assume_same_users)
+            sec_nb = [r[0] for r in conn_s.execute(
+                "SELECT id FROM notebooks WHERE id != ?", (shared_base,)).fetchall()]
+        finally:
+            conn_p.close(); conn_s.close()
+
+        print(f"[计划] 将导入 {len(sec_nb)} 个 notebook: {sec_nb}", file=sys.stderr)
+        if args.dry_run:
+            print("[dry-run] 未产出任何文件。", file=sys.stderr)
+            return 0
+
+        if out.exists() and args.force:
+            out.unlink()
+        try:
+            result = merge_core(out, prim_copy, sec_copy, shared_base)
+            merge_storage(Path(args.out_storage), prim_store, sec_store,
+                          result["imported_notebooks"])
+        except BaseException:
+            # merge_core 在 FK 校验失败时会留下已提交的部分 out_db; 失败即删, 不留半成品。
+            if out.exists():
+                out.unlink()
+            raise
+
+    print(f"[完成] 输出库={out}  导入 notebook={result['imported_notebooks']}", file=sys.stderr)
+    print(f"[完成] 行数={result['row_counts']}", file=sys.stderr)
+    print("[提醒] 部署后在 app 内点一次「重建索引/刷新图谱」以重生成 kg_index/kg_viz/ANN。",
+          file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":

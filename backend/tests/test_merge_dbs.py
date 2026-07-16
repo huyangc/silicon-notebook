@@ -316,3 +316,84 @@ def test_merge_storage_copies_primary_whole_and_secondary_imported(tmp_path):
     assert (out / "notebooks" / "nb-a11111111" / "a.pdf").read_text() == "a-src"
     assert (out / "notebooks" / "nb-b22222222" / "b.pdf").read_text() == "b-src"
     assert not (out / "kg_index").exists()  # 可再生, 不搬
+
+
+def _run_cli(tmp_path, extra=()):
+    pa, pb, ca, cb = _seed_pair(tmp_path)
+    ca.close(); cb.close()
+    (tmp_path / "sa" / "notebooks" / "nb-a11111111").mkdir(parents=True)
+    (tmp_path / "sb" / "notebooks" / "nb-b22222222").mkdir(parents=True)
+    (tmp_path / "sb" / "notebooks" / "nb-b22222222" / "b.pdf").write_text("b")
+    argv = [
+        "--db-a", str(pa), "--storage-a", str(tmp_path / "sa"),
+        "--db-b", str(pb), "--storage-b", str(tmp_path / "sb"),
+        "--keep-base", "a",
+        "--out", str(tmp_path / "merged.db"),
+        "--out-storage", str(tmp_path / "mstore"),
+        "--assume-same-users", *extra,
+    ]
+    return md.main(argv), tmp_path
+
+def test_cli_end_to_end_produces_merged_db_and_storage(tmp_path):
+    rc, tp = _run_cli(tmp_path)
+    assert rc == 0
+    conn = sqlite3.connect(tp / "merged.db")
+    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 17
+    nb = {r[0] for r in conn.execute("SELECT id FROM notebooks")}
+    assert nb == {BASE, "nb-a11111111", "nb-b22222222"}
+    conn.close()
+    assert (tp / "mstore" / "notebooks" / "nb-b22222222" / "b.pdf").read_text() == "b"
+
+
+def test_cli_end_to_end_migrates_v15_and_v16_inputs(tmp_path):
+    """最贴近真实场景: 输入是 v15 + v16 库, main() 应先各自迁到 17 再合并。
+    降级会丢掉 v16/v17 才建的(空)表; chunks/source_elements 等数据表保留。
+    这条端到端跑通 migrate(含 WAL 落盘)->preflight->merge, 是用户实际情形的守卫。"""
+    pa, pb, ca, cb = _seed_pair(tmp_path)
+    for t in ("knowhow_cells", "knowhow_rows", "knowhow_columns", "knowhow_tables",
+              "notebook_assets", "source_paper_meta", "source_authors"):
+        ca.execute(f"DROP TABLE IF EXISTS {t}")     # A -> v15
+    ca.execute("PRAGMA user_version = 15")
+    for t in ("source_paper_meta", "source_authors"):
+        cb.execute(f"DROP TABLE IF EXISTS {t}")      # B -> v16
+    cb.execute("PRAGMA user_version = 16")
+    ca.commit(); cb.commit(); ca.close(); cb.close()
+    (tmp_path / "sa" / "notebooks").mkdir(parents=True)
+    (tmp_path / "sb" / "notebooks" / "nb-b22222222").mkdir(parents=True)
+    (tmp_path / "sb" / "notebooks" / "nb-b22222222" / "b.pdf").write_text("b")
+    rc = md.main([
+        "--db-a", str(pa), "--storage-a", str(tmp_path / "sa"),
+        "--db-b", str(pb), "--storage-b", str(tmp_path / "sb"),
+        "--keep-base", "a", "--out", str(tmp_path / "merged.db"),
+        "--out-storage", str(tmp_path / "mstore"), "--assume-same-users",
+    ])
+    assert rc == 0
+    conn = sqlite3.connect(tmp_path / "merged.db")
+    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 17
+    nb = {r[0] for r in conn.execute("SELECT id FROM notebooks")}
+    assert nb == {BASE, "nb-a11111111", "nb-b22222222"}
+    # 迁移写入的数据表随合并保留(chunks 从 B 的 personal 带过来)
+    assert conn.execute(
+        "SELECT count(*) FROM chunks WHERE notebook_id='nb-b22222222'").fetchone()[0] == 1
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    conn.close()
+
+
+def test_cli_dry_run_writes_nothing(tmp_path):
+    rc, tp = _run_cli(tmp_path, extra=("--dry-run",))
+    assert rc == 0
+    assert not (tp / "merged.db").exists()
+    assert not (tp / "mstore").exists()
+
+def test_cli_refuses_existing_out_without_force(tmp_path):
+    rc, tp = _run_cli(tmp_path)
+    assert rc == 0
+    # 二次运行同 out 无 --force → 非零
+    pa2 = tp / "merged.db"
+    with pytest.raises(SystemExit):
+        md.main([
+            "--db-a", str(tp / "a.db"), "--storage-a", str(tp / "sa"),
+            "--db-b", str(tp / "b.db"), "--storage-b", str(tp / "sb"),
+            "--keep-base", "a", "--out", str(pa2),
+            "--out-storage", str(tp / "mstore2"), "--assume-same-users",
+        ])
