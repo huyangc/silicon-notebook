@@ -682,6 +682,17 @@ PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 
 
 MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级。前端在 source detail 里渲染它们——公式用 KaTeX、表格用其 HTML——所以公式是排版后的样子而不是原始 LaTeX。若 MinerU 不可达或出错，摄取会降级到 pypdf，保证上传不被阻塞，同时 pipeline log 和 source `error_message` 会保留回退诊断；若某 PDF 解析出 0 文本（如扫描/图片型 PDF），会给出提示而不是看起来"空成功"。
 
+### 单文件解析自检(`scripts/mineru_probe.py`)
+
+一个单文件诊断脚本，把一个文件(`.pdf`/`.docx`/`.pptx`)沿**应用上传时的同一条内联路径**发出去——即配置好的 MinerU 服务(`MINERU_MODE=http` → `/file_parse`，或 `MINERU_MODE=cli`)，再经同样的 `content_list` → `SourceElement` 映射——并报告能否解析。用于在把某个 MinerU 部署接入摄取前，确认它可达、且确实能解析给定文件。
+
+```bash
+python scripts/mineru_probe.py /path/to/paper.pdf
+python scripts/mineru_probe.py /path/to/paper.pdf --dump /tmp/content_list.json
+```
+
+它会先打印从仓库根 `.env` 读到的生效 MinerU 配置，再给出原始块数/类型分布，以及映射后的结构化元素数。退出码 `0`=解析成功(≥1 个元素)；`1`=根本没发请求(MinerU 未开/配置缺失，或文件不存在)；`2`=已发送但失败(不可达、超时、HTTP 错、或返回空/映射为 0 元素)，每种都附一句分类排障提示。它会 import backend 并读仓库根 `.env`，请从主 checkout 根目录运行。本探针只覆盖内联 `MINERU_MODE` 路径——不含 mineru.net 云端(URL 来源)与下面的异步 `/tasks` 批量端点。
+
 ### 批量 PDF→Markdown 解析(`scripts/mineru_batch_parse.py`)
 
 独立于 backend 之外的部署侧 CLI,用于批量/离线预解析一整个 PDF 目录(如一批书),对接你自己的 MinerU 部署,产出供下面「离线批量摄取」消费:PDF 目录 → `mineru_batch_parse.py` → Markdown 目录 → `batch_ingest.py` → KG。它递归扫描 `--src` 下的 PDF,把每个文件提交到内网 MinerU server 的**异步** `/tasks` API(提交→轮询→取结果),轮流分派到各配置的 server(每台各自有并发上限),产出与源目录同构的 `.md` 文件树到 `--out`。这与上面应用内联的单文件上传解析(`MINERU_MODE=http`,MinerU 同步的 `/file_parse` 接口)以及 mineru.net 云端路径都是独立的两条路——请指向你自己的、支持异步 API 的 MinerU server。
