@@ -49,6 +49,7 @@ CHILD_TABLES = [
     ("knowhow_columns", "knowhow_tables", "table_id", "id"),
     ("knowhow_rows", "knowhow_tables", "table_id", "id"),
     ("knowhow_cells", "knowhow_rows", "row_id", "id"),
+    ("knowhow_cell_code", "knowhow_rows", "row_id", "id"),  # _migration_18: 格子代码附件(二级子表)
     ("memory_provenance", "memory_items", "memory_id", "id"),
     ("memory_revisions", "memory_items", "memory_id", "id"),
     ("memory_embeddings", "memory_items", "memory_id", "id"),
@@ -173,10 +174,12 @@ def preflight(conn_a: sqlite3.Connection, conn_b: sqlite3.Connection,
     #    所以两侧都要检查(不只 primary)。
     assert_taxonomy_complete(conn_a)
     assert_taxonomy_complete(conn_b)
-    # 1) 版本一致且为 17
+    # 1) 版本一致且为当前 SCHEMA_VERSION(从 app 读, 不硬编码——schema 会随版本演进)
+    from app.repositories.sqlite.migrations import SCHEMA_VERSION
     va, vb = _user_version(conn_a), _user_version(conn_b)
-    if not (va == vb == 17):
-        raise SystemExit(f"schema 版本必须都为 17, 实得 A={va} B={vb}")
+    if not (va == vb == SCHEMA_VERSION):
+        raise SystemExit(
+            f"schema 版本必须都为当前 SCHEMA_VERSION={SCHEMA_VERSION}, 实得 A={va} B={vb}")
     # 2) 各恰好一个 base 且 id 相同
     ba, bb = base_id(conn_a), base_id(conn_b)
     if ba != bb:
@@ -227,14 +230,16 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
         ph = ",".join("?" for _ in sec_nb) or "NULL"  # sec_nb 为空时 IN (NULL) 匹配 0 行
 
         # 子表 -> 限定 FK 落在"以 sec_nb 为界的已导入父行"内(每个子句恰含一个 IN ({ph}))。
-        # knowhow_cells 是二级子表(cells->rows->tables.notebook_id), 必须两层下钻,
-        # 否则会带入 secondary base 的 cells -> row_id 悬挂 -> FK 失败。
+        # knowhow_cells / knowhow_cell_code 是二级子表(->rows->tables.notebook_id), 必须两层
+        # 下钻, 否则会带入 secondary base 的行 -> row_id 悬挂 -> FK 失败。
+        _knowhow_row_scope = (f"row_id IN (SELECT id FROM sec.knowhow_rows WHERE table_id IN "
+                              f"(SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph})))")
         child_scopes = {
             "source_elements": f"source_id IN (SELECT id FROM sec.sources WHERE notebook_id IN ({ph}))",
             "knowhow_columns": f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
             "knowhow_rows":    f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
-            "knowhow_cells":   (f"row_id IN (SELECT id FROM sec.knowhow_rows WHERE table_id IN "
-                                f"(SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph})))"),
+            "knowhow_cells":     _knowhow_row_scope,
+            "knowhow_cell_code": _knowhow_row_scope,
             "memory_provenance": f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
             "memory_revisions":  f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
             "memory_embeddings": f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",

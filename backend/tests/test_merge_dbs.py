@@ -14,6 +14,15 @@ assert _spec.loader is not None
 sys.modules["merge_dbs"] = md
 _spec.loader.exec_module(md)
 
+# 当前 schema 版本从 app 读, 不硬编码(schema 会随版本演进; 硬编码 17 会在 bump 后误挂)。
+from app.repositories.sqlite.migrations import SCHEMA_VERSION
+
+# 一个真 v15 库不含的、逐版本新增的表(v16 knowhow+notebook_assets / v17 paper /
+# v18 knowhow_cell_code)。降级 fixture 造"老库"时按需 DROP。
+_POST_V15_TABLES = ("knowhow_cell_code", "knowhow_cells", "knowhow_rows", "knowhow_columns",
+                    "knowhow_tables", "notebook_assets", "source_paper_meta", "source_authors")
+_POST_V16_TABLES = ("knowhow_cell_code", "source_paper_meta", "source_authors")
+
 
 def _fresh_db(path):
     """Fresh v17 schema+seed via the app repository (created at SCHEMA_VERSION)."""
@@ -119,13 +128,12 @@ def test_taxonomy_tolerates_classified_table_absent(tmp_path):
     md.assert_taxonomy_complete(conn)  # 不应 raise
 
 
-def test_migrate_brings_v15_copy_to_17_and_recreates_tables(tmp_path):
+def test_migrate_brings_v15_copy_to_current_and_recreates_tables(tmp_path):
     p = tmp_path / "old.db"
-    _fresh_db(p).close()  # v17 schema
-    # 模拟 v15: 降版本戳 + 丢掉 v16/v17 才建的表
+    _fresh_db(p).close()  # 当前 schema
+    # 模拟 v15: 降版本戳 + 丢掉 v16+ 才建的表
     conn = sqlite3.connect(p)
-    for t in ("knowhow_cells", "knowhow_rows", "knowhow_columns", "knowhow_tables",
-              "notebook_assets", "source_paper_meta", "source_authors"):
+    for t in _POST_V15_TABLES:
         conn.execute(f"DROP TABLE IF EXISTS {t}")
     conn.execute("PRAGMA user_version = 15")
     conn.commit()
@@ -134,10 +142,10 @@ def test_migrate_brings_v15_copy_to_17_and_recreates_tables(tmp_path):
     applied = md.migrate_to_current(p)
 
     conn = sqlite3.connect(p)
-    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 17
+    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"knowhow_tables", "notebook_assets", "source_paper_meta", "source_authors"} <= names
-    assert 16 in applied and 17 in applied
+    assert set(range(16, SCHEMA_VERSION + 1)) <= set(applied)  # v15 起该逐级补齐到当前
     conn.close()
 
 
@@ -166,8 +174,7 @@ def test_migrate_checkpoints_wal_so_file_copy_is_complete(tmp_path):
     p = tmp_path / "old.db"
     _fresh_db(p).close()
     conn = sqlite3.connect(p)
-    for t in ("knowhow_cells", "knowhow_rows", "knowhow_columns", "knowhow_tables",
-              "notebook_assets", "source_paper_meta", "source_authors"):
+    for t in _POST_V15_TABLES:
         conn.execute(f"DROP TABLE IF EXISTS {t}")
     conn.execute("PRAGMA user_version = 15")
     conn.commit()
@@ -181,7 +188,7 @@ def test_migrate_checkpoints_wal_so_file_copy_is_complete(tmp_path):
     ver = int(conn.execute("PRAGMA user_version").fetchone()[0])
     names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
-    assert ver == 17
+    assert ver == SCHEMA_VERSION
     assert {"knowhow_tables", "source_paper_meta", "source_authors"} <= names
 
 
@@ -269,7 +276,7 @@ def test_merge_core_clears_kg_state_for_imported(tmp_path):
 
 
 def _add_knowhow(conn, nb_id, tbl_id, cell_text):
-    """一张 knowhow 表: 1 列 1 行 1 格(覆盖二级子表 cells->rows->tables)。"""
+    """一张 knowhow 表: 1 列 1 行 1 格 + 1 代码附件(覆盖二级子表 cells/cell_code->rows->tables)。"""
     conn.execute("INSERT INTO knowhow_tables(id,notebook_id,title,created_at,updated_at) "
                  "VALUES(?,?,?,?,?)", (tbl_id, nb_id, "T", NOW, NOW))
     conn.execute("INSERT INTO knowhow_columns(id,table_id,name,position) VALUES(?,?,?,0)",
@@ -279,10 +286,15 @@ def _add_knowhow(conn, nb_id, tbl_id, cell_text):
     conn.execute("INSERT INTO knowhow_cells(id,row_id,column_id,content_md,updated_at) "
                  "VALUES(?,?,?,?,?)", (tbl_id + "-cell", tbl_id + "-r", tbl_id + "-c",
                                        cell_text, NOW))
+    conn.execute("INSERT INTO knowhow_cell_code"
+                 "(id,row_id,column_id,code_text,cell_content_hash,created_at,updated_at) "
+                 "VALUES(?,?,?,?,?,?,?)", (tbl_id + "-code", tbl_id + "-r", tbl_id + "-c",
+                                          cell_text + "-code", "hash", NOW, NOW))
 
 
 def test_merge_core_grandchild_excludes_secondary_base_knowhow(tmp_path):
-    """knowhow_cells 是二级子表: secondary base 的 cells 不得被带入(否则 row_id 悬挂)。"""
+    """knowhow_cells / knowhow_cell_code 是二级子表: secondary base 的行不得被带入
+    (否则 row_id 悬挂 -> FK 失败)。"""
     pa, pb, ca, cb = _seed_pair(tmp_path)
     _add_knowhow(cb, BASE, "kt-b-base", "BASE-CELL")          # secondary base 的 knowhow
     _add_knowhow(cb, "nb-b22222222", "kt-b-personal", "P-CELL")  # secondary personal 的 knowhow
@@ -291,7 +303,9 @@ def test_merge_core_grandchild_excludes_secondary_base_knowhow(tmp_path):
     md.merge_core(out, pa, pb, shared_base=BASE)
     conn = sqlite3.connect(out)
     cells = {r[0] for r in conn.execute("SELECT content_md FROM knowhow_cells")}
+    code = {r[0] for r in conn.execute("SELECT code_text FROM knowhow_cell_code")}
     assert "P-CELL" in cells and "BASE-CELL" not in cells
+    assert "P-CELL-code" in code and "BASE-CELL-code" not in code
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []  # 无悬挂
     conn.close()
 
@@ -338,7 +352,7 @@ def test_cli_end_to_end_produces_merged_db_and_storage(tmp_path):
     rc, tp = _run_cli(tmp_path)
     assert rc == 0
     conn = sqlite3.connect(tp / "merged.db")
-    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 17
+    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
     nb = {r[0] for r in conn.execute("SELECT id FROM notebooks")}
     assert nb == {BASE, "nb-a11111111", "nb-b22222222"}
     conn.close()
@@ -346,15 +360,14 @@ def test_cli_end_to_end_produces_merged_db_and_storage(tmp_path):
 
 
 def test_cli_end_to_end_migrates_v15_and_v16_inputs(tmp_path):
-    """最贴近真实场景: 输入是 v15 + v16 库, main() 应先各自迁到 17 再合并。
-    降级会丢掉 v16/v17 才建的(空)表; chunks/source_elements 等数据表保留。
+    """最贴近真实场景: 输入是 v15 + v16 库, main() 应先各自迁到当前版本再合并。
+    降级会丢掉更高版本才建的(空)表; chunks/source_elements 等数据表保留。
     这条端到端跑通 migrate(含 WAL 落盘)->preflight->merge, 是用户实际情形的守卫。"""
     pa, pb, ca, cb = _seed_pair(tmp_path)
-    for t in ("knowhow_cells", "knowhow_rows", "knowhow_columns", "knowhow_tables",
-              "notebook_assets", "source_paper_meta", "source_authors"):
+    for t in _POST_V15_TABLES:
         ca.execute(f"DROP TABLE IF EXISTS {t}")     # A -> v15
     ca.execute("PRAGMA user_version = 15")
-    for t in ("source_paper_meta", "source_authors"):
+    for t in _POST_V16_TABLES:
         cb.execute(f"DROP TABLE IF EXISTS {t}")      # B -> v16
     cb.execute("PRAGMA user_version = 16")
     ca.commit(); cb.commit(); ca.close(); cb.close()
@@ -369,7 +382,7 @@ def test_cli_end_to_end_migrates_v15_and_v16_inputs(tmp_path):
     ])
     assert rc == 0
     conn = sqlite3.connect(tmp_path / "merged.db")
-    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == 17
+    assert int(conn.execute("PRAGMA user_version").fetchone()[0]) == SCHEMA_VERSION
     nb = {r[0] for r in conn.execute("SELECT id FROM notebooks")}
     assert nb == {BASE, "nb-a11111111", "nb-b22222222"}
     # 迁移写入的数据表随合并保留(chunks 从 B 的 personal 带过来)
