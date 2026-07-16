@@ -32,3 +32,47 @@ export function groupRowsByAnchor(rows: KnowhowRow[], anchorColumnId: string): A
   }
   return groups;
 }
+
+export interface GridCell {
+  columnId: string;
+  text: string;
+  /** >1：合并起始格（跨 rowSpan 行）；1：独立格；0：被上方合并覆盖，渲染跳过。 */
+  rowSpan: number;
+}
+
+export interface GridDisplayRow {
+  row: KnowhowRow;
+  cells: GridCell[];
+}
+
+/** 把分组后的行展开成带 rowspan 的网格（spec §4.2.1）：每一组内、每一列，
+ * 相邻同值（trim 后）的连续段合并成一个 rowSpan 起始格，段内其余行该列
+ * rowSpan=0（渲染跳过）。跨组绝不合并——每组第一行的每列都是新的起始格。
+ * 值以 trim 比较但 text 保留原样（首行原文）。 */
+export function computeGridSpans(groups: AnchorGroup[], columns: KnowhowColumn[]): GridDisplayRow[] {
+  const out: GridDisplayRow[] = [];
+  for (const group of groups) {
+    const n = group.rows.length;
+    for (let i = 0; i < n; i++) {
+      const row = group.rows[i];
+      const cells: GridCell[] = columns.map((col) => {
+        const text = row.cells[col.id] ?? "";
+        const key = text.trim();
+        // 被上一行同列同值覆盖？（i>0 且上一行该列 trim 相同）
+        if (i > 0) {
+          const prev = (group.rows[i - 1].cells[col.id] ?? "").trim();
+          if (prev === key) return { columnId: col.id, text, rowSpan: 0 };
+        }
+        // 合并起始：向下数连续同值行数。
+        let span = 1;
+        for (let j = i + 1; j < n; j++) {
+          if ((group.rows[j].cells[col.id] ?? "").trim() === key) span++;
+          else break;
+        }
+        return { columnId: col.id, text, rowSpan: span };
+      });
+      out.push({ row, cells });
+    }
+  }
+  return out;
+}
