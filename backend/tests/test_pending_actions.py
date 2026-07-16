@@ -177,3 +177,50 @@ def test_pending_actions_promotion_visible_for_admin(repo):
     assert gov[0]["count"] == 1
     assert gov[0]["notebook_id"] == nb_id
     assert out["count"] == 1
+
+
+def test_pending_actions_includes_paper_meta_building(repo):
+    """补抽进行中，list_for_user 含 type=paper_meta 项，progress 反映内存 dict；
+    building 不计入 count(跟 index building 一致——只显示，不响铃)。"""
+    nb = _seed_user_nb(repo, "user-a")
+    svc = repo.__dict__["_runtime"].source_ingestion
+    pending = repo.__dict__["_runtime"].pending_actions_service
+
+    # 未在跑 → 无 paper_meta 项
+    items0 = pending.list_for_user("user-a")["items"]
+    assert all(i["type"] != "paper_meta" for i in items0)
+
+    # 手动注入进行中(模拟 backfill_paper_metadata 运行期间的内存态)
+    with svc._paper_meta_backfilling_lock:
+        svc._paper_meta_backfilling[nb] = {"total": 5, "done": 2}
+    try:
+        out = pending.list_for_user("user-a")
+        pm = [i for i in out["items"] if i["type"] == "paper_meta"]
+        assert len(pm) == 1
+        assert pm[0]["state"] == "building"
+        assert pm[0]["notebook_id"] == nb
+        assert pm[0]["notebook_name"] == "NB"
+        assert pm[0]["progress"] == {"done": 2, "total": 5}
+        assert out["count"] == 0
+    finally:
+        with svc._paper_meta_backfilling_lock:
+            svc._paper_meta_backfilling.pop(nb, None)
+
+
+def test_pending_actions_paper_meta_per_user_filter(repo):
+    """非 owner 看不到该 notebook 的 paper_meta 项(per-user 隔离由
+    pending_actions_projection_rows 的 created_by 过滤保证)。"""
+    nb = _seed_user_nb(repo, "user-a")
+    svc = repo.__dict__["_runtime"].source_ingestion
+    with svc._paper_meta_backfilling_lock:
+        svc._paper_meta_backfilling[nb] = {"total": 1, "done": 0}
+    try:
+        pending = repo.__dict__["_runtime"].pending_actions_service
+        # 陌生 uid(非 notebook owner，甚至没有 users 行)看不到该项
+        items = pending.list_for_user("user-stranger-999")["items"]
+        assert all(
+            i.get("notebook_id") != nb for i in items if i["type"] == "paper_meta"
+        )
+    finally:
+        with svc._paper_meta_backfilling_lock:
+            svc._paper_meta_backfilling.pop(nb, None)
