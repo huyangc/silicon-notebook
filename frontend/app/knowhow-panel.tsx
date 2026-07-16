@@ -57,6 +57,7 @@ import {
   deleteKnowhowTable,
   reprojectKnowhowTable,
   addKnowhowRow,
+  deleteKnowhowRow,
   patchKnowhowCell,
   knowhowTemplateUrl,
   optimizeKnowhowCell,
@@ -197,6 +198,14 @@ export function KnowhowPanel({
   // KnowhowMatrixDrawer（与 cellModal/codeModal 平级的另一个顶层 modal 状态，
   // 堆叠在网格之上）。
   const [openConceptValue, setOpenConceptValue] = useState<string | null>(null);
+
+  // Task 10（删概念）：矩阵抽屉「删除整个概念」二次确认态——镜像表级
+  // confirmDelete/deleting 那一对状态（KnowhowTableGrid 消费的同名 prop），
+  // 只是作用对象从"这张表"换成"当前打开的概念组"。openConceptValue 变化
+  // （切概念/关抽屉）时下面紧跟的 effect 统一重置，不必在每个改
+  // openConceptValue 的地方各自补一行重置代码。
+  const [confirmDeleteConcept, setConfirmDeleteConcept] = useState(false);
+  const [deletingConcept, setDeletingConcept] = useState(false);
 
   // Task 11（代码附件）：当前打开的代码查看/编辑浮层——与 cellModal/
   // optimizeRowId 平级的另一个顶层 modal 状态，堆叠在行详情抽屉之上。
@@ -434,6 +443,77 @@ export function KnowhowPanel({
     }
   }
 
+  // Task 10（加分支）：矩阵抽屉「+ 分支」——在当前打开的概念组下新建一个物理
+  // 行，anchor 列预填该概念值（其余列留空待填，用户在矩阵里逐格补）。与
+  // addRow 共用同一个 addingRow guard/loading 态——加分支/加概念/添加行三者
+  // 本质都是"新增一行"，同一时刻只会有一路在途，不需要三份独立状态。新行
+  // 落地后不主动打开任何格子编辑器（加一个分支通常是先看这多出的一列在矩阵
+  // 里对不对，而不是立刻扎进某一格编辑），与"加概念"那种"加了就要马上填
+  // 名字"的引导语义不同。
+  async function addBranch(anchorValue: string) {
+    if (!selectedTableId || !detail?.anchorColumnId || addingRow) return;
+    setAddingRow(true);
+    setActionError(null);
+    try {
+      const newRow = await addKnowhowRow(notebookId, selectedTableId, {
+        cells: { [detail.anchorColumnId]: anchorValue },
+      });
+      setDetail((prev) => (prev ? { ...prev, rows: appendRowOptimistically(prev.rows, newRow) } : prev));
+      loadDetail(selectedTableId);
+      loadTables();
+    } catch (err) {
+      setActionError(extractErrorMessage(err, "添加分支失败，请重试"));
+    } finally {
+      setAddingRow(false);
+    }
+  }
+
+  // Task 10（加概念）：主网格底部「+ 概念」——addRow 的变体，唯一区别是把
+  // 自动打开的编辑目标列从 orderColumnsForGrid(...)[0] 换成明确的
+  // detail.anchorColumnId（有 anchor 列的表里两者今天恰好是同一列——
+  // orderColumnsForGrid 会把 anchor 列排到首位——但这里显式表达"这是在新增
+  // 一个概念"的意图，不依赖网格列序这一巧合；后者哪天调整排序规则也不会
+  // 悄悄改变这个按钮的行为）。
+  async function addConcept() {
+    if (!selectedTableId || !detail?.anchorColumnId || addingRow) return;
+    setAddingRow(true);
+    setActionError(null);
+    try {
+      const newRow = await addKnowhowRow(notebookId, selectedTableId, { cells: {} });
+      setDetail((prev) => (prev ? { ...prev, rows: appendRowOptimistically(prev.rows, newRow) } : prev));
+      loadDetail(selectedTableId);
+      loadTables();
+      openCellEdit(newRow.id, detail.anchorColumnId);
+    } catch (err) {
+      setActionError(extractErrorMessage(err, "添加概念失败，请重试"));
+    } finally {
+      setAddingRow(false);
+    }
+  }
+
+  // Task 10（删概念）：矩阵抽屉「删除整个概念」——概念组内的物理行全部归属
+  // 这一个概念，删概念即删组内每一行，Promise.all 并发触发（与
+  // handleCellSave 的批量写同一套"前端并发触发、非后端单事务"取舍：任一路
+  // 失败就不当整批成功处理，不关抽屉、不刷新——失败的那几行在服务端可能已
+  // 经被删除，下一次 loadDetail 会照实反映服务端的（可能部分删除后的）真实
+  // 状态，这次不用本地乐观更新去掩盖它）。
+  async function deleteConcept() {
+    if (!selectedTableId || !openConceptGroup) return;
+    setDeletingConcept(true);
+    setActionError(null);
+    try {
+      await Promise.all(openConceptGroup.rows.map((row) => deleteKnowhowRow(notebookId, selectedTableId, row.id)));
+      setDeletingConcept(false);
+      setOpenConceptValue(null);
+      loadDetail(selectedTableId);
+      loadTables();
+    } catch {
+      setActionError("删除失败，请重试");
+      setConfirmDeleteConcept(false);
+      setDeletingConcept(false);
+    }
+  }
+
   // 管理 modal 里任一写操作成功：重拉表详情（modal 拿到新 detail prop 原地
   // 刷新）+ 表列表（标题/行数在列表卡片上要跟着变）。
   function handleManageChanged() {
@@ -641,6 +721,14 @@ export function KnowhowPanel({
     return groups.find((g) => g.anchorValue === openConceptValue) ?? null;
   }, [detail, openConceptValue]);
 
+  // Task 10（删概念）：openConceptValue 一变（切到另一个概念、或关闭抽屉）就
+  // 收起二次确认态——不然上一个概念点了「删除」没确认就关抽屉，下次（同一个
+  // 或另一个）概念一开就已经是确认态，等于半自动帮用户点了一半删除流程。
+  useEffect(() => {
+    setConfirmDeleteConcept(false);
+    setDeletingConcept(false);
+  }, [openConceptValue]);
+
   return (
     <section className="knowhow-view" role="dialog" aria-modal="true">
       <div className="knowhow-view-header">
@@ -703,6 +791,7 @@ export function KnowhowPanel({
             onOpenManage={() => setManageOpen(true)}
             onAddRow={addRow}
             addingRow={addingRow}
+            onAddConcept={addConcept}
             onDownloadTemplate={downloadTemplate}
             templateDownloading={templateDownloading}
             onAppendClick={() => setAppendOpen(true)}
@@ -751,6 +840,13 @@ export function KnowhowPanel({
           canEdit={canEdit}
           onEditCell={(rowId, columnId) => openCellAuto(rowId, columnId)}
           onClose={() => setOpenConceptValue(null)}
+          onAddBranch={() => addBranch(openConceptGroup.anchorValue)}
+          addingBranch={addingRow}
+          confirmDeleteConcept={confirmDeleteConcept}
+          onRequestDeleteConcept={() => setConfirmDeleteConcept(true)}
+          onCancelDeleteConcept={() => setConfirmDeleteConcept(false)}
+          onConfirmDeleteConcept={deleteConcept}
+          deletingConcept={deletingConcept}
         />
       )}
 
@@ -2509,6 +2605,7 @@ function KnowhowTableGrid({
   onOpenManage,
   onAddRow,
   addingRow,
+  onAddConcept,
   onDownloadTemplate,
   templateDownloading,
   onAppendClick,
@@ -2543,6 +2640,10 @@ function KnowhowTableGrid({
   onOpenManage: () => void;
   onAddRow: () => void;
   addingRow: boolean;
+  /** Task 10（加概念）：主网格底部「+ 概念」——只在有 anchor 列（分组视图）
+   * 且 canEdit 时渲染；记录型表没有这个入口，继续只有顶部「添加行」一个
+   * 写入口不变。 */
+  onAddConcept: () => void;
   /** 「下载模板」（Task 9，规格②路B）：按当前表头下载 xlsx 模板。 */
   onDownloadTemplate: () => void;
   templateDownloading: boolean;
@@ -2815,12 +2916,34 @@ function KnowhowTableGrid({
               <p className="knowhow-no-match">
                 {detail.rows.length === 0
                   ? canEdit
-                    ? "这张表还没有行，点上方「添加行」开始填写。"
+                    ? anchorColumnId
+                      ? "这张表还没有概念，点下方「概念」开始填写。"
+                      : "这张表还没有行，点上方「添加行」开始填写。"
                     : "这张表还没有行。"
                   : `没有匹配「${query}」的行。`}
               </p>
             )}
           </div>
+          {/* Task 10（加概念）：只在有 anchor 列的分组视图出现——记录型表
+              （anchorColumnId 为 null）保持现状，仍只有顶部工具栏「添加行」
+              一个入口，不在这里重复一个几乎等价的按钮。故意放在
+              .knowhow-grid-scroll 之外（而不是紧贴表格最后一行内部）：矩阵
+              可能很长，把入口钉在滚动区域外层能让它不必滚到底才可见，也不与
+              G2 合并单元格的 rowSpan 结构绞在一起。 */}
+          {canEdit && anchorColumnId && (
+            <div>
+              <button
+                type="button"
+                className="sort-button knowhow-reproject-button"
+                onClick={onAddConcept}
+                disabled={addingRow || deleting}
+                title="新增一个概念"
+              >
+                <Plus size={14} />
+                {addingRow ? "添加中…" : "概念"}
+              </button>
+            </div>
+          )}
         </>
       ) : null}
     </div>

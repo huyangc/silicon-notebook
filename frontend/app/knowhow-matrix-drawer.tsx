@@ -39,7 +39,7 @@
 "use client";
 
 import { type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { X } from "lucide-react";
+import { Plus, Trash2, X } from "lucide-react";
 import { buildConceptMatrix, type AnchorGroup } from "./knowhow-grouping-logic.ts";
 import { KnowhowMarkdown } from "./knowhow-cell-editor.tsx";
 import type { KnowhowColumn } from "./knowhow-model.ts";
@@ -54,6 +54,13 @@ export function KnowhowMatrixDrawer({
   highlightRowId,
   onEditCell,
   onClose,
+  onAddBranch,
+  addingBranch,
+  confirmDeleteConcept,
+  onRequestDeleteConcept,
+  onCancelDeleteConcept,
+  onConfirmDeleteConcept,
+  deletingConcept,
 }: {
   group: AnchorGroup;
   columns: KnowhowColumn[];
@@ -67,6 +74,22 @@ export function KnowhowMatrixDrawer({
   highlightRowId?: string | null;
   onEditCell: (rowId: string, columnId: string) => void;
   onClose: () => void;
+  /** Task 10（加分支）：底部「+ 分支」——在当前概念组下新建一个物理行（anchor
+   * 列预填该概念值，其余列留空待填）。可选，只有 canEdit 时 KnowhowPanel 才
+   * 传入，本组件据此决定是否渲染底部 footer。 */
+  onAddBranch?: () => void;
+  /** 加分支请求进行中——从按下按钮到新行落地这段时间禁用按钮，防止连点造出
+   * 多个空分支。 */
+  addingBranch?: boolean;
+  /** Task 10（删概念）：header「删除整个概念」二次确认——镜像
+   * KnowhowTableGrid 表级 confirmDelete/onRequestDelete/onCancelDelete/
+   * onConfirmDelete/deleting 那一组既有 prop 形状（同一套内联确认模式），
+   * 状态仍归 KnowhowPanel 持有，本组件只负责按这些 prop 渲染。 */
+  confirmDeleteConcept?: boolean;
+  onRequestDeleteConcept?: () => void;
+  onCancelDeleteConcept?: () => void;
+  onConfirmDeleteConcept?: () => void;
+  deletingConcept?: boolean;
 }) {
   const matrix = buildConceptMatrix(group, columns, anchorColumnId);
 
@@ -132,9 +155,42 @@ export function KnowhowMatrixDrawer({
               <span className="kh-modal-sep">·</span>
               <span>{matrix.branchRowIds.length} 个分支</span>
             </div>
-            <button type="button" className="icon-button" title="关闭" onClick={onClose}>
-              <X size={18} />
-            </button>
+            <div className="kh-modal-header-actions">
+              {/* Task 10（删概念）：整组一次性删除——二次确认沿用
+                  KnowhowTableGrid 表删除的既有内联确认样式
+                  （.knowhow-confirm/-yes/-no），只换文案，不新开一套确认 UI。
+                  只读成员看不到这个入口。 */}
+              {canEdit && onRequestDeleteConcept && (
+                confirmDeleteConcept ? (
+                  <span className="knowhow-confirm">
+                    <span>删除整个概念？其下 {matrix.branchRowIds.length} 个分支将一并删除</span>
+                    <button
+                      type="button"
+                      className="knowhow-confirm-yes"
+                      disabled={deletingConcept}
+                      onClick={onConfirmDeleteConcept}
+                    >
+                      {deletingConcept ? "删除中…" : "确认删除"}
+                    </button>
+                    <button type="button" className="knowhow-confirm-no" onClick={onCancelDeleteConcept}>
+                      取消
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="icon-button"
+                    title="删除整个概念"
+                    onClick={onRequestDeleteConcept}
+                  >
+                    <Trash2 size={18} />
+                  </button>
+                )
+              )}
+              <button type="button" className="icon-button" title="关闭" onClick={onClose}>
+                <X size={18} />
+              </button>
+            </div>
           </div>
         </header>
         <div className="kh-modal-body">
@@ -180,6 +236,18 @@ export function KnowhowMatrixDrawer({
             </tbody>
           </table>
         </div>
+        {/* Task 10（加分支）：底部固定入口，随时给这个概念追加一个新分支
+            （物理行，anchor 列预填当前概念值），不必先关抽屉回到主网格找
+            「添加行」再手填概念名。只读成员不出现。 */}
+        {canEdit && onAddBranch && (
+          <footer className="kh-modal-footer">
+            <div className="kh-footer-actions">
+              <button type="button" onClick={onAddBranch} disabled={addingBranch}>
+                <Plus size={14} /> {addingBranch ? "添加中…" : "分支"}
+              </button>
+            </div>
+          </footer>
+        )}
       </div>
     </div>
   );
