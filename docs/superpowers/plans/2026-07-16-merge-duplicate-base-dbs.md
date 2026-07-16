@@ -289,6 +289,33 @@ def test_migrate_does_not_seed_user_local(tmp_path):
     n = conn.execute("SELECT count(*) FROM users").fetchone()[0]
     conn.close()
     assert n == 0, "migrate() 不应 seed 用户"
+
+
+def test_migrate_checkpoints_wal_so_file_copy_is_complete(tmp_path):
+    """migrate_to_current 必须 checkpoint WAL: 迁移后只拷 .db 文件(不含 -wal),
+    副本里必须已含迁移写入(否则 WAL 未落盘, main() 的 copy/ATTACH 会静默丢数据)。
+    没有 checkpoint 时: 副本 user_version 仍是 15、新表缺失 -> 断言失败。"""
+    import shutil
+    p = tmp_path / "old.db"
+    _fresh_db(p).close()
+    conn = sqlite3.connect(p)
+    for t in ("knowhow_cells", "knowhow_rows", "knowhow_columns", "knowhow_tables",
+              "notebook_assets", "source_paper_meta", "source_authors"):
+        conn.execute(f"DROP TABLE IF EXISTS {t}")
+    conn.execute("PRAGMA user_version = 15")
+    conn.commit()
+    conn.close()
+
+    md.migrate_to_current(p)
+
+    p2 = tmp_path / "copied.db"           # 只拷 .db, 模拟 main() 的 shutil.copy2
+    shutil.copy2(p, p2)
+    conn = sqlite3.connect(p2)
+    ver = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert ver == 17
+    assert {"knowhow_tables", "source_paper_meta", "source_authors"} <= names
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
@@ -298,14 +325,15 @@ Expected: FAIL —— `AttributeError: module 'merge_dbs' has no attribute 'migr
 
 - [ ] **Step 3: 实现 `migrate_to_current`**
 
-在 import 区补：
-```python
-from typing import TYPE_CHECKING
-```
 在 `discover_tables` 前后任意处加：
 ```python
 def migrate_to_current(db_path: Path) -> list[int]:
-    """把 db_path 就地迁到 SCHEMA_VERSION。只 migrate(), 不 seed。"""
+    """把 db_path 就地迁到 SCHEMA_VERSION。只 migrate(), 不 seed。
+
+    SqliteDatabase 用 WAL 模式; 迁移写入进 -wal, 若不 checkpoint 就返回, 主 .db 文件
+    仍是旧内容 —— 后续 main() 里对该文件做 shutil.copy2 / merge_core 的 ATTACH 只读 .db,
+    会静默丢掉刚迁移的数据。所以返回前必须 checkpoint(TRUNCATE) 并关闭连接, 保证磁盘
+    上的 .db 文件是完整、自洽的。"""
     # 延迟 import: 让 Task 1 的纯 sqlite 测试无需 app 依赖即可跑。
     from app.core.config import Settings
     from app.repositories.sqlite.database import SqliteDatabase
@@ -313,7 +341,12 @@ def migrate_to_current(db_path: Path) -> list[int]:
 
     settings = Settings(database_url=f"sqlite:///{db_path}")
     database = SqliteDatabase(settings, root_dir=db_path.parent)
-    return SqliteMigrator(database, settings).migrate()
+    applied = SqliteMigrator(database, settings).migrate()
+    try:  # WAL 落盘: 把 -wal 合并回 .db 并截断, 保证后续 copy/ATTACH 看到完整数据
+        database.connect().execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        database.close_local()  # 关闭本线程 WAL 连接(SqliteDatabase 直连, 无 repo 闭包环)
+    return applied
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
@@ -941,9 +974,15 @@ def main(argv: list[str] | None = None) -> int:
 
         if out.exists() and args.force:
             out.unlink()
-        result = merge_core(out, prim_copy, sec_copy, shared_base)
-        merge_storage(Path(args.out_storage), prim_store, sec_store,
-                      result["imported_notebooks"])
+        try:
+            result = merge_core(out, prim_copy, sec_copy, shared_base)
+            merge_storage(Path(args.out_storage), prim_store, sec_store,
+                          result["imported_notebooks"])
+        except BaseException:
+            # merge_core 在 FK 校验失败时会留下已提交的部分 out_db; 失败即删, 不留半成品。
+            if out.exists():
+                out.unlink()
+            raise
 
     print(f"[完成] 输出库={out}  导入 notebook={result['imported_notebooks']}", file=sys.stderr)
     print(f"[完成] 行数={result['row_counts']}", file=sys.stderr)
