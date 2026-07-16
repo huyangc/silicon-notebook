@@ -83,7 +83,12 @@ class MinerUClient:
         body, content_type = _encode_multipart(fields, "files", file_name, content)
         request = urllib.request.Request(url, data=body, method="POST")
         request.add_header("Content-Type", content_type)
-        with urllib.request.urlopen(request, timeout=self.settings.mineru_timeout_seconds) as response:
+        # 内网 MinerU 服务:显式绕过任何环境代理(http_proxy/https_proxy/ALL_PROXY)。
+        # urllib 的默认 opener 会把这个内网 POST 经正向代理发出;代理够不到内网 GPU
+        # 主机时会在自己的网关超时(常见 ~8s)返回 504,远早于 mineru_timeout_seconds。
+        # no_proxy 亦无法用 CIDR(如 10.0.0.0/8)排除内网段,故在此层直接不走代理。
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=self.settings.mineru_timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
         return _extract_content_list(payload)
 

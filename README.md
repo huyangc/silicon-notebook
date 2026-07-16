@@ -762,6 +762,17 @@ PDF parsing is decoupled from the GPU. The backend never imports torch; it talks
 
 MinerU output maps to structured `SourceElement`s: formulas become `formula` elements (LaTeX preserved), tables become `table` elements (HTML kept in metadata), and headings keep their level. The frontend renders these in the source detail view — formulas via KaTeX, tables from their HTML — so equations show typeset rather than as raw LaTeX. If MinerU is unreachable or errors, ingestion degrades to pypdf so uploads never block, while pipeline logs and the source `error_message` keep the fallback diagnostic; a PDF that parses to zero text (e.g. a scanned/image PDF) is flagged with a hint instead of looking like an empty success.
 
+### Verify a PDF parses (`scripts/mineru_probe.py`)
+
+A single-file diagnostic that sends one file (`.pdf`/`.docx`/`.pptx`) through the **exact inline path** the app uses for uploads — the configured MinerU service (`MINERU_MODE=http` → `/file_parse`, or `MINERU_MODE=cli`) followed by the same `content_list` → `SourceElement` mapping — and reports whether it parses. Use it to confirm a MinerU deployment is reachable and actually parses a given file before wiring it into ingestion.
+
+```bash
+python scripts/mineru_probe.py /path/to/paper.pdf
+python scripts/mineru_probe.py /path/to/paper.pdf --dump /tmp/content_list.json
+```
+
+It first prints the effective MinerU config read from the repo-root `.env` — including how `http_proxy`/`no_proxy` resolve for the MinerU URL, a common cause of `504`s when an internal call is silently routed through a forward proxy (note: `no_proxy` does not understand CIDR ranges like `10.0.0.0/8`, only exact hosts) — then the raw block counts/types and the number of mapped structured elements. Exit code `0` means it parsed (≥1 element); `1` means no request was sent (MinerU off/misconfigured, or the file is missing); `2` means it sent but failed (unreachable, timeout, HTTP error, or an empty/zero-element result), each with a one-line hint classifying the failure. It imports the backend and reads the repo-root `.env`, so run it from the main checkout root. This probe covers only the inline `MINERU_MODE` path — not the mineru.net cloud path (URL sources) or the async `/tasks` batch endpoint below.
+
 ### Batch PDF→Markdown parsing (`scripts/mineru_batch_parse.py`)
 
 A standalone, backend-independent CLI for bulk/offline pre-parsing of a whole PDF directory (e.g. a book corpus) against your own MinerU deployment, feeding the offline ingestion below: PDF directory → `mineru_batch_parse.py` → Markdown directory → `batch_ingest.py` → KG. It recursively finds PDFs under `--src`, submits each to an internal MinerU server's **async** `/tasks` API (submit → poll → fetch result), distributing files round-robin across the configured servers with a per-server concurrency limit, and writes a mirrored tree of `.md` files under `--out`. This is separate from the app's inline per-upload parsing above (`MINERU_MODE=http`, MinerU's synchronous `/file_parse` endpoint) and from the mineru.net cloud path — point it at your own async-capable MinerU server(s).
