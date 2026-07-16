@@ -55,13 +55,18 @@ def test_should_extract_true_when_notebook_already_has_kg(repo):
 # P4-3: build_notebook_kg
 # ---------------------------------------------------------------------------
 
-def _make_source(repo, nb_id, sid, status="extracted"):
+def _make_source(repo, nb_id, sid, status="extracted", with_elements=True):
     with repo._write() as db:
         db.execute(
             "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
             "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
             "VALUES (?,?,?,'markdown',?,'parsed','a.md','',0,'','','academic_paper',?,?)",
             (sid, nb_id, "Doc", status, _now(), _now()))
+        if with_elements:   # 默认建「已成功 parse」源(有 elements);False = parse 未落地
+            db.execute(
+                "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+                "text,metadata,created_at) VALUES (?,?,'paragraph','p1','body','{}',?)",
+                (f"el-{sid}", sid, _now()))
     return sid
 
 
@@ -92,6 +97,22 @@ def test_build_notebook_kg_skips_sources_with_kg(repo, monkeypatch):
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: calls.append(sid))
     repo.build_notebook_kg(nb.id)
     assert calls == ["s2"]                                  # idempotent: skip s1
+
+
+def test_build_notebook_kg_skips_sources_missing_elements(repo, monkeypatch):
+    """无 source_elements 的源(parse 未落地)不进抽取 targets——避免接地校验空转
+    (LLM 抽出的节点无 element 可绑、被整源丢弃 → objects=0);记入
+    result['skipped_no_elements'],有 elements 的源正常抽。"""
+    _configure_llm(repo)
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    _make_source(repo, nb.id, "s-ok")                              # 有 elements
+    _make_source(repo, nb.id, "s-bad", with_elements=False)        # 无 elements
+    calls = []
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: calls.append(sid))
+    out = repo.build_notebook_kg(nb.id)
+    assert calls == ["s-ok"]                                  # 只抽有 elements 的
+    assert out["skipped_no_elements"] == ["s-bad"]            # 无 elements 记 skipped
+    assert "s-bad" not in out["built"]
 
 
 def test_build_notebook_kg_requires_llm(repo):

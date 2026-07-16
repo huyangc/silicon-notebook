@@ -713,7 +713,19 @@ class KnowledgeLifecycleService:
                 raise RuntimeError("LLM not configured; cannot build KG")
             with self._connect() as db:
                 src_ids, kgful = self.knowledge.source_build_rows(db, notebook_id)
-            targets = [sid for sid in src_ids if sid not in kgful]
+                parsed = self.knowledge.sources_with_elements(db, notebook_id)
+            targets = [sid for sid in src_ids if sid not in kgful and sid in parsed]
+            # 无 source_elements 的源(parse 未落地)排除出抽取:接地校验没有 element 可
+            # 对照,会把抽出的节点整源丢弃(objects=0、白烧 LLM)。须先 `batch_ingest
+            # reparse` 补 parse 生成 elements,再抽 KG。
+            skipped_no_elements = sorted(
+                sid for sid in src_ids if sid not in kgful and sid not in parsed)
+            if skipped_no_elements:
+                self.event_log.logger.warning(
+                    "build_notebook_kg: %d source(s) missing source_elements "
+                    "(parse not landed) — skipped extraction to avoid empty KG; "
+                    "run `batch_ingest reparse` to backfill: %s",
+                    len(skipped_no_elements), skipped_no_elements[:10])
             done, failed = [], []
 
             def _extract_one(sid: str) -> bool:
@@ -755,7 +767,8 @@ class KnowledgeLifecycleService:
                     self.event_log.logger.exception(
                         "build_notebook_kg: conflict resolution failed for %s", notebook_id
                     )
-            result = {"built": done, "failed": failed, "skipped": sorted(kgful)}
+            result = {"built": done, "failed": failed, "skipped": sorted(kgful),
+                      "skipped_no_elements": skipped_no_elements}
             # Backfill relink — reconnect any degree-0 nodes left in this notebook's
             # KG (legacy graphs, or nodes the inline path couldn't link within their
             # own source). Fail-safe: never breaks the build.

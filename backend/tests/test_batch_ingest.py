@@ -276,6 +276,10 @@ def _seed_sources(repo, nb_id, n, prefix):
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sid, nb_id, f"S{i}", "document", f"s{i}.md", f"/tmp/s{i}.md",
                  0, f"h{i}", "", "", "parsed", now, now))
+            db.execute(   # 有 elements = 已成功 parse(build_notebook_kg 才会把它当抽取目标)
+                "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+                "text,metadata,created_at) VALUES (?,?,'paragraph','p1','body','{}',?)",
+                (f"el-{sid}", sid, now))
     return sids
 
 

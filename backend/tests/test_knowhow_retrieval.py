@@ -485,6 +485,11 @@ def _seed_real_source_with_kg(repo, nb):
             "VALUES (?,?,?,?,?,?,'[]',?)",
             ("rel-real-1", nb, src_id, "ko-real-1", "ko-real-1", "relates_to", "2026-01-01"),
         )
+        db.execute(   # 有 elements = 已成功 parse(rebuild 后 build 才会把它当抽取目标)
+            "INSERT INTO source_elements (id, source_id, element_type, location_label, "
+            "text, metadata, created_at) VALUES (?,?,'paragraph','p1','body','{}',?)",
+            ("el-real-1", src_id, "2026-01-01"),
+        )
     return src_id
 
 
