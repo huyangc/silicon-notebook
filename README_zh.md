@@ -732,6 +732,9 @@ PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --all-no
 # 补该 notebook 内已解析论文源缺失的元数据(标题/作者/机构/期刊/年份;幂等,需 LLM 已配好,不需要 EMBED)
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx --force
+
+# 修复历史空源:对无 source_elements(上次 parse 未落地)的存量源重新 parse 补 elements,再重抽 KG
+PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 ```
 
 `embed` 子命令只补**缺失**的 chunk 与 KG 节点向量(例如某次被 429 限流后留下的空洞)。必须给 `--notebook-id` 且 EMBED 已配好——它本身就是补向量的命令,故**忽略 `--allow-no-embed`**,EMBED 未配时直接报错退出。
@@ -741,6 +744,8 @@ PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
 `backfill-source-index` 子命令主动填充 `knowledge_object_sources` 反查表(`object_id, source_id`)——删除或重解析某个来源时,需要找出哪些 KG 对象引用了它;没有这张表,该查找就得逐行 `json.loads` 整本 notebook 的 evidence JSON 才能找到匹配,几十万对象规模下很慢。这张表本来会「首用惰性回填」(未迁移库的第一次来源删除/重解析会付一次全扫描,扫描的同时顺带填表并标记该 notebook,此后每次都是索引直查)——这个命令让你提前批量付这笔成本(有界内存分批 + 打印进度),而不是让某个用户操作(删除来源)撞上它。不需要 EMBED 配置,且幂等/可中断重跑(每次重跑都清空并按当前 evidence 重建该 notebook 的行,再重新标记)。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 覆盖全库所有 notebook。若怀疑某库的反查表与实际 evidence 不一致(例如异常中断后),重跑本命令即是修复手段——它总是按当前 evidence 全量重建。
 
 `metadata` 子命令给 notebook 里还缺论文元数据(标题、作者、机构、期刊、年份)的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库,或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源(doc_type 为空或 `academic_paper`);文本读的是库里已存的解析产物(source elements),原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`(本子命令绝不新建 notebook),且要求 LLM 已配置(`KG_LLM_*`,缺省回退全局 `OPENAI_COMPAT_*`)——两者都未配时直接报错退出,不会静默跳过;不需要 EMBED 配置。幂等、可中断重跑:已有元数据行的源默认跳过,加 `--force` 则对本次范围内所有源强制重抽(例如 prompt/校验升级后)。进度按源逐行打印(`[meta <done>/<total>] <source-id> <status>`),结束打印各状态计数的 JSON 汇总。
+
+`reparse` 子命令修复一类历史存量:某些源已建、`parse_status` 看似前进,却没有 `source_elements`(上次 parse 中断或未落地)。KG 抽取有一道零-LLM 接地校验——每个 LLM 抽出的节点必须把引文匹配回该源的某个 element,否则丢弃;一个源若没有任何 element,抽出的节点会被**整源丢光**,导致 `knowledge_objects` 一行不增(抽了等于白抽),且直接重抽永远补不出。旧版 `all` 的续跑分流曾用「有没有 KG」当「是否已 parse」,把这类无-elements 源当成「已 parse、缺 KG」直接送去抽取,正是踩中此坑(该分流已修正,新导入不再遇到)。本命令对该 notebook 内所有缺 `source_elements` 的源重新跑 `process_source`(parse → 生成 elements),收尾一次 KG rebuild;有 elements 的源自动跳过(幂等、可中断重跑)。`--limit N` 只处理前 N 个;`--no-rebuild` 跳过收尾聚类(分批场景)。必须给 `--notebook-id`。
 
 **MRL 截断质量 spike(`app.eval.mrl_truncation`)。** 回答「把存量向量截断到前 1024/2048 维(+ re-normalize),检索质量掉多少」——这既是进程内向量内存瘦身(4096→1024 约 ÷4)的前置,也是 pgvector HNSW 建索引(维度上限 2000/4000)的 gate。只读、流式分块(百万行表内存有界),并总是先打印该 notebook 四张 embeddings 表的行数。
 

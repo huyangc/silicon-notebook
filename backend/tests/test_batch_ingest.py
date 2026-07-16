@@ -513,7 +513,8 @@ def test_run_all_configures_job_pool_and_restores_embed_conc(repo, tmp_path, mon
 
 
 def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
-    """已 parse、无 KG 的 source(同 hash 已摄取过)走 extract_source 补抽,不重复新建 source。"""
+    """已 parse(有 source_elements)、无 KG 的 source 走 extract_source 补抽,不重复新建。
+    对照 test_run_all_reparses_existing_source_missing_elements:无 elements 的源才 reparse。"""
     monkeypatch.setattr(repo, "llm_client", _StubLLM())
     nb_id = bi.ensure_notebook(repo, None, "nb-resume")
     d = tmp_path / "docs"
@@ -529,16 +530,20 @@ def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
         digest = bi.sha256_bytes(p.read_bytes())
         sid = f"src-r-{i}"
         sids.append(sid)
-        with repo._write() as db:               # 预置 parsed source,同 hash → already_ingested
+        with repo._write() as db:               # 预置 parsed source(带 elements),同 hash → already_ingested
             db.execute(
                 "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
                 "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sid, nb_id, f"S{i}", "document", p.name, str(p), 0, digest,
                  "", "", "parsed", now, now))
+            db.execute(                          # 有 elements = 真正已 parse → 走 resume 补抽
+                "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+                "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+                (f"el-{sid}-0", sid, "paragraph", "p1", body, "{}", now))
     extracted = []
     monkeypatch.setattr(repo, "extract_source", lambda sid: extracted.append(sid))
-    # process_source 不应被调用(全部走 resume 路径);若被调用会因无 elements 抛错并计 failed
+    # 有 elements → 全部走 resume(extract_source);process_source 不应被调用
     monkeypatch.setattr(repo, "rebuild_unified_kg",
                         lambda nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
@@ -549,8 +554,8 @@ def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
         nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
                           (nb_id,)).fetchone()["c"]
     assert nsrc == 3                              # 不重复新建
-    assert res["new"] == 0 and res["resumed"] == 3
-    assert sorted(extracted) == sorted(sids)      # 已存在的全部走 extract_source 补抽
+    assert res["new"] == 0 and res["resumed"] == 3 and res["reparsed"] == 0
+    assert sorted(extracted) == sorted(sids)      # 有 elements → 全部走 extract_source 补抽
     assert res["extracted"] == 3 and res["failed"] == 0
 
 
@@ -1427,3 +1432,106 @@ def test_metadata_phase_force(repo, monkeypatch, capsys):
 
     assert rc2 == 0
     assert fake.calls > calls_after_first
+
+
+def test_run_all_reparses_existing_source_missing_elements(repo, tmp_path, monkeypatch):
+    """已存在但无 source_elements 的 source(上次 parse 未落 elements)必须走 process_source
+    重新 parse 补 elements,而不是 extract_source 空抽。否则 build_records 的接地校验没有
+    elements 可对照 → 每个 LLM 抽出的节点被丢弃 → objects=0(kg-ingest-count 根因)。
+    行为证据:跑完后该源真的有了 elements(reparse 执行了 parse),而非停留在 0。"""
+    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    nb_id = bi.ensure_notebook(repo, None, "nb-reparse")
+    d = tmp_path / "docs"
+    d.mkdir()
+    p = d / "doc0.md"
+    p.write_text("# Title\n\nBody paragraph " + "z" * 200, encoding="utf-8")
+    digest = bi.sha256_bytes(p.read_bytes())
+    sid = "src-noel-0"
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:   # 预置已存在源,但不插 source_elements(elements 空)
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb_id, "S", "document", p.name, str(p), 0, digest,
+             "", "", "parsed", now, now))
+    # patch 掉真实抽取/rebuild(与既有 run_all 测试同款),让 process_source 只跑到 parse
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda s: None)
+    monkeypatch.setattr(repo, "rebuild_unified_kg",
+                        lambda nb, progress=None, force=False, fresh=False: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+
+    res = bi.run_all(repo, nb_id, [p], workers=1, conc=1)
+
+    assert res["new"] == 0 and res["resumed"] == 0 and res["reparsed"] == 1
+    with repo._connect() as db:  # reparse 真的 parse 了 .md → 有 elements(不是空抽)
+        n_el = db.execute("SELECT COUNT(*) c FROM source_elements WHERE source_id=?",
+                          (sid,)).fetchone()["c"]
+    assert n_el > 0
+
+
+def test_run_reparse_only_targets_sources_missing_elements(repo, tmp_path, monkeypatch):
+    """reparse 子命令:只对 n_el=0(未成功 parse)的存量源重跑 process_source 补 elements,
+    已有 elements 的源跳过。修复历史 run_all 分流把无-elements 源空抽(objects=0)的存量数据。"""
+    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    nb_id = bi.ensure_notebook(repo, None, "nb-reparse-cmd")
+    now = "2026-01-01T00:00:00"
+    d = tmp_path / "docs"
+    d.mkdir()
+    pa = d / "a.md"; pa.write_text("# A\n\nBody paragraph " + "z" * 200, encoding="utf-8")
+    pb = d / "b.md"; pb.write_text("# B\n\nBody paragraph " + "y" * 200, encoding="utf-8")
+    with repo._write() as db:
+        for sid, p in (("src-a", pa), ("src-b", pb)):
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+                "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (sid, nb_id, sid, "document", p.name, str(p), 0, sid, "", "", "parsed", now, now))
+        db.execute(  # src-b 已有 elements → reparse 应跳过它
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+            "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            ("el-b-0", "src-b", "paragraph", "p1", "existing", "{}", now))
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda s: None)
+    monkeypatch.setattr(repo, "rebuild_unified_kg",
+                        lambda nb, progress=None, force=False, fresh=False: 0)
+    monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
+
+    res = bi.run_reparse(repo, nb_id, conc=1)
+
+    assert res["reparsed"] == 1                    # 只有 src-a(无 elements)被 reparse
+    with repo._connect() as db:
+        na = db.execute("SELECT COUNT(*) c FROM source_elements WHERE source_id='src-a'").fetchone()["c"]
+        n_b = db.execute("SELECT COUNT(*) c FROM source_elements WHERE source_id='src-b'").fetchone()["c"]
+    assert na > 0                                  # src-a 被 reparse 补出 elements
+    assert n_b == 1                                # src-b 未动(仍是预置的 1 条)
+
+
+def test_main_reparse_requires_notebook_id(repo, capsys):
+    rc = bi.main(["reparse"])
+    assert rc == 2
+    assert "notebook-id" in capsys.readouterr().err
+
+
+def test_main_reparse_backfills_missing_elements(repo, tmp_path, monkeypatch):
+    """reparse 子命令端到端:对无 elements 的存量源重新 parse 补 elements(LLM 未配 →
+    抽取走 no-llm no-op,但 parse 真跑)。--no-rebuild 跳过收尾聚类。"""
+    monkeypatch.setenv("EMBED_PROVIDER", "")       # main 自建 repo → embedder 未配
+    nb_id = bi.ensure_notebook(repo, None, "nb-rp")
+    now = "2026-01-01T00:00:00"
+    p = tmp_path / "a.md"
+    p.write_text("# A\n\nBody paragraph " + "z" * 200, encoding="utf-8")
+    with repo._write() as db:   # 预置无 elements 的存量源
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-x", nb_id, "X", "document", p.name, str(p), 0, "hx", "", "", "parsed", now, now))
+
+    rc = bi.main(["reparse", "--notebook-id", nb_id, "--allow-no-embed", "--no-rebuild"])
+
+    assert rc == 0
+    r2 = SQLiteRepository(Settings())
+    with r2._connect() as db:
+        n_el = db.execute(
+            "SELECT COUNT(*) c FROM source_elements WHERE source_id='src-x'").fetchone()["c"]
+    assert n_el > 0                                 # reparse 真的 parse 了 → 有 elements

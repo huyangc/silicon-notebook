@@ -2259,6 +2259,10 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/app/main.py",
     "backend/tests/test_architecture_module_boundaries.py",
     "backend/tests/test_repository_runtime.py",
+    # kg-ingest-count fix: run_all 分三批(new/resume/reparse)+ EOF 新增 reparse 回归
+    # 测试,移动了本文件既有 consumer sites 行号并新增 monkeypatch 调用点。测试内部
+    # 行号非 API surface(同上面几个 test 文件)。
+    "backend/tests/test_batch_ingest.py",
     # Task 27 migrates every production caller onto ports / repo.maintenance —
     # these known edited caller files keep exact member+path coverage while
     # their internal line numbers stop being API surface.
@@ -3049,7 +3053,17 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_batch_ingest.py', 313, 'relink_notebook_kg', 'repo'),
         ('backend/tests/test_batch_ingest.py', 462, '_run_extraction', 'repo'),
         ('backend/tests/test_batch_ingest.py', 489, '_run_extraction', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 517, 'llm_client', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 540, 'extract_source', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 542, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 590, 'build_scale_index', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1179, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1192, 'build_notebook_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1200, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1208, 'llm_client', 'repo'),
         ('backend/tests/test_batch_ingest.py', 1211, '_run_extraction', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1217, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1243, 'rebuild_unified_kg', 'SQLiteRepository'),
         ('backend/tests/test_bm25_rrf.py', 135, '_rrf_scored', 'repo'),
         ('backend/tests/test_bm25_rrf.py', 150, '_rrf_scored', 'repo'),
         ('backend/tests/test_chunk_bruteforce_guard.py', 73, '_gather_chunks', 'repo'),
@@ -3167,6 +3181,20 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_viz_bounded.py', 118, '_unified_graph_full', 'repo'),
     },
     'actual_only': {
+        ('backend/tests/test_batch_ingest.py', 518, 'llm_client', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 545, 'extract_source', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 547, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 595, 'build_scale_index', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1184, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1197, 'build_notebook_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1205, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1213, 'llm_client', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1222, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1248, 'rebuild_unified_kg', 'SQLiteRepository'),
+        ('backend/tests/test_batch_ingest.py', 1442, 'llm_client', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1460, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1476, 'llm_client', 'repo'),
+        ('backend/tests/test_batch_ingest.py', 1495, 'rebuild_unified_kg', 'repo'),
         ('backend/tests/test_embedding_store_component.py', 59, '_write', 'repo'),
         ('backend/tests/test_embedding_store_component.py', 135, '_write', 'repo'),
         ('backend/tests/test_in_batching.py', 85, '_IN_CHUNK', 'SQLiteRepository'),
