@@ -1011,7 +1011,9 @@ export default function Home() {
         if (!refreshed.paper_meta_backfilling) {
           setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
           setBackfillingMeta(false);
-          loadSourcesPage(nb, { page: sourcesPage, q: sourceQuery }).catch(() => {}); // 刷新使新元数据带出
+          // 用 ref 读最新翻页/搜索,避免用户在补抽期间切页/搜索后被 closure 里
+          // 陈旧的 sourcesPage/sourceQuery 拉回 page 0 或空搜索。
+          loadSourcesPage(nb, { page: sourcesPageRef.current, q: sourceQueryRef.current }).catch(() => {});
         }
       } catch { /* transient error; keep polling */ }
     }, 6000);
@@ -1070,7 +1072,10 @@ export default function Home() {
   // 侧栏「补抽 N 篇」等大量读 currentNotebook 全量字段的地方需要真正刷新)。
   useEffect(() => {
     if (!analytics || !currentNotebookId) return;
-    const busy = buildingKg || kgRefreshBusy || buildingScaleIndex
+    // 打开分析看板期间 paper-meta 补抽也算「忙」——否则新独立的 backfill poll
+    // 因 analytics gate 让位不跑、聚合 poll 又不知道它在忙,补抽在看板打开期间
+    // 完成就形成状态死区(按钮永远显示「补全中…」,来源列表不刷新)。
+    const busy = buildingKg || kgRefreshBusy || buildingScaleIndex || backfillingMeta
       || Boolean(indexStatus?.kg.building) || Boolean(indexStatus?.unified_kg.building);
     if (!busy) return;
     const nb = currentNotebookId;
@@ -1094,9 +1099,23 @@ export default function Home() {
           setToast(s.scale_index.stale ? "索引重建结束（仍有更新未纳入）" : "检索索引重建完成 ✓");
         }
       }).catch(() => {});
+      // paper-meta 完成检测:index-status 不覆盖 paper_meta_backfilling,单独拉
+      // NotebookSummary(同上方 buildingKg-done 分支的既有做法)。完工不弹 toast:
+      // 那是待确认中心铃铛(paper_meta_done 事件)的职责,聚合 poll 与主 poll
+      // 保持一致(见 :984-1009 独立 backfill poll)。
+      if (backfillingMeta) {
+        api<NotebookSummary>(`/notebooks/${nb}`).then((refreshed) => {
+          if (cancelled) return;
+          if (!refreshed.paper_meta_backfilling) {
+            setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
+            setBackfillingMeta(false);
+            loadSourcesPage(nb, { page: sourcesPageRef.current, q: sourceQueryRef.current }).catch(() => {});
+          }
+        }).catch(() => {});
+      }
     }, 6000);
     return () => { cancelled = true; window.clearInterval(poll); };
-  }, [analytics, currentNotebookId, buildingKg, kgRefreshBusy, buildingScaleIndex, indexStatus?.kg.building, indexStatus?.unified_kg.building]);
+  }, [analytics, currentNotebookId, buildingKg, kgRefreshBusy, buildingScaleIndex, backfillingMeta, indexStatus?.kg.building, indexStatus?.unified_kg.building]);
   // Mirror the buildingScaleIndex poll: while the KG view's background viz index is
   // building for a large notebook, poll every 6s until it flips false, then swap in the
   // real graph. 20min safety cap so the view never spins forever. Keyed on kgViewOpen too
@@ -1236,6 +1255,13 @@ export default function Home() {
   const [highlightedElementId, setHighlightedElementId] = useState("");
   const pollCountRef = useRef(0);
   const sourcesRef = useRef<SourceSummary[]>([]);
+  // Live refs for source paging/query so long-lived poll effects (paper-meta
+  // backfill 完成检测、聚合看板 poll)读到用户最新翻页/搜索结果——把它们放进
+  // useEffect 依赖会在切页/搜索时重启定时器(重置 6s 心跳与 20min 安全上限
+  // 相对于「最后一次翻页」而非「补抽启动」),用 ref 是同 sourcesRef 的既有
+  // 轻量方案。
+  const sourcesPageRef = useRef(0);
+  const sourceQueryRef = useRef("");
   const chatBodyRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const memoryLinksAbortRef = useRef<AbortController | null>(null);
@@ -1624,6 +1650,8 @@ export default function Home() {
   // Keep a live ref of `sources` so the poll loop below reads the latest without
   // re-subscribing (its effect is keyed on the boolean `hasPending`, not the array).
   sourcesRef.current = sources;
+  sourcesPageRef.current = sourcesPage;
+  sourceQueryRef.current = sourceQuery;
   const hasPending = sources.some(
     (source) => !["extracted", "failed"].includes(source.parse_status)
   );
@@ -3628,19 +3656,28 @@ export default function Home() {
                     title="为已上传的论文补齐作者、机构等信息"
                     onClick={async () => {
                       if (!currentNotebookId || backfillingMeta) return;
+                      // POST 是 fire-and-forget:后端立刻返回 queued,真正的补抽在
+                      // background_jobs 线程里跑。仿 startKgBuild 的不对称模式——
+                      // 成功且 queued>0 时保持 backfillingMeta=true,交给下方轮询
+                      // effect(或聚合看板 poll)检测完成;queued===0 立刻复位
+                      // (无事可做);出错也复位。原本的 finally { false } 让 flag
+                      // 在 HTTP 往返几百毫秒内就被清 0,轮询 gate 从来没机会跑。
                       setBackfillingMeta(true);
                       try {
                         const res = await api<{ queued: number }>(
                           `/notebooks/${currentNotebookId}/paper-meta/backfill`,
                           { method: "POST" }
                         );
-                        setToast(res.queued > 0
-                          ? `已提交 ${res.queued} 篇论文的信息补全`
-                          : "论文信息已是最新，无需补全");
+                        if (res.queued === 0) {
+                          setBackfillingMeta(false);
+                          setToast("论文信息已是最新，无需补全");
+                        } else {
+                          setToast(`已提交 ${res.queued} 篇论文的信息补全`);
+                          // 保持 backfillingMeta=true;完成检测交给轮询 effect。
+                        }
                       } catch (err) {
-                        reportError(err);
-                      } finally {
                         setBackfillingMeta(false);
+                        reportError(err);
                       }
                     }}
                   >
