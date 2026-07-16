@@ -76,3 +76,43 @@ export function computeGridSpans(groups: AnchorGroup[], columns: KnowhowColumn[]
   }
   return out;
 }
+
+export interface MatrixAttrRow {
+  columnId: string;
+  columnName: string;
+  /** 每个分支的值，与 ConceptMatrix.branchRowIds 一一对齐。 */
+  values: string[];
+  /** 全分支同值（trim）→ C 抽屉里跨分支合并成一格（spec §4.3）。 */
+  sharedSpan: boolean;
+}
+
+export interface ConceptMatrix {
+  anchorValue: string;
+  branchRowIds: string[];
+  attrRows: MatrixAttrRow[];
+}
+
+/** 把一个概念组构造成 C 抽屉的「属性×分支」矩阵（spec §4.3）：非 anchor 列
+ * 成属性行，组内每行成一个分支列；某属性行全分支同值 → sharedSpan 让抽屉
+ * 跨分支合并显示。列顺序按传入 columns 顺序（调用方已排好）。 */
+export function buildConceptMatrix(
+  group: AnchorGroup,
+  columns: KnowhowColumn[],
+  anchorColumnId: string,
+): ConceptMatrix {
+  const branchRowIds = group.rows.map((r) => r.id);
+  const attrRows: MatrixAttrRow[] = columns
+    .filter((col) => col.id !== anchorColumnId)
+    .map((col) => {
+      const values = group.rows.map((r) => r.cells[col.id] ?? "");
+      const first = values.length ? values[0].trim() : "";
+      const sharedSpan = values.length > 1 && values.every((v) => v.trim() === first);
+      return { columnId: col.id, columnName: col.name, values, sharedSpan };
+    });
+  return { anchorValue: group.anchorValue, branchRowIds, attrRows };
+}
+
+/** 合并格改整组时要写回的 rowId 列表（spec §4.4：= 组内全部行）。 */
+export function groupCellWriteTargets(group: AnchorGroup, _columnId: string): string[] {
+  return group.rows.map((r) => r.id);
+}

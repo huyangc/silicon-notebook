@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { groupRowsByAnchor, computeGridSpans } from "./knowhow-grouping-logic.ts";
+import { groupRowsByAnchor, computeGridSpans, buildConceptMatrix, groupCellWriteTargets } from "./knowhow-grouping-logic.ts";
 
 const mk = (id, anchorVal, colId = "c0") => ({
   id, position: 0, projectionStatus: "synced", cells: { [colId]: anchorVal },
@@ -77,4 +77,32 @@ test("computeGridSpans: 组内某列部分同值只合并相邻段", () => {
   }];
   const grid = computeGridSpans(groups, [col("a"), col("tool")]);
   assert.deepEqual(grid.map((r) => r.cells[1].rowSpan), [1, 2, 0]);
+});
+
+test("buildConceptMatrix: 属性行×分支列，共享属性标记 sharedSpan", () => {
+  const group = {
+    anchorValue: "hold&setup",
+    rows: [
+      rowC("r1", { con: "hold&setup", sym: "共享现象", root: "根因1" }),
+      rowC("r2", { con: "hold&setup", sym: "共享现象", root: "根因2" }),
+    ],
+  };
+  const cols = [col("con"), { id: "sym", name: "现象", role: "attribute", position: 1 },
+    { id: "root", name: "根因", role: "procedure", position: 2 }];
+  const m = buildConceptMatrix(group, cols, "con");
+  assert.equal(m.anchorValue, "hold&setup");
+  assert.deepEqual(m.branchRowIds, ["r1", "r2"]);
+  // anchor 列(con)不进属性行
+  assert.deepEqual(m.attrRows.map((r) => r.columnId), ["sym", "root"]);
+  const sym = m.attrRows.find((r) => r.columnId === "sym");
+  assert.deepEqual(sym.values, ["共享现象", "共享现象"]);
+  assert.equal(sym.sharedSpan, true);
+  const root = m.attrRows.find((r) => r.columnId === "root");
+  assert.deepEqual(root.values, ["根因1", "根因2"]);
+  assert.equal(root.sharedSpan, false);
+});
+
+test("groupCellWriteTargets: 返回组内所有行 id", () => {
+  const group = { anchorValue: "A", rows: [rowC("r1", {}), rowC("r2", {}), rowC("r3", {})] };
+  assert.deepEqual(groupCellWriteTargets(group, "any"), ["r1", "r2", "r3"]);
 });
