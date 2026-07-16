@@ -428,3 +428,67 @@ def test_backfill_counts_and_progress(repo, notebook_id):
 
     counts2 = repo.backfill_paper_metadata(notebook_id)
     assert counts2 == {"total": 0}
+
+
+# ---------------------------------------------------------------------------
+# backfill_paper_metadata: in-memory runtime state (paper-meta-status Task 1)
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_runtime_registers_and_pops_progress(repo, notebook_id, service, monkeypatch):
+    """job 期间 facade paper_meta_backfilling(nb)=True + progress dict 反映 done/total；
+    结束后（正常/异常）自动 pop 为 False/None。"""
+    from unittest.mock import patch
+    _insert_source(repo, notebook_id, "src-a")
+    _insert_source(repo, notebook_id, "src-b")
+    fake = _FakeKgLLM(PAYLOAD)
+    repo._kg_llm_client = fake
+
+    captured = {"during": None}
+    original = service.ensure_paper_metadata
+
+    def _spy(source, **kw):
+        # 第一次调用时读一次进度快照
+        if captured["during"] is None:
+            captured["during"] = (
+                repo.paper_meta_backfilling(notebook_id),
+                repo.paper_meta_backfill_progress(notebook_id),
+            )
+        return original(source, **kw)
+
+    monkeypatch.setattr(service, "ensure_paper_metadata", _spy)
+    counts = service.backfill_paper_metadata(notebook_id)
+    assert counts["total"] == 2
+    during_flag, during_prog = captured["during"]
+    assert during_flag is True
+    assert during_prog is not None
+    assert during_prog["total"] == 2
+    assert 0 <= during_prog["done"] <= 2
+    # 结束后 pop
+    assert repo.paper_meta_backfilling(notebook_id) is False
+    assert repo.paper_meta_backfill_progress(notebook_id) is None
+
+
+def test_backfill_runtime_pops_on_exception(repo, notebook_id, service, monkeypatch):
+    """异常也 pop——finally 保证；exception 从 as_completed 冒出到调用侧。"""
+    _insert_source(repo, notebook_id, "src-c")
+    repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
+
+    def _boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(service, "ensure_paper_metadata", _boom)
+    # backfill 内部 _one 里 try 包了 ensure（已存在），异常不冒到 as_completed
+    counts = service.backfill_paper_metadata(notebook_id)
+    assert counts["total"] == 1
+    assert counts.get("failed", 0) == 1
+    assert repo.paper_meta_backfilling(notebook_id) is False
+    assert repo.paper_meta_backfill_progress(notebook_id) is None
+
+
+def test_backfill_empty_no_registration(repo, notebook_id):
+    """queued=0 不 register。"""
+    counts = repo.backfill_paper_metadata(notebook_id)
+    assert counts == {"total": 0}
+    assert repo.paper_meta_backfilling(notebook_id) is False
+    assert repo.paper_meta_backfill_progress(notebook_id) is None
