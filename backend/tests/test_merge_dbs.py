@@ -19,7 +19,11 @@ def _fresh_db(path):
     """Fresh v17 schema+seed via the app repository (created at SCHEMA_VERSION)."""
     from app.core.config import Settings
     from app.services.sqlite_repository import SQLiteRepository
-    SQLiteRepository(Settings(database_url=f"sqlite:///{path}"))
+    repo = SQLiteRepository(Settings(database_url=f"sqlite:///{path}"))
+    # 显式释放 repo 自己线程本地的 WAL 连接: 否则该连接只能靠 gc 回收(sqlite_repository
+    # 内部闭包成环, 不会被立即引用计数释放), merge_core 测试里 ca/cb.close() 后紧跟着
+    # shutil.copy2 原始文件会看到未 checkpoint 的 -wal, 漏掉刚写入的行。
+    repo.close_local()
     return sqlite3.connect(path)
 
 
@@ -181,3 +185,86 @@ def test_preflight_rejects_user_overlap_without_flag(tmp_path):
     pa, pb, ca, cb = _seed_pair(tmp_path)  # 两库都有 seed 的 user-local → 天然重叠
     with pytest.raises(SystemExit):
         md.preflight(ca, cb, assume_same_users=False)
+
+
+def test_merge_core_conserves_rows_and_keeps_primary_base(tmp_path):
+    pa, pb, ca, cb = _seed_pair(tmp_path)
+    ca.close(); cb.close()
+    out = tmp_path / "merged.db"
+
+    md.merge_core(out, pa, pb, shared_base=BASE)
+
+    conn = sqlite3.connect(out)
+    nb = {r[0]: r[1] for r in conn.execute("SELECT id, tier FROM notebooks")}
+    # base 保留 primary 那份 + 两边 personal 都在
+    assert nb == {BASE: "base", "nb-a11111111": "personal", "nb-b22222222": "personal"}
+    # base 的源计数 = primary(A) 的 2, 不是 B 的 1
+    assert conn.execute("SELECT count(*) FROM sources WHERE notebook_id=?", (BASE,)).fetchone()[0] == 2
+    # B 的 personal 数据都进来了(跨 A/B/C 类)
+    assert conn.execute("SELECT count(*) FROM chunks WHERE notebook_id='nb-b22222222'").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM knowledge_objects WHERE notebook_id='nb-b22222222'").fetchone()[0] == 1
+    assert conn.execute("SELECT count(*) FROM memory_items WHERE notebook_id='nb-b22222222'").fetchone()[0] == 1
+    # 子表(B 类)随父源进来
+    assert conn.execute(
+        "SELECT count(*) FROM source_elements WHERE source_id='src-b1'").fetchone()[0] == 1
+    # FK 无悬挂
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    conn.close()
+
+
+def test_merge_core_fts_queryable_for_imported_notebook(tmp_path):
+    pa, pb, ca, cb = _seed_pair(tmp_path)
+    ca.close(); cb.close()
+    out = tmp_path / "merged.db"
+    md.merge_core(out, pa, pb, shared_base=BASE)
+    conn = sqlite3.connect(out)
+    # 独立内容 FTS: 拷入的 chunk 命中
+    assert conn.execute(
+        "SELECT chunk_id FROM chunks_fts WHERE chunks_fts MATCH 'quantum'").fetchone()[0] == "ck-b1"
+    assert conn.execute(
+        "SELECT object_id FROM kg_objects_fts WHERE kg_objects_fts MATCH 'Flux'").fetchone()[0] == "obj-b1"
+    # 外部内容 FTS: rebuild 后 memory 命中
+    assert conn.execute(
+        "SELECT rowid FROM memory_items_fts WHERE memory_items_fts MATCH 'flux'").fetchone() is not None
+    conn.close()
+
+
+def test_merge_core_clears_kg_state_for_imported(tmp_path):
+    pa, pb, ca, cb = _seed_pair(tmp_path)
+    # 给 B 的 personal 塞一条 kg 构建状态, 应在导入后被清
+    cb.execute("INSERT INTO unified_kg_state(notebook_id,updated_at) VALUES('nb-b22222222',?)", (NOW,))
+    cb.commit(); ca.close(); cb.close()
+    out = tmp_path / "merged.db"
+    md.merge_core(out, pa, pb, shared_base=BASE)
+    conn = sqlite3.connect(out)
+    assert conn.execute(
+        "SELECT count(*) FROM unified_kg_state WHERE notebook_id='nb-b22222222'").fetchone()[0] == 0
+    conn.close()
+
+
+def _add_knowhow(conn, nb_id, tbl_id, cell_text):
+    """一张 knowhow 表: 1 列 1 行 1 格(覆盖二级子表 cells->rows->tables)。"""
+    conn.execute("INSERT INTO knowhow_tables(id,notebook_id,title,created_at,updated_at) "
+                 "VALUES(?,?,?,?,?)", (tbl_id, nb_id, "T", NOW, NOW))
+    conn.execute("INSERT INTO knowhow_columns(id,table_id,name,position) VALUES(?,?,?,0)",
+                 (tbl_id + "-c", tbl_id, "col"))
+    conn.execute("INSERT INTO knowhow_rows(id,table_id,position,created_at,updated_at) "
+                 "VALUES(?,?,0,?,?)", (tbl_id + "-r", tbl_id, NOW, NOW))
+    conn.execute("INSERT INTO knowhow_cells(id,row_id,column_id,content_md,updated_at) "
+                 "VALUES(?,?,?,?,?)", (tbl_id + "-cell", tbl_id + "-r", tbl_id + "-c",
+                                       cell_text, NOW))
+
+
+def test_merge_core_grandchild_excludes_secondary_base_knowhow(tmp_path):
+    """knowhow_cells 是二级子表: secondary base 的 cells 不得被带入(否则 row_id 悬挂)。"""
+    pa, pb, ca, cb = _seed_pair(tmp_path)
+    _add_knowhow(cb, BASE, "kt-b-base", "BASE-CELL")          # secondary base 的 knowhow
+    _add_knowhow(cb, "nb-b22222222", "kt-b-personal", "P-CELL")  # secondary personal 的 knowhow
+    cb.commit(); ca.close(); cb.close()
+    out = tmp_path / "merged.db"
+    md.merge_core(out, pa, pb, shared_base=BASE)
+    conn = sqlite3.connect(out)
+    cells = {r[0] for r in conn.execute("SELECT content_md FROM knowhow_cells")}
+    assert "P-CELL" in cells and "BASE-CELL" not in cells
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []  # 无悬挂
+    conn.close()

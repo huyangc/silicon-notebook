@@ -14,6 +14,7 @@ docs/superpowers/specs/2026-07-16-merge-duplicate-base-dbs-design.md。
 from __future__ import annotations
 
 import argparse
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -182,6 +183,96 @@ def preflight(conn_a: sqlite3.Connection, conn_b: sqlite3.Connection,
     print(f"[base 统计] A({ba}): {base_stats(conn_a, ba)}", file=sys.stderr)
     print(f"[base 统计] B({bb}): {base_stats(conn_b, bb)}", file=sys.stderr)
     return ba
+
+
+def _col_list(conn: sqlite3.Connection, table: str) -> str:
+    return ", ".join(table_columns(conn, table))
+
+
+def _table_exists(conn: sqlite3.Connection, table: str, schema: str = "main") -> bool:
+    return conn.execute(
+        f"SELECT 1 FROM {schema}.sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
+def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
+               shared_base: str) -> dict:
+    if out_db.exists():
+        raise SystemExit(f"输出已存在: {out_db}(用 --force 覆盖或换路径)")
+    shutil.copy2(primary_db, out_db)
+
+    conn = sqlite3.connect(out_db)
+    try:
+        assert_taxonomy_complete(conn)
+        conn.execute("PRAGMA foreign_keys = OFF")  # 导入期不校验; 结束后统一 foreign_key_check
+        conn.execute("ATTACH DATABASE ? AS sec", (str(secondary_db),))
+
+        sec_nb = [r[0] for r in conn.execute(
+            "SELECT id FROM sec.notebooks WHERE id != ?", (shared_base,)).fetchall()]
+        ph = ",".join("?" for _ in sec_nb) or "NULL"  # sec_nb 为空时 IN (NULL) 匹配 0 行
+
+        # 子表 -> 限定 FK 落在"以 sec_nb 为界的已导入父行"内(每个子句恰含一个 IN ({ph}))。
+        # knowhow_cells 是二级子表(cells->rows->tables.notebook_id), 必须两层下钻,
+        # 否则会带入 secondary base 的 cells -> row_id 悬挂 -> FK 失败。
+        child_scopes = {
+            "source_elements": f"source_id IN (SELECT id FROM sec.sources WHERE notebook_id IN ({ph}))",
+            "knowhow_columns": f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
+            "knowhow_rows":    f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
+            "knowhow_cells":   (f"row_id IN (SELECT id FROM sec.knowhow_rows WHERE table_id IN "
+                                f"(SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph})))"),
+            "memory_provenance": f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
+            "memory_revisions":  f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
+            "memory_embeddings": f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
+            "ask_trace_steps":   f"job_id IN (SELECT id FROM sec.ask_jobs WHERE notebook_id IN ({ph}))",
+        }
+        missing = {c for (c, *_r) in CHILD_TABLES} - set(child_scopes)
+        if missing:  # 新增子表却没定义导入范围 -> fail-loud
+            raise SystemExit(f"子表缺少导入范围定义: {sorted(missing)}")
+
+        row_counts: dict[str, int] = {}
+
+        def _run(table: str, where: str) -> None:
+            # 两库都得有该表才能跨库 INSERT; 版本演进导致某库缺表则跳过(见守卫容忍逻辑)。
+            if not (_table_exists(conn, table, "main") and _table_exists(conn, table, "sec")):
+                return
+            cols = _col_list(conn, table)
+            cur = conn.execute(
+                f"INSERT INTO main.{table} ({cols}) SELECT {cols} FROM sec.{table} WHERE {where}",
+                tuple(sec_nb))  # where 恰含一个 IN ({ph}) -> 一份 sec_nb 参数
+            row_counts[table] = row_counts.get(table, 0) + cur.rowcount
+
+        with conn:  # 单事务(FK off 期间, 顺序无关)
+            _run(NOTEBOOKS_TABLE, f"id IN ({ph})")                       # notebooks 自身按 id
+            for t in NOTEBOOK_SCOPED_TABLES + FTS_NOTEBOOK_TABLES:        # A 类 + 独立 FTS
+                _run(t, f"notebook_id IN ({ph})")
+            for child, *_rest in CHILD_TABLES:                            # B 类: 显式范围
+                _run(child, child_scopes[child])
+            for t in GLOBAL_UNION_TABLES:                                # C 类: 主库优先并集
+                if not (_table_exists(conn, t, "main") and _table_exists(conn, t, "sec")):
+                    continue
+                cols = _col_list(conn, t)
+                conn.execute(
+                    f"INSERT OR IGNORE INTO main.{t} ({cols}) SELECT {cols} FROM sec.{t}")
+            for t in KG_STATE_TABLES:                                    # 清导入 notebook 的 KG 状态
+                if _table_exists(conn, t, "main"):
+                    conn.execute(
+                        f"DELETE FROM main.{t} WHERE notebook_id IN ({ph})", tuple(sec_nb))
+
+        # 外部内容 FTS rebuild(在自己的事务里), 提交后再 DETACH(DETACH 不能在事务中)。
+        for t in EXTERNAL_FTS_TABLES:
+            if _table_exists(conn, t, "main"):
+                conn.execute(f"INSERT INTO main.{t}({t}) VALUES('rebuild')")
+        conn.commit()
+
+        dangling = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if dangling:
+            raise SystemExit(f"合并后存在悬挂外键, 已中止: {dangling[:20]}")
+
+        conn.execute("DETACH DATABASE sec")
+        conn.commit()
+        return {"imported_notebooks": sec_nb, "row_counts": row_counts}
+    finally:
+        conn.close()
 
 
 def main(argv: list[str] | None = None) -> int:  # pragma: no cover - filled in Task 6
