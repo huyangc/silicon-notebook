@@ -644,15 +644,21 @@ class KnowhowStore:
 
     # ------------------------------------------------------------- assets
     def insert_notebook_asset(
-        self, notebook_id: str, filename: str, mime: str, size: int, created_by: str
+        self,
+        notebook_id: str,
+        filename: str,
+        mime: str,
+        size: int,
+        created_by: str,
+        source_id: str | None = None,
     ) -> str:
         asset_id = self.new_id("asset")
         with self.database.write() as db:
             db.execute(
                 "INSERT INTO notebook_assets "
-                "(id, notebook_id, filename, mime, size, created_by, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (asset_id, notebook_id, filename, mime, size, created_by, self.now()),
+                "(id, notebook_id, filename, mime, size, created_by, created_at, source_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (asset_id, notebook_id, filename, mime, size, created_by, self.now(), source_id),
             )
         return asset_id
 
@@ -662,6 +668,30 @@ class KnowhowStore:
                 "SELECT * FROM notebook_assets WHERE id = ?", (asset_id,)
             ).fetchone()
         return dict(row) if row is not None else None
+
+    def source_asset_ids(self, source_id: str) -> list[str]:
+        """Every ``notebook_assets.id`` linked to ``source_id`` (MinerU
+        embedded-image extraction) — the read half of the source-view
+        rendering + delete/reparse cascade cleanup pair below."""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM notebook_assets WHERE source_id = ?", (source_id,)
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def delete_source_asset_rows(self, source_id: str) -> list[str]:
+        """Delete every ``notebook_assets`` row linked to ``source_id`` and
+        return the deleted asset ids so the caller can also remove their
+        on-disk files (this store is rows-only, same division of labor as
+        the notebook-delete/sweep_orphan_assets asset-GC paths in
+        ``AssetService``/``maintenance``)."""
+        ids = self.source_asset_ids(source_id)
+        if ids:
+            with self.database.write() as db:
+                db.execute(
+                    "DELETE FROM notebook_assets WHERE source_id = ?", (source_id,)
+                )
+        return ids
 
 
 __all__ = ["KnowhowStore", "VALID_KINDS"]

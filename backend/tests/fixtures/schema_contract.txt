@@ -317,6 +317,7 @@ notebook_assets.mime|TEXT|1|None|0
 notebook_assets.size|INTEGER|1|None|0
 notebook_assets.created_by|TEXT|1|''|0
 notebook_assets.created_at|TEXT|1|None|0
+notebook_assets.source_id|TEXT|0|None|0
 notebook_members.notebook_id|TEXT|1|None|1
 notebook_members.user_id|TEXT|1|None|2
 notebook_members.role|TEXT|1|'reader'|0
@@ -512,6 +513,7 @@ idx_memory_embeddings_model
 idx_memory_owner_notebook_status
 idx_memory_revisions_memory
 idx_notebook_assets_nb
+idx_notebook_assets_source
 idx_notebook_members_user
 idx_notebooks_created_by
 idx_notebooks_share_token

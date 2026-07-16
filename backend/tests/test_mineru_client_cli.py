@@ -1,3 +1,4 @@
+import base64
 import json
 import subprocess
 from pathlib import Path
@@ -5,7 +6,12 @@ from pathlib import Path
 import pytest
 
 from app.core.config import Settings
-from app.services.mineru_client import MinerUClient, _extract_content_list
+from app.services.mineru_client import (
+    MinerUClient,
+    _decode_data_uri,
+    _extract_content_list,
+    _extract_images,
+)
 
 
 def _cli_client(monkeypatch):
@@ -153,3 +159,75 @@ def test_http_parse_bypasses_environment_proxy(monkeypatch, tmp_path):
     assert captured.get("proxies") == {}, "opener 必须带空 ProxyHandler({}) 以绕过所有环境代理"
     assert captured["url"].endswith("/file_parse")
     assert captured["timeout"] == 42
+def test_decode_data_uri_roundtrip():
+    raw = b"\x89PNG\r\n_binary_"
+    uri = "data:image/png;base64," + base64.b64encode(raw).decode()
+    assert _decode_data_uri(uri) == raw
+    assert _decode_data_uri("not-a-data-uri") is None
+
+
+def test_extract_images_from_http_payload():
+    raw = b"JPEGBYTES"
+    uri = "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+    payload = {"results": {"doc.pdf": {"content_list": [], "images": {"images/abc.jpg": uri}}}}
+    images = _extract_images(payload)
+    assert images == {"abc.jpg": raw}  # 以 basename 为键
+
+
+def test_parse_with_images_http_gated_off(monkeypatch):
+    # return_images=False 时不请求图片、images 为空，content_list 照常。
+    from app.core.config import Settings
+    from app.services.mineru_client import MinerUClient
+    s = Settings(MINERU_MODE="http", MINERU_API_URL="http://x", MINERU_RETURN_IMAGES="0")
+    client = MinerUClient(s)
+    monkeypatch.setattr(client, "_post_file_parse",
+                        lambda fields, fp, fn: {"results": {"d.pdf": {"content_list": [{"type": "text", "text": "hi"}]}}})
+    cl, images = client.parse_with_images("/tmp/d.pdf", "d.pdf")
+    assert images == {}
+    assert cl and cl[0]["text"] == "hi"
+
+
+class FakePopenWithImages:
+    """假子进程：除 content_list.json 外，还在 out_dir 下建 images/ 子目录写一张图。"""
+
+    captured_cmd = []
+
+    def __init__(self, cmd, **kwargs):
+        FakePopenWithImages.captured_cmd = cmd
+        out_dir = Path(cmd[cmd.index("-o") + 1]) if "-o" in cmd else _out_dir_from_pdf_cmd(cmd)
+        (out_dir / "doc_content_list.json").write_text(
+            json.dumps([{"type": "text", "text": "ok", "page_idx": 0}]), encoding="utf-8"
+        )
+        images_dir = out_dir / "images"
+        images_dir.mkdir(parents=True, exist_ok=True)
+        (images_dir / "fig1.jpg").write_bytes(b"JPEGDATA")
+
+    def communicate(self, timeout=None):
+        return (b"", b"")
+
+    @property
+    def returncode(self):
+        return 0
+
+
+def test_cli_parse_with_images_copies_images_dir_before_cleanup(monkeypatch, tmp_path):
+    # return_images=True 时，images/ 目录里的文件要在临时目录销毁前拷成 basename->bytes。
+    monkeypatch.setattr(subprocess, "Popen", FakePopenWithImages)
+    monkeypatch.setenv("MINERU_RETURN_IMAGES", "1")
+    client = _cli_client(monkeypatch)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+    content_list, images = client.parse_with_images(str(pdf), "doc.pdf")
+    assert content_list == [{"type": "text", "text": "ok", "page_idx": 0}]
+    assert images == {"fig1.jpg": b"JPEGDATA"}
+
+
+def test_cli_parse_with_images_gated_off_skips_copy(monkeypatch, tmp_path):
+    monkeypatch.setattr(subprocess, "Popen", FakePopenWithImages)
+    monkeypatch.setenv("MINERU_RETURN_IMAGES", "0")
+    client = _cli_client(monkeypatch)
+    pdf = tmp_path / "doc.pdf"
+    pdf.write_bytes(b"%PDF-1.4 stub")
+    content_list, images = client.parse_with_images(str(pdf), "doc.pdf")
+    assert content_list == [{"type": "text", "text": "ok", "page_idx": 0}]
+    assert images == {}

@@ -25,13 +25,27 @@ class ChunkStore:
         self.database = database
 
     def source_elements_for_chunking(self, source_id: str) -> list:
-        """元素 id 形如 el-<sid>-0001 零补位, 故 ORDER BY id == 插入顺序。"""
+        """元素 id 形如 el-<sid>-0001 零补位, 故 ORDER BY id == 插入顺序。
+        额外带出 metadata 里的 caption：MinerU 带图注的 image 元素需凭它进检索
+        chunk（build_chunks 对 image/figure 仅在无 caption 时跳过）。"""
         with self.database.connect() as db:
             erows = db.execute(
-                "SELECT id, element_type, text FROM source_elements "
+                "SELECT id, element_type, text, metadata FROM source_elements "
                 "WHERE source_id=? ORDER BY id", (source_id,)).fetchall()
-        return [{"id": r["id"], "element_type": r["element_type"], "text": r["text"]}
-                for r in erows]
+        out = []
+        for r in erows:
+            caption = ""
+            raw = r["metadata"]
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                except (ValueError, TypeError):
+                    parsed = None
+                if isinstance(parsed, dict):
+                    caption = str(parsed.get("caption") or "")
+            out.append({"id": r["id"], "element_type": r["element_type"],
+                        "text": r["text"], "caption": caption})
+        return out
 
     def replace_source_chunks(
         self,

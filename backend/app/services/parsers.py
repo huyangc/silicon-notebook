@@ -14,16 +14,17 @@ def parse_source_file(
     file_path: str,
     file_name: str,
     mineru_client: Any = None,
+    persist_image: Any = None,
 ) -> List[SourceElement]:
     suffix = Path(file_name).suffix.lower()
     if suffix in {".md", ".markdown"}:
         return parse_markdown(source_id, Path(file_path))
     if suffix == ".docx":
-        return parse_docx(source_id, Path(file_path), file_name, mineru_client)
+        return parse_docx(source_id, Path(file_path), file_name, mineru_client, persist_image)
     if suffix == ".pptx":
-        return parse_pptx(source_id, Path(file_path), file_name, mineru_client)
+        return parse_pptx(source_id, Path(file_path), file_name, mineru_client, persist_image)
     if suffix == ".pdf":
-        return parse_pdf(source_id, Path(file_path), file_name, mineru_client)
+        return parse_pdf(source_id, Path(file_path), file_name, mineru_client, persist_image)
     if suffix == ".csv":
         return parse_csv(source_id, Path(file_path))
     if suffix in {".xlsx", ".xlsm"}:
@@ -158,6 +159,7 @@ def parse_docx(
     path: Path,
     file_name: str = "",
     mineru_client: Any = None,
+    persist_image: Any = None,
 ) -> List[SourceElement]:
     """Parse a DOCX via MinerU when configured, else fall back to python-docx.
 
@@ -166,9 +168,9 @@ def parse_docx(
     """
     if mineru_client is not None and getattr(mineru_client, "configured", False):
         try:
-            content_list = mineru_client.parse(str(path), file_name or path.name)
+            content_list, images = mineru_client.parse_with_images(str(path), file_name or path.name)
             elements = mineru_content_list_to_elements(
-                source_id, content_list, label_prefix="DOCX"
+                source_id, content_list, label_prefix="DOCX", images=images, persist_image=persist_image
             )
             if elements:
                 return elements
@@ -230,6 +232,7 @@ def parse_pptx(
     path: Path,
     file_name: str = "",
     mineru_client: Any = None,
+    persist_image: Any = None,
 ) -> List[SourceElement]:
     """Parse a PPTX via MinerU when configured, else fall back to XML extraction.
 
@@ -238,9 +241,9 @@ def parse_pptx(
     """
     if mineru_client is not None and getattr(mineru_client, "configured", False):
         try:
-            content_list = mineru_client.parse(str(path), file_name or path.name)
+            content_list, images = mineru_client.parse_with_images(str(path), file_name or path.name)
             elements = mineru_content_list_to_elements(
-                source_id, content_list, label_prefix="PPTX"
+                source_id, content_list, label_prefix="PPTX", images=images, persist_image=persist_image
             )
             if elements:
                 return elements
@@ -343,6 +346,7 @@ def parse_pdf(
     path: Path,
     file_name: str = "",
     mineru_client: Any = None,
+    persist_image: Any = None,
 ) -> List[SourceElement]:
     """Parse a PDF via MinerU when configured, else fall back to pypdf text.
 
@@ -352,8 +356,10 @@ def parse_pdf(
     """
     if mineru_client is not None and getattr(mineru_client, "configured", False):
         try:
-            content_list = mineru_client.parse(str(path), file_name or path.name)
-            elements = mineru_content_list_to_elements(source_id, content_list)
+            content_list, images = mineru_client.parse_with_images(str(path), file_name or path.name)
+            elements = mineru_content_list_to_elements(
+                source_id, content_list, images=images, persist_image=persist_image
+            )
             if elements:
                 return elements
             if hasattr(mineru_client, "last_error"):
@@ -454,6 +460,8 @@ def mineru_content_list_to_elements(
     source_id: str,
     content_list: List[dict],
     label_prefix: str = "PDF",
+    images: Dict[str, bytes] | None = None,
+    persist_image: Any = None,
 ) -> List[SourceElement]:
     """Map MinerU's content_list blocks into structured SourceElements.
 
@@ -527,18 +535,34 @@ def mineru_content_list_to_elements(
                 )
             )
         elif block_type == "image":
+            img_path = str(block.get("img_path", "")).strip()
+            img_name = Path(img_path).name
             caption = " ".join(
                 _as_list(block.get("image_caption")) + _as_list(block.get("image_footnote"))
             ).strip()
-            if not caption:
-                continue
+            asset_id = ""
+            if img_name and images and persist_image and img_name in images:
+                try:
+                    asset_id = persist_image(images[img_name], img_name) or ""
+                except Exception:
+                    asset_id = ""  # 抽图/写盘失败绝不影响文本产出
+            text = caption or f"{label_prefix} p.{page} 图 {ordinal}"
+            metadata: Dict[str, Any] = {
+                "parser": "mineru",
+                "page_number": page,
+                "source_format": label_prefix.lower(),
+            }
+            if asset_id:
+                metadata["asset_id"] = asset_id
+            if caption:
+                metadata["caption"] = caption
             elements.append(
                 _element(
                     source_id,
-                    "image_caption",
+                    "image",
                     f"{label_prefix} p.{page} image {ordinal}",
-                    caption,
-                    {"parser": "mineru", "page_number": page, "source_format": label_prefix.lower()},
+                    text,
+                    metadata,
                 )
             )
         else:

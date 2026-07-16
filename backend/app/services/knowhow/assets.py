@@ -106,6 +106,44 @@ class AssetService:
             )
         return asset
 
+    def save_source_image(
+        self, notebook_id: str, source_id: str, filename: str,
+        mime: str, data: bytes, created_by: str,
+    ) -> dict:
+        """存 MinerU 从来源抽出的内嵌图片：与 save() 同款校验+落盘，但带 source_id
+        关联，供来源视图渲染与按源级联清理。护栏(大小/张数)由调用方(persist_image
+        工厂)先行把关，这里仍做 mime/尺寸兜底校验，绝不放行不合规写盘。"""
+        validate_asset(mime, len(data))
+        asset_id = self._repo.insert_notebook_asset(
+            notebook_id, safe_filename(filename or "image"), mime, len(data),
+            created_by, source_id=source_id,
+        )
+        asset = self._repo.get_notebook_asset(asset_id)
+        if asset is None:  # pragma: no cover
+            raise RuntimeError(f"source image asset {asset_id} missing after insert")
+        path = self.path_for(asset)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+        if not path.is_file() or path.stat().st_size != len(data):
+            raise RuntimeError(f"source image asset {asset_id} did not persist to {path}")
+        return asset
+
+    def delete_source_images(self, source_id: str) -> None:
+        """删一个来源的全部内嵌图片：先读行拿到 asset 元数据算盘上路径，删行，
+        再 unlink 文件。删盘 best-effort（文件先没了不阻塞行删除）。"""
+        ids = self._repo.source_asset_ids(source_id)
+        assets = [self._repo.get_notebook_asset(i) for i in ids]
+        self._repo.delete_source_asset_rows(source_id)
+        for asset in assets:
+            if not asset:
+                continue
+            path = self.path_for(asset)
+            try:
+                if path.is_file():
+                    path.unlink()
+            except OSError:
+                pass
+
 
 __all__ = [
     "AssetService",

@@ -50,3 +50,25 @@ def test_oversize_element_becomes_own_chunk():
     els = [_el("big", "paragraph", "z" * 2000)]
     chunks = build_chunks(els, target_chars=600, overlap_chars=0)
     assert len(chunks) == 1 and chunks[0]["element_ids"] == ["big"]
+
+
+def test_image_with_caption_enters_chunk():
+    els = [
+        {"id": "e1", "element_type": "image", "text": "Figure 1: the layout", "caption": "Figure 1: the layout"},
+        {"id": "e2", "element_type": "paragraph", "text": "Body."},
+    ]
+    chunks = build_chunks(els, target_chars=600, overlap_chars=0)
+    joined = " ".join(c["text"] for c in chunks)
+    assert "Figure 1: the layout" in joined          # 带图注的图进了检索
+    assert "e1" in [i for c in chunks for i in c["element_ids"]]
+
+
+def test_image_without_caption_is_skipped():
+    els = [
+        {"id": "e1", "element_type": "image", "text": "PDF p.3 图 2"},   # 占位文本, 无 caption 键
+        {"id": "e2", "element_type": "paragraph", "text": "Body."},
+    ]
+    chunks = build_chunks(els, target_chars=600, overlap_chars=0)
+    ids = [i for c in chunks for i in c["element_ids"]]
+    assert "e1" not in ids                              # 无图注的图仍被跳过
+    assert "e2" in ids

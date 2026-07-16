@@ -43,6 +43,10 @@ KNOWHOW_TABLE_COLUMNS = {
     "knowhow_cells": {"id", "row_id", "column_id", "content_md", "updated_at"},
     "notebook_assets": {
         "id", "notebook_id", "filename", "mime", "size", "created_by", "created_at",
+        # source_id (_migration_19, source-asset-linking Task 2): nullable
+        # link back to the originating source for MinerU-extracted embedded
+        # images; NULL for knowhow paste-in images.
+        "source_id",
     },
 }
 

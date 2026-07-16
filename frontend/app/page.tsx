@@ -63,6 +63,7 @@ import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
 import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
 import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
+import { sourceImageAssetUrl } from "./source-image";
 import {
   CHAT_MODES,
   EMPTY_KNOWLEDGE,
@@ -4501,7 +4502,7 @@ export default function Home() {
                       <h3>{element.location_label}</h3>
                       <span className="tag element-type-tag">{element.element_type}</span>
                     </div>
-                    <ElementBody element={element} />
+                    <ElementBody element={element} notebookId={currentNotebookId ?? ""} />
                   </article>
                 )) : (
                   <article className="item">
@@ -5363,7 +5364,31 @@ function sanitizeTableHtml(html: string): string {
   return withoutHandlers.replace(/<\/?[a-z][^>]*>/gi, (tag) => (allowed.test(tag) ? tag : ""));
 }
 
-function ElementBody({ element }: { element: SourceElement }) {
+// 图片来源资产需鉴权(GET /assets/{id} 走 require_notebook_read),裸 <img src> 会 401;
+// 走 fetch→blob→objectURL(与 downloadReportsZip 同款鉴权 fetch 惯用法),卸载时 revoke 避免泄漏。
+function AuthedImage({ url, alt }: { url: string; alt: string }) {
+  const [src, setSrc] = useState<string>("");
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!url) return;
+    let revoked = "";
+    let alive = true;
+    fetch(url, { headers: authHeaders() })
+      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+      .then((blob) => {
+        if (!alive) return;
+        revoked = URL.createObjectURL(blob);
+        setSrc(revoked);
+      })
+      .catch(() => alive && setFailed(true));
+    return () => { alive = false; if (revoked) URL.revokeObjectURL(revoked); };
+  }, [url]);
+  if (failed) return <p className="tool-hint">图片加载失败</p>;
+  if (!src) return <p className="tool-hint">图片加载中…</p>;
+  return <img className="element-image" src={src} alt={alt} loading="lazy" />;
+}
+
+function ElementBody({ element, notebookId }: { element: SourceElement; notebookId: string }) {
   if (element.element_type === "formula") {
     return <FormulaView latex={element.text} />;
   }
@@ -5377,6 +5402,29 @@ function ElementBody({ element }: { element: SourceElement }) {
         />
       );
     }
+  }
+  if (element.element_type === "image") {
+    const assetId = typeof element.metadata?.asset_id === "string" ? element.metadata.asset_id : "";
+    const caption = typeof element.metadata?.caption === "string" ? element.metadata.caption : "";
+    const url = sourceImageAssetUrl(API_BASE, notebookId, assetId);
+    if (url) {
+      return (
+        <figure className="element-image-figure">
+          <AuthedImage url={url} alt={caption || "figure"} />
+          {caption ? <figcaption>{caption}</figcaption> : null}
+        </figure>
+      );
+    }
+    if (caption) {
+      return (
+        <figure className="element-image-figure">
+          <figcaption>{caption}</figcaption>
+        </figure>
+      );
+    }
+    // 无可渲染图片资源(如 MINERU_RETURN_IMAGES=0 关闭图片)且无 caption 时，
+    // 回退到与其余元素类型一致的纯文本展示，避免空的占位边框。
+    return <p>{element.text}</p>;
   }
   return <p>{element.text}</p>;
 }

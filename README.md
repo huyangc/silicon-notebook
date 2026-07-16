@@ -15,7 +15,8 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - Clean start: a fresh database seeds only the local user; no demo notebook or synthetic sources
 - Multipart source upload for PDF, Markdown, DOCX, PPTX, CSV, and XLSX (async through the shared KG job scheduler)
 - **KG-native ingestion**: structured Markdown parse → greedy-window KG extraction (Concept / Claim / Formula / Procedure) with concurrent embedding → extraction-first status (`extracted` = KG ready, does not wait for embedding)
-- PDF parsing via MinerU (formulas as LaTeX, tables, layout) when configured; pypdf text fallback locally or when MinerU is off
+- PDF/DOCX/PPTX parsing via MinerU (formulas as LaTeX, tables, layout, embedded images) when configured; pypdf text fallback locally or when MinerU is off
+- MinerU-extracted embedded images are retained and shown inline in the source view; captions and text remain searchable
 - Hybrid retrieval: CJK-aware bi-gram keyword + float32 matrix semantic search with per-notebook cache
 - KG-native grounded Q&A: sentence-level `[k_i]` citations (rendered as compact numbered references, including model-emitted numeric groups like `[1, 2, 3]` when they map to known references), multi-turn conversations, 1-hop KG neighbour expansion, and a live, expandable one-line agent trace for reasoning mode
 - **Typed query-time inference in reasoning mode:** the agent can call `follow_chain` to compose an evidence-backed two-hop `A→B→C` path into a transient `A→C` inference for `derived_from / kind_of / prerequisite_of / precedes / part_of`. Both direct hops remain independently citable relation evidence, rejected/ungrounded/scope-conflicting paths fail closed, the inferred conclusion is explicitly marked as reasoning, and no inferred edge is written back to the KG. The feature adds no migration, new index, or historical backfill; bounded samples use the existing source/target relation indexes and ambiguous high-degree paths are skipped.
@@ -654,6 +655,9 @@ MINERU_MODEL_SOURCE     # huggingface | modelscope
 MINERU_TIMEOUT_SECONDS  # MinerU call timeout
 MINERU_FORMULA_ENABLE   # true/false
 MINERU_TABLE_ENABLE     # true/false
+MINERU_RETURN_IMAGES    # retain embedded images from PDF/DOCX/PPTX documents (default on: true; set 0/false to keep text and captions only)
+MINERU_MAX_IMAGE_BYTES  # max size per embedded image (default 5MB; larger images are dropped)
+MINERU_MAX_IMAGES_PER_SOURCE # max embedded images per source (default 200)
 ```
 
 **Logging:**

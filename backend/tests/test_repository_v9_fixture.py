@@ -93,9 +93,10 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 快照 = 冻结的 v9 baseline.db 被【当前代码】打开后的状态：经 master
     # v10-v12、v13 Memory / Agent migration、v14 sources.memory_id migration、
     # v15 parse_status/source_type 覆盖索引 migration、v16 knowhow 表
-    # migration、v17 source_paper_meta/source_authors 表 migration 与 v18
-    # knowhow_cell_code 表 + role 词表重映射 migration 合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 18
+    # migration、v17 source_paper_meta/source_authors 表 migration、v18
+    # knowhow_cell_code 表 + role 词表重映射 migration 与 v19
+    # notebook_assets.source_id 列 + 索引 migration 合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 19
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

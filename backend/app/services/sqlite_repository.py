@@ -101,6 +101,8 @@ from app.services.sqlite_notebook_sharing import (  # noqa: F401 — compatibili
     _remap_json_ids,
 )
 from app.services.parsers import parse_source_file, mineru_content_list_to_elements
+from app.services.knowhow.assets import AssetService
+from app.services.source_image_persist import make_persist_image_factory
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     DESCRIPTION_SCHEMA_HINT,
@@ -221,9 +223,29 @@ def _schedule_knowhow_projection(repo: "SQLiteRepository", table_id: str) -> Non
     get_scheduler(repo).schedule(table_id)
 
 
+def _make_persist_image(
+    repo: "SQLiteRepository", notebook_id: str, source_id: str, created_by: str
+):
+    """Task 8: the ``make_persist_image`` seam ``wire_source_ingestion`` hands
+    to ``SourceIngestionService`` — a module-level function (not a facade
+    method) for the SAME reason ``_schedule_knowhow_projection`` above is one:
+    the one-hop-delegate facade-body contract (``test_repository_facade_
+    contract.py``) forbids a NAMED facade method whose body does real work
+    (constructing an ``AssetService`` + binding the pure factory) rather than
+    delegating to a single owning component. Threading ``repo`` (the facade)
+    explicitly keeps `AssetService(repo)` valid — it needs exactly the
+    facade's public ``storage_dir``/``insert_notebook_asset``/
+    ``get_notebook_asset`` one-hop delegates (Task 3) — while the actual
+    binding call stays inside `__init__` (the exempted composition root) via
+    an inline lambda, not a class method body."""
+    return make_persist_image_factory(
+        repo.settings, lambda: AssetService(repo)
+    )(notebook_id, source_id, created_by)
+
+
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 
 @dataclass(frozen=True)
@@ -566,8 +588,8 @@ class SQLiteRepository:
             source_type_from_name=lambda file_name: self._source_type_from_name(
                 file_name
             ),
-            parse_file=lambda source_id, file_path, file_name, client: (
-                parse_source_file(source_id, file_path, file_name, client)
+            parse_file=lambda source_id, file_path, file_name, client, persist_image=None: (
+                parse_source_file(source_id, file_path, file_name, client, persist_image)
             ),
             mineru_client=lambda: self.mineru_client,
             mineru_cloud_client=lambda: self.mineru_cloud_client,
@@ -601,6 +623,10 @@ class SQLiteRepository:
                     notebook_id, guard_name=guard_name, name=name, purpose=purpose
                 )
             ),
+            make_persist_image=lambda notebook_id, source_id, created_by: (
+                _make_persist_image(self, notebook_id, source_id, created_by)
+            ),
+            delete_source_images=lambda sid: AssetService(self).delete_source_images(sid),
         )
         # WS2a: 在途 ask 的 {job_id: cancel_event} 进程内注册表本体在 runtime-owned
         # AskCancellationRegistry(Task 23;流式执行编排在 AskExecutionCoordinator,
@@ -3286,14 +3312,26 @@ class SQLiteRepository:
         return self._runtime.knowhow_store.bump_knowhow_mutation_seq(table_id)
 
     def insert_notebook_asset(
-        self, notebook_id: str, filename: str, mime: str, size: int, created_by: str
+        self,
+        notebook_id: str,
+        filename: str,
+        mime: str,
+        size: int,
+        created_by: str,
+        source_id: Optional[str] = None,
     ) -> str:
         return self._runtime.knowhow_store.insert_notebook_asset(
-            notebook_id, filename, mime, size, created_by
+            notebook_id, filename, mime, size, created_by, source_id
         )
 
     def get_notebook_asset(self, asset_id: str) -> Optional[dict]:
         return self._runtime.knowhow_store.get_notebook_asset(asset_id)
+
+    def source_asset_ids(self, source_id: str) -> List[str]:
+        return self._runtime.knowhow_store.source_asset_ids(source_id)
+
+    def delete_source_asset_rows(self, source_id: str) -> List[str]:
+        return self._runtime.knowhow_store.delete_source_asset_rows(source_id)
 
     # ---------------------------------------------------- paper metadata
     def get_paper_meta(self, source_id: str) -> Optional[dict]:

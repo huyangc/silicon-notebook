@@ -16,6 +16,7 @@ without MinerU installed.
 
 from __future__ import annotations
 
+import base64
 import json
 import mimetypes
 import os
@@ -46,12 +47,17 @@ class MinerUClient:
 
     def parse(self, file_path: str, file_name: str) -> List[dict]:
         """Return MinerU's content_list for a PDF. Raises on failure."""
+        return self.parse_with_images(file_path, file_name)[0]
+
+    def parse_with_images(self, file_path: str, file_name: str) -> tuple[List[dict], dict[str, bytes]]:
+        """Return (content_list, {image_basename: bytes}). Image extraction is
+        purely additive -- it never affects content_list on failure."""
         self.last_error = ""
         try:
             if self.mode == "http":
-                return self._parse_http(file_path, file_name)
+                return self._parse_http_with_images(file_path, file_name)
             if self.mode == "cli":
-                return self._parse_cli(file_path, file_name)
+                return self._parse_cli_with_images(file_path, file_name)
             raise RuntimeError("MinerU is not configured")
         except Exception as exc:
             self.last_error = str(exc)
@@ -59,26 +65,10 @@ class MinerUClient:
 
     # -- HTTP mode (remote mineru-api service) ---------------------------------
 
-    def _parse_http(self, file_path: str, file_name: str) -> List[dict]:
+    def _post_file_parse(self, fields: dict, file_path: str, file_name: str) -> dict:
+        """Network seam: POST the file to mineru-api's /file_parse and return
+        the decoded JSON payload. Isolated so tests can monkeypatch it."""
         url = self.settings.mineru_api_url.rstrip("/") + "/file_parse"
-        fields = {
-            "backend": self.settings.mineru_backend,
-            "parse_method": self.settings.mineru_parse_method,
-            "return_content_list": "true",
-            "return_md": "false",
-            "return_middle_json": "false",
-            "return_model_output": "false",
-            "return_images": "false",
-            "response_format_zip": "false",
-            "formula_enable": "true" if self.settings.mineru_formula_enable else "false",
-            "table_enable": "true" if self.settings.mineru_table_enable else "false",
-        }
-        if self.settings.mineru_lang:
-            fields["lang_list"] = self.settings.mineru_lang
-        # The VLM client backends need the standalone VLM server's URL.
-        if self.settings.mineru_vlm_server_url:
-            fields["server_url"] = self.settings.mineru_vlm_server_url
-
         content = Path(file_path).read_bytes()
         body, content_type = _encode_multipart(fields, "files", file_name, content)
         request = urllib.request.Request(url, data=body, method="POST")
@@ -89,13 +79,38 @@ class MinerUClient:
         # no_proxy 亦无法用 CIDR(如 10.0.0.0/8)排除内网段,故在此层直接不走代理。
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         with opener.open(request, timeout=self.settings.mineru_timeout_seconds) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        return _extract_content_list(payload)
+            return json.loads(response.read().decode("utf-8"))
+
+    def _parse_http_with_images(self, file_path: str, file_name: str) -> tuple[List[dict], dict[str, bytes]]:
+        want_images = bool(self.settings.mineru_return_images)
+        fields = {
+            "backend": self.settings.mineru_backend,
+            "parse_method": self.settings.mineru_parse_method,
+            "return_content_list": "true",
+            "return_md": "false",
+            "return_middle_json": "false",
+            "return_model_output": "false",
+            "return_images": "true" if want_images else "false",
+            "response_format_zip": "false",
+            "formula_enable": "true" if self.settings.mineru_formula_enable else "false",
+            "table_enable": "true" if self.settings.mineru_table_enable else "false",
+        }
+        if self.settings.mineru_lang:
+            fields["lang_list"] = self.settings.mineru_lang
+        # The VLM client backends need the standalone VLM server's URL.
+        if self.settings.mineru_vlm_server_url:
+            fields["server_url"] = self.settings.mineru_vlm_server_url
+
+        payload = self._post_file_parse(fields, file_path, file_name)
+        content_list = _extract_content_list(payload)
+        images = _extract_images(payload) if want_images else {}
+        return content_list, images
 
     # -- CLI mode (local MinerU Python API subprocess) -------------------------
 
-    def _parse_cli(self, file_path: str, file_name: str) -> List[dict]:
+    def _parse_cli_with_images(self, file_path: str, file_name: str) -> tuple[List[dict], dict[str, bytes]]:
         suffix = Path(file_name).suffix.lower()
+        want_images = bool(self.settings.mineru_return_images)
         with tempfile.TemporaryDirectory(prefix="mineru-") as out_dir:
             if suffix in {".docx", ".pptx"}:
                 command = self._office_cli_command(file_path, out_dir)
@@ -129,7 +144,18 @@ class MinerUClient:
             matches = sorted(Path(out_dir).rglob("*_content_list.json"))
             if not matches:
                 raise RuntimeError("MinerU Python API produced no content_list.json")
-            return json.loads(matches[0].read_text(encoding="utf-8"))
+            content_list = json.loads(matches[0].read_text(encoding="utf-8"))
+            images: dict[str, bytes] = {}
+            if want_images:
+                # Copy images out of the temp dir before it's destroyed
+                # (TemporaryDirectory tears down on context-manager exit).
+                for img in Path(out_dir).rglob("*"):
+                    if img.is_file() and img.parent.name == "images":
+                        try:
+                            images[img.name] = img.read_bytes()
+                        except OSError:
+                            pass
+            return content_list, images
 
     def _office_cli_command(self, file_path: str, out_dir: str) -> List[str]:
         # MinerU CLI 原生解析 office：mineru -p <file> -o <dir> -l <lang> -b <backend>
@@ -260,6 +286,44 @@ def _extract_content_list(payload: object) -> List[dict]:
                 if cl is not None:
                     return cl
     raise RuntimeError("MinerU response did not contain a content_list")
+
+
+def _decode_data_uri(value: str) -> bytes | None:
+    """data:image/xxx;base64,.... -> bytes; None if *value* isn't a data URI."""
+    if not isinstance(value, str) or not value.startswith("data:"):
+        return None
+    _, _, b64 = value.partition(",")
+    if not b64:
+        return None
+    try:
+        return base64.b64decode(b64)
+    except Exception:
+        return None
+
+
+def _extract_images(payload: object) -> dict[str, bytes]:
+    """Pull images out of a mineru-api response, keyed by basename (aligned
+    with content_list's img_path basenames). Returns {} if none are found --
+    image extraction is additive and must never raise."""
+    images: dict[str, bytes] = {}
+
+    def _harvest(images_field: object) -> None:
+        if isinstance(images_field, dict):
+            for path, val in images_field.items():
+                data = _decode_data_uri(val) if isinstance(val, str) else None
+                if data is None and isinstance(val, (bytes, bytearray)):
+                    data = bytes(val)
+                if data is not None:
+                    images[Path(str(path)).name] = data
+
+    if isinstance(payload, dict):
+        results = payload.get("results")
+        if isinstance(results, dict):
+            for value in results.values():
+                if isinstance(value, dict):
+                    _harvest(value.get("images"))
+        _harvest(payload.get("images"))
+    return images
 
 
 def _terminate_process(process: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
