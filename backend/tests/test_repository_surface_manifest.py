@@ -1960,6 +1960,22 @@ PAPER_META_STATUS_ALLOWED_NEW_MEMBERS = {
     "paper_meta_backfilling", "paper_meta_backfill_progress",
 }
 
+# Task 4 (paper-meta-status-dashboard): the new notebook_analytics()
+# paper_meta_counts test file constructs the real facade directly — same
+# SQLiteRepository(...)/repo.create_notebook(...)/repo._runtime.source_store
+# fixture shape as TASK3_PAPER_META_ALLOWED_MEMBER_FILES
+# (test_paper_meta_store.py) above. notebook_analytics itself is NOT a new
+# member (it already has tracked consumers in facade_surface.json — this
+# task only adds call sites there), so only the incidental fixture-plumbing
+# members are broadly file-allowed here.
+PAPER_META_STATUS_TASK4_ALLOWED_IMPORTS = {
+    ("backend/tests/test_analytics.py", 16, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+PAPER_META_STATUS_TASK4_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_analytics.py", name)
+    for name in {"SQLiteRepository", "create_notebook", "_runtime"}
+}
+
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
 # new close_local member + new test_sqlite_connection_reuse.py consumers.
 # close_local is a brand-new facade delegate (SqliteDatabase.close_local()
@@ -2425,6 +2441,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = (
     | TASK1_PAPER_META_ALLOWED_MEMBER_FILES
     | TASK3_PAPER_META_ALLOWED_MEMBER_FILES
     | TASK4_PAPER_META_ALLOWED_MEMBER_FILES
+    | PAPER_META_STATUS_TASK4_ALLOWED_MEMBER_FILES
 )
 
 # Broad member+file allowances are safe for tests and the three deliberately
@@ -3076,6 +3093,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in MERGE_DBS_ALLOWED_IMPORTS
                     or site in TASK2_SOURCE_ASSET_ALLOWED_IMPORTS
                     or site in TASK3_SOURCE_ASSET_ALLOWED_IMPORTS
+                    or site in PAPER_META_STATUS_TASK4_ALLOWED_IMPORTS
                 )
 
 

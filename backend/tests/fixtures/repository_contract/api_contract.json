@@ -3277,6 +3277,13 @@
               "title": "Low Rated Questions",
               "type": "array"
             },
+            "paper_meta_counts": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "title": "Paper Meta Counts",
+              "type": "object"
+            },
             "source_status_counts": {
               "additionalProperties": {
                 "type": "integer"
