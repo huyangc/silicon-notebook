@@ -540,15 +540,22 @@ def test_backfill_generation_guard_protects_foreign_entry(
 
 
 def test_backfill_emits_paper_meta_done_on_success(repo, notebook_id, service, monkeypatch):
-    """成功路径 finally 前 emit paper_meta_done（stored=N）+ mark_dirty。"""
+    """成功路径 emit paper_meta_done（stored=N）+ mark_dirty；且 building
+    entry 必须在 emit 之前就已经 pop 掉，否则 mark_dirty 用仍含 building
+    项的旧快照重算，铃铛会在 done toast 后瞬间又闪回"补全中"。"""
     _insert_source(repo, notebook_id, "src-x")
     repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
 
     events: list = []
     marked: list = []
+    progress_at_emit: list = []
     from app.services import pending_bus as pb_module
-    monkeypatch.setattr(pb_module.pending_bus, "emit",
-                        lambda uid, evt: events.append((uid, evt)))
+
+    def _emit(uid, evt):
+        progress_at_emit.append(repo.paper_meta_backfill_progress(notebook_id))
+        events.append((uid, evt))
+
+    monkeypatch.setattr(pb_module.pending_bus, "emit", _emit)
     monkeypatch.setattr(pb_module.pending_bus, "mark_dirty",
                         lambda uid: marked.append(uid))
     service.backfill_paper_metadata(notebook_id)
@@ -557,6 +564,8 @@ def test_backfill_emits_paper_meta_done_on_success(repo, notebook_id, service, m
     assert done[0]["notebook_id"] == notebook_id
     assert done[0]["stored"] >= 1
     assert len(marked) >= 1
+    # entry 必须在 emit 那一刻已经被 pop（成功路径清状态先于通知）
+    assert progress_at_emit == [None]
 
 
 def test_backfill_no_done_on_zero_queue(repo, notebook_id, monkeypatch):

@@ -1245,14 +1245,29 @@ class SourceIngestionService:
             )
             stored = int(counts.get("stored", 0))
             if stored > 0:
+                # 先 pop 本次 building entry 再通知，对照
+                # scale_artifact_runtime.notify_index_done 的模板（状态先清
+                # 后通知）；否则 _notify_paper_meta_done 里的 mark_dirty 会
+                # 用仍含 building 项的旧快照重算，铃铛在 done toast 后瞬间又
+                # 闪回"补全中"，直到端点侧 notify_pending=True 的 mark_dirty
+                # 才补救。
+                self._pop_backfilling(notebook_id, my_gen)
                 self._notify_paper_meta_done(notebook_id, nb_row, stored)
             return counts
         finally:
-            # 只 pop 属于本次调用 gen 的 entry；后来者已覆盖时先来者不动手
-            with self._paper_meta_backfilling_lock:
-                entry = self._paper_meta_backfilling.get(notebook_id)
-                if entry is not None and entry.get("_gen") == my_gen:
-                    self._paper_meta_backfilling.pop(notebook_id, None)
+            # 异常路径兜底清理。成功路径已在通知前提前 pop 过，这里对同一
+            # gen 是幂等 no-op（entry 已不在，guard 直接跳过）。
+            self._pop_backfilling(notebook_id, my_gen)
+
+    def _pop_backfilling(self, notebook_id: str, my_gen: int) -> None:
+        """只 pop 属于 my_gen 世代的 entry；后来者已覆盖时（entry 的 _gen
+        不匹配）不动手，与旧 finally 内联逻辑等价。成功路径与 finally 共用
+        本方法：成功路径在通知前调用一次清空 building 状态，finally 收尾时
+        对同一 gen 变成幂等 no-op；异常路径下只有 finally 调用，照常兜底。"""
+        with self._paper_meta_backfilling_lock:
+            entry = self._paper_meta_backfilling.get(notebook_id)
+            if entry is not None and entry.get("_gen") == my_gen:
+                self._paper_meta_backfilling.pop(notebook_id, None)
 
     def _notify_paper_meta_done(
         self, notebook_id: str, nb_row: Any, stored: int
