@@ -471,22 +471,32 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
     _sched.configure(job_workers=max(1, workers))
 
     files = list(files)
-    res = {"new": 0, "resumed": 0, "extracted": 0, "failed": 0,
+    res = {"new": 0, "resumed": 0, "reparsed": 0, "extracted": 0, "failed": 0,
            "clusters": 0, "nodes_embedded": 0}
     try:
-        # ── 分两批:新文件 vs 已 parse 缺 KG 的续抽源 ─────────────────────────────
+        # ── 分三批:新文件 / 已 parse 缺 KG 补抽 / 已存在但无 elements 需重新 parse ──
+        # 关键:用「有没有 elements」而非「有没有 KG」判定是否已 parse。一个已建、
+        # parse_status 看似前进、却没有 source_elements 的源(上次 parse 中断/未落地),
+        # 若只走 extract_source 补抽,build_records 的接地校验没有 element 可对照 →
+        # LLM 抽出的节点被整源丢弃 → objects=0,且重跑多少次都修不好(每次都空抽)。
         kgful = repo.maintenance.kg_covered_source_ids(notebook_id)
+        parsed = repo.maintenance.sources_with_elements(notebook_id)
         new_files: List[Path] = []
         resume_sids: List[str] = []
+        reparse_sids: List[str] = []
         for p in files:
             sid = source_id_by_hash(repo, notebook_id, sha256_bytes(p.read_bytes()))
             if sid is None:
                 new_files.append(p)
-            elif sid not in kgful:        # 已 parse、缺 KG → 只需补抽
+            elif sid in kgful:
+                pass                      # 已有 KG → 跳过(幂等,既不新建也不重抽)
+            elif sid in parsed:           # 已 parse(有 elements)、缺 KG → 只需补抽
                 resume_sids.append(sid)
-            # else: 已有 KG → 跳过(幂等,既不新建也不重抽)
+            else:                         # 已存在但无 elements → 必须重新 parse(否则空抽)
+                reparse_sids.append(sid)
         res["new"] = len(new_files)
         res["resumed"] = len(resume_sids)
+        res["reparsed"] = len(reparse_sids)
 
         # ── 提交并发 job、收集 futures ───────────────────────────────────────────
         futs = {}
@@ -501,6 +511,8 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
                  for p in new_files],
                 scheduler=_sched,                 # 每个新 source 作为 process_source job 并发
             )
+        for sid in reparse_sids:
+            futs[submit_job(repo.process_source, sid)] = sid   # 重新 parse 补 elements(+extract)
         for sid in resume_sids:
             futs[submit_job(repo.extract_source, sid)] = sid   # 只补抽 KG,不 embed
 
@@ -546,6 +558,72 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
         repo.settings.kg_incremental_fusion_enabled = orig_fusion
         repo.settings.embed_concurrency = orig_embed_conc
     return res
+
+
+def run_reparse(repo: BatchIngestRepository, notebook_id: str,
+                limit: int | None = None, conc: int = 4,
+                log: LogFn | None = None, report_interval: int = 15,
+                no_rebuild: bool = False) -> dict[str, int]:
+    """对 notebook 内无 source_elements(未成功 parse)的存量源重跑 process_source 补
+    elements,收尾一次 rebuild_unified_kg。
+
+    修复历史 run_all resume 分流的存量:一个已建、parse_status 看似前进却没有
+    source_elements 的源(上次 parse 中断/未落地),旧 run_all 会当成「已 parse、缺 KG」
+    直接 extract_source 空抽——build_records 的接地校验没有 element 可对照 → LLM 抽出的
+    节点被整源丢弃 → objects=0,且直接重抽永远补不出 KG。必须重新 parse 生成 elements。
+    跨源并发提交到 KG job 池。有 elements 的源自动跳过(幂等)。"""
+    from app.services.kg import scheduler as _sched_mod
+    from app.services.kg.scheduler import submit_job
+
+    log = log or (lambda _e: None)
+    orig_auto = repo.settings.kg_auto_extract
+    orig_embed_conc = repo.settings.embed_concurrency
+    repo.settings.kg_auto_extract = True                 # process_source 走到 extract
+    repo.settings.embed_concurrency = conc
+    _sched_mod.configure(job_workers=max(1, conc))
+
+    res = {"reparsed": 0, "failed": 0, "clusters": 0, "nodes_embedded": 0}
+    try:
+        mnt = repo.maintenance
+        parsed = mnt.sources_with_elements(notebook_id)
+        targets = [s for s in mnt.source_ids(notebook_id) if s not in parsed]
+        if limit is not None:
+            targets = targets[:max(0, limit)]
+        res["targets"] = len(targets)
+        if not targets:
+            print("reparse: 无缺 elements 的源,跳过", flush=True)
+            return res
+
+        futs = {submit_job(repo.process_source, sid): sid for sid in targets}
+        total = len(futs)
+        with _PoolReporter(report_interval, total=total, log=log) as reporter:
+            for i, fut in enumerate(as_completed(futs), 1):
+                sid = futs[fut]
+                try:
+                    fut.result()
+                    res["reparsed"] += 1
+                    print(f"[reparse {i}/{total}] {sid} ✓", flush=True)
+                    log({"phase": "reparse", "source_id": sid, "status": "ok", "progress": f"{i}/{total}"})
+                except Exception as exc:   # noqa: BLE001 — 单源失败隔离
+                    res["failed"] += 1
+                    print(f"[reparse {i}/{total}] {sid} ✗ {type(exc).__name__}: {exc}", flush=True)
+                    log({"phase": "reparse", "source_id": sid, "status": "failed", "error": str(exc)})
+                reporter.done = i
+
+        if no_rebuild:
+            return res
+        print("rebuild: 跨文档聚类中(概念多时较慢,无输出≠卡死)…", flush=True)
+        with _PoolReporter(report_interval, total=0, log=log, label="rebuild 阶段"):
+            clusters = repo.rebuild_unified_kg(notebook_id, progress=_rebuild_progress,
+                                               force=False, fresh=False)
+            res["clusters"] = clusters
+            log({"phase": "reparse", "status": "rebuilt", "clusters": clusters})
+            print(f"rebuild done: clusters={clusters};补 KG 节点向量…", flush=True)
+            res["nodes_embedded"] = backfill_node_embeddings(repo, notebook_id, conc)
+        return res
+    finally:
+        repo.settings.kg_auto_extract = orig_auto
+        repo.settings.embed_concurrency = orig_embed_conc
 
 
 def run_index(repo: BatchIngestRepository, notebook_id: str) -> dict[str, int]:
@@ -908,7 +986,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="batch_ingest", description="离线批量摄取目录 → 项目 KG/向量库")
     p.add_argument("phase", choices=["ingest", "kg", "index", "all", "embed", "vectors-to-blob",
-                                      "backfill-source-index", "metadata"])
+                                      "backfill-source-index", "metadata", "reparse"])
     p.add_argument("--input-dir", type=Path, help="递归扫描的根目录(ingest/all 必填)")
     p.add_argument("--notebook-id", default=None, help="目标 notebook;省略则新建")
     p.add_argument("--all-notebooks", action="store_true",
@@ -926,9 +1004,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="embedding 并发(覆盖 EMBED_CONCURRENCY;all 阶段峰值≈workers×此值,"
                         "注意 429)。默认 4")
     p.add_argument("--limit", type=int, default=None,
-                   help="kg 阶段只抽前 N 个未抽源(仅限制本次抽取数量;最终 rebuild 仍覆盖全本 notebook)")
+                   help="kg 阶段只抽前 N 个未抽源 / reparse 阶段只处理前 N 个缺 elements 源"
+                        "(仅限制本次数量;最终 rebuild 仍覆盖全本 notebook)")
     p.add_argument("--no-rebuild", action="store_true",
-                   help="kg 阶段:只抽取,跳过 rebuild_unified_kg 和 scale index。"
+                   help="kg/reparse 阶段:只抽取/重解析,跳过收尾 rebuild_unified_kg 和 scale index。"
                         "大批量分批抽取用法:重复 'kg --limit N --no-rebuild',最后一次 'kg --rebuild-only'。")
     p.add_argument("--rebuild-only", action="store_true",
                    help="kg 阶段:跳过抽取,直接 rebuild_unified_kg + 节点向量 + scale index(base tier 时)。")
@@ -966,6 +1045,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.phase == "embed" and not args.notebook_id:
         print("error: --notebook-id required for embed (specify the notebook to backfill vectors)",
+              file=sys.stderr)
+        return 2
+
+    if args.phase == "reparse" and not args.notebook_id:
+        print("error: --notebook-id required for reparse (specify the notebook to re-parse)",
               file=sys.stderr)
         return 2
 
@@ -1064,6 +1148,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                    no_rebuild=no_rebuild, rebuild_only=rebuild_only, fresh=fresh,
                    report_interval=args.pool_report_interval)
         print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+
+    if args.phase == "reparse":
+        no_rebuild = getattr(args, "no_rebuild", False)
+        print(f"phase=reparse limit={args.limit} no_rebuild={no_rebuild}", flush=True)
+        _t = time.perf_counter()
+        r = run_reparse(repo, notebook_id, limit=args.limit, conc=args.embed_conc, log=log,
+                        no_rebuild=no_rebuild, report_interval=args.pool_report_interval)
+        print(f"reparse done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
 
     if args.phase == "index":
         print(f"phase=index notebook={notebook_id}", flush=True)

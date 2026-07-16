@@ -213,6 +213,22 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             }
 
+    def sources_with_elements(self, notebook_id: str) -> set:
+        """该 notebook 下已产出 source_elements(即已成功 parse)的 source_id 集合。
+        run_all 用它区分「已 parse、缺 KG → extract_source 补抽」与「无 elements →
+        必须 process_source 重新 parse」:无 elements 的源若被空抽,build_records 的
+        接地校验没有 element 可对照,LLM 抽出的节点会被整源丢弃、objects=0。"""
+        with self._runtime.database.connect() as db:
+            return {
+                r["source_id"]
+                for r in db.execute(
+                    "SELECT DISTINCT e.source_id FROM source_elements e "
+                    "JOIN sources s ON s.id = e.source_id "
+                    "WHERE s.notebook_id = ?",
+                    (notebook_id,),
+                ).fetchall()
+            }
+
     def count_sources_missing_kg(self, notebook_id: str) -> int:
         with self._runtime.database.connect() as db:
             return db.execute(
