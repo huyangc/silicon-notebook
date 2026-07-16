@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import threading
+import weakref
 from typing import Any, Callable
 
 from app.core import ask_context
@@ -585,6 +586,17 @@ class RepositoryRuntime:
         # set_promotion_service call in wire_knowledge_lifecycle.
         if self.memory_service is not None:
             self.memory_service.set_memory_kg_service(self.source_ingestion)
+        # paper-meta backfill status (Task 2): get_notebook reflects the
+        # in-process _paper_meta_backfilling dict into NotebookSummary the
+        # same way it reflects kg_building — catalog needs a live reference,
+        # set here (mirrors the catalog.memory_retriever wiring in wire_memory
+        # above; self.catalog is constructed eagerly, before source_ingestion
+        # exists, so this can't be a constructor arg). WEAKREF, not a strong
+        # ref: SourceIngestionService closes over the facade for its own
+        # wiring, so a strong ref here would let anything that transitively
+        # holds `catalog` (e.g. ScaleArtifactRuntime) keep the whole facade
+        # alive — see test_scale_artifact_runtime's retention tests.
+        self.catalog.source_ingestion = weakref.ref(self.source_ingestion)
         return self.source_ingestion
 
     def wire_kg_mutations(
