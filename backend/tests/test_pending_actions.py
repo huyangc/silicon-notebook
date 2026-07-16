@@ -224,3 +224,34 @@ def test_pending_actions_paper_meta_per_user_filter(repo):
     finally:
         with svc._paper_meta_backfilling_lock:
             svc._paper_meta_backfilling.pop(nb, None)
+
+
+def test_pending_actions_paper_meta_survives_index_status_failure(repo, monkeypatch):
+    """索引态查询抛异常时,paper_meta 项仍应出现(scope-widening 回归守卫:
+    确保一个 notebook 的 scale_runtime.status() 失败不会顺带吞掉同一个 notebook
+    的 paper_meta 项——旧实现里 `except: continue` 会把两者一起跳过)。"""
+    nb = _seed_user_nb(repo, "user-a")
+    runtime = repo.__dict__["_runtime"]
+
+    def _boom(notebook_id):
+        raise RuntimeError("scale status unavailable")
+
+    monkeypatch.setattr(runtime.scale_artifacts, "status", _boom)
+
+    svc = runtime.source_ingestion
+    with svc._paper_meta_backfilling_lock:
+        svc._paper_meta_backfilling[nb] = {"total": 3, "done": 1}
+    try:
+        out = runtime.pending_actions_service.list_for_user("user-a")
+        pm = [i for i in out["items"] if i["type"] == "paper_meta"]
+        assert len(pm) == 1
+        assert pm[0]["state"] == "building"
+        assert pm[0]["notebook_id"] == nb
+        assert pm[0]["progress"] == {"done": 1, "total": 3}
+        # index 分支因 status 抛异常而不产出该 nb 的 index 项
+        assert not any(
+            i["type"] == "index" and i["notebook_id"] == nb for i in out["items"]
+        )
+    finally:
+        with svc._paper_meta_backfilling_lock:
+            svc._paper_meta_backfilling.pop(nb, None)
