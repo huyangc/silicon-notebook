@@ -31,10 +31,13 @@ export type Snapshot = { count: number; items: PendingItem[] };
 
 // 完成事件 → toast 文案分派表。index_done 与既有硬编码文案保持字节级一致(向后兼容，
 // 见 PendingToast 渲染处的回落文案)；paper_meta_done 补充对应文案。
-const DONE_MESSAGES: Record<string, (msg: any) => string> = {
-  index_done: (m) => `「${m.notebook_name || ""}」索引构建完成,点击查看`,
-  paper_meta_done: (m) => `「${m.notebook_name || "该笔记本"}」论文信息补全完成,已补全 ${m.stored ?? 0} 篇,点击查看`,
-};
+// 用 Map 而非对象字面量:分派键是后端下发的字符串 msg.event,若某天撞上 Object.prototype
+// 成员名(toString/constructor 等),对象字面量的 [key] 查找会命中原型链函数而非 undefined
+// (原型污染式误判);Map.has/get 只认自有键,天然免疫。
+const DONE_MESSAGES = new Map<string, (msg: any) => string>([
+  ["index_done", (m) => `「${m.notebook_name || ""}」索引构建完成,点击查看`],
+  ["paper_meta_done", (m) => `「${m.notebook_name || "该笔记本"}」论文信息补全完成,已补全 ${m.stored ?? 0} 篇,点击查看`],
+]);
 
 export function usePendingActions(enabled: boolean) {
   const [snapshot, setSnapshot] = useState<Snapshot>({ count: 0, items: [] });
@@ -44,8 +47,14 @@ export function usePendingActions(enabled: boolean) {
   const retryRef = useRef(0);
   const stoppedRef = useRef(false);
 
-  const dismissDone = useCallback((notebook_id: string) => {
-    setDoneItems((xs) => xs.filter((d) => d.notebook_id !== notebook_id));
+  // kind 可选:省略时保持「清掉该 notebook 全部 done」旧语义(dismissAll / 小节「×」用);
+  // 传 kind 时只清该 notebook 的这一种完成事件——因为本 diff 允许同一 notebook 的
+  // index_done 与 paper_meta_done 并存,单条「×」若按 notebook_id 一刀切会连带清掉另
+  // 一条(doneItems 是纯内存 SSE 态、无持久化,未读的那条就永久丢了)。
+  const dismissDone = useCallback((notebook_id: string, kind?: string) => {
+    setDoneItems((xs) => xs.filter((d) =>
+      d.notebook_id !== notebook_id || (kind !== undefined && d.kind !== kind)
+    ));
   }, []);
 
   useEffect(() => {
@@ -91,13 +100,13 @@ export function usePendingActions(enabled: boolean) {
             try { msg = JSON.parse(line); } catch { continue; }
             if (msg.kind === "snapshot") {
               setSnapshot(msg.data as Snapshot);
-            } else if (msg.kind === "event" && msg.event && DONE_MESSAGES[msg.event]) {
+            } else if (msg.kind === "event" && msg.event && DONE_MESSAGES.has(msg.event)) {
               const d: DoneToast = {
                 notebook_id: msg.notebook_id,
                 notebook_name: msg.notebook_name || "",
                 ts: Date.now(),
                 kind: msg.event,
-                text: DONE_MESSAGES[msg.event](msg),
+                text: DONE_MESSAGES.get(msg.event)!(msg),
               };
               // 去重键含 kind:同一 notebook 的 index_done 与 paper_meta_done 各自独立展示，
               // 互不覆盖(旧逻辑仅按 notebook_id 去重，会丢掉先到的另一种完成事件)。
@@ -125,7 +134,7 @@ export function PendingBell(props: {
   userId?: string;
   onOpenItem: (item: PendingItem) => void;
   onOpenDone: (d: DoneToast) => void;
-  onDismissDone: (notebook_id: string) => void;
+  onDismissDone: (notebook_id: string, kind?: string) => void;
 }) {
   const { snapshot, doneItems, userId, onOpenItem, onOpenDone, onDismissDone } = props;
   const [open, setOpen] = useState(false);
@@ -266,10 +275,10 @@ export function PendingBell(props: {
                       onClick={() => view.visibleDone.forEach((d) => onDismissDone(d.notebook_id))}>×</span>
               </div>
               {view.visibleDone.map((d) => (
-                <button className="pending-row pending-row-done" key={d.notebook_id}
-                        onClick={() => { setOpen(false); onOpenDone(d); onDismissDone(d.notebook_id); }}>
+                <button className="pending-row pending-row-done" key={`${d.notebook_id}:${d.kind ?? ""}`}
+                        onClick={() => { setOpen(false); onOpenDone(d); onDismissDone(d.notebook_id, d.kind); }}>
                   <span className="pending-row-main"><span className="pending-row-label">{d.notebook_name} · {d.kind === "paper_meta_done" ? "论文信息补全完成" : "索引构建完成"}</span></span>
-                  <span className="pending-row-x" title="关掉" onClick={(e) => { e.stopPropagation(); onDismissDone(d.notebook_id); }}>×</span>
+                  <span className="pending-row-x" title="关掉" onClick={(e) => { e.stopPropagation(); onDismissDone(d.notebook_id, d.kind); }}>×</span>
                 </button>
               ))}
             </div>

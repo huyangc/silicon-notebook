@@ -43,3 +43,31 @@ test("currentSigs + pruneSigs bound the stored set to what is present now", () =
   // 旧签名(gov 334 被计数变化淘汰、以及已消失项)从存储里剪掉
   assert.deepEqual(pruneSigs(["gov:nb2:merge:334", "gov:nb2:merge:300", "stale"], cur), ["gov:nb2:merge:334"]);
 });
+
+// --- paper_meta / kind-aware done 覆盖(本 diff 新增分支) --------------------
+
+test("itemSig: paper_meta and index on the same notebook do not collide", () => {
+  const pm = { type: "paper_meta", notebook_id: "nbX", notebook_name: "X", state: "building" };
+  const ix = { type: "index", notebook_id: "nbX", notebook_name: "X", state: "building" };
+  assert.equal(itemSig(pm), "paper_meta:nbX:building");
+  assert.notEqual(itemSig(pm), itemSig(ix)); // 同 notebook、不同类型 → 不撞签名
+});
+
+test("doneSig: kind distinguishes the two completion events; omitting kind is backward-compatible", () => {
+  assert.equal(doneSig("nb"), "done:nb");                                  // 旧签名(kind 省略)
+  assert.equal(doneSig("nb", "paper_meta_done"), "done:nb:paper_meta_done");
+  assert.notEqual(doneSig("nb", "paper_meta_done"), doneSig("nb", "index_done")); // 两种完成事件不撞
+});
+
+test("mixed-kind done items on one notebook are signed and counted independently", () => {
+  const done = [
+    { notebook_id: "nbM", notebook_name: "M", ts: 1, kind: "index_done" },
+    { notebook_id: "nbM", notebook_name: "M", ts: 2, kind: "paper_meta_done" },
+  ];
+  // 同 notebook 两种 done 各自独立签名(不被折叠成一个)
+  assert.deepEqual(currentSigs([], done), ["done:nbM:index_done", "done:nbM:paper_meta_done"]);
+  // 都未读 → unread 记 2(不是 1)
+  assert.equal(pendingView([], done, [], []).unread, 2);
+  // 只把 index_done 标为已读 → 仅 paper_meta_done 仍未读
+  assert.equal(pendingView([], done, [doneSig("nbM", "index_done")], []).unread, 1);
+});
