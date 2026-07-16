@@ -80,6 +80,7 @@ import {
   resolveRowTitleText,
   appendRowOptimistically,
 } from "./knowhow-panel-logic.ts";
+import { groupRowsByAnchor, computeGridSpans } from "./knowhow-grouping-logic.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
 import { rowFallbackTitle } from "./knowhow-cell-editor-logic.ts";
 import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
@@ -1431,6 +1432,15 @@ export function KnowhowPanel({
           font-weight: 400;
         }
 
+        /* G2 合并矩阵（规格 §4.2.1）：rowspan 起始格用 --soft 弱底色与四周
+           独立格区分，纵向居中避免多行合并后内容贴顶——沿用本文件既有的
+           CSS 变量令牌，不额外引入硬编码色值/暗色媒体查询（本应用当前无
+           暗色主题，--soft 由全局 :root 统一定义，天然随主题走）。 */
+        .knowhow-cell-merged {
+          background: var(--soft);
+          vertical-align: middle;
+        }
+
         /* 行详情抽屉——分节「编辑」按钮（Task 7：每节打开同一个格子浮窗的
            编辑态）。 */
         .knowhow-drawer-edit-button {
@@ -2320,6 +2330,15 @@ function KnowhowTableGrid({
   const orderedColumns = useMemo(() => (detail ? orderColumnsForGrid(detail.columns) : []), [detail]);
   const filteredRows = useMemo(() => (detail ? filterRows(detail.rows, query) : []), [detail, query]);
 
+  // 有 anchor 列 → 分组合并矩阵渲染（spec §4.2 G2）；无 anchor（记录型表）
+  // → gridDisplayRows 为 null，<tbody> 落回原平铺渲染，零改动（spec §4.2.3）。
+  const anchorColumnId = detail?.anchorColumnId ?? null;
+  const gridDisplayRows = useMemo(() => {
+    if (!anchorColumnId) return null;
+    const groups = groupRowsByAnchor(filteredRows, anchorColumnId);
+    return computeGridSpans(groups, orderedColumns);
+  }, [anchorColumnId, filteredRows, orderedColumns]);
+
   return (
     <div className="knowhow-grid-view">
       <div className="knowhow-grid-toolbar">
@@ -2459,47 +2478,96 @@ function KnowhowTableGrid({
                 </tr>
               </thead>
               <tbody>
-                {filteredRows.map((row) => (
-                  <tr key={row.id}>
-                    {orderedColumns.map((column, index) => {
-                      const text = cellSummary(row.cells[column.id] ?? "");
-                      const filled = Boolean(text);
-                      // 行标题列（网格首列，规格②路A）填了内容后仍走既有的
-                      // 整行抽屉入口（规格⑤「点行首/概念列打开」）；空的话
-                      // 直接进格子编辑态更有引导性（规格②路A「空格子直接进
-                      // 编辑态」），而不是打开一个几乎全空的抽屉。其余列
-                      // （或空的行标题列）一律走格子浮窗，由 panel 按内容
-                      // 有无决定预览/编辑。空格 + 只读成员没有可点的入口
-                      // （规格⑦「只读成员可看」——没什么可填，也没什么可读）。
-                      const opensRowDrawer = index === 0 && filled;
-                      const clickable = opensRowDrawer || filled || canEdit;
-                      return (
-                        <td key={column.id}>
-                          {clickable ? (
-                            <button
-                              type="button"
-                              className={`knowhow-cell-open${filled ? "" : " knowhow-cell-open--empty"}`}
-                              onClick={() => (opensRowDrawer ? onOpenRow(row.id) : onOpenCell(row.id, column.id))}
-                              title={filled ? text : "点击填写这一格"}
-                            >
-                              {filled ? text : "+"}
-                            </button>
-                          ) : (
-                            <span className="knowhow-cell-text">—</span>
-                          )}
-                        </td>
-                      );
-                    })}
-                    <td>
-                      <ProjectionStatusBadge
-                        status={row.projectionStatus}
-                        canRetry={canEdit}
-                        onRetry={onRetryReproject}
-                        retrying={retryingReproject}
-                      />
-                    </td>
-                  </tr>
-                ))}
+                {gridDisplayRows === null ? (
+                  // 记录型表（无 anchor 列）：原平铺渲染，逐物理行展开，
+                  // 一行代码都不动——逻辑与改动前完全一致（规格 §4.2.3）。
+                  filteredRows.map((row) => (
+                    <tr key={row.id}>
+                      {orderedColumns.map((column, index) => {
+                        const text = cellSummary(row.cells[column.id] ?? "");
+                        const filled = Boolean(text);
+                        // 行标题列（网格首列，规格②路A）填了内容后仍走既有的
+                        // 整行抽屉入口（规格⑤「点行首/概念列打开」）；空的话
+                        // 直接进格子编辑态更有引导性（规格②路A「空格子直接进
+                        // 编辑态」），而不是打开一个几乎全空的抽屉。其余列
+                        // （或空的行标题列）一律走格子浮窗，由 panel 按内容
+                        // 有无决定预览/编辑。空格 + 只读成员没有可点的入口
+                        // （规格⑦「只读成员可看」——没什么可填，也没什么可读）。
+                        const opensRowDrawer = index === 0 && filled;
+                        const clickable = opensRowDrawer || filled || canEdit;
+                        return (
+                          <td key={column.id}>
+                            {clickable ? (
+                              <button
+                                type="button"
+                                className={`knowhow-cell-open${filled ? "" : " knowhow-cell-open--empty"}`}
+                                onClick={() => (opensRowDrawer ? onOpenRow(row.id) : onOpenCell(row.id, column.id))}
+                                title={filled ? text : "点击填写这一格"}
+                              >
+                                {filled ? text : "+"}
+                              </button>
+                            ) : (
+                              <span className="knowhow-cell-text">—</span>
+                            )}
+                          </td>
+                        );
+                      })}
+                      <td>
+                        <ProjectionStatusBadge
+                          status={row.projectionStatus}
+                          canRetry={canEdit}
+                          onRetry={onRetryReproject}
+                          retrying={retryingReproject}
+                        />
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  // 有 anchor 列：G2 合并矩阵——同概念内相邻同值列合并成一个
+                  // rowspan 起始格（规格 §4.2.1），rowSpan===0 的格被上方合并
+                  // 格覆盖、渲染跳过。点击仍落到该格所属的具体物理行（合并格
+                  // 批量写回整组是后续 task 的编辑增强，此处先保证显示正确、
+                  // 复用现有 onOpenCell 单格写入路径，行为不倒退）。
+                  gridDisplayRows.map(({ row, cells }) => (
+                    <tr key={row.id}>
+                      {cells.map((cell) => {
+                        if (cell.rowSpan === 0) return null;
+                        const text = cellSummary(cell.text);
+                        const filled = Boolean(text);
+                        const clickable = filled || canEdit;
+                        const merged = cell.rowSpan > 1;
+                        return (
+                          <td
+                            key={cell.columnId}
+                            rowSpan={merged ? cell.rowSpan : undefined}
+                            className={merged ? "knowhow-cell-merged" : undefined}
+                          >
+                            {clickable ? (
+                              <button
+                                type="button"
+                                className={`knowhow-cell-open${filled ? "" : " knowhow-cell-open--empty"}`}
+                                onClick={() => onOpenCell(row.id, cell.columnId)}
+                                title={filled ? text : "点击填写这一格"}
+                              >
+                                {filled ? text : "+"}
+                              </button>
+                            ) : (
+                              <span className="knowhow-cell-text">—</span>
+                            )}
+                          </td>
+                        );
+                      })}
+                      <td>
+                        <ProjectionStatusBadge
+                          status={row.projectionStatus}
+                          canRetry={canEdit}
+                          onRetry={onRetryReproject}
+                          retrying={retryingReproject}
+                        />
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
             {filteredRows.length === 0 && (
