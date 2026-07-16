@@ -95,6 +95,123 @@ def test_parse_grid_xlsx_non_string_cells_are_stringified():
     assert grid.rows == [["widget", "42", "3.5"]]
 
 
+# --- parse_grid: xlsx merged-cell expansion -------------------------------
+# openpyxl's iter_rows(values_only=True) 只在合并区左上角返回值、其余单元
+# 格返回 None。用户在 Excel 里做的合并（横向标题跨列、竖向分组头跨行）
+# 不展开时会被解析成一大片空——表头会重复列名（多空串），数据会掉大量非
+# 空行。grid_parser 的合并展开规则：把左上角值 fill 到该合并区覆盖的每一
+# 个单元格，让解析器看到的形状与人肉读 Excel 一致。
+
+
+def test_parse_grid_xlsx_horizontal_merge_in_header_expands():
+    # 表头一横排合并（比如「上传时间」下压合并成一个大标题覆盖 3 列）：
+    # 展开后每列都拿到相同的表头名——`_build_grid` 的「表头重复列名」守卫
+    # 仍然会驳回它（这才是正确行为，防止用户误传合并的表头当成多列），
+    # 本用例只验证「合并被 fill 了、没有静默空串列」。
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["date", None, None])
+    ws.append(["2024-01", "2024-02", "2024-03"])
+    ws.merge_cells("A1:C1")
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    with pytest.raises(GridParseError) as info:
+        parse_grid("rules.xlsx", buf.getvalue())
+    # 保证不是「空列名」错误——合并已展开成同名列，才走「重复列名」分支。
+    assert "重复" in str(info.value)
+    assert "date" in str(info.value)
+
+
+def test_parse_grid_xlsx_horizontal_merge_in_data_row_fills_across():
+    # 数据行里横向合并——例如一个案例的某个字段值太长，用户在 Excel 里
+    # 把它跨列写；展开后该值应出现在覆盖的所有列上（下游 UI 消费时按列
+    # 取值仍然拿得到，不因合并而丢失）。
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["violation", "phase-a", "phase-b", "phase-c"])
+    ws.append(["hold&setup", "shared_root_cause", None, None])
+    ws.merge_cells("B2:D2")
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    grid = parse_grid("rules.xlsx", buf.getvalue())
+
+    assert grid.columns == ["violation", "phase-a", "phase-b", "phase-c"]
+    assert grid.rows == [["hold&setup", "shared_root_cause", "shared_root_cause", "shared_root_cause"]]
+
+
+def test_parse_grid_xlsx_vertical_merge_in_column_fills_down():
+    # 竖向合并——典型来自用户表的「转置后」形态：多行案例共享同一个
+    # 「违例概念」值（原表是横向合并做主题头，用户手动转置后变成竖向
+    # 合并）。展开后 4 行都应拿到同样的概念名，UI 才能把它们当成同族案
+    # 例正常显示。
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["violation", "symptom", "fix"])
+    ws.append(["hold&setup", "case-A symptom", "case-A fix"])
+    ws.append([None, "case-B symptom", "case-B fix"])
+    ws.append([None, "case-C symptom", "case-C fix"])
+    ws.append([None, "case-D symptom", "case-D fix"])
+    ws.merge_cells("A2:A5")
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    grid = parse_grid("rules.xlsx", buf.getvalue())
+
+    assert grid.columns == ["violation", "symptom", "fix"]
+    assert grid.rows == [
+        ["hold&setup", "case-A symptom", "case-A fix"],
+        ["hold&setup", "case-B symptom", "case-B fix"],
+        ["hold&setup", "case-C symptom", "case-C fix"],
+        ["hold&setup", "case-D symptom", "case-D fix"],
+    ]
+
+
+def test_parse_grid_xlsx_multiple_merges_coexist():
+    # 一张表里同时存在多个合并区（横+竖）——展开互不干扰，每个区各自
+    # 按左上角 fill 自己的覆盖范围。
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["group", "a", "b", "c"])
+    ws.append(["G1", "x1", None, None])  # B2:D2 横向合并
+    ws.append([None, "x2", "y2", "z2"])  # A2:A3 竖向合并
+    ws.merge_cells("B2:D2")
+    ws.merge_cells("A2:A3")
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    grid = parse_grid("rules.xlsx", buf.getvalue())
+
+    assert grid.columns == ["group", "a", "b", "c"]
+    assert grid.rows == [
+        ["G1", "x1", "x1", "x1"],
+        ["G1", "x2", "y2", "z2"],
+    ]
+
+
+def test_parse_grid_xlsx_rectangular_merge_fills_all_cells():
+    # 矩形合并区（跨多行且跨多列）——覆盖范围内每一格都填左上角值，
+    # 不只是边缘或对角线。
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["h1", "h2", "h3", "h4"])
+    ws.append(["a", "shared", None, None])
+    ws.append(["b", None, None, "b4"])
+    ws.append(["c", None, None, "c4"])
+    ws.merge_cells("B2:C4")  # 3 行 × 2 列
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    grid = parse_grid("rules.xlsx", buf.getvalue())
+
+    assert grid.rows == [
+        ["a", "shared", "shared", ""],
+        ["b", "shared", "shared", "b4"],
+        ["c", "shared", "shared", "c4"],
+    ]
+
+
 # --- parse_grid: csv ------------------------------------------------------
 
 
