@@ -24,6 +24,7 @@ export type NotebookSummary = {
   access?: "owner" | "reader";
   shared_from?: string;
   is_shared?: boolean;
+  paper_meta_backfilling?: boolean;
 };
 
 export type MemoryOrigin = "ask_answer" | "external_agent";
@@ -138,6 +139,7 @@ export type SourceSummary = {
   pub_year?: number | null;
   venue?: string | null;
   paper_meta?: PaperMeta | null;
+  paper_meta_status?: "has_meta" | "not_paper" | "missing" | null;
 };
 
 export type PaginatedSources = {
@@ -325,6 +327,7 @@ export type NotebookAnalytics = {
   candidate_counts: Record<string, number>;
   knowledge_counts: Record<string, number>;
   source_status_counts: Record<string, number>;
+  paper_meta_counts?: { has_meta: number; marker: number; missing: number };
 };
 
 export type KnowledgeNode = { id: string; object_type: string; headline: string; status: string };
