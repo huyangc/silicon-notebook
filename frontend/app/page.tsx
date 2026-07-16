@@ -995,6 +995,32 @@ export default function Home() {
     }, 20 * 60 * 1000);
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
   }, [buildingKg, currentNotebookId, analytics]);
+  // Backfill completion polling: same shape as the buildingKg poll above, for the
+  // "补全论文信息"后台任务(paper-meta backfill)。同样在「索引与构建」面板打开时让位
+  // (该面板本就不覆盖 paper_meta,不存在重复轮询的问题——只是保持与既有三条 legacy
+  // poll 一致的让位约定)。完工不弹 toast：那是待确认中心铃铛(paper_meta_done 事件)
+  // 的职责,本 effect 只负责本页仍开着时把按钮文案 / 来源徽章刷新为最新态。
+  useEffect(() => {
+    if (!backfillingMeta || !currentNotebookId || analytics) return;
+    const nb = currentNotebookId;
+    let cancelled = false;
+    const poll = window.setInterval(async () => {
+      try {
+        const refreshed = await api<NotebookSummary>(`/notebooks/${nb}`);
+        if (cancelled) return;
+        if (!refreshed.paper_meta_backfilling) {
+          setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
+          setBackfillingMeta(false);
+          loadSourcesPage(nb, { page: sourcesPage, q: sourceQuery }).catch(() => {}); // 刷新使新元数据带出
+        }
+      } catch { /* transient error; keep polling */ }
+    }, 6000);
+    // Safety cap so the button never spins forever (failed job / huge corpus).
+    const cap = window.setTimeout(() => {
+      if (!cancelled) setBackfillingMeta(false);
+    }, 20 * 60 * 1000);
+    return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
+  }, [backfillingMeta, currentNotebookId, analytics]);
   // Scale-index (CSR graph + ANN) status: only meaningful for base-tier libraries.
   // 任意库选中时拉一次检索索引状态(与 tier 解耦:大个人库也显示/可建);构建中由下方 effect 轮询。
   useEffect(() => {
@@ -1985,6 +2011,7 @@ export default function Home() {
     setSourcesPage(0);
     setSourceQuery("");
     setBuildingKg(shouldResumeKgBuild(notebook));
+    setBackfillingMeta(Boolean(notebook.paper_meta_backfilling));
     setTurns([]);
     setConversationId(null);
     setAsking(false);
@@ -3741,6 +3768,12 @@ export default function Home() {
                               {source.kg_extracted ? "已入图" : "未入图"}
                             </span>
                           )}
+                          {source.paper_meta_status === "missing" && (
+                            <span className="tag" style={{ color: "var(--color-warn, #b97a00)" }} title="论文作者/机构等信息尚未补全">待补全</span>
+                          )}
+                          {source.paper_meta_status === "not_paper" && (
+                            <span className="tag" style={{ opacity: 0.6 }} title="该来源非学术论文，无需补全论文信息">非论文</span>
+                          )}
                           {source.source_url ? (
                             <a className="source-link-button" href={source.source_url} target="_blank" rel="noreferrer" title={source.source_url} onClick={(e) => e.stopPropagation()}>
                               <ExternalLink size={13} />
@@ -4547,7 +4580,7 @@ export default function Home() {
                 <span className="tag">{formatFileSize(sourceDetail.file_size)}</span>
                 <span className="tag">{sourceElements.length} 个元素</span>
               </div>
-              {sourceDetail.paper_meta?.is_paper && (
+              {sourceDetail.paper_meta_status === "has_meta" && sourceDetail.paper_meta && (
                 <div className="source-detail-paper">
                   {sourceDetail.paper_meta.title && (
                     <p className="paper-title">{sourceDetail.paper_meta.title}</p>
@@ -4581,6 +4614,14 @@ export default function Home() {
                       ))}
                     </p>
                   )}
+                </div>
+              )}
+              {sourceDetail.paper_meta_status === "not_paper" && (
+                <div className="source-detail-paper" style={{ opacity: 0.6 }}>该来源非学术论文</div>
+              )}
+              {sourceDetail.paper_meta_status === "missing" && (
+                <div className="source-detail-paper" style={{ color: "var(--color-warn, #b97a00)" }}>
+                  论文信息未补全（点击上方“补全论文信息”）
                 </div>
               )}
               {sourceDetail.extraction_warning && (
