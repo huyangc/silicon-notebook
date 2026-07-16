@@ -87,6 +87,7 @@ import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
 import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
 import { KnowhowMarkdown, KnowhowCellPreview, KnowhowCellEditor } from "./knowhow-cell-editor.tsx";
 import { KnowhowCodeChip, KnowhowCodeModal } from "./knowhow-code.tsx";
+import { KnowhowMatrixDrawer } from "./knowhow-matrix-drawer.tsx";
 import { resolveCellCodeView, CODE_STATUS_LOAD_ERROR } from "./knowhow-code-logic.ts";
 import {
   ACCEPT_SUGGESTION_LABEL,
@@ -185,6 +186,12 @@ export function KnowhowPanel({
   const [cellModal, setCellModal] = useState<{ rowId: string; columnId: string; mode: "preview" | "edit" } | null>(
     null,
   );
+
+  // Task 8（点概念打开矩阵抽屉，规格 §4.3）：当前打开的概念值——null=未打开；
+  // 非空时对应 anchor 列某个分组的 anchorValue，驱动下方渲染
+  // KnowhowMatrixDrawer（与 cellModal/codeModal 平级的另一个顶层 modal 状态，
+  // 堆叠在网格之上）。
+  const [openConceptValue, setOpenConceptValue] = useState<string | null>(null);
 
   // Task 11（代码附件）：当前打开的代码查看/编辑浮层——与 cellModal/
   // optimizeRowId 平级的另一个顶层 modal 状态，堆叠在行详情抽屉之上。
@@ -287,6 +294,7 @@ export function KnowhowPanel({
     setQuery("");
     setOpenRowId(null);
     setCellModal(null);
+    setOpenConceptValue(null); // Task 8：与 openTable/backToList 同理一并清空
     setConfirmDelete(false);
     setManageOpen(false);
     setCreateOpen(false);
@@ -332,6 +340,13 @@ export function KnowhowPanel({
     setQuery("");
     setOpenRowId(null);
     setCellModal(null);
+    // Task 8：openConceptValue 是纯按字符串匹配 detail 里的 anchor 分组
+    // （见 openConceptGroup 的 useMemo），不像 cellModal/codeModal 那样带
+    // rowId 归属校验——不清掉的话，切到另一张表后一旦该表也凑巧有同名概念，
+    // 矩阵抽屉会在用户没点任何东西的情况下自己弹出来（openConceptGroup 只是
+    // 普通 useMemo，detail 一变就重算，不经用户交互）。与其余顶层 modal 状态
+    // 一起在切表/返回列表时清空。
+    setOpenConceptValue(null);
     setConfirmDelete(false);
     setManageOpen(false);
     setAppendOpen(false);
@@ -347,6 +362,7 @@ export function KnowhowPanel({
     setQuery("");
     setOpenRowId(null);
     setCellModal(null);
+    setOpenConceptValue(null);
     setConfirmDelete(false);
     setManageOpen(false);
     setAppendOpen(false);
@@ -565,6 +581,16 @@ export function KnowhowPanel({
     ? cellSummary(resolveRowTitleText(codeModalRow, detail.columns), 60) || rowFallbackTitle(codeModalRow.position)
     : "";
 
+  // Task 8：openConceptValue 对应的 anchor 分组——按 detail.rows 全量分组
+  // （不受网格搜索 query 过滤影响，抽屉展示该概念完整的分支集合，不因为
+  // 搜索命中了其中一支就漏显示其余分支）；表已刷新/该概念值不再存在时
+  // 找不到、为 null，抽屉不渲染（见下方 KnowhowMatrixDrawer 挂载条件）。
+  const openConceptGroup = useMemo(() => {
+    if (!detail?.anchorColumnId || openConceptValue === null) return null;
+    const groups = groupRowsByAnchor(detail.rows, detail.anchorColumnId);
+    return groups.find((g) => g.anchorValue === openConceptValue) ?? null;
+  }, [detail, openConceptValue]);
+
   return (
     <section className="knowhow-view" role="dialog" aria-modal="true">
       <div className="knowhow-view-header">
@@ -615,6 +641,7 @@ export function KnowhowPanel({
             onQueryChange={setQuery}
             onOpenRow={setOpenRowId}
             onOpenCell={openCellAuto}
+            onOpenConcept={setOpenConceptValue}
             onBack={backToList}
             confirmDelete={confirmDelete}
             onRequestDelete={() => setConfirmDelete(true)}
@@ -650,6 +677,30 @@ export function KnowhowPanel({
           codeError={rowCodeError}
           onRetryCode={() => loadRowCode(openRow.id)}
           onOpenCode={openCodeModal}
+        />
+      )}
+
+      {/* Task 8（规格 §4.3）：点主网格某个概念（anchor 列的合并格，见
+          KnowhowTableGrid 的 onOpenConcept）→ 打开该概念的「属性×分支」矩阵
+          抽屉。必须排在 cellModal 渲染之前（而不是之后）：KnowhowMatrixDrawer
+          外壳复用与 cellModal 完全相同的 .kh-modal-overlay/.kh-modal-card
+          （z-index: 65，同一层级，不像 KnowhowRowDrawer 那样有专属更低的
+          z-index 天然垫底）——抽屉内点格复用 openCellAuto 会在本抽屉之上再开
+          一个 cellModal，同 z-index 下靠 DOM 顺序决出叠放，后渲染的盖在先渲染
+          的上面；本块若排在 cellModal 后面，nested 的 cellModal 反而会被本
+          抽屉的全屏 overlay 盖住、连点击都点不到。KnowhowMatrixDrawer 本身
+          刻意不带 Esc 监听器（见该组件头注释：裸 Esc 会与嵌套的格子浮窗监听器
+          双关，一次 Esc 关掉两层），故这里也不加。 */}
+      {openConceptGroup && detail?.anchorColumnId && (
+        <KnowhowMatrixDrawer
+          group={openConceptGroup}
+          columns={orderColumnsForGrid(detail.columns)}
+          anchorColumnId={detail.anchorColumnId}
+          notebookId={notebookId}
+          apiBase={apiBase}
+          canEdit={canEdit}
+          onEditCell={(rowId, columnId) => openCellAuto(rowId, columnId)}
+          onClose={() => setOpenConceptValue(null)}
         />
       )}
 
@@ -2374,6 +2425,7 @@ function KnowhowTableGrid({
   onQueryChange,
   onOpenRow,
   onOpenCell,
+  onOpenConcept,
   onBack,
   confirmDelete,
   onRequestDelete,
@@ -2403,6 +2455,11 @@ function KnowhowTableGrid({
   /** 非行标题列格子点击（规格②路A「点格子弹浮窗」）：panel 按该格是否已有
    * 内容自动决定预览还是编辑态。 */
   onOpenCell: (rowId: string, columnId: string) => void;
+  /** anchor 列格子点击（Task 8，规格 §4.3「点概念打开矩阵抽屉」）：传回该格
+   * 的概念值，panel 据此打开「属性×分支」矩阵抽屉。只有已填值的 anchor 格
+   * 才走这里（见 tbody 内 opensConceptDrawer 判据）——forward-fill 后仍空的
+   * 「无概念」行（规格 §4.2.2）保持走 onOpenCell 原地补概念，不经这里。 */
+  onOpenConcept: (anchorValue: string) => void;
   onBack: () => void;
   confirmDelete: boolean;
   onRequestDelete: () => void;
@@ -2621,9 +2678,11 @@ function KnowhowTableGrid({
                 ) : (
                   // 有 anchor 列：G2 合并矩阵——同概念内相邻同值列合并成一个
                   // rowspan 起始格（规格 §4.2.1），rowSpan===0 的格被上方合并
-                  // 格覆盖、渲染跳过。点击仍落到该格所属的具体物理行（合并格
-                  // 批量写回整组是后续 task 的编辑增强，此处先保证显示正确、
-                  // 复用现有 onOpenCell 单格写入路径，行为不倒退）。
+                  // 格覆盖、渲染跳过。非 anchor 格点击仍落到该格所属的具体物理
+                  // 行、复用现有 onOpenCell 单格写入路径（合并格批量写回整组是
+                  // 后续 task 的编辑增强，此处先保证显示正确、行为不倒退）；
+                  // anchor 列格子改走 onOpenConcept 打开该概念的矩阵抽屉
+                  // （Task 8，规格 §4.3），见下方 opensConceptDrawer 判据。
                   gridDisplayRows.map(({ row, cells }) => (
                     <tr key={row.id}>
                       {cells.map((cell) => {
@@ -2632,6 +2691,16 @@ function KnowhowTableGrid({
                         const filled = Boolean(text);
                         const clickable = filled || canEdit;
                         const merged = cell.rowSpan > 1;
+                        // 只有已填值的 anchor 格才打开概念矩阵抽屉——forward-fill
+                        // 后仍空的「无概念」行（规格 §4.2.2，leading-blank）不
+                        // 聚合、每行各自单独成一个 anchorValue==="" 的组
+                        // （groupRowsByAnchor），若也路由到这里，多个空概念行会
+                        // 撞同一个 "" 值、打开彼此不相干的那一个；而矩阵抽屉本身
+                        // 又不含 anchor 列（buildConceptMatrix 排除），压根没地方
+                        // 补概念名，会把用户卡死。保持走 onOpenCell 原地补概念
+                        // （空格子直接进编辑态，规格②路A），与下方「非 anchor
+                        // 格」同一套行为，只是列身份不同。
+                        const opensConceptDrawer = cell.columnId === anchorColumnId && filled;
                         return (
                           <td
                             key={cell.columnId}
@@ -2642,7 +2711,11 @@ function KnowhowTableGrid({
                               <button
                                 type="button"
                                 className={`knowhow-cell-open${filled ? "" : " knowhow-cell-open--empty"}`}
-                                onClick={() => onOpenCell(row.id, cell.columnId)}
+                                onClick={() =>
+                                  opensConceptDrawer
+                                    ? onOpenConcept(cell.text.trim())
+                                    : onOpenCell(row.id, cell.columnId)
+                                }
                                 title={filled ? text : "点击填写这一格"}
                               >
                                 {filled ? text : "+"}
