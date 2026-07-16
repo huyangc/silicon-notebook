@@ -157,17 +157,38 @@ class GraphRetrievalService(_RetrievalState):
                 all_relations: list = []
                 cluster_groups: dict = {}
                 ph = ",".join("?" for _ in USABLE_STATUSES)
+                # gate ii (T3, knowhow KG-node retrieval): the ONE switch for the
+                # whole feature. Flag OFF ⇒ node meta carries no table_id/rows ⇒
+                # byte-identical federated graph (and render → knowhow None). The
+                # flag is process-constant (pydantic-settings loaded at startup),
+                # so the version-cached graph never goes stale against it; a
+                # restart that flips it clears the in-memory _vector_cache.
+                # getattr fallback: config.py's flag lands via T1 (other agent);
+                # until then this reads False so nothing crashes pre-merge.
+                knowhow_on = getattr(
+                    self.settings, "knowhow_kg_node_retrieval_enabled", False)
                 for nb_id, _ in participants:
                     obj_rows = self.knowledge.graph_object_rows(
                         db, nb_id, USABLE_STATUSES,
                     )
                     for r in obj_rows:
                         p = json.loads(r["payload"] or "{}")
-                        nodes[r["id"]] = {
+                        meta = {
                             "type": r["object_type"],
                             "name": p.get("name", ""),
                             "tier": tier_map.get(nb_id, "personal"),
                         }
+                        # A single knowhow cell KO carries table_id+rows in its
+                        # payload (KnowhowProjector._ko_object_row §④). Thread the
+                        # raw fields so build_rx_graph → render can compute the
+                        # row-drawer ref via the shared, len(rows)==1-guarded
+                        # anchor helper. Merged multi-row KOs still carry the raw
+                        # rows; the render-side helper collapses them to None.
+                        if (knowhow_on and p.get("table_id")
+                                and isinstance(p.get("rows"), list)):
+                            meta["table_id"] = p["table_id"]
+                            meta["rows"] = p["rows"]
+                        nodes[r["id"]] = meta
                     # Track E: rejected edges are excluded from the federated
                     # reasoning graph too (curation feedback loop) — bare
                     # filter; the column is NOT NULL DEFAULT 'pending'

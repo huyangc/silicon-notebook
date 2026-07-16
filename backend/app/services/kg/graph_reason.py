@@ -75,6 +75,14 @@ def build_rx_graph(
             payload["tier"] = meta["tier"]
         if tag_kind:
             payload["kind"] = "entity"
+        # gate ii (T3): thread a single-row knowhow cell KO's table_id/rows so
+        # render_subgraph_context can compute its row-drawer jump ref. Only
+        # present when the caller's node meta was enriched (graph_retrieval's
+        # _load, flag on); otherwise the keys are absent → payload shape stays
+        # byte-identical to the pre-knowhow build.
+        if meta.get("table_id") is not None and meta.get("rows") is not None:
+            payload["table_id"] = meta["table_id"]
+            payload["rows"] = meta["rows"]
         idx = G.add_node(payload)
         idx_to_oid[idx] = oid
         oid_to_idx[oid] = idx
@@ -239,6 +247,7 @@ def multihop_subgraph(
 def render_subgraph_context(
     subgraph: List[Tuple[dict, Optional[dict], Optional[str]]],
     id_offset: int = 0,
+    knowhow_enabled: bool = True,
 ) -> Tuple[str, dict]:
     """Render the (node, edge, src_oid) subgraph into (context_block_str, id_map).
 
@@ -258,11 +267,31 @@ def render_subgraph_context(
 
     id_map[k{i}] = {"object_id": ..., "object_type": ..., "name": ...,
                     "definition": "", "snippet": quote, "source_title": "",
-                    "location_label": ""}
+                    "location_label": "", "tier": ..., "knowhow": ref|None}
 
     id_offset lets the caller start numbering after an existing context block
     (e.g., so graph nodes can begin at k{n+1} to avoid key collisions).
+
+    gate ii (T3, knowhow KG-node retrieval): when a node is a single-row knowhow
+    cell KO it carries the raw `{table_id, rows}` (threaded here by
+    `graph_retrieval._federated_rx_graph._load` → `build_rx_graph`, only when the
+    `knowhow_kg_node_retrieval_enabled` flag is on). We reuse the SHARED anchor
+    helper `evidence_context._knowhow_ref_from_payload` (len(rows)==1 rule) so
+    `parse_anchors` — which already reads `context.get("knowhow")` — can put a
+    `CitationKnowhowRef` on the anchor and the ask citation jumps to the row
+    drawer, mirroring the chunk path. It is null-safe end to end: non-knowhow
+    nodes (no `rows`) and merged multi-row KOs get None, so the `"knowhow"` key
+    is added for EVERY node but is None unless a single unambiguous row exists —
+    and `AnswerAnchor.knowhow`'s `exclude_if=None` keeps the wire byte-identical
+    when there's no ref. `knowhow_enabled=False` forces None regardless (a
+    render-level off-switch; the primary gate is the settings flag read in
+    `_load`, so a caller that doesn't pass this argument still honors the flag
+    via the node payload carrying — or not carrying — the raw fields).
     """
+    # Lazy import (evidence_context pulls schemas/retrieval): keep graph_reason
+    # import-light and cycle-free, matching verify_chain_edges' cancellation import.
+    from app.services.evidence_context import _knowhow_ref_from_payload
+
     lines: List[str] = []
     id_map: Dict[str, dict] = {}
     oid_to_key: Dict[str, str] = {}
@@ -289,6 +318,9 @@ def render_subgraph_context(
         ev_suffix = f'  — ev: "{quote}"' if quote else ""
         # [type][tier] matches the format answer_prompt expects (prompts.py).
         lines.append(f"{key}: [{otype}][{node_tier}] {name}{ev_suffix}")
+        # gate ii (T3): single-row knowhow cell KO → row-drawer jump ref; else
+        # None (null-safe helper). `parse_anchors` surfaces it onto the anchor.
+        knowhow = _knowhow_ref_from_payload(node) if knowhow_enabled else None
         id_map[key] = {
             "object_id": oid,
             "object_type": otype,
@@ -298,6 +330,7 @@ def render_subgraph_context(
             "source_title": "",
             "location_label": "",
             "tier": node_tier,
+            "knowhow": knowhow,
         }
         oid_to_key[oid] = key
 
