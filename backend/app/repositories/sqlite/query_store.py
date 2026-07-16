@@ -300,6 +300,37 @@ class QueryStore:
                     (notebook_id,),
                 ).fetchall()
             }
+            # paper-meta 三态计数(看板;paper-metadata Task 4)。paper_meta 写入
+            # (create_source/upsert_paper_meta)不 bump kg_mutation_seq,故这两条
+            # GROUP BY 必须未缓存直读——不能像 knowledge_counts 那样走
+            # knowledge_counts_cache 的 seq 门(会读到陈旧值,见该模块 docstring
+            # 对 sources COUNT 的同款排除说明)。is_paper 计数走
+            # idx_source_paper_meta_nb(notebook_id)。
+            by_is_paper = {
+                int(row["is_paper"]): int(row["c"])
+                for row in db.execute(
+                    "SELECT is_paper, COUNT(*) AS c FROM source_paper_meta "
+                    "WHERE notebook_id = ? GROUP BY is_paper",
+                    (notebook_id,),
+                ).fetchall()
+            }
+            # missing 计数是 SourceStore.sources_missing_paper_meta 的 COUNT 镜像
+            # (WHERE 子句逐字保持一致,口径漂移会立刻体现为两处不一致),走
+            # idx_sources_nb_parse_status_type(notebook_id, parse_status, source_type)。
+            missing = int(db.execute(
+                "SELECT COUNT(*) AS c FROM sources s "
+                "WHERE s.notebook_id = ? "
+                "  AND s.source_type NOT IN ('memory', 'knowhow') "
+                "  AND s.doc_type IN ('', 'academic_paper') "
+                "  AND s.parse_status IN ('parsed', 'extracting', 'extracted') "
+                "  AND NOT EXISTS (SELECT 1 FROM source_paper_meta m WHERE m.source_id = s.id)",
+                (notebook_id,),
+            ).fetchone()["c"])
+            paper_meta_counts = {
+                "has_meta": by_is_paper.get(1, 0),
+                "marker": by_is_paper.get(0, 0),
+                "missing": missing,
+            }
         rated = useful + not_useful
         return NotebookAnalytics(
             answers_total=answers_total,
@@ -309,6 +340,7 @@ class QueryStore:
             low_rated_questions=low_rated,
             knowledge_counts=knowledge_counts,
             source_status_counts=source_status_counts,
+            paper_meta_counts=paper_meta_counts,
         )
 
     def pending_actions_projection_rows(self, user_id: str) -> dict:

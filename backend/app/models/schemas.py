@@ -845,6 +845,7 @@ class NotebookAnalytics(BaseModel):
     low_rated_questions: List[str] = Field(default_factory=list)
     knowledge_counts: Dict[str, int] = Field(default_factory=dict)
     source_status_counts: Dict[str, int] = Field(default_factory=dict)
+    paper_meta_counts: Dict[str, int] = Field(default_factory=dict)
 
 
 class UnifiedKgStatus(BaseModel):

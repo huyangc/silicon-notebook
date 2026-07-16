@@ -9127,6 +9127,9 @@
   "notebook_analytics": {
     "consumers": [
       "backend/app/api/routes.py:267",
+      "backend/tests/test_analytics.py:64",
+      "backend/tests/test_analytics.py:77",
+      "backend/tests/test_analytics.py:86",
       "backend/tests/test_sqlite_indexes.py:257",
       "scripts/smoke_backend.py:1168"
     ],
