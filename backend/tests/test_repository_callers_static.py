@@ -146,6 +146,38 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
             ("scripts/verify_repository_snapshot.py", 1271, "probe.execute"),
         }
     },
+    # Offline two-DB merge tool (PR#276): every statement runs against temp-dir
+    # copies of the source databases (ATTACH + cross-DB INSERT...SELECT, WAL
+    # checkpoint, foreign_key_check); it never opens or mutates the live product
+    # database, and a two-database merge has no home in the single-DB repository
+    # domain API.  Line-number pins — a merge_dbs.py edit that shifts these must
+    # re-pin them here (same convention as the fixture/verifier blocks above).
+    **{
+        site: "offline two-DB merge tool works on temp-dir copies via ATTACH"
+        for site in {
+            ("scripts/merge_dbs.py", 78, "conn.execute"),
+            ("scripts/merge_dbs.py", 83, "conn.execute"),
+            ("scripts/merge_dbs.py", 141, "execute"),
+            ("scripts/merge_dbs.py", 148, "conn.execute"),
+            ("scripts/merge_dbs.py", 152, "conn.execute"),
+            ("scripts/merge_dbs.py", 161, "conn.execute"),
+            ("scripts/merge_dbs.py", 168, "conn.execute"),
+            ("scripts/merge_dbs.py", 193, "conn_a.execute"),
+            ("scripts/merge_dbs.py", 194, "conn_b.execute"),
+            ("scripts/merge_dbs.py", 211, "conn.execute"),
+            ("scripts/merge_dbs.py", 225, "conn.execute"),
+            ("scripts/merge_dbs.py", 226, "conn.execute"),
+            ("scripts/merge_dbs.py", 228, "conn.execute"),
+            ("scripts/merge_dbs.py", 259, "conn.execute"),
+            ("scripts/merge_dbs.py", 274, "conn.execute"),
+            ("scripts/merge_dbs.py", 278, "conn.execute"),
+            ("scripts/merge_dbs.py", 284, "conn.execute"),
+            ("scripts/merge_dbs.py", 287, "conn.execute"),
+            ("scripts/merge_dbs.py", 291, "conn.execute"),
+            ("scripts/merge_dbs.py", 294, "conn.execute"),
+            ("scripts/merge_dbs.py", 359, "conn_s.execute"),
+        }
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -350,6 +382,15 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ),
     ("scripts/verify_repository_snapshot.py", 1378, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
+    ),
+    # Offline two-DB merge tool (PR#276) opens temp-dir copies of the two source
+    # databases — never the live product DB (line 356 opens both copies on one
+    # line, so a single frozen key covers both connect calls).
+    ("scripts/merge_dbs.py", 222, "sqlite3.connect"): (
+        "offline two-DB merge tool opens a temp-dir copy, not the live product DB"
+    ),
+    ("scripts/merge_dbs.py", 356, "sqlite3.connect"): (
+        "offline two-DB merge tool opens temp-dir copies, not the live product DB"
     ),
 }
 
