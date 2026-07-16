@@ -54,6 +54,7 @@ export function KnowhowMatrixDrawer({
   highlightRowId,
   onEditCell,
   onClose,
+  error,
   onAddBranch,
   addingBranch,
   confirmDeleteConcept,
@@ -74,6 +75,16 @@ export function KnowhowMatrixDrawer({
   highlightRowId?: string | null;
   onEditCell: (rowId: string, columnId: string) => void;
   onClose: () => void;
+  /** 复审 Important 修复：加分支/删概念失败时的错误文案——这两个操作都从
+   * 抽屉内部触发，但它们原本仅有的落地渠道（panel 级 actionError）只在主
+   * 网格 KnowhowTableGrid 里渲染成横幅，被本抽屉的 .kh-modal-overlay
+   * （z-index 65，见 knowhow-panel.tsx 挂载处注释）整个盖住——抽屉开着时
+   * 用户看不到任何失败提示（加分支失败只是按钮静默复原，删概念失败后抽屉
+   * 还留在原地却无法得知原因）。KnowhowPanel 额外把同一条文案通过这个 prop
+   * 传进来，在 header 下方就地渲染（.kh-inline-error，与 KnowhowCellEditor
+   * 的 saveError/uploadError 同一既有模式，不新开 CSS）。null/undefined/
+   * 空字符串均不渲染。 */
+  error?: string | null;
   /** Task 10（加分支）：底部「+ 分支」——在当前概念组下新建一个物理行（anchor
    * 列预填该概念值，其余列留空待填）。可选，只有 canEdit 时 KnowhowPanel 才
    * 传入，本组件据此决定是否渲染底部 footer。 */
@@ -192,6 +203,10 @@ export function KnowhowMatrixDrawer({
               </button>
             </div>
           </div>
+          {/* 复审修复：加分支/删概念失败提示——放在 header 内、body 之上，
+              抽屉开着就能看到，不必等关闭抽屉才在主网格看到 actionError 横幅。
+              复用 .kh-modal-header 自带的 padding/gap，不新开 CSS。 */}
+          {error && <p className="kh-inline-error">{error}</p>}
         </header>
         <div className="kh-modal-body">
           <table className="kh-matrix">

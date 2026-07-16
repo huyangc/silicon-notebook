@@ -206,6 +206,17 @@ export function KnowhowPanel({
   // openConceptValue 的地方各自补一行重置代码。
   const [confirmDeleteConcept, setConfirmDeleteConcept] = useState(false);
   const [deletingConcept, setDeletingConcept] = useState(false);
+  // 复审 Important 修复：矩阵抽屉内操作（加分支/删概念）失败的错误——与
+  // actionError 分开维护，因为 actionError 只在 KnowhowTableGrid 渲染成横幅，
+  // 被抽屉的 .kh-modal-overlay（z-index 65）盖住，抽屉开着时用户看不到。
+  // addBranch/deleteConcept 失败时仍然并行写 actionError（不改变既有行为：
+  // 关闭抽屉后主网格横幅照常出现），同时把同一条文案写进这里传给
+  // KnowhowMatrixDrawer 就地渲染。用独立 state 而不是直接透传 actionError，
+  // 是为了避免一个无关操作（改名/重新投影/下载模板等）留下的陈旧 actionError
+  // 在用户打开一个全新的矩阵抽屉时被误显示——openConceptValue 变化（切概念/
+  // 关抽屉）时随 confirmDeleteConcept/deletingConcept 一并重置，保证每次
+  // 打开都是干净状态。
+  const [conceptDrawerError, setConceptDrawerError] = useState<string | null>(null);
 
   // Task 11（代码附件）：当前打开的代码查看/编辑浮层——与 cellModal/
   // optimizeRowId 平级的另一个顶层 modal 状态，堆叠在行详情抽屉之上。
@@ -454,6 +465,7 @@ export function KnowhowPanel({
     if (!selectedTableId || !detail?.anchorColumnId || addingRow) return;
     setAddingRow(true);
     setActionError(null);
+    setConceptDrawerError(null);
     try {
       const newRow = await addKnowhowRow(notebookId, selectedTableId, {
         cells: { [detail.anchorColumnId]: anchorValue },
@@ -462,7 +474,12 @@ export function KnowhowPanel({
       loadDetail(selectedTableId);
       loadTables();
     } catch (err) {
-      setActionError(extractErrorMessage(err, "添加分支失败，请重试"));
+      // 复审修复：同一条错误文案双写——actionError 保留既有渠道（关闭抽屉后
+      // 主网格横幅可见），conceptDrawerError 供抽屉在打开期间就地显示（见
+      // KnowhowMatrixDrawer 的 error prop）。
+      const message = extractErrorMessage(err, "添加分支失败，请重试");
+      setActionError(message);
+      setConceptDrawerError(message);
     } finally {
       setAddingRow(false);
     }
@@ -501,6 +518,7 @@ export function KnowhowPanel({
     if (!selectedTableId || !openConceptGroup) return;
     setDeletingConcept(true);
     setActionError(null);
+    setConceptDrawerError(null);
     try {
       await Promise.all(openConceptGroup.rows.map((row) => deleteKnowhowRow(notebookId, selectedTableId, row.id)));
       setDeletingConcept(false);
@@ -508,7 +526,11 @@ export function KnowhowPanel({
       loadDetail(selectedTableId);
       loadTables();
     } catch {
+      // 复审修复：抽屉删除失败时抽屉仍开着（不像成功路径会关闭），必须让
+      // 错误在抽屉内可见——conceptDrawerError 与 actionError 同文案双写，
+      // 理由同 addBranch 的 catch 分支注释。
       setActionError("删除失败，请重试");
+      setConceptDrawerError("删除失败，请重试");
       setConfirmDeleteConcept(false);
       setDeletingConcept(false);
     }
@@ -727,6 +749,7 @@ export function KnowhowPanel({
   useEffect(() => {
     setConfirmDeleteConcept(false);
     setDeletingConcept(false);
+    setConceptDrawerError(null); // 复审修复：同上，切概念/关抽屉不留旧错误
   }, [openConceptValue]);
 
   return (
@@ -840,6 +863,7 @@ export function KnowhowPanel({
           canEdit={canEdit}
           onEditCell={(rowId, columnId) => openCellAuto(rowId, columnId)}
           onClose={() => setOpenConceptValue(null)}
+          error={conceptDrawerError}
           onAddBranch={() => addBranch(openConceptGroup.anchorValue)}
           addingBranch={addingRow}
           confirmDeleteConcept={confirmDeleteConcept}
