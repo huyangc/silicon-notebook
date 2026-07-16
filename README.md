@@ -897,6 +897,30 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 
 Exit codes are the verdict — safe to wire directly into CI or a script gate: `0` success (recording) or all questions match (`--compare`); `1` `--compare` found a mismatch (runs differ); `2` a precondition failed before any comparison happened (EMBED unconfigured, notebook not found, or owner not found) — the CLI **errors out immediately** rather than silently producing a misleading "zero recall" comparison from zero vectors.
 
+### Merging two shared-base deployments (`scripts/merge_dbs.py`)
+
+Offline, non-destructive tool for consolidating two separately-deployed silicon-notebook instances that share exactly one common base library (same base notebook id) back into one. It keeps the fuller side's base — you pick with `--keep-base`, and the tool prints both sides' base stats (`sources`/`chunks`/`knowledge_objects` counts) up front so you can confirm the choice — while every other (personal) notebook from both sides is carried over untouched. Source `.db`/storage files are only read; the tool always writes new `--out` / `--out-storage` files. Either input may be on an older schema version — each is migrated to current (in a private temp copy) before merging.
+
+```bash
+PYTHONPATH=backend python scripts/merge_dbs.py \
+  --db-a A/silicon_notebook.db --storage-a A/storage \
+  --db-b B/silicon_notebook.db --storage-b B/storage \
+  --keep-base a \
+  --out merged/silicon_notebook.db --out-storage merged/storage \
+  --assume-same-users
+```
+
+- `--keep-base a|b` — which side's base notebook survives (normally the fuller one).
+- `--assume-same-users` — required when both databases share user id(s); confirms it really is the same person's account on both sides, otherwise the tool aborts to avoid mis-attributing content.
+- `--dry-run` — migrates, validates, and prints which notebooks would be imported, without writing anything; works even if `--out` already exists.
+- `--force` — overwrite an existing `--out` file.
+
+Precondition: apart from the shared base, notebook ids must not overlap between the two databases — the tool aborts and lists the colliding ids if they do.
+
+**Important:** point `--db-a`/`--db-b` at quiesced database files — stop each source deployment first. The tool only copies the `.db` file itself; a live deployment's pending `-wal` sidecar is not picked up, so merging straight from a running instance can silently miss recent writes. (The tool's own schema-migration writes are checkpointed back into the `.db` before it's used, so that part is safe — this caveat is about the source files you hand it.)
+
+After merging, deploy the `merged/` output (db + storage) to whichever host keeps running, and on first start trigger an index rebuild in the app ("Rebuild index" / "Refresh graph") to regenerate the `kg_index`/`kg_viz`/ANN artifacts, which are intentionally not copied.
+
 ## Current Limitations
 
 - Retrieval uses SQLite keyword (CJK bi-gram) + float32 matrix semantic search with per-notebook cache. Memory is bounded (~hundreds of MB vs the old ~1.3 GB Python-list approach). BM25/FTS5 and pgvector are deferred for larger scale.
