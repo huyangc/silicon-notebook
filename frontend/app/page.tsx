@@ -4722,14 +4722,17 @@ export default function Home() {
                 <>
                   <p className="section-title">论文元数据</p>
                   <div className="tag-row">
-                    <span className="tag" style={{ color: "var(--color-ok, #1a7f5a)" }}>有元数据 {analytics.paper_meta_counts.has_meta}</span>
-                    {analytics.paper_meta_counts.missing > 0 && (
-                      <span className="tag" style={{ color: "var(--color-warn, #b97a00)" }}>缺失 {analytics.paper_meta_counts.missing}</span>
-                    )}
-                    {analytics.paper_meta_counts.marker > 0 && (
-                      <span className="tag" style={{ opacity: 0.6 }}>非论文 {analytics.paper_meta_counts.marker}</span>
-                    )}
-                    {analytics.paper_meta_counts.has_meta === 0 && analytics.paper_meta_counts.missing === 0 && analytics.paper_meta_counts.marker === 0 && (
+                    {analytics.paper_meta_counts.has_meta + analytics.paper_meta_counts.missing + analytics.paper_meta_counts.marker > 0 ? (
+                      <>
+                        <span className="tag" style={{ color: "var(--color-ok, #1a7f5a)" }}>有元数据 {analytics.paper_meta_counts.has_meta}</span>
+                        {analytics.paper_meta_counts.missing > 0 && (
+                          <span className="tag" style={{ color: "var(--color-warn, #b97a00)" }}>缺失 {analytics.paper_meta_counts.missing}</span>
+                        )}
+                        {analytics.paper_meta_counts.marker > 0 && (
+                          <span className="tag" style={{ opacity: 0.6 }}>非论文 {analytics.paper_meta_counts.marker}</span>
+                        )}
+                      </>
+                    ) : (
                       <span className="tool-hint">暂无论文来源</span>
                     )}
                   </div>
