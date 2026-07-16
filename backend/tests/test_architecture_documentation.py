@@ -342,7 +342,7 @@ def test_current_docs_describe_reports_and_sharing_without_retired_article_contr
     assert "There is no live collaborative editing or change-password flow" in agents
     assert "Single-user mode for now" not in agents
     assert "no change-password / sharing / collaboration" not in agents
-    assert "更新日期：2026-07-13" in fangan_done
+    assert "更新日期：2026-07-16" in fangan_done
     assert "历史记录：Article Studio（已退役）" in fangan_done
     assert "历史记录（已退役）：Derived Rule Candidate" in fangan_done
 
@@ -635,6 +635,63 @@ def test_ask_mode_documentation_keeps_chunk_default_and_alias_only_retirement():
         assert "Global QA" not in text
         assert 'mode="global"' not in text
         assert 'mode="fast"' not in text
+
+
+def test_knowhow_documentation_matches_projection_isolation_and_agent_scopes():
+    """Knowhow-table contract phrases stay synchronized across the live docs.
+
+    Pins the three load-bearing claims: the cell-node projection (zero-LLM,
+    object_type = column name, row-title column optional → retrieval-only),
+    the code-attachment isolation invariant (stored, never executed or
+    indexed anywhere retrieval-facing), and the dual-auth agent scopes
+    (`knowledge:read` reads / `knowhow:code` code writes). Whitespace-
+    insensitive like the Memory promotion contract test above, so doc
+    reflows don't break the guard.
+    """
+    expected = {
+        "README.md": (
+            "every non-empty cell becomes a knowledge-graph node whose *type is its column name*",
+            "never generated or executed by the notebook, and never embedded/chunked/indexed into any KG projection",
+            "Reading code still only needs `knowledge:read` — only writing it",
+        ),
+        "README_zh.md": (
+            "节点的类型就是所在列名",
+            "格子照常切成 chunk 供问答使用，但不建任何图谱节点",
+            "绝不自动触发",
+        ),
+        "AGENTS.md": (
+            "Cell code attachments are stored per cell but never executed, indexed, embedded, "
+            "FTS'd, projected into the KG, or included in Ask context",
+            "The only scopes are `knowledge:read`, `memory:read`, `memory:read_candidates`, "
+            "`memory:propose`, `ask:execute`, and `knowhow:code`",
+            "plus the four knowhow tools `list_knowhow_tables`, `get_knowhow_discrimination`, "
+            "`get_knowhow_row`, and `put_knowhow_cell_code`",
+        ),
+        "architecture.md": (
+            "唯一零 LLM 的 KG 写入方",
+            "代码只存不执行，永不进 element/chunk/embedding/FTS/KG",
+            "读取需 `knowledge:read`、代码写入需 `knowhow:code`",
+        ),
+        "fangan_done.md": (
+            "及 knowhow 四工具 `list_knowhow_tables`、`get_knowhow_discrimination`、"
+            "`get_knowhow_row`、`put_knowhow_cell_code`",
+            "`ask:execute`、`knowhow:code`",
+        ),
+    }
+    for name, phrases in expected.items():
+        compact_text = "".join(_read(name).split())
+        for phrase in phrases:
+            assert "".join(phrase.split()) in compact_text, (
+                f"{name} is missing knowhow contract phrase: {phrase}"
+            )
+
+    # The pre-knowhow scope/tool lists must not resurface as current contract.
+    assert "精确七工具" not in _read("fangan_done.md")
+    for name in ("AGENTS.md",):
+        compact_text = "".join(_read(name).split())
+        assert "".join("`memory:propose`, and `ask:execute`.".split()) not in compact_text, (
+            f"{name} retains the retired five-scope list as current"
+        )
 
 
 def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferred():
