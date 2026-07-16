@@ -532,3 +532,50 @@ def test_backfill_generation_guard_protects_foreign_entry(
     # 清理，避免污染其它测试（fixture 隔离，防御性）
     with service._paper_meta_backfilling_lock:
         service._paper_meta_backfilling.pop(notebook_id, None)
+
+
+# ---------------------------------------------------------------------------
+# backfill_paper_metadata: paper_meta_done 铃铛事件 (paper-meta-status Task 6)
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_emits_paper_meta_done_on_success(repo, notebook_id, service, monkeypatch):
+    """成功路径 finally 前 emit paper_meta_done（stored=N）+ mark_dirty。"""
+    _insert_source(repo, notebook_id, "src-x")
+    repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
+
+    events: list = []
+    marked: list = []
+    from app.services import pending_bus as pb_module
+    monkeypatch.setattr(pb_module.pending_bus, "emit",
+                        lambda uid, evt: events.append((uid, evt)))
+    monkeypatch.setattr(pb_module.pending_bus, "mark_dirty",
+                        lambda uid: marked.append(uid))
+    service.backfill_paper_metadata(notebook_id)
+    done = [e for _, e in events if e.get("event") == "paper_meta_done"]
+    assert len(done) == 1
+    assert done[0]["notebook_id"] == notebook_id
+    assert done[0]["stored"] >= 1
+    assert len(marked) >= 1
+
+
+def test_backfill_no_done_on_zero_queue(repo, notebook_id, monkeypatch):
+    """零队列不 emit done。"""
+    events: list = []
+    from app.services import pending_bus as pb_module
+    monkeypatch.setattr(pb_module.pending_bus, "emit",
+                        lambda uid, evt: events.append((uid, evt)))
+    repo.backfill_paper_metadata(notebook_id)
+    assert not any(e.get("event") == "paper_meta_done" for _, e in events)
+
+
+def test_backfill_no_done_on_all_failed(repo, notebook_id, service, monkeypatch):
+    """全 failed 不 emit done（stored=0 视为无成果）。"""
+    _insert_source(repo, notebook_id, "src-y")
+    repo._kg_llm_client = _RaisingLLM()
+    events: list = []
+    from app.services import pending_bus as pb_module
+    monkeypatch.setattr(pb_module.pending_bus, "emit",
+                        lambda uid, evt: events.append((uid, evt)))
+    service.backfill_paper_metadata(notebook_id)
+    assert not any(e.get("event") == "paper_meta_done" for _, e in events)
