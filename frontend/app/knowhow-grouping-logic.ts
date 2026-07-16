@@ -116,3 +116,13 @@ export function buildConceptMatrix(
 export function groupCellWriteTargets(group: AnchorGroup, _columnId: string): string[] {
   return group.rows.map((r) => r.id);
 }
+
+/** 该列在这个概念组内是否是「合并共享格」（spec §4.4：组内多于一行、且该列
+ * 所有行的值 trim 后完全相同）——与 buildConceptMatrix 的 sharedSpan 同一套
+ * 判定标准，供 panel 决定编辑一格是批量写整组还是只写这一行。单行组没有
+ * 「其他分支」可言，恒 false（即便技术上"全同值"，语义上不构成共享）。 */
+export function isSharedColumn(group: AnchorGroup, columnId: string): boolean {
+  if (group.rows.length <= 1) return false;
+  const first = (group.rows[0].cells[columnId] ?? "").trim();
+  return group.rows.every((row) => (row.cells[columnId] ?? "").trim() === first);
+}

@@ -444,8 +444,15 @@ export interface KnowhowCellEditorProps {
   rowId: string;
   columnId: string;
   rowTitle: string;
+  /** 该格所属概念组的分支数——仅当这一格是「合并共享格」（anchor 分组内该列
+   * 全分支同值、组内多于一行，见 knowhow-grouping-logic.ts 的
+   * isSharedColumn）时由 panel 传入且 >1；用于 header 提示改动会同步到整组。
+   * undefined 或 <=1（记录型表 / 非共享格 / 单行组）时不显示提示。 */
+  affectedBranchCount?: number;
   /** 落库；panel 负责真正调用 patchKnowhowCell + 把结果合并回 detail 状态。
-   * reject 时本组件在原地展示错误，不关闭浮窗（用户可以重试）。 */
+   * 若该格是合并共享格，panel 会批量写整组、不只是这一行（同一份
+   * affectedBranchCount 判定，保证提示与实际写入范围一致）。reject 时本组件
+   * 在原地展示错误，不关闭浮窗（用户可以重试）。 */
   onSave: (rowId: string, columnId: string, contentMd: string) => Promise<void>;
   /** 「保存并下一格」算出下一格坐标后，把「该切到哪一格、停留在编辑态」的
    * 决定报给 panel——panel 更新 cellModal 状态，本组件靠 key 变化重新挂载。 */
@@ -460,6 +467,7 @@ export function KnowhowCellEditor({
   rowId,
   columnId,
   rowTitle,
+  affectedBranchCount,
   onSave,
   onNavigate,
   onClose,
@@ -781,6 +789,9 @@ export function KnowhowCellEditor({
               <span className="kh-mode-tag kh-mode-tag--editor">
                 <Pencil size={11} /> {EDITING_MODE_TAG}
               </span>
+              {affectedBranchCount && affectedBranchCount > 1 && (
+                <span className="kh-affect-hint">改动将同步到该概念下全部 {affectedBranchCount} 个分支</span>
+              )}
             </div>
             <div className="kh-modal-header-actions">
               <button

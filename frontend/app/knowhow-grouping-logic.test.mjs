@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { groupRowsByAnchor, computeGridSpans, buildConceptMatrix, groupCellWriteTargets } from "./knowhow-grouping-logic.ts";
+import {
+  groupRowsByAnchor,
+  computeGridSpans,
+  buildConceptMatrix,
+  groupCellWriteTargets,
+  isSharedColumn,
+} from "./knowhow-grouping-logic.ts";
 
 const mk = (id, anchorVal, colId = "c0") => ({
   id, position: 0, projectionStatus: "synced", cells: { [colId]: anchorVal },
@@ -105,4 +111,29 @@ test("buildConceptMatrix: 属性行×分支列，共享属性标记 sharedSpan",
 test("groupCellWriteTargets: 返回组内所有行 id", () => {
   const group = { anchorValue: "A", rows: [rowC("r1", {}), rowC("r2", {}), rowC("r3", {})] };
   assert.deepEqual(groupCellWriteTargets(group, "any"), ["r1", "r2", "r3"]);
+});
+
+test("isSharedColumn: 组内该列全分支同值（trim 后）→ true", () => {
+  const group = {
+    anchorValue: "hold&setup",
+    rows: [
+      rowC("r1", { sym: "共享现象" }),
+      rowC("r2", { sym: "共享现象 " }), // 尾随空白 trim 后仍算同值
+      rowC("r3", { sym: "共享现象" }),
+    ],
+  };
+  assert.equal(isSharedColumn(group, "sym"), true);
+});
+
+test("isSharedColumn: 组内该列有异值 → false", () => {
+  const group = {
+    anchorValue: "hold&setup",
+    rows: [rowC("r1", { root: "根因1" }), rowC("r2", { root: "根因2" })],
+  };
+  assert.equal(isSharedColumn(group, "root"), false);
+});
+
+test("isSharedColumn: 单行组 → false（无「其他分支」可言，不算共享格）", () => {
+  const group = { anchorValue: "A", rows: [rowC("r1", { sym: "x" })] };
+  assert.equal(isSharedColumn(group, "sym"), false);
 });

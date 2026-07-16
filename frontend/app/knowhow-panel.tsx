@@ -80,7 +80,12 @@ import {
   resolveRowTitleText,
   appendRowOptimistically,
 } from "./knowhow-panel-logic.ts";
-import { groupRowsByAnchor, computeGridSpans } from "./knowhow-grouping-logic.ts";
+import {
+  groupRowsByAnchor,
+  computeGridSpans,
+  groupCellWriteTargets,
+  isSharedColumn,
+} from "./knowhow-grouping-logic.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
 import { rowFallbackTitle } from "./knowhow-cell-editor-logic.ts";
 import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
@@ -508,30 +513,61 @@ export function KnowhowPanel({
   }
 
   // 格子浮窗「保存」：真正调用 patchKnowhowCell + 把结果合并回 detail 状态
-  // （只更新命中的那一格与其行的 projectionStatus，不必整表重拉——patch
-  // 端点本身就返回了更新后的值，见 knowhow-model.ts patchKnowhowCell 的
-  // 注释）。失败时把异常原样往上抛，编辑器组件在原地展示错误、不关闭浮窗。
+  // （只更新命中的那一格/那一组与其行的 projectionStatus，不必整表重拉——
+  // patch 端点本身就返回了更新后的值，见 knowhow-model.ts patchKnowhowCell
+  // 的注释）。失败时把异常原样往上抛，编辑器组件在原地展示错误、不关闭浮窗。
+  //
+  // 合并格批量写（anchor 分组 spec §4.4/§6）：这一格若落在一个「合并共享格」
+  // （anchor 分组内该列全分支同值、组内多于一行，见 isSharedColumn）——浮窗
+  // 提示用户「改动将同步到全部 N 个分支」（cellModalAffectedBranchCount），
+  // 保存就必须真的写回组内每一行的这一列，否则提示和实际落库范围对不上：
+  // 其余分支的值仍是旧值，直到之后又有人凑巧编辑到那一行才被悄悄覆盖成这次
+  // 的新值，造成一段时间内隐蔽的数据不一致。记录型表没有 anchorColumnId，
+  // group 恒为 null，天然落到单格写（行为与改动前一致）。本函数不依赖
+  // cellModal 状态自己独立判定分组——「优化整行」浮层的 onAcceptCell 也复用
+  // 这同一个函数（见下方 KnowhowRowOptimizeModalProps 注释），必须对任意
+  // (rowId, columnId) 的调用都成立，不能假设正巧是当前 cellModal 打开的
+  // 那一格。
+  //
+  // 注（未做/已知取舍）：这是 N 个独立 patchKnowhowCell HTTP 请求并发
+  // （Promise.all），不是后端单事务；spec §6"整组批量写在单事务内完成"在
+  // 这一 task 的范围内按"前端一次性并发触发、任一失败则不合并本地 detail"
+  // 实现——若批量中途某一路失败，已成功落库的那几行在服务端已经改变，只是
+  // 本地 detail 状态这次不合并（下次整表重拉会看到服务端的真实、可能半改的
+  // 状态）。真正的后端原子性需要新的批量端点，不在本 task 范围内。
   async function handleCellSave(rowId: string, columnId: string, contentMd: string) {
-    if (!selectedTableId) return;
-    const result = await patchKnowhowCell(notebookId, selectedTableId, rowId, columnId, contentMd);
+    if (!selectedTableId || !detail) return;
+    const group = detail.anchorColumnId
+      ? groupRowsByAnchor(detail.rows, detail.anchorColumnId).find((g) => g.rows.some((r) => r.id === rowId))
+      : null;
+    const targets = group && isSharedColumn(group, columnId) ? groupCellWriteTargets(group, columnId) : [rowId];
+    const results = await Promise.all(
+      targets.map((rid) => patchKnowhowCell(notebookId, selectedTableId, rid, columnId, contentMd)),
+    );
     setDetail((prev) => {
       if (!prev) return prev;
+      const resultByRowId = new Map(results.map((result) => [result.rowId, result]));
       return {
         ...prev,
-        rows: prev.rows.map((row) =>
-          row.id === result.rowId
-            ? { ...row, cells: { ...row.cells, [result.columnId]: result.contentMd }, projectionStatus: result.projectionStatus }
-            : row,
-        ),
+        rows: prev.rows.map((row) => {
+          const result = resultByRowId.get(row.id);
+          if (!result) return row;
+          return {
+            ...row,
+            cells: { ...row.cells, [result.columnId]: result.contentMd },
+            projectionStatus: result.projectionStatus,
+          };
+        }),
       };
     });
     // 收尾修复（浏览器 QA 实测）：格子内容一变，该格挂着的代码派生在后端立即
     // 转 stale——而保存成功路径此前只合并了格子内容，抽屉 chip / 代码浮层会
-    // 一直停留在「已实现」直到重开抽屉。保存的行恰好是当前展开行时，立即重取
-    // 行级代码状态，让 stale chip 无需重开抽屉即浮现（优化整行的 onAcceptCell
-    // 也走本函数，同样受益）。loadRowCode 自带请求号 guard，与快速切行/连续
-    // 保存并存时旧响应不会倒灌。
-    if (openRowId === result.rowId) loadRowCode(result.rowId);
+    // 一直停留在「已实现」直到重开抽屉。保存命中的行里若包含当前展开行
+    // （单格写时就是它自己；批量写整组时组内任一分支都可能是它），立即重取
+    // 行级代码状态，让 stale chip 无需重开抽屉即浮现（优化整行的
+    // onAcceptCell 也走本函数，同样受益）。loadRowCode 自带请求号 guard，与
+    // 快速切行/连续保存并存时旧响应不会倒灌。
+    if (openRowId && targets.includes(openRowId)) loadRowCode(openRowId);
   }
 
   // Task 11：打开代码浮层（抽屉 chip 的 onOpen，及"添加代码"安静入口共用同
@@ -566,6 +602,20 @@ export function KnowhowPanel({
   const cellModalRowTitle = cellModalRow && detail
     ? cellSummary(resolveRowTitleText(cellModalRow, detail.columns), 60) || rowFallbackTitle(cellModalRow.position)
     : "";
+
+  // 合并格编辑影响范围（anchor 分组 spec §4.4）：cellModal 当前格若落在一个
+  // 合并共享格（概念组内该列全分支同值、组内多于一行），算出组的分支数传给
+  // KnowhowCellEditor 触发 header 提示；与 handleCellSave 的批量写判定同一套
+  // groupRowsByAnchor + isSharedColumn 标准，保证「提示的范围」与「保存时
+  // 实际写入的范围」永远一致，不会出现提示说影响 N 个分支、保存却只改了 1
+  // 个的错位。记录型表没有 anchorColumnId，恒为 undefined（不显示提示）。
+  const cellModalGroup = cellModal && detail && detail.anchorColumnId
+    ? groupRowsByAnchor(detail.rows, detail.anchorColumnId).find((g) => g.rows.some((r) => r.id === cellModal.rowId))
+    : null;
+  const cellModalAffectedBranchCount =
+    cellModalGroup && cellModal && isSharedColumn(cellModalGroup, cellModal.columnId)
+      ? cellModalGroup.rows.length
+      : undefined;
 
   // Task 9「优化整行」批量弹窗当前作用的行——与 cellModalRow 同一套查找方式。
   const optimizeRow = detail?.rows.find((row) => row.id === optimizeRowId) ?? null;
@@ -714,6 +764,7 @@ export function KnowhowPanel({
             rowId={cellModal.rowId}
             columnId={cellModal.columnId}
             rowTitle={cellModalRowTitle}
+            affectedBranchCount={cellModalAffectedBranchCount}
             onSave={handleCellSave}
             onNavigate={(rowId, columnId) => setCellModal({ rowId, columnId, mode: "edit" })}
             onClose={() => setCellModal(null)}
@@ -1595,6 +1646,26 @@ export function KnowhowPanel({
           color: #9a5b00;
         }
 
+        /* 合并格编辑提示（anchor 分组 spec §4.4）：紧跟 kh-mode-tag--editor
+           出现在面包屑里，告知这一格是「合并共享格」——保存会批量写整组，
+           不只是眼前这一行（handleCellSave 的批量写判定与这里的
+           affectedBranchCount 同源，见 knowhow-panel.tsx handleCellSave）。
+           沿用 kh-mode-tag--editor / kh-procedure-hint 同一套琥珀语义，与
+           「编辑中」标签同色系但用一句完整提示文本而非图标短标签的形态，
+           避免和状态标签混淆。 */
+        .kh-affect-hint {
+          display: inline-flex;
+          align-items: center;
+          padding: 2px 8px;
+          font-size: 11px;
+          font-weight: 600;
+          border-radius: 999px;
+          border: 1px solid #f0dab3;
+          background: #fdf4e6;
+          color: #9a5b00;
+          white-space: nowrap;
+        }
+
         /* 全屏切换按钮：复用 icon-button 尺寸/交互，只是有独立 title/图标；不
            需要单独样式，此注释只标记它在 header-actions 里的位置。 */
 
@@ -1617,6 +1688,7 @@ export function KnowhowPanel({
         .kh-modal-breadcrumb {
           display: flex;
           align-items: center;
+          flex-wrap: wrap;
           gap: 8px;
           min-width: 0;
           font-size: 15px;
