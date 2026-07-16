@@ -687,6 +687,72 @@ class CandidateRetrievalService(_RetrievalState):
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
                 self._note_model_error("kg_obj_delta", self.settings.embed_model, exc)
         return sims
+    def _knowhow_object_types(self, notebook_id: str) -> tuple:
+        """Distinct knowhow cell-KO object_types (each a table COLUMN NAME — a
+        dynamic type projected by ``KnowhowProjector``) currently usable in the
+        notebook: ``type_counts`` (seq-memoized on ``kg_mutation_seq``, which the
+        knowhow projection bumps via ``mark_unified_dirty``, so this self-
+        invalidates) minus the four fixed ``_KG_TYPES``. Empty tuple ⇒ the
+        notebook has no knowhow graph content ⇒ every caller no-ops. Only ever
+        reached on the flag-on branch (see ``_scored_types``)."""
+        from app.repositories.sqlite import knowledge_counts_cache
+        with self._connect() as db:
+            counts = knowledge_counts_cache.type_counts(
+                db, notebook_id, statuses=USABLE_STATUSES)
+        return tuple(t for t in counts if t not in _KG_TYPES)
+
+    def _scored_types(self, notebook_id: str, types) -> List[str]:
+        """The object_types ``_retrieve_scored`` will fetch+score. FLAG OFF (or a
+        notebook with no knowhow types) ⇒ BYTE-IDENTICAL to the historical line:
+        caller ``types`` (or all four ``_KG_TYPES`` by default) filtered to
+        ``_KG_TYPES``. FLAG ON + knowhow present ⇒ the allowed set widens to
+        ``_KG_TYPES ∪ knowhow-types`` and the default (no caller ``types``)
+        unions the knowhow types in too; a caller-supplied list is still just
+        filtered against the (now wider) allowed set. ``_knowhow_object_types``
+        is only touched on the flag-on branch, so flag-off issues no new query."""
+        base = [t for t in (list(types) if types else list(_KG_TYPES)) if t in _KG_TYPES]
+        if not self.settings.knowhow_kg_node_retrieval_enabled:
+            return base
+        knowhow_types = self._knowhow_object_types(notebook_id)
+        if not knowhow_types:
+            return base
+        allowed = set(_KG_TYPES) | set(knowhow_types)
+        source = list(types) if types else [*_KG_TYPES, *knowhow_types]
+        return [t for t in source if t in allowed]
+
+    def _knowhow_ko_candidates(self, db, notebook_id: str, query: str,
+                               query_vector) -> dict:
+        """Gate 0 (default-off): ``{ko_id: sim}`` for knowhow cell KOs whose
+        hidden-source chunk vectors match the query — the semantic signal a
+        structural-only KO (no ``knowledge_embeddings`` row) otherwise lacks.
+
+        Fetches the scoped inputs through this service's stores (the hidden
+        knowhow source's chunk rows → their vectors → the cell elements — a
+        bounded brute-force over the tiny knowhow chunk set, NOT a notebook-wide
+        retrieval) and hands them to the pure ``kg_node_bridge`` reduction.
+        ``query`` is accepted for signature stability / future lexical use;
+        gate 0 is purely semantic today."""
+        from app.services.knowhow.kg_node_bridge import knowhow_ko_candidates
+        if query_vector is None:
+            return {}
+        chunk_rows = self.chunks.knowhow_chunk_rows(db, notebook_id)
+        if not chunk_rows:
+            return {}
+        chunk_to_element = {}
+        for row in chunk_rows:
+            element_ids = json.loads(row["element_ids"] or "[]")
+            if element_ids:
+                chunk_to_element[row["id"]] = element_ids[0]
+        if not chunk_to_element:
+            return {}
+        vector_rows = self.embeddings.vector_rows_for_ids(
+            db, notebook_id, "chunk_embeddings", "chunk_id", list(chunk_to_element))
+        elements = self.sources.evidence_elements(
+            list(dict.fromkeys(chunk_to_element.values())))
+        return knowhow_ko_candidates(
+            chunk_to_element, vector_rows, elements, query_vector,
+            recall=self.settings.chunk_recall)
+
     def _retrieve_scored(self, notebook_id: str, query: str,
                          types: Optional[Iterable[str]] = None,
                          w_keyword: float = W_KEYWORD,
@@ -697,7 +763,15 @@ class CandidateRetrievalService(_RetrievalState):
         per-sub-query `prefer` bias."""
         # ask_stage 埋点(纯观测):阶段墙钟拆解,生产诊断 20-30s 级检索用。
         t0 = time.perf_counter()
-        type_list = [t for t in (list(types) if types else list(_KG_TYPES)) if t in _KG_TYPES]
+        # gate i (type widening): flag-off / non-knowhow ⇒ historical filter,
+        # byte-identical. flag-on + knowhow present ⇒ column-name types join
+        # the fetch set (see _scored_types).
+        type_list = self._scored_types(notebook_id, types)
+        # gate 0/i are live only when the widening actually surfaced a knowhow
+        # (column-name) type — exactly "flag on AND this notebook has knowhow
+        # graph content" (or a caller explicitly asked for one). Flag off /
+        # non-knowhow ⇒ empty ⇒ pure no-op, no bridge query, no injection.
+        knowhow_on = bool(set(type_list) - set(_KG_TYPES))
         query_vector = self._embed_query(query)
         t_embed = time.perf_counter()
         # indexed 时用 ANN 核 ⊕ delta 取有界候选;无索引→cand_sims=None→全量(现状)。
@@ -735,6 +809,19 @@ class CandidateRetrievalService(_RetrievalState):
         t_ann = time.perf_counter()
         from app.services.vector_index import query_sims, build_matrix
         with self._connect() as db:
+            # ── gate 0 (default-off): knowhow cell-KO semantic sidecar ───────
+            # Reverse-lookup the query against ONLY the hidden knowhow source's
+            # chunk vectors → {ko_id: sim}. Computed once, folded into whichever
+            # scoring path this retrieval is on. Empty (no cost) unless knowhow_on.
+            knowhow_sims = (
+                self._knowhow_ko_candidates(db, notebook_id, query, query_vector)
+                if knowhow_on else {})
+            if knowhow_sims and cand_sims is not None:
+                # Bounded path: union into the candidate set BEFORE id_filter so
+                # the KOs are fetched, and (via knowledge_sims=cand_sims below)
+                # pick up their semantic score.
+                for ko_id, sim in knowhow_sims.items():
+                    cand_sims[ko_id] = max(cand_sims.get(ko_id, 0.0), sim)
             id_filter = set(cand_sims.keys()) if cand_sims is not None else None
             kg_objs = {t: self._knowledge_objects(db, notebook_id, t, id_filter=id_filter)
                        for t in type_list}
@@ -784,6 +871,15 @@ class CandidateRetrievalService(_RetrievalState):
                 kn_ids, kn_mat = self._vector_matrix(db, notebook_id, "knowledge_embeddings", "object_id")
                 element_sims = query_sims(query_vector, elem_ids, elem_mat) if query_vector else None
                 knowledge_sims = query_sims(query_vector, kn_ids, kn_mat) if query_vector else None
+            if knowhow_sims and cand_sims is None and knowledge_sims is not None:
+                # Full-scan path: knowhow KOs are absent from the
+                # knowledge_embeddings matrix (structural-only projection), so
+                # their semantic score comes solely from gate 0. Merge AFTER the
+                # matrix build; do NOT flip cand_sims to non-None (that would
+                # wrongly bound doc-KO retrieval). gate i already put their types
+                # in type_list, so _knowledge_objects(id_filter=None) fetched them.
+                for ko_id, sim in knowhow_sims.items():
+                    knowledge_sims[ko_id] = max(knowledge_sims.get(ko_id, 0.0), sim)
         t_hydrate = time.perf_counter()
         penalty = self.settings.kg_isolated_rank_penalty
         if self.settings.retrieval_rrf_enabled:
@@ -1198,11 +1294,14 @@ class CandidateRetrievalService(_RetrievalState):
           classify_evidence 的 tau 阈值判 grounded(RRF 微分会让全部判 inferred)。
         - weight 取 _TYPE_WEIGHT(类型权威)。
         """
-        # 汇集所有类型对象,构建 (id, text) 列表及 id->obj 映射
+        # 汇集所有类型对象,构建 (id, text) 列表及 id->obj 映射。按 kg_objs 实际
+        # 键(= _retrieve_scored 的 type_list)遍历,而非硬编码 _KG_TYPES —— flag-off
+        # 时 kg_objs 只含 _KG_TYPES 子集,逐字节等价;flag-on(knowhow)时列名动态
+        # 类型也一并进 RRF 融合(否则会被取来却在 RRF 分支静默丢弃)。
         docs: List[tuple] = []
         id_to_obj: Dict[str, dict] = {}
         id_to_type: Dict[str, str] = {}
-        for t in _KG_TYPES:
+        for t in kg_objs:
             for obj in (kg_objs.get(t) or []):
                 oid = obj["id"]
                 payload = obj.get("payload", {})

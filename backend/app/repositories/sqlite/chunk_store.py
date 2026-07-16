@@ -195,6 +195,20 @@ class ChunkStore:
         ).fetchall()
 
     @staticmethod
+    def knowhow_chunk_rows(db: sqlite3.Connection, notebook_id: str):
+        """``(id, element_ids)`` for chunks owned by the notebook's hidden
+        knowhow source(s) — the tiny, bounded set gate-0 knowhow KG-node
+        retrieval reverse-looks-up (default-off feature). Scoped to
+        ``source_type='knowhow'`` so it is a knowhow-local probe, never a
+        notebook-wide chunk scan; empty when the notebook has no knowhow table."""
+        return db.execute(
+            "SELECT id, element_ids FROM chunks "
+            "WHERE notebook_id = ? AND source_id IN "
+            "(SELECT id FROM sources WHERE notebook_id = ? AND source_type = 'knowhow')",
+            (notebook_id, notebook_id),
+        ).fetchall()
+
+    @staticmethod
     def rows_by_ids(db: sqlite3.Connection, chunk_ids: Sequence[str]):
         ids = list(chunk_ids)
         if not ids:
