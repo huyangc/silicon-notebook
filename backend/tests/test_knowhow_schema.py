@@ -192,7 +192,10 @@ def test_v15_db_upgraded_gets_knowhow_tables(repo):
     # unless the child is gone first.
     with repo._connect() as db:
         for table in (
-            "knowhow_cells", "knowhow_rows", "knowhow_columns",
+            # knowhow_cell_code (migration 17) also FKs onto knowhow_rows AND
+            # knowhow_columns, so it must drop before EITHER of those parents
+            # for the same reason knowhow_cells must — see the docstring above.
+            "knowhow_cell_code", "knowhow_cells", "knowhow_rows", "knowhow_columns",
             "knowhow_tables", "notebook_assets",
         ):
             db.execute(f"DROP TABLE IF EXISTS {table}")
@@ -214,3 +217,112 @@ def test_v15_db_upgraded_gets_knowhow_tables(repo):
     assert "idx_knowhow_rows_table" in _indexes(repo, "knowhow_rows")
     assert "idx_knowhow_cells_row" in _indexes(repo, "knowhow_cells")
     assert "idx_notebook_assets_nb" in _indexes(repo, "notebook_assets")
+
+
+# ---------------------------------------------------------------------------
+# Task 1 (knowhow-tables PR-2+3): migration 17 — knowhow_cell_code (格子级代码
+# 附件) + knowhow_columns.role 存量词表重映射(五角色->四行为类型)。
+# ---------------------------------------------------------------------------
+
+
+KNOWHOW_CELL_CODE_COLUMNS = {
+    "id", "row_id", "column_id", "code_text", "language", "updated_by",
+    "cell_content_hash", "created_at", "updated_at",
+}
+
+
+def test_fresh_db_has_knowhow_cell_code_table(repo):
+    """全新库:knowhow_cell_code 表 + idx_knowhow_cell_code_row 索引存在；
+    language/updated_by 默认值可插查；UNIQUE(row_id, column_id) 生效。"""
+    assert KNOWHOW_CELL_CODE_COLUMNS <= _cols(repo, "knowhow_cell_code")
+    assert "idx_knowhow_cell_code_row" in _indexes(repo, "knowhow_cell_code")
+
+    _mk_notebook(repo)
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowhow_tables (id, notebook_id, title, created_at, updated_at) "
+            "VALUES ('kt1', 'nb1', 'T', 't', 't')"
+        )
+        db.execute(
+            "INSERT INTO knowhow_columns (id, table_id, name, position) "
+            "VALUES ('kc1', 'kt1', '方法', 0)"
+        )
+        db.execute(
+            "INSERT INTO knowhow_rows (id, table_id, position, created_at, updated_at) "
+            "VALUES ('kr1', 'kt1', 0, 't', 't')"
+        )
+        db.execute(
+            "INSERT INTO knowhow_cell_code "
+            "(id, row_id, column_id, code_text, cell_content_hash, created_at, updated_at) "
+            "VALUES ('code1', 'kr1', 'kc1', 'print(1)', 'abc123', 't', 't')"
+        )
+
+    with repo._connect() as db:
+        row = dict(db.execute(
+            "SELECT language, updated_by FROM knowhow_cell_code WHERE id='code1'"
+        ).fetchone())
+    assert row == {"language": "", "updated_by": ""}
+
+    with pytest.raises(sqlite3.IntegrityError):
+        with repo._write() as db:
+            db.execute(
+                "INSERT INTO knowhow_cell_code "
+                "(id, row_id, column_id, code_text, cell_content_hash, created_at, updated_at) "
+                "VALUES ('code2', 'kr1', 'kc1', 'print(2)', 'def456', 't', 't')"
+            )
+
+
+def test_v16_db_upgraded_gets_cell_code_table_and_remaps_legacy_roles(repo):
+    """已部署库(user_version=16,即本任务之前)重启后 _migration_17 必须：(a) 补建
+    knowhow_cell_code 表 + 其索引；(b) 就地重映射 knowhow_columns.role 存量值——
+    concept->anchor、identify/root_cause/fix->procedure(三个"步骤类"角色收敛
+    为一个,原始子类型信息在这次重映射后不可逆地丢失,是设计决定的代价)、
+    tool->entity、plain(ELSE 分支兜底)->attribute。"""
+    _mk_notebook(repo)
+    legacy_roles = {
+        "c-concept": "concept", "c-identify": "identify",
+        "c-root_cause": "root_cause", "c-fix": "fix",
+        "c-tool": "tool", "c-plain": "plain",
+    }
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO knowhow_tables (id, notebook_id, title, created_at, updated_at) "
+            "VALUES ('kt1', 'nb1', 'T', 't', 't')"
+        )
+        for i, (col_id, role) in enumerate(legacy_roles.items()):
+            db.execute(
+                "INSERT INTO knowhow_columns (id, table_id, name, role, position) "
+                "VALUES (?, 'kt1', ?, ?, ?)",
+                (col_id, f"列{i}", role, i),
+            )
+        # Faithful "already deployed at v16" reconstruction (mirrors
+        # test_v15_db_upgraded_gets_knowhow_tables above): the migration-17-only
+        # table is dropped and the version pin rolled back before re-migrating.
+        db.execute("DROP TABLE IF EXISTS knowhow_cell_code")
+        db.execute("PRAGMA user_version = 16")
+
+    assert not _cols(repo, "knowhow_cell_code")
+
+    applied = repo._migrate()
+
+    assert 17 in applied
+    with repo._connect() as db:
+        assert int(db.execute("PRAGMA user_version").fetchone()[0]) == sr.SCHEMA_VERSION
+    assert KNOWHOW_CELL_CODE_COLUMNS <= _cols(repo, "knowhow_cell_code")
+    assert "idx_knowhow_cell_code_row" in _indexes(repo, "knowhow_cell_code")
+
+    with repo._connect() as db:
+        roles = {
+            r["id"]: r["role"]
+            for r in db.execute(
+                "SELECT id, role FROM knowhow_columns WHERE table_id='kt1'"
+            ).fetchall()
+        }
+    assert roles == {
+        "c-concept": "anchor",
+        "c-identify": "procedure",
+        "c-root_cause": "procedure",
+        "c-fix": "procedure",
+        "c-tool": "entity",
+        "c-plain": "attribute",
+    }

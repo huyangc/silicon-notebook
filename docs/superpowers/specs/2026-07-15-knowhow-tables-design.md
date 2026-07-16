@@ -18,6 +18,7 @@
 | --- | --- |
 | 进入方式 | 导入存量文件 + 在线维护（持续沉淀演进） |
 | 通用性 | 通用机制：列自定义 + 列角色标签，时序修复只是第一张表 |
+| 角色词表（2026-07-15 修订） | 五角色仅为时序修复实例、不锁定词表；改为四种域中立**行为类型**（锚点/方法步骤/实体引用/普通属性），领域语义由列名承载、边标签用列名原文；判别集 API 泛化为按列返回 `{column_name, kind, text}` |
 | 规模 | 单表百行内；单格几百字到几屏富文本；无需虚拟滚动/分页 |
 | 图片 | 只给人看：展示层保留，KG/向量化/机器输出一律剥离，零 VLM 成本 |
 | Agent 形态 | 外部 Agent 走 HTTP/MCP；notebook 不存代码、不执行代码 |
@@ -35,8 +36,11 @@
 
 - `knowhow_tables`：`id, notebook_id, title, description, mutation_seq(单调计数器), created_by, created_at, updated_at`
 - `knowhow_columns`：`id, table_id, name, role, position`
-  - `role ∈ {concept(概念锚点，每表恰一列) | identify(现象识别) | root_cause(根因分析) | fix(修复方法) | tool(依赖工具) | plain(普通)}`
-  - 角色驱动投影语义与 Agent API 字段命名；列名本身自由。
+  - **角色=域中立「行为类型」**（2026-07-15 重设计：原五角色只是时序修复域的实例，误固化为全量词表，用户纠正）：`role ∈ {anchor | procedure | entity | attribute}`
+  - **界面文案不用技术词**（用户 2026-07-15 两轮反馈：「锚点」「主题」都别扭——本体论叫法对「hold 和 setup 打架」这类值必然别扭，改用纯功能性叫法）：anchor=**「行标题」且不进每列下拉**，改为表级独立选择器「行标题列：[某列 ▾ / 不设置]」（提示：用作每行的标题；设置后每行作为一个节点进入知识图谱，节点名取自该列）；每列下拉只剩三个内容类型：procedure=「方法步骤」（写做法/流程的列，自动识别有序步骤）、entity=「工具/事物」（列出的名称自动归并：工具、命令、文档等）、attribute=「普通」（仅作为内容参与检索），各带一行提示语。机器侧/API/存储仍用英文枚举（anchor 仍是列上的标记）。
+  - **主题列可选（0..1，2026-07-15 用户以旅行日志表实证修正）**：表分两类形态——实体型（有主题列：行节点入图谱、判别集可用、行标题=主题值）与记录型（无主题列：每行是一条记录、行身份复合）。记录型**只做检索投影**（格子照常成 chunk 进向量/FTS，问答全覆盖），**不建任何图谱节点**（日期/流水记录不该成为知识实体）；判别集 API 对无主题表返回明确提示。**行标题自动合成**（展示用）：前几个非空格子短值以「 · 」拼接（截断），全空则「行 N」。**主题猜测只认列名命中，取消首列兜底**（默认普通）。向导无主题时提示「未选行标题列：本表仅参与问答检索，不构建图谱节点」。存量「恰一」校验放宽为「至多一」。
+  - **格子级节点模型**（2026-07-15 用户定稿：每个格子都是节点，列名是实体类型，行是具体实例的连接）：领域语义住在**列名**（自由文本）——**列名即节点类型**（`object_type=列名`，与 Concept/Claim 平级的动态类型），**每个非空格子→节点**（名=格值，长文本取首行截断，全文在 payload+chunk），**行=以行标题格为主语的星形连接**（主语格→同行其他格，边标签=目标列名；不做两两全连）。内容类型降为**解析提示**：procedure=格内 md 列表解析 `steps[]`、entity=**一格拆多节点**（按列表项/换行）、attribute=原样单节点——三者都建节点。**同列同值跨行归并**：节点身份=（列名，归一化值），短值自然归并（十行的 Innovus 是一个节点十条边），长文本按内容哈希独立。
+  - 兼容迁移：存量 concept→anchor、identify/root_cause/fix→procedure、tool→entity、plain→attribute；迁移后全表结构性重投影（文本未变→chunk/向量原位保留，零 LLM 零重嵌入）。
 - `knowhow_rows`：`id, table_id, position, created_at, updated_at`
 - `knowhow_cells`：`id, row_id, column_id, content_md(原始 markdown，含 asset:// 图片引用), updated_at`
 - `notebook_assets`：`id, notebook_id, filename, mime, size, created_by, created_at`；文件落根 `.local/assets/<notebook_id>/`
@@ -63,7 +67,7 @@
 - **新增行** = 建空行 + 自动打开首格浮窗，一路「保存并下一格」即天然填写向导。
 
 ### 路B · Excel 模板往返
-- 按当前表头生成 xlsx 模板下载（复用现有 openpyxl 依赖）：首行=列名（锁定），第二行=角色/填写说明。
+- 按当前表头生成 xlsx 模板下载（复用现有 openpyxl 依赖）：首行=列名（视觉突出+冻结，不做工作表保护——列名匹配与未匹配列报告已对表头改动容错，openpyxl 保护标志语义易错；2026-07-15 T6 评审裁决），第二行=角色/填写说明。
 - 用户线下批量填写后上传；按表头名匹配列，给出**导入预览**（将新增 N 行；概念列与已有行重名标黄提醒；未识别/缺失列报告），确认后**追加**导入。
 - **边界**：模板路线只收纯文本（保留换行），不解析 xlsx 内嵌图片（锚定提取不可靠）；图片与排版精修回路A补。
 
@@ -80,10 +84,9 @@
 
 每张 knowhow 表挂一个**隐藏合成源**（复用 memory 确认入 KG 的既有模式），行级变更后异步重投影（防抖），产物全部挂在该源下：
 
-- **行 → `case` KO**：标题=概念格文本；payload 按角色收纳各格净文本 + `table_id/row_id` 回链。
-- **identify/root_cause/fix 格 → `procedure` KO**：payload 带 `method_kind ∈ {identify|root_cause|fix}`；格内 markdown 有序/无序列表**确定性解析**为现成 `steps[]`（无列表结构则 steps 为空、整段作正文）。不动 LLM。
-- **tool 格 → `tool` KO**：按列表项/换行拆分多工具，表内按归一化名去重。
-- **结构化边直写 `knowledge_relations`**：`case --identified_by--> procedure(identify)`、`case --diagnosed_by--> procedure(root_cause)`、`case --fixed_by--> procedure(fix)`、`case --requires_tool--> tool`。
+- **格子级节点投影**（PR-2+3 替换 PR-1 的 case/procedure/tool 三类模型，随迁移全量重投影）：**每个非空格子 → KO**，`object_type=列名`（动态类型）、名=格值首行截断、payload 带全文净文本 + `table_id/row_id/column_id` 回链；procedure 提示列的格子解析 `steps[]`（md 有序/无序列表，确定性、不动 LLM）；entity 提示列**一格拆多 KO**（列表项/换行拆分）。
+- **同列同值跨行归并**：KO 身份=（列名，归一化值/长文哈希），evidence 累积各行来源格。
+- **边直写 `knowledge_relations`**（2026-07-15 用户指出「边标签=列名」与「节点类型=列名」冗余，去重）：行内关系统一用既有 **`about`**——同行各格 KO --about--> 行标题格 KO；语义全在节点类型上，边只表达行结构。副产品：与文献图谱同构（claim/procedure --about--> concept），下游 PPR/权重/视图零特判；「X 的修复方法」=X 邻居按类型筛。无行标题的表不建任何 KO/边（只做检索投影）。
 - **每个非空格子 → chunk**（section 标签=`表名 › 行概念 › 列名`；超长格子按现有 chunker 续切），进向量/FTS 索引——现有 ask/reasoning/外部检索免费吃到；引用标签显示 `表名 › 行概念` 而非隐藏源文件名。
 - **机器侧剥图**：`![alt](asset://…)` → `（图示：alt）`。
 - **幂等与增量**：派生对象 id = 稳定函数 `f(row_id, column_id, kind)`，编辑=原地更新无 id 抖动；仅变更格子重算 embedding；每次投影 bump 表 `mutation_seq` 与 notebook `kg_mutation_seq`（计数缓存正确失效）。
@@ -106,7 +109,7 @@ Notebook 页内新增「Knowhow 表」区块：
 沿用 Agent Bearer token（scope `knowledge:read`）+ notebook 白名单：
 
 1. `list_knowhow_tables(notebook)` → 表清单 + 列/角色定义 + 行数。
-2. `get_discrimination_set(table_id)` → **判别集一次取全**：所有行的 `{row_id, concept, identify_text}`；「净文本」= 剥图后的 markdown（结构保留，图片替换为占位）；一行有多个 identify 角色列时按列序合并、以列名作小标题。供 Agent 离线批量生成判别代码或运行时遍历判别。
+2. `get_discrimination_set(table_id)` → **判别集一次取全**（随行为类型泛化）：所有行的 `{row_id, anchor, methods:[{column_name, kind, text}]}`（methods=该行全部 procedure 类型列，按列序）；「净文本」= 剥图后的 markdown（结构保留，图片替换为占位）。Agent 按列名自行挑选判别列——词表不锁定。供离线批量生成判别代码或运行时遍历判别。
 3. `get_knowhow_row(row_id)` → 单行机器视图：逐列的角色+列名+净文本 + `steps[]` + 工具列表；判别命中后取修复方案生成代码。
 
 4. `put/get/delete_cell_code(row_id, column_id, ...)` → **格子级代码附件**：Agent 外部实现完某格方法的代码后，把**代码本体**存回 notebook（`knowhow_cell_code` 表，PR-3 自带迁移；每格一份：`{id, row_id, column_id, code_text, language, updated_by, cell_content_hash(存入时该格净文本 hash), created_at, updated_at}`，UNIQUE(row_id, column_id)）。**隔离不变量：代码永不进 element/chunk/embedding/FTS/KG 投影，ask 上下文组装不含它**——在 notebook 内不可被检索，只能经格子定位查看（投影只读 `content_md`，天然满足，另加投影不受附件影响的守护测试）。新鲜度读取时推导：附件 hash==格子当前 hash → `implemented`；不一致 → `stale`（知识已更新待重审）；无附件 → `none`。行详情机器视图**直接带代码本体**（判别命中后 Agent 一次取走方法+现成代码）；判别集只带 `code_status` 三态不带代码（控体积）。写入走新增 scope `knowhow:code`（用户界面走会话鉴权）；UI：格子/行「代码」徽章（三态）→ 点击浮层查看（等宽、复制、语言标记），用户可编辑保存（同 PR 交付）。notebook 不执行代码、**不做 LLM 语义审代码**。
@@ -144,8 +147,8 @@ Notebook 页内新增「Knowhow 表」区块：
 ## 交付切分（每 PR 前后端同 PR 交付）
 
 1. **PR-1 骨架**：数据模型+迁移、一次性整表导入（xlsx/csv/md+角色映射向导）、总览网格+行详情抽屉（只读）、资产存储与鉴权路由、确定性投影+检索接通。
-2. **PR-2 维护**：格子浮窗（预览/编辑双态、保存并下一格、图片粘贴上传、自动草稿）、建表向导（定表头→填值）、Excel 模板往返、LLM 表达优化（按钮/对照/确认回填）、ask 引用命中 knowhow 时跳转行详情抽屉。
-3. **PR-3 Agent 面**：HTTP 端点 + MCP 工具（表清单/判别集/行详情/**格子代码附件读写删**）、`knowhow_cell_code` 迁移、代码徽章+查看编辑浮层 UI、投影隔离守护测试、README 与 README_zh 用法文档（通用口径）。
+2. **PR-2 维护**（与 PR-3 合并为同一 PR 交付，2026-07-15 用户决定）：格子浮窗（预览/编辑双态、保存并下一格、图片粘贴上传、自动草稿）、建表向导（定表头→填值）、Excel 模板往返、LLM 表达优化（按钮/对照/确认回填）、ask 引用命中 knowhow 时跳转行详情抽屉；另含 PR-1 终审携带项：格子编辑 API 列归属校验、资产 GC、只读成员权限感知、引用标签「表›概念」形态、投影单飞防抖、完整表深拷贝（id 重映射，替代 PR-1 的拷贝排除）、created_by 归属。
+3. **PR-3 Agent 面**（并入同一 PR）：HTTP 端点 + MCP 工具（表清单/判别集/行详情/**格子代码附件读写删**）、`knowhow_cell_code` 迁移、代码徽章+查看编辑浮层 UI、投影隔离守护测试、README 与 README_zh 用法文档（通用口径）。
 
 ## 默认值清单（随规格一并审阅）
 

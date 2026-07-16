@@ -503,6 +503,16 @@
               "title": "Key",
               "type": "string"
             },
+            "knowhow": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CitationKnowhowRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "label": {
               "title": "Label",
               "type": "string"
@@ -770,8 +780,38 @@
           "title": "AuthResult",
           "type": "object"
         },
+        "Body_append_knowhow_rows_api_notebooks__notebook_id__knowhow__table_id__append_post": {
+          "properties": {
+            "file": {
+              "contentMediaType": "application/octet-stream",
+              "title": "File",
+              "type": "string"
+            },
+            "mode": {
+              "default": "preview",
+              "title": "Mode",
+              "type": "string"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "title": "Body_append_knowhow_rows_api_notebooks__notebook_id__knowhow__table_id__append_post",
+          "type": "object"
+        },
         "Body_import_knowhow_table_api_notebooks__notebook_id__knowhow_import_post": {
           "properties": {
+            "anchor_index": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anchor Index"
+            },
             "columns_json": {
               "title": "Columns Json",
               "type": "string"
@@ -853,6 +893,16 @@
               "title": "Element Id",
               "type": "string"
             },
+            "knowhow": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/CitationKnowhowRef"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "label": {
               "title": "Label",
               "type": "string"
@@ -893,6 +943,25 @@
             "quoted_span"
           ],
           "title": "Citation",
+          "type": "object"
+        },
+        "CitationKnowhowRef": {
+          "description": "Locator for a citation that resolves to a knowhow table cell (Task 12:\n引用跳转). Populated only when the cited element's\n``source_elements.metadata`` carries a ``knowhow`` tag (written by\n``KnowhowProjector._write_elements``) — lets the frontend jump straight\ninto that row's drawer instead of a dead/hidden source link.",
+          "properties": {
+            "row_id": {
+              "title": "Row Id",
+              "type": "string"
+            },
+            "table_id": {
+              "title": "Table Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "table_id",
+            "row_id"
+          ],
+          "title": "CitationKnowhowRef",
           "type": "object"
         },
         "ConceptWhitelistAdd": {
@@ -1391,10 +1460,270 @@
           "title": "KgSearchResponse",
           "type": "object"
         },
+        "KnowhowAgentColumn": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "kind"
+          ],
+          "title": "KnowhowAgentColumn",
+          "type": "object"
+        },
+        "KnowhowAgentTable": {
+          "properties": {
+            "anchor_column_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anchor Column Id"
+            },
+            "columns": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowAgentColumn"
+              },
+              "title": "Columns",
+              "type": "array"
+            },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "row_count": {
+              "default": 0,
+              "title": "Row Count",
+              "type": "integer"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "title": "KnowhowAgentTable",
+          "type": "object"
+        },
+        "KnowhowAppendDuplicateTitle": {
+          "properties": {
+            "row_index": {
+              "title": "Row Index",
+              "type": "integer"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "row_index",
+            "title"
+          ],
+          "title": "KnowhowAppendDuplicateTitle",
+          "type": "object"
+        },
+        "KnowhowAppendPreview": {
+          "properties": {
+            "duplicate_titles": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowAppendDuplicateTitle"
+              },
+              "title": "Duplicate Titles",
+              "type": "array"
+            },
+            "rows_preview": {
+              "items": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "title": "Rows Preview",
+              "type": "array"
+            },
+            "total_rows": {
+              "title": "Total Rows",
+              "type": "integer"
+            },
+            "unmatched_columns": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Unmatched Columns",
+              "type": "array"
+            }
+          },
+          "required": [
+            "rows_preview",
+            "total_rows"
+          ],
+          "title": "KnowhowAppendPreview",
+          "type": "object"
+        },
+        "KnowhowAppendResult": {
+          "properties": {
+            "added": {
+              "title": "Added",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "added"
+          ],
+          "title": "KnowhowAppendResult",
+          "type": "object"
+        },
+        "KnowhowCellCodePut": {
+          "properties": {
+            "code_text": {
+              "title": "Code Text",
+              "type": "string"
+            },
+            "language": {
+              "default": "",
+              "title": "Language",
+              "type": "string"
+            }
+          },
+          "required": [
+            "code_text"
+          ],
+          "title": "KnowhowCellCodePut",
+          "type": "object"
+        },
+        "KnowhowCellCodeResult": {
+          "properties": {
+            "code_text": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code Text"
+            },
+            "language": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Language"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Updated At"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "title": "KnowhowCellCodeResult",
+          "type": "object"
+        },
+        "KnowhowCellOptimizeResult": {
+          "properties": {
+            "suggestion_md": {
+              "title": "Suggestion Md",
+              "type": "string"
+            }
+          },
+          "required": [
+            "suggestion_md"
+          ],
+          "title": "KnowhowCellOptimizeResult",
+          "type": "object"
+        },
+        "KnowhowCellPatch": {
+          "properties": {
+            "content_md": {
+              "title": "Content Md",
+              "type": "string"
+            }
+          },
+          "required": [
+            "content_md"
+          ],
+          "title": "KnowhowCellPatch",
+          "type": "object"
+        },
+        "KnowhowCellPatchResult": {
+          "properties": {
+            "column_id": {
+              "title": "Column Id",
+              "type": "string"
+            },
+            "content_md": {
+              "title": "Content Md",
+              "type": "string"
+            },
+            "projection_status": {
+              "title": "Projection Status",
+              "type": "string"
+            },
+            "row_id": {
+              "title": "Row Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "row_id",
+            "column_id",
+            "content_md",
+            "projection_status"
+          ],
+          "title": "KnowhowCellPatchResult",
+          "type": "object"
+        },
         "KnowhowColumn": {
           "properties": {
             "id": {
               "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
               "type": "string"
             },
             "name": {
@@ -1404,23 +1733,153 @@
             "position": {
               "title": "Position",
               "type": "integer"
-            },
-            "role": {
-              "title": "Role",
-              "type": "string"
             }
           },
           "required": [
             "id",
             "name",
-            "role",
+            "kind",
             "position"
           ],
           "title": "KnowhowColumn",
           "type": "object"
         },
+        "KnowhowColumnCreate": {
+          "properties": {
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "position": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Position"
+            }
+          },
+          "required": [
+            "name",
+            "kind"
+          ],
+          "title": "KnowhowColumnCreate",
+          "type": "object"
+        },
+        "KnowhowColumnPatch": {
+          "properties": {
+            "kind": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Name"
+            }
+          },
+          "title": "KnowhowColumnPatch",
+          "type": "object"
+        },
+        "KnowhowDiscriminationMethod": {
+          "properties": {
+            "code_status": {
+              "title": "Code Status",
+              "type": "string"
+            },
+            "column_id": {
+              "title": "Column Id",
+              "type": "string"
+            },
+            "column_name": {
+              "title": "Column Name",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "column_id",
+            "column_name",
+            "text",
+            "code_status"
+          ],
+          "title": "KnowhowDiscriminationMethod",
+          "type": "object"
+        },
+        "KnowhowDiscriminationRow": {
+          "properties": {
+            "methods": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowDiscriminationMethod"
+              },
+              "title": "Methods",
+              "type": "array"
+            },
+            "row_id": {
+              "title": "Row Id",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "row_id",
+            "title"
+          ],
+          "title": "KnowhowDiscriminationRow",
+          "type": "object"
+        },
+        "KnowhowDiscriminationSet": {
+          "properties": {
+            "rows": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowDiscriminationRow"
+              },
+              "title": "Rows",
+              "type": "array"
+            }
+          },
+          "title": "KnowhowDiscriminationSet",
+          "type": "object"
+        },
         "KnowhowImportPreview": {
           "properties": {
+            "anchor_suggestion": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anchor Suggestion"
+            },
             "columns": {
               "items": {
                 "$ref": "#/components/schemas/KnowhowPreviewColumn"
@@ -1451,10 +1910,34 @@
           "title": "KnowhowImportPreview",
           "type": "object"
         },
+        "KnowhowNewColumnInput": {
+          "properties": {
+            "kind": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Kind"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "title": "KnowhowNewColumnInput",
+          "type": "object"
+        },
         "KnowhowPreviewColumn": {
           "properties": {
-            "guessed_role": {
-              "title": "Guessed Role",
+            "guessed_kind": {
+              "title": "Guessed Kind",
               "type": "string"
             },
             "name": {
@@ -1464,7 +1947,7 @@
           },
           "required": [
             "name",
-            "guessed_role"
+            "guessed_kind"
           ],
           "title": "KnowhowPreviewColumn",
           "type": "object"
@@ -1509,8 +1992,195 @@
           "title": "KnowhowRow",
           "type": "object"
         },
+        "KnowhowRowCell": {
+          "properties": {
+            "column_id": {
+              "title": "Column Id",
+              "type": "string"
+            },
+            "column_name": {
+              "title": "Column Name",
+              "type": "string"
+            },
+            "items": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Items"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "steps": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Steps"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "column_id",
+            "column_name",
+            "kind",
+            "text"
+          ],
+          "title": "KnowhowRowCell",
+          "type": "object"
+        },
+        "KnowhowRowCode": {
+          "properties": {
+            "code_text": {
+              "title": "Code Text",
+              "type": "string"
+            },
+            "column_id": {
+              "title": "Column Id",
+              "type": "string"
+            },
+            "language": {
+              "title": "Language",
+              "type": "string"
+            },
+            "status": {
+              "title": "Status",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            },
+            "updated_by": {
+              "title": "Updated By",
+              "type": "string"
+            }
+          },
+          "required": [
+            "column_id",
+            "language",
+            "code_text",
+            "status",
+            "updated_at",
+            "updated_by"
+          ],
+          "title": "KnowhowRowCode",
+          "type": "object"
+        },
+        "KnowhowRowCreate": {
+          "properties": {
+            "cells": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "title": "Cells",
+              "type": "object"
+            },
+            "position": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Position"
+            }
+          },
+          "title": "KnowhowRowCreate",
+          "type": "object"
+        },
+        "KnowhowRowDetail": {
+          "properties": {
+            "cells": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowRowCell"
+              },
+              "title": "Cells",
+              "type": "array"
+            },
+            "code": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowRowCode"
+              },
+              "title": "Code",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "title": "KnowhowRowDetail",
+          "type": "object"
+        },
+        "KnowhowTableCreate": {
+          "properties": {
+            "anchor_index": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anchor Index"
+            },
+            "columns": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowNewColumnInput"
+              },
+              "title": "Columns",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "title"
+          ],
+          "title": "KnowhowTableCreate",
+          "type": "object"
+        },
         "KnowhowTableDetail": {
           "properties": {
+            "anchor_column_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anchor Column Id"
+            },
             "columns": {
               "items": {
                 "$ref": "#/components/schemas/KnowhowColumn"
@@ -1586,6 +2256,45 @@
             "title"
           ],
           "title": "KnowhowTableDetail",
+          "type": "object"
+        },
+        "KnowhowTablePatch": {
+          "properties": {
+            "anchor_column_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anchor Column Id"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Description"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Title"
+            }
+          },
+          "title": "KnowhowTablePatch",
           "type": "object"
         },
         "KnowhowTableSummary": {
@@ -4903,6 +5612,270 @@
           "summary": "Revoke Agent Token"
         }
       },
+      "/api/agent/knowhow/rows/{row_id}": {
+        "get": {
+          "operationId": "get_agent_row_api_agent_knowhow_rows__row_id__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowRowDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Agent Row"
+        }
+      },
+      "/api/agent/knowhow/rows/{row_id}/cells/{column_id}/code": {
+        "delete": {
+          "operationId": "delete_agent_cell_code_api_agent_knowhow_rows__row_id__cells__column_id__code_delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Agent Cell Code"
+        },
+        "get": {
+          "operationId": "get_agent_cell_code_api_agent_knowhow_rows__row_id__cells__column_id__code_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowCellCodeResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Agent Cell Code"
+        },
+        "put": {
+          "operationId": "put_agent_cell_code_api_agent_knowhow_rows__row_id__cells__column_id__code_put",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowCellCodePut"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowCellCodeResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Put Agent Cell Code"
+        }
+      },
+      "/api/agent/knowhow/tables": {
+        "get": {
+          "operationId": "list_agent_tables_api_agent_knowhow_tables_get",
+          "parameters": [
+            {
+              "in": "query",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/KnowhowAgentTable"
+                    },
+                    "title": "Response List Agent Tables Api Agent Knowhow Tables Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Agent Tables"
+        }
+      },
+      "/api/agent/knowhow/tables/{table_id}/discrimination": {
+        "get": {
+          "operationId": "get_agent_discrimination_api_agent_knowhow_tables__table_id__discrimination_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowDiscriminationSet"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Agent Discrimination"
+        }
+      },
       "/api/answers/{answer_id}/feedback": {
         "post": {
           "operationId": "submit_feedback_api_answers__answer_id__feedback_post",
@@ -7717,11 +8690,59 @@
             }
           },
           "summary": "List Knowhow Tables"
+        },
+        "post": {
+          "description": "Create-table wizard backend: an EMPTY table (title + column\ndefinitions only, no grid/rows — mirrors import_table's create step\nminus the file). Does not schedule a reprojection (nothing to project\nyet on a zero-row table); the first row/cell mutation schedules the\ntable's first real run.",
+          "operationId": "create_knowhow_table_api_notebooks__notebook_id__knowhow_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowTableCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowTableDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Knowhow Table"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/import": {
         "post": {
-          "description": "Parse -> validate -> create table -> insert every row -> launch a\nbackground full-table projection (mirrors build_kg's background_jobs.\nsubmit pattern, including copy_context propagation of the per-user model\ncontext) -> return the FULL table detail immediately. Rows carry\nprojection_status='pending'/'syncing' until the background job advances\nthem to 'synced'/'failed'. The frontend does NOT poll the detail endpoint —\na row's settled status is observed the next time the table is (re)opened or\nthe caller explicitly refreshes it.",
+          "description": "Parse -> validate -> create table -> insert every row -> schedule a\ndebounced background full-table projection (ProjectionScheduler — PR-2+3\nTask 3; NEVER a raw background_jobs.submit call) -> return the FULL table\ndetail immediately. Rows carry projection_status='pending'/'syncing'\nuntil the background job advances them to 'synced'/'failed'. The\nfrontend does NOT poll the detail endpoint — a row's settled status is\nobserved the next time the table is (re)opened or the caller explicitly\nrefreshes it.\n\n``columns_json``=``[{name,kind}]`` + the separate ``anchor_index`` form\nfield (PR-2+3 Task 3 wire — kind is one of three non-anchor values; the\nrow-title designation is named ONLY via anchor_index, never inline).",
           "operationId": "import_knowhow_table_api_notebooks__notebook_id__knowhow_import_post",
           "parameters": [
             {
@@ -7904,11 +8925,308 @@
             }
           },
           "summary": "Get Knowhow Table"
+        },
+        "patch": {
+          "description": "title/description/anchor_column_id are all optional; anchor_column_id\nadditionally distinguishes \"omitted\" (leave alone) from \"explicit null\"\n(clear the row-title designation) via ``model_fields_set`` — omission and\nNone both parse to the same Python value, so only the set of keys the\nclient actually sent tells them apart. A patch that only renames the\ntable still schedules reprojection: the table title feeds every row's\nchunk section_path label (design doc §④), so renaming it is itself a\ncontent change from the projector's point of view.",
+          "operationId": "patch_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowTablePatch"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowTableDetail"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Patch Knowhow Table"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/append": {
+        "post": {
+          "description": "Excel append import (design doc §② 路B): matches the uploaded file's\nheader BY COLUMN NAME against the table's existing columns (never by\nposition — see knowhow_api._align_rows_to_table_columns). mode=preview\nparses+aligns without writing anything, reporting what commit WOULD do\n(rows_preview/total_rows/unmatched_columns/duplicate_titles); mode=commit\nperforms the identical alignment, actually appends the rows, and\nschedules a debounced reprojection exactly like every other mutating\nknowhow endpoint.",
+          "operationId": "append_knowhow_rows_api_notebooks__notebook_id__knowhow__table_id__append_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_append_knowhow_rows_api_notebooks__notebook_id__knowhow__table_id__append_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/KnowhowAppendPreview"
+                      },
+                      {
+                        "$ref": "#/components/schemas/KnowhowAppendResult"
+                      }
+                    ],
+                    "title": "Response Append Knowhow Rows Api Notebooks  Notebook Id  Knowhow  Table Id  Append Post"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Append Knowhow Rows"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/columns": {
+        "post": {
+          "operationId": "add_knowhow_column_api_notebooks__notebook_id__knowhow__table_id__columns_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowColumnCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowColumn"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Add Knowhow Column"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/columns/{column_id}": {
+        "delete": {
+          "operationId": "delete_knowhow_column_api_notebooks__notebook_id__knowhow__table_id__columns__column_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Knowhow Column"
+        },
+        "patch": {
+          "operationId": "patch_knowhow_column_api_notebooks__notebook_id__knowhow__table_id__columns__column_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowColumnPatch"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowColumn"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Patch Knowhow Column"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/reproject": {
         "post": {
-          "description": "Full-rebuild escape hatch (task brief: \"全量重投影逃生口，后台执行\") —\nlaunches KnowhowProjector.project_table (NEVER the seq-gated incremental\npath) in the background and responds immediately with a status body,\nmirroring build_kg/rebuild_kg's synchronous-response-then-background-work\nshape exactly.",
+          "description": "Full-rebuild escape hatch (task brief: \"全量重投影逃生口，后台执行\") —\nschedules KnowhowProjector.project_table (NEVER the seq-gated incremental\npath, and NEVER a raw background_jobs.submit — always through\nProjectionScheduler, PR-2+3 Task 3) and responds immediately with a\nstatus body, mirroring build_kg/rebuild_kg's\nsynchronous-response-then-background-work shape exactly.",
           "operationId": "reproject_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__reproject_post",
           "parameters": [
             {
@@ -7955,6 +9273,304 @@
             }
           },
           "summary": "Reproject Knowhow Table"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows": {
+        "post": {
+          "operationId": "add_knowhow_row_api_notebooks__notebook_id__knowhow__table_id__rows_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowRowCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowRow"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Add Knowhow Row"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}": {
+        "delete": {
+          "operationId": "delete_knowhow_row_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Knowhow Row"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}": {
+        "patch": {
+          "description": "Returns {row_id,column_id,content_md,projection_status} so the caller\ncan refresh just this row's sync badge without re-fetching the whole\ntable. row_id/column_id validity is checked twice, deliberately: the\ntable-scoped membership check (belongs to THIS table_id, not merely SOME\ntable) and the store's own validate_cell_target (same-table pairing) —\nboth funnel into the same 400 \"格子定位不合法\" so a client sees one\nconsistent error regardless of which check actually caught it.",
+          "operationId": "patch_knowhow_cell_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowCellPatch"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowCellPatchResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Patch Knowhow Cell"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/optimize": {
+        "post": {
+          "operationId": "optimize_knowhow_cell_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__optimize_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowCellOptimizeResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Optimize Knowhow Cell"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/template": {
+        "get": {
+          "description": "Excel template download (design doc §② 路B): the table's CURRENT\ncolumn header (+ per-column kind hint / row-title annotation), generated\nfresh on every request — never cached, so it always reflects whatever\ncolumns exist right now. Mirrors export_reports_endpoint's\nStreamingResponse+BytesIO(via knowhow_api.build_template_xlsx)+\nContent-Disposition idiom above; see _template_content_disposition for\nwhy the filename needs the RFC 5987 `filename*=` form.",
+          "operationId": "download_knowhow_template_api_notebooks__notebook_id__knowhow__table_id__template_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Download Knowhow Template"
         }
       },
       "/api/notebooks/{notebook_id}/knowledge": {

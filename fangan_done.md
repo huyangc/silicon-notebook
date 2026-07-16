@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-07-13
+更新日期：2026-07-16
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -314,10 +314,12 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **Agent 接入 UI 与 token**：总 Memory 页可创建/停用稳定 Agent profile，签发明文只显示一次的
   opaque token，配置默认 notebook、notebook allowlist、过期时间与最小 scope，并列出、撤销 token。
   Scope 为 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
-  `ask:execute`；撤销、过期、profile 停用或 notebook 权限变化会在后续调用重新校验并立即生效。
-- **官方 MCP Streamable HTTP**：`/mcp` 提供精确七工具 `list_notebooks`、`select_notebook`、
+  `ask:execute`、`knowhow:code`；撤销、过期、profile 停用或 notebook 权限变化会在后续调用重新校验并立即生效。
+- **官方 MCP Streamable HTTP**：`/mcp` 提供 Memory/context 七工具 `list_notebooks`、`select_notebook`、
   `search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、
-  `propose_memory`。每个新 session 必须先显式选择 allowlisted notebook；数据工具继续校验 notebook，
+  `propose_memory`，及 knowhow 四工具 `list_knowhow_tables`、`get_knowhow_discrimination`、
+  `get_knowhow_row`、`put_knowhow_cell_code`（2026-07-16 随 knowhow 表 Agent 面加入，读取需
+  `knowledge:read`、代码写入需 `knowhow:code`）。每个新 session 必须先显式选择 allowlisted notebook；数据工具继续校验 notebook，
   候选只能提交不能由 Agent 确认/拒绝/弃用/晋升。loopback 可用 HTTP，非 loopback/public URL 默认
   允许明文 HTTP（放宽 Host/Origin 校验并打印启动告警），设 `MCP_REQUIRE_HTTPS=1` 恢复强制 HTTPS；
   返回私有文本按不可信 evidence 处理并做长度/结果数上限。

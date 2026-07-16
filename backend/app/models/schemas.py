@@ -493,6 +493,16 @@ class RuleCard(BaseModel):
     evidence: List[Evidence]
 
 
+class CitationKnowhowRef(BaseModel):
+    """Locator for a citation that resolves to a knowhow table cell (Task 12:
+    引用跳转). Populated only when the cited element's
+    ``source_elements.metadata`` carries a ``knowhow`` tag (written by
+    ``KnowhowProjector._write_elements``) — lets the frontend jump straight
+    into that row's drawer instead of a dead/hidden source link."""
+    table_id: str
+    row_id: str
+
+
 class Citation(BaseModel):
     label: str
     source_id: str
@@ -506,6 +516,9 @@ class Citation(BaseModel):
     memory_id: str = Field(default="", exclude_if=lambda value: not value)
     provenance: Dict[str, Any] = Field(
         default_factory=dict, exclude_if=lambda value: not value
+    )
+    knowhow: Optional[CitationKnowhowRef] = Field(
+        default=None, exclude_if=lambda value: value is None
     )
 
 
@@ -539,6 +552,14 @@ class AnswerAnchor(BaseModel):
     tier: str = "personal"
     provenance: Dict[str, Any] = Field(
         default_factory=dict, exclude_if=lambda value: not value
+    )
+    # Task 12b（引用跳转扩面）: 与 Citation.knowhow 同一 exclude_if 惯例——只有
+    # 命中单行 knowhow 格子的知识对象锚点才有值（evidence_context.py
+    # knowledge_context/parse_anchors 填充），合并多行/非 knowhow 锚点整体从
+    # JSON 缺席。这是「答案 [k] 标记命中」这条主路径（reasoning 模式）的引用
+    # 跳转入口，与 Citation 侧的回退列表入口互补。
+    knowhow: Optional[CitationKnowhowRef] = Field(
+        default=None, exclude_if=lambda value: value is None
     )
 
 
@@ -974,18 +995,23 @@ class AdminUserNotebook(BaseModel):
     updated_at: str
 
 
-# --- knowhow-tables PR-1 Task 6: import/table API response models ----------
+# --- knowhow-tables PR-1 Task 6 + PR-2+3 Task 3: import/table + editing API
+# response models -------------------------------------------------------------
 # Field names are snake_case verbatim (mirrors the store's own dict shapes in
-# app/repositories/sqlite/knowhow_store.py) — the already-delivered frontend
-# model layer (frontend/app/knowhow-model.ts) maps these exact wire keys
-# (projection_status/row_count/guessed_role/rows_preview/total_rows/
-# columns_json) to its own camelCase types, so the wire must stay snake_case.
+# app/repositories/sqlite/knowhow_store.py) with ONE deliberate exception:
+# a column's ``role`` DB/store field is exposed on the wire as ``kind`` (PR-2+3
+# Task 3 renames the wire field to match the behavior-kind vocabulary; the
+# already-delivered frontend model layer, frontend/app/knowhow-model.ts,
+# already reads ``kind`` preferentially over the legacy ``role`` name). The
+# reshaping (store dict role -> wire dict kind, table-level anchor_column_id
+# derivation) lives in services/knowhow/api.py's to_wire_table/to_wire_column
+# — these are pure wire shapes with no business logic of their own.
 
 
 class KnowhowColumn(BaseModel):
     id: str
     name: str
-    role: str
+    kind: str
     position: int
 
 
@@ -1020,14 +1046,203 @@ class KnowhowTableDetail(BaseModel):
     updated_at: str = ""
     columns: List[KnowhowColumn] = Field(default_factory=list)
     rows: List[KnowhowRow] = Field(default_factory=list)
+    # Table-level row-title-column designation (design doc §①: at most one,
+    # optional). None = no anchor column (a "record-shaped" table that only
+    # participates in retrieval, never the KG) — a real, load-bearing state,
+    # not merely "field absent", so it is always present on the wire.
+    anchor_column_id: Optional[str] = None
 
 
 class KnowhowPreviewColumn(BaseModel):
     name: str
-    guessed_role: str
+    guessed_kind: str
 
 
 class KnowhowImportPreview(BaseModel):
     columns: List[KnowhowPreviewColumn]
     rows_preview: List[List[str]]
     total_rows: int
+    anchor_suggestion: Optional[int] = None
+
+
+# --- PR-2+3 Task 3: editing API request/response models -----------------------
+# Every PATCH body field is Optional with a None default so FastAPI/pydantic
+# populates ``model_fields_set`` with exactly the keys the client actually
+# sent — the routes read that set (not the values) to distinguish "field
+# omitted" from "field explicitly set to null", which matters for
+# anchor_column_id's clear-vs-leave-alone semantics (see routes.py).
+
+
+class KnowhowTablePatch(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    anchor_column_id: Optional[str] = None
+
+
+class KnowhowColumnCreate(BaseModel):
+    name: str
+    kind: str
+    position: Optional[int] = None
+
+
+class KnowhowColumnPatch(BaseModel):
+    name: Optional[str] = None
+    kind: Optional[str] = None
+
+
+class KnowhowRowCreate(BaseModel):
+    cells: Dict[str, str] = Field(default_factory=dict)
+    position: Optional[int] = None
+
+
+class KnowhowCellPatch(BaseModel):
+    content_md: str
+
+
+class KnowhowCellPatchResult(BaseModel):
+    row_id: str
+    column_id: str
+    content_md: str
+    projection_status: str
+
+
+# --- PR-2+3 Task 3: create-empty-table wizard backend --------------------------
+# Mirrors the import endpoint's column/anchor wire shape exactly
+# (columns:[{name,kind}] + a separate anchor_index) but as a JSON body
+# instead of import's multipart form, and with no grid/rows to parse.
+
+
+class KnowhowNewColumnInput(BaseModel):
+    name: str
+    # Optional (unlike the single-column editing endpoint's KnowhowColumnCreate.
+    # kind, which IS required): this feeds services.knowhow.api's
+    # _columns_with_anchor merge, shared with the import wire, which defaults
+    # an omitted kind to 'attribute' rather than erroring — the same
+    # leniency PR-1's import wire always had for an unspecified role.
+    kind: Optional[str] = None
+
+
+class KnowhowTableCreate(BaseModel):
+    title: str
+    columns: List[KnowhowNewColumnInput] = Field(default_factory=list)
+    anchor_index: Optional[int] = None
+
+
+# --- PR-2+3 Task 6: Excel template round-trip (append preview/commit) --------
+# GET .../template streams raw xlsx bytes (StreamingResponse — see routes.py),
+# so it has no response model of its own. POST .../append's response shape
+# depends on the ``mode`` form field: preview returns KnowhowAppendPreview,
+# commit returns KnowhowAppendResult — the route's response_model is their
+# Union; the two models share no field names, so a given response is never
+# ambiguous about which one it actually is.
+
+
+class KnowhowAppendDuplicateTitle(BaseModel):
+    row_index: int
+    title: str
+
+
+class KnowhowAppendPreview(BaseModel):
+    rows_preview: List[List[str]]
+    total_rows: int
+    unmatched_columns: List[str] = Field(default_factory=list)
+    duplicate_titles: List[KnowhowAppendDuplicateTitle] = Field(default_factory=list)
+
+
+class KnowhowAppendResult(BaseModel):
+    added: int
+
+
+# --- PR-2+3 Task 8: LLM cell rewrite (explicit trigger, suggestion-only) -----
+# POST .../optimize returns only the suggestion — never writes the cell
+# itself (design doc §③: 用户逐格确认 → 回填走既有 PATCH cell 端点).
+
+
+class KnowhowCellOptimizeResult(BaseModel):
+    suggestion_md: str
+
+
+# --- PR-2+3 Task 10: Agent surface (HTTP+MCP shared core) --------------------
+# The agent-facing read/write surface — table list, discrimination set, row
+# detail, and cell-level code attachments — served under /agent/knowhow/...
+# by knowhow_agent_routes.py, reachable by EITHER a signed-in session or an
+# Agent Bearer token carrying the knowledge:read (reads) / knowhow:code (code
+# writes) scope (see app.api.deps.require_user_or_agent/user_or_agent_scope).
+# MCP tools in app.api.mcp_server share the exact same
+# app.services.knowhow.api functions and wrap their dict output in
+# _budget_response instead of validating it against these response models.
+
+
+class KnowhowAgentColumn(BaseModel):
+    id: str
+    name: str
+    kind: str
+
+
+class KnowhowAgentTable(BaseModel):
+    id: str
+    title: str
+    description: str = ""
+    row_count: int = 0
+    anchor_column_id: Optional[str] = None
+    columns: List[KnowhowAgentColumn] = Field(default_factory=list)
+
+
+class KnowhowDiscriminationMethod(BaseModel):
+    column_id: str
+    column_name: str
+    text: str
+    # Design doc §⑥-4's three-state freshness derivation, surfaced per method
+    # so a batch code-generation agent can skip already-implemented/non-stale
+    # cells without a separate get_knowhow_row round trip per row. Not part
+    # of the task brief's terse endpoint-shape listing, but explicitly called
+    # for by the design doc's own "判别集只带 code_status 三态不带代码（控体
+    # 积）" — included here (never the code body itself, keeping the
+    # discrimination payload lean).
+    code_status: str
+
+
+class KnowhowDiscriminationRow(BaseModel):
+    row_id: str
+    title: str
+    methods: List[KnowhowDiscriminationMethod] = Field(default_factory=list)
+
+
+class KnowhowDiscriminationSet(BaseModel):
+    rows: List[KnowhowDiscriminationRow] = Field(default_factory=list)
+
+
+class KnowhowRowCell(BaseModel):
+    column_id: str
+    column_name: str
+    kind: str
+    text: str
+    steps: Optional[List[str]] = None
+    items: Optional[List[str]] = None
+
+
+class KnowhowRowCode(BaseModel):
+    column_id: str
+    language: str
+    code_text: str
+    status: str
+    updated_at: str
+    updated_by: str
+
+
+class KnowhowRowDetail(BaseModel):
+    title: str
+    cells: List[KnowhowRowCell] = Field(default_factory=list)
+    code: List[KnowhowRowCode] = Field(default_factory=list)
+
+
+class KnowhowCellCodePut(BaseModel):
+    code_text: str
+    language: str = ""
+
+
+class KnowhowCellCodeResult(BaseModel):
+    code_text: Optional[str] = None
+    language: Optional[str] = None
+    status: str
+    updated_at: Optional[str] = None

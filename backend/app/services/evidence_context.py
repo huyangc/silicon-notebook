@@ -6,11 +6,12 @@ its collaborators are narrow read stores only.
 """
 from __future__ import annotations
 
+import json
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 
 from app.core.config import Settings
-from app.models.schemas import AnswerAnchor, Citation
+from app.models.schemas import AnswerAnchor, Citation, CitationKnowhowRef
 from app.repositories.ports import (
     EvidenceKnowledgeContextPort, NotebookStorePort, SourceStorePort,
 )
@@ -18,6 +19,44 @@ from app.services.retrieval import RetrievedChunk, RetrievedKnowledge, est_token
 
 
 _MARKER_GROUP_RE = re.compile(r"\[((?:k\d+\s*,\s*)*k\d+)\]")
+
+
+def _knowhow_ref(element_row: Mapping[str, Any] | None) -> CitationKnowhowRef | None:
+    """Task 12（引用跳转）: 从 `evidence_elements()` 返回的一行里取出
+    `metadata.knowhow.{table_id,row_id}`，命中才建 ref，其余（非 knowhow 元素/
+    元素已不存在/metadata 解析失败）一律安全返回 None——从不抛异常。"""
+    if not element_row:
+        return None
+    try:
+        metadata = json.loads(element_row.get("metadata") or "{}")
+    except (TypeError, ValueError):
+        return None
+    knowhow = metadata.get("knowhow") if isinstance(metadata, dict) else None
+    if not isinstance(knowhow, dict):
+        return None
+    table_id, row_id = knowhow.get("table_id"), knowhow.get("row_id")
+    if not table_id or not row_id:
+        return None
+    return CitationKnowhowRef(table_id=table_id, row_id=row_id)
+
+
+def _knowhow_ref_from_payload(payload: Mapping[str, Any]) -> CitationKnowhowRef | None:
+    """Task 12b（引用跳转扩面，锚点侧）: 从知识对象（KO）的 payload 里取
+    `table_id`/`rows`（`KnowhowProjector._ko_object_row` 写入的 §④ payload
+    shape，见 projection.py 同名 docstring）算出锚点的 knowhow 定位。
+
+    合并行规则（controller 决策，T12b brief）: 只有 `len(rows) == 1` 时才有
+    唯一无歧义的行——被多行共提合并的同一个 KO（例如被 10 行同时引用的"该
+    工具"）没有单一行可跳，此时诚实地留 None（前端不出「在表格中查看」按钮），
+    不猜第一行。非 knowhow KO（payload 里没有 rows/table_id）同样安全返回
+    None——从不抛异常，镜像 `_knowhow_ref` 的防御风格。"""
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or len(rows) != 1:
+        return None
+    table_id, row_id = payload.get("table_id"), rows[0]
+    if not table_id or not row_id:
+        return None
+    return CitationKnowhowRef(table_id=str(table_id), row_id=str(row_id))
 
 
 class EvidenceContextService:
@@ -54,6 +93,18 @@ class EvidenceContextService:
         )
         lines: list[str] = []
         evidence_by_id: dict[str, dict[str, Any]] = {}
+        # Task 12b 评审修复（grounded 主路径可达性）：chunk 锚点也要带 knowhow。
+        # 前端 buildAnswerReferences 是 anchor 优先的全有全无——答案里只要有
+        # 一个 [k] 命中，引用列表就整体走 anchor 分支，citation.knowhow 永远
+        # 被遮蔽；而 chunk 锚点（所有模式 grounded 答案的主体）此前从不带
+        # knowhow → grounded 的 chunk 模式答案（answer_prompt 要求每句有据
+        # 都标 [k]）里「在表格中查看」按钮永远不出现。这里沿用共享的
+        # knowhow_refs_for 按 element_id 批量解一次（每次组装恰好一次 store
+        # 读取，PK 上的有界 IN 查询，条数 ≤ 本次入选 chunk 数——运行效率是
+        # 一等约束）。只对单 element 的 chunk 生效：knowhow 投影的格子 chunk
+        # 恒为单 element（projection.py 每格一元素），多 element 的普通文档
+        # chunk 天然不可能是 knowhow 格子，防御性跳过。
+        single_element_keys: dict[str, str] = {}
         used = 0
         for index, chunk in enumerate(chunks, 1):
             if used >= budget and lines:
@@ -72,7 +123,15 @@ class EvidenceContextService:
                 "source_title": chunk.source_title,
                 "location_label": chunk.section_path,
                 "tier": tiers.get(origin, "personal"),
+                "knowhow": None,
             }
+            element_ids = getattr(chunk, "element_ids", None) or []
+            if len(element_ids) == 1:
+                single_element_keys[key] = element_ids[0]
+        if single_element_keys:
+            refs = self.knowhow_refs_for(single_element_keys.values())
+            for key, element_id in single_element_keys.items():
+                evidence_by_id[key]["knowhow"] = refs.get(element_id)
         return ("\n".join(lines) if lines else "(none)"), evidence_by_id
 
     def knowledge_context(
@@ -136,6 +195,10 @@ class EvidenceContextService:
                 "source_title": occurrences[0].get("source_title", "") if occurrences else "",
                 "location_label": occurrences[0].get("section_path", "") if occurrences else "",
                 "tier": tier,
+                # Task 12b（引用跳转扩面，锚点侧）: KO payload 已在内存里（同
+                # 上面 hit.payload.get("name","") 的零额外查询惯例），命中单行
+                # knowhow 格子才有值，其余（非 knowhow KO/合并多行）为 None。
+                "knowhow": _knowhow_ref_from_payload(hit.payload),
             }
 
         object_to_key = {value["object_id"]: key for key, value in evidence_by_id.items()}
@@ -196,8 +259,32 @@ class EvidenceContextService:
                     location_label=str(context.get("location_label", "")),
                     tier=str(context.get("tier", "personal")),
                     provenance=dict(context.get("provenance") or {}),
+                    # Task 12b: 只有 knowledge_context 建的 evidence_by_id 才带
+                    # "knowhow" 键；chunk_context/记忆上下文没有这个键，`.get`
+                    # 安全回退 None（既有 exclude_if 惯例下从 JSON 整体缺席）。
+                    knowhow=context.get("knowhow"),
                 ))
         return anchors
+
+    def knowhow_refs_for(self, element_ids: Iterable[str]) -> dict[str, CitationKnowhowRef]:
+        """Task 12b（引用跳转扩面）: `citations_from` 与 ask_service.py 四个
+        chunk/graph 内联 `Citation(...)` 构造点共用的批量 knowhow 定位查询——
+        不管调用方一次要建多少条引用，只发生一次 `evidence_elements()` 读取
+        (运行效率是一等约束，见仓库 memory)。入参可以带空串/重复 id（各内联
+        调用点直接从 `c.element_ids[0] if c.element_ids else ""` 取值，不必
+        先自行过滤），本方法自己去重 + 丢弃假值。返回 {element_id: ref} 映射，
+        只收命中的——调用方对未命中的 element_id 用 `.get(eid)` 拿回 None，
+        与既有 `Citation.knowhow`/`exclude_if` 惯例一致。"""
+        ids = list(dict.fromkeys(eid for eid in element_ids if eid))
+        if not ids:
+            return {}
+        elements = self.sources.evidence_elements(ids)
+        refs: dict[str, CitationKnowhowRef] = {}
+        for eid in ids:
+            ref = _knowhow_ref(elements.get(eid))
+            if ref is not None:
+                refs[eid] = ref
+        return refs
 
     def citations_from(
         self,
@@ -205,20 +292,31 @@ class EvidenceContextService:
         valid_element_ids: set[str],
         label: str,
     ) -> list[Citation]:
-        citations: list[Citation] = []
+        filtered: list[tuple[str, Any]] = []
         for hit in hits:
             tier = getattr(hit, "tier", "personal") or "personal"
             for evidence in hit.evidence:
                 if evidence.element_id and evidence.element_id not in valid_element_ids:
                     continue
-                citations.append(Citation(
-                    label=label,
-                    source_id=evidence.source_id,
-                    element_id=evidence.element_id,
-                    location_label=evidence.location_label,
-                    quoted_span=evidence.quoted_span,
-                    tier=tier,
-                ))
+                filtered.append((tier, evidence))
+
+        # Task 12（引用跳转）: 批量按 element_id 查一次 knowhow 定位标签，不管
+        # 本次要建多少条引用——绝不逐条引用各查一次(运行效率是一等约束)。
+        knowhow_refs = self.knowhow_refs_for(
+            evidence.element_id for _tier, evidence in filtered
+        )
+
+        citations: list[Citation] = []
+        for tier, evidence in filtered:
+            citations.append(Citation(
+                label=label,
+                source_id=evidence.source_id,
+                element_id=evidence.element_id,
+                location_label=evidence.location_label,
+                quoted_span=evidence.quoted_span,
+                tier=tier,
+                knowhow=knowhow_refs.get(evidence.element_id),
+            ))
         return citations
 
     @staticmethod

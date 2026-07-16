@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import secrets
 import shutil
 from pathlib import Path
@@ -9,10 +11,39 @@ from typing import Callable, TYPE_CHECKING
 from app.models.schemas import NotebookSummary
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.sharing_store import SharingStore
+from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
+from app.services.knowhow.projection import cell_chunk_id, element_id
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 
 if TYPE_CHECKING:  # runtime import would be circular (runtime constructs us)
     from app.services.repository_runtime import RepositoryCompatibilitySeams
+
+_log = logging.getLogger("silicon_notebook.sharing")
+
+
+# PR-2+3 Task 13: a knowhow cell's content_md embeds pasted images as
+# ``![alt](asset://<asset_id>)`` (design doc §①) — a deep copy mints a fresh
+# asset id per copied ``notebook_assets`` row (see copy_notebook), so every
+# cell that references one must have its markdown rewritten to point at the
+# NEW id instead of the source's. Asset ids are ``new_id("asset")`` = a
+# lowercase prefix + a dash + a 32-hex uuid4 (sqlite_repository._new_id) —
+# ``[\w-]+`` safely captures the whole thing up to the closing ``)`` the
+# markdown image syntax always supplies, with no dependency on that exact
+# format (a wider match just means "not in asset_map -> left unchanged",
+# never a wrong rewrite).
+_ASSET_REF_RE = re.compile(r"asset://([\w-]+)")
+
+
+def _rewrite_asset_refs(text: str, asset_map: dict) -> str:
+    """Rewrite every ``asset://<old_id>`` in ``text`` to ``asset://<new_id>``
+    via ``asset_map`` (old id -> new id); an id with no entry (should not
+    happen — every asset referenced by a copied cell was itself copied, see
+    copy_notebook's ordering) is left exactly as-is rather than dropped."""
+    if "asset://" not in text:
+        return text
+    return _ASSET_REF_RE.sub(
+        lambda m: f"asset://{asset_map.get(m.group(1), m.group(1))}", text
+    )
 
 
 class NotebookCopyService:
@@ -24,6 +55,13 @@ class NotebookCopyService:
     (sqlite_repository._COPY_CHUNK) and ``seams.remap_json_ids`` — so patches
     applied after repository construction stay authoritative, and the per-row
     insert seat (facade ``_insert_row``) is honoured inside the store.
+
+    ``schedule_projection`` (PR-2+3 Task 13) is the facade's
+    ``knowhow_api.get_scheduler(repo).schedule`` callable — copy_notebook
+    calls it once per copied knowhow table, right after publish, so the
+    structural KO/edge graph gets rebuilt (dynamic column-name types) without
+    the caller ever blocking on it (same debounced background scheduler every
+    editing endpoint already goes through — see ``ProjectionScheduler``).
     """
 
     def __init__(
@@ -33,11 +71,13 @@ class NotebookCopyService:
         catalog: NotebookCatalogService,
         seams: "RepositoryCompatibilitySeams",
         storage_dir: Callable[[], Path],
+        schedule_projection: Callable[[str], None],
     ) -> None:
         self._store = store
         self._catalog = catalog
         self._seams = seams
         self._storage_dir = storage_dir
+        self._schedule_projection = schedule_projection
 
     def sweep_stuck_copies(self, created_by: "str | None" = None) -> int:
         return self._store.sweep_stale_copies(created_by=created_by)
@@ -69,7 +109,15 @@ class NotebookCopyService:
 
         source_dir = self._storage_dir() / "notebooks" / source_notebook_id
         destination_dir = self._storage_dir() / "notebooks" / new_id
+        # PR-2+3 Task 13: notebook_assets' on-disk files live in a SEPARATE
+        # tree from source_dir (storage_dir/assets/<nb>/, not
+        # storage_dir/notebooks/<nb>/ — see app.services.knowhow.assets.
+        # AssetService.path_for), so they need their own copied-flag +
+        # destination path for the same "compensate only what we actually
+        # wrote" discipline as destination_dir below.
+        assets_dest_dir = self._storage_dir() / "assets" / new_id
         copied_files = False
+        assets_copied = False
         try:
             if source_dir.exists():
                 shutil.copytree(source_dir, destination_dir)
@@ -98,6 +146,29 @@ class NotebookCopyService:
             chunk_map: dict = {}
             object_map: dict = {}
             relation_map: dict = {}
+            # PR-2+3 Task 13: knowhow business-table + hidden-source-content
+            # remap maps. ``knowhow_source_ids_old`` is captured from the
+            # RAW (not-yet-mutated) snapshot, before anything below rewrites
+            # snapshot["knowhow_tables"]' own dicts in place — it is how the
+            # elements/chunks loops further down tell a knowhow row apart
+            # from an ordinary document row (both share the same snapshot
+            # queries now that neither is excluded).
+            khtbl_map: dict = {}
+            khcol_map: dict = {}
+            khrow_map: dict = {}
+            khcel_map: dict = {}
+            khcode_map: dict = {}
+            asset_map: dict = {}
+            knowhow_source_ids_old = {
+                t["hidden_source_id"]
+                for t in snapshot["knowhow_tables"]
+                if t.get("hidden_source_id")
+            }
+            # old element id -> NEW row id, populated by the elements_out
+            # loop below; the chunks_out loop reads it to recompute each
+            # knowhow chunk's id from ITS row (a chunk has no row_id column
+            # of its own — only its element_ids[0] indirectly names one).
+            element_row_new: dict = {}
 
             sources_out = []
             for data in snapshot["sources"]:
@@ -139,9 +210,116 @@ class NotebookCopyService:
                 "source_authors", authors_out, chunk_size=chunk_size
             )
 
+            # --- PR-2+3 Task 13: knowhow business tables ------------------
+            # Order is FK-safe (each leg's remap map is fully populated
+            # before the next leg that depends on it runs): tables (needs
+            # source_map for hidden_source_id) -> columns/rows (need
+            # khtbl_map) -> assets (independent; builds asset_map) -> cells
+            # (needs khrow_map + khcol_map + asset_map, for the content_md
+            # asset:// rewrite) -> cell_code (needs khrow_map + khcol_map).
+            tables_out = []
+            for data in snapshot["knowhow_tables"]:
+                data["id"] = khtbl_map.setdefault(data["id"], remapped_id(data["id"]))
+                data["notebook_id"] = new_id
+                old_hidden = data.get("hidden_source_id")
+                data["hidden_source_id"] = (
+                    source_map.get(old_hidden, old_hidden) if old_hidden else old_hidden
+                )
+                tables_out.append(data)
+            self._store.insert_copy_rows("knowhow_tables", tables_out, chunk_size=chunk_size)
+
+            columns_out = []
+            for data in snapshot["knowhow_columns"]:
+                data["id"] = khcol_map.setdefault(data["id"], remapped_id(data["id"]))
+                data["table_id"] = khtbl_map[data["table_id"]]
+                columns_out.append(data)
+            self._store.insert_copy_rows("knowhow_columns", columns_out, chunk_size=chunk_size)
+
+            rows_out = []
+            for data in snapshot["knowhow_rows"]:
+                data["id"] = khrow_map.setdefault(data["id"], remapped_id(data["id"]))
+                data["table_id"] = khtbl_map[data["table_id"]]
+                # The copy has not been (re)projected yet regardless of what
+                # the SOURCE row's own status was — 'pending' is the schema
+                # default for exactly this "not yet projected" state (see
+                # migrations.py _migration_16), and the scheduling loop at
+                # the end of this method is what will settle it.
+                data["projection_status"] = "pending"
+                rows_out.append(data)
+            self._store.insert_copy_rows("knowhow_rows", rows_out, chunk_size=chunk_size)
+
+            assets_out = []
+            asset_files: list[tuple[str, str, str]] = []  # (old_id, new_id, mime)
+            for data in snapshot["notebook_assets"]:
+                old_asset_id = data["id"]
+                new_asset_id = asset_map.setdefault(old_asset_id, remapped_id(old_asset_id))
+                data["id"] = new_asset_id
+                data["notebook_id"] = new_id
+                asset_files.append((old_asset_id, new_asset_id, data["mime"]))
+                assets_out.append(data)
+            self._store.insert_copy_rows("notebook_assets", assets_out, chunk_size=chunk_size)
+
+            if asset_files:
+                assets_src_dir = self._storage_dir() / "assets" / source_notebook_id
+                assets_dest_dir.mkdir(parents=True, exist_ok=True)
+                assets_copied = True
+                for old_asset_id, new_asset_id, mime in asset_files:
+                    ext = ALLOWED_MIME_EXTENSIONS.get(mime, "bin")
+                    src_path = assets_src_dir / f"{old_asset_id}.{ext}"
+                    if src_path.is_file():
+                        shutil.copy2(src_path, assets_dest_dir / f"{new_asset_id}.{ext}")
+
+            cells_out = []
+            for data in snapshot["knowhow_cells"]:
+                data["id"] = khcel_map.setdefault(data["id"], remapped_id(data["id"]))
+                data["row_id"] = khrow_map[data["row_id"]]
+                data["column_id"] = khcol_map[data["column_id"]]
+                data["content_md"] = _rewrite_asset_refs(
+                    data.get("content_md") or "", asset_map
+                )
+                cells_out.append(data)
+            self._store.insert_copy_rows("knowhow_cells", cells_out, chunk_size=chunk_size)
+
+            cell_code_out = []
+            for data in snapshot["knowhow_cell_code"]:
+                data["id"] = khcode_map.setdefault(data["id"], remapped_id(data["id"]))
+                data["row_id"] = khrow_map[data["row_id"]]
+                data["column_id"] = khcol_map[data["column_id"]]
+                cell_code_out.append(data)
+            self._store.insert_copy_rows(
+                "knowhow_cell_code", cell_code_out, chunk_size=chunk_size
+            )
+            # --- end knowhow business tables -------------------------------
+
             elements_out = []
             for data in snapshot["source_elements"]:
-                data["id"] = element_map.setdefault(data["id"], remapped_id(data["id"]))
+                old_element_id = data["id"]
+                if data["source_id"] in knowhow_source_ids_old:
+                    # A knowhow cell's element: recompute its id via the
+                    # SAME stable formula project_table itself uses
+                    # (app.services.knowhow.projection.element_id), keyed on
+                    # the ALREADY-remapped row/column ids, instead of an
+                    # arbitrary fresh id — this is what lets the post-copy
+                    # reprojection find this exact row already in place.
+                    metadata = json.loads(data.get("metadata") or "{}")
+                    kh_meta = dict(metadata.get("knowhow") or {})
+                    new_row_id = khrow_map[kh_meta["row_id"]]
+                    new_column_id = khcol_map[kh_meta["column_id"]]
+                    new_element_id = element_id(new_row_id, new_column_id)
+                    element_map[old_element_id] = new_element_id
+                    element_row_new[old_element_id] = new_row_id
+                    kh_meta["table_id"] = khtbl_map.get(
+                        kh_meta.get("table_id"), kh_meta.get("table_id")
+                    )
+                    kh_meta["row_id"] = new_row_id
+                    kh_meta["column_id"] = new_column_id
+                    metadata["knowhow"] = kh_meta
+                    data["metadata"] = json.dumps(metadata, ensure_ascii=False)
+                    data["id"] = new_element_id
+                else:
+                    data["id"] = element_map.setdefault(
+                        old_element_id, remapped_id(old_element_id)
+                    )
                 data["source_id"] = source_map[data["source_id"]]
                 elements_out.append(data)
             self._store.insert_copy_rows(
@@ -157,7 +335,39 @@ class NotebookCopyService:
 
             chunks_out = []
             for data in snapshot["chunks"]:
-                data["id"] = chunk_map.setdefault(data["id"], remapped_id(data["id"]))
+                old_chunk_id = data["id"]
+                if data["source_id"] in knowhow_source_ids_old:
+                    # Recompute the SAME stable chunk id project_table would
+                    # (app.services.knowhow.projection.cell_chunk_id): the
+                    # trailing "part" number (column-position-derived) is
+                    # unchanged by a copy (column position is copied as-is),
+                    # so it is read straight off the OLD id; only the
+                    # row-hash segment (a pure function of row_id) needs
+                    # recomputing for the remapped row. This is the crux of
+                    # the zero-re-embed contract — landing on this exact id
+                    # with unchanged text+section_path is what makes the
+                    # post-copy project_table pass see "nothing changed".
+                    old_element_ids = json.loads(data.get("element_ids") or "[]")
+                    if not old_element_ids:
+                        # Defensive only — the projector always writes exactly
+                        # one element id per knowhow chunk (_write_chunks).
+                        # Failing loud INSIDE the try means a genuinely
+                        # malformed source row compensates the whole copy
+                        # instead of silently producing a chunk whose id the
+                        # post-copy reprojection could never reconcile.
+                        raise ValueError(
+                            f"copy_notebook: knowhow chunk {old_chunk_id} "
+                            "缺 element_ids，无法重算稳定 id"
+                        )
+                    new_row_id = element_row_new[old_element_ids[0]]
+                    part = int(old_chunk_id.rsplit("-", 1)[-1])
+                    new_chunk_id = cell_chunk_id(new_row_id, part)
+                    chunk_map[old_chunk_id] = new_chunk_id
+                    data["id"] = new_chunk_id
+                else:
+                    data["id"] = chunk_map.setdefault(
+                        old_chunk_id, remapped_id(old_chunk_id)
+                    )
                 data["notebook_id"] = new_id
                 data["source_id"] = source_map[data["source_id"]]
                 element_ids = {"element_ids": json.loads(data.get("element_ids") or "[]")}
@@ -282,12 +492,47 @@ class NotebookCopyService:
 
             self._store.validate_copy(source_notebook_id, new_id)
             self._store.publish_copy(new_id, source_notebook.status)
-            return self._catalog.get_notebook(new_id)
         except Exception:
             self._store.compensate_copy(new_id)
             if copied_files:
                 shutil.rmtree(destination_dir, ignore_errors=True)
+            if assets_copied:
+                shutil.rmtree(assets_dest_dir, ignore_errors=True)
             raise
+        # Success-only path — publish_copy above flipped the sentinel off
+        # 'copying', and compensate_copy can no longer reap the notebooks row
+        # (its DELETE is `WHERE status = 'copying'` only, sharing_store.py).
+        # NOTHING fallible past publish may live inside the try/except: a
+        # raise here used to run compensation that deleted the published
+        # copy's chunks_fts/kg_objects_fts/knowledge_embeddings rows and
+        # rmtree'd its files while the (already published) row SURVIVED — a
+        # persistent, silently-corrupted copy sweep_stale_copies never reaps.
+        #
+        # PR-2+3 Task 13: schedule ONE structural reprojection per copied
+        # knowhow table (khtbl_map.values() are all NEW table ids, still in
+        # scope from the completed try; empty for a notebook with no knowhow
+        # tables, so this is a zero-cost no-op for the common case). The
+        # chunks/vectors already sitting in the copy are byte-identical to
+        # what project_table will independently recompute, so this rebuilds
+        # the KO/edge graph (dynamic column-name types) without a single
+        # additional embedder call — see element_id/cell_chunk_id above. A
+        # scheduling failure (realistic: threading.Timer.start() RuntimeError
+        # under thread/fd exhaustion — this codebase has documented history
+        # there) is LOGGED, never compensated: the copy itself is complete
+        # and valid; the table's manual 重建投影 button (or any later edit,
+        # which schedules the same full pass) covers a missed schedule.
+        for new_table_id in khtbl_map.values():
+            try:
+                self._schedule_projection(new_table_id)
+            except Exception:  # noqa: BLE001 — published copy must survive a scheduling failure
+                _log.warning(
+                    "copy_notebook: 副本 %s 的 knowhow 表 %s 投影调度失败"
+                    "（副本数据完整，可在表内手动重建投影）",
+                    new_id,
+                    new_table_id,
+                    exc_info=True,
+                )
+        return self._catalog.get_notebook(new_id)
 
 
 class NotebookSharingService:

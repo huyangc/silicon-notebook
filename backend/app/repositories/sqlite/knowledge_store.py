@@ -924,6 +924,31 @@ class KnowledgeStore:
             row,
         )
 
+    @staticmethod
+    def legacy_typed_table_ids(
+        connection: sqlite3.Connection, object_types: Sequence[str], id_prefix: str
+    ) -> List[str]:
+        """knowhow-tables PR-2+3 Task 2's one-shot startup migration bridge:
+        every DISTINCT ``payload.table_id`` among objects whose
+        ``object_type`` is one of ``object_types`` AND whose id starts with
+        ``id_prefix`` — the detection query
+        ``app.services.knowhow.projection.find_legacy_projected_table_ids``
+        (its only caller) needs to find knowhow tables still carrying PR-1's
+        fixed case/procedure/tool vocabulary so they can be reprojected under
+        the cell-level dynamic-type model. A plain SELECT; the caller owns
+        interpretation/scheduling. Kept here (not inline SQL in the service
+        layer) per this codebase's SQL-ownership rule (Task 27,
+        test_repository_callers_static.py): every knowledge_objects query
+        lives in this store, never in a services/* file."""
+        placeholders = ",".join("?" for _ in object_types)
+        rows = connection.execute(
+            f"SELECT DISTINCT json_extract(payload, '$.table_id') AS table_id "
+            f"FROM knowledge_objects WHERE object_type IN ({placeholders}) "
+            f"AND id LIKE ?",
+            (*object_types, f"{id_prefix}%"),
+        ).fetchall()
+        return [r["table_id"] for r in rows if r["table_id"]]
+
     def get_object_row(
         self, notebook_id: str, object_id: str
     ) -> "sqlite3.Row | None":

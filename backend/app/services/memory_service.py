@@ -51,6 +51,11 @@ AGENT_SCOPES = frozenset(
         "memory:read_candidates",
         "memory:propose",
         "ask:execute",
+        # PR-2+3 Task 10: knowhow-tables agent surface — writes a cell-level
+        # code attachment (design doc §⑥-4). Reads of the same surface use
+        # the pre-existing "knowledge:read" scope; this scope gates ONLY
+        # PUT/DELETE .../cells/{col}/code, never a read.
+        "knowhow:code",
     }
 )
 _AGENT_TOKEN_RE = re.compile(r"^snm_([^.]+)\.(.+)$")

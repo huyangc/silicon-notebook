@@ -157,29 +157,46 @@ def _clean_md_cell(raw: str) -> str:
     return cell
 
 
-ROLE_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
-    ("concept", ("概念", "违例", "类型", "名称", "violation", "concept", "type")),
-    ("identify", ("识别", "现象", "症状", "特征", "identify", "symptom", "detect")),
-    ("root_cause", ("根因", "原因", "分析", "定位", "root", "cause")),
-    ("fix", ("修复", "解决", "处理", "方法", "对策", "fix", "solution")),
-    ("tool", ("工具", "命令", "脚本", "tool", "command", "script")),
+# Behavior-kind keyword table (knowhow-tables PR-2+3 Task 1, design doc §①
+# "角色词表(2026-07-15 修订)"): the five domain-instance roles collapsed into
+# domain-neutral kinds. Order = priority (procedure before entity, so a
+# 「修复工具」-style double hit reads as a how-to column, mirroring the old
+# table's priority-by-order convention).
+KIND_KEYWORDS: list[tuple[str, tuple[str, ...]]] = [
+    ("procedure", ("识别", "方法", "步骤", "分析", "修复")),
+    ("entity", ("工具", "命令", "脚本")),
 ]
 
+# Anchor (row-title column) NAME keywords — a separate vocabulary from the
+# content kinds above, because "which column names the row" is a table-level
+# identity question, not a content-type one. Matched casefolded; deliberately
+# NO first-column fallback (design doc §① 旅行日志实证: a record-shaped table
+# has no identity column, and guessing one manufactures phantom KG nodes).
+ANCHOR_NAME_KEYWORDS: tuple[str, ...] = (
+    "名称", "概念", "类型", "violation", "name", "type", "concept",
+)
 
-def guess_roles(columns: list[str]) -> list[str]:
-    roles: list[str] = []
+
+def guess_kinds(columns: list[str]) -> tuple[list[str], "int | None"]:
+    """Best-effort header heuristics for the import/create wizards: each
+    column's behavior kind (``procedure``/``entity``/``attribute`` — never
+    ``anchor``, which is not a content kind) plus, SEPARATELY, the index of
+    the first column whose NAME suggests it holds the row identity (the
+    anchor/row-title suggestion), or ``None`` when nothing qualifies. Both
+    are suggestions only — the user confirms/edits them in the wizard."""
+    kinds: list[str] = []
     for name in columns:
         low = name.strip().casefold()
-        for role, kws in ROLE_KEYWORDS:   # 顺序即优先级：识别先于修复，规避「××识别方法」误中 fix
-            if any(k in low for k in kws):
-                roles.append(role)
+        for kind, keywords in KIND_KEYWORDS:
+            if any(keyword in low for keyword in keywords):
+                kinds.append(kind)
                 break
         else:
-            roles.append("plain")
-    hits = [i for i, r in enumerate(roles) if r == "concept"]
-    if not hits:
-        roles[0] = "concept"
-    else:
-        for i in hits[1:]:
-            roles[i] = "plain"
-    return roles
+            kinds.append("attribute")
+    anchor_index: "int | None" = None
+    for index, name in enumerate(columns):
+        low = name.strip().casefold()
+        if any(keyword in low for keyword in ANCHOR_NAME_KEYWORDS):
+            anchor_index = index
+            break
+    return kinds, anchor_index

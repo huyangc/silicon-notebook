@@ -9,6 +9,7 @@ import {
   Copy,
   ExternalLink,
   Sparkles,
+  Table2,
   ThumbsDown,
   ThumbsUp,
 } from "lucide-react";
@@ -24,6 +25,7 @@ import {
 import { AnswerMarkdown } from "./answer-markdown";
 import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
+import { mapCitationKnowhowRef } from "./knowhow-model.ts";
 import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
   formatDuration,
@@ -108,9 +110,12 @@ async function copyTextToClipboard(text: string) {
 function SelectedReferenceDetail({
   reference,
   onOpenKnowledgeGraph,
+  onOpenKnowhowRow,
 }: {
   reference: AnswerReference;
   onOpenKnowledgeGraph: (objectId?: string) => void;
+  /** Task 12（引用跳转）：命中 knowhow 格子的引用才出现「在表格中查看」按钮。 */
+  onOpenKnowhowRow: (tableId: string, rowId: string) => void;
 }) {
   const objectType = reference.anchor?.object_type || "";
   const title = referenceTitle(reference);
@@ -120,6 +125,10 @@ function SelectedReferenceDetail({
   const tier = reference.anchor?.tier || "";
   const isRelationReference = objectType === "relation";
   const canLocateInGraph = Boolean(reference.anchor?.object_id) && !isRelationReference;
+  // Task 12b（引用跳转扩面）：citation 优先，anchor 兜底——两者理论上不会同时
+  // 出现在同一条 reference 上（buildAnswerReferences 二选一），但顺序仍按
+  // "更具体的赢"的既有惯例书写，与 knowhow-citation.test.mjs 的显式断言一致。
+  const knowhowRef = mapCitationKnowhowRef(reference.citation?.knowhow ?? reference.anchor?.knowhow);
   return (
     <aside className="cite-detail-card" aria-live="polite">
       <div className="cite-detail-head">
@@ -148,6 +157,16 @@ function SelectedReferenceDetail({
           <ExternalLink size={14} />
           {isRelationReference ? "关系证据不可定位" : "知识图谱"}
         </button>
+        {knowhowRef && (
+          <button
+            type="button"
+            onClick={() => onOpenKnowhowRow(knowhowRef.tableId, knowhowRef.rowId)}
+            title="在 Knowhow 表格中查看这一行"
+          >
+            <Table2 size={14} />
+            在表格中查看
+          </button>
+        )}
       </div>
       <h4><LatexText text={title} isFormula={objectType === "formula"} /></h4>
       {snippet && <p><LatexText text={snippet} /></p>}
@@ -162,11 +181,13 @@ function CitationPopover({
   anchorRect,
   onClose,
   onOpenKnowledgeGraph,
+  onOpenKnowhowRow,
 }: {
   reference: AnswerReference;
   anchorRect: DOMRect;
   onClose: () => void;
   onOpenKnowledgeGraph: (objectId?: string) => void;
+  onOpenKnowhowRow: (tableId: string, rowId: string) => void;
 }) {
   const ref = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{ top: number; left: number }>(
@@ -210,7 +231,11 @@ function CitationPopover({
       role="dialog"
       style={{ position: "fixed", top: pos.top, left: pos.left }}
     >
-      <SelectedReferenceDetail reference={reference} onOpenKnowledgeGraph={onOpenKnowledgeGraph} />
+      <SelectedReferenceDetail
+        reference={reference}
+        onOpenKnowledgeGraph={onOpenKnowledgeGraph}
+        onOpenKnowhowRow={onOpenKnowhowRow}
+      />
     </div>
   );
 }
@@ -281,6 +306,7 @@ export function AnswerView({
   feedbackSent,
   onFeedback,
   onOpenKnowledgeGraph,
+  onOpenKnowhowRow,
   notebookId,
   onBuildScaleIndex,
   buildingScaleIndex,
@@ -291,6 +317,9 @@ export function AnswerView({
   feedbackSent: string;
   onFeedback: (rating: "useful" | "not_useful") => void;
   onOpenKnowledgeGraph: (objectId?: string) => void;
+  /** Task 12（引用跳转）：命中 knowhow 格子的引用点「在表格中查看」时调用，
+   * page.tsx 据此打开 Knowhow 面板并定位到该表该行的抽屉。 */
+  onOpenKnowhowRow: (tableId: string, rowId: string) => void;
   notebookId: string | null;
   onBuildScaleIndex: (notebookId: string) => void;
   buildingScaleIndex: boolean;
@@ -387,6 +416,7 @@ export function AnswerView({
           anchorRect={citePopover.rect}
           onClose={() => setCitePopover(null)}
           onOpenKnowledgeGraph={onOpenKnowledgeGraph}
+          onOpenKnowhowRow={onOpenKnowhowRow}
         />
       )}
       <div className="answer-feedback">

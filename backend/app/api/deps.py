@@ -111,3 +111,151 @@ def memory_preview_client():
 
 def mcp_memory_repository() -> McpMemoryRepository:
     return cast(McpMemoryRepository, repository())
+
+
+# --- knowhow-tables PR-2+3 Task 10: "session OR Agent token" dependency -----
+# Appended at EOF rather than interleaved above (e.g. right after
+# get_current_user, which it otherwise reads a lot like): every line above
+# this point is individually pinned by test_repository_surface_manifest.py
+# (_runtime at :20/:23/:26/:29/:32, resolve_session at :57, current_user
+# at :61, llm_client at :109, ...) and test_repository_callers_static.py —
+# inserting anything above them shifts every one of those line numbers.
+# Appending here keeps every existing pin exactly where it already is (same
+# zero-line-shift discipline documented in services/knowhow/api.py above its
+# own Task 10 section).
+from contextlib import asynccontextmanager  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+
+
+async def _resolve_session_user(request: Request) -> UserProfile:
+    """Session-Bearer -> UserProfile: the SAME resolve-or-auth_optional-
+    fallback-or-401 behavior as get_current_user's own body, DUPLICATED
+    rather than extracted/shared — get_current_user's body has individual
+    lines pinned by both architecture guards (see this section's own header
+    comment), so refactoring it to share this helper would shift those pins
+    for zero behavioral gain. Used only by user_or_agent_scope's session
+    branch below; get_current_user itself is untouched."""
+    settings = get_settings()
+    repo = identity_repository()
+    token = _bearer_token(request)
+    if token:
+        user = await run_in_threadpool(repo.resolve_session, token)
+        if user is None:
+            raise HTTPException(status_code=401, detail="invalid or expired session")
+        return user
+    if settings.auth_optional:
+        return await run_in_threadpool(repo.current_user)  # ContextVar 未设 → seeded admin
+    raise HTTPException(status_code=401, detail="authentication required")
+
+
+@dataclass(frozen=True)
+class RequestActor:
+    """Who is making this request — a signed-in user or an authenticated
+    Agent token — reduced to what knowhow_agent_routes.py/mcp_server.py need:
+    the resolved UserProfile (already set as the request's current user via
+    set_request_user), and an actor_label for a write's audit trail (e.g.
+    knowhow_cell_code.updated_by) that reads naturally for either kind of
+    caller (an Agent's profile_name, or a session user's own id)."""
+    user: UserProfile
+    is_agent: bool
+    actor_label: str
+
+
+@asynccontextmanager
+async def user_or_agent_scope(
+    request: Request,
+    notebook_id: str,
+    scope: str,
+    *,
+    write: bool = False,
+    not_found_detail: str = "Notebook not found",
+) -> AsyncIterator[RequestActor]:
+    """The auth CORE behind require_user_or_agent (see that factory for the
+    Depends()-shaped wrapper used by a route whose notebook_id is a plain
+    path/query parameter). A row/table-scoped agent route that must resolve
+    notebook_id via a store lookup FIRST — no notebook_id in its URL at all,
+    e.g. /agent/knowhow/rows/{row_id}/... — calls this directly as an async
+    context manager instead, after that resolution; both paths share 100% of
+    the security logic below, never duplicated.
+
+    Bearer starting with ``snm_`` -> Agent token: resolve_agent_token (401 on
+    a bad/expired/unknown token, mirrors AgentBearerMiddleware's own wording
+    in app.api.mcp_server), then require_agent_access(principal, scope,
+    notebook_id) — a LIVE re-check of scope/allowlist/revocation/expiry;
+    PermissionError -> 404 (this codebase's "never confirm-or-deny a
+    resource's mere existence via 403" convention: unauthorized and
+    nonexistent get the identical response — see require_notebook_write/
+    require_notebook_read above). ``write`` is IGNORED for an Agent
+    principal — its read/write capability is entirely scope-driven (the
+    CALLER picks knowledge:read for a read, knowhow:code for a code write),
+    never a second owner/reader axis layered on top.
+
+    Otherwise -> session Bearer (or the auth_optional seeded-admin
+    fallback): resolves the user like get_current_user, then applies
+    notebook_access_repository()'s existing owner-only (write=True) or
+    owner-or-reader (write=False) guard — ``scope`` is IGNORED for a session
+    user (design doc §⑥-4: "写入走新增 scope knowhow:code（用户界面走会话鉴
+    权）" — a session's authority is notebook membership, never a scope).
+
+    Either branch sets the request's current-user ContextVar (mirrors
+    mcp_server._owner_request_context for the Agent branch, get_current_user
+    for the session branch) for the duration of the ``yield`` and resets it
+    in ``finally`` — every downstream repository call this feature makes
+    depends on that boundary being set correctly."""
+    token = _bearer_token(request)
+    if token.startswith("snm_"):
+        service = memory_service()
+        principal = await run_in_threadpool(service.resolve_agent_token, token)
+        if principal is None:
+            raise HTTPException(status_code=401, detail="invalid or expired Agent token")
+        try:
+            await run_in_threadpool(
+                service.require_agent_access, principal, scope, notebook_id
+            )
+        except PermissionError:
+            raise HTTPException(status_code=404, detail=not_found_detail)
+        owner = UserProfile(
+            id=principal.owner_id, email="", display_name=principal.profile_name,
+            role="user",
+        )
+        marker = set_request_user(owner)
+        try:
+            yield RequestActor(
+                user=owner, is_agent=True, actor_label=principal.profile_name
+            )
+        finally:
+            reset_request_user(marker)
+    else:
+        user = await _resolve_session_user(request)
+        guard = (
+            notebook_access_repository().user_can_access_notebook
+            if write
+            else notebook_access_repository().user_can_read_notebook
+        )
+        allowed = await run_in_threadpool(guard, notebook_id, user.id)
+        if not allowed:
+            raise HTTPException(status_code=404, detail=not_found_detail)
+        marker = set_request_user(user)
+        try:
+            yield RequestActor(user=user, is_agent=False, actor_label=user.id)
+        finally:
+            reset_request_user(marker)
+
+
+def require_user_or_agent(scope: str, *, write: bool = False):
+    """Dependency FACTORY for a route whose notebook_id is directly a
+    path/query parameter — FastAPI binds the inner dependency's own
+    ``notebook_id: str`` argument the same way it would for any route
+    function (path segment if the route has one by that name, else a query
+    parameter — e.g. ``GET /agent/knowhow/tables?notebook_id=``). A
+    row/table-scoped route that must resolve notebook_id via a store lookup
+    does NOT use this factory; it calls ``user_or_agent_scope`` directly
+    (see its own docstring)."""
+    async def _dependency(
+        request: Request, notebook_id: str,
+    ) -> AsyncIterator[RequestActor]:
+        async with user_or_agent_scope(
+            request, notebook_id, scope, write=write
+        ) as actor:
+            yield actor
+    return _dependency

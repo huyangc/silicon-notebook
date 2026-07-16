@@ -3,10 +3,22 @@ deterministic projector (Task 5's KnowhowProjector) relies on for machine-side
 output: stripping images to a placeholder, and turning a cell's markdown into
 structured steps / a deduped tool-name list.
 See docs/superpowers/plans/2026-07-15-knowhow-tables-pr1.md Task 5.
+
+Task 2 (knowhow-tables PR-2+3): three more pure transforms the cell-level
+node-model projector needs — ``node_name``/``value_key`` (a KO's display name
+and cross-row merge identity, design doc §④) and ``compose_row_title`` (the
+synthesized row label for anchor-less/blank-anchor rows, design doc §①).
 """
 from __future__ import annotations
 
-from app.services.knowhow.textops import parse_steps, split_tools, strip_images
+from app.services.knowhow.textops import (
+    compose_row_title,
+    node_name,
+    parse_steps,
+    split_tools,
+    strip_images,
+    value_key,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -139,3 +151,142 @@ def test_split_tools_empty_string_returns_empty_list():
 
 def test_split_tools_none_returns_empty_list():
     assert split_tools(None) == []
+
+
+# ---------------------------------------------------------------------------
+# node_name (knowhow-tables PR-2+3 Task 2: a KO's display name — design doc
+# §④ "名=格值首行截断")
+# ---------------------------------------------------------------------------
+
+
+def test_node_name_short_single_line_is_unchanged():
+    assert node_name("过冲问题") == "过冲问题"
+
+
+def test_node_name_takes_first_line_only():
+    assert node_name("过冲问题\n第二行说明") == "过冲问题"
+
+
+def test_node_name_strips_surrounding_whitespace_before_taking_first_line():
+    assert node_name("\n\n  过冲问题  \n第二行") == "过冲问题"
+
+
+def test_node_name_truncates_at_40_chars_with_ellipsis():
+    text = "甲" * 45
+    result = node_name(text)
+    assert result == "甲" * 40 + "…"
+
+
+def test_node_name_exactly_40_chars_no_ellipsis():
+    text = "甲" * 40
+    assert node_name(text) == text
+
+
+def test_node_name_empty_string_returns_empty():
+    assert node_name("") == ""
+
+
+def test_node_name_none_returns_empty():
+    assert node_name(None) == ""
+
+
+def test_node_name_whitespace_only_returns_empty():
+    assert node_name("   \n  ") == ""
+
+
+# ---------------------------------------------------------------------------
+# value_key (knowhow-tables PR-2+3 Task 2: cross-row merge identity — design
+# doc §④ "同列同值跨行归并", KO id = sha1(table_id|column_name|value_key))
+# ---------------------------------------------------------------------------
+
+
+def test_value_key_casefolds():
+    assert value_key("Oscilloscope") == value_key("oscilloscope") == value_key("OSCILLOSCOPE")
+
+
+def test_value_key_ignores_surrounding_and_internal_whitespace():
+    assert value_key("示波器") == value_key("  示波器  ") == value_key("示 波 器")
+
+
+def test_value_key_ignores_punctuation():
+    assert value_key("示波器") == value_key("示波器。") == value_key("示波器!")
+
+
+def test_value_key_distinguishes_different_values():
+    assert value_key("示波器") != value_key("万用表")
+
+
+def test_value_key_short_value_is_the_normalized_text_itself():
+    # <=80 chars after normalization -> the normalized string IS the key (no
+    # hashing) so it stays human-legible for debugging/direct DB inspection.
+    assert value_key("示波器") == "示波器"
+    assert value_key("Oscilloscope") == "oscilloscope"
+
+
+def test_value_key_long_value_hashes_to_32_hex_chars():
+    long_text = "甲" * 200
+    result = value_key(long_text)
+    assert len(result) == 32
+    assert all(c in "0123456789abcdef" for c in result)
+
+
+def test_value_key_long_value_is_deterministic():
+    long_text = "甲" * 200
+    assert value_key(long_text) == value_key(long_text)
+
+
+def test_value_key_long_value_normalizes_before_hashing():
+    """Two long values differing only by whitespace/punctuation/case still
+    collide to the same key — the >80 threshold is measured AFTER
+    normalization, and normalization runs before the hash, not after."""
+    base = "甲" * 90
+    padded = " ".join(list("甲" * 90)) + "!!!"  # same content, lots of noise
+    assert value_key(base) == value_key(padded)
+
+
+def test_value_key_empty_string_returns_empty():
+    assert value_key("") == ""
+
+
+def test_value_key_none_returns_empty():
+    assert value_key(None) == ""
+
+
+# ---------------------------------------------------------------------------
+# compose_row_title (knowhow-tables PR-2+3 Task 2: synthesized row label for
+# anchor-less/blank-anchor rows — design doc §① "行标题自动合成")
+# ---------------------------------------------------------------------------
+
+
+def test_compose_row_title_joins_up_to_three_nonempty_cells_with_middle_dot():
+    assert compose_row_title(["2026-01-01", "示波器记录", "正常"]) == (
+        "2026-01-01 · 示波器记录 · 正常"
+    )
+
+
+def test_compose_row_title_skips_empty_cells():
+    assert compose_row_title(["", "示波器记录", "", "正常"]) == "示波器记录 · 正常"
+
+
+def test_compose_row_title_stops_after_three_segments():
+    assert compose_row_title(["一", "二", "三", "四", "五"]) == "一 · 二 · 三"
+
+
+def test_compose_row_title_takes_first_line_of_each_cell():
+    assert compose_row_title(["标题行\n正文说明", "第二格"]) == "标题行 · 第二格"
+
+
+def test_compose_row_title_truncates_each_segment_at_16_chars():
+    long_segment = "甲" * 20
+    result = compose_row_title([long_segment])
+    assert result == "甲" * 16  # no ellipsis marker for this synthesized title
+
+
+def test_compose_row_title_all_empty_cells_returns_empty_string():
+    """The "行N" fallback is the CALLER's job (projection.py), not this
+    function's — an all-empty input just yields "" here."""
+    assert compose_row_title(["", "   ", ""]) == ""
+
+
+def test_compose_row_title_empty_list_returns_empty_string():
+    assert compose_row_title([]) == ""

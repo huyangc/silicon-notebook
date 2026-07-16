@@ -9,6 +9,13 @@ export type AnswerAnchorLike = {
   source_title?: string;
   location_label?: string;
   tier?: string;
+  // Task 12b（引用跳转扩面）：与 CitationLike.knowhow 同一 wire 形状/惯例——
+  // 只有命中单行 knowhow 格子的知识对象锚点才有此字段（后端
+  // `AnswerAnchor.knowhow`，evidence_context.py 的 knowledge_context/
+  // parse_anchors 填充），合并多行/非 knowhow 锚点整体缺席。这是「答案 [k]
+  // 标记命中」这条主路径的引用跳转入口，与 CitationLike 侧的回退列表入口
+  // 互补（buildAnswerReferences 优先展示 anchor 分支）。
+  knowhow?: { table_id: string; row_id: string } | null;
 };
 
 export type CitationLike = {
@@ -18,6 +25,12 @@ export type CitationLike = {
   location_label: string;
   quoted_span: string;
   tier?: string;
+  // Task 12（引用跳转）：命中 knowhow 格子的引用才有此字段（后端
+  // `Citation.knowhow`，非 knowhow 引用整体缺席，见 evidence_context.py
+  // citations_from 的 exclude_if 惯例）。字段名保持后端线上 snake_case——
+  // 本类型本就是 wire 形状的镜像，camelCase 映射统一交给
+  // knowhow-model.ts 的 mapCitationKnowhowRef 在使用侧做。
+  knowhow?: { table_id: string; row_id: string } | null;
 };
 
 export type AnswerReference = {

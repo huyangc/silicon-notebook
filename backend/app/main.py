@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from app.api.auth_routes import auth_router
 from app.api.debug_logs import router as debug_logs_router
 from app.api.deps import get_current_user, mcp_memory_repository, repository
+from app.api.knowhow_agent_routes import agent_router as knowhow_agent_router
 from app.api.mcp_server import create_memory_mcp, validate_mcp_deployment
 from app.api.routes import router
 from app.core import readiness
@@ -239,6 +240,12 @@ def create_app() -> FastAPI:
         router, prefix="/api", dependencies=[Depends(get_current_user)]
     )  # 其余全部需登录（router 级依赖：零逐路由遗漏）
     app.include_router(debug_logs_router, prefix="/api")
+    # Knowhow-tables agent surface (PR-2+3 Task 10): session OR Agent Bearer
+    # token, NOT the blanket get_current_user router dependency above — an
+    # Agent token is not a valid session token, so it must never reach that
+    # guard first. Every route resolves its own auth (app.api.deps.
+    # require_user_or_agent / user_or_agent_scope).
+    app.include_router(knowhow_agent_router, prefix="/api")
     app.mount("/mcp", mcp_app, name="memory-mcp")
 
     # 待确认中心事件总线：注入 recompute，供后台 job（mark_dirty）与流式端点

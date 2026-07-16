@@ -38,12 +38,15 @@ EMBED_DIM = 16
 
 # Time-series-fix-up domain column names, verbatim from the task brief
 # ("列名用时序修复域：违例概念/现象识别方法/根因分析动作/修复方法/依赖工具") —
-# chosen so that grid_parser.guess_roles's own keyword table would derive
-# the same roles unassisted (concept/identify/root_cause/fix/tool), though
-# the import call below still passes them explicitly (mirrors Task 6's
-# confirmed-mapping contract).
+# kinds updated to the PR-2+3 behavior-kind vocabulary (anchor/procedure/
+# entity/attribute; migration 17 remapped the legacy five-role instance
+# vocabulary). PR-2+3 Task 3 flips the import WIRE: the row-title column is
+# no longer a per-column value — it's the separate ANCHOR_INDEX below, sent
+# as its own form field (mirrors Task 6's confirmed-mapping contract, updated
+# for the kinds wire).
 HEADER = ["违例概念", "现象识别方法", "根因分析动作", "修复方法", "依赖工具"]
-ROLES = ["concept", "identify", "root_cause", "fix", "tool"]
+KINDS = ["attribute", "procedure", "procedure", "procedure", "entity"]
+ANCHOR_INDEX = 0
 TABLE_TITLE = "时序修复表"
 
 # A rare Latin/digit token embedded in ONE row's fix cell only — CJK-run
@@ -122,7 +125,7 @@ def _mk_notebook(client, headers, name="N"):
 
 
 def _columns_json():
-    return json.dumps([{"name": n, "role": r} for n, r in zip(HEADER, ROLES)])
+    return json.dumps([{"name": n, "kind": k} for n, k in zip(HEADER, KINDS)])
 
 
 def _import_table(client, headers, nb) -> str:
@@ -132,7 +135,11 @@ def _import_table(client, headers, nb) -> str:
         headers=headers,
         files={"file": ("rules.xlsx", data,
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-        data={"title": TABLE_TITLE, "columns_json": _columns_json()},
+        data={
+            "title": TABLE_TITLE,
+            "columns_json": _columns_json(),
+            "anchor_index": str(ANCHOR_INDEX),
+        },
     )
     assert resp.status_code == 200, resp.text
     return resp.json()["id"]
@@ -308,8 +315,11 @@ def test_fts_and_retrieval_hit_knowhow_chunk_with_element_backtrace(client, impo
 
 # ---------------------------------------------------------------------------
 # Assertion 3: the hidden source never appears in GET /sources, but KO type
-# counts and the knowledge graph include the projected case/procedure/tool
-# objects and their identified_by/fixed_by/requires_tool edges.
+# counts and the knowledge graph include the projected cell-level objects
+# (knowhow-tables PR-2+3 Task 2: object_type is now the CELL'S OWN COLUMN
+# NAME — a dynamic type, not the PR-1 fixed case/procedure/tool vocabulary)
+# and their `about` edges (every non-row-title cell --about--> the row-title
+# cell — design doc §④, "边直写...统一用既有 about").
 # ---------------------------------------------------------------------------
 
 
@@ -327,20 +337,28 @@ def test_hidden_source_excluded_but_ko_counts_and_graph_include_projection(clien
     types_resp = client.get(f"/api/notebooks/{nb}/knowledge-types", headers=headers)
     assert types_resp.status_code == 200, types_resp.text
     counts = {t["object_type"]: t["count"] for t in types_resp.json()}
-    # 3 rows -> 3 cases; 3 procedure-role columns (identify/root_cause/fix)
-    # filled every row -> 9 procedures; tool column values "示波器"/"万用
-    # 表"/"示波器" dedup by casefolded name within the table -> 2 tools.
-    assert counts.get("case") == len(DATA_ROWS)
-    assert counts.get("procedure") == len(DATA_ROWS) * 3
-    assert counts.get("tool") == 2
+    # Every column is its OWN dynamic object_type now — no case/procedure/
+    # tool bucket survives. 3 rows, every non-entity column holds a distinct
+    # value per row -> 3 KOs each; the entity column's values ("示波器"/
+    # "万用表"/"示波器") dedup by casefolded name across rows -> 2 KOs.
+    assert counts.get("违例概念") == len(DATA_ROWS)
+    assert counts.get("现象识别方法") == len(DATA_ROWS)
+    assert counts.get("根因分析动作") == len(DATA_ROWS)
+    assert counts.get("修复方法") == len(DATA_ROWS)
+    assert counts.get("依赖工具") == 2
+    assert not ({"case", "procedure", "tool"} & set(counts))
 
     graph_resp = client.get(f"/api/notebooks/{nb}/graph", headers=headers)
     assert graph_resp.status_code == 200, graph_resp.text
     graph = graph_resp.json()
     node_types = {n["object_type"] for n in graph["nodes"]}
-    assert {"case", "procedure", "tool"} <= node_types
+    assert {"违例概念", "现象识别方法", "根因分析动作", "修复方法", "依赖工具"} <= node_types
     edge_relations = {e["relation"] for e in graph["edges"]}
-    assert {"identified_by", "fixed_by", "requires_tool"} <= edge_relations
+    # Every knowhow-derived edge is now the SAME generic `about` relation
+    # (design doc §④: "语义全在节点类型上，边只表达行结构") — the domain
+    # semantics that used to distinguish identified_by/diagnosed_by/
+    # fixed_by/requires_tool now live entirely on the node's object_type.
+    assert edge_relations == {"about"}
 
 
 # ---------------------------------------------------------------------------
@@ -413,12 +431,15 @@ def test_delete_table_clears_chunk_fts_vector_and_ko_so_query_no_longer_hits(cli
     assert fts_after == 0
     assert ko_after == 0
 
-    # The knowledge-types view has nothing left to show for this table either.
+    # The knowledge-types view has nothing left to show for this table either
+    # (dynamic per-column types, not the old fixed case/procedure/tool names).
     types_resp = client.get(f"/api/notebooks/{nb}/knowledge-types", headers=headers)
     counts = {t["object_type"]: t["count"] for t in types_resp.json()}
-    assert counts.get("case", 0) == 0
-    assert counts.get("procedure", 0) == 0
-    assert counts.get("tool", 0) == 0
+    assert counts.get("违例概念", 0) == 0
+    assert counts.get("现象识别方法", 0) == 0
+    assert counts.get("根因分析动作", 0) == 0
+    assert counts.get("修复方法", 0) == 0
+    assert counts.get("依赖工具", 0) == 0
 
     # Same unique-term query, same surfaces as assertion 2 — nothing hits now.
     with repo._connect() as db:

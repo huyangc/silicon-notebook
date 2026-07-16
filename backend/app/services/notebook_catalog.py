@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from datetime import datetime
-from typing import Dict, List
+from pathlib import Path
+from typing import Callable, Dict, List
 
 from app.models.schemas import (
     NotebookAnalytics,
@@ -31,6 +33,29 @@ def _created_label(value: str) -> str:
     except ValueError:
         dt = datetime.now()
     return f"{dt.year}年{dt.month}月{dt.day}日"
+
+
+def _delete_notebook_asset_dir(storage_dir: Path, notebook_id: str) -> None:
+    """Remove the whole per-notebook pasted-image-asset directory
+    (``storage_dir/assets/<notebook_id>/`` — see
+    ``app.services.knowhow.assets.AssetService.path_for`` for the same path
+    formula).
+
+    ``notebook_assets`` ROWS need no explicit delete here: the column is
+    ``notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE``
+    (migration 16) and every connection runs with ``PRAGMA foreign_keys = ON``
+    (``SqliteDatabase._new_connection``), so they disappear automatically the
+    moment ``delete_row_and_orphan_embeddings`` deletes the ``notebooks`` row
+    above — verified empirically (knowhow-tables PR-2+3 Task 14): unlike
+    ``knowledge_embeddings`` (which has no FK and needs the explicit delete a
+    few lines up), ``notebook_assets`` cascades cleanly. Only the on-disk
+    FILES need this explicit cleanup (cascade never touches the filesystem).
+    Mirrors ``_delete_source_file``'s exists-before-touch tolerance so a
+    notebook that never had an asset uploaded (directory never created)
+    deletes cleanly."""
+    asset_dir = Path(storage_dir) / "assets" / notebook_id
+    if asset_dir.exists():
+        shutil.rmtree(asset_dir, ignore_errors=True)
 
 
 class NotebookSummaryQuery:
@@ -229,11 +254,23 @@ class NotebookCatalogService:
         summaries: NotebookSummaryQuery,
         queries: QueryStore,
         identity: IdentityStore,
+        storage_dir: Callable[[], Path],
     ) -> None:
+        """``storage_dir`` is a zero-arg callable resolving the LIVE storage
+        root (knowhow-tables PR-2+3 Task 14) — a callable rather than a Path
+        snapshot because the facade's ``storage_dir`` is a mutable property
+        (tests monkeypatch it per instance), exactly the convention
+        ``NotebookCopyService`` already uses for the same collaborator.
+        ``delete_notebook`` reads it to sweep the notebook's pasted-image
+        asset directory; injected at construction so EVERY caller gets the
+        cleanup — routes reach this service directly via
+        ``deps.notebook_catalog_repository()`` (``repo._runtime.catalog``),
+        never through the facade delegate."""
         self._store = store
         self._summaries = summaries
         self._queries = queries
         self._identity = identity
+        self._storage_dir = storage_dir
         self.kg_building: set = set()
         self.memory_retriever = None
 
@@ -275,9 +312,15 @@ class NotebookCatalogService:
     def delete_notebook(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing
         file_paths = self._store.delete_row_and_orphan_embeddings(notebook_id)
-        # DB deletion is committed above; only then remove files on disk.
+        # DB deletion is committed above; only then remove files on disk —
+        # source files first, then the notebook's pasted-image asset
+        # directory (knowhow-tables PR-2+3 Task 14; unconditional, from the
+        # construction-injected live storage root, so the real HTTP delete
+        # route — which reaches this service directly, not via the facade —
+        # gets the cleanup too).
         for file_path in file_paths:
             _delete_source_file(file_path)
+        _delete_notebook_asset_dir(self._storage_dir(), notebook_id)
 
     def mark_notebook_base(self, notebook_id: str) -> None:
         self.get_notebook(notebook_id)  # raises KeyError if missing

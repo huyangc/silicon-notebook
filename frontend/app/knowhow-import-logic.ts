@@ -40,9 +40,11 @@ export function deriveDefaultTitle(filename: string): string {
 
 export type RoleOption = { value: Role; label: string };
 
-// 角色下拉选项：顺序与 ROLE_LABELS 一致（概念/现象识别/根因分析/修复方法/
-// 依赖工具/普通，见 knowhow-model.ts 的顺序注释）。单一事实来源——角色
-// 词表变化只需改 knowhow-model.ts 一处，本文件自动同步。
+// 角色下拉选项：顺序与 ROLE_LABELS 一致（deprecated：ROLE_LABELS 2026-07-15
+// 起收窄为四值 CellKind——行标题(anchor)/方法步骤/工具/事物/普通，见
+// knowhow-model.ts 的定义与顶部注释）。单一事实来源——词表变化只需改
+// knowhow-model.ts 一处，本文件自动同步。Task 5 会把行标题的选择迁移到独立
+// 的表级 anchorColumnId 选择器，届时本下拉可收窄为只剩 KIND_LABELS 三项。
 export const ROLE_OPTIONS: RoleOption[] = (Object.keys(ROLE_LABELS) as Role[]).map((role) => ({
   value: role,
   label: ROLE_LABELS[role],
@@ -61,19 +63,24 @@ export function assembleImportColumns(columns: KnowhowPreviewColumn[], roles: Ro
   }));
 }
 
-// 概念列计数（供 conceptValidationError 复用，也可单独用于展示"已选 N 列"）。
+// 行标题(anchor)列计数（供 conceptValidationError 复用，也可单独用于展示
+// "已选 N 列"）。注：角色词表 2026-07-15 收窄，原 "concept" 值已改名为
+// "anchor"（行标题），函数名/校验规则(仍是"恰好一列")暂保留——Task 5 引入
+// 独立的表级行标题列选择器后会把"恰好一列"放宽为"至多一列"并整体重做这段
+// 校验（规格①："存量「恰一」校验放宽为「至多一」"），本次只做最小改名以保
+// 持编译通过、不预先改校验语义。
 export function countConceptRoles(roles: Role[]): number {
-  return roles.filter((role) => role === "concept").length;
+  return roles.filter((role) => role === "anchor").length;
 }
 
-// concept 校验：必须恰好一列为「概念」角色，否则返回可直接展示给用户的
-// 中文提示（null 表示校验通过）。0 列/大于 1 列文案不同，帮助用户判断
-// 该新增还是该改掉多余的概念列。
+// 行标题(anchor)校验：必须恰好一列为「行标题」角色，否则返回可直接展示给
+// 用户的中文提示（null 表示校验通过）。0 列/大于 1 列文案不同，帮助用户判断
+// 该新增还是该改掉多余的行标题列。
 export function conceptValidationError(roles: Role[]): string | null {
   const count = countConceptRoles(roles);
   if (count === 1) return null;
-  if (count === 0) return "请将恰好一列设为「概念」角色（当前没有概念列）";
-  return `请将恰好一列设为「概念」角色（当前有 ${count} 列被设为概念）`;
+  if (count === 0) return "请将恰好一列设为「行标题」角色（当前没有行标题列）";
+  return `请将恰好一列设为「行标题」角色（当前有 ${count} 列被设为行标题）`;
 }
 
 // 表标题为空/纯空白视为未填写。

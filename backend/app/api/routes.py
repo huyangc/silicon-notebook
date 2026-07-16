@@ -4,7 +4,7 @@ import json
 import queue
 import zipfile
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -35,8 +35,17 @@ from app.models.schemas import (
     FeedbackRequest,
     FeedbackResponse,
     KgSearchResponse,
+    KnowhowCellPatch,
+    KnowhowCellPatchResult,
+    KnowhowColumn,
+    KnowhowColumnCreate,
+    KnowhowColumnPatch,
     KnowhowImportPreview,
+    KnowhowRow,
+    KnowhowRowCreate,
+    KnowhowTableCreate,
     KnowhowTableDetail,
+    KnowhowTablePatch,
     KnowhowTableSummary,
     KnowledgeGraph,
     KnowledgeRecord,
@@ -84,6 +93,9 @@ from app.models.schemas import (
     ScaleIndexStatus,
     UnifiedKgStatus,
     UserProfile,
+    KnowhowAppendPreview,
+    KnowhowAppendResult,
+    KnowhowCellOptimizeResult,
 )
 from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
@@ -91,6 +103,7 @@ from app.services.kg import scheduler as kg_scheduler
 from app.services.knowhow import api as knowhow_api
 from app.services.knowhow.assets import AssetService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
+from app.services.model_config import ModelNotConfiguredError
 from app.services.pending_bus import pending_bus
 from app.repositories.ports import AskStreamPort, UploadedSourceFile
 from app.api.memory_routes import memory_router
@@ -482,28 +495,31 @@ async def import_knowhow_table(
     file: UploadFile = File(...),
     title: str = Form(...),
     columns_json: str = Form(...),
+    anchor_index: Optional[int] = Form(None),
 ) -> KnowhowTableDetail:
-    """Parse -> validate -> create table -> insert every row -> launch a
-    background full-table projection (mirrors build_kg's background_jobs.
-    submit pattern, including copy_context propagation of the per-user model
-    context) -> return the FULL table detail immediately. Rows carry
-    projection_status='pending'/'syncing' until the background job advances
-    them to 'synced'/'failed'. The frontend does NOT poll the detail endpoint —
-    a row's settled status is observed the next time the table is (re)opened or
-    the caller explicitly refreshes it."""
+    """Parse -> validate -> create table -> insert every row -> schedule a
+    debounced background full-table projection (ProjectionScheduler — PR-2+3
+    Task 3; NEVER a raw background_jobs.submit call) -> return the FULL table
+    detail immediately. Rows carry projection_status='pending'/'syncing'
+    until the background job advances them to 'synced'/'failed'. The
+    frontend does NOT poll the detail endpoint — a row's settled status is
+    observed the next time the table is (re)opened or the caller explicitly
+    refreshes it.
+
+    ``columns_json``=``[{name,kind}]`` + the separate ``anchor_index`` form
+    field (PR-2+3 Task 3 wire — kind is one of three non-anchor values; the
+    row-title designation is named ONLY via anchor_index, never inline)."""
     repo = repository()
     data = await file.read()
     try:
         table_id = knowhow_api.import_table(
-            repo, notebook_id, file.filename or "import", data, title, columns_json
+            repo, notebook_id, file.filename or "import", data, title,
+            columns_json, anchor_index,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    background_jobs.submit(
-        knowhow_api.build_projector(repo).project_table, table_id,
-        name=f"knowhow-import-{table_id}", notify_pending=True,
-    )
-    return repo.get_knowhow_table(table_id)
+    knowhow_api.get_scheduler(repo).schedule(table_id)
+    return knowhow_api.to_wire_table(repo.get_knowhow_table(table_id))
 
 
 @router.get(
@@ -557,20 +573,375 @@ def delete_knowhow_table(notebook_id: str, table_id: str) -> None:
 )
 def reproject_knowhow_table(notebook_id: str, table_id: str) -> dict:
     """Full-rebuild escape hatch (task brief: "全量重投影逃生口，后台执行") —
-    launches KnowhowProjector.project_table (NEVER the seq-gated incremental
-    path) in the background and responds immediately with a status body,
-    mirroring build_kg/rebuild_kg's synchronous-response-then-background-work
-    shape exactly."""
+    schedules KnowhowProjector.project_table (NEVER the seq-gated incremental
+    path, and NEVER a raw background_jobs.submit — always through
+    ProjectionScheduler, PR-2+3 Task 3) and responds immediately with a
+    status body, mirroring build_kg/rebuild_kg's
+    synchronous-response-then-background-work shape exactly."""
     repo = repository()
     try:
         knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Table not found")
-    background_jobs.submit(
-        knowhow_api.build_projector(repo).project_table, table_id,
-        name=f"knowhow-reproject-{table_id}", notify_pending=True,
-    )
+    knowhow_api.get_scheduler(repo).schedule(table_id)
     return {"status": "reprojecting", "table_id": table_id}
+
+
+# --- knowhow-tables PR-2+3 Task 3: editing API (table/column/row/cell) +
+# create-table wizard backend. Guards mirror the import/table routes above
+# exactly (owner-only write via require_notebook_access, 404 on denial).
+# Every mutation schedules a debounced full-table reprojection via
+# knowhow_api.get_scheduler(repo).schedule(table_id) — never a raw
+# background_jobs.submit call, and never seq-gated (ProjectionScheduler
+# always runs the full deterministic project_table pass). Routes stay thin;
+# the only logic here is param parsing, the table/column/row 404-scoping
+# helpers below, and dispatch — validation/orchestration lives in
+# app.services.knowhow.api, whose ValueErrors flow through this file's
+# existing `except ValueError` 400 idiom.
+
+
+def _require_table(repo: Any, notebook_id: str, table_id: str) -> dict:
+    """Shared 404 gate: table must exist AND belong to notebook_id. Returns
+    the wire-shaped table detail (columns already renamed to kind) since
+    every caller either returns it directly or uses it to scope a row/column
+    id that must belong to THIS table (not merely notebook_id) — see
+    _require_column_in_table/_require_row_in_table below."""
+    try:
+        return knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+
+
+def _require_column_in_table(table: dict, column_id: str) -> None:
+    """A column_id from a DIFFERENT table (even one in the same notebook, or
+    one the caller has no access to at all) 404s exactly like a
+    cross-notebook table_id does — the URL's table_id is the caller's proven
+    scope, not merely notebook_id (mirrors get_table_in_notebook's own
+    cross-notebook check one level deeper)."""
+    if not any(column["id"] == column_id for column in table["columns"]):
+        raise HTTPException(status_code=404, detail="Column not found")
+
+
+def _require_row_in_table(table: dict, row_id: str) -> None:
+    if not any(row["id"] == row_id for row in table["rows"]):
+        raise HTTPException(status_code=404, detail="Row not found")
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow",
+    response_model=KnowhowTableDetail,
+    dependencies=[Depends(require_notebook_access)],
+)
+def create_knowhow_table(notebook_id: str, body: KnowhowTableCreate) -> dict:
+    """Create-table wizard backend: an EMPTY table (title + column
+    definitions only, no grid/rows — mirrors import_table's create step
+    minus the file). Does not schedule a reprojection (nothing to project
+    yet on a zero-row table); the first row/cell mutation schedules the
+    table's first real run."""
+    repo = repository()
+    try:
+        table_id = knowhow_api.create_table(
+            repo, notebook_id, body.title,
+            [{"name": column.name, "kind": column.kind} for column in body.columns],
+            body.anchor_index,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
+
+
+@router.patch(
+    "/notebooks/{notebook_id}/knowhow/{table_id}",
+    response_model=KnowhowTableDetail,
+    dependencies=[Depends(require_notebook_access)],
+)
+def patch_knowhow_table(notebook_id: str, table_id: str, patch: KnowhowTablePatch) -> dict:
+    """title/description/anchor_column_id are all optional; anchor_column_id
+    additionally distinguishes "omitted" (leave alone) from "explicit null"
+    (clear the row-title designation) via ``model_fields_set`` — omission and
+    None both parse to the same Python value, so only the set of keys the
+    client actually sent tells them apart. A patch that only renames the
+    table still schedules reprojection: the table title feeds every row's
+    chunk section_path label (design doc §④), so renaming it is itself a
+    content change from the projector's point of view."""
+    repo = repository()
+    _require_table(repo, notebook_id, table_id)
+    fields_set = patch.model_fields_set
+    try:
+        if "anchor_column_id" in fields_set:
+            repo.set_knowhow_anchor_column(table_id, patch.anchor_column_id)
+        title = patch.title if "title" in fields_set else None
+        description = patch.description if "description" in fields_set else None
+        if title is not None or description is not None:
+            repo.update_knowhow_table_meta(table_id, title=title, description=description)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    knowhow_api.get_scheduler(repo).schedule(table_id)
+    return knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/columns",
+    response_model=KnowhowColumn,
+    dependencies=[Depends(require_notebook_access)],
+)
+def add_knowhow_column(notebook_id: str, table_id: str, body: KnowhowColumnCreate) -> dict:
+    repo = repository()
+    _require_table(repo, notebook_id, table_id)
+    try:
+        column_id = repo.add_knowhow_column(table_id, body.name, body.kind, body.position)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    knowhow_api.get_scheduler(repo).schedule(table_id)
+    table = repo.get_knowhow_table(table_id)
+    column = next(c for c in table["columns"] if c["id"] == column_id)
+    return knowhow_api.to_wire_column(column)
+
+
+@router.patch(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/columns/{column_id}",
+    response_model=KnowhowColumn,
+    dependencies=[Depends(require_notebook_access)],
+)
+def patch_knowhow_column(
+    notebook_id: str, table_id: str, column_id: str, body: KnowhowColumnPatch
+) -> dict:
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    _require_column_in_table(table, column_id)
+    fields_set = body.model_fields_set
+    try:
+        if "name" in fields_set and body.name is not None:
+            repo.rename_knowhow_column(column_id, body.name)
+        if "kind" in fields_set and body.kind is not None:
+            repo.set_knowhow_column_kind(column_id, body.kind)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    knowhow_api.get_scheduler(repo).schedule(table_id)
+    updated = repo.get_knowhow_table(table_id)
+    column = next(c for c in updated["columns"] if c["id"] == column_id)
+    return knowhow_api.to_wire_column(column)
+
+
+@router.delete(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/columns/{column_id}",
+    status_code=204,
+    dependencies=[Depends(require_notebook_access)],
+)
+def delete_knowhow_column(notebook_id: str, table_id: str, column_id: str) -> None:
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    _require_column_in_table(table, column_id)
+    repo.delete_knowhow_column(column_id)
+    knowhow_api.get_scheduler(repo).schedule(table_id)
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows",
+    response_model=KnowhowRow,
+    dependencies=[Depends(require_notebook_access)],
+)
+def add_knowhow_row(notebook_id: str, table_id: str, body: KnowhowRowCreate) -> dict:
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    valid_column_ids = {column["id"] for column in table["columns"]}
+    if set(body.cells) - valid_column_ids:
+        raise HTTPException(status_code=400, detail="格子对应的列不属于本表")
+    row_id = repo.add_knowhow_row(table_id, body.cells, body.position)
+    knowhow_api.get_scheduler(repo).schedule(table_id)
+    updated = repo.get_knowhow_table(table_id)
+    return next(r for r in updated["rows"] if r["id"] == row_id)
+
+
+@router.delete(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}",
+    status_code=204,
+    dependencies=[Depends(require_notebook_access)],
+)
+def delete_knowhow_row(notebook_id: str, table_id: str, row_id: str) -> None:
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    _require_row_in_table(table, row_id)
+    repo.delete_knowhow_row(row_id)
+    knowhow_api.get_scheduler(repo).schedule(table_id)
+
+
+@router.patch(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}",
+    response_model=KnowhowCellPatchResult,
+    dependencies=[Depends(require_notebook_access)],
+)
+def patch_knowhow_cell(
+    notebook_id: str, table_id: str, row_id: str, column_id: str, body: KnowhowCellPatch
+) -> dict:
+    """Returns {row_id,column_id,content_md,projection_status} so the caller
+    can refresh just this row's sync badge without re-fetching the whole
+    table. row_id/column_id validity is checked twice, deliberately: the
+    table-scoped membership check (belongs to THIS table_id, not merely SOME
+    table) and the store's own validate_cell_target (same-table pairing) —
+    both funnel into the same 400 "格子定位不合法" so a client sees one
+    consistent error regardless of which check actually caught it."""
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    if (
+        not any(row["id"] == row_id for row in table["rows"])
+        or not any(column["id"] == column_id for column in table["columns"])
+    ):
+        raise HTTPException(status_code=400, detail="格子定位不合法")
+    try:
+        repo.validate_cell_target(row_id, column_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    repo.update_knowhow_cell(row_id, column_id, body.content_md)
+    knowhow_api.get_scheduler(repo).schedule(table_id)
+    updated = repo.get_knowhow_table(table_id)
+    row = next(r for r in updated["rows"] if r["id"] == row_id)
+    return {
+        "row_id": row_id,
+        "column_id": column_id,
+        "content_md": row["cells"].get(column_id, ""),
+        "projection_status": row["projection_status"],
+    }
+
+
+# --- knowhow-tables PR-2+3 Task 6: Excel template round-trip (design doc §②
+# 路B). GET needs read access (mirrors every other knowhow GET); POST needs
+# write access (mirrors every other knowhow mutation) and — like every other
+# mutating knowhow endpoint — schedules a debounced reprojection via
+# knowhow_api.get_scheduler(repo).schedule(table_id) after a successful
+# commit, never a raw background_jobs.submit call. mode=preview never
+# writes; mode=commit is the only branch that does, using the identical
+# parse+align step preview already ran once for the user to review.
+
+
+def _template_content_disposition(filename: str) -> str:
+    """RFC 5987/6266 Content-Disposition value for a (possibly non-ASCII)
+    download filename: an ASCII-sanitized `filename=` fallback for clients
+    that don't understand the extended form, plus the real UTF-8 name via
+    `filename*=` (what every modern browser actually uses). Needed because
+    Starlette encodes header VALUES as latin-1 (Response.init_headers) — a
+    raw Chinese table title in a bare `filename="..."` alone would 500
+    (UnicodeEncodeError) the instant a real (non-ASCII) table title reached
+    this response. export_reports_endpoint's sibling zip download above
+    never needed this: "reports.zip" is a fixed ASCII literal, never a
+    user-supplied title."""
+    import re
+    from urllib.parse import quote
+
+    ascii_fallback = re.sub(
+        r'[\\"/\r\n\x00-\x1f]', "_", filename.encode("ascii", "ignore").decode("ascii")
+    ).strip() or "template.xlsx"
+    # safe="" so a literal "/" in a table title is %2F-escaped too — quote's
+    # default (safe="/") would leave it raw, which violates RFC 5987's
+    # attr-char grammar and is inconsistent with the fallback branch above,
+    # which DOES strip "/".
+    encoded = quote(filename, safe="")
+    return f'attachment; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded}'
+
+
+@router.get(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/template",
+    dependencies=[Depends(require_notebook_read)],
+)
+def download_knowhow_template(notebook_id: str, table_id: str) -> StreamingResponse:
+    """Excel template download (design doc §② 路B): the table's CURRENT
+    column header (+ per-column kind hint / row-title annotation), generated
+    fresh on every request — never cached, so it always reflects whatever
+    columns exist right now. Mirrors export_reports_endpoint's
+    StreamingResponse+BytesIO(via knowhow_api.build_template_xlsx)+
+    Content-Disposition idiom above; see _template_content_disposition for
+    why the filename needs the RFC 5987 `filename*=` form."""
+    repo = repository()
+    try:
+        table = knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+    data = knowhow_api.build_template_xlsx(table)
+    filename = f"{table['title']}-template.xlsx"
+    return StreamingResponse(
+        iter([data]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": _template_content_disposition(filename)},
+    )
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/append",
+    response_model=Union[KnowhowAppendPreview, KnowhowAppendResult],
+    dependencies=[Depends(require_notebook_access)],
+)
+async def append_knowhow_rows(
+    notebook_id: str,
+    table_id: str,
+    file: UploadFile = File(...),
+    mode: str = Form("preview"),
+) -> dict:
+    """Excel append import (design doc §② 路B): matches the uploaded file's
+    header BY COLUMN NAME against the table's existing columns (never by
+    position — see knowhow_api._align_rows_to_table_columns). mode=preview
+    parses+aligns without writing anything, reporting what commit WOULD do
+    (rows_preview/total_rows/unmatched_columns/duplicate_titles); mode=commit
+    performs the identical alignment, actually appends the rows, and
+    schedules a debounced reprojection exactly like every other mutating
+    knowhow endpoint."""
+    if mode not in ("preview", "commit"):
+        raise HTTPException(status_code=400, detail="mode 必须是 preview 或 commit")
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    data = await file.read()
+    try:
+        if mode == "preview":
+            return knowhow_api.preview_append(table, file.filename or "append", data)
+        added = knowhow_api.commit_append(repo, table_id, table, file.filename or "append", data)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    knowhow_api.get_scheduler(repo).schedule(table_id)
+    return {"added": added}
+
+
+# --- knowhow-tables PR-2+3 Task 8: LLM cell rewrite (design doc §③, explicit
+# trigger only, suggestion-only). Write-gated like every other knowhow
+# mutation (require_notebook_access) even though it never writes the store
+# itself — this is an authoring affordance (the cell-editor's "优化表达"
+# button), not a read. Never schedules a reprojection either: the user's own
+# explicit accept goes through the EXISTING PATCH cell endpoint, which is
+# what writes + schedules. ValueError/ModelNotConfiguredError -> 400 (both
+# validation-shaped, friendly Chinese message as-is); KnowhowOptimizeUnavailable
+# (the LLM call itself failed after being reached, already logged via
+# note_model_error inside optimize_cell) -> 502.
+
+
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/optimize",
+    response_model=KnowhowCellOptimizeResult,
+    dependencies=[Depends(require_notebook_access)],
+)
+def optimize_knowhow_cell(
+    notebook_id: str, table_id: str, row_id: str, column_id: str
+) -> dict:
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    if (
+        not any(row["id"] == row_id for row in table["rows"])
+        or not any(column["id"] == column_id for column in table["columns"])
+    ):
+        raise HTTPException(status_code=400, detail="格子定位不合法")
+    try:
+        repo.validate_cell_target(row_id, column_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    row = next(r for r in table["rows"] if r["id"] == row_id)
+    column = next(c for c in table["columns"] if c["id"] == column_id)
+    content_md = row["cells"].get(column_id, "")
+    try:
+        suggestion_md = knowhow_api.optimize_cell(repo, content_md, column["name"], column["kind"])
+    except ModelNotConfiguredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except knowhow_api.KnowhowOptimizeUnavailable as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"suggestion_md": suggestion_md}
 
 
 @router.get(

@@ -1407,23 +1407,25 @@ TASK28_ALLOWED_IMPORTS = {
 # every hop terminal bumped to 16 with those objects + the new (15, 16) hop),
 # then a further +65 by paper-metadata Task 1's MIGRATION_MANIFEST v17
 # additions (PAPER_META_TABLES + PAPER_META_INDEXES + every hop terminal
-# bumped to 17 with those objects + the new (16, 17) hop).
+# bumped to 17 with those objects + the new (16, 17) hop), then a further +45
+# by knowhow-tables PR-2+3 Task 1's v18 additions (KNOWHOW_CELL_CODE_TABLE/
+# _INDEX folded into every hop, terminals bumped to 18, + the new (17, 18) hop).
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1231"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:1224"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:1209"),
-    ("get_report", "scripts/verify_repository_snapshot.py:1236"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:1212"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:1221"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:1215"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:1233"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:1210"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1172"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1176"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1178"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1203"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1245"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1219"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1276"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1269"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1254"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1281"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1257"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1266"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1260"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1278"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1255"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1217"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1221"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1223"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1248"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1290"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1264"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -1750,6 +1752,17 @@ TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS = {
     "set_knowhow_row_projection", "set_knowhow_hidden_source",
     "bump_knowhow_mutation_seq", "insert_notebook_asset", "get_notebook_asset",
 }
+# Task 1 (knowhow-tables PR-2+3): twelve more KnowhowStore one-hop delegates
+# (table-meta/anchor/column/row editing + cell-code CRUD). Brand-new facade
+# members predating no frozen fixture — exempted from the consumer-scan
+# comparison entirely, exactly like TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS above.
+TASK1_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS = {
+    "update_knowhow_table_meta", "set_knowhow_anchor_column",
+    "add_knowhow_column", "rename_knowhow_column", "set_knowhow_column_kind",
+    "delete_knowhow_column", "delete_knowhow_row", "validate_cell_target",
+    "upsert_knowhow_cell_code", "get_knowhow_cell_code",
+    "delete_knowhow_cell_code", "list_knowhow_cell_code",
+}
 
 # Task 4 (knowhow-tables-pr1): the asset-store/authed-serving routes' own test
 # composes the real facade the same way Task 1/2's sibling tests do — seeding
@@ -1786,8 +1799,12 @@ TASK4_KNOWHOW_ALLOWED_MEMBER_FILES = {
 # for direct-DB assertions and the embedder_configured probe. Same broad
 # (file, member) allowance style as TASK2_KNOWHOW_ALLOWED_MEMBER_FILES rather
 # than pinning exact lines.
+# Line 18->24: PR-2+3 Task 2 rewrites this test file end to end for the
+# cell-level node model (case/procedure/tool -> dynamic per-column types),
+# expanding the module docstring/imports above this exact import line by 6
+# net lines. Not itself API surface — the member/file pair is unchanged.
 TASK5_KNOWHOW_ALLOWED_IMPORTS = {
-    ("backend/tests/test_knowhow_projection.py", 18, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_knowhow_projection.py", 24, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK5_KNOWHOW_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_knowhow_projection.py", name)
@@ -1826,8 +1843,8 @@ TASK6_KNOWHOW_ALLOWED_MEMBER_FILES = {
 # is registered both places since the two guards scan independently.
 # Mirrors Task 4's exact-consumer choice for `storage_dir` in assets.py.
 TASK6_KNOWHOW_ALLOWED_CONSUMERS = {
-    ("_runtime", "backend/app/services/knowhow/api.py:85"),
-    ("settings", "backend/app/services/knowhow/api.py:87"),
+    ("_runtime", "backend/app/services/knowhow/api.py:138"),
+    ("settings", "backend/app/services/knowhow/api.py:140"),
 }
 
 # Task 10 (knowhow-tables-pr1): the end-to-end projection -> retrieval
@@ -2261,6 +2278,11 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/tests/test_notebook_counts_batched.py",
     "backend/tests/test_ask_reconnect.py",
     "backend/tests/test_ask_redesign.py",
+    # Task 12b (knowhow citation-jump widening) adds a `knowhow_refs_for`
+    # method to _MinimalEvidence (the AskService port-boundary fixture),
+    # shifting this file's later facade-consumer call sites without changing
+    # the surface.
+    "backend/tests/test_ask_service_boundary.py",
     "backend/tests/test_conversations.py",
     "backend/tests/test_cross_tier_reasoning.py",
     "backend/tests/test_followup_retrieval_grounding.py",
@@ -2901,10 +2923,12 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
     # in test_repository_callers_static.py shift this import site further.
     # 661->670: knowhow-tables Task 6's new INDEPENDENT_PRIVATE_SITES entry
     # (the api.py `_runtime` registration, +9 net lines) shifts it again.
-    # 670->676: paper-metadata Task 1's MIGRATION_MANIFEST v17 comment
-    # expansions (INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES, +6 net lines)
-    # in test_repository_callers_static.py shift this import site further.
-    ('backend/tests/test_repository_callers_static.py', 676, 'app.services.sqlite_repository', 'SQLiteRepository'),
+    # 670->690: paper-metadata Task 1's v17 comment expansions, knowhow-tables
+    # PR-2+3 Task 1's v18 regenerated line pins (INDEPENDENT_SQL_SITES +
+    # SQLITE_CONNECT_SITES), and PR-2+3 Task 8's new INDEPENDENT_PRIVATE_SITES
+    # entry (the api.py optimize_cell `_runtime` registration) in
+    # test_repository_callers_static.py cumulatively shift this import site.
+    ('backend/tests/test_repository_callers_static.py', 690, 'app.services.sqlite_repository', 'SQLiteRepository'),
     ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
 }
 
@@ -2983,6 +3007,11 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK1_PAPER_META_ALLOWED_IMPORTS
                     or site in TASK3_PAPER_META_ALLOWED_IMPORTS
                     or site in TASK4_PAPER_META_ALLOWED_IMPORTS
+                    or site in TASK3_KNOWHOW_PR23_ALLOWED_IMPORTS
+                    or site in TASK14_KNOWHOW_PR23_ALLOWED_IMPORTS
+                    or site in TASK8_KNOWHOW_PR23_ALLOWED_IMPORTS
+                    or site in TASK13_KNOWHOW_PR23_ALLOWED_IMPORTS
+                    or site in TASK12B_KNOWHOW_PR23_ALLOWED_IMPORTS
                 )
 
 
@@ -3141,6 +3170,12 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_embedding_store_component.py', 59, '_write', 'repo'),
         ('backend/tests/test_embedding_store_component.py', 135, '_write', 'repo'),
         ('backend/tests/test_in_batching.py', 85, '_IN_CHUNK', 'SQLiteRepository'),
+        # PR-2+3 Task 13 (full deep-copy with id remap): failure-injection
+        # test mirrors test_notebook_copy_service.py's own _new_id/_insert_row
+        # monkeypatch idiom immediately above/below (same "actual but not a
+        # SurfaceMember consumer record" bucket, not a new pattern).
+        ('backend/tests/test_knowhow_copy.py', 492, '_new_id', 'sr'),
+        ('backend/tests/test_knowhow_copy.py', 501, '_insert_row', 'repo'),
         ('backend/tests/test_knowledge_governance_delegation.py', 131, 'set_conflict_status', 'repo'),
         ('backend/tests/test_notebook_copy_service.py', 93, '_new_id', 'sqlite_repository'),
         ('backend/tests/test_notebook_copy_service.py', 118, '_COPY_CHUNK', 'sqlite_repository'),
@@ -3187,6 +3222,34 @@ def test_static_repository_patch_scan_matches_manifest_exactly():
     ) not in recorded
 
 
+# Task 10 (knowhow-tables PR-2+3): the agent surface. get_knowhow_row_location
+# is a brand-new facade delegate (KnowhowStore.get_knowhow_row_location,
+# resolving a bare row_id to its {table_id, notebook_id} for the new
+# session-or-agent-token HTTP/MCP surface, which carries no notebook_id/
+# table_id in its own URL at all) — exempt its consumer-site comparison
+# entirely, exactly like TASK1_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS does for the
+# sibling store methods Task 1 added (its own many call sites, across
+# knowhow_agent_routes.py/mcp_server.py/services/knowhow/api.py, need no
+# per-site registration once the member itself is popped from comparison).
+TASK10_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS = {"get_knowhow_row_location"}
+# app.api.deps's new _resolve_session_user (the "session OR Agent token"
+# dependency's session branch, appended at EOF of deps.py — see that file's
+# own Task 10 section header) reaches two PRE-EXISTING frozen members
+# (resolve_session/current_user) a SECOND time, at new lines distinct from
+# get_current_user's own already-registered call sites. deps.py is itself
+# line-number-insensitive (LINE_NUMBER_INSENSITIVE_FILES above), but that
+# only governs the FINAL normalized-string comparison — the raw exact-line
+# pre-filter (_member_file_site_allowed's frozen=False branch, production
+# files require an exact ACTIVE_PRODUCTION_MEMBER_SITES/allowed_sites match)
+# still needs this SECOND real-line pin registered, mirroring the pattern
+# TASK6_KNOWHOW_ALLOWED_CONSUMERS uses for api.py's own _runtime/settings
+# reaches.
+TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS = {
+    ("resolve_session", "backend/app/api/deps.py:142"),
+    ("current_user", "backend/app/api/deps.py:147"),
+}
+
+
 def test_static_repository_consumer_scan_matches_manifest_exactly():
     recorded = {
         name: set(record["consumers"]) for name, record in _surface().items()
@@ -3201,7 +3264,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         (member, f"{file}:{line}")
         for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS | TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS | TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
@@ -3246,6 +3309,8 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | TASK3_MEMORY_KG_ALLOWED_NEW_MEMBERS
         | TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS
         | TASK4_PAPER_META_ALLOWED_NEW_MEMBERS
+        | TASK1_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
+        | TASK10_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)
@@ -3392,3 +3457,166 @@ def test_snapshot_generator_annotation_resolves_to_the_facade_type():
         "notebook_id": str,
         "return": dict[str, object],
     }
+
+
+# PR-2+3 Task 3 (knowhow-tables editing API + ProjectionScheduler): its own
+# HTTP-level test composes the real facade the same way Task 1/2/4/5/6's
+# sibling tests do (register/login via HTTP, then `repo.add_member` directly
+# for the read-only-member fixture — there is no HTTP "add member by id"
+# endpoint — and `repo._connect` for direct knowledge_objects-count
+# assertions). Appended at EOF (not interleaved into the existing
+# TASK*_KNOWHOW blocks above) so this registration cannot shift any of the
+# other exact-line-pinned entries already in this very large file — see
+# TASK6_KNOWHOW_ALLOWED_CONSUMERS above, whose own line numbers this task
+# already had to bump once for exactly that reason.
+TASK3_KNOWHOW_PR23_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_editing_api.py", 23, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK3_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_editing_api.py", name)
+    for name in {"SQLiteRepository", "_connect", "add_member"}
+}
+# ALL_TASK_ALLOWED_MEMBER_FILES (defined far above, near the other
+# TASKn_ALLOWED_MEMBER_FILES unions) is a plain module-level tuple-expression
+# assignment evaluated at import time — it cannot forward-reference a name
+# defined here at EOF the way the OR-chain inside a function body can (that
+# one resolves lazily, at call time). Re-binding it here, AFTER this
+# constant exists, keeps this task's registration a pure EOF append with
+# zero risk of shifting any of the many exact-line-pinned entries earlier in
+# this file, at the cost of one extra rebinding statement instead of an
+# inline union.
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK3_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
+
+# PR-2+3 Task 14 (asset GC): its own test composes the real facade the same
+# way Task 1/2/3/4/5/6's sibling tests do — repo.create_notebook to seed
+# fixtures, repo.delete_notebook to exercise the notebook-delete asset-dir
+# sweep (both pre-existing frozen members; new call sites here are registered
+# as a broad allowance rather than pinned to exact lines, same style as
+# TASK2_KNOWHOW_ALLOWED_MEMBER_FILES/TASK5_KNOWHOW_ALLOWED_MEMBER_FILES
+# above). sweep_orphan_assets itself lives on SQLiteMaintenanceAdapter
+# (backend/app/repositories/sqlite/maintenance.py), reached only through
+# repo.maintenance.sweep_orphan_assets(...) — the `maintenance` property
+# Task 27 already exempted wholesale (TASK27_ALLOWED_NEW_MEMBERS), and
+# sweep_orphan_assets is never itself a SQLiteRepository member, so nothing
+# new to register for that half. Appended at EOF for the same zero-line-shift
+# reason as TASK3_KNOWHOW_PR23_ALLOWED_IMPORTS above.
+TASK14_KNOWHOW_PR23_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_asset_gc.py", 25, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK14_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_asset_gc.py", name)
+    for name in {"SQLiteRepository", "create_notebook", "delete_notebook"}
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK14_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
+
+# PR-2+3 Task 8 (LLM cell rewrite): app/services/knowhow/api.py's optimize_cell
+# reaches `_runtime` a second, independent time (see
+# test_repository_callers_static.py's INDEPENDENT_PRIVATE_SITES for the
+# sibling registration) to resolve the per-user rewrite LLM client +
+# note_model_error — the same narrow-runtime-port pattern build_projector's
+# own `_runtime`/`settings` registration (TASK6_KNOWHOW_ALLOWED_CONSUMERS
+# above) already uses. `settings` isn't re-reached here so only `_runtime`
+# needs a new entry. 682->693: the get_scheduler weakref fix added lines above.
+TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS = {
+    ("_runtime", "backend/app/services/knowhow/api.py:693"),
+}
+# Its own HTTP-level test reaches the live app repository singleton via
+# app.api.deps.repository() (not a freshly constructed SQLiteRepository) to
+# inject a fake rewrite LLM client in-process and, for the reader-permission
+# case, repo.add_member — mirrors Task 3/6's sibling test files' own
+# SQLiteRepository/add_member direct-facade need, just reached through the
+# app's own singleton accessor instead of constructing a second instance
+# (this test's fake LLM client must be visible to the SAME repository object
+# routes.py's dependency injection resolves, which a second, separately
+# constructed SQLiteRepository would not be).
+TASK8_KNOWHOW_PR23_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_optimize.py", 15, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK8_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_optimize.py", name)
+    for name in {"SQLiteRepository", "add_member", "_rewrite_llm_client"}
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK8_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
+
+# PR-2+3 Task 13 (full deep-copy with id remap, zero re-embed): its own test
+# composes the real facade the same way Task 1/2/3/4/5/6/8/14's sibling test
+# files do (SQLiteRepository + a fake embedder mirroring
+# test_knowhow_projection.py's own fixture, plus repo._connect/_write/
+# _insert_row/_new_id direct-DB peeks for id-remap/compensation assertions —
+# same broad "this whole test file may reference this member name" allowance
+# style as TASK14_KNOWHOW_PR23_ALLOWED_MEMBER_FILES above, not a new pattern).
+# Appended at EOF for the same zero-line-shift reason as every other
+# TASKN_KNOWHOW_PR23_* block above.
+TASK13_KNOWHOW_PR23_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_copy.py", 38, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_knowhow_copy.py", 38, "app.services.sqlite_repository", "_now"),
+}
+TASK13_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_copy.py", name)
+    for name in {
+        "SQLiteRepository", "_now", "_connect", "_write", "_insert_row", "_new_id",
+        "_runtime", "copy_notebook", "create_notebook", "embedder", "settings",
+        "storage_dir",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK13_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
+
+# PR-2+3 Task 15 (cross-task safety net: code-isolation guard + PR-2/3
+# integration tests + permission-matrix extension). Its two new test files
+# both mirror test_knowhow_retrieval.py's own fixture — the app's real
+# repository singleton via app.api.routes.repository(), never a freshly
+# constructed SQLiteRepository (needed so a background projection job, which
+# runs against that SAME singleton, actually sees the fake/recording
+# embedder installed on it) — so, unlike Task 13's file, no
+# SQLiteRepository/_now import registration is needed here at all; only the
+# direct facade calls each file makes for its own DB-level assertions:
+# repo._connect (raw peeks at source_elements/chunks/knowledge_objects/
+# knowledge_relations/knowhow_cell_code), repo._retrieve_chunks +
+# repo._runtime.knowledge.chunk_fts_search + repo.ask_chunk (the isolation
+# file's "ask 上下文组装" surface), and repo._citations_from (the
+# integration file's real-element citation-enrichment scenario). Its
+# companion edit to test_knowhow_editing_api.py's permission matrix (same
+# commit) adds zero NEW facade-member call sites — only TestClient HTTP
+# verbs plus a local openpyxl import — so it needs no new registration
+# beyond its own pre-existing Task 3 entry above. Appended at EOF for the
+# same zero-line-shift reason as every other TASKN_KNOWHOW_PR23_* block.
+TASK15_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_code_isolation.py", name)
+    for name in {"_connect", "_retrieve_chunks", "_runtime", "ask_chunk"}
+} | {
+    ("backend/tests/test_knowhow_pr23_integration.py", name)
+    for name in {"_connect", "_retrieve_chunks", "_citations_from"}
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK15_KNOWHOW_PR23_ALLOWED_MEMBER_FILES
+
+# PR-2+3 Task 12b (citation-jump widening: chunk/graph modes + anchor path).
+# test_knowhow_citation.py, previously a pure-fake unit test file (no facade
+# at all — _Notebooks/_Knowledge/_SpySources fakes only), gains two real-
+# SQLite integration tests mirroring test_knowhow_projection.py's own
+# repo/embedder/projector fixture convention (chunk-mode: create_notebook +
+# a fresh SQLiteRepository + embedder + create_knowhow_table/add_knowhow_row
+# via repo._runtime.knowhow_store, then repo.ask_chunk) and
+# test_graph_src_chunks.py's raw-SQL-seed + stub-LLM convention (graph-mode:
+# repo._write for the seed rows, repo.settings/repo.llm_client/
+# repo._reasoning_llm_client, then repo.ask_graph) — plus a small
+# repo._runtime.source_store.evidence_elements call-count spy shared by both,
+# reached via repo._runtime the same way TASK6_KNOWHOW_ALLOWED_CONSUMERS'
+# build_projector helper already does. Its own import of SQLiteRepository is
+# a genuinely NEW site (T12's original file never imported it), so — unlike
+# Task 15's file above — this DOES need an ALLOWED_IMPORTS entry too, wired
+# into the OR-chain inside test_compatibility_exports_and_import_consumers_
+# are_complete (a function-body edit, safe: nothing outside this guard file
+# tracks ITS OWN internal line numbers). Appended at EOF for the same
+# zero-line-shift reason as every other TASKN_KNOWHOW_PR23_* block.
+TASK12B_KNOWHOW_PR23_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_citation.py", 45, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK12B_KNOWHOW_PR23_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_citation.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "_write", "ask_chunk", "ask_graph",
+        "create_notebook", "embedder", "llm_client", "_reasoning_llm_client",
+        "settings",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK12B_KNOWHOW_PR23_ALLOWED_MEMBER_FILES

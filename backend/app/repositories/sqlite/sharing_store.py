@@ -7,24 +7,30 @@ from typing import Callable, Sequence
 from app.core.config import Settings
 from app.repositories.sqlite.database import SqliteDatabase
 
-# knowhow-table content is deliberately EXCLUDED from a deep copy: a
-# source_type='knowhow' hidden source and everything the deterministic
-# projector derived from it (elements/chunks/case-procedure-tool KOs+edges and
-# their vectors) do not travel with a copy — a copied notebook has NO knowhow
-# remnants (clean silent absence; full knowhow-table copy is PR-2). Each
-# dependent leg below is filtered by however it keys back to that hidden
-# source; validate_copy applies the SAME per-table filter to its source-side
-# parity counts so the deliberate omission is never mistaken for a copy error.
+# knowhow-table content, PR-2+3 Task 13: knowledge_objects/knowledge_relations
+# derived FROM a knowhow hidden source stay EXCLUDED from a deep copy — they
+# are rebuilt from scratch by project_table (design doc §④), never copied
+# directly, so a stale/renamed-away copy of them could never happen. Every
+# OTHER leg (the hidden source itself, its elements, its chunks+vectors, and
+# the five knowhow business tables + notebook_assets below) DOES travel with
+# a copy (PR-2 supersedes PR-1's blanket exclusion — see
+# app.services.notebook_sharing.NotebookCopyService.copy_notebook for the id
+# remap: element/chunk ids are RECOMPUTED via
+# app.services.knowhow.projection.element_id/cell_chunk_id, the same stable
+# formula project_table itself uses, so the copy's post-copy reprojection
+# finds every chunk already (id, text, section_path)-identical and makes
+# ZERO additional embedder calls). validate_copy applies the SAME
+# still-excluded predicate to its source-side parity counts so the
+# deliberate KO/relation omission is never mistaken for a copy error.
 _KNOWHOW_SOURCE_IDS = "SELECT id FROM sources WHERE source_type = 'knowhow'"
 
-# Deep-copy row snapshot: table -> the exact SELECT the former mixin issued
-# (now knowhow-filtered).  "notebooks" carries the single source row that the
-# copy service rewrites into the destination's hidden 'copying' sentinel.
-# Order matters only for readability; the INSERT order (FK-safe) is owned by
-# NotebookCopyService.
+# Deep-copy row snapshot: table -> the exact SELECT the former mixin issued.
+# "notebooks" carries the single source row that the copy service rewrites
+# into the destination's hidden 'copying' sentinel. Order matters only for
+# readability; the INSERT order (FK-safe) is owned by NotebookCopyService.
 _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("notebooks", "SELECT * FROM notebooks WHERE id = ?"),
-    ("sources", "SELECT * FROM sources WHERE notebook_id = ? AND source_type != 'knowhow'"),
+    ("sources", "SELECT * FROM sources WHERE notebook_id = ?"),
     (
         # 1:1 with sources (PK = source_id) — joined the same way as the
         # sibling per-source tables below rather than filtered on its own
@@ -43,13 +49,9 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     (
         "source_elements",
         "SELECT se.* FROM source_elements se JOIN sources s ON s.id = se.source_id "
-        "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'",
+        "WHERE s.notebook_id = ?",
     ),
-    (
-        "chunks",
-        f"SELECT * FROM chunks WHERE notebook_id = ? "
-        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
-    ),
+    ("chunks", "SELECT * FROM chunks WHERE notebook_id = ?"),
     (
         "knowledge_objects",
         f"SELECT * FROM knowledge_objects WHERE notebook_id = ? "
@@ -60,15 +62,14 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
         f"SELECT * FROM knowledge_relations WHERE notebook_id = ? "
         f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))",
     ),
+    ("chunk_embeddings", "SELECT * FROM chunk_embeddings WHERE notebook_id = ?"),
     (
-        # chunk_embeddings has no source_id of its own — key on its chunk's
-        # source (1:1 via the chunk_id PK) so knowhow chunk vectors are dropped
-        # in lockstep with their (excluded) chunks, keeping chunk_map complete.
-        "chunk_embeddings",
-        "SELECT ce.* FROM chunk_embeddings ce JOIN chunks c ON c.id = ce.chunk_id "
-        f"WHERE ce.notebook_id = ? AND c.source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
-    ),
-    (
+        # element_embeddings still excludes knowhow: the projector's
+        # _write_elements never embeds an element (only chunks get vectors),
+        # so this filter has always been (and remains) a harmless no-op for
+        # knowhow rows — kept knowhow-filtered only for symmetry with the
+        # (still-excluded) KO/relation legs, not because any row would
+        # otherwise appear.
         "element_embeddings",
         "SELECT ee.* FROM element_embeddings ee JOIN sources s ON s.id = ee.source_id "
         "WHERE s.notebook_id = ? AND s.source_type != 'knowhow'",
@@ -78,20 +79,86 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     ("knowledge_embeddings", "SELECT * FROM knowledge_embeddings WHERE notebook_id = ?"),
     ("relation_embeddings", "SELECT * FROM relation_embeddings WHERE notebook_id = ?"),
     ("concept_clusters", "SELECT * FROM concept_clusters WHERE notebook_id = ?"),
+    # --- PR-2+3 Task 13: knowhow business tables (their own source of truth;
+    # travel WITH the copy, fresh ids, joined down from knowhow_tables since
+    # none of columns/rows/cells/cell_code carry a notebook_id of their own).
+    ("knowhow_tables", "SELECT * FROM knowhow_tables WHERE notebook_id = ?"),
+    (
+        "knowhow_columns",
+        "SELECT kc.* FROM knowhow_columns kc "
+        "JOIN knowhow_tables kt ON kt.id = kc.table_id WHERE kt.notebook_id = ?",
+    ),
+    (
+        "knowhow_rows",
+        "SELECT kr.* FROM knowhow_rows kr "
+        "JOIN knowhow_tables kt ON kt.id = kr.table_id WHERE kt.notebook_id = ?",
+    ),
+    (
+        "knowhow_cells",
+        "SELECT kc.* FROM knowhow_cells kc "
+        "JOIN knowhow_rows kr ON kr.id = kc.row_id "
+        "JOIN knowhow_tables kt ON kt.id = kr.table_id WHERE kt.notebook_id = ?",
+    ),
+    (
+        "knowhow_cell_code",
+        "SELECT kcc.* FROM knowhow_cell_code kcc "
+        "JOIN knowhow_rows kr ON kr.id = kcc.row_id "
+        "JOIN knowhow_tables kt ON kt.id = kr.table_id WHERE kt.notebook_id = ?",
+    ),
+    ("notebook_assets", "SELECT * FROM notebook_assets WHERE notebook_id = ?"),
 )
 
 # Tables copy_notebook validates row-parity on after the copy completes, each
-# with the knowhow-exclusion predicate that matches its snapshot query above.
-# Applied to BOTH source and destination counts: a no-op on the destination
-# (which never received knowhow rows) and the real filter on the source.
+# with the knowhow-exclusion predicate (if any) that matches its snapshot
+# query above. Applied to BOTH source and destination counts: a no-op on
+# "" entries and the real filter on the still-excluded KO/relation legs.
 _COPY_VALIDATED_TABLES: tuple[tuple[str, str], ...] = (
-    ("sources", "AND source_type != 'knowhow'"),
+    # PR-2+3 Task 13 makes the knowhow hidden source + its chunks travel WITH
+    # the copy (snapshot `sources`/`chunks` above carry no knowhow exclusion),
+    # so their parity predicate is empty. paper_meta/authors still exclude
+    # knowhow, matching their `source_type != 'knowhow'` snapshot filter (a
+    # knowhow hidden source never has paper metadata in practice).
+    ("sources", ""),
     ("source_paper_meta", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("source_authors", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
-    ("chunks", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
+    ("chunks", ""),
     ("knowledge_objects", f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})"),
     ("knowledge_relations", f"AND (source_id IS NULL OR source_id NOT IN ({_KNOWHOW_SOURCE_IDS}))"),
     ("concept_clusters", ""),
+    ("knowhow_tables", ""),
+    ("notebook_assets", ""),
+)
+
+# knowhow_columns/rows/cells/cell_code carry no notebook_id column of their
+# own (see migrations.py _migration_16/_migration_17) — validate_copy's
+# generic "WHERE notebook_id = ? {extra}" shape above cannot express their
+# parity check, so each gets its own full COUNT query joined down through
+# knowhow_tables/knowhow_rows instead. Same both-sides-same-filter contract
+# as _COPY_VALIDATED_TABLES: run once against the destination id, once
+# against the source id.
+_COPY_VALIDATED_JOIN_TABLES: tuple[tuple[str, str], ...] = (
+    (
+        "knowhow_columns",
+        "SELECT COUNT(*) FROM knowhow_columns kc "
+        "JOIN knowhow_tables kt ON kt.id = kc.table_id WHERE kt.notebook_id = ?",
+    ),
+    (
+        "knowhow_rows",
+        "SELECT COUNT(*) FROM knowhow_rows kr "
+        "JOIN knowhow_tables kt ON kt.id = kr.table_id WHERE kt.notebook_id = ?",
+    ),
+    (
+        "knowhow_cells",
+        "SELECT COUNT(*) FROM knowhow_cells kc "
+        "JOIN knowhow_rows kr ON kr.id = kc.row_id "
+        "JOIN knowhow_tables kt ON kt.id = kr.table_id WHERE kt.notebook_id = ?",
+    ),
+    (
+        "knowhow_cell_code",
+        "SELECT COUNT(*) FROM knowhow_cell_code kcc "
+        "JOIN knowhow_rows kr ON kr.id = kcc.row_id "
+        "JOIN knowhow_tables kt ON kt.id = kr.table_id WHERE kt.notebook_id = ?",
+    ),
 )
 
 
@@ -345,6 +412,13 @@ class SharingStore:
                     f"SELECT COUNT(*) FROM {table} WHERE notebook_id = ? {extra}",
                     (source_notebook_id,),
                 ).fetchone()[0]
+                if copied_count != source_count:
+                    raise RuntimeError(
+                        f"copy_notebook: {table} 行数不一致 {copied_count}!={source_count}"
+                    )
+            for table, query in _COPY_VALIDATED_JOIN_TABLES:
+                copied_count = db.execute(query, (new_id,)).fetchone()[0]
+                source_count = db.execute(query, (source_notebook_id,)).fetchone()[0]
                 if copied_count != source_count:
                     raise RuntimeError(
                         f"copy_notebook: {table} 行数不一致 {copied_count}!={source_count}"

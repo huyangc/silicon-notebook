@@ -177,6 +177,10 @@ def test_snapshot_insert_and_compensate_primitives(store):
         "knowledge_objects", "knowledge_relations", "chunk_embeddings",
         "element_embeddings", "knowledge_embeddings", "relation_embeddings",
         "concept_clusters",
+        # PR-2+3 Task 13: knowhow business tables + notebook_assets now
+        # travel with a copy (see sharing_store._COPY_SNAPSHOT_QUERIES).
+        "knowhow_tables", "knowhow_columns", "knowhow_rows", "knowhow_cells",
+        "knowhow_cell_code", "notebook_assets",
     }
     destination = dict(snapshot["notebooks"][0])
     destination.update(id="nb-copy-dest", status="copying")

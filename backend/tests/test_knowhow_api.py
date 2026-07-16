@@ -63,28 +63,37 @@ def _mk_notebook(client, headers, name="N"):
 
 
 HEADER = ["违例类型", "现象识别", "根因分析", "修复方法", "依赖工具"]
-ROLES = ["concept", "identify", "root_cause", "fix", "tool"]
+# Per-column content KIND (PR-2+3 Task 3 wire — the row-title/anchor
+# designation is no longer a per-column value; it's the SEPARATE
+# ANCHOR_INDEX below). Column 0's own content kind is irrelevant when it's
+# also the anchor (create_knowhow_table overwrites whichever position
+# anchor_index names), but every position still needs SOME legal kind.
+KINDS = ["attribute", "procedure", "procedure", "procedure", "entity"]
+ANCHOR_INDEX = 0
 DATA_ROWS = [
     ["过冲问题", "上升沿观察到过冲", "电源阻抗过高", "增加阻尼电阻", "示波器"],
     ["欠冲问题", "下降沿观察到欠冲", "寄生电感过大", "调整走线拓扑", "万用表"],
 ]
 
 
-def _columns_json(header=HEADER, roles=ROLES):
-    return json.dumps([{"name": n, "role": r} for n, r in zip(header, roles)])
+def _columns_json(header=HEADER, kinds=KINDS):
+    return json.dumps([{"name": n, "kind": k} for n, k in zip(header, kinds)])
 
 
 def _import_xlsx(client, headers, nb, *, header=HEADER, rows=None, title="时序修复表",
-                 columns_json=None):
+                 columns_json=None, anchor_index=ANCHOR_INDEX):
     if rows is None:
         rows = DATA_ROWS
     data = _xlsx_bytes(header, rows)
+    form = {"title": title, "columns_json": columns_json or _columns_json(header)}
+    if anchor_index is not None:
+        form["anchor_index"] = str(anchor_index)
     return client.post(
         f"/api/notebooks/{nb}/knowhow/import",
         headers=headers,
         files={"file": ("rules.xlsx", data,
                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-        data={"title": title, "columns_json": columns_json or _columns_json(header)},
+        data=form,
     )
 
 
@@ -123,7 +132,14 @@ def test_preview_xlsx_guesses_roles_and_returns_rows_preview(tmp_path, monkeypat
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert [c["name"] for c in body["columns"]] == HEADER
-    assert [c["guessed_role"] for c in body["columns"]] == ROLES
+    # PR-2+3 Task 3 wire: guess_kinds' own output surfaces directly —
+    # guessed_kind per column (违例类型 has no CONTENT-kind keyword hit, so
+    # it's 'attribute') + a separate anchor_suggestion index (违例类型 hits
+    # the anchor-NAME keyword 类型, at index 0).
+    assert [c["guessed_kind"] for c in body["columns"]] == [
+        "attribute", "procedure", "procedure", "procedure", "entity",
+    ]
+    assert body["anchor_suggestion"] == 0
     assert body["rows_preview"] == DATA_ROWS
     assert body["total_rows"] == len(DATA_ROWS)
 
@@ -158,7 +174,8 @@ def test_import_creates_table_with_full_detail_rows_and_cells(tmp_path, monkeypa
     body = resp.json()
     assert body["title"] == "时序修复表"
     assert [c["name"] for c in body["columns"]] == HEADER
-    assert [c["role"] for c in body["columns"]] == ROLES
+    assert [c["kind"] for c in body["columns"]] == ["anchor"] + KINDS[1:]
+    assert body["anchor_column_id"] == body["columns"][0]["id"]
     assert len(body["rows"]) == len(DATA_ROWS)
 
     name_to_col = {c["name"]: c["id"] for c in body["columns"]}
@@ -173,35 +190,74 @@ def test_import_column_count_mismatch_returns_friendly_400(tmp_path, monkeypatch
     owner_h = _login(client, "a00000504")
     nb = _mk_notebook(client, owner_h)
 
-    short_columns = json.dumps([{"name": n, "role": r} for n, r in zip(HEADER[:3], ROLES[:3])])
+    short_columns = json.dumps([{"name": n, "kind": k} for n, k in zip(HEADER[:3], KINDS[:3])])
     resp = _import_xlsx(client, owner_h, nb, columns_json=short_columns)
     assert resp.status_code == 400, resp.text
     detail = resp.json()["detail"]
     assert any("一" <= ch <= "鿿" for ch in detail)
 
 
-def test_import_illegal_role_value_returns_friendly_400(tmp_path, monkeypatch):
+def test_import_illegal_kind_value_returns_friendly_400(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00000505")
     nb = _mk_notebook(client, owner_h)
 
-    bad_roles = ["concept", "identify", "root_cause", "fix", "not_a_real_role"]
-    resp = _import_xlsx(client, owner_h, nb, columns_json=_columns_json(roles=bad_roles))
+    bad_kinds = ["attribute", "procedure", "procedure", "procedure", "not_a_real_kind"]
+    resp = _import_xlsx(client, owner_h, nb, columns_json=_columns_json(kinds=bad_kinds))
     assert resp.status_code == 400, resp.text
     detail = resp.json()["detail"]
     assert any("一" <= ch <= "鿿" for ch in detail)
 
 
-def test_import_missing_concept_role_returns_friendly_400(tmp_path, monkeypatch):
+def test_import_kind_anchor_value_rejected_400(tmp_path, monkeypatch):
+    """PR-2+3 Task 3: 'anchor' is never a legal per-column KIND on the
+    import wire — the row-title designation is expressed ONLY via the
+    separate anchor_index form field. A client sending kind='anchor'
+    directly (the old PR-1 per-column wire shape) gets the same friendly
+    400 as any other illegal kind string, not silent acceptance."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000523")
+    nb = _mk_notebook(client, owner_h)
+
+    anchor_as_kind = ["anchor", "procedure", "procedure", "procedure", "entity"]
+    resp = _import_xlsx(client, owner_h, nb, columns_json=_columns_json(kinds=anchor_as_kind))
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert any("一" <= ch <= "鿿" for ch in detail)
+
+
+def test_import_missing_kind_defaults_to_attribute(tmp_path, monkeypatch):
+    """PR-2+3 Task 3 (T1 review fold-in): a column entry that omits "kind"
+    entirely defaults to 'attribute' rather than erroring — mirrors PR-1's
+    own role-omission leniency, just with the new default value name."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000524")
+    nb = _mk_notebook(client, owner_h)
+
+    columns_json = json.dumps(
+        [{"name": HEADER[0]}] + [{"name": n, "kind": k} for n, k in zip(HEADER[1:], KINDS[1:])]
+    )
+    resp = _import_xlsx(client, owner_h, nb, columns_json=columns_json, anchor_index=None)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["columns"][0]["kind"] == "attribute"
+
+
+def test_import_without_anchor_column_succeeds(tmp_path, monkeypatch):
+    """PR-2+3 Task 1: the PR-1 "exactly one concept column" rule is relaxed to
+    at-most-one anchor — a record-shaped table with NO anchor column imports
+    fine (it will only ever participate in retrieval, never the KG)."""
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00000506")
     nb = _mk_notebook(client, owner_h)
 
-    no_concept_roles = ["plain", "identify", "root_cause", "fix", "tool"]
-    resp = _import_xlsx(client, owner_h, nb, columns_json=_columns_json(roles=no_concept_roles))
-    assert resp.status_code == 400, resp.text
-    detail = resp.json()["detail"]
-    assert "concept" in detail or "概念" in detail
+    no_anchor_kinds = ["attribute", "procedure", "procedure", "procedure", "entity"]
+    resp = _import_xlsx(
+        client, owner_h, nb, columns_json=_columns_json(kinds=no_anchor_kinds), anchor_index=None,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [c["kind"] for c in body["columns"]] == no_anchor_kinds
+    assert body["anchor_column_id"] is None
 
 
 def test_import_empty_title_returns_friendly_400(tmp_path, monkeypatch):
@@ -382,7 +438,12 @@ def test_delete_never_projected_table_is_a_safe_noop_for_projection(tmp_path, mo
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00000516")
     nb = _mk_notebook(client, owner_h)
-    columns = [{"name": n, "role": r} for n, r in zip(HEADER, ROLES)]
+    # Direct STORE-level call (bypasses the HTTP import wire entirely) — the
+    # store's own create_knowhow_table contract is unchanged by the Task 3
+    # wire flip: it still takes {name, role} dicts and still allows 'anchor'
+    # inline as one of them (see knowhow_store.py's own documented exception).
+    store_roles = ["anchor"] + KINDS[1:]
+    columns = [{"name": n, "role": r} for n, r in zip(HEADER, store_roles)]
     table_id = repo.create_knowhow_table(nb, "空表", "", columns)
 
     resp = client.delete(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h)

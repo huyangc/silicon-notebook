@@ -13,15 +13,16 @@ import {
   isRetryableProjectionStatus,
   resolveRowTitleText,
   isInternalAssetUrl,
+  appendRowOptimistically,
 } from "./knowhow-panel-logic.ts";
 
 // --- fixtures ------------------------------------------------------------------
 
 const columns = [
-  { id: "c-tool", name: "依赖工具", role: "tool", position: 3 },
-  { id: "c-concept", name: "概念", role: "concept", position: 0 },
-  { id: "c-fix", name: "修复方法", role: "fix", position: 2 },
-  { id: "c-identify", name: "现象识别", role: "identify", position: 1 },
+  { id: "c-tool", name: "依赖工具", role: "entity", position: 3 },
+  { id: "c-concept", name: "概念", role: "anchor", position: 0 },
+  { id: "c-fix", name: "修复方法", role: "procedure", position: 2 },
+  { id: "c-identify", name: "现象识别", role: "procedure", position: 1 },
 ];
 
 function row(id, cells) {
@@ -101,36 +102,36 @@ test("sortColumnsByPosition: 空数组返回空数组", () => {
 
 // --- orderColumnsForGrid ---------------------------------------------------------
 
-test("orderColumnsForGrid: 概念列钉首列，其余按 position 跟随", () => {
+test("orderColumnsForGrid: 行标题列(anchor)钉首列，其余按 position 跟随", () => {
   const out = orderColumnsForGrid(columns);
   assert.deepStrictEqual(out.map((c) => c.id), ["c-concept", "c-identify", "c-fix", "c-tool"]);
 });
 
-test("orderColumnsForGrid: 概念列不在 position 0 时仍钉首列", () => {
+test("orderColumnsForGrid: 行标题列不在 position 0 时仍钉首列", () => {
   const shuffled = [
-    { id: "c-identify", name: "现象识别", role: "identify", position: 0 },
-    { id: "c-concept", name: "概念", role: "concept", position: 1 },
-    { id: "c-fix", name: "修复方法", role: "fix", position: 2 },
+    { id: "c-identify", name: "现象识别", role: "procedure", position: 0 },
+    { id: "c-concept", name: "概念", role: "anchor", position: 1 },
+    { id: "c-fix", name: "修复方法", role: "procedure", position: 2 },
   ];
   const out = orderColumnsForGrid(shuffled);
   assert.deepStrictEqual(out.map((c) => c.id), ["c-concept", "c-identify", "c-fix"]);
 });
 
-test("orderColumnsForGrid: 概念列已在首位时保持不变", () => {
+test("orderColumnsForGrid: 行标题列已在首位时保持不变", () => {
   const alreadyFirst = [
-    { id: "c-concept", name: "概念", role: "concept", position: 0 },
-    { id: "c-fix", name: "修复方法", role: "fix", position: 1 },
+    { id: "c-concept", name: "概念", role: "anchor", position: 0 },
+    { id: "c-fix", name: "修复方法", role: "procedure", position: 1 },
   ];
   const out = orderColumnsForGrid(alreadyFirst);
   assert.deepStrictEqual(out.map((c) => c.id), ["c-concept", "c-fix"]);
 });
 
-test("orderColumnsForGrid: 无概念角色列时退化为纯 position 排序", () => {
-  const noConcept = [
-    { id: "c-fix", name: "修复方法", role: "fix", position: 1 },
-    { id: "c-tool", name: "依赖工具", role: "tool", position: 0 },
+test("orderColumnsForGrid: 无行标题列(记录型表)时退化为纯 position 排序", () => {
+  const noAnchor = [
+    { id: "c-fix", name: "修复方法", role: "procedure", position: 1 },
+    { id: "c-tool", name: "依赖工具", role: "entity", position: 0 },
   ];
-  const out = orderColumnsForGrid(noConcept);
+  const out = orderColumnsForGrid(noAnchor);
   assert.deepStrictEqual(out.map((c) => c.id), ["c-tool", "c-fix"]);
 });
 
@@ -167,27 +168,61 @@ test("isRetryableProjectionStatus: 仅 failed 可重试", () => {
 
 // --- resolveRowTitleText ---------------------------------------------------------
 
-test("resolveRowTitleText: 取概念列原始文本", () => {
+test("resolveRowTitleText: 取行标题列(anchor)原始文本", () => {
   const r = row("r1", { "c-concept": "时序违例", "c-fix": "调整约束" });
   assert.strictEqual(resolveRowTitleText(r, columns), "时序违例");
 });
 
-test("resolveRowTitleText: 无概念角色列时退化为 position 最小的列", () => {
-  const noConcept = [
-    { id: "c-fix", name: "修复方法", role: "fix", position: 1 },
-    { id: "c-tool", name: "依赖工具", role: "tool", position: 0 },
+test("resolveRowTitleText: 无行标题列(记录型表)时用 composeRowTitle 按 position 顺序合成多格标题（非仅首列原文）", () => {
+  const noAnchor = [
+    { id: "c-fix", name: "修复方法", role: "procedure", position: 1 },
+    { id: "c-tool", name: "依赖工具", role: "entity", position: 0 },
   ];
   const r = row("r1", { "c-tool": "innovus", "c-fix": "xxx" });
-  assert.strictEqual(resolveRowTitleText(r, noConcept), "innovus");
+  assert.strictEqual(resolveRowTitleText(r, noAnchor), "innovus · xxx");
+});
+
+test("resolveRowTitleText: 合成标题跳过首个空格子，取下一个非空格子", () => {
+  const noAnchor = [
+    { id: "c-a", name: "A", role: "attribute", position: 0 },
+    { id: "c-b", name: "B", role: "attribute", position: 1 },
+  ];
+  const r = row("r1", { "c-a": "", "c-b": "第二格内容" });
+  assert.strictEqual(resolveRowTitleText(r, noAnchor), "第二格内容");
+});
+
+test("resolveRowTitleText: 无行标题列且全部格子为空时返回空串（兜底「行 N」由调用方处理，非本函数职责）", () => {
+  const noAnchor = [{ id: "c-a", name: "A", role: "attribute", position: 0 }];
+  assert.strictEqual(resolveRowTitleText(row("r1", { "c-a": "" }), noAnchor), "");
 });
 
 test("resolveRowTitleText: 无列时返回空串", () => {
   assert.strictEqual(resolveRowTitleText(row("r1", {}), []), "");
 });
 
-test("resolveRowTitleText: 概念列存在但该行缺少该单元格时返回空串", () => {
+test("resolveRowTitleText: 行标题列存在但该行缺少该单元格时返回空串", () => {
   const r = row("r1", { "c-fix": "xxx" });
   assert.strictEqual(resolveRowTitleText(r, columns), "");
+});
+
+// --- appendRowOptimistically（T7 复审 Important 修复：添加行乐观更新）----------
+
+test("appendRowOptimistically: 把新行拼到数组末尾", () => {
+  const rows = [row("r1", { a: "1" }), row("r2", { a: "2" })];
+  const newRow = row("r3", {});
+  assert.deepStrictEqual(appendRowOptimistically(rows, newRow), [rows[0], rows[1], newRow]);
+});
+
+test("appendRowOptimistically: 空数组拼接后只剩新行", () => {
+  const newRow = row("r1", {});
+  assert.deepStrictEqual(appendRowOptimistically([], newRow), [newRow]);
+});
+
+test("appendRowOptimistically: 不修改原数组", () => {
+  const rows = [row("r1", { a: "1" })];
+  const copy = [...rows];
+  appendRowOptimistically(rows, row("r2", {}));
+  assert.deepStrictEqual(rows, copy);
 });
 
 // --- isInternalAssetUrl -----------------------------------------------------------

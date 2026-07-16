@@ -29,6 +29,12 @@ PUBLIC_TOOLS = {
     "get_memory",
     "ask_notebook",
     "propose_memory",
+    # knowhow-tables PR-2+3 Task 10 (design doc §⑥): agent surface mirroring
+    # app.api.knowhow_agent_routes's HTTP endpoints.
+    "list_knowhow_tables",
+    "get_knowhow_discrimination",
+    "get_knowhow_row",
+    "put_knowhow_cell_code",
 }
 MCP_OUTPUT_BUDGET = 12_000
 
@@ -459,6 +465,25 @@ async def test_each_data_tool_enforces_its_minimal_live_scope_and_output_budget(
         )).isError
 
 
+# The seven ORIGINAL (pre-knowhow) memory-surface tools this specific stress
+# test exercises — kept as its own local constant (not the module-level
+# PUBLIC_TOOLS, which now also carries the four knowhow-tables PR-2+3 Task 10
+# tools) so this test's scope/name ("all seven") stays accurate regardless of
+# what future tool surfaces get added to PUBLIC_TOOLS. Knowhow's own budget
+# behavior gets its own smoke test below
+# (test_knowhow_agent_tool_responses_respect_serialized_budget), mirroring
+# this test's adversarial-data style at a smaller scale.
+_MEMORY_TOOLS = {
+    "list_notebooks",
+    "select_notebook",
+    "search_agent_memory",
+    "search_notebook_context",
+    "get_memory",
+    "ask_notebook",
+    "propose_memory",
+}
+
+
 @pytest.mark.anyio
 async def test_all_seven_official_client_tool_responses_have_strict_serialized_budgets(
     mcp_env, monkeypatch
@@ -614,7 +639,7 @@ async def test_all_seven_official_client_tool_responses_have_strict_serialized_b
             )),
         }
 
-    assert set(responses) == PUBLIC_TOOLS
+    assert set(responses) == _MEMORY_TOOLS
     assert responses["list_notebooks"]["items"][0]["counts"]["sources"] == 7
     assert responses["list_notebooks"]["items"][0]["counts"]["memories"] == 3
     assert responses["select_notebook"]["kg_status"]["dirty"] is True
@@ -1039,3 +1064,159 @@ async def test_runtime_transport_requires_https_only_for_remote_clients(mcp_env)
     assert rejected.status_code == 403
     assert accepted_remote.status_code == 200
     assert accepted_loopback.status_code == 200
+
+
+# ===========================================================================
+# knowhow-tables PR-2+3 Task 10: agent surface MCP tools (design doc §⑥) —
+# same service core as app.api.knowhow_agent_routes's HTTP endpoints
+# (app.services.knowhow.api), smoke-tested here via the same OfficialMcpClient
+# harness the memory tools above use.
+# ===========================================================================
+
+
+def _seed_knowhow_table(notebook_id: str, *, anchor_text="过冲振铃", method_text="1. 看眼图\n2. 测阻抗"):
+    from app.api.deps import repository
+    repo = repository()
+    table_id = repo.create_knowhow_table(
+        notebook_id, "判别表", "",
+        [{"name": "现象", "role": "anchor"}, {"name": "方法", "role": "procedure"}],
+    )
+    table = repo.get_knowhow_table(table_id)
+    anchor_id, method_id = (column["id"] for column in table["columns"])
+    row_id = repo.add_knowhow_row(table_id, {anchor_id: anchor_text, method_id: method_text})
+    return table_id, row_id, method_id
+
+
+@pytest.mark.anyio
+async def test_knowhow_tools_list_tables_and_discrimination(mcp_env):
+    table_id, row_id, method_id = _seed_knowhow_table(mcp_env["notebook"].id)
+
+    async with OfficialMcpClient(mcp_env["app"], mcp_env["token_a"].token) as client:
+        await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
+        tables = _payload(await client.call("list_knowhow_tables"))
+        assert [item["id"] for item in tables["items"]] == [table_id]
+        assert tables["items"][0]["anchor_column_id"]
+
+        discrimination = _payload(
+            await client.call("get_knowhow_discrimination", {"table_id": table_id})
+        )
+        assert len(discrimination["rows"]) == 1
+        assert discrimination["rows"][0]["row_id"] == row_id
+        assert discrimination["rows"][0]["methods"][0]["column_id"] == method_id
+        assert discrimination["rows"][0]["methods"][0]["code_status"] == "none"
+
+
+@pytest.mark.anyio
+async def test_knowhow_tools_get_row_and_put_cell_code_is_scope_gated(mcp_env):
+    table_id, row_id, method_id = _seed_knowhow_table(mcp_env["notebook"].id)
+    app = mcp_env["app"]
+    # Two sequential client sessions against the same app instance: the
+    # underlying StreamableHTTPSessionManager can only be .run() once, so
+    # (mirrors test_notebook_selection_is_required_and_session_scoped above)
+    # share ONE outer lifespan and pass manage_lifespan=False to each client.
+    async with app.router.lifespan_context(app):
+        async with OfficialMcpClient(
+            app, mcp_env["token_a"].token, manage_lifespan=False
+        ) as client:
+            await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
+            row = _payload(await client.call("get_knowhow_row", {"row_id": row_id}))
+            assert row["title"] == "过冲振铃"
+            assert row["code"] == []
+
+            # token_a's scopes (knowledge:read/memory:*/ask:execute) do not
+            # include knowhow:code -> the write is rejected.
+            denied = await client.call(
+                "put_knowhow_cell_code",
+                {
+                    "row_id": row_id, "column_id": method_id,
+                    "code_text": "print(1)", "language": "python",
+                },
+            )
+            assert denied.isError
+
+        # A second token WITH knowhow:code can write; get_knowhow_row then
+        # surfaces the attachment (including updated_by attribution).
+        code_token = mcp_env["service"].issue_agent_token(
+            mcp_env["alice"].id, mcp_env["profile_a"].id,
+            ["knowledge:read", "knowhow:code"], mcp_env["notebook"].id,
+            [mcp_env["notebook"].id], None,
+        )
+        async with OfficialMcpClient(
+            app, code_token.token, manage_lifespan=False
+        ) as client:
+            await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
+            put_result = _payload(await client.call(
+                "put_knowhow_cell_code",
+                {
+                    "row_id": row_id, "column_id": method_id,
+                    "code_text": "print(1)", "language": "python",
+                },
+            ))
+            assert put_result["status"] == "implemented"
+
+            row = _payload(await client.call("get_knowhow_row", {"row_id": row_id}))
+            assert row["code"][0]["column_id"] == method_id
+            assert row["code"][0]["status"] == "implemented"
+            assert row["code"][0]["updated_by"] == mcp_env["profile_a"].name
+
+
+@pytest.mark.anyio
+async def test_knowhow_tools_reject_a_row_from_a_notebook_outside_the_session(mcp_env):
+    """Data-isolation cross-check (mirrors get_memory's own notebook_id
+    mismatch guard): a row_id resolved to a DIFFERENT notebook than the one
+    currently selected on this MCP session must not be readable, even though
+    the token's own allowlist covers both notebooks."""
+    other_table_id, other_row_id, other_method_id = _seed_knowhow_table(mcp_env["other"].id)
+    both_notebooks_token = mcp_env["service"].issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id, ["knowledge:read"],
+        mcp_env["notebook"].id, [mcp_env["notebook"].id, mcp_env["other"].id], None,
+    )
+
+    async with OfficialMcpClient(mcp_env["app"], both_notebooks_token.token) as client:
+        await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
+        row_result = await client.call("get_knowhow_row", {"row_id": other_row_id})
+        assert row_result.isError
+        discrimination_result = await client.call(
+            "get_knowhow_discrimination", {"table_id": other_table_id}
+        )
+        assert discrimination_result.isError
+
+
+@pytest.mark.anyio
+async def test_knowhow_agent_tool_responses_respect_serialized_budget(mcp_env):
+    """Mirrors test_all_seven_official_client_tool_responses_have_strict_
+    serialized_budgets's adversarial-data style at a smaller scale: an
+    oversized cell/code payload must still come back within MCP_OUTPUT_BUDGET
+    with truncation stats, never a raw serialization failure (design doc §⑥:
+    "响应受既有 _budget_response 预算约束")."""
+    sentinel = "私密-knowhow-budget-sentinel"
+    table_id, row_id, method_id = _seed_knowhow_table(
+        mcp_env["notebook"].id,
+        anchor_text=sentinel * 500,
+        method_text="1. " + (sentinel * 2_000),
+    )
+    code_token = mcp_env["service"].issue_agent_token(
+        mcp_env["alice"].id, mcp_env["profile_a"].id,
+        ["knowledge:read", "knowhow:code"], mcp_env["notebook"].id,
+        [mcp_env["notebook"].id], None,
+    )
+
+    async with OfficialMcpClient(mcp_env["app"], code_token.token) as client:
+        await client.call("select_notebook", {"notebook_id": mcp_env["notebook"].id})
+
+        discrimination = _payload(
+            await client.call("get_knowhow_discrimination", {"table_id": table_id})
+        )
+        _assert_budgeted(discrimination)
+
+        put_result = _payload(await client.call(
+            "put_knowhow_cell_code",
+            {
+                "row_id": row_id, "column_id": method_id,
+                "code_text": sentinel * 4_000, "language": "python",
+            },
+        ))
+        _assert_budgeted(put_result)
+
+        row = _payload(await client.call("get_knowhow_row", {"row_id": row_id}))
+        _assert_budgeted(row)

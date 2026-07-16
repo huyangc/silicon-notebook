@@ -4,7 +4,7 @@
 // 与可重试判定 / 抽屉标题解析 / 图片鉴权判定 这些可测纯逻辑单独抽出。
 // knowhow-panel.tsx 只调用本文件导出的函数，不重复实现判断逻辑。
 
-import type { KnowhowColumn, KnowhowRow, ProjectionStatus } from "./knowhow-model.ts";
+import { composeRowTitle, type KnowhowColumn, type KnowhowRow, type ProjectionStatus } from "./knowhow-model.ts";
 
 // --- 行过滤（顶部过滤框：按概念/全文包含过滤）---------------------------------
 
@@ -27,14 +27,17 @@ export function sortColumnsByPosition(columns: KnowhowColumn[]): KnowhowColumn[]
   return [...columns].sort((a, b) => a.position - b.position);
 }
 
-// 网格列头顺序：概念列钉首列（组件侧配合 sticky 定位，横向滚动时概念列保持
-// 可见），其余列按 position 升序跟随。无概念角色列时退化为纯 position 排序。
+// 网格列头顺序：行标题列钉首列（组件侧配合 sticky 定位，横向滚动时行标题列
+// 保持可见），其余列按 position 升序跟随。无行标题列时退化为纯 position 排序。
+// 注：role 词表 2026-07-15 由六值 Role 收窄为四值 CellKind，"concept" 角色
+// 已改名为 "anchor"（行标题），本函数随之最小改名；Task 5 会把行标题选择
+// 迁移到独立的表级 anchorColumnId 选择器。
 export function orderColumnsForGrid(columns: KnowhowColumn[]): KnowhowColumn[] {
   const sorted = sortColumnsByPosition(columns);
-  const conceptIndex = sorted.findIndex((column) => column.role === "concept");
-  if (conceptIndex <= 0) return sorted;
-  const concept = sorted[conceptIndex];
-  return [concept, ...sorted.slice(0, conceptIndex), ...sorted.slice(conceptIndex + 1)];
+  const anchorIndex = sorted.findIndex((column) => column.role === "anchor");
+  if (anchorIndex <= 0) return sorted;
+  const anchor = sorted[anchorIndex];
+  return [anchor, ...sorted.slice(0, anchorIndex), ...sorted.slice(anchorIndex + 1)];
 }
 
 // --- 行投影状态徽标 -------------------------------------------------------------
@@ -62,14 +65,38 @@ export function isRetryableProjectionStatus(status: ProjectionStatus): boolean {
 
 // --- 行详情抽屉标题 -------------------------------------------------------------
 
-// 抽屉标题取「概念」列的原始格子文本（未截断，组件侧再套 cellSummary 截断显
-// 示）；行内没有概念角色列时退化为 position 最小的列（通常即首列），一列都
-// 没有时返回空串交给组件侧兜底文案。
+// 抽屉标题取「行标题」列的原始格子文本（未截断，组件侧再套 cellSummary 截断
+// 显示）；行内没有行标题列（记录型表）时改用 composeRowTitle 合成多格标题
+// （按 position 顺序取前 3 个非空格子首行拼接，与后端 textops.compose_row_title
+// 同规则）——不再退化为"只看首列原文"：记录型表的首列恰好是长文本、图片
+// 说明或与行无关的字段时，裸露首列会产生误导性的行标签，合成标题综合多个
+// 格子的信息更能代表这一行。composeRowTitle 对全空行返回空串，与旧行为一致
+// 地交给调用方按既有约定兜底展示为「行 N」（rowFallbackTitle），本函数不做
+// 这一层兜底。
+// 注：同上，"concept" 角色已改名为 "anchor"（行标题），本函数随之最小改名。
 export function resolveRowTitleText(row: KnowhowRow, columns: KnowhowColumn[]): string {
   const ordered = sortColumnsByPosition(columns);
-  const conceptColumn = ordered.find((column) => column.role === "concept") ?? ordered[0];
-  if (!conceptColumn) return "";
-  return row.cells[conceptColumn.id] ?? "";
+  const anchorColumn = ordered.find((column) => column.role === "anchor");
+  if (anchorColumn) return row.cells[anchorColumn.id] ?? "";
+  return composeRowTitle(ordered.map((column) => row.cells[column.id] ?? ""));
+}
+
+// --- 「添加行」乐观更新（T7 复审 Important 修复） -------------------------------
+
+// 把新建的行本地拼进 rows 数组末尾——addKnowhowRow 的「不传 position 时总是
+// 追加」语义与此处的数组末尾拼接一致。抽成纯函数只为可测：组件侧的 addRow()
+// 在拿到新行后立即
+// `setDetail((prev) => prev ? { ...prev, rows: appendRowOptimistically(prev.rows, newRow) } : prev)`，
+// 让随后的 openCellEdit(newRow.id, ...) 在这次渲染里就能在 detail.rows 里
+// 找到这一行——不依赖背景 loadDetail(selectedTableId) 那次异步整表重拉是否
+// 已经落地。旧写法只调用 loadDetail 而不本地拼接：KnowhowCellEditor 靠
+// `table.rows.find(r => r.id === rowId)!` 定位行，重拉一旦比这次渲染慢（网络
+// 正常延迟）或失败（网络错误），编辑器压根不会出现——行已经在服务端建好，
+// 用户却看不到任何编辑器，也没有任何错误提示（addKnowhowRow 本身是成功的），
+// 只会一头雾水地留在网格上。loadDetail 仍然保留在组件侧、照常调用，作为
+// 「核对服务端真实状态」的后台校准，不再是编辑器出现的前提条件。
+export function appendRowOptimistically(rows: KnowhowRow[], newRow: KnowhowRow): KnowhowRow[] {
+  return [...rows, newRow];
 }
 
 // --- 图片鉴权判定 ---------------------------------------------------------------

@@ -265,6 +265,18 @@ Reparse preserves the source row and original file: it replaces source elements/
 
 The notebook workspace hides the global collection top bar and keeps an engineering-console visual treatment.
 
+## Knowhow tables
+
+A notebook's **Knowhow 表** action (opened as its own panel, alongside Knowledge Graph) manages **knowhow tables**: structured domain know-how captured as rows of experience entries under free-form column names. The shipped example is semiconductor timing-violation triage (one row per violation type; columns for symptom identification, root-cause analysis, fix method, tooling), but columns are plain user-defined text, not a fixed vocabulary. A table starts either from an import (xlsx/csv/Markdown, with a column-to-kind mapping preview) or from a **create-table wizard** (define the column headers first, then fill in rows). Values can be entered two ways, freely mixed: in-app through a **cell editor** — a Markdown/preview split, paste-or-drag image upload, local autosave drafts, and a *save and move to the next cell* flow for fast sequential entry — or offline through an **Excel template round-trip**: download the table's current header as an `.xlsx` template (header row frozen), fill it in bulk, then upload it to append rows (a preview reports unmatched columns and rows whose title duplicates an existing one before you commit).
+
+At most one column can be designated the table's **行标题列 / row-title column** (a table-level choice, not a per-column tag). With one set, every non-empty cell becomes a knowledge-graph node whose *type is its column name*, linked by an `about` edge back to that row's title-column node, and identical values in the same column across different rows merge into one node (ten rows citing the same tool become one tool node with ten incoming edges). Leave it unset and the table stays retrieval-only — cells still become searchable chunks for Ask, but nothing is added to the graph, which is the right shape for log-like tables where a row is a record rather than a named thing.
+
+Each column also carries a **content kind** — a deterministic parsing hint, never an LLM call: **方法步骤 / procedure** cells parse as an ordered list of steps, **工具/事物 / entity** cells split on list items/newlines into one deduplicated node per item, and **普通 / attribute** cells stay a single node. Both the cell editor and the row-detail drawer expose an explicit **优化表达 / optimize wording** button (never triggered automatically): it asks the notebook's configured LLM to tidy structure and phrasing while preserving meaning, shows the rewrite side-by-side with the original, and only replaces the cell after you accept it, one cell at a time.
+
+Ask citations that resolve to a knowhow cell jump straight to that row's detail drawer instead of the generic source view. A notebook's deep copy carries knowhow tables over in full — every table, column, row, cell, and code attachment gets a remapped id in the copy — without re-running embeddings, since cell text that didn't change keeps its existing vectors.
+
+The external-Agent surface (HTTP + MCP, discrimination sets, code attachments) is documented under [Memory and Agent MCP](#memory-and-agent-mcp); the HTTP paths are listed under [APIs](#apis).
+
 ## Memory and Agent MCP
 
 Memory is manual opt-in, creator-private, and always bound to exactly one notebook. From
@@ -314,7 +326,7 @@ The raw tag list is capped before trimming/deduplication, and blank tags are rej
 The Memory page's **Agent access** area creates stable Agent profiles and one-time plaintext
 tokens. A token has an expiry, a default notebook, a notebook allowlist, and the smallest
 needed subset of `knowledge:read`, `memory:read`, `memory:read_candidates`,
-`memory:propose`, and `ask:execute`; it can be revoked immediately. Install the backend
+`memory:propose`, `ask:execute`, and `knowhow:code`; it can be revoked immediately. Install the backend
 requirements (which include the official `mcp>=1.26.0` client/server SDK), start the backend,
 then connect to the Streamable HTTP server at `/mcp` (`/mcp/` is handled through redirect).
 By default MCP allows remote plain HTTP and relaxes Host/Origin (DNS-rebinding)
@@ -348,9 +360,29 @@ Do not assume shell environment interpolation in that header.
 
 Every new MCP session must call `select_notebook` before a data tool. The exact tool set is:
 `list_notebooks`, `select_notebook`, `search_agent_memory`,
-`search_notebook_context`, `get_memory`, `ask_notebook`, and `propose_memory`.
+`search_notebook_context`, `get_memory`, `ask_notebook`, `propose_memory`,
+`list_knowhow_tables`, `get_knowhow_discrimination`, `get_knowhow_row`, and
+`put_knowhow_cell_code`.
 The server rechecks scope, allowlist, token state, and notebook access on data calls;
 retrieved text is untrusted evidence, not executable Agent instructions.
+
+The four knowhow tools mirror the HTTP surface at `/api/agent/knowhow/...` (see
+[APIs](#apis)) through the same service functions, so HTTP and MCP never drift on
+response shape. `list_knowhow_tables`, `get_knowhow_discrimination`, and
+`get_knowhow_row` need `knowledge:read`. `get_knowhow_discrimination` returns, for a
+table with a row-title column (400 otherwise), every row's title plus each
+procedure-kind column's `{column_id, column_name, text, code_status}` — enough for an
+Agent to run its own discrimination logic and pick which fix applies. `get_knowhow_row`
+returns one row's full cell text (`steps`/`items` for procedure/entity columns) plus
+that row's **code attachments** in full. A code attachment is code an external Agent
+already wrote for one cell's method — never generated or executed by the notebook, and
+never embedded/chunked/indexed into any KG projection — whose freshness (`implemented`
+/ `stale` / `none`) is derived at read time from a content hash of the cell; the
+discrimination set carries only that status, never the code body, to stay small.
+Reading code still only needs `knowledge:read` — only writing it
+(`put_knowhow_cell_code`, and the mirrored HTTP `PUT`/`DELETE .../code`) needs
+`knowhow:code`, so a token that must read existing code before writing a new version
+needs both scopes.
 
 Only a `confirmed` Memory can be proposed for KG promotion. The creator proposes it; the
 admin queue shows sanitized extraction candidates and server-validated evidence, not a raw
@@ -417,6 +449,7 @@ Key local beta APIs:
 - `GET /api/sources/{id}`, `DELETE /api/sources/{id}`, `POST /api/sources/{id}/parse`, `GET /api/sources/{id}/elements`
 - `GET /api/notebooks/{id}/knowledge-types`, `GET /api/notebooks/{id}/knowledge?type=concept|claim|formula|procedure|...`, `PATCH /api/notebooks/{id}/knowledge/{knowledge_id}`
 - `GET /api/notebooks/{id}/graph`
+- Knowhow tables: `GET|POST /api/notebooks/{id}/knowhow`, `GET|PATCH|DELETE .../knowhow/{table_id}`, `POST .../knowhow/{table_id}/reproject` — plus import (`POST .../knowhow/import/preview`, `POST .../knowhow/import`), column/row/cell editing (`POST .../knowhow/{table_id}/columns`, `PATCH|DELETE .../columns/{column_id}`, `POST .../knowhow/{table_id}/rows`, `DELETE .../rows/{row_id}`, `PATCH .../rows/{row_id}/cells/{column_id}`), the Excel template round-trip (`GET .../knowhow/{table_id}/template`, `POST .../knowhow/{table_id}/append` with `mode=preview|commit`), and an explicit, suggestion-only LLM rewrite (`POST .../rows/{row_id}/cells/{column_id}/optimize`)
 - `GET /api/notebooks/{id}/search?q=`
 - `POST /api/notebooks/{id}/ask` — grounded Q&A with `[k_i]` citations (`mode`: `chunk` default | `graph` | `reasoning`; federation follows the mode-specific boundaries above)
 - `POST /api/notebooks/{id}/ask/stream` — NDJSON Ask progress stream (first a `started` event with `job_id`, then progress/final events). A transport disconnect stops delivery to that client only; the detached job keeps running and can persist its answer
@@ -426,6 +459,7 @@ Key local beta APIs:
 - `POST /api/answers/{answer_id}/feedback`
 - Memory: `GET /api/memories`, `GET /api/notebooks/{id}/memories`, `GET|PATCH /api/memories/{memory_id}`, `POST /api/memories/{memory_id}/confirm|reject|deprecate|promote`, `POST /api/answers/{answer_id}/memory-preview`, `POST /api/notebooks/{id}/memories/from-answer`
 - Agent access: `GET|POST /api/agent-profiles`, `PATCH /api/agent-profiles/{profile_id}`, `POST /api/agent-profiles/{profile_id}/tokens`, `GET /api/agent-tokens`, `DELETE /api/agent-tokens/{token_id}`; Streamable HTTP MCP is mounted at `/mcp`
+- Knowhow agent surface: `GET /api/agent/knowhow/tables?notebook_id=`, `GET /api/agent/knowhow/tables/{table_id}/discrimination`, `GET /api/agent/knowhow/rows/{row_id}`, `GET|PUT|DELETE /api/agent/knowhow/rows/{row_id}/cells/{column_id}/code` — reachable by either a signed-in session or an Agent Bearer token; reads need `knowledge:read`, code writes need `knowhow:code` (see [Memory and Agent MCP](#memory-and-agent-mcp))
 - Unified KG: `POST .../unified-kg/rebuild`, `GET .../unified-kg`, `GET .../unified-kg/pending-merges`, `POST .../unified-kg/merges/{id}/confirm|reject`
 - `GET .../concepts/{canonical_id}/detail`, `GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`, `POST /api/object-schemas`, `PATCH /api/object-schemas/{type}`, `DELETE /api/object-schemas/{type}`

@@ -855,6 +855,14 @@ class AskService:
                 {c.notebook_id or notebook_id for c in selected})
             def _chunk_tier(c) -> str:
                 return chunk_tier_map.get(c.notebook_id or notebook_id, "personal")
+            # Task 12b（引用跳转扩面）：chunk 模式此前从未富化过
+            # citation.knowhow（此前只有 reasoning 模式的 citations_from 会查）
+            # ——同池同权补上。批量查一次 knowhow 定位标签，覆盖 selected 里
+            # 每个 chunk 的首个 element_id；不管 mix/plain 哪条分支最终建多少
+            # 条引用，只发生一次 store 读取（运行效率是一等约束，镜像
+            # citations_from 的批量口径）。
+            knowhow_refs = self.evidence_context.knowhow_refs_for(
+                c.element_ids[0] for c in selected if c.element_ids)
             if overlay_on:
                 by_id = {c.chunk_id: c for c in selected}
                 for a in anchors:
@@ -865,7 +873,7 @@ class AskService:
                             label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                             source_id=c.source_id, element_id=eid,
                             location_label=c.section_path, quoted_span=c.text[:200],
-                            tier=_chunk_tier(c)))
+                            tier=_chunk_tier(c), knowhow=knowhow_refs.get(eid)))
             else:
                 for c in selected:
                     eid = c.element_ids[0] if c.element_ids else ""
@@ -873,7 +881,7 @@ class AskService:
                         label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                         source_id=c.source_id, element_id=eid,
                         location_label=c.section_path, quoted_span=c.text[:200],
-                        tier=_chunk_tier(c)))
+                        tier=_chunk_tier(c), knowhow=knowhow_refs.get(eid)))
             citations.extend(self._memory_citations(anchors, memory_hits))
 
             # grounding 在 chunk∪KG 合并集上;各项用其融合 relevance(rerank 分不参与)。
@@ -1235,6 +1243,12 @@ class AskService:
                     # + PPR 检索结果(可掺 base 库 chunk,notebook_id 已标)。
                     ppr_tier_map = self._tier_map_for(
                         {c.notebook_id or notebook_id for c in ppr_chunks})
+                    # Task 12b(引用跳转扩面):graph 模式的 PPR 引用同样此前从未
+                    # 富化过 citation.knowhow——批量查一次,覆盖 ppr_chunks 里每
+                    # 个 chunk 的首个 element_id,一次 store 读取(同 ask_chunk
+                    # 侧口径,运行效率是一等约束)。
+                    knowhow_refs = self.evidence_context.knowhow_refs_for(
+                        c.element_ids[0] for c in ppr_chunks if c.element_ids)
                     for a in anchors:
                         if a.object_type == "chunk" and a.object_id in by_id:
                             c = by_id[a.object_id]
@@ -1243,7 +1257,8 @@ class AskService:
                                 label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                                 source_id=c.source_id, element_id=eid,
                                 location_label=c.section_path, quoted_span=c.text[:200],
-                                tier=ppr_tier_map.get(c.notebook_id or notebook_id, "personal")))
+                                tier=ppr_tier_map.get(c.notebook_id or notebook_id, "personal"),
+                                knowhow=knowhow_refs.get(eid)))
                     citations.extend(self._memory_citations(anchors, memory_hits))
                     evidence_level, top_relevance = classify_evidence(
                         list(ppr_chunks) + list(memory_hits), anchors, llm_grounded,
@@ -1394,6 +1409,12 @@ class AskService:
                 # notebook_id) 单库范围,base 节点的 element 天生查不到 chunk——凡是这里
                 # 真返回的 chunk 必属 notebook_id 自己,故只需查这一个 notebook 的 tier。
                 src_chunk_tier = self._tier_map_for({notebook_id}).get(notebook_id, "personal")
+                # Task 12b(引用跳转扩面):graph 模式的源原文引用(mix)同样此前
+                # 从未富化过 citation.knowhow——批量查一次,覆盖 src_chunks 里
+                # 每个 chunk 的首个 element_id,一次 store 读取(同 ask_chunk
+                # 侧口径,运行效率是一等约束)。
+                knowhow_refs = self.evidence_context.knowhow_refs_for(
+                    c.element_ids[0] for c in src_chunks if c.element_ids)
                 for a in anchors:
                     if a.object_type == "chunk" and a.object_id in by_id:
                         c = by_id[a.object_id]
@@ -1402,7 +1423,7 @@ class AskService:
                             label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                             source_id=c.source_id, element_id=eid,
                             location_label=c.section_path, quoted_span=c.text[:200],
-                            tier=src_chunk_tier))
+                            tier=src_chunk_tier, knowhow=knowhow_refs.get(eid)))
                 citations.extend(self._memory_citations(anchors, memory_hits))
                 evidence_level, top_relevance = classify_evidence(
                     list(src_chunks) + list(memory_hits), anchors, llm_grounded,
