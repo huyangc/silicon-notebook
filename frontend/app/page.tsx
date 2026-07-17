@@ -1948,8 +1948,15 @@ export default function Home() {
     setDuplicates(null);
     setSessions([]);
     pollCountRef.current = 0;
-    await loadSessions(notebookId, workspaceEpoch);
+    const sessionList = await loadSessions(notebookId, workspaceEpoch);
     if (workspaceEpochRef.current !== workspaceEpoch) return false;
+    // 落在最近一条对话(列表已按 updated_at DESC 排序)而非空白新会话。
+    // 沿用本次 openNotebook 自己的 epoch:openSession 会新推一个 epoch,
+    // 那会让下面的守卫立刻失配。零对话的库自然跳过,维持新会话现状。
+    if (sessionList && sessionList.length > 0) {
+      await applySessionDetail(sessionList[0].id, workspaceEpoch);
+      if (workspaceEpochRef.current !== workspaceEpoch) return false;
+    }
     window.history.replaceState(null, "", `#notebook=${encodeURIComponent(notebookId)}`);
     window.scrollTo(0, 0);
     return true;
@@ -2361,26 +2368,23 @@ export default function Home() {
   async function loadSessions(
     notebookId: string | null = currentNotebookId,
     expectedWorkspaceEpoch = workspaceEpochRef.current,
-  ) {
-    if (!notebookId) return;
+  ): Promise<ConversationSummary[] | null> {
+    if (!notebookId) return null;
     const list = await api<ConversationSummary[]>(`/notebooks/${notebookId}/conversations`);
     if (
       activeNotebookIdRef.current !== notebookId
       || workspaceEpochRef.current !== expectedWorkspaceEpoch
-    ) return;
+    ) return null;
     setSessions(list);
+    return list;
   }
 
-  async function openSession(id: string) {
-    const workspaceEpoch = ++workspaceEpochRef.current;
-    askRunEpochRef.current += 1;
-    memoryLinksAbortRef.current?.abort();
-    memoryLinksAbortRef.current = null;
-    setAsking(false);
-    setReconnectJob(null);
-    setMemoryAnswerId(null);
+  // 会话详情 → state 的灌入内核。刻意不碰 workspaceEpochRef:调用方各自持有
+  // 自己的 epoch(openSession 新推一个、openNotebook 沿用自己的),内核只做校验。
+  // 这是 openNotebook 能复用它而不自撞守卫的唯一原因。
+  async function applySessionDetail(id: string, expectedWorkspaceEpoch: number) {
     const detail = await api<ConversationDetail>(`/conversations/${id}`);
-    if (workspaceEpochRef.current !== workspaceEpoch) return;
+    if (workspaceEpochRef.current !== expectedWorkspaceEpoch) return;
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
     setAskMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
     setConversationId(id);
@@ -2407,6 +2411,17 @@ export default function Home() {
       askJobIdRef.current = null;
       askNotebookIdRef.current = null;
     }
+  }
+
+  async function openSession(id: string) {
+    const workspaceEpoch = ++workspaceEpochRef.current;
+    askRunEpochRef.current += 1;
+    memoryLinksAbortRef.current?.abort();
+    memoryLinksAbortRef.current = null;
+    setAsking(false);
+    setReconnectJob(null);
+    setMemoryAnswerId(null);
+    await applySessionDetail(id, workspaceEpoch);
   }
 
   function startNewSession() {

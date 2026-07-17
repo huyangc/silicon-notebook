@@ -159,3 +159,35 @@ test("frontend capabilities mirror backend write and admin boundaries", () => {
   assert.match(page, /readOnly=\{!capabilities\.canManageReports\}/);
   assert.match(page, /schemaModalOpen && capabilities\.canManageSchemas/);
 });
+
+test("opening a notebook restores its most recent conversation instead of a blank one", () => {
+  // loadSessions 必须把列表交回给调用方,否则 openNotebook 无从知道该恢复哪条。
+  assert.match(page, /async function loadSessions\([\s\S]*?\): Promise<ConversationSummary\[\] \| null> \{/);
+
+  // 会话详情的灌入内核必须独立于 openSession 存在,且自己不碰 epoch——
+  // openSession 第一行就 ++workspaceEpochRef.current,openNotebook 复用它会自撞守卫。
+  const applyStart = page.indexOf("async function applySessionDetail(");
+  assert.ok(applyStart > -1, "applySessionDetail 必须存在");
+  const applyEnd = page.indexOf("\n  }\n", applyStart);
+  const applyBody = page.slice(applyStart, applyEnd);
+  assert.equal(applyBody.includes("++workspaceEpochRef.current"), false);
+  assert.equal(applyBody.includes("workspaceEpochRef.current +="), false);
+  assert.ok(applyBody.includes("setConversationId(id);"));
+  assert.ok(applyBody.includes("detail.active_job"), "在途 job 重连必须留在内核里,恢复时才能接上");
+
+  // openSession 只负责推进 epoch + 清场,详情灌入委派给内核(零重复)。
+  const openSessionStart = page.indexOf("async function openSession(id: string)");
+  const openSessionEnd = page.indexOf("\n  }\n", openSessionStart);
+  const openSessionBody = page.slice(openSessionStart, openSessionEnd);
+  assert.ok(openSessionBody.includes("++workspaceEpochRef.current"));
+  assert.match(openSessionBody, /await applySessionDetail\(id, workspaceEpoch\)/);
+  assert.equal(openSessionBody.includes("api<ConversationDetail>"), false, "详情请求不该在 openSession 里重复");
+
+  // openNotebook 用自己的 epoch 恢复最近一条,不新开 epoch。
+  const openNotebookStart = page.indexOf("async function openNotebook(notebookId: string");
+  const openNotebookEnd = page.indexOf("\n  }\n", openNotebookStart);
+  const openNotebookBody = page.slice(openNotebookStart, openNotebookEnd);
+  assert.match(openNotebookBody, /const sessionList = await loadSessions\(notebookId, workspaceEpoch\);/);
+  assert.match(openNotebookBody, /await applySessionDetail\(sessionList\[0\]\.id, workspaceEpoch\)/);
+  assert.equal(openNotebookBody.includes("await openSession("), false, "复用 openSession 会自撞 epoch 守卫");
+});
