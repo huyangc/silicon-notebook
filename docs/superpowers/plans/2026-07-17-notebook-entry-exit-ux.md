@@ -393,15 +393,7 @@ cd /Users/hzf/workspace/silicon_notebook/frontend && node --test app/workspace-l
 
 - [ ] **Step 4: 写实现**
 
-**4a.** 两处 import，都按既有的字母序插入。
-
-`page.tsx:4` 是单行的 lucide 扁平 import，`ArrowLeft` 排在 `BarChart3` 前（Task 4 要用，一并加）：
-
-```tsx
-import { ArrowLeft, BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Table2, Trash2, Upload, User, X } from "lucide-react";
-```
-
-`page.tsx:12-17` 是多行的 memory-model import 块，整块替换：
+**4a.** `page.tsx:12-17` 是多行的 memory-model import 块，整块替换（按既有字母序插入两个新导出）：
 
 ```tsx
 import {
@@ -544,7 +536,7 @@ git commit -m "feat(frontend): 浏览器返回键与刷新都能回到笔记本"
 - Test: `frontend/app/workspace-layout.test.mjs`（追加）
 
 **Interfaces:**
-- Consumes: `ArrowLeft`（Task 3 Step 4a 已加进 lucide import）
+- Consumes: 无
 - Produces: 无
 
 - [ ] **Step 1: 写失败的测试**
@@ -576,7 +568,13 @@ cd /Users/hzf/workspace/silicon_notebook/frontend && node --test app/workspace-l
 
 - [ ] **Step 3: 写实现**
 
-**3a.** `page.tsx:3375` 整行替换：
+**3a.** `page.tsx:4` 是单行的 lucide 扁平 import，按字母序把 `ArrowLeft` 排在 `BarChart3` 前：
+
+```tsx
+import { ArrowLeft, BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Table2, Trash2, Upload, User, X } from "lucide-react";
+```
+
+**3b.** `page.tsx:3375` 整行替换：
 
 ```tsx
               <button className="notebook-home" onClick={() => showCollection()} title="返回笔记本列表">
@@ -585,7 +583,7 @@ cd /Users/hzf/workspace/silicon_notebook/frontend && node --test app/workspace-l
               </button>
 ```
 
-**3b.** `globals.css:648-657` 的 `.notebook-home` 整块替换：
+**3c.** `globals.css:648-657` 的 `.notebook-home` 整块替换：
 
 ```css
 .notebook-home {
