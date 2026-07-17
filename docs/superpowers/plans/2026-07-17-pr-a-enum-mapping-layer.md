@@ -736,20 +736,20 @@ Expected: 看到 `if (typeof detail.next_action === "string") return detail.next
 追加到 `frontend/app/reasoning-trace.test.mjs` 末尾：
 
 ```js
-import { traceStepDetail } from "./reasoning-trace.ts";
+import { getTraceStepDetail } from "./reasoning-trace.ts";
 
 test("next_action 不把状态机动作名直出给用户", () => {
-  const out = traceStepDetail({ step_type: "reflect", detail: { next_action: "expand_graph" } });
+  const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: "expand_graph" } });
   assert.notEqual(out, "expand_graph");
 });
 
 test("未知 next_action 不显示,而不是显示原值", () => {
-  const out = traceStepDetail({ step_type: "reflect", detail: { next_action: "brand_new_action" } });
+  const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: "brand_new_action" } });
   assert.notEqual(out, "brand_new_action");
 });
 ```
 
-（若 `reasoning-trace.ts` 导出的函数名不是 `traceStepDetail`，Step 1 读文件时以实际名为准，并同步改这里）
+（导出名已核实：`reasoning-trace.ts:44` 的 `getTraceStepDetail`。同文件另有 `TRACE_STEP_LABELS:3`、`formatDuration:28`、`getReasoningTraceSummary:68`）
 
 - [ ] **Step 3: 跑测试确认它失败**
 
@@ -899,4 +899,6 @@ EOF
 
 **行号敏感性：** Task 2 / 6 / 7 都要求测试**追加到文件末尾**——插在中间会移动行号，打破 `test_repository_surface_manifest.py` 那类按行号钉住的守卫。
 
-**未决（留给执行者在 Task 7 Step 1 现场确认）：** `reasoning-trace.ts` 导出的函数名以实际为准。这不是占位符——Step 1 明确要求读文件确认，且给了不匹配时的处理方式。
+**无未决项。** 自查时发现 Task 7 的测试里把函数名写成了 `traceStepDetail`，实际是 `reasoning-trace.ts:44` 的 `getTraceStepDetail`，已改正——既然查得到，就不该留「现场确认」当挡箭牌。
+
+**类型一致性：** `label(map, value, fallback)` 的三参签名在 Task 1 定义后，Task 2–7 的每一处调用都是三参，无漂移。
