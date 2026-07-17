@@ -5,8 +5,9 @@
 **Goal:** 建立 `frontend/app/vocabulary.ts`（跨模块枚举映射 + 严格查表器 `label()`），并把「后端枚举直出给用户」与「兜底即原值」收编掉。
 
 > 计数勘误：初稿写「4 处兜底即原值」，是我自查用的 grep 写窄了（只认 `?? stage|status|s|step.step_type` 这几个变量名）。
-> 宽模式（`\[[a-zA-Z.]+\]\s*\?\?\s*[a-zA-Z]`）扫出约 10 处。本 PR 收 5 处（Task 3 的 4 处 + Task 7 的 `reasoning-trace.ts:86`）；
-> 另 5 处（`RELATION_LABELS`×3、`FIELD_LABELS`×2）**刻意不在本 PR**，理由见 Task 8 Step 2 的表——
+> 勘误的勘误：第一版「宽模式」`\[[a-zA-Z.]+\]` 的字符类**漏了下划线**，于是 `[latest.step_type]`、`[edge.edge_type]` 这类带 `_` 的键全被跳过，
+> 当时报的「约 10 处」仍然偏少。正确模式是 `\[[a-zA-Z0-9_.]+\]\s*\?\?\s*[a-zA-Z]`，全量 14 处命中，其中 **9 处**是真的「label 表兜底回原值」。
+> 本 PR 收 5 处（Task 3 的 4 处 + Task 7 的 `reasoning-trace.ts:86`）；另 8 处（`RELATION_LABELS`×6、`FIELD_LABELS`×2）**刻意不在本 PR**，理由见 Task 8 Step 2 的表——
 > 尤其 `FIELD_LABELS[key] ?? key` 未必是 bug：自定义类型的字段名是用户自己起的，兜底显示原 key 就是显示用户自己的词。
 
 **Architecture:** 共享核心不是词典，是**枚举映射 + 严格查表器**。`label(map, value, fallback)` 的签名**强制**调用方传兜底词，使「兜底即原值」在类型层面写不出来。散文词不进这个模块（抽不成常量），由 PR B 的文档 + lint 管。
@@ -861,8 +862,10 @@ grep -rn '"base" : "personal"' app/answer-panel.tsx
 # 宽模式:任意「查表后兜底回原值」的形状,不再只认特定变量名
 # (最初计划写的窄 grep 只认 ?? stage|status|s|step.step_type,漏掉了
 #  reasoning-trace.ts:86 的 ?? latest.step_type —— Task 3 执行时才发现)
-grep -rnE "\[[a-zA-Z.]+\]\s*\?\?\s*[a-zA-Z]" app/answer-panel.tsx app/report-view.tsx \
-  app/admin/usage/notebooks.ts app/reasoning-trace.ts app/vocabulary.ts | grep -v "^\s*\*"
+# 注意:不能写成 `| grep -v "^\s*\*"` 去滤 JSDoc —— -rn 会给每行加 file:line: 前缀,
+# `^` 永远锚不上,那个过滤器是死的(Task 3 评审实测复现)。改成匹配前缀之后的内容:
+grep -rnE "\[[a-zA-Z0-9_.]+\]\s*\?\?\s*[a-zA-Z]" app/answer-panel.tsx app/report-view.tsx \
+  app/admin/usage/notebooks.ts app/reasoning-trace.ts app/vocabulary.ts | grep -vE ":\s*\*"
 ```
 
 Expected: **三条命令全部无输出**（`vocabulary.ts` 里 JSDoc 注释提到 `MAP[v] ?? v` 属文档，已由 `grep -v` 排除；若仍有命中，逐条判断是不是真泄漏）。
@@ -871,8 +874,10 @@ Expected: **三条命令全部无输出**（`vocabulary.ts` 里 JSDoc 注释提�
 
 | 位置 | 形状 | 为什么不在本 PR |
 |---|---|---|
-| `page.tsx:757` / `:4746` / `:4952` | `RELATION_LABELS[x] ?? x` | 关系词表是**开放**词表（LLM 抽取产出任意关系名），不是封闭枚举；与被本 PR 排除的 `edge_type` 同族 |
+| `page.tsx:757` / `:4746` / `:4952` / `:5019` / `:5023` / `:5053` | `RELATION_LABELS[x] ?? x` | 关系词表是**开放**词表（LLM 抽取产出任意关系名），不是封闭枚举；与被本 PR 排除的 `edge_type` 同族 |
 | `page.tsx:5009` / `:5547` | `FIELD_LABELS[key] ?? key` | **兜底回原值在这里可能是对的**——自定义类型的字段名是用户自己起的，显示原 key 就是显示用户自己的词。需先判定「内置字段 vs 用户自定义字段」再决定，不能一刀切 |
+
+**不是这个病、别顺手改的 5 处**（形状像但语义合法）：`knowhow-code-logic.ts:79`（对象兜底 `?? NONE_CODE_VIEW`）、`answer-formatting.ts:284`（正则捕获 `match[1] ?? match[2]`）、`knowhow-import-logic.ts:62`、`knowhow-optimize-logic.ts:159`、`page.tsx:3868`（`?? null`）。判据是**兜底值是不是 `value` 自己**。
 
 - [ ] **Step 3: 确认没有越界改到 PR A2 / B 的地盘**
 
