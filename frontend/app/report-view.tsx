@@ -21,6 +21,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkCitations } from "./answer-citations";
 import { referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
+import { label } from "./vocabulary";
 
 // ---------------------------------------------------------------------------
 // 类型(与 backend/app/models/schemas.py 的 ReportSummary/ReportDetail 对齐)
@@ -247,7 +248,7 @@ function ReportStatusBadge({ status, progress }: { status: string; progress: str
   return (
     <span className={`report-status ${status}`} title={progress || undefined}>
       {live && <span className="report-status-dot" aria-hidden />}
-      <span className="report-status-label">{STATUS_LABELS[status] ?? status}</span>
+      <span className="report-status-label">{label(STATUS_LABELS, status, "处理中")}</span>
       {live && progress && <span className="report-status-progress">{progress}</span>}
     </span>
   );

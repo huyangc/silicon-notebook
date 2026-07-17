@@ -108,7 +108,7 @@ test("uses concise detail labels for trace step payloads", () => {
   assert.equal(getTraceStepDetail({ step_type: "plan", summary: "", detail: { sub_queries: [{}, {}] } }), "2 个子查询");
   assert.equal(getTraceStepDetail({ step_type: "retrieve", summary: "", detail: { count: 8 } }), "8 个候选");
   assert.equal(getTraceStepDetail({ step_type: "expand", summary: "", detail: { found: 1 } }), "新增 1");
-  assert.equal(getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "answer" } }), "answer");
+  assert.equal(getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "answer" } }), "开始作答");
 });
 
 test("summarizes an empty live trace as waiting for backend events", () => {
@@ -120,4 +120,46 @@ test("summarizes an empty live trace as waiting for backend events", () => {
     stepCountLabel: "0 步",
     totalLabel: "",
   });
+});
+
+test("next_action 不把状态机动作名直出给用户,而是显示中文人话", () => {
+  assert.equal(
+    getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "expand_graph" } }),
+    "顺着相关内容继续找",
+  );
+  assert.equal(
+    getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "add_subquery" } }),
+    "换个角度再查一遍",
+  );
+});
+
+test("未知 next_action 不显示,而不是显示原值", () => {
+  assert.equal(
+    getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "brand_new_action" } }),
+    "",
+  );
+});
+
+test("latestLabel 遇到未知 step_type 退到中性词,不直出英文", () => {
+  assert.equal(
+    getReasoningTraceSummary(
+      [{ step_type: "brand_new_step_type", summary: "", detail: {} }],
+      true,
+    ).latestLabel,
+    "处理中",
+  );
+});
+
+test("NEXT_ACTION 覆盖后端全部 7 个真实取值(非机制名)", () => {
+  // 真源 reasoning_retrieval.py:529-726 的 elif 分支。后端加第 8 个值时这条会提醒补。
+  const cases = {
+    answer: "开始作答", expand_graph: "顺着相关内容继续找", add_subquery: "换个角度再查一遍",
+    search_elements: "回原文里找细节", ppr_retrieve: "顺着关联扩大范围",
+    expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
+  };
+  for (const [action, zh] of Object.entries(cases)) {
+    const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: action } });
+    assert.equal(out, zh, `${action} 未译或译错`);
+    assert.notEqual(out, action, `${action} 泄漏了英文机制名`);
+  }
 });

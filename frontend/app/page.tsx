@@ -110,6 +110,7 @@ import {
   type UnifiedGraphResp,
   type UnifiedKgStatus,
 } from "./workspace-model";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -4452,7 +4453,7 @@ export default function Home() {
               </section>
               <div className="source-detail-meta">
                 <span className="tag">{sourceTypeLabel(sourceDetail)}</span>
-                <span className="tag">{sourceDetail.parse_status || sourceDetail.status}</span>
+                <span className="tag">{label(PARSE_STATUS, sourceDetail.parse_status || sourceDetail.status, "处理中")}</span>
                 <span className="tag">{formatFileSize(sourceDetail.file_size)}</span>
                 <span className="tag">{sourceElements.length} 个元素</span>
               </div>
@@ -4500,7 +4501,7 @@ export default function Home() {
                   <article className="item source-element-card" key={element.id}>
                     <div className="element-head">
                       <h3>{element.location_label}</h3>
-                      <span className="tag element-type-tag">{element.element_type}</span>
+                      <span className="tag element-type-tag">{label(ELEMENT_TYPE, element.element_type, "内容")}</span>
                     </div>
                     <ElementBody element={element} notebookId={currentNotebookId ?? ""} />
                   </article>
@@ -4547,7 +4548,7 @@ export default function Home() {
               </div>
               <p className="section-title">来源状态</p>
               <div className="tag-row">
-                {Object.entries(analytics.source_status_counts).map(([k, v]) => <span className="tag" key={k}>{k}: {v}</span>)}
+                {Object.entries(analytics.source_status_counts).map(([k, v]) => <span className="tag" key={k}>{label(PARSE_STATUS, k, "其他")} {v}</span>)}
               </div>
               <p className="section-title">索引与构建</p>
               {indexStatus ? (
@@ -5107,7 +5108,7 @@ export default function Home() {
                     return (
                     <article className="item" key={cand.id}>
                       <div className="tag-row">
-                        <span className="tag">{cand.status}</span>
+                        <span className="tag">{label(PROMOTION_STATUS, cand.status, "处理中")}</span>
                         <span className="tag">{cand.object_type}</span>
                         {cand.source_kind === "memory" && <span className="tag">Memory 提取候选</span>}
                         {cand.source_kind === "memory" && review.sourceRevision > 0 && (
@@ -5456,7 +5457,7 @@ function KgEvidenceCard({ evidence, index }: { evidence: EvidenceItem; index: nu
   const sourceLabel = evidence.source_title || evidence.source_id || "未知来源";
   const meta = [
     evidence.location_label,
-    evidence.element_type,
+    label(ELEMENT_TYPE, evidence.element_type, ""),
     kgConfidenceLabel(evidence.confidence)
   ].filter(Boolean);
 
@@ -5482,7 +5483,7 @@ function KgOccurrenceCard({ occurrence, index }: { occurrence: KgOccurrence; ind
   const sourceLabel = occurrence.source_title || occurrence.source_id || "未知来源";
   const meta = [
     occurrence.location_label,
-    occurrence.element_type,
+    label(ELEMENT_TYPE, occurrence.element_type ?? "", ""),
     kgConfidenceLabel(occurrence.confidence)
   ].filter(Boolean);
 
@@ -5779,7 +5780,7 @@ function KnowledgeBrowser({
       </div>
       <div className="tool-input-row">
         <select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value)}>
-          {statuses.map((value) => <option key={value} value={value}>{value === "all" ? "全部状态" : value}</option>)}
+          {statuses.map((value) => <option key={value} value={value}>{value === "all" ? "全部状态" : label(KNOWLEDGE_STATUS, value, "其他")}</option>)}
         </select>
         <button className="sort-button" onClick={reload}>刷新</button>
         {!readOnly && <button className="sort-button" onClick={onFindDuplicates}>查重</button>}
@@ -5794,7 +5795,7 @@ function KnowledgeBrowser({
               <div className="tag-row"><span className="tag">similarity {group.similarity}</span></div>
               {group.members.map((member, memberIndex) => (
                 <div className="dup-member" key={member.id}>
-                  <span><LatexText text={member.headline} isFormula={(member.object_type || group.object_type) === "formula"} /> <span className="tag">{member.status}</span></span>
+                  <span><LatexText text={member.headline} isFormula={(member.object_type || group.object_type) === "formula"} /> <span className="tag">{label(KNOWLEDGE_STATUS, member.status, "其他")}</span></span>
                   {!readOnly && memberIndex > 0 && (
                     <button className="sort-button" onClick={() => onMerge(member.id, group.members[0].id)}>
                       合并到第 1 条
@@ -5821,20 +5822,20 @@ function KnowledgeBrowser({
               </div>
               {knowledgeBody(kind, item)}
               <div className="tag-row">
-                {item.severity && <span className={`tag severity-${item.severity}`}>{item.severity}</span>}
+                {item.severity && <span className={`tag severity-${item.severity}`}>{label(SEVERITY, item.severity, "—")}</span>}
                 {(item.applies_to ?? []).map((scope) => <span className="tag" key={scope}>{scope}</span>)}
               </div>
               <div className="knowledge-govern">
                 {readOnly ? (
                   <>
-                    <span className="tag">{item.status}</span>
+                    <span className="tag">{label(KNOWLEDGE_STATUS, item.status, "其他")}</span>
                     {item.owner && <span className="tag">Owner {item.owner}</span>}
                   </>
                 ) : (
                   <>
                     <label>状态
                       <select value={item.status} onChange={(event) => onStatus(item.id, event.target.value)}>
-                        {KNOWLEDGE_STATUS_OPTIONS.map((value) => <option key={value} value={value}>{value}</option>)}
+                        {KNOWLEDGE_STATUS_OPTIONS.map((value) => <option key={value} value={value}>{label(KNOWLEDGE_STATUS, value, "其他")}</option>)}
                       </select>
                     </label>
                     <label>Owner

@@ -1,4 +1,10 @@
 import type { MemoryOrigin, MemoryPromotionState, MemoryStatus } from "./workspace-model";
+import { label, EVIDENCE_LEVEL } from "./vocabulary.ts";
+import { ASK_MODES } from "./ask-modes.ts";
+
+const ASK_MODE_LABELS: Record<string, string> = Object.fromEntries(
+  ASK_MODES.map((m) => [m.id, m.label]),
+);
 
 export type MemoryScope = "global" | "notebook";
 
@@ -225,8 +231,8 @@ export function memoryProvenanceRows(memory: {
     const citations = Array.isArray(provenance.citations) ? provenance.citations.length : 0;
     const rows: Array<[string, string]> = [
       ["原问题", String(provenance.question ?? "")],
-      ["问答模式", String(provenance.mode ?? "")],
-      ["证据等级", String(provenance.evidence_level ?? "")],
+      ["提问方式", label(ASK_MODE_LABELS, String(provenance.mode ?? ""), "—")],
+      ["依据", label(EVIDENCE_LEVEL, String(provenance.evidence_level ?? ""), "—")],
       ["引用", `${citations} 条`],
     ];
     return rows.filter(([, value]) => Boolean(value));
@@ -251,6 +257,24 @@ export type MemoryEvidenceRow = {
   status: string;
   reason: string;
   trusted: boolean;
+};
+
+// Agent 证据卡片自己的枚举——只在 memory 功能内使用，不进 vocabulary.ts（该文件只装
+// 跨模块枚举）。放在这个 model 文件而不是 memory-panel.tsx，是因为 Node 的
+// `--test` 原生 TS loader 不认 `.tsx`（无法 import JSX 文件），表要能被单测
+// 直接 import 就只能落在 `.ts` 侧；渲染层 memory-panel.tsx 只 import 不重复定义。
+// 取值真源：backend/app/repositories/sqlite/memory_store.py 的
+// `_validate_evidence_ref_on` / `_validation`。
+export const EVIDENCE_TYPE: Record<string, string> = {
+  source_element: "原文片段",
+  source: "原文出处",
+  knowledge: "知识条目",
+  memory: "记忆",
+  unsupported: "无法识别",
+};
+export const EVIDENCE_STATUS: Record<string, string> = {
+  validated: "已核对",
+  invalid: "未能核对",
 };
 
 export function memoryEvidenceRows(memory: {
