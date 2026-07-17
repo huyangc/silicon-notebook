@@ -69,7 +69,9 @@ test("内容块类型:已知值译对，未知值退中性兜底", () => {
 // 映射表是两份独立维护的列表)。从这个锚点取值断言，才能真的发现「映射表漏了
 // 后端某个取值」，而不是像上面 PARSE_STATUS/ELEMENT_TYPE 那样只能断言行为安全。
 test("KNOWLEDGE_STATUS 覆盖 workspace-model 里的每一个取值", () => {
+  // 必须 Object.hasOwn 直接查表——不能写 assert.notEqual(label(MAP,v,"其他"), v):
+  // label 未命中返回「其他」(≠v)恒真,漏了 key 也发现不了(Task 5 评审揪出的空转)。
   for (const v of KNOWLEDGE_STATUS_OPTIONS) {
-    assert.notEqual(label(KNOWLEDGE_STATUS, v, "其他"), v, `${v} 未映射,会直出英文`);
+    assert.ok(Object.hasOwn(KNOWLEDGE_STATUS, v), `${v} 未映射,会退到兜底词`);
   }
 });
