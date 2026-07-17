@@ -38,7 +38,7 @@
  */
 "use client";
 
-import { useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import { buildConceptMatrix, type AnchorGroup } from "./knowhow-grouping-logic.ts";
 import { KnowhowMarkdown } from "./knowhow-cell-editor.tsx";
@@ -63,6 +63,7 @@ export function KnowhowMatrixDrawer({
   onConfirmDeleteConcept,
   deletingConcept,
   onDeleteBranch,
+  deletingBranchRowId,
 }: {
   group: AnchorGroup;
   columns: KnowhowColumn[];
@@ -112,6 +113,11 @@ export function KnowhowMatrixDrawer({
    * 只读成员没有这个入口（渲染处 canEdit 门控）；未传入时表头只显示纯文本
    * 「分支 N」，不出现删除图标——KnowhowPanel 只在 canEdit 时才会传。 */
   onDeleteBranch?: (rowId: string) => void;
+  /** 复审 Important 修复：单个分支删除请求进行中的 rowId（对应 KnowhowPanel
+   * 的 deletingBranchRowId state）——null/undefined=当前没有删除在途。驱动
+   * 下方确认按钮的 disabled + "删除中…" 文案，镜像 header「删除整个概念」
+   * 确认按钮 disabled={deletingConcept} 那一套既有模式。 */
+  deletingBranchRowId?: string | null;
 }) {
   const matrix = buildConceptMatrix(group, columns, anchorColumnId);
 
@@ -119,8 +125,18 @@ export function KnowhowMatrixDrawer({
   // 某个分支的删除图标就把它设成该分支的 rowId，再点另一个分支的删除图标会
   // 直接把这个值换成新目标（单个 string，不是 Set，天然不会叠加出两个同时
   // 敞开的确认态，符合"点另一个分支的删除应切换确认目标，不叠加"）。抽屉整
-  // 体关闭（KnowhowPanel 卸载本组件）时随组件一并清空，不需要额外 effect。
+  // 体关闭（KnowhowPanel 卸载本组件）时随组件一并清空，不需要额外 effect；
+  // 但抽屉保持挂载、只是 group 换到另一个概念（ask 引用跳转 A→B 直接换
+  // openConceptValue，不经过"关闭再打开"，见 knowhow-panel.tsx highlightRowId
+  // 声明处注释）这一种情况下组件不会重新挂载，必须靠下面这个 effect 显式
+  // 收起——否则上一个概念里点了「删除该分支」还没确认的按钮会带进下一个
+  // 概念，显示成"确认删除"扣在一个此刻完全不相关的分支列表头上（复审 Important
+  // 修复）。
   const [confirmDeleteBranchRowId, setConfirmDeleteBranchRowId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setConfirmDeleteBranchRowId(null);
+  }, [group.anchorValue]);
 
   // 格子是否可点：镜像 knowhow-panel.tsx 主网格 G2 的既有判据
   // `clickable = filled || canEdit`（Task 6）——填了内容的格子任何人都能点开
@@ -160,14 +176,22 @@ export function KnowhowMatrixDrawer({
     if (event.currentTarget === event.target) onClose();
   }
 
-  // Follow-up B：表头确认按钮——收起本地确认态，再把真正的删除请求交给
-  // KnowhowPanel。先收起而非等 onDeleteBranch 完成再收起：删除是否成功由
-  // KnowhowPanel 通过 conceptDrawerError 另行呈现（同 addBranch/deleteConcept
-  // 失败提示的既有渠道），这里不为单个分支单独维护一份"删除中"状态——删成功
-  // 后这一列（连同它的确认态）会随 matrix.branchRowIds 重算直接从表头消失，
-  // 删失败则表头恢复成删除图标，用户可以看着 header 的错误提示重试。
+  // Follow-up B：表头确认按钮——把真正的删除请求交给 KnowhowPanel。
+  //
+  // 复审 Important 修复：改动前这里会先把 confirmDeleteBranchRowId 收起、
+  // 表头随即掉回一个可点的删除图标，请求仍在 await 中——这段窗口期给了两条
+  // 路子把同一次删除打两遍：①同一分支被快速二次点击（表头是可点的图标，第
+  // 二次点击直接又发起一次 handleConfirmDeleteBranch）；②概念组还有另一个
+  // 分支时，用户在这段窗口期确认了那一个分支的删除，两次删除都读到同一份
+  // stale openConceptGroup.rows.length，都判定"不是最后一支"，最终两行都被
+  // 删掉、组里 0 行剩却没有一次调用清空 openConceptValue（见
+  // knowhow-panel.tsx deleteBranch 的 Important 修复注释）。现在不再主动收起
+  // confirmDeleteBranchRowId：KnowhowPanel 新增的 deletingBranchRowId prop
+  // （=== rowId 时）会让下面这个确认按钮转 disabled + "删除中…"，继续挂着这份
+  // "确认中"视觉直到请求真正落地——删除成功后这一列随 matrix.branchRowIds
+  // 重算直接从表头消失（确认态随之无处渲染，不用手动清）；删除失败则按钮
+  // 恢复可点，用户能直接原地重试而不必先关掉确认框再重新点删除图标。
   function handleConfirmDeleteBranch(rowId: string) {
-    setConfirmDeleteBranchRowId(null);
     onDeleteBranch?.(rowId);
   }
 
@@ -255,9 +279,10 @@ export function KnowhowMatrixDrawer({
                         <button
                           type="button"
                           className="knowhow-confirm-yes"
+                          disabled={deletingBranchRowId === rid}
                           onClick={() => handleConfirmDeleteBranch(rid)}
                         >
-                          确认删除
+                          {deletingBranchRowId === rid ? "删除中…" : "确认删除"}
                         </button>
                         <button
                           type="button"

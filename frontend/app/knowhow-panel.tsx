@@ -234,6 +234,16 @@ export function KnowhowPanel({
   // 打开都是干净状态。
   const [conceptDrawerError, setConceptDrawerError] = useState<string | null>(null);
 
+  // Follow-up B（删分支，复审 Important 修复）：单个分支删除请求进行中的
+  // 目标 rowId——null=当前没有删除在途。镜像 addingRow 的既有重入防护用法
+  // （deleteBranch 顶部据此短路重入调用），但用 rowId 而非布尔值：删除按
+  // 具体某一行发起，用 rowId 既能在 deleteBranch 内部短路重入（避免并发的
+  // 第二次调用读到同一份 stale openConceptGroup.rows.length、两次都误判"非
+  // 最后一支"、最终留下一个悬挂指向已删概念的 openConceptValue——详见
+  // deleteBranch 函数体注释），也原样传给 KnowhowMatrixDrawer 驱动"这一列"
+  // 表头确认按钮的 disabled + "删除中…"文案，不影响其余分支列的入口。
+  const [deletingBranchRowId, setDeletingBranchRowId] = useState<string | null>(null);
+
   // Task 11（代码附件）：当前打开的代码查看/编辑浮层——与 cellModal/
   // optimizeRowId 平级的另一个顶层 modal 状态，堆叠在行详情抽屉之上。
   const [codeModal, setCodeModal] = useState<{ rowId: string; columnId: string } | null>(null);
@@ -620,9 +630,26 @@ export function KnowhowPanel({
   // KnowhowMatrixDrawer 会尝试渲染一个 branchRowIds 为空的矩阵。非最后一个
   // 分支时抽屉照常开着，loadDetail 拿到少一行的新 detail 后 openConceptGroup
   // 会自动重算成少一个分支的矩阵，不需要额外处理。
+  //
+  // 复审 Important 修复：上面这段"isLastBranch 判定"的前提是 openConceptGroup
+  // 这份旧引用在函数调用的一瞬间是权威的——但若同一个概念组里还有另一个分支
+  // 在这次请求 await 落地（+ loadDetail 刷新）之前也被确认删除，第二次调用会
+  // 读到同一份 stale rows.length，两次都判定 isLastBranch=false；两个分支都
+  // 真删掉后概念组剩 0 行，却没有一次调用触发 setOpenConceptValue(null)——
+  // openConceptValue 悬挂指向一个已不存在的概念（openConceptGroup 的 useMemo
+  // 找不到匹配组会变回 null，抽屉不再渲染，不会崩，但状态本身是脏的：万一之
+  // 后有同锚点文本的行被加回/导入，抽屉会诡异地自动弹出）。同一个分支被快速
+  // 二次点击确认同理会打两次 DELETE，第二次因行已不存在而 400，误报"删除
+  // 失败"。deletingBranchRowId（镜像 addingRow 的既有重入防护）在函数最顶部
+  // 短路重入调用，保证同一时刻至多一路删除请求在途，堵住这两条窗口；配合
+  // KnowhowMatrixDrawer 侧不再提前收起 confirmDeleteBranchRowId（见该组件
+  // handleConfirmDeleteBranch 注释），在制造出第二次点击之前先让按钮转
+  // disabled + "删除中…"。
   async function deleteBranch(rowId: string) {
+    if (deletingBranchRowId) return;
     if (!selectedTableId || !openConceptGroup) return;
     const isLastBranch = openConceptGroup.rows.length <= 1;
+    setDeletingBranchRowId(rowId);
     setActionError(null);
     setConceptDrawerError(null);
     try {
@@ -636,6 +663,8 @@ export function KnowhowPanel({
     } catch {
       setActionError("删除失败，请重试");
       setConceptDrawerError("删除失败，请重试");
+    } finally {
+      setDeletingBranchRowId(null);
     }
   }
 
@@ -981,6 +1010,7 @@ export function KnowhowPanel({
           onConfirmDeleteConcept={deleteConcept}
           deletingConcept={deletingConcept}
           onDeleteBranch={deleteBranch}
+          deletingBranchRowId={deletingBranchRowId}
         />
       )}
 
