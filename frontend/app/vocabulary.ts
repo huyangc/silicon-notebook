@@ -19,6 +19,7 @@ export const PARSE_STATUS: Record<string, string> = {
   extracting: "分析中",
   extracted: "已就绪",
   failed: "解析失败",
+  "metadata-only": "仅元数据", // source_ingestion.py:274 真实会写入
 };
 
 export const ELEMENT_TYPE: Record<string, string> = {
@@ -56,8 +57,11 @@ export const MODEL_STAGE: Record<string, string> = {
   rewrite: "改写模型",
 };
 
+// 取值真源:migrations.py:413 的建表注释 `proposed | under_review | approved | rejected`,
+// 且 page.tsx:5156 线上代码正按 proposed / under_review 分支。没有 "pending" 这个值。
 export const PROMOTION_STATUS: Record<string, string> = {
-  pending: "待审核",
+  proposed: "待审核",
+  under_review: "审核中",
   approved: "已收录",
   rejected: "未采纳",
 };
@@ -68,10 +72,17 @@ export const PROMOTION_STATUS: Record<string, string> = {
  * 签名强制传 fallback，是为了让「兜底即原值」这个 bug 写不出来。后端每加一个
  * 枚举值，旧写法（`MAP[v] ?? v`）都会自动把英文 id 泄漏给用户；这里则会退到一个
  * 中性词，并在开发期把未映射的值喊出来。
+ *
+ * 命中判断必须用 `Object.hasOwn`，不能写成 `map[value]` + 真值判断：`map[value]`
+ * 会走原型链，`value` 传入 "constructor"/"toString"/"__proto__"/"hasOwnProperty"/
+ * "valueOf" 时会命中 `Object.prototype` 上的同名成员，返回一个函数/对象而非
+ * `fallback`。TS 把 `Record<string, string>` 的索引签名推成 `string`，`tsc` 抓不
+ * 到这个类型谎言；这个值一旦被渲染进 JSX，React 会抛 "Objects are not valid as a
+ * React child" 白屏。`Object.hasOwn` 只认自身属性，天然免疫原型链，同时也顺带修
+ * 掉了真值判断的另一个坑——把「合法翻译成空串」的 key 误判为未命中。
  */
 export function label(map: Record<string, string>, value: string, fallback: string): string {
-  const hit = map[value];
-  if (hit) return hit;
+  if (Object.hasOwn(map, value)) return map[value];
   if (process.env.NODE_ENV !== "production") {
     console.error(`[vocabulary] 未映射的枚举值：${JSON.stringify(value)}`);
   }
