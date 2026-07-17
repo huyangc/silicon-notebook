@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { ArrowLeft, BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -13,7 +13,9 @@ import {
   answerIdBatches,
   collectSavedAnswerFlags,
   memoryHash,
+  notebookHash,
   parseMemoryHash,
+  parseWorkspaceHash,
 } from "./memory-model";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
@@ -1343,11 +1345,55 @@ export default function Home() {
             showCollection();
             setToast("Memory 深链接不可用或已失效");
           }
+        } else {
+          // 裸 #notebook=<id>:刷新回到笔记本(此前这条 hash 只写不读,刷新必回集合页)。
+          const workspace = parseWorkspaceHash(window.location.hash);
+          if (workspace) {
+            try {
+              await openNotebook(workspace.notebookId, "none");
+            } catch {
+              showCollection();
+              setToast("笔记本链接不可用或已失效");
+            }
+          }
         }
       })
       .catch(() => { clearToken(); })
       .finally(() => setAuthChecked(true));
   }, [serviceReady]);
+
+  // 浏览器返回/前进:hash 是唯一的真相源,读它切视图。一律传 "none"——
+  // 浏览器已经改过 URL,任何再写都会污染历史栈。
+  useEffect(() => {
+    if (!authChecked) return;
+    function onPopState() {
+      const hash = window.location.hash;
+      const memory = parseMemoryHash(hash);
+      if (memory?.scope === "global") {
+        showGlobalMemory();
+        return;
+      }
+      if (memory?.scope === "notebook" && memory.notebookId) {
+        openNotebookMemory(memory.notebookId).catch(() => {
+          showCollection();
+          setToast("Memory 深链接不可用或已失效");
+        });
+        return;
+      }
+      const workspace = parseWorkspaceHash(hash);
+      if (workspace) {
+        openNotebook(workspace.notebookId, "none").catch(() => {
+          showCollection();
+          setToast("笔记本链接不可用或已失效");
+        });
+        return;
+      }
+      // showCollection 自己的 replaceState 写的就是当前 URL(无 hash),是个 no-op。
+      showCollection();
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [authChecked]);
 
   // 接收分享:挂载时读 ?share=shr-xxx,先清掉参数(避免刷新重弹),再预览打开弹窗。
   // 预览需登录(Bearer),故等 authChecked + 有 token 再拉。
@@ -1905,7 +1951,7 @@ export default function Home() {
     setSourcesPage(pageNum);
   }
 
-  async function openNotebook(notebookId: string): Promise<boolean> {
+  async function openNotebook(notebookId: string, history: "push" | "none" = "push"): Promise<boolean> {
     const workspaceEpoch = ++workspaceEpochRef.current;
     askRunEpochRef.current += 1;
     memoryLinksAbortRef.current?.abort();
@@ -1949,15 +1995,35 @@ export default function Home() {
     setDuplicates(null);
     setSessions([]);
     pollCountRef.current = 0;
-    await loadSessions(notebookId, workspaceEpoch);
+    const sessionList = await loadSessions(notebookId, workspaceEpoch);
     if (workspaceEpochRef.current !== workspaceEpoch) return false;
-    window.history.replaceState(null, "", `#notebook=${encodeURIComponent(notebookId)}`);
+    // 落在最近一条对话(列表已按 updated_at DESC 排序)而非空白新会话。
+    // 沿用本次 openNotebook 自己的 epoch:openSession 会新推一个 epoch,
+    // 那会让下面的守卫立刻失配。零对话的库自然跳过,维持新会话现状。
+    if (sessionList && sessionList.length > 0) {
+      try {
+        await applySessionDetail(sessionList[0].id, workspaceEpoch);
+      } catch {
+        // 恢复是增强项,不是必需品:失败就静默退回本改动前的空白新会话现状,
+        // 而不是让 api() 抛出的异常冒出去把整个 notebook 打不开——恢复是无条件
+        // 自动发生的,没有失败就不打开的道理。这不是「静默吞错误」,是优雅降级到
+        // 已知良好状态;会话列表仍已加载,用户可自行点历史(那次点击失败才该报错)。
+      }
+      if (workspaceEpochRef.current !== workspaceEpoch) return false;
+    }
+    // "none" = 挂载还原 / popstate:浏览器已经把 URL 摆对了,再写一次只会多一个
+    // 死条目(用户按返回没反应)。默认 "push" 让返回键能退出 notebook。
+    if (history === "push") {
+      window.history.pushState(null, "", notebookHash(notebookId));
+    }
     window.scrollTo(0, 0);
     return true;
   }
 
   async function openNotebookMemory(notebookId: string) {
-    if (!await openNotebook(notebookId)) return;
+    // 传 "none" 让 openNotebook 别写 history,自己下面这次 replaceState 独占写入——
+    // 与本函数改动前的净效果逐字一致(旧代码是 replace 再 replace)。
+    if (!await openNotebook(notebookId, "none")) return;
     setChatMode("memory");
     window.history.replaceState(null, "", memoryHash(notebookId));
   }
@@ -1977,7 +2043,10 @@ export default function Home() {
     }
   }
   async function openDoneItem(d: { notebook_id: string }) {
-    if (await openNotebook(d.notebook_id)) await openKgView(undefined, d.notebook_id);
+    // 已经在这个库里就别再 push 一条重复的 #notebook=<同一 id>——按返回键会
+    // 触发 openNotebook(id, "none") 全量重载,把用户从当前视图甩回 ask 聊天。
+    const history = activeNotebookIdRef.current === d.notebook_id ? "none" : "push";
+    if (await openNotebook(d.notebook_id, history)) await openKgView(undefined, d.notebook_id);
   }
 
   async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {
@@ -2362,26 +2431,23 @@ export default function Home() {
   async function loadSessions(
     notebookId: string | null = currentNotebookId,
     expectedWorkspaceEpoch = workspaceEpochRef.current,
-  ) {
-    if (!notebookId) return;
+  ): Promise<ConversationSummary[] | null> {
+    if (!notebookId) return null;
     const list = await api<ConversationSummary[]>(`/notebooks/${notebookId}/conversations`);
     if (
       activeNotebookIdRef.current !== notebookId
       || workspaceEpochRef.current !== expectedWorkspaceEpoch
-    ) return;
+    ) return null;
     setSessions(list);
+    return list;
   }
 
-  async function openSession(id: string) {
-    const workspaceEpoch = ++workspaceEpochRef.current;
-    askRunEpochRef.current += 1;
-    memoryLinksAbortRef.current?.abort();
-    memoryLinksAbortRef.current = null;
-    setAsking(false);
-    setReconnectJob(null);
-    setMemoryAnswerId(null);
+  // 会话详情 → state 的灌入内核。刻意不碰 workspaceEpochRef:调用方各自持有
+  // 自己的 epoch(openSession 新推一个、openNotebook 沿用自己的),内核只做校验。
+  // 这是 openNotebook 能复用它而不自撞守卫的唯一原因。
+  async function applySessionDetail(id: string, expectedWorkspaceEpoch: number) {
     const detail = await api<ConversationDetail>(`/conversations/${id}`);
-    if (workspaceEpochRef.current !== workspaceEpoch) return;
+    if (workspaceEpochRef.current !== expectedWorkspaceEpoch) return;
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
     setAskMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
     setConversationId(id);
@@ -2408,6 +2474,17 @@ export default function Home() {
       askJobIdRef.current = null;
       askNotebookIdRef.current = null;
     }
+  }
+
+  async function openSession(id: string) {
+    const workspaceEpoch = ++workspaceEpochRef.current;
+    askRunEpochRef.current += 1;
+    memoryLinksAbortRef.current?.abort();
+    memoryLinksAbortRef.current = null;
+    setAsking(false);
+    setReconnectJob(null);
+    setMemoryAnswerId(null);
+    await applySessionDetail(id, workspaceEpoch);
   }
 
   function startNewSession() {
@@ -2960,7 +3037,10 @@ export default function Home() {
       if (!stillThere) {
         const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
         if (firstOwned) {
-          await openNotebook(firstOwned.id);
+          // 传 "none" 让 openNotebook 别写 history,自己 replaceState 顶替被退出的
+          // #notebook=<leftId>——否则那条历史条目存活,按返回键会撞上已经 403 的旧笔记本。
+          await openNotebook(firstOwned.id, "none");
+          window.history.replaceState(null, "", notebookHash(firstOwned.id));
         } else {
           showCollection();
         }
@@ -3054,7 +3134,7 @@ export default function Home() {
       window.history.replaceState(
         null,
         "",
-        mode === "memory" ? memoryHash(currentNotebookId) : `#notebook=${encodeURIComponent(currentNotebookId)}`,
+        mode === "memory" ? memoryHash(currentNotebookId) : notebookHash(currentNotebookId),
       );
     }
     if (mode === "rules") {
@@ -3373,7 +3453,10 @@ export default function Home() {
         <main className="notebook-view">
           <section className="workspace-header">
             <div className="workspace-title">
-              <button className="notebook-home" onClick={showCollection}>SN</button>
+              <button className="notebook-home" onClick={() => showCollection()}>
+                <ArrowLeft size={16} />
+                <span>返回主页</span>
+              </button>
               <div className="workspace-title-main">
                 {isReader ? (
                   <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>

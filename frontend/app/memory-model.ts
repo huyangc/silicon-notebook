@@ -147,6 +147,21 @@ export function parseMemoryHash(hash: string): { scope: MemoryScope; notebookId:
   return null;
 }
 
+// 与 memoryHash/parseMemoryHash 同住一个文件是有意的:两条 hash 共用同一套语法
+// (`#notebook=<id>` 与 `#notebook=<id>&tab=memory` 只差一个 tab 参数),拆开必然漂移。
+export function notebookHash(notebookId: string): string {
+  return `#notebook=${encodeURIComponent(notebookId)}`;
+}
+
+// 只认「有 notebook 且没有 tab=memory」的裸工作区 hash。带 tab=memory 的归
+// parseMemoryHash 管——两个解析器必须互斥,否则挂载时会抢同一条 hash。
+export function parseWorkspaceHash(hash: string): { notebookId: string } | null {
+  const params = new URLSearchParams(hash.replace(/^#/, ""));
+  const notebookId = params.get("notebook");
+  if (!notebookId || params.get("tab") === "memory") return null;
+  return { notebookId };
+}
+
 export function answerIdBatches(answerIds: string[], batchSize = 200): string[][] {
   const uniqueIds = Array.from(new Set(answerIds.map((answerId) => answerId.trim()).filter(Boolean)));
   const size = Math.max(1, Math.min(200, Math.floor(batchSize) || 200));
