@@ -18,6 +18,8 @@
 - **不得**碰 `page.tsx:5207/5208`（edge_type / review_status）。edge_type 是开放关系词表且 admin-only（P2），不在本 PR。
 - **不得**碰 `ask-modes.ts` 的 `label` / `desc` 措辞。它是独立的 per-feature 真源，有 `scripts/check_ask_modes_contract.py` 跨栈守卫钉着；本 PR 只**引用**它，不改它。
 - 只动 `frontend/`。本 PR 零后端改动、零迁移。
+- **A/B 边界**：归 PR A 的是**机器值到达屏幕的地方**。与被改枚举**同处一个元素**的相邻散文（例：tier 徽章第 140 行的 tooltip）作为不可避免的连带一并改——留着会让同一元素内部自相矛盾（徽章说「公共知识库」而它自己的 tooltip 说「基准库」）。除此之外的散文一律归 PR B，不要顺手改。
+- **不改命名，只改机制**。除词汇表定稿的 tier 两词外，各枚举的中文措辞以「贴合现状 / 直白可懂」为准，不借本 PR 推行新叫法。
 - 每个 task 结束时 `cd frontend && npm run test && npx tsc --noEmit` 必须绿。
 - 本 worktree 无 `frontend/node_modules`。**Task 0 先装。**
 
@@ -147,11 +149,15 @@ export const EVIDENCE_LEVEL: Record<string, string> = {
   overview: "概述",
 };
 
+// 措辞刻意保持与现状一字不差(answer-panel.tsx:354-358 原有的四个名字)。
+// 本 PR 只修「兜底即原值」这个机制,不碰命名——模型角色命名与设置页对齐
+// (报错说「向量模型」但设置页没这一项)属于 PR C 错误层的范围。这里改名会
+// 给同一批东西发明第三套叫法,PR C 还得再改一遍。
 export const MODEL_STAGE: Record<string, string> = {
-  embed: "语义检索",
-  rerank: "结果排序",
-  answer: "答案生成",
-  rewrite: "问题改写",
+  embed: "向量模型",
+  rerank: "重排模型",
+  answer: "答案模型",
+  rewrite: "改写模型",
 };
 
 export const PROMOTION_STATUS: Record<string, string> = {
@@ -316,7 +322,8 @@ Expected: 分别看到 `?? step.step_type`、`?? stage`、`?? status`、`?? s`
 import { MODEL_STAGE } from "./vocabulary.ts";
 
 test("模型阶段名走 label，未知 stage 不泄漏英文 id", () => {
-  assert.equal(label(MODEL_STAGE, "embed", "某个模型"), "语义检索");
+  // 措辞与现状一致(本 PR 不改命名,只改兜底机制)
+  assert.equal(label(MODEL_STAGE, "embed", "某个模型"), "向量模型");
   assert.equal(label(MODEL_STAGE, "brand_new_stage", "某个模型"), "某个模型");
   assert.notEqual(label(MODEL_STAGE, "brand_new_stage", "某个模型"), "brand_new_stage");
 });
