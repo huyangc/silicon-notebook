@@ -2,7 +2,12 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 建立 `frontend/app/vocabulary.ts`（跨模块枚举映射 + 严格查表器 `label()`），并把 12 处「后端枚举直出给用户」和 4 处「兜底即原值」收编掉。
+**Goal:** 建立 `frontend/app/vocabulary.ts`（跨模块枚举映射 + 严格查表器 `label()`），并把「后端枚举直出给用户」与「兜底即原值」收编掉。
+
+> 计数勘误：初稿写「4 处兜底即原值」，是我自查用的 grep 写窄了（只认 `?? stage|status|s|step.step_type` 这几个变量名）。
+> 宽模式（`\[[a-zA-Z.]+\]\s*\?\?\s*[a-zA-Z]`）扫出约 10 处。本 PR 收 5 处（Task 3 的 4 处 + Task 7 的 `reasoning-trace.ts:86`）；
+> 另 5 处（`RELATION_LABELS`×3、`FIELD_LABELS`×2）**刻意不在本 PR**，理由见 Task 8 Step 2 的表——
+> 尤其 `FIELD_LABELS[key] ?? key` 未必是 bug：自定义类型的字段名是用户自己起的，兜底显示原 key 就是显示用户自己的词。
 
 **Architecture:** 共享核心不是词典，是**枚举映射 + 严格查表器**。`label(map, value, fallback)` 的签名**强制**调用方传兜底词，使「兜底即原值」在类型层面写不出来。散文词不进这个模块（抽不成常量），由 PR B 的文档 + lint 管。
 
@@ -742,10 +747,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 7: 推理轨迹里的 next_action 状态机泄漏
+### Task 7: 推理轨迹里的 next_action 状态机泄漏 + 第 5 处原值兜底
 
 **Files:**
-- Modify: `frontend/app/reasoning-trace.ts:61`
+- Modify: `frontend/app/reasoning-trace.ts:61`（`next_action` 直出）
+- Modify: `frontend/app/reasoning-trace.ts:86`（`TRACE_STEP_LABELS[latest.step_type] ?? latest.step_type` —— Task 3 执行时发现的第 5 处原值兜底，与 Task 3 修的 `answer-panel.tsx:283` 是同一张表、同一个病，只是喂的是折叠态摘要 chip）
 - Test: `frontend/app/reasoning-trace.test.mjs`（既有文件，**追加到末尾**）
 
 **Interfaces:**
@@ -851,11 +857,22 @@ Expected: 全绿（含 `npm run test` / `npm run lint` / `npm run build`）。
 ```bash
 cd frontend
 grep -rnE "\{(sourceDetail\.parse_status|element\.element_type|item\.status|cand\.status)\}" app/page.tsx
-grep -rnE "\?\?\s*(stage|status|s|step\.step_type)\b" app/answer-panel.tsx app/report-view.tsx app/admin/usage/notebooks.ts | grep -iE "label|_CN|LABELS"
 grep -rn '"base" : "personal"' app/answer-panel.tsx
+# 宽模式:任意「查表后兜底回原值」的形状,不再只认特定变量名
+# (最初计划写的窄 grep 只认 ?? stage|status|s|step.step_type,漏掉了
+#  reasoning-trace.ts:86 的 ?? latest.step_type —— Task 3 执行时才发现)
+grep -rnE "\[[a-zA-Z.]+\]\s*\?\?\s*[a-zA-Z]" app/answer-panel.tsx app/report-view.tsx \
+  app/admin/usage/notebooks.ts app/reasoning-trace.ts app/vocabulary.ts | grep -v "^\s*\*"
 ```
 
-Expected: **三条命令全部无输出。**
+Expected: **三条命令全部无输出**（`vocabulary.ts` 里 JSDoc 注释提到 `MAP[v] ?? v` 属文档，已由 `grep -v` 排除；若仍有命中，逐条判断是不是真泄漏）。
+
+**不在本 PR 范围、但已知同形状的 5 处**（留给 PR B / 后续，**不要**在本 PR 顺手改）：
+
+| 位置 | 形状 | 为什么不在本 PR |
+|---|---|---|
+| `page.tsx:757` / `:4746` / `:4952` | `RELATION_LABELS[x] ?? x` | 关系词表是**开放**词表（LLM 抽取产出任意关系名），不是封闭枚举；与被本 PR 排除的 `edge_type` 同族 |
+| `page.tsx:5009` / `:5547` | `FIELD_LABELS[key] ?? key` | **兜底回原值在这里可能是对的**——自定义类型的字段名是用户自己起的，显示原 key 就是显示用户自己的词。需先判定「内置字段 vs 用户自定义字段」再决定，不能一刀切 |
 
 - [ ] **Step 3: 确认没有越界改到 PR A2 / B 的地盘**
 
@@ -931,6 +948,11 @@ EOF
 
 **行号敏感性：** Task 2 / 6 / 7 都要求测试**追加到文件末尾**——插在中间会移动行号，打破 `test_repository_surface_manifest.py` 那类按行号钉住的守卫。
 
-**无未决项。** 自查时发现 Task 7 的测试里把函数名写成了 `traceStepDetail`，实际是 `reasoning-trace.ts:44` 的 `getTraceStepDetail`，已改正——既然查得到，就不该留「现场确认」当挡箭牌。
+**自查的两处失效（执行中被发现，已回写）：**
+
+1. 函数名：原写成 `traceStepDetail`，实际是 `reasoning-trace.ts:44` 的 `getTraceStepDetail`。已改正。
+2. **「4 处兜底即原值」是错的**，真实约 10 处——我自查用的 grep 只认特定变量名，漏掉了 `?? latest.step_type` 这种。
+   Task 3 执行时由实现者发现。已把 `reasoning-trace.ts:86` 折进 Task 7，把 Task 8 的 grep 换成宽模式，
+   并把刻意排除的 5 处连同理由列进 Task 8 Step 2 —— 一个不写明「漏了什么」的守卫，读起来就像「全覆盖了」。
 
 **类型一致性：** `label(map, value, fallback)` 的三参签名在 Task 1 定义后，Task 2–7 的每一处调用都是三参，无漂移。
