@@ -15,6 +15,7 @@ import {
   addKnowhowRow,
   deleteKnowhowRow,
   patchKnowhowCell,
+  batchPatchKnowhowCells,
   createKnowhowTable,
   knowhowTemplateUrl,
   appendKnowhowPreview,
@@ -331,6 +332,45 @@ test("patchKnowhowCell: PATCH 请求体为 {content_md}，响应 snake_case 映�
       contentMd: "新内容",
       projectionStatus: "syncing",
     });
+  });
+});
+
+// --- batchPatchKnowhowCells（followup A：合并格整组单事务批量写，spec §6）--------
+
+test("batchPatchKnowhowCells: PATCH 到 .../cells，请求体为 {column_id,row_ids,content_md}，响应列表按项 snake_case 映射为 camelCase", () => {
+  const wireResult = [
+    { row_id: "r1", column_id: "c1", content_md: "统一改法", projection_status: "pending" },
+    { row_id: "r2", column_id: "c1", content_md: "统一改法", projection_status: "pending" },
+  ];
+  return withFetchStub(wireResult, async (calls) => {
+    const result = await batchPatchKnowhowCells("nb-1", "t1", {
+      columnId: "c1",
+      rowIds: ["r1", "r2"],
+      contentMd: "统一改法",
+    });
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/cells$/);
+    assert.strictEqual(calls[0].init.method, "PATCH");
+    assert.deepStrictEqual(bodyOf(calls[0]), {
+      column_id: "c1",
+      row_ids: ["r1", "r2"],
+      content_md: "统一改法",
+    });
+    assert.deepStrictEqual(result, [
+      { rowId: "r1", columnId: "c1", contentMd: "统一改法", projectionStatus: "pending" },
+      { rowId: "r2", columnId: "c1", contentMd: "统一改法", projectionStatus: "pending" },
+    ]);
+  });
+});
+
+test("batchPatchKnowhowCells: 响应空列表时返回空数组", () => {
+  return withFetchStub([], async (calls) => {
+    const result = await batchPatchKnowhowCells("nb-1", "t1", {
+      columnId: "c1",
+      rowIds: [],
+      contentMd: "x",
+    });
+    assert.deepStrictEqual(bodyOf(calls[0]), { column_id: "c1", row_ids: [], content_md: "x" });
+    assert.deepStrictEqual(result, []);
   });
 });
 

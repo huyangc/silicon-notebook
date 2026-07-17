@@ -288,6 +288,101 @@ def test_import_grid_parse_error_passthrough_400(tmp_path, monkeypatch):
     assert any("一" <= ch <= "鿿" for ch in detail)
 
 
+def test_import_table_forward_fills_anchor_column(tmp_path, monkeypatch, repo):
+    """anchor 分组显示 Task 2: a 转置/合并型 source table's concept column is
+    written once per group in the source file (vertical-merge-style "写一
+    次" convention) and left blank on the sibling branch rows below.
+    import_table must forward-fill the anchor column before insert so every
+    branch row shares the SAME anchor value — the downstream cell-level
+    projector groups rows by anchor value into one concept KO
+    (projection.py); an unfilled blank would silently orphan each branch as
+    its own concept instead of merging them. Calls import_table directly
+    (not through the HTTP route) against the `repo` fixture's DB, using a
+    notebook created via the HTTP client (mirrors
+    test_delete_never_projected_table_is_a_safe_noop_for_projection's mix of
+    HTTP-created notebook + direct repo/service calls)."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000525")
+    nb = _mk_notebook(client, owner_h)
+
+    from app.services.knowhow.api import import_table
+
+    data = _xlsx_bytes(
+        ["违例概念", "根因", "修复"],
+        [
+            ["hold&setup", "inst 变化", "换 VT"],
+            ["", "cell delay", "底层走线"],
+            ["", "noise", "提高 victim"],
+        ],
+    )
+    columns_json = json.dumps([
+        {"name": "违例概念", "kind": "attribute"},
+        {"name": "根因", "kind": "procedure"},
+        {"name": "修复", "kind": "procedure"},
+    ])
+    table_id = import_table(
+        repo, nb, "t.xlsx", data, "违例表", columns_json, anchor_index=0,
+    )
+
+    detail = repo.get_knowhow_table(table_id)
+    anchor_col_id = detail["columns"][0]["id"]
+    anchor_values = [r["cells"].get(anchor_col_id, "") for r in detail["rows"]]
+    assert anchor_values == ["hold&setup", "hold&setup", "hold&setup"]
+
+
+def test_commit_append_forward_fills_anchor_column(tmp_path, monkeypatch, repo):
+    """final-review fix (Important 1): 追加导入 (commit_append) must
+    forward-fill the anchor column exactly like import_table already does
+    (test_import_table_forward_fills_anchor_column above) — "分组列只写一
+    次，兄弟行留空" is the same convention whether the table is brand-new
+    (import) or already exists and rows are being appended into it later.
+    Before this fix, commit_append aligned the file's rows to the table's
+    columns and inserted them verbatim (`if value` merely skips blank cells,
+    it never forward-fills) — an appended branch row's blank anchor cell
+    stayed blank, so groupRowsByAnchor scatters it into its own single-row
+    group and projection._accumulate_row_knowledge (`if not anchor_text:
+    return`) drops it out of the KG entirely: silent data loss on append that
+    the import path doesn't have. Builds the target table directly via
+    create_table (mirrors test_import_table_forward_fills_anchor_column's own
+    "no HTTP for the facade call" style), fetches its wire-shaped detail
+    (commit_append's own `table` param shape — routes.py's `_require_table`
+    always hands it a `to_wire_table` result), then commit_appends a file
+    following the same vertical-merge "写一次" convention as the import test
+    above."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000526")
+    nb = _mk_notebook(client, owner_h)
+
+    from app.services.knowhow.api import commit_append, create_table, to_wire_table
+
+    table_id = create_table(
+        repo, nb, "违例表",
+        [
+            {"name": "违例概念", "kind": "attribute"},
+            {"name": "根因", "kind": "procedure"},
+            {"name": "修复", "kind": "procedure"},
+        ],
+        anchor_index=0,
+    )
+    table = to_wire_table(repo.get_knowhow_table(table_id))
+
+    data = _xlsx_bytes(
+        ["违例概念", "根因", "修复"],
+        [
+            ["hold&setup", "inst 变化", "换 VT"],
+            ["", "cell delay", "底层走线"],
+            ["", "noise", "提高 victim"],
+        ],
+    )
+    added = commit_append(repo, table_id, table, "append.xlsx", data)
+    assert added == 3
+
+    detail = repo.get_knowhow_table(table_id)
+    anchor_col_id = detail["columns"][0]["id"]
+    anchor_values = [r["cells"].get(anchor_col_id, "") for r in detail["rows"]]
+    assert anchor_values == ["hold&setup", "hold&setup", "hold&setup"]
+
+
 # ---------------------------------------------------------------------------
 # Projection: background job eventually settles rows to synced + writes
 # chunks/knowledge_objects that ask/reasoning retrieval already covers.

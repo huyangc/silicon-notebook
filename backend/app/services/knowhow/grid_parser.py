@@ -95,7 +95,13 @@ def _extract_xlsx_rows(data: bytes) -> list[list[str]]:
     from openpyxl import load_workbook
 
     try:
-        workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        # read_only=True 会让 sheet.merged_cells.ranges 变成空——流式读取
+        # 不解析合并信息；用户在 Excel 里做的横/纵向合并单元格就会静默
+        # 被 iter_rows 报成 None，表头会崩成「空列名」，数据会掉一大片。
+        # 为了展开合并只能开非 read-only（load_workbook 默认）。knowhow
+        # 表本身是给人手工填的小表（导入向导上限也很小），非 read-only
+        # 的内存代价可以接受。
+        workbook = load_workbook(io.BytesIO(data), data_only=True)
     except Exception as exc:
         raise GridParseError("无法读取 Excel 文件，请确认文件未损坏且为 .xlsx 格式") from exc
     try:
@@ -105,12 +111,76 @@ def _extract_xlsx_rows(data: bytes) -> list[list[str]]:
         if not workbook.worksheets:
             raise GridParseError("无法读取 Excel 文件，请确认文件未损坏且为 .xlsx 格式")
         sheet = workbook.worksheets[0]
-        return [
+        rows: list[list[str]] = [
             ["" if cell is None else str(cell) for cell in row]
             for row in sheet.iter_rows(values_only=True)
         ]
+        _expand_merged_ranges(rows, sheet.merged_cells.ranges)
+        return rows
     finally:
         workbook.close()
+
+
+def _expand_merged_ranges(rows: list[list[str]], ranges) -> None:
+    """In-place: fill each merged range's top-left value into every cell it
+    covers. openpyxl's ``iter_rows(values_only=True)`` returns the value
+    only in the range's top-left cell and ``None`` in all others — a user
+    reading the sheet sees one big value spanning the range; the parser
+    must see the same, otherwise header rows collapse to ``''`` duplicates
+    and data rows go blank across the merged area (e.g. a vertical merge
+    used to share a violation-concept across four sibling case rows would
+    give the last three rows an empty concept cell).
+
+    Ranges are `MergedCellRange` objects; ``min_row``/``min_col``/
+    ``max_row``/``max_col`` are 1-indexed and inclusive. Fills are safe
+    across ranges (openpyxl forbids overlapping merges at write time, so
+    each cell is claimed by at most one range) and idempotent (a range
+    whose top-left is already blank simply fills blanks — no-op).
+    """
+    for rng in ranges:
+        r0, c0 = rng.min_row - 1, rng.min_col - 1
+        r1, c1 = rng.max_row - 1, rng.max_col - 1
+        if r0 < 0 or c0 < 0 or r0 >= len(rows):
+            # A merged range past the last non-empty row (openpyxl may keep
+            # the definition even after content is deleted). Ignore — no
+            # rows to fill into.
+            continue
+        top_left = rows[r0][c0] if c0 < len(rows[r0]) else ""
+        for r in range(r0, min(r1 + 1, len(rows))):
+            row = rows[r]
+            # 合并区可能延伸到该行当前长度之外——iter_rows 会按 sheet 的
+            # max_column 对齐每一行，但极端情况下仍可能需要按需 pad。
+            if len(row) < c1 + 1:
+                row.extend([""] * (c1 + 1 - len(row)))
+            for c in range(c0, c1 + 1):
+                row[c] = top_left
+
+
+def forward_fill_column(rows: list[list[str]], col_index: int) -> list[list[str]]:
+    """Forward-fill ONE column: each blank cell inherits the last non-blank
+    value above it in that column. Applied to the anchor column at import
+    time (see ``app.services.knowhow.api.import_table``) so a "分组只写一次"
+    concept column — its value written once on a group's first row, blank on
+    the sibling rows below — becomes a fully-populated column that the
+    projector (``projection.py``: anchor-blank rows are dropped) and the grid
+    can both treat as one concept per group.
+
+    Only fills DOWN from a value already seen: a LEADING blank (no non-blank
+    above it yet) stays blank, handled downstream as an unnamed/independent
+    row. Whitespace-only is blank (matches ``_build_grid``'s strip test).
+    Returns a NEW list of NEW rows; never mutates the input."""
+    result: list[list[str]] = []
+    last = ""
+    for row in rows:
+        new_row = list(row)
+        if col_index < len(new_row):
+            cell = new_row[col_index]
+            if cell.strip():
+                last = cell
+            elif last:
+                new_row[col_index] = last
+        result.append(new_row)
+    return result
 
 
 def _decode_text(data: bytes) -> str:

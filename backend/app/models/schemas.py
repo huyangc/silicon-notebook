@@ -1106,6 +1106,18 @@ class KnowhowCellPatchResult(BaseModel):
     projection_status: str
 
 
+# --- followup A: batch cell write, one DB transaction (anchor-grouping spec
+# §6「整组批量写单事务，不半改」) — replaces the frontend's best-effort
+# Promise.all of N independent single-cell PATCHes for a merged/shared cell
+# with ONE request the backend commits atomically. Response reuses
+# KnowhowCellPatchResult, one per written row (same shape the single-cell
+# PATCH already returns, just as a list).
+class KnowhowCellsBatchPatch(BaseModel):
+    column_id: str
+    row_ids: List[str]
+    content_md: str
+
+
 # --- PR-2+3 Task 3: create-empty-table wizard backend --------------------------
 # Mirrors the import endpoint's column/anchor wire shape exactly
 # (columns:[{name,kind}] + a separate anchor_index) but as a JSON body

@@ -1716,6 +1716,32 @@
           "title": "KnowhowCellPatchResult",
           "type": "object"
         },
+        "KnowhowCellsBatchPatch": {
+          "properties": {
+            "column_id": {
+              "title": "Column Id",
+              "type": "string"
+            },
+            "content_md": {
+              "title": "Content Md",
+              "type": "string"
+            },
+            "row_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Row Ids",
+              "type": "array"
+            }
+          },
+          "required": [
+            "column_id",
+            "row_ids",
+            "content_md"
+          ],
+          "title": "KnowhowCellsBatchPatch",
+          "type": "object"
+        },
         "KnowhowColumn": {
           "properties": {
             "id": {
@@ -9049,6 +9075,69 @@
             }
           },
           "summary": "Append Knowhow Rows"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/cells": {
+        "patch": {
+          "description": "Returns one {row_id,column_id,content_md,projection_status} entry per\nrow in body.row_ids, in the same order — same shape patch_knowhow_cell\nreturns for a single row, just as a list.",
+          "operationId": "patch_knowhow_cells_batch_api_notebooks__notebook_id__knowhow__table_id__cells_patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowCellsBatchPatch"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/KnowhowCellPatchResult"
+                    },
+                    "title": "Response Patch Knowhow Cells Batch Api Notebooks  Notebook Id  Knowhow  Table Id  Cells Patch",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Patch Knowhow Cells Batch"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/columns": {

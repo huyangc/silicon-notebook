@@ -39,7 +39,7 @@ from typing import Any, Callable
 
 from app.repositories.sqlite.knowhow_store import VALID_KINDS as _STORE_KINDS
 from app.services import background_jobs
-from app.services.knowhow.grid_parser import ParsedGrid, guess_kinds, parse_grid
+from app.services.knowhow.grid_parser import ParsedGrid, guess_kinds, parse_grid, forward_fill_column
 from app.services.knowhow.projection import KnowhowProjector
 
 # Legal column KINDS a client may name directly on the wire (PR-2+3 Task 3):
@@ -195,7 +195,11 @@ def import_table(
     columns = parse_import_columns(columns_json, grid, anchor_index)
     table_id = repo.create_knowhow_table(notebook_id, title, "", columns)
     column_ids = [c["id"] for c in repo.get_knowhow_table(table_id)["columns"]]
-    for row in grid.rows:
+    # 分组型表：anchor 列可能是"只写一次"的分组列（转置/合并型表的
+    # 违例概念列），落库前 forward-fill 使同概念分支行共享 anchor 值，
+    # 下游 cell-level 投影据此归并成一个概念 KO（见 projection.py）。
+    rows = forward_fill_column(grid.rows, anchor_index) if anchor_index is not None else grid.rows
+    for row in rows:
         cells = {column_ids[i]: value for i, value in enumerate(row) if value}
         repo.add_knowhow_row(table_id, cells)
     repo.bump_knowhow_mutation_seq(table_id)
@@ -594,10 +598,29 @@ def commit_append(
     endpoint. Returns the number of rows added (never raises for duplicate
     titles or unmatched columns — those are ``preview_append``'s advisory-
     only warnings; by the time a client calls commit, the human has already
-    decided to proceed, design doc: "确认后追加导入")."""
+    decided to proceed, design doc: "确认后追加导入").
+
+    final-review fix (Important 1): forward-fills the EXISTING table's anchor
+    column across the aligned rows before insert, mirroring import_table's
+    own forward-fill (same ``forward_fill_column`` helper) — located via
+    ``table_columns``' ``kind`` field exactly like ``preview_append`` above
+    already locates ITS anchor column (this function's ``table`` param is
+    always the wire-shaped detail, never the store's raw ``role`` shape), not
+    a separate ``anchor_index`` (append has no such wire field; the anchor
+    column is whichever one the pre-existing table already designates). A
+    user filling in the downloaded template follows the identical "分组列只
+    写一次，兄弟行留空" convention as a fresh import; without this, every
+    appended sibling row's still-blank anchor cell would silently orphan it
+    out of the KG (``forward_fill_column``'s own docstring, and
+    ``projection.py``'s "anchor-blank rows are dropped")."""
     grid = parse_grid(filename, data)
     table_columns = table.get("columns", [])
     aligned_rows, _unmatched_columns = _align_rows_to_table_columns(table_columns, grid)
+    anchor_position = next(
+        (i for i, column in enumerate(table_columns) if column["kind"] == "anchor"), None
+    )
+    if anchor_position is not None:
+        aligned_rows = forward_fill_column(aligned_rows, anchor_position)
     column_ids = [column["id"] for column in table_columns]
     for aligned_row in aligned_rows:
         cells = {column_ids[i]: value for i, value in enumerate(aligned_row) if value}

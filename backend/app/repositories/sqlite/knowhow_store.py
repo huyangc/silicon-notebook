@@ -523,6 +523,50 @@ class KnowhowStore:
                 (row_id,),
             )
 
+    def update_knowhow_cells(
+        self, row_ids: list[str], column_id: str, content_md: str
+    ) -> None:
+        """Batch upsert the SAME (column, content) across MULTIPLE rows in
+        ONE write transaction — the merged-cell "write the whole concept
+        group" case (anchor-grouping spec §6, followup A): editing a shared
+        cell must write every branch row or none, never half. Each row gets
+        the identical per-row effect ``update_knowhow_cell`` gives one row
+        (cell upsert via the same ``ON CONFLICT(row_id, column_id)`` target +
+        that row's ``updated_at``/``projection_status`` -> ``'pending'``),
+        but the owning table's ``mutation_seq`` bumps only ONCE for the whole
+        batch (not once per row) since this is a single logical edit —
+        table_id is resolved from row_ids[0] (any row in the batch works;
+        callers guarantee same-table membership, exactly like
+        ``update_knowhow_cell`` takes no table_id argument and trusts its
+        one row). Empty ``row_ids`` is a no-op: no transaction opened, no
+        mutation_seq bump. All-or-nothing by construction — everything runs
+        inside a single ``with self.database.write() as db:`` block, so any
+        failure partway through (e.g. a row_id that doesn't exist, tripping
+        the ``knowhow_cells.row_id`` FK) rolls back every write already made
+        in this call, including earlier rows already looped over."""
+        if not row_ids:
+            return
+        now = self.now()
+        with self.database.write() as db:
+            for row_id in row_ids:
+                db.execute(
+                    "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(row_id, column_id) DO UPDATE SET "
+                    "content_md = excluded.content_md, updated_at = excluded.updated_at",
+                    (self.new_id("khcel"), row_id, column_id, content_md, now),
+                )
+                db.execute(
+                    "UPDATE knowhow_rows SET updated_at = ?, projection_status = 'pending' "
+                    "WHERE id = ?",
+                    (now, row_id),
+                )
+            db.execute(
+                "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 "
+                "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = ?)",
+                (row_ids[0],),
+            )
+
     def validate_cell_target(self, row_id: str, column_id: str) -> None:
         """Assert (row, column) name a real cell slot: both exist AND belong
         to the SAME table, else ``ValueError("格子定位不合法")`` uniformly (a

@@ -223,8 +223,11 @@ TASK27_ALLOWED_IMPORTS = {
     # tip: the feature's own Task 8 additions to this file (AssetService /
     # make_persist_image_factory INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES
     # entries) land on top of the already-merged merge_dbs.py reconciliation,
-    # pushing this deferred import down by +41 more lines.
-    ("backend/tests/test_repository_callers_static.py", 772, "app.services.sqlite_repository", "SQLiteRepository"),
+    # pushing this deferred import down by +41 more lines. 772->776: knowhow
+    # anchor-grouping-display's INDEPENDENT_PRIVATE_SITES comment expansion
+    # (api.py optimize_cell's `_runtime` site, 693->716, +4 net lines) shifts
+    # it again.
+    ("backend/tests/test_repository_callers_static.py", 776, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -2969,7 +2972,10 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
     # INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES entries) on top of the
     # already-merged merge_dbs.py reconciliation, adding +41 more lines above
     # this deferred import.
-    ('backend/tests/test_repository_callers_static.py', 772, 'app.services.sqlite_repository', 'SQLiteRepository'),
+    # 772->776: knowhow anchor-grouping-display's INDEPENDENT_PRIVATE_SITES
+    # comment expansion (api.py optimize_cell's `_runtime` site, 693->716,
+    # +4 net lines) shifts it again.
+    ('backend/tests/test_repository_callers_static.py', 776, 'app.services.sqlite_repository', 'SQLiteRepository'),
     ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
 }
 
@@ -3337,6 +3343,18 @@ TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS = {
     ("current_user", "backend/app/api/deps.py:147"),
 }
 
+# Followup A (anchor-grouping display spec §6「整组批量写单事务，不半改」):
+# update_knowhow_cells is a brand-new facade delegate (KnowhowStore's batch
+# sibling of update_knowhow_cell — upserts the SAME column across MULTIPLE
+# rows in ONE write transaction, so a merged/shared cell edit is all-or-
+# nothing instead of the frontend's old best-effort per-row Promise.all).
+# Exempt its consumer-site comparison entirely, exactly like
+# TASK10_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS does above for
+# get_knowhow_row_location — its one call site (the new batch PATCH
+# .../knowhow/{table_id}/cells endpoint in routes.py) needs no per-site
+# registration once the member itself is popped from comparison.
+FOLLOWUP_A_ALLOWED_NEW_MEMBERS = {"update_knowhow_cells"}
+
 
 def test_static_repository_consumer_scan_matches_manifest_exactly():
     recorded = {
@@ -3400,6 +3418,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | TASK1_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
         | TASK10_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
         | TASK3_SOURCE_ASSET_ALLOWED_NEW_MEMBERS
+        | FOLLOWUP_A_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)
@@ -3605,9 +3624,12 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK14_KNOWHOW_P
 # note_model_error — the same narrow-runtime-port pattern build_projector's
 # own `_runtime`/`settings` registration (TASK6_KNOWHOW_ALLOWED_CONSUMERS
 # above) already uses. `settings` isn't re-reached here so only `_runtime`
-# needs a new entry. 682->693: the get_scheduler weakref fix added lines above.
+# needs a new entry. 682->693: the get_scheduler weakref fix added lines
+# above. 693->716: anchor-grouping-display's forward_fill_column import plus
+# import_table's/commit_append's forward-fill additions add +23 net lines
+# further above optimize_cell.
 TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS = {
-    ("_runtime", "backend/app/services/knowhow/api.py:693"),
+    ("_runtime", "backend/app/services/knowhow/api.py:716"),
 }
 # Its own HTTP-level test reaches the live app repository singleton via
 # app.api.deps.repository() (not a freshly constructed SQLiteRepository) to
