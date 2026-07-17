@@ -36,6 +36,7 @@ import { useEffect, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { Check, Code, Copy, Edit3, Trash2, X } from "lucide-react";
 import { deleteCellCode, putCellCode, type KnowhowCellCode } from "./knowhow-model.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
+import { useFloatingWindow } from "./use-floating-window.ts";
 import {
   ADD_CODE_LABEL,
   CANCEL_CODE_LABEL,
@@ -142,6 +143,8 @@ export function KnowhowCodeModal({
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [closeGuard, setCloseGuard] = useState(false);
+  // 本浮层没有全屏概念（任务表未列出）——不传 disabled，拖动/resize 恒生效。
+  const floating = useFloatingWindow({ storageKey: "knowhow.codeModal.window" });
 
   function requestClose() {
     if (closeGuard) {
@@ -256,13 +259,15 @@ export function KnowhowCodeModal({
   return (
     <div className="kh-modal-overlay" onClick={handleBackdropClick}>
       <div
+        ref={floating.cardRef}
         className="kh-modal-card"
+        style={floating.style}
         role="dialog"
         aria-modal="true"
         aria-label={`${rowTitle} › ${columnName} › 代码`}
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="kh-modal-header">
+        <header className="kh-modal-header" {...floating.dragHandleProps}>
           <div className="kh-modal-header-top">
             <div className="kh-modal-breadcrumb">
               <span className="kh-modal-row-title" title={rowTitle}>
@@ -386,6 +391,7 @@ export function KnowhowCodeModal({
             </div>
           ) : null}
         </footer>
+        <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />
       </div>
     </div>
   );

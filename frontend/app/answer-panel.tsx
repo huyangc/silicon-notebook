@@ -415,8 +415,19 @@ export function AnswerView({
           reference={citePopover.reference}
           anchorRect={citePopover.rect}
           onClose={() => setCitePopover(null)}
-          onOpenKnowledgeGraph={onOpenKnowledgeGraph}
-          onOpenKnowhowRow={onOpenKnowhowRow}
+          // 「知识图谱」「在表格中查看」都会在本卡片之上打开一个新的全屏视图
+          // （.kg-view / .knowhow-view，z-index 均为 50，低于本卡片的 60）——
+          // 点击跳转后若不关闭这张卡片，它会一直浮在新打开的视图上方挡住内容
+          // （真机 QA 反馈）。复用与 onClose 完全相同的收起路径
+          // （setCitePopover(null)），不为此新开一套状态。
+          onOpenKnowledgeGraph={(objectId) => {
+            setCitePopover(null);
+            onOpenKnowledgeGraph(objectId);
+          }}
+          onOpenKnowhowRow={(tableId, rowId) => {
+            setCitePopover(null);
+            onOpenKnowhowRow(tableId, rowId);
+          }}
         />
       )}
       <div className="answer-feedback">

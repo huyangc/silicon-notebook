@@ -24,6 +24,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowDown, ArrowUp, Loader2, Plus, Trash2, X } from "lucide-react";
+import { useFloatingWindow, type UseFloatingWindowResult } from "./use-floating-window.ts";
 import {
   cellSummary,
   createKnowhowTable,
@@ -176,155 +177,171 @@ export function KnowhowCreateWizard({ notebookId, onClose, onCreated }: KnowhowC
   }
 
   return (
-    <ManageModalShell label="新建 Knowhow 表" onRequestClose={requestClose} closeDisabled={submitting}>
-      <div className="knowhow-manage-header-row">
-        <div>
-          <h2>新建 Knowhow 表</h2>
-          <p className="knowhow-manage-subtitle">先定表头（列名 + 内容类型 + 行标题列），创建后再逐行填值。</p>
-        </div>
-        <button
-          type="button"
-          className="icon-button"
-          onClick={requestClose}
-          disabled={submitting}
-          title={submitting ? "创建进行中，请稍候" : "关闭"}
-        >
-          <X size={20} />
-        </button>
-      </div>
+    <ManageModalShell
+      label="新建 Knowhow 表"
+      storageKey="knowhow.createWizard.window"
+      onRequestClose={requestClose}
+      closeDisabled={submitting}
+    >
+      {(floating) => (
+        <>
+          <div className="knowhow-manage-header-row" {...floating.dragHandleProps}>
+            <div>
+              <h2>新建 Knowhow 表</h2>
+              <p className="knowhow-manage-subtitle">先定表头（列名 + 内容类型 + 行标题列），创建后再逐行填值。</p>
+            </div>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={requestClose}
+              disabled={submitting}
+              title={submitting ? "创建进行中，请稍候" : "关闭"}
+            >
+              <X size={20} />
+            </button>
+          </div>
 
-      <div className="knowhow-manage-body">
-        <label className="knowhow-manage-field">
-          <span>表标题</span>
-          <input
-            type="text"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            disabled={submitting}
-            placeholder="例如 时序违例修复"
-          />
-        </label>
-
-        <div className="knowhow-manage-columns-head">
-          <span>列定义</span>
-          <button
-            type="button"
-            className="sort-button knowhow-manage-small-button"
-            onClick={() => setHeader(addWizardColumn)}
-            disabled={submitting}
-          >
-            <Plus size={14} /> 加一列
-          </button>
-        </div>
-
-        <div className="knowhow-manage-column-list">
-          {header.columns.map((column, index) => (
-            <div className="knowhow-manage-column-row knowhow-manage-column-row--wizard" key={index}>
+          <div className="knowhow-manage-body">
+            <label className="knowhow-manage-field">
+              <span>表标题</span>
               <input
                 type="text"
-                className="knowhow-manage-col-input"
-                value={column.name}
-                placeholder={`列 ${index + 1} 名称`}
-                onChange={(event) => setHeader((state) => updateWizardColumn(state, index, { name: event.target.value }))}
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
                 disabled={submitting}
+                placeholder="例如 时序违例修复"
               />
-              {header.anchorIndex === index ? (
-                <span className="knowhow-manage-anchor-badge" title={ANCHOR_SET_HINT}>
-                  行标题
-                </span>
-              ) : (
+            </label>
+
+            <div className="knowhow-manage-columns-head">
+              <span>列定义</span>
+              <button
+                type="button"
+                className="sort-button knowhow-manage-small-button"
+                onClick={() => setHeader(addWizardColumn)}
+                disabled={submitting}
+              >
+                <Plus size={14} /> 加一列
+              </button>
+            </div>
+
+            <div className="knowhow-manage-column-list">
+              {header.columns.map((column, index) => (
+                <div className="knowhow-manage-column-row knowhow-manage-column-row--wizard" key={index}>
+                  <input
+                    type="text"
+                    className="knowhow-manage-col-input"
+                    value={column.name}
+                    placeholder={`列 ${index + 1} 名称`}
+                    onChange={(event) => setHeader((state) => updateWizardColumn(state, index, { name: event.target.value }))}
+                    disabled={submitting}
+                  />
+                  {header.anchorIndex === index ? (
+                    <span className="knowhow-manage-anchor-badge" title={ANCHOR_SET_HINT}>
+                      行标题
+                    </span>
+                  ) : (
+                    <select
+                      className="knowhow-manage-kind-select"
+                      value={column.kind}
+                      title={KIND_HINTS[column.kind]}
+                      onChange={(event) =>
+                        setHeader((state) => updateWizardColumn(state, index, { kind: event.target.value as ColumnKind }))
+                      }
+                      disabled={submitting}
+                    >
+                      {KIND_OPTIONS.map((option) => (
+                        <option key={option.value} value={option.value} title={option.hint}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <div className="knowhow-manage-column-ops">
+                    <button
+                      type="button"
+                      className="knowhow-manage-op-button"
+                      title="上移"
+                      disabled={submitting || index === 0}
+                      onClick={() => setHeader((state) => moveWizardColumn(state, index, -1))}
+                    >
+                      <ArrowUp size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="knowhow-manage-op-button"
+                      title="下移"
+                      disabled={submitting || index === header.columns.length - 1}
+                      onClick={() => setHeader((state) => moveWizardColumn(state, index, 1))}
+                    >
+                      <ArrowDown size={14} />
+                    </button>
+                    <button
+                      type="button"
+                      className="knowhow-manage-op-button knowhow-manage-op-danger"
+                      title="删除该列"
+                      disabled={submitting}
+                      onClick={() => setHeader((state) => removeWizardColumn(state, index))}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="knowhow-manage-anchor-row">
+              <label className="knowhow-manage-anchor-label">
+                <span>{ANCHOR_SELECTOR_LABEL}</span>
                 <select
-                  className="knowhow-manage-kind-select"
-                  value={column.kind}
-                  title={KIND_HINTS[column.kind]}
+                  value={header.anchorIndex === null ? "" : String(header.anchorIndex)}
                   onChange={(event) =>
-                    setHeader((state) => updateWizardColumn(state, index, { kind: event.target.value as ColumnKind }))
+                    setHeader((state) =>
+                      setWizardAnchor(state, event.target.value === "" ? null : Number(event.target.value)),
+                    )
                   }
                   disabled={submitting}
                 >
-                  {KIND_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value} title={option.hint}>
-                      {option.label}
+                  <option value="">{ANCHOR_NONE_LABEL}</option>
+                  {header.columns.map((column, index) => (
+                    <option key={index} value={String(index)}>
+                      {column.name.trim() || `列 ${index + 1}`}
                     </option>
                   ))}
                 </select>
-              )}
-              <div className="knowhow-manage-column-ops">
-                <button
-                  type="button"
-                  className="knowhow-manage-op-button"
-                  title="上移"
-                  disabled={submitting || index === 0}
-                  onClick={() => setHeader((state) => moveWizardColumn(state, index, -1))}
-                >
-                  <ArrowUp size={14} />
-                </button>
-                <button
-                  type="button"
-                  className="knowhow-manage-op-button"
-                  title="下移"
-                  disabled={submitting || index === header.columns.length - 1}
-                  onClick={() => setHeader((state) => moveWizardColumn(state, index, 1))}
-                >
-                  <ArrowDown size={14} />
-                </button>
-                <button
-                  type="button"
-                  className="knowhow-manage-op-button knowhow-manage-op-danger"
-                  title="删除该列"
-                  disabled={submitting}
-                  onClick={() => setHeader((state) => removeWizardColumn(state, index))}
-                >
-                  <Trash2 size={14} />
+              </label>
+              <p className={`knowhow-manage-hint${header.anchorIndex === null ? " is-none" : ""}`}>
+                {anchorHint(header.anchorIndex)}
+              </p>
+            </div>
+
+            <KindLegend />
+
+            {touched && validationError && <p className="knowhow-manage-warning">{validationError}</p>}
+
+            {submitError && (
+              <div className="knowhow-manage-error">
+                <span>{submitError}</span>
+                <button type="button" onClick={() => setSubmitError(null)} title="关闭">
+                  <X size={14} />
                 </button>
               </div>
+            )}
+
+            <div className="knowhow-manage-actions">
+              <button
+                type="button"
+                className="new-pill knowhow-manage-submit-button"
+                disabled={submitDisabled}
+                onClick={handleCreate}
+              >
+                {submitting && <Loader2 size={14} className="knowhow-manage-spin" />}
+                {submitting ? "创建中…" : "创建"}
+              </button>
             </div>
-          ))}
-        </div>
-
-        <div className="knowhow-manage-anchor-row">
-          <label className="knowhow-manage-anchor-label">
-            <span>{ANCHOR_SELECTOR_LABEL}</span>
-            <select
-              value={header.anchorIndex === null ? "" : String(header.anchorIndex)}
-              onChange={(event) =>
-                setHeader((state) => setWizardAnchor(state, event.target.value === "" ? null : Number(event.target.value)))
-              }
-              disabled={submitting}
-            >
-              <option value="">{ANCHOR_NONE_LABEL}</option>
-              {header.columns.map((column, index) => (
-                <option key={index} value={String(index)}>
-                  {column.name.trim() || `列 ${index + 1}`}
-                </option>
-              ))}
-            </select>
-          </label>
-          <p className={`knowhow-manage-hint${header.anchorIndex === null ? " is-none" : ""}`}>
-            {anchorHint(header.anchorIndex)}
-          </p>
-        </div>
-
-        <KindLegend />
-
-        {touched && validationError && <p className="knowhow-manage-warning">{validationError}</p>}
-
-        {submitError && (
-          <div className="knowhow-manage-error">
-            <span>{submitError}</span>
-            <button type="button" onClick={() => setSubmitError(null)} title="关闭">
-              <X size={14} />
-            </button>
           </div>
-        )}
-
-        <div className="knowhow-manage-actions">
-          <button type="button" className="new-pill knowhow-manage-submit-button" disabled={submitDisabled} onClick={handleCreate}>
-            {submitting && <Loader2 size={14} className="knowhow-manage-spin" />}
-            {submitting ? "创建中…" : "创建"}
-          </button>
-        </div>
-      </div>
+        </>
+      )}
     </ManageModalShell>
   );
 }
@@ -404,168 +421,182 @@ export function KnowhowManageModal({ notebookId, detail, onClose, onChanged }: K
   const [newColKind, setNewColKind] = useState<ColumnKind>("attribute");
 
   return (
-    <ManageModalShell label={`表管理：${detail.title}`} onRequestClose={requestClose} closeDisabled={pending}>
-      <div className="knowhow-manage-header-row">
-        <div>
-          <h2>表管理</h2>
-          <p className="knowhow-manage-subtitle" title={detail.title}>
-            {detail.title}
-          </p>
-        </div>
-        <button
-          type="button"
-          className="icon-button"
-          onClick={requestClose}
-          disabled={pending}
-          title={pending ? "操作进行中，请稍候" : "关闭"}
-        >
-          <X size={20} />
-        </button>
-      </div>
-
-      <div className="knowhow-manage-body">
-        {error && (
-          <div className="knowhow-manage-error">
-            <span>{error}</span>
-            <button type="button" onClick={() => setError(null)} title="关闭">
-              <X size={14} />
-            </button>
-          </div>
-        )}
-
-        {/* --- 表信息 --- */}
-        <section className="knowhow-manage-section">
-          <h3>表信息</h3>
-          <label className="knowhow-manage-field">
-            <span>标题</span>
-            <input type="text" value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} disabled={pending} />
-          </label>
-          <label className="knowhow-manage-field">
-            <span>描述</span>
-            <textarea
-              rows={2}
-              value={descDraft}
-              onChange={(event) => setDescDraft(event.target.value)}
-              disabled={pending}
-              placeholder="这张表沉淀什么知识（可选）"
-            />
-          </label>
-          <div className="knowhow-manage-inline-actions">
-            <button
-              type="button"
-              className="sort-button knowhow-manage-small-button"
-              disabled={metaSaveDisabled}
-              onClick={() => run(() => patchKnowhowTable(notebookId, detail.id, metaPatch))}
-            >
-              保存
-            </button>
-          </div>
-        </section>
-
-        {/* --- 行标题列 --- */}
-        <section className="knowhow-manage-section">
-          <h3>{ANCHOR_SELECTOR_LABEL}</h3>
-          <div className="knowhow-manage-anchor-row">
-            <label className="knowhow-manage-anchor-label">
-              <span>{ANCHOR_SELECTOR_LABEL}</span>
-              <select
-                value={detail.anchorColumnId ?? ""}
-                disabled={pending}
-                onChange={(event) => {
-                  const value = event.target.value || null;
-                  if (value === detail.anchorColumnId) return;
-                  run(() => patchKnowhowTable(notebookId, detail.id, { anchorColumnId: value }));
-                }}
-              >
-                <option value="">{ANCHOR_NONE_LABEL}</option>
-                {orderedColumns.map((column) => (
-                  <option key={column.id} value={column.id}>
-                    {column.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <p className={`knowhow-manage-hint${detail.anchorColumnId === null ? " is-none" : ""}`}>
-              {anchorHint(detail.anchorColumnId)}
-            </p>
-          </div>
-        </section>
-
-        {/* --- 列管理 --- */}
-        <section className="knowhow-manage-section">
-          <h3>列（{orderedColumns.length}）</h3>
-          <div className="knowhow-manage-column-list">
-            {orderedColumns.map((column) => (
-              <ManageColumnRow
-                key={column.id}
-                name={column.name}
-                kind={column.role === "anchor" ? "attribute" : (column.role as ColumnKind)}
-                isAnchor={column.id === detail.anchorColumnId}
-                pending={pending}
-                onRename={(name) => run(() => patchKnowhowColumn(notebookId, detail.id, column.id, { name }))}
-                onKindChange={(kind) => run(() => patchKnowhowColumn(notebookId, detail.id, column.id, { kind }))}
-                onDelete={() => run(() => deleteKnowhowColumn(notebookId, detail.id, column.id))}
-              />
-            ))}
-          </div>
-          <div className="knowhow-manage-addcol-row">
-            <input
-              type="text"
-              className="knowhow-manage-col-input"
-              value={newColName}
-              placeholder="新列名称"
-              onChange={(event) => setNewColName(event.target.value)}
-              disabled={pending}
-            />
-            <select
-              className="knowhow-manage-kind-select"
-              value={newColKind}
-              title={KIND_HINTS[newColKind]}
-              onChange={(event) => setNewColKind(event.target.value as ColumnKind)}
-              disabled={pending}
-            >
-              {KIND_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value} title={option.hint}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className="sort-button knowhow-manage-small-button"
-              disabled={pending || !newColName.trim()}
-              onClick={() =>
-                run(async () => {
-                  await addKnowhowColumn(notebookId, detail.id, { name: newColName.trim(), kind: newColKind });
-                  setNewColName("");
-                })
-              }
-            >
-              <Plus size={14} /> 加列
-            </button>
-          </div>
-          <KindLegend />
-        </section>
-
-        {/* --- 行管理 --- */}
-        <section className="knowhow-manage-section">
-          <h3>行（{orderedRows.length}）</h3>
-          {orderedRows.length === 0 ? (
-            <p className="knowhow-manage-empty">这张表还没有行。</p>
-          ) : (
-            <div className="knowhow-manage-row-list">
-              {orderedRows.map((row, index) => (
-                <ManageRowItem
-                  key={row.id}
-                  label={cellSummary(resolveRowTitleText(row, detail.columns), 60) || `行 ${index + 1}`}
-                  pending={pending}
-                  onDelete={() => run(() => deleteKnowhowRow(notebookId, detail.id, row.id))}
-                />
-              ))}
+    <ManageModalShell
+      label={`表管理：${detail.title}`}
+      storageKey="knowhow.manage.window"
+      onRequestClose={requestClose}
+      closeDisabled={pending}
+    >
+      {(floating) => (
+        <>
+          <div className="knowhow-manage-header-row" {...floating.dragHandleProps}>
+            <div>
+              <h2>表管理</h2>
+              <p className="knowhow-manage-subtitle" title={detail.title}>
+                {detail.title}
+              </p>
             </div>
-          )}
-        </section>
-      </div>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={requestClose}
+              disabled={pending}
+              title={pending ? "操作进行中，请稍候" : "关闭"}
+            >
+              <X size={20} />
+            </button>
+          </div>
+
+          <div className="knowhow-manage-body">
+            {error && (
+              <div className="knowhow-manage-error">
+                <span>{error}</span>
+                <button type="button" onClick={() => setError(null)} title="关闭">
+                  <X size={14} />
+                </button>
+              </div>
+            )}
+
+            {/* --- 表信息 --- */}
+            <section className="knowhow-manage-section">
+              <h3>表信息</h3>
+              <label className="knowhow-manage-field">
+                <span>标题</span>
+                <input
+                  type="text"
+                  value={titleDraft}
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  disabled={pending}
+                />
+              </label>
+              <label className="knowhow-manage-field">
+                <span>描述</span>
+                <textarea
+                  rows={2}
+                  value={descDraft}
+                  onChange={(event) => setDescDraft(event.target.value)}
+                  disabled={pending}
+                  placeholder="这张表沉淀什么知识（可选）"
+                />
+              </label>
+              <div className="knowhow-manage-inline-actions">
+                <button
+                  type="button"
+                  className="sort-button knowhow-manage-small-button"
+                  disabled={metaSaveDisabled}
+                  onClick={() => run(() => patchKnowhowTable(notebookId, detail.id, metaPatch))}
+                >
+                  保存
+                </button>
+              </div>
+            </section>
+
+            {/* --- 行标题列 --- */}
+            <section className="knowhow-manage-section">
+              <h3>{ANCHOR_SELECTOR_LABEL}</h3>
+              <div className="knowhow-manage-anchor-row">
+                <label className="knowhow-manage-anchor-label">
+                  <span>{ANCHOR_SELECTOR_LABEL}</span>
+                  <select
+                    value={detail.anchorColumnId ?? ""}
+                    disabled={pending}
+                    onChange={(event) => {
+                      const value = event.target.value || null;
+                      if (value === detail.anchorColumnId) return;
+                      run(() => patchKnowhowTable(notebookId, detail.id, { anchorColumnId: value }));
+                    }}
+                  >
+                    <option value="">{ANCHOR_NONE_LABEL}</option>
+                    {orderedColumns.map((column) => (
+                      <option key={column.id} value={column.id}>
+                        {column.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className={`knowhow-manage-hint${detail.anchorColumnId === null ? " is-none" : ""}`}>
+                  {anchorHint(detail.anchorColumnId)}
+                </p>
+              </div>
+            </section>
+
+            {/* --- 列管理 --- */}
+            <section className="knowhow-manage-section">
+              <h3>列（{orderedColumns.length}）</h3>
+              <div className="knowhow-manage-column-list">
+                {orderedColumns.map((column) => (
+                  <ManageColumnRow
+                    key={column.id}
+                    name={column.name}
+                    kind={column.role === "anchor" ? "attribute" : (column.role as ColumnKind)}
+                    isAnchor={column.id === detail.anchorColumnId}
+                    pending={pending}
+                    onRename={(name) => run(() => patchKnowhowColumn(notebookId, detail.id, column.id, { name }))}
+                    onKindChange={(kind) => run(() => patchKnowhowColumn(notebookId, detail.id, column.id, { kind }))}
+                    onDelete={() => run(() => deleteKnowhowColumn(notebookId, detail.id, column.id))}
+                  />
+                ))}
+              </div>
+              <div className="knowhow-manage-addcol-row">
+                <input
+                  type="text"
+                  className="knowhow-manage-col-input"
+                  value={newColName}
+                  placeholder="新列名称"
+                  onChange={(event) => setNewColName(event.target.value)}
+                  disabled={pending}
+                />
+                <select
+                  className="knowhow-manage-kind-select"
+                  value={newColKind}
+                  title={KIND_HINTS[newColKind]}
+                  onChange={(event) => setNewColKind(event.target.value as ColumnKind)}
+                  disabled={pending}
+                >
+                  {KIND_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value} title={option.hint}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="sort-button knowhow-manage-small-button"
+                  disabled={pending || !newColName.trim()}
+                  onClick={() =>
+                    run(async () => {
+                      await addKnowhowColumn(notebookId, detail.id, { name: newColName.trim(), kind: newColKind });
+                      setNewColName("");
+                    })
+                  }
+                >
+                  <Plus size={14} /> 加列
+                </button>
+              </div>
+              <KindLegend />
+            </section>
+
+            {/* --- 行管理 --- */}
+            <section className="knowhow-manage-section">
+              <h3>行（{orderedRows.length}）</h3>
+              {orderedRows.length === 0 ? (
+                <p className="knowhow-manage-empty">这张表还没有行。</p>
+              ) : (
+                <div className="knowhow-manage-row-list">
+                  {orderedRows.map((row, index) => (
+                    <ManageRowItem
+                      key={row.id}
+                      label={cellSummary(resolveRowTitleText(row, detail.columns), 60) || `行 ${index + 1}`}
+                      pending={pending}
+                      onDelete={() => run(() => deleteKnowhowRow(notebookId, detail.id, row.id))}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+          </div>
+        </>
+      )}
     </ManageModalShell>
   );
 }
@@ -725,15 +756,31 @@ function ManageRowItem({ label, pending, onDelete }: { label: string; pending: b
 
 function ManageModalShell({
   label,
+  storageKey,
   onRequestClose,
   closeDisabled,
   children,
 }: {
   label: string;
+  /** 两个调用点各传各的键（knowhow.createWizard.window /
+   * knowhow.manage.window）——建表向导与表管理是两个独立弹窗，位置/尺寸各记
+   * 各的，不共享（不像格子浮窗查看/编辑态那样是同一身份的两种渲染）。本壳
+   * 只管把调用方给的键转交给 useFloatingWindow，不在这里硬编码任何字面量键。 */
+  storageKey: string;
   onRequestClose: () => void;
   closeDisabled: boolean;
-  children: ReactNode;
+  /** 渲染函数而非普通 ReactNode：header（拖动手柄）由两个调用点自己渲染，
+   * 但拖动状态由本壳持有的 useFloatingWindow 实例产出（单一 hook 调用点，
+   * 镜像其余 7 个已接浮窗「一个组件一个 useFloatingWindow 实例」的约定，
+   * 只是这里那个组件是壳、header 是子组件传入的 children）——把 floating
+   * 结果通过函数参数交还给调用方，好让它们把 dragHandleProps 挂到自己的
+   * header 行上、同时仍可读 floating 的其余字段。 */
+  children: (floating: UseFloatingWindowResult) => ReactNode;
 }) {
+  // 这两个弹窗没有全屏概念（不像格子浮窗/概念矩阵抽屉），resize 手柄无条件
+  // 渲染，不需要按 fullscreen 状态门控 disabled。
+  const floating = useFloatingWindow({ storageKey });
+
   return (
     <div
       className="knowhow-manage-backdrop"
@@ -742,13 +789,16 @@ function ManageModalShell({
       }}
     >
       <section
+        ref={floating.cardRef}
         className="knowhow-manage-card"
+        style={floating.style}
         role="dialog"
         aria-modal="true"
         aria-label={label}
         onClick={(event) => event.stopPropagation()}
       >
-        {children}
+        {children(floating)}
+        <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />
       </section>
       <ManageStyles />
     </div>
@@ -778,6 +828,33 @@ function ManageStyles() {
         border-radius: 16px;
         box-shadow: var(--shadow);
         overflow: hidden;
+        /* 浮窗 resize 手柄（.kh-modal-resize-handle，见下方）绝对定位需要
+           一个定位上下文——backdrop 是 position: fixed，不加这条手柄会贴到
+           整个视口右下角而不是卡片右下角。 */
+        position: relative;
+      }
+
+      /* 浮窗 resize 手柄——与 knowhow-panel.tsx 顶层 <style jsx global> 里
+         .kh-modal-resize-handle 那份定义逐字同款（同一个 class 名，沿用
+         kh-modal-* 命名），但必须在本文件自己的样式块里重复登记一份：本
+         文件的既有约定是「自成一体，不依赖面板的 style 标签是否同时挂载」
+         （见文件头注释「镜像 knowhow-import.tsx 的自成一体写法」），不能
+         指望 KnowhowPanel 的全局样式恰好也已经渲染过。两份定义规则完全
+         相同，互不冲突，哪个先被浏览器解析都一样。 */
+      .kh-modal-resize-handle {
+        position: absolute;
+        right: 0;
+        bottom: 0;
+        width: 16px;
+        height: 16px;
+        cursor: nwse-resize;
+        touch-action: none;
+        clip-path: polygon(100% 0%, 100% 100%, 0% 100%);
+        background: var(--line);
+      }
+
+      .kh-modal-resize-handle:hover {
+        background: var(--muted);
       }
 
       .knowhow-manage-header-row {
