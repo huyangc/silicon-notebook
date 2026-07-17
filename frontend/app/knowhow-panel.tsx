@@ -606,6 +606,39 @@ export function KnowhowPanel({
     }
   }
 
+  // Follow-up B（删分支，spec §4.4）：矩阵抽屉表头「删除该分支」——删除概念组
+  // 里单独一个物理行（一个分支），与上面 deleteConcept「删整个概念（组内全部
+  // 行）」不同粒度。二次确认态本身在 KnowhowMatrixDrawer 组件内部持有
+  // （confirmDeleteBranchRowId 本地 state，见该组件），这里只负责确认后的真正
+  // 删除请求——错误处理与 deleteConcept 同一套双写渠道（actionError 供关闭
+  // 抽屉后主网格横幅可见 + conceptDrawerError 供抽屉开着时就地显示）。
+  //
+  // 删最后一个分支的边界：openConceptGroup 是调用这一刻（删除请求发出前）捕获
+  // 的旧引用，await 期间不会因为其它渲染变化——在发起删除前先判定
+  // `rows.length <= 1`（= 正在删的就是这个概念组仅剩的最后一个分支），删除
+  // 成功后据此关闭抽屉（setOpenConceptValue(null)），否则该组变空后
+  // KnowhowMatrixDrawer 会尝试渲染一个 branchRowIds 为空的矩阵。非最后一个
+  // 分支时抽屉照常开着，loadDetail 拿到少一行的新 detail 后 openConceptGroup
+  // 会自动重算成少一个分支的矩阵，不需要额外处理。
+  async function deleteBranch(rowId: string) {
+    if (!selectedTableId || !openConceptGroup) return;
+    const isLastBranch = openConceptGroup.rows.length <= 1;
+    setActionError(null);
+    setConceptDrawerError(null);
+    try {
+      await deleteKnowhowRow(notebookId, selectedTableId, rowId);
+      if (isLastBranch) {
+        setOpenConceptValue(null);
+        setHighlightRowId(null); // 同 deleteConcept：没有可高亮的行了
+      }
+      loadDetail(selectedTableId);
+      loadTables();
+    } catch {
+      setActionError("删除失败，请重试");
+      setConceptDrawerError("删除失败，请重试");
+    }
+  }
+
   // 管理 modal 里任一写操作成功：重拉表详情（modal 拿到新 detail prop 原地
   // 刷新）+ 表列表（标题/行数在列表卡片上要跟着变）。
   function handleManageChanged() {
@@ -947,6 +980,7 @@ export function KnowhowPanel({
           onCancelDeleteConcept={() => setConfirmDeleteConcept(false)}
           onConfirmDeleteConcept={deleteConcept}
           deletingConcept={deletingConcept}
+          onDeleteBranch={deleteBranch}
         />
       )}
 
@@ -2539,6 +2573,39 @@ export function KnowhowPanel({
           font-weight: 600;
           white-space: nowrap;
           min-width: 140px;
+        }
+
+        /* Follow-up B（删分支，spec §4.4）：表头「分支 N」文本 + 删除图标
+           一行两端对齐——图标常驻宽度不大，justify-content: space-between
+           让它贴右边，不挤在文本正后面。二次确认态（.knowhow-confirm 整体
+           替换本 span）不受这条规则影响，两者互斥渲染。 */
+        .kh-matrix-branch-head {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 8px;
+        }
+
+        /* 表头删除图标：比既有 .icon-button（42px 圆形，为 header 顶栏设计）
+           小得多的定位样式——塞进表头格会显得极不协调，这里单开一个紧凑的
+           无边框图标按钮，hover 时变红提示危险操作，同 .knowhow-confirm 的
+           #fef2f2 底色/var(--red)，不新开色值。 */
+        .kh-matrix-branch-delete {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          flex: 0 0 auto;
+          border: none;
+          border-radius: 4px;
+          padding: 2px;
+          background: transparent;
+          color: var(--muted);
+          cursor: pointer;
+        }
+
+        .kh-matrix-branch-delete:hover {
+          color: var(--red);
+          background: #fef2f2;
         }
 
         /* 属性名列（行头）：灰底与表头呼应，纵向居中避免长文本内容把它挤到

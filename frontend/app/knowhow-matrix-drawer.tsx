@@ -38,7 +38,7 @@
  */
 "use client";
 
-import { type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
+import { useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import { buildConceptMatrix, type AnchorGroup } from "./knowhow-grouping-logic.ts";
 import { KnowhowMarkdown } from "./knowhow-cell-editor.tsx";
@@ -62,6 +62,7 @@ export function KnowhowMatrixDrawer({
   onCancelDeleteConcept,
   onConfirmDeleteConcept,
   deletingConcept,
+  onDeleteBranch,
 }: {
   group: AnchorGroup;
   columns: KnowhowColumn[];
@@ -101,8 +102,25 @@ export function KnowhowMatrixDrawer({
   onCancelDeleteConcept?: () => void;
   onConfirmDeleteConcept?: () => void;
   deletingConcept?: boolean;
+  /** Follow-up B（删分支，spec §4.4）：表头「删除该分支」——删掉这一个物理行
+   * （一个分支），与上面 onRequestDeleteConcept 那组「删整个概念」不同粒度。
+   * 二次确认态本身是本组件内部的 confirmDeleteBranchRowId 本地 state（见下方
+   * 组件体），不像删概念那样把确认态提升到 KnowhowPanel——每个分支都是独立
+   * 物理行，确认目标天然按 rowId 区分，组件自己就能管，不需要外部持有一份
+   * "哪个分支在确认中"。真正的删除请求（deleteKnowhowRow + 刷新 + 最后一个
+   * 分支时关抽屉）仍在 KnowhowPanel 完成，这个 prop 只是确认后的那一下触发。
+   * 只读成员没有这个入口（渲染处 canEdit 门控）；未传入时表头只显示纯文本
+   * 「分支 N」，不出现删除图标——KnowhowPanel 只在 canEdit 时才会传。 */
+  onDeleteBranch?: (rowId: string) => void;
 }) {
   const matrix = buildConceptMatrix(group, columns, anchorColumnId);
+
+  // Follow-up B（删分支）：哪个分支的表头正在二次确认删除——null=都没有；点
+  // 某个分支的删除图标就把它设成该分支的 rowId，再点另一个分支的删除图标会
+  // 直接把这个值换成新目标（单个 string，不是 Set，天然不会叠加出两个同时
+  // 敞开的确认态，符合"点另一个分支的删除应切换确认目标，不叠加"）。抽屉整
+  // 体关闭（KnowhowPanel 卸载本组件）时随组件一并清空，不需要额外 effect。
+  const [confirmDeleteBranchRowId, setConfirmDeleteBranchRowId] = useState<string | null>(null);
 
   // 格子是否可点：镜像 knowhow-panel.tsx 主网格 G2 的既有判据
   // `clickable = filled || canEdit`（Task 6）——填了内容的格子任何人都能点开
@@ -140,6 +158,17 @@ export function KnowhowMatrixDrawer({
 
   function handleBackdropClick(event: ReactMouseEvent<HTMLDivElement>) {
     if (event.currentTarget === event.target) onClose();
+  }
+
+  // Follow-up B：表头确认按钮——收起本地确认态，再把真正的删除请求交给
+  // KnowhowPanel。先收起而非等 onDeleteBranch 完成再收起：删除是否成功由
+  // KnowhowPanel 通过 conceptDrawerError 另行呈现（同 addBranch/deleteConcept
+  // 失败提示的既有渠道），这里不为单个分支单独维护一份"删除中"状态——删成功
+  // 后这一列（连同它的确认态）会随 matrix.branchRowIds 重算直接从表头消失，
+  // 删失败则表头恢复成删除图标，用户可以看着 header 的错误提示重试。
+  function handleConfirmDeleteBranch(rowId: string) {
+    setConfirmDeleteBranchRowId(null);
+    onDeleteBranch?.(rowId);
   }
 
   return (
@@ -215,7 +244,44 @@ export function KnowhowMatrixDrawer({
                 <th className="kh-matrix-corner"></th>
                 {matrix.branchRowIds.map((rid, i) => (
                   <th key={rid} className={rid === highlightRowId ? "kh-matrix-branch--hi" : undefined}>
-                    分支 {i + 1}
+                    {/* Follow-up B（删分支，spec §4.4）：二次确认态下这一格换成
+                        确认 UI——沿用 header「删除整个概念」那套既有内联确认
+                        样式（.knowhow-confirm/-yes/-no），只是确认目标换成这一
+                        个分支而非整组。canEdit 为假或调用方没接 onDeleteBranch
+                        时只渲染纯文本「分支 N」，不出现删除入口。 */}
+                    {canEdit && onDeleteBranch && confirmDeleteBranchRowId === rid ? (
+                      <span className="knowhow-confirm">
+                        <span>删除该分支？</span>
+                        <button
+                          type="button"
+                          className="knowhow-confirm-yes"
+                          onClick={() => handleConfirmDeleteBranch(rid)}
+                        >
+                          确认删除
+                        </button>
+                        <button
+                          type="button"
+                          className="knowhow-confirm-no"
+                          onClick={() => setConfirmDeleteBranchRowId(null)}
+                        >
+                          取消
+                        </button>
+                      </span>
+                    ) : (
+                      <span className="kh-matrix-branch-head">
+                        <span>分支 {i + 1}</span>
+                        {canEdit && onDeleteBranch && (
+                          <button
+                            type="button"
+                            className="kh-matrix-branch-delete"
+                            title="删除该分支"
+                            onClick={() => setConfirmDeleteBranchRowId(rid)}
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        )}
+                      </span>
+                    )}
                   </th>
                 ))}
               </tr>
