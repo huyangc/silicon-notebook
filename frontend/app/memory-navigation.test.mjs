@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { memoryHash, parseMemoryHash } from "./memory-model.ts";
+import { memoryHash, notebookHash, parseMemoryHash, parseWorkspaceHash } from "./memory-model.ts";
 import { CHAT_MODES } from "./workspace-model.ts";
 
 const page = await readFile(new URL("./page.tsx", import.meta.url), "utf8");
@@ -14,6 +14,33 @@ test("memory count deep-link targets the notebook memory tab", () => {
     scope: "notebook",
     notebookId: "nb-1",
   });
+});
+
+test("workspace hash round-trips a bare notebook deep-link", () => {
+  assert.equal(notebookHash("nb-1"), "#notebook=nb-1");
+  assert.deepEqual(parseWorkspaceHash("#notebook=nb-1"), { notebookId: "nb-1" });
+});
+
+test("workspace hash encodes ids that need escaping", () => {
+  assert.equal(notebookHash("nb//1?x"), "#notebook=nb%2F%2F1%3Fx");
+  assert.deepEqual(parseWorkspaceHash(notebookHash("nb//1?x")), { notebookId: "nb//1?x" });
+});
+
+test("workspace hash yields to the memory tab and ignores unrelated hashes", () => {
+  // 带 tab=memory 的归 parseMemoryHash 管,workspace 解析器必须让路,
+  // 否则挂载时两个分支会抢同一条 hash。
+  assert.equal(parseWorkspaceHash("#notebook=nb-1&tab=memory"), null);
+  assert.equal(parseWorkspaceHash("#memory"), null);
+  assert.equal(parseWorkspaceHash(""), null);
+  assert.equal(parseWorkspaceHash("#"), null);
+  assert.equal(parseWorkspaceHash("#notebook="), null);
+});
+
+test("the two hash parsers stay mutually exclusive", () => {
+  for (const hash of ["#notebook=nb-1", "#notebook=nb-1&tab=memory", "#memory", "", "#zzz"]) {
+    const both = parseMemoryHash(hash) !== null && parseWorkspaceHash(hash) !== null;
+    assert.equal(both, false, `${hash} 同时被两个解析器认领`);
+  }
 });
 
 test("global Memory has a stable outer-page location", () => {
