@@ -40,6 +40,7 @@ import {
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
@@ -266,11 +267,17 @@ function KnowhowRowContext({
   rowId,
   currentColumnId,
   defaultOpen = true,
+  onSwitchCell,
 }: {
   table: KnowhowTableDetail;
   rowId: string;
   currentColumnId: string;
   defaultOpen?: boolean;
+  /** 点某个非当前格条目 → 浮窗切换到那一格（保持浮窗打开）。未传入时全部
+   * 条目保持纯展示（不可点）——是否接这条路径、接给哪种权限的用户，由调用方
+   * （KnowhowCellPreview/KnowhowCellEditor 的调用方 knowhow-panel.tsx）决定，
+   * 本组件不关心背后的权限判定。 */
+  onSwitchCell?: (columnId: string) => void;
 }) {
   const [open, setOpen] = useState<boolean>(defaultOpen);
   const row = table.rows.find((item) => item.id === rowId);
@@ -294,11 +301,32 @@ function KnowhowRowContext({
           ) : (
             orderedColumns.map((sibling) => {
               const isCurrent = sibling.id === currentColumnId;
+              // 当前格已高亮、点了没意义，保持纯展示；其余格子仅在调用方接了
+              // onSwitchCell 时才可点——镜像 knowhow-matrix-drawer.tsx
+              // clickableCellProps 的既有 a11y 写法（role="button" + tabIndex
+              // + Enter/Space 与 onClick 同一个 activate 闭包），不可点时不挂
+              // 任何交互属性，保持"不可点=纯展示、不出现在 tab 顺序里"。
+              const clickable = !isCurrent && Boolean(onSwitchCell);
+              const activate = () => onSwitchCell?.(sibling.id);
+              const interactiveProps = clickable
+                ? {
+                    role: "button" as const,
+                    tabIndex: 0,
+                    onClick: activate,
+                    onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
+                      if (event.key === "Enter" || event.key === " " || event.key === "Spacebar") {
+                        event.preventDefault();
+                        activate();
+                      }
+                    },
+                  }
+                : {};
               return (
                 <div
                   key={sibling.id}
-                  className={`kh-row-context-item${isCurrent ? " kh-row-context-item--current" : ""}`}
+                  className={`kh-row-context-item${isCurrent ? " kh-row-context-item--current" : ""}${clickable ? " kh-row-context-item--clickable" : ""}`}
                   aria-current={isCurrent ? "true" : undefined}
+                  {...interactiveProps}
                 >
                   {isCurrent && <span className="kh-row-context-current-tag">当前格</span>}
                   {sibling.role !== "attribute" && (
@@ -342,6 +370,10 @@ export interface KnowhowCellPreviewProps {
    * 定位区）。 */
   table?: KnowhowTableDetail;
   rowId?: string;
+  /** 「本行其他格子」条目可点击切换——透传给 KnowhowRowContext，未传入时该
+   * 区保持纯展示。由调用方（knowhow-panel.tsx）决定是否接（如仅 canEdit
+   * 用户可接，见该文件调用处注释），本组件自己不做权限判断。 */
+  onSwitchCell?: (columnId: string) => void;
 }
 
 export function KnowhowCellPreview({
@@ -355,6 +387,7 @@ export function KnowhowCellPreview({
   onClose,
   table,
   rowId,
+  onSwitchCell,
 }: KnowhowCellPreviewProps) {
   const [fullscreen, toggleFullscreen] = useFullscreenToggle();
   useEffect(() => {
@@ -419,7 +452,12 @@ export function KnowhowCellPreview({
             </div>
           </div>
           {table && rowId && (
-            <KnowhowRowContext table={table} rowId={rowId} currentColumnId={column.id} />
+            <KnowhowRowContext
+              table={table}
+              rowId={rowId}
+              currentColumnId={column.id}
+              onSwitchCell={onSwitchCell}
+            />
           )}
         </header>
         <div className="kh-modal-body kh-preview-body">
@@ -458,6 +496,10 @@ export interface KnowhowCellEditorProps {
    * 决定报给 panel——panel 更新 cellModal 状态，本组件靠 key 变化重新挂载。 */
   onNavigate: (rowId: string, columnId: string) => void;
   onClose: () => void;
+  /** 「本行其他格子」条目可点击切换——透传给 KnowhowRowContext，未传入时该
+   * 区保持纯展示。编辑态本身已隐含 canEdit（能进到这一态就说明有写权限），
+   * panel 侧无需再额外按 canEdit 判断是否传入，见该文件调用处注释。 */
+  onSwitchCell?: (columnId: string) => void;
 }
 
 export function KnowhowCellEditor({
@@ -471,6 +513,7 @@ export function KnowhowCellEditor({
   onSave,
   onNavigate,
   onClose,
+  onSwitchCell,
 }: KnowhowCellEditorProps) {
   const [fullscreen, toggleFullscreen] = useFullscreenToggle();
   // panel 只在 row/column 都存在时才会挂载本组件（见 knowhow-panel.tsx 的
@@ -808,7 +851,7 @@ export function KnowhowCellEditor({
               </button>
             </div>
           </div>
-          <KnowhowRowContext table={table} rowId={rowId} currentColumnId={columnId} />
+          <KnowhowRowContext table={table} rowId={rowId} currentColumnId={columnId} onSwitchCell={onSwitchCell} />
         </header>
 
         <div className="kh-modal-body">

@@ -1028,6 +1028,11 @@ export function KnowhowPanel({
             onSave={handleCellSave}
             onNavigate={(rowId, columnId) => setCellModal({ rowId, columnId, mode: "edit" })}
             onClose={() => setCellModal(null)}
+            // 「本行其他格子」点击切换（复用既有 openCellEdit，不新造打开
+            // 路径）：编辑态能挂载到这里，本身已经证明 canEdit 为真（唯一
+            // 入口 openCellEdit/openCellAuto 的 edit 分支都受 canEdit 门控，
+            // 见本文件上方两处声明的注释），故这里无需再额外判断 canEdit。
+            onSwitchCell={(columnId) => openCellEdit(cellModal.rowId, columnId)}
           />
         ) : (
           <KnowhowCellPreview
@@ -1041,6 +1046,14 @@ export function KnowhowPanel({
             onClose={() => setCellModal(null)}
             table={detail ?? undefined}
             rowId={cellModal.rowId}
+            // 预览态只读成员（canEdit=false）也能打开（见 openCellAuto：已填
+            // 格子无论身份都进 preview）——切格复用的 openCellEdit 会无条件
+            // 把 cellModal 切到 edit 态，KnowhowCellEditor 本身不做 canEdit
+            // 校验（假定挂载它的调用方已经把关，同上一条注释）。只读成员的
+            // 「本行其他格子」因此不接这个 prop，保持纯展示，不让只读身份
+            // 绕过既有的编辑入口门控；有写权限时才接上，行为与「编辑」按钮
+            // （同样只在 canEdit 时出现）一致。
+            onSwitchCell={canEdit ? (columnId) => openCellEdit(cellModal.rowId, columnId) : undefined}
           />
         )
       )}
@@ -2021,6 +2034,18 @@ export function KnowhowPanel({
           padding: 4px 8px;
           border-radius: 6px;
           border: 1px solid transparent;
+        }
+
+        /* 可点条目（本行其他格子可切换，接了 onSwitchCell 才有 role="button"）
+           ——cursor/hover 镜像 knowhow-matrix-drawer.tsx 可点格子的既有处理，
+           hover 底色复用同一色值 #f4f7ff，两处视觉语言保持一致；当前格
+           （--current，见下）不会同时带这个类，互不冲突。 */
+        .kh-row-context-item--clickable {
+          cursor: pointer;
+        }
+
+        .kh-row-context-item--clickable:hover {
+          background: #f4f7ff;
         }
 
         /* 高亮当前浮层对应的那一行——用户打开浮层后能一眼看到「我在整行的
