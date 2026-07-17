@@ -110,7 +110,7 @@ import {
   type UnifiedGraphResp,
   type UnifiedKgStatus,
 } from "./workspace-model";
-import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS } from "./vocabulary";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -5822,7 +5822,7 @@ function KnowledgeBrowser({
               </div>
               {knowledgeBody(kind, item)}
               <div className="tag-row">
-                {item.severity && <span className={`tag severity-${item.severity}`}>{item.severity}</span>}
+                {item.severity && <span className={`tag severity-${item.severity}`}>{label(SEVERITY, item.severity, "—")}</span>}
                 {(item.applies_to ?? []).map((scope) => <span className="tag" key={scope}>{scope}</span>)}
               </div>
               <div className="knowledge-govern">

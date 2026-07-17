@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { label, TIER, PARSE_STATUS, ELEMENT_TYPE, EVIDENCE_LEVEL, PROMOTION_STATUS, KNOWLEDGE_STATUS } from "./vocabulary.ts";
+import { label, TIER, PARSE_STATUS, ELEMENT_TYPE, EVIDENCE_LEVEL, PROMOTION_STATUS, KNOWLEDGE_STATUS, SEVERITY } from "./vocabulary.ts";
 import { KNOWLEDGE_STATUS_OPTIONS } from "./workspace-model.ts";
 
 test("label 命中时返回映射值", () => {
@@ -74,4 +74,11 @@ test("KNOWLEDGE_STATUS 覆盖 workspace-model 里的每一个取值", () => {
   for (const v of KNOWLEDGE_STATUS_OPTIONS) {
     assert.ok(Object.hasOwn(KNOWLEDGE_STATUS, v), `${v} 未映射,会退到兜底词`);
   }
+});
+
+test("SEVERITY 三个取值都有中文(真源 extraction_profiles.py:28)", () => {
+  assert.equal(label(SEVERITY, "high", "—"), "高");
+  assert.equal(label(SEVERITY, "medium", "—"), "中");
+  assert.equal(label(SEVERITY, "low", "—"), "低");
+  assert.notEqual(label(SEVERITY, "high", "—"), "high");
 });

@@ -50,6 +50,13 @@ export const EVIDENCE_LEVEL: Record<string, string> = {
   overview: "概述",
 };
 
+// 知识条目重要度。真源 extraction_profiles.py:28 `severity: "high|medium|low"`。
+export const SEVERITY: Record<string, string> = {
+  high: "高",
+  medium: "中",
+  low: "低",
+};
+
 // 措辞刻意保持与现状一字不差(answer-panel.tsx:354-358 原有的四个名字)。
 // 本 PR 只修「兜底即原值」这个机制,不碰命名——模型角色命名与设置页对齐
 // (报错说「向量模型」但设置页没这一项)属于 PR C 错误层的范围。这里改名会
