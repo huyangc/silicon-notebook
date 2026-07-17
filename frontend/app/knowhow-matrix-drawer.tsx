@@ -39,10 +39,16 @@
 "use client";
 
 import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent } from "react";
-import { Plus, Trash2, X } from "lucide-react";
+import { Maximize2, Minimize2, Plus, Trash2, X } from "lucide-react";
 import { buildConceptMatrix, type AnchorGroup } from "./knowhow-grouping-logic.ts";
-import { KnowhowMarkdown } from "./knowhow-cell-editor.tsx";
+import { FULLSCREEN_LABEL, KnowhowMarkdown, RESTORE_SIZE_LABEL, useFullscreenToggle } from "./knowhow-cell-editor.tsx";
+import { useFloatingWindow } from "./use-floating-window.ts";
 import type { KnowhowColumn } from "./knowhow-model.ts";
+
+// sessionStorage 键——独立于格子浮窗的 knowhow.cellModal.fullscreen，两个弹窗
+// 各自的全屏选择互不影响（见 knowhow-cell-editor.tsx 的 useFullscreenToggle
+// 参数化注释）。
+const CONCEPT_DRAWER_FULLSCREEN_STORAGE_KEY = "knowhow.conceptDrawer.fullscreen";
 
 export function KnowhowMatrixDrawer({
   group,
@@ -121,6 +127,11 @@ export function KnowhowMatrixDrawer({
 }) {
   const matrix = buildConceptMatrix(group, columns, anchorColumnId);
 
+  const [fullscreen, toggleFullscreen] = useFullscreenToggle(CONCEPT_DRAWER_FULLSCREEN_STORAGE_KEY);
+  // 全屏时禁用拖动/resize，交给 .kh-modal-card--fullscreen 的 CSS 完全接管
+  // （与格子浮窗的既有约定一致，见 knowhow-cell-editor.tsx 对应注释）。
+  const floating = useFloatingWindow({ storageKey: "knowhow.conceptDrawer.window", disabled: fullscreen });
+
   // Follow-up B（删分支）：哪个分支的表头正在二次确认删除——null=都没有；点
   // 某个分支的删除图标就把它设成该分支的 rowId，再点另一个分支的删除图标会
   // 直接把这个值换成新目标（单个 string，不是 Set，天然不会叠加出两个同时
@@ -198,13 +209,15 @@ export function KnowhowMatrixDrawer({
   return (
     <div className="kh-modal-overlay" onClick={handleBackdropClick}>
       <div
-        className="kh-modal-card kh-matrix-card"
+        ref={floating.cardRef}
+        className={`kh-modal-card kh-matrix-card${fullscreen ? " kh-modal-card--fullscreen" : ""}`}
+        style={floating.style}
         role="dialog"
         aria-modal="true"
         aria-label={`概念 ${matrix.anchorValue}`}
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="kh-modal-header">
+        <header className="kh-modal-header" {...floating.dragHandleProps}>
           <div className="kh-modal-header-top">
             <div className="kh-modal-breadcrumb">
               {/* 徽章文案用域中立的"概念"而非 spec 背景例子里的"违例概念"
@@ -251,6 +264,15 @@ export function KnowhowMatrixDrawer({
                   </button>
                 )
               )}
+              <button
+                type="button"
+                className="icon-button"
+                title={fullscreen ? RESTORE_SIZE_LABEL : FULLSCREEN_LABEL}
+                aria-label={fullscreen ? RESTORE_SIZE_LABEL : FULLSCREEN_LABEL}
+                onClick={toggleFullscreen}
+              >
+                {fullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+              </button>
               <button type="button" className="icon-button" title="关闭" onClick={onClose}>
                 <X size={18} />
               </button>
@@ -356,6 +378,7 @@ export function KnowhowMatrixDrawer({
             </div>
           </footer>
         )}
+        {!fullscreen && <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />}
       </div>
     </div>
   );
