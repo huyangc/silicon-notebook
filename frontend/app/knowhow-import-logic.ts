@@ -116,3 +116,52 @@ export function extractErrorMessage(err: unknown, fallback = "操作失败，请
   const trimmed = withoutStatus.trim();
   return trimmed || fallback;
 }
+
+/** 预览表格里一个格子的合并显示信息：`rowSpan===0` 表示被上方同列的合并
+ * 格覆盖、渲染时跳过；`text` 是该段首行原文（比较用 trim，展示保留原样）。 */
+export type PreviewCell = { text: string; rowSpan: number };
+
+/** 预览表格的合并显示，做到「预览即所得」——与导入后主网格 G2
+ * （knowhow-grouping-logic.computeGridSpans）看到的形状一致。
+ *
+ * 两步，顺序与后端落库路径同构：
+ * ① 行标题列 forward-fill：空格继承上一个非空值，镜像后端的
+ *    `forward_fill_column`（api.import_table 落库前做的事）。「分组只写一次」
+ *    的概念列在文件里是「首行有值、兄弟行留空」，不 fill 预览就会显示成一
+ *    串「—」，看着像数据丢了。leading-blank（首行就空、上方无值可继承）保
+ *    持空，与后端语义一致。
+ * ② 每列相邻同值（trim 后）的连续段合并成一个 rowSpan 起始格，段内其余行
+ *    该列 rowSpan=0。未选行标题列（anchorIndex===null）时跳过①、仍做②。
+ *
+ * 不修改传入的 rows。
+ */
+export function computePreviewSpans(rows: string[][], anchorIndex: number | null): PreviewCell[][] {
+  const width = rows[0]?.length ?? 0;
+  if (rows.length === 0 || width === 0) return [];
+
+  const filled = rows.map((row) => [...row]);
+  if (anchorIndex !== null && anchorIndex >= 0 && anchorIndex < width) {
+    let last = "";
+    for (const row of filled) {
+      const cell = row[anchorIndex] ?? "";
+      if (cell.trim()) last = cell;
+      else if (last) row[anchorIndex] = last;
+    }
+  }
+
+  return filled.map((row, i) =>
+    Array.from({ length: width }, (_, c) => {
+      const text = row[c] ?? "";
+      const key = text.trim();
+      if (i > 0 && (filled[i - 1][c] ?? "").trim() === key) {
+        return { text, rowSpan: 0 };
+      }
+      let span = 1;
+      for (let j = i + 1; j < filled.length; j++) {
+        if ((filled[j][c] ?? "").trim() === key) span++;
+        else break;
+      }
+      return { text, rowSpan: span };
+    }),
+  );
+}

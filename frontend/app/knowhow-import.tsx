@@ -53,6 +53,7 @@ import {
   IMPORT_ACCEPT_EXTENSIONS,
   deriveDefaultTitle,
   extractErrorMessage,
+  computePreviewSpans,
   isBlankTitle,
   isSupportedImportFile,
 } from "./knowhow-import-logic.ts";
@@ -377,6 +378,14 @@ function MapStep({
   onSubmit: () => void;
   submitDisabled: boolean;
 }) {
+  // 预览即所得：与导入后的主网格 G2 看到的形状一致——先把行标题列
+  // forward-fill（镜像后端落库前的 forward_fill_column），再把每列相邻同值
+  // 合并成 rowspan 格。「分组只写一次」的概念列在文件里是「首行有值、兄弟
+  // 行留空」，不这么做预览里就是一串「—」，看着像数据丢了。
+  const previewSpans = useMemo(
+    () => computePreviewSpans(preview.rowsPreview, anchorIndex),
+    [preview.rowsPreview, anchorIndex],
+  );
   return (
     <div className="knowhow-import-map-step">
       <div className="knowhow-import-file-row">
@@ -452,12 +461,20 @@ function MapStep({
             </tr>
           </thead>
           <tbody>
-            {preview.rowsPreview.map((row, rowIndex) => (
+            {previewSpans.map((cells, rowIndex) => (
               <tr key={rowIndex}>
-                {row.map((cell, cellIndex) => {
-                  const text = cellSummary(cell ?? "");
+                {cells.map((cell, cellIndex) => {
+                  // rowSpan===0 的格被上方同列的合并格覆盖，渲染跳过。
+                  if (cell.rowSpan === 0) return null;
+                  const text = cellSummary(cell.text);
+                  const merged = cell.rowSpan > 1;
                   return (
-                    <td key={cellIndex} title={text || undefined}>
+                    <td
+                      key={cellIndex}
+                      rowSpan={merged ? cell.rowSpan : undefined}
+                      className={merged ? "is-merged" : undefined}
+                      title={text || undefined}
+                    >
                       <span className="knowhow-import-cell-text">{text || "—"}</span>
                     </td>
                   );
@@ -1128,6 +1145,14 @@ function ImportWizardStyles() {
           text-align: left;
           vertical-align: top;
           width: 180px;
+        }
+
+        /* 跨行合并格——与导入后主网格的 .knowhow-cell-merged 同款视觉
+           （soft 底 + 垂直居中），让预览里「这几行同属一个概念/共享同一个
+           属性值」和 Excel 原表、导入后的样子都对得上。 */
+        .knowhow-import-preview-table td.is-merged {
+          background: var(--soft);
+          vertical-align: middle;
         }
 
         .knowhow-import-preview-table th:last-child,
