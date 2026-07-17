@@ -3779,3 +3779,24 @@ TASK3_SOURCE_ASSET_ALLOWED_NEW_MEMBERS = {
     "source_asset_ids", "delete_source_asset_rows",
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK3_SOURCE_ASSET_ALLOWED_MEMBER_FILES
+
+# MinerU cloud file-upload fallback (Task 2 of the mineru-cloud-file-upload
+# plan; Task 1 was mineru_cloud_client.py's own parse_file_with_images method,
+# which touches no facade surface at all). process_source's file-upload
+# branch gains a symmetric local-off+cloud-configured path mirroring the
+# existing URL-source branch. Its own two new tests construct a real
+# SQLiteRepository via the same repo/_seed_queued_pdf fixture convention as
+# this file's other process_source tests, then monkeypatch
+# repo.mineru_cloud_client.parse_file_with_images and read back
+# repo.source_elements — both genuinely new call sites for this file. Every
+# other facade member these two tests touch (SQLiteRepository, _now, _write,
+# create_notebook, process_source, get_source) is already covered by
+# TASK12_ALLOWED_MEMBER_FILES's existing broad entry for this same file
+# above; source_asset_ids needs no entry either — it is already a wholesale
+# TASK3_SOURCE_ASSET_ALLOWED_NEW_MEMBERS exemption. Appended at EOF for the
+# same zero-line-shift reason as every other TASKN_* block above.
+MINERU_CLOUD_UPLOAD_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_source_ingestion_service.py", name)
+    for name in {"mineru_cloud_client", "source_elements"}
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MINERU_CLOUD_UPLOAD_ALLOWED_MEMBER_FILES
