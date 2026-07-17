@@ -58,6 +58,36 @@ def parse_grid(filename: str, data: bytes) -> ParsedGrid:
     return _build_grid(raw_rows)
 
 
+def _looks_transposed(raw_rows: list[list[str]]) -> bool:
+    """行列相反的表（字段名在第一列、每列一条记录）的形状特征。
+
+    两个条件同时成立才认：表头除首格外含空列名——那行其实是第一条记录的
+    值、只有开头几个分支有值；且第一列自上而下全部有值——那才是真正的字
+    段名。只满足前者更可能是「表头漏填了几个列名」，别误导用户去转置。
+    """
+    header = raw_rows[0]
+    if len(header) < 2 or not header[0].strip():
+        return False
+    if all(name.strip() for name in header[1:]):
+        return False
+    first_column = [row[0] for row in raw_rows[1:] if row]
+    return bool(first_column) and all(cell.strip() for cell in first_column)
+
+
+def _blank_header_error(raw_rows: list[list[str]]) -> str:
+    """空列名重复时的可行动报错——「表头存在重复列名：''」对用户零指导。
+
+    转置表刻意不做自动转换（设计决定：用户在 Excel 里手动转置后导入），
+    但这里要把它认出来并告诉用户下一步该做什么。
+    """
+    if _looks_transposed(raw_rows):
+        return (
+            "这张表看起来行列相反：第一列是字段名、每一列是一条记录。"
+            "请先在 Excel 里转置（复制 → 选择性粘贴 → 勾选「转置」）后再导入。"
+        )
+    return "表头存在多个空列名，请补齐首行中缺失的列名后再导入。"
+
+
 def _build_grid(raw_rows: list[list[str]]) -> ParsedGrid:
     if not raw_rows or not raw_rows[0]:
         raise GridParseError("表格缺少表头：文件为空，或首行没有任何列名")
@@ -66,6 +96,8 @@ def _build_grid(raw_rows: list[list[str]]) -> ParsedGrid:
     seen: set[str] = set()
     for name in columns:
         if name in seen:
+            if not name.strip():
+                raise GridParseError(_blank_header_error(raw_rows))
             raise GridParseError(f"表头存在重复列名：{name!r}")
         seen.add(name)
 

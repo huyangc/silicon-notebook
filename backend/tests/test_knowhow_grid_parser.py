@@ -554,3 +554,47 @@ def test_forward_fill_column_whitespace_only_counts_as_blank():
     # 纯空白视为空（与 _build_grid 的 strip 判空一致）。
     rows = [["A", "1"], ["   ", "2"]]
     assert forward_fill_column(rows, 0) == [["A", "1"], ["A", "2"]]
+
+
+# --- 转置表探测（用户真机踩坑：直接传行列相反的原表，只报「重复列名 ''」
+# 毫无指导意义）。设计上不做自动转置（spec §行列反走 A 方案=用户手动
+# 转置），但报错必须可行动：告诉用户这张表看起来行列相反、该怎么办。
+
+
+def test_parse_grid_transposed_table_hints_to_transpose():
+    # 用户的 EDA 违例表原貌：字段名在第一列、每列一个分支，表头行除首格
+    # 外只有第一个分支有值 → 解析成多个空列名。要给转置指引而非「重复列名 ''」。
+    data = _xlsx_bytes(
+        [
+            [
+                ["违例概念", "hold和setup打架", None, None],
+                ["现象识别方法", "单条path跨多corner", None, None],
+                ["根因分析动作", "path中个别inst", "cell delay占比", "noise同时吃"],
+                ["修复方法", "换VT开窗", "加shielding", "提高vih"],
+            ]
+        ]
+    )
+    with pytest.raises(GridParseError) as info:
+        parse_grid("know-how沉淀.xlsx", data)
+    msg = str(info.value)
+    assert "行列相反" in msg
+    assert "转置" in msg
+
+
+def test_parse_grid_blank_header_without_transposed_shape_asks_to_fill_names():
+    # 表头有空列名但不是转置形状（首列自己就有空 → 不是字段名列）：
+    # 提示补齐列名，别误导用户去转置。
+    data = _xlsx_bytes(
+        [
+            [
+                ["名称", None, None],
+                ["a", "1", "2"],
+                [None, "3", "4"],
+            ]
+        ]
+    )
+    with pytest.raises(GridParseError) as info:
+        parse_grid("t.xlsx", data)
+    msg = str(info.value)
+    assert "空列名" in msg
+    assert "转置" not in msg
