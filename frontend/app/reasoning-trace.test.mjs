@@ -108,7 +108,7 @@ test("uses concise detail labels for trace step payloads", () => {
   assert.equal(getTraceStepDetail({ step_type: "plan", summary: "", detail: { sub_queries: [{}, {}] } }), "2 个子查询");
   assert.equal(getTraceStepDetail({ step_type: "retrieve", summary: "", detail: { count: 8 } }), "8 个候选");
   assert.equal(getTraceStepDetail({ step_type: "expand", summary: "", detail: { found: 1 } }), "新增 1");
-  assert.equal(getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "answer" } }), "answer");
+  assert.equal(getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "answer" } }), "开始作答");
 });
 
 test("summarizes an empty live trace as waiting for backend events", () => {
@@ -120,4 +120,32 @@ test("summarizes an empty live trace as waiting for backend events", () => {
     stepCountLabel: "0 步",
     totalLabel: "",
   });
+});
+
+test("next_action 不把状态机动作名直出给用户,而是显示中文人话", () => {
+  assert.equal(
+    getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "expand_graph" } }),
+    "顺着相关内容继续找",
+  );
+  assert.equal(
+    getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "add_subquery" } }),
+    "换个角度再查一遍",
+  );
+});
+
+test("未知 next_action 不显示,而不是显示原值", () => {
+  assert.equal(
+    getTraceStepDetail({ step_type: "reflect", summary: "", detail: { next_action: "brand_new_action" } }),
+    "",
+  );
+});
+
+test("latestLabel 遇到未知 step_type 退到中性词,不直出英文", () => {
+  assert.equal(
+    getReasoningTraceSummary(
+      [{ step_type: "brand_new_step_type", summary: "", detail: {} }],
+      true,
+    ).latestLabel,
+    "处理中",
+  );
 });
