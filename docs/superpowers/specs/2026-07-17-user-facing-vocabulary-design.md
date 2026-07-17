@@ -95,8 +95,10 @@ export const TIER: Record<string, string> = { base: "公共知识库", personal:
 // 注意:object_type 不在此处 —— 后端已是它的真源,见 §2.1。
 
 export function label(map: Record<string, string>, value: string, fallback: string): string {
-  const hit = map[value];
-  if (hit) return hit;
+  // 必须 hasOwn 而非 `map[value]` + 真值判断:后者走原型链,map["constructor"] /
+  // map["toString"] / map["__proto__"] 都会「命中」并返回函数或对象。TS 因索引签名
+  // 推成 string、tsc 抓不到,渲染进 JSX 即 React 白屏——比要修的「泄漏英文 id」更糟。
+  if (Object.hasOwn(map, value)) return map[value];
   if (process.env.NODE_ENV !== "production") console.error(`未映射的枚举值：${value}`);
   return fallback;   // 永远不会是 value 本身
 }
