@@ -18,6 +18,7 @@ import {
   isBlankTitle,
   canSubmitImport,
   extractErrorMessage,
+  computePreviewSpans,
 } from "./knowhow-import-logic.ts";
 
 // --- IMPORT_ACCEPT_EXTENSIONS / IMPORT_ACCEPT -----------------------------------
@@ -243,4 +244,52 @@ test("extractErrorMessage: detail 字段非字符串（如 422 校验错误数�
   const message = extractErrorMessage(err);
   assert.strictEqual(typeof message, "string");
   assert.ok(message.length > 0);
+});
+
+// --- 预览合并显示（真机反馈）。转置表导入时，行标题列的兄弟行在预览里
+// 显示成一串「—」，看着像数据丢了；实际落库前后端 forward_fill_column 会
+// 把它们补成同一个概念。预览应当像 Excel 原表 / 导入后的主网格（G2，
+// computeGridSpans）那样合并显示，做到「预览即所得」。
+
+test("computePreviewSpans 先 forward-fill 行标题列，再合并相邻同值", () => {
+  const rows = [
+    ["hold和setup打架", "同一现象", "根因1"],
+    ["", "同一现象", "根因2"],
+    ["", "同一现象", "根因3"],
+  ];
+  const spans = computePreviewSpans(rows, 0);
+  // 行标题列：兄弟行的空被 fill 成同值 → 合并成一个 rowSpan=3 的起始格
+  assert.deepEqual(spans[0][0], { text: "hold和setup打架", rowSpan: 3 });
+  assert.equal(spans[1][0].rowSpan, 0);
+  assert.equal(spans[2][0].rowSpan, 0);
+  // 现象列本就三行同值（Excel 里原是合并格）→ 同样合并
+  assert.equal(spans[0][1].rowSpan, 3);
+  // 根因列三行各不同 → 各自独立
+  assert.deepEqual(spans[0][2], { text: "根因1", rowSpan: 1 });
+  assert.deepEqual(spans[1][2], { text: "根因2", rowSpan: 1 });
+});
+
+test("computePreviewSpans 未选行标题列时不 forward-fill", () => {
+  const rows = [
+    ["A", "x"],
+    ["", "x"],
+  ];
+  const spans = computePreviewSpans(rows, null);
+  // 没有行标题列 → 空不继承 → "A" 与 "" 不同值，不合并
+  assert.deepEqual(spans[0][0], { text: "A", rowSpan: 1 });
+  assert.deepEqual(spans[1][0], { text: "", rowSpan: 1 });
+  // 其余列仍按相邻同值合并
+  assert.equal(spans[0][1].rowSpan, 2);
+});
+
+test("computePreviewSpans 首行行标题为空时不被 fill（leading-blank）", () => {
+  // 首行行标题就空、上面没有可继承的值 → 保持空、独立成行，与后端
+  // forward_fill_column 的 leading-blank 语义一致。
+  const rows = [
+    ["", "x"],
+    ["A", "y"],
+  ];
+  const spans = computePreviewSpans(rows, 0);
+  assert.deepEqual(spans[0][0], { text: "", rowSpan: 1 });
+  assert.deepEqual(spans[1][0], { text: "A", rowSpan: 1 });
 });
