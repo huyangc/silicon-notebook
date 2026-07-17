@@ -22,6 +22,8 @@ export const PARSE_STATUS: Record<string, string> = {
   "metadata-only": "仅元数据", // source_ingestion.py:274 真实会写入
 };
 
+// 取值真源:structural_markdown.py 写入 source_elements 的 element_type。
+// heading/paragraph/table/code_block/text/list_item/image + parsers 侧的 formula。
 export const ELEMENT_TYPE: Record<string, string> = {
   heading: "标题",
   paragraph: "正文",
@@ -29,6 +31,8 @@ export const ELEMENT_TYPE: Record<string, string> = {
   formula: "公式",
   code_block: "代码",
   text: "正文",
+  list_item: "列表项",
+  image: "图片",
   knowhow_cell: "经验表单元格",
 };
 
