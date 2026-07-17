@@ -65,6 +65,7 @@ import {
   X,
 } from "lucide-react";
 import { authHeaders } from "./auth.ts";
+import { useFloatingWindow } from "./use-floating-window.ts";
 import {
   ROLE_LABELS,
   cellSummary,
@@ -226,16 +227,23 @@ function KnowhowImage({ src, alt, apiBase }: { src?: string; alt?: string; apiBa
 // ---------------------------------------------------------------------------
 
 const FULLSCREEN_STORAGE_KEY = "knowhow.cellModal.fullscreen";
-const FULLSCREEN_LABEL = "全屏";
-const RESTORE_SIZE_LABEL = "还原大小";
+// 导出给 knowhow-matrix-drawer.tsx 的全屏切换按钮复用——图标/aria/title 文案
+// 与格子浮窗保持逐字一致（任务要求「与格子浮窗一致」），不在那个文件另开一份
+// 可能措辞漂移的拷贝。
+export const FULLSCREEN_LABEL = "全屏";
+export const RESTORE_SIZE_LABEL = "还原大小";
 const PREVIEW_MODE_TAG = "查看";
 const EDITING_MODE_TAG = "编辑中";
 
-function useFullscreenToggle(): [boolean, () => void] {
+// storageKey 参数化（原为格子浮窗写死 FULLSCREEN_STORAGE_KEY）+ 导出：概念
+// 矩阵抽屉（knowhow-matrix-drawer.tsx）补全屏时复用同一份实现风格（sessionStorage
+// 记忆 + 图标/aria 一致），只是换一个独立的 storageKey（knowhow.conceptDrawer.
+// fullscreen）——两个弹窗的全屏选择互不影响，不共用同一个会话记忆。
+export function useFullscreenToggle(storageKey: string): [boolean, () => void] {
   const [fullscreen, setFullscreen] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     try {
-      return window.sessionStorage.getItem(FULLSCREEN_STORAGE_KEY) === "1";
+      return window.sessionStorage.getItem(storageKey) === "1";
     } catch {
       return false;
     }
@@ -245,7 +253,7 @@ function useFullscreenToggle(): [boolean, () => void] {
       const next = !current;
       try {
         if (typeof window !== "undefined") {
-          window.sessionStorage.setItem(FULLSCREEN_STORAGE_KEY, next ? "1" : "0");
+          window.sessionStorage.setItem(storageKey, next ? "1" : "0");
         }
       } catch {
         // sessionStorage 不可用（隐私模式等）时静默——只是记不住本会话选择，
@@ -253,7 +261,7 @@ function useFullscreenToggle(): [boolean, () => void] {
       }
       return next;
     });
-  }, []);
+  }, [storageKey]);
   return [fullscreen, toggle];
 }
 
@@ -389,7 +397,13 @@ export function KnowhowCellPreview({
   rowId,
   onSwitchCell,
 }: KnowhowCellPreviewProps) {
-  const [fullscreen, toggleFullscreen] = useFullscreenToggle();
+  const [fullscreen, toggleFullscreen] = useFullscreenToggle(FULLSCREEN_STORAGE_KEY);
+  // 查看态/编辑态共用同一个浮窗身份（storageKey 相同）——切换模式时（点
+  // 「编辑」/关闭编辑回到查看，见 knowhow-panel.tsx 的 cellModal 状态机）
+  // 拖动/resize 记住的位置和尺寸不该跳位置，两态各自 mount 一份 hook 实例但
+  // 读写同一个 sessionStorage 键，效果等同「共享」。全屏时禁用拖动/resize，
+  // 交给 .kh-modal-card--fullscreen 的 CSS 完全接管尺寸/位置。
+  const floating = useFloatingWindow({ storageKey: "knowhow.cellModal.window", disabled: fullscreen });
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape") onClose();
@@ -408,13 +422,15 @@ export function KnowhowCellPreview({
   return (
     <div className="kh-modal-overlay" onClick={handleBackdropClick}>
       <div
+        ref={floating.cardRef}
         className={`kh-modal-card kh-modal-card--preview${fullscreen ? " kh-modal-card--fullscreen" : ""}`}
+        style={floating.style}
         role="dialog"
         aria-modal="true"
         aria-label={`${rowTitle} › ${column.name}`}
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="kh-modal-header">
+        <header className="kh-modal-header" {...floating.dragHandleProps}>
           <div className="kh-modal-header-top">
             <div className="kh-modal-breadcrumb">
               <span className="kh-modal-row-title" title={rowTitle}>
@@ -463,6 +479,7 @@ export function KnowhowCellPreview({
         <div className="kh-modal-body kh-preview-body">
           <KnowhowMarkdown md={contentMd} notebookId={notebookId} apiBase={apiBase} />
         </div>
+        {!fullscreen && <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />}
       </div>
     </div>
   );
@@ -515,7 +532,11 @@ export function KnowhowCellEditor({
   onClose,
   onSwitchCell,
 }: KnowhowCellEditorProps) {
-  const [fullscreen, toggleFullscreen] = useFullscreenToggle();
+  const [fullscreen, toggleFullscreen] = useFullscreenToggle(FULLSCREEN_STORAGE_KEY);
+  // 与 KnowhowCellPreview 共用同一个 storageKey——查看态切编辑态（反之亦然）
+  // 是同一个浮窗身份的两种渲染，不该在切换模式时跳位置/跳尺寸，见该组件
+  // 对应注释。
+  const floating = useFloatingWindow({ storageKey: "knowhow.cellModal.window", disabled: fullscreen });
   // panel 只在 row/column 都存在时才会挂载本组件（见 knowhow-panel.tsx 的
   // cellModalRow/cellModalColumn 守卫），加上 key={rowId+columnId} 保证切格
   // 时整个组件重新挂载——这里的非空断言在该前提下是安全的。
@@ -810,13 +831,15 @@ export function KnowhowCellEditor({
   return (
     <div className="kh-modal-overlay" onClick={handleBackdropClick}>
       <div
+        ref={floating.cardRef}
         className={`kh-modal-card kh-modal-card--editor${fullscreen ? " kh-modal-card--fullscreen" : ""}`}
+        style={floating.style}
         role="dialog"
         aria-modal="true"
         aria-label={`${rowTitle} › ${column.name}`}
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="kh-modal-header">
+        <header className="kh-modal-header" {...floating.dragHandleProps}>
           <div className="kh-modal-header-top">
             <div className="kh-modal-breadcrumb">
               <span className="kh-modal-row-title" title={rowTitle}>
@@ -1016,6 +1039,7 @@ export function KnowhowCellEditor({
             </>
           )}
         </footer>
+        {!fullscreen && <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />}
       </div>
     </div>
   );

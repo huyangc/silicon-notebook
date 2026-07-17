@@ -1884,6 +1884,10 @@ export function KnowhowPanel({
           /* 左侧色条是查看/编辑态的第一眼视觉标记（见 --preview / --editor 修饰
              类），通过内边距让 header/body 内容与色条错开。 */
           border-left: 4px solid transparent;
+          /* 浮窗 resize 手柄（.kh-modal-resize-handle，见下方）绝对定位需要一个
+             定位上下文——overlay 是 position: fixed，不加这条手柄会贴到整个
+             视口右下角而不是卡片右下角。 */
+          position: relative;
         }
 
         /* 只读预览态：中性灰蓝左边条 + 白底 header 无强调。 */
@@ -1909,6 +1913,31 @@ export function KnowhowPanel({
           height: 100vh;
           border-radius: 0;
           box-shadow: none;
+        }
+
+        /* 浮窗 resize 手柄——右下角小三角，cursor 提示对角缩放。共用
+           .kh-modal-card 的这几个消费方：格子浮窗查看/编辑态、代码浮窗、
+           矩阵抽屉（.kh-matrix-card 扩展自 .kh-modal-card，同一个定位上下文）、
+           行优化弹窗；各自在全屏态（若有）时不渲染这个元素（组件层面用
+           fullscreen 布尔条件渲染，不是靠 CSS 隐藏；这条注释本身在 styled-jsx
+           的模板字符串里，不能用反引号包代码片段——反引号会提前把整段 CSS
+           模板字符串截断，之前踩过一次）。只用既有的两级灰度变量，不新开
+           色板；aria-hidden——纯鼠标/触屏手柄，没有键盘等价操作，不需要出现
+           在屏幕阅读器的可交互树里。 */
+        .kh-modal-resize-handle {
+          position: absolute;
+          right: 0;
+          bottom: 0;
+          width: 16px;
+          height: 16px;
+          cursor: nwse-resize;
+          touch-action: none;
+          clip-path: polygon(100% 0%, 100% 100%, 0% 100%);
+          background: var(--line);
+        }
+
+        .kh-modal-resize-handle:hover {
+          background: var(--muted);
         }
 
         /* header 里紧跟面包屑的小态标（「查看」/「编辑中」）——用同一支
