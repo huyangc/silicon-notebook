@@ -21,6 +21,7 @@
 - **A/B 边界**：归 PR A 的是**机器值到达屏幕的地方**。与被改枚举**同处一个元素**的相邻散文（例：tier 徽章第 140 行的 tooltip）作为不可避免的连带一并改——留着会让同一元素内部自相矛盾（徽章说「公共知识库」而它自己的 tooltip 说「基准库」）。除此之外的散文一律归 PR B，不要顺手改。
 - **不改命名，只改机制**。除词汇表定稿的 tier 两词外，各枚举的中文措辞以「贴合现状 / 直白可懂」为准，不借本 PR 推行新叫法。
 - 每个 task 结束时 `cd frontend && npm run test && npx tsc --noEmit` 必须绿。
+- **测试卫生（Task 2 评审揪出来的，别再犯）**：枚举取值的断言归 `vocabulary.test.mjs`——Task 1 已覆盖 TIER / PARSE_STATUS / EVIDENCE_LEVEL / MODEL_STAGE / PROMOTION_STATUS 四态 / 原型链 / 空串。**接线类 task（2/4/5/6）不要再抄一遍同样的 `label(MAP, value, fallback)` 断言**：那是在测上游 Task 1 的代码，净新增覆盖为零，而测试名（「XX 徽章显示中文」）会承诺它根本没验证的东西——它既不 import 也不渲染那个组件，把接线改回裸值它也不会红。只在带来**真新覆盖**时才加测试。接线本身的回归钉子是 Task 8 Step 2 的静态断言（`grep` 断言裸值形状已消失）。
 - 本 worktree 无 `frontend/node_modules`。**Task 0 先装。**
 
 ---
@@ -456,14 +457,8 @@ import { PARSE_STATUS, ELEMENT_TYPE } from "./vocabulary.ts";
 // 真正的「映射表覆盖后端全部取值」需要一个跨栈守卫(照 check_ask_modes_contract.py),
 // 归 PR B。
 
-test("解析状态:已知值译对，未知值退中性兜底而不泄漏原值", () => {
-  assert.equal(label(PARSE_STATUS, "failed", "处理中"), "解析失败");
-  assert.equal(label(PARSE_STATUS, "metadata-only", "处理中"), "仅元数据");
-  const unknown = label(PARSE_STATUS, "some_future_status", "处理中");
-  assert.equal(unknown, "处理中");
-  assert.notEqual(unknown, "some_future_status");
-});
-
+// PARSE_STATUS 已由 vocabulary.test.mjs(Task 1)覆盖——这里不要再抄一遍。
+// ELEMENT_TYPE 是 Task 1 没测过的，属真新覆盖，加这一条：
 test("内容块类型:已知值译对，未知值退中性兜底", () => {
   assert.equal(label(ELEMENT_TYPE, "table", "内容"), "表格");
   assert.equal(label(ELEMENT_TYPE, "some_future_block", "内容"), "内容");
@@ -560,15 +555,10 @@ test("KNOWLEDGE_STATUS 覆盖 workspace-model 里的每一个取值", () => {
   }
 });
 
-test("晋升候选状态覆盖后端四个真实取值", () => {
-  // 真源 migrations.py:413:proposed | under_review | approved | rejected。
-  // 没有 "pending"。proposed / under_review 是最常见的两个态,漏了它们
-  // 会让队列里绝大多数条目永久显示成兜底词。
-  assert.equal(label(PROMOTION_STATUS, "proposed", "处理中"), "待审核");
-  assert.equal(label(PROMOTION_STATUS, "under_review", "处理中"), "审核中");
-  assert.equal(label(PROMOTION_STATUS, "approved", "处理中"), "已收录");
-  assert.equal(label(PROMOTION_STATUS, "rejected", "处理中"), "未采纳");
-});
+// PROMOTION_STATUS 四态已由 vocabulary.test.mjs(Task 1)覆盖，不要再抄。
+// 上面那条 KNOWLEDGE_STATUS 测试是真新覆盖——它从 workspace-model.ts 的
+// KNOWLEDGE_STATUS_OPTIONS 这个独立锚点取值，而不是照抄映射表自己的 key，
+// 所以它真能发现「映射表漏了后端某个取值」。这是本 PR 唯一一处有独立锚点的枚举。
 ```
 
 - [ ] **Step 3: 跑测试确认它失败**
