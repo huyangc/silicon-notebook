@@ -5795,7 +5795,7 @@ function KnowledgeBrowser({
               <div className="tag-row"><span className="tag">similarity {group.similarity}</span></div>
               {group.members.map((member, memberIndex) => (
                 <div className="dup-member" key={member.id}>
-                  <span><LatexText text={member.headline} isFormula={(member.object_type || group.object_type) === "formula"} /> <span className="tag">{member.status}</span></span>
+                  <span><LatexText text={member.headline} isFormula={(member.object_type || group.object_type) === "formula"} /> <span className="tag">{label(KNOWLEDGE_STATUS, member.status, "其他")}</span></span>
                   {!readOnly && memberIndex > 0 && (
                     <button className="sort-button" onClick={() => onMerge(member.id, group.members[0].id)}>
                       合并到第 1 条
