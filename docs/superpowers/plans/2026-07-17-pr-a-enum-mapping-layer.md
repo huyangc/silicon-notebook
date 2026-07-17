@@ -858,9 +858,15 @@ Expected: 全绿（含 `npm run test` / `npm run lint` / `npm run build`）。
 
 ```bash
 cd frontend
-grep -rnE "\{(sourceDetail\.parse_status|element\.element_type|item\.status|cand\.status)\}" app/page.tsx
-# 间接写法(压进数组再 map 渲染)——Task 4 评审发现 evidence/occurrence.element_type 走这条路,精确 grep 抓不到:
-grep -rnE "(evidence|occurrence)\.element_type" app/page.tsx | grep -v "===";  # 应无输出(已改走 label)
+# 语义探针:任何「<...>{ 某对象.枚举字段 }<...>」形态的裸值直出,不再锚定具体变量名
+# ——本 PR 过程中这条 grep 因只认特定变量名(item.status/element.element_type/...)反复漏报,
+# 补了 3 次补丁(member.status 误报、evidence.element_type 间接写法、edge.edge_type 下划线)。
+# 改成按「字段名」锚定,任何前缀变量都覆盖:
+grep -rnE ">\{[a-zA-Z_]+\.(status|parse_status|element_type|object_type|review_status|edge_type|tier|mode|evidence_level)\}<" app/page.tsx | grep -vE "label\("
+# 间接写法(压进数组再 map 渲染,如 evidence/occurrence.element_type):
+grep -rnE "^\s*[a-z]+\.(status|element_type|parse_status)," app/page.tsx | grep -vE "label\("
+# 已知合法保留、不在本 PR 的(应当命中并被人工确认,不是失败):
+#   edge.edge_type / edge.review_status (5208/5209, admin 关系审核, 开放词表, 归后续)
 grep -rn '"base" : "personal"' app/answer-panel.tsx
 # 宽模式:任意「查表后兜底回原值」的形状,不再只认特定变量名
 # (最初计划写的窄 grep 只认 ?? stage|status|s|step.step_type,漏掉了
