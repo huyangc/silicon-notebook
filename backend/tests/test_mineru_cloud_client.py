@@ -114,3 +114,73 @@ def test_images_from_zip_skips_corrupt_entry(monkeypatch):
     monkeypatch.setattr(zipfile.ZipFile, "read", flaky_read)
     imgs = _images_from_zip(zip_bytes)
     assert imgs == {"ok.png": b"OKBYTES"}
+
+
+# -- parse_file_with_images tests --------------------------------------------------
+
+
+def _fake_pdf(tmp_path):
+    p = tmp_path / "doc.pdf"
+    p.write_bytes(b"%PDF-1.4 fake bytes")
+    return str(p)
+
+
+def _zip_content_and_image(content, img_name="fig1.jpg", img_bytes=b"IMG"):
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("out/x_content_list.json", json.dumps(content).encode())
+        z.writestr(f"images/{img_name}", img_bytes)
+    return buf.getvalue()
+
+
+def test_parse_file_happy_path_returns_content_and_images(monkeypatch, tmp_path):
+    c = _client(monkeypatch)
+    content = [{"type": "text", "text": "Hi", "page_idx": 0},
+               {"type": "image", "img_path": "images/fig1.jpg", "page_idx": 0}]
+    responses = iter([
+        {"code": 0, "data": {"batch_id": "b1", "file_urls": ["https://up/f1"]}},   # submit
+        {"data": {"extract_result": [{"data_id": "src-1", "state": "pending"}]}},   # poll 1
+        {"data": {"extract_result": [                                               # poll 2
+            {"data_id": "src-1", "state": "done", "full_zip_url": "https://z/r.zip"}]}},
+    ])
+    put_calls = []
+    c._http_json = lambda method, url, payload=None: next(responses)
+    c._http_put_file = lambda url, data: put_calls.append((url, data))
+    c._http_bytes = lambda url: _zip_content_and_image(content)
+    cl, images = c.parse_file_with_images(_fake_pdf(tmp_path), data_id="src-1")
+    assert cl == content
+    assert images == {"fig1.jpg": b"IMG"}
+    assert put_calls and put_calls[0][0] == "https://up/f1"        # 上传到签名 URL
+    assert put_calls[0][1] == b"%PDF-1.4 fake bytes"               # 上传的是文件字节
+
+
+def test_parse_file_failed_state_raises_with_err_msg(monkeypatch, tmp_path):
+    c = _client(monkeypatch)
+    responses = iter([
+        {"code": 0, "data": {"batch_id": "b1", "file_urls": ["https://up/f1"]}},
+        {"data": {"extract_result": [{"data_id": "src-1", "state": "failed", "err_msg": "页数超限"}]}},
+    ])
+    c._http_json = lambda method, url, payload=None: next(responses)
+    c._http_put_file = lambda url, data: None
+    with pytest.raises(RuntimeError) as exc:
+        c.parse_file_with_images(_fake_pdf(tmp_path), data_id="src-1")
+    assert "页数超限" in str(exc.value)
+    assert "页数超限" in c.last_error
+
+
+def test_parse_file_poll_timeout_raises(monkeypatch, tmp_path):
+    c = _client(monkeypatch, interval="1", timeout="2")
+    seq = iter([{"code": 0, "data": {"batch_id": "b1", "file_urls": ["https://up/f1"]}}])
+    running = {"data": {"extract_result": [{"data_id": "src-1", "state": "running"}]}}
+    c._http_json = lambda method, url, payload=None: next(seq, running)
+    c._http_put_file = lambda url, data: None
+    with pytest.raises(RuntimeError) as exc:
+        c.parse_file_with_images(_fake_pdf(tmp_path), data_id="src-1")
+    assert "超时" in str(exc.value)
+
+
+def test_parse_file_not_configured_raises(monkeypatch, tmp_path):
+    monkeypatch.delenv("MINERU_API_TOKEN", raising=False)
+    c = MinerUCloudClient(Settings())
+    with pytest.raises(MinerUCloudNotConfigured):
+        c.parse_file_with_images(_fake_pdf(tmp_path))

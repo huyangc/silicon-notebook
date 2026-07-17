@@ -65,6 +65,32 @@ class MinerUCloudClient:
                 self.last_error = str(exc)
             raise
 
+    def parse_file_with_images(
+        self, path: str, *, data_id: str = ""
+    ) -> tuple[List[dict], dict[str, bytes]]:
+        """上传本地文件给云端(v4 file-urls/batch)，返回 (content_list, {basename: 图片字节})。
+
+        与 parse_url_with_images 对称，但走"申请上传URL→PUT上传→轮询batch结果→下载ZIP"。
+        未配置 token → MinerUCloudNotConfigured；失败/超时/结果不可用 → RuntimeError。
+        """
+        self.last_error = ""
+        if not self.configured:
+            raise MinerUCloudNotConfigured("未配置 MinerU 云端凭证 (MINERU_API_TOKEN)")
+        try:
+            file_path = Path(path)
+            batch_id, item_data_id = self._submit_file(file_path, data_id)
+            zip_url = self._poll_batch(batch_id, item_data_id)
+            zip_bytes = self._http_bytes(zip_url)
+            content_list = self._content_list_from_zip(zip_bytes)
+            if not content_list:
+                raise RuntimeError("MinerU 云端结果为空 content_list")
+            images = _images_from_zip(zip_bytes) if self.settings.mineru_return_images else {}
+            return content_list, images
+        except Exception as exc:
+            if not self.last_error:
+                self.last_error = str(exc)
+            raise
+
     # -- steps -----------------------------------------------------------------
 
     def _submit(self, url: str, data_id: str) -> str:
@@ -86,6 +112,27 @@ class MinerUCloudClient:
             raise RuntimeError("MinerU 云端未返回 task_id")
         return str(task_id)
 
+    def _submit_file(self, path: Path, data_id: str) -> tuple[str, str]:
+        """申请上传 URL 并 PUT 上传文件，返回 (batch_id, 本文件 data_id)。"""
+        item_data_id = data_id or path.stem
+        body = {
+            "files": [{"name": path.name, "data_id": item_data_id, "is_ocr": False}],
+            "model_version": self.settings.mineru_cloud_model_version,
+            "enable_formula": self.settings.mineru_cloud_formula_enable,
+            "enable_table": self.settings.mineru_cloud_table_enable,
+            "language": self.settings.mineru_cloud_language,
+        }
+        payload = self._http_json("POST", self._api("/api/v4/file-urls/batch"), body)
+        if payload.get("code") not in (0, "0"):
+            raise RuntimeError(f"MinerU 云端申请上传失败: {payload.get('msg') or payload}")
+        data = payload.get("data") or {}
+        batch_id = data.get("batch_id")
+        file_urls = data.get("file_urls") or []
+        if not batch_id or not file_urls:
+            raise RuntimeError("MinerU 云端未返回 batch_id/file_urls")
+        self._http_put_file(str(file_urls[0]), path.read_bytes())
+        return str(batch_id), item_data_id
+
     def _poll(self, task_id: str) -> str:
         interval = max(1, int(self.settings.mineru_cloud_poll_interval_seconds))
         timeout = max(interval, int(self.settings.mineru_cloud_timeout_seconds))
@@ -102,6 +149,30 @@ class MinerUCloudClient:
                 return str(zip_url)
             if state == "failed":
                 raise RuntimeError(f"MinerU 云端解析失败: {data.get('err_msg') or '未知错误'}")
+            self._sleep(interval)
+        raise RuntimeError(f"MinerU 云端轮询超时 (>{timeout}s)")
+
+    def _poll_batch(self, batch_id: str, data_id: str) -> str:
+        """轮询 batch 结果，返回本文件 done 时的 full_zip_url。"""
+        interval = max(1, int(self.settings.mineru_cloud_poll_interval_seconds))
+        timeout = max(interval, int(self.settings.mineru_cloud_timeout_seconds))
+        max_polls = max(1, math.ceil(timeout / interval))
+        url = self._api(f"/api/v4/extract-results/batch/{batch_id}")
+        for _ in range(max_polls):
+            payload = self._http_json("GET", url)
+            data = payload.get("data") or {}
+            results = data.get("extract_result") or []
+            item = next((r for r in results if str(r.get("data_id")) == str(data_id)), None)
+            state = str((item or {}).get("state", "")).lower()
+            if state == "done":
+                zip_url = (item or {}).get("full_zip_url")
+                if not zip_url:
+                    raise RuntimeError("MinerU 云端完成但缺少 full_zip_url")
+                return str(zip_url)
+            if state == "failed":
+                raise RuntimeError(
+                    f"MinerU 云端解析失败: {(item or {}).get('err_msg') or '未知错误'}"
+                )
             self._sleep(interval)
         raise RuntimeError(f"MinerU 云端轮询超时 (>{timeout}s)")
 
@@ -137,6 +208,17 @@ class MinerUCloudClient:
             request, timeout=self.settings.mineru_cloud_timeout_seconds
         ) as response:
             return response.read()
+
+    def _http_put_file(self, url: str, data: bytes) -> None:
+        """PUT 上传文件字节到签名 URL(不带 Content-Type，按 MinerU 官方示例)。"""
+        request = urllib.request.Request(url, data=data, method="PUT")
+        request.add_header("Content-Type", "")
+        with urllib.request.urlopen(
+            request, timeout=self.settings.mineru_cloud_timeout_seconds
+        ) as response:
+            status = getattr(response, "status", 200) or 200
+            if status not in (200, 201, 204):
+                raise RuntimeError(f"MinerU 云端上传失败 HTTP {status}")
 
     def _sleep(self, seconds: float) -> None:
         time.sleep(seconds)
