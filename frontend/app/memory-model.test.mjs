@@ -10,9 +10,13 @@ import {
   memoryProvenanceRows,
   memoryStatusMeta,
   memoryEvidenceRows,
+  EVIDENCE_TYPE,
+  EVIDENCE_STATUS,
   MEMORY_INPUT_LIMITS,
   validateMemoryDraft,
 } from "./memory-model.ts";
+import { label } from "./vocabulary.ts";
+import { ASK_MODES } from "./ask-modes.ts";
 
 test("session abort tears down active Memory reads and writes synchronously", () => {
   const session = new AbortController();
@@ -311,4 +315,31 @@ test("frontend Memory validation mirrors server title content and tag limits", (
     "",
   );
   assert.equal(validateMemoryDraft({ title: " Title ", content_md: " Body ", tags: [" analog "] }), "");
+});
+
+test("提问方式复用 ask-modes 的 label,不直出 chunk", () => {
+  const modeLabels = Object.fromEntries(ASK_MODES.map((m) => [m.id, m.label]));
+  assert.equal(label(modeLabels, "chunk", "—"), "通用问答");
+  assert.notEqual(label(modeLabels, "chunk", "—"), "chunk");
+});
+
+// EVIDENCE_LEVEL 已在 vocabulary.test.mjs 覆盖，这里不重复。
+// EVIDENCE_TYPE / EVIDENCE_STATUS 是 memory 面板自己的枚举（不进 vocabulary.ts），
+// 真新覆盖：已知取值译对，未知取值退中性兜底、绝不泄漏原始 wire 值。
+test("Agent 证据类型:已知取值译对,未知取值退兜底不泄漏原值", () => {
+  assert.equal(label(EVIDENCE_TYPE, "source_element", "未知来源"), "原文片段");
+  assert.equal(label(EVIDENCE_TYPE, "source", "未知来源"), "原文出处");
+  assert.equal(label(EVIDENCE_TYPE, "knowledge", "未知来源"), "知识条目");
+  assert.equal(label(EVIDENCE_TYPE, "memory", "未知来源"), "记忆");
+  assert.equal(label(EVIDENCE_TYPE, "unsupported", "未知来源"), "无法识别");
+  assert.equal(label(EVIDENCE_TYPE, "some_future_type", "未知来源"), "未知来源");
+  assert.notEqual(label(EVIDENCE_TYPE, "some_future_type", "未知来源"), "some_future_type");
+});
+
+test("Agent 证据校验状态:已知取值译对,未知取值退兜底不泄漏原值", () => {
+  assert.equal(label(EVIDENCE_STATUS, "validated", "未能核对"), "已核对");
+  assert.notEqual(label(EVIDENCE_STATUS, "validated", "未能核对"), "validated");
+  assert.equal(label(EVIDENCE_STATUS, "invalid", "未能核对"), "未能核对");
+  assert.equal(label(EVIDENCE_STATUS, "unverified", "未能核对"), "未能核对");
+  assert.notEqual(label(EVIDENCE_STATUS, "unverified", "未能核对"), "unverified");
 });

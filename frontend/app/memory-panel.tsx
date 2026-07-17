@@ -28,11 +28,14 @@ import {
   memoryProvenanceRows,
   memoryStatusMeta,
   subscribeMemorySessionAbort,
+  EVIDENCE_TYPE,
+  EVIDENCE_STATUS,
   MEMORY_INPUT_LIMITS,
   validateMemoryDraft,
   type MemoryScope,
 } from "./memory-model";
 import { Pagination } from "./Pagination";
+import { label, EVIDENCE_LEVEL } from "./vocabulary";
 import type {
   MemoryOrigin,
   MemoryPreview,
@@ -818,9 +821,9 @@ export function MemoryPanel({
                     <div className="memory-evidence-list">
                       {evidenceRows.map((evidence, index) => (
                         <article key={`${memory.id}-evidence-${index}`} className={evidence.trusted ? "validated" : "invalid"}>
-                          <strong>{index + 1}. {evidence.type}</strong>
-                          <code>{evidence.identity}</code>
-                          <span>{evidence.status} · {evidence.reason}</span>
+                          <strong>{index + 1}. {label(EVIDENCE_TYPE, evidence.type, "未知来源")}</strong>
+                          <code title={evidence.identity}>{evidence.identity.slice(0, 12)}…</code>
+                          <span>{label(EVIDENCE_STATUS, evidence.status, "未能核对")}</span>
                         </article>
                       ))}
                     </div>
@@ -1101,7 +1104,7 @@ export function MemorySaveDialog({
             )}
             <div className="memory-preview-provenance">
               <strong>来源摘要</strong>
-              <span>证据等级：{String(provenance.evidence_level ?? "未知")}</span>
+              <span>依据：{label(EVIDENCE_LEVEL, String(provenance.evidence_level ?? ""), "未知")}</span>
               <span>引用：{String(provenance.citation_count ?? 0)} 条</span>
             </div>
           </>
