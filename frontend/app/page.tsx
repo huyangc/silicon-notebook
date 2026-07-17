@@ -110,7 +110,7 @@ import {
   type UnifiedGraphResp,
   type UnifiedKgStatus,
 } from "./workspace-model";
-import { label, PARSE_STATUS, ELEMENT_TYPE } from "./vocabulary";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -5108,7 +5108,7 @@ export default function Home() {
                     return (
                     <article className="item" key={cand.id}>
                       <div className="tag-row">
-                        <span className="tag">{cand.status}</span>
+                        <span className="tag">{label(PROMOTION_STATUS, cand.status, "处理中")}</span>
                         <span className="tag">{cand.object_type}</span>
                         {cand.source_kind === "memory" && <span className="tag">Memory 提取候选</span>}
                         {cand.source_kind === "memory" && review.sourceRevision > 0 && (
@@ -5457,7 +5457,7 @@ function KgEvidenceCard({ evidence, index }: { evidence: EvidenceItem; index: nu
   const sourceLabel = evidence.source_title || evidence.source_id || "未知来源";
   const meta = [
     evidence.location_label,
-    evidence.element_type,
+    label(ELEMENT_TYPE, evidence.element_type, ""),
     kgConfidenceLabel(evidence.confidence)
   ].filter(Boolean);
 
@@ -5483,7 +5483,7 @@ function KgOccurrenceCard({ occurrence, index }: { occurrence: KgOccurrence; ind
   const sourceLabel = occurrence.source_title || occurrence.source_id || "未知来源";
   const meta = [
     occurrence.location_label,
-    occurrence.element_type,
+    label(ELEMENT_TYPE, occurrence.element_type ?? "", ""),
     kgConfidenceLabel(occurrence.confidence)
   ].filter(Boolean);
 
@@ -5780,7 +5780,7 @@ function KnowledgeBrowser({
       </div>
       <div className="tool-input-row">
         <select value={statusFilter} onChange={(event) => onStatusFilter(event.target.value)}>
-          {statuses.map((value) => <option key={value} value={value}>{value === "all" ? "全部状态" : value}</option>)}
+          {statuses.map((value) => <option key={value} value={value}>{value === "all" ? "全部状态" : label(KNOWLEDGE_STATUS, value, "其他")}</option>)}
         </select>
         <button className="sort-button" onClick={reload}>刷新</button>
         {!readOnly && <button className="sort-button" onClick={onFindDuplicates}>查重</button>}
@@ -5828,14 +5828,14 @@ function KnowledgeBrowser({
               <div className="knowledge-govern">
                 {readOnly ? (
                   <>
-                    <span className="tag">{item.status}</span>
+                    <span className="tag">{label(KNOWLEDGE_STATUS, item.status, "其他")}</span>
                     {item.owner && <span className="tag">Owner {item.owner}</span>}
                   </>
                 ) : (
                   <>
                     <label>状态
                       <select value={item.status} onChange={(event) => onStatus(item.id, event.target.value)}>
-                        {KNOWLEDGE_STATUS_OPTIONS.map((value) => <option key={value} value={value}>{value}</option>)}
+                        {KNOWLEDGE_STATUS_OPTIONS.map((value) => <option key={value} value={value}>{label(KNOWLEDGE_STATUS, value, "其他")}</option>)}
                       </select>
                     </label>
                     <label>Owner

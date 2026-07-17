@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { label, TIER, PARSE_STATUS, ELEMENT_TYPE, EVIDENCE_LEVEL, PROMOTION_STATUS } from "./vocabulary.ts";
+import { label, TIER, PARSE_STATUS, ELEMENT_TYPE, EVIDENCE_LEVEL, PROMOTION_STATUS, KNOWLEDGE_STATUS } from "./vocabulary.ts";
+import { KNOWLEDGE_STATUS_OPTIONS } from "./workspace-model.ts";
 
 test("label 命中时返回映射值", () => {
   assert.equal(label(TIER, "base", "未知"), "公共知识库");
@@ -61,4 +62,14 @@ test("解析状态含 metadata-only", () => {
 test("内容块类型:已知值译对，未知值退中性兜底", () => {
   assert.equal(label(ELEMENT_TYPE, "table", "内容"), "表格");
   assert.equal(label(ELEMENT_TYPE, "some_future_block", "内容"), "内容");
+});
+
+// KNOWLEDGE_STATUS 是本 PR 唯一一处有独立锚点的枚举：workspace-model.ts 的
+// KNOWLEDGE_STATUS_OPTIONS 是后端知识条目状态的真实取值来源(与 KNOWLEDGE_STATUS
+// 映射表是两份独立维护的列表)。从这个锚点取值断言，才能真的发现「映射表漏了
+// 后端某个取值」，而不是像上面 PARSE_STATUS/ELEMENT_TYPE 那样只能断言行为安全。
+test("KNOWLEDGE_STATUS 覆盖 workspace-model 里的每一个取值", () => {
+  for (const v of KNOWLEDGE_STATUS_OPTIONS) {
+    assert.notEqual(label(KNOWLEDGE_STATUS, v, "其他"), v, `${v} 未映射,会直出英文`);
+  }
 });
