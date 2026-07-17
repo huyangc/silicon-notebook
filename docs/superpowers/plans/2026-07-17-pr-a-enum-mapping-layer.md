@@ -871,7 +871,12 @@ grep -rnE "^\s*[a-z]+\.(status|element_type|parse_status)," app/page.tsx | grep 
 #   5696 {schema.object_type} → A2
 #   5208 {edge.edge_type}     → 后续 (开放关系词表, 与 edge_type 同族)
 #   5209 {edge.review_status} → 后续 (同上, admin 关系审核)
-#   5589 {schema.status}      → 后续 (active|revoked, schema 启用态, 独立小枚举, 非 KNOWLEDGE_STATUS)
+#   5588 {schema.source}      → A2 (builtin|custom, 与 object_type 同处 schema 卡片)
+#   5589 {schema.status}      → 后续 (active|revoked, schema 启用态, 独立小枚举)
+# ⚠ 字段名白名单的教训(opus final review):这个探针本质是字段白名单,不是真语义——
+#   severity 不在白名单就漏了。收尾要另跑一个不靠字段名的扫描:
+#   grep 'className="tag[^"]*">\{[a-z]+\.[a-z_]+\}' 排除已 label( 的,逐个人工定性。
+#   PR B 的 check_ui_vocabulary.py 别照抄本白名单。
 # 注:member.status(5798) 曾在此列,已由 Task 5 补丁 5f678760 修掉(走 label(KNOWLEDGE_STATUS))。
 grep -rn '"base" : "personal"' app/answer-panel.tsx
 # 宽模式:任意「查表后兜底回原值」的形状,不再只认特定变量名
