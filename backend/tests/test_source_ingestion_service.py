@@ -543,3 +543,76 @@ def test_delete_source_cleans_images(tmp_path, monkeypatch):
     assert repo.source_asset_ids(sid) == []
     assert repo.get_notebook_asset(asset_ids[0]) is None
     assert not on_disk.is_file()
+
+
+def _seed_queued_pdf(repo, tmp_path):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    sid = f"src-{uuid4().hex[:10]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
+            "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sid, nb.id, "Doc", "pdf", "queued", "queued",
+             "doc.pdf", "/tmp/doc.pdf", 0, "", "", "academic_paper", now, now))
+    return nb, sid
+
+
+def test_upload_file_uses_cloud_when_only_cloud_configured(tmp_path, monkeypatch):
+    """本地 MinerU 未配置 + 云端已配 → 上传文件走云端 parse_file_with_images，
+    图片作为 notebook_assets 落地(与本地路径同一持久化闭包)。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.delenv("MINERU_MODE", raising=False)          # 本地 off → not configured
+    monkeypatch.delenv("MINERU_API_URL", raising=False)
+    monkeypatch.setenv("MINERU_API_TOKEN", "tok")             # 云端 configured
+    repo = SQLiteRepository(Settings())
+    nb, sid = _seed_queued_pdf(repo, tmp_path)
+
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+    monkeypatch.setattr(
+        repo.mineru_cloud_client, "parse_file_with_images",
+        lambda path, data_id="": (
+            [{"type": "image", "img_path": "fig1.png",
+              "image_caption": ["Figure 1."], "page_idx": 0}],
+            {"fig1.png": png},
+        ),
+    )
+    repo.process_source(sid)
+
+    assert repo.get_source(sid).parse_status == "extracted"
+    asset_ids = repo.source_asset_ids(sid)
+    assert len(asset_ids) == 1
+    elements = repo.source_elements(sid)
+    assert any(e.element_type == "image" for e in elements)
+
+
+def test_upload_file_cloud_error_falls_back_to_pypdf(tmp_path, monkeypatch):
+    """云端上传解析抛错 → 回落 pypdf 纯文本，摄取不中断(仍产出文本 elements)。"""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.delenv("MINERU_MODE", raising=False)
+    monkeypatch.delenv("MINERU_API_URL", raising=False)
+    monkeypatch.setenv("MINERU_API_TOKEN", "tok")
+    repo = SQLiteRepository(Settings())
+    nb, sid = _seed_queued_pdf(repo, tmp_path)
+
+    def _boom(path, data_id=""):
+        raise RuntimeError("云端 500")
+    monkeypatch.setattr(repo.mineru_cloud_client, "parse_file_with_images", _boom)
+    # pypdf 回落读取真实文件：写一个最小 PDF 到 source.file_path
+    import pypdf, io as _io
+    writer = pypdf.PdfWriter(); writer.add_blank_page(width=200, height=200)
+    real_pdf = tmp_path / "real.pdf"
+    with real_pdf.open("wb") as fh: writer.write(fh)
+    with repo._write() as db:
+        db.execute("UPDATE sources SET file_path=? WHERE id=?", (str(real_pdf), sid))
+
+    repo.process_source(sid)   # 不抛：云端错 → pypdf 兜底
+    assert repo.get_source(sid).parse_status == "extracted"
+    assert repo.source_asset_ids(sid) == []   # 空白页无图片资产

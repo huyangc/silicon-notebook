@@ -494,12 +494,34 @@ class SourceIngestionService:
                     parser_mode = "mineru_cloud"
             else:
                 mineru_client = self.mineru_client()
-                elements = self.parse_file(
-                    source_id, source.file_path, source.file_name, mineru_client,
-                    persist_image=persist_image,
-                )
-                mineru_error = str(getattr(mineru_client, "last_error", "") or "")
-                parser_mode = str(getattr(mineru_client, "mode", ""))
+                cloud_client = self.mineru_cloud_client()
+                if not mineru_client.configured and cloud_client.configured:
+                    # 本地 http/cli 未配置 + 云端已配 → 上传文件走云端(对称 URL 分支)；
+                    # 云端任一步失败 → 回落 pypdf，摄取不中断。
+                    try:
+                        content_list, images = cloud_client.parse_file_with_images(
+                            source.file_path, data_id=source_id
+                        )
+                        elements = mineru_content_list_to_elements(
+                            source_id, content_list, images=images, persist_image=persist_image
+                        )
+                        mineru_error = str(getattr(cloud_client, "last_error", "") or "")
+                        parser_mode = "mineru_cloud"
+                    except Exception as exc:
+                        mineru_error = str(getattr(cloud_client, "last_error", "") or exc)
+                        elements = self.parse_file(
+                            source_id, source.file_path, source.file_name, mineru_client,
+                            persist_image=persist_image,
+                        )
+                        parser_mode = "pypdf_fallback_after_cloud_error"
+                else:
+                    # 本地已配(http/cli) 或 两者都没配 → 现状：本地 MinerU / pypdf。
+                    elements = self.parse_file(
+                        source_id, source.file_path, source.file_name, mineru_client,
+                        persist_image=persist_image,
+                    )
+                    mineru_error = str(getattr(mineru_client, "last_error", "") or "")
+                    parser_mode = str(getattr(mineru_client, "mode", ""))
             element_parsers = sorted(
                 {
                     str(element.metadata.get("parser", ""))
