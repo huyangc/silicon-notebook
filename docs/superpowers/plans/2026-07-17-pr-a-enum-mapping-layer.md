@@ -533,6 +533,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Modify: `frontend/app/page.tsx:5837`（下拉 `{value}`）
 - Modify: `frontend/app/page.tsx:5782`（筛选 `{value}`）
 - Modify: `frontend/app/page.tsx:5110`（`{cand.status}`，晋升队列）
+- Modify: `frontend/app/page.tsx:5460` 与 `:5486`（`evidence.element_type` / `occurrence.element_type`——Task 4 评审发现的同源泄漏，间接写法：压进 `meta` 数组后 `{meta.map(item => <span>{item}</span>)}` 渲染，Task 4 的窄 grep 没抓到）
 - Test: `frontend/app/vocabulary.test.mjs`（追加）
 
 **Interfaces:**
@@ -858,6 +859,8 @@ Expected: 全绿（含 `npm run test` / `npm run lint` / `npm run build`）。
 ```bash
 cd frontend
 grep -rnE "\{(sourceDetail\.parse_status|element\.element_type|item\.status|cand\.status)\}" app/page.tsx
+# 间接写法(压进数组再 map 渲染)——Task 4 评审发现 evidence/occurrence.element_type 走这条路,精确 grep 抓不到:
+grep -rnE "(evidence|occurrence)\.element_type" app/page.tsx | grep -v "===";  # 应无输出(已改走 label)
 grep -rn '"base" : "personal"' app/answer-panel.tsx
 # 宽模式:任意「查表后兜底回原值」的形状,不再只认特定变量名
 # (最初计划写的窄 grep 只认 ?? stage|status|s|step.step_type,漏掉了
