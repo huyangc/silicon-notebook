@@ -300,6 +300,85 @@ def test_update_cell_resolves_table_id_from_row_without_a_table_id_argument(
 
 
 # ---------------------------------------------------------------------------
+# update_knowhow_cells (batch — followup A: merged-cell single-transaction
+# batch write, spec §6「整组批量写单事务，不半改」)
+# ---------------------------------------------------------------------------
+
+
+def test_update_cells_batch_writes_every_row_and_bumps_state_once(store, notebook_id):
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    row_a = store.add_knowhow_row(table_id, {})
+    row_b = store.add_knowhow_row(table_id, {})
+    row_c = store.add_knowhow_row(table_id, {})
+    seq0 = store.get_knowhow_table(table_id)["mutation_seq"]
+
+    store.update_knowhow_cells([row_a, row_b, row_c], cols["修复方法"], "统一改法")
+
+    after = store.get_knowhow_table(table_id)
+    rows_by_id = {row["id"]: row for row in after["rows"]}
+    for row_id in (row_a, row_b, row_c):
+        assert rows_by_id[row_id]["cells"][cols["修复方法"]] == "统一改法"
+        assert rows_by_id[row_id]["projection_status"] == "pending"
+    # 批量写只算一次逻辑改动：mutation_seq 只 +1（不是每行各 +1）。
+    assert after["mutation_seq"] == seq0 + 1
+
+
+def test_update_cells_batch_is_idempotent_at_storage_level(store, notebook_id):
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    row_a = store.add_knowhow_row(table_id, {})
+    row_b = store.add_knowhow_row(table_id, {})
+
+    store.update_knowhow_cells([row_a, row_b], cols["修复方法"], "v1")
+    store.update_knowhow_cells([row_a, row_b], cols["修复方法"], "v2")
+
+    assert _cell_count(store, row_a, cols["修复方法"]) == 1
+    assert _cell_count(store, row_b, cols["修复方法"]) == 1
+    detail = store.get_knowhow_table(table_id)
+    rows_by_id = {row["id"]: row for row in detail["rows"]}
+    assert rows_by_id[row_a]["cells"][cols["修复方法"]] == "v2"
+    assert rows_by_id[row_b]["cells"][cols["修复方法"]] == "v2"
+    assert detail["mutation_seq"] == 2
+
+
+def test_update_cells_batch_empty_row_ids_is_a_noop(store, notebook_id):
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    seq0 = store.get_knowhow_table(table_id)["mutation_seq"]
+
+    store.update_knowhow_cells([], cols["修复方法"], "x")
+
+    assert store.get_knowhow_table(table_id)["mutation_seq"] == seq0
+
+
+def test_update_cells_batch_is_all_or_nothing_on_bad_row_id(store, notebook_id):
+    """一个事务：批内任一 row_id 不存在(FK 违反)整批回滚，包括排在它前面、
+    本会成功的行——事务原子性的核心断言，不是靠调用方预校验。
+
+    ``sqlite3`` 是本文件唯一用到它的地方，就地 import——避免在模块头部插入
+    新 import 行，把下面既有 import 挤动行号(test_repository_surface_manifest
+    按精确行号冻结了本文件对 SQLiteRepository 的 import 座)。"""
+    import sqlite3
+
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    row_a = store.add_knowhow_row(table_id, {})
+    # 新行默认已是 'pending'，用它来判"回滚"分辨不出改没改过——先显式打成
+    # 'synced'，回滚后若仍是 'synced' 才真的证明批内那条 UPDATE 没有生效。
+    store.set_knowhow_row_projection(row_a, "synced")
+    seq0 = store.get_knowhow_table(table_id)["mutation_seq"]
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.update_knowhow_cells([row_a, "no-such-row"], cols["修复方法"], "不该落库")
+
+    after = store.get_knowhow_table(table_id)
+    assert after["rows"][0]["cells"].get(cols["修复方法"], "") == ""
+    assert after["rows"][0]["projection_status"] == "synced"
+    assert after["mutation_seq"] == seq0
+
+
+# ---------------------------------------------------------------------------
 # set_knowhow_row_projection / set_knowhow_hidden_source / bump_knowhow_mutation_seq
 # ---------------------------------------------------------------------------
 

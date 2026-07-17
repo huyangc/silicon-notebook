@@ -3337,6 +3337,18 @@ TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS = {
     ("current_user", "backend/app/api/deps.py:147"),
 }
 
+# Followup A (anchor-grouping display spec §6「整组批量写单事务，不半改」):
+# update_knowhow_cells is a brand-new facade delegate (KnowhowStore's batch
+# sibling of update_knowhow_cell — upserts the SAME column across MULTIPLE
+# rows in ONE write transaction, so a merged/shared cell edit is all-or-
+# nothing instead of the frontend's old best-effort per-row Promise.all).
+# Exempt its consumer-site comparison entirely, exactly like
+# TASK10_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS does above for
+# get_knowhow_row_location — its one call site (the new batch PATCH
+# .../knowhow/{table_id}/cells endpoint in routes.py) needs no per-site
+# registration once the member itself is popped from comparison.
+FOLLOWUP_A_ALLOWED_NEW_MEMBERS = {"update_knowhow_cells"}
+
 
 def test_static_repository_consumer_scan_matches_manifest_exactly():
     recorded = {
@@ -3400,6 +3412,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | TASK1_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
         | TASK10_KNOWHOW_PR23_ALLOWED_NEW_MEMBERS
         | TASK3_SOURCE_ASSET_ALLOWED_NEW_MEMBERS
+        | FOLLOWUP_A_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)

@@ -653,6 +653,140 @@ def test_patch_cell_unknown_row_400(tmp_path, monkeypatch):
 
 
 # ===========================================================================
+# PATCH /notebooks/{nb}/knowhow/{t}/cells (followup A: batch cell write, ONE
+# DB transaction — anchor-grouping spec §6「整组批量写单事务，不半改」.
+# Replaces the frontend's best-effort Promise.all of N independent
+# patch_knowhow_cell PATCHes for a merged/shared cell.)
+# ===========================================================================
+
+
+def test_patch_cells_batch_success(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00001074")
+    nb = _mk_notebook(client, owner_h)
+    table = _mk_table(client, owner_h, nb)
+    column_id = table["columns"][1]["id"]
+    row_ids = [
+        client.post(
+            f"/api/notebooks/{nb}/knowhow/{table['id']}/rows", headers=owner_h, json={"cells": {}},
+        ).json()["id"]
+        for _ in range(3)
+    ]
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table['id']}/cells",
+        headers=owner_h,
+        json={"column_id": column_id, "row_ids": row_ids, "content_md": "统一改法"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert {item["row_id"] for item in body} == set(row_ids)
+    for item in body:
+        assert item["column_id"] == column_id
+        assert item["content_md"] == "统一改法"
+        assert item["projection_status"] in ("pending", "syncing", "synced")
+
+    # 落库确实全写了，不只是响应体里说写了。
+    detail = client.get(f"/api/notebooks/{nb}/knowhow/{table['id']}", headers=owner_h).json()
+    written = {row["id"]: row["cells"].get(column_id) for row in detail["rows"]}
+    for row_id in row_ids:
+        assert written[row_id] == "统一改法"
+
+
+def test_patch_cells_batch_one_bad_row_400_writes_nothing_not_even_the_good_rows(
+    tmp_path, monkeypatch
+):
+    """事务原子性的端点级证据：批里混了一个不属于本表的 row_id，整请求 400，
+    且批里其余合法的 row 一个字都没落库——不是"坏的那个不写、好的照写"的半改。"""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00001075")
+    nb = _mk_notebook(client, owner_h)
+    table1 = _mk_table(client, owner_h, nb, title="表一")
+    table2 = _mk_table(client, owner_h, nb, title="表二")
+    column1 = table1["columns"][1]["id"]
+    good_row_ids = [
+        client.post(
+            f"/api/notebooks/{nb}/knowhow/{table1['id']}/rows", headers=owner_h, json={"cells": {}},
+        ).json()["id"]
+        for _ in range(2)
+    ]
+    foreign_row = client.post(
+        f"/api/notebooks/{nb}/knowhow/{table2['id']}/rows", headers=owner_h, json={"cells": {}},
+    ).json()
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table1['id']}/cells",
+        headers=owner_h,
+        json={
+            "column_id": column1,
+            "row_ids": [*good_row_ids, foreign_row["id"]],
+            "content_md": "不该落库",
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert "格子定位不合法" in resp.json()["detail"]
+
+    detail = client.get(f"/api/notebooks/{nb}/knowhow/{table1['id']}", headers=owner_h).json()
+    written = {row["id"]: row["cells"].get(column1, "") for row in detail["rows"]}
+    for row_id in good_row_ids:
+        assert written[row_id] == ""
+
+
+def test_patch_cells_batch_unknown_row_400(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00001076")
+    nb = _mk_notebook(client, owner_h)
+    table = _mk_table(client, owner_h, nb)
+    column_id = table["columns"][0]["id"]
+    row_id = client.post(
+        f"/api/notebooks/{nb}/knowhow/{table['id']}/rows", headers=owner_h, json={"cells": {}},
+    ).json()["id"]
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table['id']}/cells",
+        headers=owner_h,
+        json={"column_id": column_id, "row_ids": [row_id, "no-such-row"], "content_md": "x"},
+    )
+    assert resp.status_code == 400, resp.text
+
+
+def test_patch_cells_batch_column_from_another_table_400(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00001077")
+    nb = _mk_notebook(client, owner_h)
+    table1 = _mk_table(client, owner_h, nb, title="表一")
+    table2 = _mk_table(client, owner_h, nb, title="表二")
+    foreign_column = table2["columns"][0]["id"]
+    row1_id = client.post(
+        f"/api/notebooks/{nb}/knowhow/{table1['id']}/rows", headers=owner_h, json={"cells": {}},
+    ).json()["id"]
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table1['id']}/cells",
+        headers=owner_h,
+        json={"column_id": foreign_column, "row_ids": [row1_id], "content_md": "x"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "格子定位不合法" in resp.json()["detail"]
+
+
+def test_patch_cells_batch_empty_row_ids_is_a_noop(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00001078")
+    nb = _mk_notebook(client, owner_h)
+    table = _mk_table(client, owner_h, nb)
+    column_id = table["columns"][0]["id"]
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table['id']}/cells",
+        headers=owner_h,
+        json={"column_id": column_id, "row_ids": [], "content_md": "x"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == []
+
+
+# ===========================================================================
 # Reader / stranger matrix across the whole editing surface
 # ===========================================================================
 

@@ -37,6 +37,7 @@ from app.models.schemas import (
     KgSearchResponse,
     KnowhowCellPatch,
     KnowhowCellPatchResult,
+    KnowhowCellsBatchPatch,
     KnowhowColumn,
     KnowhowColumnCreate,
     KnowhowColumnPatch,
@@ -802,6 +803,59 @@ def patch_knowhow_cell(
         "content_md": row["cells"].get(column_id, ""),
         "projection_status": row["projection_status"],
     }
+
+
+# --- followup A: batch cell write, ONE DB transaction (anchor-grouping spec
+# §6「整组批量写单事务，不半改」). A merged/shared cell (one attribute, same
+# value across an entire concept group's branch rows) edited through the
+# frontend used to fire N independent patch_knowhow_cell PATCHes
+# (Promise.all) — a mid-batch failure could leave the group half-written.
+# This endpoint writes the whole batch through repo.update_knowhow_cells,
+# whose ONE `with self.database.write() as db:` block makes it all-or-
+# nothing at the SQL layer. Validation still happens BEFORE any write, same
+# as patch_knowhow_cell above (belt-and-suspenders: table-scoped membership
+# here, then validate_cell_target's same-table pairing) — so a single bad
+# row_id 400s the ENTIRE request and update_knowhow_cells is never called at
+# all, meaning the other, valid rows in the batch don't get written either.
+@router.patch(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/cells",
+    response_model=List[KnowhowCellPatchResult],
+    dependencies=[Depends(require_notebook_access)],
+)
+def patch_knowhow_cells_batch(
+    notebook_id: str, table_id: str, body: KnowhowCellsBatchPatch
+) -> list:
+    """Returns one {row_id,column_id,content_md,projection_status} entry per
+    row in body.row_ids, in the same order — same shape patch_knowhow_cell
+    returns for a single row, just as a list."""
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    row_ids = body.row_ids
+    valid_row_ids = {row["id"] for row in table["rows"]}
+    if (
+        not all(row_id in valid_row_ids for row_id in row_ids)
+        or not any(column["id"] == body.column_id for column in table["columns"])
+    ):
+        raise HTTPException(status_code=400, detail="格子定位不合法")
+    try:
+        for row_id in row_ids:
+            repo.validate_cell_target(row_id, body.column_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    repo.update_knowhow_cells(row_ids, body.column_id, body.content_md)
+    if row_ids:
+        knowhow_api.get_scheduler(repo).schedule(table_id)
+    updated = repo.get_knowhow_table(table_id)
+    rows_by_id = {r["id"]: r for r in updated["rows"]}
+    return [
+        {
+            "row_id": row_id,
+            "column_id": body.column_id,
+            "content_md": rows_by_id[row_id]["cells"].get(body.column_id, ""),
+            "projection_status": rows_by_id[row_id]["projection_status"],
+        }
+        for row_id in row_ids
+    ]
 
 
 # --- knowhow-tables PR-2+3 Task 6: Excel template round-trip (design doc §②
