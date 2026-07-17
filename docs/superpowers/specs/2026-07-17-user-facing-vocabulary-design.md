@@ -184,6 +184,7 @@ AGENTS.md 加一节词汇表，并写明一句：**界面词 ≠ 内部词，`pr
 
 1. **黑名单词不许出现在 JSX 渲染文本里**：`KG`、`chunk`、`notebook`、`Notebook`、`投影`、`边审`、`晋升`、`基准库`、`基准语料`、`底层库`、`个人层`、`权威参考层`、`暴力检索`、`多跳`、`Memory`、`Knowhow`、`格子`
 2. **label 查表不许 `?? 原值` 兜底**：正则捕捉 `LABELS[x] ?? x` / `?? stage` / `?? status` 这类形状
+3. **枚举映射表须覆盖后端真实取值**：照 `check_ask_modes_contract.py` 的跨栈对照，把 `vocabulary.ts` 各表的键与后端真值集比对。PR A 的评审证明了这条的必要性——手写的 `PROMOTION_STATUS` 漏掉了 `proposed`/`under_review` 两个最常见的态，`PARSE_STATUS` 漏掉了 `metadata-only`，而前端测试无从发现（没有独立锚点，照抄自己 key 的「完整性测试」恒真）
 
 **「知识库」不进黑名单。** tab 名就是个合法的裸「知识库」，而 lint 分不清上下文——一个分不清上下文的 lint 不该假装分得清。那 8 处误用在 PR B 里人工改、靠 review 把关。
 

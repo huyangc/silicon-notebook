@@ -77,6 +77,20 @@ test("label 未命中时返回 fallback，绝不返回原值", () => {
   assert.notEqual(label(TIER, "shadow_tier", "未知来源"), "shadow_tier");
 });
 
+test("label 不被原型链上的键名骗到", () => {
+  // map[value] + 真值判断会让这些键命中 Object.prototype 并返回函数/对象。
+  // TS 推成 string 但运行时不是,渲染进 JSX 就是 React 白屏。
+  for (const key of ["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"]) {
+    const out = label(TIER, key, "未知来源");
+    assert.equal(out, "未知来源", `${key} 命中了原型链`);
+    assert.equal(typeof out, "string", `${key} 返回了非字符串`);
+  }
+});
+
+test("label 不把合法的空串翻译误判为未命中", () => {
+  assert.equal(label({ silent: "" }, "silent", "兜底"), "");
+});
+
 test("label 对空字符串与未定义值同样不泄漏原值", () => {
   assert.equal(label(PARSE_STATUS, "", "处理中"), "处理中");
   assert.equal(label(PARSE_STATUS, "totally_new_status", "处理中"), "处理中");
@@ -123,6 +137,7 @@ export const PARSE_STATUS: Record<string, string> = {
   extracting: "分析中",
   extracted: "已就绪",
   failed: "解析失败",
+  "metadata-only": "仅元数据",   // source_ingestion.py:274 真实会写入
 };
 
 export const ELEMENT_TYPE: Record<string, string> = {
@@ -160,8 +175,11 @@ export const MODEL_STAGE: Record<string, string> = {
   rewrite: "改写模型",
 };
 
+// 取值真源:migrations.py:413 的建表注释 `proposed | under_review | approved | rejected`,
+// 且 page.tsx:5156 线上代码正按 proposed / under_review 分支。没有 "pending" 这个值。
 export const PROMOTION_STATUS: Record<string, string> = {
-  pending: "待审核",
+  proposed: "待审核",
+  under_review: "审核中",
   approved: "已收录",
   rejected: "未采纳",
 };
@@ -174,8 +192,13 @@ export const PROMOTION_STATUS: Record<string, string> = {
  * 中性词，并在开发期把未映射的值喊出来。
  */
 export function label(map: Record<string, string>, value: string, fallback: string): string {
-  const hit = map[value];
-  if (hit) return hit;
+  // 必须用 hasOwn 而不是 `map[value]` + 真值判断:后者会走原型链,
+  // map["constructor"] / map["toString"] / map["__proto__"] 都会「命中」并返回
+  // 一个函数或对象。TS 因 Record<string,string> 的索引签名把它推成 string,
+  // tsc 抓不到;渲染进 JSX 就是 "Objects are not valid as a React child" 白屏——
+  // 比本 PR 要修的「泄漏英文 id」更严重。hasOwn 同时顺带堵住另一个坑:
+  // 真值判断会把合法翻译成空串的 key 误判为未命中。
+  if (Object.hasOwn(map, value)) return map[value];
   if (process.env.NODE_ENV !== "production") {
     console.error(`[vocabulary] 未映射的枚举值：${JSON.stringify(value)}`);
   }
@@ -425,18 +448,25 @@ Expected: 看到三处裸值渲染。
 ```js
 import { PARSE_STATUS, ELEMENT_TYPE } from "./vocabulary.ts";
 
-test("解析状态六个取值都有中文", () => {
-  for (const v of ["uploaded", "queued", "parsed", "extracting", "extracted", "failed"]) {
-    const out = label(PARSE_STATUS, v, "处理中");
-    assert.notEqual(out, v, `${v} 未映射,会把英文直出给用户`);
-  }
+// 注意:不要写成 `for (const v of ["uploaded","queued",...])` 去循环断言「都有中文」——
+// 那个字面量数组就是从 PARSE_STATUS 自己的 key 抄来的,等于在断言「表里有表里已有的
+// 东西」,恒真,验证不了真实完整性。前端没有 parse_status / element_type 的独立锚点
+// (对比:KNOWLEDGE_STATUS 有 workspace-model.ts 的 KNOWLEDGE_STATUS_OPTIONS 可锚),
+// 所以这里只断言「行为安全」:已知值译对、未知值退到中性兜底而非泄漏原值。
+// 真正的「映射表覆盖后端全部取值」需要一个跨栈守卫(照 check_ask_modes_contract.py),
+// 归 PR B。
+
+test("解析状态:已知值译对，未知值退中性兜底而不泄漏原值", () => {
   assert.equal(label(PARSE_STATUS, "failed", "处理中"), "解析失败");
+  assert.equal(label(PARSE_STATUS, "metadata-only", "处理中"), "仅元数据");
+  const unknown = label(PARSE_STATUS, "some_future_status", "处理中");
+  assert.equal(unknown, "处理中");
+  assert.notEqual(unknown, "some_future_status");
 });
 
-test("内容块类型都有中文", () => {
-  for (const v of ["heading", "paragraph", "table", "formula", "code_block", "text", "knowhow_cell"]) {
-    assert.notEqual(label(ELEMENT_TYPE, v, "内容"), v, `${v} 未映射`);
-  }
+test("内容块类型:已知值译对，未知值退中性兜底", () => {
+  assert.equal(label(ELEMENT_TYPE, "table", "内容"), "表格");
+  assert.equal(label(ELEMENT_TYPE, "some_future_block", "内容"), "内容");
 });
 ```
 
@@ -530,8 +560,13 @@ test("KNOWLEDGE_STATUS 覆盖 workspace-model 里的每一个取值", () => {
   }
 });
 
-test("晋升候选状态有中文", () => {
-  assert.equal(label(PROMOTION_STATUS, "pending", "处理中"), "待审核");
+test("晋升候选状态覆盖后端四个真实取值", () => {
+  // 真源 migrations.py:413:proposed | under_review | approved | rejected。
+  // 没有 "pending"。proposed / under_review 是最常见的两个态,漏了它们
+  // 会让队列里绝大多数条目永久显示成兜底词。
+  assert.equal(label(PROMOTION_STATUS, "proposed", "处理中"), "待审核");
+  assert.equal(label(PROMOTION_STATUS, "under_review", "处理中"), "审核中");
+  assert.equal(label(PROMOTION_STATUS, "approved", "处理中"), "已收录");
   assert.equal(label(PROMOTION_STATUS, "rejected", "处理中"), "未采纳");
 });
 ```
