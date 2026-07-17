@@ -746,6 +746,25 @@ export function KnowhowPanel({
     setCellModal({ rowId, columnId, mode: content.trim() ? "preview" : "edit" });
   }
 
+  // 「本行其他格子」点击切换（KnowhowCellEditor/KnowhowCellPreview 的
+  // onSwitchCell 共用这一个 handler）：兄弟格永远是同一行的不同列，切换只需
+  // 换 columnId，rowId/mode 原样保留——查看态点兄弟格切完还是查看那一格，
+  // 编辑态点切完还是编辑那一格。不再经 openCellEdit：那个函数会把 mode 硬
+  // 切成 "edit"，用在这里会把预览态的只读用户也拽进编辑 UI，是越权口子
+  // （也正是本次要修的复审 finding）。
+  //
+  // 两处调用点都不需要另判 canEdit：本函数从不把 mode 改成 "edit"、只保留
+  // 原样，而所有能把 mode 置为 "edit" 的入口（openCellEdit 的三处调用——
+  // 添加行/添加概念/行详情抽屉「编辑」按钮，以及 openCellAuto 的空格子
+  // 分支）本身都受 canEdit 门控；换句话说 KnowhowCellEditor 能挂载到画面
+  // 上就已经证明当时 canEdit 为真，本函数不会破坏这条链路。KnowhowCellPreview
+  // 这边同理成立：mode 保持 "preview" 不变，只读用户点兄弟格永远是
+  // preview→preview，绕不进 KnowhowCellEditor——与本文件头部 :24-25 记录的
+  // 「只读成员看不到任何写入口」不变量一致。
+  function switchCell(columnId: string) {
+    setCellModal((current) => (current ? { ...current, columnId } : current));
+  }
+
   // 格子浮窗「保存」：真正调用 patchKnowhowCell + 把结果合并回 detail 状态
   // （只更新命中的那一格/那一组与其行的 projectionStatus，不必整表重拉——
   // patch 端点本身就返回了更新后的值，见 knowhow-model.ts patchKnowhowCell
@@ -1028,11 +1047,9 @@ export function KnowhowPanel({
             onSave={handleCellSave}
             onNavigate={(rowId, columnId) => setCellModal({ rowId, columnId, mode: "edit" })}
             onClose={() => setCellModal(null)}
-            // 「本行其他格子」点击切换（复用既有 openCellEdit，不新造打开
-            // 路径）：编辑态能挂载到这里，本身已经证明 canEdit 为真（唯一
-            // 入口 openCellEdit/openCellAuto 的 edit 分支都受 canEdit 门控，
-            // 见本文件上方两处声明的注释），故这里无需再额外判断 canEdit。
-            onSwitchCell={(columnId) => openCellEdit(cellModal.rowId, columnId)}
+            // 「本行其他格子」点击切换——见 switchCell 定义处注释（保持 mode
+            // 不变即天然安全，这里不需要再判 canEdit）。
+            onSwitchCell={switchCell}
           />
         ) : (
           <KnowhowCellPreview
@@ -1046,14 +1063,11 @@ export function KnowhowPanel({
             onClose={() => setCellModal(null)}
             table={detail ?? undefined}
             rowId={cellModal.rowId}
-            // 预览态只读成员（canEdit=false）也能打开（见 openCellAuto：已填
-            // 格子无论身份都进 preview）——切格复用的 openCellEdit 会无条件
-            // 把 cellModal 切到 edit 态，KnowhowCellEditor 本身不做 canEdit
-            // 校验（假定挂载它的调用方已经把关，同上一条注释）。只读成员的
-            // 「本行其他格子」因此不接这个 prop，保持纯展示，不让只读身份
-            // 绕过既有的编辑入口门控；有写权限时才接上，行为与「编辑」按钮
-            // （同样只在 canEdit 时出现）一致。
-            onSwitchCell={canEdit ? (columnId) => openCellEdit(cellModal.rowId, columnId) : undefined}
+            // 「本行其他格子」点击切换——见 switchCell 定义处注释。mode 保持
+            // "preview" 不变，只读用户点兄弟格还是落在预览态，绕不进
+            // KnowhowCellEditor，这里也不需要再判 canEdit（无条件传，查看态
+            // 下只读/可写用户行为一致，都是查看→查看）。
+            onSwitchCell={switchCell}
           />
         )
       )}
