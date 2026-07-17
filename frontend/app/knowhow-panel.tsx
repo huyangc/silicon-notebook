@@ -62,6 +62,7 @@ import {
   addKnowhowRow,
   deleteKnowhowRow,
   patchKnowhowCell,
+  batchPatchKnowhowCells,
   knowhowTemplateUrl,
   optimizeKnowhowCell,
   fetchKnowhowRowCodeByColumn,
@@ -575,11 +576,13 @@ export function KnowhowPanel({
   }
 
   // Task 10（删概念）：矩阵抽屉「删除整个概念」——概念组内的物理行全部归属
-  // 这一个概念，删概念即删组内每一行，Promise.all 并发触发（与
-  // handleCellSave 的批量写同一套"前端并发触发、非后端单事务"取舍：任一路
-  // 失败就不当整批成功处理，不关抽屉、不刷新——失败的那几行在服务端可能已
-  // 经被删除，下一次 loadDetail 会照实反映服务端的（可能部分删除后的）真实
-  // 状态，这次不用本地乐观更新去掩盖它）。
+  // 这一个概念，删概念即删组内每一行，Promise.all 并发触发（前端并发触发、
+  // 非后端单事务的取舍——不同于 handleCellSave 的合并格批量写：那一路
+  // followup A 已经换成后端单事务的 batchPatchKnowhowCells，这里的批量删除
+  // 目前仍是各行独立 DELETE，不在本次改动范围内）：任一路失败就不当整批
+  // 成功处理，不关抽屉、不刷新——失败的那几行在服务端可能已经被删除，下一次
+  // loadDetail 会照实反映服务端的（可能部分删除后的）真实状态，这次不用
+  // 本地乐观更新去掩盖它。
   async function deleteConcept() {
     if (!selectedTableId || !openConceptGroup) return;
     setDeletingConcept(true);
@@ -698,21 +701,26 @@ export function KnowhowPanel({
   // (rowId, columnId) 的调用都成立，不能假设正巧是当前 cellModal 打开的
   // 那一格。
   //
-  // 注（未做/已知取舍）：这是 N 个独立 patchKnowhowCell HTTP 请求并发
-  // （Promise.all），不是后端单事务；spec §6"整组批量写在单事务内完成"在
-  // 这一 task 的范围内按"前端一次性并发触发、任一失败则不合并本地 detail"
-  // 实现——若批量中途某一路失败，已成功落库的那几行在服务端已经改变，只是
-  // 本地 detail 状态这次不合并（下次整表重拉会看到服务端的真实、可能半改的
-  // 状态）。真正的后端原子性需要新的批量端点，不在本 task 范围内。
+  // followup A（后端单事务批量写）：合并格分支不再是 N 个独立
+  // patchKnowhowCell 请求并发（Promise.all）+ 前端"任一失败则不合并本地
+  // detail"的权宜取舍——一次 batchPatchKnowhowCells 调用，后端在 ONE DB
+  // 事务里把整组 rowIds 全写或全不写（见 knowhow-model.ts 该函数注释 +
+  // 后端 KnowhowStore.update_knowhow_cells）。批内任一 rowId/columnId 不合法
+  // 时请求整体 400，服务端连这一组里合法的行都不会写，前端也就不会误把半改
+  // 状态合并进 detail。非共享格（单 rowId）仍走 patchKnowhowCell 单格
+  // 端点，没必要为一格套批量端点的开销。targets.length > 1 当且仅当上面
+  // 命中了合并共享格分支——isSharedColumn 自己保证组内 <=1 行恒 false（见其
+  // 注释），用这个长度判断选路径，避免再把 group 塞进第二个条件表达式（TS
+  // 无法把 isBatch 变量的窄化跨表达式传回 group 本身）。
   async function handleCellSave(rowId: string, columnId: string, contentMd: string) {
     if (!selectedTableId || !detail) return;
     const group = detail.anchorColumnId
       ? groupRowsByAnchor(detail.rows, detail.anchorColumnId).find((g) => g.rows.some((r) => r.id === rowId))
       : null;
     const targets = group && isSharedColumn(group, columnId) ? groupCellWriteTargets(group, columnId) : [rowId];
-    const results = await Promise.all(
-      targets.map((rid) => patchKnowhowCell(notebookId, selectedTableId, rid, columnId, contentMd)),
-    );
+    const results = targets.length > 1
+      ? await batchPatchKnowhowCells(notebookId, selectedTableId, { columnId, rowIds: targets, contentMd })
+      : [await patchKnowhowCell(notebookId, selectedTableId, rowId, columnId, contentMd)];
     setDetail((prev) => {
       if (!prev) return prev;
       const resultByRowId = new Map(results.map((result) => [result.rowId, result]));
@@ -3195,8 +3203,9 @@ interface KnowhowRowOptimizeModalProps {
   row: KnowhowRow;
   columns: KnowhowColumn[];
   rowTitle: string;
-  /** 接受：真正落库(patchKnowhowCell)+把结果合并回 detail 状态——复用面板
-   * 自己的 handleCellSave，与格子浮窗保存走同一条路径，不重复实现。 */
+  /** 接受：真正落库(patchKnowhowCell 或合并格批量走 batchPatchKnowhowCells)
+   * +把结果合并回 detail 状态——复用面板自己的 handleCellSave，与格子浮窗
+   * 保存走同一条路径，不重复实现。 */
   onAcceptCell: (rowId: string, columnId: string, contentMd: string) => Promise<void>;
   onClose: () => void;
 }

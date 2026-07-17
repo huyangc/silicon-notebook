@@ -123,6 +123,14 @@ export type KnowhowCellPatchResult = {
   projectionStatus: ProjectionStatus;
 };
 
+// followup A（anchor 分组 spec §6「整组批量写单事务，不半改」）：合并共享格批量
+// 写的输入——一列 + 一组 rowId + 同一份新内容，对应后端 KnowhowCellsBatchPatch。
+export type KnowhowCellsBatchPatchInput = {
+  columnId: string;
+  rowIds: string[];
+  contentMd: string;
+};
+
 // --- 模板往返 / 追加导入类型（Task 6）--------------------------------------------
 
 export type KnowhowAppendDuplicateTitle = { rowIndex: number; title: string };
@@ -462,6 +470,15 @@ export const addKnowhowRow = (
 export const deleteKnowhowRow = (notebookId: string, tableId: string, rowId: string): Promise<void> =>
   apiFetch<void>(`/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}`, { method: "DELETE" });
 
+function mapCellPatchResult(wire: WireKnowhowCellPatchResult): KnowhowCellPatchResult {
+  return {
+    rowId: wire.row_id,
+    columnId: wire.column_id,
+    contentMd: wire.content_md,
+    projectionStatus: wire.projection_status,
+  };
+}
+
 // 格子内容 patch：返回 {rowId,columnId,contentMd,projectionStatus}——调用方
 // 用 projectionStatus 立即刷新该行的同步状态徽标，不必等待下一次整表拉取。
 export const patchKnowhowCell = (
@@ -474,12 +491,27 @@ export const patchKnowhowCell = (
   apiFetch<WireKnowhowCellPatchResult>(
     `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}`,
     { method: "PATCH", body: JSON.stringify({ content_md: contentMd }) },
-  ).then((wire) => ({
-    rowId: wire.row_id,
-    columnId: wire.column_id,
-    contentMd: wire.content_md,
-    projectionStatus: wire.projection_status,
-  }));
+  ).then(mapCellPatchResult);
+
+// followup A（anchor 分组 spec §6「整组批量写单事务，不半改」）：合并共享格
+// 批量写——一次 PATCH 把同一列在整组 rowIds 上的新内容交给后端在 ONE DB
+// 事务里全写或全不写（repo.update_knowhow_cells），取代过去 knowhow-panel
+// handleCellSave 对每个 rowId 各打一个 patchKnowhowCell、Promise.all 并发、
+// 中途失败即半改的取舍。响应形状与 patchKnowhowCell 相同，只是按 rowIds
+// 顺序回一个列表(逐项走同一个 mapCellPatchResult)。
+export const batchPatchKnowhowCells = (
+  notebookId: string,
+  tableId: string,
+  input: KnowhowCellsBatchPatchInput,
+): Promise<KnowhowCellPatchResult[]> =>
+  apiFetch<WireKnowhowCellPatchResult[]>(`/notebooks/${notebookId}/knowhow/${tableId}/cells`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      column_id: input.columnId,
+      row_ids: input.rowIds,
+      content_md: input.contentMd,
+    }),
+  }).then((wireResults) => wireResults.map(mapCellPatchResult));
 
 // --- Excel 模板往返（Task 6）------------------------------------------------------
 
