@@ -215,6 +215,18 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
     (event: ReactPointerEvent<HTMLElement>) => {
       if (disabledRef.current) return;
       if (event.pointerType === "mouse" && event.button !== 0) return; // 只响应鼠标主键；触屏/触控笔不受此限
+      // header 上总跟着关闭/全屏/编辑等按钮（或 KnowhowRowContext 那类
+      // role="button" 条目）——pointerdown 命中它们时必须放行，不能当成拖动
+      // 起手。这不是"更保险"式的防御性编程：已用一个独立最小复现页面实测
+      // 验证过，下面的 setPointerCapture 一旦在 header 上调用成功，浏览器会
+      // 把随后的 pointerup retarget 到 header 自己身上（不再是原始按钮），
+      // 原生 click 事件因此完全不会在按钮上触发——不加这道判断，header 挂
+      // 上 dragHandleProps 之后，header 里的每一个按钮都会失灵。用
+      // closest() 排除任何可交互后代，交给它们自己的 click 处理。
+      const interactiveTarget = (event.target as HTMLElement | null)?.closest(
+        'button, a, input, textarea, select, [role="button"]',
+      );
+      if (interactiveTarget) return;
       const size = measureSize();
       if (!size) return;
       event.preventDefault(); // 防止拖动触发文本选中/原生图片拖拽 ghost
