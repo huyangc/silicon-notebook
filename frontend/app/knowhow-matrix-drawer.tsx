@@ -287,6 +287,7 @@ export function KnowhowMatrixDrawer({
                         <button
                           type="button"
                           className="knowhow-confirm-no"
+                          disabled={deletingBranchRowId === rid}
                           onClick={() => setConfirmDeleteBranchRowId(null)}
                         >
                           取消
@@ -300,6 +301,7 @@ export function KnowhowMatrixDrawer({
                             type="button"
                             className="kh-matrix-branch-delete"
                             title="删除该分支"
+                            disabled={!!deletingBranchRowId}
                             onClick={() => setConfirmDeleteBranchRowId(rid)}
                           >
                             <Trash2 size={14} />
