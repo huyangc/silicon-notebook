@@ -443,8 +443,8 @@ class Settings(BaseSettings):
     mineru_max_image_bytes: int = Field(5 * 1024 * 1024, validation_alias="MINERU_MAX_IMAGE_BYTES")
     mineru_max_images_per_source: int = Field(200, validation_alias="MINERU_MAX_IMAGES_PER_SOURCE")
 
-    # MinerU.net cloud (v4) — parse a public PDF URL via the hosted service.
-    # 独立于上面的 MINERU_MODE(off/http/cli)；仅用于 URL 来源的 PDF。
+    # MinerU.net cloud (v4) — parse a public PDF URL or an uploaded file via the hosted service.
+    # 独立于上面的 MINERU_MODE(off/http/cli)；URL 来源与上传文件在本地 MinerU 未配置时都用它作云端兜底。
     mineru_api_token: str = Field("", validation_alias="MINERU_API_TOKEN")
     mineru_api_base: str = Field("https://mineru.net", validation_alias="MINERU_API_BASE")
     mineru_cloud_model_version: str = Field("vlm", validation_alias="MINERU_CLOUD_MODEL_VERSION")
