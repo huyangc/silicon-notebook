@@ -223,8 +223,11 @@ TASK27_ALLOWED_IMPORTS = {
     # tip: the feature's own Task 8 additions to this file (AssetService /
     # make_persist_image_factory INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES
     # entries) land on top of the already-merged merge_dbs.py reconciliation,
-    # pushing this deferred import down by +41 more lines.
-    ("backend/tests/test_repository_callers_static.py", 772, "app.services.sqlite_repository", "SQLiteRepository"),
+    # pushing this deferred import down by +41 more lines. 772->776: knowhow
+    # anchor-grouping-display's INDEPENDENT_PRIVATE_SITES comment expansion
+    # (api.py optimize_cell's `_runtime` site, 693->716, +4 net lines) shifts
+    # it again.
+    ("backend/tests/test_repository_callers_static.py", 776, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK4_ALLOWED_MEMBER_FILES = {
     ("backend/app/api/deps.py", name)
@@ -2969,7 +2972,10 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
     # INDEPENDENT_SQL_SITES + SQLITE_CONNECT_SITES entries) on top of the
     # already-merged merge_dbs.py reconciliation, adding +41 more lines above
     # this deferred import.
-    ('backend/tests/test_repository_callers_static.py', 772, 'app.services.sqlite_repository', 'SQLiteRepository'),
+    # 772->776: knowhow anchor-grouping-display's INDEPENDENT_PRIVATE_SITES
+    # comment expansion (api.py optimize_cell's `_runtime` site, 693->716,
+    # +4 net lines) shifts it again.
+    ('backend/tests/test_repository_callers_static.py', 776, 'app.services.sqlite_repository', 'SQLiteRepository'),
     ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
 }
 
@@ -3618,9 +3624,12 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK14_KNOWHOW_P
 # note_model_error — the same narrow-runtime-port pattern build_projector's
 # own `_runtime`/`settings` registration (TASK6_KNOWHOW_ALLOWED_CONSUMERS
 # above) already uses. `settings` isn't re-reached here so only `_runtime`
-# needs a new entry. 682->693: the get_scheduler weakref fix added lines above.
+# needs a new entry. 682->693: the get_scheduler weakref fix added lines
+# above. 693->716: anchor-grouping-display's forward_fill_column import plus
+# import_table's/commit_append's forward-fill additions add +23 net lines
+# further above optimize_cell.
 TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS = {
-    ("_runtime", "backend/app/services/knowhow/api.py:693"),
+    ("_runtime", "backend/app/services/knowhow/api.py:716"),
 }
 # Its own HTTP-level test reaches the live app repository singleton via
 # app.api.deps.repository() (not a freshly constructed SQLiteRepository) to

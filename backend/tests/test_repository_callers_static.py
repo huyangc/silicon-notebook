@@ -276,8 +276,12 @@ INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
     # note_model_error the same "extract a narrow runtime port" way
     # build_projector (line 138 above) already does — a second, independent
     # call site in the same file (682->693: the get_scheduler weakref fix
-    # added lines ABOVE optimize_cell; build_projector's 138 is unshifted).
-    ("backend/app/services/knowhow/api.py", 693, "_runtime"): (
+    # added lines ABOVE optimize_cell; build_projector's 138 is unshifted;
+    # 693->716: anchor-grouping-display's forward_fill_column import plus
+    # import_table's/commit_append's forward-fill additions add +23 net
+    # lines further ABOVE optimize_cell; build_projector's 138 stays
+    # unshifted).
+    ("backend/app/services/knowhow/api.py", 716, "_runtime"): (
         "LLM cell rewrite resolves the per-user rewrite LLM client + "
         "note_model_error via the same narrow-runtime-port extraction "
         "build_projector uses, a second independent call site"
