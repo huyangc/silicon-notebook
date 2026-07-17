@@ -221,10 +221,14 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
       // 验证过，下面的 setPointerCapture 一旦在 header 上调用成功，浏览器会
       // 把随后的 pointerup retarget 到 header 自己身上（不再是原始按钮），
       // 原生 click 事件因此完全不会在按钮上触发——不加这道判断，header 挂
-      // 上 dragHandleProps 之后，header 里的每一个按钮都会失灵。用
-      // closest() 排除任何可交互后代，交给它们自己的 click 处理。
+      // 上 dragHandleProps 之后，header 里的每一个按钮都会失灵。下面这份
+      // selector 是一份具体标签/属性的白名单（同一浏览器复现也确认过
+      // contenteditable 后代会重现一模一样的 retargeting 失败，故一并列入），
+      // 不是"是否可交互"的语义判定——closest() 只放行列在这份名单里的元素，
+      // 以后 header 里长出名单之外的新交互元素类型，得手动把它加进来才会
+      // 被放行，不会自动识别。
       const interactiveTarget = (event.target as HTMLElement | null)?.closest(
-        'button, a, input, textarea, select, [role="button"]',
+        'button, a, input, textarea, select, [role="button"], [contenteditable]:not([contenteditable="false"])',
       );
       if (interactiveTarget) return;
       const size = measureSize();
