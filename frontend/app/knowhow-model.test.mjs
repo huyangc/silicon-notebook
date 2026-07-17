@@ -17,6 +17,7 @@ import {
   patchKnowhowCell,
   batchPatchKnowhowCells,
   createKnowhowTable,
+  importKnowhow,
   knowhowTemplateUrl,
   appendKnowhowPreview,
   appendKnowhowCommit,
@@ -715,4 +716,48 @@ test("cellSummary: 空格相邻的星号（乘号）不被当作斜体剥离", (
 
 test("cellSummary: 真斜体（无内部首尾空格）仍被剥离", () => {
   assert.strictEqual(cellSummary("*强调*"), "强调");
+});
+
+// --- importKnowhow 的后端 wire 契约 ------------------------------------------
+// 真机 bug（本次修复）：importKnowhow 的 FormData 漏了 anchor_index，且
+// columns_json 用的是前端自造的 role 字段。后端 _columns_with_anchor 只读
+// column["kind"]（缺失时静默默认 'attribute'，不报错），anchor 只认独立的
+// anchor_index（VALID_KINDS 明确排除 'anchor'，不接受内联）。后果：用户在
+// 向导里选的行标题列 + 每列内容类型全部被静默丢弃，整张表落库成无 anchor 的
+// 记录型表 → forward-fill 跳过 → anchor 分组显示完全不生效。
+// 此前 importKnowhow 没有任何测试，前端单测只断言前端自己那套 role 形状，
+// 于是前后端测试都全绿、真机却从未工作。这两个用例锁住真实的 wire。
+
+test("importKnowhow: columns_json 用 kind 字段 + anchor_index 独立传（后端 wire 契约）", () => {
+  return withFetchStub(wireTable({ columns: [] }), async (calls) => {
+    await importKnowhow(
+      "nb-1",
+      new Blob(["x"]),
+      "我的表",
+      [
+        { name: "违例概念", kind: "attribute" },
+        { name: "现象识别方法", kind: "procedure" },
+      ],
+      0,
+    );
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/import$/);
+    assert.strictEqual(calls[0].init.method, "POST");
+    const form = calls[0].init.body;
+    assert.ok(form instanceof FormData);
+    assert.strictEqual(form.get("title"), "我的表");
+    // anchor 只能经 anchor_index 传达——写进 columns_json 的 role 后端不读。
+    assert.strictEqual(form.get("anchor_index"), "0");
+    // 字段名必须是 kind：写成 role 会让后端静默把每列都当成 attribute。
+    assert.deepStrictEqual(JSON.parse(form.get("columns_json")), [
+      { name: "违例概念", kind: "attribute" },
+      { name: "现象识别方法", kind: "procedure" },
+    ]);
+  });
+});
+
+test("importKnowhow: anchorIndex=null（记录型表）→ 不发 anchor_index，走后端 Form(None) 默认", () => {
+  return withFetchStub(wireTable({ columns: [] }), async (calls) => {
+    await importKnowhow("nb-1", new Blob(["x"]), "T", [{ name: "日期", kind: "attribute" }], null);
+    assert.strictEqual(calls[0].init.body.get("anchor_index"), null);
+  });
 });

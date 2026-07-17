@@ -193,20 +193,22 @@ export function deriveImportSelection(preview: {
   return { kinds, anchorIndex };
 }
 
-// 导入提交 payload（选择器版，取代 knowhow-import-logic.assembleImportColumns）：
-// 按文件列序逐位组装 {name, role}；被选为行标题的那一列 role='anchor'，其余
-// 列取用户确认后的内容类型（kinds 意外比列表短时兜底普通）。仍走现有
-// importKnowhow fetcher 的 columns_json wire——后端 VALID_ROLES 已收敛为
-// {anchor,procedure,entity,attribute}（Task 1 落地）。
-export function assembleImportColumnsWithAnchor(
+// 导入提交的列定义（选择器版，取代 knowhow-import-logic.assembleImportColumns）：
+// 按文件列序逐位组装 `{name, kind}`，kinds 意外比列名短时兜底普通。与建表的
+// assembleCreatePayload 同一 wire。
+//
+// 行标题列**不在这里**：它只经 importKnowhow 的独立 `anchor_index` 传达。
+// 曾经这个函数叫 assembleImportColumnsWithAnchor，把选中的行标题列编码成
+// `role:'anchor'` 塞进列定义——那是个不存在的后端契约。后端
+// `_columns_with_anchor` 只读 `column["kind"]`（缺失时静默默认 'attribute'，
+// 不报错），VALID_KINDS 又明确排除 'anchor'，于是每列内容类型 + 行标题列被
+// 一起无声丢弃，整张表落库成无 anchor 的记录型表（forward-fill 随之跳过，
+// anchor 分组显示完全不生效），而前后端测试全绿。
+export function assembleImportColumnKinds(
   names: string[],
   kinds: ColumnKind[],
-  anchorIndex: number | null,
-): KnowhowColumnInput[] {
-  return names.map((name, index) => ({
-    name,
-    role: index === anchorIndex ? "anchor" : kinds[index] ?? "attribute",
-  }));
+): { name: string; kind: ColumnKind }[] {
+  return names.map((name, index) => ({ name, kind: kinds[index] ?? "attribute" }));
 }
 
 // --- 管理面板：payload 与确认文案 ------------------------------------------------

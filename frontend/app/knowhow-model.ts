@@ -366,16 +366,27 @@ export const importKnowhowPreview = (notebookId: string, file: File | Blob): Pro
 };
 
 // 确认导入：文件 + 标题 + 用户确认后的列角色映射，建表+全量入库+后台投影。
+// 导入 commit：文件 + 标题 + 列定义(名+内容类型三值) + 行标题列下标。
+// wire 与建表 createKnowhowTable 同构：`columns_json=[{name,kind}]` + 独立的
+// `anchor_index`。行标题列**只**能经 anchor_index 传达——后端
+// `_columns_with_anchor` 只读 `column["kind"]`（缺失时静默默认 'attribute'
+// 而不报错），且 VALID_KINDS 明确排除 'anchor'。把 anchor 编码进列定义、或
+// 把字段名写成 role，都会被后端无声丢弃：曾导致用户在向导选的行标题列与每
+// 列内容类型全部失效、整张表落库成无 anchor 的记录型表（forward-fill 随之
+// 跳过，anchor 分组显示完全不生效）。契约由 knowhow-model.test.mjs 锁住。
 export const importKnowhow = (
   notebookId: string,
   file: File | Blob,
   title: string,
-  columns: KnowhowColumnInput[],
+  columns: { name: string; kind: ColumnKind }[],
+  anchorIndex: number | null,
 ): Promise<KnowhowTableDetail> => {
   const form = new FormData();
   form.append("file", file);
   form.append("title", title);
   form.append("columns_json", JSON.stringify(columns));
+  // null=不设行标题列（记录型表）：不发该字段，走后端 Form(None) 默认。
+  if (anchorIndex !== null) form.append("anchor_index", String(anchorIndex));
   return apiFetch<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow/import`, {
     method: "POST",
     body: form,

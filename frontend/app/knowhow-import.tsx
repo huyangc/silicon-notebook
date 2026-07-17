@@ -64,7 +64,7 @@ import {
   ANCHOR_SET_HINT,
   anchorHint,
   deriveImportSelection,
-  assembleImportColumnsWithAnchor,
+  assembleImportColumnKinds,
 } from "./knowhow-manage-logic.ts";
 import { KindLegend } from "./knowhow-manage.tsx";
 import { sortColumnsByPosition } from "./knowhow-panel-logic.ts";
@@ -197,12 +197,13 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     setSubmitting(true);
     setSubmitError(null);
     try {
-      const columns = assembleImportColumnsWithAnchor(
+      const columns = assembleImportColumnKinds(
         preview.columns.map((column) => column.name),
         kinds,
-        anchorIndex,
       );
-      await importKnowhow(notebookId, file, title.trim(), columns);
+      // 行标题列走独立的 anchor_index——后端不读列定义里的 role
+      // （见 knowhow-model.importKnowhow / manage-logic.assembleImportColumnKinds）。
+      await importKnowhow(notebookId, file, title.trim(), columns, anchorIndex);
       if (!mountedRef.current) return;
       onDone();
     } catch (err) {
