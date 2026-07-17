@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate immutable Repository composition-refactor contract fixtures.
+"""Generate the Repository composition-refactor contract fixtures.
 
-This script is deliberately tied to the pre-refactor runtime at ``3334626``.
-It is a one-way characterization tool, not a general fixture factory: once any
-``backend/app/**/*.py`` path or byte changes, regeneration is refused.
+``main`` regenerates the living contracts (ask, api, phase, repository_v9 projection)
+against the current runtime. ``facade_surface.json`` and ``repository_v9/baseline.db``
+are frozen at ``SOURCE_COMMIT`` and only change under ``--rebaseline`` (see README).
 """
 
 from __future__ import annotations
@@ -1631,7 +1631,7 @@ def _create_index_artifacts(repo, notebook_id: str) -> None:
 
 
 def generate_v9_fixture(output_dir: Path) -> None:
-    _assert_baseline_sources(REPO_ROOT)
+    _assert_baseline_sources(REPO_ROOT)  # --rebaseline only: guarded to SOURCE_COMMIT
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     final_storage = output_dir / "storage"
@@ -1678,14 +1678,14 @@ def generate_v9_fixture(output_dir: Path) -> None:
     (output_dir / "README.md").write_text(
         """# Repository schema-v9 baseline fixture
 
-Generated once from runtime commit `3334626` by
-`scripts/generate_repository_contract_fixtures.py`.
+`baseline.db` is a frozen schema-v9 database, produced once from pre-refactor
+runtime commit `3334626`. The current runtime cannot recreate it, so it is
+never rewritten; `main` only replays it to refresh the derived projection.
 
-`baseline.db` is written with `sqlite3.Connection.backup()` and needs no WAL
-sidecar. `storage/` contains one source file plus minimal loadable scale/viz
-artifacts. IDs, timestamps, credentials, tokens, and absolute fixture paths are
-normalized only in `expected_snapshot.json`; database rows remain untouched.
-Regeneration is refused after any `backend/app/**/*.py` byte or path changes.
+`baseline.db` uses `sqlite3.Connection.backup()` (no WAL sidecar); `storage/`
+holds one source plus minimal scale/viz artifacts; rows are never rewritten.
+`expected_snapshot.json`/`manifest.json` are refreshed by replaying the frozen
+db through the current code. Regenerate `baseline.db` itself via `--rebaseline`.
 """,
         encoding="utf-8",
     )
@@ -1743,7 +1743,7 @@ def collect_ask_goldens() -> dict[str, object]:
 
 
 def generate_ask_goldens(output_path: Path) -> None:
-    _assert_baseline_sources(REPO_ROOT)
+    # Living contract: re-blessed against the current runtime (no baseline guard).
 
     _write_json(output_path, collect_ask_goldens())
 
@@ -2015,9 +2015,15 @@ def _serialization_contract() -> dict[str, object]:
 
 
 def generate_api_contract(output_path: Path) -> None:
-    _assert_baseline_sources(REPO_ROOT)
+    # Living contract: re-blessed against the current runtime (no baseline guard).
     os.environ.setdefault("ALLOW_NO_ENV_FILE", "1")
+    from app.core import readiness
     from app.main import app
+
+    # The readiness gate 503s every app route until warm-up flips ready (tests do
+    # this in conftest). As a plain script, mark ready up-front so create_app()'s
+    # lifespan serves routes immediately instead of returning 503.
+    readiness.mark_ready()
 
     _write_json(
         output_path,
@@ -2250,25 +2256,86 @@ def _write_phase_contracts(output_dir: Path) -> None:
     _write_json(output_dir / "error_policies.json", ERROR_POLICIES)
 
 
+def refresh_v9_snapshot(output_dir: Path) -> None:
+    """Refresh the living v9 projection by replaying the frozen ``baseline.db``.
+
+    The committed schema-v9 ``baseline.db`` and its ``storage/`` are read-only
+    ground truth: they are copied to a scratch dir, opened by the current runtime
+    (which applies migrations up to the live schema), and the normalized snapshot
+    is written to ``expected_snapshot.json``. ``manifest.json`` is refreshed too,
+    but its ``database`` hash still covers the untouched frozen db — only the
+    ``expected_snapshot`` hash moves. ``baseline.db`` is never rewritten.
+    """
+    output_dir = output_dir.resolve()
+    final_database = output_dir / "baseline.db"
+    final_storage = output_dir / "storage"
+    if not final_database.is_file():
+        raise SystemExit(
+            f"missing frozen v9 baseline: {final_database} "
+            "(use --rebaseline from the SOURCE_COMMIT checkout to create it)"
+        )
+    with tempfile.TemporaryDirectory(prefix="repository-v9-refresh-") as temporary:
+        staging = Path(temporary)
+        database = staging / "baseline.db"
+        storage = staging / "storage"
+        shutil.copyfile(final_database, database)
+        shutil.copytree(final_storage, storage)
+        with _deterministic_runtime():
+            repo = _new_offline_repo(database, storage)
+            snapshot = normalized_repository_snapshot(repo, "nb-fixture")
+    snapshot_path = output_dir / "expected_snapshot.json"
+    _write_json(snapshot_path, snapshot)
+    manifest = {
+        "source_commit": SOURCE_COMMIT,
+        "schema_version": 9,
+        "database": _artifact_manifest(output_dir, final_database),
+        "expected_snapshot": _artifact_manifest(output_dir, snapshot_path),
+        "storage_files": _storage_manifest(final_storage),
+    }
+    _write_json(output_dir / "manifest.json", manifest)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "--fixtures-root",
         type=Path,
         default=REPO_ROOT / "backend" / "tests" / "fixtures",
         help="fixture root (default: backend/tests/fixtures)",
     )
+    parser.add_argument(
+        "--rebaseline",
+        action="store_true",
+        help=(
+            "also regenerate the frozen-at-baseline artifacts (facade_surface.json "
+            "and repository_v9/baseline.db). Guarded to SOURCE_COMMIT, so it only "
+            "runs from an untouched baseline checkout; omit for the normal workflow."
+        ),
+    )
     args = parser.parse_args(argv)
-    _assert_baseline_sources(REPO_ROOT)
 
     contract_dir = args.fixtures_root / "repository_contract"
     v9_dir = args.fixtures_root / "repository_v9"
     contract_dir.mkdir(parents=True, exist_ok=True)
-    _write_json(contract_dir / "facade_surface.json", collect_facade_surface())
+
+    # Living characterization contracts: re-blessed against the current runtime.
     _write_phase_contracts(contract_dir)
     generate_ask_goldens(contract_dir / "ask_responses.json")
     generate_api_contract(contract_dir / "api_contract.json")
-    generate_v9_fixture(v9_dir)
+
+    if args.rebaseline:
+        # Frozen-at-baseline artifacts: only valid from the SOURCE_COMMIT checkout.
+        # facade_surface.json is otherwise maintained via the surface-manifest
+        # allowlists, and baseline.db cannot be reproduced by the current runtime.
+        _assert_baseline_sources(REPO_ROOT)
+        _write_json(contract_dir / "facade_surface.json", collect_facade_surface())
+        generate_v9_fixture(v9_dir)
+    else:
+        # baseline.db stays frozen; only its derived projection is refreshed.
+        refresh_v9_snapshot(v9_dir)
     return 0
 
 
