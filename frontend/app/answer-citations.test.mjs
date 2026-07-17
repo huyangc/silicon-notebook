@@ -93,3 +93,13 @@ test("普通外链经默认 urlTransform 仍被正常处理(不放行不安全�
   // 默认 urlTransform 会清掉 javascript: 协议
   assert.doesNotMatch(html, /javascript:/);
 });
+
+import { label, TIER } from "./vocabulary.ts";
+
+test("tier 徽章显示中文而非裸枚举", () => {
+  assert.equal(label(TIER, "base", "未知来源"), "公共知识库");
+  assert.equal(label(TIER, "personal", "未知来源"), "个人知识库");
+  // 回归钉子:徽章上永远不该出现这两个英文原值
+  assert.notEqual(label(TIER, "base", "未知来源"), "base");
+  assert.notEqual(label(TIER, "personal", "未知来源"), "personal");
+});

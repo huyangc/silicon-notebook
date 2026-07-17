@@ -34,6 +34,7 @@ import {
   TRACE_STEP_LABELS,
 } from "./reasoning-trace";
 import type { AskResponse } from "./workspace-model";
+import { label, TIER } from "./vocabulary";
 
 
 function InlineFormula({ latex }: { latex: string }) {
@@ -137,9 +138,9 @@ function SelectedReferenceDetail({
         {tier && (
           <span
             className={`tier-badge tier-${tier}`}
-            title={tier === "base" ? "来自基准库（权威参考层）" : "来自个人层"}
+            title={tier === "base" ? "来自公共知识库" : "来自个人知识库"}
           >
-            {tier === "base" ? "base" : "personal"}
+            {label(TIER, tier, "未知来源")}
           </span>
         )}
         <button
