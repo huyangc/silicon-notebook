@@ -26,7 +26,7 @@ import {
   assembleCreatePayload,
   kindFromGuess,
   deriveImportSelection,
-  assembleImportColumnsWithAnchor,
+  assembleImportColumnKinds,
   COLUMN_DELETE_CONFIRM,
   ROW_DELETE_CONFIRM,
   tableMetaPatch,
@@ -371,38 +371,43 @@ test("deriveImportSelection: 越界建议一律丢弃", () => {
   assert.strictEqual(deriveImportSelection(preview).anchorIndex, null);
 });
 
-// --- assembleImportColumnsWithAnchor -------------------------------------------------
+// --- assembleImportColumnKinds -------------------------------------------------
+// 曾叫 assembleImportColumnsWithAnchor，把行标题列编码成 role:'anchor' 塞进
+// 列定义。后端从不读 role（`_columns_with_anchor` 只读 kind，缺失静默默认
+// attribute；anchor 只认独立的 anchor_index），于是行标题列 + 每列内容类型被
+// 一起丢弃、整张表落库成记录型表——而当时的测试断言的正是 role:'anchor'，
+// 固化了这个前端自造的假契约，全绿到真机才暴露。下面锁住真实 wire。
 
-test("assembleImportColumnsWithAnchor: 行标题列 role='anchor'，其余取用户确认的内容类型", () => {
-  const out = assembleImportColumnsWithAnchor(
+test("assembleImportColumnKinds: 组装 {name,kind}（后端 wire 的字段名）", () => {
+  const out = assembleImportColumnKinds(
     ["违例类型", "现象识别方法", "依赖工具"],
     ["attribute", "procedure", "entity"],
-    0,
   );
   assert.deepStrictEqual(out, [
-    { name: "违例类型", role: "anchor" },
-    { name: "现象识别方法", role: "procedure" },
-    { name: "依赖工具", role: "entity" },
+    { name: "违例类型", kind: "attribute" },
+    { name: "现象识别方法", kind: "procedure" },
+    { name: "依赖工具", kind: "entity" },
   ]);
 });
 
-test("assembleImportColumnsWithAnchor: anchorIndex=null → 全部为内容类型（记录型表）", () => {
-  const out = assembleImportColumnsWithAnchor(["日期", "花费"], ["attribute", "attribute"], null);
-  assert.ok(out.every((column) => column.role !== "anchor"));
+test("assembleImportColumnKinds: 不产出 role 字段、也不产出 kind='anchor'（后端会静默忽略/拒绝）", () => {
+  const out = assembleImportColumnKinds(["日期", "花费"], ["attribute", "procedure"]);
+  assert.ok(out.every((column) => !("role" in column)));
+  assert.ok(out.every((column) => column.kind !== "anchor"));
 });
 
-test("assembleImportColumnsWithAnchor: kinds 意外偏短时缺失项兜底为普通", () => {
-  const out = assembleImportColumnsWithAnchor(["A", "B"], ["procedure"], null);
+test("assembleImportColumnKinds: kinds 比列名短时兜底普通", () => {
+  const out = assembleImportColumnKinds(["日期", "花费"], ["procedure"]);
   assert.deepStrictEqual(out, [
-    { name: "A", role: "procedure" },
-    { name: "B", role: "attribute" },
+    { name: "日期", kind: "procedure" },
+    { name: "花费", kind: "attribute" },
   ]);
 });
 
-test("assembleImportColumnsWithAnchor: 不修改传入数组", () => {
+test("assembleImportColumnKinds: 不修改传入数组", () => {
   const names = ["A"];
   const kinds = ["entity"];
-  assembleImportColumnsWithAnchor(names, kinds, 0);
+  assembleImportColumnKinds(names, kinds);
   assert.deepStrictEqual(names, ["A"]);
   assert.deepStrictEqual(kinds, ["entity"]);
 });
