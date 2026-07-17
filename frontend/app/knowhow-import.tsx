@@ -37,6 +37,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type MouseEvent as ReactMouseEvent } from "react";
 import { ChevronLeft, Loader2, Upload, X } from "lucide-react";
+import { useFloatingWindow } from "./use-floating-window.ts";
 import {
   appendKnowhowCommit,
   appendKnowhowPreview,
@@ -104,6 +105,11 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+
+  // 本向导没有全屏概念（任务表未列出）——不传 disabled，拖动/resize 恒生效；
+  // submitting 时也不禁用拖动本身（只禁用关闭，见下方 requestClose），拖动
+  // 一个提交中的向导没有数据风险。
+  const floating = useFloatingWindow({ storageKey: "knowhow.import.window" });
 
   // 向导可能在请求进行中被关闭（用户点 X/Esc）；卸载后忽略迟到的
   // then/catch，避免对已卸载组件 setState（镜像 knowhow-panel.tsx 里
@@ -224,13 +230,15 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
   return (
     <div className="knowhow-import-backdrop" onClick={handleBackdropClick}>
       <section
+        ref={floating.cardRef}
         className="knowhow-import-card"
+        style={floating.style}
         role="dialog"
         aria-modal="true"
         aria-label="导入 Knowhow 表"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="knowhow-import-header">
+        <div className="knowhow-import-header" {...floating.dragHandleProps}>
           <div>
             <h2>导入 Knowhow 表</h2>
             <ImportStepIndicator current={stepNumber} />
@@ -272,6 +280,7 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
             />
           ) : null}
         </div>
+        <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />
       </section>
       <ImportWizardStyles />
     </div>
@@ -547,6 +556,10 @@ export function KnowhowAppendWizard({ notebookId, tableId, columns, onClose, onD
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
+  // 独立于 KnowhowImportWizard 的 knowhow.import.window——追加导入是单独一个
+  // 弹窗身份，各自记住各自的拖动/resize 位置。本向导同样没有全屏概念。
+  const floating = useFloatingWindow({ storageKey: "knowhow.append.window" });
+
   // 卸载后忽略迟到的 then/catch（镜像 KnowhowImportWizard 的 mountedRef 守卫，
   // 含 StrictMode remount 重置——见该组件同一处注释）。
   const mountedRef = useRef(true);
@@ -636,13 +649,15 @@ export function KnowhowAppendWizard({ notebookId, tableId, columns, onClose, onD
   return (
     <div className="knowhow-import-backdrop" onClick={handleBackdropClick}>
       <section
+        ref={floating.cardRef}
         className="knowhow-import-card"
+        style={floating.style}
         role="dialog"
         aria-modal="true"
         aria-label="追加导入 Knowhow 表"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="knowhow-import-header">
+        <div className="knowhow-import-header" {...floating.dragHandleProps}>
           <div>
             <h2>追加导入</h2>
             <ImportStepIndicator current={stepNumber} labels={APPEND_STEP_LABELS} />
@@ -674,6 +689,7 @@ export function KnowhowAppendWizard({ notebookId, tableId, columns, onClose, onD
             />
           ) : null}
         </div>
+        <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />
       </section>
       <ImportWizardStyles />
     </div>
@@ -830,6 +846,32 @@ function ImportWizardStyles() {
           border-radius: 16px;
           box-shadow: var(--shadow);
           overflow: hidden;
+          /* 浮窗 resize 手柄（.kh-modal-resize-handle，见下方）绝对定位需要
+             一个定位上下文——backdrop 是 position: fixed，不加这条手柄会贴到
+             整个视口右下角而不是卡片右下角。 */
+          position: relative;
+        }
+
+        /* 浮窗 resize 手柄——与 knowhow-panel.tsx 顶层 <style jsx global> 里
+           .kh-modal-resize-handle 那份定义逐字同款（同一个 class 名，沿用
+           kh-modal-* 命名），但必须在本文件自己的样式块里重复登记一份：本
+           文件的既有约定是「自成一体，不依赖面板的 style 标签是否同时挂载」
+           （见文件头注释），不能指望 KnowhowPanel 的全局样式恰好也已经渲染
+           过。两份定义规则完全相同，互不冲突，哪个先被浏览器解析都一样。 */
+        .kh-modal-resize-handle {
+          position: absolute;
+          right: 0;
+          bottom: 0;
+          width: 16px;
+          height: 16px;
+          cursor: nwse-resize;
+          touch-action: none;
+          clip-path: polygon(100% 0%, 100% 100%, 0% 100%);
+          background: var(--line);
+        }
+
+        .kh-modal-resize-handle:hover {
+          background: var(--muted);
         }
 
         .knowhow-import-header {

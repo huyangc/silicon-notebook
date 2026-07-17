@@ -52,6 +52,7 @@ import {
   X,
 } from "lucide-react";
 import { authHeaders } from "./auth.ts";
+import { useFloatingWindow } from "./use-floating-window.ts";
 import {
   ROLE_LABELS,
   cellSummary,
@@ -3389,6 +3390,8 @@ function KnowhowRowOptimizeModal({
   const [acceptBusy, setAcceptBusy] = useState(false);
   const startedRef = useRef(false);
   const mountedRef = useRef(true);
+  // 本弹窗没有全屏概念（任务表未列出）——不传 disabled，拖动/resize 恒生效。
+  const floating = useFloatingWindow({ storageKey: "knowhow.rowOptimize.window" });
 
   useEffect(() => {
     mountedRef.current = true;
@@ -3493,13 +3496,15 @@ function KnowhowRowOptimizeModal({
   return (
     <div className="kh-modal-overlay" onClick={handleBackdropClick}>
       <div
+        ref={floating.cardRef}
         className="kh-modal-card"
+        style={floating.style}
         role="dialog"
         aria-modal="true"
         aria-label={`${ROW_OPTIMIZE_BUTTON_LABEL} · ${rowTitle}`}
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="kh-modal-header">
+        <header className="kh-modal-header" {...floating.dragHandleProps}>
           <div className="kh-modal-header-top">
             <div className="kh-modal-breadcrumb">
               <span className="kh-modal-row-title" title={rowTitle}>
@@ -3600,6 +3605,7 @@ function KnowhowRowOptimizeModal({
             </div>
           )}
         </footer>
+        <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />
       </div>
     </div>
   );
