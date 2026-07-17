@@ -149,3 +149,17 @@ test("latestLabel 遇到未知 step_type 退到中性词,不直出英文", () =>
     "处理中",
   );
 });
+
+test("NEXT_ACTION 覆盖后端全部 7 个真实取值(非机制名)", () => {
+  // 真源 reasoning_retrieval.py:529-726 的 elif 分支。后端加第 8 个值时这条会提醒补。
+  const cases = {
+    answer: "开始作答", expand_graph: "顺着相关内容继续找", add_subquery: "换个角度再查一遍",
+    search_elements: "回原文里找细节", ppr_retrieve: "顺着关联扩大范围",
+    expand_community: "找相似内容对比", follow_chain: "顺着推导链继续",
+  };
+  for (const [action, zh] of Object.entries(cases)) {
+    const out = getTraceStepDetail({ step_type: "reflect", detail: { next_action: action } });
+    assert.equal(out, zh, `${action} 未译或译错`);
+    assert.notEqual(out, action, `${action} 泄漏了英文机制名`);
+  }
+});
