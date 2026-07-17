@@ -89,11 +89,10 @@
 
 ```ts
 export const TIER: Record<string, string> = { base: "公共知识库", personal: "个人知识库" };
-export const OBJECT_TYPE: Record<string, string> = {
-  concept: "概念", claim: "结论", formula: "公式", procedure: "步骤",
-};
 // 另有 parse_status / element_type / evidence_level / memory status /
 // memory promotion state / report status / trace step type / edge type
+//
+// 注意:object_type 不在此处 —— 后端已是它的真源,见 §2.1。
 
 export function label(map: Record<string, string>, value: string, fallback: string): string {
   const hit = map[value];
@@ -102,6 +101,47 @@ export function label(map: Record<string, string>, value: string, fallback: stri
   return fallback;   // 永远不会是 value 本身
 }
 ```
+
+### 2.1 object_type 是例外:真源在后端,前端那份是重复
+
+写实现计划时挖出来的,推翻了本节初稿把 `OBJECT_TYPE` 放进 `vocabulary.ts` 的设计。
+
+`backend/app/services/extraction_profiles.py:84-89` 已经有中文显示名,且**已经通过 API 下发给前端**(`KnowledgeTypeCount = { object_type, label, count }`、`ObjectSchema.label`),自定义类型也走同一条路:
+
+```python
+OBJECT_TYPE_LABELS: Dict[str, str] = {
+    "concept": "概念 Concept", "claim": "论断 Claim",
+    "formula": "公式 Formula", "procedure": "过程 Procedure",
+}
+```
+
+前端 `kg-type-mark.tsx:11-24` 自己又存了一份**英文的**(`concept: "Concept"`),外加一个把未知 snake_case 转 Title Case 的兜底。两份并存 → 同一类型在不同位置显示不同,且前端那份更差。
+
+四个约束,决定了这不是「机械改映射」:
+
+1. **label 在迁移时被写进表**(`migrations.py:1520` 的 `INSERT ... 'builtin'`)。改常量只对全新库生效,**已部署库仍是旧 label** → 必须补迁移更新存量行。
+2. **label 参与搜索匹配**(`query_store.py:505`:`if needle not in f"{label} {headline} {body}"`)。去掉英文半截 = 搜 `Concept` 不再命中 → **保留中英并排**。
+3. **用户可以改内置类型的 label**(`schema_registry.py:112-131` 的 `update_object_schema` 接受 `payload.label`;`knowledge_store.py:1316` 的 `UPDATE object_schemas SET label = ?` 没有 `source='builtin'` 守卫,只有删除被挡)。迁移**不能无条件覆盖**。
+4. `OBJECT_TYPE_LABELS` **未进 LLM prompt**(已核 `prompts.py` / `kg/extract.py`),故改词不影响抽取。
+
+定稿:**保留中英并排,只对齐词**。只改两个:
+
+| object_type | 现在 | 改为 |
+|---|---|---|
+| `claim` | 论断 Claim | **结论 Claim** |
+| `procedure` | 过程 Procedure | **步骤 Procedure** |
+| `concept` / `formula` | 概念 Concept / 公式 Formula | 不动 |
+
+迁移必须条件式,只动仍是旧默认值的 builtin 行:
+
+```sql
+UPDATE object_schemas SET label = '结论 Claim'
+ WHERE object_type = 'claim' AND label = '论断 Claim' AND source = 'builtin';
+UPDATE object_schemas SET label = '步骤 Procedure'
+ WHERE object_type = 'procedure' AND label = '过程 Procedure' AND source = 'builtin';
+```
+
+前端侧:**删掉** `kg-type-mark.tsx` 的 `KG_TYPE_LABELS` 与 TitleCase 兜底,改用 API 下发的 label。`kgTypeLabel()` 拿不到 API label 的调用点(如答案引用浮层只有 `object_type` 字符串),需要把 label 从 API plumb 过去,或退回一张由跨栈守卫钉住的小表——实现计划里定。
 
 `label()` 的签名**强制**调用方传兜底词，所以「兜底即原值」这个 bug 在类型层面就写不出来。今天两种病都会被它堵死：
 
@@ -153,16 +193,20 @@ AGENTS.md 加一节词汇表，并写明一句：**界面词 ≠ 内部词，`pr
 
 | PR | 内容 | 依赖 |
 |---|---|---|
-| **A** | `vocabulary.ts` + `label()` + 收编 12 处枚举直出、4 处 `??` 兜底 | 无。`label()` 签名即强制力，不需要 lint |
+| **A** | `vocabulary.ts` + `label()` + 收编 15 处枚举直出、5 处原值兜底（**不含 object_type**） | 无。`label()` 签名即强制力，不需要 lint |
+| **A2** | object_type 对齐（§2.1）：后端改 2 个词 + 条件式迁移更新存量 builtin 行 + 删前端重复表 | 独立成 PR——**唯一带 schema 迁移风险的一个**，隔离出来单独评审 |
 | **B** | ~60 处散文按词汇表改（含「知识库」误用 8 处）+ AGENTS.md 词汇表 + `check_ui_vocabulary.py` | A（枚举侧先干净，B 只管散文） |
 | **C** | 错误层：后端挂 `code` + 前端按 code 映射 + 「复制诊断信息」 | 无，可并行 |
 | **D** | 文档校正：6 个文档 + `test_architecture_documentation.py` | 无，0 代码 |
+
+A2 单拎出来的理由：其余四个 PR 全是纯展示层改动，改错了最多是文案难看；A2 要动 `_migration_N` + bump `SCHEMA_VERSION`，改错了会写坏已部署库的数据。两种风险不该混在一个评审面里。
 
 PR D 是纯文档欠账：`README.md` / `README_zh.md` / `AGENTS.md` / `architecture.md` / `fangan_done.md` / `silicon_notebook_fangan.md` 与 `test_architecture_documentation.py::test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions` 都在描述 `Ask / Knowledge / Memory / Deep Report` 四个 tab，**但代码早已渲染中文**（`workspace-model.ts:247-251` 的 `CHAT_MODES` → `page.tsx:3692`）：问答 / 知识库 / 记忆 / 深度报告。文档描述的是一个不存在的界面。
 
 ## 六、测试与验证
 
 - **PR A**：`vocabulary.test.mjs` 覆盖 `label()` 的兜底行为（未知值返回 fallback 而非原值）；各枚举映射的键与后端枚举对齐。
+- **PR A2**：迁移测试必须覆盖「**用户改过的 label 不被覆盖**」——预置一行 `label='我自己的叫法'` 的 builtin claim，跑迁移后断言它没变；再预置一行仍是 `'论断 Claim'` 的，断言它变成了 `'结论 Claim'`。迁移须**追加** `_migration_N` 并 bump `SCHEMA_VERSION`，不得塞进已封版的既有迁移——否则版本闸对已部署库短路，迁移根本不会执行。
 - **PR B**：`check_ui_vocabulary.py` 自身要有对照测试（能抓到黑名单词、能抓到 `?? 原值`）。
 - **PR C**：后端测试断言错误响应含 `code` 且 `detail` 字符串未变（保护 MCP 消费方）；前端测试覆盖 code→人话、未知 code→HTTP 码兜底。
 - **PR D**：改完 `test_architecture_documentation.py` 必须跑通。
@@ -175,6 +219,7 @@ PR D 是纯文档欠账：`README.md` / `README_zh.md` / `AGENTS.md` / `architec
 
 - 不改内部词汇（`projection` / `tier` / `canonical` 等在代码与架构文档中保持原名）
 - 不改四个 tab 的中文名（已经是对的）
+- 不去掉 object_type label 的英文半截（它参与搜索匹配，见 §2.1）
 - 不改 `ask-modes.ts` 的 mode `id`（跨栈契约锁死；label/desc 可改）
 - 不把 `vocabulary.ts` 做成装下所有词的 god-module（逆着 PR#241 拆 facade 的方向）
 - 模式改名（严格推理 / 深挖推理 / 图谱多跳）**不在本设计范围**，另案处理
