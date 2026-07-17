@@ -865,8 +865,14 @@ cd frontend
 grep -rnE ">\{[a-zA-Z_]+\.(status|parse_status|element_type|object_type|review_status|edge_type|tier|mode|evidence_level)\}<" app/page.tsx | grep -vE "label\("
 # 间接写法(压进数组再 map 渲染,如 evidence/occurrence.element_type):
 grep -rnE "^\s*[a-z]+\.(status|element_type|parse_status)," app/page.tsx | grep -vE "label\("
-# 已知合法保留、不在本 PR 的(应当命中并被人工确认,不是失败):
-#   edge.edge_type / edge.review_status (5208/5209, admin 关系审核, 开放词表, 归后续)
+# 语义探针跑完后应**只剩**下面这 6 处(全部有据可查、不在本 PR),多一处就是新泄漏:
+#   5112 {cand.object_type}   → A2 (object_type 真源在后端)
+#   5587 {schema.object_type} → A2
+#   5696 {schema.object_type} → A2
+#   5208 {edge.edge_type}     → 后续 (开放关系词表, 与 edge_type 同族)
+#   5209 {edge.review_status} → 后续 (同上, admin 关系审核)
+#   5589 {schema.status}      → 后续 (active|revoked, schema 启用态, 独立小枚举, 非 KNOWLEDGE_STATUS)
+# 注:member.status(5798) 曾在此列,已由 Task 5 补丁 5f678760 修掉(走 label(KNOWLEDGE_STATUS))。
 grep -rn '"base" : "personal"' app/answer-panel.tsx
 # 宽模式:任意「查表后兜底回原值」的形状,不再只认特定变量名
 # (最初计划写的窄 grep 只认 ?? stage|status|s|step.step_type,漏掉了
