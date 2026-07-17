@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { ArrowLeft, BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -3440,7 +3440,10 @@ export default function Home() {
         <main className="notebook-view">
           <section className="workspace-header">
             <div className="workspace-title">
-              <button className="notebook-home" onClick={showCollection}>SN</button>
+              <button className="notebook-home" onClick={() => showCollection()} title="返回笔记本列表">
+                <ArrowLeft size={16} />
+                <span>返回主页</span>
+              </button>
               <div className="workspace-title-main">
                 {isReader ? (
                   <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>

@@ -646,14 +646,25 @@ button {
 }
 
 .notebook-home {
-  width: 46px;
-  height: 46px;
+  flex: 0 0 auto;
+  height: 40px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 0;
-  border-radius: 12px;
+  border-radius: 999px;
   background: #101820;
   color: #fff;
-  font-weight: 800;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
   box-shadow: 0 8px 20px rgba(16, 24, 32, 0.18);
+}
+
+.notebook-home:hover {
+  background: #1f2b38;
 }
 
 .workspace-toolbar {

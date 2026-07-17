@@ -270,3 +270,16 @@ test("browser back and refresh both restore the notebook workspace", () => {
   assert.ok(mountBlock.includes("parseWorkspaceHash(window.location.hash)"));
   assert.ok(mountBlock.includes('openNotebook(workspace.notebookId, "none")'));
 });
+
+test("the workspace exit is a labelled back control, not a bare brand mark", () => {
+  // 裸 SN 方块是用户明确反馈「太抽象」的那个控件。
+  assert.equal(page.includes('<button className="notebook-home" onClick={showCollection}>SN</button>'), false);
+  assert.match(page, /className="notebook-home"[\s\S]{0,220}<ArrowLeft size=\{16\} \/>[\s\S]{0,80}<span>返回主页<\/span>/);
+  assert.match(page, /onClick=\{\(\) => showCollection\(\)\}/);
+  assert.match(page, /^import \{[^}]*\bArrowLeft\b/m);
+
+  // 从固定 46px 方块变成自适应宽度的胶囊,文字不能被压断。
+  assert.match(css, /\.notebook-home\s*{[^}]*white-space:\s*nowrap;/s);
+  assert.match(css, /\.notebook-home\s*{[^}]*flex:\s*0 0 auto;/s);
+  assert.doesNotMatch(css, /\.notebook-home\s*{[^}]*width:\s*46px;/s);
+});
