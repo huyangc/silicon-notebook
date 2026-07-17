@@ -114,7 +114,7 @@ test("session manager groups cleanup controls above the scrollable session list"
 });
 
 test("switching or leaving a notebook clears any pending ask-job reconnect to avoid cross-notebook state bleed", () => {
-  const openNotebookStart = page.indexOf("async function openNotebook(notebookId: string)");
+  const openNotebookStart = page.indexOf("async function openNotebook(notebookId: string");
   const openNotebookEnd = page.indexOf("\n  }\n", openNotebookStart);
   assert.ok(openNotebookStart > -1);
   const openNotebookBody = page.slice(openNotebookStart, openNotebookEnd);
@@ -218,8 +218,55 @@ test("openNotebook's automatic restore degrades gracefully instead of blocking t
 
   // catch 之后,epoch 守卫与开库收尾(写 URL hash、return true)必须继续执行——
   // 证明 try/catch 只吞了恢复失败这一步,没有连带吞掉函数剩下的逻辑,notebook 正常打开。
+  // 写 URL hash 那行在 Task 3(history 三件套)中从无条件 replaceState 改为
+  // "push" 时才 pushState——断言随之更新为字面新形式,守卫意图(hash 必须写)不变。
   const afterCatch = openNotebookBody.slice(catchEnd);
   assert.match(afterCatch, /if \(workspaceEpochRef\.current !== workspaceEpoch\) return false;/);
-  assert.match(afterCatch, /window\.history\.replaceState\(null, "", `#notebook=\$\{encodeURIComponent\(notebookId\)\}`\);/);
+  assert.match(afterCatch, /if \(history === "push"\) \{\s*window\.history\.pushState\(null, "", notebookHash\(notebookId\)\);/);
   assert.match(afterCatch, /return true;/);
+});
+
+test("entering a notebook pushes history so the browser back button leaves it", () => {
+  assert.match(page, /async function openNotebook\(\s*notebookId: string,\s*history: "push" \| "none" = "push",?\s*\): Promise<boolean>/);
+
+  const openNotebookStart = page.indexOf("async function openNotebook(notebookId: string");
+  const openNotebookEnd = page.indexOf("\n  }\n", openNotebookStart);
+  const openNotebookBody = page.slice(openNotebookStart, openNotebookEnd);
+  assert.match(openNotebookBody, /if \(history === "push"\) \{\s*window\.history\.pushState\(null, "", notebookHash\(notebookId\)\);/);
+  assert.equal(openNotebookBody.includes("window.history.replaceState"), false, "进 notebook 改用 pushState");
+
+  // 默认必须是 push,否则所有既有调用点(卡片/列表/新建/分享拷贝)都不进历史栈。
+  // 既有调用点一律不带第二参,靠默认值——它们的字面形式被 workspace-layout.test.mjs
+  // 的 "shared notebook transitions" 断言锁着,不许改。
+  assert.match(page, /await openNotebook\(String\(created\.id\)\)/);
+  assert.match(page, /await openNotebook\(String\(joined\.id\)\)/);
+});
+
+test("openNotebookMemory keeps its signature and its own history write", () => {
+  // memory-navigation.test.mjs:46 按字面签名锁死了它,不能加参数。
+  assert.match(page, /async function openNotebookMemory\(notebookId: string\) \{/);
+  const start = page.indexOf("async function openNotebookMemory(notebookId: string)");
+  const end = page.indexOf("\n  }\n", start);
+  const body = page.slice(start, end);
+  assert.match(body, /await openNotebook\(notebookId, "none"\)/);
+  assert.match(body, /window\.history\.replaceState\(null, "", memoryHash\(notebookId\)\)/);
+});
+
+test("browser back and refresh both restore the notebook workspace", () => {
+  // popstate:hash 变了要跟着切视图,且不能再写 history(浏览器已经改过 URL 了)。
+  assert.match(page, /window\.addEventListener\("popstate", onPopState\)/);
+  assert.match(page, /window\.removeEventListener\("popstate", onPopState\)/);
+
+  const popStart = page.indexOf("function onPopState()");
+  const popEnd = page.indexOf("\n    }\n", popStart);
+  const popBody = page.slice(popStart, popEnd);
+  assert.ok(popBody.includes('openNotebook(workspace.notebookId, "none")'));
+  assert.ok(popBody.includes("showCollection();"));
+
+  // 挂载:#notebook=<id>(不带 tab=memory)要能还原到工作区。
+  const mountStart = page.indexOf("const target = parseMemoryHash(window.location.hash);");
+  const mountEnd = page.indexOf("\n      })\n      .catch(() => { clearToken(); })", mountStart);
+  const mountBlock = page.slice(mountStart, mountEnd);
+  assert.ok(mountBlock.includes("parseWorkspaceHash(window.location.hash)"));
+  assert.ok(mountBlock.includes('openNotebook(workspace.notebookId, "none")'));
 });

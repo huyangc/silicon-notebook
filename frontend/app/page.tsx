@@ -13,7 +13,9 @@ import {
   answerIdBatches,
   collectSavedAnswerFlags,
   memoryHash,
+  notebookHash,
   parseMemoryHash,
+  parseWorkspaceHash,
 } from "./memory-model";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
@@ -1342,11 +1344,49 @@ export default function Home() {
             showCollection();
             setToast("Memory 深链接不可用或已失效");
           }
+        } else {
+          // 裸 #notebook=<id>:刷新回到笔记本(此前这条 hash 只写不读,刷新必回集合页)。
+          const workspace = parseWorkspaceHash(window.location.hash);
+          if (workspace) {
+            try {
+              await openNotebook(workspace.notebookId, "none");
+            } catch {
+              showCollection();
+              setToast("笔记本链接不可用或已失效");
+            }
+          }
         }
       })
       .catch(() => { clearToken(); })
       .finally(() => setAuthChecked(true));
   }, [serviceReady]);
+
+  // 浏览器返回/前进:hash 是唯一的真相源,读它切视图。一律传 "none"——
+  // 浏览器已经改过 URL,任何再写都会污染历史栈。
+  useEffect(() => {
+    if (!authChecked) return;
+    function onPopState() {
+      const hash = window.location.hash;
+      const memory = parseMemoryHash(hash);
+      if (memory?.scope === "global") {
+        showGlobalMemory();
+        return;
+      }
+      if (memory?.scope === "notebook" && memory.notebookId) {
+        openNotebookMemory(memory.notebookId).catch(reportError);
+        return;
+      }
+      const workspace = parseWorkspaceHash(hash);
+      if (workspace) {
+        openNotebook(workspace.notebookId, "none").catch(reportError);
+        return;
+      }
+      // showCollection 自己的 replaceState 写的就是当前 URL(无 hash),是个 no-op。
+      showCollection();
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [authChecked]);
 
   // 接收分享:挂载时读 ?share=shr-xxx,先清掉参数(避免刷新重弹),再预览打开弹窗。
   // 预览需登录(Bearer),故等 authChecked + 有 token 再拉。
@@ -1904,7 +1944,7 @@ export default function Home() {
     setSourcesPage(pageNum);
   }
 
-  async function openNotebook(notebookId: string): Promise<boolean> {
+  async function openNotebook(notebookId: string, history: "push" | "none" = "push"): Promise<boolean> {
     const workspaceEpoch = ++workspaceEpochRef.current;
     askRunEpochRef.current += 1;
     memoryLinksAbortRef.current?.abort();
@@ -1964,13 +2004,19 @@ export default function Home() {
       }
       if (workspaceEpochRef.current !== workspaceEpoch) return false;
     }
-    window.history.replaceState(null, "", `#notebook=${encodeURIComponent(notebookId)}`);
+    // "none" = 挂载还原 / popstate:浏览器已经把 URL 摆对了,再写一次只会多一个
+    // 死条目(用户按返回没反应)。默认 "push" 让返回键能退出 notebook。
+    if (history === "push") {
+      window.history.pushState(null, "", notebookHash(notebookId));
+    }
     window.scrollTo(0, 0);
     return true;
   }
 
   async function openNotebookMemory(notebookId: string) {
-    if (!await openNotebook(notebookId)) return;
+    // 传 "none" 让 openNotebook 别写 history,自己下面这次 replaceState 独占写入——
+    // 与本函数改动前的净效果逐字一致(旧代码是 replace 再 replace)。
+    if (!await openNotebook(notebookId, "none")) return;
     setChatMode("memory");
     window.history.replaceState(null, "", memoryHash(notebookId));
   }
