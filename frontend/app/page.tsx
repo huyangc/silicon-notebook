@@ -1373,12 +1373,18 @@ export default function Home() {
         return;
       }
       if (memory?.scope === "notebook" && memory.notebookId) {
-        openNotebookMemory(memory.notebookId).catch(reportError);
+        openNotebookMemory(memory.notebookId).catch(() => {
+          showCollection();
+          setToast("Memory 深链接不可用或已失效");
+        });
         return;
       }
       const workspace = parseWorkspaceHash(hash);
       if (workspace) {
-        openNotebook(workspace.notebookId, "none").catch(reportError);
+        openNotebook(workspace.notebookId, "none").catch(() => {
+          showCollection();
+          setToast("笔记本链接不可用或已失效");
+        });
         return;
       }
       // showCollection 自己的 replaceState 写的就是当前 URL(无 hash),是个 no-op。
@@ -2036,7 +2042,10 @@ export default function Home() {
     }
   }
   async function openDoneItem(d: { notebook_id: string }) {
-    if (await openNotebook(d.notebook_id)) await openKgView(undefined, d.notebook_id);
+    // 已经在这个库里就别再 push 一条重复的 #notebook=<同一 id>——按返回键会
+    // 触发 openNotebook(id, "none") 全量重载,把用户从当前视图甩回 ask 聊天。
+    const history = activeNotebookIdRef.current === d.notebook_id ? "none" : "push";
+    if (await openNotebook(d.notebook_id, history)) await openKgView(undefined, d.notebook_id);
   }
 
   async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {
@@ -3027,7 +3036,10 @@ export default function Home() {
       if (!stillThere) {
         const firstOwned = remaining.find((n) => (n.access ?? "owner") === "owner");
         if (firstOwned) {
-          await openNotebook(firstOwned.id);
+          // 传 "none" 让 openNotebook 别写 history,自己 replaceState 顶替被退出的
+          // #notebook=<leftId>——否则那条历史条目存活,按返回键会撞上已经 403 的旧笔记本。
+          await openNotebook(firstOwned.id, "none");
+          window.history.replaceState(null, "", notebookHash(firstOwned.id));
         } else {
           showCollection();
         }
@@ -3121,7 +3133,7 @@ export default function Home() {
       window.history.replaceState(
         null,
         "",
-        mode === "memory" ? memoryHash(currentNotebookId) : `#notebook=${encodeURIComponent(currentNotebookId)}`,
+        mode === "memory" ? memoryHash(currentNotebookId) : notebookHash(currentNotebookId),
       );
     }
     if (mode === "rules") {
@@ -3440,7 +3452,7 @@ export default function Home() {
         <main className="notebook-view">
           <section className="workspace-header">
             <div className="workspace-title">
-              <button className="notebook-home" onClick={() => showCollection()} title="返回笔记本列表">
+              <button className="notebook-home" onClick={() => showCollection()}>
                 <ArrowLeft size={16} />
                 <span>返回主页</span>
               </button>

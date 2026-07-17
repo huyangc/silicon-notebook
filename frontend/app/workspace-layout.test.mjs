@@ -283,3 +283,91 @@ test("the workspace exit is a labelled back control, not a bare brand mark", () 
   assert.match(css, /\.notebook-home\s*{[^}]*flex:\s*0 0 auto;/s);
   assert.doesNotMatch(css, /\.notebook-home\s*{[^}]*width:\s*46px;/s);
 });
+
+// --- 最终整支审查修复:五条发现 --------------------------------------------
+
+test("popstate degrades gracefully instead of leaving a hidden topbar error when a deep link is stale", () => {
+  // 工作区模式下整个 topbar 被 CSS 隐藏(globals.css: .app.workspace-mode .topbar
+  // { display: none; }),而 reportError 只会把消息写进 statusText,渲染在 topbar
+  // 里——用户什么都看不到,且 openNotebook 失败会把 activeNotebookIdRef 卡在 null
+  // 不恢复,静默关掉来源轮询与会话列表刷新。两个分支都必须走与挂载还原分支
+  // (parseMemoryHash/parseWorkspaceHash 那段,见上一条测试)同款的优雅降级。
+  const popStart = page.indexOf("function onPopState()");
+  const popEnd = page.indexOf("\n    }\n", popStart);
+  assert.ok(popStart > -1);
+  const popBody = page.slice(popStart, popEnd);
+
+  assert.equal(
+    popBody.includes(".catch(reportError)"),
+    false,
+    "popstate 失败必须优雅降级,不能走裸 reportError(工作区模式下 topbar 不可见,用户看不到)",
+  );
+  assert.match(
+    popBody,
+    /openNotebookMemory\(memory\.notebookId\)\.catch\(\(\) => \{\s*showCollection\(\);\s*setToast\("Memory 深链接不可用或已失效"\);\s*\}\)/,
+  );
+  assert.match(
+    popBody,
+    /openNotebook\(workspace\.notebookId, "none"\)\.catch\(\(\) => \{\s*showCollection\(\);\s*setToast\("笔记本链接不可用或已失效"\);\s*\}\)/,
+  );
+});
+
+test("leaving a shared notebook replaces the stale deep link instead of pushing a new history entry", () => {
+  // 退出只读共享后必须传 "none" 且自己 replaceState 顶替被退出的 #notebook=<leftId>——
+  // 改动前是 replaceState,不存在这问题;默认 "push" 会让那条历史条目存活,
+  // 用户按返回键就会撞上已经 403 的旧笔记本(配合上一条测试修的静默失败会甩出裸报错)。
+  const start = page.indexOf("async function handleLeaveShared() {");
+  const end = page.indexOf("\n  }", start);
+  assert.ok(start > -1);
+  const body = page.slice(start, end);
+
+  assert.equal(
+    body.includes("await openNotebook(firstOwned.id);"),
+    false,
+    "退出共享后不能再用默认 push,会让被退出的旧 #notebook=<id> 历史条目存活",
+  );
+  assert.match(body, /await openNotebook\(firstOwned\.id, "none"\)/);
+  assert.match(body, /window\.history\.replaceState\(null, "", notebookHash\(firstOwned\.id\)\)/);
+});
+
+test("the workspace back button's tooltip does not fight its own visible label", () => {
+  // title="返回笔记本列表" 与可见文字「返回主页」不一致。按钮已有可见文字,
+  // title 是纯冗余(也不参与可访问名计算,可访问名取自可见 span),删掉零 a11y 影响。
+  assert.equal(page.includes('title="返回笔记本列表"'), false);
+});
+
+test("switchChatMode reuses notebookHash instead of hand-rolling the same hash syntax", () => {
+  // memory-model.ts 里 notebookHash/memoryHash 住同一个文件就是为了不让两条
+  // hash 的语法拆开漂移;switchChatMode 手搓的模板字符串是唯一漏扫的站点。
+  const start = page.indexOf('function switchChatMode(mode: ChatMode) {');
+  const end = page.indexOf("\n  }", start);
+  assert.ok(start > -1);
+  const body = page.slice(start, end);
+
+  assert.equal(body.includes("`#notebook=${encodeURIComponent(currentNotebookId)}`"), false);
+  assert.match(body, /mode === "memory" \? memoryHash\(currentNotebookId\) : notebookHash\(currentNotebookId\)/);
+});
+
+test("opening a completed-item toast replaces history when already in that notebook, else pushes", () => {
+  // PendingToast 是 position: fixed,工作区模式下(topbar 被隐藏)仍然可见可点。
+  // 若用户已经在通知所属的笔记本里,默认 "push" 会压入一条重复的 #notebook=<同一 id>;
+  // 按返回键触发 openNotebook(id, "none") 全量重载,把用户从当前视图甩回 ask 聊天,
+  // URL 却没变。判据用 activeNotebookIdRef.current 而非 currentNotebookId state,
+  // 因为要在 openNotebook 把 ref 清空之前拿到「导航前」的值。
+  const start = page.indexOf("async function openDoneItem(");
+  const end = page.indexOf("\n  }", start);
+  assert.ok(start > -1);
+  const body = page.slice(start, end);
+  assert.match(body, /activeNotebookIdRef\.current === d\.notebook_id/);
+  assert.match(body, /openNotebook\(d\.notebook_id, history\)/);
+
+  // openPendingItem(铃铛入口)必须保持不变:它只在集合页可点(工作区模式下
+  // topbar 被 CSS 隐藏,铃铛在 topbar 里),那里的默认 push 本来就对——改成条件性
+  // 反而会让 URL 停在 / 却显示着笔记本,打断刷新深链和返回键。
+  const pendingStart = page.indexOf("async function openPendingItem(");
+  const pendingEnd = page.indexOf("\n  }", pendingStart);
+  assert.ok(pendingStart > -1);
+  const pendingBody = page.slice(pendingStart, pendingEnd);
+  assert.match(pendingBody, /if \(!await openNotebook\(item\.notebook_id\)\) return;/);
+  assert.equal(pendingBody.includes("activeNotebookIdRef.current"), false);
+});
