@@ -1,4 +1,5 @@
 import { API_BASE, authHeaders } from "../../auth.ts";
+import { label } from "../../vocabulary.ts";
 
 export type AdminUserNotebook = {
   id: string;
@@ -30,5 +31,5 @@ const STATUS_CN: Record<string, string> = {
 };
 
 export function notebookStatusLabel(s: string): string {
-  return STATUS_CN[s] ?? s;
+  return label(STATUS_CN, s, "未知状态");
 }

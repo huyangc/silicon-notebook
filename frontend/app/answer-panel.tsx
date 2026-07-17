@@ -34,7 +34,7 @@ import {
   TRACE_STEP_LABELS,
 } from "./reasoning-trace";
 import type { AskResponse } from "./workspace-model";
-import { label, TIER } from "./vocabulary";
+import { label, MODEL_STAGE, TIER } from "./vocabulary";
 
 
 function InlineFormula({ latex }: { latex: string }) {
@@ -280,7 +280,7 @@ export function ReasoningTracePanel({
             const hasTime = typeof step.duration_ms === "number";
             return (
               <li key={`${step.step_type}-${index}`} className={index === steps.length - 1 && live ? "active" : ""}>
-                <span>{TRACE_STEP_LABELS[step.step_type] ?? step.step_type}</span>
+                <span>{label(TRACE_STEP_LABELS, step.step_type, "处理中")}</span>
                 <strong>{step.summary}</strong>
                 {(detail || hasTime) && (
                   <div className="reasoning-trace-meta">
@@ -352,12 +352,7 @@ export function AnswerView({
   return (
     <div className="chat-answer">
       {answer.model_errors && answer.model_errors.length > 0 && (() => {
-        const labelOf = (stage: string) => ({
-          embed: "向量模型",
-          rerank: "重排模型",
-          answer: "答案模型",
-          rewrite: "改写模型",
-        } as Record<string, string>)[stage] ?? stage;
+        const labelOf = (stage: string) => label(MODEL_STAGE, stage, "某个模型");
         const names = Array.from(new Set(answer.model_errors.map((error) => labelOf(error.stage)))).join("、");
         return (
           <div className="answer-model-error" title={answer.model_errors[0]?.message ?? ""}>
