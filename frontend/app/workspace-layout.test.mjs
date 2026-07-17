@@ -181,7 +181,7 @@ test("opening a notebook restores its most recent conversation instead of a blan
   const openSessionBody = page.slice(openSessionStart, openSessionEnd);
   assert.ok(openSessionBody.includes("++workspaceEpochRef.current"));
   assert.match(openSessionBody, /await applySessionDetail\(id, workspaceEpoch\)/);
-  assert.equal(openSessionBody.includes("api<ConversationDetail>"), false, "详情请求不该在 openSession 里重复");
+  assert.equal(openSessionBody.includes("api<ConversationDetail>"), false, "详情请求只应存在于 applySessionDetail 内核里,openSession 必须委派而非自己再发一份");
 
   // openNotebook 用自己的 epoch 恢复最近一条,不新开 epoch。
   const openNotebookStart = page.indexOf("async function openNotebook(notebookId: string");
@@ -190,4 +190,36 @@ test("opening a notebook restores its most recent conversation instead of a blan
   assert.match(openNotebookBody, /const sessionList = await loadSessions\(notebookId, workspaceEpoch\);/);
   assert.match(openNotebookBody, /await applySessionDetail\(sessionList\[0\]\.id, workspaceEpoch\)/);
   assert.equal(openNotebookBody.includes("await openSession("), false, "复用 openSession 会自撞 epoch 守卫");
+});
+
+test("openNotebook's automatic restore degrades gracefully instead of blocking the notebook from opening", () => {
+  const openNotebookStart = page.indexOf("async function openNotebook(notebookId: string");
+  const openNotebookEnd = page.indexOf("\n  }\n", openNotebookStart);
+  assert.ok(openNotebookStart > -1);
+  const openNotebookBody = page.slice(openNotebookStart, openNotebookEnd);
+
+  // 恢复调用必须裹在 try/catch 里:它是无条件自动发生的,api() 对非 2xx 会 throw,
+  // 不 catch 就会让异常冒出 openNotebook,导致该 notebook(没有任何变通手段)彻底打不开。
+  const tryStart = openNotebookBody.indexOf(
+    "try {\n        await applySessionDetail(sessionList[0].id, workspaceEpoch);\n      } catch {"
+  );
+  assert.ok(tryStart > -1, "恢复调用必须被 try/catch 包裹,而不是让 applySessionDetail 的异常直接冒出 openNotebook");
+
+  const catchBraceIndex = openNotebookBody.indexOf("} catch {", tryStart);
+  const catchEnd = openNotebookBody.indexOf("\n      }\n", catchBraceIndex);
+  assert.ok(catchEnd > catchBraceIndex);
+  const catchBody = openNotebookBody.slice(catchBraceIndex, catchEnd);
+
+  // catch 分支不能提前 return——那样恢复失败时 openNotebook 仍会被短路掉,等于没修。
+  assert.equal(catchBody.includes("return"), false, "catch 分支不能提前 return,否则恢复失败仍会阻塞 notebook 打开");
+  // 降级后的状态就是本改动前的正常空白新会话状态,不是错误状态,不该弹 toast/报错。
+  assert.equal(catchBody.includes("reportError"), false, "恢复失败是优雅降级,不是错误,不该报错给用户");
+  assert.equal(catchBody.includes("setStatusText"), false, "恢复失败是优雅降级,不是错误,不该报错给用户");
+
+  // catch 之后,epoch 守卫与开库收尾(写 URL hash、return true)必须继续执行——
+  // 证明 try/catch 只吞了恢复失败这一步,没有连带吞掉函数剩下的逻辑,notebook 正常打开。
+  const afterCatch = openNotebookBody.slice(catchEnd);
+  assert.match(afterCatch, /if \(workspaceEpochRef\.current !== workspaceEpoch\) return false;/);
+  assert.match(afterCatch, /window\.history\.replaceState\(null, "", `#notebook=\$\{encodeURIComponent\(notebookId\)\}`\);/);
+  assert.match(afterCatch, /return true;/);
 });

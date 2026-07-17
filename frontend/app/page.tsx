@@ -1954,7 +1954,14 @@ export default function Home() {
     // 沿用本次 openNotebook 自己的 epoch:openSession 会新推一个 epoch,
     // 那会让下面的守卫立刻失配。零对话的库自然跳过,维持新会话现状。
     if (sessionList && sessionList.length > 0) {
-      await applySessionDetail(sessionList[0].id, workspaceEpoch);
+      try {
+        await applySessionDetail(sessionList[0].id, workspaceEpoch);
+      } catch {
+        // 恢复是增强项,不是必需品:失败就静默退回本改动前的空白新会话现状,
+        // 而不是让 api() 抛出的异常冒出去把整个 notebook 打不开——恢复是无条件
+        // 自动发生的,没有失败就不打开的道理。这不是「静默吞错误」,是优雅降级到
+        // 已知良好状态;会话列表仍已加载,用户可自行点历史(那次点击失败才该报错)。
+      }
       if (workspaceEpochRef.current !== workspaceEpoch) return false;
     }
     window.history.replaceState(null, "", `#notebook=${encodeURIComponent(notebookId)}`);
