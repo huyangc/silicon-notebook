@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { label, TIER, PARSE_STATUS, EVIDENCE_LEVEL, PROMOTION_STATUS } from "./vocabulary.ts";
+import { label, TIER, PARSE_STATUS, ELEMENT_TYPE, EVIDENCE_LEVEL, PROMOTION_STATUS } from "./vocabulary.ts";
 
 test("label 命中时返回映射值", () => {
   assert.equal(label(TIER, "base", "未知"), "公共知识库");
@@ -46,4 +46,19 @@ test("晋升候选状态覆盖后端四个真实取值", () => {
 
 test("解析状态含 metadata-only", () => {
   assert.equal(label(PARSE_STATUS, "metadata-only", "处理中"), "仅元数据");
+});
+
+// 注意:不要写成 `for (const v of ["uploaded","queued",...])` 去循环断言「都有中文」——
+// 那个字面量数组就是从 PARSE_STATUS 自己的 key 抄来的,等于在断言「表里有表里已有的
+// 东西」,恒真,验证不了真实完整性。前端没有 parse_status / element_type 的独立锚点
+// (对比:KNOWLEDGE_STATUS 有 workspace-model.ts 的 KNOWLEDGE_STATUS_OPTIONS 可锚),
+// 所以这里只断言「行为安全」:已知值译对、未知值退到中性兜底而非泄漏原值。
+// 真正的「映射表覆盖后端全部取值」需要一个跨栈守卫(照 check_ask_modes_contract.py),
+// 归 PR B。
+
+// PARSE_STATUS 已由本文件(Task 1)覆盖——这里不再重复。
+// ELEMENT_TYPE 是 Task 1 没测过的，属真新覆盖，加这一条：
+test("内容块类型:已知值译对，未知值退中性兜底", () => {
+  assert.equal(label(ELEMENT_TYPE, "table", "内容"), "表格");
+  assert.equal(label(ELEMENT_TYPE, "some_future_block", "内容"), "内容");
 });

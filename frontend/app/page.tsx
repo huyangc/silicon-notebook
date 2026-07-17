@@ -110,6 +110,7 @@ import {
   type UnifiedGraphResp,
   type UnifiedKgStatus,
 } from "./workspace-model";
+import { label, PARSE_STATUS, ELEMENT_TYPE } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -4452,7 +4453,7 @@ export default function Home() {
               </section>
               <div className="source-detail-meta">
                 <span className="tag">{sourceTypeLabel(sourceDetail)}</span>
-                <span className="tag">{sourceDetail.parse_status || sourceDetail.status}</span>
+                <span className="tag">{label(PARSE_STATUS, sourceDetail.parse_status || sourceDetail.status, "处理中")}</span>
                 <span className="tag">{formatFileSize(sourceDetail.file_size)}</span>
                 <span className="tag">{sourceElements.length} 个元素</span>
               </div>
@@ -4500,7 +4501,7 @@ export default function Home() {
                   <article className="item source-element-card" key={element.id}>
                     <div className="element-head">
                       <h3>{element.location_label}</h3>
-                      <span className="tag element-type-tag">{element.element_type}</span>
+                      <span className="tag element-type-tag">{label(ELEMENT_TYPE, element.element_type, "内容")}</span>
                     </div>
                     <ElementBody element={element} notebookId={currentNotebookId ?? ""} />
                   </article>
@@ -4547,7 +4548,7 @@ export default function Home() {
               </div>
               <p className="section-title">来源状态</p>
               <div className="tag-row">
-                {Object.entries(analytics.source_status_counts).map(([k, v]) => <span className="tag" key={k}>{k}: {v}</span>)}
+                {Object.entries(analytics.source_status_counts).map(([k, v]) => <span className="tag" key={k}>{label(PARSE_STATUS, k, "其他")} {v}</span>)}
               </div>
               <p className="section-title">索引与构建</p>
               {indexStatus ? (
