@@ -18,6 +18,7 @@ import {
   parseWorkspaceHash,
 } from "./memory-model";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
+import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
 import {
   ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
   groupOf, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
@@ -661,18 +662,18 @@ function kgPayloadValue(value: unknown): string {
 
 function kgTypeBandForce(width: number, height: number, activeTypes: string[]) {
   let nodes: FgNode[] = [];
-  const targets: Record<string, [number, number]> = {
-    concept: [width * 0.34, height * 0.38],
-    claim: [width * 0.66, height * 0.36],
-    formula: [width * 0.34, height * 0.72],
-    procedure: [width * 0.66, height * 0.72]
-  };
+  // 取值/积分都走 kg-layout.ts 的纯函数:原来这里是 `targets[node.type] ?? center`,
+  // node.type="constructor" 会拿到继承的构造函数(truthy,`??` 不接管)→ target[0] 为
+  // undefined → vx 变 NaN。kgBandTarget 用 Object.hasOwn 封死,并由 kg-layout.test.mjs
+  // 的有限坐标回归测试钉住(page.tsx 是 .tsx,node --test 不能直接 import)。
+  const targets = kgTypeBandTargets(width, height);
   const force = (alpha: number) => {
     const useTypeBands = activeTypes.length !== 1;
     nodes.forEach((node) => {
-      const target = useTypeBands ? (targets[node.type] ?? [width / 2, height / 2]) : [width / 2, height / 2];
-      node.vx = (node.vx ?? 0) + (target[0] - (node.x ?? 0)) * 0.035 * alpha;
-      node.vy = (node.vy ?? 0) + (target[1] - (node.y ?? 0)) * 0.035 * alpha;
+      const target = kgBandTarget(targets, node.type, width, height, useTypeBands);
+      const next = kgBandVelocity(node, target, alpha);
+      node.vx = next.vx;
+      node.vy = next.vy;
     });
   };
   force.initialize = (forceNodes: FgNode[]) => {
