@@ -186,8 +186,7 @@ const ALLOWED_DIAGNOSTIC_READS = new Map([
       // ask 流的 error 事件:原文只进受限诊断出口,上抛的是带品牌的场景文案。
       'logDiagnostic("ask-stream", event.error);',
       // 以下三处都已过人话层(裸值包进 Error 交给 toUserMessage)。
-      '? `全部预审中止：${toUserMessage(job.error ? new Error(job.error) : null, "出了点问题")}（已处理 ${job.done}）`',
-      ': toUserMessage(d.error ? new Error(d.error) : null, "该问答失败，请稍后重试"));',
+      '? `全部自动判重中止：${toUserMessage(job.error ? new Error(job.error) : null, "出了点问题")}（已处理 ${job.done}）`',      ': toUserMessage(d.error ? new Error(d.error) : null, "该问答失败，请稍后重试"));',
       ': `失败：${toUserMessage(r.error ? new Error(r.error) : null, "连接未通过")}`,',
       // 条件判断 + 已过人话层的两行(justFailed 那处)。
       "const failureHint = justFailed.error_message",
