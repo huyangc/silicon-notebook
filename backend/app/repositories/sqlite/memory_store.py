@@ -1455,3 +1455,46 @@ class MemoryStore:
                 {"record": self._record(row), "vector": row["retrieval_vector"]},
             )
         return list(rows.values())
+
+    def create_copy_with_initial_revision(
+        self,
+        write: "MemoryWrite",
+        source_memory_id: str,
+        changed_by: str,
+        reason: str,
+    ) -> MemoryRecord:
+        """把一条已有 memory 复制成 write（新 id/notebook）：单事务建 4 表 + 拷向量。
+
+        source_answer_id 必须为 None（避免 idx_memory_answer_once 撞键）；向量随拷
+        零重嵌入，源无向量则新 item 保持 embedding_status='pending'（服务侧补嵌）。
+        """
+        with self.database.write() as db:
+            db.execute("BEGIN IMMEDIATE")
+            item, created = self._insert_memory_on(db, write)
+            if item.id != write.id:
+                return item  # 幂等命中已有行（正常不会发生：copy 用全新 id）
+            self._ensure_initial_revision_on(db, item, created, changed_by, reason)
+            vec = db.execute(
+                "SELECT model, dimension, vector FROM memory_embeddings WHERE memory_id=?",
+                (source_memory_id,),
+            ).fetchone()
+            if vec is not None:
+                db.execute(
+                    "INSERT OR REPLACE INTO memory_embeddings "
+                    "(memory_id,model,dimension,vector,updated_at) VALUES (?,?,?,?,?)",
+                    (write.id, vec["model"], vec["dimension"], vec["vector"], self.now()),
+                )
+                db.execute(
+                    "UPDATE memory_items SET embedding_status='ready',embedding_error='' "
+                    "WHERE id=?",
+                    (write.id,),
+                )
+                item = self._record(
+                    db.execute(
+                        f"SELECT {self._select_columns()} FROM memory_items m "
+                        "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                        "WHERE m.id=? AND m.created_by=?",
+                        (write.id, write.created_by),
+                    ).fetchone()
+                )
+        return item

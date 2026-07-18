@@ -3105,6 +3105,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS
                     or site in KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS
                     or site in KNOWHOW_TRANSFER_ROUTES_ALLOWED_IMPORTS
+                    or site in MEMORY_TRANSFER_STORE_ALLOWED_IMPORTS
                 )
 
 
@@ -4025,3 +4026,35 @@ KNOWHOW_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES = {
     }
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES
+
+# memory cross-notebook copy/move Task B1 (MemoryStore.create_copy_with_
+# initial_revision): its own store test builds the real facade the same way
+# Task A1's knowhow-transfer store test does — SQLiteRepository(...) to build
+# the runtime, set_request_user/reset_request_user (both already
+# COMPATIBILITY_EXPORTS-registered names re-exported from
+# app.services.sqlite_repository) to scope create_notebook per-owner,
+# repo.create_user to seed the fixture user, repo._runtime to reach the new
+# memory_store, and repo._connect to read back memory_embeddings/
+# memory_revisions row counts. Every one of these is a frozen facade member
+# consumed at a fresh site this test file postdates, so it takes the same
+# broad (file, member) allowance as KNOWHOW_TRANSFER_STORE_ALLOWED_MEMBER_FILES
+# above. The three import consumers (SQLiteRepository, set_request_user,
+# reset_request_user) share one physical `from ... import (...)` statement, so
+# all three aliases attribute to the same node.lineno and all three need
+# IMPORTS entries at that one line, folded into the import-completeness
+# OR-chain (resolves lazily at call time, so defining it here at EOF is fine,
+# same as KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS). Appended at EOF for the
+# same zero-line-shift reason as every other TASKN_* block above.
+MEMORY_TRANSFER_STORE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_transfer_store.py", 6, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_memory_transfer_store.py", 6, "app.services.sqlite_repository", "set_request_user"),
+    ("backend/tests/test_memory_transfer_store.py", 6, "app.services.sqlite_repository", "reset_request_user"),
+}
+MEMORY_TRANSFER_STORE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_transfer_store.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "_connect", "create_notebook",
+        "create_user", "set_request_user", "reset_request_user",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_STORE_ALLOWED_MEMBER_FILES
