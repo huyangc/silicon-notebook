@@ -36,7 +36,20 @@ export type Snapshot = { count: number; items: PendingItem[] };
 // (原型污染式误判);Map.has/get 只认自有键,天然免疫。
 const DONE_MESSAGES = new Map<string, (msg: any) => string>([
   ["index_done", (m) => `「${m.notebook_name || ""}」索引构建完成,点击查看`],
-  ["paper_meta_done", (m) => `「${m.notebook_name || "该笔记本"}」论文信息补全完成,已补全 ${m.stored ?? 0} 篇,点击查看`],
+  // stored=0 但 not_paper>0 是完全成功的一批(全部判定为非论文,标记行已落库),
+  // 此时说「已补全 0 篇」既费解又像失败,改说清到底发生了什么。
+  ["paper_meta_done", (m) => {
+    const nb = m.notebook_name || "该笔记本";
+    const stored = m.stored ?? 0;
+    const notPaper = m.not_paper ?? 0;
+    if (stored > 0 && notPaper > 0) {
+      return `「${nb}」论文信息补全完成,已补全 ${stored} 篇,另有 ${notPaper} 篇非论文,点击查看`;
+    }
+    if (stored === 0 && notPaper > 0) {
+      return `「${nb}」论文信息已核对完成,${notPaper} 篇均非论文、无需补全,点击查看`;
+    }
+    return `「${nb}」论文信息补全完成,已补全 ${stored} 篇,点击查看`;
+  }],
 ]);
 
 export function usePendingActions(enabled: boolean) {
