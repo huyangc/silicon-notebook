@@ -15,7 +15,7 @@ import {
   type AgentTokenDraft,
 } from "./agent-token-model";
 import { API_BASE, authHeaders, clearToken, getToken } from "./auth";
-import { throwHumanizedHttpError, toUserMessage } from "./errors.ts";
+import { humanizedError, logDiagnostic, throwHumanizedHttpError, toUserMessage } from "./errors.ts";
 import {
   canEditMemory,
   canPromoteMemory,
@@ -747,7 +747,7 @@ export function MemoryPanel({
     extractKg: boolean,
   ) {
     if (busyId || sessionSignal.aborted) {
-      throw new Error("有其它操作正在进行，请稍后重试");
+      throw humanizedError("有其它操作正在进行，请稍后重试");
     }
     setBusyId(ids.length > 1 ? "__bulk__" : ids[0]);
     setError("");
@@ -761,17 +761,22 @@ export function MemoryPanel({
       const summary = summarizeTransferResults(results);
       const plainFailedCount = summary.failed - summary.copiedSourceNotRemoved.length;
       if (summary.copiedSourceNotRemoved.length > 0 || plainFailedCount > 0) {
+        // 逐条失败原因是后端 str(exc)(memory_service.transfer 内层 except 的
+        // 兜底文案,见 backend/app/services/memory_service.py)——不是产品文案,
+        // 不能拼进用户可见的 failure 串。只送 console 排障,用户看不带原文的
+        // 通用汇总(同 report-view.tsx 的 activeError 一个模式)。
         const failedReasons = Array.from(new Set(
           results
             .map((result) => (result.status === "failed" ? result.error : null))
             .filter((reason): reason is string => Boolean(reason))
-        )).join("；");
+        ));
+        if (failedReasons.length > 0) logDiagnostic("memory-transfer", failedReasons.join("；"));
         setTransferNotice({
           warning: summary.copiedSourceNotRemoved.length > 0
             ? `${summary.copiedSourceNotRemoved.length} 条已复制到目标笔记本，但源未能自动清理，请手动删除源 Memory，避免重复操作产生冗余副本。`
             : null,
           failure: plainFailedCount > 0
-            ? `${plainFailedCount} 条复制/移动失败${failedReasons ? `：${failedReasons}` : ""}`
+            ? `${plainFailedCount} 条复制/移动失败，请稍后重试`
             : null,
           success: null,
         });

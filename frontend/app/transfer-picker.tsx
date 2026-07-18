@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { authHeaders } from "./auth.ts";
+import { throwHumanizedHttpError, toUserMessage } from "./errors.ts";
 import type { NotebookSummary } from "./workspace-model.ts";
 import { destinationNotebooks, type TransferMode } from "./transfer-model.ts";
 
@@ -58,7 +59,7 @@ export function DestinationPicker({
       headers: { ...authHeaders() },
       signal: controller.signal,
     })
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`${res.status}`))))
+      .then((res) => (res.ok ? res.json() : throwHumanizedHttpError(res, "transfer-picker")))
       .then((all: NotebookSummary[]) => setNotebooks(destinationNotebooks(all, sourceNotebookId)))
       .catch((err) => {
         if (err?.name !== "AbortError") setError("加载笔记本列表失败");
@@ -78,7 +79,7 @@ export function DestinationPicker({
       // 成功后不在这里复位 busy——modal 是否关闭由调用方决定(onSubmit resolve
       // 即代表调用方已经/即将卸载本组件);只有失败分支需要复位以便用户重试。
     } catch (err) {
-      setError(err instanceof Error ? err.message : "操作失败");
+      setError(toUserMessage(err, "操作失败"));
       setBusy(false);
     }
   };

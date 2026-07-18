@@ -3,6 +3,7 @@
 // 镜像 notebook-share.ts 的样板。
 
 import { authHeaders } from "./auth.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 import { memoryTransferBody, type TransferMode, type TransferResult } from "./transfer-model.ts";
 
 // 结果单项类型(source_id/new_id/ok/error/status)的唯一真源是 transfer-model.ts
@@ -19,7 +20,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...authHeaders() },
     ...init,
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) await throwHumanizedHttpError(res, "memory-transfer");
   if (res.status === 204) return null as T;
   return res.json() as Promise<T>;
 }

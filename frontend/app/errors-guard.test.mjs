@@ -122,6 +122,40 @@ const ALLOWED_MESSAGE_READS = new Map([
       "<p>{infoModal.message}</p>",
     ],
   ],
+  [
+    "transfer-model.ts",
+    [
+      // 409 source_cleanup_failed 结构化 detail 里的 message 字段——后端固定
+      // 中文文案(backend/app/api/routes.py transfer_knowhow_table 的
+      // SourceCleanupFailed 分支),不是 catch 到的异常 .message。已经过
+      // status===409 && code==="source_cleanup_failed" 的结构校验(本函数
+      // parseCleanupFailure 上半部分),是独立于 X-User-Message 头的另一条可信
+      // 通道,不走 humanizeHttpError()。
+      'const message = typeof d.message === "string" && d.message ? d.message : FALLBACK_CLEANUP_MESSAGE;',
+    ],
+  ],
+  [
+    "knowhow-transfer.ts",
+    [
+      // 同上一条(transfer-model.ts):cleanup.message 就是 parseCleanupFailure()
+      // 校验过的那个 409 专属字段,原样带进 KnowhowSourceCleanupError,不是异常
+      // 文本。
+      "if (cleanup) throw new KnowhowSourceCleanupError(cleanup.newTableId, cleanup.message);",
+    ],
+  ],
+  [
+    "knowhow-panel.tsx",
+    [
+      // err.message 读的是 KnowhowSourceCleanupError——同一条 409 专属信任链的
+      // 第三跳(transfer-model.ts 校验 → knowhow-transfer.ts 原样带上 → 这里在
+      // instanceof 窄化之后展示),不是任意异常文本。刻意不改走 toUserMessage
+      // (err, fallback):这个类型没有、也不该有 HUMANIZED 品牌(那是 errors.ts
+      // 内部专用),toUserMessage 会把它判成"未翻译"、吞掉原文只剩兜底文案——
+      // 毁掉这条 409 分支存在的意义:明确告诉用户"副本已存在,源表还在,别再
+      // 盲目重试"(见调用点上方大段注释及 knowhow-transfer.ts 头部说明)。
+      "setActionError(err.message);",
+    ],
+  ],
 ]);
 
 test("没有任何地方把原始异常文本直出给用户", async () => {
@@ -203,6 +237,16 @@ const ALLOWED_DIAGNOSTIC_READS = new Map([
       // 取出来只为进 console(见同文件 logDiagnostic 的 useEffect)。
       'const activeError = active?.status === "failed" ? active.error : null;',
       "if (activeError) logDiagnostic(\"report\", activeError);",
+    ],
+  ],
+  [
+    "memory-panel.tsx",
+    [
+      // 逐条 failed 结果的原文是后端 str(exc)(memory_service.transfer 内层
+      // except 的兜底,见 backend/app/services/memory_service.py),取出来只为
+      // 进 console(紧接着的 logDiagnostic 调用),不拼进用户可见的 failure 文案
+      // ——同上面 report-view.tsx 的 activeError 一个模式。
+      '.map((result) => (result.status === "failed" ? result.error : null))',
     ],
   ],
 ]);

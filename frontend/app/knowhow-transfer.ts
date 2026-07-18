@@ -3,6 +3,7 @@
 // 镜像 notebook-share.ts 的样板。
 
 import { authHeaders } from "./auth.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 import { knowhowTransferBody, parseCleanupFailure, type TransferMode } from "./transfer-model.ts";
 
 // 409 source_cleanup_failed 的专用错误:复制已经提交、副本已在目标 notebook
@@ -31,19 +32,21 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!res.ok) {
-    const text = await res.text();
-    // 尝试把 body 当 JSON 解析,好让 parseCleanupFailure 有机会识别出结构化的
-    // 409 source_cleanup_failed——非 JSON(或非该形状)一律落回通用的
-    // `${status} ${text}` 错误,与 notebook-share.ts 的 apiFetch 行为一致。
+    // 先在一份 clone 上探测 409 source_cleanup_failed 的结构化形状——body 只能
+    // 消费一次(见 errors.ts readHttpError 头注释),原始 res 留给下面
+    // throwHumanizedHttpError() 读,不能在这里抢先吃掉。非 JSON(或非该形状)
+    // 一律落回通用的人话层错误,与 notebook-share.ts 的 apiFetch 行为一致。
     let parsed: unknown;
     try {
-      parsed = JSON.parse(text);
+      parsed = JSON.parse(await res.clone().text());
     } catch {
       parsed = undefined;
     }
     const cleanup = parseCleanupFailure(res.status, parsed);
     if (cleanup) throw new KnowhowSourceCleanupError(cleanup.newTableId, cleanup.message);
-    throw new Error(`${res.status} ${text}`);
+    // 其余一律走通用人话层:原始诊断进 console,用户看按状态码泛化的中文
+    // (401/403/404/409 语义保留),不再裸拼 `${status} ${text}`。
+    await throwHumanizedHttpError(res, "knowhow-transfer");
   }
   if (res.status === 204) return null as T;
   return res.json() as Promise<T>;
