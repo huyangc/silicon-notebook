@@ -801,24 +801,35 @@ test("接线：恢复提示未决时工具栏「图片」按钮置灰，且提�
 // useState 初始化器：banner 在**第一帧**就是终值，窗口不存在。下面锁的正是这一点。
 
 test("readCellDraft: 正常读到值", () => {
-  assert.strictEqual(readCellDraft({ getItem: () => "草稿" }, "k"), "草稿");
-  assert.strictEqual(readCellDraft({ getItem: () => null }, "k"), null);
+  assert.strictEqual(readCellDraft(() => ({ getItem: () => "草稿" }), "k"), "草稿");
+  assert.strictEqual(readCellDraft(() => ({ getItem: () => null }), "k"), null);
 });
 
 test("readCellDraft: storage 为 null（SSR，无 window）→ null，不抛", () => {
-  assert.strictEqual(readCellDraft(null, "k"), null);
+  assert.strictEqual(readCellDraft(() => null, "k"), null);
 });
 
-test("readCellDraft: 读取抛错（隐私模式）→ null，不抛", () => {
+test("readCellDraft: getItem 抛错（隐私模式）→ null，不抛", () => {
   assert.strictEqual(
     readCellDraft(
-      {
+      () => ({
         getItem() {
           throw new Error("SecurityError");
         },
-      },
+      }),
       "k",
     ),
+    null,
+  );
+});
+
+test("readCellDraft: localStorage 属性 getter 本身抛 SecurityError → null，不崩（回归锁）", () => {
+  // 第 8 轮复审探针：受限存储环境下 window.localStorage 属性访问自身抛错。thunk 在
+  // try 内求值，异常不逃逸；若把 getStorage() 提到 try 外，本条立刻红。
+  assert.strictEqual(
+    readCellDraft(() => {
+      throw new Error("SecurityError");
+    }, "k"),
     null,
   );
 });
@@ -828,6 +839,9 @@ test("接线：草稿扫描在 useState 初始化器里同步完成，不在 eff
   assert.match(editorSrc, /const \[draftScan\] = useState\(\(\) => \{[\s\S]*?readCellDraft\([\s\S]*?\}\);/);
   // 全文只此一处读草稿，杜绝"初始化器里读一份、effect 里又读一份"的分叉。
   assert.strictEqual((editorSrc.match(/readCellDraft\(/g) || []).length, 1);
+  // 调用点必须传 thunk（箭头函数），不许把 window.localStorage 当实参 eager 求值——
+  // 属性 getter 的 SecurityError 会逃过 helper 的 try，render 期崩整个编辑器。
+  assert.match(editorSrc, /readCellDraft\(\s*\(\) =>/);
 });
 
 test("接线：banner 与其同步镜像 ref 都从首帧扫描结果取初值", () => {

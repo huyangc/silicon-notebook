@@ -609,15 +609,19 @@ export function KnowhowCellEditor({
   // 能启动上传，随后 banner 才出现，用户一点「恢复」又把刚落笔的图片整段覆盖掉。
   // 放进 useState 初始化器后，banner 在**第一帧**就是终值，那个窗口不存在。
   // 只读 storage（幂等、无副作用）；清陈旧草稿是副作用，仍留在下面的 effect 里。
-  // 两点说明，免得看着像违规：
+  // 三点说明，免得看着像违规：
   // ① **不是订阅外部可变源**（那才需要 useSyncExternalStore）——这是 mount 时读一次、
   //    立刻落进 state，此后一切以 state 为准，不存在并发渲染撕裂；初始化器在
   //    StrictMode 下被双调用也无妨（纯读、幂等）。
   // ② **不担心水合不一致**：本组件只在用户点开某一格后才渲染，服务端渲染阶段根本
   //    不存在这棵子树；`typeof window` 判断只是防御性兜底。
+  // ③ **storage 属性访问也在 helper 的异常边界内**：`window.localStorage` 的属性
+  //    getter 在受限环境会抛 SecurityError，故以 thunk 传入、由 readCellDraft 在自己
+  //    的 try 内求值；若把 window.localStorage 直接当实参传，getter 抛错会发生在进入
+  //    helper 之前、render 期崩掉整个编辑器（第 8 轮复审）。
   const [draftScan] = useState(() => {
     const stored = readCellDraft(
-      typeof window === "undefined" ? null : window.localStorage,
+      () => (typeof window === "undefined" ? null : window.localStorage),
       draftStorageKey(rowId, columnId),
     );
     return { stored, offer: shouldOfferDraftRestore(stored, savedContent) };

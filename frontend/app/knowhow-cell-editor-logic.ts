@@ -307,15 +307,21 @@ export interface DraftStorage {
 
 // 首次渲染期间**同步**读草稿用（见组件侧注释：不能等 useEffect）。只读、幂等，因此
 // 放在 render 里是安全的；清陈旧草稿那一步是副作用，仍留在 effect 里。
-// storage 为 null（SSR：没有 window）或读取抛错（隐私模式/配额）时一律当「没有
-// 草稿」——读不到就没有可恢复的东西，也就没有「恢复会整段覆盖掉刚落笔的图片」那条
+// 收「取 storage 的 thunk」而非 storage 值本身：`window.localStorage` 的属性 getter 在
+// 受限环境（隐私模式、被禁持久化的 origin）会自己抛 SecurityError。值形态下这次属性
+// 访问是在调用方求实参时发生的，落在本函数的 try 之外——render 期一抛就崩掉整个编辑器
+// （第 8 轮复审的探针场景）。改收 thunk 后，属性访问也被拉进下面的 try，和 getItem()
+// 共用同一道异常边界。
+// 无论是 thunk 返回空（SSR：没有 window）还是取值/读取抛错（隐私模式/配额），一律当
+// 「没有草稿」——读不到就没有可恢复的东西，也就没有「恢复会整段覆盖掉刚落笔的图片」那条
 // 风险；这里只如实回答「读到了什么」，放不放行上传由调用方的门禁决定。
 export interface DraftReadStorage {
   getItem(key: string): string | null;
 }
-export function readCellDraft(storage: DraftReadStorage | null, key: string): string | null {
-  if (!storage) return null;
+export function readCellDraft(getStorage: () => DraftReadStorage | null | undefined, key: string): string | null {
   try {
+    const storage = getStorage();
+    if (!storage) return null;
     return storage.getItem(key);
   } catch {
     return null;
