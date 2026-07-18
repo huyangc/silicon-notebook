@@ -12,7 +12,7 @@ test("AnswerView exposes a manual save-to-Memory action", () => {
   assert.match(answerPanel, /onSaveMemory: \(answerId: string\) => void/);
   assert.match(answerPanel, /memorySaved: boolean/);
   assert.match(answerPanel, /onClick=\{\(\) => onSaveMemory\(answer\.answer_id\)\}/);
-  assert.match(answerPanel, /保存到 Memory/);
+  assert.match(answerPanel, /保存到记忆/);
 });
 
 test("answer capture uses preview then explicit edited confirmation", () => {

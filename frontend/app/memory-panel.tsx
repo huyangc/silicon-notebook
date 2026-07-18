@@ -367,7 +367,7 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
           <div className="agent-access-grid">
             <form className="agent-config-block" onSubmit={createProfile}>
               <h3>Agent Profile</h3>
-              <p>稳定身份用于 Memory 来源和审计；停用后它的全部 token 立即失效。</p>
+              <p>稳定身份用于记忆来源和审计；停用后它的全部 token 立即失效。</p>
               <label>名称<input value={profileName} maxLength={80} onChange={(event) => setProfileName(event.target.value)} placeholder="例如 Claude Code" /></label>
               <label>说明<input value={profileDescription} maxLength={500} onChange={(event) => setProfileDescription(event.target.value)} placeholder="用途或运行环境" /></label>
               <button type="submit" disabled={loading || !profileName.trim()}><Plus size={14} /> 新建 Profile</button>
@@ -392,11 +392,11 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
                 <option value="">选择 Profile</option>
                 {profiles.filter((profile) => profile.status === "active").map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
               </select></label>
-              <label>默认 Notebook<select value={draft.default_notebook_id} onChange={(event) => setDefaultNotebook(event.target.value)}>
-                <option value="">选择 Notebook</option>
+              <label>默认笔记本<select value={draft.default_notebook_id} onChange={(event) => setDefaultNotebook(event.target.value)}>
+                <option value="">选择笔记本</option>
                 {notebooks.map((notebook) => <option key={notebook.id} value={notebook.id}>{notebook.name}</option>)}
               </select></label>
-              <fieldset><legend>Notebook allowlist</legend>{notebooks.map((notebook) => (
+              <fieldset><legend>笔记本白名单</legend>{notebooks.map((notebook) => (
                 <label className="agent-check" key={notebook.id}><input type="checkbox" checked={draft.notebook_ids.includes(notebook.id)} disabled={draft.default_notebook_id === notebook.id} onChange={(event) => setDraft((current) => ({ ...current, notebook_ids: event.target.checked ? [...current.notebook_ids, notebook.id] : current.notebook_ids.filter((id) => id !== notebook.id) }))} />{notebook.name}</label>
               ))}</fieldset>
               <fieldset><legend>Scopes</legend>{AGENT_SCOPE_OPTIONS.map((scope) => (
@@ -420,7 +420,7 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
             <h3>已签发 Token</h3>
             {tokens.length === 0 ? <p>暂无 token。</p> : tokens.map((token) => (
               <article key={token.id}>
-                <span><strong>{token.profile_name}</strong><small>{token.scopes.join(" · ")}<br />默认：{notebooks.find((notebook) => notebook.id === token.default_notebook_id)?.name || token.default_notebook_id} · 允许 {token.notebook_ids.length} 个 notebook · {token.expires_at ? `到期 ${new Date(token.expires_at).toLocaleString("zh-CN")}` : "无到期时间"}</small></span>
+                <span><strong>{token.profile_name}</strong><small>{token.scopes.join(" · ")}<br />默认：{notebooks.find((notebook) => notebook.id === token.default_notebook_id)?.name || token.default_notebook_id} · 允许 {token.notebook_ids.length} 个笔记本 ·{token.expires_at ? `到期 ${new Date(token.expires_at).toLocaleString("zh-CN")}` : "无到期时间"}</small></span>
                 {token.revoked_at ? <em>已撤销</em> : <button type="button" className="danger" disabled={loading} onClick={() => revokeToken(token.id)}>撤销</button>}
               </article>
             ))}
@@ -685,11 +685,11 @@ export function MemoryPanel({
   }
 
   return (
-    <section className={`memory-panel memory-panel-${scope}`} aria-label={scope === "global" ? "全部 Memory" : "笔记本 Memory"}>
+    <section className={`memory-panel memory-panel-${scope}`} aria-label={scope === "global" ? "全部记忆" : "笔记本记忆"}>
       <header className="memory-panel-heading">
         <div>
-          <h1>{scope === "global" ? "Memory" : "Notebook Memory"}</h1>
-          <p>{scope === "global" ? "跨笔记本管理你主动保存和待审核的私有记忆。" : "只显示你自己绑定到当前笔记本的私有 Memory。"}</p>
+          <h1>{scope === "global" ? "记忆" : "笔记本记忆"}</h1>
+          <p>{scope === "global" ? "跨笔记本管理你主动保存和待审核的私有记忆。" : "只显示你自己绑定到当前笔记本的私有记忆。"}</p>
         </div>
         <span className="memory-total">
           {scope === "global" ? `${ownerTotal} 条 · ${ownerPending} 条待确认` : `${total} 条`}
@@ -711,9 +711,9 @@ export function MemoryPanel({
         </form>
         {scope === "global" && (
           <label>
-            Notebook
+            笔记本
             <select value={notebookFilter} onChange={(event) => { setNotebookFilter(event.target.value); setPage(0); }}>
-              <option value="">全部 notebook</option>
+              <option value="">全部笔记本</option>
               {notebookOptions.map((option) => (
                 <option key={option.notebook_id} value={option.notebook_id}>
                   {option.name}（{option.memory_count}）
@@ -775,11 +775,11 @@ export function MemoryPanel({
 
       {error && <div className="memory-error" role="alert">{error}</div>}
       {loading ? (
-        <div className="memory-empty">正在读取你的 Memory…</div>
+        <div className="memory-empty">正在读取你的记忆…</div>
       ) : items.length === 0 ? (
         <div className="memory-empty">
           <Sparkles size={26} />
-          <strong>还没有符合条件的 Memory</strong>
+          <strong>还没有符合条件的记忆</strong>
           <p>可在 Ask 回答下方手动保存，Agent 提议则会先进入待确认状态。</p>
         </div>
       ) : (
@@ -856,7 +856,7 @@ export function MemoryPanel({
                           checked={extractKg}
                           onChange={(event) => setExtractKg(event.target.checked)}
                         />
-                        同时抽取到知识图谱
+                        同时整理进知识图谱
                       </label>
                     )}
                     {detailBlocks}
@@ -896,7 +896,7 @@ export function MemoryPanel({
                             disabled={busy}
                             onClick={() => promoteMemory(memory)}
                           >
-                            <ArrowUpCircle size={14} /> 提升到 KG
+                            <ArrowUpCircle size={14} /> 贡献到公共知识库
                           </button>
                         ) : (
                           <span className={`memory-promotion-state state-${memory.promotion_state}`}>
@@ -941,7 +941,7 @@ export function MemoryPanel({
       {pendingDelete && (
         <div className="utility-modal utility-modal-top" role="dialog" aria-modal="true" aria-label="确认删除">
           <div className="utility-modal-card memory-confirm-card">
-            <h3>{pendingDelete.kind === "bulk" ? `删除选中的 ${selectedIds.size} 条 Memory？` : "删除这条 Memory？"}</h3>
+            <h3>{pendingDelete.kind === "bulk" ? `删除选中的 ${selectedIds.size} 条记忆？` : "删除这条记忆？"}</h3>
             <p>删除后不可恢复。</p>
             <div className="memory-dialog-actions">
               <button type="button" disabled={Boolean(busyId)} onClick={() => setPendingDelete(null)}>取消</button>
@@ -1064,14 +1064,14 @@ export function MemorySaveDialog({
   }
 
   return (
-    <section className="utility-modal memory-save-modal" role="dialog" aria-modal="true" aria-label="保存回答到 Memory">
+    <section className="utility-modal memory-save-modal" role="dialog" aria-modal="true" aria-label="保存回答到记忆">
       <div className="utility-modal-card memory-save-card">
         <header>
           <div className="memory-save-title">
             <span className="memory-save-icon"><Bookmark size={16} /></span>
             <div>
-              <h2>保存到 Memory</h2>
-              <p>预览并编辑后，确认才会写入你的私有 Memory。</p>
+              <h2>保存到记忆</h2>
+              <p>预览并编辑后，确认才会写入你的私有记忆。</p>
             </div>
           </div>
           <button type="button" className="memory-close" onClick={onClose} aria-label="关闭" disabled={saving}><X size={18} /></button>

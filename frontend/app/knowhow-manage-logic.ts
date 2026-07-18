@@ -44,10 +44,10 @@ export const ANCHOR_NONE_LABEL = "不设置";
 
 // 已选行标题列时的提示（规格①：「用作每行的标题；设置后每行作为一个节点进入
 // 知识图谱，节点名取自该列」）。
-export const ANCHOR_SET_HINT = "用作每行的标题；设置后每行作为一个节点进入知识图谱，节点名取自该列";
+export const ANCHOR_SET_HINT = "用作每行的标题；设置后每行作为一个概念进入知识图谱，概念名取自该列";
 
 // 未选行标题列时的提示（规格①：向导无主题时提示，随「主题→行标题」改名）。
-export const ANCHOR_NONE_HINT = "未选行标题列：本表仅参与问答检索，不构建图谱节点";
+export const ANCHOR_NONE_HINT = "未选行标题列：本表仅参与问答检索，不加入知识图谱";
 
 // 选择器下方提示语：selection 为 null（不设置）时给「仅检索投影」提示，否则给
 // 「入图谱」提示。selection 兼容两种形态——建表/导入向导用列下标(number)，

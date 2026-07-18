@@ -936,16 +936,16 @@ export default function Home() {
   const startKgBuild = (nb: string) => {
     setBuildingKg(true);
     buildKg(nb)
-      .then(() => setToast("已开始构建知识图谱（后台进行，可能需要数分钟）；完成后会自动更新"))
+      .then(() => setToast("已开始整理知识图谱（后台进行，可能需要数分钟）；完成后会自动更新"))
       .catch((e) => { reportError(e); setBuildingKg(false); });
   };
   // Trigger full re-extract: clears existing KG and rebuilds from all sources.
   // 破坏性(清空重抽)——统一确认(与概念合并/检索索引三系统一致的确认机制+文案模板)。
   const startKgRebuild = (nb: string) => {
-    confirmIndexAction("完整重抽知识图谱？\n\n将清空现有知识图谱并重新抽取全部来源。后台进行，完成后自动更新。", () => {
+    confirmIndexAction("全部重新分析？\n\n将清空现有知识图谱并重新分析全部来源。后台进行，完成后自动更新。", () => {
       setBuildingKg(true);
       rebuildKg(nb)
-        .then(() => setToast("已开始完整重抽（后台进行，可能需要数分钟）；完成后会自动更新"))
+        .then(() => setToast("已开始全部重新分析（后台进行，可能需要数分钟）；完成后会自动更新"))
         .catch((e) => { reportError(e); setBuildingKg(false); });
     });
   };
@@ -1245,13 +1245,12 @@ export default function Home() {
           setToast(job.status === "failed"
             // job.error 是后端的 `f"{type(exc).__name__}: {exc}"`
             // (services/knowledge_governance.py),不直出;原文进 console。
-            ? `全部预审中止：${toUserMessage(job.error ? new Error(job.error) : null, "出了点问题")}（已处理 ${job.done}）`
-            : `全部预审完成：已处理 ${job.done} 项`);
-        }
+            ? `全部自动判重中止：${toUserMessage(job.error ? new Error(job.error) : null, "出了点问题")}（已处理 ${job.done}）`
+            : `全部自动判重完成：已处理 ${job.done} 项`);        }
       } catch { /* transient error; keep polling */ }
     }, 6000);
     const cap = window.setTimeout(() => {
-      if (!cancelled) { setReviewAllRunning(false); setToast("全部预审仍在后台进行，请稍后查看"); }
+      if (!cancelled) { setReviewAllRunning(false); setToast("自动判重仍在后台进行，请稍后查看"); }
     }, 20 * 60 * 1000);
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
   }, [reviewAllRunning, currentNotebookId]);
@@ -1416,7 +1415,7 @@ export default function Home() {
             await openNotebookMemory(target.notebookId);
           } catch {
             showCollection();
-            setToast("Memory 深链接不可用或已失效");
+            setToast("该记忆链接不可用或已失效");
           }
         } else {
           // 裸 #notebook=<id>:刷新回到笔记本(此前这条 hash 只写不读,刷新必回集合页)。
@@ -1449,7 +1448,7 @@ export default function Home() {
       if (memory?.scope === "notebook" && memory.notebookId) {
         openNotebookMemory(memory.notebookId).catch(() => {
           showCollection();
-          setToast("Memory 深链接不可用或已失效");
+          setToast("该记忆链接不可用或已失效");
         });
         return;
       }
@@ -1998,7 +1997,7 @@ export default function Home() {
   async function openCreate() {
     const notebook = await api<NotebookSummary>("/notebooks", {
       method: "POST",
-      body: JSON.stringify({ name: "Untitled notebook", purpose: "" })
+      body: JSON.stringify({ name: "未命名笔记本", purpose: "" })
     });
     await loadNotebookCollection();
     await openNotebook(notebook.id);
@@ -2010,7 +2009,7 @@ export default function Home() {
   async function submitCreate() {
     const notebook = await api<NotebookSummary>("/notebooks", {
       method: "POST",
-      body: JSON.stringify({ name: createName.trim() || "Untitled notebook", purpose: createDesc.trim() })
+      body: JSON.stringify({ name: createName.trim() || "未命名笔记本", purpose: createDesc.trim() })
     });
     setCreateOpen(false);
     await loadNotebookCollection();
@@ -2189,7 +2188,7 @@ export default function Home() {
     memoryLinksAbortRef.current = null;
     setMemorySavedAnswers((previous) => ({ ...previous, [savedAnswerId]: true }));
     setMemoryAnswerId(null);
-    setToast("已保存到 Memory");
+    setToast("已保存到记忆");
     await loadNotebookCollection();
     if (currentNotebookId) {
       const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
@@ -2199,7 +2198,7 @@ export default function Home() {
 
   async function saveInlineNotebookName() {
     if (!currentNotebook || titleSaveInFlight) return;
-    const nextName = titleDraft.trim() || "Untitled notebook";
+    const nextName = titleDraft.trim() || "未命名笔记本";
     setTitleDraft(nextName);
     if (nextName === currentNotebook.name) return;
     setTitleSaveInFlight(true);
@@ -2211,7 +2210,7 @@ export default function Home() {
       setCurrentNotebook(updated);
       setTitleDraft(updated.name);
       await loadNotebookCollection();
-      setToast("Notebook 名称已更新");
+      setToast("笔记本名称已更新");
     } catch (error) {
       setTitleDraft(currentNotebook.name);
       reportError(error);
@@ -2245,7 +2244,7 @@ export default function Home() {
       setTitleDraft(updated.name);
     }
     await loadNotebookCollection();
-    setToast("Notebook 信息已更新");
+    setToast("笔记本信息已更新");
   }
 
   async function confirmDeleteNotebook() {
@@ -2256,7 +2255,7 @@ export default function Home() {
     }
     setDeleteNotebook(null);
     await loadNotebookCollection();
-    setToast("Notebook 已删除");
+    setToast("笔记本已删除");
   }
 
   // Stage selected files so the user can pick a document type per file before
@@ -2434,7 +2433,7 @@ export default function Home() {
     const q = nextQuestion.trim();
     if (!q) return;
     if (requiresKg(askMode) && !kgAvailable) {
-      setToast(`${strictLabel}需先为该 notebook 构建知识图谱`);
+      setToast(`${strictLabel}需先整理该笔记本的知识图谱`);
       return;
     }
     const notebookId = currentNotebookId;
@@ -2740,7 +2739,7 @@ export default function Home() {
     await loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: 0 });
     await loadKnowledgeTypes();
     await findDuplicates(knowledgeKind);
-    setToast("已合并，源条目置为 deprecated");
+    setToast("已合并，原条目已弃用");
   }
 
 
@@ -2887,7 +2886,7 @@ export default function Home() {
     setRelinkingKg(true);
     try {
       const r = await relinkKg(currentNotebookId);
-      setToast(`已补连 ${r.edges_added} 条边，剩余孤立节点 ${r.isolated_after}`);
+      setToast(`已补上 ${r.edges_added} 条关联，还有 ${r.isolated_after} 项内容没建立关联`);
       const [g, status] = await Promise.all([
         fetchUnifiedGraph(currentNotebookId, kgLimit),
         fetchUnifiedKgStatus(currentNotebookId),
@@ -2917,16 +2916,16 @@ export default function Home() {
   // 「重新合并」唯一入口(看板「索引与构建」面板 + 知识图谱视图共用):先统一确认再重建。
   function confirmRefreshUnifiedKg() {
     if (kgRefreshBusy || buildingKg) return;
-    confirmIndexAction("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新抽取来源）。后台进行，完成后自动更新。", () => refreshUnifiedKg());
+    confirmIndexAction("重新合并知识图谱？\n\n将重算跨文档概念聚类并刷新图谱索引（不重新分析来源）。后台进行，完成后自动更新。", () => refreshUnifiedKg());
   }
 
   async function reviewPendingMerges() {
     if (!currentNotebookId) return;
     setKgReviewBusy(true);
-    setToast("正在 LLM 预审（约 1 分钟，请稍候）…");
+    setToast("正在自动判重（约 1 分钟，请稍候）…");
     try {
       const summary = await reviewPendingMergesApi(currentNotebookId);
-      setToast(`已预审 ${summary.reviewed} 项：合并 ${summary.confirmed}，分开 ${summary.rejected}，保留 ${summary.unsure}`);
+      setToast(`已判重 ${summary.reviewed} 项：合并 ${summary.confirmed}，分开 ${summary.rejected}，保留 ${summary.unsure}`);
       const [pend, status] = await Promise.all([
         fetchPendingMerges(currentNotebookId),
         fetchUnifiedKgStatus(currentNotebookId),
@@ -3033,7 +3032,7 @@ export default function Home() {
     const state = tierActionState(currentNotebook, notebooks);
     if (state.action === "replace") {
       const ok = window.confirm(
-        `当前基准库是「${state.otherBaseName}」。基准库全局唯一 —— 替换为「${currentNotebook.name}」？`
+        `当前公共知识库是「${state.otherBaseName}」。公共知识库全局唯一 —— 替换为「${currentNotebook.name}」？`
       );
       if (!ok) return;
     }
@@ -3043,8 +3042,8 @@ export default function Home() {
     await loadNotebookCollection();
     setToast(
       target === "base"
-        ? "已设为基准库 — 该知识库将作为全局唯一的权威参考层参与检索与冲突仲裁"
-        : "已取消基准库，恢复为个人层"
+        ? "已设为公共知识库 — 这个笔记本会作为全局唯一的权威来源，参与检索与冲突仲裁"
+        : "已取消公共知识库，恢复为个人知识库"
     );
   }
 
@@ -3175,7 +3174,7 @@ export default function Home() {
   async function submitPromotion(objectId: string) {
     if (!currentNotebookId) return;
     await proposePromotion(currentNotebookId, objectId);
-    setToast("已提交晋升请求");
+    setToast("已提交贡献申请");
   }
 
   async function decidePromotion(candidateId: string, decision: "approve" | "reject", reason = "") {
@@ -3183,11 +3182,11 @@ export default function Home() {
     try {
       if (decision === "approve") {
         const result = await approvePromotion(candidateId);
-        const merged = result.merged_into ? `（与 ${result.merged_into.slice(0, 8)} 合并去重）` : "";
-        setToast(`晋升已批准${merged}，节点已加入基准语料`);
+        const merged = result.merged_into ? `（与 ${result.merged_into.slice(0, 8)} 合并）` : "";
+        setToast(`已批准收录${merged}，内容已加入公共知识库`);
       } else {
         await rejectPromotion(candidateId, reason);
-        setToast("晋升已拒绝，个人 KG 节点保持不变");
+        setToast("贡献未采纳，个人内容保持不变");
       }
       // Refresh queue, then any loaded notebook collection / knowledge list.
       const queue = await fetchPromotionQueue();
@@ -3374,10 +3373,10 @@ export default function Home() {
     <div className={`app ${isWorkspace ? "workspace-mode" : ""}`}>
       <header className="topbar">
         <div className="brand">
-          <button className="brand-mark" onClick={showCollection} title="Notebook collection">SN</button>
+          <button className="brand-mark" onClick={showCollection} title="笔记本列表">SN</button>
           <div>
             <div className="brand-title">silicon-notebook</div>
-            <div className="brand-subtitle">{isWorkspace ? "Notebook workspace" : outerView === "memory" ? "Private Memory" : "Notebook collection"}</div>
+            <div className="brand-subtitle">{isWorkspace ? "笔记本工作区" : outerView === "memory" ? "私有记忆" : "笔记本列表"}</div>
           </div>
         </div>
         <div className="topbar-right">
@@ -3422,7 +3421,7 @@ export default function Home() {
                   onClick={() => { setAccountMenuOpen(false); showGlobalMemory(); }}
                 >
                   <Bookmark size={16} />
-                  <span>私有 Memory</span>
+                  <span>私有记忆</span>
                 </button>
                 {canSeeAdminUsage(currentUser.role) && (
                   <a className="user-logout" role="menuitem" href="/admin/usage" title="用户使用总览">
@@ -3457,7 +3456,7 @@ export default function Home() {
             <div className="library-actions">
               <div className={`collection-search ${searchQuery ? "search-open" : ""}`}>
                 <button className="icon-button" title="Search">⌕</button>
-                <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} type="search" placeholder="搜索 notebook、来源、元素" />
+                <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} type="search" placeholder="搜索笔记本、来源、元素" />
               </div>
               <div className="segmented" aria-label="View mode">
                 {[
@@ -3483,7 +3482,7 @@ export default function Home() {
                   ))}
                 </div>
               </div>
-              <button className="sort-button" title="查看我分享出去的知识库及其只读成员" onClick={() => openSharedByMe().catch(reportError)}>
+              <button className="sort-button" title="查看我分享出去的笔记本及其只读成员" onClick={() => openSharedByMe().catch(reportError)}>
                 <Share2 size={15} /> 已分享
               </button>
               <button className="new-pill" onClick={() => openCreate().catch(reportError)}>＋ 新建</button>
@@ -3492,7 +3491,7 @@ export default function Home() {
 
           <section className="collection-title">
             <h1>我的笔记本</h1>
-            {searchQuery && <p>{visibleNotebooks.length} 个 notebook，搜索 “{searchQuery}”</p>}
+            {searchQuery && <p>{visibleNotebooks.length} 个笔记本，搜索 “{searchQuery}”</p>}
           </section>
 
           <section className={`notebook-grid view-${viewMode}`}>
@@ -3513,7 +3512,7 @@ export default function Home() {
                 )}
                 {visibleNotebooks.map(({ notebook, hits }, index) => (
                   <article key={notebook.id} className={`notebook-card ${cardTone(index)}`}>
-                    <button className="card-menu" onClick={(event) => openNotebookMenu(notebook.id, event)} title="Notebook actions">⋮</button>
+                    <button className="card-menu" onClick={(event) => openNotebookMenu(notebook.id, event)} title="笔记本操作">⋮</button>
                     <button className="notebook-card-main" onClick={() => openNotebook(notebook.id).catch(reportError)}>
                       <div className="card-icon">{cardIcon(index, notebook)}</div>
                       <div>
@@ -3532,7 +3531,7 @@ export default function Home() {
                           type="button"
                           className="notebook-memory-link"
                           onClick={() => openNotebookMemory(notebook.id).catch(reportError)}
-                        >{notebook.counts.memories ?? 0} Memory</button>
+                        >{notebook.counts.memories ?? 0} 条记忆</button>
                       </div>
                     </div>
                   </article>
@@ -3541,8 +3540,8 @@ export default function Home() {
             )}
             {visibleNotebooks.length === 0 && (
               <article className="empty-state">
-                <strong>没有找到 notebook</strong>
-                <p>换一个关键词，或回到“我的笔记本”创建新的 notebook。</p>
+                <strong>没有找到笔记本</strong>
+                <p>换一个关键词，或回到“我的笔记本”创建新的笔记本。</p>
               </article>
             )}
           </section>
@@ -3584,7 +3583,7 @@ export default function Home() {
                     className="notebook-title-input"
                     value={titleDraft}
                     disabled={titleSaveInFlight}
-                    aria-label="Notebook name"
+                    aria-label="笔记本名称"
                     maxLength={80}
                     onChange={(event) => setTitleDraft(event.target.value)}
                     onBlur={() => saveInlineNotebookName().catch(reportError)}
@@ -3599,7 +3598,7 @@ export default function Home() {
                 )}
               </div>
             </div>
-            <div className="workspace-toolbar" aria-label="Notebook actions">
+            <div className="workspace-toolbar" aria-label="笔记本操作">
               <button className="workspace-primary-action" onClick={() => openCreate().catch(reportError)}>
                 <Plus size={18} strokeWidth={2.8} />
                 <span>创建笔记本</span>
@@ -3613,14 +3612,14 @@ export default function Home() {
                     const baseName = currentNotebook?.base_notebook_name || "";
                     setInfoModal({
                     title: "分析",
-                    message: "对当前 notebook 的知识图谱与基准库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
-                    sections: baseName ? [["当前基准库", [baseName]] as [string, string[]]] : undefined,
+                    message: "对当前笔记本的知识图谱与公共知识库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
+                    sections: baseName ? [["当前公共知识库", [baseName]] as [string, string[]]] : undefined,
                     actions: [
-                      ...(currentUser?.role === "admin" ? [{ label: "晋升队列", desc: "审核待晋升进基准库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
-                      ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前知识库设为全局唯一的权威参考层，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
+                      ...(currentUser?.role === "admin" ? [{ label: "内容审核", desc: "审核待收录进公共知识库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
+                      ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前笔记本设为全局唯一的公共知识库，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
                       // 检索索引的立即/空闲时重建已收敛进「看板 → 索引与构建」面板(检索索引行,
                       // 与 tier 解耦、大库亦可建)，此处不再重复列出，避免同一动作多处入口各自确认。
-                      { label: "边审查队列", desc: "审核知识图谱中待人工确认的实体关系边", action: () => openEdgeReviewQueue().catch(reportError) }
+                      { label: "关系审核队列", desc: "审核知识图谱中待人工确认的实体关联", action: () => openEdgeReviewQueue().catch(reportError) }
                     ]
                     });
                   }}>
@@ -3635,7 +3634,7 @@ export default function Home() {
                 {capabilities.canManageSchemas && (
                   <button className="workspace-nav-button" onClick={openSchemas}>
                     <Database size={17} />
-                    <span>Schema</span>
+                    <span>内容类型</span>
                   </button>
                 )}
                 <button className="workspace-nav-button" onClick={() => openKgView()}>
@@ -3657,9 +3656,9 @@ export default function Home() {
                 </button>
                 <button className="workspace-nav-button" onClick={() => setInfoModal({
                   title: "设置",
-                  message: `${health?.llm_configured ? "LLM 已配置" : "LLM 尚未配置"}。当前设置页先保留状态与 notebook 编辑入口。`,
+                  message: `${health?.llm_configured ? "LLM 已配置" : "LLM 尚未配置"}。当前设置页先保留状态与笔记本编辑入口。`,
                   actions: capabilities.canWriteNotebook
-                    ? [{ label: "编辑当前 notebook", primary: true, action: () => setEditingNotebook(currentNotebook) }]
+                    ? [{ label: "编辑当前笔记本", primary: true, action: () => setEditingNotebook(currentNotebook) }]
                     : []
                 })}>
                   <Settings size={17} />
@@ -3739,19 +3738,19 @@ export default function Home() {
                                 type="button"
                                 className="add-source-button"
                                 disabled={buildingKg}
-                                title="有新增来源尚未入图，点击增量抽取并合并至知识图谱"
+                                title="有新增来源尚未分析，点击分析新增内容并合并进知识图谱"
                                 onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                               >
-                                <Network size={20} strokeWidth={2.7} /> {buildingKg ? "补抽中…" : `补抽 ${currentNotebook.kg_pending_sources ?? "?"} 篇新增并合并`}
+                                <Network size={20} strokeWidth={2.7} /> {buildingKg ? "分析中…" : `分析新增 ${currentNotebook.kg_pending_sources ?? "?"} 篇并合并`}
                               </button>
                               <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                                知识图谱已构建 · 有 {currentNotebook.kg_pending_sources ?? "?"} 篇来源未入图
+                                知识图谱已就绪 · 有 {currentNotebook.kg_pending_sources ?? "?"} 篇来源待分析
                               </p>
                             </>
                           )
                           : (
                             <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                              {`✓ 知识图谱已构建 · 可用「${strictLabel}」`}
+                              {`✓ 知识图谱已就绪 · 可用「${strictLabel}」`}
                             </p>
                           )
                         }
@@ -3764,16 +3763,16 @@ export default function Home() {
                           className="add-source-button"
                           disabled={buildingKg}
                           title={currentNotebook?.base_kg_available
-                            ? `本库尚未建图，${strictLabel}会借用底层库（base）；点击为本库单独构建知识图谱`
-                            : `默认问答（通用）不需要；「${strictLabel}」需先构建知识图谱`}
+                            ? `本笔记本尚未整理知识图谱，${strictLabel}会借用公共知识库；点击为本笔记本单独整理`
+                            : `默认问答（通用）不需要；「${strictLabel}」需先整理知识图谱`}
                           onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
-                          <Network size={20} strokeWidth={2.7} /> {buildingKg ? "全量构建中…" : "全量构建知识图谱"}
+                          <Network size={20} strokeWidth={2.7} /> {buildingKg ? "整理中…" : "整理知识图谱"}
                         </button>
                         <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
                           {currentNotebook?.base_kg_available
-                            ? `本库未建图，${strictLabel}将借用底层库（base）`
-                            : `默认问答无需；「${strictLabel}」需要先构建`}
+                            ? `本笔记本尚未整理知识图谱，${strictLabel}将借用公共知识库`
+                            : `默认问答无需；「${strictLabel}」需要先整理`}
                         </p>
                       </>
                     )
@@ -3794,14 +3793,14 @@ export default function Home() {
                       tabIndex={clickable ? 0 : undefined}
                       title={clickable
                         ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : v.primaryOp === "rebuild" ? "点击全量重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
-                        : (s.eligible ? "" : "库较小，暂不需要检索索引（走暴力检索）")}
+                        : (s.eligible ? "" : "内容较少，暂不需要检索索引（直接搜索已够快）")}
                       onClick={clickable ? () => runScaleIndexOp(v.primaryOp!) : undefined}
                       onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); runScaleIndexOp(v.primaryOp!); } }) : undefined}
                       style={{ margin: "2px 2px 8px", cursor: clickable ? "pointer" : "default", color }}
                     >
                       {label}
                       {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
-                        <span title="未索引部分不参与检索与推理（chunk/KG对象/关系/图谱漫游）；点「更新索引」或等待自动增量收进后可见">
+                        <span title="未索引部分不参与检索与推理（段落、概念、关联、图谱）；点「更新索引」或等待自动收进后可见">
                           {` · ${s.unindexed_sources} 源待索引`}
                         </span>
                       )}
@@ -3844,9 +3843,9 @@ export default function Home() {
                           {currentNotebook?.kg_ready && (
                             <span
                               className={`source-kg-badge${source.kg_extracted ? " source-kg-badge--in" : ""}`}
-                              title={source.kg_extracted ? "已入图：该来源已完成 KG 抽取" : "未入图：该来源尚未加入知识图谱"}
+                              title={source.kg_extracted ? "已分析：该来源已完成知识图谱分析" : "待分析：该来源尚未加入知识图谱"}
                             >
-                              {source.kg_extracted ? "已入图" : "未入图"}
+                              {source.kg_extracted ? "已分析" : "待分析"}
                             </span>
                           )}
                           {source.paper_meta_status === "missing" && (
@@ -4158,7 +4157,7 @@ export default function Home() {
                     )}
                     {groupOf(askMode) === "strict" && !kgAvailable && (
                       <span className="mode-hint">
-                        {`该 notebook 尚无知识图谱，${strictLabel}需先构建`}
+                        {`该笔记本尚无知识图谱，${strictLabel}需先整理`}
                         <button
                           type="button"
                           className="mode-engine"
@@ -4166,12 +4165,12 @@ export default function Home() {
                           disabled={buildingKg || asking}
                           onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
-                          {buildingKg ? "全量构建中…" : "全量构建知识图谱"}
+                          {buildingKg ? "整理中…" : "整理知识图谱"}
                         </button>
                       </span>
                     )}
                     {groupOf(askMode) === "strict" && kgAvailable && currentNotebook?.base_kg_available && !currentNotebook?.kg_ready && (
-                      <span className="mode-hint">本笔记本无图，将使用底层库（base）推理</span>
+                      <span className="mode-hint">本笔记本尚无知识图谱，将借用公共知识库推理</span>
                     )}
                   </div>
                   <button
@@ -4214,7 +4213,7 @@ export default function Home() {
           ) : (
             <>
               <button onClick={() => { setEditingNotebook(menuNotebook); setMenuNotebookId(null); setMenuPosition(null); }}>编辑信息</button>
-              <button className="danger" onClick={() => { setDeleteNotebook(menuNotebook); setMenuNotebookId(null); setMenuPosition(null); }}>删除 notebook</button>
+              <button className="danger" onClick={() => { setDeleteNotebook(menuNotebook); setMenuNotebookId(null); setMenuPosition(null); }}>删除笔记本</button>
             </>
           )}
         </div>
@@ -4253,8 +4252,8 @@ export default function Home() {
               <div>
                 <h2>分享「{currentNotebook.name}」</h2>
                 <p>{shareModal.copyable
-                  ? "拿到链接的登录用户可将这个知识库整份拷贝到自己的空间。"
-                  : "此库较大，拿到链接的登录用户可以只读方式加入(浏览/问答/看图，不能修改)。"}</p>
+                  ? "拿到链接的登录用户可将这个笔记本整份拷贝到自己的空间。"
+                  : "此笔记本较大，拿到链接的登录用户可以只读方式加入(浏览/问答/看图，不能修改)。"}</p>
               </div>
               <button className="icon-button" onClick={() => setShareModal(null)} title="Close">×</button>
             </div>
@@ -4271,7 +4270,7 @@ export default function Home() {
                 </div>
               </label>
               <p className="tool-hint" style={{ margin: "2px 0 0" }}>
-                {shareModal.copyable ? "他人可拷贝" : "库较大，他人可只读加入"}
+                {shareModal.copyable ? "他人可拷贝" : "笔记本较大，他人可只读加入"}
                 {` · ${shareModal.size.sources} 来源 · ${shareModal.size.nodes} 节点 · ${shareModal.size.edges} 边 · ${formatFileSize(shareModal.size.bytes)}`}
               </p>
               <div className="tag-row">
@@ -4306,7 +4305,7 @@ export default function Home() {
               )}
               {sharedPreview.mode === "readonly" && (
                 <p className="tool-hint" style={{ margin: "2px 0 0" }}>
-                  此库较大，将以只读方式加入——你可浏览来源、问答、查看知识图谱，但不能修改。
+                  此笔记本较大，将以只读方式加入——你可浏览来源、问答、查看知识图谱，但不能修改。
                 </p>
               )}
               <div className="tag-row">
@@ -4346,7 +4345,7 @@ export default function Home() {
             <div className="source-modal-header">
               <div>
                 <h2>已分享</h2>
-                <p>你分享出去的知识库。小库可被他人拷贝为独立副本;大库以只读方式共享,下方列出已加入的只读成员。</p>
+                <p>你分享出去的笔记本。较小的可被他人拷贝为独立副本;较大的以只读方式共享,下方列出已加入的只读成员。</p>
               </div>
               <button className="icon-button" onClick={() => setSharedByMeOpen(false)} title="Close">×</button>
             </div>
@@ -4356,8 +4355,8 @@ export default function Home() {
               ) : sharedByMeList.length === 0 ? (
                 <article className="source-empty">
                   <div>▧</div>
-                  <strong>尚未分享任何知识库</strong>
-                  <p>在某个知识库里点「分享」即可生成链接。</p>
+                  <strong>尚未分享任何笔记本</strong>
+                  <p>在某个笔记本里点「分享」即可生成链接。</p>
                 </article>
               ) : (
                 <div className="stack">
@@ -4365,7 +4364,7 @@ export default function Home() {
                     <div className="checklist-row" key={item.id} style={{ flexDirection: "column", alignItems: "stretch", gap: 6 }}>
                       <div className="tag-row" style={{ alignItems: "center", gap: 8 }}>
                         <span style={{ flex: 1, wordBreak: "break-word", fontWeight: 600 }}>{item.name}</span>
-                        <span className="new-pill" title={item.mode === "readonly" ? "库较大,只读共享" : "库较小,可被拷贝"}>
+                        <span className="new-pill" title={item.mode === "readonly" ? "笔记本较大,只读共享" : "笔记本较小,可被拷贝"}>
                           {shareModeLabel(item.mode)}
                         </span>
                       </div>
@@ -4420,7 +4419,7 @@ export default function Home() {
             <div className="source-modal-header">
               <div>
                 <h2>添加来源</h2>
-                <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定抽取 schema。</p>
+                <p>上传文件或添加链接；文件可为每个指定文档类型（默认自动检测），类型决定要分析出哪些字段。</p>
               </div>
               <button className="icon-button" onClick={() => { setStagedFiles([]); setStagedDocTypes([]); setLinkSectionOpen(false); setSourceModalOpen(false); }} title="Close">×</button>
             </div>
@@ -4531,7 +4530,7 @@ export default function Home() {
           <div className="utility-modal-card">
             <div className="source-modal-header">
               <div>
-                <h2>编辑 notebook</h2>
+                <h2>编辑笔记本</h2>
                 <p>第一版先手动修改标题、描述和领域；后续会由大模型从来源中补全。</p>
               </div>
               <button className="icon-button" onClick={() => setEditingNotebook(null)} title="Close">×</button>
@@ -4559,8 +4558,8 @@ export default function Home() {
           <div className="utility-modal-card narrow">
             <div className="source-modal-header">
               <div>
-                <h2>删除 notebook</h2>
-                <p>确定删除 “{deleteNotebook.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；所有成员各自绑定到此笔记本的私有 Memory 也会按生命周期一并删除。</p>
+                <h2>删除笔记本</h2>
+                <p>确定删除 “{deleteNotebook.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；所有成员各自绑定到此笔记本的私有记忆也会按生命周期一并删除。</p>
               </div>
               <button className="icon-button" onClick={() => setDeleteNotebook(null)} title="Close">×</button>
             </div>
@@ -4795,14 +4794,14 @@ export default function Home() {
                   {(() => {
                     const kg = indexStatus.kg;
                     const busy = kg.building || buildingKg;
-                    const stateLabel = busy ? "抽取中…" : !kg.ready ? "未建" : kg.pending_sources > 0 ? `${kg.pending_sources} 篇待抽` : "就绪";
+                    const stateLabel = busy ? "分析中…" : !kg.ready ? "未整理" : kg.pending_sources > 0 ? `${kg.pending_sources} 篇待分析` : "就绪";
                     const tone: "ok" | "warn" = !busy && kg.ready && kg.pending_sources === 0 ? "ok" : "warn";
                     const color = tone === "ok" ? "var(--color-ok, #1a7f5a)" : "var(--color-warn, #b97a00)";
                     const sub = !kg.ready
-                      ? `从来源抽取知识对象与关系；「${strictLabel}」需要先构建`
+                      ? `从来源分析出知识对象与关系；「${strictLabel}」需要先整理`
                       : kg.pending_sources > 0
-                        ? "有新增来源尚未入图，可增量抽取并合并进现有图谱"
-                        : `已构建，可用「${strictLabel}」`;
+                        ? "有新增来源尚未分析，可分析新增内容并合并进现有图谱"
+                        : `已就绪，可用「${strictLabel}」`;
                     return (
                       <div className={`index-card index-tone-${tone}`}>
                         <span className="index-ic" aria-hidden="true"><Network size={19} /></span>
@@ -4821,7 +4820,7 @@ export default function Home() {
                                 className="index-cta primary"
                                 onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                               >
-                                {kg.ready ? `补抽 ${kg.pending_sources} 篇` : "构建"}
+                                {kg.ready ? `分析新增 ${kg.pending_sources} 篇` : "整理"}
                               </button>
                             )}
                             {kg.ready && kg.pending_sources === 0 && (
@@ -4831,9 +4830,9 @@ export default function Home() {
                                   className="index-cta"
                                   onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
                                 >
-                                  完整重抽
+                                  全部重新分析
                                 </button>
-                                <button type="button" className="index-cta" onClick={relinkFromKgView}>补连孤立节点</button>
+                                <button type="button" className="index-cta" onClick={relinkFromKgView}>补上关联</button>
                               </>
                             )}
                           </div>
@@ -4857,7 +4856,7 @@ export default function Home() {
                             <span className="index-state">概念合并</span>
                             <span className="tag" style={{ color }}>{stateLabel}{tsSuffix}</span>
                           </div>
-                          <div className="index-sub">跨文档概念聚类；重算并刷新图谱索引（不重新抽取来源）</div>
+                          <div className="index-sub">跨文档概念聚类；重算并刷新图谱索引（不重新分析来源）</div>
                         </div>
                         {!busy && !isReader && (
                           <div className="index-ctas">
@@ -4877,12 +4876,12 @@ export default function Home() {
                     const busy = buildingScaleIndex || v.state === "building" || v.state === "queued";
                     const tsSuffix = s.last_built_at ? ` · 上次 ${formatRelativeTime(s.last_built_at)}` : "";
                     const color = v.tone === "warn" ? "var(--color-warn, #b97a00)" : v.tone === "ok" ? "var(--color-ok, #1a7f5a)" : undefined;
-                    const desc = v.tone === "muted" ? "库较小，走暴力检索即可，无需索引"
+                    const desc = v.tone === "muted" ? "内容较少，直接搜索已够快，无需索引"
                       : v.state === "building" ? "后台进行，完成后自动更新"
                       : v.state === "queued" ? "已排队，将在服务器空闲时构建；完成后自动更新"
                       : v.state === "stale" ? "新增内容未纳入索引，暂不参与检索与推理"
                       : v.state === "indexed" ? "已建成且为最新"
-                      : `从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与${strictLabel}`;
+                      : `为本笔记本的内容建立快速查找结构，加速语义检索与${strictLabel}`;
                     return (
                       <div className={`index-card index-tone-${v.tone}`}>
                         <span className="index-ic" aria-hidden="true"><Database size={19} /></span>
@@ -4899,8 +4898,8 @@ export default function Home() {
                           {v.state === "indexed" && (
                             <div className="mini-tags">
                               <span className="tag">{s.n_nodes} 节点</span>
-                              <span className="tag">{s.n_chunks} chunks</span>
-                              {s.has_chunk_ann && <span className="tag">chunk ANN ✓</span>}
+                              <span className="tag">{s.n_chunks} 段</span>
+                              {s.has_chunk_ann && <span className="tag">段落索引 ✓</span>}
                             </div>
                           )}
                         </div>
@@ -4938,8 +4937,8 @@ export default function Home() {
           <div className="utility-modal-card">
             <div className="source-modal-header">
               <div>
-                <h2>Schema 管理</h2>
-                <p>管理抽取的知识对象类型与字段。内置类型可改字段/标签/停用；可新增自定义类型；也可从当前笔记本内容归纳候选类型（建议态，需人工批准）。</p>
+                <h2>内容类型管理</h2>
+                <p>管理要分析出的知识对象类型与字段。内置类型可改字段/标签/停用；可新增自定义类型；也可从当前笔记本内容归纳候选类型（建议态，需人工批准）。</p>
               </div>
               <button className="icon-button" onClick={() => setSchemaModalOpen(false)} title="Close">×</button>
             </div>
@@ -4964,7 +4963,7 @@ export default function Home() {
             <div className="source-modal-header">
               <div>
                 <h2>知识关系图</h2>
-                <p>由各知识对象的关系字段（related_concepts / claims / formulas / procedures）解析出的边。用于 Implication / 冲突检测的下游消费。</p>
+                <p>由各知识对象的关系字段（related_concepts / claims / formulas / procedures）解析出的关联，供蕴含分析与冲突检测使用。</p>
               </div>
               <button className="icon-button" onClick={() => setGraphOpen(false)} title="Close">×</button>
             </div>
@@ -4972,7 +4971,7 @@ export default function Home() {
               {graph === null ? (
                 <p className="tool-hint">加载中…</p>
               ) : graph.edges.length === 0 ? (
-                <p className="tool-hint">暂无关系边。当抽取/审核的对象在 related_* 字段引用了同库其它对象时，这里会出现连线。</p>
+                <p className="tool-hint">暂无关联。当分析/审核的对象在 related_* 字段引用了同一笔记本的其它对象时，这里会出现连线。</p>
               ) : (
                 <div className="stack">
                   <div className="tag-row"><span className="tag">节点 {graph.nodes.length}</span><span className="tag">边 {graph.edges.length}</span></div>
@@ -5011,16 +5010,16 @@ export default function Home() {
                     type="button"
                     className="sort-button"
                     disabled={relinkingKg || buildingKg}
-                    title="为孤立节点补连边（快速、确定性，不覆盖现有图）"
+                    title="为没建立关联的内容补上关联（快速、确定性，不覆盖现有图）"
                     onClick={relinkFromKgView}
                   >
-                    {relinkingKg ? "补连中…" : "补连孤立节点"}
+                    {relinkingKg ? "补连中…" : "补上关联"}
                   </button>
                   <button
                     type="button"
                     className="sort-button"
                     disabled={kgRefreshBusy || buildingKg}
-                    title="对现有节点重新聚类 / 跨文档合并并刷新（不重新抽取来源，会先确认）"
+                    title="对现有概念重新聚类 / 跨文档合并并刷新（不重新分析来源，会先确认）"
                     onClick={confirmRefreshUnifiedKg}
                   >
                     {kgRefreshBusy ? "合并中…" : "重新合并"}
@@ -5029,10 +5028,10 @@ export default function Home() {
                     type="button"
                     className="sort-button kg-action-danger"
                     disabled={buildingKg}
-                    title="清空现有知识图谱并重新抽取全部来源（后台任务，可能数分钟）"
+                    title="清空现有知识图谱并重新分析全部来源（后台任务，可能数分钟）"
                     onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
                   >
-                    {buildingKg ? "重抽中…" : "完整重抽"}
+                    {buildingKg ? "分析中…" : "全部重新分析"}
                   </button>
                 </div>
               </div>
@@ -5097,14 +5096,14 @@ export default function Home() {
                           tabIndex={clickable ? 0 : undefined}
                           title={clickable
                             ? (v.primaryOp === "update" ? "点击更新检索索引（会先确认）" : v.primaryOp === "rebuild" ? "点击全量重建检索索引（会先确认）" : "点击构建检索索引（会先确认）")
-                            : (s.eligible ? "" : "库较小，暂不需要检索索引（走暴力检索）")}
+                            : (s.eligible ? "" : "内容较少，暂不需要检索索引（直接搜索已够快）")}
                           onClick={clickable ? () => runScaleIndexOp(v.primaryOp!) : undefined}
                           onKeyDown={clickable ? ((e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); runScaleIndexOp(v.primaryOp!); } }) : undefined}
                           style={{ cursor: clickable ? "pointer" : "default", color }}
                         >
                           {label}
                           {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
-                            <span title="未索引部分不参与检索与推理（chunk/KG对象/关系/图谱漫游）；点「更新索引」或等待自动增量收进后可见">
+                            <span title="未索引部分不参与检索与推理（段落、概念、关联、图谱）；点「更新索引」或等待自动收进后可见">
                               {` · ${s.unindexed_sources} 源待索引`}
                             </span>
                           )}
@@ -5145,7 +5144,7 @@ export default function Home() {
               <div className="kg-rail-section">
                 <h3>待确认合并 ({pendingMerges.length})</h3>
                 <button className="ghost-button" onClick={reviewPendingMerges} disabled={!pendingMerges.length || kgReviewBusy}>
-                  {kgReviewBusy ? "预审中…" : "LLM 预审"}
+                  {kgReviewBusy ? "判重中…" : "自动判重"}
                 </button>
                 <button
                   className="ghost-button"
@@ -5153,8 +5152,8 @@ export default function Home() {
                   disabled={!pendingMerges.length || reviewAllJob?.status === "running"}
                 >
                   {reviewAllJob?.status === "running"
-                    ? `全部预审中… ${reviewAllJob.done}/${reviewAllJob.total}`
-                    : "全部预审"}
+                    ? `全部判重中… ${reviewAllJob.done}/${reviewAllJob.total}`
+                    : "全部自动判重"}
                 </button>
                 {pendingMerges.length === 0 ? <p className="tool-hint">无</p> : pendingMerges.map((m) => (
                   <div className="kg-merge-row" key={m.id}>
@@ -5331,14 +5330,14 @@ export default function Home() {
           <div className="utility-modal-card">
             <div className="source-modal-header">
               <div>
-                <h2>晋升队列</h2>
-                <p>个人 KG 节点与 Memory 提取候选申请晋升到基准语料。批准后会执行去重并加入基准库。</p>
+                <h2>内容审核</h2>
+                <p>个人知识库中的内容与记忆候选申请收录到公共知识库。批准后会合并重复并加入公共知识库。</p>
               </div>
               <button className="icon-button" onClick={() => setPromoOpen(false)} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               {(promoQueue ?? []).length === 0 ? (
-                <p className="tool-hint">暂无待审晋升请求。</p>
+                <p className="tool-hint">暂无待审核的收录申请。</p>
               ) : (
                 <div className="stack">
                   {(promoQueue ?? []).map((cand) => {
@@ -5348,17 +5347,17 @@ export default function Home() {
                       <div className="tag-row">
                         <span className="tag">{label(PROMOTION_STATUS, cand.status, "处理中")}</span>
                         <span className="tag">{cand.object_type}</span>
-                        {cand.source_kind === "memory" && <span className="tag">Memory 提取候选</span>}
+                        {cand.source_kind === "memory" && <span className="tag">记忆提取候选</span>}
                         {cand.source_kind === "memory" && review.sourceRevision > 0 && (
                           <span className="tag">固定修订 #{review.sourceRevision}</span>
                         )}
                         {cand.base_match_id && (
-                          <span className="tag conflict">去重匹配: {cand.base_match_id.slice(0, 10)}</span>
+                          <span className="tag conflict">疑似重复: {cand.base_match_id.slice(0, 10)}</span>
                         )}
                       </div>
                       <h3>{String((cand.payload as Record<string, unknown>).name ?? (cand.payload as Record<string, unknown>).title ?? cand.object_id)}</h3>
                       {cand.source_kind === "memory" && review.candidates.length > 0 && (
-                        <div className="stack" aria-label="Memory 待审知识对象">
+                        <div className="stack" aria-label="记忆待审知识对象">
                           {review.candidates.map((item, index) => (
                             <section className="item" key={`${cand.id}-${item.objectType}-${index}`}>
                               <strong>{item.objectType}</strong>
@@ -5390,7 +5389,7 @@ export default function Home() {
                         </div>
                       )}
                       {cand.base_match_id && (
-                        <p className="conflict-note">基准库中已有相似节点 — 批准后将合并去重。</p>
+                        <p className="conflict-note">公共知识库中已有相似内容 — 批准后将合并。</p>
                       )}
                       {(cand.status === "proposed" || cand.status === "under_review") && (
                         <div className="modal-actions">
@@ -5406,7 +5405,7 @@ export default function Home() {
                             disabled={promoBusy}
                             onClick={() => decidePromotion(cand.id, "approve").catch(reportError)}
                           >
-                            批准晋升
+                            批准收录
                           </button>
                         </div>
                       )}
@@ -5430,8 +5429,8 @@ export default function Home() {
           <div className="utility-modal-card">
             <div className="source-modal-header">
               <div>
-                <h2>边审查队列</h2>
-                <p>按「高中心性 × 低可信」排序的关系。确认可信边，或拒绝错误边（被拒边将从所有图推理遍历中排除）。</p>
+                <h2>关系审核队列</h2>
+                <p>按「高中心性 × 低可信」排序的关系。确认可信的关联，或拒绝错误的关联（被拒的关联将从所有图推理遍历中排除）。</p>
               </div>
               <button className="icon-button" onClick={() => setEdgeReviewOpen(false)} title="Close">×</button>
             </div>
@@ -5541,7 +5540,7 @@ function NotebookList({
   return (
     <section className="notebook-list">
       <div className="notebook-list-header">
-        <span>标题</span><span>来源</span><span>Memory</span><span>创建日期</span><span>角色</span><span />
+        <span>标题</span><span>来源</span><span>记忆</span><span>创建日期</span><span>角色</span><span />
       </div>
       {entries.map(({ notebook, index, hits }) => (
         <article className="notebook-list-row" key={notebook.id}>
@@ -5556,7 +5555,7 @@ function NotebookList({
           <button className="notebook-list-cell notebook-memory-link" onClick={() => openMemory(notebook.id)}>{notebook.counts.memories ?? 0} 条</button>
           <button className="notebook-list-cell" onClick={() => openNotebook(notebook.id)}>{notebook.created_label}</button>
           <button className="notebook-list-cell role-cell" onClick={() => openNotebook(notebook.id)}>Owner</button>
-          <button className="list-row-menu" onClick={(event) => openMenu(notebook.id, event)} title="Notebook actions">⋮</button>
+          <button className="list-row-menu" onClick={(event) => openMenu(notebook.id, event)} title="笔记本操作">⋮</button>
         </article>
       ))}
     </section>
@@ -5835,7 +5834,7 @@ function SchemaRow({
         <textarea rows={2} value={fieldsText} disabled={busy} onChange={(e) => setFieldsText(e.target.value)} />
       </label>
       <label className="schema-field">
-        <span>说明（用于抽取提示）</span>
+        <span>说明（用于分析提示）</span>
         <input value={description} disabled={busy} onChange={(e) => setDescription(e.target.value)} />
       </label>
       <div className="schema-actions">
@@ -6095,10 +6094,10 @@ function KnowledgeBrowser({
                 {!readOnly && tier === "personal" && item.status !== "deprecated" && onPropose && (
                   <button
                     className="sort-button"
-                    title="提交晋升到基准库"
+                    title="贡献到公共知识库"
                     onClick={() => onPropose(item.id)}
                   >
-                    ↑ 提交晋升
+                    ↑ 提交贡献
                   </button>
                 )}
               </div>

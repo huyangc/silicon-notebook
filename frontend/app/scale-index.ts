@@ -88,12 +88,12 @@ export function describeScaleIndex(s: ScaleIndexStatus): ScaleIndexView {
 // 每个动作的确认文案 —— 描述具体精确,并诚实说明 update 会在何种条件下自动转全量。
 export function scaleIndexOpConfirm(op: ScaleIndexOp, s: ScaleIndexStatus): string {
   if (op === "build") {
-    return `构建检索索引？\n\n从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与${STRICT_LABEL}。后台进行，大库可能数分钟。`;
+    return `建立检索索引？\n\n为本笔记本的内容建立快速查找结构，加速语义检索与${STRICT_LABEL}。后台进行，内容较多时可能需要数分钟。`;
   }
   if (op === "update") {
     const n = s.unindexed_sources ?? 0;
     const what = n > 0 ? `把 ${n} 个新增来源` : "把新增/变更内容";
     return `更新检索索引？\n\n${what}增量收进现有索引。后台进行，通常较快；新增来源过多或运行时切换向量维度时，会自动转为整体重建。`;
   }
-  return "全量重建检索索引？\n\n删除现有索引并从头重建整套（CSR 图 + KG/chunk ANN）。后台进行，大库可能数分钟；期间检索走暴力回退。";
+  return "全量重建检索索引？\n\n删除现有索引并从头重建。后台进行，内容较多时可能需要数分钟；期间检索会走较慢的直接搜索。";
 }

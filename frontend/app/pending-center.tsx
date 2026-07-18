@@ -232,7 +232,7 @@ export function PendingBell(props: {
   const labelFor = (it: PendingItem): string => {
     if (it.type === "report_outline") return `深度报告《${it.title}》`;
     if (it.type === "governance") {
-      const n = it.subtype === "merge" ? "待合并" : it.subtype === "edge" ? "边审" : "晋升";
+      const n = it.subtype === "merge" ? "待合并" : it.subtype === "edge" ? "关系审核" : "内容审核";
       return `${it.notebook_name} · ${n} ${it.count}`;
     }
     if (it.type === "paper_meta") {

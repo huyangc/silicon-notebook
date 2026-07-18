@@ -75,7 +75,7 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   if (typeof detail.found === "number") return `新增 ${detail.found}`;
   if (typeof detail.next_action === "string") return label(NEXT_ACTION, detail.next_action, "");
   if (typeof detail.kg === "number" || typeof detail.elements === "number") {
-    return `${Number(detail.kg ?? 0)} 个 KG / ${Number(detail.elements ?? 0)} 段原文`;
+    return `${Number(detail.kg ?? 0)} 个概念 / ${Number(detail.elements ?? 0)} 段原文`;
   }
   return "";
 }

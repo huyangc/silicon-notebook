@@ -76,7 +76,7 @@ test("global Memory page wires profile, token, revoke, and disable actions", () 
   assert.match(panel, /`\/agent-profiles\/\$\{encodeURIComponent\(selectedProfile\)\}\/tokens`/);
   assert.match(panel, /`\/agent-tokens\/\$\{encodeURIComponent\(tokenId\)\}`/);
   assert.match(panel, /default_notebook_id/);
-  assert.match(panel, /Notebook allowlist/);
+  assert.match(panel, /笔记本白名单/);
   assert.match(panel, /过期时间/);
   assert.match(panel, /明文 token 仅显示这一次/);
   assert.match(panel, /status: "revoked"/);

@@ -124,10 +124,10 @@ export function memoryPromotionPath(memoryId: string): string {
 
 export function memoryPromotionLabel(state: MemoryPromotionState): string {
   return {
-    none: "提升到 KG",
-    proposed: "KG 审核中",
-    approved: "已进入 Base KG",
-    rejected: "KG 晋升已拒绝",
+    none: "贡献到公共知识库",
+    proposed: "审核中",
+    approved: "已收录",
+    rejected: "未采纳",
   }[state];
 }
 

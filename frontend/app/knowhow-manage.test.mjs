@@ -75,11 +75,11 @@ test("行标题列选择器：标签与「不设置」选项文案", () => {
 });
 
 test("ANCHOR_SET_HINT: 已选行标题列的提示语与规格①逐字一致", () => {
-  assert.strictEqual(ANCHOR_SET_HINT, "用作每行的标题；设置后每行作为一个节点进入知识图谱，节点名取自该列");
+  assert.strictEqual(ANCHOR_SET_HINT, "用作每行的标题；设置后每行作为一个概念进入知识图谱，概念名取自该列");
 });
 
 test("ANCHOR_NONE_HINT: 未选行标题列的提示语与规格①逐字一致", () => {
-  assert.strictEqual(ANCHOR_NONE_HINT, "未选行标题列：本表仅参与问答检索，不构建图谱节点");
+  assert.strictEqual(ANCHOR_NONE_HINT, "未选行标题列：本表仅参与问答检索，不加入知识图谱");
 });
 
 test("anchorHint: null → 未选提示；下标/列 id → 已选提示", () => {

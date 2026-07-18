@@ -68,7 +68,7 @@ test("an inaccessible notebook Memory deep-link falls back without invalidating 
 test("workspace orchestration exposes global and notebook Memory surfaces", () => {
   assert.match(page, /import \{ MemoryPanel, MemorySaveDialog \} from "\.\/memory-panel";/);
   assert.doesNotMatch(page, /className="outer-nav"/);
-  assert.match(page, /<span>私有 Memory<\/span>/);
+  assert.match(page, /<span>私有记忆<\/span>/);
   assert.match(page, /setAccountMenuOpen\(false\); showGlobalMemory\(\);/);
   assert.match(page, /function openNotebookMemory\(notebookId: string\)/);
   assert.match(page, /<MemoryPanel scope="global" notebookId=\{null\}/);
@@ -77,7 +77,7 @@ test("workspace orchestration exposes global and notebook Memory surfaces", () =
 });
 
 test("notebook deletion warns about lifecycle cleanup without exposing private counts", () => {
-  assert.match(page, /所有成员各自绑定到此笔记本的私有 Memory/);
+  assert.match(page, /所有成员各自绑定到此笔记本的私有记忆/);
   assert.doesNotMatch(page, /成员.*\{.*counts\.memories/);
 });
 

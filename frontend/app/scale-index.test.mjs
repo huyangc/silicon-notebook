@@ -71,7 +71,7 @@ test("SCALE_OP_MODE maps each op to its backend mode", () => {
 });
 
 test("confirm text is precise + honest per op", () => {
-  assert.match(scaleIndexOpConfirm("build", base), /从零/);
+  assert.match(scaleIndexOpConfirm("build", base), /快速查找结构/);
   const upd = scaleIndexOpConfirm("update", { ...base, unindexed_sources: 3 });
   assert.match(upd, /3 个新增来源/);
   assert.match(upd, /增量/);

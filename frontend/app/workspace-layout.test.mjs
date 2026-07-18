@@ -304,7 +304,7 @@ test("popstate degrades gracefully instead of leaving a hidden topbar error when
   );
   assert.match(
     popBody,
-    /openNotebookMemory\(memory\.notebookId\)\.catch\(\(\) => \{\s*showCollection\(\);\s*setToast\("Memory 深链接不可用或已失效"\);\s*\}\)/,
+    /openNotebookMemory\(memory\.notebookId\)\.catch\(\(\) => \{\s*showCollection\(\);\s*setToast\("该记忆链接不可用或已失效"\);\s*\}\)/,
   );
   assert.match(
     popBody,
