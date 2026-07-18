@@ -19,7 +19,18 @@ def frontend_labels() -> dict[str, str]:
     m = re.search(r"const KG_TYPE_LABELS[^{]*\{(.*?)\};", text, re.S)
     if not m:
         raise SystemExit("kg-type-mark.tsx: KG_TYPE_LABELS 对象字面量未找到")
-    return dict(re.findall(r'(\w+):\s*"([^"]+)"', m.group(1)))
+    # 先剥注释:否则「// concept: "概念 Concept"」这种被注释掉的条目仍会被 pair 正则
+    # 抓到、让守卫误判「一致」(review 揪出的洞)。剥掉后,注释掉真实条目 = 少一个 key
+    # = dict 不等 = 守卫失败,如实抓漂移。
+    body = strip_ts_comments(m.group(1))
+    return dict(re.findall(r'(\w+):\s*"([^"]+)"', body))
+
+
+def strip_ts_comments(s: str) -> str:
+    """剥掉 TS 块注释 /* */ 与行注释 //…(KG_TYPE_LABELS 值不含 // 或 /*,安全)。"""
+    s = re.sub(r"/\*.*?\*/", "", s, flags=re.S)
+    s = re.sub(r"//[^\n]*", "", s)
+    return s
 
 
 def main() -> int:

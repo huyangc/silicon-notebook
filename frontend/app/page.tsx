@@ -684,7 +684,10 @@ function kgTypeBandForce(width: number, height: number, activeTypes: string[]) {
 function drawKgNode(node: FgNode, ctx: CanvasRenderingContext2D, globalScale: number, selectedId: string | null, denseView: boolean) {
   const x = node.x ?? 0;
   const y = node.y ?? 0;
-  const style = KG_TYPE_STYLE[node.type] ?? { color: "#64748b", border: "#334155", text: node.type.slice(0, 2).toUpperCase(), glyph: "circle" };
+  // Object.hasOwn 而非 KG_TYPE_STYLE[node.type]:后者走原型链,node.type 为自定义类型
+  // "constructor"/"__proto__" 时命中继承属性(函数)→ style.color/glyph 变 undefined、
+  // 图谱节点渲染异常。与 kg-type-mark.tsx 的 KgTypeMark 同款防护(PR A 原型链教训)。
+  const style = Object.hasOwn(KG_TYPE_STYLE, node.type) ? KG_TYPE_STYLE[node.type] : { color: "#64748b", border: "#334155", text: node.type.slice(0, 2).toUpperCase(), glyph: "circle" };
   const selected = node.id === selectedId;
   const radius = 10 + Math.min(14, Math.sqrt(Math.max(1, node.val)) * 3.2) + (selected ? 2 : 0);
 
