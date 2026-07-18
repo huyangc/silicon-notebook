@@ -128,6 +128,18 @@ class SourceStore:
                 paper_meta=self.paper_meta_model(pm),
             )
 
+    def source_exists(self, source_id: str) -> bool:
+        """Cheap existence probe (a single ``SELECT 1``, not the full row +
+        paper-meta hydration ``get_source`` does) — for a caller that only
+        needs to know whether the row is still there, e.g.
+        ``KnowhowProjector.project_table``'s pre-terminal-write re-check
+        guarding against a concurrent ``delete_table_projection`` (a move or
+        a plain delete) landing mid-pass."""
+        with self.database.connect() as db:
+            return db.execute(
+                "SELECT 1 FROM sources WHERE id = ?", (source_id,)
+            ).fetchone() is not None
+
     def source_elements(self, source_id: str) -> List[SourceElement]:
         self.get_source(source_id)          # KeyError guard, same as the facade did
         with self.database.connect() as db:

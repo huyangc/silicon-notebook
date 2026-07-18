@@ -1373,3 +1373,136 @@ def test_get_scheduler_entry_does_not_pin_repo(repo_factory):
     # A late-firing debounced run against the collected repo is a no-op, not
     # an explosion: project_fn resolves its weakref per run.
     scheduler._project_fn("table-anything")
+
+
+# ---------------------------------------------------------------------------
+# P1-2 (PR review, cross-notebook move/copy): a concurrent teardown landing
+# mid-project_table must not let the terminal KO/relation write commit
+# orphans against a table/hidden source a racing move (or the plain DELETE
+# route — same exposure, same fix) already tore down. knowledge_objects.
+# source_id carries no FK to sources, so nothing else stops that write from
+# landing; the subsequent bump_knowhow_mutation_seq raises KeyError once the
+# table row is gone, but only AFTER the orphans below are already committed
+# — that secondary symptom is not what this test is about.
+# ---------------------------------------------------------------------------
+
+
+def test_project_table_skips_terminal_write_when_table_deleted_mid_pass(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """Deterministic interleaving reproducing the race: every row this pass
+    has finished its own structural+embed work (in production this window is
+    typically "parked in embedding" — a network-bound call several rows in)
+    when a concurrent move lands, mirroring move_table's own ordering exactly
+    (teardown-before-row-delete) — it just happens to land BEFORE this
+    already-in-flight project_table pass reaches ITS OWN terminal write,
+    instead of strictly before or after the whole call.
+
+    Anchor-only row (no other column filled) deliberately produces a KO with
+    ZERO edges (test_row_title_cell_gets_no_self_edge's own shape) so this
+    isolates the exact exposure the review flagged: knowledge_objects.
+    source_id carries no FK, so insert_object_chunk commits the orphan
+    cleanly inside the transaction; a row that also produced an edge would
+    instead hit knowledge_relations.source_id's REFERENCES sources(id) FK
+    and roll the whole transaction back (see the edges variant below) — a
+    different, also-real symptom, but not the silent-ghost-data one."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
+    hidden_source_id = projector.ensure_hidden_source(table_id)
+
+    real_set_status = store.set_knowhow_row_projection
+
+    def _concurrent_move_after_last_row(row_id, status):
+        real_set_status(row_id, status)
+        if status in ("synced", "failed"):  # the per-row loop's terminal call
+            projector.delete_table_projection(hidden_source_id)
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+
+    monkeypatch.setattr(
+        store, "set_knowhow_row_projection", _concurrent_move_after_last_row
+    )
+
+    try:
+        projector.project_table(table_id)
+    except KeyError:
+        pass  # pre-fix: bump_knowhow_mutation_seq on the now-gone table_id
+
+    with repo._connect() as db:
+        orphaned_kos = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?",
+            (hidden_source_id,),
+        ).fetchone()["c"]
+    assert orphaned_kos == 0
+    # The guard must SKIP the write, not resurrect anything the concurrent
+    # move already deleted.
+    with pytest.raises(KeyError):
+        repo._runtime.knowhow_store.get_knowhow_table(table_id)
+
+
+def test_project_table_does_not_crash_with_integrity_error_when_source_deleted_mid_pass(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """Edges variant of the same race: with an about-edge in play, pre-fix
+    the terminal write's insert_object_chunk succeeds (no FK) but the
+    following insert_relation_chunk hits knowledge_relations.source_id's FK
+    against the now-deleted hidden source and raises — an uncaught
+    sqlite3.IntegrityError escaping project_table entirely (the whole
+    terminal transaction rolls back, so no orphan here, but a background
+    projection job blowing up on a raw IntegrityError is still a real,
+    distinct symptom of the same missing existence check). The guard must
+    turn this into a clean, silent no-op skip instead."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
+    })
+    hidden_source_id = projector.ensure_hidden_source(table_id)
+
+    real_set_status = store.set_knowhow_row_projection
+
+    def _concurrent_move_after_last_row(row_id, status):
+        real_set_status(row_id, status)
+        if status in ("synced", "failed"):
+            projector.delete_table_projection(hidden_source_id)
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+
+    monkeypatch.setattr(
+        store, "set_knowhow_row_projection", _concurrent_move_after_last_row
+    )
+
+    projector.project_table(table_id)  # must not raise
+
+    with repo._connect() as db:
+        orphaned_kos = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?",
+            (hidden_source_id,),
+        ).fetchone()["c"]
+        orphaned_relations = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_relations WHERE source_id=?",
+            (hidden_source_id,),
+        ).fetchone()["c"]
+    assert orphaned_kos == 0
+    assert orphaned_relations == 0
+    with pytest.raises(KeyError):
+        repo._runtime.knowhow_store.get_knowhow_table(table_id)
+
+
+def test_project_table_proceeds_normally_when_nothing_concurrent_happens(
+    repo, projector, table_id, embedder
+):
+    """Companion happy-path guard: the new existence re-check must not turn
+    project_table into a no-op on the ordinary, uncontended pass — the KOs
+    for a still-live table must still land."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
+    })
+
+    projector.project_table(table_id)
+
+    counts = _table_object_type_counts(repo, table_id)
+    assert counts.get("违例类型") == 1
+    assert counts.get("修复方法") == 1
+    assert repo._runtime.knowhow_store.get_knowhow_table(table_id)["mutation_seq"] >= 1

@@ -399,6 +399,25 @@ class KnowhowProjector:
             self._ko_object_row(notebook_id, source_id, ko_id, entry, now)
             for ko_id, entry in ko_acc.items()
         ]
+        # Final existence guard (PR review P1-2, cross-notebook move/copy): a
+        # concurrent teardown -- move_table's delete_table_projection +
+        # delete_knowhow_table, or the plain DELETE route's identical pair --
+        # can land ANYWHERE during the per-row loop above (production's
+        # realistic window is "parked in embed_chunk_ids mid-row, several
+        # rows in"). knowledge_objects.source_id carries NO FK to sources, so
+        # nothing else would stop insert_object_chunk below from committing a
+        # fresh KO batch against a table_id/source_id that no longer exist --
+        # permanently unreclaimable ghosts in whatever notebook just had this
+        # table torn down (insert_relation_chunk, when edge_rows is
+        # non-empty, does carry an FK to sources and would instead raise
+        # IntegrityError and roll the whole transaction back -- a different,
+        # also-real "background job crashes" symptom of the exact same
+        # missing check). Re-check right here, as late as possible, and bail
+        # out -- skipping the write AND the mutation-seq bump below -- rather
+        # than resurrecting anything the teardown already removed. Mirrors
+        # delete_table_projection's own pre-write existence check just below.
+        if not self.knowhow.table_exists(table_id) or not self.sources.source_exists(source_id):
+            return
         with self.database.write() as db:
             self.knowledge.delete_relations_by_source(db, source_id)
             self.knowledge.delete_objects_by_source(db, source_id)

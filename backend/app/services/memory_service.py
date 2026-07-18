@@ -153,16 +153,30 @@ class MemoryService:
             self.memory_kg.ingest_memory_source(
                 item.notebook_id, item.id, item.title, item.content_md
             )
-            # deprecate can land WHILE the (seconds-long) ingest above runs:
-            # its remove_memory_source was a no-op — the derived source did
-            # not exist yet — and confirmed->deprecated is one-way, so it can
-            # never fire again. Re-check and clean up the source just built.
-            if self.store.memory_for_user(memory_id, user_id).status != "confirmed":
-                self.memory_kg.remove_memory_source(memory_id)
         except KeyError:
             # Memory gone/cross-owner, or ingest's documented notebook-
             # not-found guard (raised BEFORE any insert): nothing to clean up.
             return
+        # A concurrent deprecate OR a full cross-notebook MOVE can land WHILE
+        # the (seconds-long) ingest above runs. deprecate: its own
+        # remove_memory_source was a no-op — the derived source did not exist
+        # yet — and confirmed->deprecated is one-way, so it can never fire
+        # again. move: it tears down that same not-yet-existing source (also
+        # a no-op) and then DELETES the memory row outright — so this
+        # recheck itself can now raise KeyError instead of merely observing
+        # a non-confirmed status. Either way, the source ingest just
+        # (re)built above must not survive as an orphan: only a still-
+        # confirmed memory means there is genuinely nothing to clean up. This
+        # KeyError is NOT the pre-ingest "nothing created yet" case above —
+        # ingest already ran — so it must trigger cleanup, not a silent return.
+        try:
+            still_confirmed = (
+                self.store.memory_for_user(memory_id, user_id).status == "confirmed"
+            )
+        except KeyError:
+            still_confirmed = False
+        if not still_confirmed:
+            self.memory_kg.remove_memory_source(memory_id)
 
     @staticmethod
     def _promotion_candidates(item: MemoryRecord) -> list[dict[str, Any]]:

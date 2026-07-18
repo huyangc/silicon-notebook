@@ -408,6 +408,18 @@ class KnowhowStore:
             ],
         }
 
+    def table_exists(self, table_id: str) -> bool:
+        """Cheap existence probe (a single ``SELECT 1``, not the full
+        columns/rows/cells hydration ``get_knowhow_table`` does) — for a
+        caller that only needs to know whether the row is still there, e.g.
+        ``KnowhowProjector.project_table``'s pre-terminal-write re-check
+        guarding against a concurrent ``delete_knowhow_table`` (a move or a
+        plain delete) landing mid-pass."""
+        with self.database.connect() as db:
+            return db.execute(
+                "SELECT 1 FROM knowhow_tables WHERE id = ?", (table_id,)
+            ).fetchone() is not None
+
     def delete_knowhow_table(self, table_id: str) -> dict:
         """Cascade-delete a table (columns/rows/cells all carry ``ON DELETE
         CASCADE`` FKs to it in migration 16, so one DELETE is enough with

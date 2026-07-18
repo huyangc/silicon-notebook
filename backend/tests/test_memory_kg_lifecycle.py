@@ -420,3 +420,78 @@ def test_confirm_end_to_end_builds_memory_derived_source_offline(
             "SELECT COUNT(*) FROM chunks WHERE source_id=?", (source_id,)
         ).fetchone()
     assert n_chunks == 0
+
+
+# 13) P1-1 (PR review, cross-notebook move/copy): a concurrent MOVE can
+#     complete -- copy the still-confirmed victim into another notebook, tear
+#     down its not-yet-created derived source (a no-op, exactly like test 8's
+#     mid-ingest deprecate above), and DELETE the memory row -- ALL WHILE
+#     THIS job's own ingest_memory_source call for it is still running. The
+#     post-ingest recheck must then see the memory is GONE (KeyError, not
+#     merely a non-confirmed status) and still remove the source ingest just
+#     (re)created. The blanket `except KeyError: return` that guards the
+#     PRE-ingest lookup must not also swallow this POST-ingest KeyError --
+#     that comment's "nothing created yet" is only true before ingest runs;
+#     after a successful ingest it is wrong, and swallowing it here leaves
+#     moved content permanently retrievable in the OLD notebook with no
+#     memory row and no UI path left to clean it up.
+def test_kg_job_cleans_up_derived_source_when_move_deletes_memory_mid_ingest(
+    repo, memory_service, owner, notebook
+):
+    token = set_request_user(owner)
+    try:
+        target = repo.create_notebook(NotebookCreate(name="Memory KG lifecycle target"))
+    finally:
+        reset_request_user(token)
+
+    class _MidIngestMove(_KgStub):
+        """Mirrors _MidIngestDeprecate above, but the concurrent actor is a
+        real move (copy + source teardown + memory row DELETE) instead of a
+        deprecate -- the row disappears entirely instead of merely changing
+        status, which is what turns the job's post-ingest recheck from a
+        plain non-confirmed read into a KeyError."""
+
+        def __init__(self, service, user_id, target_notebook_id):
+            super().__init__(eligible=True)
+            self._service = service
+            self._user_id = user_id
+            self._target_notebook_id = target_notebook_id
+            self.victim_id: "str | None" = None
+            self.transfer_results: list = []
+            self._triggered = False
+
+        def ingest_memory_source(self, notebook_id, memory_id, title, content_md):
+            if memory_id == self.victim_id and not self._triggered:
+                self._triggered = True
+                # Concurrent move: reads the still-confirmed victim, copies
+                # it into another notebook, tears down its (not-yet-created)
+                # derived source (no-op), then deletes the memory row --
+                # exactly move_table's own ordering, just landing mid-ingest.
+                self.transfer_results = self._service.transfer(
+                    self._user_id, [memory_id], self._target_notebook_id, "move"
+                )
+            return super().ingest_memory_source(
+                notebook_id, memory_id, title, content_md
+            )
+
+    kg = _MidIngestMove(memory_service, owner.id, target.id)
+    memory_service.set_memory_kg_service(kg)
+    memory_service.kg_ingest_scheduler = lambda fn, item: fn(item)
+    memory_service.embedding_scheduler = lambda fn, job: fn(job)
+
+    item = _candidate(memory_service, notebook.id, owner.id, "req-move-mid-ingest-race")
+    kg.victim_id = item.id
+    memory_service.confirm(item.id, owner.id)
+
+    assert kg.transfer_results and kg.transfer_results[0]["ok"] is True
+    copied_id = kg.transfer_results[0]["new_id"]
+    assert memory_service.get(copied_id, owner.id).notebook_id == target.id
+
+    # The no-op teardown remove (fired mid-move, before the row it targets
+    # even existed) plus the job's OWN post-ingest cleanup once it discovers
+    # the memory is gone -- exactly two removes, the last one after ingest.
+    assert kg.calls.count(("remove", item.id)) == 2
+    assert kg.calls[-1] == ("remove", item.id)
+    assert kg.memory_source_id(item.id) is None  # no leaked derived source
+    with pytest.raises(KeyError):
+        memory_service.get(item.id, owner.id)
