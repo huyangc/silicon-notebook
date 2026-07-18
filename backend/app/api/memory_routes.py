@@ -31,6 +31,7 @@ from app.models.schemas import (
     MemoryRecord,
     MemoryReviewRequest,
     MemoryStatus,
+    MemoryTransferRequest,
     MemoryUpdate,
     PaginatedMemories,
     PromotionCandidate,
@@ -421,3 +422,20 @@ async def create_memory_from_answer(
         raise HTTPException(status_code=409, detail="Answer is no longer available")
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+
+
+@memory_router.post("/memories/transfer")
+async def transfer_memories(
+    payload: MemoryTransferRequest,
+    user: UserProfile = Depends(get_current_user),
+    service: MemoryRepository = Depends(memory_service),
+) -> dict:
+    results = await _memory_call(
+        service.transfer_memories,
+        user.id,
+        payload.memory_ids,
+        payload.target_notebook_id,
+        payload.mode,
+        payload.extract_kg,
+    )
+    return {"results": results}

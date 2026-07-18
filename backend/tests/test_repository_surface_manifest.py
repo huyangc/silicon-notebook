@@ -3107,6 +3107,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in KNOWHOW_TRANSFER_ROUTES_ALLOWED_IMPORTS
                     or site in MEMORY_TRANSFER_STORE_ALLOWED_IMPORTS
                     or site in MEMORY_TRANSFER_SERVICE_ALLOWED_IMPORTS
+                    or site in MEMORY_TRANSFER_ROUTES_ALLOWED_IMPORTS
                 )
 
 
@@ -4101,3 +4102,35 @@ MEMORY_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES = {
     }
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES
+
+# memory cross-notebook copy/move Task B3 (POST /memories/transfer REST route):
+# this is an HTTP-level test — unlike B1/B2's store/service tests, notebooks
+# and users are created through the real API (client.post("/api/notebooks"...),
+# _login's register/login roundtrip), so it does NOT need create_notebook/
+# create_user/set_request_user/reset_request_user allowances. Its only two
+# static-scan hits (confirmed by running _static_repository_consumers() and
+# filtering for this file) are the module-level `from
+# app.services.sqlite_repository import SQLiteRepository` used by the `repo`
+# fixture (same boilerplate as every other transfer-task test file), and one
+# `repo._runtime` access inside the `_seeded_service` helper — used purely to
+# reach the real memory_service and swap in synchronous embedding_scheduler/
+# kg_ingest_scheduler for candidate/confirm setup, the same pre-existing
+# fixture pattern B1/B2 already established (not a new production consumer;
+# the route itself only ever calls the frozen facade member
+# transfer_memories, already covered by MEMORY_TRANSFER_SERVICE_ALLOWED_
+# MEMBER_FILES's declaration of that member — no *_ALLOWED_NEW_MEMBERS
+# exemption needed here either). SQLiteRepository is also consumed as an
+# import, so it needs both the IMPORTS entry (import-completeness OR-chain)
+# and the MEMBER_FILES entry (broad per-file consumer-scan check), same
+# two-set split as every sibling transfer-task block above. Appended at EOF
+# for the same zero-line-shift reason as every other TASKN_* block above.
+MEMORY_TRANSFER_ROUTES_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_transfer_routes.py", 16, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+MEMORY_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_transfer_routes.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES

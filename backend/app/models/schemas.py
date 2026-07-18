@@ -155,6 +155,15 @@ class MemoryReviewRequest(MemoryUpdate):
         return normalize_reason(value) if value is not None else None
 
 
+class MemoryTransferRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_ids: List[str]
+    target_notebook_id: str
+    mode: Literal["copy", "move"]
+    extract_kg: bool = True
+
+
 class AgentProfile(BaseModel):
     id: str
     owner_id: str
