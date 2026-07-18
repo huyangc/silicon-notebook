@@ -1251,23 +1251,32 @@ class SourceIngestionService:
                 # 用仍含 building 项的旧快照重算，铃铛在 done toast 后瞬间又
                 # 闪回"补全中"，直到端点侧 notify_pending=True 的 mark_dirty
                 # 才补救。
-                self._pop_backfilling(notebook_id, my_gen)
-                self._notify_paper_meta_done(notebook_id, nb_row, stored)
+                #
+                # 只有「本世代仍持有 entry」才通知：若已被后来的 backfill 覆盖，
+                # 说明同 notebook 还有一批在跑，此时报完成会让用户在新一批仍在
+                # 进行时看到 done toast（多标签页/重复提交下还会重复发事件）。
+                if self._pop_backfilling(notebook_id, my_gen):
+                    self._notify_paper_meta_done(notebook_id, nb_row, stored)
             return counts
         finally:
             # 异常路径兜底清理。成功路径已在通知前提前 pop 过，这里对同一
             # gen 是幂等 no-op（entry 已不在，guard 直接跳过）。
             self._pop_backfilling(notebook_id, my_gen)
 
-    def _pop_backfilling(self, notebook_id: str, my_gen: int) -> None:
+    def _pop_backfilling(self, notebook_id: str, my_gen: int) -> bool:
         """只 pop 属于 my_gen 世代的 entry；后来者已覆盖时（entry 的 _gen
         不匹配）不动手，与旧 finally 内联逻辑等价。成功路径与 finally 共用
         本方法：成功路径在通知前调用一次清空 building 状态，finally 收尾时
-        对同一 gen 变成幂等 no-op；异常路径下只有 finally 调用，照常兜底。"""
+        对同一 gen 变成幂等 no-op；异常路径下只有 finally 调用，照常兜底。
+
+        返回本次调用是否真的持有并弹出了 entry —— 调用方据此决定要不要发
+        完成通知（被后来者覆盖的旧世代不该报完成，见调用处注释）。"""
         with self._paper_meta_backfilling_lock:
             entry = self._paper_meta_backfilling.get(notebook_id)
             if entry is not None and entry.get("_gen") == my_gen:
                 self._paper_meta_backfilling.pop(notebook_id, None)
+                return True
+            return False
 
     def _notify_paper_meta_done(
         self, notebook_id: str, nb_row: Any, stored: int
