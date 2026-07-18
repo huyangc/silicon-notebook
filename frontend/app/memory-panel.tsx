@@ -15,7 +15,7 @@ import {
   type AgentTokenDraft,
 } from "./agent-token-model";
 import { API_BASE, authHeaders, clearToken, getToken } from "./auth";
-import { humanizeHttpError } from "./errors.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 import {
   canEditMemory,
   canPromoteMemory,
@@ -65,22 +65,8 @@ async function memoryApi<T>(path: string, options: RequestInit = {}): Promise<T>
     clearToken();
     window.location.reload();
   }
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const body = await response.clone().json();
-      detail = typeof body?.detail === "string"
-        ? body.detail
-        : Array.isArray(body?.detail)
-          ? body.detail.map((item: { msg?: unknown }) => String(item?.msg ?? "")).filter(Boolean).join("；")
-          : "";
-    } catch {
-      detail = await response.text().catch(() => "");
-    }
-    // 原始诊断(状态码 + 后端英文 detail)进 console;面向用户抛人话。
-    console.error(`[memory] ${response.status}${detail ? ` ${detail}` : ""}`);
-    throw new Error(humanizeHttpError(response.status, detail));
-  }
+  // 原始诊断(状态码 + detail + requestId)进 console;面向用户抛人话。
+  if (!response.ok) await throwHumanizedHttpError(response, "memory");
   return response.json() as Promise<T>;
 }
 

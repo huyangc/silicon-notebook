@@ -93,6 +93,7 @@ import {
   isSharedColumn,
 } from "./knowhow-grouping-logic.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 import { rowFallbackTitle } from "./knowhow-cell-editor-logic.ts";
 import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
 import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
@@ -712,7 +713,7 @@ export function KnowhowPanel({
     setActionError(null);
     try {
       const res = await fetch(knowhowTemplateUrl(notebookId, selectedTableId), { headers: authHeaders() });
-      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      if (!res.ok) await throwHumanizedHttpError(res, "knowhow");
       const blob = await res.blob();
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");

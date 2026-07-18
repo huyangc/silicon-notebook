@@ -1,4 +1,4 @@
-import { humanizeHttpError } from "./errors.ts";
+import { humanizeHttpError, readHttpError, throwHumanizedHttpError } from "./errors.ts";
 
 export const API_BASE =
   (typeof process !== "undefined"
@@ -42,21 +42,13 @@ async function authFetch<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    let detail = "";
-    try { detail = (await res.json())?.detail ?? ""; } catch { /* noop */ }
-    // 原始诊断进 console;面向用户抛人话。
-    console.error(`[auth] ${path} -> ${res.status}${detail ? ` ${detail}` : ""}`);
-    // auth 路由的 4xx detail 恒为中文且可操作(注册的「用户名已被占用」「密码不能为空」
-    // 「用户名须为…」等),优先透传;仅 5xx/空 detail 才泛化。登录 401 特化。
-    // ⚠此「透传 detail」只适用 auth.ts(路由 detail 恒中文);page.tsx 的 api() 不可照做
-    // (那里多数路由 detail 是英文,透传会把英文漏回给用户)。
-    const human =
-      res.status === 401
-        ? "用户名或密码不对"
-        : res.status < 500 && typeof detail === "string" && detail.trim()
-          ? detail
-          : humanizeHttpError(res.status, detail);
-    throw new Error(human);
+    // 原始诊断(状态码 + detail + requestId)统一走 errors.ts 进 console。
+    const { status, detail } = await readHttpError(res, "auth");
+    // 登录 401 特化:后端 detail 是「用户名或密码错误」,登录表单上说「不对」
+    // 更自然。其余交给共享映射——auth 路由的 4xx detail 恒为中文可操作文案
+    // (「用户名已被占用」「密码不能为空」「用户名须为…」),humanizeHttpError
+    // 的「中文 detail 透传」规则会原样保留,不需要在这里再写一遍特例。
+    throw new Error(status === 401 ? "用户名或密码不对" : humanizeHttpError(status, detail));
   }
   return res.json();
 }
@@ -85,9 +77,6 @@ export async function logoutUser(): Promise<void> {
 
 export async function fetchMe(): Promise<AuthUser> {
   const res = await fetch(`${API_BASE}/me`, { headers: authHeaders() });
-  if (!res.ok) {
-    console.error(`[auth] /me -> ${res.status}`);
-    throw new Error(humanizeHttpError(res.status));
-  }
+  if (!res.ok) await throwHumanizedHttpError(res, "auth");
   return res.json();
 }

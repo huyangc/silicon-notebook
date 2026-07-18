@@ -1,20 +1,12 @@
 import type { ChannelsResponse, FullRecord, ListResponse } from "./types";
 import { authHeaders } from "../../auth.ts";
+import { throwHumanizedHttpError } from "../../errors.ts";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api";
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
-  if (!res.ok) {
-    let detail = "";
-    try {
-      const body = await res.clone().json();
-      detail = (body && (body.detail || body.message)) || "";
-    } catch {
-      detail = (await res.text().catch(() => "")) || "";
-    }
-    throw new Error(`${res.status} ${res.statusText}${detail ? ` - ${detail}` : ""}`);
-  }
+  if (!res.ok) await throwHumanizedHttpError(res, "dev-logs");
   return res.json();
 }
 

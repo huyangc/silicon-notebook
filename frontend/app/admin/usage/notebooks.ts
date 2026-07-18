@@ -1,4 +1,5 @@
 import { API_BASE, authHeaders } from "../../auth.ts";
+import { throwHumanizedHttpError } from "../../errors.ts";
 import { label } from "../../vocabulary.ts";
 
 export type AdminUserNotebook = {
@@ -18,7 +19,7 @@ export async function fetchUserNotebooks(userId: string): Promise<AdminUserNoteb
     { headers: authHeaders() }
   );
   if (res.status === 403) throw new Error("forbidden");
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
   return res.json();
 }
 

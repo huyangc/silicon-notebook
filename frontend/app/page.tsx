@@ -55,7 +55,7 @@ import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
-import { humanizeHttpError } from "./errors.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 import {
   MODEL_ROLES, type ModelRole, type ServiceForm,
   buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
@@ -324,21 +324,9 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     clearToken();
     if (typeof window !== "undefined") window.location.reload();
   }
-  if (!response.ok) {
-    // Surface the backend's error detail instead of an opaque status line.
-    let detail = "";
-    try {
-      const body = await response.clone().json();
-      detail = (body && (body.detail || body.message)) || "";
-    } catch {
-      detail = (await response.text().catch(() => "")) || "";
-    }
-    const detailStr = typeof detail === "string" ? detail : JSON.stringify(detail);
-    // 原始诊断(状态码 + statusText + 后端英文 detail + requestId)只进 console 供排查。
-    console.error(`[api] ${response.status} ${response.statusText}${detailStr ? ` - ${detailStr}` : ""}${requestId ? ` [${requestId}]` : ""}`);
-    // 面向用户只抛人话;后端 detail 保持英文供 MCP / 日志。
-    throw new Error(humanizeHttpError(response.status, detailStr));
-  }
+  // 原始诊断(状态码 + statusText + 后端 detail + requestId)只进 console 供排查;
+  // 面向用户只抛人话。收口在 errors.ts。
+  if (!response.ok) await throwHumanizedHttpError(response, "api");
   if (response.status === 204) {
     return null as T;
   }
@@ -440,20 +428,9 @@ async function readAskStream<TResponse>(
     clearToken();
     if (typeof window !== "undefined") window.location.reload();
   }
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const body = await response.clone().json();
-      detail = (body && (body.detail || body.message)) || "";
-    } catch {
-      detail = (await response.text().catch(() => "")) || "";
-    }
-    const detailStr = typeof detail === "string" ? detail : JSON.stringify(detail);
-    // 原始诊断(状态码 + statusText + 后端英文 detail + requestId)只进 console 供排查。
-    console.error(`[api] ${response.status} ${response.statusText}${detailStr ? ` - ${detailStr}` : ""}${requestId ? ` [${requestId}]` : ""}`);
-    // 面向用户只抛人话;后端 detail 保持英文供 MCP / 日志。
-    throw new Error(humanizeHttpError(response.status, detailStr));
-  }
+  // 原始诊断(状态码 + statusText + 后端 detail + requestId)只进 console 供排查;
+  // 面向用户只抛人话。收口在 errors.ts。
+  if (!response.ok) await throwHumanizedHttpError(response, "api");
   if (!response.body) {
     throw new Error("Streaming response body is unavailable");
   }
@@ -542,18 +519,9 @@ async function downloadReportsZip(nb: string, reportIds: string[]): Promise<void
     clearToken();
     if (typeof window !== "undefined") window.location.reload();
   }
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const body = await response.clone().json();
-      detail = (body && (body.detail || body.message)) || "";
-    } catch {
-      detail = (await response.text().catch(() => "")) || "";
-    }
-    const detailStr = typeof detail === "string" ? detail : JSON.stringify(detail);
-    console.error(`[api] ${response.status} ${response.statusText}${detailStr ? ` - ${detailStr}` : ""}`);
-    throw new Error(humanizeHttpError(response.status, detailStr));
-  }
+  // 原始诊断(状态码 + statusText + 后端 detail + requestId)只进 console 供排查;
+  // 面向用户只抛人话。收口在 errors.ts。
+  if (!response.ok) await throwHumanizedHttpError(response, "api");
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");

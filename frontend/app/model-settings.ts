@@ -1,5 +1,5 @@
 import { API_BASE, authHeaders } from "./auth.ts";
-import { humanizeHttpError } from "./errors.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 
 export const MODEL_ROLES = ["llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
@@ -27,7 +27,7 @@ export function buildPutPayload(forms: Record<ModelRole, ServiceForm>) {
 
 export async function fetchModelSettings(): Promise<ModelSettingsView> {
   const res = await fetch(`${API_BASE}/me/model-settings`, { headers: authHeaders() });
-  if (!res.ok) { console.error(`[model-settings] HTTP ${res.status}`); throw new Error(humanizeHttpError(res.status)); }
+  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
   return res.json();
 }
 
@@ -37,7 +37,7 @@ export async function saveModelSettings(payload: ReturnType<typeof buildPutPaylo
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload),
   });
-  if (!res.ok) { console.error(`[model-settings] HTTP ${res.status}`); throw new Error(humanizeHttpError(res.status)); }
+  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
   return res.json();
 }
 
@@ -49,6 +49,6 @@ export async function testModelService(
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ service, base_url, model, api_key }),
   });
-  if (!res.ok) { console.error(`[model-settings] HTTP ${res.status}`); throw new Error(humanizeHttpError(res.status)); }
+  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
   return res.json();
 }

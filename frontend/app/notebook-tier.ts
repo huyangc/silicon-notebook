@@ -3,6 +3,7 @@
 // `node --test` without importing the React page module.
 
 import { authHeaders } from "./auth.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 
 export type NotebookTier = "base" | "personal";
 
@@ -23,7 +24,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...authHeaders() },
     ...init,
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) await throwHumanizedHttpError(res, "tier");
   return res.json() as Promise<T>;
 }
 
