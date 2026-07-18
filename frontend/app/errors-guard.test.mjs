@@ -94,9 +94,9 @@ const ALLOWED_MESSAGE_READS = new Map([
   [
     "answer-panel.tsx",
     [
-      // 后端 AskResponse.model_errors[] 的结构化字段(PR#61),不是 JS 异常;
-      // 内容是模型服务名 + 原因,刻意展示在 title 里供排查。
-      '<div className="answer-model-error" title={answer.model_errors[0]?.message ?? ""}>',
+      // 取出来只为进 console(见同文件 logDiagnostic 的 useEffect),不上屏。
+      // 横幅本身保留(PR#61 的可观测性),但原文不再进 hover title。
+      "const modelErrorDetail = answer.model_errors?.[0]?.message ?? null;",
     ],
   ],
   [
@@ -144,6 +144,89 @@ test("没有任何地方把原始异常文本直出给用户", async () => {
     "这些地方读了原始异常文本。catch 分支一律走 errors.ts 的 toUserMessage(error, 兜底):\n" +
       offenders.join("\n") +
       "\n(确实不是异常文本的,加进 ALLOWED_MESSAGE_READS 并写清楚理由)"
+  );
+});
+
+// 守卫③:后端**诊断字段**的白名单(第三轮评审阻塞 2)。
+//
+// 守卫②只扫 `.message`,所以后端塞在 `.error` / `.error_message` 里的原始
+// 异常串整类溜了过去——「6/6 通过」是假绿。这些字段后端统一写成
+// `f"{type(exc).__name__}: {exc}"`(grep 到 24 处),和 JS 异常一样不能直出。
+//
+// `console.error` 不算(那正是原文该去的地方);`.errors`(复数)、
+// `.error_count` 之类靠 \b 排除。
+const DIAGNOSTIC_FIELD_RE = /\.(error|error_message)\b/;
+
+const ALLOWED_DIAGNOSTIC_READS = new Map([
+  [
+    "dev/logs/components/LogDetail.tsx",
+    [
+      // 开发者日志查看器:整个页面的存在意义就是显示原始日志记录,
+      // 面向的是 admin/开发者而不是终端用户(路由在 /dev/logs 且 owner 门控)。
+      "{record.error ? (",
+      '<strong>error{record.attempt != null ? `（attempt ${record.attempt}）` : ""}:</strong> {record.error}',
+    ],
+  ],
+  [
+    "dev/logs/components/StatsBar.tsx",
+    [
+      // 是个计数(number),不是错误文本。
+      '{chip("error", stats.by_status.error ?? 0)}',
+    ],
+  ],
+  [
+    "page.tsx",
+    [
+      // 组装快照对象,不是展示;原文在同函数末尾统一进 logDiagnostic。
+      "error: body?.error ?? null,",
+      "if (snapshot.error) logDiagnostic(\"ready\", snapshot.error);",
+      // 以下三处都已过人话层(裸值包进 Error 交给 toUserMessage)。
+      'throw new Error(toUserMessage(new Error(event.error), "回答没能完成，请重试"));',
+      '? `全部预审中止：${toUserMessage(job.error ? new Error(job.error) : null, "出了点问题")}（已处理 ${job.done}）`',
+      ': toUserMessage(d.error ? new Error(d.error) : null, "该问答失败，请稍后重试"));',
+      ': `失败：${toUserMessage(r.error ? new Error(r.error) : null, "连接未通过")}`,',
+      // 条件判断 + 已过人话层的两行(justFailed 那处)。
+      "const failureHint = justFailed.error_message",
+      '? toUserMessage(new Error(justFailed.error_message), "")',
+      // 只用来二选一挑文案,不展示原文。
+      "<p>{sourceDetail.error_message",
+    ],
+  ],
+  [
+    "report-view.tsx",
+    [
+      // 条件判断:失败态才渲染那条(文案是写死的中文,不含 active.error)。
+      '{active.status === "failed" && active.error && (',
+      // 取出来只为进 console(见同文件 logDiagnostic 的 useEffect)。
+      'const activeError = active?.status === "failed" ? active.error : null;',
+      "if (activeError) logDiagnostic(\"report\", activeError);",
+    ],
+  ],
+]);
+
+test("没有任何地方把后端诊断字段(.error/.error_message)直出给用户", async () => {
+  const offenders = [];
+  for (const rel of FILES) {
+    if (rel === "errors.ts") continue; // 人话层自己的实现
+    const text = await read(rel);
+    const allowed = ALLOWED_DIAGNOSTIC_READS.get(rel) ?? [];
+    text.split("\n").forEach((line, i) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("//") || trimmed.startsWith("*")) return; // 注释里可以谈这个形态
+      if (trimmed.startsWith("{/*")) return; // JSX 注释
+      // console.error 是诊断通道本身,不是泄漏。
+      if (!DIAGNOSTIC_FIELD_RE.test(trimmed.replaceAll("console.error", ""))) return;
+      if (allowed.includes(trimmed)) return;
+      offenders.push(`${rel}:${i + 1}  ${trimmed}`);
+    });
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "这些地方读了后端的原始诊断字段。要么包进 Error 走 toUserMessage(…),要么" +
+      "用 logDiagnostic() 只送 console:\n" +
+      offenders.join("\n") +
+      "\n(确实不是异常文本的,加进 ALLOWED_DIAGNOSTIC_READS 并写清楚理由)"
   );
 });
 
