@@ -207,13 +207,13 @@ def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends
 def test_model_service(payload: ModelTestRequest, user: UserProfile = Depends(get_current_user)):
     import time
     if payload.service not in _MODEL_ROLES:
-        return ModelTestResult(ok=False, error="未知服务")
+        return ModelTestResult(ok=False, user_message="未知服务")
     repo = identity_repository()
     stored = repo.get_user_model_settings(user.id).get(payload.service) or {}
     api_key = payload.api_key if payload.api_key else stored.get("api_key", "")
     base_url, model = payload.base_url.strip(), payload.model.strip()
     if not (base_url and model and api_key):
-        return ModelTestResult(ok=False, error="缺少 base_url / model / api_key")
+        return ModelTestResult(ok=False, user_message="缺少 base_url / model / api_key")
     started = time.perf_counter()
     settings = get_settings()
     try:

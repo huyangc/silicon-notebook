@@ -69,3 +69,49 @@ def test_test_endpoint_incomplete_returns_not_ok(client):
     r = client.post("/api/me/model-settings/test",
                     json={"service": "llm", "base_url": "", "model": ""}, headers=h)
     assert r.status_code == 200 and r.json()["ok"] is False
+
+
+# --- 200 响应里的两个通道 -------------------------------------------------------
+# 这个端点挂不上 X-User-Message 头(200 不是 4xx),所以出处由 schema 承载:
+# `user_message` = 后端盖章给人看的,`error` = 诊断只进 console。前端是
+# deny-by-default 的,填错通道的后果是文案静默消失,测试必须把两侧都钉住。
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        ({"service": "nope", "base_url": "x", "model": "x"}, "未知服务"),
+        ({"service": "llm", "base_url": "", "model": ""}, "缺少 base_url / model / api_key"),
+    ],
+)
+def test_precheck_failures_go_in_user_message_not_error(client, payload, expected):
+    body = client.post("/api/me/model-settings/test", json=payload, headers=_auth(client)).json()
+    assert body["user_message"] == expected
+    # 诊断通道必须留空:这两条不是异常,没有原文可给排查。
+    assert body["error"] == ""
+
+
+def test_exception_path_fills_error_and_leaves_user_message_empty(client, monkeypatch):
+    """异常分支绝不能填 user_message —— 填了就等于把 str(exc) 重新变成可展示文案。"""
+    import app.api.routes as routes
+
+    class Boom:
+        def __init__(self, *a, **k): pass
+        def chat_json(self, *a, **k): raise RuntimeError("upstream 10.0.0.7:8000 refused")
+
+    monkeypatch.setattr("app.core.llm.OpenAICompatibleClient", Boom)
+    monkeypatch.setattr(routes, "identity_repository", lambda: _StubRepo())
+    body = client.post(
+        "/api/me/model-settings/test",
+        json={"service": "llm", "base_url": "http://x", "model": "m", "api_key": "k"},
+        headers=_auth(client),
+    ).json()
+    assert body["ok"] is False
+    assert body["user_message"] == ""            # ← 用户只会看到「连接未通过」
+    assert "RuntimeError" in body["error"]       # ← 排查侧仍拿得到原文
+    assert "10.0.0.7:8000" in body["error"]
+
+
+class _StubRepo:
+    def get_user_model_settings(self, _uid):
+        return {}

@@ -3219,14 +3219,17 @@ export default function Home() {
     try {
       const r = await testModelService(role, f.base_url.trim(), f.model.trim(),
         f.keyDirty ? f.api_key : null);
-      // r.error 混着两类东西:后端预校验写的中文文案,和 `f"{type(exc).__name__}:
-      // {exc}"`(api/routes.py 的 test_model_service)。ModelTestResult 上没有
-      // 出处标记,两者分不开,故一律不直出——原文进 console。
+      // 200 响应挂不上 X-User-Message 头,故 ModelTestResult 自带出处字段:
+      // `user_message` 是后端显式盖章的用户文案(未知服务 / 缺少 base_url…),
+      // `error` 是 `f"{type(exc).__name__}: {exc}"` 的诊断,只进 console。
+      // 这页的用途就是排查配置,压成「连接未通过」等于把它废掉——所以要的是
+      // 结构化出处,不是放宽判据。
+      if (!r.ok && r.error) logDiagnostic("model-test", r.error);
       setModelTesting((m) => ({
         ...m,
         [role]: r.ok
           ? `通 ${r.latency_ms}ms`
-          : `失败：${toUserMessage(r.error ? new Error(r.error) : null, "连接未通过")}`,
+          : `失败：${r.user_message || "连接未通过"}`,
       }));
     } catch (e) {
       setModelTesting((m) => ({ ...m, [role]: "失败" })); reportError(e);

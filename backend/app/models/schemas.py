@@ -968,7 +968,12 @@ class ModelTestRequest(BaseModel):
 class ModelTestResult(BaseModel):
     ok: bool
     latency_ms: int = 0
+    # 诊断字段:失败分支写 f"{type(exc).__name__}: {exc}",给日志和排查,前端不上屏。
     error: str = ""
+    # 显式盖章的用户文案。200 响应挂不上 X-User-Message 头,但这个 body 的 schema
+    # 是我们自己的,所以用独立字段承载出处——只有确定写给人看的分支才填,异常分支
+    # 必须留空,否则又退回「按形态猜」。
+    user_message: str = ""
 
 
 class AdminUserUsage(BaseModel):

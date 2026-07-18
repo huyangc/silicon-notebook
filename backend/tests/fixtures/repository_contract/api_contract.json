@@ -3238,6 +3238,11 @@
             "ok": {
               "title": "Ok",
               "type": "boolean"
+            },
+            "user_message": {
+              "default": "",
+              "title": "User Message",
+              "type": "string"
             }
           },
           "required": [

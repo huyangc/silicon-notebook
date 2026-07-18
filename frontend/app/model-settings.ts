@@ -43,7 +43,9 @@ export async function saveModelSettings(payload: ReturnType<typeof buildPutPaylo
 
 export async function testModelService(
   service: ModelRole, base_url: string, model: string, api_key: string | null,
-): Promise<{ ok: boolean; latency_ms: number; error: string }> {
+  // 两个通道在类型上就分开:error = 诊断(只进 console),user_message = 后端
+  // 盖章的用户文案。调用点想拿 error 上屏会显得刺眼。
+): Promise<{ ok: boolean; latency_ms: number; error: string; user_message: string }> {
   const res = await fetch(`${API_BASE}/me/model-settings/test`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
