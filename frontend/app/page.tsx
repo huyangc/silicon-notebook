@@ -20,7 +20,7 @@ import {
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
   ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
-  groupOf, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
+  groupOf, groupLabel, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
 } from "./ask-modes";
 import {
   approvePromotion,
@@ -788,6 +788,9 @@ function accountInitials(username: string): string {
 }
 
 export default function Home() {
+  // 提问模式的显示名唯一真源是 ask-modes.ts —— 散文提到它时插值引用本常量,
+  // 不写死中文字面量(改名只改注册表;ask-modes.test.mjs 的散落守卫强制这一点)。
+  const strictLabel = groupLabel("strict");
   // 启动就绪门:后端预热完成前(serviceReady=false)遮住登录/加载,轮询 /api/ready。
   const [serviceReady, setServiceReady] = useState(false);
   const [readySnapshot, setReadySnapshot] = useState<ReadySnapshot | null>(null);
@@ -978,7 +981,7 @@ export default function Home() {
         if (kgBuildFinished(refreshed)) {
           setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
           setBuildingKg(false);
-          setToast("知识图谱构建完成 ✓ 可用深入分析");
+          setToast(`知识图谱构建完成 ✓ 可用${strictLabel}`);
         }
       } catch { /* transient error; keep polling */ }
     }, 6000);
@@ -1049,7 +1052,7 @@ export default function Home() {
         setScaleIndexStatus(s.scale_index);
         if (buildingKg && !s.kg.building) {
           setBuildingKg(false);
-          setToast("知识图谱构建完成 ✓ 可用深入分析");
+          setToast(`知识图谱构建完成 ✓ 可用${strictLabel}`);
           api<NotebookSummary>(`/notebooks/${nb}`)
             .then((refreshed) => { if (!cancelled) setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur)); })
             .catch(() => {});
@@ -2342,7 +2345,7 @@ export default function Home() {
     const q = nextQuestion.trim();
     if (!q) return;
     if (requiresKg(askMode) && !kgAvailable) {
-      setToast("深入分析需先为该 notebook 构建知识图谱");
+      setToast(`${strictLabel}需先为该 notebook 构建知识图谱`);
       return;
     }
     const notebookId = currentNotebookId;
@@ -3636,7 +3639,7 @@ export default function Home() {
                           )
                           : (
                             <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
-                              ✓ 知识图谱已构建 · 可用「深入分析」
+                              {`✓ 知识图谱已构建 · 可用「${strictLabel}」`}
                             </p>
                           )
                         }
@@ -3649,16 +3652,16 @@ export default function Home() {
                           className="add-source-button"
                           disabled={buildingKg}
                           title={currentNotebook?.base_kg_available
-                            ? "本库尚未建图，深入分析会借用底层库（base）；点击为本库单独构建知识图谱"
-                            : "默认问答（通用）不需要；「深入分析」需先构建知识图谱"}
+                            ? `本库尚未建图，${strictLabel}会借用底层库（base）；点击为本库单独构建知识图谱`
+                            : `默认问答（通用）不需要；「${strictLabel}」需先构建知识图谱`}
                           onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
                           <Network size={20} strokeWidth={2.7} /> {buildingKg ? "全量构建中…" : "全量构建知识图谱"}
                         </button>
                         <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
                           {currentNotebook?.base_kg_available
-                            ? "本库未建图，深入分析将借用底层库（base）"
-                            : "默认问答无需；「深入分析」需要先构建"}
+                            ? `本库未建图，${strictLabel}将借用底层库（base）`
+                            : `默认问答无需；「${strictLabel}」需要先构建`}
                         </p>
                       </>
                     )
@@ -3886,7 +3889,7 @@ export default function Home() {
                               <span>{session.title || "未命名会话"}</span>
                               <small>
                                 {formatRelativeTime(session.updated_at)} · {session.turn_count} 轮
-                                {session.used_reasoning && <span className="chat-session-reasoning-badge">✦ 深入分析</span>}
+                                {session.used_reasoning && <span className="chat-session-reasoning-badge">{`✦ ${strictLabel}`}</span>}
                               </small>
                             </button>
                             <div className="chat-session-card-actions">
@@ -4037,7 +4040,7 @@ export default function Home() {
                     )}
                     {groupOf(askMode) === "strict" && !kgAvailable && (
                       <span className="mode-hint">
-                        该 notebook 尚无知识图谱，深入分析需先构建
+                        {`该 notebook 尚无知识图谱，${strictLabel}需先构建`}
                         <button
                           type="button"
                           className="mode-engine"
@@ -4644,10 +4647,10 @@ export default function Home() {
                     const tone: "ok" | "warn" = !busy && kg.ready && kg.pending_sources === 0 ? "ok" : "warn";
                     const color = tone === "ok" ? "var(--color-ok, #1a7f5a)" : "var(--color-warn, #b97a00)";
                     const sub = !kg.ready
-                      ? "从来源抽取知识对象与关系；「深入分析」需要先构建"
+                      ? `从来源抽取知识对象与关系；「${strictLabel}」需要先构建`
                       : kg.pending_sources > 0
                         ? "有新增来源尚未入图，可增量抽取并合并进现有图谱"
-                        : "已构建，可用「深入分析」";
+                        : `已构建，可用「${strictLabel}」`;
                     return (
                       <div className={`index-card index-tone-${tone}`}>
                         <span className="index-ic" aria-hidden="true"><Network size={19} /></span>
@@ -4727,7 +4730,7 @@ export default function Home() {
                       : v.state === "queued" ? "已排队，将在服务器空闲时构建；完成后自动更新"
                       : v.state === "stale" ? "新增内容未纳入索引，暂不参与检索与推理"
                       : v.state === "indexed" ? "已建成且为最新"
-                      : "从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与深入分析";
+                      : `从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与${strictLabel}`;
                     return (
                       <div className={`index-card index-tone-${v.tone}`}>
                         <span className="index-ic" aria-hidden="true"><Database size={19} /></span>

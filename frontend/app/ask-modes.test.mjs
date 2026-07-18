@@ -3,8 +3,33 @@ import assert from "node:assert/strict";
 
 import {
   ASK_MODES, DEFAULT_ASK_MODE, ASK_MODE_GROUPS,
-  askModeIds, groupOf, defaultModeForGroup, requiresKg, canUseMode, modeFromTurn,
+  askModeIds, askModeLabels, groupOf, groupLabel, modeLabel,
+  defaultModeForGroup, requiresKg, canUseMode, modeFromTurn,
 } from "./ask-modes.ts";
+
+// frontend/app 下的全部产品源码(递归子目录),排除测试自身。
+// 平铺 readdir 会漏掉 admin/ components/ dev/ —— 守卫必须递归。
+async function appSourceFiles({ exclude = [] } = {}) {
+  const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const url = await import("node:url");
+  const appDir = path.dirname(url.fileURLToPath(import.meta.url));
+  const out = [];
+  async function walk(dir) {
+    for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+      const abs = path.join(dir, e.name);
+      if (e.isDirectory()) { await walk(abs); continue; }
+      if (!e.isFile()) continue;
+      if (!/\.(ts|tsx|mts|mjs)$/.test(e.name)) continue;
+      if (/\.test\.mjs$/.test(e.name)) continue;
+      const rel = path.relative(appDir, abs);
+      if (exclude.includes(rel)) continue;
+      out.push({ rel, text: await fs.readFile(abs, "utf8") });
+    }
+  }
+  await walk(appDir);
+  return out;
+}
 
 test("user-facing ids and default", () => {
   assert.deepEqual(askModeIds(), ["chunk", "reasoning", "graph"]);
@@ -49,22 +74,60 @@ test("user-facing labels/descs are the current names (locks against silent drift
   }
 });
 
-test("退休模式名不得在前端源码里复活(drift guard)", async () => {
-  const fs = await import("node:fs/promises");
-  const path = await import("node:path");
-  const url = await import("node:url");
-  const appDir = path.dirname(url.fileURLToPath(import.meta.url));
+test("显示名查询函数由注册表派生(单一真源的读取口)", () => {
+  assert.equal(groupLabel("strict"), ASK_MODE_GROUPS.find((g) => g.id === "strict").label);
+  assert.equal(groupLabel("general"), ASK_MODE_GROUPS.find((g) => g.id === "general").label);
+  assert.equal(modeLabel("chunk"), ASK_MODES.find((m) => m.id === "chunk").label);
+  assert.throws(() => groupLabel("nope"), /unknown ask mode group/);
+  assert.throws(() => modeLabel("nope"), /unknown ask mode/);
+  // 比对集 = 全部模式名 ∪ 全部分组名,散落守卫据此扫描。
+  assert.deepEqual(
+    [...askModeLabels()].sort(),
+    [...ASK_MODES.map((m) => m.label), ...ASK_MODE_GROUPS.map((g) => g.label)].sort(),
+  );
+});
+
+test("退休模式名不得在前端源码里复活(含子目录)", async () => {
   const retired = ["严格推理", "深挖推理", "图谱多跳"];
-  const entries = await fs.readdir(appDir, { withFileTypes: true });
   const offenders = [];
-  for (const e of entries) {
-    if (!e.isFile()) continue;
-    if (!/\.(ts|tsx)$/.test(e.name)) continue;      // 只扫源码
-    if (e.name.endsWith(".test.mjs")) continue;
-    const text = await fs.readFile(path.join(appDir, e.name), "utf8");
+  for (const { rel, text } of await appSourceFiles()) {
     for (const term of retired) {
-      if (text.includes(term)) offenders.push(`${e.name}: ${term}`);
+      if (text.includes(term)) offenders.push(`${rel}: ${term}`);
     }
   }
   assert.deepEqual(offenders, [], `退休模式名复活: ${offenders.join(", ")}`);
+});
+
+// 退休名单只禁「已知的历史名」,管不住下一次改名 —— 真正等价于单一真源的是这条:
+// 当前显示名(由 ASK_MODES/ASK_MODE_GROUPS 现场派生)不得在 ask-modes.ts 之外出现。
+// 只要有人把中文名抄进散文,这里就红;唯一合法写法是 groupLabel()/modeLabel() 插值。
+test("当前模式名不得散落在 ask-modes.ts 之外(单一真源守卫)", async () => {
+  const labels = askModeLabels();
+  assert.ok(labels.length >= 4, "比对集为空则守卫形同虚设");
+  const offenders = [];
+  for (const { rel, text } of await appSourceFiles({ exclude: ["ask-modes.ts"] })) {
+    for (const label of labels) {
+      if (text.includes(label)) offenders.push(`${rel}: 「${label}」`);
+    }
+  }
+  assert.deepEqual(
+    offenders, [],
+    `模式显示名被硬编码(应改用 groupLabel()/modeLabel() 插值): ${offenders.join(", ")}`,
+  );
+});
+
+// 守卫自身的自检:比对集真的来自注册表,而不是写死的历史清单。
+// (改注册表 label → 守卫立刻改扫新名字;这是「变异测试」的可执行版本。)
+test("散落守卫的比对集随注册表改名而变(变异自检)", async () => {
+  const slot = ASK_MODE_GROUPS.find((g) => g.id === "strict");
+  const original = slot.label;
+  const MUTANT = "«变异分组名»";     // 合成哨兵,永不与真实 label 撞名
+  try {
+    slot.label = MUTANT;
+    assert.ok(askModeLabels().includes(MUTANT), "改名后比对集未跟随 → 守卫扫的是死名单");
+    assert.ok(!askModeLabels().includes(original), "旧名仍在比对集 → 比对集不是现场派生");
+    assert.equal(groupLabel("strict"), MUTANT);
+  } finally {
+    slot.label = original;
+  }
 });

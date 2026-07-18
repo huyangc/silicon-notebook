@@ -40,6 +40,24 @@ function defOf(id: AskModeId): AskModeDef {
   return d;
 }
 
+// ——— 显示名查询:散文里提到模式/分组时一律走这两个函数,禁止再写死中文字面量。
+// (中文句子用模板插值即可,不损用户看到的文案;ask-modes.test.mjs 的散落守卫强制这一点。)
+export function modeLabel(id: AskModeId): string {
+  return defOf(id).label;
+}
+
+export function groupLabel(id: AskModeGroup): string {
+  const g = ASK_MODE_GROUPS.find((x) => x.id === id);
+  if (!g) throw new Error(`unknown ask mode group: ${id}`);
+  return g.label;
+}
+
+// 当前全部面向用户的模式名 + 分组名 —— 散落守卫的比对集(由本注册表派生,
+// 改名后守卫自动改扫新名字,故「单一真源」不依赖任何硬编码的历史清单)。
+export function askModeLabels(): string[] {
+  return [...ASK_MODES.map((m) => m.label), ...ASK_MODE_GROUPS.map((g) => g.label)];
+}
+
 export function groupOf(id: AskModeId): AskModeGroup {
   return defOf(id).group;
 }
