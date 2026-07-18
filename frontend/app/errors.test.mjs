@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 
 import {
   GENERIC_USER_ERROR,
+  humanizedError,
   humanizeHttpError,
+  logDiagnostic,
   readHttpError,
   throwHumanizedHttpError,
   toUserMessage,
@@ -40,48 +42,69 @@ test("未知状态码退兜底文案", () => {
   assert.equal(humanizeHttpError(0), "操作失败，请重试");
 });
 
-test("英文 detail 不进用户文案(只按状态码泛化)", () => {
-  // 后端英文 detail 是给 MCP / 日志看的,泛化掉。
-  assert.equal(humanizeHttpError(403, "admin only"), "没有权限进行这个操作");
+// 第三轮评审阻塞 1:信任判据从「形态」换成「出处」。没有后端 user_error()
+// 盖章(X-User-Message)的 detail,**不管长什么样**都不给用户看。
+test("没盖章的 detail 一律不进用户文案——中文也不行", () => {
+  // 旧判据「4xx 且含中文就透传」放行的两类真实泄漏:
+  assert.equal(
+    humanizeHttpError(403, "访问被拒绝 — nginx/1.25 request id=req-1 upstream=10.0.0.7:8000"),
+    "没有权限进行这个操作"
+  );
+  assert.equal(humanizeHttpError(422, "字段不能为空；field required"), "提交的内容有误");
+  // 后端 detail=str(exc) 抛出来的中文异常串,同样拦掉。
+  assert.equal(humanizeHttpError(400, "解析失败：不支持的文件类型"), "操作失败，请重试");
+  // 英文 detail 自然也一样(它们是给 MCP / 日志看的)。
   assert.equal(humanizeHttpError(403, "notebook owner required"), "没有权限进行这个操作");
   assert.equal(humanizeHttpError(500, "Internal Server Error"), "服务暂时不可用，请稍后再试");
-  assert.equal(humanizeHttpError(422, "field required"), "提交的内容有误");
   assert.equal(humanizeHttpError(400, "invalid cell address"), "操作失败，请重试");
 });
 
-test("4xx 的中文 detail 是后端写给用户的文案 → 原样透传", () => {
-  // 后端刻意写成中文的 detail 比按状态码泛化的话有用得多,不能压平。
-  assert.equal(humanizeHttpError(400, "用户名已被占用"), "用户名已被占用");
-  assert.equal(humanizeHttpError(400, "格子定位不合法"), "格子定位不合法");
-  assert.equal(humanizeHttpError(403, "仅管理员可设置基准库"), "仅管理员可设置基准库");
-  assert.equal(humanizeHttpError(403, "仅管理员可管理晋升队列"), "仅管理员可管理晋升队列");
+test("盖了章的 4xx detail 原样透传(保住可操作信息)", () => {
+  // 后端经 user_error() 明确声明「这是写给用户的」,比状态码泛化有用得多。
+  assert.equal(humanizeHttpError(400, "用户名已被占用", true), "用户名已被占用");
+  assert.equal(humanizeHttpError(400, "格子定位不合法", true), "格子定位不合法");
+  assert.equal(humanizeHttpError(403, "仅管理员可设置基准库", true), "仅管理员可设置基准库");
+  assert.equal(humanizeHttpError(403, "仅管理员可管理晋升队列", true), "仅管理员可管理晋升队列");
+  // 盖了章的英文文案也放行——信任来自出处,不是语言。
+  assert.equal(humanizeHttpError(400, "Quota exceeded", true), "Quota exceeded");
 });
 
-test("5xx 的 detail 一律不透传(哪怕是中文,也可能是内部错误)", () => {
+test("trusted 默认关(不传 = 不信)", () => {
+  // deny by default:漏传参数只会更保守,不会更宽松。
+  assert.equal(humanizeHttpError(403, "仅管理员可设置基准库"), "没有权限进行这个操作");
+});
+
+test("5xx 的 detail 一律不透传(盖了章也不行)", () => {
+  // user_error() 是给「客户端能纠正的 4xx」用的;5xx = 我们坏了,通用文案才对,
+  // 也堵住上游/网关伪造标记把内部错误顶上屏。
   assert.equal(humanizeHttpError(500, "数据库连接失败"), "服务暂时不可用，请稍后再试");
   assert.equal(humanizeHttpError(503, "后台迁移中"), "服务暂时不可用，请稍后再试");
+  assert.equal(humanizeHttpError(500, "数据库连接失败", true), "服务暂时不可用，请稍后再试");
 });
 
 test("空白 detail 不影响泛化", () => {
-  assert.equal(humanizeHttpError(404, ""), "没找到，可能已被删除");
-  assert.equal(humanizeHttpError(404, "   "), "没找到，可能已被删除");
-  assert.equal(humanizeHttpError(404, undefined), "没找到，可能已被删除");
+  assert.equal(humanizeHttpError(404, "", true), "没找到，可能已被删除");
+  assert.equal(humanizeHttpError(404, "   ", true), "没找到，可能已被删除");
+  assert.equal(humanizeHttpError(404, undefined, true), "没找到，可能已被删除");
 });
 
-test("含中文的网关/HTML 正文不算「后端写给用户的文案」,不透传", () => {
-  // 评审阻塞 2:此前判据只是「<500 且含一个汉字」,于是 403 的网关正文
-  // `<html>访问被拒绝 — nginx request id=req-1</html>` 会整段显示给用户。
+test("形态闸是第二道:盖了章但不像文案的,照样拦", () => {
+  // 出处是第一道闸,形态是第二道。防的是后端把 user_error() 用在了拼了异常
+  // 原文 / 正文的串上——一个失误不该直通到屏幕。
   assert.equal(
-    humanizeHttpError(403, "<html>访问被拒绝 — nginx request id=req-1</html>"),
+    humanizeHttpError(403, "<html>访问被拒绝 — nginx request id=req-1</html>", true),
     "没有权限进行这个操作"
   );
-  assert.equal(humanizeHttpError(404, "<p>页面不存在</p>"), "没找到，可能已被删除");
+  assert.equal(humanizeHttpError(404, "<p>页面不存在</p>", true), "没找到，可能已被删除");
   // 多行 = 正文/堆栈,不是文案。
-  assert.equal(humanizeHttpError(400, "参数不对\n  at handler (app.py:31)"), "操作失败，请重试");
+  assert.equal(humanizeHttpError(400, "参数不对\n  at handler (app.py:31)", true), "操作失败，请重试");
   // JSON 花括号 = 结构化正文,不是文案。
-  assert.equal(humanizeHttpError(400, '{"detail":"参数不对","request_id":"req-1"}'), "操作失败，请重试");
+  assert.equal(
+    humanizeHttpError(400, '{"detail":"参数不对","request_id":"req-1"}', true),
+    "操作失败，请重试"
+  );
   // 超长 = 正文,不是文案(后端为用户写的都是短句)。
-  assert.equal(humanizeHttpError(400, `很抱歉${"细节".repeat(200)}`), "操作失败，请重试");
+  assert.equal(humanizeHttpError(400, `很抱歉${"细节".repeat(200)}`, true), "操作失败，请重试");
 });
 
 // ---------------------------------------------------------------------------
@@ -116,14 +139,33 @@ function captureSync(fn) {
 
 test("toUserMessage 保住 fetch 层已译好的语义,不压平", () => {
   // 401/403/404/409 各不相同——压成同一句用户就分不清该重试还是该换账号。
+  // 判据是**品牌**(humanizedError 盖的章),不是文本长什么样。
   const { value, logs } = captureSync(() => [
-    toUserMessage(new Error("没有权限进行这个操作"), "兜底"),
-    toUserMessage(new Error("没找到，可能已被删除"), "兜底"),
-    toUserMessage(new Error("操作有冲突，请刷新后重试"), "兜底"),
+    toUserMessage(humanizedError("没有权限进行这个操作"), "兜底"),
+    toUserMessage(humanizedError("没找到，可能已被删除"), "兜底"),
+    toUserMessage(humanizedError("操作有冲突，请刷新后重试"), "兜底"),
   ]);
   assert.deepEqual(value, ["没有权限进行这个操作", "没找到，可能已被删除", "操作有冲突，请刷新后重试"]);
   // 透传路径无损,不该重复刷日志(HTTP 诊断 readHttpError 已经记过)。
   assert.deepEqual(logs, []);
+});
+
+// 第三轮评审阻塞 2:旧版靠「像不像一句中文」放行,于是后端塞在 job.error /
+// error_message / stream event 里的中文技术串一路直出到用户面前。
+test("toUserMessage 只认品牌:没盖章的中文技术串一律兜底", () => {
+  const { value, logs } = captureSync(() => [
+    // 实测复现过的原话:旧版把它整串显示给了用户。
+    toUserMessage(new Error("RuntimeError: 模型调用失败 upstream timeout"), "兜底"),
+    // 后端 f"{type(exc).__name__}: {exc}" 的典型形状。
+    toUserMessage(new Error("ValueError: 解析失败，来源为空"), "兜底"),
+    // 纯中文、短、单行、无标签——形态上完全像一句文案,但没盖章。
+    toUserMessage(new Error("知识库正在重建索引，请稍后再问"), "兜底"),
+  ]);
+  assert.deepEqual(value, ["兜底", "兜底", "兜底"]);
+  // 原文一条都不能丢,全在 console 里。
+  assert.equal(logs.length, 3);
+  assert.match(logs[0], /upstream timeout/);
+  assert.match(logs[2], /重建索引/);
 });
 
 test("toUserMessage 不把英文技术异常漏给用户", () => {
@@ -135,6 +177,33 @@ test("toUserMessage 不把英文技术异常漏给用户", () => {
     toUserMessage(undefined, "兜底"),
   ]);
   assert.deepEqual(value, ["兜底", "兜底", "兜底", "兜底", "兜底"]);
+});
+
+test("品牌伪造不了:后端字符串永远带不上它", () => {
+  // 威胁模型是「后端来的字符串被当成可展示文案」。字符串、JSON 反序列化出来的
+  // 对象、手工拼的 Error 都盖不上章——JSON 里没有 Symbol。
+  const { value } = captureSync(() => [
+    toUserMessage(JSON.parse('{"message":"没有权限进行这个操作"}'), "兜底"),
+    toUserMessage(Object.assign(new Error("没有权限进行这个操作"), { humanized: true }), "兜底"),
+    toUserMessage({ message: "没有权限进行这个操作" }, "兜底"),
+  ]);
+  assert.deepEqual(value, ["兜底", "兜底", "兜底"]);
+});
+
+test("品牌能穿过 catch / rethrow(不是一次性的)", () => {
+  // 真实路径:client 抛 → 调用方 catch → 再 throw → page 的 reportError 收。
+  let caught;
+  try {
+    try {
+      throw humanizedError("没找到，可能已被删除");
+    } catch (error) {
+      throw error;
+    }
+  } catch (error) {
+    caught = error;
+  }
+  const { value } = captureSync(() => toUserMessage(caught, "兜底"));
+  assert.equal(value, "没找到，可能已被删除");
 });
 
 test("toUserMessage 兜底时把原始值写进 console(排查不丢)", () => {
@@ -157,6 +226,42 @@ test("toUserMessage 不给用户看混着中文的技术正文", () => {
   assert.deepEqual(value, ["兜底", "兜底", "兜底"]);
 });
 
+// 阻塞 3(P2):诊断日志也要有上限——旧版 toUserMessage 把整个 error 对象直接
+// 丢进 console,HTTP 路径截断到 500 字符而这条没有,一个超长异常能刷爆控制台。
+test("超长的非 HTTP 异常,诊断行同样截断", () => {
+  const huge = new Error(`抽取失败 ${"细节 ".repeat(4000)}`);
+  const { value, logs } = captureSync(() => toUserMessage(huge, "兜底"));
+  assert.equal(value, "兜底");
+  assert.equal(logs.length, 1);
+  assert.ok(logs[0].length < 700, `诊断行应被截断,实际 ${logs[0].length} 字符`);
+  assert.match(logs[0], /已截断/);
+  // 截断归截断,开头的实质内容要留住(否则等于没记)。
+  assert.match(logs[0], /抽取失败/);
+});
+
+test("诊断格式化器认得非 Error 值(不 crash、也截断)", () => {
+  const { logs } = captureSync(() => [
+    toUserMessage("x".repeat(4000), "兜底"),
+    toUserMessage({ nested: { blob: "y".repeat(4000) } }, "兜底"),
+    toUserMessage(null, "兜底"),
+    toUserMessage(undefined, "兜底"),
+  ]);
+  assert.equal(logs.length, 4);
+  for (const line of logs) assert.ok(line.length < 700, `实际 ${line.length} 字符`);
+  assert.match(logs[2], /null/);
+  assert.match(logs[3], /undefined/);
+});
+
+test("logDiagnostic:渲染点用的显式诊断出口,同一个上限", () => {
+  const { logs } = captureSync(() =>
+    logDiagnostic("report", new Error(`规划失败 ${"细节 ".repeat(4000)}`))
+  );
+  assert.equal(logs.length, 1);
+  assert.ok(logs[0].length < 700, `实际 ${logs[0].length} 字符`);
+  assert.match(logs[0], /\[report\]/);
+  assert.match(logs[0], /规划失败/);
+});
+
 test("toUserMessage 有默认兜底文案(调用方可以不传)", () => {
   const { value } = captureSync(() => toUserMessage(new TypeError("Failed to fetch")));
   assert.equal(value, GENERIC_USER_ERROR);
@@ -173,6 +278,32 @@ const jsonResponse = (status, body, headers = {}) =>
     statusText: status === 500 ? "Internal Server Error" : "",
     headers: { "Content-Type": "application/json", ...headers },
   });
+
+// 后端经 user_error() 抛出的响应:带出处标记。没有这个头的一律不可展示。
+const markedResponse = (status, body, headers = {}) =>
+  jsonResponse(status, body, { "X-User-Message": "1", ...headers });
+
+test("readHttpError 读出出处标记(有/没有都要读对)", async () => {
+  const { value: marked } = await captureConsole(() =>
+    readHttpError(markedResponse(403, { detail: "仅管理员可设置基准库" }), "t")
+  );
+  assert.equal(marked.trusted, true);
+  assert.equal(marked.userDetail, "仅管理员可设置基准库");
+
+  const { value: bare } = await captureConsole(() =>
+    readHttpError(jsonResponse(403, { detail: "仅管理员可设置基准库" }), "t")
+  );
+  assert.equal(bare.trusted, false, "没有 X-User-Message 就不算盖章");
+  assert.equal(bare.userDetail, "仅管理员可设置基准库", "detail 照读,只是不可信");
+
+  // 只认精确的 "1"。
+  for (const bad of ["0", "true", "yes", ""]) {
+    const { value } = await captureConsole(() =>
+      readHttpError(jsonResponse(400, { detail: "x" }, { "X-User-Message": bad }), "t")
+    );
+    assert.equal(value.trusted, false, `X-User-Message: "${bad}" 不该被当成盖章`);
+  }
+});
 
 test("readHttpError 抠得出 FastAPI 的几种结构化 detail 形状", async () => {
   const { value: a } = await captureConsole(() =>
@@ -302,24 +433,35 @@ async function callFailing(fn, response) {
   }
 }
 
-test("注册 400 的中文 detail 原样保留(不被泛化成「操作失败」)", async () => {
+test("注册 400 的盖章 detail 原样保留(不被泛化成「操作失败」)", async () => {
+  // 后端这两处走的是 user_error(),响应带 X-User-Message。
   const { error } = await callFailing(
     () => registerUser("a00123456", "pw"),
-    jsonResponse(400, { detail: "用户名已被占用" })
+    markedResponse(400, { detail: "用户名已被占用" })
   );
   assert.equal(error.message, "用户名已被占用");
 
   const { error: e2 } = await callFailing(
     () => registerUser("bad", "pw"),
-    jsonResponse(400, { detail: "用户名须为「单个小写字母+00+六位数字」，如 a00123456" })
+    markedResponse(400, { detail: "用户名须为「单个小写字母+00+六位数字」，如 a00123456" })
   );
   assert.equal(e2.message, "用户名须为「单个小写字母+00+六位数字」，如 a00123456");
+});
+
+test("同一条注册 400,没盖章就只给通用文案", async () => {
+  // 这是本轮的核心回归:形态完全一样(短、中文、单行),差别只在出处。
+  const { error, logs } = await callFailing(
+    () => registerUser("a00123456", "pw"),
+    jsonResponse(400, { detail: "用户名已被占用" })
+  );
+  assert.equal(error.message, "操作失败，请重试");
+  assert.match(logs[0], /用户名已被占用/, "原文仍进 console");
 });
 
 test("登录 401 → 「用户名或密码不对」", async () => {
   const { error } = await callFailing(
     () => loginUser("a00123456", "wrong"),
-    jsonResponse(401, { detail: "用户名或密码错误" })
+    markedResponse(401, { detail: "用户名或密码错误" })
   );
   assert.equal(error.message, "用户名或密码不对");
 });
@@ -382,20 +524,31 @@ test("model-settings 失败:用户拿中文,console 拿到 状态码+detail+requ
   assert.match(logs[0], /req-xyz/);
 });
 
-test("治理 client 的中文 detail 透传(比「没有权限」具体)", async () => {
+test("治理 client 的盖章 detail 透传(比「没有权限」具体)", async () => {
   const { error } = await callFailing(
     () => setNotebookTier("nb-1", "base"),
-    jsonResponse(403, { detail: "仅管理员可设置基准库" })
+    markedResponse(403, { detail: "仅管理员可设置基准库" })
   );
   assert.equal(error.message, "仅管理员可设置基准库");
 });
 
-test("knowhow client 的中文 detail 透传(保住可操作信息)", async () => {
+test("knowhow client 的盖章 detail 透传(保住可操作信息)", async () => {
   const { error } = await callFailing(
+    () => fetchKnowhowTables("nb-1"),
+    markedResponse(400, { detail: "格子定位不合法" })
+  );
+  assert.equal(error.message, "格子定位不合法");
+});
+
+test("同一个 knowhow 400,detail=str(exc) 没盖章 → 通用文案", async () => {
+  // 后端 knowhow 路由里 `detail=str(exc)` 有十几处,和上面那条形态无法区分,
+  // 靠出处才分得开。
+  const { error, logs } = await callFailing(
     () => fetchKnowhowTables("nb-1"),
     jsonResponse(400, { detail: "格子定位不合法" })
   );
-  assert.equal(error.message, "格子定位不合法");
+  assert.equal(error.message, "操作失败，请重试");
+  assert.match(logs[0], /格子定位不合法/);
 });
 
 test("admin 总览的 403 仍走 forbidden 哨兵(专用无权限视图)", async () => {
@@ -482,9 +635,18 @@ test("流式 error 事件 / 后台 job 的英文 error → 中文", async () => 
   assert.match(logs[1], /TimeoutError/);
 });
 
-test("后端写成中文的 stream/job error 仍然透传(别把可操作信息弄丢)", () => {
-  const { value } = captureSync(() =>
-    toUserMessage(new Error("知识库正在重建索引，请稍后再问"), "回答没能完成，请重试")
-  );
-  assert.equal(value, "知识库正在重建索引，请稍后再问");
+// 这条测试原来断言的是「后端写成中文的 stream/job error 仍然透传」——它把旧的
+// 形态信任模型固化成了契约。第三轮评审的结论是那个前提本身就是错的:job.error /
+// event.error 由后端写成 f"{type(exc).__name__}: {exc}"(见
+// services/ask_execution.py),中文与否纯属偶然,不构成「这句写给用户」的证据。
+// 现在它反过来断言:没盖章的一律兜底,可操作信息由后端用 user_error() 显式给,
+// 而不是靠前端猜。
+test("stream/job 的 error 字段一律不直出——中文也一样", () => {
+  const { value, logs } = captureSync(() => [
+    toUserMessage(new Error("知识库正在重建索引，请稍后再问"), "回答没能完成，请重试"),
+    toUserMessage(new Error("RuntimeError: 模型调用失败 upstream timeout"), "回答没能完成，请重试"),
+  ]);
+  assert.deepEqual(value, ["回答没能完成，请重试", "回答没能完成，请重试"]);
+  assert.match(logs[0], /重建索引/);
+  assert.match(logs[1], /upstream timeout/);
 });

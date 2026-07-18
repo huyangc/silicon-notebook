@@ -20,6 +20,7 @@ import {
   extractErrorMessage,
   computePreviewSpans,
 } from "./knowhow-import-logic.ts";
+import { humanizedError } from "./errors.ts";
 
 // --- IMPORT_ACCEPT_EXTENSIONS / IMPORT_ACCEPT -----------------------------------
 
@@ -225,9 +226,20 @@ function silenced(fn) {
 }
 
 test("extractErrorMessage: 已翻译的中文错误原样保留", () => {
-  // 上游（apiFetch → throwHumanizedHttpError）给的就是人话，不能再加工。
-  assert.strictEqual(extractErrorMessage(new Error("列定义不能为空")), "列定义不能为空");
-  assert.strictEqual(extractErrorMessage(new Error("没有权限进行这个操作")), "没有权限进行这个操作");
+  // 上游（apiFetch → throwHumanizedHttpError）给的就是人话且带品牌，不能再加工。
+  assert.strictEqual(extractErrorMessage(humanizedError("列定义不能为空")), "列定义不能为空");
+  assert.strictEqual(
+    extractErrorMessage(humanizedError("没有权限进行这个操作")),
+    "没有权限进行这个操作"
+  );
+});
+
+test("extractErrorMessage: 没盖章的中文串不算「已翻译」", () => {
+  // 第三轮评审:判据是品牌不是形态。裸 new Error("列定义不能为空") 可能来自
+  // 后端 detail=str(exc),形态上与上面那条一模一样。
+  silenced(() => {
+    assert.strictEqual(extractErrorMessage(new Error("列定义不能为空")), "操作失败，请重试");
+  });
 });
 
 test("extractErrorMessage: 英文技术串不进用户文案，走兜底", () => {

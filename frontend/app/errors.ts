@@ -1,59 +1,102 @@
 // 错误人话层:把后端的 HTTP 状态码 / detail、以及任意 catch 到的异常,翻成给
 // 用户看的中文。
 //
-// 两条通道,严格分开——这是本模块的核心不变量:
+// 核心不变量:**deny by default,信任来自出处,不是形态。**
 //
-//   ① 可展示通道(给用户):唯一来源是后端结构化 JSON 里的 `detail` / `message`
-//      字符串字段(以及 FastAPI 422 的 `[{msg}]` 数组)。后端有一批 4xx 的
-//      detail 是刻意写成中文的可操作文案(注册的「用户名已被占用」、knowhow 的
-//      「格子定位不合法」、治理的「仅管理员可设置基准库」……),比按状态码泛化
-//      的话有用得多,原样透传。判据是「有没有汉字」:中文 detail = 后端写给
-//      用户的;英文 detail = 写给 MCP / 日志的,只按状态码泛化。
-//      **非 JSON 的原始正文永远不进这条通道**——网关的 `<html>访问被拒绝 —
-//      nginx request id=req-1</html>` 里混着标签、上游名和 request id,含一个
-//      汉字就整段甩给用户是泄漏,不是人话。见 pickUserDetail()。
+// 早先这里用「4xx 且 detail 含中文就原样穿透」来判断什么能给用户看。那是形态
+// 检查,不是信任边界——后端 40 处 `detail=str(exc)` 和 20 处刻意写给用户的中文
+// 文案都是普通字符串,结构上区分不开,于是 `403 "访问被拒绝 — nginx/1.25
+// upstream=10.0.0.7:8000"` 会连内网地址一起上屏。
+//
+// 现在出处由后端显式声明,共两条通道:
+//
+//   ① 可展示通道(给用户):只有**同时**满足两条才把 detail 原样给用户——
+//      (a) 响应带 `X-User-Message: 1`,即后端经 user_error() 明确声明「这是
+//          写给终端用户的文案」(见 backend/app/api/deps.py);
+//      (b) 它还得像一句文案(isDisplayableUserText:不多行、不带标签、不带
+//          花括号、不超长)。(b) 只是第二道形态兜底,**不是**信任判据:没有
+//          (a) 的一律不给用户看,哪怕整段都是中文。
+//      裸 `HTTPException(detail=str(exc))` 永远不带标记 → 用户只看到按状态码
+//      泛化的通用中文。
 //
 //   ② 诊断通道(给开发者 / MCP):状态码 + statusText + 原始正文 + X-Request-Id,
 //      统一截断后只进 console.error。见 pickDiagnostic() / readHttpError()。
+//
+// toUserMessage() 同理:它**只认品牌**(见 HUMANIZED),不认形态。只有本模块
+// 亲手翻译过的错误才原样返回;后端塞在 job.error / error_message / stream
+// event 里的任意字符串,不管长什么样,一律换成兜底文案 + 原文进 console。
 //
 // 用法:
 //   - 走 fetch 的失败响应 → throwHumanizedHttpError(res, tag)
 //   - catch 到的任意异常(fetch 自身 reject、流式 error 事件、后台 job 的
 //     error 字段……)→ toUserMessage(error, fallback)
-// 裸抛 `new Error(`${res.status} ...`)`、以及在用户可见位置直出 `err.message`,
-// 都由 errors-guard.test.mjs 拦住。
-
-// 中日韩统一表意文字。用来区分「后端写给用户的中文文案」与「写给 MCP / 日志的
-// 英文技术串」。
-const CJK_RE = /[一-鿿]/;
+//   - 渲染期拿到的后端诊断字段(不该上屏,但排查要留)→ logDiagnostic(tag, value)
+// 裸抛 `new Error(`${res.status} ...`)`、以及在用户可见位置直出 `err.message` /
+// `.error` / `.error_message`,都由 errors-guard.test.mjs 拦住。
 
 // 后端为用户写的文案都是短句(「用户名已被占用」「格子定位不合法」)。超长、
-// 带换行、带标签的东西不是文案,是正文 / 堆栈 / 错误页——哪怕里面有汉字也不给
-// 用户看。这是①通道在 pickUserDetail() 之外的第二道闸:任何绕过结构化提取直接
-// 调 humanizeHttpError() 的将来调用点,也漏不出网关正文。
+// 带换行、带标签的东西不是文案,是正文 / 堆栈 / 错误页——即使后端给它盖了章,
+// 也不给用户看。这是①通道在「出处标记」之外的第二道闸,防的是后端把
+// user_error() 用在了一个拼了异常原文的串上。
 const USER_TEXT_MAX_CHARS = 200;
 
-// 原始诊断进 console 前统一截断,防把整页 HTML 错误页灌进控制台。
+// 原始诊断进 console 前统一截断,防把整页 HTML 错误页 / 超长异常灌进控制台。
+// HTTP 正文和 catch 到的任意异常共用这一个上限。
 const DIAGNOSTIC_MAX_CHARS = 500;
+
+// 后端 user_error() 挂的出处标记(backend/app/api/deps.py)。
+// ⚠它同时登记在后端 CORS 的 expose_headers 里;跨源部署下没有 expose 就读不到,
+// 后果是所有后端中文文案被压平成通用文案(后端 test_user_error.py 有守卫)。
+const USER_MESSAGE_HEADER = "X-User-Message";
 
 // 兜底文案:说清「没成功」和「能重试」,不暴露任何技术细节。
 export const GENERIC_USER_ERROR = "操作没成功，请稍后重试";
 
-// 一段文本是否够格直接展示给用户。
+// 「本模块翻译过」的品牌。toUserMessage 只认它,不认文本形态。
+//
+// 为什么是 Symbol.for 而不是模块内 `Symbol()` 或 `class HumanizedError`:
+// 后两者的身份都绑在**模块实例**上,而 Next.js 会把同一个模块同时打进 server
+// 和 client bundle,于是同一个概念出现两份互不相等的身份,`instanceof` /
+// 私有 Symbol 比对会出现假阴性——盖过章的错误被判成没盖章,用户拿到兜底文案,
+// 401/403/404/409 的区分度白丢。全局注册表的 Symbol 跨模块实例稳定。
+//
+// 「可伪造性」不在威胁模型里:要挡的是**后端来的字符串**,而字符串永远带不上
+// Symbol 属性——JSON 里没有 Symbol,序列化会把它丢掉。能调 humanizedError()
+// 的只有本仓库的代码,那不是攻击面。
+const HUMANIZED: unique symbol = Symbol.for("silicon-notebook.errors.humanized") as never;
+
+// 一段文本是否够格直接展示给用户(**形态**闸,不是信任闸)。
 function isDisplayableUserText(text: string): boolean {
   if (!text || text.length > USER_TEXT_MAX_CHARS) return false;
   if (/[\r\n]/.test(text)) return false; // 多行 = 正文 / 堆栈,不是文案
   if (/<[a-zA-Z/!]/.test(text)) return false; // <html> / </p> / <!doctype:标记语言正文
   if (/[{}]/.test(text)) return false; // 花括号 = JSON / 序列化结构,不是文案
-  return CJK_RE.test(text); // 英文 = 写给 MCP / 日志的,泛化掉
+  return true;
 }
 
-export function humanizeHttpError(status: number, detail?: string): string {
-  // ⚠detail 必须来自 pickUserDetail()(结构化 JSON 字段),不能是响应原始正文。
-  // 4xx 的中文 detail 是后端刻意写给用户的可操作文案 → 透传;英文 detail
-  // (如 "notebook owner required")只进 console,不给用户看。
+// 造一个「已翻译」的错误——本模块之外没有第二个地方盖这个章。
+export function humanizedError(message: string): Error {
+  const error = new Error(message);
+  Object.defineProperty(error, HUMANIZED, { value: true, enumerable: false });
+  return error;
+}
+
+function isHumanized(error: unknown): error is Error {
+  return (
+    error instanceof Error &&
+    (error as unknown as Record<symbol, unknown>)[HUMANIZED] === true
+  );
+}
+
+// 状态码 → 中文。`trusted` 才允许 detail 原样穿透。
+//
+// ⚠ trusted 只该来自 readHttpError() 读到的 `X-User-Message` 头。手工传 true
+// 等于绕过整条信任链。
+export function humanizeHttpError(status: number, detail?: string, trusted: boolean = false): string {
   const trimmed = (detail ?? "").trim();
-  if (status < 500 && isDisplayableUserText(trimmed)) return trimmed;
+  // 5xx 一律泛化:user_error() 是给「客户端能纠正的 4xx」用的,5xx 意味着
+  // 「我们坏了」,通用文案才是对的,也避免上游/网关伪造标记把内部错误顶上屏。
+  if (trusted && status < 500 && isDisplayableUserText(trimmed)) return trimmed;
   switch (status) {
     case 401:
       return "登录状态已失效，请重新登录";
@@ -75,37 +118,39 @@ export function humanizeHttpError(status: number, detail?: string): string {
 
 // 把任意 catch 到的异常转成能给用户看的文案。**所有 catch 分支的唯一出口**。
 //
-// fetch 层抛出来的 message 已经是人话(中文),直接展示——保住 401/403/404/409
-// 之间的语义差别,别再压平成一句通用文案(否则用户分不清「登录失效 / 没权限 /
-// 已删除 / 冲突」,还会对权限和已删除问题反复重试)。
-// 其余一律兜底:fetch 自身 reject 的 "TypeError: Failed to fetch"(它根本进不了
-// throwHumanizedHttpError)、JSON 解析错、后端塞在 job.error 里的英文技术串、
-// 以及非 Error 值。判据同上:有没有中文 + 够不够像一句文案。
+// 只认品牌:本模块翻译过的(humanizedError / throwHumanizedHttpError)原样返回
+// ——保住 401/403/404/409 之间的语义差别,别压平成一句通用文案(否则用户分不清
+// 「登录失效 / 没权限 / 已删除 / 冲突」,还会对权限和已删除问题反复重试)。
+//
+// 其余一律兜底,不看内容长什么样:fetch 自身 reject 的 "TypeError: Failed to
+// fetch"、JSON 解析错、后端塞在 job.error / error_message / stream event 里的
+// 串(`RuntimeError: 模型调用失败 upstream timeout` 这种「中文技术串」正是旧
+// 形态判据漏掉的一类)、以及非 Error 值。
 //
 // 被丢掉的原始值一律进 console.error——用户看人话,排查看原文,两边都不丢。
 export function toUserMessage(error: unknown, fallback: string = GENERIC_USER_ERROR): string {
-  const message = error instanceof Error ? error.message.trim() : "";
   // 透传路径无损,不重复记日志(HTTP 错误的原始诊断 readHttpError 已经记过了)。
-  if (isDisplayableUserText(message)) return message;
-  console.error("[error] 未翻译的原始错误(已用兜底文案代替):", error);
+  if (isHumanized(error)) return error.message;
+  logDiagnostic("error", error);
   return fallback;
 }
 
 // 一次 HTTP 失败的原始诊断。
 export type HttpErrorDiagnostic = {
   status: number;
-  // 可展示的后端文案。**只可能来自 JSON 的 detail/message 字段**;非 JSON 的
-  // 原始正文恒为 ""(它只进诊断通道)。可以安全地喂给 humanizeHttpError()。
+  // 后端 JSON 里的 detail/message 原文。**能不能给用户看由 trusted 决定**,
+  // 不要绕过 humanizeHttpError() 直接展示它。
   userDetail: string;
+  // 后端是否用 user_error() 声明「这句是写给用户的」。
+  trusted: boolean;
   requestId: string;
 };
 
-// ①可展示通道:从响应正文里抠出「后端写给用户的文案」。
+// ①可展示通道:从响应正文里抠出后端的 detail 文本。
 // 覆盖 FastAPI 的几种形状:{"detail": "..."} / {"detail": [{loc,msg,type}, ...]} /
 // {"message": "..."}。除此以外一律返回空串:
 //   - 非 JSON(网关 HTML、代理错误页、纯文本堆栈)→ ""(只进诊断通道)
 //   - JSON 但没有 detail/message,或它不是字符串/字符串数组 → ""
-// 整坨 JSON、标记语言正文都不是给用户看的文案。
 function pickUserDetail(raw: string): string {
   const text = raw.trim();
   if (!text) return "";
@@ -130,23 +175,51 @@ function pickUserDetail(raw: string): string {
   return "";
 }
 
+// 诊断值统一压成单行 + 截断。HTTP 正文和 catch 到的异常共用,避免一边截断
+// 一边不截断(旧版 toUserMessage 直接把整个 error 丢进 console,无上限)。
+function truncateDiagnostic(text: string): string {
+  const oneLine = text.trim().replace(/\s+/g, " ");
+  return oneLine.length > DIAGNOSTIC_MAX_CHARS
+    ? `${oneLine.slice(0, DIAGNOSTIC_MAX_CHARS)}…[已截断]`
+    : oneLine;
+}
+
 // ②诊断通道:原始正文压成单行并统一截断。这里不做任何「可展示」判断——原样
 // (截断后)进 console 就是它的价值。
 function pickDiagnostic(raw: string): string {
-  const text = raw.trim().replace(/\s+/g, " ");
-  return text.length > DIAGNOSTIC_MAX_CHARS
-    ? `${text.slice(0, DIAGNOSTIC_MAX_CHARS)}…[已截断]`
-    : text;
+  return truncateDiagnostic(raw);
 }
 
-// 读一次失败响应的 body + 取 X-Request-Id,把原始诊断写进 console.error,
-// 返回可展示的 userDetail 供调用侧做场景化文案(如 auth.ts 的登录 401 特化)。
+// 把任意值描述成一行可读的诊断文本(同样受 DIAGNOSTIC_MAX_CHARS 约束)。
+function describeForDiagnostic(value: unknown): string {
+  if (value instanceof Error) return truncateDiagnostic(`${value.name}: ${value.message}`);
+  if (typeof value === "string") return truncateDiagnostic(value);
+  if (value === null || value === undefined) return String(value);
+  try {
+    return truncateDiagnostic(JSON.stringify(value) ?? String(value));
+  } catch {
+    return truncateDiagnostic(String(value));
+  }
+}
+
+// 把「不给用户看的原始诊断」写进 console(统一截断)。
+//
+// 用在渲染期拿到后端诊断字段、但不该上屏的地方(report.error、
+// model_errors[].message、readiness 的 error……)。
+// ⚠别在 render body 里直接调——会随重渲染刷屏;放进 useEffect 或事件回调。
+export function logDiagnostic(tag: string, value: unknown): void {
+  console.error(`[${tag}] 未翻译的原始错误(界面已用兜底文案代替):`, describeForDiagnostic(value));
+}
+
+// 读一次失败响应的 body + 取 X-Request-Id / X-User-Message,把原始诊断写进
+// console.error,返回诊断供调用侧做场景化文案(如 auth.ts 的登录 401 特化)。
 //
 // ⚠会消费 res 的 body(res.text() 只能读一次)。调用点在此之后不应再读 body
 // ——所有调用点都是「读完就抛」。
 export async function readHttpError(res: Response, tag: string): Promise<HttpErrorDiagnostic> {
   const raw = await res.text().catch(() => "");
   const userDetail = pickUserDetail(raw);
+  const trusted = res.headers.get(USER_MESSAGE_HEADER) === "1";
   const requestId = res.headers.get("X-Request-Id") || "";
   // console 里给原始正文(不是抠出来的 detail):detail 抠不出来的时候恰恰最需要
   // 看原文,而抠得出来的时候原文本来就含着它。截断在 pickDiagnostic 里统一做。
@@ -154,11 +227,11 @@ export async function readHttpError(res: Response, tag: string): Promise<HttpErr
   console.error(
     `[${tag}] ${res.status} ${res.statusText}${diagnostic ? ` - ${diagnostic}` : ""}${requestId ? ` [${requestId}]` : ""}`
   );
-  return { status: res.status, userDetail, requestId };
+  return { status: res.status, userDetail, trusted, requestId };
 }
 
-// 失败响应的统一出口:原始诊断进 console,面向用户抛人话。
+// 失败响应的统一出口:原始诊断进 console,面向用户抛人话(带品牌)。
 export async function throwHumanizedHttpError(res: Response, tag: string): Promise<never> {
-  const { status, userDetail } = await readHttpError(res, tag);
-  throw new Error(humanizeHttpError(status, userDetail));
+  const { status, userDetail, trusted } = await readHttpError(res, tag);
+  throw humanizedError(humanizeHttpError(status, userDetail, trusted));
 }

@@ -1,4 +1,9 @@
-import { humanizeHttpError, readHttpError, throwHumanizedHttpError } from "./errors.ts";
+import {
+  humanizedError,
+  humanizeHttpError,
+  readHttpError,
+  throwHumanizedHttpError,
+} from "./errors.ts";
 
 export const API_BASE =
   (typeof process !== "undefined"
@@ -43,12 +48,14 @@ async function authFetch<T>(path: string, body: unknown): Promise<T> {
   });
   if (!res.ok) {
     // 原始诊断(状态码 + detail + requestId)统一走 errors.ts 进 console。
-    const { status, userDetail } = await readHttpError(res, "auth");
+    const { status, userDetail, trusted } = await readHttpError(res, "auth");
     // 登录 401 特化:后端 detail 是「用户名或密码错误」,登录表单上说「不对」
-    // 更自然。其余交给共享映射——auth 路由的 4xx detail 恒为中文可操作文案
-    // (「用户名已被占用」「密码不能为空」「用户名须为…」),humanizeHttpError
-    // 的「中文 detail 透传」规则会原样保留,不需要在这里再写一遍特例。
-    throw new Error(status === 401 ? "用户名或密码不对" : humanizeHttpError(status, userDetail));
+    // 更自然。其余交给共享映射——auth 路由的这些 4xx 都经后端 user_error()
+    // 盖了章(「用户名已被占用」「密码不能为空」「用户名须为…」),
+    // humanizeHttpError 凭 trusted 原样保留,不需要在这里再写一遍特例。
+    throw humanizedError(
+      status === 401 ? "用户名或密码不对" : humanizeHttpError(status, userDetail, trusted)
+    );
   }
   return res.json();
 }
