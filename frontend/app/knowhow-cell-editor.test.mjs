@@ -30,9 +30,14 @@ import {
   SWITCH_GUARD_MESSAGE,
   SWITCH_GUARD_DISCARD_LABEL,
   DRAFT_FLUSH_FAILED_MESSAGE,
+  CLOSE_GUARD_MESSAGE,
   resolveCloseRequest,
   resolveSwitchRequest,
   draftFlushAction,
+  applyDraftFlush,
+  isEditorBusy,
+  isSaveBlocked,
+  resolveSaveCompletion,
 } from "./knowhow-cell-editor-logic.ts";
 
 // --- UI 文案常量：byte-exact vs 规格②路A / 任务简报原文 -------------------------
@@ -392,4 +397,115 @@ test("draftFlushAction: 无改动 + 恢复提示开着 → keep（不能删掉�
 
 test("draftFlushAction: 无改动 + 无恢复提示 → remove（清陈旧草稿）", () => {
   assert.strictEqual(draftFlushAction(false, false), "remove");
+});
+
+// --- applyDraftFlush：真实副作用路径（用会抛错的假 storage 覆盖 window.localStorage
+//     在单测里没法触发的配额/隐私模式失败）--------------------------------------
+
+test("applyDraftFlush: write 成功 → true，且确实写入了内容", () => {
+  const calls = [];
+  const storage = { setItem: (k, v) => calls.push(["set", k, v]), removeItem: (k) => calls.push(["rm", k]) };
+  assert.strictEqual(applyDraftFlush(storage, "k", "正文", "write"), true);
+  assert.deepStrictEqual(calls, [["set", "k", "正文"]]);
+});
+
+test("applyDraftFlush: write 抛错（配额/隐私模式）→ false，调用方据此不许离开", () => {
+  const storage = {
+    setItem: () => {
+      throw new Error("QuotaExceededError");
+    },
+    removeItem: () => {},
+  };
+  assert.strictEqual(applyDraftFlush(storage, "k", "正文", "write"), false);
+});
+
+test("applyDraftFlush: keep 完全不碰 storage（保住待恢复的旧草稿）", () => {
+  const calls = [];
+  const storage = { setItem: () => calls.push("set"), removeItem: () => calls.push("rm") };
+  assert.strictEqual(applyDraftFlush(storage, "k", "正文", "keep"), true);
+  assert.deepStrictEqual(calls, []);
+});
+
+test("applyDraftFlush: remove 清旧稿；removeItem 抛错也算安全（本就无内容可丢）", () => {
+  const calls = [];
+  const ok = { setItem: () => {}, removeItem: (k) => calls.push(k) };
+  assert.strictEqual(applyDraftFlush(ok, "k", "", "remove"), true);
+  assert.deepStrictEqual(calls, ["k"]);
+  const throwing = {
+    setItem: () => {},
+    removeItem: () => {
+      throw new Error("nope");
+    },
+  };
+  assert.strictEqual(applyDraftFlush(throwing, "k", "", "remove"), true);
+});
+
+// --- busy 互斥 + 陈旧回调守卫 -------------------------------------------------
+
+test("isEditorBusy: 保存 / 上传 / 优化 任一在飞即为忙（用于挡切兄弟格）", () => {
+  assert.strictEqual(isEditorBusy(false, false, false), false);
+  assert.strictEqual(isEditorBusy(true, false, false), true);
+  assert.strictEqual(isEditorBusy(false, true, false), true);
+  assert.strictEqual(isEditorBusy(false, false, true), true);
+});
+
+test("isSaveBlocked: 保存中/上传中挡保存；签名里根本没有 optimizing（LLM 可能卡死，不能锁住存盘）", () => {
+  assert.strictEqual(isSaveBlocked(false, false), false);
+  assert.strictEqual(isSaveBlocked(true, false), true);
+  assert.strictEqual(isSaveBlocked(false, true), true);
+  // 「优化中仍可保存」不是靠传 false 传出来的，而是这个判定压根不接受 optimizing
+  // 这个入参——用元数不变式把它钉住，避免日后有人把 optimizing 塞进来。
+  assert.strictEqual(isSaveBlocked.length, 2);
+  assert.strictEqual(isEditorBusy.length, 3);
+});
+
+// --- 保存成功后的草稿处置：与离开路径共用同一套 draftFlushAction/applyDraftFlush，
+//     基线是「这次真正落库的内容」，比较对象是**解析时刻的实时内容**（不是发起
+//     保存时捕获的那份）------------------------------------------------------------
+
+test("保存收尾：期间没再敲字（实时内容===落库内容）→ remove，清掉冗余草稿", () => {
+  assert.strictEqual(draftFlushAction(hasUnsavedChanges("X+AAA", "X+AAA"), false), "remove");
+});
+
+test("保存收尾：期间用户继续敲（实时内容≠落库内容）→ write 实时内容（回归锁）", () => {
+  // 发起保存时捕获 "X+AAA"，其后用户敲成 "X+AAA+BBB"。保存返回后组件即将卸载、
+  // 300ms 自动草稿定时器会被 clearTimeout 掐掉，此刻若不写实时内容，"+BBB" 就
+  // 从服务端和本地同时消失。
+  assert.strictEqual(draftFlushAction(hasUnsavedChanges("X+AAA+BBB", "X+AAA"), false), "write");
+});
+
+test("保存收尾：恢复提示还开着 → keep，绝不动那份未决定的旧草稿", () => {
+  assert.strictEqual(draftFlushAction(hasUnsavedChanges("X", "X"), true), "keep");
+});
+
+test("resolveSaveCompletion: 已卸载 → none（陈旧回调绝不操作后来打开的格子）", () => {
+  // 复审指出的跨格污染：A 格保存途中被关掉、用户打开 B 格，A 的旧回调若仍执行
+  // onNavigate/onClose 就会把 B 关掉或跳走，B 里刚输入且防抖未落盘的内容随之丢失。
+  // 注意本测试锁的是**决策表**，不是组件接线——「runSave 确实把 mountedRef.current
+  // 传进来」这一步 .tsx 侧无法在本仓库的 node:test 模型里断言（见文件头说明）。
+  assert.deepStrictEqual(resolveSaveCompletion("next", { rowId: "r2", columnId: "c1" }, false), { kind: "none" });
+  assert.deepStrictEqual(resolveSaveCompletion("save", null, false), { kind: "none" });
+});
+
+test("resolveSaveCompletion: 仍挂载 + 保存并下一格 + 有下一格 → navigate", () => {
+  assert.deepStrictEqual(resolveSaveCompletion("next", { rowId: "r2", columnId: "c1" }, true), {
+    kind: "navigate",
+    rowId: "r2",
+    columnId: "c1",
+  });
+});
+
+test("resolveSaveCompletion: 仍挂载 + 已是整表末格 → close", () => {
+  assert.deepStrictEqual(resolveSaveCompletion("next", null, true), { kind: "close" });
+});
+
+test("resolveSaveCompletion: 仍挂载 + 普通保存 → close（不跳格）", () => {
+  assert.deepStrictEqual(resolveSaveCompletion("save", { rowId: "r2", columnId: "c1" }, true), { kind: "close" });
+});
+
+test("守卫文案：不再用「已自动保存」过去式承诺（同步落盘发生在点「放弃」之后）", () => {
+  for (const msg of [CLOSE_GUARD_MESSAGE, SWITCH_GUARD_MESSAGE]) {
+    assert.doesNotMatch(msg, /已自动保存/);
+    assert.match(msg, /可恢复/);
+  }
 });

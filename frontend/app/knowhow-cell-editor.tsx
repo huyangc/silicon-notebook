@@ -34,6 +34,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -117,6 +118,14 @@ import {
   resolveCloseRequest,
   resolveSwitchRequest,
   draftFlushAction,
+  applyDraftFlush,
+  isEditorBusy,
+  isSaveBlocked,
+  SAVE_BLOCKED_UPLOADING_HINT,
+  SAVE_IN_FLIGHT_UPLOAD_HINT,
+  BUSY_HINT,
+  OPTIMIZE_SUGGESTION_STALE_MESSAGE,
+  resolveSaveCompletion,
   type LeaveIntent,
 } from "./knowhow-cell-editor-logic.ts";
 import {
@@ -597,6 +606,40 @@ export function KnowhowCellEditor({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingCursorRef = useRef<number | null>(null);
+  // 本格编辑器是否仍挂载——异步收尾（保存返回）据此判断自己是不是「陈旧回调」：
+  // 用户在保存途中关掉本格、又打开了别的格子时，本格的 key 已变、实例已卸载，
+  // 此时若继续调 onNavigate/onClose 会把**后来打开的那一格**关掉或跳走（它刚输入
+  // 且防抖未落盘的内容随之丢失）。组件按 key={rowId:columnId} 每格独立挂载，
+  // 「已卸载」正是「这次回调已过期」的准确信号。
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  // 「最新值」ref：异步收尾（保存返回）读到的 content 是发起那一刻被闭包冻住的
+  // payload，看不见用户在请求在飞期间又敲进去的字（textarea 保存中并不禁用）。
+  // 收尾要拿实时内容去决定草稿怎么处置，只能经 ref 取。
+  // 用 useLayoutEffect 而非 useEffect：被动 effect 是提交后在调度器任务里刷的，
+  // 保存的 promise 收尾有可能抢在它前面读到落后一拍的 ref，把「刚敲的最后一笔」
+  // 误判成没改动而清掉草稿。layout effect 在提交阶段同步跑，不留这个窗口。
+  const contentRef = useRef(content);
+  useLayoutEffect(() => {
+    contentRef.current = content;
+  }, [content]);
+  const restoreBannerRef = useRef(showRestoreBanner);
+  useLayoutEffect(() => {
+    restoreBannerRef.current = showRestoreBanner;
+  }, [showRestoreBanner]);
+
+  // 有异步在飞（保存 / 图片上传 / 优化表达）：门控**发起类**入口（保存、切兄弟格），
+  // 但刻意不门控**离开类**入口（关闭/Esc/背景/取消）——离开的安全性由 mountedRef
+  // 陈旧回调守卫保证；若连离开都禁掉，请求卡住时用户会被关在弹窗里出不来。
+  const busy = isEditorBusy(savingMode !== null, uploading, isCellOptimizeLoading(optimizeState));
+  // 保存的阻塞面比 busy 窄：优化在飞时仍允许保存（见 isSaveBlocked 注释——LLM 请求
+  // 无超时，锁死存盘会让用户这段时间敲的内容存不下去）。
+  const saveBlocked = isSaveBlocked(savingMode !== null, uploading);
 
   // 一次性(mount 时)检查本格是否有未保存草稿——组件靠 panel 给的
   // key={rowId+columnId} 保证每次切格都是全新挂载，故空依赖数组等价于「每次
@@ -669,32 +712,65 @@ export function KnowhowCellEditor({
 
   const runSave = useCallback(
     async (mode: "save" | "next") => {
-      if (savingMode) return;
+      // 上传未完成就保存会漏掉「还没插进正文的图片」，故上传中不许发起保存；⌘↩ 走
+      // 到这里会静默无响应，所以顺手把原因显示出来。优化在飞**不**挡保存（见
+      // isSaveBlocked 注释：LLM 请求可能卡很久，不能连带锁死存盘）。
+      if (isSaveBlocked(savingMode !== null, uploading)) {
+        if (uploading) setSaveError(SAVE_BLOCKED_UPLOADING_HINT);
+        return;
+      }
       setSavingMode(mode);
       setSaveError(null);
       try {
         await onSave(rowId, columnId, content);
-        try {
-          window.localStorage.removeItem(draftStorageKey(rowId, columnId));
-        } catch {
-          /* ignore */
+        // 保存成功后的草稿处置——与所有离开路径共用同一套决策/落盘（draftFlushAction
+        // + applyDraftFlush），基线换成「这次真正落库的内容」(content)，比较对象是
+        // **解析时刻的实时内容** contentRef.current：
+        //   · 期间没再敲字 → remove（草稿已冗余）；
+        //   · 期间用户继续敲 → write 实时内容（关键！收尾马上要 onClose/onNavigate
+        //     卸载组件，300ms 自动草稿定时器会被 clearTimeout 掐掉，此刻不写就等于
+        //     把这些字从服务端和本地一起抹掉）；
+        //   · 恢复提示还开着 → keep（那份旧草稿还没轮到我们处置）。
+        // 组件已卸载时跳过：离开路径上的 performLeave 已经同步落过草稿，这里再动
+        // 同一个键只会覆盖掉更晚的状态。
+        if (mountedRef.current) {
+          const live = contentRef.current;
+          let flushed: boolean;
+          try {
+            flushed = applyDraftFlush(
+              window.localStorage,
+              draftStorageKey(rowId, columnId),
+              live,
+              draftFlushAction(hasUnsavedChanges(live, content), restoreBannerRef.current),
+            );
+          } catch {
+            flushed = !hasUnsavedChanges(live, content);
+          }
+          // 与 performLeave 同一条契约：草稿没落成就**不离开**。此处若照常
+          // onClose/onNavigate，卸载会掐掉 300ms 自动草稿定时器，保存期间敲的字
+          // 就从服务端和本地一起没了——正是本轮复审抓到的残留口子。
+          if (!flushed) {
+            setSaveError(DRAFT_FLUSH_FAILED_MESSAGE);
+            return;
+          }
         }
-        if (mode === "next") {
-          const orderedColumns = orderColumnsForGrid(table.columns);
-          const orderedRows = sortRowsByPosition(table.rows);
-          const next = nextCellCoordinates(orderedColumns, orderedRows, { rowId, columnId });
-          if (next) onNavigate(next.rowId, next.columnId);
-          else onClose();
-        } else {
-          onClose();
-        }
+        // 收尾动作经 resolveSaveCompletion 决策：本格已卸载（保存途中被关掉、用户
+        // 又开了别的格子）时返回 none——绝不能拿本格捕获的 onNavigate/onClose 去
+        // 操作后来打开的那一格。
+        const orderedColumns = orderColumnsForGrid(table.columns);
+        const orderedRows = sortRowsByPosition(table.rows);
+        const next =
+          mode === "next" ? nextCellCoordinates(orderedColumns, orderedRows, { rowId, columnId }) : null;
+        const completion = resolveSaveCompletion(mode, next, mountedRef.current);
+        if (completion.kind === "navigate") onNavigate(completion.rowId, completion.columnId);
+        else if (completion.kind === "close") onClose();
       } catch (err) {
         setSaveError(extractErrorMessage(err, "保存失败，请重试"));
       } finally {
         setSavingMode(null);
       }
     },
-    [savingMode, onSave, rowId, columnId, content, table, onNavigate, onClose],
+    [savingMode, uploading, onSave, rowId, columnId, content, table, onNavigate, onClose],
   );
 
   // 放弃/切走前把当前内容同步落进草稿键——兜住「组件卸载抢在 300ms 自动草稿
@@ -705,65 +781,68 @@ export function KnowhowCellEditor({
   // 让执行器据此原地报错、不静默离开；keep/remove 恒真（本就没有要保存的内容，
   // 离开是安全的）。
   const flushDraft = useCallback((): boolean => {
-    const key = draftStorageKey(rowId, columnId);
     const action = draftFlushAction(hasUnsavedChanges(content, savedContent), showRestoreBanner);
-    if (action === "write") {
-      try {
-        window.localStorage.setItem(key, content);
-        return true;
-      } catch {
-        return false;
-      }
+    try {
+      return applyDraftFlush(window.localStorage, draftStorageKey(rowId, columnId), content, action);
+    } catch {
+      // 连取 window.localStorage 本身都抛（极端隐私设置）：只有 write 才算失败，
+      // keep/remove 本就没有要保存的内容，离开是安全的。
+      return action !== "write";
     }
-    if (action === "remove") {
-      try {
-        window.localStorage.removeItem(key);
-      } catch {
-        /* 清旧稿失败无所谓——本就没有要保存的内容，离开是安全的 */
-      }
-    }
-    return true;
   }, [content, savedContent, rowId, columnId, showRestoreBanner]);
 
-  // 唯一的「确认离开」执行器：所有 close/switch 路径（Esc/背景/关闭按钮、切兄弟
-  // 格、守卫「放弃」按钮）都经此。先同步落草稿——落不进就绝不离开：清掉守卫、
-  // 原地报 DRAFT_FLUSH_FAILED_MESSAGE、留在编辑框（内容还在），不在 UI 承诺
-  // 「可恢复」的同时把内容悄悄丢掉；落成了再真正 close/switch。「每条离开路径都
-  // 先落草稿」由「只有这一个执行器」这一结构保证，而非各分支各写一遍（复审 #1/#2）。
+  // 唯一的「确认离开」执行器：所有 close/switch 路径（Esc/背景/关闭按钮、取消、
+  // 切兄弟格、守卫「放弃」按钮）都经此，保存收尾那条出口也遵循同一契约。
+  // 契约：先同步落草稿；落不进则**这一次不离开**——清掉守卫、原地报
+  // DRAFT_FLUSH_FAILED_MESSAGE、内容留在编辑框，绝不在 UI 承诺「可恢复」的同时
+  // 把内容悄悄丢掉。唯一例外是用户正看着那条警告仍再点一次离开：视为已知情的
+  // 明确放弃，强制放行（否则存储不可用时无路可出，见下方 if 内注释）。
+  // 「每条离开路径都先落草稿」由「只有这一个执行器」这一结构保证，而非各分支各写。
   const performLeave = useCallback(
     (intent: LeaveIntent) => {
       if (!flushDraft()) {
-        setPendingLeave(null);
-        setSaveError(DRAFT_FLUSH_FAILED_MESSAGE);
-        return;
+        // 第一次：拦下并说明；第二次（用户此刻正看着那条警告仍要走）：强制放行。
+        // 若没有这条逃生口，存储长期不可用时所有出口都被挡死——「取消」并入统一
+        // 路径后最后一个无守卫出口也没了，用户会被永久关在弹窗里。
+        //
+        // 判据刻意用「警告是否还挂在屏幕上」而不是一个独立 latch：latch 一旦置位
+        // 就只有成功离开才会清，而 runSave / handleOptimize 都会 setSaveError(null)
+        // 把警告擦掉。那样「存储坏了 → 重试保存又失败 → 点取消」会在用户看不到任何
+        // 警告的情况下第一次点击就静默丢字。
+        if (saveError !== DRAFT_FLUSH_FAILED_MESSAGE) {
+          setPendingLeave(null);
+          setSaveError(DRAFT_FLUSH_FAILED_MESSAGE);
+          return;
+        }
       }
       setSaveError(null);
       setPendingLeave(null);
       if (intent.kind === "switch") onSwitchCell?.(intent.columnId);
       else onClose();
     },
-    [flushDraft, onSwitchCell, onClose],
+    [flushDraft, saveError, onSwitchCell, onClose],
   );
 
-  // 点「本行其他格子」的兄弟格：保存/上传进行中一律不切——异步 continuation 可能
+  // 点「本行其他格子」的兄弟格：有异步在飞（保存/上传/优化）一律不切——continuation 可能
   // 回写已卸载组件、或让旧保存的收尾（onClose/onNavigate）落到新格（复审 #3）；
   // 此时兄弟格也已被置为不可点（见 footer 的 KnowhowRowContext onSwitchCell 门），
   // 这里再挡一道。其余按 resolveSwitchRequest 决策：有未保存改动弹守卫、无改动经
   // 执行器立刻切（顺带清旧稿）。
   const handleSwitchCell = useCallback(
     (targetColumnId: string) => {
-      if (savingMode !== null || uploading) return;
+      if (busy) return;
       const { next, leave } = resolveSwitchRequest(targetColumnId, hasUnsavedChanges(content, savedContent));
       setPendingLeave(next);
       if (leave) performLeave(leave);
     },
-    [savingMode, uploading, content, savedContent, performLeave],
+    [busy, content, savedContent, performLeave],
   );
 
   // Esc/背景/关闭按钮：按 resolveCloseRequest 决策（含「二次 Esc 强制关闭」与「切格
   // 守卫弹着时按 Esc 取消切换」两条既有习惯），需要离开时统一经执行器——故二次 Esc
-  // 也会先落草稿（首版这条没落、复审 #1 指出）。显式点「取消」按钮不走这里、直接
-  // onClose（取消是用户已明确做出的放弃决定，无需二次确认，也不保草稿）。
+  // 也会先落草稿。显式点「取消」按钮**不经过本函数**（它是用户已明确做出的放弃
+  // 决定，不再二次确认），但同样经 performLeave 执行——照样同步落草稿、内容可恢复，
+  // 不留一条绕过离开状态机的旁路。
   const requestClose = useCallback(() => {
     const { next, leave } = resolveCloseRequest(pendingLeave, hasUnsavedChanges(content, savedContent));
     setPendingLeave(next);
@@ -823,6 +902,13 @@ export function KnowhowCellEditor({
   async function uploadAndInsertImages(files: File[]) {
     const images = files.filter(isImageFile);
     if (images.length === 0) return;
+    // 保存在飞时不接新上传：保存收尾会 onClose/onNavigate 卸载本格，晚一步返回的
+    // 上传只会把图片插进已卸载的组件——图片在服务端变成孤儿资产，用户这次粘贴则
+    // 无声无息地没了（保存通常比上传快，这是必然而非偶发）。
+    if (savingMode !== null) {
+      setUploadError(SAVE_IN_FLIGHT_UPLOAD_HINT);
+      return;
+    }
     setUploading(true);
     setUploadError(null);
     try {
@@ -842,6 +928,8 @@ export function KnowhowCellEditor({
       setUploadError(extractErrorMessage(err, "图片上传失败，请重试"));
     } finally {
       setUploading(false);
+      // 上传结束，「上传中不能保存」的提示就过期了——留着会变成一条常驻红字。
+      setSaveError((current) => (current === SAVE_BLOCKED_UPLOADING_HINT ? null : current));
     }
   }
 
@@ -895,7 +983,10 @@ export function KnowhowCellEditor({
   const optimizeDisabledReason = optimizeCellDisabledReason(content, savedContent, optimizeState);
 
   async function handleOptimize() {
-    if (optimizeDisabledReason) return;
+    // 与按钮 disabled 的条件保持一致（按钮同时受 busy 置灰），避免键盘/编程路径
+    // 绕过其中一半——与 runSave / handleSwitchCell 的「入口再查一遍」写法对齐。
+    if (optimizeDisabledReason || busy) return;
+    setSaveError(null); // 清掉上一轮可能留下的「建议已失效」等提示，避免常驻红字
     setOptimizeState(beginCellOptimize);
     try {
       const result = await optimizeKnowhowCell(notebookId, table.id, rowId, columnId);
@@ -910,6 +1001,15 @@ export function KnowhowCellEditor({
   // 才会真正落库+触发重投影，与格子浮窗其余编辑路径完全一致。
   function handleAcceptSuggestion() {
     if (optimizeState.status !== "ready") return;
+    // 发起优化的前提是「无未保存改动」，但请求在飞期间 textarea 并没禁用。若用户
+    // 此时又敲了字，这条建议的原文基线已经不是眼前的内容——直接 setContent 会把
+    // 那些字覆盖掉（随后自动草稿把草稿也改写成建议内容，本地同样没了）。故不接受，
+    // 丢弃这条已失效的建议并说明原因，用户的字原样留在编辑框。
+    if (hasUnsavedChanges(content, savedContent)) {
+      setOptimizeState(dismissCellOptimize());
+      setSaveError(OPTIMIZE_SUGGESTION_STALE_MESSAGE);
+      return;
+    }
     setContent(optimizeState.suggestionMd);
     setOptimizeState(dismissCellOptimize());
   }
@@ -975,10 +1075,10 @@ export function KnowhowCellEditor({
             table={table}
             rowId={rowId}
             currentColumnId={columnId}
-            // 保存/上传进行中，兄弟格置为不可点（onSwitchCell 传 undefined →
-            // KnowhowRowContext 的 clickable 判定为 false）：异步收尾会操作本格
-            // modal，此时切走会让旧 continuation 落到新格 / 回写已卸载组件（复审 #3）。
-            onSwitchCell={savingMode !== null || uploading ? undefined : handleSwitchCell}
+            // 有异步在飞（保存/上传/优化）时兄弟格置为不可点（onSwitchCell 传
+            // undefined → KnowhowRowContext 的 clickable 判定为 false、退出 tab 顺序）：
+            // 此时切走会让旧 continuation 落到新格 / 回写已卸载组件。
+            onSwitchCell={busy ? undefined : handleSwitchCell}
           />
         </header>
 
@@ -1051,9 +1151,12 @@ export function KnowhowCellEditor({
                     <button
                       type="button"
                       className="kh-toolbar-button kh-toolbar-button--optimize"
-                      title={optimizeDisabledReason ?? OPTIMIZE_CELL_BUTTON_LABEL}
+                      // busy 也会置灰本按钮，此时 optimizeDisabledReason 可能为
+                      // null——不补这一句就会「灰着但提示语说得像可点」，破坏
+                      // knowhow-optimize-logic.ts 声明的「置灰必有对得上的原因」不变量。
+                      title={optimizeDisabledReason ?? (busy ? BUSY_HINT : OPTIMIZE_CELL_BUTTON_LABEL)}
                       onClick={handleOptimize}
-                      disabled={optimizeDisabledReason !== null || uploading || savingMode !== null}
+                      disabled={optimizeDisabledReason !== null || busy}
                     >
                       {isCellOptimizeLoading(optimizeState) ? (
                         <Loader2 size={15} className="knowhow-spin" />
@@ -1140,14 +1243,31 @@ export function KnowhowCellEditor({
         </div>
 
         <footer className="kh-modal-footer">
+          {/* saveError 提到三个分支之外：它也承载「草稿落盘失败，没能离开」与「建议
+              已失效」这类在守卫/优化对照分支下产生的信息，若只在最后一个分支渲染，
+              用户会遇到「点了放弃却没关掉、且毫无解释」的死胡同。 */}
+          {saveError && <span className="kh-inline-error">{saveError}</span>}
           {pendingLeave ? (
             <div className="kh-close-guard">
-              <span>{pendingLeave.kind === "switch" ? SWITCH_GUARD_MESSAGE : CLOSE_GUARD_MESSAGE}</span>
+              {/* 落盘失败警告挂着时不再叠一句「可恢复」——此刻再点放弃就是强制丢弃，
+                  那句承诺是假的；上方已渲染的 DRAFT_FLUSH_FAILED_MESSAGE 才是实情。 */}
+              {saveError !== DRAFT_FLUSH_FAILED_MESSAGE && (
+                <span>{pendingLeave.kind === "switch" ? SWITCH_GUARD_MESSAGE : CLOSE_GUARD_MESSAGE}</span>
+              )}
               <div className="kh-close-guard-actions">
                 <button type="button" onClick={() => setPendingLeave(null)}>
                   {CLOSE_GUARD_CONTINUE_LABEL}
                 </button>
-                <button type="button" className="kh-danger-button" onClick={() => performLeave(pendingLeave)}>
+                {/* 切格分支同样受 busy 门控——守卫弹着期间用户仍可能粘贴图片/触发
+                    保存，此时放行切格会重演「异步收尾落到新格」。关闭分支不设门
+                    （离开类入口一律留出口，见 busy 注释）。 */}
+                <button
+                  type="button"
+                  className="kh-danger-button"
+                  onClick={() => performLeave(pendingLeave)}
+                  disabled={pendingLeave.kind === "switch" && busy}
+                  title={pendingLeave.kind === "switch" && busy ? BUSY_HINT : undefined}
+                >
                   {pendingLeave.kind === "switch" ? SWITCH_GUARD_DISCARD_LABEL : CLOSE_GUARD_DISCARD_LABEL}
                 </button>
               </div>
@@ -1163,19 +1283,28 @@ export function KnowhowCellEditor({
             </div>
           ) : (
             <>
-              {saveError && <span className="kh-inline-error">{saveError}</span>}
               <div className="kh-footer-actions">
-                <button type="button" onClick={onClose} disabled={savingMode !== null}>
+                {/* 「取消」是用户已明确做出的放弃决定，不再二次确认；但仍走统一执行器
+                    performLeave——同步落草稿后再关闭，未保存内容照样可恢复，不留一条
+                    绕过离开状态机、不落草稿的旁路。离开类入口不受 busy 门控（见 busy
+                    注释）。 */}
+                <button type="button" onClick={() => performLeave({ kind: "close" })}>
                   {CANCEL_LABEL}
                 </button>
-                <button type="button" onClick={() => runSave("save")} disabled={savingMode !== null}>
+                <button
+                  type="button"
+                  onClick={() => runSave("save")}
+                  disabled={saveBlocked}
+                  title={uploading ? SAVE_BLOCKED_UPLOADING_HINT : undefined}
+                >
                   <Check size={14} /> {savingMode === "save" ? "保存中…" : SAVE_LABEL}
                 </button>
                 <button
                   type="button"
                   className="kh-primary-button"
                   onClick={() => runSave("next")}
-                  disabled={savingMode !== null}
+                  disabled={saveBlocked}
+                  title={uploading ? SAVE_BLOCKED_UPLOADING_HINT : undefined}
                 >
                   {savingMode === "next" ? "保存中…" : SAVE_AND_NEXT_LABEL} <ArrowRight size={14} />
                 </button>

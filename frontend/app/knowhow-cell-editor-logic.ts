@@ -33,7 +33,10 @@ export const DRAFT_BANNER_TEXT = "检测到这一格有未保存的草稿";
 
 // Esc/背景关闭前的未保存内容提醒（规格只描述行为「未保存内容提醒」，未给
 // 逐字文案，以下为本组件自定的友好中文文案）。
-export const CLOSE_GUARD_MESSAGE = "有未保存的修改，确定要关闭吗？（草稿已自动保存，下次打开可恢复）";
+// 措辞是前瞻式（「会留作」）而非过去式（「已自动保存」）：同步落盘发生在用户点
+// 「放弃」之后，点之前并没有落盘成功这回事；万一落不进，执行器会改报
+// DRAFT_FLUSH_FAILED_MESSAGE 并留在编辑器，不让这句承诺变成空头支票。
+export const CLOSE_GUARD_MESSAGE = "有未保存的修改，确定要关闭吗？（放弃后会把未保存内容留作本地草稿，下次打开可恢复）";
 export const CLOSE_GUARD_CONTINUE_LABEL = "继续编辑";
 export const CLOSE_GUARD_DISCARD_LABEL = "放弃并关闭";
 
@@ -201,14 +204,14 @@ export const VIEW_MODE_PREVIEW_LABEL = "预览";
 // 只是离开动作是"切到另一格"而非"关闭"；放弃时草稿同步保留、可恢复）。「继续
 // 编辑」复用 CLOSE_GUARD_CONTINUE_LABEL。
 export const SWITCH_GUARD_MESSAGE =
-  "有未保存的修改，确定要切换到另一格吗？（草稿已自动保存，下次打开可恢复）";
+  "有未保存的修改，确定要切换到另一格吗？（放弃后会把未保存内容留作本地草稿，下次打开可恢复）";
 export const SWITCH_GUARD_DISCARD_LABEL = "放弃并切换";
 
 // 草稿同步落盘失败（浏览器存储不可用：隐私模式/配额）时的提示——此时绝不能
 // 静默离开，否则守卫承诺的「可恢复」是假的、内容真丢了。改为原地报此错、留在
 // 编辑框（内容还在），让用户先自行复制再决定去留。
 export const DRAFT_FLUSH_FAILED_MESSAGE =
-  "浏览器存储不可用，草稿未能保存；内容仍在编辑框，请先复制后再离开。";
+  "浏览器存储不可用，草稿未能保存；内容仍在编辑框，请先复制。再点一次「关闭/取消」将直接放弃这些内容。";
 
 // --- 离开编辑态的意图与决策（关闭 / 切兄弟格，共用「未保存 → 守卫 → 明确丢弃」）---
 //
@@ -256,4 +259,88 @@ export type DraftFlushAction = "write" | "keep" | "remove";
 export function draftFlushAction(hasChanges: boolean, restoreBannerOpen: boolean): DraftFlushAction {
   if (hasChanges) return "write";
   return restoreBannerOpen ? "keep" : "remove";
+}
+
+// 把 draftFlushAction 决出的动作真正作用到一个 Storage-like 对象上，并如实返回
+// 「是否已安全落盘」：write 抛错（配额/隐私模式）→ false，调用方据此不许离开；
+// keep/remove 恒真（本就没有要保存的内容）。storage 参数化是为了能用「会抛错的
+// 假 storage」在 node:test 里覆盖这条真实副作用路径——组件里的 window.localStorage
+// 没法在单测中触发抛错，而这正是「存储失败仍离开」那类 bug 的藏身处。
+export interface DraftStorage {
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+export function applyDraftFlush(
+  storage: DraftStorage,
+  key: string,
+  content: string,
+  action: DraftFlushAction,
+): boolean {
+  if (action === "keep") return true;
+  if (action === "write") {
+    try {
+      storage.setItem(key, content);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    storage.removeItem(key);
+  } catch {
+    /* 清旧稿失败无所谓——本就没有要保存的内容，离开是安全的 */
+  }
+  return true;
+}
+
+// 编辑器是否处在「有异步在飞」的忙态：保存中 / 图片上传中 / 优化表达请求中。
+// 用于门控**发起类**入口（保存、切兄弟格）——但刻意不门控**离开类**入口
+// （关闭/Esc/背景/取消）：离开的安全性由下面的 resolveSaveCompletion 陈旧回调
+// 守卫来保证，若连离开都禁掉，请求卡住时用户会被关在弹窗里出不来。
+export function isEditorBusy(saving: boolean, uploading: boolean, optimizing: boolean): boolean {
+  return saving || uploading || optimizing;
+}
+
+// 发起「保存」的阻塞判定——刻意**不含** optimizing：优化表达是一次可能卡很久的
+// LLM 请求（无超时/AbortController），若它把保存也锁死，用户在此期间敲的内容就
+// 存不下去。数据安全优先；代价只是那次优化请求可能白跑（保存成功会关掉浮窗，
+// 对照根本来不及展示）。上传中不许保存则是必要的——图片还没插进正文就保存会漏掉它。
+export function isSaveBlocked(saving: boolean, uploading: boolean): boolean {
+  return saving || uploading;
+}
+
+// 保存被上传挡住时的提示（按钮 title + ⌘↩ 无声无响应时的原地反馈）。
+export const SAVE_BLOCKED_UPLOADING_HINT = "图片上传中，等上传完成后再保存。";
+
+// 反向：保存在飞时不接新上传（保存收尾会关掉/切走本格，晚返回的上传会插进已卸载
+// 的组件——服务端留下孤儿资产、用户这次粘贴无声消失）。
+export const SAVE_IN_FLIGHT_UPLOAD_HINT = "正在保存，保存完成后再插入图片。";
+
+// 有其它异步在飞导致按钮置灰时的通用提示——置灰必须有对得上的原因，不能灰着却
+// 显示「可点」的文案（knowhow-optimize-logic.ts 声明的不变量）。
+export const BUSY_HINT = "有操作进行中，请稍候。";
+
+// 优化建议的基线已失效：发起优化的前提是「无未保存改动」，但请求在飞期间
+// textarea 并未禁用。若用户此时又敲了字，再点「接受」会用建议覆盖掉这些字（且
+// 随后自动草稿把草稿也改写成建议内容，等于本地也没了）。故此时不接受，改为丢弃
+// 这条已对不上原文的建议并提示重来——用户的字原样留在编辑框。
+export const OPTIMIZE_SUGGESTION_STALE_MESSAGE =
+  "编辑内容在优化期间已改动，这条建议已对不上原文，已丢弃；如需优化请保存后重新触发。";
+
+// 保存完成后该做什么——关键是第三个参数 stillMounted：本格编辑器若已卸载（用户
+// 保存途中关掉、又打开了别的格子），这次保存的收尾**绝不能**再调 onNavigate/
+// onClose，否则会把后来打开的那一格关掉或跳走（其未落盘的输入也一并丢失）。
+// 抽成纯函数是为了把这条陈旧回调规则单测锁住。
+export type SaveCompletionAction =
+  | { kind: "navigate"; rowId: string; columnId: string }
+  | { kind: "close" }
+  | { kind: "none" };
+export function resolveSaveCompletion(
+  mode: "save" | "next",
+  next: CellCoordinates | null,
+  stillMounted: boolean,
+): SaveCompletionAction {
+  if (!stillMounted) return { kind: "none" };
+  if (mode === "next") return next ? { kind: "navigate", rowId: next.rowId, columnId: next.columnId } : { kind: "close" };
+  return { kind: "close" };
 }
