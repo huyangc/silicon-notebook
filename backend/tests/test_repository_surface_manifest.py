@@ -3988,11 +3988,19 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER
 # EOF append like every other TASKN_* block; the union resolves lazily at
 # call time inside _member_file_site_allowed, same as
 # ALL_TASK_ALLOWED_MEMBER_FILES's own EOF folds above.
+#
+# final-fix-wave update: the copy_table asset-loop fix (Minor: copied asset
+# rows must not keep a foreign source_id — sets row["source_id"] = None)
+# added lines inside _remap, ahead of copy_table's own `_runtime`/
+# `storage_dir` reaches, shifting those two line numbers (185->193,
+# 204->212). _remap's own two sites (`_runtime` seam extraction at 29,
+# `get_notebook_asset` at 89) sit before the inserted lines and are
+# unaffected.
 KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES = {
     ("_runtime", "backend/app/services/knowhow/transfer.py:29"),
-    ("_runtime", "backend/app/services/knowhow/transfer.py:185"),
+    ("_runtime", "backend/app/services/knowhow/transfer.py:193"),
     ("get_notebook_asset", "backend/app/services/knowhow/transfer.py:89"),
-    ("storage_dir", "backend/app/services/knowhow/transfer.py:204"),
+    ("storage_dir", "backend/app/services/knowhow/transfer.py:212"),
 }
 ACTIVE_PRODUCTION_MEMBER_SITES = ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES
 

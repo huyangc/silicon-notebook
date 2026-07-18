@@ -20,7 +20,7 @@ def repo(tmp_path, monkeypatch):
 @pytest.fixture
 def store(repo):
     rt = repo._runtime
-    return KnowhowTransferStore(rt.database, new_id=rt.seams.new_id, now=rt.seams.now)
+    return KnowhowTransferStore(rt.database)
 
 def _table(repo) -> str:
     nb = repo.create_notebook(NotebookCreate(name="KH", purpose="p", primary_domain="d")).id

@@ -825,10 +825,13 @@ INDEPENDENT_PRIVATE_SITES = INDEPENDENT_PRIVATE_SITES | {
         "extracts the id/clock seam directly, mirroring api.py's "
         "narrow-runtime-port extraction"
     ),
-    ("backend/app/services/knowhow/transfer.py", 185, "_runtime"): (
+    ("backend/app/services/knowhow/transfer.py", 193, "_runtime"): (
         "knowhow cross-notebook transfer orchestration (like api.py) "
         "constructs/reaches the A1 KnowhowTransferStore directly, a second "
         "independent call site mirroring api.py's build_projector/"
-        "optimize_cell pair"
+        "optimize_cell pair — line shifted from 185 to 193 by the "
+        "final-fix-wave copy_table asset source_id=None fix, which added "
+        "lines earlier in _remap (Minor: copied asset rows must not keep a "
+        "foreign source_id)"
     ),
 }

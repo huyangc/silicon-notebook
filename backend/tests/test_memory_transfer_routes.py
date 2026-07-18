@@ -251,3 +251,42 @@ def test_batch_mixes_ok_and_failed_items_without_500(client, repo):
     assert results[bobs.id]["ok"] is False
     assert results[bobs.id]["status"] == "failed"
     assert results[bobs.id]["new_id"] is None
+
+
+# --------------------------------------------------------------------------
+# Final-fix-wave Important 5: memory_ids must be bounded, matching its sibling
+# MemoryBulkDeleteRequest.memory_ids (max_length=200) and answer_memory_links
+# (200 cap). Transfer is far more expensive per item than delete (write txn +
+# vector copy + potential LLM ingest + delete), so an unbounded body can
+# occupy a threadpool worker indefinitely. Pydantic rejects with 422 before
+# the route body (and therefore the service layer) ever runs.
+# --------------------------------------------------------------------------
+
+def test_empty_memory_ids_rejected_with_422(client, repo):
+    h = _login(client, "a00000050")
+    dst = client.post("/api/notebooks", json={"name": "dst"}, headers=h).json()["id"]
+
+    resp = client.post(
+        "/api/memories/transfer",
+        json={"memory_ids": [], "target_notebook_id": dst, "mode": "copy"},
+        headers=h,
+    )
+
+    assert resp.status_code == 422, resp.text
+
+
+def test_over_200_memory_ids_rejected_with_422(client, repo):
+    h = _login(client, "a00000051")
+    dst = client.post("/api/notebooks", json={"name": "dst"}, headers=h).json()["id"]
+
+    resp = client.post(
+        "/api/memories/transfer",
+        json={
+            "memory_ids": [f"mem-{i}" for i in range(201)],
+            "target_notebook_id": dst,
+            "mode": "copy",
+        },
+        headers=h,
+    )
+
+    assert resp.status_code == 422, resp.text

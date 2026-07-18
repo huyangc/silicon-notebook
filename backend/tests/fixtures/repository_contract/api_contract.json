@@ -2963,6 +2963,8 @@
               "items": {
                 "type": "string"
               },
+              "maxItems": 200,
+              "minItems": 1,
               "title": "Memory Ids",
               "type": "array"
             },

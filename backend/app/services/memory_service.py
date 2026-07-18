@@ -853,7 +853,13 @@ class MemoryService:
                 cleanup_error: str | None = None
                 source_removed = False
                 try:
-                    self._event("memory_lifecycle", copied, action=f"transfer_{mode}")
+                    self._event(
+                        "memory_lifecycle", copied, action=f"transfer_{mode}",
+                        # 复审 Minor：这条事件此前只记了副本(copied)一侧，日志
+                        # 里查不到"某条 memory 离开了源 notebook"——per-user 事件
+                        # 日志是这里唯一的排障面，缺源信息等于缺了一半故事。
+                        source_id=source.id, source_notebook_id=source.notebook_id,
+                    )
                     self._maybe_schedule_kg(copied, extract_kg)
                     if copied.embedding_status != "ready":
                         self._schedule_embed(copied)
@@ -907,7 +913,15 @@ class MemoryService:
                         "status": outcome,
                     }
                 )
-            except (KeyError, ValueError) as exc:
+            except Exception as exc:  # noqa: BLE001 — 同下方收尾 except 一样的
+                # 理由：这段循环体前半段（读源/校验/写副本）任何异常逃出去都会
+                # 中止整个 for 循环——不只丢当前条目，连它之前已经成功、甚至
+                # 已经删了源的 move 条目的结果也会被一起吞掉（transfer() 直接
+                # 向上抛出，调用方连 results 都拿不到）。真实触发面不止
+                # KeyError/ValueError：create_copy_with_initial_revision 在并发
+                # 写者下可能吃到 sqlite3.OperationalError("database is locked")
+                # （比如背景 KG/embed 任务同时在写），必须和下面的收尾 except
+                # 一样宽，否则这一条会变成裸 500 而不是 per-item failed。
                 results.append(
                     {
                         "source_id": memory_id,

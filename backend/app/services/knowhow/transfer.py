@@ -95,6 +95,14 @@ def _remap(
         row = dict(asset)
         row["id"] = new_asset_id
         row["notebook_id"] = target_notebook_id
+        # 独立副本：源资产行的 source_id 指向源 notebook 里的某个 source
+        # （MinerU 派生资产才非空；粘贴上传本就是 NULL）。原样带过去的话，
+        # knowhow_store.delete_source_asset_rows 的
+        # `DELETE FROM notebook_assets WHERE source_id=?` 不按 notebook 收窄——
+        # 源那边删/重解析该 source 会把这条已经跑到别的 notebook 里的副本行
+        # 也一并删掉。spec §4.3 承诺的是「独立副本」，副本不该继续挂在源
+        # notebook 任何 source 的生命周期上。
+        row["source_id"] = None
         assets_out.append(row)
 
     cells_out = []
@@ -223,7 +231,21 @@ def copy_table(
             )
 
     new_table_id = payload["table"]["id"]
-    get_scheduler(repo).schedule(new_table_id)  # 后台重建 KG objects/relations
+    try:
+        get_scheduler(repo).schedule(new_table_id)  # 后台重建 KG objects/relations
+    except Exception:  # noqa: BLE001 — 同上一段：DB 已提交，这里也不许把一次
+        # 已成功的拷贝变成调用方看到的裸异常。schedule() 本身能抛
+        # （ProjectionScheduler.schedule → threading.Timer.start() 在线程耗尽
+        # 时会抛 RuntimeError）；不 guard 的话，move_table 会因为这个函数没能
+        # 正常返回而整个跳过它自己的 SourceCleanupFailed→409 包装（那段 try
+        # 根本没机会进入），退化成路由层的裸 500——用户分不清"什么都没发生"
+        # 和"副本已经落地"，重试只会在目标堆更多重复表。副本本身完整（KG
+        # 重建只是留在 pending，「重建投影」逃生口可以手动补），不值得为它
+        # 牺牲整次调用的诚实返回。
+        _log.exception(
+            "copy_table：副本 %s 已提交，但调度 KG 重建失败，表会带 pending 行",
+            new_table_id,
+        )
     return new_table_id
 
 

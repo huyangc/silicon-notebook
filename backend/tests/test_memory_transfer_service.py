@@ -367,3 +367,54 @@ def test_copy_that_returns_existing_row_aborts_without_deleting_source(
     # 最要紧的一条：删源那步**根本没执行**
     assert deleted == []
     assert service.get(mem.id, alice.id).notebook_id == src
+
+
+# --- Final-fix-wave Important 2: the OUTER per-item except (guarding the
+# pre-commit portion of the loop: read source / validate / write copy) was
+# narrowed to (KeyError, ValueError) — everything the post-commit block's own
+# comment already argues for ("an escape here would drop the results of the
+# whole batch, including earlier items whose sources were already deleted by
+# move") applies just as much to this half. A realistic
+# sqlite3.OperationalError("database is locked") from
+# create_copy_with_initial_revision (BEGIN IMMEDIATE under contention with a
+# background KG/embed job) used to propagate straight out of transfer()
+# entirely — not just failing item 2, but discarding item 1's already-
+# committed, already-source-deleted move. Appended at EOF.
+def test_batch_survives_pre_commit_failure_on_a_later_item(repo, alice, monkeypatch):
+    """两条一批、第二条在**写副本这一步**（COMMIT 之前）炸掉：此前这类异常不
+    在 (KeyError, ValueError) 范围内，会直接冒出 transfer() 本身，把第一条
+    已经完成的 move（源已删）连同结果一起丢掉，调用方拿不到任何 results。"""
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    first = _confirmed_memory(service, src, alice, title="one")
+    second = _confirmed_memory(service, src, alice, title="two")
+
+    orig_create = service.store.create_copy_with_initial_revision
+
+    def _boom_on_second(write, source_memory_id, changed_by, reason):
+        if source_memory_id == second.id:
+            raise sqlite3.OperationalError("database is locked")
+        return orig_create(write, source_memory_id, changed_by, reason)
+
+    monkeypatch.setattr(service.store, "create_copy_with_initial_revision", _boom_on_second)
+
+    # Before the fix this raised sqlite3.OperationalError out of transfer()
+    # itself instead of returning a per-item result list.
+    results = repo.transfer_memories(
+        alice.id, [first.id, second.id], dst, "move", extract_kg=False
+    )
+
+    # 两条都要有结果——第一条（源已删的 move）不能被第二条的写入失败连累丢失
+    assert len(results) == 2
+    assert results[0]["source_id"] == first.id
+    assert results[0]["ok"] is True and results[0]["status"] == "moved"
+    assert results[1]["source_id"] == second.id
+    assert results[1]["ok"] is False
+    assert results[1]["status"] == "failed"
+    # 第二条从未提交过副本——不像 post-commit 失败那样带 new_id
+    assert results[1]["new_id"] is None
+    assert "database is locked" in results[1]["error"]
+    # 第一条确实搬走了；第二条的源没被碰过（这一条从未成功写副本，更不会删源）
+    with pytest.raises(KeyError):
+        service.get(first.id, alice.id)
+    assert service.get(second.id, alice.id).notebook_id == src

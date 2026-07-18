@@ -158,7 +158,7 @@ class MemoryReviewRequest(MemoryUpdate):
 class MemoryTransferRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    memory_ids: List[str]
+    memory_ids: List[str] = Field(..., min_length=1, max_length=200)
     target_notebook_id: str
     mode: Literal["copy", "move"]
     extract_kg: bool = True

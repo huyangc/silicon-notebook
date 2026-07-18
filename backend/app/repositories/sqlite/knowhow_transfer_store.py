@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import sqlite3
-from typing import Callable
 
 from app.repositories.sqlite.database import SqliteDatabase
 
@@ -39,16 +38,8 @@ _TABLE_NAMES = {
 
 
 class KnowhowTransferStore:
-    def __init__(
-        self,
-        database: SqliteDatabase,
-        *,
-        new_id: Callable[[str], str],
-        now: Callable[[], str],
-    ) -> None:
+    def __init__(self, database: SqliteDatabase) -> None:
         self.database = database
-        self.new_id = new_id
-        self.now = now
 
     def snapshot_table(self, table_id: str) -> dict:
         with self.database.connect() as db:

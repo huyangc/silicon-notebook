@@ -295,10 +295,10 @@ class RepositoryRuntime:
             new_id=seams.new_id,
             now=seams.now,
         )
-        # knowhow 单表跨 notebook 传输的 SQL（快照+单事务插入+校验）
-        self.knowhow_transfer_store = KnowhowTransferStore(
-            self.database, new_id=self.seams.new_id, now=self.seams.now
-        )
+        # knowhow 单表跨 notebook 传输的 SQL（快照+单事务插入+校验）。id/时钟
+        # 由 transfer.py 的 _remap 直接从 repo._runtime.seams 取（见该文件头
+        # 注释），store 自己不需要——不带 new_id/now 构造参数。
+        self.knowhow_transfer_store = KnowhowTransferStore(self.database)
 
     @property
     def storage_dir(self) -> Path:

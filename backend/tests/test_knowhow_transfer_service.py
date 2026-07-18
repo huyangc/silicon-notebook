@@ -226,3 +226,106 @@ def test_transfer_table_rejects_bad_mode(repo):
     import pytest as _pytest
     with _pytest.raises(ValueError):
         kh_transfer.transfer_table(repo, src_tid, dst_nb, "user-x", mode="teleport")
+
+
+# --- Final-fix-wave Important 1: copy_table's post-commit schedule() must not
+# let an exception escape. DB insert_transfer already COMMITted by this point
+# (assert repo.get_knowhow_table(new_tid) below proves it); ProjectionScheduler
+# .schedule -> threading.Timer.start() can raise RuntimeError under thread
+# exhaustion. Before the fix this propagated straight out of copy_table as a
+# bare exception — the caller (a route with no handler for it) would see a
+# 500 despite the copy having already landed, inviting a retry that piles up
+# duplicate tables. Appended at EOF (see file header pin note in
+# test_repository_callers_static.py / test_repository_surface_manifest.py —
+# transfer.py:29/89/185/204 are line-pinned; this test only calls existing
+# public functions, it doesn't touch those lines).
+def test_copy_survives_scheduler_failure_after_commit(repo, monkeypatch):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+
+    class _BoomScheduler:
+        def schedule(self, table_id):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(kh_transfer, "get_scheduler", lambda _repo: _BoomScheduler())
+
+    # Must not raise: the DB side already committed, so a scheduling failure
+    # is best-effort-lost KG rebuild, not a failed copy.
+    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, actor_id="user-x")
+
+    assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
+
+
+def test_move_survives_scheduler_failure_and_still_cleans_source(repo, monkeypatch):
+    """The same fault, exercised through move_table: before the fix, copy_table's
+    unguarded schedule() would raise and propagate straight out of move_table
+    WITHOUT ever entering its own try/except — bypassing the
+    SourceCleanupFailed -> 409 path entirely and leaving the source table
+    completely untouched while a copy silently exists in the target. After the
+    fix, the scheduler failure is swallowed inside copy_table and move_table
+    proceeds normally: copy lands, source gets cleaned up, the call returns
+    the new table id like any other successful move."""
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+
+    class _BoomScheduler:
+        def schedule(self, table_id):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(kh_transfer, "get_scheduler", lambda _repo: _BoomScheduler())
+
+    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+
+    assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
+    import pytest as _pytest
+    with _pytest.raises(KeyError):  # move 必须删源 —— schedule() 失败不能拦下这一步
+        repo.get_knowhow_table(src_tid)
+
+
+# --- Final-fix-wave Minor: copied asset rows must not keep a foreign source_id.
+# notebook_assets.source_id points at a `sources` row (non-NULL only for
+# MinerU-derived assets; paste-uploads are NULL, which is why this needs an
+# explicit non-NULL fixture to actually exercise the bug — a NULL source_id
+# would make the assertion vacuous). knowhow_store.delete_source_asset_rows
+# does `DELETE FROM notebook_assets WHERE source_id=?` with no notebook_id
+# scoping, so leaving the copy's row pointed at the SOURCE notebook's source
+# means deleting/reparsing that source in the source notebook silently deletes
+# the copy's asset row in the target notebook too — violating spec §4.3's
+# "独立副本" (independent copy) promise. Local import (not module-level) to
+# avoid shifting the line-pinned `from app.services.sqlite_repository import
+# SQLiteRepository` at line 5 (KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS).
+def test_copy_gives_asset_row_independent_source_id(repo):
+    from app.services.knowhow.assets import AssetService
+
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    asset = AssetService(repo).save(
+        src_nb, "a.png", "image/png", b"\x89PNG" + b"x" * 40, "user-x"
+    )
+    # 伪造一个非空 source_id，模拟 MinerU 派生资产（粘贴上传恒为 NULL，测不出
+    # 这条回归——必须显式构造非空值才能钉住这个坑）。
+    with repo._connect() as db:
+        db.execute(
+            "UPDATE notebook_assets SET source_id=? WHERE id=?",
+            ("src-fake-source", asset["id"]),
+        )
+        db.commit()
+
+    tid = repo.create_knowhow_table(src_nb, "T", "", [{"name": "备注", "role": "attribute"}])
+    column_id = repo.get_knowhow_table(tid)["columns"][0]["id"]
+    repo.add_knowhow_row(tid, {column_id: f"![img](asset://{asset['id']})"})
+
+    new_tid = kh_transfer.copy_table(repo, tid, dst_nb, actor_id="user-x")
+
+    with repo._connect() as db:
+        new_assets = [
+            dict(r)
+            for r in db.execute(
+                "SELECT id, source_id FROM notebook_assets WHERE notebook_id=?", (dst_nb,)
+            ).fetchall()
+        ]
+    assert len(new_assets) == 1
+    assert new_assets[0]["id"] != asset["id"]
+    assert new_assets[0]["source_id"] is None, (
+        "副本资产行的 source_id 不该继续指向源 notebook 的 source —— "
+        "否则源那边删/重解析该 source 会连带删掉这条已经在别的 notebook 的副本行"
+    )
