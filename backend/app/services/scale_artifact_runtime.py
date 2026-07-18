@@ -487,6 +487,12 @@ class ScaleArtifactRuntime:
             if notebook_id in self.building:
                 return
             self.building.add(notebook_id)
+        # building 已登记后推一次待办快照,「索引构建中」项才会立刻出现在已连接
+        # 的铃铛里;此前只有 notify_index_done 会刷新,运行期间要重连才看得到。
+        # owner 复用完成通知那套解析,fail-open 在 publish_snapshot 内。
+        from app.services.pending_bus import publish_snapshot
+
+        publish_snapshot(self._resolve_index_owner(notebook_id))
 
         def run() -> None:
             succeeded = False

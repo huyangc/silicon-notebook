@@ -699,6 +699,19 @@ class KnowledgeLifecycleService:
     # Full-notebook build / rebuild (kg_building single-flight guard)
     # ------------------------------------------------------------------
 
+    def _publish_pending_started(self) -> None:
+        """kg_building 已登记后推一次待办快照,「知识图谱构建中」项才会立刻出现
+        在已连接的铃铛里(此前只有 job 结束的 notify_pending 会刷新,运行期间要
+        重连才看得到)。归属取请求用户 ContextVar(background_jobs 已 copy_context
+        传播);CLI/离线路径解析不出 uid 时 publish_snapshot 自然 no-op。"""
+        from app.core.request_context import request_user_id
+        from app.services.pending_bus import publish_snapshot
+
+        try:
+            publish_snapshot(request_user_id())
+        except Exception:  # noqa: BLE001 - notification is fail-open
+            pass
+
     def build_notebook_kg(self, notebook_id: str, *, progress=None) -> dict:
         """按需对该 notebook 下"尚无 KG"的 source 抽取(复用 _run_extraction)。
         幂等:已有 knowledge_objects 的 source 跳过。无 LLM → RuntimeError。
@@ -708,6 +721,7 @@ class KnowledgeLifecycleService:
         self.get_notebook(notebook_id)  # KeyError if missing
         with self.kg_building_lock:
             self.kg_building.add(notebook_id)
+        self._publish_pending_started()
         try:
             if not getattr(self.llm_client, "configured", False):
                 raise RuntimeError("LLM not configured; cannot build KG")
@@ -809,6 +823,7 @@ class KnowledgeLifecycleService:
         # step of rebuild), and this outer finally-discard is then a no-op too.
         with self.kg_building_lock:
             self.kg_building.add(notebook_id)
+        self._publish_pending_started()
         try:
             self.delete_notebook_kg(notebook_id)
             return self.build_notebook_kg(notebook_id)
