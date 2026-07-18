@@ -11,7 +11,12 @@ from fastapi.responses import JSONResponse
 
 from app.api.auth_routes import auth_router
 from app.api.debug_logs import router as debug_logs_router
-from app.api.deps import get_current_user, mcp_memory_repository, repository
+from app.api.deps import (
+    USER_MESSAGE_HEADER,
+    get_current_user,
+    mcp_memory_repository,
+    repository,
+)
 from app.api.knowhow_agent_routes import agent_router as knowhow_agent_router
 from app.api.mcp_server import create_memory_mcp, validate_mcp_deployment
 from app.api.routes import router
@@ -215,7 +220,11 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
-        expose_headers=["X-Request-Id"],
+        # X-User-Message 是错误层的信任标记（见 api/deps.py 的 user_error）：
+        # 不 expose 的话跨源部署时 JS 根本读不到它，后端所有中文用户文案都会被
+        # 前端当成「没标记」而压平成通用文案。同源开发和单测都察觉不到这个坑，
+        # 故在此显式登记（test_user_error.py 有守卫）。
+        expose_headers=["X-Request-Id", USER_MESSAGE_HEADER],
     )
 
     @app.get("/")
