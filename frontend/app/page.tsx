@@ -1003,6 +1003,7 @@ export default function Home() {
   useEffect(() => {
     if (!backfillingMeta || !currentNotebookId || analytics) return;
     const nb = currentNotebookId;
+    const workspaceEpoch = workspaceEpochRef.current;
     let cancelled = false;
     const poll = window.setInterval(async () => {
       try {
@@ -1013,7 +1014,15 @@ export default function Home() {
           setBackfillingMeta(false);
           // 用 ref 读最新翻页/搜索,避免用户在补抽期间切页/搜索后被 closure 里
           // 陈旧的 sourcesPage/sourceQuery 拉回 page 0 或空搜索。
-          loadSourcesPage(nb, { page: sourcesPageRef.current, q: sourceQueryRef.current }).catch(() => {});
+          // cancelled 只拦「尚未发起」,拦不住已在途的请求回来后落状态,故按房内
+          // workspaceEpoch 约定再加一道 guard(见 workspaceEpochRef 处注释)。
+          loadSourcesPage(nb, {
+            page: sourcesPageRef.current,
+            q: sourceQueryRef.current,
+            guard: () => !cancelled
+              && activeNotebookIdRef.current === nb
+              && workspaceEpochRef.current === workspaceEpoch,
+          }).catch(() => {});
         }
       } catch { /* transient error; keep polling */ }
     }, 6000);
@@ -1079,6 +1088,7 @@ export default function Home() {
       || Boolean(indexStatus?.kg.building) || Boolean(indexStatus?.unified_kg.building);
     if (!busy) return;
     const nb = currentNotebookId;
+    const workspaceEpoch = workspaceEpochRef.current;
     let cancelled = false;
     const poll = window.setInterval(() => {
       fetchIndexStatus(nb).then((s) => {
@@ -1109,7 +1119,14 @@ export default function Home() {
           if (!refreshed.paper_meta_backfilling) {
             setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
             setBackfillingMeta(false);
-            loadSourcesPage(nb, { page: sourcesPageRef.current, q: sourceQueryRef.current }).catch(() => {});
+            // 同独立 backfill poll:cancelled 拦不住已在途的请求,补 epoch guard。
+            loadSourcesPage(nb, {
+              page: sourcesPageRef.current,
+              q: sourceQueryRef.current,
+              guard: () => !cancelled
+                && activeNotebookIdRef.current === nb
+                && workspaceEpochRef.current === workspaceEpoch,
+            }).catch(() => {});
           }
         }).catch(() => {});
       }
@@ -2000,13 +2017,20 @@ export default function Home() {
     setSourceModalOpen(true);
   }
 
-  async function loadSourcesPage(notebookId: string, opts: { page?: number; q?: string } = {}) {
+  async function loadSourcesPage(
+    notebookId: string,
+    opts: { page?: number; q?: string; guard?: () => boolean } = {},
+  ) {
     const pageNum = opts.page ?? 0;
     const q = opts.q ?? sourceQuery;
     const offset = pageNum * SOURCES_PAGE_SIZE;
     const result = await api<PaginatedSources>(
       `/notebooks/${notebookId}/sources?offset=${offset}&limit=${SOURCES_PAGE_SIZE}&q=${encodeURIComponent(q)}`,
     );
+    // 后台轮询发起的刷新可能在途期间用户已切库/切会话——那时落状态会把新库的
+    // 来源列表覆盖成旧库的。guard 由调用方按房内 workspaceEpoch 约定给出;
+    // 不传 guard 的调用方(用户主动翻页/搜索)行为与此前逐字一致。
+    if (opts.guard && !opts.guard()) return;
     setSourcesTotal(result.total_count);
     setSources(result.items);
     setSourcesPage(pageNum);
@@ -2104,11 +2128,14 @@ export default function Home() {
       await openKgView(undefined, item.notebook_id);
     }
   }
-  async function openDoneItem(d: { notebook_id: string }) {
+  async function openDoneItem(d: { notebook_id: string; kind?: string }) {
     // 已经在这个库里就别再 push 一条重复的 #notebook=<同一 id>——按返回键会
     // 触发 openNotebook(id, "none") 全量重载,把用户从当前视图甩回 ask 聊天。
     const history = activeNotebookIdRef.current === d.notebook_id ? "none" : "push";
-    if (await openNotebook(d.notebook_id, history)) await openKgView(undefined, d.notebook_id);
+    if (!await openNotebook(d.notebook_id, history)) return;
+    // 论文元数据补全完成应停在来源面板(设计稿 §3.3:作者/机构就在来源列表与详情
+    // 里),别把用户甩进知识图谱。kind 缺省视作索引完成,索引路径行为逐字不变。
+    if (d.kind !== "paper_meta_done") await openKgView(undefined, d.notebook_id);
   }
 
   async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {

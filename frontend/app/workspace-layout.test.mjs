@@ -371,3 +371,47 @@ test("opening a completed-item toast replaces history when already in that noteb
   assert.match(pendingBody, /if \(!await openNotebook\(item\.notebook_id\)\) return;/);
   assert.equal(pendingBody.includes("activeNotebookIdRef.current"), false);
 });
+
+test("a paper-meta completion opens the source panel, not the knowledge graph", () => {
+  // 设计稿 §3.3:论文信息补全完成后作者/机构就在来源列表与详情里,该停在来源
+  // 面板。此前 openDoneItem 只认 notebook_id、无条件 openKgView,于是「论文信息
+  // 补全完成」这一行和它的 toast 都把用户甩进知识图谱——与自身设计稿矛盾。
+  // 注意 pending-center 的「关闭」早已是 kind-aware(onDismissDone(id, kind)),
+  // 唯独「打开」漏了,故这里锁住 kind 分流。
+  const start = page.indexOf("async function openDoneItem(");
+  const end = page.indexOf("\n  }", start);
+  assert.ok(start > -1);
+  const body = page.slice(start, end);
+
+  // 签名必须收 kind,否则分流无从谈起
+  assert.match(page.slice(start, start + 120), /kind\?: string/);
+  // 索引完成路径逐字不变:仍进知识图谱;论文元数据完成则不进
+  assert.match(body, /d\.kind !== "paper_meta_done"/);
+  assert.match(body, /openKgView\(undefined, d\.notebook_id\)/);
+  // 不得再有「无条件跳 KG」的老写法
+  assert.equal(
+    body.includes("if (await openNotebook(d.notebook_id, history)) await openKgView"),
+    false,
+  );
+});
+
+test("background source refreshes are guarded by the workspace epoch", () => {
+  // cancelled 标志只拦「尚未发起」的请求,拦不住已在途的:effect cleanup 之后
+  // 那次 loadSourcesPage 仍会返回并 setSources,把用户刚切过去的新库来源列表
+  // 覆盖成旧库的。房内既有约定是 workspaceEpoch(见 workspaceEpochRef 处注释),
+  // 这里锁住两个后台轮询调用点都带 guard。
+  assert.match(
+    page,
+    /async function loadSourcesPage\(\s*notebookId: string,\s*opts: \{ page\?: number; q\?: string; guard\?: \(\) => boolean \} = \{\},?\s*\)/,
+  );
+  assert.match(page, /if \(opts\.guard && !opts\.guard\(\)\) return;/);
+
+  // 两处后台轮询(独立 backfill poll + 看板聚合 poll)各带一个 epoch guard
+  const guards = page.match(
+    /guard: \(\) => !cancelled\s*&& activeNotebookIdRef\.current === nb\s*&& workspaceEpochRef\.current === workspaceEpoch/g,
+  );
+  assert.equal(guards?.length, 2);
+
+  // 用户主动触发的调用(翻页/搜索)不该被 guard 影响,保持原样
+  assert.match(page, /loadSourcesPage\(currentNotebookId, \{ page: 0, q: sourceQuery \}\)/);
+});
