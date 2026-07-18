@@ -137,20 +137,40 @@ function fileExtension(name: string): string {
 }
 
 
+// 图谱边类型 → 中文。取值真源:prompts.py 列出的 edge_type 词表(supports /
+// depends_on / contrasts_with / about / defines / used_in / composed_of / mixed,
+// 外加可传递的 derived_from / kind_of / prerequisite_of / precedes / part_of)。
+// 此前有 8 个值只是把英文 id 抄了一遍(about: "about"),另有 5 个值压根没进表、
+// 靠 `?? edge_type` 直接把英文渲染给用户——两条路都是英文外泄,一并补齐。
 const RELATION_LABELS: Record<string, string> = {
   related_concepts: "关联概念",
   related_claims: "关联论断",
   related_formulas: "关联公式",
   related_procedures: "关联过程",
-  about: "about",
-  defines: "defines",
-  supports: "supports",
-  depends_on: "depends on",
-  composed_of: "composed of",
-  part_of: "part of",
-  precedes: "precedes",
-  contrasts_with: "contrasts"
+  about: "关于",
+  defines: "定义",
+  supports: "支持",
+  depends_on: "依赖",
+  composed_of: "包含",
+  part_of: "属于",
+  precedes: "先于",
+  contrasts_with: "对比",
+  used_in: "用于",
+  derived_from: "推导自",
+  kind_of: "是一种",
+  prerequisite_of: "前置于",
+  mixed: "多种关联"
 };
+
+/**
+ * 边类型的界面名。未映射时退到中性的「关联」,**绝不回落成 edge_type 原值**——
+ * 后端每加一个边类型,`RELATION_LABELS[t] ?? t` 那种写法都会把英文 id 直接画到
+ * 图上(used_in / mixed 等 5 个值就是这么泄出去的)。label() 强制传兜底词,并在
+ * 开发期把未映射的值 console.error 出来,让新值被发现而不是被静默渲染。
+ */
+function relationLabel(edgeType: string): string {
+  return label(RELATION_LABELS, edgeType, "关联");
+}
 
 const KG_TYPE_ORDER = ["concept", "claim", "formula", "procedure"];
 
@@ -753,7 +773,7 @@ function drawKgLinkLabel(link: FgLink, ctx: CanvasRenderingContext2D, globalScal
   if (!source || !target || source.x == null || source.y == null || target.x == null || target.y == null) return;
   const x = (source.x + target.x) / 2;
   const y = (source.y + target.y) / 2;
-  let label = truncateKgLabel(RELATION_LABELS[link.label] ?? link.label, 18);
+  let label = truncateKgLabel(relationLabel(link.label), 18);
   if ((link.sourceCount ?? 1) >= 2) label += ` ×${link.sourceCount}`;
   const fontSize = Math.min(12, Math.max(8, 10 / globalScale));
 
@@ -2778,7 +2798,7 @@ export default function Home() {
         body: JSON.stringify(patch)
       });
       await loadSchemas();
-      setToast("Schema 已更新");
+      setToast("内容类型已更新");
     } finally {
       setSchemaBusy(false);
     }
@@ -4982,7 +5002,7 @@ export default function Home() {
                     return (
                       <div className="checklist-row" key={`edge-${index}`}>
                         <strong><LatexText text={from?.headline ?? edge.from_id} isFormula={from?.object_type === "formula"} /></strong>
-                        <span className="tag">{RELATION_LABELS[edge.relation] ?? edge.relation}</span>
+                        <span className="tag">{relationLabel(edge.relation)}</span>
                         → <strong><LatexText text={to?.headline ?? edge.to_id} isFormula={to?.object_type === "formula"} /></strong>
                       </div>
                     );
@@ -5188,7 +5208,7 @@ export default function Home() {
                   linkColor={() => "rgba(91, 105, 130, 0.42)"}
                   linkWidth={(link: any) => 1.35 + Math.min(((link.sourceCount ?? 1) - 1), 4) * 0.5}
                   linkLabel={(link: any) => {
-                    const base = RELATION_LABELS[link.label] ?? link.label;
+                    const base = relationLabel(link.label);
                     return (link.sourceCount ?? 1) >= 2 ? `${base} · ${link.sourceCount} 源支持` : base;
                   }}
                   linkCanvasObjectMode={() => "after"}
@@ -5245,7 +5265,7 @@ export default function Home() {
                     {Object.entries(selectedKgNode.payload)
                       .filter(([key, value]) => !["name", "section_path"].includes(key) && Boolean(kgPayloadValue(value)))
                       .map(([key, value]) => (
-                        <p key={key}><strong>{FIELD_LABELS[key] ?? key}：</strong>{kgPayloadValue(value)}</p>
+                        <p key={key}><strong>{fieldLabel(key)}：</strong>{kgPayloadValue(value)}</p>
                       ))}
                     {selectedKgEdges.length > 0 && (
                       <>
@@ -5255,11 +5275,11 @@ export default function Home() {
                             <span className="kg-relation-node"><KgTypeMark type={edge.sourceType} /><span>{truncateKgLabel(edge.sourceName, 28)}</span></span>
                             {edge.source_count && edge.source_count >= 2 ? (
                               <span className="kg-relation-mid">
-                                <strong>{RELATION_LABELS[edge.edge_type] ?? edge.edge_type}</strong>
+                                <strong>{relationLabel(edge.edge_type)}</strong>
                                 <span className="tag">×{edge.source_count}源</span>
                               </span>
                             ) : (
-                              <strong>{RELATION_LABELS[edge.edge_type] ?? edge.edge_type}</strong>
+                              <strong>{relationLabel(edge.edge_type)}</strong>
                             )}
                             <span className="kg-relation-node"><KgTypeMark type={edge.targetType} /><span>{truncateKgLabel(edge.targetName, 28)}</span></span>
                           </div>
@@ -5289,7 +5309,7 @@ export default function Home() {
                               {group.nodes.map((node) => (
                                 <div className="kg-related-node" key={node.id}>
                                   <span><KgTypeMark type={node.object_type} /><LatexText text={String(node.payload.name ?? "")} isFormula={node.object_type === "formula"} /></span>
-                                  {node.edge_type ? <em>{RELATION_LABELS[node.edge_type] ?? node.edge_type}</em> : null}
+                                  {node.edge_type ? <em>{relationLabel(node.edge_type)}</em> : null}
                                 </div>
                               ))}
                             </div>
@@ -5776,6 +5796,22 @@ const FIELD_LABELS: Record<string, string> = {
   related_formulas: "相关公式", related_procedures: "相关过程"
 };
 
+/**
+ * 知识对象字段名的界面名。未命中时**刻意**原样显示 key —— 与 relationLabel 的中性
+ * 兜底相反,理由是 object schema 允许用户自建类型与字段(「内容类型管理」里的新增
+ * 类型 / 归纳候选),此时 key 就是用户自己起的名字,原样显示才诚实;换成中性词反而
+ * 把用户唯一能辨认这个字段的信息抹掉。故它不是「兜底即原值」那个 bug,而是一条经
+ * 评审的透出路径,写法与 kg-type-mark.tsx 透出自定义 object_type 保持一致。
+ *
+ * 用 Object.hasOwn 而非 `FIELD_LABELS[k] ?? k`:后者走原型链,key 撞上
+ * "constructor"/"toString"/"__proto__" 时会返回函数/对象,渲染进 JSX 就是
+ * "Objects are not valid as a React child" 白屏(vocabulary.ts 的 label() 记着同一个
+ * 坑)。字段名由用户自定义,撞上这些词完全可能。
+ */
+function fieldLabel(key: string): string {
+  return Object.hasOwn(FIELD_LABELS, key) ? FIELD_LABELS[key] : key;
+}
+
 function genericBody(item: KnowledgeItem) {
   const fields = (item.fields ?? []).filter((f) => f.value && f.value !== item.headline);
   if (fields.length === 0) return null;
@@ -5783,7 +5819,7 @@ function genericBody(item: KnowledgeItem) {
     <>
       {fields.map((field) => (
         <p key={field.key}>
-          <strong>{FIELD_LABELS[field.key] ?? field.key}：</strong>
+          <strong>{fieldLabel(field.key)}：</strong>
           {field.value}
         </p>
       ))}

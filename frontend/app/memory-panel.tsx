@@ -420,7 +420,7 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
             <h3>已签发 Token</h3>
             {tokens.length === 0 ? <p>暂无 token。</p> : tokens.map((token) => (
               <article key={token.id}>
-                <span><strong>{token.profile_name}</strong><small>{token.scopes.join(" · ")}<br />默认：{notebooks.find((notebook) => notebook.id === token.default_notebook_id)?.name || token.default_notebook_id} · 允许 {token.notebook_ids.length} 个笔记本 ·{token.expires_at ? `到期 ${new Date(token.expires_at).toLocaleString("zh-CN")}` : "无到期时间"}</small></span>
+                <span><strong>{token.profile_name}</strong><small>{token.scopes.join(" · ")}<br />默认：{notebooks.find((notebook) => notebook.id === token.default_notebook_id)?.name || token.default_notebook_id} · 允许 {token.notebook_ids.length} 个笔记本 · {token.expires_at ? `到期 ${new Date(token.expires_at).toLocaleString("zh-CN")}` : "无到期时间"}</small></span>
                 {token.revoked_at ? <em>已撤销</em> : <button type="button" className="danger" disabled={loading} onClick={() => revokeToken(token.id)}>撤销</button>}
               </article>
             ))}
@@ -1087,7 +1087,7 @@ export function MemorySaveDialog({
                     checked={extractKg}
                     onChange={(event) => setExtractKg(event.target.checked)}
                   />
-                  同时抽取到知识图谱
+                  同时整理进知识图谱
                 </label>
               </div>
             )}
