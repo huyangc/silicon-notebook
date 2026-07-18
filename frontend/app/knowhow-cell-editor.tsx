@@ -122,8 +122,8 @@ import {
   isEditorBusy,
   isSaveBlocked,
   SAVE_BLOCKED_UPLOADING_HINT,
-  SAVE_IN_FLIGHT_UPLOAD_HINT,
-  BUSY_UPLOAD_HINT,
+  RESTORE_PENDING_UPLOAD_HINT,
+  resolveUploadBlock,
   ACCEPT_BLOCKED_UPLOADING_HINT,
   LEAVE_WAITING_UPLOAD_HINT,
   DISCARD_UPLOAD_AND_LEAVE_LABEL,
@@ -1009,16 +1009,24 @@ export function KnowhowCellEditor({
   async function uploadAndInsertImages(files: File[]) {
     const images = files.filter(isImageFile);
     if (images.length === 0) return;
-    // 有异步在飞时一律不接新上传（保存/优化/另一次上传）。工具栏「图片」按钮受
-    // busy 置灰，但 textarea 的 paste 与编辑区的 drop 不经按钮，会绕过那道门——
-    // 优化在飞期间粘贴就是这么进来的，必须在函数入口再挡一次。
-    // 若不挡：① 保存收尾会卸载本格，晚返回的上传插进已卸载的树（服务端留孤儿
-    // 资产、这次粘贴无声消失）；② 优化返回后用户点「接受」，随后完成的上传会用
-    // 上传开始时的旧快照把刚接受的建议整段覆盖掉。
-    // busy 是 state（落后一拍）：连续两次粘贴可能都在重渲染前通过这道门，同时开两
-    // 批上传。uploadingRef 是同步的，补这一道就不会并发。
-    if (busy || uploadingRef.current) {
-      setUploadError(savingMode !== null ? SAVE_IN_FLIGHT_UPLOAD_HINT : BUSY_UPLOAD_HINT);
+    // 上传入口的统一门禁（决策见 resolveUploadBlock）。工具栏「图片」按钮虽已置灰，
+    // 但 textarea 的 paste 与编辑区的 drop 不经按钮、绕得过置灰，必须在函数入口
+    // **同步**再挡一次。三类拦截各自的理由：
+    // ① 保存在飞：收尾会卸载本格，晚返回的上传插进已卸载的树（服务端留孤儿资产、
+    //    这次粘贴无声消失）；
+    // ② 恢复提示未决：「恢复」是整段 setContent(draftText)，此刻自动草稿又是暂停的，
+    //    落笔的图片没有第二份记录，一点「恢复」就随整段覆盖消失；
+    // ③ 优化在飞 / 另一批上传在飞：接受建议会整段改写正文、两批上传会互相错位。
+    // 判据一律读**同步**的 ref，不读落后一拍的 state：粘贴与「刚点完恢复/丢弃」、
+    // 「上一次粘贴」可能发生在同一帧内，读 state 会漏判。
+    const uploadBlocked = resolveUploadBlock(
+      savingMode !== null,
+      uploading || uploadingRef.current,
+      isCellOptimizeLoading(optimizeState),
+      restoreBannerRef.current,
+    );
+    if (uploadBlocked) {
+      setUploadError(uploadBlocked);
       return;
     }
     const controller = new AbortController();
@@ -1287,9 +1295,12 @@ export function KnowhowCellEditor({
                     <button
                       type="button"
                       className="kh-toolbar-button"
-                      title={TOOLBAR_IMAGE_LABEL}
+                      // 恢复提示未决时一并置灰（理由见 RESTORE_PENDING_UPLOAD_HINT）。
+                      // 置灰必须配对得上的提示语，不能灰着却写「插入图片」——那是
+                      // knowhow-optimize-logic.ts 声明的不变量。
+                      title={showRestoreBanner ? RESTORE_PENDING_UPLOAD_HINT : TOOLBAR_IMAGE_LABEL}
                       onClick={handleImageButtonClick}
-                      disabled={uploading}
+                      disabled={uploading || showRestoreBanner}
                     >
                       <ImagePlus size={15} /> {TOOLBAR_IMAGE_LABEL}
                     </button>

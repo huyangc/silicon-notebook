@@ -48,6 +48,8 @@ import {
   SAVE_IN_FLIGHT_UPLOAD_HINT,
   BUSY_UPLOAD_HINT,
   ACCEPT_BLOCKED_UPLOADING_HINT,
+  RESTORE_PENDING_UPLOAD_HINT,
+  resolveUploadBlock,
   resolveSaveCompletion,
 } from "./knowhow-cell-editor-logic.ts";
 
@@ -727,7 +729,61 @@ test("接线：不得再把待完成上传寄存到 localStorage（回归锁）"
   // 那套「日志 + 认领」协议连续四轮被查出竞态（首次 mount 的 effect 顺序、跨标签页
   // claim 的非原子读改写删、部分写入失败导致丢失+重复、键名排序打乱多图顺序）。
   // 现在靠「上传不比编辑器活得久」在结构上消除，别再加回来。
+  // 盯日志本身的符号，而不是裸子串 "PENDING_UPLOAD"：后者会被
+  // RESTORE_PENDING_UPLOAD_HINT 这类无关常量误伤（本轮就误报过一次）。
   assert.equal(editorSrc.includes("kh-cell-pending-upload"), false);
-  assert.equal(editorSrc.includes("PENDING_UPLOAD"), false);
+  assert.equal(editorSrc.includes("PENDING_UPLOAD_EVENT"), false);
+  assert.equal(editorSrc.includes("PENDING_UPLOAD_STORAGE_PREFIX"), false);
+  assert.equal(editorSrc.includes("pendingUploadStorageKey"), false);
   assert.equal(editorSrc.includes("selectPendingUploadKeys"), false);
+});
+
+// --- 恢复提示未决时禁止上传 -----------------------------------------------------
+//
+// 复审第 6 轮 P1：banner 未决时上传入口仍开着，而「恢复」是**整段**
+// setContent(draftText)、此刻自动草稿又处于暂停（否则会抢在用户决定前改写那份待恢复
+// 草稿）——落笔的图片没有第二份记录，一点「恢复」就随整段覆盖消失，服务端那条资产
+// 再没有任何东西引用它。删掉待完成上传日志后更没有兜底，故从入口挡住。
+
+test("resolveUploadBlock: 恢复提示未决 → 拒绝上传（回归锁）", () => {
+  assert.strictEqual(resolveUploadBlock(false, false, false, true), RESTORE_PENDING_UPLOAD_HINT);
+});
+
+test("resolveUploadBlock: 全空闲且无待决草稿 → 放行", () => {
+  assert.strictEqual(resolveUploadBlock(false, false, false, false), null);
+});
+
+test("resolveUploadBlock: 在飞的异步先说（会自己结束），恢复提示后说（要用户动手）", () => {
+  // 保存在飞同时草稿未决：先提示保存，它自己会结束。
+  assert.strictEqual(resolveUploadBlock(true, false, false, true), SAVE_IN_FLIGHT_UPLOAD_HINT);
+  // 优化/另一批上传在飞同时草稿未决：草稿那条更可操作，先说它。
+  assert.strictEqual(resolveUploadBlock(false, true, false, true), RESTORE_PENDING_UPLOAD_HINT);
+  assert.strictEqual(resolveUploadBlock(false, false, true, true), RESTORE_PENDING_UPLOAD_HINT);
+});
+
+test("resolveUploadBlock: 上传/优化在飞（无待决草稿）→ 笼统忙态", () => {
+  assert.strictEqual(resolveUploadBlock(false, true, false, false), BUSY_UPLOAD_HINT);
+  assert.strictEqual(resolveUploadBlock(false, false, true, false), BUSY_UPLOAD_HINT);
+});
+
+test("RESTORE_PENDING_UPLOAD_HINT: 指向用户能动手的那两个按钮", () => {
+  assert.match(RESTORE_PENDING_UPLOAD_HINT, /恢复/);
+  assert.match(RESTORE_PENDING_UPLOAD_HINT, /丢弃/);
+});
+
+test("接线：上传门禁必须在任何 await 之前同步判定，且把恢复提示算进去", () => {
+  // paste/drop 不经工具栏按钮，绕得过置灰；判据还必须读同步 ref——「刚点完恢复/
+  // 丢弃」与粘贴可能落在同一帧，读 state 会漏判。
+  const beforeFirstAwait = uploadFnSrc.slice(0, uploadFnSrc.indexOf("await "));
+  assert.match(beforeFirstAwait, /resolveUploadBlock\(\s*savingMode !== null,\s*uploading \|\| uploadingRef\.current,\s*isCellOptimizeLoading\(optimizeState\),\s*restoreBannerRef\.current,\s*\)/);
+  assert.match(beforeFirstAwait, /if \(uploadBlocked\) \{[\s\S]*?return;/);
+});
+
+test("接线：恢复提示未决时工具栏「图片」按钮置灰，且提示语对得上", () => {
+  const imageButton = editorSrc.slice(
+    editorSrc.indexOf("onClick={handleImageButtonClick}") - 400,
+    editorSrc.indexOf("onClick={handleImageButtonClick}") + 120,
+  );
+  assert.match(imageButton, /disabled=\{uploading \|\| showRestoreBanner\}/);
+  assert.match(imageButton, /title=\{showRestoreBanner \? RESTORE_PENDING_UPLOAD_HINT : TOOLBAR_IMAGE_LABEL\}/);
 });

@@ -354,6 +354,31 @@ export const SAVE_IN_FLIGHT_UPLOAD_HINT = "正在保存，保存完成后再插�
 // 按钮，绕得过 busy 置灰，必须在入口再挡一次。
 export const BUSY_UPLOAD_HINT = "有操作进行中，完成后再插入图片。";
 
+// 「检测到上次草稿：恢复/丢弃」还没决出胜负时，也不接新上传。
+// 因为「恢复」是**整段** setContent(draftText)：这期间落笔的图片只存在于当前正文
+// 里，而自动草稿此刻是暂停的（否则会抢在用户决定前改写那份待恢复草稿），所以图片
+// 引用没有第二份记录——用户一点「恢复」，刚插进来的图就随整段覆盖消失，服务端那条
+// 资产再没有任何东西引用它。挡住入口是这里唯一不引入新状态的解法：另一条路（把每张
+// 落笔的图同时并进 draftText/草稿键）等于在用户还没决定之前就去改写那份待恢复草稿，
+// 正是前几轮复审明令禁止的事。
+export const RESTORE_PENDING_UPLOAD_HINT = "请先处理上方的草稿提示（恢复或丢弃）再插入图片。";
+
+// 上传入口的统一门禁：返回该拒绝的理由文案，null=放行。抽纯函数是为了让「哪些状态
+// 挡上传、各自给哪句话」可单测——组件里 paste/drop/工具栏三个入口共用它一处。
+// 顺序：在飞的异步先说（它们会自己结束，提示是「等一下」），恢复提示后说（它要用户
+// 动手，提示是「先去处理」），最后才是笼统的忙态。
+export function resolveUploadBlock(
+  saving: boolean,
+  uploading: boolean,
+  optimizing: boolean,
+  restorePending: boolean,
+): string | null {
+  if (saving) return SAVE_IN_FLIGHT_UPLOAD_HINT;
+  if (restorePending) return RESTORE_PENDING_UPLOAD_HINT;
+  if (uploading || optimizing) return BUSY_UPLOAD_HINT;
+  return null;
+}
+
 // 上传在飞时不允许「接受」优化建议：接受会整段改写正文，而随后落地的上传要把图片
 // 插到正文里，两者会互相覆盖。
 export const ACCEPT_BLOCKED_UPLOADING_HINT = "图片上传中，等上传完成后再接受建议。";
