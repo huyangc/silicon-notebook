@@ -1929,16 +1929,28 @@ export function KnowhowPanel({
           position: absolute;
           right: 0;
           bottom: 0;
-          width: 16px;
-          height: 16px;
+          width: 22px;
+          height: 22px;
           cursor: nwse-resize;
           touch-action: none;
+          /* 右下角斜纹拖拽角——放大到 22px + 斜纹填充，比原 16px 纯色三角明显
+             得多（用户反馈「太小了不知道的人注意不到」）。斜纹方向沿 nwse 对角，
+             是各类桌面应用 resize 角的通用记号。只用既有灰度变量，不新开色板。 */
           clip-path: polygon(100% 0%, 100% 100%, 0% 100%);
-          background: var(--line);
+          background-image: repeating-linear-gradient(
+            -45deg,
+            var(--muted) 0 1.5px,
+            transparent 1.5px 4.5px
+          );
         }
 
         .kh-modal-resize-handle:hover {
-          background: var(--muted);
+          background-color: var(--soft);
+          background-image: repeating-linear-gradient(
+            -45deg,
+            var(--ink) 0 1.5px,
+            transparent 1.5px 4.5px
+          );
         }
 
         /* header 里紧跟面包屑的小态标（「查看」/「编辑中」）——用同一支

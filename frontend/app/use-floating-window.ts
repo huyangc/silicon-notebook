@@ -403,7 +403,11 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
     return {
       transform: `translate3d(${rect.x}px, ${rect.y}px, 0)`,
       ...(rect.width !== null ? { width: `${rect.width}px` } : {}),
-      ...(rect.height !== null ? { height: `${rect.height}px` } : {}),
+      // 被 resize 过就把内联 height 顶上去，同时用 maxHeight:none 顶开卡片 CSS
+      // 的 max-height（各弹窗多是 max-height:80vh）——否则内联 height 会被
+      // max-height 压回 80vh，用户拉不高（Y 方向卡死的真凶）。resize 逻辑已
+      // 封顶到 VIEWPORT_MAX_RATIO，放开 max-height 也不会撑出屏幕。
+      ...(rect.height !== null ? { height: `${rect.height}px`, maxHeight: "none" } : {}),
     };
   }, [rect, disabled]);
 
