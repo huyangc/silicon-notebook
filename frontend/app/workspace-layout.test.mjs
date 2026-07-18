@@ -415,3 +415,26 @@ test("background source refreshes are guarded by the workspace epoch", () => {
   // 用户主动触发的调用(翻页/搜索)不该被 guard 影响,保持原样
   assert.match(page, /loadSourcesPage\(currentNotebookId, \{ page: 0, q: sourceQuery \}\)/);
 });
+
+test("paper-meta completion copy distinguishes an all-non-paper run", async () => {
+  // stored=0 且 not_paper>0 是完全成功的一批(全部判定为非论文,标记行已落库)。
+  // 后端此前只在 stored>0 时才发 done,前端又刻意不自己弹完成 toast,于是这种
+  // 成功 job 静默收场;现在后端会发、且带 not_paper,文案必须分情况说清楚——
+  // 否则会显示「已补全 0 篇」,既费解又像失败。
+  const { readFile } = await import("node:fs/promises");
+  const center = await readFile(new URL("./pending-center.tsx", import.meta.url), "utf8");
+
+  const start = center.indexOf('["paper_meta_done"');
+  assert.ok(start > -1, "paper_meta_done 文案分派应存在");
+  const body = center.slice(start, start + 900);
+
+  // 三条分支都在:全补全 / 混合 / 全非论文
+  assert.match(body, /stored > 0 && notPaper > 0/);
+  assert.match(body, /stored === 0 && notPaper > 0/);
+  assert.match(body, /均非论文、无需补全/);
+  // 不得再无条件说「已补全 N 篇」
+  assert.equal(
+    /^\s*\["paper_meta_done", \(m\) => `[^`]*已补全 \$\{m\.stored/.test(body),
+    false,
+  );
+});
