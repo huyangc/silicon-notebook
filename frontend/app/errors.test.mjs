@@ -684,3 +684,73 @@ test("stream/job 的 error 字段一律不直出——中文也一样", () => {
   assert.match(logs[0], /重建索引/);
   assert.match(logs[1], /upstream timeout/);
 });
+
+// ---------------------------------------------------------------------------
+// 完整组合链(第四轮评审阻塞 2)
+// ---------------------------------------------------------------------------
+//
+// 上面几条都只测**一跳**。真实路径是三跳:
+//
+//   ask stream 的 error 事件 → readAskStream 抛 → runAsk 的 catch → reportError
+//
+// 而 bug 恰恰只在**跨跳**时才显形:第一跳产出的安全文案如果装在裸 Error 里,
+// 第二跳的 toUserMessage 认不出它,再泛化一次。单跳测试全绿,用户看到的却是
+// 全局兜底。所以这条测试必须把整条链跑完,并数诊断条数。
+//
+// page.tsx 是 Next client component,node:test 里 import 不了;链路的两端由
+// errors-guard.test.mjs 按源码钉死(ask 流那处必须是 logDiagnostic + 抛
+// humanizedError,reportError 必须是 setStatusText(toUserMessage(...))),
+// 这里跑的是那两处**逐字对应**的组合。
+test("组合链:stream error 事件 → catch → reportError,场景文案不被二次泛化", () => {
+  // 第一跳:page.tsx 的 consumeLine —— 原文进诊断,抛带品牌的场景文案。
+  const streamHop = (rawError) => {
+    logDiagnostic("ask-stream", rawError);
+    throw humanizedError("回答没能完成，请重试");
+  };
+  // 第二跳:page.tsx 的 reportError —— 全工作区 90+ 个 .catch 都汇到这里。
+  const reportError = (error) => toUserMessage(error, "服务出了点问题，请稍后重试");
+
+  const { value: shown, logs } = captureSync(() => {
+    try {
+      streamHop("RuntimeError: llm call failed after 3 retries");
+      return "(没抛?)";
+    } catch (error) {
+      return reportError(error);
+    }
+  });
+
+  // 用户最终看到的是**场景**文案,不是全局兜底。这是回归点:改回裸 new Error
+  // 的话这里会变成「服务出了点问题，请稍后重试」。
+  assert.equal(shown, "回答没能完成，请重试");
+  assert.notEqual(shown, "服务出了点问题，请稍后重试");
+  assert.ok(!/[A-Za-z]/.test(shown), "用户文案里不该有英文");
+
+  // 诊断只记一次:原文一条。旧写法会记两条——第二条把已安全化的
+  // 「回答没能完成，请重试」当成「未翻译的原始错误」,既是噪声又误导排查。
+  assert.equal(logs.length, 1, `诊断应只记一次,实际 ${logs.length} 条:\n${logs.join("\n")}`);
+  assert.match(logs[0], /llm call failed after 3 retries/, "记的必须是后端原文");
+  assert.ok(
+    !logs[0].includes("回答没能完成"),
+    "不该把已安全化的用户文案当成原始错误记进诊断"
+  );
+});
+
+test("组合链:品牌能穿过任意多层 catch(不是只挡住一跳)", () => {
+  // 重连轮询、批量预审那几条路径上,错误会经过不止一层 catch。品牌是对象属性,
+  // 只要不重新包装就一路带着。
+  const { value, logs } = captureSync(() => {
+    let error;
+    try {
+      throw humanizedError("没有权限进行这个操作");
+    } catch (e1) {
+      try {
+        throw e1; // 中间层原样上抛(不重新包装)
+      } catch (e2) {
+        error = e2;
+      }
+    }
+    return toUserMessage(error, "服务出了点问题，请稍后重试");
+  });
+  assert.equal(value, "没有权限进行这个操作");
+  assert.equal(logs.length, 0, "已安全化的文案穿过 catch 不该产生诊断噪声");
+});

@@ -55,7 +55,7 @@ import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
-import { logDiagnostic, throwHumanizedHttpError, toUserMessage } from "./errors.ts";
+import { humanizedError, logDiagnostic, throwHumanizedHttpError, toUserMessage } from "./errors.ts";
 import {
   MODEL_ROLES, type ModelRole, type ServiceForm,
   buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
@@ -466,10 +466,16 @@ async function readAskStream<TResponse>(
     } else if (event.event === "cancelled") {
       throw new DOMException("已中断回答", "AbortError");  // 走 runAsk 的 isAbortError 干净分支
     } else if (event.event === "error") {
-      // 后端 error 字段是给日志 / MCP 看的英文技术串,不能原样往上抛(上层
-      // 会把它当文案显示)。原始值由 toUserMessage 记进 console;后端刻意写
-      // 成中文的错误照旧透传。
-      throw new Error(toUserMessage(new Error(event.error), "回答没能完成，请重试"));
+      // stream 事件走的是 NDJSON 正文,没有响应头,`event.error` 天然带不上出处
+      // 标记(后端写的是 f"{type(exc).__name__}: {exc}"),按出处模型一律不可信
+      // → 原文只进受限诊断出口。
+      //
+      // ⚠抛的必须是 humanizedError(带品牌),不能是裸 new Error(...)。裸 Error
+      // 会让外层 runAsk → reportError → toUserMessage 认不出这句已经安全化,
+      // 于是**再泛化一次**:「回答没能完成,请重试」被吃成全局兜底「服务出了
+      // 点问题」,而且这句安全文案还会被当成「未翻译的原始错误」多记一条诊断。
+      logDiagnostic("ask-stream", event.error);
+      throw humanizedError("回答没能完成，请重试");
     } else {
       const _exhaustive: never = event;   // union 新增 tag 未处理时 tsc 报错
       throw new Error(`unknown ask stream event: ${JSON.stringify(_exhaustive)}`);

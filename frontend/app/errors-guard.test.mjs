@@ -183,8 +183,9 @@ const ALLOWED_DIAGNOSTIC_READS = new Map([
       // 模型「测试连接」:200 响应挂不上 X-User-Message 头,出处改由 schema 的
       // code 字段承载(上屏的是 vocabulary.ts 里该 code 的文案);r.error 只进 console。
       'if (!r.ok && r.error) logDiagnostic("model-test", r.error);',
+      // ask 流的 error 事件:原文只进受限诊断出口,上抛的是带品牌的场景文案。
+      'logDiagnostic("ask-stream", event.error);',
       // 以下三处都已过人话层(裸值包进 Error 交给 toUserMessage)。
-      'throw new Error(toUserMessage(new Error(event.error), "回答没能完成，请重试"));',
       '? `全部预审中止：${toUserMessage(job.error ? new Error(job.error) : null, "出了点问题")}（已处理 ${job.done}）`',
       ': toUserMessage(d.error ? new Error(d.error) : null, "该问答失败，请稍后重试"));',
       ': `失败：${toUserMessage(r.error ? new Error(r.error) : null, "连接未通过")}`,',
@@ -233,6 +234,62 @@ test("没有任何地方把后端诊断字段(.error/.error_message)直出给用
   );
 });
 
+// 守卫④:场景文案必须**带品牌**(第四轮评审阻塞 2)。
+//
+// 品牌(HUMANIZED)原来只在 humanizeHttpError 一个出口打,于是任何「重新包装」
+// 都会掉品牌。page.tsx 的 ask 流就是这么中招的:
+//
+//   throw new Error(toUserMessage(new Error(event.error), "回答没能完成，请重试"))
+//
+// 抛出去的是**普通** Error,外层 runAsk → reportError → toUserMessage 认不出
+// 它已经安全化,于是再泛化一次:
+//   第一跳 → "回答没能完成，请重试"
+//   第二跳 → "服务出了点问题，请稍后重试"   ← 场景文案被吃掉
+// 而且第一句安全文案还会被当成「未翻译的原始错误」多记一条诊断。
+//
+// 两条形态一起禁,它们是同一个根因的两种长相:
+//   (a) `new Error(toUserMessage(...) / humanize...(...))` —— 把已安全化的文案
+//       重新包进裸 Error;
+//   (b) `new Error("<含中文>")` —— 写给用户的场景文案,压根没盖过章。
+// 两类都改用 errors.ts 的 humanizedError():它产出带品牌的 Error,能穿过外层
+// catch 原样抵达用户。
+const REWRAP_RE = /new Error\(\s*(toUserMessage|humanize|extractErrorMessage)/;
+const CJK_LITERAL_THROW_RE = /new Error\(\s*["'`][^"'`]*[一-鿿]/;
+
+// 目前为空:全仓扫下来没有「确实该裸抛中文」的场景。
+// 控制流哨兵(admin 页的 FORBIDDEN_SENTINEL)天然不在射程内——它抛的是常量不是
+// 中文字面量。真要加豁免,逐行登记并写清「为什么这句到不了用户面前」。
+const ALLOWED_UNBRANDED_COPY = new Map([]);
+
+test("给用户的场景文案必须带品牌(不重新包装、不裸抛中文)", async () => {
+  const offenders = [];
+  for (const rel of FILES) {
+    if (rel === "errors.ts") continue; // 人话层自己的实现:品牌就是在这儿打的
+    const text = await read(rel);
+    const allowed = ALLOWED_UNBRANDED_COPY.get(rel) ?? [];
+    text.split("\n").forEach((line, i) => {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("//") || trimmed.startsWith("*")) return; // 注释里可以谈这个形态
+      if (allowed.includes(trimmed)) return;
+      if (REWRAP_RE.test(trimmed)) {
+        offenders.push(`${rel}:${i + 1}  [重新包装掉品牌]  ${trimmed}`);
+        return;
+      }
+      // DOMException 不算(page.tsx 的 "已中断回答" 是 AbortError 控制流)。
+      if (CJK_LITERAL_THROW_RE.test(trimmed)) {
+        offenders.push(`${rel}:${i + 1}  [场景文案没盖章]  ${trimmed}`);
+      }
+    });
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    "这些地方产出的用户文案没带品牌,外层 catch 的 toUserMessage 会把它再泛化一次" +
+      "(场景文案被吃成全局兜底)。改用 errors.ts 的 humanizedError(文案):\n" +
+      offenders.join("\n")
+  );
+});
+
 test("catch 侧的关键出口确实走了人话层", async () => {
   // 反面守卫抓形态,这里正面钉住几个「一改就全网泄漏」的枢纽。
   const page = await read("page.tsx");
@@ -242,10 +299,12 @@ test("catch 侧的关键出口确实走了人话层", async () => {
     /function reportError\(error: unknown\) \{\s*\n\s*setStatusText\(toUserMessage\(error, "[^"]+"\)\);/,
     "page.tsx 的 reportError 必须过 toUserMessage"
   );
-  // ask 流的 error 事件 / 重连轮询的 job error:后端英文技术串。
-  assert.ok(
-    page.includes('throw new Error(toUserMessage(new Error(event.error), "回答没能完成，请重试"));'),
-    "ask 流的 error 事件必须过 toUserMessage"
+  // ask 流的 error 事件:原文进受限诊断出口,抛出去的是**带品牌**的场景文案。
+  // 裸 new Error 会掉品牌,外层 reportError 再泛化一次(第四轮评审阻塞 2)。
+  assert.match(
+    page,
+    /logDiagnostic\("ask-stream", event\.error\);\s*\n\s*throw humanizedError\("回答没能完成，请重试"\);/,
+    "ask 流的 error 事件必须 logDiagnostic 原文 + 抛 humanizedError 场景文案"
   );
   assert.match(page, /toUserMessage\(d\.error \? new Error\(d\.error\) : null,/, "job.error 必须过 toUserMessage");
 
