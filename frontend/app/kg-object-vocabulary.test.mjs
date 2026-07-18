@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { getTraceStepDetail } from "./reasoning-trace.ts";
 import { ANCHOR_SET_HINT } from "./knowhow-manage-logic.ts";
+import { UNINDEXED_SCOPE_HINT } from "./scale-index.ts";
 
 const read = (name) => readFile(new URL(`./${name}`, import.meta.url), "utf8");
 
@@ -21,6 +22,7 @@ const read = (name) => readFile(new URL(`./${name}`, import.meta.url), "utf8");
 // OBJECT_TYPE_LABELS,所以从这里读到的类型名就是后端真源的类型名。
 const kgTypeMark = await read("kg-type-mark.tsx");
 const answerPanel = await read("answer-panel.tsx");
+const pageTsx = await read("page.tsx");
 
 function builtinTypeLabels() {
   const block = kgTypeMark.match(/const KG_TYPE_LABELS: Record<string, string> = \{([\s\S]*?)\};/);
@@ -78,6 +80,34 @@ test("引用锚点的两条提示用统称,不点名任一类型", () => {
       assert.equal(title.includes(noun), false, `引用提示点名了具体类型「${noun}」:${title}`);
     }
   }
+});
+
+test("未索引徽章的说明用统称,不点名任一类型", () => {
+  // 未索引的来源什么都不参与:段落、图谱对象、关联全在内。列举里那一项若写成
+  // 「概念」,用户会以为 claim / formula / procedure / knowhow 自定义类型不受影响。
+  assert.match(UNINDEXED_SCOPE_HINT, /知识对象/);
+  for (const noun of typeNouns()) {
+    assert.equal(
+      UNINDEXED_SCOPE_HINT.includes(noun),
+      false,
+      `未索引提示点名了具体类型「${noun}」:${UNINDEXED_SCOPE_HINT}`,
+    );
+  }
+});
+
+test("未索引说明只有一份字面量 —— 复制两份正是它漂移的原因", () => {
+  // 上面那条断言只看常量的内容。它一度**假绿**:page.tsx 里另有两份手写副本,
+  // 常量改对了、副本没改,守卫却全程满意。所以这里额外钉住「单一真源」——
+  // page.tsx 只准引用常量,不准把这句话再抄回 JSX 里。
+  const inlineCopies = pageTsx.match(/未索引部分不参与/g) ?? [];
+  assert.equal(
+    inlineCopies.length,
+    0,
+    `page.tsx 里又出现了 ${inlineCopies.length} 份手写副本;请改引用 scale-index.ts 的 UNINDEXED_SCOPE_HINT`,
+  );
+  const refs = pageTsx.match(/UNINDEXED_SCOPE_HINT/g) ?? [];
+  // import 一次 + 两处徽章 = 3。少于 3 说明某处渲染点被摘掉或换回了字面量。
+  assert.ok(refs.length >= 3, `page.tsx 只引用了 ${refs.length} 次 UNINDEXED_SCOPE_HINT,渲染点丢了`);
 });
 
 test("自定义类型原样透出,不被折叠进内置表", () => {

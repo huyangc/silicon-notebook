@@ -33,7 +33,7 @@ import {
 import { promotionReviewSections } from "./promotion-review";
 import { setNotebookTier, tierActionState } from "./notebook-tier";
 import {
-  describeScaleIndex, scaleIndexOpConfirm, SCALE_OP_MODE,
+  describeScaleIndex, scaleIndexOpConfirm, SCALE_OP_MODE, UNINDEXED_SCOPE_HINT,
   type ScaleIndexOp, type ScaleIndexStatus,
 } from "./scale-index";
 import {
@@ -3821,7 +3821,7 @@ export default function Home() {
                     >
                       {label}
                       {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
-                        <span title="未索引部分不参与检索与推理（段落、概念、关联、图谱）；点「更新索引」或等待自动收进后可见">
+                        <span title={UNINDEXED_SCOPE_HINT}>
                           {` · ${s.unindexed_sources} 源待索引`}
                         </span>
                       )}
@@ -5124,7 +5124,7 @@ export default function Home() {
                         >
                           {label}
                           {s.exists && !s.delta_searchable && (s.unindexed_sources ?? 0) > 0 && (
-                            <span title="未索引部分不参与检索与推理（段落、概念、关联、图谱）；点「更新索引」或等待自动收进后可见">
+                            <span title={UNINDEXED_SCOPE_HINT}>
                               {` · ${s.unindexed_sources} 源待索引`}
                             </span>
                           )}

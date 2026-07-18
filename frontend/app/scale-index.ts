@@ -85,6 +85,16 @@ export function describeScaleIndex(s: ScaleIndexStatus): ScaleIndexView {
   return { state, stateLabel, tone, primaryOp, canRebuild };
 }
 
+// 「还有 N 个来源没进索引」徽章的悬浮说明 —— 来源栏与图谱侧栏两处共用。
+//
+// ⚠抽成常量不是为了省字:这串原本在 page.tsx 里各写一份,于是散文重写把统称
+// 修成「知识对象」时只改到一处,另一处继续挂着「概念」——把 claim / formula /
+// procedure 和 knowhow 自定义类型集体降格(见 AGENTS.md「概念」不是统称一节)。
+// 两份字面量正是它能漂移的原因,所以这里只留一份,并由
+// kg-object-vocabulary.test.mjs 钉住:统称串里不许出现任何一个具体类型名。
+export const UNINDEXED_SCOPE_HINT =
+  "未索引部分不参与检索与推理（段落、知识对象、关联、图谱）；点「更新索引」或等待自动收进后可见";
+
 // 每个动作的确认文案 —— 描述具体精确,并诚实说明 update 会在何种条件下自动转全量。
 export function scaleIndexOpConfirm(op: ScaleIndexOp, s: ScaleIndexStatus): string {
   if (op === "build") {
