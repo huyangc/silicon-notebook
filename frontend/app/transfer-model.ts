@@ -55,6 +55,23 @@ export const memoryTransferBody = (
   extract_kg: extractKg,
 });
 
+// --- AMENDMENT 1: 批量传输的「所选是否同源笔记本」判定(C4 消费)---------------
+// DestinationPicker 的 sourceNotebookId 是单数——它只用来在目标候选列表里排除
+// 源自身(见上面 destinationNotebooks)。全局 Memory 视图的多选可以跨 notebook；
+// 一旦选中项跨了源笔记本,"唯一源"这个前提就不成立了——调用方必须在打开选择器
+// 之前用这个纯函数拦截(提示用户改成单一笔记本内多选),不能悄悄拿第一条的
+// notebook 当源硬着头皮继续:那会导致"移动"从错误的笔记本删除源、"复制"漏排
+// 除真正的源笔记本。单条传输天然只有一个来源,不需要经过这个检查。
+
+/** 一批条目是否共享同一个 notebook_id；是则返回该 id,跨源或空输入返回 null。 */
+export const singleSourceNotebookId = (
+  items: readonly { notebook_id: string }[]
+): string | null => {
+  if (items.length === 0) return null;
+  const first = items[0].notebook_id;
+  return items.every((item) => item.notebook_id === first) ? first : null;
+};
+
 // --- AMENDMENT 2: 409 source_cleanup_failed 结构化解析 ----------------------
 // knowhow transfer 在「复制已提交、源清理失败」时返回 409,body 形如:
 //   { detail: { code: "source_cleanup_failed", new_table_id: "...", message: "..." } }

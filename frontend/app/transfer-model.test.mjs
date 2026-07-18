@@ -6,6 +6,7 @@ import {
   knowhowTransferBody,
   memoryTransferBody,
   parseCleanupFailure,
+  singleSourceNotebookId,
   summarizeTransferResults,
 } from "./transfer-model.ts";
 
@@ -66,6 +67,36 @@ test("memoryTransferBody: 不别名调用方数组（防调用后原地变更污
   const body = memoryTransferBody(ids, "nb-2", "copy", true);
   ids.push("m3");
   assert.deepEqual(body.memory_ids, ["m1", "m2"]);
+});
+
+// --- singleSourceNotebookId（AMENDMENT 1）-----------------------------------
+
+test("singleSourceNotebookId: 空数组 → null", () => {
+  assert.equal(singleSourceNotebookId([]), null);
+});
+
+test("singleSourceNotebookId: 单条 → 就是它的 notebook_id", () => {
+  assert.equal(singleSourceNotebookId([{ notebook_id: "nb-1" }]), "nb-1");
+});
+
+test("singleSourceNotebookId: 多条同源 → 该 notebook_id", () => {
+  const items = [{ notebook_id: "nb-1" }, { notebook_id: "nb-1" }, { notebook_id: "nb-1" }];
+  assert.equal(singleSourceNotebookId(items), "nb-1");
+});
+
+test("singleSourceNotebookId: 跨源（哪怕只有一条不同）→ null", () => {
+  const items = [{ notebook_id: "nb-1" }, { notebook_id: "nb-2" }, { notebook_id: "nb-1" }];
+  assert.equal(singleSourceNotebookId(items), null);
+});
+
+test("singleSourceNotebookId: 不同源出现在中间也能识别（不是只比对首尾两条）", () => {
+  const items = [
+    { notebook_id: "nb-1" },
+    { notebook_id: "nb-9" },
+    { notebook_id: "nb-1" },
+    { notebook_id: "nb-1" },
+  ];
+  assert.equal(singleSourceNotebookId(items), null);
 });
 
 // --- parseCleanupFailure（AMENDMENT 2）--------------------------------------

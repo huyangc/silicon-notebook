@@ -35,7 +35,10 @@ import {
   validateMemoryDraft,
   type MemoryScope,
 } from "./memory-model";
+import { transferMemories } from "./memory-transfer.ts";
 import { Pagination } from "./Pagination";
+import { singleSourceNotebookId, summarizeTransferResults, type TransferMode } from "./transfer-model.ts";
+import { DestinationPicker } from "./transfer-picker.tsx";
 import { label, EVIDENCE_LEVEL } from "./vocabulary";
 import type {
   MemoryOrigin,
@@ -71,6 +74,13 @@ async function memoryApi<T>(path: string, options: RequestInit = {}): Promise<T>
 }
 
 type MemoryDraft = { title: string; content_md: string; tags: string };
+
+// C4「复制/移动到…」结果提示——两个字段各自独立(可能只有一个非空,也可能两个
+// 同时非空):warning 对应 transfer-model.ts summarizeTransferResults() 的
+// copiedSourceNotRemoved 子集(副本已落地,需要用户手动清源,别再重试),failure
+// 对应普通 status==="failed" 的子集。两者渲染成不同色调的横幅,不能合并成一条
+// 消息——AMENDMENT 2 明确要求两者视觉上可区分。
+type TransferNotice = { warning: string | null; failure: string | null };
 
 function draftFor(memory: Pick<MemoryRecord, "title" | "content_md" | "tags">): MemoryDraft {
   return { title: memory.title, content_md: memory.content_md, tags: memory.tags.join(", ") };
@@ -469,6 +479,13 @@ export function MemoryPanel({
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [pendingDelete, setPendingDelete] = useState<{ kind: "single"; memory: MemoryRecord } | { kind: "bulk" } | null>(null);
+  // C4「复制/移动到…」：ids 在打开选择器那一刻就冻结(单条=[memory.id]，批量=
+  // 当时选中集合解出的 id 列表)，不是留一个"kind"标记再到确认时重新从
+  // selectedIds 现算——DestinationPicker 是全屏遮罩(.utility-modal)，打开期间
+  // 背后不可能再变更选中态，冻结与现算在这里等价，冻结更简单也避免选择器开着
+  // 时选中状态被其它路径意外改动而导致 sourceNotebookId 和 ids 对不上。
+  const [pendingTransfer, setPendingTransfer] = useState<{ ids: string[]; sourceNotebookId: string } | null>(null);
+  const [transferNotice, setTransferNotice] = useState<TransferNotice | null>(null);
   const listRequestEpochRef = useRef(0);
   const listControllerRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
@@ -516,6 +533,7 @@ export function MemoryPanel({
     mutationControllersRef.current.add(controller);
     setBusyId(memory.id);
     setError("");
+    setTransferNotice(null);
     try {
       await memoryApi(`/memories/${encodeURIComponent(memory.id)}`, { method: "DELETE", signal: controller.signal });
       if (controller.signal.aborted || !mountedRef.current) return;
@@ -535,6 +553,7 @@ export function MemoryPanel({
     mutationControllersRef.current.add(controller);
     setBusyId("__bulk__");
     setError("");
+    setTransferNotice(null);
     try {
       await memoryApi("/memories/bulk-delete", {
         method: "POST",
@@ -612,6 +631,7 @@ export function MemoryPanel({
     mutationControllersRef.current.add(controller);
     setBusyId(memory.id);
     setError("");
+    setTransferNotice(null);
     try {
       const validationError = validateMemoryDraft({
         title: draft.title,
@@ -660,6 +680,7 @@ export function MemoryPanel({
     mutationControllersRef.current.add(controller);
     setBusyId(memory.id);
     setError("");
+    setTransferNotice(null);
     try {
       await memoryApi(memoryPromotionPath(memory.id), {
         method: "POST",
@@ -674,6 +695,59 @@ export function MemoryPanel({
       }
     } finally {
       mutationControllersRef.current.delete(controller);
+      if (mountedRef.current) setBusyId(null);
+    }
+  }
+
+  // C4「复制/移动到…」：单条与批量共用同一个提交函数——两者最终都是同一个
+  // POST /memories/transfer 请求(数组里放 1 个或多个 id)，不像
+  // deleteMemory/bulkDeleteMemories 那样拆成两个函数——那个拆分的理由(两个不
+  // 同的端点)在这里不成立。busyId 用 ids.length > 1 区分"占住批量栏"还是
+  // "占住这一张卡"，与 bulkDeleteMemories 用 "__bulk__" 哨兵同一个道理。
+  //
+  // onSubmit 的契约(transfer-picker.tsx 头注释)：resolve 才代表"可以卸载
+  // modal 了"——批量级失败(如目标笔记本不可写/不存在，后端 4xx)必须让它继续
+  // 抛出、不能在这里吞掉，好让 DestinationPicker 自己的 catch 接管错误态、解锁
+  // 「确认」按钮重试；只有 200 成功之后才关 modal、清选中、刷新列表——这里没
+  // 有 try/catch 包住 await 本身正是为了让异常原样穿透出去。
+  //
+  // 200 之内逐条结果用 summarizeTransferResults 拆成两类，分别落进
+  // transferNotice 的 warning/failure 字段，特意不写回全局 error state：下面
+  // setRefresh 触发的重新拉取 effect 自己会在起手处 setError("")(见该 effect
+  // 顶部)，如果复用 error 存这条消息，会在同一批状态更新后几乎立刻被那次清空
+  // 冲掉——用户根本来不及看见，AMENDMENT 2 要求的"可见提示"就形同虚设。
+  // transferNotice 不挂在那个 effect 上，只在下一次别的写操作开始时才清空(与
+  // knowhow-panel.tsx 里 actionError 的清空方式同一套)，所以能稳定留到用户看见
+  // 为止。
+  async function submitTransfer(ids: string[], targetNotebookId: string, mode: TransferMode) {
+    if (busyId || sessionSignal.aborted) return;
+    setBusyId(ids.length > 1 ? "__bulk__" : ids[0]);
+    setError("");
+    setTransferNotice(null);
+    try {
+      const { results } = await transferMemories(ids, targetNotebookId, mode, true);
+      if (sessionSignal.aborted || !mountedRef.current) return;
+      setPendingTransfer(null);
+      setSelectedIds(new Set());
+      setRefresh((value) => value + 1);
+      const summary = summarizeTransferResults(results);
+      const plainFailedCount = summary.failed - summary.copiedSourceNotRemoved.length;
+      if (summary.copiedSourceNotRemoved.length > 0 || plainFailedCount > 0) {
+        const failedReasons = Array.from(new Set(
+          results
+            .map((result) => (result.status === "failed" ? result.error : null))
+            .filter((reason): reason is string => Boolean(reason))
+        )).join("；");
+        setTransferNotice({
+          warning: summary.copiedSourceNotRemoved.length > 0
+            ? `${summary.copiedSourceNotRemoved.length} 条已复制到目标笔记本，但源未能自动清理，请手动删除源 Memory，避免重复操作产生冗余副本。`
+            : null,
+          failure: plainFailedCount > 0
+            ? `${plainFailedCount} 条复制/移动失败${failedReasons ? `：${failedReasons}` : ""}`
+            : null,
+        });
+      }
+    } finally {
       if (mountedRef.current) setBusyId(null);
     }
   }
@@ -762,6 +836,39 @@ export function MemoryPanel({
           <span>已选 {selectedIds.size} / {items.length} 项</span>
           <button type="button" onClick={() => setSelectedIds(new Set(items.map((item) => item.id)))}>全选本页</button>
           <button type="button" onClick={() => setSelectedIds(new Set())}>清空</button>
+          {/* AMENDMENT 1：批量传输要求所选全部同源(DestinationPicker 的
+              sourceNotebookId 是单数，用来在目标候选里排除源自身)——全局
+              Memory 视图的多选可以跨 notebook，真跨了源就没有"唯一源"这回事，
+              打开选择器前先用 singleSourceNotebookId 拦截，不悄悄拿第一条的
+              notebook 顶上。
+              选中态跨页存活(selectedIds 不随 page/filter 变化清空，"全选本页"
+              这个命名本身就暗示还有别的页)，但 items 只装当前页——要拿
+              notebook_id 判同源，只能先从 items 里解析出选中项，若跨页选择导
+              致解不全(chosen.length !== selectedIds.size)，宁可拦下也不能悄悄
+              只传当前页能看到的那一部分：按钮上明明写着"（{selectedIds.size}）"，
+              真传输的却只是 chosen 这个子集，用户完全不会发现少传了。
+              bulkDeleteMemories 不用管这个，因为它直接把整个 selectedIds 送后
+              端、不需要在前端解析 notebook_id。 */}
+          <button
+            type="button"
+            className="memory-bulk-transfer"
+            disabled={selectedIds.size === 0 || Boolean(busyId)}
+            onClick={() => {
+              const chosen = items.filter((item) => selectedIds.has(item.id));
+              if (chosen.length !== selectedIds.size) {
+                setError("批量复制/移动只能处理当前页面内的选中项，部分选中的 Memory 不在本页，请分页分别操作");
+                return;
+              }
+              const sourceNotebookId = singleSourceNotebookId(chosen);
+              if (!sourceNotebookId) {
+                setError("批量复制/移动要求所选 Memory 属于同一个笔记本，请重新选择");
+                return;
+              }
+              setPendingTransfer({ ids: chosen.map((item) => item.id), sourceNotebookId });
+            }}
+          >
+            <Copy size={14} /> 复制/移动到…（{selectedIds.size}）
+          </button>
           <button
             type="button"
             className="danger memory-bulk-delete"
@@ -774,6 +881,16 @@ export function MemoryPanel({
       )}
 
       {error && <div className="memory-error" role="alert">{error}</div>}
+      {/* AMENDMENT 2：copied_source_not_removed 不能混进普通失败——它是"副本已
+          落地，只是源没删掉"，引导用户重试只会在目标堆更多重复副本。两个提示各
+          用独立 state、不同色调渲染，与下面普通失败横幅（复用既有 .memory-error
+          红色调）视觉上明确分开。 */}
+      {transferNotice?.warning && (
+        <div className="memory-transfer-notice" role="status">{transferNotice.warning}</div>
+      )}
+      {transferNotice?.failure && (
+        <div className="memory-error" role="alert">{transferNotice.failure}</div>
+      )}
       {loading ? (
         <div className="memory-empty">正在读取你的记忆…</div>
       ) : items.length === 0 ? (
@@ -889,20 +1006,34 @@ export function MemoryPanel({
                   {!editing && (
                     <div className="memory-card-actions">
                       {memory.status === "confirmed" && (
-                        canPromoteMemory(memory) ? (
+                        <>
+                          {canPromoteMemory(memory) ? (
+                            <button
+                              type="button"
+                              className="memory-promote-action"
+                              disabled={busy}
+                              onClick={() => promoteMemory(memory)}
+                            >
+                              <ArrowUpCircle size={14} /> 贡献到公共知识库
+                            </button>
+                          ) : (
+                            <span className={`memory-promotion-state state-${memory.promotion_state}`}>
+                              {memoryPromotionLabel(memory.promotion_state)}
+                            </span>
+                          )}
+                          {/* C4：只有 confirmed 才能传输——candidate/rejected/
+                              deprecated 传过去后端会把该条报成 per-item failed
+                              (transfer-model.ts TransferStatus 注释)，与其让用户
+                              点了才看到失败，不如干脆不给入口。 */}
                           <button
                             type="button"
-                            className="memory-promote-action"
+                            className="memory-transfer-action"
                             disabled={busy}
-                            onClick={() => promoteMemory(memory)}
+                            onClick={() => setPendingTransfer({ ids: [memory.id], sourceNotebookId: memory.notebook_id })}
                           >
-                            <ArrowUpCircle size={14} /> 贡献到公共知识库
+                            <Copy size={14} /> 复制/移动到…
                           </button>
-                        ) : (
-                          <span className={`memory-promotion-state state-${memory.promotion_state}`}>
-                            {memoryPromotionLabel(memory.promotion_state)}
-                          </span>
-                        )
+                        </>
                       )}
                       <button
                         type="button"
@@ -949,6 +1080,21 @@ export function MemoryPanel({
             </div>
           </div>
         </div>
+      )}
+      {/* C4「复制/移动到…」：单条来自卡片操作区(source=该条自己的
+          notebook_id)，批量来自选中集合(先经 singleSourceNotebookId 拦截跨源，
+          见批量按钮 onClick)。allowMove 恒为 true——Memory 传输的权限边界不像
+          knowhow 表那样需要区分"只读也能复制"：能在这个列表里看到某条 Memory
+          就必然是它的 owner(私有 Memory 不做只读共享)，目标笔记本是否可写由
+          后端 /memories/transfer 自己校验，前端不需要另开一道 canEdit 门。 */}
+      {pendingTransfer && (
+        <DestinationPicker
+          sourceNotebookId={pendingTransfer.sourceNotebookId}
+          allowMove
+          title={`复制/移动 ${pendingTransfer.ids.length} 条 Memory`}
+          onCancel={() => setPendingTransfer(null)}
+          onSubmit={(targetNotebookId, mode) => submitTransfer(pendingTransfer.ids, targetNotebookId, mode)}
+        />
       )}
     </section>
   );
