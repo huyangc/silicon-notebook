@@ -91,6 +91,9 @@ test("build 确认文案:引用当前模式名、无退休名、保留关键含�
   for (const retired of ["严格推理", "深挖推理", "图谱多跳"]) {
     assert.ok(!build.includes(retired), `确认文案含退休模式名「${retired}」`);
   }
-  assert.match(build, /从零/);   // 全量而非增量
+  // 全量而非增量:散文去黑话后由动词「建立」承担(对比 update 的「更新…增量收进」、
+  // rebuild 的「全量重建」),原先的「从零」措辞已随黑话一并重写掉。锁语义不锁字面。
+  assert.match(build, /建立/);
+  assert.ok(!build.includes("增量"), "build 确认文案不该出现增量语义");
   assert.match(build, /后台/);   // 异步不阻塞
 });
