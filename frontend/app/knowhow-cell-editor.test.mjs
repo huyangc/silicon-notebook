@@ -535,6 +535,8 @@ test("并发提示文案彼此可区分（各自对应一种在飞操作，不�
   // 固化成预期——强退后图片进待完成上传日志，下次打开这一格会被认领补回，不是孤儿。
   assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /再点一次/);
   assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /下次打开/);
+  // 「尽量」是刻意的：storage 完全不可用时这条承诺兑现不了（已知边界，见 PR）。
+  assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /尽量/);
   assert.doesNotMatch(LEAVE_BLOCKED_UPLOADING_HINT, /残留/);
 });
 
