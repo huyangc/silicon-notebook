@@ -628,3 +628,167 @@ def test_move_deletes_source_when_untouched_during_kg_source_removal(repo, alice
     assert results[0]["status"] == "moved"
     with pytest.raises(KeyError):
         service.get(mem.id, alice.id)
+
+
+# --- PR review round 4 P2-1: remove_memory_source (inside the try block
+# above) already tears down the source's KG projection BEFORE the atomic
+# delete_memory_if_unchanged retain-check runs. If a concurrent update()
+# lands in that exact window, two things are true at once: (a) the atomic
+# delete correctly RETAINS the memory (its revision changed under it), and
+# (b) the concurrent update() itself — which gates its own re-ingest on
+# `memory_source_id(item.id) is not None` — sees None (remove_memory_source
+# just cleared it) and skips its own re-ingest. Neither side re-adds it: the
+# confirmed memory is retained but permanently missing from KG until a
+# manual action.
+#
+# A local `_KgStub` (duplicated from tests/test_memory_kg_lifecycle.py's own
+# stub of the same shape, not cross-imported — this suite's own established
+# no-cross-test-file-coupling convention) stands in for the real
+# SourceIngestionService: it lets the assertions observe "is this memory's
+# derived KG source present or not" directly and deterministically, with no
+# LLM/embedder configuration dependency (ingest_memory_source's real
+# implementation would still work without one — failures there are caught
+# and turned into a 'failed'-status source row, which the real memory_
+# source_id would still find — but the stub is faster, and isolates this
+# test from unrelated ingestion-pipeline behavior).
+#
+# Injected via `service.store.delete_memory_if_unchanged` (NOT `service.
+# memory_kg.remove_memory_source`, unlike the sibling round-3 races above in
+# this file): both `update()` and `deprecate()` call `self.memory_kg.
+# remove_memory_source` internally too, so monkeypatching that attribute
+# directly would make the injected concurrent op recursively re-enter the
+# very stub that invoked it. `delete_memory_if_unchanged` is called nowhere
+# else in this window, so wrapping IT — performing the concurrent op first,
+# then delegating to the real implementation — lands the edit in the
+# identical real-world window (remove_memory_source has ALREADY run for real
+# by the time delete_memory_if_unchanged is ever called) without that
+# hazard.
+class _KgStub:
+    """Duck-typed stand-in for SourceIngestionService's four memory-KG
+    primitives (mirrors tests/test_memory_kg_lifecycle.py's own _KgStub)."""
+
+    def __init__(self, eligible: bool = True) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self._eligible = eligible
+        self._sources: dict[str, str] = {}
+
+    def memory_kg_eligible(self, notebook_id: str) -> bool:
+        return self._eligible
+
+    def memory_source_id(self, memory_id: str) -> "str | None":
+        return self._sources.get(memory_id)
+
+    def ingest_memory_source(self, notebook_id, memory_id, title, content_md) -> str:
+        self.calls.append(("ingest", memory_id))
+        self._sources[memory_id] = f"src-{memory_id}"
+        return self._sources[memory_id]
+
+    def remove_memory_source(self, memory_id: str) -> None:
+        self.calls.append(("remove", memory_id))
+        self._sources.pop(memory_id, None)
+
+
+def test_move_reingests_kg_source_when_edit_lands_after_source_removed(
+    repo, alice, monkeypatch
+):
+    from app.models.schemas import MemoryUpdate
+
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+
+    kg = _KgStub(eligible=True)
+    service.set_memory_kg_service(kg)
+    service.kg_ingest_scheduler = lambda fn, key: fn(key)  # 同步：直接观察重抽
+    service.embedding_scheduler = lambda fn, job: fn(job)
+
+    cand = service.create_candidate(
+        src, alice.id, None, "req-p21", "Original", "Original body", [], "task"
+    )
+    mem = service.confirm(cand.id, alice.id)
+    assert kg.memory_source_id(mem.id) is not None, "前置条件：源确实有派生 KG 源"
+    kg.calls.clear()
+
+    real_delete = service.store.delete_memory_if_unchanged
+
+    def _concurrent_edit_then_delete(memory_id, user_id, expected_revision):
+        # remove_memory_source（真实、未打桩）此刻已经跑完——KG 源已经真的
+        # 被删了。并发编辑恰好卡在这里：它自己执行时会去查
+        # memory_source_id(...)，此刻已经是 None，于是它自己也会放弃重抽
+        # ——这正是 bug 的前提条件，不是这条测试要验证的东西本身。
+        service.update(
+            memory_id, alice.id,
+            MemoryUpdate(title="Edited concurrently", content_md="New body"),
+        )
+        return real_delete(memory_id, user_id, expected_revision)
+
+    monkeypatch.setattr(
+        service.store, "delete_memory_if_unchanged", _concurrent_edit_then_delete
+    )
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    result = results[0]
+    assert result["ok"] is False
+    assert result["status"] == "copied_source_not_removed"
+
+    # 源没被删，且带着并发编辑后的新内容——保留分支本身的既有契约。
+    still_there = service.get(mem.id, alice.id)
+    assert still_there.notebook_id == src
+    assert still_there.title == "Edited concurrently"
+
+    # 这条测试要钉的新东西：KG 源必须被重新排队，不是永久缺失。
+    assert kg.memory_source_id(mem.id) is not None, (
+        "并发编辑保留的源必须重新排入 KG 抽取——remove_memory_source 已经把"
+        "旧派生源删了，并发 update() 自己因为 memory_source_id 是 None 而"
+        "跳过了重抽，必须靠 transfer() 的保留分支兜底重新排队，否则这条"
+        "confirmed memory 永久从 KG 里消失"
+    )
+
+
+def test_move_does_not_reingest_kg_source_when_deprecated_after_source_removed(
+    repo, alice, monkeypatch
+):
+    """Status-only companion: a concurrent DEPRECATE in the same window is a
+    deliberate decision to remove the source from KG — the retain branch's
+    re-schedule must not fight that decision and re-add it. (This is a
+    regression guard against an overcorrected fix, not a RED-before-fix
+    case: the unfixed code never re-schedules anything at all, so
+    memory_source_id staying None here is trivially true both before and
+    after the P2-1 fix — mirrors this file's own existing "Companion
+    happy-path guard" tests, e.g. test_move_deletes_source_when_untouched_
+    during_kg_source_removal above.)"""
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+
+    kg = _KgStub(eligible=True)
+    service.set_memory_kg_service(kg)
+    service.kg_ingest_scheduler = lambda fn, key: fn(key)
+    service.embedding_scheduler = lambda fn, job: fn(job)
+
+    cand = service.create_candidate(
+        src, alice.id, None, "req-p21-dep", "T", "B", [], "task"
+    )
+    mem = service.confirm(cand.id, alice.id)
+    assert kg.memory_source_id(mem.id) is not None, "前置条件：源确实有派生 KG 源"
+
+    real_delete = service.store.delete_memory_if_unchanged
+
+    def _concurrent_deprecate_then_delete(memory_id, user_id, expected_revision):
+        service.deprecate(memory_id, alice.id)
+        return real_delete(memory_id, user_id, expected_revision)
+
+    monkeypatch.setattr(
+        service.store, "delete_memory_if_unchanged", _concurrent_deprecate_then_delete
+    )
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    result = results[0]
+    assert result["status"] == "copied_source_not_removed"
+    still_there = service.get(mem.id, alice.id)
+    assert still_there.status == "deprecated"
+
+    assert kg.memory_source_id(mem.id) is None, (
+        "并发 deprecate 是刻意让源离开 KG 的决定——保留分支的重新排队不该"
+        "把它顶回去"
+    )

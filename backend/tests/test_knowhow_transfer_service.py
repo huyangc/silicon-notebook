@@ -460,3 +460,63 @@ def test_move_does_not_delete_source_row_added_during_projection_teardown(
     dst_tables = repo.list_knowhow_tables(dst_nb)
     assert len(dst_tables) == 1
     assert dst_tables[0]["id"] == exc_info.value.new_table_id
+
+
+# --- PR review round 4 P2-2: teardown-before-atomic-delete leaves the
+# RETAINED table's projection torn down with nothing queued to rebuild it.
+#
+# The scenario round 3's own test above (test_move_does_not_delete_source_
+# row_added_during_projection_teardown) already proves the atomic delete
+# correctly RETAINS the source when a concurrent edit lands during teardown
+# — this test reuses the exact same injection point (a stub build_projector
+# whose delete_table_projection performs the concurrent edit instead of
+# tearing anything down for real) and asks the next question: teardown
+# already ran (in production, delete_table_projection really does tear the
+# projection down before the atomic delete's re-check even runs) — if the
+# concurrent edit's OWN reprojection had ALSO already completed by that
+# point (rows marked synced, no job left pending), NOTHING is left to
+# rebuild the now-torn-down projection once the table is retained. The
+# concurrently-added row here starts life "pending" (KnowhowStore.
+# add_knowhow_row's own contract) and nothing in this test's injection path
+# schedules it (the stub replaces build_projector wholesale — no route-level
+# schedule() call fires either) — so absent a fix, it stays "pending"
+# forever: exactly the "no chunks/KG until a manual reproject" defect the
+# fix must close. Appended at EOF, same zero-line-shift reason as every
+# other block in this file (see the file-header pin note).
+def test_move_reschedules_projection_for_retained_source_when_edited_during_teardown(
+    repo, monkeypatch
+):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    cols = {c["name"]: c["id"] for c in repo.get_knowhow_table(src_tid)["columns"]}
+    src_hidden = _project(repo, src_tid)["hidden_source_id"]
+    assert src_hidden, "源表未真正投影，测试前置条件不成立"
+
+    class _ConcurrentEditDuringTeardown:
+        def delete_table_projection(self, hidden_source_id):
+            # 同 round 3 P1-1 的注入点：正常返回（模拟"拆投影本身成功"），
+            # 只做并发编辑这一件事。新行落库即 projection_status='pending'，
+            # 且这条注入路径不经过路由层，没有任何人会替它调度重投影。
+            repo.add_knowhow_row(src_tid, {cols["违例类型"]: "并发新增的行"})
+
+    monkeypatch.setattr(
+        kh_transfer, "build_projector", lambda _repo: _ConcurrentEditDuringTeardown()
+    )
+
+    with pytest.raises(kh_transfer.SourceCleanupFailed):
+        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+
+    # 保留分支必须自己把重投影重新排上队——不能指望并发编辑那次“顺便”
+    # 排过了（它没有：注入路径根本没走路由层的 schedule() 调用）。
+    detail = _settle(repo, src_tid)
+    assert len(detail["rows"]) == 2, "并发新增的行必须还在源表里"
+    assert all(r["projection_status"] == "synced" for r in detail["rows"]), (
+        "保留分支必须重新排队投影——否则并发新增的那一行永远停在 pending，"
+        "没有 chunk/KG，直到有人手工点「重建投影」: "
+        f"{[(r['id'], r['projection_status']) for r in detail['rows']]}"
+    )
+    with repo._connect() as db:
+        objects = db.execute(
+            "SELECT COUNT(*) FROM knowledge_objects WHERE source_id=?", (src_hidden,)
+        ).fetchone()[0]
+    assert objects > 0, "重投影必须真的重建出 KG objects，不只是把 projection_status 标记成 synced"

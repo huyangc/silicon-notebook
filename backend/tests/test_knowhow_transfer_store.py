@@ -105,3 +105,130 @@ def test_fingerprint_stable_when_nothing_changes(repo, store):
     second = store.table_fingerprint(tid)
 
     assert first == second
+
+
+# --- PR review round 4 P1 (copy correctness, not only move's): snapshot_table
+# used to run its SELECTs on a plain `with self.database.connect() as db:`
+# block. `connect()` returns the THREAD-LOCAL, REUSED connection (see
+# SqliteDatabase.connect's own docstring — 233+ call sites share it — and
+# _Conn's class docstring, which explicitly warns "生产中复用连接实际只读,
+# 所有写经 write()") with no explicit BEGIN: under WAL, a bare SELECT with no
+# open transaction observes the latest state committed AS OF THE MOMENT THAT
+# STATEMENT runs, not a snapshot pinned at the start of the method. A writer
+# committing BETWEEN two of snapshot_table's SELECTs therefore makes them see
+# two different committed states.
+#
+# This test injects a concurrent INSERT (a new row + its cell), not a
+# delete: a delete landing in this same window can only ever make a LATER
+# query (cells) a subset of what a fully-consistent read would show — still
+# stale, but not self-contradictory. A concurrent INSERT is what produces a
+# snapshot no single point in time could have produced: `cells` (read AFTER
+# the insert) contains a cell whose row_id is absent from `rows` (read
+# BEFORE the insert) — exactly what makes `_remap` hard-crash with a KeyError
+# on `khrow_map[cell["row_id"]]` (transfer.py), an ID-remap failure on a
+# plain copy, no move/delete involved.
+#
+# The interleaving is a REAL background thread whose write goes through the
+# actual `SqliteDatabase.write()` + process-wide `write_lock` — deliberately
+# not a same-thread call. `write_lock` is a `threading.RLock`: a same-thread
+# reentrant acquire always succeeds regardless of whether the fix is
+# applied, so a same-thread hook could never distinguish "fixed" from
+# "buggy" here. Local imports (not module-level) so this test's own
+# threading/contextlib helpers don't shift the line-pinned `from
+# app.services.sqlite_repository import SQLiteRepository` at line 4
+# (test_repository_surface_manifest.py's KNOWHOW_TRANSFER_STORE_ALLOWED_
+# IMPORTS) — appended at EOF for the same zero-line-shift reason documented
+# throughout the sibling transfer test files.
+def test_snapshot_table_is_internally_consistent_under_concurrent_insert(
+    repo, store, monkeypatch
+):
+    import threading
+    from contextlib import contextmanager
+
+    tid = _table(repo)
+    detail = repo.get_knowhow_table(tid)
+    col_id = detail["columns"][0]["id"]
+    main_thread_id = threading.get_ident()
+
+    hook_fired = threading.Event()
+    writer_started = threading.Event()
+    writer_committed = threading.Event()
+    spawned: list = []
+
+    def _concurrent_writer() -> None:
+        writer_started.set()
+        # 真正经过 SqliteDatabase.write() + 进程级 write_lock 的并发写者——
+        # 不是同线程再入（RLock 同线程可重入，会让这条测试测不出锁到底生不
+        # 生效）。
+        repo.add_knowhow_row(tid, {col_id: "并发新增的行"})
+        writer_committed.set()
+
+    def _hook() -> None:
+        if hook_fired.is_set():
+            return
+        hook_fired.set()
+        thread = threading.Thread(target=_concurrent_writer, daemon=True)
+        spawned.append(thread)
+        thread.start()
+        writer_started.wait(timeout=2.0)
+        # 有界等待「插入已提交」。修复前 connect() 没有锁竞争，一次单行插入
+        # 远快于这个超时，可靠地在 cells 查询之前提交——确定性 RED。修复后
+        # write() 全程占着 write_lock，这次等待会超时（不是死锁：这里只是
+        # 有界等待，不是无限等待——真正的插入被推迟到 snapshot_table 自己
+        # 的 write() 块退出、释放锁之后才能提交；测试代码在下面会再等一次，
+        # 确认它最终真的完成了）。
+        writer_committed.wait(timeout=1.0)
+
+    class _HookConnProxy:
+        def __init__(self, real):
+            self._real = real
+
+        def __enter__(self):
+            self._real.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return self._real.__exit__(exc_type, exc, tb)
+
+        def execute(self, sql, params=()):
+            result = self._real.execute(sql, params)
+            if "FROM knowhow_rows WHERE table_id" in sql:
+                _hook()
+            return result
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    real_connect = store.database.connect
+    real_write = store.database.write
+
+    def _patched_connect():
+        conn = real_connect()
+        if threading.get_ident() != main_thread_id:
+            return conn
+        return _HookConnProxy(conn)
+
+    @contextmanager
+    def _patched_write():
+        with real_write() as conn:
+            if threading.get_ident() != main_thread_id:
+                yield conn
+            else:
+                yield _HookConnProxy(conn)
+
+    monkeypatch.setattr(store.database, "connect", _patched_connect)
+    monkeypatch.setattr(store.database, "write", _patched_write)
+
+    snap = store.snapshot_table(tid)
+
+    assert hook_fired.is_set(), "hook 从未触发——rows 查询没有真的跑过，测试前置条件不成立"
+    assert spawned, "并发写者线程从未启动"
+    spawned[0].join(timeout=5.0)
+    assert writer_committed.is_set(), "并发写者最终必须成功提交（只是被推迟，不是永久卡死）"
+
+    row_ids = {r["id"] for r in snap["rows"]}
+    orphan_cells = [c for c in snap["cells"] if c["row_id"] not in row_ids]
+    assert not orphan_cells, (
+        f"快照内部不一致：{len(orphan_cells)} 个 cell 引用的 row_id 不在 rows 快照里——"
+        "rows 和 cells 两条 SELECT 在窗口内观察到了两个不同的已提交状态"
+    )

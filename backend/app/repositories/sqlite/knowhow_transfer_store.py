@@ -42,7 +42,56 @@ class KnowhowTransferStore:
         self.database = database
 
     def snapshot_table(self, table_id: str) -> dict:
-        with self.database.connect() as db:
+        """Read every business/derived row for ``table_id`` as ONE
+        internally-consistent point-in-time view.
+
+        PR review round 4 P1 (copy correctness, not only move's): this used
+        to run on a plain ``with self.database.connect() as db:`` block.
+        ``connect()`` returns the THREAD-LOCAL, REUSED connection (see
+        ``SqliteDatabase.connect``'s own docstring — 233+ call sites share
+        it — and ``_Conn``'s class docstring, which explicitly warns
+        "生产中复用连接实际只读,所有写经 write()") with no explicit
+        ``BEGIN``. Under WAL, a bare SELECT with no open transaction
+        observes the latest state committed AS OF THE MOMENT THAT STATEMENT
+        runs, not a snapshot pinned at the start of the method — a writer
+        committing BETWEEN, say, the ``rows`` SELECT and the ``cells``
+        SELECT below makes the two see two different committed states (a
+        cell ending up referencing a ``row_id`` absent from ``rows``, which
+        then hard-crashes ``transfer.py``'s ``_remap`` with a KeyError on
+        ``khrow_map[cell["row_id"]]`` — this can happen on a plain
+        ``copy_table``, no ``move``/delete involved).
+
+        The obvious-looking fix — wrap the reads in one explicit transaction
+        on this SAME connection (``db.execute("BEGIN")`` ... commit at
+        with-exit) — is NOT safe here specifically BECAUSE ``connect()`` is
+        that shared, thread-local, REUSED connection: nested
+        ``with connect() as db:`` blocks from other call sites on this
+        thread are a real, already-documented pattern (``_Conn``'s own class
+        docstring warns about exactly this), and a manual ``BEGIN`` issued
+        while already nested inside some OTHER caller's still-open
+        ``with connect()`` block would either raise "cannot start a
+        transaction within a transaction" or — worse — silently pin that
+        OUTER caller's later reads to this method's snapshot until ITS block
+        finally exits (only the OUTERMOST ``with`` commits — ``_Conn.
+        __exit__``'s depth counter). That is not a hypothetical risk to
+        guard against defensively; it is the exact failure mode ``_Conn``'s
+        docstring already exists to warn readers away from.
+
+        ``database.write()`` sidesteps all of that: it always opens a BRAND
+        NEW connection (never the shared one, so zero nesting hazard) and
+        holds the process-wide ``write_lock`` for its entire duration —
+        since EVERY write in this codebase goes through ``write()`` too
+        (the same invariant ``insert_transfer``/``delete_table_if_unchanged``
+        below already rely on), no concurrent writer can even be mid-commit
+        while we hold it. That is strictly stronger than WAL snapshot
+        isolation alone would give us (not just "a consistent snapshot", but
+        "provably no concurrent write landed at all" for the duration). The
+        cost — this method briefly blocks other writers process-wide — is
+        the same trade its two siblings in this class already make, and a
+        single table's worth of SELECTs (design doc's "百行内" scale
+        ceiling) is cheap enough to hold the lock for.
+        """
+        with self.database.write() as db:
             table = db.execute(
                 "SELECT * FROM knowhow_tables WHERE id = ?", (table_id,)
             ).fetchone()

@@ -954,6 +954,37 @@ class MemoryService:
                         if not self.store.delete_memory_if_unchanged(
                             source.id, user_id, source_revision
                         ):
+                            # P2-1（PR review round 4）：remove_memory_source 在
+                            # 上一行已经真的把源的 KG 派生源删掉了——不管这次
+                            # 原子删除最终判定"变了"保留源 memory 与否，那个
+                            # 派生源都已经不在了。保留分支尤其致命：并发那次
+                            # update()（正是它让下面这次原子删除判定"变了"）
+                            # 自己执行时会去查 memory_source_id(...)，而这一
+                            # 刻它已经是 None（就是上一行删的）——于是并发编
+                            # 辑自己也会认为"没有派生源可重抽"而放弃重抽（见
+                            # update() 自身的 memory_source_id(...) is not
+                            # None 门控）。两边都不补，这条 confirmed memory
+                            # 就永久从 KG 里消失，直到有人手工操作。
+                            #
+                            # 这里重新读一次源的最新状态——不是循环顶部那份
+                            # 旧快照 source，它的 title/content/status 都可能
+                            # 已经被这次并发编辑/状态流转带走——只有它此刻仍
+                            # 然是 confirmed（不是被同一窗口内的并发 deprecate
+                            # /reject 带走的状态）才重新排队抽取：一次 deprecate
+                            # 是刻意让派生源消失的决定，重新排队会把它顶回
+                            # 去，那是错的。复用 confirm() 已经在用的同一条
+                            # _maybe_schedule_kg/_kg_ingest_job 路径（extract_kg
+                            # 固定 True——这里恢复的是源"此刻本就该有"的 KG
+                            # 状态，与这次 transfer() 调用方对新副本的抽取偏好
+                            # 无关），不发明新机制。
+                            try:
+                                fresh_source = self.store.memory_for_user(
+                                    source.id, user_id
+                                )
+                                if fresh_source.status == "confirmed":
+                                    self._maybe_schedule_kg(fresh_source, True)
+                            except KeyError:
+                                pass  # 整行都没了：没有什么可重新抽取的
                             raise RuntimeError(
                                 "源 memory 在复制完成后被并发编辑或状态变更"
                                 "（原子删除时 revision 复核未命中），为避免"
