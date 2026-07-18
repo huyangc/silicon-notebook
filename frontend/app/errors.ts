@@ -10,12 +10,15 @@
 //
 // 现在出处由后端显式声明,共两条通道:
 //
-//   ① 可展示通道(给用户):只有**同时**满足两条才把 detail 原样给用户——
+//   ① 可展示通道(给用户):只有**同时**满足三条才把 detail 原样给用户——
 //      (a) 响应带 `X-User-Message: 1`,即后端经 user_error() 明确声明「这是
 //          写给终端用户的文案」(见 backend/app/api/deps.py);
 //      (b) 它还得像一句文案(isDisplayableUserText:不多行、不带标签、不带
-//          花括号、不超长)。(b) 只是第二道形态兜底,**不是**信任判据:没有
-//          (a) 的一律不给用户看,哪怕整段都是中文。
+//          花括号、不超长);
+//      (c) 它还得符合产品文案规范(中文,见 isCompliantUserCopy)。
+//      (a) 是**信任闸**,(b)(c) 是**展示策略闸**,两道串联、职责不能互换,
+//      详见 humanizeHttpError 上方的长注释。没有 (a) 的一律不给用户看,哪怕
+//      整段都是中文。
 //      裸 `HTTPException(detail=str(exc))` 永远不带标记 → 用户只看到按状态码
 //      泛化的通用中文。
 //
@@ -74,6 +77,35 @@ function isDisplayableUserText(text: string): boolean {
   return true;
 }
 
+// 产品文案规范:面向用户的文案一律中文(AGENTS.md)。要求「含中文」而不是
+// 「纯中文」——真实文案里混着标识符是正常的(「用户名须为『单个小写字母+00+
+// 六位数字』,如 a00123456」)。
+const CJK_RE = /[一-鿿]/;
+
+// 已通过出处验证的文案,是否符合产品文案规范。
+//
+// ⚠⚠ 这**不是**「用形态判断信任」——那个模型(「4xx 且 detail 含中文就透传」)
+// 在第三轮评审已经被否掉,它错在拿形态当**信任**判据,于是后端
+// `detail=str(exc)` 里碰巧带中文的异常串(「解析失败:不支持的文件类型」)就
+// 上了屏。别把这个函数读成那条回退。
+//
+// 区别在**作用位置**:本函数只在闸1(出处 / X-User-Message)已经放行之后才跑。
+// 到这里为止,「这句是写给终端用户的」已经由后端显式声明过了,不再有疑问;
+// 本函数判的不是「能不能信」,而是「符不符合规范」。也就是:
+//
+//     闸1 出处 → 决定**信任**(能不能给用户看)。形态在这一层没有发言权。
+//     闸2 规范 → 决定**展示**(这句合不合格)。作用在已可信的文案上。
+//
+// 两道串联,顺序和职责都不能互换,也不要合并成一道。判据方向可以自查:放宽
+// 闸2 永远不会让**不可信**的文本上屏(闸1 早就拦掉了),而放宽闸1 会——这就是
+// 两者不对称、必须分开的原因。
+//
+// 闸2 兜的是一类**产品**缺陷:后端有人用 user_error() 写了英文用户文案。
+// 那种串盖过章、也确实是写给用户的,但用户读不懂,不如按状态码给的通用中文。
+function isCompliantUserCopy(text: string): boolean {
+  return CJK_RE.test(text);
+}
+
 // 造一个「已翻译」的错误——本模块之外没有第二个地方盖这个章。
 export function humanizedError(message: string): Error {
   const error = new Error(message);
@@ -94,9 +126,20 @@ function isHumanized(error: unknown): error is Error {
 // 等于绕过整条信任链。
 export function humanizeHttpError(status: number, detail?: string, trusted: boolean = false): string {
   const trimmed = (detail ?? "").trim();
+  // 闸1(信任):出处 + 5xx 排除 + 形态兜底。
   // 5xx 一律泛化:user_error() 是给「客户端能纠正的 4xx」用的,5xx 意味着
   // 「我们坏了」,通用文案才是对的,也避免上游/网关伪造标记把内部错误顶上屏。
-  if (trusted && status < 500 && isDisplayableUserText(trimmed)) return trimmed;
+  if (trusted && status < 500 && isDisplayableUserText(trimmed)) {
+    // 闸2(展示策略):盖了章、但不符合产品文案规范 → 退回状态码通用文案。
+    if (isCompliantUserCopy(trimmed)) return trimmed;
+    // 非中文用户文案是**写码时**的产品缺陷,不是运行时故障:用户读不懂它,
+    // 但它本身不含敏感信息(已过闸1)。所以原样喊进 console 给开发者,界面退
+    // 通用文案。console 用户看不到,喊出来才有人去把它改成中文。
+    console.error(
+      `[user-copy] 后端 user_error() 给了非中文用户文案,界面已退回通用文案(请改成中文):`,
+      truncateDiagnostic(trimmed)
+    );
+  }
   switch (status) {
     case 401:
       return "登录状态已失效，请重新登录";

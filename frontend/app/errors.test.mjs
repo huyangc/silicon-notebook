@@ -65,8 +65,42 @@ test("盖了章的 4xx detail 原样透传(保住可操作信息)", () => {
   assert.equal(humanizeHttpError(400, "格子定位不合法", true), "格子定位不合法");
   assert.equal(humanizeHttpError(403, "仅管理员可设置基准库", true), "仅管理员可设置基准库");
   assert.equal(humanizeHttpError(403, "仅管理员可管理晋升队列", true), "仅管理员可管理晋升队列");
-  // 盖了章的英文文案也放行——信任来自出处,不是语言。
-  assert.equal(humanizeHttpError(400, "Quota exceeded", true), "Quota exceeded");
+  // 中文里混标识符 / 数字是正常文案,不该被闸2 误伤。
+  assert.equal(
+    humanizeHttpError(400, "用户名须为「单个小写字母+00+六位数字」，如 a00123456", true),
+    "用户名须为「单个小写字母+00+六位数字」，如 a00123456"
+  );
+});
+
+// 第四轮评审阻塞 1:出处解决了「可不可信」,没解决「该长什么样」。
+//
+// 这条测试原来断言的是 `humanizeHttpError(400, "Quota exceeded", true) ===
+// "Quota exceeded"`,理由写「信任来自出处,不是语言」——那句话对的是**闸1**,
+// 却被用来给闸2 的缺席背书,等于把 bug 钉成了契约:AGENTS.md 写着「用户可见
+// 错误一律中文」,而这里让英文原样上屏。
+//
+// 现在两道闸串联:闸1 判可不可信(出处),闸2 判合不合规(中文)。盖了章的英文
+// 文案 = 后端写码时的产品缺陷,界面退通用文案,原文喊进 console 让人去改。
+test("盖了章但非中文的文案不上屏——退通用文案 + 喊进 console", () => {
+  const { value, logs } = captureSync(() => [
+    humanizeHttpError(400, "Quota exceeded", true),
+    humanizeHttpError(403, "Forbidden: admin only", true),
+    humanizeHttpError(404, "not found", true),
+  ]);
+  assert.deepEqual(value, ["操作失败，请重试", "没有权限进行这个操作", "没找到，可能已被删除"]);
+  assert.ok(!value.some((v) => /[A-Za-z]/.test(v)), "退回的通用文案里不该有英文");
+  // 三条都得喊出来,否则没人知道后端写了英文用户文案。
+  assert.equal(logs.length, 3);
+  assert.match(logs[0], /user-copy/);
+  assert.match(logs[0], /Quota exceeded/, "原文要留在 console 供定位");
+});
+
+// 闸2 只在闸1 放行之后才跑——没盖章的英文不该产生「产品缺陷」告警,它走的是
+// 另一条路(不可信 → 泛化),混在一起会把噪声灌满 console。
+test("没盖章的非中文走闸1,不触发闸2 的产品缺陷告警", () => {
+  const { value, logs } = captureSync(() => humanizeHttpError(403, "notebook owner required"));
+  assert.equal(value, "没有权限进行这个操作");
+  assert.equal(logs.length, 0, "闸1 就拦住了,不该额外报『非中文用户文案』");
 });
 
 test("trusted 默认关(不传 = 不信)", () => {
