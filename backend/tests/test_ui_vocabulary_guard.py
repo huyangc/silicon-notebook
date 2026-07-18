@@ -121,6 +121,23 @@ def test_各类渲染位置都覆盖(tmp_path, code):
     assert scan_src(tmp_path, code), f"这段渲染文本没被抓到:{code}"
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        'const a = "保存完成后再插入图片。";',   # 「插入图片」含「入图」子串
+        'const b = "点这里插入图片";',
+        'const c = "已加入图谱";',              # 既有排除项,一并钉住
+    ],
+)
+def test_正常词组不因子串被误报(tmp_path, code):
+    """中文没有词边界,子串匹配的词条必须两侧都挡住正常词组。
+
+    REGRESSION:「入图」曾把「插入图片」判为黑话,让编辑器里三句最普通的提示
+    (『保存完成后再插入图片』等)全部报错——那是完全合格的界面中文,该改的是
+    守卫不是文案。"""
+    assert not scan_src(tmp_path, code), f"这段正常文案被误报了:{code}"
+
+
 def test_同一单元里多个黑话全部报出(tmp_path):
     hits = scan_src(tmp_path, 'const t = "从基准库抽取 chunk";')
     assert {"基准库", "抽取", "chunk"} <= set(hits)
