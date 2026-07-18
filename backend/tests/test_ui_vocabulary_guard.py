@@ -238,9 +238,113 @@ def test_正当兜底不误报(tmp_path, code):
 
 
 # --------------------------------------------------------------------------
-# 5. 端到端:真实仓库当前是干净的
+# 5. 跨层:后端被标记为「可展示」的文案同样受词表约束
+#
+# 这一节是第二轮 review 阻塞 2 的守卫。上一轮守卫按**目录**划作用域(只扫
+# frontend/app),而信任边界并不在目录上:`user_error()` 给 4xx 打了
+# `X-User-Message: 1`,前端 errors.ts 就把 detail 原样上屏。于是
+# 「仅管理员可设置基准库」「仅管理员可管理晋升队列」四条 403 一直在给用户看
+# 黑名单词,守卫却全绿。作用域必须跟着信任边界走。
 # --------------------------------------------------------------------------
 
 
-def test_真实前端源码通过守卫(capsys):
+def scan_py(tmp_path: pathlib.Path, code: str) -> list[str]:
+    """把一段后端源码写成临时文件跑 user_error 扫描,返回命中的词名。"""
+    path = tmp_path / "sample.py"
+    path.write_text(code, encoding="utf-8")
+    return [term for _line, term, _msg in guard.scan_user_error(path)[1]]
+
+
+def user_error_sites(tmp_path: pathlib.Path, code: str) -> int:
+    path = tmp_path / "sites.py"
+    path.write_text(code, encoding="utf-8")
+    return guard.scan_user_error(path)[0]
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # 真实回归样本:这四条就是漏出去的那批
+        'raise user_error(403, "仅管理员可设置基准库")',
+        'raise user_error(403, "仅管理员可管理晋升队列")',
+        # 关键字实参写法
+        'raise user_error(status_code=400, message="重建投影失败")',
+        # 表挂在模块上:deps.user_error(...) 同样是标记
+        'raise deps.user_error(400, "共 3 个 chunk 未入图")',
+        # f-string:字面量部分照查,插值剥掉
+        'raise user_error(400, f"{n} 个来源待抽取")',
+        # 跨行隐式拼接(Python 解析阶段就并成一个字面量)
+        'raise user_error(400, "本次从基准库"\n                  "读取失败")',
+    ],
+)
+def test_后端可展示文案里的黑话会被抓到(tmp_path, code):
+    assert scan_py(tmp_path, code), f"没抓到后端 user_error 里的黑话:{code}"
+
+
+def test_f_string_插值不当渲染文本(tmp_path):
+    """插值里的标识符是代码,不是文案——与前端 `${…}` 同一规则。"""
+    assert scan_py(tmp_path, 'raise user_error(400, f"共 {chunk_count} 段")') == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # 裸 HTTPException 不在扫描面内:它永远不上屏(前端按状态码给通用文案),
+        # detail 是给日志 / MCP 的诊断契约。这条反例钉住这个**刻意的**边界。
+        'raise HTTPException(status_code=400, detail="从基准库抽取 chunk 失败")',
+        # 变量 / 调用做 message:静态查不了,放行而非瞎猜(auth_routes.py 那处),
+        # 由 tests/test_user_error.py 的运行时用例覆盖。
+        'detail = "基准库不可用"\nraise user_error(400, detail)',
+        'raise user_error(400, _msg("基准库"))',
+        # 位置不对的字符串(status_code 位)不是 message
+        'raise user_error("基准库", 400)',
+        # 同名但不是标记函数的调用
+        'log.user_error_count("基准库抽取")',
+    ],
+)
+def test_不在信任边界上的后端字符串不误报(tmp_path, code):
+    assert scan_py(tmp_path, code) == [], f"误报:{code}"
+
+
+def test_扫描面塌了要红而不是静默放行(tmp_path, monkeypatch, capsys):
+    """helper 改名 / 换调用写法 → 匹配数掉到 0,而退出码仍是 0,正是本轮要根治的
+    那类假绿。非空性下限把它变成硬失败。"""
+    (tmp_path / "empty.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(guard, "BACKEND_APP", tmp_path)
+    assert guard.main() == 1
+    assert "call sites found" in capsys.readouterr().err
+
+
+def test_真实后端确有可展示文案站点(tmp_path):
+    """非空性:守卫真的在后端 app 树上找到了标记站点(不是扫了个空目录)。"""
+    total = sum(
+        guard.scan_user_error(path)[0] for path in guard.BACKEND_APP.rglob("*.py")
+    )
+    assert total >= guard.MIN_USER_ERROR_SITES, (
+        f"只找到 {total} 处 {guard.USER_ERROR}() —— 扫描面塌了"
+    )
+
+
+def test_后端真实文案确实曾经违规过(tmp_path):
+    """变异验证:把 routes.py 的一条 403 改回「基准库」,守卫必须红。
+
+    没有这条,「守卫扫了后端」和「守卫扫后端但规则对后端不生效」在绿灯下无法区分。
+    """
+    routes = guard.BACKEND_APP / "api" / "routes.py"
+    src = routes.read_text(encoding="utf-8")
+    assert "仅管理员可设为公共知识库" in src, "文案又漂了,本变异样本需同步"
+    mutated = tmp_path / "routes_mutated.py"
+    mutated.write_text(
+        src.replace("仅管理员可设为公共知识库", "仅管理员可设置基准库"), encoding="utf-8"
+    )
+    hits = [term for _line, term, _msg in guard.scan_user_error(mutated)[1]]
+    assert "基准库" in hits, "改回黑名单词后守卫仍不报——规则没作用到后端"
+
+
+# --------------------------------------------------------------------------
+# 6. 端到端:真实仓库当前是干净的
+# --------------------------------------------------------------------------
+
+
+def test_真实前后端源码都通过守卫(capsys):
     assert guard.main() == 0, capsys.readouterr().err

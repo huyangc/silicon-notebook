@@ -746,6 +746,31 @@ def test_user_facing_vocabulary_guard_is_documented_in_both_readmes():
             "README_zh.md": "backend/tests/test_ui_vocabulary_guard.py",
         }
     )
+    # 第二轮 review 阻塞 2:守卫作用域从「frontend/app 目录」改成「信任边界」——
+    # 后端 user_error() 的文案会被前端原样上屏,所以同样受词表约束。这是开发者
+    # 写后端错误文案时必须知道的约束,三份文档都要说明白。
+    _assert_phrases(
+        {
+            "AGENTS.md": "作用域跟着信任边界走，不跟着目录走",
+            "README.md": "scope follows the **trust boundary rather than the directory tree**",
+            "README_zh.md": "作用域跟着信任边界走、不跟着目录树走",
+        }
+    )
+    _assert_phrases(
+        {
+            "AGENTS.md": '后端 `user_error(status, "…")` 的消息字面量',
+            "README.md": 'the message literals of every backend `user_error(status, "…")` call',
+            "README_zh.md": '后端每处 `user_error(status, "…")` 的消息字面量',
+        }
+    )
+    # 反向边界同样要写明,否则下一个人会顺手把 str(exc) 也纳进来。
+    _assert_phrases(
+        {
+            "AGENTS.md": "裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内",
+            "README.md": "Bare `HTTPException(detail=str(exc))` stays outside the scan on purpose",
+            "README_zh.md": "裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内",
+        }
+    )
 
 
 def test_default_notebook_name_is_documented_as_a_contract_not_copy():

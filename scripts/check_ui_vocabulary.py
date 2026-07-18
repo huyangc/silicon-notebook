@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
-"""Guard: user-facing Chinese UI copy in frontend/app must not leak internal jargon.
+"""Guard: user-facing Chinese UI copy must not leak internal jargon.
 
-Scans the *rendered text* of every frontend/app *.ts/*.tsx file — string literals
-plus JSX text nodes — for a blacklist of internal terms. Any hit fails the build.
-Run by scripts/check.sh.
+Scope follows the **trust boundary, not the directory**. Two sources of copy reach
+a user's screen, and both are scanned:
+
+  1. frontend/app *.ts/*.tsx *rendered text* — string literals plus JSX text nodes.
+  2. backend `user_error(status, "…")` messages — `api/deps.py` marks exactly these
+     4xx `detail` strings with `X-User-Message: 1`, and `frontend/app/errors.ts` is
+     deny-by-default: a marked detail is shown to the user **verbatim**. Marking a
+     string is therefore a promise that it is user copy, so it inherits the copy
+     rules. Scoping this guard to `frontend/app` is what let 「基准库」and 「晋升队列」
+     ship inside marked 403s while the guard stayed green.
+
+  Bare `HTTPException(detail=str(exc))` is deliberately **not** scanned: it is never
+  displayed (the front end falls back to a generic message by status code) and its
+  detail is a diagnostics/MCP contract. `tests/test_user_error.py` guards that split.
+
+Any hit fails the build. Run by scripts/check.sh.
 
 Scope & deliberate limitation (see MEMORY severity lesson — a word blacklist is not
 a semantic checker, so this does NOT claim full coverage):
@@ -36,12 +49,22 @@ Unlike the blacklist, it scans *code*, not rendered text.
 """
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / "frontend" / "app"
+BACKEND_APP = ROOT / "backend" / "app"
+
+# 后端「这段文案会原样上屏」的唯一标记函数(app/api/deps.py)。
+USER_ERROR = "user_error"
+
+# 非空性下限:守卫按函数名做 AST 匹配,一旦 helper 改名 / 换成装饰器 / 调用写法变了,
+# 匹配数会掉到 0 而退出码仍是 0 —— 正是本次要根治的那种假绿。这不是精确台账
+# (新增站点不该让构建红),只是「扫描面塌了」的哨兵。当前实际 21 处。
+MIN_USER_ERROR_SITES = 15
 
 # ASCII acronyms/words: matched only when not glued to another ASCII letter, so
 # identifiers (currentNotebook, MemoryPanel, schemaBusy, PKG) cannot trip them.
@@ -242,6 +265,61 @@ def scan_raw_fallback(path: Path) -> list[tuple[int, str]]:
     return sorted(hits)
 
 
+def _message_literal(node: ast.expr | None) -> str | None:
+    """The literal text of a `user_error()` message argument, or None if it isn't one.
+
+    f-string interpolations are dropped and the literal spans joined — the same rule
+    the frontend pass applies to `${…}`, so `f"{n} 个来源待抽取"` still trips 抽取.
+    A message built from a variable or a call is *not* statically checkable and is
+    skipped on purpose; `tests/test_user_error.py` covers those sites at runtime and
+    `auth_routes.py` carries an inline note saying so.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        parts = [
+            v.value for v in node.values
+            if isinstance(v, ast.Constant) and isinstance(v.value, str)
+        ]
+        return " ".join(parts) if parts else None
+    return None
+
+
+def scan_user_error(path: Path) -> tuple[int, list[tuple[int, str, str]]]:
+    """Blacklisted jargon in this file's `user_error()` messages.
+
+    Returns (number of user_error call sites seen, hits) — the count feeds the
+    non-vacuity floor, so a rename that silently empties the scan is caught.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    sites, hits = 0, []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        # `user_error(...)` 与 `deps.user_error(...)` 都要认。
+        name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        if name != USER_ERROR:
+            continue
+        sites += 1
+        kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        message = kwargs.get("message", node.args[1] if len(node.args) > 1 else None)
+        text = _message_literal(message)
+        if text is None:
+            continue
+        for term in terms_in(text):
+            hits.append((node.lineno, term, text))
+    return sites, sorted(hits)
+
+
+def _rel(path: Path) -> str:
+    """Repo-relative path for reporting; falls back to the absolute one when the
+    scan root has been redirected (the self-tests point it at a tmpdir)."""
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
 def main() -> int:
     files = sorted(
         p for p in APP.rglob("*")
@@ -253,14 +331,37 @@ def main() -> int:
     violations: list[str] = []
     fallbacks: list[str] = []
     for path in files:
-        rel = path.relative_to(ROOT)
+        rel = _rel(path)
         for line, term, snippet in scan(path):
             snippet = snippet if len(snippet) <= 80 else snippet[:77] + "…"
             violations.append(f"  {rel}:{line}: 「{term}」in rendered text: {snippet!r}")
         for line, snippet in scan_raw_fallback(path):
             fallbacks.append(f"  {rel}:{line}: {snippet}")
+
+    # 后端侧:只有被 user_error() 标记为「可展示」的文案才受词表约束。
+    py_files = sorted(BACKEND_APP.rglob("*.py"))
+    if not py_files:
+        print("check_ui_vocabulary: no backend/app sources found", file=sys.stderr)
+        return 1
+    marked_sites = 0
+    for path in py_files:
+        rel = _rel(path)
+        sites, hits = scan_user_error(path)
+        marked_sites += sites
+        for line, term, snippet in hits:
+            snippet = snippet if len(snippet) <= 80 else snippet[:77] + "…"
+            violations.append(f"  {rel}:{line}: 「{term}」in user_error message: {snippet!r}")
+    if marked_sites < MIN_USER_ERROR_SITES:
+        print(
+            f"check_ui_vocabulary: only {marked_sites} {USER_ERROR}() call sites found in "
+            f"backend/app (expected ≥ {MIN_USER_ERROR_SITES}). 这条检查失去了扫描面——"
+            f"helper 是不是改名 / 换了调用写法?别调低下限来「修」它。",
+            file=sys.stderr,
+        )
+        return 1
+
     if violations:
-        print("UI vocabulary contract MISMATCH — internal jargon in rendered text:", file=sys.stderr)
+        print("UI vocabulary contract MISMATCH — internal jargon in user-visible copy:", file=sys.stderr)
         print("\n".join(violations), file=sys.stderr)
         print(
             "\nRewrite the copy per AGENTS.md「界面词汇表」(e.g. 基准库→公共知识库, "
@@ -279,7 +380,8 @@ def main() -> int:
     if violations or fallbacks:
         return 1
     print(
-        f"UI vocabulary contract OK: scanned {len(files)} frontend/app files "
+        f"UI vocabulary contract OK: scanned {len(files)} frontend/app files + "
+        f"{marked_sites} backend {USER_ERROR}() messages "
         f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms + raw-enum-fallback)"
     )
     return 0

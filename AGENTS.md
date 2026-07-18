@@ -253,7 +253,7 @@ Copy shown to users — JSX text, `label`/`title`/`placeholder`/`aria-label`, to
 
 **刻意保留、不要误杀**：**知识图谱**（用户词典里的词，只杀 KG / 建图 / 入图 等缩写变体）、**索引**（书后索引式心智模型，只杀 CSR / ANN / 暴力检索 修饰）、**「知识库」作 Knowledge tab 名**（`workspace-model.ts` 的 `CHAT_MODES`；lint 分不清 tab 名与误用，故不进黑名单）、**裸「节点」/「边」**（图谱视图里画出来的就是节点与边，属表中说的「图谱技术上下文」；且「边」与旁边 / 边框 / 边距同形，lint 判不了——故黑名单只收无歧义的复合形态：孤立节点 / 补连边 / 关系边 / 边审。散文里的裸用靠人工对照本表把关）。
 
-`scripts/check_ui_vocabulary.py`（挂在 `scripts/check.sh`）扫 `frontend/app` 渲染文本里的黑名单词，命中即失败。它是**词黑名单而非语义检查**——只在含中文的渲染单元里匹配，且剥离注释 / 标识符 / `${…}`·`{…}` 插值，故 `id: "chunk"`、`currentNotebook` 等不会误报；也因此不声称全覆盖，新增界面文案仍须人工对照上表把关。
+`scripts/check_ui_vocabulary.py`（挂在 `scripts/check.sh`）执行上表，命中即失败。它的**作用域跟着信任边界走，不跟着目录走**：既扫 `frontend/app` 的渲染文本，也扫后端 `user_error(status, "…")` 的消息字面量——`api/deps.py` 只给这批 4xx `detail` 打 `X-User-Message: 1`，而前端 `errors.ts` 是 deny-by-default、见到这个标记就把 detail **原样上屏**；打标记等于声明「这是给人看的文案」，那就同样受本表约束（曾经按目录划作用域，于是「仅管理员可设置基准库」「仅管理员可管理晋升队列」四条 403 一路上屏而守卫全绿）。裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内——它永远不上屏，detail 是诊断 / MCP 契约，那条分界由 `backend/tests/test_user_error.py` 守。它是**词黑名单而非语义检查**——只在含中文的单元里匹配，且剥离注释 / 标识符 / `${…}`·`{…}` 与 f-string 插值，故 `id: "chunk"`、`currentNotebook` 等不会误报；也因此不声称全覆盖，新增界面文案仍须人工对照上表把关。
 ## No Docker In First Version
 
 Do not add Docker or Docker Compose as the default first-version workflow.
@@ -337,7 +337,7 @@ This checks:
 - KG extraction boundary (`no-llm` offline), explicit KG storage, source cleanup → Ask → feedback → conversation and report paths, retrieval scoring, stale-source knowledge invalidation, sharing, and fresh-database assertions.
 - Logging: LLM interaction log, generic event log (parseable/disable/never-raise), and pipeline stage events + `error_message` regression.
 - Official MCP client smoke for the seven Memory tools, session notebook selection, candidate exclusion from formal context, and same-user/same-notebook cross-Agent candidate recall.
-- User-facing vocabulary guard (`check_ui_vocabulary.py`): no internal jargon in rendered `frontend/app` copy (see 界面词汇表).
+- User-facing vocabulary guard (`check_ui_vocabulary.py`): no internal jargon in copy a user can see — rendered `frontend/app` text **and** backend `user_error()` messages, whose `X-User-Message` marker means they are displayed verbatim (see 界面词汇表).
 - Source summary fallback and notebook-internal search.
 - Complete backend `pytest` suite.
 - Every recursively discovered frontend `*.test.mjs`, Next.js TypeScript, and production build. Missing `frontend/node_modules` is a hard failure.
