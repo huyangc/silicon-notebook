@@ -520,3 +520,156 @@ def test_move_reschedules_projection_for_retained_source_when_edited_during_tear
             "SELECT COUNT(*) FROM knowledge_objects WHERE source_id=?", (src_hidden,)
         ).fetchone()[0]
     assert objects > 0, "重投影必须真的重建出 KG objects，不只是把 projection_status 标记成 synced"
+
+
+# --- PR review round 5 P1-1 (ROOT FIX, fingerprint gap #3, data loss): the
+# four tests below are the move_table-level companions to the direct
+# table_fingerprint unit tests in test_knowhow_transfer_store.py (test_
+# fingerprint_changes_when_table_title_is_edited and its four siblings) —
+# same interleaving SHAPE as test_move_does_not_delete_source_row_added_
+# after_copy_snapshot above (round 2 P1-2): monkeypatch kh_transfer.
+# copy_table to call the real implementation and then perform a concurrent
+# edit on the SOURCE table right after the copy commits (the earliest a
+# concurrent writer could realistically land relative to move_table's own
+# call sequence), before move_table reaches its cleanup section. What
+# differs here is WHICH edit is injected: none of these four touch row/
+# cell/code cardinality or content, or bump mutation_seq — exactly the class
+# of edit the pre-round-5 fingerprint (mutation_seq + four counts + a
+# cell_code content signal) structurally could not see, per its own
+# docstring's "Known, accepted scope boundary" paragraph. Before the fix,
+# each of these four would have sailed straight past the recheck inside
+# move_table and the source table — now carrying newer metadata than the
+# target's frozen copy — would have been silently deleted. Appended at EOF,
+# same zero-line-shift reason as every other block in this file (see the
+# file-header pin note).
+def test_move_does_not_delete_source_table_title_edited_after_copy_snapshot(
+    repo, monkeypatch
+):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+
+    real_copy_table = kh_transfer.copy_table
+
+    def _copy_then_concurrent_title_edit(repo_, source_table_id, target_notebook_id, actor_id):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+        # 模拟并发写者：就在 copy_table 的事务提交之后、move_table 走到自己的
+        # 清理段之前，另一个请求改了源表的标题。
+        repo_.update_knowhow_table_meta(source_table_id, title="并发改名后的标题")
+        return new_id
+
+    monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_title_edit)
+
+    with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
+        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    assert exc_info.value.new_table_id
+
+    # 源没被删，且带着并发改名后的新标题——不是复制那一刻的旧快照
+    detail = repo.get_knowhow_table(src_tid)
+    assert detail["notebook_id"] == src_nb
+    assert detail["title"] == "并发改名后的标题"
+
+    # 目标侧副本仍然存在（拷贝已提交，不因收尾中止而消失），但停在拷贝那一刻
+    # 的旧标题——这个 guard 只挡「删」，不让复制本身变成实时同步
+    dst_tables = repo.list_knowhow_tables(dst_nb)
+    assert len(dst_tables) == 1
+    assert dst_tables[0]["id"] == exc_info.value.new_table_id
+    assert repo.get_knowhow_table(exc_info.value.new_table_id)["title"] == "时序修复"
+
+
+def test_move_does_not_delete_source_column_renamed_after_copy_snapshot(
+    repo, monkeypatch
+):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    column_id = repo.get_knowhow_table(src_tid)["columns"][0]["id"]
+
+    real_copy_table = kh_transfer.copy_table
+
+    def _copy_then_concurrent_rename(repo_, source_table_id, target_notebook_id, actor_id):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+        repo_.rename_knowhow_column(column_id, "并发改名后的列")
+        return new_id
+
+    monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_rename)
+
+    with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
+        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    assert exc_info.value.new_table_id
+
+    detail = repo.get_knowhow_table(src_tid)
+    assert detail["notebook_id"] == src_nb
+    assert {c["name"] for c in detail["columns"]} == {"并发改名后的列", "现象识别"}
+
+    dst_tables = repo.list_knowhow_tables(dst_nb)
+    assert len(dst_tables) == 1
+    assert dst_tables[0]["id"] == exc_info.value.new_table_id
+
+
+def test_move_does_not_delete_source_anchor_moved_after_copy_snapshot(
+    repo, monkeypatch
+):
+    """role 编码的另一半语义（anchor 指定，非纯内容 kind）：并发把 anchor 从
+    「违例类型」移到「现象识别」——这一变化直接改变「这张表的 KG 主题列是
+    谁」，round 5 之前的指纹（计数 + cell_code 内容信号）对它完全失明。"""
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    cols = repo.get_knowhow_table(src_tid)["columns"]
+    new_anchor_id = next(c["id"] for c in cols if c["name"] == "现象识别")
+
+    real_copy_table = kh_transfer.copy_table
+
+    def _copy_then_concurrent_anchor_move(repo_, source_table_id, target_notebook_id, actor_id):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+        repo_.set_knowhow_anchor_column(source_table_id, new_anchor_id)
+        return new_id
+
+    monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_anchor_move)
+
+    with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
+        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    assert exc_info.value.new_table_id
+
+    detail = repo.get_knowhow_table(src_tid)
+    assert detail["notebook_id"] == src_nb
+    roles = {c["name"]: c["role"] for c in detail["columns"]}
+    assert roles["现象识别"] == "anchor"
+    assert roles["违例类型"] == "attribute"
+
+    dst_tables = repo.list_knowhow_tables(dst_nb)
+    assert len(dst_tables) == 1
+    assert dst_tables[0]["id"] == exc_info.value.new_table_id
+
+
+def test_move_does_not_delete_source_column_swapped_after_copy_snapshot(
+    repo, monkeypatch
+):
+    """净列数不变的换列（删一列、加一列不同的）：旧指纹的 col_count 在这种
+    编辑下不动（3 列换成 3 列），是四个计数字段类设计从根本上抓不住的一类
+    编辑，只有把列身份（id）本身哈希进去才行——见 test_knowhow_transfer_
+    store.py 里同名单元测试的详细论证。"""
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    extra_col_id = repo.add_knowhow_column(src_tid, "占位列", "attribute")
+
+    real_copy_table = kh_transfer.copy_table
+
+    def _copy_then_concurrent_swap(repo_, source_table_id, target_notebook_id, actor_id):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+        repo_.add_knowhow_column(source_table_id, "替换列", "entity")
+        repo_.delete_knowhow_column(extra_col_id)
+        return new_id
+
+    monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_swap)
+
+    with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
+        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    assert exc_info.value.new_table_id
+
+    detail = repo.get_knowhow_table(src_tid)
+    assert detail["notebook_id"] == src_nb
+    names = {c["name"] for c in detail["columns"]}
+    assert "替换列" in names and "占位列" not in names, "并发换列后的列集合必须还在源表里"
+
+    dst_tables = repo.list_knowhow_tables(dst_nb)
+    assert len(dst_tables) == 1
+    assert dst_tables[0]["id"] == exc_info.value.new_table_id

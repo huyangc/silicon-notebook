@@ -4175,3 +4175,26 @@ KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES = {
 ACTIVE_PRODUCTION_MEMBER_SITES = (
     ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES
 )
+
+# memory cross-notebook copy/move PR review round 5 P1-2 (data loss —
+# promotion_candidates orphan guard): the new tests pinning "move rejects a
+# Memory with an active promotion proposal" need to actually EXERCISE the
+# Track-F promotion state machine to set up a 'proposed' Memory and to prove
+# 'approved' is deliberately NOT blocked — three more `repo.*` sites in
+# test_memory_transfer_service.py, all on facade members that are already
+# frozen elsewhere (same "fresh consumer of a pre-existing member" shape as
+# every other MEMORY_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES entry above, so
+# it takes the same broad (file, member) allowance rather than a precise
+# line pin): `repo._connect()` (read the promotion_candidates row directly,
+# to assert it is neither deleted nor orphaned), `repo.mark_notebook_base()`
+# + `repo.approve_promotion()` (both needed only to drive a candidate to
+# 'approved' for the companion "approved is not blocked" guard — mirrors
+# test_memory_promotion.py's own promotion_setup fixture). Appended at EOF
+# for the same zero-line-shift reason as every other TASKN_* block above.
+MEMORY_TRANSFER_SERVICE_ROUND5_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_transfer_service.py", name)
+    for name in {"_connect", "mark_notebook_base", "approve_promotion"}
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = (
+    ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_SERVICE_ROUND5_ALLOWED_MEMBER_FILES
+)

@@ -804,6 +804,54 @@ class MemoryService:
                     raise ValueError("源与目标不能是同一个 notebook")
                 if source.status != "confirmed":
                     raise ValueError("只能传输 confirmed 状态的 memory")
+                # P1-2（PR review round 5，与下面紧邻的 round 3 P1-2 是两件不同
+                # 的事，编号撞了纯属巧合）：move 专属的一道新校验，挡在
+                # promotion_state == "proposed" 的 memory 前面。这条 memory 在
+                # Track-F 基础知识库审批队列里有一行活的 promotion_candidates
+                # （governance_store.insert_promotion_candidate 写
+                # object_id=item.id, object_type='memory'；knowledge_
+                # governance.py 的 propose_memory_promotion 调用链确认了这一
+                # 点）。那张表没有指向 memory_items 的外键（migrations.py 的
+                # DDL：object_id 只是 TEXT NOT NULL，没有 REFERENCES）——move
+                # 删掉这行 memory 之后，那条 promotion_candidates 行会变成孤儿：
+                # 继续躺在 admin 的审批队列里，approve 时因为 memory_id 查不到
+                # 而失败（memory_store.promotion_rows_on 的 SELECT 找不到行），
+                # 且没有任何 UI 路径能清理它。
+                #
+                # 只挡 'proposed'，不挡 'none'/'approved'/'rejected'——状态
+                # 名先核实过，不是猜的：memory_items.promotion_state 自己的
+                # CHECK 约束只有这四个取值（migrations.py），且没有任何写路径
+                # 会把 'under_review' 写进这一列（那是 promotion_candidates.
+                # status 自己独有的中间态——governance_store.
+                # active_promotion_for_object 判"是否有活跃候选"用的是
+                # `status NOT IN ('approved','rejected')`，proposed/
+                # under_review 两个候选状态都算活跃，但 memory 行侧只会看到
+                # 'proposed'，因为没有代码把 under_review 同步下来）。换句话
+                # 说，从这条 memory 自己的字段看，'proposed' 已经覆盖了
+                # promotion_candidates 侧全部「活跃、没有外键、删了就变孤儿」
+                # 的状态，不存在一个 under_review 候选能靠某种 memory 侧状态
+                # 蒙混过关。'approved' 刻意放行：那一刻 knowledge_objects 里
+                # 已经落了一份独立存在的 base KG 对象（governance_store.
+                # approve_memory_promotion_in_transaction），不再依赖这条
+                # memory 行本身存活，删掉它不会孤立任何东西。
+                #
+                # 只挡 move：copy 的源分毫不动，promotion_candidates 那行还
+                # 好好指着原地不动的源，继续可审批；新副本是全新 memory，
+                # provenance 走 imported_from 单独嵌套（见下面的注释），天然
+                # promotion_state='none'，不会被这条判据碰到。
+                #
+                # 位置选在这里（早于下面 create_copy_with_initial_revision
+                # 建副本）：这是个纯拒绝分支，不涉及任何并发时序判据，越早
+                # 挡掉越好——不需要等到收尾阶段才发现，也不会有副作用需要撤销
+                # （下面还没有任何写发生）。抛出的 ValueError 落进本方法既有的
+                # 宽 except（下面第二段/循环体外层）转成
+                # status="failed"/ok=False——复用现成的错误上报路径，不发明
+                # 新的结果形状。
+                if mode == "move" and source.promotion_state == "proposed":
+                    raise ValueError(
+                        "该 Memory 正在提升到公共知识库的审批队列中，无法移动；"
+                        "请先在审批中心处理该提案后再移动"
+                    )
                 # P1-2（PR review round 3）：move 收尾用的并发编辑判据在这里、
                 # 尽量早地捕获——不能晚于下面 create_copy_with_initial_
                 # revision 用 source 建副本那一步。位置理由和 knowhow 那边

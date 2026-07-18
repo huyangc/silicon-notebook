@@ -792,3 +792,137 @@ def test_move_does_not_reingest_kg_source_when_deprecated_after_source_removed(
         "并发 deprecate 是刻意让源离开 KG 的决定——保留分支的重新排队不该"
         "把它顶回去"
     )
+
+
+# --- PR review round 5 P1-2: a confirmed Memory with promotion_state==
+# 'proposed' has a LIVE row in promotion_candidates (governance_store.py's
+# insert_promotion_candidate writes object_id=item.id, object_type='memory'
+# — confirmed by grepping knowledge_governance.py's propose_memory_
+# promotion/_memory_promotion_payload). That table has NO FK onto
+# memory_items (migrations.py's promotion_candidates DDL: `object_id TEXT
+# NOT NULL`, no REFERENCES clause) — so mode="move" deleting the memory row
+# leaves that promotion_candidates row (and the admin Track-F approval
+# queue entry it renders as, via governance_store.promotion_queue_rows)
+# pointing at nothing. The row doesn't just look stale: approving it later
+# calls memory_store.promotion_data_on -> promotion_rows_on, which raises
+# KeyError on the now-missing memory_id (memory_service.py's own
+# propose_promotion docstring chain and knowledge_governance.py:1100's
+# memory_by_id lookup both key off exactly this), or governance_store.
+# validate_promotion_approval_access_on similarly assumes the memory row is
+# still there — either way, approval fails for an admin who has no way to
+# know why a queue entry with no payload is broken.
+#
+# State-name verification done before writing this guard (not assumed):
+# memory_items.promotion_state's own CHECK constraint (migrations.py) only
+# ever allows 'none'/'proposed'/'approved'/'rejected' — there is no
+# 'under_review' value on the MEMORY row (grepped every write site:
+# propose_promotion_on writes 'proposed', set_promotion_rejected-equivalent
+# paths write 'none'/'rejected', approval writes 'approved'; nothing writes
+# 'under_review' to memory_items). promotion_candidates.status DOES have a
+# distinct 'under_review' value in its own state machine (its DDL comment
+# and governance_store.promotion_queue_rows's default-queue filter both
+# reference it), and active_promotion_for_object's "is there a LIVE
+# candidate for this object" query treats status NOT IN ('approved',
+# 'rejected') as live — i.e. BOTH 'proposed' and 'under_review' count as
+# live on the promotion_candidates side. But since memory_items.
+# promotion_state never itself takes the value 'under_review' (nothing
+# writes it there), blocking on promotion_state=='proposed' already covers
+# every live promotion_candidates state from the memory row's own point of
+# view — there is no distinct memory-side state a 'under_review' candidate
+# could be hiding behind that this guard would miss.
+# 'approved' is deliberately NOT blocked: governance_store.
+# approve_promotion_as_reviewer's own branch either finds-or-inserts a row
+# in knowledge_objects (the base KG) and flips promotion_candidates.status
+# to 'approved' — the base-KG object exists independently of the memory row
+# from that point on (test_admin_approval_is_idempotent_and_keeps_memory_
+# private in test_memory_promotion.py pins exactly this: base_object_ids
+# survive fine on their own). Deleting the memory row after that doesn't
+# orphan anything live in the approval queue.
+def test_move_rejects_memory_with_active_promotion_proposal(repo, alice):
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice, title="RC 补偿", content="补偿改善稳定性。")
+    repo.propose_memory_promotion(mem.id, alice.id)
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    assert len(results) == 1
+    result = results[0]
+    assert result["ok"] is False
+    assert result["status"] == "failed"
+    assert result["new_id"] is None
+    assert "审批队列" in result["error"] and "移动" in result["error"]
+
+    # 源 memory 分毫未动，仍在审批队列里等待处理
+    still_there = service.get(mem.id, alice.id)
+    assert still_there.notebook_id == src
+    assert still_there.promotion_state == "proposed"
+    with repo._connect() as db:
+        candidate = db.execute(
+            "SELECT status FROM promotion_candidates WHERE object_id=? AND object_type='memory'",
+            (mem.id,),
+        ).fetchone()
+    assert candidate is not None and candidate["status"] == "proposed", (
+        "promotion_candidates 那一行必须还在、还指向一个真实存在的 memory——"
+        "move 若照旧删了源，这行会永久孤立在审批队列里，approve 时因 memory_id"
+        "查不到而失败，且没有任何 UI 路径能清理它"
+    )
+
+
+def test_copy_allows_memory_with_active_promotion_proposal(repo, alice):
+    """P1-2 只挡 move——copy 时源毫发无损，promotion_candidates 那行仍然对着
+    源（没有被搬走/删除），继续正常可审批；副本本身是全新 memory，天然
+    promotion_state='none'（provenance 走 imported_from，不复制审批状态）。"""
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice, title="RC 补偿", content="补偿改善稳定性。")
+    repo.propose_memory_promotion(mem.id, alice.id)
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "copy", extract_kg=False)
+
+    assert results[0]["ok"] is True
+    assert results[0]["status"] == "copied"
+    copied = service.get(results[0]["new_id"], alice.id)
+    assert copied.notebook_id == dst
+    assert copied.promotion_state == "none"
+    # 源仍在，仍是 proposed（copy 完全不受这条新 guard 影响）
+    still_there = service.get(mem.id, alice.id)
+    assert still_there.notebook_id == src
+    assert still_there.promotion_state == "proposed"
+
+
+def test_move_allows_memory_with_approved_promotion(repo, alice):
+    """'approved' 是终态：knowledge_objects 里已经有独立存在的 base KG 对象
+    （不依赖这条 memory 行继续存在），不该被这条只为 'proposed' 设的新 guard
+    误伤——否则一条早就批准过的 memory 会永久搬不走。"""
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    base = repo.create_notebook(NotebookCreate(name="Base corpus"))
+    repo.mark_notebook_base(base.id)
+    mem = _confirmed_memory(service, src, alice, title="RC 补偿", content="补偿改善稳定性。")
+    proposal = repo.propose_memory_promotion(mem.id, alice.id)
+    repo.approve_promotion(proposal["id"])
+    approved = service.get(mem.id, alice.id)
+    assert approved.promotion_state == "approved", "前置条件：批准确实生效"
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    assert results[0]["ok"] is True
+    assert results[0]["status"] == "moved"
+    with pytest.raises(KeyError):
+        service.get(mem.id, alice.id)
+
+
+def test_move_unaffected_for_memory_without_any_promotion(repo, alice):
+    """伴生 happy-path 对照：一条从未提过审批（promotion_state='none'）的
+    普通 memory，move 行为必须和这条新 guard 加入之前完全一样——防止这条
+    guard 过度纠正、把所有 move 都拦下来。"""
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice)
+    assert mem.promotion_state == "none"
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    assert results[0]["ok"] is True
+    assert results[0]["status"] == "moved"

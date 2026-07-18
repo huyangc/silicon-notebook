@@ -232,3 +232,128 @@ def test_snapshot_table_is_internally_consistent_under_concurrent_insert(
         f"快照内部不一致：{len(orphan_cells)} 个 cell 引用的 row_id 不在 rows 快照里——"
         "rows 和 cells 两条 SELECT 在窗口内观察到了两个不同的已提交状态"
     )
+
+
+# --- PR review round 5 P1-1 (ROOT FIX, fingerprint gap #3, data loss): rounds
+# 2/3 patched table_fingerprint by ENUMERATING specific signals one at a time
+# (mutation_seq, then four counts, then a cell_code content signal) — each
+# added only after a reviewer found one more field a move could silently
+# lose. That pattern just missed a THIRD class of edit: knowhow_tables.title/
+# description and per-column name/role/position. None of these touch row/
+# cell/code cardinality OR content, so none of the old signals move — see
+# the pre-fix table_fingerprint docstring's own "Known, accepted scope
+# boundary" paragraph, which explicitly named this exact gap and called it
+# "acceptable" (round 5 disagrees: role alone encodes BOTH the anchor
+# designation and the content kind, which changes KG projection semantics,
+# not just a display label).
+#
+# The six tests below pin the fix's actual requirement — "the fingerprint
+# changes if and only if some field the copy reproduces changed" — one edit
+# at a time, so a future partial reimplementation can't silently reintroduce
+# a narrower gap. Each edit is the SAME shape already established by this
+# file's own test_fingerprint_changes_when_cell_code_is_edited_in_place
+# above: capture, edit via the real repo/store API (never write raw SQL —
+# these are the exact editing methods a real user/route would call), capture
+# again, assert the two differ. Appended at EOF, same zero-line-shift
+# convention as every other addition in this file.
+def test_fingerprint_changes_when_table_title_is_edited(repo, store):
+    tid = _table(repo)
+    before = store.table_fingerprint(tid)
+
+    repo.update_knowhow_table_meta(tid, title="改名后的时序修复")
+
+    after = store.table_fingerprint(tid)
+    assert before != after, (
+        "表标题原地编辑后 table_fingerprint 必须变化——旧指纹只看 mutation_seq/"
+        "行列格计数，标题编辑两者都不碰，move_table 的并发编辑防护会对它视而"
+        "不见，编辑随源表一起被删掉、永久丢失"
+    )
+
+
+def test_fingerprint_changes_when_table_description_is_edited(repo, store):
+    tid = _table(repo)
+    before = store.table_fingerprint(tid)
+
+    repo.update_knowhow_table_meta(tid, description="补充说明")
+
+    after = store.table_fingerprint(tid)
+    assert before != after, "表描述原地编辑后 table_fingerprint 必须变化，理由同标题"
+
+
+def test_fingerprint_changes_when_column_is_renamed(repo, store):
+    tid = _table(repo)
+    column_id = repo.get_knowhow_table(tid)["columns"][0]["id"]
+    before = store.table_fingerprint(tid)
+
+    repo.rename_knowhow_column(column_id, "新列名")
+
+    after = store.table_fingerprint(tid)
+    assert before != after, (
+        "列重命名后 table_fingerprint 必须变化——重命名不改行列格计数、不碰"
+        "mutation_seq（KnowhowStore 自己的类文档字符串明确把 rename 列进"
+        "「结构性编辑方法故意不 bump」清单），旧指纹对它完全失明"
+    )
+
+
+def test_fingerprint_changes_when_column_kind_changes(repo, store):
+    """纯内容 kind 变化（非 anchor 迁移）：现象识别列 procedure → entity。"""
+    tid = _table(repo)
+    column_id = repo.get_knowhow_table(tid)["columns"][1]["id"]  # "现象识别"，role='procedure'
+    before = store.table_fingerprint(tid)
+
+    repo.set_knowhow_column_kind(column_id, "entity")
+
+    after = store.table_fingerprint(tid)
+    assert before != after, (
+        "列 kind 原地变化后 table_fingerprint 必须变化——role 决定 KG 投影语义"
+        "（哪些列参与实体/关系抽取），旧指纹的四个计数和 cell_code 信号都不会"
+        "因为纯 kind 变化而移动"
+    )
+
+
+def test_fingerprint_changes_when_anchor_designation_moves(repo, store):
+    """role 的另一半语义：anchor 指定本身迁移（这次改动会把「现象识别」提升为
+    anchor，同时把原 anchor「违例类型」降级为 attribute——单次操作改了两列的
+    role，任务描述里 "attribute→anchor" 这个例子在这条用例里精确对应「违例
+    类型」这一侧的落点）。"""
+    tid = _table(repo)
+    cols = repo.get_knowhow_table(tid)["columns"]
+    new_anchor_id = next(c["id"] for c in cols if c["name"] == "现象识别")
+    before = store.table_fingerprint(tid)
+
+    repo.set_knowhow_anchor_column(tid, new_anchor_id)
+
+    after = store.table_fingerprint(tid)
+    assert before != after, (
+        "anchor 指定迁移后 table_fingerprint 必须变化——这是「行标题列是哪一"
+        "列」的表级语义变化，行列格计数和 mutation_seq 都不会因此移动"
+    )
+
+
+def test_fingerprint_changes_when_a_column_is_swapped_for_a_different_one(repo, store):
+    """净列数不变的换列：删一列、加一列不同的，且被删的列刻意选一个从未写过
+    任何 cell 的空列（占位列），使级联删除也不会碰 cell_count——前后两次快照
+    在旧指纹的全部字段（mutation_seq/col_count/row_count/cell_count/
+    cell_code_count/cell_code_signal）上逐一比较都相等，因为它们只看「数量」,
+    从根本上无法分辨「同样 3 列」和「3 列但其中一列换了身份」。只有把列的
+    id 本身哈希进去才能抓住这种编辑——这正是「结构完备」这个提法要堵的那类
+    永远也数不完的漏洞，不是又一个可以枚举补上的第四个信号。"""
+    tid = _table(repo)
+    extra_col_id = repo.add_knowhow_column(tid, "占位列", "attribute")
+    before_detail = repo.get_knowhow_table(tid)
+    before = store.table_fingerprint(tid)
+
+    repo.add_knowhow_column(tid, "替换列", "entity")
+    repo.delete_knowhow_column(extra_col_id)
+
+    after_detail = repo.get_knowhow_table(tid)
+    assert len(after_detail["columns"]) == len(before_detail["columns"]), (
+        "前置条件：净列数必须不变（占位列换成替换列），否则这条用例测的是"
+        "列数变化，不是列换身份"
+    )
+    after = store.table_fingerprint(tid)
+    assert before != after, (
+        "净列数不变的换列后 table_fingerprint 必须变化——纯计数式指纹在这种"
+        "编辑下无论加多少个计数字段都测不出来，move_table 会把换掉的那一列"
+        "连同源表一起删掉，永久丢失"
+    )
