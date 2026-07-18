@@ -29,6 +29,10 @@ import {
   VIEW_MODE_PREVIEW_LABEL,
   SWITCH_GUARD_MESSAGE,
   SWITCH_GUARD_DISCARD_LABEL,
+  DRAFT_FLUSH_FAILED_MESSAGE,
+  resolveCloseRequest,
+  resolveSwitchRequest,
+  draftFlushAction,
 } from "./knowhow-cell-editor-logic.ts";
 
 // --- UI 文案常量：byte-exact vs 规格②路A / 任务简报原文 -------------------------
@@ -335,4 +339,57 @@ test("切格子守卫：放弃按钮文案 + 提醒含未保存/可恢复", () =
   assert.strictEqual(SWITCH_GUARD_DISCARD_LABEL, "放弃并切换");
   assert.match(SWITCH_GUARD_MESSAGE, /未保存/);
   assert.match(SWITCH_GUARD_MESSAGE, /可恢复/);
+});
+
+// --- 离开决策纯函数（关闭 / 切格；每条路径的下一步都在此定死，执行器只负责
+//     先 flushDraft 再执行 leave）------------------------------------------------
+
+test("DRAFT_FLUSH_FAILED_MESSAGE: 存储不可用时不做虚假「可恢复」承诺", () => {
+  assert.match(DRAFT_FLUSH_FAILED_MESSAGE, /存储不可用/);
+  assert.match(DRAFT_FLUSH_FAILED_MESSAGE, /请先复制/);
+  assert.doesNotMatch(DRAFT_FLUSH_FAILED_MESSAGE, /可恢复/);
+});
+
+test("resolveCloseRequest: 无守卫 + 有改动 → 弹关闭守卫、暂不离开", () => {
+  assert.deepStrictEqual(resolveCloseRequest(null, true), { next: { kind: "close" }, leave: null });
+});
+
+test("resolveCloseRequest: 无守卫 + 无改动 → 立刻关闭（仍经执行器）", () => {
+  assert.deepStrictEqual(resolveCloseRequest(null, false), { next: null, leave: { kind: "close" } });
+});
+
+test("resolveCloseRequest: 关闭守卫已弹再触发（二次 Esc）→ 强制关闭 leave（执行器会先落草稿）", () => {
+  // 这是首版漏洞的回归锁：二次 Esc 必须产出一个 leave（→ 经执行器落草稿），
+  // 不能是「直接 onClose 不落草稿」。
+  assert.deepStrictEqual(resolveCloseRequest({ kind: "close" }, true), { next: null, leave: { kind: "close" } });
+});
+
+test("resolveCloseRequest: 切格守卫弹着时按 Esc → 取消切换、不离开、不误关整窗", () => {
+  assert.deepStrictEqual(
+    resolveCloseRequest({ kind: "switch", columnId: "c9" }, true),
+    { next: null, leave: null },
+  );
+});
+
+test("resolveSwitchRequest: 有改动 → 弹切格守卫、暂不切", () => {
+  assert.deepStrictEqual(resolveSwitchRequest("c2", true), { next: { kind: "switch", columnId: "c2" }, leave: null });
+});
+
+test("resolveSwitchRequest: 无改动 → 立刻切（仍经执行器落草稿=清旧稿）", () => {
+  assert.deepStrictEqual(resolveSwitchRequest("c2", false), { next: null, leave: { kind: "switch", columnId: "c2" } });
+});
+
+test("draftFlushAction: 有未保存改动 → write（无视恢复提示）", () => {
+  assert.strictEqual(draftFlushAction(true, false), "write");
+  assert.strictEqual(draftFlushAction(true, true), "write");
+});
+
+test("draftFlushAction: 无改动 + 恢复提示开着 → keep（不能删掉待恢复的旧草稿——回归锁）", () => {
+  // 复审发现的回归：离开时对「无改动」也 flushDraft，若无条件清旧稿会抢在用户
+  // 点「恢复」前删掉刚检测到的上次草稿。此处定死：恢复提示开着就 keep。
+  assert.strictEqual(draftFlushAction(false, true), "keep");
+});
+
+test("draftFlushAction: 无改动 + 无恢复提示 → remove（清陈旧草稿）", () => {
+  assert.strictEqual(draftFlushAction(false, false), "remove");
 });

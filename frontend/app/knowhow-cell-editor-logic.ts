@@ -203,3 +203,57 @@ export const VIEW_MODE_PREVIEW_LABEL = "预览";
 export const SWITCH_GUARD_MESSAGE =
   "有未保存的修改，确定要切换到另一格吗？（草稿已自动保存，下次打开可恢复）";
 export const SWITCH_GUARD_DISCARD_LABEL = "放弃并切换";
+
+// 草稿同步落盘失败（浏览器存储不可用：隐私模式/配额）时的提示——此时绝不能
+// 静默离开，否则守卫承诺的「可恢复」是假的、内容真丢了。改为原地报此错、留在
+// 编辑框（内容还在），让用户先自行复制再决定去留。
+export const DRAFT_FLUSH_FAILED_MESSAGE =
+  "浏览器存储不可用，草稿未能保存；内容仍在编辑框，请先复制后再离开。";
+
+// --- 离开编辑态的意图与决策（关闭 / 切兄弟格，共用「未保存 → 守卫 → 明确丢弃」）---
+//
+// 组件里所有「确认离开」路径（Esc/背景/关闭按钮、切兄弟格、守卫的「放弃」按钮）
+// 都先经这两个纯函数决出下一步，再交给组件里唯一的执行器 performLeave（先同步
+// flushDraft、成功才真正 close/switch）。把决策与副作用分开：决策在此可单测，
+// 副作用（localStorage/onClose/onSwitchCell）留在组件。这样「每条离开路径都会
+// 先落草稿」由「只有一个执行器」这一结构保证，而不是各分支各写一遍（PR 首版正
+// 是footer 分支落了草稿、二次 Esc 强制关闭那条没落，才漏了内容）。
+
+// 一次「带未保存改动的离开」意图：关闭整窗，或切到本行另一格。
+export type LeaveIntent = { kind: "close" } | { kind: "switch"; columnId: string };
+
+// 决策的两个出口：next=守卫状态的下一个值（null 表示清除/不显示守卫）；leave=需
+// 要立刻执行的离开动作（null 表示暂不离开，只是弹/收守卫）。
+export type LeaveDecision = { next: LeaveIntent | null; leave: LeaveIntent | null };
+
+// 关闭请求（Esc / 点背景 / 关闭按钮）：
+// - 关闭守卫已弹 → 立刻关闭（第二次 Esc 强制关闭，保留既有习惯；仍经执行器，故
+//   会先落草稿——这正是首版漏掉的点）；
+// - 切格守卫已弹 → 取消这次切换、回到编辑（不误关整窗）；
+// - 有未保存改动 → 弹关闭守卫；
+// - 无改动 → 立刻关闭。
+export function resolveCloseRequest(pending: LeaveIntent | null, hasChanges: boolean): LeaveDecision {
+  if (pending?.kind === "close") return { next: null, leave: { kind: "close" } };
+  if (pending?.kind === "switch") return { next: null, leave: null };
+  if (hasChanges) return { next: { kind: "close" }, leave: null };
+  return { next: null, leave: { kind: "close" } };
+}
+
+// 点兄弟格：有未保存改动 → 弹切格守卫、暂不切；无改动 → 立刻切。
+export function resolveSwitchRequest(columnId: string, hasChanges: boolean): LeaveDecision {
+  if (hasChanges) return { next: { kind: "switch", columnId }, leave: null };
+  return { next: null, leave: { kind: "switch", columnId } };
+}
+
+// flushDraft 该对 localStorage 做什么（抽纯函数：既定死规则，也可单测——离开
+// 执行器现在对「无改动」离开也调 flushDraft，若无脑清旧稿会抢在用户决定前删掉
+// 「检测到上次草稿，恢复/丢弃」提示里那份还没恢复的草稿，与自动草稿 effect 的
+// showRestoreBanner 守卫同款陷阱）：
+// - 有未保存改动 → write（写当前内容）；
+// - 无改动但恢复提示还开着 → keep（保住那份待恢复的旧草稿，不碰）；
+// - 无改动且没有恢复提示 → remove（清掉可能残留的陈旧草稿）。
+export type DraftFlushAction = "write" | "keep" | "remove";
+export function draftFlushAction(hasChanges: boolean, restoreBannerOpen: boolean): DraftFlushAction {
+  if (hasChanges) return "write";
+  return restoreBannerOpen ? "keep" : "remove";
+}

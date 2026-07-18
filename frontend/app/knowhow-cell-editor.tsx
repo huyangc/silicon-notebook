@@ -113,6 +113,11 @@ import {
   type CellViewMode,
   SWITCH_GUARD_MESSAGE,
   SWITCH_GUARD_DISCARD_LABEL,
+  DRAFT_FLUSH_FAILED_MESSAGE,
+  resolveCloseRequest,
+  resolveSwitchRequest,
+  draftFlushAction,
+  type LeaveIntent,
 } from "./knowhow-cell-editor-logic.ts";
 import {
   ACCEPT_SUGGESTION_LABEL,
@@ -553,10 +558,6 @@ export interface KnowhowCellEditorProps {
   onSwitchCell?: (columnId: string) => void;
 }
 
-// 编辑态「带未保存改动的离开」意图：关闭整窗，或切到本行另一格（columnId）。
-// 二者共用同一条守卫 UI（footer），放弃时都同步落草稿、可恢复。
-type PendingLeave = { kind: "close" } | { kind: "switch"; columnId: string };
-
 export function KnowhowCellEditor({
   notebookId,
   apiBase,
@@ -590,7 +591,7 @@ export function KnowhowCellEditor({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [pendingLeave, setPendingLeave] = useState<PendingLeave | null>(null);
+  const [pendingLeave, setPendingLeave] = useState<LeaveIntent | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [optimizeState, setOptimizeState] = useState<CellOptimizeState>(CELL_OPTIMIZE_IDLE);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -697,55 +698,77 @@ export function KnowhowCellEditor({
   );
 
   // 放弃/切走前把当前内容同步落进草稿键——兜住「组件卸载抢在 300ms 自动草稿
-  // 防抖之前、草稿没写成」的漏洞，兑现守卫文案「草稿已自动保存、可恢复」。无
-  // 改动时清掉旧草稿（与自动草稿 effect 同口径）。close/switch 放弃分支共用。
-  function flushDraft() {
-    try {
-      if (hasUnsavedChanges(content, savedContent)) {
-        window.localStorage.setItem(draftStorageKey(rowId, columnId), content);
-      } else {
-        window.localStorage.removeItem(draftStorageKey(rowId, columnId));
+  // 防抖之前、草稿没写成」的漏洞。动作由纯函数 draftFlushAction 定死（见其注释）：
+  // write=写当前内容；keep=有待恢复旧草稿时原样保住、绝不删（否则会抢在用户点
+  // 「恢复」前清掉它——与自动草稿 effect 的 showRestoreBanner 守卫同一口径）；
+  // remove=清陈旧草稿。返回是否已安全落盘：write 抛错（隐私模式/配额）返 false，
+  // 让执行器据此原地报错、不静默离开；keep/remove 恒真（本就没有要保存的内容，
+  // 离开是安全的）。
+  const flushDraft = useCallback((): boolean => {
+    const key = draftStorageKey(rowId, columnId);
+    const action = draftFlushAction(hasUnsavedChanges(content, savedContent), showRestoreBanner);
+    if (action === "write") {
+      try {
+        window.localStorage.setItem(key, content);
+        return true;
+      } catch {
+        return false;
       }
-    } catch {
-      /* ignore（隐私模式/配额）——写不进只是这次草稿没留下，不比现状差 */
     }
-  }
-
-  // 点「本行其他格子」的兄弟格：有未保存改动 → 弹守卫（与关闭一致的「未保存提醒
-  // + 明确丢弃」），让用户明确选择；无改动直接切、不打扰。守卫的放弃分支才真正
-  // 调 onSwitchCell（见 footer）。
-  const handleSwitchCell = useCallback(
-    (targetColumnId: string) => {
-      if (hasUnsavedChanges(content, savedContent)) {
-        setPendingLeave({ kind: "switch", columnId: targetColumnId });
-      } else {
-        onSwitchCell?.(targetColumnId);
+    if (action === "remove") {
+      try {
+        window.localStorage.removeItem(key);
+      } catch {
+        /* 清旧稿失败无所谓——本就没有要保存的内容，离开是安全的 */
       }
+    }
+    return true;
+  }, [content, savedContent, rowId, columnId, showRestoreBanner]);
+
+  // 唯一的「确认离开」执行器：所有 close/switch 路径（Esc/背景/关闭按钮、切兄弟
+  // 格、守卫「放弃」按钮）都经此。先同步落草稿——落不进就绝不离开：清掉守卫、
+  // 原地报 DRAFT_FLUSH_FAILED_MESSAGE、留在编辑框（内容还在），不在 UI 承诺
+  // 「可恢复」的同时把内容悄悄丢掉；落成了再真正 close/switch。「每条离开路径都
+  // 先落草稿」由「只有这一个执行器」这一结构保证，而非各分支各写一遍（复审 #1/#2）。
+  const performLeave = useCallback(
+    (intent: LeaveIntent) => {
+      if (!flushDraft()) {
+        setPendingLeave(null);
+        setSaveError(DRAFT_FLUSH_FAILED_MESSAGE);
+        return;
+      }
+      setSaveError(null);
+      setPendingLeave(null);
+      if (intent.kind === "switch") onSwitchCell?.(intent.columnId);
+      else onClose();
     },
-    [content, savedContent, onSwitchCell],
+    [flushDraft, onSwitchCell, onClose],
   );
 
-  // Esc/背景关闭前的未保存提醒：第一次触发只弹确认条（不关闭）；已经在确认
-  // 状态时再次触发视为「确认放弃」，直接关闭——常见的「再按一次 Esc 强制关闭」
-  // 习惯用法。显式点「取消」按钮不走这个函数，直接 onClose（取消是用户已经
-  // 做出的明确决定，无需二次确认）。
+  // 点「本行其他格子」的兄弟格：保存/上传进行中一律不切——异步 continuation 可能
+  // 回写已卸载组件、或让旧保存的收尾（onClose/onNavigate）落到新格（复审 #3）；
+  // 此时兄弟格也已被置为不可点（见 footer 的 KnowhowRowContext onSwitchCell 门），
+  // 这里再挡一道。其余按 resolveSwitchRequest 决策：有未保存改动弹守卫、无改动经
+  // 执行器立刻切（顺带清旧稿）。
+  const handleSwitchCell = useCallback(
+    (targetColumnId: string) => {
+      if (savingMode !== null || uploading) return;
+      const { next, leave } = resolveSwitchRequest(targetColumnId, hasUnsavedChanges(content, savedContent));
+      setPendingLeave(next);
+      if (leave) performLeave(leave);
+    },
+    [savingMode, uploading, content, savedContent, performLeave],
+  );
+
+  // Esc/背景/关闭按钮：按 resolveCloseRequest 决策（含「二次 Esc 强制关闭」与「切格
+  // 守卫弹着时按 Esc 取消切换」两条既有习惯），需要离开时统一经执行器——故二次 Esc
+  // 也会先落草稿（首版这条没落、复审 #1 指出）。显式点「取消」按钮不走这里、直接
+  // onClose（取消是用户已明确做出的放弃决定，无需二次确认，也不保草稿）。
   const requestClose = useCallback(() => {
-    // 关闭守卫弹着时再次触发（第二次 Esc / 关闭）→ 强制关闭（保留既有习惯）。
-    if (pendingLeave?.kind === "close") {
-      onClose();
-      return;
-    }
-    // 切格子守卫弹着时按 Esc / 点关闭 → 取消这次切换、回到编辑，不误关整窗。
-    if (pendingLeave?.kind === "switch") {
-      setPendingLeave(null);
-      return;
-    }
-    if (hasUnsavedChanges(content, savedContent)) {
-      setPendingLeave({ kind: "close" });
-    } else {
-      onClose();
-    }
-  }, [pendingLeave, content, savedContent, onClose]);
+    const { next, leave } = resolveCloseRequest(pendingLeave, hasUnsavedChanges(content, savedContent));
+    setPendingLeave(next);
+    if (leave) performLeave(leave);
+  }, [pendingLeave, content, savedContent, performLeave]);
 
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
@@ -948,7 +971,15 @@ export function KnowhowCellEditor({
               </button>
             </div>
           </div>
-          <KnowhowRowContext table={table} rowId={rowId} currentColumnId={columnId} onSwitchCell={handleSwitchCell} />
+          <KnowhowRowContext
+            table={table}
+            rowId={rowId}
+            currentColumnId={columnId}
+            // 保存/上传进行中，兄弟格置为不可点（onSwitchCell 传 undefined →
+            // KnowhowRowContext 的 clickable 判定为 false）：异步收尾会操作本格
+            // modal，此时切走会让旧 continuation 落到新格 / 回写已卸载组件（复审 #3）。
+            onSwitchCell={savingMode !== null || uploading ? undefined : handleSwitchCell}
+          />
         </header>
 
         <div className="kh-modal-body">
@@ -1116,20 +1147,7 @@ export function KnowhowCellEditor({
                 <button type="button" onClick={() => setPendingLeave(null)}>
                   {CLOSE_GUARD_CONTINUE_LABEL}
                 </button>
-                <button
-                  type="button"
-                  className="kh-danger-button"
-                  onClick={() => {
-                    flushDraft();
-                    if (pendingLeave.kind === "switch") {
-                      const target = pendingLeave.columnId;
-                      setPendingLeave(null);
-                      onSwitchCell?.(target);
-                    } else {
-                      onClose();
-                    }
-                  }}
-                >
+                <button type="button" className="kh-danger-button" onClick={() => performLeave(pendingLeave)}>
                   {pendingLeave.kind === "switch" ? SWITCH_GUARD_DISCARD_LABEL : CLOSE_GUARD_DISCARD_LABEL}
                 </button>
               </div>
