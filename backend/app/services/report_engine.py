@@ -367,16 +367,21 @@ class ReportEngine:
 
         def persist(force=False):
             now = time.monotonic()
+            # 取快照与落库必须同在锁内:放到锁外会让快照顺序 ≠ 落库顺序 —— 先取
+            # 快照的线程可能后写,用陈旧快照盖掉别节刚落库的完成态;而
+            # _run_sections 之后再没人写 section_status,这份陈旧快照会永久留库
+            # (报告已完成,进度视图却停在「规划」/「深挖」)。写被串行化,但
+            # 非强制写有 2 秒节流、强制写每节仅 3 次,且都远短于节内 LLM 调用。
             with lock:
                 if not force and now - last[0] < 2.0:
                     return
                 last[0] = now
                 snap = [dict(x) for x in status]
-            done = sum(1 for x in snap if x["phase"] in ("完成", "失败"))
-            running = sum(1 for x in snap if x["phase"] not in ("排队", "完成", "失败"))
-            self.dependencies.reports.update_report(
-                notebook_id, rid, section_status=snap,
-                progress=f"章节 {done}/{len(outline)} 完成 · {running} 进行中")
+                done = sum(1 for x in snap if x["phase"] in ("完成", "失败"))
+                running = sum(1 for x in snap if x["phase"] not in ("排队", "完成", "失败"))
+                self.dependencies.reports.update_report(
+                    notebook_id, rid, section_status=snap,
+                    progress=f"章节 {done}/{len(outline)} 完成 · {running} 进行中")
 
         _PHASE = {"plan": "规划", "reflect": "深挖", "retrieve": "深挖", "expand": "深挖",
                   "ppr": "深挖", "follow_chain": "深挖", "fallback": "深挖"}
