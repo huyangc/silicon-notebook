@@ -83,3 +83,35 @@ def test_copy_reprojection_reuses_vectors_zero_reembed(repo):
 
     # K-1：chunk_embeddings 已随拷贝以稳定 id 落库 → 重投影零重嵌入
     assert repo.embedder.call_count == 0
+
+
+def test_copy_is_retrievable_in_target_via_lexical_and_vector(repo):
+    """拷贝出来的表必须在目标 notebook 里「搜得到」——两条检索通道都要有。
+
+    词法通道尤其脆弱：chunks_fts 是无触发器的手工维护 FTS5 虚表，只有
+    ChunkStore.insert_rows/delete_by_ids 会写它；而对拷贝出来的 chunk，
+    重投影必然走 `old_specs == new_specs -> continue`（projection.py），
+    两个写 FTS 的路径一个都不会碰 → 事务里不显式补 chunks_fts 的话，副本
+    永久只能被向量召回、词法搜索彻底搜不到，且没有任何自愈路径（不像向量
+    有 self-heal probe）。这条断言就是那个缺口的回归闸。"""
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    _project(repo, src_tid)
+
+    new_tid = kh_transfer.copy_table(repo, src_tid, dst_nb, actor_id="user-x")
+    _settle(repo, new_tid)
+
+    with repo._connect() as db:
+        # 词法/FTS 通道（production 检索用的同一个原语）
+        fts_hits = repo._runtime.knowledge.chunk_fts_search(db, dst_nb, "示波器观察", k=10)
+        # 向量通道：拷贝进来的 chunk 必须都带着自己的向量
+        vec_rows = db.execute(
+            "SELECT COUNT(*) FROM chunk_embeddings WHERE notebook_id=?", (dst_nb,)
+        ).fetchone()[0]
+        chunk_rows = db.execute(
+            "SELECT COUNT(*) FROM chunks WHERE notebook_id=?", (dst_nb,)
+        ).fetchone()[0]
+
+    assert fts_hits, "副本的 chunk 未进 chunks_fts —— 目标库词法检索永久搜不到"
+    assert chunk_rows > 0
+    assert vec_rows == chunk_rows, "副本的 chunk 与向量数量不匹配"

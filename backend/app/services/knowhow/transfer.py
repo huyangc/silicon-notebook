@@ -10,6 +10,7 @@ routes 直接调本模块函数（沿用 knowhow_api 的「routes→模块函数
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,8 @@ from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
 from app.services.knowhow.api import get_scheduler
 from app.services.knowhow.projection import cell_chunk_id, element_id
 from app.services.notebook_sharing import _ASSET_REF_RE, _rewrite_asset_refs
+
+_log = logging.getLogger("silicon_notebook.knowhow.transfer")
 
 
 def _remap(
@@ -190,16 +193,34 @@ def copy_table(
     }
     store.insert_transfer(payload, expected_counts)  # 单事务 + 提交前校验
 
-    # 事务提交后落资产磁盘文件（单文件失败跳过，不回滚已提交 DB）
+    # 事务提交后落资产磁盘文件（设计文档 §4.1/§7：单文件 copy2 失败逐一记事件
+    # 并跳过，不回滚已提交的 DB）。best-effort 是硬要求而非风格选择：DB 事务此
+    # 时已 COMMIT，若某个文件的 copy2 抛出（磁盘满/权限/竞态删除）而异常向上冒
+    # 泡，下面的 schedule() 就永远不会被调用——副本表会带着一堆 pending 行永久
+    # 卡住、KG 一次都不会建，而 DB 里它看起来完全正常。丢一张图片远比丢整张表
+    # 的投影轻。mkdir 一并纳入保护，理由相同（它失败同样会跳过 schedule）。
     if asset_files:
-        assets_root = Path(repo.storage_dir) / "assets"
-        dest_dir = assets_root / target_notebook_id
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        for old_id, new_id, mime, src_nb in asset_files:
-            ext = ALLOWED_MIME_EXTENSIONS.get(mime, "bin")
-            src = assets_root / src_nb / f"{old_id}.{ext}"
-            if src.is_file():
-                shutil.copy2(src, dest_dir / f"{new_id}.{ext}")
+        try:
+            assets_root = Path(repo.storage_dir) / "assets"
+            dest_dir = assets_root / target_notebook_id
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            for old_id, new_id, mime, src_nb in asset_files:
+                ext = ALLOWED_MIME_EXTENSIONS.get(mime, "bin")
+                src = assets_root / src_nb / f"{old_id}.{ext}"
+                if not src.is_file():
+                    continue
+                try:
+                    shutil.copy2(src, dest_dir / f"{new_id}.{ext}")
+                except Exception:  # noqa: BLE001 — 单个资产失败不许拖垮已提交的拷贝
+                    _log.warning(
+                        "copy_table：副本 %s 的资产 %s→%s 落盘失败，跳过该文件",
+                        payload["table"]["id"], old_id, new_id, exc_info=True,
+                    )
+        except Exception:  # noqa: BLE001 — 同上，资产目录准备失败也不许跳过 schedule
+            _log.warning(
+                "copy_table：副本 %s 的资产目录准备失败，跳过全部资产落盘",
+                payload["table"]["id"], exc_info=True,
+            )
 
     new_table_id = payload["table"]["id"]
     get_scheduler(repo).schedule(new_table_id)  # 后台重建 KG objects/relations

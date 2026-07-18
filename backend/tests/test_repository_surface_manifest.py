@@ -3952,6 +3952,11 @@ KNOWHOW_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES = {
     for name in {
         "SQLiteRepository", "create_notebook", "create_knowhow_table",
         "add_knowhow_row", "get_knowhow_table", "embedder",
+        # A2 review follow-up: the lexical/vector retrievability regression
+        # test reaches repo._connect + repo._runtime.knowledge.chunk_fts_search
+        # (the same FTS primitive production retrieval uses), exactly the idiom
+        # test_knowhow_retrieval.py:280-281 already established.
+        "_connect", "_runtime",
     }
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES
@@ -3971,9 +3976,9 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER
 # call time inside _member_file_site_allowed, same as
 # ALL_TASK_ALLOWED_MEMBER_FILES's own EOF folds above.
 KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES = {
-    ("_runtime", "backend/app/services/knowhow/transfer.py:26"),
-    ("_runtime", "backend/app/services/knowhow/transfer.py:182"),
-    ("get_notebook_asset", "backend/app/services/knowhow/transfer.py:86"),
-    ("storage_dir", "backend/app/services/knowhow/transfer.py:195"),
+    ("_runtime", "backend/app/services/knowhow/transfer.py:29"),
+    ("_runtime", "backend/app/services/knowhow/transfer.py:185"),
+    ("get_notebook_asset", "backend/app/services/knowhow/transfer.py:89"),
+    ("storage_dir", "backend/app/services/knowhow/transfer.py:204"),
 }
 ACTIVE_PRODUCTION_MEMBER_SITES = ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES

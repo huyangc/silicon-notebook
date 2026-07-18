@@ -128,6 +128,32 @@ class KnowhowTransferStore:
             for key in _DERIVED_ORDER:
                 _insert_rows(db, _TABLE_NAMES[key], payload.get(key) or [])
 
+            # chunks_fts 必须在这里显式补，且必须在同一个事务里。
+            #
+            # chunks_fts 是「无触发器、手工维护」的 FTS5 虚表（migrations.py
+            # 只给 memory_items_fts 建了触发器）——正常投影路径靠
+            # ChunkStore.insert_rows 末尾那行显式写入（chunk_store.py:139）。
+            # 而拷贝出来的 chunk 走不到那行：copy_table 之后调度的重投影，对
+            # 每个副本 chunk 都满足 `old_specs == new_specs` → _write_chunks
+            # 直接 `continue`（projection.py），insert_rows/delete_by_ids 这两
+            # 个仅有的写 FTS 路径一个都不会被调用。所以不在这里补，副本就只剩
+            # 向量召回、词法检索永久搜不到，而且没有任何自愈路径（向量那边有
+            # self-heal probe，FTS 没有）。
+            #
+            # 语句与列序照抄 ChunkStore._insert_fts_rows（chunk_store.py:75-78,
+            # 由 insert_rows:139 调用），不另发明 SQL；同事务保证「FTS 写失败
+            # 连 chunk 行一起回滚」，与 replace_source_chunks 的既有不变量一致。
+            # notebook_sharing.py:487-491 对整本拷贝做的是同一件事，原因相同。
+            chunk_rows = payload.get("chunks") or []
+            if chunk_rows:
+                db.executemany(
+                    "INSERT INTO chunks_fts(chunk_id,notebook_id,text) VALUES (?,?,?)",
+                    [
+                        (c["id"], c["notebook_id"], c.get("text") or "")
+                        for c in chunk_rows
+                    ],
+                )
+
             # 提交前校验：落库计数须等于源表快照计数（不一致 → 抛错 → 回滚，不留半份副本）
             def count(sql: str) -> int:
                 return int(db.execute(sql, (new_table_id,)).fetchone()[0])

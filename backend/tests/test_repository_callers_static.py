@@ -820,12 +820,12 @@ def test_closed_remediation_modules_stay_closed():
 # idiom test_repository_surface_manifest.py already uses for
 # ALL_TASK_ALLOWED_MEMBER_FILES.
 INDEPENDENT_PRIVATE_SITES = INDEPENDENT_PRIVATE_SITES | {
-    ("backend/app/services/knowhow/transfer.py", 26, "_runtime"): (
+    ("backend/app/services/knowhow/transfer.py", 29, "_runtime"): (
         "knowhow cross-notebook transfer orchestration (like api.py) "
         "extracts the id/clock seam directly, mirroring api.py's "
         "narrow-runtime-port extraction"
     ),
-    ("backend/app/services/knowhow/transfer.py", 182, "_runtime"): (
+    ("backend/app/services/knowhow/transfer.py", 185, "_runtime"): (
         "knowhow cross-notebook transfer orchestration (like api.py) "
         "constructs/reaches the A1 KnowhowTransferStore directly, a second "
         "independent call site mirroring api.py's build_projector/"
