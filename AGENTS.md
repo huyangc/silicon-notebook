@@ -210,6 +210,8 @@ cd frontend
 npm run dev
 ```
 
+`object_type` display names have one source of truth: the backend `OBJECT_TYPE_LABELS` in `app/services/extraction_profiles.py`, shipped to the client as `KnowledgeTypeCount.label`. Any call site that can reach that API label (the Knowledge browser) must use it, so user-defined object types render their proper Chinese name too. Call sites that only hold an `object_type` string (citation popover, knowledge-graph canvas and side panel) use the built-in front-end table `KG_TYPE_LABELS` in `frontend/app/kg-type-mark.tsx`, which stays character-for-character identical to the backend constant; `scripts/check_object_type_labels_contract.py` is a hard gate in `scripts/check.sh` and fails the build on drift, so a label change on either side must land on both. Do not reintroduce a Title-Case fallback — unknown or custom types are displayed verbatim as their `object_type`. Both tables, and any other map keyed by `object_type`, must be read with `Object.hasOwn(...)` rather than bare indexing or `map[type] ?? fallback`: `constructor` and `__proto__` resolve through the prototype chain to inherited functions/objects, which are truthy, so `??` never takes over and downstream reads silently become `undefined` (this produced `NaN` node coordinates in the graph layout).
+
 ## No Docker In First Version
 
 Do not add Docker or Docker Compose as the default first-version workflow.
