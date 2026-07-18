@@ -1,0 +1,206 @@
+"""单张 knowhow 表跨 notebook 的复制/移动编排。
+
+复用整本拷贝（notebook_sharing.copy_notebook）验证过的 K-1 稳定-id 派生物方案：
+source_elements 用 element_id(new_row,new_col) 重算、chunks 用 cell_chunk_id 重算、
+chunk_embeddings 随 chunk id 原样搬 → 拷完调度 project_table，text/section_path 未变
+→ 零重嵌入。业务表 id 全新映射；cells 的 asset:// 引用改写；资产磁盘文件随迁。
+
+routes 直接调本模块函数（沿用 knowhow_api 的「routes→模块函数(repo)」惯例）。
+"""
+from __future__ import annotations
+
+import json
+import shutil
+from pathlib import Path
+from typing import Any
+
+from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
+from app.services.knowhow.api import get_scheduler
+from app.services.knowhow.projection import cell_chunk_id, element_id
+from app.services.notebook_sharing import _ASSET_REF_RE, _rewrite_asset_refs
+
+
+def _remap(
+    repo: Any, snapshot: dict, target_notebook_id: str, actor_id: str
+) -> tuple[dict, list]:
+    seams = repo._runtime.seams
+    new = seams.new_id
+    now = seams.now()
+
+    src_table = snapshot["table"]
+    src_notebook_id = src_table["notebook_id"]
+
+    khtbl_map = {src_table["id"]: new("khtbl")}
+    khcol_map: dict[str, str] = {}
+    khrow_map: dict[str, str] = {}
+    asset_map: dict[str, str] = {}
+    source_map: dict[str, str] = {}
+
+    # 隐藏源（可能不存在：源表从未投影）
+    source_out = None
+    if snapshot["source"]:
+        src_source = dict(snapshot["source"])
+        new_source_id = new("src")
+        source_map[src_source["id"]] = new_source_id
+        src_source["id"] = new_source_id
+        src_source["notebook_id"] = target_notebook_id
+        src_source["memory_id"] = ""  # 防御：knowhow 隐藏源无 memory 关联
+        source_out = src_source
+
+    table_out = dict(src_table)
+    table_out["id"] = khtbl_map[src_table["id"]]
+    table_out["notebook_id"] = target_notebook_id
+    table_out["created_by"] = actor_id
+    table_out["created_at"] = now
+    table_out["updated_at"] = now
+    old_hidden = src_table.get("hidden_source_id")
+    table_out["hidden_source_id"] = source_map.get(old_hidden) if old_hidden else None
+
+    columns_out = []
+    for col in snapshot["columns"]:
+        col = dict(col)
+        new_col = new("khcol")
+        khcol_map[col["id"]] = new_col
+        col["id"] = new_col
+        col["table_id"] = khtbl_map[col["table_id"]]
+        columns_out.append(col)
+
+    rows_out = []
+    for row in snapshot["rows"]:
+        row = dict(row)
+        new_row = new("khrow")
+        khrow_map[row["id"]] = new_row
+        row["id"] = new_row
+        row["table_id"] = khtbl_map[row["table_id"]]
+        row["projection_status"] = "pending"
+        rows_out.append(row)
+
+    # 收集本表 cells 引用到的资产（仅这些随迁）
+    referenced: set[str] = set()
+    for cell in snapshot["cells"]:
+        for match in _ASSET_REF_RE.findall(cell["content_md"] or ""):
+            referenced.add(match)
+    asset_files = []
+    assets_out = []
+    for old_asset_id in sorted(referenced):
+        asset = repo.get_notebook_asset(old_asset_id)
+        if asset is None:
+            continue
+        new_asset_id = new("asset")
+        asset_map[old_asset_id] = new_asset_id
+        asset_files.append((old_asset_id, new_asset_id, asset["mime"], src_notebook_id))
+        row = dict(asset)
+        row["id"] = new_asset_id
+        row["notebook_id"] = target_notebook_id
+        assets_out.append(row)
+
+    cells_out = []
+    for cell in snapshot["cells"]:
+        cell = dict(cell)
+        cell["id"] = new("khcel")
+        cell["row_id"] = khrow_map[cell["row_id"]]
+        cell["column_id"] = khcol_map[cell["column_id"]]
+        cell["content_md"] = _rewrite_asset_refs(cell.get("content_md") or "", asset_map)
+        cells_out.append(cell)
+
+    cell_code_out = []
+    for code in snapshot["cell_code"]:
+        code = dict(code)
+        code["id"] = new("khcode")
+        code["row_id"] = khrow_map[code["row_id"]]
+        code["column_id"] = khcol_map[code["column_id"]]
+        cell_code_out.append(code)
+
+    # 派生产物：稳定 id 重算（零重嵌入的关键）
+    element_map: dict[str, str] = {}
+    element_row_new: dict[str, str] = {}
+    elements_out = []
+    for el in snapshot["elements"]:
+        el = dict(el)
+        old_id = el["id"]
+        metadata = json.loads(el.get("metadata") or "{}")
+        kh_meta = dict(metadata.get("knowhow") or {})
+        new_row = khrow_map[kh_meta["row_id"]]
+        new_col = khcol_map[kh_meta["column_id"]]
+        new_el = element_id(new_row, new_col)
+        element_map[old_id] = new_el
+        element_row_new[old_id] = new_row
+        kh_meta["table_id"] = khtbl_map.get(kh_meta.get("table_id"), kh_meta.get("table_id"))
+        kh_meta["row_id"] = new_row
+        kh_meta["column_id"] = new_col
+        metadata["knowhow"] = kh_meta
+        el["metadata"] = json.dumps(metadata, ensure_ascii=False)
+        el["id"] = new_el
+        el["source_id"] = source_map[el["source_id"]]
+        elements_out.append(el)
+
+    chunk_map: dict[str, str] = {}
+    chunks_out = []
+    for chunk in snapshot["chunks"]:
+        chunk = dict(chunk)
+        old_chunk_id = chunk["id"]
+        old_element_ids = json.loads(chunk.get("element_ids") or "[]")
+        if not old_element_ids:
+            raise ValueError(f"knowhow chunk {old_chunk_id} 缺 element_ids，无法重算稳定 id")
+        new_row = element_row_new[old_element_ids[0]]
+        part = int(old_chunk_id.rsplit("-", 1)[-1])
+        new_chunk_id = cell_chunk_id(new_row, part)
+        chunk_map[old_chunk_id] = new_chunk_id
+        chunk["id"] = new_chunk_id
+        chunk["notebook_id"] = target_notebook_id
+        chunk["source_id"] = source_map[chunk["source_id"]]
+        chunk["element_ids"] = json.dumps(
+            [element_map.get(e, e) for e in old_element_ids], ensure_ascii=False
+        )
+        chunks_out.append(chunk)
+
+    vectors_out = []
+    for vec in snapshot["chunk_embeddings"]:
+        vec = dict(vec)
+        vec["chunk_id"] = chunk_map[vec["chunk_id"]]
+        vec["notebook_id"] = target_notebook_id
+        vectors_out.append(vec)
+
+    payload = {
+        "table": table_out,
+        "columns": columns_out,
+        "rows": rows_out,
+        "cells": cells_out,
+        "cell_code": cell_code_out,
+        "assets": assets_out,
+        "source": source_out,
+        "elements": elements_out,
+        "chunks": chunks_out,
+        "chunk_embeddings": vectors_out,
+    }
+    return payload, asset_files
+
+
+def copy_table(
+    repo: Any, source_table_id: str, target_notebook_id: str, actor_id: str
+) -> str:
+    store = repo._runtime.knowhow_transfer_store
+    snapshot = store.snapshot_table(source_table_id)
+    payload, asset_files = _remap(repo, snapshot, target_notebook_id, actor_id)
+    expected_counts = {
+        "columns": len(snapshot["columns"]),
+        "rows": len(snapshot["rows"]),
+        "cells": len(snapshot["cells"]),
+        "cell_code": len(snapshot["cell_code"]),
+    }
+    store.insert_transfer(payload, expected_counts)  # 单事务 + 提交前校验
+
+    # 事务提交后落资产磁盘文件（单文件失败跳过，不回滚已提交 DB）
+    if asset_files:
+        assets_root = Path(repo.storage_dir) / "assets"
+        dest_dir = assets_root / target_notebook_id
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for old_id, new_id, mime, src_nb in asset_files:
+            ext = ALLOWED_MIME_EXTENSIONS.get(mime, "bin")
+            src = assets_root / src_nb / f"{old_id}.{ext}"
+            if src.is_file():
+                shutil.copy2(src, dest_dir / f"{new_id}.{ext}")
+
+    new_table_id = payload["table"]["id"]
+    get_scheduler(repo).schedule(new_table_id)  # 后台重建 KG objects/relations
+    return new_table_id

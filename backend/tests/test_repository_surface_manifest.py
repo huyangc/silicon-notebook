@@ -3103,6 +3103,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in PAPER_META_STATUS_TASK4_ALLOWED_IMPORTS
                     or site in ASSET_GC_TRIGGER_ALLOWED_IMPORTS
                     or site in KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS
+                    or site in KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS
                 )
 
 
@@ -3925,3 +3926,54 @@ KNOWHOW_TRANSFER_STORE_ALLOWED_MEMBER_FILES = {
     }
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER_STORE_ALLOWED_MEMBER_FILES
+
+# knowhow cross-notebook copy/move Task A2 (transfer.py's copy_table
+# orchestration): its own service test builds the real facade the same way
+# Task A1's store test does — SQLiteRepository(...) to build the runtime,
+# repo.create_notebook + repo.create_knowhow_table + repo.add_knowhow_row +
+# repo.get_knowhow_table to seed/read a one-row table fixture, and
+# repo.embedder (swapped for a fake to count embed calls — the K-1
+# zero-re-embed assertion) — every one a frozen facade member consumed at a
+# fresh site this test file postdates, so it takes the same broad (file,
+# member) allowance as KNOWHOW_TRANSFER_STORE_ALLOWED_MEMBER_FILES above.
+# Unlike Task A1's store test, this file never reaches repo._runtime/
+# repo._connect directly — transfer.py itself does (see the
+# ACTIVE_PRODUCTION_MEMBER_SITES addition below). The lone import consumer
+# (SQLiteRepository) additionally needs the IMPORTS entry, folded into the
+# import-completeness OR-chain (resolves lazily at call time, so defining it
+# here at EOF is fine, same as KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS).
+# Appended at EOF for the same zero-line-shift reason as every other TASKN_*
+# block above.
+KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_transfer_service.py", 5, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+KNOWHOW_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_transfer_service.py", name)
+    for name in {
+        "SQLiteRepository", "create_notebook", "create_knowhow_table",
+        "add_knowhow_row", "get_knowhow_table", "embedder",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES
+
+# transfer.py itself (production, not a test file) is a genuinely new facade
+# consumer the same way communities.py/reasoning_retrieval.py/routes.py:605
+# already are above (ACTIVE_PRODUCTION_MEMBER_SITES, defined near the top of
+# this file) — copy_table's own `repo._runtime.knowhow_transfer_store` and
+# _remap's `repo._runtime.seams` are two independent narrow-runtime-port
+# reaches (mirrors app/services/knowhow/api.py's build_projector/
+# optimize_cell precedent; registered separately in
+# test_repository_callers_static.py's INDEPENDENT_PRIVATE_SITES), plus
+# _remap's `repo.get_notebook_asset(...)` and copy_table's `repo.storage_dir`
+# — both ordinary public facade members. Folded in here (not inline in the
+# ACTIVE_PRODUCTION_MEMBER_SITES literal above) to keep this a zero-line-shift
+# EOF append like every other TASKN_* block; the union resolves lazily at
+# call time inside _member_file_site_allowed, same as
+# ALL_TASK_ALLOWED_MEMBER_FILES's own EOF folds above.
+KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES = {
+    ("_runtime", "backend/app/services/knowhow/transfer.py:26"),
+    ("_runtime", "backend/app/services/knowhow/transfer.py:182"),
+    ("get_notebook_asset", "backend/app/services/knowhow/transfer.py:86"),
+    ("storage_dir", "backend/app/services/knowhow/transfer.py:195"),
+}
+ACTIVE_PRODUCTION_MEMBER_SITES = ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES

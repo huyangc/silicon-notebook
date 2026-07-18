@@ -796,3 +796,39 @@ def test_closed_remediation_modules_stay_closed():
                 if isinstance(node, ast.Attribute) and node.attr in forbidden
             )
     assert offenders == []
+
+
+# knowhow cross-notebook copy/move Task A2 (transfer.py): two independent
+# `repo._runtime` reaches, mirroring app/services/knowhow/api.py's
+# build_projector (line 138) / optimize_cell (line 716) precedent above —
+# transfer.py is knowhow orchestration exactly like api.py, deliberately not
+# wired onto the facade/RepositoryRuntime composition root either. _remap's
+# `seams = repo._runtime.seams` extracts the id/clock seam (mirrors deps.py's
+# narrow-runtime-port extraction); copy_table's
+# `store = repo._runtime.knowhow_transfer_store` extracts the A1 transfer
+# store the same way. Folded in via a module-level `|=` at EOF instead of
+# edited inline into the INDEPENDENT_PRIVATE_SITES literal above — that dict
+# sits BEFORE test_facade_exposes_the_maintenance_adapter's `from
+# app.services.sqlite_repository import SQLiteRepository` (line 776), which
+# test_repository_surface_manifest.py pins by exact line number twice
+# (COMPATIBILITY_EXPORTS consumer site + EXPECTED_PATCH_DELTAS
+# recorded_only); inserting inline would shift that line and break both
+# pins. INDEPENDENT_PRIVATE_SITES is only ever read inside function bodies
+# (test_routes_and_services_do_not_reach_private_repository_state /
+# test_no_private_facade_member_access_outside_frozen_seams), so this
+# late-bound reassignment resolves correctly at call time — the same EOF-fold
+# idiom test_repository_surface_manifest.py already uses for
+# ALL_TASK_ALLOWED_MEMBER_FILES.
+INDEPENDENT_PRIVATE_SITES = INDEPENDENT_PRIVATE_SITES | {
+    ("backend/app/services/knowhow/transfer.py", 26, "_runtime"): (
+        "knowhow cross-notebook transfer orchestration (like api.py) "
+        "extracts the id/clock seam directly, mirroring api.py's "
+        "narrow-runtime-port extraction"
+    ),
+    ("backend/app/services/knowhow/transfer.py", 182, "_runtime"): (
+        "knowhow cross-notebook transfer orchestration (like api.py) "
+        "constructs/reaches the A1 KnowhowTransferStore directly, a second "
+        "independent call site mirroring api.py's build_projector/"
+        "optimize_cell pair"
+    ),
+}
