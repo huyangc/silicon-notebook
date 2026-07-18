@@ -4003,6 +4003,86 @@ button.chat-session-card {
   width: min(520px, 100%);
 }
 
+/* DestinationPicker(transfer-picker.tsx)—knowhow 表(C3)/Memory(C4)传输共用的
+   目标笔记本选择 modal。挂在 utility-modal-card.narrow 之上,只补内容层样式,
+   不重复 modal chrome 本身。 */
+.transfer-picker-card {
+  display: grid;
+  gap: 16px;
+  padding: 22px 24px;
+}
+
+.transfer-picker-card h3 {
+  margin: 0;
+  font-size: 17px;
+  color: #18212f;
+}
+
+.transfer-target-field {
+  display: grid;
+  gap: 7px;
+  color: #4f5663;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.transfer-target-field select {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0 30px 0 12px;
+  color: var(--ink);
+  background: #fff;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-target-field select:disabled {
+  opacity: .6;
+  cursor: not-allowed;
+}
+
+.transfer-mode-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+
+.transfer-mode-toggle label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #344255;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.transfer-mode-toggle label:has(input:disabled) {
+  color: #98a2b3;
+  cursor: not-allowed;
+}
+
+.transfer-error {
+  margin: 0;
+  border: 1px solid #efc6c6;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff2f2;
+  color: #9d2828;
+  font-size: 13px;
+}
+
+.transfer-picker-card .memory-dialog-actions {
+  margin-top: 4px;
+  padding: 0;
+  border-top: 0;
+  justify-content: flex-end;
+}
+
 .source-modal-header {
   display: flex;
   align-items: flex-start;
