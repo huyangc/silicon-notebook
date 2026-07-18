@@ -91,3 +91,107 @@ def test_move_source_cleanup_failure_returns_409_with_new_table_id(client, repo,
     assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst
     # 源表仍在——删源失败绝不能连带丢了源(duplicate-not-loss)
     assert repo.get_knowhow_table(tid)["notebook_id"] == src
+
+
+# --------------------------------------------------------------------------
+# 访问控制边界（A4 评审 Important）：上面三条用例全都以 notebook OWNER 身份跑，
+# 而 owner 在 user_can_read_notebook / user_can_access_notebook 下都是 True，
+# 同 notebook 那条又在触达任何守卫之前就 400 返回了——于是路由里
+# 「copy 用读守卫 / move 用写守卫」这个三元表达式完全没有被覆盖：把它反过来
+# 写，三条用例依旧全绿，而只读成员就此获得了删除别人表的能力（move = 复制
+# + 删源）。下面四条专门钉这条接线。追加在文件尾：在 line 72 之上插入会顶掉
+# test_repository_surface_manifest.py 里按行号钉死的 patch 站点。
+# --------------------------------------------------------------------------
+
+def _uid(client, headers):
+    return client.get("/api/me", headers=headers).json()["id"]
+
+
+def test_readonly_member_can_copy_but_never_move(client, repo):
+    """只读成员：copy 放行(200)，move 必须 404 且源表分毫未动。
+
+    这一条单独就能杀死「三元表达式写反」这个变异：反过来写的话 move 会改用
+    读守卫，bob 通过 → 源表被复制走并删除 → 断言的 404 和「源表还在」双双失败。
+    """
+    owner_h = _login(client, "a00000010")
+    src = client.post("/api/notebooks", json={"name": "src"}, headers=owner_h).json()["id"]
+    tid = _table(repo, src)
+
+    bob_h = _login(client, "b00000011")
+    bob_nb = client.post("/api/notebooks", json={"name": "bob"}, headers=bob_h).json()["id"]
+    repo.add_member(src, _uid(client, bob_h))  # 只读成员：能读源，但不是 owner
+
+    # copy：源侧只需读权限 → 放行
+    resp = client.post(
+        f"/api/notebooks/{src}/knowhow/{tid}/transfer",
+        json={"target_notebook_id": bob_nb, "mode": "copy"},
+        headers=bob_h,
+    )
+    assert resp.status_code == 200, resp.text
+    assert repo.get_knowhow_table(resp.json()["new_table_id"])["notebook_id"] == bob_nb
+
+    # move：源侧要写权限(move 会删源) → 只读成员必须 404，不泄露存在性
+    resp = client.post(
+        f"/api/notebooks/{src}/knowhow/{tid}/transfer",
+        json={"target_notebook_id": bob_nb, "mode": "move"},
+        headers=bob_h,
+    )
+    assert resp.status_code == 404, resp.text
+    # 最要紧的一条：源表必须还在。只读成员绝不能删掉别人的表。
+    assert repo.get_knowhow_table(tid)["notebook_id"] == src
+
+
+def test_stranger_gets_404_for_source_notebook(client, repo):
+    """非 owner 非成员：连 copy 都不行，且 404 而非 403（不泄露存在性）。"""
+    owner_h = _login(client, "a00000020")
+    src = client.post("/api/notebooks", json={"name": "src"}, headers=owner_h).json()["id"]
+    tid = _table(repo, src)
+
+    stranger_h = _login(client, "c00000021")
+    stranger_nb = client.post(
+        "/api/notebooks", json={"name": "c"}, headers=stranger_h
+    ).json()["id"]
+
+    resp = client.post(
+        f"/api/notebooks/{src}/knowhow/{tid}/transfer",
+        json={"target_notebook_id": stranger_nb, "mode": "copy"},
+        headers=stranger_h,
+    )
+    assert resp.status_code == 404, resp.text
+    assert repo.get_knowhow_table(tid)["notebook_id"] == src
+
+
+def test_target_notebook_not_owned_is_404(client, repo):
+    """源侧是自己的，但目标 notebook 是别人的 → 404（目标恒需写权限）。
+    否则任何人都能把表塞进别人的 notebook 里。"""
+    owner_h = _login(client, "a00000030")
+    src = client.post("/api/notebooks", json={"name": "src"}, headers=owner_h).json()["id"]
+    tid = _table(repo, src)
+
+    other_h = _login(client, "d00000031")
+    other_nb = client.post("/api/notebooks", json={"name": "other"}, headers=other_h).json()["id"]
+
+    resp = client.post(
+        f"/api/notebooks/{src}/knowhow/{tid}/transfer",
+        json={"target_notebook_id": other_nb, "mode": "copy"},
+        headers=owner_h,
+    )
+    assert resp.status_code == 404, resp.text
+
+
+def test_table_from_another_notebook_is_404(client, repo):
+    """表 id 存在、两个 notebook 也都是自己的，但表不属于 URL 里那个源
+    notebook → 404。守卫只证明「你能访问 URL 里这个 notebook」，不证明
+    「这个 table_id 属于它」。"""
+    h = _login(client, "a00000040")
+    nb_a = client.post("/api/notebooks", json={"name": "a"}, headers=h).json()["id"]
+    nb_b = client.post("/api/notebooks", json={"name": "b"}, headers=h).json()["id"]
+    tid_in_b = _table(repo, nb_b)  # 表在 B，却从 A 的 URL 去搬它
+
+    resp = client.post(
+        f"/api/notebooks/{nb_a}/knowhow/{tid_in_b}/transfer",
+        json={"target_notebook_id": nb_b, "mode": "copy"},
+        headers=h,
+    )
+    assert resp.status_code == 404, resp.text
+    assert repo.get_knowhow_table(tid_in_b)["notebook_id"] == nb_b

@@ -4018,6 +4018,10 @@ KNOWHOW_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_knowhow_transfer_routes.py", name)
     for name in {
         "SQLiteRepository", "create_knowhow_table", "add_knowhow_row", "get_knowhow_table",
+        # A4 评审 Important 补的四条访问控制用例：只读成员那条要先把 bob 加成
+        # 成员（test_notebook_share_readonly.py 用的同一个 add_member 惯用法），
+        # 才能覆盖「copy 用读守卫 / move 用写守卫」这条此前完全没被测到的接线。
+        "add_member",
     }
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES

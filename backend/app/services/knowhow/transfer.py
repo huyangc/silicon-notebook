@@ -270,6 +270,13 @@ def move_table(
             build_projector(repo).delete_table_projection(hidden)
         repo.delete_knowhow_table(source_table_id)
     except Exception as exc:  # noqa: BLE001 — 副本已提交，必须转成可辨识的类型化错误
+        # 必须在这里落日志：`from exc` 保住了 __cause__，但路由会把它转成
+        # HTTPException，而 FastAPI 渲染 HTTPException 是不带 traceback 的——
+        # 真在生产触发时（用户手上留下一份需要人工对账的重复副本），服务端
+        # 将没有任何关于「为什么失败」的记录。_log.exception 带上原始堆栈。
+        _log.exception(
+            "move_table：副本 %s 已提交，但清理源表 %s 失败", new_table_id, source_table_id
+        )
         raise SourceCleanupFailed(new_table_id, exc) from exc
     return new_table_id
 

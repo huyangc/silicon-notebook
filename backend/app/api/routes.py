@@ -2113,20 +2113,27 @@ def transfer_knowhow_table(
         raise HTTPException(status_code=400, detail="源与目标不能是同一个 notebook")
     repo = repository()
     access = _kh_access()
+    # 只有 copy 能放宽到「只读成员」——写成 `read if copy else access` 而不是
+    # `access if move else read`，是为了失败关闭（默认最严兜底，同 deps.py 末尾
+    # require_notebook_access = require_notebook_write 的取向）：将来若多出第三
+    # 种 mode，它继承的是 owner-only 的强守卫，而不是悄悄拿到只读成员权限。
+    # 今天两者等价（mode 是 Literal["copy","move"]），差别只在未来。
     source_check = (
-        access.user_can_access_notebook
-        if payload.mode == "move"
-        else access.user_can_read_notebook
+        access.user_can_read_notebook
+        if payload.mode == "copy"
+        else access.user_can_access_notebook
     )
     if not source_check(notebook_id, user.id):
         raise HTTPException(status_code=404, detail="Notebook not found")
     if not access.user_can_access_notebook(payload.target_notebook_id, user.id):
         raise HTTPException(status_code=404, detail="Notebook not found")
     try:
-        table = repo.get_knowhow_table(table_id)
+        # 复用既有 helper（同 reproject 路由 routes.py:583-586 的「只做存在性+
+        # 归属校验、丢弃返回值」用法）：它自己的 docstring 持有「'从未存在' 与
+        # '存在但属于别的 notebook' 统一 KeyError → 路由统一 404，不泄露是哪种」
+        # 这条策略。手写同款检查会把该策略复刻到第二处，日后必然静默分叉。
+        knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
     except KeyError:
-        raise HTTPException(status_code=404, detail="Table not found")
-    if table["notebook_id"] != notebook_id:
         raise HTTPException(status_code=404, detail="Table not found")
     try:
         new_table_id = _kh_transfer.transfer_table(
