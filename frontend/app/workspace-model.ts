@@ -1,6 +1,21 @@
 import type { AskModeId } from "./ask-modes";
 import type { ReasoningTraceStep } from "./ask-stream";
 
+/**
+ * 新建 notebook 的默认名 —— **持久化契约，不是界面文案，不受「界面词汇表」管辖。**
+ *
+ * 这个字符串会随 `POST /notebooks` 落库成 `notebooks.name` 的真实值，并被以下位置
+ * 逐字钉死：`AGENTS.md`、`architecture.md`、`README.md` / `README_zh.md`、
+ * `fangan_done.md`，后端侧还有 `app/models/schemas.py` 的字段默认值、
+ * `notebook_store.py` 的空名兜底、`sqlite_repository.py` 的
+ * `_DEFAULT_NOTEBOOK_NAMES`（决定「自动改名只覆盖占位名、不覆盖用户起的名字」）。
+ *
+ * 曾经被「散文去黑话」顺手改成中文——那不是改文案，是改写入库里的数据，会让后端
+ * 的占位名识别与文档契约同时失配。要改必须连同上述所有位置一起改，并处理存量数据。
+ * `notebook-default-name.test.mjs` 守着这条线。
+ */
+export const DEFAULT_NOTEBOOK_NAME = "Untitled notebook";
+
 /** API/view models shared by the workspace orchestrator and extracted panels. */
 export type NotebookSummary = {
   id: string;

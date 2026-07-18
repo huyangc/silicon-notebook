@@ -70,6 +70,7 @@ import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
 import { sourceImageAssetUrl } from "./source-image";
 import {
   CHAT_MODES,
+  DEFAULT_NOTEBOOK_NAME,
   EMPTY_KNOWLEDGE,
   KNOWLEDGE_STATUS_OPTIONS,
   SOURCES_PAGE_SIZE,
@@ -1997,7 +1998,7 @@ export default function Home() {
   async function openCreate() {
     const notebook = await api<NotebookSummary>("/notebooks", {
       method: "POST",
-      body: JSON.stringify({ name: "未命名笔记本", purpose: "" })
+      body: JSON.stringify({ name: DEFAULT_NOTEBOOK_NAME, purpose: "" })
     });
     await loadNotebookCollection();
     await openNotebook(notebook.id);
@@ -2009,7 +2010,7 @@ export default function Home() {
   async function submitCreate() {
     const notebook = await api<NotebookSummary>("/notebooks", {
       method: "POST",
-      body: JSON.stringify({ name: createName.trim() || "未命名笔记本", purpose: createDesc.trim() })
+      body: JSON.stringify({ name: createName.trim() || DEFAULT_NOTEBOOK_NAME, purpose: createDesc.trim() })
     });
     setCreateOpen(false);
     await loadNotebookCollection();
@@ -2198,7 +2199,7 @@ export default function Home() {
 
   async function saveInlineNotebookName() {
     if (!currentNotebook || titleSaveInFlight) return;
-    const nextName = titleDraft.trim() || "未命名笔记本";
+    const nextName = titleDraft.trim() || DEFAULT_NOTEBOOK_NAME;
     setTitleDraft(nextName);
     if (nextName === currentNotebook.name) return;
     setTitleSaveInFlight(true);
