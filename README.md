@@ -410,7 +410,7 @@ Chunk-native retrieval is ready as soon as a source is parsed + embedded, so **K
 
 | Notebook state on upload | KG extraction | How it happens |
 |---|---|---|
-| No KG yet (fresh notebook) | **Not** auto-run | Build on demand: `POST /api/notebooks/{id}/kg/build` (UI: a notebook's **构建知识图谱 / Build KG** action; also surfaced when you pick a strict-reasoning mode on a KG-less notebook) |
+| No KG yet (fresh notebook) | **Not** auto-run | Build on demand: `POST /api/notebooks/{id}/kg/build` (UI: a notebook's **构建知识图谱 / Build KG** action; also surfaced when you pick the **深入分析** group — the `strict` modes `reasoning` / `graph` — on a KG-less notebook) |
 | Already has a KG | **Auto-run** in the background for each new source | No manual trigger — keeps the KG complete; the new source is then incrementally fused into the unified cross-document KG |
 
 The ingest-time decision is `KG_AUTO_EXTRACT or notebook-already-has-KG`:
@@ -429,6 +429,21 @@ So you **opt in once** (build the KG, or set `KG_AUTO_EXTRACT=true`); after that
 | **`chunk`** (default) | general | no | Chunk-native general Q&A: large recall → selection → long-context synthesis → citations bound to source chunks. |
 | **`graph`** | strict | yes | Single-pass Personalized-PageRank propagation across the cross-document knowledge graph. |
 | **`reasoning`** | strict | yes | Agentic, iterative plan → retrieve → reflect → answer (streams a live trace). |
+
+### Ids vs. display names
+
+The ids above (`chunk` / `reasoning` / `graph`, and the group ids `general` / `strict`) are the **protocol**: they are what `POST /ask` accepts, what persisted sessions and bookmarks store, and what the backend registry `backend/app/services/ask_modes.py` declares. They are stable and are not renamed for cosmetic reasons.
+
+What the Ask panel *shows* is a separate, UI-only layer owned by the front-end registry `frontend/app/ask-modes.ts`:
+
+| Protocol id | Ask-panel display name |
+|---|---|
+| `chunk` | 通用问答 |
+| group `strict` (what the picker offers; its default engine is `reasoning`) | 深入分析 |
+| `reasoning` | 逐步推理 |
+| `graph` | 关联追溯 |
+
+`groupLabel()` / `modeLabel()` in that registry are the only read path: no other front-end file may hardcode a display name, and prose that mentions one interpolates it. `ask-modes.test.mjs` enforces both halves — it recursively scans `frontend/app` and fails if a current display name appears outside the registry, or if a retired name (严格推理 / 深挖推理 / 图谱多跳) reappears. Renaming a display name is therefore a one-line registry edit that changes no id, request/response payload, or stored session; `scripts/check_ask_modes_contract.py` separately pins the id set across the two stacks.
 
 **`chunk` — chunk-native, with optional chunk×graph mix.**
 - *Baseline:* large chunk recall (`CHUNK_RECALL`) → MMR / multi-sub-query quota diversity selection (`CHUNK_MMR_K`) → long-context synthesis. The KG is not touched.
