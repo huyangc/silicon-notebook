@@ -53,6 +53,7 @@ import {
   Check,
   ChevronDown,
   Code,
+  Columns2,
   Edit3,
   Eye,
   ImagePlus,
@@ -104,6 +105,12 @@ import {
   shouldOfferDraftRestore,
   sortRowsByPosition,
   type TextareaSelection,
+  CELL_VIEW_MODE_STORAGE_KEY,
+  VIEW_MODE_EDIT_LABEL,
+  VIEW_MODE_SPLIT_LABEL,
+  VIEW_MODE_PREVIEW_LABEL,
+  normalizeCellViewMode,
+  type CellViewMode,
 } from "./knowhow-cell-editor-logic.ts";
 import {
   ACCEPT_SUGGESTION_LABEL,
@@ -263,6 +270,31 @@ export function useFullscreenToggle(storageKey: string): [boolean, () => void] {
     });
   }, [storageKey]);
   return [fullscreen, toggle];
+}
+
+// 编辑器视图三态（编辑/并列/预览）——sessionStorage per-session 记忆（跨会话回落
+// edit），与 useFullscreenToggle 同款持久化方式但各用各的键、互不影响。仅编辑态
+// 用，不导出。
+function useCellViewMode(): [CellViewMode, (mode: CellViewMode) => void] {
+  const [viewMode, setViewModeState] = useState<CellViewMode>(() => {
+    if (typeof window === "undefined") return "edit";
+    try {
+      return normalizeCellViewMode(window.sessionStorage.getItem(CELL_VIEW_MODE_STORAGE_KEY));
+    } catch {
+      return "edit";
+    }
+  });
+  const setViewMode = useCallback((mode: CellViewMode) => {
+    setViewModeState(mode);
+    try {
+      if (typeof window !== "undefined") {
+        window.sessionStorage.setItem(CELL_VIEW_MODE_STORAGE_KEY, mode);
+      }
+    } catch {
+      // sessionStorage 不可用（隐私模式等）静默——只是记不住本会话选择。
+    }
+  }, []);
+  return [viewMode, setViewMode];
 }
 
 // ---------------------------------------------------------------------------
@@ -533,6 +565,7 @@ export function KnowhowCellEditor({
   onSwitchCell,
 }: KnowhowCellEditorProps) {
   const [fullscreen, toggleFullscreen] = useFullscreenToggle(FULLSCREEN_STORAGE_KEY);
+  const [viewMode, setViewMode] = useCellViewMode();
   // 与 KnowhowCellPreview 共用同一个 storageKey——查看态切编辑态（反之亦然）
   // 是同一个浮窗身份的两种渲染，不该在切换模式时跳位置/跳尺寸，见该组件
   // 对应注释。
@@ -909,54 +942,60 @@ export function KnowhowCellEditor({
             </div>
           ) : (
             <>
-              {column.role === "procedure" && <p className="kh-procedure-hint">{PROCEDURE_HINT_TEXT}</p>}
+              {column.role === "procedure" && viewMode !== "preview" && (
+                <p className="kh-procedure-hint">{PROCEDURE_HINT_TEXT}</p>
+              )}
 
               <div className="kh-toolbar">
-                <button
-                  type="button"
-                  className="kh-toolbar-button"
-                  title={TOOLBAR_LIST_LABEL}
-                  onClick={handleListClick}
-                  disabled={uploading}
-                >
-                  <List size={15} /> {TOOLBAR_LIST_LABEL}
-                </button>
-                <button
-                  type="button"
-                  className="kh-toolbar-button"
-                  title={TOOLBAR_CODE_LABEL}
-                  onClick={handleCodeClick}
-                  disabled={uploading}
-                >
-                  <Code size={15} /> {TOOLBAR_CODE_LABEL}
-                </button>
-                <button
-                  type="button"
-                  className="kh-toolbar-button"
-                  title={TOOLBAR_IMAGE_LABEL}
-                  onClick={handleImageButtonClick}
-                  disabled={uploading}
-                >
-                  <ImagePlus size={15} /> {TOOLBAR_IMAGE_LABEL}
-                </button>
-                <button
-                  type="button"
-                  className="kh-toolbar-button kh-toolbar-button--optimize"
-                  title={optimizeDisabledReason ?? OPTIMIZE_CELL_BUTTON_LABEL}
-                  onClick={handleOptimize}
-                  disabled={optimizeDisabledReason !== null || uploading || savingMode !== null}
-                >
-                  {isCellOptimizeLoading(optimizeState) ? (
-                    <Loader2 size={15} className="knowhow-spin" />
-                  ) : (
-                    <Sparkles size={15} />
-                  )}
-                  {isCellOptimizeLoading(optimizeState) ? "优化中…" : OPTIMIZE_CELL_BUTTON_LABEL}
-                </button>
-                {uploading && (
-                  <span className="kh-toolbar-status">
-                    <Loader2 size={14} className="knowhow-spin" /> 图片上传中…
-                  </span>
+                {viewMode !== "preview" && (
+                  <>
+                    <button
+                      type="button"
+                      className="kh-toolbar-button"
+                      title={TOOLBAR_LIST_LABEL}
+                      onClick={handleListClick}
+                      disabled={uploading}
+                    >
+                      <List size={15} /> {TOOLBAR_LIST_LABEL}
+                    </button>
+                    <button
+                      type="button"
+                      className="kh-toolbar-button"
+                      title={TOOLBAR_CODE_LABEL}
+                      onClick={handleCodeClick}
+                      disabled={uploading}
+                    >
+                      <Code size={15} /> {TOOLBAR_CODE_LABEL}
+                    </button>
+                    <button
+                      type="button"
+                      className="kh-toolbar-button"
+                      title={TOOLBAR_IMAGE_LABEL}
+                      onClick={handleImageButtonClick}
+                      disabled={uploading}
+                    >
+                      <ImagePlus size={15} /> {TOOLBAR_IMAGE_LABEL}
+                    </button>
+                    <button
+                      type="button"
+                      className="kh-toolbar-button kh-toolbar-button--optimize"
+                      title={optimizeDisabledReason ?? OPTIMIZE_CELL_BUTTON_LABEL}
+                      onClick={handleOptimize}
+                      disabled={optimizeDisabledReason !== null || uploading || savingMode !== null}
+                    >
+                      {isCellOptimizeLoading(optimizeState) ? (
+                        <Loader2 size={15} className="knowhow-spin" />
+                      ) : (
+                        <Sparkles size={15} />
+                      )}
+                      {isCellOptimizeLoading(optimizeState) ? "优化中…" : OPTIMIZE_CELL_BUTTON_LABEL}
+                    </button>
+                    {uploading && (
+                      <span className="kh-toolbar-status">
+                        <Loader2 size={14} className="knowhow-spin" /> 图片上传中…
+                      </span>
+                    )}
+                  </>
                 )}
                 <input
                   ref={fileInputRef}
@@ -965,31 +1004,64 @@ export function KnowhowCellEditor({
                   className="kh-hidden-file-input"
                   onChange={handleFileInputChange}
                 />
+                <div className="kh-view-switch" role="group" aria-label="视图模式">
+                  <button
+                    type="button"
+                    className={`kh-view-switch-button${viewMode === "edit" ? " kh-view-switch-button--active" : ""}`}
+                    aria-pressed={viewMode === "edit"}
+                    title={VIEW_MODE_EDIT_LABEL}
+                    onClick={() => setViewMode("edit")}
+                  >
+                    <Pencil size={14} /> {VIEW_MODE_EDIT_LABEL}
+                  </button>
+                  <button
+                    type="button"
+                    className={`kh-view-switch-button${viewMode === "split" ? " kh-view-switch-button--active" : ""}`}
+                    aria-pressed={viewMode === "split"}
+                    title={VIEW_MODE_SPLIT_LABEL}
+                    onClick={() => setViewMode("split")}
+                  >
+                    <Columns2 size={14} /> {VIEW_MODE_SPLIT_LABEL}
+                  </button>
+                  <button
+                    type="button"
+                    className={`kh-view-switch-button${viewMode === "preview" ? " kh-view-switch-button--active" : ""}`}
+                    aria-pressed={viewMode === "preview"}
+                    title={VIEW_MODE_PREVIEW_LABEL}
+                    onClick={() => setViewMode("preview")}
+                  >
+                    <Eye size={14} /> {VIEW_MODE_PREVIEW_LABEL}
+                  </button>
+                </div>
               </div>
 
               {uploadError && <p className="kh-inline-error">{uploadError}</p>}
               {optimizeState.status === "error" && <p className="kh-inline-error">{optimizeState.message}</p>}
 
-              <div className="kh-split">
-                <div
-                  className={`kh-editor-pane${dragActive ? " kh-editor-pane--drag" : ""}`}
-                  onDragOver={handleDragOver}
-                  onDragLeave={handleDragLeave}
-                  onDrop={handleDrop}
-                >
-                  <textarea
-                    ref={textareaRef}
-                    className="kh-textarea"
-                    value={content}
-                    disabled={uploading}
-                    onChange={(event) => setContent(event.target.value)}
-                    onPaste={handlePaste}
-                    placeholder="输入 markdown 内容…"
-                  />
-                </div>
-                <div className="kh-preview-pane">
-                  <KnowhowMarkdown md={content} notebookId={notebookId} apiBase={apiBase} />
-                </div>
+              <div className={`kh-split kh-split--${viewMode}`}>
+                {viewMode !== "preview" && (
+                  <div
+                    className={`kh-editor-pane${dragActive ? " kh-editor-pane--drag" : ""}`}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                  >
+                    <textarea
+                      ref={textareaRef}
+                      className="kh-textarea"
+                      value={content}
+                      disabled={uploading}
+                      onChange={(event) => setContent(event.target.value)}
+                      onPaste={handlePaste}
+                      placeholder="输入 markdown 内容…"
+                    />
+                  </div>
+                )}
+                {viewMode !== "edit" && (
+                  <div className="kh-preview-pane">
+                    <KnowhowMarkdown md={content} notebookId={notebookId} apiBase={apiBase} />
+                  </div>
+                )}
               </div>
             </>
           )}

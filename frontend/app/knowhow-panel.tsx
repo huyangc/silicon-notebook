@@ -2245,8 +2245,49 @@ export function KnowhowPanel({
           flex: 1 1 auto;
           min-height: 260px;
           display: grid;
-          grid-template-columns: 1fr 1fr;
           gap: 14px;
+        }
+
+        /* 三态视图：编辑/预览单栏铺满，并列双栏。 */
+        .kh-split--edit,
+        .kh-split--preview {
+          grid-template-columns: 1fr;
+        }
+        .kh-split--split {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        /* 工具栏右侧三选一视图切换（编辑/并列/预览）——分段控件，选中态浮起白底。
+           margin-left:auto 把它推到录入按钮的另一端；预览态录入按钮隐藏时它仍靠右。 */
+        .kh-view-switch {
+          margin-left: auto;
+          display: inline-flex;
+          align-items: center;
+          gap: 2px;
+          padding: 2px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          background: var(--soft);
+        }
+        .kh-view-switch-button {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          padding: 4px 10px;
+          font-size: 12.5px;
+          color: var(--muted);
+          cursor: pointer;
+        }
+        .kh-view-switch-button:hover {
+          color: var(--ink);
+        }
+        .kh-view-switch-button--active {
+          background: #fff;
+          color: var(--ink);
+          box-shadow: 0 1px 2px rgba(24, 39, 75, 0.12);
         }
 
         .kh-editor-pane {
@@ -2768,7 +2809,8 @@ export function KnowhowPanel({
             border-radius: 0;
           }
 
-          .kh-split {
+          .kh-split,
+          .kh-split--split {
             grid-template-columns: 1fr;
           }
 
