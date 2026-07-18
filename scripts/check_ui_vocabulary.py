@@ -95,7 +95,7 @@ CJK_TERMS = {
 # `label(MAP, v, v)`。反向引用保证「兜底表达式与取值表达式逐字相同」——只认这个
 # 形态,fallback 是字面量/别的表达式都放行(那是正当兜底)。
 RAW_FALLBACK = re.compile(
-    r"(?<![.\w$])[A-Za-z_$][\w$]*\s*\[\s*(?P<key>[^\[\]{}()]+?)\s*\]\s*(?:\?\?|\|\|)\s*(?P=key)(?![\w$.])"
+    r"(?<![\w$])[A-Za-z_$][\w$]*\s*\[\s*(?P<key>[^\[\]{}()]+?)\s*\]\s*(?:\?\?|\|\|)\s*(?P=key)(?![\w$.])"
 )
 LABEL_RAW_FALLBACK = re.compile(
     r"(?<![.\w$])label\(\s*[^,()]+,\s*(?P<val>[^,()]+?)\s*,\s*(?P=val)\s*\)"

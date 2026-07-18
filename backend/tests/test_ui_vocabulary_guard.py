@@ -191,6 +191,8 @@ def test_正则字面量里的引号不会把代码拖进渲染文本(tmp_path):
         "const c = STATUS_LABELS[s] || s;",
         "const d = label(TIER, tier, tier);",
         "const e = <span>{MAP[item.status] ?? item.status}</span>;",
+        # 表挂在对象/命名空间上时同样要抓到(前缀 `.` 不能让规则漏过)
+        "const f = vocab.STATUS_LABELS[s] ?? s;",
     ],
 )
 def test_兜底即原值会被抓到(tmp_path, code):
