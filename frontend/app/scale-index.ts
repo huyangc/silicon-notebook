@@ -82,7 +82,7 @@ export function describeScaleIndex(s: ScaleIndexStatus): ScaleIndexView {
 // 每个动作的确认文案 —— 描述具体精确,并诚实说明 update 会在何种条件下自动转全量。
 export function scaleIndexOpConfirm(op: ScaleIndexOp, s: ScaleIndexStatus): string {
   if (op === "build") {
-    return "构建检索索引？\n\n从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与严格推理。后台进行，大库可能数分钟。";
+    return "构建检索索引？\n\n从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与深入分析。后台进行，大库可能数分钟。";
   }
   if (op === "update") {
     const n = s.unindexed_sources ?? 0;

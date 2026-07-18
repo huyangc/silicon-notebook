@@ -361,7 +361,7 @@ KB+confirmed-Memory 三种检索条件。
 
 | 上传时 notebook 状态 | 是否抽 KG | 怎么触发 |
 |---|---|---|
-| 尚无 KG（新库） | **不**自动抽 | 按需构建：`POST /api/notebooks/{id}/kg/build`（界面：notebook 的**「构建知识图谱」**动作；在无 KG 的库上选严格推理模式时也会提示构建） |
+| 尚无 KG（新库） | **不**自动抽 | 按需构建：`POST /api/notebooks/{id}/kg/build`（界面：notebook 的**「构建知识图谱」**动作；在无 KG 的库上选「深入分析」模式时也会提示构建） |
 | 已有 KG | 每个新源**自动后台抽取** | 无需手动触发——续抽以保持 KG 完整；新源随后增量融入跨文档统一 KG |
 
 摄取期判定 = `KG_AUTO_EXTRACT 或 该 notebook 已有 KG`：
