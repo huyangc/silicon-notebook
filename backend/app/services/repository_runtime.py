@@ -19,6 +19,7 @@ from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.knowhow_store import KnowhowStore
+from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.memory_store import MemoryStore
 from app.repositories.sqlite.notebook_store import NotebookStore
@@ -293,6 +294,10 @@ class RepositoryRuntime:
             self.database,
             new_id=seams.new_id,
             now=seams.now,
+        )
+        # knowhow 单表跨 notebook 传输的 SQL（快照+单事务插入+校验）
+        self.knowhow_transfer_store = KnowhowTransferStore(
+            self.database, new_id=self.seams.new_id, now=self.seams.now
         )
 
     @property

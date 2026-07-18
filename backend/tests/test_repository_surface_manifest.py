@@ -3102,6 +3102,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK3_SOURCE_ASSET_ALLOWED_IMPORTS
                     or site in PAPER_META_STATUS_TASK4_ALLOWED_IMPORTS
                     or site in ASSET_GC_TRIGGER_ALLOWED_IMPORTS
+                    or site in KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS
                 )
 
 
@@ -3900,3 +3901,27 @@ ASSET_GC_TRIGGER_ALLOWED_MEMBER_FILES = {
     }
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | ASSET_GC_TRIGGER_ALLOWED_MEMBER_FILES
+# knowhow cross-notebook copy/move Task A1 (KnowhowTransferStore): its own
+# store test composes the real facade the same way Task 2/3/4/5/6's sibling
+# knowhow/paper-meta tests do — SQLiteRepository(...) to build the runtime,
+# repo._runtime to reach the new knowhow_transfer_store, repo.create_notebook +
+# repo.create_knowhow_table + repo.add_knowhow_row + repo.get_knowhow_table to
+# seed a one-row table fixture, and repo._connect to assert the insert_transfer
+# rollback left no half-written copy. Every one of these is a frozen facade
+# member consumed at a fresh site this test file postdates, so it takes the
+# same broad (file, member) allowance as TASK3_PAPER_META_ALLOWED_MEMBER_FILES.
+# The lone import consumer (SQLiteRepository) additionally needs the IMPORTS
+# entry below, folded into the import-completeness OR-chain (which resolves
+# lazily at call time, so defining it here at EOF is fine). Appended at EOF for
+# the same zero-line-shift reason as every other TASKN_* block above.
+KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_transfer_store.py", 4, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+KNOWHOW_TRANSFER_STORE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_transfer_store.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "_connect", "create_notebook",
+        "create_knowhow_table", "add_knowhow_row", "get_knowhow_table",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER_STORE_ALLOWED_MEMBER_FILES
