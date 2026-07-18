@@ -23,6 +23,7 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
+import { logDiagnostic } from "./errors.ts";
 import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
@@ -338,6 +339,13 @@ export function AnswerView({
     [answerText, answer.anchors, answer.citations]
   );
   useEffect(() => setCitePopover(null), [answer.answer_id]);
+  // model_errors[].message 是模型服务的原始失败原因(stage + 上游异常文本),
+  // 横幅本身要留(PR#61 的可观测性:让用户分得清「模型挂了」vs「没搜到」),
+  // 但原文不进 title——它会被 hover 出来。原文只落 console。
+  const modelErrorDetail = answer.model_errors?.[0]?.message ?? null;
+  useEffect(() => {
+    if (modelErrorDetail) logDiagnostic("model", modelErrorDetail);
+  }, [modelErrorDetail]);
   useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 1400);
@@ -353,8 +361,8 @@ export function AnswerView({
     <div className="chat-answer">
       {answer.model_errors && answer.model_errors.length > 0 && (
         // 不再报具体 stage 名(与设置页的模型条目对不上,embed 在设置页也没有);
-        // 原始 stage/message 保留进 hover title 供排查。
-        <div className="answer-model-error" title={answer.model_errors[0]?.message ?? ""}>
+        // 原始 stage/message 不进 title(hover 就能看到),只落 console。
+        <div className="answer-model-error" title="模型服务有部分调用没成功">
           ⚠️ 这次回答可能不完整——有部分内容没能正常生成。可以重新问一次；如果一直这样，去「模型服务」检查配置。
         </div>
       )}

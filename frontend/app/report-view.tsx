@@ -21,7 +21,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkCitations } from "./answer-citations";
 import { referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
-import { toUserMessage } from "./errors";
+import { logDiagnostic, toUserMessage } from "./errors";
 import { label } from "./vocabulary";
 
 // ---------------------------------------------------------------------------
@@ -606,6 +606,14 @@ export function ReportsPanel({
     return () => { cancelled = true; window.clearInterval(poll); };
   }, [activeId, activeLive, notebookId, getReport, listReports]);
 
+  // 报告失败的原始异常串(services/report_execution.py 写的
+  // `f"{type(exc).__name__}: {exc}"`)不上屏——界面给稳定文案,原文只进 console。
+  // 放 useEffect 而不是渲染期:后者会随每次重渲染刷屏。
+  const activeError = active?.status === "failed" ? active.error : null;
+  useEffect(() => {
+    if (activeError) logDiagnostic("report", activeError);
+  }, [activeError]);
+
   // 删除二次确认 4s 后自动复位,避免按钮长期停在危险态。
   useEffect(() => {
     if (!confirmDelete) return;
@@ -823,7 +831,7 @@ export function ReportsPanel({
           </div>
         </div>
         {active.status === "failed" && active.error && (
-          <div className="report-error" title={active.error}>报告没能生成完，可以重试。</div>
+          <div className="report-error">报告没能生成完，可以重试。</div>
         )}
         {active.status === "planning" && (
           <div className="report-running-hint report-planning-hint">

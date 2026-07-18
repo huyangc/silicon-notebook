@@ -55,7 +55,7 @@ import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
-import { throwHumanizedHttpError, toUserMessage } from "./errors.ts";
+import { logDiagnostic, throwHumanizedHttpError, toUserMessage } from "./errors.ts";
 import {
   MODEL_ROLES, type ModelRole, type ServiceForm,
   buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
@@ -355,18 +355,22 @@ async function probeReady(): Promise<ReadySnapshot | null> {
     });
     let body: Partial<ReadySnapshot> | null = null;
     try { body = await res.json(); } catch { body = null; }
-    if (!res.ok || !body) {
+    const snapshot: ReadySnapshot = !res.ok || !body
       // 503(应用路由仍在预热)或解析失败:尽量沿用 body 中的进度字段。
-      return {
-        ready: false,
-        phase: (body?.phase as ReadySnapshot["phase"]) ?? "starting",
-        detail: body?.detail,
-        warmed_notebooks: body?.warmed_notebooks,
-        total_notebooks: body?.total_notebooks,
-        error: body?.error ?? null,
-      };
-    }
-    return body as ReadySnapshot;
+      ? {
+          ready: false,
+          phase: (body?.phase as ReadySnapshot["phase"]) ?? "starting",
+          detail: body?.detail,
+          warmed_notebooks: body?.warmed_notebooks,
+          total_notebooks: body?.total_notebooks,
+          error: body?.error ?? null,
+        }
+      : (body as ReadySnapshot);
+    // 后端把启动失败写成 `f"{type(exc).__name__}: {exc}"`(services/startup_warmup.py)
+    // ——`OperationalError: database is locked` 这种不该出现在启动屏上。原文在
+    // 这条 I/O 边界上落 console(和 readHttpError 一样的位置),界面只给稳定中文。
+    if (snapshot.error) logDiagnostic("ready", snapshot.error);
+    return snapshot;
   } catch {
     return null;   // 网络错误:后端还没起来,继续轮询
   }
@@ -381,7 +385,9 @@ function startupPhaseText(snap: ReadySnapshot | null): string {
     const total = snap?.total_notebooks ?? 0;
     return `正在预热 (${warmed}/${total} 笔记本)…`;
   }
-  if (phase === "error") return snap?.error?.trim() || "启动时遇到问题，正在重试…";
+  // ⚠别把 snap.error 直出:它是后端的原始异常串。原文已在 probeReady() 里进
+  // console,这里只给稳定文案。
+  if (phase === "error") return "启动时遇到问题，正在重试…";
   return "服务启动中…";
 }
 
@@ -1169,7 +1175,9 @@ export default function Home() {
           setPendingMerges(pend);
           setUnifiedKgStatus(status);
           setToast(job.status === "failed"
-            ? `全部预审中止：${job.error || "未知错误"}（已处理 ${job.done}）`
+            // job.error 是后端的 `f"{type(exc).__name__}: {exc}"`
+            // (services/knowledge_governance.py),不直出;原文进 console。
+            ? `全部预审中止：${toUserMessage(job.error ? new Error(job.error) : null, "出了点问题")}（已处理 ${job.done}）`
             : `全部预审完成：已处理 ${job.done} 项`);
         }
       } catch { /* transient error; keep polling */ }
@@ -3211,7 +3219,15 @@ export default function Home() {
     try {
       const r = await testModelService(role, f.base_url.trim(), f.model.trim(),
         f.keyDirty ? f.api_key : null);
-      setModelTesting((m) => ({ ...m, [role]: r.ok ? `通 ${r.latency_ms}ms` : `失败：${r.error}` }));
+      // r.error 混着两类东西:后端预校验写的中文文案,和 `f"{type(exc).__name__}:
+      // {exc}"`(api/routes.py 的 test_model_service)。ModelTestResult 上没有
+      // 出处标记,两者分不开,故一律不直出——原文进 console。
+      setModelTesting((m) => ({
+        ...m,
+        [role]: r.ok
+          ? `通 ${r.latency_ms}ms`
+          : `失败：${toUserMessage(r.error ? new Error(r.error) : null, "连接未通过")}`,
+      }));
     } catch (e) {
       setModelTesting((m) => ({ ...m, [role]: "失败" })); reportError(e);
     }
@@ -4590,7 +4606,13 @@ export default function Home() {
                 )) : (
                   <article className="item">
                     <h3>等待解析</h3>
-                    <p>{sourceDetail.error_message || "当前来源还没有解析出元素。"}</p>
+                    {/* error_message 是后端的原始异常串(services/source_ingestion.py),
+                        不直出——这里只按「有没有失败」二选一给稳定文案。原文在来源
+                        轮询那条路径上已经过 toUserMessage 落进 console(见 justFailed)。
+                        渲染期不调 toUserMessage:它会随重渲染反复刷日志。 */}
+                    <p>{sourceDetail.error_message
+                      ? "这个来源没能解析成功，可以删除后重新上传。"
+                      : "当前来源还没有解析出元素。"}</p>
                   </article>
                 )}
               </div>
