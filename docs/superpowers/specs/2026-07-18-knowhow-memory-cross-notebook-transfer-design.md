@@ -120,7 +120,11 @@
 ### 5.2 复制（每条，单事务）
 1. 新 `memory_items`：新 id、`notebook_id=目标`、`created_by=我`、拷 `title/content_md/tags_json`、`status='confirmed'`、`confirmed_by=我`、`confirmed_at=now`、`source_answer_id=NULL`（避免撞 `idx_memory_answer_once`）、`agent_profile_id=NULL`、`promotion_state='none'`、`embedding_status` 见下。
 2. 初始 `memory_revisions`（revision=1，`change_reason='从笔记本 <源> 复制'`）——**不拷源的历史 revision**（历史属于源、且 ref 旧 memory_id）。
-3. 新 `memory_provenance`：`origin` 沿用源值（不改 CHECK），`payload_json` 加 `imported_from: {notebook_id, memory_id, action:'copy'}`（+可选保留源 provenance 摘要）。
+3. 新 `memory_provenance`：`origin` 沿用源值（不改 CHECK），`payload_json` 写 `imported_from: {notebook_id, memory_id, action, source_provenance:{…源 payload 原样…}}`。
+   **源 provenance 必须嵌套保留、不得整体丢弃**：否则 `ask_answer` 出身的记忆复制后仍是 confirmed，
+   却丢光了 `answer_id`/`question`/`citations`/`evidence_level`——即「确认态记忆不带任何当初确认它的证据」；
+   **移动更会永久丢失**（源已删）。**嵌套而非平铺**是因为源的 `anchors`/`citations` 指向**源笔记本**的
+   行 id，在目标库不可解析，放顶层会被消费方误当作活引用。
 4. `memory_embeddings`：**拷源那 1 条向量**（新 memory_id key、同 model/dimension/vector），`embedding_status='ready'`（零重嵌入）。源无向量（pending/failed）→ 不拷，`embedding_status='pending'` 并调度补嵌（复用 `_schedule_embed`）。
 5. FTS：插 `memory_items` 由触发器自动填，无需处理。
 6. KG 重派生：按**目标** notebook 的 `memory_kg_eligible(target_nb)` 决定；沿用 confirm 的默认开 + 可取消开关（前端复用现「同时抽取到知识图谱」勾选）。走 `ingest_memory_source(target_nb, new_memory_id, title, content)` 在目标建**新**隐藏源（新 memory_id，不与源全局唯一键冲突）。后台 best-effort。
@@ -160,7 +164,10 @@
 - `POST /memories/transfer`
   - body `{ "memory_ids": [str], "target_notebook_id": str, "mode": "copy"|"move", "extract_kg": bool? }`（`extract_kg` 可选，默认 `true`，与 confirm 默认开一致）
   - 守卫：每条源 memory `created_by==我`、目标 `created_by==我`（write）；目标≠源；仅 confirmed。
-  - 返回 `{ "results": [ {"source_id":..., "new_id":..., "ok":bool, "error":str?} ] }`。
+  - 返回 `{ "results": [ {"source_id":..., "new_id":..., "ok":bool, "error":str?, "status": "copied"|"moved"|"failed"|"copied_source_not_removed"} ] }`。
+    `status` 枚举取代早期设计的 `source_deleted` 布尔：三个布尔要前端自行关联易错，且 `source_deleted`
+    在 copy 模式无意义。`copied_source_not_removed` = **副本已在目标、源未删**（`ok=False` 但 `new_id` 有值），
+    前端据此提示「副本已存在，别盲目重试」——否则用户重试会静默累积副本。
 - 两端点同步返回；KG 派生走后台。
 
 ## 9. 前端触点（前后端同 PR 交付）
