@@ -223,6 +223,35 @@ Everything that is caught rather than fetched goes through `toUserMessage(error,
 
 Do not hand-roll an error branch. `frontend/app/errors-guard.test.mjs` recursively scans `frontend/app` and enforces three shapes: no `new Error(...)` whose argument interpolates `.status`; — because that first rule cannot see `setStatusText(\`服务异常：${err.message}\`)` — **no reads of `.message` at all** outside `errors.ts` unless the exact line is registered in `ALLOWED_MESSAGE_READS`; and, because that second rule could not see the backend's *diagnostic* fields either, **no reads of `.error` or `.error_message`** unless registered in `ALLOWED_DIAGNOSTIC_READS` (`console.error` is exempt, being the channel those strings belong in). Registered entries are only cases where the value is not raw exception text or is not displayed: a sentinel comparison, a condition, a state field already written by `toUserMessage`, a value taken solely to hand to `logDiagnostic`. The guard also pins positively that `reportError`, the ask stream's `error` event, `job.error`, and `extractErrorMessage` (a thin alias of `toUserMessage` shared by ~20 knowhow call sites) still route through the layer. All allowlists are line-exact, so a new leak cannot inherit an old exemption.
 
+## 界面词汇表 (User-Facing Vocabulary)
+
+Copy shown to users — JSX text, `label`/`title`/`placeholder`/`aria-label`, toasts, errors, table headers — uses only the "interface word", never the internal implementation term. **界面词 ≠ 内部词**: `projection`/`tier`/`canonical`/`chunk`/`KG` and friends keep their original names in code, types, comments, and the architecture docs; only strings rendered to the user get rewritten.
+
+| 内部 / 黑话（界面文案里不得出现） | 界面词 |
+|---|---|
+| 基准库 / 基准语料 / 底层库 (base) / 权威参考层 | 公共知识库 |
+| 个人层 | 个人知识库 |
+| notebook / Notebook（散文中） | 笔记本 |
+| 建图 / 构建·建立知识图谱（作动作） | 整理（知识图谱） |
+| 入图 / 未入图 | 已分析 / 待分析 |
+| 抽取 / 补抽 / 重抽 | 分析 / 分析新增 / 全部重新分析 |
+| 向量检索索引 / CSR 图 / ANN / 暴力检索 | 索引（整句重写，如「建立快速查找结构」；小库说「直接搜索已够快」） |
+| chunk / chunks | 段 |
+| 节点（散文，非图谱技术上下文） | 概念 |
+| 边 / 关系边（散文） | 关联 |
+| 投影 / 投影产物 / 重建投影（knowhow） | 同步 / 重新同步 |
+| LLM 预审 / 预审 | 自动判重 |
+| 去重 | 合并重复 |
+| 晋升（用户侧）：动作 / 状态 / 队列 | 贡献到公共知识库 / 已收录 / 内容审核 |
+| 孤立节点 / 补连边 | 没建立关联的内容 / 补上关联 |
+| 边审 / 边审查队列 | 关系审核 / 关系审核队列 |
+| Memory（残留英文散文） | 记忆 |
+| schema（散文） | 内容类型 / 抽取字段 |
+| deprecated（toast 直出） | 已弃用 |
+
+**刻意保留、不要误杀**：**知识图谱**（用户词典里的词，只杀 KG / 建图 / 入图 等缩写变体）、**索引**（书后索引式心智模型，只杀 CSR / ANN / 暴力检索 修饰）、**「知识库」作 Knowledge tab 名**（`workspace-model.ts` 的 `CHAT_MODES`；lint 分不清 tab 名与误用，故不进黑名单）。
+
+`scripts/check_ui_vocabulary.py`（挂在 `scripts/check.sh`）扫 `frontend/app` 渲染文本里的黑名单词，命中即失败。它是**词黑名单而非语义检查**——只在含中文的渲染单元里匹配，且剥离注释 / 标识符 / `${…}`·`{…}` 插值，故 `id: "chunk"`、`currentNotebook` 等不会误报；也因此不声称全覆盖，新增界面文案仍须人工对照上表把关。
 ## No Docker In First Version
 
 Do not add Docker or Docker Compose as the default first-version workflow.
@@ -306,6 +335,7 @@ This checks:
 - KG extraction boundary (`no-llm` offline), explicit KG storage, source cleanup → Ask → feedback → conversation and report paths, retrieval scoring, stale-source knowledge invalidation, sharing, and fresh-database assertions.
 - Logging: LLM interaction log, generic event log (parseable/disable/never-raise), and pipeline stage events + `error_message` regression.
 - Official MCP client smoke for the seven Memory tools, session notebook selection, candidate exclusion from formal context, and same-user/same-notebook cross-Agent candidate recall.
+- User-facing vocabulary guard (`check_ui_vocabulary.py`): no internal jargon in rendered `frontend/app` copy (see 界面词汇表).
 - Source summary fallback and notebook-internal search.
 - Complete backend `pytest` suite.
 - Every recursively discovered frontend `*.test.mjs`, Next.js TypeScript, and production build. Missing `frontend/node_modules` is a hard failure.
