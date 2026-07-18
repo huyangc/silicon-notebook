@@ -133,6 +133,18 @@ class PendingBus:
         with self._lock:
             return len(self._within_ttl(self._buffer.get(user_id, [])))
 
+    def reset(self) -> None:  # 测试辅助
+        """清空全部跨测试可泄漏状态(见 tests/conftest.py 的 autouse 重置)。
+
+        本类是进程级单例:缓冲事件、已关闭的 loop、连接集合若留给下一个测试,
+        就会串味。生产期不该调用——进程内只有一条总线,清空即丢事件。
+        """
+        with self._lock:
+            self._buffer.clear()
+            self._last_publish.clear()
+            self._loop = None
+        self._conns.clear()
+
 
 pending_bus = PendingBus()
 
