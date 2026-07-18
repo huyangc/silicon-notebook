@@ -1305,7 +1305,7 @@ chunk 或 knowledge object。
 ## 19.1 形成、隐私与页面
 
 - 每条 Memory 必须绑定一个 `notebook_id` 和一个创建者，归创建者私有；总 Memory 页面只是
-  当前用户跨 notebook 聚合，notebook 卡片数量和 `Ask | Knowledge | Memory | Deep Report`
+  当前用户跨 notebook 聚合，notebook 卡片数量和 `问答 (Ask) | 知识库 (Knowledge) | 记忆 (Memory) | 深度报告 (Deep Report)`
   中的 Memory 标签是 notebook 局部视图。
 - Ask 回答底部提供“保存到 Memory”。系统先生成不落库的标题/Markdown/标签预览，用户可编辑，
   确认后直接形成 `confirmed`。LLM 未配置或预览失败时，确定性使用问题作标题、清理显示引用后的
