@@ -75,11 +75,14 @@ test("行标题列选择器：标签与「不设置」选项文案", () => {
 });
 
 test("ANCHOR_SET_HINT: 已选行标题列的提示语与规格①逐字一致", () => {
-  assert.strictEqual(ANCHOR_SET_HINT, "用作每行的标题；设置后每行作为一个节点进入知识图谱，节点名取自该列");
+  // 规格原文用「节点」（图论内部词），界面词改用「知识对象」；不能用「概念」——
+  // knowhow 的 anchor 分组在界面上已经占了「概念」这个词，且每行进图谱后的
+  // object_type 是自定义列名，不是 Concept 这一种类型。
+  assert.strictEqual(ANCHOR_SET_HINT, "用作每行的标题；设置后每行作为一个知识对象进入知识图谱，对象名取自该列");
 });
 
 test("ANCHOR_NONE_HINT: 未选行标题列的提示语与规格①逐字一致", () => {
-  assert.strictEqual(ANCHOR_NONE_HINT, "未选行标题列：本表仅参与问答检索，不构建图谱节点");
+  assert.strictEqual(ANCHOR_NONE_HINT, "未选行标题列：本表仅参与问答检索，不加入知识图谱");
 });
 
 test("anchorHint: null → 未选提示；下标/列 id → 已选提示", () => {

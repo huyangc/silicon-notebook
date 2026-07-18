@@ -1,11 +1,11 @@
 import { humanizedError } from "./errors.ts";
 
 export const AGENT_SCOPE_OPTIONS = [
-  { value: "knowledge:read", label: "读取 Knowledge" },
-  { value: "memory:read", label: "读取已确认 Memory" },
+  { value: "knowledge:read", label: "读取知识库" },
+  { value: "memory:read", label: "读取已确认记忆" },
   { value: "memory:read_candidates", label: "读取待确认候选" },
-  { value: "memory:propose", label: "主动提交候选 Memory" },
-  { value: "ask:execute", label: "执行 Notebook Ask" },
+  { value: "memory:propose", label: "主动提交候选记忆" },
+  { value: "ask:execute", label: "执行笔记本问答" },
   { value: "knowhow:code", label: "Knowhow 代码附件写入" },
 ] as const;
 

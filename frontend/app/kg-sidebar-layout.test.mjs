@@ -41,7 +41,7 @@ test("KG merge decisions optimistically remove the decided pending row", () => {
 });
 
 test("KG rebuild confirmation modal renders above the full-screen graph overlay", () => {
-  assert.match(page, /完整重抽知识图谱/);
+  assert.match(page, /清空现有知识图谱并重新分析全部来源/);
   assert.match(page, /className="utility-modal"[\s\S]*infoModal/);
   assert.ok(zIndexFor(".utility-modal") > zIndexFor(".kg-view"));
 });

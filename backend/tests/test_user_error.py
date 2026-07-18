@@ -41,10 +41,10 @@ def client(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_user_error_carries_the_marker_and_keeps_detail_a_plain_string():
-    exc = user_error(403, "仅管理员可设置基准库")
+    exc = user_error(403, "仅管理员可设为公共知识库")
     assert exc.status_code == 403
     # detail 的类型是 MCP agent / 日志 / 排查的契约，标记只能挂在头上。
-    assert exc.detail == "仅管理员可设置基准库"
+    assert exc.detail == "仅管理员可设为公共知识库"
     assert isinstance(exc.detail, str)
     assert exc.headers == {USER_MESSAGE_HEADER: "1"}
 

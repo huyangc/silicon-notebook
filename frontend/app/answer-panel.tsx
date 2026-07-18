@@ -149,11 +149,14 @@ function SelectedReferenceDetail({
           onClick={() => onOpenKnowledgeGraph(reference.anchor?.object_id)}
           disabled={!canLocateInGraph}
           title={
+            // 用「知识对象」而非「概念」:引用锚定的是 object_id,其 object_type 可以是
+            // Concept / Claim / Formula / Procedure 或 knowhow 表带来的自定义类型。
+            // 说「概念」会把后四类说成第一类,用户按图索骥时对不上。
             isRelationReference
-              ? "关系引用绑定的是边证据，不是知识节点，无法在知识图谱中定位"
+              ? "关系引用绑定的是一条关联，不是具体的知识对象，无法在知识图谱中定位"
               : reference.anchor?.object_id
                 ? "在知识图谱中定位"
-                : "该引用没有绑定知识节点"
+                : "该引用没有绑定到具体的知识对象"
           }
         >
           <ExternalLink size={14} />
@@ -367,8 +370,8 @@ export function AnswerView({
         </div>
       )}
       {answer.index_required && (
-        <div className="answer-model-error" title="大库检索强制走索引;未建索引时仅有降级结果">
-          <span>此知识库较大且尚未建立检索索引，当前检索能力受限。</span>
+        <div className="answer-model-error" title="内容较多时检索会走索引；尚未建立索引时结果会受限">
+          <span>此笔记本内容较多，尚未建立索引，当前检索能力受限。</span>
           <button
             type="button"
             className="mode-engine"
@@ -393,9 +396,9 @@ export function AnswerView({
         const { personal, base } = computeSourceTierCounts(references);
         if (personal + base === 0) return null;
         return (
-          <span className="tag source-dist" title="本次引用的来源分布（个人层 / 基准库）">
+          <span className="tag source-dist" title="本次引用的来源分布（个人知识库 / 公共知识库）">
             来源 · 个人 {personal}
-            {base > 0 && <> · <strong className="source-dist-base">基准库 {base}</strong></>}
+            {base > 0 && <> · <strong className="source-dist-base">公共 {base}</strong></>}
           </span>
         );
       })()}
@@ -434,13 +437,13 @@ export function AnswerView({
       )}
       <div className="answer-feedback">
         <button
-          aria-label={memorySaved ? "已保存到 Memory" : "保存到 Memory"}
+          aria-label={memorySaved ? "已保存到记忆" : "保存到记忆"}
           className={`answer-memory-save ${memorySaved ? "is-saved" : ""}`}
           disabled={memorySaved}
           onClick={() => onSaveMemory(answer.answer_id)}
-          title={memorySaved ? "已保存到 Memory" : "保存到 Memory"}
+          title={memorySaved ? "已保存到记忆" : "保存到记忆"}
           type="button"
-        >{memorySaved ? <Check size={15} /> : <BookmarkPlus size={15} />}<span>{memorySaved ? "已保存到 Memory" : "保存到 Memory"}</span></button>
+        >{memorySaved ? <Check size={15} /> : <BookmarkPlus size={15} />}<span>{memorySaved ? "已保存到记忆" : "保存到记忆"}</span></button>
         <div className="answer-feedback-actions">
           <button
             aria-label="有用"

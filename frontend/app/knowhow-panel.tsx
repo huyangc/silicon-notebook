@@ -497,7 +497,7 @@ export function KnowhowPanel({
       await reprojectKnowhowTable(notebookId, selectedTableId);
       loadDetail(selectedTableId);
     } catch {
-      setActionError("重新投影失败，请重试");
+      setActionError("重新同步失败，请重试");
     } finally {
       setRetryingReproject(false);
     }
@@ -3009,14 +3009,14 @@ function KnowhowTableGrid({
               className="sort-button knowhow-reproject-button"
               onClick={onRetryReproject}
               disabled={retryingReproject || deleting || !detail}
-              title="重新投影整张表（后台执行）"
+              title="重新同步整张表（后台执行）"
             >
               <RefreshCw size={14} className={retryingReproject ? "knowhow-spin" : undefined} />
-              {retryingReproject ? "重建中…" : "重建投影"}
+              {retryingReproject ? "重建中…" : "重新同步"}
             </button>
             {confirmDelete ? (
               <span className="knowhow-confirm">
-                <span>删除这张表？行、格与投影产物将一并删除</span>
+                <span>删除这张表？行、格与同步生成的内容将一并删除</span>
                 <button type="button" className="knowhow-confirm-yes" disabled={deleting} onClick={onConfirmDelete}>
                   {deleting ? "删除中…" : "确认删除"}
                 </button>
@@ -3740,7 +3740,7 @@ function ProjectionStatusBadge({
           className="knowhow-status-retry"
           onClick={onRetry}
           disabled={retrying}
-          title="重新投影整张表（后台执行）"
+          title="重新同步整张表（后台执行）"
         >
           <RefreshCw size={12} className={retrying ? "knowhow-spin" : undefined} />
           {!retrying && "重试"}

@@ -711,3 +711,93 @@ def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferre
         assert "延后为独立工作" in text, (
             f"{name} must keep the Pydantic/lifespan deferral factual"
         )
+
+
+def test_user_facing_vocabulary_guard_is_documented_in_both_readmes():
+    """界面词汇守卫是**开发约束**变更(新增硬门 + AGENTS.md 词汇契约),按仓库
+    Documentation Sync 规则必须同步两份 README:守卫存在、怎么单独跑、契约在哪。
+
+    review 阻塞 5:PR 把 check_ui_vocabulary.py 挂进了 check.sh 并在 AGENTS.md 立了
+    强制词汇契约,却只改了 AGENTS.md,两份 README 的开发/验证说明没跟。
+    """
+    _assert_phrases(
+        {
+            "README.md": "PYTHONPATH=backend python scripts/check_ui_vocabulary.py",
+            "README_zh.md": "PYTHONPATH=backend python scripts/check_ui_vocabulary.py",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "`AGENTS.md`「界面词汇表」is its single source of truth",
+            "README_zh.md": "真源是 `AGENTS.md`「界面词汇表」",
+        }
+    )
+    # 守卫的两条独立检查都要在文档里露出,否则「兜底即原值」会被当成风格建议。
+    _assert_phrases(
+        {
+            "README.md": "rejects raw enum fallbacks (`MAP[x] ?? x`, and `label(map, x, x)`",
+            "README_zh.md": "拒绝「兜底即原值」（`MAP[x] ?? x`，以及通过正规 API 达成同一效果的 `label(map, x, x)`）",
+        }
+    )
+    # 第二轮 review 阻塞 3:兜底检查改用 TS AST 并搬去前端。文档要指到新位置,
+    # 否则「同一脚本里的第二条检查」这句会把人带到早已删掉的正则上。
+    _assert_phrases(
+        {
+            "README.md": "`frontend/app/raw-enum-fallback.test.mjs`",
+            "README_zh.md": "`frontend/app/raw-enum-fallback.test.mjs`",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "runs on a real TypeScript AST rather than a regex",
+            "README_zh.md": "跑在真正的 TypeScript AST 上而非正则",
+        }
+    )
+    # 自测文件是「黑名单不得退化成词表子集」的执行者,文档要指向它。
+    _assert_phrases(
+        {
+            "README.md": "backend/tests/test_ui_vocabulary_guard.py",
+            "README_zh.md": "backend/tests/test_ui_vocabulary_guard.py",
+        }
+    )
+    # 第二轮 review 阻塞 2:守卫作用域从「frontend/app 目录」改成「信任边界」——
+    # 后端 user_error() 的文案会被前端原样上屏,所以同样受词表约束。这是开发者
+    # 写后端错误文案时必须知道的约束,三份文档都要说明白。
+    _assert_phrases(
+        {
+            "AGENTS.md": "作用域跟着信任边界走，不跟着目录走",
+            "README.md": "scope follows the **trust boundary rather than the directory tree**",
+            "README_zh.md": "作用域跟着信任边界走、不跟着目录树走",
+        }
+    )
+    _assert_phrases(
+        {
+            "AGENTS.md": '后端 `user_error(status, "…")` 的消息字面量',
+            "README.md": 'the message literals of every backend `user_error(status, "…")` call',
+            "README_zh.md": '后端每处 `user_error(status, "…")` 的消息字面量',
+        }
+    )
+    # 反向边界同样要写明,否则下一个人会顺手把 str(exc) 也纳进来。
+    _assert_phrases(
+        {
+            "AGENTS.md": "裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内",
+            "README.md": "Bare `HTTPException(detail=str(exc))` stays outside the scan on purpose",
+            "README_zh.md": "裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内",
+        }
+    )
+
+
+def test_default_notebook_name_is_documented_as_a_contract_not_copy():
+    """`Untitled notebook` 是落库值,不是界面文案。review 阻塞 1:散文重写把它改成了
+    中文,同时打破 5 份文档与后端 3 处。文档侧把「持久化值 ≠ 文案」写明,免得下一轮
+    措辞调整又把它当英文散文扫掉。"""
+    _assert_phrases(
+        {
+            "README.md": "are contracts, not copy, so they are never touched by a wording pass",
+            "README_zh.md": "属于契约不属于文案，任何一轮措辞调整都不得顺手改动它们",
+        }
+    )
+    for name in ("README.md", "README_zh.md", "AGENTS.md", "architecture.md", "fangan_done.md"):
+        assert "Untitled notebook" in _read(name), (
+            f"{name} 不再钉着默认库名 Untitled notebook——文档与代码已失配"
+        )

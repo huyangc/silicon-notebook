@@ -270,7 +270,7 @@ def require_user_or_agent(scope: str, *, write: bool = False):
 # AGENTS.md 的 line-exact 约定）。新增模块级内容一律往这后面加。
 #
 # 后端的 4xx `detail` 有两类，结构上完全一样：一类是刻意为终端用户写的中文文案
-# （「仅管理员可设置基准库」），另一类是 `detail=str(exc)` 直接甩出来的异常文本
+# （「仅管理员可设为公共知识库」），另一类是 `detail=str(exc)` 直接甩出来的异常文本
 # （含内网地址的上游错误、`field required`……）。前端没法靠形态区分它们——
 # 「4xx 且含中文就原样显示」会把网关正文和异常串一起放行。
 #

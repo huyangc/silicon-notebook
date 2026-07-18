@@ -45,13 +45,13 @@ export const tierActionState = (
   all: readonly NotebookSummaryLike[]
 ): TierActionState => {
   if (current?.tier === "base") {
-    return { action: "unset", label: "取消基准库" };
+    return { action: "unset", label: "取消公共知识库" };
   }
   const otherBase = all.find((n) => n.tier === "base" && n.id !== current?.id);
   if (otherBase) {
-    return { action: "replace", label: "替换为基准库", otherBaseName: otherBase.name };
+    return { action: "replace", label: "替换为公共知识库", otherBaseName: otherBase.name };
   }
-  return { action: "set", label: "设为基准库" };
+  return { action: "set", label: "设为公共知识库" };
 };
 
 export const setNotebookTier = (

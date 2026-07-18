@@ -20,10 +20,10 @@ test("only confirmed unproposed Memory exposes the promotion action", () => {
 
 test("promotion helpers target the owner-authenticated Memory endpoint and explain state", () => {
   assert.equal(memoryPromotionPath("memory/a"), "/memories/memory%2Fa/promote");
-  assert.equal(memoryPromotionLabel("none"), "提升到 KG");
-  assert.equal(memoryPromotionLabel("proposed"), "KG 审核中");
-  assert.equal(memoryPromotionLabel("approved"), "已进入 Base KG");
-  assert.equal(memoryPromotionLabel("rejected"), "KG 晋升已拒绝");
+  assert.equal(memoryPromotionLabel("none"), "贡献到公共知识库");
+  assert.equal(memoryPromotionLabel("proposed"), "审核中");
+  assert.equal(memoryPromotionLabel("approved"), "已收录");
+  assert.equal(memoryPromotionLabel("rejected"), "未采纳");
 });
 
 test("Memory panel exposes promotion while the admin queue identifies Memory proposals", async () => {
@@ -31,7 +31,7 @@ test("Memory panel exposes promotion while the admin queue identifies Memory pro
   const page = await readFile(new URL("./page.tsx", import.meta.url), "utf8");
   assert.match(panel, /memoryPromotionPath/);
   assert.match(panel, /canPromoteMemory/);
-  assert.match(panel, /提升到 KG/);
+  assert.match(panel, /贡献到公共知识库/);
   assert.match(page, /source_kind === "memory"/);
-  assert.match(page, /Memory 提取候选/);
+  assert.match(page, /记忆提取候选/);
 });

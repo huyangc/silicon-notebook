@@ -43,11 +43,14 @@ export const ANCHOR_SELECTOR_LABEL = "行标题列";
 export const ANCHOR_NONE_LABEL = "不设置";
 
 // 已选行标题列时的提示（规格①：「用作每行的标题；设置后每行作为一个节点进入
-// 知识图谱，节点名取自该列」）。
-export const ANCHOR_SET_HINT = "用作每行的标题；设置后每行作为一个节点进入知识图谱，节点名取自该列";
+// 知识图谱，节点名取自该列」）。界面词取「知识对象」而非规格原文的「节点」：
+// 后者是图论内部词。这里尤其不能写「概念」——knowhow 自己的 anchor 分组在界面上
+// 已经叫「概念」（见 knowhow-matrix-drawer.tsx 的徽章），而每行进图谱后拿到的
+// object_type 是用户自定义的列名，两个意思撞在同一个词上会直接误导。
+export const ANCHOR_SET_HINT = "用作每行的标题；设置后每行作为一个知识对象进入知识图谱，对象名取自该列";
 
 // 未选行标题列时的提示（规格①：向导无主题时提示，随「主题→行标题」改名）。
-export const ANCHOR_NONE_HINT = "未选行标题列：本表仅参与问答检索，不构建图谱节点";
+export const ANCHOR_NONE_HINT = "未选行标题列：本表仅参与问答检索，不加入知识图谱";
 
 // 选择器下方提示语：selection 为 null（不设置）时给「仅检索投影」提示，否则给
 // 「入图谱」提示。selection 兼容两种形态——建表/导入向导用列下标(number)，

@@ -18,7 +18,7 @@ test("summarizes the latest reasoning step for a collapsed trace row", () => {
     title: "Agent 推理中",
     latestLabel: "合成",
     latestSummary: "合成: 采用 9 个KG候选 + 0 段原文",
-    latestDetail: "9 个 KG / 0 段原文",
+    latestDetail: "9 个知识对象 / 0 段原文",
     stepCountLabel: "3 步",
     totalLabel: "",
   });

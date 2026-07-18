@@ -940,7 +940,10 @@ async def append_knowhow_rows(
     schedules a debounced reprojection exactly like every other mutating
     knowhow endpoint."""
     if mode not in ("preview", "commit"):
-        raise user_error(400, "mode 必须是 preview 或 commit")
+        # 分类:这不是用户文案。mode 是 Form 参数,UI 永远不会发错值,只有 API/MCP
+        # 客户端会踩;「mode 必须是 preview 或 commit」对真人毫无意义。故降级成普通
+        # HTTPException(英文 detail = API 契约),真人看到的是 400 的通用中文文案。
+        raise HTTPException(status_code=400, detail="mode must be 'preview' or 'commit'")
     repo = repository()
     table = _require_table(repo, notebook_id, table_id)
     data = await file.read()
@@ -1345,7 +1348,7 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
     or 'personal' (default user notes). Drives tier-weighted relevance and
     conflict precedence in ask()."""
     if user.role != "admin":
-        raise user_error(403, "仅管理员可设置基准库")
+        raise user_error(403, "仅管理员可设为公共知识库")
     tier = payload.tier.strip().lower()
     if tier not in {"base", "personal"}:
         raise HTTPException(status_code=400, detail="tier must be 'base' or 'personal'")
@@ -1879,7 +1882,7 @@ def propose_promotion(notebook_id: str, knowledge_id: str) -> PromotionCandidate
 @router.get("/promotion-queue", response_model=List[PromotionCandidate])
 def list_promotion_queue(status: str = Query(None), user: UserProfile = Depends(get_current_user)) -> List[PromotionCandidate]:
     if user.role != "admin":
-        raise user_error(403, "仅管理员可管理晋升队列")
+        raise user_error(403, "仅管理员可管理内容审核队列")
     return [
         PromotionCandidate(**c)
         for c in repository().list_promotion_queue(status_filter=status)
@@ -1892,7 +1895,7 @@ def list_promotion_queue(status: str = Query(None), user: UserProfile = Depends(
 )
 def approve_promotion(candidate_id: str, user: UserProfile = Depends(get_current_user)) -> PromotionApproveResult:
     if user.role != "admin":
-        raise user_error(403, "仅管理员可管理晋升队列")
+        raise user_error(403, "仅管理员可管理内容审核队列")
     try:
         return PromotionApproveResult(
             **repository().approve_promotion_as_reviewer(candidate_id, user.id)
@@ -1909,7 +1912,7 @@ def approve_promotion(candidate_id: str, user: UserProfile = Depends(get_current
 )
 def reject_promotion(candidate_id: str, payload: PromotionRejectRequest, user: UserProfile = Depends(get_current_user)) -> PromotionCandidate:
     if user.role != "admin":
-        raise user_error(403, "仅管理员可管理晋升队列")
+        raise user_error(403, "仅管理员可管理内容审核队列")
     try:
         return PromotionCandidate(
             **repository().reject_promotion_as_reviewer(

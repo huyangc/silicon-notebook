@@ -904,9 +904,9 @@ export function ReportsPanel({
           let base = 0;
           for (const r of active.references) if (r.tier === "base") base += 1;
           return (
-            <div className="report-source-dist" title="本报告引用的来源分布（个人层 / 基准库）">
+            <div className="report-source-dist" title="本报告引用的来源分布（个人知识库 / 公共知识库）">
               来源 · 个人 {active.references.length - base}
-              {base > 0 && <> · <strong className="source-dist-base">基准库 {base}</strong></>}
+              {base > 0 && <> · <strong className="source-dist-base">公共 {base}</strong></>}
             </div>
           );
         })()}
