@@ -17,17 +17,17 @@ export interface AskModeDef {
 export const ASK_MODES: AskModeDef[] = [
   { id: "chunk", group: "general", label: "通用问答",
     desc: "默认。大范围检索原文，适合综述、对比、找事实。", requiresKg: false, groupDefault: true },
-  { id: "reasoning", group: "strict", label: "深挖推理",
-    desc: "agent 多轮深挖，展示思考轨迹。", requiresKg: true, groupDefault: true },
-  { id: "graph", group: "strict", label: "图谱多跳",
-    desc: "沿知识图谱多跳遍历，展示关联子图。", requiresKg: true },
+  { id: "reasoning", group: "strict", label: "逐步推理",
+    desc: "像人查资料一样逐层追问，展示推理过程；适合需要一步步查证的复杂问题。", requiresKg: true, groupDefault: true },
+  { id: "graph", group: "strict", label: "关联追溯",
+    desc: "顺着资料之间的关联往外找，列出牵连到的内容；适合理清一件事的来龙去脉。", requiresKg: true },
 ];
 
 export const DEFAULT_ASK_MODE: AskModeId = "chunk";
 
 export const ASK_MODE_GROUPS: { id: AskModeGroup; label: string }[] = [
   { id: "general", label: "通用问答" },
-  { id: "strict", label: "严格推理" },
+  { id: "strict", label: "深入分析" },
 ];
 
 export function askModeIds(): AskModeId[] {
