@@ -40,9 +40,8 @@ import {
   imageMarkdown,
   resolveUploadInsertion,
   pendingUploadStorageKey,
-  parsePendingUploads,
-  appendPendingUploads,
-  pendingUploadsMarkdown,
+  pendingUploadKeyPrefix,
+  selectPendingUploadKeys,
   SAVE_BLOCKED_UPLOADING_HINT,
   SAVE_IN_FLIGHT_UPLOAD_HINT,
   BUSY_UPLOAD_HINT,
@@ -571,37 +570,40 @@ test("守卫文案：不再用「已自动保存」过去式承诺（同步落�
   }
 });
 
-// --- 待完成上传日志：与草稿键彻底分开，强退后落地的图片不会被草稿清理吃掉 -------
 
-test("pendingUploadStorageKey: 与草稿键不同前缀、不同键（绝不共用）", () => {
-  const p = pendingUploadStorageKey("r1", "c1");
+// --- 待完成上传：一 upload 一键，避免整键 read-modify-write 的多标签页竞态 -------
+
+test("pendingUploadStorageKey: 与草稿键彻底不同（绝不共用）", () => {
+  const p = pendingUploadStorageKey("r1", "c1", "b1-0");
   assert.notStrictEqual(p, draftStorageKey("r1", "c1"));
-  assert.match(p, /^kh-cell-pending-upload:/);
+  assert.match(p, /^kh-cell-pending-upload:r1:c1:b1-0$/);
 });
 
-test("parsePendingUploads: 空/坏数据一律当空，绝不因日志损坏影响编辑器", () => {
-  assert.deepStrictEqual(parsePendingUploads(null), []);
-  assert.deepStrictEqual(parsePendingUploads(""), []);
-  assert.deepStrictEqual(parsePendingUploads("{不是json"), []);
-  assert.deepStrictEqual(parsePendingUploads('{"a":1}'), []);
-  assert.deepStrictEqual(parsePendingUploads('[{"id":1,"md":2}]'), []);
-});
-
-test("appendPendingUploads: 追加保序，且按 id 幂等（重试不会插两张图）", () => {
-  const first = appendPendingUploads(null, [{ id: "b1-0", md: "<A>" }]);
-  const second = appendPendingUploads(first, [{ id: "b1-0", md: "<A>" }, { id: "b2-0", md: "<B>" }]);
-  assert.deepStrictEqual(parsePendingUploads(second), [
-    { id: "b1-0", md: "<A>" },
-    { id: "b2-0", md: "<B>" },
+test("selectPendingUploadKeys: 只挑本格的键，且按插入顺序还原", () => {
+  const all = [
+    "kh-cell-draft:r1:c1",
+    pendingUploadStorageKey("r1", "c1", "b1-1"),
+    pendingUploadStorageKey("r9", "c9", "b1-0"),
+    pendingUploadStorageKey("r1", "c1", "b1-0"),
+    "unrelated",
+  ];
+  assert.deepStrictEqual(selectPendingUploadKeys(all, "r1", "c1"), [
+    pendingUploadStorageKey("r1", "c1", "b1-0"),
+    pendingUploadStorageKey("r1", "c1", "b1-1"),
   ]);
-  assert.strictEqual(pendingUploadsMarkdown(parsePendingUploads(second)), "<A><B>");
 });
 
-test("待完成上传日志：强退→重开→旧上传落地，图片仍可被认领（回归锁）", () => {
-  // 旧实现把它写进草稿键：新实例 mount 发现草稿===已保存内容就删键，随后落地的
-  // 上传写不进任何地方 → 资产永久无人引用。独立日志不参与任何草稿清理逻辑。
-  const journal = appendPendingUploads(null, [{ id: "b1-0", md: imageMarkdown("a1", "图") }]);
-  const claimed = parsePendingUploads(journal);
-  assert.strictEqual(claimed.length, 1);
-  assert.strictEqual(pendingUploadsMarkdown(claimed), "![图](asset://a1)");
+test("selectPendingUploadKeys: 认领只覆盖此刻读到的键——并发新增的键不在其中（回归锁）", () => {
+  // 多标签页竞态：A 读到 [E1]，B 随后写入 E2。旧的整键 read-modify-write/remove
+  // 会让 A 的 removeItem 把 E2 一起删掉，E2 的图就永久没有引用了。
+  const beforeConcurrentWrite = [pendingUploadStorageKey("r1", "c1", "b1-0")];
+  const claimed = selectPendingUploadKeys(beforeConcurrentWrite, "r1", "c1");
+  const afterConcurrentWrite = [...beforeConcurrentWrite, pendingUploadStorageKey("r1", "c1", "b2-0")];
+  const remaining = selectPendingUploadKeys(afterConcurrentWrite, "r1", "c1").filter((k) => !claimed.includes(k));
+  assert.deepStrictEqual(remaining, [pendingUploadStorageKey("r1", "c1", "b2-0")]);
+});
+
+test("pendingUploadKeyPrefix: 前缀含行列、不会误伤别格", () => {
+  assert.strictEqual(pendingUploadKeyPrefix("r1", "c1"), "kh-cell-pending-upload:r1:c1:");
+  assert.ok(!pendingUploadKeyPrefix("r1", "c1").startsWith(pendingUploadKeyPrefix("r1", "c12")));
 });

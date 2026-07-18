@@ -198,44 +198,30 @@ export function resolveUploadInsertion(
 // 或下次 mount）整体取走并清空。图片在被认领前一直躺在日志里，不会被任何草稿逻辑
 // 误删；认领后进入正文，成为真实引用。
 export const PENDING_UPLOAD_STORAGE_PREFIX = "kh-cell-pending-upload:";
-export function pendingUploadStorageKey(rowId: string, columnId: string): string {
-  return `${PENDING_UPLOAD_STORAGE_PREFIX}${rowId}:${columnId}`;
+
+// **每次上传一个独立键**，而不是一个键里放一个数组。整键 read-modify-write /
+// removeItem 在多标签页下会永久丢条目：A 读到 [E1] 准备认领，B 随后把 [E1,E2]
+// 写回，A 再 removeItem 就把 E2 一起删了——E2 对应的图已经传到服务端，却再没有
+// 任何东西引用它。一 upload 一键之后，写入方只碰自己那个键、认领方只删自己读到
+// 的那些键，互不覆盖。
+export function pendingUploadKeyPrefix(rowId: string, columnId: string): string {
+  return `${PENDING_UPLOAD_STORAGE_PREFIX}${rowId}:${columnId}:`;
+}
+
+export function pendingUploadStorageKey(rowId: string, columnId: string, uploadId: string): string {
+  return `${pendingUploadKeyPrefix(rowId, columnId)}${uploadId}`;
 }
 
 // 同标签页内通知该格的活实例「有待认领的上传」——localStorage 的 storage 事件只
-// 跨标签页触发，同页重开的新实例收不到，必须自己派发。
+// 在**其它**标签页触发，同页重开的新实例收不到，必须自己派发。跨标签页则靠
+// storage 事件（见组件侧监听）。
 export const PENDING_UPLOAD_EVENT = "knowhow-cell-pending-upload";
 
-export type PendingUpload = { id: string; md: string };
-
-// 容错解析：日志被写坏/半截/被别的东西占用时一律当空，绝不因为它抛错影响编辑器。
-export function parsePendingUploads(raw: string | null): PendingUpload[] {
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (item): item is PendingUpload =>
-        typeof item === "object" &&
-        item !== null &&
-        typeof (item as PendingUpload).id === "string" &&
-        typeof (item as PendingUpload).md === "string",
-    );
-  } catch {
-    return [];
-  }
-}
-
-// 追加（按 id 幂等）：同一次上传若因重试/并发被写两次，不会在正文里出现两张图。
-export function appendPendingUploads(raw: string | null, entries: PendingUpload[]): string {
-  const existing = parsePendingUploads(raw);
-  const seen = new Set(existing.map((item) => item.id));
-  const merged = [...existing, ...entries.filter((item) => !seen.has(item.id))];
-  return JSON.stringify(merged);
-}
-
-export function pendingUploadsMarkdown(entries: PendingUpload[]): string {
-  return entries.map((item) => item.md).join("");
+// 从「storage 里现有的全部键」里挑出这一格的待认领键，按键名排序（键名含批次 id
+// 与序号，排序即还原插入顺序）。纯函数：调用方负责枚举 storage。
+export function selectPendingUploadKeys(allKeys: string[], rowId: string, columnId: string): string[] {
+  const prefix = pendingUploadKeyPrefix(rowId, columnId);
+  return allKeys.filter((key) => key.startsWith(prefix)).sort();
 }
 
 // 从文件名派生图片 alt 文本：去掉最后一个扩展名、去首尾空白。多个点时只切

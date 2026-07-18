@@ -130,9 +130,7 @@ import {
   imageMarkdown,
   resolveUploadInsertion,
   pendingUploadStorageKey,
-  parsePendingUploads,
-  appendPendingUploads,
-  pendingUploadsMarkdown,
+  selectPendingUploadKeys,
   PENDING_UPLOAD_EVENT,
   OPTIMIZE_SUGGESTION_STALE_MESSAGE,
   resolveSaveCompletion,
@@ -793,28 +791,44 @@ export function KnowhowCellEditor({
   // remove=清陈旧草稿。返回是否已安全落盘：write 抛错（隐私模式/配额）返 false，
   // 让执行器据此原地报错、不静默离开；keep/remove 恒真（本就没有要保存的内容，
   // 离开是安全的）。
-  // 认领「待完成上传日志」：把强退期间落地的图片收进正文。日志与草稿键分开，
-  // 所以它不会被新实例的草稿清理/自动草稿覆盖掉；认领后即清空（取走即拥有）。
-  // 恢复提示里那份草稿也一并追加，避免用户点「恢复」时把刚认领的图片顶掉。
+  // 认领「待完成上传」：把强退期间落地的图片收进正文。
+  //
+  // 两条硬约束（都是复审抓出来的真实丢字路径）：
+  // ① **恢复提示还没决出胜负时不认领**。此刻并进正文会让正文 dirty，而
+  //    draftFlushAction 只要 dirty 就选 "write"（banner 判断在它后面），离开时
+  //    就把那份用户还没决定的旧草稿覆盖成「已保存内容+图」。日志不参与任何草稿
+  //    清理逻辑，等得起——等用户点完恢复/丢弃，effect 会因 showRestoreBanner
+  //    变化重跑再认领。
+  // ② **先把合并结果同步落到草稿键，再删日志键**。只 setState 的话，正文要等
+  //    300ms 防抖才写盘；切笔记本/返回列表/刷新会直接卸载组件并清掉定时器，
+  //    结果日志已删、草稿没写，图片引用彻底消失。写盘失败就不删日志，宁可下次
+  //    再认领，也不能把唯一的引用弄丢。
   const claimPendingUploads = useCallback(() => {
-    let md = "";
+    if (restoreBannerRef.current) return;
     try {
-      const key = pendingUploadStorageKey(rowId, columnId);
-      const entries = parsePendingUploads(window.localStorage.getItem(key));
-      if (entries.length === 0) return;
-      md = pendingUploadsMarkdown(entries);
-      window.localStorage.removeItem(key);
+      const allKeys: string[] = [];
+      for (let i = 0; i < window.localStorage.length; i += 1) {
+        const key = window.localStorage.key(i);
+        if (key !== null) allKeys.push(key);
+      }
+      // 只认领**此刻读到的**这些键；别的标签页随后新增的键不在其中，不会被误删。
+      const keys = selectPendingUploadKeys(allKeys, rowId, columnId);
+      if (keys.length === 0) return;
+      const md = keys.map((key) => window.localStorage.getItem(key) ?? "").join("");
+      if (!md) return;
+      const merged = contentRef.current + md;
+      window.localStorage.setItem(draftStorageKey(rowId, columnId), merged);
+      for (const key of keys) window.localStorage.removeItem(key);
+      setContent(merged);
     } catch {
-      return;
+      // 存储读写不可用：不删任何键，等下次机会。
     }
-    if (!md) return;
-    setContent((prev) => prev + md);
-    setDraftText((prev) => (prev === null ? prev : prev + md));
   }, [rowId, columnId]);
 
-  // mount 时认领一次（覆盖「强退 → 上传落地 → 之后再打开这一格」），并监听同页
-  // 事件（覆盖「强退 → 立刻重开 → 旧上传随后才落地」——storage 事件不跨不了同页）。
+  // 认领时机：mount、恢复提示关闭后（effect 依赖 showRestoreBanner 自然重跑）、
+  // 同页事件（storage 事件不在本页触发）、跨标签页 storage 事件。
   useEffect(() => {
+    if (showRestoreBanner) return;
     claimPendingUploads();
     function onPending(event: Event) {
       const detail = (event as CustomEvent).detail as
@@ -822,9 +836,8 @@ export function KnowhowCellEditor({
         | undefined;
       if (!detail || detail.rowId !== rowId || detail.columnId !== columnId) return;
       if (detail.fallbackMd) {
-        // 日志没写成（存储不可用）：直接收下事件里带的 markdown，不经存储中转。
-        // 与 claimPendingUploads 同样要追加进恢复提示那份草稿——否则用户点「恢复」
-        // 会用旧草稿顶掉刚收下的图，而此时日志根本没写成、无从再认领，图就永久没了。
+        // 日志没写成（存储不可用）：直接收下事件里带的 markdown。这条兜底是
+        // **瞬时**的——没有活实例接就没了，属已知边界（见 PR 说明）。
         const md = detail.fallbackMd;
         setContent((prev) => prev + md);
         setDraftText((prev) => (prev === null ? prev : prev + md));
@@ -832,9 +845,19 @@ export function KnowhowCellEditor({
       }
       claimPendingUploads();
     }
+    function onStorage(event: StorageEvent) {
+      // 跨标签页：别的标签页写了本格的待认领键，这边立刻认领。
+      if (event.key && event.key.startsWith(pendingUploadStorageKey(rowId, columnId, ""))) {
+        claimPendingUploads();
+      }
+    }
     window.addEventListener(PENDING_UPLOAD_EVENT, onPending);
-    return () => window.removeEventListener(PENDING_UPLOAD_EVENT, onPending);
-  }, [rowId, columnId, claimPendingUploads]);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener(PENDING_UPLOAD_EVENT, onPending);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [rowId, columnId, showRestoreBanner, claimPendingUploads]);
 
   const flushDraft = useCallback((): boolean => {
     const action = draftFlushAction(hasUnsavedChanges(content, savedContent), showRestoreBanner);
@@ -1014,11 +1037,13 @@ export function KnowhowCellEditor({
       // 那是新编辑器会正常清理/覆盖的东西，混进去就会出现「强退→立刻重开→旧上传
       // 落地时草稿已被新实例清掉→图片永久无人引用」。改写入独立的待完成上传日志，
       // 由该格的活实例或下次 mount 认领（见 claimPendingUploads）。
-      const entries = snippets.map((md, index) => ({ id: `${uploadBatchId}-${index}`, md }));
       let journaled = false;
       try {
-        const key = pendingUploadStorageKey(rowId, columnId);
-        window.localStorage.setItem(key, appendPendingUploads(window.localStorage.getItem(key), entries));
+        // 一 upload 一键：只写自己的键，不做整键 read-modify-write，别的标签页
+        // 同时写别的键也不会互相覆盖。
+        snippets.forEach((md, index) => {
+          window.localStorage.setItem(pendingUploadStorageKey(rowId, columnId, `${uploadBatchId}-${index}`), md);
+        });
         journaled = true;
       } catch {
         /* 存储不可用：下面靠事件直接投递给活实例兜底 */
@@ -1028,7 +1053,7 @@ export function KnowhowCellEditor({
       try {
         window.dispatchEvent(
           new CustomEvent(PENDING_UPLOAD_EVENT, {
-            detail: { rowId, columnId, fallbackMd: journaled ? null : pendingUploadsMarkdown(entries) },
+            detail: { rowId, columnId, fallbackMd: journaled ? null : snippets.join("") },
           }),
         );
       } catch {
