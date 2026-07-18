@@ -304,6 +304,23 @@ export interface DraftStorage {
   setItem(key: string, value: string): void;
   removeItem(key: string): void;
 }
+
+// 首次渲染期间**同步**读草稿用（见组件侧注释：不能等 useEffect）。只读、幂等，因此
+// 放在 render 里是安全的；清陈旧草稿那一步是副作用，仍留在 effect 里。
+// storage 为 null（SSR：没有 window）或读取抛错（隐私模式/配额）时一律当「没有
+// 草稿」——读不到就没有可恢复的东西，也就没有「恢复会整段覆盖掉刚落笔的图片」那条
+// 风险；这里只如实回答「读到了什么」，放不放行上传由调用方的门禁决定。
+export interface DraftReadStorage {
+  getItem(key: string): string | null;
+}
+export function readCellDraft(storage: DraftReadStorage | null, key: string): string | null {
+  if (!storage) return null;
+  try {
+    return storage.getItem(key);
+  } catch {
+    return null;
+  }
+}
 export function applyDraftFlush(
   storage: DraftStorage,
   key: string,

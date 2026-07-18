@@ -104,6 +104,7 @@ import {
   isImageFile,
   nextCellCoordinates,
   shouldOfferDraftRestore,
+  readCellDraft,
   sortRowsByPosition,
   type TextareaSelection,
   CELL_VIEW_MODE_STORAGE_KEY,
@@ -602,8 +603,27 @@ export function KnowhowCellEditor({
   const savedContent = row.cells[columnId] ?? "";
 
   const [content, setContent] = useState<string>(savedContent);
-  const [draftText, setDraftText] = useState<string | null>(null);
-  const [showRestoreBanner, setShowRestoreBanner] = useState(false);
+  // 草稿扫描在**首次渲染期间同步完成**，不是 useEffect。被动 effect 通常要等首帧
+  // 绘制之后才跑，那之间界面已经可交互：任何读 showRestoreBanner/restoreBannerRef
+  // 的门禁在那个窗口里都会读到假的 false（fail-open）。粘贴/拖放正是在这个窗口里
+  // 能启动上传，随后 banner 才出现，用户一点「恢复」又把刚落笔的图片整段覆盖掉。
+  // 放进 useState 初始化器后，banner 在**第一帧**就是终值，那个窗口不存在。
+  // 只读 storage（幂等、无副作用）；清陈旧草稿是副作用，仍留在下面的 effect 里。
+  // 两点说明，免得看着像违规：
+  // ① **不是订阅外部可变源**（那才需要 useSyncExternalStore）——这是 mount 时读一次、
+  //    立刻落进 state，此后一切以 state 为准，不存在并发渲染撕裂；初始化器在
+  //    StrictMode 下被双调用也无妨（纯读、幂等）。
+  // ② **不担心水合不一致**：本组件只在用户点开某一格后才渲染，服务端渲染阶段根本
+  //    不存在这棵子树；`typeof window` 判断只是防御性兜底。
+  const [draftScan] = useState(() => {
+    const stored = readCellDraft(
+      typeof window === "undefined" ? null : window.localStorage,
+      draftStorageKey(rowId, columnId),
+    );
+    return { stored, offer: shouldOfferDraftRestore(stored, savedContent) };
+  });
+  const [draftText, setDraftText] = useState<string | null>(draftScan.offer ? draftScan.stored : null);
+  const [showRestoreBanner, setShowRestoreBanner] = useState(draftScan.offer);
   const [savingMode, setSavingMode] = useState<"save" | "next" | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -693,25 +713,16 @@ export function KnowhowCellEditor({
   // 无超时，锁死存盘会让用户这段时间敲的内容存不下去）。
   const saveBlocked = isSaveBlocked(savingMode !== null, uploading);
 
-  // 一次性(mount 时)检查本格是否有未保存草稿——组件靠 panel 给的
-  // key={rowId+columnId} 保证每次切格都是全新挂载，故空依赖数组等价于「每次
-  // 打开这一格都查一次」，不需要额外监听 rowId/columnId 变化。
+  // 扫描本身已在首次渲染时同步做完（见上方 draftScan）；这里只做它的**副作用**部分：
+  // 清掉与已保存内容相等的陈旧草稿。副作用不能放在 render 里，故留在 effect。
+  // 组件靠 panel 给的 key={rowId+columnId} 保证每次切格都是全新挂载，故空依赖数组
+  // 等价于「每次打开这一格都做一次」。
   useEffect(() => {
-    let stored: string | null = null;
+    if (draftScan.offer || draftScan.stored === null) return;
     try {
-      stored = window.localStorage.getItem(draftStorageKey(rowId, columnId));
+      window.localStorage.removeItem(draftStorageKey(rowId, columnId));
     } catch {
-      stored = null;
-    }
-    if (shouldOfferDraftRestore(stored, savedContent)) {
-      setDraftText(stored);
-      setShowRestoreBanner(true);
-    } else if (stored !== null) {
-      try {
-        window.localStorage.removeItem(draftStorageKey(rowId, columnId));
-      } catch {
-        /* ignore */
-      }
+      /* ignore */
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

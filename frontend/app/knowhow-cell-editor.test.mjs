@@ -13,6 +13,7 @@ import {
   DISCARD_DRAFT_LABEL,
   draftStorageKey,
   shouldOfferDraftRestore,
+  readCellDraft,
   hasUnsavedChanges,
   rowFallbackTitle,
   sortRowsByPosition,
@@ -786,4 +787,50 @@ test("接线：恢复提示未决时工具栏「图片」按钮置灰，且提�
   );
   assert.match(imageButton, /disabled=\{uploading \|\| showRestoreBanner\}/);
   assert.match(imageButton, /title=\{showRestoreBanner \? RESTORE_PENDING_UPLOAD_HINT : TOOLBAR_IMAGE_LABEL\}/);
+});
+
+// --- 草稿扫描必须在首帧之前完成（否则门禁 fail-open）-----------------------------
+//
+// 复审第 7 轮 P1：把上传门禁接上 restoreBanner 之后仍有一个**扫描前窗口**——
+// showRestoreBanner/restoreBannerRef 初值都是 false，而扫描原先在普通 useEffect 里，
+// 被动 effect 通常要等首帧绘制之后才跑。界面在那之间已经可交互，粘贴/拖放读到假的
+// false 就启动上传；随后 banner 才出现，用户一点「恢复」又把刚落笔的图片整段覆盖掉，
+// 与上一条 P1 同样的丢失+孤儿资产。
+//
+// 修法不是再加一个 draftScanDone 门（那只是把窗口改成"拒绝"），而是把扫描挪进
+// useState 初始化器：banner 在**第一帧**就是终值，窗口不存在。下面锁的正是这一点。
+
+test("readCellDraft: 正常读到值", () => {
+  assert.strictEqual(readCellDraft({ getItem: () => "草稿" }, "k"), "草稿");
+  assert.strictEqual(readCellDraft({ getItem: () => null }, "k"), null);
+});
+
+test("readCellDraft: storage 为 null（SSR，无 window）→ null，不抛", () => {
+  assert.strictEqual(readCellDraft(null, "k"), null);
+});
+
+test("readCellDraft: 读取抛错（隐私模式）→ null，不抛", () => {
+  assert.strictEqual(
+    readCellDraft(
+      {
+        getItem() {
+          throw new Error("SecurityError");
+        },
+      },
+      "k",
+    ),
+    null,
+  );
+});
+
+test("接线：草稿扫描在 useState 初始化器里同步完成，不在 effect 里", () => {
+  // 只要它回到 effect，首帧到 effect 提交之间的门禁就又 fail-open 了。
+  assert.match(editorSrc, /const \[draftScan\] = useState\(\(\) => \{[\s\S]*?readCellDraft\([\s\S]*?\}\);/);
+  // 全文只此一处读草稿，杜绝"初始化器里读一份、effect 里又读一份"的分叉。
+  assert.strictEqual((editorSrc.match(/readCellDraft\(/g) || []).length, 1);
+});
+
+test("接线：banner 与其同步镜像 ref 都从首帧扫描结果取初值", () => {
+  assert.match(editorSrc, /const \[showRestoreBanner, setShowRestoreBanner\] = useState\(draftScan\.offer\);/);
+  assert.match(editorSrc, /const restoreBannerRef = useRef\(showRestoreBanner\);/);
 });
