@@ -13,8 +13,7 @@ from app.api.deps import (
     admin_query_repository, identity_repository,
     notebook_access_repository, notebook_catalog_repository,
     notebook_sharing_repository, repository, require_notebook_access,
-    require_notebook_read, require_notebook_write, get_current_user, source_repository,
-    user_error,
+    require_notebook_read, require_notebook_write, get_current_user, source_repository, user_error,
 )
 from app.core.config import get_settings
 from app.services.sqlite_repository import KnowledgeGraphTooLargeError

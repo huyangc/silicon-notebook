@@ -12,38 +12,6 @@ from app.repositories.ports import AdminQueryRepository, NotebookRepository, Ide
 from app.services.sqlite_repository import SQLiteRepository
 
 
-# 用户可见文案的「出处标记」。
-#
-# 后端的 4xx `detail` 有两类，结构上完全一样：一类是刻意为终端用户写的中文文案
-# （「仅管理员可设置基准库」），另一类是 `detail=str(exc)` 直接甩出来的异常文本
-# （含内网地址的上游错误、`field required`……）。前端没法靠形态区分它们——
-# 「4xx 且含中文就原样显示」会把网关正文和异常串一起放行。
-#
-# 所以出处必须由这一侧显式声明：只有经 user_error() 抛出的 detail 才带
-# `X-User-Message: 1`，前端也只信这一个标记。裸 HTTPException 一律不带标记，
-# 前端按状态码给通用中文文案、原文只进 console。
-#
-# 用响应头而不是改 detail 的 JSON 形状：detail 是 MCP agent / 日志 / 排查的
-# 契约，它的类型不能动。
-# ⚠这个头必须同时登记进 main.py 的 CORS `expose_headers`，否则跨源部署时
-# 浏览器读不到它（同源开发和单测都察觉不到，见 test_user_error.py）。
-USER_MESSAGE_HEADER = "X-User-Message"
-
-
-def user_error(status_code: int, message: str) -> HTTPException:
-    """构造一个「detail 可以原样展示给终端用户」的 HTTPException。
-
-    message 必须是完整的中文用户文案：能读懂、可操作、不含异常类名 / 堆栈 /
-    上游地址 / 字段名。凡是拼了 `str(exc)` 的一律**不要**用这个函数——它们
-    本来就该被前端拦掉，只按状态码给通用文案。
-    """
-    return HTTPException(
-        status_code=status_code,
-        detail=message,
-        headers={USER_MESSAGE_HEADER: "1"},
-    )
-
-
 @lru_cache
 def repository() -> NotebookRepository:
     return SQLiteRepository(get_settings())
@@ -291,3 +259,42 @@ def require_user_or_agent(scope: str, *, write: bool = False):
         ) as actor:
             yield actor
     return _dependency
+
+
+# --------------------------------------------------------------------------
+# 用户可见文案的「出处标记」
+#
+# ⚠追加在文件末尾是刻意的：本模块顶部那几个 `_runtime` 取值行被
+# tests/test_repository_callers_static.py 的 INDEPENDENT_PRIVATE_SITES 按
+# **行号**精确登记，在上方插入代码会整体移位、打破那份账本（见
+# AGENTS.md 的 line-exact 约定）。新增模块级内容一律往这后面加。
+#
+# 后端的 4xx `detail` 有两类，结构上完全一样：一类是刻意为终端用户写的中文文案
+# （「仅管理员可设置基准库」），另一类是 `detail=str(exc)` 直接甩出来的异常文本
+# （含内网地址的上游错误、`field required`……）。前端没法靠形态区分它们——
+# 「4xx 且含中文就原样显示」会把网关正文和异常串一起放行。
+#
+# 所以出处必须由这一侧显式声明：只有经 user_error() 抛出的 detail 才带
+# `X-User-Message: 1`，前端也只信这一个标记。裸 HTTPException 一律不带标记，
+# 前端按状态码给通用中文文案、原文只进 console。
+#
+# 用响应头而不是改 detail 的 JSON 形状：detail 是 MCP agent / 日志 / 排查的
+# 契约，它的类型不能动。
+# ⚠这个头必须同时登记进 main.py 的 CORS `expose_headers`，否则跨源部署时
+# 浏览器读不到它（同源开发和前后端单测都察觉不到，见 tests/test_user_error.py）。
+# --------------------------------------------------------------------------
+USER_MESSAGE_HEADER = "X-User-Message"
+
+
+def user_error(status_code: int, message: str) -> HTTPException:
+    """构造一个「detail 可以原样展示给终端用户」的 HTTPException。
+
+    message 必须是完整的中文用户文案：能读懂、可操作、不含异常类名 / 堆栈 /
+    上游地址 / 字段名。凡是拼了 `str(exc)` 的一律**不要**用这个函数——它们
+    本来就该被前端拦掉，只按状态码给通用文案。
+    """
+    return HTTPException(
+        status_code=status_code,
+        detail=message,
+        headers={USER_MESSAGE_HEADER: "1"},
+    )
