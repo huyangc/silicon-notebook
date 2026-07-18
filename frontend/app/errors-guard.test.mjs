@@ -181,7 +181,7 @@ const ALLOWED_DIAGNOSTIC_READS = new Map([
       "error: body?.error ?? null,",
       "if (snapshot.error) logDiagnostic(\"ready\", snapshot.error);",
       // 模型「测试连接」:200 响应挂不上 X-User-Message 头,出处改由 schema 的
-      // user_message 字段承载(上屏的是它);这里的 r.error 只进 console。
+      // code 字段承载(上屏的是 vocabulary.ts 里该 code 的文案);r.error 只进 console。
       'if (!r.ok && r.error) logDiagnostic("model-test", r.error);',
       // 以下三处都已过人话层(裸值包进 Error 交给 toUserMessage)。
       'throw new Error(toUserMessage(new Error(event.error), "回答没能完成，请重试"));',

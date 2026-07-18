@@ -114,7 +114,7 @@ import {
   type UnifiedGraphResp,
   type UnifiedKgStatus,
 } from "./workspace-model";
-import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY } from "./vocabulary";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, MODEL_TEST_ERROR } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -3219,17 +3219,17 @@ export default function Home() {
     try {
       const r = await testModelService(role, f.base_url.trim(), f.model.trim(),
         f.keyDirty ? f.api_key : null);
-      // 200 响应挂不上 X-User-Message 头,故 ModelTestResult 自带出处字段:
-      // `user_message` 是后端显式盖章的用户文案(未知服务 / 缺少 base_url…),
+      // 200 响应挂不上 X-User-Message 头,故 ModelTestResult 用 `code` 承载出处:
+      // 后端只回稳定枚举,文案在 vocabulary.ts(这样才落在界面词汇守卫的作用域里)。
       // `error` 是 `f"{type(exc).__name__}: {exc}"` 的诊断,只进 console。
-      // 这页的用途就是排查配置,压成「连接未通过」等于把它废掉——所以要的是
+      // 这页的用途就是排查配置,一律压成「连接未通过」等于把它废掉——所以要的是
       // 结构化出处,不是放宽判据。
       if (!r.ok && r.error) logDiagnostic("model-test", r.error);
       setModelTesting((m) => ({
         ...m,
         [role]: r.ok
           ? `通 ${r.latency_ms}ms`
-          : `失败：${r.user_message || "连接未通过"}`,
+          : `失败：${label(MODEL_TEST_ERROR, r.code, "连接未通过")}`,
       }));
     } catch (e) {
       setModelTesting((m) => ({ ...m, [role]: "失败" })); reportError(e);

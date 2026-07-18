@@ -970,10 +970,12 @@ class ModelTestResult(BaseModel):
     latency_ms: int = 0
     # 诊断字段:失败分支写 f"{type(exc).__name__}: {exc}",给日志和排查,前端不上屏。
     error: str = ""
-    # 显式盖章的用户文案。200 响应挂不上 X-User-Message 头,但这个 body 的 schema
-    # 是我们自己的,所以用独立字段承载出处——只有确定写给人看的分支才填,异常分支
-    # 必须留空,否则又退回「按形态猜」。
-    user_message: str = ""
+    # 失败原因的稳定枚举。200 响应挂不上 X-User-Message 头,所以出处由 schema 承载;
+    # 这里刻意存 **code 而不是中文文案**——文案归前端(vocabulary.ts 的
+    # MODEL_TEST_ERROR),这样它才落在界面词汇守卫的作用域里。后端存中文会绕开那道
+    # 守卫,「缺少 base_url / model / api_key」这种把字段名甩给用户的文案正是这么漏的。
+    # 取值:unknown_service | missing_config | upstream_error(未知 code 前端走兜底)。
+    code: str = ""
 
 
 class AdminUserUsage(BaseModel):

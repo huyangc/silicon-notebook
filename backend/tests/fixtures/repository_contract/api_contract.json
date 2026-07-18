@@ -3225,6 +3225,11 @@
         },
         "ModelTestResult": {
           "properties": {
+            "code": {
+              "default": "",
+              "title": "Code",
+              "type": "string"
+            },
             "error": {
               "default": "",
               "title": "Error",
@@ -3238,11 +3243,6 @@
             "ok": {
               "title": "Ok",
               "type": "boolean"
-            },
-            "user_message": {
-              "default": "",
-              "title": "User Message",
-              "type": "string"
             }
           },
           "required": [
