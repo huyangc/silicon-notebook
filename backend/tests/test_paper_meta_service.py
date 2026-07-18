@@ -397,7 +397,18 @@ def test_run_extraction_catch_up_is_idempotent_on_rerun(repo, notebook_id, monke
 # ---------------------------------------------------------------------------
 
 
-def test_backfill_counts_and_progress(repo, notebook_id):
+def test_backfill_counts_and_progress(repo, notebook_id, monkeypatch):
+    # 本例真跑 backfill 且 stored>0,会走 _notify_paper_meta_done —— 那是 emit 到
+    # 进程级共享单例 pending_bus。不隔离的话事件会滞留,同进程后跑的
+    # test_me_pending_stream_first_frame_is_snapshot 读到的首帧就变成这条事件而非
+    # snapshot(xdist 下按分配随机复现,表现为 flaky)。与本文件其它 backfill 用例
+    # 一致地把 emit 打桩掉;本例只断言 counts/progress,不关心事件。
+    events: list = []
+    from app.services import pending_bus as pb_module
+    monkeypatch.setattr(pb_module.pending_bus, "emit",
+                        lambda uid, evt: events.append((uid, evt)))
+    monkeypatch.setattr(pb_module.pending_bus, "mark_dirty", lambda uid: None)
+
     fake = _FakeKgLLM(PAYLOAD)
     repo._kg_llm_client = fake
     _insert_source(repo, notebook_id, "src-1")
@@ -438,6 +449,13 @@ def test_backfill_counts_and_progress(repo, notebook_id):
 def test_backfill_runtime_registers_and_pops_progress(repo, notebook_id, service, monkeypatch):
     """job 期间 facade paper_meta_backfilling(nb)=True + progress dict 反映 done/total；
     结束后（正常/异常）自动 pop 为 False/None。"""
+    # 同 test_backfill_counts_and_progress:本例 stored>0 会真 emit 到进程级共享
+    # 单例 pending_bus,滞留事件会让同进程后跑的 SSE 首帧断言拿到 event 而非
+    # snapshot。本例只关心 building/progress,事件与否无关,打桩隔离。
+    from app.services import pending_bus as pb_module
+    monkeypatch.setattr(pb_module.pending_bus, "emit", lambda uid, evt: None)
+    monkeypatch.setattr(pb_module.pending_bus, "mark_dirty", lambda uid: None)
+
     _insert_source(repo, notebook_id, "src-a")
     _insert_source(repo, notebook_id, "src-b")
     fake = _FakeKgLLM(PAYLOAD)
@@ -588,3 +606,48 @@ def test_backfill_no_done_on_all_failed(repo, notebook_id, service, monkeypatch)
                         lambda uid, evt: events.append((uid, evt)))
     service.backfill_paper_metadata(notebook_id)
     assert not any(e.get("event") == "paper_meta_done" for _, e in events)
+
+
+def test_backfill_superseded_generation_does_not_emit_done(
+    repo, notebook_id, service, monkeypatch
+):
+    """被后来者覆盖的旧世代跑完时不得 emit paper_meta_done。
+
+    对照 test_backfill_generation_guard_protects_foreign_entry：那条锁住的是
+    「不 pop 别人的 entry」，本条锁住同一 race 的通知侧。旧实现里 _pop_backfilling
+    有世代守卫但不返回结果，_notify_paper_meta_done 无条件跟在后面——于是 A 跑完
+    就报「补全完成」，而 B 还在跑：多标签页/重复提交下用户会看到早到的 done toast，
+    并可能收到重复完成事件。断言 A（stored>0，本会走通知分支）在 entry 已被 B
+    覆盖时保持沉默，且不误弹 B 的 live entry。
+    """
+    _insert_source(repo, notebook_id, "src-superseded")
+    repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
+
+    events: list = []
+    from app.services import pending_bus as pb_module
+    monkeypatch.setattr(pb_module.pending_bus, "emit",
+                        lambda uid, evt: events.append((uid, evt)))
+
+    real_ensure = service.ensure_paper_metadata
+
+    def _clobber_then_store(source, **kw):
+        # 先真跑一遍拿到 stored（保证 A 满足 stored>0 的通知前置条件），再模拟
+        # 「后来者 B 已覆盖 entry」——A 收尾时必须发现 entry 不归自己。
+        status = real_ensure(source, **kw)
+        with service._paper_meta_backfilling_lock:
+            service._paper_meta_backfilling[notebook_id] = {
+                "total": 42, "done": 7, "_gen": 999,
+            }
+        return status
+
+    monkeypatch.setattr(service, "ensure_paper_metadata", _clobber_then_store)
+    counts = service.backfill_paper_metadata(notebook_id)
+
+    assert counts.get("stored", 0) > 0, "前置条件：A 确实存了元数据"
+    assert not any(e.get("event") == "paper_meta_done" for _, e in events), \
+        "旧世代被覆盖后不该报完成"
+    # B 的 live entry 未被误弹
+    assert repo.paper_meta_backfill_progress(notebook_id) == {"total": 42, "done": 7}
+
+    with service._paper_meta_backfilling_lock:
+        service._paper_meta_backfilling.pop(notebook_id, None)
