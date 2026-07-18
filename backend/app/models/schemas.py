@@ -1274,3 +1274,10 @@ class KnowhowCellCodeResult(BaseModel):
     language: Optional[str] = None
     status: str
     updated_at: Optional[str] = None
+
+
+class KnowhowTransferRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_notebook_id: str
+    mode: Literal["copy", "move"]

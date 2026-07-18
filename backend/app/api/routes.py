@@ -2090,3 +2090,60 @@ def backfill_paper_metadata(notebook_id: str) -> dict:
             notify_pending=True,   # 兜底刷新 pending 快照
         )
     return {"queued": queued}
+
+
+# --- knowhow 表跨 notebook 传输（复制/移动） -------------------------------
+# 追加在文件尾：mode 决定源守卫（copy=read / move=write），无法用静态
+# Depends(require_notebook_*)，故在处理器内手动核权（复用 deps 的访问仓库）。
+# 用同步 def（同 create_report/create_object_schema）——FastAPI 自动放线程池跑，
+# 无需 run_in_threadpool、无需在文件顶部加 import（避免打断行号 pin）。
+from app.api.deps import notebook_access_repository as _kh_access  # noqa: E402
+from app.models.schemas import KnowhowTransferRequest  # noqa: E402
+from app.services.knowhow import transfer as _kh_transfer  # noqa: E402
+
+
+@router.post("/notebooks/{notebook_id}/knowhow/{table_id}/transfer")
+def transfer_knowhow_table(
+    notebook_id: str,
+    table_id: str,
+    payload: KnowhowTransferRequest,
+    user: UserProfile = Depends(get_current_user),
+) -> dict:
+    if payload.target_notebook_id == notebook_id:
+        raise HTTPException(status_code=400, detail="源与目标不能是同一个 notebook")
+    repo = repository()
+    access = _kh_access()
+    source_check = (
+        access.user_can_access_notebook
+        if payload.mode == "move"
+        else access.user_can_read_notebook
+    )
+    if not source_check(notebook_id, user.id):
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if not access.user_can_access_notebook(payload.target_notebook_id, user.id):
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    try:
+        table = repo.get_knowhow_table(table_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+    if table["notebook_id"] != notebook_id:
+        raise HTTPException(status_code=404, detail="Table not found")
+    try:
+        new_table_id = _kh_transfer.transfer_table(
+            repo, table_id, payload.target_notebook_id, user.id, payload.mode
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+    except _kh_transfer.SourceCleanupFailed as exc:
+        # 复制已提交、清理源(拆投影/删源表)失败：副本已在目标存在，源仍在——
+        # 结构化 409 让前端能诚实地告诉用户"重复不丢失"，而不是裸 500 诱导用户
+        # 盲目重试(会在目标侧越堆越多重复副本)。见 A3 评审附加需求。
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "source_cleanup_failed",
+                "new_table_id": exc.new_table_id,
+                "message": "已复制到目标，但源表未删除；请手动删除源表，或先删掉多余副本再重试",
+            },
+        )
+    return {"new_table_id": new_table_id}

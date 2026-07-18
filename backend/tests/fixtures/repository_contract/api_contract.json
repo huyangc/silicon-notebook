@@ -2366,6 +2366,29 @@
           "title": "KnowhowTableSummary",
           "type": "object"
         },
+        "KnowhowTransferRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": [
+                "copy",
+                "move"
+              ],
+              "title": "Mode",
+              "type": "string"
+            },
+            "target_notebook_id": {
+              "title": "Target Notebook Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target_notebook_id",
+            "mode"
+          ],
+          "title": "KnowhowTransferRequest",
+          "type": "object"
+        },
         "KnowledgeEdge": {
           "properties": {
             "from_id": {
@@ -9699,6 +9722,66 @@
             }
           },
           "summary": "Download Knowhow Template"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/transfer": {
+        "post": {
+          "operationId": "transfer_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__transfer_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowTransferRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Transfer Knowhow Table Api Notebooks  Notebook Id  Knowhow  Table Id  Transfer Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Transfer Knowhow Table"
         }
       },
       "/api/notebooks/{notebook_id}/knowledge": {

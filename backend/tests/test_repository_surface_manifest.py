@@ -3104,6 +3104,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in ASSET_GC_TRIGGER_ALLOWED_IMPORTS
                     or site in KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS
                     or site in KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS
+                    or site in KNOWHOW_TRANSFER_ROUTES_ALLOWED_IMPORTS
                 )
 
 
@@ -3312,6 +3313,15 @@ EXPECTED_PATCH_DELTAS = {
         # SurfaceMember consumer record" bucket, not a new pattern).
         ('backend/tests/test_knowhow_copy.py', 492, '_new_id', 'sr'),
         ('backend/tests/test_knowhow_copy.py', 501, '_insert_row', 'repo'),
+        # A4 (REST 端点) fault-injection test: patches the whole class so the
+        # boom applies regardless of which SQLiteRepository instance the route
+        # handler's repository() singleton resolves to (same idea as
+        # test_in_batching.py's SQLiteRepository-base entry above). "delete_
+        # knowhow_table" itself stays exempt from the consumer-scan comparison
+        # via TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS (whole-member, any site), but
+        # the *patch*-scan (this set) doesn't get that exemption, so it needs
+        # its own exact-site entry here.
+        ('backend/tests/test_knowhow_transfer_routes.py', 72, 'delete_knowhow_table', 'SQLiteRepository'),
         ('backend/tests/test_knowledge_governance_delegation.py', 131, 'set_conflict_status', 'repo'),
         ('backend/tests/test_notebook_copy_service.py', 93, '_new_id', 'sqlite_repository'),
         ('backend/tests/test_notebook_copy_service.py', 118, '_COPY_CHUNK', 'sqlite_repository'),
@@ -3982,3 +3992,32 @@ KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES = {
     ("storage_dir", "backend/app/services/knowhow/transfer.py:204"),
 }
 ACTIVE_PRODUCTION_MEMBER_SITES = ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES
+
+# knowhow cross-notebook copy/move Task A4 (REST endpoint): its own route test
+# builds the real facade the same way Task A1/A2's sibling store/service tests
+# do — SQLiteRepository(...) to build the runtime shared with the TestClient
+# app (repository() lru_cache resolves to a DB-equivalent instance), plus
+# repo.create_knowhow_table/get_knowhow_table/add_knowhow_row to seed a
+# one-row table fixture (the same _table() idiom Task A1/A2's own fixtures
+# use). Every one of these is a frozen facade member consumed at a fresh site
+# this test file postdates, so it takes the same broad (file, member)
+# allowance as KNOWHOW_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES above. The lone
+# import consumer (SQLiteRepository) additionally needs the IMPORTS entry,
+# folded into the import-completeness OR-chain (resolves lazily at call time,
+# so defining it here at EOF is fine, same as the two sibling IMPORTS sets).
+# The 409 fault-injection test's `monkeypatch.setattr(SQLiteRepository,
+# "delete_knowhow_table", ...)` patch site is registered separately in
+# EXPECTED_PATCH_DELTAS['actual_only'] above (test_static_repository_patch_
+# scan_matches_manifest_exactly is a distinct scan from the member/site
+# consumer comparison this block feeds). Appended at EOF for the same
+# zero-line-shift reason as every other TASKN_* block above.
+KNOWHOW_TRANSFER_ROUTES_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_transfer_routes.py", 7, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+KNOWHOW_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_transfer_routes.py", name)
+    for name in {
+        "SQLiteRepository", "create_knowhow_table", "add_knowhow_row", "get_knowhow_table",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES

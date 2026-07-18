@@ -161,7 +161,13 @@ def test_move_keeps_source_intact_when_projection_teardown_fails(repo, monkeypat
     的 knowhow_tables 行才能重试；copy_table→snapshot_table 也会因表已删而
     抛 KeyError，重试同样无门。这不是纸面风险：copy_table 紧邻着调度了后台
     重投影，此刻必然存在并发 SQLite 写者，delete_table_projection 完全可能
-    在 busy timeout 上吃到 OperationalError。"""
+    在 busy timeout 上吃到 OperationalError。
+
+    A4（REST 端点）评审附加需求：move_table 现在把这一段(读 hidden_source_id
+    + 拆投影 + 删源表)包进 SourceCleanupFailed——裸 RuntimeError 不再直接
+    冒泡，而是被收进一个携带 new_table_id 的类型化错误，好让路由层能返回
+    结构化 409 而不是通用 500。故这里断言的异常类型也从 RuntimeError 改为
+    SourceCleanupFailed，并额外钉住 new_table_id/cause 两个字段。"""
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
     src_tid = _table_with_row(repo, src_nb)
     src_hidden = _project(repo, src_tid)["hidden_source_id"]
@@ -174,8 +180,10 @@ def test_move_keeps_source_intact_when_projection_teardown_fails(repo, monkeypat
     monkeypatch.setattr(kh_transfer, "build_projector", lambda _repo: _BoomProjector())
 
     import pytest as _pytest
-    with _pytest.raises(RuntimeError):
+    with _pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
         kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    assert isinstance(exc_info.value.cause, RuntimeError)
+    assert exc_info.value.new_table_id
 
     # 源表必须原封不动地还在：可以重试搬迁，也可以照常删除——两边都留，不丢。
     detail = repo.get_knowhow_table(src_tid)
@@ -187,6 +195,9 @@ def test_move_keeps_source_intact_when_projection_teardown_fails(repo, monkeypat
     # 侧查）。只钉源表还在的话，「复制根本没发生」也会让这条用例通过。
     dst_tables = repo.list_knowhow_tables(dst_nb)
     assert len(dst_tables) == 1
+    # new_table_id 就是目标侧那张副本表的 id——路由层拿它回填给调用方靠的
+    # 正是这条勾连，光钉「有一张表」测不出 id 对不对。
+    assert exc_info.value.new_table_id == dst_tables[0]["id"]
     assert dst_tables[0]["title"] == detail["title"]
 
 def test_transfer_table_dispatches_copy_keeping_source(repo):

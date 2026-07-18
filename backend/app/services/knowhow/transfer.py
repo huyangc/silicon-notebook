@@ -227,6 +227,15 @@ def copy_table(
     return new_table_id
 
 
+class SourceCleanupFailed(Exception):
+    """移动时复制已成功、但删源失败：副本已在目标存在，源仍在，可安全重试删源。"""
+
+    def __init__(self, new_table_id: str, cause: Exception) -> None:
+        super().__init__(str(cause))
+        self.new_table_id = new_table_id
+        self.cause = cause
+
+
 def move_table(
     repo: Any, source_table_id: str, target_notebook_id: str, actor_id: str
 ) -> str:
@@ -248,10 +257,20 @@ def move_table(
     #    按现在的顺序，任何一步失败都只留下「两边都在」的可恢复重复：用户
     #    可以重试搬迁，也可以照常删掉源表。宁可重复，绝不丢失。
     new_table_id = copy_table(repo, source_table_id, target_notebook_id, actor_id)
-    hidden = repo.get_knowhow_table(source_table_id).get("hidden_source_id")
-    if hidden:
-        build_projector(repo).delete_table_projection(hidden)
-    repo.delete_knowhow_table(source_table_id)
+    # A3 评审附加需求：copy_table 已经 COMMIT，从这里往下任何一步再炸，副本
+    # 都已经是既成事实——裸异常冒泡上去只会变成路由层的通用 500，调用方分不清
+    # "整个搬迁没发生"和"副本已经在、只是源没删干净"，naive 重试会在目标侧
+    # 越堆越多重复副本。把这一段(读 hidden_source_id + 拆源投影 + 删源表行)
+    # 整体收进一个类型化错误，让路由能把 new_table_id 一并带回给调用方。
+    # 注意 copy_table(...) 本身特意留在这个 try 之外——复制失败必须原样冒泡
+    # （源分毫未动、什么都没创建），不能被这里的包装误伤。
+    try:
+        hidden = repo.get_knowhow_table(source_table_id).get("hidden_source_id")
+        if hidden:
+            build_projector(repo).delete_table_projection(hidden)
+        repo.delete_knowhow_table(source_table_id)
+    except Exception as exc:  # noqa: BLE001 — 副本已提交，必须转成可辨识的类型化错误
+        raise SourceCleanupFailed(new_table_id, exc) from exc
     return new_table_id
 
 
