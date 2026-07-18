@@ -1,5 +1,12 @@
 # PR A2 · object_type 显示名对齐 Implementation Plan
 
+> **⚠ PIVOT 2026-07-18(用户决定):迁移已回退,改前端为主。** 对齐 2 词(论断→结论/过程→步骤)
+> 实测需 15 文件 schema 迁移 + 改备份校验器语义 + 重pin 行号锁 meta-test,为措辞精修 ROI 过低。
+> **新范围**:后端 label 保持 `论断/过程` 不动(零迁移);只做前端一致性修复——
+> Task 3(小表对齐当前后端)+ Task 2(跨栈守卫)+ Task 4(KnowledgeBrowser 用 API label)。
+> Task 1(后端迁移)**作废**,含其「范围修订」段。下面正文的 `结论/步骤` 一律按 `论断/过程` 读。
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 让知识对象类型（object_type）在界面上显示对齐词汇表的中文名，消除「后端/前端两份 label 打架」和「同一 Knowledge 面板标签中文、条目英文」。
