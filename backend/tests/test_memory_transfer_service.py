@@ -107,6 +107,9 @@ def test_non_confirmed_memory_not_transferable(repo, alice):
 # copy never happened": the caller needs the new_id to know a duplicate now
 # exists, status="copied_source_not_removed" to know the source was NOT cleaned
 # up, and the source memory itself must still be reachable (duplicate-not-loss).
+# PR review round 3 P1-2: fault-injection target moved from `delete_memory`
+# (unconditional) to `delete_memory_if_unchanged` (the new atomic conditional
+# delete) — move's cleanup no longer calls the former at all.
 def test_move_cleanup_failure_reports_per_item_and_keeps_copy(repo, alice, monkeypatch):
     service = repo._runtime.memory_service
     src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
@@ -115,7 +118,7 @@ def test_move_cleanup_failure_reports_per_item_and_keeps_copy(repo, alice, monke
     def _boom(*_args, **_kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(service.store, "delete_memory", _boom)
+    monkeypatch.setattr(service.store, "delete_memory_if_unchanged", _boom)
 
     results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
 
@@ -138,6 +141,10 @@ def test_move_cleanup_failure_reports_per_item_and_keeps_copy(repo, alice, monke
 # BEFORE the memory row is deleted (sources.memory_id is not a foreign key,
 # so nothing cascades — reversing this order would strand an unreachable
 # derived source on a failure between the two calls).
+# PR review round 3 P1-2: tracked call renamed from `delete_memory` to
+# `delete_memory_if_unchanged` — move's cleanup delete goes through the new
+# atomic conditional method now; the ordering guarantee itself (remove
+# BEFORE delete) is unchanged.
 def test_move_removes_kg_source_before_deleting_memory_row(repo, alice, monkeypatch):
     service = repo._runtime.memory_service
     src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
@@ -145,23 +152,23 @@ def test_move_removes_kg_source_before_deleting_memory_row(repo, alice, monkeypa
 
     call_order = []
     orig_remove = service.memory_kg.remove_memory_source
-    orig_delete = service.store.delete_memory
+    orig_delete = service.store.delete_memory_if_unchanged
 
     def _remove(memory_id):
         call_order.append("remove_memory_source")
         return orig_remove(memory_id)
 
-    def _delete(memory_id, user_id):
-        call_order.append("delete_memory")
-        return orig_delete(memory_id, user_id)
+    def _delete(memory_id, user_id, expected_revision):
+        call_order.append("delete_memory_if_unchanged")
+        return orig_delete(memory_id, user_id, expected_revision)
 
     monkeypatch.setattr(service.memory_kg, "remove_memory_source", _remove)
-    monkeypatch.setattr(service.store, "delete_memory", _delete)
+    monkeypatch.setattr(service.store, "delete_memory_if_unchanged", _delete)
 
     results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
 
     assert results[0]["ok"] is True
-    assert call_order == ["remove_memory_source", "delete_memory"]
+    assert call_order == ["remove_memory_source", "delete_memory_if_unchanged"]
 
 
 # --- Amendment 2 (widened): the post-commit wrap must also cover the
@@ -508,3 +515,116 @@ def test_move_does_not_delete_source_deprecated_after_copy_commits(repo, alice, 
     still_there = service.get(mem.id, alice.id)
     assert still_there.notebook_id == src
     assert still_there.status == "deprecated"
+
+
+# --- PR review round 3 P1-2 (still a race, even with round 2's re-check):
+# round 2 added an `embedding_revision` compare right before the cleanup
+# section, but that compare and the eventual `self.store.delete_memory` were
+# two INDEPENDENT statements with `remove_memory_source` (a real DB write)
+# running in between them — check-then-act, not atomic. An edit landing in
+# THAT specific gap (after the compare reads "unchanged", before the row is
+# actually deleted) sails straight past round 2's guard: the compare already
+# passed using the pre-edit snapshot, and the unconditional delete then
+# removes the row — with the concurrent edit gone along with it, and no
+# exception at all: `ok=True, status="moved"`, silently reporting success
+# while destroying the newer content. This is a DIFFERENT bug from round 2's
+# P1-3 (which was about the gap between reading `source` at the top of the
+# loop and create_copy_with_initial_revision's commit) — this one is
+# specifically about the SECOND check not being atomic with the delete that
+# follows it. The interleaving is injected via a stub replacing
+# `service.memory_kg.remove_memory_source` — called between the compare and
+# the delete — which performs the concurrent edit before returning (skipping
+# the real KG-source removal entirely, mirroring the sibling knowhow race
+# test's teardown-stub shape in test_knowhow_transfer_service.py): the
+# earliest realistic point in transfer()'s own call sequence after the
+# compare has already passed.
+def test_move_does_not_delete_source_edited_during_kg_source_removal(
+    repo, alice, monkeypatch
+):
+    from app.models.schemas import MemoryUpdate
+
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice, title="Original", content="Original body")
+
+    def _concurrent_edit_during_kg_removal(memory_id):
+        # 模拟并发写者恰好卡在「复核通过」和「删源行」之间的窗口——故意不调用
+        # 真实的 remove_memory_source（不是这条用例要测的东西，同款先例见
+        # test_knowhow_transfer_service.py 的 _ConcurrentEditDuringTeardown），
+        # 只做并发编辑这一件事，正常返回。
+        service.update(
+            memory_id, alice.id,
+            MemoryUpdate(title="Edited concurrently", content_md="New body"),
+        )
+
+    monkeypatch.setattr(
+        service.memory_kg, "remove_memory_source", _concurrent_edit_during_kg_removal
+    )
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    result = results[0]
+    assert result["ok"] is False
+    assert result["status"] == "copied_source_not_removed"
+    assert result["new_id"] is not None
+
+    # 源没被删，且带着并发编辑后的新内容——不是复核那一刻的旧快照
+    still_there = service.get(mem.id, alice.id)
+    assert still_there.notebook_id == src
+    assert still_there.title == "Edited concurrently"
+    assert still_there.content_md == "New body"
+
+    # 目标侧副本仍然存在（拷贝已提交，不因收尾中止而消失），但停在拷贝那一刻
+    # 的旧快照
+    copied = service.get(result["new_id"], alice.id)
+    assert copied.notebook_id == dst
+    assert copied.title == "Original"
+    assert copied.content_md == "Original body"
+
+
+# Status-only variant of the race above: title/content_md are untouched, only
+# status changes (confirmed -> deprecated) — pins that delete_memory_if_
+# unchanged's `status='confirmed'` predicate (not just the revision number)
+# actually pulls its weight, mirroring the sibling round-2 deprecate test
+# above but injected in the tighter round-3 window.
+def test_move_does_not_delete_source_deprecated_during_kg_source_removal(
+    repo, alice, monkeypatch
+):
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice, title="T", content="B")
+
+    def _concurrent_deprecate_during_kg_removal(memory_id):
+        service.deprecate(memory_id, alice.id)
+
+    monkeypatch.setattr(
+        service.memory_kg, "remove_memory_source", _concurrent_deprecate_during_kg_removal
+    )
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    result = results[0]
+    assert result["ok"] is False
+    assert result["status"] == "copied_source_not_removed"
+    assert result["new_id"] is not None
+
+    # 源没被删，且带着并发那次 deprecate 之后的新状态
+    still_there = service.get(mem.id, alice.id)
+    assert still_there.notebook_id == src
+    assert still_there.status == "deprecated"
+
+
+def test_move_deletes_source_when_untouched_during_kg_source_removal(repo, alice):
+    """Companion happy-path guard: the atomic conditional delete must not turn
+    every ordinary, uncontended move into a false-positive
+    copied_source_not_removed."""
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice, title="T", content="B")
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    assert results[0]["ok"] is True
+    assert results[0]["status"] == "moved"
+    with pytest.raises(KeyError):
+        service.get(mem.id, alice.id)

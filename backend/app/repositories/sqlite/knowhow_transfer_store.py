@@ -165,18 +165,45 @@ class KnowhowTransferStore:
             if checks != expected:
                 raise RuntimeError(f"knowhow transfer 校验失败：{checks} != {expected}")
 
+    #: Shared by ``table_fingerprint`` (own ``connect()``) and
+    #: ``delete_table_if_unchanged`` (caller-supplied connection inside its
+    #: own ``write()``) so the two never drift apart — see both methods'
+    #: docstrings for why they must run the byte-identical query.
+    _FINGERPRINT_SQL = (
+        "SELECT t.mutation_seq AS mutation_seq, "
+        "(SELECT COUNT(*) FROM knowhow_columns WHERE table_id = t.id) "
+        "AS col_count, "
+        "(SELECT COUNT(*) FROM knowhow_rows WHERE table_id = t.id) "
+        "AS row_count, "
+        "(SELECT COUNT(*) FROM knowhow_cells c JOIN knowhow_rows r "
+        " ON r.id = c.row_id WHERE r.table_id = t.id) AS cell_count, "
+        "(SELECT COUNT(*) FROM knowhow_cell_code cc JOIN knowhow_rows r "
+        " ON r.id = cc.row_id WHERE r.table_id = t.id) AS cell_code_count, "
+        "(SELECT group_concat(sig, '|') FROM ("
+        "  SELECT cc.id || ':' || cc.cell_content_hash || ':' || cc.updated_at AS sig "
+        "  FROM knowhow_cell_code cc JOIN knowhow_rows r ON r.id = cc.row_id "
+        "  WHERE r.table_id = t.id ORDER BY cc.id"
+        ")) AS cell_code_signal "
+        "FROM knowhow_tables t WHERE t.id = ?"
+    )
+
+    @classmethod
+    def _fingerprint_on(cls, db: sqlite3.Connection, table_id: str) -> "dict | None":
+        row = db.execute(cls._FINGERPRINT_SQL, (table_id,)).fetchone()
+        return dict(row) if row is not None else None
+
     def table_fingerprint(self, table_id: str) -> "dict | None":
-        """Cheap source-version probe for ``table_id``: ``mutation_seq`` plus
-        live columns/rows/cells/cell_code counts, in ONE top-level SELECT
-        (SQLite gives a single statement's scalar subqueries a consistent
-        snapshot as of when it starts executing, so this can't observe a
-        torn read the way four separate queries could). Returns ``None`` if
-        the table no longer exists.
+        """Cheap source-version probe for ``table_id``: ``mutation_seq``,
+        live columns/rows/cells/cell_code counts, AND a cell_code CONTENT
+        signal, in ONE top-level SELECT (SQLite gives a single statement's
+        scalar subqueries a consistent snapshot as of when it starts
+        executing, so this can't observe a torn read the way separate
+        queries could). Returns ``None`` if the table no longer exists.
 
         Used by ``move_table``'s snapshot-vs-delete concurrent-edit guard
         (PR review round 2 P1-2, data loss): ``copy_table`` snapshots the
-        source, and the source is deleted afterward — if a cell/row/column
-        edit commits in between, the target holds a stale copy and the
+        source, and the source is deleted afterward — if a cell/row/column/
+        code edit commits in between, the target holds a stale copy and the
         newly-edited source is destroyed forever. ``knowhow_tables.
         mutation_seq`` alone under-covers this: per ``KnowhowStore``'s own
         docstring, the structural editing methods (add/delete row, add/
@@ -187,6 +214,22 @@ class KnowhowTransferStore:
         or deleted row/column entirely. The four counts close exactly that
         gap: any add/delete changes at least one of them (columns/rows
         cascade-delete their cells and cell_code, so those counts move too).
+
+        PR review round 3 P1-3 (fingerprint gap): the four counts still miss
+        an in-place CODE edit. ``upsert_knowhow_cell_code`` is an
+        ``INSERT ... ON CONFLICT(row_id, column_id) DO UPDATE`` — editing an
+        already-attached cell's code keeps the same row/column pair, so
+        ``cell_code_count`` doesn't move, and (like every other structural-
+        vs-content distinction here) it does NOT bump ``mutation_seq``
+        either. ``cell_code_signal`` closes that gap: a deterministic
+        ``group_concat`` of ``id:cell_content_hash:updated_at`` per code row,
+        under a stable ``ORDER BY cc.id`` (group_concat has no defined input
+        order on its own; ordering the source subquery is what makes this
+        reproducible across calls — see ``test_fingerprint_stable_when_
+        nothing_changes``). Any edit changes that row's hash and/or
+        updated_at, which changes the concatenated string. ``NULL`` when the
+        table has no code rows (group_concat of zero rows), which compares
+        equal to itself and unequal to any non-empty signal, both correct.
 
         Known, accepted scope boundary: this does NOT catch a pure metadata
         edit that changes neither content nor cardinality -- renaming a
@@ -199,17 +242,33 @@ class KnowhowTransferStore:
         smaller, cosmetic gap than the data-loss this guard exists to close.
         """
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT t.mutation_seq AS mutation_seq, "
-                "(SELECT COUNT(*) FROM knowhow_columns WHERE table_id = t.id) "
-                "AS col_count, "
-                "(SELECT COUNT(*) FROM knowhow_rows WHERE table_id = t.id) "
-                "AS row_count, "
-                "(SELECT COUNT(*) FROM knowhow_cells c JOIN knowhow_rows r "
-                " ON r.id = c.row_id WHERE r.table_id = t.id) AS cell_count, "
-                "(SELECT COUNT(*) FROM knowhow_cell_code cc JOIN knowhow_rows r "
-                " ON r.id = cc.row_id WHERE r.table_id = t.id) AS cell_code_count "
-                "FROM knowhow_tables t WHERE t.id = ?",
-                (table_id,),
-            ).fetchone()
-        return dict(row) if row is not None else None
+            return self._fingerprint_on(db, table_id)
+
+    def delete_table_if_unchanged(
+        self, table_id: str, expected_fingerprint: "dict | None"
+    ) -> bool:
+        """Atomic conditional delete for ``move_table``'s cleanup step (PR
+        review round 3 P1-1): recomputes ``table_fingerprint`` and deletes
+        the ``knowhow_tables`` row (cascade — see migration 16/17's
+        ``ON DELETE CASCADE`` FKs from columns/rows onto the table, and from
+        cells/cell_code onto rows) in ONE ``database.write()``. The whole
+        method body runs under ``database.write_lock`` continuously (see
+        ``SqliteDatabase.write``'s docstring: writers are process-wide
+        serialized), so no concurrent writer's edit can land between "the
+        recheck says unchanged" and "the row is gone" the way it could
+        across two separate calls (``table_fingerprint()`` then a separate
+        unconditional delete) — that gap is exactly PR review round 2's
+        P1-2 fix left open: it re-checked the fingerprint, but the check and
+        the eventual delete were still two independent statements with an
+        arbitrary amount of other work (projection teardown) running in
+        between, so an edit landing in THAT window still sailed past the
+        check and got deleted along with the row. Returns whether the row
+        was actually deleted (``False`` means a concurrent edit changed the
+        fingerprint since ``expected_fingerprint`` was captured — the table
+        is left fully intact, caller should surface this as a recoverable
+        cleanup failure, not silently retry the delete)."""
+        with self.database.write() as db:
+            if self._fingerprint_on(db, table_id) != expected_fingerprint:
+                return False
+            cursor = db.execute("DELETE FROM knowhow_tables WHERE id = ?", (table_id,))
+            return cursor.rowcount == 1

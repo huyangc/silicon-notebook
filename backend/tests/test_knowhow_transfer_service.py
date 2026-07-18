@@ -397,3 +397,66 @@ def test_move_deletes_source_when_untouched_after_copy_snapshot(repo):
     assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
     with pytest.raises(KeyError):
         repo.get_knowhow_table(src_tid)
+
+
+# --- PR review round 3 P1-1 (still a race, even with round 2's re-check):
+# round 2 added a fingerprint recheck right before the cleanup section, but
+# the recheck and the eventual `repo.delete_knowhow_table` were two
+# INDEPENDENT statements with the entire projection-teardown call sitting in
+# between them — check-then-act, not atomic. An edit landing in THAT specific
+# gap (after the recheck reads "unchanged", before the row is actually
+# deleted) sails straight past round 2's guard: the recheck already passed
+# using the pre-edit fingerprint, and the unconditional delete then removes
+# the row (and the concurrent edit riding along with it) with no further
+# check. This is a DIFFERENT bug from round 2's P1-2 (which was about the gap
+# between copy_table's snapshot and the FIRST fingerprint read) — this one is
+# specifically about the SECOND check not being atomic with the delete that
+# follows it, and round 2's own fingerprint content (mutation_seq + 4 counts)
+# is already enough to detect an added row, so this test deliberately reuses
+# a plain add_knowhow_row (not a cell-code edit — that gap is P1-3's, tested
+# separately) to isolate the atomicity bug from the fingerprint-content bug.
+# The interleaving is injected via a stub `build_projector` whose
+# `delete_table_projection` — called between the recheck and the delete —
+# performs the concurrent write before returning normally (as if teardown
+# succeeded): the earliest realistic point in move_table's own call sequence
+# after the recheck has already passed. Appended at EOF, same zero-line-shift
+# reason as every other block in this file (see the file-header pin note).
+def test_move_does_not_delete_source_row_added_during_projection_teardown(
+    repo, monkeypatch
+):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    cols = {c["name"]: c["id"] for c in repo.get_knowhow_table(src_tid)["columns"]}
+    # 表必须真投影过，hidden_source_id 才非空——move_table 只在 hidden 为真
+    # 时才调用 delete_table_projection，这正是本用例注入并发编辑的钩子。
+    src_hidden = _project(repo, src_tid)["hidden_source_id"]
+    assert src_hidden, "源表未真正投影，测试前置条件不成立"
+
+    class _ConcurrentEditDuringTeardown:
+        def delete_table_projection(self, hidden_source_id):
+            # 模拟并发写者恰好卡在「指纹复核通过」和「原子删除」之间的窗口
+            # ——拆投影本身允许失败/耗时，是这条竞态在生产中最现实的落点。
+            # 故意不调用真实投影拆卸（不是这条用例要测的东西，_BoomProjector
+            # 同款先例见 test_move_keeps_source_intact_when_projection_
+            # teardown_fails）：只做并发编辑这一件事，正常返回（模拟"拆投影
+            # 本身成功"，把变量收窄到"拆投影和删表行之间有编辑插入"这一件
+            # 事本身）。
+            repo.add_knowhow_row(src_tid, {cols["违例类型"]: "并发新增的行"})
+
+    monkeypatch.setattr(
+        kh_transfer, "build_projector", lambda _repo: _ConcurrentEditDuringTeardown()
+    )
+
+    with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
+        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    assert exc_info.value.new_table_id
+
+    # 源没被删，且带着并发新增的那一行——不是复制/复核那一刻的旧快照
+    detail = repo.get_knowhow_table(src_tid)
+    assert detail["notebook_id"] == src_nb
+    assert len(detail["rows"]) == 2, "并发新增的行必须还在源表里，不能被误删的源表带走"
+
+    # 目标侧副本仍然存在（拷贝已提交，不因收尾中止而消失）
+    dst_tables = repo.list_knowhow_tables(dst_nb)
+    assert len(dst_tables) == 1
+    assert dst_tables[0]["id"] == exc_info.value.new_table_id

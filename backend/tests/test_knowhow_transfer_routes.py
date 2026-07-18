@@ -61,15 +61,25 @@ def test_transfer_to_same_notebook_rejected(client, repo):
 def test_move_source_cleanup_failure_returns_409_with_new_table_id(client, repo, monkeypatch):
     """A3 评审附加需求：move 时复制已提交、但删源失败——不能让用户拿到裸 500
     去盲目重试(会在目标侧越堆越多重复副本)。故障注入删源这一步(不依赖真实
-    投影/embedder：patch 整个类的 delete_knowhow_table，_table() 建的表从未
-    投影，hidden_source_id 恒为 None，走的正是"只删源"这条无条件必经路径)。
+    投影/embedder：patch 掉真正执行删除的 KnowhowTransferStore.
+    delete_table_if_unchanged，_table() 建的表从未投影，hidden_source_id 恒为
+    None，走的正是"只删源"这条无条件必经路径——round 3 P1-1 把原来 repo.
+    delete_knowhow_table 那次无条件删除换成了这个原子条件删除，故障注入点
+    随之搬到这里，参见 backend/app/services/knowhow/transfer.py 的 move_table)。
+    在类上 patch（而非 `repo._runtime.knowhow_transfer_store` 实例）：这条用例
+    走 HTTP（client 触发 app 自己的请求处理路径），app 的依赖注入通过
+    app/api/deps.py 的 `@lru_cache def repository()` 解析仓库实例，与这里
+    `repo` 夹具直接构造的 SQLiteRepository(Settings()) 是两个不同的 Python
+    对象（只是共享同一个 tmp DB 文件）——patch 实例只会打中 `repo` 自己，
+    request 处理走的是另一个对象，必须 patch 类本身才能两边都命中。
     断言：状态码 409 + 结构化 code + new_table_id 在目标侧可解析 + 源表原封
     不动地还在——"重复不丢失"必须被诚实地捅给调用方，而不是悄悄吞掉。"""
+    from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
 
-    def _boom_delete(self, table_id):
-        raise RuntimeError("simulated delete_knowhow_table failure")
+    def _boom_delete(self, table_id, expected_fingerprint):
+        raise RuntimeError("simulated delete_table_if_unchanged failure")
 
-    monkeypatch.setattr(SQLiteRepository, "delete_knowhow_table", _boom_delete)
+    monkeypatch.setattr(KnowhowTransferStore, "delete_table_if_unchanged", _boom_delete)
 
     h = _login(client, "a00000003")
     src = client.post("/api/notebooks", json={"name": "src"}, headers=h).json()["id"]

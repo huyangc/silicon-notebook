@@ -3316,15 +3316,24 @@ EXPECTED_PATCH_DELTAS = {
         # SurfaceMember consumer record" bucket, not a new pattern).
         ('backend/tests/test_knowhow_copy.py', 492, '_new_id', 'sr'),
         ('backend/tests/test_knowhow_copy.py', 501, '_insert_row', 'repo'),
-        # A4 (REST 端点) fault-injection test: patches the whole class so the
-        # boom applies regardless of which SQLiteRepository instance the route
-        # handler's repository() singleton resolves to (same idea as
-        # test_in_batching.py's SQLiteRepository-base entry above). "delete_
-        # knowhow_table" itself stays exempt from the consumer-scan comparison
-        # via TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS (whole-member, any site), but
-        # the *patch*-scan (this set) doesn't get that exemption, so it needs
-        # its own exact-site entry here.
-        ('backend/tests/test_knowhow_transfer_routes.py', 72, 'delete_knowhow_table', 'SQLiteRepository'),
+        # PR review round 3 P1-1 removed this entry: the A4 fault-injection
+        # test used to patch SQLiteRepository.delete_knowhow_table (the whole
+        # class, so the boom applied regardless of which SQLiteRepository
+        # instance the route handler's repository() singleton resolves to —
+        # same idea as test_in_batching.py's SQLiteRepository-base entry
+        # above). move_table no longer calls repo.delete_knowhow_table at
+        # all — its cleanup delete now goes through KnowhowTransferStore.
+        # delete_table_if_unchanged (the new atomic conditional delete; see
+        # that method's docstring and transfer.py's move_table), so the test
+        # was updated to patch THAT class instead (still class-level, same
+        # reason — the route handler's repository() singleton is a different
+        # SQLiteRepository instance, and therefore a different
+        # KnowhowTransferStore instance, than this test's own `repo`
+        # fixture). KnowhowTransferStore is not SQLiteRepository and not a
+        # "repo"/"*_repo"-named variable, so `_static_repository_patches()`
+        # (this set's own scanner — see its `direct_repo`/`repository_class`
+        # gating) does not observe that new patch site at all; there is
+        # nothing to add here, only this stale entry to remove.
         ('backend/tests/test_knowledge_governance_delegation.py', 131, 'set_conflict_status', 'repo'),
         ('backend/tests/test_notebook_copy_service.py', 93, '_new_id', 'sqlite_repository'),
         ('backend/tests/test_notebook_copy_service.py', 118, '_COPY_CHUNK', 'sqlite_repository'),
@@ -4016,12 +4025,19 @@ ACTIVE_PRODUCTION_MEMBER_SITES = ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSF
 # import consumer (SQLiteRepository) additionally needs the IMPORTS entry,
 # folded into the import-completeness OR-chain (resolves lazily at call time,
 # so defining it here at EOF is fine, same as the two sibling IMPORTS sets).
-# The 409 fault-injection test's `monkeypatch.setattr(SQLiteRepository,
-# "delete_knowhow_table", ...)` patch site is registered separately in
-# EXPECTED_PATCH_DELTAS['actual_only'] above (test_static_repository_patch_
-# scan_matches_manifest_exactly is a distinct scan from the member/site
-# consumer comparison this block feeds). Appended at EOF for the same
-# zero-line-shift reason as every other TASKN_* block above.
+# The 409 fault-injection test used to patch `SQLiteRepository.
+# delete_knowhow_table` and was registered separately in EXPECTED_PATCH_
+# DELTAS['actual_only'] (test_static_repository_patch_scan_matches_manifest_
+# exactly is a distinct scan from the member/site consumer comparison this
+# block feeds). PR review round 3 P1-1 moved move_table's cleanup delete off
+# repo.delete_knowhow_table onto the new KnowhowTransferStore.
+# delete_table_if_unchanged (atomic conditional delete), so the test's fault
+# injection moved with it — it now patches KnowhowTransferStore (imported
+# locally in the test function, not SQLiteRepository) at the class level, a
+# class the patch-scan's class_names set doesn't track, so that entry was
+# removed from EXPECTED_PATCH_DELTAS['actual_only'] rather than replaced.
+# Appended at EOF for the same zero-line-shift reason as every other TASKN_*
+# block above.
 KNOWHOW_TRANSFER_ROUTES_ALLOWED_IMPORTS = {
     ("backend/tests/test_knowhow_transfer_routes.py", 7, "app.services.sqlite_repository", "SQLiteRepository"),
 }

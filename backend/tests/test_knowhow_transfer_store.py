@@ -57,3 +57,51 @@ def test_insert_transfer_rejects_count_mismatch(repo, store):
     # 回滚生效：khtbl-x 未落库
     with repo._connect() as db:
         assert db.execute("SELECT COUNT(*) FROM knowhow_tables WHERE id='khtbl-x'").fetchone()[0] == 0
+
+
+# --- PR review round 3 P1-3 (fingerprint gap, data loss precursor):
+# upsert_knowhow_cell_code is an INSERT-ON-CONFLICT(row_id,column_id) upsert —
+# an in-place code edit on an already-attached cell keeps the same row/column
+# pair, so none of the four count-based fingerprint fields move (col_count/
+# row_count/cell_count/cell_code_count are all unchanged: same number of
+# rows). It also does NOT bump knowhow_tables.mutation_seq — only
+# update_knowhow_cell/update_knowhow_cells do (see KnowhowStore's own
+# docstring; upsert_knowhow_cell_code is conspicuously absent from that list).
+# So a fingerprint built only from mutation_seq + the four counts is blind to
+# this edit: move_table's snapshot-vs-delete concurrent-edit guard would sail
+# straight past a concurrent code edit and delete the source table, silently
+# discarding the newer code forever. table_fingerprint must therefore include
+# a CONTENT signal over the code rows themselves, not just their count.
+def test_fingerprint_changes_when_cell_code_is_edited_in_place(repo, store):
+    tid = _table(repo)
+    detail = repo.get_knowhow_table(tid)
+    row_id = detail["rows"][0]["id"]
+    column_id = detail["columns"][0]["id"]
+    repo.upsert_knowhow_cell_code(row_id, column_id, "print(1)", "python", "user-x", "hash-v1")
+
+    before = store.table_fingerprint(tid)
+    # 仅仅原地编辑代码内容——不加行、不加列、不碰 knowhow_cells，
+    # row/column 都是同一对，UNIQUE(row_id, column_id) 走 UPDATE 分支。
+    repo.upsert_knowhow_cell_code(row_id, column_id, "print(2)", "python", "user-x", "hash-v2")
+    after = store.table_fingerprint(tid)
+
+    assert before != after, (
+        "cell_code 内容原地编辑后 table_fingerprint 必须变化——否则 move_table 的"
+        "并发编辑防护对代码编辑视而不见，编辑会随源表一起被删掉、永久丢失"
+    )
+
+
+def test_fingerprint_stable_when_nothing_changes(repo, store):
+    """Companion happy-path guard: calling table_fingerprint twice with no
+    intervening write must be stable (no spurious churn from e.g. dict key
+    ordering or non-deterministic aggregate ordering)."""
+    tid = _table(repo)
+    detail = repo.get_knowhow_table(tid)
+    row_id = detail["rows"][0]["id"]
+    column_id = detail["columns"][0]["id"]
+    repo.upsert_knowhow_cell_code(row_id, column_id, "print(1)", "python", "user-x", "hash-v1")
+
+    first = store.table_fingerprint(tid)
+    second = store.table_fingerprint(tid)
+
+    assert first == second

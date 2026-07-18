@@ -804,6 +804,18 @@ class MemoryService:
                     raise ValueError("源与目标不能是同一个 notebook")
                 if source.status != "confirmed":
                     raise ValueError("只能传输 confirmed 状态的 memory")
+                # P1-2（PR review round 3）：move 收尾用的并发编辑判据在这里、
+                # 尽量早地捕获——不能晚于下面 create_copy_with_initial_
+                # revision 用 source 建副本那一步。位置理由和 knowhow 那边
+                # move_table 捕获 source_fingerprint 一致（越早越好：即便并
+                # 发编辑恰好卡在这次捕获和下面建副本之间，副本拷到的也已经
+                # 是编辑后的新内容，届时收尾那次复核顶多多算一次"变了"，误
+                # 判进 copied_source_not_removed——安全的方向，不会把这次
+                # 误判成"没变"而删掉新内容）。embedding_revision 是这个文件
+                # 既有的乐观并发原语（_schedule_embed 同一模式）；source 刚
+                # 读出来，字段必然仍然匹配，取到的就是它此刻的 revision 号
+                # ——留给下面 mode == "move" 分支的原子删除做版本判据。
+                source_revision = self.store.embedding_revision(source.id, source)
                 now = self.now()
                 provenance = {
                     "imported_from": {
@@ -898,25 +910,55 @@ class MemoryService:
                         # 间，用户完全可能编辑了标题/正文，或把它 deprecate 掉。
                         # 目标侧那份副本已经带着旧快照定死在库里；这里若照旧删
                         # 源，并发那次改动就随源一起永久消失（旧内容还可能反过
-                        # 来配上并发改动触发的新向量，对不上号）。复用
-                        # embedding_revision 既有的乐观并发原语（_schedule_embed
-                        # 同一模式，见其定义处）：按 memory_id 只在
-                        # title/content_md/tags/status 与传入的 source 快照逐字
-                        # 段仍相同时才返回 revision，否则 None——不依赖某个可能
-                        # 被绕过的计数器，直接查这四个字段本身，是否被并发改动
-                        # 一目了然。命中 None 就地 raise，落进上面这个 try 自己
-                        # 的收尾 except：cleanup_error 被记录、source_removed 保
-                        # 持 False，下面复用既有的 copied_source_not_removed 结
-                        # 果契约（不发明新形状）——两边都留，不丢失。
-                        if self.store.embedding_revision(source.id, source) is None:
-                            raise RuntimeError(
-                                "源 memory 在复制完成后被并发编辑或状态变更"
-                                "（title/content/tags/status 与复制时的快照不一"
-                                "致），为避免丢失该改动，源未删除"
-                            )
+                        # 来配上并发改动触发的新向量，对不上号）。
+                        #
+                        # P1-2（PR review round 3：check-then-act 仍是竞态）：
+                        # round 2 在这里加了一次 embedding_revision 复核，但复核
+                        # 和真正的 delete_memory 是两条独立语句，中间还隔着
+                        # remove_memory_source 这次真实的 DB 写——并发编辑完全
+                        # 可能恰好卡在「复核通过」之后、「删源行」之前，这次复
+                        # 核对它完全失明，行还是会被无条件删掉，编辑照样永久
+                        # 丢失，且不会有任何异常：ok=True、status="moved"，悄
+                        # 悄把新内容连同整条 memory 一起吞掉。
+                        # delete_memory_if_unchanged 把「复核」和「删」折进
+                        # DELETE 语句自己的 WHERE 子句——同一条 SQL 语句下，
+                        # status='confirmed' AND revision 匹配要么一次性都满
+                        # 足、要么整条语句零行生效，不存在"复核通过但状态已经
+                        # 变了"这种窗口。判据用 source_revision（上面循环顶部
+                        # 刚读到 source 时就近捕获的 revision 号），不是
+                        # updated_at：最初试的就是 updated_at，但
+                        # app.services.sqlite_repository._now 把时间戳截到整
+                        # 秒（`datetime.now().replace(microsecond=0)`）——
+                        # "副本提交"和"并发编辑落地"这两件事完全可能落在同一
+                        # 秒内（这里的测试就在同一进程里背靠背发生），届时新
+                        # 旧 updated_at 字符串相同，检查会把已经改过的行误判
+                        # 成"没变"而删掉（本改动开发过程中用这个文件自己的用
+                        # 例真实跑出过这个假阴性，才切到 revision）。revision
+                        # 不存在这个问题：_mutate_with_revision 的
+                        # _append_revision_on 每次调用都严格 +1 插一条新行，
+                        # 不管改的是标题/正文/tags 还是仅仅状态流转（deprecate
+                        # 走的也是 transition_with_revision），必定推高
+                        # MAX(revision)，没有并列的可能。
+                        # 返回 False 说明源在这最后一刻仍然对不上——两边都留：
+                        # 副本已在目标（create_copy_with_initial_revision 早就
+                        # COMMIT 了），源连同它的并发改动原样留在原地（即便上
+                        # 一行 remove_memory_source 已经跑过、源的派生 KG 源没
+                        # 了，也不是不可回收的孤儿——并发那次 update() 会在源
+                        # 仍 eligible 时重新调度 KG 抽取，见 update() 定义）。
+                        # 落进上面这个 try 自己的收尾 except：cleanup_error 被
+                        # 记录、source_removed 保持 False，下面复用既有的
+                        # copied_source_not_removed 结果契约（不发明新形状）
+                        # ——两边都留，不丢失。
                         if self.memory_kg is not None:
                             self.memory_kg.remove_memory_source(source.id)
-                        self.store.delete_memory(source.id, user_id)
+                        if not self.store.delete_memory_if_unchanged(
+                            source.id, user_id, source_revision
+                        ):
+                            raise RuntimeError(
+                                "源 memory 在复制完成后被并发编辑或状态变更"
+                                "（原子删除时 revision 复核未命中），为避免"
+                                "丢失该改动，源未删除"
+                            )
                         source_removed = True
                 except Exception as exc:  # noqa: BLE001 — 见上：副本已提交，收尾
                     # 失败必须逐条上报，不能冒泡、也不能伪装成"没创建"。

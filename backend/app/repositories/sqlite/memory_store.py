@@ -1246,6 +1246,56 @@ class MemoryStore:
         if cursor.rowcount != 1:
             raise KeyError(memory_id)
 
+    def delete_memory_if_unchanged(
+        self, memory_id: str, user_id: str, expected_revision: "int | None"
+    ) -> bool:
+        """Atomic conditional delete for ``MemoryService.transfer``'s move
+        cleanup (PR review round 3 P1-2): folds the concurrent-edit check
+        directly into the ``DELETE``'s ``WHERE`` clause, so "is it still the
+        row we copied" and "delete it" are ONE statement instead of a
+        separate read-then-write — no other writer can commit an edit
+        between them the way it could across two independent calls (a
+        revision compare, then a later unconditional ``delete_memory``).
+
+        Keyed on the ``memory_revisions`` MAX(revision) for this memory, NOT
+        ``updated_at``: ``updated_at`` was the first design tried here, but
+        ``app.services.sqlite_repository._now`` truncates to whole seconds
+        (``datetime.now().replace(microsecond=0)``) — two mutations inside
+        the same wall-clock second (an entirely realistic gap between "copy
+        committed" and "a concurrent edit lands") produce the byte-identical
+        string, which would make this check silently treat an edited row as
+        unchanged and delete it anyway (verified failing via this repo's own
+        test suite before switching to revision). ``revision`` has no such
+        collision: ``_mutate_with_revision``'s ``_append_revision_on`` inserts
+        exactly one new, strictly-incrementing row every time
+        ``update_with_revision``/``transition_with_revision`` runs (both
+        content edits and status transitions — ``deprecate`` goes through
+        ``transition_with_revision`` too), so any mutation since
+        ``expected_revision`` was captured makes MAX(revision) strictly
+        greater, unconditionally. Mirrors ``mark_embedding_failed``'s
+        existing ``(SELECT COALESCE(MAX(revision),0) FROM memory_revisions
+        WHERE memory_id=?)=?`` shape (same file) rather than inventing a new
+        one. ``status='confirmed'`` is redundant with that (any transition
+        away from 'confirmed' also advances revision) but kept as an
+        explicit, cheap belt-and-suspenders check — a move should never
+        delete a row that isn't (still) confirmed, regardless of how that
+        came to be true. ``expected_revision=None`` (the source's revision
+        couldn't be captured — see caller) can never equal a real revision
+        number, so the DELETE safely matches zero rows. Returns whether the
+        row was actually deleted (``False`` means the memory was edited or
+        transitioned away from 'confirmed' since ``expected_revision`` was
+        captured — the row is left fully intact; caller should surface this
+        as ``copied_source_not_removed``, not retry the delete)."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "DELETE FROM memory_items WHERE id=? AND created_by=? "
+                "AND status='confirmed' AND "
+                "(SELECT COALESCE(MAX(revision),0) FROM memory_revisions "
+                " WHERE memory_id=?)=?",
+                (memory_id, user_id, memory_id, expected_revision),
+            )
+        return cursor.rowcount == 1
+
     def bulk_delete_memories(self, user_id: str, memory_ids: Sequence[str]) -> int:
         unique = list(dict.fromkeys(str(m) for m in memory_ids if m))
         if not unique:

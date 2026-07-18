@@ -308,7 +308,34 @@ def move_table(
         hidden = repo.get_knowhow_table(source_table_id).get("hidden_source_id")
         if hidden:
             build_projector(repo).delete_table_projection(hidden)
-        repo.delete_knowhow_table(source_table_id)
+        # P1-1（PR review round 3：check-then-act 仍是竞态）：上面那次复核本身
+        # 不是原子的——它只是「读一次指纹、比一次」，和真正删表行的 DELETE 是
+        # 两条独立语句，中间隔着整段拆投影（build_projector(repo).
+        # delete_table_projection）。并发编辑完全可能恰好卡在「复核通过」之
+        # 后、「表行被删」之前这段真空里——早到 build_projector(repo) 构造期
+        # 间，晚到 delete_table_projection 内部某次写 I/O 让出线程的任意一
+        # 刻——这次复核对它完全失明，行还是会被无条件删掉，编辑照样永久丢
+        # 失。delete_table_if_unchanged 把「复核」和「删」收进
+        # KnowhowTransferStore 自己 ONE 个 database.write() 里：整个方法体连
+        # 续持有进程级 write_lock（写全程串行，见 database.py 的
+        # SqliteDatabase.write 文档字符串），没有第二个写者能在「复核」和
+        # 「删」之间插进来提交任何东西——不管拆投影花了多久、这中间发生了什
+        # 么。这才是真正堵死这条竞态的地方；上面那次复核只是尽量早地、廉价
+        # 地把明摆着已经变了的情况拦在拆投影之前（省一次没意义的拆投影），
+        # 不是正确性本身依赖的那道闸——纯 best-effort 的窗口收窄。
+        # 返回 False 说明源表指纹在这最后一刻仍然对不上——两边都留：副本已
+        # 在目标（copy_table 早就 COMMIT 了），源表连同它的并发编辑原样留在
+        # 原地（即便上一行的拆投影已经跑过，源表也没有真的消失——并发的那
+        # 次编辑本身会把受影响的行标回 pending，下次投影/重建会把它重新建
+        # 起来，不是不可回收的孤儿）。复用下面既有的 SourceCleanupFailed 包
+        # 装，不发明新的返回形状，与③④的失败处理是同一个契约。
+        if not knowhow_transfer_store.delete_table_if_unchanged(
+            source_table_id, source_fingerprint
+        ):
+            raise RuntimeError(
+                "源表在复制完成后被并发编辑（原子重删时指纹复核未命中），"
+                "为避免丢失该编辑，源表未删除"
+            )
     except Exception as exc:  # noqa: BLE001 — 副本已提交，必须转成可辨识的类型化错误
         # 必须在这里落日志：`from exc` 保住了 __cause__，但路由会把它转成
         # HTTPException，而 FastAPI 渲染 HTTPException 是不带 traceback 的——
