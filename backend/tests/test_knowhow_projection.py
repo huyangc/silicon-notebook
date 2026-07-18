@@ -1506,3 +1506,94 @@ def test_project_table_proceeds_normally_when_nothing_concurrent_happens(
     assert counts.get("违例类型") == 1
     assert counts.get("修复方法") == 1
     assert repo._runtime.knowhow_store.get_knowhow_table(table_id)["mutation_seq"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# P1-1 (PR review ROUND 2): the existence guard the two tests above cover
+# (round-1's P1-2) closed the "delete lands mid-per-row-pass" window, but the
+# guard itself was added as a plain check-then-act: `table_exists`/
+# `source_exists` ran via `self.database.connect()` strictly BEFORE
+# `self.database.write()` ever acquired the write lock for the terminal
+# section, leaving an unprotected gap between "checked: still there" and
+# "actually holding the lock that would block a concurrent delete". A move
+# landing in exactly that gap sails straight through: the check observed
+# True/True, and the terminal INSERT then commits knowledge_objects/relations
+# against a table/hidden source that is — by the time the INSERT runs —
+# already gone. The fix moves the check inside the SAME `with self.database.
+# write() as db:` block that does the deletes/inserts, on the SAME
+# connection, so "checked" and "wrote" become one atomic unit (the block
+# holds write_lock continuously for its whole duration, and any concurrent
+# delete_knowhow_table/delete_table_projection needs its OWN write() call, so
+# it cannot land inside that window at all).
+# ---------------------------------------------------------------------------
+
+
+def test_project_table_existence_check_and_terminal_write_are_atomic(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """Deterministic interleaving reproducing the TOCTOU: a concurrent move
+    (teardown-then-delete, the same order move_table itself uses) is injected
+    at the exact instant `project_table` is about to open its TERMINAL
+    `database.write()` call — i.e. after the per-row loop's last status write
+    (same hook point the two tests above use) but before the write lock for
+    the terminal section is acquired. Pre-fix, the existence check upstream
+    of that `write()` call has already run (against the still-live state)
+    and never runs again, so the terminal write proceeds and commits an
+    orphan.
+
+    The hook sits on `database.write` itself rather than on `table_exists`/
+    `source_exists`: the fix changes those calls to a different shape
+    entirely (tx-scoped, called on the connection the write() block hands
+    back), so a hook on the old check methods would simply go unexercised
+    once the fix lands — this test would then pass for the wrong reason
+    (dead injection) instead of proving the check-then-write pair is now
+    atomic. Hooking the lock-acquisition entry point itself stays meaningful
+    on both sides of the fix."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
+    hidden_source_id = projector.ensure_hidden_source(table_id)
+
+    real_set_status = store.set_knowhow_row_projection
+    state = {"last_row_done": False, "injected": False}
+
+    def _mark_last_row(row_id, status):
+        real_set_status(row_id, status)
+        if status in ("synced", "failed"):  # the per-row loop's terminal call
+            state["last_row_done"] = True
+
+    monkeypatch.setattr(store, "set_knowhow_row_projection", _mark_last_row)
+
+    from contextlib import contextmanager
+
+    database = projector.database
+    real_write = database.write
+
+    @contextmanager
+    def _write_with_race_before_terminal_section():
+        if state["last_row_done"] and not state["injected"]:
+            state["injected"] = True
+            # 并发 move 恰好卡在"最后一行状态已落地"和"这次 write() 真正拿到
+            # 写锁"之间完整跑完——旧代码的 existence 检查在这次 write() 调用
+            # 之前就已经跑完并放行了，这里注入进去才是那个未受保护的窗口。
+            projector.delete_table_projection(hidden_source_id)
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+        with real_write() as db:
+            yield db
+
+    monkeypatch.setattr(database, "write", _write_with_race_before_terminal_section)
+
+    try:
+        projector.project_table(table_id)
+    except KeyError:
+        pass  # pre-fix secondary symptom: bump_knowhow_mutation_seq on the now-gone table_id
+
+    assert state["injected"], "race hook never fired — test setup is broken"
+    with repo._connect() as db:
+        orphaned_kos = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?",
+            (hidden_source_id,),
+        ).fetchone()["c"]
+    assert orphaned_kos == 0
+    with pytest.raises(KeyError):
+        repo._runtime.knowhow_store.get_knowhow_table(table_id)

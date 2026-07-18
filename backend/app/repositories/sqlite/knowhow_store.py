@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Callable, Sequence
 
 from app.repositories.sqlite.database import SqliteDatabase
@@ -419,6 +420,32 @@ class KnowhowStore:
             return db.execute(
                 "SELECT 1 FROM knowhow_tables WHERE id = ?", (table_id,)
             ).fetchone() is not None
+
+    @staticmethod
+    def table_exists_tx(connection: sqlite3.Connection, table_id: str) -> bool:
+        """Same probe as ``table_exists``, but against a caller-supplied
+        connection instead of opening its own ``database.connect()`` —
+        mirrors ``KnowledgeStore``'s tx-scoped statics (e.g.
+        ``delete_relations_by_source``). For a caller that must check-then-
+        write atomically inside its OWN ``database.write()`` block, so the
+        check and the write share one lock-held transaction with no gap a
+        concurrent delete could land in.
+
+        PR review round 2 P1-1: ``project_table``'s terminal existence guard
+        used to call ``table_exists``/``source_exists`` BEFORE opening its
+        ``database.write()`` block — a real check-then-act gap (a concurrent
+        move's ``delete_knowhow_table`` could land between the check
+        returning True and the write lock being acquired, letting the
+        terminal write commit an orphan the guard existed to prevent). Moving
+        the check to run on the write block's own connection, as the first
+        thing inside it, closes that gap: the whole block holds
+        ``database.write_lock`` continuously, so a concurrent delete (which
+        needs its own ``write()``) cannot land inside the window at all —
+        it either fully lands before this block starts (check correctly
+        observes "gone") or blocks until this block finishes."""
+        return connection.execute(
+            "SELECT 1 FROM knowhow_tables WHERE id = ?", (table_id,)
+        ).fetchone() is not None
 
     def delete_knowhow_table(self, table_id: str) -> dict:
         """Cascade-delete a table (columns/rows/cells all carry ``ON DELETE

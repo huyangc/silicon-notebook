@@ -329,3 +329,71 @@ def test_copy_gives_asset_row_independent_source_id(repo):
         "副本资产行的 source_id 不该继续指向源 notebook 的 source —— "
         "否则源那边删/重解析该 source 会连带删掉这条已经在别的 notebook 的副本行"
     )
+
+
+# --- PR review round 2 P1-2 (data loss): copy_table snapshots the source: if
+# a cell/row/column edit commits between that snapshot and move_table's
+# delete of the source, the target keeps the stale snapshot and the newly-
+# edited source is destroyed forever — the concurrent edit is gone for good.
+# The interleaving here injects the edit via copy_table itself (monkeypatched
+# to add a row to the source right after the real copy_table returns, i.e.
+# right after the copy has committed and BEFORE move_table reaches its
+# cleanup section) — this is the earliest a concurrent writer could
+# realistically land relative to move_table's own call sequence, and it
+# deliberately uses add_knowhow_row (not a cell edit): add/delete-row is
+# exactly the case knowhow_tables.mutation_seq does NOT bump (only
+# update_knowhow_cell/update_knowhow_cells do — see KnowhowStore's own
+# docstring), so a fingerprint that compared mutation_seq alone would sail
+# straight past this race and still lose the row. Appended at EOF — this
+# file only calls existing public functions, it doesn't touch the line-
+# pinned `store = repo._runtime.knowhow_transfer_store` (transfer.py:193) or
+# any other pinned site (see test_repository_callers_static.py /
+# test_repository_surface_manifest.py).
+def test_move_does_not_delete_source_row_added_after_copy_snapshot(repo, monkeypatch):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    cols = {c["name"]: c["id"] for c in repo.get_knowhow_table(src_tid)["columns"]}
+
+    real_copy_table = kh_transfer.copy_table
+
+    def _copy_then_concurrent_row_add(repo_, source_table_id, target_notebook_id, actor_id):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+        # 模拟并发写者：就在 copy_table 的事务提交之后、move_table 走到自己的
+        # 清理段之前，另一个请求往源表加了一行。
+        repo_.add_knowhow_row(source_table_id, {cols["违例类型"]: "并发新增的行"})
+        return new_id
+
+    monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_row_add)
+
+    with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
+        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    assert exc_info.value.new_table_id
+
+    # 源没被删，且带着并发新增的那一行——不是复制那一刻的旧快照
+    detail = repo.get_knowhow_table(src_tid)
+    assert detail["notebook_id"] == src_nb
+    assert len(detail["rows"]) == 2, "并发新增的行必须还在源表里，不能被误删的源表带走"
+
+    # 目标侧副本仍然存在（拷贝已提交，不因收尾中止而消失），但停在拷贝那一刻
+    # 的旧快照（只有 1 行）——fingerprint 只挡「删」，不让复制本身变成实时
+    # 同步，这是已知、可接受的局限（见报告）。
+    dst_tables = repo.list_knowhow_tables(dst_nb)
+    assert len(dst_tables) == 1
+    assert dst_tables[0]["id"] == exc_info.value.new_table_id
+    assert repo.get_knowhow_table(exc_info.value.new_table_id)["rows"].__len__() == 1
+
+
+def test_move_deletes_source_when_untouched_after_copy_snapshot(repo):
+    """Companion happy-path guard: the new fingerprint re-check must not turn
+    every ordinary, uncontended move into a false-positive SourceCleanupFailed
+    — ``test_move_deletes_source_table_and_projection`` already covers the
+    full projection-teardown shape; this one pins the narrower fingerprint
+    match itself with a minimal table."""
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+
+    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+
+    assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
+    with pytest.raises(KeyError):
+        repo.get_knowhow_table(src_tid)

@@ -278,6 +278,19 @@ def move_table(
     #    重试也无门——copy_table→snapshot_table 会因表已删而抛 KeyError。
     #    按现在的顺序，任何一步失败都只留下「两边都在」的可恢复重复：用户
     #    可以重试搬迁，也可以照常删掉源表。宁可重复，绝不丢失。
+    #
+    # P1-2（PR review round 2，数据丢失）：④ 复制的是「此刻」的源，删除的也
+    # 是「此刻」的源，但两者相隔一整个 copy_table（快照+事务+资产落盘+调度）
+    # ——中间任何一次 cell/行/列编辑提交，目标侧落的都是编辑前的旧快照，而
+    # 编辑后的新内容会被下面的删源一并带走，永久丢失。fingerprint 在 copy_
+    # table 之前就取（越早越好：即便并发编辑恰好卡在这次取指纹和 copy_table
+    # 自己的 snapshot_table 之间，copy_table 拷到的也已经是编辑后的新内容,
+    # 指纹对比顶多多算一次「变了」误报进 SourceCleanupFailed——安全的方向，
+    # 不会把这次误判成"没变"而删掉新内容),再在删除前复核一次；不一致就在
+    # try 内部 raise，直接复用下面既有的 SourceCleanupFailed 包装——两边都
+    # 留、不丢失，与 ③ 的失败处理是同一个契约,不发明新的返回形状。
+    knowhow_transfer_store = repo._runtime.knowhow_transfer_store
+    source_fingerprint = knowhow_transfer_store.table_fingerprint(source_table_id)
     new_table_id = copy_table(repo, source_table_id, target_notebook_id, actor_id)
     # A3 评审附加需求：copy_table 已经 COMMIT，从这里往下任何一步再炸，副本
     # 都已经是既成事实——裸异常冒泡上去只会变成路由层的通用 500，调用方分不清
@@ -287,6 +300,11 @@ def move_table(
     # 注意 copy_table(...) 本身特意留在这个 try 之外——复制失败必须原样冒泡
     # （源分毫未动、什么都没创建），不能被这里的包装误伤。
     try:
+        if knowhow_transfer_store.table_fingerprint(source_table_id) != source_fingerprint:
+            raise RuntimeError(
+                "源表在复制完成后被并发编辑（列/行/格/代码计数或 mutation_seq "
+                "与复制时的快照不一致），为避免丢失该编辑，源表未删除"
+            )
         hidden = repo.get_knowhow_table(source_table_id).get("hidden_source_id")
         if hidden:
             build_projector(repo).delete_table_projection(hidden)

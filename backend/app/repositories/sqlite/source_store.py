@@ -140,6 +140,17 @@ class SourceStore:
                 "SELECT 1 FROM sources WHERE id = ?", (source_id,)
             ).fetchone() is not None
 
+    @staticmethod
+    def source_exists_tx(connection: sqlite3.Connection, source_id: str) -> bool:
+        """Tx-scoped variant of ``source_exists`` — see
+        ``KnowhowStore.table_exists_tx`` for why this exists (PR review round
+        2 P1-1: the caller must run this on the SAME connection/transaction
+        as the write it gates, not on a separately-opened one, or the
+        check-then-write pair is still a TOCTOU gap)."""
+        return connection.execute(
+            "SELECT 1 FROM sources WHERE id = ?", (source_id,)
+        ).fetchone() is not None
+
     def source_elements(self, source_id: str) -> List[SourceElement]:
         self.get_source(source_id)          # KeyError guard, same as the facade did
         with self.database.connect() as db:

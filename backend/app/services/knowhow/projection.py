@@ -399,26 +399,45 @@ class KnowhowProjector:
             self._ko_object_row(notebook_id, source_id, ko_id, entry, now)
             for ko_id, entry in ko_acc.items()
         ]
-        # Final existence guard (PR review P1-2, cross-notebook move/copy): a
-        # concurrent teardown -- move_table's delete_table_projection +
-        # delete_knowhow_table, or the plain DELETE route's identical pair --
-        # can land ANYWHERE during the per-row loop above (production's
-        # realistic window is "parked in embed_chunk_ids mid-row, several
-        # rows in"). knowledge_objects.source_id carries NO FK to sources, so
-        # nothing else would stop insert_object_chunk below from committing a
-        # fresh KO batch against a table_id/source_id that no longer exist --
-        # permanently unreclaimable ghosts in whatever notebook just had this
-        # table torn down (insert_relation_chunk, when edge_rows is
-        # non-empty, does carry an FK to sources and would instead raise
-        # IntegrityError and roll the whole transaction back -- a different,
-        # also-real "background job crashes" symptom of the exact same
-        # missing check). Re-check right here, as late as possible, and bail
-        # out -- skipping the write AND the mutation-seq bump below -- rather
-        # than resurrecting anything the teardown already removed. Mirrors
+        # Final existence guard (PR review round 1 P1-2, cross-notebook
+        # move/copy): a concurrent teardown -- move_table's
+        # delete_table_projection + delete_knowhow_table, or the plain DELETE
+        # route's identical pair -- can land ANYWHERE during the per-row loop
+        # above (production's realistic window is "parked in
+        # embed_chunk_ids mid-row, several rows in"). knowledge_objects.
+        # source_id carries NO FK to sources, so nothing else would stop
+        # insert_object_chunk below from committing a fresh KO batch against
+        # a table_id/source_id that no longer exist -- permanently
+        # unreclaimable ghosts in whatever notebook just had this table torn
+        # down (insert_relation_chunk, when edge_rows is non-empty, does
+        # carry an FK to sources and would instead raise IntegrityError and
+        # roll the whole transaction back -- a different, also-real
+        # "background job crashes" symptom of the exact same missing check).
+        #
+        # PR review round 2 P1-1: round 1's fix re-checked here but OUTSIDE
+        # this write() block (via table_exists()/source_exists(), each
+        # opening its own connect()) -- itself a fresh check-then-act gap. A
+        # concurrent move landing between that check returning True and this
+        # write() actually acquiring the write lock would sail straight
+        # through unblocked, recreating the exact orphan the guard exists to
+        # prevent (see test_project_table_existence_check_and_terminal_write_
+        # are_atomic). The check must run ON db, as the FIRST thing inside
+        # this block, so it and the writes below share one lock-held
+        # transaction: database.write() holds write_lock for the block's
+        # entire duration, and any concurrent delete_knowhow_table/
+        # delete_table_projection needs its own write() call, so it either
+        # fully lands before this block starts (table_exists_tx/
+        # source_exists_tx correctly observe "gone", we bail) or blocks until
+        # this block finishes (nothing to race). Bail out here -- skipping
+        # the write AND the mutation-seq bump below -- rather than
+        # resurrecting anything a teardown already removed. Mirrors
         # delete_table_projection's own pre-write existence check just below.
-        if not self.knowhow.table_exists(table_id) or not self.sources.source_exists(source_id):
-            return
         with self.database.write() as db:
+            if (
+                not self.knowhow.table_exists_tx(db, table_id)
+                or not self.sources.source_exists_tx(db, source_id)
+            ):
+                return
             self.knowledge.delete_relations_by_source(db, source_id)
             self.knowledge.delete_objects_by_source(db, source_id)
             if object_rows:

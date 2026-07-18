@@ -164,3 +164,52 @@ class KnowhowTransferStore:
             expected = {k: int(expected_counts.get(k, 0)) for k in checks}
             if checks != expected:
                 raise RuntimeError(f"knowhow transfer 校验失败：{checks} != {expected}")
+
+    def table_fingerprint(self, table_id: str) -> "dict | None":
+        """Cheap source-version probe for ``table_id``: ``mutation_seq`` plus
+        live columns/rows/cells/cell_code counts, in ONE top-level SELECT
+        (SQLite gives a single statement's scalar subqueries a consistent
+        snapshot as of when it starts executing, so this can't observe a
+        torn read the way four separate queries could). Returns ``None`` if
+        the table no longer exists.
+
+        Used by ``move_table``'s snapshot-vs-delete concurrent-edit guard
+        (PR review round 2 P1-2, data loss): ``copy_table`` snapshots the
+        source, and the source is deleted afterward — if a cell/row/column
+        edit commits in between, the target holds a stale copy and the
+        newly-edited source is destroyed forever. ``knowhow_tables.
+        mutation_seq`` alone under-covers this: per ``KnowhowStore``'s own
+        docstring, the structural editing methods (add/delete row, add/
+        delete column — see ``add_knowhow_row``/``delete_knowhow_row``/
+        ``add_knowhow_column``/``delete_knowhow_column``) deliberately do
+        NOT bump it, only ``update_knowhow_cell``/``update_knowhow_cells``
+        do. A mutation_seq-only comparison would miss a concurrently added
+        or deleted row/column entirely. The four counts close exactly that
+        gap: any add/delete changes at least one of them (columns/rows
+        cascade-delete their cells and cell_code, so those counts move too).
+
+        Known, accepted scope boundary: this does NOT catch a pure metadata
+        edit that changes neither content nor cardinality -- renaming a
+        column (``rename_knowhow_column``), moving the anchor designation
+        (``set_knowhow_anchor_column``), changing a column's kind
+        (``set_knowhow_column_kind``), or patching the table's title/
+        description (``update_knowhow_table_meta``). None of those touch
+        row/cell/code CONTENT -- the knowledge a move could actually lose --
+        only how it is labeled, so a stale label surviving a move is a much
+        smaller, cosmetic gap than the data-loss this guard exists to close.
+        """
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT t.mutation_seq AS mutation_seq, "
+                "(SELECT COUNT(*) FROM knowhow_columns WHERE table_id = t.id) "
+                "AS col_count, "
+                "(SELECT COUNT(*) FROM knowhow_rows WHERE table_id = t.id) "
+                "AS row_count, "
+                "(SELECT COUNT(*) FROM knowhow_cells c JOIN knowhow_rows r "
+                " ON r.id = c.row_id WHERE r.table_id = t.id) AS cell_count, "
+                "(SELECT COUNT(*) FROM knowhow_cell_code cc JOIN knowhow_rows r "
+                " ON r.id = cc.row_id WHERE r.table_id = t.id) AS cell_code_count "
+                "FROM knowhow_tables t WHERE t.id = ?",
+                (table_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None

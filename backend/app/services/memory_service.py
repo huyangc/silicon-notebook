@@ -892,6 +892,28 @@ class MemoryService:
                         # 重试或重建；而且重试整个 move 会再造一份副本（transfer
                         # 没有幂等键）。宁可留下需要人工对账的重复，也不留不可回收
                         # 的孤儿。
+                        #
+                        # P1-3（PR review round 2，数据丢失）：source 是这个循环
+                        # 顶部读的一份快照，写副本用的就是它——从那一刻到这里之
+                        # 间，用户完全可能编辑了标题/正文，或把它 deprecate 掉。
+                        # 目标侧那份副本已经带着旧快照定死在库里；这里若照旧删
+                        # 源，并发那次改动就随源一起永久消失（旧内容还可能反过
+                        # 来配上并发改动触发的新向量，对不上号）。复用
+                        # embedding_revision 既有的乐观并发原语（_schedule_embed
+                        # 同一模式，见其定义处）：按 memory_id 只在
+                        # title/content_md/tags/status 与传入的 source 快照逐字
+                        # 段仍相同时才返回 revision，否则 None——不依赖某个可能
+                        # 被绕过的计数器，直接查这四个字段本身，是否被并发改动
+                        # 一目了然。命中 None 就地 raise，落进上面这个 try 自己
+                        # 的收尾 except：cleanup_error 被记录、source_removed 保
+                        # 持 False，下面复用既有的 copied_source_not_removed 结
+                        # 果契约（不发明新形状）——两边都留，不丢失。
+                        if self.store.embedding_revision(source.id, source) is None:
+                            raise RuntimeError(
+                                "源 memory 在复制完成后被并发编辑或状态变更"
+                                "（title/content/tags/status 与复制时的快照不一"
+                                "致），为避免丢失该改动，源未删除"
+                            )
                         if self.memory_kg is not None:
                             self.memory_kg.remove_memory_source(source.id)
                         self.store.delete_memory(source.id, user_id)

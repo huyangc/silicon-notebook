@@ -4142,3 +4142,20 @@ MEMORY_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES = {
     }
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES
+
+# knowhow cross-notebook copy/move PR review round 2 P1-2 (data loss):
+# move_table's own snapshot-vs-delete concurrent-edit guard reaches
+# `repo._runtime.knowhow_transfer_store` a THIRD, independent time (the
+# other two, lines 29/193, are inside `_remap`/`copy_table` — see
+# KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES above and the matching
+# INDEPENDENT_PRIVATE_SITES fold in test_repository_callers_static.py) — this
+# file's own consumer-scan mirror of that same new site: move_table needs
+# table_fingerprint() both before copy_table runs and again right before the
+# source delete. Appended at EOF for the same zero-line-shift reason as
+# every other TASKN_* block above.
+KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES = {
+    ("_runtime", "backend/app/services/knowhow/transfer.py:292"),
+}
+ACTIVE_PRODUCTION_MEMBER_SITES = (
+    ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES
+)

@@ -835,3 +835,23 @@ INDEPENDENT_PRIVATE_SITES = INDEPENDENT_PRIVATE_SITES | {
         "foreign source_id)"
     ),
 }
+
+# knowhow cross-notebook copy/move PR review round 2 P1-2 (data loss):
+# move_table's own snapshot-vs-delete concurrent-edit guard needs the A1
+# transfer store's cheap `table_fingerprint` probe both before copy_table
+# runs and again right before the delete — a THIRD, independent
+# `repo._runtime.knowhow_transfer_store` reach in this file (the first two,
+# lines 29/193 above, are inside `_remap`/`copy_table`; this one is inside
+# `move_table` itself), same narrow-runtime-port-extraction shape as the
+# other two. Folded in as its own module-level `|=` at EOF for the same
+# zero-line-shift reason the block above documents (this dict sits before
+# line-pinned consumer sites in test_repository_surface_manifest.py).
+INDEPENDENT_PRIVATE_SITES = INDEPENDENT_PRIVATE_SITES | {
+    ("backend/app/services/knowhow/transfer.py", 292, "_runtime"): (
+        "knowhow cross-notebook transfer orchestration (like api.py) "
+        "reaches the A1 KnowhowTransferStore a third, independent time — "
+        "move_table's own snapshot-vs-delete concurrent-edit guard "
+        "(PR review round 2 P1-2) needs table_fingerprint() both before "
+        "copy_table runs and again right before the source delete"
+    ),
+}

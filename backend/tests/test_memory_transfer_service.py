@@ -418,3 +418,93 @@ def test_batch_survives_pre_commit_failure_on_a_later_item(repo, alice, monkeypa
     with pytest.raises(KeyError):
         service.get(first.id, alice.id)
     assert service.get(second.id, alice.id).notebook_id == src
+
+
+# --- PR review round 2 P1-3 (data loss): source is read ONCE at the top of
+# transfer()'s per-item loop and baked into the copy; the cleanup delete at
+# the end was unconditional. An edit (or a status transition like deprecate)
+# landing in between destroys the newer state — the target keeps the stale
+# title/content/status snapshot from read-time, and the concurrent change is
+# gone forever once the source row is deleted. The interleaving here injects
+# the edit via create_copy_with_initial_revision itself (monkeypatched to
+# call service.update on the SAME memory right after the real copy commits —
+# i.e. after the target's snapshot is already fixed in the target notebook,
+# and before transfer()'s cleanup section runs): the earliest a concurrent
+# writer could land relative to transfer()'s own call sequence, mirroring
+# how the sibling knowhow-table race test hooks copy_table.
+def test_move_does_not_delete_source_edited_after_copy_commits(repo, alice, monkeypatch):
+    from app.models.schemas import MemoryUpdate
+
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice, title="Original", content="Original body")
+
+    real_create_copy = service.store.create_copy_with_initial_revision
+
+    def _create_copy_then_concurrent_edit(write, source_memory_id, changed_by, reason):
+        copied = real_create_copy(write, source_memory_id, changed_by, reason)
+        # 模拟并发写者：就在副本提交之后、transfer() 走到自己的收尾删源之前，
+        # 另一个请求编辑了源 memory 的标题和正文。
+        service.update(
+            source_memory_id, alice.id,
+            MemoryUpdate(title="Edited concurrently", content_md="New body"),
+        )
+        return copied
+
+    monkeypatch.setattr(
+        service.store, "create_copy_with_initial_revision", _create_copy_then_concurrent_edit
+    )
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    result = results[0]
+    assert result["ok"] is False
+    assert result["status"] == "copied_source_not_removed"
+    assert result["new_id"] is not None
+
+    # 源没被删，且带着并发编辑后的新内容——不是编辑前的旧值
+    still_there = service.get(mem.id, alice.id)
+    assert still_there.notebook_id == src
+    assert still_there.title == "Edited concurrently"
+    assert still_there.content_md == "New body"
+
+    # 目标侧副本仍然存在（拷贝已提交，不因收尾中止而消失），但停在拷贝那一刻
+    # 的旧快照——这个 guard 只挡「删」，不让复制本身变成实时同步，这是已知、
+    # 可接受的局限（见报告）。
+    copied = service.get(result["new_id"], alice.id)
+    assert copied.notebook_id == dst
+    assert copied.title == "Original"
+    assert copied.content_md == "Original body"
+
+
+def test_move_does_not_delete_source_deprecated_after_copy_commits(repo, alice, monkeypatch):
+    """Status-only variant of the race above: title/content_md are untouched,
+    only status changes (confirmed -> deprecated) — pins that the guard
+    compares status too, not just content fields."""
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice, title="T", content="B")
+
+    real_create_copy = service.store.create_copy_with_initial_revision
+
+    def _create_copy_then_concurrent_deprecate(write, source_memory_id, changed_by, reason):
+        copied = real_create_copy(write, source_memory_id, changed_by, reason)
+        service.deprecate(source_memory_id, alice.id)
+        return copied
+
+    monkeypatch.setattr(
+        service.store, "create_copy_with_initial_revision",
+        _create_copy_then_concurrent_deprecate,
+    )
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    result = results[0]
+    assert result["ok"] is False
+    assert result["status"] == "copied_source_not_removed"
+    assert result["new_id"] is not None
+
+    # 源没被删，且带着并发那次 deprecate 之后的新状态
+    still_there = service.get(mem.id, alice.id)
+    assert still_there.notebook_id == src
+    assert still_there.status == "deprecated"
