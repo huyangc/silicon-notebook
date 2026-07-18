@@ -796,6 +796,17 @@ class MemoryService:
                         "notebook_id": source.notebook_id,
                         "memory_id": source.id,
                         "action": mode,
+                        # 源 provenance 原样留档，但**必须**嵌在 imported_from
+                        # 之下、绝不铺到顶层。两个理由缺一不可：
+                        # ① 不能丢：ask_answer 出身的 memory，它的 answer_id/
+                        #    question/citations/evidence_level 正是当初 confirm
+                        #    它的依据。整份换掉会得到一条 status='confirmed'、
+                        #    却不带任何佐证的 memory；move 还会删源 → 永久丢失。
+                        # ② 不能铺到顶层：里面的 anchors/citations 指向的是**源**
+                        #    notebook 的行，在目标 notebook 里根本解析不了。顶层
+                        #    的键会被下游当作本 notebook 的活引用去渲染/跳转，
+                        #    嵌一层才把语义钉死成"它在别处的来历存档"。
+                        "source_provenance": dict(source.provenance or {}),
                     }
                 }
                 write = MemoryWrite(
@@ -817,55 +828,83 @@ class MemoryService:
                 copied = self.store.create_copy_with_initial_revision(
                     write, source.id, user_id, f"从 {source.notebook_id} {mode}"
                 )
-                self._event("memory_lifecycle", copied, action=f"transfer_{mode}")
-                self._maybe_schedule_kg(copied, extract_kg)
-                if copied.embedding_status != "ready":
-                    self._schedule_embed(copied)
-                source_deleted = False
+                if copied.id != write.id:
+                    # 兜底，防的是数据丢失而不是"不好看"：store 在插入撞唯一键时
+                    # 会返回**已存在的那一行**（幂等语义）。真撞上了就意味着副本
+                    # 根本没建成，而 copied 很可能就是源自己——下面 move 那步会把
+                    # 它删掉，于是唯一一份数据凭空消失、还报成功。上面强制
+                    # source_answer_id=None 已经堵掉了已知的撞键路径
+                    # （idx_memory_answer_once），这里再结构性地兜一层：宁可整条
+                    # 报失败（new_id=None，删源绝不会执行）。
+                    raise ValueError("复制未生成新记录（疑似唯一键冲突），已中止")
+                # ↓↓↓ 上一行返回时副本**已经 COMMIT**。从这里到本条目结束，每
+                # 一步都是"既成事实之后的收尾"，所以整段收进一个宽 except：
+                # 任何一步抛出都既不能让异常冒出 transfer()（会丢掉整批已处理
+                # 条目的结果——包括前面几条已经删了源的 move），也不能落进外层
+                # 那个 handler 被报成 new_id=None（"什么都没发生"）——那是谎报，
+                # 副本就躺在目标 notebook 里。收尾分两类：
+                #   ① 派生工作 _event/_maybe_schedule_kg/_schedule_embed。它们
+                #      会真的抛：memory_kg_eligible 是两次无保护的 DB 读；
+                #      kg_ingest_scheduler→ThreadPoolExecutor.submit 在池关闭/
+                #      耗尽时抛 RuntimeError；_schedule_embed 里的
+                #      embedding_revision 也在它自身 try 之前。一次成功的复制
+                #      不该因为这些尽力而为的派生步骤而变成失败。
+                #   ② move 的源清理（顺序见下面 AMENDMENT 1）。
                 cleanup_error: str | None = None
-                if mode == "move":
-                    try:
-                        # AMENDMENT 1 (来自 knowhow 表移动任务的教训): 先拆派生
+                source_removed = False
+                try:
+                    self._event("memory_lifecycle", copied, action=f"transfer_{mode}")
+                    self._maybe_schedule_kg(copied, extract_kg)
+                    if copied.embedding_status != "ready":
+                        self._schedule_embed(copied)
+                    if mode == "move":
+                        # AMENDMENT 1（来自 knowhow 表移动任务的教训）：先拆派生
                         # KG 源，再删 memory 行——顺序不能颠倒。sources.memory_id
-                        # 不是外键，删除不会级联；若先删 memory 行、随后拆源这
-                        # 一步再失败，就会永久留下一条 memory_id 指向已删行的
-                        # 派生源：在源 notebook 里仍可被检索到，且没有任何 UI
-                        # 路径能删除它。按现在的顺序，任何一步失败都只留下
-                        # "两边都在"的可恢复状态（源仍在，可以重试整个 move）。
+                        # 不是外键，删除不会级联；若先删 memory 行、随后拆源那步
+                        # 再失败，就会永久留下一条 memory_id 指向已删行的派生源：
+                        # 在源 notebook 里仍被检索到，且没有任何 UI 路径能删它。
+                        #
+                        # 这个顺序保证的**只是**"没有东西变得不可达/不可回收"：
+                        # 无论哪步失败，源 memory 行本身都还在，副本也在，用户看
+                        # 得见也删得掉。它不保证无代价——如果 remove_memory_source
+                        # 成功而 delete_memory 失败，派生 KG 源已经没了，源
+                        # notebook 对这条 memory 的 KG/chunk 检索会一直降级到下次
+                        # 重试或重建；而且重试整个 move 会再造一份副本（transfer
+                        # 没有幂等键）。宁可留下需要人工对账的重复，也不留不可回收
+                        # 的孤儿。
                         if self.memory_kg is not None:
                             self.memory_kg.remove_memory_source(source.id)
                         self.store.delete_memory(source.id, user_id)
-                        source_deleted = True
-                    except Exception as exc:  # noqa: BLE001 — 副本已提交：这里
-                        # 失败必须逐条上报而不是让异常冒泡打断整批（会丢掉已处理
-                        # 条目的结果，且调用方永远不会知道副本已经创建出来了）。
-                        cleanup_error = str(exc)
-                        self._event(
-                            "memory_lifecycle",
-                            copied,
-                            action="transfer_move_cleanup_failed",
-                            source_id=source.id,
-                            error_type=type(exc).__name__,
-                            error=cleanup_error,
-                        )
-                if cleanup_error is not None:
-                    results.append(
-                        {
-                            "source_id": memory_id,
-                            "new_id": copied.id,
-                            "ok": False,
-                            "error": f"复制已成功，但源清理失败，源未删除：{cleanup_error}",
-                            "source_deleted": False,
-                        }
+                        source_removed = True
+                except Exception as exc:  # noqa: BLE001 — 见上：副本已提交，收尾
+                    # 失败必须逐条上报，不能冒泡、也不能伪装成"没创建"。
+                    cleanup_error = str(exc)
+                    self._event(
+                        "memory_lifecycle",
+                        copied,
+                        action=f"transfer_{mode}_followup_failed",
+                        source_id=source.id,
+                        error_type=type(exc).__name__,
+                        error=cleanup_error,
                     )
-                    continue
+                if mode == "copy":
+                    # copy 模式没有"源清理"这一说：收尾失败最多丢掉派生工作
+                    # （KG 抽取/嵌入调度），副本本身完整可用，仍算成功；失败细节
+                    # 已进事件日志（与 _embed 标记 embedding 失败的既有惯例一致）。
+                    outcome, ok, error = "copied", True, None
+                elif source_removed:
+                    outcome, ok, error = "moved", True, None
+                else:
+                    # move 承诺了"源会消失"，而它没消失——不能报成功。
+                    outcome, ok = "copied_source_not_removed", False
+                    error = f"复制已成功，但源未删除：{cleanup_error}"
                 results.append(
                     {
                         "source_id": memory_id,
                         "new_id": copied.id,
-                        "ok": True,
-                        "error": None,
-                        "source_deleted": source_deleted,
+                        "ok": ok,
+                        "error": error,
+                        "status": outcome,
                     }
                 )
             except (KeyError, ValueError) as exc:
@@ -875,7 +914,7 @@ class MemoryService:
                         "new_id": None,
                         "ok": False,
                         "error": str(exc),
-                        "source_deleted": False,
+                        "status": "failed",
                     }
                 )
         return results
