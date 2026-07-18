@@ -5850,6 +5850,9 @@ function KnowledgeBrowser({
     label: t.label,
     count: t.count
   }));
+  // 条目类型名优先用 API label(types 里含中文名,自定义类型也对);拿不到再退小表。
+  // 修「顶部 tab 用 t.label 显中文、条目却用 kgTypeLabel 显英文」的不一致。
+  const typeLabelBy = new Map(types.map((t) => [t.object_type, t.label]));
   return (
     <div className="tool-view">
       <div className="knowledge-kind-tabs">
@@ -5900,7 +5903,7 @@ function KnowledgeBrowser({
             <article className={`item ${item.status === "deprecated" ? "knowledge-deprecated" : ""}`} key={item.id}>
               <div className="knowledge-item-title">
                 <KgTypeMark type={item.object_type ?? kind} />
-                <span>{kgTypeLabel(item.object_type ?? kind)}</span>
+                <span>{typeLabelBy.get(item.object_type ?? kind) ?? kgTypeLabel(item.object_type ?? kind)}</span>
                 <h3><LatexText text={knowledgeHeadline(kind, item)} isFormula={(item.object_type ?? kind) === "formula"} /></h3>
               </div>
               {knowledgeBody(kind, item)}

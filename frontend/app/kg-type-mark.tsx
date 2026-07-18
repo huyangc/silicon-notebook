@@ -8,19 +8,23 @@ export const KG_TYPE_STYLE: Record<
   procedure: { color: "#f59e0b", border: "#b45309", text: "P", glyph: "square" },
 };
 
+// 内置类型显示名——逐字等于后端 OBJECT_TYPE_LABELS(extraction_profiles.py),
+// 由 scripts/check_object_type_labels_contract.py 钉住。中英并排是刻意的:后端同款
+// label 参与搜索匹配,前端保持一致以求全站统一。这张小表服务「只有 object_type
+// 字符串、拿不到 API label」的调用点(引用浮层、图节点);能拿到 API label 的调用点
+// (KnowledgeBrowser)走 API label,覆盖自定义类型的中文名。
 const KG_TYPE_LABELS: Record<string, string> = {
-  concept: "Concept",
-  claim: "Claim",
-  formula: "Formula",
-  procedure: "Procedure",
+  concept: "概念 Concept",
+  claim: "论断 Claim",
+  formula: "公式 Formula",
+  procedure: "过程 Procedure",
 };
 
 export function kgTypeLabel(type: string): string {
-  return KG_TYPE_LABELS[type]
-    ?? type.replace(
-      /(^|_)([a-z])/g,
-      (_match, separator, char) => `${separator ? " " : ""}${char.toUpperCase()}`,
-    );
+  // 自定义/未知类型显示原 object_type(用户自己起的 id)——诚实,不再 TitleCase 成
+  // 假英文(evidence_tier → "Evidence Tier" 那种泄漏)。Object.hasOwn 而非
+  // KG_TYPE_LABELS[type]:后者走原型链,map["constructor"] 会返回函数(PR A 教训)。
+  return Object.hasOwn(KG_TYPE_LABELS, type) ? KG_TYPE_LABELS[type] : type;
 }
 
 export function KgTypeMark({ type }: { type: string }) {
