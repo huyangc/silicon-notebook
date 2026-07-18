@@ -75,7 +75,10 @@ export function getTraceStepDetail(step: ReasoningTraceStep): string {
   if (typeof detail.found === "number") return `新增 ${detail.found}`;
   if (typeof detail.next_action === "string") return label(NEXT_ACTION, detail.next_action, "");
   if (typeof detail.kg === "number" || typeof detail.elements === "number") {
-    return `${Number(detail.kg ?? 0)} 个概念 / ${Number(detail.elements ?? 0)} 段原文`;
+    // 「知识对象」而非「概念」:detail.kg 数的是图谱里的各类对象(Concept / Claim /
+    // Formula / Procedure,外加 knowhow 表带来的自定义类型),叫「概念」等于把这堆
+    // 类型统统降格成其中一种,用户看到的数与图谱里实际的东西对不上。
+    return `${Number(detail.kg ?? 0)} 个知识对象 / ${Number(detail.elements ?? 0)} 段原文`;
   }
   return "";
 }

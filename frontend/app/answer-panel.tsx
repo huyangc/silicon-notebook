@@ -149,11 +149,14 @@ function SelectedReferenceDetail({
           onClick={() => onOpenKnowledgeGraph(reference.anchor?.object_id)}
           disabled={!canLocateInGraph}
           title={
+            // 用「知识对象」而非「概念」:引用锚定的是 object_id,其 object_type 可以是
+            // Concept / Claim / Formula / Procedure 或 knowhow 表带来的自定义类型。
+            // 说「概念」会把后四类说成第一类,用户按图索骥时对不上。
             isRelationReference
-              ? "关系引用绑定的是一条关联，不是具体概念，无法在知识图谱中定位"
+              ? "关系引用绑定的是一条关联，不是具体的知识对象，无法在知识图谱中定位"
               : reference.anchor?.object_id
                 ? "在知识图谱中定位"
-                : "该引用没有绑定到具体概念"
+                : "该引用没有绑定到具体的知识对象"
           }
         >
           <ExternalLink size={14} />

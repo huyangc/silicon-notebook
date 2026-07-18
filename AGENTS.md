@@ -237,7 +237,7 @@ Copy shown to users — JSX text, `label`/`title`/`placeholder`/`aria-label`, to
 | 抽取 / 补抽 / 重抽 | 分析 / 分析新增 / 全部重新分析 |
 | 向量检索索引 / CSR 图 / ANN / 暴力检索 | 索引（整句重写，如「建立快速查找结构」；小库说「直接搜索已够快」） |
 | chunk / chunks | 段 |
-| 节点（散文，非图谱技术上下文） | 概念 |
+| 节点 / 知识节点（散文，非图谱技术上下文） | 知识对象 / 知识条目（**不可统一降格为「概念」**，见下） |
 | 边 / 关系边（散文） | 关联 |
 | 投影 / 投影产物 / 重建投影（knowhow） | 同步 / 重新同步 |
 | LLM 预审 / 预审 | 自动判重 |
@@ -249,7 +249,9 @@ Copy shown to users — JSX text, `label`/`title`/`placeholder`/`aria-label`, to
 | schema（散文） | 内容类型 / 抽取字段 |
 | deprecated（toast 直出） | 已弃用 |
 
-**刻意保留、不要误杀**：**知识图谱**（用户词典里的词，只杀 KG / 建图 / 入图 等缩写变体）、**索引**（书后索引式心智模型，只杀 CSR / ANN / 暴力检索 修饰）、**「知识库」作 Knowledge tab 名**（`workspace-model.ts` 的 `CHAT_MODES`；lint 分不清 tab 名与误用，故不进黑名单）。
+**「概念」不是图谱对象的统称。** 图谱是**对象级**的：内置 `concept` / `claim` / `formula` / `procedure` 四型（真源 `extraction_profiles.OBJECT_TYPE_LABELS`），外加 knowhow 表以列名生成的自定义 `object_type`。「概念」只是其中**一种**类型的界面名（`概念 Concept`），把计数、引用锚点、入图提示统称为「概念」等于把其余类型降格，用户按图索骥时对不上。统称一律用**知识对象**（强调它在图谱里是个可定位的东西）或**知识条目**（强调它是一条知识内容），按语境择一。knowhow 侧尤其注意：`概念` 在那里另有所指（anchor 分组，见 `knowhow-matrix-drawer.tsx` 的徽章），复用会撞义。
+
+**刻意保留、不要误杀**：**知识图谱**（用户词典里的词，只杀 KG / 建图 / 入图 等缩写变体）、**索引**（书后索引式心智模型，只杀 CSR / ANN / 暴力检索 修饰）、**「知识库」作 Knowledge tab 名**（`workspace-model.ts` 的 `CHAT_MODES`；lint 分不清 tab 名与误用，故不进黑名单）、**裸「节点」/「边」**（图谱视图里画出来的就是节点与边，属表中说的「图谱技术上下文」；且「边」与旁边 / 边框 / 边距同形，lint 判不了——故黑名单只收无歧义的复合形态：孤立节点 / 补连边 / 关系边 / 边审。散文里的裸用靠人工对照本表把关）。
 
 `scripts/check_ui_vocabulary.py`（挂在 `scripts/check.sh`）扫 `frontend/app` 渲染文本里的黑名单词，命中即失败。它是**词黑名单而非语义检查**——只在含中文的渲染单元里匹配，且剥离注释 / 标识符 / `${…}`·`{…}` 插值，故 `id: "chunk"`、`currentNotebook` 等不会误报；也因此不声称全覆盖，新增界面文案仍须人工对照上表把关。
 ## No Docker In First Version
