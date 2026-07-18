@@ -4046,9 +4046,9 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER
 # same as KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS). Appended at EOF for the
 # same zero-line-shift reason as every other TASKN_* block above.
 MEMORY_TRANSFER_STORE_ALLOWED_IMPORTS = {
-    ("backend/tests/test_memory_transfer_store.py", 6, "app.services.sqlite_repository", "SQLiteRepository"),
-    ("backend/tests/test_memory_transfer_store.py", 6, "app.services.sqlite_repository", "set_request_user"),
-    ("backend/tests/test_memory_transfer_store.py", 6, "app.services.sqlite_repository", "reset_request_user"),
+    ("backend/tests/test_memory_transfer_store.py", 5, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_memory_transfer_store.py", 5, "app.services.sqlite_repository", "set_request_user"),
+    ("backend/tests/test_memory_transfer_store.py", 5, "app.services.sqlite_repository", "reset_request_user"),
 }
 MEMORY_TRANSFER_STORE_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_memory_transfer_store.py", name)

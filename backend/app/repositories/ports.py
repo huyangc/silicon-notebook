@@ -845,7 +845,7 @@ class MemoryStorePort(Protocol):
         *, lexical_limit: int, vector_limit: int,
     ) -> list[dict[str, Any]]: ...
     def create_copy_with_initial_revision(
-        self, write: Any, source_memory_id: str, changed_by: str, reason: str
+        self, write: MemoryWrite, source_memory_id: str, changed_by: str, reason: str
     ) -> MemoryRecord: ...
 
 
