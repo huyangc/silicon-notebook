@@ -115,3 +115,36 @@ def test_copy_is_retrievable_in_target_via_lexical_and_vector(repo):
     assert fts_hits, "副本的 chunk 未进 chunks_fts —— 目标库词法检索永久搜不到"
     assert chunk_rows > 0
     assert vec_rows == chunk_rows, "副本的 chunk 与向量数量不匹配"
+
+
+def test_move_deletes_source_table_and_projection(repo):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    # 源表先真投影（_project 会先 schedule() 再等 settle），否则
+    # hidden_source_id 全程是 None——下面的 objects 清空断言会因 SQL
+    # `source_id=NULL` 永不匹配而空转通过，测不出 delete_table_projection
+    # 有没有真的被调用。
+    src_hidden = _project(repo, src_tid)["hidden_source_id"]
+    assert src_hidden, "源表未真正投影，测试前置条件不成立"
+
+    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+
+    # 目标有，新表可读
+    assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
+    # 源表已删
+    import pytest as _pytest
+    with _pytest.raises(KeyError):
+        repo.get_knowhow_table(src_tid)
+    # 源隐藏源的投影已拆（objects 清空）
+    with repo._connect() as db:
+        remaining = db.execute(
+            "SELECT COUNT(*) FROM knowledge_objects WHERE source_id=?", (src_hidden,)
+        ).fetchone()[0]
+    assert remaining == 0
+
+def test_transfer_table_rejects_bad_mode(repo):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        kh_transfer.transfer_table(repo, src_tid, dst_nb, "user-x", mode="teleport")

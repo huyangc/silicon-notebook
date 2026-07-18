@@ -225,3 +225,31 @@ def copy_table(
     new_table_id = payload["table"]["id"]
     get_scheduler(repo).schedule(new_table_id)  # 后台重建 KG objects/relations
     return new_table_id
+
+
+def move_table(
+    repo: Any, source_table_id: str, target_notebook_id: str, actor_id: str
+) -> str:
+    # 先复制并校验通过，再删源：删源失败也绝不丢数据。
+    new_table_id = copy_table(repo, source_table_id, target_notebook_id, actor_id)
+    result = repo.delete_knowhow_table(source_table_id)
+    hidden = result.get("hidden_source_id")
+    if hidden:
+        from app.services.knowhow.api import build_projector
+
+        build_projector(repo).delete_table_projection(hidden)
+    return new_table_id
+
+
+def transfer_table(
+    repo: Any,
+    source_table_id: str,
+    target_notebook_id: str,
+    actor_id: str,
+    mode: str,
+) -> str:
+    if mode == "copy":
+        return copy_table(repo, source_table_id, target_notebook_id, actor_id)
+    if mode == "move":
+        return move_table(repo, source_table_id, target_notebook_id, actor_id)
+    raise ValueError(f"unknown transfer mode: {mode}")
