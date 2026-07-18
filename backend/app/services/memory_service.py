@@ -768,3 +768,114 @@ class MemoryService:
             raise ValueError("answer_ids may contain at most 200 unique values")
         self._require_notebook(notebook_id, user_id)
         return self.store.answer_memory_links(notebook_id, user_id, unique_ids)
+
+    def transfer(
+        self,
+        user_id: str,
+        memory_ids: "Sequence[str]",
+        target_notebook_id: str,
+        mode: str,
+        extract_kg: bool = True,
+    ) -> list[dict]:
+        if mode not in {"copy", "move"}:
+            raise ValueError(f"unknown transfer mode: {mode}")
+        # 目标必须当前用户 owner（memory 私有；两端都是我）
+        if not self.notebooks.user_can_access_notebook(target_notebook_id, user_id):
+            raise PermissionError(target_notebook_id)
+        results: list[dict] = []
+        for memory_id in memory_ids:
+            try:
+                source = self.store.memory_for_user(memory_id, user_id)
+                if source.notebook_id == target_notebook_id:
+                    raise ValueError("源与目标不能是同一个 notebook")
+                if source.status != "confirmed":
+                    raise ValueError("只能传输 confirmed 状态的 memory")
+                now = self.now()
+                provenance = {
+                    "imported_from": {
+                        "notebook_id": source.notebook_id,
+                        "memory_id": source.id,
+                        "action": mode,
+                    }
+                }
+                write = MemoryWrite(
+                    id=self.new_id("memory"),
+                    notebook_id=target_notebook_id,
+                    created_by=user_id,
+                    source_answer_id=None,
+                    origin=source.origin,
+                    status="confirmed",
+                    title=source.title,
+                    content_md=source.content_md,
+                    tags=list(source.tags),
+                    confirmed_by=user_id,
+                    confirmed_at=now,
+                    created_at=now,
+                    updated_at=now,
+                    provenance=provenance,
+                )
+                copied = self.store.create_copy_with_initial_revision(
+                    write, source.id, user_id, f"从 {source.notebook_id} {mode}"
+                )
+                self._event("memory_lifecycle", copied, action=f"transfer_{mode}")
+                self._maybe_schedule_kg(copied, extract_kg)
+                if copied.embedding_status != "ready":
+                    self._schedule_embed(copied)
+                source_deleted = False
+                cleanup_error: str | None = None
+                if mode == "move":
+                    try:
+                        # AMENDMENT 1 (来自 knowhow 表移动任务的教训): 先拆派生
+                        # KG 源，再删 memory 行——顺序不能颠倒。sources.memory_id
+                        # 不是外键，删除不会级联；若先删 memory 行、随后拆源这
+                        # 一步再失败，就会永久留下一条 memory_id 指向已删行的
+                        # 派生源：在源 notebook 里仍可被检索到，且没有任何 UI
+                        # 路径能删除它。按现在的顺序，任何一步失败都只留下
+                        # "两边都在"的可恢复状态（源仍在，可以重试整个 move）。
+                        if self.memory_kg is not None:
+                            self.memory_kg.remove_memory_source(source.id)
+                        self.store.delete_memory(source.id, user_id)
+                        source_deleted = True
+                    except Exception as exc:  # noqa: BLE001 — 副本已提交：这里
+                        # 失败必须逐条上报而不是让异常冒泡打断整批（会丢掉已处理
+                        # 条目的结果，且调用方永远不会知道副本已经创建出来了）。
+                        cleanup_error = str(exc)
+                        self._event(
+                            "memory_lifecycle",
+                            copied,
+                            action="transfer_move_cleanup_failed",
+                            source_id=source.id,
+                            error_type=type(exc).__name__,
+                            error=cleanup_error,
+                        )
+                if cleanup_error is not None:
+                    results.append(
+                        {
+                            "source_id": memory_id,
+                            "new_id": copied.id,
+                            "ok": False,
+                            "error": f"复制已成功，但源清理失败，源未删除：{cleanup_error}",
+                            "source_deleted": False,
+                        }
+                    )
+                    continue
+                results.append(
+                    {
+                        "source_id": memory_id,
+                        "new_id": copied.id,
+                        "ok": True,
+                        "error": None,
+                        "source_deleted": source_deleted,
+                    }
+                )
+            except (KeyError, ValueError) as exc:
+                results.append(
+                    {
+                        "source_id": memory_id,
+                        "new_id": None,
+                        "ok": False,
+                        "error": str(exc),
+                        "source_deleted": False,
+                    }
+                )
+        return results

@@ -51,6 +51,7 @@ def test_memory_ports_expose_store_and_lifecycle_contracts():
         "list_memories",
         "answer_memory_links",
         "memory_revisions",
+        "transfer_memories",
     }
     assert store_methods <= set(ports.MemoryStorePort.__dict__)
     assert service_methods <= set(ports.MemoryRepository.__dict__)
@@ -115,6 +116,7 @@ def test_runtime_owns_memory_components_and_facade_has_explicit_delegates(tmp_pa
         "list_memories",
         "answer_memory_links",
         "memory_revisions",
+        "transfer_memories",
     ):
         assert name in SQLiteRepository.__dict__
         assert DELEGATE_OWNER_OVERRIDES[name] == "MemoryService"
