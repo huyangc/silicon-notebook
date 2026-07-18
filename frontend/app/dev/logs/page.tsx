@@ -11,6 +11,7 @@ import { LogDetail } from "./components/LogDetail";
 import { fetchMe, type AuthUser } from "../../auth.ts";
 import { fetchAdminUsers, type AdminUserUsage } from "../../admin/usage/api.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
+import { toUserMessage } from "../../errors.ts";
 import { usernameForOwner } from "./owner";
 import { dayLabel, TODAY_VALUE } from "./date.ts";
 
@@ -98,7 +99,7 @@ export default function LogsPage() {
   useEffect(() => {
     fetchChannels(owner)
       .then((r) => setChannels(r.channels))
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(toUserMessage(e, "日志加载失败，请重试")));
   }, [owner]);
 
   useEffect(() => {
@@ -119,7 +120,7 @@ export default function LogsPage() {
       setNewestSeq(r.newest_seq);
       setPending([]);
     } catch (e) {
-      setError(String(e));
+      setError(toUserMessage(e, "日志加载失败，请重试"));
     } finally {
       setLoading(false);
     }
@@ -176,7 +177,7 @@ export default function LogsPage() {
       setRecords((prev) => [...prev, ...r.records]);
       setHasMore(r.has_more);
     } catch (e) {
-      setError(String(e));
+      setError(toUserMessage(e, "日志加载失败，请重试"));
     } finally {
       setLoading(false);
     }
@@ -190,7 +191,7 @@ export default function LogsPage() {
       try {
         setDetail(await fetchRecord(channel, rec.id, date || undefined, rec.seq));
       } catch (e) {
-        setError(String(e));
+        setError(toUserMessage(e, "日志加载失败，请重试"));
       } finally {
         setDetailLoading(false);
       }
