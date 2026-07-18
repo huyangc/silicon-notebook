@@ -1206,6 +1206,11 @@ class SourceIngestionService:
             self._paper_meta_backfilling[notebook_id] = {
                 "total": len(targets), "done": 0, "_gen": my_gen,
             }
+        # entry 已登记,此刻发布快照,「论文信息补全中」项才会在已连接的铃铛里
+        # 立刻出现——job 完成时的 notify_pending 只兜底刷新终态。必须在登记之后
+        # 发:list_for_user 读的正是上面这个 dict,提前发只会推出一个不含本项的
+        # 快照。
+        self._publish_pending(nb_row)
         try:
             def _one(source_id: str) -> None:
                 nonlocal done
@@ -1224,10 +1229,17 @@ class SourceIngestionService:
                 # 同步进度到 backfilling dict（供 pending-actions 读）；只
                 # 改属于本次调用 gen 的 entry，避免"最新一次"覆盖后先来者
                 # 的晚 worker 污染新一批的 done
+                owns = False
                 with self._paper_meta_backfilling_lock:
                     entry = self._paper_meta_backfilling.get(notebook_id)
                     if entry is not None and entry.get("_gen") == my_gen:
                         entry["done"] = current
+                        owns = True
+                # 推进度给铃铛。限频(默认 2s)——recompute 是 job 线程里的 DB
+                # 计算,每源一发在大批量下就是查询风暴;无人连接时更是零开销。
+                # 被后来者覆盖(owns=False)就别再推,那已经不是当前这批的进度了。
+                if owns:
+                    self._publish_pending(nb_row, throttled=True)
                 if progress is not None:
                     progress(current, len(targets), source_id, status)
 
@@ -1244,7 +1256,13 @@ class SourceIngestionService:
                 {"kind": "paper_meta", "notebook_id": notebook_id, "backfill": counts}
             )
             stored = int(counts.get("stored", 0))
-            if stored > 0:
+            # 「判定为非论文」也是成功收尾：ensure_paper_metadata 落了标记行
+            # (is_paper=0)、返回 "not_paper"，于是 stored 保持 0。只看 stored
+            # 会让「整批都不是论文」这种完全成功的 job 不发 done——而前端刻意
+            # 不自己弹完成 toast(交给铃铛)，用户就只能看着按钮悄悄复位。
+            # 全 failed 仍然不报完成(stored 与 not_paper 皆为 0)。
+            not_paper = int(counts.get("not_paper", 0))
+            if stored > 0 or not_paper > 0:
                 # 先 pop 本次 building entry 再通知，对照
                 # scale_artifact_runtime.notify_index_done 的模板（状态先清
                 # 后通知）；否则 _notify_paper_meta_done 里的 mark_dirty 会
@@ -1256,7 +1274,9 @@ class SourceIngestionService:
                 # 说明同 notebook 还有一批在跑，此时报完成会让用户在新一批仍在
                 # 进行时看到 done toast（多标签页/重复提交下还会重复发事件）。
                 if self._pop_backfilling(notebook_id, my_gen):
-                    self._notify_paper_meta_done(notebook_id, nb_row, stored)
+                    self._notify_paper_meta_done(
+                        notebook_id, nb_row, stored, not_paper=not_paper
+                    )
             return counts
         finally:
             # 异常路径兜底清理。成功路径已在通知前提前 pop 过，这里对同一
@@ -1278,19 +1298,41 @@ class SourceIngestionService:
                 return True
             return False
 
+    @staticmethod
+    def _pending_user_id(nb_row: Any) -> Optional[str]:
+        """待办通知的归属 user:优先当前请求用户 ContextVar(background_jobs
+        已 copy_context 传播),退化到 notebook 的 created_by。nb_row 复用
+        backfill_paper_metadata 开头已取的行,免二次查库。"""
+        from app.core.request_context import request_user_id
+
+        return request_user_id() or nb_row["created_by"]
+
+    def _publish_pending(self, nb_row: Any, *, throttled: bool = False) -> None:
+        """把当前待办快照推给发起用户(job 线程内调用)。
+
+        throttled=True 用于进度点(限频);起始/完成走不节流的路径。发布与
+        fail-open 语义都在 pending_bus.publish_snapshot 里,与 KG 构建/索引
+        构建两条路径共用同一入口。"""
+        try:
+            from app.services.pending_bus import publish_snapshot
+
+            publish_snapshot(self._pending_user_id(nb_row), throttled=throttled)
+        except Exception:  # noqa: BLE001 - notification is fail-open
+            pass
+
     def _notify_paper_meta_done(
-        self, notebook_id: str, nb_row: Any, stored: int
+        self, notebook_id: str, nb_row: Any, stored: int, *, not_paper: int = 0
     ) -> None:
         """backfill 成功收尾的铃铛通知,完全对照
-        scale_artifact_runtime.notify_index_done 的模板:owner 优先取当前
-        请求用户 ContextVar,退化到 notebook 的 created_by(nb_row 复用
-        backfill_paper_metadata 开头已取的行,免二次查库);fail-open——通知
-        本身出错绝不能让已经跑完的 backfill 抛异常/丢 counts。"""
+        scale_artifact_runtime.notify_index_done 的模板;fail-open——通知
+        本身出错绝不能让已经跑完的 backfill 抛异常/丢 counts。
+
+        事件同时带 stored 与 not_paper:前端据此区分「补全了 N 篇」与「N 篇
+        判定为非论文」,后者 stored=0 但同样是成功完成(见调用处注释)。"""
         try:
-            from app.core.request_context import request_user_id
             from app.services.pending_bus import pending_bus
 
-            uid = request_user_id() or nb_row["created_by"]
+            uid = self._pending_user_id(nb_row)
             if not uid:
                 return
             pending_bus.emit(uid, {
@@ -1298,6 +1340,7 @@ class SourceIngestionService:
                 "notebook_id": notebook_id,
                 "notebook_name": nb_row["name"],
                 "stored": stored,
+                "not_paper": not_paper,
             })
             pending_bus.mark_dirty(uid)
         except Exception:  # noqa: BLE001 - notification is fail-open

@@ -651,3 +651,64 @@ def test_backfill_superseded_generation_does_not_emit_done(
 
     with service._paper_meta_backfilling_lock:
         service._paper_meta_backfilling.pop(notebook_id, None)
+
+
+def test_backfill_publishes_pending_snapshot_after_registering(
+    repo, notebook_id, service, monkeypatch
+):
+    """登记进行中状态后立刻发布快照——「论文信息补全中」项才会在运行期间就
+    出现在已连接的铃铛里(此前只有 job 结束的 notify_pending 会刷新,用户不
+    重连就永远看不到它)。
+
+    关键断言是**时序**:首次发布时 entry 必须已经在 dict 里。发早了(登记之前)
+    推出去的快照压根不含这一项,等于没修。
+    """
+    _insert_source(repo, notebook_id, "src-pub")
+    repo._kg_llm_client = _FakeKgLLM(PAYLOAD)
+
+    seen_building: list = []
+    from app.services import pending_bus as pb_module
+    monkeypatch.setattr(pb_module.pending_bus, "emit", lambda uid, evt: None)
+    monkeypatch.setattr(
+        pb_module.pending_bus, "mark_dirty",
+        lambda uid: seen_building.append(repo.paper_meta_backfilling(notebook_id)),
+    )
+    monkeypatch.setattr(pb_module.pending_bus, "mark_dirty_throttled",
+                        lambda uid, *a, **kw: False)
+
+    service.backfill_paper_metadata(notebook_id)
+
+    assert seen_building, "运行期间至少发布过一次快照"
+    assert seen_building[0] is True, "首次发布时 entry 必须已登记"
+    assert seen_building[-1] is False, "收尾发布时 entry 已 pop(终态)"
+
+
+def test_backfill_all_non_paper_still_reports_completion(
+    repo, notebook_id, service, monkeypatch
+):
+    """整批都判定为非论文 = 成功完成,必须发 done。
+
+    ensure_paper_metadata 对非论文落标记行并返回 "not_paper",于是 stored 停在
+    0。只看 stored 会让这种完全成功的 job 静默收场——前端刻意不自己弹完成
+    toast(交给铃铛),用户就只能看着按钮悄悄复位。事件同时带 not_paper,供前端
+    区分「已补全 N 篇」与「N 篇均非论文」。
+    """
+    _insert_source(repo, notebook_id, "src-np1")
+    _insert_source(repo, notebook_id, "src-np2")
+    repo._kg_llm_client = _FakeKgLLM({"is_paper": False})
+
+    events: list = []
+    from app.services import pending_bus as pb_module
+    monkeypatch.setattr(pb_module.pending_bus, "emit",
+                        lambda uid, evt: events.append((uid, evt)))
+    monkeypatch.setattr(pb_module.pending_bus, "mark_dirty", lambda uid: None)
+    monkeypatch.setattr(pb_module.pending_bus, "mark_dirty_throttled",
+                        lambda uid, *a, **kw: False)
+
+    counts = service.backfill_paper_metadata(notebook_id)
+
+    assert counts.get("stored", 0) == 0 and counts["not_paper"] == 2
+    done = [e for _, e in events if e.get("event") == "paper_meta_done"]
+    assert len(done) == 1, "全非论文也要报完成"
+    assert done[0]["stored"] == 0
+    assert done[0]["not_paper"] == 2
