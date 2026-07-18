@@ -2803,8 +2803,19 @@ export function KnowhowPanel({
         }
 
         @media (max-width: 720px) {
+          /* 窄屏走整屏浮窗：card 是 100vw，overlay 若还留着 24px padding，卡片就被
+             推出视口 24px——右侧的关闭按钮、三态切换、「保存并下一格」会被裁掉
+             （600×900 实测 left=24/width=600/right=624）。与全屏态
+             (.kh-modal-overlay:has(> .kh-modal-card--fullscreen)) 同样的处理：
+             整屏就把 overlay 的内边距归零，由卡片自己撑满。 */
+          .kh-modal-overlay {
+            padding: 0;
+          }
+
           .kh-modal-card {
-            width: 100vw;
+            /* 用 100%（overlay 是 position:fixed;inset:0，已排除滚动条）而非 100vw
+               ——100vw 含经典滚动条宽度，窄化桌面窗口时同样会横向溢出。 */
+            width: 100%;
             max-height: 100vh;
             border-radius: 0;
           }

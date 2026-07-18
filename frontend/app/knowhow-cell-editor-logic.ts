@@ -158,7 +158,13 @@ export function insertCodeFence(sel: TextareaSelection): InsertResult {
 // 仍是合法 markdown（渲染态显示空 alt 的图片，机器侧剥图占位退化为「（图示）」
 // 无冒号形式，与 knowhow-model.ts 的 cellSummary/stripMarkdownMarks 约定一致）。
 export function insertImageMarkdown(sel: TextareaSelection, assetId: string, alt: string): InsertResult {
-  return insertAtCursor(sel, `![${alt}](asset://${assetId})`);
+  return insertAtCursor(sel, imageMarkdown(assetId, alt));
+}
+
+// 只产出 markdown 片段、不关心插到哪里——上传收尾要把片段插到「落笔时的实时内容」
+// 上（而不是上传开始时的快照），那条路径需要拿到片段本身而非「插进某个选区」的结果。
+export function imageMarkdown(assetId: string, alt: string): string {
+  return `![${alt}](asset://${assetId})`;
 }
 
 // 从文件名派生图片 alt 文本：去掉最后一个扩展名、去首尾空白。多个点时只切
@@ -315,6 +321,21 @@ export const SAVE_BLOCKED_UPLOADING_HINT = "图片上传中，等上传完成后
 // 反向：保存在飞时不接新上传（保存收尾会关掉/切走本格，晚返回的上传会插进已卸载
 // 的组件——服务端留下孤儿资产、用户这次粘贴无声消失）。
 export const SAVE_IN_FLIGHT_UPLOAD_HINT = "正在保存，保存完成后再插入图片。";
+
+// 其它异步（优化表达 / 另一次上传）在飞时同样不接新上传：paste/drop 不经工具栏
+// 按钮，绕得过 busy 置灰，必须在入口再挡一次。
+export const BUSY_UPLOAD_HINT = "有操作进行中，完成后再插入图片。";
+
+// 上传在飞时不允许「接受」优化建议：接受会整段改写正文，而随后落地的上传要把图片
+// 插到正文里，两者会互相覆盖。
+export const ACCEPT_BLOCKED_UPLOADING_HINT = "图片上传中，等上传完成后再接受建议。";
+
+// 上传在飞时默认不离开：资产已经写到服务端，此刻卸载组件的话，这次粘贴既进不了
+// 正文，资产也回收不掉——仓库里 sweep_orphan_assets 只有 maintenance adapter、
+// 没有生产调用方，也没有删除资产的接口。故等上传结束再走；仍保留「再点一次强制
+// 离开」的出口（上传可能卡住，不能把人永久关在弹窗里），代价是那张图会成为孤儿。
+export const LEAVE_BLOCKED_UPLOADING_HINT =
+  "图片上传中，请等上传完成后再离开。再点一次将直接离开（这张图会残留在服务器上）。";
 
 // 有其它异步在飞导致按钮置灰时的通用提示——置灰必须有对得上的原因，不能灰着却
 // 显示「可点」的文案（knowhow-optimize-logic.ts 声明的不变量）。

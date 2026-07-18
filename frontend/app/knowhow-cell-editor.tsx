@@ -123,7 +123,12 @@ import {
   isSaveBlocked,
   SAVE_BLOCKED_UPLOADING_HINT,
   SAVE_IN_FLIGHT_UPLOAD_HINT,
+  BUSY_UPLOAD_HINT,
+  ACCEPT_BLOCKED_UPLOADING_HINT,
+  LEAVE_BLOCKED_UPLOADING_HINT,
   BUSY_HINT,
+  imageMarkdown,
+  insertAtCursor,
   OPTIMIZE_SUGGESTION_STALE_MESSAGE,
   resolveSaveCompletion,
   type LeaveIntent,
@@ -690,13 +695,16 @@ export function KnowhowCellEditor({
   // pendingCursorRef 区分「这次 content 变化是不是一次程序化插入」（普通打字
   // 不设这个 ref，effect 空转）。
   useEffect(() => {
-    if (pendingCursorRef.current !== null && textareaRef.current) {
+    if (pendingCursorRef.current === null) return;
+    const el = textareaRef.current;
+    if (el) {
       const pos = pendingCursorRef.current;
-      const el = textareaRef.current;
       el.focus();
       el.setSelectionRange(pos, pos);
-      pendingCursorRef.current = null;
     }
+    // 无论有没有 textarea 都要清掉：预览态下上传落笔时没有 textarea 可定位，若把
+    // 偏移留在 ref 里，切回编辑态后的下一次内容变化会拿这个陈旧偏移把光标拽走。
+    pendingCursorRef.current = null;
   }, [content]);
 
   function applyInsertion(result: { value: string; cursor: number }) {
@@ -800,6 +808,22 @@ export function KnowhowCellEditor({
   // 「每条离开路径都先落草稿」由「只有这一个执行器」这一结构保证，而非各分支各写。
   const performLeave = useCallback(
     (intent: LeaveIntent) => {
+      // 上传在飞：默认不离开。资产已写到服务端，此刻卸载会让这次粘贴既进不了正文、
+      // 资产也回收不掉（无删除接口，sweep_orphan_assets 无生产调用方）。同样留一次
+      // 强制出口——上传可能卡住，不能把人关死；判据同样是「警告是否还挂在屏幕上」。
+      // 判据必须把**两条**离开警告都算作「已警告过」：上传门与下面的落盘门各自
+      // 只认自己那条消息、又会覆盖对方的消息，两者都触发时会无限交替（上传提示 →
+      // 落盘失败提示 → 上传提示…），所有出口都被挡住、弹窗再也关不掉——正是这条
+      // 逃生口本来要避免的事。认两条则最多三次点击必然放行。
+      if (
+        uploading &&
+        saveError !== LEAVE_BLOCKED_UPLOADING_HINT &&
+        saveError !== DRAFT_FLUSH_FAILED_MESSAGE
+      ) {
+        setPendingLeave(null);
+        setSaveError(LEAVE_BLOCKED_UPLOADING_HINT);
+        return;
+      }
       if (!flushDraft()) {
         // 第一次：拦下并说明；第二次（用户此刻正看着那条警告仍要走）：强制放行。
         // 若没有这条逃生口，存储长期不可用时所有出口都被挡死——「取消」并入统一
@@ -820,7 +844,7 @@ export function KnowhowCellEditor({
       if (intent.kind === "switch") onSwitchCell?.(intent.columnId);
       else onClose();
     },
-    [flushDraft, saveError, onSwitchCell, onClose],
+    [flushDraft, saveError, uploading, onSwitchCell, onClose],
   );
 
   // 点「本行其他格子」的兄弟格：有异步在飞（保存/上传/优化）一律不切——continuation 可能
@@ -902,34 +926,53 @@ export function KnowhowCellEditor({
   async function uploadAndInsertImages(files: File[]) {
     const images = files.filter(isImageFile);
     if (images.length === 0) return;
-    // 保存在飞时不接新上传：保存收尾会 onClose/onNavigate 卸载本格，晚一步返回的
-    // 上传只会把图片插进已卸载的组件——图片在服务端变成孤儿资产，用户这次粘贴则
-    // 无声无息地没了（保存通常比上传快，这是必然而非偶发）。
-    if (savingMode !== null) {
-      setUploadError(SAVE_IN_FLIGHT_UPLOAD_HINT);
+    // 有异步在飞时一律不接新上传（保存/优化/另一次上传）。工具栏「图片」按钮受
+    // busy 置灰，但 textarea 的 paste 与编辑区的 drop 不经按钮，会绕过那道门——
+    // 优化在飞期间粘贴就是这么进来的，必须在函数入口再挡一次。
+    // 若不挡：① 保存收尾会卸载本格，晚返回的上传插进已卸载的树（服务端留孤儿
+    // 资产、这次粘贴无声消失）；② 优化返回后用户点「接受」，随后完成的上传会用
+    // 上传开始时的旧快照把刚接受的建议整段覆盖掉。
+    if (busy) {
+      setUploadError(savingMode !== null ? SAVE_IN_FLIGHT_UPLOAD_HINT : BUSY_UPLOAD_HINT);
       return;
     }
     setUploading(true);
     setUploadError(null);
+    // 记下开始时的正文与光标：落笔时若正文没变过，就插回用户当初粘贴的位置（正常
+    // 情况，保住「插在光标处」的语义）；若正文在上传期间被改写过（如恢复草稿），
+    // 那个偏移已无意义，改为追加到末尾——绝不拿旧偏移往新正文里劈。
+    const startSnapshot = contentRef.current;
+    const startCaret = textareaRef.current?.selectionStart ?? startSnapshot.length;
+    // 已传完的片段：任何一张失败时也要把前面成功的插进去，否则它们在服务端已是
+    // 资产、却既进不了正文也无从回收（与 P1-1 同一类孤儿+丢字）。
+    const snippets: string[] = [];
+    const landSnippets = () => {
+      if (snippets.length === 0) return;
+      // 先把所有图片传完、只收集 markdown 片段，最后基于**落笔时的实时内容**插入。
+      // 旧写法是从上传开始时的整篇快照上累加、结束时整篇写回，任何期间发生的内容
+      // 变化都会被那份旧快照静默覆盖（复审指出的「接受的建议被旧快照盖掉」）。
+      const liveValue = contentRef.current;
+      const at = liveValue === startSnapshot ? Math.min(startCaret, liveValue.length) : liveValue.length;
+      applyInsertion(insertAtCursor({ value: liveValue, start: at, end: at }, snippets.join("")));
+    };
     try {
-      // 多图连续上传时用局部变量串联「当前文本+光标」，而非依赖 React 的
-      // content 状态（setState 是异步的，循环内连续读它会读到同一个旧值，
-      // 导致后一张图片的插入把前一张已插入的内容覆盖掉）；全部处理完后一次
-      // 性 setState，既正确也省一次多余的中间重渲染。
-      let sel = currentSelection();
       for (const file of images) {
         const asset = await uploadNotebookAsset(notebookId, file);
-        const alt = deriveAltFromFilename(file.name);
-        const result = insertImageMarkdown(sel, asset.id, alt);
-        sel = { value: result.value, start: result.cursor, end: result.cursor };
+        snippets.push(imageMarkdown(asset.id, deriveAltFromFilename(file.name)));
       }
-      applyInsertion({ value: sel.value, cursor: sel.start });
+      landSnippets();
     } catch (err) {
+      landSnippets(); // 批量中途失败：已成功的那几张仍要落进正文
       setUploadError(extractErrorMessage(err, "图片上传失败，请重试"));
     } finally {
       setUploading(false);
-      // 上传结束，「上传中不能保存」的提示就过期了——留着会变成一条常驻红字。
-      setSaveError((current) => (current === SAVE_BLOCKED_UPLOADING_HINT ? null : current));
+      // 上传结束，两条「上传中…」提示都过期了。必须连 LEAVE_BLOCKED_UPLOADING_HINT
+      // 一起清：留着不只是常驻红字说假话，更会把「强制离开」那道门预先解锁——下一次
+      // 粘贴的上传刚开始，用户第一次点离开就会直接放行（无警告、图片成孤儿、这次
+      // 粘贴静默丢失），等于 P1-1 原样复发。
+      setSaveError((current) =>
+        current === SAVE_BLOCKED_UPLOADING_HINT || current === LEAVE_BLOCKED_UPLOADING_HINT ? null : current,
+      );
     }
   }
 
@@ -1001,6 +1044,15 @@ export function KnowhowCellEditor({
   // 才会真正落库+触发重投影，与格子浮窗其余编辑路径完全一致。
   function handleAcceptSuggestion() {
     if (optimizeState.status !== "ready") return;
+    // 纯防御：对照态下正文区被替换成两栏对照，没有 textarea/拖放区/文件选择框，
+    // 因此建议待确认期间起不了新上传；反向也被 busy 挡住。真跑到这里说明上面某条
+    // 前提被改坏了，此时宁可不接受——接受会整段改写正文，而随后落地的上传要把图片
+    // 插进正文，两者互相覆盖。（注意：真发生时上传插入会让 content≠savedContent，
+    // 下一次「接受」会落到下面的基线失效分支被丢弃，不是「等等再接受就行」。）
+    if (uploading) {
+      setSaveError(ACCEPT_BLOCKED_UPLOADING_HINT);
+      return;
+    }
     // 发起优化的前提是「无未保存改动」，但请求在飞期间 textarea 并没禁用。若用户
     // 此时又敲了字，这条建议的原文基线已经不是眼前的内容——直接 setContent 会把
     // 那些字覆盖掉（随后自动草稿把草稿也改写成建议内容，本地同样没了）。故不接受，
@@ -1277,7 +1329,13 @@ export function KnowhowCellEditor({
               <button type="button" onClick={handleDiscardSuggestion}>
                 {DISCARD_SUGGESTION_LABEL}
               </button>
-              <button type="button" className="kh-primary-button" onClick={handleAcceptSuggestion}>
+              <button
+                type="button"
+                className="kh-primary-button"
+                onClick={handleAcceptSuggestion}
+                disabled={uploading}
+                title={uploading ? ACCEPT_BLOCKED_UPLOADING_HINT : undefined}
+              >
                 <Check size={14} /> {ACCEPT_SUGGESTION_LABEL}
               </button>
             </div>

@@ -37,6 +37,12 @@ import {
   applyDraftFlush,
   isEditorBusy,
   isSaveBlocked,
+  imageMarkdown,
+  SAVE_BLOCKED_UPLOADING_HINT,
+  SAVE_IN_FLIGHT_UPLOAD_HINT,
+  BUSY_UPLOAD_HINT,
+  ACCEPT_BLOCKED_UPLOADING_HINT,
+  LEAVE_BLOCKED_UPLOADING_HINT,
   resolveSaveCompletion,
 } from "./knowhow-cell-editor-logic.ts";
 
@@ -476,6 +482,41 @@ test("保存收尾：期间用户继续敲（实时内容≠落库内容）→ w
 
 test("保存收尾：恢复提示还开着 → keep，绝不动那份未决定的旧草稿", () => {
   assert.strictEqual(draftFlushAction(hasUnsavedChanges("X", "X"), true), "keep");
+});
+
+// --- 上传落笔基于「实时内容」而非上传开始时的快照（复审：接受的建议被旧快照覆盖）---
+
+test("imageMarkdown: 产出 asset:// 图片片段", () => {
+  assert.strictEqual(imageMarkdown("a1", "图"), "![图](asset://a1)");
+  assert.strictEqual(imageMarkdown("a1", ""), "![](asset://a1)");
+});
+
+test("上传落笔：正文在上传期间被改写过，插入必须基于实时内容、不得回退到旧快照", () => {
+  // 时序：用户在 "原文" 上粘贴图片 → 上传在飞 → 优化建议返回、用户点「接受」，
+  // 正文变成 "优化稿" → 上传完成。旧写法从上传开始时的快照累加并整篇写回，会把
+  // "优化稿" 整段覆盖回 "原文+图"；正确做法是把片段插到落笔时的实时内容上。
+  const snapshotAtUploadStart = "原文";
+  const liveWhenUploadLands = "优化稿";
+  const snippet = imageMarkdown("a1", "图");
+  const at = liveWhenUploadLands.length;
+  const result = insertAtCursor({ value: liveWhenUploadLands, start: at, end: at }, snippet);
+  assert.strictEqual(result.value, "优化稿![图](asset://a1)");
+  assert.doesNotMatch(result.value, /原文/);
+  assert.notStrictEqual(result.value, `${snapshotAtUploadStart}${snippet}`);
+});
+
+test("并发提示文案彼此可区分（各自对应一种在飞操作，不能混用）", () => {
+  const hints = [
+    SAVE_BLOCKED_UPLOADING_HINT,
+    SAVE_IN_FLIGHT_UPLOAD_HINT,
+    BUSY_UPLOAD_HINT,
+    ACCEPT_BLOCKED_UPLOADING_HINT,
+    LEAVE_BLOCKED_UPLOADING_HINT,
+  ];
+  assert.strictEqual(new Set(hints).size, hints.length);
+  // 「上传中离开」的提示必须讲明强制离开的代价，否则用户不知道图会残留。
+  assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /再点一次/);
+  assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /残留/);
 });
 
 test("resolveSaveCompletion: 已卸载 → none（陈旧回调绝不操作后来打开的格子）", () => {
