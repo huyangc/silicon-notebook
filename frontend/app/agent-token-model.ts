@@ -1,3 +1,5 @@
+import { humanizedError } from "./errors.ts";
+
 export const AGENT_SCOPE_OPTIONS = [
   { value: "knowledge:read", label: "读取 Knowledge" },
   { value: "memory:read", label: "读取已确认 Memory" },
@@ -31,11 +33,14 @@ export function localDateTimeToUtcIso(
   value: string,
   timezoneOffsetMinutes?: number,
 ): string {
+  // 这两句是写给用户的场景文案(不是诊断串),所以走 humanizedError 盖章:
+  // 裸 new Error 的话,memory-panel 的 catch 过 toUserMessage 时认不出它已经
+  // 安全化,会压成通用兜底,用户就不知道是「过期时间」这一栏填错了。
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/.exec(value);
-  if (!match) throw new Error("过期时间格式无效");
+  if (!match) throw humanizedError("过期时间格式无效");
   if (timezoneOffsetMinutes === undefined) {
     const parsed = new Date(value);
-    if (Number.isNaN(parsed.getTime())) throw new Error("过期时间格式无效");
+    if (Number.isNaN(parsed.getTime())) throw humanizedError("过期时间格式无效");
     return parsed.toISOString();
   }
   const [, year, month, day, hour, minute, second = "0"] = match;

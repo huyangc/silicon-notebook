@@ -6,6 +6,7 @@
 // 的既有拆分方式。knowhow-import.tsx 只调用本文件导出的函数，不重复实现
 // 判断逻辑。
 
+import { toUserMessage } from "./errors.ts";
 import { ROLE_LABELS, type Role, type KnowhowColumnInput, type KnowhowPreviewColumn } from "./knowhow-model.ts";
 
 // --- 步骤①：文件选择 -----------------------------------------------------------
@@ -95,26 +96,18 @@ export function canSubmitImport(title: string, roles: Role[]): boolean {
 
 // --- 步骤③：提交 -----------------------------------------------------------------
 
-// 后端错误展示：knowhow-model.ts 的 apiFetch()（Task 7 产物，本任务文件
-// 白名单不含该文件，不可改）在非 2xx 时固定抛
-// `Error(`${status} ${bodyText}`)`，没有做 FastAPI `{"detail": "..."}"`
-// 的展开（对照 auth.ts 里已有的同类 unwrap 写法）。本函数尽量抠出纯中文
-// detail 文本；解析失败（响应体不是 JSON，如网络层错误）时退回去掉状态码
-// 前缀后的原文；两者都拿不到有效文本时才用调用方给的兜底文案——不让用户
-// 看到裸状态码/JSON 花括号噪音，同时不吞掉后端真正想说的中文错误。
+// 后端错误展示（knowhow 各面板的错误条共用这一个入口，~20 个调用点）。
+//
+// 历史上它自己解析 `${status} ${bodyText}`、自己 unwrap FastAPI 的 detail，
+// 因为当时 knowhow-model.ts 的 apiFetch() 就是那么裸抛的。现在 apiFetch()
+// 已经走 throwHumanizedHttpError()，那套解析全是死代码；更糟的是它的兜底
+// 「拿不到 detail 就展示原文」会把 `TypeError: Failed to fetch` 这类英文
+// 技术串直接写进错误条——正是错误人话层要消灭的东西。
+//
+// 现在它就是 toUserMessage() 的别名：保留这个名字只是为了不动 ~20 个调用点，
+// 语义、兜底规则、诊断落 console 全部与全局唯一入口一致。
 export function extractErrorMessage(err: unknown, fallback = "操作失败，请重试"): string {
-  const raw = err instanceof Error ? err.message : String(err ?? "");
-  const withoutStatus = raw.replace(/^\d{3}\s/, "");
-  try {
-    const parsed = JSON.parse(withoutStatus);
-    if (parsed && typeof parsed.detail === "string" && parsed.detail.trim()) {
-      return parsed.detail;
-    }
-  } catch {
-    // 响应体不是 JSON（网络错误/非结构化文本等），走下面的原文兜底。
-  }
-  const trimmed = withoutStatus.trim();
-  return trimmed || fallback;
+  return toUserMessage(err, fallback);
 }
 
 /** 预览表格里一个格子的合并显示信息：`rowSpan===0` 表示被上方同列的合并

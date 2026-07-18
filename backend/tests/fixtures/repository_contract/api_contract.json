@@ -3225,6 +3225,11 @@
         },
         "ModelTestResult": {
           "properties": {
+            "code": {
+              "default": "",
+              "title": "Code",
+              "type": "string"
+            },
             "error": {
               "default": "",
               "title": "Error",

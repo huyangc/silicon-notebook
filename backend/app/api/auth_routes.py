@@ -1,6 +1,6 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Request
 
-from app.api.deps import identity_repository
+from app.api.deps import identity_repository, user_error
 from app.models.schemas import AuthRequest, AuthResult
 from app.services.auth_utils import is_valid_username
 
@@ -10,14 +10,17 @@ auth_router = APIRouter(prefix="/auth")
 @auth_router.post("/register", response_model=AuthResult)
 def register(payload: AuthRequest) -> AuthResult:
     if not is_valid_username(payload.username):
-        raise HTTPException(status_code=400, detail="用户名须为「单个小写字母+00+六位数字」，如 a00123456")
+        raise user_error(400, "用户名须为「单个小写字母+00+六位数字」，如 a00123456")
     if not (payload.password or "").strip():
-        raise HTTPException(status_code=400, detail="密码不能为空")
+        raise user_error(400, "密码不能为空")
     try:
         user = identity_repository().create_user(payload.username, payload.password)
     except ValueError as exc:
+        # 两个分支都是写给用户的中文文案（异常原文只用来分类，不外泄），
+        # 所以同样带出处标记。AST 扫描只认字面量 detail，这处是变量间接
+        # 引用，需要手工登记。
         detail = "用户名已被占用" if "exists" in str(exc) else "用户名不合法"
-        raise HTTPException(status_code=400, detail=detail)
+        raise user_error(400, detail)
     token = identity_repository().create_session(user.id)
     return AuthResult(token=token, user=user)
 
@@ -26,7 +29,7 @@ def register(payload: AuthRequest) -> AuthResult:
 def login(payload: AuthRequest) -> AuthResult:
     user = identity_repository().authenticate_user(payload.username, payload.password)
     if user is None:
-        raise HTTPException(status_code=401, detail="用户名或密码错误")
+        raise user_error(401, "用户名或密码错误")
     token = identity_repository().create_session(user.id)
     return AuthResult(token=token, user=user)
 

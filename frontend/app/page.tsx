@@ -55,6 +55,7 @@ import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
+import { humanizedError, logDiagnostic, throwHumanizedHttpError, toUserMessage } from "./errors.ts";
 import {
   MODEL_ROLES, type ModelRole, type ServiceForm,
   buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
@@ -113,7 +114,7 @@ import {
   type UnifiedGraphResp,
   type UnifiedKgStatus,
 } from "./workspace-model";
-import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY } from "./vocabulary";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, MODEL_TEST_ERROR } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -323,18 +324,9 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     clearToken();
     if (typeof window !== "undefined") window.location.reload();
   }
-  if (!response.ok) {
-    // Surface the backend's error detail instead of an opaque status line.
-    let detail = "";
-    try {
-      const body = await response.clone().json();
-      detail = (body && (body.detail || body.message)) || "";
-    } catch {
-      detail = (await response.text().catch(() => "")) || "";
-    }
-    const suffix = detail ? ` - ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : "";
-    throw new Error(`${response.status} ${response.statusText}${suffix}${requestId ? ` [${requestId}]` : ""}`);
-  }
+  // 原始诊断(状态码 + statusText + 后端 detail + requestId)只进 console 供排查;
+  // 面向用户只抛人话。收口在 errors.ts。
+  if (!response.ok) await throwHumanizedHttpError(response, "api");
   if (response.status === 204) {
     return null as T;
   }
@@ -363,18 +355,22 @@ async function probeReady(): Promise<ReadySnapshot | null> {
     });
     let body: Partial<ReadySnapshot> | null = null;
     try { body = await res.json(); } catch { body = null; }
-    if (!res.ok || !body) {
+    const snapshot: ReadySnapshot = !res.ok || !body
       // 503(应用路由仍在预热)或解析失败:尽量沿用 body 中的进度字段。
-      return {
-        ready: false,
-        phase: (body?.phase as ReadySnapshot["phase"]) ?? "starting",
-        detail: body?.detail,
-        warmed_notebooks: body?.warmed_notebooks,
-        total_notebooks: body?.total_notebooks,
-        error: body?.error ?? null,
-      };
-    }
-    return body as ReadySnapshot;
+      ? {
+          ready: false,
+          phase: (body?.phase as ReadySnapshot["phase"]) ?? "starting",
+          detail: body?.detail,
+          warmed_notebooks: body?.warmed_notebooks,
+          total_notebooks: body?.total_notebooks,
+          error: body?.error ?? null,
+        }
+      : (body as ReadySnapshot);
+    // 后端把启动失败写成 `f"{type(exc).__name__}: {exc}"`(services/startup_warmup.py)
+    // ——`OperationalError: database is locked` 这种不该出现在启动屏上。原文在
+    // 这条 I/O 边界上落 console(和 readHttpError 一样的位置),界面只给稳定中文。
+    if (snapshot.error) logDiagnostic("ready", snapshot.error);
+    return snapshot;
   } catch {
     return null;   // 网络错误:后端还没起来,继续轮询
   }
@@ -389,7 +385,9 @@ function startupPhaseText(snap: ReadySnapshot | null): string {
     const total = snap?.total_notebooks ?? 0;
     return `正在预热 (${warmed}/${total} 笔记本)…`;
   }
-  if (phase === "error") return snap?.error?.trim() || "启动时遇到问题，正在重试…";
+  // ⚠别把 snap.error 直出:它是后端的原始异常串。原文已在 probeReady() 里进
+  // console,这里只给稳定文案。
+  if (phase === "error") return "启动时遇到问题，正在重试…";
   return "服务启动中…";
 }
 
@@ -436,17 +434,9 @@ async function readAskStream<TResponse>(
     clearToken();
     if (typeof window !== "undefined") window.location.reload();
   }
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const body = await response.clone().json();
-      detail = (body && (body.detail || body.message)) || "";
-    } catch {
-      detail = (await response.text().catch(() => "")) || "";
-    }
-    const suffix = detail ? ` - ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : "";
-    throw new Error(`${response.status} ${response.statusText}${suffix}${requestId ? ` [${requestId}]` : ""}`);
-  }
+  // 原始诊断(状态码 + statusText + 后端 detail + requestId)只进 console 供排查;
+  // 面向用户只抛人话。收口在 errors.ts。
+  if (!response.ok) await throwHumanizedHttpError(response, "api");
   if (!response.body) {
     throw new Error("Streaming response body is unavailable");
   }
@@ -476,7 +466,16 @@ async function readAskStream<TResponse>(
     } else if (event.event === "cancelled") {
       throw new DOMException("已中断回答", "AbortError");  // 走 runAsk 的 isAbortError 干净分支
     } else if (event.event === "error") {
-      throw new Error(event.error);
+      // stream 事件走的是 NDJSON 正文,没有响应头,`event.error` 天然带不上出处
+      // 标记(后端写的是 f"{type(exc).__name__}: {exc}"),按出处模型一律不可信
+      // → 原文只进受限诊断出口。
+      //
+      // ⚠抛的必须是 humanizedError(带品牌),不能是裸 new Error(...)。裸 Error
+      // 会让外层 runAsk → reportError → toUserMessage 认不出这句已经安全化,
+      // 于是**再泛化一次**:「回答没能完成,请重试」被吃成全局兜底「服务出了
+      // 点问题」,而且这句安全文案还会被当成「未翻译的原始错误」多记一条诊断。
+      logDiagnostic("ask-stream", event.error);
+      throw humanizedError("回答没能完成，请重试");
     } else {
       const _exhaustive: never = event;   // union 新增 tag 未处理时 tsc 报错
       throw new Error(`unknown ask stream event: ${JSON.stringify(_exhaustive)}`);
@@ -535,17 +534,9 @@ async function downloadReportsZip(nb: string, reportIds: string[]): Promise<void
     clearToken();
     if (typeof window !== "undefined") window.location.reload();
   }
-  if (!response.ok) {
-    let detail = "";
-    try {
-      const body = await response.clone().json();
-      detail = (body && (body.detail || body.message)) || "";
-    } catch {
-      detail = (await response.text().catch(() => "")) || "";
-    }
-    const suffix = detail ? ` - ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : "";
-    throw new Error(`${response.status} ${response.statusText}${suffix}`);
-  }
+  // 原始诊断(状态码 + statusText + 后端 detail + requestId)只进 console 供排查;
+  // 面向用户只抛人话。收口在 errors.ts。
+  if (!response.ok) await throwHumanizedHttpError(response, "api");
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -1252,7 +1243,9 @@ export default function Home() {
           setPendingMerges(pend);
           setUnifiedKgStatus(status);
           setToast(job.status === "failed"
-            ? `全部预审中止：${job.error || "未知错误"}（已处理 ${job.done}）`
+            // job.error 是后端的 `f"{type(exc).__name__}: {exc}"`
+            // (services/knowledge_governance.py),不直出;原文进 console。
+            ? `全部预审中止：${toUserMessage(job.error ? new Error(job.error) : null, "出了点问题")}（已处理 ${job.done}）`
             : `全部预审完成：已处理 ${job.done} 项`);
         }
       } catch { /* transient error; keep polling */ }
@@ -1364,7 +1357,11 @@ export default function Home() {
             setToast("该问答已被取消");
             await loadSessions(nb);   // 后端对取消的首轮会话做了空会话清理,刷新列表去掉幽灵项
           } else {
-            setToast(d.status === "interrupted" ? "该问答因服务重启中断" : `该问答失败：${d.error || "未知错误"}`);
+            // d.error 是后端持久化的英文技术串(供日志 / MCP),不直出给用户;
+            // 后端写成中文的失败原因才透传。原始值进 console。
+            setToast(d.status === "interrupted"
+              ? "该问答因服务重启中断"
+              : toUserMessage(d.error ? new Error(d.error) : null, "该问答失败，请稍后重试"));
             await loadSessions(nb);   // 同上:失败/中断的首轮会话也可能已被后端清理
           }
         }
@@ -1732,7 +1729,13 @@ export default function Home() {
           return changed ? next : previous; // no re-render when nothing moved
         });
         if (justFailed && !cancelled) {
-          setStatusText(`来源处理失败：${justFailed.file_name || justFailed.title}${justFailed.error_message ? ` — ${justFailed.error_message}` : ""}`);
+          // source.error_message 由后端写成 `ValueError: ...` / MinerU 的英文
+          // 提示(见 source_ingestion.py),是给日志和 MCP 看的。只有它本身就是
+          // 中文可展示文案时才附给用户;否则原文只进 console(兜底传空串)。
+          const failureHint = justFailed.error_message
+            ? toUserMessage(new Error(justFailed.error_message), "")
+            : "";
+          setStatusText(`来源处理失败：${justFailed.file_name || justFailed.title}${failureHint ? ` — ${failureHint}` : ""}`);
         }
         if (reachedExtracted && currentNotebookId) {
           await loadNotebookCollection();
@@ -3239,9 +3242,12 @@ export default function Home() {
     }
   }
 
+  // 全工作区 catch 分支的统一出口(90+ 调用点)。此前它直出 err.message,于是
+  // fetch 自身 reject 时用户看到的是「服务异常：Failed to fetch」——那条路径
+  // 根本进不了 throwHumanizedHttpError。现在一律过人话层:已翻译的中文原样保留
+  // (保住 401/403/404/409 的语义差别),英文技术串只进 console。
   function reportError(error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    setStatusText(`服务异常：${message}`);
+    setStatusText(toUserMessage(error, "服务出了点问题，请稍后重试"));
   }
 
   async function handleLogout() {
@@ -3301,7 +3307,18 @@ export default function Home() {
     try {
       const r = await testModelService(role, f.base_url.trim(), f.model.trim(),
         f.keyDirty ? f.api_key : null);
-      setModelTesting((m) => ({ ...m, [role]: r.ok ? `通 ${r.latency_ms}ms` : `失败：${r.error}` }));
+      // 200 响应挂不上 X-User-Message 头,故 ModelTestResult 用 `code` 承载出处:
+      // 后端只回稳定枚举,文案在 vocabulary.ts(这样才落在界面词汇守卫的作用域里)。
+      // `error` 是 `f"{type(exc).__name__}: {exc}"` 的诊断,只进 console。
+      // 这页的用途就是排查配置,一律压成「连接未通过」等于把它废掉——所以要的是
+      // 结构化出处,不是放宽判据。
+      if (!r.ok && r.error) logDiagnostic("model-test", r.error);
+      setModelTesting((m) => ({
+        ...m,
+        [role]: r.ok
+          ? `通 ${r.latency_ms}ms`
+          : `失败：${label(MODEL_TEST_ERROR, r.code, "连接未通过")}`,
+      }));
     } catch (e) {
       setModelTesting((m) => ({ ...m, [role]: "失败" })); reportError(e);
     }
@@ -4703,7 +4720,13 @@ export default function Home() {
                 )) : (
                   <article className="item">
                     <h3>等待解析</h3>
-                    <p>{sourceDetail.error_message || "当前来源还没有解析出元素。"}</p>
+                    {/* error_message 是后端的原始异常串(services/source_ingestion.py),
+                        不直出——这里只按「有没有失败」二选一给稳定文案。原文在来源
+                        轮询那条路径上已经过 toUserMessage 落进 console(见 justFailed)。
+                        渲染期不调 toUserMessage:它会随重渲染反复刷日志。 */}
+                    <p>{sourceDetail.error_message
+                      ? "这个来源没能解析成功，可以删除后重新上传。"
+                      : "当前来源还没有解析出元素。"}</p>
                   </article>
                 )}
               </div>

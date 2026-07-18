@@ -3,6 +3,7 @@
 // 镜像 notebook-tier.ts 的样板。
 
 import { authHeaders } from "./auth.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 
 // 复用 tier.ts 里的宽松形状:后端 copy 返回一个完整 NotebookSummary,这里只声明
 // 我们会读到的字段,其余用索引签名兜底。
@@ -61,7 +62,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...authHeaders() },
     ...init,
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) await throwHumanizedHttpError(res, "share");
   // 204 No Content(取消分享)没有 body。
   if (res.status === 204) return null as T;
   return res.json() as Promise<T>;

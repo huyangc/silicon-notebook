@@ -13,7 +13,7 @@ from app.api.deps import (
     admin_query_repository, identity_repository,
     notebook_access_repository, notebook_catalog_repository,
     notebook_sharing_repository, repository, require_notebook_access,
-    require_notebook_read, require_notebook_write, get_current_user, source_repository,
+    require_notebook_read, require_notebook_write, get_current_user, source_repository, user_error,
 )
 from app.core.config import get_settings
 from app.services.sqlite_repository import KnowledgeGraphTooLargeError
@@ -207,13 +207,13 @@ def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends
 def test_model_service(payload: ModelTestRequest, user: UserProfile = Depends(get_current_user)):
     import time
     if payload.service not in _MODEL_ROLES:
-        return ModelTestResult(ok=False, error="未知服务")
+        return ModelTestResult(ok=False, code="unknown_service")
     repo = identity_repository()
     stored = repo.get_user_model_settings(user.id).get(payload.service) or {}
     api_key = payload.api_key if payload.api_key else stored.get("api_key", "")
     base_url, model = payload.base_url.strip(), payload.model.strip()
     if not (base_url and model and api_key):
-        return ModelTestResult(ok=False, error="缺少 base_url / model / api_key")
+        return ModelTestResult(ok=False, code="missing_config")
     started = time.perf_counter()
     settings = get_settings()
     try:
@@ -228,6 +228,7 @@ def test_model_service(payload: ModelTestRequest, user: UserProfile = Depends(ge
         return ModelTestResult(ok=True, latency_ms=round((time.perf_counter() - started) * 1000))
     except Exception as exc:
         return ModelTestResult(ok=False, latency_ms=round((time.perf_counter() - started) * 1000),
+                               code="upstream_error",
                                error=f"{type(exc).__name__}: {exc}"[:200])
 
 
@@ -747,7 +748,7 @@ def add_knowhow_row(notebook_id: str, table_id: str, body: KnowhowRowCreate) -> 
     table = _require_table(repo, notebook_id, table_id)
     valid_column_ids = {column["id"] for column in table["columns"]}
     if set(body.cells) - valid_column_ids:
-        raise HTTPException(status_code=400, detail="格子对应的列不属于本表")
+        raise user_error(400, "格子对应的列不属于本表")
     row_id = repo.add_knowhow_row(table_id, body.cells, body.position)
     knowhow_api.get_scheduler(repo).schedule(table_id)
     updated = repo.get_knowhow_table(table_id)
@@ -788,7 +789,7 @@ def patch_knowhow_cell(
         not any(row["id"] == row_id for row in table["rows"])
         or not any(column["id"] == column_id for column in table["columns"])
     ):
-        raise HTTPException(status_code=400, detail="格子定位不合法")
+        raise user_error(400, "格子定位不合法")
     try:
         repo.validate_cell_target(row_id, column_id)
     except ValueError as exc:
@@ -836,7 +837,7 @@ def patch_knowhow_cells_batch(
         not all(row_id in valid_row_ids for row_id in row_ids)
         or not any(column["id"] == body.column_id for column in table["columns"])
     ):
-        raise HTTPException(status_code=400, detail="格子定位不合法")
+        raise user_error(400, "格子定位不合法")
     try:
         for row_id in row_ids:
             repo.validate_cell_target(row_id, body.column_id)
@@ -939,7 +940,7 @@ async def append_knowhow_rows(
     schedules a debounced reprojection exactly like every other mutating
     knowhow endpoint."""
     if mode not in ("preview", "commit"):
-        raise HTTPException(status_code=400, detail="mode 必须是 preview 或 commit")
+        raise user_error(400, "mode 必须是 preview 或 commit")
     repo = repository()
     table = _require_table(repo, notebook_id, table_id)
     data = await file.read()
@@ -979,7 +980,7 @@ def optimize_knowhow_cell(
         not any(row["id"] == row_id for row in table["rows"])
         or not any(column["id"] == column_id for column in table["columns"])
     ):
-        raise HTTPException(status_code=400, detail="格子定位不合法")
+        raise user_error(400, "格子定位不合法")
     try:
         repo.validate_cell_target(row_id, column_id)
     except ValueError as exc:
@@ -1034,7 +1035,7 @@ def list_object_schemas() -> List[ObjectSchemaModel]:
 @router.post("/object-schemas", response_model=ObjectSchemaModel)
 def create_object_schema(payload: ObjectSchemaCreate, user: UserProfile = Depends(get_current_user)) -> ObjectSchemaModel:
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可修改全局配置")
+        raise user_error(403, "仅管理员可修改全局配置")
     try:
         return repository().create_object_schema(payload)
     except ValueError as exc:
@@ -1046,7 +1047,7 @@ def update_object_schema(
     object_type: str, payload: ObjectSchemaUpdate, user: UserProfile = Depends(get_current_user)
 ) -> ObjectSchemaModel:
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可修改全局配置")
+        raise user_error(403, "仅管理员可修改全局配置")
     try:
         return repository().update_object_schema(object_type, payload)
     except KeyError:
@@ -1058,7 +1059,7 @@ def update_object_schema(
 @router.delete("/object-schemas/{object_type}")
 def delete_object_schema(object_type: str, user: UserProfile = Depends(get_current_user)):
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可修改全局配置")
+        raise user_error(403, "仅管理员可修改全局配置")
     try:
         repository().delete_object_schema(object_type)
         return {"status": "deleted", "object_type": object_type}
@@ -1344,7 +1345,7 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
     or 'personal' (default user notes). Drives tier-weighted relevance and
     conflict precedence in ask()."""
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可设置基准库")
+        raise user_error(403, "仅管理员可设置基准库")
     tier = payload.tier.strip().lower()
     if tier not in {"base", "personal"}:
         raise HTTPException(status_code=400, detail="tier must be 'base' or 'personal'")
@@ -1808,7 +1809,7 @@ def list_concept_whitelist() -> List[ConceptWhitelistEntry]:
 @router.post("/kg/concept-whitelist", response_model=ConceptWhitelistEntry)
 def add_concept_whitelist(payload: ConceptWhitelistAdd, user: UserProfile = Depends(get_current_user)) -> ConceptWhitelistEntry:
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可修改全局配置")
+        raise user_error(403, "仅管理员可修改全局配置")
     try:
         return ConceptWhitelistEntry(**repository().concept_whitelist_add(payload.term, payload.note))
     except ValueError:
@@ -1818,7 +1819,7 @@ def add_concept_whitelist(payload: ConceptWhitelistAdd, user: UserProfile = Depe
 @router.delete("/kg/concept-whitelist/{term}", status_code=204)
 def delete_concept_whitelist(term: str, user: UserProfile = Depends(get_current_user)) -> None:
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可修改全局配置")
+        raise user_error(403, "仅管理员可修改全局配置")
     repository().concept_whitelist_remove(term)
 
 
@@ -1878,7 +1879,7 @@ def propose_promotion(notebook_id: str, knowledge_id: str) -> PromotionCandidate
 @router.get("/promotion-queue", response_model=List[PromotionCandidate])
 def list_promotion_queue(status: str = Query(None), user: UserProfile = Depends(get_current_user)) -> List[PromotionCandidate]:
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可管理晋升队列")
+        raise user_error(403, "仅管理员可管理晋升队列")
     return [
         PromotionCandidate(**c)
         for c in repository().list_promotion_queue(status_filter=status)
@@ -1891,7 +1892,7 @@ def list_promotion_queue(status: str = Query(None), user: UserProfile = Depends(
 )
 def approve_promotion(candidate_id: str, user: UserProfile = Depends(get_current_user)) -> PromotionApproveResult:
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可管理晋升队列")
+        raise user_error(403, "仅管理员可管理晋升队列")
     try:
         return PromotionApproveResult(
             **repository().approve_promotion_as_reviewer(candidate_id, user.id)
@@ -1908,7 +1909,7 @@ def approve_promotion(candidate_id: str, user: UserProfile = Depends(get_current
 )
 def reject_promotion(candidate_id: str, payload: PromotionRejectRequest, user: UserProfile = Depends(get_current_user)) -> PromotionCandidate:
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可管理晋升队列")
+        raise user_error(403, "仅管理员可管理晋升队列")
     try:
         return PromotionCandidate(
             **repository().reject_promotion_as_reviewer(
@@ -1926,7 +1927,7 @@ async def list_admin_users(user: UserProfile = Depends(get_current_user)) -> Lis
     """管理员用户使用总览:所有用户 + 用量统计 + 当前在线。仅 admin。
     重的用量聚合放线程池,回 loop 线程读 pending_bus(免锁快照)。"""
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可查看用户总览")
+        raise user_error(403, "仅管理员可查看用户总览")
     loop = asyncio.get_running_loop()
     rows = await loop.run_in_executor(None, admin_query_repository().list_user_usage)
     online = pending_bus.online_user_ids()
@@ -1937,7 +1938,7 @@ async def list_admin_users(user: UserProfile = Depends(get_current_user)) -> Lis
 def list_admin_user_notebooks(user_id: str, user: UserProfile = Depends(get_current_user)) -> List[AdminUserNotebook]:
     """某用户名下笔记本详情。仅 admin。"""
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可查看用户笔记本")
+        raise user_error(403, "仅管理员可查看用户笔记本")
     return [
         AdminUserNotebook(**row)
         for row in admin_query_repository().list_user_notebooks(user_id)
@@ -1948,7 +1949,7 @@ def list_admin_user_notebooks(user_id: str, user: UserProfile = Depends(get_curr
 async def list_online_users(user: UserProfile = Depends(get_current_user)) -> dict:
     """当前在线用户 id 集合(持有实时流连接)。仅 admin,纯读内存零 DB。"""
     if user.role != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可查看在线状态")
+        raise user_error(403, "仅管理员可查看在线状态")
     return {"online_ids": sorted(pending_bus.online_user_ids())}
 
 

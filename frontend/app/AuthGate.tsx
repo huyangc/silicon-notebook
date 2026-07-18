@@ -1,6 +1,7 @@
 "use client";
 import { FormEvent, useState } from "react";
 import { isValidUsername, loginUser, registerUser, setToken, type AuthUser } from "./auth";
+import { toUserMessage } from "./errors.ts";
 
 export function AuthGate({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => void }) {
   const [mode, setMode] = useState<"login" | "register">("login");
@@ -27,7 +28,9 @@ export function AuthGate({ onAuthenticated }: { onAuthenticated: (user: AuthUser
       setToken(token);
       onAuthenticated(user);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "操作失败");
+      // 登录/注册 client 已把状态码翻成人话;fetch 自身 reject(断网、后端没起来)
+      // 抛的是 "Failed to fetch",走兜底,原文只进 console。
+      setError(toUserMessage(err, mode === "login" ? "登录失败，请稍后重试" : "注册失败，请稍后重试"));
     } finally {
       setBusy(false);
     }

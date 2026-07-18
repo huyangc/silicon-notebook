@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -69,3 +71,52 @@ def test_test_endpoint_incomplete_returns_not_ok(client):
     r = client.post("/api/me/model-settings/test",
                     json={"service": "llm", "base_url": "", "model": ""}, headers=h)
     assert r.status_code == 200 and r.json()["ok"] is False
+
+
+# --- 200 响应里的两个通道 -------------------------------------------------------
+# 这个端点挂不上 X-User-Message 头(200 不是 4xx),所以出处由 schema 承载:
+# `code` = 稳定枚举(文案在前端 vocabulary.ts),`error` = 诊断只进 console。
+# 后端刻意不存中文:存了就绕开只扫 frontend/app 的界面词汇守卫。
+# 前端是 deny-by-default 的,填错通道的后果是文案静默消失,两侧都要钉住。
+
+
+@pytest.mark.parametrize(
+    "payload, expected",
+    [
+        ({"service": "nope", "base_url": "x", "model": "x"}, "unknown_service"),
+        ({"service": "llm", "base_url": "", "model": ""}, "missing_config"),
+    ],
+)
+def test_precheck_failures_go_in_code_not_error(client, payload, expected):
+    body = client.post("/api/me/model-settings/test", json=payload, headers=_auth(client)).json()
+    assert body["code"] == expected
+    # 诊断通道必须留空:这两条不是异常,没有原文可给排查。
+    assert body["error"] == ""
+    # 后端不得夹带中文文案——文案归前端,否则绕开界面词汇守卫。
+    assert not re.search(r"[一-鿿]", body["code"])
+
+
+def test_exception_path_fills_error_and_uses_generic_code(client, monkeypatch):
+    """异常分支只给 code,绝不把 str(exc) 送上任何可展示通道。"""
+    import app.api.routes as routes
+
+    class Boom:
+        def __init__(self, *a, **k): pass
+        def chat_json(self, *a, **k): raise RuntimeError("upstream 10.0.0.7:8000 refused")
+
+    monkeypatch.setattr("app.core.llm.OpenAICompatibleClient", Boom)
+    monkeypatch.setattr(routes, "identity_repository", lambda: _StubRepo())
+    body = client.post(
+        "/api/me/model-settings/test",
+        json={"service": "llm", "base_url": "http://x", "model": "m", "api_key": "k"},
+        headers=_auth(client),
+    ).json()
+    assert body["ok"] is False
+    assert body["code"] == "upstream_error"      # ← 用户看到的是这个 code 的中文映射
+    assert "RuntimeError" in body["error"]       # ← 排查侧仍拿得到原文
+    assert "10.0.0.7:8000" in body["error"]
+
+
+class _StubRepo:
+    def get_user_model_settings(self, _uid):
+        return {}

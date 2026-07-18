@@ -3,7 +3,8 @@
 import { Fragment, useEffect, useState } from "react";
 import { fetchMe } from "../../auth.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
-import { fetchAdminUsers, fetchOnlineIds, type AdminUserUsage } from "./api.ts";
+import { toUserMessage } from "../../errors.ts";
+import { fetchAdminUsers, fetchOnlineIds, FORBIDDEN_SENTINEL, type AdminUserUsage } from "./api.ts";
 import { formatLastActive, logsDrillHref } from "./format.ts";
 import { fetchUserNotebooks, notebookStatusLabel, type AdminUserNotebook } from "./notebooks.ts";
 import "./usage.css";
@@ -34,8 +35,13 @@ export default function AdminUsagePage() {
         setState({ kind: "ready", rows });
         setOnlineIds(new Set(rows.filter((r) => r.is_online).map((r) => r.id)));
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        setState(msg === "forbidden" ? { kind: "forbidden" } : { kind: "error", message: msg });
+        // 哨兵先判(分流到专用无权限视图),其余一律过人话层——此前这里直出
+        // e.message,断网时页面上会写「加载失败:Failed to fetch」。
+        if (e instanceof Error && e.message === FORBIDDEN_SENTINEL) {
+          setState({ kind: "forbidden" });
+          return;
+        }
+        setState({ kind: "error", message: toUserMessage(e, "请稍后重试") });
       }
     })();
   }, []);

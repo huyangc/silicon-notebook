@@ -4,6 +4,7 @@
 // React page module.
 
 import { authHeaders } from "./auth.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 
 export type PromotionCandidate = {
   id: string;
@@ -44,7 +45,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...authHeaders() },
     ...init,
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) await throwHumanizedHttpError(res, "promotion-queue");
   return res.json() as Promise<T>;
 }
 

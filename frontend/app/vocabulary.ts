@@ -78,6 +78,20 @@ export const PROMOTION_STATUS: Record<string, string> = {
 };
 
 /**
+ * 模型「测试连接」的失败原因（`ModelTestResult.code`）。
+ *
+ * 后端只回 code，文案在这里——这样它才落在界面词汇守卫的作用域里。上一版把中文
+ * 放后端，结果「缺少 base_url / model / api_key」直接把字段名甩给用户，而守卫只扫
+ * `frontend/app`、看不见它。`upstream_error` 刻意不展开成异常原文：原文是诊断，
+ * 走 logDiagnostic 进 console。
+ */
+export const MODEL_TEST_ERROR: Record<string, string> = {
+  unknown_service: "不认识这个模型用途",
+  missing_config: "还没填完，需要接口地址、模型名和密钥",
+  upstream_error: "连不上这个模型服务",
+};
+
+/**
  * 严格查表：命中返回映射值，未命中返回 `fallback`——永远不会是 `value` 本身。
  *
  * 签名强制传 fallback，是为了让「兜底即原值」这个 bug 写不出来。后端每加一个

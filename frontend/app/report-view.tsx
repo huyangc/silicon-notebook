@@ -21,6 +21,7 @@ import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
 import { remarkCitations } from "./answer-citations";
 import { referenceByAnchorKey, type AnswerReference } from "./answer-formatting";
+import { logDiagnostic, toUserMessage } from "./errors";
 import { label } from "./vocabulary";
 
 // ---------------------------------------------------------------------------
@@ -345,7 +346,10 @@ function OutlineEditor({
       // 乐观切到生成态,让父层立刻进 section_status 进度视图并恢复轮询。
       onGenerating({ ...report, status: "generating", progress: "章节 0/" + cleaned.length + " 完成" });
     } catch (error) {
-      setToast(`生成失败：${error instanceof Error ? error.message : String(error)}`);
+      // 同 surfaceError:fetch 层的译文(没权限 / 已删除 / 冲突)比「可以重试」
+      // 有用,别压平;非 HTTP 异常才退兜底。原始值的诊断由 toUserMessage 统一
+      // 记(见下方 surfaceError 的注释:这里不再补裸 console.error)。
+      setToast(toUserMessage(error, "报告没能生成完，可以重试"));
     } finally {
       setBusy(false);
     }
@@ -521,8 +525,18 @@ export function ReportsPanel({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [zipBusy, setZipBusy] = useState(false);
 
-  const surfaceError = (error: unknown) =>
-    setToast(`报告操作失败：${error instanceof Error ? error.message : String(error)}`);
+  const surfaceError = (error: unknown) => {
+    // ⚠这里**不要**再补 `console.error(error)`。原始值已经由 toUserMessage 送进
+    // errors.ts 的受限诊断出口(压单行 + 统一截断到 500 字符)。补一条裸日志既是
+    // 重复打印,又绕过那个上限——一个整页 HTML 错误页 / 超长堆栈能刷爆控制台,
+    // 正是本轮「HTTP 与非 HTTP 共用同一截断上限」整改要堵的。(第四轮评审阻塞 3)
+    //
+    // fetch 层已按状态码译过(401/403/404/409 各不相同),直接展示译文——别再压平
+    // 成一句通用文案,否则用户分不清「登录失效 / 没权限 / 已删除 / 冲突」,还会
+    // 对权限和已删除这类重试也没用的问题反复点。非 HTTP 异常(如断网的
+    // "Failed to fetch")才用兜底文案。
+    setToast(toUserMessage(error, "报告操作没成功，请稍后重试"));
+  };
 
   // 进 tab / 切换 notebook:重置视图并拉一次列表。
   useEffect(() => {
@@ -594,6 +608,14 @@ export function ReportsPanel({
     }, 6000);
     return () => { cancelled = true; window.clearInterval(poll); };
   }, [activeId, activeLive, notebookId, getReport, listReports]);
+
+  // 报告失败的原始异常串(services/report_execution.py 写的
+  // `f"{type(exc).__name__}: {exc}"`)不上屏——界面给稳定文案,原文只进 console。
+  // 放 useEffect 而不是渲染期:后者会随每次重渲染刷屏。
+  const activeError = active?.status === "failed" ? active.error : null;
+  useEffect(() => {
+    if (activeError) logDiagnostic("report", activeError);
+  }, [activeError]);
 
   // 删除二次确认 4s 后自动复位,避免按钮长期停在危险态。
   useEffect(() => {
@@ -812,7 +834,7 @@ export function ReportsPanel({
           </div>
         </div>
         {active.status === "failed" && active.error && (
-          <div className="report-error">生成失败：{active.error}</div>
+          <div className="report-error">报告没能生成完，可以重试。</div>
         )}
         {active.status === "planning" && (
           <div className="report-running-hint report-planning-hint">

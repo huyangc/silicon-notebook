@@ -3,6 +3,7 @@
 // `node --test` without importing the React page module. Mirrors promotion-queue.ts.
 
 import { authHeaders } from "./auth.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 
 export type EdgeReviewStatus = "pending" | "verified" | "rejected";
 
@@ -37,7 +38,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...authHeaders() },
     ...init,
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) await throwHumanizedHttpError(res, "edge-review-queue");
   return res.json() as Promise<T>;
 }
 

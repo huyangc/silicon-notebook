@@ -633,7 +633,11 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 - `events.jsonl` — 异步来源管线：各阶段（`parse` / `embed` / `extract`）耗时与每次状态机跃迁。卡住时能看到当前阶段及已运行时长；失败记录真实异常（以及来源的 `error_message`）。
 - `llm.jsonl` — 每次大模型调用：chat（prompt/响应/token/耗时，按 `LLM_LOG_MAX_CHARS` 截断）、embedding（仅摘要，不存原始向量）、以及 deterministic fallback 容易让人忽略的错误。
 
-浏览器 DevTools console 会镜像请求为 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`；轮询期间 UI 显示当前阶段/已用时长，失败时展示来源的 `error_message`。
+浏览器 DevTools console 会镜像请求为 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`；轮询期间 UI 显示当前阶段/已用时长，失败时点名是哪个来源。来源的 `error_message` 由后端写成 Python 异常字符串，因此进 console 而不上屏。
+
+错误信息按受众分流。用户看到的一律是中文：前端把 HTTP 状态码映射成人话（「没有权限进行这个操作」「没找到，可能已被删除」），裸状态码和后端异常原文都不会出现在界面上。**除非后端明确声明「这句是写给用户的」，否则一概不原样展示**——API 会给这类响应打上 `X-User-Message` 头，只有它们才透传（如「用户名已被占用」，比泛化文案更具体）。其余一律泛化，**包括恰好是中文的后端文本**：像「解析失败：不支持的文件类型」这种串，同样可能是一条原始异常，光看内容分不出来。5xx 无论有没有标记都泛化，避免内部错误外泄。压根没产生 HTTP 响应的失败（断连、后端没起来、藏在流式事件、后台任务记录、失败的报告、来源解析失败里的错误串）走同一条规则，不会把原文直接印出来。
+
+开发者与 MCP agent 看到的东西不变：后端 `detail` 在 API 响应和日志里保持原样，而完整诊断——状态码、状态文本、原始响应正文、以及能和 `requests.jsonl` 对上的 `X-Request-Id`——在每次请求失败时写进 DevTools console；凡是被界面换成泛化文案的错误，其原文也一并进 console。所以「它说我没权限」这类问题靠 console 里的 request id 定位，而不是猜是哪道校验拒的。
 
 部署机慢因排查可直接在持有 `.local/` 的机器上运行 `python3 scripts/diag_slow.py`。
 脚本除汇总请求、事件和 LLM 延迟外，还会基于 DB 聚合与 scale-index manifest 输出

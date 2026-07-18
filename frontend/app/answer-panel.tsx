@@ -23,6 +23,7 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
+import { logDiagnostic } from "./errors.ts";
 import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
@@ -34,7 +35,7 @@ import {
   TRACE_STEP_LABELS,
 } from "./reasoning-trace";
 import type { AskResponse } from "./workspace-model";
-import { label, MODEL_STAGE, TIER } from "./vocabulary";
+import { label, TIER } from "./vocabulary";
 
 
 function InlineFormula({ latex }: { latex: string }) {
@@ -338,6 +339,13 @@ export function AnswerView({
     [answerText, answer.anchors, answer.citations]
   );
   useEffect(() => setCitePopover(null), [answer.answer_id]);
+  // model_errors[].message 是模型服务的原始失败原因(stage + 上游异常文本),
+  // 横幅本身要留(PR#61 的可观测性:让用户分得清「模型挂了」vs「没搜到」),
+  // 但原文不进 title——它会被 hover 出来。原文只落 console。
+  const modelErrorDetail = answer.model_errors?.[0]?.message ?? null;
+  useEffect(() => {
+    if (modelErrorDetail) logDiagnostic("model", modelErrorDetail);
+  }, [modelErrorDetail]);
   useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 1400);
@@ -351,15 +359,13 @@ export function AnswerView({
 
   return (
     <div className="chat-answer">
-      {answer.model_errors && answer.model_errors.length > 0 && (() => {
-        const labelOf = (stage: string) => label(MODEL_STAGE, stage, "某个模型");
-        const names = Array.from(new Set(answer.model_errors.map((error) => labelOf(error.stage)))).join("、");
-        return (
-          <div className="answer-model-error" title={answer.model_errors[0]?.message ?? ""}>
-            ⚠️ 部分模型调用失败（{names}），本次为降级输出，可能不完整或未接地。请检查 API key / 模型服务可用性。
-          </div>
-        );
-      })()}
+      {answer.model_errors && answer.model_errors.length > 0 && (
+        // 不再报具体 stage 名(与设置页的模型条目对不上,embed 在设置页也没有);
+        // 原始 stage/message 不进 title(hover 就能看到),只落 console。
+        <div className="answer-model-error" title="模型服务有部分调用没成功">
+          ⚠️ 这次回答可能不完整——有部分内容没能正常生成。可以重新问一次；如果一直这样，去「模型服务」检查配置。
+        </div>
+      )}
       {answer.index_required && (
         <div className="answer-model-error" title="大库检索强制走索引;未建索引时仅有降级结果">
           <span>此知识库较大且尚未建立检索索引，当前检索能力受限。</span>

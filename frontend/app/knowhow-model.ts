@@ -13,6 +13,7 @@
 // 才能联调。
 
 import { authHeaders } from "./auth.ts";
+import { throwHumanizedHttpError } from "./errors.ts";
 
 // --- 内容类型（kind）与文案 -----------------------------------------------------
 
@@ -340,7 +341,7 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     headers: isForm ? { ...authHeaders() } : { "Content-Type": "application/json", ...authHeaders() },
     ...init,
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) await throwHumanizedHttpError(res, "knowhow");
   // 204 No Content(删除/重投影触发)没有 body。
   if (res.status === 204) return null as T;
   return res.json() as Promise<T>;
