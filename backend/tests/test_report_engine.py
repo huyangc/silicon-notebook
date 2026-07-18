@@ -439,6 +439,55 @@ def test_run_sections_writes_section_status(repo, monkeypatch):
     assert all(x["phase"] == "完成" for x in detail["section_status"])
 
 
+def test_run_sections_stale_snapshot_never_overwrites_newer(repo, monkeypatch):
+    """并发落库:取快照的顺序必须等于写库的顺序,陈旧快照不得覆盖新快照。
+
+    确定性复现:B 节故意慢 → A 先完成,A 的收尾写就是首个「部分完成」快照。
+    卡住这一写(模拟取快照后被调度走),放 B 跑完写下全完成快照;若写在锁外,
+    A 醒来会用陈旧快照盖掉它 —— 而 _run_sections 之后再没人写 section_status,
+    这份陈旧快照会永久留库(报告已完成,进度视图却停在「规划」)。
+    """
+    import threading
+    import time as _time
+    eng = _mk_engine(repo, _OutlineLLM())
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    def _dd(notebook_id, section, question, depth, on_step):
+        if section["title"] == "B":
+            _time.sleep(0.05)           # 保证 A 先完成
+        return ReasoningResult()
+    monkeypatch.setattr(eng, "_deep_dive", _dd)
+
+    store = eng.dependencies.reports
+    real_update = store.update_report
+    all_done = threading.Event()        # 全完成快照已落库
+    gate = threading.Lock()
+    stalled = [False]                   # 只卡首个「部分完成」快照一次
+
+    def _racy_update(nb_id, r_id, **kw):
+        snap = kw.get("section_status")
+        if snap:
+            n_done = sum(1 for x in snap if x["phase"] == "完成")
+            if n_done == len(snap):
+                all_done.set()
+            elif n_done:
+                with gate:
+                    first, stalled[0] = not stalled[0], True
+                if first:
+                    all_done.wait(0.5)  # 写在锁内时无人能推进 → 超时后照常写
+        return real_update(nb_id, r_id, **kw)
+
+    monkeypatch.setattr(store, "update_report", _racy_update)
+    nb = _mk_nb(repo); rid = repo.create_report(nb.id, "q")
+    outline = [{"title": "A", "scope": "s", "sub_queries": ["q"]},
+               {"title": "B", "scope": "s", "sub_queries": ["q"]}]
+    eng._run_sections(nb.id, rid, outline, "q", depth=2)
+    detail = repo.get_report(nb.id, rid)
+    assert all(x["phase"] == "完成" for x in detail["section_status"])
+    # progress 与 section_status 同源同写,一并守住(此处不经 generate 覆盖)
+    assert detail["progress"].startswith("章节 2/2 完成")
+
+
 # ---------------------------------------------------------------------------
 # Task 1(STORM): Corpus map 0-LLM 语料侦察(来源 + KG + chunk 路径)
 # ---------------------------------------------------------------------------
