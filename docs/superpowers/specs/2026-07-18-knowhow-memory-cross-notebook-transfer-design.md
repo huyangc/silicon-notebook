@@ -157,7 +157,7 @@
 - 越权/目标非法/单位状态非法 → 4xx，不产生任何副作用。
 
 ## 8. REST API
-- `POST /knowhow/tables/{table_id}/transfer`
+- `POST /notebooks/{notebook_id}/knowhow/{table_id}/transfer`
   - body `{ "target_notebook_id": str, "mode": "copy"|"move" }`
   - 守卫：源按 mode（copy=read / move=write）、目标 write；目标≠源。
   - 返回 `{ "new_table_id": str }`。
