@@ -345,7 +345,9 @@ function OutlineEditor({
       // 乐观切到生成态,让父层立刻进 section_status 进度视图并恢复轮询。
       onGenerating({ ...report, status: "generating", progress: "章节 0/" + cleaned.length + " 完成" });
     } catch (error) {
-      setToast(`生成失败：${error instanceof Error ? error.message : String(error)}`);
+      // 原始异常进 console 供排查;面向用户只给人话。
+      console.error("[report] 生成失败", error);
+      setToast("报告没能生成完，可以重试");
     } finally {
       setBusy(false);
     }
@@ -521,8 +523,11 @@ export function ReportsPanel({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [zipBusy, setZipBusy] = useState(false);
 
-  const surfaceError = (error: unknown) =>
-    setToast(`报告操作失败：${error instanceof Error ? error.message : String(error)}`);
+  const surfaceError = (error: unknown) => {
+    // 原始异常进 console 供排查;面向用户只给人话(错误已在 fetch 层译过,这里再兜底一层)。
+    console.error("[report] 操作失败", error);
+    setToast("报告操作没成功，请稍后重试");
+  };
 
   // 进 tab / 切换 notebook:重置视图并拉一次列表。
   useEffect(() => {
@@ -812,7 +817,7 @@ export function ReportsPanel({
           </div>
         </div>
         {active.status === "failed" && active.error && (
-          <div className="report-error">生成失败：{active.error}</div>
+          <div className="report-error" title={active.error}>报告没能生成完，可以重试。</div>
         )}
         {active.status === "planning" && (
           <div className="report-running-hint report-planning-hint">

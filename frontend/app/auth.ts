@@ -1,3 +1,5 @@
+import { humanizeHttpError } from "./errors.ts";
+
 export const API_BASE =
   (typeof process !== "undefined"
     ? process.env?.NEXT_PUBLIC_API_BASE_URL
@@ -42,7 +44,9 @@ async function authFetch<T>(path: string, body: unknown): Promise<T> {
   if (!res.ok) {
     let detail = "";
     try { detail = (await res.json())?.detail ?? ""; } catch { /* noop */ }
-    throw new Error(typeof detail === "string" && detail ? detail : `${res.status}`);
+    // 原始诊断进 console;面向用户抛人话。登录/注册的 401 特化为「用户名或密码不对」。
+    console.error(`[auth] ${path} -> ${res.status}${detail ? ` ${detail}` : ""}`);
+    throw new Error(res.status === 401 ? "用户名或密码不对" : humanizeHttpError(res.status, detail));
   }
   return res.json();
 }
@@ -71,6 +75,9 @@ export async function logoutUser(): Promise<void> {
 
 export async function fetchMe(): Promise<AuthUser> {
   const res = await fetch(`${API_BASE}/me`, { headers: authHeaders() });
-  if (!res.ok) throw new Error(`${res.status}`);
+  if (!res.ok) {
+    console.error(`[auth] /me -> ${res.status}`);
+    throw new Error(humanizeHttpError(res.status));
+  }
   return res.json();
 }

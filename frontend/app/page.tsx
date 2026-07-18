@@ -55,6 +55,7 @@ import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
+import { humanizeHttpError } from "./errors.ts";
 import {
   MODEL_ROLES, type ModelRole, type ServiceForm,
   buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
@@ -332,8 +333,11 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     } catch {
       detail = (await response.text().catch(() => "")) || "";
     }
-    const suffix = detail ? ` - ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : "";
-    throw new Error(`${response.status} ${response.statusText}${suffix}${requestId ? ` [${requestId}]` : ""}`);
+    const detailStr = typeof detail === "string" ? detail : JSON.stringify(detail);
+    // 原始诊断(状态码 + statusText + 后端英文 detail + requestId)只进 console 供排查。
+    console.error(`[api] ${response.status} ${response.statusText}${detailStr ? ` - ${detailStr}` : ""}${requestId ? ` [${requestId}]` : ""}`);
+    // 面向用户只抛人话;后端 detail 保持英文供 MCP / 日志。
+    throw new Error(humanizeHttpError(response.status, detailStr));
   }
   if (response.status === 204) {
     return null as T;
@@ -444,8 +448,11 @@ async function readAskStream<TResponse>(
     } catch {
       detail = (await response.text().catch(() => "")) || "";
     }
-    const suffix = detail ? ` - ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : "";
-    throw new Error(`${response.status} ${response.statusText}${suffix}${requestId ? ` [${requestId}]` : ""}`);
+    const detailStr = typeof detail === "string" ? detail : JSON.stringify(detail);
+    // 原始诊断(状态码 + statusText + 后端英文 detail + requestId)只进 console 供排查。
+    console.error(`[api] ${response.status} ${response.statusText}${detailStr ? ` - ${detailStr}` : ""}${requestId ? ` [${requestId}]` : ""}`);
+    // 面向用户只抛人话;后端 detail 保持英文供 MCP / 日志。
+    throw new Error(humanizeHttpError(response.status, detailStr));
   }
   if (!response.body) {
     throw new Error("Streaming response body is unavailable");
@@ -543,8 +550,9 @@ async function downloadReportsZip(nb: string, reportIds: string[]): Promise<void
     } catch {
       detail = (await response.text().catch(() => "")) || "";
     }
-    const suffix = detail ? ` - ${typeof detail === "string" ? detail : JSON.stringify(detail)}` : "";
-    throw new Error(`${response.status} ${response.statusText}${suffix}`);
+    const detailStr = typeof detail === "string" ? detail : JSON.stringify(detail);
+    console.error(`[api] ${response.status} ${response.statusText}${detailStr ? ` - ${detailStr}` : ""}`);
+    throw new Error(humanizeHttpError(response.status, detailStr));
   }
   const blob = await response.blob();
   const url = URL.createObjectURL(blob);
