@@ -111,6 +111,8 @@ import {
   VIEW_MODE_PREVIEW_LABEL,
   normalizeCellViewMode,
   type CellViewMode,
+  SWITCH_GUARD_MESSAGE,
+  SWITCH_GUARD_DISCARD_LABEL,
 } from "./knowhow-cell-editor-logic.ts";
 import {
   ACCEPT_SUGGESTION_LABEL,
@@ -551,6 +553,10 @@ export interface KnowhowCellEditorProps {
   onSwitchCell?: (columnId: string) => void;
 }
 
+// 编辑态「带未保存改动的离开」意图：关闭整窗，或切到本行另一格（columnId）。
+// 二者共用同一条守卫 UI（footer），放弃时都同步落草稿、可恢复。
+type PendingLeave = { kind: "close" } | { kind: "switch"; columnId: string };
+
 export function KnowhowCellEditor({
   notebookId,
   apiBase,
@@ -584,7 +590,7 @@ export function KnowhowCellEditor({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [closeGuard, setCloseGuard] = useState(false);
+  const [pendingLeave, setPendingLeave] = useState<PendingLeave | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [optimizeState, setOptimizeState] = useState<CellOptimizeState>(CELL_OPTIMIZE_IDLE);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -690,21 +696,56 @@ export function KnowhowCellEditor({
     [savingMode, onSave, rowId, columnId, content, table, onNavigate, onClose],
   );
 
+  // 放弃/切走前把当前内容同步落进草稿键——兜住「组件卸载抢在 300ms 自动草稿
+  // 防抖之前、草稿没写成」的漏洞，兑现守卫文案「草稿已自动保存、可恢复」。无
+  // 改动时清掉旧草稿（与自动草稿 effect 同口径）。close/switch 放弃分支共用。
+  function flushDraft() {
+    try {
+      if (hasUnsavedChanges(content, savedContent)) {
+        window.localStorage.setItem(draftStorageKey(rowId, columnId), content);
+      } else {
+        window.localStorage.removeItem(draftStorageKey(rowId, columnId));
+      }
+    } catch {
+      /* ignore（隐私模式/配额）——写不进只是这次草稿没留下，不比现状差 */
+    }
+  }
+
+  // 点「本行其他格子」的兄弟格：有未保存改动 → 弹守卫（与关闭一致的「未保存提醒
+  // + 明确丢弃」），让用户明确选择；无改动直接切、不打扰。守卫的放弃分支才真正
+  // 调 onSwitchCell（见 footer）。
+  const handleSwitchCell = useCallback(
+    (targetColumnId: string) => {
+      if (hasUnsavedChanges(content, savedContent)) {
+        setPendingLeave({ kind: "switch", columnId: targetColumnId });
+      } else {
+        onSwitchCell?.(targetColumnId);
+      }
+    },
+    [content, savedContent, onSwitchCell],
+  );
+
   // Esc/背景关闭前的未保存提醒：第一次触发只弹确认条（不关闭）；已经在确认
   // 状态时再次触发视为「确认放弃」，直接关闭——常见的「再按一次 Esc 强制关闭」
   // 习惯用法。显式点「取消」按钮不走这个函数，直接 onClose（取消是用户已经
   // 做出的明确决定，无需二次确认）。
   const requestClose = useCallback(() => {
-    if (closeGuard) {
+    // 关闭守卫弹着时再次触发（第二次 Esc / 关闭）→ 强制关闭（保留既有习惯）。
+    if (pendingLeave?.kind === "close") {
       onClose();
       return;
     }
+    // 切格子守卫弹着时按 Esc / 点关闭 → 取消这次切换、回到编辑，不误关整窗。
+    if (pendingLeave?.kind === "switch") {
+      setPendingLeave(null);
+      return;
+    }
     if (hasUnsavedChanges(content, savedContent)) {
-      setCloseGuard(true);
+      setPendingLeave({ kind: "close" });
     } else {
       onClose();
     }
-  }, [closeGuard, content, savedContent, onClose]);
+  }, [pendingLeave, content, savedContent, onClose]);
 
   useEffect(() => {
     function handleKeyDown(event: globalThis.KeyboardEvent) {
@@ -907,7 +948,7 @@ export function KnowhowCellEditor({
               </button>
             </div>
           </div>
-          <KnowhowRowContext table={table} rowId={rowId} currentColumnId={columnId} onSwitchCell={onSwitchCell} />
+          <KnowhowRowContext table={table} rowId={rowId} currentColumnId={columnId} onSwitchCell={handleSwitchCell} />
         </header>
 
         <div className="kh-modal-body">
@@ -1068,15 +1109,28 @@ export function KnowhowCellEditor({
         </div>
 
         <footer className="kh-modal-footer">
-          {closeGuard ? (
+          {pendingLeave ? (
             <div className="kh-close-guard">
-              <span>{CLOSE_GUARD_MESSAGE}</span>
+              <span>{pendingLeave.kind === "switch" ? SWITCH_GUARD_MESSAGE : CLOSE_GUARD_MESSAGE}</span>
               <div className="kh-close-guard-actions">
-                <button type="button" onClick={() => setCloseGuard(false)}>
+                <button type="button" onClick={() => setPendingLeave(null)}>
                   {CLOSE_GUARD_CONTINUE_LABEL}
                 </button>
-                <button type="button" className="kh-danger-button" onClick={onClose}>
-                  {CLOSE_GUARD_DISCARD_LABEL}
+                <button
+                  type="button"
+                  className="kh-danger-button"
+                  onClick={() => {
+                    flushDraft();
+                    if (pendingLeave.kind === "switch") {
+                      const target = pendingLeave.columnId;
+                      setPendingLeave(null);
+                      onSwitchCell?.(target);
+                    } else {
+                      onClose();
+                    }
+                  }}
+                >
+                  {pendingLeave.kind === "switch" ? SWITCH_GUARD_DISCARD_LABEL : CLOSE_GUARD_DISCARD_LABEL}
                 </button>
               </div>
             </div>
