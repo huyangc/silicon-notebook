@@ -33,7 +33,9 @@ PR-2+3 Task 3 adds three things to this module:
 from __future__ import annotations
 
 import json
+import re
 import threading
+import time
 import weakref
 from typing import Any, Callable
 
@@ -128,6 +130,51 @@ def parse_import_columns(
         if not isinstance(column, dict) or not str(column.get("name", "")).strip():
             raise ValueError("列定义缺少列名")
     return _columns_with_anchor(columns, anchor_index)
+
+
+# --- dangling asset references on save ---------------------------------------
+#
+# The GC below can only see references that reached the SERVER. The cell editor
+# keeps unsaved edits in the browser, so an image can be reclaimed while the only
+# thing still pointing at it is a draft nobody has saved yet. When that draft is
+# finally saved it would persist a link to a row+file that no longer exist.
+#
+# The file is already gone by then — nothing here can bring it back — but we can
+# refuse to silently record the dead link and instead tell the user, so they
+# re-insert the image rather than discovering a broken one later. Only refs the
+# save would ADD are checked: an already-broken link being carried along by an
+# unrelated edit must not block that edit.
+# Deliberately mirrors the renderer's IMAGE_ASSET_URL_RE
+# (frontend/app/knowhow-model.ts): ONLY the image form `![alt](asset://<id>)`
+# is a real reference, with the id charset pinned to `[A-Za-z0-9_-]+`. Matching
+# any `asset://` substring instead would reject perfectly valid Markdown — prose
+# or a code sample mentioning `asset://example` renders as literal text, yet a
+# broad match would demand an asset named `example` and fail the save with a
+# "missing image" error the user cannot act on. Note the asymmetry with the
+# sweeper's own `LIKE '%asset://<id>%'`: over-matching there only ever RETAINS
+# an asset (safe), while over-matching here REFUSES a save (not safe), so the
+# two are allowed to differ and this side is the strict one.
+_ASSET_REF_RE = re.compile(r"!\[[^\]]*\]\(asset://([A-Za-z0-9_-]+)\)")
+
+CELL_ASSET_MISSING_MESSAGE = (
+    "这一格引用的图片已不存在（可能已被自动清理），请重新插入图片后再保存。"
+)
+
+
+def asset_refs(markdown: str) -> "set[str]":
+    return set(_ASSET_REF_RE.findall(markdown or ""))
+
+
+def newly_added_asset_refs(previous_md: str, next_md: str) -> "list[str]":
+    """Asset ids this save would ADD (present in the new text, absent from the
+    old). Only these are worth guarding: an asset:// link that was ALREADY in
+    the cell may well be dead for unrelated reasons, and refusing the save
+    would strand the user — they could no longer fix the very cell holding the
+    broken link. Existence is deliberately NOT checked here; the caller hands
+    this list to the write itself, which verifies it inside its transaction
+    (checking here would only prove the asset existed a moment BEFORE the
+    write, which is exactly the race this split is designed to close)."""
+    return sorted(asset_refs(next_md) - asset_refs(previous_md))
 
 
 def build_projector(repo: Any) -> KnowhowProjector:
@@ -378,6 +425,123 @@ _SCHEDULERS: "weakref.WeakKeyDictionary[Any, ProjectionScheduler]" = weakref.Wea
 _SCHEDULERS_LOCK = threading.Lock()
 
 
+# --- orphan-asset GC trigger ------------------------------------------------
+#
+# ``repo.maintenance.sweep_orphan_assets(notebook_id)`` reclaims
+# ``notebook_assets`` rows (+ their files) that no knowhow cell references any
+# more. It shipped fully implemented and tested but with NO production caller,
+# so in a running deployment orphans accumulated forever (there is no delete
+# endpoint and no other GC). Orphans come from several paths: a cell edit that
+# drops an ``asset://`` reference, an import/reproject that replaces content,
+# and an image upload whose reference never lands (the cell editor can leave
+# one behind when the browser has no usable local storage).
+#
+# WHY HERE: every one of those paths is a cell-content mutation, and every
+# cell-content mutation already funnels into the per-table debounced,
+# single-flight ``ProjectionScheduler`` below — which already runs off the
+# request path in a background job and already collapses bursts of edits. A
+# projection completing is therefore the exact moment an asset reference may
+# have gone stale, and it costs no new scheduling machinery to ride it.
+#
+# WHY THROTTLED: ``sweep_orphan_assets`` is O(assets x cells) — one
+# ``LIKE '%asset://<id>%'`` pass over the notebook's knowhow cells PER asset,
+# with no index usable (leading wildcard). That is nothing on a small notebook
+# and seconds of SQLite work on a large one, so it must not run once per
+# projection. The per-notebook throttle below bounds it to at most one sweep
+# per interval no matter how fast the table is being edited, while still
+# reclaiming promptly once an editing session settles.
+#
+# The scan itself runs in its OWN background job rather than inline: the
+# scheduler clears `_running` only after project_fn returns, so a seconds-long
+# scan inlined here would hold the single-flight window open and delay the next
+# reprojection of that table — turning GC latency into user-visible edit
+# latency. Table DELETION (the biggest bulk producer of orphans, and one that
+# never schedules a projection because the table is gone) gets the same sweep
+# from its own route.
+#
+# KNOWN RESIDUALS, stated plainly rather than papered over:
+#   - the throttle is leading-edge, so the very projection that CREATED an
+#     orphan can be the one skipped; if editing then stops, that orphan waits
+#     until the table is projected again. Bounding cost was judged worth this;
+#     a trailing/periodic sweep would close it and needs its own cost budget.
+#   - assets younger than ASSET_SWEEP_MIN_AGE_SECONDS are spared entirely
+#     (see sweep_orphan_assets): the editor holds unsaved edits in the browser,
+#     so a pasted-but-unsaved image is a live reference the server cannot see.
+#     A draft left unsaved longer than that window is still reclaimable.
+ASSET_SWEEP_MIN_INTERVAL_SECONDS = 300.0
+
+# Spare anything created within a day: an image pasted into a cell the user has
+# not saved yet lives only in a browser draft, so the server sees no reference
+# to it at all (see sweep_orphan_assets' own note).
+ASSET_SWEEP_MIN_AGE_SECONDS = 86400.0
+
+_LAST_ASSET_SWEEP: "dict[str, float]" = {}
+_ASSET_SWEEP_LOCK = threading.Lock()
+
+
+def reset_asset_sweep_throttle() -> None:
+    """Drop all per-notebook throttle state (tests; process-global otherwise)."""
+    with _ASSET_SWEEP_LOCK:
+        _LAST_ASSET_SWEEP.clear()
+
+
+def maybe_sweep_orphan_assets(
+    repo: Any,
+    notebook_id: "str | None",
+    *,
+    now: "float | None" = None,
+    min_interval: "float | None" = None,
+    min_age_seconds: "float | None" = None,
+    background: bool = False,
+    waive_grace_if_no_tables: bool = False,
+) -> bool:
+    """Run the orphan-asset sweep for ``notebook_id`` unless this notebook was
+    swept less than ``min_interval`` seconds ago. Returns whether a sweep
+    actually ran to completion.
+
+    The throttle slot is consumed BEFORE the sweep runs, so a sweep that keeps
+    raising degrades to one attempt per interval rather than one attempt per
+    projection. Failures are swallowed: this is opportunistic housekeeping
+    hanging off a projection that already succeeded, and it must never fail
+    (or trigger a rerun of) that projection.
+    """
+    if not notebook_id:
+        return False
+    interval = ASSET_SWEEP_MIN_INTERVAL_SECONDS if min_interval is None else min_interval
+    stamp = time.monotonic() if now is None else now
+    with _ASSET_SWEEP_LOCK:
+        last = _LAST_ASSET_SWEEP.get(notebook_id)
+        if last is not None and stamp - last < interval:
+            return False
+        _LAST_ASSET_SWEEP[notebook_id] = stamp
+    age = ASSET_SWEEP_MIN_AGE_SECONDS if min_age_seconds is None else min_age_seconds
+
+    def _sweep() -> bool:
+        try:
+            repo.maintenance.sweep_orphan_assets(
+                notebook_id,
+                min_age_seconds=age,
+                waive_grace_if_no_tables=waive_grace_if_no_tables,
+            )
+            return True
+        except Exception:
+            return False  # opportunistic housekeeping; never surface or retry
+
+    if background:
+        background_jobs.submit(_sweep, name=f"knowhow-asset-sweep:{notebook_id}")
+        return True  # scheduled; the job's own outcome is deliberately not awaited
+    return _sweep()
+
+
+def run_projection_and_sweep(repo: Any, table_id: str) -> None:
+    """One projection pass, then hand the throttled orphan-asset sweep to its
+    own background job. ``project_table`` returns the notebook id it already
+    resolved, so the sweep needs no extra table read; running the scan off this
+    call keeps it out of the scheduler's single-flight window."""
+    notebook_id = build_projector(repo).project_table(table_id)
+    maybe_sweep_orphan_assets(repo, notebook_id, background=True)
+
+
 def get_scheduler(repo: Any) -> ProjectionScheduler:
     scheduler = _SCHEDULERS.get(repo)
     if scheduler is not None:
@@ -391,7 +555,7 @@ def get_scheduler(repo: Any) -> ProjectionScheduler:
                 target = repo_ref()
                 if target is None:
                     return  # repo already collected — nothing to project into
-                build_projector(target).project_table(table_id)
+                run_projection_and_sweep(target, table_id)
 
             scheduler = ProjectionScheduler(_project)
             _SCHEDULERS[repo] = scheduler

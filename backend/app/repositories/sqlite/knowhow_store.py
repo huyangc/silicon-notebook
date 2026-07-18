@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Sequence
 
 from app.repositories.sqlite.database import SqliteDatabase
 
@@ -497,14 +497,66 @@ class KnowhowStore:
             db.execute("DELETE FROM knowhow_rows WHERE id = ?", (row_id,))
 
     # -------------------------------------------------------------- cells
-    def update_knowhow_cell(self, row_id: str, column_id: str, content_md: str) -> None:
+    def _require_assets_exist(
+        self, db, row_id: str, require_assets: Sequence[str]
+    ) -> None:
+        """Assert every id in ``require_assets`` is a live ``notebook_assets``
+        row **of the notebook this cell belongs to**, else ``ValueError``. Takes
+        the CALLER's open write connection on purpose — see
+        ``update_knowhow_cell``.
+
+        Scoped to the cell's own notebook, not global: the asset endpoint serves
+        a file only when its ``notebook_id`` matches the requesting notebook, so
+        a reference to some OTHER notebook's asset saves fine and then renders as
+        a permanently broken image — exactly the dead link this check exists to
+        refuse. That is reachable without any malice: copying a cell's markdown
+        from one notebook and pasting it into another carries the ``asset://``
+        ids along. Scoping also keeps the check from answering "does this id
+        exist somewhere in the database" for ids the caller cannot otherwise
+        see."""
+        if not require_assets:
+            return  # keep the common path free of the notebook lookup
+        owner = db.execute(
+            "SELECT t.notebook_id AS notebook_id FROM knowhow_rows r "
+            "JOIN knowhow_tables t ON t.id = r.table_id WHERE r.id = ?",
+            (row_id,),
+        ).fetchone()
+        if owner is None:
+            raise ValueError(f"row {row_id} does not exist")
+        for asset_id in require_assets:
+            row = db.execute(
+                "SELECT 1 FROM notebook_assets WHERE id = ? AND notebook_id = ? LIMIT 1",
+                (asset_id, owner["notebook_id"]),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"asset {asset_id} is not available here")
+
+    def update_knowhow_cell(
+        self,
+        row_id: str,
+        column_id: str,
+        content_md: str,
+        require_assets: Sequence[str] = (),
+    ) -> None:
         """Upsert one cell's content. One write transaction: the cell
         (insert or update-in-place via the ``UNIQUE(row_id, column_id)``
         conflict target), the row's ``updated_at`` + ``projection_status`` ->
         ``'pending'``, and the owning table's ``mutation_seq`` += 1 (table_id
-        resolved from the row — the public signature has no table_id)."""
+        resolved from the row — the public signature has no table_id).
+
+        ``require_assets`` names asset ids the new content references and that
+        must still exist at COMMIT time (``ValueError`` and a full rollback
+        otherwise). The check runs inside this transaction rather than in the
+        caller because the orphan-asset sweeper deletes rows concurrently: a
+        caller that verified existence first would be reading state that the
+        sweeper can invalidate before this write lands, committing a live cell
+        reference to a deleted asset. Both sides now decide under the same
+        write lock, so one of them always loses cleanly — the sweeper's own
+        re-check sees the new reference and spares the asset, or this write
+        sees the deletion and refuses."""
         now = self.now()
         with self.database.write() as db:
+            self._require_assets_exist(db, row_id, require_assets)
             db.execute(
                 "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
                 "VALUES (?, ?, ?, ?, ?) "
@@ -524,7 +576,11 @@ class KnowhowStore:
             )
 
     def update_knowhow_cells(
-        self, row_ids: list[str], column_id: str, content_md: str
+        self,
+        row_ids: list[str],
+        column_id: str,
+        content_md: str,
+        require_assets: Sequence[str] = (),
     ) -> None:
         """Batch upsert the SAME (column, content) across MULTIPLE rows in
         ONE write transaction — the merged-cell "write the whole concept
@@ -543,11 +599,19 @@ class KnowhowStore:
         inside a single ``with self.database.write() as db:`` block, so any
         failure partway through (e.g. a row_id that doesn't exist, tripping
         the ``knowhow_cells.row_id`` FK) rolls back every write already made
-        in this call, including earlier rows already looped over."""
+        in this call, including earlier rows already looped over.
+
+        ``require_assets`` behaves exactly as in ``update_knowhow_cell`` and
+        is checked once for the whole batch (every row receives the same
+        ``content_md``, so they reference the same assets); a missing asset
+        rolls back the entire batch, preserving all-or-nothing."""
         if not row_ids:
             return
         now = self.now()
         with self.database.write() as db:
+            # row_ids share a table (documented above), so any of them resolves
+            # the same notebook.
+            self._require_assets_exist(db, row_ids[0], require_assets)
             for row_id in row_ids:
                 db.execute(
                     "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "

@@ -298,7 +298,7 @@ class KnowhowProjector:
         return source_id
 
     # ------------------------------------------------------------- project
-    def project_table(self, table_id: str, *, embed: bool = True) -> None:
+    def project_table(self, table_id: str, *, embed: bool = True) -> str:
         """THE projection entry point (single-flight full-table pass): for
         every row, rewrite its elements + diff/rewrite its chunks (existing
         per-cell diff machinery, untouched — only a genuinely changed cell's
@@ -410,6 +410,12 @@ class KnowhowProjector:
         self.knowhow.bump_knowhow_mutation_seq(table_id)
         self.invalidate_unified_cache(notebook_id)
         self.mark_unified_dirty(notebook_id)
+        # Hand the owning notebook back to the caller. The scheduler needs it to
+        # run the throttled orphan-asset sweep after a projection (see
+        # app/services/knowhow/api.py's run_projection_and_sweep) and this pass
+        # already resolved it above — returning it avoids a second table read
+        # (get_knowhow_table loads every row + cell) purely to learn one id.
+        return notebook_id
 
     # --- elements ------------------------------------------------------
     def _write_elements(self, db, source_id, table_id, row_id, columns, cell_nets, row_title, now):

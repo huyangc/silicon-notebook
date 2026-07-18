@@ -3291,17 +3291,17 @@ class SQLiteRepository:
         )
 
     def update_knowhow_cell(
-        self, row_id: str, column_id: str, content_md: str
+        self, row_id: str, column_id: str, content_md: str, require_assets=()
     ) -> None:
         return self._runtime.knowhow_store.update_knowhow_cell(
-            row_id, column_id, content_md
+            row_id, column_id, content_md, require_assets
         )
 
     def update_knowhow_cells(
-        self, row_ids: list, column_id: str, content_md: str
+        self, row_ids: list, column_id: str, content_md: str, require_assets=()
     ) -> None:
         return self._runtime.knowhow_store.update_knowhow_cells(
-            row_ids, column_id, content_md
+            row_ids, column_id, content_md, require_assets
         )
 
     def delete_knowhow_table(self, table_id: str) -> dict:
