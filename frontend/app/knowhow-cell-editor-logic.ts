@@ -187,41 +187,12 @@ export function resolveUploadInsertion(
   return insertAtCursor({ value: liveValue, start: at, end: at }, snippet);
 }
 
-// --- 待完成上传日志（pending-upload journal）------------------------------------
-//
-// 「上传已成功、但本格编辑器已经不在了」这件事**不能**塞进普通草稿键：草稿是会被
-// 新编辑器正常清理/覆盖的东西（mount 时发现与已保存内容相等就删、300ms 自动草稿
-// 随时改写、保存后清理），把待完成上传混进去，就会出现「强退→立刻重开→旧上传落
-// 地时草稿键已被新实例清掉→图片再也没有任何东西引用它」这类永久孤儿。
-//
-// 故另开一个带 id 的独立日志键：写入方只追加（按 id 幂等），认领方（该格的活实例
-// 或下次 mount）整体取走并清空。图片在被认领前一直躺在日志里，不会被任何草稿逻辑
-// 误删；认领后进入正文，成为真实引用。
-export const PENDING_UPLOAD_STORAGE_PREFIX = "kh-cell-pending-upload:";
-
-// **每次上传一个独立键**，而不是一个键里放一个数组。整键 read-modify-write /
-// removeItem 在多标签页下会永久丢条目：A 读到 [E1] 准备认领，B 随后把 [E1,E2]
-// 写回，A 再 removeItem 就把 E2 一起删了——E2 对应的图已经传到服务端，却再没有
-// 任何东西引用它。一 upload 一键之后，写入方只碰自己那个键、认领方只删自己读到
-// 的那些键，互不覆盖。
-export function pendingUploadKeyPrefix(rowId: string, columnId: string): string {
-  return `${PENDING_UPLOAD_STORAGE_PREFIX}${rowId}:${columnId}:`;
-}
-
-export function pendingUploadStorageKey(rowId: string, columnId: string, uploadId: string): string {
-  return `${pendingUploadKeyPrefix(rowId, columnId)}${uploadId}`;
-}
-
-// 同标签页内通知该格的活实例「有待认领的上传」——localStorage 的 storage 事件只
-// 在**其它**标签页触发，同页重开的新实例收不到，必须自己派发。跨标签页则靠
-// storage 事件（见组件侧监听）。
-export const PENDING_UPLOAD_EVENT = "knowhow-cell-pending-upload";
-
-// 从「storage 里现有的全部键」里挑出这一格的待认领键，按键名排序（键名含批次 id
-// 与序号，排序即还原插入顺序）。纯函数：调用方负责枚举 storage。
-export function selectPendingUploadKeys(allKeys: string[], rowId: string, columnId: string): string[] {
-  const prefix = pendingUploadKeyPrefix(rowId, columnId);
-  return allKeys.filter((key) => key.startsWith(prefix)).sort();
+// 中断（AbortController）导致的失败不是"上传失败"——是用户自己点「放弃上传并
+// 离开」或组件被卸载时我们主动掐的，报红只会让用户以为出错了。fetch 中断抛的是
+// name === "AbortError" 的 DOMException；兜底也认 AbortError 这个 name 的普通
+// Error（测试与非标准实现）。
+export function isAbortError(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { name?: unknown }).name === "AbortError";
 }
 
 // 从文件名派生图片 alt 文本：去掉最后一个扩展名、去首尾空白。多个点时只切
@@ -387,13 +358,29 @@ export const BUSY_UPLOAD_HINT = "有操作进行中，完成后再插入图片�
 // 插到正文里，两者会互相覆盖。
 export const ACCEPT_BLOCKED_UPLOADING_HINT = "图片上传中，等上传完成后再接受建议。";
 
-// 上传在飞时默认不离开（等它落进正文最省事）；仍保留「再点一次强制离开」的出口，
-// 因为上传可能卡住、不能把人永久关在弹窗里。强退不再丢东西：上传成功但组件已经
-// 离开时，图片 markdown 会被写进独立的待完成上传日志（见上方 pending-upload
-// journal 一节），由该格的活实例或下次 mount 认领进正文，所以
-// 资产有真实引用、用户下次打开可恢复，不会变成无法回收的孤儿。
-export const LEAVE_BLOCKED_UPLOADING_HINT =
-  "图片上传中，请等上传完成后再离开。再点一次将直接离开（已上传的图片会尽量留着，下次打开这一格时补进来）。";
+// 上传在飞时的离开：**不放行、也不丢弃，而是延后**——记下这次离开意图，等上传
+// 落进正文后由收尾自动执行（届时草稿里已含图片引用）。
+//
+// 为什么不是「警告一次、再点一次强制离开」：那条路会让上传的 continuation 落到
+// 已卸载的组件上——图片进不了正文，资产却已在服务端落盘、没有任何东西引用它。
+// 之前为救它在浏览器端自造过一套「待完成上传日志 + 认领」协议，但那等于在
+// localStorage 上手写一个分布式交接协议（首次 mount 的 effect 顺序、跨标签页
+// claim 的非原子读改写删、部分写入失败的丢失+重复），复审连续查出四条竞态。
+// 现在改为结构上不可能发生：**上传绝不比编辑器实例活得久**——要么等它完成，
+// 要么 abort 掉它（见 DISCARD_UPLOAD_AND_LEAVE_LABEL）。
+export function resolveLeaveDuringUpload(uploading: boolean, intent: LeaveIntent): LeaveDecisionDuringUpload {
+  return uploading ? { kind: "defer", intent } : { kind: "commit", intent };
+}
+export type LeaveDecisionDuringUpload = { kind: "defer" | "commit"; intent: LeaveIntent };
+
+// 延后离开期间的提示与出口文案。「放弃上传并离开」走 AbortController 真正取消
+// 这次上传：中断在服务端提交之前发生就什么都没建。**残留如实记账**——中断恰好落
+// 在服务端提交之后的那个窄窗口里，会留下一条没有任何东西引用的资产行，而本仓库的
+// sweep_orphan_assets 目前还没有生产调用方（接它是后端侧的单独改动）。这不影响
+// 用户看到的内容，故文案只说「放弃」，不再向用户承诺「会尽量留着」这种在存储不可
+// 用时兑现不了的话。
+export const LEAVE_WAITING_UPLOAD_HINT = "图片上传中，完成后会自动离开。";
+export const DISCARD_UPLOAD_AND_LEAVE_LABEL = "放弃上传并离开";
 
 // 有其它异步在飞导致按钮置灰时的通用提示——置灰必须有对得上的原因，不能灰着却
 // 显示「可点」的文案（knowhow-optimize-logic.ts 声明的不变量）。

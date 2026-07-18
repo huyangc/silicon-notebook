@@ -650,10 +650,16 @@ export const fetchKnowhowRowCodeByColumn = (rowId: string): Promise<Record<strin
 // UploadedAsset 用（本文件其余 fetcher 遇到 snake_case 字段时才需要那一层）。
 export type UploadedAsset = { id: string; url: string };
 
-export const uploadNotebookAsset = (notebookId: string, file: File | Blob): Promise<UploadedAsset> => {
+// signal 可选：格子编辑器用它保证「上传绝不比编辑器实例活得久」——组件卸载或用户
+// 明确放弃时中断这次请求，避免服务端已落盘资产、前端却没有任何东西引用它。
+export const uploadNotebookAsset = (
+  notebookId: string,
+  file: File | Blob,
+  signal?: AbortSignal,
+): Promise<UploadedAsset> => {
   const form = new FormData();
   form.append("file", file);
-  return apiFetch<UploadedAsset>(`/notebooks/${notebookId}/assets`, { method: "POST", body: form });
+  return apiFetch<UploadedAsset>(`/notebooks/${notebookId}/assets`, { method: "POST", body: form, signal });
 };
 
 // --- 纯 helper(单测) ------------------------------------------------------------

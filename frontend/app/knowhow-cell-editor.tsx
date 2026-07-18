@@ -125,13 +125,13 @@ import {
   SAVE_IN_FLIGHT_UPLOAD_HINT,
   BUSY_UPLOAD_HINT,
   ACCEPT_BLOCKED_UPLOADING_HINT,
-  LEAVE_BLOCKED_UPLOADING_HINT,
+  LEAVE_WAITING_UPLOAD_HINT,
+  DISCARD_UPLOAD_AND_LEAVE_LABEL,
+  resolveLeaveDuringUpload,
+  isAbortError,
   BUSY_HINT,
   imageMarkdown,
   resolveUploadInsertion,
-  pendingUploadStorageKey,
-  selectPendingUploadKeys,
-  PENDING_UPLOAD_EVENT,
   OPTIMIZE_SUGGESTION_STALE_MESSAGE,
   resolveSaveCompletion,
   type LeaveIntent,
@@ -609,6 +609,9 @@ export function KnowhowCellEditor({
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pendingLeave, setPendingLeave] = useState<LeaveIntent | null>(null);
+  // 「等这次上传落完就离开」——上传在飞时点关闭/取消不再强退，而是记下意图，由上传
+  // 收尾自动执行（见 performLeave / uploadAndInsertImages 的 finally）。
+  const [leaveAfterUpload, setLeaveAfterUpload] = useState<LeaveIntent | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [optimizeState, setOptimizeState] = useState<CellOptimizeState>(CELL_OPTIMIZE_IDLE);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -620,10 +623,26 @@ export function KnowhowCellEditor({
   // 且防抖未落盘的内容随之丢失）。组件按 key={rowId:columnId} 每格独立挂载，
   // 「已卸载」正是「这次回调已过期」的准确信号。
   const mountedRef = useRef(true);
+  // 在飞上传的中断句柄。上传**绝不允许比本组件实例活得久**：卸载/放弃时 abort 掉，
+  // 免得 continuation 落到已卸载的树上（图片进不了正文、资产却已在服务端落盘）。
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  // 卸载清理要读到最新的落盘函数，但它自己挂在 [] 依赖的 effect 上（拿到的是首帧
+  // 闭包），故经 ref 取。
+  const flushDraftRef = useRef<() => boolean>(() => true);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // 父级直接卸载本组件（返回列表 / 切笔记本 / 切到别的格）时，没有任何离开路径
+      // 跑过：① 掐掉在飞上传，② 同步把正文落进草稿键——300ms 自动草稿定时器会随
+      // 卸载一起被 clearTimeout 掉，此刻不写就等于把这些字（含刚落笔的图片引用）
+      // 从服务端和本地一起抹掉。
+      uploadAbortRef.current?.abort();
+      // **只写、绝不删**：清陈旧草稿是 mount 扫描与 300ms 自动草稿的职责。若这里
+      // 也照 flushDraft 的完整决策去 remove，React StrictMode 开发期的「挂载 →
+      // 立刻卸载 → 再挂载」会在第一次卸载时，把刚被扫描发现、用户还没决定恢复/
+      // 丢弃的那份草稿直接删掉（此刻正文还等于已保存内容 → 决策正是 remove）。
+      if (hasUnsavedChanges(contentRef.current, savedContentRef.current)) flushDraftRef.current();
     };
   }, []);
   // 「最新值」ref：异步收尾（保存返回）读到的 content 是发起那一刻被闭包冻住的
@@ -640,6 +659,31 @@ export function KnowhowCellEditor({
   useLayoutEffect(() => {
     restoreBannerRef.current = showRestoreBanner;
   }, [showRestoreBanner]);
+  // 草稿比较的基线。用 ref 而非 props 闭包：保存成功后 props.savedContent 要等父级
+  // 刷新才更新，而卸载清理与上传收尾可能抢在那之前跑，拿旧基线会误判成「有未保存
+  // 改动」多写一份垃圾草稿。runSave 成功后就地把基线推进到刚落库的内容。
+  const savedContentRef = useRef(savedContent);
+  useLayoutEffect(() => {
+    savedContentRef.current = savedContent;
+  }, [savedContent]);
+  // 「屏幕上是否还挂着落盘失败警告」是强制离开的判据（见 commitLeave），异步收尾
+  // 里也要读，故同样经 ref。
+  const saveErrorRef = useRef(saveError);
+  useLayoutEffect(() => {
+    saveErrorRef.current = saveError;
+  }, [saveError]);
+  // uploading / leaveAfterUpload 的**同步**镜像：这两个值决定「现在能不能离开」，
+  // 而 setState 要等下一次提交才可见。用户粘贴完立刻按 Esc（或上传恰好在点击同一
+  // 刻收尾）时，读 state 会看到落后一拍的值——前者会当成「没在上传」直接放行、
+  // 后者会让延后的离开没人执行。故这两处一律读写 ref。
+  const uploadingRef = useRef(uploading);
+  useLayoutEffect(() => {
+    uploadingRef.current = uploading;
+  }, [uploading]);
+  const leaveAfterUploadRef = useRef(leaveAfterUpload);
+  useLayoutEffect(() => {
+    leaveAfterUploadRef.current = leaveAfterUpload;
+  }, [leaveAfterUpload]);
 
   // 有异步在飞（保存 / 图片上传 / 优化表达）：门控**发起类**入口（保存、切兄弟格），
   // 但刻意不门控**离开类**入口（关闭/Esc/背景/取消）——离开的安全性由 mountedRef
@@ -712,6 +756,11 @@ export function KnowhowCellEditor({
 
   function applyInsertion(result: { value: string; cursor: number }) {
     pendingCursorRef.current = result.cursor;
+    // contentRef 同步领先一步（平时由 layout effect 在提交后同步）：批量上传是
+    // 「传一张、落一张」，下一张落笔要读上一张之后的实时正文。若只等 setContent
+    // 的提交，两张图接连很快传完时第二张可能读到还没提交的旧值，被判成「正文变过」
+    // 而甩到末尾——顺序就乱了。
+    contentRef.current = result.value;
     setContent(result.value);
   }
 
@@ -720,6 +769,30 @@ export function KnowhowCellEditor({
     if (!el) return { value: content, start: content.length, end: content.length };
     return { value: content, start: el.selectionStart ?? content.length, end: el.selectionEnd ?? content.length };
   }
+
+  // 放弃/切走/卸载前把当前内容同步落进草稿键——兜住「组件卸载抢在 300ms 自动草稿
+  // 防抖之前、草稿没写成」的漏洞。动作由纯函数 draftFlushAction 定死（见其注释）：
+  // write=写当前内容；keep=有待恢复旧草稿时原样保住、绝不删（否则会抢在用户点
+  // 「恢复」前清掉它——与自动草稿 effect 的 showRestoreBanner 守卫同一口径）；
+  // remove=清陈旧草稿。返回是否已安全落盘：write 抛错（隐私模式/配额）返 false，
+  // 让执行器据此原地报错、不静默离开；keep/remove 恒真（本就没有要保存的内容，
+  // 离开是安全的）。
+  // 一律读 ref（正文/基线/恢复提示）而不是 props+state 闭包：本函数会被上传收尾、
+  // 卸载清理这类**异步/延后**路径调用，闭包值在那一刻可能已落后好几拍，拿旧正文
+  // 落盘等于把用户最后敲的字（以及刚落笔的图片引用）丢掉。也因此它对本实例是稳定
+  // 的——rowId/columnId 由 key 保证一生不变。
+  const flushDraft = useCallback((): boolean => {
+    const live = contentRef.current;
+    const action = draftFlushAction(hasUnsavedChanges(live, savedContentRef.current), restoreBannerRef.current);
+    try {
+      return applyDraftFlush(window.localStorage, draftStorageKey(rowId, columnId), live, action);
+    } catch {
+      // 连取 window.localStorage 本身都抛（极端隐私设置）：只有 write 才算失败，
+      // keep/remove 本就没有要保存的内容，离开是安全的。
+      return action !== "write";
+    }
+  }, [rowId, columnId]);
+  flushDraftRef.current = flushDraft;
 
   const runSave = useCallback(
     async (mode: "save" | "next") => {
@@ -734,33 +807,22 @@ export function KnowhowCellEditor({
       setSaveError(null);
       try {
         await onSave(rowId, columnId, content);
-        // 保存成功后的草稿处置——与所有离开路径共用同一套决策/落盘（draftFlushAction
-        // + applyDraftFlush），基线换成「这次真正落库的内容」(content)，比较对象是
-        // **解析时刻的实时内容** contentRef.current：
+        // 保存成功后的草稿处置——与所有离开路径共用同一个 flushDraft：
         //   · 期间没再敲字 → remove（草稿已冗余）；
         //   · 期间用户继续敲 → write 实时内容（关键！收尾马上要 onClose/onNavigate
         //     卸载组件，300ms 自动草稿定时器会被 clearTimeout 掐掉，此刻不写就等于
         //     把这些字从服务端和本地一起抹掉）；
         //   · 恢复提示还开着 → keep（那份旧草稿还没轮到我们处置）。
-        // 组件已卸载时跳过：离开路径上的 performLeave 已经同步落过草稿，这里再动
-        // 同一个键只会覆盖掉更晚的状态。
+        // 先把基线推进到「刚落库的这份内容」，flushDraft 才判得准：props.savedContent
+        // 要等父级刷新才更新，拿它当基线会把已保存内容误判成未保存改动、多写一份
+        // 垃圾草稿。组件已卸载时跳过落盘：卸载清理已经同步落过，这里再动同一个键
+        // 只会覆盖掉更晚的状态。
+        savedContentRef.current = content;
         if (mountedRef.current) {
-          const live = contentRef.current;
-          let flushed: boolean;
-          try {
-            flushed = applyDraftFlush(
-              window.localStorage,
-              draftStorageKey(rowId, columnId),
-              live,
-              draftFlushAction(hasUnsavedChanges(live, content), restoreBannerRef.current),
-            );
-          } catch {
-            flushed = !hasUnsavedChanges(live, content);
-          }
-          // 与 performLeave 同一条契约：草稿没落成就**不离开**。此处若照常
+          // 与 commitLeave 同一条契约：草稿没落成就**不离开**。此处若照常
           // onClose/onNavigate，卸载会掐掉 300ms 自动草稿定时器，保存期间敲的字
           // 就从服务端和本地一起没了——正是本轮复审抓到的残留口子。
-          if (!flushed) {
+          if (!flushDraft()) {
             setSaveError(DRAFT_FLUSH_FAILED_MESSAGE);
             return;
           }
@@ -781,94 +843,8 @@ export function KnowhowCellEditor({
         setSavingMode(null);
       }
     },
-    [savingMode, uploading, onSave, rowId, columnId, content, table, onNavigate, onClose],
+    [savingMode, uploading, onSave, rowId, columnId, content, table, onNavigate, onClose, flushDraft],
   );
-
-  // 放弃/切走前把当前内容同步落进草稿键——兜住「组件卸载抢在 300ms 自动草稿
-  // 防抖之前、草稿没写成」的漏洞。动作由纯函数 draftFlushAction 定死（见其注释）：
-  // write=写当前内容；keep=有待恢复旧草稿时原样保住、绝不删（否则会抢在用户点
-  // 「恢复」前清掉它——与自动草稿 effect 的 showRestoreBanner 守卫同一口径）；
-  // remove=清陈旧草稿。返回是否已安全落盘：write 抛错（隐私模式/配额）返 false，
-  // 让执行器据此原地报错、不静默离开；keep/remove 恒真（本就没有要保存的内容，
-  // 离开是安全的）。
-  // 认领「待完成上传」：把强退期间落地的图片收进正文。
-  //
-  // 两条硬约束（都是复审抓出来的真实丢字路径）：
-  // ① **恢复提示还没决出胜负时不认领**。此刻并进正文会让正文 dirty，而
-  //    draftFlushAction 只要 dirty 就选 "write"（banner 判断在它后面），离开时
-  //    就把那份用户还没决定的旧草稿覆盖成「已保存内容+图」。日志不参与任何草稿
-  //    清理逻辑，等得起——等用户点完恢复/丢弃，effect 会因 showRestoreBanner
-  //    变化重跑再认领。
-  // ② **先把合并结果同步落到草稿键，再删日志键**。只 setState 的话，正文要等
-  //    300ms 防抖才写盘；切笔记本/返回列表/刷新会直接卸载组件并清掉定时器，
-  //    结果日志已删、草稿没写，图片引用彻底消失。写盘失败就不删日志，宁可下次
-  //    再认领，也不能把唯一的引用弄丢。
-  const claimPendingUploads = useCallback(() => {
-    if (restoreBannerRef.current) return;
-    try {
-      const allKeys: string[] = [];
-      for (let i = 0; i < window.localStorage.length; i += 1) {
-        const key = window.localStorage.key(i);
-        if (key !== null) allKeys.push(key);
-      }
-      // 只认领**此刻读到的**这些键；别的标签页随后新增的键不在其中，不会被误删。
-      const keys = selectPendingUploadKeys(allKeys, rowId, columnId);
-      if (keys.length === 0) return;
-      const md = keys.map((key) => window.localStorage.getItem(key) ?? "").join("");
-      if (!md) return;
-      const merged = contentRef.current + md;
-      window.localStorage.setItem(draftStorageKey(rowId, columnId), merged);
-      for (const key of keys) window.localStorage.removeItem(key);
-      setContent(merged);
-    } catch {
-      // 存储读写不可用：不删任何键，等下次机会。
-    }
-  }, [rowId, columnId]);
-
-  // 认领时机：mount、恢复提示关闭后（effect 依赖 showRestoreBanner 自然重跑）、
-  // 同页事件（storage 事件不在本页触发）、跨标签页 storage 事件。
-  useEffect(() => {
-    if (showRestoreBanner) return;
-    claimPendingUploads();
-    function onPending(event: Event) {
-      const detail = (event as CustomEvent).detail as
-        | { rowId?: string; columnId?: string; fallbackMd?: string | null }
-        | undefined;
-      if (!detail || detail.rowId !== rowId || detail.columnId !== columnId) return;
-      if (detail.fallbackMd) {
-        // 日志没写成（存储不可用）：直接收下事件里带的 markdown。这条兜底是
-        // **瞬时**的——没有活实例接就没了，属已知边界（见 PR 说明）。
-        const md = detail.fallbackMd;
-        setContent((prev) => prev + md);
-        setDraftText((prev) => (prev === null ? prev : prev + md));
-        return;
-      }
-      claimPendingUploads();
-    }
-    function onStorage(event: StorageEvent) {
-      // 跨标签页：别的标签页写了本格的待认领键，这边立刻认领。
-      if (event.key && event.key.startsWith(pendingUploadStorageKey(rowId, columnId, ""))) {
-        claimPendingUploads();
-      }
-    }
-    window.addEventListener(PENDING_UPLOAD_EVENT, onPending);
-    window.addEventListener("storage", onStorage);
-    return () => {
-      window.removeEventListener(PENDING_UPLOAD_EVENT, onPending);
-      window.removeEventListener("storage", onStorage);
-    };
-  }, [rowId, columnId, showRestoreBanner, claimPendingUploads]);
-
-  const flushDraft = useCallback((): boolean => {
-    const action = draftFlushAction(hasUnsavedChanges(content, savedContent), showRestoreBanner);
-    try {
-      return applyDraftFlush(window.localStorage, draftStorageKey(rowId, columnId), content, action);
-    } catch {
-      // 连取 window.localStorage 本身都抛（极端隐私设置）：只有 write 才算失败，
-      // keep/remove 本就没有要保存的内容，离开是安全的。
-      return action !== "write";
-    }
-  }, [content, savedContent, rowId, columnId, showRestoreBanner]);
 
   // 唯一的「确认离开」执行器：所有 close/switch 路径（Esc/背景/关闭按钮、取消、
   // 切兄弟格、守卫「放弃」按钮）都经此，保存收尾那条出口也遵循同一契约。
@@ -877,24 +853,11 @@ export function KnowhowCellEditor({
   // 把内容悄悄丢掉。唯一例外是用户正看着那条警告仍再点一次离开：视为已知情的
   // 明确放弃，强制放行（否则存储不可用时无路可出，见下方 if 内注释）。
   // 「每条离开路径都先落草稿」由「只有这一个执行器」这一结构保证，而非各分支各写。
-  const performLeave = useCallback(
+  // 真正执行离开：先同步落草稿，成功才 close/switch。上传门在它之外（见
+  // performLeave）——本函数只负责「已经可以走了」这一步，故上传收尾可以直接调它
+  // 提交那次被延后的离开，不必等 setUploading(false) 的重渲染。
+  const commitLeave = useCallback(
     (intent: LeaveIntent) => {
-      // 上传在飞：默认不离开。资产已写到服务端，此刻卸载会让这次粘贴既进不了正文、
-      // 资产也回收不掉（无删除接口，sweep_orphan_assets 无生产调用方）。同样留一次
-      // 强制出口——上传可能卡住，不能把人关死；判据同样是「警告是否还挂在屏幕上」。
-      // 判据必须把**两条**离开警告都算作「已警告过」：上传门与下面的落盘门各自
-      // 只认自己那条消息、又会覆盖对方的消息，两者都触发时会无限交替（上传提示 →
-      // 落盘失败提示 → 上传提示…），所有出口都被挡住、弹窗再也关不掉——正是这条
-      // 逃生口本来要避免的事。认两条则最多三次点击必然放行。
-      if (
-        uploading &&
-        saveError !== LEAVE_BLOCKED_UPLOADING_HINT &&
-        saveError !== DRAFT_FLUSH_FAILED_MESSAGE
-      ) {
-        setPendingLeave(null);
-        setSaveError(LEAVE_BLOCKED_UPLOADING_HINT);
-        return;
-      }
       if (!flushDraft()) {
         // 第一次：拦下并说明；第二次（用户此刻正看着那条警告仍要走）：强制放行。
         // 若没有这条逃生口，存储长期不可用时所有出口都被挡死——「取消」并入统一
@@ -904,19 +867,64 @@ export function KnowhowCellEditor({
         // 就只有成功离开才会清，而 runSave / handleOptimize 都会 setSaveError(null)
         // 把警告擦掉。那样「存储坏了 → 重试保存又失败 → 点取消」会在用户看不到任何
         // 警告的情况下第一次点击就静默丢字。
-        if (saveError !== DRAFT_FLUSH_FAILED_MESSAGE) {
+        if (saveErrorRef.current !== DRAFT_FLUSH_FAILED_MESSAGE) {
           setPendingLeave(null);
+          setLeaveAfterUpload(null);
+          leaveAfterUploadRef.current = null;
           setSaveError(DRAFT_FLUSH_FAILED_MESSAGE);
           return;
         }
       }
       setSaveError(null);
       setPendingLeave(null);
+      setLeaveAfterUpload(null);
+      leaveAfterUploadRef.current = null;
       if (intent.kind === "switch") onSwitchCell?.(intent.columnId);
       else onClose();
     },
-    [flushDraft, saveError, uploading, onSwitchCell, onClose],
+    [flushDraft, onSwitchCell, onClose],
   );
+  // 上传收尾（可能晚于好几次重渲染）要调到**当前**这版 commitLeave，而不是发起
+  // 上传那一帧闭包里的旧版（它捕获的 onClose/onSwitchCell 可能已经换过）。
+  const commitLeaveRef = useRef(commitLeave);
+  commitLeaveRef.current = commitLeave;
+
+  // 所有「确认离开」入口的统一门：上传在飞就**延后**（记下意图，等上传落进正文后
+  // 由收尾自动提交），否则立刻提交。判据读 uploadingRef 而非 uploading state——
+  // 用户粘贴完立刻按 Esc 时，state 还是上一帧的 false，读它会直接放行、把这次
+  // 上传甩成没人引用的孤儿。
+  const performLeave = useCallback(
+    (intent: LeaveIntent) => {
+      const decision = resolveLeaveDuringUpload(uploadingRef.current, intent);
+      if (decision.kind === "defer") {
+        setPendingLeave(null);
+        setLeaveAfterUpload(intent);
+        // 同步置位：上传可能在本次点击的同一刻收尾，收尾读的是 ref，晚一帧就没人
+        // 执行这次离开了。
+        leaveAfterUploadRef.current = intent;
+        return;
+      }
+      commitLeave(intent);
+    },
+    [commitLeave],
+  );
+
+  // 延后离开期间的两个出口：继续编辑（取消这次离开）、放弃上传并离开（abort 掉在飞
+  // 上传，收尾里照常提交离开——已经传完并落笔的那几张仍留在正文里）。
+  const cancelDeferredLeave = useCallback(() => {
+    setLeaveAfterUpload(null);
+    leaveAfterUploadRef.current = null;
+  }, []);
+
+  const discardUploadAndLeave = useCallback(() => {
+    uploadAbortRef.current?.abort();
+    // 意图已经记在 leaveAfterUploadRef 里，由上传收尾提交；若上传恰好已经收尾
+    // （abort 落空），这里补一次提交，免得离开请求悬在半空。
+    if (!uploadingRef.current) {
+      const intent = leaveAfterUploadRef.current;
+      if (intent) commitLeave(intent);
+    }
+  }, [commitLeave]);
 
   // 点「本行其他格子」的兄弟格：有异步在飞（保存/上传/优化）一律不切——continuation 可能
   // 回写已卸载组件、或让旧保存的收尾（onClose/onNavigate）落到新格（复审 #3）；
@@ -939,6 +947,10 @@ export function KnowhowCellEditor({
   // 决定，不再二次确认），但同样经 performLeave 执行——照样同步落草稿、内容可恢复，
   // 不留一条绕过离开状态机的旁路。
   const requestClose = useCallback(() => {
+    // 已经在「等上传落完就离开」状态：这次离开请求已经收下了，再按 Esc/点关闭不该
+    // 叠一层守卫（那会在用户点「继续编辑」后诈尸）。此刻的两个出口就是等待条上的
+    // 两个按钮。
+    if (leaveAfterUploadRef.current) return;
     const { next, leave } = resolveCloseRequest(pendingLeave, hasUnsavedChanges(content, savedContent));
     setPendingLeave(next);
     if (leave) performLeave(leave);
@@ -1003,81 +1015,57 @@ export function KnowhowCellEditor({
     // 若不挡：① 保存收尾会卸载本格，晚返回的上传插进已卸载的树（服务端留孤儿
     // 资产、这次粘贴无声消失）；② 优化返回后用户点「接受」，随后完成的上传会用
     // 上传开始时的旧快照把刚接受的建议整段覆盖掉。
-    if (busy) {
+    // busy 是 state（落后一拍）：连续两次粘贴可能都在重渲染前通过这道门，同时开两
+    // 批上传。uploadingRef 是同步的，补这一道就不会并发。
+    if (busy || uploadingRef.current) {
       setUploadError(savingMode !== null ? SAVE_IN_FLIGHT_UPLOAD_HINT : BUSY_UPLOAD_HINT);
       return;
     }
+    const controller = new AbortController();
+    uploadAbortRef.current = controller;
+    uploadingRef.current = true; // 同步置位：紧接着的离开请求必须能看见「正在上传」
     setUploading(true);
     setUploadError(null);
-    // 本批上传的唯一 id：日志按 <batchId>-<index> 去重，重试/并发不会让同一张图
-    // 在正文里出现两次。
-    const uploadBatchId =
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-    // 记下开始时的正文与光标：落笔时若正文没变过，就插回用户当初粘贴的位置（正常
-    // 情况，保住「插在光标处」的语义）；若正文在上传期间被改写过（如恢复草稿），
-    // 那个偏移已无意义，改为追加到末尾——绝不拿旧偏移往新正文里劈。
-    const startSnapshot = contentRef.current;
-    const startCaret = textareaRef.current?.selectionStart ?? startSnapshot.length;
-    // 已传完的片段：任何一张失败时也要把前面成功的插进去，否则它们在服务端已是
-    // 资产、却既进不了正文也无从回收（与 P1-1 同一类孤儿+丢字）。
-    const snippets: string[] = [];
-    const landSnippets = () => {
-      if (snippets.length === 0) return;
-      const snippet = snippets.join("");
-      // 还在本格：基于**落笔时的实时内容**插入（决策见 resolveUploadInsertion）。
-      // 旧写法是从上传开始时的整篇快照上累加、结束时整篇写回，期间任何内容变化都会
-      // 被那份旧快照静默覆盖。
-      if (mountedRef.current) {
-        applyInsertion(resolveUploadInsertion(startSnapshot, startCaret, contentRef.current, snippet));
-        return;
-      }
-      // 本格已经离开（用户在上传途中强制离开）：没有正文可插。**不写草稿键**——
-      // 那是新编辑器会正常清理/覆盖的东西，混进去就会出现「强退→立刻重开→旧上传
-      // 落地时草稿已被新实例清掉→图片永久无人引用」。改写入独立的待完成上传日志，
-      // 由该格的活实例或下次 mount 认领（见 claimPendingUploads）。
-      let journaled = false;
-      try {
-        // 一 upload 一键：只写自己的键，不做整键 read-modify-write，别的标签页
-        // 同时写别的键也不会互相覆盖。
-        snippets.forEach((md, index) => {
-          window.localStorage.setItem(pendingUploadStorageKey(rowId, columnId, `${uploadBatchId}-${index}`), md);
-        });
-        journaled = true;
-      } catch {
-        /* 存储不可用：下面靠事件直接投递给活实例兜底 */
-      }
-      // 同标签页通知：storage 事件只跨标签页触发，同页重开的新实例收不到。
-      // 日志没写成时把 markdown 直接带在事件里，活实例仍能收下这张图。
-      try {
-        window.dispatchEvent(
-          new CustomEvent(PENDING_UPLOAD_EVENT, {
-            detail: { rowId, columnId, fallbackMd: journaled ? null : snippets.join("") },
-          }),
-        );
-      } catch {
-        /* ignore */
-      }
-    };
+    // 落笔锚点：正文没变过就插回用户当初粘贴的光标处（保住「插在光标处」语义）；
+    // 变过（恢复草稿等）则追加到末尾，绝不拿旧偏移往新正文里劈。每落一张就把锚点
+    // 推进到这张之后，于是同一批的多张图按选择顺序连续排开。
+    let anchorSnapshot = contentRef.current;
+    let anchorCaret = textareaRef.current?.selectionStart ?? anchorSnapshot.length;
     try {
       for (const file of images) {
-        const asset = await uploadNotebookAsset(notebookId, file);
-        snippets.push(imageMarkdown(asset.id, deriveAltFromFilename(file.name)));
+        // 一张传完就落一张（不是整批传完再一起落）：中途 abort/失败时，已经传完的
+        // 那几张已经在正文里、随草稿落盘，不会变成「服务端有资产、正文没引用」的
+        // 孤儿。
+        const asset = await uploadNotebookAsset(notebookId, file, controller.signal);
+        const landed = resolveUploadInsertion(
+          anchorSnapshot,
+          anchorCaret,
+          contentRef.current,
+          imageMarkdown(asset.id, deriveAltFromFilename(file.name)),
+        );
+        applyInsertion(landed);
+        anchorSnapshot = landed.value;
+        anchorCaret = landed.cursor;
       }
-      landSnippets();
     } catch (err) {
-      landSnippets(); // 批量中途失败：已成功的那几张仍要落进正文
-      setUploadError(extractErrorMessage(err, "图片上传失败，请重试"));
+      // 中断是用户自己点「放弃上传并离开」或组件卸载时我们主动掐的，不是错误。
+      // 除了认 AbortError 这个 name，还看**我们自己的 signal 是否已中断**：并非所有
+      // 浏览器在所有中断时机都抛标准的 AbortError（如响应体读取途中被掐可能报成
+      // 网络错误），只按 name 判会在放弃上传后弹一条假的「图片上传失败」。
+      if (!isAbortError(err) && !controller.signal.aborted) {
+        setUploadError(extractErrorMessage(err, "图片上传失败，请重试"));
+      }
     } finally {
+      uploadAbortRef.current = null;
+      uploadingRef.current = false;
       setUploading(false);
-      // 上传结束，两条「上传中…」提示都过期了。必须连 LEAVE_BLOCKED_UPLOADING_HINT
-      // 一起清：留着不只是常驻红字说假话，更会把「强制离开」那道门预先解锁——下一次
-      // 粘贴的上传刚开始，用户第一次点离开就会直接放行（无警告、图片成孤儿、这次
-      // 粘贴静默丢失），等于 P1-1 原样复发。
-      setSaveError((current) =>
-        current === SAVE_BLOCKED_UPLOADING_HINT || current === LEAVE_BLOCKED_UPLOADING_HINT ? null : current,
-      );
+      // 「上传中不能保存」的提示过期了。
+      setSaveError((current) => (current === SAVE_BLOCKED_UPLOADING_HINT ? null : current));
+      // 上传期间被延后的离开：此刻图片已经落进正文，commitLeave 会把含图片引用的
+      // 正文同步写进草稿再关闭/切走。直接调 commitLeave 而不是 performLeave——后者
+      // 的上传门读 uploadingRef，虽已置 false，但绕开门更不容易在将来被改坏。
+      const deferred = leaveAfterUploadRef.current;
+      if (deferred && mountedRef.current) commitLeaveRef.current(deferred);
     }
   }
 
@@ -1404,7 +1392,24 @@ export function KnowhowCellEditor({
               已失效」这类在守卫/优化对照分支下产生的信息，若只在最后一个分支渲染，
               用户会遇到「点了放弃却没关掉、且毫无解释」的死胡同。 */}
           {saveError && <span className="kh-inline-error">{saveError}</span>}
-          {pendingLeave ? (
+          {/* 上传在飞时点了离开：不强退、也不静默丢弃，而是等这次上传落进正文后
+              自动离开。给两个出口——继续编辑（撤销这次离开），或明确放弃：后者
+              abort 掉在飞请求（已传完并落笔的那几张仍留在正文里），不再需要向用户
+              承诺任何「会尽量留着」的事。放在 pendingLeave 之前：延后期间守卫已被
+              清掉，这一支就是此刻唯一该出现的东西。 */}
+          {leaveAfterUpload ? (
+            <div className="kh-close-guard">
+              <span>{LEAVE_WAITING_UPLOAD_HINT}</span>
+              <div className="kh-close-guard-actions">
+                <button type="button" onClick={cancelDeferredLeave}>
+                  {CLOSE_GUARD_CONTINUE_LABEL}
+                </button>
+                <button type="button" className="kh-danger-button" onClick={discardUploadAndLeave}>
+                  {DISCARD_UPLOAD_AND_LEAVE_LABEL}
+                </button>
+              </div>
+            </div>
+          ) : pendingLeave ? (
             <div className="kh-close-guard">
               {/* 落盘失败警告挂着时不再叠一句「可恢复」——此刻再点放弃就是强制丢弃，
                   那句承诺是假的；上方已渲染的 DRAFT_FLUSH_FAILED_MESSAGE 才是实情。 */}

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import {
   PROCEDURE_HINT_TEXT,
@@ -39,14 +40,14 @@ import {
   isSaveBlocked,
   imageMarkdown,
   resolveUploadInsertion,
-  pendingUploadStorageKey,
-  pendingUploadKeyPrefix,
-  selectPendingUploadKeys,
+  resolveLeaveDuringUpload,
+  LEAVE_WAITING_UPLOAD_HINT,
+  DISCARD_UPLOAD_AND_LEAVE_LABEL,
+  isAbortError,
   SAVE_BLOCKED_UPLOADING_HINT,
   SAVE_IN_FLIGHT_UPLOAD_HINT,
   BUSY_UPLOAD_HINT,
   ACCEPT_BLOCKED_UPLOADING_HINT,
-  LEAVE_BLOCKED_UPLOADING_HINT,
   resolveSaveCompletion,
 } from "./knowhow-cell-editor-logic.ts";
 
@@ -528,16 +529,9 @@ test("并发提示文案彼此可区分（各自对应一种在飞操作，不�
     SAVE_IN_FLIGHT_UPLOAD_HINT,
     BUSY_UPLOAD_HINT,
     ACCEPT_BLOCKED_UPLOADING_HINT,
-    LEAVE_BLOCKED_UPLOADING_HINT,
+    LEAVE_WAITING_UPLOAD_HINT,
   ];
   assert.strictEqual(new Set(hints).size, hints.length);
-  // 「上传中离开」必须讲明再点一次会发生什么；且**不得**把「图片残留在服务器」
-  // 固化成预期——强退后图片进待完成上传日志，下次打开这一格会被认领补回，不是孤儿。
-  assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /再点一次/);
-  assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /下次打开/);
-  // 「尽量」是刻意的：storage 完全不可用时这条承诺兑现不了（已知边界，见 PR）。
-  assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /尽量/);
-  assert.doesNotMatch(LEAVE_BLOCKED_UPLOADING_HINT, /残留/);
 });
 
 test("resolveSaveCompletion: 已卸载 → none（陈旧回调绝不操作后来打开的格子）", () => {
@@ -573,39 +567,167 @@ test("守卫文案：不再用「已自动保存」过去式承诺（同步落�
 });
 
 
-// --- 待完成上传：一 upload 一键，避免整键 read-modify-write 的多标签页竞态 -------
+// --- 上传中离开：延后而不是强退 -------------------------------------------------
+//
+// 这里锁的是本 PR 的核心契约变更：上传在飞时的离开请求**一律延后**，由上传收尾
+// 提交。此前是「警告一次、再点一次强制离开」，continuation 会落到已卸载的组件上，
+// 于是需要在 localStorage 上自造一套「待完成上传日志 + 认领」协议来救那些图片——
+// 那套协议连续四轮被查出竞态（首次 mount 的 effect 顺序、跨标签页 claim 的非原子
+// 读改写删、部分写入失败导致的丢失+重复、键名字符串排序打乱多图顺序）。改成延后
+// 之后，「上传比编辑器活得久」这个前提本身不成立，那一整类竞态没有了落脚点。
 
-test("pendingUploadStorageKey: 与草稿键彻底不同（绝不共用）", () => {
-  const p = pendingUploadStorageKey("r1", "c1", "b1-0");
-  assert.notStrictEqual(p, draftStorageKey("r1", "c1"));
-  assert.match(p, /^kh-cell-pending-upload:r1:c1:b1-0$/);
+test("resolveLeaveDuringUpload: 上传在飞 → defer（绝不放行，也不丢弃）", () => {
+  assert.deepStrictEqual(resolveLeaveDuringUpload(true, { kind: "close" }), {
+    kind: "defer",
+    intent: { kind: "close" },
+  });
+  assert.deepStrictEqual(resolveLeaveDuringUpload(true, { kind: "switch", columnId: "c2" }), {
+    kind: "defer",
+    intent: { kind: "switch", columnId: "c2" },
+  });
 });
 
-test("selectPendingUploadKeys: 只挑本格的键，且按插入顺序还原", () => {
-  const all = [
-    "kh-cell-draft:r1:c1",
-    pendingUploadStorageKey("r1", "c1", "b1-1"),
-    pendingUploadStorageKey("r9", "c9", "b1-0"),
-    pendingUploadStorageKey("r1", "c1", "b1-0"),
-    "unrelated",
-  ];
-  assert.deepStrictEqual(selectPendingUploadKeys(all, "r1", "c1"), [
-    pendingUploadStorageKey("r1", "c1", "b1-0"),
-    pendingUploadStorageKey("r1", "c1", "b1-1"),
-  ]);
+test("resolveLeaveDuringUpload: 没有上传在飞 → commit（照常走落草稿+离开）", () => {
+  assert.deepStrictEqual(resolveLeaveDuringUpload(false, { kind: "close" }), {
+    kind: "commit",
+    intent: { kind: "close" },
+  });
 });
 
-test("selectPendingUploadKeys: 认领只覆盖此刻读到的键——并发新增的键不在其中（回归锁）", () => {
-  // 多标签页竞态：A 读到 [E1]，B 随后写入 E2。旧的整键 read-modify-write/remove
-  // 会让 A 的 removeItem 把 E2 一起删掉，E2 的图就永久没有引用了。
-  const beforeConcurrentWrite = [pendingUploadStorageKey("r1", "c1", "b1-0")];
-  const claimed = selectPendingUploadKeys(beforeConcurrentWrite, "r1", "c1");
-  const afterConcurrentWrite = [...beforeConcurrentWrite, pendingUploadStorageKey("r1", "c1", "b2-0")];
-  const remaining = selectPendingUploadKeys(afterConcurrentWrite, "r1", "c1").filter((k) => !claimed.includes(k));
-  assert.deepStrictEqual(remaining, [pendingUploadStorageKey("r1", "c1", "b2-0")]);
+test("上传中离开的文案：只承诺「完成后自动离开」，不再承诺「会尽量留着」（回归锁）", () => {
+  // 旧文案要向用户承诺强退后图片「会尽量留着、下次打开补进来」——那份承诺依赖
+  // localStorage 可用，存储不可用时兑现不了。现在离开要么等上传落完（图片真在
+  // 正文里），要么明确放弃（abort 掉），没有需要打折的承诺。
+  assert.doesNotMatch(LEAVE_WAITING_UPLOAD_HINT, /尽量/);
+  assert.doesNotMatch(LEAVE_WAITING_UPLOAD_HINT, /下次打开/);
+  assert.doesNotMatch(LEAVE_WAITING_UPLOAD_HINT, /再点一次/);
+  assert.match(LEAVE_WAITING_UPLOAD_HINT, /自动离开/);
+  // 放弃出口必须让用户看得出「这次上传不要了」，而不是含糊的「关闭」。
+  assert.match(DISCARD_UPLOAD_AND_LEAVE_LABEL, /放弃/);
 });
 
-test("pendingUploadKeyPrefix: 前缀含行列、不会误伤别格", () => {
-  assert.strictEqual(pendingUploadKeyPrefix("r1", "c1"), "kh-cell-pending-upload:r1:c1:");
-  assert.ok(!pendingUploadKeyPrefix("r1", "c1").startsWith(pendingUploadKeyPrefix("r1", "c12")));
+test("isAbortError: 只认 AbortError，普通失败照常报错", () => {
+  const aborted = new Error("aborted");
+  aborted.name = "AbortError";
+  assert.strictEqual(isAbortError(aborted), true);
+  assert.strictEqual(isAbortError(new Error("500 boom")), false);
+  assert.strictEqual(isAbortError(null), false);
+  assert.strictEqual(isAbortError("AbortError"), false);
+});
+
+// --- 批量上传：传一张落一张，顺序与位置都由 resolveUploadInsertion 决定 ---------
+
+// 下面这条按生产循环的真实写法推进锚点（landed.value / landed.cursor），而不是
+// 测试自己另写一套拼接：生产若改回「整批传完再一起落」或忘了推进锚点，这里就红。
+function landBatch(startValue, startCaret, snippets) {
+  let anchorSnapshot = startValue;
+  let anchorCaret = startCaret;
+  let live = startValue;
+  for (const snippet of snippets) {
+    const landed = resolveUploadInsertion(anchorSnapshot, anchorCaret, live, snippet);
+    live = landed.value;
+    anchorSnapshot = landed.value;
+    anchorCaret = landed.cursor;
+  }
+  return live;
+}
+
+test("批量上传：多张图按选择顺序连续落在粘贴处（>10 张也不乱序）", () => {
+  // 旧实现把待认领的图片按 localStorage 键名字符串排序还原顺序，而键名是
+  // `<随机UUID>-<序号>`：跨批次顺序随机、同批超过 10 张时序号排成 0,1,10,11,2…。
+  // 现在顺序由「传完即落笔」的循环本身保证，与任何键名编码无关。
+  const snippets = Array.from({ length: 12 }, (_, i) => imageMarkdown(`a${i}`, `图${i}`));
+  const value = landBatch("前后", 1, snippets);
+  assert.strictEqual(value, `前${snippets.join("")}后`);
+  const positions = snippets.map((s) => value.indexOf(s));
+  assert.deepStrictEqual(positions, [...positions].sort((a, b) => a - b));
+});
+
+test("批量上传：中途中断（放弃/卸载）→ 已传完的那几张仍留在正文里", () => {
+  // 「传一张落一张」的意义：abort 时前面成功的图片已经在正文里、随草稿同步落盘，
+  // 不会变成「服务端有资产、正文无引用」的孤儿。整批传完再一起落则会全丢。
+  const done = [imageMarkdown("a0", "图0"), imageMarkdown("a1", "图1")];
+  assert.strictEqual(landBatch("原文", 2, done), `原文${done.join("")}`);
+});
+
+test("批量上传：期间正文被改写 → 后续图片追加末尾，绝不拿旧偏移劈开新正文", () => {
+  const first = imageMarkdown("a0", "图0");
+  const second = imageMarkdown("a1", "图1");
+  const afterFirst = resolveUploadInsertion("abcdef", 3, "abcdef", first);
+  // 用户在两张之间恢复了草稿：实时正文与锚点快照不再相等。
+  const afterSecond = resolveUploadInsertion(afterFirst.value, afterFirst.cursor, "另一份正文", second);
+  assert.strictEqual(afterSecond.value, `另一份正文${second}`);
+});
+
+// --- 接线守卫：纯函数锁不住「组件确实这么接线」，用源码断言补上 -----------------
+//
+// 本仓库前端测试是 node --test 跑 .mjs、只 import 得了纯 .ts（.tsx 需要 JSX
+// 变换），组件的 effect 顺序/异步收尾无法真渲染断言。仓库既有做法是对源码本身下
+// 断言（见 architecture-boundaries.test.mjs），这里沿用：锁住的都是**改坏了就会
+// 复现已知数据丢失**的接线点，不是形态偏好。
+
+const editorSrc = await readFile(new URL("./knowhow-cell-editor.tsx", import.meta.url), "utf8");
+const modelSrc = await readFile(new URL("./knowhow-model.ts", import.meta.url), "utf8");
+const uploadFnSrc = editorSrc.slice(
+  editorSrc.indexOf("async function uploadAndInsertImages"),
+  editorSrc.indexOf("function handleFileInputChange"),
+);
+// 守卫必须切到**具体的块**再断言。此前这两条写成「函数体里同时出现 A 和 B」，
+// `[\s\S]*?` 会越过块的收尾大括号——把落笔挪到循环外、把提交延后离开挪出 finally，
+// 守卫照样绿（都是真 bug：前者中途中断全丢图，后者上传出错时窗口永远关不掉）。
+// 切到**循环自己的收尾大括号**（6 空格缩进），不是切到 `} catch`：后者会把「挪到
+// 循环之后、catch 之前」的落笔也圈进来，那正是要防的整批落笔形态。
+const uploadLoopStart = uploadFnSrc.indexOf("for (const file of images) {");
+const uploadLoopSrc = uploadFnSrc.slice(
+  uploadLoopStart,
+  uploadFnSrc.indexOf("\n      }", uploadLoopStart),
+);
+const uploadFinallySrc = uploadFnSrc.slice(uploadFnSrc.indexOf("} finally {"));
+
+test("接线：上传请求必须带 AbortSignal，且 fetcher 真的把它转发出去", () => {
+  // 少了它，「上传比编辑器活得久」就又成立了——continuation 落到已卸载的树上，
+  // 资产在服务端却没有任何东西引用它。
+  assert.ok(uploadFnSrc.length > 0, "uploadAndInsertImages 函数体没截到，守卫失效");
+  assert.match(uploadFnSrc, /uploadNotebookAsset\(\s*notebookId,\s*file,\s*controller\.signal\s*\)/);
+  assert.match(modelSrc, /uploadNotebookAsset = \([\s\S]*?signal\?: AbortSignal,[\s\S]*?\{[\s\S]*?body: form, signal \}/);
+});
+
+test("接线：上传是「传一张落一张」——落笔必须在 for 循环体内", () => {
+  // 整批落笔时，中途 abort/失败会让已经传完的图片全部既进不了正文、也无从回收。
+  assert.ok(uploadLoopSrc.length > 0, "for 循环体没截到，守卫失效");
+  assert.match(uploadLoopSrc, /applyInsertion\(landed\);/);
+});
+
+test("接线：延后的离开必须在 finally 里提交（try 里提交挡不住出错/中断路径）", () => {
+  // 放在 try 末尾的话，上传报错或被 abort 时根本走不到：用户点了关闭却永远关不掉
+  // （延后期间 Esc/背景/关闭都被 requestClose 早退挡住，只剩「继续编辑」）。
+  assert.ok(uploadFinallySrc.length > 0, "finally 块没截到，守卫失效");
+  assert.match(uploadFinallySrc, /leaveAfterUploadRef\.current;[\s\S]*?commitLeaveRef\.current\(deferred\)/);
+});
+
+test("接线：离开门读的是同步 ref，不是落后一拍的 uploading state", () => {
+  // 读 state 会让「粘贴完立刻按 Esc」这条路直接放行（那一刻 state 还是 false）。
+  assert.match(editorSrc, /resolveLeaveDuringUpload\(uploadingRef\.current, intent\)/);
+});
+
+test("接线：卸载清理必须中断上传并同步落草稿", () => {
+  // 父级直接卸载（返回列表/切笔记本）时没有任何离开路径跑过，300ms 自动草稿定时器
+  // 也会被清掉——不在这里落盘就等于把刚敲的字和刚落笔的图片引用一起丢掉。
+  // 切到 cleanup 块本身，不靠数字符窗口（多写两行注释就会假红）。
+  const afterMountedFalse = editorSrc.slice(editorSrc.indexOf("mountedRef.current = false;"));
+  const unmountCleanup = afterMountedFalse.slice(0, afterMountedFalse.indexOf("}, []);"));
+  assert.ok(unmountCleanup.length > 0, "卸载清理块没截到，守卫失效");
+  assert.match(unmountCleanup, /uploadAbortRef\.current\?\.abort\(\);/);
+  // 只写不删：StrictMode 的「挂载→立刻卸载→再挂载」里，若照完整决策 remove，
+  // 会把刚被扫描发现、用户还没决定的草稿删掉。
+  assert.match(unmountCleanup, /if \(hasUnsavedChanges\(contentRef\.current, savedContentRef\.current\)\) flushDraftRef\.current\(\);/);
+});
+
+test("接线：不得再把待完成上传寄存到 localStorage（回归锁）", () => {
+  // 那套「日志 + 认领」协议连续四轮被查出竞态（首次 mount 的 effect 顺序、跨标签页
+  // claim 的非原子读改写删、部分写入失败导致丢失+重复、键名排序打乱多图顺序）。
+  // 现在靠「上传不比编辑器活得久」在结构上消除，别再加回来。
+  assert.equal(editorSrc.includes("kh-cell-pending-upload"), false);
+  assert.equal(editorSrc.includes("PENDING_UPLOAD"), false);
+  assert.equal(editorSrc.includes("selectPendingUploadKeys"), false);
 });
