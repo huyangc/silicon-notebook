@@ -187,19 +187,55 @@ export function resolveUploadInsertion(
   return insertAtCursor({ value: liveValue, start: at, end: at }, snippet);
 }
 
-// 上传成功、但本格编辑器已经不在了（用户在上传途中强制离开）：没有正文可插，就把
-// 图片 markdown 追加进该格草稿。这样资产有真实引用、用户下次打开能恢复，不会变成
-// 无法回收的孤儿（仓库既无删除资产端点、也无生产 GC）。
+// --- 待完成上传日志（pending-upload journal）------------------------------------
 //
-// **只追加到已存在的草稿，storedDraft 为 null 时返回 null＝不要写**。绝不能拿
-// 组件卸载时闭包里那份 savedContent 当基线：它是粘贴那一刻的旧值。若用户在上传
-// 期间重开这一格、改了内容并保存，服务端已经是新值，而这里再用旧 savedContent
-// 造一份草稿，下次打开就会弹出「未保存草稿」把用户诱导回旧内容——一次点「恢复」
-// 再保存就把新内容覆盖没了。null 意味着「已经没人认领这个格子的草稿」（离开时
-// 清掉了、或更新的实例处置过），此时宁可放弃这张图，也不制造假草稿。
-// 调用方必须在**此刻**读取 storedDraft（而不是上传开始时的快照）。
-export function draftAfterDetachedUpload(storedDraft: string | null, snippet: string): string | null {
-  return storedDraft === null ? null : storedDraft + snippet;
+// 「上传已成功、但本格编辑器已经不在了」这件事**不能**塞进普通草稿键：草稿是会被
+// 新编辑器正常清理/覆盖的东西（mount 时发现与已保存内容相等就删、300ms 自动草稿
+// 随时改写、保存后清理），把待完成上传混进去，就会出现「强退→立刻重开→旧上传落
+// 地时草稿键已被新实例清掉→图片再也没有任何东西引用它」这类永久孤儿。
+//
+// 故另开一个带 id 的独立日志键：写入方只追加（按 id 幂等），认领方（该格的活实例
+// 或下次 mount）整体取走并清空。图片在被认领前一直躺在日志里，不会被任何草稿逻辑
+// 误删；认领后进入正文，成为真实引用。
+export const PENDING_UPLOAD_STORAGE_PREFIX = "kh-cell-pending-upload:";
+export function pendingUploadStorageKey(rowId: string, columnId: string): string {
+  return `${PENDING_UPLOAD_STORAGE_PREFIX}${rowId}:${columnId}`;
+}
+
+// 同标签页内通知该格的活实例「有待认领的上传」——localStorage 的 storage 事件只
+// 跨标签页触发，同页重开的新实例收不到，必须自己派发。
+export const PENDING_UPLOAD_EVENT = "knowhow-cell-pending-upload";
+
+export type PendingUpload = { id: string; md: string };
+
+// 容错解析：日志被写坏/半截/被别的东西占用时一律当空，绝不因为它抛错影响编辑器。
+export function parsePendingUploads(raw: string | null): PendingUpload[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is PendingUpload =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as PendingUpload).id === "string" &&
+        typeof (item as PendingUpload).md === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+// 追加（按 id 幂等）：同一次上传若因重试/并发被写两次，不会在正文里出现两张图。
+export function appendPendingUploads(raw: string | null, entries: PendingUpload[]): string {
+  const existing = parsePendingUploads(raw);
+  const seen = new Set(existing.map((item) => item.id));
+  const merged = [...existing, ...entries.filter((item) => !seen.has(item.id))];
+  return JSON.stringify(merged);
+}
+
+export function pendingUploadsMarkdown(entries: PendingUpload[]): string {
+  return entries.map((item) => item.md).join("");
 }
 
 // 从文件名派生图片 alt 文本：去掉最后一个扩展名、去首尾空白。多个点时只切
@@ -296,20 +332,10 @@ export function resolveSwitchRequest(columnId: string, hasChanges: boolean): Lea
 // - 有未保存改动 → write（写当前内容）；
 // - 无改动但恢复提示还开着 → keep（保住那份待恢复的旧草稿，不碰）；
 // - 无改动且没有恢复提示 → remove（清掉可能残留的陈旧草稿）。
-// keepKeyAlive：上传在飞时离开专用。收尾的上传只能把图片**追加进已存在的草稿**
-// （见 draftAfterDetachedUpload——键不存在就不写），所以此时把本会得出的 "remove"
-// 升级成 "write"，留一个占位草稿给它追加。只升级 "remove"：
-//   · "write" 本来就会建键，无需升级；
-//   · "keep" 是恢复提示里还没决定的旧草稿，绝不能覆盖。
 export type DraftFlushAction = "write" | "keep" | "remove";
-export function draftFlushAction(
-  hasChanges: boolean,
-  restoreBannerOpen: boolean,
-  keepKeyAlive = false,
-): DraftFlushAction {
+export function draftFlushAction(hasChanges: boolean, restoreBannerOpen: boolean): DraftFlushAction {
   if (hasChanges) return "write";
-  if (restoreBannerOpen) return "keep";
-  return keepKeyAlive ? "write" : "remove";
+  return restoreBannerOpen ? "keep" : "remove";
 }
 
 // 把 draftFlushAction 决出的动作真正作用到一个 Storage-like 对象上，并如实返回
@@ -377,10 +403,11 @@ export const ACCEPT_BLOCKED_UPLOADING_HINT = "图片上传中，等上传完成�
 
 // 上传在飞时默认不离开（等它落进正文最省事）；仍保留「再点一次强制离开」的出口，
 // 因为上传可能卡住、不能把人永久关在弹窗里。强退不再丢东西：上传成功但组件已经
-// 离开时，图片 markdown 会被写进该格草稿（见 draftAfterDetachedUpload），所以
+// 离开时，图片 markdown 会被写进独立的待完成上传日志（见上方 pending-upload
+// journal 一节），由该格的活实例或下次 mount 认领进正文，所以
 // 资产有真实引用、用户下次打开可恢复，不会变成无法回收的孤儿。
 export const LEAVE_BLOCKED_UPLOADING_HINT =
-  "图片上传中，请等上传完成后再离开。再点一次将直接离开（已上传的图片会尽量写进本格草稿供下次恢复）。";
+  "图片上传中，请等上传完成后再离开。再点一次将直接离开（已上传的图片会留着，下次打开这一格时自动补进来）。";
 
 // 有其它异步在飞导致按钮置灰时的通用提示——置灰必须有对得上的原因，不能灰着却
 // 显示「可点」的文案（knowhow-optimize-logic.ts 声明的不变量）。

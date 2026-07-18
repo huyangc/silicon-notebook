@@ -39,7 +39,10 @@ import {
   isSaveBlocked,
   imageMarkdown,
   resolveUploadInsertion,
-  draftAfterDetachedUpload,
+  pendingUploadStorageKey,
+  parsePendingUploads,
+  appendPendingUploads,
+  pendingUploadsMarkdown,
   SAVE_BLOCKED_UPLOADING_HINT,
   SAVE_IN_FLIGHT_UPLOAD_HINT,
   BUSY_UPLOAD_HINT,
@@ -407,18 +410,6 @@ test("draftFlushAction: 无改动 + 无恢复提示 → remove（清陈旧草稿
   assert.strictEqual(draftFlushAction(false, false), "remove");
 });
 
-test("draftFlushAction: keepKeyAlive 把 remove 升级成 write（给收尾上传留占位键）", () => {
-  // 上传在飞时离开：收尾的上传只能追加进**已存在**的草稿键，故离开前得留一个占位。
-  assert.strictEqual(draftFlushAction(false, false, true), "write");
-});
-
-test("draftFlushAction: keepKeyAlive 绝不动 keep——恢复提示里那份旧草稿不能被覆盖", () => {
-  assert.strictEqual(draftFlushAction(false, true, true), "keep");
-});
-
-test("draftFlushAction: keepKeyAlive 对本就有改动的情况无影响（仍是 write）", () => {
-  assert.strictEqual(draftFlushAction(true, false, true), "write");
-});
 
 // --- applyDraftFlush：真实副作用路径（用会抛错的假 storage 覆盖 window.localStorage
 //     在单测里没法触发的配额/隐私模式失败）--------------------------------------
@@ -531,24 +522,6 @@ test("resolveUploadInsertion: 起始光标偏移越界 → 夹到合法范围，
   assert.strictEqual(r.value, "很长的一段原文<IMG>");
 });
 
-// --- 强制离开后上传才落地：追加进该格草稿，资产不再是无引用孤儿 -----------------
-
-test("draftAfterDetachedUpload: 有草稿 → 追加到草稿之后（用户下次打开可恢复）", () => {
-  assert.strictEqual(draftAfterDetachedUpload("离开时的草稿", "<IMG>"), "离开时的草稿<IMG>");
-});
-
-test("draftAfterDetachedUpload: 草稿键已无人认领（null）→ 返回 null＝不要写（回归锁）", () => {
-  // 绝不能退回用闭包里那份旧 savedContent 造草稿：用户可能已在上传期间重开这一格、
-  // 改完并保存，服务端已是新值；再造一份旧草稿会在下次打开诱导用户「恢复」，
-  // 一恢复再保存就把新内容覆盖没了。
-  assert.strictEqual(draftAfterDetachedUpload(null, "<IMG>"), null);
-});
-
-test("draftAfterDetachedUpload: 追加后的草稿必然不同于已保存内容 → 下次打开会弹恢复提示", () => {
-  const saved = "已保存内容";
-  const draft = draftAfterDetachedUpload(saved, imageMarkdown("a1", "图"));
-  assert.strictEqual(shouldOfferDraftRestore(draft, saved), true);
-});
 
 test("并发提示文案彼此可区分（各自对应一种在飞操作，不能混用）", () => {
   const hints = [
@@ -559,10 +532,10 @@ test("并发提示文案彼此可区分（各自对应一种在飞操作，不�
     LEAVE_BLOCKED_UPLOADING_HINT,
   ];
   assert.strictEqual(new Set(hints).size, hints.length);
-  // 「上传中离开」必须讲明再点一次会发生什么；且**不得**再把「图片残留在服务器」
-  // 固化成预期——强退后图片会写进本格草稿，是可恢复的，不是孤儿。
+  // 「上传中离开」必须讲明再点一次会发生什么；且**不得**把「图片残留在服务器」
+  // 固化成预期——强退后图片进待完成上传日志，下次打开这一格会被认领补回，不是孤儿。
   assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /再点一次/);
-  assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /草稿/);
+  assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /下次打开/);
   assert.doesNotMatch(LEAVE_BLOCKED_UPLOADING_HINT, /残留/);
 });
 
@@ -596,4 +569,39 @@ test("守卫文案：不再用「已自动保存」过去式承诺（同步落�
     assert.doesNotMatch(msg, /已自动保存/);
     assert.match(msg, /可恢复/);
   }
+});
+
+// --- 待完成上传日志：与草稿键彻底分开，强退后落地的图片不会被草稿清理吃掉 -------
+
+test("pendingUploadStorageKey: 与草稿键不同前缀、不同键（绝不共用）", () => {
+  const p = pendingUploadStorageKey("r1", "c1");
+  assert.notStrictEqual(p, draftStorageKey("r1", "c1"));
+  assert.match(p, /^kh-cell-pending-upload:/);
+});
+
+test("parsePendingUploads: 空/坏数据一律当空，绝不因日志损坏影响编辑器", () => {
+  assert.deepStrictEqual(parsePendingUploads(null), []);
+  assert.deepStrictEqual(parsePendingUploads(""), []);
+  assert.deepStrictEqual(parsePendingUploads("{不是json"), []);
+  assert.deepStrictEqual(parsePendingUploads('{"a":1}'), []);
+  assert.deepStrictEqual(parsePendingUploads('[{"id":1,"md":2}]'), []);
+});
+
+test("appendPendingUploads: 追加保序，且按 id 幂等（重试不会插两张图）", () => {
+  const first = appendPendingUploads(null, [{ id: "b1-0", md: "<A>" }]);
+  const second = appendPendingUploads(first, [{ id: "b1-0", md: "<A>" }, { id: "b2-0", md: "<B>" }]);
+  assert.deepStrictEqual(parsePendingUploads(second), [
+    { id: "b1-0", md: "<A>" },
+    { id: "b2-0", md: "<B>" },
+  ]);
+  assert.strictEqual(pendingUploadsMarkdown(parsePendingUploads(second)), "<A><B>");
+});
+
+test("待完成上传日志：强退→重开→旧上传落地，图片仍可被认领（回归锁）", () => {
+  // 旧实现把它写进草稿键：新实例 mount 发现草稿===已保存内容就删键，随后落地的
+  // 上传写不进任何地方 → 资产永久无人引用。独立日志不参与任何草稿清理逻辑。
+  const journal = appendPendingUploads(null, [{ id: "b1-0", md: imageMarkdown("a1", "图") }]);
+  const claimed = parsePendingUploads(journal);
+  assert.strictEqual(claimed.length, 1);
+  assert.strictEqual(pendingUploadsMarkdown(claimed), "![图](asset://a1)");
 });

@@ -61,6 +61,20 @@ export function isFloatingDisabledWidth(viewportWidth: number): boolean {
   return viewportWidth <= FLOATING_DISABLED_MAX_WIDTH;
 }
 
+// 把**记住的宽高**收进当前视口（与 nextRectOnResize 同一个 VIEWPORT_MAX_RATIO
+// 上限）。视口 clamp 此前只管 x/y，宽高原样留着：在宽屏 resize 到 1041px、切到
+// 窄屏（几何被停用、看着正常）、再回到 721px 时，style 会把 1041px 原样贴回，
+// 实测卡片 right=1065、在 721px 视口里溢出 344px。宽高必须一起规范化。
+// null 表示「没被 resize 过、跟随 CSS」，保持 null 不动。
+export function clampRectSizeToViewport(rect: WindowRect, viewport: Viewport): WindowRect {
+  const maxWidth = Math.round(viewport.width * VIEWPORT_MAX_RATIO);
+  const maxHeight = Math.round(viewport.height * VIEWPORT_MAX_RATIO);
+  const width = rect.width === null ? null : Math.min(rect.width, maxWidth);
+  const height = rect.height === null ? null : Math.min(rect.height, maxHeight);
+  if (width === rect.width && height === rect.height) return rect;
+  return { ...rect, width, height };
+}
+
 function clampNumber(value: number, min: number, max: number): number {
   const lo = Math.min(min, max);
   const hi = Math.max(min, max);

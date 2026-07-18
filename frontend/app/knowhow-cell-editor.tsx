@@ -129,7 +129,11 @@ import {
   BUSY_HINT,
   imageMarkdown,
   resolveUploadInsertion,
-  draftAfterDetachedUpload,
+  pendingUploadStorageKey,
+  parsePendingUploads,
+  appendPendingUploads,
+  pendingUploadsMarkdown,
+  PENDING_UPLOAD_EVENT,
   OPTIMIZE_SUGGESTION_STALE_MESSAGE,
   resolveSaveCompletion,
   type LeaveIntent,
@@ -789,26 +793,57 @@ export function KnowhowCellEditor({
   // remove=清陈旧草稿。返回是否已安全落盘：write 抛错（隐私模式/配额）返 false，
   // 让执行器据此原地报错、不静默离开；keep/remove 恒真（本就没有要保存的内容，
   // 离开是安全的）。
-  // keepKeyAlive 的语义见 draftFlushAction。这里额外记下「占位草稿」：它的内容
-  // 等于已保存内容、本身不构成未保存改动，只是留给收尾上传追加用。若那次上传最终
-  // 一张都没成功，占位就成了没人清理的垃圾——`savedContent` 日后被别处改动（例如
-  // 合并共享列的整组写入）就会让它变成一条骗人的「检测到未保存草稿」。故记住写下
-  // 的确切值，上传收尾时按值比对清掉（见 uploadAndInsertImages 的 finally）。
-  const placeholderDraftRef = useRef<string | null>(null);
-  const flushDraft = useCallback((keepKeyAlive = false): boolean => {
-    const dirty = hasUnsavedChanges(content, savedContent);
-    const action = draftFlushAction(dirty, showRestoreBanner, keepKeyAlive);
-    // 占位写：没有未保存内容，纯粹为收尾上传留键。它失败不算「丢字」——本来就
-    // 没有字要丢，最多是这张图保不住（提示文案用的正是「尽量」）。
-    const placeholder = !dirty && action === "write";
+  // 认领「待完成上传日志」：把强退期间落地的图片收进正文。日志与草稿键分开，
+  // 所以它不会被新实例的草稿清理/自动草稿覆盖掉；认领后即清空（取走即拥有）。
+  // 恢复提示里那份草稿也一并追加，避免用户点「恢复」时把刚认领的图片顶掉。
+  const claimPendingUploads = useCallback(() => {
+    let md = "";
     try {
-      const ok = applyDraftFlush(window.localStorage, draftStorageKey(rowId, columnId), content, action);
-      if (placeholder && ok) placeholderDraftRef.current = content;
-      return ok || placeholder;
+      const key = pendingUploadStorageKey(rowId, columnId);
+      const entries = parsePendingUploads(window.localStorage.getItem(key));
+      if (entries.length === 0) return;
+      md = pendingUploadsMarkdown(entries);
+      window.localStorage.removeItem(key);
     } catch {
-      // 连取 window.localStorage 本身都抛（极端隐私设置）：只有「真的有未保存内容
-      // 要写」才算失败，keep/remove/占位写都不影响离开的安全性。
-      return action !== "write" || placeholder;
+      return;
+    }
+    if (!md) return;
+    setContent((prev) => prev + md);
+    setDraftText((prev) => (prev === null ? prev : prev + md));
+  }, [rowId, columnId]);
+
+  // mount 时认领一次（覆盖「强退 → 上传落地 → 之后再打开这一格」），并监听同页
+  // 事件（覆盖「强退 → 立刻重开 → 旧上传随后才落地」——storage 事件不跨不了同页）。
+  useEffect(() => {
+    claimPendingUploads();
+    function onPending(event: Event) {
+      const detail = (event as CustomEvent).detail as
+        | { rowId?: string; columnId?: string; fallbackMd?: string | null }
+        | undefined;
+      if (!detail || detail.rowId !== rowId || detail.columnId !== columnId) return;
+      if (detail.fallbackMd) {
+        // 日志没写成（存储不可用）：直接收下事件里带的 markdown，不经存储中转。
+        // 与 claimPendingUploads 同样要追加进恢复提示那份草稿——否则用户点「恢复」
+        // 会用旧草稿顶掉刚收下的图，而此时日志根本没写成、无从再认领，图就永久没了。
+        const md = detail.fallbackMd;
+        setContent((prev) => prev + md);
+        setDraftText((prev) => (prev === null ? prev : prev + md));
+        return;
+      }
+      claimPendingUploads();
+    }
+    window.addEventListener(PENDING_UPLOAD_EVENT, onPending);
+    return () => window.removeEventListener(PENDING_UPLOAD_EVENT, onPending);
+  }, [rowId, columnId, claimPendingUploads]);
+
+  const flushDraft = useCallback((): boolean => {
+    const action = draftFlushAction(hasUnsavedChanges(content, savedContent), showRestoreBanner);
+    try {
+      return applyDraftFlush(window.localStorage, draftStorageKey(rowId, columnId), content, action);
+    } catch {
+      // 连取 window.localStorage 本身都抛（极端隐私设置）：只有 write 才算失败，
+      // keep/remove 本就没有要保存的内容，离开是安全的。
+      return action !== "write";
     }
   }, [content, savedContent, rowId, columnId, showRestoreBanner]);
 
@@ -837,7 +872,7 @@ export function KnowhowCellEditor({
         setSaveError(LEAVE_BLOCKED_UPLOADING_HINT);
         return;
       }
-      if (!flushDraft(uploading)) {
+      if (!flushDraft()) {
         // 第一次：拦下并说明；第二次（用户此刻正看着那条警告仍要走）：强制放行。
         // 若没有这条逃生口，存储长期不可用时所有出口都被挡死——「取消」并入统一
         // 路径后最后一个无守卫出口也没了，用户会被永久关在弹窗里。
@@ -951,6 +986,12 @@ export function KnowhowCellEditor({
     }
     setUploading(true);
     setUploadError(null);
+    // 本批上传的唯一 id：日志按 <batchId>-<index> 去重，重试/并发不会让同一张图
+    // 在正文里出现两次。
+    const uploadBatchId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     // 记下开始时的正文与光标：落笔时若正文没变过，就插回用户当初粘贴的位置（正常
     // 情况，保住「插在光标处」的语义）；若正文在上传期间被改写过（如恢复草稿），
     // 那个偏移已无意义，改为追加到末尾——绝不拿旧偏移往新正文里劈。
@@ -969,18 +1010,29 @@ export function KnowhowCellEditor({
         applyInsertion(resolveUploadInsertion(startSnapshot, startCaret, contentRef.current, snippet));
         return;
       }
-      // 本格已经离开（用户在上传途中强制离开）：没有正文可插，就把图片写进该格草稿
-      // ——否则这张已经落到服务端的图既进不了任何内容、也回收不掉（无删除端点、无
-      // 生产 GC），成为永久孤儿。此刻同步读取当前草稿再叠加，与离开路径写下的草稿
-      // 竞争安全（localStorage 读改写在本标签页内是原子的）。
+      // 本格已经离开（用户在上传途中强制离开）：没有正文可插。**不写草稿键**——
+      // 那是新编辑器会正常清理/覆盖的东西，混进去就会出现「强退→立刻重开→旧上传
+      // 落地时草稿已被新实例清掉→图片永久无人引用」。改写入独立的待完成上传日志，
+      // 由该格的活实例或下次 mount 认领（见 claimPendingUploads）。
+      const entries = snippets.map((md, index) => ({ id: `${uploadBatchId}-${index}`, md }));
+      let journaled = false;
       try {
-        const key = draftStorageKey(rowId, columnId);
-        const next = draftAfterDetachedUpload(window.localStorage.getItem(key), snippet);
-        // next === null：草稿键已经没人认领（离开时清掉了、或更新的实例处置过）。
-        // 此时不写——凭闭包里那份旧 savedContent 造草稿会把用户诱导回旧内容。
-        if (next !== null) window.localStorage.setItem(key, next);
+        const key = pendingUploadStorageKey(rowId, columnId);
+        window.localStorage.setItem(key, appendPendingUploads(window.localStorage.getItem(key), entries));
+        journaled = true;
       } catch {
-        /* 存储不可用：这张图确实无处安放，属已知边界 */
+        /* 存储不可用：下面靠事件直接投递给活实例兜底 */
+      }
+      // 同标签页通知：storage 事件只跨标签页触发，同页重开的新实例收不到。
+      // 日志没写成时把 markdown 直接带在事件里，活实例仍能收下这张图。
+      try {
+        window.dispatchEvent(
+          new CustomEvent(PENDING_UPLOAD_EVENT, {
+            detail: { rowId, columnId, fallbackMd: journaled ? null : pendingUploadsMarkdown(entries) },
+          }),
+        );
+      } catch {
+        /* ignore */
       }
     };
     try {
@@ -993,20 +1045,6 @@ export function KnowhowCellEditor({
       landSnippets(); // 批量中途失败：已成功的那几张仍要落进正文
       setUploadError(extractErrorMessage(err, "图片上传失败，请重试"));
     } finally {
-      // 一张都没传成、而本格已经离开：把离开时留下的「占位草稿」按值清掉，别让它
-      // 变成没人认领的垃圾——日后 savedContent 被别处改动（如合并共享列的整组写入）
-      // 就会让这份与已保存内容不再相等的占位，冒充成一条「检测到未保存草稿」，
-      // 诱导用户恢复回旧内容。按值比对：只清我们自己写的那份，绝不误删更新的草稿。
-      if (!mountedRef.current && snippets.length === 0 && placeholderDraftRef.current !== null) {
-        try {
-          const key = draftStorageKey(rowId, columnId);
-          if (window.localStorage.getItem(key) === placeholderDraftRef.current) {
-            window.localStorage.removeItem(key);
-          }
-        } catch {
-          /* ignore */
-        }
-      }
       setUploading(false);
       // 上传结束，两条「上传中…」提示都过期了。必须连 LEAVE_BLOCKED_UPLOADING_HINT
       // 一起清：留着不只是常驻红字说假话，更会把「强制离开」那道门预先解锁——下一次

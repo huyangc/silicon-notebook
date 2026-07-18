@@ -2820,6 +2820,12 @@ export function KnowhowPanel({
             border-radius: 0;
           }
 
+          /* 窄屏浮窗几何已停用（见 use-floating-window 的 isFloatingDisabledWidth），
+             手柄按下去不会有任何反应——留着只是给出错误的可交互暗示。 */
+          .kh-modal-resize-handle {
+            display: none;
+          }
+
           .kh-split,
           .kh-split--split {
             grid-template-columns: 1fr;

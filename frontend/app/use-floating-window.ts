@@ -27,6 +27,7 @@ import {
   DEFAULT_MIN_VISIBLE,
   DEFAULT_MIN_WIDTH,
   DEFAULT_WINDOW_RECT,
+  clampRectSizeToViewport,
   clampToViewport,
   isFloatingDisabledWidth,
   nextRectOnDrag,
@@ -83,7 +84,11 @@ function readViewport(): Viewport {
 function readStoredRect(storageKey: string): WindowRect {
   if (typeof window === "undefined") return DEFAULT_WINDOW_RECT;
   try {
-    return parseWindowRect(window.sessionStorage.getItem(storageKey));
+    // 读出来就先按当前视口收一收宽高：记忆是跨「关弹窗/刷新」存活的，而 hook 在
+    // 弹窗关着时并不挂载、收不到 resize 事件。若只在 resize 时 clamp，「1280 下
+    // resize 到 1041 → 关掉弹窗 → 把窗口缩到 800 → 重开」就会把 1041px 原样贴回、
+    // 左右各溢出一大截（与 720→721 那条是同一个溢出，只是另一个入口）。
+    return clampRectSizeToViewport(parseWindowRect(window.sessionStorage.getItem(storageKey)), readViewport());
   } catch {
     // 隐私模式/存储被禁用等——静默回退默认，不影响浮窗本身可用。
     return DEFAULT_WINDOW_RECT;
@@ -400,17 +405,36 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
 
     function handleViewportResize() {
       if (disabledRef.current || isFloatingDisabledWidth(window.innerWidth)) return;
-      const size = measureSize();
-      if (!size) return;
       const viewport = readViewport();
       const current = rectRef.current;
-      const clamped = clampToViewport(
-        { x: current.x, y: current.y, width: size.width, height: size.height },
-        viewport,
-        { minVisible: DEFAULT_MIN_VISIBLE },
-      );
-      if (clamped.x === current.x && clamped.y === current.y) return; // 常见情况：本来就在界内，跳过一次无意义的 setState
-      scheduleRectUpdate((prev) => ({ ...prev, x: clamped.x, y: clamped.y }));
+      // 先规范化**记住的宽高**：窄屏期间几何被停用（style 返回 {}），从窄屏回到
+      // 宽屏时若不收一收，旧的桌面宽高会被原样贴回——实测 1280 下 resize 到
+      // 1041px、切 720 再切 721，卡片 right=1065、溢出 344px。用持久化的 rect 而
+      // 不是 measureSize()：跨断点这一刻 DOM 还是窄屏 CSS 下的临时尺寸。
+      const sized = clampRectSizeToViewport(current, viewport);
+      const measured = measureSize();
+      const width = sized.width ?? measured?.width ?? null;
+      const height = sized.height ?? measured?.height ?? null;
+      if (width === null || height === null) return;
+      const clamped = clampToViewport({ x: sized.x, y: sized.y, width, height }, viewport, {
+        minVisible: DEFAULT_MIN_VISIBLE,
+      });
+      // 常见情况：本来就在界内且宽高没被收窄，跳过一次无意义的 setState。
+      if (
+        clamped.x === current.x &&
+        clamped.y === current.y &&
+        sized.width === current.width &&
+        sized.height === current.height
+      ) {
+        return;
+      }
+      scheduleRectUpdate((prev) => ({
+        ...prev,
+        x: clamped.x,
+        y: clamped.y,
+        width: sized.width,
+        height: sized.height,
+      }));
     }
 
     window.addEventListener("resize", handleViewportResize);

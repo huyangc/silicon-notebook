@@ -12,6 +12,7 @@ import {
   nextRectOnResize,
   serializeWindowRect,
   parseWindowRect,
+  clampRectSizeToViewport,
   isFloatingDisabledWidth,
   FLOATING_DISABLED_MAX_WIDTH,
 } from "./floating-window-logic.ts";
@@ -258,4 +259,23 @@ test("isFloatingDisabledWidth: 720px 及以下停用浮窗几何（与 CSS 整�
 test("isFloatingDisabledWidth: 宽于断点则照常启用拖动/缩放几何", () => {
   assert.strictEqual(isFloatingDisabledWidth(721), false);
   assert.strictEqual(isFloatingDisabledWidth(1280), false);
+});
+
+test("clampRectSizeToViewport: 1280 下 resize 到 1041 → 回到 721 视口必须收窄（回归锁）", () => {
+  // 实测路径：1280 桌面 resize 到 1041px → 切 720（几何停用、看着正常）→ 切 721，
+  // 旧实现把 1041px 原样贴回，卡片 right=1065、在 721 视口里溢出 344px。
+  const remembered = { x: 24, y: 10, width: 1041, height: 800 };
+  const clamped = clampRectSizeToViewport(remembered, { width: 721, height: 900 });
+  assert.ok(clamped.width <= 721, `width ${clamped.width} 仍超出视口`);
+  assert.strictEqual(clamped.width, Math.round(721 * 0.96));
+});
+
+test("clampRectSizeToViewport: 视口装得下就原样返回（同一对象，不触发多余 setState）", () => {
+  const rect = { x: 0, y: 0, width: 600, height: 400 };
+  assert.strictEqual(clampRectSizeToViewport(rect, { width: 1280, height: 900 }), rect);
+});
+
+test("clampRectSizeToViewport: 没被 resize 过（null 宽高）保持 null，跟随 CSS", () => {
+  const rect = { x: 5, y: 5, width: null, height: null };
+  assert.deepStrictEqual(clampRectSizeToViewport(rect, { width: 400, height: 300 }), rect);
 });
