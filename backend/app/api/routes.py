@@ -567,6 +567,37 @@ def delete_knowhow_table(notebook_id: str, table_id: str) -> None:
         raise HTTPException(status_code=404, detail="Table not found")
     knowhow_api.build_projector(repo).delete_table_projection(detail.get("hidden_source_id"))
     repo.delete_knowhow_table(table_id)
+    # Deleting a table bulk-orphans every asset its cells referenced, and it is
+    # the one mutation that deliberately never schedules a projection (the table
+    # is gone), so the projection-completion trigger would never see it — if this
+    # was the notebook's only knowhow table, no later projection can ever fire.
+    # min_interval=0 deliberately BYPASSES the throttle: the throttle exists to
+    # bound how often the scan runs under continuous editing, but a delete is
+    # rare and is the last chance this notebook may get, so it must not be
+    # swallowed by a sweep that happened to run moments earlier. Backgrounded so
+    # a DELETE never waits on an O(assets x cells) scan.
+    #
+    # This pass normally only MARKS the freshly orphaned assets (the grace runs
+    # from first-seen-unreferenced), leaving removal to a later sweep. That is
+    # fine while other tables remain — their next projection reclaims them — but
+    # if this was the notebook's LAST knowhow table, no later projection can ever
+    # fire and the marks would never mature: the files would survive until the
+    # notebook itself is deleted, i.e. exactly the "GC never runs" state this
+    # trigger exists to end.
+    #
+    # waive_grace_if_no_tables is this route's INTENT, not its observation: the
+    # sweep re-reads "does this notebook still have a table" under the write
+    # lock before acting on it, because another request can create one (and
+    # upload a draft image into it) between here and the background worker's
+    # scan. Both must hold — asked for by a last-table delete, and still true at
+    # deletion time — or the grace stays in force. See sweep_orphan_assets.
+    knowhow_api.maybe_sweep_orphan_assets(
+        repo,
+        notebook_id,
+        min_interval=0,
+        background=True,
+        waive_grace_if_no_tables=True,
+    )
 
 
 @router.post(
@@ -794,7 +825,21 @@ def patch_knowhow_cell(
         repo.validate_cell_target(row_id, column_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    repo.update_knowhow_cell(row_id, column_id, body.content_md)
+    # Refuse to persist a NEWLY dangling asset:// link (the image was reclaimed
+    # while it lived only in this browser draft). We cannot restore the file, but
+    # silently writing a dead reference would hand the user a broken image with
+    # no explanation. The store re-checks these ids inside its own write
+    # transaction, so a sweep running right now cannot slip between us.
+    current_row = next(r for r in table["rows"] if r["id"] == row_id)
+    added_assets = knowhow_api.newly_added_asset_refs(
+        current_row.get("cells", {}).get(column_id, ""), body.content_md
+    )
+    try:
+        repo.update_knowhow_cell(
+            row_id, column_id, body.content_md, require_assets=added_assets
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
     knowhow_api.get_scheduler(repo).schedule(table_id)
     updated = repo.get_knowhow_table(table_id)
     row = next(r for r in updated["rows"] if r["id"] == row_id)
@@ -843,7 +888,28 @@ def patch_knowhow_cells_batch(
             repo.validate_cell_target(row_id, body.column_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    repo.update_knowhow_cells(row_ids, body.column_id, body.content_md)
+    # Same newly-dangling-asset guard as the single-cell route above. It cannot
+    # be skipped here just because this path is "internal": the editor saves
+    # every MERGED/shared cell through this endpoint, so a draft whose image was
+    # reclaimed reaches the database via THIS call, not the single-cell one. An
+    # asset is guarded if it is new to at least one target row.
+    current_rows_by_id = {row["id"]: row for row in table["rows"]}
+    added_assets = sorted(
+        {
+            asset_id
+            for row_id in row_ids
+            for asset_id in knowhow_api.newly_added_asset_refs(
+                current_rows_by_id[row_id].get("cells", {}).get(body.column_id, ""),
+                body.content_md,
+            )
+        }
+    )
+    try:
+        repo.update_knowhow_cells(
+            row_ids, body.column_id, body.content_md, require_assets=added_assets
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
     if row_ids:
         knowhow_api.get_scheduler(repo).schedule(table_id)
     updated = repo.get_knowhow_table(table_id)

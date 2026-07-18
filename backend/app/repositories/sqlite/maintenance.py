@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Iterator, Optional, Sequence
@@ -50,6 +52,21 @@ class SQLiteMaintenanceAdapter:
     def __init__(self, runtime: Any, *, retrieval: Callable[[], Any]) -> None:
         self._runtime = runtime
         self._retrieval = retrieval
+        # (notebook_id, asset_id) -> monotonic stamp of the FIRST sweep that
+        # found this asset unreferenced. Drives sweep_orphan_assets' grace
+        # period; see its docstring for why the clock has to start here rather
+        # than at upload time. Deliberately in memory, not a column: losing it
+        # on restart only RE-marks (delaying a deletion by one grace period),
+        # which errs toward keeping the user's data — the safe direction — and
+        # costs no migration/schema bump.
+        self._orphan_first_seen: dict[tuple[str, str], float] = {}
+        # Sweeps for different notebooks run in independent background threads
+        # (the projection scheduler submits each as its own job), so every read
+        # AND write of the mark dict has to hold this. Without it, one thread
+        # iterating while another inserts raises "dictionary changed size during
+        # iteration" — which the caller swallows, silently burning that
+        # notebook's throttle slot and delaying its cleanup.
+        self._orphan_marks_lock = threading.Lock()
 
     # -- SQLiteMaintenancePort ------------------------------------------------
 
@@ -662,10 +679,34 @@ class SQLiteMaintenanceAdapter:
 
     # -- knowhow-table assets (PR-2+3 Task 14) ---------------------------------
 
-    def sweep_orphan_assets(self, notebook_id: str) -> dict:
+    def sweep_orphan_assets(
+        self,
+        notebook_id: str,
+        *,
+        min_age_seconds: float = 0.0,
+        waive_grace_if_no_tables: bool = False,
+    ) -> dict:
         """Delete every ``notebook_assets`` row (+ on-disk file) in this
         notebook that no knowhow cell references any more, returning
         ``{"removed": n}``.
+
+        ``min_age_seconds`` requires an asset to have been seen unreferenced
+        for at least that long, across separate sweeps, before it is deleted
+        (default 0 = delete on the first sweep that finds it unreferenced).
+        The clock starts when the asset is first OBSERVED UNREFERENCED, not
+        when it was uploaded — those differ in the case that matters. A
+        reference can exist that this scan cannot see: the cell editor keeps
+        unsaved edits in the BROWSER (localStorage drafts), so an image
+        pasted-but-not-yet-saved, or one being MOVED from one cell to another,
+        is a live reference with no server-side trace. Keying the grace on
+        upload time would protect only freshly uploaded images and would delete
+        a long-lived image the instant it is cut from its old cell, before the
+        destination cell is saved. Keying it on "continuously unreferenced
+        since" protects both: the mark is dropped the moment a reference comes
+        back, so a completed move never trips it.
+
+        It is a mitigation, not a proof: a draft left unsaved for longer than
+        the grace window is still reclaimable.
 
         Reference scope is deliberately narrow: an asset counts as "kept"
         only if its id appears as an ``asset://<id>`` substring inside a
@@ -697,12 +738,25 @@ class SQLiteMaintenanceAdapter:
         """
         from pathlib import Path
 
+        # ``source_id IS NULL`` below restricts this to knowhow-pasted images.
+        # Source-derived images (migration 19: MinerU-extracted embedded
+        # figures, ``source_id`` set) are reachable ONLY through
+        # ``source_elements.metadata.asset_id`` and are served for the source
+        # view — an ``asset://<id>`` substring never appears for them anywhere,
+        # so the keeper scan would classify every single one as an orphan.
+        # They already have their own lifecycle (source removal / reparse
+        # cascade, notebook cascade), so they are simply not this sweep's
+        # business. Losing one costs a full re-parse, which is exactly what the
+        # image-retention stack exists to avoid — see
+        # test_knowhow_asset_gc_trigger.py::
+        # test_projection_run_never_touches_source_derived_images.
         with self._runtime.database.connect() as db:
             assets = db.execute(
-                "SELECT id FROM notebook_assets WHERE notebook_id=?",
+                "SELECT id FROM notebook_assets "
+                "WHERE notebook_id=? AND source_id IS NULL",
                 (notebook_id,),
             ).fetchall()
-            orphan_ids = [
+            unreferenced = [
                 row["id"]
                 for row in assets
                 if db.execute(
@@ -714,21 +768,137 @@ class SQLiteMaintenanceAdapter:
                 ).fetchone()
                 is None
             ]
-        if not orphan_ids:
+
+            # Marks for notebooks that no longer exist. The adapter is
+            # process-long-lived and a deleted notebook cascades its asset rows
+            # away and is then never swept again, so its entries would sit in
+            # the dict forever. Deciding this by AGE instead would be actively
+            # harmful: sweeps are edge-triggered (a projection, or a table
+            # being removed), so an old mark is NOT "stale", it usually means
+            # "that notebook simply has not been edited since". Dropping those
+            # would make the next sweep re-mark from scratch and start the grace
+            # over — a notebook edited less often than the grace window would
+            # then never reclaim anything, defeating the whole mechanism.
+            with self._orphan_marks_lock:
+                marked_notebooks = {key[0] for key in self._orphan_first_seen}
+            marked_notebooks.discard(notebook_id)
+            dead_notebooks = {
+                other
+                for other in marked_notebooks
+                if db.execute(
+                    "SELECT 1 FROM notebooks WHERE id = ? LIMIT 1", (other,)
+                ).fetchone()
+                is None
+            }
+
+        # Two phases. A reference that reappears (an image being moved between
+        # cells: gone from the source cell, still only in the destination
+        # cell's unsaved browser draft) clears the mark, so a completed move
+        # never reaches deletion.
+        unreferenced_set = set(unreferenced)
+        live_ids = {row["id"] for row in assets}
+
+        # Prune marks that can no longer do anything: assets this notebook no
+        # longer has (deleted by any other path), plus every mark belonging to a
+        # notebook that is itself gone (see above).
+        stamp = time.monotonic()
+        orphan_ids: list[str] = []
+        with self._orphan_marks_lock:
+            for key in [
+                key
+                for key in self._orphan_first_seen
+                if (key[0] == notebook_id and key[1] not in live_ids)
+                or key[0] in dead_notebooks
+            ]:
+                self._orphan_first_seen.pop(key, None)
+
+            # A reference that reappears (an image being moved between cells:
+            # gone from the source cell, still only in the destination cell's
+            # unsaved browser draft) clears the mark, so a completed move never
+            # reaches deletion.
+            for asset_id in live_ids - unreferenced_set:
+                self._orphan_first_seen.pop((notebook_id, asset_id), None)
+
+            if min_age_seconds <= 0:
+                orphan_ids = list(unreferenced)
+            else:
+                for asset_id in unreferenced:
+                    first_seen = self._orphan_first_seen.get((notebook_id, asset_id))
+                    if first_seen is None:
+                        self._orphan_first_seen[(notebook_id, asset_id)] = stamp  # mark
+                    elif stamp - first_seen >= min_age_seconds:
+                        orphan_ids.append(asset_id)
+
+        if not unreferenced:
             return {"removed": 0}
 
         asset_dir = Path(self._runtime.storage_dir) / "assets" / notebook_id
-        for asset_id in orphan_ids:
-            for stale_file in asset_dir.glob(f"{asset_id}.*"):
-                if stale_file.is_file():
-                    stale_file.unlink()
-
+        # Classification above ran on a read connection that is now closed. A
+        # cell save committing in that gap would restore an ``asset://`` link to
+        # a row we are about to delete — and cell references have no FK to stop
+        # it, so the user would be left with a live link pointing at a deleted
+        # row and a deleted file. Every writer (cell saves included) goes through
+        # database.write(), so re-running the keeper check INSIDE this write
+        # transaction serializes against them and closes that window. File
+        # removal stays inside the same transaction and still precedes the row
+        # delete, preserving the crash-self-healing order documented above.
+        removed: list[str] = []
         with self._runtime.database.write() as db:
-            db.executemany(
-                "DELETE FROM notebook_assets WHERE id=?",
-                [(asset_id,) for asset_id in orphan_ids],
+            # With ZERO knowhow tables left, the grace period is protecting
+            # nothing and is skipped. The grace exists to shield an asset that
+            # lives only in an unsaved browser draft, and a draft can only be
+            # rescued by saving it into a cell — with no table there is no cell
+            # to save into. This matters because the grace needs a LATER sweep
+            # to mature the mark, and sweeps are edge-triggered by projections:
+            # once the last table is gone no projection can ever fire again, so
+            # marks would never mature and the files would survive until the
+            # notebook itself was deleted — precisely the "GC never runs" state
+            # this trigger exists to end.
+            #
+            # It is decided HERE, inside the write transaction, rather than by
+            # the caller: another request can create a table and upload an image
+            # between a caller-side check and this worker's scan, and that fresh
+            # draft-only asset would then be reclaimed with no grace at all. Read
+            # under the write lock, the condition is true at deletion time or not
+            # at all.
+            grace_waived = waive_grace_if_no_tables and (
+                db.execute(
+                    "SELECT 1 FROM knowhow_tables WHERE notebook_id = ? LIMIT 1",
+                    (notebook_id,),
+                ).fetchone()
+                is None
             )
-        return {"removed": len(orphan_ids)}
+            for asset_id in unreferenced if grace_waived else orphan_ids:
+                still_unreferenced = (
+                    db.execute(
+                        "SELECT 1 FROM knowhow_cells c "
+                        "JOIN knowhow_rows r ON r.id = c.row_id "
+                        "JOIN knowhow_tables t ON t.id = r.table_id "
+                        "WHERE t.notebook_id = ? AND c.content_md LIKE ? LIMIT 1",
+                        (notebook_id, f"%asset://{asset_id}%"),
+                    ).fetchone()
+                    is None
+                )
+                if not still_unreferenced:
+                    with self._orphan_marks_lock:
+                        self._orphan_first_seen.pop((notebook_id, asset_id), None)
+                    continue
+                for stale_file in asset_dir.glob(f"{asset_id}.*"):
+                    if stale_file.is_file():
+                        # missing_ok: two sweeps can overlap if one ever outruns
+                        # the caller's throttle; losing that race must not abort
+                        # the remaining deletes.
+                        stale_file.unlink(missing_ok=True)
+                removed.append(asset_id)
+            if removed:
+                db.executemany(
+                    "DELETE FROM notebook_assets WHERE id=?",
+                    [(asset_id,) for asset_id in removed],
+                )
+        with self._orphan_marks_lock:
+            for asset_id in removed:
+                self._orphan_first_seen.pop((notebook_id, asset_id), None)
+        return {"removed": len(removed)}
 
 
 class ReadOnlySQLiteInspector:

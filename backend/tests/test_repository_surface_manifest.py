@@ -1860,8 +1860,8 @@ TASK6_KNOWHOW_ALLOWED_MEMBER_FILES = {
 # is registered both places since the two guards scan independently.
 # Mirrors Task 4's exact-consumer choice for `storage_dir` in assets.py.
 TASK6_KNOWHOW_ALLOWED_CONSUMERS = {
-    ("_runtime", "backend/app/services/knowhow/api.py:138"),
-    ("settings", "backend/app/services/knowhow/api.py:140"),
+    ("_runtime", "backend/app/services/knowhow/api.py:185"),
+    ("settings", "backend/app/services/knowhow/api.py:187"),
 }
 
 # Task 10 (knowhow-tables-pr1): the end-to-end projection -> retrieval
@@ -2314,6 +2314,13 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     "backend/app/main.py",
     "backend/tests/test_architecture_module_boundaries.py",
     "backend/tests/test_repository_runtime.py",
+    # Asset-GC trigger test: hooks database.write to prove the sweep re-checks
+    # references INSIDE the write transaction (a cell save committing between
+    # scan and delete must not lose its image). Reaching _runtime is the only
+    # way to intervene at that boundary; its internal line numbers are not API
+    # surface, and pinning them would make every future edit to this test file
+    # a manifest failure.
+    "backend/tests/test_knowhow_asset_gc_trigger.py",
     # kg-ingest-count fix: run_all 分三批(new/resume/reparse)+ EOF 新增 reparse 回归
     # 测试,移动了本文件既有 consumer sites 行号并新增 monkeypatch 调用点。测试内部
     # 行号非 API surface(同上面几个 test 文件)。
@@ -3094,6 +3101,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK2_SOURCE_ASSET_ALLOWED_IMPORTS
                     or site in TASK3_SOURCE_ASSET_ALLOWED_IMPORTS
                     or site in PAPER_META_STATUS_TASK4_ALLOWED_IMPORTS
+                    or site in ASSET_GC_TRIGGER_ALLOWED_IMPORTS
                 )
 
 
@@ -3662,7 +3670,7 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK14_KNOWHOW_P
 # import_table's/commit_append's forward-fill additions add +23 net lines
 # further above optimize_cell.
 TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS = {
-    ("_runtime", "backend/app/services/knowhow/api.py:716"),
+    ("_runtime", "backend/app/services/knowhow/api.py:880"),
 }
 # Its own HTTP-level test reaches the live app repository singleton via
 # app.api.deps.repository() (not a freshly constructed SQLiteRepository) to
@@ -3855,3 +3863,40 @@ MINERU_CLOUD_UPLOAD_ALLOWED_MEMBER_FILES = {
     for name in {"mineru_cloud_client", "source_elements"}
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MINERU_CLOUD_UPLOAD_ALLOWED_MEMBER_FILES
+
+# Orphan-asset GC trigger: sweep_orphan_assets shipped with no production
+# caller, so orphaned notebook_assets were never reclaimed. The caller added in
+# app/services/knowhow/api.py (run_projection_and_sweep, riding the debounced
+# projection scheduler under a per-notebook throttle) needs NOTHING registered
+# here for its own half — it reaches the sweep only through repo.maintenance,
+# the property Task 27 already exempted wholesale (see the Task 14 block
+# above). What DOES need registering is its test, which composes the real
+# facade the same way the sibling test_knowhow_asset_gc.py does: seed a
+# notebook + a projectable knowhow table, then assert the sweep's effect via
+# get_notebook_asset. Appended at EOF for the same zero-line-shift reason as
+# every other block above.
+ASSET_GC_TRIGGER_ALLOWED_IMPORTS = {
+    (
+        "backend/tests/test_knowhow_asset_gc_trigger.py",
+        32,
+        "app.services.sqlite_repository",
+        "SQLiteRepository",
+    ),
+}
+ASSET_GC_TRIGGER_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_asset_gc_trigger.py", name)
+    for name in {
+        "SQLiteRepository",
+        "_runtime",
+        "update_knowhow_cell",
+        "delete_notebook",
+        "create_notebook",
+        "create_knowhow_table",
+        "get_knowhow_table",
+        "add_knowhow_row",
+        "get_notebook_asset",
+        "update_knowhow_cells",
+        "list_knowhow_tables",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | ASSET_GC_TRIGGER_ALLOWED_MEMBER_FILES

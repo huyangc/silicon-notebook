@@ -266,22 +266,22 @@ INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
     # knowhow-tables PR-1 Task 6: KnowhowProjector (Task 5) is a plain
     # service, deliberately not wired onto the facade/RepositoryRuntime
     # composition root. build_projector() constructs one directly, mirroring
-    # app/api/deps.py's own "extract a narrow runtime port" precedent above
-    # (and Task 5's own test fixture, test_knowhow_projection.py::projector).
-    ("backend/app/services/knowhow/api.py", 138, "_runtime"): (
+    # app/api/deps.py's precedent + Task 5's own test fixture
+    # (138->185: the GC trigger + asset-ref helpers shifted it +47).
+    ("backend/app/services/knowhow/api.py", 185, "_runtime"): (
         "import/table API composition constructs the plain KnowhowProjector "
         "service directly, mirroring deps.py's narrow-runtime-port extraction"
     ),
     # PR-2+3 Task 8: optimize_cell resolves the per-user rewrite LLM client +
     # note_model_error the same "extract a narrow runtime port" way
-    # build_projector (line 138 above) already does — a second, independent
+    # build_projector (line 185 above) already does — a second, independent
     # call site in the same file (682->693: the get_scheduler weakref fix
-    # added lines ABOVE optimize_cell; build_projector's 138 is unshifted;
-    # 693->716: anchor-grouping-display's forward_fill_column import plus
-    # import_table's/commit_append's forward-fill additions add +23 net
-    # lines further ABOVE optimize_cell; build_projector's 138 stays
-    # unshifted).
-    ("backend/app/services/knowhow/api.py", 716, "_runtime"): (
+    # added lines ABOVE optimize_cell; 693->716: anchor-grouping-display's
+    # forward_fill_column import plus import_table's/commit_append's
+    # forward-fill additions add +23 net lines further ABOVE optimize_cell;
+    # 716->880: the GC trigger + asset-ref helpers above get_scheduler plus
+    # their imports add +164 net lines above optimize_cell).
+    ("backend/app/services/knowhow/api.py", 880, "_runtime"): (
         "LLM cell rewrite resolves the per-user rewrite LLM client + "
         "note_model_error via the same narrow-runtime-port extraction "
         "build_projector uses, a second independent call site"
