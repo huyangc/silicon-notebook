@@ -157,3 +157,99 @@ def test_no_bare_chinese_4xx_http_exception():
         "这些 4xx 的 detail 是中文用户文案，但没走 user_error()，前端会把它们"
         "压平成通用文案：\n" + "\n".join(offenders)
     )
+
+
+# ---------------------------------------------------------------------------
+# 反方向：user_error() 里的文案必须真的是中文（第四轮评审阻塞 1）
+# ---------------------------------------------------------------------------
+#
+# 上面那条查的是**反方向**（中文 detail 必须走 user_error），它挡不住
+# `user_error(400, "Quota exceeded")` —— 那句会合法通过全部门禁，然后英文原样
+# 上屏。而 AGENTS.md 写的是「用户可见错误一律中文」。
+#
+# 前端 errors.ts 的闸2 已经会把非中文文案退成通用文案（用户不会看到英文），
+# 但那是**兜底**：真出现了就意味着这条错误的可操作信息白丢了。这条测试是把
+# 缺陷挡在写码时。
+
+
+# 动态实参（变量 / f-string / 拼接）AST 看不出内容，**不静默跳过**：逐个登记，
+# 写清楚为什么它仍然满足「中文用户文案」这个契约、以及谁在覆盖它。
+# 键用「文件::函数名」而不是行号——行号会被无关改动推移。
+ALLOWED_DYNAMIC_USER_ERROR = {
+    "app/api/auth_routes.py::register": (
+        "detail 是同函数内两个中文字面量的三元选择（「用户名已被占用」/"
+        "「用户名不合法」），异常原文只用于分类、不外泄。真实响应由 "
+        "test_duplicate_username_marked_even_though_detail_is_a_variable 覆盖。"
+    ),
+}
+
+
+def _user_error_sites() -> tuple[list[str], list[str]]:
+    """扫全部 user_error() 调用点。
+
+    返回 (静态字面量里非中文的违规点, 动态实参的调用点标识)。
+    """
+    static_offenders: list[str] = []
+    dynamic_sites: list[str] = []
+
+    def visit(node: ast.AST, rel: str, func: str | None) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                visit(child, rel, child.name)
+                continue
+            if isinstance(child, ast.Call):
+                name = getattr(child.func, "id", None) or getattr(child.func, "attr", None)
+                if name == "user_error":
+                    kwargs = {kw.arg: kw.value for kw in child.keywords if kw.arg}
+                    args = list(child.args)
+                    message = kwargs.get("message", args[1] if len(args) > 1 else None)
+                    if isinstance(message, ast.Constant) and isinstance(message.value, str):
+                        if not CJK_RE.search(message.value):
+                            static_offenders.append(f"{rel}:{child.lineno}  {message.value!r}")
+                    else:
+                        dynamic_sites.append(f"{rel}::{func}")
+            visit(child, rel, func)
+
+    for path in sorted(APP_ROOT.rglob("*.py")):
+        rel = str(path.relative_to(APP_ROOT.parent))
+        if rel == "app/api/deps.py":
+            continue  # helper 自己的定义（message 是形参，不是文案）
+        visit(ast.parse(path.read_text(encoding="utf-8")), rel, None)
+    return static_offenders, dynamic_sites
+
+
+def test_static_user_error_messages_are_chinese():
+    """user_error() 的文案是**给终端用户看的**，按产品约定一律中文。
+
+    英文文案会被前端闸2 退成状态码通用文案：用户不会看到英文，但这条错误原本
+    要传达的可操作信息（该改什么、该找谁）就白丢了。
+    """
+    static_offenders, _ = _user_error_sites()
+    assert static_offenders == [], (
+        "这些 user_error() 的文案不是中文。用户可见错误一律中文（AGENTS.md）；"
+        "前端 errors.ts 的闸2 会把它们退成通用文案，可操作信息静默丢失：\n"
+        + "\n".join(static_offenders)
+    )
+
+
+def test_dynamic_user_error_sites_are_explicitly_registered():
+    """动态实参 AST 查不了内容 —— 那就**显式登记**，不许静默放过。
+
+    双向断言：新增的动态站点会红（有人绕过了静态检查），登记表里过期的条目也
+    会红（防止 allowlist 变成只增不减的坟场）。
+    """
+    _, dynamic_sites = _user_error_sites()
+    found = set(dynamic_sites)
+    registered = set(ALLOWED_DYNAMIC_USER_ERROR)
+
+    unregistered = sorted(found - registered)
+    assert unregistered == [], (
+        "这些 user_error() 的文案是动态实参，AST 看不出是不是中文。要么改成中文"
+        "字面量，要么登记进 ALLOWED_DYNAMIC_USER_ERROR 并写清理由：\n"
+        + "\n".join(unregistered)
+    )
+
+    stale = sorted(registered - found)
+    assert stale == [], (
+        "登记表里这些条目已经没有对应的调用点了，删掉它们：\n" + "\n".join(stale)
+    )
