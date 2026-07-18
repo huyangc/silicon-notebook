@@ -205,6 +205,15 @@ curl -s http://127.0.0.1:8000/api/health   # {"status":"ok","llm_configured":...
 bash scripts/check.sh                        # hermetic smoke + full pytest + frontend test/tsc/build
 ```
 
+`scripts/check.sh` also runs the contract gates below, each of which can be run on its own
+while iterating on the code it guards:
+
+```bash
+PYTHONPATH=backend python scripts/check_ask_modes_contract.py            # ask-mode id set
+PYTHONPATH=backend python scripts/check_object_type_labels_contract.py   # object_type display names
+PYTHONPATH=backend python scripts/check_ui_vocabulary.py                 # user-facing vocabulary
+```
+
 The backend writes structured JSONL logs under `.local/logs/` (`requests` / `events` /
 `llm`); see [Observability](#observability) to follow an upload or diagnose a stuck source.
 
@@ -263,6 +272,8 @@ Inside a notebook:
 - The Analysis menu itself contains only the promotion queue (admin), mark-base / mark-personal tier toggle (admin), and edge-review queue. Dashboard, Schema, and the full-screen Knowledge Graph are separate top-toolbar actions; no retired content-generation or derived-rule actions are exposed.
 
 Knowledge object types have a single source of truth for their display name: the backend `OBJECT_TYPE_LABELS` in `app/services/extraction_profiles.py`, delivered to the client as `KnowledgeTypeCount.label` by `GET /notebooks/{id}/knowledge-types`. Every call site that can reach that API label — the Knowledge browser's type tabs and object entries — renders it directly, so user-defined object types (for example the column names projected from knowhow tables) also show their proper Chinese name. Call sites that only hold an `object_type` string — the citation popover and the knowledge-graph canvas/side panel — fall back to a small built-in front-end table, `KG_TYPE_LABELS` in `frontend/app/kg-type-mark.tsx`, which is character-for-character identical to the backend constant; `scripts/check_object_type_labels_contract.py` runs inside `scripts/check.sh` as a hard gate that fails the build when the two copies drift. An unknown or custom type is displayed verbatim as its `object_type`, never Title-Cased into invented English. Because both tables are keyed by user-controlled strings, look them up with `Object.hasOwn(...)` rather than bare indexing: `constructor` and `__proto__` resolve through the prototype chain and yield inherited functions/objects instead of a miss.
+
+User-facing copy is under a vocabulary contract of its own, and `AGENTS.md`「界面词汇表」is its single source of truth: each row maps an internal term (基准库, chunk, KG, 抽取, 投影, 晋升, schema, deprecated, …) to the one word the interface may use. Internal names stay in code, types, comments, and the architecture docs — only strings rendered to a user get rewritten, and values that are *persisted* rather than rendered (the `Untitled notebook` default name, enum ids on the wire) are contracts, not copy, so they are never touched by a wording pass. `scripts/check_ui_vocabulary.py` enforces the table inside `scripts/check.sh`: it scans the rendered text of every `frontend/app` source — string literals plus JSX text nodes, with comments, identifiers, regex bodies, and `${…}` / `{…}` interpolations stripped — and fails the build on any blacklisted term. A second, independent check in the same script rejects raw enum fallbacks (`MAP[x] ?? x`), because a lookup that falls back to its own key starts rendering the backend's English enum id the moment the backend grows a value; use `label(MAP, value, fallback)` from `frontend/app/vocabulary.ts`, whose mandatory neutral fallback makes that bug unwritable. Deliberately echoing a *user-authored* string (a custom `object_type`, a user-defined schema field name) is written as an explicit `Object.hasOwn(...) ? ... : raw` instead, which also avoids the prototype-chain hazard above. The guard is a word blacklist, not a semantic checker: two rows are covered only in their unambiguous compound forms, since bare 节点 / 边 are legitimate in the graph view and 边 is a substring of 旁边 / 边框. `backend/tests/test_ui_vocabulary_guard.py` holds its positive and negative examples and additionally fails when a vocabulary-table row gains neither a matching rule nor a recorded exemption, so the blacklist cannot quietly drift back into covering only a subset of the table.
 
 Reparse preserves the source row and original file: it replaces source elements/chunks and their embeddings, and removes extraction runs plus source-derived knowledge before rebuilding. Delete performs the same source-derived cleanup, then deletes the source row (cascading source-owned records) and the local file.
 

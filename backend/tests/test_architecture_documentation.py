@@ -711,3 +711,54 @@ def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferre
         assert "延后为独立工作" in text, (
             f"{name} must keep the Pydantic/lifespan deferral factual"
         )
+
+
+def test_user_facing_vocabulary_guard_is_documented_in_both_readmes():
+    """界面词汇守卫是**开发约束**变更(新增硬门 + AGENTS.md 词汇契约),按仓库
+    Documentation Sync 规则必须同步两份 README:守卫存在、怎么单独跑、契约在哪。
+
+    review 阻塞 5:PR 把 check_ui_vocabulary.py 挂进了 check.sh 并在 AGENTS.md 立了
+    强制词汇契约,却只改了 AGENTS.md,两份 README 的开发/验证说明没跟。
+    """
+    _assert_phrases(
+        {
+            "README.md": "PYTHONPATH=backend python scripts/check_ui_vocabulary.py",
+            "README_zh.md": "PYTHONPATH=backend python scripts/check_ui_vocabulary.py",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "`AGENTS.md`「界面词汇表」is its single source of truth",
+            "README_zh.md": "真源是 `AGENTS.md`「界面词汇表」",
+        }
+    )
+    # 守卫的两条独立检查都要在文档里露出,否则「兜底即原值」会被当成风格建议。
+    _assert_phrases(
+        {
+            "README.md": "rejects raw enum fallbacks (`MAP[x] ?? x`)",
+            "README_zh.md": "拒绝「兜底即原值」（`MAP[x] ?? x`）",
+        }
+    )
+    # 自测文件是「黑名单不得退化成词表子集」的执行者,文档要指向它。
+    _assert_phrases(
+        {
+            "README.md": "backend/tests/test_ui_vocabulary_guard.py",
+            "README_zh.md": "backend/tests/test_ui_vocabulary_guard.py",
+        }
+    )
+
+
+def test_default_notebook_name_is_documented_as_a_contract_not_copy():
+    """`Untitled notebook` 是落库值,不是界面文案。review 阻塞 1:散文重写把它改成了
+    中文,同时打破 5 份文档与后端 3 处。文档侧把「持久化值 ≠ 文案」写明,免得下一轮
+    措辞调整又把它当英文散文扫掉。"""
+    _assert_phrases(
+        {
+            "README.md": "are contracts, not copy, so they are never touched by a wording pass",
+            "README_zh.md": "属于契约不属于文案，任何一轮措辞调整都不得顺手改动它们",
+        }
+    )
+    for name in ("README.md", "README_zh.md", "AGENTS.md", "architecture.md", "fangan_done.md"):
+        assert "Untitled notebook" in _read(name), (
+            f"{name} 不再钉着默认库名 Untitled notebook——文档与代码已失配"
+        )
