@@ -436,8 +436,9 @@ export type LeaveDecisionDuringUpload = { kind: "defer" | "commit"; intent: Leav
 //     移除」的话，旧时间戳仍在）。这样护住的是服务端根本看不见的活引用——「图片已
 //     粘贴、格子还没保存」和「图片正从一个格子搬到另一个格子」，它们此刻只存在于
 //     浏览器草稿里。
-// 总之：这条孤儿行不影响用户看到的内容，能否回收取决于该表此后是否再被投影。故
-// 文案只说「放弃」，不再向用户承诺「会尽量留着」这种在存储不可用时兑现不了的话。
+// 总之：这条孤儿行不影响用户看到的内容，能否回收取决于这个 notebook 此后还有没有
+// knowhow 活动（任一表被投影或被删）。故文案只说「放弃」，不再向用户承诺「会尽量
+// 留着」这种在存储不可用时兑现不了的话。
 export const LEAVE_WAITING_UPLOAD_HINT = "图片上传中，完成后会自动离开。";
 export const DISCARD_UPLOAD_AND_LEAVE_LABEL = "放弃上传并离开";
 
