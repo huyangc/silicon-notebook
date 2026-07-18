@@ -49,6 +49,32 @@ export const VIEWPORT_MAX_RATIO = 0.96;
 // 任何解析失败时都回退到这个值（或调用方显式传入的等价 fallback）。
 export const DEFAULT_WINDOW_RECT: WindowRect = { x: 0, y: 0, width: null, height: null };
 
+// 窄屏（与各弹窗 CSS 的 @media (max-width: 720px) 整屏规则同一个断点）不启用浮窗
+// 几何：CSS 把卡片改成整屏铺满，而本 hook 输出的是**内联** transform/width/height，
+// 内联样式优先级高于媒体查询——用户在桌面拖动/缩放过一次后，sessionStorage 里记下
+// 的桌面尺寸会被贴到窄屏卡片上，实测 600px 视口里 width 仍是 880px、右侧溢出
+// 280px（关闭按钮、视图切换、主操作按钮全被裁掉）。窄屏一律不输出几何、也不接
+// 拖动/缩放，交给 CSS 全权接管。
+export const FLOATING_DISABLED_MAX_WIDTH = 720;
+
+export function isFloatingDisabledWidth(viewportWidth: number): boolean {
+  return viewportWidth <= FLOATING_DISABLED_MAX_WIDTH;
+}
+
+// 把**记住的宽高**收进当前视口（与 nextRectOnResize 同一个 VIEWPORT_MAX_RATIO
+// 上限）。视口 clamp 此前只管 x/y，宽高原样留着：在宽屏 resize 到 1041px、切到
+// 窄屏（几何被停用、看着正常）、再回到 721px 时，style 会把 1041px 原样贴回，
+// 实测卡片 right=1065、在 721px 视口里溢出 344px。宽高必须一起规范化。
+// null 表示「没被 resize 过、跟随 CSS」，保持 null 不动。
+export function clampRectSizeToViewport(rect: WindowRect, viewport: Viewport): WindowRect {
+  const maxWidth = Math.round(viewport.width * VIEWPORT_MAX_RATIO);
+  const maxHeight = Math.round(viewport.height * VIEWPORT_MAX_RATIO);
+  const width = rect.width === null ? null : Math.min(rect.width, maxWidth);
+  const height = rect.height === null ? null : Math.min(rect.height, maxHeight);
+  if (width === rect.width && height === rect.height) return rect;
+  return { ...rect, width, height };
+}
+
 function clampNumber(value: number, min: number, max: number): number {
   const lo = Math.min(min, max);
   const hi = Math.max(min, max);

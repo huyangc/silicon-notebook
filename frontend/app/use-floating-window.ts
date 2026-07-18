@@ -27,7 +27,9 @@ import {
   DEFAULT_MIN_VISIBLE,
   DEFAULT_MIN_WIDTH,
   DEFAULT_WINDOW_RECT,
+  clampRectSizeToViewport,
   clampToViewport,
+  isFloatingDisabledWidth,
   nextRectOnDrag,
   nextRectOnResize,
   parseWindowRect,
@@ -82,7 +84,11 @@ function readViewport(): Viewport {
 function readStoredRect(storageKey: string): WindowRect {
   if (typeof window === "undefined") return DEFAULT_WINDOW_RECT;
   try {
-    return parseWindowRect(window.sessionStorage.getItem(storageKey));
+    // 读出来就先按当前视口收一收宽高：记忆是跨「关弹窗/刷新」存活的，而 hook 在
+    // 弹窗关着时并不挂载、收不到 resize 事件。若只在 resize 时 clamp，「1280 下
+    // resize 到 1041 → 关掉弹窗 → 把窗口缩到 800 → 重开」就会把 1041px 原样贴回、
+    // 左右各溢出一大截（与 720→721 那条是同一个溢出，只是另一个入口）。
+    return clampRectSizeToViewport(parseWindowRect(window.sessionStorage.getItem(storageKey)), readViewport());
   } catch {
     // 隐私模式/存储被禁用等——静默回退默认，不影响浮窗本身可用。
     return DEFAULT_WINDOW_RECT;
@@ -125,6 +131,19 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
     disabled = false,
   } = options;
 
+  // 窄屏（同各弹窗 CSS 的 720px 整屏断点）一律停用浮窗几何——内联样式会盖过媒体
+  // 查询，把桌面记忆的尺寸贴到整屏卡片上造成横向溢出（见 isFloatingDisabledWidth）。
+  const [narrowViewport, setNarrowViewport] = useState<boolean>(() =>
+    typeof window === "undefined" ? false : isFloatingDisabledWidth(window.innerWidth),
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sync = () => setNarrowViewport(isFloatingDisabledWidth(window.innerWidth));
+    sync();
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, []);
+
   const [rect, setRect] = useState<WindowRect>(() => readStoredRect(storageKey));
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
@@ -136,6 +155,13 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
   // 变化都重新绑定），靠闭包读 state 会拿到绑定那一刻的旧值（stale closure）；
   // 改读 ref 就总是最新值，不需要为了"读到最新 rect"而频繁重新绑定/解绑监听器。
   const rectRef = useRef(rect);
+  // 渲染侧（style/cursor）用 state 派生的 effectiveDisabled；命令式路径（拖动/
+  // 缩放/视口 clamp）**不能**读它派生的 ref——narrowViewport 要等一次提交才落到
+  // ref 上，而跨断点的那次 resize 事件就在同一轮里，会读到旧值：narrow→desktop
+  // 时 clamp 被跳过，记忆的桌面偏移原样贴回可能已变小的视口（卡片跑到屏外、而
+  // 此刻拖动已重新启用，够不回来）。故 ref 只跟显式 disabled（它不会在 resize
+  // 事件里变），窄屏与否一律用 isFloatingDisabledWidth 现场量。
+  const effectiveDisabled = disabled || narrowViewport;
   const disabledRef = useRef(disabled);
   const resizableRef = useRef(resizable);
   const minWidthRef = useRef(minWidth);
@@ -213,7 +239,7 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
 
   const onDragPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLElement>) => {
-      if (disabledRef.current) return;
+      if (disabledRef.current || isFloatingDisabledWidth(window.innerWidth)) return;
       if (event.pointerType === "mouse" && event.button !== 0) return; // 只响应鼠标主键；触屏/触控笔不受此限
       // header 上总跟着关闭/全屏/编辑等按钮（或 KnowhowRowContext 那类
       // role="button" 条目）——pointerdown 命中它们时必须放行，不能当成拖动
@@ -294,7 +320,7 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
 
   const onResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLElement>) => {
-      if (disabledRef.current || !resizableRef.current) return;
+      if (disabledRef.current || isFloatingDisabledWidth(window.innerWidth) || !resizableRef.current) return;
       if (event.pointerType === "mouse" && event.button !== 0) return;
       const size = measureSize();
       if (!size) return;
@@ -378,18 +404,37 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
     if (typeof window === "undefined") return;
 
     function handleViewportResize() {
-      if (disabledRef.current) return;
-      const size = measureSize();
-      if (!size) return;
+      if (disabledRef.current || isFloatingDisabledWidth(window.innerWidth)) return;
       const viewport = readViewport();
       const current = rectRef.current;
-      const clamped = clampToViewport(
-        { x: current.x, y: current.y, width: size.width, height: size.height },
-        viewport,
-        { minVisible: DEFAULT_MIN_VISIBLE },
-      );
-      if (clamped.x === current.x && clamped.y === current.y) return; // 常见情况：本来就在界内，跳过一次无意义的 setState
-      scheduleRectUpdate((prev) => ({ ...prev, x: clamped.x, y: clamped.y }));
+      // 先规范化**记住的宽高**：窄屏期间几何被停用（style 返回 {}），从窄屏回到
+      // 宽屏时若不收一收，旧的桌面宽高会被原样贴回——实测 1280 下 resize 到
+      // 1041px、切 720 再切 721，卡片 right=1065、溢出 344px。用持久化的 rect 而
+      // 不是 measureSize()：跨断点这一刻 DOM 还是窄屏 CSS 下的临时尺寸。
+      const sized = clampRectSizeToViewport(current, viewport);
+      const measured = measureSize();
+      const width = sized.width ?? measured?.width ?? null;
+      const height = sized.height ?? measured?.height ?? null;
+      if (width === null || height === null) return;
+      const clamped = clampToViewport({ x: sized.x, y: sized.y, width, height }, viewport, {
+        minVisible: DEFAULT_MIN_VISIBLE,
+      });
+      // 常见情况：本来就在界内且宽高没被收窄，跳过一次无意义的 setState。
+      if (
+        clamped.x === current.x &&
+        clamped.y === current.y &&
+        sized.width === current.width &&
+        sized.height === current.height
+      ) {
+        return;
+      }
+      scheduleRectUpdate((prev) => ({
+        ...prev,
+        x: clamped.x,
+        y: clamped.y,
+        width: sized.width,
+        height: sized.height,
+      }));
     }
 
     window.addEventListener("resize", handleViewportResize);
@@ -399,7 +444,7 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
   // --- 派生输出 -----------------------------------------------------------------
 
   const style = useMemo<CSSProperties>(() => {
-    if (disabled) return {};
+    if (effectiveDisabled) return {};
     return {
       transform: `translate3d(${rect.x}px, ${rect.y}px, 0)`,
       ...(rect.width !== null ? { width: `${rect.width}px` } : {}),
@@ -409,11 +454,11 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
       // 封顶到 VIEWPORT_MAX_RATIO，放开 max-height 也不会撑出屏幕。
       ...(rect.height !== null ? { height: `${rect.height}px`, maxHeight: "none" } : {}),
     };
-  }, [rect, disabled]);
+  }, [rect, effectiveDisabled]);
 
   const dragHandleStyle = useMemo<CSSProperties>(
-    () => ({ touchAction: "none", cursor: disabled ? undefined : isDragging ? "grabbing" : "grab" }),
-    [disabled, isDragging],
+    () => ({ touchAction: "none", cursor: effectiveDisabled ? undefined : isDragging ? "grabbing" : "grab" }),
+    [effectiveDisabled, isDragging],
   );
 
   const resizeHandleStyle = useMemo<CSSProperties>(() => ({ touchAction: "none" }), []);

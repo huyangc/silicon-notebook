@@ -2245,8 +2245,49 @@ export function KnowhowPanel({
           flex: 1 1 auto;
           min-height: 260px;
           display: grid;
-          grid-template-columns: 1fr 1fr;
           gap: 14px;
+        }
+
+        /* 三态视图：编辑/预览单栏铺满，并列双栏。 */
+        .kh-split--edit,
+        .kh-split--preview {
+          grid-template-columns: 1fr;
+        }
+        .kh-split--split {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        /* 工具栏右侧三选一视图切换（编辑/并列/预览）——分段控件，选中态浮起白底。
+           margin-left:auto 把它推到录入按钮的另一端；预览态录入按钮隐藏时它仍靠右。 */
+        .kh-view-switch {
+          margin-left: auto;
+          display: inline-flex;
+          align-items: center;
+          gap: 2px;
+          padding: 2px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          background: var(--soft);
+        }
+        .kh-view-switch-button {
+          display: inline-flex;
+          align-items: center;
+          gap: 5px;
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          padding: 4px 10px;
+          font-size: 12.5px;
+          color: var(--muted);
+          cursor: pointer;
+        }
+        .kh-view-switch-button:hover {
+          color: var(--ink);
+        }
+        .kh-view-switch-button--active {
+          background: #fff;
+          color: var(--ink);
+          box-shadow: 0 1px 2px rgba(24, 39, 75, 0.12);
         }
 
         .kh-editor-pane {
@@ -2762,13 +2803,31 @@ export function KnowhowPanel({
         }
 
         @media (max-width: 720px) {
+          /* 窄屏走整屏浮窗：card 是 100vw，overlay 若还留着 24px padding，卡片就被
+             推出视口 24px——右侧的关闭按钮、三态切换、「保存并下一格」会被裁掉
+             （600×900 实测 left=24/width=600/right=624）。与全屏态
+             (.kh-modal-overlay:has(> .kh-modal-card--fullscreen)) 同样的处理：
+             整屏就把 overlay 的内边距归零，由卡片自己撑满。 */
+          .kh-modal-overlay {
+            padding: 0;
+          }
+
           .kh-modal-card {
-            width: 100vw;
+            /* 用 100%（overlay 是 position:fixed;inset:0，已排除滚动条）而非 100vw
+               ——100vw 含经典滚动条宽度，窄化桌面窗口时同样会横向溢出。 */
+            width: 100%;
             max-height: 100vh;
             border-radius: 0;
           }
 
-          .kh-split {
+          /* 窄屏浮窗几何已停用（见 use-floating-window 的 isFloatingDisabledWidth），
+             手柄按下去不会有任何反应——留着只是给出错误的可交互暗示。 */
+          .kh-modal-resize-handle {
+            display: none;
+          }
+
+          .kh-split,
+          .kh-split--split {
             grid-template-columns: 1fr;
           }
 
