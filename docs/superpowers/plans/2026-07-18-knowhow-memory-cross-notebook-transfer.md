@@ -643,7 +643,15 @@ git commit -m "feat(knowhow): copy_table 编排（K-1 稳定id派生物+资产�
 def test_move_deletes_source_table_and_projection(repo):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
     src_tid = _table_with_row(repo, src_nb)
-    src_hidden = _settle(repo, src_tid)["hidden_source_id"]
+    # 必须 _project（不是裸 _settle）：add_knowhow_row 不自动调度投影，裸 _settle 会让
+    # hidden_source_id 为 None，下面的「投影已拆」断言就变成 source_id=NULL 恒不匹配的空转。
+    src_hidden = _project(repo, src_tid)["hidden_source_id"]
+    assert src_hidden, "源表未投影，删投影断言将空转"
+    with repo._connect() as db:
+        before = db.execute(
+            "SELECT COUNT(*) FROM knowledge_objects WHERE source_id=?", (src_hidden,)
+        ).fetchone()[0]
+    assert before > 0, "源表投影未产出 objects，删投影断言将空转"
 
     new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
 
@@ -680,13 +688,14 @@ def move_table(
     repo: Any, source_table_id: str, target_notebook_id: str, actor_id: str
 ) -> str:
     # 先复制并校验通过，再删源：删源失败也绝不丢数据。
+    # 删源内部顺序＝先拆投影、后删表行（反过来若拆投影失败，源的 chunks/chunks_fts/
+    # chunk_embeddings/KO 会永久不可回收地留在源笔记本继续被检索到——拆投影的唯一
+    # 调用方需要一个已被删掉的 knowhow_tables 行，而 hidden_source_id 只存在于该行）。
+    hidden = repo.get_knowhow_table(source_table_id).get("hidden_source_id")
     new_table_id = copy_table(repo, source_table_id, target_notebook_id, actor_id)
-    result = repo.delete_knowhow_table(source_table_id)
-    hidden = result.get("hidden_source_id")
     if hidden:
-        from app.services.knowhow.api import build_projector
-
         build_projector(repo).delete_table_projection(hidden)
+    repo.delete_knowhow_table(source_table_id)
     return new_table_id
 
 

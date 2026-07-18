@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
-from app.services.knowhow.api import get_scheduler
+from app.services.knowhow.api import build_projector, get_scheduler
 from app.services.knowhow.projection import cell_chunk_id, element_id
 from app.services.notebook_sharing import _ASSET_REF_RE, _rewrite_asset_refs
 
@@ -230,14 +230,21 @@ def copy_table(
 def move_table(
     repo: Any, source_table_id: str, target_notebook_id: str, actor_id: str
 ) -> str:
-    # 先复制并校验通过，再删源：删源失败也绝不丢数据。
+    # 三步顺序是这个函数的全部要害，两条边界都不能动：
+    # ① 先复制、复制成功了才碰源——copy_table 抛异常时源必须分毫未动。
+    # ② 拆源投影在删源表之前。反过来的话，拆投影一旦失败（copy_table 紧邻
+    #    调度了后台重投影，此刻必然有并发 SQLite 写者，busy timeout 上吃到
+    #    OperationalError 是现实可能），源表行已经没了，而 hidden_source_id
+    #    只存在于那条被删掉的行里：源库的 chunks/chunks_fts/chunk_embeddings/
+    #    KO 会永久且不可回收地活着（源 notebook 继续检索到已搬走的内容），
+    #    重试也无门——copy_table→snapshot_table 会因表已删而抛 KeyError。
+    #    按现在的顺序，任何一步失败都只留下「两边都在」的可恢复重复：用户
+    #    可以重试搬迁，也可以照常删掉源表。宁可重复，绝不丢失。
+    hidden = repo.get_knowhow_table(source_table_id).get("hidden_source_id")
     new_table_id = copy_table(repo, source_table_id, target_notebook_id, actor_id)
-    result = repo.delete_knowhow_table(source_table_id)
-    hidden = result.get("hidden_source_id")
     if hidden:
-        from app.services.knowhow.api import build_projector
-
         build_projector(repo).delete_table_projection(hidden)
+    repo.delete_knowhow_table(source_table_id)
     return new_table_id
 
 

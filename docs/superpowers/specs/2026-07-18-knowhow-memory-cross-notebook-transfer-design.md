@@ -87,10 +87,17 @@
 6. 调度 `ProjectionScheduler.schedule(new_table_id)` 在目标 KG 重建 objects/relations（`chunks`+`chunk_embeddings` 已在位且 text/section_path 不变 → **零重嵌入**）。best-effort，失败只记事件。
 
 ### 4.2 移动
-`mode='move'`：先执行 §4.1 完整复制**并校验通过**，再删源：
-1. `delete_knowhow_table(source_table_id)` → 得 `hidden_source_id`。
+`mode='move'`：先执行 §4.1 完整复制**并校验通过**，再删源。**删源内部顺序＝先拆投影、后删表行**：
+1. 复制前先读下 `hidden_source_id`（它只存在于 `knowhow_tables` 行里，删了行就再也拿不到）。
 2. `delete_table_projection(hidden_source_id)`（删源投影 + 源隐藏源）。
-3. 源 `notebook_assets` **不动**（沿用现删表语义）。
+3. `delete_knowhow_table(source_table_id)`（删源表行）。
+4. 源 `notebook_assets` **不动**（沿用现删表语义）。
+- **为什么是这个顺序（2 在 3 之前）**：若反过来先删表行、拆投影再失败，源的 chunks/`chunks_fts`/
+  `chunk_embeddings`/KO 会**永久且不可回收**地留在源笔记本里继续被检索到——`delete_table_projection`
+  的唯一生产调用方需要一个已不存在的 `knowhow_tables` 行，而 `hidden_source_id` 只存在于该行；
+  且 `copy_table` 紧接着调度了后台重投影，此刻存在并发写者，`delete_table_projection`
+  跨两个写事务、可能因 busy timeout 抛 `OperationalError`，并非纯理论窗口。
+  按本顺序，拆投影失败时源表行仍在 → 可重试移动、也可走正常删除路径，符合下面的「两边都留」承诺。
 - 删源在复制事务**之后**独立进行。删源失败：复制已成功，报「已复制，源未删除」，两边都留，用户可重试。**永不先删后复制**。
 
 ### 4.3 资产作用域

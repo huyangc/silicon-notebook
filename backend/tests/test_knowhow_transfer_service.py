@@ -126,6 +126,14 @@ def test_move_deletes_source_table_and_projection(repo):
     # 有没有真的被调用。
     src_hidden = _project(repo, src_tid)["hidden_source_id"]
     assert src_hidden, "源表未真正投影，测试前置条件不成立"
+    # 第二个空转口子：_settle 也接受 "failed"，而 ensure_hidden_source 跑在
+    # 行处理之前、KO 重建跑在之后——中途结构性失败会给出「truthy hidden +
+    # 零 objects」，让末尾 remaining == 0 换个路子重新空转。先钉住前置有料。
+    with repo._connect() as db:
+        before = db.execute(
+            "SELECT COUNT(*) FROM knowledge_objects WHERE source_id=?", (src_hidden,)
+        ).fetchone()[0]
+    assert before > 0, "源表投影未产出 objects，删投影断言将空转"
 
     new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
 
@@ -141,6 +149,59 @@ def test_move_deletes_source_table_and_projection(repo):
             "SELECT COUNT(*) FROM knowledge_objects WHERE source_id=?", (src_hidden,)
         ).fetchone()[0]
     assert remaining == 0
+
+def test_move_keeps_source_intact_when_projection_teardown_fails(repo, monkeypatch):
+    """拆投影失败必须留下「可恢复的重复」，而不是不可回收的幽灵。
+
+    这条钉的是 move_table 里三步的**顺序**：copy → 拆源投影 → 删源表。
+    反过来（先删表再拆投影）时，拆投影一旦失败，源表行没了、
+    hidden_source_id 只存在于那条被删掉的行里，源库的 chunks/chunks_fts/
+    chunk_embeddings/KO 就永久且不可回收地活着——源 notebook 会继续检索到
+    已经搬走的内容，而 delete_table_projection 的生产调用方需要一条不复存在
+    的 knowhow_tables 行才能重试；copy_table→snapshot_table 也会因表已删而
+    抛 KeyError，重试同样无门。这不是纸面风险：copy_table 紧邻着调度了后台
+    重投影，此刻必然存在并发 SQLite 写者，delete_table_projection 完全可能
+    在 busy timeout 上吃到 OperationalError。"""
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    src_hidden = _project(repo, src_tid)["hidden_source_id"]
+    assert src_hidden, "源表未真正投影，测试前置条件不成立"
+
+    class _BoomProjector:
+        def delete_table_projection(self, hidden_source_id):
+            raise RuntimeError("simulated delete_table_projection failure")
+
+    monkeypatch.setattr(kh_transfer, "build_projector", lambda _repo: _BoomProjector())
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError):
+        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+
+    # 源表必须原封不动地还在：可以重试搬迁，也可以照常删除——两边都留，不丢。
+    detail = repo.get_knowhow_table(src_tid)
+    assert detail["notebook_id"] == src_nb
+    assert len(detail["rows"]) == 1
+    assert detail["hidden_source_id"] == src_hidden
+
+def test_transfer_table_dispatches_copy_keeping_source(repo):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+
+    new_tid = kh_transfer.transfer_table(repo, src_tid, dst_nb, "user-x", mode="copy")
+
+    assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
+    assert repo.get_knowhow_table(src_tid)["notebook_id"] == src_nb  # copy 不删源
+
+def test_transfer_table_dispatches_move_removing_source(repo):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+
+    new_tid = kh_transfer.transfer_table(repo, src_tid, dst_nb, "user-x", mode="move")
+
+    assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
+    import pytest as _pytest
+    with _pytest.raises(KeyError):  # move 必须删源
+        repo.get_knowhow_table(src_tid)
 
 def test_transfer_table_rejects_bad_mode(repo):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
