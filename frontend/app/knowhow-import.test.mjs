@@ -204,46 +204,73 @@ test("canSubmitImport: anchor 列数不为一时不可提交", () => {
 });
 
 // --- extractErrorMessage ------------------------------------------------------------
+//
+// 它现在是 errors.ts 的 toUserMessage() 的别名（knowhow 面板 ~20 个调用点共用）。
+// 这批用例连同它的历史一起改写过：以前 knowhow-model 的 apiFetch() 裸抛
+// `${status} ${bodyText}`，所以这里自己解析状态码前缀和 JSON detail，并且
+// 「解析不出来就展示原文」——那正是把 `Internal Server Error` / `Not Found`
+// 写进用户错误条的那条路径。apiFetch() 改走 throwHumanizedHttpError() 之后
+// 那套解析全成了死代码，兜底规则也随之收紧：英文一律不给用户看。
 
-test("extractErrorMessage: 抽出 FastAPI JSON detail 中的纯中文错误", () => {
-  const err = new Error('400 {"detail":"列定义不能为空"}');
-  assert.strictEqual(extractErrorMessage(err), "列定义不能为空");
+// 静音 toUserMessage 兜底时写的 console.error（原始值本就该进 console，这里
+// 只是不让它污染测试输出）。
+function silenced(fn) {
+  const original = console.error;
+  console.error = () => {};
+  try {
+    return fn();
+  } finally {
+    console.error = original;
+  }
+}
+
+test("extractErrorMessage: 已翻译的中文错误原样保留", () => {
+  // 上游（apiFetch → throwHumanizedHttpError）给的就是人话，不能再加工。
+  assert.strictEqual(extractErrorMessage(new Error("列定义不能为空")), "列定义不能为空");
+  assert.strictEqual(extractErrorMessage(new Error("没有权限进行这个操作")), "没有权限进行这个操作");
 });
 
-test("extractErrorMessage: 非 400 状态码同样能抽出 detail", () => {
-  const err = new Error('404 {"detail":"Not Found"}');
-  assert.strictEqual(extractErrorMessage(err), "Not Found");
+test("extractErrorMessage: 英文技术串不进用户文案，走兜底", () => {
+  // 回归：这三条以前会被原样写进错误条。
+  silenced(() => {
+    assert.strictEqual(extractErrorMessage(new Error("Not Found")), "操作失败，请重试");
+    assert.strictEqual(extractErrorMessage(new Error("Internal Server Error")), "操作失败，请重试");
+    assert.strictEqual(
+      extractErrorMessage(new TypeError("Failed to fetch"), "解析文件失败，请重试"),
+      "解析文件失败，请重试"
+    );
+  });
 });
 
-test("extractErrorMessage: 响应体非 JSON 时去掉状态码前缀展示原文", () => {
-  const err = new Error("500 Internal Server Error");
-  assert.strictEqual(extractErrorMessage(err), "Internal Server Error");
+test("extractErrorMessage: 带 JSON 花括号的原文不直出（哪怕含中文）", () => {
+  silenced(() => {
+    assert.strictEqual(extractErrorMessage(new Error('400 {"detail":"列定义不能为空"}')), "操作失败，请重试");
+  });
 });
 
 test("extractErrorMessage: 空 message 时使用默认兜底文案", () => {
-  const err = new Error("");
-  assert.strictEqual(extractErrorMessage(err), "操作失败，请重试");
+  silenced(() => {
+    assert.strictEqual(extractErrorMessage(new Error("")), "操作失败，请重试");
+  });
 });
 
 test("extractErrorMessage: 支持调用方自定义兜底文案", () => {
-  const err = new Error("");
-  assert.strictEqual(extractErrorMessage(err, "解析文件失败，请重试"), "解析文件失败，请重试");
+  silenced(() => {
+    assert.strictEqual(extractErrorMessage(new Error(""), "解析文件失败，请重试"), "解析文件失败，请重试");
+  });
 });
 
-test("extractErrorMessage: 非 Error 实例（字符串）原样返回", () => {
-  assert.strictEqual(extractErrorMessage("weird string"), "weird string");
+test("extractErrorMessage: 非 Error 实例（字符串）走兜底而不是原样返回", () => {
+  silenced(() => {
+    assert.strictEqual(extractErrorMessage("weird string"), "操作失败，请重试");
+  });
 });
 
 test("extractErrorMessage: null/undefined 时使用默认兜底文案", () => {
-  assert.strictEqual(extractErrorMessage(null), "操作失败，请重试");
-  assert.strictEqual(extractErrorMessage(undefined), "操作失败，请重试");
-});
-
-test("extractErrorMessage: detail 字段非字符串（如 422 校验错误数组）时不崩溃", () => {
-  const err = new Error('422 {"detail":[{"loc":["file"],"msg":"field required"}]}');
-  const message = extractErrorMessage(err);
-  assert.strictEqual(typeof message, "string");
-  assert.ok(message.length > 0);
+  silenced(() => {
+    assert.strictEqual(extractErrorMessage(null), "操作失败，请重试");
+    assert.strictEqual(extractErrorMessage(undefined), "操作失败，请重试");
+  });
 });
 
 // --- 预览合并显示（真机反馈）。转置表导入时，行标题列的兄弟行在预览里

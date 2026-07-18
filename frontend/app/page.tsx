@@ -55,7 +55,7 @@ import { parseUrlLines } from "./url-sources";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { throwHumanizedHttpError, toUserMessage } from "./errors.ts";
 import {
   MODEL_ROLES, type ModelRole, type ServiceForm,
   buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
@@ -460,7 +460,10 @@ async function readAskStream<TResponse>(
     } else if (event.event === "cancelled") {
       throw new DOMException("已中断回答", "AbortError");  // 走 runAsk 的 isAbortError 干净分支
     } else if (event.event === "error") {
-      throw new Error(event.error);
+      // 后端 error 字段是给日志 / MCP 看的英文技术串,不能原样往上抛(上层
+      // 会把它当文案显示)。原始值由 toUserMessage 记进 console;后端刻意写
+      // 成中文的错误照旧透传。
+      throw new Error(toUserMessage(new Error(event.error), "回答没能完成，请重试"));
     } else {
       const _exhaustive: never = event;   // union 新增 tag 未处理时 tsc 报错
       throw new Error(`unknown ask stream event: ${JSON.stringify(_exhaustive)}`);
@@ -1271,7 +1274,11 @@ export default function Home() {
             setToast("该问答已被取消");
             await loadSessions(nb);   // 后端对取消的首轮会话做了空会话清理,刷新列表去掉幽灵项
           } else {
-            setToast(d.status === "interrupted" ? "该问答因服务重启中断" : `该问答失败：${d.error || "未知错误"}`);
+            // d.error 是后端持久化的英文技术串(供日志 / MCP),不直出给用户;
+            // 后端写成中文的失败原因才透传。原始值进 console。
+            setToast(d.status === "interrupted"
+              ? "该问答因服务重启中断"
+              : toUserMessage(d.error ? new Error(d.error) : null, "该问答失败，请稍后重试"));
             await loadSessions(nb);   // 同上:失败/中断的首轮会话也可能已被后端清理
           }
         }
@@ -1637,7 +1644,13 @@ export default function Home() {
           return changed ? next : previous; // no re-render when nothing moved
         });
         if (justFailed && !cancelled) {
-          setStatusText(`来源处理失败：${justFailed.file_name || justFailed.title}${justFailed.error_message ? ` — ${justFailed.error_message}` : ""}`);
+          // source.error_message 由后端写成 `ValueError: ...` / MinerU 的英文
+          // 提示(见 source_ingestion.py),是给日志和 MCP 看的。只有它本身就是
+          // 中文可展示文案时才附给用户;否则原文只进 console(兜底传空串)。
+          const failureHint = justFailed.error_message
+            ? toUserMessage(new Error(justFailed.error_message), "")
+            : "";
+          setStatusText(`来源处理失败：${justFailed.file_name || justFailed.title}${failureHint ? ` — ${failureHint}` : ""}`);
         }
         if (reachedExtracted && currentNotebookId) {
           await loadNotebookCollection();
@@ -3133,9 +3146,12 @@ export default function Home() {
     }
   }
 
+  // 全工作区 catch 分支的统一出口(90+ 调用点)。此前它直出 err.message,于是
+  // fetch 自身 reject 时用户看到的是「服务异常：Failed to fetch」——那条路径
+  // 根本进不了 throwHumanizedHttpError。现在一律过人话层:已翻译的中文原样保留
+  // (保住 401/403/404/409 的语义差别),英文技术串只进 console。
   function reportError(error: unknown) {
-    const message = error instanceof Error ? error.message : String(error);
-    setStatusText(`服务异常：${message}`);
+    setStatusText(toUserMessage(error, "服务出了点问题，请稍后重试"));
   }
 
   async function handleLogout() {

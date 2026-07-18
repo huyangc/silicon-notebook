@@ -15,7 +15,7 @@ import {
   type AgentTokenDraft,
 } from "./agent-token-model";
 import { API_BASE, authHeaders, clearToken, getToken } from "./auth";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { throwHumanizedHttpError, toUserMessage } from "./errors.ts";
 import {
   canEditMemory,
   canPromoteMemory,
@@ -214,7 +214,7 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
       });
     }).catch((cause) => {
       if (!controller.signal.aborted && epoch === requestEpochRef.current) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(toUserMessage(cause, "加载失败，请稍后重试"));
       }
     }).finally(() => {
       if (epoch === requestEpochRef.current) setLoading(false);
@@ -249,7 +249,7 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
       setProfileHasMore(agentPageHasMore(page));
     } catch (cause) {
       if (!controller.signal.aborted && epoch === requestEpochRef.current && mountedRef.current) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(toUserMessage(cause, "加载失败，请稍后重试"));
       }
     } finally {
       if (profilePageControllerRef.current === controller) {
@@ -278,7 +278,7 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
       setTokenHasMore(agentPageHasMore(page));
     } catch (cause) {
       if (!controller.signal.aborted && epoch === requestEpochRef.current && mountedRef.current) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(toUserMessage(cause, "加载失败，请稍后重试"));
       }
     } finally {
       if (tokenPageControllerRef.current === controller) {
@@ -299,7 +299,7 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
       return controller.signal.aborted || !mountedRef.current ? null : result;
     } catch (cause) {
       if (!controller.signal.aborted && mountedRef.current) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(toUserMessage(cause));
       }
       return null;
     } finally {
@@ -522,7 +522,7 @@ export function MemoryPanel({
       setSelectedIds((prev) => { const next = new Set(prev); next.delete(memory.id); return next; });
       setRefresh((value) => value + 1);
     } catch (cause) {
-      if (!controller.signal.aborted && mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause));
+      if (!controller.signal.aborted && mountedRef.current) setError(toUserMessage(cause));
     } finally {
       mutationControllersRef.current.delete(controller);
       if (mountedRef.current) setBusyId(null);
@@ -546,7 +546,7 @@ export function MemoryPanel({
       setSelectionMode(false);
       setRefresh((value) => value + 1);
     } catch (cause) {
-      if (!controller.signal.aborted && mountedRef.current) setError(cause instanceof Error ? cause.message : String(cause));
+      if (!controller.signal.aborted && mountedRef.current) setError(toUserMessage(cause));
     } finally {
       mutationControllersRef.current.delete(controller);
       if (mountedRef.current) setBusyId(null);
@@ -588,7 +588,7 @@ export function MemoryPanel({
       })
       .catch((cause) => {
         if (controller.signal.aborted || listRequestEpochRef.current !== epoch) return;
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(toUserMessage(cause, "加载失败，请稍后重试"));
       })
       .finally(() => {
         if (listRequestEpochRef.current === epoch) setLoading(false);
@@ -646,7 +646,7 @@ export function MemoryPanel({
       setRefresh((value) => value + 1);
     } catch (cause) {
       if (!controller.signal.aborted && mountedRef.current) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(toUserMessage(cause));
       }
     } finally {
       mutationControllersRef.current.delete(controller);
@@ -670,7 +670,7 @@ export function MemoryPanel({
       }
     } catch (cause) {
       if (!controller.signal.aborted && mountedRef.current) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(toUserMessage(cause));
       }
     } finally {
       mutationControllersRef.current.delete(controller);
@@ -1011,7 +1011,7 @@ export function MemorySaveDialog({
       })
       .catch((cause) => {
         if (!controller.signal.aborted && requestEpochRef.current === epoch) {
-          setError(cause instanceof Error ? cause.message : String(cause));
+          setError(toUserMessage(cause, "加载失败，请稍后重试"));
         }
       })
       .finally(() => {
@@ -1055,7 +1055,7 @@ export function MemorySaveDialog({
       if (!controller.signal.aborted && mountedRef.current) onSaved(memory);
     } catch (cause) {
       if (!controller.signal.aborted && mountedRef.current) {
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(toUserMessage(cause));
       }
     } finally {
       if (saveControllerRef.current === controller) saveControllerRef.current = null;

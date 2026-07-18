@@ -413,6 +413,20 @@ test("admin 总览的非 403 错误给人话(不是裸状态码)", async () => {
   assert.equal(error.message, "服务暂时不可用，请稍后再试");
 });
 
+test("admin 总览的 403 哨兵不吞诊断(状态码 + detail + request id 进 console)", async () => {
+  // 顺带收口:哨兵此前在读取诊断前就抛,「明明是管理员却看到无权限」无从查起。
+  const { error, logs } = await callFailing(
+    () => fetchAdminUsers(),
+    jsonResponse(403, { detail: "仅管理员可查看用户总览" }, { "X-Request-Id": "req-adm" })
+  );
+  assert.equal(error.message, "forbidden");
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /\[admin\]/);
+  assert.match(logs[0], /403/);
+  assert.match(logs[0], /仅管理员可查看用户总览/);
+  assert.match(logs[0], /req-adm/);
+});
+
 // ---------------------------------------------------------------------------
 // 非 HTTP-Response 错误(评审阻塞 1):fetch 自身 reject / 流式 error / job error
 //
