@@ -199,9 +199,15 @@ def scan(path: Path) -> list[tuple[int, str, str]]:
     hits: list[tuple[int, str, str]] = []
 
     def record(off: int, text: str, unit: str) -> None:
-        if CJK.search(unit):
-            for term in terms_in(unit):
-                hits.append((text.count("\n", 0, off) + 1, term, unit.strip()))
+        if not CJK.search(unit):
+            return
+        # A JSX text run starts right after the previous tag's `>`, so it usually
+        # opens with a newline + indentation; counting newlines up to its *start*
+        # would name the line above the copy. Skip the run's leading whitespace so
+        # the reported line is the one the developer has to edit.
+        off += len(unit) - len(unit.lstrip())
+        for term in terms_in(unit):
+            hits.append((text.count("\n", 0, off) + 1, term, unit.strip()))
 
     # Pass 1 — string literals (title=/label:/placeholder/toast/…). Drop ${…}.
     for m in STRING.finditer(blanked):

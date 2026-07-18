@@ -127,6 +127,23 @@ def test_同一单元里多个黑话全部报出(tmp_path):
     assert {"基准库", "抽取", "chunk"} <= set(hits)
 
 
+def test_报出的行号指向文案本身而不是上一行(tmp_path):
+    """JSX 文本节点紧接上一个标签的 `>` 起算,天然以换行+缩进开头;若按 run 起点
+    数行,报出来的会是文案上面那一行,大文件里很误导。"""
+    code = (
+        "export const view = (\n"          # 1
+        "  <label>\n"                      # 2
+        "    <input />\n"                  # 3
+        "    同时抽取到知识图谱\n"            # 4 ← 文案真正所在行
+        "  </label>\n"                     # 5
+        ");\n"
+    )
+    path = tmp_path / "line.tsx"
+    path.write_text(code, encoding="utf-8")
+    hits = [(line, term) for line, term, _unit in guard.scan(path)]
+    assert (4, "抽取") in hits, hits
+
+
 # --------------------------------------------------------------------------
 # 3. 反例:允许的上下文必须通过
 # --------------------------------------------------------------------------
