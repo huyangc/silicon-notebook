@@ -635,6 +635,8 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 
 浏览器 DevTools console 会镜像请求为 `[api] 方法 /路径 -> 状态 N毫秒 (request_id)`；轮询期间 UI 显示当前阶段/已用时长，失败时展示来源的 `error_message`。
 
+错误信息按受众分流。用户看到的一律是中文：前端把 HTTP 状态码映射成人话（「没有权限进行这个操作」「没找到，可能已被删除」），裸状态码和后端英文原文都不会出现在界面上。唯一的例外是后端本来就为用户写成中文的 4xx `detail`（如「用户名已被占用」），它比泛化文案更具体，原样展示；5xx 一律泛化，避免内部错误外泄。开发者与 MCP agent 看到的东西不变：后端 `detail` 在 API 响应和日志里保持原样，而完整诊断——状态码、状态文本、后端 `detail`、以及能和 `requests.jsonl` 对上的 `X-Request-Id`——在每次请求失败时写进 DevTools console。所以「它说我没权限」这类问题靠 console 里的 request id 定位，而不是猜是哪道校验拒的。
+
 部署机慢因排查可直接在持有 `.local/` 的机器上运行 `python3 scripts/diag_slow.py`。
 脚本除汇总请求、事件和 LLM 延迟外，还会基于 DB 聚合与 scale-index manifest 输出
 strict reasoning / PPR 路径审计，用来判断大库是否只走 indexed core、chunk/relation ANN

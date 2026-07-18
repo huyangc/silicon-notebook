@@ -713,6 +713,8 @@ default.
 
 In the browser, the DevTools console mirrors requests as `[api] METHOD /path -> status Nms (request_id)`; while polling, the UI shows the pending stage / elapsed time and surfaces a source's `error_message` on failure.
 
+Error messages are split by audience. What a user sees is always Chinese: the frontend maps the HTTP status code to a readable sentence ("没有权限进行这个操作", "没找到，可能已被删除"), so a raw status line or an English backend string never reaches the interface. The one exception is a 4xx `detail` the backend already wrote in Chinese for the user (for example "用户名已被占用"), which is shown verbatim because it is more specific than the generic message; 5xx is always generalized so internal failures cannot leak. What a developer or an MCP agent sees is unchanged: backend `detail` stays as-is in the API response and in the logs, and the full diagnostic — status, status text, backend `detail`, and the `X-Request-Id` that correlates with `requests.jsonl` — is written to the DevTools console on every failed request. So "it says I have no permission" is answered by reading the console's request id, not by guessing which check rejected it.
+
 For deployment slow-path triage, run `python3 scripts/diag_slow.py` on the host that owns
 `.local/`. Besides request/event/LLM summaries, it prints a strict-reasoning / PPR audit
 from DB aggregates and scale-index manifests so large libraries can be checked for
