@@ -22,6 +22,13 @@ import {
   insertImageMarkdown,
   deriveAltFromFilename,
   isImageFile,
+  normalizeCellViewMode,
+  CELL_VIEW_MODE_STORAGE_KEY,
+  VIEW_MODE_EDIT_LABEL,
+  VIEW_MODE_SPLIT_LABEL,
+  VIEW_MODE_PREVIEW_LABEL,
+  SWITCH_GUARD_MESSAGE,
+  SWITCH_GUARD_DISCARD_LABEL,
 } from "./knowhow-cell-editor-logic.ts";
 
 // --- UI 文案常量：byte-exact vs 规格②路A / 任务简报原文 -------------------------
@@ -297,4 +304,35 @@ test("isImageFile: 非图片类型返回 false", () => {
 
 test("isImageFile: 空类型返回 false", () => {
   assert.strictEqual(isImageFile({ type: "" }), false);
+});
+
+// --- 编辑器视图三态 + 切格子守卫文案 ---------------------------------------------
+
+test("normalizeCellViewMode: null / 空 / 非法值 → edit（唯一默认口径）", () => {
+  assert.strictEqual(normalizeCellViewMode(null), "edit");
+  assert.strictEqual(normalizeCellViewMode(""), "edit");
+  assert.strictEqual(normalizeCellViewMode("garbage"), "edit");
+  assert.strictEqual(normalizeCellViewMode("EDIT"), "edit"); // 大小写敏感
+});
+
+test("normalizeCellViewMode: 三个合法值原样返回", () => {
+  assert.strictEqual(normalizeCellViewMode("edit"), "edit");
+  assert.strictEqual(normalizeCellViewMode("split"), "split");
+  assert.strictEqual(normalizeCellViewMode("preview"), "preview");
+});
+
+test("CELL_VIEW_MODE_STORAGE_KEY: 与全屏键区分、editor 专用", () => {
+  assert.strictEqual(CELL_VIEW_MODE_STORAGE_KEY, "knowhow.cellEditor.viewMode");
+});
+
+test("视图三态标签：编辑 / 并列 / 预览", () => {
+  assert.strictEqual(VIEW_MODE_EDIT_LABEL, "编辑");
+  assert.strictEqual(VIEW_MODE_SPLIT_LABEL, "并列");
+  assert.strictEqual(VIEW_MODE_PREVIEW_LABEL, "预览");
+});
+
+test("切格子守卫：放弃按钮文案 + 提醒含未保存/可恢复", () => {
+  assert.strictEqual(SWITCH_GUARD_DISCARD_LABEL, "放弃并切换");
+  assert.match(SWITCH_GUARD_MESSAGE, /未保存/);
+  assert.match(SWITCH_GUARD_MESSAGE, /可恢复/);
 });

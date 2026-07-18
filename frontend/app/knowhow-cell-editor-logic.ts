@@ -175,3 +175,31 @@ export function deriveAltFromFilename(filename: string): string {
 export function isImageFile(file: { type: string }): boolean {
   return typeof file?.type === "string" && file.type.startsWith("image/");
 }
+
+// --- 编辑器视图三态（编辑/并列/预览）--------------------------------------------
+
+// 编辑态浮窗的三种视图：edit=单栏专注写作（默认）、split=编辑+预览并列对比、
+// preview=预览铺满（隐藏编辑器）。全屏与本视图态正交（见 knowhow-cell-editor.tsx
+// 的 useFullscreenToggle），各用各的 sessionStorage 键、互不影响。
+export type CellViewMode = "edit" | "split" | "preview";
+
+// per-session 记忆键（跨会话回落 edit）；与全屏键 FULLSCREEN_STORAGE_KEY 分开。
+export const CELL_VIEW_MODE_STORAGE_KEY = "knowhow.cellEditor.viewMode";
+
+// sessionStorage 读到的原始值归一化：非 "split"/"preview" 的一切（null、旧值、
+// 脏值）都回落默认 "edit"。抽纯函数便于单测，也保证组件侧默认口径只有一处。
+export function normalizeCellViewMode(raw: string | null): CellViewMode {
+  return raw === "split" || raw === "preview" ? raw : "edit";
+}
+
+// 三态分段控件按钮文案。
+export const VIEW_MODE_EDIT_LABEL = "编辑";
+export const VIEW_MODE_SPLIT_LABEL = "并列";
+export const VIEW_MODE_PREVIEW_LABEL = "预览";
+
+// 切兄弟格的未保存守卫（与关闭守卫 CLOSE_GUARD_* 同款「未保存提醒 + 明确丢弃」，
+// 只是离开动作是"切到另一格"而非"关闭"；放弃时草稿同步保留、可恢复）。「继续
+// 编辑」复用 CLOSE_GUARD_CONTINUE_LABEL。
+export const SWITCH_GUARD_MESSAGE =
+  "有未保存的修改，确定要切换到另一格吗？（草稿已自动保存，下次打开可恢复）";
+export const SWITCH_GUARD_DISCARD_LABEL = "放弃并切换";
