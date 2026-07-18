@@ -75,12 +75,16 @@ async function memoryApi<T>(path: string, options: RequestInit = {}): Promise<T>
 
 type MemoryDraft = { title: string; content_md: string; tags: string };
 
-// C4「复制/移动到…」结果提示——两个字段各自独立(可能只有一个非空,也可能两个
-// 同时非空):warning 对应 transfer-model.ts summarizeTransferResults() 的
-// copiedSourceNotRemoved 子集(副本已落地,需要用户手动清源,别再重试),failure
-// 对应普通 status==="failed" 的子集。两者渲染成不同色调的横幅,不能合并成一条
-// 消息——AMENDMENT 2 明确要求两者视觉上可区分。
-type TransferNotice = { warning: string | null; failure: string | null };
+// C4「复制/移动到…」结果提示——三个字段各自独立(同一时刻至多一个非空,由
+// submitTransfer 互斥地设置):warning 对应 transfer-model.ts
+// summarizeTransferResults() 的 copiedSourceNotRemoved 子集(副本已落地,需要
+// 用户手动清源,别再重试),failure 对应普通 status==="failed" 的子集,两者渲染
+// 成不同色调的横幅,不能合并成一条消息——AMENDMENT 2 明确要求两者视觉上可区分。
+// success 是复审 Minor 补充:批量结果里没有 warning/failure(即全部成功)、且
+// mode==="copy" 才设置——move 的成功靠列表刷新自然可见(条目从当前视图消失/
+// 搬走了),但 copy 源视图不变、目标又不在眼前,不给提示用户没法确认"点了到底
+// 有没有效果"。复用同一套 .memory-transfer-notice 视觉,不新造 chrome。
+type TransferNotice = { warning: string | null; failure: string | null; success: string | null };
 
 function draftFor(memory: Pick<MemoryRecord, "title" | "content_md" | "tags">): MemoryDraft {
   return { title: memory.title, content_md: memory.content_md, tags: memory.tags.join(", ") };
@@ -486,6 +490,12 @@ export function MemoryPanel({
   // 时选中状态被其它路径意外改动而导致 sourceNotebookId 和 ids 对不上。
   const [pendingTransfer, setPendingTransfer] = useState<{ ids: string[]; sourceNotebookId: string } | null>(null);
   const [transferNotice, setTransferNotice] = useState<TransferNotice | null>(null);
+  // Important 4（复审）：批量/单条传输弹窗自己的「同时抽取到知识图谱」勾选
+  // 状态——与上面 confirm 编辑态那个 extractKg 分开维护(两处是不同流程各自
+  // 的一次性选择,合用一个 state 会在"正编辑一条候选 memory 的同时打开传输
+  // 弹窗"这类交叠场景里互相污染)。两处打开传输弹窗的入口都会把它重置回
+  // 默认 true,保证每次打开都是"默认勾选"，匹配 confirm 时的默认行为。
+  const [transferExtractKg, setTransferExtractKg] = useState(true);
   const listRequestEpochRef = useRef(0);
   const listControllerRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
@@ -709,7 +719,16 @@ export function MemoryPanel({
   // modal 了"——批量级失败(如目标笔记本不可写/不存在，后端 4xx)必须让它继续
   // 抛出、不能在这里吞掉，好让 DestinationPicker 自己的 catch 接管错误态、解锁
   // 「确认」按钮重试；只有 200 成功之后才关 modal、清选中、刷新列表——这里没
-  // 有 try/catch 包住 await 本身正是为了让异常原样穿透出去。
+  // 有 try/catch 包住 await 本身正是为了让异常原样穿透出去。复审 Important 3
+  // 修复：忙碌/会话已中止时同样不能静默 return——那会让 onSubmit resolve 却
+  // 什么都没发生，而 DestinationPicker 自己不会在 resolve 时复位 busy(它的
+  // 约定正是"resolve=调用方接管卸载"，见 transfer-picker.tsx submit() 里的
+  // 注释)，modal 会永久卡在"处理中…"：两个按钮都 disabled，也没有背景点击/
+  // Escape 兜底，用户只能刷新页面才能脱困。busyId 这半边在正常使用中是可达
+  // 的：卡片级按钮只用 busyId===该条 memory.id 判 disabled，所以 memory A 忙
+  // 着时 memory B 的「复制/移动到…」仍然点得开、能打开这个弹窗。改成 throw
+  // 让它落进 DestinationPicker 自己的 catch(会显示这条消息并重新点亮
+  // 「确认」)，一次改动同时兜住 busyId 和 sessionSignal.aborted 两种情形。
   //
   // 200 之内逐条结果用 summarizeTransferResults 拆成两类，分别落进
   // transferNotice 的 warning/failure 字段，特意不写回全局 error state：下面
@@ -718,14 +737,23 @@ export function MemoryPanel({
   // 冲掉——用户根本来不及看见，AMENDMENT 2 要求的"可见提示"就形同虚设。
   // transferNotice 不挂在那个 effect 上，只在下一次别的写操作开始时才清空(与
   // knowhow-panel.tsx 里 actionError 的清空方式同一套)，所以能稳定留到用户看见
-  // 为止。
-  async function submitTransfer(ids: string[], targetNotebookId: string, mode: TransferMode) {
-    if (busyId || sessionSignal.aborted) return;
+  // 为止。复审 Minor 补充：批量结果里没有 warning/failure(即全部成功)、且
+  // mode==="copy" 时也落一条 transferNotice.success——move 的成功靠列表刷新
+  // 自证，copy 源视图不变、目标又不在眼前，不给提示用户没法确认操作生效。
+  async function submitTransfer(
+    ids: string[],
+    targetNotebookId: string,
+    mode: TransferMode,
+    extractKg: boolean,
+  ) {
+    if (busyId || sessionSignal.aborted) {
+      throw new Error("有其它操作正在进行，请稍后重试");
+    }
     setBusyId(ids.length > 1 ? "__bulk__" : ids[0]);
     setError("");
     setTransferNotice(null);
     try {
-      const { results } = await transferMemories(ids, targetNotebookId, mode, true);
+      const { results } = await transferMemories(ids, targetNotebookId, mode, extractKg);
       if (sessionSignal.aborted || !mountedRef.current) return;
       setPendingTransfer(null);
       setSelectedIds(new Set());
@@ -745,6 +773,15 @@ export function MemoryPanel({
           failure: plainFailedCount > 0
             ? `${plainFailedCount} 条复制/移动失败${failedReasons ? `：${failedReasons}` : ""}`
             : null,
+          success: null,
+        });
+      } else if (mode === "copy" && summary.succeeded > 0) {
+        setTransferNotice({
+          warning: null,
+          failure: null,
+          success: summary.succeeded > 1
+            ? `已复制 ${summary.succeeded} 条 Memory 到目标笔记本`
+            : "已复制到目标笔记本",
         });
       }
     } finally {
@@ -857,13 +894,16 @@ export function MemoryPanel({
               const chosen = items.filter((item) => selectedIds.has(item.id));
               if (chosen.length !== selectedIds.size) {
                 setError("批量复制/移动只能处理当前页面内的选中项，部分选中的 Memory 不在本页，请分页分别操作");
+                setTransferNotice(null);
                 return;
               }
               const sourceNotebookId = singleSourceNotebookId(chosen);
               if (!sourceNotebookId) {
                 setError("批量复制/移动要求所选 Memory 属于同一个笔记本，请重新选择");
+                setTransferNotice(null);
                 return;
               }
+              setTransferExtractKg(true);
               setPendingTransfer({ ids: chosen.map((item) => item.id), sourceNotebookId });
             }}
           >
@@ -890,6 +930,9 @@ export function MemoryPanel({
       )}
       {transferNotice?.failure && (
         <div className="memory-error" role="alert">{transferNotice.failure}</div>
+      )}
+      {transferNotice?.success && (
+        <div className="memory-transfer-notice" role="status">{transferNotice.success}</div>
       )}
       {loading ? (
         <div className="memory-empty">正在读取你的记忆…</div>
@@ -1029,7 +1072,10 @@ export function MemoryPanel({
                             type="button"
                             className="memory-transfer-action"
                             disabled={busy}
-                            onClick={() => setPendingTransfer({ ids: [memory.id], sourceNotebookId: memory.notebook_id })}
+                            onClick={() => {
+                              setTransferExtractKg(true);
+                              setPendingTransfer({ ids: [memory.id], sourceNotebookId: memory.notebook_id });
+                            }}
                           >
                             <Copy size={14} /> 复制/移动到…
                           </button>
@@ -1092,8 +1138,14 @@ export function MemoryPanel({
           sourceNotebookId={pendingTransfer.sourceNotebookId}
           allowMove
           title={`复制/移动 ${pendingTransfer.ids.length} 条 Memory`}
+          // Important 4（复审）：spec §5.2.6/§9/§12 要求的opt-out——checkbox
+          // 状态由本组件持有(transferExtractKg)，picker 只负责渲染+回调,两处
+          // 打开入口都已把它重置为默认 true(匹配 confirm 时的默认行为)。
+          showExtractKg
+          extractKg={transferExtractKg}
+          onExtractKgChange={setTransferExtractKg}
           onCancel={() => setPendingTransfer(null)}
-          onSubmit={(targetNotebookId, mode) => submitTransfer(pendingTransfer.ids, targetNotebookId, mode)}
+          onSubmit={(targetNotebookId, mode) => submitTransfer(pendingTransfer.ids, targetNotebookId, mode, transferExtractKg)}
         />
       )}
     </section>

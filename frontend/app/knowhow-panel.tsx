@@ -178,6 +178,14 @@ export function KnowhowPanel({
   // C3：「复制/移动到…」目标笔记本选择器（DestinationPicker）显隐——与
   // manageOpen 同级的顶层 modal 状态，挂载点见 render 尾部。
   const [transferOpen, setTransferOpen] = useState(false);
+  // 复审 Minor：复制成功的轻量提示——move 靠 backToList()+ 表列表刷新已自证
+  // 成功，copy 源视图不变、目标又不在眼前，不给提示用户没法确认"复制到底有
+  // 没有效果"。复用 jumpNotice 同一套 .knowhow-jump-notice 视觉(信息蓝，不新
+  // 造 chrome)，但用独立 state 而不是接了 jumpNotice 本身——理由同
+  // conceptDrawerError 与 actionError 分开维护的理由一样：两件事互不相关时不
+  // 该互相覆盖(比如打开一张有陈旧引用提示的表、随手又复制了一次，两条提示不
+  // 该互吃)。
+  const [transferNotice, setTransferNotice] = useState<string | null>(null);
   // Task 9：追加导入向导显隐 + 模板下载进行中标记（工具栏「下载模板」按钮
   // 自身的 loading 态，不走 actionError/detailError 那一套整表级错误）。
   const [appendOpen, setAppendOpen] = useState(false);
@@ -453,6 +461,7 @@ export function KnowhowPanel({
     setDetail(null);
     setDetailError(null);
     setActionError(null);
+    setTransferNotice(null);
     setQuery("");
     setOpenRowId(null);
     setCellModal(null);
@@ -477,6 +486,7 @@ export function KnowhowPanel({
     setDetail(null);
     setDetailError(null);
     setActionError(null);
+    setTransferNotice(null);
     setQuery("");
     setOpenRowId(null);
     setCellModal(null);
@@ -951,6 +961,15 @@ export function KnowhowPanel({
         </div>
       )}
 
+      {transferNotice && (
+        <div className="knowhow-jump-notice">
+          <span>{transferNotice}</span>
+          <button type="button" onClick={() => setTransferNotice(null)} title="关闭">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       <div className="knowhow-view-body">
         {selectedTableId === null ? (
           <KnowhowTableList
@@ -986,7 +1005,12 @@ export function KnowhowPanel({
             onRetryReproject={retryReproject}
             retryingReproject={retryingReproject}
             onOpenManage={() => setManageOpen(true)}
-            onTransfer={() => setTransferOpen(true)}
+            onTransfer={() => {
+              // 复审 Minor：重开弹窗前清掉上一次的成功提示，避免旧提示在新一
+              // 轮操作进行时继续挂在屏幕上造成误导。
+              setTransferNotice(null);
+              setTransferOpen(true);
+            }}
             onAddRow={addRow}
             addingRow={addingRow}
             onAddConcept={addConcept}
@@ -1164,6 +1188,13 @@ export function KnowhowPanel({
               }
               throw err; // 其它错误：什么都没发生，交回 picker 自己的错误态+可重试
             }
+            // 复审 Carried minor C3-1：成功路径顶部清空 actionError——这个文件
+            // 里其余每个动作 handler 都在起手处清空这条横幅，传输成功路径此前
+            // 漏了。move 靠紧接着的 backToList() 顺带清掉，但 copy 没有等价的
+            // 副作用：若表上原本挂着一条陈旧的 actionError（比如上次删除行失败
+            // 留下的），一次成功的复制之后它会继续显示，用户会误以为这次操作
+            // 也失败了。
+            setActionError(null);
             setTransferOpen(false);
             if (mode === "move") {
               // 移动成功：源表已被后端删除，留在原地会看到一张不存在的表——
@@ -1172,8 +1203,13 @@ export function KnowhowPanel({
               // 一项），避免遗留指向已删表的行抽屉/格子浮窗。
               backToList();
               loadTables();
+            } else {
+              // 复审 Minor：copy 成功没有任何自然可见的反馈——源表原样不动，
+              // 目标笔记本又不在当前视野里，用户点了「确认」之后除了 modal
+              // 关闭，看不出到底发生没发生。补一条轻量提示，复用既有的
+              // jumpNotice 视觉(informational，非错误色调)。
+              setTransferNotice("已复制到目标笔记本");
             }
-            // mode === "copy"：源表原样不动，关掉 modal 即可，无需跳转/刷新。
           }}
         />
       )}

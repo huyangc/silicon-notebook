@@ -18,12 +18,23 @@ export function DestinationPicker({
   sourceNotebookId,
   allowMove,
   title,
+  showExtractKg = false,
+  extractKg = true,
+  onExtractKgChange,
   onCancel,
   onSubmit,
 }: {
   sourceNotebookId: string;
   allowMove: boolean;
   title: string;
+  // Important 4（复审）：spec §5.2.6/§9/§12 要求的「同时抽取到知识图谱」
+  // opt-out——批量 move/copy 会对每条 confirmed memory 触发一次 LLM 抽取
+  // （效率优先约束要求新增 LLM 调用必须可关）。knowhow 调用方（C3）不传这
+  // 三个新 prop，三者全部可选 + showExtractKg 默认 false，渲染上什么都不多
+  // 出来——保持 DestinationPicker 对 knowhow-panel.tsx 的既有契约不变。
+  showExtractKg?: boolean;
+  extractKg?: boolean;
+  onExtractKgChange?: (value: boolean) => void;
   onCancel: () => void;
   onSubmit: (targetNotebookId: string, mode: TransferMode) => Promise<void>;
 }) {
@@ -110,6 +121,22 @@ export function DestinationPicker({
               移动(会从源删除)
             </label>
           </div>
+        )}
+        {showExtractKg && (
+          // 复用 memory-panel.tsx MemoryEditor 里同一个「同时抽取到知识图谱」
+          // 勾选样式（.agent-check，memory-panel.css）——只有 showExtractKg 时
+          // 才渲染，knowhow 调用方永远不传这个 prop，不会触发那条跨文件 CSS
+          // 依赖警告（见上方 .memory-dialog-actions 头注释）：knowhow 用的那个
+          // bundle 压根不会渲染这个节点。
+          <label className="agent-check">
+            <input
+              type="checkbox"
+              checked={extractKg}
+              disabled={busy}
+              onChange={(e) => onExtractKgChange?.(e.target.checked)}
+            />
+            同时抽取到知识图谱
+          </label>
         )}
         {error && (
           <p className="transfer-error" role="alert">
