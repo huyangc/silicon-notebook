@@ -41,11 +41,14 @@ only in their unambiguous compound forms, on purpose (documented in that section
 Also intentionally NOT blacklisted: 知识图谱, 索引 (user-dictionary words; only their
 jargon modifiers CSR/ANN/暴力检索 and the abbreviation KG are).
 
-Second, independent check — raw enum fallback (`MAP[x] ?? x`): a lookup that falls
-back to its own key leaks the backend's English enum id to the user the moment the
-backend adds a value. `vocabulary.ts` exists to make that unwritable (`label()` takes
-a mandatory neutral fallback); this guard stops the pattern from creeping back in.
-Unlike the blacklist, it scans *code*, not rendered text.
+The companion check — raw enum fallback (`MAP[x] ?? x`, `label(m, x, x)`) — lives in
+`frontend/app/raw-enum-fallback.test.mjs`, not here. It needs the *context* of the
+expression to tell a rendered lookup from internal normalisation, which means a real
+TypeScript AST; doing that from Python would mean spawning node and dragging
+`frontend/node_modules` in as a prerequisite for this otherwise dependency-free
+script. `npm run test` collects `*.test.mjs` recursively, so `scripts/check.sh` still
+runs it as a hard gate. Split of duties: this file guards *rendered text*, that one
+guards *code shape*.
 """
 from __future__ import annotations
 
@@ -113,16 +116,6 @@ CJK_TERMS = {
     "去重": re.compile(r"去重"),
     "晋升": re.compile(r"晋升"),
 }
-
-# 兜底即原值:`MAP[x] ?? x` / `MAP[x] || x`,以及经 label() 的同款写法
-# `label(MAP, v, v)`。反向引用保证「兜底表达式与取值表达式逐字相同」——只认这个
-# 形态,fallback 是字面量/别的表达式都放行(那是正当兜底)。
-RAW_FALLBACK = re.compile(
-    r"(?<![\w$])[A-Za-z_$][\w$]*\s*\[\s*(?P<key>[^\[\]{}()]+?)\s*\]\s*(?:\?\?|\|\|)\s*(?P=key)(?![\w$.])"
-)
-LABEL_RAW_FALLBACK = re.compile(
-    r"(?<![.\w$])label\(\s*[^,()]+,\s*(?P<val>[^,()]+?)\s*,\s*(?P=val)\s*\)"
-)
 
 CJK = re.compile(r"[一-鿿]")
 INTERP = re.compile(r"\$\{[^{}]*\}")  # template ${...}
@@ -243,28 +236,6 @@ def scan(path: Path) -> list[tuple[int, str, str]]:
     return hits
 
 
-def scan_raw_fallback(path: Path) -> list[tuple[int, str]]:
-    """`MAP[x] ?? x` / `label(MAP, v, v)` in this file's *code*: (line, snippet).
-
-    Deliberately not restricted to CJK units — this is a code shape, not copy, and
-    the leak it causes (backend enum id rendered verbatim) is invisible until the
-    backend grows a value. Comments are still blanked so a documented counter-example
-    in a comment does not fail the build.
-
-    Known-good shapes this must NOT flag, verified by the self-tests:
-      * `label(MAP, v, "中性兜底")` — the sanctioned API; fallback is a real fallback.
-      * `Object.hasOwn(M, t) ? M[t] : t` — kg-type-mark.tsx's deliberate pass-through
-        for user-defined knowhow object types (the raw string *is* the user's own
-        column name, so echoing it is honest, not a leak).
-    """
-    blanked = blank_comments(path.read_text(encoding="utf-8"))
-    hits: list[tuple[int, str]] = []
-    for pattern in (RAW_FALLBACK, LABEL_RAW_FALLBACK):
-        for m in pattern.finditer(blanked):
-            hits.append((blanked.count("\n", 0, m.start()) + 1, m.group(0).strip()))
-    return sorted(hits)
-
-
 def _message_literal(node: ast.expr | None) -> str | None:
     """The literal text of a `user_error()` message argument, or None if it isn't one.
 
@@ -329,14 +300,11 @@ def main() -> int:
         print("check_ui_vocabulary: no frontend/app sources found", file=sys.stderr)
         return 1
     violations: list[str] = []
-    fallbacks: list[str] = []
     for path in files:
         rel = _rel(path)
         for line, term, snippet in scan(path):
             snippet = snippet if len(snippet) <= 80 else snippet[:77] + "…"
             violations.append(f"  {rel}:{line}: 「{term}」in rendered text: {snippet!r}")
-        for line, snippet in scan_raw_fallback(path):
-            fallbacks.append(f"  {rel}:{line}: {snippet}")
 
     # 后端侧:只有被 user_error() 标记为「可展示」的文案才受词表约束。
     py_files = sorted(BACKEND_APP.rglob("*.py"))
@@ -368,21 +336,11 @@ def main() -> int:
             "chunk→段, KG/CSR/ANN→索引, 抽取→分析). Internal names stay in code, not UI.",
             file=sys.stderr,
         )
-    if fallbacks:
-        print("\nRaw enum fallback — a lookup that falls back to its own key:", file=sys.stderr)
-        print("\n".join(fallbacks), file=sys.stderr)
-        print(
-            "\n后端每加一个枚举值,这个写法就把英文 id 直接渲染给用户。改用 "
-            "vocabulary.ts 的 label(MAP, value, '中性兜底')——它强制传兜底词,"
-            "写不出「兜底即原值」。",
-            file=sys.stderr,
-        )
-    if violations or fallbacks:
         return 1
     print(
         f"UI vocabulary contract OK: scanned {len(files)} frontend/app files + "
         f"{marked_sites} backend {USER_ERROR}() messages "
-        f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms + raw-enum-fallback)"
+        f"({len(CJK_TERMS) + len(ASCII_TERMS)} blacklisted terms)"
     )
     return 0
 

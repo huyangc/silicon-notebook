@@ -9,8 +9,13 @@ schema / deprecated 全没进黑名单),而守卫退出码仍是 0。所以这�
   1. **词表覆盖**:AGENTS.md「界面词汇表」第一列的每个词,要么被某条黑名单规则命中,
      要么在 NOT_LINTABLE 里有白纸黑字的豁免理由。新增一行却不加规则 → 红。
   2. **正例**:每个黑名单词在渲染文本里都真的会被抓到(没有写了不生效的死规则)。
-  3. **反例**:注释 / 标识符 / 插值 / 纯 ASCII / 豁免上下文都不误报,以及
-     raw-enum-fallback 只抓「兜底即原值」、放行正当兜底。
+  3. **反例**:注释 / 标识符 / 插值 / 纯 ASCII / 豁免上下文都不误报。
+  4. **跨层**:后端被 `user_error()` 标记为「可展示」的文案同样受词表约束
+     (第二轮 review 阻塞 2——作用域跟信任边界走,不跟目录走)。
+
+「兜底即原值」(`MAP[x] ?? x`)那条检查已改用 TypeScript AST 并搬去
+`frontend/app/raw-enum-fallback.test.mjs`,正反样例在那边;这里只留两条断言钉住
+「搬走了、没丢、也没退回正则」。
 """
 from __future__ import annotations
 
@@ -37,12 +42,6 @@ def scan_src(tmp_path: pathlib.Path, code: str, name: str = "sample.tsx") -> lis
     path = tmp_path / name
     path.write_text(code, encoding="utf-8")
     return [term for _line, term, _unit in guard.scan(path)]
-
-
-def scan_fallback(tmp_path: pathlib.Path, code: str) -> list[str]:
-    path = tmp_path / "fallback.tsx"
-    path.write_text(code, encoding="utf-8")
-    return [snippet for _line, snippet in guard.scan_raw_fallback(path)]
 
 
 # --------------------------------------------------------------------------
@@ -196,45 +195,35 @@ def test_正则字面量里的引号不会把代码拖进渲染文本(tmp_path):
 
 
 # --------------------------------------------------------------------------
-# 4. raw enum fallback:「兜底即原值」
+# 4. raw enum fallback:「兜底即原值」—— 已搬去前端,这里只钉住「搬走了,没丢」
+#
+# 第二轮 review 阻塞 3:正则版同时漏报(`M?.[x] ?? x`、`label(M, x, x)`、
+# `f()[x] ?? x`)和误报(`ALIASES[v] ?? v` 这种纯内部归一化)。误报补不掉——它与
+# 真正的渲染查表**语法形状完全一致**,只有上下文能区分,而正则没有上下文。改用
+# TypeScript AST 后,实现只能落在 JS 侧,故整体搬去
+# frontend/app/raw-enum-fallback.test.mjs(npm run test 递归收集 → 仍是
+# scripts/check.sh 的硬门)。正反样例连同那五条探针都在那边。
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "code",
-    [
-        "const a = RELATION_LABELS[edge.edge_type] ?? edge.edge_type;",
-        "const b = FIELD_LABELS[key] ?? key;",
-        "const c = STATUS_LABELS[s] || s;",
-        "const d = label(TIER, tier, tier);",
-        "const e = <span>{MAP[item.status] ?? item.status}</span>;",
-        # 表挂在对象/命名空间上时同样要抓到(前缀 `.` 不能让规则漏过)
-        "const f = vocab.STATUS_LABELS[s] ?? s;",
-    ],
-)
-def test_兜底即原值会被抓到(tmp_path, code):
-    assert scan_fallback(tmp_path, code), f"没抓到「兜底即原值」:{code}"
+def test_兜底即原值检查已搬去前端且仍挂在硬门上():
+    """搬家最容易出的事故是「搬走了但没接上」——两边都不跑,还都是绿的。"""
+    mjs = _ROOT / "frontend" / "app" / "raw-enum-fallback.test.mjs"
+    assert mjs.exists(), f"{mjs} 不见了:兜底即原值检查搬走后没落地"
+    body = mjs.read_text(encoding="utf-8")
+    assert 'require("typescript")' in body, "没用上 TypeScript AST,又退回正则了?"
+    # npm run test 用 `find app -name '*.test.mjs'` 递归收集,check.sh 跑 npm run test。
+    pkg = (_ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
+    assert "find app -name '*.test.mjs'" in pkg, (
+        "前端测试收集方式变了,新守卫可能没被 check.sh 跑到"
+    )
+    assert "npm run test" in (_ROOT / "scripts" / "check.sh").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize(
-    "code",
-    [
-        # 正当兜底:退到中性词而非原值
-        'const a = RELATION_LABELS[edge.edge_type] ?? "关联";',
-        'const b = label(TIER, tier, "未知来源");',
-        'const c = MAP[key] ?? "";',
-        # 经评审的透出路径:自定义 object_type / 字段名原样显示(用户自己起的名字)。
-        # 写成 Object.hasOwn 三元而非 ?? ——顺带免疫原型链白屏。
-        "const d = Object.hasOwn(KG_TYPE_LABELS, type) ? KG_TYPE_LABELS[type] : type;",
-        "const e = Object.hasOwn(FIELD_LABELS, key) ? FIELD_LABELS[key] : key;",
-        # 不同的键与兜底,不是同一表达式
-        "const f = MAP[a] ?? b;",
-        # 注释里的反面教材不该让构建失败
-        "// 别写 MAP[x] ?? x\nconst g = 1;",
-    ],
-)
-def test_正当兜底不误报(tmp_path, code):
-    assert scan_fallback(tmp_path, code) == [], f"误报:{code}"
+def test_python_守卫不再自带正则版兜底检查():
+    """留着旧的等于留着那条已知误报,而且两套规则会打架。"""
+    assert not hasattr(guard, "scan_raw_fallback")
+    assert not hasattr(guard, "RAW_FALLBACK")
 
 
 # --------------------------------------------------------------------------

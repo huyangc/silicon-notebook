@@ -735,8 +735,22 @@ def test_user_facing_vocabulary_guard_is_documented_in_both_readmes():
     # 守卫的两条独立检查都要在文档里露出,否则「兜底即原值」会被当成风格建议。
     _assert_phrases(
         {
-            "README.md": "rejects raw enum fallbacks (`MAP[x] ?? x`)",
-            "README_zh.md": "拒绝「兜底即原值」（`MAP[x] ?? x`）",
+            "README.md": "rejects raw enum fallbacks (`MAP[x] ?? x`, and `label(map, x, x)`",
+            "README_zh.md": "拒绝「兜底即原值」（`MAP[x] ?? x`，以及通过正规 API 达成同一效果的 `label(map, x, x)`）",
+        }
+    )
+    # 第二轮 review 阻塞 3:兜底检查改用 TS AST 并搬去前端。文档要指到新位置,
+    # 否则「同一脚本里的第二条检查」这句会把人带到早已删掉的正则上。
+    _assert_phrases(
+        {
+            "README.md": "`frontend/app/raw-enum-fallback.test.mjs`",
+            "README_zh.md": "`frontend/app/raw-enum-fallback.test.mjs`",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "runs on a real TypeScript AST rather than a regex",
+            "README_zh.md": "跑在真正的 TypeScript AST 上而非正则",
         }
     )
     # 自测文件是「黑名单不得退化成词表子集」的执行者,文档要指向它。
