@@ -130,12 +130,12 @@ def test_retrieval_documentation_scopes_federation_and_tier_tie_break_by_path():
 def test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions():
     _assert_phrases(
         {
-            "README.md": "four tabs — **Ask**, **Knowledge**, **Memory**, and **Deep Report**",
-            "README_zh.md": "四个 tab——**Ask**、**Knowledge**、**Memory**、**Deep Report**",
-            "AGENTS.md": "four tabs: **Ask**, **Knowledge**, **Memory**, and **Deep Report**",
-            "architecture.md": "Ask / Knowledge / Memory / Deep Report 四个 tab",
-            "fangan_done.md": "Ask / Knowledge / Memory / Deep Report 四个 tab",
-            "silicon_notebook_fangan.md": "Ask | Knowledge | Memory | Deep Report",
+            "README.md": "four tabs — **问答** (Ask), **知识库** (Knowledge), **记忆** (Memory), and **深度报告** (Deep Report)",
+            "README_zh.md": "四个 tab——**问答**（Ask）、**知识库**（Knowledge）、**记忆**（Memory）、**深度报告**（Deep Report）",
+            "AGENTS.md": "four tabs: **问答** (Ask), **知识库** (Knowledge), **记忆** (Memory), and **深度报告** (Deep Report)",
+            "architecture.md": "问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab",
+            "fangan_done.md": "问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab",
+            "silicon_notebook_fangan.md": "问答 (Ask) | 知识库 (Knowledge) | 记忆 (Memory) | 深度报告 (Deep Report)",
         }
     )
     _assert_phrases(
