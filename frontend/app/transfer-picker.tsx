@@ -33,6 +33,14 @@ export function DestinationPicker({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // allowMove 从 true 翻成 false 时把 mode 拽回 copy。当前调用方都是「每次传输重新
+  // 挂载一个新实例」,所以 mode 不可能在 allowMove=false 的实例上变成 move;但这是
+  // 权限边界的 UI 半边(只读源永远不能提交 move),兜住它成本为零,别依赖调用方的
+  // 挂载习惯来维持这个不变量。
+  useEffect(() => {
+    if (!allowMove) setMode("copy");
+  }, [allowMove]);
+
   useEffect(() => {
     const controller = new AbortController();
     fetch(API_BASE + "/notebooks", {
@@ -108,11 +116,19 @@ export function DestinationPicker({
             {error}
           </p>
         )}
+        {/* ⚠ 跨文件 CSS 依赖:.memory-dialog-actions(布局/按钮尺寸/.primary/:disabled)
+            全部定义在 memory-panel.css 里,而那个文件只由 memory-panel.tsx 的
+            `import "./memory-panel.css"` 副作用加载。今天成立是因为 page.tsx 把
+            MemoryPanel 和 KnowhowPanel 静态 import 进同一个 bundle;哪天有人用
+            next/dynamic 把其中之一切出去,另一个消费方的这排按钮会静默丢掉全部样式
+            (不报错、只是变丑)。真要拆分时,把 memory-panel.css 里
+            .memory-dialog-actions 那几条(第 20/103/486-491/712 行附近的分组选择器)
+            提到 globals.css,别在这里另造一套。 */}
         <div className="memory-dialog-actions">
           <button type="button" disabled={busy} onClick={onCancel}>
             取消
           </button>
-          <button type="button" disabled={busy || !target} onClick={submit}>
+          <button type="button" className="primary" disabled={busy || !target} onClick={submit}>
             {busy ? "处理中…" : "确认"}
           </button>
         </div>
