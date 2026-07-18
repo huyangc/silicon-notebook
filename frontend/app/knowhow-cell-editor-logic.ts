@@ -167,6 +167,41 @@ export function imageMarkdown(assetId: string, alt: string): string {
   return `![${alt}](asset://${assetId})`;
 }
 
+// 上传落笔位置决策——**生产与测试共用这一个实现**。此前测试是自己手工调
+// insertAtCursor 模拟，即便生产代码改回「从上传起始快照整篇写回」也照样全绿，
+// 等于没锁住那条回归；把决策收进纯函数后，测试与生产至少共用同一份**决策**。
+// （注意仍锁不住「组件确实调了它」——.tsx 在本仓库 node:test 模型里测不到，
+// 若有人把调用点改回整篇写回，这些用例依旧会绿。）
+//
+// 正文在上传期间没变过 → 插回用户当初粘贴的光标处（保住「插在光标处」语义）；
+// 变过（恢复草稿、接受建议等）→ 起始偏移已无意义，追加到末尾，绝不拿旧偏移
+// 往新正文里劈开一刀。
+export function resolveUploadInsertion(
+  startSnapshot: string,
+  startCaret: number,
+  liveValue: string,
+  snippet: string,
+): InsertResult {
+  const at =
+    liveValue === startSnapshot ? Math.min(Math.max(startCaret, 0), liveValue.length) : liveValue.length;
+  return insertAtCursor({ value: liveValue, start: at, end: at }, snippet);
+}
+
+// 上传成功、但本格编辑器已经不在了（用户在上传途中强制离开）：没有正文可插，就把
+// 图片 markdown 追加进该格草稿。这样资产有真实引用、用户下次打开能恢复，不会变成
+// 无法回收的孤儿（仓库既无删除资产端点、也无生产 GC）。
+//
+// **只追加到已存在的草稿，storedDraft 为 null 时返回 null＝不要写**。绝不能拿
+// 组件卸载时闭包里那份 savedContent 当基线：它是粘贴那一刻的旧值。若用户在上传
+// 期间重开这一格、改了内容并保存，服务端已经是新值，而这里再用旧 savedContent
+// 造一份草稿，下次打开就会弹出「未保存草稿」把用户诱导回旧内容——一次点「恢复」
+// 再保存就把新内容覆盖没了。null 意味着「已经没人认领这个格子的草稿」（离开时
+// 清掉了、或更新的实例处置过），此时宁可放弃这张图，也不制造假草稿。
+// 调用方必须在**此刻**读取 storedDraft（而不是上传开始时的快照）。
+export function draftAfterDetachedUpload(storedDraft: string | null, snippet: string): string | null {
+  return storedDraft === null ? null : storedDraft + snippet;
+}
+
 // 从文件名派生图片 alt 文本：去掉最后一个扩展名、去首尾空白。多个点时只切
 // 掉最后一段（"a.b.png" → "a.b"，与 knowhow-import-logic.ts 的
 // deriveDefaultTitle 同规则）；不含扩展名/点在开头（隐藏文件式命名）时原样
@@ -261,10 +296,20 @@ export function resolveSwitchRequest(columnId: string, hasChanges: boolean): Lea
 // - 有未保存改动 → write（写当前内容）；
 // - 无改动但恢复提示还开着 → keep（保住那份待恢复的旧草稿，不碰）；
 // - 无改动且没有恢复提示 → remove（清掉可能残留的陈旧草稿）。
+// keepKeyAlive：上传在飞时离开专用。收尾的上传只能把图片**追加进已存在的草稿**
+// （见 draftAfterDetachedUpload——键不存在就不写），所以此时把本会得出的 "remove"
+// 升级成 "write"，留一个占位草稿给它追加。只升级 "remove"：
+//   · "write" 本来就会建键，无需升级；
+//   · "keep" 是恢复提示里还没决定的旧草稿，绝不能覆盖。
 export type DraftFlushAction = "write" | "keep" | "remove";
-export function draftFlushAction(hasChanges: boolean, restoreBannerOpen: boolean): DraftFlushAction {
+export function draftFlushAction(
+  hasChanges: boolean,
+  restoreBannerOpen: boolean,
+  keepKeyAlive = false,
+): DraftFlushAction {
   if (hasChanges) return "write";
-  return restoreBannerOpen ? "keep" : "remove";
+  if (restoreBannerOpen) return "keep";
+  return keepKeyAlive ? "write" : "remove";
 }
 
 // 把 draftFlushAction 决出的动作真正作用到一个 Storage-like 对象上，并如实返回
@@ -330,12 +375,12 @@ export const BUSY_UPLOAD_HINT = "有操作进行中，完成后再插入图片�
 // 插到正文里，两者会互相覆盖。
 export const ACCEPT_BLOCKED_UPLOADING_HINT = "图片上传中，等上传完成后再接受建议。";
 
-// 上传在飞时默认不离开：资产已经写到服务端，此刻卸载组件的话，这次粘贴既进不了
-// 正文，资产也回收不掉——仓库里 sweep_orphan_assets 只有 maintenance adapter、
-// 没有生产调用方，也没有删除资产的接口。故等上传结束再走；仍保留「再点一次强制
-// 离开」的出口（上传可能卡住，不能把人永久关在弹窗里），代价是那张图会成为孤儿。
+// 上传在飞时默认不离开（等它落进正文最省事）；仍保留「再点一次强制离开」的出口，
+// 因为上传可能卡住、不能把人永久关在弹窗里。强退不再丢东西：上传成功但组件已经
+// 离开时，图片 markdown 会被写进该格草稿（见 draftAfterDetachedUpload），所以
+// 资产有真实引用、用户下次打开可恢复，不会变成无法回收的孤儿。
 export const LEAVE_BLOCKED_UPLOADING_HINT =
-  "图片上传中，请等上传完成后再离开。再点一次将直接离开（这张图会残留在服务器上）。";
+  "图片上传中，请等上传完成后再离开。再点一次将直接离开（已上传的图片会尽量写进本格草稿供下次恢复）。";
 
 // 有其它异步在飞导致按钮置灰时的通用提示——置灰必须有对得上的原因，不能灰着却
 // 显示「可点」的文案（knowhow-optimize-logic.ts 声明的不变量）。

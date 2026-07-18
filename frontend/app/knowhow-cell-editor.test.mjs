@@ -38,6 +38,8 @@ import {
   isEditorBusy,
   isSaveBlocked,
   imageMarkdown,
+  resolveUploadInsertion,
+  draftAfterDetachedUpload,
   SAVE_BLOCKED_UPLOADING_HINT,
   SAVE_IN_FLIGHT_UPLOAD_HINT,
   BUSY_UPLOAD_HINT,
@@ -405,6 +407,19 @@ test("draftFlushAction: 无改动 + 无恢复提示 → remove（清陈旧草稿
   assert.strictEqual(draftFlushAction(false, false), "remove");
 });
 
+test("draftFlushAction: keepKeyAlive 把 remove 升级成 write（给收尾上传留占位键）", () => {
+  // 上传在飞时离开：收尾的上传只能追加进**已存在**的草稿键，故离开前得留一个占位。
+  assert.strictEqual(draftFlushAction(false, false, true), "write");
+});
+
+test("draftFlushAction: keepKeyAlive 绝不动 keep——恢复提示里那份旧草稿不能被覆盖", () => {
+  assert.strictEqual(draftFlushAction(false, true, true), "keep");
+});
+
+test("draftFlushAction: keepKeyAlive 对本就有改动的情况无影响（仍是 write）", () => {
+  assert.strictEqual(draftFlushAction(true, false, true), "write");
+});
+
 // --- applyDraftFlush：真实副作用路径（用会抛错的假 storage 覆盖 window.localStorage
 //     在单测里没法触发的配额/隐私模式失败）--------------------------------------
 
@@ -491,18 +506,48 @@ test("imageMarkdown: 产出 asset:// 图片片段", () => {
   assert.strictEqual(imageMarkdown("a1", ""), "![](asset://a1)");
 });
 
-test("上传落笔：正文在上传期间被改写过，插入必须基于实时内容、不得回退到旧快照", () => {
-  // 时序：用户在 "原文" 上粘贴图片 → 上传在飞 → 优化建议返回、用户点「接受」，
-  // 正文变成 "优化稿" → 上传完成。旧写法从上传开始时的快照累加并整篇写回，会把
-  // "优化稿" 整段覆盖回 "原文+图"；正确做法是把片段插到落笔时的实时内容上。
-  const snapshotAtUploadStart = "原文";
-  const liveWhenUploadLands = "优化稿";
+// 以下直接调用**生产落笔函数** resolveUploadInsertion。此前这里是测试自己手工调
+// insertAtCursor 模拟一遍，生产即便改回「从上传起始快照整篇写回」也照样绿——那样
+// 等于没锁住回归。
+
+test("resolveUploadInsertion: 正文期间没变 → 插回粘贴时的光标处", () => {
+  const r = resolveUploadInsertion("abcdef", 3, "abcdef", "<IMG>");
+  assert.strictEqual(r.value, "abc<IMG>def");
+  assert.strictEqual(r.cursor, 8);
+});
+
+test("resolveUploadInsertion: 正文期间被改写 → 追加末尾，绝不回退到旧快照（回归锁）", () => {
+  // 时序：在 "原文" 上粘贴图片 → 上传在飞 → 优化建议返回、用户点「接受」，正文
+  // 变成 "优化稿" → 上传完成。旧写法会把 "优化稿" 整段覆盖回 "原文+图"。
   const snippet = imageMarkdown("a1", "图");
-  const at = liveWhenUploadLands.length;
-  const result = insertAtCursor({ value: liveWhenUploadLands, start: at, end: at }, snippet);
-  assert.strictEqual(result.value, "优化稿![图](asset://a1)");
-  assert.doesNotMatch(result.value, /原文/);
-  assert.notStrictEqual(result.value, `${snapshotAtUploadStart}${snippet}`);
+  const r = resolveUploadInsertion("原文", 2, "优化稿", snippet);
+  assert.strictEqual(r.value, `优化稿${snippet}`);
+  assert.doesNotMatch(r.value, /原文/);
+  assert.notStrictEqual(r.value, `原文${snippet}`);
+});
+
+test("resolveUploadInsertion: 起始光标偏移越界 → 夹到合法范围，不抛不越界", () => {
+  const r = resolveUploadInsertion("很长的一段原文", 99, "很长的一段原文", "<IMG>");
+  assert.strictEqual(r.value, "很长的一段原文<IMG>");
+});
+
+// --- 强制离开后上传才落地：追加进该格草稿，资产不再是无引用孤儿 -----------------
+
+test("draftAfterDetachedUpload: 有草稿 → 追加到草稿之后（用户下次打开可恢复）", () => {
+  assert.strictEqual(draftAfterDetachedUpload("离开时的草稿", "<IMG>"), "离开时的草稿<IMG>");
+});
+
+test("draftAfterDetachedUpload: 草稿键已无人认领（null）→ 返回 null＝不要写（回归锁）", () => {
+  // 绝不能退回用闭包里那份旧 savedContent 造草稿：用户可能已在上传期间重开这一格、
+  // 改完并保存，服务端已是新值；再造一份旧草稿会在下次打开诱导用户「恢复」，
+  // 一恢复再保存就把新内容覆盖没了。
+  assert.strictEqual(draftAfterDetachedUpload(null, "<IMG>"), null);
+});
+
+test("draftAfterDetachedUpload: 追加后的草稿必然不同于已保存内容 → 下次打开会弹恢复提示", () => {
+  const saved = "已保存内容";
+  const draft = draftAfterDetachedUpload(saved, imageMarkdown("a1", "图"));
+  assert.strictEqual(shouldOfferDraftRestore(draft, saved), true);
 });
 
 test("并发提示文案彼此可区分（各自对应一种在飞操作，不能混用）", () => {
@@ -514,9 +559,11 @@ test("并发提示文案彼此可区分（各自对应一种在飞操作，不�
     LEAVE_BLOCKED_UPLOADING_HINT,
   ];
   assert.strictEqual(new Set(hints).size, hints.length);
-  // 「上传中离开」的提示必须讲明强制离开的代价，否则用户不知道图会残留。
+  // 「上传中离开」必须讲明再点一次会发生什么；且**不得**再把「图片残留在服务器」
+  // 固化成预期——强退后图片会写进本格草稿，是可恢复的，不是孤儿。
   assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /再点一次/);
-  assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /残留/);
+  assert.match(LEAVE_BLOCKED_UPLOADING_HINT, /草稿/);
+  assert.doesNotMatch(LEAVE_BLOCKED_UPLOADING_HINT, /残留/);
 });
 
 test("resolveSaveCompletion: 已卸载 → none（陈旧回调绝不操作后来打开的格子）", () => {

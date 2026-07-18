@@ -28,6 +28,7 @@ import {
   DEFAULT_MIN_WIDTH,
   DEFAULT_WINDOW_RECT,
   clampToViewport,
+  isFloatingDisabledWidth,
   nextRectOnDrag,
   nextRectOnResize,
   parseWindowRect,
@@ -125,6 +126,19 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
     disabled = false,
   } = options;
 
+  // 窄屏（同各弹窗 CSS 的 720px 整屏断点）一律停用浮窗几何——内联样式会盖过媒体
+  // 查询，把桌面记忆的尺寸贴到整屏卡片上造成横向溢出（见 isFloatingDisabledWidth）。
+  const [narrowViewport, setNarrowViewport] = useState<boolean>(() =>
+    typeof window === "undefined" ? false : isFloatingDisabledWidth(window.innerWidth),
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const sync = () => setNarrowViewport(isFloatingDisabledWidth(window.innerWidth));
+    sync();
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, []);
+
   const [rect, setRect] = useState<WindowRect>(() => readStoredRect(storageKey));
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
@@ -136,6 +150,13 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
   // 变化都重新绑定），靠闭包读 state 会拿到绑定那一刻的旧值（stale closure）；
   // 改读 ref 就总是最新值，不需要为了"读到最新 rect"而频繁重新绑定/解绑监听器。
   const rectRef = useRef(rect);
+  // 渲染侧（style/cursor）用 state 派生的 effectiveDisabled；命令式路径（拖动/
+  // 缩放/视口 clamp）**不能**读它派生的 ref——narrowViewport 要等一次提交才落到
+  // ref 上，而跨断点的那次 resize 事件就在同一轮里，会读到旧值：narrow→desktop
+  // 时 clamp 被跳过，记忆的桌面偏移原样贴回可能已变小的视口（卡片跑到屏外、而
+  // 此刻拖动已重新启用，够不回来）。故 ref 只跟显式 disabled（它不会在 resize
+  // 事件里变），窄屏与否一律用 isFloatingDisabledWidth 现场量。
+  const effectiveDisabled = disabled || narrowViewport;
   const disabledRef = useRef(disabled);
   const resizableRef = useRef(resizable);
   const minWidthRef = useRef(minWidth);
@@ -213,7 +234,7 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
 
   const onDragPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLElement>) => {
-      if (disabledRef.current) return;
+      if (disabledRef.current || isFloatingDisabledWidth(window.innerWidth)) return;
       if (event.pointerType === "mouse" && event.button !== 0) return; // 只响应鼠标主键；触屏/触控笔不受此限
       // header 上总跟着关闭/全屏/编辑等按钮（或 KnowhowRowContext 那类
       // role="button" 条目）——pointerdown 命中它们时必须放行，不能当成拖动
@@ -294,7 +315,7 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
 
   const onResizePointerDown = useCallback(
     (event: ReactPointerEvent<HTMLElement>) => {
-      if (disabledRef.current || !resizableRef.current) return;
+      if (disabledRef.current || isFloatingDisabledWidth(window.innerWidth) || !resizableRef.current) return;
       if (event.pointerType === "mouse" && event.button !== 0) return;
       const size = measureSize();
       if (!size) return;
@@ -378,7 +399,7 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
     if (typeof window === "undefined") return;
 
     function handleViewportResize() {
-      if (disabledRef.current) return;
+      if (disabledRef.current || isFloatingDisabledWidth(window.innerWidth)) return;
       const size = measureSize();
       if (!size) return;
       const viewport = readViewport();
@@ -399,7 +420,7 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
   // --- 派生输出 -----------------------------------------------------------------
 
   const style = useMemo<CSSProperties>(() => {
-    if (disabled) return {};
+    if (effectiveDisabled) return {};
     return {
       transform: `translate3d(${rect.x}px, ${rect.y}px, 0)`,
       ...(rect.width !== null ? { width: `${rect.width}px` } : {}),
@@ -409,11 +430,11 @@ export function useFloatingWindow(options: UseFloatingWindowOptions): UseFloatin
       // 封顶到 VIEWPORT_MAX_RATIO，放开 max-height 也不会撑出屏幕。
       ...(rect.height !== null ? { height: `${rect.height}px`, maxHeight: "none" } : {}),
     };
-  }, [rect, disabled]);
+  }, [rect, effectiveDisabled]);
 
   const dragHandleStyle = useMemo<CSSProperties>(
-    () => ({ touchAction: "none", cursor: disabled ? undefined : isDragging ? "grabbing" : "grab" }),
-    [disabled, isDragging],
+    () => ({ touchAction: "none", cursor: effectiveDisabled ? undefined : isDragging ? "grabbing" : "grab" }),
+    [effectiveDisabled, isDragging],
   );
 
   const resizeHandleStyle = useMemo<CSSProperties>(() => ({ touchAction: "none" }), []);

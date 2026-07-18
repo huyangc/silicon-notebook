@@ -12,6 +12,8 @@ import {
   nextRectOnResize,
   serializeWindowRect,
   parseWindowRect,
+  isFloatingDisabledWidth,
+  FLOATING_DISABLED_MAX_WIDTH,
 } from "./floating-window-logic.ts";
 
 // --- 常量：地基默认值 ---------------------------------------------------------
@@ -243,4 +245,17 @@ test("parseWindowRect: 支持调用方自定义 fallback（不是硬编码用 DE
   const customFallback = { x: 1, y: 2, width: 500, height: 400 };
   assert.deepStrictEqual(parseWindowRect("{bad json", customFallback), customFallback);
   assert.deepStrictEqual(parseWindowRect(null, customFallback), customFallback);
+});
+
+// --- 窄屏停用浮窗几何（内联样式会盖过 @media 整屏规则，造成横向溢出）-------------
+
+test("isFloatingDisabledWidth: 720px 及以下停用浮窗几何（与 CSS 整屏断点同一个值）", () => {
+  assert.strictEqual(FLOATING_DISABLED_MAX_WIDTH, 720);
+  assert.strictEqual(isFloatingDisabledWidth(600), true);
+  assert.strictEqual(isFloatingDisabledWidth(720), true);
+});
+
+test("isFloatingDisabledWidth: 宽于断点则照常启用拖动/缩放几何", () => {
+  assert.strictEqual(isFloatingDisabledWidth(721), false);
+  assert.strictEqual(isFloatingDisabledWidth(1280), false);
 });

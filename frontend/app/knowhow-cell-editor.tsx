@@ -128,7 +128,8 @@ import {
   LEAVE_BLOCKED_UPLOADING_HINT,
   BUSY_HINT,
   imageMarkdown,
-  insertAtCursor,
+  resolveUploadInsertion,
+  draftAfterDetachedUpload,
   OPTIMIZE_SUGGESTION_STALE_MESSAGE,
   resolveSaveCompletion,
   type LeaveIntent,
@@ -788,14 +789,26 @@ export function KnowhowCellEditor({
   // remove=清陈旧草稿。返回是否已安全落盘：write 抛错（隐私模式/配额）返 false，
   // 让执行器据此原地报错、不静默离开；keep/remove 恒真（本就没有要保存的内容，
   // 离开是安全的）。
-  const flushDraft = useCallback((): boolean => {
-    const action = draftFlushAction(hasUnsavedChanges(content, savedContent), showRestoreBanner);
+  // keepKeyAlive 的语义见 draftFlushAction。这里额外记下「占位草稿」：它的内容
+  // 等于已保存内容、本身不构成未保存改动，只是留给收尾上传追加用。若那次上传最终
+  // 一张都没成功，占位就成了没人清理的垃圾——`savedContent` 日后被别处改动（例如
+  // 合并共享列的整组写入）就会让它变成一条骗人的「检测到未保存草稿」。故记住写下
+  // 的确切值，上传收尾时按值比对清掉（见 uploadAndInsertImages 的 finally）。
+  const placeholderDraftRef = useRef<string | null>(null);
+  const flushDraft = useCallback((keepKeyAlive = false): boolean => {
+    const dirty = hasUnsavedChanges(content, savedContent);
+    const action = draftFlushAction(dirty, showRestoreBanner, keepKeyAlive);
+    // 占位写：没有未保存内容，纯粹为收尾上传留键。它失败不算「丢字」——本来就
+    // 没有字要丢，最多是这张图保不住（提示文案用的正是「尽量」）。
+    const placeholder = !dirty && action === "write";
     try {
-      return applyDraftFlush(window.localStorage, draftStorageKey(rowId, columnId), content, action);
+      const ok = applyDraftFlush(window.localStorage, draftStorageKey(rowId, columnId), content, action);
+      if (placeholder && ok) placeholderDraftRef.current = content;
+      return ok || placeholder;
     } catch {
-      // 连取 window.localStorage 本身都抛（极端隐私设置）：只有 write 才算失败，
-      // keep/remove 本就没有要保存的内容，离开是安全的。
-      return action !== "write";
+      // 连取 window.localStorage 本身都抛（极端隐私设置）：只有「真的有未保存内容
+      // 要写」才算失败，keep/remove/占位写都不影响离开的安全性。
+      return action !== "write" || placeholder;
     }
   }, [content, savedContent, rowId, columnId, showRestoreBanner]);
 
@@ -824,7 +837,7 @@ export function KnowhowCellEditor({
         setSaveError(LEAVE_BLOCKED_UPLOADING_HINT);
         return;
       }
-      if (!flushDraft()) {
+      if (!flushDraft(uploading)) {
         // 第一次：拦下并说明；第二次（用户此刻正看着那条警告仍要走）：强制放行。
         // 若没有这条逃生口，存储长期不可用时所有出口都被挡死——「取消」并入统一
         // 路径后最后一个无守卫出口也没了，用户会被永久关在弹窗里。
@@ -948,12 +961,27 @@ export function KnowhowCellEditor({
     const snippets: string[] = [];
     const landSnippets = () => {
       if (snippets.length === 0) return;
-      // 先把所有图片传完、只收集 markdown 片段，最后基于**落笔时的实时内容**插入。
-      // 旧写法是从上传开始时的整篇快照上累加、结束时整篇写回，任何期间发生的内容
-      // 变化都会被那份旧快照静默覆盖（复审指出的「接受的建议被旧快照盖掉」）。
-      const liveValue = contentRef.current;
-      const at = liveValue === startSnapshot ? Math.min(startCaret, liveValue.length) : liveValue.length;
-      applyInsertion(insertAtCursor({ value: liveValue, start: at, end: at }, snippets.join("")));
+      const snippet = snippets.join("");
+      // 还在本格：基于**落笔时的实时内容**插入（决策见 resolveUploadInsertion）。
+      // 旧写法是从上传开始时的整篇快照上累加、结束时整篇写回，期间任何内容变化都会
+      // 被那份旧快照静默覆盖。
+      if (mountedRef.current) {
+        applyInsertion(resolveUploadInsertion(startSnapshot, startCaret, contentRef.current, snippet));
+        return;
+      }
+      // 本格已经离开（用户在上传途中强制离开）：没有正文可插，就把图片写进该格草稿
+      // ——否则这张已经落到服务端的图既进不了任何内容、也回收不掉（无删除端点、无
+      // 生产 GC），成为永久孤儿。此刻同步读取当前草稿再叠加，与离开路径写下的草稿
+      // 竞争安全（localStorage 读改写在本标签页内是原子的）。
+      try {
+        const key = draftStorageKey(rowId, columnId);
+        const next = draftAfterDetachedUpload(window.localStorage.getItem(key), snippet);
+        // next === null：草稿键已经没人认领（离开时清掉了、或更新的实例处置过）。
+        // 此时不写——凭闭包里那份旧 savedContent 造草稿会把用户诱导回旧内容。
+        if (next !== null) window.localStorage.setItem(key, next);
+      } catch {
+        /* 存储不可用：这张图确实无处安放，属已知边界 */
+      }
     };
     try {
       for (const file of images) {
@@ -965,6 +993,20 @@ export function KnowhowCellEditor({
       landSnippets(); // 批量中途失败：已成功的那几张仍要落进正文
       setUploadError(extractErrorMessage(err, "图片上传失败，请重试"));
     } finally {
+      // 一张都没传成、而本格已经离开：把离开时留下的「占位草稿」按值清掉，别让它
+      // 变成没人认领的垃圾——日后 savedContent 被别处改动（如合并共享列的整组写入）
+      // 就会让这份与已保存内容不再相等的占位，冒充成一条「检测到未保存草稿」，
+      // 诱导用户恢复回旧内容。按值比对：只清我们自己写的那份，绝不误删更新的草稿。
+      if (!mountedRef.current && snippets.length === 0 && placeholderDraftRef.current !== null) {
+        try {
+          const key = draftStorageKey(rowId, columnId);
+          if (window.localStorage.getItem(key) === placeholderDraftRef.current) {
+            window.localStorage.removeItem(key);
+          }
+        } catch {
+          /* ignore */
+        }
+      }
       setUploading(false);
       // 上传结束，两条「上传中…」提示都过期了。必须连 LEAVE_BLOCKED_UPLOADING_HINT
       // 一起清：留着不只是常驻红字说假话，更会把「强制离开」那道门预先解锁——下一次
