@@ -62,6 +62,8 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/smoke_memory_mcp
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/check_ask_modes_contract.py"
 
+PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/check_object_type_labels_contract.py"
+
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -m pytest -p no:cacheprovider "$ROOT_DIR/backend/tests"
 
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
