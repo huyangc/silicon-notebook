@@ -347,8 +347,8 @@ function OutlineEditor({
       onGenerating({ ...report, status: "generating", progress: "章节 0/" + cleaned.length + " 完成" });
     } catch (error) {
       // 同 surfaceError:fetch 层的译文(没权限 / 已删除 / 冲突)比「可以重试」
-      // 有用,别压平;非 HTTP 异常才退兜底。
-      console.error("[report] 生成失败", error);
+      // 有用,别压平;非 HTTP 异常才退兜底。原始值的诊断由 toUserMessage 统一
+      // 记(见下方 surfaceError 的注释:这里不再补裸 console.error)。
       setToast(toUserMessage(error, "报告没能生成完，可以重试"));
     } finally {
       setBusy(false);
@@ -526,8 +526,11 @@ export function ReportsPanel({
   const [zipBusy, setZipBusy] = useState(false);
 
   const surfaceError = (error: unknown) => {
-    // 原始异常进 console 供排查。
-    console.error("[report] 操作失败", error);
+    // ⚠这里**不要**再补 `console.error(error)`。原始值已经由 toUserMessage 送进
+    // errors.ts 的受限诊断出口(压单行 + 统一截断到 500 字符)。补一条裸日志既是
+    // 重复打印,又绕过那个上限——一个整页 HTML 错误页 / 超长堆栈能刷爆控制台,
+    // 正是本轮「HTTP 与非 HTTP 共用同一截断上限」整改要堵的。(第四轮评审阻塞 3)
+    //
     // fetch 层已按状态码译过(401/403/404/409 各不相同),直接展示译文——别再压平
     // 成一句通用文案,否则用户分不清「登录失效 / 没权限 / 已删除 / 冲突」,还会
     // 对权限和已删除这类重试也没用的问题反复点。非 HTTP 异常(如断网的

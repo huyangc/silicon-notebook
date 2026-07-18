@@ -364,3 +364,33 @@ test("报告面板不把已翻译的错误压平成一句通用文案", async ()
   assert.ok(text.includes('toUserMessage(error, "报告操作没成功，请稍后重试")'));
   assert.ok(text.includes('toUserMessage(error, "报告没能生成完，可以重试")'));
 });
+
+// 守卫⑤:报告面板不留裸 console.error(第四轮评审阻塞 3)。
+//
+// 原来两处失败路径都是「裸日志 + toUserMessage」并排:
+//   console.error("[report] 生成失败", error);   ← 无上限、整个对象
+//   setToast(toUserMessage(error, "…"));         ← 它自己又经 logDiagnostic 记一条
+// 既重复打印,又绕过 DIAGNOSTIC_MAX_CHARS——和本轮「HTTP 与非 HTTP 共用同一
+// 截断上限」的整改声明直接矛盾。
+//
+// 这条守卫钉的是**真实调用端**:光测 helper 截断没用,因为泄漏发生在调用端
+// **额外**加的那一行上,helper 测试照样全绿。配套的行为断言见 errors.test.mjs
+// 的「报告面板的超长异常」那条。
+test("报告面板的诊断只走人话层,不留裸 console.error", async () => {
+  const text = await read("report-view.tsx");
+  const offenders = text
+    .split("\n")
+    .map((line, i) => [line.trim(), i + 1])
+    .filter(([trimmed]) => !trimmed.startsWith("//") && !trimmed.startsWith("*"))
+    .filter(([trimmed]) => trimmed.includes("console.error("))
+    .map(([trimmed, lineNo]) => `report-view.tsx:${lineNo}  ${trimmed}`);
+  assert.deepEqual(
+    offenders,
+    [],
+    "报告面板的原始诊断必须走 errors.ts(toUserMessage 会记,或显式 logDiagnostic),\n" +
+      "裸 console.error 既重复打印又绕过 500 字符上限:\n" +
+      offenders.join("\n")
+  );
+  // 正面钉住:诊断通道本身还在(别把日志一删了之,那是另一种退化)。
+  assert.ok(text.includes("logDiagnostic("), "report-view 仍应保留受限诊断出口");
+});

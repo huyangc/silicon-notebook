@@ -735,6 +735,48 @@ test("组合链:stream error 事件 → catch → reportError,场景文案不被
   );
 });
 
+// 第四轮评审阻塞 3:report-view 的两处失败路径原来是「裸 console.error +
+// toUserMessage」并排,一次失败打两条日志,其中裸的那条无上限、还是整个对象。
+//
+// 这条跑的是**调用端的完整组合**(不是只测 helper):report-view 的 surfaceError
+// 与 confirmGenerate 的 catch 现在都只剩 `setToast(toUserMessage(error, 兜底))`
+// 这一句,逐字对应下面这段。「调用端不许再补裸日志」由 errors-guard.test.mjs
+// 的守卫⑤ 钉住——两条合起来才是完整覆盖:守卫管「没有多余的那行」,这条管
+// 「剩下的这行行为对」。
+test("报告面板的超长异常:一次失败只打一条日志,且被截断", () => {
+  // 后端 500 时网关常回整页 HTML;这里模拟一个 5000 字符的异常。
+  const huge = new Error("ReportBuildError: " + "报告章节渲染失败 stack frame ".repeat(200));
+  assert.ok(huge.message.length > 4000, `构造的异常应足够长,实际 ${huge.message.length}`);
+
+  const setToastCalls = [];
+  const setToast = (text) => setToastCalls.push(text);
+
+  // ↓ report-view.tsx surfaceError 的全部内容
+  const { logs } = captureSync(() => {
+    setToast(toUserMessage(huge, "报告操作没成功，请稍后重试"));
+  });
+
+  // 用户看人话,不看堆栈。
+  assert.deepEqual(setToastCalls, ["报告操作没成功，请稍后重试"]);
+  // 一次失败 = 一条诊断(旧写法是两条:裸 console.error 一条 + logDiagnostic 一条)。
+  assert.equal(logs.length, 1, `一次失败应只打一条日志,实际 ${logs.length} 条`);
+  // 而且这条受 DIAGNOSTIC_MAX_CHARS 约束——裸 console.error 那条当年是不受的。
+  assert.ok(logs[0].length < 700, `诊断行应被截断,实际 ${logs[0].length} 字符`);
+  assert.match(logs[0], /已截断/);
+  assert.match(logs[0], /ReportBuildError/, "截断归截断,开头的实质内容要留住");
+});
+
+test("报告面板的 HTTP 译文路径:同样只有一条诊断(且在 fetch 层记)", () => {
+  // 走 throwHumanizedHttpError 的错误已经在 readHttpError 里记过原始正文,
+  // toUserMessage 认品牌直接透传、不重复记。所以这条路径同样是「一次失败一条」。
+  const setToastCalls = [];
+  const { logs } = captureSync(() => {
+    setToastCalls.push(toUserMessage(humanizedError("没有权限进行这个操作"), "报告操作没成功，请稍后重试"));
+  });
+  assert.deepEqual(setToastCalls, ["没有权限进行这个操作"]);
+  assert.equal(logs.length, 0, "已在 fetch 层记过,catch 侧不该再记一条");
+});
+
 test("组合链:品牌能穿过任意多层 catch(不是只挡住一跳)", () => {
   // 重连轮询、批量预审那几条路径上,错误会经过不止一层 catch。品牌是对象属性,
   // 只要不重新包装就一路带着。
