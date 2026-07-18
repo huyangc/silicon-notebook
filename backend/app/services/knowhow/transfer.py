@@ -230,9 +230,16 @@ def copy_table(
 def move_table(
     repo: Any, source_table_id: str, target_notebook_id: str, actor_id: str
 ) -> str:
-    # 三步顺序是这个函数的全部要害，两条边界都不能动：
+    # 四步顺序是这个函数的全部要害，三条边界都不能动：
     # ① 先复制、复制成功了才碰源——copy_table 抛异常时源必须分毫未动。
-    # ② 拆源投影在删源表之前。反过来的话，拆投影一旦失败（copy_table 紧邻
+    # ② hidden_source_id 在复制**之后**、删表行之前才读。约束只是「读要早于
+    #    DELETE」，不是「早于复制」；而放到复制之前会让这个读跨越整个复制窗口
+    #    （快照+事务+资产落盘）形成 TOCTOU：若源表在这期间**首次**被投影，
+    #    读到的 hidden 是 None → 拆投影被跳过、表行照删 → 又变成 ③ 说的那种
+    #    不可回收的幽灵；若并发的 ensure_hidden_source 顶替了 id
+    #    （projection.py:275-282），拿着旧 id 去拆会在 projection.py:702-704
+    #    静默 no-op，把新的那份漏成孤儿。读得越晚，窗口越窄。
+    # ③ 拆源投影在删源表之前。反过来的话，拆投影一旦失败（copy_table 紧邻
     #    调度了后台重投影，此刻必然有并发 SQLite 写者，busy timeout 上吃到
     #    OperationalError 是现实可能），源表行已经没了，而 hidden_source_id
     #    只存在于那条被删掉的行里：源库的 chunks/chunks_fts/chunk_embeddings/
@@ -240,8 +247,8 @@ def move_table(
     #    重试也无门——copy_table→snapshot_table 会因表已删而抛 KeyError。
     #    按现在的顺序，任何一步失败都只留下「两边都在」的可恢复重复：用户
     #    可以重试搬迁，也可以照常删掉源表。宁可重复，绝不丢失。
-    hidden = repo.get_knowhow_table(source_table_id).get("hidden_source_id")
     new_table_id = copy_table(repo, source_table_id, target_notebook_id, actor_id)
+    hidden = repo.get_knowhow_table(source_table_id).get("hidden_source_id")
     if hidden:
         build_projector(repo).delete_table_projection(hidden)
     repo.delete_knowhow_table(source_table_id)

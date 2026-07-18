@@ -88,7 +88,10 @@
 
 ### 4.2 移动
 `mode='move'`：先执行 §4.1 完整复制**并校验通过**，再删源。**删源内部顺序＝先拆投影、后删表行**：
-1. 复制前先读下 `hidden_source_id`（它只存在于 `knowhow_tables` 行里，删了行就再也拿不到）。
+1. 复制**之后**、删表行**之前**读 `hidden_source_id`（它只存在于 `knowhow_tables` 行里，删了行就再也拿不到）。
+   约束只是「读早于 DELETE」，不是「读早于复制」：放到复制之前会让这个读跨越整个复制窗口（快照+事务+资产落盘）
+   形成 TOCTOU——源表若在此期间**首次**被投影，读到 `None` 会跳过拆投影却照删表行，重新变成下面说的那种
+   不可回收的幽灵；并发的 `ensure_hidden_source` 顶替了 id 时，拿旧 id 去拆会静默 no-op 并把新的漏成孤儿。
 2. `delete_table_projection(hidden_source_id)`（删源投影 + 源隐藏源）。
 3. `delete_knowhow_table(source_table_id)`（删源表行）。
 4. 源 `notebook_assets` **不动**（沿用现删表语义）。

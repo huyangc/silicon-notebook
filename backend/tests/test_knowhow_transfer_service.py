@@ -182,6 +182,12 @@ def test_move_keeps_source_intact_when_projection_teardown_fails(repo, monkeypat
     assert detail["notebook_id"] == src_nb
     assert len(detail["rows"]) == 1
     assert detail["hidden_source_id"] == src_hidden
+    # 「两边都留」的另一半：副本已提交在目标侧。move_table 是在拆投影处抛的，
+    # 此时 copy_table 早已返回，所以目标必须真有这张表（拿不到返回值，从目标
+    # 侧查）。只钉源表还在的话，「复制根本没发生」也会让这条用例通过。
+    dst_tables = repo.list_knowhow_tables(dst_nb)
+    assert len(dst_tables) == 1
+    assert dst_tables[0]["title"] == detail["title"]
 
 def test_transfer_table_dispatches_copy_keeping_source(repo):
     src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
