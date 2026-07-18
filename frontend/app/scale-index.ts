@@ -1,6 +1,12 @@
 // 检索索引(scale retrieval index)客户端纯逻辑 —— 单测于 scale-index.test.mjs。
 // 统一「看板卡片」与两处内联徽章的状态语义,避免六态 label/可点判断重复三份。
 
+// 值导入须带 .ts 后缀:本模块被 node --test 直接加载,node 的 TS loader 不做无后缀解析。
+import { groupLabel } from "./ask-modes.ts";
+
+// 提问模式的显示名只有 ask-modes.ts 一个真源,散文里插值引用(不写死中文字面量)。
+const STRICT_LABEL = groupLabel("strict");
+
 export type ScaleIndexState =
   | "unindexed" | "suggested" | "queued" | "building" | "indexed" | "stale";
 
@@ -82,7 +88,7 @@ export function describeScaleIndex(s: ScaleIndexStatus): ScaleIndexView {
 // 每个动作的确认文案 —— 描述具体精确,并诚实说明 update 会在何种条件下自动转全量。
 export function scaleIndexOpConfirm(op: ScaleIndexOp, s: ScaleIndexStatus): string {
   if (op === "build") {
-    return "构建检索索引？\n\n从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与严格推理。后台进行，大库可能数分钟。";
+    return `构建检索索引？\n\n从零为本库构建向量检索索引（CSR 图 + KG/chunk ANN），加速语义检索与${STRICT_LABEL}。后台进行，大库可能数分钟。`;
   }
   if (op === "update") {
     const n = s.unindexed_sources ?? 0;
