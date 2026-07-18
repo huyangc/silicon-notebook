@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  GENERIC_USER_ERROR,
   humanizeHttpError,
   readHttpError,
   throwHumanizedHttpError,
@@ -67,27 +68,24 @@ test("空白 detail 不影响泛化", () => {
   assert.equal(humanizeHttpError(404, undefined), "没找到，可能已被删除");
 });
 
+test("含中文的网关/HTML 正文不算「后端写给用户的文案」,不透传", () => {
+  // 评审阻塞 2:此前判据只是「<500 且含一个汉字」,于是 403 的网关正文
+  // `<html>访问被拒绝 — nginx request id=req-1</html>` 会整段显示给用户。
+  assert.equal(
+    humanizeHttpError(403, "<html>访问被拒绝 — nginx request id=req-1</html>"),
+    "没有权限进行这个操作"
+  );
+  assert.equal(humanizeHttpError(404, "<p>页面不存在</p>"), "没找到，可能已被删除");
+  // 多行 = 正文/堆栈,不是文案。
+  assert.equal(humanizeHttpError(400, "参数不对\n  at handler (app.py:31)"), "操作失败，请重试");
+  // JSON 花括号 = 结构化正文,不是文案。
+  assert.equal(humanizeHttpError(400, '{"detail":"参数不对","request_id":"req-1"}'), "操作失败，请重试");
+  // 超长 = 正文,不是文案(后端为用户写的都是短句)。
+  assert.equal(humanizeHttpError(400, `很抱歉${"细节".repeat(200)}`), "操作失败，请重试");
+});
+
 // ---------------------------------------------------------------------------
 // toUserMessage:catch 到的异常 → 用户文案
-// ---------------------------------------------------------------------------
-
-test("toUserMessage 保住 fetch 层已译好的语义,不压平", () => {
-  // 401/403/404/409 各不相同——压成同一句用户就分不清该重试还是该换账号。
-  assert.equal(toUserMessage(new Error("没有权限进行这个操作"), "兜底"), "没有权限进行这个操作");
-  assert.equal(toUserMessage(new Error("没找到，可能已被删除"), "兜底"), "没找到，可能已被删除");
-  assert.equal(toUserMessage(new Error("操作有冲突，请刷新后重试"), "兜底"), "操作有冲突，请刷新后重试");
-});
-
-test("toUserMessage 不把英文技术异常漏给用户", () => {
-  assert.equal(toUserMessage(new TypeError("Failed to fetch"), "兜底"), "兜底");
-  assert.equal(toUserMessage(new Error("Unexpected token < in JSON"), "兜底"), "兜底");
-  assert.equal(toUserMessage(new Error(""), "兜底"), "兜底");
-  assert.equal(toUserMessage("some string", "兜底"), "兜底");
-  assert.equal(toUserMessage(undefined, "兜底"), "兜底");
-});
-
-// ---------------------------------------------------------------------------
-// readHttpError / throwHumanizedHttpError:诊断合同
 // ---------------------------------------------------------------------------
 
 // 换掉 console.error 收集诊断行,顺带保持测试输出干净。
@@ -104,6 +102,71 @@ function captureConsole(fn) {
   })();
 }
 
+// 同步版:toUserMessage 是纯函数,但兜底时会写 console.error。
+function captureSync(fn) {
+  const logs = [];
+  const original = console.error;
+  console.error = (...args) => logs.push(args.map(String).join(" "));
+  try {
+    return { value: fn(), logs };
+  } finally {
+    console.error = original;
+  }
+}
+
+test("toUserMessage 保住 fetch 层已译好的语义,不压平", () => {
+  // 401/403/404/409 各不相同——压成同一句用户就分不清该重试还是该换账号。
+  const { value, logs } = captureSync(() => [
+    toUserMessage(new Error("没有权限进行这个操作"), "兜底"),
+    toUserMessage(new Error("没找到，可能已被删除"), "兜底"),
+    toUserMessage(new Error("操作有冲突，请刷新后重试"), "兜底"),
+  ]);
+  assert.deepEqual(value, ["没有权限进行这个操作", "没找到，可能已被删除", "操作有冲突，请刷新后重试"]);
+  // 透传路径无损,不该重复刷日志(HTTP 诊断 readHttpError 已经记过)。
+  assert.deepEqual(logs, []);
+});
+
+test("toUserMessage 不把英文技术异常漏给用户", () => {
+  const { value } = captureSync(() => [
+    toUserMessage(new TypeError("Failed to fetch"), "兜底"),
+    toUserMessage(new Error("Unexpected token < in JSON"), "兜底"),
+    toUserMessage(new Error(""), "兜底"),
+    toUserMessage("some string", "兜底"),
+    toUserMessage(undefined, "兜底"),
+  ]);
+  assert.deepEqual(value, ["兜底", "兜底", "兜底", "兜底", "兜底"]);
+});
+
+test("toUserMessage 兜底时把原始值写进 console(排查不丢)", () => {
+  // 阻塞 1 的核心:用户看人话,原文进 console——两边都不能丢。
+  const { value, logs } = captureSync(() =>
+    toUserMessage(new TypeError("Failed to fetch"), "服务出了点问题，请稍后重试")
+  );
+  assert.equal(value, "服务出了点问题，请稍后重试");
+  assert.equal(logs.length, 1);
+  assert.match(logs[0], /Failed to fetch/);
+});
+
+test("toUserMessage 不给用户看混着中文的技术正文", () => {
+  const { value } = captureSync(() => [
+    // 后端 job.error 里塞的堆栈/正文,含中文也不直出。
+    toUserMessage(new Error('{"error":"抽取失败","trace":"..."}'), "兜底"),
+    toUserMessage(new Error("<html>网关拒绝 nginx/1.25</html>"), "兜底"),
+    toUserMessage(new Error("抽取失败\nTraceback (most recent call last):"), "兜底"),
+  ]);
+  assert.deepEqual(value, ["兜底", "兜底", "兜底"]);
+});
+
+test("toUserMessage 有默认兜底文案(调用方可以不传)", () => {
+  const { value } = captureSync(() => toUserMessage(new TypeError("Failed to fetch")));
+  assert.equal(value, GENERIC_USER_ERROR);
+  assert.ok(!/[A-Za-z]/.test(value));
+});
+
+// ---------------------------------------------------------------------------
+// readHttpError / throwHumanizedHttpError:诊断合同
+// ---------------------------------------------------------------------------
+
 const jsonResponse = (status, body, headers = {}) =>
   new Response(typeof body === "string" ? body : JSON.stringify(body), {
     status,
@@ -111,26 +174,77 @@ const jsonResponse = (status, body, headers = {}) =>
     headers: { "Content-Type": "application/json", ...headers },
   });
 
-test("readHttpError 抠得出 FastAPI 的几种 detail 形状", async () => {
+test("readHttpError 抠得出 FastAPI 的几种结构化 detail 形状", async () => {
   const { value: a } = await captureConsole(() =>
     readHttpError(jsonResponse(403, { detail: "notebook owner required" }), "t")
   );
-  assert.equal(a.detail, "notebook owner required");
+  assert.equal(a.userDetail, "notebook owner required");
 
   const { value: b } = await captureConsole(() =>
     readHttpError(jsonResponse(422, { detail: [{ msg: "field required" }, { msg: "too long" }] }), "t")
   );
-  assert.equal(b.detail, "field required；too long");
-
-  const { value: c } = await captureConsole(() =>
-    readHttpError(jsonResponse(500, "<html>502 Bad Gateway</html>"), "t")
-  );
-  assert.equal(c.detail, "<html>502 Bad Gateway</html>");
+  assert.equal(b.userDetail, "field required；too long");
 
   const { value: d } = await captureConsole(() =>
     readHttpError(jsonResponse(400, { message: "bad input" }), "t")
   );
-  assert.equal(d.detail, "bad input");
+  assert.equal(d.userDetail, "bad input");
+});
+
+test("非 JSON 原始正文进不了可展示通道(只进诊断)", async () => {
+  // 评审阻塞 2:pickDetail 以前对非 JSON 正文 `return text`,原始正文成了
+  // detail,再撞上「含汉字就透传」——整段网关 HTML 就上了屏。
+  const gateway = "<html>访问被拒绝 — nginx request id=req-1</html>";
+  const { value, logs } = await captureConsole(() =>
+    readHttpError(jsonResponse(403, gateway), "t")
+  );
+  assert.equal(value.userDetail, "", "非 JSON 正文不得成为可展示文案");
+  assert.match(logs[0], /nginx request id=req-1/, "但必须留在诊断里");
+
+  // JSON 里没有 detail/message,或它不是字符串/字符串数组 → 同样不可展示。
+  const { value: v2 } = await captureConsole(() =>
+    readHttpError(jsonResponse(400, { error: "参数不对", request_id: "req-2" }), "t")
+  );
+  assert.equal(v2.userDetail, "");
+  const { value: v3 } = await captureConsole(() =>
+    readHttpError(jsonResponse(400, { detail: { code: 17, msg: "参数不对" } }), "t")
+  );
+  assert.equal(v3.userDetail, "");
+});
+
+test("诊断值统一截断(非 JSON 大正文也逃不掉)", async () => {
+  // 评审阻塞 2:旧写法 `detail || raw.slice(0, 500)`,非 JSON 正文会先被
+  // pickDetail 当成 detail 返回,于是走 `detail` 那一侧,截断被绕过。
+  const huge = `<html>${"错误详情 ".repeat(2000)}</html>`;
+  const { value, logs } = await captureConsole(() => readHttpError(jsonResponse(502, huge), "t"));
+  assert.equal(value.userDetail, "");
+  assert.ok(logs[0].length < 700, `诊断行应被截断,实际 ${logs[0].length} 字符`);
+  assert.match(logs[0], /已截断/);
+
+  // 结构化但超长的 detail 同样截断。
+  const { logs: l2 } = await captureConsole(() =>
+    readHttpError(jsonResponse(500, { detail: "x".repeat(4000) }), "t")
+  );
+  assert.ok(l2[0].length < 700, `诊断行应被截断,实际 ${l2[0].length} 字符`);
+});
+
+test("含中文的网关正文:用户拿中文兜底,原文只在 console", async () => {
+  // 阻塞 2 的端到端断言(自验②)。
+  const gateway = "<html>访问被拒绝 — nginx request id=req-1</html>";
+  const { logs } = await captureConsole(async () => {
+    await assert.rejects(
+      throwHumanizedHttpError(jsonResponse(403, gateway, { "X-Request-Id": "req-1" }), "share"),
+      (error) => {
+        assert.equal(error.message, "没有权限进行这个操作");
+        assert.ok(!error.message.includes("<"), "不得出现标签");
+        assert.ok(!error.message.includes("nginx"), "不得出现上游名");
+        assert.ok(!error.message.includes("req-1"), "不得出现 request id");
+        return true;
+      }
+    );
+  });
+  assert.match(logs[0], /nginx/);
+  assert.match(logs[0], /req-1/);
 });
 
 test("readHttpError 把 状态码 + detail + requestId 写进 console", async () => {
@@ -297,4 +411,66 @@ test("admin 总览的 403 仍走 forbidden 哨兵(专用无权限视图)", async
 test("admin 总览的非 403 错误给人话(不是裸状态码)", async () => {
   const { error } = await callFailing(() => fetchAdminUsers(), jsonResponse(500, { detail: "boom" }));
   assert.equal(error.message, "服务暂时不可用，请稍后再试");
+});
+
+// ---------------------------------------------------------------------------
+// 非 HTTP-Response 错误(评审阻塞 1):fetch 自身 reject / 流式 error / job error
+//
+// 这些路径根本进不了 throwHumanizedHttpError——没有 Response 可读。此前它们
+// 一路直出到用户面前(「服务异常：Failed to fetch」)。
+// ---------------------------------------------------------------------------
+
+// 让 fetch 自身 reject(断网、DNS 挂、后端没起来),而不是返回一个失败响应。
+async function callWithRejectingFetch(fn, cause) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw cause;
+  };
+  try {
+    return await captureConsole(async () => {
+      try {
+        await fn();
+        return null;
+      } catch (error) {
+        return error;
+      }
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test("fetch 自身 reject:用户看到中文,「Failed to fetch」只在 console", async () => {
+  const { value: caught } = await callWithRejectingFetch(
+    () => shareNotebook("nb-1"),
+    new TypeError("Failed to fetch")
+  );
+  assert.ok(caught instanceof TypeError, "client 不吞这个异常,原样往上抛给 catch 侧");
+
+  // 用户看到的是 catch 侧过完人话层的结果——page.tsx 的 reportError 就是这条。
+  const { value: shown, logs } = captureSync(() =>
+    toUserMessage(caught, "服务出了点问题，请稍后重试")
+  );
+  assert.equal(shown, "服务出了点问题，请稍后重试");
+  assert.ok(!shown.includes("Failed to fetch"));
+  assert.ok(!/[A-Za-z]/.test(shown), "用户文案里不该有英文");
+  assert.match(logs[0], /Failed to fetch/, "原文必须留在 console");
+});
+
+test("流式 error 事件 / 后台 job 的英文 error → 中文", async () => {
+  // page.tsx 的 ask 流 `event.error` 与重连轮询的 `job.error` 都是后端英文串。
+  const { value, logs } = captureSync(() => [
+    toUserMessage(new Error("RuntimeError: llm call failed after 3 retries"), "回答没能完成，请重试"),
+    toUserMessage(new Error("TimeoutError"), "该问答失败，请稍后重试"),
+  ]);
+  assert.deepEqual(value, ["回答没能完成，请重试", "该问答失败，请稍后重试"]);
+  assert.match(logs[0], /llm call failed/);
+  assert.match(logs[1], /TimeoutError/);
+});
+
+test("后端写成中文的 stream/job error 仍然透传(别把可操作信息弄丢)", () => {
+  const { value } = captureSync(() =>
+    toUserMessage(new Error("知识库正在重建索引，请稍后再问"), "回答没能完成，请重试")
+  );
+  assert.equal(value, "知识库正在重建索引，请稍后再问");
 });
