@@ -845,16 +845,27 @@ function ManageStyles() {
         position: absolute;
         right: 0;
         bottom: 0;
-        width: 16px;
-        height: 16px;
+        width: 22px;
+        height: 22px;
         cursor: nwse-resize;
         touch-action: none;
+        /* 右下角斜纹拖拽角——与 knowhow-panel.tsx 的 .kh-modal-resize-handle
+           逐字同款（放大 + 斜纹，见那份注释）。 */
         clip-path: polygon(100% 0%, 100% 100%, 0% 100%);
-        background: var(--line);
+        background-image: repeating-linear-gradient(
+          -45deg,
+          var(--muted) 0 1.5px,
+          transparent 1.5px 4.5px
+        );
       }
 
       .kh-modal-resize-handle:hover {
-        background: var(--muted);
+        background-color: var(--soft);
+        background-image: repeating-linear-gradient(
+          -45deg,
+          var(--ink) 0 1.5px,
+          transparent 1.5px 4.5px
+        );
       }
 
       .knowhow-manage-header-row {

@@ -5,6 +5,7 @@ import {
   DEFAULT_MIN_VISIBLE,
   DEFAULT_MIN_WIDTH,
   DEFAULT_MIN_HEIGHT,
+  VIEWPORT_MAX_RATIO,
   DEFAULT_WINDOW_RECT,
   clampToViewport,
   nextRectOnDrag,
@@ -146,10 +147,15 @@ test("nextRectOnResize: 自定义 minWidth/minHeight 生效", () => {
   assert.deepStrictEqual(result, { width: 420, height: 300 });
 });
 
-test("nextRectOnResize: 不能超过视口上限", () => {
+test("nextRectOnResize: 封顶到视口的 VIEWPORT_MAX_RATIO（留一点边距，不贴边/不溢出）", () => {
   const start = { x: 0, y: 0, width: 880, height: 600 };
   const result = nextRectOnResize(start, 5000, 5000, VIEWPORT);
-  assert.deepStrictEqual(result, { width: VIEWPORT.width, height: VIEWPORT.height });
+  // 上限=视口 * VIEWPORT_MAX_RATIO：既放开 Y 方向（不再被卡片 CSS 的
+  // max-height:80vh 压死），又不让卡片撑到贴边/溢出、把 resize 角拖出视口。
+  assert.deepStrictEqual(result, {
+    width: Math.round(VIEWPORT.width * VIEWPORT_MAX_RATIO),
+    height: Math.round(VIEWPORT.height * VIEWPORT_MAX_RATIO),
+  });
 });
 
 // --- serializeWindowRect / parseWindowRect ---------------------------------------

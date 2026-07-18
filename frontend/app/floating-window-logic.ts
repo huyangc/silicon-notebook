@@ -38,6 +38,13 @@ export const DEFAULT_MIN_VISIBLE = 48;
 export const DEFAULT_MIN_WIDTH = 360;
 export const DEFAULT_MIN_HEIGHT = 240;
 
+// resize 放大上限占视口的比例——按用户屏幕分辨率自适应（乘视口尺寸），而不是
+// 硬编码某个 px 上限。留 4% 边距（0.96）而非贴满视口：一是卡片撑到 100% 会
+// 顶到屏幕边、右下角 resize 手柄贴边不好抓（甚至被浏览器滚动条盖住）；二是
+// 与卡片自身 24px overlay padding 的观感一致。想真占满屏请用「全屏」按钮
+// （那条路走 .kh-modal-card--fullscreen，与 resize 是两回事）。
+export const VIEWPORT_MAX_RATIO = 0.96;
+
 // 「未偏移、未 resize」的初始态——居中、跟随 CSS 默认尺寸。parseWindowRect 在
 // 任何解析失败时都回退到这个值（或调用方显式传入的等价 fallback）。
 export const DEFAULT_WINDOW_RECT: WindowRect = { x: 0, y: 0, width: null, height: null };
@@ -99,8 +106,11 @@ export function nextRectOnResize(
 ): { width: number; height: number } {
   const minWidth = opts?.minWidth ?? DEFAULT_MIN_WIDTH;
   const minHeight = opts?.minHeight ?? DEFAULT_MIN_HEIGHT;
-  const width = clampNumber(start.width + deltaX, minWidth, Math.max(minWidth, viewport.width));
-  const height = clampNumber(start.height + deltaY, minHeight, Math.max(minHeight, viewport.height));
+  // 上限=视口 * VIEWPORT_MAX_RATIO（按分辨率自适应，留一点边距，见常量注释）。
+  const maxWidth = Math.round(viewport.width * VIEWPORT_MAX_RATIO);
+  const maxHeight = Math.round(viewport.height * VIEWPORT_MAX_RATIO);
+  const width = clampNumber(start.width + deltaX, minWidth, Math.max(minWidth, maxWidth));
+  const height = clampNumber(start.height + deltaY, minHeight, Math.max(minHeight, maxHeight));
   return { width, height };
 }
 
