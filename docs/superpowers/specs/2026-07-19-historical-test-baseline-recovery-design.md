@@ -1,7 +1,7 @@
 # Historical Test Baseline Recovery
 
-**Date:** 2026-07-19  
-**Status:** Approved design  
+**Date:** 2026-07-19
+**Status:** Approved design
 **Target branch:** `codex/historical-debt-baseline`
 
 ## Context
