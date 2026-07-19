@@ -483,6 +483,10 @@ function hasPositionOrOrderQuery(relative, source) {
     joinScopes(scope, [state]);
   }
 
+  function collectPossibleThrow(scope) {
+    for (const collect of throwCollectors) collect(scope);
+  }
+
   function collectFunctionVarNames(node) {
     const names = new Set();
     function collect(current, root = false) {
@@ -586,14 +590,57 @@ function hasPositionOrOrderQuery(relative, source) {
 
   function fileReadTraits(expression, scope) {
     const current = unwrapExpression(expression);
-    if (!ts.isIdentifier(current)) return {};
-    const resolved = resolvedBinding(scope, current.text);
-    return resolved
-      ? {
-        fileRead: resolved.fileRead,
-        fileReadNamespace: resolved.fileReadNamespace,
-      }
-      : {};
+    if (ts.isIdentifier(current)) {
+      const resolved = resolvedBinding(scope, current.text);
+      return resolved
+        ? {
+          fileRead: resolved.fileRead,
+          fileReadNamespace: resolved.fileReadNamespace,
+        }
+        : {};
+    }
+    if (
+      ts.isPropertyAccessExpression(current)
+      && FILE_READ_EXPORTS.has(current.name.text)
+      && ts.isIdentifier(current.expression)
+      && resolvedBinding(scope, current.expression.text)
+        ?.fileReadNamespace
+    ) {
+      return { fileRead: true };
+    }
+    if (ts.isConditionalExpression(current)) {
+      const whenTrue = fileReadTraits(current.whenTrue, scope);
+      const whenFalse = fileReadTraits(current.whenFalse, scope);
+      return {
+        fileRead: (
+          Boolean(whenTrue.fileRead)
+          || Boolean(whenFalse.fileRead)
+        ),
+        fileReadNamespace: (
+          Boolean(whenTrue.fileReadNamespace)
+          || Boolean(whenFalse.fileReadNamespace)
+        ),
+      };
+    }
+    if (
+      ts.isBinaryExpression(current)
+      && [
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(current.operatorToken.kind)
+    ) {
+      const left = fileReadTraits(current.left, scope);
+      const right = fileReadTraits(current.right, scope);
+      return {
+        fileRead: Boolean(left.fileRead) || Boolean(right.fileRead),
+        fileReadNamespace: (
+          Boolean(left.fileReadNamespace)
+          || Boolean(right.fileReadNamespace)
+        ),
+      };
+    }
+    return {};
   }
 
   function parameterIsTextFlow(parameter) {
@@ -614,13 +661,6 @@ function hasPositionOrOrderQuery(relative, source) {
 
   function visit(node, scope) {
     if (found) return;
-    if (
-      ts.isCallExpression(node)
-      || ts.isNewExpression(node)
-      || ts.isThrowStatement(node)
-    ) {
-      for (const collect of throwCollectors) collect(scope);
-    }
     if (ts.isFunctionLike(node)) {
       const functionScope = newScope(scope, "function");
       for (const parameter of node.parameters) {
@@ -632,10 +672,14 @@ function hasPositionOrOrderQuery(relative, source) {
               && isTextFlow(parameter.initializer, functionScope)
             )
           );
+          const traits = parameter.initializer
+            ? fileReadTraits(parameter.initializer, functionScope)
+            : {};
           defineBinding(
             functionScope,
             parameter.name.text,
             value,
+            traits,
           );
         }
         if (parameter.initializer) {
@@ -770,6 +814,7 @@ function hasPositionOrOrderQuery(relative, source) {
           visit(entryClause.expression, branch);
         }
         let stopped = false;
+        let abrupt = false;
         for (
           let clauseIndex = entry;
           clauseIndex < clauses.length && !stopped;
@@ -781,9 +826,18 @@ function hasPositionOrOrderQuery(relative, source) {
               break;
             }
             visit(statement, branch);
+            if (
+              ts.isReturnStatement(statement)
+              || ts.isThrowStatement(statement)
+              || ts.isContinueStatement(statement)
+            ) {
+              stopped = true;
+              abrupt = true;
+              break;
+            }
           }
         }
-        branches.push(branch);
+        if (!abrupt) branches.push(branch);
       }
       joinScopes(scope, branches);
       return;
@@ -854,13 +908,60 @@ function hasPositionOrOrderQuery(relative, source) {
     }
     if (
       ts.isBinaryExpression(node)
-      && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && node.operatorToken.kind <= ts.SyntaxKind.LastAssignment
       && ts.isIdentifier(node.left)
     ) {
-      const value = isTextFlow(node.right, scope);
-      const traits = fileReadTraits(node.right, scope);
+      const existing = resolvedBinding(scope, node.left.text);
+      const rightValue = isTextFlow(node.right, scope);
+      const rightTraits = fileReadTraits(node.right, scope);
+      const preservesLeft = [
+        ts.SyntaxKind.PlusEqualsToken,
+        ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+        ts.SyntaxKind.BarBarEqualsToken,
+        ts.SyntaxKind.QuestionQuestionEqualsToken,
+      ].includes(node.operatorToken.kind);
+      const plainAssignment = (
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      );
+      const value = plainAssignment
+        ? rightValue
+        : (
+          preservesLeft
+            ? Boolean(existing?.value) || rightValue
+            : false
+        );
+      const traits = plainAssignment
+        ? rightTraits
+        : (
+          preservesLeft
+            ? {
+              fileRead: (
+                Boolean(existing?.fileRead)
+                || Boolean(rightTraits.fileRead)
+              ),
+              fileReadNamespace: (
+                Boolean(existing?.fileReadNamespace)
+                || Boolean(rightTraits.fileReadNamespace)
+              ),
+            }
+            : {}
+        );
       visit(node.right, scope);
       assignBinding(scope, node.left.text, value, traits);
+      return;
+    }
+    if (ts.isThrowStatement(node)) {
+      visit(node.expression, scope);
+      collectPossibleThrow(scope);
+      return;
+    }
+    if (ts.isNewExpression(node)) {
+      visit(node.expression, scope);
+      for (const argument of node.arguments ?? []) {
+        visit(argument, scope);
+      }
+      collectPossibleThrow(scope);
       return;
     }
     if (
@@ -902,32 +1003,30 @@ function hasPositionOrOrderQuery(relative, source) {
       found = true;
       return;
     }
-    if (
-      ts.isCallExpression(node)
-      && ts.isPropertyAccessExpression(node.expression)
-    ) {
-      const method = node.expression.name.text;
-      if (["getStart", "getFullStart", "getEnd"].includes(method)) {
-        found = true;
-        return;
-      }
-      if (
-        method === "at"
-        && ts.isPropertyAccessExpression(node.expression.expression)
-        && ["statements", "members", "properties"].includes(
-          node.expression.expression.name.text,
+    if (ts.isCallExpression(node)) {
+      const property = ts.isPropertyAccessExpression(node.expression)
+        ? node.expression
+        : undefined;
+      const textReceiver = (
+        property
+        && ["indexOf", "slice", "substring"].includes(
+          property.name.text,
         )
-      ) {
+      )
+        ? property.expression
+        : undefined;
+      if (textReceiver && isTextFlow(textReceiver, scope)) {
         found = true;
         return;
       }
-      if (
-        ["indexOf", "slice", "substring"].includes(method)
-        && isTextFlow(node.expression.expression, scope)
-      ) {
+      visit(node.expression, scope);
+      for (const argument of node.arguments) visit(argument, scope);
+      if (textReceiver && isTextFlow(textReceiver, scope)) {
         found = true;
         return;
       }
+      collectPossibleThrow(scope);
+      return;
     }
     ts.forEachChild(node, (child) => visit(child, scope));
   }
@@ -1141,6 +1240,14 @@ test("source policy rejects position identities without banning ordinary arrays"
       + " data = readFileSync(path, 'utf8'); risky();"
       + " } catch { data.slice(1); }",
     "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\ntry {"
+      + " risky(data = readFileSync(path, 'utf8'));"
+      + " } catch { data.slice(1); }",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\ntry {"
+      + " throw (data = readFileSync(path, 'utf8'));"
+      + " } catch { data.slice(1); }",
+    "import { readFileSync } from 'node:fs';\n"
       + "let data = [];\nswitch (kind) {"
       + " case 1: data = readFileSync(path, 'utf8');"
       + " case 2: data.slice(1); break; }",
@@ -1159,6 +1266,15 @@ test("source policy rejects position identities without banning ordinary arrays"
       + "let load;\nif (flag) { load = readFile; }"
       + " else { load = other; }\n"
       + "const data = await load(path, 'utf8');\ndata.slice(1);",
+    "import fs from 'node:fs';\n"
+      + "const load = fs.readFileSync;\n"
+      + "const data = load(path, 'utf8');\ndata.slice(1);",
+    "import { readFileSync } from 'node:fs';\n"
+      + "const load = flag ? readFileSync : other;\n"
+      + "const data = load(path, 'utf8');\ndata.slice(1);",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\ndata += readFileSync(path, 'utf8');\n"
+      + "data.slice(1);",
     "function fragment(payload, alias = payload) {"
       + " return alias.slice(1); }",
     "import { readFileSync } from 'node:fs';\n"
@@ -1177,6 +1293,17 @@ test("source policy rejects position identities without banning ordinary arrays"
       "import { readFileSync } from 'node:fs';\n"
         + "let data = readFileSync(path, 'utf8');\n"
         + "data = [];\ndata.slice(1);",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "import { readFileSync } from 'node:fs';\n"
+        + "let data = [];\nfunction inspect() {"
+        + " switch (kind) { case 1:"
+        + " data = readFileSync(path, 'utf8'); return;"
+        + " case 2: data.slice(); } }",
     ),
     [],
   );
