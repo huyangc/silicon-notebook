@@ -642,7 +642,8 @@ class AskService:
         )
         if chains:
             from app.services.kg.follow_chain import render_follow_chain_context
-            chain_block, chain_id_map = render_follow_chain_context(chains, id_offset=2000)
+            chain_block, chain_id_map = render_follow_chain_context(
+                chains, id_offset=2000, active_notebook_id=notebook_id)
             if chain_block and chain_block != "(none)":
                 context_block = f"{context_block}\n\n{chain_block}"
                 id_map = {**id_map, **chain_id_map}
@@ -747,8 +748,8 @@ class AskService:
             if ex and ex.comparison and (self.settings.community_layer_enabled
                                           or self.settings.mention_bridge_enabled):
                 communities = self.communities()
-                base_nb = communities.first_base_notebook_id(notebook_id)
-                if base_nb:
+                base_ids = communities.mounted_base_ids(notebook_id)
+                for base_nb in base_ids:
                     peers, _src = communities.resolve_comparison_peers(
                         base_nb, ex.comparison["focal"], retrieval_query,
                         top_k=self.settings.community_peers_topk,
@@ -855,6 +856,15 @@ class AskService:
                 {c.notebook_id or notebook_id for c in selected})
             def _chunk_tier(c) -> str:
                 return chunk_tier_map.get(c.notebook_id or notebook_id, "personal")
+            # Task 14 codex r4 fix: c.notebook_id 同样会被 PPR(_mix_retrieve 第三路
+            # 概念漫游,merge 进 selected 的 chunk)对 active 库自己的命中打上 active
+            # 自己的 id,并非只在跨库命中时才打标——citations_from 同一根因的镜像
+            # 修复(见 evidence_context.py citations_from 的 codex r4 fix 注释)。这
+            # 里直接构造 Citation(不经 citations_from),必须同样与调用方
+            # notebook_id 比较,相等则归零,否则前端会显示一个多余的「来自「当前
+            # 笔记本」」徽章。
+            def _cite_notebook_id(c) -> str:
+                return c.notebook_id if c.notebook_id != notebook_id else ""
             # Task 12b（引用跳转扩面）：chunk 模式此前从未富化过
             # citation.knowhow（此前只有 reasoning 模式的 citations_from 会查）
             # ——同池同权补上。批量查一次 knowhow 定位标签，覆盖 selected 里
@@ -873,7 +883,8 @@ class AskService:
                             label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                             source_id=c.source_id, element_id=eid,
                             location_label=c.section_path, quoted_span=c.text[:200],
-                            tier=_chunk_tier(c), knowhow=knowhow_refs.get(eid)))
+                            tier=_chunk_tier(c), notebook_id=_cite_notebook_id(c),
+                            knowhow=knowhow_refs.get(eid)))
             else:
                 for c in selected:
                     eid = c.element_ids[0] if c.element_ids else ""
@@ -881,7 +892,8 @@ class AskService:
                         label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                         source_id=c.source_id, element_id=eid,
                         location_label=c.section_path, quoted_span=c.text[:200],
-                        tier=_chunk_tier(c), knowhow=knowhow_refs.get(eid)))
+                        tier=_chunk_tier(c), notebook_id=_cite_notebook_id(c),
+                        knowhow=knowhow_refs.get(eid)))
             citations.extend(self._memory_citations(anchors, memory_hits))
 
             # grounding 在 chunk∪KG 合并集上;各项用其融合 relevance(rerank 分不参与)。
@@ -958,12 +970,12 @@ class AskService:
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
-                or self.candidates.any_base_has_kg()):
+                or self.candidates.any_base_has_kg(notebook_id)):
             response = AskResponse(
                 answer_id="",
-                conclusion="本笔记本尚未构建知识图谱,也没有可用的底层(tier=base)KG;"
-                           "请先点『构建知识图谱』,或把一个已建图的笔记本设为底层"
-                           "(POST /notebooks/{id}/tier)。",
+                conclusion="本笔记本尚未构建知识图谱,也没有已建图的参考库;"
+                           "请先点『构建知识图谱』,或为本笔记本挂载一个已建图的"
+                           "公共知识库。",
                 conversation_id=conversation_id, retrieval_query=question,
                 llm_mode="deterministic", kg_required=True)
             response.mode = "reasoning"
@@ -1021,7 +1033,7 @@ class AskService:
             cited_element_ids = {ev.element_id for item in top_hits
                                  for ev in item.evidence if ev.element_id}
             citations = self.evidence_context.citations_from(
-                top_hits, cited_element_ids, "KG evidence")
+                top_hits, cited_element_ids, "KG evidence", notebook_id=notebook_id)
 
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
@@ -1138,12 +1150,12 @@ class AskService:
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
-                or self.candidates.any_base_has_kg()):
+                or self.candidates.any_base_has_kg(notebook_id)):
             response = AskResponse(
                 answer_id="",
-                conclusion="本笔记本尚未构建知识图谱,也没有可用的底层(tier=base)KG;"
-                           "请先点『构建知识图谱』,或把一个已建图的笔记本设为底层"
-                           "(POST /notebooks/{id}/tier)。",
+                conclusion="本笔记本尚未构建知识图谱,也没有已建图的参考库;"
+                           "请先点『构建知识图谱』,或为本笔记本挂载一个已建图的"
+                           "公共知识库。",
                 conversation_id=conversation_id, retrieval_query=question,
                 llm_mode="deterministic", kg_required=True)
             response.mode = "graph"
@@ -1243,6 +1255,16 @@ class AskService:
                     # + PPR 检索结果(可掺 base 库 chunk,notebook_id 已标)。
                     ppr_tier_map = self._tier_map_for(
                         {c.notebook_id or notebook_id for c in ppr_chunks})
+                    # Task 14 codex r4 fix: _ppr_retrieve 对 active 库自己的命中
+                    # 同样会打上 active 自己的 id(scale_ppr 的 combined_chunk_ids
+                    # 跨 base ⊕ active,逐 chunk 原样带出 chunk_notebook_id,并非
+                    # 只在跨库命中时才打标)——citations_from 同一根因的镜像修复
+                    # (见 evidence_context.py citations_from 的 codex r4 fix 注
+                    # 释)。这里直接构造 Citation,必须同样与调用方 notebook_id
+                    # 比较,相等则归零,否则前端会显示一个多余的「来自「当前笔记
+                    # 本」」徽章。
+                    def _cite_notebook_id(c) -> str:
+                        return c.notebook_id if c.notebook_id != notebook_id else ""
                     # Task 12b(引用跳转扩面):graph 模式的 PPR 引用同样此前从未
                     # 富化过 citation.knowhow——批量查一次,覆盖 ppr_chunks 里每
                     # 个 chunk 的首个 element_id,一次 store 读取(同 ask_chunk
@@ -1258,6 +1280,7 @@ class AskService:
                                 source_id=c.source_id, element_id=eid,
                                 location_label=c.section_path, quoted_span=c.text[:200],
                                 tier=ppr_tier_map.get(c.notebook_id or notebook_id, "personal"),
+                                notebook_id=_cite_notebook_id(c),
                                 knowhow=knowhow_refs.get(eid)))
                     citations.extend(self._memory_citations(anchors, memory_hits))
                     evidence_level, top_relevance = classify_evidence(
@@ -1409,6 +1432,14 @@ class AskService:
                 # notebook_id) 单库范围,base 节点的 element 天生查不到 chunk——凡是这里
                 # 真返回的 chunk 必属 notebook_id 自己,故只需查这一个 notebook 的 tier。
                 src_chunk_tier = self._tier_map_for({notebook_id}).get(notebook_id, "personal")
+                # Task 14 codex r4 fix: c.notebook_id 在这条分支里目前恒为 ""
+                # (_kg_source_chunks 从不设置 RetrievedChunk.notebook_id,见其上方
+                # 注释),但仍与调用方 notebook_id 比较后再传入,而非原样透传——
+                # 与 citations_from/ask_chunk 两处 mix 分支/ask_graph 的 PPR 分支
+                # 保持同一写法,防止 _kg_source_chunks 未来改动(或换一条同名字段
+                # 的产出源)时悄悄退化成第四处同类泄漏。
+                def _cite_notebook_id(c) -> str:
+                    return c.notebook_id if c.notebook_id != notebook_id else ""
                 # Task 12b(引用跳转扩面):graph 模式的源原文引用(mix)同样此前
                 # 从未富化过 citation.knowhow——批量查一次,覆盖 src_chunks 里
                 # 每个 chunk 的首个 element_id,一次 store 读取(同 ask_chunk
@@ -1423,7 +1454,8 @@ class AskService:
                             label=f"{c.source_title} · {c.section_path}".strip(" ·"),
                             source_id=c.source_id, element_id=eid,
                             location_label=c.section_path, quoted_span=c.text[:200],
-                            tier=src_chunk_tier, knowhow=knowhow_refs.get(eid)))
+                            tier=src_chunk_tier, notebook_id=_cite_notebook_id(c),
+                            knowhow=knowhow_refs.get(eid)))
                 citations.extend(self._memory_citations(anchors, memory_hits))
                 evidence_level, top_relevance = classify_evidence(
                     list(src_chunks) + list(memory_hits), anchors, llm_grounded,

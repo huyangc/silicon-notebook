@@ -57,11 +57,29 @@ from app.services.retrieval import cosine, keyword_score
 _IN_CHUNK = 900
 
 
+class PromotionTargetError(ValueError):
+    """晋升目标(target_base_id)解析/校验失败 —— 挂 0 个公共库、挂 >1 个却未
+    显式指定、或指定的目标不在挂载集合内(见 _resolve_promotion_target)。
+
+    刻意作为 ValueError 的子类而非独立异常:知识对象晋升路由的
+    `except ValueError` 无需改动即可继续把它映射成 400。子类化只是为了让
+    Memory 晋升路由(经 memory_routes._memory_call 统一映射,那里的裸
+    ValueError 语义是"状态冲突"→409)能在同一个 except 链里把这一类"目标
+    无效"的输入错误单独识别出来映射成 400,而不误伤"该 Memory 已在晋升中"
+    这类真正的状态冲突。"""
+
+
 def promotion_row_to_dict(
-    row: sqlite3.Row, *, payload=None, evidence=None, source_revision: int = 0
+    row: sqlite3.Row, *, payload=None, evidence=None, source_revision: int = 0,
+    target_base_name: str = "",
 ) -> dict:
     """Map a promotion_candidates row to the PromotionCandidate-shaped dict.
-    payload/evidence are denormalised from knowledge_objects when listing."""
+    payload/evidence are denormalised from knowledge_objects when listing.
+    target_base_name (Task 13 审查 #4) is likewise denormalised by the caller
+    from notebooks — this function stays a pure row mapper with no DB access,
+    so callers that can batch (list_promotion_queue) resolve names in one
+    `id IN (...)` round-trip up front; callers that don't need it (propose/
+    approve/reject single-row responses) simply leave it at the default ''."""
     return {
         "id": row["id"],
         "notebook_id": row["notebook_id"],
@@ -77,6 +95,8 @@ def promotion_row_to_dict(
         "source_kind": "memory" if row["object_type"] == "memory" else "knowledge",
         "memory_id": row["object_id"] if row["object_type"] == "memory" else "",
         "source_revision": int(source_revision),
+        "target_base_id": row["target_base_id"],
+        "target_base_name": target_base_name,
     }
 
 
@@ -990,6 +1010,27 @@ class KnowledgeGovernanceService:
     # Governance: promotion state machine (Track F)
     # ------------------------------------------------------------------
 
+    def _resolve_promotion_target(
+        self, db: sqlite3.Connection, notebook_id: str, target_base_id: str = ""
+    ) -> str:
+        """挂 0 个公共库 → 拒绝；挂 1 个 → 默认它；挂 >1 个 → 必须显式指定且必须
+        在挂载集合内(设计 §6 晋升目标)。Shared by propose_promotion and
+        propose_memory_promotion — both write into the SAME
+        promotion_candidates.target_base_id column, and the approval side
+        (approve_promotion_in_transaction / approve_memory_promotion_in_transaction)
+        reads it uniformly, so both proposal paths must resolve it the same way."""
+        allowed = self.governance_store.mounted_public_base_ids(db, notebook_id)
+        if not allowed:
+            raise PromotionTargetError("该笔记本尚未挂载任何公共知识库，无法提交晋升")
+        target = (target_base_id or "").strip()
+        if not target:
+            if len(allowed) > 1:
+                raise PromotionTargetError("挂载了多个公共知识库，请指定晋升目标")
+            target = allowed[0]
+        if target not in allowed:
+            raise PromotionTargetError("晋升目标必须是本笔记本已挂载的公共知识库")
+        return target
+
     @staticmethod
     def _memory_promotion_payload(item, snapshot: Optional[dict] = None) -> dict:
         pinned = snapshot or {}
@@ -1002,9 +1043,14 @@ class KnowledgeGovernanceService:
         }
 
     def propose_memory_promotion(
-        self, item, candidates: List[dict], user_id: str
+        self, item, candidates: List[dict], user_id: str, *, target_base_id: str = ""
     ) -> dict:
-        """Place a creator-owned confirmed Memory into the existing curator queue."""
+        """Place a creator-owned confirmed Memory into the existing curator queue.
+
+        Task 8 (multi-domain base libraries) adds target_base_id, mirroring
+        propose_promotion's kwarg: which mounted public reference library to
+        promote into (required only when more than one is mounted; see
+        _resolve_promotion_target, shared with the knowledge-object path)."""
         self.get_notebook(item.notebook_id)
         if item.created_by != user_id:
             raise KeyError(item.id)
@@ -1024,6 +1070,7 @@ class KnowledgeGovernanceService:
                     evidence=[Evidence(**card) for card in snapshot.get("evidence", [])],
                     source_revision=int(snapshot.get("source_revision") or 0),
                 )
+            target = self._resolve_promotion_target(db, item.notebook_id, target_base_id)
             cand_id = self._new_id("promo")
             current = self.memory_store.promotion_rows_on(db, [item.id]).get(item.id)
             if current is None:
@@ -1032,7 +1079,8 @@ class KnowledgeGovernanceService:
                 db, current.notebook_id, current.provenance
             )
             self.governance_store.insert_promotion_candidate(
-                db, cand_id, item.notebook_id, item.id, "memory", now
+                db, cand_id, item.notebook_id, item.id, "memory", now,
+                target_base_id=target,
             )
             current = self.memory_store.propose_promotion_on(
                 db, item.id, user_id, cand_id, candidates, evidence, item, now
@@ -1046,12 +1094,18 @@ class KnowledgeGovernanceService:
             source_revision=int(snapshot.get("source_revision") or 0),
         )
 
-    def propose_promotion(self, notebook_id: str, object_id: str) -> dict:
+    def propose_promotion(
+        self, notebook_id: str, object_id: str, *, target_base_id: str = ""
+    ) -> dict:
         """Propose a personal-KG object for promotion into the base corpus.
 
         Idempotent for an already-active proposal of the same object. Raises
         KeyError if the notebook or object is missing; ValueError if the
-        notebook is itself a base notebook (use the review gate there instead).
+        notebook is itself a base notebook (use the review gate there instead),
+        or if ``target_base_id`` cannot be resolved against this notebook's
+        mounted public reference libraries (0 mounted → reject; 1 → default;
+        >1 → the caller must pass target_base_id explicitly — see
+        _resolve_promotion_target).
         """
         self.get_notebook(notebook_id)  # KeyError if notebook missing
         now = self._now()
@@ -1068,9 +1122,11 @@ class KnowledgeGovernanceService:
             existing = self.governance_store.active_promotion_for_object(db, object_id)
             if existing is not None:
                 return promotion_row_to_dict(existing)
+            target = self._resolve_promotion_target(db, notebook_id, target_base_id)
             cand_id = self._new_id("promo")
             self.governance_store.insert_promotion_candidate(
-                db, cand_id, notebook_id, object_id, obj["object_type"], now
+                db, cand_id, notebook_id, object_id, obj["object_type"], now,
+                target_base_id=target,
             )
             row = self.governance_store.promotion_candidate_row(db, cand_id)
         return promotion_row_to_dict(row)
@@ -1079,11 +1135,17 @@ class KnowledgeGovernanceService:
         """List promotion candidates across all notebooks (the curator sees
         everything). Defaults to the active queue (proposed + under_review);
         pass status_filter to view a single status. Denormalises payload +
-        evidence from knowledge_objects for display.
+        evidence from knowledge_objects for display, and (Task 13 审查 #4)
+        target_base_name from notebooks — the curator otherwise has no way to
+        know which library a candidate targets unless they happen to own it
+        (notebooks.find on the frontend's own notebook list misses every
+        public base someone else created).
 
         Batched (house pattern, see _hydrate_search_hits): one `id IN (...)`
         knowledge_objects lookup for the whole queue instead of a per-row
-        SELECT — was N+1 (one round-trip per candidate)."""
+        SELECT — was N+1 (one round-trip per candidate). target_base_name
+        resolution follows the same pattern: one `id IN (...)` notebooks
+        lookup for the whole queue, not a per-row SELECT."""
         with self._connect() as db:
             rows = self.governance_store.promotion_queue_rows(db, status_filter)
             object_ids = list(dict.fromkeys(
@@ -1098,8 +1160,17 @@ class KnowledgeGovernanceService:
                 for r in self.governance_store.promotion_object_rows(db, batch):
                     obj_by_id[r["id"]] = r
             memory_by_id = self.memory_store.promotion_rows_on(db, memory_ids)
+            target_ids = list(dict.fromkeys(
+                r["target_base_id"] for r in rows if r["target_base_id"]
+            ))
+            name_by_id: Dict[str, str] = {}
+            for i in range(0, len(target_ids), _IN_CHUNK):
+                batch = target_ids[i:i + _IN_CHUNK]
+                for r in self.governance_store.notebook_name_rows(db, batch):
+                    name_by_id[r["id"]] = r["name"]
             out: List[dict] = []
             for row in rows:
+                target_base_name = name_by_id.get(row["target_base_id"], "")
                 memory = memory_by_id.get(row["object_id"])
                 if row["object_type"] == "memory":
                     snapshot = (
@@ -1124,6 +1195,7 @@ class KnowledgeGovernanceService:
                             ),
                             evidence=safe_evidence,
                             source_revision=int(snapshot.get("source_revision") or 0),
+                            target_base_name=target_base_name,
                         )
                     )
                     continue
@@ -1135,7 +1207,10 @@ class KnowledgeGovernanceService:
                     else []
                 )
                 out.append(
-                    promotion_row_to_dict(row, payload=payload, evidence=evidence)
+                    promotion_row_to_dict(
+                        row, payload=payload, evidence=evidence,
+                        target_base_name=target_base_name,
+                    )
                 )
         return out
 

@@ -22,7 +22,7 @@ import pytest
 
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 from app.services.communities import (
-    CommunityQueryService, _norm, community_peers, first_base_notebook_id,
+    CommunityQueryService, _norm, community_peers, mounted_base_ids,
 )
 
 
@@ -74,8 +74,17 @@ def _make_db() -> sqlite3.Connection:
         """
         CREATE TABLE notebooks (
             id TEXT PRIMARY KEY,
+            name TEXT NOT NULL DEFAULT '',
             tier TEXT,
-            updated_at TEXT
+            status TEXT NOT NULL DEFAULT 'active',
+            updated_at TEXT,
+            created_by TEXT
+        );
+        CREATE TABLE notebook_bases (
+            notebook_id TEXT NOT NULL,
+            base_notebook_id TEXT NOT NULL,
+            created_at TEXT,
+            created_by TEXT
         );
         CREATE TABLE concept_clusters (
             notebook_id TEXT NOT NULL,
@@ -155,7 +164,7 @@ def repo_no_communities() -> _FakeRepo:
 
 
 # --------------------------------------------------------------------------- #
-# _norm / first_base_notebook_id 基础
+# _norm / mounted_base_ids 基础
 # --------------------------------------------------------------------------- #
 def test_norm_collapses_ws_and_lowercases():
     assert _norm("  DeepSeek   V4  ") == "deepseek v4"
@@ -163,12 +172,24 @@ def test_norm_collapses_ws_and_lowercases():
     assert _norm(None) == ""  # type: ignore[arg-type]
 
 
-def test_first_base_notebook_excludes_active(repo_with_communities):
+def test_mounted_base_ids_reflects_mounts(repo_with_communities):
+    """多领域基准库:mounted_base_ids 不再是「系统里随便一个 tier='base'」,
+    而是「本库显式挂载的参考库」——没挂就看不到,哪怕对方已发布。"""
     repo = repo_with_communities
-    # active 恰是 nb-base 本身 → 应被 id != ? 排除 → None
-    assert first_base_notebook_id(repo.community_queries, "nb-base") is None
-    # active 是别的 nb → 返回 base 库
-    assert first_base_notebook_id(repo.community_queries, "nb-active") == "nb-base"
+    repo._conn.execute(
+        "INSERT INTO notebooks (id, tier, created_by) VALUES ('nb-active', 'personal', 'u1')"
+    )
+    # nb-base 尚未被任何库挂载 → 空
+    assert mounted_base_ids(repo.community_queries, "nb-active") == []
+    repo._conn.execute(
+        "INSERT INTO notebook_bases (notebook_id, base_notebook_id, created_at, created_by) "
+        "VALUES ('nb-active', 'nb-base', '2026-07-19T00:00:00', 'u1')"
+    )
+    repo._conn.commit()
+    # 挂载后可见
+    assert mounted_base_ids(repo.community_queries, "nb-active") == ["nb-base"]
+    # nb-base 自己没挂任何东西 → 空(即便它自己是 tier='base')
+    assert mounted_base_ids(repo.community_queries, "nb-base") == []
 
 
 # --------------------------------------------------------------------------- #

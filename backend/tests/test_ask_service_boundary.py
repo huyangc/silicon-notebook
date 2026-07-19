@@ -174,7 +174,7 @@ class _MinimalCandidates:
     def has_kg(self, notebook_id):
         return True
 
-    def any_base_has_kg(self):
+    def any_base_has_kg(self, notebook_id):
         return False
 
     def graph_is_large(self, notebook_id):

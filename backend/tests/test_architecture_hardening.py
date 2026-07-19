@@ -98,6 +98,7 @@ def test_federated_large_guard_includes_base_notebooks(tmp_path, monkeypatch):
     personal = repo.create_notebook(NotebookCreate(name="personal"))
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(personal.id, [base.id], "user-local")
 
     monkeypatch.setattr(
         repo.retrieval.candidates,

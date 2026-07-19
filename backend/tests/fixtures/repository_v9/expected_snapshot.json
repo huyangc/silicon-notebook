@@ -330,7 +330,7 @@
       "access": "owner",
       "access_scope": "private",
       "base_kg_available": false,
-      "base_notebook_name": "",
+      "base_notebooks": [],
       "counts": {
         "cases": 0,
         "checklist_items": 0,
@@ -1323,6 +1323,11 @@
         "type": "index"
       },
       {
+        "name": "idx_notebook_bases_base",
+        "sql_sha256": "fcbcb19078ddd0e66e5dec668b3c7e96a58eebfc49021cbecf16851564b4dfb4",
+        "type": "index"
+      },
+      {
         "name": "idx_notebook_members_user",
         "sql_sha256": "d19d04e75eb1ca890f435ea4508b7da01eae29fa1214df4b76a9f8ed5d7cf6b1",
         "type": "index"
@@ -1698,6 +1703,11 @@
         "type": "table"
       },
       {
+        "name": "notebook_bases",
+        "sql_sha256": "7cfd916ab21139d31c860d4b2b6d23e1323b04dcfaa14b636bbe9cc0b79957c4",
+        "type": "table"
+      },
+      {
         "name": "notebook_members",
         "sql_sha256": "86957dac313deb2ff589f331611d907888c21c00bafb0e79bf95af846697442e",
         "type": "table"
@@ -1714,7 +1724,7 @@
       },
       {
         "name": "promotion_candidates",
-        "sql_sha256": "2697cb7f18289e681bb7bf9d5e576c03b6a134fd61279cd4ef7e9591972d5259",
+        "sql_sha256": "57a4cdf516ee6c321d993d4ab5c1c485cf02616e9f9ab28da38fe7abf560dc31",
         "type": "table"
       },
       {
@@ -1778,6 +1788,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 19
+    "user_version": 20
   }
 }

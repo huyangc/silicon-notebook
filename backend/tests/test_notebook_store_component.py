@@ -74,7 +74,10 @@ def test_update_row_applies_only_provided_fields(repo):
     assert dict(after) == before  # empty payload → no write at all
 
 
-def test_set_tier_base_is_globally_unique_and_personal_is_local(repo):
+def test_set_tier_base_no_longer_globally_unique_and_personal_is_local(repo):
+    """多领域基准库:set_tier(tier='base') 不再全局唯一 —— 把 B 设为 base 不应
+    降级 A(各领域各有自己的公共知识库)。tier='personal' 仍是纯本地重置,
+    幂等,且不影响其它笔记本的 tier。"""
     first = repo.create_notebook(NotebookCreate(name="A"))
     second = repo.create_notebook(NotebookCreate(name="B"))
     store = repo._runtime.notebook_store
@@ -82,10 +85,10 @@ def test_set_tier_base_is_globally_unique_and_personal_is_local(repo):
     assert store.get_row(first.id)["tier"] == "base"
     store.set_tier(second.id, "base")
     assert store.get_row(second.id)["tier"] == "base"
-    assert store.get_row(first.id)["tier"] == "personal"
+    assert store.get_row(first.id)["tier"] == "base"
     store.set_tier(second.id, "personal")
     assert store.get_row(second.id)["tier"] == "personal"
-    assert store.get_row(first.id)["tier"] == "personal"
+    assert store.get_row(first.id)["tier"] == "base"
 
 
 def test_delete_row_returns_file_paths_and_clears_orphan_embeddings(repo, tmp_path):

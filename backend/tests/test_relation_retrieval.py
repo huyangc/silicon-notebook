@@ -95,6 +95,7 @@ def test_federated_retrieve_relations_spans_base(repo):
          {"local_id": "b", "object_type": "concept", "payload": {"name": "PTAT Current"}, "evidence": []}],
         [{"source_local_id": "a", "target_local_id": "b", "edge_type": "depends_on", "evidence": []}])
     personal = repo.create_notebook(NotebookCreate(name="my notes"))
+    repo.replace_notebook_bases(personal.id, [base.id], "user-local")
     hits = repo.federated_retrieve_relations(personal.id, "bandgap reference ptat")
     assert hits, "个人本应能联邦检索到 base 库的关系"
     assert hits[0].tier == "base"

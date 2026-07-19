@@ -220,6 +220,43 @@ def test_preflight_rejects_user_overlap_without_flag(tmp_path):
         md.preflight(ca, cb, assume_same_users=False)
 
 
+def test_sole_base_id_reports_side_and_names_on_multiple_base_notebooks(tmp_path):
+    """核实事实#1: base_id()(现 _sole_base_id())在多于一个 base 时早已 SystemExit ——
+    这条测试钉住"改进措辞"后的行为: 报错要点名是哪一侧、列出全部候选公共知识库的
+    id+name, 并用"公共知识库"新措辞而不是"base 库"。"""
+    conn = _fresh_db(tmp_path / "a.db")
+    _add_notebook(conn, "nb-base1", "base", name="Analog IC Base")
+    _add_notebook(conn, "nb-base2", "base", name="Digital IC Base")
+    conn.commit()
+    with pytest.raises(SystemExit) as exc:
+        md._sole_base_id(conn, "A")
+    msg = str(exc.value)
+    assert "A 侧" in msg
+    assert "公共知识库" in msg
+    assert "nb-base1" in msg and "Analog IC Base" in msg
+    assert "nb-base2" in msg and "Digital IC Base" in msg
+
+
+def test_sole_base_id_reports_side_when_none(tmp_path):
+    conn = _fresh_db(tmp_path / "a.db")
+    conn.execute("DELETE FROM notebooks WHERE tier='base'")
+    conn.commit()
+    with pytest.raises(SystemExit) as exc:
+        md._sole_base_id(conn, "B")
+    assert "B 侧" in str(exc.value)
+    assert "没有公共知识库" in str(exc.value)
+
+
+def test_preflight_rejects_multiple_base_notebooks_per_side(tmp_path):
+    """多领域基准库场景下一侧可能真的挂了/新建了不止一个 tier='base' 的 notebook ——
+    merge_dbs.py 明确不支持这种输入, preflight 端到端必须拒绝而不是猜一个。"""
+    pa, pb, ca, cb = _seed_pair(tmp_path)
+    _add_notebook(ca, "nb-a-base2", "base", name="Second Base On A")
+    ca.commit()
+    with pytest.raises(SystemExit):
+        md.preflight(ca, cb, assume_same_users=True)
+
+
 def test_merge_core_conserves_rows_and_keeps_primary_base(tmp_path):
     pa, pb, ca, cb = _seed_pair(tmp_path)
     ca.close(); cb.close()
@@ -307,6 +344,54 @@ def test_merge_core_grandchild_excludes_secondary_base_knowhow(tmp_path):
     assert "P-CELL" in cells and "BASE-CELL" not in cells
     assert "P-CELL-code" in code and "BASE-CELL-code" not in code
     assert conn.execute("PRAGMA foreign_key_check").fetchall() == []  # 无悬挂
+    conn.close()
+
+
+def test_merge_core_carries_secondary_personal_notebook_mount_edges(tmp_path):
+    """核实事实#2 补测: notebook_bases 已被归入 NOTEBOOK_SCOPED_TABLES(Task 1), 但此前
+    test_merge_dbs.py 里 notebook_bases 出现 0 次, 没有任何回归覆盖。secondary 侧个人
+    notebook 自己持有的挂载边(这里挂到共享 base, 多领域场景下最常见的形态)应随该
+    notebook 一起完整带过, 且不产生悬挂外键。"""
+    pa, pb, ca, cb = _seed_pair(tmp_path)
+    cb.execute(
+        "INSERT INTO notebook_bases(notebook_id,base_notebook_id,created_at,created_by) "
+        "VALUES(?,?,?,?)", ("nb-b22222222", BASE, NOW, "user-local"))
+    cb.commit(); ca.close(); cb.close()
+    out = tmp_path / "merged.db"
+    md.merge_core(out, pa, pb, shared_base=BASE)
+    conn = sqlite3.connect(out)
+    rows = conn.execute(
+        "SELECT notebook_id, base_notebook_id FROM notebook_bases WHERE notebook_id=?",
+        ("nb-b22222222",)).fetchall()
+    assert rows == [("nb-b22222222", BASE)]
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    conn.close()
+
+
+def test_merge_core_drops_secondary_base_owned_mount_edges(tmp_path):
+    """核实事实#3(既有模式, 非本特性引入): secondary base 自己持有的挂载边(notebook_id
+    == shared_base 的行)不在 sec_nb 集合里, 和 base 名下其它 notebook-scoped 数据
+    (sources/chunks/...)一样只保留 primary 那份 —— 与 --keep-base "保留更全一侧的 base"
+    的既定契约一致。这条测试把这个后果显式钉住, 不让它继续无声无息(对应说明见
+    scripts/merge_dbs.py 里 NOTEBOOK_SCOPED_TABLES 旁的注释 + README merge_dbs 一节)。"""
+    pa, pb, ca, cb = _seed_pair(tmp_path)
+    # primary(A, keep-base 一侧)的 base 自己挂了一个 A 的 personal 库(同 owner, 合法挂载)
+    ca.execute(
+        "INSERT INTO notebook_bases(notebook_id,base_notebook_id,created_at,created_by) "
+        "VALUES(?,?,?,?)", (BASE, "nb-a11111111", NOW, "user-local"))
+    # secondary(B)的 base 也挂了它自己的一个库 —— 合并后这条边应当消失
+    cb.execute(
+        "INSERT INTO notebook_bases(notebook_id,base_notebook_id,created_at,created_by) "
+        "VALUES(?,?,?,?)", (BASE, "nb-b22222222", NOW, "user-local"))
+    ca.commit(); cb.commit(); ca.close(); cb.close()
+    out = tmp_path / "merged.db"
+    md.merge_core(out, pa, pb, shared_base=BASE)
+    conn = sqlite3.connect(out)
+    rows = {r for r in conn.execute(
+        "SELECT notebook_id, base_notebook_id FROM notebook_bases WHERE notebook_id=?",
+        (BASE,))}
+    assert rows == {(BASE, "nb-a11111111")}  # 只剩 primary 那条; secondary 的那条被静默丢弃
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
     conn.close()
 
 

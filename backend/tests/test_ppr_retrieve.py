@@ -202,6 +202,16 @@ def test_ask_graph_ppr_cites_multiple_documents(repo, monkeypatch):
     assert resp.mode == "graph"
     src_ids = {c.source_id for c in resp.citations}
     assert "src-A" in src_ids and "src-B" in src_ids
+    # codex r4 fix: 单笔记本、无挂载 base——_ppr_retrieve 返回的每个 chunk 的
+    # notebook_id 必然就是 nb.id 自己(scale_ppr/_ppr_graph 都只在 nb 范围内
+    # 找,r["chunk_notebook_id"] 原样带出、并非只在跨库命中时才打标)。ask_graph
+    # 的 PPR 分支内联 Citation(...) 构造点必须把它归一成空串,否则前端会对
+    # 「本库自己」的两条证据都渲染出一个多余的「来自「当前笔记本」」徽章。
+    nb_by_source = {c.source_id: c.notebook_id for c in resp.citations}
+    assert nb_by_source.get("src-A") == "", (
+        f"单库 PPR chunk citation.notebook_id 应留空,实为 {nb_by_source.get('src-A')!r}")
+    assert nb_by_source.get("src-B") == "", (
+        f"单库 PPR chunk citation.notebook_id 应留空,实为 {nb_by_source.get('src-B')!r}")
 
 
 def test_ask_graph_ppr_off_keeps_kg_path(repo, monkeypatch):
@@ -348,6 +358,7 @@ def test_ppr_graph_federates_base_tier(repo):
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
     active = repo.create_notebook(NotebookCreate(name="active"))
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
     with repo._write() as db:
         now = "2026-06-24T00:00:00"
         for nb_id, oid, sid, cid, el in [(base.id, "eb", "sb", "cb", "elb"),
@@ -426,6 +437,7 @@ def test_scale_ppr_caches_combined_graph(repo, monkeypatch):
 
     active = _seed_two_doc_moe(repo, suffix="-act")
     repo.rebuild_unified_kg(active.id)
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
 
     import app.services.kg.scale_index as si
     calls = {"n": 0}

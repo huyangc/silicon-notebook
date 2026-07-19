@@ -36,6 +36,7 @@ def promotion_setup(repo):
         reset_request_user(token)
     base = repo.create_notebook(NotebookCreate(name="Base corpus"))
     repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook.id, [base.id], owner.id)
     with repo._write() as db:
         db.execute(
             "INSERT INTO agent_profiles "
@@ -301,6 +302,51 @@ def test_admin_approval_is_idempotent_and_keeps_memory_private(repo, promotion_s
     )
 
 
+def test_approve_memory_promotion_writes_into_mounted_target_not_earliest_created(repo):
+    """对称于 test_multi_domain_bases.py::TestPromotionTarget::
+    test_approve_promotion_writes_into_explicit_target_not_earliest_created,但
+    覆盖 Memory 晋升审批侧的 target_base_id 读取路径
+    (`approve_memory_promotion_in_transaction`,与知识对象晋升审批侧
+    `approve_promotion_in_transaction` 是两处独立实现)。b1 比 b2 先创建但不
+    挂载,笔记本只挂 b2——晋升审批后对象必须落在 b2(候选行的 target_base_id),
+    b1 的对象数必须是 0,证明读的不是全局最早创建的 base。"""
+    owner = repo.create_user("y00108009", "pw")
+    token = set_request_user(owner)
+    try:
+        notebook = repo.create_notebook(NotebookCreate(name="Target order memory"))
+    finally:
+        reset_request_user(token)
+    b1 = repo.create_notebook(NotebookCreate(name="早创建"))
+    repo.mark_notebook_base(b1.id)
+    b2 = repo.create_notebook(NotebookCreate(name="后创建"))
+    repo.mark_notebook_base(b2.id)
+    with repo._write() as db:  # 秒级时间戳会撞车,直接把 b1 backdate 到明确更早
+        db.execute(
+            "UPDATE notebooks SET created_at=? WHERE id=?",
+            ("2000-01-01T00:00:00", b1.id),
+        )
+    repo.replace_notebook_bases(notebook.id, [b2.id], owner.id)  # 只挂 b2,不挂 b1
+    candidate = repo.create_memory_candidate(
+        notebook.id, owner.id, None, "target-order",
+        "Target order claim", "Memory promotion must land in the mounted base.",
+        [], "reason", {}, [],
+    )
+    memory = repo.confirm_memory(candidate.id, owner.id)
+    proposal = repo.propose_memory_promotion(memory.id, owner.id)
+    repo.approve_promotion(proposal["id"])
+    with repo._connect() as db:
+        b1_count = db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
+            (b1.id,),
+        ).fetchone()["c"]
+        b2_count = db.execute(
+            "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
+            (b2.id,),
+        ).fetchone()["c"]
+    assert b2_count == 1
+    assert b1_count == 0
+
+
 def test_admin_cannot_approve_after_owner_deprecates_proposed_memory(
     repo, promotion_setup
 ):
@@ -433,6 +479,7 @@ def test_admin_approval_fails_closed_after_member_loses_notebook_access(repo):
         reset_request_user(token)
     base = repo.create_notebook(NotebookCreate(name="Shared promotion base"))
     repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook.id, [base.id], notebook_owner.id)
     repo.add_member(notebook.id, memory_owner.id)
     memory = repo.create_memory_candidate(
         notebook.id,
@@ -670,6 +717,9 @@ def test_memory_promotion_api_is_owner_only_and_admin_queue_reuses_existing_rout
         "/api/notebooks", headers=headers, json={"name": "Memory API promotion"}
     ).json()["id"]
     repo_api = repository()
+    base = repo_api.create_notebook(NotebookCreate(name="Memory API promotion base"))
+    repo_api.mark_notebook_base(base.id)
+    repo_api.replace_notebook_bases(notebook_id, [base.id], user_id)
     candidate = repo_api.create_memory_candidate(
         notebook_id, user_id, None, "api-promotion", "Claim", "A grounded claim",
         [], "reason", {}, [],
@@ -710,6 +760,9 @@ def test_promotion_routes_record_the_authenticated_admin_reviewer(tmp_path, monk
     repo_api = repository()
     base = repo_api.create_notebook(NotebookCreate(name="Reviewer base"))
     repo_api.mark_notebook_base(base.id)
+    repo_api.replace_notebook_bases(
+        notebook_id, [base.id], owner_session["user"]["id"]
+    )
     with repo_api._write() as db:
         db.execute(
             "UPDATE users SET role='admin' WHERE id IN (?,?)",

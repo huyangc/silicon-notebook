@@ -99,6 +99,7 @@ def test_answer_context_folds_across_tiers(repo):
     base = repo.create_notebook(NotebookCreate(name="base"))
     per = repo.create_notebook(NotebookCreate(name="per"))
     _mark_base(repo, base.id)
+    repo.replace_notebook_bases(per.id, [base.id], "user-local")
     for nb, lid in ((base, "B"), (per, "P")):
         repo.store_kg(nb.id, "s1", [{"local_id": lid, "object_type": "concept",
             "payload": {"name": "cascode", "section_path": "1"}, "evidence": []}], [])
@@ -128,6 +129,7 @@ def test_answer_context_shows_base_relations(repo):
     ], [{"source_local_id": "X", "target_local_id": "Y", "edge_type": "supports", "evidence": []}])
     repo.rebuild_unified_kg(base.id)
     per = repo.create_notebook(NotebookCreate(name="per"))
+    repo.replace_notebook_bases(per.id, [base.id], "user-local")
     with repo._connect() as db:
         rows = db.execute("SELECT id, json_extract(payload,'$.name') nm FROM knowledge_objects "
                           "WHERE notebook_id=?", (base.id,)).fetchall()

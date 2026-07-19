@@ -16,6 +16,7 @@ from typing import Dict, List, Optional
 
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
+from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.services.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
@@ -69,6 +70,39 @@ def merge_evidence_lists(base_ev: list, src_ev: list) -> list:
         seen.add(key)
         merged.append(ev)
     return merged
+
+
+def require_live_promotion_target(connection: sqlite3.Connection, base_nb_id: str) -> None:
+    """最终整支审查 BLOCKER 2:approve 阶段(而非 propose 阶段)复核目标笔记本
+    仍然存在且仍是公共知识库。
+
+    propose 时的挂载校验(knowledge_governance._resolve_promotion_target /
+    mounted_public_base_ids)只是提交那一刻的快照——审批往往发生在数天后,期间
+    目标可能被降级(tier='base'→'personal')、转让给别人,或者整个删除。写入侧
+    此前只检查 target_base_id 非空,不复核目标行本身,于是:
+      - 降级场景:知识对象被悄悄写进降级后的个人笔记本(数据破坏,且是静默的)
+      - 删除场景:INSERT INTO knowledge_objects 撞 FOREIGN KEY 约束,裸
+        sqlite3.IntegrityError 冒泡成 500(而不是一个操作者看得懂的错误)
+    两处 approve_*_in_transaction 共用同一个校验,在写入前、同一个事务内调用,
+    避免两份判定漂移(呼应 mount_sql.py 顶部"谓词只在一处定义"的既有原则)。
+
+    刻意不检查挂载是否仍然生效——挂载是检索关系,不是晋升授权;取消挂载后仍
+    允许晋升是设计上的既定行为(governance_store 顶部/spec §6),这次修复不能
+    把它也拦掉。
+
+    调用位置是契约的一部分:两处调用点都必须放在各自的"已批准"幂等早返回
+    **之后**,只守真正会写数据的路径。放在幂等分支前面看似更"保险",实际是
+    回归——会把"重试一个已经批准过的候选"变成硬失败(目标批准后才被降级,
+    或 _migration_20 未回填的存量行 target_base_id=''),而重试对一个已完成
+    的操作理应是无副作用的空操作。见 codex 对 PR#304 的审查(2026-07-19)。"""
+    row = connection.execute(
+        "SELECT tier FROM notebooks WHERE id=?", (base_nb_id,)
+    ).fetchone()
+    if row is None or (row["tier"] or "personal") != "base":
+        raise ValueError(
+            "晋升目标笔记本已不是公共知识库(可能已被删除或降级为个人库): "
+            f"{base_nb_id}；请撤回候选后重新指定晋升目标，或联系管理员重新发布该库"
+        )
 
 
 class GovernanceStore:
@@ -512,6 +546,26 @@ class GovernanceStore:
         ).fetchall()
 
     @staticmethod
+    def notebook_name_rows(
+        connection: sqlite3.Connection, notebook_ids: List[str]
+    ) -> List[sqlite3.Row]:
+        """Batched id→name lookup for promotion-queue target display (Task 13
+        审查 #4). Mirrors promotion_object_rows' single `id IN (...)` round-trip
+        so list_promotion_queue stays O(1) queries regardless of queue size —
+        GET /promotion-queue is admin-only (curator sees the whole queue),
+        so resolving any owner's notebook name here is intended; unrelated to
+        list_mount_edges' demoted-base name masking for regular mount holders
+        (that guards a *different* audience: non-admin users who lost mount
+        visibility, not the curator this endpoint is scoped to)."""
+        if not notebook_ids:
+            return []
+        placeholders = ",".join("?" for _ in notebook_ids)
+        return connection.execute(
+            f"SELECT id, name FROM notebooks WHERE id IN ({placeholders})",
+            notebook_ids,
+        ).fetchall()
+
+    @staticmethod
     def safe_memory_evidence(
         connection: sqlite3.Connection, notebook_id: str, provenance: dict
     ) -> List[dict]:
@@ -615,15 +669,16 @@ class GovernanceStore:
         object_id: str,
         object_type: str,
         now: str,
+        target_base_id: str = "",
     ) -> None:
         connection.execute(
             """
             INSERT INTO promotion_candidates
             (id, notebook_id, object_id, object_type, status, reason,
-             reviewed_by, base_match_id, created_at, updated_at)
-            VALUES (?, ?, ?, ?, 'proposed', '', '', '', ?, ?)
+             reviewed_by, base_match_id, created_at, updated_at, target_base_id)
+            VALUES (?, ?, ?, ?, 'proposed', '', '', '', ?, ?, ?)
             """,
-            (cand_id, notebook_id, object_id, object_type, now, now),
+            (cand_id, notebook_id, object_id, object_type, now, now, target_base_id),
         )
 
     @staticmethod
@@ -643,12 +698,55 @@ class GovernanceStore:
         ).fetchall()
 
     @staticmethod
-    def first_base_notebook_row(
-        connection: sqlite3.Connection,
-    ) -> "sqlite3.Row | None":
+    def mounted_public_base_ids(
+        connection: sqlite3.Connection, notebook_id: str
+    ) -> list[str]:
+        """本库挂载的**公共知识库** id —— 晋升只能进公共知识库,不能进别人的个人库。
+        原 first_base_notebook_row 的全局 LIMIT 1 在多领域下语义已不成立。"""
+        rows = connection.execute(
+            "SELECT b.id AS id " + MOUNT_JOIN + " AND b.tier = 'base'" + MOUNT_ORDER,
+            (notebook_id,),
+        ).fetchall()
+        return [row["id"] for row in rows]
+
+    @staticmethod
+    def promotion_target_column_ready(connection: sqlite3.Connection) -> bool:
+        """target_base_id 列(_migration_20)是否已就绪。供离线维护工具(Task 9的
+        scripts/backfill_promotion_targets.py)在读 pending_promotion_targets /
+        写 set_promotion_target 之前自检 schema 版本, 避免在未迁移库上把"没有
+        target_base_id 列"误判成"没有待处理候选"。"""
+        cols = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(promotion_candidates)"
+            ).fetchall()
+        }
+        return "target_base_id" in cols
+
+    @staticmethod
+    def pending_promotion_targets(connection: sqlite3.Connection) -> List[sqlite3.Row]:
+        """status IN ('proposed','under_review') 且 target_base_id 为空串的候选行 ——
+        SCHEMA_VERSION=20 之前创建、_migration_20 未回填 target_base_id 的存量候选。
+        target_base_id 只在 propose 时可设(insert_promotion_candidate), 没有别的接口
+        能给已存在候选补目标, 这是唯一的存量补救读口, 供离线 CLI 使用。"""
         return connection.execute(
-            "SELECT id FROM notebooks WHERE tier='base' ORDER BY created_at ASC LIMIT 1"
-        ).fetchone()
+            "SELECT id, notebook_id, object_id, object_type, status, created_at "
+            "FROM promotion_candidates "
+            "WHERE status IN ('proposed','under_review') AND target_base_id='' "
+            "ORDER BY notebook_id, created_at, id"
+        ).fetchall()
+
+    @staticmethod
+    def set_promotion_target(
+        connection: sqlite3.Connection, candidate_id: str, target_base_id: str, now: str
+    ) -> None:
+        """写入存量候选的 target_base_id —— 唯一的"事后补写"入口, 只供离线补救 CLI
+        (scripts/backfill_promotion_targets.py)使用。正常 propose 路径走
+        insert_promotion_candidate 的 target_base_id 参数, 不经过这里。"""
+        connection.execute(
+            "UPDATE promotion_candidates SET target_base_id=?, updated_at=? WHERE id=?",
+            (target_base_id, now, candidate_id),
+        )
 
     @staticmethod
     def first_admin_user_id(connection: sqlite3.Connection) -> str:
@@ -658,28 +756,59 @@ class GovernanceStore:
         return str(row["id"]) if row is not None else ""
 
     @staticmethod
-    def approved_base_object_id(
-        connection: sqlite3.Connection, base_notebook_id: str, candidate_id: str
-    ) -> "sqlite3.Row | None":
-        return connection.execute(
-            "SELECT id FROM knowledge_objects "
-            "WHERE notebook_id=? AND source_candidate_id=? "
-            "ORDER BY created_at ASC, id ASC LIMIT 1",
-            (base_notebook_id, candidate_id),
+    def locate_approved_base_object(
+        connection: sqlite3.Connection, candidate_id: str, base_match_id: str
+    ) -> "tuple[str, str]":
+        """Resolve (base_object_id, base_notebook_id) for an ALREADY-APPROVED
+        knowledge-object promotion candidate, without trusting target_base_id —
+        callers must be able to find this even when it is stale (the target
+        was demoted/deleted after approval) or '' (a pre-_migration_20 row the
+        migration backfilled without inferring its historical target; see
+        require_live_promotion_target's docstring).
+
+        Fresh-insert approvals stamp source_candidate_id on the new object,
+        and candidate ids are globally unique (128-bit, see
+        sqlite_repository._new_id), so a lookup by source_candidate_id alone —
+        no notebook scope needed — is sufficient and correct. Merge approvals
+        never stamp source_candidate_id on the pre-existing matched object
+        (only its evidence changes), so those fall back to base_match_id,
+        which the write path stamps onto promotion_candidates at approval
+        time precisely so a later retry can find its way back."""
+        hit = connection.execute(
+            "SELECT id, notebook_id FROM knowledge_objects "
+            "WHERE source_candidate_id=? ORDER BY created_at ASC, id ASC LIMIT 1",
+            (candidate_id,),
         ).fetchone()
+        if hit is not None:
+            return str(hit["id"]), str(hit["notebook_id"])
+        if not base_match_id:
+            return "", ""
+        match_row = connection.execute(
+            "SELECT notebook_id FROM knowledge_objects WHERE id=?",
+            (base_match_id,),
+        ).fetchone()
+        return base_match_id, (str(match_row["notebook_id"]) if match_row else "")
 
     @staticmethod
-    def approved_memory_base_object_ids(
-        connection: sqlite3.Connection, base_notebook_id: str, candidate_id: str
-    ) -> List[str]:
-        return [
-            str(row["id"])
-            for row in connection.execute(
-                "SELECT id FROM knowledge_objects "
-                "WHERE notebook_id=? AND source_candidate_id=? ORDER BY id",
-                (base_notebook_id, candidate_id),
-            ).fetchall()
-        ]
+    def locate_approved_memory_base_objects(
+        connection: sqlite3.Connection, candidate_id: str
+    ) -> "tuple[List[str], str]":
+        """Resolve (base_object_ids, base_notebook_id) for an ALREADY-APPROVED
+        Memory promotion candidate — same rationale as
+        locate_approved_base_object (must not trust a stale/empty
+        target_base_id). Every knowledge object a Memory promotion creates
+        stamps the same source_candidate_id, so one global (non-notebook-
+        scoped) lookup covers all of them; a single approval only ever writes
+        into one base notebook, so the first row's notebook_id is
+        representative of all of them."""
+        rows = connection.execute(
+            "SELECT id, notebook_id FROM knowledge_objects "
+            "WHERE source_candidate_id=? ORDER BY id",
+            (candidate_id,),
+        ).fetchall()
+        ids = [str(row["id"]) for row in rows]
+        base_notebook_id = str(rows[0]["notebook_id"]) if rows else ""
+        return ids, base_notebook_id
 
     def approve_memory_promotion_in_transaction(
         self,
@@ -696,19 +825,29 @@ class GovernanceStore:
             raise KeyError(candidate_id)
         if cand["status"] == "rejected":
             raise ValueError("cannot approve a rejected promotion candidate")
-        base_row = self.first_base_notebook_row(connection)
-        if base_row is None:
-            raise ValueError("no base notebook — mark one with mark_notebook_base() first")
-        base_nb_id = str(base_row["id"])
+        base_nb_id = str(cand["target_base_id"] or "")
+
+        # Idempotency BEFORE live-target validation — see the matching
+        # comment in approve_promotion_in_transaction (shared bug, shared
+        # fix) and require_live_promotion_target's docstring. The common
+        # retry path is additionally short-circuited one layer up, in
+        # knowledge_governance.approve_promotion, before it ever reaches
+        # here; this branch is the fallback for when that layer's own
+        # tracking (Memory provenance base_object_ids) is unavailable.
         if cand["status"] == "approved":
+            existing_object_ids, existing_base_nb_id = (
+                self.locate_approved_memory_base_objects(connection, candidate_id)
+            )
             return {
-                "base_notebook_id": base_nb_id,
-                "base_object_ids": self.approved_memory_base_object_ids(
-                    connection, base_nb_id, candidate_id
-                ),
+                "base_notebook_id": existing_base_nb_id or base_nb_id,
+                "base_object_ids": existing_object_ids,
                 "created_object_ids": [],
                 "merged_object_ids": [],
             }
+
+        if not base_nb_id:
+            raise ValueError("晋升候选缺少目标公共知识库(target_base_id)")
+        require_live_promotion_target(connection, base_nb_id)
 
         base_object_ids: list[str] = []
         created_object_ids: list[str] = []
@@ -804,24 +943,35 @@ class GovernanceStore:
         if cand["status"] == "rejected":
             raise ValueError("cannot approve a rejected promotion candidate")
         object_type = cand["object_type"]
+        base_nb_id = str(cand["target_base_id"] or "")
 
-        base_row = self.first_base_notebook_row(connection)
-        if base_row is None:
-            raise ValueError("no base notebook — mark one with mark_notebook_base() first")
-        base_nb_id = base_row["id"]
-
-        # Idempotency: if already approved, return the existing base object.
+        # Idempotency BEFORE live-target validation: a retry of an
+        # already-completed approval must return the existing base object
+        # as-is, not re-run target validation — the target's tier/existence
+        # can legitimately change *after* approval (demoted to personal,
+        # deleted, or this is a pre-_migration_20 row whose target_base_id
+        # backfilled to '' with no way to infer its historical target — see
+        # require_live_promotion_target's docstring), and none of that
+        # should turn a no-op retry into a hard failure. Live-target
+        # revalidation below guards only the write path — the one place a
+        # stale target could actually corrupt data — do not move it back
+        # above this branch.
         if cand["status"] == "approved":
-            existing = self.approved_base_object_id(connection, base_nb_id, candidate_id)
-            base_object_id = existing["id"] if existing else (cand["base_match_id"] or "")
+            base_object_id, resolved_base_nb_id = self.locate_approved_base_object(
+                connection, candidate_id, cand["base_match_id"] or ""
+            )
             return PromotionApproval(
                 candidate_id=candidate_id,
                 source_notebook_id=cand["notebook_id"],
                 source_object_id=cand["object_id"],
-                base_notebook_id=base_nb_id,
+                base_notebook_id=resolved_base_nb_id or base_nb_id,
                 base_object_id=base_object_id,
                 created_new_object=False,
             )
+
+        if not base_nb_id:
+            raise ValueError("晋升候选缺少目标公共知识库(target_base_id)")
+        require_live_promotion_target(connection, base_nb_id)
 
         # Fetch the personal object being promoted.
         src = connection.execute(

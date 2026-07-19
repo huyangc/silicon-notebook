@@ -61,8 +61,11 @@ from app.models.schemas import (
     ModelSettingsUpdate,
     ModelTestRequest,
     ModelTestResult,
+    MountedBase,
+    MountedByCount,
     NotebookAnalytics,
     NotebookCreate,
+    NotebookRef,
     NotebookSearchResponse,
     NotebookSummary,
     NotebookTemplate,
@@ -70,6 +73,7 @@ from app.models.schemas import (
     ObjectSchemaCreate,
     ObjectSchemaModel,
     ObjectSchemaUpdate,
+    PromoteRequest,
     PromotionApproveResult,
     PromotionCandidate,
     PaginatedSources,
@@ -92,6 +96,7 @@ from app.models.schemas import (
     SourceSummary,
     RebuildScaleIndexRequest,
     ScaleIndexStatus,
+    SetBasesRequest,
     UnifiedKgStatus,
     UserProfile,
     KnowhowAppendPreview,
@@ -1410,9 +1415,9 @@ def review_relation(notebook_id: str, rel_id: str,
 
 @router.post("/notebooks/{notebook_id}/tier", response_model=NotebookSummary, dependencies=[Depends(require_notebook_access)])
 def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
-    """Set a notebook's federation tier: 'base' (authoritative reference KG)
-    or 'personal' (default user notes). Drives tier-weighted relevance and
-    conflict precedence in ask()."""
+    """Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本
+    挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己
+    的公共知识库。"""
     if user.role != "admin":
         raise user_error(403, "仅管理员可设为公共知识库")
     tier = payload.tier.strip().lower()
@@ -1427,6 +1432,60 @@ def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfi
         return catalog.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
+            dependencies=[Depends(require_notebook_access)])
+def list_notebook_bases_route(notebook_id: str) -> List[MountedBase]:
+    """本 notebook 挂载的参考库。含 active=False 的失效边(被挂库易主 / 公共库被
+    降级),前端置灰展示——边保留是为了对方恢复后自动生效。"""
+    return [MountedBase(**edge) for edge in repository().list_notebook_bases(notebook_id)]
+
+
+@router.put("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
+            dependencies=[Depends(require_notebook_access)])
+def set_notebook_bases_route(
+    notebook_id: str, payload: SetBasesRequest,
+    user: UserProfile = Depends(get_current_user),
+) -> List[MountedBase]:
+    """全量替换挂载集合。只接受本 notebook 的可挂候选(公共知识库 ∪ 同 owner 的库)
+    ∪ 当前已挂载的 id(含失效边),其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。
+    写权限本身由 require_notebook_access(owner-only,404 on denial)在依赖层挡;
+    这里只做候选集校验,不重复手工判断写权限。
+
+    并入"当前已挂载的 id"是刻意的:mountable_notebooks 与失效边的判定谓词
+    (MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主后)永远不会
+    出现在 mountable 里。前端编辑表单原样重新提交"保留这条失效边不变"的挂载集合
+    (不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)
+    时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。
+    并入的是"已挂载"而非"任意 id",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。"""
+    repo = repository()
+    allowed = {n["id"] for n in repo.mountable_notebooks(notebook_id)}
+    allowed |= {edge["id"] for edge in repo.list_notebook_bases(notebook_id)}
+    wanted = [nb_id for nb_id in dict.fromkeys(payload.base_notebook_ids) if nb_id]
+    if any(nb_id not in allowed for nb_id in wanted):
+        raise user_error(400, "选择里包含不能作为参考库的知识库")
+    repo.replace_notebook_bases(notebook_id, wanted, user.id)
+    return [MountedBase(**edge) for edge in repo.list_notebook_bases(notebook_id)]
+
+
+@router.get("/notebooks/{notebook_id}/mountable", response_model=List[NotebookRef],
+            dependencies=[Depends(require_notebook_access)])
+def mountable_notebooks_route(notebook_id: str) -> List[NotebookRef]:
+    """可挂候选 = 所有公共知识库 ∪ 与本库同 owner 的库。
+
+    刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的
+    /notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。"""
+    return [NotebookRef(**n) for n in repository().mountable_notebooks(notebook_id)]
+
+
+@router.get("/notebooks/{notebook_id}/mounted-by-count", response_model=MountedByCount,
+            dependencies=[Depends(require_notebook_access)])
+def mounted_by_count_route(notebook_id: str) -> MountedByCount:
+    """删除确认弹窗专用(spec §6):有多少笔记本正在把本 notebook 挂为参考库——
+    ON DELETE CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须看到影响面。
+    与 DELETE 端点用同一个 owner-only 依赖(不新开一套权限判断)。"""
+    return MountedByCount(count=repository().mounted_by_count(notebook_id))
 
 
 @router.post("/notebooks/{notebook_id}/share", response_model=ShareResponse,
@@ -1936,9 +1995,13 @@ def merge_review_job(notebook_id: str) -> MergeReviewJob:
     status_code=201,
     dependencies=[Depends(require_notebook_access)],
 )
-def propose_promotion(notebook_id: str, knowledge_id: str) -> PromotionCandidate:
+def propose_promotion(
+    notebook_id: str, knowledge_id: str, payload: PromoteRequest = PromoteRequest()
+) -> PromotionCandidate:
     try:
-        return PromotionCandidate(**repository().propose_promotion(notebook_id, knowledge_id))
+        return PromotionCandidate(**repository().propose_promotion(
+            notebook_id, knowledge_id, target_base_id=payload.target_base_id
+        ))
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook or knowledge object not found")
     except ValueError as exc:

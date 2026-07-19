@@ -139,6 +139,7 @@ def test_scale_ppr_uses_base_index_from_active(repo):
     seed + CSR splice path must surface the base chunk (cB) with a [0,1] score."""
     base = _seed_base_with_chunk(repo)
     active = repo.create_notebook(NotebookCreate(name="active"))  # personal, no KG
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
     out = repo.scale_ppr(active.id, "MOSFET voltage gain")
     assert isinstance(out, list) and out, "scale path should surface base chunks"
     ids = [cid for cid, _ in out]

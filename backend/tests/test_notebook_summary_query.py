@@ -116,8 +116,9 @@ def test_base_notebook_projection_survives_the_move(repo):
     base = repo.create_notebook(NotebookCreate(name="基准库"))
     other = repo.create_notebook(NotebookCreate(name="notes"))
     repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(other.id, [base.id], "user-local")
     summary = repo.get_notebook(other.id)
-    assert summary.base_notebook_name == "基准库"
+    assert [b.name for b in summary.base_notebooks] == ["基准库"]
     assert summary.base_kg_available is False
     assert summary.tier == "personal"
     assert repo.get_notebook(base.id).tier == "base"
@@ -197,20 +198,22 @@ def test_t4deleg_pending_kg_source_count_delegate(repo, monkeypatch):
     assert calls and calls[0] == notebook.id  # MUT
 
 
-def test_t4deleg_base_notebook_info_row_delegate(repo, monkeypatch):
-    # base_notebook_info_row takes only the connection (no notebook_id), so the
-    # strong delegation proof is that the store's returned tuple reaches the
-    # NotebookSummary unaltered (name + kg-availability projection).
+def test_t4deleg_mounted_bases_row_delegate(repo, monkeypatch):
+    # mounted_bases_row takes (db, notebook_id); the strong delegation proof is
+    # that the store's returned rows reach the NotebookSummary unaltered (ref
+    # list + kg-availability projection).
     notebook = repo.create_notebook(NotebookCreate(name="baseinfo"))
     calls = []
 
-    def spy(db):
-        calls.append(True)
-        return ("SENTINEL-BASE", 1)
+    def spy(db, notebook_id):
+        calls.append(notebook_id)
+        return [{"id": "nb-sentinel", "name": "SENTINEL-BASE", "tier": "base", "has_kg": 1}]
 
-    monkeypatch.setattr(repo._runtime.queries, "base_notebook_info_row", spy)
+    monkeypatch.setattr(repo._runtime.queries, "mounted_bases_row", spy)
     summary = repo.get_notebook(notebook.id)
-    assert calls and summary.base_notebook_name == "SENTINEL-BASE" and summary.base_kg_available is True  # MUT
+    assert calls and calls[0] == notebook.id  # MUT
+    assert [b.name for b in summary.base_notebooks] == ["SENTINEL-BASE"]
+    assert summary.base_kg_available is True
 
 
 def test_t4deleg_summary_notebook_row_delegate(repo, monkeypatch):

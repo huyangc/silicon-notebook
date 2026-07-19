@@ -179,6 +179,7 @@ def test_approve_promotion_candidate_failure_rolls_back_base_and_candidate(
     personal = repo.create_notebook(NotebookCreate(name="personal rollback"))
     base = repo.create_notebook(NotebookCreate(name="base rollback"))
     repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(personal.id, [base.id], "user-local")
     object_id = repo._test_insert_object(
         personal.id, "claim", {"name": "rollback promotion"}
     )

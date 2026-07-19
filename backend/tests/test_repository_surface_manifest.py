@@ -526,7 +526,7 @@ TASK7_ALLOWED_MEMBER_FILES = {
 TASK8_ALLOWED_MEMBER_FILES = {
     ("backend/app/services/sqlite_repository.py", name)
     for name in {
-        "_NOTEBOOK_COUNT_TYPES", "_base_notebook_info",
+        "_NOTEBOOK_COUNT_TYPES", "_mounted_bases",
         "_count_pending_kg_sources", "_knowledge_type_counts",
         "_notebook_from_row",
     }
@@ -1399,8 +1399,12 @@ TASK27_ALLOWED_MEMBER_FILES = {
 TASK27_ALLOWED_NEW_MEMBERS = {"maintenance"}
 TASK27_ALLOWED_CONSUMERS = {
     ("retrieval", "backend/app/eval/retrieval_metrics.py:47"),
-    ("retrieval", "scripts/diag_base_report.py:116"),
-    ("retrieval", "scripts/diag_base_report.py:172"),
+    # 最终整支审查 必办 3 (2026-07-19): diag_base_report.py 的挂载集合优先诊断
+    # 改写在 repo.retrieval.retrieve_scored/ppr_retrieve 之前插入了新的 §2b
+    # (查 notebook_bases、早退)小节,把这两个既有调用点从 :116/:172 顶下到
+    # 当前行号。
+    ("retrieval", "scripts/diag_base_report.py:165"),
+    ("retrieval", "scripts/diag_base_report.py:221"),
 }
 
 # Task 28: the backup-only snapshot verifier is a new read-only composition
@@ -1428,21 +1432,21 @@ TASK28_ALLOWED_IMPORTS = {
 # (NOTEBOOK_ASSETS_SOURCE_ID_COLUMN/_INDEX folded into every hop, terminals
 # bumped to 19, + the new (18, 19) hop).
 TASK28_ALLOWED_CONSUMERS = {
-    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1333"),
-    ("get_conversation", "scripts/verify_repository_snapshot.py:1326"),
-    ("get_notebook", "scripts/verify_repository_snapshot.py:1311"),
-    ("get_report", "scripts/verify_repository_snapshot.py:1338"),
-    ("knowledge_types", "scripts/verify_repository_snapshot.py:1314"),
-    ("list_conversations", "scripts/verify_repository_snapshot.py:1323"),
-    ("list_knowledge", "scripts/verify_repository_snapshot.py:1317"),
-    ("list_reports", "scripts/verify_repository_snapshot.py:1335"),
-    ("list_sources", "scripts/verify_repository_snapshot.py:1312"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1274"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1278"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1280"),
-    ("maintenance", "scripts/verify_repository_snapshot.py:1305"),
-    ("search_notebook", "scripts/verify_repository_snapshot.py:1347"),
-    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1321"),
+    ("ask_job_detail", "scripts/verify_repository_snapshot.py:1398"),
+    ("get_conversation", "scripts/verify_repository_snapshot.py:1391"),
+    ("get_notebook", "scripts/verify_repository_snapshot.py:1376"),
+    ("get_report", "scripts/verify_repository_snapshot.py:1403"),
+    ("knowledge_types", "scripts/verify_repository_snapshot.py:1379"),
+    ("list_conversations", "scripts/verify_repository_snapshot.py:1388"),
+    ("list_knowledge", "scripts/verify_repository_snapshot.py:1382"),
+    ("list_reports", "scripts/verify_repository_snapshot.py:1400"),
+    ("list_sources", "scripts/verify_repository_snapshot.py:1377"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1339"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1343"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1345"),
+    ("maintenance", "scripts/verify_repository_snapshot.py:1370"),
+    ("search_notebook", "scripts/verify_repository_snapshot.py:1412"),
+    ("unified_kg_status", "scripts/verify_repository_snapshot.py:1386"),
 }
 
 # Task 1 (Memory): schema-version and migration tests add new compatibility
@@ -2398,6 +2402,30 @@ LINE_NUMBER_INSENSITIVE_FILES = {
     # in facade_surface.json instead (that scan has no line-insensitivity
     # lever). Line numbers here are not API surface.
     "backend/tests/test_notebook_share_copy.py",
+    # multi-domain-base Task 3 (drop base-tier global uniqueness): fixing the
+    # 21 deliberately-failing federation tests requires inserting one
+    # `repo.replace_notebook_bases(...)` mount call into each seed helper /
+    # test body, shifting every later facade-consumer call site in these
+    # seven files without changing which members they exercise. Internal
+    # line numbers here are not API surface (same reasoning as the other
+    # test files above).
+    "backend/tests/test_architecture_hardening.py",
+    "backend/tests/test_cross_doc_merge.py",
+    "backend/tests/test_edge_review_queue.py",
+    "backend/tests/test_ppr_fallback_guard.py",
+    "backend/tests/test_ppr_retrieve.py",
+    "backend/tests/test_relation_retrieval.py",
+    "backend/tests/test_rx_graph_cluster_hubs.py",
+    # multi-domain-base Task 4 (follow_chain start-point gate rewired onto
+    # notebook_bases mounts): the two base-tier follow_chain tests need a
+    # `repo.replace_notebook_bases(...)` mount call added (the start-point
+    # gate no longer treats every tier='base' notebook as readable), and a
+    # new test_follow_chain_rejects_start_in_unmounted_base proves the
+    # negative case — all three edits shift every later facade-consumer call
+    # site in this file without changing which members it exercises. Internal
+    # line numbers here are not API surface (same reasoning as the other test
+    # files above).
+    "backend/tests/test_follow_chain_repository.py",
 }
 
 ALL_TASK_ALLOWED_MEMBER_FILES = (
@@ -2505,6 +2533,43 @@ ACTIVE_PRODUCTION_MEMBER_SITES = {
     # Task 23: _stream_ask_events reaches the runtime-owned
     # AskExecutionCoordinator through the repo it is handed (frozen signature).
     ("_runtime", "backend/app/api/routes.py:605"),
+    # multi-domain-base Task 8 (API 端点,2026-07-19): three new mount-edge
+    # HTTP routes call list_notebook_bases/mountable_notebooks (each twice:
+    # a GET route + the PUT route's return statement)/replace_notebook_bases
+    # (PUT route body) — genuinely new production consumer sites, none of
+    # which are frozen facade_surface.json members (same "not yet a tracked
+    # member" status Task 2/3/7 already documented for this same trio), so
+    # only their exact current sites need registering here.
+    #
+    # 最终整支审查(2026-07-19)两处后续改动把下面这批全部下移到当前行号:
+    #   BLOCKER 1 — set_notebook_bases_route 的 docstring 改写 + 新增一行
+    #     `allowed |= {edge["id"] for edge in repo.list_notebook_bases(...)}`
+    #     (候选白名单从"只认 mountable"放宽为"mountable ∪ 当前已挂载的 id",
+    #     使重新提交一份含失效边的既有挂载集合不再 400 —— 否则用户永远存不了
+    #     编辑表单)在函数体内新增了一处 list_notebook_bases 调用。
+    #   必办 4 — 新增 `from app.models.schemas import (... MountedByCount ...)`
+    #     顶下本文件其后全部内容一行,并在 mountable_notebooks_route 之后新增
+    #     mounted_by_count_route(删除确认弹窗的挂载计数,spec §6),带来一个
+    #     全新的 mounted_by_count 生产消费点。
+    # rebase 到 master(ee9b4647 界面散文对齐 + 55a2e3c2 错误人话层)之后,
+    # routes.py 在本块之前净增 70 行(user_error 化的 4xx 与新的 knowhow
+    # 端点),下面这批站点整体下移 70 行 —— 纯行号平移,消费点本身没变。
+    ("mark_notebook_base", "backend/app/api/routes.py:1429"),
+    ("set_notebook_personal", "backend/app/api/routes.py:1431"),
+    ("list_notebook_bases", "backend/app/api/routes.py:1442"),
+    ("mountable_notebooks", "backend/app/api/routes.py:1463"),
+    ("list_notebook_bases", "backend/app/api/routes.py:1464"),
+    ("replace_notebook_bases", "backend/app/api/routes.py:1468"),
+    ("list_notebook_bases", "backend/app/api/routes.py:1469"),
+    ("mountable_notebooks", "backend/app/api/routes.py:1479"),
+    ("mounted_by_count", "backend/app/api/routes.py:1488"),
+    # 必办 3 — diag_base_report.py 新增 §2b(先查该笔记本自己的挂载集合,不再
+    # 全局猜一个 tier='base' 的 notebook),第一次调用 list_notebook_bases。
+    # scripts/diag_base_report.py 在 LINE_NUMBER_INSENSITIVE_FILES 里,但（同
+    # routes.py 的既有先例）那只影响 test_static_repository_consumer_scan_
+    # matches_manifest_exactly 最终比较前的归一化,不豁免 _member_file_site_
+    # allowed 这一步的精确匹配,故仍需注册精确行号。
+    ("list_notebook_bases", "scripts/diag_base_report.py:92"),
 }
 REVIEW_FIX_ALLOWED_CONSUMERS = {
     # ("_runtime", test_notebook_share_copy.py) formerly pinned this one exact
@@ -2552,6 +2617,16 @@ REVIEW_FIX_ALLOWED_CONSUMERS = {
     # source_paper_meta directly (rather than via repo.get_paper_meta, which
     # is monkeypatched in that test) — a fresh repo._connect() consumer site.
     ("_connect", "backend/tests/test_paper_meta_service.py:294"),
+    # Task 13 审查 #4 (target_base_name backfill): two new direct
+    # repo.list_promotion_queue() consumers in
+    # TestPromotionQueueTargetBaseName (test_multi_domain_bases.py, appended
+    # at file-end per that file's own "don't insert mid-file" convention) —
+    # exact new test consumers, the frozen production surface is untouched.
+    # codex r2 fix (2026-07-19): TestResolve gained
+    # test_participants_order_base_before_personal (MOUNT_ORDER pin), shifting
+    # every later line in this file by +24 — pure line move, same call sites.
+    ("list_promotion_queue", "backend/tests/test_multi_domain_bases.py:935"),
+    ("list_promotion_queue", "backend/tests/test_multi_domain_bases.py:956"),
 }
 
 # sqlite connection reuse: Change-4 line shift in test_node_context_steps.py +
@@ -3108,6 +3183,10 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in MEMORY_TRANSFER_STORE_ALLOWED_IMPORTS
                     or site in MEMORY_TRANSFER_SERVICE_ALLOWED_IMPORTS
                     or site in MEMORY_TRANSFER_ROUTES_ALLOWED_IMPORTS
+                    or site in TASK1_MULTI_DOMAIN_BASE_ALLOWED_IMPORTS
+                    or site in TASK3_MULTI_DOMAIN_BASE_ALLOWED_IMPORTS
+                    or site in TASK9_MULTI_DOMAIN_BASE_ALLOWED_IMPORTS
+                    or site in TASK_FINAL_REVIEW_MULTI_DOMAIN_BASE_ALLOWED_IMPORTS
                 )
 
 
@@ -3247,6 +3326,13 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_relation_ann.py', 412, 'notebook_copy_stats', 'repo'),
         ('backend/tests/test_relation_retrieval.py', 267, '_relations_with_names', 'repo'),
         ('backend/tests/test_relation_retrieval.py', 291, '_IN_CHUNK', 'repo'),
+        # multi-domain-base Task 3: test_federated_retrieve_relations_spans_base
+        # gains one replace_notebook_bases mount call above these two
+        # pre-existing repo._connect() consumer sites, shifting them by one
+        # line (old positions 188/206; new positions registered in
+        # 'actual_only' below).
+        ('backend/tests/test_relation_retrieval.py', 188, '_connect', 'repo'),
+        ('backend/tests/test_relation_retrieval.py', 206, '_connect', 'repo'),
         ('backend/tests/test_relation_scoring_cold_matrix_guard.py', 69, '_vector_matrix', 'repo'),
         ('backend/tests/test_relation_scoring_cold_matrix_guard.py', 78, 'notebook_copy_stats', 'repo'),
         ('backend/tests/test_relation_scoring_cold_matrix_guard.py', 98, 'notebook_copy_stats', 'repo'),
@@ -3280,6 +3366,21 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_sources_page_batched.py', 183, '_connect', 'repo'),
         ('backend/tests/test_sqlite_write_optimization.py', 121, '_write', 'embed_repo'),
         ('backend/tests/test_viz_bounded.py', 118, '_unified_graph_full', 'repo'),
+        # multi-domain-base Task 3: test_rejected_base_edge_excluded_from_
+        # federated_graph_for_personal_active's shared _seed_federated helper
+        # gains one replace_notebook_bases mount call above this
+        # monkeypatch.setattr(repo, "_invalidate_unified_cache", ...) site,
+        # shifting it by one line (new position registered in 'actual_only'
+        # below).
+        ('backend/tests/test_edge_review_queue.py', 288, '_invalidate_unified_cache', 'repo'),
+        # multi-domain-base Task 7 (晋升目标显式化): a new
+        # _make_personal_with_base helper (creating+mounting a base in one
+        # call, since propose_promotion now rejects an unmounted notebook)
+        # is inserted above test_list_promotion_queue_batches_object_lookup_
+        # not_n_plus_1's monkeypatch.setattr(repo, "_connect", ...) spy site,
+        # shifting it by nine lines (new position registered in 'actual_only'
+        # below).
+        ('backend/tests/test_trackF_governance_promotion.py', 171, '_connect', 'repo'),
     },
     'actual_only': {
         ('backend/tests/test_batch_ingest.py', 288, 'llm_client', 'repo'),
@@ -3307,6 +3408,7 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_batch_ingest.py', 1499, 'rebuild_unified_kg', 'repo'),
         ('backend/tests/test_batch_ingest.py', 1548, 'llm_client', 'repo'),
         ('backend/tests/test_batch_ingest.py', 1565, 'rebuild_unified_kg', 'repo'),
+        ('backend/tests/test_edge_review_queue.py', 289, '_invalidate_unified_cache', 'repo'),
         ('backend/tests/test_embedding_store_component.py', 59, '_write', 'repo'),
         ('backend/tests/test_embedding_store_component.py', 135, '_write', 'repo'),
         ('backend/tests/test_in_batching.py', 85, '_IN_CHUNK', 'SQLiteRepository'),
@@ -3345,8 +3447,14 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_notebook_share_copy.py', 379, '_COPY_CHUNK', 'sr'),
         ('backend/tests/test_notebook_share_copy.py', 390, '_insert_row', 'repo'),
         ('backend/tests/test_rebuild_cache.py', 215, '_now', 'repo_mod'),
+        ('backend/tests/test_relation_retrieval.py', 189, '_connect', 'repo'),
+        ('backend/tests/test_relation_retrieval.py', 207, '_connect', 'repo'),
         ('backend/tests/test_repository_runtime.py', 19, '_now', 'sqlite_repository'),
-        ('backend/tests/test_scale_index_repo.py', 209, 'rebuild_unified_kg', 'repo'),
+        # multi-domain-base Task 3: test_scale_ppr_uses_base_index_from_active
+        # gains one replace_notebook_bases mount call above this pre-existing
+        # (already line-drifted, see the matching 209 entry above) rebuild_
+        # unified_kg patch site, shifting it one further line to 210.
+        ('backend/tests/test_scale_index_repo.py', 210, 'rebuild_unified_kg', 'repo'),
         ('backend/tests/test_schema_registry_service.py', 157, 'llm_client', 'repo'),
         ('backend/tests/test_schema_registry_service.py', 177, 'llm_client', 'repo'),
         ('backend/tests/test_schema_registry_service.py', 180, 'llm_client', 'repo'),
@@ -3358,6 +3466,14 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_source_ingestion_service.py', 253, 'parse_source_file', 'facade_mod'),
         ('backend/tests/test_source_ingestion_service.py', 332, 'parse_source_file', 'facade_mod'),
         ('backend/tests/test_sqlite_write_optimization.py', 128, '_write', 'embed_repo'),
+        # multi-domain-base Task 7: matching new position for the
+        # test_trackF_governance_promotion.py _connect spy site registered in
+        # 'recorded_only' above (171 -> 180). Task 7 review-gap fix #1 then
+        # adds a docstring to test_propose_from_base_notebook_raises
+        # (earlier in the same class) disambiguating its bare
+        # pytest.raises(ValueError) with match="review gate" — six more
+        # lines above this spy site, shifting it again (180 -> 186).
+        ('backend/tests/test_trackF_governance_promotion.py', 186, '_connect', 'repo'),
     },
 }
 
@@ -4215,4 +4331,289 @@ MEMORY_TRANSFER_SERVICE_ROUND5_ALLOWED_MEMBER_FILES = {
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = (
     ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_SERVICE_ROUND5_ALLOWED_MEMBER_FILES
+)
+
+# multi-domain-base Task 1 (_migration_20: notebook_bases mount table +
+# promotion_candidates.target_base_id): test_multi_domain_bases.py is a
+# genuinely NEW test file (new facade import site), constructed via the same
+# repo(tmp_path)-style fixture convention as test_source_asset_migration.py /
+# test_knowhow_schema.py — an explicit `from app.services.sqlite_repository
+# import SQLiteRepository` (line 10) plus repo._connect()/._write()/
+# .create_notebook()/.delete_notebook()/.embedder touches. Wired into the
+# OR-chain inside test_compatibility_exports_and_import_consumers_are_complete
+# (function-body edit, appended at EOF here for the same zero-line-shift
+# reason as every other TASKN_* block above).
+TASK1_MULTI_DOMAIN_BASE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_multi_domain_bases.py", 10, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK1_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_multi_domain_bases.py", name)
+    for name in {
+        "SQLiteRepository", "_connect", "_write", "create_notebook",
+        "delete_notebook", "embedder",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK1_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+
+# multi-domain-base Task 2 (mount-edge CRUD + resolve_participants rewired onto
+# notebook_bases; see mount_sql.py's MOUNT_JOIN/MOUNT_VALID/MOUNT_ORDER): the
+# same test_multi_domain_bases.py file grows a TestResolve class exercising
+# the new mount-aware participant resolution. It touches three genuinely new
+# facade members (list_notebook_bases, mountable_notebooks,
+# replace_notebook_bases — none are in the frozen facade_surface.json fixture
+# yet, so their only consumer sites, all inside this file, disappear from both
+# sides of the comparison once filtered here — no separate ALLOWED_NEW_MEMBERS
+# entry is needed) plus fresh call sites of four already-frozen members
+# (_runtime, create_user, mark_notebook_base, set_notebook_personal — the
+# latter two were already facade members but not yet called from this file).
+# create_user mints a real second users-row so the "other owner" simulations
+# satisfy notebooks.created_by's FK (REFERENCES users(id)), the same reason
+# test_scale_index_repo.py's _resolve_index_owner tests use it. Wired via the
+# broad (file, member) MEMBER_FILES mechanism instead of exact line pins —
+# same choice Task 1 made for this file above — appended at EOF for the same
+# zero-line-shift reason as every other TASKN_* block in this file.
+TASK2_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_multi_domain_bases.py", name)
+    for name in {
+        "_runtime", "create_user", "mark_notebook_base", "set_notebook_personal",
+        "list_notebook_bases", "mountable_notebooks", "replace_notebook_bases",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK2_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+
+# multi-domain-base Task 3 (drop base-tier global uniqueness): fixing the 21
+# tests Task 2 deliberately left failing ("marked base but never mounted it")
+# means calling the still-brand-new replace_notebook_bases facade member from
+# twelve pre-existing federation test files, none of which had a reason to
+# import/call it before now. Exactly like Task 2's own three new members on
+# test_multi_domain_bases.py, replace_notebook_bases is not yet in the frozen
+# facade_surface.json fixture, so its only consumer sites (all inside these
+# twelve files) disappear from both sides of the comparison once filtered
+# here — no separate ALLOWED_NEW_MEMBERS entry is needed. Wired via the broad
+# (file, member) MEMBER_FILES mechanism instead of exact line pins (seven of
+# these twelve files are additionally registered in
+# LINE_NUMBER_INSENSITIVE_FILES above, for their own pre-existing members
+# whose call sites merely shifted; the other five were already there from
+# earlier tasks). Appended at EOF for the same zero-line-shift reason as
+# every other TASKN_* block in this file.
+TASK3_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    (file, "replace_notebook_bases")
+    for file in {
+        "backend/tests/test_architecture_hardening.py",
+        "backend/tests/test_cross_doc_merge.py",
+        "backend/tests/test_cross_tier_reasoning.py",
+        "backend/tests/test_edge_review_queue.py",
+        "backend/tests/test_p4_kg_shrink.py",
+        "backend/tests/test_ppr_fallback_guard.py",
+        "backend/tests/test_ppr_retrieve.py",
+        "backend/tests/test_relation_retrieval.py",
+        "backend/tests/test_rx_graph_cluster_hubs.py",
+        "backend/tests/test_scale_index_repo.py",
+        "backend/tests/test_trackF_governance_promotion.py",
+        "backend/tests/test_two_tier_federated.py",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK3_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+
+# multi-domain-base Task 3, import scan: TestTask6AskGraphFederated's own
+# repo_with_two_notebooks fixture (test_cross_tier_reasoning.py) gains one
+# replace_notebook_bases mount call above its local `from
+# app.services.sqlite_repository import SQLiteRepository`, shifting that
+# import from its frozen-recorded line down to 457. Wired into the OR-chain
+# inside test_compatibility_exports_and_import_consumers_are_complete
+# (function-body edit, appended at EOF here for the same zero-line-shift
+# reason as every other TASKN_* block above).
+TASK3_MULTI_DOMAIN_BASE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_cross_tier_reasoning.py", 457, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+
+# multi-domain-base Task 4 (KG availability gate + follow_chain start-point gate
+# rewired onto notebook_bases mounts): test_multi_domain_bases.py grows a
+# TestKgGate class exercising the facade's `_any_base_notebook_has_kg` (now
+# `notebook_id`-required) directly — the strongest available proof surface,
+# since NotebookSummary.base_kg_available was, at the time, powered by a
+# *different*, still globally-scoped query (NotebookSummaryQuery.
+# base_notebook_info / QueryStore.base_notebook_info_row) — Task 5 has since
+# renamed and rewired that query to mounted_bases/mounted_bases_row, per its
+# own plan Step 4, replacing the then-unmounted-global form (those two old
+# names no longer exist; the rename confirms it was never meant to move in
+# this task). TestKgGate seeds the base notebook's
+# KG via `store_kg`, a call this file never made before. Both are genuinely
+# new (file, member) consumer sites — `_any_base_notebook_has_kg` and
+# `store_kg` are both already-frozen facade members (unlike Task 1/2's three
+# then-unfrozen mount-CRUD members), so their new sites need registering here
+# same as every other TASKN_* block, appended at EOF for zero line shift.
+# test_follow_chain_repository.py's two base-tier tests gain their first-ever
+# `replace_notebook_bases` mount call (exactly like the twelve files Task 3
+# registered in its own block above) — replace_notebook_bases is still not a
+# frozen facade_surface.json member, same reasoning as Task 2/3.
+TASK4_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_multi_domain_bases.py", name)
+    for name in {"_any_base_notebook_has_kg", "store_kg"}
+} | {("backend/tests/test_follow_chain_repository.py", "replace_notebook_bases")}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK4_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+
+# multi-domain-base Task 5 (base_notebooks 取代全局唯一 base_notebook_name):
+# test_notebook_summary_query.py's projection-survives-the-move test gains its
+# first-ever `replace_notebook_bases` mount call (the field it asserts on is
+# now mount-derived, not a global tier='base' lookup, so the test must mount
+# to see a non-empty result) — same "genuinely new (file, member) consumer
+# site for an already-frozen facade member" situation Task 3/4 registered
+# here, appended at EOF for zero line shift.
+TASK5_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_notebook_summary_query.py", "replace_notebook_bases"),
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK5_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+
+# multi-domain-base Task 6 (scale-index eligible() 扩展:「被任何笔记本挂载」本身
+# 构成建索引资格,否则挂自己的大笔记本当参考库时,它既非 tier='base' 也未必已有
+# 磁盘索引 → 在 PPR 侧对大库触发 ppr_fallback_refused 静默返空):
+# test_multi_domain_bases.py grows a TestScaleEligible class exercising the
+# facade's `_scale_index_eligible` directly — already a frozen facade member
+# (private_wrapper delegate onto ScaleArtifactRuntime.eligible), so its new
+# (file, member) consumer site needs registering here same as every other
+# TASKN_MULTI_DOMAIN_BASE_* block above, appended at EOF for zero line shift.
+TASK6_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_multi_domain_bases.py", "_scale_index_eligible"),
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK6_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+
+# multi-domain-base Task 7 (晋升目标显式化: propose_promotion now resolves
+# promotion_candidates.target_base_id against mounted_public_base_ids instead
+# of the removed first_base_notebook_row global pick):
+# test_multi_domain_bases.py grows a TestPromotionTarget class exercising the
+# facade's `propose_promotion` / `approve_promotion` (both already frozen
+# facade members) plus its first-ever use of the `_test_insert_object`
+# test-only helper (every prior class in this file seeded objects via
+# store_kg instead) — three genuinely new (file, member) consumer sites, same
+# reasoning as every other TASKN_MULTI_DOMAIN_BASE_* block above.
+#
+# Separately, propose_promotion's new "0 mounted public bases -> reject"
+# guard means every promotion test needs a REAL mount, not just a
+# `tier='base'` label — test_knowledge_governance_delegation.py's four
+# t4deleg promotion-delegate spies gain their first-ever mark_notebook_base /
+# replace_notebook_bases calls (plus a raw `repo._write()` insert standing in
+# for propose_promotion in the one spy that specifically needs an approval-
+# time failure), and test_kg_mutation_phase_matrix.py /
+# test_kg_mutation_failure_boundaries.py / test_memory_promotion.py each gain
+# their first-ever replace_notebook_bases mount call above a pre-existing
+# propose_promotion / propose_memory_promotion site. replace_notebook_bases
+# is still not a frozen facade_surface.json member (Task 2/3's own reasoning
+# applies unchanged), so only the newly-frozen-member sites below need
+# registering; test_repository_phase_contracts.py's matching two
+# replace_notebook_bases additions use its `repository` fixture parameter
+# name, which the consumer scanner's repo_pattern regex never matches (same
+# reason that file's existing propose_promotion/create_notebook calls are
+# invisible to it too — the scanner only sees its `_trace_writes(repo, ...)`
+# helper's `repo`-named parameter), so those two sites need no registration.
+TASK7_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_multi_domain_bases.py", name)
+    for name in {"_test_insert_object", "propose_promotion", "approve_promotion"}
+} | {
+    ("backend/tests/test_knowledge_governance_delegation.py", name)
+    for name in {"_write", "mark_notebook_base", "replace_notebook_bases"}
+} | {
+    (file, "replace_notebook_bases")
+    for file in {
+        "backend/tests/test_kg_mutation_phase_matrix.py",
+        "backend/tests/test_kg_mutation_failure_boundaries.py",
+        "backend/tests/test_memory_promotion.py",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK7_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+
+# multi-domain-base Task 8 (API 端点,2026-07-19): TestApiUnauthorizedWrite
+# proves the read-only-share-doesn't-grant-mountable-status invariant by
+# constructing a real notebook_members row and then asserting
+# user_can_read_notebook is True as a precondition (otherwise the subsequent
+# 400 could just mean "u1 can't even see the notebook", not "read access
+# isn't a mount credential") — test_multi_domain_bases.py's first-ever call
+# to this member, same reasoning as every other TASKN_MULTI_DOMAIN_BASE_*
+# block above.
+TASK8_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_multi_domain_bases.py", "user_can_read_notebook"),
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK8_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+
+# multi-domain-base Task 9 (merge_dbs 边界报错 + 文档同步 + 存量待批晋升候选补救 CLI,
+# 2026-07-19): the new scripts/backfill_promotion_targets.py offline maintenance tool
+# gets its own test file, test_backfill_promotion_targets.py, whose `_fresh_db` helper
+# mirrors test_merge_dbs.py's own pattern exactly (construct SQLiteRepository once to
+# build a fresh current-schema+seed db, then close_local() before handing the bare
+# sqlite3.connect() to the module under test) — a single new import consumer site, same
+# shape as Task 1's test_multi_domain_bases.py:10 and MERGE_DBS_ALLOWED_IMPORTS above.
+# Separately, registering scripts/backfill_promotion_targets.py's own
+# sqlite3.connect (Task 9's SQLITE_CONNECT_SITES entry in
+# test_repository_callers_static.py) added ten lines above that same file's
+# pre-existing test_facade_exposes_the_maintenance_adapter, shifting ITS
+# in-function `from app.services.sqlite_repository import SQLiteRepository`
+# from its frozen-recorded line down to 786 — the same kind of pre-existing-
+# import-shifted-by-unrelated-edit situation Task 3 registered for
+# test_cross_tier_reasoning.py above.
+# Wired via both the exact-line IMPORTS set (test_compatibility_exports_and_import_
+# consumers_are_complete's OR-chain) and the broader (file, member) MEMBER_FILES set
+# (test_static_repository_consumer_scan_matches_manifest_exactly's _member_file_site_
+# allowed), same as every other TASKN_MULTI_DOMAIN_BASE_* block above. Appended at EOF
+# for the same zero-line-shift reason as every other TASKN_* block in this file.
+TASK9_MULTI_DOMAIN_BASE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_backfill_promotion_targets.py", 33, "app.services.sqlite_repository", "SQLiteRepository"),
+    # 786->790: 最终整支审查 必办 3 的 FACADE_CLASS_IMPORT_SITES 注册(见本文件下方
+    # diag_base_report.py 行号说明的同一次编辑)在这条 786 之前插入了 4 行注释,
+    # 把这个同一个 in-function import 再顶下 4 行——同一个统计量,第 N 次被无关
+    # 编辑顶下(776->786 是 Task 9 自己那次;上面 TASK27_ALLOWED_IMPORTS 里的
+    # 776 因此也已过期,保留不动,多余条目无害,只有缺失条目才会转红)。
+    ("backend/tests/test_repository_callers_static.py", 790, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+TASK9_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_backfill_promotion_targets.py", "SQLiteRepository"),
+    ("backend/tests/test_repository_callers_static.py", "SQLiteRepository"),
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK9_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+
+# 最终整支审查 必办 4 (2026-07-19): the new `mounted_by_count` facade member (delete-
+# confirmation "N notebooks reference this one", spec §6) is exercised by a new
+# TestMountedByCount class appended to test_multi_domain_bases.py — a genuinely new
+# facade member not yet in the frozen facade_surface.json fixture, same "no separate
+# ALLOWED_NEW_MEMBERS entry needed, only the (file, member) MEMBER_FILES allowance"
+# situation Task 2 documented for list_notebook_bases/mountable_notebooks/
+# replace_notebook_bases above. Appended at EOF for the same zero-line-shift reason.
+TASK_FINAL_REVIEW_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_multi_domain_bases.py", "mounted_by_count"),
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = (
+    ALL_TASK_ALLOWED_MEMBER_FILES | TASK_FINAL_REVIEW_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+)
+
+# 最终整支审查 必办 3 (2026-07-19): diag_base_report.py's module docstring rewrite
+# (mount-set-aware diagnosis instead of a global tier='base' guess; see the
+# script's own header) grows the top-of-file comment by ~10 lines, shifting its
+# pre-existing `from app.services.sqlite_repository import SQLiteRepository`
+# down from the frozen-recorded line 26 to 36 — the exact same "pre-existing
+# import shifted by an unrelated edit" situation Task 3/Task 9 registered above
+# for test_cross_tier_reasoning.py / test_repository_callers_static.py. This
+# import-consumer test (unlike the general consumer-scan test) does not
+# normalize line numbers away even for LINE_NUMBER_INSENSITIVE_FILES members,
+# so the exact new site needs registering here rather than relying on that
+# mechanism.
+TASK_FINAL_REVIEW_MULTI_DOMAIN_BASE_ALLOWED_IMPORTS = {
+    ("scripts/diag_base_report.py", 36, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+
+# 多领域基准库 × PR#300 的 rebase 汇合点：master 新增的
+# test_memory_transfer_service.py 用 propose_memory_promotion 造出「审批中 /
+# 已批准」的前置状态，来测传输守卫对这两种状态的取舍；而本支把晋升目标改成
+# 由挂载集合解析（挂 0 个公共知识库 → PromotionTargetError 直接拒绝，不再有
+# 「全局唯一 base」的隐式兜底），那些用例的 src 笔记本因此必须先挂上一个
+# base，其 `_mount_base` helper 里就出现了本文件第一次 replace_notebook_bases
+# 调用。与上面 TASK3 那十二个联邦测试文件完全同一情形、同一处理：
+# replace_notebook_bases 仍不在冻结的 facade_surface.json 里，走宽松的
+# (file, member) MEMBER_FILES 机制即可，不需要单独的 ALLOWED_NEW_MEMBERS 条目。
+# 这里刻意不并进 TASK3 那个集合——它的注释明确写着「twelve pre-existing
+# federation test files」，塞进第十三个非联邦文件会让那句话变成假的。
+# EOF 追加，保持零行位移（同本文件其它每一个 TASKN_* 块）。
+REBASE_PR300_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_transfer_service.py", "replace_notebook_bases"),
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = (
+    ALL_TASK_ALLOWED_MEMBER_FILES | REBASE_PR300_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
 )

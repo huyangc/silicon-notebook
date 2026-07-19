@@ -374,6 +374,20 @@ class NotebookUpdate(BaseModel):
     access_scope: Optional[str] = None
 
 
+class NotebookRef(BaseModel):
+    """轻量 notebook 引用 —— 参考库挂载相关接口共用。"""
+    id: str
+    name: str
+    tier: str = "personal"
+
+
+class MountedBase(NotebookRef):
+    """一条挂载边。active=False 表示边还在但当前不生效(被挂库易主 / 公共库被降级),
+    前端须置灰并说明,不能假装它还在工作。"""
+    active: bool = True
+    inactive_reason: str = ""
+
+
 class NotebookSummary(BaseModel):
     id: str
     name: str
@@ -400,12 +414,12 @@ class NotebookSummary(BaseModel):
     # 该 notebook 此刻是否正在跑论文元数据补抽（进程内内存标志，get_notebook 实时
     # 回填，镜像 kg_building 的 wiring）。重启即 False——补抽本身幂等可重触发。
     paper_meta_backfilling: bool = False
-    # 系统中是否存在已建 KG 的 tier='base' 笔记本。即便本 notebook 无图,有 base 也可
-    # 进行严格推理(reasoning/graph)。前端门控:requiresKg → (kg_ready 或 base_kg_available)。
+    # 本 notebook 挂载的参考库中是否有任一已建 KG。即便本 notebook 无图,挂了有图的
+    # 参考库也可进行严格推理(reasoning/graph)。前端门控:requiresKg → (kg_ready 或
+    # base_kg_available)。未挂载 → False。
     base_kg_available: bool = False
-    # 全局唯一基准库的名字(tier='base',无则空)。全局参考信息,所有用户只读可见 ——
-    # 前端「分析」弹窗顶部展示「当前基准库:X」,非管理员也能看到是哪个(但改不了)。
-    base_notebook_name: str = ""
+    # 本 notebook 挂载的参考库列表(0..N)。基准库不再全局唯一,也不再隐式参与检索。
+    base_notebooks: List[NotebookRef] = Field(default_factory=list)
     # 已解析但尚未抽取 KG 的 source 数,驱动前端「补抽 N 篇」
     kg_pending_sources: int = 0
     # Phase 2 只读共享:本用户对该库的访问权。"owner" = 自有(可写);
@@ -530,6 +544,12 @@ class Citation(BaseModel):
     # user notes). Mirrors AnswerAnchor.tier — lets the "来源分布" badge count
     # citations, not just anchors.
     tier: str = "personal"
+    # 多领域基准库(Task 14): 证据的真实来源 notebook id —— 只在跨库命中(federated
+    # retrieval 从一个挂载的参考库找到、并非本次 ask 所在 notebook 的证据)才非空;
+    # 本库内证据留空。前端据此查 id→name 映射,给引用徽章标"来自「某某库」",查不到
+    # 就退回泛化的 tier 文案(不猜、不显示裸 id)。exclude_if 让绝大多数(同库)引用
+    # 的 JSON payload 不多带这个键。
+    notebook_id: str = Field(default="", exclude_if=lambda value: not value)
     memory_id: str = Field(default="", exclude_if=lambda value: not value)
     provenance: Dict[str, Any] = Field(
         default_factory=dict, exclude_if=lambda value: not value
@@ -567,6 +587,9 @@ class AnswerAnchor(BaseModel):
     # Source tier: 'base' (authoritative reference KG) or 'personal' (default,
     # user notes). Lets the UI surface authority + supports conflict precedence.
     tier: str = "personal"
+    # 多领域基准库(Task 14): 与 Citation.notebook_id 同一惯例——只在跨库命中时
+    # 非空,供前端引用徽章标来源库名。见 Citation.notebook_id 的完整注释。
+    notebook_id: str = Field(default="", exclude_if=lambda value: not value)
     provenance: Dict[str, Any] = Field(
         default_factory=dict, exclude_if=lambda value: not value
     )
@@ -806,6 +829,18 @@ class SetTierRequest(BaseModel):
     tier: str   # "base" | "personal"
 
 
+class SetBasesRequest(BaseModel):
+    """全量替换本 notebook 的参考库挂载集合。空数组 = 取消全部挂载。"""
+    base_notebook_ids: List[str] = Field(default_factory=list)
+
+
+class MountedByCount(BaseModel):
+    """有多少笔记本正在把本 notebook 挂为参考库(不论边当前是否生效)——删除确认
+    弹窗专用(spec §6):CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须
+    看到影响面。"""
+    count: int = 0
+
+
 class DetectDocTypeItem(BaseModel):
     """One file's name + leading text sample for upload-time type detection."""
     name: str
@@ -933,6 +968,14 @@ class PromotionCandidate(BaseModel):
     memory_id: str = ""
     # Memory-backed proposals are reviewed against this immutable source revision.
     source_revision: int = 0
+    # 多领域基准库(Task 7/8):这条候选要晋升进哪个公共知识库。挂 >1 个公共库时
+    # 由提交方显式指定;队列里暴露出来是策展人审核"该进哪个库"的唯一依据。
+    target_base_id: str = ""
+    # Task 13 审查 #4:target_base_id 对应的库名,由后端 join notebooks 给出——
+    # 策展人不一定是目标库的 owner,前端自己的 notebooks 列表(自有∪只读加入)
+    # 覆盖不到"别人创建的公共知识库",猜不出真名。目标为空或库已不存在时是
+    # 空串(list_promotion_queue 批量解析,不逐行查询)。
+    target_base_name: str = ""
 
 
 class PromotionApproveResult(BaseModel):
@@ -944,6 +987,12 @@ class PromotionApproveResult(BaseModel):
 
 class PromotionRejectRequest(BaseModel):
     reason: str = ""
+
+
+class PromoteRequest(BaseModel):
+    """POST .../promote 的可选请求体(知识对象晋升 + Memory 晋升共用)。挂载了
+    多个公共知识库时必须显式指定 target_base_id,否则服务层拒绝(400)。"""
+    target_base_id: str = ""
 
 
 class ConceptWhitelistEntry(BaseModel):
