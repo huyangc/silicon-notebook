@@ -863,6 +863,14 @@ class MemoryService:
                 # 既有的乐观并发原语（_schedule_embed 同一模式）；source 刚
                 # 读出来，字段必然仍然匹配，取到的就是它此刻的 revision 号
                 # ——留给下面 mode == "move" 分支的原子删除做版本判据。
+                #
+                # PR review round 7 P1-A：这个同一个 revision 号现在还多担一
+                # 份职责——原样传进下面的 create_copy_with_initial_revision，
+                # 让它在自己的事务内核对「源此刻的 embedding_status=='ready'
+                # 且 revision 与这里捕获的一致」才把向量拷给副本并标 ready。
+                # 不发明第二个判据：这里已经是「拷贝这一刻，source 的内容对应
+                # 哪个 revision」的唯一诚实答案，删源判据和拷向量判据没有理由
+                # 用两个不同的数字。
                 source_revision = self.store.embedding_revision(source.id, source)
                 now = self.now()
                 provenance = {
@@ -900,7 +908,8 @@ class MemoryService:
                     provenance=provenance,
                 )
                 copied = self.store.create_copy_with_initial_revision(
-                    write, source.id, user_id, f"从 {source.notebook_id} {mode}"
+                    write, source.id, user_id, f"从 {source.notebook_id} {mode}",
+                    source_revision,
                 )
                 if copied.id != write.id:
                     # 兜底，防的是数据丢失而不是"不好看"：store 在插入撞唯一键时

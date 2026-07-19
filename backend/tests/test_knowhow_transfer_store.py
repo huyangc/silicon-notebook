@@ -357,3 +357,41 @@ def test_fingerprint_changes_when_a_column_is_swapped_for_a_different_one(repo, 
         "编辑下无论加多少个计数字段都测不出来，move_table 会把换掉的那一列"
         "连同源表一起删掉，永久丢失"
     )
+
+
+# --- PR review round 7 P2-B: cell_code_signal hashed row_id/column_id/
+# code_text/language/cell_content_hash, but NOT updated_by — an agent
+# rewriting an attachment with IDENTICAL code/language/content-hash but a
+# DIFFERENT updated_by left every one of those four fields unchanged, so the
+# fingerprint was blind to it. _remap (transfer.py) copies the FULL cell_code
+# row into the target (`code = dict(code)`; only id/row_id/column_id get
+# overwritten — updated_by rides along untouched), so the fingerprint must
+# cover every field the copy reproduces, per this file's own structural-
+# completeness rule (see table_fingerprint's docstring) — updated_by is no
+# exception just because it happens to carry no display content. Without
+# this, a concurrent updated_by-only rewrite racing a move sails straight
+# past the recheck: the source row gets deleted, and the target is left
+# holding the OLDER attribution forever. Appended at EOF, same zero-line-
+# shift convention as every other addition in this file.
+def test_fingerprint_changes_when_cell_code_updated_by_changes(repo, store):
+    """同 test_fingerprint_changes_when_cell_code_is_edited_in_place 的编辑
+    手法，但反过来：code_text/language/cell_content_hash 三者原样不变，只换
+    updated_by——旧指纹的四个字段一个都不移动，必须新增第五个才能抓住它。"""
+    tid = _table(repo)
+    detail = repo.get_knowhow_table(tid)
+    row_id = detail["rows"][0]["id"]
+    column_id = detail["columns"][0]["id"]
+    repo.upsert_knowhow_cell_code(row_id, column_id, "print(1)", "python", "user-x", "hash-v1")
+
+    before = store.table_fingerprint(tid)
+    # 代码/语言/内容哈希三者原样不变，只换 updated_by（同一次 UPSERT 的
+    # ON CONFLICT(row_id, column_id) DO UPDATE 分支——同 test_fingerprint_
+    # changes_when_cell_code_is_edited_in_place 走的同一条更新路径）。
+    repo.upsert_knowhow_cell_code(row_id, column_id, "print(1)", "python", "user-y", "hash-v1")
+    after = store.table_fingerprint(tid)
+
+    assert before != after, (
+        "仅 updated_by 变化时 table_fingerprint 必须变化——_remap 会把整行"
+        "（含 updated_by）原样搬进副本，指纹若对它失明，并发 move 会把刚刚"
+        "变化的属主信息连同源表一并删掉，目标副本永久留着旧的属主"
+    )

@@ -870,6 +870,56 @@ def test_move_sweep_is_idempotent_when_no_orphan_exists(repo):
     assert not remaining
 
 
+# --- PR review round 7 P2-B: move-level companion to test_knowhow_transfer_
+# store.py's own test_fingerprint_changes_when_cell_code_updated_by_changes.
+# cell_code_signal hashed row_id/column_id/code_text/language/
+# cell_content_hash but not updated_by — an agent rewriting a cell's code
+# attachment with the IDENTICAL code/language/content-hash right after
+# copy_table commits, changing only updated_by, used to leave every one of
+# those four fields unchanged, so the fingerprint recheck inside move_table
+# would see "unchanged" and delete the source — freezing the target on the
+# STALE attribution forever. Same injection shape as the sibling round-5
+# tests above (monkeypatch kh_transfer.copy_table to call the real
+# implementation, then perform the concurrent edit on the source before
+# move_table reaches its cleanup section). Appended near EOF (ahead of the
+# scheduler-drain fixture below, which must stay the file's literal last
+# block per its own comment) for the same zero-line-shift reason as every
+# other block in this file.
+def test_move_does_not_delete_source_cell_code_updated_by_changed_after_copy_snapshot(
+    repo, monkeypatch
+):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    detail = repo.get_knowhow_table(src_tid)
+    row_id = detail["rows"][0]["id"]
+    column_id = detail["columns"][0]["id"]
+    repo.upsert_knowhow_cell_code(row_id, column_id, "print(1)", "python", "user-x", "hash-v1")
+
+    real_copy_table = kh_transfer.copy_table
+
+    def _copy_then_concurrent_updated_by_change(repo_, source_table_id, target_notebook_id, actor_id):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+        # 模拟并发写者：就在 copy_table 的事务提交之后、move_table 走到自己的
+        # 清理段之前，另一个 agent 用完全相同的代码/语言/hash 重写了这个
+        # cell 的代码附件，只换了 updated_by。
+        repo_.upsert_knowhow_cell_code(row_id, column_id, "print(1)", "python", "user-y", "hash-v1")
+        return new_id
+
+    monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_updated_by_change)
+
+    with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
+        kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    assert exc_info.value.new_table_id
+
+    # 源没被删，且带着并发重写后的新 updated_by——不是复制那一刻的旧属主
+    code = repo._runtime.knowhow_store.get_knowhow_cell_code(row_id, column_id)
+    assert code["updated_by"] == "user-y"
+
+    dst_tables = repo.list_knowhow_tables(dst_nb)
+    assert len(dst_tables) == 1
+    assert dst_tables[0]["id"] == exc_info.value.new_table_id
+
+
 # ---------------------------------------------------------------------------
 # 测试间调度器排水（追加于 EOF，避免移动上方守卫行号 pin）。
 # copy_table/move_table 会给目标（保留路径还有源）表调度 0.5s 防抖重投影；

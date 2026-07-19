@@ -1597,3 +1597,81 @@ def test_project_table_existence_check_and_terminal_write_are_atomic(
     assert orphaned_kos == 0
     with pytest.raises(KeyError):
         repo._runtime.knowhow_store.get_knowhow_table(table_id)
+
+
+# ---------------------------------------------------------------------------
+# PR review round 7 P2-A: ensure_hidden_source creation+attach atomicity
+# ---------------------------------------------------------------------------
+#
+# ensure_hidden_source used to insert the sources row (self.sources.
+# insert_source) and attach it back onto the table (self.knowhow.
+# set_knowhow_hidden_source) in TWO separate database.write() transactions.
+# The round-6 orphan sweep (KnowhowTransferStore.orphaned_knowhow_source_ids
+# — every source_type='knowhow' row in a notebook unreferenced by any
+# knowhow_tables.hidden_source_id, run at the end of every move_table) has no
+# way to distinguish "a legitimately in-flight brand-new source, one
+# statement away from being attached" from "an actual orphan a torn-down
+# move left behind" — both look identical to that query (a knowhow-typed
+# source with nothing pointing at it yet). A sweep landing in the gap
+# between the two writes would delete a LIVE source belonging to a
+# DIFFERENT table's concurrent first projection; that projection then fails
+# on FK when it goes to write elements (self-heals on the next projection
+# pass — ensure_hidden_source re-mints a replacement — but is still
+# observably wrong in between: a dropped source, an FK crash, and a
+# temporarily broken projection for something that did nothing wrong).
+#
+# This test hooks database.write itself — same monkeypatch shape as this
+# file's own test_project_table_existence_check_and_terminal_write_are_
+# atomic above — rather than pinning an exact call count: it runs the REAL
+# orphan-sweep query after EVERY write() transaction ensure_hidden_source
+# opens and records what it finds. That generalizes across both the pre-fix
+# two-transaction shape (creation and attach are two separate write() calls
+# — the sweep run between them finds the freshly-created, not-yet-attached
+# source) and the post-fix one-transaction shape (creation and attach commit
+# together — the sweep never has a boundary to land on where the source
+# exists but isn't referenced yet), instead of asserting "database.write is
+# called exactly once" (an implementation detail the fix doesn't actually
+# require — a caller-supplied `connection=` still shares one real SQLite
+# transaction even if some future refactor added more no-op write() calls
+# elsewhere in the same request). Local `from contextlib import
+# contextmanager` (not module-level) so this addition doesn't shift the
+# file's own line-pinned `from app.services.sqlite_repository import
+# SQLiteRepository` at line 24 (TASK5_KNOWHOW_ALLOWED_IMPORTS in
+# test_repository_surface_manifest.py) — same zero-line-shift convention as
+# every other addition in this file, and the same reason
+# test_snapshot_table_is_internally_consistent_under_concurrent_insert in
+# test_knowhow_transfer_store.py uses a local import too. Appended at EOF.
+def test_ensure_hidden_source_creation_and_attach_are_atomic(
+    repo, projector, table_id, notebook_id, monkeypatch
+):
+    from contextlib import contextmanager
+
+    transfer_store = repo._runtime.knowhow_transfer_store
+    database = projector.database
+    real_write = database.write
+    observed_after_each_write: list[list[str]] = []
+
+    @contextmanager
+    def _write_then_sweep():
+        with real_write() as db:
+            yield db
+        # 这次 write() 事务已经提交——此刻孤儿扫描（round 6 move_table 收尾用
+        # 的同一条查询）能看到什么。
+        observed_after_each_write.append(
+            transfer_store.orphaned_knowhow_source_ids(notebook_id)
+        )
+
+    monkeypatch.setattr(database, "write", _write_then_sweep)
+
+    source_id = projector.ensure_hidden_source(table_id)
+
+    assert observed_after_each_write, "hook 从未真正触发任何 write()，测试前置条件不成立"
+    assert all(orphans == [] for orphans in observed_after_each_write), (
+        "ensure_hidden_source 期间至少有一次 write() 事务提交之后，孤儿扫描"
+        "能看到刚创建、但还没有任何表引用的隐藏源——创建和挂载不是原子的一"
+        f"步，中间这个窗口里源是可观察的「未引用」状态：{observed_after_each_write}"
+    )
+    assert (
+        repo._runtime.knowhow_store.get_knowhow_table(table_id)["hidden_source_id"]
+        == source_id
+    )

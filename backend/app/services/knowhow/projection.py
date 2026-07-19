@@ -270,7 +270,34 @@ class KnowhowProjector:
         calls this itself (its own signature carries no source_id), so a
         table's very first projection transparently creates its hidden
         source — callers never need to sequence ensure_hidden_source before
-        project_table by hand."""
+        project_table by hand.
+
+        PR review round 7 P2-A (creation+attach atomicity): minting the
+        ``sources`` row and attaching it back onto ``table_id`` (writing
+        ``hidden_source_id``) used to run in TWO separate ``database.
+        write()`` transactions. The round-6 orphan sweep (``KnowhowTransfer
+        Store.orphaned_knowhow_source_ids`` — every ``source_type='knowhow'``
+        row in a notebook unreferenced by any ``knowhow_tables.hidden_
+        source_id``, run at the end of every ``move_table``) cannot tell "a
+        legitimately in-flight brand-new source, one statement away from
+        being attached" apart from "an actual orphan a torn-down move left
+        behind" — both are, at that instant, a knowhow-typed source nothing
+        points at yet. A sweep landing in the gap between the two writes
+        would delete a LIVE source belonging to a DIFFERENT table's
+        concurrent first projection, which then fails on FK when it goes to
+        write elements (self-heals next projection pass, since this method
+        re-mints a replacement when the recorded id no longer resolves, but
+        is still observably wrong in between).
+
+        Both writes now share ONE ``database.write()`` transaction:
+        ``SourceStore.insert_source`` already accepted an optional
+        ``connection=`` to join a caller's transaction (its own docstring:
+        "batch imports keep their all-or-nothing semantics"), and
+        ``KnowhowStore.set_knowhow_hidden_source`` gained the identical
+        parameter, mirroring that exact idiom rather than inventing a new
+        one. With creation and attachment atomic, the sweep can only ever
+        observe a knowhow source that is either fully absent or already
+        referenced — never the intermediate state."""
         table = self.knowhow.get_knowhow_table(table_id)
         existing = table.get("hidden_source_id")
         if existing:
@@ -280,21 +307,23 @@ class KnowhowProjector:
             except KeyError:
                 pass  # recorded id no longer resolves — recreate below
         source_id = self.new_id("src")
-        self.sources.insert_source(
-            source_id=source_id,
-            notebook_id=table["notebook_id"],
-            title=f"Knowhow 表：{table['title']}",
-            source_type="knowhow",
-            status="active",
-            parse_status="parsed",
-            file_name="",
-            file_path="",
-            file_size=0,
-            file_hash="",
-            summary="",
-            doc_type="",
-        )
-        self.knowhow.set_knowhow_hidden_source(table_id, source_id)
+        with self.database.write() as db:
+            self.sources.insert_source(
+                source_id=source_id,
+                notebook_id=table["notebook_id"],
+                title=f"Knowhow 表：{table['title']}",
+                source_type="knowhow",
+                status="active",
+                parse_status="parsed",
+                file_name="",
+                file_path="",
+                file_size=0,
+                file_hash="",
+                summary="",
+                doc_type="",
+                connection=db,
+            )
+            self.knowhow.set_knowhow_hidden_source(table_id, source_id, connection=db)
         return source_id
 
     # ------------------------------------------------------------- project

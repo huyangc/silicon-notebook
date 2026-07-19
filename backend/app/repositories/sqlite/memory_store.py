@@ -1512,11 +1512,41 @@ class MemoryStore:
         source_memory_id: str,
         changed_by: str,
         reason: str,
+        expected_source_revision: "int | None",
     ) -> MemoryRecord:
         """把一条已有 memory 复制成 write（新 id/notebook）：单事务建 4 表 + 拷向量。
 
         source_answer_id 必须为 None（避免 idx_memory_answer_once 撞键）；向量随拷
         零重嵌入，源无向量则新 item 保持 embedding_status='pending'（服务侧补嵌）。
+
+        PR review round 7 P1-A（拷贝陈旧向量却标 ready）：源当前的
+        ``memory_embeddings`` 行可能相对源当前的 ``memory_items`` 内容是陈旧的
+        ——编辑一条 confirmed memory 的正文会把 ``embedding_status`` 翻回
+        ``'pending'``（``_mutate_with_revision``，只要 ``values`` 非空），但从不
+        触碰/删除旧的 ``memory_embeddings`` 行，那要等到后续的重嵌入任务调用
+        ``replace_embedding`` 才会发生。若一次 transfer 恰好落在「编辑已提交、
+        重嵌入还没跑完」这个窗口，无条件拷贝「此刻存在的那行向量」并标
+        ready，拷的就是旧文本的向量、却配着新文本、且从此永久标着 ready——
+        ``MemoryService.transfer`` 只在 ``copied.embedding_status != "ready"``
+        时才补调度 ``_schedule_embed``，一旦被误标 ready，不会再有任何东西替
+        它重新嵌入。
+
+        因此只有源在**这同一个事务内**被重新确认「此刻确实是就绪状态」才把
+        向量拷走并标 ready：``memory_items.embedding_status == 'ready'`` **且**
+        源当前的 ``memory_revisions`` 最新 revision 等于调用方传入的
+        ``expected_source_revision``（调用方——即 ``MemoryService.transfer``
+        ——早已为收尾的原子删源捕获过这同一个 revision 号，此处原样复用同一
+        判据，不发明第二套；``None`` 与任何真实 revision 都不相等，天然安
+        全失败，与 ``delete_memory_if_unchanged`` 对 ``expected_revision=None``
+        的既有约定一致）。仅有 ``embedding_status=='ready'`` 不够：若源在调用
+        方捕获 revision 之后、这个事务真正运行之前，先后经历「并发编辑
+        （ready→pending）」又「并发重嵌入完成（pending→ready，但对应的是编辑
+        后的新内容）」，此刻的 ready 对应的是比 ``write.content_md``（调用方
+        更早捕获的旧快照）更新的一次修订——revision 号比对能截住这第二类错
+        配，仅查 embedding_status 截不住。两个条件有一个不满足，副本就不拷
+        任何向量、留在 schema 默认的 ``'pending'``——与「源从未有过向量」那
+        条既有分支（``test_create_copy_without_source_vector_stays_pending``）
+        退化成完全相同的形状，服务侧的 ``_schedule_embed`` 兜底照常接管。
         """
         with self.database.write() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -1524,27 +1554,40 @@ class MemoryStore:
             if item.id != write.id:
                 return item  # 幂等命中已有行（正常不会发生：copy 用全新 id）
             self._ensure_initial_revision_on(db, item, created, changed_by, reason)
-            vec = db.execute(
-                "SELECT model, dimension, vector FROM memory_embeddings WHERE memory_id=?",
-                (source_memory_id,),
+            source_state = db.execute(
+                "SELECT embedding_status,(SELECT COALESCE(MAX(revision),0) "
+                "FROM memory_revisions WHERE memory_id=?) AS revision "
+                "FROM memory_items WHERE id=?",
+                (source_memory_id, source_memory_id),
             ).fetchone()
-            if vec is not None:
-                db.execute(
-                    "INSERT OR REPLACE INTO memory_embeddings "
-                    "(memory_id,model,dimension,vector,updated_at) VALUES (?,?,?,?,?)",
-                    (write.id, vec["model"], vec["dimension"], vec["vector"], self.now()),
-                )
-                db.execute(
-                    "UPDATE memory_items SET embedding_status='ready',embedding_error='' "
-                    "WHERE id=?",
-                    (write.id,),
-                )
-                item = self._record(
+            source_is_current = (
+                source_state is not None
+                and source_state["embedding_status"] == "ready"
+                and expected_source_revision is not None
+                and int(source_state["revision"]) == int(expected_source_revision)
+            )
+            if source_is_current:
+                vec = db.execute(
+                    "SELECT model, dimension, vector FROM memory_embeddings WHERE memory_id=?",
+                    (source_memory_id,),
+                ).fetchone()
+                if vec is not None:
                     db.execute(
-                        f"SELECT {self._select_columns()} FROM memory_items m "
-                        "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
-                        "WHERE m.id=? AND m.created_by=?",
-                        (write.id, write.created_by),
-                    ).fetchone()
-                )
+                        "INSERT OR REPLACE INTO memory_embeddings "
+                        "(memory_id,model,dimension,vector,updated_at) VALUES (?,?,?,?,?)",
+                        (write.id, vec["model"], vec["dimension"], vec["vector"], self.now()),
+                    )
+                    db.execute(
+                        "UPDATE memory_items SET embedding_status='ready',embedding_error='' "
+                        "WHERE id=?",
+                        (write.id,),
+                    )
+                    item = self._record(
+                        db.execute(
+                            f"SELECT {self._select_columns()} FROM memory_items m "
+                            "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                            "WHERE m.id=? AND m.created_by=?",
+                            (write.id, write.created_by),
+                        ).fetchone()
+                    )
         return item

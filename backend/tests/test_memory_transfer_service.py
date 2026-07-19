@@ -369,7 +369,7 @@ def test_copy_that_returns_existing_row_aborts_without_deleting_source(
     # 模拟"撞唯一键 → 返回已存在的那一行（就是源自己）"
     monkeypatch.setattr(
         service.store, "create_copy_with_initial_revision",
-        lambda write, source_memory_id, changed_by, reason: mem,
+        lambda write, source_memory_id, changed_by, reason, expected_source_revision: mem,
     )
     deleted = []
     monkeypatch.setattr(
@@ -409,10 +409,10 @@ def test_batch_survives_pre_commit_failure_on_a_later_item(repo, alice, monkeypa
 
     orig_create = service.store.create_copy_with_initial_revision
 
-    def _boom_on_second(write, source_memory_id, changed_by, reason):
+    def _boom_on_second(write, source_memory_id, changed_by, reason, expected_source_revision):
         if source_memory_id == second.id:
             raise sqlite3.OperationalError("database is locked")
-        return orig_create(write, source_memory_id, changed_by, reason)
+        return orig_create(write, source_memory_id, changed_by, reason, expected_source_revision)
 
     monkeypatch.setattr(service.store, "create_copy_with_initial_revision", _boom_on_second)
 
@@ -459,8 +459,12 @@ def test_move_does_not_delete_source_edited_after_copy_commits(repo, alice, monk
 
     real_create_copy = service.store.create_copy_with_initial_revision
 
-    def _create_copy_then_concurrent_edit(write, source_memory_id, changed_by, reason):
-        copied = real_create_copy(write, source_memory_id, changed_by, reason)
+    def _create_copy_then_concurrent_edit(
+        write, source_memory_id, changed_by, reason, expected_source_revision
+    ):
+        copied = real_create_copy(
+            write, source_memory_id, changed_by, reason, expected_source_revision
+        )
         # 模拟并发写者：就在副本提交之后、transfer() 走到自己的收尾删源之前，
         # 另一个请求编辑了源 memory 的标题和正文。
         service.update(
@@ -505,8 +509,12 @@ def test_move_does_not_delete_source_deprecated_after_copy_commits(repo, alice, 
 
     real_create_copy = service.store.create_copy_with_initial_revision
 
-    def _create_copy_then_concurrent_deprecate(write, source_memory_id, changed_by, reason):
-        copied = real_create_copy(write, source_memory_id, changed_by, reason)
+    def _create_copy_then_concurrent_deprecate(
+        write, source_memory_id, changed_by, reason, expected_source_revision
+    ):
+        copied = real_create_copy(
+            write, source_memory_id, changed_by, reason, expected_source_revision
+        )
         service.deprecate(source_memory_id, alice.id)
         return copied
 
@@ -1014,4 +1022,70 @@ def test_move_cleans_up_source_recreated_between_removal_and_delete(
         "窗口期内冒出来的重建派生源必须被收尾的第二次 remove_memory_source 清"
         "理掉——不能作为 sources.memory_id 指向一条已删 memory 的孤儿永久留"
         "在库里、继续参与检索"
+    )
+
+
+# --- PR review round 7 P1-A service-level companion to test_memory_
+# transfer_store.py's own test_create_copy_after_edit_does_not_copy_stale_
+# vector_as_ready: that test pins the STORE's gating logic directly; this
+# one proves the SERVICE-level consequence the task explicitly calls out —
+# transfer() only re-schedules an embed for the copy when `copied.
+# embedding_status != "ready"` (memory_service.py). Before the store-level
+# fix, a copy made from a source caught mid-edit (embedding_status=
+# 'pending', its OLD vector still attached) was wrongly marked 'ready',
+# which SKIPPED this very re-schedule — leaving the copy permanently stuck
+# with a vector that doesn't match its own text, since nothing else in this
+# codebase ever revisits a 'ready' Memory's embedding. This proves the fixed
+# copy (embedding_status='pending') actually gets a fresh embed scheduled,
+# not merely that it avoided attaching the wrong vector.
+#
+# embedding_scheduler is swapped to a RECORDING, NON-EXECUTING stand-in
+# (records the job's item id, never calls the real _embed) — both to set up
+# the repro deterministically (the edit below must leave embedding_status=
+# 'pending' with the stale memory_embeddings row still in place; this
+# suite's usual synchronous `lambda fn, job: fn(job)` scheduler would
+# immediately re-embed and erase that exact window) and to observe whether
+# transfer() schedules a SECOND job for the copy. Local `from app.models.
+# schemas import MemoryUpdate` mirrors the same local-import convention this
+# file's own test_move_does_not_delete_source_edited_after_copy_commits
+# already uses. Appended at EOF, same zero-line-shift convention as every
+# other addition in this file.
+def test_move_schedules_embed_for_copy_when_source_vector_was_stale_at_transfer_time(
+    repo, alice
+):
+    from app.models.schemas import MemoryUpdate
+
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice, title="Original", content="Original body")
+    assert service.get(mem.id, alice.id).embedding_status == "ready"
+
+    scheduled: list[str] = []
+
+    def _recording_scheduler(fn, job):
+        scheduled.append(job.item.id)
+        # 故意不调用 fn(job)——模拟"已排队、还没真正跑完"，这正是这条竞态要
+        # 卡住的那个窗口：编辑已提交（embedding_status 翻回 pending），但重
+        # 嵌入还没落地（memory_embeddings 里那行旧向量原样留着）。
+
+    service.embedding_scheduler = _recording_scheduler
+    service.update(mem.id, alice.id, MemoryUpdate(content_md="Edited body"))
+    assert service.get(mem.id, alice.id).embedding_status == "pending", (
+        "前置条件：编辑必须真的落在 pending 状态、旧向量原样留着，测试才有意义"
+    )
+    scheduled.clear()  # 只关心 transfer 自己触发的调度，不是上面编辑那次的
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "copy", extract_kg=False)
+
+    assert results[0]["ok"] is True
+    new_id = results[0]["new_id"]
+    copied = service.get(new_id, alice.id)
+    assert copied.embedding_status == "pending", (
+        "源在传输那一刻 embedding_status 是 'pending'（编辑已提交、重嵌入还"
+        "没跑完）——副本不该继承一个对不上自己文本的向量、更不该标 ready"
+    )
+    assert new_id in scheduled, (
+        "transfer() 只在 copied.embedding_status != 'ready' 时才补调度 "
+        "_schedule_embed——副本被误标 ready 的旧 bug 会让这次调度被跳过，"
+        "从此没有任何东西替这条副本重新嵌入"
     )

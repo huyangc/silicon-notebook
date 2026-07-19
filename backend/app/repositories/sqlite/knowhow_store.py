@@ -464,13 +464,36 @@ class KnowhowStore:
             db.execute("DELETE FROM knowhow_tables WHERE id = ?", (table_id,))
         return {"hidden_source_id": hidden_source_id}
 
-    def set_knowhow_hidden_source(self, table_id: str, source_id: str) -> None:
+    def set_knowhow_hidden_source(
+        self,
+        table_id: str,
+        source_id: str,
+        *,
+        connection: "sqlite3.Connection | None" = None,
+    ) -> None:
+        """Attach ``source_id`` as ``table_id``'s hidden source.
+
+        PR review round 7 P2-A: pass ``connection`` to join a caller-owned
+        write transaction — mirrors ``SourceStore.insert_source``'s/
+        ``update_file_hash``'s own ``connection=`` idiom exactly (build the
+        statement/params once, execute directly on the caller's connection
+        if given, otherwise open this method's own ``write()``). Without a
+        connection, the update commits in its own transaction; ``Knowhow
+        Projector.ensure_hidden_source`` passes the SAME connection it used
+        to insert the ``sources`` row a moment earlier, so creation and
+        attachment land in ONE transaction — see that method's own
+        docstring for why the two used to be separate and what that gap
+        could leak."""
+        statement = (
+            "UPDATE knowhow_tables SET hidden_source_id = ?, updated_at = ? "
+            "WHERE id = ?"
+        )
+        values = (source_id, self.now(), table_id)
+        if connection is not None:
+            connection.execute(statement, values)
+            return
         with self.database.write() as db:
-            db.execute(
-                "UPDATE knowhow_tables SET hidden_source_id = ?, updated_at = ? "
-                "WHERE id = ?",
-                (source_id, self.now(), table_id),
-            )
+            db.execute(statement, values)
 
     def bump_knowhow_mutation_seq(self, table_id: str) -> int:
         """Increment and return the table's monotonic ``mutation_seq``.
