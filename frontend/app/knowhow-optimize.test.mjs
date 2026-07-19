@@ -91,6 +91,7 @@ import {
 import {
   assignmentsIn,
   callSitesIn,
+  controlFlowIn,
   findFunction,
   findFunctionIn,
   ifBranchesIn,
@@ -2099,19 +2100,73 @@ test("接线（F）：只有 preflight/409 stale 分支标记跳过，普通保�
     "KnowhowReformatBatchModal",
     "runSave",
   );
-  const branches = ifBranchesIn(runSave);
-  const preflight = branches.find(
-    ({ condition }) => (
-      condition === "currentByKey && isReformatUnitStale(unit, currentByKey)"
+  const unitLoop = controlFlowIn(runSave).find(
+    ({ kind, expression }) => kind === "for-of" && expression === "units",
+  );
+  assert.ok(unitLoop);
+  const preflight = unitLoop.body.find(
+    ({ kind, condition }) => (
+      kind === "if"
+      && condition === "currentByKey && isReformatUnitStale(unit, currentByKey)"
     ),
   );
-  const conflict = branches.find(
-    ({ condition }) => condition === "httpErrorStatus(err) === 409",
+  assert.deepEqual(
+    preflight?.then.map(({ kind }) => kind),
+    ["expression", "assignment", "continue"],
   );
-  assert.ok(preflight?.thenCalls.includes("markReformatItemStaleSkipped"));
-  assert.ok(conflict?.thenCalls.includes("markReformatItemStaleSkipped"));
-  assert.equal(conflict?.elseCalls.includes("markReformatItemStaleSkipped"), false);
-  assert.ok(conflict?.elseCalls.includes("applyReformatSaveError"));
+  assert.ok(
+    preflight?.then[0].calls.some(
+      ({ target }) => target === "markReformatItemStaleSkipped",
+    ),
+  );
+  assert.deepEqual(preflight?.then[1], {
+    kind: "assignment",
+    target: "saveStaleSkipCount",
+    operator: "+=",
+    value: "1",
+    calls: [],
+  });
+
+  const saveAttempt = unitLoop.body.find(({ kind }) => kind === "try");
+  const conflict = saveAttempt?.catch.find(
+    ({ kind, condition }) => (
+      kind === "if" && condition === "httpErrorStatus(err) === 409"
+    ),
+  );
+  assert.deepEqual(conflict?.then.map(({ kind }) => kind), [
+    "expression",
+    "assignment",
+  ]);
+  assert.ok(
+    conflict?.then[0].calls.some(
+      ({ target }) => target === "markReformatItemStaleSkipped",
+    ),
+  );
+  assert.deepEqual(conflict?.then[1], {
+    kind: "assignment",
+    target: "saveStaleSkipCount",
+    operator: "+=",
+    value: "1",
+    calls: [],
+  });
+  assert.deepEqual(conflict?.else.map(({ kind }) => kind), [
+    "variables",
+    "expression",
+  ]);
+  assert.equal(
+    conflict?.else.some(
+      ({ kind, target }) => (
+        kind === "assignment" && target === "saveStaleSkipCount"
+      ),
+    ),
+    false,
+  );
+  assert.ok(
+    conflict?.else[1].calls.some(
+      ({ target }) => target === "applyReformatSaveError",
+    ),
+  );
+
   assert.deepEqual(
     assignmentsIn(runSave).filter(
       ({ target }) => target === "saveStaleSkipCount",
@@ -2159,12 +2214,33 @@ test("接线（F1）：runBatch 声明 run 阶段 stale 计数并在陈旧分支
     ),
     { name: "runStaleSkipCount", initializer: "0" },
   );
-  const stale = ifBranchesIn(runBatch).find(
-    ({ condition }) => (
-      condition === "reformatResultIsStale(item.originalMd, result.sourceMd)"
+  const itemLoop = controlFlowIn(runBatch).find(
+    ({ kind, expression }) => kind === "for-of" && expression === "batch.items",
+  );
+  const runAttempt = itemLoop?.body.find(({ kind }) => kind === "try");
+  const stale = runAttempt?.try.find(
+    ({ kind, condition }) => (
+      kind === "if"
+      && condition === "reformatResultIsStale(item.originalMd, result.sourceMd)"
     ),
   );
-  assert.ok(stale?.thenCalls.includes("markReformatItemRunStale"));
+  assert.deepEqual(stale?.then.map(({ kind }) => kind), [
+    "expression",
+    "assignment",
+    "continue",
+  ]);
+  assert.ok(
+    stale?.then[0].calls.some(
+      ({ target }) => target === "markReformatItemRunStale",
+    ),
+  );
+  assert.deepEqual(stale?.then[1], {
+    kind: "assignment",
+    target: "runStaleSkipCount",
+    operator: "+=",
+    value: "1",
+    calls: [],
+  });
   assert.deepEqual(
     assignmentsIn(runBatch).filter(
       ({ target }) => target === "runStaleSkipCount",

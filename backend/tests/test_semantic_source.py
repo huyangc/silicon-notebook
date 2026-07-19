@@ -70,6 +70,23 @@ def test_import_identity_includes_scope_and_symbol_without_line():
     )
 
 
+def test_module_from_import_keeps_the_imported_module_as_a_semantic_target():
+    index = PythonSourceIndex.from_sources(
+        {"app/a.py": "from app.services import sqlite_repository\n"}
+    )
+
+    assert index.import_keys() == frozenset(
+        {
+            SemanticKey(
+                path="app/a.py",
+                scope="<module>",
+                kind="import",
+                target="app.services:sqlite_repository",
+            )
+        }
+    )
+
+
 def test_session_index_contains_known_repository_import(python_source_index):
     imports = python_source_index.import_keys()
 

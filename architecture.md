@@ -262,9 +262,11 @@ cd frontend
 npm run build
 ```
 
-`scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane。静态
-契约用模块路径、限定 scope、操作类型、目标与审核计数作为语义身份；源码行号/
-offset 仅供诊断，不得用作预期站点身份。前端纯逻辑/语义契约使用 `*.test.mjs`，
-真实组件交互使用 `*.component.test.tsx` + Vitest/jsdom/Testing Library。pytest
-controller 在 xdist worker 启动前预热仓库本地 Matplotlib 字体缓存，避免每个
-图谱 worker 重复执行 macOS 字体枚举。
+`scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane；每个 lane
+拥有独立进程组，controller 收到中断或终止信号时会终止并回收其 pytest/npm/Next.js
+后代。静态契约用模块路径、限定 scope、操作类型、目标与审核计数作为语义身份；
+源码行号/offset 仅供诊断，不得用作预期站点身份。前端纯逻辑/语义契约使用
+`*.test.mjs`，真实组件交互使用 `*.component.test.tsx` +
+Vitest/jsdom/Testing Library；策略同时覆盖测试入口和 helper 模块。pytest controller
+在 xdist worker 启动前预热仓库本地 Matplotlib 字体缓存，避免每个图谱 worker
+重复执行 macOS 字体枚举。

@@ -335,8 +335,10 @@ bash scripts/check.sh
 
 `scripts/check.sh` is the complete offline local gate. It runs three bounded
 lanes concurrently: complete backend pytest, syntax/smoke/contract/harness
-checks, and frontend test/typecheck/build. Acceptance on the current Apple
-Silicon development machine uses:
+checks, and frontend test/typecheck/build. Each lane owns a process group;
+interrupting or terminating the controller must terminate and reap every
+pytest/npm/Next.js descendant. Acceptance on the current Apple Silicon
+development machine uses:
 
 ```bash
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
@@ -357,8 +359,9 @@ this is a measured baseline, not a portable timeout assertion for every host.
 - Do not test components through CSS geometry, source layout/order, source
   slices, or source line counts. Feature work should update tests only when an
   observable contract changes.
-- No committed skip, xfail, todo, or only markers. Direct production-source
-  reads are forbidden outside the shared semantic-source adapter.
+- No committed skip, xfail, todo, or only markers. The policy covers test
+  entrypoints and helper modules; direct production-source reads are forbidden
+  outside the shared semantic-source adapter.
 - The pytest controller prewarms one repo-local Matplotlib font cache before
   xdist workers start. Preserve that boundary; per-worker macOS font
   enumeration is an avoidable multi-second cold start.

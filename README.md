@@ -1050,7 +1050,7 @@ Run:
 bash scripts/check.sh
 ```
 
-This is the complete offline local gate. It runs three bounded lanes concurrently: `check_backend.sh` executes the complete backend pytest suite; `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, `tsc --noEmit`, and the production frontend build. The official-client MCP smoke pins exactly eleven tools: seven Memory tools plus four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+This is the complete offline local gate. It runs three bounded lanes concurrently: `check_backend.sh` executes the complete backend pytest suite; `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, `tsc --noEmit`, and the production frontend build. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly eleven tools: seven Memory tools plus four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
 
 Use the project’s Homebrew/Miniconda interpreter for acceptance:
 
@@ -1071,7 +1071,7 @@ For approved multi-step implementation plans, use subagent-driven development by
 - Backend and frontend static contracts use semantic identities such as module path, qualified scope, operation kind, target, and reviewed count. Source positions are diagnostic metadata only; line numbers, source offsets, CSS order, and source slices must never identify an expected site.
 - Frontend `*.test.mjs` files cover pure logic and the small set of justified architecture/security/vocabulary/entry contracts with `node:test`. Frontend `*.component.test.tsx` files use Vitest, jsdom, and Testing Library to exercise user-visible behavior through roles, actions, and state.
 - Component behavior must not be pinned through CSS geometry or source layout. A routine feature refactor should change tests only when its observable contract changes.
-- Committed tests may not be disabled with skip/xfail/todo/only. Repository policy tests enforce this and prevent direct production-source reads outside the shared semantic-source adapter.
+- Committed tests may not be disabled with skip/xfail/todo/only. Repository policy tests enforce this across test entrypoints and their helper modules, and prevent direct production-source reads outside the shared semantic-source adapter.
 - Backend test startup prewarms one repo-local Matplotlib font cache before xdist workers start. Keep that controller boundary: letting each graph worker enumerate macOS fonts independently adds avoidable multi-second cold starts.
 
 ## Documentation Maintenance

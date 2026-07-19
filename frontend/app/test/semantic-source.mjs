@@ -203,6 +203,252 @@ export function assignmentsIn(node) {
 }
 
 
+function assignmentEffect(node) {
+  if (
+    !ts.isBinaryExpression(node)
+    || node.operatorToken.kind < ts.SyntaxKind.FirstAssignment
+    || node.operatorToken.kind > ts.SyntaxKind.LastAssignment
+  ) {
+    return undefined;
+  }
+  return {
+    kind: "assignment",
+    target: semanticText(node.left),
+    operator: node.operatorToken.getText(node.getSourceFile()),
+    value: semanticText(node.right),
+    calls: callSitesIn(node.right),
+    ...awaitedCallsField(node.right),
+  };
+}
+
+
+function awaitedCallsField(node) {
+  const awaitedCalls = [];
+  function visit(child) {
+    if (ts.isAwaitExpression(child)) {
+      awaitedCalls.push(...callSitesIn(child.expression));
+      return;
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return awaitedCalls.length > 0 ? { awaitedCalls } : {};
+}
+
+
+function statementSequence(node) {
+  if (ts.isSourceFile(node) || ts.isBlock(node)) {
+    return node.statements.flatMap(summarizeStatement);
+  }
+  return summarizeStatement(node);
+}
+
+
+function callbackBodyFlow(callback) {
+  if (ts.isBlock(callback.body)) {
+    return statementSequence(callback.body);
+  }
+  return [{
+    kind: "return-expression",
+    calls: callSitesIn(callback.body),
+  }];
+}
+
+
+function summarizeStatement(statement) {
+  if (ts.isVariableStatement(statement)) {
+    return [{
+      kind: "variables",
+      declarations: statement.declarationList.declarations.map(
+        (declaration) => ({
+          name: semanticText(declaration.name),
+          initializer: declaration.initializer
+            ? semanticText(declaration.initializer)
+            : undefined,
+        }),
+      ),
+      calls: callSitesIn(statement),
+      ...awaitedCallsField(statement),
+    }];
+  }
+  if (ts.isExpressionStatement(statement)) {
+    const assignment = assignmentEffect(statement.expression);
+    if (assignment) {
+      return [assignment];
+    }
+    return [{
+      kind: "expression",
+      calls: callSitesIn(statement),
+      ...awaitedCallsField(statement),
+    }];
+  }
+  if (ts.isIfStatement(statement)) {
+    return [{
+      kind: "if",
+      condition: semanticText(statement.expression),
+      ...awaitedCallsField(statement.expression),
+      then: statementSequence(statement.thenStatement),
+      else: statement.elseStatement
+        ? statementSequence(statement.elseStatement)
+        : [],
+    }];
+  }
+  if (ts.isForOfStatement(statement)) {
+    return [{
+      kind: "for-of",
+      initializer: semanticText(statement.initializer),
+      expression: semanticText(statement.expression),
+      ...awaitedCallsField(statement.expression),
+      body: statementSequence(statement.statement),
+    }];
+  }
+  if (ts.isForInStatement(statement)) {
+    return [{
+      kind: "for-in",
+      initializer: semanticText(statement.initializer),
+      expression: semanticText(statement.expression),
+      ...awaitedCallsField(statement.expression),
+      body: statementSequence(statement.statement),
+    }];
+  }
+  if (ts.isForStatement(statement)) {
+    return [{
+      kind: "for",
+      initializer: statement.initializer
+        ? semanticText(statement.initializer)
+        : undefined,
+      condition: statement.condition
+        ? semanticText(statement.condition)
+        : undefined,
+      incrementor: statement.incrementor
+        ? semanticText(statement.incrementor)
+        : undefined,
+      ...awaitedCallsField(statement),
+      body: statementSequence(statement.statement),
+    }];
+  }
+  if (ts.isTryStatement(statement)) {
+    return [{
+      kind: "try",
+      try: statementSequence(statement.tryBlock),
+      catch: statement.catchClause
+        ? statementSequence(statement.catchClause.block)
+        : [],
+      finally: statement.finallyBlock
+        ? statementSequence(statement.finallyBlock)
+        : [],
+    }];
+  }
+  if (ts.isReturnStatement(statement)) {
+    if (
+      statement.expression
+      && (
+        ts.isArrowFunction(statement.expression)
+        || ts.isFunctionExpression(statement.expression)
+      )
+    ) {
+      return [{
+        kind: "return-callback",
+        flow: callbackBodyFlow(statement.expression),
+      }];
+    }
+    return [{
+      kind: "return",
+      ...(statement.expression
+        ? awaitedCallsField(statement.expression)
+        : {}),
+    }];
+  }
+  if (ts.isContinueStatement(statement)) {
+    return [{ kind: "continue" }];
+  }
+  if (ts.isBreakStatement(statement)) {
+    return [{ kind: "break" }];
+  }
+  if (ts.isThrowStatement(statement)) {
+    return [{
+      kind: "throw",
+      calls: callSitesIn(statement.expression),
+      ...awaitedCallsField(statement.expression),
+    }];
+  }
+  if (ts.isBlock(statement)) {
+    return statementSequence(statement);
+  }
+  return [{
+    kind: ts.SyntaxKind[statement.kind] ?? "statement",
+    calls: callSitesIn(statement),
+  }];
+}
+
+
+export function controlFlowIn(node) {
+  if (
+    (
+      ts.isFunctionDeclaration(node)
+      || ts.isMethodDeclaration(node)
+      || ts.isFunctionExpression(node)
+      || ts.isArrowFunction(node)
+    )
+    && node.body
+  ) {
+    return ts.isBlock(node.body)
+      ? statementSequence(node.body)
+      : [{ kind: "return-expression", calls: callSitesIn(node.body) }];
+  }
+  if (
+    ts.isVariableDeclaration(node)
+    && node.initializer
+    && (
+      ts.isArrowFunction(node.initializer)
+      || ts.isFunctionExpression(node.initializer)
+    )
+  ) {
+    return callbackBodyFlow(node.initializer);
+  }
+  return statementSequence(node);
+}
+
+
+export function callbackFlowsIn(node, target) {
+  const callbacks = [];
+  function visit(child) {
+    if (
+      ts.isCallExpression(child)
+      && semanticText(child.expression) === target
+    ) {
+      child.arguments.forEach((argument, argumentIndex) => {
+        if (
+          !ts.isArrowFunction(argument)
+          && !ts.isFunctionExpression(argument)
+        ) {
+          return;
+        }
+        callbacks.push({
+          target,
+          argumentIndex,
+          parameters: argument.parameters.map(
+            (parameter) => semanticText(parameter.name),
+          ),
+          otherArguments: child.arguments
+            .filter((_value, index) => index !== argumentIndex)
+            .map(semanticText),
+          flow: callbackBodyFlow(argument),
+        });
+      });
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return callbacks.sort((left, right) => (
+    left.argumentIndex - right.argumentIndex
+    || JSON.stringify(left.otherArguments)
+      .localeCompare(JSON.stringify(right.otherArguments))
+    || JSON.stringify(left.flow).localeCompare(JSON.stringify(right.flow))
+  ));
+}
+
+
 export function ifConditionsIn(node) {
   const conditions = [];
   function visit(child) {

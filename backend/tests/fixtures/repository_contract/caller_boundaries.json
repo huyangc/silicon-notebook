@@ -91,6 +91,22 @@
     {
       "count": 1,
       "kind": "facade_imports",
+      "path": "backend/app/services/sqlite_notebook_sharing.py",
+      "reason": "compatibility shim late-binds legacy facade monkeypatch seams",
+      "scope": "<module>._copy_chunk_size",
+      "target": "app.services:sqlite_repository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/services/sqlite_notebook_sharing.py",
+      "reason": "compatibility shim late-binds legacy facade monkeypatch seams",
+      "scope": "<module>._repository_new_id",
+      "target": "app.services:sqlite_repository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
       "path": "scripts/backfill_kg_embeddings.py",
       "reason": "offline CLI composition root",
       "scope": "<module>",
@@ -149,6 +165,14 @@
       "kind": "facade_imports",
       "path": "scripts/generate_repository_contract_fixtures.py",
       "reason": "contract fixture composition root",
+      "scope": "<module>._deterministic_runtime",
+      "target": "app.services:sqlite_repository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "contract fixture composition root",
       "scope": "<module>._new_offline_repo",
       "target": "app.services.sqlite_repository:SQLiteRepository"
     },
@@ -159,6 +183,14 @@
       "reason": "contract fixture composition root",
       "scope": "<module>.collect_facade_surface",
       "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "contract fixture composition root",
+      "scope": "<module>.collect_facade_surface",
+      "target": "app.services:sqlite_repository"
     },
     {
       "count": 1,

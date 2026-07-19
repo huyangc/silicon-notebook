@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 
 import {
   assignmentsIn,
+  callbackFlowsIn,
   callSitesIn,
   callsIn,
+  controlFlowIn,
   findFunction,
   findFunctionIn,
   ifBranchesIn,
@@ -134,6 +136,134 @@ test("semantic assignment queries report target, operator, and value", () => {
 });
 
 
+test("control-flow queries preserve semantic nesting and statement order", () => {
+  const source = parseText(
+    [
+      "async function upload(items) {",
+      "  const gate = blocked();",
+      "  if (gate) { fail(gate); return; }",
+      "  try {",
+      "    for (const item of items) {",
+      "      const result = await send(item, controller.signal);",
+      "      apply(result);",
+      "    }",
+      "  } finally {",
+      "    active.current = false;",
+      "    if (next) leave(next);",
+      "  }",
+      "}",
+    ].join("\n"),
+    "a.ts",
+  );
+
+  const flow = controlFlowIn(findFunction(source, "upload"));
+  assert.deepEqual(flow.map(({ kind }) => kind), ["variables", "if", "try"]);
+  assert.deepEqual(flow[0], {
+    kind: "variables",
+    declarations: [{ name: "gate", initializer: "blocked()" }],
+    calls: [{ target: "blocked", arguments: [] }],
+  });
+  assert.deepEqual(flow[1], {
+    kind: "if",
+    condition: "gate",
+    then: [
+      {
+        kind: "expression",
+        calls: [{ target: "fail", arguments: ["gate"] }],
+      },
+      { kind: "return" },
+    ],
+    else: [],
+  });
+  const loop = flow[2].try[0];
+  assert.equal(loop.kind, "for-of");
+  assert.equal(loop.initializer, "const item");
+  assert.equal(loop.expression, "items");
+  assert.deepEqual(loop.body.map(({ kind }) => kind), [
+    "variables",
+    "expression",
+  ]);
+  assert.deepEqual(loop.body[0].calls, [
+    {
+      target: "send",
+      arguments: ["item", "controller.signal"],
+    },
+  ]);
+  assert.deepEqual(loop.body[0].awaitedCalls, loop.body[0].calls);
+  assert.deepEqual(flow[2].finally, [
+    {
+      kind: "assignment",
+      target: "active.current",
+      operator: "=",
+      value: "false",
+      calls: [],
+    },
+    {
+      kind: "if",
+      condition: "next",
+      then: [
+        {
+          kind: "expression",
+          calls: [{ target: "leave", arguments: ["next"] }],
+        },
+      ],
+      else: [],
+    },
+  ]);
+});
+
+
+test("callback-flow queries expose cleanup behavior without source offsets", () => {
+  const source = parseText(
+    [
+      "function Editor() {",
+      "  useEffect(() => {",
+      "    return () => {",
+      "      abort();",
+      "      if (dirty) flush();",
+      "    };",
+      "  }, []);",
+      "}",
+    ].join("\n"),
+    "a.ts",
+  );
+
+  assert.deepEqual(
+    callbackFlowsIn(findFunction(source, "Editor"), "useEffect"),
+    [
+      {
+        target: "useEffect",
+        argumentIndex: 0,
+        parameters: [],
+        otherArguments: ["[]"],
+        flow: [
+          {
+            kind: "return-callback",
+            flow: [
+              {
+                kind: "expression",
+                calls: [{ target: "abort", arguments: [] }],
+              },
+              {
+                kind: "if",
+                condition: "dirty",
+                then: [
+                  {
+                    kind: "expression",
+                    calls: [{ target: "flush", arguments: [] }],
+                  },
+                ],
+                else: [],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  );
+});
+
+
 test("semantic wiring queries ignore source formatting and line movement", () => {
   const first = parseText(
     "function save(){if(busy)return;api.save(value,normalize(value))}",
@@ -147,6 +277,7 @@ test("semantic wiring queries ignore source formatting and line movement", () =>
   for (const query of [
     callSitesIn,
     assignmentsIn,
+    controlFlowIn,
     ifBranchesIn,
     ifConditionsIn,
     variableInitializersIn,

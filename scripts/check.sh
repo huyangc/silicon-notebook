@@ -23,19 +23,38 @@ declare -a PIDS=()
 declare -a LANES=(contracts backend frontend)
 
 cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
   for pid in "${PIDS[@]:-}"; do
-    kill "$pid" 2>/dev/null || true
+    kill -TERM -- "-$pid" 2>/dev/null || true
+  done
+  for pid in "${PIDS[@]:-}"; do
+    wait "$pid" 2>/dev/null || true
   done
   rm -rf "$TMP_DIR"
+  exit "$status"
 }
-trap cleanup EXIT INT TERM
+
+handle_interrupt() {
+  exit 130
+}
+
+handle_terminate() {
+  exit 143
+}
+
+trap cleanup EXIT
+trap handle_interrupt INT
+trap handle_terminate TERM
 
 for lane in "${LANES[@]}"; do
   CHECK_LANE_NAME="$lane" \
   CHECK_TIMING_FILE="$TMP_DIR/$lane.time" \
   ROOT_DIR="$ROOT_DIR" \
   PYTHON_BIN="$PYTHON_BIN" \
-    "$ROOT_DIR/scripts/check_${lane}.sh" \
+    "$PYTHON_BIN" -c \
+      'import os, sys; os.setpgrp(); os.execv(sys.argv[1], sys.argv[1:])' \
+      "$ROOT_DIR/scripts/check_${lane}.sh" \
     >"$TMP_DIR/$lane.log" 2>&1 &
   PIDS+=("$!")
 done

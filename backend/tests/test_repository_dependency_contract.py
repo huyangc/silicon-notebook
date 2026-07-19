@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from tests.architecture.repository_callers import (
+    FACADE_IMPORT_TARGETS,
     collect_caller_contract,
     private_repository_sites,
     production_source_index,
@@ -127,6 +128,14 @@ def test_caller_contract_uses_semantic_identity_and_reasoned_counts():
 
 def test_caller_contract_matches_live_semantic_boundaries():
     assert _contract() == collect_caller_contract()
+
+
+def test_facade_import_targets_cover_module_and_symbol_import_forms():
+    assert FACADE_IMPORT_TARGETS == {
+        "app.services.sqlite_repository",
+        "app.services.sqlite_repository:SQLiteRepository",
+        "app.services:sqlite_repository",
+    }
 
 
 def test_lifecycle_service_is_sql_free_and_uses_exact_store_seams():

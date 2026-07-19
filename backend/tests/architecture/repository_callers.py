@@ -44,6 +44,9 @@ FACADE_IMPORT_REASON_BY_PATH = {
     "backend/app/scripts/recluster_kg.py": "offline CLI composition root",
     "backend/app/scripts/reembed_kg.py": "offline CLI composition root",
     "backend/app/services/batch_ingest.py": "batch-ingest CLI composition root",
+    "backend/app/services/sqlite_notebook_sharing.py": (
+        "compatibility shim late-binds legacy facade monkeypatch seams"
+    ),
     "scripts/backfill_kg_embeddings.py": "offline CLI composition root",
     "scripts/backfill_knowhow_md.py": "offline maintenance CLI composition root",
     "scripts/bench_sqlite_writes.py": "synthetic benchmark composition root",
@@ -56,6 +59,12 @@ FACADE_IMPORT_REASON_BY_PATH = {
     "scripts/replay_retrieval.py": "offline CLI composition root",
     "scripts/smoke_backend.py": "offline smoke composition root",
     "scripts/verify_repository_snapshot.py": "backup-only verifier composition root",
+}
+
+FACADE_IMPORT_TARGETS = {
+    "app.services.sqlite_repository",
+    "app.services.sqlite_repository:SQLiteRepository",
+    "app.services:sqlite_repository",
 }
 
 PRIVATE_REASON_BY_PATH = {
@@ -128,14 +137,10 @@ def sqlite_connect_sites() -> tuple[SemanticFinding, ...]:
 
 
 def facade_import_sites() -> tuple[SemanticFinding, ...]:
-    targets = {
-        "app.services.sqlite_repository",
-        "app.services.sqlite_repository:SQLiteRepository",
-    }
     return tuple(
         finding
         for finding in production_source_index().imports()
-        if finding.key.target in targets
+        if finding.key.target in FACADE_IMPORT_TARGETS
     )
 
 

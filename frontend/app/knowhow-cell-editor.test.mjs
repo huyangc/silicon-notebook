@@ -82,8 +82,10 @@ import {
   insertViaExecCommandOrFallback,
 } from "./knowhow-cell-editor-logic.ts";
 import {
+  callbackFlowsIn,
   callSitesIn,
   callsIn,
+  controlFlowIn,
   declarations,
   findFunction,
   ifBranchesIn,
@@ -711,18 +713,117 @@ test("批量上传：期间正文被改写 → 后续图片追加末尾，绝不
 
 test("editor semantically wires upload through the tested state-machine boundaries", async () => {
   const upload = findFunction(editorModule, "uploadAndInsertImages");
-  const uploadCalls = callsIn(upload);
-  const accesses = propertyAccesses(editorModule);
+  const flow = controlFlowIn(upload);
+  const blockedIndex = flow.findIndex(
+    ({ kind, condition }) => kind === "if" && condition === "uploadBlocked",
+  );
+  const tryIndex = flow.findIndex(({ kind }) => kind === "try");
+  assert.ok(blockedIndex >= 0 && blockedIndex < tryIndex);
+  assert.equal(
+    flow.slice(0, tryIndex).some(
+      ({ awaitedCalls }) => (awaitedCalls?.length ?? 0) > 0,
+    ),
+    false,
+  );
+  assert.deepEqual(flow[blockedIndex].then.map(({ kind }) => kind), [
+    "expression",
+    "return",
+  ]);
 
-  for (const target of [
-    "resolveUploadBlock",
-    "uploadNotebookAsset",
-    "resolveUploadInsertion",
-    "applyInsertion",
-  ]) {
-    assert.ok(uploadCalls.includes(target), target);
-  }
-  assert.ok(accesses.includes("uploadAbortRef.current?.abort"));
+  const uploadTry = flow[tryIndex];
+  const loop = uploadTry.try.find(
+    ({ kind, expression }) => kind === "for-of" && expression === "images",
+  );
+  assert.ok(loop);
+  assert.strictEqual(uploadTry.try[0], loop);
+  assert.deepEqual(loop.body.map(({ kind }) => kind), [
+    "variables",
+    "variables",
+    "expression",
+    "assignment",
+    "assignment",
+  ]);
+  assert.deepEqual(loop.body[0].calls, [
+    {
+      target: "uploadNotebookAsset",
+      arguments: ["notebookId", "file", "controller.signal"],
+    },
+  ]);
+  assert.deepEqual(loop.body[0].awaitedCalls, loop.body[0].calls);
+  assert.ok(
+    loop.body[1].calls.some(
+      ({ target }) => target === "resolveUploadInsertion",
+    ),
+  );
+  assert.deepEqual(loop.body[2].calls, [
+    { target: "applyInsertion", arguments: ["landed"] },
+  ]);
+
+  assert.deepEqual(
+    uploadTry.finally.slice(0, 3),
+    [
+      {
+        kind: "assignment",
+        target: "uploadAbortRef.current",
+        operator: "=",
+        value: "null",
+        calls: [],
+      },
+      {
+        kind: "assignment",
+        target: "uploadingRef.current",
+        operator: "=",
+        value: "false",
+        calls: [],
+      },
+      {
+        kind: "expression",
+        calls: [{ target: "setUploading", arguments: ["false"] }],
+      },
+    ],
+  );
+  const deferredLeave = uploadTry.finally.find(
+    ({ kind, condition }) => (
+      kind === "if" && condition === "deferred && mountedRef.current"
+    ),
+  );
+  assert.deepEqual(deferredLeave?.then, [
+    {
+      kind: "expression",
+      calls: [{ target: "commitLeaveRef.current", arguments: ["deferred"] }],
+    },
+  ]);
+
+  const editor = findFunction(editorModule, "KnowhowCellEditor");
+  const unmount = callbackFlowsIn(editor, "useEffect").find(
+    ({ otherArguments, flow: effectFlow }) => (
+      otherArguments.length === 1
+      && otherArguments[0] === "[]"
+      && effectFlow.some(({ kind }) => kind === "return-callback")
+    ),
+  );
+  const cleanup = unmount?.flow.find(
+    ({ kind }) => kind === "return-callback",
+  )?.flow;
+  assert.deepEqual(cleanup?.map(({ kind }) => kind), [
+    "assignment",
+    "expression",
+    "if",
+  ]);
+  assert.deepEqual(cleanup?.[1].calls, [
+    { target: "uploadAbortRef.current?.abort", arguments: [] },
+  ]);
+  assert.deepEqual(cleanup?.[2], {
+    kind: "if",
+    condition: "hasUnsavedChanges(contentRef.current, savedContentRef.current)",
+    then: [
+      {
+        kind: "expression",
+        calls: [{ target: "flushDraftRef.current", arguments: [] }],
+      },
+    ],
+    else: [],
+  });
   assert.equal(stringLiterals(editorModule).includes("kh-cell-pending-upload"), false);
 });
 

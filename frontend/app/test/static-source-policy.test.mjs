@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 import { STATIC_SOURCE_CONTRACTS } from "./static-source-contracts.mjs";
 
@@ -21,21 +22,110 @@ const POSITION_QUERY_ALLOWLIST = new Set([
 ]);
 
 
-async function testModules(directory = APP_DIR) {
+function isPolicyModule(relative) {
+  return (
+    relative.endsWith(".mjs")
+    || relative.endsWith(".component.test.tsx")
+    || (
+      relative.startsWith("test/")
+      && (relative.endsWith(".ts") || relative.endsWith(".tsx"))
+    )
+  );
+}
+
+
+async function policyModules(directory = APP_DIR) {
   const entries = await readdir(directory, { withFileTypes: true });
   const modules = [];
   for (const entry of entries) {
     const absolute = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      modules.push(...await testModules(absolute));
-    } else if (
-      entry.name.endsWith(".test.mjs")
-      || entry.name.endsWith(".component.test.tsx")
-    ) {
+      modules.push(...await policyModules(absolute));
+    } else if (isPolicyModule(
+      path.relative(APP_DIR, absolute).replaceAll(path.sep, "/"),
+    )) {
       modules.push(absolute);
     }
   }
   return modules.sort();
+}
+
+
+function hasPositionOrOrderQuery(relative, source, readsFiles) {
+  if (POSITION_QUERY_ALLOWLIST.has(relative)) return false;
+  const sourceFile = ts.createSourceFile(
+    relative,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    relative.endsWith(".tsx")
+      ? ts.ScriptKind.TSX
+      : relative.endsWith(".ts")
+        ? ts.ScriptKind.TS
+        : ts.ScriptKind.JS,
+  );
+  let found = false;
+
+  function sourceLike(expression) {
+    return (
+      ts.isIdentifier(expression)
+      && /^(?:source|sourceText|productionSource|content)$/i.test(
+        expression.text,
+      )
+    );
+  }
+
+  function visit(node) {
+    if (found) return;
+    if (
+      ts.isPropertyAccessExpression(node)
+      && ["pos", "end"].includes(node.name.text)
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      ts.isElementAccessExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && ["statements", "members", "properties"].includes(
+        node.expression.name.text,
+      )
+    ) {
+      found = true;
+      return;
+    }
+    if (
+      ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+    ) {
+      const method = node.expression.name.text;
+      if (["getStart", "getFullStart", "getEnd"].includes(method)) {
+        found = true;
+        return;
+      }
+      if (
+        method === "at"
+        && ts.isPropertyAccessExpression(node.expression.expression)
+        && ["statements", "members", "properties"].includes(
+          node.expression.expression.name.text,
+        )
+      ) {
+        found = true;
+        return;
+      }
+      if (
+        ["indexOf", "slice", "substring"].includes(method)
+        && (readsFiles || sourceLike(node.expression.expression))
+      ) {
+        found = true;
+        return;
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return found;
 }
 
 
@@ -49,14 +139,7 @@ function modulePolicyOffenders(relative, source) {
     offenders.push(`${relative}: direct production-source read`);
   }
   if (
-    !POSITION_QUERY_ALLOWLIST.has(relative)
-    && (
-      /\.(?:getStart|getEnd)\s*\(/.test(source)
-      || (
-        readsFiles
-        && /\.(?:indexOf|slice|substring)\s*\(/.test(source)
-      )
-    )
+    hasPositionOrOrderQuery(relative, source, readsFiles)
   ) {
     offenders.push(`${relative}: source-position or source-order query`);
   }
@@ -75,7 +158,7 @@ function modulePolicyOffenders(relative, source) {
 
 async function policyOffenders() {
   const offenders = [];
-  for (const absolute of await testModules()) {
+  for (const absolute of await policyModules()) {
     const relative = path.relative(APP_DIR, absolute).replaceAll(path.sep, "/");
     const source = await readFile(absolute, "utf8");
     offenders.push(...modulePolicyOffenders(relative, source));
@@ -101,6 +184,18 @@ test("source policy rejects position identities without banning ordinary arrays"
     ),
     ["example.test.mjs: source-position or source-order query"],
   );
+  for (const mutation of [
+    "const start = node.getFullStart();",
+    "const finish = node.end;",
+    "const first = sourceFile.statements[0];",
+    "const first = sourceFile.members.at(0);",
+  ]) {
+    assert.deepEqual(
+      modulePolicyOffenders("example.test.mjs", mutation),
+      ["example.test.mjs: source-position or source-order query"],
+      mutation,
+    );
+  }
   assert.deepEqual(
     modulePolicyOffenders(
       "example.test.mjs",
@@ -115,11 +210,27 @@ test("source policy rejects position identities without banning ordinary arrays"
   );
   assert.deepEqual(
     modulePolicyOffenders(
+      "test/source-helper.mjs",
+      "export function fragment(source) { return source.slice(1); }",
+    ),
+    ["test/source-helper.mjs: source-position or source-order query"],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
       "example.test.mjs",
       "const copy = values.slice().sort();",
     ),
     [],
   );
+});
+
+
+test("source policy includes semantic helper modules, not only test entrypoints", async () => {
+  const relative = (await policyModules()).map(
+    (absolute) => path.relative(APP_DIR, absolute).replaceAll(path.sep, "/"),
+  );
+  assert.ok(relative.includes("test/semantic-source.mjs"));
+  assert.ok(relative.includes("test/setup.ts"));
 });
 
 
