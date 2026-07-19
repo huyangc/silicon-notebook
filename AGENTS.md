@@ -337,7 +337,7 @@ This checks:
 - Markdown, DOCX, PPTX, and PDF upload/parse smoke path (sync and async-scheduler paths).
 - KG extraction boundary (`no-llm` offline), explicit KG storage, source cleanup → Ask → feedback → conversation and report paths, retrieval scoring, stale-source knowledge invalidation, sharing, and fresh-database assertions.
 - Logging: LLM interaction log, generic event log (parseable/disable/never-raise), and pipeline stage events + `error_message` regression.
-- Official MCP client smoke for the seven Memory tools, session notebook selection, candidate exclusion from formal context, and same-user/same-notebook cross-Agent candidate recall.
+- Official MCP client smoke for exactly eleven tools (seven Memory plus four knowhow), session notebook selection, candidate exclusion from formal context, and same-user/same-notebook cross-Agent candidate recall.
 - User-facing vocabulary guard (`check_ui_vocabulary.py`): no internal jargon in copy a user can see — rendered `frontend/app` text **and** backend `user_error()` messages, whose `X-User-Message` marker means they are displayed verbatim (see 界面词汇表).
 - Source summary fallback and notebook-internal search.
 - Complete backend `pytest` suite plus the deterministic extraction-scoring harness under `fangan/testcases/harness/tests`; committed tests must not depend on developer-local source documents.
