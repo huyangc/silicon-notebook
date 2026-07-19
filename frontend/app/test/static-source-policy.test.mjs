@@ -100,7 +100,7 @@ function unwrapExpression(expression) {
 
 function staticStringValue(
   expression,
-  bindings = new Map(),
+  resolveBinding = undefined,
   seen = new Set(),
 ) {
   const current = unwrapExpression(expression);
@@ -112,21 +112,22 @@ function staticStringValue(
   }
   if (
     ts.isIdentifier(current)
-    && bindings.has(current.text)
-    && !seen.has(current.text)
+    && resolveBinding
   ) {
+    const binding = resolveBinding(current);
+    if (!binding || seen.has(binding.declaration)) return undefined;
     return staticStringValue(
-      bindings.get(current.text),
-      bindings,
-      new Set(seen).add(current.text),
+      binding.initializer,
+      resolveBinding,
+      new Set(seen).add(binding.declaration),
     );
   }
   if (
     ts.isBinaryExpression(current)
     && current.operatorToken.kind === ts.SyntaxKind.PlusToken
   ) {
-    const left = staticStringValue(current.left, bindings, seen);
-    const right = staticStringValue(current.right, bindings, seen);
+    const left = staticStringValue(current.left, resolveBinding, seen);
+    const right = staticStringValue(current.right, resolveBinding, seen);
     return left === undefined || right === undefined
       ? undefined
       : left + right;
@@ -135,23 +136,66 @@ function staticStringValue(
 }
 
 
-function staticStringBindings(sourceFile) {
-  const bindings = new Map();
-  (function visit(node) {
-    if (
-      ts.isVariableDeclaration(node)
-      && ts.isIdentifier(node.name)
-      && node.initializer
-    ) {
-      bindings.set(node.name.text, node.initializer);
+function directVariableBinding(statements, name) {
+  for (const statement of statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const declaration of statement.declarationList.declarations) {
+      if (ts.isIdentifier(declaration.name) && declaration.name.text === name) {
+        return {
+          declaration,
+          initializer: (
+            statement.declarationList.flags & ts.NodeFlags.Const
+          )
+            ? declaration.initializer
+            : undefined,
+        };
+      }
     }
-    ts.forEachChild(node, visit);
-  }(sourceFile));
-  return bindings;
+  }
+  return undefined;
 }
 
 
-function staticPropertyName(expression) {
+function lexicalConstBinding(identifier) {
+  const name = identifier.text;
+  for (
+    let current = identifier.parent;
+    current;
+    current = current.parent
+  ) {
+    if (ts.isBlock(current) || ts.isSourceFile(current)) {
+      const binding = directVariableBinding(current.statements, name);
+      if (binding) {
+        return binding.initializer
+          ? binding
+          : undefined;
+      }
+    }
+    if (
+      ts.isFunctionLike(current)
+      && current.parameters.some(
+        (parameter) => (
+          ts.isIdentifier(parameter.name)
+          && parameter.name.text === name
+        ),
+      )
+    ) {
+      return undefined;
+    }
+    if (
+      ts.isCatchClause(current)
+      && current.variableDeclaration
+      && ts.isIdentifier(current.variableDeclaration.name)
+      && current.variableDeclaration.name.text === name
+    ) {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+
+function staticPropertyName(expression, resolveBinding = undefined) {
   if (ts.isPropertyAccessExpression(expression)) {
     return expression.name.text;
   }
@@ -159,17 +203,20 @@ function staticPropertyName(expression) {
     ts.isElementAccessExpression(expression)
     && expression.argumentExpression
   ) {
-    return staticStringValue(expression.argumentExpression);
+    return staticStringValue(
+      expression.argumentExpression,
+      resolveBinding,
+    );
   }
   return undefined;
 }
 
 
-function staticModuleCallSpecifier(node, bindings = new Map()) {
+function staticModuleCallSpecifier(node, resolveBinding = undefined) {
   if (!ts.isCallExpression(node) || node.arguments.length === 0) {
     return undefined;
   }
-  const first = staticStringValue(node.arguments[0], bindings);
+  const first = staticStringValue(node.arguments[0], resolveBinding);
   if (first === undefined) return undefined;
   const callee = unwrapExpression(node.expression);
   if (callee.kind === ts.SyntaxKind.ImportKeyword) {
@@ -186,7 +233,7 @@ function staticModuleCallSpecifier(node, bindings = new Map()) {
       ts.isPropertyAccessExpression(callee)
       || ts.isElementAccessExpression(callee)
     )
-    && staticPropertyName(callee) === "require"
+    && staticPropertyName(callee, resolveBinding) === "require"
     && ts.isIdentifier(unwrapExpression(callee.expression))
     && unwrapExpression(callee.expression).text === "module"
   ) {
@@ -221,7 +268,6 @@ function relativeImports(relative, source, moduleNames) {
     true,
     scriptKind(relative),
   );
-  const stringBindings = staticStringBindings(sourceFile);
   const imports = [];
   function resolve(specifier) {
     if (!specifier.startsWith(".")) return undefined;
@@ -262,7 +308,10 @@ function relativeImports(relative, source, moduleNames) {
       const resolved = resolve(node.moduleReference.expression.text);
       if (resolved) imports.push(resolved);
     }
-    const callSpecifier = staticModuleCallSpecifier(node, stringBindings);
+    const callSpecifier = staticModuleCallSpecifier(
+      node,
+      lexicalConstBinding,
+    );
     if (callSpecifier !== undefined) {
       const resolved = resolve(callSpecifier);
       if (resolved) imports.push(resolved);
@@ -371,7 +420,6 @@ function isDefinitelyArrayType(type) {
 
 function moduleReadsFiles(sourceFile) {
   let readsFiles = false;
-  const stringBindings = staticStringBindings(sourceFile);
   const isFsSpecifier = (value) => (
     /^(?:node:)?fs(?:\/promises)?$/.test(value)
   );
@@ -398,7 +446,10 @@ function moduleReadsFiles(sourceFile) {
       readsFiles = true;
       return;
     }
-    const callSpecifier = staticModuleCallSpecifier(node, stringBindings);
+    const callSpecifier = staticModuleCallSpecifier(
+      node,
+      lexicalConstBinding,
+    );
     if (callSpecifier !== undefined && isFsSpecifier(callSpecifier)) {
       readsFiles = true;
       return;
@@ -422,7 +473,6 @@ function hasPositionOrOrderQuery(relative, source) {
   const registeredReader = (
     readsFiles && STRICT_TEXT_READER_ALLOWLIST.has(relative)
   );
-  const stringBindings = staticStringBindings(sourceFile);
   const typeDeclarations = new Map();
   (function recordTypeDeclarations(node) {
     if (
@@ -484,6 +534,17 @@ function hasPositionOrOrderQuery(relative, source) {
       (clause) => clause.types.flatMap((heritage) => {
         const name = rightmostExpressionName(heritage.expression);
         if (!name || seen.has(name)) return [];
+        if (
+          ["Partial", "Readonly", "Required"].includes(name)
+          && heritage.typeArguments?.length === 1
+        ) {
+          return [
+            ...(resolvedTypeMembers(
+              heritage.typeArguments[0],
+              seen,
+            ) ?? []),
+          ];
+        }
         const inheritedDeclaration = typeDeclarations.get(name);
         return inheritedDeclaration
           ? [
@@ -583,22 +644,48 @@ function hasPositionOrOrderQuery(relative, source) {
     return ts.isIdentifier(current) ? current.text : undefined;
   }
 
-  function definitelyAstNodeType(type) {
+  function definitelyAstNodeType(type, seen = new Set()) {
     if (!type) return false;
     if (ts.isParenthesizedTypeNode(type)) {
-      return definitelyAstNodeType(type.type);
+      return definitelyAstNodeType(type.type, seen);
     }
     if (ts.isUnionTypeNode(type)) {
-      return type.types.every(definitelyAstNodeType);
+      return type.types.every(
+        (part) => definitelyAstNodeType(part, seen),
+      );
     }
     if (!ts.isTypeReferenceNode(type)) return false;
-    return [
+    const name = rightmostTypeName(type.typeName);
+    if (
+      ["Partial", "Readonly", "Required"].includes(name)
+      && type.typeArguments?.length === 1
+    ) {
+      return definitelyAstNodeType(type.typeArguments[0], seen);
+    }
+    if ([
       "Declaration",
       "Expression",
       "Node",
       "SourceFile",
       "Statement",
-    ].includes(rightmostTypeName(type.typeName));
+    ].includes(name)) {
+      return true;
+    }
+    if (
+      ts.isIdentifier(type.typeName)
+      && !seen.has(type.typeName.text)
+    ) {
+      const declaration = typeDeclarations.get(type.typeName.text);
+      return Boolean(
+        declaration
+        && ts.isTypeAliasDeclaration(declaration)
+        && definitelyAstNodeType(
+          declaration.type,
+          new Set(seen).add(type.typeName.text),
+        )
+      );
+    }
+    return false;
   }
 
   function isRawReaderExpression(expression, scope) {
@@ -611,7 +698,9 @@ function hasPositionOrOrderQuery(relative, source) {
         ts.isPropertyAccessExpression(current)
         || ts.isElementAccessExpression(current)
       )
-      && ["readFile", "readFileSync"].includes(staticPropertyName(current))
+      && ["readFile", "readFileSync"].includes(
+        staticPropertyName(current, lexicalConstBinding),
+      )
     ) {
       return true;
     }
@@ -635,7 +724,7 @@ function hasPositionOrOrderQuery(relative, source) {
     }
     const moduleSpecifier = staticModuleCallSpecifier(
       current,
-      stringBindings,
+      lexicalConstBinding,
     );
     if (
       moduleSpecifier !== undefined
@@ -724,7 +813,10 @@ function hasPositionOrOrderQuery(relative, source) {
         ts.isPropertyAccessExpression(current.expression)
         || ts.isElementAccessExpression(current.expression)
       )
-      && staticPropertyName(current.expression) === "concat"
+      && staticPropertyName(
+        current.expression,
+        lexicalConstBinding,
+      ) === "concat"
       && (
         expressionKind(current.expression.expression, scope) === "source"
         || current.arguments.some(
@@ -740,7 +832,10 @@ function hasPositionOrOrderQuery(relative, source) {
         ts.isPropertyAccessExpression(current.expression)
         || ts.isElementAccessExpression(current.expression)
       )
-      && staticPropertyName(current.expression) === "from"
+      && staticPropertyName(
+        current.expression,
+        lexicalConstBinding,
+      ) === "from"
       && ts.isIdentifier(unwrapExpression(current.expression.expression))
       && unwrapExpression(current.expression.expression).text === "Array"
       && current.arguments.length > 0
@@ -753,7 +848,7 @@ function hasPositionOrOrderQuery(relative, source) {
     if (
       ts.isCallExpression(current)
       && AST_NODE_FACTORIES.has(
-        staticPropertyName(current.expression)
+        staticPropertyName(current.expression, lexicalConstBinding)
         ?? (
           ts.isIdentifier(current.expression)
             ? current.expression.text
@@ -780,7 +875,9 @@ function hasPositionOrOrderQuery(relative, source) {
         ts.isPropertyAccessExpression(current)
         || ts.isElementAccessExpression(current)
       )
-      && AST_COLLECTIONS.has(staticPropertyName(current))
+      && AST_COLLECTIONS.has(
+        staticPropertyName(current, lexicalConstBinding),
+      )
       && expressionKind(current.expression, scope) === "ast-node"
     ) {
       return "ast-collection";
@@ -790,7 +887,9 @@ function hasPositionOrOrderQuery(relative, source) {
         ts.isPropertyAccessExpression(current)
         || ts.isElementAccessExpression(current)
       )
-      && AST_POSITION_METHODS.has(staticPropertyName(current))
+      && AST_POSITION_METHODS.has(
+        staticPropertyName(current, lexicalConstBinding),
+      )
       && expressionKind(current.expression, scope) === "ast-node"
     ) {
       return "ast-position-method";
@@ -800,7 +899,9 @@ function hasPositionOrOrderQuery(relative, source) {
         ts.isPropertyAccessExpression(current)
         || ts.isElementAccessExpression(current)
       )
-      && ["readFile", "readFileSync"].includes(staticPropertyName(current))
+      && ["readFile", "readFileSync"].includes(
+        staticPropertyName(current, lexicalConstBinding),
+      )
       && expressionKind(current.expression, scope) === "fs-namespace"
     ) {
       return "raw-reader";
@@ -827,7 +928,7 @@ function hasPositionOrOrderQuery(relative, source) {
       return name.text;
     }
     if (ts.isComputedPropertyName(name)) {
-      return staticStringValue(name.expression);
+      return staticStringValue(name.expression, lexicalConstBinding);
     }
     return undefined;
   }
@@ -1018,6 +1119,14 @@ function hasPositionOrOrderQuery(relative, source) {
         || ts.isSwitchStatement(ancestor)
         || ts.isIterationStatement(ancestor, false)
         || ts.isTryStatement(ancestor)
+        || (
+          ts.isBinaryExpression(ancestor)
+          && [
+            ts.SyntaxKind.AmpersandAmpersandToken,
+            ts.SyntaxKind.BarBarToken,
+            ts.SyntaxKind.QuestionQuestionToken,
+          ].includes(ancestor.operatorToken.kind)
+        )
       ),
     ));
   }
@@ -1170,7 +1279,9 @@ function hasPositionOrOrderQuery(relative, source) {
         ts.isPropertyAccessExpression(node)
         || ts.isElementAccessExpression(node)
       )
-      && ["pos", "end"].includes(staticPropertyName(node))
+      && ["pos", "end"].includes(
+        staticPropertyName(node, lexicalConstBinding),
+      )
       && expressionKind(node.expression, scope) === "ast-node"
     ) {
       found = true;
@@ -1181,7 +1292,7 @@ function hasPositionOrOrderQuery(relative, source) {
         ts.isPropertyAccessExpression(node)
         || ts.isElementAccessExpression(node)
       )
-      && staticPropertyName(node) === "length"
+      && staticPropertyName(node, lexicalConstBinding) === "length"
       && ["source", "ast-collection"].includes(
         textReceiverKind(node.expression, scope),
       )
@@ -1231,7 +1342,10 @@ function hasPositionOrOrderQuery(relative, source) {
         || ts.isElementAccessExpression(node.expression)
       )
     ) {
-      const method = staticPropertyName(node.expression);
+      const method = staticPropertyName(
+        node.expression,
+        lexicalConstBinding,
+      );
       const receiver = node.expression.expression;
       if (
         AST_POSITION_METHODS.has(method)
@@ -1387,6 +1501,15 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
     "let body = source; try { body = []; } catch {} body.slice(1);",
     "let body = []; body ||= source; body.slice(1);",
     "let body = source; body &&= []; body.slice(1);",
+    "let body = source; flag && (body = []); body.slice(1);",
+    "let body = source; flag || (body = []); body.slice(1);",
+    "let body = source; flag ?? (body = []); body.slice(1);",
+    "const key = 'pos'; ({ [key]: p } = node);",
+    "const method = 'getStart'; node[method]();",
+    "function inspect(tree: Readonly<ts.SourceFile>) {"
+      + " return tree.statements[0]; }",
+    "type Tree = ts.SourceFile;"
+      + " function inspect(tree: Tree) { return tree.statements[0]; }",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("example.test.mjs", mutation),
@@ -1426,6 +1549,8 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
     "const fs = import('node:' + 'fs'); void fs;",
     "const fs = require('f' + 's'); void fs;",
     "const specifier = 'f' + 's'; const fs = import(specifier); void fs;",
+    "const specifier = 'node:fs'; import(specifier);"
+      + " function shadow() { const specifier = './helper'; return specifier; }",
     "import fs = require('node:fs'); void fs;",
   ]) {
     assert.deepEqual(
@@ -1500,6 +1625,10 @@ test("source policy leaves ordinary array operations alone", () => {
       + " function good({ source }: P) { return source.slice(); }",
     "interface Base { source: string[] } interface Child extends Base {}"
       + " function good({ source }: Child) { return source.slice(); }",
+    "interface Base { source: string[] }"
+      + " interface Child extends Readonly<Base> {}"
+      + " function good({ source }: Child) { return source.slice(); }",
+    "let specifier = 'node:fs'; specifier = './helper'; import(specifier);",
     "function good({ source }: Readonly<{ source: string[] }>) {"
       + " return source.slice(); }",
   ]) {
@@ -1615,6 +1744,18 @@ test("source policy follows dynamic imports to test-only helpers", () => {
   assert.deepEqual(
     [...policyRelativeModules(typescriptModules)].sort(),
     ["dynamic-helper.ts", "feature.test.ts"],
+  );
+
+  modules.set("other.ts", "export const other = true;");
+  modules.set(
+    "feature.test.mjs",
+    "const specifier = './dynamic-helper.ts'; import(specifier);"
+      + " function shadow() {"
+      + " const specifier = './other.ts'; return specifier; }",
+  );
+  assert.deepEqual(
+    [...policyRelativeModules(modules)].sort(),
+    ["dynamic-helper.ts", "feature.test.mjs"],
   );
 });
 
