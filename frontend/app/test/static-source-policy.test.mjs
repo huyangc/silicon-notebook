@@ -88,6 +88,7 @@ function unwrapExpression(expression) {
   while (
     ts.isParenthesizedExpression(current)
     || ts.isAsExpression(current)
+    || ts.isSatisfiesExpression(current)
     || ts.isTypeAssertionExpression(current)
     || ts.isNonNullExpression(current)
     || ts.isAwaitExpression(current)
@@ -1618,6 +1619,7 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
     "const items = sourceFile.statements; items[0];",
     "(source).slice(1);",
     "(source as string).slice(1);",
+    "(source satisfies string).slice(1);",
     "source.trim().split('\\n');",
     "source.at(0);",
     "const [first] = source;",
@@ -1710,6 +1712,7 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
       + " function shadow() { const specifier = './helper'; return specifier; }",
     "for (const specifier = 'node:fs'; flag;) {"
       + " import(specifier); break; }",
+    "const specifier = ('node:fs' satisfies string); import(specifier);",
     "switch (flag) { case 1:"
       + " const specifier = 'node:fs'; import(specifier); break; }",
     "namespace N {"
@@ -1896,6 +1899,8 @@ test("source policy follows dynamic imports to test-only helpers", () => {
     "const helper = module.require('./dynamic-helper.ts'); void helper;",
     "const helper = (module).require('./dynamic-helper.ts'); void helper;",
     "const helper = import('./dynamic-' + 'helper.ts'); void helper;",
+    "const specifier = ('./dynamic-helper.ts' satisfies string);"
+      + " import(specifier);",
     "const specifier = './dynamic-helper.ts';"
       + " const helper = import(specifier); void helper;",
   ]) {
