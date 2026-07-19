@@ -22,32 +22,146 @@ const POSITION_QUERY_ALLOWLIST = new Set([
 ]);
 
 
-function isPolicyModule(relative) {
+function isSourceModule(relative) {
   return (
     relative.endsWith(".mjs")
-    || relative.endsWith(".component.test.tsx")
-    || (
-      relative.startsWith("test/")
-      && (relative.endsWith(".ts") || relative.endsWith(".tsx"))
-    )
+    || relative.endsWith(".ts")
+    || relative.endsWith(".tsx")
   );
 }
 
 
-async function policyModules(directory = APP_DIR) {
+function isTestEntrypoint(relative) {
+  return (
+    relative.endsWith(".test.mjs")
+    || relative.endsWith(".test.ts")
+    || relative.endsWith(".test.tsx")
+  );
+}
+
+
+function scriptKind(relative) {
+  if (relative.endsWith(".tsx")) return ts.ScriptKind.TSX;
+  if (relative.endsWith(".ts")) return ts.ScriptKind.TS;
+  return ts.ScriptKind.JS;
+}
+
+
+async function sourceModules(directory = APP_DIR) {
   const entries = await readdir(directory, { withFileTypes: true });
   const modules = [];
   for (const entry of entries) {
     const absolute = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      modules.push(...await policyModules(absolute));
-    } else if (isPolicyModule(
+      modules.push(...await sourceModules(absolute));
+    } else if (isSourceModule(
       path.relative(APP_DIR, absolute).replaceAll(path.sep, "/"),
     )) {
       modules.push(absolute);
     }
   }
   return modules.sort();
+}
+
+
+function relativeImports(relative, source, moduleNames) {
+  const sourceFile = ts.createSourceFile(
+    relative,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKind(relative),
+  );
+  const imports = [];
+  function resolve(specifier) {
+    if (!specifier.startsWith(".")) return undefined;
+    const base = path.posix.normalize(
+      path.posix.join(path.posix.dirname(relative), specifier),
+    );
+    for (const candidate of [
+      base,
+      `${base}.ts`,
+      `${base}.tsx`,
+      `${base}.mjs`,
+      `${base}/index.ts`,
+      `${base}/index.tsx`,
+      `${base}/index.mjs`,
+    ]) {
+      if (moduleNames.has(candidate)) return candidate;
+    }
+    return undefined;
+  }
+  function visit(node) {
+    if (
+      (
+        ts.isImportDeclaration(node)
+        || ts.isExportDeclaration(node)
+      )
+      && node.moduleSpecifier
+      && ts.isStringLiteral(node.moduleSpecifier)
+    ) {
+      const resolved = resolve(node.moduleSpecifier.text);
+      if (resolved) imports.push(resolved);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return imports;
+}
+
+
+function reachableModules(roots, importsByModule) {
+  const reached = new Set();
+  const pending = [...roots];
+  while (pending.length > 0) {
+    const relative = pending.pop();
+    if (reached.has(relative)) continue;
+    reached.add(relative);
+    pending.push(...(importsByModule.get(relative) ?? []));
+  }
+  return reached;
+}
+
+
+function policyRelativeModules(moduleSources) {
+  const moduleNames = new Set(moduleSources.keys());
+  const importsByModule = new Map(
+    [...moduleSources].map(([relative, source]) => [
+      relative,
+      relativeImports(relative, source, moduleNames),
+    ]),
+  );
+  const testEntrypoints = [...moduleNames].filter(isTestEntrypoint);
+  const productionEntrypoints = [...moduleNames].filter(
+    (relative) => /(?:^|\/)(?:page|layout|route)\.tsx?$/.test(relative),
+  );
+  const testReachable = reachableModules(testEntrypoints, importsByModule);
+  const productionReachable = reachableModules(
+    productionEntrypoints,
+    importsByModule,
+  );
+  return new Set(
+    [...moduleNames].filter((relative) => (
+      isTestEntrypoint(relative)
+      || relative.startsWith("test/")
+      || (
+        testReachable.has(relative)
+        && !productionReachable.has(relative)
+      )
+    )),
+  );
+}
+
+
+async function policyModules() {
+  const sources = new Map();
+  for (const absolute of await sourceModules()) {
+    const relative = path.relative(APP_DIR, absolute).replaceAll(path.sep, "/");
+    sources.set(relative, await readFile(absolute, "utf8"));
+  }
+  return [...policyRelativeModules(sources)]
+    .sort()
+    .map((relative) => path.join(APP_DIR, relative));
 }
 
 
@@ -58,11 +172,7 @@ function hasPositionOrOrderQuery(relative, source, readsFiles) {
     source,
     ts.ScriptTarget.Latest,
     true,
-    relative.endsWith(".tsx")
-      ? ts.ScriptKind.TSX
-      : relative.endsWith(".ts")
-        ? ts.ScriptKind.TS
-        : ts.ScriptKind.JS,
+    scriptKind(relative),
   );
   let found = false;
 
@@ -95,6 +205,28 @@ function hasPositionOrOrderQuery(relative, source, readsFiles) {
       return;
     }
     if (
+      (
+        ts.isVariableDeclaration(node)
+        && ts.isArrayBindingPattern(node.name)
+        && node.initializer
+        && ts.isPropertyAccessExpression(node.initializer)
+        && ["statements", "members", "properties"].includes(
+          node.initializer.name.text,
+        )
+      )
+      || (
+        ts.isBinaryExpression(node)
+        && ts.isArrayLiteralExpression(node.left)
+        && ts.isPropertyAccessExpression(node.right)
+        && ["statements", "members", "properties"].includes(
+          node.right.name.text,
+        )
+      )
+    ) {
+      found = true;
+      return;
+    }
+    if (
       ts.isCallExpression(node)
       && ts.isPropertyAccessExpression(node.expression)
     ) {
@@ -115,7 +247,11 @@ function hasPositionOrOrderQuery(relative, source, readsFiles) {
       }
       if (
         ["indexOf", "slice", "substring"].includes(method)
-        && (readsFiles || sourceLike(node.expression.expression))
+        && (
+          readsFiles
+          || sourceLike(node.expression.expression)
+          || !isTestEntrypoint(relative)
+        )
       ) {
         found = true;
         return;
@@ -189,6 +325,7 @@ test("source policy rejects position identities without banning ordinary arrays"
     "const finish = node.end;",
     "const first = sourceFile.statements[0];",
     "const first = sourceFile.members.at(0);",
+    "const [first] = sourceFile.statements;",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("example.test.mjs", mutation),
@@ -211,7 +348,7 @@ test("source policy rejects position identities without banning ordinary arrays"
   assert.deepEqual(
     modulePolicyOffenders(
       "test/source-helper.mjs",
-      "export function fragment(source) { return source.slice(1); }",
+      "export function fragment(text) { return text.slice(1); }",
     ),
     ["test/source-helper.mjs: source-position or source-order query"],
   );
@@ -221,6 +358,32 @@ test("source policy rejects position identities without banning ordinary arrays"
       "const copy = values.slice().sort();",
     ),
     [],
+  );
+});
+
+
+test("source policy follows test imports to root TypeScript helper modules", () => {
+  const modules = new Map([
+    [
+      "feature.test.mjs",
+      "import { fragment } from './feature-helper.ts'; void fragment;",
+    ],
+    [
+      "feature-helper.ts",
+      "export function fragment(text: string) { return text.slice(1); }",
+    ],
+    ["page.tsx", "export default function Page() { return null; }"],
+  ]);
+  assert.deepEqual(
+    [...policyRelativeModules(modules)].sort(),
+    ["feature-helper.ts", "feature.test.mjs"],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "feature-helper.ts",
+      modules.get("feature-helper.ts"),
+    ),
+    ["feature-helper.ts: source-position or source-order query"],
   );
 });
 

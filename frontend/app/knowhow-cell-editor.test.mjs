@@ -99,6 +99,17 @@ import {
 
 const editorModule = await parseModule("knowhow-cell-editor.tsx");
 
+
+function flowContainsAwait(flow) {
+  const nestedFlowKeys = ["then", "else", "body", "try", "catch", "finally", "flow"];
+  return flow.some((effect) => (
+    (effect.awaitedCalls?.length ?? 0) > 0
+    || nestedFlowKeys.some(
+      (key) => Array.isArray(effect[key]) && flowContainsAwait(effect[key]),
+    )
+  ));
+}
+
 // --- UI 文案常量：byte-exact vs 规格②路A / 任务简报原文 -------------------------
 
 test("PROCEDURE_HINT_TEXT: 与规格②路A 原文逐字一致", () => {
@@ -718,13 +729,32 @@ test("editor semantically wires upload through the tested state-machine boundari
     ({ kind, condition }) => kind === "if" && condition === "uploadBlocked",
   );
   const tryIndex = flow.findIndex(({ kind }) => kind === "try");
-  assert.ok(blockedIndex >= 0 && blockedIndex < tryIndex);
-  assert.equal(
-    flow.slice(0, tryIndex).some(
-      ({ awaitedCalls }) => (awaitedCalls?.length ?? 0) > 0,
+  const uploadGate = flow.find(
+    ({ kind, declarations: bindings }) => (
+      kind === "variables"
+      && bindings.some(({ name }) => name === "uploadBlocked")
     ),
-    false,
   );
+  assert.deepEqual(uploadGate?.declarations, [
+    {
+      name: "uploadBlocked",
+      initializer: "resolveUploadBlock(savingMode !== null, uploading || uploadingRef.current, isCellOptimizeLoading(optimizeState), restoreBannerRef.current)",
+    },
+  ]);
+  assert.deepEqual(
+    uploadGate?.calls.find(({ target }) => target === "resolveUploadBlock"),
+    {
+      target: "resolveUploadBlock",
+      arguments: [
+        "savingMode !== null",
+        "uploading || uploadingRef.current",
+        "isCellOptimizeLoading(optimizeState)",
+        "restoreBannerRef.current",
+      ],
+    },
+  );
+  assert.ok(blockedIndex >= 0 && blockedIndex < tryIndex);
+  assert.equal(flowContainsAwait(flow.slice(0, tryIndex)), false);
   assert.deepEqual(flow[blockedIndex].then.map(({ kind }) => kind), [
     "expression",
     "return",
