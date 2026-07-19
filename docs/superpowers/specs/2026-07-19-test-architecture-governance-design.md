@@ -222,6 +222,14 @@ Remaining frontend source scans are registered centrally with:
 No registered scan may depend on line numbers, text order, arbitrary slices,
 or a duplicate assertion already protected by a component or pure-model test.
 
+The enforcement stays deliberately bounded. Test entrypoints and test-only
+helpers may not read production files directly; the registered
+`semantic-source.mjs` adapter exposes AST semantics only. A syntax-only guard
+rejects AST position/collection-order APIs and source-named text slicing,
+splitting, indexing, or length. It does not attempt whole-JavaScript data-flow
+or closure interpretation, so its runtime is linear in the parsed syntax and
+ordinary array operations remain valid.
+
 ## Performance Design
 
 ### Complete-gate budget

@@ -362,6 +362,11 @@ this is a measured baseline, not a portable timeout assertion for every host.
 - No committed skip, xfail, todo, or only markers. The policy covers test
   entrypoints and helper modules; direct production-source reads are forbidden
   outside the shared semantic-source adapter.
+- Keep the frontend source policy bounded and syntactic: reject AST
+  position/collection-order APIs and source-named text position operations.
+  `semantic-source.mjs` may expose AST semantics but must not use text slicing,
+  splitting, indexing, or length as a contract. Do not reintroduce a
+  whole-JavaScript data-flow interpreter; ordinary array operations stay valid.
 - The pytest controller prewarms one repo-local Matplotlib font cache before
   xdist workers start. Preserve that boundary; per-worker macOS font
   enumeration is an avoidable multi-second cold start.

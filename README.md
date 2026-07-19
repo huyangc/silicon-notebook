@@ -1072,6 +1072,7 @@ For approved multi-step implementation plans, use subagent-driven development by
 - Frontend `*.test.mjs` files cover pure logic and the small set of justified architecture/security/vocabulary/entry contracts with `node:test`. Frontend `*.component.test.tsx` files use Vitest, jsdom, and Testing Library to exercise user-visible behavior through roles, actions, and state.
 - Component behavior must not be pinned through CSS geometry or source layout. A routine feature refactor should change tests only when its observable contract changes.
 - Committed tests may not be disabled with skip/xfail/todo/only. Repository policy tests enforce this across test entrypoints and their helper modules, and prevent direct production-source reads outside the shared semantic-source adapter.
+- The frontend source policy is intentionally bounded: it rejects AST position/collection-order APIs and source-named text position operations syntactically, while the shared `semantic-source.mjs` adapter may expose AST semantics but may not use text slicing, splitting, indexing, or length as a contract. Do not replace this with whole-JavaScript data-flow interpretation; ordinary array operations stay valid.
 - Backend test startup prewarms one repo-local Matplotlib font cache before xdist workers start. Keep that controller boundary: letting each graph worker enumerate macOS fonts independently adds avoidable multi-second cold starts.
 
 ## Documentation Maintenance
