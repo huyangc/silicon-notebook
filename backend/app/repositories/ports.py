@@ -201,6 +201,10 @@ class MemoryRepository(Protocol):
     ) -> dict[str, str]: ...
     def memory_revisions(self, memory_id: str, user_id: str) -> list[Any]: ...
     def propose_memory_promotion(self, memory_id: str, user_id: str) -> dict: ...
+    def transfer_memories(
+        self, user_id: str, memory_ids: list[str], target_notebook_id: str,
+        mode: str, extract_kg: bool = True,
+    ) -> list[dict]: ...
 
 
 class NotebookCatalogRepository(Protocol):
@@ -824,6 +828,9 @@ class MemoryStorePort(Protocol):
         fields: Mapping[str, Any] | None, changed_by: str, reason: str,
     ) -> MemoryRecord: ...
     def delete_memory(self, memory_id: str, user_id: str) -> None: ...
+    def delete_memory_if_unchanged(
+        self, memory_id: str, user_id: str, expected_revision: int | None
+    ) -> bool: ...
     def bulk_delete_memories(
         self, user_id: str, memory_ids: Sequence[str]
     ) -> int: ...
@@ -844,6 +851,14 @@ class MemoryStorePort(Protocol):
         self, user_id: str, notebook_id: str, statuses: Sequence[str], query: str,
         *, lexical_limit: int, vector_limit: int,
     ) -> list[dict[str, Any]]: ...
+    def create_copy_with_initial_revision(
+        self,
+        write: MemoryWrite,
+        source_memory_id: str,
+        changed_by: str,
+        reason: str,
+        expected_source_revision: "int | None",
+    ) -> MemoryRecord: ...
 
 
 class ReportSourceQueryPort(Protocol):

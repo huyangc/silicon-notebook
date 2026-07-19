@@ -114,3 +114,15 @@ class SqliteDatabase:
                     yield conn
             finally:
                 conn.close()
+
+    @staticmethod
+    def begin_immediate(conn: sqlite3.Connection) -> None:
+        """在 write() 递出的连接上显式开启 SQLite 写事务。
+
+        write_lock 只互斥**本进程**写者；离线 CLI/维护进程共库时，write() 块内
+        首条 DML 之前的 SELECT 不开启 SQLite 事务，另一进程可在「读到检查通过」
+        与「首条写入」之间提交变更。调用方（store 的条件删除/一致性快照、投影
+        终写守卫）在块首调用本方法，让检查与写入对跨进程写者也原子。事务由
+        write() 的 ``with conn:`` 在块尾统一 commit/rollback。SQL 收在本层
+        （repositories/sqlite），服务层不出现裸 SQL（callers_static 约束）。"""
+        conn.execute("BEGIN IMMEDIATE")

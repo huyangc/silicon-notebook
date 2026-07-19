@@ -270,7 +270,58 @@ class KnowhowProjector:
         calls this itself (its own signature carries no source_id), so a
         table's very first projection transparently creates its hidden
         source — callers never need to sequence ensure_hidden_source before
-        project_table by hand."""
+        project_table by hand.
+
+        PR review round 7 P2-A (creation+attach atomicity): minting the
+        ``sources`` row and attaching it back onto ``table_id`` (writing
+        ``hidden_source_id``) used to run in TWO separate ``database.
+        write()`` transactions. The round-6 orphan sweep (``KnowhowTransfer
+        Store.orphaned_knowhow_source_ids`` — every ``source_type='knowhow'``
+        row in a notebook unreferenced by any ``knowhow_tables.hidden_
+        source_id``, run at the end of every ``move_table``) cannot tell "a
+        legitimately in-flight brand-new source, one statement away from
+        being attached" apart from "an actual orphan a torn-down move left
+        behind" — both are, at that instant, a knowhow-typed source nothing
+        points at yet. A sweep landing in the gap between the two writes
+        would delete a LIVE source belonging to a DIFFERENT table's
+        concurrent first projection, which then fails on FK when it goes to
+        write elements (self-heals next projection pass, since this method
+        re-mints a replacement when the recorded id no longer resolves, but
+        is still observably wrong in between).
+
+        Both writes now share ONE ``database.write()`` transaction:
+        ``SourceStore.insert_source`` already accepted an optional
+        ``connection=`` to join a caller's transaction (its own docstring:
+        "batch imports keep their all-or-nothing semantics"), and
+        ``KnowhowStore.set_knowhow_hidden_source`` gained the identical
+        parameter, mirroring that exact idiom rather than inventing a new
+        one. With creation and attachment atomic, the sweep can only ever
+        observe a knowhow source that is either fully absent or already
+        referenced — never the intermediate state.
+
+        PR review round 8 P1-A (atomic still isn't the same as CORRECT):
+        being ONE transaction only stops the sweep from landing IN BETWEEN
+        the two writes — it does nothing to stop a table that was already
+        deleted by the time this method's own existence check ran (or that
+        gets deleted between that check and this transaction acquiring the
+        write lock — the "resume after the sweep already ran" case the
+        family history above is really about) from having BOTH writes
+        still go ahead: ``set_knowhow_hidden_source``'s UPDATE matches zero
+        rows against a gone ``table_id``, which SQLite does not treat as an
+        error, so ``insert_source``'s INSERT would commit right alongside
+        it — a fresh, permanently unreferenced source, born after the one
+        sweep that could have caught it already ran. ``set_knowhow_hidden_
+        source`` now raises ``KeyError(table_id)`` on that zero-rowcount
+        case (see its own docstring), which rolls back this WHOLE
+        transaction — ``insert_source``'s INSERT included — so nothing
+        commits. That ``KeyError`` then propagates straight out of this
+        method (nothing here catches it) and out of ``project_table``'s own
+        call to it, which sits BEFORE that method's per-row loop —
+        the exact same "raise before any row is touched, so there is
+        nothing to partially write" shape ``project_table`` already has at
+        its very top when ``get_knowhow_table`` itself raises for a
+        table_id that never existed in the first place. No new call site
+        needed to wire this in; being early in the function IS the wiring."""
         table = self.knowhow.get_knowhow_table(table_id)
         existing = table.get("hidden_source_id")
         if existing:
@@ -280,21 +331,23 @@ class KnowhowProjector:
             except KeyError:
                 pass  # recorded id no longer resolves — recreate below
         source_id = self.new_id("src")
-        self.sources.insert_source(
-            source_id=source_id,
-            notebook_id=table["notebook_id"],
-            title=f"Knowhow 表：{table['title']}",
-            source_type="knowhow",
-            status="active",
-            parse_status="parsed",
-            file_name="",
-            file_path="",
-            file_size=0,
-            file_hash="",
-            summary="",
-            doc_type="",
-        )
-        self.knowhow.set_knowhow_hidden_source(table_id, source_id)
+        with self.database.write() as db:
+            self.sources.insert_source(
+                source_id=source_id,
+                notebook_id=table["notebook_id"],
+                title=f"Knowhow 表：{table['title']}",
+                source_type="knowhow",
+                status="active",
+                parse_status="parsed",
+                file_name="",
+                file_path="",
+                file_size=0,
+                file_hash="",
+                summary="",
+                doc_type="",
+                connection=db,
+            )
+            self.knowhow.set_knowhow_hidden_source(table_id, source_id, connection=db)
         return source_id
 
     # ------------------------------------------------------------- project
@@ -399,7 +452,52 @@ class KnowhowProjector:
             self._ko_object_row(notebook_id, source_id, ko_id, entry, now)
             for ko_id, entry in ko_acc.items()
         ]
+        # Final existence guard (PR review round 1 P1-2, cross-notebook
+        # move/copy): a concurrent teardown -- move_table's
+        # delete_table_projection + delete_knowhow_table, or the plain DELETE
+        # route's identical pair -- can land ANYWHERE during the per-row loop
+        # above (production's realistic window is "parked in
+        # embed_chunk_ids mid-row, several rows in"). knowledge_objects.
+        # source_id carries NO FK to sources, so nothing else would stop
+        # insert_object_chunk below from committing a fresh KO batch against
+        # a table_id/source_id that no longer exist -- permanently
+        # unreclaimable ghosts in whatever notebook just had this table torn
+        # down (insert_relation_chunk, when edge_rows is non-empty, does
+        # carry an FK to sources and would instead raise IntegrityError and
+        # roll the whole transaction back -- a different, also-real
+        # "background job crashes" symptom of the exact same missing check).
+        #
+        # PR review round 2 P1-1: round 1's fix re-checked here but OUTSIDE
+        # this write() block (via table_exists()/source_exists(), each
+        # opening its own connect()) -- itself a fresh check-then-act gap. A
+        # concurrent move landing between that check returning True and this
+        # write() actually acquiring the write lock would sail straight
+        # through unblocked, recreating the exact orphan the guard exists to
+        # prevent (see test_project_table_existence_check_and_terminal_write_
+        # are_atomic). The check must run ON db, as the FIRST thing inside
+        # this block, so it and the writes below share one lock-held
+        # transaction: database.write() holds write_lock for the block's
+        # entire duration, and any concurrent delete_knowhow_table/
+        # delete_table_projection needs its own write() call, so it either
+        # fully lands before this block starts (table_exists_tx/
+        # source_exists_tx correctly observe "gone", we bail) or blocks until
+        # this block finishes (nothing to race). Bail out here -- skipping
+        # the write AND the mutation-seq bump below -- rather than
+        # resurrecting anything a teardown already removed. Mirrors
+        # delete_table_projection's own pre-write existence check just below.
         with self.database.write() as db:
+            # 显式开写事务：write_lock 只互斥本进程写者；离线 CLI/维护进程共库时，
+            # 下面两个存在性 SELECT 在首条 DML 前不开启 SQLite 事务，另一进程可在
+            # 「检查通过」与「首条写入」之间提交删表/删源，让 anchor-only 投影插出
+            # 无 FK 约束的孤儿 knowledge_objects（已删/已移内容仍可检索）。经
+            # SqliteDatabase.begin_immediate（SQL 收在 store 层）让检查与写入对
+            # 跨进程写者也原子——与 snapshot_table/delete_table_if_unchanged 同款。
+            self.database.begin_immediate(db)
+            if (
+                not self.knowhow.table_exists_tx(db, table_id)
+                or not self.sources.source_exists_tx(db, source_id)
+            ):
+                return
             self.knowledge.delete_relations_by_source(db, source_id)
             self.knowledge.delete_objects_by_source(db, source_id)
             if object_rows:

@@ -1246,6 +1246,89 @@ class MemoryStore:
         if cursor.rowcount != 1:
             raise KeyError(memory_id)
 
+    def delete_memory_if_unchanged(
+        self, memory_id: str, user_id: str, expected_revision: "int | None"
+    ) -> bool:
+        """Atomic conditional delete for ``MemoryService.transfer``'s move
+        cleanup (PR review round 3 P1-2): folds the concurrent-edit check
+        directly into the ``DELETE``'s ``WHERE`` clause, so "is it still the
+        row we copied" and "delete it" are ONE statement instead of a
+        separate read-then-write — no other writer can commit an edit
+        between them the way it could across two independent calls (a
+        revision compare, then a later unconditional ``delete_memory``).
+
+        Keyed on the ``memory_revisions`` MAX(revision) for this memory, NOT
+        ``updated_at``: ``updated_at`` was the first design tried here, but
+        ``app.services.sqlite_repository._now`` truncates to whole seconds
+        (``datetime.now().replace(microsecond=0)``) — two mutations inside
+        the same wall-clock second (an entirely realistic gap between "copy
+        committed" and "a concurrent edit lands") produce the byte-identical
+        string, which would make this check silently treat an edited row as
+        unchanged and delete it anyway (verified failing via this repo's own
+        test suite before switching to revision). ``revision`` has no such
+        collision: ``_mutate_with_revision``'s ``_append_revision_on`` inserts
+        exactly one new, strictly-incrementing row every time
+        ``update_with_revision``/``transition_with_revision`` runs (both
+        content edits and status transitions — ``deprecate`` goes through
+        ``transition_with_revision`` too), so any mutation since
+        ``expected_revision`` was captured makes MAX(revision) strictly
+        greater, unconditionally. Mirrors ``mark_embedding_failed``'s
+        existing ``(SELECT COALESCE(MAX(revision),0) FROM memory_revisions
+        WHERE memory_id=?)=?`` shape (same file) rather than inventing a new
+        one. ``status='confirmed'`` is redundant with that (any transition
+        away from 'confirmed' also advances revision) but kept as an
+        explicit, cheap belt-and-suspenders check — a move should never
+        delete a row that isn't (still) confirmed, regardless of how that
+        came to be true. ``expected_revision=None`` (the source's revision
+        couldn't be captured — see caller) can never equal a real revision
+        number, so the DELETE safely matches zero rows. Returns whether the
+        row was actually deleted (``False`` means the memory was edited or
+        transitioned away from 'confirmed', or (round 8, see below) had a
+        promotion proposed, since ``expected_revision`` was captured — the
+        row is left fully intact; caller should surface this as
+        ``copied_source_not_removed``, not retry the delete).
+
+        PR review round 8 P1-B: also requires ``promotion_state NOT IN
+        ('proposed')``. ``MemoryService.transfer`` already rejects a move
+        outright when the LOOP-TOP snapshot's ``promotion_state`` is
+        already ``'proposed'`` (its own pre-check, cheap and gives the
+        clearer per-item message for that case — kept as-is, this method
+        doesn't replace it). But a proposal landing AFTER that snapshot is
+        read and BEFORE this DELETE runs used to slip through anyway, and
+        NOT because the revision guard above was somehow blind to it in
+        the way ``status`` alone would be — ``memory_store.
+        propose_promotion_on`` calls ``_append_revision_on`` too, a
+        genuine new ``memory_revisions`` row. The actual gap: the caller
+        captures ``expected_revision`` via ``embedding_revision`` a few
+        lines AFTER its own promotion-state pre-check — if the proposal
+        lands in exactly that narrow window, ``embedding_revision``'s read
+        observes the ALREADY-BUMPED revision, and THIS delete's revision
+        check a moment later compares against that same, unmoved-since
+        number: both sides agree, precisely because the very mutation this
+        method needed to catch is what moved the number they now agree on.
+        A revision-only WHERE clause cannot distinguish "unchanged since
+        expected_revision was captured" from "changed, but AFTER capture
+        and by exactly the mutation this delete needs to reject" — folding
+        the ``promotion_state`` check directly into this same atomic
+        statement closes that gap regardless of exactly when, relative to
+        the revision capture, the proposal lands: whatever the DELETE
+        would have matched on revision/status alone, this additional
+        clause still independently vetoes it while ``promotion_state`` is
+        ``'proposed'`` at the instant the DELETE actually runs. A rowcount
+        of 0 caused by this new clause flows through the exact same
+        ``False`` return / retain-and-report-``copied_source_not_removed``
+        path as every other "changed since expected_revision" cause above
+        — not a new result shape."""
+        with self.database.write() as db:
+            cursor = db.execute(
+                "DELETE FROM memory_items WHERE id=? AND created_by=? "
+                "AND status='confirmed' AND promotion_state NOT IN ('proposed') AND "
+                "(SELECT COALESCE(MAX(revision),0) FROM memory_revisions "
+                " WHERE memory_id=?)=?",
+                (memory_id, user_id, memory_id, expected_revision),
+            )
+        return cursor.rowcount == 1
+
     def bulk_delete_memories(self, user_id: str, memory_ids: Sequence[str]) -> int:
         unique = list(dict.fromkeys(str(m) for m in memory_ids if m))
         if not unique:
@@ -1455,3 +1538,89 @@ class MemoryStore:
                 {"record": self._record(row), "vector": row["retrieval_vector"]},
             )
         return list(rows.values())
+
+    def create_copy_with_initial_revision(
+        self,
+        write: "MemoryWrite",
+        source_memory_id: str,
+        changed_by: str,
+        reason: str,
+        expected_source_revision: "int | None",
+    ) -> MemoryRecord:
+        """把一条已有 memory 复制成 write（新 id/notebook）：单事务建 4 表 + 拷向量。
+
+        source_answer_id 必须为 None（避免 idx_memory_answer_once 撞键）；向量随拷
+        零重嵌入，源无向量则新 item 保持 embedding_status='pending'（服务侧补嵌）。
+
+        PR review round 7 P1-A（拷贝陈旧向量却标 ready）：源当前的
+        ``memory_embeddings`` 行可能相对源当前的 ``memory_items`` 内容是陈旧的
+        ——编辑一条 confirmed memory 的正文会把 ``embedding_status`` 翻回
+        ``'pending'``（``_mutate_with_revision``，只要 ``values`` 非空），但从不
+        触碰/删除旧的 ``memory_embeddings`` 行，那要等到后续的重嵌入任务调用
+        ``replace_embedding`` 才会发生。若一次 transfer 恰好落在「编辑已提交、
+        重嵌入还没跑完」这个窗口，无条件拷贝「此刻存在的那行向量」并标
+        ready，拷的就是旧文本的向量、却配着新文本、且从此永久标着 ready——
+        ``MemoryService.transfer`` 只在 ``copied.embedding_status != "ready"``
+        时才补调度 ``_schedule_embed``，一旦被误标 ready，不会再有任何东西替
+        它重新嵌入。
+
+        因此只有源在**这同一个事务内**被重新确认「此刻确实是就绪状态」才把
+        向量拷走并标 ready：``memory_items.embedding_status == 'ready'`` **且**
+        源当前的 ``memory_revisions`` 最新 revision 等于调用方传入的
+        ``expected_source_revision``（调用方——即 ``MemoryService.transfer``
+        ——早已为收尾的原子删源捕获过这同一个 revision 号，此处原样复用同一
+        判据，不发明第二套；``None`` 与任何真实 revision 都不相等，天然安
+        全失败，与 ``delete_memory_if_unchanged`` 对 ``expected_revision=None``
+        的既有约定一致）。仅有 ``embedding_status=='ready'`` 不够：若源在调用
+        方捕获 revision 之后、这个事务真正运行之前，先后经历「并发编辑
+        （ready→pending）」又「并发重嵌入完成（pending→ready，但对应的是编辑
+        后的新内容）」，此刻的 ready 对应的是比 ``write.content_md``（调用方
+        更早捕获的旧快照）更新的一次修订——revision 号比对能截住这第二类错
+        配，仅查 embedding_status 截不住。两个条件有一个不满足，副本就不拷
+        任何向量、留在 schema 默认的 ``'pending'``——与「源从未有过向量」那
+        条既有分支（``test_create_copy_without_source_vector_stays_pending``）
+        退化成完全相同的形状，服务侧的 ``_schedule_embed`` 兜底照常接管。
+        """
+        with self.database.write() as db:
+            db.execute("BEGIN IMMEDIATE")
+            item, created = self._insert_memory_on(db, write)
+            if item.id != write.id:
+                return item  # 幂等命中已有行（正常不会发生：copy 用全新 id）
+            self._ensure_initial_revision_on(db, item, created, changed_by, reason)
+            source_state = db.execute(
+                "SELECT embedding_status,(SELECT COALESCE(MAX(revision),0) "
+                "FROM memory_revisions WHERE memory_id=?) AS revision "
+                "FROM memory_items WHERE id=?",
+                (source_memory_id, source_memory_id),
+            ).fetchone()
+            source_is_current = (
+                source_state is not None
+                and source_state["embedding_status"] == "ready"
+                and expected_source_revision is not None
+                and int(source_state["revision"]) == int(expected_source_revision)
+            )
+            if source_is_current:
+                vec = db.execute(
+                    "SELECT model, dimension, vector FROM memory_embeddings WHERE memory_id=?",
+                    (source_memory_id,),
+                ).fetchone()
+                if vec is not None:
+                    db.execute(
+                        "INSERT OR REPLACE INTO memory_embeddings "
+                        "(memory_id,model,dimension,vector,updated_at) VALUES (?,?,?,?,?)",
+                        (write.id, vec["model"], vec["dimension"], vec["vector"], self.now()),
+                    )
+                    db.execute(
+                        "UPDATE memory_items SET embedding_status='ready',embedding_error='' "
+                        "WHERE id=?",
+                        (write.id,),
+                    )
+                    item = self._record(
+                        db.execute(
+                            f"SELECT {self._select_columns()} FROM memory_items m "
+                            "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+                            "WHERE m.id=? AND m.created_by=?",
+                            (write.id, write.created_by),
+                        ).fetchone()
+                    )
+        return item

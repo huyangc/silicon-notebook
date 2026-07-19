@@ -2366,6 +2366,29 @@
           "title": "KnowhowTableSummary",
           "type": "object"
         },
+        "KnowhowTransferRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": [
+                "copy",
+                "move"
+              ],
+              "title": "Mode",
+              "type": "string"
+            },
+            "target_notebook_id": {
+              "title": "Target Notebook Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target_notebook_id",
+            "mode"
+          ],
+          "title": "KnowhowTransferRequest",
+          "type": "object"
+        },
         "KnowledgeEdge": {
           "properties": {
             "from_id": {
@@ -2926,6 +2949,44 @@
             }
           },
           "title": "MemoryReviewRequest",
+          "type": "object"
+        },
+        "MemoryTransferRequest": {
+          "additionalProperties": false,
+          "properties": {
+            "extract_kg": {
+              "default": true,
+              "title": "Extract Kg",
+              "type": "boolean"
+            },
+            "memory_ids": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 200,
+              "minItems": 1,
+              "title": "Memory Ids",
+              "type": "array"
+            },
+            "mode": {
+              "enum": [
+                "copy",
+                "move"
+              ],
+              "title": "Mode",
+              "type": "string"
+            },
+            "target_notebook_id": {
+              "title": "Target Notebook Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "memory_ids",
+            "target_notebook_id",
+            "mode"
+          ],
+          "title": "MemoryTransferRequest",
           "type": "object"
         },
         "MemoryUpdate": {
@@ -7127,6 +7188,46 @@
           "summary": "Bulk Delete Memories"
         }
       },
+      "/api/memories/transfer": {
+        "post": {
+          "operationId": "transfer_memories_api_memories_transfer_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryTransferRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Transfer Memories Api Memories Transfer Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Transfer Memories"
+        }
+      },
       "/api/memories/{memory_id}": {
         "delete": {
           "operationId": "delete_memory_api_memories__memory_id__delete",
@@ -9699,6 +9800,66 @@
             }
           },
           "summary": "Download Knowhow Template"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/transfer": {
+        "post": {
+          "operationId": "transfer_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__transfer_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowTransferRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Transfer Knowhow Table Api Notebooks  Notebook Id  Knowhow  Table Id  Transfer Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Transfer Knowhow Table"
         }
       },
       "/api/notebooks/{notebook_id}/knowledge": {

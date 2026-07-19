@@ -22,7 +22,11 @@
  * 权限（PR-2+3 Task 5）：`canEdit`（= notebook 写权限，page.tsx 传
  * `!isReader`）统一门控**全部写入口**——新建表 / 导入表格 / 添加行 / 管理 /
  * 重建投影 / 删除表 / 失败行「重试」。只读成员（canEdit=false）看到纯浏览
- * 视图，一个写按钮都不出现（规格⑦「只读成员可看」）。
+ * 视图，一个写按钮都不出现（规格⑦「只读成员可看」）。唯一例外（C3）：
+ * 「复制/移动到…」不受 canEdit 整体门控——它不写入本笔记本，copy 只需对源
+ * 笔记本有读权限即可，只读成员也能看到并使用（把表复制到自己另有写权限的
+ * 笔记本）；`allowMove={canEdit}` 单独收紧「移动」这一半（会从源删除，需要
+ * 源的写权限），交给 DestinationPicker（C2）据此隐藏移动选项。
  *
  * 编辑入口的分工：建表向导 + 表/列/行管理在 knowhow-manage.tsx；导入向导在
  * knowhow-import.tsx；格子内容编辑浮窗（预览态 KnowhowCellPreview / 编辑态
@@ -38,6 +42,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as R
 import {
   Check,
   ChevronLeft,
+  Copy,
   Download,
   Edit3,
   ListPlus,
@@ -100,6 +105,11 @@ import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
 import { KnowhowMarkdown, KnowhowCellPreview, KnowhowCellEditor } from "./knowhow-cell-editor.tsx";
 import { KnowhowCodeChip, KnowhowCodeModal } from "./knowhow-code.tsx";
 import { KnowhowMatrixDrawer } from "./knowhow-matrix-drawer.tsx";
+// C3：表级「复制/移动到…」——目标笔记本选择器是 C2 的共享组件（同一层 UI 也
+// 服务 Memory 的 C4），网络客户端与其 409 source_cleanup_failed 专用错误类型
+// 在 knowhow-transfer.ts（纯 fetch 封装，无 JSX，见该文件头注释）。
+import { DestinationPicker } from "./transfer-picker.tsx";
+import { transferKnowhowTable, KnowhowSourceCleanupError } from "./knowhow-transfer.ts";
 import { resolveCellCodeView, CODE_STATUS_LOAD_ERROR } from "./knowhow-code-logic.ts";
 import {
   ACCEPT_SUGGESTION_LABEL,
@@ -165,6 +175,17 @@ export function KnowhowPanel({
   const [importOpen, setImportOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
+  // C3：「复制/移动到…」目标笔记本选择器（DestinationPicker）显隐——与
+  // manageOpen 同级的顶层 modal 状态，挂载点见 render 尾部。
+  const [transferOpen, setTransferOpen] = useState(false);
+  // 复审 Minor：复制成功的轻量提示——move 靠 backToList()+ 表列表刷新已自证
+  // 成功，copy 源视图不变、目标又不在眼前，不给提示用户没法确认"复制到底有
+  // 没有效果"。复用 jumpNotice 同一套 .knowhow-jump-notice 视觉(信息蓝，不新
+  // 造 chrome)，但用独立 state 而不是接了 jumpNotice 本身——理由同
+  // conceptDrawerError 与 actionError 分开维护的理由一样：两件事互不相关时不
+  // 该互相覆盖(比如打开一张有陈旧引用提示的表、随手又复制了一次，两条提示不
+  // 该互吃)。
+  const [transferNotice, setTransferNotice] = useState<string | null>(null);
   // Task 9：追加导入向导显隐 + 模板下载进行中标记（工具栏「下载模板」按钮
   // 自身的 loading 态，不走 actionError/detailError 那一套整表级错误）。
   const [appendOpen, setAppendOpen] = useState(false);
@@ -362,6 +383,7 @@ export function KnowhowPanel({
     setHighlightRowId(null); // Task 11：与 openConceptValue 并列一并清空
     setConfirmDelete(false);
     setManageOpen(false);
+    setTransferOpen(false); // C3：与 manageOpen 同级的顶层 modal 状态，一并清空
     setCreateOpen(false);
     setAppendOpen(false);
     setOptimizeRowId(null);
@@ -439,6 +461,7 @@ export function KnowhowPanel({
     setDetail(null);
     setDetailError(null);
     setActionError(null);
+    setTransferNotice(null);
     setQuery("");
     setOpenRowId(null);
     setCellModal(null);
@@ -452,6 +475,7 @@ export function KnowhowPanel({
     setHighlightRowId(null); // Task 11：与 openConceptValue 并列一并清空
     setConfirmDelete(false);
     setManageOpen(false);
+    setTransferOpen(false); // C3：与 manageOpen 同级的顶层 modal 状态，一并清空
     setAppendOpen(false);
     setOptimizeRowId(null);
     setCodeModal(null);
@@ -462,6 +486,7 @@ export function KnowhowPanel({
     setDetail(null);
     setDetailError(null);
     setActionError(null);
+    setTransferNotice(null);
     setQuery("");
     setOpenRowId(null);
     setCellModal(null);
@@ -469,6 +494,7 @@ export function KnowhowPanel({
     setHighlightRowId(null); // Task 11：与 openConceptValue 并列一并清空
     setConfirmDelete(false);
     setManageOpen(false);
+    setTransferOpen(false); // C3：与 manageOpen 同级的顶层 modal 状态，一并清空
     setAppendOpen(false);
     setOptimizeRowId(null);
     setCodeModal(null);
@@ -935,6 +961,15 @@ export function KnowhowPanel({
         </div>
       )}
 
+      {transferNotice && (
+        <div className="knowhow-jump-notice">
+          <span>{transferNotice}</span>
+          <button type="button" onClick={() => setTransferNotice(null)} title="关闭">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+
       <div className="knowhow-view-body">
         {selectedTableId === null ? (
           <KnowhowTableList
@@ -970,6 +1005,12 @@ export function KnowhowPanel({
             onRetryReproject={retryReproject}
             retryingReproject={retryingReproject}
             onOpenManage={() => setManageOpen(true)}
+            onTransfer={() => {
+              // 复审 Minor：重开弹窗前清掉上一次的成功提示，避免旧提示在新一
+              // 轮操作进行时继续挂在屏幕上造成误导。
+              setTransferNotice(null);
+              setTransferOpen(true);
+            }}
             onAddRow={addRow}
             addingRow={addingRow}
             onAddConcept={addConcept}
@@ -1106,6 +1147,77 @@ export function KnowhowPanel({
           detail={detail}
           onClose={() => setManageOpen(false)}
           onChanged={handleManageChanged}
+        />
+      )}
+
+      {/* C3：「复制/移动到…」——不像 manageOpen 那样再加 canEdit 门：copy 只需
+          对源笔记本有读权限，只读成员也该能把表复制到自己有写权限的另一个
+          笔记本（工具栏按钮同理不整体挂在 canEdit 下，见 KnowhowTableGrid）。
+          真正的权限边界收在 allowMove——只有可写源才允许挑「移动」，交给
+          DestinationPicker 内部据此隐藏移动单选项，与后端 source_check 的
+          copy/move 分支（routes.py transfer_knowhow_table）对齐。 */}
+      {transferOpen && detail && (
+        <DestinationPicker
+          sourceNotebookId={notebookId}
+          allowMove={canEdit}
+          title={`复制/移动表：${detail.title}`}
+          onCancel={() => setTransferOpen(false)}
+          onSubmit={async (targetNotebookId, mode) => {
+            try {
+              await transferKnowhowTable(notebookId, detail.id, targetNotebookId, mode);
+            } catch (err) {
+              if (err instanceof KnowhowSourceCleanupError) {
+                // 复制已提交、源清理（拆投影/删源表）失败：副本已在目标落地，
+                // 源表还在——绝不能让这个异常落回 DestinationPicker 自己的
+                // catch（那会把「确认」按钮重新点亮，诱导用户用同一个 move
+                // 流程重试，只会在目标又堆一份重复副本，见 knowhow-transfer.ts
+                // 头部注释）。这里就地吞掉、正常 resolve（不 throw）——
+                // DestinationPicker.submit 只在 onSubmit 抛出时才回到它自己的
+                // 错误态并解开 busy 锁；resolve 意味着它保持 busy、把「何时
+                // 关」交还给调用方，本分支紧接着自己 setTransferOpen(false)
+                // 促成卸载（同 onSubmit 头注释的既定协议）。把这条消息改浮到
+                // 表级 actionError 横幅——源表仍是当前打开的这张，用户能直接看到。
+                //
+                // round 10 P1-A：下一步该怎么做，不再由这里替用户下判断——
+                // err.message 是后端按 SourceCleanupFailed.reason 分两种成因
+                // 各自写好的人话文案（见 transfer.py 该类的文档字符串）：
+                // "source_cleanup_failed" 时源确实原封未动，走既有的「删除表」
+                // 入口手动清理是安全的；"source_changed_kept" 时源是被有意保留
+                // 下来保护一份并发编辑的，走「删除表」会连带永久丢失它——这条
+                // 消息本身已经把正确的下一步讲清楚了（核对目标里的旧副本/重新
+                // 发起搬迁，别删源），这里只管原样显示，不能再补一句通用的
+                // "可以安全删除源表"，那对第二种成因是错的。
+                setTransferOpen(false);
+                setActionError(err.message);
+                loadDetail(detail.id);
+                loadTables();
+                return;
+              }
+              throw err; // 其它错误：什么都没发生，交回 picker 自己的错误态+可重试
+            }
+            // 复审 Carried minor C3-1：成功路径顶部清空 actionError——这个文件
+            // 里其余每个动作 handler 都在起手处清空这条横幅，传输成功路径此前
+            // 漏了。move 靠紧接着的 backToList() 顺带清掉，但 copy 没有等价的
+            // 副作用：若表上原本挂着一条陈旧的 actionError（比如上次删除行失败
+            // 留下的），一次成功的复制之后它会继续显示，用户会误以为这次操作
+            // 也失败了。
+            setActionError(null);
+            setTransferOpen(false);
+            if (mode === "move") {
+              // 移动成功：源表已被后端删除，留在原地会看到一张不存在的表——
+              // 回到表列表并刷新。backToList 是既有的选中态清空函数，一并清掉
+              // openRowId/cellModal 等一整套顶层弹层态（不止 selectedTableId
+              // 一项），避免遗留指向已删表的行抽屉/格子浮窗。
+              backToList();
+              loadTables();
+            } else {
+              // 复审 Minor：copy 成功没有任何自然可见的反馈——源表原样不动，
+              // 目标笔记本又不在当前视野里，用户点了「确认」之后除了 modal
+              // 关闭，看不出到底发生没发生。补一条轻量提示，复用既有的
+              // jumpNotice 视觉(informational，非错误色调)。
+              setTransferNotice("已复制到目标笔记本");
+            }
+          }}
         />
       )}
 
@@ -2941,6 +3053,7 @@ function KnowhowTableGrid({
   onRetryReproject,
   retryingReproject,
   onOpenManage,
+  onTransfer,
   onAddRow,
   addingRow,
   onAddConcept,
@@ -2976,6 +3089,12 @@ function KnowhowTableGrid({
   onRetryReproject: () => void;
   retryingReproject: boolean;
   onOpenManage: () => void;
+  /** C3「复制/移动到…」：打开目标笔记本选择器（DestinationPicker）。与
+   * onOpenManage 同一模式——面板自持 modal 显隐态，这里只负责打开。不像
+   * 其余写入口那样整体挂在 canEdit 门内：copy 只需对源笔记本有读权限，只读
+   * 成员也该看到这个按钮（能复制、不能移动），故渲染处单独处理，见下方
+   * JSX。 */
+  onTransfer: () => void;
   onAddRow: () => void;
   addingRow: boolean;
   /** Task 10（加概念）：主网格底部「+ 概念」——只在有 anchor 列（分组视图）
@@ -3013,83 +3132,106 @@ function KnowhowTableGrid({
           <h3 title={detail?.title}>{detail?.title ?? ""}</h3>
           {detail?.description && <p>{detail.description}</p>}
         </div>
-        {/* 全部写入口（添加行/下载模板/追加导入/管理/重建投影/删除表）只对
-            canEdit 出现；只读成员的工具栏只剩返回与标题（规格⑦）。 */}
-        {canEdit && (
-          <div className="knowhow-grid-toolbar-actions">
-            <button
-              type="button"
-              className="sort-button knowhow-reproject-button"
-              onClick={onAddRow}
-              disabled={addingRow || deleting || !detail}
-              title="在表末尾添加一行"
-            >
-              <ListPlus size={14} />
-              {addingRow ? "添加中…" : "添加行"}
-            </button>
-            {/* 「下载模板」+「追加导入」（Task 9，规格②路B）：前者按当前表头
-                下载 xlsx 模板供线下批量填写，后者把填好的文件追加导入回这
-                张表——两个入口紧邻，模板下载天然是追加导入的前置步骤。 */}
-            <button
-              type="button"
-              className="sort-button knowhow-reproject-button"
-              onClick={onDownloadTemplate}
-              disabled={!detail || templateDownloading}
-              title="按当前表头下载 Excel 模板，线下批量填写"
-            >
-              {templateDownloading ? <Loader2 size={14} className="knowhow-spin" /> : <Download size={14} />}
-              {templateDownloading ? "下载中…" : "下载模板"}
-            </button>
-            <button
-              type="button"
-              className="sort-button knowhow-reproject-button"
-              onClick={onAppendClick}
-              disabled={!detail || deleting}
-              title="从填好的 Excel/CSV/Markdown 追加导入行"
-            >
-              <Upload size={14} />
-              追加导入
-            </button>
-            <button
-              type="button"
-              className="sort-button knowhow-reproject-button"
-              onClick={onOpenManage}
-              disabled={!detail || deleting}
-              title="表信息、行标题列、列与行管理"
-            >
-              <Settings2 size={14} />
-              管理
-            </button>
-            {/* 表级「重建投影」逃生口(spec 要求)：整表重投影，后台执行。区别于
-                失败行徽标上的行内「重试」——那只在某行 failed 时出现，这个入口
-                任何时候都在，供用户在整表走样时一键重建。进行中禁用防重复触发。 */}
-            <button
-              type="button"
-              className="sort-button knowhow-reproject-button"
-              onClick={onRetryReproject}
-              disabled={retryingReproject || deleting || !detail}
-              title="重新同步整张表（后台执行）"
-            >
-              <RefreshCw size={14} className={retryingReproject ? "knowhow-spin" : undefined} />
-              {retryingReproject ? "重建中…" : "重新同步"}
-            </button>
-            {confirmDelete ? (
-              <span className="knowhow-confirm">
-                <span>删除这张表？行、格与同步生成的内容将一并删除</span>
-                <button type="button" className="knowhow-confirm-yes" disabled={deleting} onClick={onConfirmDelete}>
-                  {deleting ? "删除中…" : "确认删除"}
-                </button>
-                <button type="button" className="knowhow-confirm-no" onClick={onCancelDelete}>
-                  取消
-                </button>
-              </span>
-            ) : (
-              <button type="button" className="icon-button" title="删除表" onClick={onRequestDelete}>
-                <Trash2 size={18} />
+        {/* 添加行/下载模板/追加导入/管理/重建投影/删除表——这些写入口只对
+            canEdit 出现；只读成员的工具栏在返回与标题之外，只剩下面
+            「复制/移动到…」一个入口（规格⑦的例外，C3）：它不写入
+            本笔记本——copy 只需对源笔记本有读权限，只读成员也该能把表复制到
+            自己有写权限的另一个笔记本；真正的写权限边界（能否「移动」=会从
+            源删除）收在 allowMove={canEdit}，由 DestinationPicker 内部据此
+            隐藏移动单选项，与后端 source_check 的 copy/move 分支对齐。 */}
+        <div className="knowhow-grid-toolbar-actions">
+          {canEdit && (
+            <>
+              <button
+                type="button"
+                className="sort-button knowhow-reproject-button"
+                onClick={onAddRow}
+                disabled={addingRow || deleting || !detail}
+                title="在表末尾添加一行"
+              >
+                <ListPlus size={14} />
+                {addingRow ? "添加中…" : "添加行"}
               </button>
-            )}
-          </div>
-        )}
+              {/* 「下载模板」+「追加导入」（Task 9，规格②路B）：前者按当前表头
+                  下载 xlsx 模板供线下批量填写，后者把填好的文件追加导入回这
+                  张表——两个入口紧邻，模板下载天然是追加导入的前置步骤。 */}
+              <button
+                type="button"
+                className="sort-button knowhow-reproject-button"
+                onClick={onDownloadTemplate}
+                disabled={!detail || templateDownloading}
+                title="按当前表头下载 Excel 模板，线下批量填写"
+              >
+                {templateDownloading ? <Loader2 size={14} className="knowhow-spin" /> : <Download size={14} />}
+                {templateDownloading ? "下载中…" : "下载模板"}
+              </button>
+              <button
+                type="button"
+                className="sort-button knowhow-reproject-button"
+                onClick={onAppendClick}
+                disabled={!detail || deleting}
+                title="从填好的 Excel/CSV/Markdown 追加导入行"
+              >
+                <Upload size={14} />
+                追加导入
+              </button>
+              <button
+                type="button"
+                className="sort-button knowhow-reproject-button"
+                onClick={onOpenManage}
+                disabled={!detail || deleting}
+                title="表信息、行标题列、列与行管理"
+              >
+                <Settings2 size={14} />
+                管理
+              </button>
+            </>
+          )}
+          {/* C3：「复制/移动到…」——唯一一个不整体挂在 canEdit 门内的表级
+              动作，紧邻「管理」，理由见上方容器注释。 */}
+          <button
+            type="button"
+            className="sort-button knowhow-reproject-button"
+            onClick={onTransfer}
+            disabled={!detail || deleting}
+            title="把这张表复制或移动到另一个笔记本"
+          >
+            <Copy size={14} />
+            复制/移动到…
+          </button>
+          {canEdit && (
+            <>
+              {/* 表级「重建投影」逃生口(spec 要求)：整表重投影，后台执行。区别于
+                  失败行徽标上的行内「重试」——那只在某行 failed 时出现，这个入口
+                  任何时候都在，供用户在整表走样时一键重建。进行中禁用防重复触发。 */}
+              <button
+                type="button"
+                className="sort-button knowhow-reproject-button"
+                onClick={onRetryReproject}
+                disabled={retryingReproject || deleting || !detail}
+                title="重新同步整张表（后台执行）"
+              >
+                <RefreshCw size={14} className={retryingReproject ? "knowhow-spin" : undefined} />
+                {retryingReproject ? "重建中…" : "重新同步"}
+              </button>
+              {confirmDelete ? (
+                <span className="knowhow-confirm">
+                  <span>删除这张表？行、格与同步生成的内容将一并删除</span>
+                  <button type="button" className="knowhow-confirm-yes" disabled={deleting} onClick={onConfirmDelete}>
+                    {deleting ? "删除中…" : "确认删除"}
+                  </button>
+                  <button type="button" className="knowhow-confirm-no" onClick={onCancelDelete}>
+                    取消
+                  </button>
+                </span>
+              ) : (
+                <button type="button" className="icon-button" title="删除表" onClick={onRequestDelete}>
+                  <Trash2 size={18} />
+                </button>
+              )}
+            </>
+          )}
+        </div>
       </div>
 
       {actionError && (

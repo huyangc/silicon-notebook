@@ -1373,3 +1373,430 @@ def test_get_scheduler_entry_does_not_pin_repo(repo_factory):
     # A late-firing debounced run against the collected repo is a no-op, not
     # an explosion: project_fn resolves its weakref per run.
     scheduler._project_fn("table-anything")
+
+
+# ---------------------------------------------------------------------------
+# P1-2 (PR review, cross-notebook move/copy): a concurrent teardown landing
+# mid-project_table must not let the terminal KO/relation write commit
+# orphans against a table/hidden source a racing move (or the plain DELETE
+# route — same exposure, same fix) already tore down. knowledge_objects.
+# source_id carries no FK to sources, so nothing else stops that write from
+# landing; the subsequent bump_knowhow_mutation_seq raises KeyError once the
+# table row is gone, but only AFTER the orphans below are already committed
+# — that secondary symptom is not what this test is about.
+# ---------------------------------------------------------------------------
+
+
+def test_project_table_skips_terminal_write_when_table_deleted_mid_pass(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """Deterministic interleaving reproducing the race: every row this pass
+    has finished its own structural+embed work (in production this window is
+    typically "parked in embedding" — a network-bound call several rows in)
+    when a concurrent move lands, mirroring move_table's own ordering exactly
+    (teardown-before-row-delete) — it just happens to land BEFORE this
+    already-in-flight project_table pass reaches ITS OWN terminal write,
+    instead of strictly before or after the whole call.
+
+    Anchor-only row (no other column filled) deliberately produces a KO with
+    ZERO edges (test_row_title_cell_gets_no_self_edge's own shape) so this
+    isolates the exact exposure the review flagged: knowledge_objects.
+    source_id carries no FK, so insert_object_chunk commits the orphan
+    cleanly inside the transaction; a row that also produced an edge would
+    instead hit knowledge_relations.source_id's REFERENCES sources(id) FK
+    and roll the whole transaction back (see the edges variant below) — a
+    different, also-real symptom, but not the silent-ghost-data one."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
+    hidden_source_id = projector.ensure_hidden_source(table_id)
+
+    real_set_status = store.set_knowhow_row_projection
+
+    def _concurrent_move_after_last_row(row_id, status):
+        real_set_status(row_id, status)
+        if status in ("synced", "failed"):  # the per-row loop's terminal call
+            projector.delete_table_projection(hidden_source_id)
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+
+    monkeypatch.setattr(
+        store, "set_knowhow_row_projection", _concurrent_move_after_last_row
+    )
+
+    try:
+        projector.project_table(table_id)
+    except KeyError:
+        pass  # pre-fix: bump_knowhow_mutation_seq on the now-gone table_id
+
+    with repo._connect() as db:
+        orphaned_kos = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?",
+            (hidden_source_id,),
+        ).fetchone()["c"]
+    assert orphaned_kos == 0
+    # The guard must SKIP the write, not resurrect anything the concurrent
+    # move already deleted.
+    with pytest.raises(KeyError):
+        repo._runtime.knowhow_store.get_knowhow_table(table_id)
+
+
+def test_project_table_does_not_crash_with_integrity_error_when_source_deleted_mid_pass(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """Edges variant of the same race: with an about-edge in play, pre-fix
+    the terminal write's insert_object_chunk succeeds (no FK) but the
+    following insert_relation_chunk hits knowledge_relations.source_id's FK
+    against the now-deleted hidden source and raises — an uncaught
+    sqlite3.IntegrityError escaping project_table entirely (the whole
+    terminal transaction rolls back, so no orphan here, but a background
+    projection job blowing up on a raw IntegrityError is still a real,
+    distinct symptom of the same missing existence check). The guard must
+    turn this into a clean, silent no-op skip instead."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
+    })
+    hidden_source_id = projector.ensure_hidden_source(table_id)
+
+    real_set_status = store.set_knowhow_row_projection
+
+    def _concurrent_move_after_last_row(row_id, status):
+        real_set_status(row_id, status)
+        if status in ("synced", "failed"):
+            projector.delete_table_projection(hidden_source_id)
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+
+    monkeypatch.setattr(
+        store, "set_knowhow_row_projection", _concurrent_move_after_last_row
+    )
+
+    projector.project_table(table_id)  # must not raise
+
+    with repo._connect() as db:
+        orphaned_kos = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?",
+            (hidden_source_id,),
+        ).fetchone()["c"]
+        orphaned_relations = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_relations WHERE source_id=?",
+            (hidden_source_id,),
+        ).fetchone()["c"]
+    assert orphaned_kos == 0
+    assert orphaned_relations == 0
+    with pytest.raises(KeyError):
+        repo._runtime.knowhow_store.get_knowhow_table(table_id)
+
+
+def test_project_table_proceeds_normally_when_nothing_concurrent_happens(
+    repo, projector, table_id, embedder
+):
+    """Companion happy-path guard: the new existence re-check must not turn
+    project_table into a no-op on the ordinary, uncontended pass — the KOs
+    for a still-live table must still land."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
+    })
+
+    projector.project_table(table_id)
+
+    counts = _table_object_type_counts(repo, table_id)
+    assert counts.get("违例类型") == 1
+    assert counts.get("修复方法") == 1
+    assert repo._runtime.knowhow_store.get_knowhow_table(table_id)["mutation_seq"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# P1-1 (PR review ROUND 2): the existence guard the two tests above cover
+# (round-1's P1-2) closed the "delete lands mid-per-row-pass" window, but the
+# guard itself was added as a plain check-then-act: `table_exists`/
+# `source_exists` ran via `self.database.connect()` strictly BEFORE
+# `self.database.write()` ever acquired the write lock for the terminal
+# section, leaving an unprotected gap between "checked: still there" and
+# "actually holding the lock that would block a concurrent delete". A move
+# landing in exactly that gap sails straight through: the check observed
+# True/True, and the terminal INSERT then commits knowledge_objects/relations
+# against a table/hidden source that is — by the time the INSERT runs —
+# already gone. The fix moves the check inside the SAME `with self.database.
+# write() as db:` block that does the deletes/inserts, on the SAME
+# connection, so "checked" and "wrote" become one atomic unit (the block
+# holds write_lock continuously for its whole duration, and any concurrent
+# delete_knowhow_table/delete_table_projection needs its OWN write() call, so
+# it cannot land inside that window at all).
+# ---------------------------------------------------------------------------
+
+
+def test_project_table_existence_check_and_terminal_write_are_atomic(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """Deterministic interleaving reproducing the TOCTOU: a concurrent move
+    (teardown-then-delete, the same order move_table itself uses) is injected
+    at the exact instant `project_table` is about to open its TERMINAL
+    `database.write()` call — i.e. after the per-row loop's last status write
+    (same hook point the two tests above use) but before the write lock for
+    the terminal section is acquired. Pre-fix, the existence check upstream
+    of that `write()` call has already run (against the still-live state)
+    and never runs again, so the terminal write proceeds and commits an
+    orphan.
+
+    The hook sits on `database.write` itself rather than on `table_exists`/
+    `source_exists`: the fix changes those calls to a different shape
+    entirely (tx-scoped, called on the connection the write() block hands
+    back), so a hook on the old check methods would simply go unexercised
+    once the fix lands — this test would then pass for the wrong reason
+    (dead injection) instead of proving the check-then-write pair is now
+    atomic. Hooking the lock-acquisition entry point itself stays meaningful
+    on both sides of the fix."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
+    hidden_source_id = projector.ensure_hidden_source(table_id)
+
+    real_set_status = store.set_knowhow_row_projection
+    state = {"last_row_done": False, "injected": False}
+
+    def _mark_last_row(row_id, status):
+        real_set_status(row_id, status)
+        if status in ("synced", "failed"):  # the per-row loop's terminal call
+            state["last_row_done"] = True
+
+    monkeypatch.setattr(store, "set_knowhow_row_projection", _mark_last_row)
+
+    from contextlib import contextmanager
+
+    database = projector.database
+    real_write = database.write
+
+    @contextmanager
+    def _write_with_race_before_terminal_section():
+        if state["last_row_done"] and not state["injected"]:
+            state["injected"] = True
+            # 并发 move 恰好卡在"最后一行状态已落地"和"这次 write() 真正拿到
+            # 写锁"之间完整跑完——旧代码的 existence 检查在这次 write() 调用
+            # 之前就已经跑完并放行了，这里注入进去才是那个未受保护的窗口。
+            projector.delete_table_projection(hidden_source_id)
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+        with real_write() as db:
+            yield db
+
+    monkeypatch.setattr(database, "write", _write_with_race_before_terminal_section)
+
+    try:
+        projector.project_table(table_id)
+    except KeyError:
+        pass  # pre-fix secondary symptom: bump_knowhow_mutation_seq on the now-gone table_id
+
+    assert state["injected"], "race hook never fired — test setup is broken"
+    with repo._connect() as db:
+        orphaned_kos = db.execute(
+            "SELECT COUNT(*) c FROM knowledge_objects WHERE source_id=?",
+            (hidden_source_id,),
+        ).fetchone()["c"]
+    assert orphaned_kos == 0
+    with pytest.raises(KeyError):
+        repo._runtime.knowhow_store.get_knowhow_table(table_id)
+
+
+# ---------------------------------------------------------------------------
+# PR review round 7 P2-A: ensure_hidden_source creation+attach atomicity
+# ---------------------------------------------------------------------------
+#
+# ensure_hidden_source used to insert the sources row (self.sources.
+# insert_source) and attach it back onto the table (self.knowhow.
+# set_knowhow_hidden_source) in TWO separate database.write() transactions.
+# The round-6 orphan sweep (KnowhowTransferStore.orphaned_knowhow_source_ids
+# — every source_type='knowhow' row in a notebook unreferenced by any
+# knowhow_tables.hidden_source_id, run at the end of every move_table) has no
+# way to distinguish "a legitimately in-flight brand-new source, one
+# statement away from being attached" from "an actual orphan a torn-down
+# move left behind" — both look identical to that query (a knowhow-typed
+# source with nothing pointing at it yet). A sweep landing in the gap
+# between the two writes would delete a LIVE source belonging to a
+# DIFFERENT table's concurrent first projection; that projection then fails
+# on FK when it goes to write elements (self-heals on the next projection
+# pass — ensure_hidden_source re-mints a replacement — but is still
+# observably wrong in between: a dropped source, an FK crash, and a
+# temporarily broken projection for something that did nothing wrong).
+#
+# This test hooks database.write itself — same monkeypatch shape as this
+# file's own test_project_table_existence_check_and_terminal_write_are_
+# atomic above — rather than pinning an exact call count: it runs the REAL
+# orphan-sweep query after EVERY write() transaction ensure_hidden_source
+# opens and records what it finds. That generalizes across both the pre-fix
+# two-transaction shape (creation and attach are two separate write() calls
+# — the sweep run between them finds the freshly-created, not-yet-attached
+# source) and the post-fix one-transaction shape (creation and attach commit
+# together — the sweep never has a boundary to land on where the source
+# exists but isn't referenced yet), instead of asserting "database.write is
+# called exactly once" (an implementation detail the fix doesn't actually
+# require — a caller-supplied `connection=` still shares one real SQLite
+# transaction even if some future refactor added more no-op write() calls
+# elsewhere in the same request). Local `from contextlib import
+# contextmanager` (not module-level) so this addition doesn't shift the
+# file's own line-pinned `from app.services.sqlite_repository import
+# SQLiteRepository` at line 24 (TASK5_KNOWHOW_ALLOWED_IMPORTS in
+# test_repository_surface_manifest.py) — same zero-line-shift convention as
+# every other addition in this file, and the same reason
+# test_snapshot_table_is_internally_consistent_under_concurrent_insert in
+# test_knowhow_transfer_store.py uses a local import too. Appended at EOF.
+def test_ensure_hidden_source_creation_and_attach_are_atomic(
+    repo, projector, table_id, notebook_id, monkeypatch
+):
+    from contextlib import contextmanager
+
+    transfer_store = repo._runtime.knowhow_transfer_store
+    database = projector.database
+    real_write = database.write
+    observed_after_each_write: list[list[str]] = []
+
+    @contextmanager
+    def _write_then_sweep():
+        with real_write() as db:
+            yield db
+        # 这次 write() 事务已经提交——此刻孤儿扫描（round 6 move_table 收尾用
+        # 的同一条查询）能看到什么。
+        observed_after_each_write.append(
+            transfer_store.orphaned_knowhow_source_ids(notebook_id)
+        )
+
+    monkeypatch.setattr(database, "write", _write_then_sweep)
+
+    source_id = projector.ensure_hidden_source(table_id)
+
+    assert observed_after_each_write, "hook 从未真正触发任何 write()，测试前置条件不成立"
+    assert all(orphans == [] for orphans in observed_after_each_write), (
+        "ensure_hidden_source 期间至少有一次 write() 事务提交之后，孤儿扫描"
+        "能看到刚创建、但还没有任何表引用的隐藏源——创建和挂载不是原子的一"
+        f"步，中间这个窗口里源是可观察的「未引用」状态：{observed_after_each_write}"
+    )
+    assert (
+        repo._runtime.knowhow_store.get_knowhow_table(table_id)["hidden_source_id"]
+        == source_id
+    )
+
+
+# ---------------------------------------------------------------------------
+# PR review round 8 P1-A: ensure_hidden_source must fail (not just "be
+# atomic") when attaching to a table a concurrent move already tore down.
+# ---------------------------------------------------------------------------
+#
+# Round 7 made creation+attach ONE database.write() transaction — the test
+# above proves the orphan sweep can no longer observe a source that exists
+# but isn't referenced yet. That closed the "torn between two commits"
+# window, but left a DIFFERENT one open: a projection that read the table
+# BEFORE a concurrent move deleted it (get_knowhow_table's own row) can
+# still be parked mid-ensure_hidden_source when the move's full teardown —
+# delete_table_projection + delete_knowhow_table, THEN the move's one-shot
+# orphan sweep (KnowhowTransferStore.orphaned_knowhow_source_ids, run once
+# at the end of move_table) — runs to completion. When the parked call
+# resumes, KnowhowStore.set_knowhow_hidden_source's UPDATE
+# (`...WHERE id=table_id`) matches ZERO rows: SQLite does not raise on a
+# no-op UPDATE. Pre-fix, the SIBLING insert_source call in that same
+# transaction still commits — an unreferenced, permanently orphaned
+# source_type='knowhow' row, born AFTER the one sweep that could have
+# caught it already ran, so nothing will ever clean it up.
+#
+# The fix scopes the new invariant to set_knowhow_hidden_source's
+# connection= path only (the one ensure_hidden_source uses to join its own
+# transaction) — the public, no-connection form keeps its existing
+# tolerant zero-row behavior verbatim for its other callers (grepped:
+# test_knowhow_store.py's three direct calls all target a table that
+# exists at call time; nothing depends on the old silently-tolerant
+# behavior for a GONE table_id).
+def test_ensure_hidden_source_raises_and_commits_nothing_when_table_deleted_before_attach(
+    repo, projector, table_id, notebook_id, monkeypatch
+):
+    """Direct unit test on ensure_hidden_source itself: hook database.write
+    so the FIRST call — the one ensure_hidden_source opens to insert_source
+    + set_knowhow_hidden_source — is preceded by a full concurrent
+    teardown of table_id, mirroring exactly the delete_knowhow_table call
+    this file's own test_project_table_skips_terminal_write_when_table_
+    deleted_mid_pass above uses for the same kind of race (this table has
+    never been projected, so there is no prior hidden source to tear down
+    first)."""
+    from contextlib import contextmanager
+
+    database = projector.database
+    real_write = database.write
+    state = {"raced": False}
+
+    @contextmanager
+    def _write_with_concurrent_delete_before_attach():
+        if not state["raced"]:
+            state["raced"] = True
+            # 并发 move 的完整拆除，恰好卡在 ensure_hidden_source 判定"需要
+            # 新建源"之后、这次 write() 真正拿到写锁之前完整跑完（现实中的
+            # 窗口通常是"卡在 new_id()/调度延迟"，这里用 monkeypatch 精确
+            # 复现同一个可观察后果）。
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+        with real_write() as db:
+            yield db
+
+    monkeypatch.setattr(database, "write", _write_with_concurrent_delete_before_attach)
+
+    with pytest.raises(KeyError):
+        projector.ensure_hidden_source(table_id)
+
+    assert state["raced"], "race hook never fired — test setup is broken"
+    with repo._connect() as db:
+        orphaned_sources = db.execute(
+            "SELECT COUNT(*) c FROM sources WHERE notebook_id=? AND source_type='knowhow'",
+            (notebook_id,),
+        ).fetchone()["c"]
+    assert orphaned_sources == 0, (
+        "set_knowhow_hidden_source 的 UPDATE 在表已经不存在时匹配零行——若不报错，"
+        "同一事务里 insert_source 的 INSERT 仍会提交：一个永久孤儿，且已经错过了"
+        "move 收尾那唯一一次孤儿扫描窗口，从此不会被任何东西清理"
+    )
+
+
+def test_project_table_writes_nothing_when_table_deleted_before_hidden_source_attach(
+    repo, projector, table_id, notebook_id, monkeypatch
+):
+    """Companion to the direct test above, observed through project_table's
+    own entry point instead of calling ensure_hidden_source directly: proves
+    the per-row element/chunk writes are UNREACHABLE once ensure_hidden_
+    source raises — project_table must abort exactly as cleanly as it
+    already does when get_knowhow_table itself raises at the very top (see
+    this file's existing coverage of that path), not partially write from
+    its now-stale in-memory `table` snapshot."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
+
+    from contextlib import contextmanager
+
+    database = projector.database
+    real_write = database.write
+    state = {"raced": False}
+
+    @contextmanager
+    def _write_with_concurrent_delete_before_attach():
+        if not state["raced"]:
+            state["raced"] = True
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+        with real_write() as db:
+            yield db
+
+    monkeypatch.setattr(database, "write", _write_with_concurrent_delete_before_attach)
+
+    with pytest.raises(KeyError):
+        projector.project_table(table_id)
+
+    assert state["raced"], "race hook never fired — test setup is broken"
+    with repo._connect() as db:
+        orphaned_sources = db.execute(
+            "SELECT COUNT(*) c FROM sources WHERE notebook_id=? AND source_type='knowhow'",
+            (notebook_id,),
+        ).fetchone()["c"]
+        element_count = db.execute("SELECT COUNT(*) c FROM source_elements").fetchone()["c"]
+        chunk_count = db.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
+    assert orphaned_sources == 0
+    assert element_count == 0, (
+        "per-row element write must be unreachable once ensure_hidden_source raises"
+    )
+    assert chunk_count == 0, (
+        "per-row chunk write must be unreachable once ensure_hidden_source raises"
+    )

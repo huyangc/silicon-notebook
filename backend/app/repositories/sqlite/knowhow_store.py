@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Callable, Sequence
 
 from app.repositories.sqlite.database import SqliteDatabase
@@ -408,6 +409,44 @@ class KnowhowStore:
             ],
         }
 
+    def table_exists(self, table_id: str) -> bool:
+        """Cheap existence probe (a single ``SELECT 1``, not the full
+        columns/rows/cells hydration ``get_knowhow_table`` does) — for a
+        caller that only needs to know whether the row is still there, e.g.
+        ``KnowhowProjector.project_table``'s pre-terminal-write re-check
+        guarding against a concurrent ``delete_knowhow_table`` (a move or a
+        plain delete) landing mid-pass."""
+        with self.database.connect() as db:
+            return db.execute(
+                "SELECT 1 FROM knowhow_tables WHERE id = ?", (table_id,)
+            ).fetchone() is not None
+
+    @staticmethod
+    def table_exists_tx(connection: sqlite3.Connection, table_id: str) -> bool:
+        """Same probe as ``table_exists``, but against a caller-supplied
+        connection instead of opening its own ``database.connect()`` —
+        mirrors ``KnowledgeStore``'s tx-scoped statics (e.g.
+        ``delete_relations_by_source``). For a caller that must check-then-
+        write atomically inside its OWN ``database.write()`` block, so the
+        check and the write share one lock-held transaction with no gap a
+        concurrent delete could land in.
+
+        PR review round 2 P1-1: ``project_table``'s terminal existence guard
+        used to call ``table_exists``/``source_exists`` BEFORE opening its
+        ``database.write()`` block — a real check-then-act gap (a concurrent
+        move's ``delete_knowhow_table`` could land between the check
+        returning True and the write lock being acquired, letting the
+        terminal write commit an orphan the guard existed to prevent). Moving
+        the check to run on the write block's own connection, as the first
+        thing inside it, closes that gap: the whole block holds
+        ``database.write_lock`` continuously, so a concurrent delete (which
+        needs its own ``write()``) cannot land inside the window at all —
+        it either fully lands before this block starts (check correctly
+        observes "gone") or blocks until this block finishes."""
+        return connection.execute(
+            "SELECT 1 FROM knowhow_tables WHERE id = ?", (table_id,)
+        ).fetchone() is not None
+
     def delete_knowhow_table(self, table_id: str) -> dict:
         """Cascade-delete a table (columns/rows/cells all carry ``ON DELETE
         CASCADE`` FKs to it in migration 16, so one DELETE is enough with
@@ -425,13 +464,66 @@ class KnowhowStore:
             db.execute("DELETE FROM knowhow_tables WHERE id = ?", (table_id,))
         return {"hidden_source_id": hidden_source_id}
 
-    def set_knowhow_hidden_source(self, table_id: str, source_id: str) -> None:
+    def set_knowhow_hidden_source(
+        self,
+        table_id: str,
+        source_id: str,
+        *,
+        connection: "sqlite3.Connection | None" = None,
+    ) -> None:
+        """Attach ``source_id`` as ``table_id``'s hidden source.
+
+        PR review round 7 P2-A: pass ``connection`` to join a caller-owned
+        write transaction — mirrors ``SourceStore.insert_source``'s/
+        ``update_file_hash``'s own ``connection=`` idiom exactly (build the
+        statement/params once, execute directly on the caller's connection
+        if given, otherwise open this method's own ``write()``). Without a
+        connection, the update commits in its own transaction; ``Knowhow
+        Projector.ensure_hidden_source`` passes the SAME connection it used
+        to insert the ``sources`` row a moment earlier, so creation and
+        attachment land in ONE transaction — see that method's own
+        docstring for why the two used to be separate and what that gap
+        could leak.
+
+        PR review round 8 P1-A: on the ``connection=`` path, raises
+        ``KeyError(table_id)`` if the UPDATE's ``rowcount`` is 0 — i.e.
+        ``table_id`` no longer exists. Round 7 made the sibling
+        ``insert_source`` call and this UPDATE atomic (one transaction),
+        but atomicity alone doesn't stop either statement from succeeding
+        on its own terms: SQLite does not raise on a zero-row UPDATE, so
+        without this check, a concurrent full delete landing between
+        ``ensure_hidden_source``'s existence check and this transaction
+        actually acquiring the write lock would let ``insert_source``'s
+        INSERT commit anyway — an unreferenced, permanently orphaned
+        ``source_type='knowhow'`` row, born AFTER the move's one-shot
+        orphan sweep already ran (so nothing will ever clean it up; see
+        ``KnowhowProjector.ensure_hidden_source``'s own docstring for the
+        full race). Raising here rolls back the WHOLE caller-owned
+        transaction — the ``with conn:`` both calls share rolls back on any
+        exception — so ``insert_source``'s INSERT is undone too; no source
+        row survives.
+
+        Deliberately scoped to the ``connection=`` path only. The public,
+        no-connection form below keeps its original silently-tolerant
+        zero-row behavior verbatim — this codebase's default zero-row
+        UPDATE/DELETE convention — for its OTHER callers (grepped:
+        ``test_knowhow_store.py``'s three direct calls all target a table
+        that still exists at call time; nothing exercises, or depends on,
+        the old tolerant behavior for an already-gone ``table_id``), so
+        this new invariant applies exactly where it was found missing and
+        nowhere else."""
+        statement = (
+            "UPDATE knowhow_tables SET hidden_source_id = ?, updated_at = ? "
+            "WHERE id = ?"
+        )
+        values = (source_id, self.now(), table_id)
+        if connection is not None:
+            cursor = connection.execute(statement, values)
+            if cursor.rowcount == 0:
+                raise KeyError(table_id)
+            return
         with self.database.write() as db:
-            db.execute(
-                "UPDATE knowhow_tables SET hidden_source_id = ?, updated_at = ? "
-                "WHERE id = ?",
-                (source_id, self.now(), table_id),
-            )
+            db.execute(statement, values)
 
     def bump_knowhow_mutation_seq(self, table_id: str) -> int:
         """Increment and return the table's monotonic ``mutation_seq``.

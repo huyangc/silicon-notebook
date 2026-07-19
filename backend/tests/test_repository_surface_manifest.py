@@ -3102,6 +3102,12 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK3_SOURCE_ASSET_ALLOWED_IMPORTS
                     or site in PAPER_META_STATUS_TASK4_ALLOWED_IMPORTS
                     or site in ASSET_GC_TRIGGER_ALLOWED_IMPORTS
+                    or site in KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS
+                    or site in KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS
+                    or site in KNOWHOW_TRANSFER_ROUTES_ALLOWED_IMPORTS
+                    or site in MEMORY_TRANSFER_STORE_ALLOWED_IMPORTS
+                    or site in MEMORY_TRANSFER_SERVICE_ALLOWED_IMPORTS
+                    or site in MEMORY_TRANSFER_ROUTES_ALLOWED_IMPORTS
                 )
 
 
@@ -3310,6 +3316,24 @@ EXPECTED_PATCH_DELTAS = {
         # SurfaceMember consumer record" bucket, not a new pattern).
         ('backend/tests/test_knowhow_copy.py', 492, '_new_id', 'sr'),
         ('backend/tests/test_knowhow_copy.py', 501, '_insert_row', 'repo'),
+        # PR review round 3 P1-1 removed this entry: the A4 fault-injection
+        # test used to patch SQLiteRepository.delete_knowhow_table (the whole
+        # class, so the boom applied regardless of which SQLiteRepository
+        # instance the route handler's repository() singleton resolves to —
+        # same idea as test_in_batching.py's SQLiteRepository-base entry
+        # above). move_table no longer calls repo.delete_knowhow_table at
+        # all — its cleanup delete now goes through KnowhowTransferStore.
+        # delete_table_if_unchanged (the new atomic conditional delete; see
+        # that method's docstring and transfer.py's move_table), so the test
+        # was updated to patch THAT class instead (still class-level, same
+        # reason — the route handler's repository() singleton is a different
+        # SQLiteRepository instance, and therefore a different
+        # KnowhowTransferStore instance, than this test's own `repo`
+        # fixture). KnowhowTransferStore is not SQLiteRepository and not a
+        # "repo"/"*_repo"-named variable, so `_static_repository_patches()`
+        # (this set's own scanner — see its `direct_repo`/`repository_class`
+        # gating) does not observe that new patch site at all; there is
+        # nothing to add here, only this stale entry to remove.
         ('backend/tests/test_knowledge_governance_delegation.py', 131, 'set_conflict_status', 'repo'),
         ('backend/tests/test_notebook_copy_service.py', 93, '_new_id', 'sqlite_repository'),
         ('backend/tests/test_notebook_copy_service.py', 118, '_COPY_CHUNK', 'sqlite_repository'),
@@ -3900,3 +3924,295 @@ ASSET_GC_TRIGGER_ALLOWED_MEMBER_FILES = {
     }
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | ASSET_GC_TRIGGER_ALLOWED_MEMBER_FILES
+# knowhow cross-notebook copy/move Task A1 (KnowhowTransferStore): its own
+# store test composes the real facade the same way Task 2/3/4/5/6's sibling
+# knowhow/paper-meta tests do — SQLiteRepository(...) to build the runtime,
+# repo._runtime to reach the new knowhow_transfer_store, repo.create_notebook +
+# repo.create_knowhow_table + repo.add_knowhow_row + repo.get_knowhow_table to
+# seed a one-row table fixture, and repo._connect to assert the insert_transfer
+# rollback left no half-written copy. Every one of these is a frozen facade
+# member consumed at a fresh site this test file postdates, so it takes the
+# same broad (file, member) allowance as TASK3_PAPER_META_ALLOWED_MEMBER_FILES.
+# The lone import consumer (SQLiteRepository) additionally needs the IMPORTS
+# entry below, folded into the import-completeness OR-chain (which resolves
+# lazily at call time, so defining it here at EOF is fine). Appended at EOF for
+# the same zero-line-shift reason as every other TASKN_* block above.
+KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_transfer_store.py", 4, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+KNOWHOW_TRANSFER_STORE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_transfer_store.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "_connect", "create_notebook",
+        "create_knowhow_table", "add_knowhow_row", "get_knowhow_table",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER_STORE_ALLOWED_MEMBER_FILES
+
+# knowhow cross-notebook copy/move Task A2 (transfer.py's copy_table
+# orchestration): its own service test builds the real facade the same way
+# Task A1's store test does — SQLiteRepository(...) to build the runtime,
+# repo.create_notebook + repo.create_knowhow_table + repo.add_knowhow_row +
+# repo.get_knowhow_table to seed/read a one-row table fixture, and
+# repo.embedder (swapped for a fake to count embed calls — the K-1
+# zero-re-embed assertion) — every one a frozen facade member consumed at a
+# fresh site this test file postdates, so it takes the same broad (file,
+# member) allowance as KNOWHOW_TRANSFER_STORE_ALLOWED_MEMBER_FILES above.
+# Unlike Task A1's store test, this file never reaches repo._runtime/
+# repo._connect directly — transfer.py itself does (see the
+# ACTIVE_PRODUCTION_MEMBER_SITES addition below). The lone import consumer
+# (SQLiteRepository) additionally needs the IMPORTS entry, folded into the
+# import-completeness OR-chain (resolves lazily at call time, so defining it
+# here at EOF is fine, same as KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS).
+# Appended at EOF for the same zero-line-shift reason as every other TASKN_*
+# block above.
+KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_transfer_service.py", 5, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+KNOWHOW_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_transfer_service.py", name)
+    for name in {
+        "SQLiteRepository", "create_notebook", "create_knowhow_table",
+        "add_knowhow_row", "get_knowhow_table", "embedder",
+        # A2 review follow-up: the lexical/vector retrievability regression
+        # test reaches repo._connect + repo._runtime.knowledge.chunk_fts_search
+        # (the same FTS primitive production retrieval uses), exactly the idiom
+        # test_knowhow_retrieval.py:280-281 already established.
+        "_connect", "_runtime",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES
+
+# transfer.py itself (production, not a test file) is a genuinely new facade
+# consumer the same way communities.py/reasoning_retrieval.py/routes.py:605
+# already are above (ACTIVE_PRODUCTION_MEMBER_SITES, defined near the top of
+# this file) — copy_table's own `repo._runtime.knowhow_transfer_store` and
+# _remap's `repo._runtime.seams` are two independent narrow-runtime-port
+# reaches (mirrors app/services/knowhow/api.py's build_projector/
+# optimize_cell precedent; registered separately in
+# test_repository_callers_static.py's INDEPENDENT_PRIVATE_SITES), plus
+# _remap's `repo.get_notebook_asset(...)` and copy_table's `repo.storage_dir`
+# — both ordinary public facade members. Folded in here (not inline in the
+# ACTIVE_PRODUCTION_MEMBER_SITES literal above) to keep this a zero-line-shift
+# EOF append like every other TASKN_* block; the union resolves lazily at
+# call time inside _member_file_site_allowed, same as
+# ALL_TASK_ALLOWED_MEMBER_FILES's own EOF folds above.
+#
+# final-fix-wave update: the copy_table asset-loop fix (Minor: copied asset
+# rows must not keep a foreign source_id — sets row["source_id"] = None)
+# added lines inside _remap, ahead of copy_table's own `_runtime`/
+# `storage_dir` reaches, shifting those two line numbers (185->193,
+# 204->212). _remap's own two sites (`_runtime` seam extraction at 29,
+# `get_notebook_asset` at 89) sit before the inserted lines and are
+# unaffected.
+#
+# PR review round 6 P1-A update: the stale-derived-artifact skip guards
+# added to _remap's elements/chunks/chunk_embeddings loops (a deleted
+# business row/column's leftover source_elements/chunks must be dropped, not
+# KeyError-crash the whole transfer — see transfer.py's own comment on that
+# loop) sit ahead of copy_table's `_runtime`/`storage_dir` reaches too,
+# shifting those two line numbers again (193->221, 212->240). _remap's own
+# two sites (29, 89) again sit before the inserted lines and are unaffected;
+# move_table's own third `_runtime` reach (previously 292) shifts the same
+# way — see KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES below.
+KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES = {
+    ("_runtime", "backend/app/services/knowhow/transfer.py:29"),
+    ("_runtime", "backend/app/services/knowhow/transfer.py:221"),
+    ("get_notebook_asset", "backend/app/services/knowhow/transfer.py:89"),
+    ("storage_dir", "backend/app/services/knowhow/transfer.py:240"),
+}
+ACTIVE_PRODUCTION_MEMBER_SITES = ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES
+
+# knowhow cross-notebook copy/move Task A4 (REST endpoint): its own route test
+# builds the real facade the same way Task A1/A2's sibling store/service tests
+# do — SQLiteRepository(...) to build the runtime shared with the TestClient
+# app (repository() lru_cache resolves to a DB-equivalent instance), plus
+# repo.create_knowhow_table/get_knowhow_table/add_knowhow_row to seed a
+# one-row table fixture (the same _table() idiom Task A1/A2's own fixtures
+# use). Every one of these is a frozen facade member consumed at a fresh site
+# this test file postdates, so it takes the same broad (file, member)
+# allowance as KNOWHOW_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES above. The lone
+# import consumer (SQLiteRepository) additionally needs the IMPORTS entry,
+# folded into the import-completeness OR-chain (resolves lazily at call time,
+# so defining it here at EOF is fine, same as the two sibling IMPORTS sets).
+# The 409 fault-injection test used to patch `SQLiteRepository.
+# delete_knowhow_table` and was registered separately in EXPECTED_PATCH_
+# DELTAS['actual_only'] (test_static_repository_patch_scan_matches_manifest_
+# exactly is a distinct scan from the member/site consumer comparison this
+# block feeds). PR review round 3 P1-1 moved move_table's cleanup delete off
+# repo.delete_knowhow_table onto the new KnowhowTransferStore.
+# delete_table_if_unchanged (atomic conditional delete), so the test's fault
+# injection moved with it — it now patches KnowhowTransferStore (imported
+# locally in the test function, not SQLiteRepository) at the class level, a
+# class the patch-scan's class_names set doesn't track, so that entry was
+# removed from EXPECTED_PATCH_DELTAS['actual_only'] rather than replaced.
+# Appended at EOF for the same zero-line-shift reason as every other TASKN_*
+# block above.
+KNOWHOW_TRANSFER_ROUTES_ALLOWED_IMPORTS = {
+    ("backend/tests/test_knowhow_transfer_routes.py", 7, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+KNOWHOW_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_knowhow_transfer_routes.py", name)
+    for name in {
+        "SQLiteRepository", "create_knowhow_table", "add_knowhow_row", "get_knowhow_table",
+        # A4 评审 Important 补的四条访问控制用例：只读成员那条要先把 bob 加成
+        # 成员（test_notebook_share_readonly.py 用的同一个 add_member 惯用法），
+        # 才能覆盖「copy 用读守卫 / move 用写守卫」这条此前完全没被测到的接线。
+        "add_member",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES
+
+# memory cross-notebook copy/move Task B1 (MemoryStore.create_copy_with_
+# initial_revision): its own store test builds the real facade the same way
+# Task A1's knowhow-transfer store test does — SQLiteRepository(...) to build
+# the runtime, set_request_user/reset_request_user (both already
+# COMPATIBILITY_EXPORTS-registered names re-exported from
+# app.services.sqlite_repository) to scope create_notebook per-owner,
+# repo.create_user to seed the fixture user, repo._runtime to reach the new
+# memory_store, and repo._connect to read back memory_embeddings/
+# memory_revisions row counts. Every one of these is a frozen facade member
+# consumed at a fresh site this test file postdates, so it takes the same
+# broad (file, member) allowance as KNOWHOW_TRANSFER_STORE_ALLOWED_MEMBER_FILES
+# above. The three import consumers (SQLiteRepository, set_request_user,
+# reset_request_user) share one physical `from ... import (...)` statement, so
+# all three aliases attribute to the same node.lineno and all three need
+# IMPORTS entries at that one line, folded into the import-completeness
+# OR-chain (resolves lazily at call time, so defining it here at EOF is fine,
+# same as KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS). Appended at EOF for the
+# same zero-line-shift reason as every other TASKN_* block above.
+MEMORY_TRANSFER_STORE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_transfer_store.py", 5, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_memory_transfer_store.py", 5, "app.services.sqlite_repository", "set_request_user"),
+    ("backend/tests/test_memory_transfer_store.py", 5, "app.services.sqlite_repository", "reset_request_user"),
+}
+MEMORY_TRANSFER_STORE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_transfer_store.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "_connect", "create_notebook",
+        "create_user", "set_request_user", "reset_request_user",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_STORE_ALLOWED_MEMBER_FILES
+
+# memory cross-notebook copy/move Task B2 (MemoryService.transfer + the
+# transfer_memories facade delegate): its own service test builds the real
+# facade the same way Task B1's store test does — SQLiteRepository(...) to
+# build the runtime, set_request_user/reset_request_user (COMPATIBILITY_
+# EXPORTS-registered, re-exported from app.services.sqlite_repository) to
+# scope create_notebook per-owner, repo.create_user to seed the two fixture
+# users (alice/bob), repo._runtime to reach memory_service (swap in
+# synchronous embedding_scheduler/kg_ingest_scheduler, and to fault-inject
+# store.delete_memory / memory_kg.remove_memory_source for the Amendment-1
+# ordering guard and the Amendment-2 cleanup-failure regression tests), and
+# repo.transfer_memories itself. Every one of these except transfer_memories
+# is a frozen facade member consumed at a fresh site this test file
+# postdates, so it takes the same broad (file, member) allowance as
+# MEMORY_TRANSFER_STORE_ALLOWED_MEMBER_FILES above. transfer_memories has NO
+# frozen consumers at all — it is a brand-new facade member that predates no
+# frozen fixture entry (same situation as TASK3_SOURCE_ASSET_ALLOWED_NEW_
+# MEMBERS's source_asset_ids/delete_source_asset_rows) — but since this one
+# test file is its only consumer so far (B3 wires the REST route on top of it
+# later), the same (file, member) allowance covers it too; no wholesale
+# *_ALLOWED_NEW_MEMBERS pop-loop exemption is needed. The three import
+# consumers (SQLiteRepository, set_request_user, reset_request_user) share
+# one physical `from ... import (...)` statement, so all three aliases
+# attribute to the same node.lineno and all three need IMPORTS entries at
+# that one line, folded into the import-completeness OR-chain (resolves
+# lazily at call time, so defining it here at EOF is fine, same as MEMORY_
+# TRANSFER_STORE_ALLOWED_IMPORTS). Appended at EOF for the same
+# zero-line-shift reason as every other TASKN_* block above.
+MEMORY_TRANSFER_SERVICE_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_transfer_service.py", 6, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_memory_transfer_service.py", 6, "app.services.sqlite_repository", "set_request_user"),
+    ("backend/tests/test_memory_transfer_service.py", 6, "app.services.sqlite_repository", "reset_request_user"),
+}
+MEMORY_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_transfer_service.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime", "create_notebook",
+        "create_user", "set_request_user", "reset_request_user",
+        "transfer_memories",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES
+
+# memory cross-notebook copy/move Task B3 (POST /memories/transfer REST route):
+# this is an HTTP-level test — unlike B1/B2's store/service tests, notebooks
+# and users are created through the real API (client.post("/api/notebooks"...),
+# _login's register/login roundtrip), so it does NOT need create_notebook/
+# create_user/set_request_user/reset_request_user allowances. Its only two
+# static-scan hits (confirmed by running _static_repository_consumers() and
+# filtering for this file) are the module-level `from
+# app.services.sqlite_repository import SQLiteRepository` used by the `repo`
+# fixture (same boilerplate as every other transfer-task test file), and one
+# `repo._runtime` access inside the `_seeded_service` helper — used purely to
+# reach the real memory_service and swap in synchronous embedding_scheduler/
+# kg_ingest_scheduler for candidate/confirm setup, the same pre-existing
+# fixture pattern B1/B2 already established (not a new production consumer;
+# the route itself only ever calls the frozen facade member
+# transfer_memories, already covered by MEMORY_TRANSFER_SERVICE_ALLOWED_
+# MEMBER_FILES's declaration of that member — no *_ALLOWED_NEW_MEMBERS
+# exemption needed here either). SQLiteRepository is also consumed as an
+# import, so it needs both the IMPORTS entry (import-completeness OR-chain)
+# and the MEMBER_FILES entry (broad per-file consumer-scan check), same
+# two-set split as every sibling transfer-task block above. Appended at EOF
+# for the same zero-line-shift reason as every other TASKN_* block above.
+MEMORY_TRANSFER_ROUTES_ALLOWED_IMPORTS = {
+    ("backend/tests/test_memory_transfer_routes.py", 16, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+MEMORY_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_transfer_routes.py", name)
+    for name in {
+        "SQLiteRepository", "_runtime",
+    }
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_ROUTES_ALLOWED_MEMBER_FILES
+
+# knowhow cross-notebook copy/move PR review round 2 P1-2 (data loss):
+# move_table's own snapshot-vs-delete concurrent-edit guard reaches
+# `repo._runtime.knowhow_transfer_store` a THIRD, independent time (the
+# other two, lines 29/193 originally, now 29/221 after round 6's P1-A fix —
+# see KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES above and the matching
+# INDEPENDENT_PRIVATE_SITES fold in test_repository_callers_static.py) — this
+# file's own consumer-scan mirror of that same new site: move_table needs
+# table_fingerprint() both before copy_table runs and again right before the
+# source delete. Appended at EOF for the same zero-line-shift reason as
+# every other TASKN_* block above.
+#
+# PR review round 6 P1-A update: same _remap skip-guard lines that shifted
+# copy_table's own two sites (193->221, 212->240 above) sit ahead of this
+# site too, shifting it 292->320.
+#
+# PR review round 10 P1-A update: SourceCleanupFailed's docstring/__init__
+# grew a `reason` param (source_changed vs cleanup_error) ahead of
+# move_table, shifting this site again (320->330).
+KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES = {
+    ("_runtime", "backend/app/services/knowhow/transfer.py:330"),
+}
+ACTIVE_PRODUCTION_MEMBER_SITES = (
+    ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES
+)
+
+# memory cross-notebook copy/move PR review round 5 P1-2 (data loss —
+# promotion_candidates orphan guard): the new tests pinning "move rejects a
+# Memory with an active promotion proposal" need to actually EXERCISE the
+# Track-F promotion state machine to set up a 'proposed' Memory and to prove
+# 'approved' is deliberately NOT blocked — three more `repo.*` sites in
+# test_memory_transfer_service.py, all on facade members that are already
+# frozen elsewhere (same "fresh consumer of a pre-existing member" shape as
+# every other MEMORY_TRANSFER_SERVICE_ALLOWED_MEMBER_FILES entry above, so
+# it takes the same broad (file, member) allowance rather than a precise
+# line pin): `repo._connect()` (read the promotion_candidates row directly,
+# to assert it is neither deleted nor orphaned), `repo.mark_notebook_base()`
+# + `repo.approve_promotion()` (both needed only to drive a candidate to
+# 'approved' for the companion "approved is not blocked" guard — mirrors
+# test_memory_promotion.py's own promotion_setup fixture). Appended at EOF
+# for the same zero-line-shift reason as every other TASKN_* block above.
+MEMORY_TRANSFER_SERVICE_ROUND5_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_memory_transfer_service.py", name)
+    for name in {"_connect", "mark_notebook_base", "approve_promotion"}
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = (
+    ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_SERVICE_ROUND5_ALLOWED_MEMBER_FILES
+)

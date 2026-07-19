@@ -493,6 +493,7 @@ DELEGATE_OWNER_OVERRIDES: Mapping[str, str] = {
     'propose_memory_promotion': 'MemoryService',
     'reject_memory': 'MemoryService',
     'update_memory': 'MemoryService',
+    'transfer_memories': 'MemoryService',
     '_NOTEBOOK_COUNT_TYPES': 'NotebookSummaryQuery',
     '_active_kg_delta': 'RetrievalService',
     '_add_column_if_missing': 'SqliteDatabase',

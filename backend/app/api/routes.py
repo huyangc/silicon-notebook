@@ -2090,3 +2090,85 @@ def backfill_paper_metadata(notebook_id: str) -> dict:
             notify_pending=True,   # 兜底刷新 pending 快照
         )
     return {"queued": queued}
+
+
+# --- knowhow 表跨 notebook 传输（复制/移动） -------------------------------
+# 追加在文件尾：mode 决定源守卫（copy=read / move=write），无法用静态
+# Depends(require_notebook_*)，故在处理器内手动核权（复用 deps 的访问仓库）。
+# 用同步 def（同 create_report/create_object_schema）——FastAPI 自动放线程池跑，
+# 无需 run_in_threadpool、无需在文件顶部加 import（避免打断行号 pin）。
+from app.api.deps import notebook_access_repository as _kh_access  # noqa: E402
+from app.models.schemas import KnowhowTransferRequest  # noqa: E402
+from app.services.knowhow import transfer as _kh_transfer  # noqa: E402
+
+
+@router.post("/notebooks/{notebook_id}/knowhow/{table_id}/transfer")
+def transfer_knowhow_table(
+    notebook_id: str,
+    table_id: str,
+    payload: KnowhowTransferRequest,
+    user: UserProfile = Depends(get_current_user),
+) -> dict:
+    if payload.target_notebook_id == notebook_id:
+        raise HTTPException(status_code=400, detail="源与目标不能是同一个 notebook")
+    repo = repository()
+    access = _kh_access()
+    # 只有 copy 能放宽到「只读成员」——写成 `read if copy else access` 而不是
+    # `access if move else read`，是为了失败关闭（默认最严兜底，同 deps.py 末尾
+    # require_notebook_access = require_notebook_write 的取向）：将来若多出第三
+    # 种 mode，它继承的是 owner-only 的强守卫，而不是悄悄拿到只读成员权限。
+    # 今天两者等价（mode 是 Literal["copy","move"]），差别只在未来。
+    source_check = (
+        access.user_can_read_notebook
+        if payload.mode == "copy"
+        else access.user_can_access_notebook
+    )
+    if not source_check(notebook_id, user.id):
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    if not access.user_can_access_notebook(payload.target_notebook_id, user.id):
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    try:
+        # 复用既有 helper（同 reproject 路由 routes.py:583-586 的「只做存在性+
+        # 归属校验、丢弃返回值」用法）：它自己的 docstring 持有「'从未存在' 与
+        # '存在但属于别的 notebook' 统一 KeyError → 路由统一 404，不泄露是哪种」
+        # 这条策略。手写同款检查会把该策略复刻到第二处，日后必然静默分叉。
+        knowhow_api.get_table_in_notebook(repo, notebook_id, table_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+    try:
+        new_table_id = _kh_transfer.transfer_table(
+            repo, table_id, payload.target_notebook_id, user.id, payload.mode
+        )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Table not found")
+    except _kh_transfer.SourceCleanupFailed as exc:
+        # 复制已提交、清理源(拆投影/删源表)失败：副本已在目标存在，源仍在——
+        # 结构化 409 让前端能诚实地告诉用户"重复不丢失"，而不是裸 500 诱导用户
+        # 盲目重试(会在目标侧越堆越多重复副本)。见 A3 评审附加需求。
+        #
+        # round 10 P1-A：exc.reason 区分两种截然不同的成因，绝不能共用同一条
+        # "请手动删除源表"的指引——"source_changed" 时源是被有意保留下来保护
+        # 一份并发编辑的（指纹复核未命中），照做会连带丢掉那份编辑；只有
+        # "cleanup_error"（拆投影/原子删除本身抛出异常，源确实原封未动）才
+        # 适用"手动删源"这条建议。code 因此分裂成两个：source_cleanup_failed
+        # 原样保留给 cleanup_error（不破坏既有契约/前端已有的分支判断），新增
+        # source_changed_kept 给 source_changed。
+        if exc.reason == "source_changed":
+            code = "source_changed_kept"
+            message = (
+                "源表在复制完成后有更新的修改，为避免丢失该修改，源表已被保留——"
+                "目标笔记本里的副本是这次修改之前的旧版本。请核对后删除目标里的"
+                "旧副本，或重新发起一次搬迁；请勿删除源表。"
+            )
+        else:
+            code = "source_cleanup_failed"
+            message = "已复制到目标，但源表未删除；请手动删除源表，或先删掉多余副本再重试"
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": code,
+                "new_table_id": exc.new_table_id,
+                "message": message,
+            },
+        )
+    return {"new_table_id": new_table_id}

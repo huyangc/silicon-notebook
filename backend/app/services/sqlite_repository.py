@@ -3427,6 +3427,18 @@ class SQLiteRepository:
     def paper_meta_backfill_progress(self, notebook_id: str) -> Optional[dict]:
         """返回 {"total","done"} 的浅拷贝或 None（未在跑）。锁内取快照。"""
         return self._runtime.source_ingestion.paper_meta_backfill_progress(notebook_id)
+    # --- memory cross-notebook copy/move Task B2: one-hop delegate --------
+    def transfer_memories(
+        self,
+        user_id: str,
+        memory_ids: List[str],
+        target_notebook_id: str,
+        mode: str,
+        extract_kg: bool = True,
+    ) -> list[dict]:
+        return self._runtime.memory_service.transfer(
+            user_id, memory_ids, target_notebook_id, mode, extract_kg
+        )
 
 
 def _now() -> str:

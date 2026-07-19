@@ -185,11 +185,24 @@
   cursor: pointer;
 }
 
-.memory-bulk-bar button.memory-bulk-delete {
+/* C4「复制/移动到…（N）」——紧邻「删除选中」放在批量栏尾部。margin-left:auto
+   放在这一个(而非 .memory-bulk-delete)身上，把它和跟在它后面的「删除选中」
+   作为一对整体推到栏右侧；若两个按钮各自 auto，flexbox 会在它们中间也匀出
+   一段空当，视觉上就不是"紧邻"了。 */
+.memory-bulk-bar button.memory-bulk-transfer {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   margin-left: auto;
+  border-color: #c9d6f7;
+  color: #1b4fcb;
+  font-weight: 700;
+}
+
+.memory-bulk-bar button.memory-bulk-delete {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border-color: #e4b1b1;
   background: #fbeaea;
   color: #a52d2d;
@@ -229,6 +242,27 @@
 
 .memory-delete-action:hover:not(:disabled) { background: #fbeaea; }
 .memory-delete-action:disabled { opacity: .5; cursor: not-allowed; }
+
+/* C4「复制/移动到…」卡片级入口——同 .memory-promote-action 的蓝色调（都是
+   "笔记本级别的元操作"，与红色的删除区分开），盒模型对齐 .memory-delete-action
+   （同一排按钮，高度/圆角/字号要严格一致，见 ui-polish-bar：同类控件成列
+   对齐）。 */
+.memory-transfer-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid #c9d6f7;
+  border-radius: 9px;
+  background: #fff;
+  color: #1b4fcb;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.memory-transfer-action:hover:not(:disabled) { background: #eef3ff; }
+.memory-transfer-action:disabled { opacity: .5; cursor: not-allowed; }
 
 .memory-confirm-card {
   width: min(420px, calc(100vw - 32px));
@@ -513,6 +547,20 @@
   padding: 10px 12px;
   background: #fff2f2;
   color: #9d2828;
+  font-size: 13px;
+}
+
+/* C4「复制/移动到…」copied_source_not_removed 提示——故意不用 .memory-error 的
+   红：那个状态是"副本已经落地，只是源没删掉"，不是失败，用同一套红会诱导用户
+   当成失败重试，只会在目标堆更多重复副本。琥珀色调复用本文件 .memory-badge.
+   tone-warning 的配色（#855200/#fff1cc 一脉），呼应"待确认"徽标已经建立的
+   "需要你去处理，不是出错了"语义。 */
+.memory-transfer-notice {
+  border: 1px solid #f0dab3;
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: #fff8ea;
+  color: #855200;
   font-size: 13px;
 }
 

@@ -19,6 +19,7 @@ from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.knowhow_store import KnowhowStore
+from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.memory_store import MemoryStore
 from app.repositories.sqlite.notebook_store import NotebookStore
@@ -294,6 +295,10 @@ class RepositoryRuntime:
             new_id=seams.new_id,
             now=seams.now,
         )
+        # knowhow 单表跨 notebook 传输的 SQL（快照+单事务插入+校验）。id/时钟
+        # 由 transfer.py 的 _remap 直接从 repo._runtime.seams 取（见该文件头
+        # 注释），store 自己不需要——不带 new_id/now 构造参数。
+        self.knowhow_transfer_store = KnowhowTransferStore(self.database)
 
     @property
     def storage_dir(self) -> Path:
