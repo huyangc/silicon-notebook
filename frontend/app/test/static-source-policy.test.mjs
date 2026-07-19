@@ -15,6 +15,10 @@ const DIRECT_READ_ALLOWLIST = new Set([
   "test/static-source-policy.test.mjs",
   "test-runner-config.test.mjs",
 ]);
+const POSITION_QUERY_ALLOWLIST = new Set([
+  // Contains mutation examples for this policy; it does not inspect production.
+  "test/static-source-policy.test.mjs",
+]);
 
 
 async function testModules(directory = APP_DIR) {
@@ -35,33 +39,46 @@ async function testModules(directory = APP_DIR) {
 }
 
 
+function modulePolicyOffenders(relative, source) {
+  const offenders = [];
+  const readsFiles = (
+    /from\s+["']node:fs(?:\/promises)?["']/.test(source)
+    || /import\(\s*["']node:fs(?:\/promises)?["']\s*\)/.test(source)
+  );
+  if (readsFiles && !DIRECT_READ_ALLOWLIST.has(relative)) {
+    offenders.push(`${relative}: direct production-source read`);
+  }
+  if (
+    !POSITION_QUERY_ALLOWLIST.has(relative)
+    && (
+      /\.(?:getStart|getEnd)\s*\(/.test(source)
+      || (
+        readsFiles
+        && /\.(?:indexOf|slice|substring)\s*\(/.test(source)
+      )
+    )
+  ) {
+    offenders.push(`${relative}: source-position or source-order query`);
+  }
+  if (/(?:frontend|backend|scripts)\/[^:'"\n]+:\d+\b/.test(source)) {
+    offenders.push(`${relative}: path-line identity`);
+  }
+  if (
+    /\b(?:test|it|describe)\.(?:skip|only|todo)\s*\(/.test(source)
+    || /\bskip\s*:\s*(?:true|["'])/.test(source)
+  ) {
+    offenders.push(`${relative}: disabled or exclusive test`);
+  }
+  return offenders;
+}
+
+
 async function policyOffenders() {
   const offenders = [];
   for (const absolute of await testModules()) {
     const relative = path.relative(APP_DIR, absolute).replaceAll(path.sep, "/");
     const source = await readFile(absolute, "utf8");
-    const readsFiles = (
-      /from\s+["']node:fs(?:\/promises)?["']/.test(source)
-      || /import\(\s*["']node:fs(?:\/promises)?["']\s*\)/.test(source)
-    );
-    if (readsFiles && !DIRECT_READ_ALLOWLIST.has(relative)) {
-      offenders.push(`${relative}: direct production-source read`);
-    }
-    if (
-      readsFiles
-      && /\.(?:indexOf|slice|substring|getStart|getEnd)\s*\(/.test(source)
-    ) {
-      offenders.push(`${relative}: source-position or source-order query`);
-    }
-    if (/(?:frontend|backend|scripts)\/[^:'"\n]+:\d+\b/.test(source)) {
-      offenders.push(`${relative}: path-line identity`);
-    }
-    if (
-      /\b(?:test|it|describe)\.(?:skip|only|todo)\s*\(/.test(source)
-      || /\bskip\s*:\s*(?:true|["'])/.test(source)
-    ) {
-      offenders.push(`${relative}: disabled or exclusive test`);
-    }
+    offenders.push(...modulePolicyOffenders(relative, source));
   }
   return offenders.sort();
 }
@@ -73,6 +90,36 @@ test("static source scans are registered with a category and reason", () => {
     assert.ok(contract.reason, name);
     assert.ok(contract.roots.length > 0, name);
   }
+});
+
+
+test("source policy rejects position identities without banning ordinary arrays", () => {
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "example.test.mjs",
+      "const start = node.getStart();",
+    ),
+    ["example.test.mjs: source-position or source-order query"],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "example.test.mjs",
+      "import { readFile } from 'node:fs/promises';\n"
+        + "const source = await readFile(path, 'utf8');\n"
+        + "source.slice(source.indexOf('a'));",
+    ),
+    [
+      "example.test.mjs: direct production-source read",
+      "example.test.mjs: source-position or source-order query",
+    ],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "example.test.mjs",
+      "const copy = values.slice().sort();",
+    ),
+    [],
+  );
 });
 
 
