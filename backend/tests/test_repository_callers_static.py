@@ -179,6 +179,24 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
             ("scripts/verify_repository_snapshot.py", 1393, "probe.execute"),
         }
     },
+    # knowhow-md-normalize backfill CLI (scripts/backfill_knowhow_md.py): the
+    # DEFAULT rules-only dry-run reads the product database DIRECTLY through a
+    # mode=ro connection (P2 — it must NEVER construct the write-capable
+    # SQLiteRepository, whose __init__ runs migrations/seed/crash-recovery, so
+    # even a "writes nothing" dry-run could mutate schema/state). These four
+    # execute-shaped calls are that read-only walk of knowhow tables/columns/
+    # rows/cells (_read_knowhow_tables_ro), on the mode=ro connection registered
+    # in SQLITE_CONNECT_SITES below — never a mutation of the live database. Same
+    # registered-raw-SQL-in-scripts precedent as scripts/merge_dbs.py.
+    **{
+        site: "offline backfill CLI reads the product DB mode=ro for a rules-only dry-run"
+        for site in {
+            ("scripts/backfill_knowhow_md.py", 216, "conn.execute"),
+            ("scripts/backfill_knowhow_md.py", 223, "conn.execute"),
+            ("scripts/backfill_knowhow_md.py", 228, "conn.execute"),
+            ("scripts/backfill_knowhow_md.py", 236, "conn.execute"),
+        }
+    },
     # Offline two-DB merge tool (PR#276): every statement runs against temp-dir
     # copies of the source databases (ATTACH + cross-DB INSERT...SELECT, WAL
     # checkpoint, foreign_key_check); it never opens or mutates the live product
@@ -232,6 +250,14 @@ FACADE_CLASS_IMPORT_SITES: dict[tuple[str, int], str] = {
     ("backend/app/scripts/reembed_kg.py", 7): "offline CLI composition root",
     ("backend/app/services/batch_ingest.py", 29): "batch-ingest CLI composition root",
     ("scripts/backfill_kg_embeddings.py", 21): "offline CLI composition root",
+    # knowhow-md-normalize Task 6: the one-time existing-cell backfill CLI
+    # composes the real repository directly (SQLiteRepository(Settings())),
+    # the same composition-root pattern as every other scripts/backfill_*.py
+    # tool above. (--use-llm / --apply only; the DEFAULT rules-only dry-run is
+    # read-only and never constructs it -- see this file's SQLITE_CONNECT_SITES
+    # + INDEPENDENT_SQL_SITES backfill entries.) Line 63->76->78->81 (P2 read-only
+    # default, two new imports, then this batch's +3-line docstring expansion).
+    ("scripts/backfill_knowhow_md.py", 81): "offline CLI composition root",
     ("scripts/bench_sqlite_writes.py", 20): "synthetic benchmark composition root",
     ("scripts/build_chunks.py", 5): "offline CLI composition root",
     ("scripts/denoise_reextract_nb.py", 18): "offline CLI composition root",
@@ -271,24 +297,41 @@ INDEPENDENT_PRIVATE_SITES: dict[tuple[str, int, str], str] = {
     # service, deliberately not wired onto the facade/RepositoryRuntime
     # composition root. build_projector() constructs one directly, mirroring
     # app/api/deps.py's precedent + Task 5's own test fixture
-    # (138->185: the GC trigger + asset-ref helpers shifted it +47).
-    ("backend/app/services/knowhow/api.py", 185, "_runtime"): (
+    # (138->185: the GC trigger + asset-ref helpers shifted it +47; then
+    # 185->197: knowhow-md-normalize's own docstring/normalize-call additions
+    # to preview_import earlier in the file add +12 net lines above
+    # build_projector; then 197->211: the P1-c ``_preview_row`` helper +
+    # preview_import doc lines add +14 more above build_projector — re-pinned
+    # by that fix; F5 preview OOR check adds +6: 236->242, see reformat_cell below).
+    ("backend/app/services/knowhow/api.py", 242, "_runtime"): (
         "import/table API composition constructs the plain KnowhowProjector "
         "service directly, mirroring deps.py's narrow-runtime-port extraction"
     ),
     # PR-2+3 Task 8: optimize_cell resolves the per-user rewrite LLM client +
     # note_model_error the same "extract a narrow runtime port" way
-    # build_projector (line 185 above) already does — a second, independent
-    # call site in the same file (682->693: the get_scheduler weakref fix
-    # added lines ABOVE optimize_cell; 693->716: anchor-grouping-display's
-    # forward_fill_column import plus import_table's/commit_append's
-    # forward-fill additions add +23 net lines further ABOVE optimize_cell;
-    # 716->880: the GC trigger + asset-ref helpers above get_scheduler plus
-    # their imports add +164 net lines above optimize_cell).
-    ("backend/app/services/knowhow/api.py", 880, "_runtime"): (
+    # build_projector (line 221 above) already does — a second, independent
+    # call site in the same file. Its line drifts every time anything is added
+    # above optimize_cell; the P1-c anchor-skip additions in preview_import/
+    # import_table/preview_append/commit_append add +36 net lines, landing it
+    # at 965 (was 929). F5 preview-anchor range check adds +6: 990->996.
+    ("backend/app/services/knowhow/api.py", 996, "_runtime"): (
         "LLM cell rewrite resolves the per-user rewrite LLM client + "
         "note_model_error via the same narrow-runtime-port extraction "
         "build_projector uses, a second independent call site"
+    ),
+    # knowhow-md-normalize Task 3: reformat_cell (LLM reformat -> content-
+    # invariant check -> rule_normalize fallback, see that function's own
+    # docstring) resolves ``repo._runtime.models.rewrite_llm_client`` the
+    # same narrow-runtime-port way build_projector/optimize_cell above
+    # already do — a third, independent call site in the same file. Also
+    # registered as a new KNOWHOW_MDNORM_ALLOWED_CONSUMERS entry in
+    # test_repository_surface_manifest.py, since the two guards scan
+    # independently (same convention optimize_cell's own registration above
+    # documents). P1-c anchor-skip above push it 1054->1096; F5 OOR +6: 1121->1127.
+    ("backend/app/services/knowhow/api.py", 1127, "_runtime"): (
+        "reformat_cell resolves the per-user rewrite LLM client via the same "
+        "narrow-runtime-port extraction build_projector/optimize_cell use, a "
+        "third independent call site"
     ),
     **{
         site: "contract fixture generator operates on a disposable fixture database"
@@ -440,6 +483,13 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ),
     ("scripts/merge_dbs.py", 377, "sqlite3.connect"): (
         "offline two-DB merge tool opens temp-dir copies, not the live product DB"
+    ),
+    # knowhow-md-normalize backfill CLI opens the product DB mode=ro for the
+    # DEFAULT rules-only dry-run (P2), never constructing the write-capable
+    # SQLiteRepository; the read-only walk's execute-shaped calls are registered
+    # in INDEPENDENT_SQL_SITES above.
+    ("scripts/backfill_knowhow_md.py", 280, "sqlite3.connect"): (
+        "offline backfill CLI opens the product DB mode=ro for a rules-only dry-run"
     ),
     # Offline promotion-target backfill CLI (Task 9, multi-domain base libraries):
     # opens the operator-supplied --db path directly (it is meant to patch a real

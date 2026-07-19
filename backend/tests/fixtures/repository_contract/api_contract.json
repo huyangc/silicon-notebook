@@ -841,6 +841,17 @@
         },
         "Body_preview_knowhow_import_api_notebooks__notebook_id__knowhow_import_preview_post": {
           "properties": {
+            "anchor_index": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anchor Index"
+            },
             "file": {
               "contentMediaType": "application/octet-stream",
               "title": "File",
@@ -1690,6 +1701,17 @@
             "content_md": {
               "title": "Content Md",
               "type": "string"
+            },
+            "expected_before": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expected Before"
             }
           },
           "required": [
@@ -1726,6 +1748,34 @@
           "title": "KnowhowCellPatchResult",
           "type": "object"
         },
+        "KnowhowCellReformatResult": {
+          "properties": {
+            "candidate_md": {
+              "title": "Candidate Md",
+              "type": "string"
+            },
+            "changed": {
+              "title": "Changed",
+              "type": "boolean"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            },
+            "source_md": {
+              "title": "Source Md",
+              "type": "string"
+            }
+          },
+          "required": [
+            "candidate_md",
+            "source",
+            "changed",
+            "source_md"
+          ],
+          "title": "KnowhowCellReformatResult",
+          "type": "object"
+        },
         "KnowhowCellsBatchPatch": {
           "properties": {
             "column_id": {
@@ -1735,6 +1785,20 @@
             "content_md": {
               "title": "Content Md",
               "type": "string"
+            },
+            "expected_before": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expected Before"
             },
             "row_ids": {
               "items": {
@@ -9184,6 +9248,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/import/preview": {
         "post": {
+          "description": "``anchor_index`` (optional, same wire shape as the import commit\nendpoint's) lets the wizard re-preview after the user changes the row-title\n(anchor) selection in step 2: when given, the preview skips THAT column from\nnormalization instead of the guessed one, keeping \"预览即所得\" true for the\nuser-confirmed anchor. Omitted on the initial load — preview then skips the\nguess (unchanged behavior).",
           "operationId": "preview_knowhow_import_api_notebooks__notebook_id__knowhow_import_preview_post",
           "parameters": [
             {
@@ -9979,6 +10044,72 @@
             }
           },
           "summary": "Optimize Knowhow Cell"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/reformat": {
+        "post": {
+          "operationId": "reformat_knowhow_cell_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__reformat_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/KnowhowCellReformatResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Reformat Knowhow Cell"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/template": {

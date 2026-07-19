@@ -3335,6 +3335,16 @@ class SQLiteRepository:
             row_ids, column_id, content_md, require_assets
         )
 
+    def update_knowhow_cells_bulk_guarded(self, notebook_id: str, updates: list) -> dict:
+        return self._runtime.knowhow_store.update_knowhow_cells_bulk_guarded(notebook_id, updates)
+
+    def update_knowhow_cells_guarded_atomic(
+        self, notebook_id: str, updates: list, require_assets=()
+    ) -> dict:
+        return self._runtime.knowhow_store.update_knowhow_cells_guarded_atomic(
+            notebook_id, updates, require_assets
+        )
+
     def delete_knowhow_table(self, table_id: str) -> dict:
         return self._runtime.knowhow_store.delete_knowhow_table(table_id)
 

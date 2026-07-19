@@ -113,6 +113,10 @@ const ALLOWED_MESSAGE_READS = new Map([
     [
       // 组件自己的状态字段,由 extractErrorMessage()(= toUserMessage 别名)写入。
       '{optimizeState.status === "error" && <p className="kh-inline-error">{optimizeState.message}</p>}',
+      // 同上:「规整格式」的错误态字段,唯一写入点是同文件 handleReformat 的
+      // catch —— setReformatState(failCellReformat(state, extractErrorMessage(
+      // err, "规整格式失败，请重试"))),同样只经人话层,不会有原始异常文本。
+      '{reformatState.status === "error" && <p className="kh-inline-error">{reformatState.message}</p>}',
     ],
   ],
   [

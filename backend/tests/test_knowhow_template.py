@@ -442,7 +442,18 @@ def test_append_commit_still_succeeds_despite_duplicate_titles(tmp_path, monkeyp
     assert len(detail["rows"]) == 2  # pre-existing row + the newly appended duplicate-titled one
 
 
-def test_append_commit_preserves_markdown_characters_and_newlines_verbatim(tmp_path, monkeypatch):
+def test_append_commit_normalizes_markdown_but_preserves_special_characters(tmp_path, monkeypatch):
+    """knowhow-md-normalize Task 5: commit_append now runs every non-empty
+    cell through rule_normalize (zero LLM) before storing, so this can no
+    longer assert byte-for-byte verbatim storage (its pre-Task-5 name/claim).
+    What must still hold — and is exactly what this test now pins — is that
+    markdown special characters (`**`/`_`/backtick/`#`) survive untouched;
+    the ONLY change rule_normalize makes to this already-clean input is
+    inserting the blank line CommonMark wants between a prose paragraph and
+    an immediately-following list (a formatting-only change: same characters,
+    same line content, one extra blank separator — see
+    test_md_normalize_rule.py/knowhow_normalize_golden.json for rule_normalize's
+    own dedicated unit coverage of that transform)."""
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00002033")
     nb = _mk_notebook(client, owner_h)
@@ -461,7 +472,9 @@ def test_append_commit_preserves_markdown_characters_and_newlines_verbatim(tmp_p
 
     detail = client.get(f"/api/notebooks/{nb}/knowhow/{table['id']}", headers=owner_h).json()
     row = detail["rows"][0]
-    assert row["cells"][col_ids["方法"]] == markdown_text
+    # rule_normalize's only change here: a blank line inserted before the list.
+    expected = "**加粗** _斜体_ `代码` # 标题\n\n- 步骤一\n- 步骤二"
+    assert row["cells"][col_ids["方法"]] == expected
 
 
 def test_append_commit_bad_file_400_and_writes_nothing(tmp_path, monkeypatch):

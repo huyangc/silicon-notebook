@@ -1171,6 +1171,13 @@ class KnowhowRowCreate(BaseModel):
 
 class KnowhowCellPatch(BaseModel):
     content_md: str
+    # Concurrency P1 (fix b): when set, the write goes through a SERVER-SIDE
+    # compare-and-write in one transaction (see routes.patch_knowhow_cell →
+    # update_knowhow_cells_guarded_atomic) — the stored content_md must still
+    # equal this baseline or the write is refused with 409, nothing written.
+    # The batch-reformat save path sends it; the MANUAL cell editor omits it
+    # (None) to keep its existing last-write-wins semantics.
+    expected_before: Optional[str] = None
 
 
 class KnowhowCellPatchResult(BaseModel):
@@ -1190,6 +1197,14 @@ class KnowhowCellsBatchPatch(BaseModel):
     column_id: str
     row_ids: List[str]
     content_md: str
+    # Concurrency P1 (fix b): OPTIONAL per-row baseline, POSITIONALLY PARALLEL to
+    # row_ids (expected_before[i] is row_ids[i]'s snapshot). When set, the whole
+    # fan-out is written through update_knowhow_cells_guarded_atomic as ONE
+    # all-or-nothing compare-and-write: if ANY target's stored content no longer
+    # equals its baseline the entire group is refused (409, nothing written) —
+    # never a half-written concept group. Omitted (None) → legacy
+    # update_knowhow_cells last-write-wins (the manual editor's shared-cell save).
+    expected_before: Optional[List[str]] = None
 
 
 # --- PR-2+3 Task 3: create-empty-table wizard backend --------------------------
@@ -1246,6 +1261,29 @@ class KnowhowAppendResult(BaseModel):
 
 class KnowhowCellOptimizeResult(BaseModel):
     suggestion_md: str
+
+
+# --- knowhow-md-normalize Task 4: /reformat HTTP endpoint result ------------
+# Same suggestion-only contract as KnowhowCellOptimizeResult above, but
+# reformat_cell (Task 3) is internally graceful about an unconfigured LLM
+# (never raises ModelNotConfiguredError — falls back to rule_normalize
+# instead), so the wire shape carries `source`/`changed` rather than an
+# unconditional single suggestion string: the caller reads `source` to decide
+# how to present the candidate (llm / rule/llm-failed / rule/no-llm) and
+# `changed` to skip a no-op diff.
+
+
+class KnowhowCellReformatResult(BaseModel):
+    candidate_md: str
+    source: str
+    changed: bool
+    # Concurrency P1 (fix a): the EXACT saved content_md the server read and fed
+    # to reformat_cell. /reformat reads the LIVE cell, so if another tab edited
+    # it after the batch modal snapshotted originalMd, source_md != that snapshot
+    # → the candidate derives from content the client never saw. The batch client
+    # compares source_md to its originalMd snapshot: mismatch routes that cell
+    # straight to stale-skipped and refuses to cache the candidate for duplicates.
+    source_md: str
 
 
 # --- PR-2+3 Task 10: Agent surface (HTTP+MCP shared core) --------------------
