@@ -136,20 +136,79 @@ function staticStringValue(
 }
 
 
-function directVariableBinding(statements, name) {
+function bindingNameContains(bindingName, name) {
+  if (ts.isIdentifier(bindingName)) return bindingName.text === name;
+  if (ts.isObjectBindingPattern(bindingName)) {
+    return bindingName.elements.some(
+      (element) => bindingNameContains(element.name, name),
+    );
+  }
+  return bindingName.elements.some(
+    (element) => (
+      !ts.isOmittedExpression(element)
+      && bindingNameContains(element.name, name)
+    ),
+  );
+}
+
+
+function declarationListBinding(declarationList, name) {
+  for (const declaration of declarationList.declarations) {
+    if (!bindingNameContains(declaration.name, name)) continue;
+    const isStaticConst = (
+      declarationList.flags & ts.NodeFlags.Const
+      && ts.isIdentifier(declaration.name)
+      && declaration.initializer
+    );
+    return {
+      declaration,
+      initializer: isStaticConst ? declaration.initializer : undefined,
+    };
+  }
+  return undefined;
+}
+
+
+function importBindsName(statement, name) {
+  if (ts.isImportEqualsDeclaration(statement)) {
+    return statement.name.text === name;
+  }
+  if (!ts.isImportDeclaration(statement) || !statement.importClause) {
+    return false;
+  }
+  if (statement.importClause.name?.text === name) return true;
+  const bindings = statement.importClause.namedBindings;
+  if (bindings && ts.isNamespaceImport(bindings)) {
+    return bindings.name.text === name;
+  }
+  return Boolean(
+    bindings
+    && ts.isNamedImports(bindings)
+    && bindings.elements.some((element) => element.name.text === name),
+  );
+}
+
+
+function directLexicalBinding(statements, name) {
   for (const statement of statements) {
-    if (!ts.isVariableStatement(statement)) continue;
-    for (const declaration of statement.declarationList.declarations) {
-      if (ts.isIdentifier(declaration.name) && declaration.name.text === name) {
-        return {
-          declaration,
-          initializer: (
-            statement.declarationList.flags & ts.NodeFlags.Const
-          )
-            ? declaration.initializer
-            : undefined,
-        };
-      }
+    if (ts.isVariableStatement(statement)) {
+      const binding = declarationListBinding(
+        statement.declarationList,
+        name,
+      );
+      if (binding) return binding;
+    }
+    if (
+      (
+        ts.isFunctionDeclaration(statement)
+        || ts.isClassDeclaration(statement)
+      )
+      && statement.name?.text === name
+    ) {
+      return { declaration: statement, initializer: undefined };
+    }
+    if (importBindsName(statement, name)) {
+      return { declaration: statement, initializer: undefined };
     }
   }
   return undefined;
@@ -164,7 +223,7 @@ function lexicalConstBinding(identifier) {
     current = current.parent
   ) {
     if (ts.isBlock(current) || ts.isSourceFile(current)) {
-      const binding = directVariableBinding(current.statements, name);
+      const binding = directLexicalBinding(current.statements, name);
       if (binding) {
         return binding.initializer
           ? binding
@@ -172,21 +231,39 @@ function lexicalConstBinding(identifier) {
       }
     }
     if (
+      (
+        ts.isForStatement(current)
+        || ts.isForInStatement(current)
+        || ts.isForOfStatement(current)
+      )
+      && current.initializer
+      && ts.isVariableDeclarationList(current.initializer)
+    ) {
+      const binding = declarationListBinding(current.initializer, name);
+      if (binding) {
+        return binding.initializer ? binding : undefined;
+      }
+    }
+    if (
       ts.isFunctionLike(current)
       && current.parameters.some(
-        (parameter) => (
-          ts.isIdentifier(parameter.name)
-          && parameter.name.text === name
-        ),
+        (parameter) => bindingNameContains(parameter.name, name),
       )
+    ) {
+      return undefined;
+    }
+    if (
+      ts.isFunctionLike(current)
+      && current.name
+      && ts.isIdentifier(current.name)
+      && current.name.text === name
     ) {
       return undefined;
     }
     if (
       ts.isCatchClause(current)
       && current.variableDeclaration
-      && ts.isIdentifier(current.variableDeclaration.name)
-      && current.variableDeclaration.name.text === name
+      && bindingNameContains(current.variableDeclaration.name, name)
     ) {
       return undefined;
     }
@@ -644,6 +721,49 @@ function hasPositionOrOrderQuery(relative, source) {
     return ts.isIdentifier(current) ? current.text : undefined;
   }
 
+  const astTypeNames = new Set([
+    "Declaration",
+    "Expression",
+    "Node",
+    "SourceFile",
+    "Statement",
+  ]);
+
+  function interfaceExtendsAst(declaration, seen) {
+    return (declaration.heritageClauses ?? []).some(
+      (clause) => clause.types.some((heritage) => {
+        const name = rightmostExpressionName(heritage.expression);
+        if (!name) return false;
+        if (astTypeNames.has(name)) return true;
+        if (
+          ["Partial", "Readonly", "Required"].includes(name)
+          && heritage.typeArguments?.length === 1
+        ) {
+          return definitelyAstNodeType(
+            heritage.typeArguments[0],
+            seen,
+          );
+        }
+        if (seen.has(name)) return false;
+        const inherited = typeDeclarations.get(name);
+        return Boolean(
+          inherited
+          && (
+            ts.isInterfaceDeclaration(inherited)
+              ? interfaceExtendsAst(
+                inherited,
+                new Set(seen).add(name),
+              )
+              : definitelyAstNodeType(
+                inherited.type,
+                new Set(seen).add(name),
+              )
+          )
+        );
+      }),
+    );
+  }
+
   function definitelyAstNodeType(type, seen = new Set()) {
     if (!type) return false;
     if (ts.isParenthesizedTypeNode(type)) {
@@ -651,6 +771,11 @@ function hasPositionOrOrderQuery(relative, source) {
     }
     if (ts.isUnionTypeNode(type)) {
       return type.types.every(
+        (part) => definitelyAstNodeType(part, seen),
+      );
+    }
+    if (ts.isIntersectionTypeNode(type)) {
+      return type.types.some(
         (part) => definitelyAstNodeType(part, seen),
       );
     }
@@ -662,13 +787,7 @@ function hasPositionOrOrderQuery(relative, source) {
     ) {
       return definitelyAstNodeType(type.typeArguments[0], seen);
     }
-    if ([
-      "Declaration",
-      "Expression",
-      "Node",
-      "SourceFile",
-      "Statement",
-    ].includes(name)) {
+    if (astTypeNames.has(name)) {
       return true;
     }
     if (
@@ -678,10 +797,16 @@ function hasPositionOrOrderQuery(relative, source) {
       const declaration = typeDeclarations.get(type.typeName.text);
       return Boolean(
         declaration
-        && ts.isTypeAliasDeclaration(declaration)
-        && definitelyAstNodeType(
-          declaration.type,
-          new Set(seen).add(type.typeName.text),
+        && (
+          ts.isInterfaceDeclaration(declaration)
+            ? interfaceExtendsAst(
+              declaration,
+              new Set(seen).add(type.typeName.text),
+            )
+            : definitelyAstNodeType(
+              declaration.type,
+              new Set(seen).add(type.typeName.text),
+            )
         )
       );
     }
@@ -1510,6 +1635,10 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
       + " return tree.statements[0]; }",
     "type Tree = ts.SourceFile;"
       + " function inspect(tree: Tree) { return tree.statements[0]; }",
+    "interface Tree extends ts.SourceFile {}"
+      + " function inspect(tree: Tree) { return tree.statements[0]; }",
+    "type Tree = ts.SourceFile & { tag: string };"
+      + " function inspect(tree: Tree) { return tree.statements[0]; }",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("example.test.mjs", mutation),
@@ -1551,6 +1680,8 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
     "const specifier = 'f' + 's'; const fs = import(specifier); void fs;",
     "const specifier = 'node:fs'; import(specifier);"
       + " function shadow() { const specifier = './helper'; return specifier; }",
+    "for (const specifier = 'node:fs'; flag;) {"
+      + " import(specifier); break; }",
     "import fs = require('node:fs'); void fs;",
   ]) {
     assert.deepEqual(
@@ -1629,6 +1760,13 @@ test("source policy leaves ordinary array operations alone", () => {
       + " interface Child extends Readonly<Base> {}"
       + " function good({ source }: Child) { return source.slice(); }",
     "let specifier = 'node:fs'; specifier = './helper'; import(specifier);",
+    "const specifier = 'node:fs';"
+      + " function safe({ specifier }) { import(specifier); }",
+    "const specifier = 'node:fs';"
+      + " function safe(options) {"
+      + " const { specifier } = options; import(specifier); }",
+    "const specifier = 'node:fs';"
+      + " function safe() { function specifier() {} import(specifier); }",
     "function good({ source }: Readonly<{ source: string[] }>) {"
       + " return source.slice(); }",
   ]) {
@@ -1752,6 +1890,16 @@ test("source policy follows dynamic imports to test-only helpers", () => {
     "const specifier = './dynamic-helper.ts'; import(specifier);"
       + " function shadow() {"
       + " const specifier = './other.ts'; return specifier; }",
+  );
+  assert.deepEqual(
+    [...policyRelativeModules(modules)].sort(),
+    ["dynamic-helper.ts", "feature.test.mjs"],
+  );
+
+  modules.set(
+    "feature.test.mjs",
+    "for (const specifier = './dynamic-helper.ts'; flag;) {"
+      + " import(specifier); break; }",
   );
   assert.deepEqual(
     [...policyRelativeModules(modules)].sort(),
