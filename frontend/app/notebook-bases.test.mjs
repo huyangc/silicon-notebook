@@ -1,12 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import {
   groupMountable,
   mergeMountCandidates,
   mountCostHint,
   MOUNT_HINT_THRESHOLD,
   resolvePromotionTarget,
+  shouldShowBorrowedBaseHint,
   toMountedBases,
 } from "./notebook-bases.ts";
 
@@ -78,18 +78,27 @@ test("resolvePromotionTarget 忽略同 owner 的个人库(晋升只能进公共�
 // 旧代码会让这条提示和上面的「该 notebook 尚无知识图谱，需先构建」提示同框
 // 打架。钉住:两条提示门控必须一致地要求 groupOf(askMode)==="strict" 且
 // base 确有 KG(kgAvailable && base_kg_available)。
-test(".chat-hint「将使用参考库推理」提示与「尚无知识图谱」提示同步要求 strict tab + base_kg_available，不会同框打架", async () => {
-  const page = await readFile(new URL("./page.tsx", import.meta.url), "utf8");
-  const match = page.match(
-    /\{([^\n]*?)\s*&&\s*\(\s*\n\s*<span className="chat-hint">/
-  );
-  assert.ok(match, "chat-hint span 的门控表达式没找到(page.tsx 结构变了?)");
-  const condition = match[1];
-  assert.match(condition, /groupOf\(askMode\) === "strict"/,
-    "丢了 tab 门控会让这条深入分析文案常驻在通用问答 tab 上,文案错位");
-  assert.match(condition, /currentNotebook\?\.base_kg_available/,
-    "丢了 base_kg_available 会在挂载的参考库尚未建图时,和「尚无知识图谱」提示同框打架");
-  assert.match(condition, /!currentNotebook\?\.kg_ready/);
+test("借用参考库提示要求 strict、可用 base KG、当前未建图", () => {
+  const baseline = {
+    strict: true,
+    kgAvailable: true,
+    baseKgAvailable: true,
+    kgReady: false,
+    baseCount: 1,
+  };
+  assert.equal(shouldShowBorrowedBaseHint(baseline), true);
+  for (const override of [
+    { strict: false },
+    { kgAvailable: false },
+    { baseKgAvailable: false },
+    { kgReady: true },
+    { baseCount: 0 },
+  ]) {
+    assert.equal(
+      shouldShowBorrowedBaseHint({ ...baseline, ...override }),
+      false,
+    );
+  }
 });
 
 // 最终整支审查 BLOCKER 1:参考库选择器过去只渲染 groupMountable(mountable),而

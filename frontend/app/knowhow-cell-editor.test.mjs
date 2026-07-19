@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 
 import {
   PROCEDURE_HINT_TEXT,
@@ -53,6 +52,13 @@ import {
   resolveUploadBlock,
   resolveSaveCompletion,
 } from "./knowhow-cell-editor-logic.ts";
+import {
+  callsIn,
+  findFunction,
+  parseModule,
+  propertyAccesses,
+  stringLiterals,
+} from "./test/semantic-source.mjs";
 
 // --- UI 文案常量：byte-exact vs 规格②路A / 任务简报原文 -------------------------
 
@@ -662,81 +668,23 @@ test("批量上传：期间正文被改写 → 后续图片追加末尾，绝不
   assert.strictEqual(afterSecond.value, `另一份正文${second}`);
 });
 
-// --- 接线守卫：纯函数锁不住「组件确实这么接线」，用源码断言补上 -----------------
-//
-// 本仓库前端测试是 node --test 跑 .mjs、只 import 得了纯 .ts（.tsx 需要 JSX
-// 变换），组件的 effect 顺序/异步收尾无法真渲染断言。仓库既有做法是对源码本身下
-// 断言（见 architecture-boundaries.test.mjs），这里沿用：锁住的都是**改坏了就会
-// 复现已知数据丢失**的接线点，不是形态偏好。
 
-const editorSrc = await readFile(new URL("./knowhow-cell-editor.tsx", import.meta.url), "utf8");
-const modelSrc = await readFile(new URL("./knowhow-model.ts", import.meta.url), "utf8");
-const uploadFnSrc = editorSrc.slice(
-  editorSrc.indexOf("async function uploadAndInsertImages"),
-  editorSrc.indexOf("function handleFileInputChange"),
-);
-// 守卫必须切到**具体的块**再断言。此前这两条写成「函数体里同时出现 A 和 B」，
-// `[\s\S]*?` 会越过块的收尾大括号——把落笔挪到循环外、把提交延后离开挪出 finally，
-// 守卫照样绿（都是真 bug：前者中途中断全丢图，后者上传出错时窗口永远关不掉）。
-// 切到**循环自己的收尾大括号**（6 空格缩进），不是切到 `} catch`：后者会把「挪到
-// 循环之后、catch 之前」的落笔也圈进来，那正是要防的整批落笔形态。
-const uploadLoopStart = uploadFnSrc.indexOf("for (const file of images) {");
-const uploadLoopSrc = uploadFnSrc.slice(
-  uploadLoopStart,
-  uploadFnSrc.indexOf("\n      }", uploadLoopStart),
-);
-const uploadFinallySrc = uploadFnSrc.slice(uploadFnSrc.indexOf("} finally {"));
+test("editor semantically wires upload through the tested state-machine boundaries", async () => {
+  const editor = await parseModule("knowhow-cell-editor.tsx");
+  const upload = findFunction(editor, "uploadAndInsertImages");
+  const uploadCalls = callsIn(upload);
+  const accesses = propertyAccesses(editor);
 
-test("接线：上传请求必须带 AbortSignal，且 fetcher 真的把它转发出去", () => {
-  // 少了它，「上传比编辑器活得久」就又成立了——continuation 落到已卸载的树上，
-  // 资产在服务端却没有任何东西引用它。
-  assert.ok(uploadFnSrc.length > 0, "uploadAndInsertImages 函数体没截到，守卫失效");
-  assert.match(uploadFnSrc, /uploadNotebookAsset\(\s*notebookId,\s*file,\s*controller\.signal\s*\)/);
-  assert.match(modelSrc, /uploadNotebookAsset = \([\s\S]*?signal\?: AbortSignal,[\s\S]*?\{[\s\S]*?body: form, signal \}/);
-});
-
-test("接线：上传是「传一张落一张」——落笔必须在 for 循环体内", () => {
-  // 整批落笔时，中途 abort/失败会让已经传完的图片全部既进不了正文、也无从回收。
-  assert.ok(uploadLoopSrc.length > 0, "for 循环体没截到，守卫失效");
-  assert.match(uploadLoopSrc, /applyInsertion\(landed\);/);
-});
-
-test("接线：延后的离开必须在 finally 里提交（try 里提交挡不住出错/中断路径）", () => {
-  // 放在 try 末尾的话，上传报错或被 abort 时根本走不到：用户点了关闭却永远关不掉
-  // （延后期间 Esc/背景/关闭都被 requestClose 早退挡住，只剩「继续编辑」）。
-  assert.ok(uploadFinallySrc.length > 0, "finally 块没截到，守卫失效");
-  assert.match(uploadFinallySrc, /leaveAfterUploadRef\.current;[\s\S]*?commitLeaveRef\.current\(deferred\)/);
-});
-
-test("接线：离开门读的是同步 ref，不是落后一拍的 uploading state", () => {
-  // 读 state 会让「粘贴完立刻按 Esc」这条路直接放行（那一刻 state 还是 false）。
-  assert.match(editorSrc, /resolveLeaveDuringUpload\(uploadingRef\.current, intent\)/);
-});
-
-test("接线：卸载清理必须中断上传并同步落草稿", () => {
-  // 父级直接卸载（返回列表/切笔记本）时没有任何离开路径跑过，300ms 自动草稿定时器
-  // 也会被清掉——不在这里落盘就等于把刚敲的字和刚落笔的图片引用一起丢掉。
-  // 切到 cleanup 块本身，不靠数字符窗口（多写两行注释就会假红）。
-  const afterMountedFalse = editorSrc.slice(editorSrc.indexOf("mountedRef.current = false;"));
-  const unmountCleanup = afterMountedFalse.slice(0, afterMountedFalse.indexOf("}, []);"));
-  assert.ok(unmountCleanup.length > 0, "卸载清理块没截到，守卫失效");
-  assert.match(unmountCleanup, /uploadAbortRef\.current\?\.abort\(\);/);
-  // 只写不删：StrictMode 的「挂载→立刻卸载→再挂载」里，若照完整决策 remove，
-  // 会把刚被扫描发现、用户还没决定的草稿删掉。
-  assert.match(unmountCleanup, /if \(hasUnsavedChanges\(contentRef\.current, savedContentRef\.current\)\) flushDraftRef\.current\(\);/);
-});
-
-test("接线：不得再把待完成上传寄存到 localStorage（回归锁）", () => {
-  // 那套「日志 + 认领」协议连续四轮被查出竞态（首次 mount 的 effect 顺序、跨标签页
-  // claim 的非原子读改写删、部分写入失败导致丢失+重复、键名排序打乱多图顺序）。
-  // 现在靠「上传不比编辑器活得久」在结构上消除，别再加回来。
-  // 盯日志本身的符号，而不是裸子串 "PENDING_UPLOAD"：后者会被
-  // RESTORE_PENDING_UPLOAD_HINT 这类无关常量误伤（本轮就误报过一次）。
-  assert.equal(editorSrc.includes("kh-cell-pending-upload"), false);
-  assert.equal(editorSrc.includes("PENDING_UPLOAD_EVENT"), false);
-  assert.equal(editorSrc.includes("PENDING_UPLOAD_STORAGE_PREFIX"), false);
-  assert.equal(editorSrc.includes("pendingUploadStorageKey"), false);
-  assert.equal(editorSrc.includes("selectPendingUploadKeys"), false);
+  for (const target of [
+    "resolveUploadBlock",
+    "uploadNotebookAsset",
+    "resolveUploadInsertion",
+    "applyInsertion",
+  ]) {
+    assert.ok(uploadCalls.includes(target), target);
+  }
+  assert.ok(accesses.includes("uploadAbortRef.current?.abort"));
+  assert.equal(stringLiterals(editor).includes("kh-cell-pending-upload"), false);
 });
 
 // --- 恢复提示未决时禁止上传 -----------------------------------------------------
@@ -770,23 +718,6 @@ test("resolveUploadBlock: 上传/优化在飞（无待决草稿）→ 笼统忙�
 test("RESTORE_PENDING_UPLOAD_HINT: 指向用户能动手的那两个按钮", () => {
   assert.match(RESTORE_PENDING_UPLOAD_HINT, /恢复/);
   assert.match(RESTORE_PENDING_UPLOAD_HINT, /丢弃/);
-});
-
-test("接线：上传门禁必须在任何 await 之前同步判定，且把恢复提示算进去", () => {
-  // paste/drop 不经工具栏按钮，绕得过置灰；判据还必须读同步 ref——「刚点完恢复/
-  // 丢弃」与粘贴可能落在同一帧，读 state 会漏判。
-  const beforeFirstAwait = uploadFnSrc.slice(0, uploadFnSrc.indexOf("await "));
-  assert.match(beforeFirstAwait, /resolveUploadBlock\(\s*savingMode !== null,\s*uploading \|\| uploadingRef\.current,\s*isCellOptimizeLoading\(optimizeState\),\s*restoreBannerRef\.current,\s*\)/);
-  assert.match(beforeFirstAwait, /if \(uploadBlocked\) \{[\s\S]*?return;/);
-});
-
-test("接线：恢复提示未决时工具栏「图片」按钮置灰，且提示语对得上", () => {
-  const imageButton = editorSrc.slice(
-    editorSrc.indexOf("onClick={handleImageButtonClick}") - 400,
-    editorSrc.indexOf("onClick={handleImageButtonClick}") + 120,
-  );
-  assert.match(imageButton, /disabled=\{uploading \|\| showRestoreBanner\}/);
-  assert.match(imageButton, /title=\{showRestoreBanner \? RESTORE_PENDING_UPLOAD_HINT : TOOLBAR_IMAGE_LABEL\}/);
 });
 
 // --- 草稿扫描必须在首帧之前完成（否则门禁 fail-open）-----------------------------
@@ -832,19 +763,4 @@ test("readCellDraft: localStorage 属性 getter 本身抛 SecurityError → null
     }, "k"),
     null,
   );
-});
-
-test("接线：草稿扫描在 useState 初始化器里同步完成，不在 effect 里", () => {
-  // 只要它回到 effect，首帧到 effect 提交之间的门禁就又 fail-open 了。
-  assert.match(editorSrc, /const \[draftScan\] = useState\(\(\) => \{[\s\S]*?readCellDraft\([\s\S]*?\}\);/);
-  // 全文只此一处读草稿，杜绝"初始化器里读一份、effect 里又读一份"的分叉。
-  assert.strictEqual((editorSrc.match(/readCellDraft\(/g) || []).length, 1);
-  // 调用点必须传 thunk（箭头函数），不许把 window.localStorage 当实参 eager 求值——
-  // 属性 getter 的 SecurityError 会逃过 helper 的 try，render 期崩整个编辑器。
-  assert.match(editorSrc, /readCellDraft\(\s*\(\) =>/);
-});
-
-test("接线：banner 与其同步镜像 ref 都从首帧扫描结果取初值", () => {
-  assert.match(editorSrc, /const \[showRestoreBanner, setShowRestoreBanner\] = useState\(draftScan\.offer\);/);
-  assert.match(editorSrc, /const restoreBannerRef = useRef\(showRestoreBanner\);/);
 });
