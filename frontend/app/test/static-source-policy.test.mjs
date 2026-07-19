@@ -49,6 +49,13 @@ const AST_POSITION_METHODS = new Set([
   "getFullStart",
   "getStart",
 ]);
+const AST_NODE_FACTORIES = new Set([
+  "createSourceFile",
+  "findFunction",
+  "findFunctionIn",
+  "parseModule",
+  "parseText",
+]);
 
 
 function isSourceModule(relative) {
@@ -91,7 +98,11 @@ function unwrapExpression(expression) {
 }
 
 
-function staticStringValue(expression) {
+function staticStringValue(
+  expression,
+  bindings = new Map(),
+  seen = new Set(),
+) {
   const current = unwrapExpression(expression);
   if (
     ts.isStringLiteralLike(current)
@@ -100,16 +111,43 @@ function staticStringValue(expression) {
     return current.text;
   }
   if (
+    ts.isIdentifier(current)
+    && bindings.has(current.text)
+    && !seen.has(current.text)
+  ) {
+    return staticStringValue(
+      bindings.get(current.text),
+      bindings,
+      new Set(seen).add(current.text),
+    );
+  }
+  if (
     ts.isBinaryExpression(current)
     && current.operatorToken.kind === ts.SyntaxKind.PlusToken
   ) {
-    const left = staticStringValue(current.left);
-    const right = staticStringValue(current.right);
+    const left = staticStringValue(current.left, bindings, seen);
+    const right = staticStringValue(current.right, bindings, seen);
     return left === undefined || right === undefined
       ? undefined
       : left + right;
   }
   return undefined;
+}
+
+
+function staticStringBindings(sourceFile) {
+  const bindings = new Map();
+  (function visit(node) {
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.initializer
+    ) {
+      bindings.set(node.name.text, node.initializer);
+    }
+    ts.forEachChild(node, visit);
+  }(sourceFile));
+  return bindings;
 }
 
 
@@ -127,21 +165,21 @@ function staticPropertyName(expression) {
 }
 
 
-function staticModuleCallSpecifier(node) {
+function staticModuleCallSpecifier(node, bindings = new Map()) {
   if (!ts.isCallExpression(node) || node.arguments.length === 0) {
     return undefined;
   }
-  const first = unwrapExpression(node.arguments[0]);
-  if (!ts.isStringLiteralLike(first)) return undefined;
+  const first = staticStringValue(node.arguments[0], bindings);
+  if (first === undefined) return undefined;
   const callee = unwrapExpression(node.expression);
   if (callee.kind === ts.SyntaxKind.ImportKeyword) {
-    return first.text;
+    return first;
   }
   if (
     ts.isIdentifier(callee)
     && callee.text === "require"
   ) {
-    return first.text;
+    return first;
   }
   if (
     (
@@ -152,7 +190,7 @@ function staticModuleCallSpecifier(node) {
     && ts.isIdentifier(unwrapExpression(callee.expression))
     && unwrapExpression(callee.expression).text === "module"
   ) {
-    return first.text;
+    return first;
   }
   return undefined;
 }
@@ -183,6 +221,7 @@ function relativeImports(relative, source, moduleNames) {
     true,
     scriptKind(relative),
   );
+  const stringBindings = staticStringBindings(sourceFile);
   const imports = [];
   function resolve(specifier) {
     if (!specifier.startsWith(".")) return undefined;
@@ -223,7 +262,7 @@ function relativeImports(relative, source, moduleNames) {
       const resolved = resolve(node.moduleReference.expression.text);
       if (resolved) imports.push(resolved);
     }
-    const callSpecifier = staticModuleCallSpecifier(node);
+    const callSpecifier = staticModuleCallSpecifier(node, stringBindings);
     if (callSpecifier !== undefined) {
       const resolved = resolve(callSpecifier);
       if (resolved) imports.push(resolved);
@@ -332,6 +371,7 @@ function isDefinitelyArrayType(type) {
 
 function moduleReadsFiles(sourceFile) {
   let readsFiles = false;
+  const stringBindings = staticStringBindings(sourceFile);
   const isFsSpecifier = (value) => (
     /^(?:node:)?fs(?:\/promises)?$/.test(value)
   );
@@ -358,7 +398,7 @@ function moduleReadsFiles(sourceFile) {
       readsFiles = true;
       return;
     }
-    const callSpecifier = staticModuleCallSpecifier(node);
+    const callSpecifier = staticModuleCallSpecifier(node, stringBindings);
     if (callSpecifier !== undefined && isFsSpecifier(callSpecifier)) {
       readsFiles = true;
       return;
@@ -382,6 +422,7 @@ function hasPositionOrOrderQuery(relative, source) {
   const registeredReader = (
     readsFiles && STRICT_TEXT_READER_ALLOWLIST.has(relative)
   );
+  const stringBindings = staticStringBindings(sourceFile);
   const typeDeclarations = new Map();
   (function recordTypeDeclarations(node) {
     if (
@@ -429,6 +470,34 @@ function hasPositionOrOrderQuery(relative, source) {
       : "unknown";
   }
 
+  function rightmostExpressionName(expression) {
+    let current = expression;
+    while (ts.isPropertyAccessExpression(current)) current = current.name;
+    return ts.isIdentifier(current) ? current.text : undefined;
+  }
+
+  function resolvedDeclarationMembers(declaration, seen) {
+    if (ts.isTypeAliasDeclaration(declaration)) {
+      return resolvedTypeMembers(declaration.type, seen);
+    }
+    const inherited = (declaration.heritageClauses ?? []).flatMap(
+      (clause) => clause.types.flatMap((heritage) => {
+        const name = rightmostExpressionName(heritage.expression);
+        if (!name || seen.has(name)) return [];
+        const inheritedDeclaration = typeDeclarations.get(name);
+        return inheritedDeclaration
+          ? [
+            ...(resolvedDeclarationMembers(
+              inheritedDeclaration,
+              new Set(seen).add(name),
+            ) ?? []),
+          ]
+          : [];
+      }),
+    );
+    return [...declaration.members, ...inherited];
+  }
+
   function resolvedTypeMembers(type, seen = new Set()) {
     if (!type) return undefined;
     if (ts.isParenthesizedTypeNode(type)) {
@@ -440,12 +509,16 @@ function hasPositionOrOrderQuery(relative, source) {
       && ts.isIdentifier(type.typeName)
       && !seen.has(type.typeName.text)
     ) {
+      if (
+        ["Partial", "Readonly", "Required"].includes(type.typeName.text)
+        && type.typeArguments?.length === 1
+      ) {
+        return resolvedTypeMembers(type.typeArguments[0], seen);
+      }
       const declaration = typeDeclarations.get(type.typeName.text);
       if (!declaration) return undefined;
       const nextSeen = new Set(seen).add(type.typeName.text);
-      return ts.isInterfaceDeclaration(declaration)
-        ? declaration.members
-        : resolvedTypeMembers(declaration.type, nextSeen);
+      return resolvedDeclarationMembers(declaration, nextSeen);
     }
     if (ts.isIntersectionTypeNode(type)) {
       return type.types.flatMap(
@@ -480,6 +553,15 @@ function hasPositionOrOrderQuery(relative, source) {
       type
       && ts.isTypeReferenceNode(type)
       && ts.isIdentifier(type.typeName)
+      && ["Partial", "Readonly", "Required"].includes(type.typeName.text)
+      && type.typeArguments?.length === 1
+    ) {
+      return definitelyArrayType(type.typeArguments[0], seen);
+    }
+    if (
+      type
+      && ts.isTypeReferenceNode(type)
+      && ts.isIdentifier(type.typeName)
       && !seen.has(type.typeName.text)
     ) {
       const declaration = typeDeclarations.get(type.typeName.text);
@@ -493,6 +575,30 @@ function hasPositionOrOrderQuery(relative, source) {
       );
     }
     return false;
+  }
+
+  function rightmostTypeName(typeName) {
+    let current = typeName;
+    while (ts.isQualifiedName(current)) current = current.right;
+    return ts.isIdentifier(current) ? current.text : undefined;
+  }
+
+  function definitelyAstNodeType(type) {
+    if (!type) return false;
+    if (ts.isParenthesizedTypeNode(type)) {
+      return definitelyAstNodeType(type.type);
+    }
+    if (ts.isUnionTypeNode(type)) {
+      return type.types.every(definitelyAstNodeType);
+    }
+    if (!ts.isTypeReferenceNode(type)) return false;
+    return [
+      "Declaration",
+      "Expression",
+      "Node",
+      "SourceFile",
+      "Statement",
+    ].includes(rightmostTypeName(type.typeName));
   }
 
   function isRawReaderExpression(expression, scope) {
@@ -526,6 +632,16 @@ function hasPositionOrOrderQuery(relative, source) {
     const current = unwrapExpression(expression);
     if (ts.isIdentifier(current)) {
       return bindingKind(scope, current.text);
+    }
+    const moduleSpecifier = staticModuleCallSpecifier(
+      current,
+      stringBindings,
+    );
+    if (
+      moduleSpecifier !== undefined
+      && /^(?:node:)?fs(?:\/promises)?$/.test(moduleSpecifier)
+    ) {
+      return "fs-namespace";
     }
     if (ts.isArrayLiteralExpression(current)) {
       const spreadKinds = current.elements
@@ -629,7 +745,35 @@ function hasPositionOrOrderQuery(relative, source) {
       && unwrapExpression(current.expression.expression).text === "Array"
       && current.arguments.length > 0
     ) {
-      return expressionKind(current.arguments[0], scope);
+      const inputKind = expressionKind(current.arguments[0], scope);
+      return ["source", "ast-collection"].includes(inputKind)
+        ? inputKind
+        : "array";
+    }
+    if (
+      ts.isCallExpression(current)
+      && AST_NODE_FACTORIES.has(
+        staticPropertyName(current.expression)
+        ?? (
+          ts.isIdentifier(current.expression)
+            ? current.expression.text
+            : ""
+        ),
+      )
+    ) {
+      return "ast-node";
+    }
+    if (
+      registeredReader
+      && (
+        ts.isCallExpression(current)
+        || ts.isNewExpression(current)
+      )
+      && (current.arguments ?? []).some(
+        (argument) => expressionKind(argument, scope) === "source",
+      )
+    ) {
+      return "source";
     }
     if (
       (
@@ -673,6 +817,21 @@ function hasPositionOrOrderQuery(relative, source) {
     return "unknown";
   }
 
+  function propertyNameText(name) {
+    if (!name) return undefined;
+    if (
+      ts.isIdentifier(name)
+      || ts.isStringLiteralLike(name)
+      || ts.isNumericLiteral(name)
+    ) {
+      return name.text;
+    }
+    if (ts.isComputedPropertyName(name)) {
+      return staticStringValue(name.expression);
+    }
+    return undefined;
+  }
+
   function declarePattern(
     name,
     type,
@@ -686,6 +845,8 @@ function hasPositionOrOrderQuery(relative, source) {
       if (kind === undefined) {
         kind = definitelyArrayType(type) || initializerKind === "array"
           ? "array"
+          : definitelyAstNodeType(type)
+            ? "ast-node"
           : initializerKind !== "unknown"
             ? initializerKind
             : defaultKind(name.text);
@@ -708,12 +869,7 @@ function hasPositionOrOrderQuery(relative, source) {
           continue;
         }
         const property = element.propertyName
-          ? (
-            ts.isIdentifier(element.propertyName)
-            || ts.isStringLiteralLike(element.propertyName)
-          )
-            ? element.propertyName.text
-            : undefined
+          ? propertyNameText(element.propertyName)
           : ts.isIdentifier(element.name)
             ? element.name.text
             : undefined;
@@ -765,12 +921,7 @@ function hasPositionOrOrderQuery(relative, source) {
 
   function objectBindingProperty(element) {
     if (element.propertyName) {
-      return (
-        ts.isIdentifier(element.propertyName)
-        || ts.isStringLiteralLike(element.propertyName)
-      )
-        ? element.propertyName.text
-        : undefined;
+      return propertyNameText(element.propertyName);
     }
     return ts.isIdentifier(element.name) ? element.name.text : undefined;
   }
@@ -858,6 +1009,74 @@ function hasPositionOrOrderQuery(relative, source) {
     return expressionKind(expression, scope);
   }
 
+  function assignmentIsConditional(node, logical = false) {
+    return logical || Boolean(ts.findAncestor(
+      node,
+      (ancestor) => (
+        ts.isIfStatement(ancestor)
+        || ts.isConditionalExpression(ancestor)
+        || ts.isSwitchStatement(ancestor)
+        || ts.isIterationStatement(ancestor, false)
+        || ts.isTryStatement(ancestor)
+      ),
+    ));
+  }
+
+  function assignBinding(scope, name, kind, conditional = false) {
+    if (kind === "unknown") return;
+    for (let current = scope; current; current = current.parent) {
+      if (current.bindings.has(name)) {
+        current.bindings.set(
+          name,
+          conditional
+            ? joinedKind(current.bindings.get(name), kind)
+            : kind,
+        );
+        return;
+      }
+    }
+    scope.bindings.set(name, kind);
+  }
+
+  function objectAssignmentTarget(property) {
+    if (ts.isShorthandPropertyAssignment(property)) {
+      return property.name.text;
+    }
+    if (ts.isPropertyAssignment(property)) {
+      const target = unwrapExpression(property.initializer);
+      return ts.isIdentifier(target) ? target.text : undefined;
+    }
+    return undefined;
+  }
+
+  function applyObjectAssignment(node, scope, conditional) {
+    const left = unwrapExpression(node.left);
+    if (
+      !ts.isObjectLiteralExpression(left)
+      || expressionKind(node.right, scope) !== "ast-node"
+    ) {
+      return false;
+    }
+    for (const property of left.properties) {
+      if (
+        !ts.isShorthandPropertyAssignment(property)
+        && !ts.isPropertyAssignment(property)
+      ) {
+        continue;
+      }
+      const propertyName = propertyNameText(property.name);
+      if (["pos", "end"].includes(propertyName)) return true;
+      const target = objectAssignmentTarget(property);
+      if (!target) continue;
+      if (AST_COLLECTIONS.has(propertyName)) {
+        assignBinding(scope, target, "ast-collection", conditional);
+      } else if (AST_POSITION_METHODS.has(propertyName)) {
+        assignBinding(scope, target, "ast-position-method", conditional);
+      }
+    }
+    return false;
+  }
+
   function visit(node, scope) {
     if (found) return;
     if (ts.isSourceFile(node)) {
@@ -918,36 +1137,32 @@ function hasPositionOrOrderQuery(relative, source) {
         return;
       }
     }
-    if (
-      ts.isBinaryExpression(node)
-      && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
-      && ts.isIdentifier(node.left)
-    ) {
+    if (ts.isBinaryExpression(node)) {
+      const logicalAssignment = [
+        ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+        ts.SyntaxKind.BarBarEqualsToken,
+        ts.SyntaxKind.QuestionQuestionEqualsToken,
+      ].includes(node.operatorToken.kind);
+      const simpleAssignment = (
+        node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      );
       const rightKind = expressionKind(node.right, scope);
-      if (rightKind !== "unknown") {
-        for (let current = scope; current; current = current.parent) {
-          if (current.bindings.has(node.left.text)) {
-            const conditional = ts.findAncestor(
-              node,
-              (ancestor) => (
-                ts.isIfStatement(ancestor)
-                || ts.isConditionalExpression(ancestor)
-                || ts.isSwitchStatement(ancestor)
-                || ts.isIterationStatement(ancestor, false)
-              ),
-            );
-            current.bindings.set(
-              node.left.text,
-              conditional
-                ? joinedKind(
-                  current.bindings.get(node.left.text),
-                  rightKind,
-                )
-                : rightKind,
-            );
-            break;
-          }
-        }
+      const conditional = assignmentIsConditional(
+        node,
+        logicalAssignment,
+      );
+      if (
+        (simpleAssignment || logicalAssignment)
+        && ts.isIdentifier(node.left)
+      ) {
+        assignBinding(scope, node.left.text, rightKind, conditional);
+      }
+      if (
+        simpleAssignment
+        && applyObjectAssignment(node, scope, conditional)
+      ) {
+        found = true;
+        return;
       }
     }
     if (
@@ -1162,6 +1377,16 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
     "const { pos } = node; void pos;",
     "sourceFile.statements.length;",
     "sourceFile.statements.slice(1);",
+    "({ pos } = node);",
+    "({ statements: items } = sourceFile); items[0];",
+    "function inspect(tree: ts.SourceFile) { return tree.statements[0]; }",
+    "const tree = ts.createSourceFile('a.ts', code); tree.statements[0];",
+    "const tree = parseText(code, 'a.ts'); tree.statements[0];",
+    "findFunction(tree, 'save').getStart();",
+    "({ getStart: start } = node); start();",
+    "let body = source; try { body = []; } catch {} body.slice(1);",
+    "let body = []; body ||= source; body.slice(1);",
+    "let body = source; body &&= []; body.slice(1);",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("example.test.mjs", mutation),
@@ -1198,6 +1423,9 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
     "const fs = require('fs', undefined); void fs;",
     "const fs = module.require('node:fs'); void fs;",
     "const fs = (module).require('node:fs'); void fs;",
+    "const fs = import('node:' + 'fs'); void fs;",
+    "const fs = require('f' + 's'); void fs;",
+    "const specifier = 'f' + 's'; const fs = import(specifier); void fs;",
     "import fs = require('node:fs'); void fs;",
   ]) {
     assert.deepEqual(
@@ -1234,6 +1462,11 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
     "const body = await load(url, 'utf8'); body[0];",
     "const load = readFile; const body = await load(url, 'utf8'); body.length;",
     "const body = decode(await readFile(url, 'utf8')); body.slice(1);",
+    "const body = decode(await readFile(url, 'utf8')); body[0];",
+    "const body = decode(await readFile(url, 'utf8')); body.length;",
+    "const fs = await import('node:fs/promises');"
+      + " const { readFile: load } = fs;"
+      + " const body = await load(url, 'utf8'); body[0];",
   ]) {
     const importLine = operation.includes("load(url")
       && !operation.startsWith("const load")
@@ -1265,6 +1498,10 @@ test("source policy leaves ordinary array operations alone", () => {
     "const model = { properties: [1] }; model.properties[0];",
     "interface P { source: string[] }"
       + " function good({ source }: P) { return source.slice(); }",
+    "interface Base { source: string[] } interface Child extends Base {}"
+      + " function good({ source }: Child) { return source.slice(); }",
+    "function good({ source }: Readonly<{ source: string[] }>) {"
+      + " return source.slice(); }",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("example.test.ts", source),
@@ -1272,6 +1509,15 @@ test("source policy leaves ordinary array operations alone", () => {
       source,
     );
   }
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "import { readFile } from 'node:fs/promises';\n"
+        + "const items = getItems(); const copy = Array.from(items);"
+        + " copy.slice(); copy[0]; copy.length;",
+    ),
+    [],
+  );
 });
 
 
@@ -1347,6 +1593,9 @@ test("source policy follows dynamic imports to test-only helpers", () => {
     "const helper = require('./dynamic-helper.ts'); void helper;",
     "const helper = module.require('./dynamic-helper.ts'); void helper;",
     "const helper = (module).require('./dynamic-helper.ts'); void helper;",
+    "const helper = import('./dynamic-' + 'helper.ts'); void helper;",
+    "const specifier = './dynamic-helper.ts';"
+      + " const helper = import(specifier); void helper;",
   ]) {
     modules.set("feature.test.mjs", entrypoint);
     assert.deepEqual(
