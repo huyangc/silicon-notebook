@@ -615,6 +615,40 @@ test("F3-2：闭合 span 之后散文里的 `](`（`` `code` [docs](/url\\n\"tit
 });
 
 // ---------------------------------------------------------------------------
+// F3 round-3（本批 review）— 目的地跟踪器此前对**每个** `)` 都减目的地深度，于是带**引号
+// 标题**、标题里在软换行前含 `)` 的合法链接 `[x](url "title )\ncontinued")` 里，标题的 `)`
+// 被误当目的地闭合括号：line 1 被判「已闭合」、门放行、normalizeImpl 注入空行把标题拆断、
+// 链接退化（符号盲的 contentInvariant 兜不住）。修复：按 CommonMark 行内链接文法建模——目的地
+// 跑到空白或 `)` 后，可选**标题**以 `"`/`'`/`(` 开、分别由 `"`/`'`/`)` 闭（转义感知）；标题
+// 内的 `)` **不**减目的地深度。行尾仍开着（目的地 OR 标题未闭）= 拒绝（fail-closed 不变，
+// 此前只是被标题的 `)` 提前闭合）。镜像 test_md_normalize_rule.py 的 test_link_title_*。
+// ---------------------------------------------------------------------------
+
+test("F3-3：引号标题内 `)` 跨软换行（`[x](url \"title )\\ncontinued\")`）-> 拒绝、逐字原样返回", () => {
+  const raw = '[x](url "title )\ncontinued")';
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw); // 逐字原样——链接保留
+});
+
+test("F3-3：同行完整、标题含 `)` 的链接（`[x](url \"title )\") 同行完整`）不 rich", () => {
+  // 过度拒绝锁：目的地正确地跨标题保持开着，真正的闭合 `)` 才关掉链接。
+  assert.strictEqual(isRichMarkdown('[x](url "title )") 同行完整'), false);
+});
+
+test("F3-3：单引号标题跨软换行（`[x](url 'ti)tle'\\n)`）-> 拒绝", () => {
+  // 标题在 line 1 闭合（`'ti)tle'`、内部 `)` 忽略），但目的地闭合 `)` 在 line 2 -> line 1
+  // 结束时链接仍开着 -> 拒绝。
+  const raw = "[x](url 'ti)tle'\n)";
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw);
+});
+
+test("F3-3：同行完整的括号标题 `(title)`（`[x](url (title))`）不 rich", () => {
+  // 括号标题在目的地后的 `(` 开（闭 `)`），第一个 `)` 闭标题、链接的 `)` 闭链接 -> 不 rich。
+  assert.strictEqual(isRichMarkdown('[x](url (title))'), false);
+});
+
+// ---------------------------------------------------------------------------
 // F3 — marker 宽度必须按 CODE POINT 计，不是 UTF-16 单元 —— 镜像
 // test_md_normalize_rule.py 的 test_astral_ordered_marker_child_indented_by_
 // codepoint_width。星际有序 marker 如 𝟙.（U+1D7D9，UTF-16 里是代理对，category

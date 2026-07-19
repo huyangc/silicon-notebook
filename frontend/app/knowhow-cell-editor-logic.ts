@@ -844,17 +844,22 @@ function endsWithOpenInlineSpan(line: string): boolean {
     i += 1;
   }
   if (depth > 0) return true;
-  // 4) 链接目的地圆括号（F3）：`](` 之后进入目的地、追踪未闭合的 `(` 深度（转义感知）。
-  //    行尾仍在目的地内 = `[docs](/url\n"title")` 这类目的地跨软换行（`]` 处方括号深度已归零、
-  //    规则 3 看不见它，但 `(`-目的地没闭）。**只**在见过 `](` 后才追踪——散文里的裸 `(未闭合`
-  //    不受影响（严格限定链接目的地上下文）。对应 Python `_ends_with_open_inline_span` 第 4 段。
-  //    Round-2（本批 review）：武装 `](` 前须确认它落在**散文**里、而非同行**已闭合**的行内代码/
-  //    公式 span 内——`` `x](` `` 里 `](` 是代码 span 内容、不是链接起头，旧实现把它也武装、整格误判
-  //    rich。本段同时追踪 code-span（镜像规则 2：无转义、等长 run 闭合）与 math-span（镜像规则 1：
-  //    转义感知、等长 run 闭合）状态，落在任一已开着 span 内的 `](` **不**武装；散文里的 `](` 仍武装。
-  //    跨行**开着**的 code/math span 已由规则 1/2 先行拒绝（走不到这里），故此处每个 span 必在行尾前闭合。
-  let inDest = false;
-  let destDepth = 0;
+  // 4) 链接目的地 + 标题（F3；round-3 扩展到 title）：`](` 之后进入链接目标区，按 CommonMark 行内
+  //    链接文法追踪三个子相——"dest"（目的地文本：转义感知、圆括号平衡、**空白**结束进入 "gap"）、
+  //    "gap"（目的地后：等可选 title opener `"`/`'`/`(` 或链接闭合 `)`）、"title"（标题内：转义感知，
+  //    只等对应 title-close `"`/`'`/`)`）。**标题内的 `)` 不减目的地深度**（round-3 核心修复：旧实现
+  //    在每个 `)` 都减、把带引号标题里的 `)` 误当目的地闭合括号 -> `[x](url "title )\ncontinued")` 被判
+  //    「已闭合」漏拒、注入空行塞进标题拆断链接）。行尾仍在任一子相内 = 链接跨软换行、未闭 -> 拒绝
+  //    （fail-closed 不变，只是不再被标题的 `)` 提前闭合）。**只**在见过 `](` 后才进入——散文里的裸
+  //    `(未闭合` 不受影响。对应 Python `_ends_with_open_inline_span` 第 4 段。
+  //    Round-2：武装 `](` 前须确认它落在**散文**里、而非同行**已闭合**的行内代码/公式 span 内——
+  //    `` `x](` `` 里 `](` 是代码 span 内容、不是链接起头，旧实现把它也武装、整格误判 rich。本段同时
+  //    追踪 code-span（镜像规则 2：无转义、等长 run 闭合）与 math-span（镜像规则 1：转义感知、等长 run
+  //    闭合）状态，落在任一已开着 span 内的 `](` **不**武装；散文里的 `](` 仍武装。跨行**开着**的
+  //    code/math span 已由规则 1/2 先行拒绝（走不到这里），故此处每个 span 必在行尾前闭合。
+  let linkPhase: "dest" | "gap" | "title" | null = null; // null | 目的地文本 | 目的地后空白 | 标题内
+  let destDepth = 0; // 目的地圆括号平衡深度（转义感知）
+  let titleClose = ""; // 当前标题的闭合字符（" / ' / )）
   let codeInside = false; // 反引号 code-span：镜像规则 2（无转义、等长 run 闭合）
   let codeLen = 0;
   let mathInside = false; // `$` math-span：镜像规则 1（转义感知、等长 run 闭合）
@@ -862,8 +867,18 @@ function endsWithOpenInlineSpan(line: string): boolean {
   i = 0;
   while (i < n) {
     const ch = line[i];
-    if (inDest) {
-      // 目的地内：转义感知、只数圆括号深度（同旧实现）
+    if (linkPhase === "title") {
+      // 标题内：转义感知，只等 titleClose；`)` 不减目的地深度
+      if (ch === "\\") {
+        i += 2; // 转义下一字符：\" / \' / \) 既不闭标题也不动深度
+        continue;
+      }
+      if (ch === titleClose) linkPhase = "gap"; // 标题闭合 -> 回到间隙，等链接闭合 `)`（或另一个 title）
+      i += 1;
+      continue;
+    }
+    if (linkPhase === "dest") {
+      // 目的地文本：转义感知、平衡圆括号；空白结束目的地
       if (ch === "\\") {
         i += 2; // 转义下一字符：\( / \) 既不开也不合目的地深度
         continue;
@@ -871,9 +886,24 @@ function endsWithOpenInlineSpan(line: string): boolean {
       if (ch === "(") destDepth += 1;
       else if (ch === ")") {
         destDepth -= 1;
-        if (destDepth === 0) inDest = false; // 目的地闭合
+        if (destDepth === 0) linkPhase = null; // 目的地圆括号归零 = 链接整体闭合（无标题）
+      } else if (ch === " " || ch === "\t") {
+        linkPhase = "gap"; // 空白结束目的地 -> 等可选 title 或闭合 `)`
       }
       i += 1;
+      continue;
+    }
+    if (linkPhase === "gap") {
+      // 目的地后：等 title-opener（"/'/(）或链接闭合 `)`
+      if (ch === ")") linkPhase = null; // 无标题（或标题后）的链接闭合 `)`
+      else if (ch === '"' || ch === "'") {
+        linkPhase = "title";
+        titleClose = ch;
+      } else if (ch === "(") {
+        linkPhase = "title";
+        titleClose = ")";
+      }
+      i += 1; // 其余（空白/异常字符）留在 gap，行尾仍开着即拒绝
       continue;
     }
     if (codeInside) {
@@ -940,14 +970,14 @@ function endsWithOpenInlineSpan(line: string): boolean {
       continue;
     }
     if (ch === "]" && i + 1 < n && line[i + 1] === "(") {
-      inDest = true; // 散文里的 `](` 起头目的地：`(` 计一层深度，跳过这两个字符
+      linkPhase = "dest"; // 散文里的 `](` 起头目的地：`(` 计一层深度，跳过这两个字符
       destDepth = 1;
       i += 2;
       continue;
     }
     i += 1;
   }
-  return inDest;
+  return linkPhase !== null; // 行尾仍在 dest/gap/title 任一子相内 = 链接跨软换行、未闭
 }
 
 // F1（review）：一行**任意位置**是否出现「标签形状」的未转义 `<`（`<` 紧跟 ASCII 字母、

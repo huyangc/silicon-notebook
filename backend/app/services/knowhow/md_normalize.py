@@ -298,12 +298,15 @@ def _ends_with_open_inline_span(line: str) -> bool:
       3. 链接/图片文本方括号 `[` `]`：**未转义**的方括号深度（`[` +1、`]` 归零 floor 0）。
          行尾深度 >0 = 有个 `[label` 跨行没闭合（`[label\\ncontinued](url)` 会被空行拆断）。
          只认 ASCII `[]`——全角【】是不同字符、不影响（真实语料正是用【】）。
-      4. 链接**目的地**圆括号（F3，本批 review）：见到 `](` 后进入目的地、追踪未闭合的 `(`
-         深度（转义感知，`\\)` 不闭合）。行尾仍在目的地内 = `[docs](/url\\n"title")` 这类
-         目的地跨软换行——`]` 处方括号深度已归零（规则 3 看不见它），但 `(`-目的地没闭，
-         `_normalize` 注入空行会把目的地/标题拆到两段、链接退化成散文。**严格限定链接上下文**：
-         只在见过 `](` 之后才追踪圆括号，散文里的裸 `(未闭合` 不受影响（常见、不该拒）。
-         Round-2（本批 review）：`](` 还须落在**散文**里才武装——同行**已闭合**的行内代码/公式
+      4. 链接**目的地 + 标题**（F3；round-3 扩展到 title）：见到 `](` 后进入链接目标区，按
+         CommonMark 行内链接文法追踪三个子相——目的地（转义感知、圆括号平衡、空白结束）、
+         目的地后的间隙、可选标题（`"`/`'`/`(` 开，分别由 `"`/`'`/`)` 闭，转义感知）。**标题内的
+         `)` 不减目的地深度**（round-3 核心修复：旧实现在每个 `)` 都减、把带引号标题里的 `)` 误当
+         目的地闭合括号 -> `[x](url "title )\\ncontinued")` 被判「已闭合」漏拒）。行尾仍在任一子相内
+         = `[docs](/url\\n"title")` / `[x](url "title )\\n…")` 这类链接跨软换行——`]` 处方括号深度已
+         归零（规则 3 看不见它），但链接目标没闭，`_normalize` 注入空行会把目的地/标题拆到两段、链接
+         退化成散文。**严格限定链接上下文**：只在见过 `](` 之后才追踪，散文里的裸 `(未闭合` 不受
+         影响（常见、不该拒）。Round-2：`](` 还须落在**散文**里才武装——同行**已闭合**的行内代码/公式
          span 内的 `](`（`` `x](` ``、`$a](b$`）是 span 内容、不是链接起头，本段同时镜像规则 2/1
          的 code/math run 配对、对落在已闭合 span 内的 `](` **不**武装（否则 `` `x](` `` 会误判
          rich、`A. header` 从不加粗）。
@@ -378,19 +381,28 @@ def _ends_with_open_inline_span(line: str) -> bool:
         i += 1
     if depth > 0:
         return True
-    # 4) 链接目的地圆括号（F3）：`](` 之后进入目的地、追踪未闭合的 `(` 深度（转义感知）。
-    #    行尾仍在目的地内 = 目的地跨软换行。**只**在见过 `](` 后才追踪——散文里的裸 `(`
-    #    不受影响（严格限定链接目的地上下文，见文档第 4 条）。
+    # 4) 链接目的地 + 标题（F3；round-3 扩展到 title）：`](` 之后进入链接的「目标」区，按
+    #    CommonMark 行内链接文法建模三个子相：
+    #      - "dest"（目的地文本）：转义感知、圆括号**平衡**深度（`(` +1、`)` -1，深度归零=链接
+    #        整体闭合）；**空白**结束目的地、进入 "gap"。
+    #      - "gap"（目的地后）：等一个可选**标题** opener（`"`/`'`/`(`）或链接闭合 `)`。
+    #      - "title"（标题内）：转义感知，只等对应的 title-close（`"`→`"`、`'`→`'`、`(`→`)`）；
+    #        **标题内的 `)` 不减目的地深度**（round-3 修复的核心——旧实现在每个 `)` 都减，把带引号
+    #        标题里的 `)` 误当目的地闭合括号 -> 跨行标题 `[x](url "title )\ncontinued")` 被判「已闭合」
+    #        漏拒、注入空行塞进标题拆断链接）。标题闭合回到 "gap"。
+    #    行尾仍在任一子相内（"dest"/"gap"/"title"）= 链接跨软换行、未闭合 -> 拒绝（既有 fail-closed
+    #    规则不变，只是不再被标题的 `)` 提前闭合）。**只**在见过 `](` 后才进入——散文里的裸 `(` 不受
+    #    影响（严格限定链接上下文，见文档第 4 条）。
     #
-    #    Round-2（本批 review）：武装 `](` 前必须先确认它落在**散文**里、而非同行**已闭合**的行内
-    #    代码/公式 span 内——`` `x](` `` 里 `](` 是代码 span 内容、不是链接起头，旧实现把它也当链接
-    #    起头武装了跟踪器、整格误判 rich 逐字返回（`A. header` 从未加粗）。本段左到右**同时**追踪
-    #    code-span 与 math-span 状态，分别精确镜像上面规则 2 的反引号 run 配对（无转义）与规则 1 的
-    #    `$` run 配对（转义感知）：落在任一已开着 span 内的 `](` **不**武装；散文里的 `](` 仍武装
-    #    （下面跨行链接的回归锁不受影响）。跨行**开着**的 code/math span 已由规则 1/2 先行拒绝（走不
-    #    到这里），故此处每个进入的 span 必在行尾前闭合、追踪良好定义。
-    in_dest = False
-    dest_depth = 0
+    #    Round-2：武装 `](` 前必须先确认它落在**散文**里、而非同行**已闭合**的行内代码/公式 span 内——
+    #    `` `x](` `` 里 `](` 是代码 span 内容、不是链接起头，旧实现把它也当链接起头武装、整格误判 rich
+    #    逐字返回（`A. header` 从未加粗）。本段左到右**同时**追踪 code-span 与 math-span 状态，分别精确
+    #    镜像上面规则 2 的反引号 run 配对（无转义）与规则 1 的 `$` run 配对（转义感知）：落在任一已开着
+    #    span 内的 `](` **不**武装；散文里的 `](` 仍武装（下面跨行链接的回归锁不受影响）。跨行**开着**的
+    #    code/math span 已由规则 1/2 先行拒绝（走不到这里），故此处每个进入的 span 必在行尾前闭合。
+    link_phase: "str | None" = None  # None | "dest"（目的地文本）| "gap"（目的地后空白）| "title"（标题内）
+    dest_depth = 0                   # 目的地圆括号平衡深度（转义感知）
+    title_close = ""                 # 当前标题的闭合字符（" / ' / )）
     code_inside = False              # 反引号 code-span：镜像规则 2（无转义、等长 run 闭合）
     code_len = 0
     math_inside = False              # `$` math-span：镜像规则 1（转义感知、等长 run 闭合）
@@ -398,17 +410,36 @@ def _ends_with_open_inline_span(line: str) -> bool:
     i = 0
     while i < n:
         ch = line[i]
-        if in_dest:                              # 目的地内：转义感知、只数圆括号深度（同旧实现）
+        if link_phase == "title":                # 标题内：转义感知，只等 title_close；`)` 不减目的地深度
             if ch == "\\":
-                i += 2                           # 转义下一字符：\( / \) 既不开也不合目的地深度
+                i += 2                            # 转义下一字符：\" / \' / \) 既不闭标题也不动深度
+                continue
+            if ch == title_close:
+                link_phase = "gap"                # 标题闭合 -> 回到间隙，等链接闭合 `)`（或另一个 title）
+            i += 1
+            continue
+        if link_phase == "dest":                 # 目的地文本：转义感知、平衡圆括号；空白结束目的地
+            if ch == "\\":
+                i += 2                            # 转义下一字符：\( / \) 既不开也不合目的地深度
                 continue
             if ch == "(":
                 dest_depth += 1
             elif ch == ")":
                 dest_depth -= 1
                 if dest_depth == 0:
-                    in_dest = False              # 目的地闭合
+                    link_phase = None             # 目的地圆括号归零 = 链接整体闭合（无标题）
+            elif ch == " " or ch == "\t":
+                link_phase = "gap"                # 空白结束目的地 -> 等可选 title 或闭合 `)`
             i += 1
+            continue
+        if link_phase == "gap":                  # 目的地后：等 title-opener（"/'/(）或链接闭合 `)`
+            if ch == ")":
+                link_phase = None                 # 无标题（或标题后）的链接闭合 `)`
+            elif ch == '"' or ch == "'":
+                link_phase, title_close = "title", ch
+            elif ch == "(":
+                link_phase, title_close = "title", ")"
+            i += 1                                # 其余（空白/异常字符）留在 gap，行尾仍开着即拒绝
             continue
         if code_inside:                          # 代码 span 内（镜像规则 2）：不转义，等长 run 闭合
             if ch == "`":
@@ -459,12 +490,12 @@ def _ends_with_open_inline_span(line: str) -> bool:
             math_inside, math_len = True, run
             continue
         if ch == "]" and i + 1 < n and line[i + 1] == "(":
-            in_dest = True                       # 散文里的 `](` 起头目的地：`(` 计一层深度，跳过两字符
+            link_phase = "dest"                  # 散文里的 `](` 起头目的地：`(` 计一层深度，跳过两字符
             dest_depth = 1
             i += 2
             continue
         i += 1
-    return in_dest
+    return link_phase is not None                # 行尾仍在 dest/gap/title 任一子相内 = 链接跨软换行、未闭
 
 
 def _has_midline_inline_html(line: str) -> bool:

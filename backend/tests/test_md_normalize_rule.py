@@ -1115,6 +1115,53 @@ def test_link_destination_plain_text_bracket_paren_still_arms_after_closed_span(
 
 
 # ---------------------------------------------------------------------------
+# F3 round-3 (this review) — the destination tracker decremented paren depth on
+# EVERY `)`, so a valid inline link whose QUOTED TITLE contains `)` before a soft
+# newline -- `[x](url "title )\ncontinued")` -- had the title's `)` mistaken for
+# the destination's closing paren: line 1 was judged closed/safe, so the gate
+# passed and `_normalize` split the title with a blank line, breaking the link
+# (symbol-blind `content_invariant` misses it). Fix: model CommonMark's inline-link
+# grammar -- after the destination (which runs to whitespace or `)`), an OPTIONAL
+# title opens with `"`/`'`/`(` (closing with `"`/`'`/`)`, escape-aware); a `)`
+# INSIDE an open title does NOT decrement destination depth. A line ending with the
+# link still open (open destination OR open title) refuses (fail-closed unchanged --
+# the bug was only the title's `)` prematurely CLOSING it).
+# ---------------------------------------------------------------------------
+
+
+def test_link_title_close_paren_spanning_soft_newline_refused():
+    # THE codex example: the quoted title contains `)` then a soft newline. The title's
+    # `)` must NOT read as the destination's closing paren -> line 1 ends INSIDE the open
+    # title -> refuse byte-identically (the link is preserved, not blank-line-split).
+    raw = '[x](url "title )\ncontinued")'
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw          # byte-identical -- link preserved
+
+
+def test_link_title_close_paren_complete_same_line_not_rich():
+    # over-refusal lock: a same-line COMPLETE link whose title contains `)` -> the dest
+    # correctly stays open through the title, the real closing `)` closes the link -> not
+    # rich (no cross-line span; the trailing prose is normalizable).
+    assert is_rich_markdown('[x](url "title )") 同行完整') is False
+
+
+def test_link_single_quote_title_spanning_soft_newline_refused():
+    # single-quote title variant: the title closes on line 1 (`'ti)tle'`, its inner `)`
+    # ignored), but the destination's closing `)` sits on line 2 -> line 1 ends after the
+    # title with the link still open -> refuse.
+    raw = "[x](url 'ti)tle'\n)"
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw
+
+
+def test_link_paren_title_complete_same_line_not_rich():
+    # paren-style title `(title)` complete on one line -> opens on the post-destination
+    # `(` (close `)`), the first `)` closes the title, the link's `)` closes the link ->
+    # not rich. (Nested paren titles parse oddly; only the simple form is exercised.)
+    assert is_rich_markdown('[x](url (title))') is False
+
+
+# ---------------------------------------------------------------------------
 # F1 cell-global emphasis pairing — the intraword (both-flanking) hole and the
 # load-bearing R*C survival. See the section comment above `test_emphasis_open_
 # star_spanning_soft_newline_refused` for the algorithm.
