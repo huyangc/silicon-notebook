@@ -1305,3 +1305,108 @@ def test_batch_cells_guarded_valid_asset_ref_succeeds(tmp_path, monkeypatch):
     by_id = {r["id"]: r for r in fresh["rows"]}
     assert by_id[r0["id"]]["cells"][col["id"]] == content
     assert by_id[r1["id"]]["cells"][col["id"]] == content
+
+
+# ---------------------------------------------------------------------------
+# Concurrency P1 (round-5): the anchor baseline guard now also refuses the batch
+# when the anchor DESIGNATION moved to another column, or when a NEW row JOINED
+# the group after the modal froze its row ids -- both leave every frozen
+# expected_anchor matching (so the per-row byte-exact re-read passes) while the
+# fan-out has become a partial/misaimed group write. Same 409 + copy as a stale
+# expected_before. The server derives current membership itself; the wire is
+# unchanged (still anchor_column_id + expected_anchor).
+# ---------------------------------------------------------------------------
+
+# Two rows sharing ONE anchor value 示波器 -> a single concept group (the seed's
+# DATA_ROWS deliberately use DISTINCT anchors, so the group tests import this).
+_SAME_GROUP_ROWS = [
+    ["示波器", "上升沿过冲", "电源阻抗过高", "同一改法", "工具A"],
+    ["示波器", "下降沿欠冲", "寄生电感过大", "同一改法", "工具B"],
+]
+
+
+def test_batch_cells_anchor_designation_moved_409_writes_nothing(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000562")
+    nb = _mk_notebook(client, owner_h)
+    table_id = _import_xlsx(client, owner_h, nb, rows=_SAME_GROUP_ROWS).json()["id"]
+    detail = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    anchor = next(c for c in detail["columns"] if c["name"] == "违例类型")
+    other = next(c for c in detail["columns"] if c["name"] == "现象识别")
+    col = next(c for c in detail["columns"] if c["name"] == "修复方法")
+    r0, r1 = detail["rows"][0], detail["rows"][1]
+    eb0 = r0["cells"].get(col["id"], "")
+    eb1 = r1["cells"].get(col["id"], "")
+    a0 = r0["cells"].get(anchor["id"], "")
+    a1 = r1["cells"].get(anchor["id"], "")
+
+    # Another client moves the anchor designation to a different column (HTTP
+    # table-meta PATCH). The old anchor column's cell values are untouched, so
+    # the per-row byte-exact anchor re-read still matches -- only designation moved.
+    moved = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}",
+        headers=owner_h,
+        json={"anchor_column_id": other["id"]},
+    )
+    assert moved.status_code == 200, moved.text
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/cells",
+        headers=owner_h,
+        json={
+            "column_id": col["id"],
+            "row_ids": [r0["id"], r1["id"]],
+            "content_md": "统一改法",
+            "expected_before": [eb0, eb1],
+            "anchor_column_id": anchor["id"],  # the column that WAS the anchor
+            "expected_anchor": [a0, a1],  # values unchanged
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    by_id = {r["id"]: r for r in fresh["rows"]}
+    assert by_id[r0["id"]]["cells"][col["id"]] == eb0  # nothing written
+    assert by_id[r1["id"]]["cells"][col["id"]] == eb1
+
+
+def test_batch_cells_new_row_joined_group_409_writes_nothing(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000563")
+    nb = _mk_notebook(client, owner_h)
+    table_id = _import_xlsx(client, owner_h, nb, rows=_SAME_GROUP_ROWS).json()["id"]
+    detail = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    anchor = next(c for c in detail["columns"] if c["name"] == "违例类型")
+    col = next(c for c in detail["columns"] if c["name"] == "修复方法")
+    r0, r1 = detail["rows"][0], detail["rows"][1]
+    eb0 = r0["cells"].get(col["id"], "")
+    eb1 = r1["cells"].get(col["id"], "")
+    a0 = r0["cells"].get(anchor["id"], "")
+    a1 = r1["cells"].get(anchor["id"], "")
+
+    # Another client adds a NEW row whose anchor cell TRIM-equals the group value
+    # (surrounding whitespace). The modal froze only {r0, r1}; the frontend would
+    # now show three rows merged. Frozen baselines all still match.
+    joined = client.post(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/rows",
+        headers=owner_h,
+        json={"cells": {anchor["id"]: "  示波器 ", col["id"]: "别的改法"}},
+    )
+    assert joined.status_code == 200, joined.text
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/cells",
+        headers=owner_h,
+        json={
+            "column_id": col["id"],
+            "row_ids": [r0["id"], r1["id"]],
+            "content_md": "统一改法",
+            "expected_before": [eb0, eb1],
+            "anchor_column_id": anchor["id"],
+            "expected_anchor": [a0, a1],
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    by_id = {r["id"]: r for r in fresh["rows"]}
+    assert by_id[r0["id"]]["cells"][col["id"]] == eb0  # nothing written
+    assert by_id[r1["id"]]["cells"][col["id"]] == eb1

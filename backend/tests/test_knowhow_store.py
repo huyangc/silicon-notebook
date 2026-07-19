@@ -1275,3 +1275,107 @@ def test_guarded_atomic_omitted_anchor_guard_is_legacy(store, notebook_id):
     rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
     assert rows[r0][shared_col] == "新改法"
     assert rows[r1][shared_col] == "新改法"
+
+
+# ---------------------------------------------------------------------------
+# Concurrency P1 (round-5): the per-row byte-exact anchor re-read above catches a
+# FROZEN target that LEFT the group, but two structural drifts also make the
+# fan-out a partial/misaimed group write while EVERY frozen row still matches its
+# snapshot: (a) the table's ANCHOR DESIGNATION moved to a DIFFERENT column after
+# the snapshot (the guarded column's cells all still equal their frozen values,
+# but the logical grouping is now defined by another column); and (b) a NEW row
+# JOINED the group (its anchor cell set to the group value by another client) --
+# every frozen id still matches, but the write now covers only a SUBSET of the
+# current logical group. The round-5 fix adds, inside the SAME BEGIN IMMEDIATE
+# before any write, a DESIGNATION check (anchor_column_id must still be the
+# table's role=='anchor' column) and an EXACT-MEMBERSHIP check (for each distinct
+# frozen anchor VALUE, the current member row-id set -- rows whose anchor cell
+# TRIM-equals that value, mirroring the frontend groupRowsByAnchor -- must EQUAL
+# the frozen target set). Both refuse the whole batch (409, nothing written).
+# ---------------------------------------------------------------------------
+
+
+def test_guarded_atomic_anchor_designation_moved_conflicts_writes_nothing(store, notebook_id):
+    table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
+        store, notebook_id
+    )
+    other_col = _columns_by_name(store, table_id)["现象识别"]
+    # Another client moves the anchor DESIGNATION to a different column; the OLD
+    # anchor column's cell values are untouched (both rows still read 示波器), so
+    # the per-row byte-exact anchor re-read passes -- only the designation moved.
+    store.set_knowhow_anchor_column(table_id, other_col)
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, shared_val, "新改法"),
+            (table_id, r1, shared_col, shared_val, "新改法"),
+        ],
+        anchor_column_id=anchor_col,  # the column that WAS the anchor at snapshot
+        expected_anchor=[anchor_val, anchor_val],
+    )
+
+    assert result == {"written": [], "conflict": True}
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == shared_val  # all-or-nothing: nothing written
+    assert rows[r1][shared_col] == shared_val
+
+
+def test_guarded_atomic_new_row_joined_group_conflicts_writes_nothing(store, notebook_id):
+    table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
+        store, notebook_id
+    )
+    # Another client adds a NEW row whose anchor cell TRIM-equals the group value
+    # (surrounding whitespace variance) -- the frontend would show it merged into
+    # this group, but the fan-out froze only {r0, r1}. Every frozen row still
+    # matches its baseline; only the membership grew. TRIM here is load-bearing:
+    # a byte-exact member scan would MISS this joiner ("  示波器 " != "示波器").
+    r2 = store.add_knowhow_row(table_id, {anchor_col: "  示波器 ", shared_col: "别的"})
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, shared_val, "新改法"),
+            (table_id, r1, shared_col, shared_val, "新改法"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=[anchor_val, anchor_val],
+    )
+
+    assert result == {"written": [], "conflict": True}
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == shared_val  # nothing written
+    assert rows[r1][shared_col] == shared_val
+    assert rows[r2][shared_col] == "别的"
+
+
+def test_guarded_atomic_membership_trims_whitespace_variant_member(store, notebook_id):
+    # A member whose STORED anchor differs from the group value only by
+    # surrounding whitespace is still an in-group member (frontend groups by
+    # .trim()): the membership check must NOT flag it as drift. Both rows' frozen
+    # anchor snapshots are their byte-exact stored values (so the per-row
+    # byte-exact re-read also passes), yet they TRIM to the SAME key -> the
+    # current member set equals the frozen set -> the write proceeds. (This fails
+    # if the membership check trims the current members but not the frozen keys,
+    # which would split {r0, r1} into two singleton groups and falsely conflict.)
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    anchor_col, shared_col = cols["违例类型"], cols["修复方法"]
+    r0 = store.add_knowhow_row(table_id, {anchor_col: "示波器", shared_col: "旧改法"})
+    r1 = store.add_knowhow_row(table_id, {anchor_col: " 示波器 ", shared_col: "旧改法"})
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, "旧改法", "新改法"),
+            (table_id, r1, shared_col, "旧改法", "新改法"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=["示波器", " 示波器 "],  # byte-exact snapshots; trim-equal
+    )
+
+    assert result["conflict"] is False
+    assert result["written"] == [(r0, shared_col), (r1, shared_col)]
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == "新改法"
+    assert rows[r1][shared_col] == "新改法"
