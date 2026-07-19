@@ -26,6 +26,9 @@ const STRICT_TEXT_READER_ALLOWLIST = new Set([
 const SOURCE_INPUT_NAME = (
   /^(?:source|sourceText|productionSource|content|text|payload)$/i
 );
+const AST_NODE_INPUT_NAME = (
+  /^(?:node|sourceFile|declaration|statement|expression)$/i
+);
 const TEXT_POSITION_METHODS = new Set([
   "at",
   "charAt",
@@ -40,6 +43,11 @@ const AST_COLLECTIONS = new Set([
   "members",
   "properties",
   "statements",
+]);
+const AST_POSITION_METHODS = new Set([
+  "getEnd",
+  "getFullStart",
+  "getStart",
 ]);
 
 
@@ -83,6 +91,28 @@ function unwrapExpression(expression) {
 }
 
 
+function staticStringValue(expression) {
+  const current = unwrapExpression(expression);
+  if (
+    ts.isStringLiteralLike(current)
+    || ts.isNoSubstitutionTemplateLiteral(current)
+  ) {
+    return current.text;
+  }
+  if (
+    ts.isBinaryExpression(current)
+    && current.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    const left = staticStringValue(current.left);
+    const right = staticStringValue(current.right);
+    return left === undefined || right === undefined
+      ? undefined
+      : left + right;
+  }
+  return undefined;
+}
+
+
 function staticPropertyName(expression) {
   if (ts.isPropertyAccessExpression(expression)) {
     return expression.name.text;
@@ -90,11 +120,8 @@ function staticPropertyName(expression) {
   if (
     ts.isElementAccessExpression(expression)
     && expression.argumentExpression
-    && ts.isStringLiteralLike(
-      unwrapExpression(expression.argumentExpression),
-    )
   ) {
-    return unwrapExpression(expression.argumentExpression).text;
+    return staticStringValue(expression.argumentExpression);
   }
   return undefined;
 }
@@ -106,23 +133,24 @@ function staticModuleCallSpecifier(node) {
   }
   const first = unwrapExpression(node.arguments[0]);
   if (!ts.isStringLiteralLike(first)) return undefined;
-  if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+  const callee = unwrapExpression(node.expression);
+  if (callee.kind === ts.SyntaxKind.ImportKeyword) {
     return first.text;
   }
   if (
-    ts.isIdentifier(node.expression)
-    && node.expression.text === "require"
+    ts.isIdentifier(callee)
+    && callee.text === "require"
   ) {
     return first.text;
   }
   if (
     (
-      ts.isPropertyAccessExpression(node.expression)
-      || ts.isElementAccessExpression(node.expression)
+      ts.isPropertyAccessExpression(callee)
+      || ts.isElementAccessExpression(callee)
     )
-    && staticPropertyName(node.expression) === "require"
-    && ts.isIdentifier(node.expression.expression)
-    && node.expression.expression.text === "module"
+    && staticPropertyName(callee) === "require"
+    && ts.isIdentifier(unwrapExpression(callee.expression))
+    && unwrapExpression(callee.expression).text === "module"
   ) {
     return first.text;
   }
@@ -354,10 +382,26 @@ function hasPositionOrOrderQuery(relative, source) {
   const registeredReader = (
     readsFiles && STRICT_TEXT_READER_ALLOWLIST.has(relative)
   );
+  const typeDeclarations = new Map();
+  (function recordTypeDeclarations(node) {
+    if (
+      (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
+      && node.name
+    ) {
+      typeDeclarations.set(node.name.text, node);
+    }
+    ts.forEachChild(node, recordTypeDeclarations);
+  }(sourceFile));
   let found = false;
 
   function newScope(parent = undefined) {
     return { parent, bindings: new Map() };
+  }
+
+  function defaultKind(name) {
+    if (SOURCE_INPUT_NAME.test(name)) return "source";
+    if (AST_NODE_INPUT_NAME.test(name)) return "ast-node";
+    return "unknown";
   }
 
   function bindingKind(scope, name) {
@@ -366,12 +410,53 @@ function hasPositionOrOrderQuery(relative, source) {
         return current.bindings.get(name);
       }
     }
-    return SOURCE_INPUT_NAME.test(name) ? "source" : "unknown";
+    return defaultKind(name);
+  }
+
+  function joinedKind(...kinds) {
+    for (const kind of [
+      "source",
+      "ast-position-method",
+      "ast-collection",
+      "raw-reader",
+      "fs-namespace",
+      "ast-node",
+    ]) {
+      if (kinds.includes(kind)) return kind;
+    }
+    return kinds.length > 0 && kinds.every((kind) => kind === "array")
+      ? "array"
+      : "unknown";
+  }
+
+  function resolvedTypeMembers(type, seen = new Set()) {
+    if (!type) return undefined;
+    if (ts.isParenthesizedTypeNode(type)) {
+      return resolvedTypeMembers(type.type, seen);
+    }
+    if (ts.isTypeLiteralNode(type)) return type.members;
+    if (
+      ts.isTypeReferenceNode(type)
+      && ts.isIdentifier(type.typeName)
+      && !seen.has(type.typeName.text)
+    ) {
+      const declaration = typeDeclarations.get(type.typeName.text);
+      if (!declaration) return undefined;
+      const nextSeen = new Set(seen).add(type.typeName.text);
+      return ts.isInterfaceDeclaration(declaration)
+        ? declaration.members
+        : resolvedTypeMembers(declaration.type, nextSeen);
+    }
+    if (ts.isIntersectionTypeNode(type)) {
+      return type.types.flatMap(
+        (part) => [...(resolvedTypeMembers(part, seen) ?? [])],
+      );
+    }
+    return undefined;
   }
 
   function objectPropertyType(type, property) {
-    if (!type || !ts.isTypeLiteralNode(type)) return undefined;
-    for (const member of type.members) {
+    for (const member of resolvedTypeMembers(type) ?? []) {
       if (
         ts.isPropertySignature(member)
         && member.name
@@ -389,19 +474,50 @@ function hasPositionOrOrderQuery(relative, source) {
     return undefined;
   }
 
-  function isRawReadCall(expression) {
+  function definitelyArrayType(type, seen = new Set()) {
+    if (isDefinitelyArrayType(type)) return true;
+    if (
+      type
+      && ts.isTypeReferenceNode(type)
+      && ts.isIdentifier(type.typeName)
+      && !seen.has(type.typeName.text)
+    ) {
+      const declaration = typeDeclarations.get(type.typeName.text);
+      return Boolean(
+        declaration
+        && ts.isTypeAliasDeclaration(declaration)
+        && definitelyArrayType(
+          declaration.type,
+          new Set(seen).add(type.typeName.text),
+        )
+      );
+    }
+    return false;
+  }
+
+  function isRawReaderExpression(expression, scope) {
+    const current = unwrapExpression(expression);
+    if (ts.isIdentifier(current)) {
+      return bindingKind(scope, current.text) === "raw-reader";
+    }
+    if (
+      (
+        ts.isPropertyAccessExpression(current)
+        || ts.isElementAccessExpression(current)
+      )
+      && ["readFile", "readFileSync"].includes(staticPropertyName(current))
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function isRawReadCall(expression, scope) {
     const current = unwrapExpression(expression);
     return Boolean(
       registeredReader
       && ts.isCallExpression(current)
-      && ["readFile", "readFileSync"].includes(
-        staticPropertyName(current.expression)
-        ?? (
-          ts.isIdentifier(current.expression)
-            ? current.expression.text
-            : ""
-        ),
-      )
+      && isRawReaderExpression(current.expression, scope)
     );
   }
 
@@ -411,8 +527,24 @@ function hasPositionOrOrderQuery(relative, source) {
     if (ts.isIdentifier(current)) {
       return bindingKind(scope, current.text);
     }
-    if (ts.isArrayLiteralExpression(current)) return "array";
-    if (isRawReadCall(current)) return "source";
+    if (ts.isArrayLiteralExpression(current)) {
+      const spreadKinds = current.elements
+        .filter(ts.isSpreadElement)
+        .map((element) => expressionKind(element.expression, scope));
+      return spreadKinds.length > 0
+        ? joinedKind(...spreadKinds, "array")
+        : "array";
+    }
+    if (isRawReadCall(current, scope)) return "source";
+    if (ts.isConditionalExpression(current)) {
+      return joinedKind(
+        expressionKind(current.whenTrue, scope),
+        expressionKind(current.whenFalse, scope),
+      );
+    }
+    if (ts.isCommaListExpression(current)) {
+      return expressionKind(current.elements.at(-1), scope);
+    }
     if (
       ts.isTemplateExpression(current)
       && current.templateSpans.some(
@@ -422,14 +554,33 @@ function hasPositionOrOrderQuery(relative, source) {
       return "source";
     }
     if (
-      ts.isBinaryExpression(current)
-      && current.operatorToken.kind === ts.SyntaxKind.PlusToken
-      && (
-        expressionKind(current.left, scope) === "source"
-        || expressionKind(current.right, scope) === "source"
+      ts.isTaggedTemplateExpression(current)
+      && ts.isTemplateExpression(current.template)
+      && current.template.templateSpans.some(
+        (span) => expressionKind(span.expression, scope) === "source",
       )
     ) {
       return "source";
+    }
+    if (
+      ts.isBinaryExpression(current)
+      && current.operatorToken.kind === ts.SyntaxKind.CommaToken
+    ) {
+      return expressionKind(current.right, scope);
+    }
+    if (
+      ts.isBinaryExpression(current)
+      && [
+        ts.SyntaxKind.PlusToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.AmpersandAmpersandToken,
+      ].includes(current.operatorToken.kind)
+    ) {
+      return joinedKind(
+        expressionKind(current.left, scope),
+        expressionKind(current.right, scope),
+      );
     }
     if (
       ts.isCallExpression(current)
@@ -442,13 +593,73 @@ function hasPositionOrOrderQuery(relative, source) {
       return "source";
     }
     if (
+      ts.isNewExpression(current)
+      && ts.isIdentifier(current.expression)
+      && current.expression.text === "String"
+      && (current.arguments ?? []).some(
+        (argument) => expressionKind(argument, scope) === "source",
+      )
+    ) {
+      return "source";
+    }
+    if (
+      ts.isCallExpression(current)
+      && (
+        ts.isPropertyAccessExpression(current.expression)
+        || ts.isElementAccessExpression(current.expression)
+      )
+      && staticPropertyName(current.expression) === "concat"
+      && (
+        expressionKind(current.expression.expression, scope) === "source"
+        || current.arguments.some(
+          (argument) => expressionKind(argument, scope) === "source",
+        )
+      )
+    ) {
+      return "source";
+    }
+    if (
+      ts.isCallExpression(current)
+      && (
+        ts.isPropertyAccessExpression(current.expression)
+        || ts.isElementAccessExpression(current.expression)
+      )
+      && staticPropertyName(current.expression) === "from"
+      && ts.isIdentifier(unwrapExpression(current.expression.expression))
+      && unwrapExpression(current.expression.expression).text === "Array"
+      && current.arguments.length > 0
+    ) {
+      return expressionKind(current.arguments[0], scope);
+    }
+    if (
       (
         ts.isPropertyAccessExpression(current)
         || ts.isElementAccessExpression(current)
       )
       && AST_COLLECTIONS.has(staticPropertyName(current))
+      && expressionKind(current.expression, scope) === "ast-node"
     ) {
       return "ast-collection";
+    }
+    if (
+      (
+        ts.isPropertyAccessExpression(current)
+        || ts.isElementAccessExpression(current)
+      )
+      && AST_POSITION_METHODS.has(staticPropertyName(current))
+      && expressionKind(current.expression, scope) === "ast-node"
+    ) {
+      return "ast-position-method";
+    }
+    if (
+      (
+        ts.isPropertyAccessExpression(current)
+        || ts.isElementAccessExpression(current)
+      )
+      && ["readFile", "readFileSync"].includes(staticPropertyName(current))
+      && expressionKind(current.expression, scope) === "fs-namespace"
+    ) {
+      return "raw-reader";
     }
     if (
       ts.isCallExpression(current)
@@ -462,26 +673,38 @@ function hasPositionOrOrderQuery(relative, source) {
     return "unknown";
   }
 
-  function declarePattern(name, type, initializer, scope) {
+  function declarePattern(
+    name,
+    type,
+    initializer,
+    scope,
+    forcedKind = undefined,
+  ) {
     if (ts.isIdentifier(name)) {
       const initializerKind = expressionKind(initializer, scope);
-      const kind = (
-        isDefinitelyArrayType(type)
-        || initializerKind === "array"
-      )
-        ? "array"
-        : initializerKind !== "unknown"
-          ? initializerKind
-          : SOURCE_INPUT_NAME.test(name.text)
-            ? "source"
-            : "unknown";
+      let kind = forcedKind;
+      if (kind === undefined) {
+        kind = definitelyArrayType(type) || initializerKind === "array"
+          ? "array"
+          : initializerKind !== "unknown"
+            ? initializerKind
+            : defaultKind(name.text);
+      }
       scope.bindings.set(name.text, kind);
       return;
     }
     if (ts.isObjectBindingPattern(name)) {
+      const initializerKind = forcedKind
+        ?? expressionKind(initializer, scope);
       for (const element of name.elements) {
         if (element.dotDotDotToken) {
-          declarePattern(element.name, undefined, undefined, scope);
+          declarePattern(
+            element.name,
+            undefined,
+            undefined,
+            scope,
+            forcedKind,
+          );
           continue;
         }
         const property = element.propertyName
@@ -494,18 +717,125 @@ function hasPositionOrOrderQuery(relative, source) {
           : ts.isIdentifier(element.name)
             ? element.name.text
             : undefined;
+        const propertyType = objectPropertyType(type, property);
+        let propertyKind = forcedKind;
+        if (propertyKind === undefined && definitelyArrayType(propertyType)) {
+          propertyKind = "array";
+        } else if (
+          propertyKind === undefined
+          && initializerKind === "ast-node"
+          && AST_COLLECTIONS.has(property)
+        ) {
+          propertyKind = "ast-collection";
+        } else if (
+          propertyKind === undefined
+          && initializerKind === "ast-node"
+          && AST_POSITION_METHODS.has(property)
+        ) {
+          propertyKind = "ast-position-method";
+        } else if (
+          propertyKind === undefined
+          && initializerKind === "fs-namespace"
+          && ["readFile", "readFileSync"].includes(property)
+        ) {
+          propertyKind = "raw-reader";
+        }
         declarePattern(
           element.name,
-          objectPropertyType(type, property),
+          propertyType,
           undefined,
           scope,
+          propertyKind,
         );
       }
       return;
     }
     for (const element of name.elements) {
       if (!ts.isOmittedExpression(element)) {
-        declarePattern(element.name, undefined, undefined, scope);
+        declarePattern(
+          element.name,
+          undefined,
+          undefined,
+          scope,
+          forcedKind,
+        );
+      }
+    }
+  }
+
+  function objectBindingProperty(element) {
+    if (element.propertyName) {
+      return (
+        ts.isIdentifier(element.propertyName)
+        || ts.isStringLiteralLike(element.propertyName)
+      )
+        ? element.propertyName.text
+        : undefined;
+    }
+    return ts.isIdentifier(element.name) ? element.name.text : undefined;
+  }
+
+  function patternConsumesOrder(name, initializer, scope) {
+    const initializerKind = expressionKind(initializer, scope);
+    if (
+      ts.isArrayBindingPattern(name)
+      && ["source", "ast-collection"].includes(initializerKind)
+    ) {
+      return true;
+    }
+    return (
+      ts.isObjectBindingPattern(name)
+      && initializerKind === "ast-node"
+      && name.elements.some(
+        (element) => ["pos", "end"].includes(
+          objectBindingProperty(element),
+        ),
+      )
+    );
+  }
+
+  function predeclareImports(statements, scope) {
+    for (const statement of statements) {
+      if (
+        ts.isImportDeclaration(statement)
+        && statement.importClause
+        && statement.moduleSpecifier
+        && ts.isStringLiteralLike(statement.moduleSpecifier)
+        && /^(?:node:)?fs(?:\/promises)?$/.test(
+          statement.moduleSpecifier.text,
+        )
+      ) {
+        if (statement.importClause.name) {
+          scope.bindings.set(
+            statement.importClause.name.text,
+            "fs-namespace",
+          );
+        }
+        const bindings = statement.importClause.namedBindings;
+        if (bindings && ts.isNamespaceImport(bindings)) {
+          scope.bindings.set(bindings.name.text, "fs-namespace");
+        } else if (bindings && ts.isNamedImports(bindings)) {
+          for (const element of bindings.elements) {
+            const imported = (element.propertyName ?? element.name).text;
+            scope.bindings.set(
+              element.name.text,
+              ["readFile", "readFileSync"].includes(imported)
+                ? "raw-reader"
+                : "unknown",
+            );
+          }
+        }
+      }
+      if (
+        ts.isImportEqualsDeclaration(statement)
+        && ts.isExternalModuleReference(statement.moduleReference)
+        && statement.moduleReference.expression
+        && ts.isStringLiteralLike(statement.moduleReference.expression)
+        && /^(?:node:)?fs(?:\/promises)?$/.test(
+          statement.moduleReference.expression.text,
+        )
+      ) {
+        scope.bindings.set(statement.name.text, "fs-namespace");
       }
     }
   }
@@ -531,6 +861,7 @@ function hasPositionOrOrderQuery(relative, source) {
   function visit(node, scope) {
     if (found) return;
     if (ts.isSourceFile(node)) {
+      predeclareImports(node.statements, scope);
       predeclareStatements(node.statements, scope);
       for (const statement of node.statements) visit(statement, scope);
       return;
@@ -538,6 +869,18 @@ function hasPositionOrOrderQuery(relative, source) {
     if (ts.isFunctionLike(node)) {
       const functionScope = newScope(scope);
       for (const parameter of node.parameters) {
+        if (parameter.initializer) {
+          visit(parameter.initializer, functionScope);
+          if (found) return;
+          if (patternConsumesOrder(
+            parameter.name,
+            parameter.initializer,
+            functionScope,
+          )) {
+            found = true;
+            return;
+          }
+        }
         declarePattern(
           parameter.name,
           parameter.type,
@@ -548,6 +891,20 @@ function hasPositionOrOrderQuery(relative, source) {
       if (node.body) visit(node.body, functionScope);
       return;
     }
+    if (ts.isCatchClause(node)) {
+      const catchScope = newScope(scope);
+      if (node.variableDeclaration) {
+        declarePattern(
+          node.variableDeclaration.name,
+          node.variableDeclaration.type,
+          node.variableDeclaration.initializer,
+          catchScope,
+          "unknown",
+        );
+      }
+      visit(node.block, catchScope);
+      return;
+    }
     if (ts.isBlock(node)) {
       const blockScope = newScope(scope);
       predeclareStatements(node.statements, blockScope);
@@ -556,13 +913,7 @@ function hasPositionOrOrderQuery(relative, source) {
     }
     if (ts.isVariableDeclaration(node)) {
       declarePattern(node.name, node.type, node.initializer, scope);
-      if (
-        (
-          ts.isArrayBindingPattern(node.name)
-          || ts.isObjectBindingPattern(node.name)
-        )
-        && expressionKind(node.initializer, scope) === "source"
-      ) {
+      if (patternConsumesOrder(node.name, node.initializer, scope)) {
         found = true;
         return;
       }
@@ -576,7 +927,24 @@ function hasPositionOrOrderQuery(relative, source) {
       if (rightKind !== "unknown") {
         for (let current = scope; current; current = current.parent) {
           if (current.bindings.has(node.left.text)) {
-            current.bindings.set(node.left.text, rightKind);
+            const conditional = ts.findAncestor(
+              node,
+              (ancestor) => (
+                ts.isIfStatement(ancestor)
+                || ts.isConditionalExpression(ancestor)
+                || ts.isSwitchStatement(ancestor)
+                || ts.isIterationStatement(ancestor, false)
+              ),
+            );
+            current.bindings.set(
+              node.left.text,
+              conditional
+                ? joinedKind(
+                  current.bindings.get(node.left.text),
+                  rightKind,
+                )
+                : rightKind,
+            );
             break;
           }
         }
@@ -588,6 +956,7 @@ function hasPositionOrOrderQuery(relative, source) {
         || ts.isElementAccessExpression(node)
       )
       && ["pos", "end"].includes(staticPropertyName(node))
+      && expressionKind(node.expression, scope) === "ast-node"
     ) {
       found = true;
       return;
@@ -598,7 +967,9 @@ function hasPositionOrOrderQuery(relative, source) {
         || ts.isElementAccessExpression(node)
       )
       && staticPropertyName(node) === "length"
-      && textReceiverKind(node.expression, scope) === "source"
+      && ["source", "ast-collection"].includes(
+        textReceiverKind(node.expression, scope),
+      )
     ) {
       found = true;
       return;
@@ -647,7 +1018,17 @@ function hasPositionOrOrderQuery(relative, source) {
     ) {
       const method = staticPropertyName(node.expression);
       const receiver = node.expression.expression;
-      if (["getStart", "getFullStart", "getEnd"].includes(method)) {
+      if (
+        AST_POSITION_METHODS.has(method)
+        && expressionKind(receiver, scope) === "ast-node"
+      ) {
+        found = true;
+        return;
+      }
+      if (
+        method === "call"
+        && expressionKind(receiver, scope) === "ast-position-method"
+      ) {
         found = true;
         return;
       }
@@ -660,11 +1041,26 @@ function hasPositionOrOrderQuery(relative, source) {
       }
       if (
         TEXT_POSITION_METHODS.has(method)
-        && textReceiverKind(receiver, scope) === "source"
+        && (
+          ["source", "ast-collection"].includes(
+            textReceiverKind(receiver, scope),
+          )
+          || (
+            registeredReader
+            && textReceiverKind(receiver, scope) !== "array"
+          )
+        )
       ) {
         found = true;
         return;
       }
+    }
+    if (
+      ts.isCallExpression(node)
+      && expressionKind(node.expression, scope) === "ast-position-method"
+    ) {
+      found = true;
+      return;
     }
     ts.forEachChild(node, (child) => visit(child, scope));
   }
@@ -748,6 +1144,24 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
     "String(source).slice(1);",
     "`${source}`.slice(1);",
     "(source + '').slice(1);",
+    "function f(x = source.slice(1)) {}",
+    "function g([first] = source) {}",
+    "(flag ? source : '').slice(1);",
+    "(source ?? '').slice(1);",
+    "(0, source).slice(1);",
+    "new String(source).slice(1);",
+    "''.concat(source).slice(1);",
+    "String.raw`${source}`.slice(1);",
+    "let body = source; if (flag) body = []; body.slice(1);",
+    "[...sourceFile.statements][0];",
+    "Array.from(sourceFile.statements)[0];",
+    "const { statements: items } = sourceFile; items[0];",
+    "const start = node.getStart; start.call(node);",
+    "const { getStart } = node; getStart();",
+    "node['p' + 'os'];",
+    "const { pos } = node; void pos;",
+    "sourceFile.statements.length;",
+    "sourceFile.statements.slice(1);",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("example.test.mjs", mutation),
@@ -783,6 +1197,7 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
     "const fs = await import('node:fs', {}); void fs;",
     "const fs = require('fs', undefined); void fs;",
     "const fs = module.require('node:fs'); void fs;",
+    "const fs = (module).require('node:fs'); void fs;",
     "import fs = require('node:fs'); void fs;",
   ]) {
     assert.deepEqual(
@@ -816,11 +1231,18 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
   for (const operation of [
     "const body = await readFile(url, 'utf8'); body[0];",
     "const body = await readFile(url, 'utf8'); body.length;",
+    "const body = await load(url, 'utf8'); body[0];",
+    "const load = readFile; const body = await load(url, 'utf8'); body.length;",
+    "const body = decode(await readFile(url, 'utf8')); body.slice(1);",
   ]) {
+    const importLine = operation.includes("load(url")
+      && !operation.startsWith("const load")
+      ? "import { readFile as load } from 'node:fs/promises';\n"
+      : "import { readFile } from 'node:fs/promises';\n";
     assert.deepEqual(
       modulePolicyOffenders(
         "test/semantic-source.mjs",
-        "import { readFile } from 'node:fs/promises';\n" + operation,
+        importLine + operation,
       ),
       ["test/semantic-source.mjs: source-position or source-order query"],
       operation,
@@ -838,6 +1260,11 @@ test("source policy leaves ordinary array operations alone", () => {
     "function trimPrefix(value: string) { return value.slice(1); }",
     "function good({ source }: { source: string[] }) {"
       + " return source.slice(); }",
+    "try {} catch (source) { source.slice(1); }",
+    "const response = { end() {} }; response.end();",
+    "const model = { properties: [1] }; model.properties[0];",
+    "interface P { source: string[] }"
+      + " function good({ source }: P) { return source.slice(); }",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("example.test.ts", source),
@@ -850,7 +1277,7 @@ test("source policy leaves ordinary array operations alone", () => {
 
 test("source policy stays bounded for repeated callable syntax", () => {
   const repeatedCalls = Array.from(
-    { length: 1_000 },
+    { length: 10_000 },
     () => "f();",
   ).join("\n");
   const source = [
@@ -919,6 +1346,7 @@ test("source policy follows dynamic imports to test-only helpers", () => {
     "const helper = await import('./dynamic-helper.ts', {}); void helper;",
     "const helper = require('./dynamic-helper.ts'); void helper;",
     "const helper = module.require('./dynamic-helper.ts'); void helper;",
+    "const helper = (module).require('./dynamic-helper.ts'); void helper;",
   ]) {
     modules.set("feature.test.mjs", entrypoint);
     assert.deepEqual(

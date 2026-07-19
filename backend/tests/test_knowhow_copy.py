@@ -176,6 +176,36 @@ def _kos_for_source(repo, hidden_source_id: str):
         ).fetchall()
 
 
+def _poll_projected_kos(repo, table_id: str, timeout: float = 6.0):
+    """Wait for the table-level KO transaction that follows per-row sync.
+
+    ``projection_status='synced'`` is a row-level checkpoint.  The projector
+    commits the accumulated knowledge objects after every row reaches that
+    checkpoint, so a test that asserts on KOs must synchronize on the KO batch
+    itself rather than treating row status as table-level completion.
+    """
+    deadline = time.time() + timeout
+    detail = None
+    kos = []
+    while time.time() < deadline:
+        detail = repo.get_knowhow_table(table_id)
+        rows = detail.get("rows", [])
+        hidden_source_id = detail.get("hidden_source_id")
+        if (
+            rows
+            and all(row["projection_status"] == "synced" for row in rows)
+            and hidden_source_id
+        ):
+            kos = _kos_for_source(repo, hidden_source_id)
+            if kos:
+                return detail, kos
+        time.sleep(0.02)
+    raise AssertionError(
+        "post-copy projection did not commit its knowledge-object batch: "
+        f"detail={detail!r}, ko_count={len(kos)}"
+    )
+
+
 # ===========================================================================
 # Business-table remap: tables/columns/rows/cells/cell_code/assets
 # ===========================================================================
@@ -403,8 +433,7 @@ def test_copy_zero_embed_calls_and_post_projection_kos_have_dynamic_types(
     assert embedder.call_count == calls_after_source_projection
 
     new_table_id = _only_table_id(repo, new_nb.id)
-    detail = _poll_rows_settled(repo, new_table_id)
-    assert detail is not None
+    detail, kos = _poll_projected_kos(repo, new_table_id)
     assert all(r["projection_status"] == "synced" for r in detail["rows"]), detail
 
     # The post-copy project_table run rebuilt the KO/edge graph structurally
@@ -415,8 +444,6 @@ def test_copy_zero_embed_calls_and_post_projection_kos_have_dynamic_types(
 
     new_hidden = detail["hidden_source_id"]
     assert new_hidden is not None
-    kos = _kos_for_source(repo, new_hidden)
-    assert kos, "post-copy projection should have (re)built KOs for the copy"
     assert {ko["object_type"] for ko in kos} <= {"违例类型", "现象识别", "依赖工具"}
     # And the copy's KOs are under the copy's own hidden source, never the
     # original's (object_type == column name is exactly the cell-level model
