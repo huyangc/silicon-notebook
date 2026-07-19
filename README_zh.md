@@ -943,7 +943,7 @@ PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/sili
 bash scripts/check.sh
 ```
 
-该脚本进行后端语法检查（`py_compile`）、不读取仓库 `.env` 的离线 hermetic smoke、完整后端 pytest、递归发现的全部前端 `*.test.mjs`、`tsc --noEmit` 与 production build。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+该脚本进行后端语法检查（`py_compile`）、不读取仓库 `.env` 的离线 hermetic smoke、完整 backend pytest、`fangan/testcases/harness/tests` 下的确定性抽取评分 harness、递归发现的全部前端 `*.test.mjs`、`tsc --noEmit` 与 production build。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
 
 ## 开发流程
 

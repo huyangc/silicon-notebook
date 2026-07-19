@@ -340,7 +340,7 @@ This checks:
 - Official MCP client smoke for the seven Memory tools, session notebook selection, candidate exclusion from formal context, and same-user/same-notebook cross-Agent candidate recall.
 - User-facing vocabulary guard (`check_ui_vocabulary.py`): no internal jargon in copy a user can see — rendered `frontend/app` text **and** backend `user_error()` messages, whose `X-User-Message` marker means they are displayed verbatim (see 界面词汇表).
 - Source summary fallback and notebook-internal search.
-- Complete backend `pytest` suite.
+- Complete backend `pytest` suite plus the deterministic extraction-scoring harness under `fangan/testcases/harness/tests`; committed tests must not depend on developer-local source documents.
 - Every recursively discovered frontend `*.test.mjs`, Next.js TypeScript, and production build. Missing `frontend/node_modules` is a hard failure.
 
 For local API checks, use:

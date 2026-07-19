@@ -18,6 +18,8 @@
 
     python -m pytest harness/ -q
 
+仓库总门禁 `scripts/check.sh` 也会运行同一套确定性自检；它不需要模型、网络或仓库外来源文件。
+
 ## 评分模型
 
 - **先对齐 atoms**（`source_span` IoU）→ 复用 `gold_atom_id↔pred_atom_id` 映射到下游。

@@ -1016,7 +1016,7 @@ Run:
 bash scripts/check.sh
 ```
 
-This checks backend syntax (`py_compile`), a hermetic offline smoke path (`smoke_backend.py` — the repository `.env` is disabled and no real LLM/embedding key is inherited), the complete backend pytest suite, every recursively discovered frontend `*.test.mjs`, Next.js `tsc --noEmit`, and the production frontend build. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+This checks backend syntax (`py_compile`), a hermetic offline smoke path (`smoke_backend.py` — the repository `.env` is disabled and no real LLM/embedding key is inherited), the complete backend pytest suite, the deterministic extraction-scoring harness under `fangan/testcases/harness/tests`, every recursively discovered frontend `*.test.mjs`, Next.js `tsc --noEmit`, and the production frontend build. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
 
 ## Development Workflow
 

@@ -67,6 +67,9 @@ PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/check_ui_vocabul
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -m pytest -p no:cacheprovider "$ROOT_DIR/backend/tests"
 
+PYTHONPATH="$ROOT_DIR/backend:$ROOT_DIR" "$PYTHON_BIN" \
+  -m pytest -p no:cacheprovider "$ROOT_DIR/fangan/testcases/harness/tests"
+
 if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
   echo "frontend/node_modules not found; run 'npm install' in frontend/ first" >&2
   exit 1
