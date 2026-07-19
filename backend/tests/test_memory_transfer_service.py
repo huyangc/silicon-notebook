@@ -98,6 +98,10 @@ def test_non_confirmed_memory_not_transferable(repo, alice):
     assert results[0]["ok"] is False and "confirmed" in results[0]["error"].lower()
     assert results[0]["new_id"] is None
     assert results[0]["status"] == "failed"
+    # round 8 P2-A 回归闸：只有 promotion_proposed 那一条具体拒绝才带 error_
+    # code——这是个普通校验失败（plain ValueError），必须诚实留 None，不是
+    # 随手挂个占位 code。
+    assert results[0]["error_code"] is None
 
 
 # --- Amendment 2: cleanup-failure-after-commit must be reported per-item, not
@@ -871,6 +875,10 @@ def test_move_rejects_memory_with_active_promotion_proposal(repo, alice):
     assert result["status"] == "failed"
     assert result["new_id"] is None
     assert "审批队列" in result["error"] and "移动" in result["error"]
+    # round 8 P2-A：这条拒绝必须带上机器可判的 error_code，前端才能把它从
+    # "N 条失败，请稍后重试"的通用兜底里摘出来，单独给可操作的提示（重试对
+    # 这一条永远无效，得先去待确认中心处理提案）。
+    assert result["error_code"] == "promotion_proposed"
 
     # 源 memory 分毫未动，仍在审批队列里等待处理
     still_there = service.get(mem.id, alice.id)
@@ -1088,4 +1096,89 @@ def test_move_schedules_embed_for_copy_when_source_vector_was_stale_at_transfer_
         "transfer() 只在 copied.embedding_status != 'ready' 时才补调度 "
         "_schedule_embed——副本被误标 ready 的旧 bug 会让这次调度被跳过，"
         "从此没有任何东西替这条副本重新嵌入"
+    )
+
+
+# --- PR review round 8 P1-B: round 5's promotion-proposal guard (test_move_
+# rejects_memory_with_active_promotion_proposal above) reads `source.
+# promotion_state` at the LOOP's TOP, before create_copy_with_initial_
+# revision even runs. A proposal landing AFTER that read but before the
+# conditional delete can slip through it — and the exact window that lets
+# it slip through is narrower and sneakier than "delete_memory_if_unchanged
+# runs against a stale revision": governance_store's propose path (memory_
+# store.propose_promotion_on) does BOTH an `UPDATE memory_items SET
+# promotion_state='proposed'` AND an `_append_revision_on` call (a genuine
+# new memory_revisions row — confirmed by reading propose_promotion_on
+# directly, not assumed). If the proposal lands BEFORE `source_revision =
+# self.store.embedding_revision(source.id, source)` captures its number
+# (memory_service.py, a few lines below the pre-check), that capture reads
+# the ALREADY-BUMPED post-proposal revision — the SAME number the atomic
+# delete's WHERE clause checks a moment later. Both sides of the revision
+# comparison agree, precisely BECAUSE the proposal bumped revision — the
+# guard that looks like it should catch this (revision changed!) is the
+# very thing a same-number match papers over. The memory disappears while
+# the promotion_candidates row propose_memory_promotion just inserted for
+# it is now orphaned — unapprovable (memory_store.promotion_rows_on's
+# SELECT joins back to memory_items and finds nothing), permanently stuck
+# in the admin Track-F queue.
+#
+# (Landing the proposal any LATER than this — e.g. right before delete_
+# memory_if_unchanged itself, as this file's round-3 races above do for
+# their own concurrent-edit scenarios — would make source_revision stale
+# by the time of the proposal, so the OLD revision-only WHERE clause would
+# already (correctly, if incidentally) reject the delete. That is not this
+# bug: this test intercepts embedding_revision itself, one call earlier,
+# so the proposal lands in the actual window the family history describes
+# — before revision is captured, not after.)
+def test_move_retains_memory_when_promotion_proposed_between_precheck_and_revision_capture(
+    repo, alice, monkeypatch
+):
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice, title="RC 补偿", content="补偿改善稳定性。")
+    assert mem.promotion_state == "none", (
+        "前置条件：loop 顶部读到的快照必须是 'none'，round 5 的早退 pre-check "
+        "才会放行——这条竞态测的正是 pre-check 放行之后才发生的并发提案"
+    )
+
+    real_embedding_revision = service.store.embedding_revision
+
+    def _propose_then_capture_revision(memory_id, item):
+        # pre-check 已经放行（它读到的 source.promotion_state 仍是
+        # 'none'）。并发提案恰好卡在这里——embedding_revision 真正读出"这一
+        # 刻的 revision"之前：propose_promotion_on 会同时①把 promotion_state
+        # 翻成 'proposed' ②追加一条新的 memory_revisions 行。下面这次真实
+        # embedding_revision 调用因此读到的已经是"提案之后"的新 revision
+        # ——它和收尾那次原子删除比对用的是同一个数字，旧的 WHERE 子句（只
+        # 查 revision 对不对得上）对这次并发提案完全失明：两边都对得上，
+        # 删除照常成功。
+        repo.propose_memory_promotion(memory_id, alice.id)
+        return real_embedding_revision(memory_id, item)
+
+    monkeypatch.setattr(
+        service.store, "embedding_revision", _propose_then_capture_revision
+    )
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    assert len(results) == 1
+    result = results[0]
+    # GREEN：新 WHERE 子句（额外要求 promotion_state NOT IN ('proposed')）让
+    # 这次 DELETE 匹配零行，退回既有的保留分支契约——不是新发明的结果形状。
+    assert result["ok"] is False
+    assert result["status"] == "copied_source_not_removed"
+    assert result["new_id"] is not None
+
+    still_there = service.get(mem.id, alice.id)
+    assert still_there.notebook_id == src
+    assert still_there.promotion_state == "proposed"
+    with repo._connect() as db:
+        candidate = db.execute(
+            "SELECT status FROM promotion_candidates WHERE object_id=? AND object_type='memory'",
+            (mem.id,),
+        ).fetchone()
+    assert candidate is not None and candidate["status"] == "proposed", (
+        "并发提案的 promotion_candidates 行必须还在、还指向一个真实存在的 "
+        "memory——若源被删掉，这行会永久孤立在审批队列里，approve 时因 "
+        "memory_id 查不到而失败，且没有任何 UI 路径能清理它"
     )

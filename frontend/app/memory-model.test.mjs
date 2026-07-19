@@ -271,6 +271,105 @@ test("跨库传输但缺问题/引用/证据时只渲染来源一行（不为空
   assert.deepEqual(rows, [["来源", "复制自笔记本 nb-src-3"]]);
 });
 
+// --- round 8 P2-B：重复传输的嵌套 provenance 链必须逐层展开 ------------------
+// 一条 memory 被传输两次（A → B → C）：B 里的副本 provenance 是
+// {imported_from: {notebook_id: A, action, source_provenance: P0}}（P0 = 原始
+// ask-answer/agent 载荷，单跳形状，上面几条既有测试测的就是这个）。第二次传输
+// （B → C）时，memory_service.py transfer() 读到的 source.provenance 就是这整
+// 个嵌套对象，新副本的 provenance 变成
+// {imported_from: {notebook_id: B, action, source_provenance: {imported_from:
+// {notebook_id: A, action, source_provenance: P0}}}}——旧代码的 archivalProvenanceRows
+// 只读一层 source_provenance，指望它直接是 P0（有 question/citations 字段），
+// 但这里它是"另一层 imported_from 包装"，没有 question/citations 字段，两条
+// 存档行全部消失，只剩"来源"这一行——第二个目的地丢失了原始问题/引用/证据数。
+test("跨库传输两次（A→B→C）：来源逐层展开为两行，存档问题/引用取自最深层原始 provenance", () => {
+  const rows = memoryProvenanceRows({
+    origin: "ask_answer",
+    provenance: {
+      imported_from: {
+        notebook_id: "nb-B",
+        memory_id: "memory-b-copy",
+        action: "move",
+        source_provenance: {
+          imported_from: {
+            notebook_id: "nb-A",
+            memory_id: "memory-a-original",
+            action: "copy",
+            source_provenance: {
+              question: "为什么这个电源轨要求纹波低于 5%？",
+              mode: "chunk",
+              evidence_level: "grounded",
+              citations: [{ source_id: "s1" }, { source_id: "s2" }],
+            },
+          },
+        },
+      },
+    },
+  });
+  assert.deepEqual(rows, [
+    ["来源", "移动自笔记本 nb-B"],
+    ["上级来源 1", "复制自笔记本 nb-A"],
+    ["原笔记本问题（仅存档）", "为什么这个电源轨要求纹波低于 5%？"],
+    ["原笔记本引用（仅存档）", "2 条"],
+  ]);
+});
+
+test("跨库传输三次（A→B→C→D）：三跳全部展开，存档数据仍取自最深层", () => {
+  const rows = memoryProvenanceRows({
+    origin: "external_agent",
+    provenance: {
+      imported_from: {
+        notebook_id: "nb-C",
+        action: "copy",
+        source_provenance: {
+          imported_from: {
+            notebook_id: "nb-B",
+            action: "move",
+            source_provenance: {
+              imported_from: {
+                notebook_id: "nb-A",
+                action: "move",
+                source_provenance: {
+                  evidence_refs: [{ type: "source_element" }, { type: "memory" }],
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  assert.deepEqual(rows, [
+    ["来源", "复制自笔记本 nb-C"],
+    ["上级来源 1", "移动自笔记本 nb-B"],
+    ["上级来源 2", "移动自笔记本 nb-A"],
+    ["原笔记本证据引用（仅存档）", "2 条"],
+  ]);
+});
+
+test("跨库传输两次但最深层缺问题/引用/证据：只展开两条来源行，不为空字段造行", () => {
+  const rows = memoryProvenanceRows({
+    origin: "ask_answer",
+    provenance: {
+      imported_from: {
+        notebook_id: "nb-B",
+        action: "move",
+        source_provenance: {
+          imported_from: {
+            notebook_id: "nb-A",
+            action: "copy",
+            source_provenance: {},
+          },
+        },
+      },
+    },
+  });
+  assert.deepEqual(rows, [
+    ["来源", "移动自笔记本 nb-B"],
+    ["上级来源 1", "复制自笔记本 nb-A"],
+  ]);
+});
+
 test("非传输 memory 的 ask-answer 来源渲染保持不变（回归闸）", () => {
   const rows = memoryProvenanceRows({
     origin: "ask_answer",

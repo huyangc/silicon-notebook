@@ -174,14 +174,15 @@ test("parseCleanupFailure: message 缺失时给非空兜底文案", () => {
 
 test("summarizeTransferResults: 全部成功（copied + moved 混合）", () => {
   const results = [
-    { source_id: "m1", new_id: "m1x", ok: true, error: null, status: "copied" },
-    { source_id: "m2", new_id: "m2x", ok: true, error: null, status: "moved" },
+    { source_id: "m1", new_id: "m1x", ok: true, error: null, error_code: null, status: "copied" },
+    { source_id: "m2", new_id: "m2x", ok: true, error: null, error_code: null, status: "moved" },
   ];
   const summary = summarizeTransferResults(results);
   assert.equal(summary.total, 2);
   assert.equal(summary.succeeded, 2);
   assert.equal(summary.failed, 0);
   assert.deepEqual(summary.copiedSourceNotRemoved, []);
+  assert.deepEqual(summary.promotionBlocked, []);
 });
 
 test("summarizeTransferResults: 混合结果（成功/普通失败/复制未删源）", () => {
@@ -215,11 +216,82 @@ test("summarizeTransferResults: 全部是 copied_source_not_removed", () => {
   assert.equal(summary.succeeded, 0);
   assert.equal(summary.failed, 2);
   assert.equal(summary.copiedSourceNotRemoved.length, 2);
+  assert.deepEqual(summary.promotionBlocked, []);
 });
 
 test("summarizeTransferResults: 空数组", () => {
   const summary = summarizeTransferResults([]);
-  assert.deepEqual(summary, { total: 0, succeeded: 0, failed: 0, copiedSourceNotRemoved: [] });
+  assert.deepEqual(summary, {
+    total: 0,
+    succeeded: 0,
+    failed: 0,
+    copiedSourceNotRemoved: [],
+    promotionBlocked: [],
+  });
+});
+
+// --- promotionBlocked（round 8 P2-A）----------------------------------------
+// 后端在 memory_service.py 的 _TransferRejected 上挂 error_code=
+// "promotion_proposed"：该 Memory 正在公共知识库审批队列中，move 被拒绝。
+// 这不是普通失败——重试在提案被处理之前永远还是这个结果，前端得把它从
+// "N 条失败，请稍后重试"里摘出来单独提示，不能引导用户白费力气重试。
+
+test("summarizeTransferResults: 识别 promotion_proposed 阻塞，与普通失败/copiedSourceNotRemoved 分开", () => {
+  const results = [
+    { source_id: "m1", new_id: "m1x", ok: true, error: null, error_code: null, status: "copied" },
+    {
+      source_id: "m2",
+      new_id: null,
+      ok: false,
+      error: "该 Memory 正在提升到公共知识库的审批队列中，无法移动；请先在审批中心处理该提案后再移动",
+      error_code: "promotion_proposed",
+      status: "failed",
+    },
+    { source_id: "m3", new_id: null, ok: false, error: "not found", error_code: null, status: "failed" },
+    {
+      source_id: "m4",
+      new_id: "m4x",
+      ok: false,
+      error: "复制已成功，但源未删除：disk full",
+      error_code: null,
+      status: "copied_source_not_removed",
+    },
+  ];
+  const summary = summarizeTransferResults(results);
+  assert.equal(summary.total, 4);
+  assert.equal(summary.succeeded, 1);
+  assert.equal(summary.failed, 3);
+  assert.equal(summary.promotionBlocked.length, 1);
+  assert.equal(summary.promotionBlocked[0].source_id, "m2");
+  assert.equal(summary.copiedSourceNotRemoved.length, 1);
+  assert.equal(summary.copiedSourceNotRemoved[0].source_id, "m4");
+});
+
+test("summarizeTransferResults: error_code 缺失（旧结果/其它失败原因）不算 promotionBlocked", () => {
+  const results = [
+    { source_id: "m1", new_id: null, ok: false, error: "boom", status: "failed" },
+  ];
+  const summary = summarizeTransferResults(results);
+  assert.deepEqual(summary.promotionBlocked, []);
+  assert.equal(summary.failed, 1);
+});
+
+test("summarizeTransferResults: promotion_proposed 全部命中", () => {
+  const results = [
+    {
+      source_id: "m1", new_id: null, ok: false,
+      error: "e1", error_code: "promotion_proposed", status: "failed",
+    },
+    {
+      source_id: "m2", new_id: null, ok: false,
+      error: "e2", error_code: "promotion_proposed", status: "failed",
+    },
+  ];
+  const summary = summarizeTransferResults(results);
+  assert.equal(summary.total, 2);
+  assert.equal(summary.failed, 2);
+  assert.equal(summary.promotionBlocked.length, 2);
+  assert.deepEqual(summary.copiedSourceNotRemoved, []);
 });
 
 // --- confirmedOnly（P2-B，round 6 评审）---------------------------------

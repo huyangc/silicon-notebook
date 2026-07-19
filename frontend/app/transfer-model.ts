@@ -21,11 +21,22 @@ export type TransferStatus = "copied" | "moved" | "failed" | "copied_source_not_
 // 没删但副本已存在)。不变量(调用方可依赖,后端保证):
 //   ok === true  ⟺ error === null
 //   status === "failed" ⟺ new_id === null
+//   error_code 只在 error 非空时才可能非空,绝不替代 error(人话文案照旧走
+//     error/status;error_code 只是给前端挑分支用的机器令牌)——round 8 P2-A。
 export type TransferResult = {
   source_id: string;
   new_id: string | null;
   ok: boolean;
   error: string | null;
+  // 机器可判的拒绝原因(backend/app/services/memory_service.py 的
+  // `_TransferRejected`)。目前后端只产出一个值:"promotion_proposed"——该
+  // Memory 正在公共知识库审批队列中,move 被拒绝,重试永远不会成功,前端得
+  // 给一条区别于"请稍后重试"的可操作提示。其余每一种失败(status 不是
+  // "failed"的成功/警告结果、或"failed"里除这一种以外的任何原因)一律
+  // null——不是"未分类"的占位值,是"这条失败没有专属机器码,只有 error 里
+  // 的人话/诊断文案"。留 string(不是窄字面量联合):前端只在乎"是不是
+  // promotion_proposed",不需要为后端未来新增的其它 code 同步改这里的类型。
+  error_code: string | null;
   status: TransferStatus;
 };
 
@@ -115,19 +126,31 @@ export type TransferResultsSummary = {
   // 但源没删掉——不是普通失败,不能引导用户「重试」(会在目标堆出更多重复副本),
   // 需要单独一条「副本已存在,请手动清理源」的提示。
   copiedSourceNotRemoved: TransferResult[];
+  // status === "failed" 且 error_code === "promotion_proposed" 的子集(round 8
+  // P2-A):这条 Memory 正在公共知识库审批队列里,move 被拒绝——同样不是能靠
+  // "重试"解决的普通失败(在提案被审批中心处理完之前,重试永远还是这个结果),
+  // 需要单独一条「去待确认中心处理提案」的可操作提示,不能和其它失败一起被
+  // 压进"N 条失败,请稍后重试"。
+  promotionBlocked: TransferResult[];
 };
 
-/** 汇总一批 memory transfer 结果:成功/失败计数 + 需要"副本已存在,别再重试"提示的子集。 */
+/** 汇总一批 memory transfer 结果:成功/失败计数 + 「副本已存在,别再重试」/
+ *  「正在审批中,别再重试」两个不可重试子集(理由/文案在各自渲染点不同,
+ *  分开两个字段而不是合并成一个"不可重试"桶)。 */
 export const summarizeTransferResults = (
   results: readonly TransferResult[]
 ): TransferResultsSummary => {
   const succeeded = results.filter((r) => r.ok).length;
   const copiedSourceNotRemoved = results.filter((r) => r.status === "copied_source_not_removed");
+  const promotionBlocked = results.filter(
+    (r) => r.status === "failed" && r.error_code === "promotion_proposed"
+  );
   return {
     total: results.length,
     succeeded,
     failed: results.length - succeeded,
     copiedSourceNotRemoved,
+    promotionBlocked,
   };
 };
 

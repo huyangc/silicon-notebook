@@ -258,25 +258,61 @@ function importedFromOf(provenance: Record<string, unknown>): ImportedFrom | nul
   return imported && typeof imported === "object" ? (imported as ImportedFrom) : null;
 }
 
+// round 8 P2-B：一条 memory 被传输不止一次（A → B → C……）时，
+// memory_service.py transfer() 的既有约定（"源的完整 provenance 原样嵌在
+// imported_from.source_provenance 之下"）会逐跳叠罗汉——第二次传输把第一次
+// 传输产出的整个 {imported_from: {...}} 对象原样塞进它自己的
+// source_provenance，而不是被"拆开揉平"。结果是一条 imported_from.
+// source_provenance.imported_from.source_provenance…… 的链，长度等于这条
+// memory 被传输过的次数。单跳（只传输过一次）时链长为 1，source_provenance
+// 直接就是最初 ask-answer/agent 的原始载荷——这正是本文件已有测试覆盖的
+// 形状。importedFromChain 把整条链摘出来，最近的一跳在前（数组下标 0 =
+// 最后一次传输，即"这条 memory 是从哪个 notebook 直接搬过来的"）；archival
+// ProvenanceRows 再从链的最后一环（最早、最深的那一跳）取真正的原始 ask-
+// answer/agent 载荷——那才是 question/citations/evidence_refs 实际存在的
+// 地方，中间任何一跳的 source_provenance 都只是"下一层包装"，没有这些字段。
+// 上限 10 跳纯粹是防御性的（畸形/循环数据的兜底），不是产品期望的深度——
+// 真实使用中几次传输就会到两三跳，10 只是绝不该触发的安全阀。
+const MAX_PROVENANCE_HOPS = 10;
+
+function importedFromChain(provenance: Record<string, unknown>): ImportedFrom[] {
+  const hops: ImportedFrom[] = [];
+  let current = importedFromOf(provenance);
+  while (current && hops.length < MAX_PROVENANCE_HOPS) {
+    hops.push(current);
+    const nested = current.source_provenance;
+    const nestedObj = nested && typeof nested === "object" ? (nested as Record<string, unknown>) : null;
+    current = nestedObj ? importedFromOf(nestedObj) : null;
+  }
+  return hops;
+}
+
 // 仅存档投影本身：不复用「活」provenance 那两条分支的完整字段集合（创建
 // Agent/客户端请求这些字段对一条已经离开源 notebook 的记忆没有意义，只挑
-// 「回答了什么问题/背后有多少证据」这类留档价值最高的信号），只读
+// 「回答了什么问题/背后有多少证据」这类留档价值最高的信号），只读最深层
 // source_provenance 里的 question/citations（ask_answer）或 evidence_refs
 // （external_agent）——与下面「活」分支各自读的字段一一对应，故意不合并成
 // 一份共享逻辑：两处未来各自演化时不该互相牵连。
 function archivalProvenanceRows(
   origin: MemoryOrigin,
-  imported: ImportedFrom,
+  provenance: Record<string, unknown>,
 ): Array<[string, string]> {
-  const notebookId = String(imported.notebook_id ?? "");
-  const actionLabel = label(TRANSFER_ACTION_LABEL, String(imported.action ?? ""), "传输");
-  const rows: Array<[string, string]> = [
-    ["来源", notebookId ? `${actionLabel}自笔记本 ${notebookId}` : `${actionLabel}而来`],
-  ];
+  const hops = importedFromChain(provenance);
+  if (hops.length === 0) return [];
+  // 每一跳各自一行："来源"给最近的一跳（与既有单跳测试的字面文案保持逐字
+  // 一致，不引入无谓的 diff）；再往上（更早）的每一跳单独编号，避免 React
+  // 渲染用 label 当 key 时因同名"来源"行相撞（见 memory-panel.tsx 的
+  // <div key={label}>）。
+  const rows: Array<[string, string]> = hops.map((hop, index) => {
+    const notebookId = String(hop.notebook_id ?? "");
+    const actionLabel = label(TRANSFER_ACTION_LABEL, String(hop.action ?? ""), "传输");
+    const text = notebookId ? `${actionLabel}自笔记本 ${notebookId}` : `${actionLabel}而来`;
+    return index === 0 ? ["来源", text] : [`上级来源 ${index}`, text];
+  });
+  const deepest = hops[hops.length - 1];
+  const rawDeepest = deepest.source_provenance;
   const sourceProvenance =
-    imported.source_provenance && typeof imported.source_provenance === "object"
-      ? (imported.source_provenance as Record<string, unknown>)
-      : {};
+    rawDeepest && typeof rawDeepest === "object" ? (rawDeepest as Record<string, unknown>) : {};
   if (origin === "ask_answer") {
     const question = String(sourceProvenance.question ?? "");
     if (question) rows.push(["原笔记本问题（仅存档）", question]);
@@ -300,7 +336,7 @@ export function memoryProvenanceRows(memory: {
 }): Array<[string, string]> {
   const provenance = memory.provenance ?? {};
   const imported = importedFromOf(provenance);
-  if (imported) return archivalProvenanceRows(memory.origin, imported);
+  if (imported) return archivalProvenanceRows(memory.origin, provenance);
   if (memory.origin === "ask_answer") {
     const citations = Array.isArray(provenance.citations) ? provenance.citations.length : 0;
     const rows: Array<[string, string]> = [

@@ -1675,3 +1675,128 @@ def test_ensure_hidden_source_creation_and_attach_are_atomic(
         repo._runtime.knowhow_store.get_knowhow_table(table_id)["hidden_source_id"]
         == source_id
     )
+
+
+# ---------------------------------------------------------------------------
+# PR review round 8 P1-A: ensure_hidden_source must fail (not just "be
+# atomic") when attaching to a table a concurrent move already tore down.
+# ---------------------------------------------------------------------------
+#
+# Round 7 made creation+attach ONE database.write() transaction — the test
+# above proves the orphan sweep can no longer observe a source that exists
+# but isn't referenced yet. That closed the "torn between two commits"
+# window, but left a DIFFERENT one open: a projection that read the table
+# BEFORE a concurrent move deleted it (get_knowhow_table's own row) can
+# still be parked mid-ensure_hidden_source when the move's full teardown —
+# delete_table_projection + delete_knowhow_table, THEN the move's one-shot
+# orphan sweep (KnowhowTransferStore.orphaned_knowhow_source_ids, run once
+# at the end of move_table) — runs to completion. When the parked call
+# resumes, KnowhowStore.set_knowhow_hidden_source's UPDATE
+# (`...WHERE id=table_id`) matches ZERO rows: SQLite does not raise on a
+# no-op UPDATE. Pre-fix, the SIBLING insert_source call in that same
+# transaction still commits — an unreferenced, permanently orphaned
+# source_type='knowhow' row, born AFTER the one sweep that could have
+# caught it already ran, so nothing will ever clean it up.
+#
+# The fix scopes the new invariant to set_knowhow_hidden_source's
+# connection= path only (the one ensure_hidden_source uses to join its own
+# transaction) — the public, no-connection form keeps its existing
+# tolerant zero-row behavior verbatim for its other callers (grepped:
+# test_knowhow_store.py's three direct calls all target a table that
+# exists at call time; nothing depends on the old silently-tolerant
+# behavior for a GONE table_id).
+def test_ensure_hidden_source_raises_and_commits_nothing_when_table_deleted_before_attach(
+    repo, projector, table_id, notebook_id, monkeypatch
+):
+    """Direct unit test on ensure_hidden_source itself: hook database.write
+    so the FIRST call — the one ensure_hidden_source opens to insert_source
+    + set_knowhow_hidden_source — is preceded by a full concurrent
+    teardown of table_id, mirroring exactly the delete_knowhow_table call
+    this file's own test_project_table_skips_terminal_write_when_table_
+    deleted_mid_pass above uses for the same kind of race (this table has
+    never been projected, so there is no prior hidden source to tear down
+    first)."""
+    from contextlib import contextmanager
+
+    database = projector.database
+    real_write = database.write
+    state = {"raced": False}
+
+    @contextmanager
+    def _write_with_concurrent_delete_before_attach():
+        if not state["raced"]:
+            state["raced"] = True
+            # 并发 move 的完整拆除，恰好卡在 ensure_hidden_source 判定"需要
+            # 新建源"之后、这次 write() 真正拿到写锁之前完整跑完（现实中的
+            # 窗口通常是"卡在 new_id()/调度延迟"，这里用 monkeypatch 精确
+            # 复现同一个可观察后果）。
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+        with real_write() as db:
+            yield db
+
+    monkeypatch.setattr(database, "write", _write_with_concurrent_delete_before_attach)
+
+    with pytest.raises(KeyError):
+        projector.ensure_hidden_source(table_id)
+
+    assert state["raced"], "race hook never fired — test setup is broken"
+    with repo._connect() as db:
+        orphaned_sources = db.execute(
+            "SELECT COUNT(*) c FROM sources WHERE notebook_id=? AND source_type='knowhow'",
+            (notebook_id,),
+        ).fetchone()["c"]
+    assert orphaned_sources == 0, (
+        "set_knowhow_hidden_source 的 UPDATE 在表已经不存在时匹配零行——若不报错，"
+        "同一事务里 insert_source 的 INSERT 仍会提交：一个永久孤儿，且已经错过了"
+        "move 收尾那唯一一次孤儿扫描窗口，从此不会被任何东西清理"
+    )
+
+
+def test_project_table_writes_nothing_when_table_deleted_before_hidden_source_attach(
+    repo, projector, table_id, notebook_id, monkeypatch
+):
+    """Companion to the direct test above, observed through project_table's
+    own entry point instead of calling ensure_hidden_source directly: proves
+    the per-row element/chunk writes are UNREACHABLE once ensure_hidden_
+    source raises — project_table must abort exactly as cleanly as it
+    already does when get_knowhow_table itself raises at the very top (see
+    this file's existing coverage of that path), not partially write from
+    its now-stale in-memory `table` snapshot."""
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
+
+    from contextlib import contextmanager
+
+    database = projector.database
+    real_write = database.write
+    state = {"raced": False}
+
+    @contextmanager
+    def _write_with_concurrent_delete_before_attach():
+        if not state["raced"]:
+            state["raced"] = True
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+        with real_write() as db:
+            yield db
+
+    monkeypatch.setattr(database, "write", _write_with_concurrent_delete_before_attach)
+
+    with pytest.raises(KeyError):
+        projector.project_table(table_id)
+
+    assert state["raced"], "race hook never fired — test setup is broken"
+    with repo._connect() as db:
+        orphaned_sources = db.execute(
+            "SELECT COUNT(*) c FROM sources WHERE notebook_id=? AND source_type='knowhow'",
+            (notebook_id,),
+        ).fetchone()["c"]
+        element_count = db.execute("SELECT COUNT(*) c FROM source_elements").fetchone()["c"]
+        chunk_count = db.execute("SELECT COUNT(*) c FROM chunks").fetchone()["c"]
+    assert orphaned_sources == 0
+    assert element_count == 0, (
+        "per-row element write must be unreachable once ensure_hidden_source raises"
+    )
+    assert chunk_count == 0, (
+        "per-row chunk write must be unreachable once ensure_hidden_source raises"
+    )

@@ -1283,13 +1283,46 @@ class MemoryStore:
         couldn't be captured — see caller) can never equal a real revision
         number, so the DELETE safely matches zero rows. Returns whether the
         row was actually deleted (``False`` means the memory was edited or
-        transitioned away from 'confirmed' since ``expected_revision`` was
-        captured — the row is left fully intact; caller should surface this
-        as ``copied_source_not_removed``, not retry the delete)."""
+        transitioned away from 'confirmed', or (round 8, see below) had a
+        promotion proposed, since ``expected_revision`` was captured — the
+        row is left fully intact; caller should surface this as
+        ``copied_source_not_removed``, not retry the delete).
+
+        PR review round 8 P1-B: also requires ``promotion_state NOT IN
+        ('proposed')``. ``MemoryService.transfer`` already rejects a move
+        outright when the LOOP-TOP snapshot's ``promotion_state`` is
+        already ``'proposed'`` (its own pre-check, cheap and gives the
+        clearer per-item message for that case — kept as-is, this method
+        doesn't replace it). But a proposal landing AFTER that snapshot is
+        read and BEFORE this DELETE runs used to slip through anyway, and
+        NOT because the revision guard above was somehow blind to it in
+        the way ``status`` alone would be — ``memory_store.
+        propose_promotion_on`` calls ``_append_revision_on`` too, a
+        genuine new ``memory_revisions`` row. The actual gap: the caller
+        captures ``expected_revision`` via ``embedding_revision`` a few
+        lines AFTER its own promotion-state pre-check — if the proposal
+        lands in exactly that narrow window, ``embedding_revision``'s read
+        observes the ALREADY-BUMPED revision, and THIS delete's revision
+        check a moment later compares against that same, unmoved-since
+        number: both sides agree, precisely because the very mutation this
+        method needed to catch is what moved the number they now agree on.
+        A revision-only WHERE clause cannot distinguish "unchanged since
+        expected_revision was captured" from "changed, but AFTER capture
+        and by exactly the mutation this delete needs to reject" — folding
+        the ``promotion_state`` check directly into this same atomic
+        statement closes that gap regardless of exactly when, relative to
+        the revision capture, the proposal lands: whatever the DELETE
+        would have matched on revision/status alone, this additional
+        clause still independently vetoes it while ``promotion_state`` is
+        ``'proposed'`` at the instant the DELETE actually runs. A rowcount
+        of 0 caused by this new clause flows through the exact same
+        ``False`` return / retain-and-report-``copied_source_not_removed``
+        path as every other "changed since expected_revision" cause above
+        — not a new result shape."""
         with self.database.write() as db:
             cursor = db.execute(
                 "DELETE FROM memory_items WHERE id=? AND created_by=? "
-                "AND status='confirmed' AND "
+                "AND status='confirmed' AND promotion_state NOT IN ('proposed') AND "
                 "(SELECT COALESCE(MAX(revision),0) FROM memory_revisions "
                 " WHERE memory_id=?)=?",
                 (memory_id, user_id, memory_id, expected_revision),

@@ -297,7 +297,31 @@ class KnowhowProjector:
         parameter, mirroring that exact idiom rather than inventing a new
         one. With creation and attachment atomic, the sweep can only ever
         observe a knowhow source that is either fully absent or already
-        referenced — never the intermediate state."""
+        referenced — never the intermediate state.
+
+        PR review round 8 P1-A (atomic still isn't the same as CORRECT):
+        being ONE transaction only stops the sweep from landing IN BETWEEN
+        the two writes — it does nothing to stop a table that was already
+        deleted by the time this method's own existence check ran (or that
+        gets deleted between that check and this transaction acquiring the
+        write lock — the "resume after the sweep already ran" case the
+        family history above is really about) from having BOTH writes
+        still go ahead: ``set_knowhow_hidden_source``'s UPDATE matches zero
+        rows against a gone ``table_id``, which SQLite does not treat as an
+        error, so ``insert_source``'s INSERT would commit right alongside
+        it — a fresh, permanently unreferenced source, born after the one
+        sweep that could have caught it already ran. ``set_knowhow_hidden_
+        source`` now raises ``KeyError(table_id)`` on that zero-rowcount
+        case (see its own docstring), which rolls back this WHOLE
+        transaction — ``insert_source``'s INSERT included — so nothing
+        commits. That ``KeyError`` then propagates straight out of this
+        method (nothing here catches it) and out of ``project_table``'s own
+        call to it, which sits BEFORE that method's per-row loop —
+        the exact same "raise before any row is touched, so there is
+        nothing to partially write" shape ``project_table`` already has at
+        its very top when ``get_knowhow_table`` itself raises for a
+        table_id that never existed in the first place. No new call site
+        needed to wire this in; being early in the function IS the wiring."""
         table = self.knowhow.get_knowhow_table(table_id)
         existing = table.get("hidden_source_id")
         if existing:

@@ -483,14 +483,44 @@ class KnowhowStore:
         to insert the ``sources`` row a moment earlier, so creation and
         attachment land in ONE transaction — see that method's own
         docstring for why the two used to be separate and what that gap
-        could leak."""
+        could leak.
+
+        PR review round 8 P1-A: on the ``connection=`` path, raises
+        ``KeyError(table_id)`` if the UPDATE's ``rowcount`` is 0 — i.e.
+        ``table_id`` no longer exists. Round 7 made the sibling
+        ``insert_source`` call and this UPDATE atomic (one transaction),
+        but atomicity alone doesn't stop either statement from succeeding
+        on its own terms: SQLite does not raise on a zero-row UPDATE, so
+        without this check, a concurrent full delete landing between
+        ``ensure_hidden_source``'s existence check and this transaction
+        actually acquiring the write lock would let ``insert_source``'s
+        INSERT commit anyway — an unreferenced, permanently orphaned
+        ``source_type='knowhow'`` row, born AFTER the move's one-shot
+        orphan sweep already ran (so nothing will ever clean it up; see
+        ``KnowhowProjector.ensure_hidden_source``'s own docstring for the
+        full race). Raising here rolls back the WHOLE caller-owned
+        transaction — the ``with conn:`` both calls share rolls back on any
+        exception — so ``insert_source``'s INSERT is undone too; no source
+        row survives.
+
+        Deliberately scoped to the ``connection=`` path only. The public,
+        no-connection form below keeps its original silently-tolerant
+        zero-row behavior verbatim — this codebase's default zero-row
+        UPDATE/DELETE convention — for its OTHER callers (grepped:
+        ``test_knowhow_store.py``'s three direct calls all target a table
+        that still exists at call time; nothing exercises, or depends on,
+        the old tolerant behavior for an already-gone ``table_id``), so
+        this new invariant applies exactly where it was found missing and
+        nowhere else."""
         statement = (
             "UPDATE knowhow_tables SET hidden_source_id = ?, updated_at = ? "
             "WHERE id = ?"
         )
         values = (source_id, self.now(), table_id)
         if connection is not None:
-            connection.execute(statement, values)
+            cursor = connection.execute(statement, values)
+            if cursor.rowcount == 0:
+                raise KeyError(table_id)
             return
         with self.database.write() as db:
             db.execute(statement, values)

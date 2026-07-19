@@ -102,6 +102,28 @@ def _normalize_expiry(value: str) -> str:
     )
 
 
+class _TransferRejected(ValueError):
+    """PR review round 8 P2-A: a per-item ``MemoryService.transfer`` rejection
+    that carries a machine-readable ``error_code`` alongside its human
+    message, so the frontend can route THIS ONE rejection to its own
+    branded, non-retryable notice instead of the generic "N 条失败，请稍后
+    重试" bucket every other exception ``transfer()``'s outer except handler
+    also catches falls into (that generic message is actively wrong here:
+    retrying a move blocked on an active promotion proposal can never
+    succeed until the proposal is resolved in the approval center).
+
+    A thin ``ValueError`` subclass, not a new taxonomy — every existing
+    behavior that treats this as a plain ``ValueError`` (the outer except
+    below, ``str(exc)`` for the ``error`` field) keeps working completely
+    unchanged; only the new ``error_code`` attribute is additive, read via
+    ``getattr(exc, "error_code", None)`` so every OTHER exception type
+    that same handler catches naturally yields ``None``."""
+
+    def __init__(self, message: str, *, error_code: str) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
 class MemoryService:
     def __init__(
         self,
@@ -848,9 +870,15 @@ class MemoryService:
                 # status="failed"/ok=False——复用现成的错误上报路径，不发明
                 # 新的结果形状。
                 if mode == "move" and source.promotion_state == "proposed":
-                    raise ValueError(
+                    # PR review round 8 P2-A：_TransferRejected（普通
+                    # ValueError 的薄子类）带上 error_code="promotion_proposed"
+                    # ——前端靠它把这一条从"N 条失败，请稍后重试"的通用兜底里
+                    # 摘出来，单独给一条"去待确认中心处理提案"的可操作提示
+                    # （重试对这一条永远无效，通用文案在这里是误导）。
+                    raise _TransferRejected(
                         "该 Memory 正在提升到公共知识库的审批队列中，无法移动；"
-                        "请先在审批中心处理该提案后再移动"
+                        "请先在审批中心处理该提案后再移动",
+                        error_code="promotion_proposed",
                     )
                 # P1-2（PR review round 3）：move 收尾用的并发编辑判据在这里、
                 # 尽量早地捕获——不能晚于下面 create_copy_with_initial_
@@ -1042,10 +1070,19 @@ class MemoryService:
                                     self._maybe_schedule_kg(fresh_source, True)
                             except KeyError:
                                 pass  # 整行都没了：没有什么可重新抽取的
+                            # 括注措辞（round 8 P1-B）：delete_memory_if_
+                            # unchanged 的 WHERE 子句现在有两类互相独立的判据
+                            # 会让它返回 False——revision 不匹配（这条分支原本
+                            # 唯一覆盖的场景），或者 promotion_state 恰好在原
+                            # 子删除那一刻是 'proposed'（新判据；那种情况下
+                            # revision 完全可能对得上，就是这条 bug 本身的成因
+                            # ——见 delete_memory_if_unchanged 自己的文档）。
+                            # 不再点名"revision 复核未命中"这一个具体机制，
+                            # 换成不预设成因的措辞，两类原因下都不失实。
                             raise RuntimeError(
-                                "源 memory 在复制完成后被并发编辑或状态变更"
-                                "（原子删除时 revision 复核未命中），为避免"
-                                "丢失该改动，源未删除"
+                                "源 memory 在复制完成后被并发编辑、状态变更或"
+                                "提交了知识库提升提案（原子删除条件未命中），"
+                                "为避免丢失改动或孤立该提案，源未删除"
                             )
                         source_removed = True
                         # P1-C（PR review round 6）：一个在制品的 _kg_ingest_
@@ -1101,6 +1138,11 @@ class MemoryService:
                         "new_id": copied.id,
                         "ok": ok,
                         "error": error,
+                        # round 8 P2-A：这条路径的三个结果（copied/moved/
+                        # copied_source_not_removed）都已经有自己专属、机器
+                        # 可判的 status 值——None 只是保持每条结果字典字段
+                        # 形状一致（调用方不用先判"这个键存不存在"）。
+                        "error_code": None,
                         "status": outcome,
                     }
                 )
@@ -1119,6 +1161,12 @@ class MemoryService:
                         "new_id": None,
                         "ok": False,
                         "error": str(exc),
+                        # round 8 P2-A：只有 _TransferRejected 这一个异常类型
+                        # 携带 error_code——这段 except 捕获的其它一切（普通
+                        # ValueError 校验失败、并发 OperationalError……）都没
+                        # 有这个属性，getattr 的默认值让它们诚实地留 None，
+                        # 不是发明一个"未分类"的假 code。
+                        "error_code": getattr(exc, "error_code", None),
                         "status": "failed",
                     }
                 )

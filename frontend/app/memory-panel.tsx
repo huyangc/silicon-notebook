@@ -75,16 +75,27 @@ async function memoryApi<T>(path: string, options: RequestInit = {}): Promise<T>
 
 type MemoryDraft = { title: string; content_md: string; tags: string };
 
-// C4「复制/移动到…」结果提示——三个字段各自独立(同一时刻至多一个非空,由
-// submitTransfer 互斥地设置):warning 对应 transfer-model.ts
-// summarizeTransferResults() 的 copiedSourceNotRemoved 子集(副本已落地,需要
-// 用户手动清源,别再重试),failure 对应普通 status==="failed" 的子集,两者渲染
-// 成不同色调的横幅,不能合并成一条消息——AMENDMENT 2 明确要求两者视觉上可区分。
-// success 是复审 Minor 补充:批量结果里没有 warning/failure(即全部成功)、且
-// mode==="copy" 才设置——move 的成功靠列表刷新自然可见(条目从当前视图消失/
-// 搬走了),但 copy 源视图不变、目标又不在眼前,不给提示用户没法确认"点了到底
-// 有没有效果"。复用同一套 .memory-transfer-notice 视觉,不新造 chrome。
-type TransferNotice = { warning: string | null; failure: string | null; success: string | null };
+// C4「复制/移动到…」结果提示——四个字段各自独立设置(warning/promotionBlocked/
+// failure 可以在同一批结果里同时非空,分属结果数组里不相交的子集;success 与
+// 其它三个互斥,只在没有任何 warning/promotionBlocked/failure 时才可能非空):
+// warning 对应 transfer-model.ts summarizeTransferResults() 的
+// copiedSourceNotRemoved 子集(副本已落地,需要用户手动清源,别再重试);
+// promotionBlocked 对应它的 promotionBlocked 子集(round 8 P2-A:该 Memory 正
+// 在公共知识库审批队列中,move 被拒绝——同样不能引导"重试",得指向待确认中
+// 心);failure 对应剩下的普通 status==="failed"。三者渲染成不同文案的横幅,
+// 不能合并成一条消息——AMENDMENT 2 明确要求 warning/failure 视觉上可区分,
+// promotionBlocked 是同一原则的延伸:原因不同,提示和后续动作也该不同。
+// success 是复审 Minor 补充:批量结果里没有 warning/promotionBlocked/failure
+// (即全部成功)、且 mode==="copy" 才设置——move 的成功靠列表刷新自然可见(条
+// 目从当前视图消失/搬走了),但 copy 源视图不变、目标又不在眼前,不给提示用
+// 户没法确认"点了到底有没有效果"。复用同一套 .memory-transfer-notice 视
+// 觉,不新造 chrome。
+type TransferNotice = {
+  warning: string | null;
+  promotionBlocked: string | null;
+  failure: string | null;
+  success: string | null;
+};
 
 function draftFor(memory: Pick<MemoryRecord, "title" | "content_md" | "tags">): MemoryDraft {
   return { title: memory.title, content_md: memory.content_md, tags: memory.tags.join(", ") };
@@ -763,12 +774,22 @@ export function MemoryPanel({
       setSelectedIds(new Set());
       setRefresh((value) => value + 1);
       const summary = summarizeTransferResults(results);
-      const plainFailedCount = summary.failed - summary.copiedSourceNotRemoved.length;
-      if (summary.copiedSourceNotRemoved.length > 0 || plainFailedCount > 0) {
+      // round 8 P2-A：promotionBlocked 也从"普通失败"计数里摘出去——它和
+      // copiedSourceNotRemoved 一样不可重试，不该被算进"N 条失败，请稍后
+      // 重试"那句会误导用户去点"重试"的通用文案。
+      const plainFailedCount =
+        summary.failed - summary.copiedSourceNotRemoved.length - summary.promotionBlocked.length;
+      if (
+        summary.copiedSourceNotRemoved.length > 0 ||
+        summary.promotionBlocked.length > 0 ||
+        plainFailedCount > 0
+      ) {
         // 逐条失败原因是后端 str(exc)(memory_service.transfer 内层 except 的
         // 兜底文案,见 backend/app/services/memory_service.py)——不是产品文案,
         // 不能拼进用户可见的 failure 串。只送 console 排障,用户看不带原文的
-        // 通用汇总(同 report-view.tsx 的 activeError 一个模式)。
+        // 通用汇总(同 report-view.tsx 的 activeError 一个模式)。promotion_
+        // proposed 那条的原文也在这批里(它的 status 仍是 "failed")，走的
+        // 是同一条既有诊断出口，不需要单独处理。
         const failedReasons = Array.from(new Set(
           results
             .map((result) => (result.status === "failed" ? result.error : null))
@@ -779,6 +800,9 @@ export function MemoryPanel({
           warning: summary.copiedSourceNotRemoved.length > 0
             ? `${summary.copiedSourceNotRemoved.length} 条已复制到目标笔记本，但源未能自动清理，请手动删除源 Memory，避免重复操作产生冗余副本。`
             : null,
+          promotionBlocked: summary.promotionBlocked.length > 0
+            ? `${summary.promotionBlocked.length} 条正在公共知识库审批中，暂不能移动；请先在待确认中心处理提案。`
+            : null,
           failure: plainFailedCount > 0
             ? `${plainFailedCount} 条复制/移动失败，请稍后重试`
             : null,
@@ -787,6 +811,7 @@ export function MemoryPanel({
       } else if (mode === "copy" && summary.succeeded > 0) {
         setTransferNotice({
           warning: null,
+          promotionBlocked: null,
           failure: null,
           success: summary.succeeded > 1
             ? `已复制 ${summary.succeeded} 条 Memory 到目标笔记本`
@@ -950,9 +975,16 @@ export function MemoryPanel({
       {/* AMENDMENT 2：copied_source_not_removed 不能混进普通失败——它是"副本已
           落地，只是源没删掉"，引导用户重试只会在目标堆更多重复副本。两个提示各
           用独立 state、不同色调渲染，与下面普通失败横幅（复用既有 .memory-error
-          红色调）视觉上明确分开。 */}
+          红色调）视觉上明确分开。round 8 P2-A：promotionBlocked 是同一原则的
+          第三条分支——正在公共知识库审批中，重试同样无效，需要指向待确认中心
+          而不是"稍后重试"，与 warning 共用同一套非警示色的 .memory-transfer-
+          notice 视觉（都是"已知原因、非报错"的提示，不是 failure 那种需要
+          用户重新操作的错误态）。 */}
       {transferNotice?.warning && (
         <div className="memory-transfer-notice" role="status">{transferNotice.warning}</div>
+      )}
+      {transferNotice?.promotionBlocked && (
+        <div className="memory-transfer-notice" role="status">{transferNotice.promotionBlocked}</div>
       )}
       {transferNotice?.failure && (
         <div className="memory-error" role="alert">{transferNotice.failure}</div>
