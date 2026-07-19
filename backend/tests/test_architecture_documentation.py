@@ -731,6 +731,50 @@ def test_knowhow_documentation_matches_projection_isolation_and_agent_scopes():
         )
 
 
+def test_current_mcp_docs_pin_complete_eleven_tool_surface():
+    public_tools = (
+        "list_notebooks",
+        "select_notebook",
+        "search_agent_memory",
+        "search_notebook_context",
+        "get_memory",
+        "ask_notebook",
+        "propose_memory",
+        "list_knowhow_tables",
+        "get_knowhow_discrimination",
+        "get_knowhow_row",
+        "put_knowhow_cell_code",
+    )
+    current_docs = (
+        "architecture.md",
+        "fangan_done.md",
+        "silicon_notebook_fangan.md",
+    )
+
+    for name in current_docs:
+        text = _read(name)
+        compact_text = "".join(text.split())
+        assert "十一个工具" in compact_text, (
+            f"{name} must describe the complete eleven-tool MCP surface"
+        )
+        assert "`knowhow:code`" in text, (
+            f"{name} must document the write scope required by the knowhow tool"
+        )
+        for tool in public_tools:
+            assert tool in text, f"{name} is missing current MCP tool {tool}"
+
+    stale_claims = (
+        r"mcp_server\.py` 提供七个 scoped",
+        r"(?:离线 )?smoke[：，][^。\n]{0,30}七工具契约",
+    )
+    for name in current_docs:
+        text = _read(name)
+        for pattern in stale_claims:
+            assert re.search(pattern, text, flags=re.IGNORECASE) is None, (
+                f"{name} retains obsolete seven-tool MCP wording: {pattern}"
+            )
+
+
 def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferred():
     remediation = _read(
         "docs/superpowers/specs/2026-07-10-architecture-remediation-design.md"
