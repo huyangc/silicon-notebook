@@ -107,7 +107,7 @@ function relativeImports(relative, source, moduleNames) {
       ts.isCallExpression(node)
       && node.expression.kind === ts.SyntaxKind.ImportKeyword
       && node.arguments.length === 1
-      && ts.isStringLiteral(node.arguments[0])
+      && ts.isStringLiteralLike(node.arguments[0])
     ) {
       const resolved = resolve(node.arguments[0].text);
       if (resolved) imports.push(resolved);
@@ -174,91 +174,26 @@ async function policyModules() {
 }
 
 
-function isDefinitelyArrayInput(parameter) {
+function isDefinitelyArrayType(type) {
+  if (!type) return false;
+  if (ts.isArrayTypeNode(type) || ts.isTupleTypeNode(type)) return true;
+  if (ts.isParenthesizedTypeNode(type)) {
+    return isDefinitelyArrayType(type.type);
+  }
   if (
-    parameter.initializer
-    && ts.isArrayLiteralExpression(parameter.initializer)
+    ts.isTypeOperatorNode(type)
+    && type.operator === ts.SyntaxKind.ReadonlyKeyword
   ) {
-    return true;
+    return isDefinitelyArrayType(type.type);
   }
-  function isArrayType(type) {
-    if (!type) return false;
-    if (ts.isArrayTypeNode(type) || ts.isTupleTypeNode(type)) return true;
-    if (ts.isParenthesizedTypeNode(type)) return isArrayType(type.type);
-    if (ts.isUnionTypeNode(type)) return type.types.every(isArrayType);
-    return (
-      ts.isTypeReferenceNode(type)
-      && ts.isIdentifier(type.typeName)
-      && ["Array", "ReadonlyArray"].includes(type.typeName.text)
-    );
+  if (ts.isUnionTypeNode(type)) {
+    return type.types.every(isDefinitelyArrayType);
   }
-  return isArrayType(parameter.type);
-}
-
-
-function textFlowReceivers(sourceFile, includeHelperInputs) {
-  const receivers = new Set();
-
-  function unwrapAwait(expression) {
-    return ts.isAwaitExpression(expression)
-      ? expression.expression
-      : expression;
-  }
-
-  function isTextFlow(expression) {
-    const unwrapped = unwrapAwait(expression);
-    if (ts.isIdentifier(unwrapped)) return receivers.has(unwrapped.text);
-    return (
-      ts.isCallExpression(unwrapped)
-      && (
-        (
-          ts.isIdentifier(unwrapped.expression)
-          && ["readFile", "readFileSync"].includes(
-            unwrapped.expression.text,
-          )
-        )
-        || (
-          ts.isPropertyAccessExpression(unwrapped.expression)
-          && ["readFile", "readFileSync"].includes(
-            unwrapped.expression.name.text,
-          )
-        )
-      )
-    );
-  }
-
-  function visit(node) {
-    if (includeHelperInputs && ts.isFunctionLike(node)) {
-      for (const parameter of node.parameters) {
-        if (
-          ts.isIdentifier(parameter.name)
-          && !isDefinitelyArrayInput(parameter)
-        ) {
-          receivers.add(parameter.name.text);
-        }
-      }
-    }
-    if (
-      ts.isVariableDeclaration(node)
-      && ts.isIdentifier(node.name)
-      && node.initializer
-      && isTextFlow(node.initializer)
-    ) {
-      receivers.add(node.name.text);
-    }
-    if (
-      ts.isBinaryExpression(node)
-      && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
-      && ts.isIdentifier(node.left)
-      && isTextFlow(node.right)
-    ) {
-      receivers.add(node.left.text);
-    }
-    ts.forEachChild(node, visit);
-  }
-
-  visit(sourceFile);
-  return receivers;
+  return (
+    ts.isTypeReferenceNode(type)
+    && ts.isIdentifier(type.typeName)
+    && ["Array", "ReadonlyArray"].includes(type.typeName.text)
+  );
 }
 
 
@@ -272,22 +207,148 @@ function hasPositionOrOrderQuery(relative, source) {
     scriptKind(relative),
   );
   let found = false;
-  const flowReceivers = textFlowReceivers(
-    sourceFile,
-    !isTestEntrypoint(relative),
-  );
+  const SOURCE_INPUT_NAME = /^(?:source|sourceText|productionSource|content|text|payload)$/i;
 
-  function sourceLike(expression) {
+  function newScope(parent = undefined) {
+    return { parent, bindings: new Map() };
+  }
+
+  function binding(scope, name) {
+    for (let current = scope; current; current = current.parent) {
+      if (current.bindings.has(name)) {
+        return current.bindings.get(name);
+      }
+    }
+    return undefined;
+  }
+
+  function assignBinding(scope, name, value) {
+    for (let current = scope; current; current = current.parent) {
+      if (current.bindings.has(name)) {
+        current.bindings.set(name, value);
+        return;
+      }
+    }
+    scope.bindings.set(name, value);
+  }
+
+  function unwrapExpression(expression) {
+    let current = expression;
+    while (
+      ts.isAwaitExpression(current)
+      || ts.isParenthesizedExpression(current)
+      || ts.isAsExpression(current)
+      || ts.isTypeAssertionExpression(current)
+      || ts.isNonNullExpression(current)
+    ) {
+      current = current.expression;
+    }
+    return current;
+  }
+
+  function isFileRead(expression) {
+    const current = unwrapExpression(expression);
+    if (!ts.isCallExpression(current)) return false;
+    if (
+      ts.isIdentifier(current.expression)
+      && ["readFile", "readFileSync"].includes(current.expression.text)
+    ) {
+      return true;
+    }
     return (
-      ts.isIdentifier(expression)
-      && /^(?:source|sourceText|productionSource|content)$/i.test(
-        expression.text,
+      ts.isPropertyAccessExpression(current.expression)
+      && ["readFile", "readFileSync"].includes(current.expression.name.text)
+    );
+  }
+
+  function isTextFlow(expression, scope) {
+    const current = unwrapExpression(expression);
+    if (ts.isIdentifier(current)) {
+      const resolved = binding(scope, current.text);
+      return resolved === undefined
+        ? SOURCE_INPUT_NAME.test(current.text)
+        : resolved;
+    }
+    if (isFileRead(current)) return true;
+    if (ts.isConditionalExpression(current)) {
+      return (
+        isTextFlow(current.whenTrue, scope)
+        || isTextFlow(current.whenFalse, scope)
+      );
+    }
+    return (
+      ts.isBinaryExpression(current)
+      && current.operatorToken.kind === ts.SyntaxKind.PlusToken
+      && (
+        isTextFlow(current.left, scope)
+        || isTextFlow(current.right, scope)
       )
     );
   }
 
-  function visit(node) {
+  function parameterIsTextFlow(parameter) {
+    if (
+      (
+        parameter.initializer
+        && ts.isArrayLiteralExpression(parameter.initializer)
+      )
+      || isDefinitelyArrayType(parameter.type)
+    ) {
+      return false;
+    }
+    return (
+      ts.isIdentifier(parameter.name)
+      && SOURCE_INPUT_NAME.test(parameter.name.text)
+    );
+  }
+
+  function visit(node, scope) {
     if (found) return;
+    if (ts.isFunctionLike(node)) {
+      const functionScope = newScope(scope);
+      for (const parameter of node.parameters) {
+        if (ts.isIdentifier(parameter.name)) {
+          functionScope.bindings.set(
+            parameter.name.text,
+            parameterIsTextFlow(parameter),
+          );
+        }
+        if (parameter.initializer) {
+          visit(parameter.initializer, scope);
+        }
+      }
+      if (node.body) visit(node.body, functionScope);
+      return;
+    }
+    if (ts.isBlock(node)) {
+      const blockScope = newScope(scope);
+      for (const statement of node.statements) {
+        visit(statement, blockScope);
+        if (found) return;
+      }
+      return;
+    }
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+    ) {
+      const value = node.initializer
+        ? isTextFlow(node.initializer, scope)
+        : false;
+      if (node.initializer) visit(node.initializer, scope);
+      scope.bindings.set(node.name.text, value);
+      return;
+    }
+    if (
+      ts.isBinaryExpression(node)
+      && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && ts.isIdentifier(node.left)
+    ) {
+      const value = isTextFlow(node.right, scope);
+      visit(node.right, scope);
+      assignBinding(scope, node.left.text, value);
+      return;
+    }
     if (
       ts.isPropertyAccessExpression(node)
       && ["pos", "end"].includes(node.name.text)
@@ -348,22 +409,16 @@ function hasPositionOrOrderQuery(relative, source) {
       }
       if (
         ["indexOf", "slice", "substring"].includes(method)
-        && (
-          sourceLike(node.expression.expression)
-          || (
-            ts.isIdentifier(node.expression.expression)
-            && flowReceivers.has(node.expression.expression.text)
-          )
-        )
+        && isTextFlow(node.expression.expression, scope)
       ) {
         found = true;
         return;
       }
     }
-    ts.forEachChild(node, visit);
+    ts.forEachChild(node, (child) => visit(child, scope));
   }
 
-  visit(sourceFile);
+  visit(sourceFile, newScope());
   return found;
 }
 
@@ -471,10 +526,65 @@ test("source policy rejects position identities without banning ordinary arrays"
   );
   assert.deepEqual(
     modulePolicyOffenders(
+      "test/readonly-array-helper.ts",
+      "export function clone(values: readonly string[]) {"
+        + " return values.slice(); }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/scoped-array-helper.ts",
+      "function fragment(payload: string) { return payload.slice(1); }\n"
+        + "function clone(payload: string[]) { return payload.slice(); }",
+    ),
+    ["test/scoped-array-helper.ts: source-position or source-order query"],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/unpoisoned-array-helper.ts",
+      "function inspect(payload: string) { return payload.length; }\n"
+        + "function clone(payload: string[]) { return payload.slice(); }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/ordinary-string-helper.ts",
+      "function trimPrefix(value: string) { return value.slice(1); }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
       "example.test.mjs",
       "const copy = values.slice().sort();",
     ),
     [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "feature.test.mjs",
+      "function fragment(payload) { return payload.slice(1); }",
+    ),
+    ["feature.test.mjs: source-position or source-order query"],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "import { readFile } from 'node:fs/promises';\n"
+        + "const fragment = (await readFile(path, 'utf8')).slice(1);",
+    ),
+    ["test/semantic-source.mjs: source-position or source-order query"],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "import fs from 'node:fs';\n"
+        + "let payload;\npayload = fs.readFileSync(path, 'utf8');\n"
+        + "payload.substring(1);",
+    ),
+    ["test/semantic-source.mjs: source-position or source-order query"],
   );
 });
 
@@ -517,6 +627,15 @@ test("source policy follows dynamic imports to test-only helpers", () => {
     ],
     ["page.tsx", "export default function Page() { return null; }"],
   ]);
+  assert.deepEqual(
+    [...policyRelativeModules(modules)].sort(),
+    ["dynamic-helper.ts", "feature.test.mjs"],
+  );
+
+  modules.set(
+    "feature.test.mjs",
+    "const helper = await import(`./dynamic-helper.ts`); void helper;",
+  );
   assert.deepEqual(
     [...policyRelativeModules(modules)].sort(),
     ["dynamic-helper.ts", "feature.test.mjs"],
