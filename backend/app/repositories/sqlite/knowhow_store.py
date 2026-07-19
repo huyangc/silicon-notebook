@@ -879,6 +879,8 @@ class KnowhowStore:
         notebook_id: str,
         updates: "list[tuple[str, str, str, str, str]]",
         require_assets: Sequence[str] = (),
+        anchor_column_id: "str | None" = None,
+        expected_anchor: "Sequence[str] | None" = None,
     ) -> "dict[str, object]":
         """ALL-OR-NOTHING compare-and-write for the interactive editor's
         batch-reformat save (concurrency P1 fix b, HTTP 409 on a concurrent
@@ -913,6 +915,23 @@ class KnowhowStore:
         it to the legacy 400 + CELL_ASSET_MISSING_MESSAGE, distinct from the 409).
         Sharing the write lock is the same anti-TOCTOU reasoning as the compare.
 
+        ANCHOR BASELINE GUARD (round-4 P1, OPTIONAL): the editor's batch fan-out
+        writes a merged/shared cell to every branch row of an anchor GROUP using
+        row ids FROZEN when the modal opened. If another client moves a sibling
+        row's ANCHOR out of that group but leaves the EDITED cell untouched,
+        ``expected_before`` still matches and membership still holds — the
+        candidate would silently land on a row that no longer belongs to the
+        group. When the caller supplies BOTH ``anchor_column_id`` and
+        ``expected_anchor`` (positionally parallel to ``updates`` —
+        ``expected_anchor[i]`` is ``updates[i]``'s row's snapshot anchor value,
+        exactly as ``expected_before`` parallels ``row_ids``), phase 1 also
+        re-reads each target row's anchor-column cell UNDER THE SAME
+        ``BEGIN IMMEDIATE`` and treats a mismatch as a conflict IDENTICAL to a
+        stale ``expected_before``: the whole batch is refused before any write
+        (all-or-nothing). Omitting either argument (both default ``None``) skips
+        the anchor re-read entirely — byte-identical to the pre-fix behavior, so
+        the single-cell/manual-editor callers that never pass it are unaffected.
+
         Returns ``{"written": [(row_id, column_id), ...], "conflict": bool}``.
         ``conflict=True`` guarantees ``written == []`` (the caller maps it to a
         409 with a friendly "内容已被其他人修改，请刷新后重试"). Empty ``updates``
@@ -934,8 +953,12 @@ class KnowhowStore:
             # BEGIN once autocommit is off), and a busy peer surfaces via
             # PRAGMA busy_timeout.
             db.execute("BEGIN IMMEDIATE")
+            # Anchor baseline guard active only when BOTH inputs are supplied (the
+            # editor's fan-out); omitted -> byte-identical legacy path. See the
+            # docstring's ANCHOR BASELINE GUARD paragraph.
+            anchor_guard = anchor_column_id is not None and expected_anchor is not None
             # Phase 1: membership + stale compare for ALL entries BEFORE writing.
-            for table_id, row_id, column_id, expected_before, content_md in updates:
+            for idx, (table_id, row_id, column_id, expected_before, content_md) in enumerate(updates):
                 membership = db.execute(
                     "SELECT r.table_id AS row_table, c.table_id AS col_table, "
                     "t.notebook_id AS tbl_notebook "
@@ -958,6 +981,22 @@ class KnowhowStore:
                 current = current_row["content_md"] if current_row is not None else None
                 if current != expected_before:
                     return {"written": [], "conflict": True}
+                if anchor_guard:
+                    # Re-read THIS row's anchor cell under the same lock and compare
+                    # to the frozen snapshot value; a moved/cleared anchor (stored
+                    # value, or None when the cell is gone, != expected_anchor[idx])
+                    # is a conflict identical to a stale expected_before — the row
+                    # left the logical group this fan-out targets.
+                    anchor_cell = db.execute(
+                        "SELECT content_md FROM knowhow_cells "
+                        "WHERE row_id = ? AND column_id = ?",
+                        (row_id, anchor_column_id),
+                    ).fetchone()
+                    current_anchor = (
+                        anchor_cell["content_md"] if anchor_cell is not None else None
+                    )
+                    if current_anchor != expected_anchor[idx]:
+                        return {"written": [], "conflict": True}
             # F2: every entry cleared membership+stale → the new content's newly
             # referenced assets must still exist in THIS notebook. All entries share
             # notebook_id (membership just proved it), so checking against any target

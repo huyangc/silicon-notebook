@@ -1675,6 +1675,53 @@ test("planReformatSaves 行作用域：共享列 unit 的 writeTargets 覆盖全
   }
 });
 
+// --- P1（round-4）：写目标还带上快照 anchorMd，让守卫拦住「离组行被冻结扇出误写」---
+// 批量扇出用建批次那一刻冻结的行 id 写共享格。若他人把某兄弟行的 anchor 改掉（移出
+// 本组）但没动被编辑的格，expected_before 仍匹配、后端旧守卫看不见——候选就落到已
+// 离组的行。修复：每个写目标额外带上该行 anchor 列的**快照**值（anchorMd），后端在同
+// 一事务内重读比对，任一离组即整组 409。anchorMd 与 originalMd 同源于传入的那份快照。
+test("planReformatSaves: 共享列 unit 的每个 writeTarget 带上快照 anchorMd（= 建批次那刻该行 anchor 列值）", () => {
+  const changed = [
+    { rowId: "r1", columnId: "c-shared", columnName: "共享说明", originalMd: "旧共享说明", status: "changed", candidateMd: "新共享说明", source: "llm" },
+  ];
+  const units = planReformatSaves(changed, F1_SHARED_ROWS, "c-anchor");
+  assert.strictEqual(units.length, 1);
+  // 三个写目标各带自己那行的 anchor 列快照值（F1_SHARED_ROWS 全组 c-anchor="示波器"）。
+  const anchorByRow = new Map(units[0].writeTargets.map((t) => [t.rowId, t.anchorMd]));
+  assert.deepStrictEqual(
+    [...anchorByRow.entries()].sort(),
+    [["r1", "示波器"], ["r2", "示波器"], ["r3", "示波器"]],
+  );
+});
+
+test("planReformatSaves: writeTarget.anchorMd 在建批次那刻定格——之后改实时行的 anchor 不泄漏进来（快照不可变）", () => {
+  // 局部快照（不污染共享夹具）。planReformatSaves 是纯函数：只读传入这份 rows，
+  // 故 runSave 传 snapshotRef.current.allRows 时 anchor 基线恒为快照值。
+  const snapshot = [
+    { id: "r1", position: 0, cells: { "c-anchor": "示波器", "c-shared": "旧共享说明" } },
+    { id: "r2", position: 1, cells: { "c-anchor": "示波器", "c-shared": "旧共享说明" } },
+  ];
+  const changed = [
+    { rowId: "r1", columnId: "c-shared", columnName: "共享说明", originalMd: "旧共享说明", status: "changed", candidateMd: "新共享说明", source: "llm" },
+  ];
+  const units = planReformatSaves(changed, snapshot, "c-anchor");
+  // 弹窗打开期间实时行被改（模拟 detail 刷新/他人把该行移出组）——已规划的 unit 不受影响。
+  snapshot[0].cells["c-anchor"] = "万用表";
+  snapshot[1].cells["c-anchor"] = "万用表";
+  for (const t of units[0].writeTargets) {
+    assert.strictEqual(t.anchorMd, "示波器"); // 仍是建批次那刻的快照值
+  }
+});
+
+test("planReformatSaves: 记录型表（anchorColumnId=null）——writeTarget.anchorMd 为空串（无 anchor 列可读）", () => {
+  const rows = [{ id: "r1", position: 0, cells: { "c-a": "同内容" } }];
+  const changed = [
+    { rowId: "r1", columnId: "c-a", columnName: "A", originalMd: "同内容", status: "changed", candidateMd: "新内容", source: "llm" },
+  ];
+  const units = planReformatSaves(changed, rows, null);
+  assert.strictEqual(units[0].writeTargets[0].anchorMd, "");
+});
+
 test("isReformatUnitStale 行作用域：非展示兄弟(r3)被并发改动 → 整组判 stale（RED：旧实现只查被选中行，看不见 r3 的改动）", () => {
   const changed = [
     { rowId: "r1", columnId: "c-shared", columnName: "共享说明", originalMd: "旧共享说明", status: "changed", candidateMd: "新共享说明", source: "llm" },
@@ -2318,11 +2365,11 @@ const handleCellSaveStart = panelSrc.indexOf("async function handleCellSave(");
 // openCodeModal 紧随 handleCellSave，是稳定的块尾锚点——切到它之前，避免 [\s\S]*? 越界。
 const handleCellSaveSrc = panelSrc.slice(handleCellSaveStart, panelSrc.indexOf("function openCodeModal(", handleCellSaveStart));
 
-test("接线（P1，扇出同源）：handleCellSave 签名带可选 targetRowIds（第 5 参，紧随 expectedByRowId）", () => {
+test("接线（P1，扇出同源）：handleCellSave 签名带可选 targetRowIds（第 5 参）+ anchorGuard（第 6 参，round-4）", () => {
   assert.ok(handleCellSaveStart > 0 && handleCellSaveSrc.length > 0, "handleCellSave 函数体没截到，守卫失效");
   assert.match(
     handleCellSaveSrc,
-    /async function handleCellSave\(\s*rowId: string,\s*columnId: string,\s*contentMd: string,\s*expectedByRowId\?: Map<string, string>,\s*targetRowIds\?: string\[\],\s*\)/,
+    /async function handleCellSave\(\s*rowId: string,\s*columnId: string,\s*contentMd: string,\s*expectedByRowId\?: Map<string, string>,\s*targetRowIds\?: string\[\],\s*anchorGuard\?: \{ anchorColumnId: string; expectedAnchorByRowId: Map<string, string> \},\s*\)/,
   );
 });
 
@@ -2335,20 +2382,40 @@ test("接线（P1，扇出同源）：提供 targetRowIds 时**照用**（不重
   );
 });
 
-test("接线（P1，扇出同源）：runSave 把 unit.writeTargets 的行 id 作第 5 参下发给 onSaveCell", () => {
+test("接线（P1，扇出同源）：runSave 把 unit.writeTargets 的行 id 作第 5 参、anchorGuard 作第 6 参下发给 onSaveCell", () => {
   // units 取自 snapshotRef 冻结快照（见「接线（F1，不可变快照）」），此处把它的写目标行 id
   // 一并显式下发——handleCellSave 照用、不从实时 detail 重算，规划与扇写严格同源。
   assert.match(runSaveSrc, /const targetRowIds = unit\.writeTargets\.map\(\(t\) => t\.rowId\);/);
   assert.match(
     runSaveSrc,
-    /await onSaveCell\(\s*rep\.rowId,\s*rep\.columnId,\s*rep\.candidateMd \?\? "",\s*expectedByRowId,\s*targetRowIds,\s*\);/,
+    /await onSaveCell\(\s*rep\.rowId,\s*rep\.columnId,\s*rep\.candidateMd \?\? "",\s*expectedByRowId,\s*targetRowIds,\s*anchorGuard,\s*\);/,
   );
 });
 
-test("接线（P1，扇出同源）：KnowhowReformatBatchModalProps.onSaveCell 签名带 targetRowIds（批量总是下发）", () => {
+test("接线（P1 round-4）：runSave 从 snapshotRef 冻结快照建 anchorGuard（有 anchor 列才带；anchorMd 取自 writeTargets）", () => {
+  // anchor 基线守卫与写目标/originalMd 同源于 snapshotRef 冻结快照，绝不读实时 detail——
+  // 否则弹窗打开期间 detail 刷新会把他人新 anchor 当基线（正是守卫要挡的漂移）。记录型表
+  // （anchorColumnId=null）不带守卫。
+  assert.match(runSaveSrc, /const anchorColumnId = snapshotRef\.current\.anchorColumnId;/);
+  assert.match(
+    runSaveSrc,
+    /const anchorGuard = anchorColumnId\s*\?\s*\{\s*anchorColumnId,\s*expectedAnchorByRowId: new Map\(unit\.writeTargets\.map\(\(t\) => \[t\.rowId, t\.anchorMd\]\)\),\s*\}\s*: undefined;/,
+  );
+});
+
+test("接线（P1 round-4）：handleCellSave 的批量分支把 anchorGuard 展开成 anchorColumnId + expectedAnchor（按 targets 平行），单格分支不带", () => {
+  // 批量端点（targets>1，合并共享组扇写）才带 anchor 守卫；expectedAnchor 与 expectedBefore
+  // 一样按 targets 顺序平行、缺值退化 ""。单格 patchKnowhowCell 分支刻意不接（无组可离）。
+  assert.match(
+    handleCellSaveSrc,
+    /\.\.\.\(anchorGuard\s*\?\s*\{\s*anchorColumnId: anchorGuard\.anchorColumnId,\s*expectedAnchor: targets\.map\(\(rid\) => anchorGuard\.expectedAnchorByRowId\.get\(rid\) \?\? ""\),\s*\}\s*: \{\}\),/,
+  );
+});
+
+test("接线（P1，扇出同源）：KnowhowReformatBatchModalProps.onSaveCell 签名带 targetRowIds + anchorGuard（批量总是下发）", () => {
   // prop 类型要求它（批量恒传，同 expectedByRowId：prop 必填、handleCellSave 实现放宽为可选）。
   assert.match(
     panelSrc,
-    /onSaveCell: \(\s*rowId: string,\s*columnId: string,\s*contentMd: string,\s*expectedByRowId: Map<string, string>,\s*targetRowIds: string\[\],\s*\) => Promise<void>;/,
+    /onSaveCell: \(\s*rowId: string,\s*columnId: string,\s*contentMd: string,\s*expectedByRowId: Map<string, string>,\s*targetRowIds: string\[\],\s*anchorGuard\?: \{ anchorColumnId: string; expectedAnchorByRowId: Map<string, string> \},\s*\) => Promise<void>;/,
   );
 });

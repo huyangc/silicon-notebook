@@ -3339,10 +3339,15 @@ class SQLiteRepository:
         return self._runtime.knowhow_store.update_knowhow_cells_bulk_guarded(notebook_id, updates)
 
     def update_knowhow_cells_guarded_atomic(
-        self, notebook_id: str, updates: list, require_assets=()
+        self,
+        notebook_id: str,
+        updates: list,
+        require_assets=(),
+        anchor_column_id=None,
+        expected_anchor=None,
     ) -> dict:
         return self._runtime.knowhow_store.update_knowhow_cells_guarded_atomic(
-            notebook_id, updates, require_assets
+            notebook_id, updates, require_assets, anchor_column_id, expected_anchor
         )
 
     def delete_knowhow_table(self, table_id: str) -> dict:

@@ -2575,13 +2575,17 @@ ACTIVE_PRODUCTION_MEMBER_SITES = {
     # 行 —— 同样是纯行号平移,消费点本身没变。上面 mark_notebook_base/
     # set_notebook_personal 经 catalog.* 调用、非 repo.* 消费点,扫描不追踪、未被
     # 门禁标记,保持原样。
-    ("list_notebook_bases", "backend/app/api/routes.py:1572"),
-    ("mountable_notebooks", "backend/app/api/routes.py:1593"),
-    ("list_notebook_bases", "backend/app/api/routes.py:1594"),
-    ("replace_notebook_bases", "backend/app/api/routes.py:1598"),
-    ("list_notebook_bases", "backend/app/api/routes.py:1599"),
-    ("mountable_notebooks", "backend/app/api/routes.py:1609"),
-    ("mounted_by_count", "backend/app/api/routes.py:1618"),
+    # knowhow-md-normalize followup(round-4 anchor 守卫,2026-07-19):
+    # patch_knowhow_cells_batch 里新增 anchor 基线守卫块(anchor_column_id/
+    # expected_anchor 解析 + 长度校验)+ 守卫写调用展开成多行,在本块之前净增 20 行,
+    # 把下面这四个新成员消费点整体再下移 20 行(纯行号平移,消费点本身没变)。
+    ("list_notebook_bases", "backend/app/api/routes.py:1592"),
+    ("mountable_notebooks", "backend/app/api/routes.py:1613"),
+    ("list_notebook_bases", "backend/app/api/routes.py:1614"),
+    ("replace_notebook_bases", "backend/app/api/routes.py:1618"),
+    ("list_notebook_bases", "backend/app/api/routes.py:1619"),
+    ("mountable_notebooks", "backend/app/api/routes.py:1629"),
+    ("mounted_by_count", "backend/app/api/routes.py:1638"),
     # 必办 3 — diag_base_report.py 新增 §2b(先查该笔记本自己的挂载集合,不再
     # 全局猜一个 tier='base' 的 notebook),第一次调用 list_notebook_bases。
     # scripts/diag_base_report.py 在 LINE_NUMBER_INSENSITIVE_FILES 里,但（同

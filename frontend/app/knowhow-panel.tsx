@@ -891,12 +891,19 @@ export function KnowhowPanel({
   // 保持既有 last-write-wins：那是真人在主动编辑，不该被自己更早的快照挡下（本
   // 修复刻意不改这条流的语义）。基线按 targets 顺序平行下发；某写目标缺基线时退化
   // 成 ""（几乎必然判陈旧、保守跳过，不盲写）。
+  //
+  // 并发防护（P1 round-4）：`anchorGuard` 也仅由**批量规整保存**传入（快照 anchor 列
+  // id + rowId -> 建批次那刻该行 anchor 快照值），只作用于**批量端点**（targets>1，即
+  // 合并共享组扇写）——后端在同一事务内额外重读每行 anchor 列，任一行 anchor 自快照以来
+  // 被移出组就整组 409（离组行不再被冻结扇出误写）。**单格路径（patchKnowhowCell）刻意
+  // 不带**：单行没有「兄弟组」可离，且手动编辑器本就 last-write-wins。缺值同样退化成 ""。
   async function handleCellSave(
     rowId: string,
     columnId: string,
     contentMd: string,
     expectedByRowId?: Map<string, string>,
     targetRowIds?: string[],
+    anchorGuard?: { anchorColumnId: string; expectedAnchorByRowId: Map<string, string> },
   ) {
     if (!selectedTableId || !detail) return;
     // 扇出写目标（合并共享格写整组）的两条来源，刻意分流（P1）：
@@ -926,8 +933,16 @@ export function KnowhowPanel({
           ...(expectedByRowId
             ? { expectedBefore: targets.map((rid) => expectedByRowId.get(rid) ?? "") }
             : {}),
+          // 合并共享组扇写才带 anchor 守卫（与 expectedBefore 一样按 targets 平行下发）。
+          ...(anchorGuard
+            ? {
+                anchorColumnId: anchorGuard.anchorColumnId,
+                expectedAnchor: targets.map((rid) => anchorGuard.expectedAnchorByRowId.get(rid) ?? ""),
+              }
+            : {}),
         })
       : [
+          // 单格路径：不带 anchor 守卫（见上方 handleCellSave 头注释的 split 说明）。
           await patchKnowhowCell(
             notebookId,
             selectedTableId,
@@ -4154,13 +4169,17 @@ interface KnowhowReformatBatchModalProps {
    * 传它，令 handleCellSave 照用这份快照写目标、不从实时 detail 重算合并共享组——规划
    * 与扇写因此同源于同一份快照，杜绝 detail 刷新致组分裂时「只写代表行却整组报成功」。
    * handleCellSave 的这两个参都是可选的（手动编辑器省略、走实时分组 + last-write-wins），
-   * 故此处签名要求它们、实现放宽它们，两侧兼容。 */
+   * 故此处签名要求它们、实现放宽它们，两侧兼容。第 6 参 `anchorGuard`（P1 round-4）=
+   * 快照 anchor 列 id + rowId -> 建批次那刻该行 anchor 快照值：只在**有 anchor 列**时下发，
+   * 令 handleCellSave 的合并共享组扇写额外带上 anchor 基线守卫，后端拦「离组行被冻结扇出
+   * 误写」。记录型表（无 anchor 列）传 undefined，故此参可选。 */
   onSaveCell: (
     rowId: string,
     columnId: string,
     contentMd: string,
     expectedByRowId: Map<string, string>,
     targetRowIds: string[],
+    anchorGuard?: { anchorColumnId: string; expectedAnchorByRowId: Map<string, string> },
   ) => Promise<void>;
   /** F（review）：保存阶段发生过 stale 跳过（preflight 比对 或 409）时回调——请父级重取
    * 整表，把陈旧的 detail 快照（喂给下一次批量的 rows/originalMd 基线之源）换新，否则关掉
@@ -4433,6 +4452,18 @@ function KnowhowReformatBatchModal({
       // 代表行、循环却整组标 saved（漏写报成功）；显式写目标堵住这条缝。基线（expectedBefore）
       // 仍逐行随行，服务端事务内逐行比对，真陈旧则 409 -> 落到既有 stale-skip。
       const targetRowIds = unit.writeTargets.map((t) => t.rowId);
+      // P1（round-4）：把本 unit 每个写目标的**快照** anchor 值（unit.writeTargets[i].anchorMd，
+      // 与 originalMd 同源于 snapshotRef 冻结快照）连同**快照** anchor 列 id 一起下发——服务端
+      // 事务内额外重读每行 anchor 列，任一行 anchor 自建批次以来被移出组就整组 409（落到既有
+      // stale-skip 路径）。只在有 anchor 列（分组视图）才带；记录型表 anchorColumnId=null 时不带
+      // （无「兄弟组」可离）。anchorColumnId 取自 snapshotRef 而非实时 detail，与写目标同一份底稿。
+      const anchorColumnId = snapshotRef.current.anchorColumnId;
+      const anchorGuard = anchorColumnId
+        ? {
+            anchorColumnId,
+            expectedAnchorByRowId: new Map(unit.writeTargets.map((t) => [t.rowId, t.anchorMd])),
+          }
+        : undefined;
       try {
         await onSaveCell(
           rep.rowId,
@@ -4440,6 +4471,7 @@ function KnowhowReformatBatchModal({
           rep.candidateMd ?? "",
           expectedByRowId,
           targetRowIds,
+          anchorGuard,
         );
         if (!mountedRef.current) return;
         setBatch((state) => unit.members.reduce((s, m) => applyReformatSaveSuccess(s, m.rowId, m.columnId), state));

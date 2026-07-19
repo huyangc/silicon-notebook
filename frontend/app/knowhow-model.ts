@@ -134,6 +134,13 @@ export type KnowhowCellsBatchPatchInput = {
   // 对应 rowIds[i]）。提供时后端把整组当作一次 all-or-nothing 事务内比对，任一
   // 行的基线陈旧就整组 409 拒写；省略时退回 last-write-wins（手动编辑器合并格保存）。
   expectedBefore?: string[];
+  // 并发防护（P1 round-4）：可选的 anchor 基线守卫。anchorColumnId = 分组键列 id，
+  // expectedAnchor **按 rowIds 顺序平行** = 每行 anchor 列的快照值。与 expectedBefore
+  // 一起由批量扇出下发：后端在同一事务内额外重读每行 anchor 列，任一行 anchor 自快照
+  // 以来被移出组就整组 409（离组行不再被冻结扇出误写；被编辑格没变、expectedBefore
+  // 单独拦不住这类漂移）。两字段成对，缺一即不带该守卫（手动编辑器合并格省略）。
+  anchorColumnId?: string;
+  expectedAnchor?: string[];
 };
 
 // --- 模板往返 / 追加导入类型（Task 6）--------------------------------------------
@@ -546,20 +553,26 @@ export const batchPatchKnowhowCells = (
   notebookId: string,
   tableId: string,
   input: KnowhowCellsBatchPatchInput,
-): Promise<KnowhowCellPatchResult[]> =>
-  apiFetch<WireKnowhowCellPatchResult[]>(`/notebooks/${notebookId}/knowhow/${tableId}/cells`, {
+): Promise<KnowhowCellPatchResult[]> => {
+  // 逐键条件装配请求体：省略的守卫字段**不进** body（区别于传 null）——既有测试锁死
+  // 「省略 expectedBefore 时 body 不含该键」，anchor 守卫同理。
+  const body: Record<string, unknown> = {
+    column_id: input.columnId,
+    row_ids: input.rowIds,
+    content_md: input.contentMd,
+  };
+  if (input.expectedBefore !== undefined) body.expected_before = input.expectedBefore;
+  // anchor 守卫两字段成对：只有都提供才带上（后端也要求 anchor_column_id 与
+  // expected_anchor 同时在场才启用守卫）。
+  if (input.anchorColumnId !== undefined && input.expectedAnchor !== undefined) {
+    body.anchor_column_id = input.anchorColumnId;
+    body.expected_anchor = input.expectedAnchor;
+  }
+  return apiFetch<WireKnowhowCellPatchResult[]>(`/notebooks/${notebookId}/knowhow/${tableId}/cells`, {
     method: "PATCH",
-    body: JSON.stringify(
-      input.expectedBefore === undefined
-        ? { column_id: input.columnId, row_ids: input.rowIds, content_md: input.contentMd }
-        : {
-            column_id: input.columnId,
-            row_ids: input.rowIds,
-            content_md: input.contentMd,
-            expected_before: input.expectedBefore,
-          },
-    ),
+    body: JSON.stringify(body),
   }).then((wireResults) => wireResults.map(mapCellPatchResult));
+};
 
 // --- Excel 模板往返（Task 6）------------------------------------------------------
 

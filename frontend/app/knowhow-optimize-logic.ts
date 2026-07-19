@@ -944,6 +944,12 @@ export type ReformatSaveWriteTarget = {
    *  取自 planReformatSaves 收到的**完整** detail.rows 的对应格，与展示成员的
    *  originalMd 同源（同一份 detail 快照）。 */
   originalMd: string;
+  /** round-4 P1：该行 anchor 列在建批次那一刻的快照值（记录型表/无 anchor 列时为
+   *  ""）。fan-out 的守卫写把它作为**每行**的 anchor 基线下发给后端——后端在同一
+   *  事务内重读该行 anchor 列，任一行的 anchor 自快照以来被移出组就整组 409（离组
+   *  行不再被冻结扇出误写；被编辑格没变、expected_before 单独拦不住这类漂移）。与
+   *  originalMd 同源于传入的那份完整 detail.rows 快照。 */
+  anchorMd: string;
 };
 
 export type ReformatSaveUnit = {
@@ -988,6 +994,11 @@ export function planReformatSaves(
   // 兄弟行——正是本次修复要纳入 stale 比对的那些）。
   const rowById = new Map<string, KnowhowRow>();
   for (const row of rows) rowById.set(row.id, row);
+  // round-4 P1：某行 anchor 列在建批次那一刻的快照值（无 anchor 列 → ""）。fan-out
+  // 的守卫写把它当每行的 anchor 基线下发给后端，据此拦「离组行被冻结扇出误写」。取自
+  // 传入的这份 rows 快照，与 originalMd 同源（runSave 传 snapshotRef.current.allRows）。
+  const anchorOf = (rowId: string): string =>
+    anchorColumnId ? rowById.get(rowId)?.cells[anchorColumnId] ?? "" : "";
 
   const units: ReformatSaveUnit[] = [];
   const unitBySignature = new Map<string, ReformatSaveUnit>();
@@ -999,7 +1010,9 @@ export function planReformatSaves(
       units.push({
         representative: item,
         members: [item],
-        writeTargets: [{ rowId: item.rowId, columnId: item.columnId, originalMd: item.originalMd }],
+        writeTargets: [
+          { rowId: item.rowId, columnId: item.columnId, originalMd: item.originalMd, anchorMd: anchorOf(item.rowId) },
+        ],
       });
       continue;
     }
@@ -1023,6 +1036,7 @@ export function planReformatSaves(
       rowId,
       columnId: item.columnId,
       originalMd: rowById.get(rowId)?.cells[item.columnId] ?? "",
+      anchorMd: anchorOf(rowId),
     }));
     const unit: ReformatSaveUnit = { representative: item, members: [item], writeTargets };
     unitBySignature.set(signature, unit);

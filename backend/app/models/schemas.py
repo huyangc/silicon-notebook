@@ -1205,6 +1205,16 @@ class KnowhowCellsBatchPatch(BaseModel):
     # never a half-written concept group. Omitted (None) → legacy
     # update_knowhow_cells last-write-wins (the manual editor's shared-cell save).
     expected_before: Optional[List[str]] = None
+    # Concurrency P1 (round-4): OPTIONAL anchor baseline guard, POSITIONALLY
+    # PARALLEL to row_ids (expected_anchor[i] is row_ids[i]'s snapshot anchor
+    # value). Provided together with expected_before by the batch-reformat fan-out
+    # so update_knowhow_cells_guarded_atomic ALSO re-reads each target row's
+    # anchor cell in-transaction: a sibling row whose anchor moved OUT of the
+    # shared group after the modal froze its row ids (edited cell unchanged, so
+    # expected_before still matches) refuses the whole group (409). Omitted (None)
+    # → the anchor is never re-read (byte-identical to expected_before-only).
+    anchor_column_id: Optional[str] = None
+    expected_anchor: Optional[List[str]] = None
 
 
 # --- PR-2+3 Task 3: create-empty-table wizard backend --------------------------

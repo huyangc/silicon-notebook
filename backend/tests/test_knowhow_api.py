@@ -1110,6 +1110,85 @@ def test_batch_cells_expected_before_any_mismatch_409_writes_nothing(tmp_path, m
 
 
 # ---------------------------------------------------------------------------
+# Concurrency P1 (round-4 followup): the batch cell-save wire gains an OPTIONAL
+# anchor baseline guard (anchor_column_id + expected_anchor, positionally
+# parallel to row_ids like expected_before). A sibling row's ANCHOR moved out of
+# the shared group after the modal snapshotted its row ids, while the EDITED cell
+# is unchanged (expected_before still matches) -- the old guard validated only the
+# edited column, so the candidate silently landed on the离组 row. With the anchor
+# baseline provided, any mismatch refuses the whole group (409, nothing written),
+# same user_error copy as a stale expected_before. Omitting it is byte-identical
+# legacy.
+# ---------------------------------------------------------------------------
+
+
+def test_batch_cells_anchor_baseline_mismatch_409_writes_nothing(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000560")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    anchor = next(c for c in detail["columns"] if c["name"] == "违例类型")
+    col = next(c for c in detail["columns"] if c["name"] == "修复方法")
+    r0, r1 = detail["rows"][0], detail["rows"][1]
+    eb0 = r0["cells"].get(col["id"], "")
+    eb1 = r1["cells"].get(col["id"], "")
+    a0 = r0["cells"].get(anchor["id"], "")
+    a1 = r1["cells"].get(anchor["id"], "")
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/cells",
+        headers=owner_h,
+        json={
+            "column_id": col["id"],
+            "row_ids": [r0["id"], r1["id"]],
+            "content_md": "统一改法",
+            # edited cell unchanged -> isolates the anchor check from the
+            # expected_before 409 path.
+            "expected_before": [eb0, eb1],
+            "anchor_column_id": anchor["id"],
+            "expected_anchor": [a0, a1 + "（组已变）"],  # 2nd row's anchor baseline stale
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    by_id = {r["id"]: r for r in fresh["rows"]}
+    assert by_id[r0["id"]]["cells"][col["id"]] == eb0  # neither row changed
+    assert by_id[r1["id"]]["cells"][col["id"]] == eb1
+
+
+def test_batch_cells_anchor_baseline_match_writes_all(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000561")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    anchor = next(c for c in detail["columns"] if c["name"] == "违例类型")
+    col = next(c for c in detail["columns"] if c["name"] == "修复方法")
+    r0, r1 = detail["rows"][0], detail["rows"][1]
+    eb0 = r0["cells"].get(col["id"], "")
+    eb1 = r1["cells"].get(col["id"], "")
+    a0 = r0["cells"].get(anchor["id"], "")
+    a1 = r1["cells"].get(anchor["id"], "")
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/cells",
+        headers=owner_h,
+        json={
+            "column_id": col["id"],
+            "row_ids": [r0["id"], r1["id"]],
+            "content_md": "统一改法",
+            "expected_before": [eb0, eb1],
+            "anchor_column_id": anchor["id"],
+            "expected_anchor": [a0, a1],  # anchors unchanged -> writes proceed
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    by_id = {r["id"]: r for r in fresh["rows"]}
+    assert by_id[r0["id"]]["cells"][col["id"]] == "统一改法"
+    assert by_id[r1["id"]]["cells"][col["id"]] == "统一改法"
+
+
+# ---------------------------------------------------------------------------
 # F2 — the GUARDED (expected_before) write branch must run the SAME asset
 # validation the legacy branch runs: a guarded write whose content references a
 # missing/foreign asset:// must be refused with the legacy path's 400 +
