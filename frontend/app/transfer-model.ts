@@ -130,3 +130,17 @@ export const summarizeTransferResults = (
     copiedSourceNotRemoved,
   };
 };
+
+// --- AMENDMENT 4（P2-B，round 6 评审）：批量传输必须预先剔除非 confirmed 项 ---
+// 单条卡片操作区的「复制/移动到…」入口天生只在 status==="confirmed" 的卡片上
+// 渲染（memory-panel.tsx 里那条 memory.status === "confirmed" 门），但批量选择
+// 走 checkbox，选中态与状态无关——用户可以选中 candidate/rejected/deprecated
+// 条目一起点「复制/移动到…」。后端 memory_service.transfer() 对这些条目会逐条
+// 报 status="failed"（"只能传输 confirmed 状态的 memory"），不是数据丢失，但
+// 都是可预见的、本可以在前端拦下来的失败。调用方在打开 DestinationPicker 之
+// 前用这个纯函数先筛一遍所选条目，把注定失败的条目挡在请求之外。
+
+/** 只保留 status === "confirmed" 的条目，其余（candidate/rejected/deprecated）
+ *  剔除，相对顺序不变。 */
+export const confirmedOnly = <T extends { status: string }>(items: readonly T[]): T[] =>
+  items.filter((item) => item.status === "confirmed");

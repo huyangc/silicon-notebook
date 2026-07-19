@@ -122,7 +122,26 @@ def _remap(
         code["column_id"] = khcol_map[code["column_id"]]
         cell_code_out.append(code)
 
-    # 派生产物：稳定 id 重算（零重嵌入的关键）
+    # 派生产物：稳定 id 重算（零重嵌入的关键）。
+    #
+    # P1-A（PR review round 6，普通顺序 bug，非并发竞态）：这里的 elements 不
+    # 保证全部还对应存活的业务行/列。project_table 的重投影只按「当前存活
+    # 行」重写：_write_elements 对每一行都是「先按 row_id 整体删、再按当前
+    # 列集合重插」（projection.py），但这只在该行本身被下一次重投影**重新
+    # 访问**时才会发生——一行被 delete_knowhow_row 删掉之后，它不再出现在
+    # table["rows"] 里，从此没有任何重投影会再碰它，它名下已经写过的
+    # source_elements（连同 chunks/chunk_embeddings）永久留在隐藏源下。
+    # snapshot_table 按 source_id 整表 SELECT，不按行/列过滤，会把这些陈旧
+    # 派生物原样读进快照。以前这里对 khrow_map/khcol_map 的查找是无条件
+    # 的——查不到就是裸 KeyError，把整次复制/搬迁直接崩掉（路由层的
+    # `except KeyError` 把它转成 404 "Table not found"），该表从此永久无法
+    # 再被复制或移动，且不需要任何并发就能触发（普通用户「加两行、删一
+    # 行」就会踩上）。
+    #
+    # 跳过 khrow_map/khcol_map 里找不到的陈旧引用是正确的丢弃，不是将就：
+    # 它们不代表任何还活着的业务数据，目标侧的重投影本来就只会替存活行重
+    # 建 KO/chunk，带过去的陈旧派生物既不会被覆盖也不会被清理，唯一后果是
+    # 副本从出生起就带着一份永久性死重。
     element_map: dict[str, str] = {}
     element_row_new: dict[str, str] = {}
     elements_out = []
@@ -131,8 +150,12 @@ def _remap(
         old_id = el["id"]
         metadata = json.loads(el.get("metadata") or "{}")
         kh_meta = dict(metadata.get("knowhow") or {})
-        new_row = khrow_map[kh_meta["row_id"]]
-        new_col = khcol_map[kh_meta["column_id"]]
+        old_row_id = kh_meta.get("row_id")
+        old_col_id = kh_meta.get("column_id")
+        if old_row_id not in khrow_map or old_col_id not in khcol_map:
+            continue  # 陈旧派生物（已删行/列的遗留）——不随复制/搬迁携带
+        new_row = khrow_map[old_row_id]
+        new_col = khcol_map[old_col_id]
         new_el = element_id(new_row, new_col)
         element_map[old_id] = new_el
         element_row_new[old_id] = new_row
@@ -153,6 +176,8 @@ def _remap(
         old_element_ids = json.loads(chunk.get("element_ids") or "[]")
         if not old_element_ids:
             raise ValueError(f"knowhow chunk {old_chunk_id} 缺 element_ids，无法重算稳定 id")
+        if old_element_ids[0] not in element_row_new:
+            continue  # 挂在陈旧 element 下的陈旧 chunk——同上，一并跳过
         new_row = element_row_new[old_element_ids[0]]
         part = int(old_chunk_id.rsplit("-", 1)[-1])
         new_chunk_id = cell_chunk_id(new_row, part)
@@ -168,7 +193,10 @@ def _remap(
     vectors_out = []
     for vec in snapshot["chunk_embeddings"]:
         vec = dict(vec)
-        vec["chunk_id"] = chunk_map[vec["chunk_id"]]
+        old_chunk_id = vec["chunk_id"]
+        if old_chunk_id not in chunk_map:
+            continue  # 陈旧 chunk 的向量——同上，随其 chunk 一并跳过
+        vec["chunk_id"] = chunk_map[old_chunk_id]
         vec["notebook_id"] = target_notebook_id
         vectors_out.append(vec)
 
@@ -305,7 +333,13 @@ def move_table(
                 "源表在复制完成后被并发编辑（列/行/格/代码计数或 mutation_seq "
                 "与复制时的快照不一致），为避免丢失该编辑，源表未删除"
             )
-        hidden = repo.get_knowhow_table(source_table_id).get("hidden_source_id")
+        source_table_row = repo.get_knowhow_table(source_table_id)
+        hidden = source_table_row.get("hidden_source_id")
+        # P1-B（PR review round 6）读得越早越安全，同④的取指纹一个道理：这
+        # 一读要撑到下面成功路径最后的孤儿扫描——扫描按 notebook 收窄
+        # （KnowhowTransferStore.orphaned_knowhow_source_ids 的文档字符串），
+        # 表行删掉之后就再也读不到它的 notebook_id 了，必须现在存下来。
+        src_notebook_id = source_table_row["notebook_id"]
         if hidden:
             build_projector(repo).delete_table_projection(hidden)
         # P1-1（PR review round 3：check-then-act 仍是竞态）：上面那次复核本身
@@ -353,6 +387,39 @@ def move_table(
             "move_table：副本 %s 已提交，但清理源表 %s 失败", new_table_id, source_table_id
         )
         raise SourceCleanupFailed(new_table_id, exc) from exc
+
+    # P1-B（PR review round 6，孤儿收尾扫描）：源表行此刻确凿已经删除、副本
+    # 确凿已经在目标——上面的 try/except 只覆盖到这里为止的「读指纹+拆投影
+    # +原子删表」，不该再管接下来这一步。这一步单独存在的理由：delete_
+    # table_projection(hidden) 删的是 source 行本身，从不清空表行的
+    # hidden_source_id 列（只有 set_knowhow_hidden_source 写它）——所以从
+    # 它返回到上面原子删除真正执行这段真空里，表行仍在、hidden_source_id
+    # 仍指着刚被拆掉的旧 id。一个恰好卡在这个窗口的并发 ensure_hidden_
+    # source（stale-debounce 重投影撞上这次 move，projection.py 的「记录的
+    # id 解不出就重铸一个」分支）会读到这个已经解不出的旧 id、铸出一个替身
+    # source 并把它写回表行。table_fingerprint 只覆盖业务数据（正确——
+    # hidden_source_id 是派生数据，不该进指纹），看不见这次替换，原子删除
+    # 照常成功；表行没了，替身 source 从此不再被任何 knowhow_tables 行引
+    # 用，变成源 notebook 里一个继续可被检索到的永久孤儿。
+    #
+    # 扫描的失败必须只记日志、绝不重新抛出：源表行已经确凿删除，这不是
+    # SourceCleanupFailed 承诺的「源仍在，可安全重试删源」那种状态——把扫
+    # 描失败包装成那个类型化错误，会让调用方对着一张早就不存在的源表做出
+    # 错误决策（比如引导用户去"删除源表"，而源表根本已经没了）。留给下一
+    # 次同 notebook 的 move（这个扫描本来就是幂等、opportunistic 的）或将
+    # 来专门的孤儿清理入口去补，不是这次调用必须完成的事。
+    try:
+        for orphan_id in knowhow_transfer_store.orphaned_knowhow_source_ids(
+            src_notebook_id
+        ):
+            build_projector(repo).delete_table_projection(orphan_id)
+    except Exception:  # noqa: BLE001 — 见上：源表已确凿删除，扫描失败不能
+        # 把一次已经成功的移动回报成需要人工介入的清理失败。
+        _log.warning(
+            "move_table：源表 %s 已成功移动，但收尾孤儿隐藏源扫描失败，"
+            "notebook %s 可能残留孤儿（下次同 notebook 的 move 会重试）",
+            source_table_id, src_notebook_id, exc_info=True,
+        )
     return new_table_id
 
 

@@ -4005,11 +4005,21 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_TRANSFER
 # 204->212). _remap's own two sites (`_runtime` seam extraction at 29,
 # `get_notebook_asset` at 89) sit before the inserted lines and are
 # unaffected.
+#
+# PR review round 6 P1-A update: the stale-derived-artifact skip guards
+# added to _remap's elements/chunks/chunk_embeddings loops (a deleted
+# business row/column's leftover source_elements/chunks must be dropped, not
+# KeyError-crash the whole transfer — see transfer.py's own comment on that
+# loop) sit ahead of copy_table's `_runtime`/`storage_dir` reaches too,
+# shifting those two line numbers again (193->221, 212->240). _remap's own
+# two sites (29, 89) again sit before the inserted lines and are unaffected;
+# move_table's own third `_runtime` reach (previously 292) shifts the same
+# way — see KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES below.
 KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES = {
     ("_runtime", "backend/app/services/knowhow/transfer.py:29"),
-    ("_runtime", "backend/app/services/knowhow/transfer.py:193"),
+    ("_runtime", "backend/app/services/knowhow/transfer.py:221"),
     ("get_notebook_asset", "backend/app/services/knowhow/transfer.py:89"),
-    ("storage_dir", "backend/app/services/knowhow/transfer.py:212"),
+    ("storage_dir", "backend/app/services/knowhow/transfer.py:240"),
 }
 ACTIVE_PRODUCTION_MEMBER_SITES = ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES
 
@@ -4162,15 +4172,19 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_
 # knowhow cross-notebook copy/move PR review round 2 P1-2 (data loss):
 # move_table's own snapshot-vs-delete concurrent-edit guard reaches
 # `repo._runtime.knowhow_transfer_store` a THIRD, independent time (the
-# other two, lines 29/193, are inside `_remap`/`copy_table` — see
-# KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES above and the matching
+# other two, lines 29/193 originally, now 29/221 after round 6's P1-A fix —
+# see KNOWHOW_TRANSFER_SERVICE_ACTIVE_PRODUCTION_SITES above and the matching
 # INDEPENDENT_PRIVATE_SITES fold in test_repository_callers_static.py) — this
 # file's own consumer-scan mirror of that same new site: move_table needs
 # table_fingerprint() both before copy_table runs and again right before the
 # source delete. Appended at EOF for the same zero-line-shift reason as
 # every other TASKN_* block above.
+#
+# PR review round 6 P1-A update: same _remap skip-guard lines that shifted
+# copy_table's own two sites (193->221, 212->240 above) sit ahead of this
+# site too, shifting it 292->320.
 KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES = {
-    ("_runtime", "backend/app/services/knowhow/transfer.py:292"),
+    ("_runtime", "backend/app/services/knowhow/transfer.py:320"),
 }
 ACTIVE_PRODUCTION_MEMBER_SITES = (
     ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES

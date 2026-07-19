@@ -825,14 +825,15 @@ INDEPENDENT_PRIVATE_SITES = INDEPENDENT_PRIVATE_SITES | {
         "extracts the id/clock seam directly, mirroring api.py's "
         "narrow-runtime-port extraction"
     ),
-    ("backend/app/services/knowhow/transfer.py", 193, "_runtime"): (
+    ("backend/app/services/knowhow/transfer.py", 221, "_runtime"): (
         "knowhow cross-notebook transfer orchestration (like api.py) "
         "constructs/reaches the A1 KnowhowTransferStore directly, a second "
         "independent call site mirroring api.py's build_projector/"
-        "optimize_cell pair — line shifted from 185 to 193 by the "
-        "final-fix-wave copy_table asset source_id=None fix, which added "
-        "lines earlier in _remap (Minor: copied asset rows must not keep a "
-        "foreign source_id)"
+        "optimize_cell pair — line shifted 185->193 by the final-fix-wave "
+        "copy_table asset source_id=None fix, then 193->221 by PR review "
+        "round 6 P1-A's stale-derived-artifact skip guards added earlier in "
+        "_remap (a deleted business row/column's leftover source_elements/"
+        "chunks must be dropped, not KeyError-crash the whole transfer)"
     ),
 }
 
@@ -841,13 +842,17 @@ INDEPENDENT_PRIVATE_SITES = INDEPENDENT_PRIVATE_SITES | {
 # transfer store's cheap `table_fingerprint` probe both before copy_table
 # runs and again right before the delete — a THIRD, independent
 # `repo._runtime.knowhow_transfer_store` reach in this file (the first two,
-# lines 29/193 above, are inside `_remap`/`copy_table`; this one is inside
+# lines 29/221 above, are inside `_remap`/`copy_table`; this one is inside
 # `move_table` itself), same narrow-runtime-port-extraction shape as the
 # other two. Folded in as its own module-level `|=` at EOF for the same
 # zero-line-shift reason the block above documents (this dict sits before
 # line-pinned consumer sites in test_repository_surface_manifest.py).
+#
+# PR review round 6 P1-A update: same _remap skip-guard lines that shifted
+# the block above (193->221) sit ahead of this site too, shifting it
+# 292->320.
 INDEPENDENT_PRIVATE_SITES = INDEPENDENT_PRIVATE_SITES | {
-    ("backend/app/services/knowhow/transfer.py", 292, "_runtime"): (
+    ("backend/app/services/knowhow/transfer.py", 320, "_runtime"): (
         "knowhow cross-notebook transfer orchestration (like api.py) "
         "reaches the A1 KnowhowTransferStore a third, independent time — "
         "move_table's own snapshot-vs-delete concurrent-edit guard "

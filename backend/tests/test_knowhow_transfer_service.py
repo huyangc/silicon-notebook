@@ -673,3 +673,198 @@ def test_move_does_not_delete_source_column_swapped_after_copy_snapshot(
     dst_tables = repo.list_knowhow_tables(dst_nb)
     assert len(dst_tables) == 1
     assert dst_tables[0]["id"] == exc_info.value.new_table_id
+
+
+# --- PR review round 6 P1-A (MOST IMPORTANT — plain sequential bug, not a
+# concurrency race): project a table, then delete a business ROW. project_
+# table's per-row loop (_write_elements/_write_chunks in projection.py) only
+# ever rewrites elements/chunks for rows still present in table["rows"] —
+# _write_elements's own delete-then-reinsert (`delete_elements_by_knowhow_
+# row(db, source_id, row_id)`) only fires for a row that gets REVISITED by a
+# later projection pass. A deleted row is never revisited by anything (it is
+# simply absent from the next pass's row loop), so its old source_elements
+# (and the chunks/chunk_embeddings hanging off them) stay attached to the
+# table's hidden source FOREVER — nothing in this codebase ever sweeps them.
+# snapshot_table selects every element/chunk by source_id (no row/column
+# filter), so the snapshot silently includes these stale rows. _remap then
+# did `khrow_map[kh_meta["row_id"]]` unconditionally — khrow_map only holds
+# LIVE row ids (built from snapshot["rows"], which IS filtered by the live
+# `knowhow_rows` table) — so the stale element's row_id raises KeyError. The
+# route's `except KeyError: raise HTTPException(404, "Table not found")`
+# turns this into a permanent, ordinary-usage brick: the table can never be
+# copied or moved again by anyone, no concurrency required to trigger it.
+# Local `import json` (not module-level) to avoid shifting this file's own
+# line-pinned `from app.services.sqlite_repository import SQLiteRepository`
+# at line 5 (KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS in
+# test_repository_surface_manifest.py) — same zero-line-shift convention
+# every other block in this file already follows.
+def test_copy_skips_stale_elements_from_a_deleted_row(repo):
+    import json
+
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    tid = repo.create_knowhow_table(src_nb, "时序修复", "desc", COLUMNS)
+    cols = {c["name"]: c["id"] for c in repo.get_knowhow_table(tid)["columns"]}
+    row1 = repo.add_knowhow_row(tid, {cols["违例类型"]: "过冲", cols["现象识别"]: "示波器观察"})
+    repo.add_knowhow_row(tid, {cols["违例类型"]: "欠冲", cols["现象识别"]: "眼图分析"})
+    _project(repo, tid)  # 两行都投影，各自在隐藏源下产出 element/chunk
+
+    repo.delete_knowhow_row(row1)  # 只删业务行本身——不触发任何重投影
+
+    # 修复前：这里直接 KeyError（khrow_map 缺 row1），路由层会转成 404。
+    new_tid = kh_transfer.copy_table(repo, tid, dst_nb, actor_id="user-x")
+
+    dst = repo.get_knowhow_table(new_tid)
+    assert len(dst["rows"]) == 1, "只有存活的第 2 行应该被复制（业务行快照本就只含活行）"
+    surviving_row_ids = {r["id"] for r in dst["rows"]}
+    with repo._connect() as db:
+        elements = [
+            dict(r) for r in db.execute(
+                "SELECT se.metadata FROM source_elements se "
+                "JOIN sources s ON s.id = se.source_id WHERE s.notebook_id=?",
+                (dst_nb,),
+            ).fetchall()
+        ]
+    assert elements, "目标表投影后应至少产出一个 element（不能因为过度跳过而变成零产出）"
+    for el in elements:
+        meta = json.loads(el["metadata"])["knowhow"]
+        assert meta["row_id"] in surviving_row_ids, (
+            f"目标侧 element 引用了非存活业务行 {meta['row_id']}——陈旧派生物"
+            "不该跟着复制搬过去"
+        )
+
+
+def test_copy_skips_stale_elements_from_a_deleted_column(repo):
+    """镜像用例（同一崩溃机制，触发源是删列而非删行）：_write_elements 按行
+    整体删后重插，只有该行被重投影时才会清理已经不在当前列集合里的陈旧
+    element；列被删除但没有任何后续重投影发生时，旧列的 element 原样留在
+    隐藏源下，_remap 必须同样跳过、不崩溃。"""
+    import json
+
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    tid = repo.create_knowhow_table(src_nb, "时序修复", "desc", COLUMNS)
+    cols = {c["name"]: c["id"] for c in repo.get_knowhow_table(tid)["columns"]}
+    repo.add_knowhow_row(tid, {cols["违例类型"]: "过冲", cols["现象识别"]: "示波器观察"})
+    _project(repo, tid)
+
+    repo.delete_knowhow_column(cols["现象识别"])  # 只删列本身——不触发任何重投影
+
+    new_tid = kh_transfer.copy_table(repo, tid, dst_nb, actor_id="user-x")
+
+    dst = repo.get_knowhow_table(new_tid)
+    assert {c["name"] for c in dst["columns"]} == {"违例类型"}
+    surviving_col_ids = {c["id"] for c in dst["columns"]}
+    with repo._connect() as db:
+        elements = [
+            dict(r) for r in db.execute(
+                "SELECT se.metadata FROM source_elements se "
+                "JOIN sources s ON s.id = se.source_id WHERE s.notebook_id=?",
+                (dst_nb,),
+            ).fetchall()
+        ]
+    assert elements, "目标表投影后应至少产出一个 element"
+    for el in elements:
+        meta = json.loads(el["metadata"])["knowhow"]
+        assert meta["column_id"] in surviving_col_ids, (
+            f"目标侧 element 引用了非存活列 {meta['column_id']}——陈旧派生物"
+            "不该跟着复制搬过去"
+        )
+
+
+# --- PR review round 6 P1-B: a hidden source recreated mid-move (retain-path/
+# stale-debounce reprojection racing move_table's own teardown) must be swept
+# after a successful delete. Window: delete_table_projection(hidden) deletes
+# the SOURCE row but does NOT clear knowhow_tables.hidden_source_id on the
+# table row (that column is only ever touched by set_knowhow_hidden_source,
+# never by delete_table_projection) — so between that call returning and
+# delete_table_if_unchanged's atomic delete, the table row still exists with
+# hidden_source_id pointing at the now-gone source. If a concurrent
+# ensure_hidden_source (KnowhowProjector's own idempotent "recreate if the
+# recorded id no longer resolves" branch — projection.py) runs for this exact
+# table_id in that window, it reads the stale hidden_source_id, gets KeyError
+# resolving it, and mints a REPLACEMENT source — updating the table row's
+# hidden_source_id to the new id. table_fingerprint (structural business data
+# only, correctly — hidden_source_id is derived, not business content) never
+# sees this, so the atomic delete still succeeds normally; the table row
+# (with the replacement id) is gone, and the replacement source is now
+# unreferenced by ANY knowhow_tables row — a permanent orphan, still
+# searchable, sitting in the SOURCE notebook.
+#
+# Real concurrency is unreliable to trigger deterministically in a test, so
+# this injects the race directly: monkeypatch KnowhowTransferStore.
+# delete_table_if_unchanged (the method called immediately after
+# delete_table_projection returns, mirroring this file's own established
+# teardown-injection idiom, e.g. test_move_does_not_delete_source_row_added_
+# during_projection_teardown above) to call the REAL production
+# KnowhowProjector.ensure_hidden_source for src_tid — the exact method a
+# concurrent reprojection job would call — before delegating to the real
+# delete. This reproduces production's actual code path, not a hand-rolled
+# approximation of its output.
+def test_move_sweeps_hidden_source_recreated_between_teardown_and_delete(
+    repo, monkeypatch
+):
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    src_hidden = _project(repo, src_tid)["hidden_source_id"]
+    assert src_hidden, "源表未真正投影，测试前置条件不成立"
+
+    store = repo._runtime.knowhow_transfer_store
+    real_delete = store.delete_table_if_unchanged
+    replacement_ids: list[str] = []
+
+    def _recreate_hidden_source_then_delete(table_id, expected_fingerprint):
+        # delete_table_projection(src_hidden) 已经跑完（在 move_table 自己的
+        # try 块里，紧邻在这次调用之前）——这里调真实的 ensure_hidden_source，
+        # 与生产中恰好卡在这个窗口的并发重投影走的是同一条代码路径：读到的
+        # hidden_source_id 仍是刚被拆掉的旧 src_hidden，resolve 失败后铸出一
+        # 个全新替身源，并把它写回 table_id 的 hidden_source_id 列。
+        replacement_ids.append(
+            kh_transfer.build_projector(repo).ensure_hidden_source(table_id)
+        )
+        return real_delete(table_id, expected_fingerprint)
+
+    monkeypatch.setattr(
+        store, "delete_table_if_unchanged", _recreate_hidden_source_then_delete
+    )
+
+    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+
+    assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
+    with pytest.raises(KeyError):
+        repo.get_knowhow_table(src_tid)
+    assert replacement_ids and replacement_ids[0] != src_hidden, (
+        "前置条件：注入确实铸出了一个新的替身隐藏源（不是复用旧的）"
+    )
+
+    with repo._connect() as db:
+        remaining = [
+            dict(r) for r in db.execute(
+                "SELECT id FROM sources WHERE notebook_id=? AND source_type='knowhow'",
+                (src_nb,),
+            ).fetchall()
+        ]
+    assert not remaining, (
+        f"替身隐藏源 {replacement_ids} 必须被收尾扫掉，不能作为孤儿留在源 "
+        f"notebook 里继续可被检索到：{remaining}"
+    )
+
+
+def test_move_sweep_is_idempotent_when_no_orphan_exists(repo):
+    """Companion happy-path guard: the ordinary, uncontended move (no
+    concurrent reprojection racing teardown) must not be affected by the new
+    sweep — no orphan to find, sweep is a no-op, move behaves exactly as
+    before."""
+    src_nb, dst_nb = _nb(repo, "src"), _nb(repo, "dst")
+    src_tid = _table_with_row(repo, src_nb)
+    _project(repo, src_tid)
+
+    new_tid = kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+
+    assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst_nb
+    with pytest.raises(KeyError):
+        repo.get_knowhow_table(src_tid)
+    with repo._connect() as db:
+        remaining = db.execute(
+            "SELECT id FROM sources WHERE notebook_id=? AND source_type='knowhow'",
+            (src_nb,),
+        ).fetchall()
+    assert not remaining

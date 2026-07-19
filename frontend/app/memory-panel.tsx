@@ -37,7 +37,7 @@ import {
 } from "./memory-model";
 import { transferMemories } from "./memory-transfer.ts";
 import { Pagination } from "./Pagination";
-import { singleSourceNotebookId, summarizeTransferResults, type TransferMode } from "./transfer-model.ts";
+import { confirmedOnly, singleSourceNotebookId, summarizeTransferResults, type TransferMode } from "./transfer-model.ts";
 import { DestinationPicker } from "./transfer-picker.tsx";
 import { label, EVIDENCE_LEVEL } from "./vocabulary";
 import type {
@@ -488,7 +488,11 @@ export function MemoryPanel({
   // selectedIds 现算——DestinationPicker 是全屏遮罩(.utility-modal)，打开期间
   // 背后不可能再变更选中态，冻结与现算在这里等价，冻结更简单也避免选择器开着
   // 时选中状态被其它路径意外改动而导致 sourceNotebookId 和 ids 对不上。
-  const [pendingTransfer, setPendingTransfer] = useState<{ ids: string[]; sourceNotebookId: string } | null>(null);
+  // excludedCount（P2-B）：批量入口在冻结 ids 之前已经用 confirmedOnly 筛掉了
+  // 非 confirmed 项——这里记一下筛掉了几条，好让下面的 picker 标题如实告诉
+  // 用户"看到的数字比你选中的少，是因为剔除了非已确认状态"，而不是悄悄少传。
+  // 单条入口（卡片操作区本就只在 confirmed 卡片上渲染）永远是 undefined。
+  const [pendingTransfer, setPendingTransfer] = useState<{ ids: string[]; sourceNotebookId: string; excludedCount?: number } | null>(null);
   const [transferNotice, setTransferNotice] = useState<TransferNotice | null>(null);
   // Important 4（复审）：批量/单条传输弹窗自己的「同时抽取到知识图谱」勾选
   // 状态——与上面 confirm 编辑态那个 extractKg 分开维护(两处是不同流程各自
@@ -890,7 +894,14 @@ export function MemoryPanel({
               只传当前页能看到的那一部分：按钮上明明写着"（{selectedIds.size}）"，
               真传输的却只是 chosen 这个子集，用户完全不会发现少传了。
               bulkDeleteMemories 不用管这个，因为它直接把整个 selectedIds 送后
-              端、不需要在前端解析 notebook_id。 */}
+              端、不需要在前端解析 notebook_id。
+              P2-B（round 6 评审）：批量选择走 checkbox，不像单条卡片操作区
+              那样天生只在 confirmed 卡片上才有传输入口——用户能选中
+              candidate/rejected/deprecated 一起点，后端会把这些逐条报成
+              per-item failed（可预见、能在前端拦下来的失败）。顺序固定：
+              先过跨页完整性守卫、再过 confirmedOnly 状态过滤、最后才过
+              singleSourceNotebookId——过滤之后的子集才是真正要传输的，同源
+              校验必须对着这个子集做，不是对着未过滤的 chosen。 */}
           <button
             type="button"
             className="memory-bulk-transfer"
@@ -902,14 +913,24 @@ export function MemoryPanel({
                 setTransferNotice(null);
                 return;
               }
-              const sourceNotebookId = singleSourceNotebookId(chosen);
+              const confirmed = confirmedOnly(chosen);
+              if (confirmed.length === 0) {
+                setError("所选 Memory 均非已确认状态，只有已确认的 Memory 才能复制/移动");
+                setTransferNotice(null);
+                return;
+              }
+              const sourceNotebookId = singleSourceNotebookId(confirmed);
               if (!sourceNotebookId) {
                 setError("批量复制/移动要求所选 Memory 属于同一个笔记本，请重新选择");
                 setTransferNotice(null);
                 return;
               }
               setTransferExtractKg(true);
-              setPendingTransfer({ ids: chosen.map((item) => item.id), sourceNotebookId });
+              setPendingTransfer({
+                ids: confirmed.map((item) => item.id),
+                sourceNotebookId,
+                excludedCount: chosen.length - confirmed.length,
+              });
             }}
           >
             <Copy size={14} /> 复制/移动到…（{selectedIds.size}）
@@ -1137,12 +1158,20 @@ export function MemoryPanel({
           见批量按钮 onClick)。allowMove 恒为 true——Memory 传输的权限边界不像
           knowhow 表那样需要区分"只读也能复制"：能在这个列表里看到某条 Memory
           就必然是它的 owner(私有 Memory 不做只读共享)，目标笔记本是否可写由
-          后端 /memories/transfer 自己校验，前端不需要另开一道 canEdit 门。 */}
+          后端 /memories/transfer 自己校验，前端不需要另开一道 canEdit 门。
+          P2-B：pendingTransfer.ids 在批量入口已经过 confirmedOnly 过滤，标题
+          里的数字天然就是"真正会传输的条数"；excludedCount>0 时额外带一句
+          提示，告诉用户按钮上看到的选中数和这里的数字对不上是因为剔除了非
+          已确认状态，不是漏传了。 */}
       {pendingTransfer && (
         <DestinationPicker
           sourceNotebookId={pendingTransfer.sourceNotebookId}
           allowMove
-          title={`复制/移动 ${pendingTransfer.ids.length} 条 Memory`}
+          title={
+            pendingTransfer.excludedCount
+              ? `复制/移动 ${pendingTransfer.ids.length} 条 Memory（已排除 ${pendingTransfer.excludedCount} 条非已确认状态）`
+              : `复制/移动 ${pendingTransfer.ids.length} 条 Memory`
+          }
           // Important 4（复审）：spec §5.2.6/§9/§12 要求的opt-out——checkbox
           // 状态由本组件持有(transferExtractKg)，picker 只负责渲染+回调,两处
           // 打开入口都已把它重置为默认 true(匹配 confirm 时的默认行为)。

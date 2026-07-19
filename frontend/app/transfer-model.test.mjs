@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  confirmedOnly,
   destinationNotebooks,
   knowhowTransferBody,
   memoryTransferBody,
@@ -219,4 +220,36 @@ test("summarizeTransferResults: 全部是 copied_source_not_removed", () => {
 test("summarizeTransferResults: 空数组", () => {
   const summary = summarizeTransferResults([]);
   assert.deepEqual(summary, { total: 0, succeeded: 0, failed: 0, copiedSourceNotRemoved: [] });
+});
+
+// --- confirmedOnly（P2-B，round 6 评审）---------------------------------
+// 批量传输选择走 checkbox，不像单条卡片操作区那样天生只在 status==="confirmed"
+// 的卡片上才渲染传输入口——用户能选中 candidate/rejected/deprecated 条目。
+// 后端 memory_service.transfer() 会把这些逐条报成 per-item failed（status
+// 字段的既有契约），与其让用户点了才看到一堆可预见的失败，不如在打开
+// DestinationPicker 之前先筛掉。
+
+test("confirmedOnly: 全部 confirmed → 原样透传", () => {
+  const items = [{ id: "m1", status: "confirmed" }, { id: "m2", status: "confirmed" }];
+  assert.deepEqual(confirmedOnly(items), items);
+});
+
+test("confirmedOnly: 混合状态 → 只留 confirmed，保持原有相对顺序", () => {
+  const items = [
+    { id: "m1", status: "confirmed" },
+    { id: "m2", status: "candidate" },
+    { id: "m3", status: "confirmed" },
+    { id: "m4", status: "rejected" },
+    { id: "m5", status: "deprecated" },
+  ];
+  assert.deepEqual(confirmedOnly(items).map((item) => item.id), ["m1", "m3"]);
+});
+
+test("confirmedOnly: 全部非 confirmed → 空数组", () => {
+  const items = [{ id: "m1", status: "candidate" }, { id: "m2", status: "deprecated" }];
+  assert.deepEqual(confirmedOnly(items), []);
+});
+
+test("confirmedOnly: 空数组 → 空数组", () => {
+  assert.deepEqual(confirmedOnly([]), []);
 });

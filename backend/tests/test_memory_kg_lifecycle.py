@@ -487,10 +487,25 @@ def test_kg_job_cleans_up_derived_source_when_move_deletes_memory_mid_ingest(
     copied_id = kg.transfer_results[0]["new_id"]
     assert memory_service.get(copied_id, owner.id).notebook_id == target.id
 
-    # The no-op teardown remove (fired mid-move, before the row it targets
-    # even existed) plus the job's OWN post-ingest cleanup once it discovers
-    # the memory is gone -- exactly two removes, the last one after ingest.
-    assert kg.calls.count(("remove", item.id)) == 2
+    # Three "remove" calls for item.id (PR review round 6 P1-C added the
+    # middle one -- transfer()'s own move flow now issues an extra,
+    # idempotent safety-net removal immediately after its atomic delete
+    # succeeds, insurance against a source recreated by an in-flight ingest
+    # job racing that exact window):
+    #   1. the recursive move's own pre-delete teardown remove, fired mid-
+    #      ingest before ingest_memory_source's super() call has recorded
+    #      anything for item.id in kg._sources -- pops nothing;
+    #   2. round 6's new safety-net remove, fired right after that SAME
+    #      recursive move's atomic delete succeeds -- same reason as #1,
+    #      still nothing recorded for item.id yet, still pops nothing;
+    #   3. the OUTER job's own post-ingest cleanup, once it discovers (via
+    #      KeyError on the post-ingest recheck) that the memory is gone --
+    #      by now ingest_memory_source's super() call HAS already recorded
+    #      the phantom source for item.id (it runs right after the recursive
+    #      transfer() call returns), so this is the one call that actually
+    #      pops something.
+    # The last call must still be the real, effective one.
+    assert kg.calls.count(("remove", item.id)) == 3
     assert kg.calls[-1] == ("remove", item.id)
     assert kg.memory_source_id(item.id) is None  # no leaked derived source
     with pytest.raises(KeyError):

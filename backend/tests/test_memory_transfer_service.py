@@ -145,7 +145,16 @@ def test_move_cleanup_failure_reports_per_item_and_keeps_copy(repo, alice, monke
 # `delete_memory_if_unchanged` — move's cleanup delete goes through the new
 # atomic conditional method now; the ordering guarantee itself (remove
 # BEFORE delete) is unchanged.
-def test_move_removes_kg_source_before_deleting_memory_row(repo, alice, monkeypatch):
+# PR review round 6 P1-C: a THIRD call joins the sequence on the successful
+# path — a second, idempotent `remove_memory_source` right after the atomic
+# delete confirms it actually removed the row (insurance against a source
+# recreated by an in-flight _kg_ingest_job racing the window between the
+# first removal and the delete — see test_move_cleans_up_source_recreated_
+# between_removal_and_delete below for the full scenario). The ordering
+# guarantee this test exists to pin is unchanged (remove BEFORE delete); it
+# now also pins that the extra safety-net removal runs AFTER, not instead of
+# or before, the delete.
+def test_move_removes_kg_source_before_and_after_deleting_memory_row(repo, alice, monkeypatch):
     service = repo._runtime.memory_service
     src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
     mem = _confirmed_memory(service, src, alice)
@@ -168,7 +177,9 @@ def test_move_removes_kg_source_before_deleting_memory_row(repo, alice, monkeypa
     results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
 
     assert results[0]["ok"] is True
-    assert call_order == ["remove_memory_source", "delete_memory_if_unchanged"]
+    assert call_order == [
+        "remove_memory_source", "delete_memory_if_unchanged", "remove_memory_source",
+    ]
 
 
 # --- Amendment 2 (widened): the post-commit wrap must also cover the
@@ -926,3 +937,81 @@ def test_move_unaffected_for_memory_without_any_promotion(repo, alice):
 
     assert results[0]["ok"] is True
     assert results[0]["status"] == "moved"
+
+
+# --- PR review round 6 P1-C: an in-flight _kg_ingest_job that finishes BETWEEN
+# `self.memory_kg.remove_memory_source(source.id)` and `delete_memory_if_
+# unchanged` recreates a derived source for a memory that is about to be
+# deleted, and nothing cleans it up afterward. Window: the job's own post-
+# ingest recheck (`_kg_ingest_job` in memory_service.py) reads the memory's
+# CURRENT status — while this move is still between the two calls above, the
+# memory row still exists and is still 'confirmed' (the atomic delete has not
+# run yet), so the job's recheck sees `still_confirmed = True` and does NOT
+# call its own cleanup `remove_memory_source`. The atomic delete then runs a
+# moment later and succeeds completely normally (this is an ordinary,
+# uncontested move — no concurrent EDIT of the memory itself, so revision
+# still matches): the memory row is gone, but the freshly (re)created
+# `sources` row (memory_id=source.id, plus whatever KG it produced) is now
+# orphaned forever — nothing else in this codebase will ever call remove_
+# memory_source for an id that no longer resolves to a live memory.
+#
+# Real background-job timing is unreliable to trigger deterministically in a
+# test, so this injects the race directly: monkeypatch `service.store.
+# delete_memory_if_unchanged` (the call immediately after the real, first
+# `remove_memory_source` already ran) to insert a "recreated" derived source
+# via the same production `SourceStore.insert_source` call `ingest_memory_
+# source` itself uses — before delegating to the real delete. This lands the
+# injected row in the exact real-world window: after the first removal has
+# already run for real, before the delete commits.
+def test_move_cleans_up_source_recreated_between_removal_and_delete(
+    repo, alice, monkeypatch
+):
+    service = repo._runtime.memory_service
+    src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    mem = _confirmed_memory(service, src, alice, title="T", content="B")
+    assert service.memory_kg.memory_source_id(mem.id) is None, (
+        "前置条件：_confirmed_memory 关闭了 kg_ingest_scheduler，此刻不该有派生源"
+    )
+
+    real_delete = service.store.delete_memory_if_unchanged
+
+    def _recreate_source_then_delete(memory_id, user_id, expected_revision):
+        # remove_memory_source（真实、未打桩）此刻已经跑完一次——这里模拟一个
+        # 恰好在这个窗口里跑完 ingest 的并发 _kg_ingest_job：它此刻查到的
+        # memory 仍是 confirmed（因为下面这次原子删除还没发生），所以它自己
+        # 的收尾检查不会清理这条刚建好的源。落库形状照抄 source_ingestion.
+        # ingest_memory_source 真实调用 SourceStore.insert_source 的方式。
+        repo._runtime.source_store.insert_source(
+            source_id=repo._runtime.seams.new_id("src"),
+            notebook_id=src,
+            title=mem.title,
+            source_type="memory",
+            status="active",
+            parse_status="parsed",
+            file_name="",
+            file_path="",
+            file_size=0,
+            file_hash="fake-recreated-mid-window",
+            summary="",
+            doc_type="",
+            memory_id=memory_id,
+        )
+        return real_delete(memory_id, user_id, expected_revision)
+
+    monkeypatch.setattr(
+        service.store, "delete_memory_if_unchanged", _recreate_source_then_delete
+    )
+
+    results = repo.transfer_memories(alice.id, [mem.id], dst, "move", extract_kg=False)
+
+    result = results[0]
+    assert result["ok"] is True
+    assert result["status"] == "moved"
+    with pytest.raises(KeyError):
+        service.get(mem.id, alice.id)
+
+    assert service.memory_kg.memory_source_id(mem.id) is None, (
+        "窗口期内冒出来的重建派生源必须被收尾的第二次 remove_memory_source 清"
+        "理掉——不能作为 sources.memory_id 指向一条已删 memory 的孤儿永久留"
+        "在库里、继续参与检索"
+    )

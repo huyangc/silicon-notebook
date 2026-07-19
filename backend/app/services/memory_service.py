@@ -1039,6 +1039,31 @@ class MemoryService:
                                 "丢失该改动，源未删除"
                             )
                         source_removed = True
+                        # P1-C（PR review round 6）：一个在制品的 _kg_ingest_
+                        # job 可能恰好在上面这次 remove_memory_source 已经真
+                        # 实跑完、delete_memory_if_unchanged 还没落地这个窗口
+                        # 里完成自己的 ingest_memory_source——它的 post-ingest
+                        # 复检（_kg_ingest_job 自身逻辑）读到的 memory 此刻仍
+                        # 是 confirmed（因为上一行的原子删除这一刻还没发生），
+                        # 于是它自己判定"still_confirmed=True"、不会调用它自
+                        # 己的收尾 remove_memory_source。而上一行的原子删除随
+                        # 后按预期成功（这是一次没有并发编辑本体的普通
+                        # move，revision 仍然匹配）——memory 行没了，但窗口期
+                        # 内刚冒出来的这个派生源（sources.memory_id 指向一条
+                        # 已经不存在的 memory）从此不再被任何东西引用，永久
+                        # 留在库里、继续参与检索，直到有人手工清理。
+                        #
+                        # 一行保险：既然 memory 行现在确凿已经删除，再无条件
+                        # 补一次 remove_memory_source 总是安全的——它自己的
+                        # docstring 承诺"无派生源时幂等 no-op"，普通（无此窗
+                        # 口竞态）的 move 会在这里第二次查到 None、直接返回，
+                        # 不产生任何额外副作用；只有真撞上这个窗口时才有事可
+                        # 删。失败与否都落进本方法既有的收尾 except（下面几
+                        # 行）——不发明新的错误上报路径，且不会把已经确凿成
+                        # 功的 move 结果改判成失败（source_removed 在这一行
+                        # 之前就已置 True）。
+                        if self.memory_kg is not None:
+                            self.memory_kg.remove_memory_source(source.id)
                 except Exception as exc:  # noqa: BLE001 — 见上：副本已提交，收尾
                     # 失败必须逐条上报，不能冒泡、也不能伪装成"没创建"。
                     cleanup_error = str(exc)

@@ -428,3 +428,49 @@ class KnowhowTransferStore:
                 return False
             cursor = db.execute("DELETE FROM knowhow_tables WHERE id = ?", (table_id,))
             return cursor.rowcount == 1
+
+    def orphaned_knowhow_source_ids(self, notebook_id: str) -> list[str]:
+        """PR review round 6 P1-B: every ``source_type='knowhow'`` row in
+        ``notebook_id`` that no ``knowhow_tables.hidden_source_id`` currently
+        references.
+
+        These can only exist via one narrow, real window in ``move_table``'s
+        own cleanup: ``delete_table_projection(hidden)`` deletes the SOURCE
+        row but deliberately never touches the TABLE row's
+        ``hidden_source_id`` column (only ``set_knowhow_hidden_source``
+        writes it) — so between that call returning and the atomic
+        ``delete_table_if_unchanged`` a moment later, the table row still
+        exists with ``hidden_source_id`` pointing at the now-gone source. A
+        concurrent ``KnowhowProjector.ensure_hidden_source`` for that exact
+        table (a stale-debounce reprojection racing the move) reads that
+        stale id, fails to resolve it, and mints a REPLACEMENT — updating the
+        table row's ``hidden_source_id`` to the new id. ``table_fingerprint``
+        never sees this (it is deliberately structural-business-data-only —
+        ``hidden_source_id`` is derived, not business content, see that
+        method's own docstring), so the atomic delete still succeeds
+        normally a moment later: the table row (carrying the replacement id)
+        is gone, and the replacement source is now referenced by NOTHING —
+        a permanent orphan, still searchable, sitting in the source
+        notebook.
+
+        Every OTHER ``knowhow`` source is always either live (a table's
+        current ``hidden_source_id``) or already torn down in the very same
+        ``database.write()`` call that deletes its owning table row
+        (ordinary ``delete_table_projection`` + ``delete_knowhow_table``
+        pair, or this store's own ``delete_table_if_unchanged``) — nothing
+        else in this codebase ever leaves one dangling, so this is a cheap,
+        safe, idempotent sweep to run after every successful move, not a
+        general-purpose repair scan. Read-only; the caller tears each
+        returned id down via the existing ``KnowhowProjector.
+        delete_table_projection`` (idempotent no-op if it somehow raced
+        itself gone again by the time the sweep gets to it)."""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM sources WHERE notebook_id = ? AND source_type = 'knowhow' "
+                "AND id NOT IN ("
+                "  SELECT hidden_source_id FROM knowhow_tables "
+                "  WHERE hidden_source_id IS NOT NULL"
+                ")",
+                (notebook_id,),
+            ).fetchall()
+        return [str(row["id"]) for row in rows]

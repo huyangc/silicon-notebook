@@ -180,6 +180,115 @@ test("candidate review exposes every normalized evidence ref and validation resu
   ]);
 });
 
+// --- P2-A（round 6 评审）：跨 notebook 复制/移动而来的 memory，其 provenance
+// 嵌套在 provenance.imported_from.source_provenance 之下（memory_service.py
+// transfer() 的既有约定，见 backend 侧 test_copy_preserves_source_provenance_
+// nested_under_imported_from）——anchors/citations 指向源 notebook，不能当活
+// 引用渲染。修复前 memoryProvenanceRows/memoryEvidenceRows 只读顶层字段，对
+// 这种嵌套形状视而不见：复制来的 ask-answer memory 显示零引用，agent 来的
+// 显示零证据。
+
+test("跨库复制而来的 ask-answer memory：来源+问题+引用计数渲染为仅存档", () => {
+  const rows = memoryProvenanceRows({
+    origin: "ask_answer",
+    provenance: {
+      imported_from: {
+        notebook_id: "nb-src-1",
+        memory_id: "memory-old-1",
+        action: "copy",
+        source_provenance: {
+          question: "为什么这个电源轨要求纹波低于 5%？",
+          mode: "chunk",
+          evidence_level: "grounded",
+          citations: [{ source_id: "s1" }, { source_id: "s2" }],
+        },
+      },
+    },
+  });
+  assert.deepEqual(rows, [
+    ["来源", "复制自笔记本 nb-src-1"],
+    ["原笔记本问题（仅存档）", "为什么这个电源轨要求纹波低于 5%？"],
+    ["原笔记本引用（仅存档）", "2 条"],
+  ]);
+});
+
+test("跨库移动而来的 agent memory：来源+证据引用计数渲染为仅存档", () => {
+  const rows = memoryProvenanceRows({
+    origin: "external_agent",
+    provenance: {
+      imported_from: {
+        notebook_id: "nb-src-2",
+        memory_id: "memory-old-2",
+        action: "move",
+        source_provenance: {
+          agent_profile: { id: "profile-1", name: "Codex" },
+          client_request_id: "request-1",
+          reason: "Reusable constraint",
+          evidence_refs: [
+            { type: "source_element" },
+            { type: "memory" },
+            { type: "knowledge" },
+          ],
+        },
+      },
+    },
+  });
+  assert.deepEqual(rows, [
+    ["来源", "移动自笔记本 nb-src-2"],
+    ["原笔记本证据引用（仅存档）", "3 条"],
+  ]);
+});
+
+test("跨库传输的证据引用不进 memoryEvidenceRows（不是可操作的活审核项）", () => {
+  const rows = memoryEvidenceRows({
+    origin: "external_agent",
+    provenance: {
+      imported_from: {
+        notebook_id: "nb-src-2",
+        memory_id: "memory-old-2",
+        action: "move",
+        source_provenance: {
+          evidence_refs: [{ type: "source_element", trusted: true }],
+        },
+      },
+    },
+  });
+  assert.deepEqual(rows, []);
+});
+
+test("跨库传输但缺问题/引用/证据时只渲染来源一行（不为空字段造行）", () => {
+  const rows = memoryProvenanceRows({
+    origin: "ask_answer",
+    provenance: {
+      imported_from: {
+        notebook_id: "nb-src-3",
+        memory_id: "memory-old-3",
+        action: "copy",
+        source_provenance: {},
+      },
+    },
+  });
+  assert.deepEqual(rows, [["来源", "复制自笔记本 nb-src-3"]]);
+});
+
+test("非传输 memory 的 ask-answer 来源渲染保持不变（回归闸）", () => {
+  const rows = memoryProvenanceRows({
+    origin: "ask_answer",
+    provenance: {
+      question: "为什么稳定？",
+      mode: "chunk",
+      evidence_level: "grounded",
+      citations: [{ source_id: "s1" }],
+    },
+  });
+  assert.deepEqual(rows, [
+    ["原问题", "为什么稳定？"],
+    ["提问方式", "通用问答"],
+    ["依据", "有据"],
+    ["引用", "1 条"],
+  ]);
+});
+
 test("confirm body includes extract_kg when the notebook KG is eligible", () => {
   const checked = memoryModel.confirmMemoryBody({
     title: "Rail budget",
