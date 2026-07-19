@@ -486,6 +486,13 @@ class KnowhowProjector:
         # resurrecting anything a teardown already removed. Mirrors
         # delete_table_projection's own pre-write existence check just below.
         with self.database.write() as db:
+            # 显式开写事务：write_lock 只互斥本进程写者；离线 CLI/维护进程共库时，
+            # 下面两个存在性 SELECT 在首条 DML 前不开启 SQLite 事务，另一进程可在
+            # 「检查通过」与「首条写入」之间提交删表/删源，让 anchor-only 投影插出
+            # 无 FK 约束的孤儿 knowledge_objects（已删/已移内容仍可检索）。经
+            # SqliteDatabase.begin_immediate（SQL 收在 store 层）让检查与写入对
+            # 跨进程写者也原子——与 snapshot_table/delete_table_if_unchanged 同款。
+            self.database.begin_immediate(db)
             if (
                 not self.knowhow.table_exists_tx(db, table_id)
                 or not self.sources.source_exists_tx(db, source_id)
