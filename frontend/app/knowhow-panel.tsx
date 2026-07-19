@@ -896,12 +896,28 @@ export function KnowhowPanel({
     columnId: string,
     contentMd: string,
     expectedByRowId?: Map<string, string>,
+    targetRowIds?: string[],
   ) {
     if (!selectedTableId || !detail) return;
+    // 扇出写目标（合并共享格写整组）的两条来源，刻意分流（P1）：
+    //  · 批量规整保存（runSave）显式传入 `targetRowIds` = 建批次那一刻**冻结快照**里
+    //    规划好的写目标（planReformatSaves 的 unit.writeTargets 行 id）——此处**照单
+    //    全写、绝不从实时 detail 重算分组**。否则：detail 在弹窗打开期间刷新、某 anchor
+    //    组分裂/合并时，规划校验的是旧成员、回调却按新分组只扇写代表行，保存循环仍把
+    //    旧成员整组标 saved = 漏写却报成功。规划与扇写必须同源于同一份冻结快照。
+    //  · 手动格子编辑（onSave）/「优化整行」接受（onAcceptCell）**不传**——退回从
+    //    **实时** detail 重算分组的既有行为：那是真人在当前表上编辑，本就该按眼前的
+    //    分组扇写（与改动前逐字一致）。`group` 仅这条缺省路径会消费（批量路径照用显式
+    //    写目标、不看它；仍无条件求值，成本等同改动前、无回归）。
+    // 权威裁决在服务端：带守卫的批量写在**同一事务内逐行**校验成员归属 + expected_before，
+    // 任一不符整体 409（nothing written）。故即便快照规划的写目标之一已被他人真正改动，
+    // 也会安全落到既有的 409 -> stale-skip 路径，绝不盲写覆盖——客户端出「意图」，
+    // 服务端裁「真相」。
     const group = detail.anchorColumnId
       ? groupRowsByAnchor(detail.rows, detail.anchorColumnId).find((g) => g.rows.some((r) => r.id === rowId))
       : null;
-    const targets = group && isSharedColumn(group, columnId) ? groupCellWriteTargets(group, columnId) : [rowId];
+    const targets =
+      targetRowIds ?? (group && isSharedColumn(group, columnId) ? groupCellWriteTargets(group, columnId) : [rowId]);
     const results = targets.length > 1
       ? await batchPatchKnowhowCells(notebookId, selectedTableId, {
           columnId,
@@ -4133,13 +4149,18 @@ interface KnowhowReformatBatchModalProps {
   /** 保存：复用面板自己的 handleCellSave——与格子浮窗、「优化整行」保存走
    * 同一条路径（含合并共享格批量写判定），不重复实现。第 4 参 `expectedByRowId`
    * = 本 unit 每个写目标的 originalMd 基线映射（P1-b）：批量保存**总是**传它，触发
-   * 服务端事务内比对（陈旧 -> 409）。handleCellSave 的该参是可选的（手动编辑器省略
-   * 走 last-write-wins），故此处签名要求它、实现放宽它，两侧兼容。 */
+   * 服务端事务内比对（陈旧 -> 409）。第 5 参 `targetRowIds` = 本 unit 的写目标行 id
+   * 全集（取自建批次冻结快照的 unit.writeTargets，P1「扇出同源」）：批量保存**总是**
+   * 传它，令 handleCellSave 照用这份快照写目标、不从实时 detail 重算合并共享组——规划
+   * 与扇写因此同源于同一份快照，杜绝 detail 刷新致组分裂时「只写代表行却整组报成功」。
+   * handleCellSave 的这两个参都是可选的（手动编辑器省略、走实时分组 + last-write-wins），
+   * 故此处签名要求它们、实现放宽它们，两侧兼容。 */
   onSaveCell: (
     rowId: string,
     columnId: string,
     contentMd: string,
     expectedByRowId: Map<string, string>,
+    targetRowIds: string[],
   ) => Promise<void>;
   /** F（review）：保存阶段发生过 stale 跳过（preflight 比对 或 409）时回调——请父级重取
    * 整表，把陈旧的 detail 快照（喂给下一次批量的 rows/originalMd 基线之源）换新，否则关掉
@@ -4406,8 +4427,20 @@ function KnowhowReformatBatchModal({
       // 下发给 handleCellSave，触发服务端事务内比对——这才是防覆盖他人编辑的**权威**
       // 判定（上面的 preflight refetch 只是省一次注定 409 的往返的廉价前置过滤）。
       const expectedByRowId = new Map(unit.writeTargets.map((t) => [t.rowId, t.originalMd]));
+      // P1（扇出同源）：把本 unit 的写目标行 id（取自建批次冻结快照的 unit.writeTargets，与
+      // 上面 planReformatSaves 用的 snapshotRef 同源）显式下发给 handleCellSave，令其**照用**、
+      // 不从实时 detail 重算合并共享组。若弹窗打开期间 detail 刷新使该组分裂，实时重算只会写
+      // 代表行、循环却整组标 saved（漏写报成功）；显式写目标堵住这条缝。基线（expectedBefore）
+      // 仍逐行随行，服务端事务内逐行比对，真陈旧则 409 -> 落到既有 stale-skip。
+      const targetRowIds = unit.writeTargets.map((t) => t.rowId);
       try {
-        await onSaveCell(rep.rowId, rep.columnId, rep.candidateMd ?? "", expectedByRowId);
+        await onSaveCell(
+          rep.rowId,
+          rep.columnId,
+          rep.candidateMd ?? "",
+          expectedByRowId,
+          targetRowIds,
+        );
         if (!mountedRef.current) return;
         setBatch((state) => unit.members.reduce((s, m) => applyReformatSaveSuccess(s, m.rowId, m.columnId), state));
       } catch (err) {

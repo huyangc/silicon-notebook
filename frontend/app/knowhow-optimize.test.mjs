@@ -89,6 +89,13 @@ import {
   reformatResultIsStale,
   markReformatItemRunStale,
 } from "./knowhow-optimize-logic.ts";
+// P1（扇出同源）：合并共享组的实时重算用这套（与 handleCellSave 同源），下面的
+// 「实时组分裂 -> 扇出漂移」逻辑测试据它坐实缺陷机制。
+import {
+  groupRowsByAnchor,
+  isSharedColumn,
+  groupCellWriteTargets,
+} from "./knowhow-grouping-logic.ts";
 
 // ===========================================================================
 // 1. 单格「优化表达」对照状态机
@@ -1795,6 +1802,56 @@ test("planReformatSaves（F1 快照动机）：合并共享格 writeTargets 的 
   // 周期内绝不读实时 allRows（否则 mid-flight 重载后就复现 (b) 的覆盖）。
 });
 
+// --- F1（P1 续）：批量保存的**扇出**也必须同源于冻结快照。上一处修复冻结了「规划」
+//     （写目标/基线取自 snapshotRef 快照），但保存循环仍调最新的 handleCellSave 闭包——而它
+//     从**实时** detail 重算合并共享组的扇出。detail 在弹窗打开期间刷新、某 anchor 组分裂时，
+//     规划校验的是旧成员、回调却按新分组只扇写代表行，循环仍把旧成员整组标 saved = 漏写却
+//     报成功。修复：runSave 把 unit.writeTargets 的行 id 作显式 targetRowIds 下发，handleCellSave
+//     照用、不重算。下面这条纯逻辑测试先坐实「实时重算会漂移成只写代表行」，再证明「下发
+//     unit.writeTargets 的行 id 则整组不漂移」——handleCellSave 照用显式写目标由 knowhow-panel.tsx
+//     源码 pin 守卫（见下方「接线（P1，扇出同源）」）。
+test("端到端（保存循环，P1）：批量保存把**快照**写目标行 id 下发给 onSaveCell——实时组分裂也不漂移成只写代表行", async () => {
+  let state = buildSavingState("table", F1_SHARED_ROWS, F1_COLUMNS, (item) =>
+    // c-shared 全组同值 -> 合并共享 unit；c-anchor/c-branch 无需改动。
+    item.columnId === "c-shared"
+      ? { candidateMd: "新共享说明", source: "llm", changed: true }
+      : { candidateMd: item.originalMd, source: "rule/no-llm", changed: false },
+  );
+  const changed = state.items.filter((item) => item.status === "changed");
+  // units 取自**建批次那一刻的快照**（r1/r2/r3 同组共享列）——写目标覆盖整组。
+  const units = planReformatSaves(changed, F1_SHARED_ROWS, "c-anchor");
+  assert.strictEqual(units.length, 1);
+  assert.deepStrictEqual(units[0].writeTargets.map((t) => t.rowId).slice().sort(), ["r1", "r2", "r3"]);
+
+  // 建 unit 之后，父表 detail 刷新：他人把 r2/r3 的 anchor 改走，该组**分裂**（只剩 r1
+  // 仍是「示波器」）。若 handleCellSave 从这份实时行重算扇出，合并共享组坍缩成单行 ->
+  // 只写代表行 r1（正是 P1：规划的旧成员 r2/r3 漏写，却被循环整组标 saved）。
+  const liveRowsAfterSplit = F1_SHARED_ROWS.map((r) =>
+    r.id === "r1" ? r : { ...r, cells: { ...r.cells, "c-anchor": `另一概念-${r.id}` } },
+  );
+  const liveGroup = groupRowsByAnchor(liveRowsAfterSplit, "c-anchor").find((g) => g.rows.some((x) => x.id === "r1"));
+  const buggyLiveFanout =
+    liveGroup && isSharedColumn(liveGroup, "c-shared") ? groupCellWriteTargets(liveGroup, "c-shared") : ["r1"];
+  assert.deepStrictEqual(buggyLiveFanout, ["r1"]); // 实时重算漂移：只写代表行
+
+  // 修复后的保存循环接线（镜像 runSave）：把 unit.writeTargets 的行 id 作第 5 参
+  // 显式下发。捕获传给 onSaveCell 的写目标，验证它=**快照**全组、不随实时分裂漂移。
+  const calls = [];
+  const onSaveCell = async (rowId, columnId, contentMd, expectedByRowId, targetRowIds) => {
+    calls.push({ rowId, targetRowIds, expectedKeys: [...expectedByRowId.keys()] });
+  };
+  for (const unit of units) {
+    const rep = unit.representative;
+    const expectedByRowId = new Map(unit.writeTargets.map((t) => [t.rowId, t.originalMd]));
+    await onSaveCell(rep.rowId, rep.columnId, rep.candidateMd ?? "", expectedByRowId, unit.writeTargets.map((t) => t.rowId));
+  }
+  assert.strictEqual(calls.length, 1);
+  // 关键：下发的是**快照**全组（r1/r2/r3），不是实时分裂后的 [r1]——扇写整组，报 saved 名副其实。
+  assert.deepStrictEqual(calls[0].targetRowIds.slice().sort(), ["r1", "r2", "r3"]);
+  // 基线也逐行随行（服务端事务内逐行比对；真陈旧 -> 409 -> 既有 stale-skip）。
+  assert.deepStrictEqual(calls[0].expectedKeys.slice().sort(), ["r1", "r2", "r3"]);
+});
+
 // ===========================================================================
 // 7. 批量保存：保存前比对当前落库内容，拒绝覆盖他人编辑（代码评审 F2）
 // ===========================================================================
@@ -2249,4 +2306,49 @@ test("接线（F2）：编辑器渲染点把 onServerStale 也接到同一个 re
   // 单格 server-stale 与批量 stale 跳过共用父级刷新路径（reloadTableDetail），
   // 避免两套漂移。
   assert.match(panelSrc, /onServerStale=\{reloadTableDetail\}/);
+});
+
+// --- 接线守卫（P1，扇出同源）：批量保存的**扇出**必须取自冻结快照的写目标，不从实时
+//     detail 重算合并共享组——否则规划（snapshotRef 冻结）与扇写（实时闭包）漂移：detail
+//     刷新致某组分裂时，扇写只落代表行、循环却整组标 saved（漏写报成功，P1）。三处接线：
+//     ① handleCellSave 接受可选 targetRowIds、提供时**照用**、缺省时退回实时分组重算（手动
+//     路径不变）；② runSave 把 unit.writeTargets 的行 id 作第 5 参下发；③ 批量弹窗 props 的
+//     onSaveCell 签名带上它。.tsx 在本仓库 node:test 模型里只能源码断言（同既有「接线」守卫）。--
+const handleCellSaveStart = panelSrc.indexOf("async function handleCellSave(");
+// openCodeModal 紧随 handleCellSave，是稳定的块尾锚点——切到它之前，避免 [\s\S]*? 越界。
+const handleCellSaveSrc = panelSrc.slice(handleCellSaveStart, panelSrc.indexOf("function openCodeModal(", handleCellSaveStart));
+
+test("接线（P1，扇出同源）：handleCellSave 签名带可选 targetRowIds（第 5 参，紧随 expectedByRowId）", () => {
+  assert.ok(handleCellSaveStart > 0 && handleCellSaveSrc.length > 0, "handleCellSave 函数体没截到，守卫失效");
+  assert.match(
+    handleCellSaveSrc,
+    /async function handleCellSave\(\s*rowId: string,\s*columnId: string,\s*contentMd: string,\s*expectedByRowId\?: Map<string, string>,\s*targetRowIds\?: string\[\],\s*\)/,
+  );
+});
+
+test("接线（P1，扇出同源）：提供 targetRowIds 时**照用**（不重算）；缺省时退回实时分组重算（手动路径不变）", () => {
+  // targets = targetRowIds ??（实时 group && isSharedColumn ? groupCellWriteTargets : [rowId]）：
+  // 显式写目标优先、缺省退回既有实时分组——两条来源刻意分流，手动编辑语义逐字不变。
+  assert.match(
+    handleCellSaveSrc,
+    /const targets =\s*targetRowIds \?\?\s*\(group && isSharedColumn\(group, columnId\) \? groupCellWriteTargets\(group, columnId\) : \[rowId\]\);/,
+  );
+});
+
+test("接线（P1，扇出同源）：runSave 把 unit.writeTargets 的行 id 作第 5 参下发给 onSaveCell", () => {
+  // units 取自 snapshotRef 冻结快照（见「接线（F1，不可变快照）」），此处把它的写目标行 id
+  // 一并显式下发——handleCellSave 照用、不从实时 detail 重算，规划与扇写严格同源。
+  assert.match(runSaveSrc, /const targetRowIds = unit\.writeTargets\.map\(\(t\) => t\.rowId\);/);
+  assert.match(
+    runSaveSrc,
+    /await onSaveCell\(\s*rep\.rowId,\s*rep\.columnId,\s*rep\.candidateMd \?\? "",\s*expectedByRowId,\s*targetRowIds,\s*\);/,
+  );
+});
+
+test("接线（P1，扇出同源）：KnowhowReformatBatchModalProps.onSaveCell 签名带 targetRowIds（批量总是下发）", () => {
+  // prop 类型要求它（批量恒传，同 expectedByRowId：prop 必填、handleCellSave 实现放宽为可选）。
+  assert.match(
+    panelSrc,
+    /onSaveCell: \(\s*rowId: string,\s*columnId: string,\s*contentMd: string,\s*expectedByRowId: Map<string, string>,\s*targetRowIds: string\[\],\s*\) => Promise<void>;/,
+  );
 });
