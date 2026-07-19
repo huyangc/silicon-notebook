@@ -305,6 +305,8 @@ function hasPositionOrOrderQuery(relative, source) {
   const fileReadImports = [];
   const fileReadNamespaces = [];
   const throwCollectors = [];
+  const callResults = new WeakMap();
+  const activeFunctionCalls = new Set();
   let nextBindingId = 1;
 
   for (const statement of sourceFile.statements) {
@@ -339,13 +341,24 @@ function hasPositionOrOrderQuery(relative, source) {
 
   function newBinding(
     value,
-    { fileRead = false, fileReadNamespace = 0 } = {},
+    {
+      callables = [],
+      callablesComplete = false,
+      definitelyTruthy = false,
+      fileRead = false,
+      fileReadNamespace = 0,
+      fileReadNamespaceGuaranteed = 0,
+    } = {},
   ) {
     return {
       id: nextBindingId++,
       value,
+      callables,
+      callablesComplete,
+      definitelyTruthy,
       fileRead,
       fileReadNamespace,
+      fileReadNamespaceGuaranteed,
     };
   }
 
@@ -362,8 +375,14 @@ function hasPositionOrOrderQuery(relative, source) {
     const existing = scope.bindings.get(name);
     if (existing) {
       existing.value = value;
+      existing.callables = traits.callables ?? [];
+      existing.callablesComplete = traits.callablesComplete ?? false;
+      existing.definitelyTruthy = traits.definitelyTruthy ?? false;
       existing.fileRead = traits.fileRead ?? false;
       existing.fileReadNamespace = traits.fileReadNamespace ?? 0;
+      existing.fileReadNamespaceGuaranteed = (
+        traits.fileReadNamespaceGuaranteed ?? 0
+      );
       return existing;
     }
     const created = newBinding(value, traits);
@@ -375,8 +394,14 @@ function hasPositionOrOrderQuery(relative, source) {
     const existing = resolvedBinding(scope, name);
     if (existing) {
       existing.value = value;
+      existing.callables = traits.callables ?? [];
+      existing.callablesComplete = traits.callablesComplete ?? false;
+      existing.definitelyTruthy = traits.definitelyTruthy ?? false;
       existing.fileRead = traits.fileRead ?? false;
       existing.fileReadNamespace = traits.fileReadNamespace ?? 0;
+      existing.fileReadNamespaceGuaranteed = (
+        traits.fileReadNamespaceGuaranteed ?? 0
+      );
     } else {
       defineBinding(scope, name, value, traits);
     }
@@ -404,8 +429,14 @@ function hasPositionOrOrderQuery(relative, source) {
           {
             id: entry.id,
             value: entry.value,
+            callables: [...entry.callables],
+            callablesComplete: entry.callablesComplete,
+            definitelyTruthy: entry.definitelyTruthy,
             fileRead: entry.fileRead,
             fileReadNamespace: entry.fileReadNamespace,
+            fileReadNamespaceGuaranteed: (
+              entry.fileReadNamespaceGuaranteed
+            ),
           },
         );
       }
@@ -421,8 +452,14 @@ function hasPositionOrOrderQuery(relative, source) {
         if (!states.has(entry.id)) {
           states.set(entry.id, {
             value: entry.value,
+            callables: [...entry.callables],
+            callablesComplete: entry.callablesComplete,
+            definitelyTruthy: entry.definitelyTruthy,
             fileRead: entry.fileRead,
             fileReadNamespace: entry.fileReadNamespace,
+            fileReadNamespaceGuaranteed: (
+              entry.fileReadNamespaceGuaranteed
+            ),
           });
         }
       }
@@ -434,6 +471,19 @@ function hasPositionOrOrderQuery(relative, source) {
     const branchStates = branches.map(bindingStates);
     for (let current = target; current; current = current.parent) {
       for (const entry of current.bindings.values()) {
+        entry.callables = [
+          ...new Set(
+            branchStates.flatMap(
+              (states) => states.get(entry.id)?.callables ?? [],
+            ),
+          ),
+        ];
+        entry.callablesComplete = branchStates.every(
+          (states) => states.get(entry.id)?.callablesComplete ?? false,
+        );
+        entry.definitelyTruthy = branchStates.every(
+          (states) => states.get(entry.id)?.definitelyTruthy ?? false,
+        );
         entry.value = branchStates.some(
           (states) => states.get(entry.id)?.value ?? entry.value,
         );
@@ -453,6 +503,16 @@ function hasPositionOrOrderQuery(relative, source) {
           ),
           0,
         );
+        entry.fileReadNamespaceGuaranteed = branchStates.reduce(
+          (mask, states) => (
+            mask
+            & (
+              states.get(entry.id)?.fileReadNamespaceGuaranteed
+              ?? 0
+            )
+          ),
+          ALL_FILE_READ_EXPORTS,
+        );
       }
     }
   }
@@ -466,8 +526,18 @@ function hasPositionOrOrderQuery(relative, source) {
         const other = rightStates.get(id);
         return (
           other?.value === value.value
+          && other.callablesComplete === value.callablesComplete
+          && other.definitelyTruthy === value.definitelyTruthy
           && other.fileRead === value.fileRead
           && other.fileReadNamespace === value.fileReadNamespace
+          && (
+            other.fileReadNamespaceGuaranteed
+            === value.fileReadNamespaceGuaranteed
+          )
+          && other.callables.length === value.callables.length
+          && other.callables.every(
+            (callable) => value.callables.includes(callable),
+          )
         );
       },
     );
@@ -477,10 +547,20 @@ function hasPositionOrOrderQuery(relative, source) {
     return { normal: true, abrupt: [] };
   }
 
-  function abruptCompletion(kind, scope, label = undefined) {
+  function abruptCompletion(
+    kind,
+    scope,
+    label = undefined,
+    details = {},
+  ) {
     return {
       normal: false,
-      abrupt: [{ kind, label, scope: cloneScope(scope) }],
+      abrupt: [{
+        kind,
+        label,
+        scope: cloneScope(scope),
+        ...details,
+      }],
     };
   }
 
@@ -585,7 +665,18 @@ function hasPositionOrOrderQuery(relative, source) {
         )
         && statement.name
       ) {
-        defineBinding(scope, statement.name.text, false);
+        defineBinding(
+          scope,
+          statement.name.text,
+          false,
+          ts.isFunctionDeclaration(statement)
+            ? {
+              callables: [statement],
+              callablesComplete: true,
+              definitelyTruthy: true,
+            }
+            : { definitelyTruthy: true },
+        );
       }
       if (
         ts.isVariableStatement(statement)
@@ -727,24 +818,39 @@ function hasPositionOrOrderQuery(relative, source) {
       const propertyBit = FILE_READ_EXPORT_BITS.get(property) ?? 0;
       const defaultReachable = Boolean(
         defaultInitializer
-        && !(traits.fileReadNamespace & propertyBit),
+        && !(traits.fileReadNamespaceGuaranteed & propertyBit),
       );
       if (defaultReachable) visit(defaultInitializer, scope);
       const defaultTraits = defaultReachable
-        ? fileReadTraits(defaultInitializer, scope)
+        ? expressionTraits(defaultInitializer, scope)
         : {};
       const targetTraits = rest
         ? {
           fileReadNamespace: (
             traits.fileReadNamespace & ~excludedMask
           ),
+          fileReadNamespaceGuaranteed: (
+            traits.fileReadNamespaceGuaranteed & ~excludedMask
+          ),
         }
         : {
+          callables: defaultTraits.callables ?? [],
+          callablesComplete: defaultTraits.callablesComplete ?? false,
+          definitelyTruthy: Boolean(
+            (traits.fileReadNamespaceGuaranteed & propertyBit)
+            || (
+              (traits.fileReadNamespace & propertyBit)
+              && defaultTraits.definitelyTruthy
+            )
+          ),
           fileRead: Boolean(
             defaultTraits.fileRead
             || (traits.fileReadNamespace & propertyBit)
           ),
           fileReadNamespace: defaultTraits.fileReadNamespace ?? 0,
+          fileReadNamespaceGuaranteed: (
+            defaultTraits.fileReadNamespaceGuaranteed ?? 0
+          ),
         };
       const value = defaultReachable
         ? isTextFlow(defaultInitializer, scope)
@@ -763,6 +869,46 @@ function hasPositionOrOrderQuery(relative, source) {
     return Boolean(fileReadTraits(current.expression, scope).fileRead);
   }
 
+  function expressionDefinitelyTruthy(expression, scope) {
+    const current = unwrapExpression(expression);
+    if (ts.isIdentifier(current)) {
+      return Boolean(
+        resolvedBinding(scope, current.text)?.definitelyTruthy,
+      );
+    }
+    if (
+      ts.isFunctionLike(current)
+      || ts.isObjectLiteralExpression(current)
+      || ts.isArrayLiteralExpression(current)
+      || ts.isClassExpression(current)
+    ) {
+      return true;
+    }
+    if (ts.isConditionalExpression(current)) {
+      return (
+        expressionDefinitelyTruthy(current.whenTrue, scope)
+        && expressionDefinitelyTruthy(current.whenFalse, scope)
+      );
+    }
+    if (
+      ts.isBinaryExpression(current)
+      && current.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && current.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+      && ts.isIdentifier(current.left)
+    ) {
+      return Boolean(
+        resolvedBinding(scope, current.left.text)?.definitelyTruthy,
+      );
+    }
+    if (
+      ts.isBinaryExpression(current)
+      && current.operatorToken.kind === ts.SyntaxKind.CommaToken
+    ) {
+      return expressionDefinitelyTruthy(current.right, scope);
+    }
+    return false;
+  }
+
   function isTextFlow(expression, scope) {
     const current = unwrapExpression(expression);
     if (ts.isIdentifier(current)) {
@@ -772,6 +918,9 @@ function hasPositionOrOrderQuery(relative, source) {
         : resolved.value;
     }
     if (isFileRead(current, scope)) return true;
+    if (ts.isCallExpression(current)) {
+      return Boolean(callResults.get(current)?.value);
+    }
     if (ts.isTemplateExpression(current)) {
       return current.templateSpans.some(
         (span) => isTextFlow(span.expression, scope),
@@ -788,6 +937,9 @@ function hasPositionOrOrderQuery(relative, source) {
       && current.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
       && current.operatorToken.kind <= ts.SyntaxKind.LastAssignment
     ) {
+      if (ts.isIdentifier(current.left)) {
+        return isTextFlow(current.left, scope);
+      }
       if (current.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
         return isTextFlow(current.right, scope);
       }
@@ -808,6 +960,22 @@ function hasPositionOrOrderQuery(relative, source) {
       && current.operatorToken.kind === ts.SyntaxKind.CommaToken
     ) {
       return isTextFlow(current.right, scope);
+    }
+    if (
+      ts.isBinaryExpression(current)
+      && [
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(current.operatorToken.kind)
+      && expressionDefinitelyTruthy(current.left, scope)
+    ) {
+      return [
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(current.operatorToken.kind)
+        ? isTextFlow(current.left, scope)
+        : isTextFlow(current.right, scope);
     }
     return (
       ts.isBinaryExpression(current)
@@ -832,6 +1000,9 @@ function hasPositionOrOrderQuery(relative, source) {
         ? {
           fileRead: resolved.fileRead,
           fileReadNamespace: resolved.fileReadNamespace,
+          fileReadNamespaceGuaranteed: (
+            resolved.fileReadNamespaceGuaranteed
+          ),
         }
         : {};
     }
@@ -884,6 +1055,10 @@ function hasPositionOrOrderQuery(relative, source) {
           (whenTrue.fileReadNamespace ?? 0)
           | (whenFalse.fileReadNamespace ?? 0)
         ),
+        fileReadNamespaceGuaranteed: (
+          (whenTrue.fileReadNamespaceGuaranteed ?? 0)
+          & (whenFalse.fileReadNamespaceGuaranteed ?? 0)
+        ),
       };
     }
     if (
@@ -894,6 +1069,26 @@ function hasPositionOrOrderQuery(relative, source) {
         ts.SyntaxKind.QuestionQuestionToken,
       ].includes(current.operatorToken.kind)
     ) {
+      const leftIsTruthy = expressionDefinitelyTruthy(
+        current.left,
+        scope,
+      );
+      if (
+        leftIsTruthy
+        && [
+          ts.SyntaxKind.BarBarToken,
+          ts.SyntaxKind.QuestionQuestionToken,
+        ].includes(current.operatorToken.kind)
+      ) {
+        return fileReadTraits(current.left, scope);
+      }
+      if (
+        leftIsTruthy
+        && current.operatorToken.kind
+          === ts.SyntaxKind.AmpersandAmpersandToken
+      ) {
+        return fileReadTraits(current.right, scope);
+      }
       const left = fileReadTraits(current.left, scope);
       const right = fileReadTraits(current.right, scope);
       return {
@@ -902,6 +1097,10 @@ function hasPositionOrOrderQuery(relative, source) {
           (left.fileReadNamespace ?? 0)
           | (right.fileReadNamespace ?? 0)
         ),
+        fileReadNamespaceGuaranteed: (
+          (left.fileReadNamespaceGuaranteed ?? 0)
+          & (right.fileReadNamespaceGuaranteed ?? 0)
+        ),
       };
     }
     if (
@@ -909,7 +1108,16 @@ function hasPositionOrOrderQuery(relative, source) {
       && current.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
       && current.operatorToken.kind <= ts.SyntaxKind.LastAssignment
     ) {
+      if (ts.isIdentifier(current.left)) {
+        return fileReadTraits(current.left, scope);
+      }
       if (current.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        return fileReadTraits(current.right, scope);
+      }
+      if (
+        current.operatorToken.kind
+        === ts.SyntaxKind.AmpersandAmpersandEqualsToken
+      ) {
         return fileReadTraits(current.right, scope);
       }
       if ([
@@ -925,6 +1133,10 @@ function hasPositionOrOrderQuery(relative, source) {
             (left.fileReadNamespace ?? 0)
             | (right.fileReadNamespace ?? 0)
           ),
+          fileReadNamespaceGuaranteed: (
+            (left.fileReadNamespaceGuaranteed ?? 0)
+            & (right.fileReadNamespaceGuaranteed ?? 0)
+          ),
         };
       }
       return {};
@@ -936,6 +1148,143 @@ function hasPositionOrOrderQuery(relative, source) {
       return fileReadTraits(current.right, scope);
     }
     return {};
+  }
+
+  function callableTraits(expression, scope) {
+    const current = unwrapExpression(expression);
+    if (ts.isFunctionLike(current)) {
+      return {
+        callables: [current],
+        callablesComplete: true,
+        definitelyTruthy: true,
+      };
+    }
+    if (ts.isIdentifier(current)) {
+      const resolved = resolvedBinding(scope, current.text);
+      return resolved
+        ? {
+          callables: [...resolved.callables],
+          callablesComplete: resolved.callablesComplete,
+          definitelyTruthy: resolved.definitelyTruthy,
+        }
+        : {};
+    }
+    if (ts.isCallExpression(current)) {
+      return callResults.get(current)?.traits ?? {};
+    }
+    if (ts.isConditionalExpression(current)) {
+      const whenTrue = callableTraits(current.whenTrue, scope);
+      const whenFalse = callableTraits(current.whenFalse, scope);
+      return {
+        callables: [
+          ...new Set([
+            ...(whenTrue.callables ?? []),
+            ...(whenFalse.callables ?? []),
+          ]),
+        ],
+        callablesComplete: Boolean(
+          whenTrue.callablesComplete
+          && whenFalse.callablesComplete,
+        ),
+        definitelyTruthy: Boolean(
+          whenTrue.definitelyTruthy
+          && whenFalse.definitelyTruthy,
+        ),
+      };
+    }
+    if (
+      ts.isBinaryExpression(current)
+      && [
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(current.operatorToken.kind)
+    ) {
+      const leftIsTruthy = expressionDefinitelyTruthy(
+        current.left,
+        scope,
+      );
+      if (
+        leftIsTruthy
+        && [
+          ts.SyntaxKind.BarBarToken,
+          ts.SyntaxKind.QuestionQuestionToken,
+        ].includes(current.operatorToken.kind)
+      ) {
+        return callableTraits(current.left, scope);
+      }
+      if (
+        leftIsTruthy
+        && current.operatorToken.kind
+          === ts.SyntaxKind.AmpersandAmpersandToken
+      ) {
+        return callableTraits(current.right, scope);
+      }
+      const left = callableTraits(current.left, scope);
+      const right = callableTraits(current.right, scope);
+      return {
+        callables: [
+          ...new Set([
+            ...(left.callables ?? []),
+            ...(right.callables ?? []),
+          ]),
+        ],
+        callablesComplete: Boolean(
+          left.callablesComplete && right.callablesComplete,
+        ),
+        definitelyTruthy: Boolean(
+          left.definitelyTruthy && right.definitelyTruthy,
+        ),
+      };
+    }
+    if (
+      ts.isObjectLiteralExpression(current)
+      || ts.isArrayLiteralExpression(current)
+      || ts.isClassExpression(current)
+    ) {
+      return { definitelyTruthy: true };
+    }
+    if (
+      ts.isBinaryExpression(current)
+      && current.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && current.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+      && ts.isIdentifier(current.left)
+    ) {
+      return callableTraits(current.left, scope);
+    }
+    if (
+      ts.isBinaryExpression(current)
+      && current.operatorToken.kind === ts.SyntaxKind.CommaToken
+    ) {
+      return callableTraits(current.right, scope);
+    }
+    return {};
+  }
+
+  function expressionTraits(expression, scope) {
+    const fileTraits = fileReadTraits(expression, scope);
+    const localTraits = callableTraits(expression, scope);
+    return {
+      ...fileTraits,
+      ...localTraits,
+      definitelyTruthy: Boolean(
+        localTraits.definitelyTruthy
+        || fileTraits.fileRead
+        || fileTraits.fileReadNamespaceGuaranteed
+      ),
+    };
+  }
+
+  function bindingTraits(binding) {
+    if (!binding) return {};
+    return {
+      callables: [...binding.callables],
+      callablesComplete: binding.callablesComplete,
+      definitelyTruthy: binding.definitelyTruthy,
+      fileRead: binding.fileRead,
+      fileReadNamespace: binding.fileReadNamespace,
+      fileReadNamespaceGuaranteed: binding.fileReadNamespaceGuaranteed,
+    };
   }
 
   function parameterIsTextFlow(parameter) {
@@ -1022,6 +1371,155 @@ function hasPositionOrOrderQuery(relative, source) {
     );
   }
 
+  function bindFunctionParameters(
+    node,
+    functionScope,
+    callerScope = undefined,
+    argumentsList = [],
+  ) {
+    for (let index = 0; index < node.parameters.length; index += 1) {
+      const parameter = node.parameters[index];
+      const argument = callerScope ? argumentsList[index] : undefined;
+      if (argument) {
+        if (ts.isIdentifier(parameter.name)) {
+          defineBinding(
+            functionScope,
+            parameter.name.text,
+            isTextFlow(argument, callerScope),
+            expressionTraits(argument, callerScope),
+          );
+        }
+        continue;
+      }
+      if (ts.isIdentifier(parameter.name)) {
+        if (parameter.initializer) {
+          visit(parameter.initializer, functionScope);
+        }
+        const value = Boolean(
+          (!callerScope && parameterIsTextFlow(parameter))
+          || (
+            parameter.initializer
+            && isTextFlow(parameter.initializer, functionScope)
+          )
+        );
+        const traits = parameter.initializer
+          ? expressionTraits(parameter.initializer, functionScope)
+          : {};
+        defineBinding(
+          functionScope,
+          parameter.name.text,
+          value,
+          traits,
+        );
+      } else if (parameter.initializer) {
+        visit(parameter.initializer, functionScope);
+      }
+    }
+  }
+
+  function analyzeFunctionDefinition(node, scope) {
+    const functionScope = newScope(cloneScope(scope), "function");
+    throwCollectors.push(() => {});
+    try {
+      bindFunctionParameters(node, functionScope);
+      if (node.body) predeclareFunctionVars(node.body, functionScope);
+      if (node.body) visit(node.body, functionScope);
+    } finally {
+      throwCollectors.pop();
+    }
+  }
+
+  function mergeResultTraits(results) {
+    if (results.length === 0) return {};
+    return {
+      callables: [
+        ...new Set(
+          results.flatMap((result) => result.traits.callables ?? []),
+        ),
+      ],
+      callablesComplete: results.every(
+        (result) => result.traits.callablesComplete ?? false,
+      ),
+      definitelyTruthy: results.every(
+        (result) => result.traits.definitelyTruthy ?? false,
+      ),
+      fileRead: results.some(
+        (result) => result.traits.fileRead ?? false,
+      ),
+      fileReadNamespace: results.reduce(
+        (mask, result) => (
+          mask | (result.traits.fileReadNamespace ?? 0)
+        ),
+        0,
+      ),
+      fileReadNamespaceGuaranteed: results.reduce(
+        (mask, result) => (
+          mask & (result.traits.fileReadNamespaceGuaranteed ?? 0)
+        ),
+        ALL_FILE_READ_EXPORTS,
+      ),
+    };
+  }
+
+  function invokeLocalFunction(node, argumentsList, scope) {
+    if (activeFunctionCalls.has(node)) {
+      return { normal: true, value: false, traits: {} };
+    }
+    activeFunctionCalls.add(node);
+    try {
+      const callParent = cloneScope(scope);
+      const functionScope = newScope(callParent, "function");
+      bindFunctionParameters(
+        node,
+        functionScope,
+        scope,
+        argumentsList,
+      );
+      if (node.body) predeclareFunctionVars(node.body, functionScope);
+      let result;
+      let returned;
+      if (node.body && !ts.isBlock(node.body)) {
+        result = visit(node.body, functionScope);
+        returned = [{
+          scope: cloneScope(functionScope),
+          traits: expressionTraits(node.body, functionScope),
+          value: isTextFlow(node.body, functionScope),
+        }];
+      } else {
+        result = node.body
+          ? visit(node.body, functionScope)
+          : normalCompletion();
+        returned = result.abrupt
+          .filter((completion) => completion.kind === "return")
+          .map((completion) => ({
+            scope: completion.scope,
+            traits: completion.returnTraits ?? {},
+            value: completion.returnValue ?? false,
+          }));
+        if (result.normal) {
+          returned.push({
+            scope: cloneScope(functionScope),
+            traits: {},
+            value: false,
+          });
+        }
+      }
+      if (returned.length > 0) {
+        joinScopes(
+          scope,
+          returned.map((returnResult) => returnResult.scope),
+        );
+      }
+      return {
+        normal: returned.length > 0,
+        traits: mergeResultTraits(returned),
+        value: returned.some((returnResult) => returnResult.value),
+      };
+    } finally {
+      activeFunctionCalls.delete(node);
+    }
+  }
+
   function visit(node, scope) {
     if (found) return normalCompletion();
     if (ts.isContinueStatement(node)) {
@@ -1036,7 +1534,19 @@ function hasPositionOrOrderQuery(relative, source) {
     }
     if (ts.isReturnStatement(node)) {
       if (node.expression) visit(node.expression, scope);
-      return abruptCompletion("return", scope);
+      return abruptCompletion(
+        "return",
+        scope,
+        undefined,
+        {
+          returnTraits: node.expression
+            ? expressionTraits(node.expression, scope)
+            : {},
+          returnValue: node.expression
+            ? isTextFlow(node.expression, scope)
+            : false,
+        },
+      );
     }
     if (ts.isLabeledStatement(node)) {
       if (isLoopStatement(node.statement)) {
@@ -1063,39 +1573,19 @@ function hasPositionOrOrderQuery(relative, source) {
       };
     }
     if (ts.isFunctionLike(node)) {
-      const functionScope = newScope(scope, "function");
-      throwCollectors.push(() => {});
-      try {
-        for (const parameter of node.parameters) {
-          if (ts.isIdentifier(parameter.name)) {
-            if (parameter.initializer) {
-              visit(parameter.initializer, functionScope);
-            }
-            const value = Boolean(
-              parameterIsTextFlow(parameter)
-              || (
-                parameter.initializer
-                && isTextFlow(parameter.initializer, functionScope)
-              )
-            );
-            const traits = parameter.initializer
-              ? fileReadTraits(parameter.initializer, functionScope)
-              : {};
-            defineBinding(
-              functionScope,
-              parameter.name.text,
-              value,
-              traits,
-            );
-          } else if (parameter.initializer) {
-            visit(parameter.initializer, functionScope);
-          }
-        }
-        if (node.body) predeclareFunctionVars(node.body, functionScope);
-        if (node.body) visit(node.body, functionScope);
-      } finally {
-        throwCollectors.pop();
+      if (ts.isFunctionDeclaration(node) && node.name) {
+        assignBinding(
+          scope,
+          node.name.text,
+          false,
+          {
+            callables: [node],
+            callablesComplete: true,
+            definitelyTruthy: true,
+          },
+        );
       }
+      analyzeFunctionDefinition(node, scope);
       return normalCompletion();
     }
     if (ts.isBlock(node)) {
@@ -1296,6 +1786,23 @@ function hasPositionOrOrderQuery(relative, source) {
       ].includes(node.operatorToken.kind)
     ) {
       visit(node.left, scope);
+      const leftIsTruthy = expressionDefinitelyTruthy(node.left, scope);
+      if (
+        leftIsTruthy
+        && [
+          ts.SyntaxKind.BarBarToken,
+          ts.SyntaxKind.QuestionQuestionToken,
+        ].includes(node.operatorToken.kind)
+      ) {
+        return normalCompletion();
+      }
+      if (
+        leftIsTruthy
+        && node.operatorToken.kind
+          === ts.SyntaxKind.AmpersandAmpersandToken
+      ) {
+        return visit(node.right, scope);
+      }
       const skipped = cloneScope(scope);
       const evaluated = cloneScope(scope);
       visit(node.right, evaluated);
@@ -1315,7 +1822,7 @@ function hasPositionOrOrderQuery(relative, source) {
         ? isTextFlow(node.initializer, scope)
         : false;
       const traits = node.initializer
-        ? fileReadTraits(node.initializer, scope)
+        ? expressionTraits(node.initializer, scope)
         : {};
       if (ts.isObjectBindingPattern(node.name)) {
         bindObjectCapabilities(
@@ -1357,7 +1864,7 @@ function hasPositionOrOrderQuery(relative, source) {
       visit(node.right, scope);
       bindObjectCapabilities(
         node.left,
-        fileReadTraits(node.right, scope),
+        expressionTraits(node.right, scope),
         scope,
         false,
       );
@@ -1371,27 +1878,31 @@ function hasPositionOrOrderQuery(relative, source) {
     ) {
       const existing = resolvedBinding(scope, node.left.text);
       const existingValue = Boolean(existing?.value);
-      const existingFileRead = Boolean(existing?.fileRead);
-      const existingFileReadNamespace = (
-        existing?.fileReadNamespace ?? 0
-      );
+      const existingTraits = bindingTraits(existing);
+      const operator = node.operatorToken.kind;
       const preservesValueLeft = [
         ts.SyntaxKind.PlusEqualsToken,
         ts.SyntaxKind.AmpersandAmpersandEqualsToken,
         ts.SyntaxKind.BarBarEqualsToken,
         ts.SyntaxKind.QuestionQuestionEqualsToken,
-      ].includes(node.operatorToken.kind);
-      const preservesCapabilityLeft = [
-        ts.SyntaxKind.AmpersandAmpersandEqualsToken,
-        ts.SyntaxKind.BarBarEqualsToken,
-        ts.SyntaxKind.QuestionQuestionEqualsToken,
-      ].includes(node.operatorToken.kind);
+      ].includes(operator);
       const plainAssignment = (
-        node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        operator === ts.SyntaxKind.EqualsToken
       );
-      visit(node.right, scope);
-      const rightValue = isTextFlow(node.right, scope);
-      const rightTraits = fileReadTraits(node.right, scope);
+      const skipsRight = Boolean(
+        existing?.definitelyTruthy
+        && [
+          ts.SyntaxKind.BarBarEqualsToken,
+          ts.SyntaxKind.QuestionQuestionEqualsToken,
+        ].includes(operator),
+      );
+      if (!skipsRight) visit(node.right, scope);
+      const rightValue = skipsRight
+        ? false
+        : isTextFlow(node.right, scope);
+      const rightTraits = skipsRight
+        ? {}
+        : expressionTraits(node.right, scope);
       const value = plainAssignment
         ? rightValue
         : (
@@ -1399,22 +1910,26 @@ function hasPositionOrOrderQuery(relative, source) {
             ? existingValue || rightValue
             : false
         );
-      const traits = plainAssignment
-        ? rightTraits
-        : (
-          preservesCapabilityLeft
-            ? {
-              fileRead: (
-                existingFileRead
-                || Boolean(rightTraits.fileRead)
-              ),
-              fileReadNamespace: (
-                existingFileReadNamespace
-                | (rightTraits.fileReadNamespace ?? 0)
-              ),
-            }
-            : {}
-      );
+      let traits = {};
+      if (plainAssignment) {
+        traits = rightTraits;
+      } else if (
+        operator === ts.SyntaxKind.AmpersandAmpersandEqualsToken
+      ) {
+        traits = rightTraits;
+      } else if (
+        [
+          ts.SyntaxKind.BarBarEqualsToken,
+          ts.SyntaxKind.QuestionQuestionEqualsToken,
+        ].includes(operator)
+      ) {
+        traits = skipsRight
+          ? existingTraits
+          : mergeResultTraits([
+            { traits: existingTraits, value: existingValue },
+            { traits: rightTraits, value: rightValue },
+          ]);
+      }
       assignBinding(scope, node.left.text, value, traits);
       return normalCompletion();
     }
@@ -1488,12 +2003,47 @@ function hasPositionOrOrderQuery(relative, source) {
       }
       visit(node.expression, scope);
       for (const argument of node.arguments) visit(argument, scope);
+      const callable = callableTraits(node.expression, scope);
+      const callBranches = [];
+      const localResults = [];
+      for (const target of callable.callables ?? []) {
+        const branch = cloneScope(scope);
+        const result = invokeLocalFunction(
+          target,
+          [...node.arguments],
+          branch,
+        );
+        if (result.normal) {
+          callBranches.push(branch);
+          localResults.push({
+            traits: result.traits,
+            value: result.value,
+          });
+        }
+      }
+      if (!callable.callablesComplete) {
+        callBranches.push(cloneScope(scope));
+        localResults.push({ traits: {}, value: false });
+      }
+      if ((callable.callables ?? []).length > 0) {
+        if (callBranches.length > 0) joinScopes(scope, callBranches);
+        callResults.set(node, {
+          traits: mergeResultTraits(localResults),
+          value: localResults.some((result) => result.value),
+        });
+      }
       if (textReceiver && isTextFlow(textReceiver, scope)) {
         found = true;
         return normalCompletion();
       }
       collectPossibleThrow(scope);
-      return normalCompletion();
+      return {
+        normal: (
+          (callable.callables ?? []).length === 0
+          || callBranches.length > 0
+        ),
+        abrupt: [],
+      };
     }
     const abrupt = [];
     let normal = true;
@@ -1508,17 +2058,27 @@ function hasPositionOrOrderQuery(relative, source) {
 
   const rootScope = newScope(undefined, "function");
   for (const name of fileReadImports) {
-    defineBinding(rootScope, name, false, { fileRead: true });
+    defineBinding(
+      rootScope,
+      name,
+      false,
+      { definitelyTruthy: true, fileRead: true },
+    );
   }
   for (const name of fileReadNamespaces) {
     defineBinding(
       rootScope,
       name,
       false,
-      { fileReadNamespace: ALL_FILE_READ_EXPORTS },
+      {
+        definitelyTruthy: true,
+        fileReadNamespace: ALL_FILE_READ_EXPORTS,
+        fileReadNamespaceGuaranteed: ALL_FILE_READ_EXPORTS,
+      },
     );
   }
   predeclareFunctionVars(sourceFile, rootScope);
+  predeclareStatements(sourceFile.statements, rootScope);
   visit(sourceFile, rootScope);
   return found;
 }
@@ -1830,6 +2390,34 @@ test("source policy rejects position identities without banning ordinary arrays"
       + "let data = readFileSync(path, 'utf8');\ntry {"
       + " try { throw err; } finally {}"
       + " } catch { data.slice(); }",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\n"
+      + "function helper() { data = readFileSync(path, 'utf8'); }\n"
+      + "data = [];\nhelper();\ndata.slice();",
+    "import * as fs from 'node:fs';\n"
+      + "import { readFileSync as read } from 'node:fs';\n"
+      + "const ns = flag ? fs : {};\n"
+      + "const { readFileSync: data = read(path, 'utf8') } = ns;\n"
+      + "data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "const other = () => [];\nlet load = other;\n"
+      + "const alias = (load &&= readFileSync);\n"
+      + "const data = alias(path, 'utf8'); data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "function helper() { return readFileSync(path, 'utf8'); }\n"
+      + "const data = helper(); data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "function identity(value) { return value; }\n"
+      + "const data = identity(readFileSync(path, 'utf8')); data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\nhelper();\ndata.slice();\n"
+      + "function helper() { data = readFileSync(path, 'utf8'); }",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\ndata &&= readFileSync(path, 'utf8');\n"
+      + "data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "const data = [] && readFileSync(path, 'utf8');\n"
+      + "data.slice();",
     "function fragment(payload, alias = payload) {"
       + " return alias.slice(1); }",
     "import { readFileSync } from 'node:fs';\n"
@@ -1967,6 +2555,36 @@ test("source policy rejects position identities without banning ordinary arrays"
     "import { readFileSync } from 'node:fs';\n"
       + "let load = readFileSync;\nconst alias = (load += 'x');\n"
       + "const data = alias(path, 'utf8'); data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\n"
+      + "function helper() { data = readFileSync(path, 'utf8'); }\n"
+      + "data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "const other = () => [];\nlet load = readFileSync;\n"
+      + "const alias = (load &&= other);\n"
+      + "const data = alias(path, 'utf8'); data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "const other = () => [];\nlet load = other;\n"
+      + "const alias = (load ||= readFileSync);\n"
+      + "const data = alias(path, 'utf8'); data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "const other = () => [];\nlet load = other;\n"
+      + "const alias = (load ??= readFileSync);\n"
+      + "const data = alias(path, 'utf8'); data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = readFileSync(path, 'utf8');\n"
+      + "function clear() { data = []; }\nclear();\ndata.slice();",
+    "import * as fs from 'node:fs';\n"
+      + "let data = fs.readFileSync(path, 'utf8');\ntry {"
+      + " const ns = fs || {};"
+      + " const { readFileSync: load = risky() } = ns;\ndata = [];"
+      + " } catch {}\ndata.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\nconst alias = (data ||= readFileSync());\n"
+      + "alias.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "const data = [] || readFileSync(path, 'utf8');\n"
+      + "data.slice();",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("test/semantic-source.mjs", mutation),
