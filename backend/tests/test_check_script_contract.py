@@ -17,6 +17,6 @@ def test_check_script_runs_every_committed_test_root():
     package = json.loads(
         (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
     )
-    assert package["scripts"]["test"] == (
-        "node --test $(find app -name '*.test.mjs' -type f -print)"
-    )
+    frontend_test = package["scripts"]["test"]
+    assert "test:node" in frontend_test
+    assert "test:component" in frontend_test
