@@ -47,6 +47,15 @@ def _anchor_trim(value: "str | None") -> str:
     return (value or "").strip(_JS_TRIM_WHITESPACE)
 
 
+def _like_escape(value: str) -> str:
+    """Escape SQLite ``LIKE`` metacharacters (``%`` any-run, ``_`` any-char) and the
+    escape character itself in ``value`` so it can be bound as a LITERAL substring in
+    a ``LIKE '%' || ? || '%' ESCAPE '\\'`` pattern. Backslash is escaped FIRST so the
+    escapes this function adds are not themselves re-escaped; an unescaped backslash
+    would also make SQLite reject the pattern outright."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class KnowhowStore:
     """SQLite row persistence for the knowhow-table feature (knowhow-tables
     PR-1 Task 2, extended by PR-2+3 Task 1): ``knowhow_tables``/
@@ -1041,17 +1050,34 @@ class KnowhowStore:
                         continue
                     frozen_by_key.setdefault(key, set()).add(u_row)
                 if frozen_by_key:
+                    # F2 (round-7 P2): DON'T rescan the table's ENTIRE anchor column
+                    # per guarded call. A unique-anchor table makes every changed cell
+                    # its own singleton coversAnchorGroup unit, so an R×C import fires
+                    # R×C guarded calls, each O(R) -> O(R²C) inside the write lock.
+                    # Instead, for each DISTINCT non-blank frozen key, fetch only
+                    # CANDIDATE rows via a LIKE substring prefilter on the TRIMMED key,
+                    # then let the exact _anchor_trim equality below decide true
+                    # membership. The trimmed core is BY DEFINITION a contiguous
+                    # substring of any raw value that trim-equals it, so LIKE can never
+                    # UNDER-match a true member (the fail-closed structural guard is
+                    # preserved -- a joiner cannot hide); it may OVER-match (key nested
+                    # in a longer value, ASCII case-folding), which the exact filter
+                    # then discards. Same BEGIN IMMEDIATE; each call now touches
+                    # O(candidate) rows, not O(R). (Blank keys were already skipped
+                    # when frozen_by_key was built, so blank-anchor rows never
+                    # aggregate here -- each is its own group, mirroring the frontend.)
                     current_by_key: "dict[str, set[str]]" = {}
-                    for cell in db.execute(
-                        "SELECT c.row_id AS row_id, c.content_md AS anchor_md "
-                        "FROM knowhow_cells c JOIN knowhow_rows r ON r.id = c.row_id "
-                        "WHERE r.table_id = ? AND c.column_id = ?",
-                        (anchor_table_id, anchor_column_id),
-                    ).fetchall():
-                        member_key = _anchor_trim(cell["anchor_md"])
-                        if not member_key:
-                            continue
-                        current_by_key.setdefault(member_key, set()).add(cell["row_id"])
+                    for key in frozen_by_key:
+                        like_pattern = "%" + _like_escape(key) + "%"
+                        for cell in db.execute(
+                            "SELECT c.row_id AS row_id, c.content_md AS anchor_md "
+                            "FROM knowhow_cells c JOIN knowhow_rows r ON r.id = c.row_id "
+                            "WHERE r.table_id = ? AND c.column_id = ? "
+                            "AND c.content_md LIKE ? ESCAPE '\\'",
+                            (anchor_table_id, anchor_column_id, like_pattern),
+                        ).fetchall():
+                            if _anchor_trim(cell["anchor_md"]) == key:
+                                current_by_key.setdefault(key, set()).add(cell["row_id"])
                     for key, frozen_ids in frozen_by_key.items():
                         if current_by_key.get(key, set()) != frozen_ids:
                             return {"written": [], "conflict": True}
@@ -1081,17 +1107,26 @@ class KnowhowStore:
                     return {"written": [], "conflict": True}
                 if anchor_guard:
                     # Re-read THIS row's anchor cell under the same lock and compare
-                    # to the frozen snapshot value; a moved/cleared anchor (stored
-                    # value, or None when the cell is gone, != expected_anchor[idx])
-                    # is a conflict identical to a stale expected_before — the row
-                    # left the logical group this fan-out targets.
+                    # to the frozen snapshot value; a moved/cleared anchor (!=
+                    # expected_anchor[idx]) is a conflict identical to a stale
+                    # expected_before — the row left the logical group this fan-out
+                    # targets. F1 (round-7 P2): an ABSENT anchor cell reads as ""
+                    # (NOT None) to MIRROR get_knowhow_table, which represents a
+                    # never-written cell as "" (the column key is simply missing from
+                    # its `cells` dict) and the frontend's
+                    # (row.cells[anchorColumnId] ?? "").trim(); the wire therefore
+                    # sends expected_anchor="" for a blank-anchor row. Mapping the
+                    # missing DB row to None instead made "" != None a PERMANENT 409 —
+                    # blank-anchor rows could never be batch-saved even after a reload.
+                    # (content_md is NOT NULL DEFAULT '', so a stored cell is never
+                    # None; absent is the only source of the missing value.)
                     anchor_cell = db.execute(
                         "SELECT content_md FROM knowhow_cells "
                         "WHERE row_id = ? AND column_id = ?",
                         (row_id, anchor_column_id),
                     ).fetchone()
                     current_anchor = (
-                        anchor_cell["content_md"] if anchor_cell is not None else None
+                        anchor_cell["content_md"] if anchor_cell is not None else ""
                     )
                     if current_anchor != expected_anchor[idx]:
                         return {"written": [], "conflict": True}
