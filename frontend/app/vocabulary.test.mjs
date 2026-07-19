@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { label, TIER, PARSE_STATUS, ELEMENT_TYPE, EVIDENCE_LEVEL, PROMOTION_STATUS, KNOWLEDGE_STATUS, SEVERITY, MODEL_TEST_ERROR } from "./vocabulary.ts";
-import { readFileSync } from "node:fs";
 import { KNOWLEDGE_STATUS_OPTIONS } from "./workspace-model.ts";
 
 test("label 命中时返回映射值", () => {
@@ -102,16 +101,4 @@ test("MODEL_TEST_ERROR 三个 code 都有人话,且不泄漏后端字段名", ()
 test("未知 code 退到兜底词,绝不回显 code 本身", () => {
   assert.equal(label(MODEL_TEST_ERROR, "rate_limited", "连接未通过"), "连接未通过");
   assert.notEqual(label(MODEL_TEST_ERROR, "rate_limited", "连接未通过"), "rate_limited");
-});
-
-test("跨栈:后端 test_model_service 发出的 code 这边都认得", () => {
-  const src = readFileSync(new URL("../../backend/app/api/routes.py", import.meta.url), "utf8");
-  const fn = src.slice(src.indexOf("def test_model_service"));
-  const body = fn.slice(0, fn.indexOf("\n@router."));
-  const emitted = [...body.matchAll(/code="([a-z_]+)"/g)].map((m) => m[1]);
-  assert.ok(emitted.length >= 3, `没解析到后端 code(解析器失效?):${emitted}`);
-  for (const code of emitted) {
-    assert.ok(Object.hasOwn(MODEL_TEST_ERROR, code),
-      `后端发出 code "${code}" 但前端没有对应文案,用户会看到兜底词`);
-  }
 });

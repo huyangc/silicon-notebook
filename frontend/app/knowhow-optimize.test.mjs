@@ -6,7 +6,6 @@
 // directly here.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 
 import {
   CELL_OPTIMIZE_IDLE,
@@ -89,6 +88,19 @@ import {
   reformatResultIsStale,
   markReformatItemRunStale,
 } from "./knowhow-optimize-logic.ts";
+import {
+  assignmentsIn,
+  callSitesIn,
+  controlFlowIn,
+  findFunction,
+  findFunctionIn,
+  ifBranchesIn,
+  jsxElements,
+  parseModule,
+  variableInitializersIn,
+} from "./test/semantic-source.mjs";
+
+const panelModule = await parseModule("knowhow-panel.tsx");
 
 // ===========================================================================
 // 1. 单格「优化表达」对照状态机
@@ -2066,109 +2078,237 @@ test("reformatBatchRunNeedsRefresh: 无 run 阶段 stale 跳过（count===0）�
   assert.strictEqual(reformatBatchRunNeedsRefresh(0), false);
 });
 
-// --- 接线守卫（F）：runSave 必须在两个 stale 跳过分支各累加一次计数，并在收尾按
-//     谓词回调 onStaleReload。.tsx 在本仓库 node:test 模型里只能源码断言（同
-//     knowhow-cell-editor.test.mjs 的既有做法）。切到 runSave 函数块再断言，不让
-//     [\s\S]*? 越过块边界。------------------------------------------------------------
-
-const panelSrc = await readFile(new URL("./knowhow-panel.tsx", import.meta.url), "utf8");
-const runSaveStart = panelSrc.indexOf("async function runSave()");
-// 注意：`function requestClose()` 在本文件出现两次（另一个组件也有一个）——必须从
-// runSave 之后开始找它自己后面那个，否则切到的是 runSave **之前**的那一个、区间空。
-const runSaveSrc = panelSrc.slice(runSaveStart, panelSrc.indexOf("function requestClose()", runSaveStart));
-// F1：runBatch 函数块（run 阶段收尾也要刷父表）。`function handleAbort()` 紧随 runBatch，
-// 是稳定的块尾锚点——切到它之前，避免 [\s\S]*? 越过块边界读到别的收尾。
-const runBatchStart = panelSrc.indexOf("async function runBatch()");
-const runBatchSrc = panelSrc.slice(runBatchStart, panelSrc.indexOf("function handleAbort()", runBatchStart));
+// --- 接线守卫（F）：AST 语义契约，不依赖源码偏移、函数顺序或格式。-------------
 
 test("接线（F）：runSave 声明保存阶段 stale 计数（不从 summary 反推，避免掺入 run 阶段来源）", () => {
-  assert.ok(runSaveSrc.length > 0, "runSave 函数体没截到，守卫失效");
-  assert.match(runSaveSrc, /let saveStaleSkipCount = 0;/);
+  const runSave = findFunctionIn(
+    panelModule,
+    "KnowhowReformatBatchModal",
+    "runSave",
+  );
+  assert.deepEqual(
+    variableInitializersIn(runSave).find(
+      ({ name }) => name === "saveStaleSkipCount",
+    ),
+    { name: "saveStaleSkipCount", initializer: "0" },
+  );
 });
 
-test("接线（F）：preflight 跳过分支累加计数（在 continue 之前）", () => {
-  // 保存前比对命中 -> markReformatItemStaleSkipped 整组 + 计数 + continue。切到
-  // `if (currentByKey && isReformatUnitStale...` 这个块，断言块内既 mark 又累加。
-  const preflightStart = runSaveSrc.indexOf("if (currentByKey && isReformatUnitStale(unit, currentByKey)) {");
-  const preflightSrc = runSaveSrc.slice(preflightStart, runSaveSrc.indexOf("continue;", preflightStart));
-  assert.ok(preflightStart > 0 && preflightSrc.length > 0, "preflight 跳过块没截到");
-  assert.match(preflightSrc, /markReformatItemStaleSkipped/);
-  assert.match(preflightSrc, /saveStaleSkipCount \+= 1;/);
-});
+test("接线（F）：只有 preflight/409 stale 分支标记跳过，普通保存失败走 error 分支", () => {
+  const runSave = findFunctionIn(
+    panelModule,
+    "KnowhowReformatBatchModal",
+    "runSave",
+  );
+  const unitLoop = controlFlowIn(runSave).find(
+    ({ kind, expression }) => kind === "for-of" && expression === "units",
+  );
+  assert.ok(unitLoop);
+  const preflight = unitLoop.body.find(
+    ({ kind, condition }) => (
+      kind === "if"
+      && condition === "currentByKey && isReformatUnitStale(unit, currentByKey)"
+    ),
+  );
+  assert.deepEqual(
+    preflight?.then.map(({ kind }) => kind),
+    ["expression", "assignment", "continue"],
+  );
+  assert.ok(
+    preflight?.then[0].calls.some(
+      ({ target }) => target === "markReformatItemStaleSkipped",
+    ),
+  );
+  assert.deepEqual(preflight?.then[1], {
+    kind: "assignment",
+    target: "saveStaleSkipCount",
+    operator: "+=",
+    value: "1",
+    calls: [],
+  });
 
-test("接线（F）：409 跳过分支累加计数（在 else 之前——不把普通保存失败算进 stale）", () => {
-  // 409 分支：markReformatItemStaleSkipped 整组 + 计数；紧邻的 else 是 save_error
-  // （**不**累加）。切到 `if (httpErrorStatus(err) === 409) {` 到它自己的 `} else {`。
-  const s409Start = runSaveSrc.indexOf("if (httpErrorStatus(err) === 409) {");
-  const s409Src = runSaveSrc.slice(s409Start, runSaveSrc.indexOf("} else {", s409Start));
-  assert.ok(s409Start > 0 && s409Src.length > 0, "409 跳过块没截到");
-  assert.match(s409Src, /markReformatItemStaleSkipped/);
-  assert.match(s409Src, /saveStaleSkipCount \+= 1;/);
-  // save_error 分支绝不能累加（否则普通保存失败也会误触发父表刷新）。
-  const elseStart = runSaveSrc.indexOf("} else {", s409Start);
-  const elseSrc = runSaveSrc.slice(elseStart, runSaveSrc.indexOf("\n      }", elseStart));
-  assert.match(elseSrc, /applyReformatSaveError/);
-  assert.doesNotMatch(elseSrc, /saveStaleSkipCount/);
+  const saveAttempt = unitLoop.body.find(({ kind }) => kind === "try");
+  const conflict = saveAttempt?.catch.find(
+    ({ kind, condition }) => (
+      kind === "if" && condition === "httpErrorStatus(err) === 409"
+    ),
+  );
+  assert.deepEqual(conflict?.then.map(({ kind }) => kind), [
+    "expression",
+    "assignment",
+  ]);
+  assert.ok(
+    conflict?.then[0].calls.some(
+      ({ target }) => target === "markReformatItemStaleSkipped",
+    ),
+  );
+  assert.deepEqual(conflict?.then[1], {
+    kind: "assignment",
+    target: "saveStaleSkipCount",
+    operator: "+=",
+    value: "1",
+    calls: [],
+  });
+  assert.deepEqual(conflict?.else.map(({ kind }) => kind), [
+    "variables",
+    "expression",
+  ]);
+  assert.equal(
+    conflict?.else.some(
+      ({ kind, target }) => (
+        kind === "assignment" && target === "saveStaleSkipCount"
+      ),
+    ),
+    false,
+  );
+  assert.ok(
+    conflict?.else[1].calls.some(
+      ({ target }) => target === "applyReformatSaveError",
+    ),
+  );
+
+  assert.deepEqual(
+    assignmentsIn(runSave).filter(
+      ({ target }) => target === "saveStaleSkipCount",
+    ),
+    [
+      { target: "saveStaleSkipCount", operator: "+=", value: "1" },
+      { target: "saveStaleSkipCount", operator: "+=", value: "1" },
+    ],
+  );
 });
 
 test("接线（F）：save 阶段收尾在 mounted 块内按谓词经 requestStaleReload 刷父表（恰一次，无跳过则不调）", () => {
-  // 收尾块：finishReformatBatchSave + setBusy(false) + 按 reformatBatchSaveNeedsRefresh
-  // 决定是否 requestStaleReload()。F1 后回调收敛到 requestStaleReload（恰一次闸），
-  // 不再各自直调 onStaleReload。用紧致锚定这条收尾（只夹白空/单行注释，不跨块）。
-  assert.match(
-    runSaveSrc,
-    /if \(reformatBatchSaveNeedsRefresh\(saveStaleSkipCount\)\) requestStaleReload\(\);/,
+  const runSave = findFunctionIn(
+    panelModule,
+    "KnowhowReformatBatchModal",
+    "runSave",
   );
-  // 谓词回调必须在 finishReformatBatchSave 之后（收尾块内），不是循环体里逐格触发。
-  const finishIdx = runSaveSrc.indexOf("finishReformatBatchSave(state)");
-  const notifyIdx = runSaveSrc.indexOf("reformatBatchSaveNeedsRefresh(saveStaleSkipCount)");
-  assert.ok(finishIdx > 0 && notifyIdx > finishIdx, "requestStaleReload 回调必须在收尾块内、循环之后");
+  const mounted = ifBranchesIn(runSave).find(
+    ({ condition, thenCalls }) => (
+      condition === "mountedRef.current"
+      && thenCalls.includes("finishReformatBatchSave")
+    ),
+  );
+  const refresh = ifBranchesIn(runSave).find(
+    ({ condition }) => (
+      condition === "reformatBatchSaveNeedsRefresh(saveStaleSkipCount)"
+    ),
+  );
+  assert.ok(mounted?.thenCalls.includes("requestStaleReload"));
+  assert.deepEqual(refresh?.thenCalls, ["requestStaleReload"]);
 });
 
 // --- 接线守卫（F1）：run 阶段陈旧也要刷父表——runBatch 在陈旧分支累加计数、收尾按
 //     谓词经 requestStaleReload 刷一次；两阶段都跳过时经同一个「恰一次」闸只刷一次。----
 
 test("接线（F1）：runBatch 声明 run 阶段 stale 计数并在陈旧分支累加（在 continue 之前）", () => {
-  assert.ok(runBatchSrc.length > 0, "runBatch 函数体没截到，守卫失效");
-  assert.match(runBatchSrc, /let runStaleSkipCount = 0;/);
-  // 陈旧分支：markReformatItemRunStale 整格 + 计数 + continue。切到 markReformatItemRunStale
-  // 到它自己后面那个 continue（去重命中的 continue 在此分支之前，不会误截）。
-  const staleStart = runBatchSrc.indexOf("markReformatItemRunStale");
-  const staleSrc = runBatchSrc.slice(staleStart, runBatchSrc.indexOf("continue;", staleStart));
-  assert.ok(staleStart > 0 && staleSrc.length > 0, "run 阶段陈旧分支没截到");
-  assert.match(staleSrc, /runStaleSkipCount \+= 1;/);
+  const runBatch = findFunctionIn(
+    panelModule,
+    "KnowhowReformatBatchModal",
+    "runBatch",
+  );
+  assert.deepEqual(
+    variableInitializersIn(runBatch).find(
+      ({ name }) => name === "runStaleSkipCount",
+    ),
+    { name: "runStaleSkipCount", initializer: "0" },
+  );
+  const itemLoop = controlFlowIn(runBatch).find(
+    ({ kind, expression }) => kind === "for-of" && expression === "batch.items",
+  );
+  const runAttempt = itemLoop?.body.find(({ kind }) => kind === "try");
+  const stale = runAttempt?.try.find(
+    ({ kind, condition }) => (
+      kind === "if"
+      && condition === "reformatResultIsStale(item.originalMd, result.sourceMd)"
+    ),
+  );
+  assert.deepEqual(stale?.then.map(({ kind }) => kind), [
+    "expression",
+    "assignment",
+    "continue",
+  ]);
+  assert.ok(
+    stale?.then[0].calls.some(
+      ({ target }) => target === "markReformatItemRunStale",
+    ),
+  );
+  assert.deepEqual(stale?.then[1], {
+    kind: "assignment",
+    target: "runStaleSkipCount",
+    operator: "+=",
+    value: "1",
+    calls: [],
+  });
+  assert.deepEqual(
+    assignmentsIn(runBatch).filter(
+      ({ target }) => target === "runStaleSkipCount",
+    ),
+    [{ target: "runStaleSkipCount", operator: "+=", value: "1" }],
+  );
 });
 
 test("接线（F1）：runBatch 收尾在 mounted 块内按谓词经 requestStaleReload 刷父表", () => {
-  assert.match(runBatchSrc, /if \(reformatBatchRunNeedsRefresh\(runStaleSkipCount\)\) requestStaleReload\(\);/);
-  // 刷新必须在 finishReformatBatchRun 之后（收尾块内），不是循环体里逐格触发。
-  const finishIdx = runBatchSrc.indexOf("finishReformatBatchRun(state)");
-  const notifyIdx = runBatchSrc.indexOf("reformatBatchRunNeedsRefresh(runStaleSkipCount)");
-  assert.ok(finishIdx > 0 && notifyIdx > finishIdx, "requestStaleReload 回调必须在收尾块内、循环之后");
+  const runBatch = findFunctionIn(
+    panelModule,
+    "KnowhowReformatBatchModal",
+    "runBatch",
+  );
+  const mounted = ifBranchesIn(runBatch).find(
+    ({ condition, thenCalls }) => (
+      condition === "mountedRef.current"
+      && thenCalls.includes("finishReformatBatchRun")
+    ),
+  );
+  const refresh = ifBranchesIn(runBatch).find(
+    ({ condition }) => (
+      condition === "reformatBatchRunNeedsRefresh(runStaleSkipCount)"
+    ),
+  );
+  assert.ok(mounted?.thenCalls.includes("requestStaleReload"));
+  assert.deepEqual(refresh?.thenCalls, ["requestStaleReload"]);
 });
 
 test("接线（F1）：requestStaleReload 是「恰一次」闸——ref 置真后再调即早退（两阶段都跳过也只刷一次）", () => {
-  // run 阶段收尾与 save 阶段收尾都经 requestStaleReload；首调置 ref、后续调用早退，
-  // 保证「run+save 都跳过」时父表也只刷一次、不刷两遍。
-  assert.match(
-    panelSrc,
-    /function requestStaleReload\(\) \{\s*if \(staleReloadedRef\.current\) return;\s*staleReloadedRef\.current = true;\s*onStaleReload\?\.\(\);\s*\}/,
+  const request = findFunctionIn(
+    panelModule,
+    "KnowhowReformatBatchModal",
+    "requestStaleReload",
   );
-  // 两个收尾都走 requestStaleReload，不各自直调 onStaleReload（避免绕过恰一次闸）。
-  assert.ok(runBatchSrc.includes("requestStaleReload()"), "runBatch 收尾必须经 requestStaleReload");
-  assert.ok(runSaveSrc.includes("requestStaleReload()"), "runSave 收尾必须经 requestStaleReload");
+  const guard = ifBranchesIn(request).find(
+    ({ condition }) => condition === "staleReloadedRef.current",
+  );
+  assert.equal(guard?.thenReturns, true);
+  assert.deepEqual(assignmentsIn(request), [
+    { target: "staleReloadedRef.current", operator: "=", value: "true" },
+  ]);
+  assert.ok(callSitesIn(request).some(({ target }) => target === "onStaleReload"));
 });
 
 test("接线（F）：两处 KnowhowReformatBatchModal 都传 onStaleReload={reloadTableDetail}", () => {
   // 行作用域 + 表作用域两个渲染点都要接线，否则一处漏了就复现「关掉重开永远跳过」。
-  const occurrences = panelSrc.split("onStaleReload={reloadTableDetail}").length - 1;
-  assert.strictEqual(occurrences, 2, "两个 KnowhowReformatBatchModal 渲染点都要传 onStaleReload");
+  const modals = jsxElements(panelModule, "KnowhowReformatBatchModal");
+  assert.strictEqual(modals.length, 2);
+  assert.deepEqual(
+    modals.map(({ bindings }) => bindings.onStaleReload),
+    ["reloadTableDetail", "reloadTableDetail"],
+  );
   // reloadTableDetail 是带 stale-guard 的 loadDetail 复用（单一真源，见 detailRequestRef）。
-  assert.match(panelSrc, /const reloadTableDetail = useCallback\(\(\) => \{\s*if \(selectedTableId\) loadDetail\(selectedTableId\);\s*\}, \[selectedTableId, loadDetail\]\);/);
+  assert.deepEqual(
+    variableInitializersIn(findFunction(panelModule, "KnowhowPanel")).find(
+      ({ name }) => name === "reloadTableDetail",
+    ),
+    {
+      name: "reloadTableDetail",
+      initializer: "useCallback(() => { if (selectedTableId) loadDetail(selectedTableId); }, [selectedTableId, loadDetail])",
+    },
+  );
 });
 
 test("接线（F2）：编辑器渲染点把 onServerStale 也接到同一个 reloadTableDetail", () => {
   // 单格 server-stale 与批量 stale 跳过共用父级刷新路径（reloadTableDetail），
   // 避免两套漂移。
-  assert.match(panelSrc, /onServerStale=\{reloadTableDetail\}/);
+  const editor = jsxElements(panelModule, "KnowhowCellEditor")[0];
+  assert.equal(editor?.bindings.onServerStale, "reloadTableDetail");
 });

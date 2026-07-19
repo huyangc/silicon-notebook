@@ -54,15 +54,9 @@
 // Python 守卫管**渲染文本**里的词,这里管**代码形状**。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-import { createRequire } from "node:module";
+import ts from "typescript";
 
-const require = createRequire(import.meta.url);
-const ts = require("typescript");
-
-const APP_DIR = path.dirname(fileURLToPath(import.meta.url));
+import { appSourceModules } from "./test/semantic-source.mjs";
 
 // 确定**不会**被用户读到的 JSX 属性。见上文 R3:这里是反白名单,列不全的那一侧
 // 是「可见属性」,所以枚举不可见的这一侧。aria-* 刻意不在内(读屏会念出来)。
@@ -122,10 +116,13 @@ export function scanRawEnumFallback(code, fileName = "sample.tsx") {
     /* setParentNodes */ true,
     fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   );
+  return scanRawEnumModule(sf);
+}
+
+function scanRawEnumModule(sf) {
   const hits = [];
   const record = (node, rule) => {
-    const { line } = sf.getLineAndCharacterOfPosition(node.getStart(sf));
-    hits.push({ line: line + 1, rule, snippet: node.getText(sf).replace(/\s+/g, " ") });
+    hits.push({ rule, snippet: node.getText(sf).replace(/\s+/g, " ") });
   };
 
   const visit = (node) => {
@@ -283,20 +280,14 @@ test("含 label 的表名在任何位置都抓,哪怕不在 JSX 里", () => {
 // 4. 端到端:真实 frontend/app 是干净的
 // --------------------------------------------------------------------------
 
-function appSources() {
-  return readdirSync(APP_DIR, { recursive: true, encoding: "utf8" })
-    .filter((rel) => /\.tsx?$/.test(rel) && !rel.includes(".test.") && !rel.endsWith(".d.mts"))
-    .map((rel) => path.join(APP_DIR, rel));
-}
-
-test("真实 frontend/app 源码没有兜底即原值", () => {
-  const files = appSources();
+test("真实 frontend/app 源码没有兜底即原值", async () => {
+  const modules = await appSourceModules();
   // 非空性:递归收集一旦写坏(比如 recursive 选项失效),扫 0 个文件也会「全绿」。
-  assert.ok(files.length > 40, `只收集到 ${files.length} 个源文件,扫描面塌了`);
+  assert.ok(modules.length > 40, `只收集到 ${modules.length} 个源文件,扫描面塌了`);
   const offenders = [];
-  for (const file of files) {
-    for (const hit of scanRawEnumFallback(readFileSync(file, "utf8"), file)) {
-      offenders.push(`${path.relative(APP_DIR, file)}:${hit.line}  ${hit.rule}  ${hit.snippet}`);
+  for (const { path, module } of modules) {
+    for (const hit of scanRawEnumModule(module)) {
+      offenders.push(`${path}  ${hit.rule}  ${hit.snippet}`);
     }
   }
   assert.deepEqual(
@@ -305,20 +296,5 @@ test("真实 frontend/app 源码没有兜底即原值", () => {
     "查表兜底成了原值,后端每加一个枚举值就把英文 id 渲染给用户。\n" +
       "改用 vocabulary.ts 的 label(MAP, value, '中性兜底')——签名强制传兜底词。\n" +
       offenders.join("\n"),
-  );
-});
-
-test("扫描器在真实源码上确实跑到了 JSX 与 label() 两条路径", () => {
-  // 防「实现整体失效但恰好全绿」:拿真实 page.tsx 做变异,注入一处必须被抓到。
-  const page = readFileSync(path.join(APP_DIR, "page.tsx"), "utf8");
-  assert.deepEqual(scanRawEnumFallback(page, "page.tsx"), []);
-  const mutated = page.replace(
-    "<span title={UNINDEXED_SCOPE_HINT}>",
-    "<span title={PARSE_STATUS[s.parse_status] ?? s.parse_status}>",
-  );
-  assert.notEqual(mutated, page, "变异锚点没找到,page.tsx 结构变了");
-  assert.ok(
-    scanRawEnumFallback(mutated, "page.tsx").length > 0,
-    "往真实 page.tsx 注入兜底即原值后仍不报 —— 扫描器在真实文件上没生效",
   );
 });

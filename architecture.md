@@ -66,7 +66,7 @@ v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升
 
 - `workspace-model.ts` 保存共享 API/视图类型与常量。
 - `answer-panel.tsx` 保存答案、引用与 reasoning trace UI。
-- `kg-type-mark.tsx` 保存答案与图谱共用的知识类型标记。
+- `kg-type-model.ts` 保存内置知识类型文案/样式；`kg-type-mark.tsx` 消费并 re-export 该模型，保存答案与图谱共用的类型标记渲染。
 - `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
 
 notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab。外层另有当前用户的总 Memory 页面，notebook 卡片数量可深链到局部 Memory tab。全屏 Knowledge Graph、看板和 Schema 是独立顶栏动作；「分析」菜单本身只含晋升队列（admin）、tier 切换（admin）与边审查队列。当前没有文章研究、思维导图、信息图或派生规则入口，也没有固定 Studio 右栏。
@@ -257,7 +257,16 @@ python scripts/verify_repository_snapshot.py \
 完整离线门禁与前端生产构建：
 
 ```bash
-bash scripts/check.sh
+PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 cd frontend
 npm run build
 ```
+
+`scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane；每个 lane
+拥有独立进程组，controller 收到中断或终止信号时会终止并回收其 pytest/npm/Next.js
+后代。静态契约用模块路径、限定 scope、操作类型、目标与审核计数作为语义身份；
+源码行号/offset 仅供诊断，不得用作预期站点身份。前端纯逻辑/语义契约使用
+`*.test.mjs`，真实组件交互使用 `*.component.test.tsx` +
+Vitest/jsdom/Testing Library；策略同时覆盖测试入口和 helper 模块。pytest controller
+在 xdist worker 启动前预热仓库本地 Matplotlib 字体缓存，避免每个图谱 worker
+重复执行 macOS 字体枚举。

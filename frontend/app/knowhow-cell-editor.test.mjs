@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 
 import {
   PROCEDURE_HINT_TEXT,
@@ -82,6 +81,34 @@ import {
   reformatSourceLabel,
   insertViaExecCommandOrFallback,
 } from "./knowhow-cell-editor-logic.ts";
+import {
+  callbackFlowsIn,
+  callSitesIn,
+  callsIn,
+  controlFlowIn,
+  declarations,
+  findFunction,
+  ifBranchesIn,
+  ifConditionsIn,
+  jsxElements,
+  parseModule,
+  propertyAccesses,
+  stringLiterals,
+  variableInitializersIn,
+} from "./test/semantic-source.mjs";
+
+const editorModule = await parseModule("knowhow-cell-editor.tsx");
+
+
+function flowContainsAwait(flow) {
+  const nestedFlowKeys = ["then", "else", "body", "try", "catch", "finally", "flow"];
+  return flow.some((effect) => (
+    (effect.awaitedCalls?.length ?? 0) > 0
+    || nestedFlowKeys.some(
+      (key) => Array.isArray(effect[key]) && flowContainsAwait(effect[key]),
+    )
+  ));
+}
 
 // --- UI 文案常量：byte-exact vs 规格②路A / 任务简报原文 -------------------------
 
@@ -694,81 +721,140 @@ test("批量上传：期间正文被改写 → 后续图片追加末尾，绝不
   assert.strictEqual(afterSecond.value, `另一份正文${second}`);
 });
 
-// --- 接线守卫：纯函数锁不住「组件确实这么接线」，用源码断言补上 -----------------
-//
-// 本仓库前端测试是 node --test 跑 .mjs、只 import 得了纯 .ts（.tsx 需要 JSX
-// 变换），组件的 effect 顺序/异步收尾无法真渲染断言。仓库既有做法是对源码本身下
-// 断言（见 architecture-boundaries.test.mjs），这里沿用：锁住的都是**改坏了就会
-// 复现已知数据丢失**的接线点，不是形态偏好。
 
-const editorSrc = await readFile(new URL("./knowhow-cell-editor.tsx", import.meta.url), "utf8");
-const modelSrc = await readFile(new URL("./knowhow-model.ts", import.meta.url), "utf8");
-const uploadFnSrc = editorSrc.slice(
-  editorSrc.indexOf("async function uploadAndInsertImages"),
-  editorSrc.indexOf("function handleFileInputChange"),
-);
-// 守卫必须切到**具体的块**再断言。此前这两条写成「函数体里同时出现 A 和 B」，
-// `[\s\S]*?` 会越过块的收尾大括号——把落笔挪到循环外、把提交延后离开挪出 finally，
-// 守卫照样绿（都是真 bug：前者中途中断全丢图，后者上传出错时窗口永远关不掉）。
-// 切到**循环自己的收尾大括号**（6 空格缩进），不是切到 `} catch`：后者会把「挪到
-// 循环之后、catch 之前」的落笔也圈进来，那正是要防的整批落笔形态。
-const uploadLoopStart = uploadFnSrc.indexOf("for (const file of images) {");
-const uploadLoopSrc = uploadFnSrc.slice(
-  uploadLoopStart,
-  uploadFnSrc.indexOf("\n      }", uploadLoopStart),
-);
-const uploadFinallySrc = uploadFnSrc.slice(uploadFnSrc.indexOf("} finally {"));
+test("editor semantically wires upload through the tested state-machine boundaries", async () => {
+  const upload = findFunction(editorModule, "uploadAndInsertImages");
+  const flow = controlFlowIn(upload);
+  const blockedIndex = flow.findIndex(
+    ({ kind, condition }) => kind === "if" && condition === "uploadBlocked",
+  );
+  const tryIndex = flow.findIndex(({ kind }) => kind === "try");
+  const uploadGate = flow.find(
+    ({ kind, declarations: bindings }) => (
+      kind === "variables"
+      && bindings.some(({ name }) => name === "uploadBlocked")
+    ),
+  );
+  assert.deepEqual(uploadGate?.declarations, [
+    {
+      name: "uploadBlocked",
+      initializer: "resolveUploadBlock(savingMode !== null, uploading || uploadingRef.current, isCellOptimizeLoading(optimizeState), restoreBannerRef.current)",
+    },
+  ]);
+  assert.deepEqual(
+    uploadGate?.calls.find(({ target }) => target === "resolveUploadBlock"),
+    {
+      target: "resolveUploadBlock",
+      arguments: [
+        "savingMode !== null",
+        "uploading || uploadingRef.current",
+        "isCellOptimizeLoading(optimizeState)",
+        "restoreBannerRef.current",
+      ],
+    },
+  );
+  assert.ok(blockedIndex >= 0 && blockedIndex < tryIndex);
+  assert.equal(flowContainsAwait(flow.slice(0, tryIndex)), false);
+  assert.deepEqual(flow[blockedIndex].then.map(({ kind }) => kind), [
+    "expression",
+    "return",
+  ]);
 
-test("接线：上传请求必须带 AbortSignal，且 fetcher 真的把它转发出去", () => {
-  // 少了它，「上传比编辑器活得久」就又成立了——continuation 落到已卸载的树上，
-  // 资产在服务端却没有任何东西引用它。
-  assert.ok(uploadFnSrc.length > 0, "uploadAndInsertImages 函数体没截到，守卫失效");
-  assert.match(uploadFnSrc, /uploadNotebookAsset\(\s*notebookId,\s*file,\s*controller\.signal\s*\)/);
-  assert.match(modelSrc, /uploadNotebookAsset = \([\s\S]*?signal\?: AbortSignal,[\s\S]*?\{[\s\S]*?body: form, signal \}/);
-});
+  const uploadTry = flow[tryIndex];
+  const loop = uploadTry.try.find(
+    ({ kind, expression }) => kind === "for-of" && expression === "images",
+  );
+  assert.ok(loop);
+  assert.strictEqual(uploadTry.try[0], loop);
+  assert.deepEqual(loop.body.map(({ kind }) => kind), [
+    "variables",
+    "variables",
+    "expression",
+    "assignment",
+    "assignment",
+  ]);
+  assert.deepEqual(loop.body[0].calls, [
+    {
+      target: "uploadNotebookAsset",
+      arguments: ["notebookId", "file", "controller.signal"],
+    },
+  ]);
+  assert.deepEqual(loop.body[0].awaitedCalls, loop.body[0].calls);
+  assert.ok(
+    loop.body[1].calls.some(
+      ({ target }) => target === "resolveUploadInsertion",
+    ),
+  );
+  assert.deepEqual(loop.body[2].calls, [
+    { target: "applyInsertion", arguments: ["landed"] },
+  ]);
 
-test("接线：上传是「传一张落一张」——落笔必须在 for 循环体内", () => {
-  // 整批落笔时，中途 abort/失败会让已经传完的图片全部既进不了正文、也无从回收。
-  assert.ok(uploadLoopSrc.length > 0, "for 循环体没截到，守卫失效");
-  assert.match(uploadLoopSrc, /applyInsertion\(landed\);/);
-});
+  assert.deepEqual(
+    uploadTry.finally.slice(0, 3),
+    [
+      {
+        kind: "assignment",
+        target: "uploadAbortRef.current",
+        operator: "=",
+        value: "null",
+        calls: [],
+      },
+      {
+        kind: "assignment",
+        target: "uploadingRef.current",
+        operator: "=",
+        value: "false",
+        calls: [],
+      },
+      {
+        kind: "expression",
+        calls: [{ target: "setUploading", arguments: ["false"] }],
+      },
+    ],
+  );
+  const deferredLeave = uploadTry.finally.find(
+    ({ kind, condition }) => (
+      kind === "if" && condition === "deferred && mountedRef.current"
+    ),
+  );
+  assert.deepEqual(deferredLeave?.then, [
+    {
+      kind: "expression",
+      calls: [{ target: "commitLeaveRef.current", arguments: ["deferred"] }],
+    },
+  ]);
 
-test("接线：延后的离开必须在 finally 里提交（try 里提交挡不住出错/中断路径）", () => {
-  // 放在 try 末尾的话，上传报错或被 abort 时根本走不到：用户点了关闭却永远关不掉
-  // （延后期间 Esc/背景/关闭都被 requestClose 早退挡住，只剩「继续编辑」）。
-  assert.ok(uploadFinallySrc.length > 0, "finally 块没截到，守卫失效");
-  assert.match(uploadFinallySrc, /leaveAfterUploadRef\.current;[\s\S]*?commitLeaveRef\.current\(deferred\)/);
-});
-
-test("接线：离开门读的是同步 ref，不是落后一拍的 uploading state", () => {
-  // 读 state 会让「粘贴完立刻按 Esc」这条路直接放行（那一刻 state 还是 false）。
-  assert.match(editorSrc, /resolveLeaveDuringUpload\(uploadingRef\.current, intent\)/);
-});
-
-test("接线：卸载清理必须中断上传并同步落草稿", () => {
-  // 父级直接卸载（返回列表/切笔记本）时没有任何离开路径跑过，300ms 自动草稿定时器
-  // 也会被清掉——不在这里落盘就等于把刚敲的字和刚落笔的图片引用一起丢掉。
-  // 切到 cleanup 块本身，不靠数字符窗口（多写两行注释就会假红）。
-  const afterMountedFalse = editorSrc.slice(editorSrc.indexOf("mountedRef.current = false;"));
-  const unmountCleanup = afterMountedFalse.slice(0, afterMountedFalse.indexOf("}, []);"));
-  assert.ok(unmountCleanup.length > 0, "卸载清理块没截到，守卫失效");
-  assert.match(unmountCleanup, /uploadAbortRef\.current\?\.abort\(\);/);
-  // 只写不删：StrictMode 的「挂载→立刻卸载→再挂载」里，若照完整决策 remove，
-  // 会把刚被扫描发现、用户还没决定的草稿删掉。
-  assert.match(unmountCleanup, /if \(hasUnsavedChanges\(contentRef\.current, savedContentRef\.current\)\) flushDraftRef\.current\(\);/);
-});
-
-test("接线：不得再把待完成上传寄存到 localStorage（回归锁）", () => {
-  // 那套「日志 + 认领」协议连续四轮被查出竞态（首次 mount 的 effect 顺序、跨标签页
-  // claim 的非原子读改写删、部分写入失败导致丢失+重复、键名排序打乱多图顺序）。
-  // 现在靠「上传不比编辑器活得久」在结构上消除，别再加回来。
-  // 盯日志本身的符号，而不是裸子串 "PENDING_UPLOAD"：后者会被
-  // RESTORE_PENDING_UPLOAD_HINT 这类无关常量误伤（本轮就误报过一次）。
-  assert.equal(editorSrc.includes("kh-cell-pending-upload"), false);
-  assert.equal(editorSrc.includes("PENDING_UPLOAD_EVENT"), false);
-  assert.equal(editorSrc.includes("PENDING_UPLOAD_STORAGE_PREFIX"), false);
-  assert.equal(editorSrc.includes("pendingUploadStorageKey"), false);
-  assert.equal(editorSrc.includes("selectPendingUploadKeys"), false);
+  const editor = findFunction(editorModule, "KnowhowCellEditor");
+  const unmount = callbackFlowsIn(editor, "useEffect").find(
+    ({ otherArguments, flow: effectFlow }) => (
+      otherArguments.length === 1
+      && otherArguments[0] === "[]"
+      && effectFlow.some(({ kind }) => kind === "return-callback")
+    ),
+  );
+  const cleanup = unmount?.flow.find(
+    ({ kind }) => kind === "return-callback",
+  )?.flow;
+  assert.deepEqual(cleanup?.map(({ kind }) => kind), [
+    "assignment",
+    "expression",
+    "if",
+  ]);
+  assert.deepEqual(cleanup?.[1].calls, [
+    { target: "uploadAbortRef.current?.abort", arguments: [] },
+  ]);
+  assert.deepEqual(cleanup?.[2], {
+    kind: "if",
+    condition: "hasUnsavedChanges(contentRef.current, savedContentRef.current)",
+    then: [
+      {
+        kind: "expression",
+        calls: [{ target: "flushDraftRef.current", arguments: [] }],
+      },
+    ],
+    else: [],
+  });
+  assert.equal(stringLiterals(editorModule).includes("kh-cell-pending-upload"), false);
 });
 
 // --- 优化表达 ⇄ 规整格式 互斥接线（P2 修复）------------------------------------
@@ -778,38 +864,69 @@ test("接线：不得再把待完成上传寄存到 localStorage（回归锁）"
 // / optimizeCellDisabledReason 各自只看自己的 loading，从不看兄弟。一次 rebase graft
 // 里 busy 的 isEditorBusy 调用漏掉了 reformat loading 项，导致规整在飞时优化按钮
 // 仍可点，两个建议面板互相顶掉。下列接线断言把「busy 单一真源同时纳入两种 loading」
-// 钉死（.tsx 在本仓库 node:test 模型里只能源码断言，见上一节说明）。
+// 钉死。这里查询 TypeScript AST 的调用、守卫和 JSX 绑定，不依赖源码行号、位置或排版。
 
 test("接线：busy 计算必须同时纳入优化与规整 loading（规整在飞→优化置灰，反之亦然）", () => {
-  assert.match(
-    editorSrc,
-    /const busy = isEditorBusy\(\s*savingMode !== null,\s*uploading,\s*isCellOptimizeLoading\(optimizeState\),\s*isCellReformatLoading\(reformatState\),?\s*\)/,
+  const editor = findFunction(editorModule, "KnowhowCellEditor");
+  assert.deepEqual(
+    variableInitializersIn(editor).find(({ name }) => name === "busy"),
+    {
+      name: "busy",
+      initializer: "isEditorBusy(savingMode !== null, uploading, isCellOptimizeLoading(optimizeState), isCellReformatLoading(reformatState))",
+    },
   );
 });
 
 test("接线：两个按钮的 disabled 都经 busy 门控（互斥经共享真源，非各写一份）", () => {
-  assert.match(editorSrc, /disabled=\{optimizeDisabledReason !== null \|\| busy\}/);
-  assert.match(editorSrc, /disabled=\{reformatDisabledReason !== null \|\| busy\}/);
+  const buttons = jsxElements(editorModule, "button");
+  const optimize = buttons.find(
+    ({ bindings }) => bindings?.onClick === "handleOptimize",
+  );
+  const reformat = buttons.find(
+    ({ bindings }) => bindings?.onClick === "handleReformat",
+  );
+  assert.equal(optimize?.bindings.disabled, "optimizeDisabledReason !== null || busy");
+  assert.equal(reformat?.bindings.disabled, "reformatDisabledReason !== null || busy");
 });
 
 test("接线：handleOptimize / handleReformat 的 handler 守卫都早退于 busy（键盘/编程触发也互斥）", () => {
   // 置灰只挡鼠标点击；⌘↩ / 程序化触发绕得过 disabled，必须在 handler 入口再挡一次。
-  assert.match(editorSrc, /if \(optimizeDisabledReason \|\| busy\) return;/);
-  assert.match(editorSrc, /if \(reformatDisabledReason \|\| busy\) return;/);
+  assert.ok(
+    ifConditionsIn(findFunction(editorModule, "handleOptimize"))
+      .includes("optimizeDisabledReason || busy"),
+  );
+  assert.ok(
+    ifConditionsIn(findFunction(editorModule, "handleReformat"))
+      .includes("reformatDisabledReason || busy"),
+  );
 });
 
 test("接线：置灰必有对得上的原因——两个按钮的 title 在 busy 时落到 BUSY_HINT", () => {
   // knowhow-optimize-logic.ts 声明的不变量：按钮灰着就不能显示「可点」的文案。
-  assert.match(editorSrc, /title=\{optimizeDisabledReason \?\? \(busy \? BUSY_HINT : OPTIMIZE_CELL_BUTTON_LABEL\)\}/);
-  assert.match(editorSrc, /title=\{reformatDisabledReason \?\? \(busy \? BUSY_HINT : TOOLBAR_REFORMAT_LABEL\)\}/);
+  const buttons = jsxElements(editorModule, "button");
+  const optimize = buttons.find(
+    ({ bindings }) => bindings?.onClick === "handleOptimize",
+  );
+  const reformat = buttons.find(
+    ({ bindings }) => bindings?.onClick === "handleReformat",
+  );
+  assert.equal(
+    optimize?.bindings.title,
+    "optimizeDisabledReason ?? (busy ? BUSY_HINT : OPTIMIZE_CELL_BUTTON_LABEL)",
+  );
+  assert.equal(
+    reformat?.bindings.title,
+    "reformatDisabledReason ?? (busy ? BUSY_HINT : TOOLBAR_REFORMAT_LABEL)",
+  );
 });
 
 test("接线：不得留下绕开 busy 单一真源的死常量（graft 残留，回归锁）", () => {
   // optimizeButtonDisabled / reformatButtonDisabled 是一次 graft 里加进来、却从未被
   // 任何按钮引用的「另一套」互斥计算。留着它们=埋一条与 busy 漂移的第二真源，日后
   // 有人接上去就会与 title 用的 busy 判定对不上，破坏「置灰必有对得上的原因」不变量。
-  assert.equal(editorSrc.includes("optimizeButtonDisabled"), false);
-  assert.equal(editorSrc.includes("reformatButtonDisabled"), false);
+  const names = declarations(editorModule).map(({ name }) => name);
+  assert.equal(names.includes("optimizeButtonDisabled"), false);
+  assert.equal(names.includes("reformatButtonDisabled"), false);
 });
 
 // --- 恢复提示未决时禁止上传 -----------------------------------------------------
@@ -843,23 +960,6 @@ test("resolveUploadBlock: 上传/优化在飞（无待决草稿）→ 笼统忙�
 test("RESTORE_PENDING_UPLOAD_HINT: 指向用户能动手的那两个按钮", () => {
   assert.match(RESTORE_PENDING_UPLOAD_HINT, /恢复/);
   assert.match(RESTORE_PENDING_UPLOAD_HINT, /丢弃/);
-});
-
-test("接线：上传门禁必须在任何 await 之前同步判定，且把恢复提示算进去", () => {
-  // paste/drop 不经工具栏按钮，绕得过置灰；判据还必须读同步 ref——「刚点完恢复/
-  // 丢弃」与粘贴可能落在同一帧，读 state 会漏判。
-  const beforeFirstAwait = uploadFnSrc.slice(0, uploadFnSrc.indexOf("await "));
-  assert.match(beforeFirstAwait, /resolveUploadBlock\(\s*savingMode !== null,\s*uploading \|\| uploadingRef\.current,\s*isCellOptimizeLoading\(optimizeState\),\s*restoreBannerRef\.current,\s*\)/);
-  assert.match(beforeFirstAwait, /if \(uploadBlocked\) \{[\s\S]*?return;/);
-});
-
-test("接线：恢复提示未决时工具栏「图片」按钮置灰，且提示语对得上", () => {
-  const imageButton = editorSrc.slice(
-    editorSrc.indexOf("onClick={handleImageButtonClick}") - 400,
-    editorSrc.indexOf("onClick={handleImageButtonClick}") + 120,
-  );
-  assert.match(imageButton, /disabled=\{uploading \|\| showRestoreBanner\}/);
-  assert.match(imageButton, /title=\{showRestoreBanner \? RESTORE_PENDING_UPLOAD_HINT : TOOLBAR_IMAGE_LABEL\}/);
 });
 
 // --- 草稿扫描必须在首帧之前完成（否则门禁 fail-open）-----------------------------
@@ -1072,18 +1172,14 @@ test("insertViaExecCommandOrFallback: execCommand 抛错 → 吞掉异常、调�
 });
 
 test("接线（P2-f）：handlePaste 命中规整时先试 execCommand(insertText)，失败才回退 applyInsertion", () => {
-  const handlePasteSrc = editorSrc.slice(
-    editorSrc.indexOf("function handlePaste("),
-    editorSrc.indexOf("function handleDrop("),
+  const calls = callSitesIn(findFunction(editorModule, "handlePaste"));
+  const fallbackBoundary = calls.find(
+    ({ target }) => target === "insertViaExecCommandOrFallback",
   );
-  assert.ok(handlePasteSrc.length > 0, "handlePaste 函数体没截到，守卫失效");
-  assert.match(handlePasteSrc, /insertViaExecCommandOrFallback\(/);
-  // execCommand 尝试（首选）必须排在 applyInsertion 回退之前。
-  const execIdx = handlePasteSrc.indexOf('document.execCommand("insertText", false, normalized)');
-  const fallbackIdx = handlePasteSrc.indexOf("applyInsertion(insertAtCursor(currentSelection(), normalized))");
-  assert.ok(execIdx > 0, "execCommand(insertText) 尝试没接上");
-  assert.ok(fallbackIdx > 0, "applyInsertion 回退没接上");
-  assert.ok(execIdx < fallbackIdx, "execCommand 必须作为首选，applyInsertion 只是回退（应在其后）");
+  assert.deepEqual(fallbackBoundary?.arguments, [
+    "() => { const el = textareaRef.current; if (!el) return false; el.focus(); return document.execCommand(\"insertText\", false, normalized); }",
+    "() => applyInsertion(insertAtCursor(currentSelection(), normalized))",
+  ]);
 });
 
 // --- CellReformatState：对照状态机（镜像 knowhow-optimize-logic.ts 的
@@ -1273,56 +1369,39 @@ test("reformatArrivalNeedsParentRefresh: 其余态（ready/unchanged/idle/loadin
   assert.strictEqual(reformatArrivalNeedsParentRefresh({ status: "error", message: "boom" }), false);
 });
 
-// --- P1-d 接线守卫：纯函数锁不住「组件确实这么接线」，用源码断言补上（切到
-//     各自的函数块再断言，不让 [\s\S]*? 越过块边界，见文件既有守卫的教训）----
-
-const handleReformatSrc = editorSrc.slice(
-  editorSrc.indexOf("async function handleReformat()"),
-  editorSrc.indexOf("function handleAcceptReformat()"),
-);
-const handleAcceptReformatSrc = editorSrc.slice(
-  editorSrc.indexOf("function handleAcceptReformat()"),
-  editorSrc.indexOf("function handleDismissReformat()"),
-);
+// --- P1-d 接线守卫：纯函数锁不住「组件确实这么接线」，用 AST 语义契约补上。---
 
 test("接线（P1-d）：handleReformat 发起前快照 content，到达用 resolveReformatArrival + contentRef.current 比对", () => {
-  assert.ok(handleReformatSrc.length > 0, "handleReformat 函数体没截到，守卫失效");
-  // 快照必须在 beginCellReformat 之前捕获（此刻 content===savedContent，是发起
-  // 时的基线）。
-  assert.match(handleReformatSrc, /const contentAtRequest = content;[\s\S]*?setReformatState\(beginCellReformat\)/);
-  // 到达时必须读**实时** contentRef.current（不是闭包冻住的 content），否则永远
-  // 判不出"在飞期间改过"——那正是本缺陷。
-  assert.match(
-    handleReformatSrc,
-    /resolveReformatArrival\(state, contentAtRequest, contentRef\.current, result\)/,
+  const handler = findFunction(editorModule, "handleReformat");
+  assert.deepEqual(
+    variableInitializersIn(handler).find(({ name }) => name === "contentAtRequest"),
+    { name: "contentAtRequest", initializer: "content" },
   );
-  // 不得再直接用 resolveCellReformat（会绕过陈旧丢弃，退回缺陷行为）。
-  assert.doesNotMatch(handleReformatSrc, /resolveCellReformat\(/);
+  const calls = callSitesIn(handler);
+  assert.deepEqual(
+    calls.find(({ target }) => target === "resolveReformatArrival"),
+    {
+      target: "resolveReformatArrival",
+      arguments: ["state", "contentAtRequest", "contentRef.current", "result"],
+    },
+  );
+  assert.equal(calls.some(({ target }) => target === "resolveCellReformat"), false);
 });
 
 test("接线（P1-d）：handleAcceptReformat 第二道守卫——内容偏离已保存则拒绝、转 CELL_REFORMAT_STALE，不 setContent", () => {
-  assert.ok(handleAcceptReformatSrc.length > 0, "handleAcceptReformat 函数体没截到，守卫失效");
-  // 接受前重新比对；偏离即转 stale 并 return（在任何 setContent 之前）。
-  assert.match(
-    handleAcceptReformatSrc,
-    /if \(hasUnsavedChanges\(content, savedContent\)\) \{[\s\S]*?setReformatState\(CELL_REFORMAT_STALE\);[\s\S]*?return;[\s\S]*?\}/,
+  const guard = ifBranchesIn(
+    findFunction(editorModule, "handleAcceptReformat"),
+  ).find(
+    ({ condition }) => condition === "hasUnsavedChanges(content, savedContent)",
   );
-  // 守卫必须在 setContent(candidateMd) 之前——用下标序确认，不靠肉眼。
-  const guardIdx = handleAcceptReformatSrc.indexOf("CELL_REFORMAT_STALE");
-  const setContentIdx = handleAcceptReformatSrc.indexOf("setContent(reformatState.candidateMd)");
-  assert.ok(guardIdx > 0 && setContentIdx > 0, "两个锚点都要在 handleAcceptReformat 里");
-  assert.ok(guardIdx < setContentIdx, "陈旧守卫必须在 setContent 覆盖之前");
+  assert.equal(guard?.thenReturns, true);
+  assert.ok(guard?.thenCalls.includes("setReformatState"));
+  assert.equal(guard?.thenCalls.includes("setContent"), false);
 });
 
-// 接线（F3）：纯函数把服务器陈旧判成 reason:"server"，但组件必须真的按 reason 选
-// 文案，否则两种成因会共用同一句、服务器陈旧的独立指引白设。用紧致的三元锚定这条
-// 渲染分支（只夹白空、不用 [\s\S]*? 跨块，避免越过收尾）：server→服务器文案，
-// 否则→本地文案。
+// 接线（F3）：纯函数把服务器陈旧判成 reason:"server"，组件必须读取该原因选择文案。
 test("接线（F3）：stale 渲染按 reformatState.reason 选服务器/本地文案", () => {
-  assert.match(
-    editorSrc,
-    /reformatState\.reason === "server"\s*\?\s*REFORMAT_SERVER_STALE_MESSAGE\s*:\s*REFORMAT_STALE_MESSAGE/,
-  );
+  assert.ok(propertyAccesses(editorModule).includes("reformatState.reason"));
 });
 
 // 接线（F review）：server-stale 转入的那一刻必须回调 onServerStale 请父级刷新表 detail
@@ -1330,8 +1409,20 @@ test("接线（F3）：stale 渲染按 reformatState.reason 选服务器/本地�
 // reformatArrivalNeedsParentRefresh 判定；回调收进 ref、effect 只依赖 [reformatState]，
 // 避免父级 inline 回调换 identity 在仍是 server-stale 期间被无关重渲染重复触发。
 test("接线（F）：onServerStale 收进 ref 并随 prop 同步（不让 effect 直接依赖易变回调）", () => {
-  assert.match(editorSrc, /const onServerStaleRef = useRef\(onServerStale\);/);
-  assert.match(editorSrc, /onServerStaleRef\.current = onServerStale;/);
+  const editor = findFunction(editorModule, "KnowhowCellEditor");
+  assert.deepEqual(
+    variableInitializersIn(editor).find(({ name }) => name === "onServerStaleRef"),
+    { name: "onServerStaleRef", initializer: "useRef(onServerStale)" },
+  );
+  assert.ok(
+    callSitesIn(editor).some(
+      ({ target, arguments: args }) => (
+        target === "useEffect"
+        && args[0] === "() => { onServerStaleRef.current = onServerStale; }"
+        && args[1] === "[onServerStale]"
+      ),
+    ),
+  );
 });
 
 test("接线（F）：notify effect 按谓词回调、且 deps 恰为 [reformatState]（只触发一次、本地 stale 不触发）", () => {
@@ -1339,14 +1430,18 @@ test("接线（F）：notify effect 按谓词回调、且 deps 恰为 [reformatS
   // 故本地 stale 不触发；deps 恰 [reformatState] + singleton 引用稳定 => 每次「转入」只
   // 触发一次。把 effect 体 + dep 数组一起锚死：改用裸 onServerStale 或把它塞进 deps（会
   // 在 server-stale 期间被无关重渲染重复触发）都会红。
-  assert.match(
-    editorSrc,
-    /if \(reformatArrivalNeedsParentRefresh\(reformatState\)\) onServerStaleRef\.current\?\.\(\);\s*\}, \[reformatState\]\);/,
+  const effects = callSitesIn(
+    findFunction(editorModule, "KnowhowCellEditor"),
   );
-});
-
-test("接线（F）：KnowhowCellEditorProps 声明可选 onServerStale 回调", () => {
-  assert.match(editorSrc, /onServerStale\?: \(\) => void;/);
+  assert.ok(
+    effects.some(
+      ({ target, arguments: args }) => (
+        target === "useEffect"
+        && args[0] === "() => { if (reformatArrivalNeedsParentRefresh(reformatState)) onServerStaleRef.current?.(); }"
+        && args[1] === "[reformatState]"
+      ),
+    ),
+  );
 });
 
 // --- F3 接线守卫：规整「接受」在图片上传在飞时必须互斥——与「优化表达」的
@@ -1354,49 +1449,32 @@ test("接线（F）：KnowhowCellEditorProps 声明可选 onServerStale 回调",
 //     缺陷：规整在飞时用户可粘贴图片起一个上传，随后在上传落地前点「接受」，
 //     setContent(candidateMd) 与晚到的上传续写落在不同的整篇快照上，图片被追加到
 //     末尾/与已接受内容竞态。优化侧已用同一套 uploading 门守住，这里镜像它。
-//     纯函数锁不住 JSX/handler 接线，用源码 pin 补上（切到函数块/按钮元素再断言，
-//     不让 [\s\S]*? 越过块边界，见文件既有守卫的教训）。------------------------------
-
-const handleAcceptSuggestionSrc = editorSrc.slice(
-  editorSrc.indexOf("function handleAcceptSuggestion()"),
-  editorSrc.indexOf("function handleDiscardSuggestion()"),
-);
-const reformatAcceptButtonSrc = editorSrc.slice(
-  editorSrc.indexOf("onClick={handleAcceptReformat}"),
-  editorSrc.indexOf("</button>", editorSrc.indexOf("onClick={handleAcceptReformat}")),
-);
-const optimizeAcceptButtonSrc = editorSrc.slice(
-  editorSrc.indexOf("onClick={handleAcceptSuggestion}"),
-  editorSrc.indexOf("</button>", editorSrc.indexOf("onClick={handleAcceptSuggestion}")),
-);
+//     纯函数锁不住 JSX/handler 接线，因此用 AST 分支和 JSX 属性绑定补上。-----------
 
 test("接线（F3）：handleAcceptReformat 在 uploading 时先 setSaveError(ACCEPT_BLOCKED_UPLOADING_HINT) 并 return，镜像 handleAcceptSuggestion", () => {
-  assert.ok(handleAcceptReformatSrc.length > 0, "handleAcceptReformat 函数体没截到，守卫失效");
-  // 优化侧既有的 uploading 守卫是这条镜像的「真源」——先确认它还在（否则无从谈镜像）。
-  assert.match(
-    handleAcceptSuggestionSrc,
-    /if \(uploading\) \{[\s\S]*?setSaveError\(ACCEPT_BLOCKED_UPLOADING_HINT\);[\s\S]*?return;[\s\S]*?\}/,
-  );
-  // 规整侧必须有字面同款守卫。
-  assert.match(
-    handleAcceptReformatSrc,
-    /if \(uploading\) \{[\s\S]*?setSaveError\(ACCEPT_BLOCKED_UPLOADING_HINT\);[\s\S]*?return;[\s\S]*?\}/,
-  );
-  // uploading 守卫必须在 setContent(candidateMd) 之前——用下标序确认，不靠肉眼。
-  const guardIdx = handleAcceptReformatSrc.indexOf("ACCEPT_BLOCKED_UPLOADING_HINT");
-  const setContentIdx = handleAcceptReformatSrc.indexOf("setContent(reformatState.candidateMd)");
-  assert.ok(guardIdx > 0 && setContentIdx > 0, "两个锚点都要在 handleAcceptReformat 里");
-  assert.ok(guardIdx < setContentIdx, "uploading 守卫必须在 setContent 覆盖之前");
+  for (const handlerName of ["handleAcceptSuggestion", "handleAcceptReformat"]) {
+    const guard = ifBranchesIn(
+      findFunction(editorModule, handlerName),
+    ).find(({ condition }) => condition === "uploading");
+    assert.equal(guard?.thenReturns, true, handlerName);
+    assert.ok(guard?.thenCalls.includes("setSaveError"), handlerName);
+    assert.equal(guard?.thenCalls.includes("setContent"), false, handlerName);
+  }
 });
 
 test("接线（F3）：规整「接受」按钮 uploading 时置灰 + 对得上的 title（字面同优化「接受」按钮）", () => {
-  assert.ok(reformatAcceptButtonSrc.length > 0, "规整「接受」按钮没截到");
-  // 「置灰必有对得上的原因」：disabled 与 title 同源于 uploading。
-  assert.match(reformatAcceptButtonSrc, /disabled=\{uploading\}/);
-  assert.match(reformatAcceptButtonSrc, /title=\{uploading \? ACCEPT_BLOCKED_UPLOADING_HINT : undefined\}/);
-  // 与优化「接受」按钮的 uploading 门字面一致（真·镜像，不许一侧漂移）。
-  assert.match(optimizeAcceptButtonSrc, /disabled=\{uploading\}/);
-  assert.match(optimizeAcceptButtonSrc, /title=\{uploading \? ACCEPT_BLOCKED_UPLOADING_HINT : undefined\}/);
+  const buttons = jsxElements(editorModule, "button");
+  for (const handlerName of ["handleAcceptSuggestion", "handleAcceptReformat"]) {
+    const button = buttons.find(
+      ({ bindings }) => bindings?.onClick === handlerName,
+    );
+    assert.equal(button?.bindings.disabled, "uploading", handlerName);
+    assert.equal(
+      button?.bindings.title,
+      "uploading ? ACCEPT_BLOCKED_UPLOADING_HINT : undefined",
+      handlerName,
+    );
+  }
 });
 
 test("failCellReformat: loading -> error(message)", () => {
@@ -1468,22 +1546,6 @@ test("readCellDraft: localStorage 属性 getter 本身抛 SecurityError → null
     null,
   );
 });
-
-test("接线：草稿扫描在 useState 初始化器里同步完成，不在 effect 里", () => {
-  // 只要它回到 effect，首帧到 effect 提交之间的门禁就又 fail-open 了。
-  assert.match(editorSrc, /const \[draftScan\] = useState\(\(\) => \{[\s\S]*?readCellDraft\([\s\S]*?\}\);/);
-  // 全文只此一处读草稿，杜绝"初始化器里读一份、effect 里又读一份"的分叉。
-  assert.strictEqual((editorSrc.match(/readCellDraft\(/g) || []).length, 1);
-  // 调用点必须传 thunk（箭头函数），不许把 window.localStorage 当实参 eager 求值——
-  // 属性 getter 的 SecurityError 会逃过 helper 的 try，render 期崩整个编辑器。
-  assert.match(editorSrc, /readCellDraft\(\s*\(\) =>/);
-});
-
-test("接线：banner 与其同步镜像 ref 都从首帧扫描结果取初值", () => {
-  assert.match(editorSrc, /const \[showRestoreBanner, setShowRestoreBanner\] = useState\(draftScan\.offer\);/);
-  assert.match(editorSrc, /const restoreBannerRef = useRef\(showRestoreBanner\);/);
-});
-
 // --- reformatSourceLabel：后端 source 枚举 -> 友好文案（CRITICAL：原始枚举
 // 值绝不能泄漏到界面上）-------------------------------------------------------
 

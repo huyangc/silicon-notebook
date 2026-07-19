@@ -141,7 +141,7 @@ Confirmed scope:
 ## Architecture Baseline
 
 - `frontend/` is the only frontend path. (The former static `web/` fallback has been removed.)
-- `frontend/app/page.tsx` is the workspace orchestrator. Keep shared workspace API/view models in `frontend/app/workspace-model.ts`, answer/citation/reasoning-trace UI in `frontend/app/answer-panel.tsx`, and shared KG type marks in `frontend/app/kg-type-mark.tsx`; do not copy those implementations back into `page.tsx`.
+- `frontend/app/page.tsx` is the workspace orchestrator. Keep shared workspace API/view models in `frontend/app/workspace-model.ts`, answer/citation/reasoning-trace UI in `frontend/app/answer-panel.tsx`, built-in KG labels/styles in `frontend/app/kg-type-model.ts`, and shared KG rendering in `frontend/app/kg-type-mark.tsx`; do not copy those implementations back into `page.tsx`.
 - Backend uses FastAPI.
 - Default local persistence is SQLite at `.local/silicon_notebook.db`, implemented with the Python standard library `sqlite3`.
 - Source files are stored under `SILICON_NOTEBOOK_STORAGE_DIR`, defaulting to `.local/storage`.
@@ -215,7 +215,7 @@ cd frontend
 npm run dev
 ```
 
-`object_type` display names have one source of truth: the backend `OBJECT_TYPE_LABELS` in `app/services/extraction_profiles.py`, shipped to the client as `KnowledgeTypeCount.label`. Any call site that can reach that API label (the Knowledge browser) must use it, so user-defined object types render their proper Chinese name too. Call sites that only hold an `object_type` string (citation popover, knowledge-graph canvas and side panel) use the built-in front-end table `KG_TYPE_LABELS` in `frontend/app/kg-type-mark.tsx`, which stays character-for-character identical to the backend constant; `scripts/check_object_type_labels_contract.py` is a hard gate in `scripts/check.sh` and fails the build on drift, so a label change on either side must land on both. Do not reintroduce a Title-Case fallback — unknown or custom types are displayed verbatim as their `object_type`. Both tables, and any other map keyed by `object_type`, must be read with `Object.hasOwn(...)` rather than bare indexing or `map[type] ?? fallback`: `constructor` and `__proto__` resolve through the prototype chain to inherited functions/objects, which are truthy, so `??` never takes over and downstream reads silently become `undefined` (this produced `NaN` node coordinates in the graph layout).
+`object_type` display names have one source of truth: the backend `OBJECT_TYPE_LABELS` in `app/services/extraction_profiles.py`, shipped to the client as `KnowledgeTypeCount.label`. Any call site that can reach that API label (the Knowledge browser) must use it, so user-defined object types render their proper Chinese name too. Call sites that only hold an `object_type` string (citation popover, knowledge-graph canvas and side panel) use the built-in front-end table `KG_TYPE_LABELS` in `frontend/app/kg-type-model.ts`; `kg-type-mark.tsx` consumes and re-exports the model for shared rendering. The table stays character-for-character identical to the backend constant; `scripts/check_object_type_labels_contract.py` is a hard gate in `scripts/check.sh` and fails the build on drift, so a label change on either side must land on both. Do not reintroduce a Title-Case fallback — unknown or custom types are displayed verbatim as their `object_type`. Both tables, and any other map keyed by `object_type`, must be read with `Object.hasOwn(...)` rather than bare indexing or `map[type] ?? fallback`: `constructor` and `__proto__` resolve through the prototype chain to inherited functions/objects, which are truthy, so `??` never takes over and downstream reads silently become `undefined` (this produced `NaN` node coordinates in the graph layout).
 
 Errors shown to a user are always Chinese, and the translation happens only in the frontend — `frontend/app/errors.ts` is the single source. Backend `detail` strings stay as they are and are never rewritten to please the UI: they are the contract for MCP agents, logs, and triage. The layer is **deny by default, and trust comes from provenance rather than from the shape of the text**. This is the one rule to keep straight, because the obvious alternative is wrong: a backend `detail` that happens to be Chinese, short, and single-line is *not* evidence that it was written for a user. Roughly forty call sites raise `HTTPException(detail=str(exc))`, and their output is structurally indistinguishable from the twenty that carry deliberate user copy — an earlier version of this module trusted "4xx and contains a CJK character" and consequently displayed `403 访问被拒绝 — nginx/1.25 request id=req-1 upstream=10.0.0.7:8000`, internal address included.
 
@@ -225,7 +225,7 @@ Trust is checked before shape, and shape is still checked second. `humanizeHttpE
 
 Everything that is caught rather than fetched goes through `toUserMessage(error, fallback)`, and that function **only recognizes a brand, never a shape**. `throwHumanizedHttpError` and `humanizedError(message)` stamp the errors this module has translated; `toUserMessage` returns a stamped message verbatim — preserving the 401/403/404/409 distinction instead of flattening every failure into one sentence — and replaces everything else with the caller's fallback, writing the discarded original to `console.error`. This matters because the largest failure class never reaches `throwHumanizedHttpError` at all: when `fetch` itself rejects there is no `Response` to read, and backend error strings frequently arrive as JSON fields rather than status codes — the ask stream's `error` event, a persisted `ask_job.error`, a report's `error`, a source's `error_message`, a readiness snapshot's `error`, `model_errors[].message`. The backend writes `f"{type(exc).__name__}: {exc}"` into all of those, which is for logs and MCP, not for a person, and a shape-based rule let the Chinese-looking ones (`RuntimeError: 模型调用失败 upstream timeout`) straight through. The brand is a `Symbol.for(...)` rather than a module-local `Symbol` or an `instanceof` class check, because Next.js bundles the same module into both the server and client graphs and the module-local forms would produce two non-equal identities and thus false negatives; forgery is not a concern, since the values being screened are strings and JSON carries no symbols. Values that must not be rendered but must still be traceable go to `logDiagnostic(tag, value)`, which shares the HTTP path's truncation limit — never call it (or `toUserMessage`) during render, or it repeats on every re-render; log at an I/O boundary or in a `useEffect` keyed on the value.
 
-Do not hand-roll an error branch. `frontend/app/errors-guard.test.mjs` recursively scans `frontend/app` and enforces three shapes: no `new Error(...)` whose argument interpolates `.status`; — because that first rule cannot see `setStatusText(\`服务异常：${err.message}\`)` — **no reads of `.message` at all** outside `errors.ts` unless the exact line is registered in `ALLOWED_MESSAGE_READS`; and, because that second rule could not see the backend's *diagnostic* fields either, **no reads of `.error` or `.error_message`** unless registered in `ALLOWED_DIAGNOSTIC_READS` (`console.error` is exempt, being the channel those strings belong in). Registered entries are only cases where the value is not raw exception text or is not displayed: a sentinel comparison, a condition, a state field already written by `toUserMessage`, a value taken solely to hand to `logDiagnostic`. The guard also pins positively that `reportError`, the ask stream's `error` event, `job.error`, and `extractErrorMessage` (a thin alias of `toUserMessage` shared by ~20 knowhow call sites) still route through the layer. All allowlists are line-exact, so a new leak cannot inherit an old exemption.
+Do not hand-roll an error branch. `frontend/app/errors-guard.test.mjs` recursively scans `frontend/app` and enforces three shapes: no `new Error(...)` whose argument interpolates `.status`; — because that first rule cannot see `setStatusText(\`服务异常：${err.message}\`)` — **no reads of `.message` at all** outside `errors.ts` unless the semantic site is reviewed; and, because that second rule could not see the backend's *diagnostic* fields either, **no reads of `.error` or `.error_message`** unless reviewed (`console.error` is exempt, being the channel those strings belong in). Reviewed entries are keyed by module path + qualified scope + access kind + target and carry a reasoned count; source positions and snippets are diagnostics only. Entries are limited to cases where the value is not raw exception text or is not displayed: a sentinel comparison, a condition, a state field already written by `toUserMessage`, or a value taken solely to hand to `logDiagnostic`. The guard also pins positively that `reportError`, the ask stream's `error` event, `job.error`, and `extractErrorMessage` (a thin alias of `toUserMessage` shared by ~20 knowhow call sites) still route through the layer.
 
 ## 界面词汇表 (User-Facing Vocabulary)
 
@@ -333,6 +333,44 @@ Run:
 bash scripts/check.sh
 ```
 
+`scripts/check.sh` is the complete offline local gate. It runs three bounded
+lanes concurrently: complete backend pytest, syntax/smoke/contract/harness
+checks, and frontend test/typecheck/build. Each lane owns a process group;
+interrupting or terminating the controller must terminate and reap every
+pytest/npm/Next.js descendant. Acceptance on the current Apple Silicon
+development machine uses:
+
+```bash
+PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
+```
+
+The verified local development target is a complete warm run under 60 seconds;
+this is a measured baseline, not a portable timeout assertion for every host.
+
+## Test Architecture
+
+- Static contracts use semantic identities (module path, qualified scope,
+  operation kind, target, and reviewed count). Source line/offset data is
+  diagnostic only and must never identify expected behavior.
+- Frontend `*.test.mjs` uses `node:test` for pure logic and justified
+  architecture/security/vocabulary/entry contracts. Frontend
+  `*.component.test.tsx` uses Vitest/jsdom/Testing Library for behavior through
+  roles, actions, and state.
+- Do not test components through CSS geometry, source layout/order, source
+  slices, or source line counts. Feature work should update tests only when an
+  observable contract changes.
+- No committed skip, xfail, todo, or only markers. The policy covers test
+  entrypoints and helper modules; direct production-source reads are forbidden
+  outside the shared semantic-source adapter.
+- Keep the frontend source policy bounded and syntactic: reject AST
+  position/collection-order APIs and source-named text position operations.
+  `semantic-source.mjs` may expose AST semantics but must not use text slicing,
+  splitting, indexing, or length as a contract. Do not reintroduce a
+  whole-JavaScript data-flow interpreter; ordinary array operations stay valid.
+- The pytest controller prewarms one repo-local Matplotlib font cache before
+  xdist workers start. Preserve that boundary; per-worker macOS font
+  enumeration is an avoidable multi-second cold start.
+
 This checks:
 
 - Backend Python syntax.
@@ -344,7 +382,7 @@ This checks:
 - User-facing vocabulary guard (`check_ui_vocabulary.py`): no internal jargon in copy a user can see — rendered `frontend/app` text **and** backend `user_error()` messages, whose `X-User-Message` marker means they are displayed verbatim (see 界面词汇表).
 - Source summary fallback and notebook-internal search.
 - Complete backend `pytest` suite plus the deterministic extraction-scoring harness under `fangan/testcases/harness/tests`; committed tests must not depend on developer-local source documents.
-- Every recursively discovered frontend `*.test.mjs`, Next.js TypeScript, and production build. Missing `frontend/node_modules` is a hard failure.
+- Every recursively discovered frontend `*.test.mjs` and `*.component.test.tsx`, Next.js TypeScript, and production build. Missing `frontend/node_modules` is a hard failure.
 
 For local API checks, use:
 

@@ -18,64 +18,62 @@ export MINERU_MODE="off" MINERU_API_TOKEN=""
 mkdir -p "$ROOT_DIR/.local/pycache"
 export PYTHONPYCACHEPREFIX="$ROOT_DIR/.local/pycache"
 
-"$PYTHON_BIN" -m py_compile \
-  "$ROOT_DIR/backend/app/main.py" \
-  "$ROOT_DIR/backend/app/api/routes.py" \
-  "$ROOT_DIR/backend/app/core/config.py" \
-  "$ROOT_DIR/backend/app/core/llm.py" \
-  "$ROOT_DIR/backend/app/models/schemas.py" \
-  "$ROOT_DIR/backend/app/services/ask_modes.py" \
-  "$ROOT_DIR/backend/app/services/cancellation.py" \
-  "$ROOT_DIR/backend/app/services/extraction_profiles.py" \
-  "$ROOT_DIR/backend/app/services/kg/extract.py" \
-  "$ROOT_DIR/backend/app/services/kg/graph_reason.py" \
-  "$ROOT_DIR/backend/app/services/kg/models.py" \
-  "$ROOT_DIR/backend/app/services/kg/canonicalize.py" \
-  "$ROOT_DIR/backend/app/services/kg_ingest.py" \
-  "$ROOT_DIR/backend/app/services/reextract.py" \
-  "$ROOT_DIR/backend/app/services/mineru_client.py" \
-  "$ROOT_DIR/backend/app/services/notebook_templates.py" \
-  "$ROOT_DIR/backend/app/services/parsers.py" \
-  "$ROOT_DIR/backend/app/services/prompts.py" \
-  "$ROOT_DIR/backend/app/services/query_rewrite.py" \
-  "$ROOT_DIR/backend/app/services/reasoning_retrieval.py" \
-  "$ROOT_DIR/backend/app/services/remote_sources.py" \
-  "$ROOT_DIR/backend/app/services/batch_ingest.py" \
-  "$ROOT_DIR/backend/app/services/kg/scheduler.py" \
-  "$ROOT_DIR/backend/app/services/repository.py" \
-  "$ROOT_DIR/backend/app/services/retrieval.py" \
-  "$ROOT_DIR/backend/app/services/sqlite_identity.py" \
-  "$ROOT_DIR/backend/app/services/sqlite_notebook_sharing.py" \
-  "$ROOT_DIR/backend/app/services/sqlite_repository.py" \
-  "$ROOT_DIR/backend/app/api/deps.py" \
-  "$ROOT_DIR/backend/app/api/auth_routes.py" \
-  "$ROOT_DIR/backend/app/services/auth_utils.py"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/silicon-check.XXXXXX")"
+declare -a PIDS=()
+declare -a LANES=(contracts backend frontend)
 
-PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" - <<'PY'
-import markdown_it  # noqa: F401
-import numpy  # noqa: F401
-PY
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  for pid in "${PIDS[@]:-}"; do
+    kill -TERM -- "-$pid" 2>/dev/null || true
+  done
+  for pid in "${PIDS[@]:-}"; do
+    wait "$pid" 2>/dev/null || true
+  done
+  rm -rf "$TMP_DIR"
+  exit "$status"
+}
 
-PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/smoke_backend.py"
+handle_interrupt() {
+  exit 130
+}
 
-PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/smoke_memory_mcp.py"
+handle_terminate() {
+  exit 143
+}
 
-PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/check_ask_modes_contract.py"
+trap cleanup EXIT
+trap handle_interrupt INT
+trap handle_terminate TERM
 
-PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/check_object_type_labels_contract.py"
-PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" "$ROOT_DIR/scripts/check_ui_vocabulary.py"
+for lane in "${LANES[@]}"; do
+  CHECK_LANE_NAME="$lane" \
+  CHECK_TIMING_FILE="$TMP_DIR/$lane.time" \
+  ROOT_DIR="$ROOT_DIR" \
+  PYTHON_BIN="$PYTHON_BIN" \
+    "$PYTHON_BIN" -c \
+      'import os, sys; os.setpgrp(); os.execv(sys.argv[1], sys.argv[1:])' \
+      "$ROOT_DIR/scripts/check_${lane}.sh" \
+    >"$TMP_DIR/$lane.log" 2>&1 &
+  PIDS+=("$!")
+done
 
-PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -m pytest -p no:cacheprovider "$ROOT_DIR/backend/tests"
+status=0
+for index in "${!LANES[@]}"; do
+  if ! wait "${PIDS[$index]}"; then
+    status=1
+  fi
+done
 
-PYTHONPATH="$ROOT_DIR/backend:$ROOT_DIR" "$PYTHON_BIN" \
-  -m pytest -p no:cacheprovider "$ROOT_DIR/fangan/testcases/harness/tests"
+for lane in "${LANES[@]}"; do
+  printf "\n===== %s =====\n" "$lane"
+  cat "$TMP_DIR/$lane.log"
+  if [[ -f "$TMP_DIR/$lane.time" ]]; then
+    cat "$TMP_DIR/$lane.time"
+  else
+    printf "%s=missing\n" "$lane"
+  fi
+done
 
-if [[ ! -d "$ROOT_DIR/frontend/node_modules" ]]; then
-  echo "frontend/node_modules not found; run 'npm install' in frontend/ first" >&2
-  exit 1
-fi
-
-cd "$ROOT_DIR/frontend"
-npm run test
-npm run lint
-npm run build
+exit "$status"

@@ -5,7 +5,6 @@
 // 对 knowhow-panel-logic.ts 的拆分方式）。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 
 import {
   IMPORT_ACCEPT_EXTENSIONS,
@@ -27,6 +26,17 @@ import {
   SUBMIT_PREVIEW_ERROR_HINT,
 } from "./knowhow-import-logic.ts";
 import { humanizedError } from "./errors.ts";
+import {
+  assignmentsIn,
+  callSitesIn,
+  findFunction,
+  findFunctionIn,
+  jsxElements,
+  parseModule,
+  variableInitializersIn,
+} from "./test/semantic-source.mjs";
+
+const importModule = await parseModule("knowhow-import.tsx");
 
 // --- IMPORT_ACCEPT_EXTENSIONS / IMPORT_ACCEPT -----------------------------------
 
@@ -393,52 +403,85 @@ test("importSubmitDisabledReason: 重取中优先于重取失败（loading 时�
 
 // --- 接线：改选行标题列 → 重取预览（P2 全栈修复的前端一侧）--------------------
 //
-// 组件是 .tsx，本仓库 node:test 只 import 得了纯 .ts（见文件头说明），故对
-// knowhow-import.tsx 源码本身下断言（同 knowhow-cell-editor.test.mjs 的 editorSrc
-// 手法）。锁住的接线点：改坏了就复现真 bug——预览按猜测列规整、commit 却按用户
-// 所选列规整，「预览即所得」被打破（见后端 preview_import 的 anchor_index）。
-
-const importSrc = await readFile(new URL("./knowhow-import.tsx", import.meta.url), "utf8");
-
-const handleAnchorChangeSrc = importSrc.slice(
-  importSrc.indexOf("async function handleAnchorChange"),
-  importSrc.indexOf("function backToSelect("),
-);
+// 这些守卫查询 TypeScript AST 的调用、赋值、变量与 JSX 绑定，不依赖源码行号、
+// 字符偏移、函数排列或格式。锁住的是「预览即所得」的业务接线。
 
 test("接线：行标题单选的 onAnchorChange 接到 handleAnchorChange（不是裸 setAnchorIndex——否则只改分组不重取规整）", () => {
-  assert.match(importSrc, /onAnchorChange=\{handleAnchorChange\}/);
+  const mapping = jsxElements(importModule, "MapStep").find(
+    ({ scope }) => scope === "<module>.KnowhowImportWizard",
+  );
+  assert.equal(mapping?.bindings.onAnchorChange, "handleAnchorChange");
 });
 
 test("接线：handleAnchorChange 用**所选** anchor 下标重取预览（预览随所选列重新规整）", () => {
-  assert.ok(handleAnchorChangeSrc.length > 0, "handleAnchorChange 函数体没截到，守卫失效");
-  assert.match(handleAnchorChangeSrc, /importKnowhowPreview\(\s*notebookId,\s*currentFile,\s*nextAnchorIndex\s*\)/);
+  const handler = findFunctionIn(
+    importModule,
+    "KnowhowImportWizard",
+    "handleAnchorChange",
+  );
+  assert.deepEqual(
+    callSitesIn(handler).find(({ target }) => target === "importKnowhowPreview"),
+    {
+      target: "importKnowhowPreview",
+      arguments: ["notebookId", "currentFile", "nextAnchorIndex"],
+    },
+  );
 });
 
 test("接线：handleAnchorChange 带请求序号守卫（快速切换只让最新一次落地，丢弃乱序旧响应）", () => {
-  assert.match(handleAnchorChangeSrc, /anchorReqSeqRef\.current \+ 1/);
+  const handler = findFunctionIn(
+    importModule,
+    "KnowhowImportWizard",
+    "handleAnchorChange",
+  );
+  assert.deepEqual(
+    variableInitializersIn(handler).find(({ name }) => name === "seq"),
+    { name: "seq", initializer: "anchorReqSeqRef.current + 1" },
+  );
+  assert.deepEqual(assignmentsIn(handler), [
+    { target: "anchorReqSeqRef.current", operator: "=", value: "seq" },
+  ]);
   // 守卫经纯逻辑 shouldApplyAnchorPreview（单测另有覆盖）：响应序号仍是最新且
   // 组件仍挂载才落地——序号在切文件/返回选择步骤时被推进，旧响应在此失配丢弃。
-  assert.match(
-    handleAnchorChangeSrc,
-    /shouldApplyAnchorPreview\(\s*mountedRef\.current,\s*seq,\s*anchorReqSeqRef\.current\s*\)/,
+  const guards = callSitesIn(handler).filter(
+    ({ target }) => target === "shouldApplyAnchorPreview",
+  );
+  assert.deepEqual(
+    [...new Set(guards.map(({ arguments: args }) => JSON.stringify(args)))],
+    [JSON.stringify(["mountedRef.current", "seq", "anchorReqSeqRef.current"])],
   );
 });
 
 test("接线：重取失败保留旧网格（不清空 preview），只置 refreshError 提示", () => {
   // 清空 preview 会让用户改一次行标题就把整块预览打没，比原 bug 更糟。
-  assert.match(handleAnchorChangeSrc, /setAnchorPreviewError\(/);
-  assert.equal(handleAnchorChangeSrc.includes("setPreview(null)"), false);
+  const calls = callSitesIn(findFunctionIn(
+    importModule,
+    "KnowhowImportWizard",
+    "handleAnchorChange",
+  ));
+  assert.ok(calls.some(({ target }) => target === "setAnchorPreviewError"));
+  assert.equal(
+    calls.some(
+      ({ target, arguments: args }) => (
+        target === "setPreview" && args[0] === "null"
+      ),
+    ),
+    false,
+  );
 });
 
 test("接线：初始「猜测预选」不经 handleAnchorChange（handleFileSelected 直接 setAnchorIndex，不多取一次预览）", () => {
   // 初始预览本就是后端按猜测列规整的；若初始也走重取，等于每次开文件都多一趟往返。
-  const handleFileSelectedSrc = importSrc.slice(
-    importSrc.indexOf("async function handleFileSelected"),
-    importSrc.indexOf("function handleFileInputChange("),
+  const calls = callSitesIn(findFunctionIn(
+    importModule,
+    "KnowhowImportWizard",
+    "handleFileSelected",
+  ));
+  assert.deepEqual(
+    calls.find(({ target }) => target === "setAnchorIndex"),
+    { target: "setAnchorIndex", arguments: ["selection.anchorIndex"] },
   );
-  assert.ok(handleFileSelectedSrc.length > 0, "handleFileSelected 函数体没截到，守卫失效");
-  assert.match(handleFileSelectedSrc, /setAnchorIndex\(selection\.anchorIndex\)/);
-  assert.equal(handleFileSelectedSrc.includes("handleAnchorChange"), false);
+  assert.equal(calls.some(({ target }) => target === "handleAnchorChange"), false);
 });
 
 // --- 接线（P1）：离开映射上下文时作废在飞重取预览 -----------------------------
@@ -449,26 +492,48 @@ test("接线：初始「猜测预选」不经 handleAnchorChange（handleFileSel
 // (b) 返回选择步骤——使那条迟到响应失配、被 shouldApplyAnchorPreview 丢弃。
 
 test("接线（P1）：handleFileSelected 初始预览开始时递增序号并清掉在飞重取态（作废上一个文件仍在飞的重取响应）", () => {
-  const handleFileSelectedSrc = importSrc.slice(
-    importSrc.indexOf("async function handleFileSelected"),
-    importSrc.indexOf("function handleFileInputChange("),
+  const handler = findFunctionIn(
+    importModule,
+    "KnowhowImportWizard",
+    "handleFileSelected",
   );
-  assert.ok(handleFileSelectedSrc.length > 0, "handleFileSelected 函数体没截到，守卫失效");
-  assert.match(handleFileSelectedSrc, /anchorReqSeqRef\.current \+= 1/);
-  assert.match(handleFileSelectedSrc, /setAnchorPreviewLoading\(false\)/);
-  assert.match(handleFileSelectedSrc, /setAnchorPreviewError\(null\)/);
+  assert.deepEqual(assignmentsIn(handler), [
+    { target: "anchorReqSeqRef.current", operator: "+=", value: "1" },
+  ]);
+  const calls = callSitesIn(handler);
+  assert.ok(calls.some(
+    ({ target, arguments: args }) => (
+      target === "setAnchorPreviewLoading" && args[0] === "false"
+    ),
+  ));
+  assert.ok(calls.some(
+    ({ target, arguments: args }) => (
+      target === "setAnchorPreviewError" && args[0] === "null"
+    ),
+  ));
 });
 
 test("接线（P1）：backToSelect 返回选择步骤时递增序号（作废仍在飞的重取响应，防它迟到覆盖已切走的文件）", () => {
-  const backToSelectSrc = importSrc.slice(
-    importSrc.indexOf("function backToSelect("),
-    importSrc.indexOf("function setKindAt("),
+  const handler = findFunctionIn(
+    importModule,
+    "KnowhowImportWizard",
+    "backToSelect",
   );
-  assert.ok(backToSelectSrc.length > 0, "backToSelect 函数体没截到，守卫失效");
-  assert.match(backToSelectSrc, /anchorReqSeqRef\.current \+= 1/);
+  assert.deepEqual(assignmentsIn(handler), [
+    { target: "anchorReqSeqRef.current", operator: "+=", value: "1" },
+  ]);
   // 返回时同样清掉在飞重取态（否则旧的 refreshing/error 提示会残留）。
-  assert.match(backToSelectSrc, /setAnchorPreviewLoading\(false\)/);
-  assert.match(backToSelectSrc, /setAnchorPreviewError\(null\)/);
+  const calls = callSitesIn(handler);
+  assert.ok(calls.some(
+    ({ target, arguments: args }) => (
+      target === "setAnchorPreviewLoading" && args[0] === "false"
+    ),
+  ));
+  assert.ok(calls.some(
+    ({ target, arguments: args }) => (
+      target === "setAnchorPreviewError" && args[0] === "null"
+    ),
+  ));
 });
 
 // --- 接线（P2）：提交必须等重取预览就绪 ---------------------------------------
@@ -479,19 +544,32 @@ test("接线（P1）：backToSelect 返回选择步骤时递增序号（作废�
 // 原因绑到按钮 title（置灰必有对得上的原因）。
 
 test("接线（P2）：提交置灰原因经 importSubmitDisabledReason 计算（预览重取中/失败都并入 disabled）", () => {
-  assert.match(
-    importSrc,
-    /importSubmitDisabledReason\(\s*title,\s*anchorPreviewLoading,\s*anchorPreviewError\s*\)/,
+  const wizard = findFunction(importModule, "KnowhowImportWizard");
+  const initializers = variableInitializersIn(wizard);
+  assert.deepEqual(
+    initializers.find(({ name }) => name === "submitDisabledReason"),
+    {
+      name: "submitDisabledReason",
+      initializer: "importSubmitDisabledReason(title, anchorPreviewLoading, anchorPreviewError)",
+    },
   );
   // submitting 单独 OR 进 disabled（它有自己的按钮文案「导入中…」），其余原因来自 helper。
-  assert.match(importSrc, /submitDisabled\s*=\s*submitting\s*\|\|\s*submitDisabledReason\s*!==\s*null/);
+  assert.deepEqual(
+    initializers.find(({ name }) => name === "submitDisabled"),
+    {
+      name: "submitDisabled",
+      initializer: "submitting || submitDisabledReason !== null",
+    },
+  );
 });
 
 test("接线（P2）：提交按钮把置灰原因绑到 title（hover 能看到为什么不能点）", () => {
-  const submitButtonSrc = importSrc.slice(
-    importSrc.indexOf("knowhow-import-submit-button"),
-    importSrc.indexOf("确认导入"),
+  const button = jsxElements(importModule, "button").find(
+    ({ attributes, scope }) => (
+      scope === "<module>.MapStep"
+      && attributes.className === "new-pill knowhow-import-submit-button"
+    ),
   );
-  assert.ok(submitButtonSrc.length > 0, "提交按钮片段没截到，守卫失效");
-  assert.match(submitButtonSrc, /title=\{submitDisabledReason \?\? undefined\}/);
+  assert.equal(button?.bindings.disabled, "submitDisabled");
+  assert.equal(button?.bindings.title, "submitDisabledReason ?? undefined");
 });
