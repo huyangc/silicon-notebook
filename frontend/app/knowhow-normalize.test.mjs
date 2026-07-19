@@ -571,6 +571,50 @@ test("F3：目的地内转义 `\\)` 不闭合、行尾仍开着 -> 拒绝", () =
 });
 
 // ---------------------------------------------------------------------------
+// F3 round-2（本批 review）— `](` 目的地跟踪器此前对**每个** `](` 都武装，含落在**同行已
+// 闭合**的行内代码/公式 span 内的那个。`A. header\n`x](`` 里 `](` 是代码 span 内容（非链接
+// 起头），旧扫描仍武装了跟踪器、整格被判 rich 逐字返回，`A. header` 从未加粗。修复：rule-4
+// 扫描同时左到右追踪代码 span / `$` span 状态，落在已闭合 span 内的 `](` **不**武装；散文里
+// 的 `](` 仍武装（下面跨行链接的回归锁仍拒绝）。镜像 test_md_normalize_rule.py 同名用例。
+// ---------------------------------------------------------------------------
+
+test("F3-2：已闭合代码 span 内的 `](`（`` `x](` ``）不武装 -> 规整（标题加粗）", () => {
+  // 单行 `` `x](` `` 里 `](` 是代码 span 内容、非链接起头，唯一可能拒绝它的规则不再拒绝：
+  assert.strictEqual(isRichMarkdown("`x](`"), false);
+  assert.strictEqual(ruleNormalize("`x](`"), "`x](`"); // 代码 span 逐字保留（幂等）
+  // 端到端「标题加粗」：顶格 alpha 标题在该代码 span 行之上规整成加粗节标题。注意 review 的裸
+  // `A. header\n`x](``（marker 紧跟 prose、无空行）因**另一条**既有规则——懒延续——被拒（与本 `](`
+  // 修复无关，见下条 pin），空行断开懒延续即可隔离本修复：标题加粗、代码 span 逐字保留。
+  const raw = "A. header\n\n`x](`";
+  assert.strictEqual(isRichMarkdown(raw), false);
+  const out = ruleNormalize(raw).split("\n");
+  assert.ok(out.includes("**A. header**")); // 标题加粗
+  assert.ok(out.includes("`x](`")); // 代码 span 逐字保留
+});
+
+test("F3-2：裸 `A. header\\n`x](``（marker 紧跟 prose）仍因懒延续被拒（与 `](` 修复正交）", () => {
+  // pin 该 confound：review 的裸相邻形态**仍** rich——不是因为 `](`（那行已不再单独拒绝、上条
+  // 已断言），而是列 0 prose 紧跟 marker = 懒延续。与 `](` 修复正交，不得回归成规整。
+  const raw = "A. header\n`x](`";
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw);
+});
+
+test("F3-2：同行闭合代码 span 内的 `](`（`` `](` 同行闭合 ``）不 rich", () => {
+  assert.strictEqual(isRichMarkdown("`](` 同行闭合"), false);
+});
+
+test("F3-2：同行闭合 `$` 公式 span 内的 `](`（`$a](b$ 同行`）不 rich", () => {
+  assert.strictEqual(isRichMarkdown("$a](b$ 同行"), false);
+});
+
+test("F3-2：闭合 span 之后散文里的 `](`（`` `code` [docs](/url\\n\"title\") ``）仍拒绝", () => {
+  const raw = '`code` [docs](/url\n"title")';
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw);
+});
+
+// ---------------------------------------------------------------------------
 // F3 — marker 宽度必须按 CODE POINT 计，不是 UTF-16 单元 —— 镜像
 // test_md_normalize_rule.py 的 test_astral_ordered_marker_child_indented_by_
 // codepoint_width。星际有序 marker 如 𝟙.（U+1D7D9，UTF-16 里是代理对，category

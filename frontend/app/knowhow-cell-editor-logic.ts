@@ -848,29 +848,102 @@ function endsWithOpenInlineSpan(line: string): boolean {
   //    行尾仍在目的地内 = `[docs](/url\n"title")` 这类目的地跨软换行（`]` 处方括号深度已归零、
   //    规则 3 看不见它，但 `(`-目的地没闭）。**只**在见过 `](` 后才追踪——散文里的裸 `(未闭合`
   //    不受影响（严格限定链接目的地上下文）。对应 Python `_ends_with_open_inline_span` 第 4 段。
+  //    Round-2（本批 review）：武装 `](` 前须确认它落在**散文**里、而非同行**已闭合**的行内代码/
+  //    公式 span 内——`` `x](` `` 里 `](` 是代码 span 内容、不是链接起头，旧实现把它也武装、整格误判
+  //    rich。本段同时追踪 code-span（镜像规则 2：无转义、等长 run 闭合）与 math-span（镜像规则 1：
+  //    转义感知、等长 run 闭合）状态，落在任一已开着 span 内的 `](` **不**武装；散文里的 `](` 仍武装。
+  //    跨行**开着**的 code/math span 已由规则 1/2 先行拒绝（走不到这里），故此处每个 span 必在行尾前闭合。
   let inDest = false;
   let destDepth = 0;
+  let codeInside = false; // 反引号 code-span：镜像规则 2（无转义、等长 run 闭合）
+  let codeLen = 0;
+  let mathInside = false; // `$` math-span：镜像规则 1（转义感知、等长 run 闭合）
+  let mathLen = 0;
   i = 0;
   while (i < n) {
     const ch = line[i];
-    if (ch === "\\") {
-      i += 2; // 转义下一字符：\( / \) 既不开也不合目的地深度
-      continue;
-    }
-    if (!inDest) {
-      if (ch === "]" && i + 1 < n && line[i + 1] === "(") {
-        inDest = true; // `](` 起头目的地：`(` 计一层深度，跳过这两个字符
-        destDepth = 1;
-        i += 2;
+    if (inDest) {
+      // 目的地内：转义感知、只数圆括号深度（同旧实现）
+      if (ch === "\\") {
+        i += 2; // 转义下一字符：\( / \) 既不开也不合目的地深度
         continue;
+      }
+      if (ch === "(") destDepth += 1;
+      else if (ch === ")") {
+        destDepth -= 1;
+        if (destDepth === 0) inDest = false; // 目的地闭合
       }
       i += 1;
       continue;
     }
-    if (ch === "(") destDepth += 1;
-    else if (ch === ")") {
-      destDepth -= 1;
-      if (destDepth === 0) inDest = false; // 目的地闭合
+    if (codeInside) {
+      // 代码 span 内（镜像规则 2）：不转义，等长 run 闭合
+      if (ch === "`") {
+        let run = 0;
+        while (i < n && line[i] === "`") {
+          run += 1;
+          i += 1;
+        }
+        if (run === codeLen) codeInside = false;
+        continue; // run 长度不等 -> span 内字面，保持 inside
+      }
+      i += 1;
+      continue;
+    }
+    if (mathInside) {
+      // 公式 span 内（镜像规则 1）：转义感知，等长 run 闭合
+      if (ch === "\\") {
+        i += 2;
+        continue;
+      }
+      if (ch === "$") {
+        let run = 0;
+        while (i < n && line[i] === "$") {
+          run += 1;
+          i += 1;
+        }
+        if (run === mathLen) mathInside = false;
+        continue; // run 长度不等 -> span 内字面，保持 inside
+      }
+      i += 1;
+      continue;
+    }
+    // 散文：开 code-span / 开 math-span / 武装 `](`。`\` 转义下一字符——**反引号除外**（镜像规则 2
+    // 「反引号侧不做转义」：`` \` `` 仍按裸 run 计、照常开 span），其余 `\$`/`\]`/`\(` 照旧跳过（镜
+    // 像规则 1/3/4 的转义感知），使 code/math 追踪与规则 2/1 逐位对齐。
+    if (ch === "\\") {
+      if (i + 1 < n && line[i + 1] === "`") {
+        i += 1; // `\` 当字面、让紧邻反引号照常开 span（对齐规则 2 裸计）
+        continue;
+      }
+      i += 2;
+      continue;
+    }
+    if (ch === "`") {
+      let run = 0;
+      while (i < n && line[i] === "`") {
+        run += 1;
+        i += 1;
+      }
+      codeInside = true;
+      codeLen = run;
+      continue;
+    }
+    if (ch === "$") {
+      let run = 0;
+      while (i < n && line[i] === "$") {
+        run += 1;
+        i += 1;
+      }
+      mathInside = true;
+      mathLen = run;
+      continue;
+    }
+    if (ch === "]" && i + 1 < n && line[i + 1] === "(") {
+      inDest = true; // 散文里的 `](` 起头目的地：`(` 计一层深度，跳过这两个字符
+      destDepth = 1;
+      i += 2;
+      continue;
     }
     i += 1;
   }

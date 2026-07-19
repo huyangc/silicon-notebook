@@ -1054,6 +1054,67 @@ def test_link_destination_escaped_close_paren_keeps_it_open():
 
 
 # ---------------------------------------------------------------------------
+# F3 round-2 (this review) — the `](`-destination tracker armed on EVERY `](`,
+# including one that sits INSIDE an already-CLOSED inline code / math span on the
+# same line. `A. header\n`x](`` closes the backtick span (the `](` is code-span
+# content, not a link opener), yet the tracker armed and never disarmed -> the cell
+# was classified rich and returned byte-identical, so `A. header` was never bolded.
+# Fix: the rule-4 scan now also tracks the code-span / `$`-span state left-to-right;
+# a `](` seen while inside a closed span does NOT arm the tracker. A `](` in plain
+# text still arms it (the cross-line link regression locks below stay refused).
+# ---------------------------------------------------------------------------
+
+
+def test_link_destination_bracket_paren_inside_closed_code_span_not_refused():
+    # THE codex example line: a `](` INSIDE a backtick code span closed on its own line is
+    # span CONTENT, not a link opener -> it must NOT arm the destination tracker. On the
+    # single line (the only rule that could refuse it) the cell now normalizes:
+    assert is_rich_markdown("`x](`") is False
+    assert rule_normalize("`x](`") == "`x](`"    # code span preserved verbatim (idempotent)
+    # End-to-end "the header gets bolded": a top-level alpha header above that code-span
+    # line normalizes to a bold section header. NB the review's raw `A. header\n`x](``
+    # (marker directly followed by prose, no blank) is refused for a SEPARATE, pre-existing
+    # reason -- the lazy-continuation rule (test_lazy_continuation_after_* pin it) -- which
+    # is independent of this `](` fix; a blank line breaks that continuation and isolates
+    # the fix, so the header below bolds while the code span stays verbatim.
+    raw = "A. header\n\n`x](`"
+    assert is_rich_markdown(raw) is False
+    out = rule_normalize(raw).split("\n")
+    assert "**A. header**" in out                # header bolded
+    assert "`x](`" in out                        # code span preserved verbatim
+
+
+def test_link_destination_bracket_paren_adjacent_alpha_refused_by_lazy_continuation():
+    # regression pin documenting the confound: the review's literal `A. header\n`x](``
+    # (marker directly followed by prose) STAYS rich -- NOT because of the `](` (that line
+    # no longer refuses on its own, asserted above) but because column-0 prose directly
+    # after a marker is a lazy continuation. This is orthogonal to the `](` fix and must
+    # not regress into normalizing (which would blank-line-split a soft-break paragraph).
+    raw = "A. header\n`x](`"
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw
+
+
+def test_link_destination_bracket_paren_inside_closed_code_span_same_line():
+    # `](` inside a code span closed on the SAME line (with trailing prose) -> not rich.
+    assert is_rich_markdown("`](` 同行闭合") is False
+
+
+def test_link_destination_bracket_paren_inside_closed_math_span_not_refused():
+    # `](` inside a `$`-math span closed on the same line -> the math-span state disarms
+    # the tracker just like the code-span state -> not rich.
+    assert is_rich_markdown("$a](b$ 同行") is False
+
+
+def test_link_destination_plain_text_bracket_paren_still_arms_after_closed_span():
+    # regression lock: a `](` in PLAIN text (after a closed code span) with an unclosed
+    # destination must STILL refuse -- the closed-span skip must not swallow real links.
+    raw = '`code` [docs](/url\n"title")'
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw
+
+
+# ---------------------------------------------------------------------------
 # F1 cell-global emphasis pairing — the intraword (both-flanking) hole and the
 # load-bearing R*C survival. See the section comment above `test_emphasis_open_
 # star_spanning_soft_newline_refused` for the algorithm.

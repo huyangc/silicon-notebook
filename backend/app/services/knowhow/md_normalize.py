@@ -303,6 +303,10 @@ def _ends_with_open_inline_span(line: str) -> bool:
          目的地跨软换行——`]` 处方括号深度已归零（规则 3 看不见它），但 `(`-目的地没闭，
          `_normalize` 注入空行会把目的地/标题拆到两段、链接退化成散文。**严格限定链接上下文**：
          只在见过 `](` 之后才追踪圆括号，散文里的裸 `(未闭合` 不受影响（常见、不该拒）。
+         Round-2（本批 review）：`](` 还须落在**散文**里才武装——同行**已闭合**的行内代码/公式
+         span 内的 `](`（`` `x](` ``、`$a](b$`）是 span 内容、不是链接起头，本段同时镜像规则 2/1
+         的 code/math run 配对、对落在已闭合 span 内的 `](` **不**武装（否则 `` `x](` `` 会误判
+         rich、`A. header` 从不加粗）。
 
     强调 `*`/`_` 与 GFM 删除线 `~` 的跨行配对**不在本函数**——它做不到逐行判定：词内
     `R*C`（两侧都是词字符的孤立 run）绝不能因自身就把整格拒掉，但两行各一个 run 若在
@@ -377,28 +381,88 @@ def _ends_with_open_inline_span(line: str) -> bool:
     # 4) 链接目的地圆括号（F3）：`](` 之后进入目的地、追踪未闭合的 `(` 深度（转义感知）。
     #    行尾仍在目的地内 = 目的地跨软换行。**只**在见过 `](` 后才追踪——散文里的裸 `(`
     #    不受影响（严格限定链接目的地上下文，见文档第 4 条）。
+    #
+    #    Round-2（本批 review）：武装 `](` 前必须先确认它落在**散文**里、而非同行**已闭合**的行内
+    #    代码/公式 span 内——`` `x](` `` 里 `](` 是代码 span 内容、不是链接起头，旧实现把它也当链接
+    #    起头武装了跟踪器、整格误判 rich 逐字返回（`A. header` 从未加粗）。本段左到右**同时**追踪
+    #    code-span 与 math-span 状态，分别精确镜像上面规则 2 的反引号 run 配对（无转义）与规则 1 的
+    #    `$` run 配对（转义感知）：落在任一已开着 span 内的 `](` **不**武装；散文里的 `](` 仍武装
+    #    （下面跨行链接的回归锁不受影响）。跨行**开着**的 code/math span 已由规则 1/2 先行拒绝（走不
+    #    到这里），故此处每个进入的 span 必在行尾前闭合、追踪良好定义。
     in_dest = False
     dest_depth = 0
+    code_inside = False              # 反引号 code-span：镜像规则 2（无转义、等长 run 闭合）
+    code_len = 0
+    math_inside = False              # `$` math-span：镜像规则 1（转义感知、等长 run 闭合）
+    math_len = 0
     i = 0
     while i < n:
         ch = line[i]
-        if ch == "\\":
-            i += 2                       # 转义下一字符：\( / \) 既不开也不合目的地深度
-            continue
-        if not in_dest:
-            if ch == "]" and i + 1 < n and line[i + 1] == "(":
-                in_dest = True           # `](` 起头目的地：`(` 计一层深度，跳过这两个字符
-                dest_depth = 1
-                i += 2
+        if in_dest:                              # 目的地内：转义感知、只数圆括号深度（同旧实现）
+            if ch == "\\":
+                i += 2                           # 转义下一字符：\( / \) 既不开也不合目的地深度
                 continue
+            if ch == "(":
+                dest_depth += 1
+            elif ch == ")":
+                dest_depth -= 1
+                if dest_depth == 0:
+                    in_dest = False              # 目的地闭合
             i += 1
             continue
-        if ch == "(":
-            dest_depth += 1
-        elif ch == ")":
-            dest_depth -= 1
-            if dest_depth == 0:
-                in_dest = False          # 目的地闭合
+        if code_inside:                          # 代码 span 内（镜像规则 2）：不转义，等长 run 闭合
+            if ch == "`":
+                run = 0
+                while i < n and line[i] == "`":
+                    run += 1
+                    i += 1
+                if run == code_len:
+                    code_inside = False
+                continue                         # run 长度不等 -> span 内字面，保持 inside
+            i += 1
+            continue
+        if math_inside:                          # 公式 span 内（镜像规则 1）：转义感知，等长 run 闭合
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "$":
+                run = 0
+                while i < n and line[i] == "$":
+                    run += 1
+                    i += 1
+                if run == math_len:
+                    math_inside = False
+                continue                         # run 长度不等 -> span 内字面，保持 inside
+            i += 1
+            continue
+        # 散文：开 code-span / 开 math-span / 武装 `](`。`\` 转义下一字符——**反引号除外**（镜像
+        # 规则 2「反引号侧不做转义」：`` \` `` 仍按裸 run 计、照常开 span），其余 `\$`/`\]`/`\(`
+        # 照旧跳过（镜像规则 1/3/4 的转义感知），使 code/math 追踪与规则 2/1 逐位对齐。
+        if ch == "\\":
+            if i + 1 < n and line[i + 1] == "`":
+                i += 1                           # `\` 当字面、让紧邻反引号照常开 span（对齐规则 2 裸计）
+                continue
+            i += 2
+            continue
+        if ch == "`":
+            run = 0
+            while i < n and line[i] == "`":
+                run += 1
+                i += 1
+            code_inside, code_len = True, run
+            continue
+        if ch == "$":
+            run = 0
+            while i < n and line[i] == "$":
+                run += 1
+                i += 1
+            math_inside, math_len = True, run
+            continue
+        if ch == "]" and i + 1 < n and line[i + 1] == "(":
+            in_dest = True                       # 散文里的 `](` 起头目的地：`(` 计一层深度，跳过两字符
+            dest_depth = 1
+            i += 2
+            continue
         i += 1
     return in_dest
 
