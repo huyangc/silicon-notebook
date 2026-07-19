@@ -205,3 +205,35 @@ def test_table_from_another_notebook_is_404(client, repo):
     )
     assert resp.status_code == 404, resp.text
     assert repo.get_knowhow_table(tid_in_b)["notebook_id"] == nb_b
+
+
+# ---------------------------------------------------------------------------
+# 测试间调度器排水（同 test_knowhow_transfer_service.py 尾部同名 fixture 的
+# 理由）：经路由 copy/move 同样会调度 0.5s 防抖重投影，不 settle 即结束的
+# 测试会把投影线程溢出到同 worker 后续测试，间歇性打破
+# test_get_scheduler_entry_does_not_pin_repo。收尾取消未点火 Timer 并等收敛。
+import time as _drain_time
+
+import pytest as _pytest_drain
+
+
+@_pytest_drain.fixture(autouse=True)
+def _drain_projection_scheduler(repo):
+    yield
+    from app.services.knowhow import api as _kh_api
+
+    scheduler = _kh_api._SCHEDULERS.get(repo)
+    if scheduler is None:
+        return
+    with scheduler._lock:
+        pending = list(scheduler._timers.values())
+        scheduler._timers.clear()
+        scheduler._rerun.clear()
+    for timer in pending:
+        timer.cancel()
+    deadline = _drain_time.time() + 8.0
+    while _drain_time.time() < deadline:
+        with scheduler._lock:
+            if not scheduler._running and not scheduler._timers:
+                return
+        _drain_time.sleep(0.05)

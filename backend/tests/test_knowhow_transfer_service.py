@@ -868,3 +868,36 @@ def test_move_sweep_is_idempotent_when_no_orphan_exists(repo):
             (src_nb,),
         ).fetchall()
     assert not remaining
+
+
+# ---------------------------------------------------------------------------
+# 测试间调度器排水（追加于 EOF，避免移动上方守卫行号 pin）。
+# copy_table/move_table 会给目标（保留路径还有源）表调度 0.5s 防抖重投影；
+# 不 settle 就结束的测试会让 Timer 在测试结束后才点火，把一条持有 repo 强引用
+# （_project 里的 target = repo_ref()）的投影线程溢出到同 worker 的后续测试，
+# 间歇性打破 test_knowhow_projection.py::test_get_scheduler_entry_does_not_pin_repo
+# 的全局 len(_SCHEDULERS)==0 / repo 可回收断言。此 fixture 在每个测试收尾时
+# 取消未点火的 Timer 并等在跑的投影收敛，保证不向后续测试泄漏线程。
+import pytest as _pytest_drain
+
+
+@_pytest_drain.fixture(autouse=True)
+def _drain_projection_scheduler(repo):
+    yield
+    from app.services.knowhow import api as _kh_api
+
+    scheduler = _kh_api._SCHEDULERS.get(repo)
+    if scheduler is None:
+        return
+    with scheduler._lock:
+        pending = list(scheduler._timers.values())
+        scheduler._timers.clear()
+        scheduler._rerun.clear()
+    for timer in pending:
+        timer.cancel()
+    deadline = time.time() + 8.0
+    while time.time() < deadline:
+        with scheduler._lock:
+            if not scheduler._running and not scheduler._timers:
+                return
+        time.sleep(0.05)
