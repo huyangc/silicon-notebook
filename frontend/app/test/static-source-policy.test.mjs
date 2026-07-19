@@ -724,11 +724,15 @@ function hasPositionOrOrderQuery(relative, source) {
         target,
       } of targets
     ) {
-      if (defaultInitializer) visit(defaultInitializer, scope);
-      const defaultTraits = defaultInitializer
+      const propertyBit = FILE_READ_EXPORT_BITS.get(property) ?? 0;
+      const defaultReachable = Boolean(
+        defaultInitializer
+        && !(traits.fileReadNamespace & propertyBit),
+      );
+      if (defaultReachable) visit(defaultInitializer, scope);
+      const defaultTraits = defaultReachable
         ? fileReadTraits(defaultInitializer, scope)
         : {};
-      const propertyBit = FILE_READ_EXPORT_BITS.get(property) ?? 0;
       const targetTraits = rest
         ? {
           fileReadNamespace: (
@@ -742,7 +746,7 @@ function hasPositionOrOrderQuery(relative, source) {
           ),
           fileReadNamespace: defaultTraits.fileReadNamespace ?? 0,
         };
-      const value = defaultInitializer
+      const value = defaultReachable
         ? isTextFlow(defaultInitializer, scope)
         : false;
       if (define) {
@@ -788,10 +792,10 @@ function hasPositionOrOrderQuery(relative, source) {
         return isTextFlow(current.right, scope);
       }
       return [
-          ts.SyntaxKind.PlusEqualsToken,
-          ts.SyntaxKind.AmpersandAmpersandEqualsToken,
-          ts.SyntaxKind.BarBarEqualsToken,
-          ts.SyntaxKind.QuestionQuestionEqualsToken,
+        ts.SyntaxKind.PlusEqualsToken,
+        ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+        ts.SyntaxKind.BarBarEqualsToken,
+        ts.SyntaxKind.QuestionQuestionEqualsToken,
       ].includes(current.operatorToken.kind)
         ? (
           isTextFlow(current.left, scope)
@@ -909,10 +913,9 @@ function hasPositionOrOrderQuery(relative, source) {
         return fileReadTraits(current.right, scope);
       }
       if ([
-          ts.SyntaxKind.PlusEqualsToken,
-          ts.SyntaxKind.AmpersandAmpersandEqualsToken,
-          ts.SyntaxKind.BarBarEqualsToken,
-          ts.SyntaxKind.QuestionQuestionEqualsToken,
+        ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+        ts.SyntaxKind.BarBarEqualsToken,
+        ts.SyntaxKind.QuestionQuestionEqualsToken,
       ].includes(current.operatorToken.kind)) {
         const left = fileReadTraits(current.left, scope);
         const right = fileReadTraits(current.right, scope);
@@ -1061,33 +1064,38 @@ function hasPositionOrOrderQuery(relative, source) {
     }
     if (ts.isFunctionLike(node)) {
       const functionScope = newScope(scope, "function");
-      for (const parameter of node.parameters) {
-        if (ts.isIdentifier(parameter.name)) {
-          if (parameter.initializer) {
+      throwCollectors.push(() => {});
+      try {
+        for (const parameter of node.parameters) {
+          if (ts.isIdentifier(parameter.name)) {
+            if (parameter.initializer) {
+              visit(parameter.initializer, functionScope);
+            }
+            const value = Boolean(
+              parameterIsTextFlow(parameter)
+              || (
+                parameter.initializer
+                && isTextFlow(parameter.initializer, functionScope)
+              )
+            );
+            const traits = parameter.initializer
+              ? fileReadTraits(parameter.initializer, functionScope)
+              : {};
+            defineBinding(
+              functionScope,
+              parameter.name.text,
+              value,
+              traits,
+            );
+          } else if (parameter.initializer) {
             visit(parameter.initializer, functionScope);
           }
-          const value = Boolean(
-            parameterIsTextFlow(parameter)
-            || (
-              parameter.initializer
-              && isTextFlow(parameter.initializer, functionScope)
-            )
-          );
-          const traits = parameter.initializer
-            ? fileReadTraits(parameter.initializer, functionScope)
-            : {};
-          defineBinding(
-            functionScope,
-            parameter.name.text,
-            value,
-            traits,
-          );
-        } else if (parameter.initializer) {
-          visit(parameter.initializer, functionScope);
         }
+        if (node.body) predeclareFunctionVars(node.body, functionScope);
+        if (node.body) visit(node.body, functionScope);
+      } finally {
+        throwCollectors.pop();
       }
-      if (node.body) predeclareFunctionVars(node.body, functionScope);
-      if (node.body) visit(node.body, functionScope);
       return normalCompletion();
     }
     if (ts.isBlock(node)) {
@@ -1367,8 +1375,13 @@ function hasPositionOrOrderQuery(relative, source) {
       const existingFileReadNamespace = (
         existing?.fileReadNamespace ?? 0
       );
-      const preservesLeft = [
+      const preservesValueLeft = [
         ts.SyntaxKind.PlusEqualsToken,
+        ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+        ts.SyntaxKind.BarBarEqualsToken,
+        ts.SyntaxKind.QuestionQuestionEqualsToken,
+      ].includes(node.operatorToken.kind);
+      const preservesCapabilityLeft = [
         ts.SyntaxKind.AmpersandAmpersandEqualsToken,
         ts.SyntaxKind.BarBarEqualsToken,
         ts.SyntaxKind.QuestionQuestionEqualsToken,
@@ -1382,14 +1395,14 @@ function hasPositionOrOrderQuery(relative, source) {
       const value = plainAssignment
         ? rightValue
         : (
-          preservesLeft
+          preservesValueLeft
             ? existingValue || rightValue
             : false
         );
       const traits = plainAssignment
         ? rightTraits
         : (
-          preservesLeft
+          preservesCapabilityLeft
             ? {
               fileRead: (
                 existingFileRead
@@ -1943,6 +1956,17 @@ test("source policy rejects position identities without banning ordinary arrays"
     "import * as fs from 'node:fs';\n"
       + "const { readFileSync: omit, ...rest } = fs;\n"
       + "const data = rest.readFileSync(path, 'utf8'); data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = readFileSync(path, 'utf8');\ntry {"
+      + " function helper() { risky(); }\ndata = [];"
+      + " } catch {}\ndata.slice();",
+    "import * as fs from 'node:fs';\n"
+      + "let data = fs.readFileSync(path, 'utf8');\ntry {"
+      + " const { readFileSync: load = risky() } = fs;\ndata = [];"
+      + " } catch {}\ndata.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let load = readFileSync;\nconst alias = (load += 'x');\n"
+      + "const data = alias(path, 'utf8'); data.slice();",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("test/semantic-source.mjs", mutation),
