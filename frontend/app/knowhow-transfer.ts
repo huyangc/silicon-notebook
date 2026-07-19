@@ -6,9 +6,14 @@ import { authHeaders } from "./auth.ts";
 import { throwHumanizedHttpError } from "./errors.ts";
 import { knowhowTransferBody, parseCleanupFailure, type TransferMode } from "./transfer-model.ts";
 
-// 409 source_cleanup_failed 的专用错误:复制已经提交、副本已在目标 notebook
-// 落地,只是源表清理(拆投影/删源表)失败。调用方(C3)用 `instanceof` 分支出
-// "副本已存在,别再盲目重试"的提示,并可以直接用 newTableId 跳到副本。
+// 409（source_cleanup_failed / source_changed_kept，round 10 P1-A 起两个 code
+// 共用同一个异常类型）的专用错误:复制已经提交、副本已在目标 notebook 落地,
+// 只是源清理阶段没有把源删掉——原因可能是清理操作本身失败(source_cleanup_
+// failed,源原封未动,手动删源安全),也可能是源在复制后被并发编辑、是被有意
+// 保留下来保护那份编辑的(source_changed_kept,绝不能引导删除)。两个 code 的
+// message 都是后端按各自成因写好的人话文案,本类不区分 code、只原样透传
+// message——调用方(C3)用 `instanceof` 分支出"副本已存在,别再盲目重试"的提示
+// 并展示这条 message,不需要自己再判一次是哪个 code。
 // 判定逻辑本身在 transfer-model.ts 的 parseCleanupFailure() 里,是纯函数、有
 // 单测——这里只管拿它的结果转成一个类型化的异常。
 export class KnowhowSourceCleanupError extends Error {
@@ -54,9 +59,10 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
 
 // 把一张 knowhow 表复制/移动到另一个 notebook。
 // - copy:源保持不动,目标新增一份独立副本。
-// - move:目标新增副本后删除源;若副本已提交但源清理失败,后端答 409
-//   source_cleanup_failed——上面的 apiFetch 会把它转成 KnowhowSourceCleanupError
-//   抛出(而不是拍扁成字符串),调用方按需 catch。
+// - move:目标新增副本后删除源;若副本已提交但源没能删掉(清理本身失败,或
+//   源被有意保留以保护一份并发编辑),后端答 409(code 为 source_cleanup_
+//   failed 或 source_changed_kept 之一)——上面的 apiFetch 会把它转成
+//   KnowhowSourceCleanupError 抛出(而不是拍扁成字符串),调用方按需 catch。
 export const transferKnowhowTable = (
   notebookId: string,
   tableId: string,

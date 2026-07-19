@@ -4183,8 +4183,12 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | MEMORY_TRANSFER_
 # PR review round 6 P1-A update: same _remap skip-guard lines that shifted
 # copy_table's own two sites (193->221, 212->240 above) sit ahead of this
 # site too, shifting it 292->320.
+#
+# PR review round 10 P1-A update: SourceCleanupFailed's docstring/__init__
+# grew a `reason` param (source_changed vs cleanup_error) ahead of
+# move_table, shifting this site again (320->330).
 KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES = {
-    ("_runtime", "backend/app/services/knowhow/transfer.py:320"),
+    ("_runtime", "backend/app/services/knowhow/transfer.py:330"),
 }
 ACTIVE_PRODUCTION_MEMBER_SITES = (
     ACTIVE_PRODUCTION_MEMBER_SITES | KNOWHOW_TRANSFER_SERVICE_P1_2_ACTIVE_PRODUCTION_SITES

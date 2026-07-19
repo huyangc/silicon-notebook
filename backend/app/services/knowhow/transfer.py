@@ -278,12 +278,22 @@ def copy_table(
 
 
 class SourceCleanupFailed(Exception):
-    """移动时复制已成功、但删源失败：副本已在目标存在，源仍在，可安全重试删源。"""
+    """移动时复制已成功、但源清理阶段未能把源删掉：副本已在目标存在。
 
-    def __init__(self, new_table_id: str, cause: Exception) -> None:
+    ``reason``（round 10 P1-A）区分两种截然不同的成因，路由层要给用户两种
+    截然不同的指引，不能共用同一句"请手动删除源表"：
+    - "source_changed"：指纹复核未命中——源在复制完成后被并发编辑，是被
+      有意保留下来保护那份编辑的，不是清理失败。源仍带着这份编辑，引导
+      用户删除它会连带永久丢失该编辑。
+    - "cleanup_error"：拆投影/原子删除本身抛出异常，源确实原封未动，手动
+      删除是安全的（原有行为，contract 不变）。
+    """
+
+    def __init__(self, new_table_id: str, cause: Exception, *, reason: str) -> None:
         super().__init__(str(cause))
         self.new_table_id = new_table_id
         self.cause = cause
+        self.reason = reason
 
 
 def move_table(
@@ -327,8 +337,19 @@ def move_table(
     # 整体收进一个类型化错误，让路由能把 new_table_id 一并带回给调用方。
     # 注意 copy_table(...) 本身特意留在这个 try 之外——复制失败必须原样冒泡
     # （源分毫未动、什么都没创建），不能被这里的包装误伤。
+    #
+    # round 10 P1-A：cleanup_reason 默认 "cleanup_error"（真正的拆投影/删除
+    # 操作抛出异常——源原封未动，手动删除安全），下面两处指纹复核未命中的
+    # 分支各自在 raise 之前把它扳成 "source_changed"（源被有意保留以保护一
+    # 份并发编辑，绝不能引导用户删除源）。用 try 之前的局部变量而不是
+    # isinstance 判某个专用异常类型：即便"扳成 source_changed 之后、真正
+    # raise 之前"这段收尾（比如下面重新调度投影）自己又抛出别的异常，语义
+    # 依然对——源确实是因为指纹变了才被保留的，不该因为收尾工作本身失手就
+    # 误判成"删除安全"的 cleanup_error。
+    cleanup_reason = "cleanup_error"
     try:
         if knowhow_transfer_store.table_fingerprint(source_table_id) != source_fingerprint:
+            cleanup_reason = "source_changed"
             raise RuntimeError(
                 "源表在复制完成后被并发编辑（列/行/格/代码计数或 mutation_seq "
                 "与复制时的快照不一致），为避免丢失该编辑，源表未删除"
@@ -373,6 +394,7 @@ def move_table(
         if not knowhow_transfer_store.delete_table_if_unchanged(
             source_table_id, source_fingerprint
         ):
+            cleanup_reason = "source_changed"
             get_scheduler(repo).schedule(source_table_id)
             raise RuntimeError(
                 "源表在复制完成后被并发编辑（原子重删时指纹复核未命中），"
@@ -386,7 +408,7 @@ def move_table(
         _log.exception(
             "move_table：副本 %s 已提交，但清理源表 %s 失败", new_table_id, source_table_id
         )
-        raise SourceCleanupFailed(new_table_id, exc) from exc
+        raise SourceCleanupFailed(new_table_id, exc, reason=cleanup_reason) from exc
 
     # P1-B（PR review round 6，孤儿收尾扫描）：源表行此刻确凿已经删除、副本
     # 确凿已经在目标——上面的 try/except 只覆盖到这里为止的「读指纹+拆投影

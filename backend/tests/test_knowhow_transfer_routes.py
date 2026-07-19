@@ -95,12 +95,79 @@ def test_move_source_cleanup_failure_returns_409_with_new_table_id(client, repo,
     assert resp.status_code == 409, resp.text
     detail = resp.json()["detail"]
     assert detail["code"] == "source_cleanup_failed"
+    # round 10 P1-A：这条用例是"清理操作本身抛异常"这一支（reason=
+    # cleanup_error）——message 必须落在"手动删源安全"这条既有指引上,不能被
+    # 下面新增的 source_changed 分支意外顶替。
+    assert "手动删除源表" in detail["message"]
     new_tid = detail["new_table_id"]
     assert new_tid
     # 副本已在目标侧、可解析
     assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst
     # 源表仍在——删源失败绝不能连带丢了源(duplicate-not-loss)
     assert repo.get_knowhow_table(tid)["notebook_id"] == src
+
+
+# round 10 P1-A：上面那条用例的镜像——源清理失败的成因不是清理操作本身抛异常
+# （delete_table_if_unchanged 直接 raise），而是源在复制完成后被并发编辑（指纹
+# 复核未命中，delete_table_if_unchanged 正常返回 False）：源是被有意保留下来
+# 保护这份编辑的，绝不能引导用户删除它。这条截然不同的成因必须映射到截然不同
+# 的 code（source_changed_kept），且 message 绝不能出现"删除源表"字样——照做
+# 会连带永久丢失这份被保留下来的并发编辑。
+#
+# 并发编辑通过 monkeypatch 模块级 `copy_table`（`app.services.knowhow.transfer`
+# 模块属性，同 test_knowhow_transfer_service.py 里
+# test_move_does_not_delete_source_row_added_after_copy_snapshot 的同款手法）
+# 在真实 copy_table 返回之后、move_table 走到自己的清理段之前，往源表插入一
+# 行——这条 monkeypatch 是模块级的，对 HTTP 路由触发的调用同样生效：move_table
+# 内部对 copy_table 的调用是它自己模块全局命名空间里的名字查找，不是绑定引用，
+# 不需要（也不能像 KnowhowTransferStore 那样）改成 patch 类。
+def test_move_source_changed_returns_distinct_code_and_never_suggests_deleting_source(
+    client, repo, monkeypatch
+):
+    from app.services.knowhow import transfer as kh_transfer
+
+    h = _login(client, "a00000004")
+    src = client.post("/api/notebooks", json={"name": "src"}, headers=h).json()["id"]
+    dst = client.post("/api/notebooks", json={"name": "dst"}, headers=h).json()["id"]
+    tid = _table(repo, src)
+    cols = {c["name"]: c["id"] for c in repo.get_knowhow_table(tid)["columns"]}
+
+    real_copy_table = kh_transfer.copy_table
+
+    def _copy_then_concurrent_row_add(repo_, source_table_id, target_notebook_id, actor_id):
+        new_id = real_copy_table(repo_, source_table_id, target_notebook_id, actor_id)
+        repo_.add_knowhow_row(source_table_id, {cols["违例类型"]: "并发新增的行"})
+        return new_id
+
+    monkeypatch.setattr(kh_transfer, "copy_table", _copy_then_concurrent_row_add)
+
+    resp = client.post(
+        f"/api/notebooks/{src}/knowhow/{tid}/transfer",
+        json={"target_notebook_id": dst, "mode": "move"},
+        headers=h,
+    )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["code"] == "source_changed_kept"
+    # 不能只查"删除源表"不出现——message 里合法地用"请勿删除源表"这个否定
+    # 祈使句提醒用户，这个短语本身就含着"删除源表"四个字。真正要挡的是
+    # cleanup_error 消息那句会诱导操作的正面祈使句"手动删除源表"；同时正面
+    # 钉住这条消息确实包含明确的"别删"警示，不是恰好没提。
+    assert "手动删除源表" not in detail["message"], (
+        "source_changed 绝不能沿用 cleanup_error 那句「手动删除源表」——照做"
+        "会连带永久丢失被保留下来的并发编辑：" + detail["message"]
+    )
+    assert "请勿删除源表" in detail["message"] or "不要删除源表" in detail["message"], (
+        "source_changed 的指引必须明确提醒用户别删源表：" + detail["message"]
+    )
+    new_tid = detail["new_table_id"]
+    assert new_tid
+    assert repo.get_knowhow_table(new_tid)["notebook_id"] == dst
+    # 源表仍在，且带着并发新增的那一行——不是复制那一刻的旧快照
+    src_detail = repo.get_knowhow_table(tid)
+    assert src_detail["notebook_id"] == src
+    assert len(src_detail["rows"]) == 2
 
 
 # --------------------------------------------------------------------------

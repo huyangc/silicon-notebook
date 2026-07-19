@@ -1176,10 +1176,17 @@ export function KnowhowPanel({
                 // 错误态并解开 busy 锁；resolve 意味着它保持 busy、把「何时
                 // 关」交还给调用方，本分支紧接着自己 setTransferOpen(false)
                 // 促成卸载（同 onSubmit 头注释的既定协议）。把这条消息改浮到
-                // 表级 actionError 横幅——源表仍是当前打开的这张，用户能直接看到，
-                // 并可走既有的「删除表」入口手动清理（该操作幂等，安全重试；
-                // 见 transfer.py SourceCleanupFailed 类注释「源仍在，可安全
-                // 重试删源」）。
+                // 表级 actionError 横幅——源表仍是当前打开的这张，用户能直接看到。
+                //
+                // round 10 P1-A：下一步该怎么做，不再由这里替用户下判断——
+                // err.message 是后端按 SourceCleanupFailed.reason 分两种成因
+                // 各自写好的人话文案（见 transfer.py 该类的文档字符串）：
+                // "source_cleanup_failed" 时源确实原封未动，走既有的「删除表」
+                // 入口手动清理是安全的；"source_changed_kept" 时源是被有意保留
+                // 下来保护一份并发编辑的，走「删除表」会连带永久丢失它——这条
+                // 消息本身已经把正确的下一步讲清楚了（核对目标里的旧副本/重新
+                // 发起搬迁，别删源），这里只管原样显示，不能再补一句通用的
+                // "可以安全删除源表"，那对第二种成因是错的。
                 setTransferOpen(false);
                 setActionError(err.message);
                 loadDetail(detail.id);

@@ -83,26 +83,36 @@ export const singleSourceNotebookId = (
   return items.every((item) => item.notebook_id === first) ? first : null;
 };
 
-// --- AMENDMENT 2: 409 source_cleanup_failed 结构化解析 ----------------------
-// knowhow transfer 在「复制已提交、源清理失败」时返回 409,body 形如:
-//   { detail: { code: "source_cleanup_failed", new_table_id: "...", message: "..." } }
-// (见 backend/app/api/routes.py transfer_knowhow_table 的 SourceCleanupFailed 分支)。
-// 通用错误路径会把整个 body 拍扁成一行字符串,丢失 new_table_id——这条信息 C3
-// 必须要有(提示"副本已在目标存在,别再盲目重试",并能直接带用户跳过去)。
-// 判定逻辑单独抽成纯函数(这里),网络客户端只管把 status/body 转手过来问它、
-// 拿到非 null 就抛结构化错误——不在 fetch 包装器里重复写字段判断。
-
+// --- AMENDMENT 2: 409 source_cleanup_failed/source_changed_kept 结构化解析 --
+// knowhow transfer 在"复制已提交、源清理未完成"时返回 409,body 形如:
+//   { detail: { code, new_table_id: "...", message: "..." } }
+// (见 backend/app/api/routes.py transfer_knowhow_table 的 SourceCleanupFailed
+// 分支)。通用错误路径会把整个 body 拍扁成一行字符串,丢失 new_table_id——这条
+// 信息 C3 必须要有(提示"副本已在目标存在,别再盲目重试",并能直接带用户跳过
+// 去)。判定逻辑单独抽成纯函数(这里),网络客户端只管把 status/body 转手过来
+// 问它、拿到非 null 就抛结构化错误——不在 fetch 包装器里重复写字段判断。
+//
+// round 10 P1-A：code 现在有两个截然不同的值,对应后端 SourceCleanupFailed.
+// reason 的两种成因——"source_cleanup_failed"(清理操作本身抛异常,源原封
+// 未动,手动删源安全)和新增的"source_changed_kept"(指纹复核未命中,源被
+// 有意保留以保护一份并发编辑,绝不能引导删除)。两者的 message 都是后端按各
+// 自成因写的人话文案,这里只管原样透传——不需要在这一层区分"具体是哪个
+// code":knowhow-panel.tsx 的调用点只是把 message 显示出来,后端已经把"这
+// 种情况该怎么办"写进了 message 本身。
 export type CleanupFailure = { newTableId: string; message: string };
 
 const FALLBACK_CLEANUP_MESSAGE = "已复制到目标，但源表未删除，请勿重复重试";
 
+const CLEANUP_FAILURE_CODES = new Set(["source_cleanup_failed", "source_changed_kept"]);
+
 /**
  * 判定一个 HTTP 响应是否是 knowhow transfer 特有的
- * `409 {detail: {code: "source_cleanup_failed", new_table_id, message}}`。
- * 命中 → {newTableId, message};其余任何情况(非 409、非该 code、detail 是普通
- * 字符串、new_table_id 缺失或非字符串、body 根本不是对象……)一律 null,调用方
- * 落回通用错误路径。纯函数,不摸网络——status/body 由调用方(res.status /
- * 已解析的 JSON)转手过来。
+ * `409 {detail: {code, new_table_id, message}}`(code 为
+ * "source_cleanup_failed" 或 "source_changed_kept" 之一)。命中 →
+ * {newTableId, message};其余任何情况(非 409、code 不是这两者之一、detail
+ * 是普通字符串、new_table_id 缺失或非字符串、body 根本不是对象……)一律
+ * null,调用方落回通用错误路径。纯函数,不摸网络——status/body 由调用方
+ * (res.status / 已解析的 JSON)转手过来。
  */
 export const parseCleanupFailure = (status: number, body: unknown): CleanupFailure | null => {
   if (status !== 409) return null;
@@ -110,7 +120,7 @@ export const parseCleanupFailure = (status: number, body: unknown): CleanupFailu
   const detail = (body as Record<string, unknown>).detail;
   if (typeof detail !== "object" || detail === null) return null;
   const d = detail as Record<string, unknown>;
-  if (d.code !== "source_cleanup_failed") return null;
+  if (typeof d.code !== "string" || !CLEANUP_FAILURE_CODES.has(d.code)) return null;
   if (typeof d.new_table_id !== "string" || !d.new_table_id) return null;
   const message = typeof d.message === "string" && d.message ? d.message : FALLBACK_CLEANUP_MESSAGE;
   return { newTableId: d.new_table_id, message };
@@ -123,9 +133,19 @@ export type TransferResultsSummary = {
   succeeded: number;
   failed: number;
   // status === "copied_source_not_removed" 的子集:副本已经在目标 notebook 落地,
-  // 但源没删掉——不是普通失败,不能引导用户「重试」(会在目标堆出更多重复副本),
-  // 需要单独一条「副本已存在,请手动清理源」的提示。
+  // 但源没删掉——不是普通失败,不能引导用户笼统地「重试」(会在目标堆出更多重复
+  // 副本)。这是个超集,下面的 sourceChanged 是它按 error_code 进一步细分出的
+  // 子集(round 10 P1-B):两种成因需要截然不同的指引,不能共用一条消息。
   copiedSourceNotRemoved: TransferResult[];
+  // copiedSourceNotRemoved 的子集:error_code === "source_changed"(round 10
+  // P1-B)——源不是清理失败,而是在复制完成后被并发编辑/状态变更/提交了审批
+  // 提案,是被有意保留下来保护这份改动的。绝不能引导用户删除源(会连带丢失
+  // 那份改动);正确的下一步是核对目标里的旧副本、删除它,或重新发起一次
+  // 搬迁。copiedSourceNotRemoved 减去这个子集,剩下的就是真正的清理失败
+  // (error_code === "cleanup_error")——那种情况下源确实原封未动,弃用/删除
+  // 都安全,调用方直接用 copiedSourceNotRemoved.length - sourceChanged.length
+  // 算,不需要再单独一个字段(同 plainFailedCount 的既有算法风格)。
+  sourceChanged: TransferResult[];
   // status === "failed" 且 error_code === "promotion_proposed" 的子集(round 8
   // P2-A):这条 Memory 正在公共知识库审批队列里,move 被拒绝——同样不是能靠
   // "重试"解决的普通失败(在提案被审批中心处理完之前,重试永远还是这个结果),
@@ -142,6 +162,7 @@ export const summarizeTransferResults = (
 ): TransferResultsSummary => {
   const succeeded = results.filter((r) => r.ok).length;
   const copiedSourceNotRemoved = results.filter((r) => r.status === "copied_source_not_removed");
+  const sourceChanged = copiedSourceNotRemoved.filter((r) => r.error_code === "source_changed");
   const promotionBlocked = results.filter(
     (r) => r.status === "failed" && r.error_code === "promotion_proposed"
   );
@@ -150,6 +171,7 @@ export const summarizeTransferResults = (
     succeeded,
     failed: results.length - succeeded,
     copiedSourceNotRemoved,
+    sourceChanged,
     promotionBlocked,
   };
 };

@@ -184,6 +184,9 @@ def test_move_keeps_source_intact_when_projection_teardown_fails(repo, monkeypat
         kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
     assert isinstance(exc_info.value.cause, RuntimeError)
     assert exc_info.value.new_table_id
+    # round 10 P1-A：teardown 本身抛出异常——源原封未动，reason 必须是
+    # "cleanup_error"（手动删除源表安全），不能被误判成 "source_changed"。
+    assert exc_info.value.reason == "cleanup_error"
 
     # 源表必须原封不动地还在：可以重试搬迁，也可以照常删除——两边都留，不丢。
     detail = repo.get_knowhow_table(src_tid)
@@ -368,6 +371,9 @@ def test_move_does_not_delete_source_row_added_after_copy_snapshot(repo, monkeyp
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
         kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
     assert exc_info.value.new_table_id
+    # round 10 P1-A：早退的指纹预检未命中——源是被有意保留以保护这份并发
+    # 编辑的，reason 必须是 "source_changed"（绝不能引导用户删除源）。
+    assert exc_info.value.reason == "source_changed"
 
     # 源没被删，且带着并发新增的那一行——不是复制那一刻的旧快照
     detail = repo.get_knowhow_table(src_tid)
@@ -450,6 +456,9 @@ def test_move_does_not_delete_source_row_added_during_projection_teardown(
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
         kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
     assert exc_info.value.new_table_id
+    # round 10 P1-A：原子条件删除返回 False（指纹复核未命中）——源是被有意
+    # 保留以保护这份并发编辑的，reason 必须是 "source_changed"。
+    assert exc_info.value.reason == "source_changed"
 
     # 源没被删，且带着并发新增的那一行——不是复制/复核那一刻的旧快照
     detail = repo.get_knowhow_table(src_tid)
@@ -503,8 +512,11 @@ def test_move_reschedules_projection_for_retained_source_when_edited_during_tear
         kh_transfer, "build_projector", lambda _repo: _ConcurrentEditDuringTeardown()
     )
 
-    with pytest.raises(kh_transfer.SourceCleanupFailed):
+    with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
         kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
+    # round 10 P1-A：同上一条用例，原子条件删除返回 False——reason 必须是
+    # "source_changed"。
+    assert exc_info.value.reason == "source_changed"
 
     # 保留分支必须自己把重投影重新排上队——不能指望并发编辑那次“顺便”
     # 排过了（它没有：注入路径根本没走路由层的 schedule() 调用）。
@@ -562,6 +574,8 @@ def test_move_does_not_delete_source_table_title_edited_after_copy_snapshot(
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
         kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
     assert exc_info.value.new_table_id
+    # round 10 P1-A：早退的指纹预检未命中——reason 必须是 "source_changed"。
+    assert exc_info.value.reason == "source_changed"
 
     # 源没被删，且带着并发改名后的新标题——不是复制那一刻的旧快照
     detail = repo.get_knowhow_table(src_tid)
@@ -595,6 +609,7 @@ def test_move_does_not_delete_source_column_renamed_after_copy_snapshot(
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
         kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
     assert exc_info.value.new_table_id
+    assert exc_info.value.reason == "source_changed"  # round 10 P1-A
 
     detail = repo.get_knowhow_table(src_tid)
     assert detail["notebook_id"] == src_nb
@@ -628,6 +643,7 @@ def test_move_does_not_delete_source_anchor_moved_after_copy_snapshot(
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
         kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
     assert exc_info.value.new_table_id
+    assert exc_info.value.reason == "source_changed"  # round 10 P1-A
 
     detail = repo.get_knowhow_table(src_tid)
     assert detail["notebook_id"] == src_nb
@@ -664,6 +680,7 @@ def test_move_does_not_delete_source_column_swapped_after_copy_snapshot(
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
         kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
     assert exc_info.value.new_table_id
+    assert exc_info.value.reason == "source_changed"  # round 10 P1-A
 
     detail = repo.get_knowhow_table(src_tid)
     assert detail["notebook_id"] == src_nb
@@ -910,6 +927,7 @@ def test_move_does_not_delete_source_cell_code_updated_by_changed_after_copy_sna
     with pytest.raises(kh_transfer.SourceCleanupFailed) as exc_info:
         kh_transfer.move_table(repo, src_tid, dst_nb, actor_id="user-x")
     assert exc_info.value.new_table_id
+    assert exc_info.value.reason == "source_changed"  # round 10 P1-A
 
     # 源没被删，且带着并发重写后的新 updated_by——不是复制那一刻的旧属主
     code = repo._runtime.knowhow_store.get_knowhow_cell_code(row_id, column_id)

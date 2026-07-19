@@ -2145,12 +2145,30 @@ def transfer_knowhow_table(
         # 复制已提交、清理源(拆投影/删源表)失败：副本已在目标存在，源仍在——
         # 结构化 409 让前端能诚实地告诉用户"重复不丢失"，而不是裸 500 诱导用户
         # 盲目重试(会在目标侧越堆越多重复副本)。见 A3 评审附加需求。
+        #
+        # round 10 P1-A：exc.reason 区分两种截然不同的成因，绝不能共用同一条
+        # "请手动删除源表"的指引——"source_changed" 时源是被有意保留下来保护
+        # 一份并发编辑的（指纹复核未命中），照做会连带丢掉那份编辑；只有
+        # "cleanup_error"（拆投影/原子删除本身抛出异常，源确实原封未动）才
+        # 适用"手动删源"这条建议。code 因此分裂成两个：source_cleanup_failed
+        # 原样保留给 cleanup_error（不破坏既有契约/前端已有的分支判断），新增
+        # source_changed_kept 给 source_changed。
+        if exc.reason == "source_changed":
+            code = "source_changed_kept"
+            message = (
+                "源表在复制完成后有更新的修改，为避免丢失该修改，源表已被保留——"
+                "目标笔记本里的副本是这次修改之前的旧版本。请核对后删除目标里的"
+                "旧副本，或重新发起一次搬迁；请勿删除源表。"
+            )
+        else:
+            code = "source_cleanup_failed"
+            message = "已复制到目标，但源表未删除；请手动删除源表，或先删掉多余副本再重试"
         raise HTTPException(
             status_code=409,
             detail={
-                "code": "source_cleanup_failed",
+                "code": code,
                 "new_table_id": exc.new_table_id,
-                "message": "已复制到目标，但源表未删除；请手动删除源表，或先删掉多余副本再重试",
+                "message": message,
             },
         )
     return {"new_table_id": new_table_id}

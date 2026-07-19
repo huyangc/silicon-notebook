@@ -851,8 +851,12 @@ INDEPENDENT_PRIVATE_SITES = INDEPENDENT_PRIVATE_SITES | {
 # PR review round 6 P1-A update: same _remap skip-guard lines that shifted
 # the block above (193->221) sit ahead of this site too, shifting it
 # 292->320.
+#
+# PR review round 10 P1-A update: SourceCleanupFailed's docstring/__init__
+# grew a `reason` param (source_changed vs cleanup_error — see the class's
+# own docstring) ahead of move_table, shifting this site again (320->330).
 INDEPENDENT_PRIVATE_SITES = INDEPENDENT_PRIVATE_SITES | {
-    ("backend/app/services/knowhow/transfer.py", 320, "_runtime"): (
+    ("backend/app/services/knowhow/transfer.py", 330, "_runtime"): (
         "knowhow cross-notebook transfer orchestration (like api.py) "
         "reaches the A1 KnowhowTransferStore a third, independent time — "
         "move_table's own snapshot-vs-delete concurrent-edit guard "

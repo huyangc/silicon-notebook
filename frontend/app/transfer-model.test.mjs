@@ -116,6 +116,30 @@ test("parseCleanupFailure: 命中 409 source_cleanup_failed → {newTableId, mes
   });
 });
 
+// round 10 P1-A：第二个 409 code——SourceCleanupFailed.reason 现在区分两种
+// 成因（backend/app/services/knowhow/transfer.py），路由层（routes.py）据此
+// 产出两个不同的 code。parseCleanupFailure 必须同时接受这个新 code、原样把
+// message 带出去，不能只认旧的 source_cleanup_failed。
+test("parseCleanupFailure: 命中 409 source_changed_kept → {newTableId, message}", () => {
+  const body = {
+    detail: {
+      code: "source_changed_kept",
+      new_table_id: "kt-100",
+      message:
+        "源表在复制完成后有更新的修改，为避免丢失该修改，源表已被保留——" +
+        "目标笔记本里的副本是这次修改之前的旧版本。请核对后删除目标里的" +
+        "旧副本，或重新发起一次搬迁；请勿删除源表。",
+    },
+  };
+  assert.deepEqual(parseCleanupFailure(409, body), {
+    newTableId: "kt-100",
+    message:
+      "源表在复制完成后有更新的修改，为避免丢失该修改，源表已被保留——" +
+      "目标笔记本里的副本是这次修改之前的旧版本。请核对后删除目标里的" +
+      "旧副本，或重新发起一次搬迁；请勿删除源表。",
+  });
+});
+
 test("parseCleanupFailure: 非 409 状态码 → null（即使 body 形状对）", () => {
   const body = {
     detail: { code: "source_cleanup_failed", new_table_id: "kt-99", message: "x" },
@@ -125,7 +149,7 @@ test("parseCleanupFailure: 非 409 状态码 → null（即使 body 形状对）
   assert.equal(parseCleanupFailure(200, body), null);
 });
 
-test("parseCleanupFailure: 409 但 code 不是 source_cleanup_failed → null", () => {
+test("parseCleanupFailure: 409 但 code 不是这两个已知值之一 → null", () => {
   assert.equal(
     parseCleanupFailure(409, { detail: { code: "other_error", new_table_id: "kt-99" } }),
     null
@@ -182,10 +206,11 @@ test("summarizeTransferResults: 全部成功（copied + moved 混合）", () => 
   assert.equal(summary.succeeded, 2);
   assert.equal(summary.failed, 0);
   assert.deepEqual(summary.copiedSourceNotRemoved, []);
+  assert.deepEqual(summary.sourceChanged, []);
   assert.deepEqual(summary.promotionBlocked, []);
 });
 
-test("summarizeTransferResults: 混合结果（成功/普通失败/复制未删源）", () => {
+test("summarizeTransferResults: 混合结果（成功/普通失败/复制未删源-cleanup_error）", () => {
   const results = [
     { source_id: "m1", new_id: "m1x", ok: true, error: null, status: "copied" },
     { source_id: "m2", new_id: null, ok: false, error: "not found", status: "failed" },
@@ -194,6 +219,7 @@ test("summarizeTransferResults: 混合结果（成功/普通失败/复制未删�
       new_id: "m3x",
       ok: false,
       error: "复制已成功，但源未删除：disk full",
+      error_code: "cleanup_error",
       status: "copied_source_not_removed",
     },
   ];
@@ -204,18 +230,32 @@ test("summarizeTransferResults: 混合结果（成功/普通失败/复制未删�
   assert.equal(summary.copiedSourceNotRemoved.length, 1);
   assert.equal(summary.copiedSourceNotRemoved[0].source_id, "m3");
   assert.equal(summary.copiedSourceNotRemoved[0].new_id, "m3x");
+  // round 10 P1-B：cleanup_error 不落进 sourceChanged 子集——它是"清理本身
+  // 出错，源确实原封未动"，与"源被有意保留"是截然不同的两回事。
+  assert.deepEqual(summary.sourceChanged, []);
 });
 
-test("summarizeTransferResults: 全部是 copied_source_not_removed", () => {
+test("summarizeTransferResults: 全部是 copied_source_not_removed（source_changed + cleanup_error 混合，round 10 P1-B）", () => {
   const results = [
-    { source_id: "m1", new_id: "m1x", ok: false, error: "e1", status: "copied_source_not_removed" },
-    { source_id: "m2", new_id: "m2x", ok: false, error: "e2", status: "copied_source_not_removed" },
+    {
+      source_id: "m1", new_id: "m1x", ok: false, error: "e1",
+      error_code: "source_changed", status: "copied_source_not_removed",
+    },
+    {
+      source_id: "m2", new_id: "m2x", ok: false, error: "e2",
+      error_code: "cleanup_error", status: "copied_source_not_removed",
+    },
   ];
   const summary = summarizeTransferResults(results);
   assert.equal(summary.total, 2);
   assert.equal(summary.succeeded, 0);
   assert.equal(summary.failed, 2);
   assert.equal(summary.copiedSourceNotRemoved.length, 2);
+  // sourceChanged 必须只挑出 m1（error_code === "source_changed"），漏掉 m2
+  // 会导致前端错误地告诉用户"删除源是安全的"，多挑上 m2 则相反——两个方向
+  // 都要盯住。
+  assert.equal(summary.sourceChanged.length, 1);
+  assert.equal(summary.sourceChanged[0].source_id, "m1");
   assert.deepEqual(summary.promotionBlocked, []);
 });
 
@@ -226,6 +266,7 @@ test("summarizeTransferResults: 空数组", () => {
     succeeded: 0,
     failed: 0,
     copiedSourceNotRemoved: [],
+    sourceChanged: [],
     promotionBlocked: [],
   });
 });
@@ -265,6 +306,9 @@ test("summarizeTransferResults: 识别 promotion_proposed 阻塞，与普通失�
   assert.equal(summary.promotionBlocked[0].source_id, "m2");
   assert.equal(summary.copiedSourceNotRemoved.length, 1);
   assert.equal(summary.copiedSourceNotRemoved[0].source_id, "m4");
+  // m4 的 error_code 是 null（不是 "source_changed"）——不该被 sourceChanged
+  // 误收：null 只表示"没有机器可判的成因"，不能当成"源被有意保留"处理。
+  assert.deepEqual(summary.sourceChanged, []);
 });
 
 test("summarizeTransferResults: error_code 缺失（旧结果/其它失败原因）不算 promotionBlocked", () => {
@@ -292,6 +336,7 @@ test("summarizeTransferResults: promotion_proposed 全部命中", () => {
   assert.equal(summary.failed, 2);
   assert.equal(summary.promotionBlocked.length, 2);
   assert.deepEqual(summary.copiedSourceNotRemoved, []);
+  assert.deepEqual(summary.sourceChanged, []);
 });
 
 // --- confirmedOnly（P2-B，round 6 评审）---------------------------------

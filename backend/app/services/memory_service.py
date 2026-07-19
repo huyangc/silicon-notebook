@@ -963,6 +963,22 @@ class MemoryService:
                 #   ② move 的源清理（顺序见下面 AMENDMENT 1）。
                 cleanup_error: str | None = None
                 source_removed = False
+                # round 10 P1-B（镜像 knowhow 侧 SourceCleanupFailed.reason）：
+                # copied_source_not_removed 这个 status 目前把两种截然不同的
+                # 成因压成同一句"源未删除"人话——(a) 下面的原子条件删除返回
+                # False：源被有意保留下来保护一份并发编辑/状态流转/审批提案，
+                # 不是清理失败；(b) 收尾这段真的抛了异常（remove_memory_
+                # source/_maybe_schedule_kg/_schedule_embed……）：源确实原封
+                # 未动。前端要对这两种给出截然不同的指引——(a) 时絮叨"删除源"
+                # 会连带丢失那份被保留下来的编辑，只能是"弃用源"或"重新发起
+                # 搬迁"；(b) 时源没有任何变化，弃用/删除都安全。默认
+                # "cleanup_error"，只在原子删除真的返回 False 那一刻扳成
+                # "source_changed"——和 knowhow 侧同一个"局部变量而非 isinstance
+                # 判特定异常类型"的理由：即便扳过之后、真正 raise 之前的收尾
+                # （下面重新排队 KG 抽取）自己又抛出别的异常，源确实是因为原子
+                # 删除判定"变了"才被保留的，不该因为收尾工作本身失手就误判成
+                # "删除安全"的 cleanup_error。
+                retain_reason = "cleanup_error"
                 try:
                     self._event(
                         "memory_lifecycle", copied, action=f"transfer_{mode}",
@@ -1039,6 +1055,11 @@ class MemoryService:
                         if not self.store.delete_memory_if_unchanged(
                             source.id, user_id, source_revision
                         ):
+                            # round 10 P1-B：源确凿是因为原子删除的 WHERE 子句
+                            # 未命中才被保留的——在任何后续收尾工作（下面的
+                            # 重新排队 KG 抽取）有机会自己出错之前，先诚实记
+                            # 下这一点。
+                            retain_reason = "source_changed"
                             # P2-1（PR review round 4）：remove_memory_source 在
                             # 上一行已经真的把源的 KG 派生源删掉了——不管这次
                             # 原子删除最终判定"变了"保留源 memory 与否，那个
@@ -1125,24 +1146,26 @@ class MemoryService:
                     # copy 模式没有"源清理"这一说：收尾失败最多丢掉派生工作
                     # （KG 抽取/嵌入调度），副本本身完整可用，仍算成功；失败细节
                     # 已进事件日志（与 _embed 标记 embedding 失败的既有惯例一致）。
-                    outcome, ok, error = "copied", True, None
+                    outcome, ok, error, result_error_code = "copied", True, None, None
                 elif source_removed:
-                    outcome, ok, error = "moved", True, None
+                    outcome, ok, error, result_error_code = "moved", True, None, None
                 else:
                     # move 承诺了"源会消失"，而它没消失——不能报成功。
                     outcome, ok = "copied_source_not_removed", False
                     error = f"复制已成功，但源未删除：{cleanup_error}"
+                    # round 10 P1-B：这条 status 现在把 retain_reason 原样带出
+                    # 去——"source_changed"（源保留是有意为之，前端绝不能引导
+                    # 删除）还是 "cleanup_error"（源确实原封未动，删除/弃用都
+                    # 安全）。ok=True 的两条分支上面固定 None：error 为空时
+                    # error_code 不该非空（同 round 8 P2-A 定的那条不变量）。
+                    result_error_code = retain_reason
                 results.append(
                     {
                         "source_id": memory_id,
                         "new_id": copied.id,
                         "ok": ok,
                         "error": error,
-                        # round 8 P2-A：这条路径的三个结果（copied/moved/
-                        # copied_source_not_removed）都已经有自己专属、机器
-                        # 可判的 status 值——None 只是保持每条结果字典字段
-                        # 形状一致（调用方不用先判"这个键存不存在"）。
-                        "error_code": None,
+                        "error_code": result_error_code,
                         "status": outcome,
                     }
                 )

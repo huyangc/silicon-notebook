@@ -132,6 +132,10 @@ def test_move_cleanup_failure_reports_per_item_and_keeps_copy(repo, alice, monke
     assert result["new_id"] is not None
     assert result["status"] == "copied_source_not_removed"
     assert "database is locked" in result["error"]
+    # round 10 P1-B：delete_memory_if_unchanged 本身抛异常（不是返回 False）
+    # ——源确实原封未动，error_code 必须是 "cleanup_error"（弃用/删除都安全），
+    # 不能被误判成 "source_changed"。
+    assert result["error_code"] == "cleanup_error"
 
     # 副本已经存在于目标 notebook——不会因为清理失败而丢失/静默重复创建
     copied = service.get(result["new_id"], alice.id)
@@ -239,6 +243,9 @@ def test_move_kg_eligibility_failure_keeps_source_and_reports_copy(
     assert result["ok"] is False
     assert result["status"] == "copied_source_not_removed"
     assert result["new_id"] is not None
+    # round 10 P1-B：故障点在 memory_kg_eligible——远早于原子删除，源确实
+    # 原封未动，error_code 必须是 "cleanup_error"。
+    assert result["error_code"] == "cleanup_error"
     assert service.get(result["new_id"], alice.id).notebook_id == dst
     # 源没被删（收尾在 remove/delete 之前就中断了）——重复而非丢失
     assert service.get(mem.id, alice.id).notebook_id == src
@@ -271,6 +278,9 @@ def test_batch_survives_post_commit_failure_on_a_later_item(repo, alice, monkeyp
     assert results[1]["ok"] is False
     assert results[1]["status"] == "copied_source_not_removed"
     assert results[1]["new_id"] is not None
+    # round 10 P1-B：故障点是 remove_memory_source 抛异常，远早于原子删除
+    # ——第二条的源确实原封未动，error_code 必须是 "cleanup_error"。
+    assert results[1]["error_code"] == "cleanup_error"
     # 第一条确实搬走了；第二条的源还在
     with pytest.raises(KeyError):
         service.get(first.id, alice.id)
@@ -487,6 +497,10 @@ def test_move_does_not_delete_source_edited_after_copy_commits(repo, alice, monk
     assert result["ok"] is False
     assert result["status"] == "copied_source_not_removed"
     assert result["new_id"] is not None
+    # round 10 P1-B：delete_memory_if_unchanged 返回 False（revision 复核未
+    # 命中）——源是被有意保留以保护这份并发编辑的，error_code 必须是
+    # "source_changed"（绝不能引导用户删除源）。
+    assert result["error_code"] == "source_changed"
 
     # 源没被删，且带着并发编辑后的新内容——不是编辑前的旧值
     still_there = service.get(mem.id, alice.id)
@@ -533,6 +547,9 @@ def test_move_does_not_delete_source_deprecated_after_copy_commits(repo, alice, 
     assert result["ok"] is False
     assert result["status"] == "copied_source_not_removed"
     assert result["new_id"] is not None
+    # round 10 P1-B：同上一条用例，delete_memory_if_unchanged 返回 False——
+    # error_code 必须是 "source_changed"。
+    assert result["error_code"] == "source_changed"
 
     # 源没被删，且带着并发那次 deprecate 之后的新状态
     still_there = service.get(mem.id, alice.id)
@@ -590,6 +607,7 @@ def test_move_does_not_delete_source_edited_during_kg_source_removal(
     assert result["ok"] is False
     assert result["status"] == "copied_source_not_removed"
     assert result["new_id"] is not None
+    assert result["error_code"] == "source_changed"  # round 10 P1-B
 
     # 源没被删，且带着并发编辑后的新内容——不是复核那一刻的旧快照
     still_there = service.get(mem.id, alice.id)
@@ -618,7 +636,24 @@ def test_move_does_not_delete_source_deprecated_during_kg_source_removal(
     mem = _confirmed_memory(service, src, alice, title="T", content="B")
 
     def _concurrent_deprecate_during_kg_removal(memory_id):
-        service.deprecate(memory_id, alice.id)
+        # round 10 P1-B 修复（不是 mock 手法演进，是这条用例自己一直带着的
+        # 一个假阳性回收口）：直接调 store 的状态流转原语，不经过 service.
+        # deprecate()——deprecate() 自己也会调 self.memory_kg.
+        # remove_memory_source（正是这里被 monkeypatch 的同一个属性），经它
+        # 调用会递归重入这个桩本身，对刚被上一次调用转成 deprecated 的行再
+        # 转一次状态，撞上 transition_with_revision 自己的"非法状态迁移"校验
+        # 炸出一个和这条竞态无关的 ValueError（`invalid memory transition:
+        # deprecated -> deprecated`）——这是 mock 手法的人为产物，不是这条
+        # 竞态本身要模拟的东西：真实并发的 deprecate 是另一个请求/线程独立
+        # 调用，不会嵌套进这次 remove_memory_source 调用本身。只重放
+        # deprecate() 真正会影响 delete_memory_if_unchanged 判据的那部分效果
+        # （状态+revision），不重放它自己的 KG 收尾调用，才不会把这条用例的
+        # error_code 断言意外地测成"清理本身炸了"（round 10 之前，reason 这
+        # 个字段不存在，这个假阳性一直被悄悄吞掉、测不出来）。
+        service.store.transition_with_revision(
+            memory_id, alice.id, {"confirmed"}, "deprecated",
+            fields=None, changed_by=alice.id, reason="deprecated",
+        )
 
     monkeypatch.setattr(
         service.memory_kg, "remove_memory_source", _concurrent_deprecate_during_kg_removal
@@ -630,6 +665,7 @@ def test_move_does_not_delete_source_deprecated_during_kg_source_removal(
     assert result["ok"] is False
     assert result["status"] == "copied_source_not_removed"
     assert result["new_id"] is not None
+    assert result["error_code"] == "source_changed"  # round 10 P1-B
 
     # 源没被删，且带着并发那次 deprecate 之后的新状态
     still_there = service.get(mem.id, alice.id)
@@ -753,6 +789,9 @@ def test_move_reingests_kg_source_when_edit_lands_after_source_removed(
     result = results[0]
     assert result["ok"] is False
     assert result["status"] == "copied_source_not_removed"
+    # round 10 P1-B：delete_memory_if_unchanged 返回 False——error_code 必须
+    # 是 "source_changed"。
+    assert result["error_code"] == "source_changed"
 
     # 源没被删，且带着并发编辑后的新内容——保留分支本身的既有契约。
     still_there = service.get(mem.id, alice.id)
@@ -808,6 +847,7 @@ def test_move_does_not_reingest_kg_source_when_deprecated_after_source_removed(
 
     result = results[0]
     assert result["status"] == "copied_source_not_removed"
+    assert result["error_code"] == "source_changed"  # round 10 P1-B
     still_there = service.get(mem.id, alice.id)
     assert still_there.status == "deprecated"
 
@@ -1168,6 +1208,11 @@ def test_move_retains_memory_when_promotion_proposed_between_precheck_and_revisi
     assert result["ok"] is False
     assert result["status"] == "copied_source_not_removed"
     assert result["new_id"] is not None
+    # round 10 P1-B：delete_memory_if_unchanged 返回 False 是唯一的分类判据
+    # （不深究"变了"具体是内容编辑还是这里的并发提案）——error_code 仍是
+    # "source_changed"：源没有被清理操作本身搞坏，是原子删除的 WHERE 子句
+    # 没匹配上，指引依旧是"别删源、去核对/重试"，不是"删除安全"。
+    assert result["error_code"] == "source_changed"
 
     still_there = service.get(mem.id, alice.id)
     assert still_there.notebook_id == src

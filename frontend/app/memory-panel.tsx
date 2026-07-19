@@ -75,23 +75,35 @@ async function memoryApi<T>(path: string, options: RequestInit = {}): Promise<T>
 
 type MemoryDraft = { title: string; content_md: string; tags: string };
 
-// C4「复制/移动到…」结果提示——四个字段各自独立设置(warning/promotionBlocked/
-// failure 可以在同一批结果里同时非空,分属结果数组里不相交的子集;success 与
-// 其它三个互斥,只在没有任何 warning/promotionBlocked/failure 时才可能非空):
+// C4「复制/移动到…」结果提示——五个字段各自独立设置(warning/sourceChanged/
+// promotionBlocked/failure 可以在同一批结果里同时非空,分属结果数组里不相交
+// 的子集;success 与其它四个互斥,只在没有任何 warning/sourceChanged/
+// promotionBlocked/failure 时才可能非空):
 // warning 对应 transfer-model.ts summarizeTransferResults() 的
-// copiedSourceNotRemoved 子集(副本已落地,需要用户手动清源,别再重试);
-// promotionBlocked 对应它的 promotionBlocked 子集(round 8 P2-A:该 Memory 正
-// 在公共知识库审批队列中,move 被拒绝——同样不能引导"重试",得指向待确认中
-// 心);failure 对应剩下的普通 status==="failed"。三者渲染成不同文案的横幅,
-// 不能合并成一条消息——AMENDMENT 2 明确要求 warning/failure 视觉上可区分,
-// promotionBlocked 是同一原则的延伸:原因不同,提示和后续动作也该不同。
-// success 是复审 Minor 补充:批量结果里没有 warning/promotionBlocked/failure
-// (即全部成功)、且 mode==="copy" 才设置——move 的成功靠列表刷新自然可见(条
-// 目从当前视图消失/搬走了),但 copy 源视图不变、目标又不在眼前,不给提示用
-// 户没法确认"点了到底有没有效果"。复用同一套 .memory-transfer-notice 视
-// 觉,不新造 chrome。
+// copiedSourceNotRemoved 子集减去 sourceChanged 子集,即 error_code ===
+// "cleanup_error" 的那部分——清理操作本身出错,源确实原封未动,弃用/删除都
+// 安全;sourceChanged 对应它的 sourceChanged 子集(round 10 P1-B):源不是清理
+// 失败,是在复制完成后被并发编辑/状态变更/提交了审批提案而被有意保留下来
+// 的——这两种成因绝不能共用一条"请手动删除源"的指引,那对 sourceChanged 是
+// 危险的(照做会连带丢失被保留下来的改动),只能是「核对目标/重新发起搬迁」
+// 或「弃用源」(弃用会真的清理掉源的 KG 派生源,删除不会——MemoryService.
+// delete 只删行本身,是 deprecate 才会调 remove_memory_source);promotionBlocked
+// 对应它的 promotionBlocked 子集(round 8 P2-A:该 Memory 正在公共知识库审批
+// 队列中,move 被拒绝——同样不能引导"重试",得指向待确认中心);failure 对应
+// 剩下的普通 status==="failed"。四者渲染成不同文案的横幅,不能合并成一条消息
+// ——AMENDMENT 2 明确要求 warning/failure 视觉上可区分,promotionBlocked/
+// sourceChanged 是同一原则的延伸:原因不同,提示和后续动作也该不同。
+// success 是复审 Minor 补充,round 10 P2 从"仅 copy"扩到 copy/move 都设置:
+// 批量结果里没有 warning/sourceChanged/promotionBlocked/failure(即全部成功)
+// 就设置——原先 move 的成功被认为"靠列表刷新自然可见"，但未过滤的全局
+// Memory 视图里列表刷新后卡片依旧在(只是换了 notebook，卡片不显示归属笔记
+// 本)，用户拿不到任何"确实移动成功了"的确认；copy 同理(源视图不变、目标又
+// 不在眼前)。两种模式统一带上目标笔记本名字,不给提示用户没法确认"点了到底
+// 有没有效果、去了哪"。复用同一套 .memory-transfer-notice 视觉,不新造
+// chrome。
 type TransferNotice = {
   warning: string | null;
+  sourceChanged: string | null;
   promotionBlocked: string | null;
   failure: string | null;
   success: string | null;
@@ -745,21 +757,25 @@ export function MemoryPanel({
   // 让它落进 DestinationPicker 自己的 catch(会显示这条消息并重新点亮
   // 「确认」)，一次改动同时兜住 busyId 和 sessionSignal.aborted 两种情形。
   //
-  // 200 之内逐条结果用 summarizeTransferResults 拆成两类，分别落进
-  // transferNotice 的 warning/failure 字段，特意不写回全局 error state：下面
-  // setRefresh 触发的重新拉取 effect 自己会在起手处 setError("")(见该 effect
-  // 顶部)，如果复用 error 存这条消息，会在同一批状态更新后几乎立刻被那次清空
-  // 冲掉——用户根本来不及看见，AMENDMENT 2 要求的"可见提示"就形同虚设。
-  // transferNotice 不挂在那个 effect 上，只在下一次别的写操作开始时才清空(与
-  // knowhow-panel.tsx 里 actionError 的清空方式同一套)，所以能稳定留到用户看见
-  // 为止。复审 Minor 补充：批量结果里没有 warning/failure(即全部成功)、且
-  // mode==="copy" 时也落一条 transferNotice.success——move 的成功靠列表刷新
-  // 自证，copy 源视图不变、目标又不在眼前，不给提示用户没法确认操作生效。
+  // 200 之内逐条结果用 summarizeTransferResults 拆成若干类，分别落进
+  // transferNotice 的 warning/sourceChanged/failure 字段，特意不写回全局 error
+  // state：下面 setRefresh 触发的重新拉取 effect 自己会在起手处 setError("")
+  // (见该 effect 顶部)，如果复用 error 存这条消息，会在同一批状态更新后几乎
+  // 立刻被那次清空冲掉——用户根本来不及看见，AMENDMENT 2 要求的"可见提示"就
+  // 形同虚设。transferNotice 不挂在那个 effect 上，只在下一次别的写操作开始
+  // 时才清空(与 knowhow-panel.tsx 里 actionError 的清空方式同一套)，所以能
+  // 稳定留到用户看见为止。复审 Minor 补充，round 10 P2 从"仅 copy"扩到
+  // copy/move 都设置：批量结果里没有 warning/sourceChanged/promotionBlocked/
+  // failure(即全部成功)就落一条 transferNotice.success，带上目标笔记本名字
+  // ——原先只在 mode==="copy" 时设置，理由是"move 的成功靠列表刷新自然可
+  // 见"，但那对未过滤的全局视图不成立：卡片不显示 notebook 归属，一次成功
+  // 的移动会让列表刷新后卡片原样还在(只是换了笔记本)，用户拿不到任何确认。
   async function submitTransfer(
     ids: string[],
     targetNotebookId: string,
     mode: TransferMode,
     extractKg: boolean,
+    targetNotebookName: string,
   ) {
     if (busyId || sessionSignal.aborted) {
       throw humanizedError("有其它操作正在进行，请稍后重试");
@@ -774,6 +790,12 @@ export function MemoryPanel({
       setSelectedIds(new Set());
       setRefresh((value) => value + 1);
       const summary = summarizeTransferResults(results);
+      // round 10 P1-B：copiedSourceNotRemoved 现在按 error_code 拆成两个互
+      // 斥的展示桶——sourceChanged（源被有意保留，绝不能建议删除）和
+      // "剩下的那部分"即 cleanupErrorCount（清理操作本身出错，源确实原封
+      // 未动，弃用/删除都安全）。两者相加恒等于 copiedSourceNotRemoved.length
+      // （sourceChanged 是它的子集），所以不需要再单独一个"总数"字段。
+      const cleanupErrorCount = summary.copiedSourceNotRemoved.length - summary.sourceChanged.length;
       // round 8 P2-A：promotionBlocked 也从"普通失败"计数里摘出去——它和
       // copiedSourceNotRemoved 一样不可重试，不该被算进"N 条失败，请稍后
       // 重试"那句会误导用户去点"重试"的通用文案。
@@ -797,8 +819,19 @@ export function MemoryPanel({
         ));
         if (failedReasons.length > 0) logDiagnostic("memory-transfer", failedReasons.join("；"));
         setTransferNotice({
-          warning: summary.copiedSourceNotRemoved.length > 0
-            ? `${summary.copiedSourceNotRemoved.length} 条已复制到目标笔记本，但源未能自动清理，请手动删除源 Memory，避免重复操作产生冗余副本。`
+          // round 10 P1-B：这条消息现在只覆盖 cleanupErrorCount（真正的清理
+          // 失败）——绝不能再建议"删除"：MemoryService.delete 只删行本身，
+          // 不会清理派生的 KG 源（只有 deprecate 会），照做会让这条已经搬去
+          // 目标的 Memory 在源 notebook 的知识图谱里继续可被检索到，变成一
+          // 个搜得到、点不开的幽灵。
+          warning: cleanupErrorCount > 0
+            ? `${cleanupErrorCount} 条已复制到目标笔记本，但源未能自动清理。建议将源 Memory 标记为「弃用」（会一并清理其知识图谱关联），或重新发起一次移动；直接删除不会清理知识图谱，可能留下可搜索的残留。`
+            : null,
+          // round 10 P1-B：源不是清理失败——是在复制完成后被并发编辑/状态
+          // 变更/提交了审批提案而被有意保留下来的，目标里的副本才是那次改
+          // 动之前的旧版本。绝不能建议删除源（会连带永久丢失那份改动）。
+          sourceChanged: summary.sourceChanged.length > 0
+            ? `${summary.sourceChanged.length} 条源 Memory 有更新的修改已被保留；请核对后删除目标笔记本里的旧副本，或重新发起一次移动。`
             : null,
           promotionBlocked: summary.promotionBlocked.length > 0
             ? `${summary.promotionBlocked.length} 条正在公共知识库审批中，暂不能移动；请先在待确认中心处理提案。`
@@ -808,14 +841,16 @@ export function MemoryPanel({
             : null,
           success: null,
         });
-      } else if (mode === "copy" && summary.succeeded > 0) {
+      } else if (summary.succeeded > 0) {
+        const verb = mode === "move" ? "移动" : "复制";
         setTransferNotice({
           warning: null,
+          sourceChanged: null,
           promotionBlocked: null,
           failure: null,
           success: summary.succeeded > 1
-            ? `已复制 ${summary.succeeded} 条 Memory 到目标笔记本`
-            : "已复制到目标笔记本",
+            ? `已${verb} ${summary.succeeded} 条 Memory 到「${targetNotebookName}」`
+            : `已${verb}到「${targetNotebookName}」`,
         });
       }
     } finally {
@@ -977,11 +1012,16 @@ export function MemoryPanel({
           用独立 state、不同色调渲染，与下面普通失败横幅（复用既有 .memory-error
           红色调）视觉上明确分开。round 8 P2-A：promotionBlocked 是同一原则的
           第三条分支——正在公共知识库审批中，重试同样无效，需要指向待确认中心
-          而不是"稍后重试"，与 warning 共用同一套非警示色的 .memory-transfer-
-          notice 视觉（都是"已知原因、非报错"的提示，不是 failure 那种需要
-          用户重新操作的错误态）。 */}
+          而不是"稍后重试"。round 10 P1-B：sourceChanged 是第四条分支——源不是
+          清理失败，是被有意保留下来保护一份并发改动的，指引和 warning（真正的
+          清理失败）截然不同，不能合并成一条消息。四者共用同一套非警示色的
+          .memory-transfer-notice 视觉（都是"已知原因、非报错"的提示，不是
+          failure 那种需要用户重新操作的错误态）。 */}
       {transferNotice?.warning && (
         <div className="memory-transfer-notice" role="status">{transferNotice.warning}</div>
+      )}
+      {transferNotice?.sourceChanged && (
+        <div className="memory-transfer-notice" role="status">{transferNotice.sourceChanged}</div>
       )}
       {transferNotice?.promotionBlocked && (
         <div className="memory-transfer-notice" role="status">{transferNotice.promotionBlocked}</div>
@@ -1211,7 +1251,9 @@ export function MemoryPanel({
           extractKg={transferExtractKg}
           onExtractKgChange={setTransferExtractKg}
           onCancel={() => setPendingTransfer(null)}
-          onSubmit={(targetNotebookId, mode) => submitTransfer(pendingTransfer.ids, targetNotebookId, mode, transferExtractKg)}
+          onSubmit={(targetNotebookId, mode, targetNotebookName) =>
+            submitTransfer(pendingTransfer.ids, targetNotebookId, mode, transferExtractKg, targetNotebookName)
+          }
         />
       )}
     </section>

@@ -37,7 +37,14 @@ export function DestinationPicker({
   extractKg?: boolean;
   onExtractKgChange?: (value: boolean) => void;
   onCancel: () => void;
-  onSubmit: (targetNotebookId: string, mode: TransferMode) => Promise<void>;
+  // round 10 P2：第三个参数是目标笔记本的 name——本组件自己刚从 /notebooks
+  // 拉到的完整候选列表（下面的 notebooks state）里现成就有，调用方（尤其是
+  // memory-panel.tsx 的全局视图）不必再自己维护一份"全部笔记本 id→name"的
+  // 映射去查（它现成的 notebookOptions 只覆盖"当前已经有 memory 的笔记本"，
+  // 搬到一个全新的空笔记本时查不到）。knowhow 调用方（C3）的 onSubmit 目前
+  // 只声明了两个参数——这在 TS 里合法（回调可以忽略多传的实参），不强制
+  // 所有调用方都用上第三个。
+  onSubmit: (targetNotebookId: string, mode: TransferMode, targetNotebookName: string) => Promise<void>;
 }) {
   const [notebooks, setNotebooks] = useState<NotebookSummary[]>([]);
   const [target, setTarget] = useState("");
@@ -75,7 +82,12 @@ export function DestinationPicker({
     setBusy(true);
     setError(null);
     try {
-      await onSubmit(target, mode);
+      // round 10 P2：target 恒是从下面 <select> 渲染的 notebooks 列表里选出
+      // 来的 id，此刻在这份列表里查得到——find 失败（列表在选中后又变了这种
+      // 理论上不该发生的情况）时兜底成 target 本身，好过让调用方拿到空串
+      // 拼出"已移动到「」"这种看着像 bug 的文案。
+      const targetName = notebooks.find((n) => n.id === target)?.name ?? target;
+      await onSubmit(target, mode, targetName);
       // 成功后不在这里复位 busy——modal 是否关闭由调用方决定(onSubmit resolve
       // 即代表调用方已经/即将卸载本组件);只有失败分支需要复位以便用户重试。
     } catch (err) {

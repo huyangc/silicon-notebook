@@ -290,3 +290,64 @@ def test_over_200_memory_ids_rejected_with_422(client, repo):
     )
 
     assert resp.status_code == 422, resp.text
+
+
+# --------------------------------------------------------------------------
+# round 10 P1-B：error_code 必须在 HTTP JSON 里原样透传——这条端点没有
+# response_model（memory_routes.py 的 transfer_memories 直接
+# `return {"results": results}`，service 返回的 dict 原样序列化），理论上不
+# 该有任何字段被悄悄丢掉；这条用例确认真走一遍 HTTP 也确实如此，不只是
+# service 层直接 Python 调用能看到这个字段。并发编辑通过 monkeypatch 类级
+# `MemoryStore.create_copy_with_initial_revision` 注入——同上面 A4 knowhow
+# 路由测试头部注释的理由：app 的 repository() 和这里的 repo 夹具是两个不同
+# 的 Python 对象（只是共享同一个 tmp DB 文件），必须 patch 类本身才能两边
+# 都命中。
+# --------------------------------------------------------------------------
+
+def test_move_source_changed_reports_error_code_over_http(client, repo, monkeypatch):
+    from app.models.schemas import MemoryUpdate
+    from app.repositories.sqlite.memory_store import MemoryStore
+
+    real_create_copy = MemoryStore.create_copy_with_initial_revision
+
+    def _create_copy_then_concurrent_edit(
+        self, write, source_memory_id, changed_by, reason, expected_source_revision
+    ):
+        copied = real_create_copy(
+            self, write, source_memory_id, changed_by, reason, expected_source_revision
+        )
+        # 模拟并发写者：就在副本提交之后、transfer() 走到自己的收尾删源之前，
+        # 另一个请求编辑了源 memory 的标题。
+        repo._runtime.memory_service.update(
+            source_memory_id, write.created_by, MemoryUpdate(title="并发改的标题")
+        )
+        return copied
+
+    monkeypatch.setattr(
+        MemoryStore, "create_copy_with_initial_revision", _create_copy_then_concurrent_edit
+    )
+
+    h = _login(client, "a00000060")
+    uid = _uid(client, h)
+    src = client.post("/api/notebooks", json={"name": "src"}, headers=h).json()["id"]
+    dst = client.post("/api/notebooks", json={"name": "dst"}, headers=h).json()["id"]
+    mem = _confirmed_memory(repo, src, uid)
+
+    resp = client.post(
+        "/api/memories/transfer",
+        json={"memory_ids": [mem.id], "target_notebook_id": dst, "mode": "move", "extract_kg": False},
+        headers=h,
+    )
+
+    assert resp.status_code == 200, resp.text
+    result = resp.json()["results"][0]
+    assert result["ok"] is False
+    assert result["status"] == "copied_source_not_removed"
+    # 这条断言是本用例存在的理由：error_code 必须原样穿过 HTTP JSON，前端
+    # summarizeTransferResults() 靠它区分 source_changed / cleanup_error。
+    assert result["error_code"] == "source_changed"
+
+    # 源仍在，且带着并发编辑后的新标题——不是复制那一刻的旧快照
+    src_check = client.get(f"/api/memories/{mem.id}", headers=h)
+    assert src_check.status_code == 200
+    assert src_check.json()["title"] == "并发改的标题"
