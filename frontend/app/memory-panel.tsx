@@ -869,13 +869,13 @@ export function MemoryPanel({
           // 目标的 Memory 在源 notebook 的知识图谱里继续可被检索到，变成一
           // 个搜得到、点不开的幽灵。
           warning: cleanupErrorCount > 0
-            ? `${cleanupErrorCount} 条已复制到目标笔记本，但源未能自动清理。建议将源 Memory 标记为「弃用」（会一并清理其知识图谱关联），或重新发起一次移动；直接删除不会清理知识图谱，可能留下可搜索的残留。`
+            ? `${cleanupErrorCount} 条已复制到目标笔记本，但源未能自动清理。建议将源记忆标记为「弃用」（会一并清理其知识图谱关联），或重新发起一次移动；直接删除不会清理知识图谱，可能留下可搜索的残留。`
             : null,
           // round 10 P1-B：源不是清理失败——是在复制完成后被并发编辑/状态
           // 变更/提交了审批提案而被有意保留下来的，目标里的副本才是那次改
           // 动之前的旧版本。绝不能建议删除源（会连带永久丢失那份改动）。
           sourceChanged: summary.sourceChanged.length > 0
-            ? `${summary.sourceChanged.length} 条源 Memory 有更新的修改已被保留；请核对后删除目标笔记本里的旧副本，或重新发起一次移动。`
+            ? `${summary.sourceChanged.length} 条源记忆有更新的修改已被保留；请核对后删除目标笔记本里的旧副本，或重新发起一次移动。`
             : null,
           promotionBlocked: summary.promotionBlocked.length > 0
             ? `${summary.promotionBlocked.length} 条正在公共知识库审批中，暂不能移动；请先在待确认中心处理提案。`
@@ -893,7 +893,7 @@ export function MemoryPanel({
           promotionBlocked: null,
           failure: null,
           success: summary.succeeded > 1
-            ? `已${verb} ${summary.succeeded} 条 Memory 到「${targetNotebookName}」`
+            ? `已${verb} ${summary.succeeded} 条记忆到「${targetNotebookName}」`
             : `已${verb}到「${targetNotebookName}」`,
         });
       }
@@ -1021,19 +1021,19 @@ export function MemoryPanel({
             onClick={() => {
               const chosen = items.filter((item) => selectedIds.has(item.id));
               if (chosen.length !== selectedIds.size) {
-                setError("批量复制/移动只能处理当前页面内的选中项，部分选中的 Memory 不在本页，请分页分别操作");
+                setError("批量复制/移动只能处理当前页面内的选中项，部分选中的记忆不在本页，请分页分别操作");
                 setTransferNotice(null);
                 return;
               }
               const confirmed = confirmedOnly(chosen);
               if (confirmed.length === 0) {
-                setError("所选 Memory 均非已确认状态，只有已确认的 Memory 才能复制/移动");
+                setError("所选记忆均非已确认状态，只有已确认的记忆才能复制/移动");
                 setTransferNotice(null);
                 return;
               }
               const sourceNotebookId = singleSourceNotebookId(confirmed);
               if (!sourceNotebookId) {
-                setError("批量复制/移动要求所选 Memory 属于同一个笔记本，请重新选择");
+                setError("批量复制/移动要求所选记忆属于同一个笔记本，请重新选择");
                 setTransferNotice(null);
                 return;
               }
@@ -1295,8 +1295,8 @@ export function MemoryPanel({
           allowMove
           title={
             pendingTransfer.excludedCount
-              ? `复制/移动 ${pendingTransfer.ids.length} 条 Memory（已排除 ${pendingTransfer.excludedCount} 条非已确认状态）`
-              : `复制/移动 ${pendingTransfer.ids.length} 条 Memory`
+              ? `复制/移动 ${pendingTransfer.ids.length} 条记忆（已排除 ${pendingTransfer.excludedCount} 条非已确认状态）`
+              : `复制/移动 ${pendingTransfer.ids.length} 条记忆`
           }
           // Important 4（复审）：spec §5.2.6/§9/§12 要求的opt-out——checkbox
           // 状态由本组件持有(transferExtractKg)，picker 只负责渲染+回调,两处

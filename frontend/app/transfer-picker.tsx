@@ -148,7 +148,7 @@ export function DestinationPicker({
               disabled={busy}
               onChange={(e) => onExtractKgChange?.(e.target.checked)}
             />
-            同时抽取到知识图谱
+            同时整理进知识图谱
           </label>
         )}
         {error && (
