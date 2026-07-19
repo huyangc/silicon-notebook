@@ -297,6 +297,11 @@ function hasPositionOrOrderQuery(relative, source) {
   let found = false;
   const SOURCE_INPUT_NAME = /^(?:source|sourceText|productionSource|content|text|payload)$/i;
   const FILE_READ_EXPORTS = new Set(["readFile", "readFileSync"]);
+  const FILE_READ_EXPORT_BITS = new Map([
+    ["readFile", 1],
+    ["readFileSync", 2],
+  ]);
+  const ALL_FILE_READ_EXPORTS = 3;
   const fileReadImports = [];
   const fileReadNamespaces = [];
   const throwCollectors = [];
@@ -334,7 +339,7 @@ function hasPositionOrOrderQuery(relative, source) {
 
   function newBinding(
     value,
-    { fileRead = false, fileReadNamespace = false } = {},
+    { fileRead = false, fileReadNamespace = 0 } = {},
   ) {
     return {
       id: nextBindingId++,
@@ -358,7 +363,7 @@ function hasPositionOrOrderQuery(relative, source) {
     if (existing) {
       existing.value = value;
       existing.fileRead = traits.fileRead ?? false;
-      existing.fileReadNamespace = traits.fileReadNamespace ?? false;
+      existing.fileReadNamespace = traits.fileReadNamespace ?? 0;
       return existing;
     }
     const created = newBinding(value, traits);
@@ -371,7 +376,7 @@ function hasPositionOrOrderQuery(relative, source) {
     if (existing) {
       existing.value = value;
       existing.fileRead = traits.fileRead ?? false;
-      existing.fileReadNamespace = traits.fileReadNamespace ?? false;
+      existing.fileReadNamespace = traits.fileReadNamespace ?? 0;
     } else {
       defineBinding(scope, name, value, traits);
     }
@@ -438,11 +443,15 @@ function hasPositionOrOrderQuery(relative, source) {
             ?? entry.fileRead
           ),
         );
-        entry.fileReadNamespace = branchStates.some(
-          (states) => (
-            states.get(entry.id)?.fileReadNamespace
-            ?? entry.fileReadNamespace
+        entry.fileReadNamespace = branchStates.reduce(
+          (mask, states) => (
+            mask
+            | (
+              states.get(entry.id)?.fileReadNamespace
+              ?? entry.fileReadNamespace
+            )
           ),
+          0,
         );
       }
     }
@@ -523,7 +532,7 @@ function hasPositionOrOrderQuery(relative, source) {
   }
 
   function collectPossibleThrow(scope) {
-    for (const collect of throwCollectors) collect(scope);
+    throwCollectors.at(-1)?.(scope);
   }
 
   function bindingIdentifiers(name, identifiers = []) {
@@ -646,6 +655,7 @@ function hasPositionOrOrderQuery(relative, source) {
         && ts.isIdentifier(entry.name)
       ) {
         targets.push({
+          defaultInitializer: entry.initializer,
           property: entry.propertyName
             ? staticPropertyName(entry.propertyName)
             : entry.name.text,
@@ -657,12 +667,26 @@ function hasPositionOrOrderQuery(relative, source) {
         && ts.isIdentifier(entry.initializer)
       ) {
         targets.push({
+          defaultInitializer: undefined,
           property: staticPropertyName(entry.name),
           rest: false,
           target: entry.initializer.text,
         });
+      } else if (
+        ts.isPropertyAssignment(entry)
+        && ts.isBinaryExpression(entry.initializer)
+        && entry.initializer.operatorToken.kind === ts.SyntaxKind.EqualsToken
+        && ts.isIdentifier(entry.initializer.left)
+      ) {
+        targets.push({
+          defaultInitializer: entry.initializer.right,
+          property: staticPropertyName(entry.name),
+          rest: false,
+          target: entry.initializer.left.text,
+        });
       } else if (ts.isShorthandPropertyAssignment(entry)) {
         targets.push({
+          defaultInitializer: entry.objectAssignmentInitializer,
           property: entry.name.text,
           rest: false,
           target: entry.name.text,
@@ -672,6 +696,7 @@ function hasPositionOrOrderQuery(relative, source) {
         && ts.isIdentifier(entry.expression)
       ) {
         targets.push({
+          defaultInitializer: undefined,
           property: undefined,
           rest: true,
           target: entry.expression.text,
@@ -682,21 +707,48 @@ function hasPositionOrOrderQuery(relative, source) {
   }
 
   function bindObjectCapabilities(pattern, traits, scope, define) {
-    for (const { property, rest, target } of objectBindingTargets(pattern)) {
-      const targetTraits = (
-        traits.fileReadNamespace && rest
-      )
-        ? { fileReadNamespace: true }
-        : (
-          traits.fileReadNamespace
-          && FILE_READ_EXPORTS.has(property)
-        )
-          ? { fileRead: true }
-          : {};
+    const targets = objectBindingTargets(pattern);
+    const excludedMask = targets.reduce(
+      (mask, { property, rest }) => (
+        rest
+          ? mask
+          : mask | (FILE_READ_EXPORT_BITS.get(property) ?? 0)
+      ),
+      0,
+    );
+    for (
+      const {
+        defaultInitializer,
+        property,
+        rest,
+        target,
+      } of targets
+    ) {
+      if (defaultInitializer) visit(defaultInitializer, scope);
+      const defaultTraits = defaultInitializer
+        ? fileReadTraits(defaultInitializer, scope)
+        : {};
+      const propertyBit = FILE_READ_EXPORT_BITS.get(property) ?? 0;
+      const targetTraits = rest
+        ? {
+          fileReadNamespace: (
+            traits.fileReadNamespace & ~excludedMask
+          ),
+        }
+        : {
+          fileRead: Boolean(
+            defaultTraits.fileRead
+            || (traits.fileReadNamespace & propertyBit)
+          ),
+          fileReadNamespace: defaultTraits.fileReadNamespace ?? 0,
+        };
+      const value = defaultInitializer
+        ? isTextFlow(defaultInitializer, scope)
+        : false;
       if (define) {
-        defineBinding(scope, target, false, targetTraits);
+        defineBinding(scope, target, value, targetTraits);
       } else {
-        assignBinding(scope, target, false, targetTraits);
+        assignBinding(scope, target, value, targetTraits);
       }
     }
   }
@@ -732,16 +784,19 @@ function hasPositionOrOrderQuery(relative, source) {
       && current.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
       && current.operatorToken.kind <= ts.SyntaxKind.LastAssignment
     ) {
-      return (
-        current.operatorToken.kind === ts.SyntaxKind.EqualsToken
-        || [
+      if (current.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        return isTextFlow(current.right, scope);
+      }
+      return [
           ts.SyntaxKind.PlusEqualsToken,
           ts.SyntaxKind.AmpersandAmpersandEqualsToken,
           ts.SyntaxKind.BarBarEqualsToken,
           ts.SyntaxKind.QuestionQuestionEqualsToken,
-        ].includes(current.operatorToken.kind)
-      )
-        ? isTextFlow(current.right, scope)
+      ].includes(current.operatorToken.kind)
+        ? (
+          isTextFlow(current.left, scope)
+          || isTextFlow(current.right, scope)
+        )
         : false;
     }
     if (
@@ -780,8 +835,14 @@ function hasPositionOrOrderQuery(relative, source) {
       ts.isPropertyAccessExpression(current)
       && FILE_READ_EXPORTS.has(current.name.text)
       && ts.isIdentifier(current.expression)
-      && resolvedBinding(scope, current.expression.text)
-        ?.fileReadNamespace
+      && (
+        (
+          resolvedBinding(scope, current.expression.text)
+            ?.fileReadNamespace
+          ?? 0
+        )
+        & (FILE_READ_EXPORT_BITS.get(current.name.text) ?? 0)
+      )
     ) {
       return { fileRead: true };
     }
@@ -791,8 +852,19 @@ function hasPositionOrOrderQuery(relative, source) {
       && FILE_READ_EXPORTS.has(
         staticStringValue(current.argumentExpression),
       )
-      && resolvedBinding(scope, current.expression.text)
-        ?.fileReadNamespace
+      && (
+        (
+          resolvedBinding(scope, current.expression.text)
+            ?.fileReadNamespace
+          ?? 0
+        )
+        & (
+          FILE_READ_EXPORT_BITS.get(
+            staticStringValue(current.argumentExpression),
+          )
+          ?? 0
+        )
+      )
     ) {
       return { fileRead: true };
     }
@@ -805,8 +877,8 @@ function hasPositionOrOrderQuery(relative, source) {
           || Boolean(whenFalse.fileRead)
         ),
         fileReadNamespace: (
-          Boolean(whenTrue.fileReadNamespace)
-          || Boolean(whenFalse.fileReadNamespace)
+          (whenTrue.fileReadNamespace ?? 0)
+          | (whenFalse.fileReadNamespace ?? 0)
         ),
       };
     }
@@ -823,8 +895,8 @@ function hasPositionOrOrderQuery(relative, source) {
       return {
         fileRead: Boolean(left.fileRead) || Boolean(right.fileRead),
         fileReadNamespace: (
-          Boolean(left.fileReadNamespace)
-          || Boolean(right.fileReadNamespace)
+          (left.fileReadNamespace ?? 0)
+          | (right.fileReadNamespace ?? 0)
         ),
       };
     }
@@ -833,17 +905,26 @@ function hasPositionOrOrderQuery(relative, source) {
       && current.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
       && current.operatorToken.kind <= ts.SyntaxKind.LastAssignment
     ) {
-      return (
-        current.operatorToken.kind === ts.SyntaxKind.EqualsToken
-        || [
+      if (current.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+        return fileReadTraits(current.right, scope);
+      }
+      if ([
           ts.SyntaxKind.PlusEqualsToken,
           ts.SyntaxKind.AmpersandAmpersandEqualsToken,
           ts.SyntaxKind.BarBarEqualsToken,
           ts.SyntaxKind.QuestionQuestionEqualsToken,
-        ].includes(current.operatorToken.kind)
-      )
-        ? fileReadTraits(current.right, scope)
-        : {};
+      ].includes(current.operatorToken.kind)) {
+        const left = fileReadTraits(current.left, scope);
+        const right = fileReadTraits(current.right, scope);
+        return {
+          fileRead: Boolean(left.fileRead) || Boolean(right.fileRead),
+          fileReadNamespace: (
+            (left.fileReadNamespace ?? 0)
+            | (right.fileReadNamespace ?? 0)
+          ),
+        };
+      }
+      return {};
     }
     if (
       ts.isBinaryExpression(current)
@@ -1062,22 +1143,39 @@ function hasPositionOrOrderQuery(relative, source) {
       const tryResult = visit(node.tryBlock, tryScope);
       throwCollectors.pop();
       let normalBranches = tryResult.normal ? [tryScope] : [];
+      const explicitThrows = tryResult.abrupt.filter(
+        (completion) => completion.kind === "throw",
+      );
       let abrupt = node.catchClause
         ? tryResult.abrupt.filter(
           (completion) => completion.kind !== "throw",
         )
-        : [...tryResult.abrupt];
+        : [
+          ...tryResult.abrupt,
+          ...possibleThrows.map((throwScope) => ({
+            kind: "throw",
+            label: undefined,
+            scope: cloneScope(throwScope),
+          })),
+        ];
       if (node.catchClause) {
+        const catchInputs = [
+          ...possibleThrows,
+          ...explicitThrows.map((completion) => completion.scope),
+        ];
+        const catchReachable = catchInputs.length > 0;
         const catchScope = cloneScope(scope);
         joinScopes(
           catchScope,
-          possibleThrows.length > 0
-            ? possibleThrows
+          catchReachable
+            ? catchInputs
             : [cloneScope(scope)],
         );
         const catchResult = visit(node.catchClause, catchScope);
-        if (catchResult.normal) normalBranches.push(catchScope);
-        abrupt.push(...catchResult.abrupt);
+        if (catchReachable) {
+          if (catchResult.normal) normalBranches.push(catchScope);
+          abrupt.push(...catchResult.abrupt);
+        }
       }
       if (node.finallyBlock) {
         const finalNormal = [];
@@ -1116,16 +1214,30 @@ function hasPositionOrOrderQuery(relative, source) {
         clauses.flatMap((clause) => [...clause.statements]),
         switchScope,
       );
-      const branches = clauses.some(ts.isDefaultClause)
-        ? []
-        : [cloneScope(switchScope)];
+      function visitCaseComparisons(branch, entry) {
+        const limit = ts.isDefaultClause(clauses[entry])
+          ? clauses.length - 1
+          : entry;
+        for (let index = 0; index <= limit; index += 1) {
+          if (ts.isCaseClause(clauses[index])) {
+            visit(clauses[index].expression, branch);
+          }
+        }
+      }
+      const branches = [];
+      if (!clauses.some(ts.isDefaultClause)) {
+        const noMatch = cloneScope(switchScope);
+        for (const clause of clauses) {
+          if (ts.isCaseClause(clause)) {
+            visit(clause.expression, noMatch);
+          }
+        }
+        branches.push(noMatch);
+      }
       const propagated = [];
       for (let entry = 0; entry < clauses.length; entry += 1) {
         const branch = cloneScope(switchScope);
-        const entryClause = clauses[entry];
-        if (ts.isCaseClause(entryClause)) {
-          visit(entryClause.expression, branch);
-        }
+        visitCaseComparisons(branch, entry);
         let stopped = false;
         for (
           let clauseIndex = entry;
@@ -1252,8 +1364,8 @@ function hasPositionOrOrderQuery(relative, source) {
       const existing = resolvedBinding(scope, node.left.text);
       const existingValue = Boolean(existing?.value);
       const existingFileRead = Boolean(existing?.fileRead);
-      const existingFileReadNamespace = Boolean(
-        existing?.fileReadNamespace,
+      const existingFileReadNamespace = (
+        existing?.fileReadNamespace ?? 0
       );
       const preservesLeft = [
         ts.SyntaxKind.PlusEqualsToken,
@@ -1285,7 +1397,7 @@ function hasPositionOrOrderQuery(relative, source) {
               ),
               fileReadNamespace: (
                 existingFileReadNamespace
-                || Boolean(rightTraits.fileReadNamespace)
+                | (rightTraits.fileReadNamespace ?? 0)
               ),
             }
             : {}
@@ -1390,7 +1502,7 @@ function hasPositionOrOrderQuery(relative, source) {
       rootScope,
       name,
       false,
-      { fileReadNamespace: true },
+      { fileReadNamespace: ALL_FILE_READ_EXPORTS },
     );
   }
   predeclareFunctionVars(sourceFile, rootScope);
@@ -1670,6 +1782,9 @@ test("source policy rejects position identities without banning ordinary arrays"
       + "const { ...rest } = fs;\n"
       + "const data = rest.readFileSync(path, 'utf8'); data.slice();",
     "import * as fs from 'node:fs';\n"
+      + "const { readFileSync: omit, ...rest } = fs;\n"
+      + "const data = await rest.readFile(path, 'utf8'); data.slice();",
+    "import * as fs from 'node:fs';\n"
       + "const { ['read' + 'FileSync']: load } = fs;\n"
       + "const data = load(path, 'utf8'); data.slice();",
     "import { readFileSync } from 'node:fs';\n"
@@ -1679,6 +1794,29 @@ test("source policy rejects position identities without banning ordinary arrays"
     "import { readFileSync } from 'node:fs';\n"
       + "let data = [];\nfor (;;) {"
       + " data = readFileSync(path, 'utf8'); break; }\ndata.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\nswitch (k) {"
+      + " case (data = readFileSync(path, 'utf8'), 1): break;"
+      + " default: data.slice(); }",
+    "import { readFileSync } from 'node:fs';\n"
+      + "const { missing: load = readFileSync } = {};\n"
+      + "const data = load(path, 'utf8'); data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "const { missing: data = readFileSync(path, 'utf8') } = {};\n"
+      + "data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = readFileSync(path, 'utf8');\n"
+      + "const copy = (data += 'x'); copy.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let load = readFileSync;\nconst alias = (load ||= other);\n"
+      + "const data = alias(path, 'utf8'); data.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = readFileSync(path, 'utf8');\n"
+      + "const copy = (0, data += 'x'); copy.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = readFileSync(path, 'utf8');\ntry {"
+      + " try { throw err; } finally {}"
+      + " } catch { data.slice(); }",
     "function fragment(payload, alias = payload) {"
       + " return alias.slice(1); }",
     "import { readFileSync } from 'node:fs';\n"
@@ -1794,6 +1932,17 @@ test("source policy rejects position identities without banning ordinary arrays"
     "import { readFileSync } from 'node:fs';\n"
       + "function f() { let data = readFileSync();"
       + " while (true) { return; } data.slice(); }",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = readFileSync(path, 'utf8');\ntry {"
+      + " try { throw err; } catch { data = []; }"
+      + " } catch {}\ndata.slice();",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = readFileSync(path, 'utf8');\ntry {"
+      + " try { risky(); data = []; } catch { data = []; }"
+      + " } catch {}\ndata.slice();",
+    "import * as fs from 'node:fs';\n"
+      + "const { readFileSync: omit, ...rest } = fs;\n"
+      + "const data = rest.readFileSync(path, 'utf8'); data.slice();",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("test/semantic-source.mjs", mutation),

@@ -69,7 +69,9 @@ def test_unified_graph_large_nb_returns_building_placeholder(repo, monkeypatch):
     assert result["total_nodes"] == 0
     assert result["total_edges"] == 0
     assert result["truncated"] is False
-    assert nb.id in repo._viz_building or manifest_path  # background thread was spawned
+    assert (
+        nb.id in repo._viz_building or os.path.exists(manifest_path)
+    )  # background thread was spawned or already finished
     _wait_until_not_building(repo, nb.id)
 
 
@@ -117,10 +119,16 @@ def test_unified_kg_status_reports_viz_building(repo, monkeypatch):
     nb = _star(repo)
     _clear_viz(repo, nb.id)
     monkeypatch.setattr(repo.settings, "viz_sync_build_max_objects", 0)
+    pending = {}
+    monkeypatch.setattr(
+        repo._runtime.scale_artifacts,
+        "_start_daemon",
+        lambda _name, target: pending.setdefault("target", target),
+    )
     repo.unified_graph(nb.id, level="object", limit=10)  # spawns background build
     status = repo.unified_kg_status(nb.id)
-    assert "viz_building" in status
-    _wait_until_not_building(repo, nb.id)
+    assert status["viz_building"] is True
+    pending["target"]()
     status2 = repo.unified_kg_status(nb.id)
     assert status2["viz_building"] is False
 
