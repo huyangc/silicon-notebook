@@ -223,10 +223,83 @@ function hasPositionOrOrderQuery(relative, source) {
     true,
     scriptKind(relative),
   );
+  let structuralPositionQuery = false;
+  let textPositionMethod = false;
+  function scanPositionSyntax(node) {
+    if (
+      ts.isPropertyAccessExpression(node)
+      && ["pos", "end"].includes(node.name.text)
+    ) {
+      structuralPositionQuery = true;
+      return;
+    }
+    if (
+      ts.isElementAccessExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && ["statements", "members", "properties"].includes(
+        node.expression.name.text,
+      )
+    ) {
+      structuralPositionQuery = true;
+      return;
+    }
+    if (
+      (
+        ts.isVariableDeclaration(node)
+        && ts.isArrayBindingPattern(node.name)
+        && node.initializer
+        && ts.isPropertyAccessExpression(node.initializer)
+        && ["statements", "members", "properties"].includes(
+          node.initializer.name.text,
+        )
+      )
+      || (
+        ts.isBinaryExpression(node)
+        && ts.isArrayLiteralExpression(node.left)
+        && ts.isPropertyAccessExpression(node.right)
+        && ["statements", "members", "properties"].includes(
+          node.right.name.text,
+        )
+      )
+    ) {
+      structuralPositionQuery = true;
+      return;
+    }
+    if (
+      ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+    ) {
+      const method = node.expression.name.text;
+      if (["getStart", "getFullStart", "getEnd"].includes(method)) {
+        structuralPositionQuery = true;
+        return;
+      }
+      if (
+        method === "at"
+        && ts.isPropertyAccessExpression(node.expression.expression)
+        && ["statements", "members", "properties"].includes(
+          node.expression.expression.name.text,
+        )
+      ) {
+        structuralPositionQuery = true;
+        return;
+      }
+      if (["indexOf", "slice", "substring"].includes(method)) {
+        textPositionMethod = true;
+      }
+    }
+    ts.forEachChild(node, scanPositionSyntax);
+  }
+  scanPositionSyntax(sourceFile);
+  if (structuralPositionQuery) return true;
+  if (!textPositionMethod) return false;
+
   let found = false;
   const SOURCE_INPUT_NAME = /^(?:source|sourceText|productionSource|content|text|payload)$/i;
   const FILE_READ_EXPORTS = new Set(["readFile", "readFileSync"]);
-  const fileReadCallees = new Set(FILE_READ_EXPORTS);
+  const fileReadImports = [];
+  const fileReadNamespaces = [];
+  const throwCollectors = [];
   let nextBindingId = 1;
 
   for (const statement of sourceFile.statements) {
@@ -235,15 +308,22 @@ function hasPositionOrOrderQuery(relative, source) {
       || !ts.isStringLiteral(statement.moduleSpecifier)
       || !/^node:fs(?:\/promises)?$/.test(statement.moduleSpecifier.text)
       || !statement.importClause
-      || !statement.importClause.namedBindings
-      || !ts.isNamedImports(statement.importClause.namedBindings)
     ) {
       continue;
     }
-    for (const element of statement.importClause.namedBindings.elements) {
-      const imported = element.propertyName?.text ?? element.name.text;
-      if (FILE_READ_EXPORTS.has(imported)) {
-        fileReadCallees.add(element.name.text);
+    if (statement.importClause.name) {
+      fileReadNamespaces.push(statement.importClause.name.text);
+    }
+    const bindings = statement.importClause.namedBindings;
+    if (bindings && ts.isNamespaceImport(bindings)) {
+      fileReadNamespaces.push(bindings.name.text);
+    }
+    if (bindings && ts.isNamedImports(bindings)) {
+      for (const element of bindings.elements) {
+        const imported = element.propertyName?.text ?? element.name.text;
+        if (FILE_READ_EXPORTS.has(imported)) {
+          fileReadImports.push(element.name.text);
+        }
       }
     }
   }
@@ -252,8 +332,16 @@ function hasPositionOrOrderQuery(relative, source) {
     return { parent, kind, bindings: new Map() };
   }
 
-  function newBinding(value) {
-    return { id: nextBindingId++, value };
+  function newBinding(
+    value,
+    { fileRead = false, fileReadNamespace = false } = {},
+  ) {
+    return {
+      id: nextBindingId++,
+      value,
+      fileRead,
+      fileReadNamespace,
+    };
   }
 
   function resolvedBinding(scope, name) {
@@ -265,23 +353,27 @@ function hasPositionOrOrderQuery(relative, source) {
     return undefined;
   }
 
-  function defineBinding(scope, name, value) {
+  function defineBinding(scope, name, value, traits = {}) {
     const existing = scope.bindings.get(name);
     if (existing) {
       existing.value = value;
+      existing.fileRead = traits.fileRead ?? false;
+      existing.fileReadNamespace = traits.fileReadNamespace ?? false;
       return existing;
     }
-    const created = newBinding(value);
+    const created = newBinding(value, traits);
     scope.bindings.set(name, created);
     return created;
   }
 
-  function assignBinding(scope, name, value) {
+  function assignBinding(scope, name, value, traits = {}) {
     const existing = resolvedBinding(scope, name);
     if (existing) {
       existing.value = value;
+      existing.fileRead = traits.fileRead ?? false;
+      existing.fileReadNamespace = traits.fileReadNamespace ?? false;
     } else {
-      defineBinding(scope, name, value);
+      defineBinding(scope, name, value, traits);
     }
   }
 
@@ -304,7 +396,12 @@ function hasPositionOrOrderQuery(relative, source) {
       for (const [name, entry] of original.bindings) {
         cloned.bindings.set(
           name,
-          { id: entry.id, value: entry.value },
+          {
+            id: entry.id,
+            value: entry.value,
+            fileRead: entry.fileRead,
+            fileReadNamespace: entry.fileReadNamespace,
+          },
         );
       }
       clonedParent = cloned;
@@ -316,7 +413,13 @@ function hasPositionOrOrderQuery(relative, source) {
     const states = new Map();
     for (let current = scope; current; current = current.parent) {
       for (const entry of current.bindings.values()) {
-        if (!states.has(entry.id)) states.set(entry.id, entry.value);
+        if (!states.has(entry.id)) {
+          states.set(entry.id, {
+            value: entry.value,
+            fileRead: entry.fileRead,
+            fileReadNamespace: entry.fileReadNamespace,
+          });
+        }
       }
     }
     return states;
@@ -327,10 +430,57 @@ function hasPositionOrOrderQuery(relative, source) {
     for (let current = target; current; current = current.parent) {
       for (const entry of current.bindings.values()) {
         entry.value = branchStates.some(
-          (states) => states.get(entry.id) ?? entry.value,
+          (states) => states.get(entry.id)?.value ?? entry.value,
+        );
+        entry.fileRead = branchStates.some(
+          (states) => (
+            states.get(entry.id)?.fileRead
+            ?? entry.fileRead
+          ),
+        );
+        entry.fileReadNamespace = branchStates.some(
+          (states) => (
+            states.get(entry.id)?.fileReadNamespace
+            ?? entry.fileReadNamespace
+          ),
         );
       }
     }
+  }
+
+  function sameBindingValues(left, right) {
+    const leftStates = bindingStates(left);
+    const rightStates = bindingStates(right);
+    if (leftStates.size !== rightStates.size) return false;
+    return [...leftStates].every(
+      ([id, value]) => {
+        const other = rightStates.get(id);
+        return (
+          other?.value === value.value
+          && other.fileRead === value.fileRead
+          && other.fileReadNamespace === value.fileReadNamespace
+        );
+      },
+    );
+  }
+
+  function analyzeRepeatingFlow(scope, runIteration, canSkip) {
+    const baseline = cloneScope(scope);
+    if (!canSkip) runIteration(baseline);
+    let state = cloneScope(baseline);
+    const maxIterations = bindingStates(scope).size + 2;
+    for (let index = 0; index < maxIterations; index += 1) {
+      const iteration = cloneScope(state);
+      runIteration(iteration);
+      const next = cloneScope(baseline);
+      joinScopes(next, [baseline, iteration]);
+      if (sameBindingValues(state, next)) {
+        state = next;
+        break;
+      }
+      state = next;
+    }
+    joinScopes(scope, [state]);
   }
 
   function collectFunctionVarNames(node) {
@@ -375,18 +525,27 @@ function hasPositionOrOrderQuery(relative, source) {
     return current;
   }
 
-  function isFileRead(expression) {
+  function isFileRead(expression, scope) {
     const current = unwrapExpression(expression);
     if (!ts.isCallExpression(current)) return false;
-    if (
-      ts.isIdentifier(current.expression)
-      && fileReadCallees.has(current.expression.text)
-    ) {
-      return true;
+    if (ts.isIdentifier(current.expression)) {
+      return (
+        resolvedBinding(scope, current.expression.text)
+          ?.fileRead
+        ?? false
+      );
     }
     return (
       ts.isPropertyAccessExpression(current.expression)
-      && ["readFile", "readFileSync"].includes(current.expression.name.text)
+      && FILE_READ_EXPORTS.has(current.expression.name.text)
+      && ts.isIdentifier(current.expression.expression)
+      && (
+        resolvedBinding(
+          scope,
+          current.expression.expression.text,
+        )?.fileReadNamespace
+        ?? false
+      )
     );
   }
 
@@ -398,7 +557,12 @@ function hasPositionOrOrderQuery(relative, source) {
         ? SOURCE_INPUT_NAME.test(current.text)
         : resolved.value;
     }
-    if (isFileRead(current)) return true;
+    if (isFileRead(current, scope)) return true;
+    if (ts.isTemplateExpression(current)) {
+      return current.templateSpans.some(
+        (span) => isTextFlow(span.expression, scope),
+      );
+    }
     if (ts.isConditionalExpression(current)) {
       return (
         isTextFlow(current.whenTrue, scope)
@@ -420,6 +584,18 @@ function hasPositionOrOrderQuery(relative, source) {
     );
   }
 
+  function fileReadTraits(expression, scope) {
+    const current = unwrapExpression(expression);
+    if (!ts.isIdentifier(current)) return {};
+    const resolved = resolvedBinding(scope, current.text);
+    return resolved
+      ? {
+        fileRead: resolved.fileRead,
+        fileReadNamespace: resolved.fileReadNamespace,
+      }
+      : {};
+  }
+
   function parameterIsTextFlow(parameter) {
     if (
       (
@@ -438,18 +614,32 @@ function hasPositionOrOrderQuery(relative, source) {
 
   function visit(node, scope) {
     if (found) return;
+    if (
+      ts.isCallExpression(node)
+      || ts.isNewExpression(node)
+      || ts.isThrowStatement(node)
+    ) {
+      for (const collect of throwCollectors) collect(scope);
+    }
     if (ts.isFunctionLike(node)) {
       const functionScope = newScope(scope, "function");
       for (const parameter of node.parameters) {
         if (ts.isIdentifier(parameter.name)) {
+          const value = Boolean(
+            parameterIsTextFlow(parameter)
+            || (
+              parameter.initializer
+              && isTextFlow(parameter.initializer, functionScope)
+            )
+          );
           defineBinding(
             functionScope,
             parameter.name.text,
-            parameterIsTextFlow(parameter),
+            value,
           );
         }
         if (parameter.initializer) {
-          visit(parameter.initializer, scope);
+          visit(parameter.initializer, functionScope);
         }
       }
       if (node.body) predeclareFunctionVars(node.body, functionScope);
@@ -490,10 +680,24 @@ function hasPositionOrOrderQuery(relative, source) {
     }
     if (ts.isTryStatement(node)) {
       const tryScope = cloneScope(scope);
-      visit(node.tryBlock, tryScope);
-      const branches = [tryScope];
+      const tryBlockScope = newScope(tryScope);
+      const possibleThrows = [];
+      throwCollectors.push(
+        (throwScope) => possibleThrows.push(cloneScope(throwScope)),
+      );
+      for (const statement of node.tryBlock.statements) {
+        visit(statement, tryBlockScope);
+      }
+      throwCollectors.pop();
+      const branches = [tryBlockScope];
       if (node.catchClause) {
         const catchScope = cloneScope(scope);
+        joinScopes(
+          catchScope,
+          possibleThrows.length > 0
+            ? possibleThrows
+            : [cloneScope(scope)],
+        );
         visit(node.catchClause, catchScope);
         branches.push(catchScope);
       }
@@ -501,26 +705,42 @@ function hasPositionOrOrderQuery(relative, source) {
       if (node.finallyBlock) visit(node.finallyBlock, scope);
       return;
     }
-    if (
-      ts.isWhileStatement(node)
-      || ts.isDoStatement(node)
-    ) {
+    if (ts.isDoStatement(node)) {
+      analyzeRepeatingFlow(
+        scope,
+        (iteration) => {
+          visit(node.statement, iteration);
+          visit(node.expression, iteration);
+        },
+        false,
+      );
+      return;
+    }
+    if (ts.isWhileStatement(node)) {
       visit(node.expression, scope);
-      const baseline = cloneScope(scope);
-      const iteration = cloneScope(scope);
-      visit(node.statement, iteration);
-      joinScopes(scope, [baseline, iteration]);
+      analyzeRepeatingFlow(
+        scope,
+        (iteration) => {
+          visit(node.statement, iteration);
+          visit(node.expression, iteration);
+        },
+        true,
+      );
       return;
     }
     if (ts.isForStatement(node)) {
       const loopScope = newScope(scope);
       if (node.initializer) visit(node.initializer, loopScope);
       if (node.condition) visit(node.condition, loopScope);
-      const baseline = cloneScope(loopScope);
-      const iteration = cloneScope(loopScope);
-      visit(node.statement, iteration);
-      if (node.incrementor) visit(node.incrementor, iteration);
-      joinScopes(loopScope, [baseline, iteration]);
+      analyzeRepeatingFlow(
+        loopScope,
+        (iteration) => {
+          visit(node.statement, iteration);
+          if (node.incrementor) visit(node.incrementor, iteration);
+          if (node.condition) visit(node.condition, iteration);
+        },
+        true,
+      );
       return;
     }
     if (
@@ -530,24 +750,66 @@ function hasPositionOrOrderQuery(relative, source) {
       const loopScope = newScope(scope);
       visit(node.expression, loopScope);
       visit(node.initializer, loopScope);
-      const baseline = cloneScope(loopScope);
-      const iteration = cloneScope(loopScope);
-      visit(node.statement, iteration);
-      joinScopes(loopScope, [baseline, iteration]);
+      analyzeRepeatingFlow(
+        loopScope,
+        (iteration) => visit(node.statement, iteration),
+        true,
+      );
       return;
     }
     if (ts.isSwitchStatement(node)) {
       visit(node.expression, scope);
-      const branches = [cloneScope(scope)];
-      for (const clause of node.caseBlock.clauses) {
+      const clauses = node.caseBlock.clauses;
+      const branches = clauses.some(ts.isDefaultClause)
+        ? []
+        : [cloneScope(scope)];
+      for (let entry = 0; entry < clauses.length; entry += 1) {
         const branch = cloneScope(scope);
-        if (ts.isCaseClause(clause)) visit(clause.expression, branch);
-        for (const statement of clause.statements) {
-          visit(statement, branch);
+        const entryClause = clauses[entry];
+        if (ts.isCaseClause(entryClause)) {
+          visit(entryClause.expression, branch);
+        }
+        let stopped = false;
+        for (
+          let clauseIndex = entry;
+          clauseIndex < clauses.length && !stopped;
+          clauseIndex += 1
+        ) {
+          for (const statement of clauses[clauseIndex].statements) {
+            if (ts.isBreakStatement(statement)) {
+              stopped = true;
+              break;
+            }
+            visit(statement, branch);
+          }
         }
         branches.push(branch);
       }
       joinScopes(scope, branches);
+      return;
+    }
+    if (ts.isConditionalExpression(node)) {
+      visit(node.condition, scope);
+      const whenTrue = cloneScope(scope);
+      visit(node.whenTrue, whenTrue);
+      const whenFalse = cloneScope(scope);
+      visit(node.whenFalse, whenFalse);
+      joinScopes(scope, [whenTrue, whenFalse]);
+      return;
+    }
+    if (
+      ts.isBinaryExpression(node)
+      && [
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(node.operatorToken.kind)
+    ) {
+      visit(node.left, scope);
+      const skipped = cloneScope(scope);
+      const evaluated = cloneScope(scope);
+      visit(node.right, evaluated);
+      joinScopes(scope, [skipped, evaluated]);
       return;
     }
     if (
@@ -557,6 +819,9 @@ function hasPositionOrOrderQuery(relative, source) {
       const value = node.initializer
         ? isTextFlow(node.initializer, scope)
         : false;
+      const traits = node.initializer
+        ? fileReadTraits(node.initializer, scope)
+        : {};
       if (node.initializer) visit(node.initializer, scope);
       const declarationList = node.parent;
       const declarationScope = (
@@ -570,10 +835,20 @@ function hasPositionOrOrderQuery(relative, source) {
         && !(declarationList.flags & ts.NodeFlags.BlockScoped)
       ) {
         if (node.initializer) {
-          assignBinding(declarationScope, node.name.text, value);
+          assignBinding(
+            declarationScope,
+            node.name.text,
+            value,
+            traits,
+          );
         }
       } else {
-        defineBinding(declarationScope, node.name.text, value);
+        defineBinding(
+          declarationScope,
+          node.name.text,
+          value,
+          traits,
+        );
       }
       return;
     }
@@ -583,8 +858,9 @@ function hasPositionOrOrderQuery(relative, source) {
       && ts.isIdentifier(node.left)
     ) {
       const value = isTextFlow(node.right, scope);
+      const traits = fileReadTraits(node.right, scope);
       visit(node.right, scope);
-      assignBinding(scope, node.left.text, value);
+      assignBinding(scope, node.left.text, value, traits);
       return;
     }
     if (
@@ -657,6 +933,17 @@ function hasPositionOrOrderQuery(relative, source) {
   }
 
   const rootScope = newScope(undefined, "function");
+  for (const name of fileReadImports) {
+    defineBinding(rootScope, name, false, { fileRead: true });
+  }
+  for (const name of fileReadNamespaces) {
+    defineBinding(
+      rootScope,
+      name,
+      false,
+      { fileReadNamespace: true },
+    );
+  }
   predeclareFunctionVars(sourceFile, rootScope);
   visit(sourceFile, rootScope);
   return found;
@@ -844,8 +1131,19 @@ test("source policy rejects position identities without banning ordinary arrays"
       + "let data = [];\nwhile (flag) {"
       + " data = readFileSync(path, 'utf8'); }\ndata.slice(1);",
     "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\nwhile (flag) {"
+      + " data.slice(1); data = readFileSync(path, 'utf8'); }",
+    "import { readFileSync } from 'node:fs';\n"
       + "let data;\ntry { data = readFileSync(path, 'utf8'); }"
       + " catch { data = []; }\ndata.slice(1);",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\ntry {"
+      + " data = readFileSync(path, 'utf8'); risky();"
+      + " } catch { data.slice(1); }",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\nswitch (kind) {"
+      + " case 1: data = readFileSync(path, 'utf8');"
+      + " case 2: data.slice(1); break; }",
     "import { readFileSync } from 'node:fs';\n"
       + "if (flag) { var data = readFileSync(path, 'utf8'); }\n"
       + "data.slice(1);",
@@ -854,6 +1152,18 @@ test("source policy rejects position identities without banning ordinary arrays"
       + "try {} catch (data) {}\ndata.slice(1);",
     "import { readFile as load } from 'node:fs/promises';\n"
       + "const data = await load(path, 'utf8');\ndata.slice(1);",
+    "import { readFile } from 'node:fs/promises';\n"
+      + "const load = readFile;\n"
+      + "const data = await load(path, 'utf8');\ndata.slice(1);",
+    "import { readFile } from 'node:fs/promises';\n"
+      + "let load;\nif (flag) { load = readFile; }"
+      + " else { load = other; }\n"
+      + "const data = await load(path, 'utf8');\ndata.slice(1);",
+    "function fragment(payload, alias = payload) {"
+      + " return alias.slice(1); }",
+    "import { readFileSync } from 'node:fs';\n"
+      + "const data = `${readFileSync(path, 'utf8')}`;\n"
+      + "data.slice(1);",
   ]) {
     assert.deepEqual(
       modulePolicyOffenders("test/semantic-source.mjs", mutation),
@@ -867,6 +1177,60 @@ test("source policy rejects position identities without banning ordinary arrays"
       "import { readFileSync } from 'node:fs';\n"
         + "let data = readFileSync(path, 'utf8');\n"
         + "data = [];\ndata.slice(1);",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "import { readFileSync } from 'node:fs';\n"
+        + "let data = [];\ntry {"
+        + " data = readFileSync(path, 'utf8');"
+        + " } catch { data.slice(1); }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "import { readFileSync } from 'node:fs';\n"
+        + "let data = readFileSync(path, 'utf8');\n"
+        + "do { data = []; } while (flag);\ndata.slice(1);",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "import { readFile } from 'node:fs/promises';\n"
+        + "function clone(readFile: () => number[]) {"
+        + " const data = readFile(); return data.slice(); }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "import fs from 'node:fs';\n"
+        + "function clone(fs: { readFileSync(): number[] }) {"
+        + " const data = fs.readFileSync(); return data.slice(); }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "function readFile() { return []; }\n"
+        + "const data = readFile(); data.slice();",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "import { readFile } from 'node:fs/promises';\n"
+        + "let load = readFile;\nload = other;\n"
+        + "const data = load(); data.slice();",
     ),
     [],
   );
