@@ -22,6 +22,8 @@ def _dotted_name(node: ast.AST) -> str:
     if isinstance(node, ast.Attribute):
         parent = _dotted_name(node.value)
         return f"{parent}.{node.attr}" if parent else node.attr
+    if isinstance(node, ast.Subscript):
+        return _dotted_name(node.value)
     return ""
 
 
@@ -83,14 +85,16 @@ def _is_named_diagnostic_append(
             return False
         owner = _dotted_name(item.func.value).lower()
         return (
-            item.func.attr == "append"
+            item.func.attr in {"add", "append", "extend", "update"}
             and any(
                 token in owner
-                for token in ("diagnostic", "offender", "violation", "error")
-            )
-            and any(
-                isinstance(arg, (ast.Constant, ast.JoinedStr))
-                for arg in item.args
+                for token in (
+                    "diagnostic",
+                    "offender",
+                    "violation",
+                    "mismatch",
+                    "error",
+                )
             )
         )
     return False

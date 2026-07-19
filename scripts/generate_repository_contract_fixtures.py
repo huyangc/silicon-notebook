@@ -2,8 +2,9 @@
 """Generate the Repository composition-refactor contract fixtures.
 
 ``main`` regenerates the living contracts (ask, api, phase, repository_v9 projection)
-against the current runtime. ``facade_surface.json`` and ``repository_v9/baseline.db``
-are frozen at ``SOURCE_COMMIT`` and only change under ``--rebaseline`` (see README).
+against the current runtime. ``facade_surface.json`` is an explicitly rebaselined
+current-state semantic contract; ``repository_v9/baseline.db`` remains frozen at
+``SOURCE_COMMIT`` and changes only under ``--rebaseline`` (see README).
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ import time
 import zipfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 from unittest import mock
 
 
@@ -40,6 +41,7 @@ if str(BACKEND_ROOT) not in sys.path:
 from app.services.sqlite_repository import SQLiteRepository
 
 SOURCE_COMMIT = "3334626"
+SURFACE_SOURCE_COMMIT = "842de5d22dbdc423d6572fe0650911dafa910c35"
 FIXED_TIME = "2024-01-02T03:04:05"
 FIXED_EXPIRY = "2024-02-01T03:04:05"
 FIXED_PASSWORD_SALT = "00" * 16
@@ -53,6 +55,8 @@ CONSUMER_ROOTS = (
     REPO_ROOT / "scripts",
     REPO_ROOT / "backend" / "tests",
 )
+
+TEST_CONSUMER_PREFIX = "backend/tests/"
 
 # These exports are intentionally explicit: later refactor gates must preserve
 # both compatibility modules even when the implementation owners move.
@@ -167,6 +171,66 @@ def _dotted_name(node: ast.AST) -> str:
     return ".".join(reversed(parts))
 
 
+def _semantic_scopes(tree: ast.AST) -> dict[ast.AST, str]:
+    scopes: dict[ast.AST, str] = {}
+
+    class ScopeVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.stack = ["<module>"]
+
+        @property
+        def current(self) -> str:
+            return ".".join(self.stack)
+
+        def visit(self, node: ast.AST) -> None:
+            scopes[node] = self.current
+            super().visit(node)
+
+        def _visit_scope(self, node: ast.AST, name: str) -> None:
+            self.stack.append(name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self._visit_scope(node, node.name)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_scope(node, node.name)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_scope(node, node.name)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            self._visit_scope(node, "<lambda>")
+
+    ScopeVisitor().visit(tree)
+    return scopes
+
+
+def _semantic_site(
+    *,
+    path: str,
+    scope: str,
+    kind: str,
+    target: str,
+) -> dict[str, str]:
+    return {
+        "path": path,
+        "scope": scope,
+        "kind": kind,
+        "target": target,
+    }
+
+
+def _site_key(site: dict[str, str]) -> tuple[str, str, str, str]:
+    return (
+        site["path"],
+        site["scope"],
+        site["kind"],
+        site["target"],
+    )
+
+
 def _literal_target(node: ast.AST) -> str:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value.rsplit(".", 1)[-1]
@@ -260,12 +324,32 @@ def _patch_compatibility(name: str, kind: str) -> str:
     return "test-only"
 
 
-def collect_facade_surface() -> dict[str, dict[str, object]]:
+def _owners_at_commit(commit: str) -> dict[str, str]:
+    relative = "backend/app/repositories/ownership_manifest.py"
+    source = subprocess.check_output(
+        ["git", "show", f"{commit}:{relative}"],
+        cwd=REPO_ROOT,
+        text=True,
+    )
+    namespace: dict[str, object] = {}
+    exec(compile(source, f"{commit}:{relative}", "exec"), namespace)
+    return dict(namespace["OWNER_BY_MEMBER"])
+
+
+def collect_facade_surface(
+    *,
+    owner_by_member: Mapping[str, str] | None = None,
+) -> dict[str, dict[str, object]]:
     """Collect the consumer-visible facade and compatibility patch surface."""
+    if owner_by_member is None:
+        from app.repositories.ownership_manifest import OWNER_BY_MEMBER
+
+        owner_by_member = OWNER_BY_MEMBER
     from app.services import repository as repository_module
     from app.services import sqlite_repository as module
     from app.services.ask_modes import ASK_MODES
     from app.services.sqlite_repository import SQLiteRepository
+    from tests.test_repository_facade_contract import facade_delegate_evidence
 
     class_members: dict[str, object] = {}
     for cls in reversed(SQLiteRepository.__mro__[:-1]):
@@ -306,15 +390,47 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
     }
     module_candidates = set(COMPATIBILITY_EXPORTS)
     candidate_names = set(class_members) | instance_attributes | module_candidates
-    consumers: dict[str, set[str]] = defaultdict(set)
-    patches: dict[str, list[dict[str, object]]] = defaultdict(list)
+    delegate_owners = {
+        name: owner
+        for name, owner in facade_delegate_evidence(
+            SQLiteRepository,
+            {name: "" for name in candidate_names},
+        ).items()
+        if owner
+    }
+    consumers: dict[
+        str,
+        dict[tuple[str, str, str, str], dict[str, str]],
+    ] = defaultdict(dict)
+    patches: dict[
+        str,
+        dict[tuple[str, str, str, str], dict[str, str]],
+    ] = defaultdict(dict)
+
+    def add_consumer(
+        name: str,
+        *,
+        path: str,
+        scope: str,
+        kind: str,
+        target: str | None = None,
+    ) -> None:
+        site = _semantic_site(
+            path=path,
+            scope=scope,
+            kind=kind,
+            target=target or name,
+        )
+        consumers[name][_site_key(site)] = site
 
     for path in _iter_python_files():
-        relative = str(path.relative_to(REPO_ROOT))
+        relative = path.relative_to(REPO_ROOT).as_posix()
+        track_ordinary_consumers = not relative.startswith(TEST_CONSUMER_PREFIX)
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
         except (SyntaxError, UnicodeDecodeError):
             continue
+        scopes = _semantic_scopes(tree)
         module_aliases = {"sqlite_repository"}
         class_aliases = {"SQLiteRepository"}
         for import_node in ast.walk(tree):
@@ -345,8 +461,18 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
                 continue
             for alias in node.names:
                 export = COMPATIBILITY_EXPORTS.get(alias.name)
-                if export is not None and export[0] == node.module:
-                    consumers[alias.name].add(f"{relative}:{node.lineno}")
+                if (
+                    track_ordinary_consumers
+                    and export is not None
+                    and export[0] == node.module
+                ):
+                    add_consumer(
+                        alias.name,
+                        path=relative,
+                        scope=scopes[node],
+                        kind="import",
+                        target=f"{node.module}:{alias.name}",
+                    )
 
         repo_base_pattern = re.compile(
             r"(?:[A-Za-z_]\w*\.)?(?:repo|[A-Za-z_]\w*_repo)"
@@ -405,16 +531,32 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
                     )
                 )
                 if module_target and node.attr in module_candidates:
-                    consumers[node.attr].add(f"{relative}:{node.lineno}")
+                    if track_ordinary_consumers:
+                        add_consumer(
+                            node.attr,
+                            path=relative,
+                            scope=scopes[node],
+                            kind="attribute",
+                        )
                 elif facade_target and (
                     node.attr in class_members or node.attr in instance_attributes
                 ):
-                    consumers[node.attr].add(f"{relative}:{node.lineno}")
+                    if track_ordinary_consumers:
+                        add_consumer(
+                            node.attr,
+                            path=relative,
+                            scope=scopes[node],
+                            kind="attribute",
+                        )
                 self.generic_visit(node)
 
         ConsumerVisitor().visit(tree)
 
-        def add_patch(target_name: str, target_base: str, line: int) -> None:
+        def add_patch(
+            target_name: str,
+            target_base: str,
+            node: ast.AST,
+        ) -> None:
             module_target = target_base in module_aliases
             facade_target = (
                 bool(repo_base_pattern.fullmatch(target_base))
@@ -429,7 +571,6 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
                 and target_name not in instance_attributes
             ):
                 return
-            consumers[target_name].add(f"{relative}:{line}")
             export = COMPATIBILITY_EXPORTS.get(target_name)
             exported_value = (
                 getattr(compatibility_modules[export[0]], target_name)
@@ -451,17 +592,25 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
                 if target_name.startswith("_")
                 else "method"
             )
-            patches[target_name].append(
-                {
-                    "base": target_base,
-                    "file": relative,
-                    "line": line,
-                    "target": target_name,
-                    "compatibility": _patch_compatibility(target_name, patch_kind),
-                }
+            site = {
+                **_semantic_site(
+                    path=relative,
+                    scope=scopes[node],
+                    kind="patch",
+                    target=target_name,
+                ),
+                "base": target_base,
+                "compatibility": _patch_compatibility(target_name, patch_kind),
+            }
+            patches[target_name][_site_key(site)] = site
+            add_consumer(
+                target_name,
+                path=relative,
+                scope=scopes[node],
+                kind="patch",
             )
 
-        helper_targets: dict[str, tuple[int, int, str]] = {}
+        helper_targets: dict[str, tuple[int, ast.FunctionDef, str]] = {}
         for function in (
             node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
         ):
@@ -482,7 +631,7 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
                     continue
                 helper_targets[function.name] = (
                     params.index(call.args[1].id),
-                    call.lineno,
+                    function,
                     target_base,
                 )
 
@@ -493,16 +642,16 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
             helper = helper_targets.get(_dotted_name(call.func))
             if helper is None:
                 continue
-            target_index, _line, _base = helper
+            target_index, _function, _base = helper
             if target_index >= len(call.args):
                 continue
             target = _literal_target(call.args[target_index])
             if target:
                 helper_values[_dotted_name(call.func)].add(target)
         for helper_name, values in helper_values.items():
-            _index, line, target_base = helper_targets[helper_name]
+            _index, function, target_base = helper_targets[helper_name]
             for target in values:
-                add_patch(target, target_base, line)
+                add_patch(target, target_base, function)
 
         def visit(node: ast.AST, loop_values: dict[str, tuple[str, ...]]) -> None:
             local_values = loop_values
@@ -525,21 +674,31 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
                     elif isinstance(node.args[1], ast.Name):
                         targets = local_values.get(node.args[1].id, ())
                     for target_name in targets:
-                        add_patch(target_name, target_base, node.lineno)
+                        add_patch(target_name, target_base, node)
             for child in ast.iter_child_nodes(node):
                 visit(child, local_values)
 
         visit(tree, {})
 
     for spec in ASK_MODES.values():
-        consumers[spec.handler].add("ASK_MODES[*].handler")
+        add_consumer(
+            spec.handler,
+            path="backend/app/services/ask_modes.py",
+            scope="<module>.ASK_MODES",
+            kind="registry",
+        )
 
     for name, (module_name, _owner) in COMPATIBILITY_EXPORTS.items():
-        consumers[name].add(f"compatibility:{module_name}")
+        add_consumer(
+            name,
+            path=module_name,
+            scope="<module>",
+            kind="compatibility",
+        )
 
     surface: dict[str, dict[str, object]] = {}
     for name in sorted(candidate_names):
-        if not consumers.get(name):
+        if not consumers.get(name) and not patches.get(name):
             continue
         scope = "facade"
         signature = ""
@@ -584,15 +743,78 @@ def collect_facade_surface() -> dict[str, dict[str, object]]:
             "kind": kind,
             "scope": scope,
             "signature": signature,
-            "consumers": sorted(consumers[name]),
-            "owner": _owner_for(name),
-            "patch_targets": sorted(
-                patches.get(name, []), key=lambda item: (item["file"], item["line"])
+            "consumers": [
+                consumers[name][key]
+                for key in sorted(consumers[name])
+            ],
+            "owner": delegate_owners.get(
+                name,
+                owner_by_member.get(name, _owner_for(name)),
             ),
+            "patch_targets": [
+                patches[name][key]
+                for key in sorted(patches[name])
+            ],
         }
         if scope == "module":
             surface[name]["modules"] = [COMPATIBILITY_EXPORTS[name][0]]
     return surface
+
+
+def _render_consumer_site(site: dict[str, str]) -> str:
+    return (
+        "ConsumerSite("
+        f"path={site['path']!r}, "
+        f"scope={site['scope']!r}, "
+        f"kind={site['kind']!r}, "
+        f"target={site['target']!r}"
+        ")"
+    )
+
+
+def _render_consumer_sites(sites: list[dict[str, str]]) -> list[str]:
+    return [f"            {_render_consumer_site(site)}," for site in sites]
+
+
+def write_ownership_surface(
+    path: Path,
+    surface: dict[str, dict[str, object]],
+) -> None:
+    source = path.read_text(encoding="utf-8")
+    start = source.index("SURFACE_MEMBERS = (")
+    end = source.index("\ndef _unique_nonempty_owners", start)
+    lines = ["SURFACE_MEMBERS = ("]
+    for name, record in sorted(surface.items()):
+        lines.extend(
+            [
+                "    SurfaceMember(",
+                f"        name={name!r},",
+                f"        owner={record['owner']!r},",
+                f"        kind={record['kind']!r},",
+                "        consumers=(",
+                *_render_consumer_sites(record["consumers"]),
+                "        ),",
+                "        patches=(",
+                *_render_consumer_sites(
+                    [
+                        {
+                            "path": patch["path"],
+                            "scope": patch["scope"],
+                            "kind": patch["kind"],
+                            "target": patch["target"],
+                        }
+                        for patch in record["patch_targets"]
+                    ]
+                ),
+                "        ),",
+                "    ),",
+            ]
+        )
+    lines.append(")")
+    path.write_text(
+        source[:start] + "\n".join(lines) + source[end:],
+        encoding="utf-8",
+    )
 
 
 class _FakeChatAdapter:
@@ -2315,11 +2537,57 @@ def main(argv: Sequence[str] | None = None) -> int:
             "runs from an untouched baseline checkout; omit for the normal workflow."
         ),
     )
+    parser.add_argument(
+        "--rebaseline-surface",
+        action="store_true",
+        help=(
+            "regenerate only the current semantic facade_surface.json contract; "
+            "never touches the frozen repository_v9 database or storage"
+        ),
+    )
+    parser.add_argument(
+        "--rebaseline-callers",
+        action="store_true",
+        help=(
+            "regenerate only the semantic repository caller-boundary contract; "
+            "never touches runtime or frozen repository_v9 artifacts"
+        ),
+    )
     args = parser.parse_args(argv)
+    selected_rebaseline_modes = sum(
+        bool(value)
+        for value in (
+            args.rebaseline,
+            args.rebaseline_surface,
+            args.rebaseline_callers,
+        )
+    )
+    if selected_rebaseline_modes > 1:
+        parser.error("choose only one rebaseline mode")
 
     contract_dir = args.fixtures_root / "repository_contract"
     v9_dir = args.fixtures_root / "repository_v9"
     contract_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.rebaseline_callers:
+        from tests.architecture.repository_callers import collect_caller_contract
+
+        _write_json(
+            contract_dir / "caller_boundaries.json",
+            collect_caller_contract(),
+        )
+        return 0
+
+    if args.rebaseline_surface:
+        surface = collect_facade_surface(
+            owner_by_member=_owners_at_commit(SURFACE_SOURCE_COMMIT),
+        )
+        _write_json(contract_dir / "facade_surface.json", surface)
+        write_ownership_surface(
+            REPO_ROOT / "backend" / "app" / "repositories" / "ownership_manifest.py",
+            surface,
+        )
+        return 0
 
     # Living characterization contracts: re-blessed against the current runtime.
     _write_phase_contracts(contract_dir)

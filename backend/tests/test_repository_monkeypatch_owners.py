@@ -21,12 +21,17 @@ FACADE_SOURCE = ROOT / "backend" / "app" / "services" / "sqlite_repository.py"
 
 def test_every_private_facade_patch_targets_a_manifest_marked_seam():
     from app.repositories.ownership_manifest import LATE_BOUND_COMPATIBILITY_SEAMS
-    from tests.test_repository_surface_manifest import _static_repository_patches
+    from tests.architecture.repository_contract import live_surface
 
     offenders = sorted(
-        f"{file}:{line} -> {target} (base={base})"
-        for file, line, target, base in _static_repository_patches()
-        if target.startswith("_") and target not in LATE_BOUND_COMPATIBILITY_SEAMS
+        (
+            f"{patch['path']}::{patch['scope']} -> {patch['target']} "
+            f"(base={patch['base']})"
+        )
+        for record in live_surface().values()
+        for patch in record["patch_targets"]
+        if patch["target"].startswith("_")
+        and patch["target"] not in LATE_BOUND_COMPATIBILITY_SEAMS
     )
     assert offenders == [], (
         "test-only facade-private patch targets are forbidden — patch the "

@@ -3,6 +3,9 @@ from pathlib import Path
 from tests.architecture.policy import policy_offenders
 
 
+ROOT = Path(__file__).resolve().parents[2]
+
+
 def _write(tmp_path: Path, source: str) -> Path:
     path = tmp_path / "test_contract.py"
     path.write_text(source, encoding="utf-8")
@@ -61,6 +64,16 @@ def test_policy_allows_lineno_only_as_diagnostic_metadata(tmp_path):
     assert policy_offenders((path,)) == []
 
 
+def test_policy_allows_lineno_in_named_diagnostic_map(tmp_path):
+    path = _write(
+        tmp_path,
+        "def collect(node, key, diagnostic_lines_by_key):\n"
+        "    diagnostic_lines_by_key[key].append(node.lineno)\n",
+    )
+
+    assert policy_offenders((path,)) == []
+
+
 def test_policy_detects_skip_and_xfail_markers(tmp_path):
     path = _write(
         tmp_path,
@@ -74,3 +87,20 @@ def test_policy_detects_skip_and_xfail_markers(tmp_path):
         "test_contract.py:1: pytest-skip",
         "test_contract.py:3: pytest-xfail",
     ]
+
+
+def test_repository_contracts_have_no_source_position_identity_or_markers():
+    policy_implementation = {
+        ROOT / "backend" / "tests" / "architecture" / "policy.py",
+        ROOT / "backend" / "tests" / "test_test_architecture_policy.py",
+    }
+    paths = tuple(
+        path
+        for path in sorted((ROOT / "backend" / "tests").rglob("*.py"))
+        if path not in policy_implementation
+    ) + (
+        ROOT / "scripts" / "generate_repository_contract_fixtures.py",
+        ROOT / "backend" / "app" / "repositories" / "ownership_manifest.py",
+    )
+
+    assert policy_offenders(paths) == []

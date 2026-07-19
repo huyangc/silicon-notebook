@@ -1,4 +1,10 @@
-from tests.architecture.semantic_source import PythonSourceIndex, SemanticKey
+import ast
+
+from tests.architecture.semantic_source import (
+    PythonSourceIndex,
+    SemanticKey,
+    qualified_scopes,
+)
 
 
 def test_line_movement_does_not_change_semantic_identity():
@@ -73,3 +79,36 @@ def test_session_index_contains_known_repository_import(python_source_index):
         kind="import",
         target="app.services.sqlite_repository:SQLiteRepository",
     ) in imports
+
+
+def test_attribute_identity_tracks_scope_and_occurrence_count():
+    index = PythonSourceIndex.from_sources(
+        {
+            "app/a.py": (
+                "def run(repo):\n"
+                "    repo._runtime.start()\n"
+                "    return repo._runtime\n"
+            )
+        }
+    )
+
+    finding = index.attributes(target="repo._runtime")[0]
+    assert finding.key == SemanticKey(
+        path="app/a.py",
+        scope="<module>.run",
+        kind="attribute",
+        target="repo._runtime",
+    )
+    assert finding.count == 2
+    assert finding.diagnostic_lines == (2, 3)
+
+
+def test_qualified_scopes_identify_nested_calls_without_positions():
+    tree = ast.parse(
+        "class Worker:\n"
+        "    def run(self, port):\n"
+        "        return port.fetch()\n"
+    )
+    call = next(node for node in ast.walk(tree) if isinstance(node, ast.Call))
+
+    assert qualified_scopes(tree)[call] == "<module>.Worker.run"

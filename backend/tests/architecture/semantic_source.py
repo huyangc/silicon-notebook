@@ -31,11 +31,47 @@ def dotted_name(node: ast.AST) -> str:
     return ""
 
 
+def qualified_scopes(tree: ast.AST) -> dict[ast.AST, str]:
+    scopes: dict[ast.AST, str] = {}
+
+    class ScopeVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.stack = ["<module>"]
+
+        @property
+        def current(self) -> str:
+            return ".".join(self.stack)
+
+        def visit(self, node: ast.AST) -> None:
+            scopes[node] = self.current
+            super().visit(node)
+
+        def _visit_scope(self, node: ast.AST, name: str) -> None:
+            self.stack.append(name)
+            self.generic_visit(node)
+            self.stack.pop()
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            self._visit_scope(node, node.name)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            self._visit_scope(node, node.name)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self._visit_scope(node, node.name)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            self._visit_scope(node, "<lambda>")
+
+    ScopeVisitor().visit(tree)
+    return scopes
+
+
 class _Visitor(ast.NodeVisitor):
     def __init__(self, path: str) -> None:
         self.path = path
         self.scopes = ["<module>"]
-        self.sites: list[tuple[SemanticKey, int]] = []
+        self.diagnostic_sites: list[tuple[SemanticKey, int]] = []
 
     @property
     def scope(self) -> str:
@@ -57,7 +93,7 @@ class _Visitor(ast.NodeVisitor):
 
     def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
-            self.sites.append(
+            self.diagnostic_sites.append(
                 (
                     SemanticKey(
                         path=self.path,
@@ -72,7 +108,7 @@ class _Visitor(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         module = "." * node.level + (node.module or "")
         for alias in node.names:
-            self.sites.append(
+            self.diagnostic_sites.append(
                 (
                     SemanticKey(
                         path=self.path,
@@ -87,12 +123,28 @@ class _Visitor(ast.NodeVisitor):
     def visit_Call(self, node: ast.Call) -> None:
         target = dotted_name(node.func)
         if target:
-            self.sites.append(
+            self.diagnostic_sites.append(
                 (
                     SemanticKey(
                         path=self.path,
                         scope=self.scope,
                         kind="call",
+                        target=target,
+                    ),
+                    node.lineno,
+                )
+            )
+        self.generic_visit(node)
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        target = dotted_name(node)
+        if target:
+            self.diagnostic_sites.append(
+                (
+                    SemanticKey(
+                        path=self.path,
+                        scope=self.scope,
+                        kind="attribute",
                         target=target,
                     ),
                     node.lineno,
@@ -111,7 +163,7 @@ class PythonSourceIndex:
         for path, source in sorted(sources.items()):
             visitor = _Visitor(path)
             visitor.visit(ast.parse(source, filename=path))
-            for key, line in visitor.sites:
+            for key, line in visitor.diagnostic_sites:
                 grouped[key].append(line)
         findings = tuple(
             SemanticFinding(
@@ -152,8 +204,23 @@ class PythonSourceIndex:
             and (target is None or finding.key.target == target)
         )
 
+    def attributes(
+        self,
+        *,
+        target: str | None = None,
+    ) -> tuple[SemanticFinding, ...]:
+        return tuple(
+            finding
+            for finding in self.findings
+            if finding.key.kind == "attribute"
+            and (target is None or finding.key.target == target)
+        )
+
     def import_keys(self) -> frozenset[SemanticKey]:
         return frozenset(finding.key for finding in self.imports())
 
     def call_keys(self) -> frozenset[SemanticKey]:
         return frozenset(finding.key for finding in self.calls())
+
+    def attribute_keys(self) -> frozenset[SemanticKey]:
+        return frozenset(finding.key for finding in self.attributes())
