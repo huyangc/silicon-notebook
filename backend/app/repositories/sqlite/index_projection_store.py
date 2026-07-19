@@ -136,6 +136,19 @@ class IndexProjectionStore:
         with self.connect() as db:
             return knowledge_counts_cache.chunk_count(db, notebook_id)
 
+    def is_mounted_by_anyone(self, notebook_id: str) -> bool:
+        """被任何笔记本当作参考库挂着(Task 6:scale eligible() 的挂载分支)——
+        不区分挂载边是否仍然「有效」,故意不走 mount_sql.py 的 MOUNT_VALID_EXPR:
+        那个谓词是解析参与集用的(边失效是可恢复的临时态),这里问的是「该不该为它
+        投入建索引的成本」,答案不该随边的有效性瞬时抖动。ScaleArtifactRuntime.eligible
+        消费;QueryStore.is_mounted_by_anyone 是 NotebookScaleProfile.index_eligible
+        侧的镜像实现,两处必须保持同一判定。"""
+        with self.connect() as db:
+            return bool(db.execute(
+                "SELECT EXISTS(SELECT 1 FROM notebook_bases WHERE base_notebook_id=?)",
+                (notebook_id,),
+            ).fetchone()[0])
+
     def source_ids(self, notebook_id: str) -> List[str]:
         with self.connect() as db:
             return [r["id"] for r in db.execute(

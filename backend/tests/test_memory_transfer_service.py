@@ -30,6 +30,18 @@ def _nb(repo, user, name):
     finally:
         reset_request_user(tok)
 
+def _mount_base(repo, user, notebook_id, name="Base corpus"):
+    """多领域基准库：晋升目标现在由挂载集合解析——挂 0 个公共知识库的笔记本
+    propose_memory_promotion 直接拒绝(PromotionTargetError)，不再有"全局唯一
+    base"这个隐式兜底可以蹭。下面这些用例关心的是「传输 × 审批状态」的交互，
+    审批提案本身只是前置条件，所以统一用这个 helper 把挂载补齐，而不是放宽
+    被测的守卫。挂 1 个 → target 自动解析成它，与这些用例原本的单一目标语义
+    一致。"""
+    base = repo.create_notebook(NotebookCreate(name=name))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook_id, [base.id], user.id)
+    return base
+
 def _confirmed_memory(service, nb, user, title="T", content="B"):
     # 走 agent candidate → confirm，拿到一条 confirmed memory（不需 answer 夹具）
     service.embedding_scheduler = lambda fn, job: fn(job)
@@ -904,6 +916,7 @@ def test_move_does_not_reingest_kg_source_when_deprecated_after_source_removed(
 def test_move_rejects_memory_with_active_promotion_proposal(repo, alice):
     service = repo._runtime.memory_service
     src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    _mount_base(repo, alice, src)
     mem = _confirmed_memory(service, src, alice, title="RC 补偿", content="补偿改善稳定性。")
     repo.propose_memory_promotion(mem.id, alice.id)
 
@@ -942,6 +955,7 @@ def test_copy_allows_memory_with_active_promotion_proposal(repo, alice):
     promotion_state='none'（provenance 走 imported_from，不复制审批状态）。"""
     service = repo._runtime.memory_service
     src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    _mount_base(repo, alice, src)
     mem = _confirmed_memory(service, src, alice, title="RC 补偿", content="补偿改善稳定性。")
     repo.propose_memory_promotion(mem.id, alice.id)
 
@@ -964,8 +978,7 @@ def test_move_allows_memory_with_approved_promotion(repo, alice):
     误伤——否则一条早就批准过的 memory 会永久搬不走。"""
     service = repo._runtime.memory_service
     src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
-    base = repo.create_notebook(NotebookCreate(name="Base corpus"))
-    repo.mark_notebook_base(base.id)
+    _mount_base(repo, alice, src)
     mem = _confirmed_memory(service, src, alice, title="RC 补偿", content="补偿改善稳定性。")
     proposal = repo.propose_memory_promotion(mem.id, alice.id)
     repo.approve_promotion(proposal["id"])
@@ -1175,6 +1188,7 @@ def test_move_retains_memory_when_promotion_proposed_between_precheck_and_revisi
 ):
     service = repo._runtime.memory_service
     src, dst = _nb(repo, alice, "src"), _nb(repo, alice, "dst")
+    _mount_base(repo, alice, src)
     mem = _confirmed_memory(service, src, alice, title="RC 补偿", content="补偿改善稳定性。")
     assert mem.promotion_state == "none", (
         "前置条件：loop 顶部读到的快照必须是 'none'，round 5 的早退 pre-check "

@@ -430,7 +430,11 @@ def test_renderer_starts_at_k2001_and_keeps_source_to_target_direction():
     chain = compose_two_hop_paths(
         nodes, relations, "C", direction="in",
     )[0]
-    context, id_map = render_follow_chain_context([chain])
+    # _chain_fixture's relations all default to notebook_id="nb" (_rel); this
+    # ask's own active_notebook_id matches, i.e. an ordinary same-notebook
+    # chain (the common case) — see the dedicated own/foreign pair below for
+    # the notebook_id-in-id_map contract itself (Task 14 审查修复 #1).
+    context, id_map = render_follow_chain_context([chain], active_notebook_id="nb")
 
     assert set(id_map) == {"k2001", "k2002"}
     assert "k2001: [relation][personal] A --derived_from--> B" in context
@@ -459,10 +463,41 @@ def test_renderer_deduplicates_shared_relation_anchors_and_honours_offset():
         _rel("to-d", "B", "D", "derived_from", quote="B to D"),
     ]
     chains = compose_two_hop_paths(nodes, relations, "A", max_results=4)
-    context, id_map = render_follow_chain_context(chains, id_offset=20)
+    context, id_map = render_follow_chain_context(
+        chains, id_offset=20, active_notebook_id="nb")
     assert set(id_map) == {"k21", "k22", "k23"}
     assert context.count("A --derived_from--> B — evidence") == 1
 
 
 def test_renderer_empty_input_matches_other_context_renderers():
-    assert render_follow_chain_context([]) == ("(none)", {})
+    assert render_follow_chain_context([], active_notebook_id="") == ("(none)", {})
+
+
+def test_renderer_blanks_notebook_id_for_the_active_notebooks_own_hops():
+    """Task 14 审查修复 #1: follow_chain 是引用徽章库名贯通漏掉的第五个锚点
+    生产点。同库(active_notebook_id 本身)的跳步不能在 id_map 里带自己的
+    notebook_id——否则前端徽章会显示一个多余的"来自「自己」"标签，与
+    evidence_context.py 的 chunk_context/knowledge_context 用 raw_origin
+    (而非回退过的 origin)的既有惯例不一致。"""
+    nodes, relations = _chain_fixture()  # 两条 relation 都 notebook_id="nb"(_rel 默认)
+    chain = compose_two_hop_paths(nodes, relations, "A")[0]
+    _context, id_map = render_follow_chain_context([chain], active_notebook_id="nb")
+    assert id_map["k2001"]["notebook_id"] == ""
+    assert id_map["k2002"]["notebook_id"] == ""
+
+
+def test_renderer_keeps_a_mounted_bases_real_notebook_id_for_cross_notebook_hops():
+    """跨库(挂载的参考库)跳步的 notebook_id 原样带出，供前端引用徽章解出真实
+    库名（而不是退化成泛化的"来自公共知识库"文案）。"""
+    nodes = {oid: _node(oid, "formula") for oid in ("A", "B", "C")}
+    relations = [
+        _rel("r1", "A", "B", "derived_from", quote="A to B",
+             tier="base", notebook_id="base-nb"),
+        _rel("r2", "B", "C", "derived_from", quote="B to C",
+             tier="base", notebook_id="base-nb"),
+    ]
+    chain = compose_two_hop_paths(nodes, relations, "A")[0]
+    _context, id_map = render_follow_chain_context(
+        [chain], active_notebook_id="active-nb")
+    assert id_map["k2001"]["notebook_id"] == "base-nb"
+    assert id_map["k2002"]["notebook_id"] == "base-nb"

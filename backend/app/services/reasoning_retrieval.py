@@ -70,6 +70,15 @@ _MAX_PPR_RETRIEVES = 3
 # follow_chain 每次最多形成少量两跳路径，但 agent 若不断换起点仍可能把关系
 # evidence 上下文撑爆；与 PPR 动作同样设内部硬上限，不增加环境变量。
 _MAX_FOLLOW_CHAIN_ACTIONS = 3
+# expand_community 跨挂载库合并去重后的兄弟实体总量帽,相对单库上限
+# community_peers_topk(默认 8)的倍数。多领域基准库下每个挂载库最多贡献
+# topk 个,不设总量帽会让合并结果随挂载库数 N 线性到 topk×N——每个新增的
+# peer 都要再触发一次 search() 检索,与「运行效率是一等约束」冲突。取 2 倍
+# (默认帽 16):挂 2 个库(当前最常见的多领域场景)时不因帽而打折,挂更多库时
+# 线性增长在这里被截住。用相对 topk 的倍数而非写死绝对值,是为了这条帽在
+# 任何 COMMUNITY_PEERS_TOPK 配置下都满足「单库场景不受影响」(单库最多贡献
+# topk 个,topk × 2 ≥ topk 恒成立)。
+_COMMUNITY_PEERS_CAP_FACTOR = 2
 
 # Reflect 循环中,当上一步检索动作未带来任何新证据时,附加到候选摘要里的提示。
 # 目的:让模型"知道"重复检索已无收益,从而自主决定直接作答(而非被强制收尾),
@@ -736,14 +745,24 @@ class ReasoningRetriever:
                                      detail={"reason": "no_focal_or_done", "focal": focal_name}))
                 else:
                     community_focals_done.add(fkey)
+                    # 挂载的参考库可能有多个(多领域基准库),逐个扩展、去重合并——
+                    # 不再是「拿全局唯一 base 的一个 id」。source 一旦被某个库以
+                    # comention(共提,高精度路径)命中就不再被后续库的 community
+                    # (社区回退)覆盖——sticky-prefer comention,避免把已发生的高精度
+                    # 贡献在展示文案上错误降级成「同社区实体」。单库场景(循环只跑
+                    # 一轮)与改前逐字等价。
                     peers, peer_source = [], "community"
                     try:
-                        base_nb = self.communities.first_base_notebook_id(notebook_id)
-                        if base_nb:
-                            peers, peer_source = self.communities.resolve_comparison_peers(
+                        for base_nb in self.communities.mounted_base_ids(notebook_id):
+                            found, src = self.communities.resolve_comparison_peers(
                                 base_nb, focal_name, question,
                                 top_k=self.settings.community_peers_topk,
                                 candidates=self.settings.community_rerank_candidates)
+                            for pname in found:
+                                if pname not in peers:
+                                    peers.append(pname)
+                            if found and peer_source != "comention":
+                                peer_source = src
                     except Exception as exc:  # noqa: BLE001 — 注释声称 fail-open 但原代码未实现兜底:
                         # community/共提层任何故障(缺表 / 数据异常)都不该拖垮 reasoning 或
                         # 深度报告的社区/横向对比节 —— 跳过扩展、继续。
@@ -751,6 +770,12 @@ class ReasoningRetriever:
                                          summary="跳过 expand_community(对比层不可用)",
                                          detail={"reason": "community_error", "error": str(exc)[:120]}))
                         peers, peer_source = [], "community"
+                    # 总量帽(见 _COMMUNITY_PEERS_CAP_FACTOR 注释):合并各库结果后才截断,
+                    # 取自 mounted_base_ids 的确定性遍历顺序(MOUNT_ORDER)+ list.append 的
+                    # 插入序,不依赖 dict/set 遍历顺序,同样的输入总是截出同样的前 N 个。
+                    peers_cap = self.settings.community_peers_topk * _COMMUNITY_PEERS_CAP_FACTOR
+                    if len(peers) > peers_cap:
+                        peers = peers[:peers_cap]
                     added, names = 0, []
                     for pname in peers:
                         raise_if_cancelled(self.cancel_event)

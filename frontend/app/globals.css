@@ -2753,6 +2753,19 @@ button.chat-session-card {
   margin-left: 4px;
 }
 
+/* 多领域基准库(Task 14):无图但挂了参考库时的提示——挂载库可能不止一个，
+   文案比旧版「借用底层库（base）」长得多，强制独占一行，和上方 mode-tab/
+   mode-engine 按钮行留出呼吸空间，不挤在同一行尾部。选择器比 .chat-input-bar
+   span 更具体（两个类 vs 一类+一元素），才能压过它的 13px/#667085，回到与
+   .mode-hint 一致的弱化提示语气，而不是喧宾夺主。 */
+.ask-mode-control .chat-hint {
+  flex-basis: 100%;
+  margin-top: 6px;
+  color: #98a2b3;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .chat-input {
   min-height: 36px;
   max-height: 120px;
@@ -4150,6 +4163,22 @@ button.chat-session-card {
   padding: 24px;
 }
 
+/* 编辑 notebook 弹窗:参考库多选(多领域基准库)让这张卡在多数视口高度下会超出
+   屏幕——不加限高时保存/取消按钮直接被裁到视口外且无法滚动触达(utility-modal-card
+   是 overflow:hidden,utility-modal 遮罩是 overflow:visible,两者都不提供滚动)。
+   同一问题 source-modal-card 早已修过(见其注释),这里镜像同一套「卡限高 + flex
+   纵向布局 + 表单区自滚动,标题栏与关闭按钮常驻」方案,只作用于这一张卡:
+   .edit-form 还被模型服务面板的字段组复用,不能直接改共享类。 */
+.notebook-edit-card {
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+}
+.notebook-edit-card .edit-form {
+  overflow-y: auto;
+  min-height: 0; /* flex 子项默认 min-height:auto 会撑破限高,导致滚动条不生效 */
+}
+
 .edit-form label {
   display: grid;
   gap: 7px;
@@ -5255,6 +5284,40 @@ button.chat-session-card {
   background: var(--soft);
   color: var(--muted);
 }
+/* codex 评审 PR#304 第 3 轮 P2 #2:库名并入徽章可见文字(answer-panel.tsx 的
+   SelectedReferenceDetail)。子节点从"一段文字"变成"文字 + 库名 span + 文字"三段
+   拼一句话——`.cite-detail-head span` 的通用规则给同级 span 之间加 gap:5px(本是
+   给图标+文字的 KG 类型徽章设计的),原样继承会在「「」和库名之间硬插出可见空隙,
+   把一句话拆散。用 .cite-detail-head .tier-badge(特异性 (0,2,1),压过 (0,1,1))清零。 */
+.cite-detail-head .tier-badge {
+  gap: 0;
+}
+/* 库名是用户自己起的笔记本名,可能任意大小写——.tier-badge 的 text-transform:
+   uppercase 是继承属性,会连累把名字强制转大写,这里单独复位。max-width 是长名
+   截断,与 .base-picker-name/.promotion-target-name 同一套省略号惯例;那两处靠
+   祖先 flex 链的 min-width:0 让 max-width:100% 生效,这里的 .tier-badge 是内容
+   撑开的 inline-flex(没有外部宽度可"100%"),故直接给定长(120px,够容纳约 8-9
+   个汉字或 18-20 个西文字符,同时不会在 .cite-popover 的 360px 宽卡片里撑破布局)。
+   title 上的完整库名不受截断影响,悬浮仍能看到全文。
+
+   display:inline-block 不是装饰性的,是这条规则能否生效的关键:`.cite-detail-head
+   span` 用的是后代选择器(不是子选择器),库名这个 span 虽然只是 .tier-badge 的
+   子节点,但它自己也是 .cite-detail-head 的后代 span,同样会被那条通用规则命中
+   → display:inline-flex。省略号截断的宽度裁切在 flex 容器上依然生效(overflow:
+   hidden 照样裁),但 text-overflow:ellipsis 的省略号字形在 flex 格式化上下文里
+   不会画出来——只裁不显省略号,肉眼看就是硬生生断在某个字上,比不截断还难发现
+   (真机浏览器量出来的,computed style 全对,肉眼却看不出来,靠 clientWidth <
+   scrollWidth 才揪出来)。这里用 .cite-detail-head .tier-badge-source-name
+   (特异性 (0,2,0))压过 .cite-detail-head span 的 (0,1,1),把它按回普通
+   inline-block,ellipsis 才会真的画出来。 */
+.cite-detail-head .tier-badge-source-name {
+  display: inline-block;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-transform: none;
+}
 .source-dist {
   color: var(--muted);
 }
@@ -5627,3 +5690,53 @@ button.chat-session-card {
   font-size: 13px;
   cursor: pointer;
 }
+
+/* 多领域基准库 —— 编辑弹窗里的参考库多选。列对齐 + 长名省略号截断,与 .tier-badge
+   群落同风格。 */
+.base-picker { display: flex; flex-direction: column; gap: 6px; }
+.base-picker-title { font-weight: 600; }
+.base-picker-desc,
+.base-picker-empty,
+.base-picker-hint { font-size: 12px; opacity: .7; margin: 0; }
+.base-picker-hint { color: var(--warning, #b8860b); }
+.base-picker-group { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.base-picker-group-title { font-size: 12px; opacity: .6; }
+/* 审查 M1/M2:.base-picker-row 落在一个 <label> 元素上,又嵌在 .edit-form 表单里——
+   .edit-form label(特异性 0,1,1)压过纯类选择器 .base-picker-row(0,1,0),会静默把
+   gap 从设计值 8px 吃成 7px。这里用 .base-picker-group 父类限定把特异性提到 (0,2,0)
+   反超,而不是反过来降 .edit-form label 的特异性(那会连累表单里其它字段标签的样式)。
+   grid 从 3 列(checkbox/名字/原因)收窄成 2 列——原因文案(如有)现在纵向堆叠进名字
+   所在的第二列(见下面 .base-picker-name-block),不再单占最后一列被推到行最右。 */
+.base-picker-group .base-picker-row {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+}
+/* 审查 M3:失效原因紧跟在库名正下方,而不是被网格最后一列推到行最右侧(远离库名,
+   读起来像是独立的一列而不是在注解库名)。镜像 .pending-row-main/-label/-nb 那套
+   "主行+副行都左对齐、都省略号截断"的既有惯例。min-width:0 让这个 flex 子项能在
+   网格列里正常收缩——align-items:flex-start 下子项默认按内容撑宽,不加会导致下面
+   的省略号截断失效。 */
+.base-picker-name-block { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 0; }
+/* 审查 M2:库名不该跟「标题」「目标用户」这些字段标签一样重——.edit-form label 的
+   font-weight:700 是经由继承(而非选择器特异性)渗进这个 <span> 的,直接在这里显式
+   声明就赢(继承的优先级本来就低于任何直接命中该元素的声明,不需要打特异性战)。
+   max-width:100% 是让省略号截断在 flex-start(而非 stretch)布局下仍然生效,同下面
+   .base-picker-dead-note 与既有的 .pending-row-label 是同一个写法。 */
+.base-picker-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.base-picker-row-dead { opacity: .45; }
+/* 同一处继承坑:显式给 400(比库名的 500 更轻,注解性质的说明文字),不然也会被
+   .edit-form label 的 700 经继承渗透,跟审查截图里"库名/字段标签一样粗"是同一个根因。 */
+.base-picker-dead-note { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 400; opacity: .8; }
+
+/* 晋升目标选择器(挂 >1 个公共知识库时弹出) —— 复用 .sort-button 的药丸样式,
+   只改左对齐 + 纵向排列,与 .base-picker 同一套列对齐/省略号截断惯例。 */
+.promotion-target-list { display: flex; flex-direction: column; gap: 8px; padding: 18px 24px 24px; }
+.promotion-target-option { width: 100%; text-align: left; }
+.promotion-target-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 必办 4:删除确认弹窗里"N 个笔记本正在把它作为参考库"的提示(spec §6)——CASCADE
+   不可逆,这一行必须比上面的说明文字更醒目。复用 .base-picker-hint 同款告警色,
+   但加粗:这里警示的后果("这些笔记本会立即失去参考库")比"检索会变慢"更严重。 */
+.delete-mount-warning { margin: 8px 0 0; color: var(--warning, #b8860b); font-weight: 600; line-height: 1.45; }

@@ -322,6 +322,7 @@ def test_e_citation_enrichment_e2e_with_real_projected_element(client, edited_en
     `metadata.knowhow` correctly end-to-end, not just the pure-function
     parsing logic in isolation."""
     repo = client._repo
+    nb = edited_env["nb"]
     table = edited_env["table"]
     row = edited_env["row"]
     anchor_id = edited_env["anchor_id"]
@@ -346,7 +347,7 @@ def test_e_citation_enrichment_e2e_with_real_projected_element(client, edited_en
         object_id="o1", object_type="claim", payload={}, evidence=[evidence], tier="personal",
     )
 
-    citations = repo._citations_from([hit], {element_id}, "KG evidence")
+    citations = repo._citations_from([hit], {element_id}, "KG evidence", notebook_id=nb)
 
     assert len(citations) == 1
     assert citations[0].knowhow is not None

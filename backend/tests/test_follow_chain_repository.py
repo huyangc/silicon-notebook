@@ -143,10 +143,21 @@ def test_follow_chain_rejects_incompatible_validity_scope(repo):
         nb.id, ids["Premise A"], edge_type="derived_from").inferences == []
 
 
+def test_follow_chain_rejects_start_in_unmounted_base(repo):
+    """起点授权门按挂载判定:base 已发布(tier='base')但 active 从未挂载它,
+    follow_chain 不得把 base 的对象当作合法起点——即便对象本身存在且可达。"""
+    active = repo.create_notebook(NotebookCreate(name="active"))
+    base, base_ids, _ = _seed_chain(repo)
+    repo.mark_notebook_base(base.id)
+    assert repo._follow_chain(
+        active.id, base_ids["Premise A"], edge_type="derived_from").inferences == []
+
+
 def test_follow_chain_can_read_base_but_not_unrelated_personal(repo):
     active = repo.create_notebook(NotebookCreate(name="active"))
     base, base_ids, _ = _seed_chain(repo)
     repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
     other, other_ids, _ = _seed_chain(repo)
 
     base_result = repo._follow_chain(
@@ -162,6 +173,7 @@ def test_base_chain_trust_is_higher_than_personal(repo):
     active = repo.create_notebook(NotebookCreate(name="active"))
     base, base_ids, relation_ids = _seed_chain(repo)
     repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
     with repo._write() as db:
         db.execute(
             f"UPDATE knowledge_relations SET review_status='verified' "

@@ -527,6 +527,11 @@
               "title": "Name",
               "type": "string"
             },
+            "notebook_id": {
+              "default": "",
+              "title": "Notebook Id",
+              "type": "string"
+            },
             "object_id": {
               "title": "Object Id",
               "type": "string"
@@ -914,6 +919,11 @@
             "memory_id": {
               "default": "",
               "title": "Memory Id",
+              "type": "string"
+            },
+            "notebook_id": {
+              "default": "",
+              "title": "Notebook Id",
               "type": "string"
             },
             "provenance": {
@@ -3312,6 +3322,52 @@
           "title": "ModelTestResult",
           "type": "object"
         },
+        "MountedBase": {
+          "description": "一条挂载边。active=False 表示边还在但当前不生效(被挂库易主 / 公共库被降级),\n前端须置灰并说明,不能假装它还在工作。",
+          "properties": {
+            "active": {
+              "default": true,
+              "title": "Active",
+              "type": "boolean"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "inactive_reason": {
+              "default": "",
+              "title": "Inactive Reason",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "tier": {
+              "default": "personal",
+              "title": "Tier",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "title": "MountedBase",
+          "type": "object"
+        },
+        "MountedByCount": {
+          "description": "有多少笔记本正在把本 notebook 挂为参考库(不论边当前是否生效)——删除确认\n弹窗专用(spec §6):CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须\n看到影响面。",
+          "properties": {
+            "count": {
+              "default": 0,
+              "title": "Count",
+              "type": "integer"
+            }
+          },
+          "title": "MountedByCount",
+          "type": "object"
+        },
         "NotebookAnalytics": {
           "properties": {
             "answers_total": {
@@ -3423,6 +3479,30 @@
           "title": "NotebookCreate",
           "type": "object"
         },
+        "NotebookRef": {
+          "description": "轻量 notebook 引用 —— 参考库挂载相关接口共用。",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "tier": {
+              "default": "personal",
+              "title": "Tier",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ],
+          "title": "NotebookRef",
+          "type": "object"
+        },
         "NotebookSearchResponse": {
           "properties": {
             "hits": {
@@ -3461,10 +3541,12 @@
               "title": "Base Kg Available",
               "type": "boolean"
             },
-            "base_notebook_name": {
-              "default": "",
-              "title": "Base Notebook Name",
-              "type": "string"
+            "base_notebooks": {
+              "items": {
+                "$ref": "#/components/schemas/NotebookRef"
+              },
+              "title": "Base Notebooks",
+              "type": "array"
             },
             "counts": {
               "additionalProperties": {
@@ -4142,6 +4224,18 @@
           "title": "PaperMeta",
           "type": "object"
         },
+        "PromoteRequest": {
+          "description": "POST .../promote 的可选请求体(知识对象晋升 + Memory 晋升共用)。挂载了\n多个公共知识库时必须显式指定 target_base_id,否则服务层拒绝(400)。",
+          "properties": {
+            "target_base_id": {
+              "default": "",
+              "title": "Target Base Id",
+              "type": "string"
+            }
+          },
+          "title": "PromoteRequest",
+          "type": "object"
+        },
         "PromotionApproveResult": {
           "properties": {
             "base_object_id": {
@@ -4244,6 +4338,16 @@
             },
             "status": {
               "title": "Status",
+              "type": "string"
+            },
+            "target_base_id": {
+              "default": "",
+              "title": "Target Base Id",
+              "type": "string"
+            },
+            "target_base_name": {
+              "default": "",
+              "title": "Target Base Name",
               "type": "string"
             }
           },
@@ -4643,6 +4747,20 @@
             "text"
           ],
           "title": "SearchHit",
+          "type": "object"
+        },
+        "SetBasesRequest": {
+          "description": "全量替换本 notebook 的参考库挂载集合。空数组 = 取消全部挂载。",
+          "properties": {
+            "base_notebook_ids": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Base Notebook Ids",
+              "type": "array"
+            }
+          },
+          "title": "SetBasesRequest",
           "type": "object"
         },
         "SetTierRequest": {
@@ -7453,6 +7571,18 @@
               }
             }
           ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromoteRequest",
+                  "default": {
+                    "target_base_id": ""
+                  }
+                }
+              }
+            }
+          },
           "responses": {
             "201": {
               "content": {
@@ -8114,6 +8244,102 @@
             }
           },
           "summary": "Get Notebook Asset File"
+        }
+      },
+      "/api/notebooks/{notebook_id}/bases": {
+        "get": {
+          "description": "本 notebook 挂载的参考库。含 active=False 的失效边(被挂库易主 / 公共库被\n降级),前端置灰展示——边保留是为了对方恢复后自动生效。",
+          "operationId": "list_notebook_bases_route_api_notebooks__notebook_id__bases_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/MountedBase"
+                    },
+                    "title": "Response List Notebook Bases Route Api Notebooks  Notebook Id  Bases Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "List Notebook Bases Route"
+        },
+        "put": {
+          "description": "全量替换挂载集合。只接受本 notebook 的可挂候选(公共知识库 ∪ 同 owner 的库)\n∪ 当前已挂载的 id(含失效边),其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。\n写权限本身由 require_notebook_access(owner-only,404 on denial)在依赖层挡;\n这里只做候选集校验,不重复手工判断写权限。\n\n并入\"当前已挂载的 id\"是刻意的:mountable_notebooks 与失效边的判定谓词\n(MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主后)永远不会\n出现在 mountable 里。前端编辑表单原样重新提交\"保留这条失效边不变\"的挂载集合\n(不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)\n时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。\n并入的是\"已挂载\"而非\"任意 id\",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。",
+          "operationId": "set_notebook_bases_route_api_notebooks__notebook_id__bases_put",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetBasesRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/MountedBase"
+                    },
+                    "title": "Response Set Notebook Bases Route Api Notebooks  Notebook Id  Bases Put",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Set Notebook Bases Route"
         }
       },
       "/api/notebooks/{notebook_id}/concepts/{canonical_id}/detail": {
@@ -10127,6 +10353,18 @@
               }
             }
           ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromoteRequest",
+                  "default": {
+                    "target_base_id": ""
+                  }
+                }
+              }
+            }
+          },
           "responses": {
             "201": {
               "content": {
@@ -10346,6 +10584,90 @@
             }
           },
           "summary": "Create Memory From Answer"
+        }
+      },
+      "/api/notebooks/{notebook_id}/mountable": {
+        "get": {
+          "description": "可挂候选 = 所有公共知识库 ∪ 与本库同 owner 的库。\n\n刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的\n/notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。",
+          "operationId": "mountable_notebooks_route_api_notebooks__notebook_id__mountable_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {
+                      "$ref": "#/components/schemas/NotebookRef"
+                    },
+                    "title": "Response Mountable Notebooks Route Api Notebooks  Notebook Id  Mountable Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Mountable Notebooks Route"
+        }
+      },
+      "/api/notebooks/{notebook_id}/mounted-by-count": {
+        "get": {
+          "description": "删除确认弹窗专用(spec §6):有多少笔记本正在把本 notebook 挂为参考库——\nON DELETE CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须看到影响面。\n与 DELETE 端点用同一个 owner-only 依赖(不新开一套权限判断)。",
+          "operationId": "mounted_by_count_route_api_notebooks__notebook_id__mounted_by_count_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/MountedByCount"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Mounted By Count Route"
         }
       },
       "/api/notebooks/{notebook_id}/objects/{object_id}/context": {
@@ -11490,7 +11812,7 @@
       },
       "/api/notebooks/{notebook_id}/tier": {
         "post": {
-          "description": "Set a notebook's federation tier: 'base' (authoritative reference KG)\nor 'personal' (default user notes). Drives tier-weighted relevance and\nconflict precedence in ask().",
+          "description": "Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本\n挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己\n的公共知识库。",
           "operationId": "set_notebook_tier_api_notebooks__notebook_id__tier_post",
           "parameters": [
             {
@@ -12683,7 +13005,7 @@
       "access": "owner",
       "access_scope": "",
       "base_kg_available": false,
-      "base_notebook_name": "",
+      "base_notebooks": [],
       "counts": {
         "cases": 0,
         "checklist_items": 0,

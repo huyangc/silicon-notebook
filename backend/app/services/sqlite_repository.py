@@ -245,7 +245,7 @@ def _make_persist_image(
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 
 @dataclass(frozen=True)
@@ -1042,12 +1042,16 @@ class SQLiteRepository:
     def _count_pending_kg_sources(self, db: sqlite3.Connection, notebook_id: str) -> int:
         return self._runtime.notebook_summaries.count_pending_kg_sources(db, notebook_id)
 
-    def _any_base_notebook_has_kg(self, db: "sqlite3.Connection | None" = None) -> bool:
-        """True iff some tier='base' notebook has any knowledge_objects."""
-        return self._runtime.knowledge.any_base_has_kg_compat(db)
+    def _any_base_notebook_has_kg(
+        self, notebook_id: str, db: "sqlite3.Connection | None" = None
+    ) -> bool:
+        """True iff 该 notebook 挂载的参考库里有任一已建 KG。"""
+        return self._runtime.knowledge.any_mounted_has_kg_compat(notebook_id, db)
 
-    def _base_notebook_info(self, db: "sqlite3.Connection | None" = None) -> "tuple[str, bool]":
-        return self._runtime.notebook_summaries.base_notebook_info(db)
+    def _mounted_bases(
+        self, notebook_id: str, db: "sqlite3.Connection | None" = None
+    ) -> "tuple[list, bool]":
+        return self._runtime.notebook_summaries.mounted_bases(notebook_id, db)
 
     @staticmethod
     def _source_ids_from_evidence(evidence_json: Optional[str]) -> set:
@@ -1127,6 +1131,22 @@ class SQLiteRepository:
 
     def set_notebook_personal(self, notebook_id: str) -> None:
         return self._runtime.catalog.set_notebook_personal(notebook_id)
+
+    def list_notebook_bases(self, notebook_id: str) -> list[dict]:
+        return self._runtime.notebook_store.list_mount_edges_for_notebook(notebook_id)
+
+    def mountable_notebooks(self, notebook_id: str) -> list[dict]:
+        return self._runtime.notebook_store.mountable_for_notebook(notebook_id)
+
+    def mounted_by_count(self, notebook_id: str) -> int:
+        return self._runtime.notebook_store.mounted_by_count_for_notebook(notebook_id)
+
+    def replace_notebook_bases(
+        self, notebook_id: str, base_notebook_ids: list[str], created_by: str
+    ) -> None:
+        return self._runtime.notebook_store.replace_mounts(
+            notebook_id, base_notebook_ids, created_by
+        )
 
     def delete_notebook(self, notebook_id: str) -> None:
         return self._runtime.catalog.delete_notebook(notebook_id)
@@ -1292,8 +1312,12 @@ class SQLiteRepository:
     def memory_revisions(self, memory_id: str, user_id: str) -> list:
         return self._runtime.memory_service.revisions(memory_id, user_id)
 
-    def propose_memory_promotion(self, memory_id: str, user_id: str) -> dict:
-        return self._runtime.memory_service.propose_promotion(memory_id, user_id)
+    def propose_memory_promotion(
+        self, memory_id: str, user_id: str, *, target_base_id: str = ""
+    ) -> dict:
+        return self._runtime.memory_service.propose_promotion(
+            memory_id, user_id, target_base_id=target_base_id
+        )
 
     # ------------------------------------------------------------------
     # Sharing / membership / deep-copy domain (Task 9): composed
@@ -2271,13 +2295,18 @@ class SQLiteRepository:
             row, payload=payload, evidence=evidence
         )
 
-    def propose_promotion(self, notebook_id: str, object_id: str) -> dict:
+    def propose_promotion(
+        self, notebook_id: str, object_id: str, *, target_base_id: str = ""
+    ) -> dict:
         """Propose a personal-KG object for promotion into the base corpus —
         KnowledgeGovernanceService owns the orchestration (Task 16; idempotent
         active-proposal reuse and the base-notebook guard are unchanged).
-        Frozen-signature delegate."""
+        Task 7 (multi-domain base libraries) adds target_base_id: which
+        mounted public reference library to promote into (required only when
+        more than one is mounted). Frozen for the original two positional
+        params; target_base_id is additive and backward compatible."""
         return self._runtime.knowledge_governance.propose_promotion(
-            notebook_id, object_id
+            notebook_id, object_id, target_base_id=target_base_id
         )
 
     def list_promotion_queue(self, status_filter: Optional[str] = None) -> List[dict]:
@@ -2688,9 +2717,11 @@ class SQLiteRepository:
         items: List[RetrievedKnowledge],
         valid_element_ids: set,
         label: str,
+        *,
+        notebook_id: str,
     ) -> List[Citation]:
         return self._runtime.evidence_context_component.citations_from(
-            items, valid_element_ids, label
+            items, valid_element_ids, label, notebook_id=notebook_id
         )
 
     # SQLite default SQLITE_MAX_VARIABLE_NUMBER-safe chunk size for `IN (...)`

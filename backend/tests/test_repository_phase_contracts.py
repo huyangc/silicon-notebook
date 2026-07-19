@@ -267,6 +267,7 @@ def test_approve_promotion_commits_candidate_and_base_before_hooks(
     personal = repository.create_notebook(NotebookCreate(name="personal"))
     base = repository.create_notebook(NotebookCreate(name="base"))
     repository.mark_notebook_base(base.id)
+    repository.replace_notebook_bases(personal.id, [base.id], "user-local")
     object_id = repository._test_insert_object(
         personal.id, "claim", {"name": "promotion phase"}
     )
@@ -312,6 +313,7 @@ def test_approve_promotion_transaction_failure_rolls_back_base_and_candidate(
     personal = repository.create_notebook(NotebookCreate(name="personal rollback"))
     base = repository.create_notebook(NotebookCreate(name="base rollback"))
     repository.mark_notebook_base(base.id)
+    repository.replace_notebook_bases(personal.id, [base.id], "user-local")
     object_id = repository._test_insert_object(
         personal.id, "claim", {"name": "rollback promotion"}
     )

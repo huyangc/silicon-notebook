@@ -28,31 +28,22 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-export type TierAction = "set" | "replace" | "unset";
+export type TierAction = "set" | "unset";
 
 export type TierActionState = {
   action: TierAction;
   label: string;
-  otherBaseName?: string;
 };
 
-// 三态基准库按钮 —— 基准库全局唯一:
-// - 当前 notebook 已是 base → unset(可取消)
-// - 别处已有 base → replace(带当前基准库名,点击需确认替换)
-// - 全局无 base → set(直接设)
+// 二态发布按钮 —— 公共知识库不再全局唯一(多领域各有自己的),故没有「替换」这一态:
+// - 当前 notebook 已是 base → unset(撤回发布)
+// - 否则 → set(发布)
 export const tierActionState = (
-  current: NotebookSummaryLike | undefined,
-  all: readonly NotebookSummaryLike[]
-): TierActionState => {
-  if (current?.tier === "base") {
-    return { action: "unset", label: "取消公共知识库" };
-  }
-  const otherBase = all.find((n) => n.tier === "base" && n.id !== current?.id);
-  if (otherBase) {
-    return { action: "replace", label: "替换为公共知识库", otherBaseName: otherBase.name };
-  }
-  return { action: "set", label: "设为公共知识库" };
-};
+  current: NotebookSummaryLike | undefined
+): TierActionState =>
+  current?.tier === "base"
+    ? { action: "unset", label: "取消公共知识库" }
+    : { action: "set", label: "设为公共知识库" };
 
 export const setNotebookTier = (
   notebookId: string,

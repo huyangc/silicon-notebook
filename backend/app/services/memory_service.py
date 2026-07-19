@@ -255,7 +255,9 @@ class MemoryService:
             )
         return candidates
 
-    def propose_promotion(self, memory_id: str, user_id: str) -> dict:
+    def propose_promotion(
+        self, memory_id: str, user_id: str, *, target_base_id: str = ""
+    ) -> dict:
         item = self.get(memory_id, user_id)
         if item.status != "confirmed":
             raise ValueError("only confirmed Memory can be promoted")
@@ -264,7 +266,8 @@ class MemoryService:
         if self.promotion_service is None:
             raise RuntimeError("Memory promotion service is not wired")
         return self.promotion_service.propose_memory_promotion(
-            item, self._promotion_candidates(item), user_id
+            item, self._promotion_candidates(item), user_id,
+            target_base_id=target_base_id,
         )
 
     def create_agent_profile(

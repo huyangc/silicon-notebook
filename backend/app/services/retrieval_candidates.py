@@ -177,10 +177,10 @@ class _RetrievalState:
     def _notebook_has_kg(self, notebook_id: str) -> bool:
         return self.knowledge.has_kg(notebook_id)
 
-    def _any_base_notebook_has_kg(self, database=None) -> bool:
+    def _any_base_notebook_has_kg(self, notebook_id: str, database=None) -> bool:
         if database is not None:
-            return self.knowledge.any_base_has_kg_on(database)
-        return self.knowledge.any_base_has_kg()
+            return self.knowledge.any_mounted_has_kg_on(database, notebook_id)
+        return self.knowledge.any_mounted_has_kg(notebook_id)
 
     def _federated_rx_graph(self, *args, **kwargs):
         return self._peer._federated_rx_graph(*args, **kwargs)
@@ -1468,7 +1468,7 @@ class CandidateRetrievalService(_RetrievalState):
         vector_chunks = self._gather_vector_chunks(notebook_id, sub_queries)
         kg_block, kg_id_map, kg_hits, kg_chunks = "", {}, [], []
         overlay_on = self.settings.chunk_kg_overlay_enabled and (
-            self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg())
+            self._notebook_has_kg(notebook_id) or self._any_base_notebook_has_kg(notebook_id))
         if overlay_on:
             kg_block, kg_id_map, kg_hits = self._chunk_kg_overlay(
                 notebook_id, query, hl, id_offset=self._MIX_KG_KEY_BASE)
@@ -1491,7 +1491,7 @@ class CandidateRetrievalService(_RetrievalState):
         overlay_on = (s.chunk_kg_overlay_enabled
                       and self.rerank_client.configured
                       and (self._notebook_has_kg(notebook_id)
-                           or self._any_base_notebook_has_kg()))
+                           or self._any_base_notebook_has_kg(notebook_id)))
         if overlay_on:
             strategy = "mix"
         elif len(sub_queries) >= 2:

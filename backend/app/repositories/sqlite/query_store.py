@@ -10,6 +10,7 @@ from app.models.schemas import (
     SearchHit,
 )
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.services.extraction_profiles import OBJECT_TYPE_LABELS
 from app.services.notebook_scale import NotebookScaleFacts
 
@@ -87,14 +88,15 @@ class QueryStore:
         return int(row["count"])
 
     @staticmethod
-    def base_notebook_info_row(db: sqlite3.Connection):
+    def mounted_bases_row(db: sqlite3.Connection, notebook_id: str):
+        """本库挂载的有效参考库 + 各自是否有 KG —— 一次查询同时供 NotebookSummary 的
+        base_notebooks 与 base_kg_available。"""
         return db.execute(
-            "SELECT nb.name, "
-            "EXISTS(SELECT 1 FROM knowledge_objects ko "
-            "JOIN notebooks b ON b.id = ko.notebook_id WHERE b.tier = 'base') "
-            "FROM notebooks nb WHERE nb.tier = 'base' "
-            "ORDER BY nb.created_at ASC LIMIT 1"
-        ).fetchone()
+            "SELECT b.id AS id, b.name AS name, b.tier AS tier, "
+            "EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id) AS has_kg "
+            + MOUNT_JOIN + MOUNT_VALID + MOUNT_ORDER,
+            (notebook_id,),
+        ).fetchall()
 
     @staticmethod
     def summary_notebook_row(db: sqlite3.Connection, notebook_id: str):
@@ -567,3 +569,15 @@ class QueryStore:
                 one("SELECT COUNT(*) FROM knowledge_objects WHERE notebook_id = ?"),
                 one("SELECT COUNT(*) FROM knowledge_relations WHERE notebook_id = ?"),
             )
+
+    def is_mounted_by_anyone(self, notebook_id: str) -> bool:
+        """被任何笔记本当作参考库挂着(Task 6)—— NotebookScaleProfile.index_eligible
+        的挂载分支消费。刻意不区分挂载边是否仍然「有效」(不走 mount_sql.py 的
+        MOUNT_VALID_EXPR):那是解析参与集用的谓词,边失效通常是临时的,不该让
+        索引跟着过期。IndexProjectionStore.is_mounted_by_anyone 是
+        ScaleArtifactRuntime.eligible 侧的镜像实现,两处必须保持同一判定。"""
+        with self.database.connect() as db:
+            return bool(db.execute(
+                "SELECT EXISTS(SELECT 1 FROM notebook_bases WHERE base_notebook_id=?)",
+                (notebook_id,),
+            ).fetchone()[0])

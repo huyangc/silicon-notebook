@@ -124,27 +124,27 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
     **{
         site: "offline merge tool operates on temporary copies of exported databases"
         for site in {
-            ("scripts/merge_dbs.py", 78, "conn.execute"),
-            ("scripts/merge_dbs.py", 83, "conn.execute"),
-            ("scripts/merge_dbs.py", 141, "execute"),
-            ("scripts/merge_dbs.py", 148, "conn.execute"),
-            ("scripts/merge_dbs.py", 152, "conn.execute"),
-            ("scripts/merge_dbs.py", 161, "conn.execute"),
-            ("scripts/merge_dbs.py", 168, "conn.execute"),
-            ("scripts/merge_dbs.py", 193, "conn_a.execute"),
-            ("scripts/merge_dbs.py", 194, "conn_b.execute"),
-            ("scripts/merge_dbs.py", 211, "conn.execute"),
-            ("scripts/merge_dbs.py", 225, "conn.execute"),
-            ("scripts/merge_dbs.py", 226, "conn.execute"),
-            ("scripts/merge_dbs.py", 228, "conn.execute"),
-            ("scripts/merge_dbs.py", 259, "conn.execute"),
-            ("scripts/merge_dbs.py", 274, "conn.execute"),
-            ("scripts/merge_dbs.py", 278, "conn.execute"),
-            ("scripts/merge_dbs.py", 284, "conn.execute"),
-            ("scripts/merge_dbs.py", 287, "conn.execute"),
-            ("scripts/merge_dbs.py", 291, "conn.execute"),
-            ("scripts/merge_dbs.py", 294, "conn.execute"),
-            ("scripts/merge_dbs.py", 359, "conn_s.execute"),
+            ("scripts/merge_dbs.py", 88, "conn.execute"),
+            ("scripts/merge_dbs.py", 93, "conn.execute"),
+            ("scripts/merge_dbs.py", 151, "execute"),
+            ("scripts/merge_dbs.py", 158, "conn.execute"),
+            ("scripts/merge_dbs.py", 166, "conn.execute"),
+            ("scripts/merge_dbs.py", 182, "conn.execute"),
+            ("scripts/merge_dbs.py", 189, "conn.execute"),
+            ("scripts/merge_dbs.py", 214, "conn_a.execute"),
+            ("scripts/merge_dbs.py", 215, "conn_b.execute"),
+            ("scripts/merge_dbs.py", 232, "conn.execute"),
+            ("scripts/merge_dbs.py", 246, "conn.execute"),
+            ("scripts/merge_dbs.py", 247, "conn.execute"),
+            ("scripts/merge_dbs.py", 249, "conn.execute"),
+            ("scripts/merge_dbs.py", 280, "conn.execute"),
+            ("scripts/merge_dbs.py", 295, "conn.execute"),
+            ("scripts/merge_dbs.py", 299, "conn.execute"),
+            ("scripts/merge_dbs.py", 305, "conn.execute"),
+            ("scripts/merge_dbs.py", 308, "conn.execute"),
+            ("scripts/merge_dbs.py", 312, "conn.execute"),
+            ("scripts/merge_dbs.py", 315, "conn.execute"),
+            ("scripts/merge_dbs.py", 380, "conn_s.execute"),
         }
     },
     # Snapshot verifier attaches only to a private backup/probe opened ro.
@@ -166,17 +166,17 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
             # then a further +57 by source-asset-linking Task 2's v19
             # additions (NOTEBOOK_ASSETS_SOURCE_ID_COLUMN/_INDEX + every hop's
             # terminal bumped to 19 + the new (18, 19) hop).
-            ("scripts/verify_repository_snapshot.py", 862, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 869, "digest_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 891, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 895, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 920, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 921, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 938, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 950, "meta_conn.execute"),
-            ("scripts/verify_repository_snapshot.py", 1292, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1299, "probe.execute"),
-            ("scripts/verify_repository_snapshot.py", 1328, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 927, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 934, "digest_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 956, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 960, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 985, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 986, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 1003, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 1015, "meta_conn.execute"),
+            ("scripts/verify_repository_snapshot.py", 1357, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1364, "probe.execute"),
+            ("scripts/verify_repository_snapshot.py", 1393, "probe.execute"),
         }
     },
     # Offline two-DB merge tool (PR#276): every statement runs against temp-dir
@@ -188,27 +188,27 @@ INDEPENDENT_SQL_SITES: dict[tuple[str, int, str], str] = {
     **{
         site: "offline two-DB merge tool works on temp-dir copies via ATTACH"
         for site in {
-            ("scripts/merge_dbs.py", 78, "conn.execute"),
-            ("scripts/merge_dbs.py", 83, "conn.execute"),
-            ("scripts/merge_dbs.py", 141, "execute"),
-            ("scripts/merge_dbs.py", 148, "conn.execute"),
-            ("scripts/merge_dbs.py", 152, "conn.execute"),
-            ("scripts/merge_dbs.py", 161, "conn.execute"),
-            ("scripts/merge_dbs.py", 168, "conn.execute"),
-            ("scripts/merge_dbs.py", 193, "conn_a.execute"),
-            ("scripts/merge_dbs.py", 194, "conn_b.execute"),
-            ("scripts/merge_dbs.py", 211, "conn.execute"),
-            ("scripts/merge_dbs.py", 225, "conn.execute"),
-            ("scripts/merge_dbs.py", 226, "conn.execute"),
-            ("scripts/merge_dbs.py", 228, "conn.execute"),
-            ("scripts/merge_dbs.py", 259, "conn.execute"),
-            ("scripts/merge_dbs.py", 274, "conn.execute"),
-            ("scripts/merge_dbs.py", 278, "conn.execute"),
-            ("scripts/merge_dbs.py", 284, "conn.execute"),
-            ("scripts/merge_dbs.py", 287, "conn.execute"),
-            ("scripts/merge_dbs.py", 291, "conn.execute"),
-            ("scripts/merge_dbs.py", 294, "conn.execute"),
-            ("scripts/merge_dbs.py", 359, "conn_s.execute"),
+            ("scripts/merge_dbs.py", 88, "conn.execute"),
+            ("scripts/merge_dbs.py", 93, "conn.execute"),
+            ("scripts/merge_dbs.py", 151, "execute"),
+            ("scripts/merge_dbs.py", 158, "conn.execute"),
+            ("scripts/merge_dbs.py", 166, "conn.execute"),
+            ("scripts/merge_dbs.py", 182, "conn.execute"),
+            ("scripts/merge_dbs.py", 189, "conn.execute"),
+            ("scripts/merge_dbs.py", 214, "conn_a.execute"),
+            ("scripts/merge_dbs.py", 215, "conn_b.execute"),
+            ("scripts/merge_dbs.py", 232, "conn.execute"),
+            ("scripts/merge_dbs.py", 246, "conn.execute"),
+            ("scripts/merge_dbs.py", 247, "conn.execute"),
+            ("scripts/merge_dbs.py", 249, "conn.execute"),
+            ("scripts/merge_dbs.py", 280, "conn.execute"),
+            ("scripts/merge_dbs.py", 295, "conn.execute"),
+            ("scripts/merge_dbs.py", 299, "conn.execute"),
+            ("scripts/merge_dbs.py", 305, "conn.execute"),
+            ("scripts/merge_dbs.py", 308, "conn.execute"),
+            ("scripts/merge_dbs.py", 312, "conn.execute"),
+            ("scripts/merge_dbs.py", 315, "conn.execute"),
+            ("scripts/merge_dbs.py", 380, "conn_s.execute"),
         }
     },
 }
@@ -235,7 +235,11 @@ FACADE_CLASS_IMPORT_SITES: dict[tuple[str, int], str] = {
     ("scripts/bench_sqlite_writes.py", 20): "synthetic benchmark composition root",
     ("scripts/build_chunks.py", 5): "offline CLI composition root",
     ("scripts/denoise_reextract_nb.py", 18): "offline CLI composition root",
-    ("scripts/diag_base_report.py", 26): "offline diagnostic composition root",
+    # 最终整支审查 必办 3 (2026-07-19): diag_base_report.py 的模块 docstring 改写
+    # (先查该笔记本自己的挂载集合,不再全局猜一个 tier='base' 的 notebook 当唯一
+    # 参考库；挂载数为 0 时给出正确的结论与药方,不再一律归因到 scale 索引) 让
+    # 顶部说明多出十来行,把这个 import 顶下到当前行号。
+    ("scripts/diag_base_report.py", 36): "offline diagnostic composition root",
     ("scripts/generate_repository_contract_fixtures.py", 40): "contract fixture composition root",
     ("scripts/generate_repository_contract_fixtures.py", 268): "contract fixture composition root",
     ("scripts/generate_repository_contract_fixtures.py", 758): "contract fixture composition root",
@@ -395,10 +399,10 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     ("scripts/generate_repository_contract_fixtures.py", 1650, "sqlite3.connect"): (
         "contract fixture generator opens disposable fixture databases"
     ),
-    ("scripts/merge_dbs.py", 222, "sqlite3.connect"): (
+    ("scripts/merge_dbs.py", 243, "sqlite3.connect"): (
         "offline merge tool opens a temporary copy of the merge output/primary database"
     ),
-    ("scripts/merge_dbs.py", 356, "sqlite3.connect"): (
+    ("scripts/merge_dbs.py", 377, "sqlite3.connect"): (
         "offline merge tool opens temporary copies of both source databases"
     ),
     # Line numbers shifted +32 by Task 1 (memory-kg-extract)'s v14 manifest
@@ -413,29 +417,39 @@ SQLITE_CONNECT_SITES: dict[tuple[str, int, str], str] = {
     # (17, 18) hop), then a further +57 by source-asset-linking Task 2's v19
     # manifest additions (NOTEBOOK_ASSETS_SOURCE_ID_COLUMN/_INDEX + every hop
     # terminal bumped to 19 + the new (18, 19) hop).
-    ("scripts/verify_repository_snapshot.py", 916, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 981, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 917, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 982, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1286, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1351, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1433, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1498, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
-    ("scripts/verify_repository_snapshot.py", 1435, "sqlite3.connect"): (
+    ("scripts/verify_repository_snapshot.py", 1500, "sqlite3.connect"): (
         "snapshot verifier reads only backup/probe databases"
     ),
     # Offline two-DB merge tool (PR#276) opens temp-dir copies of the two source
-    # databases — never the live product DB (line 356 opens both copies on one
+    # databases — never the live product DB (line 377 opens both copies on one
     # line, so a single frozen key covers both connect calls).
-    ("scripts/merge_dbs.py", 222, "sqlite3.connect"): (
+    ("scripts/merge_dbs.py", 243, "sqlite3.connect"): (
         "offline two-DB merge tool opens a temp-dir copy, not the live product DB"
     ),
-    ("scripts/merge_dbs.py", 356, "sqlite3.connect"): (
+    ("scripts/merge_dbs.py", 377, "sqlite3.connect"): (
         "offline two-DB merge tool opens temp-dir copies, not the live product DB"
+    ),
+    # Offline promotion-target backfill CLI (Task 9, multi-domain base libraries):
+    # opens the operator-supplied --db path directly (it is meant to patch a real
+    # deployed database in place, unlike merge_dbs.py's temp-copy convention) but
+    # all product SQL against promotion_candidates lives in GovernanceStore
+    # (pending_promotion_targets / set_promotion_target / mounted_public_base_ids)
+    # — this is the sole non-store call site, and it is only ever a connection open.
+    ("scripts/backfill_promotion_targets.py", 238, "sqlite3.connect"): (
+        "offline maintenance CLI opens the operator-supplied --db path;"
+        " all promotion_candidates SQL lives in GovernanceStore"
     ),
 }
 

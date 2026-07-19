@@ -67,8 +67,8 @@ def test_reasoning_retriever_accepts_ports_without_sqlite_repository():
         reasoning_llm_client = type("LLM", (), {"configured": False})()
 
     class _Communities:
-        def first_base_notebook_id(self, active_notebook_id):
-            return None
+        def mounted_base_ids(self, active_notebook_id):
+            return []
 
         def resolve_comparison_peers(self, *args, **kwargs):
             return [], "community"

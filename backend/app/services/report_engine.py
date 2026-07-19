@@ -297,7 +297,7 @@ class ReportEngine:
         if getattr(result, "chains", None):
             from app.services.kg.follow_chain import render_follow_chain_context
             chain_block, chain_map = render_follow_chain_context(
-                result.chains, id_offset=2000)
+                result.chains, id_offset=2000, active_notebook_id=notebook_id)
             if chain_block and chain_block != "(none)":
                 context_block = f"{context_block}\n\n{chain_block}"
         memory_map = {}

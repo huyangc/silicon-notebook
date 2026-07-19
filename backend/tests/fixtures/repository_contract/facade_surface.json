@@ -199,7 +199,7 @@
       "backend/tests/test_pending_actions.py:3",
       "backend/tests/test_pipeline_concurrency.py:10",
       "backend/tests/test_ppr_fallback_guard.py:17",
-      "backend/tests/test_ppr_retrieve.py:324",
+      "backend/tests/test_ppr_retrieve.py:334",
       "backend/tests/test_ppr_retrieve.py:4",
       "backend/tests/test_query_hotpath_cache.py:27",
       "backend/tests/test_query_refine.py:7",
@@ -732,7 +732,7 @@
       }
     ],
     "scope": "facade",
-    "signature": "(self, db: \"'sqlite3.Connection | None'\" = None) -> 'bool'"
+    "signature": "(self, notebook_id: 'str', db: \"'sqlite3.Connection | None'\" = None) -> 'bool'"
   },
   "_as_retrieved": {
     "consumers": [
@@ -841,7 +841,7 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'None'"
   },
-  "_base_notebook_info": {
+  "_mounted_bases": {
     "consumers": [
       "backend/app/services/sqlite_repository.py:13822"
     ],
@@ -849,7 +849,7 @@
     "owner": "NotebookCatalogService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, db: \"'sqlite3.Connection | None'\" = None) -> \"'tuple[str, bool]'\""
+    "signature": "(self, notebook_id: 'str', db: \"'sqlite3.Connection | None'\" = None) -> \"'tuple[list, bool]'\""
   },
   "_build_chunk_retrieval_plan": {
     "consumers": [
@@ -926,7 +926,7 @@
       "backend/app/services/sqlite_repository.py:11613",
       "backend/app/services/sqlite_repository.py:11649",
       "backend/app/services/sqlite_repository.py:12512",
-      "backend/tests/test_chunk_retrieval_characterization.py:624",
+      "backend/tests/test_chunk_retrieval_characterization.py:656",
       "backend/tests/test_mix_answer.py:79",
       "backend/tests/test_mix_answer.py:80"
     ],
@@ -962,7 +962,7 @@
     "owner": "RetrievalService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, items: 'List[RetrievedKnowledge]', valid_element_ids: 'set', label: 'str') -> 'List[Citation]'"
+    "signature": "(self, items: 'List[RetrievedKnowledge]', valid_element_ids: 'set', label: 'str', *, notebook_id: 'str') -> 'List[Citation]'"
   },
   "_cleanup_empty_conversation": {
     "consumers": [
@@ -6125,7 +6125,7 @@
       "backend/tests/test_chunk_retrieval_characterization.py:470",
       "backend/tests/test_chunk_retrieval_characterization.py:506",
       "backend/tests/test_chunk_retrieval_characterization.py:531",
-      "backend/tests/test_chunk_retrieval_characterization.py:580",
+      "backend/tests/test_chunk_retrieval_characterization.py:587",
       "backend/tests/test_empty_synth_guard.py:111",
       "backend/tests/test_empty_synth_guard.py:121",
       "backend/tests/test_language_policy.py:306",
@@ -8779,7 +8779,7 @@
       "backend/tests/test_chunk_retrieval_characterization.py:438",
       "backend/tests/test_chunk_retrieval_characterization.py:504",
       "backend/tests/test_chunk_retrieval_characterization.py:529",
-      "backend/tests/test_chunk_retrieval_characterization.py:578",
+      "backend/tests/test_chunk_retrieval_characterization.py:585",
       "backend/tests/test_community_reports.py:51",
       "backend/tests/test_community_reports.py:55",
       "backend/tests/test_community_reports.py:62",
@@ -8959,7 +8959,7 @@
       "backend/app/api/routes.py:785",
       "backend/tests/test_architecture_hardening.py:100",
       "backend/tests/test_chunk_retrieval_characterization.py:562",
-      "backend/tests/test_chunk_retrieval_characterization.py:611",
+      "backend/tests/test_chunk_retrieval_characterization.py:640",
       "backend/tests/test_cross_tier_reasoning.py:463",
       "backend/tests/test_cross_tier_reasoning.py:97",
       "backend/tests/test_edge_review_queue.py:205",
@@ -9478,7 +9478,7 @@
     "owner": "KnowledgeGovernanceService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', object_id: 'str') -> 'dict'"
+    "signature": "(self, notebook_id: 'str', object_id: 'str', *, target_base_id: 'str' = '') -> 'dict'"
   },
   "propose_schemas": {
     "consumers": [
@@ -10831,7 +10831,7 @@
       "backend/tests/test_chunk_retrieval_characterization.py:411",
       "backend/tests/test_chunk_retrieval_characterization.py:454",
       "backend/tests/test_chunk_retrieval_characterization.py:503",
-      "backend/tests/test_chunk_retrieval_characterization.py:577",
+      "backend/tests/test_chunk_retrieval_characterization.py:584",
       "backend/tests/test_chunk_retrieval_plan.py:36",
       "backend/tests/test_chunk_retrieval_plan.py:52",
       "backend/tests/test_communities.py:33",

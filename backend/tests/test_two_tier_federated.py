@@ -33,33 +33,32 @@ class TestTask1:
         nb2 = repo.get_notebook(nb.id)
         assert nb2.tier == "base"
 
-    def test_mark_notebook_base_is_globally_unique(self, repo):
-        """基准库全局唯一:把 B 设为 base 时，旧 base A 应在同一事务里被降级为 personal。"""
-        a = repo.create_notebook(NotebookCreate(name="base A"))
-        b = repo.create_notebook(NotebookCreate(name="base B"))
-        repo.mark_notebook_base(a.id)
-        assert repo.get_notebook(a.id).tier == "base"
-        repo.mark_notebook_base(b.id)  # 设新 base → 旧的应自动降级
-        assert repo.get_notebook(b.id).tier == "base"
-        assert repo.get_notebook(a.id).tier == "personal"
+    def test_multiple_base_notebooks_coexist(self, repo):
+        """多领域基准库:base 不再全局唯一,设 B 为 base 不应降级 A。
 
-    def test_base_notebook_name_visible_from_any_summary(self, repo):
-        """base_notebook_name 暴露全局唯一基准库的名字,任意 notebook 的 summary 都能读到
-        (供非管理员在分析弹窗只读查看是哪个);无基准库为空;base_kg_available 语义不变。"""
+        领域各有独立公共知识库(模拟/物理设计/数字前端),谁参与检索由笔记本的
+        挂载边决定,不再由「哪个是那个唯一的 base」决定。"""
+        a = repo.create_notebook(NotebookCreate(name="模拟"))
+        b = repo.create_notebook(NotebookCreate(name="物理设计"))
+        repo.mark_notebook_base(a.id)
+        repo.mark_notebook_base(b.id)
+        assert repo.get_notebook(a.id).tier == "base"
+        assert repo.get_notebook(b.id).tier == "base"
+
+    def test_base_notebooks_reflect_mounts(self, repo):
+        """base_notebooks 是「本库挂了哪些参考库」,不再是全局那一个的名字。"""
         base = repo.create_notebook(NotebookCreate(name="模拟IC教材"))
         other = repo.create_notebook(NotebookCreate(name="my notes"))
-        # 尚无 base → 空
-        assert repo.get_notebook(other.id).base_notebook_name == ""
-        # 标记 base 后,从「别的」notebook 的 summary 也能看到基准库名(非仅 base 自身)
         repo.mark_notebook_base(base.id)
-        assert repo.get_notebook(other.id).base_notebook_name == "模拟IC教材"
-        assert repo.get_notebook(base.id).base_notebook_name == "模拟IC教材"
-        # 空库无 KG → base_kg_available 仍为 False(合并进同一查询后未回归)
+        # 已发布但未挂载 → 看不到
+        assert repo.get_notebook(other.id).base_notebooks == []
+        repo.replace_notebook_bases(other.id, [base.id], "user-local")
+        names = [b.name for b in repo.get_notebook(other.id).base_notebooks]
+        assert names == ["模拟IC教材"]
+        # 空库无 KG → 门仍关
         assert repo.get_notebook(other.id).base_kg_available is False
-        # 换 base(全局唯一)→ 名字随之更新
-        base2 = repo.create_notebook(NotebookCreate(name="内部规范集"))
-        repo.mark_notebook_base(base2.id)
-        assert repo.get_notebook(other.id).base_notebook_name == "内部规范集"
+        # base 自己没挂任何东西 → 空
+        assert repo.get_notebook(base.id).base_notebooks == []
 
     def test_tier_is_idempotent_on_existing_db(self, tmp_path, monkeypatch):
         """Running _migrate() twice on a DB that already has the tier column
@@ -91,6 +90,7 @@ class TestTask2:
              "payload": {"name": "capacitance concept note", "section_path": "1"},
              "evidence": []},
         ], [])
+        repo.replace_notebook_bases(personal_nb.id, [base_nb.id], "user-local")
         return base_nb, personal_nb
 
     def test_federated_retrieve_returns_hits_from_both_notebooks(self, repo):
@@ -134,6 +134,7 @@ class TestTask3:
         base_nb = repo.create_notebook(NotebookCreate(name="base"))
         repo.mark_notebook_base(base_nb.id)
         personal_nb = repo.create_notebook(NotebookCreate(name="personal"))
+        repo.replace_notebook_bases(personal_nb.id, [base_nb.id], "user-local")
 
         base_hit = RetrievedKnowledge(
             object_id="b1", object_type="claim", payload={}, score=0.20, relevance=0.20)

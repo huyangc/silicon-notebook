@@ -35,6 +35,18 @@ def _make_base_nb(repo, name="base"):
     return nb
 
 
+def _make_personal_with_base(repo, personal_name="personal", base_name="base"):
+    """Create a personal notebook with a base notebook mounted as its sole
+    public reference library. Task 7 (promotion-target explicitness) makes
+    propose_promotion reject a notebook with zero mounted public bases, so
+    every promotion test needs a real mount, not just a `tier='base'` label
+    floating unattached in the system."""
+    nb = _make_personal_nb(repo, personal_name)
+    base = _make_base_nb(repo, base_name)
+    repo.replace_notebook_bases(nb.id, [base.id], "user-local")
+    return nb, base
+
+
 def _insert_claim(repo, notebook_id, name):
     """Insert a claim into a (personal) notebook via the test helper."""
     return repo._test_insert_object(
@@ -67,7 +79,7 @@ def _objects_in(repo, notebook_id, object_type="claim"):
 
 class TestPromotionStateMachine:
     def test_propose_creates_candidate_in_proposed_state(self, repo):
-        nb = _make_personal_nb(repo)
+        nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "cascode raises output resistance")
         cand = repo.propose_promotion(nb.id, oid)
         assert cand["status"] == "proposed"
@@ -86,14 +98,20 @@ class TestPromotionStateMachine:
             repo.propose_promotion("nb-nope", "ko-nope")
 
     def test_propose_from_base_notebook_raises(self, repo):
+        """`_make_base_nb` mounts nothing, so a bare `pytest.raises(ValueError)`
+        can't tell "rejected by the tier guard" apart from "rejected because
+        0 public bases are mounted" (`_resolve_promotion_target`) — the tier
+        guard runs first in `propose_promotion`, but if it were ever deleted
+        this test would keep passing for the wrong reason. `match` pins it to
+        the tier guard's actual message."""
         base = _make_base_nb(repo)
         # store_kg into base lands as 'reviewed'; insert directly for the test.
         oid = repo._test_insert_object(base.id, "claim", {"name": "base claim"})
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="review gate"):
             repo.propose_promotion(base.id, oid)
 
     def test_propose_object_already_proposed_is_idempotent(self, repo):
-        nb = _make_personal_nb(repo)
+        nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "g_m over g_ds sets intrinsic gain")
         first = repo.propose_promotion(nb.id, oid)
         second = repo.propose_promotion(nb.id, oid)
@@ -107,8 +125,7 @@ class TestPromotionStateMachine:
         assert n == 1
 
     def test_list_promotion_queue_returns_only_under_review_and_proposed(self, repo):
-        nb = _make_personal_nb(repo)
-        base = _make_base_nb(repo)
+        nb, base = _make_personal_with_base(repo)
         o1 = _insert_claim(repo, nb.id, "claim one")
         o2 = _insert_claim(repo, nb.id, "claim two")
         o3 = _insert_claim(repo, nb.id, "claim three")
@@ -124,8 +141,7 @@ class TestPromotionStateMachine:
         assert c3["id"] not in ids
 
     def test_list_promotion_queue_populates_payload_and_evidence(self, repo):
-        nb = _make_personal_nb(repo)
-        _make_base_nb(repo)
+        nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "the denormalised payload claim")
         repo.propose_promotion(nb.id, oid)
         queue = repo.list_promotion_queue()
@@ -138,8 +154,7 @@ class TestPromotionStateMachine:
         lookup for the whole queue, not one SELECT per candidate row (was N+1).
         Spy on connection.execute call count for the notebook_id-independent
         knowledge_objects payload query."""
-        nb = _make_personal_nb(repo)
-        _make_base_nb(repo)
+        nb, _base = _make_personal_with_base(repo)
         oids = [_insert_claim(repo, nb.id, f"claim {i}") for i in range(12)]
         for oid in oids:
             repo.propose_promotion(nb.id, oid)
@@ -178,9 +193,15 @@ class TestPromotionStateMachine:
     def test_list_promotion_queue_equals_per_row_oracle(self, repo):
         """Output equality oracle: batched list_promotion_queue must return the
         SAME payload/evidence per candidate as the old per-row-SELECT
-        implementation (recomputed here verbatim)."""
-        nb = _make_personal_nb(repo)
-        _make_base_nb(repo)
+        implementation (recomputed here verbatim).
+
+        Task 13 审查 #4 adds target_base_name (also batch-resolved, same
+        `id IN (...)` house pattern) — the oracle recomputes it per-row here
+        via a plain SELECT, mirroring how payload/evidence are recomputed
+        above. `_promotion_row_to_dict` itself doesn't take target_base_name
+        (that facade wrapper's signature is frozen — see facade_surface.json),
+        so it's spliced into the oracle dict after the fact instead."""
+        nb, base = _make_personal_with_base(repo)
         oids = [_insert_claim(repo, nb.id, f"oracle claim {i}") for i in range(5)]
         for oid in oids:
             repo.propose_promotion(nb.id, oid)
@@ -204,13 +225,21 @@ class TestPromotionStateMachine:
                     [Evidence(**e) for e in json.loads(obj["evidence"] or "[]")]
                     if obj else []
                 )
-                oracle.append(repo._promotion_row_to_dict(row, payload=payload, evidence=evidence))
+                target_nb = db.execute(
+                    "SELECT name FROM notebooks WHERE id=?",
+                    (row["target_base_id"],),
+                ).fetchone()
+                entry = repo._promotion_row_to_dict(row, payload=payload, evidence=evidence)
+                entry["target_base_name"] = target_nb["name"] if target_nb else ""
+                oracle.append(entry)
 
         assert got == oracle
+        assert all(c["target_base_name"] == base.name for c in got), (
+            "oracle 本身若没跟着重算 target_base_name 会静默通过——用真实值再断言一次"
+        )
 
     def test_approve_promotion_copies_object_to_base_corpus(self, repo):
-        nb = _make_personal_nb(repo)
-        base = _make_base_nb(repo)
+        nb, base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "approved claim copies to base")
         cand = repo.propose_promotion(nb.id, oid)
         result = repo.approve_promotion(cand["id"])
@@ -220,16 +249,14 @@ class TestPromotionStateMachine:
         assert json.loads(base_rows[0]["payload"])["name"] == "approved claim copies to base"
 
     def test_approve_promotion_sets_base_object_status_approved(self, repo):
-        nb = _make_personal_nb(repo)
-        base = _make_base_nb(repo)
+        nb, base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "status approved on base")
         cand = repo.propose_promotion(nb.id, oid)
         result = repo.approve_promotion(cand["id"])
         assert _status_of(repo, result["base_object_id"]) == "approved"
 
     def test_approve_promotion_stamps_candidate_approved(self, repo):
-        nb = _make_personal_nb(repo)
-        _make_base_nb(repo)
+        nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "candidate stamped approved")
         cand = repo.propose_promotion(nb.id, oid)
         repo.approve_promotion(cand["id"])
@@ -242,8 +269,7 @@ class TestPromotionStateMachine:
         assert row["reviewed_by"] == "curator"
 
     def test_approve_promotion_is_idempotent(self, repo):
-        nb = _make_personal_nb(repo)
-        base = _make_base_nb(repo)
+        nb, base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "idempotent approve")
         cand = repo.propose_promotion(nb.id, oid)
         first = repo.approve_promotion(cand["id"])
@@ -252,16 +278,19 @@ class TestPromotionStateMachine:
         # Exactly one base object was created.
         assert len(_objects_in(repo, base.id, "claim")) == 1
 
-    def test_approve_promotion_no_base_notebook_raises(self, repo):
+    def test_propose_without_mounted_base_raises(self, repo):
+        """Task 7(晋升目标显式化)把"没有可晋升目标"从 approve 阶段的全局
+        兜底检查前移到 propose 阶段的挂载校验——旧版这里叫
+        test_approve_promotion_no_base_notebook_raises,测的是"系统里压根没有
+        base,propose 能成功但 approve 才报错";新设计下 propose 直接读本笔记本
+        的挂载集合,没挂就地拒绝,approve 根本走不到。"""
         nb = _make_personal_nb(repo)
         oid = _insert_claim(repo, nb.id, "no base around")
-        cand = repo.propose_promotion(nb.id, oid)
         with pytest.raises(ValueError):
-            repo.approve_promotion(cand["id"])
+            repo.propose_promotion(nb.id, oid)
 
     def test_approve_promotion_deduplicates_against_existing_base_objects(self, repo):
-        nb = _make_personal_nb(repo)
-        base = _make_base_nb(repo)
+        nb, base = _make_personal_with_base(repo)
         # Existing base object with the SAME normalized claim text.
         existing = repo._test_insert_object(
             base.id, "claim", {"name": "Cascode raises output resistance."}
@@ -280,8 +309,7 @@ class TestPromotionStateMachine:
             repo.approve_promotion("promo-nope")
 
     def test_approve_rejected_candidate_raises(self, repo):
-        nb = _make_personal_nb(repo)
-        _make_base_nb(repo)
+        nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "rejected then approve")
         cand = repo.propose_promotion(nb.id, oid)
         repo.reject_promotion(cand["id"], reason="no")
@@ -289,7 +317,7 @@ class TestPromotionStateMachine:
             repo.approve_promotion(cand["id"])
 
     def test_reject_promotion_leaves_personal_object_untouched(self, repo):
-        nb = _make_personal_nb(repo)
+        nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "personal untouched after reject")
         cand = repo.propose_promotion(nb.id, oid)
         repo.reject_promotion(cand["id"], reason="not canonical")
@@ -298,7 +326,7 @@ class TestPromotionStateMachine:
         assert len(_objects_in(repo, nb.id, "claim")) == 1
 
     def test_reject_promotion_records_reason_on_candidate(self, repo):
-        nb = _make_personal_nb(repo)
+        nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "records the reason")
         cand = repo.propose_promotion(nb.id, oid)
         updated = repo.reject_promotion(cand["id"], reason="duplicate of base node")
@@ -311,8 +339,7 @@ class TestPromotionStateMachine:
             repo.reject_promotion("promo-nope", reason="x")
 
     def test_reject_approved_candidate_raises(self, repo):
-        nb = _make_personal_nb(repo)
-        _make_base_nb(repo)
+        nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "approved then reject")
         cand = repo.propose_promotion(nb.id, oid)
         repo.approve_promotion(cand["id"])
@@ -320,8 +347,7 @@ class TestPromotionStateMachine:
             repo.reject_promotion(cand["id"], reason="too late")
 
     def test_rejected_object_does_not_appear_in_base_corpus(self, repo):
-        nb = _make_personal_nb(repo)
-        base = _make_base_nb(repo)
+        nb, base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "must not leak into base")
         cand = repo.propose_promotion(nb.id, oid)
         repo.reject_promotion(cand["id"], reason="rejected")
@@ -329,8 +355,7 @@ class TestPromotionStateMachine:
         assert _objects_in(repo, base.id, "claim") == []
 
     def test_reproposal_allowed_after_rejection(self, repo):
-        nb = _make_personal_nb(repo)
-        _make_base_nb(repo)
+        nb, _base = _make_personal_with_base(repo)
         oid = _insert_claim(repo, nb.id, "re-proposed after reject")
         cand = repo.propose_promotion(nb.id, oid)
         repo.reject_promotion(cand["id"], reason="first time no")
@@ -392,9 +417,21 @@ def _seed_base(client):
     return nb["id"]
 
 
+def _seed_base_and_mount(client, nb_id):
+    """Seed a base notebook and mount it onto nb_id. Task 7 requires an
+    explicit mount before propose_promotion resolves a target; there is no
+    HTTP endpoint for mounting yet (Task 8 — API 三端点), so this reaches the
+    shared repository directly, same as _seed_base already does for
+    mark_notebook_base."""
+    base_id = _seed_base(client)
+    client._repo.replace_notebook_bases(nb_id, [base_id], "user-local")
+    return base_id
+
+
 class TestPromotionRoutes:
     def test_propose_returns_201(self, client):
         nb_id, oid = _seed_personal_object(client)
+        _seed_base_and_mount(client, nb_id)
         r = client.post(f"/api/notebooks/{nb_id}/knowledge/{oid}/promote")
         assert r.status_code == 201
         body = r.json()
@@ -403,6 +440,7 @@ class TestPromotionRoutes:
 
     def test_queue_lists_proposed(self, client):
         nb_id, oid = _seed_personal_object(client, name="queued claim")
+        _seed_base_and_mount(client, nb_id)
         client.post(f"/api/notebooks/{nb_id}/knowledge/{oid}/promote")
         r = client.get("/api/promotion-queue")
         assert r.status_code == 200
@@ -410,8 +448,8 @@ class TestPromotionRoutes:
         assert any(c["object_id"] == oid for c in items)
 
     def test_approve_returns_200_and_base_object_id(self, client):
-        base_id = _seed_base(client)
         nb_id, oid = _seed_personal_object(client, name="approve via route")
+        _seed_base_and_mount(client, nb_id)
         cand = client.post(f"/api/notebooks/{nb_id}/knowledge/{oid}/promote").json()
         r = client.post(f"/api/promotion-queue/{cand['id']}/approve")
         assert r.status_code == 200
@@ -421,6 +459,7 @@ class TestPromotionRoutes:
 
     def test_reject_returns_200_and_candidate_with_reason(self, client):
         nb_id, oid = _seed_personal_object(client, name="reject via route")
+        _seed_base_and_mount(client, nb_id)
         cand = client.post(f"/api/notebooks/{nb_id}/knowledge/{oid}/promote").json()
         r = client.post(
             f"/api/promotion-queue/{cand['id']}/reject",
@@ -498,6 +537,7 @@ class TestBaseReviewGateEdgeCases:
         base = _make_base_nb(repo)
         _store_claim(repo, base.id, "capacitance scales with area")
         personal = _make_personal_nb(repo)
+        repo.replace_notebook_bases(personal.id, [base.id], "user-local")
         _store_claim(repo, personal.id, "personal note on capacitance")
         # All base claims are 'reviewed' (the gate); confirm before asking.
         assert all(r["status"] == "reviewed" for r in _objects_in(repo, base.id, "claim"))
@@ -512,8 +552,9 @@ class TestBaseReviewGateEdgeCases:
         P4-5: ask_fast retired; test now calls _retrieve_scored directly."""
         from app.models.schemas import AskRequest
 
-        _make_base_nb(repo)
+        base = _make_base_nb(repo)
         personal = _make_personal_nb(repo)
+        repo.replace_notebook_bases(personal.id, [base.id], "user-local")
         _store_claim(repo, personal.id, "miller effect increases input capacitance")
         oid = _objects_in(repo, personal.id, "claim")[0]["id"]
         cand = repo.propose_promotion(personal.id, oid)
@@ -529,6 +570,7 @@ class TestBaseReviewGateEdgeCases:
         base = _make_base_nb(repo)
         _store_claim(repo, base.id, "base only claim about noise figure")
         personal = _make_personal_nb(repo)
+        repo.replace_notebook_bases(personal.id, [base.id], "user-local")
         _store_claim(repo, personal.id, "personal claim about noise figure")
         p_oid = _objects_in(repo, personal.id, "claim")[0]["id"]
         cand = repo.propose_promotion(personal.id, p_oid)
@@ -544,6 +586,7 @@ class TestBaseReviewGateEdgeCases:
         retrieval from the personal notebook."""
         base = _make_base_nb(repo)
         personal = _make_personal_nb(repo)
+        repo.replace_notebook_bases(personal.id, [base.id], "user-local")
         _store_claim(repo, personal.id, "thermal noise sets the noise floor")
         p_oid = _objects_in(repo, personal.id, "claim")[0]["id"]
         cand = repo.propose_promotion(personal.id, p_oid)

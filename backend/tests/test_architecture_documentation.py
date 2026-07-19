@@ -127,6 +127,29 @@ def test_retrieval_documentation_scopes_federation_and_tier_tie_break_by_path():
         assert "remains score-only" not in _read(name)
 
 
+def test_mount_documentation_describes_explicit_reference_library_model_and_zero_mount_cutover():
+    """多领域基准库(2026-07-18/19)最终整支审查必办 5:notebook_bases 挂载集合
+    取代了全局唯一 tier='base' 之后,最大的行为变化——升级到 schema 20 不回填
+    挂载,所有既有笔记本挂载数清零,联邦检索对所有人停止直到用户自己去挂——
+    此前只写在设计规格里(docs/superpowers/specs/2026-07-18-multi-domain-base-
+    libraries-design.md §7),四份活文档(README/README_zh/AGENTS/architecture)
+    零处提及。钉住四份文档都描述了这个升级断层,并且 architecture.md 不再用
+    「跨 active + base」这个在多参考库模型下已不成立的措辞(暗示 base 仍是
+    全局唯一、隐式参与)。"""
+    _assert_phrases(
+        {
+            "README.md": "every pre-existing notebook starts with zero mounted reference libraries",
+            "README_zh.md": "所有既有笔记本挂载数清零",
+            "AGENTS.md": "every pre-existing notebook starts with zero mounted reference libraries",
+            "architecture.md": "所有既有笔记本挂载数清零",
+        }
+    )
+    assert "跨 active + base 收集" not in _read("architecture.md"), (
+        "「跨 active + base」暗示 base 仍是全局唯一隐式参与 —— 多参考库模型下"
+        "已不成立,应改为按显式挂载集合描述(notebook_bases)"
+    )
+
+
 def test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions():
     _assert_phrases(
         {

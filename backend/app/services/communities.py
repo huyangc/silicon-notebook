@@ -18,8 +18,8 @@ class CommunityQueryService:
         self.event_log = event_log
         self.sibling_min_bridge = int(sibling_min_bridge)
 
-    def first_base_notebook_id(self, active_notebook_id: str) -> Optional[str]:
-        return self.unified_kg.first_base_notebook_id(active_notebook_id)
+    def mounted_base_ids(self, active_notebook_id: str) -> List[str]:
+        return self.unified_kg.mounted_base_ids(active_notebook_id)
 
     def community_peers(self, base_notebook_id: str, focal_name: str,
                         question: str, *, top_k: int,
@@ -114,8 +114,8 @@ def _resolve_focal(store, notebook_id: str, focal_name: str) -> Optional[str]:
     return store.resolve_focal(notebook_id, key)
 
 
-def first_base_notebook_id(queries, active_nb: str) -> Optional[str]:
-    return queries.first_base_notebook_id(active_nb)
+def mounted_base_ids(queries, active_nb: str) -> List[str]:
+    return queries.mounted_base_ids(active_nb)
 
 
 def community_peers(queries, base_nb: str, focal_name: str, query: str, *,
@@ -135,8 +135,8 @@ def sibling_peers(queries, notebook_id: str, focal_name: str, *,
     sibling_min_bridge 以下的弱共提对丢弃。
 
     notebook_id 语义:本原语 notebook 无关——查哪个库的 concept_comentions 由调用方决定。
-    resolve_comparison_peers 传的是与 community_peers **同一个 BASE 库 id**(先
-    first_base_notebook_id 解析),使共提/社区两路口径一致、prefer/fallback 是 like-for-like;
+    resolve_comparison_peers 传的是与 community_peers **同一个 BASE 库 id**(调用方对
+    mounted_base_ids 的结果逐个传入),使共提/社区两路口径一致、prefer/fallback 是 like-for-like;
     未来其它调用方可指向活动库自身。返回 [(canonical_name, bridge_claims), ...] 降序。
     任何异常 / 焦点解析不到 / 无共提数据 → [](静默,不 emit;由调用方回退社区路径兜底文案)。"""
     return queries.sibling_peers(
@@ -151,7 +151,7 @@ def resolve_comparison_peers(queries, base_nb: str, focal_name: str, query: str,
     返回 (names, source),source ∈ {"comention", "community"}:
       · 先 sibling_peers(共提兄弟,零 LLM 直接查表);非空 → 用其名单,source="comention"。
       · 空 → 回退 community_peers(Louvain 社区),source="community",行为与今日逐字一致。
-    两路都查同一个 BASE 库 id(调用方已 first_base_notebook_id 解析)→ 口径一致 like-for-like。
+    两路都查同一个 BASE 库 id(调用方对 mounted_base_ids 逐个传入)→ 口径一致 like-for-like。
     sibling_peers 内部 fail-open→[] 时自动回退。**不吞 community_peers 异常**——与既有两调用点
     保持一致(expand_community 的 try/except、ask_chunk 的无兜底,都仍在各自调用点)。"""
     siblings = sibling_peers(

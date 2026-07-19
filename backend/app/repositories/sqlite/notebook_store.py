@@ -6,6 +6,9 @@ from typing import Callable, List, Literal, Sequence
 
 from app.models.schemas import NotebookCreate, NotebookUpdate
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.mount_sql import (
+    MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID, MOUNT_VALID_EXPR,
+)
 
 # Knowledge-object statuses that count as "usable" for retrieval and the
 # NotebookSummary type counts.  Task 13 moved the canonical definition to
@@ -15,10 +18,11 @@ from app.services.knowledge_contracts import USABLE_STATUSES  # noqa: F401
 
 
 class NotebookStore:
-    """SQLite notebooks-table row persistence: CRUD, tier transitions and row
-    deletion (including the orphan knowledge-embedding cleanup that the
-    schema's missing FK makes necessary).  Row-level only — summary projection
-    and orchestration live in app.services.notebook_catalog."""
+    """SQLite notebooks-table row persistence: CRUD, tier transitions, 参考库挂载边
+    (notebook_bases) 与检索参与集解析, and row deletion (including the orphan
+    knowledge-embedding cleanup that the schema's missing FK makes necessary).
+    Row-level only — summary projection and orchestration live in
+    app.services.notebook_catalog."""
 
     def __init__(
         self,
@@ -47,22 +51,44 @@ class NotebookStore:
                     out[row["id"]] = row["tier"] or "personal"
         return out
 
+    # ---------------------------------------------------------------- 参考库挂载
+    # 参与集 = [本库] + 本库「有效」挂载的库(notebook_bases)。基准库不再全局唯一,
+    # 也不再隐式参与 —— 必须显式挂载。有效性的定义见 mount_sql 模块。
+
+    @staticmethod
+    def resolve_participants(
+        db: sqlite3.Connection, active_notebook_id: str
+    ) -> list[tuple[str, str]]:
+        """[(notebook_id, tier)] —— 首项恒为 active 本身。唯一的参与集定义点。"""
+        active = db.execute(
+            "SELECT tier FROM notebooks WHERE id=?", (active_notebook_id,)
+        ).fetchone()
+        out = [(
+            active_notebook_id,
+            (active["tier"] if active is not None else "personal") or "personal",
+        )]
+        rows = db.execute(
+            "SELECT b.id AS id, b.tier AS tier "
+            + MOUNT_JOIN + MOUNT_VALID + MOUNT_ORDER,
+            (active_notebook_id,),
+        ).fetchall()
+        out.extend((row["id"], row["tier"] or "personal") for row in rows)
+        return out
+
     def participant_notebook_ids(self, active_notebook_id: str) -> list[str]:
         with self.database.connect() as db:
             return self.participant_ids(db, active_notebook_id)
 
     @staticmethod
     def participant_ids(db: sqlite3.Connection, active_notebook_id: str) -> list[str]:
-        rows = db.execute(
-            "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
-            (active_notebook_id,),
-        ).fetchall()
-        return [active_notebook_id] + [row["id"] for row in rows]
+        return [nb_id for nb_id, _ in NotebookStore.resolve_participants(db, active_notebook_id)]
 
     @staticmethod
     def participant_rows(db: sqlite3.Connection, active_notebook_id: str):
+        """(active_row, base_rows) —— 形状与全局唯一 base 时代一致,消费方无需改动。"""
         base_rows = db.execute(
-            "SELECT id, tier FROM notebooks WHERE tier='base' AND id != ?",
+            "SELECT b.id AS id, b.tier AS tier "
+            + MOUNT_JOIN + MOUNT_VALID + MOUNT_ORDER,
             (active_notebook_id,),
         ).fetchall()
         active_row = db.execute(
@@ -72,18 +98,108 @@ class NotebookStore:
 
     @staticmethod
     def participant_tiers(db: sqlite3.Connection, active_notebook_id: str):
+        pairs = NotebookStore.resolve_participants(db, active_notebook_id)
+        return [nb_id for nb_id, _ in pairs], dict(pairs)
+
+    @staticmethod
+    def list_mount_edges(db: sqlite3.Connection, notebook_id: str) -> list[dict]:
+        """全部挂载边(含失效的)。失效边保留展示 + 置灰,不能假装它还在工作。
+
+        失效边如果不属于本笔记本(notebook_id)的 owner,名字一律遮蔽:挂载时
+        合法看到过对方当时的名字,不代表被挂库易主、或公共库被降级之后对方
+        (新 owner / 原 owner)改的新名字也该继续流向这个已经无权访问的挂载方
+        ——那是一条持续的信息泄露通道,不是一次性的。仅当失效边就是本笔记本
+        owner 自己的库(比如自挂,后来因别的原因失效)时才照常显示真实名字,
+        因为库主本就看得到自己的库,没有泄露可言。"""
         rows = db.execute(
-            "SELECT id FROM notebooks WHERE tier='base' AND id != ?",
-            (active_notebook_id,),
+            "SELECT b.id AS id, b.name AS name, b.tier AS tier, "
+            + MOUNT_VALID_EXPR + " AS ok, "
+            "(b.created_by = a.created_by) AS same_owner "
+            + MOUNT_JOIN + MOUNT_ORDER,
+            (notebook_id,),
         ).fetchall()
-        ids = [active_notebook_id] + [row["id"] for row in rows]
-        tiers = {}
-        for notebook_id in ids:
-            row = db.execute(
-                "SELECT tier FROM notebooks WHERE id=?", (notebook_id,),
-            ).fetchone()
-            tiers[notebook_id] = row["tier"] if row else "personal"
-        return ids, tiers
+        out = []
+        for row in rows:
+            active = bool(row["ok"])
+            name_visible = active or bool(row["same_owner"])
+            out.append({
+                "id": row["id"],
+                "name": row["name"] if name_visible else "已不可用的知识库",
+                "tier": row["tier"] or "personal",
+                "active": active,
+                "inactive_reason": "" if active else "该库已不是公共知识库，且不属于你",
+            })
+        return out
+
+    def list_mount_edges_for_notebook(self, notebook_id: str) -> list[dict]:
+        """self-connecting 版 list_mount_edges —— facade 一跳委托用(不外传 db)。"""
+        with self.database.connect() as db:
+            return self.list_mount_edges(db, notebook_id)
+
+    @staticmethod
+    def mounted_by_count(db: sqlite3.Connection, notebook_id: str) -> int:
+        """有多少笔记本正在把 notebook_id 挂为参考库——删除确认弹窗专用(spec §6)。
+        故意不按 MOUNT_VALID_EXPR 过滤生效性:即便边当前失效,删除这个 notebook
+        仍会经 ON DELETE CASCADE 把这些边彻底清空,连"对方重新发布后自动恢复"的
+        可能性都没了——这个影响面也该让操作者在删前看到。PRIMARY KEY(notebook_id,
+        base_notebook_id) 保证同一挂载方不会被计两次。"""
+        row = db.execute(
+            "SELECT COUNT(*) AS c FROM notebook_bases WHERE base_notebook_id=?",
+            (notebook_id,),
+        ).fetchone()
+        return int(row["c"]) if row is not None else 0
+
+    def mounted_by_count_for_notebook(self, notebook_id: str) -> int:
+        """self-connecting 版 mounted_by_count —— facade 一跳委托用(不外传 db)。"""
+        with self.database.connect() as db:
+            return self.mounted_by_count(db, notebook_id)
+
+    @staticmethod
+    def mountable_notebooks(db: sqlite3.Connection, notebook_id: str) -> list[dict]:
+        """可挂候选 = 所有公共知识库 ∪ 与本库同 owner 的库，排除本库自己。
+
+        公共知识库对普通用户的常规列表是隐藏的,故此处专门放行 id/name/tier 三个
+        字段——这是用户发现领域库的唯一入口。刻意不含只读分享(notebook_members)
+        进来的库:对方撤销分享后边仍在会成为越权通道。
+
+        有效性谓词与排序复用 mount_sql 的 MOUNT_VALID_EXPR/MOUNT_ORDER(唯一定义
+        点)——但 FROM 子句不能复用 MOUNT_JOIN:这里枚举的是候选笔记本本身,不是
+        已有的挂载边。"""
+        rows = db.execute(
+            "SELECT b.id AS id, b.name AS name, b.tier AS tier "
+            "FROM notebooks b JOIN notebooks a ON a.id = ? "
+            "WHERE b.id != a.id AND " + MOUNT_VALID_EXPR
+            + MOUNT_ORDER,
+            (notebook_id,),
+        ).fetchall()
+        return [
+            {"id": r["id"], "name": r["name"], "tier": r["tier"] or "personal"}
+            for r in rows
+        ]
+
+    def mountable_for_notebook(self, notebook_id: str) -> list[dict]:
+        """self-connecting 版 mountable_notebooks —— facade 一跳委托用(不外传 db)。"""
+        with self.database.connect() as db:
+            return self.mountable_notebooks(db, notebook_id)
+
+    def replace_mounts(
+        self, notebook_id: str, base_notebook_ids: Sequence[str], created_by: str
+    ) -> None:
+        """全量替换本库的挂载集合(幂等)。自挂与重复项在写入前剔除,与 CHECK/PK 双保险。"""
+        wanted = [
+            nb_id for nb_id in dict.fromkeys(base_notebook_ids)
+            if nb_id and nb_id != notebook_id
+        ]
+        now = self.now()
+        with self.database.write() as db:
+            db.execute("DELETE FROM notebook_bases WHERE notebook_id=?", (notebook_id,))
+            for base_id in wanted:
+                db.execute(
+                    "INSERT INTO notebook_bases"
+                    "(notebook_id, base_notebook_id, created_at, created_by)"
+                    " VALUES (?,?,?,?)",
+                    (notebook_id, base_id, now, created_by),
+                )
 
     def create_row(self, payload: NotebookCreate, created_by: str) -> str:
         """Minimal creation: only name + description (purpose). When the user
@@ -170,25 +286,18 @@ class NotebookStore:
     def set_tier(
         self, notebook_id: str, tier: Literal["base", "personal"]
     ) -> None:
-        """tier='base': mark THE single authoritative base KG — 基准库全局唯一,
-        同一事务里先把其它 tier='base' 的 notebook 降级为 'personal', 再把目标设为
-        'base'.  tier='personal': symmetric local reset.  Both idempotent."""
+        """tier='base': 发布为公共知识库(admin 动作)。**不再全局唯一** —— 每个领域
+        可以有自己的公共知识库,谁参与某次检索由 notebook_bases 挂载边决定。
+        tier='personal': 撤回发布。两者幂等。
+
+        降级为 personal 时不清理指向它的挂载边:边保留但解析时跳过(见
+        resolve_participants),重新发布即自动恢复。"""
         now = self.now()
         with self.database.write() as db:
-            if tier == "base":
-                db.execute(
-                    "UPDATE notebooks SET tier='personal', updated_at=? WHERE tier='base' AND id != ?",
-                    (now, notebook_id),
-                )
-                db.execute(
-                    "UPDATE notebooks SET tier='base', updated_at=? WHERE id=?",
-                    (now, notebook_id),
-                )
-            else:
-                db.execute(
-                    "UPDATE notebooks SET tier='personal', updated_at=? WHERE id=?",
-                    (now, notebook_id),
-                )
+            db.execute(
+                "UPDATE notebooks SET tier=?, updated_at=? WHERE id=?",
+                (tier, now, notebook_id),
+            )
 
     def delete_row_and_orphan_embeddings(self, notebook_id: str) -> list[str]:
         """Delete the notebooks row in ONE committed transaction and return the
@@ -270,7 +379,3 @@ class NotebookStore:
     def tier(self, notebook_id: str) -> str:
         with self.database.connect() as db:
             return self.tier_on(db, notebook_id)
-
-    def participant_notebook_ids(self, notebook_id: str) -> List[str]:
-        with self.database.connect() as db:
-            return self.participant_ids(db, notebook_id)

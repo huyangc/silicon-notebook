@@ -16,6 +16,7 @@ class NotebookScaleFacts:
 
 class NotebookScaleFactsRepository(Protocol):
     def load_notebook_scale_facts(self, notebook_id: str) -> NotebookScaleFacts: ...
+    def is_mounted_by_anyone(self, notebook_id: str) -> bool: ...
 
 class NotebookScaleProfile:
     def __init__(self, settings: Settings, facts: NotebookScaleFactsRepository, version_for: Callable[[str], Hashable], cache: VectorCache) -> None:
@@ -34,6 +35,8 @@ class NotebookScaleProfile:
         if self.is_copyable(notebook_id): return False
         return not has_disk_index
     def index_eligible(self, notebook_id: str, *, tier: str, has_disk_index: bool, total_chunks: int) -> bool:
-        if tier == "base" or has_disk_index: return True
+        # 被任何笔记本挂载即构成建索引资格(Task 6)——镜像 ScaleArtifactRuntime.eligible
+        # 的同一分支,两处必须保持一致(否则建索引与用索引的判定会分叉)。
+        if tier == "base" or has_disk_index or self.facts_repo.is_mounted_by_anyone(notebook_id): return True
         if total_chunks > self.settings.index_suggest_chunk_threshold: return True
         return not self.is_copyable(notebook_id)

@@ -242,7 +242,7 @@ def test_reasoning_consumes_confirmed_memory_when_no_kg_exists(memory_data, monk
     data.repo._reasoning_llm_client = llm
     service = data.repo._runtime.ask_service()
     monkeypatch.setattr(service.candidates, "has_kg", lambda _nb: False)
-    monkeypatch.setattr(service.candidates, "any_base_has_kg", lambda: False)
+    monkeypatch.setattr(service.candidates, "any_base_has_kg", lambda _nb: False)
 
     response = service.ask_reasoning(
         data.notebook.id,
@@ -263,7 +263,7 @@ def test_graph_memory_only_answer_does_not_build_or_walk_the_graph(memory_data, 
     data.repo.llm_client = llm
     service = data.repo._runtime.ask_service()
     monkeypatch.setattr(service.candidates, "has_kg", lambda _nb: False)
-    monkeypatch.setattr(service.candidates, "any_base_has_kg", lambda: False)
+    monkeypatch.setattr(service.candidates, "any_base_has_kg", lambda _nb: False)
     monkeypatch.setattr(service.retrieval, "federated_retrieve", lambda *_a, **_k: [])
     monkeypatch.setattr(
         service.graph,

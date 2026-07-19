@@ -16,6 +16,7 @@ import {
 } from "./agent-token-model";
 import { API_BASE, authHeaders, clearToken, getToken } from "./auth";
 import { humanizedError, logDiagnostic, throwHumanizedHttpError, toUserMessage } from "./errors.ts";
+import { resolvePromotionTarget, type MountedBase } from "./notebook-bases";
 import {
   canEditMemory,
   canPromoteMemory,
@@ -476,12 +477,35 @@ function AgentAccessManager({ sessionSignal }: { sessionSignal: AbortSignal }) {
 export function MemoryPanel({
   scope,
   notebookId,
+  bases,
+  notebookBases,
   sessionSignal,
 }: {
   scope: MemoryScope;
   notebookId: string | null;
+  /** 多领域基准库(Task 14 追加项)：仅 scope==="notebook" 时由 page.tsx 传入，
+   * 供 resolvePromotionTarget 判定晋升按钮的三态（0 个禁用/1 个直接用/>1 个
+   * 弹选择器）。scope==="notebook" 下所有记忆共享同一个 notebookId，这份
+   * bases 对它们都成立。 */
+  bases?: MountedBase[];
+  /** codex 对 PR#304 的审查(2026-07-19)P2 #2:scope==="global" 时由 page.tsx
+   * 传入——一条 Memory 可能来自任意一个 notebook，没有单一"当前笔记本"，
+   * 但每条记忆自带 notebook_id，按它各自查询挂载集合即可；"没有单一当前
+   * 笔记本"不等于"无法解析"，此前把两者混为一谈，导致这类笔记本从全局页
+   * 晋升永远做不到（挂了 >1 个公共库时后端必拒，而这个视图没有任何选择器）。
+   * key 是 notebook_id，value 形状同 `bases`。 */
+  notebookBases?: Record<string, MountedBase[]>;
   sessionSignal: AbortSignal;
 }) {
+  // 晋升目标三态按记忆各自的 notebook 解析，两个 scope 共用同一套
+  // resolvePromotionTarget 判定(不另写一份规则)。notebook 视图里所有记忆
+  // 共享同一个 notebookId，退化成固定的 `bases`；global 视图按
+  // memory.notebook_id 查 notebookBases。
+  const promotionTargetFor = (memory: MemoryRecord) =>
+    resolvePromotionTarget(
+      scope === "notebook" ? (bases ?? []) : (notebookBases?.[memory.notebook_id] ?? [])
+    );
+  const [pendingPromotionMemory, setPendingPromotionMemory] = useState<MemoryRecord | null>(null);
   const [items, setItems] = useState<MemoryRecord[]>([]);
   const [total, setTotal] = useState(0);
   const [ownerTotal, setOwnerTotal] = useState(0);
@@ -711,8 +735,25 @@ export function MemoryPanel({
     }
   }
 
-  async function promoteMemory(memory: MemoryRecord) {
+  // 多领域基准库(Task 14 追加项):targetBaseId 未传时按 promotionTargetFor(memory)
+  // 三态分派——none(0 个公共库挂载)拒绝、auto(1 个)直接用、choose(>1 个)转去
+  // 弹选择器,选好后选择器自己会带着 targetBaseId 回调本函数,这一次不再重新
+  // 分派,直接提交。与 page.tsx::submitPromotion 同一套规则(不另写一份判定);
+  // global 视图(P2 #2 修复)现在也走这同一套三态,不再是"不作前置判定直接提交"。
+  async function promoteMemory(memory: MemoryRecord, targetBaseId?: string) {
     if (busyId || sessionSignal.aborted || !canPromoteMemory(memory)) return;
+    if (!targetBaseId) {
+      const target = promotionTargetFor(memory);
+      if (target.kind === "none") {
+        setError("需先挂载一个公共知识库，才能贡献内容");
+        return;
+      }
+      if (target.kind === "choose") {
+        setPendingPromotionMemory(memory);
+        return;
+      }
+      targetBaseId = target.baseId;
+    }
     const controller = new AbortController();
     mutationControllersRef.current.add(controller);
     setBusyId(memory.id);
@@ -721,6 +762,9 @@ export function MemoryPanel({
     try {
       await memoryApi(memoryPromotionPath(memory.id), {
         method: "POST",
+        // 不传时不带 body——与后端 PromoteRequest 的可选请求体默认值对称,
+        // 镜像 promotion-queue.ts::proposePromotion 的既有惯例。
+        ...(targetBaseId ? { body: JSON.stringify({ target_base_id: targetBaseId }) } : {}),
         signal: controller.signal,
       });
       if (!controller.signal.aborted && mountedRef.current) {
@@ -863,6 +907,14 @@ export function MemoryPanel({
     setPage(0);
     setQuery(queryDraft.trim());
   }
+
+  // 选择器弹窗展示的候选:按弹窗当前挂起的那条记忆(而非某个固定 scope 级
+  // 别的值)解析——global 视图下不同记忆的候选集本就可能不同。
+  const pendingPromotionTarget = pendingPromotionMemory
+    ? promotionTargetFor(pendingPromotionMemory)
+    : null;
+  const pendingPromotionOptions =
+    pendingPromotionTarget?.kind === "choose" ? pendingPromotionTarget.options : [];
 
   return (
     <section className={`memory-panel memory-panel-${scope}`} aria-label={scope === "global" ? "全部记忆" : "笔记本记忆"}>
@@ -1047,6 +1099,7 @@ export function MemoryPanel({
             const originMeta = memoryOriginMeta(memory.origin);
             const editing = editingId === memory.id;
             const busy = busyId === memory.id;
+            const promotionTarget = promotionTargetFor(memory);
             const provenanceRows = memoryProvenanceRows(memory);
             const evidenceRows = memoryEvidenceRows(memory);
             const isExpanded = expandedIds.has(memory.id);
@@ -1152,7 +1205,8 @@ export function MemoryPanel({
                             <button
                               type="button"
                               className="memory-promote-action"
-                              disabled={busy}
+                              disabled={busy || promotionTarget.kind === "none"}
+                              title={promotionTarget.kind === "none" ? "需先挂载一个公共知识库，才能贡献内容" : undefined}
                               onClick={() => promoteMemory(memory)}
                             >
                               <ArrowUpCircle size={14} /> 贡献到公共知识库
@@ -1255,6 +1309,44 @@ export function MemoryPanel({
             submitTransfer(pendingTransfer.ids, targetNotebookId, mode, transferExtractKg, targetNotebookName)
           }
         />
+      )}
+      {pendingPromotionMemory && (
+        <section
+          className="utility-modal"
+          role="dialog"
+          aria-modal="true"
+          onClick={(event) => { if (event.currentTarget === event.target) setPendingPromotionMemory(null); }}
+        >
+          <div className="utility-modal-card narrow">
+            <div className="source-modal-header">
+              <div>
+                <h2>选择贡献目标</h2>
+                <p>这条记忆所在的笔记本挂载了多个公共知识库，请选择要进入哪一个。</p>
+              </div>
+              <button className="icon-button" onClick={() => setPendingPromotionMemory(null)} title="Close">×</button>
+            </div>
+            <div className="promotion-target-list">
+              {pendingPromotionOptions.map((base) => (
+                <button
+                  key={base.id}
+                  type="button"
+                  className="sort-button promotion-target-option"
+                  onClick={() => {
+                    const memory = pendingPromotionMemory;
+                    setPendingPromotionMemory(null);
+                    if (memory) {
+                      promoteMemory(memory, base.id).catch(
+                        (cause) => setError(toUserMessage(cause, "提交失败，请稍后重试")),
+                      );
+                    }
+                  }}
+                >
+                  <span className="promotion-target-name" title={base.name}>{base.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
       )}
     </section>
   );

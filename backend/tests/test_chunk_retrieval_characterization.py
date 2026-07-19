@@ -564,7 +564,14 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
     own_chunk = RetrievedChunk(
         chunk_id="ck-own-0", source_id="src-x", source_title="Doc",
         section_path="0", text="own passage moe routing detail",
-        element_ids=["el-x-0000"], score=1.0, relevance=1.0)
+        element_ids=["el-x-0000"], score=1.0, relevance=1.0,
+        # codex r4 fix: 显式打上 active_nb.id,镜像真实 _ppr_retrieve 的产出——
+        # scale_ppr 的 combined_chunk_ids 跨 base ⊕ active,逐 chunk 原样带出
+        # chunk_notebook_id,对 active 库自己的命中同样会打上 active 自己的
+        # id(并非留空;之前这里手写留空,side-step 了这个真实场景,没能在这
+        # 条测试上暴露 ask_chunk 的 mix/plain 两处内联 Citation(...) 构造点
+        # 也需要同 citations_from 一样的自库归一化)。
+        notebook_id=active_nb.id)
     ppr_chunk = RetrievedChunk(
         chunk_id="ck-ppr-0", source_id="src-base", source_title="BaseDoc",
         section_path="0", text="base layer passage moe routing detail",
@@ -593,6 +600,25 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
     assert tier_by_anchor.get("ck-ppr-0") == "base", (
         f"PPR 带来的 base 库 chunk anchor.tier 应为 base,实为 {tier_by_anchor.get('ck-ppr-0')}")
 
+    # Task 14(引用徽章带库名) + codex r4 fix:citation/anchor 的 notebook_id
+    # 必须反映"是否真正跨库",而非原始值是否非空——own_chunk 显式打了
+    # active_nb.id(同库,PPR 对本库命中同样会打真实 notebook_id)必须归一成
+    # 空串,ppr_chunk 显式标了 base_nb.id(真正跨库)才必须原样带出,前端才能
+    # 查得到「模拟IC教材」这样的库名,同时不会对本库自己的证据显示一个多余的
+    # 「来自「当前笔记本」」徽章。
+    nb_by_chunk = {c.source_id: c.notebook_id for c in resp.citations}
+    assert nb_by_chunk.get("src-x") == "", (
+        f"active 库自己的 chunk citation.notebook_id 应留空,实为 {nb_by_chunk.get('src-x')!r}")
+    assert nb_by_chunk.get("src-base") == base_nb.id, (
+        f"PPR 带来的 base 库 chunk citation.notebook_id 应为 {base_nb.id!r},"
+        f"实为 {nb_by_chunk.get('src-base')!r}")
+    nb_by_anchor = {a.object_id: a.notebook_id for a in resp.anchors}
+    assert nb_by_anchor.get("ck-own-0") == "", (
+        f"active 库自己的 chunk anchor.notebook_id 应留空,实为 {nb_by_anchor.get('ck-own-0')!r}")
+    assert nb_by_anchor.get("ck-ppr-0") == base_nb.id, (
+        f"PPR 带来的 base 库 chunk anchor.notebook_id 应为 {base_nb.id!r},"
+        f"实为 {nb_by_anchor.get('ck-ppr-0')!r}")
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 12. _chunk_answer_context 本身:tier 按每 chunk 的 notebook_id 批量解析,
@@ -601,13 +627,16 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
 # ═══════════════════════════════════════════════════════════════════════════
 
 def test_chunk_answer_context_resolves_tier_per_chunk_notebook_id(repo):
-    """三个 chunk:一个 notebook_id 指向 base 库、一个指向另一个 personal 库、
-    一个留空(回退调用方传入的 notebook_id)——id_map 里每条的 tier 都必须对应
-    其真实来源库,不能被硬编码坍缩成清一色 'personal'。"""
+    """四个 chunk:一个 notebook_id 指向 base 库、一个指向真正另一个 personal 库、
+    一个等于调用方自己(own_nb——联邦/PPR 检索对本库命中同样会打上 active 自己
+    的 notebook_id,并非只在跨库命中时才打标)、一个留空(回退调用方传入的
+    notebook_id)——id_map 里每条的 tier 都必须对应其真实来源库,不能被硬编码
+    坍缩成清一色 'personal'。"""
     from app.services.retrieval import RetrievedChunk
 
     own_nb, _ = _seed_chunks(repo, ["own doc passage"])
     base_nb, _ = _seed_chunks(repo, ["base doc passage"])
+    other_personal_nb, _ = _seed_chunks(repo, ["other personal doc passage"])
     repo.mark_notebook_base(base_nb.id)
 
     chunks = [
@@ -616,6 +645,9 @@ def test_chunk_answer_context_resolves_tier_per_chunk_notebook_id(repo):
         RetrievedChunk(chunk_id="ck-base", source_id="s", source_title="D",
                         section_path="1", text="base-tier chunk", relevance=0.5,
                         notebook_id=base_nb.id),
+        RetrievedChunk(chunk_id="ck-other-personal", source_id="s", source_title="D",
+                        section_path="1", text="other-personal-tier chunk", relevance=0.5,
+                        notebook_id=other_personal_nb.id),
         RetrievedChunk(chunk_id="ck-own", source_id="s", source_title="D",
                         section_path="1", text="own-tier chunk", relevance=0.5,
                         notebook_id=own_nb.id),
@@ -628,5 +660,28 @@ def test_chunk_answer_context_resolves_tier_per_chunk_notebook_id(repo):
         f"notebook_id 留空应回退调用方 own_nb(personal),实为 {tier_by_chunk['ck-empty']}")
     assert tier_by_chunk["ck-base"] == "base", (
         f"notebook_id 指向 base 库的 chunk tier 应为 base,实为 {tier_by_chunk['ck-base']}")
+    assert tier_by_chunk["ck-other-personal"] == "personal", (
+        f"notebook_id 指向另一个 personal 库的 chunk tier 应为 personal,实为 "
+        f"{tier_by_chunk['ck-other-personal']}")
     assert tier_by_chunk["ck-own"] == "personal", (
-        f"notebook_id 指向另一个 personal 库的 chunk tier 应为 personal,实为 {tier_by_chunk['ck-own']}")
+        f"notebook_id 等于 active 自己的 chunk tier 应为 personal,实为 {tier_by_chunk['ck-own']}")
+
+    # codex r2 fix: id_map 的 "notebook_id" 键只有真正跨库才非空(不像 tier 那样
+    # 回退调用方 own_nb)——ck-empty 没打来源留空;ck-base/ck-other-personal 指向
+    # 真正不同的库,原样带出;ck-own 的 notebook_id 原始值恰好等于调用方自己的
+    # own_nb(联邦/PPR 检索对本库命中同样会打上 active 自己的 id,并非只在跨库
+    # 命中时才打标——见 evidence_context.py chunk_context 的 raw_origin 归一化)
+    # 必须归一成空串,否则前端引用徽章会显示一个多余的"来自「自己」"库名。
+    nb_by_chunk = {v["object_id"]: v["notebook_id"] for v in id_map.values()}
+    assert nb_by_chunk["ck-empty"] == "", (
+        f"notebook_id 留空的 chunk,evidence 的 notebook_id 也应留空(不回退 own_nb),"
+        f"实为 {nb_by_chunk['ck-empty']!r}")
+    assert nb_by_chunk["ck-base"] == base_nb.id, (
+        f"notebook_id 指向 base 库的 chunk,evidence 的 notebook_id 应为 {base_nb.id!r},"
+        f"实为 {nb_by_chunk['ck-base']!r}")
+    assert nb_by_chunk["ck-other-personal"] == other_personal_nb.id, (
+        f"notebook_id 指向另一个 personal 库的 chunk,evidence 的 notebook_id 应为 "
+        f"{other_personal_nb.id!r},实为 {nb_by_chunk['ck-other-personal']!r}")
+    assert nb_by_chunk["ck-own"] == "", (
+        f"notebook_id 等于调用方自己(own_nb)的 chunk,evidence 的 notebook_id 必须"
+        f"归一成空串(不是「跨库」),实为 {nb_by_chunk['ck-own']!r}")

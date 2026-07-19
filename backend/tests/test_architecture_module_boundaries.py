@@ -121,7 +121,7 @@ def test_remaining_sql_bodies_are_composed_with_explicit_delegates():
 
     component_methods = {
         KnowledgeStore: (
-            "source_has_kg", "any_base_has_kg_on", "retrieval_objects",
+            "source_has_kg", "any_mounted_has_kg_on", "retrieval_objects",
             "edge_centrality_source_rows", "concept_cluster_detail_rows",
             "concept_neighbor_rows", "insert_test_object",
         ),

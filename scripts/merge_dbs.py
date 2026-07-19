@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=17) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=20) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # 注: object_schemas 主键是全局 object_type(非 notebook 隔离); builtin 行 notebook_id=''
@@ -38,7 +38,17 @@ NOTEBOOK_SCOPED_TABLES = [
     "extraction_candidates", "articles", "article_claims", "conversations",
     "answers", "feedback", "ask_jobs", "reports", "memory_items",
     "knowhow_tables", "notebook_assets", "notebook_members", "agent_token_notebooks",
+    "notebook_bases",
 ]
+# notebook_bases 是"挂载方"拥有的行(notebook_id=挂载方, base_notebook_id=被挂的公共知识
+# 库), 按本类通用规则以 notebook_id IN (sec_nb) 筛——sec_nb 恒不含 shared_base(它并入
+# primary 整库拷贝, 不算"被导入的" notebook)。这对普通 personal notebook 没问题: 它自己
+# 持有的挂载边会随它一起带过。但如果 shared_base 本身在 secondary 那侧也挂了别的参考库
+# (notebook_id=shared_base 的行), 这些边就不在 sec_nb 里, 会被静默排除——最终只保留
+# primary 那份 base 自己的挂载边。这不是 notebook_bases 独有的新问题, 而是 --keep-base
+# "保留更全一侧的 base"这一既有设计对 base 名下所有 notebook-scoped 数据(sources/chunks/
+# knowledge_objects/...)一贯的效果, 只是这里显式点出来, 不让它继续无声无息(见 README
+# merge_dbs 一节的对应说明)。
 
 # 独立内容 FTS(带 notebook_id 列, 无触发器) —— 按 notebook_id 列清单拷行
 FTS_NOTEBOOK_TABLES = ["chunks_fts", "kg_objects_fts"]
@@ -148,11 +158,22 @@ def notebook_ids(conn: sqlite3.Connection) -> dict[str, str]:
     return {r[0]: r[1] for r in conn.execute("SELECT id, tier FROM notebooks").fetchall()}
 
 
-def base_id(conn: sqlite3.Connection) -> str:
-    ids = [r[0] for r in conn.execute("SELECT id FROM notebooks WHERE tier='base'").fetchall()]
-    if len(ids) != 1:
-        raise SystemExit(f"期望恰好 1 个 base 库, 实得 {len(ids)} 个: {ids}")
-    return ids[0]
+def _sole_base_id(conn: sqlite3.Connection, side: str) -> str:
+    """本工具只支持"两边共享恰好一个公共知识库"的合并场景。多领域基准库下一个库可以
+    挂载/持有多个 tier='base' 的公共知识库,这种情况下没有安全的隐式选择(不能像单 base
+    时代那样直接取第一个)——必须让用户先看清两边各自的公共知识库集合再决定怎么处理,
+    所以 >1 个时直接 fail-loud 报出侧别+全部候选,而不是猜一个。"""
+    rows = conn.execute("SELECT id, name FROM notebooks WHERE tier='base'").fetchall()
+    if len(rows) > 1:
+        names = "、".join(f"{r[0]}({r[1]})" for r in rows)
+        raise SystemExit(
+            f"{side} 侧存在 {len(rows)} 个公共知识库: {names}。本工具只支持"
+            f"「两边共享恰好一个公共知识库」的场景, 多领域库请勿使用 --keep-base 猜测"
+            f"——请先手动确认要合并的是哪一对公共知识库, 多出来的公共知识库需要单独处理。"
+        )
+    if not rows:
+        raise SystemExit(f"{side} 侧没有公共知识库(tier='base')")
+    return str(rows[0][0])
 
 
 def base_stats(conn: sqlite3.Connection, nb_id: str) -> dict[str, int]:
@@ -181,7 +202,7 @@ def preflight(conn_a: sqlite3.Connection, conn_b: sqlite3.Connection,
         raise SystemExit(
             f"schema 版本必须都为当前 SCHEMA_VERSION={SCHEMA_VERSION}, 实得 A={va} B={vb}")
     # 2) 各恰好一个 base 且 id 相同
-    ba, bb = base_id(conn_a), base_id(conn_b)
+    ba, bb = _sole_base_id(conn_a, "A"), _sole_base_id(conn_b, "B")
     if ba != bb:
         raise SystemExit(f"两库 base id 不同: A={ba} B={bb}; 无法认定为同一 base")
     # 3) notebook id 交集恰好只有 base

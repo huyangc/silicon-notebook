@@ -33,6 +33,19 @@ import {
 import { promotionReviewSections } from "./promotion-review";
 import { setNotebookTier, tierActionState } from "./notebook-tier";
 import {
+  groupMountable,
+  listBases,
+  listMountable,
+  mergeMountCandidates,
+  mountCostHint,
+  mountedByCount,
+  resolvePromotionTarget,
+  setBases,
+  toMountedBases,
+  type MountedBase,
+  type NotebookRef,
+} from "./notebook-bases";
+import {
   describeScaleIndex, scaleIndexOpConfirm, SCALE_OP_MODE, UNINDEXED_SCOPE_HINT,
   type ScaleIndexOp, type ScaleIndexStatus,
 } from "./scale-index";
@@ -841,7 +854,16 @@ export default function Home() {
   const [menuNotebookId, setMenuNotebookId] = useState<string | null>(null);
   const [menuPosition, setMenuPosition] = useState<NotebookMenuPosition | null>(null);
   const [editingNotebook, setEditingNotebook] = useState<NotebookSummary | null>(null);
+  // 多领域基准库:编辑弹窗里的参考库多选(mountable=候选,mountedIds=当前勾选,
+  // mountEdges=拉取时的挂载边快照,用于渲染失效边置灰)。三者只在打开编辑弹窗时
+  // (openNotebookEditor)拉取——bases/mountable 两个端点是 owner-only,访客 404。
+  const [mountable, setMountable] = useState<NotebookRef[]>([]);
+  const [mountedIds, setMountedIds] = useState<string[]>([]);
+  const [mountEdges, setMountEdges] = useState<MountedBase[]>([]);
   const [deleteNotebook, setDeleteNotebook] = useState<NotebookSummary | null>(null);
+  // 必办 4(spec §6):删除确认弹窗要显示"N 个笔记本正在把它作为参考库"—— CASCADE
+  // 会连同这些边一起清空且不可撤销。只在打开删除确认弹窗时才拉取(openDeleteConfirm)。
+  const [deleteMountedByCount, setDeleteMountedByCount] = useState(0);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [linkSectionOpen, setLinkSectionOpen] = useState(false);
   const [urlText, setUrlText] = useState("");
@@ -882,6 +904,12 @@ export default function Home() {
   const [promoQueue, setPromoQueue] = useState<PromotionCandidate[] | null>(null);
   const [promoOpen, setPromoOpen] = useState(false);
   const [promoBusy, setPromoBusy] = useState(false);
+  // 多领域基准库:提交晋升前需要知道本笔记本挂了几个公共知识库(resolvePromotionTarget:
+  // 0 个禁用按钮/1 个直接用/>1 个弹选择器)。只在进入「Rules」知识浏览 tab 时按 owner
+  // 门控拉取(switchChatMode),不在打开笔记本时无条件调用。
+  const [currentNotebookBases, setCurrentNotebookBases] = useState<MountedBase[]>([]);
+  // 挂了 >1 个公共知识库时,点「提交晋升」先记下待定的知识对象 id,弹选择器要求选一个。
+  const [pendingPromotionObjectId, setPendingPromotionObjectId] = useState<string | null>(null);
   const [edgeQueue, setEdgeQueue] = useState<EdgeReviewItem[] | null>(null);
   const [edgeReviewOpen, setEdgeReviewOpen] = useState(false);
   const [edgeBusy, setEdgeBusy] = useState(false);
@@ -1801,6 +1829,37 @@ export default function Home() {
   const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources), [currentNotebook, sources]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
   const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
+  // 多领域基准库(Task 14):引用徽章要把 citation/anchor 的 notebook_id 解成人话
+  // 库名——id→name 映射从 notebooks(自己的库集合)与当前笔记本挂载的参考库
+  // (base_notebooks,覆盖别人创建、不在自己集合里的公共知识库)合并得到,逐 turn
+  // 复用同一份而非每条引用各建一次。
+  const notebookNames = useMemo(() => {
+    const names: Record<string, string> = {};
+    for (const nb of notebooks) names[nb.id] = nb.name;
+    for (const base of currentNotebook?.base_notebooks ?? []) names[base.id] = base.name;
+    return names;
+  }, [notebooks, currentNotebook]);
+  // 多领域基准库(Task 14 追加项):Memory 晋升按钮要复用与知识条目同一套
+  // resolvePromotionTarget(0 个禁用/1 个直接用/>1 个弹选择器)。数据源刻意不用
+  // owner-only 的 /bases 端点(currentNotebookBases 只在进「Rules」tab 时按
+  // canGovernKnowledge 门控拉取,只读访客会 404)——改用打开笔记本就有、
+  // owner/reader 都能看到的 NotebookSummary.base_notebooks;该查询本就只回填
+  // 当前生效的挂载边,天然等价于 active=true,不需要再喊一次接口。
+  const notebookPromotionBases: MountedBase[] = useMemo(
+    () => toMountedBases(currentNotebook?.base_notebooks ?? []),
+    [currentNotebook?.base_notebooks],
+  );
+  // codex 对 PR#304 的审查(2026-07-19)P2 #2:全局 Memory 页(scope==="global")
+  // 一条记忆可能来自任意 notebook,不能像上面 notebookPromotionBases 那样共用
+  // 同一份——按 memory.notebook_id 各自查。数据源同上一个 useMemo 的理由:不喊
+  // owner-only 的 /bases,改用 notebooks(list_for_user 已覆盖 owner∪reader,
+  // 涵盖一切可能出现在这里的 memory.notebook_id)里每条自带的 base_notebooks,
+  // 一次性建好全量映射。
+  const notebookBasesById: Record<string, MountedBase[]> = useMemo(() => {
+    const map: Record<string, MountedBase[]> = {};
+    for (const nb of notebooks) map[nb.id] = toMountedBases(nb.base_notebooks ?? []);
+    return map;
+  }, [notebooks]);
   const currentSession = useMemo(
     () => sessions.find((session) => session.id === conversationId) ?? null,
     [conversationId, sessions],
@@ -2102,6 +2161,7 @@ export default function Home() {
     setKnowledgeKind("concept");
     setKnowledgeStatusFilter("all");
     setDuplicates(null);
+    setCurrentNotebookBases([]);
     setSessions([]);
     pollCountRef.current = 0;
     const sessionList = await loadSessions(notebookId, workspaceEpoch);
@@ -2240,13 +2300,24 @@ export default function Home() {
     }
   }
 
+  // 打开编辑弹窗:先拉可挂候选 + 当前挂载边,弹窗渲染时已有数据,不会先空白闪一下。
+  // listMountable/listBases 是 owner-only 端点(访客 404)——编辑弹窗本身就是 owner-only
+  // 界面,在这里(而非打开笔记本时)才拉取是安全的边界。
+  const openNotebookEditor = async (nb: NotebookSummary) => {
+    const [cands, edges] = await Promise.all([listMountable(nb.id), listBases(nb.id)]);
+    setMountable(cands);
+    setMountEdges(edges);
+    setMountedIds(edges.map((e) => e.id));
+    setEditingNotebook(nb);
+  };
+
   async function saveNotebookEdit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!editingNotebook) return;
     const formData = new FormData(event.currentTarget);
     const splitLines = (value: string) =>
       value.split(/[\n;,，；]/).map((s) => s.trim()).filter(Boolean);
-    const updated = await api<NotebookSummary>(`/notebooks/${editingNotebook.id}`, {
+    await api<NotebookSummary>(`/notebooks/${editingNotebook.id}`, {
       method: "PATCH",
       body: JSON.stringify({
         name: formData.get("name"),
@@ -2259,14 +2330,28 @@ export default function Home() {
         taxonomy: splitLines(String(formData.get("taxonomy") || ""))
       })
     });
+    // 参考库挂载在同一次保存里一并写(全量替换);随后重新拉一次 notebook——PATCH 的
+    // 响应是挂载写之前的快照,base_notebooks/base_kg_available 要靠这次重拉才最新。
+    const bases = await setBases(editingNotebook.id, mountedIds);
+    const updated = await api<NotebookSummary>(`/notebooks/${editingNotebook.id}`);
     setEditingNotebook(null);
     if (currentNotebookId === updated.id) {
       setCurrentNotebook(updated);
       setTitleDraft(updated.name);
+      setCurrentNotebookBases(bases);
     }
     await loadNotebookCollection();
     setToast("笔记本信息已更新");
   }
+
+  // 打开删除确认弹窗前先查"有多少笔记本正在把它作为参考库"(spec §6)——CASCADE
+  // 不可逆,用户点删除前必须看到影响面。镜像 openNotebookEditor 的"先拉数据再开
+  // 弹窗"惯例,避免弹窗先显示 0 再跳成真实数字的那一下闪烁。
+  const openDeleteConfirm = async (nb: NotebookSummary) => {
+    const { count } = await mountedByCount(nb.id);
+    setDeleteMountedByCount(count);
+    setDeleteNotebook(nb);
+  };
 
   async function confirmDeleteNotebook() {
     if (!deleteNotebook) return;
@@ -2454,7 +2539,7 @@ export default function Home() {
     const q = nextQuestion.trim();
     if (!q) return;
     if (requiresKg(askMode) && !kgAvailable) {
-      setToast(`${strictLabel}需先整理该笔记本的知识图谱`);
+      setToast(`${strictLabel}需要知识图谱 — 可在「设置 → 编辑当前笔记本」里挂一个参考库，或先整理该笔记本的知识图谱`);
       return;
     }
     const notebookId = currentNotebookId;
@@ -3050,20 +3135,14 @@ export default function Home() {
   // --- Two-tier federation: mark notebook base / personal -----------------
   async function handleTierAction() {
     if (!currentNotebook) return;
-    const state = tierActionState(currentNotebook, notebooks);
-    if (state.action === "replace") {
-      const ok = window.confirm(
-        `当前公共知识库是「${state.otherBaseName}」。公共知识库全局唯一 —— 替换为「${currentNotebook.name}」？`
-      );
-      if (!ok) return;
-    }
+    const state = tierActionState(currentNotebook);
     const target = state.action === "unset" ? "personal" : "base";
     const updated = await setNotebookTier(currentNotebook.id, target);
     setCurrentNotebook(updated as NotebookSummary);
     await loadNotebookCollection();
     setToast(
       target === "base"
-        ? "已设为公共知识库 — 这个笔记本会作为全局唯一的权威来源，参与检索与冲突仲裁"
+        ? "已设为公共知识库 — 其他笔记本可以在设置里把它挂为参考库"
         : "已取消公共知识库，恢复为个人知识库"
     );
   }
@@ -3192,9 +3271,23 @@ export default function Home() {
     setPromoOpen(true);
   }
 
-  async function submitPromotion(objectId: string) {
+  // targetBaseId 未传时按 promotionTarget(渲染时用 currentNotebookBases 算出)三态分派:
+  // none(0 个公共库挂载)拒绝、auto(1 个)直接用、choose(>1 个)转去弹选择器,选好后
+  // 选择器自己会带着 targetBaseId 回调本函数——这一次不再重新分派,直接提交。
+  async function submitPromotion(objectId: string, targetBaseId?: string) {
     if (!currentNotebookId) return;
-    await proposePromotion(currentNotebookId, objectId);
+    if (!targetBaseId) {
+      if (promotionTarget.kind === "none") {
+        setToast("需先挂载一个公共知识库，才能贡献内容");
+        return;
+      }
+      if (promotionTarget.kind === "choose") {
+        setPendingPromotionObjectId(objectId);
+        return;
+      }
+      targetBaseId = promotionTarget.baseId;
+    }
+    await proposePromotion(currentNotebookId, objectId, targetBaseId);
     setToast("已提交贡献申请");
   }
 
@@ -3259,6 +3352,12 @@ export default function Home() {
           loadKnowledge(knowledgeKind, { status: "all", page: 0 }).catch(reportError);
         }
       }).catch(reportError);
+      // 提交晋升要知道本笔记本挂了几个公共知识库(resolvePromotionTarget)。/bases
+      // 是 owner-only 端点,非 owner 404(见 notebook-bases.ts 顶部注释)——不能像
+      // loadKnowledgeTypes 那样对所有访客无条件调用,这里显式门控 canGovernKnowledge。
+      if (currentNotebookId && capabilities.canGovernKnowledge) {
+        listBases(currentNotebookId).then(setCurrentNotebookBases).catch(reportError);
+      }
     }
   }
 
@@ -3371,6 +3470,8 @@ export default function Home() {
     canManageReports: !isReader,
     canManageSchemas: currentUser?.role === "admin",
   };
+  // 挂了几个公共知识库决定「提交晋升」按钮的行为(none=禁用/auto=直接用/choose=弹选择器)。
+  const promotionTarget = resolvePromotionTarget(currentNotebookBases);
   const menuNotebook = menuNotebookId
     ? notebooks.find((item) => item.id === menuNotebookId) ?? null
     : null;
@@ -3571,7 +3672,7 @@ export default function Home() {
 
       {!isWorkspace && outerView === "memory" && (
         <main className="page memory-view">
-          <MemoryPanel scope="global" notebookId={null} sessionSignal={memorySessionAbortRef.current.signal} />
+          <MemoryPanel scope="global" notebookId={null} notebookBases={notebookBasesById} sessionSignal={memorySessionAbortRef.current.signal} />
         </main>
       )}
 
@@ -3627,17 +3728,17 @@ export default function Home() {
               <div className="workspace-nav-group">
                 {!isReader && (
                   <button className="workspace-nav-button" onClick={() => {
-                    const tier = tierActionState(currentNotebook, notebooks);
-                    // 基准库名走后端全局字段 base_notebook_name(所有用户只读可见,不依赖它出现在
-                    // 自己的库列表里)。弹窗顶部只读展示「当前基准库」,非管理员也能看到是哪个、但改不了。
-                    const baseName = currentNotebook?.base_notebook_name || "";
+                    const tier = tierActionState(currentNotebook);
+                    // 参考库列表随 NotebookSummary.base_notebooks 一起返回(owner/reader 都能看到,
+                    // 权威只读)。弹窗顶部只读展示本笔记本挂了哪些参考库;没挂时不显示该段落。
+                    const baseNames = (currentNotebook?.base_notebooks ?? []).map((b) => b.name);
                     setInfoModal({
                     title: "分析",
-                    message: "对当前笔记本的知识图谱与公共知识库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
-                    sections: baseName ? [["当前公共知识库", [baseName]] as [string, string[]]] : undefined,
+                    message: "对当前笔记本的知识图谱与参考库做治理与审查（部分操作仅管理员）。输出在弹窗中呈现。",
+                    sections: baseNames.length ? [["本笔记本的参考库", baseNames] as [string, string[]]] : undefined,
                     actions: [
                       ...(currentUser?.role === "admin" ? [{ label: "内容审核", desc: "审核待收录进公共知识库的内容（管理员）", action: () => openPromoQueue().catch(reportError) }] : []),
-                      ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前笔记本设为全局唯一的公共知识库，供检索时优先参考（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
+                      ...(currentUser?.role === "admin" ? [{ label: tier.label, desc: "把当前笔记本设为公共知识库，供其他笔记本挂为参考库（管理员）", action: () => handleTierAction().catch(reportError) }] : []),
                       // 检索索引的立即/空闲时重建已收敛进「看板 → 索引与构建」面板(检索索引行,
                       // 与 tier 解耦、大库亦可建)，此处不再重复列出，避免同一动作多处入口各自确认。
                       { label: "关系审核队列", desc: "审核知识图谱中待人工确认的实体关联", action: () => openEdgeReviewQueue().catch(reportError) }
@@ -3679,7 +3780,7 @@ export default function Home() {
                   title: "设置",
                   message: `${health?.llm_configured ? "LLM 已配置" : "LLM 尚未配置"}。当前设置页先保留状态与笔记本编辑入口。`,
                   actions: capabilities.canWriteNotebook
-                    ? [{ label: "编辑当前笔记本", primary: true, action: () => setEditingNotebook(currentNotebook) }]
+                    ? [{ label: "编辑当前笔记本", primary: true, action: () => openNotebookEditor(currentNotebook).catch(reportError) }]
                     : []
                 })}>
                   <Settings size={17} />
@@ -3784,16 +3885,16 @@ export default function Home() {
                           className="add-source-button"
                           disabled={buildingKg}
                           title={currentNotebook?.base_kg_available
-                            ? `本笔记本尚未整理知识图谱，${strictLabel}会借用公共知识库；点击为本笔记本单独整理`
-                            : `默认问答（通用）不需要；「${strictLabel}」需先整理知识图谱`}
+                            ? `本笔记本尚未整理知识图谱，${strictLabel}会借用已挂载的参考库；点击为本笔记本单独整理`
+                            : `本笔记本尚未整理知识图谱，也没挂参考库；「${strictLabel}」需先整理知识图谱或挂一个参考库`}
                           onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                         >
                           <Network size={20} strokeWidth={2.7} /> {buildingKg ? "整理中…" : "整理知识图谱"}
                         </button>
                         <p className="tool-hint" style={{ margin: "2px 2px 8px" }}>
                           {currentNotebook?.base_kg_available
-                            ? `本笔记本尚未整理知识图谱，${strictLabel}将借用公共知识库`
-                            : `默认问答无需；「${strictLabel}」需要先整理`}
+                            ? `本笔记本尚未整理知识图谱，${strictLabel}将借用已挂载的参考库`
+                            : `本笔记本尚未整理知识图谱，也没挂参考库；「${strictLabel}」需要先整理或挂一个参考库`}
                         </p>
                       </>
                     )
@@ -4066,6 +4167,7 @@ export default function Home() {
                             onOpenKnowledgeGraph={(objectId) => openKgView(objectId)}
                             onOpenKnowhowRow={openKnowhowAt}
                             notebookId={currentNotebookId}
+                            notebookNames={notebookNames}
                             onBuildScaleIndex={() => runScaleIndexOp("build")}
                             buildingScaleIndex={buildingScaleIndex}
                             onSaveMemory={(answerId) => setMemoryAnswerId(answerId)}
@@ -4103,6 +4205,7 @@ export default function Home() {
                     reload={() => loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: 0 }).catch(reportError)}
                     tier={currentNotebook?.tier}
                     onPropose={(id) => submitPromotion(id).catch(reportError)}
+                    proposeDisabledReason={promotionTarget.kind === "none" ? "需先挂载一个公共知识库" : undefined}
                     total={knowledgeTotal[knowledgeKind] ?? 0}
                     page={knowledgePage[knowledgeKind] ?? 0}
                     onPage={(p) => loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: p }).catch(reportError)}
@@ -4133,7 +4236,7 @@ export default function Home() {
                 )}
 
                 {chatMode === "memory" && currentNotebookId && (
-                  <MemoryPanel scope="notebook" notebookId={currentNotebookId} sessionSignal={memorySessionAbortRef.current.signal} />
+                  <MemoryPanel scope="notebook" notebookId={currentNotebookId} bases={notebookPromotionBases} sessionSignal={memorySessionAbortRef.current.signal} />
                 )}
               </div>
               {chatMode === "ask" && (
@@ -4190,8 +4293,8 @@ export default function Home() {
                         </button>
                       </span>
                     )}
-                    {groupOf(askMode) === "strict" && kgAvailable && currentNotebook?.base_kg_available && !currentNotebook?.kg_ready && (
-                      <span className="mode-hint">本笔记本尚无知识图谱，将借用公共知识库推理</span>
+                    {groupOf(askMode) === "strict" && kgAvailable && currentNotebook?.base_kg_available && !currentNotebook?.kg_ready && (currentNotebook?.base_notebooks?.length ?? 0) > 0 && (
+                      <span className="chat-hint">本笔记本尚无知识图谱，将借用参考库「{currentNotebook.base_notebooks?.map((b) => b.name).join("、")}」推理</span>
                     )}
                   </div>
                   <button
@@ -4233,8 +4336,8 @@ export default function Home() {
             >退出共享</button>
           ) : (
             <>
-              <button onClick={() => { setEditingNotebook(menuNotebook); setMenuNotebookId(null); setMenuPosition(null); }}>编辑信息</button>
-              <button className="danger" onClick={() => { setDeleteNotebook(menuNotebook); setMenuNotebookId(null); setMenuPosition(null); }}>删除笔记本</button>
+              <button onClick={() => { openNotebookEditor(menuNotebook).catch(reportError); setMenuNotebookId(null); setMenuPosition(null); }}>编辑信息</button>
+              <button className="danger" onClick={() => { openDeleteConfirm(menuNotebook).catch(reportError); setMenuNotebookId(null); setMenuPosition(null); }}>删除笔记本</button>
             </>
           )}
         </div>
@@ -4548,7 +4651,7 @@ export default function Home() {
 
       {editingNotebook && (
         <section className="utility-modal" role="dialog" aria-modal="true">
-          <div className="utility-modal-card">
+          <div className="utility-modal-card notebook-edit-card">
             <div className="source-modal-header">
               <div>
                 <h2>编辑笔记本</h2>
@@ -4559,7 +4662,61 @@ export default function Home() {
             <form className="edit-form" onSubmit={(event) => saveNotebookEdit(event).catch(reportError)}>
               <label>标题<input name="name" defaultValue={editingNotebook.name} maxLength={80} required /></label>
               <label>描述<textarea name="purpose" defaultValue={editingNotebook.purpose} rows={3} maxLength={260} /></label>
-              <label>领域<input name="primary_domain" defaultValue={editingNotebook.primary_domain} maxLength={80} /></label>
+              <label>领域关键词<input name="primary_domain" defaultValue={editingNotebook.primary_domain} maxLength={80} /></label>
+              <div className="base-picker">
+                <span className="base-picker-title">参考库</span>
+                <p className="base-picker-desc">检索时会一并搜索这些知识库。不选则只搜本笔记本。</p>
+                {(() => {
+                  // 最终整支审查 BLOCKER 1:必须渲染 mountable ∪ mountEdges 的并集,而不是
+                  // 只渲染 mountable——失效边(active=false)按 MOUNT_VALID_EXPR 定义永远不在
+                  // mountable 候选里,只渲染 mountable 会让那一行永久消失,用户也没法取消勾选
+                  // 它、保存表单会被后端 400 拒绝(见 notebook-bases.ts mergeMountCandidates
+                  // 与 routes.py set_notebook_bases_route 的联动说明)。
+                  const groups = groupMountable(mergeMountCandidates(mountable, mountEdges));
+                  const render = (title: string, list: MountedBase[]) =>
+                    list.length === 0 ? null : (
+                      <div className="base-picker-group" key={title}>
+                        <span className="base-picker-group-title">{title}</span>
+                        {list.map((n) => {
+                          const dead = !n.active;
+                          return (
+                            <label className={`base-picker-row${dead ? " base-picker-row-dead" : ""}`} key={n.id}>
+                              <input
+                                type="checkbox"
+                                checked={mountedIds.includes(n.id)}
+                                onChange={(e) =>
+                                  setMountedIds((prev) =>
+                                    e.target.checked
+                                      ? [...prev, n.id]
+                                      : prev.filter((id) => id !== n.id)
+                                  )
+                                }
+                              />
+                              {/* 审查 M3:失效原因文案挪到库名正下方(而不是网格最后一列被推到行最右)——
+                                  同一个 wrapper 里纵向堆叠,让原因读起来明显是在注解上面那个库名。 */}
+                              <span className="base-picker-name-block">
+                                <span className="base-picker-name" title={n.name}>{n.name}</span>
+                                {dead && <span className="base-picker-dead-note">{n.inactive_reason}</span>}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    );
+                  return (
+                    <>
+                      {render("公共知识库", groups.public)}
+                      {render("我的笔记本", groups.mine)}
+                      {groups.public.length === 0 && groups.mine.length === 0 && (
+                        <p className="base-picker-empty">暂无可挂载的知识库。</p>
+                      )}
+                    </>
+                  );
+                })()}
+                {mountCostHint(mountedIds.length) && (
+                  <p className="base-picker-hint">{mountCostHint(mountedIds.length)}</p>
+                )}
+              </div>
               <label>目标用户<input name="target_users" defaultValue={editingNotebook.target_users ?? ""} maxLength={120} /></label>
               <label>预期问题（每行/逗号一条）<textarea name="expected_questions" defaultValue={(editingNotebook.expected_questions ?? []).join("\n")} rows={2} /></label>
               <label>来源类型（每行/逗号一条）<input name="source_types" defaultValue={(editingNotebook.source_types ?? []).join(", ")} /></label>
@@ -4581,6 +4738,11 @@ export default function Home() {
               <div>
                 <h2>删除笔记本</h2>
                 <p>确定删除 “{deleteNotebook.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；所有成员各自绑定到此笔记本的私有记忆也会按生命周期一并删除。</p>
+                {deleteMountedByCount > 0 && (
+                  <p className="delete-mount-warning">
+                    {deleteMountedByCount} 个笔记本正在把它作为参考库，删除后这些笔记本会立即失去这条参考库——此操作不可撤销。
+                  </p>
+                )}
               </div>
               <button className="icon-button" onClick={() => setDeleteNotebook(null)} title="Close">×</button>
             </div>
@@ -5352,7 +5514,7 @@ export default function Home() {
             <div className="source-modal-header">
               <div>
                 <h2>内容审核</h2>
-                <p>个人知识库中的内容与记忆候选申请收录到公共知识库。批准后会合并重复并加入公共知识库。</p>
+                <p>个人知识库中的内容与记忆候选申请收录到公共知识库。批准后会合并重复并加入所选的目标公共知识库。</p>
               </div>
               <button className="icon-button" onClick={() => setPromoOpen(false)} title="Close">×</button>
             </div>
@@ -5393,6 +5555,14 @@ export default function Home() {
                         </div>
                       )}
                       <p className="tool-hint">来源笔记本: {cand.notebook_id.slice(0, 10)}</p>
+                      {cand.target_base_id && (
+                        <p className="tool-hint">
+                          {/* Task 13 审查 #4:优先用后端 join 出来的 target_base_name(策展人不一定是
+                              目标库 owner,notebooks 只覆盖自有∪只读加入,猜不出别人创建的公共库真名)；
+                              查不到再回退旧写法(notebooks.find),最后兜底截断 id。 */}
+                          目标公共知识库: {cand.target_base_name || notebooks.find((n) => n.id === cand.target_base_id)?.name || cand.target_base_id.slice(0, 10)}
+                        </p>
+                      )}
                       {review.evidence.length > 0 && (
                         <div className="stack" aria-label="服务端校验证据">
                           <strong>证据</strong>
@@ -5435,6 +5605,41 @@ export default function Home() {
                   })}
                 </div>
               )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {pendingPromotionObjectId && (
+        <section
+          className="utility-modal"
+          role="dialog"
+          aria-modal="true"
+          onClick={(event) => { if (event.currentTarget === event.target) setPendingPromotionObjectId(null); }}
+        >
+          <div className="utility-modal-card narrow">
+            <div className="source-modal-header">
+              <div>
+                <h2>选择贡献目标</h2>
+                <p>本笔记本挂载了多个公共知识库，请选择这条知识要进入哪一个。</p>
+              </div>
+              <button className="icon-button" onClick={() => setPendingPromotionObjectId(null)} title="Close">×</button>
+            </div>
+            <div className="promotion-target-list">
+              {(promotionTarget.kind === "choose" ? promotionTarget.options : []).map((base) => (
+                <button
+                  key={base.id}
+                  type="button"
+                  className="sort-button promotion-target-option"
+                  onClick={() => {
+                    const objectId = pendingPromotionObjectId;
+                    setPendingPromotionObjectId(null);
+                    if (objectId) submitPromotion(objectId, base.id).catch(reportError);
+                  }}
+                >
+                  <span className="promotion-target-name" title={base.name}>{base.name}</span>
+                </button>
+              ))}
             </div>
           </div>
         </section>
@@ -6007,6 +6212,7 @@ function KnowledgeBrowser({
   reload,
   tier,
   onPropose,
+  proposeDisabledReason,
   total,
   page,
   onPage,
@@ -6027,6 +6233,7 @@ function KnowledgeBrowser({
   reload: () => void;
   tier?: string;
   onPropose?: (id: string) => void;
+  proposeDisabledReason?: string;
   total: number;
   page: number;
   onPage: (p: number) => void;
@@ -6131,7 +6338,8 @@ function KnowledgeBrowser({
                 {!readOnly && tier === "personal" && item.status !== "deprecated" && onPropose && (
                   <button
                     className="sort-button"
-                    title="贡献到公共知识库"
+                    title={proposeDisabledReason || "贡献到公共知识库"}
+                    disabled={Boolean(proposeDisabledReason)}
                     onClick={() => onPropose(item.id)}
                   >
                     ↑ 提交贡献

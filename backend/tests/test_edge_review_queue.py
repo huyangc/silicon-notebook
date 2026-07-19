@@ -228,6 +228,7 @@ def _seed_federated(repo):
                        "line_start": 1, "line_end": 1,
                        "quote": "personal concept supports personal claim"}]},
     ])
+    repo.replace_notebook_bases(pers_nb.id, [base_nb.id], "user-local")
     return base_nb.id, pers_nb.id
 
 
