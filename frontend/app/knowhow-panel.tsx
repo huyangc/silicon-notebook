@@ -893,10 +893,17 @@ export function KnowhowPanel({
   // 成 ""（几乎必然判陈旧、保守跳过，不盲写）。
   //
   // 并发防护（P1 round-4）：`anchorGuard` 也仅由**批量规整保存**传入（快照 anchor 列
-  // id + rowId -> 建批次那刻该行 anchor 快照值），只作用于**批量端点**（targets>1，即
-  // 合并共享组扇写）——后端在同一事务内额外重读每行 anchor 列，任一行 anchor 自快照以来
-  // 被移出组就整组 409（离组行不再被冻结扇出误写）。**单格路径（patchKnowhowCell）刻意
-  // 不带**：单行没有「兄弟组」可离，且手动编辑器本就 last-write-wins。缺值同样退化成 ""。
+  // id + rowId -> 建批次那刻该行 anchor 快照值）——后端在同一事务内额外重读每行 anchor 列，
+  // 任一行 anchor 自快照以来被移出组就整组 409（离组行不再被冻结扇出误写）；round-5 再加
+  // 「指定未变 + 组成员集与冻结写目标精确相等」结构守卫（增员/减员亦 409）。缺值退化成 ""。
+  // 并发防护（P1 round-6）：`anchorGuard` 一旦传入就**恒**走 guarded 批量端点——**含只有一个
+  // 写目标的单例组**（下方 split：`useBatchEndpoint = targets.length > 1 || anchorGuard`）。此前
+  // 单例组按 targets.length===1 落单格端点、绕过成员校验：建批次那刻组内仅一行，之后有兄弟行
+  // join 该 anchor 组，就只写原行、悄悄把已共享的组留成不一致（round-5 为多目标关掉的同类结构
+  // 漂移，单例组漏在门外）。runSave 侧 `coversAnchorGroup` 门保证 anchorGuard 只对**整组写**
+  // （合并共享列扇写 / 单例组）下发，故「带 anchorGuard ⟺ 该走 guarded 端点」恒成立；多行组的
+  // **非共享列**是有意子集写、不带守卫，仍走单格端点。**手动格子编辑 / 优化整行**不带 anchorGuard、
+  // 单目标恒落单格端点（无组可离、last-write-wins），逐字不变。
   async function handleCellSave(
     rowId: string,
     columnId: string,
@@ -925,7 +932,17 @@ export function KnowhowPanel({
       : null;
     const targets =
       targetRowIds ?? (group && isSharedColumn(group, columnId) ? groupCellWriteTargets(group, columnId) : [rowId]);
-    const results = targets.length > 1
+    // 端点选路（split，P1 round-6）：走 guarded 批量端点当且仅当——
+    //  · targets.length > 1：合并共享格扇写（手动编辑或规整保存都可能命中），必须整组一事务写；
+    //  · 或带 anchorGuard：**规整保存**对「整组写」单元下发的锚定守卫（runSave 的 coversAnchorGroup
+    //    门保证只有合并共享列扇写 / **单例组** 才带它）。带上它就必须让服务端跑「指定未变 + 组成员
+    //    精确相等 + expected_before」三重校验——否则**单例组**（建批次那刻仅一行、只有一个写目标）
+    //    会走单格端点、无成员校验：若之后有兄弟行 join 该 anchor 组，只写原行、悄悄把已共享的组留成
+    //    不一致（正是 round-5 为多目标单元关掉的同一类结构漂移，单例组此前漏在门外）。成员漂移即整批
+    //    409 → 落既有 stale-skip。**手动格子编辑 / 优化整行**不带 anchorGuard（也不带 targetRowIds），
+    //    单目标恒落下面的单格端点，逐字不变（last-write-wins，无组可离）。
+    const useBatchEndpoint = targets.length > 1 || Boolean(anchorGuard);
+    const results = useBatchEndpoint
       ? await batchPatchKnowhowCells(notebookId, selectedTableId, {
           columnId,
           rowIds: targets,
@@ -933,7 +950,8 @@ export function KnowhowPanel({
           ...(expectedByRowId
             ? { expectedBefore: targets.map((rid) => expectedByRowId.get(rid) ?? "") }
             : {}),
-          // 合并共享组扇写才带 anchor 守卫（与 expectedBefore 一样按 targets 平行下发）。
+          // 整组写才带 anchor 守卫（与 expectedBefore 一样按 targets 平行下发；单例组 targets 长度 1
+          // 也照常带——后端 length-validated 平行数组接受 1 行批次，成员校验即在此单行上跑）。
           ...(anchorGuard
             ? {
                 anchorColumnId: anchorGuard.anchorColumnId,
@@ -942,7 +960,8 @@ export function KnowhowPanel({
             : {}),
         })
       : [
-          // 单格路径：不带 anchor 守卫（见上方 handleCellSave 头注释的 split 说明）。
+          // 单格路径：无 anchorGuard 的手动编辑落到这里，不带 anchor 守卫（见上方 split 说明及
+          // handleCellSave 头注释）。expectedBefore 仍随手动编辑的 last-write-wins 语义按需下发。
           await patchKnowhowCell(
             notebookId,
             selectedTableId,
@@ -4455,10 +4474,15 @@ function KnowhowReformatBatchModal({
       // P1（round-4）：把本 unit 每个写目标的**快照** anchor 值（unit.writeTargets[i].anchorMd，
       // 与 originalMd 同源于 snapshotRef 冻结快照）连同**快照** anchor 列 id 一起下发——服务端
       // 事务内额外重读每行 anchor 列，任一行 anchor 自建批次以来被移出组就整组 409（落到既有
-      // stale-skip 路径）。只在有 anchor 列（分组视图）才带；记录型表 anchorColumnId=null 时不带
-      // （无「兄弟组」可离）。anchorColumnId 取自 snapshotRef 而非实时 detail，与写目标同一份底稿。
+      // stale-skip 路径）。anchorColumnId 取自 snapshotRef 而非实时 detail，与写目标同一份底稿。
+      // P1（round-6）：再叠一道 unit.coversAnchorGroup 门——只有「整组写」（合并共享列扇写 /
+      // 单例组）才下发 anchorGuard。多行组里的**非共享列**是有意的子集写（writeTargets ⊊ 组），
+      // 若也带守卫，后端「组成员精确相等」会把「组里本就有别的兄弟行」误判成 joiner 漂移、把每次
+      // 合法的逐行属性规整都假 409。记录型表 anchorColumnId=null（无兄弟组可离）本就 coversAnchorGroup
+      // =false，两条件合一：唯有有 anchor 列且写目标恰为完整组时才带守卫。带上它的（=整组写）会由
+      // handleCellSave 路由到 guarded 批量端点，即便只有一个写目标（单例组），令成员校验必跑。
       const anchorColumnId = snapshotRef.current.anchorColumnId;
-      const anchorGuard = anchorColumnId
+      const anchorGuard = anchorColumnId && unit.coversAnchorGroup
         ? {
             anchorColumnId,
             expectedAnchorByRowId: new Map(unit.writeTargets.map((t) => [t.rowId, t.anchorMd])),

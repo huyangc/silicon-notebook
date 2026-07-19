@@ -968,6 +968,16 @@ export type ReformatSaveUnit = {
    *  整组跳过，不拿旧内容算出的候选盲写。行作用域下可能**超出** members（兄弟行
    *  不在 batch.items 里、不展示，但物理上仍会被扇写到，必须一并查陈旧）。 */
   writeTargets: ReformatSaveWriteTarget[];
+  /** round-6 P1：本单元的 writeTargets 是否**恰好**是建批次那一刻该 anchor 组的
+   *  **完整**成员集——唯有此时后端「组成员精确相等」结构守卫才成立（joiner/leaver
+   *  表现为 current≠frozen）。`true` 的两类：①合并共享列扇写（writeTargets=整组）；
+   *  ②**单例组**（组内仅一行，writeTargets=那一行=整组）。`false` 的一类是回归防线：
+   *  多行组里的**非共享列**——writeTargets 是**有意的子集**（只写这一行），若也带
+   *  守卫，后端会把「组里本就有别的兄弟行」误判成 joiner 漂移、把每次合法的逐行
+   *  属性规整都假 409。记录型表（无 anchor 组）恒 `false`。runSave 据此决定是否给
+   *  该单元下发 anchorGuard；下发了的（=整组写）handleCellSave 一律走 guarded 批量
+   *  端点，令服务端跑「指定未变 + 组成员精确相等 + expected_before」三重校验。 */
+  coversAnchorGroup: boolean;
 };
 
 // 把待保存的 changed 条目按「会扇写到同一组」合并成代表保存单元。`rows` 必须传
@@ -1007,12 +1017,17 @@ export function planReformatSaves(
     if (!group || !isSharedColumn(group, item.columnId)) {
       // 非共享格：只写这一格，写目标 = 展示成员本身（基线用它自己的 originalMd
       // 快照，与改动前逐格 onSaveCell + 逐格 stale 比对的行为完全一致）。
+      // round-6：这一格覆盖整组 ⟺ 它就是个**单例组**（组内仅一行）——此时 writeTargets
+      // ={这一行}=整组，后端「组成员精确相等」守卫成立（建批次后有兄弟行 join 即
+      // current≠frozen → 409）。多行组里落到这个分支的一定是**非共享列**（子集写），
+      // 带守卫会假 409，故 coversAnchorGroup=false。记录型表 group 为 undefined，恒 false。
       units.push({
         representative: item,
         members: [item],
         writeTargets: [
           { rowId: item.rowId, columnId: item.columnId, originalMd: item.originalMd, anchorMd: anchorOf(item.rowId) },
         ],
+        coversAnchorGroup: !!group && group.rows.length === 1,
       });
       continue;
     }
@@ -1038,7 +1053,9 @@ export function planReformatSaves(
       originalMd: rowById.get(rowId)?.cells[item.columnId] ?? "",
       anchorMd: anchorOf(rowId),
     }));
-    const unit: ReformatSaveUnit = { representative: item, members: [item], writeTargets };
+    // round-6：合并共享列扇写——writeTargets = groupCellWriteTargets(group) = 组内全部
+    // 兄弟行 = 整组，故 coversAnchorGroup=true，带 anchorGuard 走 guarded 批量端点。
+    const unit: ReformatSaveUnit = { representative: item, members: [item], writeTargets, coversAnchorGroup: true };
     unitBySignature.set(signature, unit);
     units.push(unit);
   }
