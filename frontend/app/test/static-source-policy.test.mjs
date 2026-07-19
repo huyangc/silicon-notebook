@@ -202,6 +202,8 @@ function directLexicalBinding(statements, name) {
       (
         ts.isFunctionDeclaration(statement)
         || ts.isClassDeclaration(statement)
+        || ts.isEnumDeclaration(statement)
+        || ts.isModuleDeclaration(statement)
       )
       && statement.name?.text === name
     ) {
@@ -222,12 +224,25 @@ function lexicalConstBinding(identifier) {
     current;
     current = current.parent
   ) {
-    if (ts.isBlock(current) || ts.isSourceFile(current)) {
+    if (
+      ts.isBlock(current)
+      || ts.isSourceFile(current)
+      || ts.isModuleBlock(current)
+    ) {
       const binding = directLexicalBinding(current.statements, name);
       if (binding) {
         return binding.initializer
           ? binding
           : undefined;
+      }
+    }
+    if (ts.isCaseBlock(current)) {
+      const binding = directLexicalBinding(
+        current.clauses.flatMap((clause) => [...clause.statements]),
+        name,
+      );
+      if (binding) {
+        return binding.initializer ? binding : undefined;
       }
     }
     if (
@@ -249,6 +264,19 @@ function lexicalConstBinding(identifier) {
       && current.parameters.some(
         (parameter) => bindingNameContains(parameter.name, name),
       )
+    ) {
+      return undefined;
+    }
+    if (
+      (ts.isClassDeclaration(current) || ts.isClassExpression(current))
+      && current.name?.text === name
+    ) {
+      return undefined;
+    }
+    if (
+      ts.isModuleDeclaration(current)
+      && ts.isIdentifier(current.name)
+      && current.name.text === name
     ) {
       return undefined;
     }
@@ -1682,6 +1710,10 @@ test("source policy rejects layout identities with bounded syntax rules", () => 
       + " function shadow() { const specifier = './helper'; return specifier; }",
     "for (const specifier = 'node:fs'; flag;) {"
       + " import(specifier); break; }",
+    "switch (flag) { case 1:"
+      + " const specifier = 'node:fs'; import(specifier); break; }",
+    "namespace N {"
+      + " const specifier = 'node:fs'; import(specifier); }",
     "import fs = require('node:fs'); void fs;",
   ]) {
     assert.deepEqual(
@@ -1767,6 +1799,9 @@ test("source policy leaves ordinary array operations alone", () => {
       + " const { specifier } = options; import(specifier); }",
     "const specifier = 'node:fs';"
       + " function safe() { function specifier() {} import(specifier); }",
+    "const specifier = 'node:fs';"
+      + " const C = class specifier {"
+      + " static load() { import(specifier); } };",
     "function good({ source }: Readonly<{ source: string[] }>) {"
       + " return source.slice(); }",
   ]) {
@@ -1905,6 +1940,22 @@ test("source policy follows dynamic imports to test-only helpers", () => {
     [...policyRelativeModules(modules)].sort(),
     ["dynamic-helper.ts", "feature.test.mjs"],
   );
+
+  for (const entrypoint of [
+    "switch (flag) { case 1:"
+      + " const specifier = './dynamic-helper.ts';"
+      + " import(specifier); break; }",
+    "namespace N { const specifier = './dynamic-helper.ts';"
+      + " import(specifier); }",
+  ]) {
+    modules.set("feature.test.ts", entrypoint);
+    modules.delete("feature.test.mjs");
+    assert.deepEqual(
+      [...policyRelativeModules(modules)].sort(),
+      ["dynamic-helper.ts", "feature.test.ts"],
+      entrypoint,
+    );
+  }
 });
 
 
