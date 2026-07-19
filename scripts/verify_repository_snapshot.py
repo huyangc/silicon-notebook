@@ -462,51 +462,88 @@ NOTEBOOK_ASSETS_SOURCE_INDEX = {
         "CREATE INDEX idx_notebook_assets_source ON notebook_assets(source_id)",
 }
 
+# v20 (multi-domain-base Task 1): a new reference-library mount table —
+# notebook_bases(notebook_id, base_notebook_id, created_at, created_by),
+# PRIMARY KEY (notebook_id, base_notebook_id) — plus its lookup index, and a
+# genuine before/after ALTER on the already-existing promotion_candidates
+# table (target_base_id: the promotion destination base). _migration_20 adds
+# exactly these three schema objects — no new trigger/view. Any DB below 20
+# gains notebook_bases + its index on the way to current, so
+# NOTEBOOK_BASES_TABLE/NOTEBOOK_BASES_INDEX belong in every hop's
+# tables/indexes allowlist; promotion_candidates has existed since the v1
+# baseline, so PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN belongs in every
+# hop's columns allowlist too (mirrors the sources.memory_id / v14 pattern
+# above, not the notebook_assets.source_id v16-cutoff nuance — there is no
+# cutoff here because promotion_candidates predates every hop's pre-version).
+NOTEBOOK_BASES_TABLE = {
+    "notebook_bases": """CREATE TABLE notebook_bases (
+                  notebook_id      TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  base_notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  created_at TEXT NOT NULL,
+                  created_by TEXT REFERENCES users(id),
+                  PRIMARY KEY (notebook_id, base_notebook_id),
+                  CHECK (notebook_id != base_notebook_id)
+                )""",
+}
+NOTEBOOK_BASES_INDEX = {
+    "idx_notebook_bases_base":
+        "CREATE INDEX idx_notebook_bases_base ON notebook_bases(base_notebook_id)",
+}
+PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN = {
+    "target_base_id": ("target_base_id", "TEXT", 1, "''", 0),
+}
+
 MIGRATION_MANIFEST = {
-    # Cumulative delta from the frozen v9 fixture to merged schema v19.
-    (9, 19): {
+    # Cumulative delta from the frozen v9 fixture to merged schema v20.
+    (9, 20): {
         "tables": {
             "kg_rebuild_checkpoint": EXPECTED_KG_REBUILD_CHECKPOINT_SQL,
             **EXPECTED_MEMORY_TABLES,
             **KNOWHOW_TABLES,
             **PAPER_META_TABLES,
             **KNOWHOW_CELL_CODE_TABLE,
+            **NOTEBOOK_BASES_TABLE,
         },
-        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN,
+                    "promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
         "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES,
                     **SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX,
                     **KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
-                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX, **NOTEBOOK_BASES_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (10, 19): {
+    (10, 20): {
         "tables": {**EXPECTED_MEMORY_TABLES, **KNOWHOW_TABLES, **PAPER_META_TABLES,
-                   **KNOWHOW_CELL_CODE_TABLE},
-        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+                   **KNOWHOW_CELL_CODE_TABLE, **NOTEBOOK_BASES_TABLE},
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN,
+                    "promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
         "indexes": {**MASTER_SCALE_INDEXES, **EXPECTED_MEMORY_INDEXES,
                     **SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX,
                     **KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
-                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX, **NOTEBOOK_BASES_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
     # Both branches independently used v11 before merge. Select the exact
     # lineage below from the source schema, then admit only the missing objects.
-    (11, 19, "memory"): {
-        "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE},
-        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+    (11, 20, "memory"): {
+        "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE,
+                   **NOTEBOOK_BASES_TABLE},
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN,
+                    "promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
         "indexes": {**MASTER_SCALE_INDEXES, **SOURCES_MEMORY_ID_INDEX,
                     **SOURCES_PARSE_STATUS_TYPE_INDEX, **KNOWHOW_INDEXES,
                     **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
-                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX, **NOTEBOOK_BASES_INDEX},
         "triggers": {},
         "views": {},
     },
-    (11, 19, "master"): {
+    (11, 20, "master"): {
         "tables": {**EXPECTED_MEMORY_TABLES, **KNOWHOW_TABLES, **PAPER_META_TABLES,
-                   **KNOWHOW_CELL_CODE_TABLE},
-        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+                   **KNOWHOW_CELL_CODE_TABLE, **NOTEBOOK_BASES_TABLE},
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN,
+                    "promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
         "indexes": {
             "idx_sources_nb_parse_status": MASTER_SCALE_INDEXES["idx_sources_nb_parse_status"],
             **EXPECTED_MEMORY_INDEXES,
@@ -516,18 +553,20 @@ MIGRATION_MANIFEST = {
             **PAPER_META_INDEXES,
             **KNOWHOW_CELL_CODE_INDEX,
             **NOTEBOOK_ASSETS_SOURCE_INDEX,
+            **NOTEBOOK_BASES_INDEX,
         },
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
-    (12, 19): {
+    (12, 20): {
         "tables": {**EXPECTED_MEMORY_TABLES, **KNOWHOW_TABLES, **PAPER_META_TABLES,
-                   **KNOWHOW_CELL_CODE_TABLE},
-        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+                   **KNOWHOW_CELL_CODE_TABLE, **NOTEBOOK_BASES_TABLE},
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN,
+                    "promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
         "indexes": {**EXPECTED_MEMORY_INDEXES, **SOURCES_MEMORY_ID_INDEX,
                     **SOURCES_PARSE_STATUS_TYPE_INDEX, **KNOWHOW_INDEXES,
                     **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
-                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX, **NOTEBOOK_BASES_INDEX},
         "triggers": EXPECTED_MEMORY_TRIGGERS,
         "views": {},
     },
@@ -537,82 +576,108 @@ MIGRATION_MANIFEST = {
     # covering index; _migration_16 adds the five knowhow/notebook_assets
     # tables + their indexes; _migration_17 adds the two paper-metadata
     # tables + their indexes; _migration_18 adds the knowhow_cell_code table +
-    # its index; _migration_19 adds notebook_assets.source_id + its index —
-    # no new triggers on any hop.
-    (13, 19): {
-        "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE},
-        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN},
+    # its index; _migration_19 adds notebook_assets.source_id + its index;
+    # _migration_20 adds notebook_bases + its index and
+    # promotion_candidates.target_base_id — no new triggers on any hop.
+    (13, 20): {
+        "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE,
+                   **NOTEBOOK_BASES_TABLE},
+        "columns": {"sources": SOURCES_MEMORY_ID_COLUMN,
+                    "promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
         "indexes": {**SOURCES_MEMORY_ID_INDEX, **SOURCES_PARSE_STATUS_TYPE_INDEX,
                     **KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
-                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX, **NOTEBOOK_BASES_INDEX},
         "triggers": {},
         "views": {},
     },
     # The v14 -> current hop (Task 5 + knowhow-tables PR-1 Task 1 +
-    # paper-metadata Task 1 + cell-code Task 1 + source-asset-linking Task 2):
-    # a database already carrying sources.memory_id gains the parse_status/
-    # source_type covering index, the five knowhow/notebook_assets tables, the
-    # two paper-metadata tables, the knowhow_cell_code table, and
-    # notebook_assets.source_id's index. No new column/trigger — mirrors
-    # Task 1's single-object (13, 14) entry.
-    (14, 19): {
-        "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE},
-        "columns": {},
+    # paper-metadata Task 1 + cell-code Task 1 + source-asset-linking Task 2 +
+    # multi-domain-base Task 1): a database already carrying sources.memory_id
+    # gains the parse_status/source_type covering index, the five knowhow/
+    # notebook_assets tables, the two paper-metadata tables, the
+    # knowhow_cell_code table, notebook_assets.source_id's index,
+    # notebook_bases + its index, and promotion_candidates.target_base_id.
+    # No new trigger — mirrors Task 1's single-object (13, 14) entry.
+    (14, 20): {
+        "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE,
+                   **NOTEBOOK_BASES_TABLE},
+        "columns": {"promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
         "indexes": {**SOURCES_PARSE_STATUS_TYPE_INDEX, **KNOWHOW_INDEXES,
                     **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
-                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX, **NOTEBOOK_BASES_INDEX},
         "triggers": {},
         "views": {},
     },
     # The v15 -> current hop (knowhow-tables PR-1 Task 1 + paper-metadata
-    # Task 1 + cell-code Task 1 + source-asset-linking Task 2): a database
-    # already at v15 gains the five knowhow/notebook_assets tables, the two
-    # paper-metadata tables, the knowhow_cell_code table, and
-    # notebook_assets.source_id's index, plus their indexes. No new
-    # column/trigger/view — mirrors Task 5's single-object (14, 15) entry.
-    (15, 19): {
-        "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE},
-        "columns": {},
+    # Task 1 + cell-code Task 1 + source-asset-linking Task 2 +
+    # multi-domain-base Task 1): a database already at v15 gains the five
+    # knowhow/notebook_assets tables, the two paper-metadata tables, the
+    # knowhow_cell_code table, notebook_assets.source_id's index,
+    # notebook_bases + its index, and promotion_candidates.target_base_id.
+    # No new trigger/view — mirrors Task 5's single-object (14, 15) entry.
+    (15, 20): {
+        "tables": {**KNOWHOW_TABLES, **PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE,
+                   **NOTEBOOK_BASES_TABLE},
+        "columns": {"promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
         "indexes": {**KNOWHOW_INDEXES, **PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
-                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX, **NOTEBOOK_BASES_INDEX},
         "triggers": {},
         "views": {},
     },
     # The v16 -> current hop (paper-metadata Task 1 + cell-code Task 1 +
-    # source-asset-linking Task 2): a database already at v16 (carrying the
-    # five knowhow/notebook_assets tables — notebook_assets WITHOUT source_id)
-    # gains the two paper-metadata tables, the knowhow_cell_code table, and —
-    # unlike the below-16 hops above — a genuine before/after ALTER on the
-    # already-existing notebook_assets table, so its column belongs in
-    # "columns" here rather than folded into a "tables" CREATE literal.
-    (16, 19): {
-        "tables": {**PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE},
-        "columns": {"notebook_assets": NOTEBOOK_ASSETS_SOURCE_ID_COLUMN},
+    # source-asset-linking Task 2 + multi-domain-base Task 1): a database
+    # already at v16 (carrying the five knowhow/notebook_assets tables —
+    # notebook_assets WITHOUT source_id) gains the two paper-metadata tables,
+    # the knowhow_cell_code table, notebook_bases + its index, and — same
+    # before/after-ALTER reasoning as notebook_assets.source_id —
+    # promotion_candidates.target_base_id.
+    (16, 20): {
+        "tables": {**PAPER_META_TABLES, **KNOWHOW_CELL_CODE_TABLE, **NOTEBOOK_BASES_TABLE},
+        "columns": {"notebook_assets": NOTEBOOK_ASSETS_SOURCE_ID_COLUMN,
+                    "promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
         "indexes": {**PAPER_META_INDEXES, **KNOWHOW_CELL_CODE_INDEX,
-                    **NOTEBOOK_ASSETS_SOURCE_INDEX},
+                    **NOTEBOOK_ASSETS_SOURCE_INDEX, **NOTEBOOK_BASES_INDEX},
         "triggers": {},
         "views": {},
     },
     # The v17 -> current hop (knowhow-tables PR-2+3 Task 1 + source-asset-
-    # linking Task 2): a database already at v17 gains the cell-code table +
-    # its index — _migration_18's role remap rewrites row VALUES, not schema
-    # objects, so it has no entry here — plus notebook_assets.source_id (a
-    # genuine before/after ALTER, same reasoning as the v16 hop above).
-    (17, 19): {
-        "tables": KNOWHOW_CELL_CODE_TABLE,
-        "columns": {"notebook_assets": NOTEBOOK_ASSETS_SOURCE_ID_COLUMN},
-        "indexes": {**KNOWHOW_CELL_CODE_INDEX, **NOTEBOOK_ASSETS_SOURCE_INDEX},
+    # linking Task 2 + multi-domain-base Task 1): a database already at v17
+    # gains the cell-code table + its index — _migration_18's role remap
+    # rewrites row VALUES, not schema objects, so it has no entry here — plus
+    # notebook_assets.source_id, notebook_bases + its index, and
+    # promotion_candidates.target_base_id (both genuine before/after ALTERs,
+    # same reasoning as the v16 hop above).
+    (17, 20): {
+        "tables": {**KNOWHOW_CELL_CODE_TABLE, **NOTEBOOK_BASES_TABLE},
+        "columns": {"notebook_assets": NOTEBOOK_ASSETS_SOURCE_ID_COLUMN,
+                    "promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
+        "indexes": {**KNOWHOW_CELL_CODE_INDEX, **NOTEBOOK_ASSETS_SOURCE_INDEX,
+                    **NOTEBOOK_BASES_INDEX},
         "triggers": {},
         "views": {},
     },
-    # The v18 -> v19 hop (source-asset-linking Task 2): a database already at
-    # v18 gains only notebook_assets.source_id (before/after ALTER, same
-    # reasoning as the v16/v17 hops above) + its lookup index — no new
-    # table/trigger/view.
-    (18, 19): {
-        "tables": {},
-        "columns": {"notebook_assets": NOTEBOOK_ASSETS_SOURCE_ID_COLUMN},
-        "indexes": NOTEBOOK_ASSETS_SOURCE_INDEX,
+    # The v18 -> current hop (source-asset-linking Task 2 + multi-domain-base
+    # Task 1): a database already at v18 gains notebook_assets.source_id
+    # (before/after ALTER, same reasoning as the v16/v17 hops above) + its
+    # lookup index, plus notebook_bases + its index and
+    # promotion_candidates.target_base_id — no new trigger/view besides
+    # notebook_bases itself.
+    (18, 20): {
+        "tables": NOTEBOOK_BASES_TABLE,
+        "columns": {"notebook_assets": NOTEBOOK_ASSETS_SOURCE_ID_COLUMN,
+                    "promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
+        "indexes": {**NOTEBOOK_ASSETS_SOURCE_INDEX, **NOTEBOOK_BASES_INDEX},
+        "triggers": {},
+        "views": {},
+    },
+    # The v19 -> v20 hop (multi-domain-base Task 1): a database already at
+    # v19 gains only notebook_bases + its lookup index, plus
+    # promotion_candidates.target_base_id (before/after ALTER — the table has
+    # existed since the v1 baseline) — no new trigger/view.
+    (19, 20): {
+        "tables": NOTEBOOK_BASES_TABLE,
+        "columns": {"promotion_candidates": PROMOTION_CANDIDATES_TARGET_BASE_ID_COLUMN},
+        "indexes": NOTEBOOK_BASES_INDEX,
         "triggers": {},
         "views": {},
     },
