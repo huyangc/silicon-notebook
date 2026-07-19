@@ -4182,10 +4182,20 @@ function KnowhowReformatBatchModal({
   // aborted=true）仍然走 setBatch，两者各司其职。
   const abortedRef = useRef(false);
   const mountedRef = useRef(true);
-  // F1：run 阶段陈旧跳过与 save 阶段陈旧跳过是两个独立触发源（前者在 runBatch 收尾、
-  // 后者在 runSave 收尾），但父表只需刷新一次就能让下次批量拿到新鲜基线——两个源都
-  // 经 requestStaleReload 汇流，此 ref 保证「恰一次」（两阶段都跳过时也不刷两遍）。
-  const staleReloadedRef = useRef(false);
+  // F1（P1 回归：延迟重载）：run 阶段陈旧跳过与 save 阶段陈旧跳过是两个独立触发源（前者
+  // 在 runBatch 收尾、后者在 runSave 收尾），都经 requestStaleReload **只置此标记**——批量
+  // 进行中**绝不**立即重载父表 detail。原因：进行中重载会让 allRows/handleCellSave 读到刷新
+  // 后的行，planReformatSaves 可能拿另一客户端的**新值**当 expected_before、让带守卫的写覆盖
+  // 掉那次更新（正是守卫要挡的一类）。真正的 reloadTableDetail 延到弹窗**卸载（关闭）**才触发
+  // （见下方 mount effect 的 cleanup）；关窗重开自然从刷新后的 detail 重建，而一个进行中的
+  // 批次全程用建批次那一刻的不可变快照、内部始终自洽。置真幂等，卸载时恰消费一次。
+  const pendingReloadRef = useRef(false);
+  // F1（P1 回归：不可变快照）：建批次那一刻定格整表规划所需的 allRows/anchorColumnId。批量
+  // 生命周期内**一切**写目标/基线（planReformatSaves）都取自它——父级 detail 因任何原因（含
+  // 本批自己延迟触发的刷新、或 handleCellSave 成功后的 setDetail 合并）变化都不泄漏进来，
+  // 保证一个进行中的批次始终对着同一份底稿规划。useRef 首帧初值只求值一次、之后 props 变化
+  // 不改它（关窗重开是一次全新挂载 -> 从刷新后的 detail 拿到新快照）。
+  const snapshotRef = useRef({ allRows, anchorColumnId });
   // 本弹窗没有全屏概念（任务表未列出，同 KnowhowRowOptimizeModal）——不传
   // disabled，拖动/resize 恒生效。
   const floating = useFloatingWindow({ storageKey: "knowhow.reformatBatch.window" });
@@ -4194,7 +4204,14 @@ function KnowhowReformatBatchModal({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // F1（延迟重载）：弹窗卸载=关闭。批量进行中攒下的「需要重载」标记在此唯一消费——run/save
+      // 阶段的 stale 跳过意味着父级 detail 已落后于服务器，关窗时刷新一次整表，下次打开用新鲜
+      // 基线复跑、被跳过的格子不再永远跳过。所有关闭路径（X/背景/Esc/父级清状态）都汇于卸载 ->
+      // 天然「恰一次」；没跳过时标记为假 -> 不调（无谓 refetch 也省了）。onStaleReload 是稳定
+      // useCallback（reloadTableDetail），弹窗生命周期内不变，[] 依赖捕获首帧即对应被编辑的这张表。
+      if (pendingReloadRef.current) onStaleReload?.();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 行标题 map：只有表作用域需要在条目列表里区分"这是哪一行"——行作用域下
@@ -4212,13 +4229,12 @@ function KnowhowReformatBatchModal({
     return scope === "table" ? `${rowLabelById.get(item.rowId) ?? ""} · ${item.columnName}` : item.columnName;
   }
 
-  // 「恰一次」父表刷新闸：run 阶段收尾（run-stale）与 save 阶段收尾（save-stale）都
-  // 经这里请父级刷新整表（reloadTableDetail）。首次调用置 ref 后触发，之后早退——
-  // 两阶段都发生过 stale 跳过时，父表也只刷新一次（见 staleReloadedRef 注释）。
+  // F1（P1 回归：延迟重载）：run 阶段收尾（run-stale）与 save 阶段收尾（save-stale）都经这里
+  // ——**只**置「需要重载」标记，**不**立即调用 onStaleReload。批量进行中重载父表 = 用他人新值
+  // 覆盖的口子（见 pendingReloadRef 注释）。真正的 reloadTableDetail 延到弹窗卸载（关闭）才触发
+  // （见 mount effect 的 cleanup）；置真幂等（两阶段都跳过也只置一次），卸载时恰消费一次。
   function requestStaleReload() {
-    if (staleReloadedRef.current) return;
-    staleReloadedRef.current = true;
-    onStaleReload?.();
+    pendingReloadRef.current = true;
   }
 
   // run 循环：按初始化时固定下来的 items 顺序（该数组的长度/顺序全程不变，
@@ -4335,10 +4351,12 @@ function KnowhowReformatBatchModal({
   async function runSave() {
     if (busy) return;
     const changed = batch.items.filter((item) => item.status === "changed");
-    // F1：用**完整** detail.rows（allRows）规划——与 handleCellSave 重算 anchor 组
-    // 的行集同源，让合并共享列 unit 的写目标覆盖 fan-out 会写到的全部兄弟行（含行
-    // 作用域下不展示的那些），保存前一并查陈旧、不静默覆盖他人对兄弟行的并发编辑。
-    const units = planReformatSaves(changed, allRows, anchorColumnId);
+    // F1：用**完整** detail.rows 规划——与 handleCellSave 重算 anchor 组的行集同源，让合并
+    // 共享列 unit 的写目标覆盖 fan-out 会写到的全部兄弟行（含行作用域下不展示的那些），保存前
+    // 一并查陈旧、不静默覆盖他人对兄弟行的并发编辑。**取自建批次那一刻的不可变快照**
+    // （snapshotRef，非实时 allRows/anchorColumnId props）：P1 回归的根因正是进行中重载后
+    // 读到刷新过的行、把他人新值当 expected_before 基线（见 snapshotRef/pendingReloadRef 注释）。
+    const units = planReformatSaves(changed, snapshotRef.current.allRows, snapshotRef.current.anchorColumnId);
     setBusy(true);
     setSaveTargetCount(changed.length); // 定格保存分母（见 saveTargetCount 注释）
     setBatch((state) => beginReformatBatchSave(state));

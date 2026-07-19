@@ -1766,6 +1766,35 @@ test("端到端（保存循环，F1）：非共享列——每格各调一次 on
   assert.strictEqual(reformatBatchSummary(state).saved, 3);
 });
 
+// --- F1（P1 回归）：批量必须从建批次那一刻的**不可变快照**规划，实时(刷新后)行绝不
+//     泄漏进来 -----------------------------------------------------------------------
+// 缺陷（回归）：run 阶段的 stale 修复会在批量弹窗**仍开着**时重载父表 detail。批量条目
+// 保留旧 originalMd，但 planReformatSaves 若读**刷新后**的 allRows，就会拿另一客户端的
+// **新值**当非展示兄弟的 expected_before 基线——带守卫的写据此判 fresh，用旧文算出的候选
+// 覆盖掉那次更新（正是守卫要挡的一类）。下面这条纯逻辑测试锚定「基线完全由传入 rows
+// 决定」这一事实——由此推出 runSave **必须**传建批次快照而非实时 props（接线由
+// knowhow-panel.tsx 的 snapshotRef 源码 pin 守卫，见下方「接线（F1，不可变快照）」）。
+test("planReformatSaves（F1 快照动机）：合并共享格 writeTargets 的 expected_before 基线取自**传入的 rows**——传实时(刷新后)行会把他人新值当基线", () => {
+  const changed = [
+    { rowId: "r1", columnId: "c-shared", columnName: "共享说明", originalMd: "旧共享说明", status: "changed", candidateMd: "新共享说明", source: "llm" },
+  ];
+  // (a) 传建批次快照（r1/r2/r3 都还是「旧共享说明」）——writeTargets 基线都是它。
+  const snapshotUnits = planReformatSaves(changed, F1_SHARED_ROWS, "c-anchor");
+  for (const t of snapshotUnits[0].writeTargets) assert.strictEqual(t.originalMd, "旧共享说明");
+  // (b) 刷新后另一客户端把这个合并共享格整组统一改成新值（仍全分支同值 -> 仍是共享列，
+  //     writeTargets 仍覆盖 r1/r2/r3）。若用这份实时行规划，基线就变成**他人的新值**——
+  //     这正是 P1：带守卫的写会拿它当 expected_before、判 fresh、用旧文候选覆盖他人编辑。
+  const refreshedRows = F1_SHARED_ROWS.map((r) => ({
+    ...r,
+    cells: { ...r.cells, "c-shared": "他人刚统一改的新值" },
+  }));
+  const liveUnits = planReformatSaves(changed, refreshedRows, "c-anchor");
+  assert.deepStrictEqual(liveUnits[0].writeTargets.map((t) => t.rowId).sort(), ["r1", "r2", "r3"]);
+  for (const t of liveUnits[0].writeTargets) assert.strictEqual(t.originalMd, "他人刚统一改的新值");
+  // 结论：writeTargets 基线完全由传入 rows 决定，故 runSave 必须传建批次快照、批量生命
+  // 周期内绝不读实时 allRows（否则 mid-flight 重载后就复现 (b) 的覆盖）。
+});
+
 // ===========================================================================
 // 7. 批量保存：保存前比对当前落库内容，拒绝覆盖他人编辑（代码评审 F2）
 // ===========================================================================
@@ -2147,16 +2176,65 @@ test("接线（F1）：runBatch 收尾在 mounted 块内按谓词经 requestStal
   assert.ok(finishIdx > 0 && notifyIdx > finishIdx, "requestStaleReload 回调必须在收尾块内、循环之后");
 });
 
-test("接线（F1）：requestStaleReload 是「恰一次」闸——ref 置真后再调即早退（两阶段都跳过也只刷一次）", () => {
-  // run 阶段收尾与 save 阶段收尾都经 requestStaleReload；首调置 ref、后续调用早退，
-  // 保证「run+save 都跳过」时父表也只刷一次、不刷两遍。
+// --- 接线守卫（F1，P1 回归）：批量进行中**绝不**重载父表——run/save 阶段的 stale 跳过只
+//     置 pendingReloadRef 标记，真正的 reloadTableDetail 延到弹窗**卸载（关闭）**才触发；
+//     且批量生命周期内一切规划取自建批次那一刻的**不可变快照**（snapshotRef），实时
+//     allRows/anchorColumnId 绝不泄漏进来（否则 mid-flight 重载后拿他人新值当 expected_before
+//     覆盖那次编辑）。这两条合力堵住 P1。--------------------------------------------------
+
+test("接线（F1，延迟重载）：requestStaleReload 只置 pendingReloadRef 标记，进行中**不**直调 onStaleReload", () => {
+  // 批量进行中立即重载父表 = 用他人新值覆盖的口子（P1）。两阶段收尾都经 requestStaleReload，
+  // 但它现在只置标记；真正的重载延到卸载 cleanup（关窗才刷）。
   assert.match(
     panelSrc,
-    /function requestStaleReload\(\) \{\s*if \(staleReloadedRef\.current\) return;\s*staleReloadedRef\.current = true;\s*onStaleReload\?\.\(\);\s*\}/,
+    /function requestStaleReload\(\) \{\s*pendingReloadRef\.current = true;\s*\}/,
   );
-  // 两个收尾都走 requestStaleReload，不各自直调 onStaleReload（避免绕过恰一次闸）。
+  // requestStaleReload 函数体内**不**出现 onStaleReload（那会 mid-flight 立即重载）。
+  const reqStart = panelSrc.indexOf("function requestStaleReload()");
+  const reqSrc = panelSrc.slice(reqStart, panelSrc.indexOf("}", reqStart) + 1);
+  assert.ok(reqStart > 0 && reqSrc.length > 0, "requestStaleReload 函数体没截到");
+  assert.doesNotMatch(reqSrc, /onStaleReload/);
+  // 两个收尾仍都走 requestStaleReload（置标记），不各自直调 onStaleReload。
   assert.ok(runBatchSrc.includes("requestStaleReload()"), "runBatch 收尾必须经 requestStaleReload");
   assert.ok(runSaveSrc.includes("requestStaleReload()"), "runSave 收尾必须经 requestStaleReload");
+});
+
+test("接线（F1，延迟重载）：真正的 onStaleReload 只在**卸载 cleanup** 里按 pendingReloadRef 触发（关窗才重载、恰一次、无跳过则不调）", () => {
+  // 卸载 cleanup 是唯一消费点：pendingReloadRef 为真才调 onStaleReload。所有关闭路径
+  // （X/背景/Esc/父级清状态）都汇于卸载 -> 天然「恰一次」；没跳过时标记为假 -> 不调（no stale
+  // -> no reload）；进行中永不卸载 -> 零重载（mid-flight -> zero reloads）。
+  // `mountedRef.current = true;` 在本文件出现两次（KnowhowRowOptimizeModal 也有一个）——
+  // 必须从 KnowhowReformatBatchModal 函数之后开始找它自己那个，否则截到的是别的 modal。
+  const batchModalStart = panelSrc.indexOf("function KnowhowReformatBatchModal(");
+  const mountStart = panelSrc.indexOf("mountedRef.current = true;", batchModalStart);
+  const mountEffectSrc = panelSrc.slice(mountStart, panelSrc.indexOf("}, []);", mountStart));
+  assert.ok(batchModalStart > 0 && mountStart > batchModalStart && mountEffectSrc.length > 0, "批量弹窗的挂载 effect 没截到");
+  assert.match(mountEffectSrc, /if \(pendingReloadRef\.current\) onStaleReload\?\.\(\);/);
+  // 消费点必须在 cleanup（return () => {…}）内、mountedRef.current = false 之后。
+  const cleanupIdx = mountEffectSrc.indexOf("return () =>");
+  const falseIdx = mountEffectSrc.indexOf("mountedRef.current = false;");
+  const fireIdx = mountEffectSrc.indexOf("if (pendingReloadRef.current) onStaleReload");
+  assert.ok(cleanupIdx > 0 && falseIdx > cleanupIdx && fireIdx > falseIdx, "onStaleReload 必须在卸载 cleanup 内、mountedRef=false 之后触发");
+});
+
+test("接线（F1，延迟重载）：onStaleReload?.() 在整个面板里**只有一个调用点**（卸载 cleanup）——进行中零重载", () => {
+  // run/save 收尾都只 requestStaleReload（置标记），全组件里真正的 onStaleReload?.() 调用
+  // 只出现一次（卸载 cleanup）。若哪天有人又在收尾直调 onStaleReload，这条即变红。
+  const invocations = panelSrc.split("onStaleReload?.()").length - 1;
+  assert.strictEqual(invocations, 1, "onStaleReload?.() 只应在卸载 cleanup 出现一次");
+});
+
+test("接线（F1，不可变快照）：建批次定格 snapshotRef，runSave 用它规划（不读实时 allRows/anchorColumnId）", () => {
+  // P1 根因：进行中重载后 allRows 变新，planReformatSaves 拿他人新值当 expected_before。
+  // 修复：建批次（组件挂载）时用 useRef 定格 {allRows, anchorColumnId} 一次，之后 props 变
+  // 化不改它；runSave 的规划全取自 snapshotRef.current。
+  assert.match(panelSrc, /const snapshotRef = useRef\(\{ allRows, anchorColumnId \}\);/);
+  assert.match(
+    runSaveSrc,
+    /const units = planReformatSaves\(changed, snapshotRef\.current\.allRows, snapshotRef\.current\.anchorColumnId\);/,
+  );
+  // 绝不再从实时 props 规划（否则重载后的行泄漏进进行中的批次 -> 复现 P1）。
+  assert.doesNotMatch(runSaveSrc, /planReformatSaves\(changed, allRows, anchorColumnId\)/);
 });
 
 test("接线（F）：两处 KnowhowReformatBatchModal 都传 onStaleReload={reloadTableDetail}", () => {

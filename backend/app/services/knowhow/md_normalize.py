@@ -298,6 +298,11 @@ def _ends_with_open_inline_span(line: str) -> bool:
       3. 链接/图片文本方括号 `[` `]`：**未转义**的方括号深度（`[` +1、`]` 归零 floor 0）。
          行尾深度 >0 = 有个 `[label` 跨行没闭合（`[label\\ncontinued](url)` 会被空行拆断）。
          只认 ASCII `[]`——全角【】是不同字符、不影响（真实语料正是用【】）。
+      4. 链接**目的地**圆括号（F3，本批 review）：见到 `](` 后进入目的地、追踪未闭合的 `(`
+         深度（转义感知，`\\)` 不闭合）。行尾仍在目的地内 = `[docs](/url\\n"title")` 这类
+         目的地跨软换行——`]` 处方括号深度已归零（规则 3 看不见它），但 `(`-目的地没闭，
+         `_normalize` 注入空行会把目的地/标题拆到两段、链接退化成散文。**严格限定链接上下文**：
+         只在见过 `](` 之后才追踪圆括号，散文里的裸 `(未闭合` 不受影响（常见、不该拒）。
 
     强调 `*`/`_` 与 GFM 删除线 `~` 的跨行配对**不在本函数**——它做不到逐行判定：词内
     `R*C`（两侧都是词字符的孤立 run）绝不能因自身就把整格拒掉，但两行各一个 run 若在
@@ -367,7 +372,35 @@ def _ends_with_open_inline_span(line: str) -> bool:
         elif ch == "]":
             depth = max(0, depth - 1)
         i += 1
-    return depth > 0
+    if depth > 0:
+        return True
+    # 4) 链接目的地圆括号（F3）：`](` 之后进入目的地、追踪未闭合的 `(` 深度（转义感知）。
+    #    行尾仍在目的地内 = 目的地跨软换行。**只**在见过 `](` 后才追踪——散文里的裸 `(`
+    #    不受影响（严格限定链接目的地上下文，见文档第 4 条）。
+    in_dest = False
+    dest_depth = 0
+    i = 0
+    while i < n:
+        ch = line[i]
+        if ch == "\\":
+            i += 2                       # 转义下一字符：\( / \) 既不开也不合目的地深度
+            continue
+        if not in_dest:
+            if ch == "]" and i + 1 < n and line[i + 1] == "(":
+                in_dest = True           # `](` 起头目的地：`(` 计一层深度，跳过这两个字符
+                dest_depth = 1
+                i += 2
+                continue
+            i += 1
+            continue
+        if ch == "(":
+            dest_depth += 1
+        elif ch == ")":
+            dest_depth -= 1
+            if dest_depth == 0:
+                in_dest = False          # 目的地闭合
+        i += 1
+    return in_dest
 
 
 def _has_midline_inline_html(line: str) -> bool:
@@ -380,11 +413,15 @@ def _has_midline_inline_html(line: str) -> bool:
     `content_invariant`（`<`/`>` 都是标点 P、内容字符没变）兜不住这种结构腐蚀。门必须
     对它 fail CLOSED、整格拒绝（原样返回）。
 
-    刻意只认「`<` + 字母/`/`」这一 tag 形状：`a < b`（`<` 后空格）、`x<0`/`i<3`（`<` 后
-    数字，是小于号）仍可规整；`x<y`（`<` 后字母）被拒。过度拒绝（miss 一格、用户仍可手动
-    触发）与腐蚀（改坏结构且校验放行）的代价不对称，取 fail-closed、接受偶尔多拒。`\\<`
-    转义的 `<`（反斜杠转义下一字符）不算标签起头。与 TS 孪生 `hasMidlineInlineHtml` 逐
-    字符对齐。调用方保证只对非空行调用（空行由 `_line_normalizable` 的 blank 短路挡掉）。"""
+    刻意只认「`<` + 字母/`/`/`!`/`?`」这一 tag 形状（与**行首** HTML 块的 `_HTML_BLOCK_RE
+    = ^<[A-Za-z/!?]` 同一字符类）：`a < b`（`<` 后空格）、`x<0`/`i<3`（`<` 后数字，是小于
+    号）仍可规整；`x<y`（`<` 后字母）、`foo <!-- x`（`<!` 注释/声明起头）、`foo <?pi`（`<?`
+    处理指令起头）被拒。F2（本批 review）：`!`/`?` 此前漏在字符类外，于是**行中**跨软换行的
+    HTML 注释 `foo <!-- x\\ny -->` / PI `foo <?pi\\nx?>` 漏网——`_normalize` 注入空行塞进
+    构造内部、符号盲的 `content_invariant` 兜不住。过度拒绝（miss 一格、用户仍可手动触发）
+    与腐蚀（改坏结构且校验放行）的代价不对称，取 fail-closed、接受偶尔多拒。`\\<` 转义的
+    `<`（反斜杠转义下一字符）不算标签起头。与 TS 孪生 `hasMidlineInlineHtml` 逐字符对齐。
+    调用方保证只对非空行调用（空行由 `_line_normalizable` 的 blank 短路挡掉）。"""
     i, n = 0, len(line)
     while i < n:
         ch = line[i]
@@ -393,7 +430,7 @@ def _has_midline_inline_html(line: str) -> bool:
             continue
         if ch == "<":
             nxt = line[i + 1] if i + 1 < n else ""
-            if nxt == "/" or (nxt.isascii() and nxt.isalpha()):
+            if nxt in ("/", "!", "?") or (nxt.isascii() and nxt.isalpha()):
                 return True
         i += 1
     return False
@@ -779,15 +816,19 @@ def _trim_gfm_url_end(url: str) -> int:
 
 def _match_bare_autolink(text: str, pos: int) -> "int | None":
     """裸 GFM autolink 字面（URL / www / 邮箱）从 `pos` 起的匹配：命中返回构造之后一位的
-    下标（半开 end），否则 ``None``。要求 `pos` 处于**词边界**——`pos` 前一字符非字母数字
-    （行首/空白/标点/CJK 句读/`_`/`*`/`(` 等都算边界；紧跟在字母数字后的 `http`/`www` 是
-    更长单词/标识符的一部分、不匹配）。URL 先于邮箱尝试（`http://user@host` 是带 userinfo
+    下标（半开 end），否则 ``None``。要求 `pos` 处于**词边界**——`pos` 前一字符非 **ASCII**
+    字母数字（F4，本批 review：只有 ASCII 字母/数字算「词内」而挡下起始；行首/空白/标点/**CJK
+    表意字符**/CJK 句读/`_`/`*`/`(` 等都算边界）。`str.isalnum()` 是 Unicode 感知的、会把 CJK
+    也判成字母数字，于是 `参见https://…`（CJK 紧贴 URL、无空格）被误判成「词内」而跳过，URL 落
+    进散文放宽标点区、`a-b`→`ab` 的改写看不见；但 remark-gfm 把 CJK 当合法左边界、照样把它
+    渲染成链接——两侧分歧。改用 ASCII-alnum 边界与 remark-gfm 对齐（`abchttps://…` 这类 ASCII
+    紧邻仍不匹配、是更长单词的一部分）。URL 先于邮箱尝试（`http://user@host` 是带 userinfo
     的 URL，不是邮箱）。URL 命中后 `_trim_gfm_url_end` 剥尾随标点；剥完只剩裸 scheme 前缀
     （`https://.` -> `https://`、`www.` -> `www`）判为退化、不算构造（返回 None）。见上方
     `_GFM_BARE_URL_RE` 注释块。"""
     prev = text[pos - 1] if pos > 0 else ""
-    if prev.isalnum():
-        return None                        # 非词边界：更长单词/标识符的一部分
+    if prev.isascii() and prev.isalnum():
+        return None                        # 非词边界：ASCII 字母数字紧邻 = 更长单词/标识符的一部分
     m = _GFM_BARE_URL_RE.match(text, pos)
     if m:
         matched = m.group(0)

@@ -826,6 +826,43 @@ def test_bare_url_between_digits_inside_url_is_protected():
 
 
 # ---------------------------------------------------------------------------
+# F4 (this review) — the bare-autolink word-boundary check must use ASCII-alnum ONLY.
+# `参见https://host/a-b` (CJK immediately before the URL, no space): remark-gfm treats
+# the CJK char as a valid left boundary and autolinks the URL, but the matcher's
+# `prev.isalnum()` (Unicode-aware) counted the CJK `见` as alphanumeric and SKIPPED the
+# URL, leaving it in the punctuation-relaxed prose where a tail edit (`a-b` -> `ab`) was
+# invisible. Fix: `prev.isascii() and prev.isalnum()` -- ASCII letters/digits are the
+# only word chars that block a start; CJK / punctuation / whitespace all count as
+# boundaries. ASCII-adjacent (`abchttps://x`) stays unmatched per GFM. Python-only.
+# ---------------------------------------------------------------------------
+
+
+def test_bare_url_after_cjk_boundary_is_protected():
+    # THE codex example: a bare URL glued to CJK prose (no space). RED before the fix
+    # (CJK counted as a word char -> URL skipped -> unprotected) -> old True.
+    before = "参见https://host/a-b"
+    after = "参见https://host/ab"
+    assert content_invariant(before, after) is False
+
+
+def test_bare_url_after_cjk_boundary_tokenized_in_link_refs():
+    # the URL adjacent to CJK is now captured as one verbatim autolink ref (a CJK char
+    # is a boundary, exactly like a space).
+    from app.services.knowhow.md_normalize import _link_refs
+    assert _link_refs("参见https://host/a-b") == ["https://host/a-b"]
+
+
+def test_bare_url_after_ascii_alnum_still_not_matched():
+    # regression guard: an ASCII-alnum char immediately before the scheme is NOT a
+    # boundary per GFM (`abchttps://x` is one long word) -> still not matched.
+    from app.services.knowhow.md_normalize import _link_refs
+    assert _link_refs("abchttps://x") == []
+    # and a real boundary (CJK / space / string-start) still matches.
+    assert _link_refs("见https://x/y") == ["https://x/y"]
+    assert _link_refs("https://x/y") == ["https://x/y"]
+
+
+# ---------------------------------------------------------------------------
 # F2 (this review) — the invariant must BYTE-PROTECT inline CODE-SPAN content,
 # exactly as it already does for images/links/fenced blocks. Inline code content
 # was landing in the punctuation-relaxed signature, so

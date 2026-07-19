@@ -843,19 +843,52 @@ function endsWithOpenInlineSpan(line: string): boolean {
     else if (ch === "]") depth = Math.max(0, depth - 1);
     i += 1;
   }
-  return depth > 0;
+  if (depth > 0) return true;
+  // 4) 链接目的地圆括号（F3）：`](` 之后进入目的地、追踪未闭合的 `(` 深度（转义感知）。
+  //    行尾仍在目的地内 = `[docs](/url\n"title")` 这类目的地跨软换行（`]` 处方括号深度已归零、
+  //    规则 3 看不见它，但 `(`-目的地没闭）。**只**在见过 `](` 后才追踪——散文里的裸 `(未闭合`
+  //    不受影响（严格限定链接目的地上下文）。对应 Python `_ends_with_open_inline_span` 第 4 段。
+  let inDest = false;
+  let destDepth = 0;
+  i = 0;
+  while (i < n) {
+    const ch = line[i];
+    if (ch === "\\") {
+      i += 2; // 转义下一字符：\( / \) 既不开也不合目的地深度
+      continue;
+    }
+    if (!inDest) {
+      if (ch === "]" && i + 1 < n && line[i + 1] === "(") {
+        inDest = true; // `](` 起头目的地：`(` 计一层深度，跳过这两个字符
+        destDepth = 1;
+        i += 2;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (ch === "(") destDepth += 1;
+    else if (ch === ")") {
+      destDepth -= 1;
+      if (destDepth === 0) inDest = false; // 目的地闭合
+    }
+    i += 1;
+  }
+  return inDest;
 }
 
-// F1（review）：一行**任意位置**是否出现「标签形状」的未转义 `<`（`<` 紧跟 ASCII 字母
-// 或 `/`——`<span`/`</span`/`<em` …）。命中即整格拒绝。对应 Python
+// F1（review）：一行**任意位置**是否出现「标签形状」的未转义 `<`（`<` 紧跟 ASCII 字母、
+// `/`、`!` 或 `?`——`<span`/`</span`/`<em`/`<!--`/`<?pi` …）。命中即整格拒绝。对应 Python
 // `_has_midline_inline_html`。startsBlockConstruct 的 HTML_BLOCK_RE 是 `^` 锚定的、只认
 // **行首** HTML 块，`前缀 <span>\ncontinued</span>` 这类**行中**起头、跨软换行的行内 HTML
-// 漏网——normalizeImpl 注入空行把它拆断、符号盲的后端 content_invariant 兜不住。只认
-// 「`<`+字母/`/`」tag 形状：`a < b`（后接空格）、`x<0`/`i<3`（后接数字）仍可规整；`x<y`
-// （后接字母）被拒（fail CLOSED，miss vs 腐蚀代价不对称）。`\<` 转义跳过。定界符 `<`/`\`
-// 皆单 UTF-16 单元 ASCII；`nxt` 取自 `line[i+1]`，与 Python `line[i+1]` 在最终布尔上对齐
-// （星际字符作 nxt 取到代理对半、非 ASCII 字母判否，与 Python 见完整码点一致——都不是
-// ASCII 字母）。调用方保证只对非空行调用。
+// 漏网——normalizeImpl 注入空行把它拆断、符号盲的后端 content_invariant 兜不住。认
+// 「`<`+字母/`/`/`!`/`?`」tag 形状（与行首 HTML_BLOCK_RE = `^<[A-Za-z/!?]` 同一字符类）：
+// `a < b`（后接空格）、`x<0`/`i<3`（后接数字）仍可规整；`x<y`（字母）、`foo <!-- x`（`<!`
+// 注释）、`foo <?pi`（`<?` PI）被拒（fail CLOSED，miss vs 腐蚀代价不对称）。F2（本批
+// review）：`!`/`?` 此前漏在字符类外，行中跨软换行的 HTML 注释/PI 漏网——补齐。`\<` 转义跳
+// 过。定界符 `<`/`\` 皆单 UTF-16 单元 ASCII；`nxt` 取自 `line[i+1]`，与 Python `line[i+1]`
+// 在最终布尔上对齐（星际字符作 nxt 取到代理对半、非 ASCII 字母判否，与 Python 见完整码点一致
+// ——都不是 ASCII 字母、也不是 `/`/`!`/`?`）。调用方保证只对非空行调用。
 function isAsciiLetter(ch: string): boolean {
   return (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z");
 }
@@ -870,7 +903,7 @@ function hasMidlineInlineHtml(line: string): boolean {
     }
     if (ch === "<") {
       const nxt = i + 1 < n ? line[i + 1] : "";
-      if (nxt === "/" || isAsciiLetter(nxt)) return true;
+      if (nxt === "/" || nxt === "!" || nxt === "?" || isAsciiLetter(nxt)) return true;
     }
     i += 1;
   }
