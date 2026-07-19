@@ -1,9 +1,26 @@
+import os
 from pathlib import Path
 
 from tests.architecture.policy import policy_offenders
 
 
 ROOT = Path(__file__).resolve().parents[2]
+REQUIRED_LAYERS = {
+    "scripts/check_backend.sh": ("backend/tests",),
+    "scripts/check_contracts.sh": (
+        "smoke_backend.py",
+        "smoke_memory_mcp.py",
+        "check_ask_modes_contract.py",
+        "check_object_type_labels_contract.py",
+        "check_ui_vocabulary.py",
+        "fangan/testcases/harness/tests",
+    ),
+    "scripts/check_frontend.sh": (
+        "npm run test",
+        "npm run lint",
+        "npm run build",
+    ),
+}
 
 
 def _write(tmp_path: Path, source: str) -> Path:
@@ -104,3 +121,44 @@ def test_repository_contracts_have_no_source_position_identity_or_markers():
     )
 
     assert policy_offenders(paths) == []
+
+
+def test_complete_gate_delegates_every_required_verification_layer():
+    coordinator = (ROOT / "scripts" / "check.sh").read_text(encoding="utf-8")
+    for relative, responsibilities in REQUIRED_LAYERS.items():
+        lane = ROOT / relative
+        assert lane.exists(), relative
+        source = lane.read_text(encoding="utf-8")
+        for responsibility in responsibilities:
+            assert responsibility in source, f"{relative}: {responsibility}"
+
+    for lane_name in ("backend", "contracts", "frontend"):
+        assert f"check_${{lane}}.sh" in coordinator or (
+            f"check_{lane_name}.sh" in coordinator
+        )
+
+
+def test_verification_lanes_do_not_disable_committed_tests():
+    forbidden = ('-m "not slow"', "--ignore", "pytest.mark.skip", "xfail")
+    for relative in REQUIRED_LAYERS:
+        source = (ROOT / relative).read_text(encoding="utf-8")
+        assert not any(value in source for value in forbidden), relative
+
+
+def test_backend_parallelism_is_bounded_and_explicit():
+    config = (ROOT / "backend" / "pytest.ini").read_text(encoding="utf-8")
+    assert "addopts = -n 12 --dist loadgroup" in config
+    assert "architecture_contract:" in config
+    assert "graph_index_contract:" in config
+    assert "-n auto" not in config
+    assert "worksteal" not in config
+    backend_lane = (
+        ROOT / "scripts" / "check_backend.sh"
+    ).read_text(encoding="utf-8")
+    assert 'BACKEND_PYTEST_WORKERS="${BACKEND_PYTEST_WORKERS:-12}"' in backend_lane
+
+
+def test_parallel_graph_tests_share_repo_local_matplotlib_cache():
+    cache_dir = Path(os.environ["MPLCONFIGDIR"]).resolve()
+    assert cache_dir == (ROOT / ".local" / "matplotlib").resolve()
+    assert tuple(cache_dir.glob("fontlist-v*.json"))

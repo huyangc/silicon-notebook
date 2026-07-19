@@ -236,7 +236,9 @@ def test_兜底即原值检查已搬去前端且仍挂在硬门上():
         "前端测试收集方式变了,新守卫可能没被 check.sh 跑到"
     )
     assert "test:node" in pkg["scripts"]["test"]
-    assert "npm run test" in (_ROOT / "scripts" / "check.sh").read_text(encoding="utf-8")
+    assert "npm run test" in (
+        _ROOT / "scripts" / "check_frontend.sh"
+    ).read_text(encoding="utf-8")
 
 
 def test_python_守卫不再自带正则版兜底检查():

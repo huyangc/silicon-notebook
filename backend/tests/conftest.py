@@ -5,15 +5,69 @@ from pathlib import Path
 
 os.environ.setdefault("SILICON_NOTEBOOK_AUTH_OPTIONAL", "true")
 
+# python-igraph imports its drawing adapters lazily on the first graph rebuild,
+# which imports Matplotlib. On macOS, a missing Matplotlib cache invokes the
+# system font enumerator (~8 s). Without a shared prewarm every xdist worker
+# repeats that subprocess concurrently. Build one repo-local cache in the
+# controller before workers are spawned; workers then only read the artifact.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_MPLCONFIGDIR = _REPO_ROOT / ".local" / "matplotlib"
+os.environ["MPLCONFIGDIR"] = str(_MPLCONFIGDIR)
+_MPLCONFIGDIR.mkdir(parents=True, exist_ok=True)
+if "PYTEST_XDIST_WORKER" not in os.environ:
+    import matplotlib.font_manager as _matplotlib_font_manager  # noqa: F401
+
 
 import pytest
 
 from tests.architecture.semantic_source import PythonSourceIndex
 
 
+_ARCHITECTURE_CONTRACT_MODULES = {
+    "test_architecture_documentation.py",
+    "test_repository_dependency_contract.py",
+    "test_repository_monkeypatch_owners.py",
+    "test_repository_protocol_coverage.py",
+    "test_repository_surface_contract.py",
+    "test_semantic_source.py",
+}
+_GRAPH_INDEX_CONTRACT_MODULES = {
+    "test_auto_scale_index.py",
+    "test_autotune_wiring.py",
+    "test_canonical_relations.py",
+    "test_chunk_retrieval.py",
+    "test_chunk_retrieval_characterization.py",
+}
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items):
+    """Keep repository-wide source scans on one worker.
+
+    Their process-local indexes are deliberately shared. Spreading the modules
+    across xdist workers reparses the whole repository in every process and
+    increases both CPU cost and complete-gate latency.
+    """
+    for item in items:
+        if Path(str(item.fspath)).name in _ARCHITECTURE_CONTRACT_MODULES:
+            item.add_marker(
+                pytest.mark.architecture_contract,
+            )
+            item.add_marker(
+                pytest.mark.xdist_group(name="architecture_contract"),
+            )
+        elif Path(str(item.fspath)).name in _GRAPH_INDEX_CONTRACT_MODULES:
+            item.add_marker(
+                pytest.mark.graph_index_contract,
+            )
+            item.add_marker(
+                pytest.mark.xdist_group(name="graph_index_contract"),
+            )
+
+
 @pytest.fixture(scope="session")
 def python_source_index() -> PythonSourceIndex:
-    root = Path(__file__).resolve().parents[2]
+    root = _REPO_ROOT
     paths = tuple((root / "backend" / "app").rglob("*.py")) + tuple(
         (root / "backend" / "tests").rglob("*.py")
     )
