@@ -99,6 +99,14 @@
     {
       "count": 1,
       "kind": "facade_imports",
+      "path": "scripts/backfill_knowhow_md.py",
+      "reason": "offline maintenance CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
       "path": "scripts/bench_sqlite_writes.py",
       "reason": "synthetic benchmark composition root",
       "scope": "<module>._make_repo",
@@ -253,6 +261,14 @@
     {
       "count": 1,
       "kind": "independent_private",
+      "path": "backend/app/services/knowhow/api.py",
+      "reason": "knowhow orchestration constructs narrow services from runtime ports",
+      "scope": "<module>.reformat_cell",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
       "path": "backend/app/services/knowhow/transfer.py",
       "reason": "knowhow transfer orchestration constructs its store and runtime seams",
       "scope": "<module>._remap",
@@ -387,6 +403,14 @@
       "reason": "independent evaluation-results database",
       "scope": "<module>.EvalDB.source_titles",
       "target": "db.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "scripts/backfill_knowhow_md.py",
+      "reason": "read-only planning for an operator-supplied maintenance database",
+      "scope": "<module>._read_knowhow_tables_ro",
+      "target": "conn.execute"
     },
     {
       "count": 1,
@@ -676,6 +700,14 @@
       "path": "backend/app/eval/db.py",
       "reason": "independent evaluation-results database",
       "scope": "<module>.EvalDB._connect",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/backfill_knowhow_md.py",
+      "reason": "read-only planning connection to an operator-supplied database",
+      "scope": "<module>.plan_backfill_readonly",
       "target": "sqlite3.connect"
     },
     {

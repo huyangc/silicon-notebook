@@ -102,6 +102,7 @@ from app.models.schemas import (
     KnowhowAppendPreview,
     KnowhowAppendResult,
     KnowhowCellOptimizeResult,
+    KnowhowCellReformatResult,
 )
 from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
@@ -484,10 +485,20 @@ def get_notebook_asset_file(notebook_id: str, asset_id: str) -> FileResponse:
     response_model=KnowhowImportPreview,
     dependencies=[Depends(require_notebook_access)],
 )
-async def preview_knowhow_import(notebook_id: str, file: UploadFile = File(...)) -> KnowhowImportPreview:
+async def preview_knowhow_import(
+    notebook_id: str,
+    file: UploadFile = File(...),
+    anchor_index: Optional[int] = Form(None),
+) -> KnowhowImportPreview:
+    """``anchor_index`` (optional, same wire shape as the import commit
+    endpoint's) lets the wizard re-preview after the user changes the row-title
+    (anchor) selection in step 2: when given, the preview skips THAT column from
+    normalization instead of the guessed one, keeping "预览即所得" true for the
+    user-confirmed anchor. Omitted on the initial load — preview then skips the
+    guess (unchanged behavior)."""
     data = await file.read()
     try:
-        return knowhow_api.preview_import(file.filename or "import", data)
+        return knowhow_api.preview_import(file.filename or "import", data, anchor_index)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -830,21 +841,51 @@ def patch_knowhow_cell(
         repo.validate_cell_target(row_id, column_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    # Refuse to persist a NEWLY dangling asset:// link (the image was reclaimed
-    # while it lived only in this browser draft). We cannot restore the file, but
-    # silently writing a dead reference would hand the user a broken image with
-    # no explanation. The store re-checks these ids inside its own write
-    # transaction, so a sweep running right now cannot slip between us.
-    current_row = next(r for r in table["rows"] if r["id"] == row_id)
-    added_assets = knowhow_api.newly_added_asset_refs(
-        current_row.get("cells", {}).get(column_id, ""), body.content_md
-    )
-    try:
-        repo.update_knowhow_cell(
-            row_id, column_id, body.content_md, require_assets=added_assets
+    # Concurrency P1 (fix b): when the caller supplies expected_before (the
+    # batch-reformat save path), the write must be a SERVER-SIDE atomic
+    # compare-and-write — the whole point is to close the client-side TOCTOU the
+    # old preflight-fetch-then-PATCH left open. Route it through the guarded store
+    # method (one entry); a stale baseline → 409 with a friendly message, nothing
+    # written. When expected_before is None (the manual cell editor), keep the
+    # existing last-write-wins path unchanged — a human actively editing this
+    # cell should not have their save refused by their own earlier snapshot.
+    if body.expected_before is not None:
+        # F2: the guarded (compare-and-write) branch must run the SAME newly-
+        # dangling-asset guard the legacy branch below runs — otherwise a guarded
+        # save can commit content referencing a missing/foreign asset. Compute the
+        # newly added refs against the CURRENT cell and hand them to the store,
+        # which re-checks them INSIDE its write transaction (a sweep running now
+        # cannot slip between us); a miss raises ValueError -> legacy 400.
+        current_row = next(r for r in table["rows"] if r["id"] == row_id)
+        added_assets = knowhow_api.newly_added_asset_refs(
+            current_row.get("cells", {}).get(column_id, ""), body.content_md
         )
-    except ValueError:
-        raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
+        try:
+            result = repo.update_knowhow_cells_guarded_atomic(
+                notebook_id,
+                [(table_id, row_id, column_id, body.expected_before, body.content_md)],
+                require_assets=added_assets,
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
+        if result["conflict"]:
+            raise user_error(409, "内容已被其他人修改，请刷新后重试")
+    else:
+        # Refuse to persist a NEWLY dangling asset:// link (the image was reclaimed
+        # while it lived only in this browser draft). We cannot restore the file, but
+        # silently writing a dead reference would hand the user a broken image with
+        # no explanation. The store re-checks these ids inside its own write
+        # transaction, so a sweep running right now cannot slip between us.
+        current_row = next(r for r in table["rows"] if r["id"] == row_id)
+        added_assets = knowhow_api.newly_added_asset_refs(
+            current_row.get("cells", {}).get(column_id, ""), body.content_md
+        )
+        try:
+            repo.update_knowhow_cell(
+                row_id, column_id, body.content_md, require_assets=added_assets
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
     knowhow_api.get_scheduler(repo).schedule(table_id)
     updated = repo.get_knowhow_table(table_id)
     row = next(r for r in updated["rows"] if r["id"] == row_id)
@@ -893,28 +934,68 @@ def patch_knowhow_cells_batch(
             repo.validate_cell_target(row_id, body.column_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    # Same newly-dangling-asset guard as the single-cell route above. It cannot
-    # be skipped here just because this path is "internal": the editor saves
-    # every MERGED/shared cell through this endpoint, so a draft whose image was
-    # reclaimed reaches the database via THIS call, not the single-cell one. An
-    # asset is guarded if it is new to at least one target row.
-    current_rows_by_id = {row["id"]: row for row in table["rows"]}
-    added_assets = sorted(
-        {
-            asset_id
-            for row_id in row_ids
-            for asset_id in knowhow_api.newly_added_asset_refs(
-                current_rows_by_id[row_id].get("cells", {}).get(body.column_id, ""),
-                body.content_md,
+    # Concurrency P1 (fix b): with per-row expected_before (the batch-reformat
+    # fan-out save), write the WHOLE group through the guarded atomic store method
+    # — one all-or-nothing compare-and-write, so a stale baseline on ANY branch
+    # refuses the entire concept group (409, nothing written) rather than a
+    # half-written group. expected_before is positionally parallel to row_ids.
+    if body.expected_before is not None:
+        if len(body.expected_before) != len(row_ids):
+            # Client contract error (the UI always sends matching lengths); an
+            # API/MCP client that gets it wrong sees the generic 400 Chinese copy.
+            raise HTTPException(
+                status_code=400, detail="expected_before length must match row_ids"
             )
-        }
-    )
-    try:
-        repo.update_knowhow_cells(
-            row_ids, body.column_id, body.content_md, require_assets=added_assets
+        updates = [
+            (table_id, row_id, body.column_id, expected, body.content_md)
+            for row_id, expected in zip(row_ids, body.expected_before)
+        ]
+        # F2: same newly-dangling-asset guard as the single-cell guarded branch —
+        # cover EVERY fan-out target's new content (an asset is guarded if it is
+        # new to at least one target row), identical to the legacy batch else-branch
+        # below. The store re-checks inside its write transaction; a miss -> 400.
+        current_rows_by_id = {row["id"]: row for row in table["rows"]}
+        added_assets = sorted(
+            {
+                asset_id
+                for row_id in row_ids
+                for asset_id in knowhow_api.newly_added_asset_refs(
+                    current_rows_by_id[row_id].get("cells", {}).get(body.column_id, ""),
+                    body.content_md,
+                )
+            }
         )
-    except ValueError:
-        raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
+        try:
+            result = repo.update_knowhow_cells_guarded_atomic(
+                notebook_id, updates, require_assets=added_assets
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
+        if result["conflict"]:
+            raise user_error(409, "内容已被其他人修改，请刷新后重试")
+    else:
+        # Same newly-dangling-asset guard as the single-cell route above. It cannot
+        # be skipped here just because this path is "internal": the editor saves
+        # every MERGED/shared cell through this endpoint, so a draft whose image was
+        # reclaimed reaches the database via THIS call, not the single-cell one. An
+        # asset is guarded if it is new to at least one target row.
+        current_rows_by_id = {row["id"]: row for row in table["rows"]}
+        added_assets = sorted(
+            {
+                asset_id
+                for row_id in row_ids
+                for asset_id in knowhow_api.newly_added_asset_refs(
+                    current_rows_by_id[row_id].get("cells", {}).get(body.column_id, ""),
+                    body.content_md,
+                )
+            }
+        )
+        try:
+            repo.update_knowhow_cells(
+                row_ids, body.column_id, body.content_md, require_assets=added_assets
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)
     if row_ids:
         knowhow_api.get_scheduler(repo).schedule(table_id)
     updated = repo.get_knowhow_table(table_id)
@@ -1071,6 +1152,55 @@ def optimize_knowhow_cell(
     except knowhow_api.KnowhowOptimizeUnavailable as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return {"suggestion_md": suggestion_md}
+
+
+# --- knowhow-md-normalize Task 4: /reformat HTTP endpoint (design doc §③-
+# adjacent, same suggestion-only contract as /optimize just above) — exposes
+# Task 3's knowhow_api.reformat_cell over HTTP for a later editor "格式化
+# 排版" button (and a later-still batch action) to call. Structure mirrors
+# optimize_knowhow_cell exactly (repo resolve -> _require_table 404 gate ->
+# row/column table-membership 400 -> validate_cell_target 400 -> read the
+# SAVED content_md). The one deliberate divergence: reformat_cell already
+# handles an unconfigured LLM gracefully inside itself (falls back to
+# rule_normalize, returns source="rule/no-llm") and NEVER raises
+# ModelNotConfiguredError — see that function's own docstring — so this
+# endpoint does NOT mirror optimize's ModelNotConfiguredError/
+# KnowhowOptimizeUnavailable -> 400/502 mapping. It always 200s with
+# {candidate_md, source, changed}; the caller reads `source` to decide how to
+# present the candidate. Suggestion-only like optimize: never writes the
+# cell, never schedules a reprojection — the user's own accept goes through
+# the existing PATCH cell endpoint.
+@router.post(
+    "/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/reformat",
+    response_model=KnowhowCellReformatResult,
+    dependencies=[Depends(require_notebook_access)],
+)
+def reformat_knowhow_cell(
+    notebook_id: str, table_id: str, row_id: str, column_id: str
+) -> dict:
+    repo = repository()
+    table = _require_table(repo, notebook_id, table_id)
+    if (
+        not any(row["id"] == row_id for row in table["rows"])
+        or not any(column["id"] == column_id for column in table["columns"])
+    ):
+        raise user_error(400, "格子定位不合法")
+    try:
+        repo.validate_cell_target(row_id, column_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    row = next(r for r in table["rows"] if r["id"] == row_id)
+    column = next(c for c in table["columns"] if c["id"] == column_id)
+    content_md = row["cells"].get(column_id, "")
+    result = knowhow_api.reformat_cell(repo, content_md, column["name"], column["kind"])
+    # Concurrency P1 (fix a): report the EXACT content_md we just read and fed to
+    # reformat_cell so the batch client can tell "this candidate derives from the
+    # cell I snapshotted" from "the live cell was edited under me". content_md is
+    # the same string reformat_cell consumed (it does `raw = content_md or ""`,
+    # and content_md is never None here — `.get(column_id, "")`), so source_md ==
+    # the snapshot iff nobody edited the cell between modal-open and now.
+    result["source_md"] = content_md
+    return result
 
 
 @router.get(

@@ -159,6 +159,145 @@ def test_preview_grid_parse_error_passthrough_400(tmp_path, monkeypatch):
     assert any("一" <= ch <= "鿿" for ch in detail)  # friendly Chinese, not a raw dump
 
 
+# --- preview normalizes using the USER-confirmed anchor, not the guess -------
+#
+# knowhow-md-normalize P2 (this fix): the wizard lets the user change/clear the
+# row-title (anchor) selection in step 2 before committing; ``import_table``
+# then skips the USER-CONFIRMED anchor from normalization. The preview MUST skip
+# the same column, or "预览即所得" breaks (preview shows raw where commit stores
+# normalized, and vice versa). Fixture: col 0 ("现象类型") is the GUESSED anchor
+# (hits the 类型 keyword); BOTH columns hold Excel bullet content that
+# ``rule_normalize`` rewrites ("• x" -> "- x"), so raw-vs-normalized is directly
+# observable per column.
+NORM_HEADER = ["现象类型", "识别步骤"]
+NORM_KINDS = ["attribute", "procedure"]
+NORM_ROWS = [["• 过冲\n• 欠冲", "• 看上升沿\n• 看下降沿"]]
+NORM_RAW_0, NORM_NORM_0 = "• 过冲\n• 欠冲", "- 过冲\n- 欠冲"
+NORM_RAW_1, NORM_NORM_1 = "• 看上升沿\n• 看下降沿", "- 看上升沿\n- 看下降沿"
+
+
+def _preview_norm(client, headers, nb, *, anchor_index=None):
+    data = _xlsx_bytes(NORM_HEADER, NORM_ROWS)
+    form = {} if anchor_index is None else {"anchor_index": str(anchor_index)}
+    return client.post(
+        f"/api/notebooks/{nb}/knowhow/import/preview",
+        headers=headers,
+        files={"file": ("p.xlsx", data,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        data=form,
+    )
+
+
+def _commit_stored_row0(client, headers, nb, *, anchor_index):
+    """Import NORM_ROWS with the given anchor_index and return the single stored
+    row's values as a column-ordered list — i.e. what commit ACTUALLY persisted,
+    the ground truth the preview must match."""
+    resp = _import_xlsx(
+        client, headers, nb, header=NORM_HEADER, rows=NORM_ROWS,
+        columns_json=json.dumps([{"name": n, "kind": k} for n, k in zip(NORM_HEADER, NORM_KINDS)]),
+        anchor_index=anchor_index,
+    )
+    assert resp.status_code == 200, resp.text
+    detail = resp.json()
+    col_ids = [c["id"] for c in detail["columns"]]
+    row = detail["rows"][0]
+    return [row["cells"].get(cid, "") for cid in col_ids]
+
+
+def test_preview_skips_guessed_anchor_without_param(tmp_path, monkeypatch):
+    """Default (no anchor_index form field): unchanged behavior — the GUESSED
+    anchor column (col 0) is left raw; every other column is normalized."""
+    client = _client(tmp_path, monkeypatch)
+    h = _login(client, "a00000531")
+    nb = _mk_notebook(client, h)
+    body = _preview_norm(client, h, nb).json()
+    assert body["anchor_suggestion"] == 0
+    assert body["rows_preview"][0] == [NORM_RAW_0, NORM_NORM_1]
+
+
+def test_preview_skips_user_confirmed_anchor(tmp_path, monkeypatch):
+    """anchor_index=1 (user re-picked col 1 as the row-title): col 1 now stays
+    raw and the previously-guessed col 0 is normalized — the preview follows the
+    CONFIRMED anchor, not the guess. The reported anchor_suggestion still echoes
+    the guess (that field is the wizard's initial-selection hint, unchanged)."""
+    client = _client(tmp_path, monkeypatch)
+    h = _login(client, "a00000532")
+    nb = _mk_notebook(client, h)
+    body = _preview_norm(client, h, nb, anchor_index=1).json()
+    assert body["anchor_suggestion"] == 0
+    assert body["rows_preview"][0] == [NORM_NORM_0, NORM_RAW_1]
+
+
+def test_preview_matches_commit_for_guessed_anchor(tmp_path, monkeypatch):
+    """预览即所得, guessed-anchor path: preview-without-param == what a commit
+    with anchor_index=0 (the guess) actually stores."""
+    client = _client(tmp_path, monkeypatch)
+    h = _login(client, "a00000533")
+    nb = _mk_notebook(client, h)
+    preview_row = _preview_norm(client, h, nb).json()["rows_preview"][0]
+    stored_row = _commit_stored_row0(client, h, nb, anchor_index=0)
+    assert preview_row == stored_row == [NORM_RAW_0, NORM_NORM_1]
+
+
+def test_preview_matches_commit_for_changed_anchor(tmp_path, monkeypatch):
+    """预览即所得, changed-anchor path (the contract this fix restores): preview
+    with anchor_index=1 == what a commit with anchor_index=1 stores."""
+    client = _client(tmp_path, monkeypatch)
+    h = _login(client, "a00000534")
+    nb = _mk_notebook(client, h)
+    preview_row = _preview_norm(client, h, nb, anchor_index=1).json()["rows_preview"][0]
+    stored_row = _commit_stored_row0(client, h, nb, anchor_index=1)
+    assert preview_row == stored_row == [NORM_NORM_0, NORM_RAW_1]
+
+
+def test_preview_explicit_no_anchor_normalizes_all_and_matches_commit(tmp_path, monkeypatch):
+    """预览即所得, cleared-anchor path（三态修复的第三态）：anchor_index=-1 表示
+    向导里明确清空「不设行标题」——预览不跳过任何列（全列规整），与 commit 不带
+    anchor_index（无锚定列 → 存储环节全列规整）落库的结果逐字一致。若 -1 也退回
+    按猜测列跳过，预览会在猜测列上显示 raw、提交却存 normalized——预览即所得撒谎。
+    三态：缺省=按猜测列跳过；>=0=按所选列跳过；负数=明确无锚定、不跳过。
+    anchor_suggestion 仍如实回报猜测（它是初始预选提示，与跳过哪列无关）。"""
+    client = _client(tmp_path, monkeypatch)
+    h = _login(client, "a00000535")
+    nb = _mk_notebook(client, h)
+    body = _preview_norm(client, h, nb, anchor_index=-1).json()
+    assert body["anchor_suggestion"] == 0
+    assert body["rows_preview"][0] == [NORM_NORM_0, NORM_NORM_1]
+    stored_row = _commit_stored_row0(client, h, nb, anchor_index=None)
+    assert body["rows_preview"][0] == stored_row
+
+
+def test_preview_out_of_range_anchor_index_rejected_like_commit(tmp_path, monkeypatch):
+    """F5 (this review): preview must validate anchor_index range EXACTLY like the
+    import commit does. An anchor_index >= column count previously slipped through
+    preview (skips nothing -> normalizes ALL columns, 200) while the commit path
+    (`_columns_with_anchor`) rejects it 400 -> preview≠commit. Both must now raise
+    the same friendly-Chinese 400. `-1`/None/valid indices are unchanged (locked
+    by the four tests above)."""
+    client = _client(tmp_path, monkeypatch)
+    h = _login(client, "a00000536")
+    nb = _mk_notebook(client, h)
+    oor = len(HEADER)   # == 5; valid indices are 0..4, so 5 is first out-of-range
+
+    # commit is the ground-truth error shape for out-of-range anchor_index.
+    commit = _import_xlsx(client, h, nb, anchor_index=oor)
+    assert commit.status_code == 400, commit.text
+    commit_detail = commit.json()["detail"]
+
+    # preview must now reject the SAME index with the SAME 400 (was 200 pre-fix).
+    data = _xlsx_bytes(HEADER, DATA_ROWS)
+    preview = client.post(
+        f"/api/notebooks/{nb}/knowhow/import/preview",
+        headers=h,
+        files={"file": ("p.xlsx", data,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        data={"anchor_index": str(oor)},
+    )
+    assert preview.status_code == 400, preview.text
+    assert preview.json()["detail"] == commit_detail   # SAME friendly message
+    assert any("一" <= ch <= "鿿" for ch in preview.json()["detail"])
+
+
 # ---------------------------------------------------------------------------
 # POST /notebooks/{nb}/knowhow/import
 # ---------------------------------------------------------------------------
@@ -381,6 +520,212 @@ def test_commit_append_forward_fills_anchor_column(tmp_path, monkeypatch, repo):
     anchor_col_id = detail["columns"][0]["id"]
     anchor_values = [r["cells"].get(anchor_col_id, "") for r in detail["rows"]]
     assert anchor_values == ["hold&setup", "hold&setup", "hold&setup"]
+
+
+# ---------------------------------------------------------------------------
+# knowhow-md-normalize Task 5: import/append must normalize Excel-idiom cell
+# formatting (Tab-indented `•` bullets, `A.`/`B.` section markers) into clean
+# CommonMark BEFORE storing — rules-only (Task 1's rule_normalize), zero LLM,
+# since this is the always-on bulk-import path (an efficiency constraint: it
+# must not make a per-cell LLM call). The LLM-backed reformat_cell (Task 3)
+# stays a separate, explicit-trigger-only suggestion layer that never runs
+# automatically on import/append.
+# ---------------------------------------------------------------------------
+
+IDIOM_CELL = "A. 考量\n\t• 增大 R\n\t• 增大 C"
+
+
+def test_import_table_normalizes_excel_idiom_cells(tmp_path, monkeypatch, repo):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000529")
+    nb = _mk_notebook(client, owner_h)
+
+    from app.services.knowhow.api import import_table
+
+    data = _xlsx_bytes(["概念", "方法"], [["概念X", IDIOM_CELL]])
+    columns_json = json.dumps([
+        {"name": "概念", "kind": "attribute"},
+        {"name": "方法", "kind": "procedure"},
+    ])
+    table_id = import_table(repo, nb, "t.xlsx", data, "整改表", columns_json, anchor_index=0)
+
+    detail = repo.get_knowhow_table(table_id)
+    method_col_id = detail["columns"][1]["id"]
+    stored = detail["rows"][0]["cells"][method_col_id]
+
+    assert "\t" not in stored
+    assert "•" not in stored
+    assert "- 增大 R" in stored.split("\n")
+    assert "**A. 考量**" in stored
+
+
+def test_commit_append_normalizes_excel_idiom_cells(tmp_path, monkeypatch, repo):
+    """Same guarantee as test_import_table_normalizes_excel_idiom_cells above,
+    but for the append path — commit_append's own storage loop must not skip
+    rule_normalize just because the table already exists."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000530")
+    nb = _mk_notebook(client, owner_h)
+
+    from app.services.knowhow.api import commit_append, create_table, to_wire_table
+
+    table_id = create_table(
+        repo, nb, "整改表",
+        [
+            {"name": "概念", "kind": "attribute"},
+            {"name": "方法", "kind": "procedure"},
+        ],
+        anchor_index=0,
+    )
+    table = to_wire_table(repo.get_knowhow_table(table_id))
+
+    data = _xlsx_bytes(["概念", "方法"], [["概念X", IDIOM_CELL]])
+    added = commit_append(repo, table_id, table, "append.xlsx", data)
+    assert added == 1
+
+    detail = repo.get_knowhow_table(table_id)
+    method_col_id = detail["columns"][1]["id"]
+    stored = detail["rows"][0]["cells"][method_col_id]
+
+    assert "\t" not in stored
+    assert "•" not in stored
+    assert "- 增大 R" in stored.split("\n")
+    assert "**A. 考量**" in stored
+
+
+# ---------------------------------------------------------------------------
+# P2-3 (code review): the preview IS the human-review gate ("预览即所得") --
+# it must show EXACTLY the text a subsequent commit will persist, not the raw
+# parsed grid. preview_import/preview_append used to return grid.rows/
+# aligned_rows verbatim while import_table/commit_append stored
+# safe_rule_normalize'd text — an Excel-idiom cell previewed one way and
+# committed a DIFFERENT way, defeating the point of reviewing before commit.
+# ---------------------------------------------------------------------------
+
+
+def test_preview_import_matches_what_import_table_stores(tmp_path, monkeypatch, repo):
+    """Byte-for-byte comparison against the ACTUAL committed cell (not a
+    re-implementation of the normalization rules) -- proves preview_import
+    and import_table agree because they call the SAME normalization
+    function on the SAME input, not because two independent
+    implementations happen to produce matching output today.
+
+    P1-c: the anchor column is a grouping KEY -- both preview AND commit must
+    keep it byte-raw (never normalize `A. 概念` into `**A. 概念**`), so the
+    idiom-shaped anchor cell below is asserted to pass through unchanged on
+    BOTH sides (preview == commit stays true for it too)."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000531")
+    nb = _mk_notebook(client, owner_h)
+
+    from app.services.knowhow.api import import_table, preview_import
+
+    # column 0 (概念) is the anchor (guess_kinds flags 概念; import passes
+    # anchor_index=0) and carries an Excel-idiom-shaped value -- it must NOT be
+    # normalized. Column 1 (方法) is a normal content column that MUST be.
+    data = _xlsx_bytes(["概念", "方法"], [["A. 概念", IDIOM_CELL]])
+    columns_json = json.dumps([
+        {"name": "概念", "kind": "attribute"},
+        {"name": "方法", "kind": "procedure"},
+    ])
+
+    preview = preview_import("t.xlsx", data)
+    previewed_anchor = preview["rows_preview"][0][0]
+    previewed_method = preview["rows_preview"][0][1]
+    assert "\t" not in previewed_method and "•" not in previewed_method  # method normalized
+    assert previewed_anchor == "A. 概念"  # anchor kept byte-raw, not **A. 概念**
+
+    table_id = import_table(repo, nb, "t.xlsx", data, "整改表", columns_json, anchor_index=0)
+    detail = repo.get_knowhow_table(table_id)
+    anchor_col_id = detail["columns"][0]["id"]
+    method_col_id = detail["columns"][1]["id"]
+    stored_anchor = detail["rows"][0]["cells"][anchor_col_id]
+    stored_method = detail["rows"][0]["cells"][method_col_id]
+
+    assert previewed_method == stored_method
+    assert stored_anchor == "A. 概念"          # commit kept the anchor byte-raw too
+    assert previewed_anchor == stored_anchor    # preview == commit for the anchor
+
+
+def test_preview_append_matches_what_commit_append_stores(tmp_path, monkeypatch, repo):
+    """Same guarantee as test_preview_import_matches_what_import_table_stores
+    above, for the append path -- preview_append's rows_preview must match
+    what commit_append actually persists into an EXISTING table.
+
+    P1-c: the anchor column stays byte-raw on BOTH the preview and the commit
+    side (idiom-shaped `A. 概念` below), exactly like the import test above."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000532")
+    nb = _mk_notebook(client, owner_h)
+
+    from app.services.knowhow.api import commit_append, create_table, preview_append, to_wire_table
+
+    table_id = create_table(
+        repo, nb, "整改表",
+        [
+            {"name": "概念", "kind": "attribute"},
+            {"name": "方法", "kind": "procedure"},
+        ],
+        anchor_index=0,
+    )
+    table = to_wire_table(repo.get_knowhow_table(table_id))
+    data = _xlsx_bytes(["概念", "方法"], [["A. 概念", IDIOM_CELL]])
+
+    preview = preview_append(table, "append.xlsx", data)
+    previewed_anchor = preview["rows_preview"][0][0]
+    previewed_method = preview["rows_preview"][0][1]
+    assert "\t" not in previewed_method and "•" not in previewed_method  # method normalized
+    assert previewed_anchor == "A. 概念"  # anchor kept byte-raw, not **A. 概念**
+
+    added = commit_append(repo, table_id, table, "append.xlsx", data)
+    assert added == 1
+
+    detail = repo.get_knowhow_table(table_id)
+    anchor_col_id = detail["columns"][0]["id"]
+    method_col_id = detail["columns"][1]["id"]
+    stored_anchor = detail["rows"][0]["cells"][anchor_col_id]
+    stored_method = detail["rows"][0]["cells"][method_col_id]
+
+    assert previewed_method == stored_method
+    assert stored_anchor == "A. 概念"          # commit kept the anchor byte-raw too
+    assert previewed_anchor == stored_anchor    # preview == commit for the anchor
+
+
+def test_commit_append_keeps_anchor_byte_stable_and_in_same_group(tmp_path, monkeypatch, repo):
+    """P1-c (the confirmed defect): the anchor column is a grouping KEY, not
+    prose. An appended row whose anchor text matches an existing row's anchor
+    must be stored BYTE-IDENTICAL, so both land in the SAME anchor group. Before
+    the fix commit_append normalized the incoming anchor (`A. Component` ->
+    `**A. Component**`) while the existing row kept `A. Component`, splitting the
+    group even though the append preview matched them. Both the existing row
+    (via import_table) and the appended row (via commit_append) go through the
+    now-anchor-skipping bulk paths, so both anchors stay raw and equal."""
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000533")
+    nb = _mk_notebook(client, owner_h)
+
+    from app.services.knowhow.api import commit_append, import_table, to_wire_table
+
+    columns_json = json.dumps([
+        {"name": "概念", "kind": "attribute"},
+        {"name": "方法", "kind": "procedure"},
+    ])
+    data0 = _xlsx_bytes(["概念", "方法"], [["A. Component", "既有内容"]])
+    table_id = import_table(repo, nb, "t.xlsx", data0, "违例表", columns_json, anchor_index=0)
+    table = to_wire_table(repo.get_knowhow_table(table_id))
+    anchor_col_id = table["columns"][0]["id"]
+
+    existing_anchor = repo.get_knowhow_table(table_id)["rows"][0]["cells"][anchor_col_id]
+    assert existing_anchor == "A. Component"  # import kept the anchor byte-raw
+
+    data1 = _xlsx_bytes(["概念", "方法"], [["A. Component", "追加内容"]])
+    added = commit_append(repo, table_id, table, "append.xlsx", data1)
+    assert added == 1
+
+    detail = repo.get_knowhow_table(table_id)
+    anchors = [r["cells"].get(anchor_col_id, "") for r in detail["rows"]]
+    # both rows carry byte-identical anchor text -> one group, not two
+    assert anchors == ["A. Component", "A. Component"]
 
 
 # ---------------------------------------------------------------------------
@@ -609,3 +954,275 @@ def test_reproject_unknown_table_404(tmp_path, monkeypatch):
     owner_h = _login(client, "a00000520")
     nb = _mk_notebook(client, owner_h)
     assert client.post(f"/api/notebooks/{nb}/knowhow/no-such-table/reproject", headers=owner_h).status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Concurrency P1 fixes (batch-reformat integrity moved SERVER-SIDE):
+#  (a) /reformat round-trips the exact saved content_md it read as ``source_md``
+#      so the batch client can detect "the server reformatted content I never
+#      snapshotted" (a concurrent edit between modal-open and /reformat).
+#  (b) the cell-save endpoints take an OPTIONAL ``expected_before`` — when set,
+#      the write goes through KnowhowStore.update_knowhow_cells_guarded_atomic
+#      (compare-and-write in ONE transaction; a stale baseline → 409, NOTHING
+#      written; fan-out is all-or-nothing). Omitted → legacy last-write-wins
+#      (the manual editor's semantics stay unchanged).
+# ---------------------------------------------------------------------------
+
+
+def _seed_table_detail(client, headers, nb):
+    table_id = _import_xlsx(client, headers, nb).json()["id"]
+    detail = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=headers).json()
+    return table_id, detail
+
+
+def _cell(detail, row_index, col_name):
+    col = next(c for c in detail["columns"] if c["name"] == col_name)
+    row = detail["rows"][row_index]
+    return row["id"], col["id"], row["cells"].get(col["id"], "")
+
+
+def test_reformat_response_carries_source_md_equal_to_stored_cell(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000540")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    row_id, col_id, stored = _cell(detail, 0, "修复方法")
+    assert stored  # sanity: the seeded cell is non-empty
+
+    resp = client.post(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/rows/{row_id}/cells/{col_id}/reformat",
+        headers=owner_h,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert {"candidate_md", "source", "changed", "source_md"} <= set(body)
+    assert body["source_md"] == stored
+
+
+def test_patch_cell_expected_before_match_writes_and_marks_pending(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000541")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    row_id, col_id, stored = _cell(detail, 0, "修复方法")
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/rows/{row_id}/cells/{col_id}",
+        headers=owner_h,
+        json={"content_md": "增加串联阻尼电阻", "expected_before": stored},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["content_md"] == "增加串联阻尼电阻"
+    assert body["projection_status"] == "pending"
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    assert _cell(fresh, 0, "修复方法")[2] == "增加串联阻尼电阻"
+
+
+def test_patch_cell_expected_before_mismatch_409_writes_nothing(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000542")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    row_id, col_id, stored = _cell(detail, 0, "修复方法")
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/rows/{row_id}/cells/{col_id}",
+        headers=owner_h,
+        json={"content_md": "不该落库", "expected_before": stored + "（他人已改）"},
+    )
+    assert resp.status_code == 409, resp.text
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    assert _cell(fresh, 0, "修复方法")[2] == stored  # untouched
+
+
+def test_patch_cell_without_expected_before_is_legacy_last_write_wins(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000543")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    row_id, col_id, _ = _cell(detail, 0, "修复方法")
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/rows/{row_id}/cells/{col_id}",
+        headers=owner_h,
+        json={"content_md": "覆盖写入"},  # no expected_before → unconditional
+    )
+    assert resp.status_code == 200, resp.text
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    assert _cell(fresh, 0, "修复方法")[2] == "覆盖写入"
+
+
+def test_batch_cells_expected_before_all_match_writes_all(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000544")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    col = next(c for c in detail["columns"] if c["name"] == "修复方法")
+    r0, r1 = detail["rows"][0], detail["rows"][1]
+    eb0 = r0["cells"].get(col["id"], "")
+    eb1 = r1["cells"].get(col["id"], "")
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/cells",
+        headers=owner_h,
+        json={
+            "column_id": col["id"],
+            "row_ids": [r0["id"], r1["id"]],
+            "content_md": "统一改法",
+            "expected_before": [eb0, eb1],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    by_id = {r["id"]: r for r in fresh["rows"]}
+    assert by_id[r0["id"]]["cells"][col["id"]] == "统一改法"
+    assert by_id[r1["id"]]["cells"][col["id"]] == "统一改法"
+
+
+def test_batch_cells_expected_before_any_mismatch_409_writes_nothing(tmp_path, monkeypatch):
+    # Fan-out atomicity: ANY stale baseline refuses the WHOLE group (never a
+    # half-written concept group).
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000545")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    col = next(c for c in detail["columns"] if c["name"] == "修复方法")
+    r0, r1 = detail["rows"][0], detail["rows"][1]
+    eb0 = r0["cells"].get(col["id"], "")
+    eb1 = r1["cells"].get(col["id"], "")
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/cells",
+        headers=owner_h,
+        json={
+            "column_id": col["id"],
+            "row_ids": [r0["id"], r1["id"]],
+            "content_md": "统一改法",
+            "expected_before": [eb0, eb1 + "（他人已改）"],  # 2nd baseline stale
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    by_id = {r["id"]: r for r in fresh["rows"]}
+    assert by_id[r0["id"]]["cells"][col["id"]] == eb0  # neither row changed
+    assert by_id[r1["id"]]["cells"][col["id"]] == eb1
+
+
+# ---------------------------------------------------------------------------
+# F2 — the GUARDED (expected_before) write branch must run the SAME asset
+# validation the legacy branch runs: a guarded write whose content references a
+# missing/foreign asset:// must be refused with the legacy path's 400 +
+# CELL_ASSET_MISSING_MESSAGE, nothing written. Pre-fix the guarded branch went
+# straight to update_knowhow_cells_guarded_atomic (no newly_added_asset_refs /
+# _require_assets_exist), so a compare-and-write could commit a dead reference.
+# ---------------------------------------------------------------------------
+
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"knowhow-f2-fixture" * 4
+
+
+def _upload_asset(client, headers, nb) -> str:
+    up = client.post(
+        f"/api/notebooks/{nb}/assets",
+        headers=headers,
+        files={"file": ("a.png", _PNG_BYTES, "image/png")},
+    )
+    assert up.status_code == 200, up.text
+    return up.json()["id"]
+
+
+def test_patch_cell_guarded_bogus_asset_ref_400_writes_nothing(tmp_path, monkeypatch):
+    from app.services.knowhow.api import CELL_ASSET_MISSING_MESSAGE
+
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000546")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    row_id, col_id, stored = _cell(detail, 0, "修复方法")
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/rows/{row_id}/cells/{col_id}",
+        headers=owner_h,
+        # baseline matches -> isolates the asset check from the 409 (stale) path.
+        json={"content_md": "见 ![图](asset://bogus-missing-id)", "expected_before": stored},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == CELL_ASSET_MISSING_MESSAGE
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    assert _cell(fresh, 0, "修复方法")[2] == stored  # nothing written
+
+
+def test_patch_cell_guarded_valid_asset_ref_succeeds(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000547")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    row_id, col_id, stored = _cell(detail, 0, "修复方法")
+    content = f"见 ![图](asset://{_upload_asset(client, owner_h, nb)})"
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/rows/{row_id}/cells/{col_id}",
+        headers=owner_h,
+        json={"content_md": content, "expected_before": stored},
+    )
+    assert resp.status_code == 200, resp.text
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    assert _cell(fresh, 0, "修复方法")[2] == content
+
+
+def test_batch_cells_guarded_bogus_asset_ref_400_writes_nothing(tmp_path, monkeypatch):
+    from app.services.knowhow.api import CELL_ASSET_MISSING_MESSAGE
+
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000548")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    col = next(c for c in detail["columns"] if c["name"] == "修复方法")
+    r0, r1 = detail["rows"][0], detail["rows"][1]
+    eb0 = r0["cells"].get(col["id"], "")
+    eb1 = r1["cells"].get(col["id"], "")
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/cells",
+        headers=owner_h,
+        json={
+            "column_id": col["id"],
+            "row_ids": [r0["id"], r1["id"]],
+            "content_md": "见 ![图](asset://bogus-missing-id)",
+            "expected_before": [eb0, eb1],  # baselines match -> not a 409; the asset check must fire
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == CELL_ASSET_MISSING_MESSAGE
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    by_id = {r["id"]: r for r in fresh["rows"]}
+    assert by_id[r0["id"]]["cells"][col["id"]] == eb0  # neither row changed
+    assert by_id[r1["id"]]["cells"][col["id"]] == eb1
+
+
+def test_batch_cells_guarded_valid_asset_ref_succeeds(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000549")
+    nb = _mk_notebook(client, owner_h)
+    table_id, detail = _seed_table_detail(client, owner_h, nb)
+    col = next(c for c in detail["columns"] if c["name"] == "修复方法")
+    r0, r1 = detail["rows"][0], detail["rows"][1]
+    eb0 = r0["cells"].get(col["id"], "")
+    eb1 = r1["cells"].get(col["id"], "")
+    content = f"见 ![图](asset://{_upload_asset(client, owner_h, nb)})"
+
+    resp = client.patch(
+        f"/api/notebooks/{nb}/knowhow/{table_id}/cells",
+        headers=owner_h,
+        json={
+            "column_id": col["id"],
+            "row_ids": [r0["id"], r1["id"]],
+            "content_md": content,
+            "expected_before": [eb0, eb1],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    fresh = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h).json()
+    by_id = {r["id"]: r for r in fresh["rows"]}
+    assert by_id[r0["id"]]["cells"][col["id"]] == content
+    assert by_id[r1["id"]]["cells"][col["id"]] == content

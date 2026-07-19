@@ -94,6 +94,50 @@ export function canSubmitImport(title: string, roles: Role[]): boolean {
   return !isBlankTitle(title) && conceptValidationError(roles) === null;
 }
 
+// --- 步骤②：改选行标题列 → 重取预览的「在飞失效」守卫（P1 修复）----------------
+//
+// 用户在映射步骤改选行标题列会发起一次「按新锚定列重取预览」的请求。这些请求
+// 并发/乱序，且——更隐蔽——会在用户「返回选择步骤 / 另选一个文件」之后才迟到
+// 返回。用一个单调递增的请求序号来失效：每次「发起新重取 / 离开映射上下文
+// （切文件、返回选择步骤）」都把当前序号 +1；响应落地前用本函数校验「响应
+// 序号仍等于当前序号且组件仍挂载」——任何更早发起的在飞响应都会在此失配被丢弃。
+//
+// 不失效的后果（正是本守卫要挡的 P1）：文件 A 改锚定的在飞重取（responseSeq=N）
+// 在用户切到文件 B 后迟到返回，若此时 currentSeq 仍是 N，就会把文件 B 的预览
+// 覆盖成文件 A 的行——列数相等时用户甚至能就此把 B 按 A 的列结构导入。切文件 /
+// 返回选择步骤时把 currentSeq 递增，这个响应的 responseSeq 便不再等于
+// currentSeq，本函数返回 false、响应被丢弃。
+export function shouldApplyAnchorPreview(mounted: boolean, responseSeq: number, currentSeq: number): boolean {
+  return mounted && responseSeq === currentSeq;
+}
+
+// --- 步骤②③：提交按钮的置灰原因（null=可提交）（P2 修复）----------------------
+//
+// 集中在一处，让「按钮 disabled」与「hover 提示」永远对得上同一个原因（UI 约定
+// 「置灰必有对得上的原因」——同 knowhow-optimize-logic.ts 的
+// optimizeCellDisabledReason 写法）。submitting 态由按钮自身文案（「导入中…」）
+// 表达、不在此列，由调用方另行 OR 进 disabled。优先级：标题未填 > 预览重取
+// 未就绪 > 重取失败。
+//
+// 关键（P2）：改选行标题列后预览正在重取（anchorPreviewLoading）或重取失败
+// （anchorPreviewError）时必须挡住提交——否则用户会拿着「旧锚定列规整的预览」
+// 或「刷新失败、根本没更新的预览」就提交，而 commit 按新锚定列走，展示≠落库。
+// 重取失败时用户重新选一次行标题列即可重试（handleAnchorChange 会清掉 error）。
+export const SUBMIT_BLANK_TITLE_HINT = "请先填写表标题";
+export const SUBMIT_PREVIEW_REFRESHING_HINT = "预览更新中，请稍候";
+export const SUBMIT_PREVIEW_ERROR_HINT = "预览更新失败，请重新选择行标题列后再试";
+
+export function importSubmitDisabledReason(
+  title: string,
+  anchorPreviewLoading: boolean,
+  anchorPreviewError: string | null,
+): string | null {
+  if (isBlankTitle(title)) return SUBMIT_BLANK_TITLE_HINT;
+  if (anchorPreviewLoading) return SUBMIT_PREVIEW_REFRESHING_HINT;
+  if (anchorPreviewError) return SUBMIT_PREVIEW_ERROR_HINT;
+  return null;
+}
+
 // --- 步骤③：提交 -----------------------------------------------------------------
 
 // 后端错误展示（knowhow 各面板的错误条共用这一个入口，~20 个调用点）。

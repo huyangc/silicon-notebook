@@ -723,6 +723,272 @@ class KnowhowStore:
                 (row_ids[0],),
             )
 
+    def update_knowhow_cells_bulk_guarded(
+        self, notebook_id: str, updates: list[tuple[str, str, str, str, str]]
+    ) -> "dict[str, list[tuple[str, str]]]":
+        """Compare-and-write bulk cell writer for
+        ``scripts/backfill_knowhow_md.py``'s ``--apply`` paths (TOCTOU +
+        membership fix). Each update is ``(table_id, row_id, column_id,
+        expected_before, content_md)`` and ``notebook_id`` is the notebook the
+        caller claims every entry belongs to. INSIDE ONE write transaction, for
+        every update this:
+
+        1. VALIDATES MEMBERSHIP (F2): joins the row and the column to their
+           owning table and verifies ``row.table_id == column.table_id ==
+           table_id`` (the id the caller claims for this entry) AND that table
+           belongs to ``notebook_id``. An entry that fails -- ids belonging to
+           another notebook/table, a cross-table (row, column) pair, or a
+           nonexistent row/column/table -- is collected as REJECTED and left
+           byte-for-byte untouched. This closes the hole where the method
+           trusted caller-supplied ids: an entry whose (row, column) lived in a
+           DIFFERENT notebook/table passed the ``before`` compare below and
+           silently overwrote a foreign cell while bumping the CALLER's table.
+           The membership read shares this write transaction, so it cannot race
+           a concurrent table move.
+
+        2. RE-READS the target cell's CURRENT ``content_md`` and writes
+           ``content_md`` ONLY when the stored value still equals
+           ``expected_before``; an update whose cell no longer matches (a live
+           backend user edited it after the plan was reviewed, or the row was
+           deleted so the current value is ``None``) is collected as SKIPPED and
+           left untouched. Neither a skip nor a reject ever aborts the
+           transaction.
+
+        Doing the compare INSIDE the same write transaction that performs the
+        write is the whole point. The CLI used to read the current cells, compare
+        against each plan entry's ``before``, THEN call the plain bulk write in a
+        SEPARATE step: a cell edited BETWEEN that read and the write passed the
+        now-stale comparison and got overwritten on top of the live edit,
+        violating the documented "post-review edits are skipped" guarantee.
+        Re-reading under the write lock closes that window -- the compare and the
+        write see the same committed state, so a cell that moved after the read
+        is refused rather than clobbered.
+
+        A written cell gets the exact per-row effect ``update_knowhow_cell``
+        gives (cell upsert via the same
+        ``ON CONFLICT(row_id, column_id)`` target + that row's ``updated_at`` /
+        ``projection_status`` -> ``'pending'``), and every DISTINCT table with at
+        least one actual write bumps its ``mutation_seq`` exactly once -- a table
+        whose updates were ALL skipped/rejected does not bump (nothing in it
+        changed). Empty ``updates`` is a no-op (no transaction opened).
+
+        Returns ``{"written": [...], "skipped": [...], "already_applied": [...],
+        "rejected": [...]}`` (each a list of ``(row_id, column_id)`` in first-seen
+        order), so the CLI reports each outcome from THIS transaction's own result
+        rather than a separate pre-read. F4: a cell whose CURRENT content already
+        equals the update's ``content_md`` (the AFTER) -- a PRIOR apply committed
+        the write but its separate reprojection step never completed (it threw, or
+        the process exited), leaving the row 'pending'/'failed' -- is reported in
+        the DISTINCT ``already_applied`` bucket, NOT lumped with genuine
+        moved-target ``skipped`` (current != before AND != after). The CLI
+        reprojects tables with written OR already_applied rows (reprojection is
+        idempotent), so a rerun of the same plan recovers such stuck rows even
+        though it writes nothing. Both buckets leave the cell untouched and bump
+        no ``mutation_seq``."""
+        if not updates:
+            return {"written": [], "skipped": [], "already_applied": [], "rejected": []}
+        now = self.now()
+        written: list[tuple[str, str]] = []
+        skipped: list[tuple[str, str]] = []
+        already_applied: list[tuple[str, str]] = []
+        rejected: list[tuple[str, str]] = []
+        written_table_ids: list[str] = []
+        with self.database.write() as db:
+            # F1 (cross-process atomicity): take a RESERVED lock BEFORE the
+            # phase-1 re-reads. write()'s ``write_lock`` only serializes writers
+            # in THIS process; pysqlite (isolation_level="") would otherwise open
+            # the transaction lazily at the first DML below, leaving every
+            # ``SELECT current`` above running in autocommit -- a second PROCESS
+            # (a live backend beside the CLI, another worker) could commit an edit
+            # between the compare and our write, and we would clobber it on top,
+            # defeating the whole compare-and-write. BEGIN IMMEDIATE makes the
+            # read-compare-write one cross-process-atomic critical section; a
+            # writer already holding the lock surfaces as the connection's normal
+            # busy handling (PRAGMA busy_timeout in _new_connection). The
+            # enclosing ``with conn:`` still owns commit/rollback -- once
+            # sqlite3_get_autocommit is 0 pysqlite issues no second implicit
+            # BEGIN, so this integrates without a double-begin.
+            db.execute("BEGIN IMMEDIATE")
+            for table_id, row_id, column_id, expected_before, content_md in updates:
+                # F2: membership -- row and column must both belong to the SAME
+                # table the caller claims, and that table must belong to the
+                # expected notebook. A missing row/column/table yields no join
+                # row and is likewise rejected.
+                membership = db.execute(
+                    "SELECT r.table_id AS row_table, c.table_id AS col_table, "
+                    "t.notebook_id AS tbl_notebook "
+                    "FROM knowhow_rows r, knowhow_columns c, knowhow_tables t "
+                    "WHERE r.id = ? AND c.id = ? AND t.id = ?",
+                    (row_id, column_id, table_id),
+                ).fetchone()
+                if (
+                    membership is None
+                    or membership["row_table"] != table_id
+                    or membership["col_table"] != table_id
+                    or membership["tbl_notebook"] != notebook_id
+                ):
+                    rejected.append((row_id, column_id))
+                    continue
+                current_row = db.execute(
+                    "SELECT content_md FROM knowhow_cells "
+                    "WHERE row_id = ? AND column_id = ?",
+                    (row_id, column_id),
+                ).fetchone()
+                current = current_row["content_md"] if current_row is not None else None
+                if current != expected_before:
+                    # F4: distinguish an ALREADY-APPLIED cell (current == the AFTER
+                    # this update would write -- a prior committed apply, its
+                    # reprojection never finished) from a GENUINE moved target
+                    # (current != before AND != after -- a live edit after review).
+                    # The CLI reprojects already_applied tables (idempotent) but
+                    # not moved ones; both leave the cell untouched.
+                    if current == content_md:
+                        already_applied.append((row_id, column_id))
+                    else:
+                        skipped.append((row_id, column_id))
+                    continue
+                db.execute(
+                    "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(row_id, column_id) DO UPDATE SET "
+                    "content_md = excluded.content_md, updated_at = excluded.updated_at",
+                    (self.new_id("khcel"), row_id, column_id, content_md, now),
+                )
+                db.execute(
+                    "UPDATE knowhow_rows SET updated_at = ?, projection_status = 'pending' "
+                    "WHERE id = ?",
+                    (now, row_id),
+                )
+                written.append((row_id, column_id))
+                if table_id not in written_table_ids:
+                    written_table_ids.append(table_id)
+            for table_id in written_table_ids:
+                db.execute(
+                    "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = ?",
+                    (table_id,),
+                )
+        return {
+            "written": written,
+            "skipped": skipped,
+            "already_applied": already_applied,
+            "rejected": rejected,
+        }
+
+    def update_knowhow_cells_guarded_atomic(
+        self,
+        notebook_id: str,
+        updates: "list[tuple[str, str, str, str, str]]",
+        require_assets: Sequence[str] = (),
+    ) -> "dict[str, object]":
+        """ALL-OR-NOTHING compare-and-write for the interactive editor's
+        batch-reformat save (concurrency P1 fix b, HTTP 409 on a concurrent
+        edit). Each update is ``(table_id, row_id, column_id, expected_before,
+        content_md)`` and ``notebook_id`` is the notebook every entry must
+        belong to. Same membership + compare guarantees as
+        ``update_knowhow_cells_bulk_guarded``, but the FAILURE MODE is the
+        opposite: where the bulk-guarded backfill collects skips/rejects and
+        presses on (idempotent CLI re-run), THIS method refuses the WHOLE batch
+        the moment any entry fails membership or its stored ``content_md`` no
+        longer equals ``expected_before``.
+
+        It does so in TWO PHASES inside ONE ``self.database.write()``
+        transaction: phase 1 validates membership and re-reads+compares EVERY
+        target's current content; only if EVERY entry clears does phase 2 write
+        them all (same per-row effect as ``update_knowhow_cell`` — cell upsert +
+        that row's ``updated_at``/``projection_status`` -> ``'pending'`` — plus
+        one ``mutation_seq`` bump per distinct written table). A conflict in
+        phase 1 returns BEFORE any write happens, so the transaction commits with
+        nothing changed — all-or-nothing by construction, no rollback needed. The
+        compare sharing the write transaction is the whole point: reading the
+        cells in a SEPARATE step, comparing, then writing would reopen the TOCTOU
+        window a live edit between the read and the write slips through.
+
+        ``require_assets`` (F2) behaves exactly as in ``update_knowhow_cell``:
+        asset ids the new content references that must still be live
+        ``notebook_assets`` rows OF THIS notebook at COMMIT time. Checked INSIDE
+        this same write transaction (after membership+stale clear, before any
+        write), so the guarded save path gets the identical dangling-asset guard
+        the legacy last-write-wins path already had — a missing/foreign asset
+        raises ``ValueError`` and the transaction commits nothing (the caller maps
+        it to the legacy 400 + CELL_ASSET_MISSING_MESSAGE, distinct from the 409).
+        Sharing the write lock is the same anti-TOCTOU reasoning as the compare.
+
+        Returns ``{"written": [(row_id, column_id), ...], "conflict": bool}``.
+        ``conflict=True`` guarantees ``written == []`` (the caller maps it to a
+        409 with a friendly "内容已被其他人修改，请刷新后重试"). Empty ``updates``
+        is a no-op (``{"written": [], "conflict": False}``, no transaction)."""
+        if not updates:
+            return {"written": [], "conflict": False}
+        now = self.now()
+        written: list[tuple[str, str]] = []
+        written_table_ids: list[str] = []
+        with self.database.write() as db:
+            # F1 (cross-process atomicity): reserve the write lock BEFORE phase 1
+            # re-reads, for the same reason as update_knowhow_cells_bulk_guarded
+            # -- write()'s ``write_lock`` is process-local, and pysqlite
+            # (isolation_level="") would otherwise defer the transaction to the
+            # first phase-2 DML, leaving the phase-1 compare running in
+            # autocommit where a second PROCESS could slip a write in between.
+            # BEGIN IMMEDIATE makes the read-compare-write cross-process atomic;
+            # the enclosing ``with conn:`` still commits/rolls back (no double
+            # BEGIN once autocommit is off), and a busy peer surfaces via
+            # PRAGMA busy_timeout.
+            db.execute("BEGIN IMMEDIATE")
+            # Phase 1: membership + stale compare for ALL entries BEFORE writing.
+            for table_id, row_id, column_id, expected_before, content_md in updates:
+                membership = db.execute(
+                    "SELECT r.table_id AS row_table, c.table_id AS col_table, "
+                    "t.notebook_id AS tbl_notebook "
+                    "FROM knowhow_rows r, knowhow_columns c, knowhow_tables t "
+                    "WHERE r.id = ? AND c.id = ? AND t.id = ?",
+                    (row_id, column_id, table_id),
+                ).fetchone()
+                if (
+                    membership is None
+                    or membership["row_table"] != table_id
+                    or membership["col_table"] != table_id
+                    or membership["tbl_notebook"] != notebook_id
+                ):
+                    return {"written": [], "conflict": True}
+                current_row = db.execute(
+                    "SELECT content_md FROM knowhow_cells "
+                    "WHERE row_id = ? AND column_id = ?",
+                    (row_id, column_id),
+                ).fetchone()
+                current = current_row["content_md"] if current_row is not None else None
+                if current != expected_before:
+                    return {"written": [], "conflict": True}
+            # F2: every entry cleared membership+stale → the new content's newly
+            # referenced assets must still exist in THIS notebook. All entries share
+            # notebook_id (membership just proved it), so checking against any target
+            # row resolves the same notebook (mirrors update_knowhow_cells checking
+            # against row_ids[0]). A miss raises ValueError -> whole tx rolls back,
+            # nothing written -> caller returns the legacy 400 (not a 409).
+            self._require_assets_exist(db, updates[0][1], require_assets)
+            # Phase 2: every entry cleared → write them all in this transaction.
+            for table_id, row_id, column_id, expected_before, content_md in updates:
+                db.execute(
+                    "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(row_id, column_id) DO UPDATE SET "
+                    "content_md = excluded.content_md, updated_at = excluded.updated_at",
+                    (self.new_id("khcel"), row_id, column_id, content_md, now),
+                )
+                db.execute(
+                    "UPDATE knowhow_rows SET updated_at = ?, projection_status = 'pending' "
+                    "WHERE id = ?",
+                    (now, row_id),
+                )
+                written.append((row_id, column_id))
+                if table_id not in written_table_ids:
+                    written_table_ids.append(table_id)
+            for table_id in written_table_ids:
+                db.execute(
+                    "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = ?",
+                    (table_id,),
+                )
+        return {"written": written, "conflict": False}
+
     def validate_cell_target(self, row_id: str, column_id: str) -> None:
         """Assert (row, column) name a real cell slot: both exist AND belong
         to the SAME table, else ``ValueError("格子定位不合法")`` uniformly (a

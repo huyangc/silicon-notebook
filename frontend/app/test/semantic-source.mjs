@@ -5,6 +5,20 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 
+const printer = ts.createPrinter({
+  newLine: ts.NewLineKind.LineFeed,
+  removeComments: true,
+});
+
+
+function semanticText(node) {
+  return printer
+    .printNode(ts.EmitHint.Unspecified, node, node.getSourceFile())
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+
 export function parseText(source, fileName) {
   return ts.createSourceFile(
     fileName,
@@ -108,6 +122,30 @@ export function findFunction(sourceFile, name) {
 }
 
 
+export function findFunctionIn(sourceFile, parentName, name) {
+  const scopes = [];
+  let match;
+  function visit(node) {
+    const nodeName = declaredName(node, sourceFile);
+    if (!match && nodeName === name && scopes.includes(parentName)) {
+      match = node;
+    }
+    if (nodeName) {
+      scopes.push(nodeName);
+    }
+    ts.forEachChild(node, visit);
+    if (nodeName) {
+      scopes.pop();
+    }
+  }
+  visit(sourceFile);
+  if (!match) {
+    throw new Error(`function not found: ${parentName}.${name}`);
+  }
+  return match;
+}
+
+
 export function callsIn(node) {
   const calls = [];
   function visit(child) {
@@ -118,6 +156,126 @@ export function callsIn(node) {
   }
   visit(node);
   return calls.sort();
+}
+
+
+export function callSitesIn(node) {
+  const calls = [];
+  function visit(child) {
+    if (ts.isCallExpression(child)) {
+      calls.push({
+        target: semanticText(child.expression),
+        arguments: child.arguments.map(semanticText),
+      });
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return calls.sort((left, right) => (
+    left.target.localeCompare(right.target)
+    || JSON.stringify(left.arguments).localeCompare(JSON.stringify(right.arguments))
+  ));
+}
+
+
+export function assignmentsIn(node) {
+  const assignments = [];
+  function visit(child) {
+    if (
+      ts.isBinaryExpression(child)
+      && child.operatorToken.kind >= ts.SyntaxKind.FirstAssignment
+      && child.operatorToken.kind <= ts.SyntaxKind.LastAssignment
+    ) {
+      assignments.push({
+        target: semanticText(child.left),
+        operator: child.operatorToken.getText(child.getSourceFile()),
+        value: semanticText(child.right),
+      });
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return assignments.sort((left, right) => (
+    left.target.localeCompare(right.target)
+    || left.operator.localeCompare(right.operator)
+    || left.value.localeCompare(right.value)
+  ));
+}
+
+
+export function ifConditionsIn(node) {
+  const conditions = [];
+  function visit(child) {
+    if (ts.isIfStatement(child)) {
+      conditions.push(semanticText(child.expression));
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return conditions.sort();
+}
+
+
+function containsReturn(node) {
+  let found = false;
+  function visit(child) {
+    if (found) {
+      return;
+    }
+    if (ts.isReturnStatement(child)) {
+      found = true;
+      return;
+    }
+    if (child !== node && ts.isFunctionLike(child)) {
+      return;
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return found;
+}
+
+
+export function ifBranchesIn(node) {
+  const branches = [];
+  function visit(child) {
+    if (ts.isIfStatement(child)) {
+      branches.push({
+        condition: semanticText(child.expression),
+        thenCalls: callsIn(child.thenStatement),
+        elseCalls: child.elseStatement ? callsIn(child.elseStatement) : [],
+        thenReturns: containsReturn(child.thenStatement),
+        elseReturns: child.elseStatement
+          ? containsReturn(child.elseStatement)
+          : false,
+      });
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return branches.sort((left, right) => (
+    left.condition.localeCompare(right.condition)
+    || JSON.stringify(left).localeCompare(JSON.stringify(right))
+  ));
+}
+
+
+export function variableInitializersIn(node) {
+  const initializers = [];
+  function visit(child) {
+    if (ts.isVariableDeclaration(child) && child.initializer) {
+      initializers.push({
+        name: semanticText(child.name),
+        initializer: semanticText(child.initializer),
+      });
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return initializers.sort((left, right) => (
+    left.name.localeCompare(right.name)
+    || left.initializer.localeCompare(right.initializer)
+  ));
 }
 
 
@@ -245,6 +403,31 @@ function staticJsxAttributes(attributes, sourceFile) {
 }
 
 
+function dynamicJsxBindings(attributes, sourceFile) {
+  const result = {};
+  for (const attribute of attributes.properties) {
+    if (!ts.isJsxAttribute(attribute)) {
+      continue;
+    }
+    const initializer = attribute.initializer;
+    if (
+      !initializer
+      || ts.isStringLiteral(initializer)
+      || !ts.isJsxExpression(initializer)
+      || !initializer.expression
+      || ts.isStringLiteral(initializer.expression)
+      || ts.isNumericLiteral(initializer.expression)
+    ) {
+      continue;
+    }
+    result[attribute.name.getText(sourceFile)] = semanticText(
+      initializer.expression,
+    );
+  }
+  return result;
+}
+
+
 export function jsxElements(sourceFile, elementName) {
   const scopes = ["<module>"];
   const elements = [];
@@ -261,10 +444,15 @@ export function jsxElements(sourceFile, elementName) {
       )
       && node.tagName.getText(sourceFile) === elementName
     ) {
-      elements.push({
+      const element = {
         scope: scopes.join("."),
         attributes: staticJsxAttributes(node.attributes, sourceFile),
-      });
+      };
+      const bindings = dynamicJsxBindings(node.attributes, sourceFile);
+      if (Object.keys(bindings).length > 0) {
+        element.bindings = bindings;
+      }
+      elements.push(element);
     }
     ts.forEachChild(node, visit);
     if (name) {

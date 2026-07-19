@@ -37,8 +37,8 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     reason: "model diagnostic detail is sent only to bounded logging",
   },
   "knowhow-cell-editor.tsx|<module>.KnowhowCellEditor|property|message": {
-    count: 1,
-    reason: "optimizer error state is written through the humanization boundary",
+    count: 2,
+    reason: "optimizer and reformatter error states are written through the humanization boundary",
   },
   "knowhow-panel.tsx|<module>.KnowhowPanel|property|message": {
     count: 1,

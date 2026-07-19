@@ -68,6 +68,13 @@ export const GENERIC_USER_ERROR = "操作没成功，请稍后重试";
 // 的只有本仓库的代码,那不是攻击面。
 const HUMANIZED: unique symbol = Symbol.for("silicon-notebook.errors.humanized") as never;
 
+// 原始 HTTP 状态码,挂在带品牌的 Error 上(非枚举属性)。humanizeHttpError 把
+// detail 压平成一句中文文案就丢了状态码,可有些 catch 侧要按状态码分流——并发
+// 保存里 409(他人已改 → 跳过该格)必须和其他失败(真报错)区分开。用与 HUMANIZED
+// 同样的 Symbol.for 全局注册表(跨 server/client bundle 稳定,见上)。JSON 里没有
+// Symbol,后端来的字符串永远带不上它,故只有本仓库亲手 throw 的错误才有状态码。
+const HTTP_STATUS: unique symbol = Symbol.for("silicon-notebook.errors.httpStatus") as never;
+
 // 一段文本是否够格直接展示给用户(**形态**闸,不是信任闸)。
 function isDisplayableUserText(text: string): boolean {
   if (!text || text.length > USER_TEXT_MAX_CHARS) return false;
@@ -106,10 +113,14 @@ function isCompliantUserCopy(text: string): boolean {
   return CJK_RE.test(text);
 }
 
-// 造一个「已翻译」的错误——本模块之外没有第二个地方盖这个章。
-export function humanizedError(message: string): Error {
+// 造一个「已翻译」的错误——本模块之外没有第二个地方盖这个章。可选 `status`:
+// HTTP 失败经此抛出时挂上原始状态码,供 httpErrorStatus 读回做状态码分流。
+export function humanizedError(message: string, status?: number): Error {
   const error = new Error(message);
   Object.defineProperty(error, HUMANIZED, { value: true, enumerable: false });
+  if (status !== undefined) {
+    Object.defineProperty(error, HTTP_STATUS, { value: status, enumerable: false });
+  }
   return error;
 }
 
@@ -118,6 +129,16 @@ function isHumanized(error: unknown): error is Error {
     error instanceof Error &&
     (error as unknown as Record<symbol, unknown>)[HUMANIZED] === true
   );
+}
+
+// 读回一个错误上的原始 HTTP 状态码(只有 throwHumanizedHttpError 抛出的错误才
+// 有)。非 HTTP 错误(fetch 自身 reject、纯 Error、humanizedError 无状态、非 Error
+// 值)一律返回 undefined。用途:catch 侧按状态码分流(如 409 → 内容已被他人改动,
+// 走「跳过该格」而非「保存失败」),不必读 .message 做脆弱的文案匹配。
+export function httpErrorStatus(error: unknown): number | undefined {
+  if (!(error instanceof Error)) return undefined;
+  const status = (error as unknown as Record<symbol, unknown>)[HTTP_STATUS];
+  return typeof status === "number" ? status : undefined;
 }
 
 // 状态码 → 中文。`trusted` 才允许 detail 原样穿透。
@@ -276,5 +297,7 @@ export async function readHttpError(res: Response, tag: string): Promise<HttpErr
 // 失败响应的统一出口:原始诊断进 console,面向用户抛人话(带品牌)。
 export async function throwHumanizedHttpError(res: Response, tag: string): Promise<never> {
   const { status, userDetail, trusted } = await readHttpError(res, tag);
-  throw humanizedError(humanizeHttpError(status, userDetail, trusted));
+  // 状态码随品牌一并挂上:文案被 humanizeHttpError 压平后,catch 侧仍能按状态码
+  // 分流(httpErrorStatus)。
+  throw humanizedError(humanizeHttpError(status, userDetail, trusted), status);
 }

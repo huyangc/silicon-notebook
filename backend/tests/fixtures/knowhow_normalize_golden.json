@@ -1,0 +1,72 @@
+[
+  {
+    "name": "bullets_under_alpha_header",
+    "raw": "通过用底层走线加shielding并使用1W1S rule，同时增大R、C，增大线延。\nA. 增大 R 和 C 的考量\n\t• 增加RC时间常数，delay正比于R*C\n\t• 增大 R： 导致转换时间（Transition Time）变慢。\nB. 1W1S rule 与 Shielding 的作用\n\t• Shielding (加屏蔽线)： 保证信号完整性。",
+    "expect_contains": [
+      "**A. 增大 R 和 C 的考量**",
+      "- 增加RC时间常数，delay正比于R*C",
+      "**B. 1W1S rule 与 Shielding 的作用**",
+      "- Shielding (加屏蔽线)： 保证信号完整性。"
+    ],
+    "expect_absent": [
+      "\t",
+      "•"
+    ],
+    "expect_exact": "通过用底层走线加shielding并使用1W1S rule，同时增大R、C，增大线延。\n\n**A. 增大 R 和 C 的考量**\n\n- 增加RC时间常数，delay正比于R*C\n- 增大 R： 导致转换时间（Transition Time）变慢。\n\n**B. 1W1S rule 与 Shielding 的作用**\n\n- Shielding (加屏蔽线)： 保证信号完整性。"
+  },
+  {
+    "name": "ordered_with_alpha_substeps",
+    "raw": "\n单条path跨多corner s/h打架\n\n1. 获取available buffer在各个corner下的延时\n2. 提取Hold违例path\n4. 计算是否会导致setup违例：\n\ta. cornerA下，margin充足\n\tb. 所有corner裕量充足",
+    "expect_contains": [
+      "单条path跨多corner s/h打架",
+      "1. 获取available buffer在各个corner下的延时",
+      "   - cornerA下，margin充足",
+      "   - 所有corner裕量充足"
+    ],
+    "expect_absent": [
+      "\t",
+      "\ta."
+    ],
+    "expect_exact": "单条path跨多corner s/h打架\n\n1. 获取available buffer在各个corner下的延时\n2. 提取Hold违例path\n4. 计算是否会导致setup违例：\n   - cornerA下，margin充足\n   - 所有corner裕量充足"
+  },
+  {
+    "name": "tab_prefixed_ordered_still_lists",
+    "raw": "实际操作：\n\t1. 遍历各个corner\n\t2. 输出delta delay较大的net",
+    "expect_contains": [
+      "实际操作：",
+      "1. 遍历各个corner",
+      "2. 输出delta delay较大的net"
+    ],
+    "expect_absent": [
+      "\t1.",
+      "\t2."
+    ],
+    "expect_exact": "实际操作：\n\n1. 遍历各个corner\n2. 输出delta delay较大的net"
+  },
+  {
+    "name": "two_prose_lines_stay_separate",
+    "raw": "分析 pt\n修复 innovus",
+    "expect_contains": [
+      "分析 pt",
+      "修复 innovus"
+    ],
+    "expect_absent": [
+      "分析 pt 修复 innovus"
+    ],
+    "expect_exact": "分析 pt\n\n修复 innovus"
+  },
+  {
+    "name": "idempotent_clean_markdown",
+    "raw": "**A. 标题**\n\n- 一\n- 二",
+    "expect_contains": [
+      "**A. 标题**",
+      "- 一",
+      "- 二"
+    ],
+    "expect_absent": [
+      "\t",
+      "•"
+    ],
+    "expect_exact": "**A. 标题**\n\n- 一\n- 二"
+  }
+]

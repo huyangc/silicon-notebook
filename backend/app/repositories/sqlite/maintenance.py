@@ -167,6 +167,33 @@ class SQLiteMaintenanceAdapter:
             ).fetchone()
         return self._runtime.identity._user_profile(user, profile)
 
+    def resolve_notebook_owner_profile(self, notebook_id: str):
+        """Resolve a notebook's OWNER (``notebooks.created_by`` -> that user's
+        UserProfile); None when the notebook is missing, has no owner, or its
+        owner user no longer exists. Sibling of ``resolve_owner_profile``
+        (which keys on a username): offline tooling that must act AS the
+        notebook owner -- ``scripts/backfill_knowhow_md.py``'s ``--use-llm``,
+        which resolves the per-user rewrite model client -- looks the owner up
+        by notebook_id and establishes that user's request context, so the
+        OWNER's per-user model configuration is honored rather than the ambient
+        default (user-local) the identity plumbing falls back to when no request
+        user is set."""
+        with self._runtime.database.connect() as db:
+            notebook = db.execute(
+                "SELECT created_by FROM notebooks WHERE id=?", (notebook_id,)
+            ).fetchone()
+            if notebook is None or not notebook["created_by"]:
+                return None
+            user = db.execute(
+                "SELECT * FROM users WHERE id=?", (notebook["created_by"],)
+            ).fetchone()
+            if user is None:
+                return None
+            profile = db.execute(
+                "SELECT * FROM user_profiles WHERE user_id=?", (user["id"],)
+            ).fetchone()
+        return self._runtime.identity._user_profile(user, profile)
+
     def all_notebook_ids(self) -> list[str]:
         with self._runtime.database.connect() as db:
             return [

@@ -183,6 +183,12 @@
       },
       {
         "kind": "import",
+        "path": "scripts/backfill_knowhow_md.py",
+        "scope": "<module>",
+        "target": "app.services.sqlite_repository:SQLiteRepository"
+      },
+      {
+        "kind": "import",
         "path": "scripts/bench_sqlite_writes.py",
         "scope": "<module>._make_repo",
         "target": "app.services.sqlite_repository:SQLiteRepository"
@@ -1483,6 +1489,12 @@
         "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.optimize_cell",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/knowhow/api.py",
+        "scope": "<module>.reformat_cell",
         "target": "_runtime"
       },
       {
@@ -3762,6 +3774,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.update_knowhow_cells_bulk_guarded",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.update_knowhow_cells_guarded_atomic",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.update_knowhow_table_meta",
         "target": "_runtime"
       },
@@ -5289,6 +5313,12 @@
         "path": "backend/app/services/knowhow/transfer.py",
         "scope": "<module>.move_table",
         "target": "get_knowhow_table"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/backfill_knowhow_md.py",
+        "scope": "<module>.plan_backfill",
+        "target": "get_knowhow_table"
       }
     ],
     "kind": "method",
@@ -5735,6 +5765,12 @@
         "kind": "attribute",
         "path": "backend/app/services/knowhow/api.py",
         "scope": "<module>.list_tables_for_agent",
+        "target": "list_knowhow_tables"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/backfill_knowhow_md.py",
+        "scope": "<module>.plan_backfill",
         "target": "list_knowhow_tables"
       }
     ],
@@ -6328,6 +6364,12 @@
         "kind": "attribute",
         "path": "scripts/backfill_kg_embeddings.py",
         "scope": "<module>.main",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/backfill_knowhow_md.py",
+        "scope": "<module>._run_dry_run",
         "target": "maintenance"
       },
       {
@@ -8374,6 +8416,57 @@
     "scope": "facade",
     "signature": "(self, row_ids: 'list', column_id: 'str', content_md: 'str', require_assets=()) -> 'None'"
   },
+  "update_knowhow_cells_bulk_guarded": {
+    "consumers": [
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_backfill_knowhow_md.py",
+        "scope": "<module>.test_apply_from_plan_skip_report_comes_from_transaction_return_value",
+        "target": "update_knowhow_cells_bulk_guarded"
+      },
+      {
+        "kind": "attribute",
+        "path": "scripts/backfill_knowhow_md.py",
+        "scope": "<module>.apply_reviewed_plan",
+        "target": "update_knowhow_cells_bulk_guarded"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowStore",
+    "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_backfill_knowhow_md.py",
+        "scope": "<module>.test_apply_from_plan_skip_report_comes_from_transaction_return_value",
+        "target": "update_knowhow_cells_bulk_guarded"
+      }
+    ],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', updates: 'list') -> 'dict'"
+  },
+  "update_knowhow_cells_guarded_atomic": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.patch_knowhow_cell",
+        "target": "update_knowhow_cells_guarded_atomic"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.patch_knowhow_cells_batch",
+        "target": "update_knowhow_cells_guarded_atomic"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', updates: 'list', require_assets=()) -> 'dict'"
+  },
   "update_knowhow_table_meta": {
     "consumers": [
       {
@@ -8578,6 +8671,12 @@
         "kind": "attribute",
         "path": "backend/app/api/routes.py",
         "scope": "<module>.patch_knowhow_cells_batch",
+        "target": "validate_cell_target"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.reformat_knowhow_cell",
         "target": "validate_cell_target"
       },
       {

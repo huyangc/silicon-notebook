@@ -920,6 +920,37 @@ PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/sili
 
 **重要提醒:** 运行 `apply` 前请先停止后端服务——本工具直接打开 `--db` 文件且不设
 `busy_timeout`,若后端正持有该库的活跃事务,同时写入可能相互冲突。
+### 回填存量 knowhow 格子的 Markdown 格式(`scripts/backfill_knowhow_md.py`)
+
+Knowhow 表格已经对新导入/追加的数据、以及格子级「整理格式」操作自动做 Excel 习惯排版规整(Tab 缩进的 `•` 项目符号、`A.`/`a.` 分节/子项编号、软换行等清理成干净的 CommonMark),但这个规整不会回溯性地应用到规整功能上线之前就已存在的格子。这个一次性 CLI 用于给指定 notebook 的这些存量格子补做同样的规整。
+
+**先 dry-run,再按评审过的 plan 文件写入。** dry-run 绝不写库,而是把完整计划写成一个 JSON plan 文件(并打印其路径),供你逐条评审;随后 `--apply --plan` 按【那个文件】逐条写入——落库的就是你评审过的,不会重新规划。
+
+**默认 dry-run 是只读的,随时可安全执行。** 默认(纯规则)dry-run 以只读方式打开数据库,不会构造可写仓库,因此对着正在运行/繁忙的后端跑也安全。`--use-llm`(需要改写模型)和 `--apply`(写库)则以【可写】方式打开数据库——打开时可能执行尚未完成的 schema 迁移与崩溃恢复,工具会在这么做时打印一行提示,建议在后端空闲时再执行这两种。
+
+```bash
+# dry-run(默认):打印每格 before/after/来源 + 汇总,并写出 plan 文件
+#(默认 .local/backfill_plans/knowhow_md_<notebook>_<时间戳>.json)——不写库
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx
+
+# 评审 plan 文件无误后,按它逐条写入(确定性规则,不涉及 LLM)——任何 --apply 都【必须】带 --plan
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --apply --plan <plan.json>
+
+# 改走 LLM 重排(每格「重排 -> 内容不变式校验 -> 规则兜底」):先 dry-run 评审,再按
+# 评审过的 plan 写入(同样的 --apply --plan 握手)
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --use-llm
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --use-llm --apply --plan <plan.json>
+```
+
+- `--notebook`(必填)—— 要回填的 notebook。
+- `--apply` —— 真正写入;它【必须】带 `--plan PATH`,按该评审过的 plan 文件逐条写入。某个格子若在评审后被人改过(当前内容与 plan 记录的 `before` 不一致)会被【跳过并报告】,绝不覆盖已经改动过的目标。每个写入的行标记为 pending,交由投影重算其 KG/步骤(重投影在命令退出前同步完成)。不带 `--plan` 的 `--apply` 是【硬错误】:apply 时从【当前】库重新规划,会把评审后被改过的格子也带进来写入却从未被评审(`--use-llm` 更甚——改写模型随机,重新规划连候选都不同)——所以请先 dry-run、评审其 plan 文件,再按【那份】写入。
+- `--use-llm` —— 改走已配置的改写模型逐格重排(自带零 LLM 的内容不变式校验,校验不过会自动退回确定性规则),而不是默认那套随时可用的规则规整器。若改写模型未配置、或其结果未过校验已退回规则,工具会打印明确的 `WARNING`,不会悄悄假装 LLM 生效了。
+- `--save-plan PATH` —— 覆盖 dry-run 写出 plan 文件的路径。
+- `--plan PATH` —— 要写入的评审过的 plan 文件(见 `--apply`)。
+
+**行标题(anchor)列绝不参与规整**——不论是导入、追加还是本回填等【批量】路径:它是分组键,必须字节稳定,规整它会让刚被改动的行与既有概念组的键失配、组被劈开。(只有编辑器里【显式】的单格「整理格式」——有人逐格评审建议、且同组兄弟行一起改写——才可以动它。)
+
+必须在主 checkout 根目录下运行(需要真实的 `.env`/数据库配置,与上面的 `batch_ingest.py`/`replay_retrieval.py` 一样)。可安全重复执行:再按同一个 plan 应用一次是 no-op(每个已应用的格子当前内容都已不再等于它记录的 `before`)。
 
 ## 当前限制
 

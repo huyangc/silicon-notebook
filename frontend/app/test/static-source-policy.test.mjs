@@ -9,6 +9,8 @@ import { STATIC_SOURCE_CONTRACTS } from "./static-source-contracts.mjs";
 
 const APP_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const DIRECT_READ_ALLOWLIST = new Set([
+  // Reads committed cross-language golden data, never production source text.
+  "knowhow-normalize.test.mjs",
   "test/semantic-source.mjs",
   "test/static-source-policy.test.mjs",
   "test-runner-config.test.mjs",

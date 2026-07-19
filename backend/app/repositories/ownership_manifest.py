@@ -104,6 +104,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/scripts/reembed_kg.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
+            ConsumerSite(path='scripts/backfill_knowhow_md.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/bench_sqlite_writes.py', scope='<module>._make_repo', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/build_chunks.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>', kind='import', target='app.services.sqlite_repository:SQLiteRepository'),
@@ -596,6 +597,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_sharing_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.build_projector', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.optimize_cell', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.reformat_cell', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/transfer.py', scope='<module>._remap', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/transfer.py', scope='<module>.copy_table', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/knowhow/transfer.py', scope='<module>.move_table', kind='attribute', target='_runtime'),
@@ -975,6 +977,8 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.update_agent_profile', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.update_knowhow_cell', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.update_knowhow_cells', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.update_knowhow_cells_bulk_guarded', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.update_knowhow_cells_guarded_atomic', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.update_knowhow_table_meta', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.update_knowledge', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.update_memory', kind='attribute', target='_runtime'),
@@ -1683,6 +1687,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.list_tables_for_agent', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.put_cell_code', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/services/knowhow/transfer.py', scope='<module>.move_table', kind='attribute', target='get_knowhow_table'),
+            ConsumerSite(path='scripts/backfill_knowhow_md.py', scope='<module>.plan_backfill', kind='attribute', target='get_knowhow_table'),
         ),
         patches=(
         ),
@@ -1870,6 +1875,7 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.list_knowhow_tables', kind='attribute', target='list_knowhow_tables'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.list_tables_for_agent', kind='attribute', target='list_knowhow_tables'),
+            ConsumerSite(path='scripts/backfill_knowhow_md.py', scope='<module>.plan_backfill', kind='attribute', target='list_knowhow_tables'),
         ),
         patches=(
         ),
@@ -2039,6 +2045,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.eval_insert_source_for_test', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>._counts', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/backfill_kg_embeddings.py', scope='<module>.main', kind='attribute', target='maintenance'),
+            ConsumerSite(path='scripts/backfill_knowhow_md.py', scope='<module>._run_dry_run', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/build_chunks.py', scope='<module>.main', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>._run_status', kind='attribute', target='maintenance'),
             ConsumerSite(path='scripts/denoise_reextract_nb.py', scope='<module>.main', kind='attribute', target='maintenance'),
@@ -2853,6 +2860,29 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='update_knowhow_cells_bulk_guarded',
+        owner='KnowhowStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/tests/test_backfill_knowhow_md.py', scope='<module>.test_apply_from_plan_skip_report_comes_from_transaction_return_value', kind='patch', target='update_knowhow_cells_bulk_guarded'),
+            ConsumerSite(path='scripts/backfill_knowhow_md.py', scope='<module>.apply_reviewed_plan', kind='attribute', target='update_knowhow_cells_bulk_guarded'),
+        ),
+        patches=(
+            ConsumerSite(path='backend/tests/test_backfill_knowhow_md.py', scope='<module>.test_apply_from_plan_skip_report_comes_from_transaction_return_value', kind='patch', target='update_knowhow_cells_bulk_guarded'),
+        ),
+    ),
+    SurfaceMember(
+        name='update_knowhow_cells_guarded_atomic',
+        owner='KnowhowStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cell', kind='attribute', target='update_knowhow_cells_guarded_atomic'),
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cells_batch', kind='attribute', target='update_knowhow_cells_guarded_atomic'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='update_knowhow_table_meta',
         owner='KnowhowStore',
         kind='method',
@@ -2951,6 +2981,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.optimize_knowhow_cell', kind='attribute', target='validate_cell_target'),
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cell', kind='attribute', target='validate_cell_target'),
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cells_batch', kind='attribute', target='validate_cell_target'),
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.reformat_knowhow_cell', kind='attribute', target='validate_cell_target'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.delete_cell_code', kind='attribute', target='validate_cell_target'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.get_cell_code', kind='attribute', target='validate_cell_target'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.put_cell_code', kind='attribute', target='validate_cell_target'),
