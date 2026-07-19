@@ -103,6 +103,15 @@ function relativeImports(relative, source, moduleNames) {
       const resolved = resolve(node.moduleSpecifier.text);
       if (resolved) imports.push(resolved);
     }
+    if (
+      ts.isCallExpression(node)
+      && node.expression.kind === ts.SyntaxKind.ImportKeyword
+      && node.arguments.length === 1
+      && ts.isStringLiteral(node.arguments[0])
+    ) {
+      const resolved = resolve(node.arguments[0].text);
+      if (resolved) imports.push(resolved);
+    }
     ts.forEachChild(node, visit);
   }
   visit(sourceFile);
@@ -165,7 +174,95 @@ async function policyModules() {
 }
 
 
-function hasPositionOrOrderQuery(relative, source, readsFiles) {
+function isDefinitelyArrayInput(parameter) {
+  if (
+    parameter.initializer
+    && ts.isArrayLiteralExpression(parameter.initializer)
+  ) {
+    return true;
+  }
+  function isArrayType(type) {
+    if (!type) return false;
+    if (ts.isArrayTypeNode(type) || ts.isTupleTypeNode(type)) return true;
+    if (ts.isParenthesizedTypeNode(type)) return isArrayType(type.type);
+    if (ts.isUnionTypeNode(type)) return type.types.every(isArrayType);
+    return (
+      ts.isTypeReferenceNode(type)
+      && ts.isIdentifier(type.typeName)
+      && ["Array", "ReadonlyArray"].includes(type.typeName.text)
+    );
+  }
+  return isArrayType(parameter.type);
+}
+
+
+function textFlowReceivers(sourceFile, includeHelperInputs) {
+  const receivers = new Set();
+
+  function unwrapAwait(expression) {
+    return ts.isAwaitExpression(expression)
+      ? expression.expression
+      : expression;
+  }
+
+  function isTextFlow(expression) {
+    const unwrapped = unwrapAwait(expression);
+    if (ts.isIdentifier(unwrapped)) return receivers.has(unwrapped.text);
+    return (
+      ts.isCallExpression(unwrapped)
+      && (
+        (
+          ts.isIdentifier(unwrapped.expression)
+          && ["readFile", "readFileSync"].includes(
+            unwrapped.expression.text,
+          )
+        )
+        || (
+          ts.isPropertyAccessExpression(unwrapped.expression)
+          && ["readFile", "readFileSync"].includes(
+            unwrapped.expression.name.text,
+          )
+        )
+      )
+    );
+  }
+
+  function visit(node) {
+    if (includeHelperInputs && ts.isFunctionLike(node)) {
+      for (const parameter of node.parameters) {
+        if (
+          ts.isIdentifier(parameter.name)
+          && !isDefinitelyArrayInput(parameter)
+        ) {
+          receivers.add(parameter.name.text);
+        }
+      }
+    }
+    if (
+      ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.initializer
+      && isTextFlow(node.initializer)
+    ) {
+      receivers.add(node.name.text);
+    }
+    if (
+      ts.isBinaryExpression(node)
+      && node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+      && ts.isIdentifier(node.left)
+      && isTextFlow(node.right)
+    ) {
+      receivers.add(node.left.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return receivers;
+}
+
+
+function hasPositionOrOrderQuery(relative, source) {
   if (POSITION_QUERY_ALLOWLIST.has(relative)) return false;
   const sourceFile = ts.createSourceFile(
     relative,
@@ -175,6 +272,10 @@ function hasPositionOrOrderQuery(relative, source, readsFiles) {
     scriptKind(relative),
   );
   let found = false;
+  const flowReceivers = textFlowReceivers(
+    sourceFile,
+    !isTestEntrypoint(relative),
+  );
 
   function sourceLike(expression) {
     return (
@@ -248,9 +349,11 @@ function hasPositionOrOrderQuery(relative, source, readsFiles) {
       if (
         ["indexOf", "slice", "substring"].includes(method)
         && (
-          readsFiles
-          || sourceLike(node.expression.expression)
-          || !isTestEntrypoint(relative)
+          sourceLike(node.expression.expression)
+          || (
+            ts.isIdentifier(node.expression.expression)
+            && flowReceivers.has(node.expression.expression.text)
+          )
         )
       ) {
         found = true;
@@ -275,7 +378,7 @@ function modulePolicyOffenders(relative, source) {
     offenders.push(`${relative}: direct production-source read`);
   }
   if (
-    hasPositionOrOrderQuery(relative, source, readsFiles)
+    hasPositionOrOrderQuery(relative, source)
   ) {
     offenders.push(`${relative}: source-position or source-order query`);
   }
@@ -348,9 +451,23 @@ test("source policy rejects position identities without banning ordinary arrays"
   assert.deepEqual(
     modulePolicyOffenders(
       "test/source-helper.mjs",
-      "export function fragment(text) { return text.slice(1); }",
+      "export function fragment(payload) { return payload.slice(1); }",
     ),
     ["test/source-helper.mjs: source-position or source-order query"],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/array-helper.ts",
+      "export function clone(values: string[]) { return values.slice(); }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/local-array-helper.mjs",
+      "export function clone() { const values = [1]; return values.slice(); }",
+    ),
+    [],
   );
   assert.deepEqual(
     modulePolicyOffenders(
@@ -384,6 +501,25 @@ test("source policy follows test imports to root TypeScript helper modules", () 
       modules.get("feature-helper.ts"),
     ),
     ["feature-helper.ts: source-position or source-order query"],
+  );
+});
+
+
+test("source policy follows dynamic imports to test-only helpers", () => {
+  const modules = new Map([
+    [
+      "feature.test.mjs",
+      "const helper = await import('./dynamic-helper.ts'); void helper;",
+    ],
+    [
+      "dynamic-helper.ts",
+      "export function fragment(payload: string) { return payload.slice(1); }",
+    ],
+    ["page.tsx", "export default function Page() { return null; }"],
+  ]);
+  assert.deepEqual(
+    [...policyRelativeModules(modules)].sort(),
+    ["dynamic-helper.ts", "feature.test.mjs"],
   );
 });
 
