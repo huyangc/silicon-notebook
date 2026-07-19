@@ -111,10 +111,14 @@ async function copyTextToClipboard(text: string) {
 
 function SelectedReferenceDetail({
   reference,
+  notebookNames,
   onOpenKnowledgeGraph,
   onOpenKnowhowRow,
 }: {
   reference: AnswerReference;
+  /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
+   * 参考库(base_notebooks)合并，供引用徽章把 notebook_id 解成人类可读的库名。 */
+  notebookNames: Record<string, string>;
   onOpenKnowledgeGraph: (objectId?: string) => void;
   /** Task 12（引用跳转）：命中 knowhow 格子的引用才出现「在表格中查看」按钮。 */
   onOpenKnowhowRow: (tableId: string, rowId: string) => void;
@@ -124,7 +128,13 @@ function SelectedReferenceDetail({
   const snippet = referenceSnippet(reference);
   const source = referenceSource(reference);
   const location = referenceLocation(reference);
-  const tier = reference.anchor?.tier || "";
+  // citation/anchor 二选一(buildAnswerReferences 全有全无),但既有的 anchor-only
+  // 写法会让「无 [k] 标记、走 citation 回退列表」的答案永远显示不出 tier 徽章——
+  // 补齐 citation 分支，和上面 referenceTitle/referenceSource 等 helper 的
+  // "anchor 优先、citation 兜底"惯例保持一致。
+  const tier = reference.anchor?.tier ?? reference.citation?.tier ?? "";
+  const sourceNotebookId = reference.citation?.notebook_id || reference.anchor?.notebook_id || "";
+  const sourceName = sourceNotebookId ? notebookNames[sourceNotebookId] : undefined;
   const isRelationReference = objectType === "relation";
   const canLocateInGraph = Boolean(reference.anchor?.object_id) && !isRelationReference;
   // Task 12b（引用跳转扩面）：citation 优先，anchor 兜底——两者理论上不会同时
@@ -139,9 +149,22 @@ function SelectedReferenceDetail({
         {tier && (
           <span
             className={`tier-badge tier-${tier}`}
-            title={tier === "base" ? "来自公共知识库" : "来自个人知识库"}
+            title={
+              sourceName
+                ? `来自「${sourceName}」（${tier === "base" ? "公共知识库" : "个人知识库"}）`
+                : (tier === "base" ? "来自公共知识库" : "来自个人知识库")
+            }
           >
-            {label(TIER, tier, "未知来源")}
+            {sourceName ? (
+              // 可达性修复(codex 评审 PR#304 第 3 轮 P2 #2):库名此前只进了上面的
+              // title(hover 提示),触屏/键盘用户完全看不到是哪个库。这里把库名
+              // 并入可见文字——长名走 .tier-badge-source-name 的省略号截断,不撑
+              // 爆卡片;title 与可见文字内容一致,悬浮仍能看到被截断的完整库名。
+              <>来自「<span className="tier-badge-source-name">{sourceName}</span>」（{label(TIER, tier, "未知来源")}）</>
+            ) : (
+              // 查不到库名(如跨二级挂载):优雅退回原有的泛化 tier 文案,不吐 id/空白。
+              label(TIER, tier, "未知来源")
+            )}
           </span>
         )}
         <button
@@ -183,12 +206,14 @@ function SelectedReferenceDetail({
 
 function CitationPopover({
   reference,
+  notebookNames,
   anchorRect,
   onClose,
   onOpenKnowledgeGraph,
   onOpenKnowhowRow,
 }: {
   reference: AnswerReference;
+  notebookNames: Record<string, string>;
   anchorRect: DOMRect;
   onClose: () => void;
   onOpenKnowledgeGraph: (objectId?: string) => void;
@@ -238,6 +263,7 @@ function CitationPopover({
     >
       <SelectedReferenceDetail
         reference={reference}
+        notebookNames={notebookNames}
         onOpenKnowledgeGraph={onOpenKnowledgeGraph}
         onOpenKnowhowRow={onOpenKnowhowRow}
       />
@@ -313,6 +339,7 @@ export function AnswerView({
   onOpenKnowledgeGraph,
   onOpenKnowhowRow,
   notebookId,
+  notebookNames,
   onBuildScaleIndex,
   buildingScaleIndex,
   onSaveMemory,
@@ -326,6 +353,9 @@ export function AnswerView({
    * page.tsx 据此打开 Knowhow 面板并定位到该表该行的抽屉。 */
   onOpenKnowhowRow: (tableId: string, rowId: string) => void;
   notebookId: string | null;
+  /** 多领域基准库(Task 14)：id→name 映射，来自 notebooks 列表 + 当前笔记本挂载的
+   * 参考库(base_notebooks)合并，逐 turn 复用同一份，供引用徽章标来源库名。 */
+  notebookNames: Record<string, string>;
   onBuildScaleIndex: (notebookId: string) => void;
   buildingScaleIndex: boolean;
   onSaveMemory: (answerId: string) => void;
@@ -418,6 +448,7 @@ export function AnswerView({
       {citePopover && (
         <CitationPopover
           reference={citePopover.reference}
+          notebookNames={notebookNames}
           anchorRect={citePopover.rect}
           onClose={() => setCitePopover(null)}
           // 「知识图谱」「在表格中查看」都会在本卡片之上打开一个新的全屏视图
