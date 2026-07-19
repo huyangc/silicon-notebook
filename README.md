@@ -41,10 +41,12 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 15. The committed v9 compatibility fixture
-upgrades through the existing v10 migration, the v11/v12 SQLite hot-path index
-migrations, the v13 Memory/Agent migration, and the v14/v15 Memory-derived
-source link/index migrations, and remains readable.
+The current schema version is 20. The committed v9 compatibility fixture
+upgrades through migrations v10–v20 and remains readable. Those migrations
+cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
+Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
+(v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
+reference-library mounts plus promotion targets (v20).
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, and graph/answer type marks share `kg-type-mark.tsx`.
 - Boundary regression tests prevent these responsibilities from being copied back into the monoliths. Future extraction should follow the same incremental pattern: preserve endpoints and user behavior, move one cohesive domain, then run the complete offline gate.
 

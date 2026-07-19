@@ -9,6 +9,7 @@ from app.repositories.ports import (
     RetrievalPort,
 )
 from app.repositories.ownership_manifest import OWNER_BY_MEMBER
+from app.repositories.sqlite.migrations import SCHEMA_VERSION
 from app.services import report_engine, report_execution, repository_runtime
 from tests import test_repository_facade_contract as facade_contract
 from tests.test_repository_callers_static import (
@@ -607,26 +608,37 @@ def test_report_cancellation_is_the_documented_process_global_runtime_exception(
     )
 
 
-def test_repository_schema_baseline_wording_is_exact_and_not_stale():
-    english_current = (
-        "The current schema version is 15. The committed v9 compatibility fixture\n"
-        "upgrades through the existing v10 migration, the v11/v12 SQLite hot-path index\n"
-        "migrations, the v13 Memory/Agent migration, and the v14/v15 Memory-derived\n"
-        "source link/index migrations, and remains readable."
-    )
-    chinese_current = (
-        "当前 schema 版本为 15。已提交的 v9 兼容 fixture 会经由既有 v10 migration、"
-        "v11/v12 SQLite 热路径索引 migration、v13 Memory/Agent migration 与 v14/v15 Memory 派生源 link/index migration 升级，并保持可读。"
-    )
+def test_live_schema_docs_follow_executable_version():
+    english_version = f"The current schema version is {SCHEMA_VERSION}."
+    chinese_version = f"当前 schema 版本为 {SCHEMA_VERSION}。"
+    migration_span = f"v10–v{SCHEMA_VERSION}"
+
+    for name in ("README.md", "AGENTS.md"):
+        text = _read(name)
+        assert english_version in text
+        assert re.findall(
+            r"The current schema version is (\d+)\.", text
+        ) == [str(SCHEMA_VERSION)]
+        assert migration_span in text
+
+    for name in ("README_zh.md", "architecture.md"):
+        text = _read(name)
+        assert chinese_version in text
+        assert re.findall(
+            r"当前 schema 版本为 (\d+)[。]", text
+        ) == [str(SCHEMA_VERSION)]
+        assert migration_span in text
+
+
+def test_repository_composition_history_keeps_v10_baseline():
     historical_chinese = (
         "本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。"
         "已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。"
     )
-    for name in ("README.md", "AGENTS.md"):
-        assert english_current in _read(name), f"{name} is missing the exact schema statement"
-    assert chinese_current in _read("README_zh.md")
     for name in ("architecture.md", "fangan_done.md") + COMPOSITION_HISTORY_DOCS:
-        assert historical_chinese in _read(name), f"{name} is missing the historical schema statement"
+        assert historical_chinese in _read(name), (
+            f"{name} is missing the historical schema statement"
+        )
 
     for name in COMPOSITION_HISTORY_DOCS:
         text = _read(name)
@@ -637,7 +649,9 @@ def test_repository_schema_baseline_wording_is_exact_and_not_stale():
             "SCHEMA_VERSION remains 9",
             "schema v9 and frozen-master",
         ):
-            assert stale not in text, f"{name} retains stale schema wording: {stale}"
+            assert stale not in text, (
+                f"{name} retains stale schema wording: {stale}"
+            )
 
 
 def test_ask_mode_documentation_keeps_chunk_default_and_alias_only_retirement():
