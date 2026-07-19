@@ -149,10 +149,12 @@ Confirmed scope:
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state is runtime-owned, and supported post-composition replacements must update every retained consumer. Synchronous Ask/report submission failures must mark the durable job/report failed, unregister its cancellation entry, and re-raise; preserve the successful worker order and existing Ask transaction checkpoints.
 - Schema changes stay version-gated behind `SqliteMigrator` (append `_migration_N` + bump `SCHEMA_VERSION`); startup recovery/seed/admin-upgrade run every boot outside the version gate. Pre-refactor databases must keep loading: the frozen v9 fixture replay (`backend/tests/fixtures/repository_v9/`, `test_legacy_db_compat.py`) and the backup-only real-database verifier `scripts/verify_repository_snapshot.py` are the guards. The verifier uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, never constructs the repository on an original database/storage path, and reports a retained temporary backup on cleanup failure without private row data. Original DB/WAL metadata and SHM existence/size are guarded; on a live WAL attachment only SHM mtime is exempt.
 
-The current schema version is 15. The committed v9 compatibility fixture
-upgrades through the existing v10 migration, the v11/v12 SQLite hot-path index
-migrations, the v13 Memory/Agent migration, and the v14/v15 Memory-derived
-source link/index migrations, and remains readable.
+The current schema version is 20. The committed v9 compatibility fixture
+upgrades through migrations v10–v20 and remains readable. Those migrations
+cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
+Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
+(v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
+reference-library mounts plus promotion targets (v20).
 - PostgreSQL + pgvector remain the future production/team-beta direction. Do not require them for the current local beta.
 - Until a PostgreSQL repository exists, reject every non-`sqlite:///` `DATABASE_URL` at settings construction; never silently fall back to `.local` for an unsupported database scheme.
 - KG-native tables are live: `knowledge_objects` (object types `concept/claim/formula/procedure`), `knowledge_relations`, knowledge/element/chunk/relation embeddings, `concept_clusters`, `extraction_runs`, `answers`, `conversations`, `feedback`, `ask_jobs`, `ask_trace_steps`, and `reports`; sharing uses notebook share fields plus `notebook_members`. The independent Memory layer uses `memory_items`, `memory_revisions`, `memory_provenance`, `memory_embeddings`, `agent_profiles`, `agent_access_tokens`, and `agent_token_notebooks`; Memory is never inserted into source/chunk/KG tables, and KG promotion creates a separate governed object. Embedding vectors are persisted locally and assembled into versioned float32 matrices or scale indexes. Graph/reasoning paths build or load federated graph state while preserving tier provenance.
@@ -337,10 +339,10 @@ This checks:
 - Markdown, DOCX, PPTX, and PDF upload/parse smoke path (sync and async-scheduler paths).
 - KG extraction boundary (`no-llm` offline), explicit KG storage, source cleanup → Ask → feedback → conversation and report paths, retrieval scoring, stale-source knowledge invalidation, sharing, and fresh-database assertions.
 - Logging: LLM interaction log, generic event log (parseable/disable/never-raise), and pipeline stage events + `error_message` regression.
-- Official MCP client smoke for the seven Memory tools, session notebook selection, candidate exclusion from formal context, and same-user/same-notebook cross-Agent candidate recall.
+- Official MCP client smoke for exactly eleven tools (seven Memory plus four knowhow), session notebook selection, candidate exclusion from formal context, and same-user/same-notebook cross-Agent candidate recall.
 - User-facing vocabulary guard (`check_ui_vocabulary.py`): no internal jargon in copy a user can see — rendered `frontend/app` text **and** backend `user_error()` messages, whose `X-User-Message` marker means they are displayed verbatim (see 界面词汇表).
 - Source summary fallback and notebook-internal search.
-- Complete backend `pytest` suite.
+- Complete backend `pytest` suite plus the deterministic extraction-scoring harness under `fangan/testcases/harness/tests`; committed tests must not depend on developer-local source documents.
 - Every recursively discovered frontend `*.test.mjs`, Next.js TypeScript, and production build. Missing `frontend/node_modules` is a hard failure.
 
 For local API checks, use:

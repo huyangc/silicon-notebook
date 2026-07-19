@@ -1332,12 +1332,15 @@ chunk 或 knowledge object。
 - 用户在总 Memory 页创建稳定 Agent profile，并签发明文只显示一次的 opaque token。Token 配置
   过期时间、默认 notebook、notebook allowlist 和最小 scope；可即时撤销。可用 scope 只有
   `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
-  `ask:execute`。
+  `ask:execute`、`knowhow:code`。
 - MCP 使用官方 SDK 的 Streamable HTTP `/mcp`。本机只允许 loopback HTTP；远程默认允许明文 HTTP（可信内网默认：放宽 Host/Origin 校验并打印启动告警），设 `MCP_REQUIRE_HTTPS=1` 恢复强制 HTTPS 与 DNS-rebinding 保护。
   每个新 session 先显式调用 `select_notebook`，服务端在后续每次数据调用重新校验 token、scope、
   allowlist、所选 notebook 和用户当前访问权。
-- 精确工具集为 `list_notebooks`、`select_notebook`、`search_agent_memory`、
-  `search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory`。
+- 精确工具集共十一个工具（七个 Memory/context 工具与四个 knowhow 工具）：
+  `list_notebooks`、`select_notebook`、`search_agent_memory`、`search_notebook_context`、
+  `get_memory`、`ask_notebook`、`propose_memory`、`list_knowhow_tables`、
+  `get_knowhow_discrimination`、`get_knowhow_row`、`put_knowhow_cell_code`。
+  knowhow 读取需 `knowledge:read`，格子代码写入需 `knowhow:code`。
   Agent 不能确认、拒绝、弃用或晋升 Memory；返回内容始终作为不可信 evidence/data，不作为指令。
 
 ## 19.4 Memory → KG 治理
@@ -1353,5 +1356,6 @@ dedupe/merge，创建或合并一个或多个 Base KG 对象，并由 API 与晋
 
 固定 gold 计算 Recall@5、MRR、nDCG，并以三项零容忍计数守卫 candidate→正式平面、跨用户、
 跨 notebook 泄漏；另有 A/B harness 对比 no-Memory、KB-only、KB+confirmed-Memory。发布门槛
-还包含官方 MCP client 离线 smoke：七工具契约、session 选择隔离、candidate 不进入正式上下文，
-以及同用户同 notebook 的跨 Agent candidate 召回。
+还包含官方 MCP client 离线 smoke：十一个工具契约（七个 Memory/context 工具与四个 knowhow
+工具）、session 选择隔离、candidate 不进入正式上下文，以及同用户同 notebook 的跨 Agent
+candidate 召回。

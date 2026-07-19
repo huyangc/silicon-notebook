@@ -41,7 +41,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
-当前 schema 版本为 15。已提交的 v9 兼容 fixture 会经由既有 v10 migration、v11/v12 SQLite 热路径索引 migration、v13 Memory/Agent migration 与 v14/v15 Memory 派生源 link/index migration 升级，并保持可读。
+当前 schema 版本为 20。已提交的 v9 兼容 fixture 会经由 v10–v20 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标。
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，图谱和答案共用的类型标记位于 `kg-type-mark.tsx`。
 - 结构回归测试会阻止这些职责重新复制回巨型文件。后续拆分沿用同一增量方式：保持端点与用户行为不变，每次只迁移一个高内聚领域，然后运行完整离线门禁。
 
@@ -943,7 +943,7 @@ PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/sili
 bash scripts/check.sh
 ```
 
-该脚本进行后端语法检查（`py_compile`）、不读取仓库 `.env` 的离线 hermetic smoke、完整后端 pytest、递归发现的全部前端 `*.test.mjs`、`tsc --noEmit` 与 production build。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+该脚本进行后端语法检查（`py_compile`）、不读取仓库 `.env` 的离线 hermetic smoke、完整 backend pytest、`fangan/testcases/harness/tests` 下的确定性抽取评分 harness、递归发现的全部前端 `*.test.mjs`、`tsc --noEmit` 与 production build。官方 client MCP smoke 精确锁定十一个工具：七个 Memory 工具加四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
 
 ## 开发流程
 

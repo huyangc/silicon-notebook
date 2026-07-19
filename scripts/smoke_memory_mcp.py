@@ -22,6 +22,10 @@ TOOLS = {
     "get_memory",
     "ask_notebook",
     "propose_memory",
+    "list_knowhow_tables",
+    "get_knowhow_discrimination",
+    "get_knowhow_row",
+    "put_knowhow_cell_code",
 }
 
 
@@ -168,7 +172,10 @@ async def run() -> None:
                 ))
                 assert memory_id in {item["memory_id"] for item in recalled["items"]}
 
-    print("memory MCP smoke: OK (7 tools, session isolation, candidate plane isolation)")
+    print(
+        "memory MCP smoke: OK "
+        "(11 tools, session isolation, candidate plane isolation)"
+    )
 
 
 if __name__ == "__main__":

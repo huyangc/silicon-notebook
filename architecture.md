@@ -44,13 +44,16 @@
 本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
 
 此后 master 先以 v11/v12 增加 SQLite 热路径索引，Agent Memory 在合并后使用 v13
-migration；当前 schema 版本为 13，冻结 v9 fixture 会继续经过 v10～v13 升级并保持可读。
+migration；当前 schema 版本为 20。已提交的 v9 兼容 fixture 会经由 v10–v20 migration
+升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent
+与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，
+v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。
 
 ### 2.3 API 与领域服务
 
-- `backend/app/api/routes.py` 目前仍是聚合 FastAPI router，承载 notebook、source、Ask、knowledge、report 与治理端点；`memory_routes.py` 承载 Memory 与 Agent access 页面 API，`mcp_server.py` 提供七个 scoped Streamable HTTP 工具；`auth_routes.py` 和 `deps.py` 分别承载认证路由与访问控制依赖。
+- `backend/app/api/routes.py` 目前仍是聚合 FastAPI router，承载 notebook、source、Ask、knowledge、report 与治理端点；`memory_routes.py` 承载 Memory 与 Agent access 页面 API，`mcp_server.py` 提供十一个工具（七个 Memory/context 与四个 knowhow）的 scoped Streamable HTTP 面；`auth_routes.py` 和 `deps.py` 分别承载认证路由与访问控制依赖。
 - `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑。
 - `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、mode 注册和 reasoning 迭代。
 - `report_engine.py` 负责两阶段深度报告；`background_jobs.py`、`cancellation.py` 和 repository 中的 job 状态共同管理后台任务与显式取消。
@@ -144,6 +147,11 @@ token 是否撤销/过期、profile 状态、scope、allowlist 与用户当前 n
 evidence，不提供原始 revision/provenance 浏览。批准前会重新校验 Memory 当前仍为 confirmed 且
 创建者仍有访问权，再经既有 dedupe/merge 创建或合并一个或多个 Base KG 对象，并在 API/审计中
 保存完整 `base_object_ids`；私有 Memory 行仍归原创建者。
+
+当前公开十一个工具：`list_notebooks`、`select_notebook`、`search_agent_memory`、
+`search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory`、
+`list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row` 与
+`put_knowhow_cell_code`；读取需相应 read scope，格子代码写入需 `knowhow:code`。
 
 ### 3.5 KG 与索引维护
 
