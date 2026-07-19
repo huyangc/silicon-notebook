@@ -192,7 +192,24 @@ function isDefinitelyArrayType(type) {
   return (
     ts.isTypeReferenceNode(type)
     && ts.isIdentifier(type.typeName)
-    && ["Array", "ReadonlyArray"].includes(type.typeName.text)
+    && [
+      "Array",
+      "ReadonlyArray",
+      "ArrayBuffer",
+      "SharedArrayBuffer",
+      "Buffer",
+      "Int8Array",
+      "Uint8Array",
+      "Uint8ClampedArray",
+      "Int16Array",
+      "Uint16Array",
+      "Int32Array",
+      "Uint32Array",
+      "Float32Array",
+      "Float64Array",
+      "BigInt64Array",
+      "BigUint64Array",
+    ].includes(type.typeName.text)
   );
 }
 
@@ -208,12 +225,38 @@ function hasPositionOrOrderQuery(relative, source) {
   );
   let found = false;
   const SOURCE_INPUT_NAME = /^(?:source|sourceText|productionSource|content|text|payload)$/i;
+  const FILE_READ_EXPORTS = new Set(["readFile", "readFileSync"]);
+  const fileReadCallees = new Set(FILE_READ_EXPORTS);
+  let nextBindingId = 1;
 
-  function newScope(parent = undefined) {
-    return { parent, bindings: new Map() };
+  for (const statement of sourceFile.statements) {
+    if (
+      !ts.isImportDeclaration(statement)
+      || !ts.isStringLiteral(statement.moduleSpecifier)
+      || !/^node:fs(?:\/promises)?$/.test(statement.moduleSpecifier.text)
+      || !statement.importClause
+      || !statement.importClause.namedBindings
+      || !ts.isNamedImports(statement.importClause.namedBindings)
+    ) {
+      continue;
+    }
+    for (const element of statement.importClause.namedBindings.elements) {
+      const imported = element.propertyName?.text ?? element.name.text;
+      if (FILE_READ_EXPORTS.has(imported)) {
+        fileReadCallees.add(element.name.text);
+      }
+    }
   }
 
-  function binding(scope, name) {
+  function newScope(parent = undefined, kind = "block") {
+    return { parent, kind, bindings: new Map() };
+  }
+
+  function newBinding(value) {
+    return { id: nextBindingId++, value };
+  }
+
+  function resolvedBinding(scope, name) {
     for (let current = scope; current; current = current.parent) {
       if (current.bindings.has(name)) {
         return current.bindings.get(name);
@@ -222,14 +265,100 @@ function hasPositionOrOrderQuery(relative, source) {
     return undefined;
   }
 
+  function defineBinding(scope, name, value) {
+    const existing = scope.bindings.get(name);
+    if (existing) {
+      existing.value = value;
+      return existing;
+    }
+    const created = newBinding(value);
+    scope.bindings.set(name, created);
+    return created;
+  }
+
   function assignBinding(scope, name, value) {
+    const existing = resolvedBinding(scope, name);
+    if (existing) {
+      existing.value = value;
+    } else {
+      defineBinding(scope, name, value);
+    }
+  }
+
+  function nearestFunctionScope(scope) {
+    let current = scope;
+    while (current.parent && current.kind !== "function") {
+      current = current.parent;
+    }
+    return current;
+  }
+
+  function cloneScope(scope) {
+    const chain = [];
     for (let current = scope; current; current = current.parent) {
-      if (current.bindings.has(name)) {
-        current.bindings.set(name, value);
-        return;
+      chain.push(current);
+    }
+    let clonedParent;
+    for (const original of chain.reverse()) {
+      const cloned = newScope(clonedParent, original.kind);
+      for (const [name, entry] of original.bindings) {
+        cloned.bindings.set(
+          name,
+          { id: entry.id, value: entry.value },
+        );
+      }
+      clonedParent = cloned;
+    }
+    return clonedParent;
+  }
+
+  function bindingStates(scope) {
+    const states = new Map();
+    for (let current = scope; current; current = current.parent) {
+      for (const entry of current.bindings.values()) {
+        if (!states.has(entry.id)) states.set(entry.id, entry.value);
       }
     }
-    scope.bindings.set(name, value);
+    return states;
+  }
+
+  function joinScopes(target, branches) {
+    const branchStates = branches.map(bindingStates);
+    for (let current = target; current; current = current.parent) {
+      for (const entry of current.bindings.values()) {
+        entry.value = branchStates.some(
+          (states) => states.get(entry.id) ?? entry.value,
+        );
+      }
+    }
+  }
+
+  function collectFunctionVarNames(node) {
+    const names = new Set();
+    function collect(current, root = false) {
+      if (!root && ts.isFunctionLike(current)) return;
+      if (
+        ts.isVariableDeclarationList(current)
+        && !(current.flags & ts.NodeFlags.BlockScoped)
+      ) {
+        for (const declaration of current.declarations) {
+          if (ts.isIdentifier(declaration.name)) {
+            names.add(declaration.name.text);
+          }
+        }
+      }
+      ts.forEachChild(current, (child) => collect(child));
+    }
+    collect(node, true);
+    return names;
+  }
+
+  function predeclareFunctionVars(node, scope) {
+    for (const name of collectFunctionVarNames(node)) {
+      if (!scope.bindings.has(name)) {
+        scope.bindings.set(name, newBinding(false));
+      }
+    }
   }
 
   function unwrapExpression(expression) {
@@ -251,7 +380,7 @@ function hasPositionOrOrderQuery(relative, source) {
     if (!ts.isCallExpression(current)) return false;
     if (
       ts.isIdentifier(current.expression)
-      && ["readFile", "readFileSync"].includes(current.expression.text)
+      && fileReadCallees.has(current.expression.text)
     ) {
       return true;
     }
@@ -264,10 +393,10 @@ function hasPositionOrOrderQuery(relative, source) {
   function isTextFlow(expression, scope) {
     const current = unwrapExpression(expression);
     if (ts.isIdentifier(current)) {
-      const resolved = binding(scope, current.text);
+      const resolved = resolvedBinding(scope, current.text);
       return resolved === undefined
         ? SOURCE_INPUT_NAME.test(current.text)
-        : resolved;
+        : resolved.value;
     }
     if (isFileRead(current)) return true;
     if (ts.isConditionalExpression(current)) {
@@ -278,7 +407,12 @@ function hasPositionOrOrderQuery(relative, source) {
     }
     return (
       ts.isBinaryExpression(current)
-      && current.operatorToken.kind === ts.SyntaxKind.PlusToken
+      && [
+        ts.SyntaxKind.PlusToken,
+        ts.SyntaxKind.AmpersandAmpersandToken,
+        ts.SyntaxKind.BarBarToken,
+        ts.SyntaxKind.QuestionQuestionToken,
+      ].includes(current.operatorToken.kind)
       && (
         isTextFlow(current.left, scope)
         || isTextFlow(current.right, scope)
@@ -305,10 +439,11 @@ function hasPositionOrOrderQuery(relative, source) {
   function visit(node, scope) {
     if (found) return;
     if (ts.isFunctionLike(node)) {
-      const functionScope = newScope(scope);
+      const functionScope = newScope(scope, "function");
       for (const parameter of node.parameters) {
         if (ts.isIdentifier(parameter.name)) {
-          functionScope.bindings.set(
+          defineBinding(
+            functionScope,
             parameter.name.text,
             parameterIsTextFlow(parameter),
           );
@@ -317,6 +452,7 @@ function hasPositionOrOrderQuery(relative, source) {
           visit(parameter.initializer, scope);
         }
       }
+      if (node.body) predeclareFunctionVars(node.body, functionScope);
       if (node.body) visit(node.body, functionScope);
       return;
     }
@@ -328,6 +464,92 @@ function hasPositionOrOrderQuery(relative, source) {
       }
       return;
     }
+    if (ts.isCatchClause(node)) {
+      const catchScope = newScope(scope);
+      if (
+        node.variableDeclaration
+        && ts.isIdentifier(node.variableDeclaration.name)
+      ) {
+        defineBinding(
+          catchScope,
+          node.variableDeclaration.name.text,
+          false,
+        );
+      }
+      visit(node.block, catchScope);
+      return;
+    }
+    if (ts.isIfStatement(node)) {
+      visit(node.expression, scope);
+      const thenScope = cloneScope(scope);
+      visit(node.thenStatement, thenScope);
+      const elseScope = cloneScope(scope);
+      if (node.elseStatement) visit(node.elseStatement, elseScope);
+      joinScopes(scope, [thenScope, elseScope]);
+      return;
+    }
+    if (ts.isTryStatement(node)) {
+      const tryScope = cloneScope(scope);
+      visit(node.tryBlock, tryScope);
+      const branches = [tryScope];
+      if (node.catchClause) {
+        const catchScope = cloneScope(scope);
+        visit(node.catchClause, catchScope);
+        branches.push(catchScope);
+      }
+      joinScopes(scope, branches);
+      if (node.finallyBlock) visit(node.finallyBlock, scope);
+      return;
+    }
+    if (
+      ts.isWhileStatement(node)
+      || ts.isDoStatement(node)
+    ) {
+      visit(node.expression, scope);
+      const baseline = cloneScope(scope);
+      const iteration = cloneScope(scope);
+      visit(node.statement, iteration);
+      joinScopes(scope, [baseline, iteration]);
+      return;
+    }
+    if (ts.isForStatement(node)) {
+      const loopScope = newScope(scope);
+      if (node.initializer) visit(node.initializer, loopScope);
+      if (node.condition) visit(node.condition, loopScope);
+      const baseline = cloneScope(loopScope);
+      const iteration = cloneScope(loopScope);
+      visit(node.statement, iteration);
+      if (node.incrementor) visit(node.incrementor, iteration);
+      joinScopes(loopScope, [baseline, iteration]);
+      return;
+    }
+    if (
+      ts.isForInStatement(node)
+      || ts.isForOfStatement(node)
+    ) {
+      const loopScope = newScope(scope);
+      visit(node.expression, loopScope);
+      visit(node.initializer, loopScope);
+      const baseline = cloneScope(loopScope);
+      const iteration = cloneScope(loopScope);
+      visit(node.statement, iteration);
+      joinScopes(loopScope, [baseline, iteration]);
+      return;
+    }
+    if (ts.isSwitchStatement(node)) {
+      visit(node.expression, scope);
+      const branches = [cloneScope(scope)];
+      for (const clause of node.caseBlock.clauses) {
+        const branch = cloneScope(scope);
+        if (ts.isCaseClause(clause)) visit(clause.expression, branch);
+        for (const statement of clause.statements) {
+          visit(statement, branch);
+        }
+        branches.push(branch);
+      }
+      joinScopes(scope, branches);
+      return;
+    }
     if (
       ts.isVariableDeclaration(node)
       && ts.isIdentifier(node.name)
@@ -336,7 +558,23 @@ function hasPositionOrOrderQuery(relative, source) {
         ? isTextFlow(node.initializer, scope)
         : false;
       if (node.initializer) visit(node.initializer, scope);
-      scope.bindings.set(node.name.text, value);
+      const declarationList = node.parent;
+      const declarationScope = (
+        ts.isVariableDeclarationList(declarationList)
+        && !(declarationList.flags & ts.NodeFlags.BlockScoped)
+      )
+        ? nearestFunctionScope(scope)
+        : scope;
+      if (
+        ts.isVariableDeclarationList(declarationList)
+        && !(declarationList.flags & ts.NodeFlags.BlockScoped)
+      ) {
+        if (node.initializer) {
+          assignBinding(declarationScope, node.name.text, value);
+        }
+      } else {
+        defineBinding(declarationScope, node.name.text, value);
+      }
       return;
     }
     if (
@@ -418,7 +656,9 @@ function hasPositionOrOrderQuery(relative, source) {
     ts.forEachChild(node, (child) => visit(child, scope));
   }
 
-  visit(sourceFile, newScope());
+  const rootScope = newScope(undefined, "function");
+  predeclareFunctionVars(sourceFile, rootScope);
+  visit(sourceFile, rootScope);
   return found;
 }
 
@@ -557,6 +797,13 @@ test("source policy rejects position identities without banning ordinary arrays"
   );
   assert.deepEqual(
     modulePolicyOffenders(
+      "test/typed-array-helper.ts",
+      "function clone(payload: Uint8Array) { return payload.slice(); }",
+    ),
+    [],
+  );
+  assert.deepEqual(
+    modulePolicyOffenders(
       "example.test.mjs",
       "const copy = values.slice().sort();",
     ),
@@ -585,6 +832,43 @@ test("source policy rejects position identities without banning ordinary arrays"
         + "payload.substring(1);",
     ),
     ["test/semantic-source.mjs: source-position or source-order query"],
+  );
+  for (const mutation of [
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = readFileSync(path, 'utf8');\n"
+      + "if (flag) { data = []; }\ndata.slice(1);",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data;\nif (flag) { data = readFileSync(path, 'utf8'); }"
+      + " else { data = []; }\ndata.slice(1);",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = [];\nwhile (flag) {"
+      + " data = readFileSync(path, 'utf8'); }\ndata.slice(1);",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data;\ntry { data = readFileSync(path, 'utf8'); }"
+      + " catch { data = []; }\ndata.slice(1);",
+    "import { readFileSync } from 'node:fs';\n"
+      + "if (flag) { var data = readFileSync(path, 'utf8'); }\n"
+      + "data.slice(1);",
+    "import { readFileSync } from 'node:fs';\n"
+      + "let data = readFileSync(path, 'utf8');\n"
+      + "try {} catch (data) {}\ndata.slice(1);",
+    "import { readFile as load } from 'node:fs/promises';\n"
+      + "const data = await load(path, 'utf8');\ndata.slice(1);",
+  ]) {
+    assert.deepEqual(
+      modulePolicyOffenders("test/semantic-source.mjs", mutation),
+      ["test/semantic-source.mjs: source-position or source-order query"],
+      mutation,
+    );
+  }
+  assert.deepEqual(
+    modulePolicyOffenders(
+      "test/semantic-source.mjs",
+      "import { readFileSync } from 'node:fs';\n"
+        + "let data = readFileSync(path, 'utf8');\n"
+        + "data = [];\ndata.slice(1);",
+    ),
+    [],
   );
 });
 
