@@ -1,11 +1,23 @@
 """测试进程默认开 auth_optional：无 token 的请求回退 seeded admin，
 既有 HTTP 测试无需逐一登录即可继续以 admin 身份跑。"""
 import os
+from pathlib import Path
 
 os.environ.setdefault("SILICON_NOTEBOOK_AUTH_OPTIONAL", "true")
 
 
 import pytest
+
+from tests.architecture.semantic_source import PythonSourceIndex
+
+
+@pytest.fixture(scope="session")
+def python_source_index() -> PythonSourceIndex:
+    root = Path(__file__).resolve().parents[2]
+    paths = tuple((root / "backend" / "app").rglob("*.py")) + tuple(
+        (root / "backend" / "tests").rglob("*.py")
+    )
+    return PythonSourceIndex.from_paths(root, paths)
 
 
 @pytest.fixture(autouse=True)
