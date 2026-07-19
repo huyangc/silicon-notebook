@@ -59,6 +59,7 @@ import {
   Eye,
   ImagePlus,
   List,
+  ListChecks,
   Loader2,
   Maximize2,
   Minimize2,
@@ -72,6 +73,7 @@ import {
   ROLE_LABELS,
   cellSummary,
   optimizeKnowhowCell,
+  reformatKnowhowCell,
   rewriteAssetUrls,
   uploadNotebookAsset,
   type KnowhowColumn,
@@ -81,6 +83,8 @@ import { orderColumnsForGrid, sortColumnsByPosition, isInternalAssetUrl } from "
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
 import {
   CANCEL_LABEL,
+  CELL_REFORMAT_IDLE,
+  CELL_REFORMAT_STALE,
   CLOSE_GUARD_CONTINUE_LABEL,
   CLOSE_GUARD_DISCARD_LABEL,
   CLOSE_GUARD_MESSAGE,
@@ -88,6 +92,11 @@ import {
   DRAFT_BANNER_TEXT,
   EDIT_LABEL,
   PROCEDURE_HINT_TEXT,
+  REFORMAT_SERVER_STALE_MESSAGE,
+  REFORMAT_STALE_MESSAGE,
+  REFORMAT_SUGGESTION_LABEL,
+  REFORMAT_UNCHANGED_DISMISS_LABEL,
+  REFORMAT_UNCHANGED_MESSAGE,
   RESTORE_DRAFT_LABEL,
   ROW_CONTEXT_TOGGLE_LABEL,
   SAVE_AND_NEXT_LABEL,
@@ -95,17 +104,31 @@ import {
   TOOLBAR_CODE_LABEL,
   TOOLBAR_IMAGE_LABEL,
   TOOLBAR_LIST_LABEL,
+  TOOLBAR_REFORMAT_LABEL,
+  beginCellReformat,
   deriveAltFromFilename,
+  dismissCellReformat,
   draftStorageKey,
+  failCellReformat,
   hasUnsavedChanges,
+  insertAtCursor,
   insertCodeFence,
   insertImageMarkdown,
   insertListMarker,
+  insertViaExecCommandOrFallback,
+  isCellReformatLoading,
   isImageFile,
   nextCellCoordinates,
+  reformatArrivalNeedsParentRefresh,
+  reformatCellDisabledReason,
+  reformatSourceLabel,
+  resolveReformatArrival,
+  ruleNormalize,
+  shouldNormalizePaste,
   shouldOfferDraftRestore,
   readCellDraft,
   sortRowsByPosition,
+  type CellReformatState,
   type TextareaSelection,
   CELL_VIEW_MODE_STORAGE_KEY,
   VIEW_MODE_EDIT_LABEL,
@@ -574,6 +597,11 @@ export interface KnowhowCellEditorProps {
    * 区保持纯展示。编辑态本身已隐含 canEdit（能进到这一态就说明有写权限），
    * panel 侧无需再额外按 canEdit 判断是否传入，见该文件调用处注释。 */
   onSwitchCell?: (columnId: string) => void;
+  /** F（review）：规整到达解析判 server-stale（他人在本编辑器打开后又保存过这一格）时
+   * 回调——请父级重取整表 detail，把陈旧的 savedContent 快照换新，否则关掉重开撞同一
+   * server-stale 态、永远循环（判定见 knowhow-cell-editor-logic.ts 的
+   * reformatArrivalNeedsParentRefresh）。可选：未接线的调用方（测试/预览）省略即无副作用。 */
+  onServerStale?: () => void;
 }
 
 export function KnowhowCellEditor({
@@ -588,6 +616,7 @@ export function KnowhowCellEditor({
   onNavigate,
   onClose,
   onSwitchCell,
+  onServerStale,
 }: KnowhowCellEditorProps) {
   const [fullscreen, toggleFullscreen] = useFullscreenToggle(FULLSCREEN_STORAGE_KEY);
   const [viewMode, setViewMode] = useCellViewMode();
@@ -638,6 +667,21 @@ export function KnowhowCellEditor({
   const [leaveAfterUpload, setLeaveAfterUpload] = useState<LeaveIntent | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [optimizeState, setOptimizeState] = useState<CellOptimizeState>(CELL_OPTIMIZE_IDLE);
+  const [reformatState, setReformatState] = useState<CellReformatState>(CELL_REFORMAT_IDLE);
+  // F（review）：server-stale 一旦确认就请父级刷新整表 detail（见 logic 文件
+  // reformatArrivalNeedsParentRefresh 注释）。回调收进 ref，让下面的 notify effect 只依赖
+  // reformatState——onServerStale 若是父级 inline 箭头会每次重渲染换 identity，直接依赖它
+  // 会在仍是 server-stale 期间被无关重渲染重复触发（破坏「只触发一次」）。
+  const onServerStaleRef = useRef(onServerStale);
+  useEffect(() => {
+    onServerStaleRef.current = onServerStale;
+  }, [onServerStale]);
+  // reformatState 转入 server-stale 的那一刻触发一次（CELL_REFORMAT_SERVER_STALE 是引用
+  // 稳定的 singleton，reformatState 未变的重渲染 deps 不变、不重触发）；本地 stale 不触发
+  // （谓词按 reason 区分——见 reformatArrivalNeedsParentRefresh）。
+  useEffect(() => {
+    if (reformatArrivalNeedsParentRefresh(reformatState)) onServerStaleRef.current?.();
+  }, [reformatState]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingCursorRef = useRef<number | null>(null);
@@ -709,10 +753,17 @@ export function KnowhowCellEditor({
     leaveAfterUploadRef.current = leaveAfterUpload;
   }, [leaveAfterUpload]);
 
-  // 有异步在飞（保存 / 图片上传 / 优化表达）：门控**发起类**入口（保存、切兄弟格），
-  // 但刻意不门控**离开类**入口（关闭/Esc/背景/取消）——离开的安全性由 mountedRef
-  // 陈旧回调守卫保证；若连离开都禁掉，请求卡住时用户会被关在弹窗里出不来。
-  const busy = isEditorBusy(savingMode !== null, uploading, isCellOptimizeLoading(optimizeState));
+  // 有异步在飞（保存 / 图片上传 / 优化表达 / 规整格式）：门控**发起类**入口（保存、
+  // 切兄弟格），也是「优化表达」⇄「规整格式」互斥的唯一真源（见 isEditorBusy 注释——
+  // 规整在飞必须置灰优化，反之亦然）；但刻意不门控**离开类**入口（关闭/Esc/背景/取消）
+  // ——离开的安全性由 mountedRef 陈旧回调守卫保证；若连离开都禁掉，请求卡住时用户会被
+  // 关在弹窗里出不来。
+  const busy = isEditorBusy(
+    savingMode !== null,
+    uploading,
+    isCellOptimizeLoading(optimizeState),
+    isCellReformatLoading(reformatState),
+  );
   // 保存的阻塞面比 busy 窄：优化在飞时仍允许保存（见 isSaveBlocked 注释——LLM 请求
   // 无超时，锁死存盘会让用户这段时间敲的内容存不下去）。
   const saveBlocked = isSaveBlocked(savingMode !== null, uploading);
@@ -988,12 +1039,22 @@ export function KnowhowCellEditor({
           setOptimizeState(dismissCellOptimize());
           return;
         }
+        // 「规整格式」对照/无需改动/已失效提示同理——Esc 先退出这一层，不直接
+        // 关闭整个浮窗。
+        if (
+          reformatState.status === "ready" ||
+          reformatState.status === "unchanged" ||
+          reformatState.status === "stale"
+        ) {
+          setReformatState(dismissCellReformat());
+          return;
+        }
         requestClose();
       }
     }
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [runSave, requestClose, optimizeState]);
+  }, [runSave, requestClose, optimizeState, reformatState]);
 
   function handleRestoreDraft() {
     if (draftText !== null) setContent(draftText);
@@ -1109,10 +1170,39 @@ export function KnowhowCellEditor({
         if (file && isImageFile(file)) files.push(file);
       }
     }
-    // 剪贴板里没有图片(纯文本粘贴)：不拦截，交给浏览器默认粘贴行为。
-    if (files.length === 0) return;
+    if (files.length > 0) {
+      event.preventDefault();
+      void uploadAndInsertImages(files);
+      return;
+    }
+    // 剪贴板里没有图片：纯文本粘贴默认交给浏览器原生行为；只有出现**明确的
+    // 列表证据**（项目符号字形，或「缩进 + 行首列表标记」的 Excel 子项形状，
+    // 见 shouldNormalizePaste）才拦截并用 ruleNormalize 规整后插入。刻意不把
+    // 「含 TAB」单独当作触发条件：TAB 缩进的代码（Tcl/Makefile 等）会被
+    // ruleNormalize 判成散文而丢掉缩进——漏判只是让用户多点一次「规整格式」
+    // 按钮（有前后对比可确认），误判却会毁掉内容，两者代价不对称，故从严。
+    //
+    // P2-f 插入方式（说实话版）：先试 document.execCommand("insertText")——它于
+    // 光标处插入并替换选区、**加入 textarea 原生撤销栈**、触发 input 事件让受控
+    // 组件的 onChange 照常更新 content（与正常打字同一条路），所以这次自动重排
+    // Cmd/Ctrl+Z **撤得掉**。execCommand 已废弃、个别环境返回 false 或抛错时，
+    // 回退到 applyInsertion 老路径（程序化 setContent，**不进撤销栈**、撤不掉，
+    // 但粘贴仍生效）——优雅降级。决策与回退抽到 insertViaExecCommandOrFallback
+    // 便于单测（此前这里承诺"撤销语义与其它程序化插入一致"，那条老路根本不进
+    // 撤销栈，是空头承诺，故一并改正）。
+    const text = event.clipboardData?.getData("text/plain") ?? "";
+    if (!shouldNormalizePaste(text)) return;
     event.preventDefault();
-    void uploadAndInsertImages(files);
+    const normalized = ruleNormalize(text);
+    insertViaExecCommandOrFallback(
+      () => {
+        const el = textareaRef.current;
+        if (!el) return false;
+        el.focus();
+        return document.execCommand("insertText", false, normalized);
+      },
+      () => applyInsertion(insertAtCursor(currentSelection(), normalized)),
+    );
   }
 
   function handleDrop(event: DragEvent<HTMLDivElement>) {
@@ -1184,6 +1274,72 @@ export function KnowhowCellEditor({
 
   function handleDiscardSuggestion() {
     setOptimizeState(dismissCellOptimize());
+  }
+
+  // 「规整格式」（knowhow-md-normalize Task 8，显式触发）：reformat_cell 与
+  // optimize_cell 同样读的是已保存的格子内容，未保存修改时同样挡住按钮，
+  // 理由与上面 optimizeDisabledReason 完全一致，见 reformatCellDisabledReason
+  // 注释。此外互斥彼此的 loading 态——同一时刻只允许一条候选内容在途，避免
+  // 用户连点「优化表达」和「规整格式」后，两个异步请求谁先回来就顶掉工具栏
+  // 这种竞态。这条互斥**不**在这里各写一份 disabled 表达式（曾有一版 graft 残留出
+  // 两个从未接线的 *ButtonDisabled 常量、却与 title 用的 busy 判定漂移），而是
+  // 统一由上面的 busy 承载：busy 已同时纳入
+  // isCellOptimizeLoading 与 isCellReformatLoading，两个按钮的 disabled 与 title
+  // 都读它，天然一致。一旦其中一个进入 ready/unchanged，工具栏本身连同另一个按钮
+  // 都不再渲染（见下方 return JSX 的分支），故只需在两者都还"看得见"的 loading
+  // 阶段互斥。
+  const reformatDisabledReason = reformatCellDisabledReason(content, savedContent, reformatState);
+
+  async function handleReformat() {
+    // 与按钮 disabled 一致：busy 含兄弟「优化表达」的 loading，键盘/编程路径也互斥。
+    if (reformatDisabledReason || busy) return;
+    // P1-d：快照发起请求那一刻的编辑器内容。reformat_cell 读的是已保存内容，但
+    // 请求在飞期间 textarea 未禁用——用户此刻敲的字会让内容偏离这份快照。到达时
+    // 用 contentRef.current（实时值，非本闭包冻住的旧 content）比对，变了就丢弃这
+    // 次候选、转 stale，绝不拿陈旧候选覆盖用户刚敲的字。
+    const contentAtRequest = content;
+    setReformatState(beginCellReformat);
+    try {
+      const result = await reformatKnowhowCell(notebookId, table.id, rowId, columnId);
+      setReformatState((state) => resolveReformatArrival(state, contentAtRequest, contentRef.current, result));
+    } catch (err) {
+      setReformatState((state) => failCellReformat(state, extractErrorMessage(err, "规整格式失败，请重试")));
+    }
+  }
+
+  // 「接受」：与「优化表达」的 handleAcceptSuggestion 同规矩——只把候选内容
+  // 填进编辑框的 content 草稿（仍需手动「保存」/「保存并下一格」才真正落库），
+  // 不直接调用 patchKnowhowCell。
+  function handleAcceptReformat() {
+    if (reformatState.status !== "ready") return;
+    // F3（与 handleAcceptSuggestion 的 uploading 守卫字面对称）：图片上传在飞时
+    // 不接受——接受会整段 setContent(candidateMd)，而随后落地的上传续写要把图片
+    // 插进正文，两者会落在不同的整篇快照上互相错位（图片被追加到末尾/覆盖已接受
+    // 内容）。规整在飞期间 textarea 未禁用，用户可粘贴图片起一个上传、再在其落地
+    // 前点「接受」，故必须在此挡住（accept 按钮也 disabled={uploading}，这是键盘/
+    // 编程路径的入口兜底）。真发生时上传插入会让 content≠savedContent，下一次
+    // 「接受」落到下面的基线失效分支被丢弃，不是「等等再接受就行」。
+    if (uploading) {
+      setSaveError(ACCEPT_BLOCKED_UPLOADING_HINT);
+      return;
+    }
+    // P1-d 第二道守卫（与 handleReformat 的到达守卫对称）：候选到达后、接受前，
+    // 若当前内容已偏离已保存内容，setContent(candidateMd) 会整段覆盖掉这些字——
+    // 拒绝，转同一句 stale 提示，用户的字原样留在编辑框。对照态下正文区已被两栏
+    // 对照替换、正常路径打不了字，此守卫是"UI 前提被改坏"时的兜底，同
+    // handleAcceptSuggestion 的防御姿态。
+    if (hasUnsavedChanges(content, savedContent)) {
+      setReformatState(CELL_REFORMAT_STALE);
+      return;
+    }
+    setContent(reformatState.candidateMd);
+    setReformatState(dismissCellReformat());
+  }
+
+  // 「放弃」候选 / changed=false 提示的「知道了」共用同一个收尾——两者都只是
+  // 退出这一层展示、回到正常编辑视图，没有额外副作用需要区分。
+  function handleDismissReformat() {
+    setReformatState(dismissCellReformat());
   }
 
   // 背景点击关闭（镜像 knowhow-import.tsx / knowhow-manage.tsx 既有习语）：
@@ -1280,6 +1436,48 @@ export function KnowhowCellEditor({
                 </div>
               </div>
             </div>
+          ) : reformatState.status === "ready" ? (
+            // 「规整格式」候选就绪：与「优化表达」共用同一套 .kh-optimize-compare
+            // 左右对照面板结构（任务要求"相同的 before/after compare 面板"），
+            // 只是右侧标题换成 REFORMAT_SUGGESTION_LABEL（区分"规整建议"与
+            // "优化建议"）并额外挂一个 source 友好文案小标签——source 是后端
+            // 枚举，绝不直接渲染原始字符串，一律经 reformatSourceLabel 映射。
+            <div className="kh-optimize-compare">
+              <div className="kh-optimize-pane">
+                <h5>{OPTIMIZE_ORIGINAL_LABEL}</h5>
+                <div className="kh-optimize-pane-body">
+                  <KnowhowMarkdown md={savedContent} notebookId={notebookId} apiBase={apiBase} />
+                </div>
+              </div>
+              <div className="kh-optimize-pane kh-optimize-pane--reformat-suggestion">
+                <h5>
+                  {REFORMAT_SUGGESTION_LABEL}{" "}
+                  <span className="kh-reformat-source-tag">{reformatSourceLabel(reformatState.source)}</span>
+                </h5>
+                <div className="kh-optimize-pane-body">
+                  <KnowhowMarkdown md={reformatState.candidateMd} notebookId={notebookId} apiBase={apiBase} />
+                </div>
+              </div>
+            </div>
+          ) : reformatState.status === "unchanged" ? (
+            // changed=false：不展示左右一模一样的空对照，改用友好提示（任务
+            // 要求）。
+            <div className="kh-reformat-unchanged">
+              <p>{REFORMAT_UNCHANGED_MESSAGE}</p>
+              <span className="kh-reformat-source-tag">{reformatSourceLabel(reformatState.source)}</span>
+            </div>
+          ) : reformatState.status === "stale" ? (
+            // 陈旧 → 不展示会误导的候选对照，改用友好信息态（复用 unchanged 的柔和
+            // 样式，非红色 error）。按 reason 选文案：local=本编辑器在飞期间被改动
+            // （P1-d，用户的字仍在 content 里，「知道了」退回即可见、可续编）；
+            // server=他人已在服务器改过这一格（F3，基线已旧，需关闭后重开）。
+            <div className="kh-reformat-unchanged">
+              <p>
+                {reformatState.reason === "server"
+                  ? REFORMAT_SERVER_STALE_MESSAGE
+                  : REFORMAT_STALE_MESSAGE}
+              </p>
+            </div>
           ) : (
             <>
               {column.role === "procedure" && viewMode !== "preview" && (
@@ -1336,6 +1534,23 @@ export function KnowhowCellEditor({
                       )}
                       {isCellOptimizeLoading(optimizeState) ? "优化中…" : OPTIMIZE_CELL_BUTTON_LABEL}
                     </button>
+                    <button
+                      type="button"
+                      className="kh-toolbar-button kh-toolbar-button--reformat"
+                      // 同 optimize：busy 也会置灰本按钮，此时 reformatDisabledReason
+                      // 可能为 null——不补这一句就会「灰着但提示语说得像可点」，破坏
+                      // knowhow-optimize-logic.ts 声明的「置灰必有对得上的原因」不变量。
+                      title={reformatDisabledReason ?? (busy ? BUSY_HINT : TOOLBAR_REFORMAT_LABEL)}
+                      onClick={handleReformat}
+                      disabled={reformatDisabledReason !== null || busy}
+                    >
+                      {isCellReformatLoading(reformatState) ? (
+                        <Loader2 size={15} className="knowhow-spin" />
+                      ) : (
+                        <ListChecks size={15} />
+                      )}
+                      {isCellReformatLoading(reformatState) ? "规整中…" : TOOLBAR_REFORMAT_LABEL}
+                    </button>
                     {uploading && (
                       <span className="kh-toolbar-status">
                         <Loader2 size={14} className="knowhow-spin" /> 图片上传中…
@@ -1383,6 +1598,7 @@ export function KnowhowCellEditor({
 
               {uploadError && <p className="kh-inline-error">{uploadError}</p>}
               {optimizeState.status === "error" && <p className="kh-inline-error">{optimizeState.message}</p>}
+              {reformatState.status === "error" && <p className="kh-inline-error">{reformatState.message}</p>}
 
               <div className={`kh-split kh-split--${viewMode}`}>
                 {viewMode !== "preview" && (
@@ -1473,6 +1689,36 @@ export function KnowhowCellEditor({
                 title={uploading ? ACCEPT_BLOCKED_UPLOADING_HINT : undefined}
               >
                 <Check size={14} /> {ACCEPT_SUGGESTION_LABEL}
+              </button>
+            </div>
+          ) : reformatState.status === "ready" ? (
+            <div className="kh-footer-actions">
+              <button type="button" onClick={handleDismissReformat}>
+                {DISCARD_SUGGESTION_LABEL}
+              </button>
+              {/* F3：与优化「接受」按钮字面同款——上传在飞时置灰 + 对得上的 title
+                  （「置灰必有对得上的原因」），接受与上传互斥（见 handleAcceptReformat）。 */}
+              <button
+                type="button"
+                className="kh-primary-button"
+                onClick={handleAcceptReformat}
+                disabled={uploading}
+                title={uploading ? ACCEPT_BLOCKED_UPLOADING_HINT : undefined}
+              >
+                <Check size={14} /> {ACCEPT_SUGGESTION_LABEL}
+              </button>
+            </div>
+          ) : reformatState.status === "unchanged" ? (
+            <div className="kh-footer-actions">
+              <button type="button" className="kh-primary-button" onClick={handleDismissReformat}>
+                {REFORMAT_UNCHANGED_DISMISS_LABEL}
+              </button>
+            </div>
+          ) : reformatState.status === "stale" ? (
+            // P1-d：陈旧提示的唯一出口——「知道了」退回编辑视图（内容原样保留）。
+            <div className="kh-footer-actions">
+              <button type="button" className="kh-primary-button" onClick={handleDismissReformat}>
+                {REFORMAT_UNCHANGED_DISMISS_LABEL}
               </button>
             </div>
           ) : (

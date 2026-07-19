@@ -11,6 +11,7 @@ import {
   ROW_CONTEXT_TOGGLE_LABEL,
   RESTORE_DRAFT_LABEL,
   DISCARD_DRAFT_LABEL,
+  TOOLBAR_REFORMAT_LABEL,
   draftStorageKey,
   shouldOfferDraftRestore,
   readCellDraft,
@@ -52,6 +53,34 @@ import {
   RESTORE_PENDING_UPLOAD_HINT,
   resolveUploadBlock,
   resolveSaveCompletion,
+  BULLET_GLYPHS,
+  shouldNormalizePaste,
+  ruleNormalize,
+  isRichMarkdown,
+  CELL_REFORMAT_IDLE,
+  CELL_REFORMAT_STALE,
+  CELL_REFORMAT_SERVER_STALE,
+  REFORMAT_SUGGESTION_LABEL,
+  REFORMAT_UNCHANGED_MESSAGE,
+  REFORMAT_UNCHANGED_DISMISS_LABEL,
+  REFORMAT_STALE_MESSAGE,
+  REFORMAT_SERVER_STALE_MESSAGE,
+  REFORMAT_LOADING_HINT,
+  REFORMAT_UNSAVED_HINT,
+  REFORMAT_EMPTY_HINT,
+  REFORMAT_SOURCE_LLM_LABEL,
+  REFORMAT_SOURCE_RULE_LABEL,
+  REFORMAT_SOURCE_FALLBACK_LABEL,
+  beginCellReformat,
+  resolveCellReformat,
+  resolveReformatArrival,
+  reformatArrivalNeedsParentRefresh,
+  failCellReformat,
+  dismissCellReformat,
+  isCellReformatLoading,
+  reformatCellDisabledReason,
+  reformatSourceLabel,
+  insertViaExecCommandOrFallback,
 } from "./knowhow-cell-editor-logic.ts";
 
 // --- UI 文案常量：byte-exact vs 规格②路A / 任务简报原文 -------------------------
@@ -457,11 +486,14 @@ test("applyDraftFlush: remove 清旧稿；removeItem 抛错也算安全（本就
 
 // --- busy 互斥 + 陈旧回调守卫 -------------------------------------------------
 
-test("isEditorBusy: 保存 / 上传 / 优化 任一在飞即为忙（用于挡切兄弟格）", () => {
-  assert.strictEqual(isEditorBusy(false, false, false), false);
-  assert.strictEqual(isEditorBusy(true, false, false), true);
-  assert.strictEqual(isEditorBusy(false, true, false), true);
-  assert.strictEqual(isEditorBusy(false, false, true), true);
+test("isEditorBusy: 保存 / 上传 / 优化 / 规整 任一在飞即为忙（挡切兄弟格 + 优化⇄规整互斥）", () => {
+  assert.strictEqual(isEditorBusy(false, false, false, false), false);
+  assert.strictEqual(isEditorBusy(true, false, false, false), true);
+  assert.strictEqual(isEditorBusy(false, true, false, false), true);
+  assert.strictEqual(isEditorBusy(false, false, true, false), true);
+  // 规整在飞（第 4 个入参）同样算忙——这是 P2 互斥修复的核心：规整期间优化按钮
+  // 必须置灰，否则两个建议面板会竞态互相顶掉。
+  assert.strictEqual(isEditorBusy(false, false, false, true), true);
 });
 
 test("isSaveBlocked: 保存中/上传中挡保存；签名里根本没有 optimizing（LLM 可能卡死，不能锁住存盘）", () => {
@@ -471,7 +503,7 @@ test("isSaveBlocked: 保存中/上传中挡保存；签名里根本没有 optimi
   // 「优化中仍可保存」不是靠传 false 传出来的，而是这个判定压根不接受 optimizing
   // 这个入参——用元数不变式把它钉住，避免日后有人把 optimizing 塞进来。
   assert.strictEqual(isSaveBlocked.length, 2);
-  assert.strictEqual(isEditorBusy.length, 3);
+  assert.strictEqual(isEditorBusy.length, 4);
 });
 
 // --- 保存成功后的草稿处置：与离开路径共用同一套 draftFlushAction/applyDraftFlush，
@@ -739,6 +771,47 @@ test("接线：不得再把待完成上传寄存到 localStorage（回归锁）"
   assert.equal(editorSrc.includes("selectPendingUploadKeys"), false);
 });
 
+// --- 优化表达 ⇄ 规整格式 互斥接线（P2 修复）------------------------------------
+//
+// 两个工具栏按钮（「优化表达」「规整格式」）各调一次可能卡很久的后端请求，同一
+// 时刻只允许一条候选在途；互斥**只**经共享的 busy 实现——reformatCellDisabledReason
+// / optimizeCellDisabledReason 各自只看自己的 loading，从不看兄弟。一次 rebase graft
+// 里 busy 的 isEditorBusy 调用漏掉了 reformat loading 项，导致规整在飞时优化按钮
+// 仍可点，两个建议面板互相顶掉。下列接线断言把「busy 单一真源同时纳入两种 loading」
+// 钉死（.tsx 在本仓库 node:test 模型里只能源码断言，见上一节说明）。
+
+test("接线：busy 计算必须同时纳入优化与规整 loading（规整在飞→优化置灰，反之亦然）", () => {
+  assert.match(
+    editorSrc,
+    /const busy = isEditorBusy\(\s*savingMode !== null,\s*uploading,\s*isCellOptimizeLoading\(optimizeState\),\s*isCellReformatLoading\(reformatState\),?\s*\)/,
+  );
+});
+
+test("接线：两个按钮的 disabled 都经 busy 门控（互斥经共享真源，非各写一份）", () => {
+  assert.match(editorSrc, /disabled=\{optimizeDisabledReason !== null \|\| busy\}/);
+  assert.match(editorSrc, /disabled=\{reformatDisabledReason !== null \|\| busy\}/);
+});
+
+test("接线：handleOptimize / handleReformat 的 handler 守卫都早退于 busy（键盘/编程触发也互斥）", () => {
+  // 置灰只挡鼠标点击；⌘↩ / 程序化触发绕得过 disabled，必须在 handler 入口再挡一次。
+  assert.match(editorSrc, /if \(optimizeDisabledReason \|\| busy\) return;/);
+  assert.match(editorSrc, /if \(reformatDisabledReason \|\| busy\) return;/);
+});
+
+test("接线：置灰必有对得上的原因——两个按钮的 title 在 busy 时落到 BUSY_HINT", () => {
+  // knowhow-optimize-logic.ts 声明的不变量：按钮灰着就不能显示「可点」的文案。
+  assert.match(editorSrc, /title=\{optimizeDisabledReason \?\? \(busy \? BUSY_HINT : OPTIMIZE_CELL_BUTTON_LABEL\)\}/);
+  assert.match(editorSrc, /title=\{reformatDisabledReason \?\? \(busy \? BUSY_HINT : TOOLBAR_REFORMAT_LABEL\)\}/);
+});
+
+test("接线：不得留下绕开 busy 单一真源的死常量（graft 残留，回归锁）", () => {
+  // optimizeButtonDisabled / reformatButtonDisabled 是一次 graft 里加进来、却从未被
+  // 任何按钮引用的「另一套」互斥计算。留着它们=埋一条与 busy 漂移的第二真源，日后
+  // 有人接上去就会与 title 用的 busy 判定对不上，破坏「置灰必有对得上的原因」不变量。
+  assert.equal(editorSrc.includes("optimizeButtonDisabled"), false);
+  assert.equal(editorSrc.includes("reformatButtonDisabled"), false);
+});
+
 // --- 恢复提示未决时禁止上传 -----------------------------------------------------
 //
 // 复审第 6 轮 P1：banner 未决时上传入口仍开着，而「恢复」是**整段**
@@ -823,6 +896,568 @@ test("readCellDraft: getItem 抛错（隐私模式）→ null，不抛", () => {
   );
 });
 
+// ===========================================================================
+// knowhow-md-normalize Task 8：编辑器「规整格式」按钮 + 粘贴即时规整
+// ===========================================================================
+
+// --- TOOLBAR_REFORMAT_LABEL --------------------------------------------------
+
+test("TOOLBAR_REFORMAT_LABEL: 与任务简报原文逐字一致", () => {
+  assert.strictEqual(TOOLBAR_REFORMAT_LABEL, "规整格式");
+});
+
+// --- shouldNormalizePaste：粘贴触发判定 ---------------------------------------
+//
+// 代价不对称，判定必须保守：漏判(miss)代价低——用户仍可手动点「规整格式」
+// 按钮，那条路径带 before/after 对照预览，可以先看结果再决定接受/放弃；
+// 误判(false positive)代价高且可能不可恢复——粘贴命中后走的插入路径
+// (applyInsertion -> setContent) 是对受控 textarea 编程式设置 .value，不进
+// 浏览器原生撤销栈，Cmd+Z 大概率救不回被强行拆散的原文。故要求"正的列表
+// 证据"（规则 a/b 之一），不能仅凭一个裸 TAB 就触发——那正是下面这组用例要
+// 锁住不再回归的历史缺陷：整段 TAB 缩进的代码（Tcl/Python/Makefile 等）曾被
+// 当成 Excel 粘贴内容拆散、逐行插空行，且不可靠撤销。
+
+test("shouldNormalizePaste: 含项目符号 • -> true（规则 a：字形是强证据，代码基本不会用它）", () => {
+  assert.strictEqual(shouldNormalizePaste("• 第一项\n• 第二项"), true);
+});
+
+test("shouldNormalizePaste: BULLET_GLYPHS 里每个字形单独出现都触发（规则 a）", () => {
+  for (const glyph of BULLET_GLYPHS) {
+    assert.strictEqual(shouldNormalizePaste(`${glyph} 项`), true, `glyph=${JSON.stringify(glyph)}`);
+  }
+});
+
+test("shouldNormalizePaste: 缩进行 + 字母子项 marker（Excel「缩进子项」形状）-> true（规则 b）", () => {
+  assert.strictEqual(shouldNormalizePaste("1. 步骤一\n\ta. 子项"), true);
+});
+
+test("shouldNormalizePaste: 字母顶层标题 + 缩进项目符号子项 -> true（字形已构成规则 a 的证据）", () => {
+  assert.strictEqual(shouldNormalizePaste("A. 考量\n\t• 增大 R"), true);
+});
+
+test("shouldNormalizePaste: TAB 缩进代码（proc/if 块）-> false——这正是本次修复要堵住的误伤（原判定见 TAB 即触发，会把这段代码拆成散行）", () => {
+  const code = 'proc foo {} {\n\tputs "hello"\n}';
+  assert.strictEqual(shouldNormalizePaste(code), false);
+});
+
+test("shouldNormalizePaste: 任意缩进深度的纯 TAB 缩进代码行 -> false（不因缩进层数变多而误判）", () => {
+  assert.strictEqual(shouldNormalizePaste("\t\t\tdeeply indented code"), false);
+});
+
+test("shouldNormalizePaste: 普通散文（无 TAB/项目符号）-> false，不干预正常粘贴", () => {
+  assert.strictEqual(shouldNormalizePaste("这是一段普通的说明文字，没有任何特殊格式。"), false);
+});
+
+test("shouldNormalizePaste: 已是干净 markdown 列表（无缩进、无字形）-> false，规整不会有收益", () => {
+  assert.strictEqual(shouldNormalizePaste("- 一\n- 二"), false);
+});
+
+test("shouldNormalizePaste: 代码粘贴（空格缩进，不含 TAB/字形/列表 marker）-> false，不误伤代码", () => {
+  assert.strictEqual(shouldNormalizePaste("function foo() {\n  return 1;\n}"), false);
+});
+
+test("shouldNormalizePaste: 空字符串 -> false", () => {
+  assert.strictEqual(shouldNormalizePaste(""), false);
+});
+
+test("shouldNormalizePaste: 纯 TAB 分隔单行（Excel 一行原样贴入，如「列1 TAB 列2 TAB 列3」）不再触发——ruleNormalize 对单行输入是 no-op，拦截没有收益", () => {
+  const text = "列1\t列2\t列3";
+  assert.strictEqual(shouldNormalizePaste(text), false);
+  // 用实际调用验证上面注释的论断为真，而不是仅凭断言：单行文本没有列表
+  // marker，整行归类成一个 prose 段，ruleNormalize 前后应逐字相同。
+  assert.strictEqual(ruleNormalize(text), text);
+});
+
+test("shouldNormalizePaste: TAB 出现在行中间（非行首）不构成缩进证据 -> false（规则 b 要求 TAB/空格必须在行首）", () => {
+  assert.strictEqual(shouldNormalizePaste("说明文字\t补充说明"), false);
+});
+
+// --- I3 修复：规则 a 要求字形是「行首 marker」，而非仅仅「出现在文本中任意
+// 位置」-----------------------------------------------------------------------
+//
+// BULLET_GLYPHS 含 · (U+00B7)，中文里常作人名内的分隔符（如"弗拉基米尔·普京"）。
+// 旧判定「字形出现在文本任意位置即触发」会把这种含人名的普通段落误判为
+// Excel 列表粘贴，进而拆散成每行一段——且这条插入路径按文件本身的注释不进
+// 浏览器原生撤销栈，用户 Cmd+Z 救不回来。修复：字形必须在「行首（允许前面有
+// 缩进）+ 后跟空白」时才算 marker，与 ruleNormalize 自己识别 bullet 的标准
+// （BULLET_RE 应用在 lstripTabSpace 之后的行首）完全同源。
+
+test("shouldNormalizePaste: 人名中的 · 分隔符（非行首）-> false（I3 回归用例：不再仅凭字形出现即触发）", () => {
+  assert.strictEqual(shouldNormalizePaste("会议记录：弗拉基米尔·普京 出席\n第二行"), false);
+});
+
+test("shouldNormalizePaste: 行首 · + 空格的真实项目符号列表 -> true（未被 I3 修复误伤）", () => {
+  assert.strictEqual(shouldNormalizePaste("· 项目一\n· 项目二"), true);
+});
+
+// --- 保守门接入：粘贴内容若已是富 markdown 结构，一律不拦截 --------------------
+//
+// 与 ruleNormalize 共用同一道 isRichMarkdown 保守闸门（knowhow-md-normalize
+// 后续 PR，镜像后端 rule_normalize 的架构性修复）：粘贴进来的内容如果已经是
+// 真实 markdown 结构（围栏代码块、GFM 表格……），不该被当成 Excel 脏排版
+// 拦截重排——这条插入路径 (applyInsertion -> setContent) 本就不进浏览器原生
+// 撤销栈，误判代价高。以下前两个用例是"翻转"回归用例：在接入这道门之前，
+// 规则 (a)/(b) 会误判为 true（围栏/表格内部恰好长得像 Excel 缩进子项），
+// 接入门之后必须变回 false。
+
+test("shouldNormalizePaste: 围栏代码块内容恰好长得像缩进子项 -> false（门优先于规则 b，翻转回归用例）", () => {
+  // 门接入前：line[0]==='\t' 且 lstripTabSpace 后 "a. code inside" 命中
+  // ALPHA_RE，规则 b 会误判 true；isRichMarkdown 先命中围栏信号，整体判为
+  // 富 markdown，门必须先拦下，规则 a/b 根本不会被跑到。
+  const raw = "```\n\ta. code inside\n```";
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(shouldNormalizePaste(raw), false);
+});
+
+test("shouldNormalizePaste: 无前导竖线 GFM 表格里一行恰好长得像缩进子项 -> false（门优先于规则 b，翻转回归用例）", () => {
+  // 门接入前：第三行 "\ta. weirdo | x" 经 lstripTabSpace 后命中 ALPHA_RE，
+  // 规则 b 会误判 true；is_rich_markdown 的"无前导竖线表格行"信号（与分隔行
+  // 相邻）先命中第一行，门必须先拦下。
+  const raw = "A | B\n--- | ---\n\ta. weirdo | x";
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(shouldNormalizePaste(raw), false);
+});
+
+test("shouldNormalizePaste: 粘贴一个干净的围栏代码块 -> false", () => {
+  assert.strictEqual(shouldNormalizePaste("```\nconst x = 1;\n```"), false);
+});
+
+test("shouldNormalizePaste: 粘贴一个干净的 GFM 表格（行首竖线）-> false", () => {
+  assert.strictEqual(shouldNormalizePaste("| A | B |\n| - | - |\n| 1 | 2 |"), false);
+});
+
+// --- P2-f：insertViaExecCommandOrFallback —— 优先走原生撤销栈，失败优雅回退 ----
+//
+// 命中 shouldNormalizePaste 的粘贴 preventDefault 后要插入规整文本。老路径
+// applyInsertion->setContent 是程序化赋值 .value，不进 textarea 原生撤销栈、
+// Cmd/Ctrl+Z 撤不掉。改进：先试 execCommand("insertText")（进撤销栈 + 触发 input
+// 事件让 React onChange 更新 state），返回 false 或抛错才回退老路径。
+
+test("insertViaExecCommandOrFallback: execCommand 返回 true → 不调回退，返回 true（不叠加第二次插入）", () => {
+  let fallbackCalls = 0;
+  const ok = insertViaExecCommandOrFallback(
+    () => true,
+    () => {
+      fallbackCalls += 1;
+    },
+  );
+  assert.strictEqual(ok, true);
+  assert.strictEqual(fallbackCalls, 0);
+});
+
+test("insertViaExecCommandOrFallback: execCommand 返回 false（环境已移除该 API）→ 调回退，返回 false", () => {
+  let fallbackCalls = 0;
+  const ok = insertViaExecCommandOrFallback(
+    () => false,
+    () => {
+      fallbackCalls += 1;
+    },
+  );
+  assert.strictEqual(ok, false);
+  assert.strictEqual(fallbackCalls, 1);
+});
+
+test("insertViaExecCommandOrFallback: execCommand 抛错 → 吞掉异常、调回退，返回 false（不让异常冒泡毁掉粘贴）", () => {
+  let fallbackCalls = 0;
+  const ok = insertViaExecCommandOrFallback(
+    () => {
+      throw new Error("execCommand is not supported");
+    },
+    () => {
+      fallbackCalls += 1;
+    },
+  );
+  assert.strictEqual(ok, false);
+  assert.strictEqual(fallbackCalls, 1);
+});
+
+test("接线（P2-f）：handlePaste 命中规整时先试 execCommand(insertText)，失败才回退 applyInsertion", () => {
+  const handlePasteSrc = editorSrc.slice(
+    editorSrc.indexOf("function handlePaste("),
+    editorSrc.indexOf("function handleDrop("),
+  );
+  assert.ok(handlePasteSrc.length > 0, "handlePaste 函数体没截到，守卫失效");
+  assert.match(handlePasteSrc, /insertViaExecCommandOrFallback\(/);
+  // execCommand 尝试（首选）必须排在 applyInsertion 回退之前。
+  const execIdx = handlePasteSrc.indexOf('document.execCommand("insertText", false, normalized)');
+  const fallbackIdx = handlePasteSrc.indexOf("applyInsertion(insertAtCursor(currentSelection(), normalized))");
+  assert.ok(execIdx > 0, "execCommand(insertText) 尝试没接上");
+  assert.ok(fallbackIdx > 0, "applyInsertion 回退没接上");
+  assert.ok(execIdx < fallbackIdx, "execCommand 必须作为首选，applyInsertion 只是回退（应在其后）");
+});
+
+// --- CellReformatState：对照状态机（镜像 knowhow-optimize-logic.ts 的
+// CellOptimizeState，多一个 changed=false 对应的 "unchanged" 态）---------------
+
+test("CELL_REFORMAT_IDLE: 初始态", () => {
+  assert.deepStrictEqual(CELL_REFORMAT_IDLE, { status: "idle" });
+});
+
+test("beginCellReformat: idle -> loading", () => {
+  assert.deepStrictEqual(beginCellReformat({ status: "idle" }), { status: "loading" });
+});
+
+test("beginCellReformat: error -> loading（允许重新点「规整格式」）", () => {
+  assert.deepStrictEqual(beginCellReformat({ status: "error", message: "x" }), { status: "loading" });
+});
+
+test("beginCellReformat: 已在 loading 时原样返回（防重复触发）", () => {
+  const state = { status: "loading" };
+  assert.strictEqual(beginCellReformat(state), state);
+});
+
+test("resolveCellReformat: loading + changed=true -> ready(candidateMd, source)", () => {
+  const next = resolveCellReformat({ status: "loading" }, { candidateMd: "- a\n- b", source: "llm", changed: true });
+  assert.deepStrictEqual(next, { status: "ready", candidateMd: "- a\n- b", source: "llm" });
+});
+
+test("resolveCellReformat: loading + changed=false -> unchanged(source)（不展示空对照）", () => {
+  const next = resolveCellReformat(
+    { status: "loading" },
+    { candidateMd: "已经规整过的内容", source: "rule/no-llm", changed: false },
+  );
+  assert.deepStrictEqual(next, { status: "unchanged", source: "rule/no-llm" });
+});
+
+test("resolveCellReformat: 非 loading 态收到结果时原样返回（迟到结果不覆盖新状态）", () => {
+  const idle = { status: "idle" };
+  assert.strictEqual(resolveCellReformat(idle, { candidateMd: "x", source: "llm", changed: true }), idle);
+});
+
+// --- P1-d：resolveReformatArrival —— 到达时的陈旧丢弃守卫 ----------------------
+//
+// reformat_cell 读的是已保存内容；请求在飞期间 textarea 未禁用，用户敲的字会让
+// 编辑器内容偏离「发起请求那一刻的快照」。到达时先比对当前内容与快照：变了就
+// 丢弃候选转 stale（不拿陈旧候选覆盖用户刚敲的字），没变才照常。
+
+test("CELL_REFORMAT_STALE: 本地陈旧单例带 reason:'local'", () => {
+  assert.deepStrictEqual(CELL_REFORMAT_STALE, { status: "stale", reason: "local" });
+});
+
+test("CELL_REFORMAT_SERVER_STALE: 服务器陈旧单例带 reason:'server'", () => {
+  assert.deepStrictEqual(CELL_REFORMAT_SERVER_STALE, { status: "stale", reason: "server" });
+});
+
+test("REFORMAT_STALE_MESSAGE: 与任务简报文案逐字一致", () => {
+  assert.strictEqual(REFORMAT_STALE_MESSAGE, "编辑器内容已变化，本次规整结果已失效，请重试");
+});
+
+test("REFORMAT_SERVER_STALE_MESSAGE: 服务器陈旧文案（与本地陈旧区分）", () => {
+  assert.strictEqual(REFORMAT_SERVER_STALE_MESSAGE, "服务器上的内容已被其他人修改，请关闭后重新打开");
+  assert.notStrictEqual(REFORMAT_SERVER_STALE_MESSAGE, REFORMAT_STALE_MESSAGE);
+});
+
+test("resolveReformatArrival: 内容未变 + sourceMd 一致 + changed=true → ready（照常委托 resolveCellReformat）", () => {
+  const next = resolveReformatArrival({ status: "loading" }, "原文", "原文", {
+    candidateMd: "- a\n- b",
+    source: "llm",
+    changed: true,
+    sourceMd: "原文",
+  });
+  assert.deepStrictEqual(next, { status: "ready", candidateMd: "- a\n- b", source: "llm" });
+});
+
+test("resolveReformatArrival: 内容未变 + sourceMd 一致 + changed=false → unchanged（照常委托）", () => {
+  const next = resolveReformatArrival({ status: "loading" }, "原文", "原文", {
+    candidateMd: "原文",
+    source: "rule/no-llm",
+    changed: false,
+    sourceMd: "原文",
+  });
+  assert.deepStrictEqual(next, { status: "unchanged", source: "rule/no-llm" });
+});
+
+test("resolveReformatArrival: 内容已变（用户在飞期间敲了字）→ 本地 stale，绝不展示陈旧候选", () => {
+  const next = resolveReformatArrival({ status: "loading" }, "原文", "原文+用户新敲的字", {
+    candidateMd: "- 基于旧原文的候选",
+    source: "llm",
+    changed: true,
+    sourceMd: "原文",
+  });
+  assert.deepStrictEqual(next, { status: "stale", reason: "local" });
+  // 关键：候选内容没有被带出去（没有 candidateMd 字段可供 setContent 覆盖）。
+  assert.strictEqual(next.candidateMd, undefined);
+});
+
+test("resolveReformatArrival: 内容已变但 changed=false 也一样丢弃转本地 stale（陈旧就是陈旧，与 changed 无关）", () => {
+  const next = resolveReformatArrival({ status: "loading" }, "原文", "改过的内容", {
+    candidateMd: "原文",
+    source: "rule/no-llm",
+    changed: false,
+    sourceMd: "原文",
+  });
+  assert.deepStrictEqual(next, { status: "stale", reason: "local" });
+});
+
+// F3：本地内容没变、但后端回带的 sourceMd ≠ 发起快照——他人在本编辑器打开后又保存
+// 过这一格，候选是拿本地从没见过的服务器内容算出来的，对照面板左侧「原文」已是旧值。
+test("resolveReformatArrival: sourceMd 与发起快照不一致（他人已改）→ 服务器 stale，绝不展示误导候选", () => {
+  const next = resolveReformatArrival({ status: "loading" }, "原文", "原文", {
+    candidateMd: "基于更新后服务器内容的候选",
+    source: "llm",
+    changed: true,
+    sourceMd: "他人保存后的新原文",
+  });
+  assert.deepStrictEqual(next, { status: "stale", reason: "server" });
+  assert.strictEqual(next.candidateMd, undefined);
+});
+
+test("resolveReformatArrival: sourceMd 不一致即便 changed=false 也判服务器 stale（左侧原文已对不上）", () => {
+  const next = resolveReformatArrival({ status: "loading" }, "原文", "原文", {
+    candidateMd: "原文",
+    source: "rule/no-llm",
+    changed: false,
+    sourceMd: "他人保存后的新原文",
+  });
+  assert.deepStrictEqual(next, { status: "stale", reason: "server" });
+});
+
+// 本地改动与服务器改动同时发生：本地优先（用户的字仍在、"重试"是对他们的正确指引；
+// 且本地分支保持 P1-d 既有契约不变），故 reason 仍是 local。
+test("resolveReformatArrival: 本地已变 + sourceMd 也不一致 → 本地 stale 优先", () => {
+  const next = resolveReformatArrival({ status: "loading" }, "原文", "原文+新字", {
+    candidateMd: "候选",
+    source: "llm",
+    changed: true,
+    sourceMd: "他人保存后的新原文",
+  });
+  assert.deepStrictEqual(next, { status: "stale", reason: "local" });
+});
+
+test("resolveReformatArrival: 非 loading 态 → 原样返回（迟到结果不覆盖新状态，同 resolveCellReformat）", () => {
+  const idle = { status: "idle" };
+  assert.strictEqual(
+    resolveReformatArrival(idle, "原文", "改过的内容", { candidateMd: "x", source: "llm", changed: true, sourceMd: "原文" }),
+    idle,
+  );
+  const err = { status: "error", message: "boom" };
+  assert.strictEqual(
+    resolveReformatArrival(err, "原文", "原文", { candidateMd: "x", source: "llm", changed: true, sourceMd: "原文" }),
+    err,
+  );
+});
+
+test("端到端（P1-d）：loading → 用户在飞期间改动 → 到达转本地 stale → 「知道了」回 idle（内容未被覆盖）", () => {
+  let state = beginCellReformat(CELL_REFORMAT_IDLE);
+  assert.strictEqual(state.status, "loading");
+  // 发起时快照="草稿A"，到达时实时内容已变成"草稿A+B"。
+  state = resolveReformatArrival(state, "草稿A", "草稿A+B", { candidateMd: "规整候选", source: "llm", changed: true, sourceMd: "草稿A" });
+  assert.deepStrictEqual(state, { status: "stale", reason: "local" });
+  state = dismissCellReformat();
+  assert.deepStrictEqual(state, { status: "idle" });
+});
+
+// --- F（review）：server-stale 必须触发父级刷新表 detail ---------------------------
+//
+// 缺陷：到达解析判 server-stale（他人在本编辑器打开后又保存过这一格）时提示「请关闭
+// 后重新打开」，但关闭只清 modal——父级 detail 快照（savedContent 之源）没被重拉，重开
+// 撞同一 server-stale 态、永远循环。修复：组件在到达后按 reformatArrivalNeedsParentRefresh
+// 判定回调 onServerStale，父级重取整表，下次打开就有新鲜 savedContent。纯谓词单测 +
+// 接线源码 pin（.tsx 在本仓库 node:test 模型里只能源码断言，见下方「接线守卫」一节）。
+
+test("reformatArrivalNeedsParentRefresh: server-stale → true（须请父级刷新）", () => {
+  assert.strictEqual(reformatArrivalNeedsParentRefresh(CELL_REFORMAT_SERVER_STALE), true);
+  assert.strictEqual(reformatArrivalNeedsParentRefresh({ status: "stale", reason: "server" }), true);
+});
+
+test("reformatArrivalNeedsParentRefresh: 本地 stale → false（重试即可，服务器基线没变，不刷新）", () => {
+  assert.strictEqual(reformatArrivalNeedsParentRefresh(CELL_REFORMAT_STALE), false);
+  assert.strictEqual(reformatArrivalNeedsParentRefresh({ status: "stale", reason: "local" }), false);
+});
+
+test("reformatArrivalNeedsParentRefresh: 其余态（ready/unchanged/idle/loading/error）→ false（不刷新）", () => {
+  assert.strictEqual(reformatArrivalNeedsParentRefresh({ status: "ready", candidateMd: "x", source: "llm" }), false);
+  assert.strictEqual(reformatArrivalNeedsParentRefresh({ status: "unchanged", source: "rule/no-llm" }), false);
+  assert.strictEqual(reformatArrivalNeedsParentRefresh(CELL_REFORMAT_IDLE), false);
+  assert.strictEqual(reformatArrivalNeedsParentRefresh({ status: "loading" }), false);
+  assert.strictEqual(reformatArrivalNeedsParentRefresh({ status: "error", message: "boom" }), false);
+});
+
+// --- P1-d 接线守卫：纯函数锁不住「组件确实这么接线」，用源码断言补上（切到
+//     各自的函数块再断言，不让 [\s\S]*? 越过块边界，见文件既有守卫的教训）----
+
+const handleReformatSrc = editorSrc.slice(
+  editorSrc.indexOf("async function handleReformat()"),
+  editorSrc.indexOf("function handleAcceptReformat()"),
+);
+const handleAcceptReformatSrc = editorSrc.slice(
+  editorSrc.indexOf("function handleAcceptReformat()"),
+  editorSrc.indexOf("function handleDismissReformat()"),
+);
+
+test("接线（P1-d）：handleReformat 发起前快照 content，到达用 resolveReformatArrival + contentRef.current 比对", () => {
+  assert.ok(handleReformatSrc.length > 0, "handleReformat 函数体没截到，守卫失效");
+  // 快照必须在 beginCellReformat 之前捕获（此刻 content===savedContent，是发起
+  // 时的基线）。
+  assert.match(handleReformatSrc, /const contentAtRequest = content;[\s\S]*?setReformatState\(beginCellReformat\)/);
+  // 到达时必须读**实时** contentRef.current（不是闭包冻住的 content），否则永远
+  // 判不出"在飞期间改过"——那正是本缺陷。
+  assert.match(
+    handleReformatSrc,
+    /resolveReformatArrival\(state, contentAtRequest, contentRef\.current, result\)/,
+  );
+  // 不得再直接用 resolveCellReformat（会绕过陈旧丢弃，退回缺陷行为）。
+  assert.doesNotMatch(handleReformatSrc, /resolveCellReformat\(/);
+});
+
+test("接线（P1-d）：handleAcceptReformat 第二道守卫——内容偏离已保存则拒绝、转 CELL_REFORMAT_STALE，不 setContent", () => {
+  assert.ok(handleAcceptReformatSrc.length > 0, "handleAcceptReformat 函数体没截到，守卫失效");
+  // 接受前重新比对；偏离即转 stale 并 return（在任何 setContent 之前）。
+  assert.match(
+    handleAcceptReformatSrc,
+    /if \(hasUnsavedChanges\(content, savedContent\)\) \{[\s\S]*?setReformatState\(CELL_REFORMAT_STALE\);[\s\S]*?return;[\s\S]*?\}/,
+  );
+  // 守卫必须在 setContent(candidateMd) 之前——用下标序确认，不靠肉眼。
+  const guardIdx = handleAcceptReformatSrc.indexOf("CELL_REFORMAT_STALE");
+  const setContentIdx = handleAcceptReformatSrc.indexOf("setContent(reformatState.candidateMd)");
+  assert.ok(guardIdx > 0 && setContentIdx > 0, "两个锚点都要在 handleAcceptReformat 里");
+  assert.ok(guardIdx < setContentIdx, "陈旧守卫必须在 setContent 覆盖之前");
+});
+
+// 接线（F3）：纯函数把服务器陈旧判成 reason:"server"，但组件必须真的按 reason 选
+// 文案，否则两种成因会共用同一句、服务器陈旧的独立指引白设。用紧致的三元锚定这条
+// 渲染分支（只夹白空、不用 [\s\S]*? 跨块，避免越过收尾）：server→服务器文案，
+// 否则→本地文案。
+test("接线（F3）：stale 渲染按 reformatState.reason 选服务器/本地文案", () => {
+  assert.match(
+    editorSrc,
+    /reformatState\.reason === "server"\s*\?\s*REFORMAT_SERVER_STALE_MESSAGE\s*:\s*REFORMAT_STALE_MESSAGE/,
+  );
+});
+
+// 接线（F review）：server-stale 转入的那一刻必须回调 onServerStale 请父级刷新表 detail
+// （否则关掉重开撞同一陈旧态、永远循环）。用 effect 观察 reformatState，谓词
+// reformatArrivalNeedsParentRefresh 判定；回调收进 ref、effect 只依赖 [reformatState]，
+// 避免父级 inline 回调换 identity 在仍是 server-stale 期间被无关重渲染重复触发。
+test("接线（F）：onServerStale 收进 ref 并随 prop 同步（不让 effect 直接依赖易变回调）", () => {
+  assert.match(editorSrc, /const onServerStaleRef = useRef\(onServerStale\);/);
+  assert.match(editorSrc, /onServerStaleRef\.current = onServerStale;/);
+});
+
+test("接线（F）：notify effect 按谓词回调、且 deps 恰为 [reformatState]（只触发一次、本地 stale 不触发）", () => {
+  // 谓词 reformatArrivalNeedsParentRefresh 只对 reason:"server" 为真（见 logic 单测），
+  // 故本地 stale 不触发；deps 恰 [reformatState] + singleton 引用稳定 => 每次「转入」只
+  // 触发一次。把 effect 体 + dep 数组一起锚死：改用裸 onServerStale 或把它塞进 deps（会
+  // 在 server-stale 期间被无关重渲染重复触发）都会红。
+  assert.match(
+    editorSrc,
+    /if \(reformatArrivalNeedsParentRefresh\(reformatState\)\) onServerStaleRef\.current\?\.\(\);\s*\}, \[reformatState\]\);/,
+  );
+});
+
+test("接线（F）：KnowhowCellEditorProps 声明可选 onServerStale 回调", () => {
+  assert.match(editorSrc, /onServerStale\?: \(\) => void;/);
+});
+
+// --- F3 接线守卫：规整「接受」在图片上传在飞时必须互斥——与「优化表达」的
+//     handleAcceptSuggestion 完全对称（accept 按钮 disabled + handler 内先 return）。
+//     缺陷：规整在飞时用户可粘贴图片起一个上传，随后在上传落地前点「接受」，
+//     setContent(candidateMd) 与晚到的上传续写落在不同的整篇快照上，图片被追加到
+//     末尾/与已接受内容竞态。优化侧已用同一套 uploading 门守住，这里镜像它。
+//     纯函数锁不住 JSX/handler 接线，用源码 pin 补上（切到函数块/按钮元素再断言，
+//     不让 [\s\S]*? 越过块边界，见文件既有守卫的教训）。------------------------------
+
+const handleAcceptSuggestionSrc = editorSrc.slice(
+  editorSrc.indexOf("function handleAcceptSuggestion()"),
+  editorSrc.indexOf("function handleDiscardSuggestion()"),
+);
+const reformatAcceptButtonSrc = editorSrc.slice(
+  editorSrc.indexOf("onClick={handleAcceptReformat}"),
+  editorSrc.indexOf("</button>", editorSrc.indexOf("onClick={handleAcceptReformat}")),
+);
+const optimizeAcceptButtonSrc = editorSrc.slice(
+  editorSrc.indexOf("onClick={handleAcceptSuggestion}"),
+  editorSrc.indexOf("</button>", editorSrc.indexOf("onClick={handleAcceptSuggestion}")),
+);
+
+test("接线（F3）：handleAcceptReformat 在 uploading 时先 setSaveError(ACCEPT_BLOCKED_UPLOADING_HINT) 并 return，镜像 handleAcceptSuggestion", () => {
+  assert.ok(handleAcceptReformatSrc.length > 0, "handleAcceptReformat 函数体没截到，守卫失效");
+  // 优化侧既有的 uploading 守卫是这条镜像的「真源」——先确认它还在（否则无从谈镜像）。
+  assert.match(
+    handleAcceptSuggestionSrc,
+    /if \(uploading\) \{[\s\S]*?setSaveError\(ACCEPT_BLOCKED_UPLOADING_HINT\);[\s\S]*?return;[\s\S]*?\}/,
+  );
+  // 规整侧必须有字面同款守卫。
+  assert.match(
+    handleAcceptReformatSrc,
+    /if \(uploading\) \{[\s\S]*?setSaveError\(ACCEPT_BLOCKED_UPLOADING_HINT\);[\s\S]*?return;[\s\S]*?\}/,
+  );
+  // uploading 守卫必须在 setContent(candidateMd) 之前——用下标序确认，不靠肉眼。
+  const guardIdx = handleAcceptReformatSrc.indexOf("ACCEPT_BLOCKED_UPLOADING_HINT");
+  const setContentIdx = handleAcceptReformatSrc.indexOf("setContent(reformatState.candidateMd)");
+  assert.ok(guardIdx > 0 && setContentIdx > 0, "两个锚点都要在 handleAcceptReformat 里");
+  assert.ok(guardIdx < setContentIdx, "uploading 守卫必须在 setContent 覆盖之前");
+});
+
+test("接线（F3）：规整「接受」按钮 uploading 时置灰 + 对得上的 title（字面同优化「接受」按钮）", () => {
+  assert.ok(reformatAcceptButtonSrc.length > 0, "规整「接受」按钮没截到");
+  // 「置灰必有对得上的原因」：disabled 与 title 同源于 uploading。
+  assert.match(reformatAcceptButtonSrc, /disabled=\{uploading\}/);
+  assert.match(reformatAcceptButtonSrc, /title=\{uploading \? ACCEPT_BLOCKED_UPLOADING_HINT : undefined\}/);
+  // 与优化「接受」按钮的 uploading 门字面一致（真·镜像，不许一侧漂移）。
+  assert.match(optimizeAcceptButtonSrc, /disabled=\{uploading\}/);
+  assert.match(optimizeAcceptButtonSrc, /title=\{uploading \? ACCEPT_BLOCKED_UPLOADING_HINT : undefined\}/);
+});
+
+test("failCellReformat: loading -> error(message)", () => {
+  assert.deepStrictEqual(failCellReformat({ status: "loading" }, "规整格式失败，请重试"), {
+    status: "error",
+    message: "规整格式失败，请重试",
+  });
+});
+
+test("failCellReformat: 非 loading 态原样返回", () => {
+  const ready = { status: "ready", candidateMd: "x", source: "llm" };
+  assert.strictEqual(failCellReformat(ready, "err"), ready);
+});
+
+test("dismissCellReformat: 任何时候都回到 idle", () => {
+  assert.deepStrictEqual(dismissCellReformat(), { status: "idle" });
+});
+
+test("isCellReformatLoading: 仅 loading 态为 true", () => {
+  assert.strictEqual(isCellReformatLoading({ status: "idle" }), false);
+  assert.strictEqual(isCellReformatLoading({ status: "loading" }), true);
+  assert.strictEqual(isCellReformatLoading({ status: "ready", candidateMd: "x", source: "llm" }), false);
+  assert.strictEqual(isCellReformatLoading({ status: "unchanged", source: "llm" }), false);
+  assert.strictEqual(isCellReformatLoading({ status: "stale" }), false);
+  assert.strictEqual(isCellReformatLoading({ status: "error", message: "x" }), false);
+});
+
+// --- reformatCellDisabledReason（同 optimizeCellDisabledReason 的优先级：
+// 正在请求中 > 有未保存修改 > 内容为空 > 可点击）------------------------------
+
+test("reformatCellDisabledReason: 正在规整中 -> 优先于其它原因", () => {
+  assert.strictEqual(
+    reformatCellDisabledReason("有未保存修改", "已保存", { status: "loading" }),
+    REFORMAT_LOADING_HINT,
+  );
+});
+
+test("reformatCellDisabledReason: 有未保存修改 -> 提示先保存", () => {
+  assert.strictEqual(reformatCellDisabledReason("新内容", "旧内容", { status: "idle" }), REFORMAT_UNSAVED_HINT);
+});
+
+test("reformatCellDisabledReason: 内容为空(且无未保存修改) -> 提示格子为空", () => {
+  assert.strictEqual(reformatCellDisabledReason("", "", { status: "idle" }), REFORMAT_EMPTY_HINT);
+  assert.strictEqual(reformatCellDisabledReason("   ", "   ", { status: "idle" }), REFORMAT_EMPTY_HINT);
+});
+
+test("reformatCellDisabledReason: 已保存且非空 -> null（可点击）", () => {
+  assert.strictEqual(reformatCellDisabledReason("已保存的内容", "已保存的内容", { status: "idle" }), null);
+});
+
+test("reformatCellDisabledReason: ready/unchanged 态且内容一致非空 -> null", () => {
+  assert.strictEqual(
+    reformatCellDisabledReason("已保存的内容", "已保存的内容", { status: "ready", candidateMd: "x", source: "llm" }),
+    null,
+  );
+  assert.strictEqual(
+    reformatCellDisabledReason("已保存的内容", "已保存的内容", { status: "unchanged", source: "llm" }),
+    null,
+  );
+});
+
 test("readCellDraft: localStorage 属性 getter 本身抛 SecurityError → null，不崩（回归锁）", () => {
   // 第 8 轮复审探针：受限存储环境下 window.localStorage 属性访问自身抛错。thunk 在
   // try 内求值，异常不逃逸；若把 getStorage() 提到 try 外，本条立刻红。
@@ -847,4 +1482,76 @@ test("接线：草稿扫描在 useState 初始化器里同步完成，不在 eff
 test("接线：banner 与其同步镜像 ref 都从首帧扫描结果取初值", () => {
   assert.match(editorSrc, /const \[showRestoreBanner, setShowRestoreBanner\] = useState\(draftScan\.offer\);/);
   assert.match(editorSrc, /const restoreBannerRef = useRef\(showRestoreBanner\);/);
+});
+
+// --- reformatSourceLabel：后端 source 枚举 -> 友好文案（CRITICAL：原始枚举
+// 值绝不能泄漏到界面上）-------------------------------------------------------
+
+test("reformatSourceLabel: 'llm' -> 「已用 AI 规整格式」", () => {
+  assert.strictEqual(reformatSourceLabel("llm"), REFORMAT_SOURCE_LLM_LABEL);
+  assert.strictEqual(reformatSourceLabel("llm"), "已用 AI 规整格式");
+});
+
+test("reformatSourceLabel: 'rule/llm-failed' -> 「已用规则规整格式」（不暴露 AI 失败这一实现细节）", () => {
+  assert.strictEqual(reformatSourceLabel("rule/llm-failed"), REFORMAT_SOURCE_RULE_LABEL);
+  assert.strictEqual(reformatSourceLabel("rule/llm-failed"), "已用规则规整格式");
+});
+
+test("reformatSourceLabel: 'rule/no-llm' -> 「已用规则规整格式」", () => {
+  assert.strictEqual(reformatSourceLabel("rule/no-llm"), REFORMAT_SOURCE_RULE_LABEL);
+});
+
+test("reformatSourceLabel: 未知/意外枚举值 -> 兜底友好文案，绝不泄漏原始字符串", () => {
+  const label = reformatSourceLabel("some-unexpected-enum-value");
+  assert.strictEqual(label, REFORMAT_SOURCE_FALLBACK_LABEL);
+  assert.ok(!label.includes("some-unexpected-enum-value"));
+  assert.ok(!label.includes("rule/"));
+  assert.ok(!label.includes("llm"));
+});
+
+test("reformatSourceLabel: 空字符串 -> 兜底友好文案", () => {
+  assert.strictEqual(reformatSourceLabel(""), REFORMAT_SOURCE_FALLBACK_LABEL);
+});
+
+test("reformatSourceLabel: 三个已知枚举值的映射结果都不是裸枚举字符串本身", () => {
+  for (const raw of ["llm", "rule/llm-failed", "rule/no-llm"]) {
+    assert.notStrictEqual(reformatSourceLabel(raw), raw);
+  }
+});
+
+// --- 其余文案常量非空 ---------------------------------------------------------
+
+test("REFORMAT_SUGGESTION_LABEL / REFORMAT_UNCHANGED_MESSAGE / REFORMAT_UNCHANGED_DISMISS_LABEL: 非空文案", () => {
+  for (const value of [REFORMAT_SUGGESTION_LABEL, REFORMAT_UNCHANGED_MESSAGE, REFORMAT_UNCHANGED_DISMISS_LABEL]) {
+    assert.ok(typeof value === "string" && value.length > 0);
+  }
+  assert.strictEqual(REFORMAT_UNCHANGED_MESSAGE, "已经是规整格式，无需改动");
+});
+
+// --- 端到端：规整格式对照状态机走一遍完整流程 ---------------------------------
+
+test("端到端：规整格式——loading -> ready -> 放弃回到 idle", () => {
+  let state = CELL_REFORMAT_IDLE;
+  state = beginCellReformat(state);
+  assert.strictEqual(state.status, "loading");
+  state = resolveCellReformat(state, { candidateMd: "- a\n- b", source: "llm", changed: true });
+  assert.deepStrictEqual(state, { status: "ready", candidateMd: "- a\n- b", source: "llm" });
+  state = dismissCellReformat();
+  assert.deepStrictEqual(state, { status: "idle" });
+});
+
+test("端到端：规整格式——changed=false 时到 unchanged，「知道了」回到 idle", () => {
+  let state = beginCellReformat(CELL_REFORMAT_IDLE);
+  state = resolveCellReformat(state, { candidateMd: "原内容", source: "rule/no-llm", changed: false });
+  assert.deepStrictEqual(state, { status: "unchanged", source: "rule/no-llm" });
+  state = dismissCellReformat();
+  assert.deepStrictEqual(state, { status: "idle" });
+});
+
+test("端到端：规整格式——失败后可重试", () => {
+  let state = beginCellReformat(CELL_REFORMAT_IDLE);
+  state = failCellReformat(state, "规整格式失败，请重试");
+  assert.strictEqual(state.status, "error");
+  state = beginCellReformat(state);
+  assert.strictEqual(state.status, "loading");
 });

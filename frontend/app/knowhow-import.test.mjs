@@ -5,6 +5,7 @@
 // 对 knowhow-panel-logic.ts 的拆分方式）。
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import {
   IMPORT_ACCEPT_EXTENSIONS,
@@ -19,6 +20,11 @@ import {
   canSubmitImport,
   extractErrorMessage,
   computePreviewSpans,
+  shouldApplyAnchorPreview,
+  importSubmitDisabledReason,
+  SUBMIT_BLANK_TITLE_HINT,
+  SUBMIT_PREVIEW_REFRESHING_HINT,
+  SUBMIT_PREVIEW_ERROR_HINT,
 } from "./knowhow-import-logic.ts";
 import { humanizedError } from "./errors.ts";
 
@@ -331,4 +337,161 @@ test("computePreviewSpans 首行行标题为空时不被 fill（leading-blank）
   const spans = computePreviewSpans(rows, 0);
   assert.deepEqual(spans[0][0], { text: "", rowSpan: 1 });
   assert.deepEqual(spans[1][0], { text: "A", rowSpan: 1 });
+});
+
+// --- shouldApplyAnchorPreview（P1：在飞重取预览的失效守卫）---------------------
+//
+// 缺陷：改锚定的在飞重取用请求序号自守；但「返回选择步骤 / 另选文件」此前不
+// 递增序号，于是文件 A 的迟到重取响应仍匹配旧序号、把已切到的文件 B 的预览
+// 覆盖成 A 的行。守卫本身很小——真正的修复是把序号递增接到那两个离开映射
+// 上下文的点上（见下方源码接线守卫）；本函数只负责「响应序号还等于当前序号
+// 且组件仍挂载才落地」这个判定。
+
+test("shouldApplyAnchorPreview: 挂载中且序号匹配 → true（最新一次响应落地）", () => {
+  assert.strictEqual(shouldApplyAnchorPreview(true, 3, 3), true);
+});
+
+test("shouldApplyAnchorPreview: 序号失配 → false（更晚的切文件/返回/重取已把当前序号推进，旧响应被丢弃）", () => {
+  // 正是 P1 场景：文件 A 的重取 responseSeq=1，用户返回并切到文件 B 把
+  // currentSeq 推到 3，A 的迟到响应到达时 1 !== 3 → 丢弃，不覆盖 B 的预览。
+  assert.strictEqual(shouldApplyAnchorPreview(true, 1, 3), false);
+  assert.strictEqual(shouldApplyAnchorPreview(true, 4, 3), false);
+});
+
+test("shouldApplyAnchorPreview: 已卸载 → false（即便序号匹配也不 setState 到已卸载组件）", () => {
+  assert.strictEqual(shouldApplyAnchorPreview(false, 3, 3), false);
+});
+
+// --- importSubmitDisabledReason（P2：提交必须等重取预览就绪）-------------------
+//
+// 提交按钮在「预览正在按新锚定列重取」或「重取失败」时必须置灰——否则用户
+// 会拿着旧锚定列规整的预览（或根本没刷新成功的预览）提交，commit 却按新锚定
+// 列走，展示≠落库。同 optimizeCellDisabledReason：同一函数算出的原因同时驱动
+// disabled 与 title，不会「置灰了但提示语对不上真实原因」。
+
+test("importSubmitDisabledReason: 全部就绪 → null（可提交）", () => {
+  assert.strictEqual(importSubmitDisabledReason("我的表", false, null), null);
+});
+
+test("importSubmitDisabledReason: 标题为空 → 提示填标题（优先级最高）", () => {
+  assert.strictEqual(importSubmitDisabledReason("   ", false, null), SUBMIT_BLANK_TITLE_HINT);
+  // 标题空优先于预览态：即便同时在重取，也先提示更根本的「没填标题」。
+  assert.strictEqual(importSubmitDisabledReason("", true, "更新预览失败"), SUBMIT_BLANK_TITLE_HINT);
+});
+
+test("importSubmitDisabledReason: 预览重取中 → 提示稍候（挡住「拿旧预览提交」）", () => {
+  assert.strictEqual(importSubmitDisabledReason("我的表", true, null), SUBMIT_PREVIEW_REFRESHING_HINT);
+});
+
+test("importSubmitDisabledReason: 预览重取失败 → 提示重选行标题列后再试（挡住「拿没刷成功的预览提交」）", () => {
+  assert.strictEqual(importSubmitDisabledReason("我的表", false, "更新预览失败，请重试"), SUBMIT_PREVIEW_ERROR_HINT);
+});
+
+test("importSubmitDisabledReason: 重取中优先于重取失败（loading 时不显示上一次的 error）", () => {
+  assert.strictEqual(importSubmitDisabledReason("我的表", true, "上次的错误"), SUBMIT_PREVIEW_REFRESHING_HINT);
+});
+
+// --- 接线：改选行标题列 → 重取预览（P2 全栈修复的前端一侧）--------------------
+//
+// 组件是 .tsx，本仓库 node:test 只 import 得了纯 .ts（见文件头说明），故对
+// knowhow-import.tsx 源码本身下断言（同 knowhow-cell-editor.test.mjs 的 editorSrc
+// 手法）。锁住的接线点：改坏了就复现真 bug——预览按猜测列规整、commit 却按用户
+// 所选列规整，「预览即所得」被打破（见后端 preview_import 的 anchor_index）。
+
+const importSrc = await readFile(new URL("./knowhow-import.tsx", import.meta.url), "utf8");
+
+const handleAnchorChangeSrc = importSrc.slice(
+  importSrc.indexOf("async function handleAnchorChange"),
+  importSrc.indexOf("function backToSelect("),
+);
+
+test("接线：行标题单选的 onAnchorChange 接到 handleAnchorChange（不是裸 setAnchorIndex——否则只改分组不重取规整）", () => {
+  assert.match(importSrc, /onAnchorChange=\{handleAnchorChange\}/);
+});
+
+test("接线：handleAnchorChange 用**所选** anchor 下标重取预览（预览随所选列重新规整）", () => {
+  assert.ok(handleAnchorChangeSrc.length > 0, "handleAnchorChange 函数体没截到，守卫失效");
+  assert.match(handleAnchorChangeSrc, /importKnowhowPreview\(\s*notebookId,\s*currentFile,\s*nextAnchorIndex\s*\)/);
+});
+
+test("接线：handleAnchorChange 带请求序号守卫（快速切换只让最新一次落地，丢弃乱序旧响应）", () => {
+  assert.match(handleAnchorChangeSrc, /anchorReqSeqRef\.current \+ 1/);
+  // 守卫经纯逻辑 shouldApplyAnchorPreview（单测另有覆盖）：响应序号仍是最新且
+  // 组件仍挂载才落地——序号在切文件/返回选择步骤时被推进，旧响应在此失配丢弃。
+  assert.match(
+    handleAnchorChangeSrc,
+    /shouldApplyAnchorPreview\(\s*mountedRef\.current,\s*seq,\s*anchorReqSeqRef\.current\s*\)/,
+  );
+});
+
+test("接线：重取失败保留旧网格（不清空 preview），只置 refreshError 提示", () => {
+  // 清空 preview 会让用户改一次行标题就把整块预览打没，比原 bug 更糟。
+  assert.match(handleAnchorChangeSrc, /setAnchorPreviewError\(/);
+  assert.equal(handleAnchorChangeSrc.includes("setPreview(null)"), false);
+});
+
+test("接线：初始「猜测预选」不经 handleAnchorChange（handleFileSelected 直接 setAnchorIndex，不多取一次预览）", () => {
+  // 初始预览本就是后端按猜测列规整的；若初始也走重取，等于每次开文件都多一趟往返。
+  const handleFileSelectedSrc = importSrc.slice(
+    importSrc.indexOf("async function handleFileSelected"),
+    importSrc.indexOf("function handleFileInputChange("),
+  );
+  assert.ok(handleFileSelectedSrc.length > 0, "handleFileSelected 函数体没截到，守卫失效");
+  assert.match(handleFileSelectedSrc, /setAnchorIndex\(selection\.anchorIndex\)/);
+  assert.equal(handleFileSelectedSrc.includes("handleAnchorChange"), false);
+});
+
+// --- 接线（P1）：离开映射上下文时作废在飞重取预览 -----------------------------
+//
+// 缺陷：文件 A 改锚定的在飞重取（seq=N）在用户返回并切到文件 B 后迟到返回，
+// 序号仍匹配 → 把 B 的预览覆盖成 A 的行（列数相等还能就此把 B 按 A 的列导入）。
+// 修复：在两个「离开映射上下文」的点递增序号——(a) 新文件初始预览开始，
+// (b) 返回选择步骤——使那条迟到响应失配、被 shouldApplyAnchorPreview 丢弃。
+
+test("接线（P1）：handleFileSelected 初始预览开始时递增序号并清掉在飞重取态（作废上一个文件仍在飞的重取响应）", () => {
+  const handleFileSelectedSrc = importSrc.slice(
+    importSrc.indexOf("async function handleFileSelected"),
+    importSrc.indexOf("function handleFileInputChange("),
+  );
+  assert.ok(handleFileSelectedSrc.length > 0, "handleFileSelected 函数体没截到，守卫失效");
+  assert.match(handleFileSelectedSrc, /anchorReqSeqRef\.current \+= 1/);
+  assert.match(handleFileSelectedSrc, /setAnchorPreviewLoading\(false\)/);
+  assert.match(handleFileSelectedSrc, /setAnchorPreviewError\(null\)/);
+});
+
+test("接线（P1）：backToSelect 返回选择步骤时递增序号（作废仍在飞的重取响应，防它迟到覆盖已切走的文件）", () => {
+  const backToSelectSrc = importSrc.slice(
+    importSrc.indexOf("function backToSelect("),
+    importSrc.indexOf("function setKindAt("),
+  );
+  assert.ok(backToSelectSrc.length > 0, "backToSelect 函数体没截到，守卫失效");
+  assert.match(backToSelectSrc, /anchorReqSeqRef\.current \+= 1/);
+  // 返回时同样清掉在飞重取态（否则旧的 refreshing/error 提示会残留）。
+  assert.match(backToSelectSrc, /setAnchorPreviewLoading\(false\)/);
+  assert.match(backToSelectSrc, /setAnchorPreviewError\(null\)/);
+});
+
+// --- 接线（P2）：提交必须等重取预览就绪 ---------------------------------------
+//
+// 缺陷：改锚定后预览还在重取（anchorPreviewLoading）或重取失败（anchorPreviewError）
+// 时提交按钮仍可点——用户会拿着旧锚定列规整的（或根本没刷成功的）预览提交，
+// commit 却按新锚定列走，展示≠落库。修复：这两态并入 submitDisabled，并把置灰
+// 原因绑到按钮 title（置灰必有对得上的原因）。
+
+test("接线（P2）：提交置灰原因经 importSubmitDisabledReason 计算（预览重取中/失败都并入 disabled）", () => {
+  assert.match(
+    importSrc,
+    /importSubmitDisabledReason\(\s*title,\s*anchorPreviewLoading,\s*anchorPreviewError\s*\)/,
+  );
+  // submitting 单独 OR 进 disabled（它有自己的按钮文案「导入中…」），其余原因来自 helper。
+  assert.match(importSrc, /submitDisabled\s*=\s*submitting\s*\|\|\s*submitDisabledReason\s*!==\s*null/);
+});
+
+test("接线（P2）：提交按钮把置灰原因绑到 title（hover 能看到为什么不能点）", () => {
+  const submitButtonSrc = importSrc.slice(
+    importSrc.indexOf("knowhow-import-submit-button"),
+    importSrc.indexOf("确认导入"),
+  );
+  assert.ok(submitButtonSrc.length > 0, "提交按钮片段没截到，守卫失效");
+  assert.match(submitButtonSrc, /title=\{submitDisabledReason \?\? undefined\}/);
 });

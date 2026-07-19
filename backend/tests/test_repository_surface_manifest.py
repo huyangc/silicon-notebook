@@ -1761,7 +1761,13 @@ TASK1_KNOWHOW_ALLOWED_MEMBER_FILES = {
 # like SQLITE_CONN_REUSE_ALLOWED_NEW_MEMBERS does for close_local) rather than
 # pinned to exact lines.
 TASK2_KNOWHOW_ALLOWED_IMPORTS = {
-    ("backend/tests/test_knowhow_store.py", 15, "app.services.sqlite_repository", "SQLiteRepository"),
+    # Shifted 15->17 by the F1 (BEGIN IMMEDIATE cross-process-atomicity) tests
+    # appended to test_knowhow_store.py, which added a top-of-file ``import
+    # sqlite3`` (the two-connection lock probe needs sqlite3.connect /
+    # sqlite3.OperationalError). This is the same SQLiteRepository import site,
+    # only two lines lower; the consumer scan pins it exactly (no
+    # line-insensitivity lever), so re-pin it.
+    ("backend/tests/test_knowhow_store.py", 17, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK2_KNOWHOW_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_knowhow_store.py", name)
@@ -1863,9 +1869,15 @@ TASK6_KNOWHOW_ALLOWED_MEMBER_FILES = {
 # `settings` isn't private so it only needs registering HERE, and `_runtime`
 # is registered both places since the two guards scan independently.
 # Mirrors Task 4's exact-consumer choice for `storage_dir` in assets.py.
+# 185->197 / 187->199: knowhow-md-normalize's own docstring/normalize-call
+# additions to preview_import earlier in the file add +12 net lines above
+# build_projector; then 197->211 / 199->213: the P1-c ``_preview_row`` helper
+# + preview_import doc lines add +14 more (see INDEPENDENT_PRIVATE_SITES's
+# sibling re-pin).
 TASK6_KNOWHOW_ALLOWED_CONSUMERS = {
-    ("_runtime", "backend/app/services/knowhow/api.py:185"),
-    ("settings", "backend/app/services/knowhow/api.py:187"),
+    # F5 preview-anchor range check adds +6 net lines in preview_import: 236->242, 238->244.
+    ("_runtime", "backend/app/services/knowhow/api.py:242"),
+    ("settings", "backend/app/services/knowhow/api.py:244"),
 }
 
 # Task 10 (knowhow-tables-pr1): the end-to-end projection -> retrieval
@@ -2556,13 +2568,20 @@ ACTIVE_PRODUCTION_MEMBER_SITES = {
     # 端点),下面这批站点整体下移 70 行 —— 纯行号平移,消费点本身没变。
     ("mark_notebook_base", "backend/app/api/routes.py:1429"),
     ("set_notebook_personal", "backend/app/api/routes.py:1431"),
-    ("list_notebook_bases", "backend/app/api/routes.py:1442"),
-    ("mountable_notebooks", "backend/app/api/routes.py:1463"),
-    ("list_notebook_bases", "backend/app/api/routes.py:1464"),
-    ("replace_notebook_bases", "backend/app/api/routes.py:1468"),
-    ("list_notebook_bases", "backend/app/api/routes.py:1469"),
-    ("mountable_notebooks", "backend/app/api/routes.py:1479"),
-    ("mounted_by_count", "backend/app/api/routes.py:1488"),
+    # knowhow-md-normalize rebase(2026-07-19):本特性在本块之前的 knowhow 路由段
+    # 净增 130 行(/reformat 端点 + 单格/批量 reformat 的请求/响应模型与处理),
+    # 把下面这四个「尚未进冻结 facade_surface.json」的新成员消费点(它们只靠本处
+    # 精确行号被 allowed_sites 过滤,没有 recorded 侧可归一化匹配)整体再下移 130
+    # 行 —— 同样是纯行号平移,消费点本身没变。上面 mark_notebook_base/
+    # set_notebook_personal 经 catalog.* 调用、非 repo.* 消费点,扫描不追踪、未被
+    # 门禁标记,保持原样。
+    ("list_notebook_bases", "backend/app/api/routes.py:1572"),
+    ("mountable_notebooks", "backend/app/api/routes.py:1593"),
+    ("list_notebook_bases", "backend/app/api/routes.py:1594"),
+    ("replace_notebook_bases", "backend/app/api/routes.py:1598"),
+    ("list_notebook_bases", "backend/app/api/routes.py:1599"),
+    ("mountable_notebooks", "backend/app/api/routes.py:1609"),
+    ("mounted_by_count", "backend/app/api/routes.py:1618"),
     # 必办 3 — diag_base_report.py 新增 §2b(先查该笔记本自己的挂载集合,不再
     # 全局猜一个 tier='base' 的 notebook),第一次调用 list_notebook_bases。
     # scripts/diag_base_report.py 在 LINE_NUMBER_INSENSITIVE_FILES 里,但（同
@@ -3177,6 +3196,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in TASK3_SOURCE_ASSET_ALLOWED_IMPORTS
                     or site in PAPER_META_STATUS_TASK4_ALLOWED_IMPORTS
                     or site in ASSET_GC_TRIGGER_ALLOWED_IMPORTS
+                    or site in KNOWHOW_MDNORM_ALLOWED_IMPORTS
                     or site in KNOWHOW_TRANSFER_STORE_ALLOWED_IMPORTS
                     or site in KNOWHOW_TRANSFER_SERVICE_ALLOWED_IMPORTS
                     or site in KNOWHOW_TRANSFER_ROUTES_ALLOWED_IMPORTS
@@ -3383,6 +3403,15 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_trackF_governance_promotion.py', 171, '_connect', 'repo'),
     },
     'actual_only': {
+        # knowhow-md-normalize P1 TOCTOU test: the CLI-level "skip report comes
+        # from the transaction's return value" test stubs the guarded bulk store
+        # method via monkeypatch.setattr(repo, "update_knowhow_cells_bulk_guarded",
+        # ...). That member postdates the frozen fixture, so the patch site is
+        # actual-only; the patch scan has no line-insensitivity lever, so it is
+        # exact-pinned like every sibling here. Shifted 1142->1148 by this batch's
+        # F3 test edits (a _dry_run_then_apply helper + the plan-handshake test
+        # conversions above it).
+        ('backend/tests/test_backfill_knowhow_md.py', 1148, 'update_knowhow_cells_bulk_guarded', 'repo'),
         ('backend/tests/test_batch_ingest.py', 288, 'llm_client', 'repo'),
         ('backend/tests/test_batch_ingest.py', 293, '_mark_unified_kg_dirty', 'repo'),
         ('backend/tests/test_batch_ingest.py', 306, 'llm_client', 'repo'),
@@ -3548,9 +3577,9 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS | MERGE_DBS_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS | MERGE_DBS_ALLOWED_IMPORTS | KNOWHOW_MDNORM_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS | TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS | TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS | TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS | TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS | KNOWHOW_MDNORM_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites
@@ -3600,6 +3629,8 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | TASK3_SOURCE_ASSET_ALLOWED_NEW_MEMBERS
         | FOLLOWUP_A_ALLOWED_NEW_MEMBERS
         | PAPER_META_STATUS_ALLOWED_NEW_MEMBERS
+        | KNOWHOW_MDNORM_ALLOWED_NEW_MEMBERS
+        | KNOWHOW_MDNORM_GUARDED_ATOMIC_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)
@@ -3808,9 +3839,17 @@ ALL_TASK_ALLOWED_MEMBER_FILES = ALL_TASK_ALLOWED_MEMBER_FILES | TASK14_KNOWHOW_P
 # needs a new entry. 682->693: the get_scheduler weakref fix added lines
 # above. 693->716: anchor-grouping-display's forward_fill_column import plus
 # import_table's/commit_append's forward-fill additions add +23 net lines
-# further above optimize_cell.
+# further above optimize_cell. 716->880: the GC trigger + asset-ref helpers
+# above get_scheduler plus their imports add +164 net lines above
+# optimize_cell. 880->929: knowhow-md-normalize's own rule_normalize-before-
+# store wiring/comments in import_table/preview_append/commit_append add +49
+# further net lines above optimize_cell. 929->965: the P1-c anchor-skip
+# additions in preview_import/import_table/preview_append/commit_append add +36
+# further net lines above optimize_cell (see INDEPENDENT_PRIVATE_SITES's
+# sibling re-pin).
 TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS = {
-    ("_runtime", "backend/app/services/knowhow/api.py:880"),
+    # F5 preview-anchor range check adds +6 net lines above optimize_cell: 990->996.
+    ("_runtime", "backend/app/services/knowhow/api.py:996"),
 }
 # Its own HTTP-level test reaches the live app repository singleton via
 # app.api.deps.repository() (not a freshly constructed SQLiteRepository) to
@@ -4562,7 +4601,11 @@ TASK9_MULTI_DOMAIN_BASE_ALLOWED_IMPORTS = {
     # 把这个同一个 in-function import 再顶下 4 行——同一个统计量,第 N 次被无关
     # 编辑顶下(776->786 是 Task 9 自己那次;上面 TASK27_ALLOWED_IMPORTS 里的
     # 776 因此也已过期,保留不动,多余条目无害,只有缺失条目才会转红)。
-    ("backend/tests/test_repository_callers_static.py", 790, "app.services.sqlite_repository", "SQLiteRepository"),
+    # 790->840: knowhow-md-normalize 在 test_repository_callers_static.py 顶部登记
+    # 了它自己的四组条目(INDEPENDENT_SQL_SITES + FACADE_CLASS_IMPORT_SITES +
+    # INDEPENDENT_PRIVATE_SITES 三处 _runtime 重钉/新增 + SQLITE_CONNECT_SITES),
+    # 净增 50 行都在这个 in-function import 之前,同一个统计量再次被无关编辑顶下。
+    ("backend/tests/test_repository_callers_static.py", 840, "app.services.sqlite_repository", "SQLiteRepository"),
 }
 TASK9_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
     ("backend/tests/test_backfill_promotion_targets.py", "SQLiteRepository"),
@@ -4616,4 +4659,85 @@ REBASE_PR300_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES = {
 }
 ALL_TASK_ALLOWED_MEMBER_FILES = (
     ALL_TASK_ALLOWED_MEMBER_FILES | REBASE_PR300_MULTI_DOMAIN_BASE_ALLOWED_MEMBER_FILES
+)
+
+# knowhow-md-normalize Task 6: the one-time existing-cell backfill CLI
+# (scripts/backfill_knowhow_md.py) composes the real repository directly
+# (SQLiteRepository(Settings())) — same composition-root pattern as the
+# sibling scripts/merge_dbs.py tool (MERGE_DBS_ALLOWED_IMPORTS above) — to
+# walk every knowhow table/row/cell in a notebook, normalize each non-empty
+# cell (rule_normalize by default, or reformat_cell's LLM-reformat-then-
+# invariant-check-then-rule-fallback under --use-llm), write the changed
+# ones in one bulk transaction, then reproject the touched tables
+# synchronously in-process (see that module's own docstrings for the full
+# rationale). Its test (test_backfill_knowhow_md.py) constructs the same
+# real facade directly, not through any app/api composition root.
+KNOWHOW_MDNORM_ALLOWED_IMPORTS = {
+    # Script import shifted 63->76 by the P2 read-only-default work (an
+    # ``import sqlite3`` + docstring/read-only-default paragraph above it), then
+    # 76->78 by the F1/F4 fix's two new top-of-file imports (urllib.parse.quote
+    # + app.core.request_context set/reset_request_user for the owner-context),
+    # then 78->81 by this batch's +3-line module-docstring expansion (every
+    # --apply now requires --plan).
+    ("scripts/backfill_knowhow_md.py", 81, "app.services.sqlite_repository", "SQLiteRepository"),
+    ("backend/tests/test_backfill_knowhow_md.py", 30, "app.services.sqlite_repository", "SQLiteRepository"),
+}
+# The FROZEN facade members this test file consumes -- ``_connect`` (peeks the
+# DB directly to assert a projected side effect), ``create_notebook`` (the
+# fixtures seed notebooks), ``_rewrite_llm_client`` (tests inject a fake/failing
+# rewrite client through the real facade property), and the F1 owner-context
+# helpers ``create_user`` / ``set_user_model_settings`` / ``set_request_user`` /
+# ``reset_request_user`` (the two-users-with-different-rewrite-clients tests
+# configure a second user and act AS the notebook owner) -- get a BROAD
+# member+file allowance (line-number-insensitive, same lever as
+# ASSET_GC_TRIGGER_ALLOWED_MEMBER_FILES) rather than exact per-line pins: the P1
+# TOCTOU + P2 read-only-default + F1/F2/F3 tests append more scenarios
+# exercising the same members, and pinning each new call site's exact line would
+# make every future test edit a manifest failure for no contract benefit. Every
+# OTHER member this file consumes (create_knowhow_table / get_knowhow_table /
+# add_knowhow_row / update_knowhow_cell / list_knowhow_tables / ...) is a NEW
+# facade member that postdates the frozen fixture and is already popped from the
+# scan comparison by its own *_ALLOWED_NEW_MEMBERS set, so it needs nothing here.
+KNOWHOW_MDNORM_ALLOWED_MEMBER_FILES = {
+    ("backend/tests/test_backfill_knowhow_md.py", name)
+    for name in {
+        "_connect", "create_notebook", "_rewrite_llm_client",
+        "create_user", "set_user_model_settings",
+        "set_request_user", "reset_request_user",
+    }
+}
+# Exact consumer sites this feature adds OUTSIDE that broadly-allowed test file:
+#  - `_runtime` (reformat_cell's own third independent call site — see
+#    INDEPENDENT_PRIVATE_SITES in test_repository_callers_static.py, which
+#    this mirrors, and TASK6/TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS above for
+#    the sibling build_projector/optimize_cell registrations).
+# (The former ``update_knowhow_cells_bulk`` script consumer entry is gone: F3
+# deleted that unguarded write path — the rules-only ``--apply`` now routes
+# through the guarded ``update_knowhow_cells_bulk_guarded`` like every other
+# apply path, and the store method + its facade delegate were removed with it.)
+KNOWHOW_MDNORM_ALLOWED_CONSUMERS = {
+    # F5 preview-anchor range check adds +6 net lines above reformat_cell: 1121->1127.
+    ("_runtime", "backend/app/services/knowhow/api.py:1127"),
+}
+# Brand-new facade member the P1 TOCTOU fix adds (the compare-and-write bulk
+# variant, apply_reviewed_plan's atomic in-transaction guard, now the SOLE bulk
+# write path after F3): it postdates the frozen fixture, so -- exactly like
+# update_knowhow_cell's own TASK2_KNOWHOW_ALLOWED_NEW_MEMBERS entry -- pop it
+# from the scan comparison entirely (covers both its
+# scripts/backfill_knowhow_md.py write site AND the store-direct test's call
+# site, without pinning either line).
+KNOWHOW_MDNORM_ALLOWED_NEW_MEMBERS = {"update_knowhow_cells_bulk_guarded"}
+# Concurrency P1 fix (b): the all-or-nothing compare-and-write the EDITOR's
+# batch-reformat save routes through (a sibling of update_knowhow_cells_bulk_
+# guarded that refuses the whole batch with a 409 on any stale/foreign entry
+# instead of skipping per-entry). Brand-new facade delegate postdating the
+# frozen facade_surface fixture, so -- exactly like update_knowhow_cells_bulk_
+# guarded and update_knowhow_cell before it -- pop it from the scan comparison
+# entirely (covers its routes.py consumer sites without pinning either line).
+KNOWHOW_MDNORM_GUARDED_ATOMIC_ALLOWED_NEW_MEMBERS = {"update_knowhow_cells_guarded_atomic"}
+# Fold the backfill test's broad member+file allowance into the master set the
+# consumer scan filters through (same one-line extension ASSET_GC_TRIGGER uses
+# above).
+ALL_TASK_ALLOWED_MEMBER_FILES = (
+    ALL_TASK_ALLOWED_MEMBER_FILES | KNOWHOW_MDNORM_ALLOWED_MEMBER_FILES
 )

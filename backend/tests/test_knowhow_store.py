@@ -7,6 +7,8 @@ See docs/superpowers/plans/2026-07-15-knowhow-tables-pr1.md Task 2.
 """
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
 from app.core.config import Settings
@@ -1029,3 +1031,148 @@ def test_facade_delegates_editing_and_code_members(repo, notebook_id):
     assert all(c["id"] != new_col for c in repo.get_knowhow_table(table_id)["columns"])
     repo.delete_knowhow_row(row_id)
     assert repo.get_knowhow_table(table_id)["rows"] == []
+
+
+# ---------------------------------------------------------------------------
+# F1 (P1 code review): the guarded compare-and-write must be CROSS-PROCESS
+# atomic. SQLite (pysqlite isolation_level="") opens the transaction lazily at
+# the first DML, so the phase-1 ``SELECT current`` re-reads run OUTSIDE the
+# write transaction; SqliteDatabase.write()'s ``write_lock`` is only
+# PROCESS-local. A second PROCESS (a live backend beside the CLI, another
+# worker) could commit a write BETWEEN the compare and this method's own write,
+# and the guarded write would clobber it on top -- the advertised
+# compare-and-write is then not atomic across processes. The fix issues
+# ``BEGIN IMMEDIATE`` before any read so the whole read-compare-write runs under
+# a real RESERVED lock. These tests pin (a) the trace: ``BEGIN IMMEDIATE`` is
+# emitted before the first SELECT of the guarded path, and (b) the behaviour: a
+# second raw connection's own ``BEGIN IMMEDIATE`` is refused (SQLITE_BUSY) while
+# the guarded transaction is mid-flight -- proof the reserved lock is actually
+# held across the compare, not merely acquired at the trailing write.
+# ---------------------------------------------------------------------------
+
+
+def _one_cell(store: KnowhowStore, notebook_id: str) -> tuple[str, str, str, str]:
+    """A table with one procedure column and one row whose cell holds ``old``.
+    Returns ``(table_id, row_id, column_id, "old")`` -- the coordinates the
+    guarded methods take as ``(table_id, row_id, column_id, expected_before,
+    content_md)``."""
+    table_id = store.create_knowhow_table(
+        notebook_id, "T", "", [{"name": "修复", "role": "procedure"}]
+    )
+    column_id = store.get_knowhow_table(table_id)["columns"][0]["id"]
+    row_id = store.add_knowhow_row(table_id, {column_id: "old"})
+    return table_id, row_id, column_id, "old"
+
+
+def _trace_write_connections(store: KnowhowStore, monkeypatch) -> list[str]:
+    """Attach a statement tracer to every write connection SqliteDatabase.write()
+    opens from now on, returning the shared list the tracer appends to. The
+    callback is set AFTER ``_new_connection`` finishes (past its PRAGMAs), so the
+    list starts at the first statement the guarded body itself issues."""
+    statements: list[str] = []
+    original = store.database._new_connection
+
+    def traced() -> sqlite3.Connection:
+        conn = original()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(store.database, "_new_connection", traced)
+    return statements
+
+
+def _assert_begin_immediate_before_first_select(statements: list[str]) -> None:
+    upper = [s.strip().upper() for s in statements]
+    assert any("BEGIN IMMEDIATE" in s for s in upper), (
+        "guarded path never issued BEGIN IMMEDIATE -> its phase-1 reads run "
+        f"outside any write transaction. Traced: {statements}"
+    )
+    begin_idx = next(i for i, s in enumerate(upper) if "BEGIN IMMEDIATE" in s)
+    select_idx = next(i for i, s in enumerate(upper) if s.startswith("SELECT"))
+    assert begin_idx < select_idx, (
+        "BEGIN IMMEDIATE must precede the first SELECT so the compare re-reads "
+        f"under the reserved lock. Traced: {statements}"
+    )
+
+
+def test_guarded_atomic_emits_begin_immediate_before_first_select(store, notebook_id, monkeypatch):
+    table_id, row_id, column_id, before = _one_cell(store, notebook_id)
+    statements = _trace_write_connections(store, monkeypatch)
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id, [(table_id, row_id, column_id, before, "new")]
+    )
+
+    assert result == {"written": [(row_id, column_id)], "conflict": False}
+    _assert_begin_immediate_before_first_select(statements)
+
+
+def test_bulk_guarded_emits_begin_immediate_before_first_select(store, notebook_id, monkeypatch):
+    table_id, row_id, column_id, before = _one_cell(store, notebook_id)
+    statements = _trace_write_connections(store, monkeypatch)
+
+    result = store.update_knowhow_cells_bulk_guarded(
+        notebook_id, [(table_id, row_id, column_id, before, "new")]
+    )
+
+    assert result["written"] == [(row_id, column_id)]
+    _assert_begin_immediate_before_first_select(statements)
+
+
+def _lock_probe(store: KnowhowStore, monkeypatch) -> dict:
+    """Hook ``store.new_id`` (called only in the WRITE phase, i.e. AFTER the
+    compare re-reads) so that the FIRST time the guarded body reaches its write
+    phase, a second raw connection with a zero busy-timeout attempts its own
+    ``BEGIN IMMEDIATE``. If the guarded transaction holds the reserved lock
+    (post-fix) that attempt raises SQLITE_BUSY; otherwise it succeeds, proving
+    the compare ran with no write lock held. Records the outcome and delegates
+    to the real id generator so the write still lands."""
+    seen: dict = {}
+    db_path = str(store.database.db_path)
+    original_new_id = store.new_id
+
+    def probing_new_id(prefix: str) -> str:
+        if "locked" not in seen:
+            second = sqlite3.connect(db_path, timeout=0)
+            try:
+                second.execute("BEGIN IMMEDIATE")
+                seen["locked"] = False
+                second.rollback()
+            except sqlite3.OperationalError:
+                seen["locked"] = True
+            finally:
+                second.close()
+        return original_new_id(prefix)
+
+    monkeypatch.setattr(store, "new_id", probing_new_id)
+    return seen
+
+
+def test_guarded_atomic_holds_reserved_lock_across_compare_and_write(store, notebook_id, monkeypatch):
+    table_id, row_id, column_id, before = _one_cell(store, notebook_id)
+    seen = _lock_probe(store, monkeypatch)
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id, [(table_id, row_id, column_id, before, "new")]
+    )
+
+    assert result == {"written": [(row_id, column_id)], "conflict": False}
+    assert seen.get("locked") is True, (
+        "a second connection could BEGIN IMMEDIATE mid-transaction -> the "
+        "guarded compare-and-write holds no cross-process write lock"
+    )
+
+
+def test_bulk_guarded_holds_reserved_lock_across_compare_and_write(store, notebook_id, monkeypatch):
+    table_id, row_id, column_id, before = _one_cell(store, notebook_id)
+    seen = _lock_probe(store, monkeypatch)
+
+    result = store.update_knowhow_cells_bulk_guarded(
+        notebook_id, [(table_id, row_id, column_id, before, "new")]
+    )
+
+    assert result["written"] == [(row_id, column_id)]
+    assert seen.get("locked") is True, (
+        "a second connection could BEGIN IMMEDIATE mid-transaction -> the "
+        "guarded compare-and-write holds no cross-process write lock"
+    )

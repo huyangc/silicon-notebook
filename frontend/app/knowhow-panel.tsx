@@ -45,6 +45,7 @@ import {
   Copy,
   Download,
   Edit3,
+  ListChecks,
   ListPlus,
   Loader2,
   Plus,
@@ -71,6 +72,7 @@ import {
   batchPatchKnowhowCells,
   knowhowTemplateUrl,
   optimizeKnowhowCell,
+  reformatKnowhowCell,
   fetchKnowhowRowCodeByColumn,
   patchKnowhowColumn,
   type KnowhowTableSummary,
@@ -98,8 +100,8 @@ import {
   isSharedColumn,
 } from "./knowhow-grouping-logic.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
-import { throwHumanizedHttpError } from "./errors.ts";
-import { rowFallbackTitle } from "./knowhow-cell-editor-logic.ts";
+import { throwHumanizedHttpError, httpErrorStatus } from "./errors.ts";
+import { rowFallbackTitle, reformatSourceLabel, REFORMAT_SUGGESTION_LABEL } from "./knowhow-cell-editor-logic.ts";
 import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
 import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
 import { KnowhowMarkdown, KnowhowCellPreview, KnowhowCellEditor } from "./knowhow-cell-editor.tsx";
@@ -139,6 +141,46 @@ import {
   templateDownloadFilename,
   type RowOptimizeItem,
   type RowOptimizeQueueState,
+  BATCH_REFORMAT_ROW_BUTTON_LABEL,
+  BATCH_REFORMAT_TABLE_BUTTON_LABEL,
+  BATCH_REFORMAT_START_LABEL,
+  BATCH_REFORMAT_ABORT_LABEL,
+  BATCH_REFORMAT_CONFIRM_LABEL,
+  BATCH_REFORMAT_DISCARD_LABEL,
+  BATCH_REFORMAT_CLOSE_LABEL,
+  BATCH_REFORMAT_EMPTY_TEXT_ROW,
+  BATCH_REFORMAT_EMPTY_TEXT_TABLE,
+  BATCH_REFORMAT_DONE_TEXT,
+  BATCH_REFORMAT_STATUS_LABELS,
+  batchReformatScaleText,
+  reformatReviewingSummaryText,
+  initReformatBatch,
+  reformatBatchSummary,
+  beginReformatBatchRun,
+  markReformatItemRunning,
+  applyReformatResult,
+  applyReformatError,
+  abortReformatBatchRun,
+  finishReformatBatchRun,
+  beginReformatBatchSave,
+  markReformatItemSaving,
+  applyReformatSaveSuccess,
+  applyReformatSaveError,
+  finishReformatBatchSave,
+  reformatBatchSaveNeedsRefresh,
+  reformatBatchRunNeedsRefresh,
+  reformatDedupeKey,
+  applyReformatCachedResult,
+  reformatResultIsStale,
+  markReformatItemRunStale,
+  planReformatSaves,
+  reformatSaveCellKey,
+  isReformatUnitStale,
+  markReformatItemStaleSkipped,
+  BATCH_REFORMAT_STALE_SKIP_TEXT,
+  type ReformatBatchState,
+  type ReformatBatchItem,
+  type ReformatBatchScope,
 } from "./knowhow-optimize-logic.ts";
 
 // ---------------------------------------------------------------------------
@@ -194,6 +236,13 @@ export function KnowhowPanel({
   // 优化的行 id（与 cellModal 平级的另一个顶层 modal 状态，堆叠在抽屉之上，
   // 镜像 cellModal 自己的挂载方式）。
   const [optimizeRowId, setOptimizeRowId] = useState<string | null>(null);
+  // knowhow-md-normalize Task 9：「一键规整」批量弹窗——行作用域用 rowId 记
+  // 正在批量规整哪一行（与 optimizeRowId 同一种"堆叠在抽屉之上"的顶层 modal
+  // 状态）；表作用域只是个布尔开关（作用对象是 detail.rows 整体，不需要再
+  // 记哪一行）。两者共用同一个 KnowhowReformatBatchModal 组件，只是
+  // scope/rows 参数不同（见该组件定义处注释）。
+  const [reformatRowId, setReformatRowId] = useState<string | null>(null);
+  const [reformatTableOpen, setReformatTableOpen] = useState(false);
 
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
   const [detail, setDetail] = useState<KnowhowTableDetail | null>(null);
@@ -327,6 +376,17 @@ export function KnowhowPanel({
     };
   }, [selectedTableId, loadDetail]);
 
+  // F（review，单格 F2 + 批量 F3 共用）：规整发现「服务器原文已被他人改动」后，请求刷新
+  // 当前表 detail——复用带 stale-guard 的 loadDetail（见 detailRequestRef 注释），把陈旧的
+  // detail 快照（单格 savedContent / 批量 originalMd 基线之源）换成最新，避免关掉重开撞
+  // 同一陈旧态、永远循环。detail 是喂给编辑器/批量弹窗的**单一真源**，且期间一切编辑都
+  // 经 handleCellSave -> setDetail 落库合并（没有未落盘的本地态会被覆盖），故「重取整表
+  // 后整体 set」是安全的。useCallback 稳定 identity：既省无谓重渲染，也让编辑器那侧即便
+  // 直接依赖它也不会误触发（编辑器另用 ref 兜底，双保险）。
+  const reloadTableDetail = useCallback(() => {
+    if (selectedTableId) loadDetail(selectedTableId);
+  }, [selectedTableId, loadDetail]);
+
   // Task 11：行详情抽屉展开的这一行的代码状态——独立于 loadDetail（整表结构/
   // 内容），只在抽屉真正打开时才发起，避免网格视图本身多背一次网络请求。
   const rowCodeRequestRef = useRef(0);
@@ -387,6 +447,8 @@ export function KnowhowPanel({
     setCreateOpen(false);
     setAppendOpen(false);
     setOptimizeRowId(null);
+    setReformatRowId(null);
+    setReformatTableOpen(false);
     setCodeModal(null);
     jumpRoutedRef.current = null; // Task 11：兜底一并重置，理由见上方声明处注释
   }, [notebookId]);
@@ -821,15 +883,44 @@ export function KnowhowPanel({
   // 命中了合并共享格分支——isSharedColumn 自己保证组内 <=1 行恒 false（见其
   // 注释），用这个长度判断选路径，避免再把 group 塞进第二个条件表达式（TS
   // 无法把 isBatch 变量的窄化跨表达式传回 group 本身）。
-  async function handleCellSave(rowId: string, columnId: string, contentMd: string) {
+  //
+  // 并发防护（P1-b）：`expectedByRowId` 仅由**批量规整保存**传入（rowId ->
+  // 建批次那一刻该格的 originalMd 快照），触发**服务端事务内**比对——当前落库内容
+  // 与基线不一致就 409 拒写（nothing written），fan-out 整组 all-or-nothing。手动
+  // 格子编辑器（onSave）与「优化整行」接受（onAcceptCell）**不传**（undefined），
+  // 保持既有 last-write-wins：那是真人在主动编辑，不该被自己更早的快照挡下（本
+  // 修复刻意不改这条流的语义）。基线按 targets 顺序平行下发；某写目标缺基线时退化
+  // 成 ""（几乎必然判陈旧、保守跳过，不盲写）。
+  async function handleCellSave(
+    rowId: string,
+    columnId: string,
+    contentMd: string,
+    expectedByRowId?: Map<string, string>,
+  ) {
     if (!selectedTableId || !detail) return;
     const group = detail.anchorColumnId
       ? groupRowsByAnchor(detail.rows, detail.anchorColumnId).find((g) => g.rows.some((r) => r.id === rowId))
       : null;
     const targets = group && isSharedColumn(group, columnId) ? groupCellWriteTargets(group, columnId) : [rowId];
     const results = targets.length > 1
-      ? await batchPatchKnowhowCells(notebookId, selectedTableId, { columnId, rowIds: targets, contentMd })
-      : [await patchKnowhowCell(notebookId, selectedTableId, rowId, columnId, contentMd)];
+      ? await batchPatchKnowhowCells(notebookId, selectedTableId, {
+          columnId,
+          rowIds: targets,
+          contentMd,
+          ...(expectedByRowId
+            ? { expectedBefore: targets.map((rid) => expectedByRowId.get(rid) ?? "") }
+            : {}),
+        })
+      : [
+          await patchKnowhowCell(
+            notebookId,
+            selectedTableId,
+            rowId,
+            columnId,
+            contentMd,
+            expectedByRowId ? expectedByRowId.get(rowId) ?? "" : undefined,
+          ),
+        ];
     setDetail((prev) => {
       if (!prev) return prev;
       const resultByRowId = new Map(results.map((result) => [result.rowId, result]));
@@ -907,6 +998,13 @@ export function KnowhowPanel({
   const optimizeRow = detail?.rows.find((row) => row.id === optimizeRowId) ?? null;
   const optimizeRowTitle = optimizeRow && detail
     ? cellSummary(resolveRowTitleText(optimizeRow, detail.columns), 60) || rowFallbackTitle(optimizeRow.position)
+    : "";
+
+  // knowhow-md-normalize Task 9「一键规整整行」批量弹窗当前作用的行——同一套
+  // 查找/标题合成方式。
+  const reformatRow = detail?.rows.find((row) => row.id === reformatRowId) ?? null;
+  const reformatRowTitle = reformatRow && detail
+    ? cellSummary(resolveRowTitleText(reformatRow, detail.columns), 60) || rowFallbackTitle(reformatRow.position)
     : "";
 
   // Task 11「代码附件」浮层当前作用的行/列——与 cellModalRow/cellModalColumn
@@ -1017,6 +1115,7 @@ export function KnowhowPanel({
             onDownloadTemplate={downloadTemplate}
             templateDownloading={templateDownloading}
             onAppendClick={() => setAppendOpen(true)}
+            onReformatTableClick={() => setReformatTableOpen(true)}
             onRenameColumn={handleRenameColumn}
           />
         )}
@@ -1031,8 +1130,11 @@ export function KnowhowPanel({
           canEdit={canEdit}
           onEditCell={openCellEdit}
           onClose={() => setOpenRowId(null)}
-          cellModalOpen={cellModal !== null || optimizeRowId !== null || codeModal !== null}
+          cellModalOpen={
+            cellModal !== null || optimizeRowId !== null || reformatRowId !== null || codeModal !== null
+          }
           onOptimizeRow={() => setOptimizeRowId(openRow.id)}
+          onReformatRow={() => setReformatRowId(openRow.id)}
           codeByColumn={rowCodeByColumn}
           codeLoaded={rowCodeLoaded}
           codeError={rowCodeError}
@@ -1093,6 +1195,9 @@ export function KnowhowPanel({
             // 「本行其他格子」点击切换——见 switchCell 定义处注释（保持 mode
             // 不变即天然安全，这里不需要再判 canEdit）。
             onSwitchCell={switchCell}
+            // F（review）：规整判 server-stale 时刷新整表 detail，下次打开就有新鲜
+            // savedContent（否则关掉重开撞同一陈旧态、永远循环）。
+            onServerStale={reloadTableDetail}
           />
         ) : (
           <KnowhowCellPreview
@@ -1245,6 +1350,47 @@ export function KnowhowPanel({
           rowTitle={optimizeRowTitle}
           onAcceptCell={handleCellSave}
           onClose={() => setOptimizeRowId(null)}
+        />
+      )}
+
+      {/* knowhow-md-normalize Task 9「一键规整整行」——KnowhowReformatBatchModal
+          按 scope="row" 只处理这一行，rows 传单元素数组（"整行/整表用同一份
+          init 逻辑"，见 knowhow-optimize-logic.ts 第 5 节头注释）。 */}
+      {reformatRowId && reformatRow && detail && selectedTableId && (
+        <KnowhowReformatBatchModal
+          notebookId={notebookId}
+          apiBase={apiBase}
+          tableId={selectedTableId}
+          scope="row"
+          rows={[reformatRow]}
+          allRows={detail.rows}
+          columns={detail.columns}
+          anchorColumnId={detail.anchorColumnId}
+          title={reformatRowTitle}
+          onSaveCell={handleCellSave}
+          // F（review）：保存阶段跳过过 stale 格 -> 刷新整表，下次批量用新鲜基线复跑。
+          onStaleReload={reloadTableDetail}
+          onClose={() => setReformatRowId(null)}
+        />
+      )}
+
+      {/* 「一键规整整表」——scope="table"，rows 传整表全部行；这是导入后把
+          整表 LLM 精整的入口（设计文档 §5.3）。 */}
+      {reformatTableOpen && detail && selectedTableId && (
+        <KnowhowReformatBatchModal
+          notebookId={notebookId}
+          apiBase={apiBase}
+          tableId={selectedTableId}
+          scope="table"
+          rows={detail.rows}
+          allRows={detail.rows}
+          columns={detail.columns}
+          anchorColumnId={detail.anchorColumnId}
+          title={detail.title}
+          onSaveCell={handleCellSave}
+          // F（review）：保存阶段跳过过 stale 格 -> 刷新整表，下次批量用新鲜基线复跑。
+          onStaleReload={reloadTableDetail}
+          onClose={() => setReformatTableOpen(false)}
         />
       )}
 
@@ -2480,6 +2626,21 @@ export function KnowhowPanel({
           background: #f5f0ff;
         }
 
+        /* Task 8（knowhow-md-normalize）：「规整格式」工具栏按钮——刻意不用
+           上面 --optimize 的紫色（那支紫色的既定含义是"LLM 触发的动作，不是
+           格式化"，见上面注释），规整格式恰恰是"只改格式"，配一支绿色调
+           （与 .kh-optimize-queue-status--accepted 同一个 --green），呼应
+           "确定性规则重排、无需担心语义被悄悄改写"的直觉。 */
+        .kh-toolbar-button--reformat {
+          border-color: #a9dfc7;
+          color: var(--green);
+        }
+
+        .kh-toolbar-button--reformat:hover:not(:disabled) {
+          border-color: var(--green);
+          background: #eaf7f0;
+        }
+
         /* Task 9：单格「优化表达」原文/建议对照（规格③）与「优化整行」队列
            里当前格的对照复用同一套 .kh-optimize-* 样式。 */
         .kh-optimize-compare {
@@ -2514,11 +2675,53 @@ export function KnowhowPanel({
           background: #f5f0ff;
         }
 
+        /* Task 8：「规整格式」候选面板标题——绿色调，呼应上面
+           .kh-toolbar-button--reformat 的用色，与紫色的"优化建议"区分开。 */
+        .kh-optimize-pane--reformat-suggestion h5 {
+          color: var(--green);
+          background: #eaf7f0;
+        }
+
         .kh-optimize-pane-body {
           flex: 1 1 auto;
           min-height: 0;
           overflow-y: auto;
           padding: 10px 12px;
+        }
+
+        /* Task 8：changed=false 时的友好提示——替代"原文/建议完全相同"的空
+           对照面板；source 小标签复用同一个 .kh-reformat-source-tag，与
+           「规整建议」面板标题旁的用法保持视觉一致。 */
+        .kh-reformat-unchanged {
+          flex: 1 1 auto;
+          min-height: 220px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          border: 1px dashed var(--line);
+          border-radius: 8px;
+          padding: 24px;
+          text-align: center;
+        }
+
+        .kh-reformat-unchanged p {
+          margin: 0;
+          font-size: 14px;
+          font-weight: 600;
+          color: var(--ink);
+        }
+
+        .kh-reformat-source-tag {
+          display: inline-flex;
+          align-items: center;
+          padding: 2px 8px;
+          border-radius: 999px;
+          background: var(--soft);
+          color: var(--muted);
+          font-size: 11.5px;
+          font-weight: 600;
         }
 
         .kh-optimize-queue-list {
@@ -2576,6 +2779,41 @@ export function KnowhowPanel({
         .kh-optimize-queue-status--skipped,
         .kh-optimize-queue-status--waiting {
           color: var(--muted);
+        }
+
+        /* knowhow-md-normalize Task 9：「一键规整」批量弹窗的各态复用同一套
+           .kh-optimize-queue-status 外壳，只是状态词表不同（见
+           knowhow-optimize-logic.ts ReformatBatchCellStatus），配色沿用上面
+           同一套语义——蓝=正在进行中/等待确认保存，绿=已成功落地，红=失败，
+           灰=中性(待处理/无需改动)，琥珀=已中止/已跳过(需注意但非失败)。 */
+        .kh-optimize-queue-status--pending,
+        .kh-optimize-queue-status--unchanged {
+          color: var(--muted);
+        }
+
+        .kh-optimize-queue-status--running,
+        .kh-optimize-queue-status--changed,
+        .kh-optimize-queue-status--saving {
+          color: #1f5eff;
+        }
+
+        .kh-optimize-queue-status--saved {
+          color: #177a55;
+        }
+
+        .kh-optimize-queue-status--reformat_error,
+        .kh-optimize-queue-status--save_error {
+          color: #ba2d2d;
+        }
+
+        /* 「已中止」——用户主动停下的在飞格子。刻意用琥珀而非红色：它不是失败，
+           但也不是中性的"待处理/无需改动"，值得与它们区分开、让用户一眼看出
+           哪些格子被中止截断了（P2-g）。「已跳过（内容已变）」（F2）同理用琥珀
+           ——保存前发现被他人改动而主动放弃这次写入，不是保存失败（红），也不是
+           中性状态，需要用户注意（重新运行规整）。 */
+        .kh-optimize-queue-status--aborted,
+        .kh-optimize-queue-status--stale_skipped {
+          color: #9a6a00;
         }
 
         .kh-modal-footer {
@@ -3060,6 +3298,7 @@ function KnowhowTableGrid({
   onDownloadTemplate,
   templateDownloading,
   onAppendClick,
+  onReformatTableClick,
   onRenameColumn,
 }: {
   detail: KnowhowTableDetail | null;
@@ -3106,6 +3345,10 @@ function KnowhowTableGrid({
   templateDownloading: boolean;
   /** 「追加导入」（Task 9，规格②路B）：打开追加导入向导。 */
   onAppendClick: () => void;
+  /** 「一键规整整表」（knowhow-md-normalize Task 9）：打开批量规整弹窗，对
+   * 整表非空格子逐格调用 reformat_cell，汇总后人工整体确认才落库——是导入
+   * 后把整表 LLM 精整的入口（设计文档 §5.3）。 */
+  onReformatTableClick: () => void;
   /** 表头列名 inline 改名（canEdit 时启用）：双击列名进入编辑框，回车/失焦
    * 时把新名字丢回来落库。用户不必再翻「管理」抽屉找列改名——就地改。 */
   onRenameColumn: (columnId: string, name: string) => void;
@@ -3174,6 +3417,20 @@ function KnowhowTableGrid({
               >
                 <Upload size={14} />
                 追加导入
+              </button>
+              {/* 「一键规整整表」（knowhow-md-normalize Task 9）：紧邻「追加导入」
+                  ——最典型的使用时机就是导入后把整表统一交给 AI 精整排版一遍
+                  （设计文档 §5.3）。批量弹窗自己会先展示将处理的格子数、跑完后
+                  要求人工整体确认才落库，这里的按钮本身不需要二次确认。 */}
+              <button
+                type="button"
+                className="sort-button knowhow-reproject-button"
+                onClick={onReformatTableClick}
+                disabled={!detail || deleting}
+                title="对整张表的非空格子批量规整格式（跑完后需人工确认才保存）"
+              >
+                <ListChecks size={14} />
+                {BATCH_REFORMAT_TABLE_BUTTON_LABEL}
               </button>
               <button
                 type="button"
@@ -3443,6 +3700,7 @@ function KnowhowRowDrawer({
   onEditCell,
   onClose,
   onOptimizeRow,
+  onReformatRow,
   cellModalOpen,
   codeByColumn,
   codeLoaded,
@@ -3462,6 +3720,11 @@ function KnowhowRowDrawer({
   onClose: () => void;
   /** 「优化整行」入口（Task 9，规格③）：打开批量优化弹窗，堆叠在本抽屉之上。 */
   onOptimizeRow: () => void;
+  /** 「一键规整整行」入口（knowhow-md-normalize Task 9）：打开批量规整弹窗，
+   * 同样堆叠在本抽屉之上——与「优化整行」并列但语义不同（规整=只改格式，
+   * 优化=改措辞，见 knowhow-cell-editor-logic.ts TOOLBAR_REFORMAT_LABEL
+   * 头注释同一区分）。 */
+  onReformatRow: () => void;
   /** 任何堆叠在本抽屉之上的顶层弹窗（格子浮窗编辑态/预览态，Task 9 的
    * KnowhowRowOptimizeModal，或 Task 11 的 KnowhowCodeModal）当前是否打开
    * （T7 复审 Important 修复）：为 true 时本抽屉的 Esc 监听器短路、不关闭
@@ -3508,6 +3771,13 @@ function KnowhowRowDrawer({
             {canEdit && (
               <button type="button" className="knowhow-drawer-edit-button" onClick={onOptimizeRow}>
                 <Sparkles size={13} /> {ROW_OPTIMIZE_BUTTON_LABEL}
+              </button>
+            )}
+            {/* 「一键规整整行」批量入口（knowhow-md-normalize Task 9）——挨着
+                「优化整行」，同一只读门控。 */}
+            {canEdit && (
+              <button type="button" className="knowhow-drawer-edit-button" onClick={onReformatRow}>
+                <ListChecks size={13} /> {BATCH_REFORMAT_ROW_BUTTON_LABEL}
               </button>
             )}
             <button className="icon-button" onClick={onClose} title="关闭">
@@ -3818,6 +4088,546 @@ function KnowhowRowOptimizeModal({
               </button>
             </div>
           )}
+        </footer>
+        <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// KnowhowReformatBatchModal — 「一键规整整行 / 整表」批量弹窗
+// （knowhow-md-normalize Task 9，复用 knowhow-optimize-logic.ts 第 5 节的
+// ReformatBatchState；行/表两个入口共用同一个组件，只是 scope/rows 不同）。
+//
+// 与上面 KnowhowRowOptimizeModal 的关键差异（对应状态机差异，见该 logic
+// 文件第 5 节头注释）：这里没有逐格「接受/跳过」——reformat_cell 对全部非空
+// 格子自动跑完（idle -> running），跑完后停在 reviewing 展示汇总 + 逐格
+// before/after，用户看过之后**一次性**点「确认保存」才会进入 saving 逐格
+// 落库（任务硬要求①"Never auto-persist"：状态机里根本没有 running 直通
+// saving 的路径，唯一入口是这里 runSave 里调用的 beginReformatBatchSave，
+// 而它只会被「确认保存」按钮的 onClick 触发）。开始规整前先展示将处理的
+// 格子数（任务硬要求③），单格失败（无论是规整调用还是保存调用）不阻断
+// 其余格子、只标记该格并计入 summary（任务硬要求④）。
+// ---------------------------------------------------------------------------
+
+interface KnowhowReformatBatchModalProps {
+  notebookId: string;
+  apiBase: string;
+  tableId: string;
+  scope: ReformatBatchScope;
+  /** 行作用域传 `[row]`；表作用域传 `detail.rows` 全量——**只**用于建批次的展示
+   * 条目（initReformatBatch）：行作用域下弹窗只展示被选中行那一行的格子。 */
+  rows: KnowhowRow[];
+  /** **完整** detail.rows（**两种作用域都传全量**）——保存阶段规划扇出/查陈旧走
+   * 这一份（planReformatSaves），必须与 handleCellSave 重算 anchor 组用的行集
+   * 严格同源，否则合并共享列的非展示兄弟行会漏查陈旧、被静默覆盖（F1）。 */
+  allRows: KnowhowRow[];
+  columns: KnowhowColumn[];
+  /** 行标题列 id（记录型表为 null）——与 handleCellSave 同源的那份，用于保存前
+   * 把「会扇写到同一合并共享组」的候选合并成一次代表保存（F1，见
+   * planReformatSaves）。必须与 `allRows` 取自同一份 detail，两者一起决定分组。 */
+  anchorColumnId: string | null;
+  /** 面包屑首段：行作用域传行标题，表作用域传表标题。 */
+  title: string;
+  /** 保存：复用面板自己的 handleCellSave——与格子浮窗、「优化整行」保存走
+   * 同一条路径（含合并共享格批量写判定），不重复实现。第 4 参 `expectedByRowId`
+   * = 本 unit 每个写目标的 originalMd 基线映射（P1-b）：批量保存**总是**传它，触发
+   * 服务端事务内比对（陈旧 -> 409）。handleCellSave 的该参是可选的（手动编辑器省略
+   * 走 last-write-wins），故此处签名要求它、实现放宽它，两侧兼容。 */
+  onSaveCell: (
+    rowId: string,
+    columnId: string,
+    contentMd: string,
+    expectedByRowId: Map<string, string>,
+  ) => Promise<void>;
+  /** F（review）：保存阶段发生过 stale 跳过（preflight 比对 或 409）时回调——请父级重取
+   * 整表，把陈旧的 detail 快照（喂给下一次批量的 rows/originalMd 基线之源）换新，否则关掉
+   * 重开会用同一陈旧基线复跑、那些格子永远跳过（判定见 reformatBatchSaveNeedsRefresh）。 */
+  onStaleReload?: () => void;
+  onClose: () => void;
+}
+
+function KnowhowReformatBatchModal({
+  notebookId,
+  apiBase,
+  tableId,
+  scope,
+  rows,
+  allRows,
+  columns,
+  anchorColumnId,
+  title,
+  onSaveCell,
+  onStaleReload,
+  onClose,
+}: KnowhowReformatBatchModalProps) {
+  // F2：批量规整排除 anchor 列——传入 anchorColumnId，buildReformatBatchItems 据此跳过
+  // 分组键列（详见 knowhow-optimize-logic.ts）。记录型表 anchorColumnId=null 时不排除任何列。
+  const [batch, setBatch] = useState<ReformatBatchState>(() => initReformatBatch(scope, rows, columns, anchorColumnId));
+  // running/saving 两个自动循环阶段统称"忙"：忙时关闭按钮禁用、「开始规整」/
+  // 「确认保存」按钮不可重复点击（镜像 KnowhowRowOptimizeModal 的
+  // acceptBusy，只是这里覆盖的是整个批量循环而不是单次「接受」）。
+  const [busy, setBusy] = useState(false);
+  // 保存阶段的目标格数 = 点「确认保存」那一刻 status==="changed" 的格子数，在
+  // runSave 开始时定格一次。saving 进度条的分母/进度都据它算（见下方
+  // saveTargetTotal/saveProgressDone），而**不**从 summary.stale_skipped 反推——因为
+  // stale_skipped 现在有两个来源（保存阶段的 F2，以及 P1-a 运行阶段的 sourceMd 陈旧），
+  // 后者根本没进过保存集，混进保存分母会把它撑大。用「确认时的 changed 数」当分母，
+  // 再用 total - 仍在 changed/saving 的数当已完成数，两个来源天然都不掺进来。
+  const [saveTargetCount, setSaveTargetCount] = useState(0);
+  // 中止只需要让"驱动循环的 for 语句"停止发起下一次请求——不经由 React
+  // state（那样要等一次 re-render 才能读到，循环体里判断的仍是发起本次
+  // 请求那一刻的旧值）。真正的 UI 状态翻转（phase -> reviewing、
+  // aborted=true）仍然走 setBatch，两者各司其职。
+  const abortedRef = useRef(false);
+  const mountedRef = useRef(true);
+  // F1：run 阶段陈旧跳过与 save 阶段陈旧跳过是两个独立触发源（前者在 runBatch 收尾、
+  // 后者在 runSave 收尾），但父表只需刷新一次就能让下次批量拿到新鲜基线——两个源都
+  // 经 requestStaleReload 汇流，此 ref 保证「恰一次」（两阶段都跳过时也不刷两遍）。
+  const staleReloadedRef = useRef(false);
+  // 本弹窗没有全屏概念（任务表未列出，同 KnowhowRowOptimizeModal）——不传
+  // disabled，拖动/resize 恒生效。
+  const floating = useFloatingWindow({ storageKey: "knowhow.reformatBatch.window" });
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // 行标题 map：只有表作用域需要在条目列表里区分"这是哪一行"——行作用域下
+  // rows 只有一个元素，行标题已经在 header 面包屑展示过一次，条目列表只需
+  // 显示列名即可，不必逐条重复同一个行标题。
+  const rowLabelById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const row of rows) {
+      map.set(row.id, cellSummary(resolveRowTitleText(row, columns), 40) || rowFallbackTitle(row.position));
+    }
+    return map;
+  }, [rows, columns]);
+
+  function itemLabel(item: ReformatBatchItem): string {
+    return scope === "table" ? `${rowLabelById.get(item.rowId) ?? ""} · ${item.columnName}` : item.columnName;
+  }
+
+  // 「恰一次」父表刷新闸：run 阶段收尾（run-stale）与 save 阶段收尾（save-stale）都
+  // 经这里请父级刷新整表（reloadTableDetail）。首次调用置 ref 后触发，之后早退——
+  // 两阶段都发生过 stale 跳过时，父表也只刷新一次（见 staleReloadedRef 注释）。
+  function requestStaleReload() {
+    if (staleReloadedRef.current) return;
+    staleReloadedRef.current = true;
+    onStaleReload?.();
+  }
+
+  // run 循环：按初始化时固定下来的 items 顺序（该数组的长度/顺序全程不变，
+  // 只有各项的 status 字段经 setBatch 改写——见 logic 文件 replaceReformatItem）
+  // 逐格调用 reformat_cell；用 for 循环本身的顺序驱动请求发起顺序，不需要
+  // 状态机里再维护一个 cursor（对照 RowOptimizeQueueState.cursor：那边的
+  // "当前格"同时驱动 UI 与请求发起，这里两者已经用 for 循环 + rowId/columnId
+  // 天然键解耦，见 logic 文件头注释）。
+  //
+  // 按内容去重（代码评审修复，见 knowhow-optimize-logic.ts reformatDedupeKey
+  // 注释）：anchor 分组的兄弟行会把同一份值 forward-fill 到每一行，"整表"
+  // 批量因此常常对同一列的一份内容重复建条目。dedupeCache 是本次 runBatch
+  // 调用局部的普通 Map（不进 React state——同 abortedRef，纯粹是循环内部的
+  // 记账，不驱动渲染），键为 reformatDedupeKey(columnId, originalMd)：命中时
+  // 直接用上一次拿到的结果套用到这一格（applyReformatCachedResult），完全
+  // 跳过网络请求；未命中时照常调用 reformat_cell，成功后把结果存进缓存供后面
+  // 的重复格复用。效果：每个 (列, 内容) 组合最多一次真实调用，所有重复格
+  // 拿到逐字相同的候选——确认保存时 handleCellSave 的合并共享格批量写因此
+  // 变成"用同一份内容覆盖同一份内容"的无害操作，弹窗展示的候选与最终落库
+  // 的内容不会再对不上。
+  async function runBatch() {
+    if (busy) return;
+    setBusy(true);
+    abortedRef.current = false;
+    setBatch((state) => beginReformatBatchRun(state));
+    const dedupeCache = new Map<string, { candidateMd: string; source: string; changed: boolean }>();
+    // F1：run 阶段因 sourceMd 陈旧跳过的格子数（从没进保存集）。收尾据它决定是否请
+    // 父级刷新整表——否则这些格子的父表快照永不刷新、关掉重开用同一陈旧基线永远跳过。
+    let runStaleSkipCount = 0;
+    for (const item of batch.items) {
+      if (abortedRef.current) break;
+      const dedupeKey = reformatDedupeKey(item.columnId, item.originalMd);
+      const cached = dedupeCache.get(dedupeKey);
+      if (cached) {
+        setBatch((state) => applyReformatCachedResult(state, item.rowId, item.columnId, cached));
+        continue;
+      }
+      setBatch((state) => markReformatItemRunning(state, item.rowId, item.columnId));
+      try {
+        const result = await reformatKnowhowCell(notebookId, tableId, item.rowId, item.columnId);
+        if (!mountedRef.current) return;
+        // 并发防护（P1-a）：后端回带 sourceMd = 它实际读到并规整的原文。若它 ≠ 本格
+        // 建批次那一刻的 originalMd 快照，说明这格在「建批次」到「这次 /reformat」之间
+        // 被别人改了——候选是拿客户端没见过的内容算出来的。此时该格直接判陈旧，且**不
+        // 写去重缓存**：否则它的重复格（同 trim 原文）会复用这份基于陌生内容的候选，
+        // 一旦污染就纠不回来。判定用本格自己的 originalMd（items 数组只改 status、
+        // originalMd 恒为建批次快照），在 setBatch 之外算，避免 reducer 里读副作用。
+        if (reformatResultIsStale(item.originalMd, result.sourceMd)) {
+          setBatch((state) =>
+            markReformatItemRunStale(state, item.rowId, item.columnId, BATCH_REFORMAT_STALE_SKIP_TEXT),
+          );
+          runStaleSkipCount += 1; // F1：计入 run 阶段 stale，收尾据它请父表刷新
+          continue; // 不缓存——这份候选不可用于任何重复格
+        }
+        dedupeCache.set(dedupeKey, result);
+        setBatch((state) => applyReformatResult(state, item.rowId, item.columnId, result));
+      } catch (err) {
+        // 单格规整失败不阻断整批（任务硬要求④）：记下这一格的错误，循环
+        // 继续处理下一项。规整失败不写入缓存——不能让"这一格失败了"被误当
+        // 成"这份内容的规整结果就是失败"套用到它的重复格上；下一个重复格
+        // 仍会独立重试一次真实调用。
+        if (!mountedRef.current) return;
+        setBatch((state) =>
+          applyReformatError(state, item.rowId, item.columnId, extractErrorMessage(err, "规整格式失败，请重试")),
+        );
+      }
+    }
+    if (mountedRef.current) {
+      setBatch((state) => finishReformatBatchRun(state));
+      setBusy(false);
+      // F1：run 阶段跳过过 stale 格 -> 父级 detail 快照已落后于服务器（这些格子是别人
+      // 刚写的新内容），刷新一次整表，让下次批量用新鲜基线复跑、不再永远跳过。经
+      // requestStaleReload 与保存阶段共用同一个「恰一次」闸（两阶段都跳过也只刷一次）。
+      if (reformatBatchRunNeedsRefresh(runStaleSkipCount)) requestStaleReload();
+    }
+  }
+
+  // 「中止」：立即把 UI 切到 reviewing（已收集到的候选可以照常被确认保存），
+  // 并把 abortedRef 置真——for 循环在处理完当前正在等待的这一格后，下一次
+  // 循环体顶部的检查会让它不再发起新的请求（当前正在途中的这一格请求仍会
+  // 走完，落地的结果由 applyReformatResult/applyReformatError 自身的
+  // `state.phase !== "running"` 检查丢弃，见 logic 文件对应注释）。
+  //
+  // 故意不在这里 setBusy(false)：runBatch 的 for 循环仍在等当前这一格的
+  // 请求落地，要等它真正跑到循环尾部才会自己解除 busy。若这里抢先解除，
+  // "确认保存"按钮会在那个当前请求仍未落地的窗口内变得可点——用户手快的话
+  // 能在 runBatch 收尾之前就点开 runSave，两个循环并发跑，runBatch 收尾时
+  // 的 setBusy(false) 会把 runSave 才刚设的 busy=true 又踩回 false（保存
+  // 中却显示"可关闭"）。留给 runBatch 自己收尾解除，busy 短暂保持 true（最多
+  // 等一次已经在途的 HTTP 往返），关闭/确认按钮都会在真正安全的那一刻才变
+  // 回可点——不引入这个并发窗口。
+  function handleAbort() {
+    abortedRef.current = true;
+    setBatch((state) => abortReformatBatchRun(state));
+  }
+
+  // save 循环：只处理"确认那一刻" status==="changed" 的项（changed=false 的
+  // 格子从未落在这个集合里，任务硬要求①）；单格保存失败同样不阻断其余格子
+  // （任务硬要求④）。
+  //
+  // F1（合并共享格去重）：planReformatSaves 把「会经 handleCellSave 扇写到同一
+  // 合并共享组」的 changed 条目合并成一个代表保存——N 个兄弟行原本各调一次
+  // onSaveCell、每次又扇写整组（N² 次行 upsert、N 次投影 bump），合并后整组只
+  // 发一次代表保存，其余成员的终态跟随这次结果。判定复用 handleCellSave 同源的
+  // groupRowsByAnchor/isSharedColumn/groupCellWriteTargets（见该 logic 函数），
+  // 不另发明等价。units/currentByKey 都在循环前算/取一次并被闭包固定，循环中
+  // setDetail 引发的 re-render 不会改动它们。
+  //
+  // F2（保存前比对，防覆盖他人编辑）：建批次到点「确认保存」之间可能隔了几分钟，
+  // 另一标签页/用户可能已改了某格。保存前 refetch 整表一次、把当前落库内容与
+  // originalMd 快照逐格比对（isReformatUnitStale），不一致就整组跳过（终态
+  // stale_skipped + 友好文案，计入 summary），不拿旧内容算出的候选盲写覆盖那次
+  // 更新。后端不改 API，纯客户端「比对-跳过」。
+  async function runSave() {
+    if (busy) return;
+    const changed = batch.items.filter((item) => item.status === "changed");
+    // F1：用**完整** detail.rows（allRows）规划——与 handleCellSave 重算 anchor 组
+    // 的行集同源，让合并共享列 unit 的写目标覆盖 fan-out 会写到的全部兄弟行（含行
+    // 作用域下不展示的那些），保存前一并查陈旧、不静默覆盖他人对兄弟行的并发编辑。
+    const units = planReformatSaves(changed, allRows, anchorColumnId);
+    setBusy(true);
+    setSaveTargetCount(changed.length); // 定格保存分母（见 saveTargetCount 注释）
+    setBatch((state) => beginReformatBatchSave(state));
+
+    // 保存前整表 refetch → (行,列)->当前落库内容 映射（一趟往返换掉逐格往返）。
+    // refetch 失败则降级为「不做防覆盖检查」（currentByKey=null）：保持既有保存
+    // 行为，不因一次网络抖动就整批拒绝保存（防覆盖是尽力而为的安全网，不是
+    // 硬不变量——后端本就没有 expected-before 强一致）。
+    let currentByKey: Map<string, string> | null = null;
+    try {
+      const fresh = await fetchKnowhowTable(notebookId, tableId);
+      if (!mountedRef.current) return;
+      const map = new Map<string, string>();
+      for (const row of fresh.rows) {
+        for (const [colId, content] of Object.entries(row.cells)) {
+          map.set(reformatSaveCellKey(row.id, colId), content);
+        }
+      }
+      currentByKey = map;
+    } catch {
+      if (!mountedRef.current) return;
+      currentByKey = null;
+    }
+
+    // F（review）：保存阶段实际发生的 stale 跳过计数（preflight 比对命中 + 409 两个来源）。
+    // 循环内局部计数、**不**从 summary.stale_skipped 反推——后者混入了 run 阶段 P1-a 的
+    // stale（那批从没进保存集）。收尾据它决定是否请父级刷新整表（见下方与
+    // reformatBatchSaveNeedsRefresh）。
+    let saveStaleSkipCount = 0;
+    for (const unit of units) {
+      const rep = unit.representative;
+      if (currentByKey && isReformatUnitStale(unit, currentByKey)) {
+        // 内容已被他人改动：整组跳过，不发保存请求，标 stale_skipped + 友好文案。
+        setBatch((state) =>
+          unit.members.reduce(
+            (s, m) => markReformatItemStaleSkipped(s, m.rowId, m.columnId, BATCH_REFORMAT_STALE_SKIP_TEXT),
+            state,
+          ),
+        );
+        saveStaleSkipCount += 1;
+        continue;
+      }
+      // 把本扇出等价类的全部成员一起标 saving——representative 的一次保存经
+      // handleCellSave 扇写到整组，成员物理上都会被写到。
+      setBatch((state) => unit.members.reduce((s, m) => markReformatItemSaving(s, m.rowId, m.columnId), state));
+      // P1-b：把本 unit 每个写目标的 originalMd 基线（含行作用域下不展示的兄弟行）
+      // 下发给 handleCellSave，触发服务端事务内比对——这才是防覆盖他人编辑的**权威**
+      // 判定（上面的 preflight refetch 只是省一次注定 409 的往返的廉价前置过滤）。
+      const expectedByRowId = new Map(unit.writeTargets.map((t) => [t.rowId, t.originalMd]));
+      try {
+        await onSaveCell(rep.rowId, rep.columnId, rep.candidateMd ?? "", expectedByRowId);
+        if (!mountedRef.current) return;
+        setBatch((state) => unit.members.reduce((s, m) => applyReformatSaveSuccess(s, m.rowId, m.columnId), state));
+      } catch (err) {
+        if (!mountedRef.current) return;
+        if (httpErrorStatus(err) === 409) {
+          // 服务端判定他人已改（内容已被并发编辑）：整组走 stale_skipped 而非保存
+          // 失败——这不是故障，是主动放弃这次盲写以保护他人的新编辑（与 F2 同终态、
+          // 同友好文案）。单 unit 跳过不阻断其余 unit（循环继续）。
+          setBatch((state) =>
+            unit.members.reduce(
+              (s, m) => markReformatItemStaleSkipped(s, m.rowId, m.columnId, BATCH_REFORMAT_STALE_SKIP_TEXT),
+              state,
+            ),
+          );
+          saveStaleSkipCount += 1;
+        } else {
+          const message = extractErrorMessage(err, "保存失败，请重试");
+          setBatch((state) => unit.members.reduce((s, m) => applyReformatSaveError(s, m.rowId, m.columnId, message), state));
+        }
+      }
+    }
+    if (mountedRef.current) {
+      setBatch((state) => finishReformatBatchSave(state));
+      setBusy(false);
+      // F（review）：保存阶段跳过过 stale 格 -> 父级 detail 快照已落后于服务器（被跳过的
+      // 格子是别人刚写的新内容），刷新一次整表，让下次批量用新鲜基线复跑、不再永远跳过。
+      // F1：经 requestStaleReload 汇流（与 run 阶段共用「恰一次」闸，两阶段都跳过只刷一次）。
+      if (reformatBatchSaveNeedsRefresh(saveStaleSkipCount)) requestStaleReload();
+    }
+  }
+
+  function requestClose() {
+    if (busy) return;
+    onClose();
+  }
+
+  useEffect(() => {
+    function handleKeyDown(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") requestClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy]);
+
+  function handleBackdropClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (event.currentTarget === event.target) requestClose();
+  }
+
+  const summary = reformatBatchSummary(batch);
+  const buttonLabel = scope === "row" ? BATCH_REFORMAT_ROW_BUTTON_LABEL : BATCH_REFORMAT_TABLE_BUTTON_LABEL;
+  const emptyText = scope === "row" ? BATCH_REFORMAT_EMPTY_TEXT_ROW : BATCH_REFORMAT_EMPTY_TEXT_TABLE;
+  const isEmpty = batch.items.length === 0;
+  // run/save 两个阶段各自的"跑到第几个了"——两个分母不同（run 是全部
+  // items；save 只数 status 曾经是/正是 changed 那一批），分别在对应阶段
+  // 展示，不用同一个笼统的 done/total（见下方 header 徽标）。
+  // run 阶段可达的终态含 stale_skipped（P1-a：sourceMd 陈旧的格子在运行阶段就落
+  // 终态）——不计进去 run 徽标会卡在 <100% 的假未完成。此徽标只在 phase==="running"
+  // 显示，那时 stale_skipped 全部来自运行阶段（保存还没开始），故直接并入即准确。
+  const runProgressDone = summary.changed + summary.unchanged + summary.reformat_error + summary.stale_skipped;
+  // save 阶段分母 = 点「确认保存」那一刻的 changed 数（saveTargetCount，定格一次）；
+  // 已完成 = 分母 - 仍在 changed/saving 的数。这样天然把「运行阶段就 stale_skipped
+  // 的格子」排除在保存进度之外（它们从没进过保存集），不必去区分两类 stale_skipped。
+  const saveTargetTotal = saveTargetCount;
+  const saveProgressDone = saveTargetCount - summary.changed - summary.saving;
+
+  // 条目列表：run/reviewing/saving/done 四个阶段共用同一套渲染（每个阶段
+  // 里各项的 status 本身已经足以说明当前处境，不需要为每个阶段各写一份
+  // 列表 JSX）。
+  const queueList = (
+    <ul className="kh-optimize-queue-list">
+      {batch.items.map((item) => (
+        <li key={`${item.rowId}:${item.columnId}`} className="kh-optimize-queue-item">
+          <span className="kh-optimize-queue-col">{itemLabel(item)}</span>
+          <span className={`kh-optimize-queue-status kh-optimize-queue-status--${item.status}`}>
+            {BATCH_REFORMAT_STATUS_LABELS[item.status]}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+
+  return (
+    <div className="kh-modal-overlay" onClick={handleBackdropClick}>
+      <div
+        ref={floating.cardRef}
+        className="kh-modal-card"
+        style={floating.style}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${buttonLabel} · ${title}`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header className="kh-modal-header" {...floating.dragHandleProps}>
+          <div className="kh-modal-header-top">
+            <div className="kh-modal-breadcrumb">
+              <span className="kh-modal-row-title" title={title}>
+                {title}
+              </span>
+              <span className="kh-modal-sep">›</span>
+              <span className="kh-modal-col-name">{buttonLabel}</span>
+              {!isEmpty && batch.phase === "running" && (
+                <span className="knowhow-status-badge">{`${runProgressDone}/${summary.total}`}</span>
+              )}
+              {!isEmpty && batch.phase === "saving" && (
+                <span className="knowhow-status-badge">{`${saveProgressDone}/${saveTargetTotal}`}</span>
+              )}
+            </div>
+            <div className="kh-modal-header-actions">
+              {batch.phase === "running" && (
+                <button type="button" className="kh-preview-edit-button" onClick={handleAbort}>
+                  {BATCH_REFORMAT_ABORT_LABEL}
+                </button>
+              )}
+              <button type="button" className="icon-button" title="关闭" onClick={requestClose} disabled={busy}>
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div className="kh-modal-body">
+          {isEmpty ? (
+            <p className="kh-row-context-empty">{emptyText}</p>
+          ) : (
+            <>
+              {batch.phase === "idle" && (
+                <p className="kh-row-context-empty">{batchReformatScaleText(batch.items.length)}</p>
+              )}
+              {batch.phase === "reviewing" && (
+                <p className="kh-row-context-empty">
+                  {/* F4（review）：明细 vs「无需改动」的判定收进 reformatReviewingSummaryText
+                      单一真源——旧内联三元漏了 reformat_error，整批全失败时会粉饰成「无需改动」。
+                      P2-g：中止在飞项、P1-a：运行阶段 stale_skipped 都并入明细（不当失败、不被
+                      NO_CHANGES 吞掉），逐格明细里另有友好文案说明。 */}
+                  {reformatReviewingSummaryText(summary)}
+                </p>
+              )}
+              {batch.phase === "done" && (
+                <p className="kh-row-context-empty">
+                  {BATCH_REFORMAT_DONE_TEXT}
+                  {summary.saved > 0 ? ` ${summary.saved} 个${BATCH_REFORMAT_STATUS_LABELS.saved}` : ""}
+                  {summary.save_error > 0 ? `，${summary.save_error} 个${BATCH_REFORMAT_STATUS_LABELS.save_error}` : ""}
+                  {/* F2：被判「内容已变」跳过的格子也如实计入收尾摘要（不当失败、
+                      不被吞），逐格明细里另有友好文案说明。 */}
+                  {summary.stale_skipped > 0
+                    ? `，${summary.stale_skipped} 个${BATCH_REFORMAT_STATUS_LABELS.stale_skipped}`
+                    : ""}
+                </p>
+              )}
+
+              {queueList}
+
+              {/* 规整/保存失败的具体原因——中文错误文案，逐格列出（任务硬
+                  要求④"surface the count"不只是数字，出错的格子也要能看到
+                  为什么）。 */}
+              {batch.items
+                .filter((item) => item.errorMessage)
+                .map((item) => (
+                  <p key={`err:${item.rowId}:${item.columnId}`} className="kh-inline-error">
+                    {itemLabel(item)}：{item.errorMessage}
+                  </p>
+                ))}
+
+              {/* before/after 对照——只在 reviewing/saving/done 阶段展示（run
+                  阶段还没跑完，不急着展示部分结果），只列有候选内容的项
+                  （changed 及其后续的 saving/saved/save_error，unchanged/
+                  reformat_error 没有候选可比对，已经在上面的列表 + 错误提示
+                  里说明过）。复用「规整格式」单格对照同一套 .kh-optimize-*
+                  样式与 REFORMAT_SUGGESTION_LABEL/reformatSourceLabel（任务
+                  硬要求②：source 绝不直出原始枚举）。 */}
+              {(batch.phase === "reviewing" || batch.phase === "saving" || batch.phase === "done") &&
+                batch.items
+                  .filter((item) => item.candidateMd !== undefined)
+                  .map((item) => (
+                    <div className="kh-optimize-compare" key={`compare:${item.rowId}:${item.columnId}`}>
+                      <div className="kh-optimize-pane">
+                        <h5>
+                          {OPTIMIZE_ORIGINAL_LABEL} · {itemLabel(item)}
+                        </h5>
+                        <div className="kh-optimize-pane-body">
+                          <KnowhowMarkdown md={item.originalMd} notebookId={notebookId} apiBase={apiBase} />
+                        </div>
+                      </div>
+                      <div className="kh-optimize-pane kh-optimize-pane--reformat-suggestion">
+                        <h5>
+                          {REFORMAT_SUGGESTION_LABEL}{" "}
+                          <span className="kh-reformat-source-tag">{reformatSourceLabel(item.source ?? "")}</span>
+                        </h5>
+                        <div className="kh-optimize-pane-body">
+                          <KnowhowMarkdown md={item.candidateMd ?? ""} notebookId={notebookId} apiBase={apiBase} />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+            </>
+          )}
+        </div>
+
+        <footer className="kh-modal-footer">
+          {isEmpty ? (
+            <div className="kh-footer-actions">
+              <button type="button" onClick={requestClose}>
+                {BATCH_REFORMAT_CLOSE_LABEL}
+              </button>
+            </div>
+          ) : batch.phase === "idle" ? (
+            <div className="kh-footer-actions">
+              <button type="button" onClick={requestClose} disabled={busy}>
+                {BATCH_REFORMAT_CLOSE_LABEL}
+              </button>
+              <button type="button" className="kh-primary-button" onClick={runBatch} disabled={busy}>
+                {BATCH_REFORMAT_START_LABEL}
+              </button>
+            </div>
+          ) : batch.phase === "reviewing" ? (
+            <div className="kh-footer-actions">
+              {/* disabled={busy}：中止后短暂仍 busy（等 runBatch 收尾，见
+                  handleAbort 注释）——按钮在那个窗口里如实显示"暂不可点"，
+                  而不是看着能点、点了却被 requestClose 内部悄悄吞掉。文案
+                  按有没有 changed 项区分：没有任何改动时"放弃改动"用词不对
+                  （根本没有改动可放弃），改用平实的"关闭"。 */}
+              <button type="button" onClick={requestClose} disabled={busy}>
+                {summary.changed > 0 ? BATCH_REFORMAT_DISCARD_LABEL : BATCH_REFORMAT_CLOSE_LABEL}
+              </button>
+              {summary.changed > 0 && (
+                <button type="button" className="kh-primary-button" onClick={runSave} disabled={busy}>
+                  <Check size={14} /> {BATCH_REFORMAT_CONFIRM_LABEL}
+                </button>
+              )}
+            </div>
+          ) : batch.phase === "done" ? (
+            <div className="kh-footer-actions">
+              <button type="button" onClick={requestClose}>
+                {BATCH_REFORMAT_CLOSE_LABEL}
+              </button>
+            </div>
+          ) : null}
         </footer>
         <span className="kh-modal-resize-handle" aria-hidden="true" {...floating.resizeHandleProps} />
       </div>

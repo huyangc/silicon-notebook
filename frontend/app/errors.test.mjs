@@ -5,6 +5,7 @@ import {
   GENERIC_USER_ERROR,
   humanizedError,
   humanizeHttpError,
+  httpErrorStatus,
   logDiagnostic,
   readHttpError,
   throwHumanizedHttpError,
@@ -438,6 +439,36 @@ test("throwHumanizedHttpError:诊断进 console,用户拿到中文", async () =>
     );
   });
   assert.match(logs[0], /notebook owner required/);
+});
+
+// httpErrorStatus:并发防护（P1-b）需要在 catch 里区分 409（他人已改 → 跳过该格）
+// 与其他失败（真报错）。humanizeHttpError 把 detail 压平成中文文案，丢了状态码；
+// 所以 throwHumanizedHttpError 把原始状态码挂在带品牌的 Error 上，httpErrorStatus
+// 读回它。非 HTTP 错误（fetch reject、纯 Error）读不到 → undefined。
+test("httpErrorStatus: 从带品牌的 HTTP 错误上读回原始状态码（区分 409 与其他）", async () => {
+  await captureConsole(async () => {
+    await assert.rejects(
+      throwHumanizedHttpError(markedResponse(409, { detail: "内容已被其他人修改，请刷新后重试" }), "knowhow"),
+      (error) => {
+        assert.equal(httpErrorStatus(error), 409);
+        return true;
+      }
+    );
+    await assert.rejects(
+      throwHumanizedHttpError(jsonResponse(500, { detail: "boom" }), "knowhow"),
+      (error) => {
+        assert.equal(httpErrorStatus(error), 500);
+        return true;
+      }
+    );
+  });
+});
+
+test("httpErrorStatus: 非 HTTP 错误（纯 Error / humanizedError 无状态 / 非 Error 值）→ undefined", () => {
+  assert.strictEqual(httpErrorStatus(new Error("Failed to fetch")), undefined);
+  assert.strictEqual(httpErrorStatus(humanizedError("回答没能完成，请重试")), undefined);
+  assert.strictEqual(httpErrorStatus(null), undefined);
+  assert.strictEqual(httpErrorStatus("字符串不是错误"), undefined);
 });
 
 // ---------------------------------------------------------------------------

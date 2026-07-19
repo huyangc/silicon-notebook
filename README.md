@@ -995,6 +995,38 @@ PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/sili
 Unlike `merge_dbs.py`'s always-write-a-new-output convention, this tool patches the `--db` path you give it in place, and refuses to run against a database that has not yet migrated to `SCHEMA_VERSION>=20`.
 
 **Important:** stop the backend service before running `apply` — this tool opens the `--db` file directly with no `busy_timeout`, so writing against it while the backend holds it open can collide with a live transaction.
+### Backfilling knowhow-cell Markdown formatting (`scripts/backfill_knowhow_md.py`)
+
+Knowhow tables normalize Excel-style formatting (Tab-indented `•` bullets, `A.`/`a.` section/sub markers, soft line breaks) into clean CommonMark automatically for new imports/appends and for the per-cell "reformat" action, but that normalization doesn't retroactively touch cells that already existed before it was turned on. This one-time CLI backfills those existing (存量) cells for a given notebook.
+
+**Dry-run first, then apply a reviewed plan file.** A dry-run never writes to the database; it always saves the full plan to a JSON file (and prints its path) so you can review exactly what would change, then re-applies *that file* verbatim — so what lands is exactly what you reviewed.
+
+**The default dry-run is read-only and safe to run anytime.** The default (rules-only) dry-run opens the database read-only and never constructs the write-capable repository, so it is safe to run against a live/busy backend. `--use-llm` (needs the rewrite model) and `--apply` (writes) instead open the database read-write, which may run any pending schema migrations and crash-recovery on open — the tool prints a one-line notice when it does this, so prefer running those when the backend is idle.
+
+```bash
+# dry-run (default): prints the per-cell diff + summary AND writes a plan file
+# (default .local/backfill_plans/knowhow_md_<notebook>_<timestamp>.json) — no DB writes
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx
+
+# after reviewing the plan file, apply it verbatim (deterministic rules, no LLM
+# involved) — every --apply REQUIRES --plan
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --apply --plan <plan.json>
+
+# LLM-backed reformatter (reformat -> content-invariance check -> rule fallback per cell):
+# dry-run to review, then apply the reviewed plan (same --apply --plan handshake)
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --use-llm
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --use-llm --apply --plan <plan.json>
+```
+
+- `--notebook` (required) — the notebook to backfill.
+- `--apply` — write the changes; it **requires** `--plan PATH` and applies that reviewed plan file verbatim. A cell whose stored content changed since the dry-run (someone edited it after review) is skipped and reported rather than overwritten on top of a moved target. Each written row is marked pending so the background projector recomputes its KG/steps (reprojection runs synchronously before the command exits). A plan-less `--apply` is a hard error: re-planning from the *current* database at apply time would pick up any cell edited after the reviewed dry-run and write it despite never being reviewed (and for `--use-llm` the stochastic rewrite model would produce different candidates entirely) — so run the dry-run, review its plan file, then apply *that*.
+- `--use-llm` — reformat each cell through the configured rewrite model (with its own zero-LLM content-invariance check and automatic fallback to the deterministic rules) instead of the default, always-available rule-based normalizer. If the rewrite model isn't configured, or its output fails the invariance check and falls back to rules, the tool prints an explicit `WARNING` rather than silently pretending the LLM ran.
+- `--save-plan PATH` — override where the dry-run writes the plan file.
+- `--plan PATH` — the reviewed plan file to apply (see `--apply`).
+
+The **anchor (row-title) column is never reformatted** by any bulk path (import, append, or this backfill) — it's a grouping key that must stay byte-stable, so normalizing it would split freshly-touched rows off from their existing concept group. (Only the explicit per-cell "reformat" action in the editor, where a human reviews the suggestion and all sibling rows are rewritten together, may touch it.)
+
+Must be run from the main checkout root (it needs the real `.env`/database configuration, same as `batch_ingest.py`/`replay_retrieval.py` above). Safe to re-run: applying the same plan again is a no-op (each already-applied cell no longer matches its recorded "before").
 
 ## Current Limitations
 

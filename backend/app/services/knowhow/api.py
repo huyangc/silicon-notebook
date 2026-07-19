@@ -54,21 +54,78 @@ from app.services.knowhow.projection import KnowhowProjector
 VALID_KINDS = _STORE_KINDS - {"anchor"}
 
 
-def preview_import(filename: str, data: bytes) -> dict:
+def _preview_row(row: list, anchor_index: "int | None") -> list:
+    """Normalize a preview row's cells EXCEPT the anchor column's (P1-c). The
+    anchor column is a grouping KEY, not prose: it must stay byte-stable, so
+    the preview applies the SAME skip ``import_table``/``commit_append`` apply
+    at commit time and 预览即所得 stays true for it too (a previewed
+    ``**A. 概念**`` that committed as raw ``A. 概念`` would be a lie). Empty
+    cells pass through untouched, mirroring the storage loops' ``if value``
+    guard. anchor = 分组键，必须字节稳定；规整它会让新行与旧行的键失配、组被劈开。"""
+    return [
+        value if (i == anchor_index or not value)
+        else md_normalize.safe_rule_normalize(value)[0]
+        for i, value in enumerate(row)
+    ]
+
+
+def preview_import(filename: str, data: bytes, anchor_index: "int | None" = None) -> dict:
     """Parse the uploaded grid and return the wire-shaped preview: each
     column's name + guessed kind, the anchor (row-title) suggestion index
     (None when no column name suggests one), the first 5 data rows, and the
     total row count. Never writes anything. Raises GridParseError (a
-    ValueError subclass) unchanged on a structurally invalid file."""
+    ValueError subclass) unchanged on a structurally invalid file.
+
+    P2-3 code-review fix: ``rows_preview`` must show EXACTLY what
+    ``import_table`` will persist -- the preview IS the human-review gate
+    (design doc "预览即所得"), so every non-empty previewed cell goes through
+    the identical ``md_normalize.safe_rule_normalize`` call ``import_table``'s
+    own storage loop uses (same falsy-guard: an empty cell is left alone,
+    mirroring ``import_table``'s ``if value`` filter), rather than the raw
+    parsed text. Only the returned slice (``grid.rows[:5]``) needs
+    normalizing -- that is all a caller ever sees.
+
+    P1-c / this fix: the anchor column is skipped from normalization exactly
+    like ``import_table`` skips the confirmed one (see ``_preview_row``). WHICH
+    column is skipped follows the caller: when ``anchor_index`` is provided
+    (the wizard has re-picked / cleared the row-title selection in step 2), the
+    preview skips THAT column -- so the previewed normalization matches a commit
+    with the same ``anchor_index``, on the guessed AND the changed column alike.
+    When it is omitted (the wizard's initial load, before the user touches the
+    selector), the preview skips the GUESSED column -- unchanged behavior. Note
+    ``anchor_suggestion`` always reports the GUESS regardless: it is the
+    wizard's initial-selection hint, not the column being skipped.
+
+    Tri-state ``anchor_index``（评审残留修复）: the selection has THREE states
+    and parameter-omission can only encode one of them — ``None``/omitted =
+    initial load, skip the GUESS (matches the wizard's pre-selected hint);
+    ``>= 0`` = the user picked that column, skip it; ``< 0``（wire 上传 -1）=
+    the user explicitly CLEARED「不设行标题」→ no anchor exists → skip NOTHING,
+    matching what a commit without ``anchor_index`` stores (all columns
+    normalized). Collapsing "cleared" into omission would make the preview
+    skip the guessed column while commit normalizes it — 预览即所得 would lie
+    on exactly that column."""
     grid = parse_grid(filename, data)
-    kinds, anchor_index = guess_kinds(grid.columns)
+    kinds, guessed_anchor = guess_kinds(grid.columns)
+    if anchor_index is None:
+        skip_index = guessed_anchor          # 初始加载：按猜测列跳过
+    elif anchor_index < 0:
+        skip_index = None                    # 明确清空：无锚定列，不跳过任何列
+    elif anchor_index >= len(grid.columns):
+        # F5（review）：越界的 anchor_index 必须像 commit 路径（_columns_with_anchor）
+        # 一样 400 拒绝，而不是当成「跳过一个不存在的列 -> 全列规整」静默放行——否则
+        # 同一个越界 index 预览 200、提交 400，预览即所得撒谎。用与 commit 逐字相同的
+        # 友好文案（负数在上面的分支已按「明确清空」处理、不落到这里）。
+        raise ValueError("行标题列索引超出范围")
+    else:
+        skip_index = anchor_index            # 用户所选列
     return {
         "columns": [
             {"name": name, "guessed_kind": kind}
             for name, kind in zip(grid.columns, kinds)
         ],
-        "anchor_suggestion": anchor_index,
-        "rows_preview": grid.rows[:5],
+        "anchor_suggestion": guessed_anchor,
+        "rows_preview": [_preview_row(row, skip_index) for row in grid.rows[:5]],
         "total_rows": len(grid.rows),
     }
 
@@ -246,8 +303,40 @@ def import_table(
     # 违例概念列），落库前 forward-fill 使同概念分支行共享 anchor 值，
     # 下游 cell-level 投影据此归并成一个概念 KO（见 projection.py）。
     rows = forward_fill_column(grid.rows, anchor_index) if anchor_index is not None else grid.rows
+    # knowhow-md-normalize Task 5: every non-empty cell goes through
+    # md_normalize.rule_normalize (Task 1, zero LLM) before it ever reaches
+    # the store — Excel copy-paste idioms (Tab-indented `•` bullets, `A.`/
+    # `B.` section markers) must not land verbatim. Rules-only on purpose:
+    # this is the always-on bulk-import path (an efficiency constraint —
+    # no per-cell LLM call here); the LLM-backed reformat_cell (Task 3,
+    # below) stays an explicit-trigger-only suggestion layer, never wired
+    # into import/append.
+    #
+    # final-review fix (Critical 1, layer 2 -- defense in depth): goes
+    # through ``safe_rule_normalize`` rather than bare ``rule_normalize`` —
+    # gates the candidate through ``content_invariant`` first and silently
+    # keeps the original cell text whenever the (supposedly format-only)
+    # candidate would fail it, rather than ever letting a rule_normalize
+    # bug land a content-destroying rewrite in the store unchecked.
+    #
+    # P1-c: the anchor column is EXEMPT from normalization — anchor = 分组键，
+    # 必须字节稳定；规整它会让新行与旧行的键失配、组被劈开 (an appended
+    # `A. 概念` normalized to `**A. 概念**` would split off from an existing
+    # `A. 概念` group). ``columns`` carries the store roles here, so the anchor
+    # column is whichever one ``parse_import_columns`` marked ``role=='anchor'``.
+    anchor_col_ids = {
+        column_ids[i] for i, column in enumerate(columns) if column.get("role") == "anchor"
+    }
     for row in rows:
-        cells = {column_ids[i]: value for i, value in enumerate(row) if value}
+        cells = {}
+        for i, value in enumerate(row):
+            if not value:
+                continue
+            col_id = column_ids[i]
+            cells[col_id] = (
+                value if col_id in anchor_col_ids
+                else md_normalize.safe_rule_normalize(value)[0]
+            )
         repo.add_knowhow_row(table_id, cells)
     repo.bump_knowhow_mutation_seq(table_id)
     return table_id
@@ -714,7 +803,16 @@ def preview_append(table: dict, filename: str, data: bytes) -> dict:
     incoming batch — the design doc's own wording ("对比现有行标") scopes it
     that way. ``row_index`` is the 0-based position within the file's OWN
     data rows (``grid.rows``), the same "index is 0-based" convention this
-    module already uses for ``anchor_index`` elsewhere."""
+    module already uses for ``anchor_index`` elsewhere.
+
+    P2-3 code-review fix: ``rows_preview`` must show EXACTLY what
+    ``commit_append`` will persist -- same rationale/guard as
+    ``preview_import`` above (this function's sibling), applied to
+    ``aligned_rows`` instead of ``grid.rows`` directly. Duplicate-title
+    detection above deliberately still compares the RAW aligned values
+    (unchanged behavior, out of this fix's scope) -- only the returned
+    preview slice is normalized. P1-c: the anchor column is skipped in the
+    preview exactly as ``commit_append`` skips it at commit (``_preview_row``)."""
     grid = parse_grid(filename, data)
     table_columns = table.get("columns", [])
     aligned_rows, unmatched_columns = _align_rows_to_table_columns(table_columns, grid)
@@ -736,7 +834,7 @@ def preview_append(table: dict, filename: str, data: bytes) -> dict:
                 duplicate_titles.append({"row_index": row_index, "title": title})
 
     return {
-        "rows_preview": aligned_rows[:5],
+        "rows_preview": [_preview_row(row, anchor_position) for row in aligned_rows[:5]],
         "total_rows": len(grid.rows),
         "unmatched_columns": unmatched_columns,
         "duplicate_titles": duplicate_titles,
@@ -786,8 +884,26 @@ def commit_append(
     if anchor_position is not None:
         aligned_rows = forward_fill_column(aligned_rows, anchor_position)
     column_ids = [column["id"] for column in table_columns]
+    # knowhow-md-normalize Task 5: same rule_normalize-before-store guarantee
+    # as import_table's own row loop above (zero LLM, always-on) — appending
+    # into an existing table must not skip it. final-review fix (Critical 1,
+    # layer 2): same safe_rule_normalize content_invariant gate as
+    # import_table above — see that call site's comment.
+    #
+    # P1-c: the anchor column is EXEMPT (``anchor_position``, already resolved
+    # above for forward-fill) — anchor = 分组键，必须字节稳定；规整它会让新行
+    # 与旧行的键失配、组被劈开 (this is the confirmed defect: an appended
+    # `A. Component` normalized to `**A. Component**` splits off from the
+    # existing `A. Component` group even though the append preview matched them).
     for aligned_row in aligned_rows:
-        cells = {column_ids[i]: value for i, value in enumerate(aligned_row) if value}
+        cells = {}
+        for i, value in enumerate(aligned_row):
+            if not value:
+                continue
+            cells[column_ids[i]] = (
+                value if i == anchor_position
+                else md_normalize.safe_rule_normalize(value)[0]
+            )
         repo.add_knowhow_row(table_id, cells)
     repo.bump_knowhow_mutation_seq(table_id)
     return len(aligned_rows)
@@ -898,6 +1014,129 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
     except Exception as exc:
         models.note_model_error("knowhow_optimize", model_label, exc)
         raise KnowhowOptimizeUnavailable("优化服务暂时不可用，请稍后再试") from exc
+
+
+# --- knowhow-md-normalize Task 3: reformat_cell orchestration --------------
+#
+# LLM 重排（只整理排版）→ 零 LLM 内容不变式校验（md_normalize.content_invariant,
+# Task 2）→ 不过就退确定性规则规整器（md_normalize.rule_normalize, Task 1）。
+# 与 optimize_cell 一样 suggestion-only、从不写库；回填仍走既有 PATCH cell 端点。
+#
+# P1-c 注：``reformat_cell`` 及其 PATCH-cell 回填端点【刻意不做 anchor 列免规整】
+# ——与 import_table/commit_append/回填脚本那三条【批量】路径相反。批量路径一次
+# 落多行、无人逐格把关，规整 anchor 会悄悄劈开分组键；而单格 reformat 是【显式、
+# 人工评审】的建议，且 shared-column 保存扇出会把同组所有兄弟行一起改写（见
+# update_knowhow_cells），组一致性天然保持。故这里不加 anchor 跳过是对的，勿"修"。
+#
+# ``md_normalize`` 的 import 放在这里（而非文件顶部 import 块）是与上面
+# build_projector/optimize_cell 完全相同的零行移位理由：往文件顶部插入会移动
+# INDEPENDENT_PRIVATE_SITES/TASK*_KNOWHOW_ALLOWED_CONSUMERS 已按精确行号钉住的
+# 138/716 两个 `_runtime` 落点；本节自己的新 `_runtime` 落点（reformat_cell 内）
+# 已作为第三个独立落点登记在两个守卫测试里。
+from app.services.knowhow import md_normalize
+
+_REFORMAT_SCHEMA_HINT = '{"reformatted_md": ""}'
+
+
+def _reformat_cell_prompt(content_md: str, column_name: str, kind: str) -> str:
+    """固定 prompt 模板：只整理 Excel 习惯排版标记（`•`/`A.`/Tab 缩进/软换行）为
+    干净 CommonMark，**不改文字、不改行结构**——"保持行结构"这句是刻意的、与
+    ``content_invariant``（Task 2）的按行签名校验对齐，详见下方注释。"""
+    procedure_clause = (
+        "- 「方法步骤」列：**保持每一行已有的列表标记类型与编号原样**——原本是有序编号（如 `1.`/`2.`/`2018.`）就保留那个数字、不要重新编号，原本是 `•`/`-` 项目符号就保持为项目符号（`•` 仍按上面归一成 `- `、缩进的字母子项仍按上面转成嵌套 `- `）；切勿把项目符号或字母项改写成数字编号。\n"
+        if kind == "procedure" else ""
+    )
+    return (
+        f"你是表格知识库的排版助手。下面是「{column_name}」列某个格子的内容，"
+        "它可能来自 Excel，带有 `•` 项目符号、`A.`/`a.` 编号、Tab 缩进、软换行。\n"
+        "请**只整理每一行的排版标记**，把它变成干净的 CommonMark：\n"
+        "- `•` 等符号转成 `- `；顶格的 `A.`/`B.` 分节标题用 `**加粗**`；缩进的 `a.`/`b.` 子项转成嵌套 `- `。\n"
+        "- 可在段落/列表之间增删**空行**。\n"
+        f"{procedure_clause}"
+        "**保持行结构**：不要拆分或合并任何一行——每行的文字与总行数保持不变，只改行首标记、缩进、强调符与行间空行。\n"
+        "**严禁**：改动、增删、翻译任何文字；调换行/句顺序；改动数字。\n"
+        "允许：整理标点的全角/半角及其间距。\n"
+        "`![说明](asset://...)` 图片引用必须原样保留。\n"
+        "只输出整理后的 markdown 正文，不要解释、不要代码围栏包裹。\n\n"
+        f"当前内容：\n{content_md}\n\n"
+        f'严格按此 JSON 返回：{_REFORMAT_SCHEMA_HINT}'
+    )
+
+
+# 注：prompt 明令「保持行结构（不拆分/合并行）」，与 content_signature 的**按行**校验一致——
+# 这样 LLM 不会去做校验必然拒绝的整行拆分。行内多步骤挤在一行的 procedure 格，
+# LLM 与 rule_normalize 都不拆（一致、可预期）；用户可手动分行或用编辑器的有序列表按钮。
+
+
+def llm_reformat(client: Any, content_md: str, column_name: str, kind: str) -> "str | None":
+    """调 LLM 只做排版整理；调用失败（JSON 解析失败/字段缺失/网络异常）一律
+    返回 None，调用方据此回退到 rule_normalize。``ModelNotConfiguredError``
+    ——client 未配置（哨兵 client，见 model_provider.py::_UnconfiguredLLMClient）
+    ——单独重新抛出、不吞：调用方 reformat_cell 靠这个异常与「LLM 真的改坏了
+    内容」区分 rule/no-llm 与 rule/llm-failed，详见那边的 except 分支与顶部
+    docstring。
+
+    ``client`` 由调用方（``reformat_cell``）解析好后传入，而不是在这里再从
+    ``repo._runtime.models`` 重新取一次——``rewrite_llm_client`` 是走 per-user
+    模型配置解析的 property（见 model_provider.py），避免同一次 reformat_cell
+    调用里把它解析两遍，也让本文件新增的 `_runtime` 私有面 reach 只多一个
+    落点（在 reformat_cell 里）而不是两个。"""
+    from app.core.llm import cap_kwargs
+    from app.services.model_config import ModelNotConfiguredError
+
+    try:
+        prompt = _reformat_cell_prompt(content_md, column_name, kind)
+        raw = client.chat_json(
+            [{"role": "user", "content": prompt}],
+            _REFORMAT_SCHEMA_HINT,
+            **cap_kwargs(client, "openai_compat_max_tokens"),
+        )
+        data = json.loads(raw)
+        out = data.get("reformatted_md") if isinstance(data, dict) else None
+        return out if isinstance(out, str) and out.strip() else None
+    except ModelNotConfiguredError:
+        raise
+    except Exception:
+        return None
+
+
+def reformat_cell(repo: Any, content_md: str, column_name: str, kind: str) -> dict:
+    """LLM 重排 → 内容不变式校验 → 不过退规则。返回候选 dict
+    ``{"candidate_md", "source", "changed"}``，``source`` ∈
+    ``{"llm", "rule/llm-failed", "rule/no-llm"}``。**从不写库**（suggestion-
+    only，与 optimize_cell 同规矩——回填走既有 PATCH cell 端点，那才触发重投影）。
+
+    ``rule/llm-failed`` vs ``rule/no-llm`` 不能只靠 client-None 判定区分：生产
+    环境 ``repo._runtime.models.rewrite_llm_client`` 从不是 None——未配置时
+    ``model_provider.py``(``_llm_for_role``)要么返回一个 ``.configured=False``
+    的哨兵（``chat_json`` 抛 ``ModelNotConfiguredError``），要么回退到系统
+    client（同样可能 ``.configured=False``，``chat_json`` 抛普通
+    ``RuntimeError``）。两种未配置形状都必须落 rule/no-llm，因此这里双重把关
+    （belt-and-suspenders，两个都留着——见下方两处判定各自覆盖的用例）：
+    ①前置 ``.configured`` 判定挡住「未配置且如实暴露 .configured=False」的
+    形状，压根不调 LLM；②包一层 ``except ModelNotConfiguredError`` 兜底挡住
+    「.configured 未如实反映、只在真调用时才暴露未配置」的形状（哨兵本身即是
+    ``configured=False`` 已经会被①挡住，②纯粹是防御性兜底）。除此之外的任何
+    异常（网络/超时/JSON 解析失败）或校验不过都仍是真的调了 LLM、只是结果不能
+    用 → rule/llm-failed，不受这次改动影响。"""
+    from app.services.model_config import ModelNotConfiguredError
+
+    raw = content_md or ""
+    if not raw.strip():
+        return {"candidate_md": raw, "source": "rule/no-llm", "changed": False}
+    client = getattr(repo._runtime.models, "rewrite_llm_client", None)
+    if client is None or not getattr(client, "configured", True):
+        cand = md_normalize.rule_normalize(raw)
+        return {"candidate_md": cand, "source": "rule/no-llm", "changed": cand != raw}
+    try:
+        cand = llm_reformat(client, raw, column_name, kind)
+    except ModelNotConfiguredError:
+        cand = md_normalize.rule_normalize(raw)
+        return {"candidate_md": cand, "source": "rule/no-llm", "changed": cand != raw}
+    if cand is not None and md_normalize.content_invariant(raw, cand):
+        return {"candidate_md": cand, "source": "llm", "changed": cand != raw}
+    cand = md_normalize.rule_normalize(raw)
+    return {"candidate_md": cand, "source": "rule/llm-failed", "changed": cand != raw}
 
 
 # --- PR-2+3 Task 10: Agent surface (HTTP+MCP shared core, design doc §⑥) ----
