@@ -826,16 +826,28 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 `--limit` 只限本轮**抽取**的来源数;最终聚类始终覆盖整个 notebook。大库(见上文 `SCALE_INDEX_AUTO_ENABLED`)在 `kg` 重建后会**自动重建**可伸缩检索索引(不会陈旧)。`KG_CLUSTER_REP_ANN_MAX`(默认 2,000,000)封顶 rep-ANN 规模——超出则分片建索引并 WARNING(绝不静默截断)。
 
-**并发调优。** 三个旋钮控制吞吐(与 429 压力):
+**并发调优。** 三个彼此独立的控制项决定吞吐与 429 压力。显式 CLI 值优先；省略时继承对应的 settings/环境变量：
 
-- `--workers` —— `all` 阶段**同时抽取的文档数**(覆盖 `KG_JOB_CONCURRENCY`);`ingest` 阶段为文件解析并发;`vectors-to-blob` 阶段为 `json.loads`/重编码的并行进程数(默认 `min(8, CPU核数)`;`1` 完全不启动进程池)。
-- `--embed-conc` —— embedding 并发(覆盖 `EMBED_CONCURRENCY`);`all` 阶段 chunk 向量在每篇文档管线的后台跑。
-- `KG_EXTRACT_WORKERS`(`.env`,默认 16)—— KG 抽取 LLM 窗口级的全局总并发,跨所有文档共享(文档内 + 文档间)。
-- `--pool-report-interval` —— `all`/`kg` 阶段每 N 秒打一行**实时线程池占用**(默认 15;`0` 关闭)。并排显示 KG-LLM(抽取窗口)池与 embedding 线程——如 `[pool 17:52:33] KG-LLM(window) 14/16 · 源(job) 8/8 · embed 6bg+20pool · 源完成 5/40`——用以确认 embedding 模型与 KG-LLM 在共享算力的模型服务上**同时**打满。
+- `--workers` —— 来源管线并发；回退 `KG_JOB_CONCURRENCY`。它在 `all` 中分派来源 job、在 `ingest` 中控制文件解析。`vectors-to-blob` 中它仍表示解析/重编码进程池大小（默认 `min(8, CPU核数)`；`1` 关闭该进程池）。
+- `--llm-conc` —— 传统 `chat_json` LLM 调用的进程级硬上限；回退 `KG_EXTRACT_WORKERS`（默认 16）。它跨所有来源共享，也覆盖单个来源内部的抽取窗口。
+- `--embed-conc` —— embedding 工作的进程级硬上限；回退 `EMBED_CONCURRENCY`。它跨所有来源共享，不是逐文档上限。
 
-`all` 阶段 embedding 峰值并发 ≈ `--workers × --embed-conc`,两者同时调高易触发服务商 429,谨慎。若某次限流留下缺失向量,事后用 `embed` 子命令补修。
+模型 gate 与来源分派相互独立：`--workers` 不会乘大任何模型上限。特别是，embedding 峰值并发始终由跨所有来源的 `--embed-conc` 硬封顶。所有会调用模型的批处理阶段都遵守同一 gate 合同，包括 `all`、`kg`、`reparse`、`metadata`（以及 `ingest` 与 `embed` 中的 embedding 工作）。若一次限流留下缺失向量，之后用 `embed` 子命令补修。
 
-选项:`--owner`(notebook 属主用户名,大小写不敏感,默认 = admin 用户)、`--workers`(`all` 阶段同时抽取的文档数 = `KG_JOB_CONCURRENCY`,`ingest` 阶段为文件并发;`vectors-to-blob` 阶段为解析/编码进程池大小,默认 `min(8, CPU核数)`,`1` = 不启进程池)、`--embed-conc`(embedding 并发 = `EMBED_CONCURRENCY`;避 429)、`--limit`(kg 抽取子集——聚类仍覆盖全量)、`--no-rebuild` / `--rebuild-only`(分批大库构建时拆分「抽取」与「末尾聚类」)、`--fresh`(清空 rebuild checkpoint,强制 merge 审查 + 概念描述全量重裁;用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild,`all` 阶段的末尾聚类同样适用)、`--allow-no-embed`(EMBED 未配时显式允许无向量降级;默认拒绝,不静默;`embed` 子命令忽略此项)、`--pool-report-interval`(`all`/`kg` 阶段每隔几秒自报线程池占用,显示 KG-LLM vs embed 并发以验证多模型同时打满;默认 15,`0` 关)、`--all-notebooks`(仅 `vectors-to-blob` / `backfill-source-index`:作用于全部 notebook 而非单个)、`--force`(仅 `metadata`:已有元数据行的源也重抽)、`--dry-run`(只扫描预估)。`embed` 子命令只补缺失的 chunk + 节点向量,需 `--notebook-id`。`vectors-to-blob` 子命令把旧 JSON 文本向量迁移成 BLOB,需 `--notebook-id` 或 `--all-notebooks`。`backfill-source-index` 子命令主动构建来源删除反查表,需 `--notebook-id` 或 `--all-notebooks`。`metadata` 子命令给已解析的论文来源补抽元数据(标题/作者/期刊/年份),需 `--notebook-id` 且 LLM 已配置。
+例如：来源管线较大、embedding 端点保守、但 LLM 容量较高时：
+
+```bash
+PYTHONPATH=backend python scripts/batch_ingest.py reparse \
+  --notebook-id nb-xxxx \
+  --workers 32 \
+  --llm-conc 24 \
+  --embed-conc 4 \
+  --pool-report-interval 5
+```
+
+- `--pool-report-interval` —— `all`/`kg` 阶段每 N 秒打一行实时池占用（默认 15；`0` 关闭）。它在来源 job 旁显示 LLM 与 embedding gate 的 `active/max/waiting`，例如 `[pool 17:52:33] LLM 14/24 waiting=2 · embedding 4/4 waiting=9 · source 8/32 · 源完成 5/40`，可直接看出独立上限与排队压力。
+
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(8, CPU核数)`，`1` = 不启进程池）、`--llm-conc`（传统 `chat_json` 的进程级上限 = `KG_EXTRACT_WORKERS`）、`--embed-conc`（进程级 embedding 上限 = `EMBED_CONCURRENCY`；跨所有来源避 429）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild，`all` 阶段的末尾聚类同样适用）、`--allow-no-embed`（EMBED 未配时显式允许无向量降级；默认拒绝，不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg` 阶段每隔几秒自报池占用，显示 LLM 与 embedding 的 `active/max/waiting`；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`：作用于全部 notebook 而非单个）、`--force`（仅 `metadata`：已有元数据行的源也重抽）、`--dry-run`（只扫描预估）。`embed` 子命令只补缺失的 chunk + 节点向量，需 `--notebook-id`。`vectors-to-blob` 子命令把旧 JSON 文本向量迁移成 BLOB，需 `--notebook-id` 或 `--all-notebooks`。`backfill-source-index` 子命令主动构建来源删除反查表，需 `--notebook-id` 或 `--all-notebooks`。`metadata` 子命令给已解析的论文来源补抽元数据（标题/作者/期刊/年份），需 `--notebook-id` 且 LLM 已配置。
 
 前置:`.env` 配好 EMBED 与 `KG_LLM`(KG 抽取缺省回退全局 `OPENAI_COMPAT_*`)。EMBED 未配时 CLI **默认拒绝运行**——要无向量导入须显式 `--allow-no-embed`(此时跳过 chunk/KG 向量),绝不静默;KG 抽取在无可用 LLM 时报错。重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
 
