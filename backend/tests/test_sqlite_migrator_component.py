@@ -13,16 +13,16 @@ def test_initialize_orders_migrate_recover_seed():
     assert calls == ["migrate", "recover", "seed"]
 
 
-def test_schema_version_constant_is_v19():
+def test_schema_version_constant_is_v20():
     # master v11/v12 hot-path indexes、Memory / Agent v13 migration、Task 1 的
     # sources.memory_id v14 migration、Task 5 的 parse_status/source_type 覆盖
     # 索引 v15 migration、knowhow-tables PR-1 Task 1 的五张新表 v16 migration、
     # paper-metadata Task 1 的 source_paper_meta/source_authors 两表 v17
     # migration、PR-2+3 Task 1 的 cell_code 表 + role 词表重映射 v18 migration
-    # 与 source-asset-linking Task 2 的 notebook_assets.source_id 列 v19
-    # migration 均保留；与 facade 模块级 SCHEMA_VERSION、test_follow_chain 守卫
-    # 同步。
-    assert SCHEMA_VERSION == 19
+    # 与 source-asset-linking Task 2 的 notebook_assets.source_id 列 v19、
+    # KG 构建任务状态表 v20 migration 均保留；与 facade 模块级
+    # SCHEMA_VERSION 同步。
+    assert SCHEMA_VERSION == 20
 
 
 def test_add_column_guard_on_missing_table(tmp_path):

@@ -95,8 +95,9 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # v15 parse_status/source_type 覆盖索引 migration、v16 knowhow 表
     # migration、v17 source_paper_meta/source_authors 表 migration、v18
     # knowhow_cell_code 表 + role 词表重映射 migration 与 v19
-    # notebook_assets.source_id 列 + 索引 migration 合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 19
+    # notebook_assets.source_id 列 + 索引 migration、v20 kg_build_jobs 合法升级
+    # 到当前版本。
+    assert snapshot["schema"]["user_version"] == 20
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

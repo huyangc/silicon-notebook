@@ -11,7 +11,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1424,6 +1424,34 @@ class SqliteMigrator:
                 "ON notebook_assets(source_id)"
             )
 
+    def _migration_20(self) -> None:
+        """持久化 KG 构建任务状态与笔记本级单飞约束。"""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS kg_build_jobs (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  created_by TEXT NOT NULL DEFAULT '',
+                  mode TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'running',
+                  stage TEXT NOT NULL DEFAULT 'probing',
+                  total_sources INTEGER NOT NULL DEFAULT 0,
+                  completed_sources INTEGER NOT NULL DEFAULT 0,
+                  failed_sources INTEGER NOT NULL DEFAULT 0,
+                  error_code TEXT NOT NULL DEFAULT '',
+                  error_message TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  finished_at TEXT NOT NULL DEFAULT ''
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_kg_build_jobs_one_running
+                  ON kg_build_jobs(notebook_id) WHERE status = 'running';
+                CREATE INDEX IF NOT EXISTS idx_kg_build_jobs_nb_created
+                  ON kg_build_jobs(notebook_id, created_at DESC, id DESC);
+                """
+            )
+
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
@@ -1442,6 +1470,15 @@ class SqliteMigrator:
             db.execute(
                 "UPDATE knowhow_rows SET projection_status='failed' "
                 "WHERE projection_status IN ('syncing','pending')")
+            now = _now()
+            db.execute(
+                "UPDATE kg_build_jobs SET status='failed', stage='finished', "
+                "error_code='worker_interrupted', "
+                "error_message='服务重启导致本次分析中断；"
+                "已完成内容已保留，可继续分析未完成内容。', "
+                "updated_at=?, finished_at=? WHERE status='running'",
+                (now, now),
+            )
 
     def _seed(self) -> None:
         now = _now()

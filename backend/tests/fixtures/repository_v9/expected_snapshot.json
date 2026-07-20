@@ -1183,6 +1183,16 @@
         "type": "index"
       },
       {
+        "name": "idx_kg_build_jobs_nb_created",
+        "sql_sha256": "e3a4668ce57736a82a051df215a00b3ccf48b2aeb2d3ccf6f8bd58fccebbe7f1",
+        "type": "index"
+      },
+      {
+        "name": "idx_kg_build_jobs_one_running",
+        "sql_sha256": "dc9cb69aac157cdeb9e1a89f696e2efa41169ce1dec9ff288463d3b93b0c4793",
+        "type": "index"
+      },
+      {
         "name": "idx_kg_cluster_scratch_nb_run",
         "sql_sha256": "63dda4f6c99afb18cd60dd4f9107f4aef2dd87368713947c8dee6f6c108da7bf",
         "type": "index"
@@ -1548,6 +1558,11 @@
         "type": "table"
       },
       {
+        "name": "kg_build_jobs",
+        "sql_sha256": "b3a53939a3bb75d8387891e998b125eccea586be4937a872efd4be021ed40788",
+        "type": "table"
+      },
+      {
         "name": "kg_cluster_scratch",
         "sql_sha256": "99d623abe3512d8074f90faea3ba34e41af1042e09da59e2c8fe4432a08e7e0c",
         "type": "table"
@@ -1778,6 +1793,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 19
+    "user_version": 20
   }
 }
