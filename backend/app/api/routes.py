@@ -489,16 +489,23 @@ async def preview_knowhow_import(
     notebook_id: str,
     file: UploadFile = File(...),
     anchor_index: Optional[int] = Form(None),
+    orientation: str = Form("columns"),
 ) -> KnowhowImportPreview:
     """``anchor_index`` (optional, same wire shape as the import commit
     endpoint's) lets the wizard re-preview after the user changes the row-title
     (anchor) selection in step 2: when given, the preview skips THAT column from
     normalization instead of the guessed one, keeping "预览即所得" true for the
     user-confirmed anchor. Omitted on the initial load — preview then skips the
-    guess (unchanged behavior)."""
+    guess (unchanged behavior). ``orientation`` selects whether the raw source
+    presents attributes in columns (default) or rows."""
     data = await file.read()
     try:
-        return knowhow_api.preview_import(file.filename or "import", data, anchor_index)
+        return knowhow_api.preview_import(
+            file.filename or "import",
+            data,
+            orientation=orientation,
+            anchor_index=anchor_index,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -514,6 +521,7 @@ async def import_knowhow_table(
     title: str = Form(...),
     columns_json: str = Form(...),
     anchor_index: Optional[int] = Form(None),
+    orientation: str = Form("columns"),
 ) -> KnowhowTableDetail:
     """Parse -> validate -> create table -> insert every row -> schedule a
     debounced background full-table projection (ProjectionScheduler — PR-2+3
@@ -524,6 +532,8 @@ async def import_knowhow_table(
     observed the next time the table is (re)opened or the caller explicitly
     refreshes it.
 
+    ``orientation`` selects whether raw source attributes are in columns
+    (default) or rows; preview and commit normalize through the same parser.
     ``columns_json``=``[{name,kind}]`` + the separate ``anchor_index`` form
     field (PR-2+3 Task 3 wire — kind is one of three non-anchor values; the
     row-title designation is named ONLY via anchor_index, never inline)."""
@@ -532,7 +542,7 @@ async def import_knowhow_table(
     try:
         table_id = knowhow_api.import_table(
             repo, notebook_id, file.filename or "import", data, title,
-            columns_json, anchor_index,
+            columns_json, anchor_index, orientation,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))

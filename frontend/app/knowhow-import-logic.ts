@@ -7,9 +7,34 @@
 // 判断逻辑。
 
 import { toUserMessage } from "./errors.ts";
-import { ROLE_LABELS, type Role, type KnowhowColumnInput, type KnowhowPreviewColumn } from "./knowhow-model.ts";
+import {
+  ROLE_LABELS,
+  type KnowhowColumnInput,
+  type KnowhowImportOrientation,
+  type KnowhowPreviewColumn,
+  type Role,
+} from "./knowhow-model.ts";
 
 // --- 步骤①：文件选择 -----------------------------------------------------------
+
+export const DEFAULT_IMPORT_ORIENTATION: KnowhowImportOrientation = "columns";
+
+export const IMPORT_ORIENTATION_OPTIONS: {
+  value: KnowhowImportOrientation;
+  label: string;
+  description: string;
+}[] = [
+  {
+    value: "columns",
+    label: "属性按列",
+    description: "第一行是属性名，每一行是一条记录",
+  },
+  {
+    value: "rows",
+    label: "属性按行",
+    description: "第一列是属性名，每一列是一条记录",
+  },
+];
 
 // 支持的导入文件扩展名，顺序即 <input accept> 与提示文案的顺序。与后端
 // grid_parser.parse_grid 支持的后缀集合一致（.xlsm 也被后端接受，但向导

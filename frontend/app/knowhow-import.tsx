@@ -48,10 +48,13 @@ import {
   type KnowhowAppendPreview,
   type KnowhowColumn,
   type KnowhowImportPreview,
+  type KnowhowImportOrientation,
 } from "./knowhow-model.ts";
 import {
+  DEFAULT_IMPORT_ORIENTATION,
   IMPORT_ACCEPT,
   IMPORT_ACCEPT_EXTENSIONS,
+  IMPORT_ORIENTATION_OPTIONS,
   deriveDefaultTitle,
   extractErrorMessage,
   computePreviewSpans,
@@ -93,6 +96,7 @@ type Step = "select" | "map";
 
 export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImportWizardProps) {
   const [step, setStep] = useState<Step>("select");
+  const [orientation, setOrientation] = useState<KnowhowImportOrientation>(DEFAULT_IMPORT_ORIENTATION);
 
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -179,7 +183,7 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     setAnchorPreviewError(null);
     setPreviewLoading(true);
     try {
-      const result = await importKnowhowPreview(notebookId, selected);
+      const result = await importKnowhowPreview(notebookId, selected, orientation);
       if (!mountedRef.current) return;
       setFile(selected);
       setPreview(result);
@@ -218,7 +222,12 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     setAnchorPreviewLoading(true);
     setAnchorPreviewError(null);
     try {
-      const result = await importKnowhowPreview(notebookId, currentFile, nextAnchorIndex);
+      const result = await importKnowhowPreview(
+        notebookId,
+        currentFile,
+        orientation,
+        nextAnchorIndex,
+      );
       // 迟到/被更新的选择覆盖：只让最新一次落地，丢弃乱序旧响应；序号在切文件/
       // 返回选择步骤时也会被推进，故这条守卫同时挡住「文件 A 的重取迟到覆盖已切
       // 到的文件 B 预览」（P1）。
@@ -267,7 +276,7 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
       );
       // 行标题列走独立的 anchor_index——后端不读列定义里的 role
       // （见 knowhow-model.importKnowhow / manage-logic.assembleImportColumnKinds）。
-      await importKnowhow(notebookId, file, title.trim(), columns, anchorIndex);
+      await importKnowhow(notebookId, file, title.trim(), columns, anchorIndex, orientation);
       if (!mountedRef.current) return;
       onDone();
     } catch (err) {
@@ -316,6 +325,8 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
             <SelectFileStep
               loading={previewLoading}
               error={previewError}
+              orientation={orientation}
+              onOrientationChange={setOrientation}
               onFileInputChange={handleFileInputChange}
             />
           ) : preview ? (
@@ -352,7 +363,7 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
 // ---------------------------------------------------------------------------
 
 const STEP_LABELS: [1 | 2 | 3, string][] = [
-  [1, "选文件"],
+  [1, "选格式与文件"],
   [2, "预览与列设置"],
   [3, "提交"],
 ];
@@ -392,14 +403,45 @@ function ImportStepIndicator({
 function SelectFileStep({
   loading,
   error,
+  orientation,
+  onOrientationChange,
   onFileInputChange,
 }: {
   loading: boolean;
   error: string | null;
+  orientation?: KnowhowImportOrientation;
+  onOrientationChange?: (orientation: KnowhowImportOrientation) => void;
   onFileInputChange: (event: ChangeEvent<HTMLInputElement>) => void;
 }) {
   return (
     <div className="knowhow-import-select-step">
+      {orientation !== undefined && onOrientationChange ? (
+        <fieldset className="knowhow-import-orientation" disabled={loading}>
+          <legend>属性怎么排列？</legend>
+          <div className="knowhow-import-orientation-options">
+            {IMPORT_ORIENTATION_OPTIONS.map((option) => (
+              <label
+                key={option.value}
+                className={`knowhow-import-orientation-option${
+                  orientation === option.value ? " is-selected" : ""
+                }`}
+              >
+                <input
+                  type="radio"
+                  name="knowhow-import-orientation"
+                  value={option.value}
+                  checked={orientation === option.value}
+                  onChange={() => onOrientationChange(option.value)}
+                />
+                <span>
+                  <strong>{option.label}</strong>
+                  <small>{option.description}</small>
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      ) : null}
       <label className={`knowhow-import-dropzone${loading ? " is-loading" : ""}`}>
         <input type="file" accept={IMPORT_ACCEPT} onChange={onFileInputChange} disabled={loading} />
         <span className="knowhow-import-drop-icon">
@@ -1051,6 +1093,78 @@ function ImportWizardStyles() {
           gap: 12px;
         }
 
+        .knowhow-import-orientation {
+          margin: 0;
+          padding: 0;
+          border: 0;
+        }
+
+        .knowhow-import-orientation legend {
+          margin-bottom: 10px;
+          padding: 0;
+          color: var(--ink);
+          font-size: 14px;
+          font-weight: 600;
+        }
+
+        .knowhow-import-orientation-options {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 10px;
+        }
+
+        .knowhow-import-orientation-option {
+          display: flex;
+          align-items: flex-start;
+          gap: 10px;
+          padding: 12px 14px;
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          background: #fff;
+          cursor: pointer;
+          transition:
+            border-color 0.15s ease,
+            background 0.15s ease;
+        }
+
+        .knowhow-import-orientation-option:hover {
+          border-color: var(--blue);
+        }
+
+        .knowhow-import-orientation-option.is-selected {
+          border-color: var(--blue);
+          background: #f4f7ff;
+          box-shadow: inset 0 0 0 1px var(--blue);
+        }
+
+        .knowhow-import-orientation-option input {
+          margin: 3px 0 0;
+          accent-color: var(--blue);
+        }
+
+        .knowhow-import-orientation-option span {
+          display: flex;
+          min-width: 0;
+          flex-direction: column;
+          gap: 4px;
+        }
+
+        .knowhow-import-orientation-option strong {
+          color: var(--ink);
+          font-size: 14px;
+        }
+
+        .knowhow-import-orientation-option small {
+          color: var(--muted);
+          font-size: 12px;
+          line-height: 1.5;
+        }
+
+        .knowhow-import-orientation:disabled .knowhow-import-orientation-option {
+          cursor: not-allowed;
+          opacity: 0.65;
+        }
+
         .knowhow-import-dropzone {
           position: relative;
           min-height: 220px;
@@ -1409,6 +1523,12 @@ function ImportWizardStyles() {
         .knowhow-import-submit-button:disabled {
           opacity: 0.6;
           cursor: not-allowed;
+        }
+
+        @media (max-width: 640px) {
+          .knowhow-import-orientation-options {
+            grid-template-columns: 1fr;
+          }
         }
       `}</style>
   );

@@ -18,8 +18,8 @@ import {
   batchPatchKnowhowCells,
   reformatKnowhowCell,
   createKnowhowTable,
-  importKnowhow,
   importKnowhowPreview,
+  importKnowhow,
   knowhowTemplateUrl,
   appendKnowhowPreview,
   appendKnowhowCommit,
@@ -827,6 +827,27 @@ test("cellSummary: 真斜体（无内部首尾空格）仍被剥离", () => {
 // 此前 importKnowhow 没有任何测试，前端单测只断言前端自己那套 role 形状，
 // 于是前后端测试都全绿、真机却从未工作。这两个用例锁住真实的 wire。
 
+test("importKnowhowPreview: multipart 携带用户选择的属性排列方式", () => {
+  return withFetchStub(
+    {
+      columns: [],
+      rows_preview: [],
+      total_rows: 0,
+      anchor_suggestion: null,
+    },
+    async (calls) => {
+      await importKnowhowPreview(
+        "nb-1",
+        new Blob(["x"]),
+        "rows",
+      );
+      const form = calls[0].init.body;
+      assert.ok(form instanceof FormData);
+      assert.strictEqual(form.get("orientation"), "rows");
+    },
+  );
+});
+
 test("importKnowhow: columns_json 用 kind 字段 + anchor_index 独立传（后端 wire 契约）", () => {
   return withFetchStub(wireTable({ columns: [] }), async (calls) => {
     await importKnowhow(
@@ -838,12 +859,14 @@ test("importKnowhow: columns_json 用 kind 字段 + anchor_index 独立传（后
         { name: "现象识别方法", kind: "procedure" },
       ],
       0,
+      "rows",
     );
     assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/import$/);
     assert.strictEqual(calls[0].init.method, "POST");
     const form = calls[0].init.body;
     assert.ok(form instanceof FormData);
     assert.strictEqual(form.get("title"), "我的表");
+    assert.strictEqual(form.get("orientation"), "rows");
     // anchor 只能经 anchor_index 传达——写进 columns_json 的 role 后端不读。
     assert.strictEqual(form.get("anchor_index"), "0");
     // 字段名必须是 kind：写成 role 会让后端静默把每列都当成 attribute。
@@ -856,8 +879,16 @@ test("importKnowhow: columns_json 用 kind 字段 + anchor_index 独立传（后
 
 test("importKnowhow: anchorIndex=null（记录型表）→ 不发 anchor_index，走后端 Form(None) 默认", () => {
   return withFetchStub(wireTable({ columns: [] }), async (calls) => {
-    await importKnowhow("nb-1", new Blob(["x"]), "T", [{ name: "日期", kind: "attribute" }], null);
+    await importKnowhow(
+      "nb-1",
+      new Blob(["x"]),
+      "T",
+      [{ name: "日期", kind: "attribute" }],
+      null,
+      "columns",
+    );
     assert.strictEqual(calls[0].init.body.get("anchor_index"), null);
+    assert.strictEqual(calls[0].init.body.get("orientation"), "columns");
   });
 });
 
@@ -882,13 +913,14 @@ test("importKnowhowPreview: 初始加载（不传 anchorIndex）→ POST /import
     const form = calls[0].init.body;
     assert.ok(form instanceof FormData);
     assert.ok(form.get("file"));
+    assert.strictEqual(form.get("orientation"), "columns");
     assert.strictEqual(form.get("anchor_index"), null); // 未发送
   });
 });
 
 test("importKnowhowPreview: 用户选了某列（anchorIndex=1）→ FormData 带 anchor_index='1'（后端按所选列规整，预览即所得）", () => {
   return withFetchStub(WIRE_PREVIEW, async (calls) => {
-    await importKnowhowPreview("nb-1", new Blob(["x"]), 1);
+    await importKnowhowPreview("nb-1", new Blob(["x"]), "columns", 1);
     const form = calls[0].init.body;
     assert.strictEqual(form.get("anchor_index"), "1");
   });
@@ -896,14 +928,14 @@ test("importKnowhowPreview: 用户选了某列（anchorIndex=1）→ FormData �
 
 test("importKnowhowPreview: anchorIndex=0 也如实发送（不能被 falsy 判断吞掉）", () => {
   return withFetchStub(WIRE_PREVIEW, async (calls) => {
-    await importKnowhowPreview("nb-1", new Blob(["x"]), 0);
+    await importKnowhowPreview("nb-1", new Blob(["x"]), "columns", 0);
     assert.strictEqual(calls[0].init.body.get("anchor_index"), "0");
   });
 });
 
 test("importKnowhowPreview: 清空行标题（anchorIndex=null）→ 发 anchor_index='-1'（明确无锚定，预览全列规整=commit 行为）", () => {
   return withFetchStub(WIRE_PREVIEW, async (calls) => {
-    await importKnowhowPreview("nb-1", new Blob(["x"]), null);
+    await importKnowhowPreview("nb-1", new Blob(["x"]), "columns", null);
     assert.strictEqual(calls[0].init.body.get("anchor_index"), "-1");
   });
 });

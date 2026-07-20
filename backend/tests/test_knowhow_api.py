@@ -80,14 +80,26 @@ def _columns_json(header=HEADER, kinds=KINDS):
     return json.dumps([{"name": n, "kind": k} for n, k in zip(header, kinds)])
 
 
-def _import_xlsx(client, headers, nb, *, header=HEADER, rows=None, title="时序修复表",
-                 columns_json=None, anchor_index=ANCHOR_INDEX):
+def _import_xlsx(
+    client,
+    headers,
+    nb,
+    *,
+    header=HEADER,
+    rows=None,
+    title="时序修复表",
+    columns_json=None,
+    anchor_index=ANCHOR_INDEX,
+    orientation=None,
+):
     if rows is None:
         rows = DATA_ROWS
     data = _xlsx_bytes(header, rows)
     form = {"title": title, "columns_json": columns_json or _columns_json(header)}
     if anchor_index is not None:
         form["anchor_index"] = str(anchor_index)
+    if orientation is not None:
+        form["orientation"] = orientation
     return client.post(
         f"/api/notebooks/{nb}/knowhow/import",
         headers=headers,
@@ -298,6 +310,64 @@ def test_preview_out_of_range_anchor_index_rejected_like_commit(tmp_path, monkey
     assert any("一" <= ch <= "鿿" for ch in preview.json()["detail"])
 
 
+def test_preview_rows_orientation_returns_normalized_grid_and_first_anchor(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000527")
+    nb = _mk_notebook(client, owner_h)
+    data = _xlsx_bytes(
+        ["属性", "过冲问题", "欠冲问题"],
+        [
+            ["现象识别", "上升沿过冲", "下降沿欠冲"],
+            ["根因分析", "电源阻抗高", "寄生电感大"],
+        ],
+    )
+
+    resp = client.post(
+        f"/api/notebooks/{nb}/knowhow/import/preview",
+        headers=owner_h,
+        files={
+            "file": (
+                "row-attributes.xlsx",
+                data,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        data={"orientation": "rows"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [column["name"] for column in body["columns"]] == [
+        "属性",
+        "现象识别",
+        "根因分析",
+    ]
+    assert body["rows_preview"] == [
+        ["过冲问题", "上升沿过冲", "电源阻抗高"],
+        ["欠冲问题", "下降沿欠冲", "寄生电感大"],
+    ]
+    assert body["total_rows"] == 2
+    assert body["anchor_suggestion"] == 0
+
+
+def test_preview_rejects_unknown_orientation(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000528")
+    nb = _mk_notebook(client, owner_h)
+
+    resp = client.post(
+        f"/api/notebooks/{nb}/knowhow/import/preview",
+        headers=owner_h,
+        files={"file": ("rules.csv", b"name,value\nA,1\n", "text/csv")},
+        data={"orientation": "diagonal"},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "非法的属性排列方式"
+
+
 # ---------------------------------------------------------------------------
 # POST /notebooks/{nb}/knowhow/import
 # ---------------------------------------------------------------------------
@@ -322,6 +392,82 @@ def test_import_creates_table_with_full_detail_rows_and_cells(tmp_path, monkeypa
         assert row["cells"][name_to_col[HEADER[0]]] == expected[0]
         assert row["cells"][name_to_col[HEADER[4]]] == expected[4]
         assert row["projection_status"] in ("pending", "syncing", "synced")
+
+
+def test_import_rows_orientation_persists_the_normalized_preview_shape(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000529")
+    nb = _mk_notebook(client, owner_h)
+    normalized_header = ["属性", "现象识别", "根因分析"]
+    normalized_kinds = ["attribute", "procedure", "procedure"]
+
+    resp = _import_xlsx(
+        client,
+        owner_h,
+        nb,
+        header=["属性", "过冲问题", "欠冲问题"],
+        rows=[
+            ["现象识别", "上升沿过冲", "下降沿欠冲"],
+            ["根因分析", "电源阻抗高", "寄生电感大"],
+        ],
+        columns_json=_columns_json(normalized_header, normalized_kinds),
+        anchor_index=0,
+        orientation="rows",
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [column["name"] for column in body["columns"]] == normalized_header
+    assert [column["kind"] for column in body["columns"]] == [
+        "anchor",
+        "procedure",
+        "procedure",
+    ]
+    column_ids = {
+        column["name"]: column["id"]
+        for column in body["columns"]
+    }
+    assert [
+        [
+            row["cells"][column_ids[name]]
+            for name in normalized_header
+        ]
+        for row in body["rows"]
+    ] == [
+        ["过冲问题", "上升沿过冲", "电源阻抗高"],
+        ["欠冲问题", "下降沿欠冲", "寄生电感大"],
+    ]
+
+
+def test_import_without_orientation_remains_column_oriented(
+    tmp_path, monkeypatch
+):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000530")
+    nb = _mk_notebook(client, owner_h)
+
+    resp = _import_xlsx(client, owner_h, nb, orientation=None)
+
+    assert resp.status_code == 200, resp.text
+    assert [column["name"] for column in resp.json()["columns"]] == HEADER
+
+
+def test_import_rejects_unknown_orientation(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000537")
+    nb = _mk_notebook(client, owner_h)
+
+    resp = _import_xlsx(
+        client,
+        owner_h,
+        nb,
+        orientation="diagonal",
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "非法的属性排列方式"
 
 
 def test_import_column_count_mismatch_returns_friendly_400(tmp_path, monkeypatch):

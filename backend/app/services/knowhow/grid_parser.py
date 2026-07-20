@@ -18,10 +18,10 @@ class GridParseError(ValueError):
     """A grid could not be parsed into a valid table. Raised for: an empty
     header (empty file, or a first row with no column names); duplicate column
     names; zero data rows (nothing after the header, OR every data row blank);
-    an unsupported file suffix; text (csv/md) that decodes as neither UTF-8
-    (BOM-tolerant) nor GBK; or an xlsx openpyxl cannot open (corrupt / not a
-    real .xlsx) or that contains no worksheet. Carries a user-facing Chinese
-    message."""
+    an unsupported file suffix or orientation; text (csv/md) that decodes as
+    neither UTF-8 (BOM-tolerant) nor GBK; or an xlsx openpyxl cannot open
+    (corrupt / not a real .xlsx) or that contains no worksheet. Carries a
+    user-facing Chinese message."""
 
 
 @dataclass
@@ -34,18 +34,37 @@ class ParsedGrid:
 _SEPARATOR_CELL_RE = re.compile(r":?-{3,}:?")
 _PIPE_SPLIT_RE = re.compile(r"(?<!\\)\|")
 _BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+IMPORT_ORIENTATIONS = frozenset({"columns", "rows"})
 
 
-def parse_grid(filename: str, data: bytes) -> ParsedGrid:
-    """Parse xlsx/xlsm/csv/md bytes into a ParsedGrid, dispatched by suffix.
+def _normalize_orientation(
+    raw_rows: list[list[str]], orientation: str
+) -> list[list[str]]:
+    if orientation == "columns" or not raw_rows:
+        return raw_rows
+    width = max((len(row) for row in raw_rows), default=0)
+    rectangular = [
+        row + [""] * (width - len(row))
+        for row in raw_rows
+    ]
+    return [list(column) for column in zip(*rectangular)]
 
-    Raises GridParseError for an empty header, duplicate column names, zero
-    data rows, an unsupported file suffix, text that decodes as neither
-    UTF-8 (with optional BOM) nor GBK (csv/md), or xlsx bytes that are
-    corrupted/not a valid Excel file. Data rows shorter than the header are
-    padded with "" to header length; longer rows are truncated — neither
-    case raises.
+
+def parse_grid(
+    filename: str, data: bytes, orientation: str = "columns"
+) -> ParsedGrid:
+    """Parse xlsx/xlsm/csv/md bytes into a column-attribute ``ParsedGrid``.
+
+    ``orientation='columns'`` treats the first raw row as the header.
+    ``orientation='rows'`` pads the raw matrix to a rectangle, transposes it,
+    then applies the same validation. Raises GridParseError for an empty
+    header, duplicate column names, zero data rows, an unsupported file
+    suffix/orientation, undecodable text, or invalid xlsx bytes. Column-mode
+    data rows shorter than the header are padded with "" and longer rows are
+    truncated; row-mode raggedness is resolved before transposition.
     """
+    if orientation not in IMPORT_ORIENTATIONS:
+        raise GridParseError("非法的属性排列方式")
     suffix = Path(filename).suffix.lower()
     if suffix in (".xlsx", ".xlsm"):
         raw_rows = _extract_xlsx_rows(data)
@@ -55,7 +74,11 @@ def parse_grid(filename: str, data: bytes) -> ParsedGrid:
         raw_rows = _extract_markdown_rows(data)
     else:
         raise GridParseError(f"不支持的表格文件类型：{suffix or filename}")
-    return _build_grid(raw_rows)
+    normalized_rows = _normalize_orientation(raw_rows, orientation)
+    return _build_grid(
+        normalized_rows,
+        suggest_rows_orientation=orientation == "columns",
+    )
 
 
 def _looks_transposed(raw_rows: list[list[str]]) -> bool:
@@ -74,30 +97,39 @@ def _looks_transposed(raw_rows: list[list[str]]) -> bool:
     return bool(first_column) and all(cell.strip() for cell in first_column)
 
 
-def _blank_header_error(raw_rows: list[list[str]]) -> str:
+def _blank_header_error(
+    raw_rows: list[list[str]], *, suggest_rows_orientation: bool
+) -> str:
     """空列名重复时的可行动报错——「表头存在重复列名：''」对用户零指导。
 
-    转置表刻意不做自动转换（设计决定：用户在 Excel 里手动转置后导入），
-    但这里要把它认出来并告诉用户下一步该做什么。
+    属性按列模式下识别出典型属性行表时，引导用户回到导入向导切换方向；
+    已经选择属性按行后若规范化表头仍为空，只提示补齐属性名。
     """
-    if _looks_transposed(raw_rows):
+    if suggest_rows_orientation and _looks_transposed(raw_rows):
         return (
-            "这张表看起来行列相反：第一列是字段名、每一列是一条记录。"
-            "请先在 Excel 里转置（复制 → 选择性粘贴 → 勾选「转置」）后再导入。"
+            "这张表看起来是属性按行排列，"
+            "请返回并选择“属性按行”后重新导入。"
         )
-    return "表头存在多个空列名，请补齐首行中缺失的列名后再导入。"
+    return "表头存在空列名，请补齐缺失的列名后再导入。"
 
 
-def _build_grid(raw_rows: list[list[str]]) -> ParsedGrid:
+def _build_grid(
+    raw_rows: list[list[str]], *, suggest_rows_orientation: bool = False
+) -> ParsedGrid:
     if not raw_rows or not raw_rows[0]:
         raise GridParseError("表格缺少表头：文件为空，或首行没有任何列名")
 
     columns = raw_rows[0]
     seen: set[str] = set()
     for name in columns:
+        if not name.strip():
+            raise GridParseError(
+                _blank_header_error(
+                    raw_rows,
+                    suggest_rows_orientation=suggest_rows_orientation,
+                )
+            )
         if name in seen:
-            if not name.strip():
-                raise GridParseError(_blank_header_error(raw_rows))
             raise GridParseError(f"表头存在重复列名：{name!r}")
         seen.add(name)
 

@@ -826,6 +826,11 @@
               "title": "File",
               "type": "string"
             },
+            "orientation": {
+              "default": "columns",
+              "title": "Orientation",
+              "type": "string"
+            },
             "title": {
               "title": "Title",
               "type": "string"
@@ -855,6 +860,11 @@
             "file": {
               "contentMediaType": "application/octet-stream",
               "title": "File",
+              "type": "string"
+            },
+            "orientation": {
+              "default": "columns",
+              "title": "Orientation",
               "type": "string"
             }
           },
@@ -9223,7 +9233,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/import": {
         "post": {
-          "description": "Parse -> validate -> create table -> insert every row -> schedule a\ndebounced background full-table projection (ProjectionScheduler — PR-2+3\nTask 3; NEVER a raw background_jobs.submit call) -> return the FULL table\ndetail immediately. Rows carry projection_status='pending'/'syncing'\nuntil the background job advances them to 'synced'/'failed'. The\nfrontend does NOT poll the detail endpoint — a row's settled status is\nobserved the next time the table is (re)opened or the caller explicitly\nrefreshes it.\n\n``columns_json``=``[{name,kind}]`` + the separate ``anchor_index`` form\nfield (PR-2+3 Task 3 wire — kind is one of three non-anchor values; the\nrow-title designation is named ONLY via anchor_index, never inline).",
+          "description": "Parse -> validate -> create table -> insert every row -> schedule a\ndebounced background full-table projection (ProjectionScheduler — PR-2+3\nTask 3; NEVER a raw background_jobs.submit call) -> return the FULL table\ndetail immediately. Rows carry projection_status='pending'/'syncing'\nuntil the background job advances them to 'synced'/'failed'. The\nfrontend does NOT poll the detail endpoint — a row's settled status is\nobserved the next time the table is (re)opened or the caller explicitly\nrefreshes it.\n\n``orientation`` selects whether raw source attributes are in columns\n(default) or rows; preview and commit normalize through the same parser.\n``columns_json``=``[{name,kind}]`` + the separate ``anchor_index`` form\nfield (PR-2+3 Task 3 wire — kind is one of three non-anchor values; the\nrow-title designation is named ONLY via anchor_index, never inline).",
           "operationId": "import_knowhow_table_api_notebooks__notebook_id__knowhow_import_post",
           "parameters": [
             {
@@ -9273,7 +9283,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/import/preview": {
         "post": {
-          "description": "``anchor_index`` (optional, same wire shape as the import commit\nendpoint's) lets the wizard re-preview after the user changes the row-title\n(anchor) selection in step 2: when given, the preview skips THAT column from\nnormalization instead of the guessed one, keeping \"预览即所得\" true for the\nuser-confirmed anchor. Omitted on the initial load — preview then skips the\nguess (unchanged behavior).",
+          "description": "``anchor_index`` (optional, same wire shape as the import commit\nendpoint's) lets the wizard re-preview after the user changes the row-title\n(anchor) selection in step 2: when given, the preview skips THAT column from\nnormalization instead of the guessed one, keeping \"预览即所得\" true for the\nuser-confirmed anchor. Omitted on the initial load — preview then skips the\nguess (unchanged behavior). ``orientation`` selects whether the raw source\npresents attributes in columns (default) or rows.",
           "operationId": "preview_knowhow_import_api_notebooks__notebook_id__knowhow_import_preview_post",
           "parameters": [
             {

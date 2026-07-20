@@ -7,8 +7,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  DEFAULT_IMPORT_ORIENTATION,
   IMPORT_ACCEPT_EXTENSIONS,
   IMPORT_ACCEPT,
+  IMPORT_ORIENTATION_OPTIONS,
   isSupportedImportFile,
   deriveDefaultTitle,
   ROLE_OPTIONS,
@@ -37,6 +39,36 @@ import {
 } from "./test/semantic-source.mjs";
 
 const importModule = await parseModule("knowhow-import.tsx");
+
+// --- 属性排列方式 ---------------------------------------------------------------
+
+test("IMPORT_ORIENTATION_OPTIONS: 默认属性按列，并提供双方向说明", () => {
+  assert.strictEqual(DEFAULT_IMPORT_ORIENTATION, "columns");
+  assert.deepStrictEqual(IMPORT_ORIENTATION_OPTIONS, [
+    {
+      value: "columns",
+      label: "属性按列",
+      description: "第一行是属性名，每一行是一条记录",
+    },
+    {
+      value: "rows",
+      label: "属性按行",
+      description: "第一列是属性名，每一列是一条记录",
+    },
+  ]);
+});
+
+test("KnowhowImportWizard: 返回选文件时保留用户选择的属性排列方式", () => {
+  const handler = findFunctionIn(
+    importModule,
+    "KnowhowImportWizard",
+    "backToSelect",
+  );
+  assert.equal(
+    callSitesIn(handler).some(({ target }) => target === "setOrientation"),
+    false,
+  );
+});
 
 // --- IMPORT_ACCEPT_EXTENSIONS / IMPORT_ACCEPT -----------------------------------
 
@@ -423,7 +455,22 @@ test("接线：handleAnchorChange 用**所选** anchor 下标重取预览（预�
     callSitesIn(handler).find(({ target }) => target === "importKnowhowPreview"),
     {
       target: "importKnowhowPreview",
-      arguments: ["notebookId", "currentFile", "nextAnchorIndex"],
+      arguments: ["notebookId", "currentFile", "orientation", "nextAnchorIndex"],
+    },
+  );
+});
+
+test("接线：初始预览携带用户选择的属性排列方式", () => {
+  const handler = findFunctionIn(
+    importModule,
+    "KnowhowImportWizard",
+    "handleFileSelected",
+  );
+  assert.deepEqual(
+    callSitesIn(handler).find(({ target }) => target === "importKnowhowPreview"),
+    {
+      target: "importKnowhowPreview",
+      arguments: ["notebookId", "selected", "orientation"],
     },
   );
 });

@@ -69,12 +69,18 @@ def _preview_row(row: list, anchor_index: "int | None") -> list:
     ]
 
 
-def preview_import(filename: str, data: bytes, anchor_index: "int | None" = None) -> dict:
+def preview_import(
+    filename: str,
+    data: bytes,
+    orientation: str = "columns",
+    anchor_index: "int | None" = None,
+) -> dict:
     """Parse the uploaded grid and return the wire-shaped preview: each
     column's name + guessed kind, the anchor (row-title) suggestion index
-    (None when no column name suggests one), the first 5 data rows, and the
-    total row count. Never writes anything. Raises GridParseError (a
-    ValueError subclass) unchanged on a structurally invalid file.
+    (the normalized first column for row-oriented input; otherwise None when
+    no column name suggests one), the first 5 data rows, and the total row
+    count. Never writes anything. Raises GridParseError (a ValueError
+    subclass) unchanged on a structurally invalid file.
 
     P2-3 code-review fix: ``rows_preview`` must show EXACTLY what
     ``import_table`` will persist -- the preview IS the human-review gate
@@ -104,9 +110,15 @@ def preview_import(filename: str, data: bytes, anchor_index: "int | None" = None
     matching what a commit without ``anchor_index`` stores (all columns
     normalized). Collapsing "cleared" into omission would make the preview
     skip the guessed column while commit normalizes it — 预览即所得 would lie
-    on exactly that column."""
-    grid = parse_grid(filename, data)
+    on exactly that column.
+
+    ``orientation`` is applied before kind/anchor inference so preview and
+    commit inspect the identical normalized grid. Row-oriented input always
+    suggests the normalized first column as its row title."""
+    grid = parse_grid(filename, data, orientation)
     kinds, guessed_anchor = guess_kinds(grid.columns)
+    if orientation == "rows":
+        guessed_anchor = 0
     if anchor_index is None:
         skip_index = guessed_anchor          # 初始加载：按猜测列跳过
     elif anchor_index < 0:
@@ -282,6 +294,7 @@ def import_table(
     title: str,
     columns_json: str,
     anchor_index: "int | None" = None,
+    orientation: str = "columns",
 ) -> str:
     """Full import orchestration (task brief step 2): parse -> validate ->
     create the table -> insert every row+cell -> bump mutation_seq once for
@@ -291,11 +304,13 @@ def import_table(
     concerns, only data orchestration, so it stays trivially testable and
     reusable.
 
-    Raises ValueError for: GridParseError (bad file), column-validation
-    failures (parse_import_columns), or the store's own name-uniqueness /
+    ``orientation`` is request-scoped and normalized by ``parse_grid`` before
+    the confirmed column mapping is validated. Raises ValueError for:
+    GridParseError (bad file/orientation), column-validation failures
+    (parse_import_columns), or the store's own name-uniqueness /
     at-most-one-anchor checks (create_knowhow_table) — routes.py's existing
     400 idiom catches all of these uniformly."""
-    grid = parse_grid(filename, data)
+    grid = parse_grid(filename, data, orientation)
     columns = parse_import_columns(columns_json, grid, anchor_index)
     table_id = repo.create_knowhow_table(notebook_id, title, "", columns)
     column_ids = [c["id"] for c in repo.get_knowhow_table(table_id)["columns"]]
