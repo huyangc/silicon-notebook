@@ -13,7 +13,9 @@ import {
 } from "./workspace-transitions.ts";
 import { CHAT_MODES } from "./workspace-model.ts";
 import {
+  callSitesIn,
   declarations,
+  findFunctionIn,
   importsFrom,
   jsxElements,
   parseModule,
@@ -160,6 +162,45 @@ test("workspace composes the shared Memory surfaces", async () => {
       ),
     ),
     true,
+  );
+});
+
+
+test("global Memory navigation owns and forwards explicit destination state", async () => {
+  const page = await parseModule("page.tsx");
+  const showGlobalMemory = findFunctionIn(page, "Home", "showGlobalMemory");
+  const globalPanel = jsxElements(page, "MemoryPanel").find(
+    ({ attributes }) => attributes.scope === "global",
+  );
+
+  assert.ok(
+    callSitesIn(showGlobalMemory).some(
+      ({ target, arguments: args }) => (
+        target === "setMemoryNavigationTarget"
+        && args[0] === "target"
+      ),
+    ),
+  );
+  assert.ok(
+    callSitesIn(showGlobalMemory).some(
+      ({ target, arguments: args }) => (
+        target === "memoryHash"
+        && args[0] === "null"
+        && args[1] === "target"
+      ),
+    ),
+  );
+  assert.equal(
+    globalPanel?.bindings?.initialNotebookId,
+    "memoryNavigationTarget.notebookId",
+  );
+  assert.equal(
+    globalPanel?.bindings?.initialStatus,
+    "memoryNavigationTarget.status",
+  );
+  assert.equal(
+    globalPanel?.bindings?.initialMemoryId,
+    "memoryNavigationTarget.itemId",
   );
 });
 
