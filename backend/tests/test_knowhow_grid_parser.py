@@ -353,6 +353,7 @@ def test_parse_grid_md_row_length_mismatch_pads_and_truncates():
             ).encode("utf-8"),
         ),
     ],
+    ids=["xlsx", "xlsm", "csv", "markdown"],
 )
 def test_parse_grid_rows_orientation_transposes_to_column_attributes(filename, data):
     grid = parse_grid(filename, data, orientation="rows")
