@@ -49,6 +49,20 @@ class ConcurrencyGate:
             )
 
 
+class _AdmissionPermit:
+    def __init__(self, semaphore: Any) -> None:
+        self._semaphore = semaphore
+        self._lock = threading.Lock()
+        self._released = False
+
+    def release(self) -> None:
+        with self._lock:
+            if self._released:
+                return
+            self._released = True
+        self._semaphore.release()
+
+
 class BoundedEmbeddingExecutor:
     def __init__(self, maximum: int) -> None:
         if int(maximum) <= 0:
@@ -76,9 +90,16 @@ class BoundedEmbeddingExecutor:
             if self._closed:
                 raise RuntimeError("embedding executor is closed")
             self._waiting += 1
-        self._admission.acquire()
-        with self._lock:
-            self._waiting -= 1
+        acquired = False
+        try:
+            acquired = bool(self._admission.acquire())
+        finally:
+            with self._lock:
+                self._waiting -= 1
+        if not acquired:
+            raise RuntimeError("embedding admission was not acquired")
+
+        permit = _AdmissionPermit(self._admission)
 
         def invoke() -> Any:
             thread = threading.current_thread()
@@ -92,13 +113,17 @@ class BoundedEmbeddingExecutor:
                 thread.name = original_name
                 with self._lock:
                     self._active -= 1
-                self._admission.release()
+                permit.release()
 
         try:
-            return self._executor.submit(invoke)
+            future = self._executor.submit(invoke)
         except BaseException:
-            self._admission.release()
+            permit.release()
             raise
+        future.add_done_callback(
+            lambda completed: permit.release() if completed.cancelled() else None
+        )
+        return future
 
     def run(
         self,
@@ -160,10 +185,10 @@ def activate_model_concurrency(
     try:
         yield state
     finally:
+        state.embedding.shutdown()
         with _state_lock:
             if _active_state is state:
                 _active_state = None
-        state.embedding.shutdown()
 
 
 class LimitedJsonChatClient:
