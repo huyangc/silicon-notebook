@@ -43,8 +43,9 @@ class KgExtractionRunControl:
     ):
         self.job_id = job_id
         self._event = threading.Event()
-        self._lock = threading.Lock()
+        self._lock = threading.Condition()
         self._failure: KgBuildFailure | None = None
+        self._publishing = False
         self._on_abort = on_abort
 
     @property
@@ -57,25 +58,36 @@ class KgExtractionRunControl:
             return self._failure
 
     def abort(self, failure: KgBuildFailure) -> KgBuildFailure:
-        notify = None
         with self._lock:
-            if self._failure is None:
+            while self._publishing and self._failure is None:
+                self._lock.wait()
+            if self._failure is not None:
+                return self._failure
+            self._publishing = True
+        try:
+            if self._on_abort is not None:
+                self._on_abort(failure)
+        except Exception:
+            # State publication is retried by the outer source/job catch;
+            # never replace the classified model failure with telemetry or
+            # persistence plumbing from this window thread.
+            pass
+        finally:
+            # Publish the circuit only after the first-abort callback returns.
+            # Concurrent abort/raise callers wait on the Condition, so
+            # window/source drain cannot overtake durable ``stopping``.
+            with self._lock:
                 self._failure = failure
                 self._event.set()
-                notify = self._on_abort
-            first_failure = self._failure
-        if notify is not None:
-            try:
-                notify(first_failure)
-            except Exception:
-                # State publication is retried by the outer source/job catch;
-                # never replace the classified model failure with telemetry or
-                # persistence plumbing from this window thread.
-                pass
-        return first_failure
+                self._publishing = False
+                self._lock.notify_all()
+        return failure
 
     def raise_if_aborted(self) -> None:
-        failure = self.failure
+        with self._lock:
+            while self._publishing and self._failure is None:
+                self._lock.wait()
+            failure = self._failure
         if failure is not None:
             raise KgBuildAborted(failure)
 

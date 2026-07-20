@@ -979,12 +979,21 @@ class KnowledgeLifecycleService:
             nonlocal stopping_marked
             if stopping_marked:
                 return
-            self.kg_build_jobs.set_stage(
-                job_id,
-                "stopping",
-                error_code=exc.failure.code,
-                error_message=exc.failure.user_message,
-            )
+            try:
+                changed = self.kg_build_jobs.set_stage(
+                    job_id,
+                    "stopping",
+                    error_code=exc.failure.code,
+                    error_message=exc.failure.user_message,
+                )
+            except Exception:
+                self.event_log.logger.exception(
+                    "failed to publish stopping state for KG job %s",
+                    job_id,
+                )
+                return
+            if not changed:
+                return
             stopping_marked = True
             stopping = self.kg_build_jobs.get(job_id)
             self._emit_kg_build_event(

@@ -414,3 +414,28 @@ def test_model_failure_emits_circuit_stopping_and_failed_without_diagnostics(
         assert "Return" not in rendered
         assert "source 0" not in rendered
     assert kg_events[-1]["error_code"] == "model_unavailable"
+
+
+def test_stopping_publication_failure_does_not_replace_model_failure(
+    repo, monkeypatch
+):
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    repo._kg_llm_client = _ControlledKgClient(fail_probe=True)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    monkeypatch.setattr(
+        repo._runtime.kg_build_jobs,
+        "set_stage",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("status persistence failed")
+        ),
+    )
+
+    with pytest.raises(KgBuildAborted) as raised:
+        repo.execute_notebook_kg_job(
+            notebook.id, job["id"], "incremental"
+        )
+
+    assert raised.value.failure.code == "model_unavailable"
+    saved = repo._runtime.kg_build_jobs.get(job["id"])
+    assert saved["status"] == "failed"
+    assert saved["error_code"] == "model_unavailable"

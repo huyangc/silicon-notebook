@@ -179,6 +179,72 @@ def test_first_abort_failure_wins():
     assert raised.value.failure is first
 
 
+def test_abort_is_not_published_until_first_callback_finishes():
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    second_started = threading.Event()
+    observer_started = threading.Event()
+    callbacks = []
+
+    def on_abort(failure):
+        callbacks.append(failure)
+        callback_started.set()
+        assert release_callback.wait(2)
+
+    control = KgExtractionRunControl("job-a", on_abort=on_abort)
+    first = KgBuildFailure("first", "first message")
+    second = KgBuildFailure("second", "second message")
+
+    def abort_second():
+        second_started.set()
+        return control.abort(second)
+
+    def observe_abort():
+        observer_started.set()
+        control.raise_if_aborted()
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        first_future = executor.submit(control.abort, first)
+        assert callback_started.wait(1)
+        assert control.aborted is False
+        assert control.failure is None
+
+        second_future = executor.submit(abort_second)
+        observer_future = executor.submit(observe_abort)
+        assert second_started.wait(1)
+        assert observer_started.wait(1)
+        assert second_future.done() is False
+        assert observer_future.done() is False
+
+        release_callback.set()
+        assert first_future.result(timeout=1) is first
+        assert second_future.result(timeout=1) is first
+        with pytest.raises(KgBuildAborted) as raised:
+            observer_future.result(timeout=1)
+
+    assert callbacks == [first]
+    assert control.aborted is True
+    assert raised.value.failure is first
+
+
+def test_abort_callback_failure_preserves_classified_failure():
+    failure = KgBuildFailure("model_unavailable", "safe message")
+
+    def reject_publication(_failure):
+        raise RuntimeError("status persistence failed")
+
+    control = KgExtractionRunControl(
+        "job-a",
+        on_abort=reject_publication,
+    )
+
+    assert control.abort(failure) is failure
+    assert control.aborted is True
+    with pytest.raises(KgBuildAborted) as raised:
+        control.raise_if_aborted()
+    assert raised.value.failure is failure
+
+
 def test_unclassified_failure_does_not_open_circuit():
     control = KgExtractionRunControl("job-a")
     delegate = _SequenceClient([ValueError("malformed model payload")])
