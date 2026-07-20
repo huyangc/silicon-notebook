@@ -20,8 +20,8 @@ const overview: NotebookContentOverview = {
     table_count: 3,
     row_count: 12,
     projection_pending: 1,
-    projection_failed: 0,
-    stale_code_count: 1,
+    projection_failed: 2,
+    stale_code_count: 3,
     recent_tables: [
       { id: "t1", title: "Bring-up", row_count: 4, last_activity_at: "2026-07-21T08:00:00Z" },
       { id: "t2", title: "Validation", row_count: 3, last_activity_at: "2026-07-20T08:00:00Z" },
@@ -55,15 +55,27 @@ test("renders content asset metrics, recent items, and navigation callbacks", ()
   expect(screen.getByRole("heading", { name: "Memory" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Knowhow" })).toBeInTheDocument();
   expect(screen.getByText("4 条")).toBeInTheDocument();
+  expect(screen.getByText("投影失败 2 张")).toBeInTheDocument();
+  expect(screen.getByText("代码过期 3 格")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "打开记忆 Not shown memory" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "打开 Knowhow 表 Not shown table" })).not.toBeInTheDocument();
 
+  fireEvent.click(screen.getByRole("button", { name: "查看全部记忆" }));
+  expect(onOpenMemory).toHaveBeenCalledWith(null, null);
   fireEvent.click(screen.getByRole("button", { name: "查看 2 条已确认记忆" }));
   expect(onOpenMemory).toHaveBeenCalledWith("confirmed", null);
+  fireEvent.click(screen.getByRole("button", { name: "查看 2 条待确认记忆" }));
+  expect(onOpenMemory).toHaveBeenCalledWith("candidate", null);
   fireEvent.click(screen.getByRole("button", { name: "打开记忆 Stable memory" }));
   expect(onOpenMemory).toHaveBeenCalledWith(null, "m1");
+  fireEvent.click(screen.getByRole("button", { name: "查看全部 Knowhow 表" }));
+  expect(onOpenKnowhow).toHaveBeenCalledWith("all", null);
   fireEvent.click(screen.getByRole("button", { name: "查看 1 张待投影表" }));
   expect(onOpenKnowhow).toHaveBeenCalledWith("projection_pending", null);
+  fireEvent.click(screen.getByRole("button", { name: "查看 2 张投影失败表" }));
+  expect(onOpenKnowhow).toHaveBeenCalledWith("projection_failed", null);
+  fireEvent.click(screen.getByRole("button", { name: "查看含 3 个过期代码单元格的表" }));
+  expect(onOpenKnowhow).toHaveBeenCalledWith("stale_code", null);
   fireEvent.click(screen.getByRole("button", { name: "打开 Knowhow 表 Bring-up" }));
   expect(onOpenKnowhow).toHaveBeenCalledWith("all", "t1");
 });

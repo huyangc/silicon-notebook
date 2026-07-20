@@ -54,7 +54,9 @@ export function ContentOverviewCards({
         <article className="content-overview-card" aria-labelledby="content-overview-memory">
           <div className="content-overview-card-head">
             <h3 id="content-overview-memory">Memory</h3>
-            <button type="button" onClick={() => onOpenMemory(null, null)}>查看全部</button>
+            <button type="button" aria-label="查看全部记忆" onClick={() => onOpenMemory(null, null)}>
+              查看全部
+            </button>
           </div>
           <div className="content-overview-metrics">
             <span>{countLabel(memory.total, "条")}</span>
@@ -93,7 +95,9 @@ export function ContentOverviewCards({
           <div className="content-overview-card-head">
             <h3 id="content-overview-knowhow">Knowhow</h3>
             {readOnly ? <span className="content-overview-read-only">只读</span> : null}
-            <button type="button" onClick={() => onOpenKnowhow("all", null)}>查看全部</button>
+            <button type="button" aria-label="查看全部 Knowhow 表" onClick={() => onOpenKnowhow("all", null)}>
+              查看全部
+            </button>
           </div>
           <div className="content-overview-metrics">
             <span>{countLabel(knowhow.table_count, "张表")}</span>
@@ -104,6 +108,20 @@ export function ContentOverviewCards({
               onClick={() => onOpenKnowhow("projection_pending", null)}
             >
               待投影 {countLabel(knowhow.projection_pending, "张")}
+            </button>
+            <button
+              type="button"
+              aria-label={`查看 ${countLabel(knowhow.projection_failed, "张")}投影失败表`}
+              onClick={() => onOpenKnowhow("projection_failed", null)}
+            >
+              投影失败 {countLabel(knowhow.projection_failed, "张")}
+            </button>
+            <button
+              type="button"
+              aria-label={`查看含 ${knowhow.stale_code_count} 个过期代码单元格的表`}
+              onClick={() => onOpenKnowhow("stale_code", null)}
+            >
+              代码过期 {countLabel(knowhow.stale_code_count, "格")}
             </button>
           </div>
           {knowhow.recent_tables.length > 0 ? (
