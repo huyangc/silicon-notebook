@@ -400,9 +400,6 @@ def _ends_with_open_inline_span(line: str) -> bool:
     #    镜像上面规则 2 的反引号 run 配对（无转义）与规则 1 的 `$` run 配对（转义感知）：落在任一已开着
     #    span 内的 `](` **不**武装；散文里的 `](` 仍武装（下面跨行链接的回归锁不受影响）。跨行**开着**的
     #    code/math span 已由规则 1/2 先行拒绝（走不到这里），故此处每个进入的 span 必在行尾前闭合。
-    link_phase: "str | None" = None  # None | "dest"（目的地文本）| "gap"（目的地后空白）| "title"（标题内）
-    dest_depth = 0                   # 目的地圆括号平衡深度（转义感知）
-    title_close = ""                 # 当前标题的闭合字符（" / ' / )）
     code_inside = False              # 反引号 code-span：镜像规则 2（无转义、等长 run 闭合）
     code_len = 0
     math_inside = False              # `$` math-span：镜像规则 1（转义感知、等长 run 闭合）
@@ -410,37 +407,6 @@ def _ends_with_open_inline_span(line: str) -> bool:
     i = 0
     while i < n:
         ch = line[i]
-        if link_phase == "title":                # 标题内：转义感知，只等 title_close；`)` 不减目的地深度
-            if ch == "\\":
-                i += 2                            # 转义下一字符：\" / \' / \) 既不闭标题也不动深度
-                continue
-            if ch == title_close:
-                link_phase = "gap"                # 标题闭合 -> 回到间隙，等链接闭合 `)`（或另一个 title）
-            i += 1
-            continue
-        if link_phase == "dest":                 # 目的地文本：转义感知、平衡圆括号；空白结束目的地
-            if ch == "\\":
-                i += 2                            # 转义下一字符：\( / \) 既不开也不合目的地深度
-                continue
-            if ch == "(":
-                dest_depth += 1
-            elif ch == ")":
-                dest_depth -= 1
-                if dest_depth == 0:
-                    link_phase = None             # 目的地圆括号归零 = 链接整体闭合（无标题）
-            elif ch == " " or ch == "\t":
-                link_phase = "gap"                # 空白结束目的地 -> 等可选 title 或闭合 `)`
-            i += 1
-            continue
-        if link_phase == "gap":                  # 目的地后：等 title-opener（"/'/(）或链接闭合 `)`
-            if ch == ")":
-                link_phase = None                 # 无标题（或标题后）的链接闭合 `)`
-            elif ch == '"' or ch == "'":
-                link_phase, title_close = "title", ch
-            elif ch == "(":
-                link_phase, title_close = "title", ")"
-            i += 1                                # 其余（空白/异常字符）留在 gap，行尾仍开着即拒绝
-            continue
         if code_inside:                          # 代码 span 内（镜像规则 2）：不转义，等长 run 闭合
             if ch == "`":
                 run = 0
@@ -490,12 +456,13 @@ def _ends_with_open_inline_span(line: str) -> bool:
             math_inside, math_len = True, run
             continue
         if ch == "]" and i + 1 < n and line[i + 1] == "(":
-            link_phase = "dest"                  # 散文里的 `](` 起头目的地：`(` 计一层深度，跳过两字符
-            dest_depth = 1
-            i += 2
+            after_target = _scan_inline_link_target(line, i + 2, n)
+            if after_target is None:
+                return True                       # 不完整/不合法目标跨软换行：fail closed
+            i = after_target
             continue
         i += 1
-    return link_phase is not None                # 行尾仍在 dest/gap/title 任一子相内 = 链接跨软换行、未闭
+    return False
 
 
 def _has_midline_inline_html(line: str) -> bool:
@@ -958,6 +925,73 @@ def _scan_balanced(text: str, i: int, n: int, open_ch: str, close_ch: str) -> "i
     return i if depth == 0 else None
 
 
+def _scan_inline_link_target(text: str, i: int, n: int) -> "int | None":
+    """Consume an inline link target starting just after its outer ``(``.
+
+    Destinations may contain balanced, escaped parentheses.  Once whitespace
+    ends a destination, an optional title is either double-quoted,
+    single-quoted, or parenthesized.  Escapes consume the next delimiter in all
+    three forms.  This is deliberately a small CommonMark-shaped scanner rather
+    than a general Markdown parser: a complete target returns the index after
+    its outer ``)``, and incomplete or malformed input returns ``None``.
+
+    Both the full-text reference scanner and the line-local soft-newline gate
+    use this function.  In particular, a ``)`` in a quoted title cannot be
+    mistaken for the closing parenthesis of the surrounding link.
+    """
+    phase = "dest"
+    destination_depth = 1
+    title_close = ""
+    while i < n:
+        ch = text[i]
+        if phase == "dest":
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "(":
+                destination_depth += 1
+            elif ch == ")":
+                destination_depth -= 1
+                if destination_depth == 0:
+                    return i + 1
+            elif ch.isspace():
+                phase = "gap"
+            i += 1
+            continue
+        if phase == "gap":
+            if ch.isspace():
+                i += 1
+                continue
+            if ch == ")":
+                return i + 1
+            if ch == '"' or ch == "'":
+                phase, title_close = "title", ch
+                i += 1
+                continue
+            if ch == "(":
+                phase, title_close = "title", ")"
+                i += 1
+                continue
+            return None
+        if phase == "title":
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == title_close:
+                phase = "after_title"
+            i += 1
+            continue
+        # Kept as an explicit state rather than folding it into ``gap``: only
+        # whitespace and the outer close may follow a title.
+        if ch.isspace():
+            i += 1
+            continue
+        if ch == ")":
+            return i + 1
+        return None
+    return None
+
+
 def _find_link_constructs(text: str) -> "list[tuple[int, int, str]]":
     """模块内**唯一**的「链接式」构造扫描器：一趟从左到右扫出所有 CommonMark 图片
     `![alt](dest)`、行内链接 `[text](dest)`、尖括号自动链接 `<scheme:...>`，**以及**
@@ -997,7 +1031,7 @@ def _find_link_constructs(text: str) -> "list[tuple[int, int, str]]":
             if after_alt is None or after_alt >= n or text[after_alt] != "(":
                 pos += 1                       # alt 未闭合 / 其后不是 `](`：不是链接/图片
                 continue
-            after_dest = _scan_balanced(text, after_alt + 1, n, "(", ")")  # dest 平衡圆括号
+            after_dest = _scan_inline_link_target(text, after_alt + 1, n)
             if after_dest is None:
                 pos += 1                       # 目的地未闭合：不算构造
                 continue

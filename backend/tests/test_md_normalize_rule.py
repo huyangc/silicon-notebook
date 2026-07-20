@@ -1138,6 +1138,15 @@ def test_link_title_close_paren_spanning_soft_newline_refused():
     assert rule_normalize(raw) == raw          # byte-identical -- link preserved
 
 
+def test_escaped_delimiter_in_multiline_link_title_stays_open():
+    # A title delimiter escaped before the soft newline remains title text.  The
+    # line gate must keep the complete link intact instead of injecting a blank
+    # line into its title.
+    raw = '[x](url "title ) and \\"quoted\\"\ncontinued")'
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw
+
+
 def test_link_title_close_paren_complete_same_line_not_rich():
     # over-refusal lock: a same-line COMPLETE link whose title contains `)` -> the dest
     # correctly stays open through the title, the real closing `)` closes the link -> not

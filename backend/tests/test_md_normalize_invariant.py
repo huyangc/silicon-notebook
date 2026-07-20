@@ -330,6 +330,47 @@ def test_link_with_balanced_paren_dest_is_one_full_ref():
 
 
 # ---------------------------------------------------------------------------
+# F3 follow-up — inline-link titles are part of the byte-protected reference.
+# A `)` inside a quoted title is title text, not the closing parenthesis of the
+# outer link.  The scanner must keep the complete multiline construct intact so
+# a punctuation-only title edit cannot escape the invariant.
+# ---------------------------------------------------------------------------
+
+
+def test_double_quoted_link_title_punctuation_edit_is_rejected():
+    before = '[x](url "title )\ncontinued")'
+    after = '[x](url "title )\ncontinued-")'
+    assert content_invariant(before, after) is False
+
+
+def test_double_quoted_multiline_link_title_is_one_protected_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    before = '[x](url "title ) and \\"quoted\\"\ncontinued")'
+    after = '[x](url "title ) and \\"quoted\\"\ncontinued-")'
+    assert _link_refs(before) == [before]
+    assert content_invariant(before, after) is False
+
+
+def test_single_quoted_multiline_link_title_is_one_protected_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    before = "[x](url 'title ) and \\\'quoted\\\'\ncontinued')"
+    after = "[x](url 'title ) and \\\'quoted\\\'\ncontinued-')"
+    assert _link_refs(before) == [before]
+    assert content_invariant(before, after) is False
+
+
+def test_parenthesized_multiline_link_title_honors_escaped_close_paren():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    before = "[x](url (title \\) still open\ncontinued))"
+    after = "[x](url (title \\) still open\ncontinued-))"
+    assert _link_refs(before) == [before]
+    assert content_invariant(before, after) is False
+
+
+# ---------------------------------------------------------------------------
 # F3 — the balanced-paren scanner must HONOR ESCAPED PARENS. A backslash escapes
 # the next char: `\)` and `\(` neither close nor open depth. The old scanner
 # treats `\)` as a real terminator, so `![x](foo\)bar)` is captured as
