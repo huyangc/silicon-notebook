@@ -789,7 +789,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 
 `embed` 子命令只补**缺失**的 chunk 与 KG 节点向量(例如某次被 429 限流后留下的空洞)。必须给 `--notebook-id` 且 EMBED 已配好——它本身就是补向量的命令,故**忽略 `--allow-no-embed`**,EMBED 未配时直接报错退出。
 
-`vectors-to-blob` 子命令是一次性存储迁移:embedding 向量过去以 JSON 文本存 SQLite,导致把几十万行加载成矩阵(建索引、检索冷启动)时大部分时间耗在 `json.loads` 上。现在新写入统一存成 float32 BLOB(`np.frombuffer` 零解析直接重解读字节),且所有读点都已兼容两种格式——所以这个命令是可选但推荐的升级后操作:它把四张 embeddings 表(`chunk_embeddings`、`knowledge_embeddings`、`element_embeddings`、`relation_embeddings`)里仍是 JSON 文本的旧行原地转成 BLOB,分批事务提交(每批 5000 行)并按表打印进度。它**不计算新向量**(故不需要 EMBED 配置),且幂等/可中断重跑——只选 SQLite 仍判定为 `text` 类型的行,跑第二遍时天然无行可转。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 转换全库所有 notebook。`json.loads`/重编码这一步(百万行规模下的单核瓶颈)按 `--workers` 个进程并行(默认 `min(8, CPU核数)`;`--workers 1` 完全不启动进程池)——主进程始终独占全部数据库读写,SQLite 单写者不变;进程池崩溃时自动回退串行,绝不丢run。
+`vectors-to-blob` 子命令是一次性存储迁移:embedding 向量过去以 JSON 文本存 SQLite,导致把几十万行加载成矩阵(建索引、检索冷启动)时大部分时间耗在 `json.loads` 上。现在新写入统一存成 float32 BLOB(`np.frombuffer` 零解析直接重解读字节),且所有读点都已兼容两种格式——所以这个命令是可选但推荐的升级后操作:它把四张 embeddings 表(`chunk_embeddings`、`knowledge_embeddings`、`element_embeddings`、`relation_embeddings`)里仍是 JSON 文本的旧行原地转成 BLOB,分批事务提交(每批 5000 行)并按表打印进度。它**不计算新向量**(故不需要 EMBED 配置),且幂等/可中断重跑——只选 SQLite 仍判定为 `text` 类型的行,跑第二遍时天然无行可转。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 转换全库所有 notebook。`json.loads`/重编码这一步(百万行规模下的单核瓶颈)按 `--workers` 个进程并行(默认 `min(32, CPU核数)`;`--workers 1` 完全不启动进程池)——主进程始终独占全部数据库读写,SQLite 单写者不变;进程池崩溃时自动回退串行,绝不丢run。
 
 `backfill-source-index` 子命令主动填充 `knowledge_object_sources` 反查表(`object_id, source_id`)——删除或重解析某个来源时,需要找出哪些 KG 对象引用了它;没有这张表,该查找就得逐行 `json.loads` 整本 notebook 的 evidence JSON 才能找到匹配,几十万对象规模下很慢。这张表本来会「首用惰性回填」(未迁移库的第一次来源删除/重解析会付一次全扫描,扫描的同时顺带填表并标记该 notebook,此后每次都是索引直查)——这个命令让你提前批量付这笔成本(有界内存分批 + 打印进度),而不是让某个用户操作(删除来源)撞上它。不需要 EMBED 配置,且幂等/可中断重跑(每次重跑都清空并按当前 evidence 重建该 notebook 的行,再重新标记)。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 覆盖全库所有 notebook。若怀疑某库的反查表与实际 evidence 不一致(例如异常中断后),重跑本命令即是修复手段——它总是按当前 evidence 全量重建。
 
@@ -828,7 +828,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 **并发调优。** 三个彼此独立的控制项决定吞吐与 429 压力。显式 CLI 值优先；省略时继承对应的 settings/环境变量：
 
-- `--workers` —— 来源管线并发；回退 `KG_JOB_CONCURRENCY`。它在 `all` 中分派来源 job、在 `ingest` 中控制文件解析。`vectors-to-blob` 中它仍表示解析/重编码进程池大小（默认 `min(8, CPU核数)`；`1` 关闭该进程池）。
+- `--workers` —— 来源管线并发；回退 `KG_JOB_CONCURRENCY`。它在 `all` 中分派来源 job、在 `ingest` 中控制文件解析。`vectors-to-blob` 中它仍表示解析/重编码进程池大小（默认 `min(32, CPU核数)`；`1` 关闭该进程池）。
 - `--llm-conc` —— 传统 `chat_json` LLM 调用的进程级硬上限；回退 `KG_EXTRACT_WORKERS`（默认 16）。它跨所有来源共享，也覆盖单个来源内部的抽取窗口。
 - `--embed-conc` —— embedding 工作的进程级硬上限；回退 `EMBED_CONCURRENCY`。它跨所有来源共享，不是逐文档上限。
 
@@ -845,9 +845,9 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse \
   --pool-report-interval 5
 ```
 
-- `--pool-report-interval` —— `all`/`kg` 阶段每 N 秒打一行实时池占用（默认 15；`0` 关闭）。它在来源 job 旁显示 LLM 与 embedding gate 的 `active/max/waiting`，例如 `[pool 17:52:33] LLM 14/24 waiting=2 · embedding 4/4 waiting=9 · source 8/32 · 源完成 5/40`，可直接看出独立上限与排队压力。
+- `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打一行实时池占用（默认 15；`0` 关闭）。它在来源 job 旁显示 LLM 与 embedding gate 的 `active/max/waiting`，例如 `[pool 17:52:33] LLM 14/24 waiting=2 · embedding 4/4 waiting=9 · source 8/32 · 源完成 5/40`，可直接看出独立上限与排队压力。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(8, CPU核数)`，`1` = 不启进程池）、`--llm-conc`（传统 `chat_json` 的进程级上限 = `KG_EXTRACT_WORKERS`）、`--embed-conc`（进程级 embedding 上限 = `EMBED_CONCURRENCY`；跨所有来源避 429）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild，`all` 阶段的末尾聚类同样适用）、`--allow-no-embed`（EMBED 未配时显式允许无向量降级；默认拒绝，不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg` 阶段每隔几秒自报池占用，显示 LLM 与 embedding 的 `active/max/waiting`；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`：作用于全部 notebook 而非单个）、`--force`（仅 `metadata`：已有元数据行的源也重抽）、`--dry-run`（只扫描预估）。`embed` 子命令只补缺失的 chunk + 节点向量，需 `--notebook-id`。`vectors-to-blob` 子命令把旧 JSON 文本向量迁移成 BLOB，需 `--notebook-id` 或 `--all-notebooks`。`backfill-source-index` 子命令主动构建来源删除反查表，需 `--notebook-id` 或 `--all-notebooks`。`metadata` 子命令给已解析的论文来源补抽元数据（标题/作者/期刊/年份），需 `--notebook-id` 且 LLM 已配置。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--llm-conc`（传统 `chat_json` 的进程级上限 = `KG_EXTRACT_WORKERS`）、`--embed-conc`（进程级 embedding 上限 = `EMBED_CONCURRENCY`；跨所有来源避 429）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild，`all` 阶段的末尾聚类同样适用）、`--allow-no-embed`（EMBED 未配时显式允许无向量降级；默认拒绝，不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒自报池占用，显示 LLM 与 embedding 的 `active/max/waiting`；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`：作用于全部 notebook 而非单个）、`--force`（仅 `metadata`：已有元数据行的源也重抽）、`--dry-run`（只扫描预估）。`embed` 子命令只补缺失的 chunk + 节点向量，需 `--notebook-id`。`vectors-to-blob` 子命令把旧 JSON 文本向量迁移成 BLOB，需 `--notebook-id` 或 `--all-notebooks`。`backfill-source-index` 子命令主动构建来源删除反查表，需 `--notebook-id` 或 `--all-notebooks`。`metadata` 子命令给已解析的论文来源补抽元数据（标题/作者/期刊/年份），需 `--notebook-id` 且 LLM 已配置。
 
 前置:`.env` 配好 EMBED 与 `KG_LLM`(KG 抽取缺省回退全局 `OPENAI_COMPAT_*`)。EMBED 未配时 CLI **默认拒绝运行**——要无向量导入须显式 `--allow-no-embed`(此时跳过 chunk/KG 向量),绝不静默;KG 抽取在无可用 LLM 时报错。重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
 
