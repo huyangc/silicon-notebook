@@ -1,5 +1,7 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 import threading
+import time
 
 import httpx
 import pytest
@@ -63,6 +65,45 @@ class _ControlledKgClient:
                 "edges": [],
             }
         )
+
+
+class _DrainVisibilityClient:
+    configured = True
+    model = "test-kg"
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.source_calls = 0
+        self.blocked = threading.Event()
+        self.failed = threading.Event()
+        self.release = threading.Event()
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        prompt = messages[0]["content"]
+        if prompt.startswith('Return {"ok":true}'):
+            return '{"ok":true}'
+        with self.lock:
+            self.source_calls += 1
+            call = self.source_calls
+        if call == 1:
+            self.blocked.set()
+            assert self.release.wait(5)
+            return json.dumps(
+                {
+                    "nodes": [
+                        {
+                            "local_id": "engram",
+                            "type": "Concept",
+                            "name": "Engram",
+                            "ev": 0,
+                        }
+                    ],
+                    "edges": [],
+                }
+            )
+        assert self.blocked.wait(1)
+        self.failed.set()
+        raise _ControlledKgClient._connection_error()
 
 
 @pytest.fixture
@@ -236,6 +277,37 @@ def test_rebuild_probe_failure_happens_before_delete(repo, monkeypatch):
     assert saved["error_code"] == "model_unavailable"
 
 
+def test_job_enters_stopping_before_running_sources_are_drained(repo):
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    client = _DrainVisibilityClient()
+    repo._kg_llm_client = client
+    kg_scheduler.configure(window_workers=2, job_workers=2)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            repo.execute_notebook_kg_job,
+            notebook.id,
+            job["id"],
+            "incremental",
+        )
+        assert client.failed.wait(2)
+        try:
+            deadline = time.monotonic() + 2
+            stage = ""
+            while time.monotonic() < deadline:
+                stage = repo._runtime.kg_build_jobs.get(job["id"])["stage"]
+                if stage == "stopping":
+                    break
+                time.sleep(0.01)
+            assert stage == "stopping"
+            assert future.done() is False
+        finally:
+            client.release.set()
+        with pytest.raises(KgBuildAborted):
+            future.result(timeout=5)
+
+
 def test_duplicate_preparation_never_enters_executor(repo):
     notebook, _source_ids = _seed_three_parsed_sources(repo)
     repo._kg_llm_client = _ControlledKgClient()
@@ -246,3 +318,66 @@ def test_duplicate_preparation_never_enters_executor(repo):
 
     assert first["status"] == "running"
     assert repo._runtime.kg_build_jobs.get(first["id"])["status"] == "running"
+
+
+def test_successful_job_emits_safe_started_progress_and_success_events(
+    repo, monkeypatch
+):
+    notebook, source_ids = _seed_three_parsed_sources(repo)
+    repo._kg_llm_client = _ControlledKgClient()
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+    repo.execute_notebook_kg_job(
+        notebook.id, job["id"], "incremental"
+    )
+
+    kg_events = [
+        event for event in events
+        if str(event.get("kind", "")).startswith("kg_build_")
+    ]
+    kinds = [event["kind"] for event in kg_events]
+    assert kinds[0] == "kg_build_started"
+    assert kinds.count("kg_build_progress") == len(source_ids)
+    assert kinds[-1] == "kg_build_succeeded"
+    allowed = {
+        "kind", "job_id", "notebook_id", "mode", "status", "stage",
+        "total_sources", "completed_sources", "failed_sources",
+        "error_code", "latency_ms",
+    }
+    assert all(set(event) <= allowed for event in kg_events)
+    assert all(event["job_id"] == job["id"] for event in kg_events)
+
+
+def test_model_failure_emits_circuit_stopping_and_failed_without_diagnostics(
+    repo, monkeypatch
+):
+    notebook, _source_ids = _seed_three_parsed_sources(repo)
+    repo._kg_llm_client = _ControlledKgClient(fail_probe=True)
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
+
+    with pytest.raises(KgBuildAborted):
+        repo.execute_notebook_kg_job(
+            notebook.id, job["id"], "incremental"
+        )
+
+    kg_events = [
+        event for event in events
+        if str(event.get("kind", "")).startswith("kg_build_")
+    ]
+    assert [event["kind"] for event in kg_events] == [
+        "kg_build_started",
+        "kg_build_circuit_opened",
+        "kg_build_stopping",
+        "kg_build_failed",
+    ]
+    for event in kg_events:
+        rendered = json.dumps(event, ensure_ascii=False)
+        assert "model.example" not in rendered
+        assert "APIConnectionError" not in rendered
+        assert "Return" not in rendered
+        assert "source 0" not in rendered
+    assert kg_events[-1]["error_code"] == "model_unavailable"

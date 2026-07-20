@@ -394,11 +394,21 @@ KB+confirmed-Memory 三种检索条件。
 `KG_LLM_MAX_RETRIES` 次（默认 `2`，允许 `0..3`）。若服务持续不可达，或认证失败/
 请求被永久拒绝，本次任务共享的中断控制会阻止继续发起请求，取消尚未开始的
 source/window 工作，并等待已经开始的调用安全退出。中断范围只限当前 notebook 的
-本次 KG 任务，不影响其他 notebook 或之后重新发起的任务。
+本次 KG 任务，不影响其他 notebook 或之后重新发起的任务。可用性探测会显式绕过
+LLM 响应缓存且不回写缓存，旧的成功探测不能在当前模型已经不可用时放行破坏性重建。
 
-已完成来源的结果会保留；被中断来源不会写入半成品。之后普通「继续分析」只处理仍
-未完成的来源。只有显式「全部重新分析」会清空已有 KG，而且会在删除前先探测模型
-服务。若进程重启时仍有 running job，启动恢复会把它标为 failed，避免状态栏永久旋转。
+已完成来源的结果会保留；同一来源的 object/relation 分块共用一个 SQLite 事务，被
+中断或写入失败的来源不会留下半成品；旧版本遗留但最新 extraction run 已失败的图也
+仍判定为未完成。之后普通「继续分析」只处理未完成来源。只有显式「全部重新分析」
+会清空已有 KG，而且会在删除前先探测模型服务。若进程重启时仍有 running job，启动
+恢复会把 job 与 running extraction run 标为 failed，并把关联来源从 `extracting`
+恢复为 `parsed`。
+
+前端用 notebook、workspace epoch 与请求 epoch 共同约束建库响应归属，并在持久化 job
+仍为 `running` 时持续轮询，不再用固定时限伪造本地完成。安全结构化事件覆盖
+`kg_build_started`、`kg_build_progress`、`kg_build_circuit_opened`、
+`kg_build_stopping`、`kg_build_succeeded` 与 `kg_build_failed`，不记录 provider
+诊断、prompt、来源正文、token 或凭据。
 
 ## 检索模式（问答）
 

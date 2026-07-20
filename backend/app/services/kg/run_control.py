@@ -171,4 +171,5 @@ def probe_kg_model(client: TaskScopedKgClient) -> None:
         [{"role": "user", "content": 'Return {"ok":true} and nothing else.'}],
         '{"ok":true}',
         max_tokens=16,
+        bypass_cache=True,
     )

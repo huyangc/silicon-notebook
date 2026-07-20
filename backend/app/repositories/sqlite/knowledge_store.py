@@ -165,8 +165,14 @@ class KnowledgeStore:
         ]
         kg_source_ids = {
             row["source_id"] for row in db.execute(
-                "SELECT DISTINCT source_id FROM knowledge_objects "
-                "WHERE notebook_id = ? AND source_id != ''", (notebook_id,)
+                "SELECT DISTINCT ko.source_id FROM knowledge_objects ko "
+                "WHERE ko.notebook_id = ? AND ko.source_id != '' "
+                "AND COALESCE(("
+                "  SELECT er.status FROM extraction_runs er "
+                "  WHERE er.source_id=ko.source_id AND er.run_type='kg' "
+                "  ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1"
+                "), 'completed')='completed'",
+                (notebook_id,),
             ).fetchall()
         }
         return source_ids, kg_source_ids
@@ -1330,10 +1336,22 @@ class KnowledgeStore:
 
     @staticmethod
     def source_has_kg(db: sqlite3.Connection, source_id: str) -> bool:
-        """True iff the source has ≥1 knowledge_objects row with a matching
-        source_id."""
+        """True iff the source has a complete KG graph.
+
+        Direct/governance rows without extraction history remain compatible.
+        When extraction history exists, the latest KG run must be completed so
+        a failed legacy partial write cannot masquerade as resumable completion.
+        """
         row = db.execute(
-            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE source_id = ? AND source_id != '')",
+            "SELECT EXISTS("
+            "  SELECT 1 FROM knowledge_objects ko "
+            "  WHERE ko.source_id = ? AND ko.source_id != '' "
+            "  AND COALESCE(("
+            "    SELECT er.status FROM extraction_runs er "
+            "    WHERE er.source_id=ko.source_id AND er.run_type='kg' "
+            "    ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1"
+            "  ), 'completed')='completed'"
+            ")",
             (source_id,),
         ).fetchone()
         return bool(row[0])

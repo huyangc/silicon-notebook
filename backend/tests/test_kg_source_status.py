@@ -1,10 +1,10 @@
 """Tests for per-source kg_extracted flag and notebook kg_pending_sources count.
 
 These tests verify:
-- SourceSummary.kg_extracted is True when ≥1 knowledge_objects row links to the source.
+- SourceSummary.kg_extracted requires a linked object and a complete latest KG run
+  (or no extraction history for direct/governance compatibility rows).
 - SourceSummary.kg_extracted is False when no such rows exist.
-- NotebookSummary.kg_pending_sources counts sources that are PARSED (have source_elements)
-  but have NO KG (no knowledge_objects with that source_id).
+- NotebookSummary.kg_pending_sources counts parsed sources without a complete KG.
 - A source with no source_elements (not parsed) does NOT count as pending.
 - After a source gets KG, the pending count drops.
 """
@@ -214,3 +214,37 @@ def test_set_source_status_persists_and_emits_status_event(repo, monkeypatch):
         and e.get("source_id") == src_id and e.get("error") == "boom"
         for e in events
     )
+
+
+def test_failed_latest_extraction_does_not_hide_partial_source_graph(repo):
+    """A failed run plus leftover rows is unfinished and must be resumable."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    src_id = _insert_source(repo, nb.id)
+    repo._test_insert_object(
+        nb.id, "concept", {"name": "Partial"}, source_id=src_id
+    )
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            """
+            INSERT INTO extraction_runs
+            (id, notebook_id, source_id, run_type, status, error_message,
+             created_at, updated_at)
+            VALUES (?, ?, ?, 'kg', 'failed', 'chunk failure', ?, ?)
+            """,
+            (f"run-{uuid4().hex[:10]}", nb.id, src_id, now, now),
+        )
+    from app.repositories.sqlite import knowledge_counts_cache
+    knowledge_counts_cache.invalidate(nb.id)
+
+    with repo._connect() as db:
+        assert repo._source_has_kg(db, src_id) is False
+        assert repo._count_pending_kg_sources(db, nb.id) == 1
+    assert repo.get_source(src_id).kg_extracted is False
+    targets, skipped, _missing = (
+        repo._runtime.knowledge_lifecycle._kg_target_state(
+            nb.id, "incremental"
+        )
+    )
+    assert targets == [src_id]
+    assert skipped == []

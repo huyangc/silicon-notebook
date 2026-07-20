@@ -447,13 +447,25 @@ Each KG model request uses `KG_LLM_TIMEOUT_SECONDS` (default `60`) and at most
 unavailability persists, or the service rejects/authenticates the request
 permanently, the shared control for that one job stops new requests, cancels
 queued source/window work, and drains calls already in flight. Other notebooks
-and later tasks are unaffected.
+and later tasks are unaffected. The availability probe explicitly bypasses the
+LLM response cache and does not populate it, so a stale successful probe cannot
+authorize destructive rebuild work during a live outage.
 
 Completed sources remain committed; an interrupted source does not persist a
-partial extraction. A later normal build analyzes only unfinished sources.
-Explicit rebuild is the only action that clears existing KG data, and it probes
-the model before deleting anything. If the process restarts with a running job,
-startup recovery marks that job failed so the UI does not spin indefinitely.
+partial extraction: object/relation chunks for one source share one SQLite
+transaction, and a legacy leftover graph whose latest extraction run failed is
+still classified as unfinished. A later normal build analyzes only unfinished
+sources. Explicit rebuild is the only action that clears existing KG data, and
+it probes the model before deleting anything. If the process restarts with a
+running job, startup recovery marks that job and its running extraction rows
+failed and restores affected sources from `extracting` to `parsed`.
+
+The frontend guards start responses by notebook, workspace epoch, and request
+epoch, and keeps polling while the durable job remains `running`; it does not
+invent local completion after a fixed time cap. Safe structured events cover
+`kg_build_started`, `kg_build_progress`, `kg_build_circuit_opened`,
+`kg_build_stopping`, `kg_build_succeeded`, and `kg_build_failed` without
+provider diagnostics, prompts, source text, tokens, or credentials.
 
 ## Retrieval modes (Ask)
 

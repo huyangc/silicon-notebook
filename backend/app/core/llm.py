@@ -198,6 +198,7 @@ class OpenAICompatibleClient:
         top_p: float = 1.0,
         max_tokens: Optional[int] = None,
         cancel_event: CancelEvent = None,
+        bypass_cache: bool = False,
     ) -> str:
         if not self.configured:
             raise RuntimeError("OpenAI-compatible LLM settings are not configured")
@@ -217,15 +218,16 @@ class OpenAICompatibleClient:
         # Best-effort cache lookup: a cache fault must never break the call.
         cache = None
         ckey = ""
-        try:
-            cache = self._get_cache()
-            if cache is not None:
-                ckey = cache_key(model, full_messages, response_schema_hint)
-                cached = cache.get(ckey)
-                if cached is not None:
-                    return cached
-        except Exception:
-            cache, ckey = None, ""
+        if not bypass_cache:
+            try:
+                cache = self._get_cache()
+                if cache is not None:
+                    ckey = cache_key(model, full_messages, response_schema_hint)
+                    cached = cache.get(ckey)
+                    if cached is not None:
+                        return cached
+            except Exception:
+                cache, ckey = None, ""
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": full_messages,

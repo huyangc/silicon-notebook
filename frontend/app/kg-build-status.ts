@@ -9,6 +9,25 @@ export type KgBuildPresentation = {
   actionLabel: string | null;
 };
 
+export type KgBuildRequestOwner = {
+  notebookId: string;
+  workspaceEpoch: number;
+  requestEpoch: number;
+};
+
+export function ownsKgBuildRequest(
+  owner: KgBuildRequestOwner,
+  currentNotebookId: string | null | undefined,
+  currentWorkspaceEpoch: number,
+  currentRequestEpoch: number,
+): boolean {
+  return (
+    owner.notebookId === currentNotebookId
+    && owner.workspaceEpoch === currentWorkspaceEpoch
+    && owner.requestEpoch === currentRequestEpoch
+  );
+}
+
 export function kgBuildPresentation(
   job: KgBuildJobStatus | null | undefined,
   pendingSources: number,

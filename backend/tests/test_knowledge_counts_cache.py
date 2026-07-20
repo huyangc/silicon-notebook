@@ -23,6 +23,8 @@ def _db() -> sqlite3.Connection:
         "CREATE TABLE chunks(id TEXT, notebook_id TEXT, source_id TEXT);"
         "CREATE TABLE sources(id TEXT, notebook_id TEXT);"
         "CREATE TABLE source_elements(id TEXT, source_id TEXT);"
+        "CREATE TABLE extraction_runs("
+        "source_id TEXT, run_type TEXT, status TEXT, created_at TEXT);"
     )
     return db
 

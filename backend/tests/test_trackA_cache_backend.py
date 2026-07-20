@@ -77,3 +77,66 @@ def test_no_cache_backend_injection_skips_cache(monkeypatch, tmp_path):
     client = OpenAICompatibleClient(settings, cache=NoCacheBackend())
     # _get_cache must return the injected NoCacheBackend
     assert isinstance(client._get_cache(), NoCacheBackend)
+
+
+def test_chat_json_cache_bypass_uses_transport_and_does_not_overwrite_hit(
+    monkeypatch, tmp_path
+):
+    """Availability probes must observe the live transport, never a stale hit."""
+    from types import SimpleNamespace
+
+    from app.core.config import Settings
+    from app.core.llm import OpenAICompatibleClient
+
+    schema_hint = '{"ok":true}'
+    user_msg = {"role": "user", "content": "probe"}
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are the extraction and reasoning engine for "
+            "silicon-notebook. Return valid JSON only, no markdown fences. "
+            f"Schema hint: {schema_hint}"
+        ),
+    }
+    model = "test-model"
+    cache = LLMCache(str(tmp_path / "bypass.db"))
+    key = cache_key(model, [system_msg, user_msg], schema_hint)
+    cache.put(key, '{"ok":"cached"}')
+
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content='{"ok":"live"}')
+                )
+            ],
+            usage=None,
+        )
+
+    settings = Settings(
+        openai_compat_base_url="http://fake",
+        openai_compat_api_key="fake",
+        openai_compat_model=model,
+        llm_cache_enabled=False,
+    )
+    client = OpenAICompatibleClient(settings, cache=cache)
+    monkeypatch.setattr(
+        client,
+        "client",
+        lambda: SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(create=create)
+            )
+        ),
+    )
+
+    assert client.chat_json(
+        [user_msg],
+        schema_hint,
+        bypass_cache=True,
+    ) == '{"ok":"live"}'
+    assert len(calls) == 1
+    assert cache.get(key) == '{"ok":"cached"}'

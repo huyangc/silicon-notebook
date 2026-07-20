@@ -1472,6 +1472,21 @@ class SqliteMigrator:
                 "WHERE projection_status IN ('syncing','pending')")
             now = _now()
             db.execute(
+                "UPDATE sources SET status='parsed', parse_status='parsed', "
+                "error_message='', updated_at=? "
+                "WHERE parse_status='extracting' AND id IN ("
+                "  SELECT source_id FROM extraction_runs "
+                "  WHERE run_type='kg' AND status='running'"
+                ")",
+                (now,),
+            )
+            db.execute(
+                "UPDATE extraction_runs SET status='failed', "
+                "error_message='worker_interrupted: 服务重启导致知识图谱分析中断', "
+                "updated_at=? WHERE run_type='kg' AND status='running'",
+                (now,),
+            )
+            db.execute(
                 "UPDATE kg_build_jobs SET status='failed', stage='finished', "
                 "error_code='worker_interrupted', "
                 "error_message='服务重启导致本次分析中断；"

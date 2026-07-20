@@ -139,8 +139,7 @@ class NotebookSummaryQuery:
     def count_pending_kg_sources(
         self, db: sqlite3.Connection, notebook_id: str
     ) -> int:
-        """Count sources in the notebook that are PARSED (have ≥1 source_elements row)
-        but have NO KG (no knowledge_objects row with that source_id)."""
+        """Count parsed sources that do not have a complete KG extraction."""
         return self.queries.pending_kg_source_count(db, notebook_id)
 
     def base_notebook_info(

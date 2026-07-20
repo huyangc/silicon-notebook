@@ -538,7 +538,15 @@ class SourceStore:
             (row["id"],),
         ).fetchone()["count"])
         kg_extracted = bool(db.execute(
-            "SELECT EXISTS(SELECT 1 FROM knowledge_objects WHERE source_id = ? AND source_id != '')",
+            "SELECT EXISTS("
+            "  SELECT 1 FROM knowledge_objects ko "
+            "  WHERE ko.source_id = ? AND ko.source_id != '' "
+            "  AND COALESCE(("
+            "    SELECT er.status FROM extraction_runs er "
+            "    WHERE er.source_id=ko.source_id AND er.run_type='kg' "
+            "    ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1"
+            "  ), 'completed')='completed'"
+            ")",
             (row["id"],),
         ).fetchone()[0])
         pm = (
@@ -603,8 +611,14 @@ class SourceStore:
             ).fetchall():
                 element_counts[r["source_id"]] = int(r["c"])
             for r in db.execute(
-                f"SELECT DISTINCT source_id FROM knowledge_objects "
-                f"WHERE source_id IN ({ph}) AND source_id != ''", batch,
+                f"SELECT DISTINCT ko.source_id FROM knowledge_objects ko "
+                f"WHERE ko.source_id IN ({ph}) AND ko.source_id != '' "
+                "AND COALESCE(("
+                "  SELECT er.status FROM extraction_runs er "
+                "  WHERE er.source_id=ko.source_id AND er.run_type='kg' "
+                "  ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1"
+                "), 'completed')='completed'",
+                batch,
             ).fetchall():
                 kg_extracted_ids.add(r["source_id"])
             for r in db.execute(

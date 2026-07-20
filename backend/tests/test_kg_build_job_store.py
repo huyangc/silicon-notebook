@@ -154,6 +154,30 @@ def test_restart_marks_running_kg_job_failed(tmp_path):
         "incremental",
         4,
     )
+    now = repo._runtime.seams.now()
+    with repo._write() as db:
+        db.execute(
+            """
+            INSERT INTO sources
+            (id, notebook_id, title, source_type, status, parse_status,
+             file_name, file_path, file_size, file_hash, summary, doc_type,
+             created_at, updated_at)
+            VALUES ('source-restart', ?, 'Interrupted', 'markdown',
+                    'extracting', 'extracting', 'source.md', '', 0, '',
+                    '', 'academic_paper', ?, ?)
+            """,
+            (notebook.id, now, now),
+        )
+        db.execute(
+            """
+            INSERT INTO extraction_runs
+            (id, notebook_id, source_id, run_type, status, error_message,
+             created_at, updated_at)
+            VALUES ('run-restart', ?, 'source-restart', 'kg', 'running',
+                    '', ?, ?)
+            """,
+            (notebook.id, now, now),
+        )
 
     restarted = SQLiteRepository(settings)
     restarted_store = KgBuildJobStore(
@@ -166,3 +190,15 @@ def test_restart_marks_running_kg_job_failed(tmp_path):
     assert recovered["stage"] == "finished"
     assert recovered["error_code"] == "worker_interrupted"
     assert recovered["finished_at"]
+    with restarted._connect() as db:
+        source = db.execute(
+            "SELECT status, parse_status FROM sources "
+            "WHERE id='source-restart'"
+        ).fetchone()
+        run = db.execute(
+            "SELECT status, error_message FROM extraction_runs "
+            "WHERE id='run-restart'"
+        ).fetchone()
+    assert (source["status"], source["parse_status"]) == ("parsed", "parsed")
+    assert run["status"] == "failed"
+    assert "worker_interrupted" in run["error_message"]

@@ -3,7 +3,7 @@
 Failure-injection companions to test_kg_mutation_phase_matrix: each test
 breaks ONE phase and asserts exactly what the frozen matrix says survives.
 
-    store_kg second object chunk   first 1000 rows stay committed;
+    store_kg second object chunk   whole source graph rolls back;
                                    no relations, no embeds, no hooks
     write_clusters insert          replace transaction rolls back atomically
                                    (old rows survive, no cluster-seq bump,
@@ -77,7 +77,7 @@ def _count(repo, sql, *params):
         return db.execute(sql, params).fetchone()["c"]
 
 
-def test_store_kg_second_chunk_failure_keeps_first_chunk_and_skips_phases(
+def test_store_kg_second_chunk_failure_rolls_back_whole_source_graph(
     repo, monkeypatch
 ):
     notebook = repo.create_notebook(NotebookCreate(name="chunk failure"))
@@ -115,12 +115,12 @@ def test_store_kg_second_chunk_failure_keeps_first_chunk_and_skips_phases(
     with pytest.raises(RuntimeError, match="second chunk failed"):
         repo.store_kg(notebook.id, None, objects, relations)
 
-    # First 1000-row chunk committed in its own transaction and survives; the
-    # failed second chunk rolled back; no later phase ran.
+    # A source is the KG persistence boundary: a later chunk failure rolls back
+    # the earlier chunk too, and no later phase runs.
     assert _count(
         repo, "SELECT COUNT(*) AS c FROM knowledge_objects WHERE notebook_id=?",
         notebook.id,
-    ) == 1000
+    ) == 0
     assert _count(
         repo, "SELECT COUNT(*) AS c FROM knowledge_relations WHERE notebook_id=?",
         notebook.id,

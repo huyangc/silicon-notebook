@@ -97,6 +97,7 @@ class JsonChatClientPort(Protocol):
         top_p: float = 1.0,
         max_tokens: Optional[int] = None,
         cancel_event: CancelEvent = None,
+        bypass_cache: bool = False,
     ) -> str: ...
 
 

@@ -209,6 +209,7 @@ def test_probe_uses_small_bounded_request():
     assert delegate.kwargs == [
         {
             "max_tokens": 16,
+            "bypass_cache": True,
             "timeout": 60,
             "max_retries": 0,
         }

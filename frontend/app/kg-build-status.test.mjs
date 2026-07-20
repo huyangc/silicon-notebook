@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   isTrackedKgTerminal,
+  ownsKgBuildRequest,
   kgBuildPresentation,
   kgBuildTerminalToast,
 } from "./kg-build-status.ts";
@@ -101,4 +103,39 @@ test("old terminal response cannot finish a newer tracked job", () => {
     ),
     true,
   );
+});
+
+test("KG start callbacks are owned by notebook, workspace, and request epoch", () => {
+  const request = {
+    notebookId: "notebook-a",
+    workspaceEpoch: 7,
+    requestEpoch: 3,
+  };
+  assert.equal(
+    ownsKgBuildRequest(request, "notebook-a", 7, 3),
+    true,
+  );
+  assert.equal(
+    ownsKgBuildRequest(request, "notebook-b", 7, 3),
+    false,
+  );
+  assert.equal(
+    ownsKgBuildRequest(request, "notebook-a", 8, 3),
+    false,
+  );
+  assert.equal(
+    ownsKgBuildRequest(request, "notebook-a", 7, 4),
+    false,
+  );
+});
+
+test("durable KG polling never synthesizes completion after a time cap", () => {
+  const source = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
+  const start = source.indexOf("// While a build runs");
+  const end = source.indexOf("// Backfill completion polling", start);
+  assert.notEqual(start, -1);
+  assert.notEqual(end, -1);
+  const kgPoll = source.slice(start, end);
+  assert.doesNotMatch(kgPoll, /setTimeout\s*\(/);
+  assert.doesNotMatch(kgPoll, /仍在后台进行，请稍后刷新/);
 });

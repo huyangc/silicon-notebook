@@ -3027,7 +3027,7 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
 KG_BUILD_CIRCUIT_ALLOWED_IMPORTS = {
     (
         "backend/tests/test_kg_build_circuit_breaker.py",
-        14,
+        16,
         "app.services.sqlite_repository",
         "SQLiteRepository",
     ),
@@ -3049,17 +3049,28 @@ KG_BUILD_CIRCUIT_ALLOWED_NEW_MEMBERS = {
     "fail_notebook_kg_job_submission",
     "execute_notebook_kg_job",
 }
+KG_BUILD_CIRCUIT_ALLOWED_CONSUMERS = {
+    ("create_notebook", "backend/tests/test_kg_source_status.py:221"),
+    ("_test_insert_object", "backend/tests/test_kg_source_status.py:223"),
+    ("_write", "backend/tests/test_kg_source_status.py:227"),
+    ("_connect", "backend/tests/test_kg_source_status.py:240"),
+    ("_source_has_kg", "backend/tests/test_kg_source_status.py:241"),
+    ("_count_pending_kg_sources", "backend/tests/test_kg_source_status.py:242"),
+    ("get_source", "backend/tests/test_kg_source_status.py:243"),
+    ("_runtime", "backend/tests/test_kg_source_status.py:245"),
+}
 KG_BUILD_CIRCUIT_ALLOWED_MEMBER_FILES = {
     (path, member)
     for path, members in {
         "backend/tests/test_kg_build_circuit_breaker.py": {
             "SQLiteRepository", "_connect", "_kg_llm_client", "_runtime",
-            "_write", "create_notebook", "embedder",
+            "_write", "create_notebook", "embedder", "event_log",
             "execute_notebook_kg_job", "get_notebook",
             "prepare_notebook_kg_job",
         },
         "backend/tests/test_kg_build_job_store.py": {
-            "SQLiteRepository", "_runtime", "create_notebook", "current_user",
+            "SQLiteRepository", "_connect", "_runtime", "_write",
+            "create_notebook", "current_user",
         },
         "backend/tests/test_kg_building_flag.py": {
             "SQLiteRepository", "_kg_building", "_mark_unified_kg_dirty",
@@ -3515,7 +3526,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         (member, f"{file}:{line}")
         for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS | MERGE_DBS_ALLOWED_IMPORTS | KG_BUILD_CIRCUIT_ALLOWED_IMPORTS
     }
-    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS | TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS | TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS
+    allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS | TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS | TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS | KG_BUILD_CIRCUIT_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
         actual[name] = {
             site for site in sites

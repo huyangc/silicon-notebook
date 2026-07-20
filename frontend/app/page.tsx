@@ -68,6 +68,7 @@ import { canSeeAdminUsage } from "./admin/usage/format.ts";
 import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
 import {
   isTrackedKgTerminal,
+  ownsKgBuildRequest,
   kgBuildPresentation,
   kgBuildTerminalToast,
 } from "./kg-build-status";
@@ -972,14 +973,26 @@ export default function Home() {
   }
   // Kick off a KG build for `nb`; the effect below then polls until it's ready.
   const startKgBuild = (nb: string) => {
+    const owner = {
+      notebookId: nb,
+      workspaceEpoch: workspaceEpochRef.current,
+      requestEpoch: ++kgBuildRequestEpochRef.current,
+    };
+    const stillOwned = () => ownsKgBuildRequest(
+      owner,
+      activeNotebookIdRef.current,
+      workspaceEpochRef.current,
+      kgBuildRequestEpochRef.current,
+    );
     setBuildingKg(true);
     buildKg(nb)
       .then((started) => {
+        if (!stillOwned()) return;
         setTrackedKgJobId(started.job_id);
         setToast("已开始整理知识图谱；完成后会自动更新");
         api<NotebookSummary>(`/notebooks/${nb}`)
           .then((refreshed) => {
-            if (activeNotebookIdRef.current === nb) {
+            if (stillOwned()) {
               setCurrentNotebook(refreshed);
               if (
                 isTrackedKgTerminal(started.job_id, refreshed.kg_build)
@@ -995,20 +1008,37 @@ export default function Home() {
           })
           .catch(() => {});
       })
-      .catch((e) => { reportError(e); setBuildingKg(false); });
+      .catch((e) => {
+        if (!stillOwned()) return;
+        reportError(e);
+        setBuildingKg(false);
+      });
   };
   // Trigger full re-extract: clears existing KG and rebuilds from all sources.
   // 破坏性(清空重抽)——统一确认(与概念合并/检索索引三系统一致的确认机制+文案模板)。
   const startKgRebuild = (nb: string) => {
     confirmIndexAction("全部重新分析？\n\n将清空现有知识图谱并重新分析全部来源。后台进行，完成后自动更新。", () => {
+      if (activeNotebookIdRef.current !== nb) return;
+      const owner = {
+        notebookId: nb,
+        workspaceEpoch: workspaceEpochRef.current,
+        requestEpoch: ++kgBuildRequestEpochRef.current,
+      };
+      const stillOwned = () => ownsKgBuildRequest(
+        owner,
+        activeNotebookIdRef.current,
+        workspaceEpochRef.current,
+        kgBuildRequestEpochRef.current,
+      );
       setBuildingKg(true);
       rebuildKg(nb)
         .then((started) => {
+          if (!stillOwned()) return;
           setTrackedKgJobId(started.job_id);
           setToast("已开始全部重新分析；完成后会自动更新");
           api<NotebookSummary>(`/notebooks/${nb}`)
             .then((refreshed) => {
-              if (activeNotebookIdRef.current === nb) {
+              if (stillOwned()) {
                 setCurrentNotebook(refreshed);
                 if (
                   isTrackedKgTerminal(started.job_id, refreshed.kg_build)
@@ -1026,7 +1056,11 @@ export default function Home() {
             })
             .catch(() => {});
         })
-        .catch((e) => { reportError(e); setBuildingKg(false); });
+        .catch((e) => {
+          if (!stillOwned()) return;
+          reportError(e);
+          setBuildingKg(false);
+        });
     });
   };
   // 侧栏收起状态持久化(localStorage;隐私模式等读写失败静默降级)
@@ -1065,11 +1099,7 @@ export default function Home() {
         }
       } catch { /* transient error; keep polling */ }
     }, 6000);
-    // Safety cap so the button never spins forever (failed build / huge corpus).
-    const cap = window.setTimeout(() => {
-      if (!cancelled) { setBuildingKg(false); setToast("构建仍在后台进行，请稍后刷新查看状态"); }
-    }, 20 * 60 * 1000);
-    return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
+    return () => { cancelled = true; window.clearInterval(poll); };
   }, [buildingKg, currentNotebookId, analytics, trackedKgJobId]);
   // Backfill completion polling: same shape as the buildingKg poll above, for the
   // "补全论文信息"后台任务(paper-meta backfill)。同样在「索引与构建」面板打开时让位
@@ -1387,6 +1417,7 @@ export default function Home() {
   // still match, preventing cross-user/notebook/conversation state bleed.
   const activeNotebookIdRef = useRef<string | null>(null);
   const workspaceEpochRef = useRef(0);
+  const kgBuildRequestEpochRef = useRef(0);
   const askRunEpochRef = useRef(0);
   // started 事件落地前(jobId 尚未知晓)点了「停止」:先记下意图,onStart 拿到 jobId 后立即补打 cancel。
   const cancelRequestedRef = useRef(false);

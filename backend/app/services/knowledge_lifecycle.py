@@ -40,6 +40,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from app.core.config import Settings
@@ -210,10 +211,9 @@ class KnowledgeLifecycleService:
                  objects: List[dict], relations: List[dict]) -> Tuple[int, int]:
         """Insert KG nodes/edges (remapping local ids to DB ids), embeds payload.
 
-        分块写入(每块 CHUNK 行, 各自一个 _write() 事务), 避免单源 2.6万行塞一个
-        事务长时间持锁。本地 id->DB id 在分块前一次性预分配, 跨块关系仍能正确
-        remap。代价: 失整源原子性(崩溃可能留半本); _run_extraction 逐源自清 +
-        可重跑兜底。Relations 引用不到的 local id 静默跳过。"""
+        分块执行批量 INSERT，但所有 object/relation 块共享一个事务：source 是
+        KG 的持久化边界，任一后续块失败都回滚整源。本地 id->DB id 在分块前一次性
+        预分配，跨块关系仍能正确 remap。Relations 引用不到的 local id 静默跳过。"""
         CHUNK = 1000
         now = self._now()
         local_to_id: Dict[str, str] = {}
@@ -248,9 +248,9 @@ class KnowledgeLifecycleService:
             nb_row = self.knowledge.notebook_tier_row(db, notebook_id)
         auto_status = 'reviewed' if (nb_row and nb_row["tier"] == 'base') else 'approved'
 
-        for i in range(0, len(objects), CHUNK):
-            chunk = objects[i:i + CHUNK]
-            with self._write() as db:
+        with self._write() as db:
+            for i in range(0, len(objects), CHUNK):
+                chunk = objects[i:i + CHUNK]
                 self.knowledge.insert_object_chunk(
                     db,
                     [(o["_oid"], notebook_id, o["object_type"], auto_status,
@@ -276,9 +276,8 @@ class KnowledgeLifecycleService:
                 ]
                 if kos_rows:
                     self.knowledge.insert_object_source_rows(db, kos_rows)
-        for i in range(0, len(db_relations), CHUNK):
-            chunk = db_relations[i:i + CHUNK]
-            with self._write() as db:
+            for i in range(0, len(db_relations), CHUNK):
+                chunk = db_relations[i:i + CHUNK]
                 self.knowledge.insert_relation_chunk(
                     db,
                     [(r["_rid"], notebook_id, source_id,
@@ -728,6 +727,30 @@ class KnowledgeLifecycleService:
         except Exception:  # noqa: BLE001 - notification is fail-open
             pass
 
+    def _emit_kg_build_event(
+        self,
+        kind: str,
+        job: dict,
+        *,
+        latency_ms: int = 0,
+    ) -> None:
+        """Emit only the reviewed task metadata; never prompts or diagnostics."""
+        self.event_log.emit(
+            {
+                "kind": kind,
+                "job_id": job["id"],
+                "notebook_id": job["notebook_id"],
+                "mode": job["mode"],
+                "status": job["status"],
+                "stage": job["stage"],
+                "total_sources": int(job["total_sources"]),
+                "completed_sources": int(job["completed_sources"]),
+                "failed_sources": int(job["failed_sources"]),
+                "error_code": job["error_code"],
+                "latency_ms": max(0, int(latency_ms)),
+            }
+        )
+
     def _kg_target_state(
         self, notebook_id: str, mode: str
     ) -> Tuple[List[str], List[str], List[str]]:
@@ -769,6 +792,7 @@ class KnowledgeLifecycleService:
         )
         with self.kg_building_lock:
             self.kg_building.add(notebook_id)
+        self._emit_kg_build_event("kg_build_started", job)
         self._publish_pending_started()
         return job
 
@@ -779,6 +803,10 @@ class KnowledgeLifecycleService:
             return False
         failed = self.kg_build_jobs.fail_submission(job_id)
         if failed:
+            self._emit_kg_build_event(
+                "kg_build_failed",
+                self.kg_build_jobs.get(job_id),
+            )
             with self.kg_building_lock:
                 self.kg_building.discard(job["notebook_id"])
         return failed
@@ -805,6 +833,7 @@ class KnowledgeLifecycleService:
         control: KgExtractionRunControl,
         controlled_client: TaskScopedKgClient,
         progress=None,
+        on_abort=None,
     ) -> dict:
         import concurrent.futures as _cf
         from app.services.kg import scheduler as _kg_scheduler
@@ -857,6 +886,10 @@ class KnowledgeLifecycleService:
             self.kg_build_jobs.record_source_result(
                 job_id, succeeded=succeeded
             )
+            self._emit_kg_build_event(
+                "kg_build_progress",
+                self.kg_build_jobs.get(job_id),
+            )
             progress_index += 1
             if progress is not None:
                 try:
@@ -874,6 +907,8 @@ class KnowledgeLifecycleService:
             abort = _record_result(future)
             if abort is None:
                 continue
+            if on_abort is not None:
+                on_abort(abort)
             for pending in futures:
                 pending.cancel()
             _cf.wait(futures)
@@ -938,6 +973,35 @@ class KnowledgeLifecycleService:
         controlled_client = TaskScopedKgClient(
             self.kg_llm_client, self.settings, control
         )
+        started = time.perf_counter()
+        stopping_marked = False
+
+        def _latency_ms() -> int:
+            return round((time.perf_counter() - started) * 1000)
+
+        def _mark_stopping(exc: KgBuildAborted) -> None:
+            nonlocal stopping_marked
+            if stopping_marked:
+                return
+            stopping_marked = True
+            self.kg_build_jobs.set_stage(
+                job_id,
+                "stopping",
+                error_code=exc.failure.code,
+                error_message=exc.failure.user_message,
+            )
+            stopping = self.kg_build_jobs.get(job_id)
+            self._emit_kg_build_event(
+                "kg_build_circuit_opened",
+                stopping,
+                latency_ms=_latency_ms(),
+            )
+            self._emit_kg_build_event(
+                "kg_build_stopping",
+                stopping,
+                latency_ms=_latency_ms(),
+            )
+
         try:
             if mode == "rebuild":
                 probe_kg_model(controlled_client)
@@ -958,22 +1022,28 @@ class KnowledgeLifecycleService:
                 control,
                 controlled_client,
                 progress,
+                _mark_stopping,
             )
             self._run_success_side_effects(notebook_id, result)
             self.kg_build_jobs.finish(job_id, "succeeded")
+            self._emit_kg_build_event(
+                "kg_build_succeeded",
+                self.kg_build_jobs.get(job_id),
+                latency_ms=_latency_ms(),
+            )
             return {**result, "job_id": job_id}
         except KgBuildAborted as exc:
-            self.kg_build_jobs.set_stage(
-                job_id,
-                "stopping",
-                error_code=exc.failure.code,
-                error_message=exc.failure.user_message,
-            )
+            _mark_stopping(exc)
             self.kg_build_jobs.finish(
                 job_id,
                 "failed",
                 error_code=exc.failure.code,
                 error_message=exc.failure.user_message,
+            )
+            self._emit_kg_build_event(
+                "kg_build_failed",
+                self.kg_build_jobs.get(job_id),
+                latency_ms=_latency_ms(),
             )
             raise
         except Exception:
@@ -982,6 +1052,11 @@ class KnowledgeLifecycleService:
                 "failed",
                 error_code="internal_error",
                 error_message=INTERNAL_KG_BUILD_ERROR_MESSAGE,
+            )
+            self._emit_kg_build_event(
+                "kg_build_failed",
+                self.kg_build_jobs.get(job_id),
+                latency_ms=_latency_ms(),
             )
             raise
         finally:
