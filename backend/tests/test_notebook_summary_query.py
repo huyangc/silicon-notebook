@@ -177,9 +177,9 @@ def test_t4deleg_visible_source_count_delegate(repo, monkeypatch):
     """memory-kg-extract Task 5 retargets the counts["sources"] projection
     from the generic count_rows(table, column, value) primitive to the
     dedicated visible_source_count(notebook_id) — it excludes Memory-derived
-    synthetic sources (source_type='memory'), which count_rows cannot express
-    since it is a table-agnostic helper still used elsewhere (the facade's
-    _count re-export). The delegation-proof spy moves with it."""
+    and Knowhow-table synthetic sources, which count_rows cannot express since
+    it is a table-agnostic helper still used elsewhere (the facade's _count
+    re-export). The delegation-proof spy moves with it."""
     notebook = repo.create_notebook(NotebookCreate(name="count-rows"))
     calls = []
 
@@ -222,19 +222,37 @@ def test_t4deleg_notebook_has_kg_delegate(repo, monkeypatch):
     assert calls and calls[0] == notebook.id  # MUT
 
 
-def test_t4deleg_visible_pending_kg_source_count_delegate(repo, monkeypatch):
+def test_t4deleg_from_row_uses_visible_pending_kg_sources(repo, monkeypatch):
     notebook = repo.create_notebook(NotebookCreate(name="pending"))
     calls = []
 
     def spy(db, notebook_id):
         calls.append(notebook_id)
-        return 0
+        return 17
 
     monkeypatch.setattr(
-        repo._runtime.queries, "visible_pending_kg_source_count", spy
+        repo._runtime.notebook_summaries, "visible_pending_kg_sources", spy
     )
-    repo.get_notebook(notebook.id)
+    summary = repo.get_notebook(notebook.id)
     assert calls and calls[0] == notebook.id  # MUT
+    assert summary.kg_pending_sources == 17
+
+
+def test_t4deleg_count_pending_kg_sources_stays_physical(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="physical-pending"))
+    calls = []
+
+    def spy(db, notebook_id):
+        calls.append(notebook_id)
+        return 23
+
+    monkeypatch.setattr(repo._runtime.queries, "pending_kg_source_count", spy)
+    with repo._connect() as db:
+        count = repo._runtime.notebook_summaries.count_pending_kg_sources(
+            db, notebook.id
+        )
+    assert calls and calls[0] == notebook.id  # MUT
+    assert count == 23
 
 
 def test_t4deleg_mounted_bases_row_delegate(repo, monkeypatch):

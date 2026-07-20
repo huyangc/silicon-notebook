@@ -38,8 +38,9 @@ existing invalidate hooks cover them for free):
 Sources COUNT / ``source_ids`` are deliberately NOT cached here: ``create_source``
 inserts a row without bumping the seq, so a seq-keyed memo would drift — and they
 stay cheap without a memo. The user-facing source count
-(``QueryStore.visible_source_count``, ``AND source_type != 'memory'``) and the
-/analytics parse_status GROUP BY are both covering-only scans via
+(``QueryStore.visible_source_count``,
+``AND source_type NOT IN ('memory', 'knowhow')``) and the /analytics
+parse_status GROUP BY are both covering-only scans via
 ``idx_sources_nb_parse_status_type`` (notebook_id, parse_status, source_type;
 migration 15), so neither回表s to the sources base table nor tops the cold-open
 budget.
@@ -62,6 +63,7 @@ _PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _VISIBLE_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _LOCK = threading.Lock()
+_INVALIDATION_EPOCH = 0
 _MAX_NOTEBOOKS = 512  # bounded LRU; counts dict per notebook is tiny (types×statuses)
 
 
@@ -183,33 +185,40 @@ def pending_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
         if hit is not None and hit[0] == seq:
             _PENDING.move_to_end(notebook_id)
             return hit[1]
+        invalidation_epoch = _INVALIDATION_EPOCH
 
     count = _pending_source_count_query(db, notebook_id, visible_only=False)
 
     with _LOCK:
-        _PENDING[notebook_id] = (seq, count)
-        _PENDING.move_to_end(notebook_id)
-        while len(_PENDING) > _MAX_NOTEBOOKS:
-            _PENDING.popitem(last=False)
+        if invalidation_epoch == _INVALIDATION_EPOCH:
+            _PENDING[notebook_id] = (seq, count)
+            _PENDING.move_to_end(notebook_id)
+            while len(_PENDING) > _MAX_NOTEBOOKS:
+                _PENDING.popitem(last=False)
     return count
 
 
 def visible_pending_source_count(
     db: sqlite3.Connection, notebook_id: str
 ) -> int:
-    """User-visible parsed source count without a complete KG graph."""
+    """User-visible parsed source count without a complete KG graph.
+
+    Excludes Memory-derived and Knowhow-table synthetic sources.
+    """
     seq = _mutation_seq(db, notebook_id)
     with _LOCK:
         hit = _VISIBLE_PENDING.get(notebook_id)
         if hit is not None and hit[0] == seq:
             _VISIBLE_PENDING.move_to_end(notebook_id)
             return hit[1]
+        invalidation_epoch = _INVALIDATION_EPOCH
     count = _pending_source_count_query(db, notebook_id, visible_only=True)
     with _LOCK:
-        _VISIBLE_PENDING[notebook_id] = (seq, count)
-        _VISIBLE_PENDING.move_to_end(notebook_id)
-        while len(_VISIBLE_PENDING) > _MAX_NOTEBOOKS:
-            _VISIBLE_PENDING.popitem(last=False)
+        if invalidation_epoch == _INVALIDATION_EPOCH:
+            _VISIBLE_PENDING[notebook_id] = (seq, count)
+            _VISIBLE_PENDING.move_to_end(notebook_id)
+            while len(_VISIBLE_PENDING) > _MAX_NOTEBOOKS:
+                _VISIBLE_PENDING.popitem(last=False)
     return count
 
 
@@ -280,8 +289,12 @@ def invalidate(notebook_id: "Optional[str]" = None) -> None:
     """Drop cached counts (a whole notebook, or everything) across ALL
     memos. Not required for correctness — the seq gate self-invalidates — but a
     cheap safety valve for tests and for any write path that lands before its seq
-    bump commits (extraction begin, notebook-KG delete, test inserts)."""
+    bump commits (extraction begin, notebook-KG delete, test inserts). The epoch
+    prevents an in-flight pending-source query from reinserting its
+    pre-invalidation snapshot."""
+    global _INVALIDATION_EPOCH
     with _LOCK:
+        _INVALIDATION_EPOCH += 1
         if notebook_id is None:
             _MEMO.clear()
             _PENDING.clear()

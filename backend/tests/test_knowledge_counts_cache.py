@@ -244,6 +244,76 @@ def test_physical_and_visible_pending_source_caches_diverge_and_invalidate():
     assert kcc.visible_pending_source_count(db, nb) == 0
 
 
+def _assert_pending_query_invalidation_does_not_reinsert(
+    monkeypatch, *, counter, invalidate_all
+):
+    db = _db()
+    nb = f"nb-{counter.__name__}-invalidation-race-{int(invalidate_all)}"
+    _add_source(db, nb, "s-uploaded")
+    _set_seq(db, nb, 1)
+    db.commit()
+    original = kcc._pending_source_count_query
+    raced = False
+
+    def snapshot_then_invalidate(db_arg, notebook_id, *, visible_only):
+        nonlocal raced
+        count = original(db_arg, notebook_id, visible_only=visible_only)
+        if not raced:
+            raced = True
+            db_arg.execute(
+                "INSERT INTO knowledge_objects"
+                "(id,notebook_id,object_type,status,source_id) VALUES(?,?,?,?,?)",
+                (
+                    f"ko-{counter.__name__}-{int(invalidate_all)}",
+                    nb,
+                    "concept",
+                    "approved",
+                    "s-uploaded",
+                ),
+            )
+            db_arg.commit()
+            if invalidate_all:
+                kcc.invalidate()
+            else:
+                kcc.invalidate(notebook_id)
+        return count
+
+    monkeypatch.setattr(kcc, "_pending_source_count_query", snapshot_then_invalidate)
+
+    assert counter(db, nb) == 1
+    assert counter(db, nb) == 0
+
+
+def test_pending_source_count_does_not_reinsert_snapshot_after_invalidation(
+    monkeypatch,
+):
+    _assert_pending_query_invalidation_does_not_reinsert(
+        monkeypatch,
+        counter=kcc.pending_source_count,
+        invalidate_all=False,
+    )
+
+
+def test_visible_pending_source_count_does_not_reinsert_after_invalidation(
+    monkeypatch,
+):
+    _assert_pending_query_invalidation_does_not_reinsert(
+        monkeypatch,
+        counter=kcc.visible_pending_source_count,
+        invalidate_all=False,
+    )
+
+
+def test_visible_pending_source_count_does_not_reinsert_after_global_invalidation(
+    monkeypatch,
+):
+    _assert_pending_query_invalidation_does_not_reinsert(
+        monkeypatch,
+        counter=kcc.visible_pending_source_count,
+        invalidate_all=True,
+    )
+
+
 def test_object_type_total_all_vs_status_slice():
     db = _db()
     nb = "nbo"
