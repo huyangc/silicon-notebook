@@ -364,12 +364,15 @@ this is a measured baseline, not a portable timeout assertion for every host.
   target. Do not make the check required until stable green PR and post-merge
   runs have been observed and the user explicitly approves branch-protection
   changes.
-- CI-executed tests locate committed fixtures from `Path(__file__)`-anchored
-  repository paths. They must not embed developer checkout paths, depend on
-  `HOME`, or read repository-external source documents.
+- Every filesystem, data, and dependency path used by a CI-executed test is
+  repository-relative and independent of the process cwd. Committed fixtures
+  are located from `Path(__file__)`-anchored repository paths; tests must not
+  embed developer checkout paths, depend on `HOME`, or read
+  repository-external source documents.
 - Any third-party package imported during test startup is a direct declared
-  dependency in `backend/requirements.txt`; a developer's preinstalled package
-  is never evidence that CI can install the gate.
+  dependency in `backend/requirements.txt`; a clean CI install uses that file
+  and `frontend/package-lock.json`. A developer's preinstalled package is never
+  evidence that CI can install the gate.
 - Hosted-runner lane timings are observational. The under-60-second acceptance
   target applies to the verified Apple Silicon Homebrew warm gate, not a cold
   GitHub runner.

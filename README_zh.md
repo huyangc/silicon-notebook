@@ -1009,11 +1009,13 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 `CI / full-gate` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
 并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。
 
-CI 可移植性属于门禁契约：所有由 CI 执行的测试都必须从当前仓库文件位置
-定位已提交 fixture，禁止依赖开发机 checkout 绝对路径或 `HOME`；测试启动时
-直接导入的第三方包必须声明在 `backend/requirements.txt`。干净 hosted runner
-必须只凭这些声明即可安装并全绿。各 lane 时长继续输出供观察，60 秒内目标
-只约束已验证的 Apple Silicon Homebrew warm gate。
+CI 可移植性属于门禁契约：所有由 CI 执行的测试使用的文件系统、数据和依赖
+路径都必须相对仓库，并且独立于进程 cwd。已提交 fixture 必须从其仓库文件位置
+定位，禁止依赖开发机 checkout 绝对路径或 `HOME`，测试也不得读取仓库外源文档。
+测试启动时直接导入的第三方包必须声明在 `backend/requirements.txt`；干净 hosted
+runner 必须从该文件和 `frontend/package-lock.json` 安装，并且只凭这些声明即可
+全绿。各 lane 时长继续输出供观察，60 秒内目标只约束已验证的 Apple Silicon
+Homebrew warm gate。
 
 依赖仓库外 PDF 解析产物的 gold 生成、构建与校验脚本仍属于 developer-only
 工具并保持在 `scripts/check.sh` 之外；该例外绝不适用于已提交测试。

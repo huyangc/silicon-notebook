@@ -1097,13 +1097,16 @@ separate from the under-60-second local Apple Silicon warm-gate target.
 only after stable green pull-request and post-merge runs have been observed
 and the user explicitly approves the branch-protection change.
 
-CI portability is part of the gate contract: every CI-executed test locates
-committed fixtures relative to its own repository files, never through a
-developer checkout path or `HOME`; every third-party package imported during
-test startup is declared in `backend/requirements.txt`. A clean hosted runner
-must install and pass from those declarations alone. Lane timings remain
-visible for observation, while the under-60-second target applies only to the
-verified Apple Silicon Homebrew warm gate.
+CI portability is part of the gate contract: every filesystem, data, and
+dependency path used by a CI-executed test is repository-relative and
+independent of the process cwd. Committed fixtures are located relative to
+their repository files, never through a developer checkout path or `HOME`,
+and tests never read repository-external source documents. Every third-party
+package imported during test startup is declared in `backend/requirements.txt`;
+a clean hosted runner installs from that file and `frontend/package-lock.json`,
+then passes from those declarations alone. Lane timings remain visible for
+observation, while the under-60-second target applies only to the verified
+Apple Silicon Homebrew warm gate.
 
 Developer-only gold-generation/build/validation scripts that consume external
 PDF parse output remain outside `scripts/check.sh`; that exception never
