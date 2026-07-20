@@ -2110,7 +2110,7 @@ def transfer_knowhow_table(
     user: UserProfile = Depends(get_current_user),
 ) -> dict:
     if payload.target_notebook_id == notebook_id:
-        raise HTTPException(status_code=400, detail="源与目标不能是同一个 notebook")
+        raise user_error(400, "源与目标不能是同一个笔记本")
     repo = repository()
     access = _kh_access()
     # 只有 copy 能放宽到「只读成员」——写成 `read if copy else access` 而不是
