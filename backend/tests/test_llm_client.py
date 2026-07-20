@@ -3,7 +3,7 @@ connection must NOT be amplified into a ~6-minute block by SDK auto-retries or
 by the JSON-mode -> plain-mode fallback."""
 import httpx
 import pytest
-from openai import APIConnectionError, APITimeoutError
+from openai import APIConnectionError, APIStatusError, APITimeoutError
 
 import app.core.llm as llm_mod
 from app.core.config import Settings
@@ -50,6 +50,16 @@ class _FakeOpenAI:
     def __init__(self, create): self.chat = _Chat(create)
 
 
+def _api_status_error(status, message):
+    request = httpx.Request("POST", "https://x/chat/completions")
+    response = httpx.Response(
+        status,
+        request=request,
+        json={"error": {"message": message}},
+    )
+    return APIStatusError(message, response=response, body=response.json())
+
+
 def _make(monkeypatch, create):
     monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://x")
     monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "k")
@@ -58,6 +68,45 @@ def _make(monkeypatch, create):
     c = OpenAICompatibleClient(Settings())
     monkeypatch.setattr(c, "client", lambda: _FakeOpenAI(create))
     return c
+
+
+def test_kg_llm_limits_have_bounded_defaults(monkeypatch):
+    monkeypatch.delenv("KG_LLM_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("KG_LLM_MAX_RETRIES", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.kg_llm_timeout_seconds == 60
+    assert settings.kg_llm_max_retries == 2
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503])
+def test_transient_http_status_uses_bounded_retry(monkeypatch, status):
+    monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "1")
+    monkeypatch.setattr(llm_mod, "sleep_or_cancel", lambda *_a, **_k: None)
+    err = _api_status_error(status, "upstream unavailable")
+    create = _FakeCreate([err, _Resp()])
+    client = _make(monkeypatch, create)
+    assert client.chat_json([{"role": "user", "content": "hi"}], "{}") == '{"ok":1}'
+    assert len(create.calls) == 2
+    assert "response_format" in create.calls[1]
+
+
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_permanent_http_status_does_not_retry_or_plain_fallback(monkeypatch, status):
+    monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "3")
+    create = _FakeCreate([_api_status_error(status, "denied")])
+    client = _make(monkeypatch, create)
+    with pytest.raises(APIStatusError):
+        client.chat_json([{"role": "user", "content": "hi"}], "{}")
+    assert len(create.calls) == 1
+
+
+def test_only_explicit_response_format_rejection_falls_back(monkeypatch):
+    rejected = _api_status_error(400, "response_format json_object is unsupported")
+    create = _FakeCreate([rejected, _Resp()])
+    client = _make(monkeypatch, create)
+    assert client.chat_json([{"role": "user", "content": "hi"}], "{}") == '{"ok":1}'
+    assert len(create.calls) == 2
+    assert "response_format" not in create.calls[1]
 
 
 def test_connection_error_fails_fast_no_fallback(monkeypatch):

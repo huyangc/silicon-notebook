@@ -141,6 +141,17 @@ class Settings(BaseSettings):
     kg_llm_base_url: str = Field("", validation_alias="KG_LLM_BASE_URL")
     kg_llm_api_key: str = Field("", validation_alias="KG_LLM_API_KEY")
     kg_llm_model: str = Field("", validation_alias="KG_LLM_MODEL")
+    kg_llm_timeout_seconds: int = Field(
+        60,
+        gt=0,
+        validation_alias="KG_LLM_TIMEOUT_SECONDS",
+    )
+    kg_llm_max_retries: int = Field(
+        2,
+        ge=0,
+        le=3,
+        validation_alias="KG_LLM_MAX_RETRIES",
+    )
 
     # --- 论文元数据抽取(paper-metadata):对 academic_paper 源的文档头部做一次小
     # LLM 调用,接地校验后入库(source_paper_meta/source_authors)。

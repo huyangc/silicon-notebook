@@ -5,12 +5,45 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from openai import APIConnectionError, APITimeoutError, OpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from app.core.config import Settings
 from app.core.llm_cache import CacheBackend, cache_key
 from app.core.llm_logging import LLMInteractionLogger, new_interaction_id
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled, sleep_or_cancel
+
+
+def llm_status_code(exc: Exception) -> int | None:
+    value = getattr(exc, "status_code", None)
+    return int(value) if isinstance(value, int) else None
+
+
+def is_transient_llm_error(exc: Exception) -> bool:
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    status = llm_status_code(exc)
+    return status == 429 or (status is not None and 500 <= status <= 599)
+
+
+def is_response_format_rejection(exc: Exception) -> bool:
+    status = llm_status_code(exc)
+    text = str(exc).lower()
+    return status in (400, 422) and (
+        "response_format" in text
+        or "json_object" in text
+        or "json mode" in text
+    )
+
+
+def _is_non_http_response_format_rejection(exc: Exception) -> bool:
+    if not isinstance(exc, ValueError):
+        return False
+    text = str(exc).lower()
+    return (
+        "response_format" in text
+        or "json_object" in text
+        or "json mode" in text
+    )
 
 
 def _usage_dict(response: Any) -> Optional[Dict[str, int]]:
@@ -249,17 +282,17 @@ class OpenAICompatibleClient:
                             response = self.client().chat.completions.create(
                                 **kwargs, **req_kwargs, response_format={"type": "json_object"}
                             )
-                    except (APIConnectionError, APITimeoutError):
-                        # Network stall/timeout: do NOT retry the whole request
-                        # without JSON mode (that would double the wait). Re-raise
-                        # so the connection-retry loop below handles it.
-                        raise
                     except AskCancelled:
                         raise
-                    except Exception:
+                    except Exception as exc:
                         # Server rejected response_format (param unsupported):
                         # retry once in plain mode. NOT a connection error, so it
                         # never enters the bounded connection-retry loop.
+                        if not (
+                            is_response_format_rejection(exc)
+                            or _is_non_http_response_format_rejection(exc)
+                        ):
+                            raise
                         if cancel_event is not None:
                             streamed_content = self._stream_chat_content(
                                 kwargs, req_kwargs, json_mode=False, cancel_event=cancel_event)
@@ -268,8 +301,11 @@ class OpenAICompatibleClient:
                     break
                 except AskCancelled:
                     raise
-                except (APIConnectionError, APITimeoutError) as exc:
-                    if attempt + 1 >= attempts:
+                except Exception as exc:
+                    if (
+                        not is_transient_llm_error(exc)
+                        or attempt + 1 >= attempts
+                    ):
                         # Exhausted: propagate so the outer handler logs an error.
                         raise
                     # Visible retry record so blips show up in llm.jsonl.
