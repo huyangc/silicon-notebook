@@ -1060,6 +1060,23 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 
 The current Apple Silicon development baseline is a complete warm gate under 60 seconds. This is a measured local target, not a portable timeout assertion for every CI host.
 
+### GitHub Actions CI
+
+`.github/workflows/ci.yml` exposes the same complete gate as the single
+`CI / full-gate` check. It runs for pull requests targeting `master`, pushes
+to `master`, and manual dispatches on `ubuntu-24.04` with Python 3.13 and
+Node.js 22. The workflow installs from `backend/requirements.txt` and
+`frontend/package-lock.json`, then delegates test selection entirely to
+`scripts/check.sh`.
+
+The workflow is read-only, does not receive model or deployment secrets, and
+uses four backend pytest workers to avoid oversubscribing the hosted runner.
+Its 20-minute timeout includes dependency installation and is intentionally
+separate from the under-60-second local Apple Silicon warm-gate target.
+`CI / full-gate` is initially observational; make it a required `master` check
+only after stable green pull-request and post-merge runs have been observed
+and the user explicitly approves the branch-protection change.
+
 ## Development Workflow
 
 For every new feature development task, create a new git worktree by default, start a new feature branch inside that worktree, complete the work there, and open a PR from that branch. Do not switch branches directly in the main local checkout for feature work. If the current directory is already an isolated linked worktree, keep working there.
