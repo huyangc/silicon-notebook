@@ -110,6 +110,8 @@ export type KnowhowImportPreview = {
   anchorSuggestion: number | null;
 };
 
+export type KnowhowImportOrientation = "columns" | "rows";
+
 // --- 编辑 API 输入类型（Task 3）--------------------------------------------------
 
 export type KnowhowTablePatch = { title?: string; description?: string; anchorColumnId?: string | null };
@@ -367,7 +369,8 @@ export const fetchKnowhowTable = (notebookId: string, tableId: string): Promise<
   apiFetch<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow/${tableId}`).then(mapDetail);
 
 // 导入预览：上传文件、拿列名+猜测内容类型+行标题列建议+前 5 行预览+总行数，
-// 不建表。`anchorIndex` 可选——向导在步骤②改/清行标题列后重取预览时带上它，后端
+// 不建表。`orientation` 决定原始属性按列还是按行；`anchorIndex` 可选——向导在
+// 步骤②改/清行标题列后重取预览时带上它，后端
 // 据此按**所选**锚定列跳过规整（而非猜测列），保住「预览即所得」（见后端
 // preview_import 的 anchor_index 参数）。
 // 三态编码（评审残留修复）：省略参数只能表达三态之一，故——
@@ -379,10 +382,12 @@ export const fetchKnowhowTable = (notebookId: string, tableId: string): Promise<
 export const importKnowhowPreview = (
   notebookId: string,
   file: File | Blob,
+  orientation: KnowhowImportOrientation = "columns",
   anchorIndex?: number | null,
 ): Promise<KnowhowImportPreview> => {
   const form = new FormData();
   form.append("file", file);
+  form.append("orientation", orientation);
   if (typeof anchorIndex === "number") form.append("anchor_index", String(anchorIndex));
   else if (anchorIndex === null) form.append("anchor_index", "-1");
   return apiFetch<WireImportPreview>(`/notebooks/${notebookId}/knowhow/import/preview`, {
@@ -406,11 +411,13 @@ export const importKnowhow = (
   title: string,
   columns: { name: string; kind: ColumnKind }[],
   anchorIndex: number | null,
+  orientation: KnowhowImportOrientation = "columns",
 ): Promise<KnowhowTableDetail> => {
   const form = new FormData();
   form.append("file", file);
   form.append("title", title);
   form.append("columns_json", JSON.stringify(columns));
+  form.append("orientation", orientation);
   // null=不设行标题列（记录型表）：不发该字段，走后端 Form(None) 默认。
   if (anchorIndex !== null) form.append("anchor_index", String(anchorIndex));
   return apiFetch<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow/import`, {
