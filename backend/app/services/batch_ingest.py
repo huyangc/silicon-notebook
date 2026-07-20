@@ -144,15 +144,15 @@ def _batch_concurrency_scope(
     )
     old_window = scheduler.max_workers()
     old_job = scheduler.job_concurrency()
-    repo.settings.kg_job_concurrency = effective.workers
-    repo.settings.kg_extract_workers = effective.llm
-    repo.settings.embed_concurrency = effective.embedding
-    scheduler.configure(
-        window_workers=effective.llm,
-        job_workers=effective.workers,
-    )
     phase_error: BaseException | None = None
     try:
+        repo.settings.kg_job_concurrency = effective.workers
+        repo.settings.kg_extract_workers = effective.llm
+        repo.settings.embed_concurrency = effective.embedding
+        scheduler.configure(
+            window_workers=effective.llm,
+            job_workers=effective.workers,
+        )
         with activate_model_concurrency(
             llm_max=effective.llm,
             embed_max=effective.embedding,

@@ -588,6 +588,54 @@ def test_batch_scope_restore_failure_does_not_mask_phase_error(
         scheduler.reset()
 
 
+def test_batch_scope_install_failure_restores_settings_and_scheduler(
+    repo, monkeypatch
+):
+    from app.services.kg import scheduler
+    from app.services.model_concurrency import current_model_concurrency
+
+    old_settings = (
+        repo.settings.kg_job_concurrency,
+        repo.settings.kg_extract_workers,
+        repo.settings.embed_concurrency,
+    )
+    old_window = scheduler.max_workers()
+    old_job = scheduler.job_concurrency()
+    effective = bi.EffectiveConcurrency(
+        workers=7,
+        llm=5,
+        embedding=2,
+        workers_source="cli",
+        llm_source="cli",
+        embedding_source="cli",
+    )
+    real_configure = scheduler.configure
+    calls = 0
+
+    def fail_install_once(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("install failed")
+        return real_configure(**kwargs)
+
+    monkeypatch.setattr(scheduler, "configure", fail_install_once)
+
+    with pytest.raises(RuntimeError, match="install failed"):
+        with bi._batch_concurrency_scope(repo, effective):
+            pytest.fail("phase must not start when scheduler installation fails")
+
+    assert calls == 2
+    assert current_model_concurrency() is None
+    assert scheduler.max_workers() == old_window
+    assert scheduler.job_concurrency() == old_job
+    assert (
+        repo.settings.kg_job_concurrency,
+        repo.settings.kg_extract_workers,
+        repo.settings.embed_concurrency,
+    ) == old_settings
+
+
 def test_main_prints_effective_concurrency(repo, monkeypatch, capsys):
     nb_id = bi.ensure_notebook(repo, None, "nb-effective-concurrency")
     monkeypatch.setenv("EMBED_PROVIDER", "")
