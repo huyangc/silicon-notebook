@@ -168,6 +168,28 @@ def current_model_concurrency() -> ModelConcurrencyState | None:
         return _active_state
 
 
+def _shutdown_model_concurrency(
+    state: ModelConcurrencyState,
+    *,
+    primary_error: BaseException | None = None,
+) -> None:
+    global _active_state
+    try:
+        try:
+            state.embedding.shutdown()
+        except BaseException as shutdown_error:
+            if primary_error is None:
+                raise
+            primary_error.add_note(
+                "model concurrency shutdown failed while preserving the "
+                f"primary error: {shutdown_error!r}"
+            )
+    finally:
+        with _state_lock:
+            if _active_state is state:
+                _active_state = None
+
+
 @contextmanager
 def activate_model_concurrency(
     *, llm_max: int, embed_max: int
@@ -184,11 +206,11 @@ def activate_model_concurrency(
         _active_state = state
     try:
         yield state
-    finally:
-        state.embedding.shutdown()
-        with _state_lock:
-            if _active_state is state:
-                _active_state = None
+    except BaseException as primary_error:
+        _shutdown_model_concurrency(state, primary_error=primary_error)
+        raise
+    else:
+        _shutdown_model_concurrency(state)
 
 
 class LimitedJsonChatClient:

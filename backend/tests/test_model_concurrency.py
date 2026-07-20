@@ -4,6 +4,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 import pytest
 
+from app.services import model_concurrency as model_concurrency_module
 from app.services.model_concurrency import (
     BoundedEmbeddingExecutor,
     ConcurrencyGate,
@@ -168,6 +169,57 @@ def test_activation_remains_registered_until_owned_executor_drains(monkeypatch):
         thread.join(2)
 
     assert scope_finished.is_set()
+    assert current_model_concurrency() is None
+
+
+def test_activation_shutdown_failure_surfaces_and_clears_state(monkeypatch):
+    shutdown_error = RuntimeError("injected shutdown failure")
+    monkeypatch.setattr(model_concurrency_module, "_active_state", None)
+
+    with pytest.raises(RuntimeError, match="injected shutdown failure") as caught:
+        with activate_model_concurrency(llm_max=1, embed_max=1) as state:
+            original_shutdown = state.embedding.shutdown
+
+            def failing_shutdown():
+                original_shutdown()
+                raise shutdown_error
+
+            monkeypatch.setattr(state.embedding, "shutdown", failing_shutdown)
+
+    assert caught.value is shutdown_error
+    assert current_model_concurrency() is None
+    with activate_model_concurrency(llm_max=1, embed_max=1) as next_state:
+        assert current_model_concurrency() is next_state
+
+    assert current_model_concurrency() is None
+
+
+def test_activation_shutdown_failure_does_not_mask_body_error(monkeypatch):
+    primary_error = ValueError("injected body failure")
+    shutdown_error = RuntimeError("injected shutdown failure")
+    monkeypatch.setattr(model_concurrency_module, "_active_state", None)
+
+    with pytest.raises(ValueError, match="injected body failure") as caught:
+        with activate_model_concurrency(llm_max=1, embed_max=1) as state:
+            original_shutdown = state.embedding.shutdown
+
+            def failing_shutdown():
+                original_shutdown()
+                raise shutdown_error
+
+            monkeypatch.setattr(state.embedding, "shutdown", failing_shutdown)
+            raise primary_error
+
+    assert caught.value is primary_error
+    assert current_model_concurrency() is None
+    assert any(
+        "model concurrency shutdown failed" in note
+        and "injected shutdown failure" in note
+        for note in getattr(primary_error, "__notes__", [])
+    )
+    with activate_model_concurrency(llm_max=1, embed_max=1):
+        pass
+
     assert current_model_concurrency() is None
 
 
