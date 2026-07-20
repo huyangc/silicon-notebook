@@ -248,3 +248,31 @@ def test_failed_latest_extraction_does_not_hide_partial_source_graph(repo):
     )
     assert targets == [src_id]
     assert skipped == []
+
+
+def test_completed_extraction_invalidates_prewarmed_pending_cache(repo):
+    """Completing the run must refresh pending count without another KG write."""
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    src_id = _insert_source(repo, nb.id)
+    run_id = f"run-{uuid4().hex[:10]}"
+    now = _now()
+    with repo._write() as db:
+        db.execute(
+            """
+            INSERT INTO extraction_runs
+            (id, notebook_id, source_id, run_type, status, error_message,
+             created_at, updated_at)
+            VALUES (?, ?, ?, 'kg', 'running', '', ?, ?)
+            """,
+            (run_id, nb.id, src_id, now, now),
+        )
+    repo._test_insert_object(
+        nb.id, "concept", {"name": "Complete"}, source_id=src_id
+    )
+
+    assert repo.get_notebook(nb.id).kg_pending_sources == 1
+    repo._runtime.knowledge.finish_extraction(
+        run_id, "completed", "kg objects=1"
+    )
+
+    assert repo.get_notebook(nb.id).kg_pending_sources == 0

@@ -170,6 +170,18 @@ def test_restart_marks_running_kg_job_failed(tmp_path):
         )
         db.execute(
             """
+            INSERT INTO sources
+            (id, notebook_id, title, source_type, status, parse_status,
+             file_name, file_path, file_size, file_hash, summary, doc_type,
+             created_at, updated_at)
+            VALUES ('source-before-run', ?, 'Interrupted before run',
+                    'markdown', 'extracting', 'extracting', 'before.md', '',
+                    0, '', '', 'academic_paper', ?, ?)
+            """,
+            (notebook.id, now, now),
+        )
+        db.execute(
+            """
             INSERT INTO extraction_runs
             (id, notebook_id, source_id, run_type, status, error_message,
              created_at, updated_at)
@@ -195,10 +207,18 @@ def test_restart_marks_running_kg_job_failed(tmp_path):
             "SELECT status, parse_status FROM sources "
             "WHERE id='source-restart'"
         ).fetchone()
+        before_run = db.execute(
+            "SELECT status, parse_status FROM sources "
+            "WHERE id='source-before-run'"
+        ).fetchone()
         run = db.execute(
             "SELECT status, error_message FROM extraction_runs "
             "WHERE id='run-restart'"
         ).fetchone()
     assert (source["status"], source["parse_status"]) == ("parsed", "parsed")
+    assert (before_run["status"], before_run["parse_status"]) == (
+        "parsed",
+        "parsed",
+    )
     assert run["status"] == "failed"
     assert "worker_interrupted" in run["error_message"]

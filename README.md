@@ -446,10 +446,12 @@ Each KG model request uses `KG_LLM_TIMEOUT_SECONDS` (default `60`) and at most
 `KG_LLM_MAX_RETRIES` retries (default `2`, allowed `0..3`). If transient
 unavailability persists, or the service rejects/authenticates the request
 permanently, the shared control for that one job stops new requests, cancels
-queued source/window work, and drains calls already in flight. Other notebooks
-and later tasks are unaffected. The availability probe explicitly bypasses the
-LLM response cache and does not populate it, so a stale successful probe cannot
-authorize destructive rebuild work during a live outage.
+queued source/window work, publishes `stopping` from the first failing window
+before either window- or source-level draining, and then drains calls already
+in flight. Other notebooks and later tasks are unaffected. The availability
+probe explicitly bypasses the LLM response cache and does not populate it, so a
+stale successful probe cannot authorize destructive rebuild work during a live
+outage.
 
 Completed sources remain committed; an interrupted source does not persist a
 partial extraction: object/relation chunks for one source share one SQLite
@@ -458,7 +460,10 @@ still classified as unfinished. A later normal build analyzes only unfinished
 sources. Explicit rebuild is the only action that clears existing KG data, and
 it probes the model before deleting anything. If the process restarts with a
 running job, startup recovery marks that job and its running extraction rows
-failed and restores affected sources from `extracting` to `parsed`.
+failed and restores every orphan `extracting` source to `parsed`, including a
+source interrupted before its extraction-run row was created. Completing or
+failing an extraction run also invalidates that notebook's pending-source memo,
+so a status poll cannot keep reporting a completed source as unfinished.
 
 The frontend guards start responses by notebook, workspace epoch, and request
 epoch, and keeps polling while the durable job remains `running`; it does not

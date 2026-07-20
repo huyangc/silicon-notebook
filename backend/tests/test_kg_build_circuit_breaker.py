@@ -277,11 +277,44 @@ def test_rebuild_probe_failure_happens_before_delete(repo, monkeypatch):
     assert saved["error_code"] == "model_unavailable"
 
 
-def test_job_enters_stopping_before_running_sources_are_drained(repo):
+def test_job_enters_stopping_before_running_windows_are_drained(
+    repo, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from app.services import kg_ingest
+    from app.services.kg.parsing import SourceElementQ
+
     notebook, _source_ids = _seed_three_parsed_sources(repo)
     client = _DrainVisibilityClient()
     repo._kg_llm_client = client
-    kg_scheduler.configure(window_workers=2, job_workers=2)
+    elements = [
+        SourceElementQ(
+            id=f"window-element-{index}",
+            type="paragraph",
+            file="source.md",
+            line_start=index + 1,
+            line_end=index + 1,
+            char_start=index * 20,
+            char_end=index * 20 + 12,
+            text=f"technical fact {index}",
+        )
+        for index in range(2)
+    ]
+    monkeypatch.setattr(
+        kg_ingest,
+        "windows_with_elements",
+        lambda *_args, **_kwargs: [
+            (SimpleNamespace(section_path=f"section-{index}"), [element])
+            for index, element in enumerate(elements)
+        ],
+    )
+    monkeypatch.setattr(
+        kg_ingest,
+        "should_extract_window",
+        lambda *_args, **_kwargs: (True, ""),
+    )
+    kg_scheduler.configure(window_workers=2, job_workers=1)
     job = repo.prepare_notebook_kg_job(notebook.id, "incremental")
 
     with ThreadPoolExecutor(max_workers=1) as executor:

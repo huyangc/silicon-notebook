@@ -393,16 +393,19 @@ KB+confirmed-Memory 三种检索条件。
 每次 KG 模型请求使用 `KG_LLM_TIMEOUT_SECONDS`（默认 `60` 秒），瞬态错误最多重试
 `KG_LLM_MAX_RETRIES` 次（默认 `2`，允许 `0..3`）。若服务持续不可达，或认证失败/
 请求被永久拒绝，本次任务共享的中断控制会阻止继续发起请求，取消尚未开始的
-source/window 工作，并等待已经开始的调用安全退出。中断范围只限当前 notebook 的
-本次 KG 任务，不影响其他 notebook 或之后重新发起的任务。可用性探测会显式绕过
-LLM 响应缓存且不回写缓存，旧的成功探测不能在当前模型已经不可用时放行破坏性重建。
+source/window 工作，在首个窗口确认熔断时、窗口级与来源级 drain 开始前就持久化
+`stopping`，再等待已经开始的调用安全退出。中断范围只限当前 notebook 的本次 KG
+任务，不影响其他 notebook 或之后重新发起的任务。可用性探测会显式绕过 LLM 响应
+缓存且不回写缓存，旧的成功探测不能在当前模型已经不可用时放行破坏性重建。
 
 已完成来源的结果会保留；同一来源的 object/relation 分块共用一个 SQLite 事务，被
 中断或写入失败的来源不会留下半成品；旧版本遗留但最新 extraction run 已失败的图也
 仍判定为未完成。之后普通「继续分析」只处理未完成来源。只有显式「全部重新分析」
 会清空已有 KG，而且会在删除前先探测模型服务。若进程重启时仍有 running job，启动
-恢复会把 job 与 running extraction run 标为 failed，并把关联来源从 `extracting`
-恢复为 `parsed`。
+恢复会把 job 与 running extraction run 标为 failed，并把所有遗留的 `extracting`
+来源恢复为 `parsed`，包括尚未来得及创建 extraction run 就中断的来源。extraction
+run 进入完成或失败终态后还会精确失效该 notebook 的待处理来源缓存，避免轮询长期把
+已完成来源误报为未完成。
 
 前端用 notebook、workspace epoch 与请求 epoch 共同约束建库响应归属，并在持久化 job
 仍为 `running` 时持续轮询，不再用固定时限伪造本地完成。安全结构化事件覆盖

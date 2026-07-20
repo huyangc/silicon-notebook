@@ -3072,6 +3072,11 @@ KG_BUILD_CIRCUIT_ALLOWED_MEMBER_FILES = {
             "SQLiteRepository", "_connect", "_runtime", "_write",
             "create_notebook", "current_user",
         },
+        "backend/tests/test_kg_source_status.py": {
+            "_connect", "_count_pending_kg_sources", "_runtime",
+            "_source_has_kg", "_test_insert_object", "_write",
+            "create_notebook", "get_notebook", "get_source",
+        },
         "backend/tests/test_kg_building_flag.py": {
             "SQLiteRepository", "_kg_building", "_mark_unified_kg_dirty",
             "_runtime", "build_notebook_kg", "create_notebook", "embedder",

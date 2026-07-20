@@ -969,10 +969,6 @@ class KnowledgeLifecycleService:
             raise RuntimeError("KG build job does not match this request")
         with self.kg_building_lock:
             self.kg_building.add(notebook_id)
-        control = KgExtractionRunControl(job_id)
-        controlled_client = TaskScopedKgClient(
-            self.kg_llm_client, self.settings, control
-        )
         started = time.perf_counter()
         stopping_marked = False
 
@@ -983,13 +979,13 @@ class KnowledgeLifecycleService:
             nonlocal stopping_marked
             if stopping_marked:
                 return
-            stopping_marked = True
             self.kg_build_jobs.set_stage(
                 job_id,
                 "stopping",
                 error_code=exc.failure.code,
                 error_message=exc.failure.user_message,
             )
+            stopping_marked = True
             stopping = self.kg_build_jobs.get(job_id)
             self._emit_kg_build_event(
                 "kg_build_circuit_opened",
@@ -1001,6 +997,16 @@ class KnowledgeLifecycleService:
                 stopping,
                 latency_ms=_latency_ms(),
             )
+
+        control = KgExtractionRunControl(
+            job_id,
+            on_abort=lambda failure: _mark_stopping(
+                KgBuildAborted(failure)
+            ),
+        )
+        controlled_client = TaskScopedKgClient(
+            self.kg_llm_client, self.settings, control
+        )
 
         try:
             if mode == "rebuild":

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import inspect
 import random
 import threading
-from typing import Any
+from typing import Any, Callable
 
 from app.core.config import Settings
 from app.core.llm import is_transient_llm_error, llm_status_code
@@ -35,11 +35,17 @@ class KgBuildAborted(RuntimeError):
 
 
 class KgExtractionRunControl:
-    def __init__(self, job_id: str):
+    def __init__(
+        self,
+        job_id: str,
+        *,
+        on_abort: Callable[[KgBuildFailure], None] | None = None,
+    ):
         self.job_id = job_id
         self._event = threading.Event()
         self._lock = threading.Lock()
         self._failure: KgBuildFailure | None = None
+        self._on_abort = on_abort
 
     @property
     def aborted(self) -> bool:
@@ -51,11 +57,22 @@ class KgExtractionRunControl:
             return self._failure
 
     def abort(self, failure: KgBuildFailure) -> KgBuildFailure:
+        notify = None
         with self._lock:
             if self._failure is None:
                 self._failure = failure
                 self._event.set()
-            return self._failure
+                notify = self._on_abort
+            first_failure = self._failure
+        if notify is not None:
+            try:
+                notify(first_failure)
+            except Exception:
+                # State publication is retried by the outer source/job catch;
+                # never replace the classified model failure with telemetry or
+                # persistence plumbing from this window thread.
+                pass
+        return first_failure
 
     def raise_if_aborted(self) -> None:
         failure = self.failure

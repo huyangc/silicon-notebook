@@ -299,10 +299,23 @@ class KnowledgeStore:
             self.begin_extraction_run(db, source_id, notebook_id, run_id, created_at)
 
     def finish_extraction(self, run_id: str, status: str, message: str) -> None:
+        notebook_id = ""
         with self.database.write() as db:
+            row = db.execute(
+                "SELECT notebook_id FROM extraction_runs WHERE id=?",
+                (run_id,),
+            ).fetchone()
             self.finish_extraction_run(
                 db, run_id, status, message, self.seams.now()
             )
+            if row is not None:
+                notebook_id = row["notebook_id"]
+        if notebook_id:
+            # pending_source_count depends on the latest run status, while its
+            # version key is the KG mutation sequence. A status-only terminal
+            # update therefore needs an explicit post-commit invalidation.
+            from app.repositories.sqlite import knowledge_counts_cache
+            knowledge_counts_cache.invalidate(notebook_id)
 
     def add_relations_current(
         self, notebook_id: str, source_id: str, relations: List[dict]
