@@ -8,7 +8,7 @@ import {
 
 test("closing Knowhow clears the open flag, health filter, and jump target together", () => {
   const open = openKnowhowNavigation({
-    healthFilter: "stale",
+    healthFilter: "stale_code",
     jumpTarget: { tableId: "table-a", rowId: "row-a" },
   });
 
