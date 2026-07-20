@@ -66,6 +66,11 @@ import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
 import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
+import {
+  isTrackedKgTerminal,
+  kgBuildPresentation,
+  kgBuildTerminalToast,
+} from "./kg-build-status";
 import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
 import { sourceImageAssetUrl } from "./source-image";
 import {
@@ -87,6 +92,7 @@ import {
   type FgNode,
   type Health,
   type KgNeighborsResp,
+  type KgBuildJobStatus,
   type KgObject,
   type KgOccurrence,
   type KgProcedureStep,
@@ -524,8 +530,13 @@ async function readAskStream<TResponse>(
 }
 
 const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, { method: "POST" });
-const buildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/kg/build`, { method: "POST" });
-const rebuildKg = (nb: string) => api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/kg/rebuild`, { method: "POST" });
+type KgBuildStartResponse = {
+  status: string;
+  notebook_id: string;
+  job_id: string;
+};
+const buildKg = (nb: string) => api<KgBuildStartResponse>(`/notebooks/${nb}/kg/build`, { method: "POST" });
+const rebuildKg = (nb: string) => api<KgBuildStartResponse>(`/notebooks/${nb}/kg/rebuild`, { method: "POST" });
 const relinkKg = (nb: string) => api<{ isolated_before: number; edges_added: number; isolated_after: number }>(`/notebooks/${nb}/kg/relink`, { method: "POST" });
 
 // 深度报告(后台 job):类型见 report-view.tsx(与后端 ReportSummary/ReportDetail 对齐)。
@@ -579,7 +590,12 @@ const fetchScaleIndexStatus = (nb: string) => api<ScaleIndexStatus>(`/notebooks/
 // index_status() 的返回形状(backend/app/services/sqlite_repository.py)。scale_index
 // 原样复用既有 ScaleIndexStatus 类型,避免重复定义漂移。
 type IndexStatus = {
-  kg: { ready: boolean; building: boolean; pending_sources: number };
+  kg: {
+    ready: boolean;
+    building: boolean;
+    pending_sources: number;
+    job: KgBuildJobStatus | null;
+  };
   unified_kg: { dirty: boolean; building: boolean; last_rebuild_at: string };
   scale_index: ScaleIndexStatus;
 };
@@ -922,6 +938,7 @@ export default function Home() {
   const [kgRefreshBusy, setKgRefreshBusy] = useState(false);
   const [kgRangeBusy, setKgRangeBusy] = useState(false);
   const [buildingKg, setBuildingKg] = useState(false);
+  const [trackedKgJobId, setTrackedKgJobId] = useState<string | null>(null);
   const [backfillingMeta, setBackfillingMeta] = useState(false);
   const [relinkingKg, setRelinkingKg] = useState(false);
   const [buildingScaleIndex, setBuildingScaleIndex] = useState(false);
@@ -957,7 +974,27 @@ export default function Home() {
   const startKgBuild = (nb: string) => {
     setBuildingKg(true);
     buildKg(nb)
-      .then(() => setToast("已开始整理知识图谱（后台进行，可能需要数分钟）；完成后会自动更新"))
+      .then((started) => {
+        setTrackedKgJobId(started.job_id);
+        setToast("已开始整理知识图谱；完成后会自动更新");
+        api<NotebookSummary>(`/notebooks/${nb}`)
+          .then((refreshed) => {
+            if (activeNotebookIdRef.current === nb) {
+              setCurrentNotebook(refreshed);
+              if (
+                isTrackedKgTerminal(started.job_id, refreshed.kg_build)
+              ) {
+                setBuildingKg(false);
+                setTrackedKgJobId(null);
+                const message = kgBuildTerminalToast(refreshed.kg_build);
+                if (message) setToast(message);
+              } else {
+                setBuildingKg(shouldResumeKgBuild(refreshed));
+              }
+            }
+          })
+          .catch(() => {});
+      })
       .catch((e) => { reportError(e); setBuildingKg(false); });
   };
   // Trigger full re-extract: clears existing KG and rebuilds from all sources.
@@ -966,7 +1003,29 @@ export default function Home() {
     confirmIndexAction("全部重新分析？\n\n将清空现有知识图谱并重新分析全部来源。后台进行，完成后自动更新。", () => {
       setBuildingKg(true);
       rebuildKg(nb)
-        .then(() => setToast("已开始全部重新分析（后台进行，可能需要数分钟）；完成后会自动更新"))
+        .then((started) => {
+          setTrackedKgJobId(started.job_id);
+          setToast("已开始全部重新分析；完成后会自动更新");
+          api<NotebookSummary>(`/notebooks/${nb}`)
+            .then((refreshed) => {
+              if (activeNotebookIdRef.current === nb) {
+                setCurrentNotebook(refreshed);
+                if (
+                  isTrackedKgTerminal(started.job_id, refreshed.kg_build)
+                ) {
+                  setBuildingKg(false);
+                  setTrackedKgJobId(null);
+                  const message = kgBuildTerminalToast(
+                    refreshed.kg_build,
+                  );
+                  if (message) setToast(message);
+                } else {
+                  setBuildingKg(shouldResumeKgBuild(refreshed));
+                }
+              }
+            })
+            .catch(() => {});
+        })
         .catch((e) => { reportError(e); setBuildingKg(false); });
     });
   };
@@ -994,8 +1053,13 @@ export default function Home() {
       try {
         const refreshed = await api<NotebookSummary>(`/notebooks/${nb}`);
         if (cancelled) return;
-        if (kgBuildFinished(refreshed)) {
-          setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
+        setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
+        if (isTrackedKgTerminal(trackedKgJobId, refreshed.kg_build)) {
+          setBuildingKg(false);
+          setTrackedKgJobId(null);
+          const message = kgBuildTerminalToast(refreshed.kg_build);
+          if (message) setToast(message);
+        } else if (!refreshed.kg_build && kgBuildFinished(refreshed)) {
           setBuildingKg(false);
           setToast(`知识图谱构建完成 ✓ 可用${strictLabel}`);
         }
@@ -1006,7 +1070,7 @@ export default function Home() {
       if (!cancelled) { setBuildingKg(false); setToast("构建仍在后台进行，请稍后刷新查看状态"); }
     }, 20 * 60 * 1000);
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
-  }, [buildingKg, currentNotebookId, analytics]);
+  }, [buildingKg, currentNotebookId, analytics, trackedKgJobId]);
   // Backfill completion polling: same shape as the buildingKg poll above, for the
   // "补全论文信息"后台任务(paper-meta backfill)。同样在「索引与构建」面板打开时让位
   // (该面板本就不覆盖 paper_meta,不存在重复轮询的问题——只是保持与既有三条 legacy
@@ -1108,10 +1172,30 @@ export default function Home() {
         setIndexStatus(s);
         setScaleIndexStatus(s.scale_index);
         if (buildingKg && !s.kg.building) {
-          setBuildingKg(false);
-          setToast(`知识图谱构建完成 ✓ 可用${strictLabel}`);
           api<NotebookSummary>(`/notebooks/${nb}`)
-            .then((refreshed) => { if (!cancelled) setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur)); })
+            .then((refreshed) => {
+              if (cancelled) return;
+              setCurrentNotebook((cur) => (
+                cur && cur.id === nb ? refreshed : cur
+              ));
+              if (
+                isTrackedKgTerminal(
+                  trackedKgJobId,
+                  refreshed.kg_build,
+                )
+              ) {
+                setBuildingKg(false);
+                setTrackedKgJobId(null);
+                const message = kgBuildTerminalToast(refreshed.kg_build);
+                if (message) setToast(message);
+              } else if (
+                !refreshed.kg_build
+                && kgBuildFinished(refreshed)
+              ) {
+                setBuildingKg(false);
+                setToast(`知识图谱构建完成 ✓ 可用${strictLabel}`);
+              }
+            })
             .catch(() => {});
         }
         // 同上:终态需 building 与 state==="queued" 都排除，否则「已排队」的自动 fold
@@ -1144,7 +1228,7 @@ export default function Home() {
       }
     }, 6000);
     return () => { cancelled = true; window.clearInterval(poll); };
-  }, [analytics, currentNotebookId, buildingKg, kgRefreshBusy, buildingScaleIndex, backfillingMeta, indexStatus?.kg.building, indexStatus?.unified_kg.building]);
+  }, [analytics, currentNotebookId, buildingKg, kgRefreshBusy, buildingScaleIndex, backfillingMeta, trackedKgJobId, indexStatus?.kg.building, indexStatus?.unified_kg.building]);
   // Mirror the buildingScaleIndex poll: while the KG view's background viz index is
   // building for a large notebook, poll every 6s until it flips false, then swap in the
   // real graph. 20min safety cap so the view never spins forever. Keyed on kgViewOpen too
@@ -1801,6 +1885,11 @@ export default function Home() {
   const welcomeCopy = useMemo(() => welcomeCopyFor(currentNotebook, sources), [currentNotebook, sources]);
   const askHint = useMemo(() => askPlaceholder(currentNotebook), [currentNotebook]);
   const kgAvailable = !!(currentNotebook?.kg_ready || currentNotebook?.base_kg_available);
+  const currentKgBuildView = kgBuildPresentation(
+    currentNotebook?.kg_build,
+    currentNotebook?.kg_pending_sources ?? 0,
+    Boolean(currentNotebook?.kg_ready),
+  );
   const currentSession = useMemo(
     () => sessions.find((session) => session.id === conversationId) ?? null,
     [conversationId, sessions],
@@ -2086,6 +2175,11 @@ export default function Home() {
     setSourcesPage(0);
     setSourceQuery("");
     setBuildingKg(shouldResumeKgBuild(notebook));
+    setTrackedKgJobId(
+      notebook.kg_build?.status === "running"
+        ? notebook.kg_build.job_id
+        : null,
+    );
     setBackfillingMeta(Boolean(notebook.paper_meta_backfilling));
     setTurns([]);
     setConversationId(null);
@@ -2775,6 +2869,9 @@ export default function Home() {
     fetchIndexStatus(nb).then((s) => {
       setIndexStatus(s);
       setScaleIndexStatus(s.scale_index);
+      if (s.kg.job?.status === "running") {
+        setTrackedKgJobId(s.kg.job.job_id);
+      }
       if (s.kg.building) setBuildingKg(true);
       if (shouldResumeScaleIndex(s.scale_index)) setBuildingScaleIndex(true);
     }).catch(() => {});
@@ -3798,6 +3895,27 @@ export default function Home() {
                       </>
                     )
                 )}
+                {currentNotebook?.kg_build && (
+                  <div
+                    className={`kg-build-status kg-build-tone-${currentKgBuildView.tone}`}
+                    role="status"
+                  >
+                    <strong>{currentKgBuildView.label}</strong>
+                    <span>{currentKgBuildView.detail}</span>
+                    {currentKgBuildView.actionLabel && !buildingKg && !isReader && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (currentNotebookId) {
+                            startKgBuild(currentNotebookId);
+                          }
+                        }}
+                      >
+                        {currentKgBuildView.actionLabel}
+                      </button>
+                    )}
+                  </div>
+                )}
                 {scaleIndexStatus && (scaleIndexStatus.eligible || scaleIndexStatus.exists) && (() => {
                   // 检索索引与 tier 解耦：任意达标库（含大个人库）均显示。徽章紧凑,只做主
                   // 动作(构建/更新);全量重建入口在看板卡片。状态语义统一走 describeScaleIndex。
@@ -4814,24 +4932,37 @@ export default function Home() {
                   {/* 知识图谱行:状态取 indexStatus.kg,动作复用既有 startKgBuild/startKgRebuild/relinkFromKgView。 */}
                   {(() => {
                     const kg = indexStatus.kg;
-                    const busy = kg.building || buildingKg;
-                    const stateLabel = busy ? "分析中…" : !kg.ready ? "未整理" : kg.pending_sources > 0 ? `${kg.pending_sources} 篇待分析` : "就绪";
-                    const tone: "ok" | "warn" = !busy && kg.ready && kg.pending_sources === 0 ? "ok" : "warn";
-                    const color = tone === "ok" ? "var(--color-ok, #1a7f5a)" : "var(--color-warn, #b97a00)";
-                    const sub = !kg.ready
-                      ? `从来源分析出知识对象与关系；「${strictLabel}」需要先整理`
-                      : kg.pending_sources > 0
-                        ? "有新增来源尚未分析，可分析新增内容并合并进现有图谱"
-                        : `已就绪，可用「${strictLabel}」`;
+                    const view = kgBuildPresentation(
+                      kg.job,
+                      kg.pending_sources,
+                      kg.ready,
+                    );
+                    const busy = kg.job?.status === "running"
+                      || kg.building
+                      || buildingKg;
+                    const tone = view.tone === "success"
+                      ? "ok"
+                      : view.tone === "neutral"
+                        ? "muted"
+                        : view.tone === "error"
+                          ? "error"
+                          : "warn";
+                    const color = tone === "ok"
+                      ? "var(--color-ok, #1a7f5a)"
+                      : tone === "error"
+                        ? "var(--color-danger, #b42318)"
+                        : tone === "muted"
+                          ? "var(--muted)"
+                          : "var(--color-warn, #b97a00)";
                     return (
                       <div className={`index-card index-tone-${tone}`}>
                         <span className="index-ic" aria-hidden="true"><Network size={19} /></span>
                         <div className="index-main">
                           <div className="tag-row" style={{ alignItems: "center" }}>
                             <span className="index-state">知识图谱</span>
-                            <span className="tag" style={{ color }}>{stateLabel}</span>
+                            <span className="tag" style={{ color }}>{view.label}</span>
                           </div>
-                          <div className="index-sub">{sub}</div>
+                          <div className="index-sub">{view.detail}</div>
                         </div>
                         {!busy && !isReader && (
                           <div className="index-ctas">
@@ -4841,18 +4972,23 @@ export default function Home() {
                                 className="index-cta primary"
                                 onClick={() => { if (currentNotebookId) startKgBuild(currentNotebookId); }}
                               >
-                                {kg.ready ? `分析新增 ${kg.pending_sources} 篇` : "整理"}
+                                {view.actionLabel
+                                  ?? (kg.ready
+                                    ? `分析新增 ${kg.pending_sources} 篇`
+                                    : "整理")}
+                              </button>
+                            )}
+                            {kg.ready && (
+                              <button
+                                type="button"
+                                className="index-cta"
+                                onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
+                              >
+                                全部重新分析
                               </button>
                             )}
                             {kg.ready && kg.pending_sources === 0 && (
                               <>
-                                <button
-                                  type="button"
-                                  className="index-cta"
-                                  onClick={() => { if (currentNotebookId) startKgRebuild(currentNotebookId); }}
-                                >
-                                  全部重新分析
-                                </button>
                                 <button type="button" className="index-cta" onClick={relinkFromKgView}>补上关联</button>
                               </>
                             )}

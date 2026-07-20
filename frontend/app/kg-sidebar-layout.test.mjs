@@ -45,3 +45,10 @@ test("KG rebuild confirmation modal renders above the full-screen graph overlay"
   assert.match(page, /className="utility-modal"[\s\S]*infoModal/);
   assert.ok(zIndexFor(".utility-modal") > zIndexFor(".kg-view"));
 });
+
+test("interrupted KG continuation stays hidden for read-only notebook members", () => {
+  assert.match(
+    page,
+    /currentKgBuildView\.actionLabel && !buildingKg && !isReader/,
+  );
+});

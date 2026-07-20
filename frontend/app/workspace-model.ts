@@ -16,6 +16,19 @@ import type { ReasoningTraceStep } from "./ask-stream";
  */
 export const DEFAULT_NOTEBOOK_NAME = "Untitled notebook";
 
+export type KgBuildJobStatus = {
+  job_id: string;
+  mode: "incremental" | "rebuild";
+  status: "running" | "succeeded" | "failed";
+  stage: "probing" | "extracting" | "stopping" | "finished";
+  total_sources: number;
+  completed_sources: number;
+  failed_sources: number;
+  error_code: string;
+  user_message: string;
+  updated_at: string;
+};
+
 /** API/view models shared by the workspace orchestrator and extracted panels. */
 export type NotebookSummary = {
   id: string;
@@ -36,6 +49,7 @@ export type NotebookSummary = {
   base_kg_available?: boolean;
   base_notebook_name?: string;
   kg_pending_sources?: number;
+  kg_build?: KgBuildJobStatus | null;
   access?: "owner" | "reader";
   shared_from?: string;
   is_shared?: boolean;
