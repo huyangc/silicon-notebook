@@ -298,3 +298,11 @@ def user_error(status_code: int, message: str) -> HTTPException:
         detail=message,
         headers={USER_MESSAGE_HEADER: "1"},
     )
+
+
+from app.services.content_overview import ContentOverviewService  # noqa: E402
+
+
+def content_overview_service() -> ContentOverviewService:
+    runtime = repository()._runtime  # type: ignore[attr-defined]
+    return ContentOverviewService(runtime.memory_store, runtime.knowhow_store)

@@ -911,18 +911,28 @@ def test_projection_completes_synced_with_chunks_and_knowledge_objects(tmp_path,
 # ---------------------------------------------------------------------------
 
 
-def test_list_and_get_table_detail(tmp_path, monkeypatch):
+def test_list_and_get_table_detail(tmp_path, monkeypatch, repo):
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00000509")
     nb = _mk_notebook(client, owner_h)
-    table_id = _import_xlsx(client, owner_h, nb).json()["id"]
+    table_id = repo.create_knowhow_table(
+        nb,
+        "时序修复表",
+        "",
+        [{"name": "现象", "role": "anchor"}],
+    )
+    repo.add_knowhow_row(table_id, {})
 
     listed = client.get(f"/api/notebooks/{nb}/knowhow", headers=owner_h)
     assert listed.status_code == 200
     summaries = listed.json()
     assert len(summaries) == 1
     assert summaries[0]["id"] == table_id
-    assert summaries[0]["row_count"] == len(DATA_ROWS)
+    assert summaries[0]["row_count"] == 1
+    assert summaries[0]["projection_pending"] == 1
+    assert summaries[0]["projection_failed"] == 0
+    assert summaries[0]["stale_code_count"] == 0
+    assert summaries[0]["last_activity_at"]
 
     got = client.get(f"/api/notebooks/{nb}/knowhow/{table_id}", headers=owner_h)
     assert got.status_code == 200
