@@ -1,12 +1,21 @@
 # backend/tests/test_batch_ingest.py
 import json
+import inspect
+import threading
+import time
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
-from app.services.model_concurrency import ConcurrencySnapshot
+from app.services.model_concurrency import (
+    ConcurrencySnapshot,
+    LimitedJsonChatClient,
+    activate_model_concurrency,
+    current_model_concurrency,
+)
 from app.services import batch_ingest as bi
 
 
@@ -264,6 +273,50 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
 
 class _StubLLM:
     configured = True
+
+
+def test_run_kg_limit_parallelizes_sources_with_workers(repo, monkeypatch):
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+    targets = [f"src-{i}" for i in range(6)]
+
+    monkeypatch.setattr(
+        repo.maintenance, "source_ids", lambda notebook_id: targets
+    )
+    monkeypatch.setattr(
+        repo.maintenance, "kg_covered_source_ids", lambda notebook_id: set()
+    )
+    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+
+    def extract(source_id):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.04)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(repo.maintenance, "run_extraction", extract)
+    effective = bi.EffectiveConcurrency(
+        workers=3,
+        llm=8,
+        embedding=2,
+        workers_source="cli",
+        llm_source="cli",
+        embedding_source="cli",
+    )
+    with bi._batch_concurrency_scope(repo, effective):
+        bi.run_kg(
+            repo,
+            bi.ensure_notebook(repo, None, "nb-kg-limit"),
+            limit=6,
+            no_rebuild=True,
+        )
+    assert peak == 3
 
 
 def _seed_sources(repo, nb_id, n, prefix):
@@ -553,6 +606,157 @@ def test_batch_concurrency_scope_configures_and_restores(repo, monkeypatch):
         {"window_workers": 5, "job_workers": 7},
         {"window_workers": old_window, "job_workers": old_job},
     ]
+
+
+def test_run_reparse_does_not_reconfigure_scheduler(repo, monkeypatch):
+    from app.services.kg import scheduler
+
+    configure_calls = []
+    monkeypatch.setattr(
+        scheduler, "configure", lambda **kwargs: configure_calls.append(kwargs)
+    )
+    monkeypatch.setattr(
+        repo.maintenance, "source_ids", lambda notebook_id: []
+    )
+    monkeypatch.setattr(
+        repo.maintenance, "sources_with_elements", lambda notebook_id: set()
+    )
+
+    bi.run_reparse(
+        repo,
+        bi.ensure_notebook(repo, None, "nb-reparse-owner"),
+        conc=2,
+        no_rebuild=True,
+    )
+
+    assert configure_calls == []
+
+
+def test_run_all_does_not_reconfigure_scheduler(repo, monkeypatch):
+    from app.services.kg import scheduler
+
+    configure_calls = []
+    monkeypatch.setattr(
+        scheduler, "configure", lambda **kwargs: configure_calls.append(kwargs)
+    )
+    monkeypatch.setattr(
+        repo,
+        "rebuild_unified_kg",
+        lambda notebook_id, progress=None, force=False, fresh=False: 0,
+    )
+    monkeypatch.setattr(
+        bi, "backfill_node_embeddings", lambda repo, notebook_id, conc: 0
+    )
+
+    bi.run_all(
+        repo,
+        bi.ensure_notebook(repo, None, "nb-all-owner"),
+        [],
+        conc=2,
+        report_interval=0,
+    )
+
+    assert configure_calls == []
+
+
+def test_run_all_has_no_phase_local_workers_parameter():
+    assert "workers" not in inspect.signature(bi.run_all).parameters
+
+
+class _PeakRecorder:
+    configured = True
+    model = "peak-recorder"
+
+    def __init__(self, delay=0.05):
+        self.delay = delay
+        self.lock = threading.Lock()
+        self.active = 0
+        self.peak = 0
+
+    def _call(self):
+        with self.lock:
+            self.active += 1
+            self.peak = max(self.peak, self.active)
+        try:
+            time.sleep(self.delay)
+        finally:
+            with self.lock:
+                self.active -= 1
+
+    def chat_json(self, messages, schema="", **kwargs):
+        self._call()
+        return "{}"
+
+    def embed(self):
+        self._call()
+        return [0.0]
+
+
+class _FakeMaintenance:
+    def __init__(self, source_ids):
+        self._source_ids = source_ids
+
+    def sources_with_elements(self, notebook_id):
+        return set()
+
+    def source_ids(self, notebook_id):
+        return list(self._source_ids)
+
+
+class _ReparseConcurrencyRepo:
+    def __init__(self, llm, embed):
+        self.settings = SimpleNamespace(
+            kg_auto_extract=False,
+            kg_incremental_fusion_enabled=True,
+            kg_job_concurrency=8,
+            kg_extract_workers=6,
+            embed_concurrency=8,
+        )
+        self.maintenance = _FakeMaintenance(
+            [f"src-peak-{i}" for i in range(12)]
+        )
+        self._llm = llm
+        self._embed = embed
+
+    def process_source(self, source_id):
+        state = current_model_concurrency()
+        assert state is not None
+        LimitedJsonChatClient(self._llm, state.llm).chat_json([], "{}")
+        state.embedding.run(
+            self._embed.embed,
+            task_prefix="emb-el",
+        )
+        return SimpleNamespace(id=source_id)
+
+
+def test_reparse_llm_and_embedding_peaks_are_independent():
+    from app.services.kg import scheduler as kg_scheduler
+
+    llm = _PeakRecorder()
+    embed = _PeakRecorder()
+    repo = _ReparseConcurrencyRepo(llm, embed)
+
+    try:
+        kg_scheduler.configure(window_workers=6, job_workers=8)
+        with activate_model_concurrency(llm_max=6, embed_max=2) as state:
+            result = bi.run_reparse(
+                repo,
+                "nb-peak",
+                conc=2,
+                no_rebuild=True,
+                report_interval=0,
+            )
+            llm_snapshot = state.llm.snapshot()
+            embed_snapshot = state.embedding.snapshot()
+    finally:
+        kg_scheduler.reset()
+
+    assert result["reparsed"] == 12
+    assert result["failed"] == 0
+    assert 4 <= llm.peak <= 6
+    assert embed.peak == 2
+    assert llm_snapshot.active == llm_snapshot.waiting == 0
+    assert embed_snapshot.active == embed_snapshot.waiting == 0
 
 
 def test_batch_scope_restore_failure_does_not_mask_phase_error(
@@ -929,7 +1133,7 @@ def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
                         lambda nb, progress=None, force=False, fresh=False: (rebuild_calls.append(nb), 5)[1])
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
 
-    res = bi.run_all(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
+    res = bi.run_all(repo, nb_id, bi.iter_files(d), conc=2)
 
     with repo._connect() as db:
         nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
@@ -970,7 +1174,7 @@ def test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc(
 
     orig_embed_conc = repo.settings.embed_concurrency
     try:
-        bi.run_all(repo, nb_id, bi.iter_files(d), workers=3, conc=7)
+        bi.run_all(repo, nb_id, bi.iter_files(d), conc=7)
         assert configure_calls == []
         assert seen_embed_conc["during"] == 7        # try 内 embed_concurrency 被设为 conc
         assert repo.settings.embed_concurrency == orig_embed_conc       # finally 恢复
@@ -1014,7 +1218,7 @@ def test_run_all_resumes_existing_without_kg(repo, tmp_path, monkeypatch):
                         lambda nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
 
-    res = bi.run_all(repo, nb_id, files, workers=2, conc=2)
+    res = bi.run_all(repo, nb_id, files, conc=2)
 
     with repo._connect() as db:
         nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
@@ -1688,7 +1892,7 @@ def test_run_all_fresh_flag_forces_rebuild(repo, monkeypatch, tmp_path):
     monkeypatch.setattr(repo, "rebuild_unified_kg", _fake_rebuild)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
 
-    bi.run_all(repo, nb_id, bi.iter_files(d), workers=1, conc=1, fresh=True)
+    bi.run_all(repo, nb_id, bi.iter_files(d), conc=1, fresh=True)
 
     assert seen == {"force": True, "fresh": True}
 
@@ -1768,8 +1972,6 @@ def test_maintenance_extraction_routes_through_ingestion_service(repo, monkeypat
 
 # ── Task 6: metadata phase (offline paper-metadata bulk backfill) ───────────
 
-import threading
-
 from app.repositories.sqlite.source_store import SourceElementWrite
 
 _META_HEAD_TEXT = ("Systolic Arrays Revisited\nJane Doe\nMIT\nISCA 2025\n"
@@ -1833,6 +2035,55 @@ def _insert_meta_source(repo, notebook_id, source_id):
                                  location_label="", text=_META_HEAD_TEXT, metadata={})],
             created_at="2026-01-01T00:00:00",
         )
+
+
+def test_paper_metadata_backfill_uses_source_job_concurrency(repo, monkeypatch):
+    nb_id = bi.ensure_notebook(repo, None, "nb-meta-workers")
+    service = repo._runtime.source_ingestion
+    source_ids = [f"src-meta-{i}" for i in range(12)]
+    repo.settings.kg_job_concurrency = 12
+    repo.settings.kg_extract_workers = 3
+    lock = threading.Lock()
+    active = 0
+    peak = 0
+
+    monkeypatch.setattr(
+        service.sources,
+        "sources_missing_paper_meta",
+        lambda notebook_id, include_existing=False: source_ids,
+    )
+    monkeypatch.setattr(
+        service.sources,
+        "get_source",
+        lambda source_id: SimpleNamespace(
+            id=source_id,
+            notebook_id=nb_id,
+            type="document",
+        ),
+    )
+    monkeypatch.setattr(service, "_publish_pending", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        service, "_notify_paper_meta_done", lambda *args, **kwargs: None
+    )
+
+    def ensure(source, force=False):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        try:
+            time.sleep(0.04)
+            return "stored"
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(service, "ensure_paper_metadata", ensure)
+    counts = service.backfill_paper_metadata(nb_id)
+
+    assert counts["total"] == 12
+    assert counts["stored"] == 12
+    assert peak == 12
 
 
 def test_metadata_phase_requires_llm(repo, capsys):
@@ -1941,7 +2192,7 @@ def test_run_all_reparses_existing_source_missing_elements(repo, tmp_path, monke
                         lambda nb, progress=None, force=False, fresh=False: 0)
     monkeypatch.setattr(bi, "backfill_node_embeddings", lambda repo, nb, conc: 0)
 
-    res = bi.run_all(repo, nb_id, [p], workers=1, conc=1)
+    res = bi.run_all(repo, nb_id, [p], conc=1)
 
     assert res["new"] == 0 and res["resumed"] == 0 and res["reparsed"] == 1
     with repo._connect() as db:  # reparse 真的 parse 了 .md → 有 elements(不是空抽)

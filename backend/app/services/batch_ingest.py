@@ -460,6 +460,10 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
            report_interval: int = 15) -> dict[str, int]:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
 
+    source job 与 LLM window 并发上限由外层 _batch_concurrency_scope 统一安装；
+    本函数只向已配置的 scheduler 提交 source job，不在 phase 内重配任一 pool。
+    conc 仅供本函数直接调用的 embedding helper 使用。
+
     Flags:
       rebuild_only=True  — 跳过抽取,直接 rebuild_unified_kg + 节点向量(含 scale index)。
       no_rebuild=True    — 只抽取,跳过 rebuild_unified_kg 和 scale index(大批量分批抽,最后一批再 rebuild)。
@@ -471,6 +475,8 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
     Scale-index 自动联:rebuild 后若 notebook 为 base tier 或已存在 scale index,则调
     repo.build_scale_index(notebook_id) 使索引与新簇同步。
     """
+    from app.services.kg.scheduler import submit_job
+
     if no_rebuild and rebuild_only:
         raise ValueError("no_rebuild 和 rebuild_only 互斥,不能同时为 True")
 
@@ -510,18 +516,38 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                 kgful = mnt.kg_covered_source_ids(notebook_id)
                 targets = [s for s in all_sids if s not in kgful][:max(0, limit)]
                 n_targets = len(targets)
+
+                def _extract_one(sid: str) -> tuple[str, Exception | None]:
+                    try:
+                        mnt.set_source_status(sid, "extracting")
+                        mnt.run_extraction(sid)
+                        mnt.set_source_status(sid, "extracted")
+                        return sid, None
+                    except Exception as exc:  # noqa: BLE001 — 单源失败隔离
+                        return sid, exc
+
                 with _PoolReporter(report_interval, total=n_targets, log=log) as reporter:
-                    for i, sid in enumerate(targets, 1):
-                        try:
-                            mnt.set_source_status(sid, "extracting")
-                            mnt.run_extraction(sid)
-                            mnt.set_source_status(sid, "extracted")
+                    futures = {
+                        submit_job(_extract_one, sid): sid for sid in targets
+                    }
+                    for i, future in enumerate(as_completed(futures), 1):
+                        sid, error = future.result()
+                        if error is None:
                             res["extracted"] += 1
-                            log({"phase": "kg", "source_id": sid, "status": "extracted",
-                                 "progress": f"{i}/{n_targets}"})
-                        except Exception as exc:   # noqa: BLE001 — 单源失败隔离
+                            log({
+                                "phase": "kg",
+                                "source_id": sid,
+                                "status": "extracted",
+                                "progress": f"{i}/{n_targets}",
+                            })
+                        else:
                             res["failed"] += 1
-                            log({"phase": "kg", "source_id": sid, "status": "failed", "error": str(exc)})
+                            log({
+                                "phase": "kg",
+                                "source_id": sid,
+                                "status": "failed",
+                                "error": str(error),
+                            })
                         reporter.done = i
 
         # ── no_rebuild:抽取后直接返回,不做 rebuild/scale-index ───────────────
@@ -559,7 +585,7 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
 
 
 def run_all(repo: BatchIngestRepository, notebook_id: str,
-            files: Iterable[Path], workers: int = 4, conc: int = 4,
+            files: Iterable[Path], conc: int = 4,
             log: LogFn | None = None, report_interval: int = 15,
             fresh: bool = False) -> dict[str, int]:
     """流式 all:per-source 流水线(parse+embed+extract 在 process_source 内重叠),
@@ -689,7 +715,10 @@ def run_reparse(repo: BatchIngestRepository, notebook_id: str,
     source_elements 的源(上次 parse 中断/未落地),旧 run_all 会当成「已 parse、缺 KG」
     直接 extract_source 空抽——build_records 的接地校验没有 element 可对照 → LLM 抽出的
     节点被整源丢弃 → objects=0,且直接重抽永远补不出 KG。必须重新 parse 生成 elements。
-    跨源并发提交到 KG job 池。有 elements 的源自动跳过(幂等)。"""
+    跨源并发提交到 KG job 池。有 elements 的源自动跳过(幂等)。
+
+    source job 与 LLM window 并发上限由外层 _batch_concurrency_scope 统一安装；
+    本函数只提交 job。conc 仅供 embedding helper/兼容设置使用。"""
     from app.services.kg.scheduler import submit_job
 
     log = log or (lambda _e: None)
@@ -1273,7 +1302,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             print("phase=all (pipelined)", flush=True)
             _t = time.perf_counter()
             r = run_all(repo, notebook_id, iter_files(args.input_dir),
-                        workers=effective.workers, conc=effective.embedding, log=log,
+                        conc=effective.embedding, log=log,
                         report_interval=args.pool_report_interval,
                         fresh=getattr(args, "fresh", False))
             print(f"all done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
