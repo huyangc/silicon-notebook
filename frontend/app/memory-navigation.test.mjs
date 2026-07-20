@@ -25,6 +25,9 @@ test("memory count deep-link targets the notebook memory tab", () => {
   assert.deepEqual(parseMemoryHash("#notebook=nb-1&tab=memory"), {
     scope: "notebook",
     notebookId: "nb-1",
+    filterNotebookId: null,
+    status: null,
+    itemId: null,
   });
 });
 
@@ -74,7 +77,35 @@ test("global Memory has a stable outer-page location", () => {
   assert.equal(memoryHash(null), "#memory");
   assert.deepEqual(
     parseMemoryHash("#memory"),
-    { scope: "global", notebookId: null },
+    {
+      scope: "global",
+      notebookId: null,
+      filterNotebookId: null,
+      status: null,
+      itemId: null,
+    },
+  );
+});
+
+
+test("global Memory deep-links preserve optional filters and a detail target", () => {
+  assert.equal(
+    memoryHash(null, {
+      notebookId: "nb 1",
+      status: "confirmed",
+      itemId: "mem/1",
+    }),
+    "#memory&notebook=nb%201&status=confirmed&item=mem%2F1",
+  );
+  assert.deepEqual(
+    parseMemoryHash("#memory&notebook=nb%201&status=confirmed&item=mem%2F1"),
+    {
+      scope: "global",
+      notebookId: null,
+      filterNotebookId: "nb 1",
+      status: "confirmed",
+      itemId: "mem/1",
+    },
   );
 });
 

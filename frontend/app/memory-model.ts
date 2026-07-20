@@ -131,18 +131,61 @@ export function memoryPromotionLabel(state: MemoryPromotionState): string {
   }[state];
 }
 
-export function memoryHash(notebookId: string | null): string {
-  return notebookId
-    ? `#notebook=${encodeURIComponent(notebookId)}&tab=memory`
-    : "#memory";
+export type MemoryNavigationTarget = {
+  notebookId?: string | null;
+  status?: MemoryStatus | null;
+  itemId?: string | null;
+};
+
+export type ParsedMemoryHash = {
+  scope: MemoryScope;
+  notebookId: string | null;
+  filterNotebookId: string | null;
+  status: MemoryStatus | null;
+  itemId: string | null;
+};
+
+export function memoryHash(
+  notebookId: string | null,
+  target: MemoryNavigationTarget = {},
+): string {
+  if (notebookId) {
+    return `#notebook=${encodeURIComponent(notebookId)}&tab=memory`;
+  }
+  const parts = ["memory"];
+  if (target.notebookId) parts.push(`notebook=${encodeURIComponent(target.notebookId)}`);
+  if (target.status) parts.push(`status=${encodeURIComponent(target.status)}`);
+  if (target.itemId) parts.push(`item=${encodeURIComponent(target.itemId)}`);
+  return `#${parts.join("&")}`;
 }
 
-export function parseMemoryHash(hash: string): { scope: MemoryScope; notebookId: string | null } | null {
-  if (hash === "#memory") return { scope: "global", notebookId: null };
-  const params = new URLSearchParams(hash.replace(/^#/, ""));
+export function parseMemoryHash(hash: string): ParsedMemoryHash | null {
+  const raw = hash.replace(/^#/, "");
+  if (raw === "memory" || raw.startsWith("memory&")) {
+    const params = new URLSearchParams(raw === "memory" ? "" : raw.slice(7));
+    const status = params.get("status");
+    const validStatus = status === "candidate"
+      || status === "confirmed"
+      || status === "rejected"
+      || status === "deprecated";
+    return {
+      scope: "global",
+      notebookId: null,
+      filterNotebookId: params.get("notebook"),
+      status: validStatus ? status : null,
+      itemId: params.get("item"),
+    };
+  }
+  const params = new URLSearchParams(raw);
   const notebookId = params.get("notebook");
   if (notebookId && params.get("tab") === "memory") {
-    return { scope: "notebook", notebookId };
+    return {
+      scope: "notebook",
+      notebookId,
+      filterNotebookId: null,
+      status: null,
+      itemId: null,
+    };
   }
   return null;
 }
@@ -156,7 +199,9 @@ export function notebookHash(notebookId: string): string {
 // 只认「有 notebook 且没有 tab=memory」的裸工作区 hash。带 tab=memory 的归
 // parseMemoryHash 管——两个解析器必须互斥,否则挂载时会抢同一条 hash。
 export function parseWorkspaceHash(hash: string): { notebookId: string } | null {
-  const params = new URLSearchParams(hash.replace(/^#/, ""));
+  const raw = hash.replace(/^#/, "");
+  if (raw === "memory" || raw.startsWith("memory&")) return null;
+  const params = new URLSearchParams(raw);
   const notebookId = params.get("notebook");
   if (!notebookId || params.get("tab") === "memory") return null;
   return { notebookId };

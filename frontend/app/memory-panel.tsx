@@ -480,6 +480,9 @@ export function MemoryPanel({
   bases,
   notebookBases,
   sessionSignal,
+  initialNotebookId,
+  initialStatus,
+  initialMemoryId,
 }: {
   scope: MemoryScope;
   notebookId: string | null;
@@ -496,6 +499,9 @@ export function MemoryPanel({
    * key 是 notebook_id，value 形状同 `bases`。 */
   notebookBases?: Record<string, MountedBase[]>;
   sessionSignal: AbortSignal;
+  initialNotebookId?: string | null;
+  initialStatus?: MemoryStatus | null;
+  initialMemoryId?: string | null;
 }) {
   // 晋升目标三态按记忆各自的 notebook 解析，两个 scope 共用同一套
   // resolvePromotionTarget 判定(不另写一份规则)。notebook 视图里所有记忆
@@ -511,9 +517,13 @@ export function MemoryPanel({
   const [ownerTotal, setOwnerTotal] = useState(0);
   const [ownerPending, setOwnerPending] = useState(0);
   const [notebookOptions, setNotebookOptions] = useState<PaginatedMemories["notebook_options"]>([]);
-  const [notebookFilter, setNotebookFilter] = useState("");
+  const [notebookFilter, setNotebookFilter] = useState(
+    scope === "global" ? initialNotebookId ?? "" : "",
+  );
   const [page, setPage] = useState(0);
-  const [status, setStatus] = useState<MemoryStatus | "all">("all");
+  const [status, setStatus] = useState<MemoryStatus | "all">(
+    initialStatus ?? "all",
+  );
   const [origin, setOrigin] = useState<MemoryOrigin | "all">("all");
   const [queryDraft, setQueryDraft] = useState("");
   const [query, setQuery] = useState("");
@@ -573,6 +583,13 @@ export function MemoryPanel({
   useEffect(() => {
     window.localStorage.setItem("memory-layout", layout);
   }, [layout]);
+
+  useEffect(() => {
+    if (scope !== "global") return;
+    setNotebookFilter(initialNotebookId ?? "");
+    setStatus(initialStatus ?? "all");
+    setPage(0);
+  }, [scope, initialNotebookId, initialStatus]);
 
   const toggleExpanded = (id: string) => setExpandedIds((prev) => {
     const next = new Set(prev);
@@ -679,6 +696,14 @@ export function MemoryPanel({
       if (listRequestEpochRef.current === epoch) listRequestEpochRef.current += 1;
     };
   }, [notebookFilter, notebookId, origin, page, query, refresh, scope, sessionSignal, status]);
+
+  useEffect(() => {
+    if (!initialMemoryId || !items.some((item) => item.id === initialMemoryId)) return;
+    setExpandedIds((previous) => {
+      if (previous.has(initialMemoryId)) return previous;
+      return new Set(previous).add(initialMemoryId);
+    });
+  }, [initialMemoryId, items]);
 
   function beginEdit(memory: MemoryRecord) {
     setEditingId(memory.id);

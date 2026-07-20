@@ -81,7 +81,17 @@ export type KnowhowTableSummary = {
   title: string;
   description: string;
   rowCount: number;
+  projectionPending: number;
+  projectionFailed: number;
+  staleCodeCount: number;
+  lastActivityAt: string;
 };
+
+export type KnowhowHealthFilter =
+  | "all"
+  | "projection_pending"
+  | "projection_failed"
+  | "stale_code";
 
 export type KnowhowTableDetail = {
   id: string;
@@ -200,7 +210,11 @@ type WireKnowhowTableSummary = {
   id: string;
   title: string;
   description: string | null;
-  row_count: number;
+  row_count?: number | null;
+  projection_pending?: number | null;
+  projection_failed?: number | null;
+  stale_code_count?: number | null;
+  last_activity_at?: string | null;
 };
 
 type WireKnowhowTableDetail = {
@@ -270,8 +284,28 @@ function mapSummary(table: WireKnowhowTableSummary): KnowhowTableSummary {
     id: table.id,
     title: table.title,
     description: table.description ?? "",
-    rowCount: table.row_count,
+    rowCount: table.row_count ?? 0,
+    projectionPending: table.projection_pending ?? 0,
+    projectionFailed: table.projection_failed ?? 0,
+    staleCodeCount: table.stale_code_count ?? 0,
+    lastActivityAt: table.last_activity_at ?? "",
   };
+}
+
+export function filterKnowhowTables(
+  tables: KnowhowTableSummary[],
+  filter: KnowhowHealthFilter,
+): KnowhowTableSummary[] {
+  if (filter === "projection_pending") {
+    return tables.filter((table) => table.projectionPending > 0);
+  }
+  if (filter === "projection_failed") {
+    return tables.filter((table) => table.projectionFailed > 0);
+  }
+  if (filter === "stale_code") {
+    return tables.filter((table) => table.staleCodeCount > 0);
+  }
+  return tables;
 }
 
 // 行标题列 id：优先取显式 anchor_column_id 字段(含显式 null——Task 3 落地后
