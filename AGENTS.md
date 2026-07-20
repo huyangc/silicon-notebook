@@ -347,6 +347,22 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 The verified local development target is a complete warm run under 60 seconds;
 this is a measured baseline, not a portable timeout assertion for every host.
 
+### GitHub Actions CI
+
+- `.github/workflows/ci.yml` is a read-only wrapper around
+  `scripts/check.sh`; never duplicate test roots or frontend commands in the
+  workflow.
+- `CI / full-gate` runs on pull requests to `master`, pushes to `master`, and
+  manual dispatches on `ubuntu-24.04` with Python 3.13, Node.js 22, and four
+  backend pytest workers.
+- Keep model/deployment secrets out of this workflow. Package-manager caches
+  may contain downloads only; do not cache `node_modules`, virtualenvs,
+  databases, or `.local` application state.
+- The 20-minute hosted-runner timeout is not the local 60-second warm-gate
+  target. Do not make the check required until stable green PR and post-merge
+  runs have been observed and the user explicitly approves branch-protection
+  changes.
+
 ## Test Architecture
 
 - Static contracts use semantic identities (module path, qualified scope,

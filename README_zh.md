@@ -984,6 +984,20 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 
 当前 Apple Silicon 开发基线要求完整 warm gate 在 60 秒内完成；这是本机实测目标，不是对每一台 CI 机器的可移植超时断言。
 
+### GitHub Actions CI
+
+`.github/workflows/ci.yml` 把同一套完整门禁暴露为唯一的
+`CI / full-gate` 检查。它在目标为 `master` 的 PR、`master` push 与手动触发时
+运行，环境固定为 `ubuntu-24.04`、Python 3.13、Node.js 22。workflow 从
+`backend/requirements.txt` 与 `frontend/package-lock.json` 安装依赖，然后把
+测试选择完整委托给 `scripts/check.sh`。
+
+该 workflow 只有读权限，不接收模型或部署 secrets，并把后端 pytest worker
+限制为 4，避免 GitHub 托管 runner 过度抢占。20 分钟 timeout 包含依赖安装，
+与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。初次接入时
+`CI / full-gate` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
+并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。
+
 ## 开发流程
 
 每开始一个新的特性开发任务，默认先新建 git worktree，并在该 worktree 内基于新 feature 分支开发；完成后从该分支提交 PR。不要为了特性开发直接在本地主 checkout 里切分支。如果当前目录已经是隔离的 linked worktree，则继续在当前 worktree 内工作。
