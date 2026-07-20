@@ -15,6 +15,7 @@ markdown-it-py>=3.0.0
 numpy>=2.0.0
 networkx>=3.0
 python-igraph>=0.11    # 社区检测 scale 路径(整数边表+C 核,10^6-10^7 边;缺失则回退 networkx)
+matplotlib>=3.10       # pytest controller 直接预热字体缓存；igraph drawing adapter 也会加载，CI 不得依赖开发机碰巧预装
 rustworkx>=0.15.0
 pyyaml>=6.0
 pytest>=8.0
