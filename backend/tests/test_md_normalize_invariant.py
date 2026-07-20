@@ -371,6 +371,69 @@ def test_parenthesized_multiline_link_title_honors_escaped_close_paren():
 
 
 # ---------------------------------------------------------------------------
+# F3 follow-up — CommonMark angle-enclosed inline-link destinations consume
+# through their unescaped `>`.  Spaces and `)` are destination content, while
+# malformed angle destinations are not captured as links.
+# ---------------------------------------------------------------------------
+
+
+def test_angle_destination_with_spaces_is_one_full_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    md = "[x](<foo bar-baz>)"
+    assert _link_refs(md) == [md]
+
+
+def test_angle_destination_with_literal_close_paren_is_one_full_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    md = "[x](<foo)bar-baz>)"
+    assert _link_refs(md) == [md]
+
+
+def test_angle_destination_punctuation_mutation_is_rejected():
+    before = "[x](<foo)bar-baz>)"
+    after = "[x](<foo)barbaz>)"
+    assert content_invariant(before, after) is False
+
+
+def test_empty_angle_destination_is_one_full_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    md = "[x](<>)"
+    assert _link_refs(md) == [md]
+
+
+def test_angle_destination_with_title_is_one_full_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    md = '[x](<foo bar> "title )")'
+    assert _link_refs(md) == [md]
+
+
+def test_angle_destination_honors_escaped_greater_than():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    md = "[x](<foo\\>bar>)"
+    assert _link_refs(md) == [md]
+
+
+def test_malformed_angle_destinations_are_not_link_refs():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    assert _link_refs("[x](<foo<bar>)") == []
+    assert _link_refs("[x](<foo\nbar>)") == []
+    assert _link_refs("[x](<foo\\\nbar>)") == []
+    assert _link_refs("[x](<foo)") == []
+
+
+def test_format_only_change_around_angle_destination_passes():
+    before = "见 [x](<foo bar-baz>) 效果"
+    after = "**见** [x](<foo bar-baz>) 效果"
+    assert content_invariant(before, after) is True
+
+
+# ---------------------------------------------------------------------------
 # F3 — the balanced-paren scanner must HONOR ESCAPED PARENS. A backslash escapes
 # the next char: `\)` and `\(` neither close nor open depth. The old scanner
 # treats `\)` as a real terminator, so `![x](foo\)bar)` is captured as

@@ -928,22 +928,49 @@ def _scan_balanced(text: str, i: int, n: int, open_ch: str, close_ch: str) -> "i
 def _scan_inline_link_target(text: str, i: int, n: int) -> "int | None":
     """Consume an inline link target starting just after its outer ``(``.
 
-    Destinations may contain balanced, escaped parentheses.  Once whitespace
-    ends a destination, an optional title is either double-quoted,
-    single-quoted, or parenthesized.  Escapes consume the next delimiter in all
-    three forms.  This is deliberately a small CommonMark-shaped scanner rather
-    than a general Markdown parser: a complete target returns the index after
-    its outer ``)``, and incomplete or malformed input returns ``None``.
+    Bare destinations may contain balanced, escaped parentheses.  A destination
+    beginning with ``<`` instead consumes through its unescaped ``>``; spaces
+    and ``)`` are content there, while an inner ``<`` or newline is malformed.
+    Once whitespace ends a bare destination, or follows an angle destination,
+    an optional title is either double-quoted, single-quoted, or parenthesized.
+    Escapes consume the next delimiter in all forms.  This is deliberately a
+    small CommonMark-shaped scanner rather than a general Markdown parser: a
+    complete target returns the index after its outer ``)``, and incomplete or
+    malformed input returns ``None``.
 
     Both the full-text reference scanner and the line-local soft-newline gate
     use this function.  In particular, a ``)`` in a quoted title cannot be
     mistaken for the closing parenthesis of the surrounding link.
     """
-    phase = "dest"
+    phase = "angle" if i < n and text[i] == "<" else "dest"
+    if phase == "angle":
+        i += 1
     destination_depth = 1
     title_close = ""
     while i < n:
         ch = text[i]
+        if phase == "angle":
+            if ch == "\n" or ch == "\r":
+                return None
+            if ch == "\\":
+                if i + 1 < n and (text[i + 1] == "\n" or text[i + 1] == "\r"):
+                    return None
+                i += 2
+                continue
+            if ch == "<":
+                return None
+            if ch == ">":
+                phase = "after_angle"
+            i += 1
+            continue
+        if phase == "after_angle":
+            if ch == ")":
+                return i + 1
+            if ch.isspace():
+                phase = "gap"
+                i += 1
+                continue
+            return None
         if phase == "dest":
             if ch == "\\":
                 i += 2
