@@ -13,6 +13,11 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
+from app.repositories.sqlite.anchor_normalization import (
+    JS_TRIM_WHITESPACE,
+    js_trim,
+    sqlite_js_trim_expression,
+)
 from app.repositories.sqlite.knowhow_store import KnowhowStore
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -1529,48 +1534,61 @@ def test_guarded_atomic_blank_anchor_rows_never_form_a_membership_group(store, n
     assert result["written"] == [(r0, shared_col), (r1, shared_col)]
 
 
-def test_guarded_atomic_membership_fetch_is_like_scoped_not_full_column_scan(
-    store, notebook_id, monkeypatch
-):
-    # F2 (structural perf lock via sqlite trace): the membership check must NOT
-    # rescan the table's whole anchor column per guarded call. The only query that
-    # aliases content_md AS anchor_md is the membership candidate fetch; assert
-    # every occurrence of it is the LIKE-scoped prefilter, never the unfiltered
-    # full-column scan. RED before the fix (no LIKE), GREEN after.
-    table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
+def test_guarded_atomic_membership_query_uses_normalized_anchor_index(store, notebook_id):
+    # The write-transaction membership lookup is a hot path: a reformat of R
+    # singleton groups and C columns invokes it R×C times. Its observable query
+    # plan must therefore seek the normalized-anchor expression index, rather
+    # than scanning knowhow_cells once per save unit. The expression is the
+    # ECMAScript String.prototype.trim() code-point set; the production helper
+    # owns this spelling once the migration/store change lands.
+    table_id, anchor_col, _shared_col, _r0, _r1, anchor_val, _shared_val = _anchor_group(
         store, notebook_id
     )
-    statements = _trace_write_connections(store, monkeypatch)
+    with store.database.connect() as db:
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT c.row_id "
+            "FROM knowhow_cells c JOIN knowhow_rows r ON r.id = c.row_id "
+            "WHERE c.column_id = ? "
+            f"AND {sqlite_js_trim_expression('c.content_md')} = ? "
+            "AND r.table_id = ?",
+            (anchor_col, anchor_val, table_id),
+        ).fetchall()
 
-    result = store.update_knowhow_cells_guarded_atomic(
-        notebook_id,
-        [
-            (table_id, r0, shared_col, shared_val, "新改法"),
-            (table_id, r1, shared_col, shared_val, "新改法"),
-        ],
-        anchor_column_id=anchor_col,
-        expected_anchor=[anchor_val, anchor_val],
-    )
-    assert result["conflict"] is False  # sanity: the guarded path ran to completion
+    details = [row["detail"] for row in plan]
+    assert any(
+        "idx_knowhow_cells_column_normalized_anchor_row" in detail
+        for detail in details
+    ), details
+    assert not any("SCAN " in detail for detail in details), details
 
-    normalized = [" ".join(s.upper().split()) for s in statements]
-    member_scans = [s for s in normalized if "ANCHOR_MD" in s]
-    assert member_scans, f"anchor membership fetch never ran. Traced: {statements}"
-    assert all("LIKE" in s and "ESCAPE" in s for s in member_scans), (
-        "anchor membership fetch must be a LIKE-scoped candidate prefilter, not an "
-        f"unfiltered full anchor-column scan. Traced: {member_scans}"
-    )
+
+@pytest.mark.parametrize("padding", list(JS_TRIM_WHITESPACE))
+def test_sql_normalized_anchor_matches_js_trim_for_every_included_codepoint(store, padding):
+    value = f"{padding}anchor{padding}"
+    with store.database.connect() as db:
+        normalized = db.execute(
+            f"SELECT {sqlite_js_trim_expression('?')}", (value,)
+        ).fetchone()[0]
+    assert js_trim(value) == "anchor"
+    assert normalized == "anchor"
+
+
+@pytest.mark.parametrize("padding", ["\x1c", "\x1d", "\x1e", "\x1f", "\x85"])
+def test_sql_normalized_anchor_keeps_js_trim_excluded_edge_cases(store, padding):
+    value = f"{padding}anchor{padding}"
+    with store.database.connect() as db:
+        normalized = db.execute(
+            f"SELECT {sqlite_js_trim_expression('?')}", (value,)
+        ).fetchone()[0]
+    assert js_trim(value) == value
+    assert normalized == value
 
 
 def test_guarded_atomic_joiner_with_exotic_whitespace_padding_detected(store, notebook_id):
-    # F2 no-UNDER-match lock: the LIKE prefilter searches for the TRIMMED key as a
-    # substring, so a joiner whose stored anchor pads the group value with exotic
-    # whitespace the DB's own LIKE does not trim (U+3000 IDEOGRAPHIC SPACE, which
-    # _JS_TRIM_WHITESPACE strips) is STILL a LIKE candidate -- "示波器" is a
-    # contiguous substring of "　示波器" -- and the exact _anchor_trim filter
-    # confirms it trim-equals the group. Membership grew beyond the frozen {r0, r1}
-    # -> conflict. (Fails if the prefilter matched the RAW value exactly instead of
-    # the trimmed core as a substring: it would miss this member -> fail-open.)
+    # The expression index applies the same ECMAScript trim as the frontend, so a
+    # joiner padded by U+3000 IDEOGRAPHIC SPACE has the same normalized key as
+    # "示波器". Membership grows beyond frozen {r0, r1} and must conflict.
     table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
         store, notebook_id
     )
@@ -1593,22 +1611,17 @@ def test_guarded_atomic_joiner_with_exotic_whitespace_padding_detected(store, no
     assert rows[r2][shared_col] == "别的"
 
 
-def test_guarded_atomic_membership_escapes_like_wildcards(store, notebook_id):
-    # F2: the LIKE candidate prefilter binds the TRIMMED anchor text, which may
-    # itself contain LIKE metacharacters (%, _) or the escape char (\). They must be
-    # escaped (ESCAPE '\') so the pattern matches them LITERALLY -- an unescaped
-    # backslash makes SQLite reject the pattern (crash), and unescaped %/_ would
-    # widen the candidate set. The exact _anchor_trim filter still decides true
-    # membership, so a group whose anchor value carries all three writes correctly
-    # and a decoy the UNescaped pattern would wildcard-match stays out of the group.
+def test_guarded_atomic_membership_treats_like_wildcards_as_literal_anchor_text(store, notebook_id):
+    # Membership is equality on the normalized expression, so LIKE metacharacters
+    # and backslashes are ordinary anchor text. A group carrying all three writes
+    # correctly while a wildcard-shaped decoy remains outside the group.
     table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
     cols = _columns_by_name(store, table_id)
     anchor_col, shared_col = cols["违例类型"], cols["修复方法"]
     tricky = "a_b%c\\d"  # underscore + percent + backslash
     r0 = store.add_knowhow_row(table_id, {anchor_col: tricky, shared_col: "旧改法"})
     r1 = store.add_knowhow_row(table_id, {anchor_col: tricky, shared_col: "旧改法"})
-    # Decoy that an UNescaped '%a_b%c\d%' pattern would wildcard-match (_ / % as
-    # wildcards) but which is NOT the literal anchor -> must never join the group.
+    # It resembles a wildcard match but is not the literal normalized anchor.
     decoy = store.add_knowhow_row(table_id, {anchor_col: "aXbYcZd", shared_col: "别的"})
 
     result = store.update_knowhow_cells_guarded_atomic(

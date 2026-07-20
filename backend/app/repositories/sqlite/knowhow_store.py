@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable, Sequence
 
+from app.repositories.sqlite.anchor_normalization import js_trim, sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -19,42 +20,6 @@ VALID_KINDS = frozenset({"anchor", "procedure", "entity", "attribute"})
 #: one exception — its initial column list may name the anchor inline (it
 #: validates the at-most-one rule itself).
 _NON_ANCHOR_KINDS = frozenset({"procedure", "entity", "attribute"})
-
-#: The EXACT whitespace set JS ``String.prototype.trim()`` strips (ECMAScript
-#: WhiteSpace ∪ LineTerminator). ``update_knowhow_cells_guarded_atomic``'s anchor
-#: group-membership guard must judge "same group" with the SAME equivalence the
-#: frontend uses — ``frontend/app/knowhow-grouping-logic.ts``'s
-#: ``groupRowsByAnchor``/``isSharedColumn`` group anchor cells by ``.trim()`` (and
-#: a blank-after-trim value is its OWN group, never aggregated). This is
-#: deliberately NOT ``str.strip()``'s default set nor SQLite ``TRIM()`` (space
-#: only): ``str.strip()`` also strips U+001C–U+001F and U+0085 (which JS trim does
-#: NOT) and omits U+FEFF (which JS trim DOES strip). Passing this explicit set to
-#: ``str.strip(chars)`` reproduces JS ``trim()`` code-point-for-code-point, so a
-#: row the frontend shows as an in-group whitespace variant is judged in-group
-#: here too — directional safety: no joiner the modal would show merged can slip
-#: past the guard because the two sides disagree on an edge whitespace code point.
-_JS_TRIM_WHITESPACE = (
-    "\t\n\x0b\x0c\r \xa0"
-    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
-    "\u2028\u2029\u202f\u205f\u3000\ufeff"
-)
-
-
-def _anchor_trim(value: "str | None") -> str:
-    """Trim an anchor cell value EXACTLY like JS ``String.prototype.trim()`` (see
-    ``_JS_TRIM_WHITESPACE``) so the atomic guard's group-membership test mirrors
-    the frontend ``groupRowsByAnchor`` equivalence."""
-    return (value or "").strip(_JS_TRIM_WHITESPACE)
-
-
-def _like_escape(value: str) -> str:
-    """Escape SQLite ``LIKE`` metacharacters (``%`` any-run, ``_`` any-char) and the
-    escape character itself in ``value`` so it can be bound as a LITERAL substring in
-    a ``LIKE '%' || ? || '%' ESCAPE '\\'`` pattern. Backslash is escaped FIRST so the
-    escapes this function adds are not themselves re-escaped; an unescaped backslash
-    would also make SQLite reject the pattern outright."""
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-
 
 class KnowhowStore:
     """SQLite row persistence for the knowhow-table feature (knowhow-tables
@@ -1044,7 +1009,7 @@ class KnowhowStore:
                 # the targets, the CURRENT member row-id set must EQUAL the frozen
                 # target set for that value. "Member" MIRRORS the frontend
                 # groupRowsByAnchor (frontend/app/knowhow-grouping-logic.ts): a row
-                # whose anchor cell TRIM-equals the value (see _anchor_trim, which
+                # whose anchor cell TRIM-equals the value (see js_trim, which
                 # reproduces JS String.prototype.trim() exactly). A blank-after-trim
                 # value is its OWN group there (never aggregated), so blank keys
                 # carry no multi-row membership and are skipped — the fan-out only
@@ -1054,7 +1019,7 @@ class KnowhowStore:
                 # VALUE-EDIT guard; this set check is the STRUCTURAL guard.
                 frozen_by_key: "dict[str, set[str]]" = {}
                 for (_ut, u_row, _uc, _ub, _um), snapshot in zip(updates, expected_anchor):
-                    key = _anchor_trim(snapshot)
+                    key = js_trim(snapshot)
                     if not key:
                         continue
                     frozen_by_key.setdefault(key, set()).add(u_row)
@@ -1064,29 +1029,25 @@ class KnowhowStore:
                     # its own singleton coversAnchorGroup unit, so an R×C import fires
                     # R×C guarded calls, each O(R) -> O(R²C) inside the write lock.
                     # Instead, for each DISTINCT non-blank frozen key, fetch only
-                    # CANDIDATE rows via a LIKE substring prefilter on the TRIMMED key,
-                    # then let the exact _anchor_trim equality below decide true
-                    # membership. The trimmed core is BY DEFINITION a contiguous
-                    # substring of any raw value that trim-equals it, so LIKE can never
-                    # UNDER-match a true member (the fail-closed structural guard is
-                    # preserved -- a joiner cannot hide); it may OVER-match (key nested
-                    # in a longer value, ASCII case-folding), which the exact filter
-                    # then discards. Same BEGIN IMMEDIATE; each call now touches
-                    # O(candidate) rows, not O(R). (Blank keys were already skipped
-                    # when frozen_by_key was built, so blank-anchor rows never
-                    # aggregate here -- each is its own group, mirroring the frontend.)
+                    # exact members through the v21 normalized-anchor expression
+                    # index. The SQL expression is shared with that migration and
+                    # exactly matches js_trim, so a whitespace-padded joiner cannot
+                    # hide and no Python post-filter is needed. Same BEGIN IMMEDIATE;
+                    # each call now touches O(group) rows, not O(R). (Blank keys were
+                    # already skipped when frozen_by_key was built, so blank-anchor
+                    # rows never aggregate here -- each is its own group, mirroring
+                    # the frontend.)
                     current_by_key: "dict[str, set[str]]" = {}
+                    normalized_anchor = sqlite_js_trim_expression("c.content_md")
                     for key in frozen_by_key:
-                        like_pattern = "%" + _like_escape(key) + "%"
                         for cell in db.execute(
-                            "SELECT c.row_id AS row_id, c.content_md AS anchor_md "
+                            "SELECT c.row_id AS row_id "
                             "FROM knowhow_cells c JOIN knowhow_rows r ON r.id = c.row_id "
                             "WHERE r.table_id = ? AND c.column_id = ? "
-                            "AND c.content_md LIKE ? ESCAPE '\\'",
-                            (anchor_table_id, anchor_column_id, like_pattern),
+                            f"AND {normalized_anchor} = ?",
+                            (anchor_table_id, anchor_column_id, key),
                         ).fetchall():
-                            if _anchor_trim(cell["anchor_md"]) == key:
-                                current_by_key.setdefault(key, set()).add(cell["row_id"])
+                            current_by_key.setdefault(key, set()).add(cell["row_id"])
                     for key, frozen_ids in frozen_by_key.items():
                         if current_by_key.get(key, set()) != frozen_ids:
                             return {"written": [], "conflict": True}

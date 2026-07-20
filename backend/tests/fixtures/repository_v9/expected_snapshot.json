@@ -1193,6 +1193,11 @@
         "type": "index"
       },
       {
+        "name": "idx_knowhow_cells_column_normalized_anchor_row",
+        "sql_sha256": "0355c31deff860cff2e80d6e50263be02d706ab265989e3ec90132ad687a139d",
+        "type": "index"
+      },
+      {
         "name": "idx_knowhow_cells_row",
         "sql_sha256": "4489d7ad333ba96b0192add418c3be60001a11ed7862b2141eb105c7a080a313",
         "type": "index"
@@ -1788,6 +1793,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 20
+    "user_version": 21
   }
 }

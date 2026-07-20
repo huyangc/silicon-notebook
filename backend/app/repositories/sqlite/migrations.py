@@ -5,13 +5,14 @@ import sqlite3
 from typing import Any
 
 from app.core.config import Settings
+from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
 
 from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT_TYPE_LABELS
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1469,6 +1470,23 @@ class SqliteMigrator:
                     "ALTER TABLE promotion_candidates "
                     "ADD COLUMN target_base_id TEXT NOT NULL DEFAULT ''"
                 )
+
+    def _migration_21(self) -> None:
+        """Index guarded anchor membership by ECMAScript-trimmed content.
+
+        Interactive reformat saves compare every complete anchor-group member
+        while holding ``BEGIN IMMEDIATE``. The leading-wildcard prefilter could
+        still scan the table per save unit; this expression index makes the
+        exact ``column_id + JS-trim(content_md)`` lookup indexable without an
+        application-defined SQLite function or materialized column.
+        """
+        with self._connect() as db:
+            normalized_anchor = sqlite_js_trim_expression("content_md")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS "
+                "idx_knowhow_cells_column_normalized_anchor_row "
+                f"ON knowhow_cells(column_id, {normalized_anchor}, row_id)"
+            )
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，

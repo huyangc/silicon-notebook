@@ -38,12 +38,13 @@ def _indexes(repo, table):
 
 
 def test_fresh_db_has_notebook_assets_source_id(tmp_path):
-    """全新库:SCHEMA_VERSION 已到 20（notebook_assets.source_id 列在 v19 落地，
-    此后 v20 加了 notebook_bases + promotion_candidates.target_base_id，不影响
+    """全新库:SCHEMA_VERSION 已到 21（notebook_assets.source_id 列在 v19 落地，
+    此后 v20 加了 notebook_bases + promotion_candidates.target_base_id、v21 加了
+    normalized-anchor expression index，均不影响
     本列）；notebook_assets 带可空 source_id 列 + idx_notebook_assets_source
     索引；user_version 已盖到 SCHEMA_VERSION。"""
     repo = _repo(tmp_path)
-    assert SCHEMA_VERSION == 20
+    assert SCHEMA_VERSION == 21
     assert "source_id" in _cols(repo, "notebook_assets")
     assert "idx_notebook_assets_source" in _indexes(repo, "notebook_assets")
     with repo._connect() as db:

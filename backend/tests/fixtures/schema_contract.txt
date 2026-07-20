@@ -493,6 +493,7 @@ idx_feedback_answer
 idx_feedback_nb_rating
 idx_kg_cluster_scratch_nb_run
 idx_knowhow_cell_code_row
+idx_knowhow_cells_column_normalized_anchor_row
 idx_knowhow_cells_row
 idx_knowhow_columns_table
 idx_knowhow_rows_table
