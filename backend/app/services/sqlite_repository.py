@@ -531,7 +531,9 @@ class SQLiteRepository:
             set_source_status=lambda source_id, status: (
                 self._set_source_status(source_id, status)
             ),
-            run_extraction=lambda source_id: self._run_extraction(source_id),
+            run_extraction=lambda source_id, **kwargs: (
+                self._runtime.source_ingestion.run_extraction(source_id, **kwargs)
+            ),
             llm=lambda: self.llm_client,
             kg_llm=lambda: self.kg_llm_client,
             cluster_map=lambda notebook_id: self.cluster_map(notebook_id),

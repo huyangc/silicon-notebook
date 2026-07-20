@@ -110,7 +110,7 @@ class KnowledgeLifecycleService:
         embed_relations_batch: Callable[[str, List[dict]], None],
         source_ids_from_evidence: Callable[[Optional[str]], set],
         set_source_status: Callable[..., None],
-        run_extraction: Callable[[str], None],
+        run_extraction: Callable[..., None],
         llm: Callable[[], Any],
         kg_llm: Callable[[], Any],
         cluster_map: Callable[[str], Dict[str, str]],

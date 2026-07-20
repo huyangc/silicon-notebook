@@ -10,6 +10,7 @@ from app.core.llm import cap_kwargs
 from app.services.kg.client import safe_json
 from app.services.kg.models import Edge, Evidence, Node, Step
 from app.services.kg.parsing import SourceElementQ
+from app.services.kg.run_control import KgBuildAborted
 from app.services.prompts import gleaning_prompt, refine_prompt, REFINE_SCHEMA_HINT
 
 NODE_TYPES = {"Concept", "Claim", "Formula", "Procedure"}
@@ -184,6 +185,8 @@ def refine_nodes(client: Any, elements: List[SourceElementQ], nodes: List[Node],
             **cap_kwargs(client, "kg_extract_max_tokens"),
         )
         data = safe_json(raw)
+    except KgBuildAborted:
+        raise
     except (APIConnectionError, APITimeoutError):
         raise
     except Exception:
@@ -226,6 +229,8 @@ def _glean_nodes(client: Any, elements: List[SourceElementQ], section_path: str,
             raw = client.chat_json(messages, _KG_SCHEMA_HINT,
                                    **cap_kwargs(client, "kg_extract_max_tokens"))
             data = safe_json(raw)
+        except KgBuildAborted:
+            raise
         except Exception:
             return
         added = 0
@@ -273,6 +278,8 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
             **cap_kwargs(client, "kg_extract_max_tokens"),
         )
         data = safe_json(raw)
+    except KgBuildAborted:
+        raise
     except (APIConnectionError, APITimeoutError):
         raise            # hard failure: window never processed — caller counts it
     except Exception:
@@ -304,6 +311,8 @@ def extract_window(client: Any, elements: List[SourceElementQ], section_path: st
         # window — degrade to unfiltered nodes instead.
         try:
             kept = refine_nodes(client, elements, nodes, section_path)
+        except KgBuildAborted:
+            raise
         except Exception:
             kept = nodes
         kept_ids = {n.id for n in kept}

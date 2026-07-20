@@ -978,7 +978,7 @@ class SourceIngestionService:
             for e in extra
         ]
 
-    def run_extraction(self, source_id: str) -> None:
+    def run_extraction(self, source_id: str, *, kg_client: Any | None = None) -> None:
         source: SourceDetail = self.sources.get_source(source_id)
         elements = self.source_elements(source_id)
         # 历史源 catch-up:补论文元数据(幂等,有行即跳)。ensure_paper_metadata 的
@@ -1003,7 +1003,7 @@ class SourceIngestionService:
         from app.repositories.sqlite import knowledge_counts_cache
         knowledge_counts_cache.invalidate(source.notebook_id)
         try:
-            kg_llm_client = self.kg_llm()
+            kg_llm_client = kg_client if kg_client is not None else self.kg_llm()
             if not getattr(kg_llm_client, "configured", False):
                 self.finish_extraction_run(run_id, "completed", "no-llm")
                 return

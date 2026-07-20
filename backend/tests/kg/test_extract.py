@@ -1,6 +1,8 @@
 import json
+import pytest
 from app.services.kg.extract import extract_window, _prompt
 from app.services.kg.parsing import SourceElementQ
+from app.services.kg.run_control import KgBuildAborted, KgBuildFailure
 
 
 def _se(idx: int, text: str, char_start: int) -> SourceElementQ:
@@ -70,6 +72,20 @@ def test_marker_anchoring_binds_resolves_and_drops():
 def test_extract_window_empty_elements():
     nodes, edges = extract_window(Fake(), [], "1", "textbook")
     assert nodes == [] and edges == []
+
+
+def test_extract_window_propagates_task_abort():
+    class AbortedClient:
+        def chat_json(self, messages, response_schema_hint):
+            raise KgBuildAborted(
+                KgBuildFailure("model_unavailable", "model unavailable")
+            )
+
+    with pytest.raises(KgBuildAborted):
+        extract_window(
+            AbortedClient(), ELEMENTS, "1", "textbook", refine=True,
+            gleaning_rounds=1,
+        )
 
 
 def test_prompt_template_valid():

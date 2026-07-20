@@ -852,7 +852,7 @@ class RepositoryRuntime:
         embed_relations_batch: Callable[..., None],
         source_ids_from_evidence: Callable[..., set],
         set_source_status: Callable[..., None],
-        run_extraction: Callable[[str], None],
+        run_extraction: Callable[..., None],
         llm: Callable[[], Any],
         kg_llm: Callable[[], Any],
         cluster_map: Callable[[str], dict],

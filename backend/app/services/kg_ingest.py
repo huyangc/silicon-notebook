@@ -3,6 +3,7 @@ The ONLY bridge between app.services.kg.* and the product. Extraction model is
 the product LLM (deepseek-v4-flash via OPENAI_COMPAT_*)."""
 from __future__ import annotations
 
+import concurrent.futures as cf
 import math
 import re
 from typing import Any, List, Tuple
@@ -12,6 +13,7 @@ from app.services.kg.extract import extract_window
 from app.services.kg.canonicalize import canonicalize
 from app.services.kg.filters import should_extract_window, is_noise_concept, is_meta_claim
 from app.services.kg.models import Edge, KnowledgeGraph, Node
+from app.services.kg.run_control import KgBuildAborted
 from app.services.kg.scheduler import submit_window
 
 DOC_TYPE_MAP = {"academic_paper": "academic", "article": "academic", "textbook": "textbook"}
@@ -204,11 +206,16 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                               gleaning_rounds=gleaning_rounds,
                               base_filter=base_filter)
                 for idx, (w, els) in enumerate(pairs)]
-        for fut in futs:
+        for fut in cf.as_completed(futs):
             try:
                 ns, es = fut.result()
                 nodes += ns
                 edges += es
+            except KgBuildAborted:
+                for pending in futs:
+                    pending.cancel()
+                cf.wait(futs)
+                raise
             except Exception:
                 failed += 1
     nodes, edges, concepts_dropped = drop_noise_concepts(nodes, edges, whitelist)
