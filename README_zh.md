@@ -1021,6 +1021,17 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 `CI / full-gate` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
 并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。
 
+CI 可移植性属于门禁契约：所有由 CI 执行的测试使用的文件系统、数据和依赖
+路径都必须相对仓库，并且独立于进程 cwd。已提交 fixture 必须从其仓库文件位置
+定位，禁止依赖开发机 checkout 绝对路径或 `HOME`，测试也不得读取仓库外源文档。
+测试启动时直接导入的第三方包必须声明在 `backend/requirements.txt`；干净 hosted
+runner 必须从该文件和 `frontend/package-lock.json` 安装，并且只凭这些声明即可
+全绿。各 lane 时长继续输出供观察，60 秒内目标只约束已验证的 Apple Silicon
+Homebrew warm gate。
+
+依赖仓库外 PDF 解析产物的 gold 生成、构建与校验脚本仍属于 developer-only
+工具并保持在 `scripts/check.sh` 之外；该例外绝不适用于已提交测试。
+
 ## 开发流程
 
 每开始一个新的特性开发任务，默认先新建 git worktree，并在该 worktree 内基于新 feature 分支开发；完成后从该分支提交 PR。不要为了特性开发直接在本地主 checkout 里切分支。如果当前目录已经是隔离的 linked worktree，则继续在当前 worktree 内工作。

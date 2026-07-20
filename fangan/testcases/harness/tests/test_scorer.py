@@ -1,31 +1,36 @@
-import glob
-import os
+from pathlib import Path
 
 import yaml
 
 from harness import scorer
 
-REPO = "/Users/hzf/workspace/silicon_notebook"
-GOLDS = sorted(glob.glob(os.path.join(REPO, "fangan/testcases/*/ch*/gold.yaml")))
+
+def _read_yaml(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def test_gold_files_found():
-    assert len(GOLDS) == 14
+def test_gold_files_found(gold_paths: tuple[Path, ...]) -> None:
+    assert len(gold_paths) == 14
 
 
-def test_gold_vs_gold_is_perfect():
-    # The core sanity invariant: scoring gold against itself yields 100 on every chapter.
-    for gp in GOLDS:
-        gold = yaml.safe_load(open(gp, encoding="utf-8"))
+def test_gold_vs_gold_is_perfect(gold_paths: tuple[Path, ...]) -> None:
+    for gold_path in gold_paths:
+        gold = _read_yaml(gold_path)
         result = scorer.score_fixture(gold, gold)
-        assert result["weighted_score"] == 100.0, f"{gp} -> {result['weighted_score']}"
-        for bucket, s in result["stage_scores"].items():
-            assert abs(s - 1.0) < 1e-9, f"{gp} bucket {bucket} = {s}"
+        assert result["weighted_score"] == 100.0, (
+            f"{gold_path} -> {result['weighted_score']}"
+        )
+        for bucket, score in result["stage_scores"].items():
+            assert abs(score - 1.0) < 1e-9, (
+                f"{gold_path} bucket {bucket} = {score}"
+            )
 
 
-def test_dropping_an_object_lowers_score():
-    gold = yaml.safe_load(open(GOLDS[0], encoding="utf-8"))
-    pred = yaml.safe_load(open(GOLDS[0], encoding="utf-8"))
+def test_dropping_an_object_lowers_score(
+    gold_paths: tuple[Path, ...],
+) -> None:
+    gold = _read_yaml(gold_paths[0])
+    pred = _read_yaml(gold_paths[0])
     if pred.get("objects"):
         pred["objects"] = pred["objects"][:-1]
     result = scorer.score_fixture(gold, pred)
