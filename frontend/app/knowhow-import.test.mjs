@@ -5,10 +5,13 @@
 // 对 knowhow-panel-logic.ts 的拆分方式）。
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
+  DEFAULT_IMPORT_ORIENTATION,
   IMPORT_ACCEPT_EXTENSIONS,
   IMPORT_ACCEPT,
+  IMPORT_ORIENTATION_OPTIONS,
   isSupportedImportFile,
   deriveDefaultTitle,
   ROLE_OPTIONS,
@@ -37,6 +40,31 @@ import {
 } from "./test/semantic-source.mjs";
 
 const importModule = await parseModule("knowhow-import.tsx");
+
+// --- 属性排列方式 ---------------------------------------------------------------
+
+test("IMPORT_ORIENTATION_OPTIONS: 默认属性按列，并提供双方向说明", () => {
+  assert.strictEqual(DEFAULT_IMPORT_ORIENTATION, "columns");
+  assert.deepStrictEqual(IMPORT_ORIENTATION_OPTIONS, [
+    {
+      value: "columns",
+      label: "属性按列",
+      description: "第一行是属性名，每一行是一条记录",
+    },
+    {
+      value: "rows",
+      label: "属性按行",
+      description: "第一列是属性名，每一列是一条记录",
+    },
+  ]);
+});
+
+test("KnowhowImportWizard: 返回选文件时保留用户选择的属性排列方式", () => {
+  const source = readFileSync(new URL("./knowhow-import.tsx", import.meta.url), "utf8");
+  const backToSelect = source.match(/function backToSelect\(\) \{([\s\S]*?)\n  \}/)?.[1];
+  assert.ok(backToSelect, "应能找到新表导入向导的 backToSelect");
+  assert.doesNotMatch(backToSelect, /setOrientation/);
+});
 
 // --- IMPORT_ACCEPT_EXTENSIONS / IMPORT_ACCEPT -----------------------------------
 
