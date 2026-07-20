@@ -65,6 +65,10 @@ from app.services.sqlite_repository import (
 )
 
 RESTART_ERROR = "中断:服务重启"
+KG_RUN_RESTART_ERROR = "worker_interrupted: 服务重启导致知识图谱分析中断"
+KG_JOB_RESTART_MESSAGE = (
+    "服务重启导致本次分析中断；已完成内容已保留，可继续分析未完成内容。"
+)
 
 # Tables whose rows the startup sequence may legitimately touch; every one is
 # compared row-by-row against the documented allowance instead of digest-only.
@@ -75,6 +79,9 @@ SPECIAL_TABLES = (
     "object_schemas",
     "merge_review_jobs",
     "ask_jobs",
+    "sources",
+    "extraction_runs",
+    "kg_build_jobs",
 )
 
 # The admin in-place upgrade (`_seed`) rewrites exactly these user-local
@@ -1100,6 +1107,9 @@ def _empty_normalized() -> Dict[str, int]:
     return {
         "merge_review_jobs": 0,
         "ask_jobs": 0,
+        "sources": 0,
+        "extraction_runs": 0,
+        "kg_build_jobs": 0,
         "seeded_users": 0,
         "seeded_user_profiles": 0,
         "seeded_concept_whitelist": 0,
@@ -1166,6 +1176,61 @@ def _compare_special_rows(
                 and rows_equal(pre_row, post_row, frozenset({"status", "error"}))
             ):
                 normalized["ask_jobs"] += 1
+            else:
+                problems.append(f"table={table} reason=recovery-changed-other-fields")
+            continue
+        if table == "sources" and pre_row.get("parse_status") == "extracting":
+            allowed = frozenset(
+                {"status", "parse_status", "error_message", "updated_at"}
+            )
+            if (
+                post_row.get("status") == "parsed"
+                and post_row.get("parse_status") == "parsed"
+                and post_row.get("error_message") == ""
+                and post_row.get("updated_at") != pre_row.get("updated_at")
+                and rows_equal(pre_row, post_row, allowed)
+            ):
+                normalized["sources"] += 1
+            else:
+                problems.append(f"table={table} reason=recovery-changed-other-fields")
+            continue
+        if (
+            table == "extraction_runs"
+            and pre_row.get("run_type") == "kg"
+            and pre_row.get("status") == "running"
+        ):
+            allowed = frozenset({"status", "error_message", "updated_at"})
+            if (
+                post_row.get("status") == "failed"
+                and post_row.get("error_message") == KG_RUN_RESTART_ERROR
+                and post_row.get("updated_at") != pre_row.get("updated_at")
+                and rows_equal(pre_row, post_row, allowed)
+            ):
+                normalized["extraction_runs"] += 1
+            else:
+                problems.append(f"table={table} reason=recovery-changed-other-fields")
+            continue
+        if table == "kg_build_jobs" and pre_row.get("status") == "running":
+            allowed = frozenset(
+                {
+                    "status",
+                    "stage",
+                    "error_code",
+                    "error_message",
+                    "updated_at",
+                    "finished_at",
+                }
+            )
+            if (
+                post_row.get("status") == "failed"
+                and post_row.get("stage") == "finished"
+                and post_row.get("error_code") == "worker_interrupted"
+                and post_row.get("error_message") == KG_JOB_RESTART_MESSAGE
+                and post_row.get("updated_at") != pre_row.get("updated_at")
+                and post_row.get("finished_at") == post_row.get("updated_at")
+                and rows_equal(pre_row, post_row, allowed)
+            ):
+                normalized["kg_build_jobs"] += 1
             else:
                 problems.append(f"table={table} reason=recovery-changed-other-fields")
             continue
@@ -1671,6 +1736,53 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result = verify_snapshot(args.database, args.storage_dir)
     _print_report(result)
     return 0 if result.ok else 1
+
+
+# v22: durable notebook-scoped KG build status plus a partial unique index
+# enforcing one running task per notebook. Appended here to keep the verifier's
+# source-audit coordinates stable; compare_snapshots resolves the manifest only
+# when invoked, after module initialization has completed.
+KG_BUILD_JOB_TABLE = {
+    "kg_build_jobs": """CREATE TABLE kg_build_jobs (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  created_by TEXT NOT NULL DEFAULT '',
+                  mode TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'running',
+                  stage TEXT NOT NULL DEFAULT 'probing',
+                  total_sources INTEGER NOT NULL DEFAULT 0,
+                  completed_sources INTEGER NOT NULL DEFAULT 0,
+                  failed_sources INTEGER NOT NULL DEFAULT 0,
+                  error_code TEXT NOT NULL DEFAULT '',
+                  error_message TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  finished_at TEXT NOT NULL DEFAULT ''
+                )""",
+}
+KG_BUILD_JOB_INDEXES = {
+    "idx_kg_build_jobs_one_running":
+        """CREATE UNIQUE INDEX idx_kg_build_jobs_one_running
+                  ON kg_build_jobs(notebook_id) WHERE status = 'running'""",
+    "idx_kg_build_jobs_nb_created":
+        """CREATE INDEX idx_kg_build_jobs_nb_created
+                  ON kg_build_jobs(notebook_id, created_at DESC, id DESC)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 22, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KG_BUILD_JOB_TABLE},
+        "indexes": {**manifest["indexes"], **KG_BUILD_JOB_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(21, 22)] = {
+    "tables": KG_BUILD_JOB_TABLE,
+    "columns": {},
+    "indexes": KG_BUILD_JOB_INDEXES,
+    "triggers": {},
+    "views": {},
+}
 
 
 if __name__ == "__main__":

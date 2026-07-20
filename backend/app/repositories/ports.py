@@ -97,6 +97,7 @@ class JsonChatClientPort(Protocol):
         top_p: float = 1.0,
         max_tokens: Optional[int] = None,
         cancel_event: CancelEvent = None,
+        bypass_cache: bool = False,
     ) -> str: ...
 
 
@@ -320,6 +321,16 @@ class KgMutationPort(Protocol):
 
 
 class KnowledgeLifecycleRepository(Protocol):
+    def prepare_notebook_kg_job(self, notebook_id: str, mode: str) -> dict: ...
+    def fail_notebook_kg_job_submission(self, job_id: str) -> bool: ...
+    def execute_notebook_kg_job(
+        self,
+        notebook_id: str,
+        job_id: str,
+        mode: str,
+        *,
+        progress: Callable | None = None,
+    ) -> dict: ...
     def build_notebook_kg(self, notebook_id: str, *, progress: Callable | None = None) -> dict: ...
     def rebuild_notebook_kg(self, notebook_id: str) -> dict: ...
     def relink_notebook_kg(self, notebook_id: str) -> dict: ...
@@ -400,6 +411,41 @@ class NotebookStorePort(Protocol):
     def participant_ids(self, db: sqlite3.Connection, active_notebook_id: str) -> list[str]: ...
     def participant_rows(self, db: sqlite3.Connection, active_notebook_id: str) -> tuple[Any, list[Any]]: ...
     def participant_tiers(self, db: sqlite3.Connection, active_notebook_id: str) -> tuple[list[str], dict[str, str]]: ...
+
+
+class KgBuildJobStorePort(Protocol):
+    def create_job(
+        self,
+        notebook_id: str,
+        created_by: str,
+        mode: str,
+        total_sources: int,
+    ) -> dict: ...
+    def get(self, job_id: str) -> dict: ...
+    def latest(self, notebook_id: str) -> dict | None: ...
+    def latest_on(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> dict | None: ...
+    def set_stage(
+        self,
+        job_id: str,
+        stage: str,
+        *,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> bool: ...
+    def record_source_result(
+        self, job_id: str, *, succeeded: bool
+    ) -> bool: ...
+    def finish(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> bool: ...
+    def fail_submission(self, job_id: str) -> bool: ...
 
 
 class SourceStorePort(Protocol):

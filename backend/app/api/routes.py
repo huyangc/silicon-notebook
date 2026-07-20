@@ -114,6 +114,7 @@ from app.services.model_config import ModelNotConfiguredError
 from app.services.pending_bus import pending_bus
 from app.repositories.ports import AskStreamPort, UploadedSourceFile
 from app.api.memory_routes import memory_router
+from app.repositories.sqlite.kg_build_job_store import KgBuildAlreadyRunning
 
 router = APIRouter()
 router.include_router(memory_router)
@@ -1709,15 +1710,33 @@ def build_kg(notebook_id: str) -> dict:
     """按需触发该 notebook 的 KG 建图(后台线程,幂等)。
     已有 knowledge_objects 的 source 会跳过。需 LLM 已配置,否则 409。"""
     repo = repository()
-    if not getattr(repo.llm_client, "configured", False):
-        raise HTTPException(status_code=409, detail="LLM not configured")
     try:
         repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    background_jobs.submit(repo.build_notebook_kg, notebook_id,
-                           name=f"buildkg-{notebook_id}", notify_pending=True)
-    return {"status": "building", "notebook_id": notebook_id}
+    if not getattr(repo.kg_llm_client, "configured", False):
+        raise HTTPException(status_code=409, detail="LLM not configured")
+    try:
+        job = repo.prepare_notebook_kg_job(notebook_id, "incremental")
+    except KgBuildAlreadyRunning:
+        raise user_error(409, "当前笔记本已有知识图谱分析任务正在运行")
+    try:
+        background_jobs.submit(
+            repo.execute_notebook_kg_job,
+            notebook_id,
+            job["id"],
+            "incremental",
+            name=f"buildkg-{notebook_id}",
+            notify_pending=True,
+        )
+    except Exception:
+        repo.fail_notebook_kg_job_submission(job["id"])
+        raise
+    return {
+        "status": "building",
+        "notebook_id": notebook_id,
+        "job_id": job["id"],
+    }
 
 
 @router.post("/notebooks/{notebook_id}/kg/rebuild", dependencies=[Depends(require_notebook_access)])
@@ -1726,15 +1745,33 @@ def rebuild_kg(notebook_id: str) -> dict:
     (background thread). Requires LLM configured (409 if not), 404 if notebook
     missing — same guards as build_kg."""
     repo = repository()
-    if not getattr(repo.llm_client, "configured", False):
-        raise HTTPException(status_code=409, detail="LLM not configured")
     try:
         repo.get_notebook(notebook_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
-    background_jobs.submit(repo.rebuild_notebook_kg, notebook_id,
-                           name=f"rebuildkg-{notebook_id}", notify_pending=True)
-    return {"status": "rebuilding", "notebook_id": notebook_id}
+    if not getattr(repo.kg_llm_client, "configured", False):
+        raise HTTPException(status_code=409, detail="LLM not configured")
+    try:
+        job = repo.prepare_notebook_kg_job(notebook_id, "rebuild")
+    except KgBuildAlreadyRunning:
+        raise user_error(409, "当前笔记本已有知识图谱分析任务正在运行")
+    try:
+        background_jobs.submit(
+            repo.execute_notebook_kg_job,
+            notebook_id,
+            job["id"],
+            "rebuild",
+            name=f"rebuildkg-{notebook_id}",
+            notify_pending=True,
+        )
+    except Exception:
+        repo.fail_notebook_kg_job_submission(job["id"])
+        raise
+    return {
+        "status": "rebuilding",
+        "notebook_id": notebook_id,
+        "job_id": job["id"],
+    }
 
 
 @router.post("/notebooks/{notebook_id}/kg/relink", dependencies=[Depends(require_notebook_access)])

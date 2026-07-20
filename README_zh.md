@@ -41,7 +41,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
-当前 schema 版本为 21。已提交的 v9 兼容 fixture 会经由 v10–v21 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引。
+当前 schema 版本为 22。已提交的 v9 兼容 fixture 会经由 v10–v22 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务。
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，内置 KG 类型文案/样式位于 `kg-type-model.ts`，图谱和答案共用 `kg-type-mark.tsx` 渲染。
 - 结构回归测试会阻止这些职责重新复制回巨型文件。后续拆分沿用同一增量方式：保持端点与用户行为不变，每次只迁移一个高内聚领域，然后运行完整离线门禁。
 
@@ -382,6 +382,36 @@ KB+confirmed-Memory 三种检索条件。
 - 否则仅当该 notebook 已有 KG 对象时，上传才抽。
 
 即：**首次 opt-in**（构建 KG，或设 `KG_AUTO_EXTRACT=true`），之后新文档自动抽取 + 融合。整库重抽用 `POST /api/notebooks/{id}/kg/rebuild`；离线批量构建见「离线批量摄取」一节。
+
+### KG 构建故障隔离
+
+手动整理/全部重新分析会创建持久化、任务级的 `kg_build_jobs` 记录；同一 notebook
+同时只允许一项 KG 任务运行。Notebook 与索引状态 API 会返回
+`probing → extracting → stopping → finished`、来源进度和经过审查的用户提示。
+前端刷新后仍能恢复该状态；失败后显示「继续分析未完成内容」。
+
+每次 KG 模型请求使用 `KG_LLM_TIMEOUT_SECONDS`（默认 `60` 秒），瞬态错误最多重试
+`KG_LLM_MAX_RETRIES` 次（默认 `2`，允许 `0..3`）。若服务持续不可达，或认证失败/
+请求被永久拒绝，本次任务共享的中断控制会阻止继续发起请求，取消尚未开始的
+source/window 工作，在首个窗口确认熔断时、窗口级与来源级 drain 开始前就持久化
+`stopping`，再等待已经开始的调用安全退出。中断范围只限当前 notebook 的本次 KG
+任务，不影响其他 notebook 或之后重新发起的任务。可用性探测会显式绕过 LLM 响应
+缓存且不回写缓存，旧的成功探测不能在当前模型已经不可用时放行破坏性重建。
+
+已完成来源的结果会保留；同一来源的 object/relation 分块共用一个 SQLite 事务，被
+中断或写入失败的来源不会留下半成品；旧版本遗留但最新 extraction run 已失败的图也
+仍判定为未完成。之后普通「继续分析」只处理未完成来源。只有显式「全部重新分析」
+会清空已有 KG，而且会在删除前先探测模型服务。若进程重启时仍有 running job，启动
+恢复会把 job 与 running extraction run 标为 failed，并把所有遗留的 `extracting`
+来源恢复为 `parsed`，包括尚未来得及创建 extraction run 就中断的来源。extraction
+run 进入完成或失败终态后还会精确失效该 notebook 的待处理来源缓存，避免轮询长期把
+已完成来源误报为未完成。
+
+前端用 notebook、workspace epoch 与请求 epoch 共同约束建库响应归属，并在持久化 job
+仍为 `running` 时持续轮询，不再用固定时限伪造本地完成。安全结构化事件覆盖
+`kg_build_started`、`kg_build_progress`、`kg_build_circuit_opened`、
+`kg_build_stopping`、`kg_build_succeeded` 与 `kg_build_failed`，不记录 provider
+诊断、prompt、来源正文、token 或凭据。
 
 ## 检索模式（问答）
 
@@ -1016,7 +1046,11 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 测试选择完整委托给 `scripts/check.sh`。
 
 该 workflow 只有读权限，不接收模型或部署 secrets，并把后端 pytest worker
-限制为 4，避免 GitHub 托管 runner 过度抢占。20 分钟 timeout 包含依赖安装，
+限制为 4，避免 GitHub 托管 runner 过度抢占。后端安装设置
+`HNSWLIB_NO_NATIVE=1` 并禁用 pip wheel cache：`hnswlib` 默认会用
+`-march=native` 编译，把这种本机 wheel 缓存后恢复到 CPU 特性不同的托管
+runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN 性能换取确定性；
+生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。20 分钟 timeout 包含依赖安装，
 与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。初次接入时
 `CI / full-gate` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
 并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。

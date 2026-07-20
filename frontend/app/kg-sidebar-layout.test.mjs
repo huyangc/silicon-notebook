@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { canContinueKgBuild } from "./kg-build-status.ts";
 import { withoutDecidedMerge } from "./kg-merge-model.ts";
 import {
   declarations,
@@ -44,4 +45,11 @@ test("KG merge decisions remove id and duplicate-pair rows", () => {
   );
 
   assert.deepEqual(remaining.map((item) => item.id), ["merge-3"]);
+});
+
+test("interrupted KG continuation stays hidden for read-only notebook members", () => {
+  assert.equal(canContinueKgBuild("继续分析未完成内容", false, false), true);
+  assert.equal(canContinueKgBuild("继续分析未完成内容", false, true), false);
+  assert.equal(canContinueKgBuild("继续分析未完成内容", true, false), false);
+  assert.equal(canContinueKgBuild(null, false, false), false);
 });

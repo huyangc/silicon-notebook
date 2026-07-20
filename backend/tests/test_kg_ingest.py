@@ -1,6 +1,15 @@
+import concurrent.futures as cf
+import threading
+import time
+from types import SimpleNamespace
+
+import pytest
+
 from app.models.schemas import SourceElement
 from app.services import kg_ingest
 from app.services.kg.models import Node, Edge, Evidence, KnowledgeGraph
+from app.services.kg.parsing import SourceElementQ
+from app.services.kg.run_control import KgBuildAborted, KgBuildFailure
 
 
 def _el(i, text):
@@ -175,6 +184,70 @@ def test_extract_graph_no_failures_zero_count():
     g = kg_ingest.extract_graph(FakeClient(payload), ABS, "doc.md", "academic")
     assert g.failed_windows == 0
     assert g.total_windows >= 1
+
+
+def test_extract_graph_cancels_and_drains_windows_after_task_abort(monkeypatch):
+    total = 12
+    elements = [
+        SourceElementQ(
+            id=f"e-{i}", type="paragraph", file="doc.md",
+            line_start=i + 1, line_end=i + 1,
+            char_start=i * 20, char_end=i * 20 + 12,
+            text=f"technical fact {i}",
+        )
+        for i in range(total)
+    ]
+    pairs = [
+        (SimpleNamespace(section_path=f"section-{i}"), [elements[i]])
+        for i in range(total)
+    ]
+    monkeypatch.setattr(
+        kg_ingest, "windows_with_elements", lambda *_args, **_kwargs: pairs
+    )
+    monkeypatch.setattr(
+        kg_ingest, "should_extract_window", lambda *_args, **_kwargs: (True, "")
+    )
+
+    executor = cf.ThreadPoolExecutor(max_workers=2)
+    monkeypatch.setattr(
+        kg_ingest, "submit_window",
+        lambda fn, *args, **kwargs: executor.submit(fn, *args, **kwargs),
+    )
+
+    class AbortThenSlowClient:
+        configured = True
+
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.calls = 0
+            self.running = 0
+
+        def chat_json(self, messages, response_schema_hint):
+            with self.lock:
+                self.calls += 1
+                call_number = self.calls
+                self.running += 1
+            try:
+                if call_number == 1:
+                    raise KgBuildAborted(
+                        KgBuildFailure("model_unavailable", "model unavailable")
+                    )
+                time.sleep(0.05)
+                return '{"nodes":[],"edges":[]}'
+            finally:
+                with self.lock:
+                    self.running -= 1
+
+    client = AbortThenSlowClient()
+    try:
+        with pytest.raises(KgBuildAborted):
+            kg_ingest.extract_graph(
+                client, "ignored", "doc.md", "academic", n=10, m=0
+            )
+        assert client.running == 0
+        assert client.calls < total
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def test_canonicalize_merges_across_windows():

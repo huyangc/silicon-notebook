@@ -374,6 +374,19 @@ class NotebookUpdate(BaseModel):
     access_scope: Optional[str] = None
 
 
+class KgBuildJobStatus(BaseModel):
+    job_id: str
+    mode: Literal["incremental", "rebuild"]
+    status: Literal["running", "succeeded", "failed"]
+    stage: Literal["probing", "extracting", "stopping", "finished"]
+    total_sources: int = 0
+    completed_sources: int = 0
+    failed_sources: int = 0
+    error_code: str = ""
+    user_message: str = ""
+    updated_at: str = ""
+
+
 class NotebookRef(BaseModel):
     """轻量 notebook 引用 —— 参考库挂载相关接口共用。"""
     id: str
@@ -411,6 +424,9 @@ class NotebookSummary(BaseModel):
     # 该 notebook 此刻是否正在构建/重抽 KG（进程内内存标志，get_notebook 实时回填）。
     # 前端刷新/切库后据此把「构建中…」进度接回（后台 daemon 线程本就在跑）。
     kg_building: bool = False
+    # 最近一次 KG 构建任务的持久化状态；仅单笔记本详情投影，列表保持 None
+    # 以避免逐笔记本附加查询。
+    kg_build: Optional[KgBuildJobStatus] = None
     # 该 notebook 此刻是否正在跑论文元数据补抽（进程内内存标志，get_notebook 实时
     # 回填，镜像 kg_building 的 wiring）。重启即 False——补抽本身幂等可重触发。
     paper_meta_backfilling: bool = False

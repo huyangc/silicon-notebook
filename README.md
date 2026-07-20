@@ -41,13 +41,14 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 21. The committed v9 compatibility fixture
-upgrades through migrations v10–v21 and remains readable. Those migrations
+The current schema version is 22. The committed v9 compatibility fixture
+upgrades through migrations v10–v22 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
 reference-library mounts plus promotion targets (v20), and the normalized
-interactive-reformat anchor-membership expression index (v21).
+interactive-reformat anchor-membership expression index (v21); v22 adds durable
+notebook-scoped KG build jobs.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Boundary regression tests prevent these responsibilities from being copied back into the monoliths. Future extraction should follow the same incremental pattern: preserve endpoints and user behavior, move one cohesive domain, then run the complete offline gate.
 
@@ -435,6 +436,44 @@ The ingest-time decision is `KG_AUTO_EXTRACT or notebook-already-has-KG`:
 - Otherwise extraction runs on upload only if the notebook already contains KG objects.
 
 So you **opt in once** (build the KG, or set `KG_AUTO_EXTRACT=true`); after that, new documents are auto-extracted and fused. Re-extract a whole notebook from scratch with `POST /api/notebooks/{id}/kg/rebuild`. For bulk/offline builds, see the **Offline batch ingestion** section.
+
+### KG build failure isolation
+
+Manual notebook builds/rebuilds create a durable, task-scoped `kg_build_jobs`
+row and allow only one running KG task per notebook. The notebook and index
+status APIs expose `probing → extracting → stopping → finished`, source counts,
+and a safe user-facing failure message; the frontend shows the same state after
+refresh and offers **继续分析未完成内容** after a failure.
+
+Each KG model request uses `KG_LLM_TIMEOUT_SECONDS` (default `60`) and at most
+`KG_LLM_MAX_RETRIES` retries (default `2`, allowed `0..3`). If transient
+unavailability persists, or the service rejects/authenticates the request
+permanently, the shared control for that one job stops new requests, cancels
+queued source/window work, publishes `stopping` from the first failing window
+before either window- or source-level draining, and then drains calls already
+in flight. Other notebooks and later tasks are unaffected. The availability
+probe explicitly bypasses the LLM response cache and does not populate it, so a
+stale successful probe cannot authorize destructive rebuild work during a live
+outage.
+
+Completed sources remain committed; an interrupted source does not persist a
+partial extraction: object/relation chunks for one source share one SQLite
+transaction, and a legacy leftover graph whose latest extraction run failed is
+still classified as unfinished. A later normal build analyzes only unfinished
+sources. Explicit rebuild is the only action that clears existing KG data, and
+it probes the model before deleting anything. If the process restarts with a
+running job, startup recovery marks that job and its running extraction rows
+failed and restores every orphan `extracting` source to `parsed`, including a
+source interrupted before its extraction-run row was created. Completing or
+failing an extraction run also invalidates that notebook's pending-source memo,
+so a status poll cannot keep reporting a completed source as unfinished.
+
+The frontend guards start responses by notebook, workspace epoch, and request
+epoch, and keeps polling while the durable job remains `running`; it does not
+invent local completion after a fixed time cap. Safe structured events cover
+`kg_build_started`, `kg_build_progress`, `kg_build_circuit_opened`,
+`kg_build_stopping`, `kg_build_succeeded`, and `kg_build_failed` without
+provider diagnostics, prompts, source text, tokens, or credentials.
 
 ## Retrieval modes (Ask)
 
@@ -1103,6 +1142,11 @@ Node.js 22. The workflow installs from `backend/requirements.txt` and
 
 The workflow is read-only, does not receive model or deployment secrets, and
 uses four backend pytest workers to avoid oversubscribing the hosted runner.
+Backend installation sets `HNSWLIB_NO_NATIVE=1` and disables pip's wheel cache:
+`hnswlib` otherwise builds with `-march=native`, and a cached locally built
+wheel can crash with `SIGILL` when restored on a hosted runner with different
+CPU features. The portable build trades a small ANN speedup for deterministic
+CI; production wheelhouses may still target their declared deployment CPU.
 Its 20-minute timeout includes dependency installation and is intentionally
 separate from the under-60-second local Apple Silicon warm-gate target.
 `CI / full-gate` is initially observational; make it a required `master` check

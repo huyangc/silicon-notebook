@@ -245,7 +245,7 @@ def _make_persist_image(
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 
 
 @dataclass(frozen=True)
@@ -509,7 +509,7 @@ class SQLiteRepository:
             connect=lambda: self._connect(),
             close_local=lambda: self.close_local(),
             write=lambda: self._write(),
-            get_notebook=lambda notebook_id: self.get_notebook(notebook_id),
+            get_notebook=lambda notebook_id: self.get_notebook(notebook_id), current_user_id=lambda: self.current_user().id,
             invalidate_unified_cache=lambda notebook_id: (
                 self._invalidate_unified_cache(notebook_id)
             ),
@@ -528,10 +528,10 @@ class SQLiteRepository:
             source_ids_from_evidence=lambda evidence_json: (
                 self._source_ids_from_evidence(evidence_json)
             ),
-            set_source_status=lambda source_id, status: (
-                self._set_source_status(source_id, status)
-            ),
-            run_extraction=lambda source_id: self._run_extraction(source_id),
+            set_source_status=lambda source_id, status, **kwargs: self._set_source_status(
+                source_id, status, **kwargs),
+            run_extraction=lambda source_id, **kwargs: _call_extraction_compat(
+                self._run_extraction, self._runtime.source_ingestion.run_extraction, source_id, kwargs),
             llm=lambda: self.llm_client,
             kg_llm=lambda: self.kg_llm_client,
             cluster_map=lambda notebook_id: self.cluster_map(notebook_id),
@@ -3486,6 +3486,24 @@ class SQLiteRepository:
             user_id, memory_ids, target_notebook_id, mode, extract_kg
         )
 
+    # --- durable KG build jobs: task-scoped entry points -----------------
+    def prepare_notebook_kg_job(self, notebook_id: str, mode: str) -> dict:
+        return self._runtime.knowledge_lifecycle.prepare_notebook_kg_job(
+            notebook_id, mode
+        )
+
+    def fail_notebook_kg_job_submission(self, job_id: str) -> bool:
+        return self._runtime.knowledge_lifecycle.fail_notebook_kg_job_submission(
+            job_id
+        )
+
+    def execute_notebook_kg_job(
+        self, notebook_id: str, job_id: str, mode: str, *, progress=None
+    ) -> dict:
+        return self._runtime.knowledge_lifecycle.execute_notebook_kg_job(
+            notebook_id, job_id, mode, progress=progress
+        )
+
 
 def _now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
@@ -3521,3 +3539,12 @@ def _snippet(text: str, needle: str) -> str:
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(clean) else ""
     return f"{prefix}{clean[start:end]}{suffix}"
+
+
+def _call_extraction_compat(
+    callback, task_callback, source_id: str, kwargs: dict
+) -> None:
+    """Keep legacy one-argument monkeypatch seats while forwarding task state."""
+    if getattr(callback, "__func__", None) is SQLiteRepository._run_extraction:
+        return task_callback(source_id, **kwargs)
+    return callback(source_id)

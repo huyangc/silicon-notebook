@@ -262,7 +262,7 @@ Expected: 6 passed。
 - [ ] **Step 8: 跑既有 schema 相关测试确认未回归**
 
 ```bash
-cd backend && /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest tests/ -q -k "schema or migration" 
+cd backend && /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest tests/ -q -k "schema or migration"
 ```
 
 Expected: 全绿。若有断言 `SCHEMA_VERSION == 19` 的用例，改为 20。

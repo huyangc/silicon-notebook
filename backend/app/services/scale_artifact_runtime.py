@@ -449,6 +449,11 @@ class ScaleArtifactRuntime:
                 "ready": bool(notebook.kg_ready),
                 "building": bool(notebook.kg_building),
                 "pending_sources": int(notebook.kg_pending_sources),
+                "job": (
+                    notebook.kg_build.model_dump(mode="json")
+                    if notebook.kg_build
+                    else None
+                ),
             },
             "unified_kg": {
                 "dirty": bool(unified.get("dirty", False)),

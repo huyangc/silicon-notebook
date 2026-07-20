@@ -581,6 +581,7 @@ SURFACE_MEMBERS = (
         kind='private_wrapper',
         consumers=(
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__.<lambda>', kind='attribute', target='_run_extraction'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>._call_extraction_compat', kind='attribute', target='_run_extraction'),
         ),
         patches=(
         ),
@@ -838,8 +839,10 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.deprecate_memory', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.effective_schemas', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.embedder', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.execute_notebook_kg_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.export_reports', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.extract_source', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.fail_notebook_kg_job_submission', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.find_duplicates', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.find_notebook_by_share_token', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.finish_ask_job', kind='attribute', target='_runtime'),
@@ -911,6 +914,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.pending_actions_projection_rows', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.pending_conflicts', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.pending_merges', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.prepare_notebook_kg_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.process_source', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.propose_memory_promotion', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.propose_promotion', kind='attribute', target='_runtime'),
@@ -1195,7 +1199,6 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='build_notebook_kg'),
             ConsumerSite(path='backend/app/scripts/build_kg.py', scope='<module>.main', kind='attribute', target='build_notebook_kg'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg', kind='attribute', target='build_notebook_kg'),
             ConsumerSite(path='backend/tests/test_batch_ingest.py', scope='<module>.test_kg_fresh_alone_forces_rebuild', kind='patch', target='build_notebook_kg'),
@@ -1427,6 +1430,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_ask_job', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.upload_notebook_asset', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.main', kind='attribute', target='current_user'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__.<lambda>', kind='attribute', target='current_user'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='current_user'),
         ),
         patches=(
@@ -1585,6 +1589,17 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='execute_notebook_kg_job',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='execute_notebook_kg_job'),
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='execute_notebook_kg_job'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='export_reports',
         owner='ReportStore',
         kind='method',
@@ -1606,6 +1621,17 @@ SURFACE_MEMBERS = (
         ),
         patches=(
             ConsumerSite(path='backend/tests/test_batch_ingest.py', scope='<module>.test_run_all_resumes_existing_without_kg', kind='patch', target='extract_source'),
+        ),
+    ),
+    SurfaceMember(
+        name='fail_notebook_kg_job_submission',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='fail_notebook_kg_job_submission'),
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='fail_notebook_kg_job_submission'),
+        ),
+        patches=(
         ),
     ),
     SurfaceMember(
@@ -1793,6 +1819,8 @@ SURFACE_MEMBERS = (
         kind='property',
         consumers=(
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='kg_llm_client'),
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='kg_llm_client'),
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='kg_llm_client'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_metadata', kind='attribute', target='kg_llm_client'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__.<lambda>', kind='attribute', target='kg_llm_client'),
         ),
@@ -1967,8 +1995,6 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_preview_client', kind='attribute', target='llm_client'),
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='llm_client'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='llm_client'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='llm_client'),
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='llm_client'),
             ConsumerSite(path='backend/app/eval/inference.py', scope='<module>.run_inference', kind='attribute', target='llm_client'),
             ConsumerSite(path='backend/app/eval/sa_calibration.py', scope='<module>._run_arm', kind='attribute', target='llm_client'),
@@ -2250,6 +2276,17 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='prepare_notebook_kg_job',
+        owner='KnowledgeLifecycleService',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='prepare_notebook_kg_job'),
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='prepare_notebook_kg_job'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='process_source',
         owner='SourceIngestionService',
         kind='method',
@@ -2291,16 +2328,6 @@ SURFACE_MEMBERS = (
         kind='property',
         consumers=(
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>._report_llm_ready', kind='attribute', target='reasoning_llm_client'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
-        name='rebuild_notebook_kg',
-        owner='KnowledgeLifecycleService',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='rebuild_notebook_kg'),
         ),
         patches=(
         ),
@@ -2747,11 +2774,13 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__.<lambda>', kind='attribute', target='source_elements'),
+            ConsumerSite(path='backend/tests/test_kg_llm_client.py', scope='<module>.test_extraction_accepts_explicit_task_scoped_kg_client', kind='patch', target='source_elements'),
             ConsumerSite(path='backend/tests/test_kg_llm_client.py', scope='<module>.test_extraction_passes_kg_llm_client_to_extract_graph', kind='patch', target='source_elements'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>._source_evidence', kind='attribute', target='source_elements'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='source_elements'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_kg_llm_client.py', scope='<module>.test_extraction_accepts_explicit_task_scoped_kg_client', kind='patch', target='source_elements'),
             ConsumerSite(path='backend/tests/test_kg_llm_client.py', scope='<module>.test_extraction_passes_kg_llm_client_to_extract_graph', kind='patch', target='source_elements'),
         ),
     ),

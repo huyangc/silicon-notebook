@@ -33,7 +33,7 @@ def test_get_notebook_reflects_kg_building_set(repo):
 
 def test_kg_building_set_during_build_and_cleared_after(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="t"))
-    repo.llm_client = types.SimpleNamespace(configured=True)  # 无 sources → 不真抽取
+    repo.llm_client = _ProbeLLM()  # 无 sources，仅执行入口探测
     seen = {}
     orig = repo._mark_unified_kg_dirty
     def spy(nid):
@@ -58,7 +58,7 @@ def test_kg_building_cleared_on_failure(repo):
 def test_kg_building_set_during_rebuild_delete_phase(repo, monkeypatch):
     """rebuild=delete+build：标志必须覆盖 delete 阶段（否则大库 delete>6s 时前端轮询过早停）。"""
     nb = repo.create_notebook(NotebookCreate(name="t"))
-    repo.llm_client = types.SimpleNamespace(configured=True)  # build 不 RuntimeError；无 sources → 快
+    repo.llm_client = _ProbeLLM()  # 无 sources，仅执行入口探测
     seen = {}
     orig_delete = repo._runtime.knowledge_lifecycle.delete_notebook_kg
     def spy_delete(nid):
@@ -107,3 +107,46 @@ def test_paper_meta_backfilling_guard_when_source_ingestion_missing(repo):
     assert dead_ref() is None                             # 确认 GC 掉了
     catalog.source_ingestion = dead_ref                   # 弱引用已死分支
     assert repo.get_notebook(nb.id).paper_meta_backfilling is False
+
+
+def test_get_notebook_hydrates_latest_durable_kg_job(repo):
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    job = repo._runtime.kg_build_jobs.create_job(
+        nb.id,
+        "user-local",
+        "incremental",
+        5,
+    )
+    summary = repo.get_notebook(nb.id)
+    assert summary.kg_building is True
+    assert summary.kg_build is not None
+    assert summary.kg_build.job_id == job["id"]
+    assert summary.kg_build.stage == "probing"
+
+
+def test_terminal_durable_job_does_not_keep_building_true(repo):
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    job = repo._runtime.kg_build_jobs.create_job(
+        nb.id,
+        "user-local",
+        "incremental",
+        5,
+    )
+    repo._runtime.kg_build_jobs.finish(
+        job["id"],
+        "failed",
+        error_code="model_unavailable",
+        error_message="safe message",
+    )
+    summary = repo.get_notebook(nb.id)
+    assert summary.kg_building is False
+    assert summary.kg_build is not None
+    assert summary.kg_build.status == "failed"
+    assert summary.kg_build.user_message == "safe message"
+
+
+class _ProbeLLM:
+    configured = True
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        return '{"ok":true}'

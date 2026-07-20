@@ -4,7 +4,10 @@
 
 export type MergeReviewJobLike = { status: string };
 export type ScaleIndexStatusLike = { building?: boolean; state?: string };
-export type NotebookKgBuildLike = { kg_building?: boolean };
+export type NotebookKgBuildLike = {
+  kg_building?: boolean;
+  kg_build?: { status: string } | null;
+};
 
 /** 「全部预审」是否应在 mount/切库时接回轮询（后端 merge-review job 仍 running）。 */
 export function shouldResumeReviewAll(job: MergeReviewJobLike | null | undefined): boolean {
@@ -17,14 +20,16 @@ export function shouldResumeScaleIndex(status: ScaleIndexStatusLike | null | und
   return !!status && (status.building === true || status.state === "queued");
 }
 
-/** KG 构建/重抽：后端内存标志 kg_building 为真即应接回轮询。 */
+/** KG 构建/重抽：优先读取持久化 job；旧服务响应才退回 kg_building。 */
 export function shouldResumeKgBuild(nb: NotebookKgBuildLike | null | undefined): boolean {
-  return !!nb && nb.kg_building === true;
+  if (!nb) return false;
+  if (nb.kg_build) return nb.kg_build.status === "running";
+  return nb.kg_building === true;
 }
 
 /** KG 轮询的停止条件：改看 kg_building（而非 kg_ready）——
  *  重抽已建库时 kg_ready 恒为真，用它会一上来就误判「完成」。
  *  空值（null/undefined）视为「未在构建」→ true。 */
 export function kgBuildFinished(nb: NotebookKgBuildLike | null | undefined): boolean {
-  return !nb || !nb.kg_building;
+  return !shouldResumeKgBuild(nb);
 }

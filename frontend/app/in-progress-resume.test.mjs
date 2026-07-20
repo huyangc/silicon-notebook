@@ -27,7 +27,15 @@ test("scaleIndex: state===\"queued\" 即使 building=false 也应接回（已排
   assert.equal(shouldResumeScaleIndex({ building: false, state: "stale" }), false);
 });
 
-test("kgBuild: kg_building=true → 接回；false/缺省/空 → 否", () => {
+test("kgBuild: durable running job takes precedence over legacy flag", () => {
+  assert.equal(shouldResumeKgBuild({
+    kg_building: false,
+    kg_build: { status: "running" },
+  }), true);
+  assert.equal(shouldResumeKgBuild({
+    kg_building: true,
+    kg_build: { status: "failed" },
+  }), false);
   assert.equal(shouldResumeKgBuild({ kg_building: true }), true);
   assert.equal(shouldResumeKgBuild({ kg_building: false }), false);
   assert.equal(shouldResumeKgBuild({}), false);
@@ -35,6 +43,14 @@ test("kgBuild: kg_building=true → 接回；false/缺省/空 → 否", () => {
 });
 
 test("kgBuildFinished: 看 kg_building 而非 kg_ready（重抽已建库时 kg_ready 恒真）", () => {
+  assert.equal(kgBuildFinished({
+    kg_ready: true,
+    kg_build: { status: "running" },
+  }), false);
+  assert.equal(kgBuildFinished({
+    kg_building: true,
+    kg_build: { status: "failed" },
+  }), true);
   assert.equal(kgBuildFinished({ kg_building: true }), false);
   assert.equal(kgBuildFinished({ kg_building: false }), true);
   assert.equal(kgBuildFinished({ kg_ready: true, kg_building: true }), false);  // 关键：不误停

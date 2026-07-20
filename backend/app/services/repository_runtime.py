@@ -20,6 +20,7 @@ from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.knowhow_store import KnowhowStore
 from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
+from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.memory_store import MemoryStore
 from app.repositories.sqlite.notebook_store import NotebookStore
@@ -65,7 +66,6 @@ from app.services.ask_service import AskService
 from app.services.notebook_scale import NotebookScaleProfile
 from app.services.pending_actions_service import PendingActionsService
 
-
 @dataclass(frozen=True)
 class RepositoryCompatibilitySeams:
     new_id: Callable[[str], str]
@@ -93,11 +93,11 @@ class RepositoryRuntime:
             new_id=seams.new_id,
             now=seams.now,
         )
-        self.notebook_summaries = NotebookSummaryQuery(self.database, self.queries)
-        # Source file persistence resolves storage_dir through the database
-        # boundary's resolve_path — no facade seams, so construction is eager.
-        # Constructed BEFORE the catalog below so the catalog's storage_dir
-        # callable can bind THIS store directly.
+        self.kg_build_jobs = KgBuildJobStore(self.database, new_id=seams.new_id, now=seams.now)
+        self.notebook_summaries = NotebookSummaryQuery(self.database, self.queries, self.kg_build_jobs)
+        # Source files resolve storage_dir through the database. Construct eagerly
+        # BEFORE the catalog so its storage_dir callable can bind THIS store
+        # directly.
         self.source_files = SourceFileStore(
             self.database.resolve_path(settings.storage_dir),
             resolve_path=self.database.resolve_path,
@@ -834,7 +834,7 @@ class RepositoryRuntime:
         connect: Callable[[], Any],
         close_local: Callable[[], None],
         write: Callable[[], Any],
-        get_notebook: Callable[[str], Any],
+        get_notebook: Callable[[str], Any], current_user_id: Callable[[], str],
         invalidate_unified_cache: Callable[[str], None],
         mark_unified_kg_dirty: Callable[[str], None],
         bump_cluster_mutation_seq: Callable[..., None],
@@ -842,7 +842,7 @@ class RepositoryRuntime:
         embed_relations_batch: Callable[..., None],
         source_ids_from_evidence: Callable[..., set],
         set_source_status: Callable[..., None],
-        run_extraction: Callable[[str], None],
+        run_extraction: Callable[..., None],
         llm: Callable[[], Any],
         kg_llm: Callable[[], Any],
         cluster_map: Callable[[str], dict],
@@ -918,7 +918,7 @@ class RepositoryRuntime:
             knowledge=self.knowledge,
             governance_store=self.governance,
             unified_kg=self.unified_kg,
-            governance=self.knowledge_governance,
+            governance=self.knowledge_governance, kg_build_jobs=self.kg_build_jobs,
             kg_building=self.catalog.kg_building,
             unified_cache=self.retrieval_snapshots.unified_cache,
             scale_artifacts=self.scale_artifacts,
@@ -927,7 +927,7 @@ class RepositoryRuntime:
             connect=connect,
             close_local=close_local,
             write=write,
-            get_notebook=get_notebook,
+            get_notebook=get_notebook, current_user_id=current_user_id,
             invalidate_unified_cache=invalidate_unified_cache,
             mark_unified_kg_dirty=mark_unified_kg_dirty,
             bump_cluster_mutation_seq=bump_cluster_mutation_seq,

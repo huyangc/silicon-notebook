@@ -1439,6 +1439,12 @@
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.__init__.<lambda>",
         "target": "_run_extraction"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>._call_extraction_compat",
+        "target": "_run_extraction"
       }
     ],
     "kind": "private_wrapper",
@@ -2940,6 +2946,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.execute_notebook_kg_job",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.export_reports",
         "target": "_runtime"
       },
@@ -2947,6 +2959,12 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.extract_source",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.fail_notebook_kg_job_submission",
         "target": "_runtime"
       },
       {
@@ -3373,6 +3391,12 @@
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.pending_merges",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.prepare_notebook_kg_job",
         "target": "_runtime"
       },
       {
@@ -4286,12 +4310,6 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.build_kg",
-        "target": "build_notebook_kg"
-      },
-      {
-        "kind": "attribute",
         "path": "backend/app/scripts/build_kg.py",
         "scope": "<module>.main",
         "target": "build_notebook_kg"
@@ -4788,6 +4806,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.__init__.<lambda>",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>.main",
         "target": "current_user"
@@ -5036,6 +5060,27 @@
     "scope": "facade",
     "signature": "<instance attribute>"
   },
+  "execute_notebook_kg_job": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.build_kg",
+        "target": "execute_notebook_kg_job"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.rebuild_kg",
+        "target": "execute_notebook_kg_job"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', job_id: 'str', mode: 'str', *, progress=None) -> 'dict'"
+  },
   "export_reports": {
     "consumers": [
       {
@@ -5092,6 +5137,27 @@
     ],
     "scope": "facade",
     "signature": "(self, source_id: 'str') -> 'None'"
+  },
+  "fail_notebook_kg_job_submission": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.build_kg",
+        "target": "fail_notebook_kg_job_submission"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.rebuild_kg",
+        "target": "fail_notebook_kg_job_submission"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, job_id: 'str') -> 'bool'"
   },
   "federated_retrieve": {
     "consumers": [
@@ -5592,6 +5658,18 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.build_kg",
+        "target": "kg_llm_client"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.rebuild_kg",
+        "target": "kg_llm_client"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_metadata",
         "target": "kg_llm_client"
@@ -5957,18 +6035,6 @@
         "kind": "attribute",
         "path": "backend/app/api/routes.py",
         "scope": "<module>.backfill_paper_metadata",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.build_kg",
-        "target": "llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.rebuild_kg",
         "target": "llm_client"
       },
       {
@@ -6877,6 +6943,27 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'List[dict]'"
   },
+  "prepare_notebook_kg_job": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.build_kg",
+        "target": "prepare_notebook_kg_job"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.rebuild_kg",
+        "target": "prepare_notebook_kg_job"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowledgeLifecycleService",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, notebook_id: 'str', mode: 'str') -> 'dict'"
+  },
   "process_source": {
     "consumers": [
       {
@@ -6972,21 +7059,6 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self)"
-  },
-  "rebuild_notebook_kg": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.rebuild_kg",
-        "target": "rebuild_notebook_kg"
-      }
-    ],
-    "kind": "method",
-    "owner": "KnowledgeLifecycleService",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, notebook_id: 'str') -> 'dict'"
   },
   "rebuild_unified_kg": {
     "consumers": [
@@ -8215,6 +8287,12 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_kg_llm_client.py",
+        "scope": "<module>.test_extraction_accepts_explicit_task_scoped_kg_client",
+        "target": "source_elements"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_kg_llm_client.py",
         "scope": "<module>.test_extraction_passes_kg_llm_client_to_extract_graph",
         "target": "source_elements"
       },
@@ -8234,6 +8312,14 @@
     "kind": "method",
     "owner": "SourceStore",
     "patch_targets": [
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_kg_llm_client.py",
+        "scope": "<module>.test_extraction_accepts_explicit_task_scoped_kg_client",
+        "target": "source_elements"
+      },
       {
         "base": "repo",
         "compatibility": "test-only",

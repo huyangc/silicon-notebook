@@ -38,13 +38,13 @@ def _indexes(repo, table):
 
 
 def test_fresh_db_has_notebook_assets_source_id(tmp_path):
-    """全新库:SCHEMA_VERSION 已到 21（notebook_assets.source_id 列在 v19 落地，
+    """全新库:SCHEMA_VERSION 已到 22（notebook_assets.source_id 列在 v19 落地，
     此后 v20 加了 notebook_bases + promotion_candidates.target_base_id、v21 加了
-    normalized-anchor expression index，均不影响
+    normalized-anchor expression index、v22 加了 kg_build_jobs，均不影响
     本列）；notebook_assets 带可空 source_id 列 + idx_notebook_assets_source
     索引；user_version 已盖到 SCHEMA_VERSION。"""
     repo = _repo(tmp_path)
-    assert SCHEMA_VERSION == 21
+    assert SCHEMA_VERSION == 22
     assert "source_id" in _cols(repo, "notebook_assets")
     assert "idx_notebook_assets_source" in _indexes(repo, "notebook_assets")
     with repo._connect() as db:
@@ -93,7 +93,7 @@ def test_deployed_v18_db_backfills_source_id_column(tmp_path):
     test_rebuild_checkpoint.py::test_deployed_v9_db_gets_checkpoint_table_backfilled
     (SQLite>=3.35 支持 ALTER TABLE ... DROP COLUMN)。"""
     db_name = "deployed.db"
-    repo = _repo(tmp_path, db_name)  # 先建到当前 SCHEMA_VERSION(19)
+    repo = _repo(tmp_path, db_name)  # 先建到当前 SCHEMA_VERSION
     assert "source_id" in _cols(repo, "notebook_assets")
 
     with repo._connect() as db:
@@ -116,7 +116,7 @@ def test_migration_19_is_reentrant_when_column_already_present(tmp_path):
     触发 _migration_19 不得抛 'duplicate column name'——PRAGMA table_info 存在
     性守卫必须先查后加。"""
     db_name = "reentrant.db"
-    repo = _repo(tmp_path, db_name)  # 全新库，source_id 列已随 SCHEMA_VERSION 19 到位
+    repo = _repo(tmp_path, db_name)  # 全新库，source_id 列已随 v19 到位
     assert "source_id" in _cols(repo, "notebook_assets")
 
     with repo._connect() as db:

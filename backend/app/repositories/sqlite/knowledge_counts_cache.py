@@ -147,8 +147,11 @@ def object_type_total(
 
 
 def pending_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
-    """Count of parsed sources (>=1 ``source_elements`` row) that have no KG
-    object yet — the "N sources pending KG" badge on ``from_row``. Memoized on
+    """Count parsed sources without a complete KG graph.
+
+    A direct/governance graph without extraction history remains complete, but
+    rows left by a failed latest KG run stay pending. This is the "N sources
+    pending KG" badge on ``from_row``. Memoized on
     ``(notebook_id, kg_mutation_seq)``. Cold it is a 2-predicate correlated scan
     over every source (~2s at 48k sources); warm it is one PK seq read."""
     seq = _mutation_seq(db, notebook_id)
@@ -162,7 +165,12 @@ def pending_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
         "SELECT COUNT(*) FROM sources s WHERE s.notebook_id = ? "
         "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id) "
         "AND NOT EXISTS (SELECT 1 FROM knowledge_objects k "
-        "WHERE k.source_id = s.id AND k.source_id != '')",
+        "WHERE k.source_id = s.id AND k.source_id != '' "
+        "AND COALESCE(("
+        "  SELECT er.status FROM extraction_runs er "
+        "  WHERE er.source_id=s.id AND er.run_type='kg' "
+        "  ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1"
+        "), 'completed')='completed')",
         (notebook_id,),
     ).fetchone()
     count = int(row[0])

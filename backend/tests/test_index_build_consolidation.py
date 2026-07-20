@@ -40,7 +40,7 @@ def test_index_status_aggregates_three_systems(repo, monkeypatch):
     # kg 子字典值级对照 NotebookSummary
     nb2 = repo.get_notebook(nb.id)
     assert out["kg"] == {"ready": bool(nb2.kg_ready), "building": bool(nb2.kg_building),
-                         "pending_sources": int(nb2.kg_pending_sources)}
+                         "pending_sources": int(nb2.kg_pending_sources), "job": None}
 
 
 def test_index_status_kg_pending_matches_summary(repo):
@@ -140,3 +140,16 @@ def test_status_last_built_at_absent_manifest_safe(repo):
     repo._scale_idx_cache.pop(nb.id, None)  # 清进程缓存强制重读
     st = repo.scale_index_status(nb.id)
     assert st.get("last_built_at", "") == ""   # 缺键→空,不报错
+
+
+def test_index_status_reuses_notebook_job_projection(repo):
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    job = repo._runtime.kg_build_jobs.create_job(
+        nb.id,
+        "user-local",
+        "incremental",
+        5,
+    )
+    status = repo.index_status(nb.id)
+    assert status["kg"]["job"]["job_id"] == job["id"]
+    assert status["kg"]["building"] is True

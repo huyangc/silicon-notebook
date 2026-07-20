@@ -164,7 +164,7 @@ def test_list_sources_page_batches_lookups_not_n_plus_1(repo, monkeypatch):
             # get_notebook's unrelated EXISTS/COUNT-with-subquery shapes).
             if "FROM source_elements" in sql and "GROUP BY source_id" in sql:
                 calls["source_elements"] += 1
-            elif "FROM knowledge_objects" in sql and "DISTINCT source_id" in sql:
+            elif "FROM knowledge_objects" in sql and "SELECT DISTINCT" in sql:
                 calls["knowledge_objects"] += 1
             elif "FROM extraction_runs" in sql and "ORDER BY source_id" in sql:
                 calls["extraction_runs"] += 1

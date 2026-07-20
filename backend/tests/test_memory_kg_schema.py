@@ -50,7 +50,7 @@ def test_fresh_db_has_sources_memory_id(repo):
     assert idx is not None and "WHERE memory_id" in idx["sql"]
 
 
-def test_schema_version_is_21():
+def test_schema_version_is_22():
     # paper-metadata Task 1's _migration_17 (source_paper_meta/source_authors
     # tables) bumped v16 → v17; knowhow-tables PR-2+3 Task 1's _migration_18
     # (knowhow_cell_code table + role vocabulary remap) bumped v17 → v18;
@@ -58,8 +58,8 @@ def test_schema_version_is_21():
     # column + its index) bumped v18 → v19; multi-domain-base Task 1's
     # _migration_20 (notebook_bases table + promotion_candidates.
     # target_base_id column) bumped v19 → v20; the normalized-anchor expression
-    # index then bumped v20 → v21.
-    assert sr.SCHEMA_VERSION == 21
+    # index bumped v20 → v21; durable KG build jobs bumped v21 → v22.
+    assert sr.SCHEMA_VERSION == 22
 
 
 def test_deployed_v13_db_upgrades_via_migration_14(repo):

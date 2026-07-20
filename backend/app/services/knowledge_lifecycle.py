@@ -40,6 +40,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from app.core.config import Settings
@@ -47,7 +48,19 @@ from app.core.event_logging import EventLogger
 from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+from app.repositories.ports import KgBuildJobStorePort
 from app.services.knowledge_governance import KnowledgeGovernanceService
+from app.services.kg.run_control import (
+    KgBuildAborted,
+    KgExtractionRunControl,
+    TaskScopedKgClient,
+    probe_kg_model,
+)
+
+
+INTERNAL_KG_BUILD_ERROR_MESSAGE = (
+    "知识图谱分析意外中断；已完成内容已保留，可继续分析未完成内容。"
+)
 
 
 try:
@@ -92,6 +105,7 @@ class KnowledgeLifecycleService:
         governance_store: GovernanceStore,
         unified_kg: UnifiedKgStore,
         governance: KnowledgeGovernanceService,
+        kg_build_jobs: KgBuildJobStorePort,
         kg_building: set,
         unified_cache: Dict[Any, Any],
         scale_artifacts: Any,
@@ -101,6 +115,7 @@ class KnowledgeLifecycleService:
         close_local: Callable[[], None],
         write: Callable[[], Any],
         get_notebook: Callable[[str], Any],
+        current_user_id: Callable[[], str],
         invalidate_unified_cache: Callable[[str], None],
         mark_unified_kg_dirty: Callable[[str], None],
         bump_cluster_mutation_seq: Callable[[sqlite3.Connection, str], None],
@@ -108,7 +123,7 @@ class KnowledgeLifecycleService:
         embed_relations_batch: Callable[[str, List[dict]], None],
         source_ids_from_evidence: Callable[[Optional[str]], set],
         set_source_status: Callable[..., None],
-        run_extraction: Callable[[str], None],
+        run_extraction: Callable[..., None],
         llm: Callable[[], Any],
         kg_llm: Callable[[], Any],
         cluster_map: Callable[[str], Dict[str, str]],
@@ -124,6 +139,7 @@ class KnowledgeLifecycleService:
         self.governance_store = governance_store
         self.unified_kg = unified_kg
         self.governance = governance
+        self.kg_build_jobs = kg_build_jobs
         # KG build/rebuild 的进行中标志(进程内;重启后天然为空=未构建,无需 reconcile)。
         # 集合本体归 NotebookCatalogService 所有(get_notebook 在那读成员资格);
         # 本服务持同一个 set 对象,build/rebuild 路径照旧 add/discard;facade 的
@@ -140,6 +156,7 @@ class KnowledgeLifecycleService:
         self._close_local = close_local
         self._write = write
         self.get_notebook = get_notebook
+        self._current_user_id = current_user_id
         self._invalidate_unified_cache = invalidate_unified_cache
         self._mark_unified_kg_dirty = mark_unified_kg_dirty
         self._bump_cluster_mutation_seq = bump_cluster_mutation_seq
@@ -194,10 +211,9 @@ class KnowledgeLifecycleService:
                  objects: List[dict], relations: List[dict]) -> Tuple[int, int]:
         """Insert KG nodes/edges (remapping local ids to DB ids), embeds payload.
 
-        分块写入(每块 CHUNK 行, 各自一个 _write() 事务), 避免单源 2.6万行塞一个
-        事务长时间持锁。本地 id->DB id 在分块前一次性预分配, 跨块关系仍能正确
-        remap。代价: 失整源原子性(崩溃可能留半本); _run_extraction 逐源自清 +
-        可重跑兜底。Relations 引用不到的 local id 静默跳过。"""
+        分块执行批量 INSERT，但所有 object/relation 块共享一个事务：source 是
+        KG 的持久化边界，任一后续块失败都回滚整源。本地 id->DB id 在分块前一次性
+        预分配，跨块关系仍能正确 remap。Relations 引用不到的 local id 静默跳过。"""
         CHUNK = 1000
         now = self._now()
         local_to_id: Dict[str, str] = {}
@@ -232,9 +248,9 @@ class KnowledgeLifecycleService:
             nb_row = self.knowledge.notebook_tier_row(db, notebook_id)
         auto_status = 'reviewed' if (nb_row and nb_row["tier"] == 'base') else 'approved'
 
-        for i in range(0, len(objects), CHUNK):
-            chunk = objects[i:i + CHUNK]
-            with self._write() as db:
+        with self._write() as db:
+            for i in range(0, len(objects), CHUNK):
+                chunk = objects[i:i + CHUNK]
                 self.knowledge.insert_object_chunk(
                     db,
                     [(o["_oid"], notebook_id, o["object_type"], auto_status,
@@ -260,9 +276,8 @@ class KnowledgeLifecycleService:
                 ]
                 if kos_rows:
                     self.knowledge.insert_object_source_rows(db, kos_rows)
-        for i in range(0, len(db_relations), CHUNK):
-            chunk = db_relations[i:i + CHUNK]
-            with self._write() as db:
+            for i in range(0, len(db_relations), CHUNK):
+                chunk = db_relations[i:i + CHUNK]
                 self.knowledge.insert_relation_chunk(
                     db,
                     [(r["_rid"], notebook_id, source_id,
@@ -712,124 +727,396 @@ class KnowledgeLifecycleService:
         except Exception:  # noqa: BLE001 - notification is fail-open
             pass
 
-    def build_notebook_kg(self, notebook_id: str, *, progress=None) -> dict:
-        """按需对该 notebook 下"尚无 KG"的 source 抽取(复用 _run_extraction)。
-        幂等:已有 knowledge_objects 的 source 跳过。无 LLM → RuntimeError。
-        跨源**并发**(提交到全局 KG job 池;窗口仍由全局 window 池封顶,两池分离防死锁);
-        单 source 失败隔离,不连累其余、不回退其终态,错误入 event log。
-        progress(i, n, source_id, ok):可选回调,每抽完一源调一次(批量 CLI 显示进度用)。"""
-        self.get_notebook(notebook_id)  # KeyError if missing
-        with self.kg_building_lock:
-            self.kg_building.add(notebook_id)
-        self._publish_pending_started()
-        try:
-            if not getattr(self.llm_client, "configured", False):
-                raise RuntimeError("LLM not configured; cannot build KG")
-            with self._connect() as db:
-                src_ids, kgful = self.knowledge.source_build_rows(db, notebook_id)
-                parsed = self.knowledge.sources_with_elements(db, notebook_id)
-            targets = [sid for sid in src_ids if sid not in kgful and sid in parsed]
-            # 无 source_elements 的源(parse 未落地)排除出抽取:接地校验没有 element 可
-            # 对照,会把抽出的节点整源丢弃(objects=0、白烧 LLM)。须先 `batch_ingest
-            # reparse` 补 parse 生成 elements,再抽 KG。
+    def _emit_kg_build_event(
+        self,
+        kind: str,
+        job: dict,
+        *,
+        latency_ms: int = 0,
+    ) -> None:
+        """Emit only the reviewed task metadata; never prompts or diagnostics."""
+        self.event_log.emit(
+            {
+                "kind": kind,
+                "job_id": job["id"],
+                "notebook_id": job["notebook_id"],
+                "mode": job["mode"],
+                "status": job["status"],
+                "stage": job["stage"],
+                "total_sources": int(job["total_sources"]),
+                "completed_sources": int(job["completed_sources"]),
+                "failed_sources": int(job["failed_sources"]),
+                "error_code": job["error_code"],
+                "latency_ms": max(0, int(latency_ms)),
+            }
+        )
+
+    def _kg_target_state(
+        self, notebook_id: str, mode: str
+    ) -> Tuple[List[str], List[str], List[str]]:
+        with self._connect() as db:
+            source_ids, kgful = self.knowledge.source_build_rows(db, notebook_id)
+            parsed = self.knowledge.sources_with_elements(db, notebook_id)
+        if mode == "rebuild":
+            targets = sorted(sid for sid in source_ids if sid in parsed)
+            skipped: List[str] = []
             skipped_no_elements = sorted(
-                sid for sid in src_ids if sid not in kgful and sid not in parsed)
-            if skipped_no_elements:
-                self.event_log.logger.warning(
-                    "build_notebook_kg: %d source(s) missing source_elements "
-                    "(parse not landed) — skipped extraction to avoid empty KG; "
-                    "run `batch_ingest reparse` to backfill: %s",
-                    len(skipped_no_elements), skipped_no_elements[:10])
-            done, failed = [], []
+                sid for sid in source_ids if sid not in parsed
+            )
+        else:
+            targets = sorted(
+                sid for sid in source_ids if sid not in kgful and sid in parsed
+            )
+            skipped = sorted(kgful)
+            skipped_no_elements = sorted(
+                sid
+                for sid in source_ids
+                if sid not in kgful and sid not in parsed
+            )
+        return targets, skipped, skipped_no_elements
 
-            def _extract_one(sid: str) -> bool:
-                try:
-                    self._set_source_status(sid, "extracting")
-                    self._run_extraction(sid)
-                    self._set_source_status(sid, "extracted")
-                    return True
-                except Exception:  # noqa: BLE001 — 隔离单 source 失败
-                    self.event_log.logger.exception("build_notebook_kg failed for %s", sid)
-                    return False
-
-            # 跨源并发:提交到全局 KG job 池(cap=KG_JOB_CONCURRENCY);窗口仍走全局 window
-            # 池(cap=KG_EXTRACT_WORKERS)、总量封顶不打爆 LLM,两池分离防死锁。
-            import concurrent.futures as _cf
-            from app.services.kg import scheduler as _kg_scheduler
-            futs = {_kg_scheduler.submit_job(_extract_one, sid): sid for sid in targets}
-            for _i, fut in enumerate(_cf.as_completed(futs), 1):
-                sid = futs[fut]
-                ok = bool(fut.result())   # _extract_one 内部已吞异常,只返回布尔
-                (done if ok else failed).append(sid)
-                if progress is not None:
-                    try:
-                        progress(_i, len(targets), sid, ok)
-                    except Exception:  # noqa: BLE001 — 进度回调绝不破坏构建
-                        pass
-            done.sort()
-            failed.sort()
-            try:
-                self._mark_unified_kg_dirty(notebook_id)
-            except Exception:
-                self.event_log.logger.exception("unified-KG dirty mark failed for %s", notebook_id)
-            # Conflict resolution pass — runs after ALL sources are extracted.
-            # Fail-safe: any exception is logged but never breaks the build.
-            if self.settings.kg_conflict_resolution_enabled:
-                try:
-                    self.governance.resolve_notebook_conflicts(notebook_id)
-                except Exception:  # noqa: BLE001
-                    self.event_log.logger.exception(
-                        "build_notebook_kg: conflict resolution failed for %s", notebook_id
-                    )
-            result = {"built": done, "failed": failed, "skipped": sorted(kgful),
-                      "skipped_no_elements": skipped_no_elements}
-            # Backfill relink — reconnect any degree-0 nodes left in this notebook's
-            # KG (legacy graphs, or nodes the inline path couldn't link within their
-            # own source). Fail-safe: never breaks the build.
-            if getattr(self.settings, "kg_relink_enabled", True):
-                try:
-                    result["relink"] = self.relink_notebook_kg(notebook_id)
-                except Exception:  # noqa: BLE001
-                    self.event_log.logger.exception(
-                        "build_notebook_kg: relink failed for %s", notebook_id
-                    )
-            # Content-add settle point: enqueue an idle incremental fold if this
-            # notebook already has a scale index, so the newly-extracted sources
-            # become semantically searchable (fold only, never a fresh build).
-            # Fail-safe: helper never raises.
-            self.scale_artifacts.maybe_enqueue_fold(notebook_id)
-            return result
-        finally:
-            with self.kg_building_lock:
-                self.kg_building.discard(notebook_id)
-
-    def rebuild_notebook_kg(self, notebook_id: str) -> dict:
-        """Full re-extract: wipe all KG artefacts, then build from scratch.
-
-        Equivalent to delete_notebook_kg + build_notebook_kg but in a single
-        call so background threads don't need to chain the two methods.
-        After delete every source has no KG, so build re-extracts all of them;
-        build's tail relink pass runs automatically.
-        Missing-notebook KeyError is raised by delete_notebook_kg's own
-        get_notebook guard (unchanged) — no separate pre-check here, so this
-        wrapper adds zero new behavior on the invalid-id path."""
-        # kg_building must cover the delete phase too — large notebooks
-        # (590k+ objects) can spend >6s in delete_notebook_kg alone, and the
-        # frontend polls every 6s. Without this wrapper, a poll landing during
-        # delete reads kg_building=False (build_notebook_kg hasn't set it yet)
-        # and the UI reports "build complete" while the job is still running.
-        # Nesting is safe: set.add is idempotent, so build_notebook_kg's own
-        # add is a no-op; its finally-discard fires when build ends (the last
-        # step of rebuild), and this outer finally-discard is then a no-op too.
+    def prepare_notebook_kg_job(self, notebook_id: str, mode: str) -> dict:
+        if mode not in {"incremental", "rebuild"}:
+            raise ValueError("unsupported KG build mode")
+        self.get_notebook(notebook_id)
+        if not getattr(self.kg_llm_client, "configured", False):
+            raise RuntimeError("LLM not configured; cannot build KG")
+        targets, _skipped, _skipped_no_elements = self._kg_target_state(
+            notebook_id, mode
+        )
+        job = self.kg_build_jobs.create_job(
+            notebook_id,
+            self._current_user_id(),
+            mode,
+            len(targets),
+        )
         with self.kg_building_lock:
             self.kg_building.add(notebook_id)
+        self._emit_kg_build_event("kg_build_started", job)
         self._publish_pending_started()
+        return job
+
+    def fail_notebook_kg_job_submission(self, job_id: str) -> bool:
         try:
-            self.delete_notebook_kg(notebook_id)
-            return self.build_notebook_kg(notebook_id)
+            job = self.kg_build_jobs.get(job_id)
+        except KeyError:
+            return False
+        failed = self.kg_build_jobs.fail_submission(job_id)
+        if failed:
+            self._emit_kg_build_event(
+                "kg_build_failed",
+                self.kg_build_jobs.get(job_id),
+            )
+            with self.kg_building_lock:
+                self.kg_building.discard(job["notebook_id"])
+        return failed
+
+    def _warn_skipped_sources(
+        self, skipped_no_elements: List[str]
+    ) -> None:
+        if skipped_no_elements:
+            self.event_log.logger.warning(
+                "build_notebook_kg: %d source(s) missing source_elements "
+                "(parse not landed) — skipped extraction to avoid empty KG; "
+                "run `batch_ingest reparse` to backfill: %s",
+                len(skipped_no_elements),
+                skipped_no_elements[:10],
+            )
+
+    def _extract_targets(
+        self,
+        notebook_id: str,
+        targets: List[str],
+        skipped: List[str],
+        skipped_no_elements: List[str],
+        job_id: str,
+        control: KgExtractionRunControl,
+        controlled_client: TaskScopedKgClient,
+        progress=None,
+        on_abort=None,
+    ) -> dict:
+        import concurrent.futures as _cf
+        from app.services.kg import scheduler as _kg_scheduler
+
+        done: List[str] = []
+        failed: List[str] = []
+
+        def _extract_one(source_id: str) -> bool:
+            control.raise_if_aborted()
+            self._set_source_status(source_id, "extracting")
+            try:
+                control.raise_if_aborted()
+                self._run_extraction(
+                    source_id, kg_client=controlled_client
+                )
+                self._set_source_status(source_id, "extracted")
+                return True
+            except KgBuildAborted:
+                self._set_source_status(
+                    source_id, "parsed", error_message=""
+                )
+                raise
+            except Exception:  # noqa: BLE001 - isolate non-model source failure
+                self._set_source_status(
+                    source_id, "parsed", error_message=""
+                )
+                self.event_log.logger.exception(
+                    "build_notebook_kg failed for %s", source_id
+                )
+                return False
+
+        futures = {
+            _kg_scheduler.submit_job(_extract_one, source_id): source_id
+            for source_id in targets
+        }
+        processed = set()
+        progress_index = 0
+
+        def _record_result(future) -> KgBuildAborted | None:
+            nonlocal progress_index
+            if future in processed or future.cancelled():
+                return None
+            processed.add(future)
+            source_id = futures[future]
+            try:
+                succeeded = bool(future.result())
+            except KgBuildAborted as exc:
+                return exc
+            (done if succeeded else failed).append(source_id)
+            self.kg_build_jobs.record_source_result(
+                job_id, succeeded=succeeded
+            )
+            self._emit_kg_build_event(
+                "kg_build_progress",
+                self.kg_build_jobs.get(job_id),
+            )
+            progress_index += 1
+            if progress is not None:
+                try:
+                    progress(
+                        progress_index,
+                        len(targets),
+                        source_id,
+                        succeeded,
+                    )
+                except Exception:  # noqa: BLE001 - progress is fail-open
+                    pass
+            return None
+
+        for future in _cf.as_completed(futures):
+            abort = _record_result(future)
+            if abort is None:
+                continue
+            if on_abort is not None:
+                on_abort(abort)
+            for pending in futures:
+                pending.cancel()
+            _cf.wait(futures)
+            for drained in futures:
+                if drained is future:
+                    continue
+                _record_result(drained)
+            raise abort
+
+        done.sort()
+        failed.sort()
+        return {
+            "built": done,
+            "failed": failed,
+            "skipped": skipped,
+            "skipped_no_elements": skipped_no_elements,
+        }
+
+    def _run_success_side_effects(
+        self, notebook_id: str, result: dict
+    ) -> None:
+        try:
+            self._mark_unified_kg_dirty(notebook_id)
+        except Exception:
+            self.event_log.logger.exception(
+                "unified-KG dirty mark failed for %s", notebook_id
+            )
+        if self.settings.kg_conflict_resolution_enabled:
+            try:
+                self.governance.resolve_notebook_conflicts(notebook_id)
+            except Exception:  # noqa: BLE001 - governance is fail-open here
+                self.event_log.logger.exception(
+                    "build_notebook_kg: conflict resolution failed for %s",
+                    notebook_id,
+                )
+        if getattr(self.settings, "kg_relink_enabled", True):
+            try:
+                result["relink"] = self.relink_notebook_kg(notebook_id)
+            except Exception:  # noqa: BLE001 - relink is fail-open here
+                self.event_log.logger.exception(
+                    "build_notebook_kg: relink failed for %s", notebook_id
+                )
+        self.scale_artifacts.maybe_enqueue_fold(notebook_id)
+
+    def _run_notebook_kg_job(
+        self,
+        notebook_id: str,
+        job_id: str,
+        mode: str,
+        progress=None,
+    ) -> dict:
+        job = self.kg_build_jobs.get(job_id)
+        if (
+            job["notebook_id"] != notebook_id
+            or job["mode"] != mode
+            or job["status"] != "running"
+        ):
+            raise RuntimeError("KG build job does not match this request")
+        with self.kg_building_lock:
+            self.kg_building.add(notebook_id)
+        started = time.perf_counter()
+        stopping_marked = False
+
+        def _latency_ms() -> int:
+            return round((time.perf_counter() - started) * 1000)
+
+        def _mark_stopping(exc: KgBuildAborted) -> None:
+            nonlocal stopping_marked
+            if stopping_marked:
+                return
+            try:
+                changed = self.kg_build_jobs.set_stage(
+                    job_id,
+                    "stopping",
+                    error_code=exc.failure.code,
+                    error_message=exc.failure.user_message,
+                )
+            except Exception:
+                self.event_log.logger.exception(
+                    "failed to publish stopping state for KG job %s",
+                    job_id,
+                )
+                return
+            if not changed:
+                return
+            stopping_marked = True
+            stopping = self.kg_build_jobs.get(job_id)
+            self._emit_kg_build_event(
+                "kg_build_circuit_opened",
+                stopping,
+                latency_ms=_latency_ms(),
+            )
+            self._emit_kg_build_event(
+                "kg_build_stopping",
+                stopping,
+                latency_ms=_latency_ms(),
+            )
+
+        control = KgExtractionRunControl(
+            job_id,
+            on_abort=lambda failure: _mark_stopping(
+                KgBuildAborted(failure)
+            ),
+        )
+        controlled_client = TaskScopedKgClient(
+            self.kg_llm_client, self.settings, control
+        )
+
+        try:
+            if mode == "rebuild":
+                probe_kg_model(controlled_client)
+                self.delete_notebook_kg(notebook_id)
+            targets, skipped, skipped_no_elements = self._kg_target_state(
+                notebook_id, "incremental"
+            )
+            if mode != "rebuild" and targets:
+                probe_kg_model(controlled_client)
+            self._warn_skipped_sources(skipped_no_elements)
+            self.kg_build_jobs.set_stage(job_id, "extracting")
+            result = self._extract_targets(
+                notebook_id,
+                targets,
+                skipped,
+                skipped_no_elements,
+                job_id,
+                control,
+                controlled_client,
+                progress,
+                _mark_stopping,
+            )
+            self._run_success_side_effects(notebook_id, result)
+            self.kg_build_jobs.finish(job_id, "succeeded")
+            self._emit_kg_build_event(
+                "kg_build_succeeded",
+                self.kg_build_jobs.get(job_id),
+                latency_ms=_latency_ms(),
+            )
+            return {**result, "job_id": job_id}
+        except KgBuildAborted as exc:
+            _mark_stopping(exc)
+            self.kg_build_jobs.finish(
+                job_id,
+                "failed",
+                error_code=exc.failure.code,
+                error_message=exc.failure.user_message,
+            )
+            self._emit_kg_build_event(
+                "kg_build_failed",
+                self.kg_build_jobs.get(job_id),
+                latency_ms=_latency_ms(),
+            )
+            raise
+        except Exception:
+            self.kg_build_jobs.finish(
+                job_id,
+                "failed",
+                error_code="internal_error",
+                error_message=INTERNAL_KG_BUILD_ERROR_MESSAGE,
+            )
+            self._emit_kg_build_event(
+                "kg_build_failed",
+                self.kg_build_jobs.get(job_id),
+                latency_ms=_latency_ms(),
+            )
+            raise
         finally:
             with self.kg_building_lock:
                 self.kg_building.discard(notebook_id)
+
+    def build_notebook_kg(
+        self, notebook_id: str, *, progress=None, job_id: str | None = None
+    ) -> dict:
+        if job_id is None:
+            job_id = self.prepare_notebook_kg_job(
+                notebook_id, "incremental"
+            )["id"]
+        return self._run_notebook_kg_job(
+            notebook_id, job_id, "incremental", progress
+        )
+
+    def execute_notebook_kg_job(
+        self,
+        notebook_id: str,
+        job_id: str,
+        mode: str,
+        *,
+        progress=None,
+    ) -> dict:
+        if mode == "incremental":
+            return self.build_notebook_kg(
+                notebook_id, progress=progress, job_id=job_id
+            )
+        if mode == "rebuild":
+            return self.rebuild_notebook_kg(
+                notebook_id, job_id=job_id
+            )
+        raise ValueError("unsupported KG build mode")
+
+    def rebuild_notebook_kg(
+        self, notebook_id: str, *, job_id: str | None = None
+    ) -> dict:
+        if job_id is None:
+            job_id = self.prepare_notebook_kg_job(
+                notebook_id, "rebuild"
+            )["id"]
+        return self._run_notebook_kg_job(
+            notebook_id, job_id, "rebuild"
+        )
 
     # ------------------------------------------------------------------
     # Unified-KG reads (status / graph / neighbors)

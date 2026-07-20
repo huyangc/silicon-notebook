@@ -278,7 +278,12 @@ class SQLiteMaintenanceAdapter:
             return db.execute(
                 "SELECT COUNT(*) c FROM sources s WHERE s.notebook_id=? "
                 "AND NOT EXISTS (SELECT 1 FROM knowledge_objects k "
-                "WHERE k.source_id=s.id AND k.source_id!='')",
+                "WHERE k.source_id=s.id AND k.source_id!='' "
+                "AND COALESCE(("
+                "  SELECT er.status FROM extraction_runs er "
+                "  WHERE er.source_id=s.id AND er.run_type='kg' "
+                "  ORDER BY er.created_at DESC, er.rowid DESC LIMIT 1"
+                "), 'completed')='completed')",
                 (notebook_id,),
             ).fetchone()["c"]
 

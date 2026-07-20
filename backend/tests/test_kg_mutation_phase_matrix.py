@@ -233,8 +233,8 @@ def test_store_kg_preserves_post_commit_order(repo, monkeypatch):
 
 
 def test_store_kg_chunks_thousand_rows_before_embeds_and_hooks(repo, monkeypatch):
-    """1500 objects / 1200 relations → 2 object-chunk transactions, then 2
-    relation-chunk transactions, then embeds, then invalidate, then dirty."""
+    """1500 objects / 1200 relations share one source-atomic transaction,
+    then embeds, invalidate, and dirty run only after that commit."""
     notebook = repo.create_notebook(NotebookCreate(name="chunked"))
     objects = [_claim(f"L{i}", f"claim {i}") for i in range(1500)]
     relations = [
@@ -261,11 +261,14 @@ def test_store_kg_chunks_thousand_rows_before_embeds_and_hooks(repo, monkeypatch
     n_obj, n_rel = repo.store_kg(notebook.id, None, objects, relations)
 
     assert (n_obj, n_rel) == (1500, 1200)
-    assert events == (
-        ["write.begin", "write.commit"] * 2      # object chunks of 1000
-        + ["write.begin", "write.commit"] * 2    # relation chunks of 1000
-        + ["embed_objects", "embed_relations", "invalidate", "dirty"]
-    )
+    assert events == [
+        "write.begin",
+        "write.commit",
+        "embed_objects",
+        "embed_relations",
+        "invalidate",
+        "dirty",
+    ]
 
 
 # --------------------------------------------------------- relink_notebook_kg
