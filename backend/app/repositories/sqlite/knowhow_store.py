@@ -1011,6 +1011,8 @@ class KnowhowStore:
             # docstring's ANCHOR BASELINE GUARD paragraph.
             anchor_guard = anchor_column_id is not None and expected_anchor is not None
             if anchor_guard:
+                if len(expected_anchor) != len(updates):
+                    return {"written": [], "conflict": True}
                 # Round-5 P1: the per-row byte-exact anchor re-read in the phase-1
                 # loop below catches a FROZEN target that LEFT the group, but two
                 # STRUCTURAL drifts leave every per-row baseline still matching while
@@ -1028,7 +1030,14 @@ class KnowhowStore:
                     "SELECT table_id, role FROM knowhow_columns WHERE id = ?",
                     (anchor_column_id,),
                 ).fetchone()
-                if anchor_col_row is None or anchor_col_row["role"] != "anchor":
+                if (
+                    anchor_col_row is None
+                    or anchor_col_row["role"] != "anchor"
+                    or any(
+                        update_table_id != anchor_col_row["table_id"]
+                        for update_table_id, _row, _column, _before, _content in updates
+                    )
+                ):
                     return {"written": [], "conflict": True}
                 anchor_table_id = anchor_col_row["table_id"]
                 # (b) EXACT MEMBERSHIP: for each DISTINCT frozen anchor VALUE among

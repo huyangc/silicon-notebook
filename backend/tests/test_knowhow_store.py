@@ -1207,6 +1207,60 @@ def _anchor_group(store: KnowhowStore, notebook_id: str):
     return table_id, anchor_col, shared_col, r0, r1, "示波器", "旧改法"
 
 
+def test_atomic_anchor_guard_rejects_parallel_length_mismatch(store, notebook_id):
+    table_id, anchor_col, shared_col, r0, r1, anchor, before = _anchor_group(
+        store, notebook_id
+    )
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, before, "new"),
+            (table_id, r1, shared_col, before, "new"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=[anchor],
+    )
+    assert result == {"written": [], "conflict": True}
+    rows = {
+        row["id"]: row["cells"]
+        for row in store.get_knowhow_table(table_id)["rows"]
+    }
+    assert rows[r0][shared_col] == before
+    assert rows[r1][shared_col] == before
+
+
+def test_atomic_anchor_guard_rejects_anchor_column_from_another_table(
+    store, notebook_id
+):
+    target = store.create_knowhow_table(notebook_id, "target", "", BASE_COLUMNS)
+    target_cols = _columns_by_name(store, target)
+    row_id = store.add_knowhow_row(
+        target,
+        {target_cols["修复方法"]: "old"},
+    )
+
+    foreign = store.create_knowhow_table(notebook_id, "foreign", "", BASE_COLUMNS)
+    foreign_anchor = _columns_by_name(store, foreign)["违例类型"]
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (
+                target,
+                row_id,
+                target_cols["修复方法"],
+                "old",
+                "new",
+            )
+        ],
+        anchor_column_id=foreign_anchor,
+        expected_anchor=[""],
+    )
+    assert result == {"written": [], "conflict": True}
+    row = store.get_knowhow_table(target)["rows"][0]
+    assert row["cells"][target_cols["修复方法"]] == "old"
+
+
 def test_guarded_atomic_anchor_mismatch_conflicts_writes_nothing(store, notebook_id):
     table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
         store, notebook_id
