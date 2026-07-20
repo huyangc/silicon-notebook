@@ -162,23 +162,42 @@ def _batch_concurrency_scope(
         phase_error = exc
         raise
     finally:
-        (
-            repo.settings.kg_job_concurrency,
-            repo.settings.kg_extract_workers,
-            repo.settings.embed_concurrency,
-        ) = old_settings
+        cleanup_errors: list[tuple[str, BaseException]] = []
+        for name, old_value in zip(
+            (
+                "kg_job_concurrency",
+                "kg_extract_workers",
+                "embed_concurrency",
+            ),
+            old_settings,
+        ):
+            try:
+                setattr(repo.settings, name, old_value)
+            except BaseException as restore_error:
+                cleanup_errors.append(
+                    (f"batch setting {name}", restore_error)
+                )
         try:
             scheduler.configure(
                 window_workers=old_window,
                 job_workers=old_job,
             )
-        except Exception as restore_error:
-            if phase_error is None:
-                raise
-            print(
-                "warning: failed to restore KG scheduler after phase error: "
-                f"{type(restore_error).__name__}: {restore_error}",
-                file=sys.stderr,
+        except BaseException as restore_error:
+            cleanup_errors.append(("KG scheduler", restore_error))
+
+        if phase_error is not None:
+            for label, restore_error in cleanup_errors:
+                print(
+                    f"warning: failed to restore {label} after phase error: "
+                    f"{type(restore_error).__name__}: {restore_error}",
+                    file=sys.stderr,
+                )
+        elif len(cleanup_errors) == 1:
+            raise cleanup_errors[0][1]
+        elif cleanup_errors:
+            raise BaseExceptionGroup(
+                "batch concurrency cleanup failed",
+                [restore_error for _, restore_error in cleanup_errors],
             )
 
 
@@ -1232,6 +1251,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     manifest = Path(repo.storage_dir) / "batch_ingest" / f"{notebook_id}.jsonl"
     log = _make_logger(manifest)
     print(f"notebook={notebook_id} manifest={manifest}", flush=True)
+    log({
+        "phase": "concurrency",
+        "workers": effective.workers,
+        "llm": effective.llm,
+        "embedding": effective.embedding,
+        "workers_source": effective.workers_source,
+        "llm_source": effective.llm_source,
+        "embedding_source": effective.embedding_source,
+    })
     print(
         "concurrency: "
         f"source={effective.workers}({effective.workers_source}) "

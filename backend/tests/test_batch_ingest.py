@@ -636,7 +636,166 @@ def test_batch_scope_install_failure_restores_settings_and_scheduler(
     ) == old_settings
 
 
-def test_main_prints_effective_concurrency(repo, monkeypatch, capsys):
+def test_batch_scope_activation_failure_restores_settings_and_scheduler(
+    repo, monkeypatch
+):
+    from app.services.kg import scheduler
+    from app.services.model_concurrency import current_model_concurrency
+
+    old_settings = (
+        repo.settings.kg_job_concurrency,
+        repo.settings.kg_extract_workers,
+        repo.settings.embed_concurrency,
+    )
+    old_window = scheduler.max_workers()
+    old_job = scheduler.job_concurrency()
+    effective = bi.EffectiveConcurrency(
+        workers=7,
+        llm=5,
+        embedding=2,
+        workers_source="cli",
+        llm_source="cli",
+        embedding_source="cli",
+    )
+    real_configure = scheduler.configure
+    configure_calls = []
+
+    class _FailingActivation:
+        def __enter__(self):
+            raise RuntimeError("activation failed")
+
+        def __exit__(self, *exc):
+            return False
+
+    def tracked_configure(**kwargs):
+        configure_calls.append(kwargs)
+        return real_configure(**kwargs)
+
+    monkeypatch.setattr(scheduler, "configure", tracked_configure)
+    monkeypatch.setattr(
+        bi,
+        "activate_model_concurrency",
+        lambda **_kwargs: _FailingActivation(),
+    )
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        with bi._batch_concurrency_scope(repo, effective):
+            pytest.fail("phase must not start when model activation fails")
+
+    assert current_model_concurrency() is None
+    assert configure_calls == [
+        {"window_workers": 5, "job_workers": 7},
+        {"window_workers": old_window, "job_workers": old_job},
+    ]
+    assert (
+        repo.settings.kg_job_concurrency,
+        repo.settings.kg_extract_workers,
+        repo.settings.embed_concurrency,
+    ) == old_settings
+
+
+def test_batch_scope_settings_restore_failure_does_not_mask_phase_error(
+    repo, monkeypatch, capsys
+):
+    from app.services.kg import scheduler
+
+    old_settings = (
+        repo.settings.kg_job_concurrency,
+        repo.settings.kg_extract_workers,
+        repo.settings.embed_concurrency,
+    )
+    effective = bi.EffectiveConcurrency(
+        workers=7,
+        llm=5,
+        embedding=2,
+        workers_source="cli",
+        llm_source="cli",
+        embedding_source="cli",
+    )
+    settings_type = type(repo.settings)
+    real_setattr = settings_type.__setattr__
+    real_configure = scheduler.configure
+    configure_calls = []
+
+    def fail_job_restore(settings, name, value):
+        if (
+            settings is repo.settings
+            and name == "kg_job_concurrency"
+            and value == old_settings[0]
+        ):
+            raise RuntimeError("settings restore failed")
+        return real_setattr(settings, name, value)
+
+    def tracked_configure(**kwargs):
+        configure_calls.append(kwargs)
+        return real_configure(**kwargs)
+
+    monkeypatch.setattr(settings_type, "__setattr__", fail_job_restore)
+    monkeypatch.setattr(scheduler, "configure", tracked_configure)
+    try:
+        with pytest.raises(ValueError, match="phase failed"):
+            with bi._batch_concurrency_scope(repo, effective):
+                raise ValueError("phase failed")
+
+        assert len(configure_calls) == 2
+        assert repo.settings.kg_extract_workers == old_settings[1]
+        assert repo.settings.embed_concurrency == old_settings[2]
+        assert "failed to restore batch setting kg_job_concurrency" in (
+            capsys.readouterr().err
+        )
+    finally:
+        real_setattr(repo.settings, "kg_job_concurrency", old_settings[0])
+        scheduler.reset()
+
+
+def test_batch_scope_settings_restore_failure_surfaces_after_success(
+    repo, monkeypatch
+):
+    from app.services.kg import scheduler
+
+    old_workers = repo.settings.kg_job_concurrency
+    effective = bi.EffectiveConcurrency(
+        workers=7,
+        llm=5,
+        embedding=2,
+        workers_source="cli",
+        llm_source="cli",
+        embedding_source="cli",
+    )
+    settings_type = type(repo.settings)
+    real_setattr = settings_type.__setattr__
+    real_configure = scheduler.configure
+    configure_calls = []
+
+    def fail_job_restore(settings, name, value):
+        if (
+            settings is repo.settings
+            and name == "kg_job_concurrency"
+            and value == old_workers
+        ):
+            raise RuntimeError("settings restore failed")
+        return real_setattr(settings, name, value)
+
+    def tracked_configure(**kwargs):
+        configure_calls.append(kwargs)
+        return real_configure(**kwargs)
+
+    monkeypatch.setattr(settings_type, "__setattr__", fail_job_restore)
+    monkeypatch.setattr(scheduler, "configure", tracked_configure)
+    try:
+        with pytest.raises(RuntimeError, match="settings restore failed"):
+            with bi._batch_concurrency_scope(repo, effective):
+                pass
+
+        assert len(configure_calls) == 2
+    finally:
+        real_setattr(repo.settings, "kg_job_concurrency", old_workers)
+        scheduler.reset()
+
+
+def test_main_reports_effective_concurrency_to_stdout_and_manifest(
+    repo, monkeypatch, capsys
+):
     nb_id = bi.ensure_notebook(repo, None, "nb-effective-concurrency")
     monkeypatch.setenv("EMBED_PROVIDER", "")
     monkeypatch.setattr(
@@ -670,6 +829,18 @@ def test_main_prints_effective_concurrency(repo, monkeypatch, capsys):
         "concurrency: source=32(cli) llm=24(cli) embedding=4(cli)"
         in capsys.readouterr().out
     )
+    manifest = Path(repo.storage_dir) / "batch_ingest" / f"{nb_id}.jsonl"
+    event = json.loads(manifest.read_text(encoding="utf-8").splitlines()[0])
+    event.pop("ts")
+    assert event == {
+        "phase": "concurrency",
+        "workers": 32,
+        "llm": 24,
+        "embedding": 4,
+        "workers_source": "cli",
+        "llm_source": "cli",
+        "embedding_source": "cli",
+    }
 
 
 def test_pool_snapshot_reports_gate_truth():
