@@ -10,7 +10,7 @@ import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
 import { KnowhowPanel } from "./knowhow-panel";
 import { ContentOverviewCards } from "./content-overview-cards";
-import { startAnalyticsLoads } from "./analytics-loaders";
+import { AnalyticsLoadScope, startAnalyticsLoads } from "./analytics-loaders";
 import {
   answerIdBatches,
   collectSavedAnswerFlags,
@@ -21,6 +21,11 @@ import {
   type MemoryNavigationTarget,
 } from "./memory-model";
 import type { KnowhowHealthFilter } from "./knowhow-model";
+import {
+  CLOSED_KNOWHOW_NAVIGATION,
+  closeKnowhowNavigation,
+  openKnowhowNavigation,
+} from "./knowhow-navigation";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
 import { withoutDecidedMerge } from "./kg-merge-model";
@@ -971,11 +976,9 @@ export default function Home() {
   const [graph, setGraph] = useState<KnowledgeGraph | null>(null);
   const [graphOpen, setGraphOpen] = useState(false);
   const [kgViewOpen, setKgViewOpen] = useState(false);
-  const [knowhowOpen, setKnowhowOpen] = useState(false);
-  const [knowhowHealthFilter, setKnowhowHealthFilter] = useState<KnowhowHealthFilter>("all");
+  const [knowhowNavigation, setKnowhowNavigation] = useState(CLOSED_KNOWHOW_NAVIGATION);
   // Task 12（引用跳转）：ask 引用命中 knowhow 格子时的跳转目标——非 null 时
   // KnowhowPanel 挂载即定位到该表该行的抽屉（见 openKnowhowAt）。
-  const [knowhowJumpTarget, setKnowhowJumpTarget] = useState<{ tableId: string; rowId: string | null } | null>(null);
   const [uGraph, setUGraph] = useState<UnifiedGraphResp | null>(null);
   // 大库首次可视化索引在后台构建时，GET /unified-kg 返回占位 viz_building:true；
   // 这里驱动图区「构建中」提示 + 轮询，直到索引建好后自动换真图。
@@ -1001,6 +1004,7 @@ export default function Home() {
   // 「索引与构建」面板(看板弹窗)的三系统聚合状态——openAnalytics 打开时经 fetchIndexStatus
   // 一次拉齐,面板打开期间任一系统忙碌时轻量轮询保鲜(见下方 effect)。
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
+  const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
   // 「索引与构建」面板统一确认——三系统(知识图谱/概念合并/检索索引)的破坏性动作
@@ -2259,6 +2263,8 @@ export default function Home() {
     const historyMode = history === "push"
       ? historyModeForTransition(currentNotebookId, notebookId)
       : null;
+    closeAnalytics();
+    closeKnowhow();
     const workspaceEpoch = ++workspaceEpochRef.current;
     askRunEpochRef.current += 1;
     memoryLinksAbortRef.current?.abort();
@@ -2375,6 +2381,8 @@ export default function Home() {
   }
 
   function showCollection() {
+    closeAnalytics();
+    closeKnowhow();
     workspaceEpochRef.current += 1;
     askRunEpochRef.current += 1;
     memoryLinksAbortRef.current?.abort();
@@ -2990,9 +2998,24 @@ export default function Home() {
   }
 
 
+  function closeAnalytics() {
+    analyticsLoadScopeRef.current.cancel();
+    setAnalytics(null);
+    setContentOverview(null);
+    setContentOverviewError("");
+    setContentOverviewLoading(false);
+  }
+
+  function closeKnowhow() {
+    setKnowhowNavigation((current) => closeKnowhowNavigation(current));
+  }
+
   async function openAnalytics() {
     if (!currentNotebookId) return;
     const nb = currentNotebookId;
+    const owner = analyticsLoadScopeRef.current.begin(nb);
+    const isCurrent = () => analyticsLoadScopeRef.current.isCurrent(owner, activeNotebookIdRef.current);
+    setContentOverview(null);
     setContentOverviewLoading(true);
     setContentOverviewError("");
     const loads = startAnalyticsLoads({
@@ -3006,7 +3029,7 @@ export default function Home() {
     // 快照),取代原先仅单独拉检索索引状态;顺带回填 scaleIndexStatus(供既有
     // runScaleIndexOp 等复用)与忙碌位(供既有轮询接回跨会话发起的构建)。
     void loads.indexStatus.then((result) => {
-      if (!result.ok) return;
+      if (!result.ok || !isCurrent()) return;
       const status = result.value;
       setIndexStatus(status);
       setScaleIndexStatus(status.scale_index);
@@ -3017,6 +3040,7 @@ export default function Home() {
       if (shouldResumeScaleIndex(status.scale_index)) setBuildingScaleIndex(true);
     });
     void loads.contentOverview.then((result) => {
+      if (!isCurrent()) return;
       if (result.ok) {
         setContentOverview(result.value);
         setContentOverviewError("");
@@ -3026,8 +3050,12 @@ export default function Home() {
       }
       setContentOverviewLoading(false);
     });
-    const response = await loads.analytics;
-    setAnalytics(response);
+    try {
+      const response = await loads.analytics;
+      if (isCurrent()) setAnalytics(response);
+    } catch (error) {
+      if (isCurrent()) throw error;
+    }
   }
 
   function openAnalyticsMemory(
@@ -3036,7 +3064,7 @@ export default function Home() {
   ) {
     if (!currentNotebookId) return;
     const target = { notebookId: currentNotebookId, status, itemId };
-    setAnalytics(null);
+    closeAnalytics();
     showGlobalMemory(target);
   }
 
@@ -3044,10 +3072,11 @@ export default function Home() {
     filter: KnowhowHealthFilter,
     tableId: string | null,
   ) {
-    setKnowhowHealthFilter(filter);
-    setKnowhowJumpTarget(tableId ? { tableId, rowId: null } : null);
-    setAnalytics(null);
-    setKnowhowOpen(true);
+    closeAnalytics();
+    setKnowhowNavigation(openKnowhowNavigation({
+      healthFilter: filter,
+      jumpTarget: tableId ? { tableId, rowId: null } : null,
+    }));
   }
 
   async function loadSchemas() {
@@ -3107,8 +3136,7 @@ export default function Home() {
   // 打开 Knowhow 面板并记下目标表/行，KnowhowPanel 自己负责挂载后定位到该
   // 行的抽屉（含目标表/行已被删除时的兜底提示，见 knowhow-panel.tsx）。
   function openKnowhowAt(tableId: string, rowId: string) {
-    setKnowhowJumpTarget({ tableId, rowId });
-    setKnowhowOpen(true);
+    setKnowhowNavigation(openKnowhowNavigation({ jumpTarget: { tableId, rowId } }));
   }
 
   async function openKgView(
@@ -3912,7 +3940,7 @@ export default function Home() {
                   <Network size={17} />
                   <span>知识图谱</span>
                 </button>
-                <button className="workspace-nav-button" onClick={() => setKnowhowOpen(true)}>
+                <button className="workspace-nav-button" onClick={() => setKnowhowNavigation(openKnowhowNavigation())}>
                   <Table2 size={17} />
                   <span>Knowhow 表</span>
                 </button>
@@ -5086,14 +5114,14 @@ export default function Home() {
       )}
 
       {analytics && (
-        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) setAnalytics(null); }}>
+        <section className="utility-modal" role="dialog" aria-modal="true" onClick={(event) => { if (event.currentTarget === event.target) closeAnalytics(); }}>
           <div className="utility-modal-card">
             <div className="source-modal-header">
               <div>
                 <h2>知识分析看板</h2>
                 <p>回答质量、审核进度、知识覆盖、来源状态与索引构建状态的本机统计。</p>
               </div>
-              <button className="icon-button" onClick={() => setAnalytics(null)} title="Close">×</button>
+              <button className="icon-button" onClick={closeAnalytics} title="Close">×</button>
             </div>
             <div className="source-detail-body">
               <p className="section-title">回答质量</p>
@@ -5686,19 +5714,15 @@ export default function Home() {
         </section>
       )}
 
-      {knowhowOpen && currentNotebookId && (
+      {knowhowNavigation.isOpen && currentNotebookId && (
         <KnowhowPanel
           notebookId={currentNotebookId}
           apiBase={API_BASE}
           canEdit={!isReader}
-          onClose={() => {
-            setKnowhowOpen(false);
-            setKnowhowHealthFilter("all");
-            setKnowhowJumpTarget(null);
-          }}
-          initialTableId={knowhowJumpTarget?.tableId}
-          initialRowId={knowhowJumpTarget?.rowId}
-          initialHealthFilter={knowhowHealthFilter}
+          onClose={closeKnowhow}
+          initialTableId={knowhowNavigation.jumpTarget?.tableId}
+          initialRowId={knowhowNavigation.jumpTarget?.rowId}
+          initialHealthFilter={knowhowNavigation.healthFilter}
         />
       )}
 

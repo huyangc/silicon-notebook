@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { startAnalyticsLoads } from "./analytics-loaders.ts";
+import { AnalyticsLoadScope, startAnalyticsLoads } from "./analytics-loaders.ts";
 
 
 test("starts all reads immediately and isolates optional overview failure", async () => {
@@ -28,4 +28,22 @@ test("starts all reads immediately and isolates optional overview failure", asyn
     value: { kg: { building: false } },
   });
   assert.deepEqual(await loads.contentOverview, { ok: false });
+});
+
+test("rejects an older analytics request after a newer notebook open", () => {
+  const scope = new AnalyticsLoadScope();
+  const notebookA = scope.begin("notebook-a");
+  const notebookB = scope.begin("notebook-b");
+
+  assert.equal(scope.isCurrent(notebookA, "notebook-b"), false);
+  assert.equal(scope.isCurrent(notebookB, "notebook-b"), true);
+});
+
+test("rejects optional analytics settlement after the view closes", () => {
+  const scope = new AnalyticsLoadScope();
+  const owner = scope.begin("notebook-a");
+
+  scope.cancel();
+
+  assert.equal(scope.isCurrent(owner, "notebook-a"), false);
 });
