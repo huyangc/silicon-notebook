@@ -219,6 +219,10 @@ export function KnowhowPanel({
     [tables, healthFilter],
   );
 
+  useEffect(() => {
+    setHealthFilter(initialHealthFilter ?? "all");
+  }, [initialHealthFilter]);
+
   // modal 的显隐：面板自持状态，不经 page.tsx 转发——page.tsx 挂载
   // <KnowhowPanel> 时只传 notebookId/apiBase/canEdit/onClose 四个 prop，
   // 导入/新建/管理/追加入口完全由本文件内部驱动。

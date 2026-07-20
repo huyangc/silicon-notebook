@@ -561,6 +561,7 @@ export function MemoryPanel({
   const listControllerRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
   const mutationControllersRef = useRef(new Set<AbortController>());
+  const navigationExpandedIdRef = useRef<string | null>(null);
 
   useEffect(() => subscribeMemorySessionAbort(sessionSignal, () => {
     listControllerRef.current?.abort();
@@ -589,7 +590,18 @@ export function MemoryPanel({
     setNotebookFilter(initialNotebookId ?? "");
     setStatus(initialStatus ?? "all");
     setPage(0);
-  }, [scope, initialNotebookId, initialStatus]);
+    setOrigin("all");
+    setQueryDraft("");
+    setQuery("");
+    setEditingId(null);
+    setExpandedIds((previous) => {
+      const next = new Set(previous);
+      if (navigationExpandedIdRef.current) next.delete(navigationExpandedIdRef.current);
+      navigationExpandedIdRef.current = initialMemoryId ?? null;
+      if (initialMemoryId) next.add(initialMemoryId);
+      return next;
+    });
+  }, [scope, initialNotebookId, initialStatus, initialMemoryId]);
 
   const toggleExpanded = (id: string) => setExpandedIds((prev) => {
     const next = new Set(prev);
@@ -696,14 +708,6 @@ export function MemoryPanel({
       if (listRequestEpochRef.current === epoch) listRequestEpochRef.current += 1;
     };
   }, [notebookFilter, notebookId, origin, page, query, refresh, scope, sessionSignal, status]);
-
-  useEffect(() => {
-    if (!initialMemoryId || !items.some((item) => item.id === initialMemoryId)) return;
-    setExpandedIds((previous) => {
-      if (previous.has(initialMemoryId)) return previous;
-      return new Set(previous).add(initialMemoryId);
-    });
-  }, [initialMemoryId, items]);
 
   function beginEdit(memory: MemoryRecord) {
     setEditingId(memory.id);
