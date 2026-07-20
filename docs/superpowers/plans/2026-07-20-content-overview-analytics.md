@@ -664,7 +664,7 @@ router.include_router(content_overview_router)
 Run:
 
 ```bash
-PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider -n0 backend/tests/test_content_overview_api.py backend/tests/test_knowhow_api.py backend/tests/test_repository_callers_static.py backend/tests/test_repository_surface_manifest.py backend/tests/test_repository_dependency_contract.py -q
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider -n0 backend/tests/test_content_overview_api.py backend/tests/test_knowhow_api.py backend/tests/test_repository_surface_contract.py backend/tests/test_repository_protocol_coverage.py backend/tests/test_repository_dependency_contract.py -q
 ```
 
 Expected: endpoint, Knowhow list, privacy, and architecture tests all pass.
