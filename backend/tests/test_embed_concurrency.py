@@ -1,11 +1,13 @@
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 import pytest
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
+from app.services.model_concurrency import activate_model_concurrency
 from app.services.sqlite_repository import SQLiteRepository, _now
 
 
@@ -90,6 +92,25 @@ def test_embed_source_failed_batch_isolated(repo):
     assert n == 20                    # the failed batch's 10 dropped; other 20 persisted
 
 
+def test_two_sources_share_one_embedding_hard_cap(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    source_ids = [
+        _insert_source_with_elements(repo, nb.id, 40),
+        _insert_source_with_elements(repo, nb.id, 40),
+        _insert_source_with_elements(repo, nb.id, 40),
+    ]
+    emb = _ConcEmbedder(dim=8)
+    repo.embedder = emb
+
+    with activate_model_concurrency(llm_max=8, embed_max=2):
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = [pool.submit(repo._embed_source, sid) for sid in source_ids]
+            for future in futures:
+                future.result()
+
+    assert emb.max_concurrent == 2
+
+
 class _ThreadNameEmbedder(_ConcEmbedder):
     """Also records the worker-thread names embed_texts ran on."""
     def __init__(self, dim=8):
@@ -110,6 +131,7 @@ def test_embed_source_workers_use_emb_el_thread_prefix(repo):
     sid = _insert_source_with_elements(repo, nb.id, 25)   # 3 batches (10,10,5)
     emb = _ThreadNameEmbedder(dim=8)
     repo.embedder = emb
-    repo._embed_source(sid)
+    with activate_model_concurrency(llm_max=2, embed_max=2):
+        repo._embed_source(sid)
     assert emb.thread_names
     assert all(name.startswith("emb-el") for name in emb.thread_names)

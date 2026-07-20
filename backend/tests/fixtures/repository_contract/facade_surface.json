@@ -4782,6 +4782,12 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.main",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>.main",
         "target": "current_user"
@@ -6028,13 +6034,13 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_configures_job_pool_and_restores_embed_conc",
+        "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
         "target": "llm_client"
       },
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
+        "scope": "<module>.test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc",
         "target": "llm_client"
       },
       {
@@ -6053,6 +6059,12 @@
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_all_resumes_existing_without_kg",
+        "target": "llm_client"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_kg_limit_parallelizes_sources_with_workers",
         "target": "llm_client"
       },
       {
@@ -6128,7 +6140,7 @@
         "compatibility": "production-compatible",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_configures_job_pool_and_restores_embed_conc",
+        "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
         "target": "llm_client"
       },
       {
@@ -6136,7 +6148,7 @@
         "compatibility": "production-compatible",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
+        "scope": "<module>.test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc",
         "target": "llm_client"
       },
       {
@@ -6161,6 +6173,14 @@
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_all_resumes_existing_without_kg",
+        "target": "llm_client"
+      },
+      {
+        "base": "repo",
+        "compatibility": "production-compatible",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_kg_limit_parallelizes_sources_with_workers",
         "target": "llm_client"
       },
       {
@@ -7027,13 +7047,19 @@
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_configures_job_pool_and_restores_embed_conc",
+        "scope": "<module>.test_run_all_does_not_reconfigure_scheduler",
         "target": "rebuild_unified_kg"
       },
       {
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc",
         "target": "rebuild_unified_kg"
       },
       {
@@ -7131,7 +7157,7 @@
         "compatibility": "test-only",
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
-        "scope": "<module>.test_run_all_configures_job_pool_and_restores_embed_conc",
+        "scope": "<module>.test_run_all_does_not_reconfigure_scheduler",
         "target": "rebuild_unified_kg"
       },
       {
@@ -7140,6 +7166,14 @@
         "kind": "patch",
         "path": "backend/tests/test_batch_ingest.py",
         "scope": "<module>.test_run_all_fresh_flag_forces_rebuild",
+        "target": "rebuild_unified_kg"
+      },
+      {
+        "base": "repo",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_batch_ingest.py",
+        "scope": "<module>.test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc",
         "target": "rebuild_unified_kg"
       },
       {
@@ -8082,6 +8116,18 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._batch_concurrency_scope",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._dispatch_main",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.backfill_chunk_embeddings",
         "target": "settings"
       },
@@ -8089,12 +8135,6 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.backfill_node_embeddings",
-        "target": "settings"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.main",
         "target": "settings"
       },
       {
@@ -8241,7 +8281,7 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.main",
+        "scope": "<module>._dispatch_main",
         "target": "storage_dir"
       },
       {

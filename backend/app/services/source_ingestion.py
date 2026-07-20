@@ -1182,7 +1182,7 @@ class SourceIngestionService:
     ) -> dict:
         """批量补抽缺论文元数据的源(CLI phase=metadata 与应用内端点共用)。
         幂等键=meta 行存在;失败源不落行,重跑自动重试(断点续跑)。有界并发
-        (≤8,受 kg_extract_workers 约束),任务级 copy_context 传播 per-user
+        (受 kg_job_concurrency 约束),任务级 copy_context 传播 per-user
         模型配置。返回 {"total": N, "<status>": n, ...} 计数。成功收尾
         (stored>0)经 pending_bus 广播 paper_meta_done 铃铛事件,见
         _notify_paper_meta_done。"""
@@ -1193,7 +1193,13 @@ class SourceIngestionService:
         counts: dict = {"total": len(targets)}
         if not targets:
             return counts
-        workers = max(1, min(8, int(getattr(self.settings, "kg_extract_workers", 4))))
+        workers = max(
+            1,
+            min(
+                int(getattr(self.settings, "kg_job_concurrency", 4)),
+                len(targets),
+            ),
+        )
         lock = threading.Lock()
         done = 0
 

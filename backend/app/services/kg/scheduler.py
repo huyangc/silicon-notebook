@@ -131,10 +131,11 @@ def job_concurrency() -> int:
 
 def configure(*, window_workers: int | None = None, job_workers: int | None = None) -> None:
     """Rebuild both pools with explicit sizes (falls back to settings for any
-    omitted value). Used by tests and by the offline CLI (batch_ingest.run_all)
-    to override pool capacity at runtime — the pools otherwise read an
-    independent Settings() at first use, so repo.settings changes don't reach
-    them and this explicit call is the only way to resize them."""
+    omitted value). Used by tests and by the offline CLI's
+    batch_ingest._batch_concurrency_scope, which is the sole batch pool
+    configuration owner. Phase helpers only submit work to the installed
+    pools. The pools otherwise read an independent Settings() at first use, so
+    repo.settings changes do not reach them."""
     with _lock:
         s = Settings()
         _shutdown_locked()

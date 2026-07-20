@@ -15,11 +15,12 @@ import os
 import sys
 import threading
 import time
-from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Mapping, Optional, Protocol, Sequence, Tuple
+from typing import Callable, Iterable, Iterator, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from app.core.config import Settings
 from app.core.request_context import set_request_user, reset_request_user
@@ -27,6 +28,12 @@ from app.models.schemas import NotebookCreate
 from app.repositories.sqlite.maintenance import VECTOR_TABLES as _VECTOR_TABLES
 from app.services.repository import UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
+from app.services.model_concurrency import (
+    ConcurrencySnapshot,
+    ModelConcurrencyState,
+    activate_model_concurrency,
+    current_model_concurrency,
+)
 import sqlite3
 from app.models.schemas import NotebookSummary, SourceSummary, UserProfile
 from app.repositories.ports import (
@@ -75,6 +82,125 @@ class BatchIngestRepository(Protocol):
                           ) -> ScaleBuildManifest: ...
 
 
+@dataclass(frozen=True)
+class EffectiveConcurrency:
+    workers: int
+    llm: int
+    embedding: int
+    workers_source: str
+    llm_source: str
+    embedding_source: str
+
+
+def _positive(value: int, name: str) -> int:
+    value = int(value)
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def _resolve_effective_concurrency(
+    args: argparse.Namespace, settings: Settings, phase: str
+) -> EffectiveConcurrency:
+    workers_default = (
+        _BACKFILL_DEFAULT_WORKERS
+        if phase == "vectors-to-blob"
+        else settings.kg_job_concurrency
+    )
+    return EffectiveConcurrency(
+        workers=_positive(
+            args.workers if args.workers is not None else workers_default,
+            "--workers",
+        ),
+        llm=_positive(
+            args.llm_conc
+            if args.llm_conc is not None
+            else settings.kg_extract_workers,
+            "--llm-conc",
+        ),
+        embedding=_positive(
+            args.embed_conc
+            if args.embed_conc is not None
+            else settings.embed_concurrency,
+            "--embed-conc",
+        ),
+        workers_source="cli" if args.workers is not None else "env",
+        llm_source="cli" if args.llm_conc is not None else "env",
+        embedding_source="cli" if args.embed_conc is not None else "env",
+    )
+
+
+@contextmanager
+def _batch_concurrency_scope(
+    repo: BatchIngestRepository,
+    effective: EffectiveConcurrency,
+) -> Iterator[ModelConcurrencyState]:
+    from app.services.kg import scheduler
+
+    old_settings = (
+        repo.settings.kg_job_concurrency,
+        repo.settings.kg_extract_workers,
+        repo.settings.embed_concurrency,
+    )
+    old_window = scheduler.max_workers()
+    old_job = scheduler.job_concurrency()
+    phase_error: BaseException | None = None
+    try:
+        repo.settings.kg_job_concurrency = effective.workers
+        repo.settings.kg_extract_workers = effective.llm
+        repo.settings.embed_concurrency = effective.embedding
+        scheduler.configure(
+            window_workers=effective.llm,
+            job_workers=effective.workers,
+        )
+        with activate_model_concurrency(
+            llm_max=effective.llm,
+            embed_max=effective.embedding,
+        ) as state:
+            yield state
+    except BaseException as exc:
+        phase_error = exc
+        raise
+    finally:
+        cleanup_errors: list[tuple[str, BaseException]] = []
+        for name, old_value in zip(
+            (
+                "kg_job_concurrency",
+                "kg_extract_workers",
+                "embed_concurrency",
+            ),
+            old_settings,
+        ):
+            try:
+                setattr(repo.settings, name, old_value)
+            except BaseException as restore_error:
+                cleanup_errors.append(
+                    (f"batch setting {name}", restore_error)
+                )
+        try:
+            scheduler.configure(
+                window_workers=old_window,
+                job_workers=old_job,
+            )
+        except BaseException as restore_error:
+            cleanup_errors.append(("KG scheduler", restore_error))
+
+        if phase_error is not None:
+            for label, restore_error in cleanup_errors:
+                print(
+                    f"warning: failed to restore {label} after phase error: "
+                    f"{type(restore_error).__name__}: {restore_error}",
+                    file=sys.stderr,
+                )
+        elif len(cleanup_errors) == 1:
+            raise cleanup_errors[0][1]
+        elif cleanup_errors:
+            raise BaseExceptionGroup(
+                "batch concurrency cleanup failed",
+                [restore_error for _, restore_error in cleanup_errors],
+            )
+
+
 def _rebuild_progress(phase: str, i: int, n: int) -> None:
     """CLI progress printer for rebuild_unified_kg sub-phases. Two shapes:
       - stage banner (n == 0): print the phase alone on its own line;
@@ -100,53 +226,24 @@ def _index_stage_progress(stage: str, latency_ms: int) -> None:
     print(f"  [index] {stage}: {latency_ms}ms", flush=True)
 
 
-def _live_embed_thread_counts() -> Counter[str]:
-    """Snapshot of live pool threads by name convention:
-      - `embed-<sid>` per-source background embed daemons → "bg"
-      - `emb-el`/`emb-ck`/`emb-kg`/`emb-rel` embed pool workers → "pool"
-      - `kg-desc` 概念描述生成 LLM 池 → "desc"(rebuild 阶段;不经 scheduler window 池)
-      - `kg-review` merge-review 预审 LLM 池 → "review"(rebuild 阶段;同上)
-    Best-effort observability only; racy by nature (threads come and go)."""
-    c: Counter = Counter()
-    for t in threading.enumerate():
-        n = t.name or ""
-        if n.startswith("embed-"):
-            c["bg"] += 1
-        elif n.startswith("emb-"):
-            c["pool"] += 1
-        elif n.startswith("kg-desc"):
-            c["desc"] += 1
-        elif n.startswith("kg-review"):
-            c["review"] += 1
-    return c
-
-
 def _format_pool_snapshot(
     ts: str,
     s: Mapping[str, int],
-    embed: Counter[str],
+    *,
+    llm: ConcurrencySnapshot,
+    embedding: ConcurrencySnapshot,
     done: int,
     total: int,
     label: str = "",
 ) -> str:
-    """Pure one-line snapshot of pool utilization. `ts` is the wall-clock time of
-    the snapshot (so it lines up with the model-call logs); `s` is
-    scheduler.stats(); `embed` is _live_embed_thread_counts(). Shows KG-LLM(window)
-    vs embed concurrency side by side so a shared-compute model service can be
-    confirmed to run both pools at once. 抽取期(total>0)显示「源完成 done/total」;
-    其它有 LLM 的阶段(如 rebuild,total=0)显示阶段名 label。
-    rebuild 期的概念描述/merge-review LLM 走独立线程池(非 scheduler window),按线程名单列
-    「概念描述(LLM) N」「merge-review(LLM) N」——仅在活跃(>0)时出现,否则不加噪。"""
+    """Render gate-backed model utilization plus the source job pool."""
     tail = f" · 源完成 {done}/{total}" if total > 0 else (f" · {label}" if label else "")
-    llm = ""
-    if embed.get("desc", 0):
-        llm += f" · 概念描述(LLM) {embed['desc']}"
-    if embed.get("review", 0):
-        llm += f" · merge-review(LLM) {embed['review']}"
-    return (f"[pool {ts}] KG-LLM(window) {s['window_active']}/{s['window_max']}"
-            f" · 源(job) {s['job_active']}/{s['job_max']}"
-            f" · embed {embed.get('bg', 0)}bg+{embed.get('pool', 0)}pool"
-            + llm + tail)
+    return (
+        f"[pool {ts}] LLM {llm.active}/{llm.maximum} waiting={llm.waiting}"
+        f" · embedding {embedding.active}/{embedding.maximum} waiting={embedding.waiting}"
+        f" · source {s['job_active']}/{s['job_max']}"
+        + tail
+    )
 
 
 class _PoolReporter:
@@ -178,13 +275,41 @@ class _PoolReporter:
         while not self._stop.wait(self.interval):
             try:
                 s = _sched.stats()
+                state = current_model_concurrency()
+                llm_snapshot = (
+                    state.llm.snapshot()
+                    if state is not None
+                    else ConcurrencySnapshot(active=0, maximum=0, waiting=0)
+                )
+                embed_snapshot = (
+                    state.embedding.snapshot()
+                    if state is not None
+                    else ConcurrencySnapshot(active=0, maximum=0, waiting=0)
+                )
                 line = _format_pool_snapshot(
-                    time.strftime("%H:%M:%S"), s,
-                    _live_embed_thread_counts(), self.done, self.total, self.label)
+                    time.strftime("%H:%M:%S"),
+                    s,
+                    llm=llm_snapshot,
+                    embedding=embed_snapshot,
+                    done=self.done,
+                    total=self.total,
+                    label=self.label,
+                )
                 print(line, flush=True)
                 if self.log:
-                    self.log({"phase": "pool", **s, "done": self.done,
-                              "total": self.total, "label": self.label})
+                    self.log({
+                        "phase": "pool",
+                        **s,
+                        "llm_active": llm_snapshot.active,
+                        "llm_max": llm_snapshot.maximum,
+                        "llm_waiting": llm_snapshot.waiting,
+                        "embed_active": embed_snapshot.active,
+                        "embed_max": embed_snapshot.maximum,
+                        "embed_waiting": embed_snapshot.waiting,
+                        "done": self.done,
+                        "total": self.total,
+                        "label": self.label,
+                    })
             except Exception:   # noqa: BLE001 — observability must never break ingest
                 pass
 
@@ -228,19 +353,16 @@ def _resolve_owner_profile(
     return profile
 
 
-def ensure_notebook(repo: BatchIngestRepository, notebook_id: Optional[str], name: str,
-                    owner: Optional[str] = None) -> str:
-    """返回目标 notebook_id:给定则校验存在,否则以解析出的属主新建。
-    owner=用户名(默认= admin 用户);notebook.created_by 记其 user id。"""
+def ensure_notebook(
+    repo: BatchIngestRepository,
+    notebook_id: Optional[str],
+    name: str,
+) -> str:
+    """Resolve or create a notebook under the caller's active request user."""
     if notebook_id:
         repo.get_notebook(notebook_id)   # 不存在则 KeyError
         return notebook_id
-    profile = _resolve_owner_profile(repo, owner)
-    token = set_request_user(profile)
-    try:
-        return repo.create_notebook(NotebookCreate(name=name)).id
-    finally:
-        reset_request_user(token)
+    return repo.create_notebook(NotebookCreate(name=name)).id
 
 
 def run_ingest(
@@ -335,6 +457,10 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
            report_interval: int = 15) -> dict[str, int]:
     """Phase 2:对尚无 KG 的 source 抽取(per-source 融合关)→ 一次 rebuild_unified_kg → 补节点向量。
 
+    source job 与 LLM window 并发上限由外层 _batch_concurrency_scope 统一安装；
+    本函数只向已配置的 scheduler 提交 source job，不在 phase 内重配任一 pool。
+    conc 仅供本函数直接调用的 embedding helper 使用。
+
     Flags:
       rebuild_only=True  — 跳过抽取,直接 rebuild_unified_kg + 节点向量(含 scale index)。
       no_rebuild=True    — 只抽取,跳过 rebuild_unified_kg 和 scale index(大批量分批抽,最后一批再 rebuild)。
@@ -346,6 +472,8 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
     Scale-index 自动联:rebuild 后若 notebook 为 base tier 或已存在 scale index,则调
     repo.build_scale_index(notebook_id) 使索引与新簇同步。
     """
+    from app.services.kg.scheduler import submit_job
+
     if no_rebuild and rebuild_only:
         raise ValueError("no_rebuild 和 rebuild_only 互斥,不能同时为 True")
 
@@ -385,18 +513,38 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
                 kgful = mnt.kg_covered_source_ids(notebook_id)
                 targets = [s for s in all_sids if s not in kgful][:max(0, limit)]
                 n_targets = len(targets)
+
+                def _extract_one(sid: str) -> tuple[str, Exception | None]:
+                    try:
+                        mnt.set_source_status(sid, "extracting")
+                        mnt.run_extraction(sid)
+                        mnt.set_source_status(sid, "extracted")
+                        return sid, None
+                    except Exception as exc:  # noqa: BLE001 — 单源失败隔离
+                        return sid, exc
+
                 with _PoolReporter(report_interval, total=n_targets, log=log) as reporter:
-                    for i, sid in enumerate(targets, 1):
-                        try:
-                            mnt.set_source_status(sid, "extracting")
-                            mnt.run_extraction(sid)
-                            mnt.set_source_status(sid, "extracted")
+                    futures = {
+                        submit_job(_extract_one, sid): sid for sid in targets
+                    }
+                    for i, future in enumerate(as_completed(futures), 1):
+                        sid, error = future.result()
+                        if error is None:
                             res["extracted"] += 1
-                            log({"phase": "kg", "source_id": sid, "status": "extracted",
-                                 "progress": f"{i}/{n_targets}"})
-                        except Exception as exc:   # noqa: BLE001 — 单源失败隔离
+                            log({
+                                "phase": "kg",
+                                "source_id": sid,
+                                "status": "extracted",
+                                "progress": f"{i}/{n_targets}",
+                            })
+                        else:
                             res["failed"] += 1
-                            log({"phase": "kg", "source_id": sid, "status": "failed", "error": str(exc)})
+                            log({
+                                "phase": "kg",
+                                "source_id": sid,
+                                "status": "failed",
+                                "error": str(error),
+                            })
                         reporter.done = i
 
         # ── no_rebuild:抽取后直接返回,不做 rebuild/scale-index ───────────────
@@ -434,7 +582,7 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
 
 
 def run_all(repo: BatchIngestRepository, notebook_id: str,
-            files: Iterable[Path], workers: int = 4, conc: int = 4,
+            files: Iterable[Path], conc: int = 4,
             log: LogFn | None = None, report_interval: int = 15,
             fresh: bool = False) -> dict[str, int]:
     """流式 all:per-source 流水线(parse+embed+extract 在 process_source 内重叠),
@@ -447,17 +595,13 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
     批量期强制 kg_auto_extract=True(让 process_source 走到 extract)且关 per-source 融合;
     finally 恢复两者原值。单 source 失败隔离,计入 failed,不连累其余。
 
-    并发旋钮(本函数内生效,finally 复原):
-      workers → scheduler.configure(job_workers=workers) 覆盖 KG_JOB_CONCURRENCY
-        (= 同时抽几篇文档)。scheduler 池容量读独立 Settings(),不会被 repo.settings
-        传导,故必须显式 configure。
-      conc    → repo.settings.embed_concurrency=conc 覆盖 EMBED_CONCURRENCY
-        (process_source 内的后台 chunk embed 用它)。
+    并发上限由调用方的 batch controller 统一安装；本函数不重配 scheduler，
+    以免只传 job_workers 时把独立的 LLM window 上限重置为 Settings 默认值。
+    conc 仍用于传给本函数直接调用的 embedding helpers。
 
     fresh=True — 透传给末尾的 rebuild_unified_kg:清空 rebuild checkpoint 并强制
       merge 审查/概念描述全量重跑(隐含 force=True,理由同 run_kg)。
     """
-    from app.services.kg import scheduler as _sched
     from app.services.kg.scheduler import submit_job
 
     log = log or (lambda _e: None)
@@ -467,9 +611,6 @@ def run_all(repo: BatchIngestRepository, notebook_id: str,
     repo.settings.kg_auto_extract = True                 # 强制 process_source 走 extract 分支
     repo.settings.kg_incremental_fusion_enabled = False  # 批量期关 per-source 融合,收尾一次 rebuild
     repo.settings.embed_concurrency = conc               # process_source 后台 chunk embed 并发
-    # KG job 池读独立 Settings(),repo.settings 改不到它 → 显式 configure 覆盖 KG_JOB_CONCURRENCY
-    _sched.configure(job_workers=max(1, workers))
-
     files = list(files)
     res = {"new": 0, "resumed": 0, "reparsed": 0, "extracted": 0, "failed": 0,
            "clusters": 0, "nodes_embedded": 0}
@@ -571,8 +712,10 @@ def run_reparse(repo: BatchIngestRepository, notebook_id: str,
     source_elements 的源(上次 parse 中断/未落地),旧 run_all 会当成「已 parse、缺 KG」
     直接 extract_source 空抽——build_records 的接地校验没有 element 可对照 → LLM 抽出的
     节点被整源丢弃 → objects=0,且直接重抽永远补不出 KG。必须重新 parse 生成 elements。
-    跨源并发提交到 KG job 池。有 elements 的源自动跳过(幂等)。"""
-    from app.services.kg import scheduler as _sched_mod
+    跨源并发提交到 KG job 池。有 elements 的源自动跳过(幂等)。
+
+    source job 与 LLM window 并发上限由外层 _batch_concurrency_scope 统一安装；
+    本函数只提交 job。conc 仅供 embedding helper/兼容设置使用。"""
     from app.services.kg.scheduler import submit_job
 
     log = log or (lambda _e: None)
@@ -585,7 +728,6 @@ def run_reparse(repo: BatchIngestRepository, notebook_id: str,
     # vector_cache/写锁)。收尾的 rebuild_unified_kg 会做一次全量融合(与 run_all/run_kg 一致)。
     repo.settings.kg_incremental_fusion_enabled = False
     repo.settings.embed_concurrency = conc
-    _sched_mod.configure(job_workers=max(1, conc))
 
     res = {"reparsed": 0, "failed": 0, "clusters": 0, "nodes_embedded": 0}
     try:
@@ -1002,13 +1144,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--owner", default=None,
                    help="notebook 属主用户名(大小写不敏感);默认= admin 用户")
     p.add_argument("--workers", type=int, default=None,
-                   help="all 阶段同时抽取的文档数(覆盖 KG_JOB_CONCURRENCY,其余摄取阶段为"
-                        "文件级并发,默认 4);vectors-to-blob 阶段为 json.loads/编码并行进程数"
-                        f"(默认 min(32, CPU核数)={_BACKFILL_DEFAULT_WORKERS},<=1 走原串行路径,"
+                   help="源/文档级并发；省略时继承 KG_JOB_CONCURRENCY。"
+                        "vectors-to-blob 阶段为 json.loads/编码并行进程数"
+                        f"(默认 min(32, CPU核数)={_BACKFILL_DEFAULT_WORKERS},1 走原串行路径,"
                         "不启动进程池;别到 64——单写 SQLite executemany + IPC 在 ~16-24 处封顶)")
-    p.add_argument("--embed-conc", type=int, default=4,
-                   help="embedding 并发(覆盖 EMBED_CONCURRENCY;all 阶段峰值≈workers×此值,"
-                        "注意 429)。默认 4")
+    p.add_argument("--llm-conc", type=int, default=None,
+                   help="传统 LLM 全局并发硬上限；省略时继承 KG_EXTRACT_WORKERS")
+    p.add_argument("--embed-conc", type=int, default=None,
+                   help="embedding 全局并发硬上限；省略时继承 EMBED_CONCURRENCY，"
+                        "与源/文档级并发独立")
     p.add_argument("--limit", type=int, default=None,
                    help="kg 阶段只抽前 N 个未抽源 / reparse 阶段只处理前 N 个缺 elements 源"
                         "(仅限制本次数量;最终 rebuild 仍覆盖全本 notebook)")
@@ -1026,19 +1170,203 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="metadata phase: 已有元数据行的源也重抽(prompt/校验升级后刷新)")
     p.add_argument("--pool-report-interval", type=int, default=15,
-                   help="每 N 秒自报线程池占用(KG-LLM/源/embed);0 关闭。all/kg 阶段生效")
+                   help="每 N 秒自报线程池占用(KG-LLM/源/embed);0 关闭。"
+                        "all/kg/reparse 阶段生效")
     p.add_argument("--dry-run", action="store_true", help="只扫描+报告,不写库")
     return p
 
 
+def _dispatch_main(
+    args: argparse.Namespace,
+    repo: BatchIngestRepository,
+    effective: EffectiveConcurrency,
+) -> int:
+    if args.phase == "vectors-to-blob":
+        # 纯格式转换(已算好的向量 JSON→BLOB),不产出新向量,不需要 EMBED 就绪,
+        # 也不走 ensure_notebook(不新建库;--notebook-id 必须是已存在的库)。
+        _t = time.perf_counter()
+        r = run_vectors_to_blob(
+            repo,
+            args.notebook_id,
+            all_notebooks=args.all_notebooks,
+            workers=effective.workers,
+        )
+        print(
+            f"vectors-to-blob done: {r} ({time.perf_counter() - _t:.1f}s)",
+            flush=True,
+        )
+        return 0
+
+    if args.phase == "backfill-source-index":
+        # 纯 SQL 派生索引重建(evidence JSON → knowledge_object_sources),不需要
+        # EMBED 就绪,也不走 ensure_notebook(不新建库;--notebook-id 必须是已存在的库)。
+        _t = time.perf_counter()
+        r = run_backfill_source_index(
+            repo,
+            args.notebook_id,
+            all_notebooks=args.all_notebooks,
+        )
+        print(
+            f"backfill-source-index done: {r} "
+            f"({time.perf_counter() - _t:.1f}s)",
+            flush=True,
+        )
+        return 0
+
+    if args.phase == "metadata":
+        print(
+            "concurrency: "
+            f"source={effective.workers}({effective.workers_source}) "
+            f"llm={effective.llm}({effective.llm_source}) "
+            f"embedding={effective.embedding}({effective.embedding_source})",
+            flush=True,
+        )
+        with _batch_concurrency_scope(repo, effective):
+            return run_metadata(repo, args)
+
+    # embed 子命令就是补向量:EMBED 未配直接报错,忽略 --allow-no-embed。
+    allow_no_embed = args.allow_no_embed and args.phase != "embed"
+    if not repo.settings.embedder_configured:
+        if not allow_no_embed:
+            extra = (
+                "\n  注意:embed 子命令用于补向量,--allow-no-embed 对它无效。"
+                if args.phase == "embed"
+                else ""
+            )
+            print(
+                "error: EMBED 未就绪 → 不会产出向量(chunk/节点),检索将失效。\n"
+                f"  当前 EMBED_PROVIDER={(repo.settings.embed_provider or '').strip()!r}"
+                "(目前仅支持 'dashscope',大小写不敏感),且需 "
+                "EMBED_BASE_URL/EMBED_API_KEY/EMBED_MODEL 都配齐。\n"
+                "  若确认 .env 已配:.env 按「当前工作目录」加载——请从含 .env "
+                "的仓库根(主 checkout,不是 worktree)运行。\n"
+                "  确实要无向量导入,请显式加 --allow-no-embed。"
+                + extra,
+                file=sys.stderr,
+            )
+            return 2
+        print(
+            "[warn] --allow-no-embed:无向量模式,本次不产出 chunk/节点向量。",
+            flush=True,
+        )
+
+    nb_name = args.notebook_name or "Batch Import"
+    notebook_id = ensure_notebook(repo, args.notebook_id, nb_name)
+    manifest = Path(repo.storage_dir) / "batch_ingest" / f"{notebook_id}.jsonl"
+    log = _make_logger(manifest)
+    print(f"notebook={notebook_id} manifest={manifest}", flush=True)
+    log({
+        "phase": "concurrency",
+        "workers": effective.workers,
+        "llm": effective.llm,
+        "embedding": effective.embedding,
+        "workers_source": effective.workers_source,
+        "llm_source": effective.llm_source,
+        "embedding_source": effective.embedding_source,
+    })
+    print(
+        "concurrency: "
+        f"source={effective.workers}({effective.workers_source}) "
+        f"llm={effective.llm}({effective.llm_source}) "
+        f"embedding={effective.embedding}({effective.embedding_source})",
+        flush=True,
+    )
+
+    if args.phase == "index":
+        print(f"phase=index notebook={notebook_id}", flush=True)
+        _t = time.perf_counter()
+        r = run_index(repo, notebook_id)
+        print(f"index done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+        return 0
+
+    with _batch_concurrency_scope(repo, effective):
+        if args.phase == "all":
+            print("phase=all (pipelined)", flush=True)
+            _t = time.perf_counter()
+            r = run_all(
+                repo,
+                notebook_id,
+                iter_files(args.input_dir),
+                conc=effective.embedding,
+                log=log,
+                report_interval=args.pool_report_interval,
+                fresh=getattr(args, "fresh", False),
+            )
+            print(f"all done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+            return 0
+
+        if args.phase == "ingest":
+            files = iter_files(args.input_dir)
+            print(f"phase=ingest files={len(files)}", flush=True)
+            _t = time.perf_counter()
+            c = run_ingest(
+                repo,
+                notebook_id,
+                files,
+                workers=effective.workers,
+                conc=effective.embedding,
+                log=log,
+            )
+            print(
+                f"ingest done: {c} ({time.perf_counter() - _t:.1f}s)",
+                flush=True,
+            )
+
+        if args.phase == "kg":
+            no_rebuild = getattr(args, "no_rebuild", False)
+            rebuild_only = getattr(args, "rebuild_only", False)
+            fresh = getattr(args, "fresh", False)
+            print(
+                f"phase=kg limit={args.limit} no_rebuild={no_rebuild} "
+                f"rebuild_only={rebuild_only} fresh={fresh}",
+                flush=True,
+            )
+            _t = time.perf_counter()
+            r = run_kg(
+                repo,
+                notebook_id,
+                limit=args.limit,
+                conc=effective.embedding,
+                log=log,
+                no_rebuild=no_rebuild,
+                rebuild_only=rebuild_only,
+                fresh=fresh,
+                report_interval=args.pool_report_interval,
+            )
+            print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+
+        if args.phase == "reparse":
+            no_rebuild = getattr(args, "no_rebuild", False)
+            print(
+                f"phase=reparse limit={args.limit} no_rebuild={no_rebuild}",
+                flush=True,
+            )
+            _t = time.perf_counter()
+            r = run_reparse(
+                repo,
+                notebook_id,
+                limit=args.limit,
+                conc=effective.embedding,
+                log=log,
+                no_rebuild=no_rebuild,
+                report_interval=args.pool_report_interval,
+            )
+            print(
+                f"reparse done: {r} ({time.perf_counter() - _t:.1f}s)",
+                flush=True,
+            )
+
+        if args.phase == "embed":
+            print(f"phase=embed notebook={notebook_id}", flush=True)
+            _t = time.perf_counter()
+            r = run_embed(repo, notebook_id, conc=effective.embedding)
+            print(f"embed done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
+
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_arg_parser().parse_args(argv)
-    # --workers has a phase-dependent default (argparse default is None so we
-    # can tell "omitted" from "explicitly 4"): doc-extraction concurrency for
-    # ingest/all/kg defaults to 4; vectors-to-blob's parse/encode pool defaults
-    # to min(32, cpu_count()) and is resolved separately below.
-    if args.workers is None and args.phase != "vectors-to-blob":
-        args.workers = 4
 
     if args.phase in {"ingest", "all"} and not args.input_dir:
         print("error: --input-dir required for ingest/all", file=sys.stderr)
@@ -1067,6 +1395,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("error: backfill-source-index 需要 --notebook-id 或 --all-notebooks", file=sys.stderr)
         return 2
 
+    settings = Settings()
+    try:
+        effective = _resolve_effective_concurrency(args, settings, args.phase)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
     if args.dry_run:
         files = iter_files(args.input_dir) if args.input_dir else []
         print(f"[dry-run] {len(files)} files under {args.input_dir}", flush=True)
@@ -1081,98 +1416,14 @@ def main(argv: Optional[List[str]] = None) -> int:
               file=sys.stderr)
         return 2
 
-    repo = SQLiteRepository(Settings())
-
-    if args.phase == "vectors-to-blob":
-        # 纯格式转换(已算好的向量 JSON→BLOB),不产出新向量,不需要 EMBED 就绪,
-        # 也不走 ensure_notebook(不新建库;--notebook-id 必须是已存在的库)。
-        blob_workers = args.workers if args.workers is not None else _BACKFILL_DEFAULT_WORKERS
-        _t = time.perf_counter()
-        r = run_vectors_to_blob(repo, args.notebook_id, all_notebooks=args.all_notebooks,
-                                workers=blob_workers)
-        print(f"vectors-to-blob done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
-        return 0
-
-    if args.phase == "backfill-source-index":
-        # 纯 SQL 派生索引重建(evidence JSON → knowledge_object_sources),不需要
-        # EMBED 就绪,也不走 ensure_notebook(不新建库;--notebook-id 必须是已存在的库)。
-        _t = time.perf_counter()
-        r = run_backfill_source_index(repo, args.notebook_id, all_notebooks=args.all_notebooks)
-        print(f"backfill-source-index done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
-        return 0
-
-    if args.phase == "metadata":
-        return run_metadata(repo, args)
-
-    # embed 子命令就是补向量:EMBED 未配直接报错,忽略 --allow-no-embed。
-    allow_no_embed = args.allow_no_embed and args.phase != "embed"
-    if not repo.settings.embedder_configured:
-        if not allow_no_embed:
-            extra = ("\n  注意:embed 子命令用于补向量,--allow-no-embed 对它无效。"
-                     if args.phase == "embed" else "")
-            print(
-                f"error: EMBED 未就绪 → 不会产出向量(chunk/节点),检索将失效。\n"
-                f"  当前 EMBED_PROVIDER={(repo.settings.embed_provider or '').strip()!r}"
-                "(目前仅支持 'dashscope',大小写不敏感),且需 EMBED_BASE_URL/EMBED_API_KEY/EMBED_MODEL 都配齐。\n"
-                "  若确认 .env 已配:.env 按「当前工作目录」加载——请从含 .env 的仓库根(主 checkout,不是 worktree)运行。\n"
-                "  确实要无向量导入,请显式加 --allow-no-embed。" + extra,
-                file=sys.stderr,
-            )
-            return 2
-        print("[warn] --allow-no-embed:无向量模式,本次不产出 chunk/节点向量。", flush=True)
-    nb_name = args.notebook_name or "Batch Import"  # 新建路径已强制 --notebook-name;append（带 id）时不使用
-    notebook_id = ensure_notebook(repo, args.notebook_id, nb_name, owner=args.owner)
-    manifest = Path(repo.storage_dir) / "batch_ingest" / f"{notebook_id}.jsonl"
-    log = _make_logger(manifest)
-    print(f"notebook={notebook_id} manifest={manifest}", flush=True)
-
-    if args.phase == "all":
-        print("phase=all (pipelined)", flush=True)
-        _t = time.perf_counter()
-        r = run_all(repo, notebook_id, iter_files(args.input_dir),
-                    workers=args.workers, conc=args.embed_conc, log=log,
-                    report_interval=args.pool_report_interval,
-                    fresh=getattr(args, "fresh", False))
-        print(f"all done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
-        return 0
-
-    if args.phase == "ingest":
-        files = iter_files(args.input_dir)
-        print(f"phase=ingest files={len(files)}", flush=True)
-        _t = time.perf_counter()
-        c = run_ingest(repo, notebook_id, files, workers=args.workers, conc=args.embed_conc, log=log)
-        print(f"ingest done: {c} ({time.perf_counter() - _t:.1f}s)", flush=True)
-
-    if args.phase == "kg":
-        no_rebuild = getattr(args, "no_rebuild", False)
-        rebuild_only = getattr(args, "rebuild_only", False)
-        fresh = getattr(args, "fresh", False)
-        print(f"phase=kg limit={args.limit} no_rebuild={no_rebuild} rebuild_only={rebuild_only} "
-              f"fresh={fresh}", flush=True)
-        _t = time.perf_counter()
-        r = run_kg(repo, notebook_id, limit=args.limit, conc=args.embed_conc, log=log,
-                   no_rebuild=no_rebuild, rebuild_only=rebuild_only, fresh=fresh,
-                   report_interval=args.pool_report_interval)
-        print(f"kg done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
-
-    if args.phase == "reparse":
-        no_rebuild = getattr(args, "no_rebuild", False)
-        print(f"phase=reparse limit={args.limit} no_rebuild={no_rebuild}", flush=True)
-        _t = time.perf_counter()
-        r = run_reparse(repo, notebook_id, limit=args.limit, conc=args.embed_conc, log=log,
-                        no_rebuild=no_rebuild, report_interval=args.pool_report_interval)
-        print(f"reparse done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
-
-    if args.phase == "index":
-        print(f"phase=index notebook={notebook_id}", flush=True)
-        _t = time.perf_counter()
-        r = run_index(repo, notebook_id)
-        print(f"index done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
-
-    if args.phase == "embed":
-        print(f"phase=embed notebook={notebook_id}", flush=True)
-        _t = time.perf_counter()
-        r = run_embed(repo, notebook_id, conc=args.embed_conc)
-        print(f"embed done: {r} ({time.perf_counter() - _t:.1f}s)", flush=True)
-
-    return 0
+    repo = SQLiteRepository(settings)
+    batch_user = (
+        _resolve_owner_profile(repo, args.owner)
+        if args.owner is not None
+        else repo.current_user()
+    )
+    user_token = set_request_user(batch_user)
+    try:
+        return _dispatch_main(args, repo, effective)
+    finally:
+        reset_request_user(user_token)

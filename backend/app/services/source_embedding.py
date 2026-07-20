@@ -8,6 +8,7 @@ from app.core.event_logging import EventLogger
 from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.embedding_store import EmbeddingStore
 from app.repositories.sqlite.source_store import SourceStore
+from app.services.model_concurrency import current_model_concurrency
 from app.services.retrieval import _payload_text
 
 
@@ -53,7 +54,10 @@ class SourceEmbeddingService:
         if not text:
             return
         try:
-            vector = self.embedder().embed_query(text[:2000])
+            vector = self._run_embedding_call(
+                lambda: self.embedder().embed_query(text[:2000]),
+                task_prefix="emb-kg",
+            )
         except Exception:
             return
         self.vectors.replace_knowledge_vectors(
@@ -76,6 +80,35 @@ class SourceEmbeddingService:
                 ensure()
             except Exception:  # noqa: BLE001 — warm-up only
                 pass
+
+    def _map_embedding_batches(
+        self,
+        fn: Callable[[Any], list],
+        batches: list,
+        *,
+        task_prefix: str,
+    ) -> list[list]:
+        state = current_model_concurrency()
+        if state is not None:
+            futures = [
+                state.embedding.submit(fn, batch, task_prefix=task_prefix)
+                for batch in batches
+            ]
+            return [future.result() for future in futures]
+
+        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
+        with _cf.ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix=task_prefix
+        ) as pool:
+            return list(pool.map(fn, batches))
+
+    def _run_embedding_call(
+        self, fn: Callable[[], Any], *, task_prefix: str
+    ) -> Any:
+        state = current_model_concurrency()
+        if state is None:
+            return fn()
+        return state.embedding.run(fn, task_prefix=task_prefix)
 
     def embed_source(self, source_id: str) -> None:
         if not self.settings.embedder_configured:
@@ -106,11 +139,11 @@ class SourceEmbeddingService:
                 return []
             return [(el.id, vector) for el, vector in zip(els, vectors)]
 
-        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
         rows = []
-        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-el") as pool:
-            for part in pool.map(_embed_only, batches):
-                rows.extend(part)
+        for part in self._map_embedding_batches(
+            _embed_only, batches, task_prefix="emb-el"
+        ):
+            rows.extend(part)
         now = self.now()
         if rows:
             self.vectors.replace_element_vectors(
@@ -154,19 +187,20 @@ class SourceEmbeddingService:
                 return []
             return [(oid, vec) for (oid, _), vec in zip(batch, vectors)]
 
-        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
         total = len(pending)
         done = 0
         buf: list = []
-        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-kg") as pool:
-            for bi, part in enumerate(pool.map(_embed_only, batches), 1):
-                buf.extend(part)
-                done += len(batches[bi - 1])
-                if bi % commit_every == 0:
-                    self.flush_object_vectors(notebook_id, buf)
-                    buf = []
-                    if progress:
-                        progress(done, total)
+        parts = self._map_embedding_batches(
+            _embed_only, batches, task_prefix="emb-kg"
+        )
+        for bi, part in enumerate(parts, 1):
+            buf.extend(part)
+            done += len(batches[bi - 1])
+            if bi % commit_every == 0:
+                self.flush_object_vectors(notebook_id, buf)
+                buf = []
+                if progress:
+                    progress(done, total)
         if buf:
             self.flush_object_vectors(notebook_id, buf)
         if progress:
@@ -195,11 +229,11 @@ class SourceEmbeddingService:
                 return []
             return [(rid, vec) for (rid, _), vec in zip(batch, vectors)]
 
-        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
         rows = []
-        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-rel") as pool:
-            for part in pool.map(_embed_only, batches):
-                rows.extend(part)
+        for part in self._map_embedding_batches(
+            _embed_only, batches, task_prefix="emb-rel"
+        ):
+            rows.extend(part)
         if not rows:
             return
         self.vectors.replace_relation_vectors(
@@ -232,7 +266,10 @@ class SourceEmbeddingService:
         texts = [r["text"][:trunc] for r in rows]
         embedder = self.embedder()
         self._warm_up(embedder)
-        vectors = embedder.embed_texts(texts)  # intentionally NOT try/except-wrapped
+        vectors = self._run_embedding_call(
+            lambda: embedder.embed_texts(texts),
+            task_prefix="emb-ck",
+        )
         pairs = [(r["id"], vector) for r, vector in zip(rows, vectors)]
         self.vectors.replace_chunk_vectors(notebook_id, pairs, created_at=self.now())
 
@@ -271,11 +308,11 @@ class SourceEmbeddingService:
                 return []
             return [(cid, v) for (cid, _), v in zip(batch, vecs)]
 
-        workers = max(1, min(self.settings.embed_concurrency, len(batches)))
         out = []
-        with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="emb-ck") as pool:
-            for part in pool.map(_emb, batches):
-                out.extend(part)
+        for part in self._map_embedding_batches(
+            _emb, batches, task_prefix="emb-ck"
+        ):
+            out.extend(part)
         if not out:
             return
         self.vectors.replace_chunk_vectors(
