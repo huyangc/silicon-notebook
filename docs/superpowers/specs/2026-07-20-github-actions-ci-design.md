@@ -62,11 +62,19 @@ deployment configuration. `scripts/check.sh` already clears model-provider
 configuration and forces MinerU off, preserving its deterministic offline
 boundary.
 
-Only GitHub-maintained setup actions are used:
+Only GitHub-maintained setup actions are used, pinned to the immutable commit
+for an explicitly reviewed release:
 
-- `actions/checkout@v6`;
-- `actions/setup-python@v6`;
-- `actions/setup-node@v6`.
+- `actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd`
+  (`v6.0.2`);
+- `actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405`
+  (`v6.2.0`);
+- `actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e`
+  (`v6.4.0`).
+
+Keep the release version in an inline workflow comment so an updater can map
+the immutable SHA back to its human-readable release. Do not replace these
+pins with moving major-version tags.
 
 ## Runner and Dependency Setup
 
@@ -133,7 +141,8 @@ source slices:
 - permissions are exactly read-only repository contents;
 - concurrency cancels superseded runs;
 - the job uses the pinned runner and a finite 20-minute timeout;
-- setup actions configure Python 3.13, Node 22, and dependency caches;
+- setup actions use the reviewed full-length commit pins and configure Python
+  3.13, Node 22, and dependency caches;
 - dependency installation uses the committed requirement and lock files;
 - the only repository gate invoked by the job is `scripts/check.sh`;
 - `PYTHON_BIN` and the bounded pytest worker count reach the gate.

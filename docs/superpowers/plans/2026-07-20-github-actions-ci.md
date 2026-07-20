@@ -13,7 +13,11 @@
 - Work only in `/Users/hzf/workspace/silicon_notebook/.worktrees/github-actions-ci` on `codex/github-actions-ci`.
 - The workflow must use `pull_request`, never `pull_request_target`.
 - Workflow permissions must be exactly `contents: read`; checkout credentials must not persist.
-- Use `actions/checkout@v6`, `actions/setup-python@v6`, and `actions/setup-node@v6`.
+- Pin GitHub-maintained actions to the reviewed full-length commit:
+  checkout `de0fac2e4500dabe0009e67214ff5f5447ce83dd` (`v6.0.2`),
+  setup-python `a309ff8b426b58ec0e2a45f0f869d46889d02405`
+  (`v6.2.0`), and setup-node
+  `48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e` (`v6.4.0`).
 - Use one `ubuntu-24.04` job with Python `3.13`, Node.js `22`, and a 20-minute timeout.
 - Install from `backend/requirements.txt` and `frontend/package-lock.json`; cache package-manager downloads only.
 - The workflow must call `bash scripts/check.sh`; it must not copy or enumerate the gate's test roots.
@@ -107,17 +111,26 @@ def test_ci_job_installs_declared_dependencies_and_runs_only_the_complete_gate()
     assert job["runs-on"] == "ubuntu-24.04"
     assert job["timeout-minutes"] == "20"
 
-    checkout = _uses_step(job, "actions/checkout@v6")
+    checkout = _uses_step(
+        job,
+        "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    )
     assert checkout["with"] == {"persist-credentials": "false"}
 
-    python = _uses_step(job, "actions/setup-python@v6")
+    python = _uses_step(
+        job,
+        "actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405",
+    )
     assert python["with"] == {
         "python-version": "3.13",
         "cache": "pip",
         "cache-dependency-path": "backend/requirements.txt",
     }
 
-    node = _uses_step(job, "actions/setup-node@v6")
+    node = _uses_step(
+        job,
+        "actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e",
+    )
     assert node["with"] == {
         "node-version": "22",
         "cache": "npm",
@@ -186,19 +199,19 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.13"
           cache: pip
           cache-dependency-path: backend/requirements.txt
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: "22"
           cache: npm
