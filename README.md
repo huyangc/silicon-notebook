@@ -1029,13 +1029,16 @@ The **anchor (row-title) column is never reformatted** by any bulk path (import,
 Only an interactive row/table reformat batch's save unit has this guarded
 concurrency contract; ordinary shared-cell edits and ordinary APIs do not gain
 it. When the batch opens, it freezes the complete table snapshot, including the
-exact member set of every non-empty anchor group. One SQLite write transaction
-revalidates every write target's expected content baseline, the active anchor
-designation, and every frozen group's exact membership. Any content, anchor, or
-membership drift rejects the entire save unit with HTTP 409 and zero partial
-writes. The UI retains the generated reformat candidates as stale, requires the
-user to rerun the reformat, and refreshes the table after the batch dialog
-closes.
+exact member set only for each non-empty anchor group covered by a complete
+anchor-group save unit (a merged shared-column fan-out or a singleton complete
+group). One SQLite write transaction revalidates every write target's expected
+content baseline, the active anchor designation, and the exact membership of
+those covered frozen groups. A non-shared column in a multi-row anchor group is
+a valid subset write: it checks only its write-target baselines, not the whole
+group membership guard. Any applicable content, anchor, or membership drift
+rejects the entire save unit with HTTP 409 and zero partial writes. The UI
+retains the generated reformat candidates as stale, requires the user to rerun
+the reformat, and refreshes the table after the batch dialog closes.
 
 Must be run from the main checkout root (it needs the real `.env`/database configuration, same as `batch_ingest.py`/`replay_retrieval.py` above). Safe to re-run: applying the same plan again is a no-op (each already-applied cell no longer matches its recorded "before").
 
