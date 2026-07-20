@@ -105,5 +105,20 @@ Observed:
   the new target read-only.
 - TypeScript and whitespace checks exited 0.
 
-The component test emits pre-existing jsdom warnings for the production
-`<style jsx global>` attributes; no assertions or behavior depend on them.
+The scoped component-test harness suppresses only React's complete formatted
+warning signature for the production `<style jsx global>` attributes, records
+all other `console.error` calls, and fails after each test if any occurred.
+
+### Pristine test output
+
+```text
+
+ RUN  v3.2.7 /Users/hzf/workspace/silicon_notebook/.worktrees/content-overview-analytics/frontend
+
+ ✓ app/content-navigation.component.test.tsx (2 tests) 298ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  23:55:56
+   Duration  1.03s (transform 197ms, setup 67ms, collect 333ms, tests 298ms, environment 146ms, prepare 25ms)
+```

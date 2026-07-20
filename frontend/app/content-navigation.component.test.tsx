@@ -1,6 +1,6 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 
 import { KnowhowPanel } from "./knowhow-panel";
 import { MemoryPanel } from "./memory-panel";
@@ -76,9 +76,37 @@ const memoryPage: PaginatedMemories = {
   ],
 };
 
+let unexpectedConsoleErrors: unknown[][] = [];
+
+function isKnownStyledJsxAttributeWarning(args: unknown[]): boolean {
+  const [format, value, attribute, domAttribute, domValue, propName] = args;
+  return format === (
+    "Received `%s` for a non-boolean attribute `%s`.\n\n"
+    + "If you want to write it to the DOM, pass a string instead: %s=\"%s\" or %s={value.toString()}."
+  )
+    && value === true
+    && (attribute === "jsx" || attribute === "global")
+    && domAttribute === attribute
+    && domValue === true
+    && propName === attribute;
+}
+
+beforeEach(() => {
+  unexpectedConsoleErrors = [];
+  vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+    if (!isKnownStyledJsxAttributeWarning(args)) unexpectedConsoleErrors.push(args);
+  });
+});
+
 afterEach(() => {
-  vi.unstubAllGlobals();
-  window.localStorage.clear();
+  try {
+    expect(unexpectedConsoleErrors).toEqual([]);
+  } finally {
+    cleanup();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    window.localStorage.clear();
+  }
 });
 
 
