@@ -61,7 +61,7 @@ def test_content_overview_uses_viewer_memory_and_canonical_code_freshness():
                 "updated_at": "2026-07-20T09:00:00+00:00",
             },
             {
-                "saved_hash": cell_content_hash("new"),
+                "saved_hash": cell_content_hash("![plot](asset://img)\nnew"),
                 "current_content_md": "![plot](asset://img)\nnew",
                 "updated_at": "2026-07-20T08:00:00+00:00",
             },

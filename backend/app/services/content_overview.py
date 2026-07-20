@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 
 from app.models.schemas import (
     KnowhowOverviewSummary,
@@ -14,14 +13,6 @@ from app.repositories.ports import (
     ContentOverviewMemoryStorePort,
 )
 from app.services.knowhow.api import cell_content_hash
-
-
-_MARKDOWN_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-
-
-def _code_freshness_hash(content_md: str) -> str:
-    return cell_content_hash(_MARKDOWN_IMAGE_RE.sub("", content_md).strip())
-
 
 class ContentOverviewService:
     def __init__(
@@ -37,7 +28,7 @@ class ContentOverviewService:
         for row in self.knowhow_store.knowhow_table_health_inputs(notebook_id):
             code_inputs = row["code_inputs"]
             stale_count = sum(
-                item["saved_hash"] != _code_freshness_hash(item["current_content_md"])
+                item["saved_hash"] != cell_content_hash(item["current_content_md"])
                 for item in code_inputs
             )
             activity = [
