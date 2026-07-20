@@ -511,7 +511,7 @@ def test_main_reports_non_positive_model_concurrency(repo, capsys):
     assert "positive integer" in capsys.readouterr().err
 
 
-def test_batch_concurrency_scope_configures_and_restores(repo):
+def test_batch_concurrency_scope_configures_and_restores(repo, monkeypatch):
     from app.services.kg import scheduler
     from app.services.model_concurrency import current_model_concurrency
 
@@ -522,6 +522,14 @@ def test_batch_concurrency_scope_configures_and_restores(repo):
     )
     old_window = scheduler.max_workers()
     old_job = scheduler.job_concurrency()
+    real_configure = scheduler.configure
+    configure_calls = []
+
+    def tracked_configure(**kwargs):
+        configure_calls.append(kwargs)
+        return real_configure(**kwargs)
+
+    monkeypatch.setattr(scheduler, "configure", tracked_configure)
     effective = bi.EffectiveConcurrency(
         workers=7, llm=5, embedding=2,
         workers_source="cli", llm_source="cli", embedding_source="cli",
@@ -541,6 +549,10 @@ def test_batch_concurrency_scope_configures_and_restores(repo):
         repo.settings.kg_extract_workers,
         repo.settings.embed_concurrency,
     ) == old_settings
+    assert configure_calls == [
+        {"window_workers": 5, "job_workers": 7},
+        {"window_workers": old_window, "job_workers": old_job},
+    ]
 
 
 def test_batch_scope_restore_failure_does_not_mask_phase_error(
@@ -1651,6 +1663,20 @@ def test_metadata_phase_backfills(repo, monkeypatch, capsys):
     assert rc2 == 0
     out2 = capsys.readouterr().out
     assert '"total": 0' in out2
+
+
+def test_metadata_phase_does_not_require_embedding_provider(
+    repo, monkeypatch, capsys
+):
+    _patch_fake_llm(monkeypatch)
+    monkeypatch.setenv("EMBED_PROVIDER", "")
+    nb_id = bi.ensure_notebook(repo, None, "nb-meta-no-embed")
+    _insert_meta_source(repo, nb_id, "src-no-embed")
+
+    rc = bi.main(["metadata", "--notebook-id", nb_id])
+
+    assert rc == 0
+    assert "[meta done]" in capsys.readouterr().out
 
 
 def test_metadata_phase_force(repo, monkeypatch, capsys):
