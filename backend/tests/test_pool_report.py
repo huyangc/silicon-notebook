@@ -1,9 +1,9 @@
 # backend/tests/test_pool_report.py
-"""周期性线程池占用自报(KG-LLM window 池 / 源 job 池 / embed 线程)的观测特性。
+"""周期性并发占用自报(共享 LLM/embedding gate + 源 job 池)的观测特性。
 
 - scheduler.stats():in-flight(活跃)计数,submit_window/submit_job 在 worker 内 inc/dec;
   submit_job 仍走 ctx.run 传播 ContextVar(每用户 KG_LLM 配置的命脉,不得回归)。
-- batch_ingest._format_pool_snapshot / _live_embed_thread_counts / _PoolReporter 纯观测。
+- batch_ingest._format_pool_snapshot / _PoolReporter 只报告真实 gate snapshot。
 """
 import contextvars
 import threading
@@ -12,6 +12,12 @@ import time
 import pytest
 
 from app.services import batch_ingest as bi
+from app.services.concept_merge_review import review_merge_candidates
+from app.services.model_concurrency import (
+    ConcurrencySnapshot,
+    LimitedJsonChatClient,
+    activate_model_concurrency,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -103,67 +109,88 @@ def test_submit_job_still_propagates_contextvar():
 # ── _format_pool_snapshot 纯格式化 ───────────────────────────────────────────
 
 def test_format_pool_snapshot_exact():
-    from collections import Counter
     s = {"window_active": 14, "window_max": 16, "job_active": 8, "job_max": 8}
-    embed = Counter({"bg": 6, "pool": 20})
-    line = bi._format_pool_snapshot("17:52:33", s, embed, 5, 40)
+    line = bi._format_pool_snapshot(
+        "17:52:33",
+        s,
+        llm=ConcurrencySnapshot(active=14, maximum=16, waiting=3),
+        embedding=ConcurrencySnapshot(active=6, maximum=20, waiting=4),
+        done=5,
+        total=40,
+    )
     assert line == (
-        "[pool 17:52:33] KG-LLM(window) 14/16 · 源(job) 8/8"
-        " · embed 6bg+20pool · 源完成 5/40"
+        "[pool 17:52:33] LLM 14/16 waiting=3"
+        " · embedding 6/20 waiting=4 · source 8/8 · 源完成 5/40"
     )
 
 
-def test_format_pool_snapshot_missing_embed_keys_zero():
-    from collections import Counter
+def test_format_pool_snapshot_idle_gates():
     s = {"window_active": 0, "window_max": 1, "job_active": 0, "job_max": 1}
-    # total=0 且无 label → 尾部无「源完成」(该段仅抽取期显示);此处重点验 embed 缺键→0bg+0pool。
-    line = bi._format_pool_snapshot("00:00:03", s, Counter(), 0, 0)
+    line = bi._format_pool_snapshot(
+        "00:00:03",
+        s,
+        llm=ConcurrencySnapshot(active=0, maximum=1, waiting=0),
+        embedding=ConcurrencySnapshot(active=0, maximum=1, waiting=0),
+        done=0,
+        total=0,
+    )
     assert line == (
-        "[pool 00:00:03] KG-LLM(window) 0/1 · 源(job) 0/1"
-        " · embed 0bg+0pool"
+        "[pool 00:00:03] LLM 0/1 waiting=0"
+        " · embedding 0/1 waiting=0 · source 0/1"
     )
 
 
 def test_format_pool_snapshot_label_when_no_source_total():
     """非抽取阶段(total=0)带 label(如 rebuild)→ 尾部显示 label 而非源完成。"""
-    from collections import Counter
     s = {"window_active": 2, "window_max": 16, "job_active": 0, "job_max": 8}
-    line = bi._format_pool_snapshot("00:00:03", s, Counter({"pool": 3}), 0, 0, label="rebuild 阶段")
+    line = bi._format_pool_snapshot(
+        "00:00:03",
+        s,
+        llm=ConcurrencySnapshot(active=2, maximum=16, waiting=4),
+        embedding=ConcurrencySnapshot(active=3, maximum=8, waiting=5),
+        done=0,
+        total=0,
+        label="rebuild 阶段",
+    )
     assert line == (
-        "[pool 00:00:03] KG-LLM(window) 2/16 · 源(job) 0/8"
-        " · embed 0bg+3pool · rebuild 阶段"
+        "[pool 00:00:03] LLM 2/16 waiting=4"
+        " · embedding 3/8 waiting=5 · source 0/8 · rebuild 阶段"
     )
 
 
-# ── _live_embed_thread_counts 线程名统计 ─────────────────────────────────────
+# ── live gate snapshot ───────────────────────────────────────────────────────
 
-def test_live_embed_thread_counts():
-    base = bi._live_embed_thread_counts()
+def test_active_model_state_snapshots_drive_formatting():
     release = threading.Event()
-    started = [threading.Event() for _ in range(3)]
+    embed_started = threading.Event()
 
-    def blocker(ev):
-        ev.set()
+    def blocking_embed():
+        embed_started.set()
         release.wait(2)
 
-    threads = [
-        threading.Thread(target=blocker, args=(started[0],), name="embed-x", daemon=True),
-        threading.Thread(target=blocker, args=(started[1],), name="embed-z", daemon=True),
-        threading.Thread(target=blocker, args=(started[2],), name="emb-y", daemon=True),
-    ]
-    for t in threads:
-        t.start()
-    for ev in started:
-        assert ev.wait(2)
-    try:
-        c = bi._live_embed_thread_counts()
-        # ≥ 基线 + 我们起的(bg=2 个 embed-*, pool=1 个 emb-*)
-        assert c["bg"] >= base.get("bg", 0) + 2
-        assert c["pool"] >= base.get("pool", 0) + 1
-    finally:
-        release.set()
-        for t in threads:
-            t.join(2)
+    with activate_model_concurrency(llm_max=3, embed_max=2) as state:
+        future = state.embedding.submit(blocking_embed, task_prefix="probe")
+        try:
+            assert embed_started.wait(2)
+            with state.llm.slot():
+                line = bi._format_pool_snapshot(
+                    "00:00:03",
+                    {
+                        "window_active": 0,
+                        "window_max": 3,
+                        "job_active": 0,
+                        "job_max": 4,
+                    },
+                    llm=state.llm.snapshot(),
+                    embedding=state.embedding.snapshot(),
+                    done=0,
+                    total=0,
+                )
+                assert "LLM 1/3 waiting=0" in line
+                assert "embedding 1/2 waiting=0" in line
+        finally:
+            release.set()
+        future.result(timeout=2)
 
 
 # ── _PoolReporter 后台自报 ───────────────────────────────────────────────────
@@ -178,16 +205,27 @@ def test_pool_reporter_interval_zero_starts_no_thread(capsys):
 
 def test_pool_reporter_prints_and_reflects_done(capsys):
     logs = []
-    with bi._PoolReporter(interval=0.02, total=40, log=logs.append) as r:
-        r.done = 5
-        time.sleep(0.1)   # ~5 intervals
+    with activate_model_concurrency(llm_max=7, embed_max=3):
+        with bi._PoolReporter(interval=0.02, total=40, log=logs.append) as r:
+            r.done = 5
+            time.sleep(0.1)   # ~5 intervals
     out = capsys.readouterr().out
     assert "[pool" in out
-    # 至少一行反映 done/total
+    assert "LLM 0/7 waiting=0" in out
+    assert "embedding 0/3 waiting=0" in out
     assert "源完成 5/40" in out
-    # 结构化 log 也发了 pool 相 phase
-    assert any(e.get("phase") == "pool" and e.get("done") == 5 and e.get("total") == 40
-               for e in logs)
+    assert any(
+        e.get("phase") == "pool"
+        and e.get("done") == 5
+        and e.get("total") == 40
+        and e.get("llm_active") == 0
+        and e.get("llm_max") == 7
+        and e.get("llm_waiting") == 0
+        and e.get("embed_active") == 0
+        and e.get("embed_max") == 3
+        and e.get("embed_waiting") == 0
+        for e in logs
+    )
 
 
 def test_pool_reporter_exception_in_loop_never_raises(capsys, monkeypatch):
@@ -205,39 +243,92 @@ def test_pool_reporter_exception_in_loop_never_raises(capsys, monkeypatch):
     # 到这里没炸即通过
 
 
-# ── rebuild 期 LLM 池(概念描述/merge-review,独立线程池非 scheduler window)──────
+# ── rebuild LLM calls share the same gate ────────────────────────────────────
 
-def test_rebuild_llm_pools_counted_and_shown():
-    """rebuild 的概念描述(kg-desc)/merge-review(kg-review)走独立 ThreadPoolExecutor,
-    不经 scheduler window 池;按线程名统计 + 快照单列,使 rebuild 期也能看到真实并发。"""
-    from collections import Counter
-    # 线程名统计:起 kg-desc/kg-review 线程 → 计入 desc/review
-    base = bi._live_embed_thread_counts()
-    release = threading.Event()
-    started = [threading.Event() for _ in range(2)]
+def test_parallel_rebuild_review_calls_are_reported_by_shared_llm_gate():
+    """Real merge-review worker calls use the already-resolved limited client.
 
-    def blk(ev):
-        ev.set()
-        release.wait(2)
+    With two parallel review chunks and llm_max=1, the live gate must report one
+    active and one waiting call; no thread-name estimation or special rebuild
+    counters are involved.
+    """
 
-    ts = [threading.Thread(target=blk, args=(started[0],), name="kg-desc_0", daemon=True),
-          threading.Thread(target=blk, args=(started[1],), name="kg-review_0", daemon=True)]
-    for t in ts:
-        t.start()
-    for ev in started:
-        assert ev.wait(2)
-    try:
-        c = bi._live_embed_thread_counts()
-        assert c["desc"] >= base.get("desc", 0) + 1
-        assert c["review"] >= base.get("review", 0) + 1
-    finally:
-        release.set()
-        for t in ts:
-            t.join(2)
+    class _BlockingReviewClient:
+        configured = True
 
-    # 快照:desc/review>0 时单列;抽取期(无)不出现,不加噪
-    s = {"window_active": 0, "window_max": 16, "job_active": 0, "job_max": 8}
-    line = bi._format_pool_snapshot("00:00:03", s, Counter({"desc": 8, "review": 2}), 0, 0, label="rebuild 阶段")
-    assert "概念描述(LLM) 8" in line and "merge-review(LLM) 2" in line
-    line2 = bi._format_pool_snapshot("00:00:03", s, Counter({"pool": 4}), 5, 10)
-    assert "概念描述" not in line2 and "merge-review" not in line2
+        def __init__(self):
+            self.started = threading.Event()
+            self.release = threading.Event()
+
+        def chat_json(self, *_args, **_kwargs):
+            self.started.set()
+            self.release.wait(2)
+            return '{"decisions":[]}'
+
+    raw = _BlockingReviewClient()
+    candidates = [
+        {
+            "id": f"candidate-{i}",
+            "canonical_a": f"A{i}",
+            "canonical_b": f"B{i}",
+        }
+        for i in range(2)
+    ]
+    completed = threading.Event()
+    errors: list[BaseException] = []
+
+    with activate_model_concurrency(llm_max=1, embed_max=1) as state:
+        limited = LimitedJsonChatClient(raw, state.llm)
+
+        def run_review():
+            try:
+                review_merge_candidates(
+                    limited,
+                    candidates,
+                    batch_size=1,
+                    max_workers=2,
+                )
+            except BaseException as exc:  # surface worker failures on the test thread
+                errors.append(exc)
+            finally:
+                completed.set()
+
+        review_thread = threading.Thread(target=run_review, daemon=True)
+        review_thread.start()
+        try:
+            assert raw.started.wait(2)
+            deadline = time.time() + 2
+            snapshot = state.llm.snapshot()
+            while snapshot.waiting != 1 and time.time() < deadline:
+                time.sleep(0.01)
+                snapshot = state.llm.snapshot()
+
+            line = bi._format_pool_snapshot(
+                "00:00:03",
+                {
+                    "window_active": 0,
+                    "window_max": 1,
+                    "job_active": 0,
+                    "job_max": 2,
+                },
+                llm=snapshot,
+                embedding=state.embedding.snapshot(),
+                done=0,
+                total=0,
+                label="rebuild 阶段",
+            )
+            assert line == (
+                "[pool 00:00:03] LLM 1/1 waiting=1"
+                " · embedding 0/1 waiting=0 · source 0/2 · rebuild 阶段"
+            )
+        finally:
+            raw.release.set()
+            review_thread.join(2)
+
+        assert completed.is_set()
+        assert errors == []
+        assert state.llm.snapshot() == ConcurrencySnapshot(
+            active=0,
+            maximum=1,
+            waiting=0,
+        )
