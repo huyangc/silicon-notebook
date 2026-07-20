@@ -6,6 +6,7 @@ from pathlib import Path
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
+from app.services.model_concurrency import ConcurrencySnapshot
 from app.services import batch_ingest as bi
 
 
@@ -456,6 +457,234 @@ def test_arg_parser_embed_phase():
     assert args.phase == "embed"
 
 
+def test_model_concurrency_cli_omission_inherits_settings(monkeypatch):
+    monkeypatch.setenv("KG_JOB_CONCURRENCY", "11")
+    monkeypatch.setenv("KG_EXTRACT_WORKERS", "13")
+    monkeypatch.setenv("EMBED_CONCURRENCY", "3")
+    args = bi.build_arg_parser().parse_args(["reparse", "--notebook-id", "nb-x"])
+    effective = bi._resolve_effective_concurrency(args, Settings(), "reparse")
+    assert (effective.workers, effective.llm, effective.embedding) == (11, 13, 3)
+    assert (
+        effective.workers_source,
+        effective.llm_source,
+        effective.embedding_source,
+    ) == ("env", "env", "env")
+
+
+def test_model_concurrency_cli_overrides_settings(monkeypatch):
+    monkeypatch.setenv("KG_JOB_CONCURRENCY", "11")
+    monkeypatch.setenv("KG_EXTRACT_WORKERS", "13")
+    monkeypatch.setenv("EMBED_CONCURRENCY", "3")
+    args = bi.build_arg_parser().parse_args([
+        "reparse", "--notebook-id", "nb-x",
+        "--workers", "20", "--llm-conc", "16", "--embed-conc", "2",
+    ])
+    effective = bi._resolve_effective_concurrency(args, Settings(), "reparse")
+    assert (effective.workers, effective.llm, effective.embedding) == (20, 16, 2)
+    assert effective.workers_source == "cli"
+    assert effective.llm_source == "cli"
+    assert effective.embedding_source == "cli"
+
+
+@pytest.mark.parametrize(
+    "flag", ["--workers", "--llm-conc", "--embed-conc"]
+)
+def test_model_concurrency_rejects_non_positive_values(flag):
+    args = bi.build_arg_parser().parse_args([
+        "reparse", "--notebook-id", "nb-x", flag, "0",
+    ])
+    with pytest.raises(ValueError, match="positive"):
+        bi._resolve_effective_concurrency(args, Settings(), "reparse")
+
+
+def test_main_reports_non_positive_model_concurrency(repo, capsys):
+    nb_id = bi.ensure_notebook(repo, None, "nb-invalid-concurrency")
+    rc = bi.main([
+        "reparse",
+        "--notebook-id",
+        nb_id,
+        "--embed-conc",
+        "0",
+        "--allow-no-embed",
+    ])
+    assert rc == 2
+    assert "positive integer" in capsys.readouterr().err
+
+
+def test_batch_concurrency_scope_configures_and_restores(repo):
+    from app.services.kg import scheduler
+    from app.services.model_concurrency import current_model_concurrency
+
+    old_settings = (
+        repo.settings.kg_job_concurrency,
+        repo.settings.kg_extract_workers,
+        repo.settings.embed_concurrency,
+    )
+    old_window = scheduler.max_workers()
+    old_job = scheduler.job_concurrency()
+    effective = bi.EffectiveConcurrency(
+        workers=7, llm=5, embedding=2,
+        workers_source="cli", llm_source="cli", embedding_source="cli",
+    )
+
+    with bi._batch_concurrency_scope(repo, effective):
+        assert scheduler.job_concurrency() == 7
+        assert scheduler.max_workers() == 5
+        assert repo.settings.embed_concurrency == 2
+        assert current_model_concurrency() is not None
+
+    assert current_model_concurrency() is None
+    assert scheduler.job_concurrency() == old_job
+    assert scheduler.max_workers() == old_window
+    assert (
+        repo.settings.kg_job_concurrency,
+        repo.settings.kg_extract_workers,
+        repo.settings.embed_concurrency,
+    ) == old_settings
+
+
+def test_batch_scope_restore_failure_does_not_mask_phase_error(
+    repo, monkeypatch, capsys
+):
+    from app.services.kg import scheduler
+
+    effective = bi.EffectiveConcurrency(
+        workers=2,
+        llm=2,
+        embedding=1,
+        workers_source="cli",
+        llm_source="cli",
+        embedding_source="cli",
+    )
+    real_configure = scheduler.configure
+    calls = 0
+
+    def flaky_configure(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("restore failed")
+        return real_configure(**kwargs)
+
+    monkeypatch.setattr(scheduler, "configure", flaky_configure)
+    try:
+        with pytest.raises(ValueError, match="phase failed"):
+            with bi._batch_concurrency_scope(repo, effective):
+                raise ValueError("phase failed")
+        assert "failed to restore KG scheduler" in capsys.readouterr().err
+    finally:
+        scheduler.reset()
+
+
+def test_main_prints_effective_concurrency(repo, monkeypatch, capsys):
+    nb_id = bi.ensure_notebook(repo, None, "nb-effective-concurrency")
+    monkeypatch.setenv("EMBED_PROVIDER", "")
+    monkeypatch.setattr(
+        bi,
+        "run_reparse",
+        lambda repo, notebook_id, **kwargs: {
+            "targets": 0,
+            "reparsed": 0,
+            "failed": 0,
+            "clusters": 0,
+            "nodes_embedded": 0,
+        },
+    )
+
+    rc = bi.main([
+        "reparse",
+        "--notebook-id",
+        nb_id,
+        "--workers",
+        "32",
+        "--llm-conc",
+        "24",
+        "--embed-conc",
+        "4",
+        "--allow-no-embed",
+        "--no-rebuild",
+    ])
+
+    assert rc == 0
+    assert (
+        "concurrency: source=32(cli) llm=24(cli) embedding=4(cli)"
+        in capsys.readouterr().out
+    )
+
+
+def test_pool_snapshot_reports_gate_truth():
+    line = bi._format_pool_snapshot(
+        "17:52:33",
+        {
+            "window_active": 7,
+            "window_max": 24,
+            "job_active": 29,
+            "job_max": 32,
+        },
+        llm=ConcurrencySnapshot(active=23, maximum=24, waiting=5),
+        embedding=ConcurrencySnapshot(active=4, maximum=4, waiting=18),
+        done=5,
+        total=40,
+    )
+    assert "LLM 23/24 waiting=5" in line
+    assert "embedding 4/4 waiting=18" in line
+    assert "source 29/32" in line
+    assert "源完成 5/40" in line
+
+
+def test_pool_reporter_emits_gate_truth(monkeypatch):
+    from app.services.kg import scheduler
+
+    llm_snapshot = ConcurrencySnapshot(active=3, maximum=5, waiting=7)
+    embedding_snapshot = ConcurrencySnapshot(active=2, maximum=2, waiting=11)
+
+    class _Gate:
+        def __init__(self, snapshot):
+            self._snapshot = snapshot
+
+        def snapshot(self):
+            return self._snapshot
+
+    class _State:
+        llm = _Gate(llm_snapshot)
+        embedding = _Gate(embedding_snapshot)
+
+    events = []
+    reporter = bi._PoolReporter(interval=1, total=9, log=events.append)
+    waits = iter([False, True])
+    monkeypatch.setattr(reporter._stop, "wait", lambda _interval: next(waits))
+    monkeypatch.setattr(bi, "current_model_concurrency", lambda: _State())
+    monkeypatch.setattr(
+        scheduler,
+        "stats",
+        lambda: {
+            "window_active": 4,
+            "window_max": 5,
+            "job_active": 6,
+            "job_max": 8,
+        },
+    )
+
+    reporter._loop()
+
+    assert events == [{
+        "phase": "pool",
+        "window_active": 4,
+        "window_max": 5,
+        "job_active": 6,
+        "job_max": 8,
+        "llm_active": 3,
+        "llm_max": 5,
+        "llm_waiting": 7,
+        "embed_active": 2,
+        "embed_max": 2,
+        "embed_waiting": 11,
+        "done": 0,
+        "total": 9,
+        "label": "",
+    }]
+
+
 def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     """run_all per-source 流水线:每个新文件建 source + 走 process_source 抽取(extracted=N),
     末尾一次 rebuild_unified_kg。强制 kg_auto_extract 让 process_source 走到 extract。"""
@@ -482,9 +711,11 @@ def test_run_all_pipelines_new_sources(repo, tmp_path, monkeypatch):
     assert rebuild_calls == [nb_id]               # 末尾恰好一次 rebuild
 
 
-def test_run_all_configures_job_pool_and_restores_embed_conc(repo, tmp_path, monkeypatch):
-    """Task 3:run_all 用 scheduler.configure(job_workers=workers) 覆盖 KG_JOB_CONCURRENCY,
-    并在 try 内把 repo.settings.embed_concurrency 设为 conc、finally 恢复原值。"""
+def test_run_all_leaves_scheduler_to_controller_and_restores_embed_conc(
+    repo, tmp_path, monkeypatch
+):
+    """run_all 不自行重配 scheduler；批次 controller 统一安装 source/LLM 上限。
+    run_all 自己临时覆盖的 embed_concurrency 仍须 finally 恢复。"""
     from app.services.kg import scheduler as _sched
 
     monkeypatch.setattr(repo, "llm_client", _StubLLM())
@@ -509,7 +740,7 @@ def test_run_all_configures_job_pool_and_restores_embed_conc(repo, tmp_path, mon
     orig_embed_conc = repo.settings.embed_concurrency
     try:
         bi.run_all(repo, nb_id, bi.iter_files(d), workers=3, conc=7)
-        assert any(c.get("job_workers") == 3 for c in configure_calls)  # 以 job_workers==workers 调过
+        assert configure_calls == []
         assert seen_embed_conc["during"] == 7        # try 内 embed_concurrency 被设为 conc
         assert repo.settings.embed_concurrency == orig_embed_conc       # finally 恢复
     finally:
