@@ -99,6 +99,41 @@ def _insert_running_jobs(database: Path) -> None:
     db.close()
 
 
+def _insert_running_kg_build(database: Path) -> None:
+    """Create the complete crash shape recovered by the v22 startup path."""
+    with sqlite3.connect(database) as db:
+        source_id, notebook_id = db.execute(
+            "SELECT id, notebook_id FROM sources ORDER BY id LIMIT 1"
+        ).fetchone()
+        db.execute(
+            "UPDATE sources SET status='extracting', parse_status='extracting', "
+            "error_message='raw-provider-secret', updated_at='crash-source' "
+            "WHERE id=?",
+            (source_id,),
+        )
+        db.execute(
+            "INSERT INTO extraction_runs "
+            "(id, notebook_id, source_id, run_type, status, error_message, "
+            "created_at, updated_at) VALUES "
+            "('run-kg-crashed', ?, ?, 'kg', 'running', "
+            "'raw-provider-secret', 'crash-run', 'crash-run')",
+            (notebook_id, source_id),
+        )
+        db.execute(
+            "INSERT INTO kg_build_jobs "
+            "(id, notebook_id, created_by, mode, status, stage, total_sources, "
+            "completed_sources, failed_sources, error_code, error_message, "
+            "created_at, updated_at, finished_at) VALUES "
+            "('job-kg-crashed', ?, 'user-local', 'incremental', 'running', "
+            "'extracting', 1, 0, 0, 'raw_code', 'raw-provider-secret', "
+            "'crash-job', 'crash-job', '')",
+            (notebook_id,),
+        )
+        db.commit()
+        db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        db.execute("PRAGMA journal_mode=DELETE")
+
+
 def _verify_with_repository_mutation(module, database, storage, mutation, monkeypatch):
     real_repository = module.SQLiteRepository
 
@@ -304,7 +339,7 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
-def test_deployed_v13_database_verifies_through_migrations_14_to_20(tmp_path):
+def test_deployed_v13_database_verifies_through_migrations_14_to_22(tmp_path):
     """The v13 hop is the one EVERY currently-deployed production database
     takes: v13 was the shipping schema before the memory-kg-extract feature.
     Post-v13 migrations are _migration_14 (sources.memory_id column + its
@@ -313,21 +348,28 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_20(tmp_path):
     tables + their indexes, knowhow-tables PR-1 Task 1), _migration_17 (the
     two paper-metadata tables + their indexes, paper-metadata Task 1),
     _migration_18 (the knowhow_cell_code table + its index, knowhow-tables
-    PR-2+3 Task 1 — its role-value remap is row data, invisible here), and
+    PR-2+3 Task 1 — its role-value remap is row data, invisible here),
     _migration_19 (notebook_assets.source_id column + its index, MinerU
     image-retention Task 2 — dropping notebook_assets below for
     _migration_16 already clears both, so no extra rollback step is
-    needed), and _migration_20 (durable KG build jobs). The v9-fixture tests
-    above only exercise the (9, SCHEMA_VERSION)
-    manifest key, so a missing (13, SCHEMA_VERSION) entry would make the
-    backup verifier fail closed (migration-manifest-missing + unmanifested
-    column/index/table) on every real upgrade while staying green in CI.
-    Build the faithful v13 shape by upgrading the fixture copy to current and
-    rolling back EXACTLY what every post-v13 migration adds — including
-    _migration_15's index, _migration_16's tables (which also absorb
-    _migration_19's column + index), _migration_17's tables, and
-    _migration_18's table plus _migration_20's table, or the constructed 'v13'
-    would retain them and the hop would under-report its additions."""
+    needed), _migration_20 (notebook_bases table + its index, and
+    promotion_candidates.target_base_id, multi-domain-base Task 1 — neither
+    is absorbed by another table's drop here, since promotion_candidates is
+    a foundational table nothing else in this rollback removes, so both get
+    their own explicit rollback statement below, mirroring how
+    sources.memory_id is handled). The v9-fixture tests above only exercise
+    the (9, SCHEMA_VERSION) manifest key, so a missing (13, SCHEMA_VERSION)
+    entry would make the backup verifier fail closed (migration-manifest-
+    missing + unmanifested column/index/table) on every real upgrade while
+    staying green in CI. Build the faithful v13 shape by upgrading the
+    fixture copy to current and rolling back EXACTLY what every post-v13
+    migration adds — including _migration_15's index, _migration_16's tables
+    (which also absorb _migration_19's column + index), _migration_17's
+    tables, _migration_18's table, _migration_20's table + column, and the
+    _migration_21 normalized-anchor index plus _migration_22's durable KG
+    build-job table, or
+    the constructed 'v13' would retain them and the hop would under-report
+    its additions."""
     from app.core.config import Settings
 
     module = _load_verifier()
@@ -346,7 +388,12 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_20(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
-        rollback.execute("DROP TABLE kg_build_jobs")                     # _migration_20
+        rollback.execute("DROP TABLE kg_build_jobs")                     # _migration_22
+        rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")  # _migration_21
+        rollback.execute("DROP TABLE notebook_bases")                     # _migration_20
+        rollback.execute(
+            "ALTER TABLE promotion_candidates DROP COLUMN target_base_id"
+        )                                                                 # _migration_20
         rollback.execute("DROP TABLE source_authors")                    # _migration_17
         rollback.execute("DROP TABLE source_paper_meta")                 # _migration_17
         # knowhow_cell_code FKs onto BOTH knowhow_rows and knowhow_columns,
@@ -372,6 +419,53 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_20(tmp_path):
     assert result.source_user_version == 13
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
+
+
+def test_deployed_v20_database_verifies_through_migrations_21_and_22(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    rollback = sqlite3.connect(database)
+    try:
+        rollback.execute("DROP TABLE kg_build_jobs")
+        rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
+        rollback.execute("PRAGMA user_version = 20")
+        rollback.commit()
+    finally:
+        rollback.close()
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 20
+    assert result.final_user_version == module.SCHEMA_VERSION
+
+
+def test_deployed_v21_database_verifies_through_kg_build_jobs(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    rollback = sqlite3.connect(database)
+    try:
+        rollback.execute("DROP TABLE kg_build_jobs")
+        rollback.execute("PRAGMA user_version = 21")
+        rollback.commit()
+    finally:
+        rollback.close()
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 21
+    assert result.final_user_version == module.SCHEMA_VERSION
 
 
 @pytest.mark.parametrize(
@@ -579,6 +673,54 @@ def test_only_recovery_seed_and_admin_upgrade_fields_are_normalized(tmp_path):
     assert result.normalized["admin_upgraded"] == 1
     assert result.normalized["seeded_object_schemas"] >= 1
     assert result.normalized["seeded_concept_whitelist"] >= 1
+
+
+def test_v22_kg_crash_recovery_is_normalized_field_by_field(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    _insert_running_kg_build(database)
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.changed_tables == []
+    assert result.normalized["sources"] == 1
+    assert result.normalized["extraction_runs"] == 1
+    assert result.normalized["kg_build_jobs"] == 1
+
+
+def test_v22_kg_recovery_never_excuses_other_job_field_changes(
+    tmp_path, monkeypatch
+):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    _insert_running_kg_build(database)
+    real_repository = module.SQLiteRepository
+
+    class TamperingRepository(real_repository):
+        def __init__(self, settings):
+            super().__init__(settings)
+            with self._write() as db:
+                db.execute(
+                    "UPDATE kg_build_jobs SET mode='rebuild' "
+                    "WHERE id='job-kg-crashed'"
+                )
+
+    monkeypatch.setattr(module, "SQLiteRepository", TamperingRepository)
+    result = module.verify_snapshot(database, storage)
+
+    assert not result.ok
+    assert "kg_build_jobs" in result.changed_tables
 
 
 def test_normalization_never_excuses_other_job_field_changes(tmp_path, monkeypatch):

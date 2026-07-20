@@ -15,6 +15,14 @@ export type KgBuildRequestOwner = {
   requestEpoch: number;
 };
 
+export function canContinueKgBuild(
+  actionLabel: string | null,
+  buildingKg: boolean,
+  isReader: boolean,
+): boolean {
+  return Boolean(actionLabel) && !buildingKg && !isReader;
+}
+
 export function ownsKgBuildRequest(
   owner: KgBuildRequestOwner,
   currentNotebookId: string | null | undefined,
@@ -138,4 +146,32 @@ export function isTrackedKgTerminal(
       && trackedJobId === job.job_id
       && job.status !== "running",
   );
+}
+
+/**
+ * Notebook summaries expose the latest durable KG job. A different id therefore
+ * means another tab started a newer job after the locally tracked one ended.
+ * Adopt a newer running job, or accept its terminal state, so polling cannot
+ * remain pinned forever to an older id.
+ */
+export function reconcileTrackedKgPoll(
+  trackedJobId: string | null | undefined,
+  latestJob: KgBuildJobStatus | null | undefined,
+): { terminal: boolean; trackedJobId: string | null } {
+  if (!trackedJobId || !latestJob) {
+    return {
+      terminal: false,
+      trackedJobId: trackedJobId ?? null,
+    };
+  }
+  if (latestJob.status === "running") {
+    return {
+      terminal: false,
+      trackedJobId: latestJob.job_id,
+    };
+  }
+  return {
+    terminal: true,
+    trackedJobId: null,
+  };
 }

@@ -21,7 +21,7 @@ This repository targets a local real-team beta loop built around a KG-native pip
 - KG-native grounded Q&A: sentence-level `[k_i]` citations (rendered as compact numbered references, including model-emitted numeric groups like `[1, 2, 3]` when they map to known references), multi-turn conversations, 1-hop KG neighbour expansion, and a live, expandable one-line agent trace for reasoning mode
 - **Typed query-time inference in reasoning mode:** the agent can call `follow_chain` to compose an evidence-backed two-hop `A→B→C` path into a transient `A→C` inference for `derived_from / kind_of / prerequisite_of / precedes / part_of`. Both direct hops remain independently citable relation evidence, rejected/ungrounded/scope-conflicting paths fail closed, the inferred conclusion is explicitly marked as reasoning, and no inferred edge is written back to the KG. The feature adds no migration, new index, or historical backfill; bounded samples use the existing source/target relation indexes and ambiguous high-degree paths are skipped.
 - Two-tier knowledge base: each notebook has a `tier` (`base` | `personal`, default `personal`). Baseline `chunk` retrieval reads chunks from the active notebook only; optional KG overlay/PPR can add federated KG context and base-backed chunks, while `graph` and `reasoning` use federated KG paths. The exact-score `base` tie-break applies only to knowledge-object hits returned by `federated_retrieve()`: scores stay unchanged and a higher-scoring personal hit still wins. `federated_retrieve_relations()` remains score-only. Separately, when base and personal evidence contradict during answer synthesis, the answer defers to the base position and surfaces the discrepancy. Citations carry their tier (`AnswerAnchor.tier`) and Ask renders a `base`/`personal` badge per cited anchor.
-- **User accounts**: self-service registration (username rule: a single letter + `00` + 6 digits, e.g. `a00123456`; stored lower-cased) + password login with opaque Bearer session tokens. Each notebook is owned by its creator; a user's library contains owned notebooks plus large shared notebooks they explicitly joined read-only. On first boot the built-in `admin` account is created (login `admin`, password from `SILICON_NOTEBOOK_ADMIN_PASSWORD`, local default `admin`; production/non-loopback startup requires changing it); the admin owns pre-existing notebooks and is the only user who can mark a notebook as the base KG. Base notebooks are hidden from regular users' lists but are still used as authoritative retrieval context at ask time. Set `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` for local/no-auth testing. The frontend shows a login/register gate on first load; the topbar displays the logged-in username and a logout button.
+- **User accounts**: self-service registration (username rule: a single letter + `00` + 6 digits, e.g. `a00123456`; stored lower-cased) + password login with opaque Bearer session tokens. Each notebook is owned by its creator; a user's library contains owned notebooks plus large shared notebooks they explicitly joined read-only. On first boot the built-in `admin` account is created (login `admin`, password from `SILICON_NOTEBOOK_ADMIN_PASSWORD`, local default `admin`; production/non-loopback startup requires changing it); the admin owns pre-existing notebooks and is the only user who can publish a notebook as a public knowledge base. Base notebooks are hidden from regular users' lists but are discoverable through each notebook's reference-library picker, and participate in retrieval only for notebooks that explicitly mount them. Upgrading an existing deployment to schema 20 does not backfill mounts: every pre-existing notebook starts with zero mounted reference libraries, and federation stays off for it until a user explicitly mounts one. Set `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` for local/no-auth testing. The frontend shows a login/register gate on first load; the topbar displays the logged-in username and a logout button.
 - **Share links**: owners can publish an opaque notebook link. Small notebooks are copied into the recipient's account; large notebooks are joined as read-only membership. Write access stays with the owner, and there is no live collaborative editing or change-password flow.
 - **Notebook-bound private Memory**: users can manually turn an Ask answer into an editable preview and confirm it as reusable Memory. The collection has a user-level Memory page; notebook cards show the current user's count, and each workspace exposes **问答** (Ask) | **知识库** (Knowledge) | **记忆** (Memory) | **深度报告** (Deep Report). External Agents can submit `candidate` Memory through MCP; candidates are shared only among that same user's authorized Agents in the same notebook and do not enter formal Ask/search/report retrieval until the user confirms them.
 - Optional graph-reasoning Ask mode (`mode="graph"`, opt-in/experimental): a rustworkx in-memory graph built from `knowledge_relations` is traversed for bounded multi-hop derivation/support chains, with answer-time adversarial chain verification and a weakest-link `chain_trust` score (the default Ask mode stays `chunk`)
@@ -41,12 +41,15 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 20. The committed v9 compatibility fixture
-upgrades through v10, the v11/v12 SQLite hot-path indexes, v13 Memory/Agent,
-v14/v15 Memory-derived source links/indexes, v16 Knowhow tables/assets, v17
-paper metadata, v18 Knowhow cell-code/role migration, v19 source-linked assets,
-and v20 durable KG build jobs, and remains readable.
-- `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, and graph/answer type marks share `kg-type-mark.tsx`.
+The current schema version is 22. The committed v9 compatibility fixture
+upgrades through migrations v10–v22 and remains readable. Those migrations
+cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
+Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
+(v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
+reference-library mounts plus promotion targets (v20), and the normalized
+interactive-reformat anchor-membership expression index (v21); v22 adds durable
+notebook-scoped KG build jobs.
+- `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Boundary regression tests prevent these responsibilities from being copied back into the monoliths. Future extraction should follow the same incremental pattern: preserve endpoints and user behavior, move one cohesive domain, then run the complete offline gate.
 
 ## Deployment
@@ -270,9 +273,9 @@ Inside a notebook:
 - Left column: user-imported source files with live parse-status (green = `extracted` only; others shown in amber while processing), detail previews, and delete actions. Network source search is disabled for now.
 - Main column: four tabs — **问答** (Ask), **知识库** (Knowledge), **记忆** (Memory), and **深度报告** (Deep Report). Ask provides grounded Q&A with clickable `[k_i]` sentence citations, three retrieval modes, multi-turn conversations, a live expandable reasoning trace, and feedback. Knowledge browses and governs dynamic object types. Memory shows only the current user's private records bound to this notebook. Deep Report exposes the two-stage report lifecycle, outline review, progress, export, cancellation, and deletion. In Ask, `Enter` submits, `Shift+Enter` keeps a newline, and while a model response is running the input/mode controls are locked while the send button becomes an interrupt control. A transport disconnect stops delivery to that client only; navigation, refresh, or transport loss leaves the detached Ask job running and it may persist its final answer. Clicking interrupt is a distinct cancellation action: the client calls `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel`, which sets the backend cancellation event so the worker/LLM path stops and does not save a cancelled final answer. The workspace remains two columns and has no fixed Studio sidebar.
 - Knowledge Graph opens as a full-screen overlay: object-level KG nodes (Concept / Claim / Formula / Procedure) with type-specific shapes, edge relationship labels, multi-select type filters, and a type-grouped side panel that focuses the canvas on selection. The side panel renders source excerpts as structured evidence cards so long titles, locations, formulas, and mixed Chinese/English text wrap inside the panel.
-- The Analysis menu itself contains only the promotion queue (admin), mark-base / mark-personal tier toggle (admin), and edge-review queue. Dashboard, Schema, and the full-screen Knowledge Graph are separate top-toolbar actions; no retired content-generation or derived-rule actions are exposed.
+- The Analysis menu itself contains only the promotion queue (admin), publish / unpublish public knowledge base (admin), and edge-review queue. Dashboard, Schema, and the full-screen Knowledge Graph are separate top-toolbar actions; no retired content-generation or derived-rule actions are exposed.
 
-Knowledge object types have a single source of truth for their display name: the backend `OBJECT_TYPE_LABELS` in `app/services/extraction_profiles.py`, delivered to the client as `KnowledgeTypeCount.label` by `GET /notebooks/{id}/knowledge-types`. Every call site that can reach that API label — the Knowledge browser's type tabs and object entries — renders it directly, so user-defined object types (for example the column names projected from knowhow tables) also show their proper Chinese name. Call sites that only hold an `object_type` string — the citation popover and the knowledge-graph canvas/side panel — fall back to a small built-in front-end table, `KG_TYPE_LABELS` in `frontend/app/kg-type-mark.tsx`, which is character-for-character identical to the backend constant; `scripts/check_object_type_labels_contract.py` runs inside `scripts/check.sh` as a hard gate that fails the build when the two copies drift. An unknown or custom type is displayed verbatim as its `object_type`, never Title-Cased into invented English. Because both tables are keyed by user-controlled strings, look them up with `Object.hasOwn(...)` rather than bare indexing: `constructor` and `__proto__` resolve through the prototype chain and yield inherited functions/objects instead of a miss.
+Knowledge object types have a single source of truth for their display name: the backend `OBJECT_TYPE_LABELS` in `app/services/extraction_profiles.py`, delivered to the client as `KnowledgeTypeCount.label` by `GET /notebooks/{id}/knowledge-types`. Every call site that can reach that API label — the Knowledge browser's type tabs and object entries — renders it directly, so user-defined object types (for example the column names projected from knowhow tables) also show their proper Chinese name. Call sites that only hold an `object_type` string — the citation popover and the knowledge-graph canvas/side panel — fall back to the small built-in front-end table `KG_TYPE_LABELS` in `frontend/app/kg-type-model.ts`; `kg-type-mark.tsx` consumes and re-exports that model for shared rendering. The table is character-for-character identical to the backend constant; `scripts/check_object_type_labels_contract.py` runs inside `scripts/check.sh` as a hard gate that fails the build when the two copies drift. An unknown or custom type is displayed verbatim as its `object_type`, never Title-Cased into invented English. Because both tables are keyed by user-controlled strings, look them up with `Object.hasOwn(...)` rather than bare indexing: `constructor` and `__proto__` resolve through the prototype chain and yield inherited functions/objects instead of a miss.
 
 User-facing copy is under a vocabulary contract of its own, and `AGENTS.md`「界面词汇表」is its single source of truth: each row maps an internal term (基准库, chunk, KG, 抽取, 投影, 晋升, schema, deprecated, …) to the one word the interface may use. Internal names stay in code, types, comments, and the architecture docs — only strings rendered to a user get rewritten, and values that are *persisted* rather than rendered (the `Untitled notebook` default name, enum ids on the wire) are contracts, not copy, so they are never touched by a wording pass. `scripts/check_ui_vocabulary.py` enforces the table inside `scripts/check.sh`, and its scope follows the **trust boundary rather than the directory tree**: it scans the rendered text of every `frontend/app` source — string literals plus JSX text nodes, with comments, identifiers, regex bodies, and `${…}` / `{…}` interpolations stripped — *and* the message literals of every backend `user_error(status, "…")` call, because `api/deps.py` marks exactly those 4xx `detail` strings with `X-User-Message: 1` and the deny-by-default front end then displays them verbatim. Marking a string is a promise that it is user copy, so it inherits the copy rules; scoping the guard to `frontend/app` is what let 「基准库」and 「晋升队列」ship inside marked 403s while the guard stayed green. Bare `HTTPException(detail=str(exc))` stays outside the scan on purpose — it is never displayed and its detail is a diagnostics/MCP contract, a split guarded by `backend/tests/test_user_error.py`. A blacklisted term on either side fails the build. A second, independent guard — `frontend/app/raw-enum-fallback.test.mjs`, collected by `npm run test` and therefore also gated by `scripts/check.sh` — rejects raw enum fallbacks (`MAP[x] ?? x`, and `label(map, x, x)` which defeats the same design through the sanctioned API), because a lookup that falls back to its own key starts rendering the backend's English enum id the moment the backend grows a value; use `label(MAP, value, fallback)` from `frontend/app/vocabulary.ts`, whose mandatory neutral fallback makes that bug unwritable. That check runs on a real TypeScript AST rather than a regex: `M[x] ?? x` in a rendered position and `ALIASES[v] ?? v` in internal normalisation are the *same* syntactic shape, so only the surrounding context distinguishes a leak from correct code — a regex flagged the second and missed `M?.[x] ?? x`, `getLabels()[x] ?? x`, and `label(m, x, x)` entirely. Its own docstring records what it still cannot see (a value computed into a variable before being rendered, non-JSX sinks such as `alert(...)`), since honest scope beats a check that fakes completeness. Deliberately echoing a *user-authored* string (a custom `object_type`, a user-defined schema field name) is written as an explicit `Object.hasOwn(...) ? ... : raw` instead, which also avoids the prototype-chain hazard above. The guard is a word blacklist, not a semantic checker: two rows are covered only in their unambiguous compound forms, since bare 节点 / 边 are legitimate in the graph view and 边 is a substring of 旁边 / 边框. `backend/tests/test_ui_vocabulary_guard.py` holds its positive and negative examples and additionally fails when a vocabulary-table row gains neither a matching rule nor a recorded exemption, so the blacklist cannot quietly drift back into covering only a subset of the table.
 
@@ -532,7 +535,8 @@ Key local beta APIs:
 - `GET .../concepts/{canonical_id}/detail`, `GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`, `POST /api/object-schemas`, `PATCH /api/object-schemas/{type}`, `DELETE /api/object-schemas/{type}`
 - `GET /api/notebooks/{id}/duplicates`, `POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
-- Two-tier: `POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → returns the updated `NotebookSummary` (400 on bad tier, 404 on missing notebook). Sets the notebook's federation tier (base = authoritative reference KG, personal = default user notes).
+- Two-tier: `POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → returns the updated `NotebookSummary` (400 on bad tier, 404 on missing notebook). Sets the notebook's federation tier (base = publishable as a public knowledge base, personal = default user notes); a `base` notebook only participates in another notebook's retrieval once that notebook explicitly mounts it (`GET`/`PUT /api/notebooks/{id}/bases`, candidates via `GET /api/notebooks/{id}/mountable`).
+- Reference-library mounts: `GET /api/notebooks/{id}/bases` → `MountedBase[]` (this notebook's mount edges, including greyed-out inactive ones); `PUT /api/notebooks/{id}/bases` body `{base_notebook_ids}` → full replace, returns the updated `MountedBase[]` (400 if any id is outside the mountable candidate set; owner-only); `GET /api/notebooks/{id}/mountable` → `NotebookRef[]` (mountable candidates: every public knowledge base plus this notebook's own same-owner libraries).
 - Edge trust & curation: `GET /api/notebooks/{id}/edge-review-queue`, `POST /api/notebooks/{id}/relations/{rel_id}/review`
 - Governance / promotion: `POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`, `GET /api/promotion-queue`, `POST /api/promotion-queue/{candidate_id}/approve|reject`
 - Deep report (two-phase): `POST /api/notebooks/{id}/reports` body `{question, depth?, auto_generate?}` → `{report_id}`; runs **phase-1 planning** and stops at `status=outline_ready` (unless `auto_generate=true`, which chains straight through). `GET /api/notebooks/{id}/reports/{rid}` polls status + the enriched `outline` (per-section perspectives / tensions / sufficiency) + `content_md` + live `section_status`. `PATCH .../reports/{rid}/outline` body `{sections}` edits the draft outline (only while `outline_ready`; 422 if no valid section). `POST .../reports/{rid}/generate` body `{depth?}` launches **phase-2 generation** (only from `outline_ready`, else 409). Also `GET /reports` (list), `POST .../cancel`, `DELETE`, `POST .../reports/export` body `{report_ids}` → `reports.zip`. Sections deep-dive in parallel up to `KG_JOB_CONCURRENCY`.
@@ -689,10 +693,15 @@ REPORT_ALLOW_PARAMETRIC      # deep-report: allow 【通识】/general-knowledge
 
 **Two-tier KB & graph reasoning (Wave 1+2):** these have no `.env` toggles today.
 A notebook's `tier` (`base` | `personal`, default `personal`) is data on the notebook
-row, set via the repository's `mark_notebook_base()`. Tier-aware federation leaves
-retrieval scores unchanged: relevance is the primary ordering key, with `base` used
-only as the secondary key for an exact score tie. The base-wins contradiction rule is
-a separate answer-synthesis policy that remains active once a notebook is marked `base`. The opt-in
+row, set via the repository's `mark_notebook_base()`; publishing a notebook to `base`
+does not make it globally shared — every other notebook must explicitly mount it as a
+reference library (persisted in `notebook_bases`, managed through `GET`/`PUT
+/api/notebooks/{id}/bases`, discovered via `GET /api/notebooks/{id}/mountable`)
+before it joins that notebook's retrieval participant set. Tier-aware federation
+leaves retrieval scores unchanged: relevance is the primary ordering key, with `base`
+used only as the secondary key for an exact score tie among mounted participants. The
+base-wins contradiction rule is a separate answer-synthesis policy that remains active
+for evidence from a mounted base notebook. The opt-in
 graph-reasoning Ask mode (`mode="graph"`) bounds its multi-hop traversal with fixed
 defaults `max_depth=3` and `max_fan_out=8` (read via `getattr` on settings, so a future
 `GRAPH_MAX_DEPTH` / `GRAPH_MAX_FAN_OUT` env override would slot in without code changes).
@@ -908,7 +917,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 
 The `embed` subcommand re-fills only the chunk and KG-node vectors that are *missing* (e.g. after a 429-throttled run left gaps). It requires `--notebook-id` and a configured EMBED endpoint — being a vector-backfill command, it ignores `--allow-no-embed` and errors out if EMBED is unconfigured.
 
-The `vectors-to-blob` subcommand is a one-time storage migration: embedding vectors used to be stored as JSON text in SQLite, which means loading hundreds of thousands of rows into a matrix (index builds, retrieval cold start) spends most of its time in `json.loads`. New writes are now stored as raw float32 BLOBs (`np.frombuffer` reinterprets them with zero parsing), and every reader already accepts either format — so this command is optional but recommended after upgrading: it re-encodes any pre-existing JSON-text rows across all four embeddings tables (`chunk_embeddings`, `knowledge_embeddings`, `element_embeddings`, `relation_embeddings`) in place, in batched transactions (5,000 rows/commit) with progress printed per table. It does **not** compute new vectors (so it needs no EMBED configuration) and is idempotent/restartable — re-running it converts nothing further, since it only selects rows SQLite still types as `text`. Use `--notebook-id` to scope it to one library or `--all-notebooks` to convert every notebook in the database. The `json.loads`/re-encode step (the single-core bottleneck at millions-of-rows scale) is parallelized across `--workers` processes (default `min(8, cpu_count())`; `--workers 1` uses no process pool at all) — the main process still owns every DB read/write, so SQLite stays single-writer. If the worker pool crashes it falls back to a serial pass automatically rather than losing the run.
+The `vectors-to-blob` subcommand is a one-time storage migration: embedding vectors used to be stored as JSON text in SQLite, which means loading hundreds of thousands of rows into a matrix (index builds, retrieval cold start) spends most of its time in `json.loads`. New writes are now stored as raw float32 BLOBs (`np.frombuffer` reinterprets them with zero parsing), and every reader already accepts either format — so this command is optional but recommended after upgrading: it re-encodes any pre-existing JSON-text rows across all four embeddings tables (`chunk_embeddings`, `knowledge_embeddings`, `element_embeddings`, `relation_embeddings`) in place, in batched transactions (5,000 rows/commit) with progress printed per table. It does **not** compute new vectors (so it needs no EMBED configuration) and is idempotent/restartable — re-running it converts nothing further, since it only selects rows SQLite still types as `text`. Use `--notebook-id` to scope it to one library or `--all-notebooks` to convert every notebook in the database. The `json.loads`/re-encode step (the single-core bottleneck at millions-of-rows scale) is parallelized across `--workers` processes (default `min(32, cpu_count())`; `--workers 1` uses no process pool at all) — the main process still owns every DB read/write, so SQLite stays single-writer. If the worker pool crashes it falls back to a serial pass automatically rather than losing the run.
 
 The `backfill-source-index` subcommand proactively populates `knowledge_object_sources`, a reverse-lookup table (`object_id, source_id`) used when a source is deleted or reparsed to find which KG objects reference it. Without it, that lookup has to scan every object's evidence JSON in the notebook (`json.loads` over the whole table) just to find matches for one source — expensive at hundreds of thousands of objects. The table is normally populated lazily (the first source delete/reparse on an un-migrated notebook pays the scan once, populates the table while it's already reading every row, and marks the notebook so every subsequent operation is an indexed lookup instead) — this command lets you pay that cost up front, in bounded-memory batches with progress printed, instead of on a user-facing delete. It needs no EMBED configuration and is idempotent/restartable (each run clears and rebuilds the notebook's rows from the current evidence, then re-marks it). Use `--notebook-id` to scope it to one library or `--all-notebooks` to cover every notebook in the database. If you ever suspect a notebook's reverse index has drifted from its actual evidence (e.g. after an abnormal interruption), re-running this command is the remediation — it always rebuilds from the current evidence.
 
@@ -946,16 +955,28 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 `--limit` bounds only how many sources are *extracted* this run; the final clustering always covers the whole notebook. After a `kg` rebuild on a large notebook (see `SCALE_INDEX_AUTO_ENABLED` above) the scalable-retrieval index is rebuilt automatically (so it never goes stale). `KG_CLUSTER_REP_ANN_MAX` (default 2,000,000) caps the rep-ANN size — above it the index is built in shards with a warning (never silently truncated).
 
-**Concurrency tuning.** Three knobs control throughput (and 429 pressure):
+**Concurrency tuning.** Three independent controls set throughput and 429 pressure. An explicit CLI value takes precedence; when omitted, it inherits the corresponding setting/environment value:
 
-- `--workers` — in the `all` phase, how many *documents* are extracted at once (overrides `KG_JOB_CONCURRENCY`). In `ingest` it is the file-parse concurrency. In `vectors-to-blob` it's the number of processes used to parallelize `json.loads`/re-encode (default `min(8, cpu_count())`; `1` disables the process pool entirely).
-- `--embed-conc` — embedding concurrency (overrides `EMBED_CONCURRENCY`). In `all`, chunk embedding runs in the background of each document's pipeline.
-- `KG_EXTRACT_WORKERS` (`.env`, default 16) — the global cap on concurrent KG-extraction LLM windows, shared across all documents (intra- and inter-document).
-- `--pool-report-interval` — in the `all` and `kg` phases, print a live pool-utilization line every N seconds (default 15; `0` disables it). It reports the KG-LLM (extraction-window) pool vs the embedding threads side by side — e.g. `[pool 17:52:33] KG-LLM(window) 14/16 · 源(job) 8/8 · embed 6bg+20pool · 源完成 5/40` — so you can confirm the embedding model and the KG-LLM are saturating a shared-compute model service *at the same time*.
+- `--workers` — source-pipeline concurrency; falls back to `KG_JOB_CONCURRENCY`. It dispatches source jobs in `all` and file parsing in `ingest`. In `vectors-to-blob`, it instead remains the parse/re-encode process-pool size (default `min(32, cpu_count())`; `1` disables that pool).
+- `--llm-conc` — process-wide hard cap for traditional `chat_json` LLM work; falls back to `KG_EXTRACT_WORKERS` (default 16). It is shared across all sources, including intra-source extraction windows.
+- `--embed-conc` — process-wide hard cap for embedding work; falls back to `EMBED_CONCURRENCY`. It is shared across all sources, not a per-document limit.
 
-In the `all` phase, peak embedding concurrency is roughly `--workers × --embed-conc`, so raise both cautiously to avoid provider 429s. If a throttled run leaves vectors missing, repair them later with the `embed` subcommand.
+The model gates are independent of source dispatch: `--workers` never multiplies either model cap. In particular, embedding peak is hard-capped by `--embed-conc` across all sources. The same model-gate contract covers every model-running batch phase, including `all`, `kg`, `reparse`, and `metadata` (as well as embedding work in `ingest` and `embed`). If a throttled run leaves vectors missing, repair them later with the `embed` subcommand.
 
-Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (documents extracted concurrently in `all` = `KG_JOB_CONCURRENCY`, file concurrency in `ingest`; in `vectors-to-blob` it's the parse/encode process-pool size, default `min(8, cpu_count())`, `1` = no pool), `--embed-conc` (embedding concurrency = `EMBED_CONCURRENCY`; throttles 429s), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--fresh` (clears the rebuild checkpoint to force a full re-run of merge-review + concept-description adjudication; use when you changed the KG model/thresholds but the data is unchanged — implies a forced rebuild, and also applies to the `all` phase's final clustering), `--allow-no-embed` (explicitly allow running without embeddings when EMBED is unconfigured; refused by default — never silent; ignored by the `embed` subcommand), `--pool-report-interval` (seconds between live pool-utilization self-reports in `all`/`kg`, showing KG-LLM vs embed concurrency to verify multi-model saturation; default 15, `0` off), `--all-notebooks` (`vectors-to-blob` / `backfill-source-index` only: act on every notebook instead of one), `--force` (`metadata` only: re-extract sources that already have a metadata row), `--dry-run` (scan & estimate only). The `embed` subcommand backfills only missing chunk + node vectors and requires `--notebook-id`. The `vectors-to-blob` subcommand migrates legacy JSON-text vectors to BLOB and requires `--notebook-id` or `--all-notebooks`. The `backfill-source-index` subcommand proactively builds the source-deletion reverse index and requires `--notebook-id` or `--all-notebooks`. The `metadata` subcommand backfills paper metadata (title/authors/venue/year) for already-parsed academic-paper sources and requires `--notebook-id` and a configured LLM.
+For a large source pipeline with a conservative embedding endpoint but higher LLM capacity:
+
+```bash
+PYTHONPATH=backend python scripts/batch_ingest.py reparse \
+  --notebook-id nb-xxxx \
+  --workers 32 \
+  --llm-conc 24 \
+  --embed-conc 4 \
+  --pool-report-interval 5
+```
+
+- `--pool-report-interval` — in the `all`, `kg`, and `reparse` phases, print a live pool-utilization line every N seconds (default 15; `0` disables it). It reports LLM and embedding gate `active/max/waiting` values beside source jobs — for example, `[pool 17:52:33] LLM 14/24 waiting=2 · embedding 4/4 waiting=9 · source 8/32 · 源完成 5/40` — so you can see the independent caps and queue pressure.
+
+Options: `--owner` (notebook owner username, case-insensitive; defaults to the admin user), `--workers` (source-pipeline concurrency = `KG_JOB_CONCURRENCY`; in `vectors-to-blob`, parse/encode process-pool size, default `min(32, cpu_count())`, `1` = no pool), `--llm-conc` (process-wide traditional `chat_json` cap = `KG_EXTRACT_WORKERS`), `--embed-conc` (process-wide embedding cap = `EMBED_CONCURRENCY`; throttles 429s across all sources), `--limit` (kg extraction subset — clustering still covers the whole notebook), `--no-rebuild` / `--rebuild-only` (split extraction from the final clustering for batched large builds), `--fresh` (clears the rebuild checkpoint to force a full re-run of merge-review + concept-description adjudication; use when you changed the KG model/thresholds but the data is unchanged — implies a forced rebuild, and also applies to the `all` phase's final clustering), `--allow-no-embed` (explicitly allow running without embeddings when EMBED is unconfigured; refused by default — never silent; ignored by the `embed` subcommand), `--pool-report-interval` (seconds between live pool-utilization self-reports in `all`/`kg`/`reparse`, showing LLM and embedding `active/max/waiting`; default 15, `0` off), `--all-notebooks` (`vectors-to-blob` / `backfill-source-index` only: act on every notebook instead of one), `--force` (`metadata` only: re-extract sources that already have a metadata row), `--dry-run` (scan & estimate only). The `embed` subcommand backfills only missing chunk + node vectors and requires `--notebook-id`. The `vectors-to-blob` subcommand migrates legacy JSON-text vectors to BLOB and requires `--notebook-id` or `--all-notebooks`. The `backfill-source-index` subcommand proactively builds the source-deletion reverse index and requires `--notebook-id` or `--all-notebooks`. The `metadata` subcommand backfills paper metadata (title/authors/venue/year) for already-parsed academic-paper sources and requires `--notebook-id` and a configured LLM.
 
 Prereqs: configure EMBED and `KG_LLM` (KG extraction falls back to the global `OPENAI_COMPAT_*`) in `.env`. With EMBED unconfigured the CLI **refuses to run by default** — pass `--allow-no-embed` to import without vectors (chunk/KG vectors are then skipped), never silently; KG extraction errors if no LLM is reachable. Duplicate files are skipped by content hash; progress is written to `<storage>/batch_ingest/<notebook>.jsonl` and a re-run resumes automatically.
 
@@ -985,7 +1006,7 @@ Exit codes are the verdict — safe to wire directly into CI or a script gate: `
 
 ### Merging two shared-base deployments (`scripts/merge_dbs.py`)
 
-Offline, non-destructive tool for consolidating two separately-deployed silicon-notebook instances that share exactly one common base library (same base notebook id) back into one. It keeps the fuller side's base — you pick with `--keep-base`, and the tool prints both sides' base stats (`sources`/`chunks`/`knowledge_objects` counts) up front so you can confirm the choice — while every other (personal) notebook from both sides is carried over untouched. Source `.db`/storage files are only read; the tool always writes new `--out` / `--out-storage` files. Either input may be on an older schema version — each is migrated to current (in a private temp copy) before merging.
+Offline, non-destructive tool for consolidating two separately-deployed silicon-notebook instances that share exactly one common public knowledge base (same base notebook id) back into one. It keeps the fuller side's base — you pick with `--keep-base`, and the tool prints both sides' base stats (`sources`/`chunks`/`knowledge_objects` counts) up front so you can confirm the choice — while every other (personal) notebook from both sides is carried over untouched, including each one's own reference-library mounts (`notebook_bases`). Source `.db`/storage files are only read; the tool always writes new `--out` / `--out-storage` files. Either input may be on an older schema version — each is migrated to current (in a private temp copy) before merging. Multi-domain deployments can have more than one public knowledge base per side: this tool does not support that shape and refuses to guess — if either side has more than one `tier='base'` notebook, it aborts immediately, naming the side and every candidate, instead of picking one.
 
 ```bash
 PYTHONPATH=backend python scripts/merge_dbs.py \
@@ -1001,11 +1022,82 @@ PYTHONPATH=backend python scripts/merge_dbs.py \
 - `--dry-run` — migrates, validates, and prints which notebooks would be imported, without writing anything; works even if `--out` already exists.
 - `--force` — overwrite an existing `--out` file.
 
-Precondition: apart from the shared base, notebook ids must not overlap between the two databases — the tool aborts and lists the colliding ids if they do.
+Preconditions: each side must have exactly one `tier='base'` public knowledge base (see above); and apart from that shared base, notebook ids must not overlap between the two databases — the tool aborts and lists the colliding ids if they do.
 
 **Important:** point `--db-a`/`--db-b` at quiesced database files — stop each source deployment first. The tool only copies the `.db` file itself; a live deployment's pending `-wal` sidecar is not picked up, so merging straight from a running instance can silently miss recent writes. (The tool's own schema-migration writes are checkpointed back into the `.db` before it's used, so that part is safe — this caveat is about the source files you hand it.)
 
+**Reference-library mounts on the losing base:** the surviving base notebook (the `--keep-base` side) keeps only its own reference-library mounts; if the *other* side's base notebook had mounted other reference libraries, those mounts are dropped, same as every other piece of notebook-scoped data the non-surviving base owns (its sources, chunks, knowledge objects, ...). Every other (personal) notebook's own mounts are carried over untouched from both sides.
+
 After merging, deploy the `merged/` output (db + storage) to whichever host keeps running, and on first start trigger an index rebuild in the app ("Rebuild index" / "Refresh graph") to regenerate the `kg_index`/`kg_viz`/ANN artifacts, which are intentionally not copied.
+
+### Backfilling legacy promotion-candidate targets (`scripts/backfill_promotion_targets.py`)
+
+Upgrading to `SCHEMA_VERSION>=20` (multi-domain reference libraries) adds `promotion_candidates.target_base_id`, but the migration only adds the column — it does not backfill existing rows. Any promotion candidate that was still `proposed`/`under_review` from before the upgrade keeps an empty `target_base_id`, and approval fails for it (target_base_id is otherwise only ever set when the candidate is first proposed). Run this offline tool once after upgrading if the deployment might have such candidates; it resolves each one the same way the propose-time flow does — via the candidate's notebook's mounted public knowledge bases (mounting 0 blocks it, exactly 1 auto-resolves, more than 1 needs an explicit target) — reusing the single shared `GovernanceStore.mounted_public_base_ids` rather than a second copy of that rule.
+
+```bash
+PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/silicon_notebook.db list
+PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/silicon_notebook.db apply \
+  [--set NOTEBOOK_ID=BASE_ID ...] [--dry-run]
+```
+
+- `list` — read-only report: every `proposed`/`under_review` candidate with an empty `target_base_id`, grouped by notebook, alongside that notebook's mounted public knowledge bases and how each candidate would resolve.
+- `apply` — writes `target_base_id` for every candidate that resolves unambiguously (auto, or via `--set`); candidates that are still blocked (notebook has no mount) or ambiguous (multiple mounts and no matching `--set`) are left untouched and reported, so a second pass after mounting a base (or supplying `--set`) picks up exactly the remainder. Writes immediately by default, matching `merge_dbs.py`'s convention; pass `--dry-run` to preview without writing.
+- `--set NOTEBOOK_ID=BASE_ID` — required to resolve a notebook that has more than one mounted public knowledge base; repeatable for several notebooks. A target outside that notebook's mounted set aborts the entire run before any row is written (no partial writes).
+
+Unlike `merge_dbs.py`'s always-write-a-new-output convention, this tool patches the `--db` path you give it in place, and refuses to run against a database that has not yet migrated to `SCHEMA_VERSION>=20`.
+
+**Important:** stop the backend service before running `apply` — this tool opens the `--db` file directly with no `busy_timeout`, so writing against it while the backend holds it open can collide with a live transaction.
+### Backfilling knowhow-cell Markdown formatting (`scripts/backfill_knowhow_md.py`)
+
+Knowhow tables normalize Excel-style formatting (Tab-indented `•` bullets, `A.`/`a.` section/sub markers, soft line breaks) into clean CommonMark automatically for new imports/appends and for the per-cell "reformat" action, but that normalization doesn't retroactively touch cells that already existed before it was turned on. This one-time CLI backfills those existing (存量) cells for a given notebook.
+
+**Dry-run first, then apply a reviewed plan file.** A dry-run never writes to the database; it always saves the full plan to a JSON file (and prints its path) so you can review exactly what would change, then re-applies *that file* verbatim — so what lands is exactly what you reviewed.
+
+**The default dry-run is read-only and safe to run anytime.** The default (rules-only) dry-run opens the database read-only and never constructs the write-capable repository, so it is safe to run against a live/busy backend. `--use-llm` (needs the rewrite model) and `--apply` (writes) instead open the database read-write, which may run any pending schema migrations and crash-recovery on open — the tool prints a one-line notice when it does this, so prefer running those when the backend is idle.
+
+```bash
+# dry-run (default): prints the per-cell diff + summary AND writes a plan file
+# (default .local/backfill_plans/knowhow_md_<notebook>_<timestamp>.json) — no DB writes
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx
+
+# after reviewing the plan file, apply it verbatim (deterministic rules, no LLM
+# involved) — every --apply REQUIRES --plan
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --apply --plan <plan.json>
+
+# LLM-backed reformatter (reformat -> content-invariance check -> rule fallback per cell):
+# dry-run to review, then apply the reviewed plan (same --apply --plan handshake)
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --use-llm
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --use-llm --apply --plan <plan.json>
+```
+
+- `--notebook` (required) — the notebook to backfill.
+- `--apply` — write the changes; it **requires** `--plan PATH` and applies that reviewed plan file verbatim. A cell whose stored content changed since the dry-run (someone edited it after review) is skipped and reported rather than overwritten on top of a moved target. Each written row is marked pending so the background projector recomputes its KG/steps (reprojection runs synchronously before the command exits). A plan-less `--apply` is a hard error: re-planning from the *current* database at apply time would pick up any cell edited after the reviewed dry-run and write it despite never being reviewed (and for `--use-llm` the stochastic rewrite model would produce different candidates entirely) — so run the dry-run, review its plan file, then apply *that*.
+- `--use-llm` — reformat each cell through the configured rewrite model (with its own zero-LLM content-invariance check and automatic fallback to the deterministic rules) instead of the default, always-available rule-based normalizer. If the rewrite model isn't configured, or its output fails the invariance check and falls back to rules, the tool prints an explicit `WARNING` rather than silently pretending the LLM ran.
+- `--save-plan PATH` — override where the dry-run writes the plan file.
+- `--plan PATH` — the reviewed plan file to apply (see `--apply`).
+
+The **anchor (row-title) column is never reformatted** by any bulk path (import, append, or this backfill) — it's a grouping key that must stay byte-stable, so normalizing it would split freshly-touched rows off from their existing concept group. (Only the explicit per-cell "reformat" action in the editor, where a human reviews the suggestion and all sibling rows are rewritten together, may touch it.)
+
+Only an interactive row/table reformat batch's save unit has this guarded
+concurrency contract; ordinary shared-cell edits and ordinary APIs do not gain
+it. When the batch opens, it freezes the complete table snapshot, including the
+exact member set only for each non-empty anchor group covered by a complete
+anchor-group save unit (a merged shared-column fan-out or a singleton complete
+group). One SQLite write transaction revalidates every write target's expected
+content baseline, the active anchor designation, and the exact membership of
+those covered frozen groups. A non-shared column in a multi-row anchor group is
+a valid subset write: it checks only its write-target baselines, not the whole
+group membership guard. Any applicable content, anchor, or membership drift
+rejects the entire save unit with HTTP 409 and zero partial writes. The UI
+retains the generated reformat candidates as stale, requires the user to rerun
+the reformat, and refreshes the table after the batch dialog closes.
+
+Schema v21 indexes `(column_id, JS-trim(content_md), row_id)`. The guarded
+membership check uses that same exact normalization as an equality predicate,
+so complete anchor-group verification remains fail-closed while it seeks the
+group instead of scanning the entire anchor column inside its write transaction.
+
+Must be run from the main checkout root (it needs the real `.env`/database configuration, same as `batch_ingest.py`/`replay_retrieval.py` above). Safe to re-run: applying the same plan again is a no-op (each already-applied cell no longer matches its recorded "before").
 
 ## Current Limitations
 
@@ -1015,7 +1107,7 @@ After merging, deploy the `merged/` output (db + storage) to whichever host keep
 - Unified KG rebuild is explicit and observable via `GET /notebooks/{id}/unified-kg/status`; ingesting a source marks the graph dirty instead of rebuilding synchronously, and opening the graph overlay no longer auto-rebuilds (refresh on demand).
 - Cross-document concept merge uses deterministic alias normalization plus bounded top-k vector candidates (scales past thousands of concepts); optional LLM pre-review (`POST /notebooks/{id}/unified-kg/merges/review`) confirms/rejects high-confidence near-synonym merges in small batches.
 - LLM-backed KG extraction requires configured `OPENAI_COMPAT_*`; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
-- Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `chunk`/`reasoning` paths). Marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; tier-aware federation and the base-wins conflict rule activate automatically once a notebook is marked `base`.
+- Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `chunk`/`reasoning` paths). Marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; publishing a notebook as a public knowledge base only makes it mountable — tier-aware federation and the base-wins conflict rule activate only for notebooks that explicitly mount it as a reference library.
 - Notebook sharing is link-based copy/read-only membership, not live collaborative editing; owners retain write authority.
 - PostgreSQL + pgvector are not required for the local beta and are deferred. Until a PostgreSQL repository exists, non-`sqlite:///` `DATABASE_URL` values fail fast instead of silently falling back to a local database.
 - The `off`-mode PDF fallback uses pypdf layout extraction (decent reading order, no new deps) — formulas, tables, and scanned/image PDFs still need MinerU; see "PDF parsing with MinerU".
@@ -1029,13 +1121,47 @@ Run:
 bash scripts/check.sh
 ```
 
-This checks backend syntax (`py_compile`), a hermetic offline smoke path (`smoke_backend.py` — the repository `.env` is disabled and no real LLM/embedding key is inherited), the complete backend pytest suite, every recursively discovered frontend `*.test.mjs`, Next.js `tsc --noEmit`, and the production frontend build. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+This is the complete offline local gate. It runs three bounded lanes concurrently: `check_backend.sh` executes the complete backend pytest suite; `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, `tsc --noEmit`, and the production frontend build. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly eleven tools: seven Memory tools plus four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+
+Use the project’s Homebrew/Miniconda interpreter for acceptance:
+
+```bash
+PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
+```
+
+The current Apple Silicon development baseline is a complete warm gate under 60 seconds. This is a measured local target, not a portable timeout assertion for every CI host.
+
+### GitHub Actions CI
+
+`.github/workflows/ci.yml` exposes the same complete gate as the single
+`CI / full-gate` check. It runs for pull requests targeting `master`, pushes
+to `master`, and manual dispatches on `ubuntu-24.04` with Python 3.13 and
+Node.js 22. The workflow installs from `backend/requirements.txt` and
+`frontend/package-lock.json`, then delegates test selection entirely to
+`scripts/check.sh`.
+
+The workflow is read-only, does not receive model or deployment secrets, and
+uses four backend pytest workers to avoid oversubscribing the hosted runner.
+Its 20-minute timeout includes dependency installation and is intentionally
+separate from the under-60-second local Apple Silicon warm-gate target.
+`CI / full-gate` is initially observational; make it a required `master` check
+only after stable green pull-request and post-merge runs have been observed
+and the user explicitly approves the branch-protection change.
 
 ## Development Workflow
 
 For every new feature development task, create a new git worktree by default, start a new feature branch inside that worktree, complete the work there, and open a PR from that branch. Do not switch branches directly in the main local checkout for feature work. If the current directory is already an isolated linked worktree, keep working there.
 
 For approved multi-step implementation plans, use subagent-driven development by default: assign each task to a fresh implementation subagent and require task-scoped specification and code-quality review before moving on. Research, design, status, and review-only work does not require a worktree or subagents.
+
+### Test architecture
+
+- Backend and frontend static contracts use semantic identities such as module path, qualified scope, operation kind, target, and reviewed count. Source positions are diagnostic metadata only; line numbers, source offsets, CSS order, and source slices must never identify an expected site.
+- Frontend `*.test.mjs` files cover pure logic and the small set of justified architecture/security/vocabulary/entry contracts with `node:test`. Frontend `*.component.test.tsx` files use Vitest, jsdom, and Testing Library to exercise user-visible behavior through roles, actions, and state.
+- Component behavior must not be pinned through CSS geometry or source layout. A routine feature refactor should change tests only when its observable contract changes.
+- Committed tests may not be disabled with skip/xfail/todo/only. Repository policy tests enforce this across test entrypoints and their helper modules, and prevent direct production-source reads outside the shared semantic-source adapter.
+- The frontend source policy is intentionally bounded: it rejects AST position/collection-order APIs and source-named text position operations syntactically, while the shared `semantic-source.mjs` adapter may expose AST semantics but may not use text slicing, splitting, indexing, or length as a contract. Do not replace this with whole-JavaScript data-flow interpretation; ordinary array operations stay valid.
+- Backend test startup prewarms one repo-local Matplotlib font cache before xdist workers start. Keep that controller boundary: letting each graph worker enumerate macOS fonts independently adds avoidable multi-second cold starts.
 
 ## Documentation Maintenance
 

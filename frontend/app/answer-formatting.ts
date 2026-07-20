@@ -9,6 +9,11 @@ export type AnswerAnchorLike = {
   source_title?: string;
   location_label?: string;
   tier?: string;
+  // 多领域基准库(Task 14)：只在跨库命中(federated retrieval 从一个挂载的参考库
+  // 找到、并非本次 ask 所在 notebook 的证据)时非空；本库内证据这个字段缺席
+  // (后端 exclude_if，见 schemas.py AnswerAnchor.notebook_id)。引用徽章据此查
+  // id→name 映射，标"来自「某某库」"。
+  notebook_id?: string;
   // Task 12b（引用跳转扩面）：与 CitationLike.knowhow 同一 wire 形状/惯例——
   // 只有命中单行 knowhow 格子的知识对象锚点才有此字段（后端
   // `AnswerAnchor.knowhow`，evidence_context.py 的 knowledge_context/
@@ -25,6 +30,10 @@ export type CitationLike = {
   location_label: string;
   quoted_span: string;
   tier?: string;
+  // 多领域基准库(Task 14)：与 AnswerAnchorLike.notebook_id 同一惯例——只在跨库
+  // 命中时非空，供引用徽章查 id→name 映射标来源库名。见 schemas.py
+  // Citation.notebook_id 的完整注释。
+  notebook_id?: string;
   // Task 12（引用跳转）：命中 knowhow 格子的引用才有此字段（后端
   // `Citation.knowhow`，非 knowhow 引用整体缺席，见 evidence_context.py
   // citations_from 的 exclude_if 惯例）。字段名保持后端线上 snake_case——

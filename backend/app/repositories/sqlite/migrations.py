@@ -5,13 +5,14 @@ import sqlite3
 from typing import Any
 
 from app.core.config import Settings
+from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
 
 from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT_TYPE_LABELS
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 22
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -87,6 +88,15 @@ class SqliteMigrator:
                   created_by TEXT REFERENCES users(id),
                   created_at TEXT NOT NULL,
                   updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS notebook_bases (
+                  notebook_id      TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  base_notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  created_at TEXT NOT NULL,
+                  created_by TEXT REFERENCES users(id),
+                  PRIMARY KEY (notebook_id, base_notebook_id),
+                  CHECK (notebook_id != base_notebook_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS sources (
@@ -416,7 +426,8 @@ class SqliteMigrator:
                   base_match_id TEXT NOT NULL DEFAULT '',
                   -- canonical_id in the base corpus if dedup found a match
                   created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
+                  updated_at TEXT NOT NULL,
+                  target_base_id TEXT NOT NULL DEFAULT ''
                 );
                 CREATE INDEX IF NOT EXISTS idx_promotion_status ON promotion_candidates(status);
                 CREATE INDEX IF NOT EXISTS idx_promotion_nb ON promotion_candidates(notebook_id, status);
@@ -471,6 +482,8 @@ class SqliteMigrator:
                   seed TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_kg_cluster_scratch_nb_run ON kg_cluster_scratch(notebook_id, run_id);
+
+                CREATE INDEX IF NOT EXISTS idx_notebook_bases_base ON notebook_bases(base_notebook_id);
 
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_status ON sources(notebook_id, status);
                 CREATE INDEX IF NOT EXISTS idx_sources_notebook_created ON sources(notebook_id, created_at);
@@ -1425,6 +1438,57 @@ class SqliteMigrator:
             )
 
     def _migration_20(self) -> None:
+        """多领域基准库：参考库挂载边 notebook_bases + 晋升目标 target_base_id。
+
+        基准库不再全局唯一——每个 notebook 显式声明挂载哪些库(0..N)，检索参与集
+        由本表解析而非 `WHERE tier='base'`。已部署库(user_version>=1 时
+        _migration_1 短路)靠本迁移补建，与 _migration_2/_migration_4/_migration_19
+        同款。CREATE TABLE/INDEX IF NOT EXISTS + PRAGMA 列存在性守卫保证可重入。"""
+        with self._connect() as db:
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notebook_bases (
+                  notebook_id      TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  base_notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  created_at TEXT NOT NULL,
+                  created_by TEXT REFERENCES users(id),
+                  PRIMARY KEY (notebook_id, base_notebook_id),
+                  CHECK (notebook_id != base_notebook_id)
+                )
+                """
+            )
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_notebook_bases_base "
+                "ON notebook_bases(base_notebook_id)"
+            )
+            cols = {
+                row[1]
+                for row in db.execute("PRAGMA table_info(promotion_candidates)").fetchall()
+            }
+            if "target_base_id" not in cols:
+                db.execute(
+                    "ALTER TABLE promotion_candidates "
+                    "ADD COLUMN target_base_id TEXT NOT NULL DEFAULT ''"
+                )
+
+    def _migration_21(self) -> None:
+        """Index guarded anchor membership by ECMAScript-trimmed content.
+
+        Interactive reformat saves compare every complete anchor-group member
+        while holding ``BEGIN IMMEDIATE``. The leading-wildcard prefilter could
+        still scan the table per save unit; this expression index makes the
+        exact ``column_id + JS-trim(content_md)`` lookup indexable without an
+        application-defined SQLite function or materialized column.
+        """
+        with self._connect() as db:
+            normalized_anchor = sqlite_js_trim_expression("content_md")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS "
+                "idx_knowhow_cells_column_normalized_anchor_row "
+                f"ON knowhow_cells(column_id, {normalized_anchor}, row_id)"
+            )
+
+    def _migration_22(self) -> None:
         """持久化 KG 构建任务状态与笔记本级单飞约束。"""
         with self._connect() as db:
             db.executescript(

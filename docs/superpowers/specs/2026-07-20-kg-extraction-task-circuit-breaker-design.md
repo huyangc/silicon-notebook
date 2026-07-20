@@ -78,7 +78,7 @@ stopped by this task.
 
 ## 5. Durable Job Model
 
-Schema version 20 adds `kg_build_jobs`:
+Schema version 22 adds `kg_build_jobs`:
 
 | Column | Meaning |
 | --- | --- |
@@ -402,7 +402,7 @@ Implementation follows test-driven development.
 - startup recovery marks leftover running jobs failed;
 - `NotebookSummary` and index status expose the same job;
 - POST responses contain `job_id`; and
-- the v9 fixture upgrades through schema v20.
+- the v9 fixture upgrades through schema v22.
 
 ### 14.4 Frontend tests
 

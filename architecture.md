@@ -44,13 +44,19 @@
 本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。
 
 此后 master 先以 v11/v12 增加 SQLite 热路径索引，Agent Memory 在合并后使用 v13
-migration；当前 schema 版本为 13，冻结 v9 fixture 会继续经过 v10～v13 升级并保持可读。
+migration；当前 schema 版本为 22。已提交的 v9 兼容 fixture 会经由 v10–v22 migration
+升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent
+与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，
+v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 为交互式规整的
+anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化表达式索引，v22
+增加持久化的 notebook 级 KG 构建任务；store
+以同一 ECMAScript trim 表达式等值查询，避免在 `BEGIN IMMEDIATE` 中按保存单元扫描整列。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。
 
 ### 2.3 API 与领域服务
 
-- `backend/app/api/routes.py` 目前仍是聚合 FastAPI router，承载 notebook、source、Ask、knowledge、report 与治理端点；`memory_routes.py` 承载 Memory 与 Agent access 页面 API，`mcp_server.py` 提供七个 scoped Streamable HTTP 工具；`auth_routes.py` 和 `deps.py` 分别承载认证路由与访问控制依赖。
+- `backend/app/api/routes.py` 目前仍是聚合 FastAPI router，承载 notebook、source、Ask、knowledge、report 与治理端点；`memory_routes.py` 承载 Memory 与 Agent access 页面 API，`mcp_server.py` 提供十一个工具（七个 Memory/context 与四个 knowhow）的 scoped Streamable HTTP 面；`auth_routes.py` 和 `deps.py` 分别承载认证路由与访问控制依赖。
 - `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑。
 - `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、mode 注册和 reasoning 迭代。
 - `report_engine.py` 负责两阶段深度报告；`background_jobs.py`、`cancellation.py` 和 repository 中的 job 状态共同管理后台任务与显式取消。
@@ -63,7 +69,7 @@ migration；当前 schema 版本为 13，冻结 v9 fixture 会继续经过 v10�
 
 - `workspace-model.ts` 保存共享 API/视图类型与常量。
 - `answer-panel.tsx` 保存答案、引用与 reasoning trace UI。
-- `kg-type-mark.tsx` 保存答案与图谱共用的知识类型标记。
+- `kg-type-model.ts` 保存内置知识类型文案/样式；`kg-type-mark.tsx` 消费并 re-export 该模型，保存答案与图谱共用的类型标记渲染。
 - `ask-stream.ts`、`ask-reconnect.ts` 等 helper 保存流式问答和恢复行为。
 
 notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report) 四个 tab。外层另有当前用户的总 Memory 页面，notebook 卡片数量可深链到局部 Memory tab。全屏 Knowledge Graph、看板和 Schema 是独立顶栏动作；「分析」菜单本身只含晋升队列（admin）、tier 切换（admin）与边审查队列。当前没有文章研究、思维导图、信息图或派生规则入口，也没有固定 Studio 右栏。
@@ -125,7 +131,7 @@ transport disconnect / navigation / refresh
 
 联合范围按检索路径区分：`chunk` 基线只读取 active notebook 的 chunk；启用 KG overlay 或 PPR 时，才可能加入 federated KG 上下文与 base-backed chunk。`graph` 和 `reasoning` 使用 federated KG 路径。
 
-知识对象 `federated_retrieve()` 跨 active + base 收集并标记 tier，其相关度 score 不乘 tier 常数，也不设置 tier 配额或地板；exact-score 的 `base` 次序只适用于知识对象命中。因此相关度更高的 personal knowledge hit 仍在前。`federated_retrieve_relations()` 的关系命中只按 score 降序，不使用 base 平局次序。
+知识对象 `federated_retrieve()` 跨 active 与其显式挂载的参考库集合（`notebook_bases`，可能为空）收集并标记 tier，其相关度 score 不乘 tier 常数，也不设置 tier 配额或地板；exact-score 的 `base` 次序只适用于知识对象命中。因此相关度更高的 personal knowledge hit 仍在前。`federated_retrieve_relations()` 的关系命中只按 score 降序，不使用 base 平局次序。
 
 base 的权威性另在答案合成 prompt 中表达：如果 personal 与 base 证据矛盾，答案服从 base，并明确披露差异。这是 synthesis policy，不是 retrieval score policy，也不参与 grounding 阈值。
 
@@ -144,6 +150,11 @@ token 是否撤销/过期、profile 状态、scope、allowlist 与用户当前 n
 evidence，不提供原始 revision/provenance 浏览。批准前会重新校验 Memory 当前仍为 confirmed 且
 创建者仍有访问权，再经既有 dedupe/merge 创建或合并一个或多个 Base KG 对象，并在 API/审计中
 保存完整 `base_object_ids`；私有 Memory 行仍归原创建者。
+
+当前公开十一个工具：`list_notebooks`、`select_notebook`、`search_agent_memory`、
+`search_notebook_context`、`get_memory`、`ask_notebook`、`propose_memory`、
+`list_knowhow_tables`、`get_knowhow_discrimination`、`get_knowhow_row` 与
+`put_knowhow_cell_code`；读取需相应 read scope，格子代码写入需 `knowhow:code`。
 
 ### 3.5 KG 与索引维护
 
@@ -185,6 +196,7 @@ FTS/KG，Ask 上下文不含（隔离不变量有专门测试守护）；`implem
 - **启动失败有持久化终态**：Ask/report 同步提交失败时，已创建的 job/report 进入 failed、进程内 cancellation entry 被注销，提交异常继续抛给调用方；正常完成顺序不变。
 - **检索范围按 mode**：`chunk` 基线只读 active notebook；KG overlay/PPR 才可加入 federated KG/base-backed chunk；`graph`/`reasoning` 走 federated KG。
 - **tier 次序只限知识对象**：`federated_retrieve()` 的 knowledge hit 完全平局时 base 作为第二排序键；relation hit 仍只按 score。base-wins 矛盾规则只属于回答合成。
+- **升级不回填挂载**：迁移到 schema 20 只建 `notebook_bases` 表，不写入任何挂载行；所有既有笔记本挂载数清零，联邦检索对所有人停止，直到用户显式挂载一个参考库。
 - **两列四 tab workspace**：固定区域只有来源栏与主区域；主区域含 问答 (Ask)、知识库 (Knowledge)、记忆 (Memory)、深度报告 (Deep Report)，当前没有固定 Studio 右侧栏。
 - **Memory 双平面隔离**：candidate 仅同用户、同 notebook 的 scoped Agent 候选召回可见；正式 Ask、搜索、报告与 notebook context 只使用 confirmed。
 - **source cleanup 边界**：reparse 保留 source 行和原始文件，替换解析/分块/embedding 并清理抽取派生；delete 再删除 source 行与本地文件。
@@ -248,7 +260,16 @@ python scripts/verify_repository_snapshot.py \
 完整离线门禁与前端生产构建：
 
 ```bash
-bash scripts/check.sh
+PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 cd frontend
 npm run build
 ```
+
+`scripts/check.sh` 并行运行 backend、contracts、frontend 三个有界 lane；每个 lane
+拥有独立进程组，controller 收到中断或终止信号时会终止并回收其 pytest/npm/Next.js
+后代。静态契约用模块路径、限定 scope、操作类型、目标与审核计数作为语义身份；
+源码行号/offset 仅供诊断，不得用作预期站点身份。前端纯逻辑/语义契约使用
+`*.test.mjs`，真实组件交互使用 `*.component.test.tsx` +
+Vitest/jsdom/Testing Library；策略同时覆盖测试入口和 helper 模块。pytest controller
+在 xdist worker 启动前预热仓库本地 Matplotlib 字体缓存，避免每个图谱 worker
+重复执行 macOS 字体枚举。

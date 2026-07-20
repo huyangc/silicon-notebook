@@ -16,8 +16,10 @@ import {
   deleteKnowhowRow,
   patchKnowhowCell,
   batchPatchKnowhowCells,
+  reformatKnowhowCell,
   createKnowhowTable,
   importKnowhow,
+  importKnowhowPreview,
   knowhowTemplateUrl,
   appendKnowhowPreview,
   appendKnowhowCommit,
@@ -336,6 +338,36 @@ test("patchKnowhowCell: PATCH 请求体为 {content_md}，响应 snake_case 映�
   });
 });
 
+// 并发防护（P1-b）：expectedBefore 提供时进请求体（后端据此做事务内比对，
+// 陈旧则 409）；省略时不进请求体，退回既有 last-write-wins（手动编辑器语义不变）。
+test("patchKnowhowCell: 提供 expectedBefore 时请求体带 expected_before（服务端比对基线）", () => {
+  const wireResult = { row_id: "r1", column_id: "c1", content_md: "新内容", projection_status: "pending" };
+  return withFetchStub(wireResult, async (calls) => {
+    await patchKnowhowCell("nb-1", "t1", "r1", "c1", "新内容", "旧内容");
+    assert.deepStrictEqual(bodyOf(calls[0]), { content_md: "新内容", expected_before: "旧内容" });
+  });
+});
+
+test("patchKnowhowCell: 省略 expectedBefore 时请求体不含 expected_before 键（不是 null——手动编辑器 last-write-wins）", () => {
+  const wireResult = { row_id: "r1", column_id: "c1", content_md: "x", projection_status: "pending" };
+  return withFetchStub(wireResult, async (calls) => {
+    await patchKnowhowCell("nb-1", "t1", "r1", "c1", "x");
+    assert.strictEqual("expected_before" in bodyOf(calls[0]), false);
+  });
+});
+
+// --- reformatKnowhowCell（P1-a：回带 source_md）------------------------------
+
+test("reformatKnowhowCell: POST 到 .../reformat，响应 source_md 映射为 sourceMd（连同 candidate/source/changed）", () => {
+  const wire = { candidate_md: "- a\n- b", source: "llm", changed: true, source_md: "原文快照" };
+  return withFetchStub(wire, async (calls) => {
+    const result = await reformatKnowhowCell("nb-1", "t1", "r1", "c1");
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/t1\/rows\/r1\/cells\/c1\/reformat$/);
+    assert.strictEqual(calls[0].init.method, "POST");
+    assert.deepStrictEqual(result, { candidateMd: "- a\n- b", source: "llm", changed: true, sourceMd: "原文快照" });
+  });
+});
+
 // --- batchPatchKnowhowCells（followup A：合并格整组单事务批量写，spec §6）--------
 
 test("batchPatchKnowhowCells: PATCH 到 .../cells，请求体为 {column_id,row_ids,content_md}，响应列表按项 snake_case 映射为 camelCase", () => {
@@ -363,6 +395,34 @@ test("batchPatchKnowhowCells: PATCH 到 .../cells，请求体为 {column_id,row_
   });
 });
 
+test("batchPatchKnowhowCells: 提供 expectedBefore（按 rowIds 平行）时请求体带 expected_before 数组", () => {
+  const wireResult = [
+    { row_id: "r1", column_id: "c1", content_md: "统一改法", projection_status: "pending" },
+    { row_id: "r2", column_id: "c1", content_md: "统一改法", projection_status: "pending" },
+  ];
+  return withFetchStub(wireResult, async (calls) => {
+    await batchPatchKnowhowCells("nb-1", "t1", {
+      columnId: "c1",
+      rowIds: ["r1", "r2"],
+      contentMd: "统一改法",
+      expectedBefore: ["旧1", "旧2"],
+    });
+    assert.deepStrictEqual(bodyOf(calls[0]), {
+      column_id: "c1",
+      row_ids: ["r1", "r2"],
+      content_md: "统一改法",
+      expected_before: ["旧1", "旧2"],
+    });
+  });
+});
+
+test("batchPatchKnowhowCells: 省略 expectedBefore 时请求体不含 expected_before 键（手动编辑器合并格 last-write-wins）", () => {
+  return withFetchStub([], async (calls) => {
+    await batchPatchKnowhowCells("nb-1", "t1", { columnId: "c1", rowIds: ["r1"], contentMd: "x" });
+    assert.strictEqual("expected_before" in bodyOf(calls[0]), false);
+  });
+});
+
 test("batchPatchKnowhowCells: 响应空列表时返回空数组", () => {
   return withFetchStub([], async (calls) => {
     const result = await batchPatchKnowhowCells("nb-1", "t1", {
@@ -372,6 +432,45 @@ test("batchPatchKnowhowCells: 响应空列表时返回空数组", () => {
     });
     assert.deepStrictEqual(bodyOf(calls[0]), { column_id: "c1", row_ids: [], content_md: "x" });
     assert.deepStrictEqual(result, []);
+  });
+});
+
+// 并发防护（P1 round-4）：批量扇出还带上 anchor 基线守卫——anchorColumnId +
+// expectedAnchor（按 rowIds 平行），后端在同一事务内重读每行 anchor 列，任一
+// 行的 anchor 自建批次以来被移出组就整组 409（离组行不再被冻结扇出误写）。与
+// expectedBefore 一样是可选的：手动编辑器省略。
+test("batchPatchKnowhowCells: 提供 anchorColumnId + expectedAnchor（按 rowIds 平行）时请求体带 anchor_column_id + expected_anchor", () => {
+  return withFetchStub([], async (calls) => {
+    await batchPatchKnowhowCells("nb-1", "t1", {
+      columnId: "c1",
+      rowIds: ["r1", "r2"],
+      contentMd: "统一改法",
+      expectedBefore: ["旧1", "旧2"],
+      anchorColumnId: "c-anchor",
+      expectedAnchor: ["示波器", "示波器"],
+    });
+    assert.deepStrictEqual(bodyOf(calls[0]), {
+      column_id: "c1",
+      row_ids: ["r1", "r2"],
+      content_md: "统一改法",
+      expected_before: ["旧1", "旧2"],
+      anchor_column_id: "c-anchor",
+      expected_anchor: ["示波器", "示波器"],
+    });
+  });
+});
+
+test("batchPatchKnowhowCells: 省略 anchor 守卫时请求体不含 anchor_column_id / expected_anchor 键（手动编辑器合并格）", () => {
+  return withFetchStub([], async (calls) => {
+    await batchPatchKnowhowCells("nb-1", "t1", {
+      columnId: "c1",
+      rowIds: ["r1"],
+      contentMd: "x",
+      expectedBefore: ["旧1"],
+    });
+    const body = bodyOf(calls[0]);
+    assert.strictEqual("anchor_column_id" in body, false);
+    assert.strictEqual("expected_anchor" in body, false);
   });
 });
 
@@ -759,5 +858,52 @@ test("importKnowhow: anchorIndex=null（记录型表）→ 不发 anchor_index�
   return withFetchStub(wireTable({ columns: [] }), async (calls) => {
     await importKnowhow("nb-1", new Blob(["x"]), "T", [{ name: "日期", kind: "attribute" }], null);
     assert.strictEqual(calls[0].init.body.get("anchor_index"), null);
+  });
+});
+
+// --- importKnowhowPreview 的 anchor_index wire（P2 修复：向导改行标题列后重取预览）--
+// 预览按后端选的锚定列跳过规整；向导初始加载不知道用户会选哪列（猜测列由响应带回），
+// 故初始不发 anchor_index（后端退回按 guess 规整）；用户在步骤②改选某列后重取时带上
+// 它，后端据此按**所选**列规整，保住「预览即所得」。
+// 三态编码（评审残留修复）：anchor 选择有三种状态，「省略参数」只能表达其一——
+//   undefined（初始加载，未碰选择器）→ 省略（后端按猜测列跳过，与界面预选一致）；
+//   number（选了某列）→ 发该列下标；
+//   null（明确清空「不设行标题」）→ 发 -1（后端解读为「无锚定列」→ 不跳过任何列，
+//   与 commit 不带 anchor_index 时全列规整对齐）。若 null 也省略，预览会按猜测列
+//   跳过而提交却全列规整——预览即所得在猜测列上撒谎。
+
+const WIRE_PREVIEW = { columns: [], rows_preview: [], total_rows: 0, anchor_suggestion: null };
+
+test("importKnowhowPreview: 初始加载（不传 anchorIndex）→ POST /import/preview 不带 anchor_index（后端退回按猜测列规整）", () => {
+  return withFetchStub(WIRE_PREVIEW, async (calls) => {
+    await importKnowhowPreview("nb-1", new Blob(["x"]));
+    assert.match(calls[0].url, /\/notebooks\/nb-1\/knowhow\/import\/preview$/);
+    assert.strictEqual(calls[0].init.method, "POST");
+    const form = calls[0].init.body;
+    assert.ok(form instanceof FormData);
+    assert.ok(form.get("file"));
+    assert.strictEqual(form.get("anchor_index"), null); // 未发送
+  });
+});
+
+test("importKnowhowPreview: 用户选了某列（anchorIndex=1）→ FormData 带 anchor_index='1'（后端按所选列规整，预览即所得）", () => {
+  return withFetchStub(WIRE_PREVIEW, async (calls) => {
+    await importKnowhowPreview("nb-1", new Blob(["x"]), 1);
+    const form = calls[0].init.body;
+    assert.strictEqual(form.get("anchor_index"), "1");
+  });
+});
+
+test("importKnowhowPreview: anchorIndex=0 也如实发送（不能被 falsy 判断吞掉）", () => {
+  return withFetchStub(WIRE_PREVIEW, async (calls) => {
+    await importKnowhowPreview("nb-1", new Blob(["x"]), 0);
+    assert.strictEqual(calls[0].init.body.get("anchor_index"), "0");
+  });
+});
+
+test("importKnowhowPreview: 清空行标题（anchorIndex=null）→ 发 anchor_index='-1'（明确无锚定，预览全列规整=commit 行为）", () => {
+  return withFetchStub(WIRE_PREVIEW, async (calls) => {
+    await importKnowhowPreview("nb-1", new Blob(["x"]), null);
+    assert.strictEqual(calls[0].init.body.get("anchor_index"), "-1");
   });
 });

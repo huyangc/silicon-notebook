@@ -20,6 +20,9 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 from app.models.schemas import Evidence
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.mount_sql import (
+    MOUNT_JOIN, MOUNT_VALID, MOUNTED_BASE_IDS_SUBQUERY,
+)
 
 
 class KnowledgeStore:
@@ -258,24 +261,27 @@ class KnowledgeStore:
                 (notebook_id,),
             ).fetchone()[0])
 
-    def any_base_has_kg(self) -> bool:
-        with self.database.connect() as db:
-            return bool(db.execute(
-                "SELECT EXISTS(SELECT 1 FROM knowledge_objects ko "
-                "JOIN notebooks nb ON nb.id=ko.notebook_id WHERE nb.tier='base')"
-            ).fetchone()[0])
-
     @staticmethod
-    def any_base_has_kg_on(db: sqlite3.Connection) -> bool:
+    def any_mounted_has_kg_on(db: sqlite3.Connection, notebook_id: str) -> bool:
+        """本库挂载的参考库中是否有任一已建 KG —— 驱动前端严格推理门控。
+        未挂载 → False(即便系统里存在有图的公共知识库)。"""
         return bool(db.execute(
-            "SELECT EXISTS(SELECT 1 FROM knowledge_objects ko JOIN notebooks nb "
-            "ON nb.id=ko.notebook_id WHERE nb.tier='base')"
+            "SELECT EXISTS(SELECT 1 " + MOUNT_JOIN + MOUNT_VALID
+            + " AND EXISTS(SELECT 1 FROM knowledge_objects ko WHERE ko.notebook_id = b.id))",
+            (notebook_id,),
         ).fetchone()[0])
 
-    def any_base_has_kg_compat(
-        self, db: "sqlite3.Connection | None" = None
+    def any_mounted_has_kg(self, notebook_id: str) -> bool:
+        with self.database.connect() as db:
+            return self.any_mounted_has_kg_on(db, notebook_id)
+
+    def any_mounted_has_kg_compat(
+        self, notebook_id: str, db: "sqlite3.Connection | None" = None
     ) -> bool:
-        return self.any_base_has_kg_on(db) if db is not None else self.any_base_has_kg()
+        return (
+            self.any_mounted_has_kg_on(db, notebook_id) if db is not None
+            else self.any_mounted_has_kg(notebook_id)
+        )
 
     def retrieval_objects_compat(
         self, db: sqlite3.Connection, notebook_id: str, object_type: str,
@@ -476,13 +482,16 @@ class KnowledgeStore:
     @staticmethod
     def follow_start_row(db: sqlite3.Connection, object_id: str,
                          active_notebook_id: str, statuses):
+        """起点授权门:只有 active 自己的对象、或 active 挂载的参考库里的对象,
+        才能作为 follow_chain 的合法起点(未挂载的 tier='base' 库不算,即便它已发布)。"""
         ph = ",".join("?" for _ in statuses)
         return db.execute(
             f"SELECT ko.*, n.tier AS notebook_tier "
             f"FROM knowledge_objects ko JOIN notebooks n ON n.id=ko.notebook_id "
             f"WHERE ko.id=? AND ko.status IN ({ph}) "
-            f"AND (ko.notebook_id=? OR n.tier='base')",
-            (object_id, *statuses, active_notebook_id),
+            "AND (ko.notebook_id=? OR ko.notebook_id IN ("
+            + MOUNTED_BASE_IDS_SUBQUERY + "))",
+            (object_id, *statuses, active_notebook_id, active_notebook_id),
         ).fetchone()
 
     @staticmethod

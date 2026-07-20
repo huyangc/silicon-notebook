@@ -130,6 +130,17 @@ export type KnowhowCellsBatchPatchInput = {
   columnId: string;
   rowIds: string[];
   contentMd: string;
+  // 并发防护（P1-b）：可选的每行基线，**按 rowIds 顺序平行**（expectedBefore[i]
+  // 对应 rowIds[i]）。提供时后端把整组当作一次 all-or-nothing 事务内比对，任一
+  // 行的基线陈旧就整组 409 拒写；省略时退回 last-write-wins（手动编辑器合并格保存）。
+  expectedBefore?: string[];
+  // 并发防护（P1 round-4）：可选的 anchor 基线守卫。anchorColumnId = 分组键列 id，
+  // expectedAnchor **按 rowIds 顺序平行** = 每行 anchor 列的快照值。与 expectedBefore
+  // 一起由批量扇出下发：后端在同一事务内额外重读每行 anchor 列，任一行 anchor 自快照
+  // 以来被移出组就整组 409（离组行不再被冻结扇出误写；被编辑格没变、expectedBefore
+  // 单独拦不住这类漂移）。两字段成对，缺一即不带该守卫（手动编辑器合并格省略）。
+  anchorColumnId?: string;
+  expectedAnchor?: string[];
 };
 
 // --- 模板往返 / 追加导入类型（Task 6）--------------------------------------------
@@ -356,10 +367,24 @@ export const fetchKnowhowTable = (notebookId: string, tableId: string): Promise<
   apiFetch<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow/${tableId}`).then(mapDetail);
 
 // 导入预览：上传文件、拿列名+猜测内容类型+行标题列建议+前 5 行预览+总行数，
-// 不建表。
-export const importKnowhowPreview = (notebookId: string, file: File | Blob): Promise<KnowhowImportPreview> => {
+// 不建表。`anchorIndex` 可选——向导在步骤②改/清行标题列后重取预览时带上它，后端
+// 据此按**所选**锚定列跳过规整（而非猜测列），保住「预览即所得」（见后端
+// preview_import 的 anchor_index 参数）。
+// 三态编码（评审残留修复）：省略参数只能表达三态之一，故——
+//   undefined（初始加载，尚不知用户会选哪列，猜测列由响应带回）→ 不发，后端按猜测列跳过；
+//   number（用户选了某列）→ 发该列下标（typeof === "number" 判断，anchorIndex=0 不被吞）；
+//   null（明确清空「不设行标题」）→ 发 -1，后端解读为「无锚定列」→ 全列规整，
+//   与 commit 不带 anchor_index 的落库行为对齐。null 若也不发，预览会按猜测列跳过
+//   而提交却全列规整——预览即所得在猜测列上撒谎。
+export const importKnowhowPreview = (
+  notebookId: string,
+  file: File | Blob,
+  anchorIndex?: number | null,
+): Promise<KnowhowImportPreview> => {
   const form = new FormData();
   form.append("file", file);
+  if (typeof anchorIndex === "number") form.append("anchor_index", String(anchorIndex));
+  else if (anchorIndex === null) form.append("anchor_index", "-1");
   return apiFetch<WireImportPreview>(`/notebooks/${notebookId}/knowhow/import/preview`, {
     method: "POST",
     body: form,
@@ -493,16 +518,29 @@ function mapCellPatchResult(wire: WireKnowhowCellPatchResult): KnowhowCellPatchR
 
 // 格子内容 patch：返回 {rowId,columnId,contentMd,projectionStatus}——调用方
 // 用 projectionStatus 立即刷新该行的同步状态徽标，不必等待下一次整表拉取。
+//
+// expectedBefore（并发防护 P1-b）：提供时随请求体带 expected_before，后端在**同一
+// 写事务内**比对当前落库内容，不一致就 409 拒写（nothing written）——批量规整保存
+// 走这条路。省略时不带该键，退回既有 last-write-wins（手动编辑器的语义，刻意不变：
+// 那是真人在编辑，不该被自己更早的快照挡下）。
 export const patchKnowhowCell = (
   notebookId: string,
   tableId: string,
   rowId: string,
   columnId: string,
   contentMd: string,
+  expectedBefore?: string,
 ): Promise<KnowhowCellPatchResult> =>
   apiFetch<WireKnowhowCellPatchResult>(
     `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}`,
-    { method: "PATCH", body: JSON.stringify({ content_md: contentMd }) },
+    {
+      method: "PATCH",
+      body: JSON.stringify(
+        expectedBefore === undefined
+          ? { content_md: contentMd }
+          : { content_md: contentMd, expected_before: expectedBefore },
+      ),
+    },
   ).then(mapCellPatchResult);
 
 // followup A（anchor 分组 spec §6「整组批量写单事务，不半改」）：合并共享格
@@ -515,15 +553,26 @@ export const batchPatchKnowhowCells = (
   notebookId: string,
   tableId: string,
   input: KnowhowCellsBatchPatchInput,
-): Promise<KnowhowCellPatchResult[]> =>
-  apiFetch<WireKnowhowCellPatchResult[]>(`/notebooks/${notebookId}/knowhow/${tableId}/cells`, {
+): Promise<KnowhowCellPatchResult[]> => {
+  // 逐键条件装配请求体：省略的守卫字段**不进** body（区别于传 null）——既有测试锁死
+  // 「省略 expectedBefore 时 body 不含该键」，anchor 守卫同理。
+  const body: Record<string, unknown> = {
+    column_id: input.columnId,
+    row_ids: input.rowIds,
+    content_md: input.contentMd,
+  };
+  if (input.expectedBefore !== undefined) body.expected_before = input.expectedBefore;
+  // anchor 守卫两字段成对：只有都提供才带上（后端也要求 anchor_column_id 与
+  // expected_anchor 同时在场才启用守卫）。
+  if (input.anchorColumnId !== undefined && input.expectedAnchor !== undefined) {
+    body.anchor_column_id = input.anchorColumnId;
+    body.expected_anchor = input.expectedAnchor;
+  }
+  return apiFetch<WireKnowhowCellPatchResult[]>(`/notebooks/${notebookId}/knowhow/${tableId}/cells`, {
     method: "PATCH",
-    body: JSON.stringify({
-      column_id: input.columnId,
-      row_ids: input.rowIds,
-      content_md: input.contentMd,
-    }),
+    body: JSON.stringify(body),
   }).then((wireResults) => wireResults.map(mapCellPatchResult));
+};
 
 // --- Excel 模板往返（Task 6）------------------------------------------------------
 
@@ -578,6 +627,26 @@ export const optimizeKnowhowCell = (
     `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/optimize`,
     { method: "POST" },
   ).then((wire) => ({ suggestionMd: wire.suggestion_md }));
+
+// --- 排版重排（knowhow-md-normalize Task 4，同样显式触发、不写库）-----------
+// 与 optimizeKnowhowCell 的关键差异：后端 reformat_cell 对「未配置模型」等
+// 情况已内部优雅兜底（source="rule/no-llm"，绝不抛错），所以本端点恒 200，
+// 调用方据 source 决定候选文案的呈现方式（供 Task 5 编辑器按钮/Task 后续
+// 批量动作消费）。
+// source_md（并发防护 P1-a）：后端回带它实际读到并喂给 reformat_cell 的原文，
+// 映射为 sourceMd。批量规整据此比对建批次那一刻的 originalMd 快照——不一致说明
+// 候选是拿「客户端没见过的内容」算出来的（别的标签页/用户已改了这格），该格直接
+// 跳过、且不进去重缓存（见 knowhow-optimize-logic.ts reformatResultIsStale）。
+export const reformatKnowhowCell = (
+  notebookId: string,
+  tableId: string,
+  rowId: string,
+  columnId: string,
+) =>
+  apiFetch<{ candidate_md: string; source: string; changed: boolean; source_md: string }>(
+    `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/reformat`,
+    { method: "POST" },
+  ).then((w) => ({ candidateMd: w.candidate_md, source: w.source, changed: w.changed, sourceMd: w.source_md }));
 
 // --- 格子级代码附件（Task 10；HTTP 端点 session/agent token 皆可访问，本文件
 // 的调用方(Task 11 用户界面)走既有 session 鉴权，与其余 fetcher 共用

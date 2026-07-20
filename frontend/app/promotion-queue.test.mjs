@@ -52,6 +52,18 @@ test("proposePromotion POSTs the promote endpoint", () =>
     assert.strictEqual(calls[0].init.method, "POST");
   }));
 
+test("proposePromotion omits the body when no target base is given (server default-resolves)", () =>
+  withFetchStub(async (calls) => {
+    await proposePromotion("nb-1", "ko-9");
+    assert.strictEqual(calls[0].init.body, undefined);
+  }));
+
+test("proposePromotion sends target_base_id when the notebook has multiple mounted bases", () =>
+  withFetchStub(async (calls) => {
+    await proposePromotion("nb-1", "ko-9", "base-42");
+    assert.deepStrictEqual(JSON.parse(calls[0].init.body), { target_base_id: "base-42" });
+  }));
+
 test("approvePromotion POSTs the approve endpoint and encodes the id", () =>
   withFetchStub(async (calls) => {
     await approvePromotion("promo-abc");

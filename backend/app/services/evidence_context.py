@@ -113,7 +113,18 @@ class EvidenceContextService:
             line = f"{key}: {chunk.text}"
             lines.append(line)
             used += len(line)
-            origin = getattr(chunk, "notebook_id", "") or notebook_id
+            # raw_origin: chunk.notebook_id 的原始值;origin 另外回退本次 ask 的
+            # notebook_id 供 tier 查表用(同库 chunk 也要查得到 tier)。徽章库名
+            # 映射(Task 14)要的是"真正跨库才非空"的 raw_origin——但联邦/PPR 检索
+            # (federated_retrieve/_ppr_retrieve)对本库命中同样会把 notebook_id
+            # 打成 active 自己的 id,并非只在跨库命中时才打标(codex r2 review 修
+            # 正此前的错误假设),故显式比较 notebook_id 归零,镜像
+            # follow_chain.py 的 `hop.notebook_id != active_notebook_id` 处理,
+            # 否则前端会把"本库自己"解出一个多余的"来自「当前笔记本」"徽章。
+            raw_origin = getattr(chunk, "notebook_id", "") or ""
+            origin = raw_origin or notebook_id
+            if raw_origin == notebook_id:
+                raw_origin = ""
             evidence_by_id[key] = {
                 "object_id": chunk.chunk_id,
                 "object_type": "chunk",
@@ -123,6 +134,7 @@ class EvidenceContextService:
                 "source_title": chunk.source_title,
                 "location_label": chunk.section_path,
                 "tier": tiers.get(origin, "personal"),
+                "notebook_id": raw_origin,
                 "knowhow": None,
             }
             element_ids = getattr(chunk, "element_ids", None) or []
@@ -158,7 +170,17 @@ class EvidenceContextService:
             if cluster_id in seen_clusters:
                 continue
             seen_clusters.add(cluster_id)
-            origin = getattr(hit, "notebook_id", "") or notebook_id
+            # raw_origin: hit.notebook_id 的原始值,供 Task 14 的引用徽章库名映射
+            # 用;origin 另外回退本次 ask 的 notebook_id,供 node_context 查询用
+            # (同库命中也要查得到详情)。徽章要的是"真正跨库才非空"的
+            # raw_origin——但 federated_retrieve 对本库命中同样会把 notebook_id
+            # 打成 active 自己的 id(并非只在跨库命中时才打标,codex r2 review 修
+            # 正此前的错误假设),故显式比较 notebook_id 归零,镜像
+            # follow_chain.py 的 `hop.notebook_id != active_notebook_id` 处理。
+            raw_origin = getattr(hit, "notebook_id", "") or ""
+            origin = raw_origin or notebook_id
+            if raw_origin == notebook_id:
+                raw_origin = ""
             try:
                 context = self.knowledge.node_context(origin, hit.object_id)
             except KeyError:
@@ -195,6 +217,7 @@ class EvidenceContextService:
                 "source_title": occurrences[0].get("source_title", "") if occurrences else "",
                 "location_label": occurrences[0].get("section_path", "") if occurrences else "",
                 "tier": tier,
+                "notebook_id": raw_origin,
                 # Task 12b（引用跳转扩面，锚点侧）: KO payload 已在内存里（同
                 # 上面 hit.payload.get("name","") 的零额外查询惯例），命中单行
                 # knowhow 格子才有值，其余（非 knowhow KO/合并多行）为 None。
@@ -258,6 +281,10 @@ class EvidenceContextService:
                     source_title=str(context.get("source_title", "")),
                     location_label=str(context.get("location_label", "")),
                     tier=str(context.get("tier", "personal")),
+                    # Task 14: 只有 chunk_context/knowledge_context 填了才非空
+                    # (render_subgraph_context 的纯 graph-BFS 节点暂未填,`.get`
+                    # 安全回退空串,徽章优雅退回泛化 tier 文案,不崩不猜)。
+                    notebook_id=str(context.get("notebook_id", "")),
                     provenance=dict(context.get("provenance") or {}),
                     # Task 12b: 只有 knowledge_context 建的 evidence_by_id 才带
                     # "knowhow" 键；chunk_context/记忆上下文没有这个键，`.get`
@@ -291,23 +318,40 @@ class EvidenceContextService:
         hits: Sequence[RetrievedKnowledge],
         valid_element_ids: set[str],
         label: str,
+        *,
+        notebook_id: str,
     ) -> list[Citation]:
-        filtered: list[tuple[str, Any]] = []
+        filtered: list[tuple[str, str, Any]] = []
         for hit in hits:
             tier = getattr(hit, "tier", "personal") or "personal"
+            # Task 14 codex r4 fix: hit.notebook_id 的原始值同样会被联邦检索
+            # (_federated_retrieve_impl)对 active 库自己的命中打上 active 自己
+            # 的 id——resolve_participants/participant_tiers 首项恒为 active
+            # 本身,`for nid in notebook_ids: h.notebook_id = nid` 对每一本都无
+            # 条件执行,并不是只有跨库命中才打标(chunk_context/knowledge_context/
+            # render_follow_chain_context 都踩过、也都已按同一模式修过这个错误
+            # 假设——本函数此前的注释也这样误判过,codex r3 review 当时把它判
+            # 定为"不可达"是错的:citations_from 的产出会在答案合成失败、或模型
+            # 没吐出任何有效 [k] 锚点时,被前端 buildAnswerReferences 当"回退
+            # 列表"直接展示——见其 `if (references.length > 0) return
+            # references;` 之后的 citations 兜底分支。必须显式与调用方
+            # notebook_id 比较,相等则归零,镜像既有三处处理。
+            hit_notebook_id = getattr(hit, "notebook_id", "") or ""
+            if hit_notebook_id == notebook_id:
+                hit_notebook_id = ""
             for evidence in hit.evidence:
                 if evidence.element_id and evidence.element_id not in valid_element_ids:
                     continue
-                filtered.append((tier, evidence))
+                filtered.append((tier, hit_notebook_id, evidence))
 
         # Task 12（引用跳转）: 批量按 element_id 查一次 knowhow 定位标签，不管
         # 本次要建多少条引用——绝不逐条引用各查一次(运行效率是一等约束)。
         knowhow_refs = self.knowhow_refs_for(
-            evidence.element_id for _tier, evidence in filtered
+            evidence.element_id for _tier, _nb, evidence in filtered
         )
 
         citations: list[Citation] = []
-        for tier, evidence in filtered:
+        for tier, hit_notebook_id, evidence in filtered:
             citations.append(Citation(
                 label=label,
                 source_id=evidence.source_id,
@@ -315,6 +359,7 @@ class EvidenceContextService:
                 location_label=evidence.location_label,
                 quoted_span=evidence.quoted_span,
                 tier=tier,
+                notebook_id=hit_notebook_id,
                 knowhow=knowhow_refs.get(evidence.element_id),
             ))
         return citations

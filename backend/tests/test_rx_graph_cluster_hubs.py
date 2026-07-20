@@ -93,6 +93,7 @@ def test_federated_rx_graph_bridges_base_and_active_via_cluster(repo):
     base_nb = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base_nb.id)
     pers_nb = repo.create_notebook(NotebookCreate(name="personal"))
+    repo.replace_notebook_bases(pers_nb.id, [base_nb.id], "user-local")
 
     now = _NOW
     with repo._write() as db:
@@ -137,6 +138,7 @@ def test_federated_rx_graph_version_invalidates_on_cluster_row(repo):
     base_nb = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base_nb.id)
     pers_nb = repo.create_notebook(NotebookCreate(name="personal"))
+    repo.replace_notebook_bases(pers_nb.id, [base_nb.id], "user-local")
     with repo._write() as db:
         for oid, nbid in (("B1", base_nb.id), ("P1", pers_nb.id)):
             db.execute(

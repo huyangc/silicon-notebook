@@ -1,0 +1,842 @@
+{
+  "facade_imports": [
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/api/deps.py",
+      "reason": "API composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/eval/inference.py",
+      "reason": "evaluation composition root",
+      "scope": "<module>.run_inference",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/eval/run_all.py",
+      "reason": "evaluation composition root",
+      "scope": "<module>.main",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/eval/sa_calibration.py",
+      "reason": "evaluation composition root",
+      "scope": "<module>._run_arm",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/eval/speed.py",
+      "reason": "evaluation composition root",
+      "scope": "<module>.measure_speed",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/scripts/backfill_relation_embeddings.py",
+      "reason": "offline CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/scripts/build_kg.py",
+      "reason": "offline CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/scripts/gen_recall_gold.py",
+      "reason": "offline CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/scripts/recluster_kg.py",
+      "reason": "offline CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/scripts/reembed_kg.py",
+      "reason": "offline CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/services/batch_ingest.py",
+      "reason": "batch-ingest CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/services/sqlite_notebook_sharing.py",
+      "reason": "compatibility shim late-binds legacy facade monkeypatch seams",
+      "scope": "<module>._copy_chunk_size",
+      "target": "app.services:sqlite_repository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/services/sqlite_notebook_sharing.py",
+      "reason": "compatibility shim late-binds legacy facade monkeypatch seams",
+      "scope": "<module>._repository_new_id",
+      "target": "app.services:sqlite_repository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/backfill_kg_embeddings.py",
+      "reason": "offline CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/backfill_knowhow_md.py",
+      "reason": "offline maintenance CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/bench_sqlite_writes.py",
+      "reason": "synthetic benchmark composition root",
+      "scope": "<module>._make_repo",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/build_chunks.py",
+      "reason": "offline CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/denoise_reextract_nb.py",
+      "reason": "offline CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/diag_base_report.py",
+      "reason": "offline diagnostic composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "contract fixture composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "contract fixture composition root",
+      "scope": "<module>._deterministic_runtime",
+      "target": "app.services:sqlite_repository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "contract fixture composition root",
+      "scope": "<module>._new_offline_repo",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "contract fixture composition root",
+      "scope": "<module>.collect_facade_surface",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "contract fixture composition root",
+      "scope": "<module>.collect_facade_surface",
+      "target": "app.services:sqlite_repository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/kg_product_smoke.py",
+      "reason": "offline smoke composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/reextract_notebook.py",
+      "reason": "offline CLI composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/replay_retrieval.py",
+      "reason": "offline CLI composition root",
+      "scope": "<module>.record_run",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/smoke_backend.py",
+      "reason": "offline smoke composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "backup-only verifier composition root",
+      "scope": "<module>",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    }
+  ],
+  "independent_private": [
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.admin_query_repository",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.identity_repository",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.notebook_access_repository",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.notebook_catalog_repository",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.notebook_sharing_repository",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/services/knowhow/api.py",
+      "reason": "knowhow orchestration constructs narrow services from runtime ports",
+      "scope": "<module>.build_projector",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/services/knowhow/api.py",
+      "reason": "knowhow orchestration constructs narrow services from runtime ports",
+      "scope": "<module>.optimize_cell",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/services/knowhow/api.py",
+      "reason": "knowhow orchestration constructs narrow services from runtime ports",
+      "scope": "<module>.reformat_cell",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/services/knowhow/transfer.py",
+      "reason": "knowhow transfer orchestration constructs its store and runtime seams",
+      "scope": "<module>._remap",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/services/knowhow/transfer.py",
+      "reason": "knowhow transfer orchestration constructs its store and runtime seams",
+      "scope": "<module>.copy_table",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/services/knowhow/transfer.py",
+      "reason": "knowhow transfer orchestration constructs its store and runtime seams",
+      "scope": "<module>.move_table",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "scripts/bench_sqlite_writes.py",
+      "reason": "synthetic temporary write benchmark",
+      "scope": "<module>.main",
+      "target": "_connect"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._capture_ask_case",
+      "target": "_connect"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._create_index_artifacts",
+      "target": "_scale_index_version"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._seed_ask_repository",
+      "target": "_write"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._seed_v9_rows",
+      "target": "_write"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._serialization_contract",
+      "target": "_connect"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>.normalized_repository_snapshot",
+      "target": "_connect"
+    }
+  ],
+  "independent_sql": [
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/core/llm_cache.py",
+      "reason": "independent LLM response cache database",
+      "scope": "<module>.LLMCache.__init__",
+      "target": "db.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/core/llm_cache.py",
+      "reason": "independent LLM response cache database",
+      "scope": "<module>.LLMCache._connect",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/core/llm_cache.py",
+      "reason": "independent LLM response cache database",
+      "scope": "<module>.LLMCache.get",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/core/llm_cache.py",
+      "reason": "independent LLM response cache database",
+      "scope": "<module>.LLMCache.put",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/eval/db.py",
+      "reason": "independent evaluation-results database",
+      "scope": "<module>.EvalDB.objects",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/eval/db.py",
+      "reason": "independent evaluation-results database",
+      "scope": "<module>.EvalDB.relation_degree",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/eval/db.py",
+      "reason": "independent evaluation-results database",
+      "scope": "<module>.EvalDB.source_titles",
+      "target": "db.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "scripts/backfill_knowhow_md.py",
+      "reason": "read-only planning for an operator-supplied maintenance database",
+      "scope": "<module>._read_knowhow_tables_ro",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/bench_sqlite_writes.py",
+      "reason": "synthetic temporary write benchmark database",
+      "scope": "<module>.main",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_open_latency.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.main._run",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._sample_typeof",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.report_artifacts",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.report_notebook_count_hotpaths._run",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.report_reasoning_ppr_audit",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.report_reasoning_ppr_audit.group_count",
+      "target": "conn.execute"
+    },
+    {
+      "count": 5,
+      "kind": "independent_sql",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.report_scale_profile",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.report_scale_profile.group_count",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._capture_ask_case",
+      "target": "db.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._rows_for_table",
+      "target": "db.execute"
+    },
+    {
+      "count": 6,
+      "kind": "independent_sql",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._seed_ask_repository",
+      "target": "db.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._seed_ask_repository",
+      "target": "db.executemany"
+    },
+    {
+      "count": 12,
+      "kind": "independent_sql",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._seed_v9_rows",
+      "target": "db.execute"
+    },
+    {
+      "count": 11,
+      "kind": "independent_sql",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._seed_v9_rows",
+      "target": "db.executemany"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>._serialization_contract",
+      "target": "db.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>.normalized_repository_snapshot",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>._sole_base_id",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>._table_exists",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>._user_version",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.base_stats",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.discover_tables",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.main",
+      "target": "conn_s.execute"
+    },
+    {
+      "count": 9,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.merge_core",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.merge_core._run",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.migrate_to_current",
+      "target": "execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.notebook_ids",
+      "target": "conn.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.preflight",
+      "target": "conn_a.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.preflight",
+      "target": "conn_b.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.table_columns",
+      "target": "conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "read-only backup and probe databases",
+      "scope": "<module>._special_table_rows",
+      "target": "meta_conn.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "read-only backup and probe databases",
+      "scope": "<module>._table_digest",
+      "target": "digest_conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "read-only backup and probe databases",
+      "scope": "<module>.exercise_reads",
+      "target": "probe.execute"
+    },
+    {
+      "count": 4,
+      "kind": "independent_sql",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "read-only backup and probe databases",
+      "scope": "<module>.snapshot_database",
+      "target": "meta_conn.execute"
+    }
+  ],
+  "sqlite_connect": [
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/core/llm_cache.py",
+      "reason": "independent LLM response cache database",
+      "scope": "<module>.LLMCache._connect",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/eval/db.py",
+      "reason": "independent evaluation-results database",
+      "scope": "<module>.EvalDB._connect",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/backfill_knowhow_md.py",
+      "reason": "read-only planning connection to an operator-supplied database",
+      "scope": "<module>.plan_backfill_readonly",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/backfill_promotion_targets.py",
+      "reason": "operator-supplied offline maintenance database",
+      "scope": "<module>.main",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/diag_open_latency.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.main",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.report_artifacts",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.report_notebook_count_hotpaths",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.report_reasoning_ppr_audit",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/diag_slow.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>.report_scale_profile",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 2,
+      "kind": "sqlite_connect",
+      "path": "scripts/generate_repository_contract_fixtures.py",
+      "reason": "disposable contract fixture databases",
+      "scope": "<module>.generate_v9_fixture",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 2,
+      "kind": "sqlite_connect",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.main",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/merge_dbs.py",
+      "reason": "temporary copies used by the offline two-database merge tool",
+      "scope": "<module>.merge_core",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "read-only backup and probe databases",
+      "scope": "<module>.exercise_reads",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 2,
+      "kind": "sqlite_connect",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "read-only backup and probe databases",
+      "scope": "<module>.snapshot_database",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 2,
+      "kind": "sqlite_connect",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "read-only backup and probe databases",
+      "scope": "<module>.verify_snapshot",
+      "target": "sqlite3.connect"
+    }
+  ]
+}

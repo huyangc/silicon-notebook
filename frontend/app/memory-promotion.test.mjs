@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -7,6 +6,12 @@ import {
   memoryPromotionLabel,
   memoryPromotionPath,
 } from "./memory-model.ts";
+import {
+  importsFrom,
+  jsxTextValues,
+  parseModule,
+  stringLiterals,
+} from "./test/semantic-source.mjs";
 
 test("only confirmed unproposed Memory exposes the promotion action", () => {
   assert.equal(canPromoteMemory({ status: "confirmed", promotion_state: "none" }), true);
@@ -27,11 +32,15 @@ test("promotion helpers target the owner-authenticated Memory endpoint and expla
 });
 
 test("Memory panel exposes promotion while the admin queue identifies Memory proposals", async () => {
-  const panel = await readFile(new URL("./memory-panel.tsx", import.meta.url), "utf8");
-  const page = await readFile(new URL("./page.tsx", import.meta.url), "utf8");
-  assert.match(panel, /memoryPromotionPath/);
-  assert.match(panel, /canPromoteMemory/);
-  assert.match(panel, /贡献到公共知识库/);
-  assert.match(page, /source_kind === "memory"/);
-  assert.match(page, /记忆提取候选/);
+  const panel = await parseModule("memory-panel.tsx");
+  const page = await parseModule("page.tsx");
+  const panelModelImports = new Set(
+    importsFrom(panel, "./memory-model").map((item) => item.imported),
+  );
+
+  assert.equal(panelModelImports.has("memoryPromotionPath"), true);
+  assert.equal(panelModelImports.has("canPromoteMemory"), true);
+  assert.ok(jsxTextValues(panel).some((value) => value.includes("贡献到公共知识库")));
+  assert.ok(stringLiterals(page).includes("memory"));
+  assert.ok(jsxTextValues(page).some((value) => value.includes("记忆提取候选")));
 });

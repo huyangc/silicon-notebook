@@ -5,6 +5,10 @@ from typing import Any
 from app.core.config import Settings
 from app.core.llm import OpenAICompatibleClient
 from app.repositories.sqlite.identity_store import IdentityStore
+from app.services.model_concurrency import (
+    LimitedJsonChatClient,
+    current_model_concurrency,
+)
 from app.services.model_config import ModelNotConfiguredError, ResolvedModelConfig
 from app.services.rerank_client import RerankClient
 
@@ -103,13 +107,21 @@ class RuntimeModelProvider:
             self._user_llm_clients[fingerprint] = client
         return client
 
+    def _limit_json_client(self, client: Any) -> Any:
+        state = current_model_concurrency()
+        if state is None:
+            return client
+        return LimitedJsonChatClient(client, state.llm)
+
     def _llm_for_role(self, role: str):
         cfg = self.identity.resolve_model_config(self.identity.current_user(), role)
         if cfg.source == "user":
-            return self._user_llm_cached(cfg)
-        if cfg.source == "none":
-            return _UNCONFIGURED_LLM
-        return self._system_llm_for(role)
+            raw = self._user_llm_cached(cfg)
+        elif cfg.source == "none":
+            raw = _UNCONFIGURED_LLM
+        else:
+            raw = self._system_llm_for(role)
+        return self._limit_json_client(raw)
 
     def primary_unconfigured(self) -> bool:
         """Whether the current user has no configured primary LLM."""

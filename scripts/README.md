@@ -69,7 +69,7 @@ python3 scripts/diag.py base-recall [active_notebook_id] [查询词]
 |--------|--------|----------|------|
 | `slow` | 离线从 `.local` 日志/工件捞慢因证据(请求延迟分位 / 事故观测事件 / LLM 延迟 / 规模画像 / reasoning-PPR 审计 / env),出**可直接粘贴**的文本报告 | **纯 stdlib、只读、脱敏**,可在持有 `.local/` 的**部署机**上跑,不 import app | `diag_slow.py` |
 | `latency` | 从 `events.jsonl` 的 `ask_stage` 事件出**每阶段 P50/P95/max**(自动并入 per-user 子目录) | 纯 stdlib,不 import app | 聚合口径与 `app/eval/ask_latency.py` 一致(有漂移守卫测试) |
-| `base-recall` | 活体连真实库/env,诊断「深度报告 / reasoning 为何不引用 base 库」(常见根因=base 未建 scale 索引→语义召回恒 0) | **需 import app**(懒加载:仅此子命令拉起 app),在能加载真实 `.env`+库的机器上跑 | `diag_base_report.py` |
+| `base-recall` | 活体连真实库/env,诊断「深度报告 / reasoning 为何不引用参考库」(最常见根因=这个笔记本压根没挂任何参考库,和索引无关——见下方脚本自身的分级说明) | **需 import app**(懒加载:仅此子命令拉起 app),在能加载真实 `.env`+库的机器上跑 | `diag_base_report.py` |
 
 **离线纯净性是硬约束**:`slow` / `latency` 绝不 import app(`diag.py` 自身零 DB 调用、零 app 依赖),这样在裸机上随手就能跑;只有 `base-recall` 才懒加载 app。
 

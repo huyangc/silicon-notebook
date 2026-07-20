@@ -12,6 +12,7 @@ from app.models.schemas import (
     KgBuildJobStatus,
     NotebookAnalytics,
     NotebookCreate,
+    NotebookRef,
     NotebookSearchResponse,
     NotebookSummary,
     NotebookTemplate,
@@ -142,22 +143,22 @@ class NotebookSummaryQuery:
         """Count parsed sources that do not have a complete KG extraction."""
         return self.queries.pending_kg_source_count(db, notebook_id)
 
-    def base_notebook_info(
-        self, db: "sqlite3.Connection | None" = None
-    ) -> "tuple[str, bool]":
-        """(基准库名, 是否有 KG) —— 一次查询同时供 NotebookSummary 的 base_notebook_name
-        与 base_kg_available,避免每条 summary 各查一次(net-zero 于原 base_kg_available)。
-        基准库全局唯一(mark_notebook_base 会降级其它 tier='base'),取最早创建者;has_kg
-        沿用 _any_base_notebook_has_kg 相同的 EXISTS 语义,保证 base_kg_available 值不变。
-        无基准库 → ("", False)。"""
+    def mounted_bases(
+        self, notebook_id: str, db: "sqlite3.Connection | None" = None
+    ) -> "tuple[list[NotebookRef], bool]":
+        """(参考库列表, 是否任一有 KG) —— 一次查询同时供 NotebookSummary 的
+        base_notebooks 与 base_kg_available,避免每条 summary 各查一次。
+        未挂载 → ([], False)。"""
         if db is not None:
-            row = self.queries.base_notebook_info_row(db)
+            rows = self.queries.mounted_bases_row(db, notebook_id)
         else:
             with self.database.connect() as conn:
-                row = self.queries.base_notebook_info_row(conn)
-        if not row:
-            return ("", False)
-        return (row[0] or "", bool(row[1]))
+                rows = self.queries.mounted_bases_row(conn, notebook_id)
+        refs = [
+            NotebookRef(id=r["id"], name=r["name"], tier=r["tier"] or "personal")
+            for r in rows
+        ]
+        return (refs, any(bool(r["has_kg"]) for r in rows))
 
     def from_row(
         self,
@@ -185,7 +186,7 @@ class NotebookSummaryQuery:
             except (json.JSONDecodeError, TypeError):
                 return []
 
-        base_name, base_has_kg = self.base_notebook_info(connection)
+        base_refs, base_has_kg = self.mounted_bases(row["id"], connection)
         return NotebookSummary(
             id=row["id"],
             name=row["name"],
@@ -202,7 +203,7 @@ class NotebookSummaryQuery:
             tier=row["tier"] if "tier" in keys else "personal",
             kg_ready=self.has_kg(connection, row["id"]),
             base_kg_available=base_has_kg,
-            base_notebook_name=base_name,
+            base_notebooks=base_refs,
             kg_pending_sources=self.count_pending_kg_sources(connection, row["id"]),
             is_shared=bool(row["is_shared"]) if "is_shared" in keys else False,
         )

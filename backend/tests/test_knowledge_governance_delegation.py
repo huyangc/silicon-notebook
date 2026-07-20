@@ -175,6 +175,9 @@ def test_t4deleg_review_queue_rows_delegate(repo, monkeypatch):
 
 def test_t4deleg_promotion_object_type_row_delegate(repo, monkeypatch):
     notebook = repo.create_notebook(NotebookCreate(name="promo"))
+    base = repo.create_notebook(NotebookCreate(name="promo base"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
     object_id = repo._test_insert_object(notebook.id, "concept", {"name": "Widget"})
     store = repo._runtime.governance
     original = store.promotion_object_type_row  # staticmethod -> plain function
@@ -193,6 +196,9 @@ def test_t4deleg_notebook_tier_row_delegate(repo, monkeypatch):
     # promotion_object_type_row runs for real (real object); only the tier read
     # is spied, so propose_promotion's base-notebook guard reaches the store.
     notebook = repo.create_notebook(NotebookCreate(name="tier"))
+    base = repo.create_notebook(NotebookCreate(name="tier base"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
     object_id = repo._test_insert_object(notebook.id, "concept", {"name": "T"})
     calls = []
 
@@ -207,6 +213,9 @@ def test_t4deleg_notebook_tier_row_delegate(repo, monkeypatch):
 
 def test_t4deleg_promotion_object_rows_delegate(repo, monkeypatch):
     notebook = repo.create_notebook(NotebookCreate(name="pq"))
+    base = repo.create_notebook(NotebookCreate(name="pq base"))
+    repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(notebook.id, [base.id], "user-local")
     object_id = repo._test_insert_object(notebook.id, "concept", {"name": "Q"})
     repo.propose_promotion(notebook.id, object_id)  # seeds one 'proposed' candidate
     calls = []
@@ -222,10 +231,23 @@ def test_t4deleg_promotion_object_rows_delegate(repo, monkeypatch):
 
 def test_t4deleg_object_payload_row_delegate(repo, monkeypatch):
     # object_payload_row is read BEFORE approve_promotion_in_transaction raises
-    # "no base notebook" (no base tier here) — the spy still records the call.
+    # for a missing target_base_id — the spy still records the call. Task 7
+    # (multi-domain base libraries) moved the "nowhere to promote into" guard
+    # from a global "no base notebook exists" check to a per-candidate
+    # target_base_id read; propose_promotion itself now refuses to create a
+    # candidate with an empty target, so this seeds one directly via raw SQL,
+    # mirroring a pre-Task-7 legacy row (see promotion_candidates migration).
     notebook = repo.create_notebook(NotebookCreate(name="approve"))
     object_id = repo._test_insert_object(notebook.id, "concept", {"name": "A"})
-    candidate = repo.propose_promotion(notebook.id, object_id)
+    candidate_id = "promo-t4deleg-empty-target"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO promotion_candidates "
+            "(id, notebook_id, object_id, object_type, status, reason, "
+            " reviewed_by, base_match_id, created_at, updated_at, target_base_id) "
+            "VALUES (?,?,?,?,'proposed','','','',?,?,'')",
+            (candidate_id, notebook.id, object_id, "concept", "t", "t"),
+        )
     calls = []
 
     def spy(db, obj_id):
@@ -233,8 +255,8 @@ def test_t4deleg_object_payload_row_delegate(repo, monkeypatch):
         return {"payload": "{}"}
 
     monkeypatch.setattr(repo._runtime.governance, "object_payload_row", spy)
-    with pytest.raises(ValueError, match="no base notebook"):
-        repo.approve_promotion(candidate["id"])
+    with pytest.raises(ValueError, match="target_base_id"):
+        repo.approve_promotion(candidate_id)
     assert calls and calls[0] == object_id  # MUT
 
 

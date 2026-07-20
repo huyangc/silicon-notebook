@@ -1,367 +1,319 @@
-// 错误人话层的防复发守卫。
-//
-// 「全改人话」很容易变成假绿:errors.ts 的单测全过,但某个独立 API client 根本
-// 没接进来,照样把 `403 {"detail":"notebook owner required"}` 直接甩给用户。
-// 这里扫全量前端源码,从形态上禁掉两类泄漏,并正面钉住已迁移的调用点:
-//
-//   ①「裸抛状态码」——`new Error(`${res.status} ...`)`(第一轮评审)
-//   ②「直出 err.message」——catch 分支把原始异常文本写进用户可见位置
-//      (第二轮评审阻塞 1)。守卫①抓不到这类:`setStatusText(`服务异常:
-//      ${err.message}`)` 里没有任何状态码,但 fetch 自身 reject 时用户看到的
-//      就是「服务异常:Failed to fetch」——那条路径根本进不了
-//      throwHumanizedHttpError。
-
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
 
-const APP_DIR = fileURLToPath(new URL("./", import.meta.url));
+import ts from "typescript";
 
-async function sourceFiles() {
-  const entries = await readdir(APP_DIR, { recursive: true, withFileTypes: true });
-  return entries
-    .filter((e) => e.isFile())
-    .map((e) => path.relative(APP_DIR, path.join(e.parentPath ?? e.path, e.name)))
-    .filter((p) => /\.tsx?$/.test(p) && !p.endsWith(".d.ts"))
-    .sort();
+import {
+  appSourceModules,
+  callsIn,
+  findFunction,
+  importsIn,
+  parseModule,
+  stringLiterals,
+} from "./test/semantic-source.mjs";
+
+
+const APPROVED_BARE_STATUS_ERRORS = Object.freeze({
+  "knowhow-cell-editor.tsx|<module>.KnowhowImage|bare-status-error|Error": {
+    count: 1,
+    reason: "authenticated image failures become a non-text failed placeholder",
+  },
+  "page.tsx|<module>.AuthedImage|bare-status-error|Error": {
+    count: 1,
+    reason: "authenticated source image failures become a failed placeholder",
+  },
+  "pending-center.tsx|<module>.usePendingActions.connect|bare-status-error|Error": {
+    count: 1,
+    reason: "stream status is internal reconnect control flow",
+  },
+});
+const APPROVED_MESSAGE_READS = Object.freeze({
+  "admin/usage/page.tsx|<module>.AdminUsagePage|property|message": {
+    count: 2,
+    reason: "one access is a forbidden sentinel and one is humanized view state",
+  },
+  "answer-panel.tsx|<module>.AnswerView|property|message": {
+    count: 1,
+    reason: "model diagnostic detail is sent only to bounded logging",
+  },
+  "knowhow-cell-editor.tsx|<module>.KnowhowCellEditor|property|message": {
+    count: 2,
+    reason: "optimizer and reformatter error states are written through the humanization boundary",
+  },
+  "knowhow-panel.tsx|<module>.KnowhowPanel|property|message": {
+    count: 1,
+    reason: "typed source-cleanup error carries server-validated 409 guidance",
+  },
+  "knowhow-transfer.ts|<module>.apiFetch|property|message": {
+    count: 1,
+    reason: "validated source-cleanup guidance is copied into its typed error",
+  },
+  "page.tsx|<module>.Home|property|message": {
+    count: 1,
+    reason: "application-owned information modal state is not exception text",
+  },
+  "transfer-model.ts|<module>.parseCleanupFailure|property|message": {
+    count: 3,
+    reason: "409 cleanup payload is schema-checked before its guidance is returned",
+  },
+});
+const APPROVED_DIAGNOSTIC_READS = Object.freeze({
+  "dev/logs/components/LogDetail.tsx|<module>.LogDetail|diagnostic|error": {
+    count: 2,
+    reason: "owner-only developer log detail intentionally renders raw records",
+  },
+  "dev/logs/components/StatsBar.tsx|<module>.StatsBar|diagnostic|error": {
+    count: 1,
+    reason: "status aggregate is a numeric count rather than diagnostic text",
+  },
+  "memory-panel.tsx|<module>.MemoryPanel.submitTransfer|diagnostic|error": {
+    count: 1,
+    reason: "per-item transfer diagnostics are selected only for bounded logging",
+  },
+  "page.tsx|<module>.Home.runModelTest|diagnostic|error": {
+    count: 2,
+    reason: "model test diagnostics are gated by result code and sent to logging",
+  },
+  "page.tsx|<module>.Home.tick|diagnostic|error_message": {
+    count: 2,
+    reason: "background source failures pass through toUserMessage",
+  },
+  "page.tsx|<module>.Home|diagnostic|error": {
+    count: 4,
+    reason: "workspace job diagnostics are logged or passed through toUserMessage",
+  },
+  "page.tsx|<module>.Home|diagnostic|error_message": {
+    count: 1,
+    reason: "source detail uses the field only to select fixed user copy",
+  },
+  "page.tsx|<module>.probeReady|diagnostic|error": {
+    count: 3,
+    reason: "startup diagnostics are captured in a snapshot and bounded logging",
+  },
+  "page.tsx|<module>.readAskStream.consumeLine|diagnostic|error": {
+    count: 1,
+    reason: "stream diagnostics are logged before a branded scenario error",
+  },
+  "report-view.tsx|<module>.ReportsPanel|diagnostic|error": {
+    count: 2,
+    reason: "report failure detail is condition-only and bounded-log-only",
+  },
+});
+
+
+function declaredScopeName(node, sourceFile) {
+  if (
+    ts.isFunctionDeclaration(node)
+    || ts.isMethodDeclaration(node)
+    || ts.isClassDeclaration(node)
+  ) {
+    return node.name?.getText(sourceFile);
+  }
+  if (
+    ts.isVariableDeclaration(node)
+    && node.initializer
+    && (
+      ts.isArrowFunction(node.initializer)
+      || ts.isFunctionExpression(node.initializer)
+    )
+  ) {
+    return node.name.getText(sourceFile);
+  }
+  return undefined;
 }
 
-const FILES = await sourceFiles();
 
-async function read(relPath) {
-  return readFile(path.join(APP_DIR, relPath), "utf8");
+function containsProperty(node, propertyName) {
+  let found = false;
+  function visit(child) {
+    if (
+      ts.isPropertyAccessExpression(child)
+      && child.name.text === propertyName
+    ) {
+      found = true;
+    }
+    ts.forEachChild(child, visit);
+  }
+  visit(node);
+  return found;
 }
 
-// 已知例外:必须逐行精确登记,新增的裸抛照样会被抓。
-// 共同点是「这个 Error 根本走不到用户面前」——被自己的 catch 吞掉用作内部
-// 控制流。它们要的是控制流,不是文案。
-const ALLOWED_BARE_THROWS = new Map([
-  [
-    // SSE 重连:Error 被同一个 try 的 catch 吞掉用于退避重连,不进 UI。
-    // 也不能改走 throwHumanizedHttpError——那会读掉(消费)流式响应的 body。
-    "pending-center.tsx",
-    ["if (!resp.ok || !resp.body) throw new Error(`stream ${resp.status}`);"],
-  ],
-  [
-    // 带鉴权的图片加载:catch 只把这张图切成 failed 占位,不展示 message。
-    "knowhow-cell-editor.tsx",
-    ["if (!res.ok) throw new Error(String(res.status));"],
-  ],
-  [
-    // 同上(source detail 里的 <AuthedImage>):失败只渲染「图片加载失败」占位。
-    "page.tsx",
-    [".then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))"],
-  ],
-]);
 
-test("没有任何地方把 HTTP 状态码裸抛给用户", async () => {
-  const offenders = [];
-  for (const rel of FILES) {
-    const text = await read(rel);
-    const allowed = ALLOWED_BARE_THROWS.get(rel) ?? [];
-    text.split("\n").forEach((line, i) => {
-      const trimmed = line.trim();
-      // 形态:`new Error(...)` 的实参里出现 `.status`——模板串
-      // (`${res.status} ${await res.text()}`)和 String(res.status) 都算。
-      // 只看 `new Error(` 之后的部分,免得把 `if (res.status === 403) throw
-      // new Error("forbidden")` 这种「条件里有 status」的哨兵误伤。
-      if (trimmed.startsWith("//") || trimmed.startsWith("*")) return; // 注释里可以引用这个形态
-      const at = trimmed.indexOf("new Error(");
-      if (at < 0) return;
-      if (!trimmed.slice(at + "new Error(".length).includes(".status")) return;
-      if (allowed.includes(trimmed)) return;
-      offenders.push(`${rel}:${i + 1}  ${trimmed}`);
-    });
+function callName(node) {
+  if (ts.isIdentifier(node)) return node.text;
+  if (ts.isPropertyAccessExpression(node)) return node.name.text;
+  if (ts.isCallExpression(node)) return callName(node.expression);
+  return "";
+}
+
+
+function semanticErrorSites(sourceFile, path) {
+  const scopes = ["<module>"];
+  const grouped = new Map();
+  const unsafeCopy = [];
+
+  function record(kind, target, node) {
+    const key = `${path}|${scopes.join(".")}|${kind}|${target}`;
+    const current = grouped.get(key) ?? {
+      key,
+      count: 0,
+      diagnosticSnippets: [],
+    };
+    current.count += 1;
+    current.diagnosticSnippets.push(
+      node.getText(sourceFile).replace(/\s+/g, " "),
+    );
+    grouped.set(key, current);
   }
-  assert.deepEqual(
-    offenders,
-    [],
-    "这些地方把状态码/后端原文直接抛给了用户,改用 errors.ts 的 " +
-      "throwHumanizedHttpError(res, tag):\n" + offenders.join("\n")
-  );
-});
 
-// 守卫②:`.message` 白名单。
-//
-// 用「禁形态」写这条守卫是拦不住的——泄漏的写法太多(`err.message`、
-// `${e.message}`、`cause instanceof Error ? cause.message : String(cause)`、
-// 包一层 helper 再 return……)。反过来做就严密了:**任何** `.message` 读取都
-// 必须在这里逐行登记。登记的都是「这不是原始异常文本」的场景。
-// errors.ts 自己是人话层的实现,整体豁免。
-const ALLOWED_MESSAGE_READS = new Map([
-  [
-    "answer-panel.tsx",
-    [
-      // 取出来只为进 console(见同文件 logDiagnostic 的 useEffect),不上屏。
-      // 横幅本身保留(PR#61 的可观测性),但原文不再进 hover title。
-      "const modelErrorDetail = answer.model_errors?.[0]?.message ?? null;",
-    ],
-  ],
-  [
-    "admin/usage/page.tsx",
-    [
-      // 哨兵比对(不是展示):403 → 专用无权限视图。
-      "if (e instanceof Error && e.message === FORBIDDEN_SENTINEL) {",
-      // 展示的是 state.message,而它只由 toUserMessage() 写入(见同文件 catch)。
-      'return <main className="usage-page usage-empty">加载失败:{state.message}</main>;',
-    ],
-  ],
-  [
-    "knowhow-cell-editor.tsx",
-    [
-      // 组件自己的状态字段,由 extractErrorMessage()(= toUserMessage 别名)写入。
-      '{optimizeState.status === "error" && <p className="kh-inline-error">{optimizeState.message}</p>}',
-    ],
-  ],
-  [
-    "page.tsx",
-    [
-      // 应用自己写的提示弹窗文案,与异常无关。
-      "<p>{infoModal.message}</p>",
-    ],
-  ],
-  [
-    "transfer-model.ts",
-    [
-      // 409 source_cleanup_failed 结构化 detail 里的 message 字段——后端固定
-      // 中文文案(backend/app/api/routes.py transfer_knowhow_table 的
-      // SourceCleanupFailed 分支),不是 catch 到的异常 .message。已经过
-      // status===409 && code==="source_cleanup_failed" 的结构校验(本函数
-      // parseCleanupFailure 上半部分),是独立于 X-User-Message 头的另一条可信
-      // 通道,不走 humanizeHttpError()。
-      'const message = typeof d.message === "string" && d.message ? d.message : FALLBACK_CLEANUP_MESSAGE;',
-    ],
-  ],
-  [
-    "knowhow-transfer.ts",
-    [
-      // 同上一条(transfer-model.ts):cleanup.message 就是 parseCleanupFailure()
-      // 校验过的那个 409 专属字段,原样带进 KnowhowSourceCleanupError,不是异常
-      // 文本。
-      "if (cleanup) throw new KnowhowSourceCleanupError(cleanup.newTableId, cleanup.message);",
-    ],
-  ],
-  [
-    "knowhow-panel.tsx",
-    [
-      // err.message 读的是 KnowhowSourceCleanupError——同一条 409 专属信任链的
-      // 第三跳(transfer-model.ts 校验 → knowhow-transfer.ts 原样带上 → 这里在
-      // instanceof 窄化之后展示),不是任意异常文本。刻意不改走 toUserMessage
-      // (err, fallback):这个类型没有、也不该有 HUMANIZED 品牌(那是 errors.ts
-      // 内部专用),toUserMessage 会把它判成"未翻译"、吞掉原文只剩兜底文案——
-      // 毁掉这条 409 分支存在的意义:明确告诉用户"副本已存在,源表还在,别再
-      // 盲目重试"(见调用点上方大段注释及 knowhow-transfer.ts 头部说明)。
-      "setActionError(err.message);",
-    ],
-  ],
-]);
+  function visit(node) {
+    const scopeName = declaredScopeName(node, sourceFile);
+    if (scopeName) scopes.push(scopeName);
 
-test("没有任何地方把原始异常文本直出给用户", async () => {
-  const offenders = [];
-  for (const rel of FILES) {
-    if (rel === "errors.ts") continue; // 人话层自己的实现
-    const text = await read(rel);
-    const allowed = ALLOWED_MESSAGE_READS.get(rel) ?? [];
-    text.split("\n").forEach((line, i) => {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("//") || trimmed.startsWith("*")) return; // 注释里可以谈这个形态
-      if (!/\.message\b/.test(trimmed)) return; // 注意 `.messages`(复数)不算
-      if (allowed.includes(trimmed)) return;
-      offenders.push(`${rel}:${i + 1}  ${trimmed}`);
-    });
-  }
-  assert.deepEqual(
-    offenders,
-    [],
-    "这些地方读了原始异常文本。catch 分支一律走 errors.ts 的 toUserMessage(error, 兜底):\n" +
-      offenders.join("\n") +
-      "\n(确实不是异常文本的,加进 ALLOWED_MESSAGE_READS 并写清楚理由)"
-  );
-});
-
-// 守卫③:后端**诊断字段**的白名单(第三轮评审阻塞 2)。
-//
-// 守卫②只扫 `.message`,所以后端塞在 `.error` / `.error_message` 里的原始
-// 异常串整类溜了过去——「6/6 通过」是假绿。这些字段后端统一写成
-// `f"{type(exc).__name__}: {exc}"`(grep 到 24 处),和 JS 异常一样不能直出。
-//
-// `console.error` 不算(那正是原文该去的地方);`.errors`(复数)、
-// `.error_count` 之类靠 \b 排除。
-const DIAGNOSTIC_FIELD_RE = /\.(error|error_message)\b/;
-
-const ALLOWED_DIAGNOSTIC_READS = new Map([
-  [
-    "dev/logs/components/LogDetail.tsx",
-    [
-      // 开发者日志查看器:整个页面的存在意义就是显示原始日志记录,
-      // 面向的是 admin/开发者而不是终端用户(路由在 /dev/logs 且 owner 门控)。
-      "{record.error ? (",
-      '<strong>error{record.attempt != null ? `（attempt ${record.attempt}）` : ""}:</strong> {record.error}',
-    ],
-  ],
-  [
-    "dev/logs/components/StatsBar.tsx",
-    [
-      // 是个计数(number),不是错误文本。
-      '{chip("error", stats.by_status.error ?? 0)}',
-    ],
-  ],
-  [
-    "page.tsx",
-    [
-      // 组装快照对象,不是展示;原文在同函数末尾统一进 logDiagnostic。
-      "error: body?.error ?? null,",
-      "if (snapshot.error) logDiagnostic(\"ready\", snapshot.error);",
-      // 模型「测试连接」:200 响应挂不上 X-User-Message 头,出处改由 schema 的
-      // code 字段承载(上屏的是 vocabulary.ts 里该 code 的文案);r.error 只进 console。
-      'if (!r.ok && r.error) logDiagnostic("model-test", r.error);',
-      // ask 流的 error 事件:原文只进受限诊断出口,上抛的是带品牌的场景文案。
-      'logDiagnostic("ask-stream", event.error);',
-      // 以下三处都已过人话层(裸值包进 Error 交给 toUserMessage)。
-      '? `全部自动判重中止：${toUserMessage(job.error ? new Error(job.error) : null, "出了点问题")}（已处理 ${job.done}）`',      ': toUserMessage(d.error ? new Error(d.error) : null, "该问答失败，请稍后重试"));',
-      ': `失败：${toUserMessage(r.error ? new Error(r.error) : null, "连接未通过")}`,',
-      // 条件判断 + 已过人话层的两行(justFailed 那处)。
-      "const failureHint = justFailed.error_message",
-      '? toUserMessage(new Error(justFailed.error_message), "")',
-      // 只用来二选一挑文案,不展示原文。
-      "<p>{sourceDetail.error_message",
-    ],
-  ],
-  [
-    "report-view.tsx",
-    [
-      // 条件判断:失败态才渲染那条(文案是写死的中文,不含 active.error)。
-      '{active.status === "failed" && active.error && (',
-      // 取出来只为进 console(见同文件 logDiagnostic 的 useEffect)。
-      'const activeError = active?.status === "failed" ? active.error : null;',
-      "if (activeError) logDiagnostic(\"report\", activeError);",
-    ],
-  ],
-  [
-    "memory-panel.tsx",
-    [
-      // 逐条 failed 结果的原文是后端 str(exc)(memory_service.transfer 内层
-      // except 的兜底,见 backend/app/services/memory_service.py),取出来只为
-      // 进 console(紧接着的 logDiagnostic 调用),不拼进用户可见的 failure 文案
-      // ——同上面 report-view.tsx 的 activeError 一个模式。
-      '.map((result) => (result.status === "failed" ? result.error : null))',
-    ],
-  ],
-]);
-
-test("没有任何地方把后端诊断字段(.error/.error_message)直出给用户", async () => {
-  const offenders = [];
-  for (const rel of FILES) {
-    if (rel === "errors.ts") continue; // 人话层自己的实现
-    const text = await read(rel);
-    const allowed = ALLOWED_DIAGNOSTIC_READS.get(rel) ?? [];
-    text.split("\n").forEach((line, i) => {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("//") || trimmed.startsWith("*")) return; // 注释里可以谈这个形态
-      if (trimmed.startsWith("{/*")) return; // JSX 注释
-      // console.error 是诊断通道本身,不是泄漏。
-      if (!DIAGNOSTIC_FIELD_RE.test(trimmed.replaceAll("console.error", ""))) return;
-      if (allowed.includes(trimmed)) return;
-      offenders.push(`${rel}:${i + 1}  ${trimmed}`);
-    });
-  }
-  assert.deepEqual(
-    offenders,
-    [],
-    "这些地方读了后端的原始诊断字段。要么包进 Error 走 toUserMessage(…),要么" +
-      "用 logDiagnostic() 只送 console:\n" +
-      offenders.join("\n") +
-      "\n(确实不是异常文本的,加进 ALLOWED_DIAGNOSTIC_READS 并写清楚理由)"
-  );
-});
-
-// 守卫④:场景文案必须**带品牌**(第四轮评审阻塞 2)。
-//
-// 品牌(HUMANIZED)原来只在 humanizeHttpError 一个出口打,于是任何「重新包装」
-// 都会掉品牌。page.tsx 的 ask 流就是这么中招的:
-//
-//   throw new Error(toUserMessage(new Error(event.error), "回答没能完成，请重试"))
-//
-// 抛出去的是**普通** Error,外层 runAsk → reportError → toUserMessage 认不出
-// 它已经安全化,于是再泛化一次:
-//   第一跳 → "回答没能完成，请重试"
-//   第二跳 → "服务出了点问题，请稍后重试"   ← 场景文案被吃掉
-// 而且第一句安全文案还会被当成「未翻译的原始错误」多记一条诊断。
-//
-// 两条形态一起禁,它们是同一个根因的两种长相:
-//   (a) `new Error(toUserMessage(...) / humanize...(...))` —— 把已安全化的文案
-//       重新包进裸 Error;
-//   (b) `new Error("<含中文>")` —— 写给用户的场景文案,压根没盖过章。
-// 两类都改用 errors.ts 的 humanizedError():它产出带品牌的 Error,能穿过外层
-// catch 原样抵达用户。
-const REWRAP_RE = /new Error\(\s*(toUserMessage|humanize|extractErrorMessage)/;
-const CJK_LITERAL_THROW_RE = /new Error\(\s*["'`][^"'`]*[一-鿿]/;
-
-// 目前为空:全仓扫下来没有「确实该裸抛中文」的场景。
-// 控制流哨兵(admin 页的 FORBIDDEN_SENTINEL)天然不在射程内——它抛的是常量不是
-// 中文字面量。真要加豁免,逐行登记并写清「为什么这句到不了用户面前」。
-const ALLOWED_UNBRANDED_COPY = new Map([]);
-
-test("给用户的场景文案必须带品牌(不重新包装、不裸抛中文)", async () => {
-  const offenders = [];
-  for (const rel of FILES) {
-    if (rel === "errors.ts") continue; // 人话层自己的实现:品牌就是在这儿打的
-    const text = await read(rel);
-    const allowed = ALLOWED_UNBRANDED_COPY.get(rel) ?? [];
-    text.split("\n").forEach((line, i) => {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("//") || trimmed.startsWith("*")) return; // 注释里可以谈这个形态
-      if (allowed.includes(trimmed)) return;
-      if (REWRAP_RE.test(trimmed)) {
-        offenders.push(`${rel}:${i + 1}  [重新包装掉品牌]  ${trimmed}`);
-        return;
+    if (ts.isPropertyAccessExpression(node)) {
+      if (node.name.text === "message" && path !== "errors.ts") {
+        record("property", "message", node);
       }
-      // DOMException 不算(page.tsx 的 "已中断回答" 是 AbortError 控制流)。
-      if (CJK_LITERAL_THROW_RE.test(trimmed)) {
-        offenders.push(`${rel}:${i + 1}  [场景文案没盖章]  ${trimmed}`);
+      if (
+        (node.name.text === "error" || node.name.text === "error_message")
+        && path !== "errors.ts"
+        && node.expression.getText(sourceFile) !== "console"
+      ) {
+        record("diagnostic", node.name.text, node);
       }
-    });
+    }
+
+    if (
+      ts.isNewExpression(node)
+      && callName(node.expression) === "Error"
+      && node.arguments?.length
+    ) {
+      const argument = node.arguments[0];
+      if (containsProperty(argument, "status")) {
+        record("bare-status-error", "Error", node);
+      }
+      if (
+        ts.isCallExpression(argument)
+        && /^(?:toUserMessage|humanize|extractErrorMessage)$/.test(
+          callName(argument.expression),
+        )
+      ) {
+        unsafeCopy.push({
+          path,
+          scope: scopes.join("."),
+          kind: "rewrapped-humanized-error",
+          diagnosticSnippet: node.getText(sourceFile).replace(/\s+/g, " "),
+        });
+      }
+      if (
+        (
+          ts.isStringLiteral(argument)
+          || ts.isNoSubstitutionTemplateLiteral(argument)
+        )
+        && /[一-鿿]/.test(argument.text)
+      ) {
+        unsafeCopy.push({
+          path,
+          scope: scopes.join("."),
+          kind: "unbranded-user-copy",
+          diagnosticSnippet: node.getText(sourceFile).replace(/\s+/g, " "),
+        });
+      }
+    }
+
+    ts.forEachChild(node, visit);
+    if (scopeName) scopes.pop();
   }
+
+  visit(sourceFile);
+  return {
+    grouped: [...grouped.values()].sort(
+      (left, right) => left.key.localeCompare(right.key),
+    ),
+    unsafeCopy,
+  };
+}
+
+
+async function repositoryErrorSites() {
+  const result = {
+    bareStatus: [],
+    message: [],
+    diagnostic: [],
+    unsafeCopy: [],
+  };
+  for (const { path, module } of await appSourceModules()) {
+    const findings = semanticErrorSites(module, path);
+    result.unsafeCopy.push(...findings.unsafeCopy);
+    for (const finding of findings.grouped) {
+      if (finding.key.includes("|bare-status-error|")) {
+        result.bareStatus.push(finding);
+      } else if (finding.key.includes("|diagnostic|")) {
+        result.diagnostic.push(finding);
+      } else {
+        result.message.push(finding);
+      }
+    }
+  }
+  return result;
+}
+
+
+function comparable(findings) {
+  return Object.fromEntries(findings.map(({ key, count }) => [key, count]));
+}
+
+function reviewedCounts(manifest) {
+  return Object.fromEntries(
+    Object.entries(manifest).map(([key, review]) => {
+      assert.ok(review.reason, key);
+      return [key, review.count];
+    }),
+  );
+}
+
+
+test("reviewed raw-error exceptions use semantic identity", async () => {
+  const sites = await repositoryErrorSites();
   assert.deepEqual(
-    offenders,
-    [],
-    "这些地方产出的用户文案没带品牌,外层 catch 的 toUserMessage 会把它再泛化一次" +
-      "(场景文案被吃成全局兜底)。改用 errors.ts 的 humanizedError(文案):\n" +
-      offenders.join("\n")
+    comparable(sites.bareStatus),
+    reviewedCounts(APPROVED_BARE_STATUS_ERRORS),
+  );
+  assert.deepEqual(
+    comparable(sites.message),
+    reviewedCounts(APPROVED_MESSAGE_READS),
+  );
+  assert.deepEqual(
+    comparable(sites.diagnostic),
+    reviewedCounts(APPROVED_DIAGNOSTIC_READS),
   );
 });
 
-test("catch 侧的关键出口确实走了人话层", async () => {
-  // 反面守卫抓形态,这里正面钉住几个「一改就全网泄漏」的枢纽。
-  const page = await read("page.tsx");
-  // 全工作区 90+ 个 .catch(reportError) 都汇到这一个函数。
-  assert.match(
-    page,
-    /function reportError\(error: unknown\) \{\s*\n\s*setStatusText\(toUserMessage\(error, "[^"]+"\)\);/,
-    "page.tsx 的 reportError 必须过 toUserMessage"
-  );
-  // ask 流的 error 事件:原文进受限诊断出口,抛出去的是**带品牌**的场景文案。
-  // 裸 new Error 会掉品牌,外层 reportError 再泛化一次(第四轮评审阻塞 2)。
-  assert.match(
-    page,
-    /logDiagnostic\("ask-stream", event\.error\);\s*\n\s*throw humanizedError\("回答没能完成，请重试"\);/,
-    "ask 流的 error 事件必须 logDiagnostic 原文 + 抛 humanizedError 场景文案"
-  );
-  assert.match(page, /toUserMessage\(d\.error \? new Error\(d\.error\) : null,/, "job.error 必须过 toUserMessage");
 
-  // knowhow 面板 ~20 个调用点共用的入口,必须就是 toUserMessage。
-  const knowhow = await read("knowhow-import-logic.ts");
-  assert.match(
-    knowhow,
-    /export function extractErrorMessage\([^)]*\): string \{\s*\n\s*return toUserMessage\(err, fallback\);\s*\n\}/,
-    "extractErrorMessage 必须只是 toUserMessage 的别名,不能再长出第二套规则"
+test("user copy is not rewrapped or thrown without the humanized brand", async () => {
+  const sites = await repositoryErrorSites();
+  assert.deepEqual(sites.unsafeCopy, []);
+});
+
+
+test("critical catch boundaries call the shared humanization layer", async () => {
+  const page = await parseModule("page.tsx");
+  const knowhow = await parseModule("knowhow-import-logic.ts");
+
+  assert.ok(callsIn(findFunction(page, "reportError")).includes("toUserMessage"));
+  assert.ok(callsIn(findFunction(page, "readAskStream")).includes("humanizedError"));
+  assert.ok(callsIn(findFunction(page, "readAskStream")).includes("logDiagnostic"));
+  assert.deepEqual(
+    callsIn(findFunction(knowhow, "extractErrorMessage")),
+    ["toUserMessage"],
   );
 });
 
-test("每个独立 API client 都接进了错误人话层", async () => {
-  // 正面钉住:这些文件各有自己的 fetch 封装,是最容易漏掉的一类。
+
+test("independent API clients import and call the error boundary", async () => {
+  const modules = new Map(
+    (await appSourceModules()).map((item) => [item.path, item.module]),
+  );
   const clients = [
     "auth.ts",
     "notebook-share.ts",
@@ -377,63 +329,47 @@ test("每个独立 API client 都接进了错误人话层", async () => {
     "admin/usage/notebooks.ts",
     "dev/logs/api.ts",
   ];
-  for (const rel of clients) {
-    const text = await read(rel);
+
+  for (const path of clients) {
+    const module = modules.get(path);
+    assert.ok(module, path);
     assert.ok(
-      /from "[./]*errors(\.ts)?"/.test(text),
-      `${rel} 有自己的 fetch 封装,必须 import 错误人话层`
+      importsIn(module).some(({ module: imported }) => (
+        imported.endsWith("/errors")
+        || imported.endsWith("/errors.ts")
+        || imported === "./errors"
+        || imported === "./errors.ts"
+      )),
+      `${path}: missing errors import`,
     );
+    const calls = callsIn(module);
     assert.ok(
-      text.includes("throwHumanizedHttpError(") || text.includes("readHttpError("),
-      `${rel} 应当用 throwHumanizedHttpError()/readHttpError() 处理失败响应`
+      calls.includes("throwHumanizedHttpError")
+      || calls.includes("readHttpError"),
+      `${path}: missing failure-response boundary`,
     );
   }
 });
 
-test("model-settings 的诊断带上 detail 和 requestId(不是裸 HTTP 500)", async () => {
-  const text = await read("model-settings.ts");
-  // 旧写法只有 `console.error(\`[model-settings] HTTP ${res.status}\`)`,
-  // 模型服务测试失败时定位不到供应商到底报了什么。
-  assert.equal(text.includes("] HTTP ${res.status}"), false);
-  assert.equal((text.match(/throwHumanizedHttpError\(res, "model-settings"\)/g) ?? []).length, 3);
-});
 
-test("报告面板不把已翻译的错误压平成一句通用文案", async () => {
-  const text = await read("report-view.tsx");
-  // 无条件 setToast(通用文案) 会把 401/403/404/409 压成同一句,
-  // 用户分不清「登录失效 / 没权限 / 已删除 / 冲突」,还会反复重试。
-  assert.equal(text.includes('setToast("报告操作没成功，请稍后重试")'), false);
-  assert.equal(text.includes('setToast("报告没能生成完，可以重试")'), false);
-  assert.ok(text.includes('toUserMessage(error, "报告操作没成功，请稍后重试")'));
-  assert.ok(text.includes('toUserMessage(error, "报告没能生成完，可以重试")'));
-});
-
-// 守卫⑤:报告面板不留裸 console.error(第四轮评审阻塞 3)。
-//
-// 原来两处失败路径都是「裸日志 + toUserMessage」并排:
-//   console.error("[report] 生成失败", error);   ← 无上限、整个对象
-//   setToast(toUserMessage(error, "…"));         ← 它自己又经 logDiagnostic 记一条
-// 既重复打印,又绕过 DIAGNOSTIC_MAX_CHARS——和本轮「HTTP 与非 HTTP 共用同一
-// 截断上限」的整改声明直接矛盾。
-//
-// 这条守卫钉的是**真实调用端**:光测 helper 截断没用,因为泄漏发生在调用端
-// **额外**加的那一行上,helper 测试照样全绿。配套的行为断言见 errors.test.mjs
-// 的「报告面板的超长异常」那条。
-test("报告面板的诊断只走人话层,不留裸 console.error", async () => {
-  const text = await read("report-view.tsx");
-  const offenders = text
-    .split("\n")
-    .map((line, i) => [line.trim(), i + 1])
-    .filter(([trimmed]) => !trimmed.startsWith("//") && !trimmed.startsWith("*"))
-    .filter(([trimmed]) => trimmed.includes("console.error("))
-    .map(([trimmed, lineNo]) => `report-view.tsx:${lineNo}  ${trimmed}`);
-  assert.deepEqual(
-    offenders,
-    [],
-    "报告面板的原始诊断必须走 errors.ts(toUserMessage 会记,或显式 logDiagnostic),\n" +
-      "裸 console.error 既重复打印又绕过 500 字符上限:\n" +
-      offenders.join("\n")
+test("model and report clients retain bounded diagnostics and scenario copy", async () => {
+  const modelSettings = await parseModule("model-settings.ts");
+  const report = await parseModule("report-view.tsx");
+  assert.equal(
+    callsIn(modelSettings)
+      .filter((target) => target === "throwHumanizedHttpError")
+      .length,
+    3,
   );
-  // 正面钉住:诊断通道本身还在(别把日志一删了之,那是另一种退化)。
-  assert.ok(text.includes("logDiagnostic("), "report-view 仍应保留受限诊断出口");
+  assert.equal(callsIn(report).includes("console.error"), false);
+  assert.equal(callsIn(report).includes("logDiagnostic"), true);
+  assert.equal(callsIn(report).includes("toUserMessage"), true);
+  assert.equal(
+    stringLiterals(report).includes("报告操作没成功，请稍后重试"),
+    true,
+  );
+  assert.equal(
+    stringLiterals(report).includes("报告没能生成完，可以重试"),
+    true,
+  );
 });

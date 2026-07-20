@@ -146,20 +146,25 @@ def test_build_notebook_kg_requires_llm(repo):
 # ---------------------------------------------------------------------------
 
 def test_any_base_notebook_has_kg(repo):
+    active = repo.create_notebook(NotebookCreate(name="active"))
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
-    assert repo._any_base_notebook_has_kg() is False
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
+    assert repo._any_base_notebook_has_kg(active.id) is False
     # personal notebook with KG must NOT count as base:
     pers = repo.create_notebook(NotebookCreate(name="p"))
     repo.store_kg(pers.id, None, [
         {"local_id": "P1", "object_type": "concept",
          "payload": {"name": "P"}, "evidence": []}], [])
-    assert repo._any_base_notebook_has_kg() is False
+    assert repo._any_base_notebook_has_kg(active.id) is False
     # now give the BASE notebook KG:
     repo.store_kg(base.id, None, [
         {"local_id": "B1", "object_type": "concept",
          "payload": {"name": "B"}, "evidence": []}], [])
-    assert repo._any_base_notebook_has_kg() is True
+    assert repo._any_base_notebook_has_kg(active.id) is True
+    # unrelated notebook that never mounted base must NOT see the gate open:
+    unmounted = repo.create_notebook(NotebookCreate(name="unmounted"))
+    assert repo._any_base_notebook_has_kg(unmounted.id) is False
 
 
 def test_base_kg_available_on_notebook_summary(repo):
@@ -170,6 +175,9 @@ def test_base_kg_available_on_notebook_summary(repo):
     repo.store_kg(base.id, None, [
         {"local_id": "B1", "object_type": "concept",
          "payload": {"name": "B"}, "evidence": []}], [])
+    # 已发布且有 KG,但未挂载 → 门仍关(多领域基准库:不再隐式全局参与)。
+    assert repo.get_notebook(nb.id).base_kg_available is False
+    repo.replace_notebook_bases(nb.id, [base.id], "user-local")
     assert repo.get_notebook(nb.id).base_kg_available is True
 
 
@@ -222,8 +230,9 @@ def test_strict_allowed_when_base_has_kg(repo):
         {"local_id": "B1", "object_type": "concept",
          "payload": {"name": "Engram"}, "evidence": []}], [])
     empty = repo.create_notebook(NotebookCreate(name="empty"))   # own KG empty
+    repo.replace_notebook_bases(empty.id, [base.id], "user-local")
     resp = repo.ask_reasoning(empty.id, AskRequest(question="Engram", mode="reasoning"))
-    assert resp.kg_required is False           # base satisfies the gate
+    assert resp.kg_required is False           # mounted base satisfies the gate
 
 
 def test_reasoning_search_federates_base(repo):
@@ -234,6 +243,7 @@ def test_reasoning_search_federates_base(repo):
         {"local_id": "B1", "object_type": "concept",
          "payload": {"name": "Engram"}, "evidence": []}], [])
     empty = repo.create_notebook(NotebookCreate(name="empty"))
+    repo.replace_notebook_bases(empty.id, [base.id], "user-local")
     hits = ReasoningRetriever.from_repository(repo, repo.settings).search(empty.id, "Engram")
     names = {h.payload.get("name") for h in hits}
     assert "Engram" in names                   # base hit surfaced via federation
@@ -268,12 +278,14 @@ def test_citations_from_reasoning_hits_carries_base_tier(repo):
     repo.store_kg(active.id, None, [
         {"local_id": "A1", "object_type": "concept",
          "payload": {"name": "Engram encoding"}, "evidence": _PERSONAL_EVIDENCE}], [])
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
 
     # Mirrors ask_reasoning's own call shape (sqlite_repository.py ~12118-12120):
     # top_hits federated across base ⊕ active, then bound to Citation objects.
     top_hits = repo.retrieval.federated_retrieve(active.id, "Engram")
     cited_element_ids = {ev.element_id for item in top_hits for ev in item.evidence}
-    citations = repo._citations_from(top_hits, cited_element_ids, "KG evidence")
+    citations = repo._citations_from(
+        top_hits, cited_element_ids, "KG evidence", notebook_id=active.id)
 
     tier_by_source = {c.source_id: c.tier for c in citations}
     assert tier_by_source.get("src-base") == "base", (
@@ -281,6 +293,48 @@ def test_citations_from_reasoning_hits_carries_base_tier(repo):
         f"(全部 citations: {[(c.source_id, c.tier) for c in citations]})")
     assert tier_by_source.get("src-own") == "personal", (
         f"active 库自己命中的 citation.tier 应为 personal,实为 {tier_by_source.get('src-own')}")
+
+
+# codex r4 review: citations_from() 此前只对 chunk_context/knowledge_context/
+# render_follow_chain_context 三条路径做了「命中的 notebook_id 等于调用方
+# active notebook_id 就归零」的归一化,citations_from 自己漏了——评审当时误判
+# 「不可达」,实际可达:上面 test_citations_from_reasoning_hits_carries_base_tier
+# 已经证明 federated_retrieve 对 active 自己的命中同样会打上 active 自己的
+# notebook_id(_federated_retrieve_impl 对 participant_notebook_ids 里的每一本
+# 都无条件执行 h.notebook_id = nid,首项恒为 active 自己),citations_from 原样
+# 透传就会让「本库自己」的证据带一个非空 notebook_id——当答案合成失败/模型没
+# 吐出任何 [k] 锚点时,前端 buildAnswerReferences 回退展示这批 citation(见
+# frontend/app/answer-formatting.ts 的 `if (references.length > 0) return
+# references;` 之后的 citations 兜底分支),会渲染出一个多余的
+# 「来自「当前笔记本」」徽章。这里复刻 test_citations_from_reasoning_hits_
+# carries_base_tier 同一套 fixture(真实 federated_retrieve,非假协作者,与
+# ask_reasoning 12118-12120 同一调用形状),额外验证 notebook_id 字段本身。
+def test_citations_from_reasoning_hits_blanks_self_notebook_id(repo):
+    base = repo.create_notebook(NotebookCreate(name="base"))
+    repo.mark_notebook_base(base.id)
+    repo.store_kg(base.id, None, [
+        {"local_id": "B1", "object_type": "concept",
+         "payload": {"name": "Engram"}, "evidence": _BASE_EVIDENCE}], [])
+    active = repo.create_notebook(NotebookCreate(name="active"))
+    repo.store_kg(active.id, None, [
+        {"local_id": "A1", "object_type": "concept",
+         "payload": {"name": "Engram encoding"}, "evidence": _PERSONAL_EVIDENCE}], [])
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
+
+    # Mirrors ask_reasoning's own call shape (sqlite_repository.py ~12118-12120).
+    top_hits = repo.retrieval.federated_retrieve(active.id, "Engram")
+    cited_element_ids = {ev.element_id for item in top_hits for ev in item.evidence}
+    citations = repo._citations_from(
+        top_hits, cited_element_ids, "KG evidence", notebook_id=active.id)
+
+    nb_by_source = {c.source_id: c.notebook_id for c in citations}
+    assert nb_by_source.get("src-own") == "", (
+        "active 库自己命中(src-own)的 citation.notebook_id 必须归一成空串"
+        f"(不是「跨库」),实为 {nb_by_source.get('src-own')!r}——否则前端会显示"
+        "一个多余的「来自「当前笔记本」」徽章。")
+    assert nb_by_source.get("src-base") == base.id, (
+        f"真正跨库命中(src-base 来自 base)必须原样带出 notebook_id,实为 "
+        f"{nb_by_source.get('src-base')!r}(应为 {base.id!r})")
 
 
 def test_tier_map_for_batches_and_defaults_unknown_to_personal(repo):

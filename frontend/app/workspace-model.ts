@@ -1,5 +1,6 @@
 import type { AskModeId } from "./ask-modes";
 import type { ReasoningTraceStep } from "./ask-stream";
+import type { NotebookRef } from "./notebook-bases";
 
 /**
  * 新建 notebook 的默认名 —— **持久化契约，不是界面文案，不受「界面词汇表」管辖。**
@@ -47,7 +48,7 @@ export type NotebookSummary = {
   kg_ready?: boolean;
   kg_building?: boolean;
   base_kg_available?: boolean;
-  base_notebook_name?: string;
+  base_notebooks?: NotebookRef[];
   kg_pending_sources?: number;
   kg_build?: KgBuildJobStatus | null;
   access?: "owner" | "reader";

@@ -17,26 +17,30 @@ function withFetchStub(run) {
 
 test("tierActionState: 当前 notebook 已是 base → unset(可取消)", () => {
   const cur = { id: "a", name: "A", tier: "base" };
-  const s = tierActionState(cur, [cur]);
+  const s = tierActionState(cur);
   assert.strictEqual(s.action, "unset");
 });
 
-test("tierActionState: 别处已有 base → replace,带当前基准库名", () => {
-  const cur = { id: "a", name: "A", tier: "personal" };
-  const other = { id: "b", name: "B 基准", tier: "base" };
-  const s = tierActionState(cur, [cur, other]);
-  assert.strictEqual(s.action, "replace");
-  assert.strictEqual(s.otherBaseName, "B 基准");
+test("公共知识库不再唯一：别处已有 base 时仍是 set 而非 replace", () => {
+  const got = tierActionState({ id: "a", name: "A", tier: "personal" });
+  assert.equal(got.action, "set");
+  assert.equal(got.label, "设为公共知识库");
+});
+
+test("当前已是公共知识库 → unset", () => {
+  const got = tierActionState({ id: "a", name: "A", tier: "base" });
+  assert.equal(got.action, "unset");
+  assert.equal(got.label, "取消公共知识库");
 });
 
 test("tierActionState: 全局无 base → set", () => {
   const cur = { id: "a", name: "A", tier: "personal" };
-  const s = tierActionState(cur, [cur]);
+  const s = tierActionState(cur);
   assert.strictEqual(s.action, "set");
 });
 
 test("tierActionState: current 为空也不报错(默认 set)", () => {
-  const s = tierActionState(undefined, []);
+  const s = tierActionState(undefined);
   assert.strictEqual(s.action, "set");
 });
 

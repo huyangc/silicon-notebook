@@ -332,6 +332,10 @@ notebook_assets.size|INTEGER|1|None|0
 notebook_assets.created_by|TEXT|1|''|0
 notebook_assets.created_at|TEXT|1|None|0
 notebook_assets.source_id|TEXT|0|None|0
+notebook_bases.notebook_id|TEXT|1|None|1
+notebook_bases.base_notebook_id|TEXT|1|None|2
+notebook_bases.created_at|TEXT|1|None|0
+notebook_bases.created_by|TEXT|0|None|0
 notebook_members.notebook_id|TEXT|1|None|1
 notebook_members.user_id|TEXT|1|None|2
 notebook_members.role|TEXT|1|'reader'|0
@@ -377,6 +381,7 @@ promotion_candidates.reviewed_by|TEXT|1|''|0
 promotion_candidates.base_match_id|TEXT|1|''|0
 promotion_candidates.created_at|TEXT|1|None|0
 promotion_candidates.updated_at|TEXT|1|None|0
+promotion_candidates.target_base_id|TEXT|1|''|0
 relation_embeddings.relation_id|TEXT|0|None|1
 relation_embeddings.notebook_id|TEXT|1|None|0
 relation_embeddings.vector|TEXT|1|None|0
@@ -504,6 +509,7 @@ idx_kg_build_jobs_nb_created
 idx_kg_build_jobs_one_running
 idx_kg_cluster_scratch_nb_run
 idx_knowhow_cell_code_row
+idx_knowhow_cells_column_normalized_anchor_row
 idx_knowhow_cells_row
 idx_knowhow_columns_table
 idx_knowhow_rows_table
@@ -530,6 +536,7 @@ idx_memory_owner_notebook_status
 idx_memory_revisions_memory
 idx_notebook_assets_nb
 idx_notebook_assets_source
+idx_notebook_bases_base
 idx_notebook_members_user
 idx_notebooks_created_by
 idx_notebooks_share_token

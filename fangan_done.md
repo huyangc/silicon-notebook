@@ -317,7 +317,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   opaque token，配置默认 notebook、notebook allowlist、过期时间与最小 scope，并列出、撤销 token。
   Scope 为 `knowledge:read`、`memory:read`、`memory:read_candidates`、`memory:propose`、
   `ask:execute`、`knowhow:code`；撤销、过期、profile 停用或 notebook 权限变化会在后续调用重新校验并立即生效。
-- **官方 MCP Streamable HTTP**：`/mcp` 提供 Memory/context 七工具 `list_notebooks`、`select_notebook`、
+- **官方 MCP Streamable HTTP**：`/mcp` 提供十一个工具：Memory/context 七工具 `list_notebooks`、`select_notebook`、
   `search_agent_memory`、`search_notebook_context`、`get_memory`、`ask_notebook`、
   `propose_memory`，及 knowhow 四工具 `list_knowhow_tables`、`get_knowhow_discrimination`、
   `get_knowhow_row`、`put_knowhow_cell_code`（2026-07-16 随 knowhow 表 Agent 面加入，读取需
@@ -333,7 +333,8 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   `base_object_ids`。私有 Memory 的 owner/status 不改变，完整私有任务上下文不进入 Base KG 对象。
 - **确定性评价与验证**：固定 gold 计算 Recall@5/MRR/nDCG，candidate→正式平面、跨用户、跨
   notebook 三个泄漏计数均为 0；A/B harness 覆盖 no-Memory、KB-only、KB+confirmed-Memory。
-  `scripts/check.sh` 已包含官方 `mcp` client 离线 smoke，验证七工具、session 选择隔离、candidate
+  `scripts/check.sh` 已包含官方 `mcp` client 离线 smoke，验证十一个工具契约（七个 Memory/context
+  工具与四个 knowhow 工具）、session 选择隔离、candidate
   正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2939 passed, 1 skipped`、
   前端 `189 passed`、TypeScript 与 Next.js production build 均成功。
 

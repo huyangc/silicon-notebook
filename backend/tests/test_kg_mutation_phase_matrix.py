@@ -417,6 +417,7 @@ def test_approve_promotion_commits_then_embeds_then_invalidate_then_dirty(
     personal = repo.create_notebook(NotebookCreate(name="personal"))
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
+    repo.replace_notebook_bases(personal.id, [base.id], "user-local")
     object_id = repo._test_insert_object(
         personal.id, "claim", {"name": "promotion phase"}
     )

@@ -21,7 +21,7 @@
 - KG-native 接地问答：逐句 `[k_i]` 引用（渲染为紧凑编号引用；模型直接输出的数字复合引用如 `[1, 2, 3]` 在能映射到已知引用时也可点击）、多轮会话、1-hop KG 邻居扩展，推理模式实时显示可展开的一行 agent 轨迹
 - **推理模式的类型化查询期推导：** agent 可调用 `follow_chain`，把有证据的两跳 `A→B→C` 临时组合成 `A→C`；首版只允许 `derived_from / kind_of / prerequisite_of / precedes / part_of`。两条直接关系各自保留可引用的关系证据；被拒绝、无 quote、类型或 `validity_scope` 冲突的路径 fail-closed；推论明确标作「推断」，且绝不写回 KG。该能力不新增 migration、索引或历史回填；查询只对既有 source/target 索引做有界抽样，高度节点无法在预算内确认时直接放弃推论。
 - 两层知识库：每个 notebook 带 `tier`（`base` | `personal`，默认 `personal`）。`chunk` 基线只从当前 active notebook 读取 chunk；可选 KG overlay / PPR 才可能加入 federated KG 上下文与 base-backed chunk，`graph` / `reasoning` 使用 federated KG 路径。exact-score 的 `base` 次序只适用于知识对象命中：`federated_retrieve()` 不改相关度分数，分数更高的 personal hit 仍排在前面；`federated_retrieve_relations()` 的关系命中仍只按 score 排序。回答合成阶段另有独立规则：当 base 与 personal 证据冲突时，以 base 立场为准并指出差异。引用携带其 tier（`AnswerAnchor.tier`），Ask 在每条引用上渲染 `base`/`personal` 标记。
-- **用户系统**：自助注册（用户名规则：单个字母 + `00` + 6 位数字，如 `a00123456`，存储为小写）+ 密码登录，使用不透明 Bearer 会话 token。每个 notebook 由其创建者所有；用户库包含自己拥有的 notebook，以及主动加入的大型只读共享 notebook。首次启动时自动创建内置 `admin` 账号（登录用户名 `admin`，密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，本地默认 `admin`；production/对外监听必须修改）；admin 持有原有 notebook 并是唯一可将 notebook 标为基准库的用户。基准库 notebook 对普通用户的列表隐藏，但问答时仍作为权威检索上下文使用。本地/测试场景可设置 `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 跳过登录。前端在首次加载时显示登录/注册界面，顶栏展示已登录用户名和退出按钮。
+- **用户系统**：自助注册（用户名规则：单个字母 + `00` + 6 位数字，如 `a00123456`，存储为小写）+ 密码登录，使用不透明 Bearer 会话 token。每个 notebook 由其创建者所有；用户库包含自己拥有的 notebook，以及主动加入的大型只读共享 notebook。首次启动时自动创建内置 `admin` 账号（登录用户名 `admin`，密码来自 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，本地默认 `admin`；production/对外监听必须修改）；admin 持有原有 notebook 并是唯一可将 notebook 发布为公共知识库的用户。公共知识库对普通用户的列表隐藏，但可在每个笔记本的参考库选择器里发现，仅对显式挂载了它们的笔记本参与检索。升级到 schema 20 不会回填挂载：所有既有笔记本挂载数清零，联邦检索对它们全部停止，直到用户自己显式挂载一个参考库。本地/测试场景可设置 `SILICON_NOTEBOOK_AUTH_OPTIONAL=true` 跳过登录。前端在首次加载时显示登录/注册界面，顶栏展示已登录用户名和退出按钮。
 - **分享链接**：owner 可发布不透明 notebook 链接；小 notebook 复制到接收者账号，大 notebook 以只读成员方式加入。写权限仍归 owner；当前没有实时协同编辑或修改密码流程。
 - **绑定 notebook 的私有 Memory**：用户可手动把 Ask 回答生成可编辑预览，并在确认后沉淀为可复用 Memory。外层提供用户级总 Memory 页面，notebook 卡片显示当前用户的数量，工作区为 **问答**（Ask） | **知识库**（Knowledge） | **记忆**（Memory） | **深度报告**（Deep Report）。外部 Agent 可经 MCP 提交 `candidate`；它只在同一用户、同一 notebook 的获授权 Agent 间共享，用户确认前不会进入正式 Ask/搜索/报告检索。
 - 可选图推理问答模式（`mode="graph"`，opt-in / 实验性）：基于 `knowledge_relations` 构建 rustworkx 内存图，做有界多跳 derivation/support 链遍历，答题时做对抗式链路校验并给出最弱环 `chain_trust` 分（默认 Ask 仍为 `chunk`）
@@ -41,8 +41,8 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
-当前 schema 版本为 20。已提交的 v9 兼容 fixture 会依次经过 v10、v11/v12 SQLite 热路径索引、v13 Memory/Agent、v14/v15 Memory 派生源 link/index、v16 Knowhow 表/资产、v17 论文元数据、v18 Knowhow 格子代码/角色迁移、v19 来源关联资产与 v20 持久化 KG 构建任务，并保持可读。
-- `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，图谱和答案共用的类型标记位于 `kg-type-mark.tsx`。
+当前 schema 版本为 22。已提交的 v9 兼容 fixture 会经由 v10–v22 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务。
+- `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，内置 KG 类型文案/样式位于 `kg-type-model.ts`，图谱和答案共用 `kg-type-mark.tsx` 渲染。
 - 结构回归测试会阻止这些职责重新复制回巨型文件。后续拆分沿用同一增量方式：保持端点与用户行为不变，每次只迁移一个高内聚领域，然后运行完整离线门禁。
 
 ## 部署
@@ -244,9 +244,9 @@ vi .env         # 填模型服务 URL(同 2 · 配置)
 - 左栏：用户导入来源文件，实时显示 parse-status（绿色仅给 `extracted`，其余处理中为橙色），支持详情预览和删除。网络来源检索暂不开放。
 - 主栏：四个 tab——**问答**（Ask）、**知识库**（Knowledge）、**记忆**（Memory）、**深度报告**（Deep Report）。Ask 提供逐句 `[k_i]` 引用、三种检索模式、多轮会话、实时推理轨迹与反馈；Knowledge 负责动态类型浏览与治理；Memory 只显示当前用户绑定在此 notebook 的私有记录；Deep Report 负责两阶段报告、大纲审阅、进度、导出、取消和删除。问答输入框中 `Enter` 发送，`Shift+Enter` 保留换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制。transport 断连只停止向当前客户端继续推送；导航、刷新或 transport 丢失后 detached Ask job 仍在后台运行并可保存最终回答。用户点击中断则调用 `POST /api/notebooks/{id}/ask/jobs/{job_id}/cancel`，由后端设置取消事件，使 worker / LLM 路径停止，且不保存被取消的最终回答。主工作区保持两列且没有固定 Studio 右栏。
 - 知识图谱以全屏浮层打开：object 级 KG 节点（Concept / Claim / Formula / Procedure），类型形状，边关系标签，多选类型过滤，按类型分组侧栏（选中节点聚焦画布）。侧栏的「出处」以结构化证据卡片展示，长标题、位置、公式与中英混排正文会在面板内换行。
-- 「分析」菜单本身只包含晋升队列（admin）、基准库/个人层切换（admin）与边审查队列。看板、Schema、全屏知识图谱是其他顶栏动作；当前不再暴露已退役的内容生成或派生规则动作。
+- 「分析」菜单本身只包含晋升队列（admin）、发布/撤回公共知识库（admin）与边审查队列。看板、Schema、全屏知识图谱是其他顶栏动作；当前不再暴露已退役的内容生成或派生规则动作。
 
-知识对象类型的显示名只有一份真源：后端 `app/services/extraction_profiles.py` 的 `OBJECT_TYPE_LABELS`，由 `GET /notebooks/{id}/knowledge-types` 以 `KnowledgeTypeCount.label` 下发给前端。凡是拿得到这个 API label 的调用点——Knowledge 浏览器的类型 tab 与条目——一律直接使用它，因此用户自定义类型（例如 knowhow 表列名投影出来的类型）同样能显示正确的中文名。只拿得到 `object_type` 字符串的调用点——引用浮层与知识图谱画布/侧栏——回落到前端内置小表 `frontend/app/kg-type-mark.tsx` 的 `KG_TYPE_LABELS`，该表逐字等于后端常量；`scripts/check_object_type_labels_contract.py` 作为硬门挂在 `scripts/check.sh` 里，两份一旦漂移即构建失败。未知/自定义类型一律原样显示其 `object_type`，绝不 TitleCase 成臆造的英文。这两张表的键都由用户可控字符串索引，查表必须走 `Object.hasOwn(...)` 而非裸下标：`constructor`、`__proto__` 会命中原型链上继承的函数/对象，而不是「查不到」。
+知识对象类型的显示名只有一份真源：后端 `app/services/extraction_profiles.py` 的 `OBJECT_TYPE_LABELS`，由 `GET /notebooks/{id}/knowledge-types` 以 `KnowledgeTypeCount.label` 下发给前端。凡是拿得到这个 API label 的调用点——Knowledge 浏览器的类型 tab 与条目——一律直接使用它，因此用户自定义类型（例如 knowhow 表列名投影出来的类型）同样能显示正确的中文名。只拿得到 `object_type` 字符串的调用点——引用浮层与知识图谱画布/侧栏——回落到前端内置小表 `frontend/app/kg-type-model.ts` 的 `KG_TYPE_LABELS`；`kg-type-mark.tsx` 消费并 re-export 该模型供共用渲染。该表逐字等于后端常量；`scripts/check_object_type_labels_contract.py` 作为硬门挂在 `scripts/check.sh` 里，两份一旦漂移即构建失败。未知/自定义类型一律原样显示其 `object_type`，绝不 TitleCase 成臆造的英文。这两张表的键都由用户可控字符串索引，查表必须走 `Object.hasOwn(...)` 而非裸下标：`constructor`、`__proto__` 会命中原型链上继承的函数/对象，而不是「查不到」。
 
 面向用户的文案另有一份词汇契约，真源是 `AGENTS.md`「界面词汇表」：表中每一行把一个内部词（基准库、chunk、KG、抽取、投影、晋升、schema、deprecated……）映射到界面唯一允许使用的说法。内部名保留在代码、类型、注释与架构文档里——只有渲染给用户看的字符串才改写；而**被持久化**而非被渲染的值（`Untitled notebook` 这个默认库名、协议上的 enum id）属于契约不属于文案，任何一轮措辞调整都不得顺手改动它们。`scripts/check_ui_vocabulary.py` 作为硬门挂在 `scripts/check.sh` 里执行该表，其**作用域跟着信任边界走、不跟着目录树走**：既扫描 `frontend/app` 每个源文件的渲染文本——字符串字面量加 JSX 文本节点，并先剥离注释、标识符、正则体与 `${…}` / `{…}` 插值——也扫描后端每处 `user_error(status, "…")` 的消息字面量，因为 `api/deps.py` 恰恰只给这批 4xx `detail` 打上 `X-User-Message: 1`，而 deny-by-default 的前端见到该标记就把它原样显示给用户。打标记等于声明「这是给人看的文案」，那就同样受这份词表约束；此前把守卫圈在 `frontend/app` 里，正是「仅管理员可设置基准库」「仅管理员可管理晋升队列」四条 403 一路上屏而守卫全绿的原因。裸 `HTTPException(detail=str(exc))` 刻意不在扫描面内——它永远不上屏，detail 是诊断 / MCP 契约，这条分界由 `backend/tests/test_user_error.py` 守。任一侧命中黑名单词即构建失败。另有一条独立守卫 `frontend/app/raw-enum-fallback.test.mjs`（由 `npm run test` 递归收集，因而同样是 `scripts/check.sh` 的硬门），拒绝「兜底即原值」（`MAP[x] ?? x`，以及通过正规 API 达成同一效果的 `label(map, x, x)`）：这种查表一旦后端新增枚举值，就会把英文 id 直接渲染给用户；应改用 `frontend/app/vocabulary.ts` 的 `label(MAP, value, fallback)`，它强制传中性兜底词，使该 bug 写不出来。该检查跑在真正的 TypeScript AST 上而非正则：渲染位置的 `M[x] ?? x` 与内部归一化的 `ALIASES[v] ?? v` **语法形状完全一致**，只有上下文能区分泄漏与正常代码——正则版误报了后者，又整个漏掉了 `M?.[x] ?? x`、`getLabels()[x] ?? x` 与 `label(m, x, x)`。它自己的文件头如实写明仍然看不到的部分（先算进变量再渲染、`alert(...)` 这类非 JSX 出口），诚实标注优于假装全覆盖。若确实要原样透出**用户自己写的**字符串（自定义 `object_type`、用户自建的 schema 字段名），则显式写成 `Object.hasOwn(...) ? ... : raw`，顺带规避上面那个原型链隐患。该守卫是词黑名单而非语义检查：有两行只覆盖其无歧义的复合形态——图谱视图里裸用「节点」「边」是正当的，且「边」与「旁边」「边框」同形。`backend/tests/test_ui_vocabulary_guard.py` 存放它的正例与反例，并额外在「词汇表新增一行却既没有对应规则、也没有登记豁免理由」时失败，使黑名单无法悄悄退化成只覆盖词表的一个子集。
 
@@ -473,7 +473,8 @@ run 进入完成或失败终态后还会精确失效该 notebook 的待处理来
 - `GET .../concepts/{canonical_id}/detail`、`GET .../objects/{object_id}/context`
 - `GET /api/object-schemas`、`POST /api/object-schemas`、`PATCH /api/object-schemas/{type}`、`DELETE /api/object-schemas/{type}`
 - `GET /api/notebooks/{id}/duplicates`、`POST /api/notebooks/{id}/knowledge/{knowledge_id}/merge`
-- 两层：`POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → 返回更新后的 `NotebookSummary`（tier 非法 400，notebook 不存在 404）。设置 notebook 的联合层（base = 权威参考 KG，personal = 默认用户笔记）。
+- 两层：`POST /api/notebooks/{id}/tier` body `{tier: "base" | "personal"}` → 返回更新后的 `NotebookSummary`（tier 非法 400，notebook 不存在 404）。设置 notebook 的联合层（base = 可发布为公共知识库，personal = 默认用户笔记）；`base` notebook 只有在被其它笔记本显式挂载后才参与该笔记本的检索（`GET`/`PUT /api/notebooks/{id}/bases`，候选列表见 `GET /api/notebooks/{id}/mountable`）。
+- 参考库挂载：`GET /api/notebooks/{id}/bases` → `MountedBase[]`（本 notebook 的挂载边，含置灰的失效边）；`PUT /api/notebooks/{id}/bases` body `{base_notebook_ids}` → 全量替换，返回更新后的 `MountedBase[]`（含不可挂载的 id 时 400；仅 owner 可写）；`GET /api/notebooks/{id}/mountable` → `NotebookRef[]`（可挂候选：所有公共知识库，加上本 notebook 自己同 owner 的库）。
 - 边可信与策展：`GET /api/notebooks/{id}/edge-review-queue`、`POST /api/notebooks/{id}/relations/{rel_id}/review`
 - 治理 / 晋升：`POST /api/notebooks/{id}/knowledge/{knowledge_id}/promote`、`GET /api/promotion-queue`、`POST /api/promotion-queue/{candidate_id}/approve|reject`
 - 深度报告（两阶段）：`POST /api/notebooks/{id}/reports` body `{question, depth?, auto_generate?}` → `{report_id}`;跑**阶段1 规划**后停在 `status=outline_ready`（`auto_generate=true` 则一路直出）。`GET .../reports/{rid}` 轮询状态 + 富 `outline`（每节 视角/张力/充分性）+ `content_md` + 实时 `section_status`。`PATCH .../reports/{rid}/outline` body `{sections}` 编辑草案大纲（仅 `outline_ready` 态,无有效节 422）。`POST .../reports/{rid}/generate` body `{depth?}` 启**阶段2 生成**（仅从 `outline_ready`,否则 409）。另 `GET /reports`（列表）、`POST .../cancel`、`DELETE`、`POST .../reports/export` `{report_ids}` → `reports.zip`。章节按 `KG_JOB_CONCURRENCY` 并行深挖。
@@ -617,9 +618,12 @@ REPORT_ALLOW_PARAMETRIC      # 深度报告：允许【通识】层（库外通�
 
 **两层知识库与图推理（Wave 1+2）：** 目前没有 `.env` 开关。notebook 的 `tier`
 （`base` | `personal`，默认 `personal`）是 notebook 行上的数据，通过仓库方法
-`mark_notebook_base()` 设置。tier 感知联合检索不改相关度分数：相关度是第一排序键，
-`base` 仅在相关度分数完全相同时作为第二排序键。答案里的 base 优先冲突规则是独立的合成策略，
-在 notebook 标为 `base` 后始终生效。
+`mark_notebook_base()` 设置；把一个 notebook 发布为 `base` 并不会让它自动全局共享——
+其它每个 notebook 都必须显式把它挂为参考库（持久化在 `notebook_bases`，经
+`GET`/`PUT /api/notebooks/{id}/bases` 管理、`GET /api/notebooks/{id}/mountable` 发现候选）
+之后，它才会加入该 notebook 的检索参与集。tier 感知联合检索不改相关度分数：相关度是
+第一排序键，`base` 仅在参与集内命中相关度分数完全相同时作为第二排序键。答案里的 base
+优先冲突规则是独立的合成策略，对来自已挂载 base notebook 的证据始终生效。
 可选的图推理 Ask 模式（`mode="graph"`）多跳遍历用固定默认 `max_depth=3`、`max_fan_out=8`
 （经 `getattr` 读取 settings，因此将来加 `GRAPH_MAX_DEPTH` / `GRAPH_MAX_FAN_OUT` env 覆盖无需改代码）。
 边可信打分、策展审核队列、个人→基准晋升同样是行为，不由 env 控制。
@@ -815,7 +819,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 
 `embed` 子命令只补**缺失**的 chunk 与 KG 节点向量(例如某次被 429 限流后留下的空洞)。必须给 `--notebook-id` 且 EMBED 已配好——它本身就是补向量的命令,故**忽略 `--allow-no-embed`**,EMBED 未配时直接报错退出。
 
-`vectors-to-blob` 子命令是一次性存储迁移:embedding 向量过去以 JSON 文本存 SQLite,导致把几十万行加载成矩阵(建索引、检索冷启动)时大部分时间耗在 `json.loads` 上。现在新写入统一存成 float32 BLOB(`np.frombuffer` 零解析直接重解读字节),且所有读点都已兼容两种格式——所以这个命令是可选但推荐的升级后操作:它把四张 embeddings 表(`chunk_embeddings`、`knowledge_embeddings`、`element_embeddings`、`relation_embeddings`)里仍是 JSON 文本的旧行原地转成 BLOB,分批事务提交(每批 5000 行)并按表打印进度。它**不计算新向量**(故不需要 EMBED 配置),且幂等/可中断重跑——只选 SQLite 仍判定为 `text` 类型的行,跑第二遍时天然无行可转。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 转换全库所有 notebook。`json.loads`/重编码这一步(百万行规模下的单核瓶颈)按 `--workers` 个进程并行(默认 `min(8, CPU核数)`;`--workers 1` 完全不启动进程池)——主进程始终独占全部数据库读写,SQLite 单写者不变;进程池崩溃时自动回退串行,绝不丢run。
+`vectors-to-blob` 子命令是一次性存储迁移:embedding 向量过去以 JSON 文本存 SQLite,导致把几十万行加载成矩阵(建索引、检索冷启动)时大部分时间耗在 `json.loads` 上。现在新写入统一存成 float32 BLOB(`np.frombuffer` 零解析直接重解读字节),且所有读点都已兼容两种格式——所以这个命令是可选但推荐的升级后操作:它把四张 embeddings 表(`chunk_embeddings`、`knowledge_embeddings`、`element_embeddings`、`relation_embeddings`)里仍是 JSON 文本的旧行原地转成 BLOB,分批事务提交(每批 5000 行)并按表打印进度。它**不计算新向量**(故不需要 EMBED 配置),且幂等/可中断重跑——只选 SQLite 仍判定为 `text` 类型的行,跑第二遍时天然无行可转。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 转换全库所有 notebook。`json.loads`/重编码这一步(百万行规模下的单核瓶颈)按 `--workers` 个进程并行(默认 `min(32, CPU核数)`;`--workers 1` 完全不启动进程池)——主进程始终独占全部数据库读写,SQLite 单写者不变;进程池崩溃时自动回退串行,绝不丢run。
 
 `backfill-source-index` 子命令主动填充 `knowledge_object_sources` 反查表(`object_id, source_id`)——删除或重解析某个来源时,需要找出哪些 KG 对象引用了它;没有这张表,该查找就得逐行 `json.loads` 整本 notebook 的 evidence JSON 才能找到匹配,几十万对象规模下很慢。这张表本来会「首用惰性回填」(未迁移库的第一次来源删除/重解析会付一次全扫描,扫描的同时顺带填表并标记该 notebook,此后每次都是索引直查)——这个命令让你提前批量付这笔成本(有界内存分批 + 打印进度),而不是让某个用户操作(删除来源)撞上它。不需要 EMBED 配置,且幂等/可中断重跑(每次重跑都清空并按当前 evidence 重建该 notebook 的行,再重新标记)。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 覆盖全库所有 notebook。若怀疑某库的反查表与实际 evidence 不一致(例如异常中断后),重跑本命令即是修复手段——它总是按当前 evidence 全量重建。
 
@@ -852,16 +856,28 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 `--limit` 只限本轮**抽取**的来源数;最终聚类始终覆盖整个 notebook。大库(见上文 `SCALE_INDEX_AUTO_ENABLED`)在 `kg` 重建后会**自动重建**可伸缩检索索引(不会陈旧)。`KG_CLUSTER_REP_ANN_MAX`(默认 2,000,000)封顶 rep-ANN 规模——超出则分片建索引并 WARNING(绝不静默截断)。
 
-**并发调优。** 三个旋钮控制吞吐(与 429 压力):
+**并发调优。** 三个彼此独立的控制项决定吞吐与 429 压力。显式 CLI 值优先；省略时继承对应的 settings/环境变量：
 
-- `--workers` —— `all` 阶段**同时抽取的文档数**(覆盖 `KG_JOB_CONCURRENCY`);`ingest` 阶段为文件解析并发;`vectors-to-blob` 阶段为 `json.loads`/重编码的并行进程数(默认 `min(8, CPU核数)`;`1` 完全不启动进程池)。
-- `--embed-conc` —— embedding 并发(覆盖 `EMBED_CONCURRENCY`);`all` 阶段 chunk 向量在每篇文档管线的后台跑。
-- `KG_EXTRACT_WORKERS`(`.env`,默认 16)—— KG 抽取 LLM 窗口级的全局总并发,跨所有文档共享(文档内 + 文档间)。
-- `--pool-report-interval` —— `all`/`kg` 阶段每 N 秒打一行**实时线程池占用**(默认 15;`0` 关闭)。并排显示 KG-LLM(抽取窗口)池与 embedding 线程——如 `[pool 17:52:33] KG-LLM(window) 14/16 · 源(job) 8/8 · embed 6bg+20pool · 源完成 5/40`——用以确认 embedding 模型与 KG-LLM 在共享算力的模型服务上**同时**打满。
+- `--workers` —— 来源管线并发；回退 `KG_JOB_CONCURRENCY`。它在 `all` 中分派来源 job、在 `ingest` 中控制文件解析。`vectors-to-blob` 中它仍表示解析/重编码进程池大小（默认 `min(32, CPU核数)`；`1` 关闭该进程池）。
+- `--llm-conc` —— 传统 `chat_json` LLM 调用的进程级硬上限；回退 `KG_EXTRACT_WORKERS`（默认 16）。它跨所有来源共享，也覆盖单个来源内部的抽取窗口。
+- `--embed-conc` —— embedding 工作的进程级硬上限；回退 `EMBED_CONCURRENCY`。它跨所有来源共享，不是逐文档上限。
 
-`all` 阶段 embedding 峰值并发 ≈ `--workers × --embed-conc`,两者同时调高易触发服务商 429,谨慎。若某次限流留下缺失向量,事后用 `embed` 子命令补修。
+模型 gate 与来源分派相互独立：`--workers` 不会乘大任何模型上限。特别是，embedding 峰值并发始终由跨所有来源的 `--embed-conc` 硬封顶。所有会调用模型的批处理阶段都遵守同一 gate 合同，包括 `all`、`kg`、`reparse`、`metadata`（以及 `ingest` 与 `embed` 中的 embedding 工作）。若一次限流留下缺失向量，之后用 `embed` 子命令补修。
 
-选项:`--owner`(notebook 属主用户名,大小写不敏感,默认 = admin 用户)、`--workers`(`all` 阶段同时抽取的文档数 = `KG_JOB_CONCURRENCY`,`ingest` 阶段为文件并发;`vectors-to-blob` 阶段为解析/编码进程池大小,默认 `min(8, CPU核数)`,`1` = 不启进程池)、`--embed-conc`(embedding 并发 = `EMBED_CONCURRENCY`;避 429)、`--limit`(kg 抽取子集——聚类仍覆盖全量)、`--no-rebuild` / `--rebuild-only`(分批大库构建时拆分「抽取」与「末尾聚类」)、`--fresh`(清空 rebuild checkpoint,强制 merge 审查 + 概念描述全量重裁;用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild,`all` 阶段的末尾聚类同样适用)、`--allow-no-embed`(EMBED 未配时显式允许无向量降级;默认拒绝,不静默;`embed` 子命令忽略此项)、`--pool-report-interval`(`all`/`kg` 阶段每隔几秒自报线程池占用,显示 KG-LLM vs embed 并发以验证多模型同时打满;默认 15,`0` 关)、`--all-notebooks`(仅 `vectors-to-blob` / `backfill-source-index`:作用于全部 notebook 而非单个)、`--force`(仅 `metadata`:已有元数据行的源也重抽)、`--dry-run`(只扫描预估)。`embed` 子命令只补缺失的 chunk + 节点向量,需 `--notebook-id`。`vectors-to-blob` 子命令把旧 JSON 文本向量迁移成 BLOB,需 `--notebook-id` 或 `--all-notebooks`。`backfill-source-index` 子命令主动构建来源删除反查表,需 `--notebook-id` 或 `--all-notebooks`。`metadata` 子命令给已解析的论文来源补抽元数据(标题/作者/期刊/年份),需 `--notebook-id` 且 LLM 已配置。
+例如：来源管线较大、embedding 端点保守、但 LLM 容量较高时：
+
+```bash
+PYTHONPATH=backend python scripts/batch_ingest.py reparse \
+  --notebook-id nb-xxxx \
+  --workers 32 \
+  --llm-conc 24 \
+  --embed-conc 4 \
+  --pool-report-interval 5
+```
+
+- `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打一行实时池占用（默认 15；`0` 关闭）。它在来源 job 旁显示 LLM 与 embedding gate 的 `active/max/waiting`，例如 `[pool 17:52:33] LLM 14/24 waiting=2 · embedding 4/4 waiting=9 · source 8/32 · 源完成 5/40`，可直接看出独立上限与排队压力。
+
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--llm-conc`（传统 `chat_json` 的进程级上限 = `KG_EXTRACT_WORKERS`）、`--embed-conc`（进程级 embedding 上限 = `EMBED_CONCURRENCY`；跨所有来源避 429）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild，`all` 阶段的末尾聚类同样适用）、`--allow-no-embed`（EMBED 未配时显式允许无向量降级；默认拒绝，不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒自报池占用，显示 LLM 与 embedding 的 `active/max/waiting`；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`：作用于全部 notebook 而非单个）、`--force`（仅 `metadata`：已有元数据行的源也重抽）、`--dry-run`（只扫描预估）。`embed` 子命令只补缺失的 chunk + 节点向量，需 `--notebook-id`。`vectors-to-blob` 子命令把旧 JSON 文本向量迁移成 BLOB，需 `--notebook-id` 或 `--all-notebooks`。`backfill-source-index` 子命令主动构建来源删除反查表，需 `--notebook-id` 或 `--all-notebooks`。`metadata` 子命令给已解析的论文来源补抽元数据（标题/作者/期刊/年份），需 `--notebook-id` 且 LLM 已配置。
 
 前置:`.env` 配好 EMBED 与 `KG_LLM`(KG 抽取缺省回退全局 `OPENAI_COMPAT_*`)。EMBED 未配时 CLI **默认拒绝运行**——要无向量导入须显式 `--allow-no-embed`(此时跳过 chunk/KG 向量),绝不静默;KG 抽取在无可用 LLM 时报错。重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
 
@@ -890,7 +906,7 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 
 ### 合并两个共享 base 库的部署(`scripts/merge_dbs.py`)
 
-离线、非破坏性工具,用于把两个各自独立部署、但**共享同一个 base 库**(同一个 base notebook id)的 silicon-notebook 实例合并成一个。保留哪侧的 base 由 `--keep-base` 指定(通常选更全的那侧)——运行时会先打印两侧 base 的统计(`sources`/`chunks`/`knowledge_objects` 计数)供核对;两侧其余(个人)notebook 原样全部并入。源库的 `.db`/storage 文件只读,工具始终写出全新的 `--out` / `--out-storage`。两侧输入允许是旧 schema 版本——合并前会先各自迁移到最新(在私有临时副本上进行,不改动源文件)。
+离线、非破坏性工具,用于把两个各自独立部署、但**共享同一个公共知识库**(同一个 base notebook id)的 silicon-notebook 实例合并成一个。保留哪侧的 base 由 `--keep-base` 指定(通常选更全的那侧)——运行时会先打印两侧 base 的统计(`sources`/`chunks`/`knowledge_objects` 计数)供核对;两侧其余(个人)notebook 原样全部并入,包括各自持有的参考库挂载边(`notebook_bases`)。源库的 `.db`/storage 文件只读,工具始终写出全新的 `--out` / `--out-storage`。两侧输入允许是旧 schema 版本——合并前会先各自迁移到最新(在私有临时副本上进行,不改动源文件)。多领域部署下一侧可能不止一个公共知识库:本工具不支持这种形态、也不会替你猜——若任一侧存在不止一个 `tier='base'` 的 notebook,会立即中止并点名是哪一侧、列出全部候选,而不是自作主张选一个。
 
 ```bash
 PYTHONPATH=backend python scripts/merge_dbs.py \
@@ -906,11 +922,88 @@ PYTHONPATH=backend python scripts/merge_dbs.py \
 - `--dry-run` —— 只迁移+校验+打印将会导入哪些 notebook,不产出任何文件;即使 `--out` 已存在也能预览。
 - `--force` —— 覆盖已存在的 `--out` 文件。
 
-前提条件:除共享的 base 外,两库的 notebook id 不得重叠——一旦撞车,工具会中止并列出冲突的 id。
+前提条件:两侧各自必须恰好有一个 `tier='base'` 的公共知识库(见上);除共享的 base 外,两库的 notebook id 不得重叠——一旦撞车,工具会中止并列出冲突的 id。
 
 **重要提醒:** `--db-a`/`--db-b` 要指向已静置(先停服务)的数据库文件。工具只拷贝 `.db` 文件本身,正在运行的部署若有未落盘的 `-wal` sidecar 不会被带上——直接对着运行中的实例合并可能静默丢失最近的写入。(工具自身做 schema 迁移时的写入会在使用前 checkpoint 回 `.db`,这部分是安全的;这条提醒针对的是你提供的源文件本身。)
 
+**落败一侧 base 自己的参考库挂载边:** 合并后保留的 base notebook(`--keep-base` 那一侧)只保留它自己的参考库挂载边;如果**另一侧**的 base notebook 曾挂载过别的参考库,这些挂载边不会被带过来——这和该 base 名下其它 notebook-scoped 数据(它自己的 sources、chunks、knowledge objects……)的既定规则完全一致。两侧其它(个人)notebook 自己持有的挂载边则原样全部并入,不受影响。
+
 合并完成后,把 `merged/` 产出(db + storage)部署到要保留下来的那台主机,首次启动后在 app 内触发一次索引重建(「重建索引」/「刷新图谱」)以重新生成 `kg_index`/`kg_viz`/ANN 等未被拷贝的产物。
+
+### 补齐存量待批晋升候选的目标公共知识库(`scripts/backfill_promotion_targets.py`)
+
+升级到 `SCHEMA_VERSION>=20`(多领域参考库)会给 `promotion_candidates` 加一列
+`target_base_id`,但迁移只加列、**不回填**存量行。任何在升级前就已创建、此时仍处
+`proposed`/`under_review` 的晋升候选,`target_base_id` 都是空串,批准时会失败
+(target_base_id 只在候选首次提交时可设,没有别的接口能事后补写)。如果部署库里可能有
+这类存量候选,升级后先跑一次本工具处理;它按 propose 时同一条规则解析每一行的目标——
+经该候选所属 notebook 已挂载的公共知识库(挂 0 个则阻塞、恰好 1 个自动解析、多个则需要
+显式指定),复用同一个 `GovernanceStore.mounted_public_base_ids` 判定,不另写一份。
+
+```bash
+PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/silicon_notebook.db list
+PYTHONPATH=backend python scripts/backfill_promotion_targets.py --db .local/silicon_notebook.db apply \
+  [--set NOTEBOOK_ID=BASE_ID ...] [--dry-run]
+```
+
+- `list` —— 只读报告:列出每条 `target_base_id` 为空的 `proposed`/`under_review` 候选,
+  按 notebook 分组,附带该 notebook 已挂载的公共知识库与每条候选的解析结果预览。
+- `apply` —— 为每条能无歧义解析的候选(自动解析,或经 `--set` 指定)写入
+  `target_base_id`;仍阻塞(该 notebook 未挂载任何公共知识库)或仍有歧义(挂了多个、
+  又没给匹配的 `--set`)的候选原样不动并在报告里列出,挂载/补 `--set` 后再跑一次即可
+  只处理剩下的部分。默认直接写库(与 `merge_dbs.py` 的约定一致);加 `--dry-run` 只
+  预览、不写库。
+- `--set NOTEBOOK_ID=BASE_ID` —— 给挂载了不止一个公共知识库的 notebook 显式指定目标,
+  必需时才用,可重复用于多个 notebook。目标若不在该 notebook 的挂载集合内,整次运行
+  会在任何写入之前直接中止(不会出现部分写入)。
+
+和 `merge_dbs.py` 「总是写全新输出」的约定不同,本工具直接就地修改你给的 `--db` 路径;
+如果该库还没迁移到 `SCHEMA_VERSION>=20` 则拒绝运行。
+
+**重要提醒:** 运行 `apply` 前请先停止后端服务——本工具直接打开 `--db` 文件且不设
+`busy_timeout`,若后端正持有该库的活跃事务,同时写入可能相互冲突。
+### 回填存量 knowhow 格子的 Markdown 格式(`scripts/backfill_knowhow_md.py`)
+
+Knowhow 表格已经对新导入/追加的数据、以及格子级「整理格式」操作自动做 Excel 习惯排版规整(Tab 缩进的 `•` 项目符号、`A.`/`a.` 分节/子项编号、软换行等清理成干净的 CommonMark),但这个规整不会回溯性地应用到规整功能上线之前就已存在的格子。这个一次性 CLI 用于给指定 notebook 的这些存量格子补做同样的规整。
+
+**先 dry-run,再按评审过的 plan 文件写入。** dry-run 绝不写库,而是把完整计划写成一个 JSON plan 文件(并打印其路径),供你逐条评审;随后 `--apply --plan` 按【那个文件】逐条写入——落库的就是你评审过的,不会重新规划。
+
+**默认 dry-run 是只读的,随时可安全执行。** 默认(纯规则)dry-run 以只读方式打开数据库,不会构造可写仓库,因此对着正在运行/繁忙的后端跑也安全。`--use-llm`(需要改写模型)和 `--apply`(写库)则以【可写】方式打开数据库——打开时可能执行尚未完成的 schema 迁移与崩溃恢复,工具会在这么做时打印一行提示,建议在后端空闲时再执行这两种。
+
+```bash
+# dry-run(默认):打印每格 before/after/来源 + 汇总,并写出 plan 文件
+#(默认 .local/backfill_plans/knowhow_md_<notebook>_<时间戳>.json)——不写库
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx
+
+# 评审 plan 文件无误后,按它逐条写入(确定性规则,不涉及 LLM)——任何 --apply 都【必须】带 --plan
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --apply --plan <plan.json>
+
+# 改走 LLM 重排(每格「重排 -> 内容不变式校验 -> 规则兜底」):先 dry-run 评审,再按
+# 评审过的 plan 写入(同样的 --apply --plan 握手)
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --use-llm
+PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --use-llm --apply --plan <plan.json>
+```
+
+- `--notebook`(必填)—— 要回填的 notebook。
+- `--apply` —— 真正写入;它【必须】带 `--plan PATH`,按该评审过的 plan 文件逐条写入。某个格子若在评审后被人改过(当前内容与 plan 记录的 `before` 不一致)会被【跳过并报告】,绝不覆盖已经改动过的目标。每个写入的行标记为 pending,交由投影重算其 KG/步骤(重投影在命令退出前同步完成)。不带 `--plan` 的 `--apply` 是【硬错误】:apply 时从【当前】库重新规划,会把评审后被改过的格子也带进来写入却从未被评审(`--use-llm` 更甚——改写模型随机,重新规划连候选都不同)——所以请先 dry-run、评审其 plan 文件,再按【那份】写入。
+- `--use-llm` —— 改走已配置的改写模型逐格重排(自带零 LLM 的内容不变式校验,校验不过会自动退回确定性规则),而不是默认那套随时可用的规则规整器。若改写模型未配置、或其结果未过校验已退回规则,工具会打印明确的 `WARNING`,不会悄悄假装 LLM 生效了。
+- `--save-plan PATH` —— 覆盖 dry-run 写出 plan 文件的路径。
+- `--plan PATH` —— 要写入的评审过的 plan 文件(见 `--apply`)。
+
+**行标题(anchor)列绝不参与规整**——不论是导入、追加还是本回填等【批量】路径:它是分组键,必须字节稳定,规整它会让刚被改动的行与既有概念组的键失配、组被劈开。(只有编辑器里【显式】的单格「整理格式」——有人逐格评审建议、且同组兄弟行一起改写——才可以动它。)
+
+这项并发契约只适用于编辑器交互式整行/整表规整批次的保存单元；普通共享格编辑和普通
+API 不获得此保证。批次打开时会冻结完整表快照，但仅为由完整 anchor-group 保存单元覆盖的
+每个非空 anchor 分组冻结精确成员集合（合并共享列扇写或单例完整组）。同一个 SQLite 写
+事务会逐一重新校验全部写目标的 expected 内容基线、当前行标题列指定，以及这些被覆盖冻结
+分组的精确成员。多行 anchor 分组里的非共享列是合法子集写：只校验其写目标基线，不做整组
+成员集 guard。适用的任一内容、anchor 或成员漂移都会使整个保存单元以 HTTP 409 拒绝，且
+绝不部分写入。UI 会保留刚生成的规整候选并标记为陈旧，要求用户重新运行规整，并在关闭
+批量弹窗后刷新整表。
+
+v21 为 `(column_id, JS-trim(content_md), row_id)` 建立索引；guarded 成员检查以同一归一化表达式做等值查询。因此完整 anchor 分组仍 fail-closed，但在写事务中按分组查找而不再扫描整列。
+
+必须在主 checkout 根目录下运行(需要真实的 `.env`/数据库配置,与上面的 `batch_ingest.py`/`replay_retrieval.py` 一样)。可安全重复执行:再按同一个 plan 应用一次是 no-op(每个已应用的格子当前内容都已不再等于它记录的 `before`)。
 
 ## 当前限制
 
@@ -920,7 +1013,7 @@ PYTHONPATH=backend python scripts/merge_dbs.py \
 - 统一 KG rebuild 改为显式且可观测（`GET /notebooks/{id}/unified-kg/status`）；摄取来源只标记图谱为 dirty 而非同步重建，打开图谱浮层不再自动重建（按需刷新）。
 - 跨文档概念合并使用确定性别名归一化 + 有界 top-k 向量候选（可扩展到上千概念）；可选 LLM 预审（`POST /notebooks/{id}/unified-kg/merges/review`）对小批量近义词候选做高置信确认/拒绝。
 - KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
-- 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `chunk`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；一旦某 notebook 标为 `base`，tier 感知联合检索与 base 优先冲突规则自动生效。
+- 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `chunk`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；把一个 notebook 发布为公共知识库只是让它可被挂载——tier 感知联合检索与 base 优先冲突规则只对显式把它挂为参考库的笔记本生效。
 - Notebook 分享采用链接复制/只读成员方式，不是实时协同编辑；写权限仍归 owner。
 - PostgreSQL + pgvector 暂不阻塞本机 beta，后续再迁移。在 PostgreSQL repository 实现前，非 `sqlite:///` 的 `DATABASE_URL` 会直接报错，不再静默落到本地数据库。
 - `off` 模式 PDF 回退用 pypdf layout 抽取（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。
@@ -934,13 +1027,44 @@ PYTHONPATH=backend python scripts/merge_dbs.py \
 bash scripts/check.sh
 ```
 
-该脚本进行后端语法检查（`py_compile`）、不读取仓库 `.env` 的离线 hermetic smoke、完整后端 pytest、递归发现的全部前端 `*.test.mjs`、`tsc --noEmit` 与 production build。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+这是完整的本地离线门禁，并行运行三个有界 lane：`check_backend.sh` 执行完整 backend pytest；`check_contracts.sh` 执行语法/依赖预检、hermetic smoke、契约检查与确定性抽取评分 harness；`check_frontend.sh` 执行递归发现的全部 `*.test.mjs`、全部 `*.component.test.tsx`、`tsc --noEmit` 与 production build。每个 lane 都有独立进程组，因此中断或终止 controller 时，也会终止并回收 pytest、npm 和 Next.js 的后代进程。官方 client MCP smoke 精确锁定十一个工具：七个 Memory 工具加四个 knowhow 工具。缺少 `frontend/node_modules` 会直接失败，不再静默跳过前端门禁。
+
+验收时使用项目一直采用的 Homebrew/Miniconda Python：
+
+```bash
+PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
+```
+
+当前 Apple Silicon 开发基线要求完整 warm gate 在 60 秒内完成；这是本机实测目标，不是对每一台 CI 机器的可移植超时断言。
+
+### GitHub Actions CI
+
+`.github/workflows/ci.yml` 把同一套完整门禁暴露为唯一的
+`CI / full-gate` 检查。它在目标为 `master` 的 PR、`master` push 与手动触发时
+运行，环境固定为 `ubuntu-24.04`、Python 3.13、Node.js 22。workflow 从
+`backend/requirements.txt` 与 `frontend/package-lock.json` 安装依赖，然后把
+测试选择完整委托给 `scripts/check.sh`。
+
+该 workflow 只有读权限，不接收模型或部署 secrets，并把后端 pytest worker
+限制为 4，避免 GitHub 托管 runner 过度抢占。20 分钟 timeout 包含依赖安装，
+与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。初次接入时
+`CI / full-gate` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
+并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。
 
 ## 开发流程
 
 每开始一个新的特性开发任务，默认先新建 git worktree，并在该 worktree 内基于新 feature 分支开发；完成后从该分支提交 PR。不要为了特性开发直接在本地主 checkout 里切分支。如果当前目录已经是隔离的 linked worktree，则继续在当前 worktree 内工作。
 
 对于已经批准的多步骤实施计划，默认采用 subagent-driven development：每个任务交给一个全新的实现子 Agent，并在进入下一任务前完成该任务范围内的规格符合性与代码质量审查。纯调研、设计、状态汇报和只读审查不要求创建 worktree 或使用子 Agent。
+
+### 测试架构
+
+- 后端与前端静态契约使用模块路径、限定 scope、操作种类、目标和审核后的计数等语义身份。源码位置只能作为诊断元数据；行号、offset、CSS 顺序和源码切片都不得用来标识预期站点。
+- 前端 `*.test.mjs` 用 `node:test` 覆盖纯逻辑，以及少量有明确理由的架构/安全/词汇/入口契约；`*.component.test.tsx` 用 Vitest、jsdom 与 Testing Library，通过 role、用户动作和状态验证可见行为。
+- 组件行为不得由 CSS 几何或源码布局钉死。普通特性重构只有在可观察契约改变时才应修改测试。
+- 已提交测试不得使用 skip/xfail/todo/only 禁用；repository policy 会同时检查测试入口及其 helper 模块，并禁止绕过共享 semantic-source 适配器直接读取生产源码。
+- 前端源码策略必须保持有界：通过语法规则拒绝 AST 位置/集合顺序 API，以及源码语义命名值上的文本位置操作；共享 `semantic-source.mjs` 只能暴露 AST 语义，不能把文本切片、分行、下标或长度当作契约。不要为此实现整套 JavaScript 数据流解释器，普通数组操作仍然合法。
+- backend 测试会在 xdist worker 启动前，由主进程预热一份仓库本地 Matplotlib 字体缓存。必须保留这个 controller 边界，不能让每个图谱 worker 各自重复枚举 macOS 字体。
 
 ## 文档维护
 

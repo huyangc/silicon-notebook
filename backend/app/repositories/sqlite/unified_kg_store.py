@@ -26,6 +26,7 @@ import sqlite3
 from typing import Dict, List, Optional, Tuple
 
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 
 
 class UnifiedKgStore:
@@ -629,12 +630,14 @@ class UnifiedKgStore:
     # -------------------------------------------- community-peer primitives
     # communities.py(对比检索原语)的读接口 —— 自己开只读连接(原实现即用
     # 独立 repo._connect() 短查询;WAL 并发读)。
-    def first_base_notebook_id(self, active_nb: str) -> Optional[str]:
+    def mounted_base_ids(self, active_nb: str) -> list[str]:
+        """本库挂载的有效参考库 id —— 社区对比检索的扩展域。原
+        first_base_notebook_id 的全局 LIMIT 1 在多领域下无意义。"""
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT id FROM notebooks WHERE tier='base' AND id != ? ORDER BY updated_at DESC LIMIT 1",
-                (active_nb,)).fetchone()
-        return row["id"] if row else None
+            rows = db.execute(
+                "SELECT b.id AS id " + MOUNT_JOIN + MOUNT_VALID + MOUNT_ORDER,
+                (active_nb,)).fetchall()
+        return [row["id"] for row in rows]
 
     def resolve_focal(self, notebook_id: str, focal_key: str) -> Optional[str]:
         """focal 归一键 → canonical_id(lower(canonical_name)==key,多簇取成员最多者)。"""

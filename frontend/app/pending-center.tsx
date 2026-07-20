@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bell } from "lucide-react";
 import { API_BASE, authHeaders, getToken } from "./auth";
-import { itemSig, currentSigs, pruneSigs, pendingView } from "./pending-actions";
+import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView } from "./pending-actions";
 
 // localStorage 读写(私密模式/SSR 容错):待办的「已读/关掉」状态按用户存本地。
 const loadSigs = (key: string): string[] => {
@@ -28,29 +28,6 @@ export type PendingItem = {
 export type DoneToast = { notebook_id: string; notebook_name: string; ts: number; kind?: string; text?: string };
 
 export type Snapshot = { count: number; items: PendingItem[] };
-
-// 完成事件 → toast 文案分派表。index_done 与既有硬编码文案保持字节级一致(向后兼容，
-// 见 PendingToast 渲染处的回落文案)；paper_meta_done 补充对应文案。
-// 用 Map 而非对象字面量:分派键是后端下发的字符串 msg.event,若某天撞上 Object.prototype
-// 成员名(toString/constructor 等),对象字面量的 [key] 查找会命中原型链函数而非 undefined
-// (原型污染式误判);Map.has/get 只认自有键,天然免疫。
-const DONE_MESSAGES = new Map<string, (msg: any) => string>([
-  ["index_done", (m) => `「${m.notebook_name || ""}」索引构建完成,点击查看`],
-  // stored=0 但 not_paper>0 是完全成功的一批(全部判定为非论文,标记行已落库),
-  // 此时说「已补全 0 篇」既费解又像失败,改说清到底发生了什么。
-  ["paper_meta_done", (m) => {
-    const nb = m.notebook_name || "该笔记本";
-    const stored = m.stored ?? 0;
-    const notPaper = m.not_paper ?? 0;
-    if (stored > 0 && notPaper > 0) {
-      return `「${nb}」论文信息补全完成,已补全 ${stored} 篇,另有 ${notPaper} 篇非论文,点击查看`;
-    }
-    if (stored === 0 && notPaper > 0) {
-      return `「${nb}」论文信息已核对完成,${notPaper} 篇均非论文、无需补全,点击查看`;
-    }
-    return `「${nb}」论文信息补全完成,已补全 ${stored} 篇,点击查看`;
-  }],
-]);
 
 export function usePendingActions(enabled: boolean) {
   const [snapshot, setSnapshot] = useState<Snapshot>({ count: 0, items: [] });
@@ -113,13 +90,15 @@ export function usePendingActions(enabled: boolean) {
             try { msg = JSON.parse(line); } catch { continue; }
             if (msg.kind === "snapshot") {
               setSnapshot(msg.data as Snapshot);
-            } else if (msg.kind === "event" && msg.event && DONE_MESSAGES.has(msg.event)) {
+            } else if (msg.kind === "event" && msg.event) {
+              const text = doneMessage(msg.event, msg);
+              if (!text) continue;
               const d: DoneToast = {
                 notebook_id: msg.notebook_id,
                 notebook_name: msg.notebook_name || "",
                 ts: Date.now(),
                 kind: msg.event,
-                text: DONE_MESSAGES.get(msg.event)!(msg),
+                text,
               };
               // 去重键含 kind:同一 notebook 的 index_done 与 paper_meta_done 各自独立展示，
               // 互不覆盖(旧逻辑仅按 notebook_id 去重，会丢掉先到的另一种完成事件)。

@@ -123,6 +123,7 @@ class TestTask2FederatedRxGraph:
                   "quoted_span": "personal concept supports personal claim", "confidence": 1.0}
              ]},
         ])
+        r.replace_notebook_bases(pers_nb.id, [base_nb.id], "user-local")
         return r, base_nb.id, pers_nb.id
 
     def test_federated_graph_contains_nodes_from_both_notebooks(self, repo_two_notebooks):
@@ -493,6 +494,7 @@ class TestTask6AskGraphFederated:
                   "quoted_span": "gate oxide thinning supports leakage claim", "confidence": 1.0}
              ]},
         ])
+        r.replace_notebook_bases(pers_nb.id, [base_nb.id], "user-local")
         return r, base_nb, pers_nb
 
     def test_ask_graph_traverses_both_notebooks(self, repo_with_two_notebooks):

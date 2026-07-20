@@ -1,6 +1,9 @@
 """大库检索统一 copyable + 无索引提示建索引。"""
 import json
+
+import numpy as np
 import pytest
+import scipy.sparse as sp
 
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
@@ -61,12 +64,48 @@ from app.models.schemas import AskResponse
 
 
 def _index_nb(repo, name="big"):
-    from app.models.schemas import NotebookCreate
     nb = repo.create_notebook(NotebookCreate(name=name))
     _add_chunk(repo, nb.id, "s1", "c1", "alpha")
-    repo.rebuild_unified_kg(nb.id)
-    repo.build_scale_index(nb.id)   # 磁盘有 manifest → 有索引
+    _write_minimum_valid_scale_artifact(repo, nb.id)
     return nb
+
+
+def _write_minimum_valid_scale_artifact(repo, notebook_id):
+    """Persist the smallest loadable scale artifact through the real store.
+
+    ``_needs_index`` only probes whether an on-disk artifact can be loaded.
+    Building a complete KG and ANN here tests unrelated construction work and
+    used to dominate the suite.  The one-node artifact retains the production
+    file format and catalog/load path without manufacturing a whole graph.
+    """
+    runtime = repo._runtime.scale_artifacts
+    runtime.artifacts.save_full(
+        notebook_id,
+        {
+            "node_ids": ["c1"],
+            "transition": sp.csr_matrix((1, 1), dtype=np.float32),
+            "idf": np.ones(1, dtype=np.float32),
+            "chunk_index": np.array([0], dtype=np.int32),
+            "ann_vectors": np.empty((0, 16), dtype=np.float32),
+            "ann_labels": [],
+            "manifest": {
+                "version": runtime.version(notebook_id),
+                "dim": 16,
+                "n_nodes": 1,
+                "n_chunks": 1,
+                "n_ann": 0,
+            },
+        },
+    )
+
+
+def test_indexed_fixture_is_detected_without_rebuild(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="indexed"))
+    _add_chunk(repo, notebook.id, "s1", "c1", "alpha")
+    _write_minimum_valid_scale_artifact(repo, notebook.id)
+    monkeypatch.setattr(repo.settings, "notebook_copy_max_rows", 0)
+
+    assert repo._needs_index(notebook.id) is False
 
 
 def test_needs_index_truth_table(repo, monkeypatch):

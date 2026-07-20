@@ -134,7 +134,9 @@ def test_param_rejection_falls_back_to_plain(monkeypatch):
 def test_connection_error_retries_then_recovers(monkeypatch):
     """Two transient connection errors then a valid response: chat_json returns
     the content and create is called 3 times (1 + 2 retries)."""
-    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        llm_mod, "sleep_or_cancel", lambda _seconds, _cancel_event: None
+    )
     err = APIConnectionError(request=httpx.Request("POST", "https://x"))
     create = _FakeCreate([err, err, _Resp()])
     c = _make(monkeypatch, create)  # default OPENAI_COMPAT_MAX_RETRIES = 2
@@ -146,7 +148,9 @@ def test_connection_error_retries_then_recovers(monkeypatch):
 def test_connection_error_retries_exhausted(monkeypatch):
     """Create always raises a connection error: chat_json raises after exactly
     1 + max_retries attempts."""
-    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        llm_mod, "sleep_or_cancel", lambda _seconds, _cancel_event: None
+    )
     monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "2")
     err = APIConnectionError(request=httpx.Request("POST", "https://x"))
     create = _FakeCreate([err])  # repeats last behavior forever
@@ -159,7 +163,9 @@ def test_connection_error_retries_exhausted(monkeypatch):
 def test_non_connection_error_does_not_loop(monkeypatch):
     """A non-connection error on json-mode create triggers exactly ONE plain-mode
     retry (existing fallback) and does NOT enter the connection-retry loop."""
-    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        llm_mod, "sleep_or_cancel", lambda _seconds, _cancel_event: None
+    )
     monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "5")
     create = _FakeCreate([ValueError("response_format unsupported"), _Resp()])
     c = _make(monkeypatch, create)
@@ -202,7 +208,9 @@ def test_per_call_timeout_passed_on_plain_fallback(monkeypatch):
 def test_per_call_max_retries_zero_no_retry(monkeypatch):
     """(B) max_retries=0 -> exactly 1 attempt (no retry) even though the global
     setting allows several; the per-call override wins."""
-    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        llm_mod, "sleep_or_cancel", lambda _seconds, _cancel_event: None
+    )
     monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "5")  # global allows many
     err = APITimeoutError(request=httpx.Request("POST", "https://x"))
     create = _FakeCreate([err])  # repeats forever
@@ -215,7 +223,9 @@ def test_per_call_max_retries_zero_no_retry(monkeypatch):
 def test_per_call_max_retries_overrides_global(monkeypatch):
     """(B) max_retries=2 -> 1 + 2 = 3 attempts, independent of the (smaller)
     global setting, confirming the override path is used for the loop bound."""
-    monkeypatch.setattr(llm_mod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        llm_mod, "sleep_or_cancel", lambda _seconds, _cancel_event: None
+    )
     monkeypatch.setenv("OPENAI_COMPAT_MAX_RETRIES", "0")  # global says fail-fast
     err = APITimeoutError(request=httpx.Request("POST", "https://x"))
     create = _FakeCreate([err])
@@ -223,6 +233,25 @@ def test_per_call_max_retries_overrides_global(monkeypatch):
     with pytest.raises(APITimeoutError):
         c.chat_json([{"role": "user", "content": "hi"}], "{}", max_retries=2)
     assert len(create.calls) == 3  # 1 + 2 retries from the override
+
+
+def test_connection_retry_uses_injected_wait_boundary(monkeypatch):
+    waits = []
+    monkeypatch.setattr(
+        llm_mod,
+        "sleep_or_cancel",
+        lambda seconds, cancel_event: waits.append((seconds, cancel_event)),
+    )
+    err = APIConnectionError(request=httpx.Request("POST", "https://x"))
+    create = _FakeCreate([err, _Resp()])
+    client = _make(monkeypatch, create)
+
+    assert client.chat_json(
+        [{"role": "user", "content": "hi"}], "{}"
+    ) == '{"ok":1}'
+    assert len(waits) == 1
+    assert 1 <= waits[0][0] <= 2
+    assert waits[0][1] is None
 
 
 def test_client_built_with_no_sdk_retries(monkeypatch):

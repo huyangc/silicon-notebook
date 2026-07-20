@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { itemSig, doneSig, currentSigs, pruneSigs, pendingView } from "./pending-actions.ts";
+import {
+  itemSig,
+  doneMessage,
+  doneSig,
+  currentSigs,
+  pruneSigs,
+  pendingView,
+} from "./pending-actions.ts";
 
 const report = { type: "report_outline", notebook_id: "nb1", notebook_name: "NB1", report_id: "r1", title: "T" };
 const gov = { type: "governance", notebook_id: "nb2", notebook_name: "NB2", subtype: "merge", count: 334 };
@@ -57,6 +64,26 @@ test("doneSig: kind distinguishes the two completion events; omitting kind is ba
   assert.equal(doneSig("nb"), "done:nb");                                  // 旧签名(kind 省略)
   assert.equal(doneSig("nb", "paper_meta_done"), "done:nb:paper_meta_done");
   assert.notEqual(doneSig("nb", "paper_meta_done"), doneSig("nb", "index_done")); // 两种完成事件不撞
+});
+
+test("paper metadata completion copy distinguishes all-non-paper runs", () => {
+  assert.match(
+    doneMessage("paper_meta_done", {
+      notebook_name: "Papers",
+      stored: 0,
+      not_paper: 3,
+    }),
+    /3 篇均非论文、无需补全/,
+  );
+  assert.match(
+    doneMessage("paper_meta_done", {
+      notebook_name: "Papers",
+      stored: 2,
+      not_paper: 1,
+    }),
+    /已补全 2 篇,另有 1 篇非论文/,
+  );
+  assert.equal(doneMessage("unknown", {}), null);
 });
 
 test("mixed-kind done items on one notebook are signed and counted independently", () => {

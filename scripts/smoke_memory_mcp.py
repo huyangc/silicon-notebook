@@ -172,7 +172,10 @@ async def run() -> None:
                 ))
                 assert memory_id in {item["memory_id"] for item in recalled["items"]}
 
-    print("memory MCP smoke: OK (11 tools, session isolation, candidate plane isolation)")
+    print(
+        "memory MCP smoke: OK "
+        "(11 tools, session isolation, candidate plane isolation)"
+    )
 
 
 if __name__ == "__main__":

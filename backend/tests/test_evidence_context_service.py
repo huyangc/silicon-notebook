@@ -73,11 +73,21 @@ def test_evidence_context_chunk_golden_matches_master():
     # Task 12b review fix: chunk anchors resolve knowhow too (grounded-path
     # button reachability). These chunks carry no element_ids, so the field
     # is present-but-None and no store lookup fires at all.
+    # Task 14 codex r2 fix: c-active 的 notebook_id 显式等于本次 ask 的
+    # notebook_id("active")——联邦/PPR 检索对本库命中同样会打上 active 自己的
+    # notebook_id(并非只在跨库命中时才打标),chunk_context 必须把它归一成空串
+    # (镜像 follow_chain.py 的 `hop.notebook_id != active_notebook_id` 处理),
+    # 否则前端引用徽章会显示一个多余的"来自「当前笔记本」"库名。
     assert evidence["k1"] == {
         "object_id": "c-active", "object_type": "chunk", "name": "1.1",
         "definition": None, "snippet": "active text", "source_title": "Paper A",
-        "location_label": "1.1", "tier": "personal", "knowhow": None,
+        "location_label": "1.1", "tier": "personal", "notebook_id": "",
+        "knowhow": None,
     }
+    # k2(c-base)真正跨库:tier 解析为 base 且 notebook_id 原样带出,供 Task 14
+    # 的引用徽章库名映射消费。
+    assert evidence["k2"]["tier"] == "base"
+    assert evidence["k2"]["notebook_id"] == "base"
 
 
 def test_evidence_context_knowledge_golden_matches_master():
@@ -94,8 +104,40 @@ def test_evidence_context_knowledge_golden_matches_master():
         "object_id": "o1", "object_type": "concept", "name": "Cascode",
         "definition": "stable definition", "snippet": "source excerpt",
         "source_title": "Source A", "location_label": "§1", "tier": "base",
-        "knowhow": None,
+        "notebook_id": "base", "knowhow": None,
     }
+
+
+def test_evidence_context_knowledge_context_blanks_self_notebook_id():
+    """codex r2 fix: federated_retrieve()(retrieval_candidates.py 的
+    `_federated_retrieve_impl`)对 active 库自己的命中同样会把
+    RetrievedKnowledge.notebook_id 打成 active 自己的 id——resolve_participants
+    首项恒为 active 本身(notebook_store.py:66-69),`for nid in notebook_ids:` 第
+    一轮 `h.notebook_id = nid` 无条件执行,并不是只有跨库命中才打标(旧假设,
+    test_evidence_context_chunk_golden_matches_master 曾经的注释也这样错误
+    假设过)。knowledge_context 必须把等于调用方 notebook_id 的值归一成空串,
+    镜像 follow_chain.py 的 `hop.notebook_id != active_notebook_id` 处理,否则
+    前端引用徽章会显示一个多余的"来自「当前笔记本」"库名。o2 真正跨库
+    (来自 base)必须仍然原样带出 notebook_id——不能连带误伤这条既有不变量。"""
+    hits = [
+        RetrievedKnowledge(
+            object_id="o1", object_type="concept", payload={"name": "Self hit"},
+            evidence=[], tier="personal", notebook_id="active",
+        ),
+        RetrievedKnowledge(
+            object_id="o2", object_type="concept", payload={"name": "Cross hit"},
+            evidence=[], tier="base", notebook_id="base",
+        ),
+    ]
+    _, evidence = _service().knowledge_context("active", hits)
+    assert evidence["k1"]["notebook_id"] == "", (
+        "hit.notebook_id 等于调用方 active 时必须归一成空串,实为 "
+        f"{evidence['k1']['notebook_id']!r}")
+    assert evidence["k1"]["tier"] == "personal"
+    assert evidence["k2"]["notebook_id"] == "base", (
+        "真正跨库命中(o2 来自 base)必须原样带出 notebook_id,实为 "
+        f"{evidence['k2']['notebook_id']!r}")
+    assert evidence["k2"]["tier"] == "base"
 
 
 def test_evidence_context_numeric_group_anchors_match_master():
@@ -109,6 +151,29 @@ def test_evidence_context_numeric_group_anchors_match_master():
         ("k1", "o1", "base"), ("k2", "o2", "personal")
     ]
     assert service.parse_anchors("mixed [k1, k999]", evidence) == []
+    # Task 14: 两条 evidence 都没带 "notebook_id" 键(render_subgraph_context 的
+    # 纯 graph-BFS 节点尚未填充这个键)——`.get` 必须安全回退空串,不抛 KeyError,
+    # 徽章優雅退回泛化 tier 文案。
+    assert [anchor.notebook_id for anchor in anchors] == ["", ""]
+
+
+def test_evidence_context_parse_anchors_carries_notebook_id_when_present():
+    """chunk_context/knowledge_context 填了 "notebook_id" 键时,parse_anchors
+    必须原样透传到 AnswerAnchor,供 Task 14 的引用徽章库名映射消费。"""
+    evidence = {
+        "k1": {
+            "object_id": "o1", "object_type": "claim", "name": "A", "tier": "base",
+            "notebook_id": "base-nb",
+        },
+        "k2": {
+            "object_id": "o2", "object_type": "claim", "name": "B", "tier": "personal",
+            "notebook_id": "",
+        },
+    }
+    anchors = _service().parse_anchors("[k1, k2]", evidence)
+    assert [(anchor.key, anchor.notebook_id) for anchor in anchors] == [
+        ("k1", "base-nb"), ("k2", "")
+    ]
 
 
 def test_evidence_context_preserves_tier_and_source_metadata():
@@ -120,8 +185,70 @@ def test_evidence_context_preserves_tier_and_source_metadata():
             confidence=1.0,
         )], tier="base",
     )
-    citations = _service().citations_from([hit], {"e1"}, "KG evidence")
+    citations = _service().citations_from([hit], {"e1"}, "KG evidence", notebook_id="active")
     assert len(citations) == 1
     assert citations[0].tier == "base"
     assert citations[0].source_id == "s1"
     assert citations[0].location_label == "p. 4"
+    # Task 14: 这条 hit 没显式打 notebook_id(RetrievedKnowledge 默认 ""——即
+    # "本库,不是跨库联邦命中"),citation.notebook_id 必须原样留空,而不是回填
+    # 成某个"当前 notebook"。
+    assert citations[0].notebook_id == ""
+
+
+def test_evidence_context_citations_from_carries_cross_tier_notebook_id():
+    """hit 显式标了来源库(federated_retrieve 的产出)时,citations_from 必须把
+    它原样带到 Citation.notebook_id,供 Task 14 的引用徽章库名映射消费。"""
+    hit = RetrievedKnowledge(
+        object_id="o1", object_type="claim", payload={"name": "Claim"},
+        evidence=[Evidence(
+            source_id="s1", source_title="Source title", element_id="e1",
+            element_type="text", location_label="p. 4", quoted_span="quoted",
+            confidence=1.0,
+        )], tier="base", notebook_id="base-nb",
+    )
+    citations = _service().citations_from([hit], {"e1"}, "KG evidence", notebook_id="active")
+    assert len(citations) == 1
+    assert citations[0].notebook_id == "base-nb"
+
+
+def test_evidence_context_citations_from_blanks_self_notebook_id():
+    """codex r4 fix: federated_retrieve()(_federated_retrieve_impl)对 active
+    库自己的命中同样会把 RetrievedKnowledge.notebook_id 打成 active 自己的
+    id——resolve_participants 首项恒为 active 本身,`for nid in notebook_ids:`
+    第一轮 `h.notebook_id = nid` 无条件执行,并不是只有跨库命中才打标(与
+    test_evidence_context_knowledge_context_blanks_self_notebook_id 验证过的
+    knowledge_context 同一根因)。citations_from 此前没有调用方 notebook_id
+    可比较,原样透传——当答案合成失败/模型没吐出任何 [k] 锚点时,前端会把
+    这批 citation 当回退列表直接展示,「本库自己」的证据就会被误标成"来自
+    「当前笔记本」"。必须把等于调用方 notebook_id 的值归一成空串,镜像
+    chunk_context/knowledge_context/render_follow_chain_context 的既有处理;
+    真正跨库命中(hit_cross 来自 base)必须仍然原样带出——不能连带误伤既有
+    不变量。"""
+    hit_self = RetrievedKnowledge(
+        object_id="o1", object_type="concept", payload={"name": "Self hit"},
+        evidence=[Evidence(
+            source_id="s-own", source_title="Own doc", element_id="e-own",
+            element_type="text", location_label="p. 1", quoted_span="own quote",
+            confidence=1.0,
+        )], tier="personal", notebook_id="active",
+    )
+    hit_cross = RetrievedKnowledge(
+        object_id="o2", object_type="concept", payload={"name": "Cross hit"},
+        evidence=[Evidence(
+            source_id="s-base", source_title="Base doc", element_id="e-base",
+            element_type="text", location_label="p. 2", quoted_span="base quote",
+            confidence=1.0,
+        )], tier="base", notebook_id="base",
+    )
+    citations = _service().citations_from(
+        [hit_self, hit_cross], {"e-own", "e-base"}, "KG evidence", notebook_id="active")
+    by_source = {c.source_id: c for c in citations}
+    assert by_source["s-own"].notebook_id == "", (
+        "hit.notebook_id 等于调用方 active 时必须归一成空串,实为 "
+        f"{by_source['s-own'].notebook_id!r}")
+    assert by_source["s-own"].tier == "personal"
+    assert by_source["s-base"].notebook_id == "base", (
+        "真正跨库命中(s-base 来自 base)必须原样带出 notebook_id,实为 "
+        f"{by_source['s-base'].notebook_id!r}")
+    assert by_source["s-base"].tier == "base"

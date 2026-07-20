@@ -9,15 +9,10 @@ from app.repositories.ports import (
     RetrievalPort,
 )
 from app.repositories.ownership_manifest import OWNER_BY_MEMBER
+from app.repositories.sqlite.migrations import SCHEMA_VERSION
 from app.services import report_engine, report_execution, repository_runtime
 from tests import test_repository_facade_contract as facade_contract
-from tests.test_repository_callers_static import (
-    EXPECTED_REMEDIATION_SITES as CALLER_REMEDIATION_SITES,
-    INDEPENDENT_PRIVATE_SITES,
-    INDEPENDENT_SQL_SITES,
-    private_repository_sites,
-    product_sql_sites,
-)
+from tests.architecture.repository_callers import collect_caller_contract
 from tests.test_repository_protocol_coverage import protocol_calls
 
 
@@ -125,6 +120,29 @@ def test_retrieval_documentation_scopes_federation_and_tier_tie_break_by_path():
         assert "所有模式都跨 `tier=base`" not in text
     for name in CONTRACT_DOCS[1:2] + CONTRACT_DOCS[3:]:
         assert "remains score-only" not in _read(name)
+
+
+def test_mount_documentation_describes_explicit_reference_library_model_and_zero_mount_cutover():
+    """多领域基准库(2026-07-18/19)最终整支审查必办 5:notebook_bases 挂载集合
+    取代了全局唯一 tier='base' 之后,最大的行为变化——升级到 schema 20 不回填
+    挂载,所有既有笔记本挂载数清零,联邦检索对所有人停止直到用户自己去挂——
+    此前只写在设计规格里(docs/superpowers/specs/2026-07-18-multi-domain-base-
+    libraries-design.md §7),四份活文档(README/README_zh/AGENTS/architecture)
+    零处提及。钉住四份文档都描述了这个升级断层,并且 architecture.md 不再用
+    「跨 active + base」这个在多参考库模型下已不成立的措辞(暗示 base 仍是
+    全局唯一、隐式参与)。"""
+    _assert_phrases(
+        {
+            "README.md": "every pre-existing notebook starts with zero mounted reference libraries",
+            "README_zh.md": "所有既有笔记本挂载数清零",
+            "AGENTS.md": "every pre-existing notebook starts with zero mounted reference libraries",
+            "architecture.md": "所有既有笔记本挂载数清零",
+        }
+    )
+    assert "跨 active + base 收集" not in _read("architecture.md"), (
+        "「跨 active + base」暗示 base 仍是全局唯一隐式参与 —— 多参考库模型下"
+        "已不成立,应改为按显式挂载集合描述(notebook_bases)"
+    )
 
 
 def test_workspace_documentation_names_four_tabs_and_actual_toolbar_actions():
@@ -409,15 +427,18 @@ def test_repository_documentation_matches_composed_runtime_and_v9_compatibility(
 def test_completed_repository_boundary_claims_are_source_guarded():
     """The completion prose is coupled to production-source architecture guards.
 
-    These helpers are shared with the architecture suites instead of copying or
-    weakening their exact exception/debt ledgers here.
+    The semantic caller contract is checked exactly against its reviewed fixture
+    in the repository dependency suite. Here we additionally pin that every
+    remaining boundary crossing has an explicit architectural reason.
     """
-    assert set(product_sql_sites()) - set(INDEPENDENT_SQL_SITES) == set()
-    assert set(private_repository_sites()) - set(INDEPENDENT_PRIVATE_SITES) == set()
-    assert CALLER_REMEDIATION_SITES == {
-        "product_sql": set(),
-        "private_repository": set(),
-    }
+    caller_contract = collect_caller_contract()
+    assert caller_contract["independent_sql"]
+    assert caller_contract["independent_private"]
+    assert all(
+        entry["reason"]
+        for entries in caller_contract.values()
+        for entry in entries
+    )
     assert facade_contract.facade_body_violations(
         facade_contract.SQLiteRepository
     ) == []
@@ -584,29 +605,37 @@ def test_report_cancellation_is_the_documented_process_global_runtime_exception(
     )
 
 
-def test_repository_schema_baseline_wording_is_exact_and_not_stale():
-    english_current = (
-        "The current schema version is 20. The committed v9 compatibility fixture\n"
-        "upgrades through v10, the v11/v12 SQLite hot-path indexes, v13 Memory/Agent,\n"
-        "v14/v15 Memory-derived source links/indexes, v16 Knowhow tables/assets, v17\n"
-        "paper metadata, v18 Knowhow cell-code/role migration, v19 source-linked assets,\n"
-        "and v20 durable KG build jobs, and remains readable."
-    )
-    chinese_current = (
-        "当前 schema 版本为 20。已提交的 v9 兼容 fixture 会依次经过 v10、"
-        "v11/v12 SQLite 热路径索引、v13 Memory/Agent、v14/v15 Memory 派生源 "
-        "link/index、v16 Knowhow 表/资产、v17 论文元数据、v18 Knowhow 格子代码/"
-        "角色迁移、v19 来源关联资产与 v20 持久化 KG 构建任务，并保持可读。"
-    )
+def test_live_schema_docs_follow_executable_version():
+    english_version = f"The current schema version is {SCHEMA_VERSION}."
+    chinese_version = f"当前 schema 版本为 {SCHEMA_VERSION}。"
+    migration_span = f"v10–v{SCHEMA_VERSION}"
+
+    for name in ("README.md", "AGENTS.md"):
+        text = _read(name)
+        assert english_version in text
+        assert re.findall(
+            r"The current schema version is (\d+)\.", text
+        ) == [str(SCHEMA_VERSION)]
+        assert migration_span in text
+
+    for name in ("README_zh.md", "architecture.md"):
+        text = _read(name)
+        assert chinese_version in text
+        assert re.findall(
+            r"当前 schema 版本为 (\d+)[。]", text
+        ) == [str(SCHEMA_VERSION)]
+        assert migration_span in text
+
+
+def test_repository_composition_history_keeps_v10_baseline():
     historical_chinese = (
         "本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。"
         "已提交的 v9 兼容 fixture 会经由既有 v10 migration 升级，并保持可读。"
     )
-    for name in ("README.md", "AGENTS.md"):
-        assert english_current in _read(name), f"{name} is missing the exact schema statement"
-    assert chinese_current in _read("README_zh.md")
     for name in ("architecture.md", "fangan_done.md") + COMPOSITION_HISTORY_DOCS:
-        assert historical_chinese in _read(name), f"{name} is missing the historical schema statement"
+        assert historical_chinese in _read(name), (
+            f"{name} is missing the historical schema statement"
+        )
 
     for name in COMPOSITION_HISTORY_DOCS:
         text = _read(name)
@@ -617,7 +646,9 @@ def test_repository_schema_baseline_wording_is_exact_and_not_stale():
             "SCHEMA_VERSION remains 9",
             "schema v9 and frozen-master",
         ):
-            assert stale not in text, f"{name} retains stale schema wording: {stale}"
+            assert stale not in text, (
+                f"{name} retains stale schema wording: {stale}"
+            )
 
 
 def test_ask_mode_documentation_keeps_chunk_default_and_alias_only_retirement():
@@ -695,6 +726,50 @@ def test_knowhow_documentation_matches_projection_isolation_and_agent_scopes():
         assert "".join("`memory:propose`, and `ask:execute`.".split()) not in compact_text, (
             f"{name} retains the retired five-scope list as current"
         )
+
+
+def test_current_mcp_docs_pin_complete_eleven_tool_surface():
+    public_tools = (
+        "list_notebooks",
+        "select_notebook",
+        "search_agent_memory",
+        "search_notebook_context",
+        "get_memory",
+        "ask_notebook",
+        "propose_memory",
+        "list_knowhow_tables",
+        "get_knowhow_discrimination",
+        "get_knowhow_row",
+        "put_knowhow_cell_code",
+    )
+    current_docs = (
+        "architecture.md",
+        "fangan_done.md",
+        "silicon_notebook_fangan.md",
+    )
+
+    for name in current_docs:
+        text = _read(name)
+        compact_text = "".join(text.split())
+        assert "十一个工具" in compact_text, (
+            f"{name} must describe the complete eleven-tool MCP surface"
+        )
+        assert "`knowhow:code`" in text, (
+            f"{name} must document the write scope required by the knowhow tool"
+        )
+        for tool in public_tools:
+            assert tool in text, f"{name} is missing current MCP tool {tool}"
+
+    stale_claims = (
+        r"mcp_server\.py` 提供七个 scoped",
+        r"(?:离线 )?smoke[：，][^。\n]{0,30}七工具契约",
+    )
+    for name in current_docs:
+        text = _read(name)
+        for pattern in stale_claims:
+            assert re.search(pattern, text, flags=re.IGNORECASE) is None, (
+                f"{name} retains obsolete seven-tool MCP wording: {pattern}"
+            )
 
 
 def test_superseded_spec_scope_is_repository_only_with_pydantic_lifespan_deferred():

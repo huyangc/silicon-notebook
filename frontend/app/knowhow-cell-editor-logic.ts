@@ -45,6 +45,13 @@ export const TOOLBAR_LIST_LABEL = "列表";
 export const TOOLBAR_CODE_LABEL = "代码";
 export const TOOLBAR_IMAGE_LABEL = "图片";
 
+// 「规整格式」工具栏按钮标签（knowhow-md-normalize Task 8；任务简报原文
+// 逐字一致）。与「优化表达」（knowhow-optimize-logic.ts 的
+// OPTIMIZE_CELL_BUTTON_LABEL）并存于同一工具栏，语义刻意区分：规整=只改
+// 格式（调用 reformat_cell，规则确定性重排，LLM 仅锦上添花且失败也有规则
+// 兜底）；优化=改措辞（调用 optimize_cell，纯 LLM 改写）。
+export const TOOLBAR_REFORMAT_LABEL = "规整格式";
+
 // --- 草稿键 / 恢复决策 -----------------------------------------------------------
 
 // 草稿存储键：cell id 即 (rowId, columnId) 二元组——两者都是全局唯一的 128
@@ -350,12 +357,158 @@ export function applyDraftFlush(
   return true;
 }
 
-// 编辑器是否处在「有异步在飞」的忙态：保存中 / 图片上传中 / 优化表达请求中。
-// 用于门控**发起类**入口（保存、切兄弟格）——但刻意不门控**离开类**入口
-// （关闭/Esc/背景/取消）：离开的安全性由下面的 resolveSaveCompletion 陈旧回调
-// 守卫来保证，若连离开都禁掉，请求卡住时用户会被关在弹窗里出不来。
-export function isEditorBusy(saving: boolean, uploading: boolean, optimizing: boolean): boolean {
-  return saving || uploading || optimizing;
+// --- ruleNormalize：Excel 习惯排版 → 干净 CommonMark 的确定性规整器（零 LLM）---
+//
+// 与后端 backend/app/services/knowhow/md_normalize.py 的 rule_normalize 严格
+// 同语义——两侧共享同一份 golden fixture（backend/tests/fixtures/
+// knowhow_normalize_golden.json，见 knowhow-normalize.test.mjs）做 parity，
+// 防止两个语言实现随时间漂移。以下逐函数对应 Python 版：
+//   indentDepth       ~ _indent_depth
+//   classifyLine      ~ classify_line
+//   isRichMarkdown    ~ is_rich_markdown（allow-list 门，rule_normalize 入口即调用）
+//   normalizeImpl     ~ _normalize
+//   ruleNormalize     ~ rule_normalize（唯一导出，永不抛）
+//
+// 与 Python 正则/字符串语义有意的差异点见各处注释（Unicode 数字、
+// lstrip(俩字符) vs trimStart 等），完整讨论见任务简报/报告。
+//
+// content_signature / content_invariant（Python 侧的内容不变式校验）与 Python
+// 的行式围栏扫描器 `_fence_spans`/`_is_closing_fence` 都是后端专属：它们只在
+// 后端「LLM 重排候选是否安全落库」的把关路径上使用，前端没有对应调用点，故
+// 不移植——只有 rule_normalize 有 TS 孪生。前端 isRichMarkdown 只需判定某行是
+// 否**开启**围栏（FENCE_OPEN_RE），不需要配对闭合，故不移植 isClosingFence。
+
+// 与 Python BULLET_GLYPHS = "•●◦▪‣·" 同一字符集，直接内联进字符类（这些字符
+// 在 JS/Python 正则里都不是元字符，无需转义）。
+// body 捕获组用 [^\n] 而非裸 `.`：JS 正则 `.` 排除全部 LineTerminator（\n \r
+// U+2028 U+2029），Python `.`（无 DOTALL）只排除 \n 一个字符；若沿用裸 `.`，
+// body 里混入 U+2028/U+2029 时 (.*)$ 会在 JS 侧因无法跨越该字符触达 $ 而整体
+// 匹配失败，该行被错误降级为 prose，而 Python 一侧仍正常识别为列表/标题行——
+// 换成 [^\n] 后两侧排除集合完全一致（只排除 \n），恢复 byte-identical parity。
+const BULLET_RE = /^([•●◦▪‣·]|[-*+])[ \t]+([^\n]*)$/;
+// Python `\d` 在 str 模式正则下默认按 Unicode 十进制数字（Nd 类）匹配，不是
+// 单纯 ASCII 0-9；JS 裸 \d 永远只认 ASCII，需要 Unicode 属性转义 \p{Nd} 配
+// u 标志才能等价（例如全角数字「１.」两侧都应识别为有序列表 marker）。
+const ORDERED_RE = /^([\p{Nd}]+)[.)、][ \t]+([^\n]*)$/u;
+const ALPHA_RE = /^([A-Za-z])[.)、][ \t]+([^\n]*)$/;
+
+type LineKind = "bullet" | "ordered" | "alpha" | "prose" | "blank";
+
+interface LineInfo {
+  kind: LineKind;
+  depth: number; // 缩进层级
+  body: string; // marker 之后的正文
+  marker: string; // ordered 的数字 / alpha 的字母（其余 kind 为空串）
+}
+
+// Python `line.lstrip("\t ")`：只剥前导 TAB / 半角空格这两种字符，不是通用
+// 空白剥离——JS 的 trimStart() 会剥掉所有 Unicode 空白（含全角空格等），
+// 若行首恰好是那类字符会被过度剥离、导致与 Python 端分类不一致，故手写。
+function lstripTabSpace(line: string): string {
+  let i = 0;
+  while (i < line.length && (line[i] === "\t" || line[i] === " ")) i++;
+  return line.slice(i);
+}
+
+// Python `str.isspace()` 为真的码点集合——即无参数 `str.strip()` 剥离的正是
+// 这些字符，不多不少。与 JS bare String.prototype.trim() 的空白集不同，两处
+// 差异都是真实分歧点（逐字符核对自 CPython Unicode 表，共 29 个码点）：
+//   - Python 剥、JS trim() 不剥：U+001C-U+001F (FS/GS/RS/US) 与 U+0085 (NEL)
+//   - JS trim() 剥、Python 不剥：U+FEFF (BOM)——不在这个集合里，因此下面
+//     `pyStrip` 不会剥它，这正是与 bare .trim() 唯一但关键的行为差异之一
+// （另一差异方向见上面第一条）。零宽空格 U+200B 同样两侧都不剥，故也不在表
+// 内——不要因为“看起来像空白”就加进来。
+function isPyWhitespace(code: number): boolean {
+  return (
+    (code >= 0x09 && code <= 0x0d) || // \t \n \v \f \r
+    code === 0x20 || // space
+    (code >= 0x1c && code <= 0x1f) || // FS GS RS US
+    code === 0x85 || // NEL
+    code === 0xa0 || // NBSP
+    code === 0x1680 || // Ogham space mark
+    (code >= 0x2000 && code <= 0x200a) || // en quad .. hair space
+    code === 0x2028 || // line separator
+    code === 0x2029 || // paragraph separator
+    code === 0x202f || // narrow no-break space
+    code === 0x205f || // medium mathematical space
+    code === 0x3000 // ideographic space
+  );
+}
+
+// Python 无参数 `str.strip()` 的等价物：两端剥掉上面这组「Python 认为是空白」
+// 的字符。凡是移植代码里对应 Python `.strip()` 调用的站点都必须走这个函数，
+// 不能用 bare `.trim()`（两者空白集不同，见上）；`lstripTabSpace()` 是另一个
+// 独立、故意更窄的调用（对应 Python `lstrip("\t ")`），不受此影响、不要合并。
+function pyStrip(s: string): string {
+  let start = 0;
+  let end = s.length;
+  while (start < end && isPyWhitespace(s.charCodeAt(start))) start++;
+  while (end > start && isPyWhitespace(s.charCodeAt(end - 1))) end--;
+  return s.slice(start, end);
+}
+
+// 每个前导 TAB = 1 层；随后每 2 个前导空格 = 1 层（floor）。
+function indentDepth(line: string): number {
+  let i = 0;
+  let tabs = 0;
+  while (i < line.length && line[i] === "\t") {
+    tabs += 1;
+    i += 1;
+  }
+  let spaces = 0;
+  while (i < line.length && line[i] === " ") {
+    spaces += 1;
+    i += 1;
+  }
+  return tabs + Math.floor(spaces / 2);
+}
+
+function classifyLine(line: string): LineInfo {
+  if (!pyStrip(line)) {
+    return { kind: "blank", depth: 0, body: "", marker: "" };
+  }
+  const depth = indentDepth(line);
+  const stripped = lstripTabSpace(line);
+  let m = BULLET_RE.exec(stripped);
+  if (m) {
+    return { kind: "bullet", depth, body: pyStrip(m[2]), marker: "" };
+  }
+  m = ORDERED_RE.exec(stripped);
+  if (m) {
+    return { kind: "ordered", depth, body: pyStrip(m[2]), marker: m[1] };
+  }
+  m = ALPHA_RE.exec(stripped);
+  if (m) {
+    return { kind: "alpha", depth, body: pyStrip(m[2]), marker: m[1] };
+  }
+  return { kind: "prose", depth, body: pyStrip(stripped), marker: "" };
+}
+
+type PrevKind = "start" | "prose" | "list" | "header";
+
+// 围栏开口检测：某行 stripped 后以「``` 或 ~~~ 至少 3 个」的连续 run 开头。
+// isRichMarkdown 的 allow-list 门用它把「以围栏开头的行」判为块级构造、整格
+// 拒绝规整（只需判开口，无需配对闭合——见文件头注释：闭合配对是后端
+// content_signature 专属，前端不移植 isClosingFence）。围栏开口不能用裸 `.`
+// 排除 \n 之外的 LineTerminator 那套坑——这里只匹配前导重复字符本身，不含
+// body，无需 [^\n] 那层考量。
+const FENCE_OPEN_RE = /^(`{3,}|~{3,})/;
+
+// 编辑器是否处在「有异步在飞」的忙态：保存中 / 图片上传中 / 优化表达请求中 /
+// 规整格式请求中。用于门控**发起类**入口（保存、切兄弟格），也是「优化表达」与
+// 「规整格式」两个工具栏按钮**互斥**的唯一真源——两者各自的 disabledReason 只看
+// 自己的 loading，谁在飞就靠 busy 把对方（及切格/保存）一并置灰，避免两条候选
+// 同时在途、两个建议面板互相顶掉（P2 修复：reformat 项曾在一次 rebase graft 中
+// 从这里漏掉，规整在飞时优化按钮仍可点）。但刻意不门控**离开类**入口（关闭/Esc/
+// 背景/取消）：离开的安全性由下面的 resolveSaveCompletion 陈旧回调守卫来保证，
+// 若连离开都禁掉，请求卡住时用户会被关在弹窗里出不来。
+export function isEditorBusy(
+  saving: boolean,
+  uploading: boolean,
+  optimizing: boolean,
+  reformatting: boolean,
+): boolean {
+  return saving || uploading || optimizing || reformatting;
 }
 
 // 发起「保存」的阻塞判定——刻意**不含** optimizing：优化表达是一次可能卡很久的
@@ -469,4 +622,971 @@ export function resolveSaveCompletion(
   if (!stillMounted) return { kind: "none" };
   if (mode === "next") return next ? { kind: "navigate", rowId: next.rowId, columnId: next.columnId } : { kind: "close" };
   return { kind: "close" };
+}
+
+// ---------------------------------------------------------------------------
+// 架构性修复：把规整门从 deny-list 翻转成 allow-list（未知结构默认不动）。
+//
+// 修复前 isRichMarkdown 枚举「危险信号」，任何一行只要不匹配 bullet/ordered/
+// alpha 就被当 prose 逐行重排。markdown 的块级结构是开放集合：四轮独立评审各
+// 自发现一种它没学过的结构被打散（围栏代码块、无竖线 GFM 表格、列表延续行，
+// 以及 deny-list 至今仍漏的 4 空格缩进代码块），而后端的 content_invariant 对
+// 「文字没变、结构被毁」结构性失明，兜不住。与其每发现一种就补一个信号，不如
+// 翻转判定方向：只有当**每一行**都命中封闭文法时才允许规整，否则整格原样返回。
+// 门对未知结构 fail CLOSED，是唯一那道防线。逐函数对应 md_normalize.py 的
+// is_rich_markdown / _line_normalizable / _starts_block_construct /
+// _is_delim_like，完整文法与动机见那边的文档字符串。
+//
+// 封闭文法（每行必须是三者之一）：① 空行；② list-marker 行（classifyLine 判为
+// bullet/ordered/alpha，复用它，含 Excel tab/空格缩进 marker——但前导空白须过
+// markerIndentOk 的 CommonMark 4 空格消歧：含 TAB 或纯空格 <=3 才放行，纯空格 >=4
+// 判为缩进代码块整格拒绝）；③ 顶格 prose 行
+// （无前导 tab/空格，且不以其它 CommonMark 块级构造开头）。关键性质：任何有前
+// 导空白、且本身不是 list marker 的行 -> 整格拒绝，这一条通用地关掉了缩进代码
+// 块 / 列表延续行 / 缩进 prose 一整类。列 0 以 `**` 开头（`*` 不跟空白不是
+// bullet）仍是允许的 prose，保住对已规整格子的幂等。
+// ---------------------------------------------------------------------------
+
+// F1：CommonMark HTML 块起始符 = `<` 后接 字母/`/`/`!`/`?`——`!` 覆盖注释
+// `<!--`/声明 `<!DOCTYPE`/`<![CDATA[`，`?` 覆盖处理指令 `<?`。与 Python
+// `_HTML_BLOCK_RE = re.compile(r"^<[A-Za-z/!?]")` 同一字符类（`!`/`?`/`/` 在
+// JS 正则字符类内均为字面量，`/` 处于 `[...]` 中无需转义、不会终止正则字面量）。
+const HTML_BLOCK_RE = /^<[A-Za-z/!?]/;
+
+// 引用式链接定义：对应 Python `_REF_LINK_DEF_RE = re.compile(r"^\[[^\]]*\]:")`——
+// allow-list 门只判「行以 [label]: 开头」（label 可空、冒号后不要求内容）即整
+// 格拒绝，故是纯前缀匹配，不再叠旧版那层「冒号后 pyStrip 非空」的判定。
+const REF_LINK_DEF_RE = /^\[[^\]]*\]:/;
+
+// 整行（pyStrip 去两端空白后）只由 `| : - =` 加空白组成、至少含一个 `-`/`=`、
+// 长度 >= 2。一并覆盖 GFM 表格分隔行（`--- | ---`）、setext 下划线（`===`/
+// `---`）、以及 `-`/`=` 主题分隔线——纯字母/CJK/数字行（如 `A-B`、`2018`）不落
+// 入此集合，仍是允许的 prose。对应 Python `_is_delim_like`。用 for..of 按 code
+// point 迭代；集合成员全是单 ASCII，故含非 ASCII 字符时循环提前 return false，
+// s.length（UTF-16 单元）与 Python len（code point）在会返回 true 的场景下一致。
+const DELIM_LIKE_CHARS = new Set(["|", ":", "-", "=", " ", "\t"]);
+function isDelimLike(line: string): boolean {
+  const s = pyStrip(line);
+  if (s.length < 2) return false;
+  for (const ch of s) {
+    if (!DELIM_LIKE_CHARS.has(ch)) return false;
+  }
+  return s.includes("-") || s.includes("=");
+}
+
+// 顶格行（已知无前导 tab/空格）是否以「段落以外的」CommonMark 块级构造开头——
+// 是则整格拒绝规整。对应 Python `_starts_block_construct`。所有匹配都作用在
+// 原始 line 上（调用方已保证列 0），与 Python 站点一致。
+function startsBlockConstruct(line: string): boolean {
+  if (FENCE_OPEN_RE.test(line)) return true; // 围栏代码块
+  const first = line[0];
+  if (first === "|" || first === ">" || first === "#") return true; // 竖线表格 / 引用块 / ATX 标题
+  if (HTML_BLOCK_RE.test(line)) return true; // HTML 块（< 后接字母/`/`/`!`/`?`——标签/闭合/注释<!--/PI<?/声明<!/CDATA<![）
+  if (REF_LINK_DEF_RE.test(line)) return true; // 引用式链接定义 [label]:
+  if (isDelimLike(line)) return true; // GFM 分隔行 / setext 下划线 / 主题分隔线
+  return false;
+}
+
+// CommonMark 的 4 空格消歧，作用在「已被 classifyLine 判为 marker」的行上：该行
+// 的前导空白（只可能是 tab/半角空格）可被门接受，当且仅当含至少一个 TAB（Excel
+// 指纹：目标语料全是 tab 缩进），或纯空格且个数 <= 3（CommonMark：1-3 个前导空格
+// 仍是列表项，3 空格也正是本 emitter 单层嵌套发出的缩进）；纯空格且个数 >= 4 判为
+// 缩进代码块 -> 拒绝（fail CLOSED，意图不可辨）。对应 Python `_marker_indent_ok`。
+// leading 只含 tab/半角空格（都是单 UTF-16 单元），故 .length 与 Python len 一致。
+function markerIndentOk(line: string): boolean {
+  const leading = line.slice(0, line.length - lstripTabSpace(line).length);
+  if (leading.includes("\t")) return true;
+  return leading.length <= 3;
+}
+
+// CommonMark 主题分隔线：去掉**所有**空格/tab 后由 >=3 个同一字符组成，且该字符
+// 取自 `* - _`。覆盖 `***`/`___`/`---` 及空格分隔变体 `* * *`/`- - -`/`_ _ _`。
+// 对应 Python `_is_thematic_break`（Batch F 规则 2）：这类行会被 bullet 正则误判为
+// 列表项（`* * *` = `*` + 正文 `* *` -> 规整成 `- * *`、毁掉水平分隔线），符号盲的
+// content_invariant 兜不住；既有 isDelimLike 只认 `| : - =`（裸 `---`），本函数推广
+// 到空格分隔与 `*`/`_` 形式，两条规则刻意并存、不合并。用 spread 按 code point 迭代
+// 与 Python 一致——只有 ch ∈ `* - _`（ASCII）才会走到 every，故 length（此时全 ASCII，
+// UTF-16 单元 = code point）与 Python len 结果一致。
+const THEMATIC_BREAK_CHARS = new Set(["*", "-", "_"]);
+function isThematicBreak(line: string): boolean {
+  const stripped = line.replace(/[ \t]/g, "");
+  if (stripped.length < 3) return false;
+  const ch = stripped[0];
+  return THEMATIC_BREAK_CHARS.has(ch) && [...stripped].every((c) => c === ch);
+}
+
+// F1：CommonMark 硬换行标记——**非空行** RAW 形态以 >=2 个尾随空格、或单个尾随
+// 反斜杠结尾，都是段落**内部**的 <br>（deliberate hard line break）。normalizeImpl
+// 会 strip 掉尾随标记（body 走 pyStrip）再把相邻 prose 用空行分段，于是段内硬换行
+// 被静默改成**段落断裂**，符号盲的后端 content_invariant 兜不住 -> 门在此 fail
+// CLOSED 整格拒绝。真实 Excel 粘贴的尾随空白最多一个空格（语料唯一形态，非硬换行）
+// 仍放行；miss vs 腐蚀的代价不对称要求拒绝。对应 Python `_has_hard_break`：调用方
+// 保证只对非空行调用（空行——含只有尾随空格的纯空白行——由 lineNormalizable 的
+// blank 短路在此之前挡掉）。尾随空格只数半角空格（CommonMark 硬换行不认 tab），
+// 逐字符倒数，与 Python rstrip(" ") 一致；反斜杠是单 BMP 字符，endsWith 与 len 计
+// 数都无 UTF-16 vs code point 分歧。
+function hasHardBreak(line: string): boolean {
+  if (line.endsWith("\\")) return true;
+  let end = line.length;
+  while (end > 0 && line[end - 1] === " ") end--;
+  return line.length - end >= 2;
+}
+
+// 强调定界符「侧翼」判据的空白检测——CommonMark flanking 把行首/行尾也算空白，调用方
+// 用空串 "" 表示边界（本函数只判真实字符，边界由调用方短路成「非 open/close」）。对应
+// Python `_flank_is_space`（`str.isspace()`）：复用既有的 isPyWhitespace（逐码点核对自
+// CPython Unicode 表），故两侧对「delimiter 两侧是不是空白」结论一致（含全角空格 U+3000）。
+// 侧翼字符若是星际字符，line[k] 取到的是代理对的一个半——低/高代理项恒非 isPyWhitespace，
+// 判为非空白，与 Python 把该星际码点判为非空白一致（最终布尔等价）。
+function flankIsSpace(ch: string): boolean {
+  return isPyWhitespace(ch.charCodeAt(0));
+}
+
+// F2：CommonMark「词内下划线」判据里的「word 侧」——侧翼是不是字母/数字（含 CJK）。
+// 对应 Python `_is_word_flank`（`str.isalnum()`）：`/[\p{L}\p{N}]/u` 匹配 Unicode 字母/
+// 数字（ASCII 字母数字 + CJK 表意 + 各语系）。仅 `hasCrossLineEmphasis` 里 `_` 这一个
+// 定界符用——两侧都是 word char 的 `_` 是词内字面、整段跳过；`*`/`~` 不受此约束。空串
+// （边界）恒 false。侧翼是星际字符时 `line[k]` 取到代理对半（恒 false），与 Python 见完整
+// 码点在最终布尔上对齐（星际字母作侧翼在语料里不出现，差分谐波零漂移）。
+const WORD_FLANK_RE = /[\p{L}\p{N}]/u;
+function isWordFlank(ch: string): boolean {
+  return ch !== "" && WORD_FLANK_RE.test(ch);
+}
+
+// F1：一行是否以**未闭合**的行内构造收尾（会跨软换行）。对应 Python
+// `_ends_with_open_inline_span`。normalizeImpl 注入空行会把该构造拆断，符号盲的后端
+// content_invariant 兜不住 -> 门在此 fail CLOSED 整格拒绝。独立追踪三类构造（刻意保守、
+// 互不影响；任一在行尾仍开着即拒绝）：
+//   1. remark-math `$`：按 **run** 配对（`\$` 跳过——反斜杠转义下一字符）——长度 N 的 `$`-run
+//      开一个公式 span，只由后面**同长度**的 run 闭合（`$` 行内、`$$` display，CommonMark-math
+//      约定），行尾仍在开着的 `$`-run 内 = 未闭合跨行（刻意也拒绝孤立 `价格 $100`；旧逐字符
+//      奇偶把 `$$` 当两 `$`＝偶＝闭合而漏掉 display 形态 `$$x\n+y$$`）；
+//   2. 行内代码反引号：N 个反引号 run 由等长 run 闭合、run 内不同长度反引号是字面，
+//      行尾仍在 span 内 = 未闭合。反引号侧不做转义处理（保守，只会多拒不会漏拒）；
+//   3. 链接/图片文本方括号 `[`/`]`：未转义方括号深度（`[` +1、`]` 归零 floor 0），行尾
+//      深度 >0 = 有个 `[label` 跨行没闭合（`[label\ncontinued](url)`）。只认 ASCII `[]`——
+//      全角【】是不同字符、不影响（真实语料正是用【】）。
+// 强调 `*`/`_` 与 GFM 删除线 `~` 的跨行配对**不在本函数**——它做不到逐行判定（词内 `R*C`
+// 的孤立 run 不能因自身拒整格，但两行各一个 run 若成对就必须拒），需要跨整格的配对栈，改由
+// hasCrossLineEmphasis（`*`/`_`/`~` 三个独立栈）在 isRichMarkdown 做一次全格扫描（见其文档）。
+// 定界符 `$`/`` ` ``/`[`/`]`/`\` 都是单 UTF-16 单元的 ASCII；反斜杠 `i += 2` 即便跳进星际
+// 字符的代理对中段也无害——低代理项恒非这些定界符，只会被随后 i+=1 跳过，最终落点与
+// Python 按 code point 的 i+=2 一致，故与 Python 的计数在最终布尔上等价（差分谐波已覆盖
+// 星际形状、零漂移）。围栏开口行由 startsBlockConstruct 在别处拒绝，本函数不为其特设分支
+// （即便也命中反引号未闭合，结论一致、无害）。调用方保证只对非空行调用。
+function endsWithOpenInlineSpan(line: string): boolean {
+  const n = line.length;
+  // 1) 未转义 `$` 的 run 配对（run 长度相等才闭合；`\$` 转义跳过——镜像下面的反引号处理）。
+  //    长度 N 的 `$`-run 开一个公式 span，只由后面**同长度**的 run 闭合（`$` 行内、`$$`
+  //    display，CommonMark-math 约定）。行尾仍在开着的 `$`-run 内 -> 未闭合、跨行。旧的
+  //    逐字符奇偶把 `$$` 当两个 `$`（偶数＝已闭合）漏掉 display 形态 `$$x\n+y$$`。
+  let dollarInside = false;
+  let dollarOpenLen = 0;
+  let i = 0;
+  while (i < n) {
+    const ch = line[i];
+    if (ch === "\\") {
+      i += 2; // 反斜杠转义下一字符（含 \$）——跳过被转义的那个
+      continue;
+    }
+    if (ch === "$") {
+      let run = 0;
+      while (i < n && line[i] === "$") {
+        run += 1;
+        i += 1;
+      }
+      if (!dollarInside) {
+        dollarInside = true;
+        dollarOpenLen = run;
+      } else if (run === dollarOpenLen) {
+        dollarInside = false;
+        dollarOpenLen = 0;
+      }
+      continue; // run 长度不等 -> span 内字面，保持 inside
+    }
+    i += 1;
+  }
+  if (dollarInside) return true;
+  // 2) 行内代码反引号 run 配对（run 长度相等才闭合）。
+  let inside = false;
+  let openLen = 0;
+  i = 0;
+  while (i < n) {
+    if (line[i] === "`") {
+      let run = 0;
+      while (i < n && line[i] === "`") {
+        run += 1;
+        i += 1;
+      }
+      if (!inside) {
+        inside = true;
+        openLen = run;
+      } else if (run === openLen) {
+        inside = false;
+        openLen = 0;
+      }
+      continue; // run 长度不等 -> span 内字面，保持 inside
+    }
+    i += 1;
+  }
+  if (inside) return true;
+  // 3) 链接/图片文本方括号深度（未转义、floor 0）。
+  let depth = 0;
+  i = 0;
+  while (i < n) {
+    const ch = line[i];
+    if (ch === "\\") {
+      i += 2; // 转义 \[ / \] 既不开也不合深度
+      continue;
+    }
+    if (ch === "[") depth += 1;
+    else if (ch === "]") depth = Math.max(0, depth - 1);
+    i += 1;
+  }
+  if (depth > 0) return true;
+  // 4) 链接目的地 + 标题：`](` 之后进入链接目标区，按 CommonMark 行内链接文法追踪——
+  //    "dest"（裸目的地：转义感知、圆括号平衡、**空白**结束进入 "gap"）、"angle"/"afterAngle"
+  //    （`<...>` 目的地：空格与 `)` 是内容，未转义 `>` 后只接受外层 `)` 或空白）、
+  //    "gap"（目的地后：等可选 title opener `"`/`'`/`(` 或链接闭合 `)`）、"title"（标题内：转义感知，
+  //    只等对应 title-close `"`/`'`/`)`）。**标题内的 `)` 不减目的地深度**（round-3 核心修复：旧实现
+  //    在每个 `)` 都减、把带引号标题里的 `)` 误当目的地闭合括号 -> `[x](url "title )\ncontinued")` 被判
+  //    「已闭合」漏拒、注入空行塞进标题拆断链接）。行尾仍在任一子相内 = 链接跨软换行、未闭 -> 拒绝
+  //    （fail-closed 不变，只是不再被标题的 `)` 提前闭合）。**只**在见过 `](` 后才进入——散文里的裸
+  //    `(未闭合` 不受影响。对应 Python `_ends_with_open_inline_span` 第 4 段。
+  //    Round-2：武装 `](` 前须确认它落在**散文**里、而非同行**已闭合**的行内代码/公式 span 内——
+  //    `` `x](` `` 里 `](` 是代码 span 内容、不是链接起头，旧实现把它也武装、整格误判 rich。本段同时
+  //    追踪 code-span（镜像规则 2：无转义、等长 run 闭合）与 math-span（镜像规则 1：转义感知、等长 run
+  //    闭合）状态，落在任一已开着 span 内的 `](` **不**武装；散文里的 `](` 仍武装。跨行**开着**的
+  //    code/math span 已由规则 1/2 先行拒绝（走不到这里），故此处每个 span 必在行尾前闭合。
+  let linkPhase: "dest" | "angle" | "afterAngle" | "gap" | "title" | null = null;
+  let destDepth = 0; // 目的地圆括号平衡深度（转义感知）
+  let titleClose = ""; // 当前标题的闭合字符（" / ' / )）
+  let codeInside = false; // 反引号 code-span：镜像规则 2（无转义、等长 run 闭合）
+  let codeLen = 0;
+  let mathInside = false; // `$` math-span：镜像规则 1（转义感知、等长 run 闭合）
+  let mathLen = 0;
+  i = 0;
+  while (i < n) {
+    const ch = line[i];
+    if (linkPhase === "angle") {
+      if (ch === "\\") {
+        i += 2;
+        continue;
+      }
+      if (ch === "<") return true;
+      if (ch === ">") linkPhase = "afterAngle";
+      i += 1;
+      continue;
+    }
+    if (linkPhase === "afterAngle") {
+      if (ch === ")") linkPhase = null;
+      else if (ch === " " || ch === "\t") linkPhase = "gap";
+      else return true;
+      i += 1;
+      continue;
+    }
+    if (linkPhase === "title") {
+      // 标题内：转义感知，只等 titleClose；`)` 不减目的地深度
+      if (ch === "\\") {
+        i += 2; // 转义下一字符：\" / \' / \) 既不闭标题也不动深度
+        continue;
+      }
+      if (ch === titleClose) linkPhase = "gap"; // 标题闭合 -> 回到间隙，等链接闭合 `)`（或另一个 title）
+      i += 1;
+      continue;
+    }
+    if (linkPhase === "dest") {
+      // 目的地文本：转义感知、平衡圆括号；空白结束目的地
+      if (ch === "\\") {
+        i += 2; // 转义下一字符：\( / \) 既不开也不合目的地深度
+        continue;
+      }
+      if (ch === "(") destDepth += 1;
+      else if (ch === ")") {
+        destDepth -= 1;
+        if (destDepth === 0) linkPhase = null; // 目的地圆括号归零 = 链接整体闭合（无标题）
+      } else if (ch === " " || ch === "\t") {
+        linkPhase = "gap"; // 空白结束目的地 -> 等可选 title 或闭合 `)`
+      }
+      i += 1;
+      continue;
+    }
+    if (linkPhase === "gap") {
+      // 目的地后：等 title-opener（"/'/(）或链接闭合 `)`
+      if (ch === ")") linkPhase = null; // 无标题（或标题后）的链接闭合 `)`
+      else if (ch === '"' || ch === "'") {
+        linkPhase = "title";
+        titleClose = ch;
+      } else if (ch === "(") {
+        linkPhase = "title";
+        titleClose = ")";
+      }
+      i += 1; // 其余（空白/异常字符）留在 gap，行尾仍开着即拒绝
+      continue;
+    }
+    if (codeInside) {
+      // 代码 span 内（镜像规则 2）：不转义，等长 run 闭合
+      if (ch === "`") {
+        let run = 0;
+        while (i < n && line[i] === "`") {
+          run += 1;
+          i += 1;
+        }
+        if (run === codeLen) codeInside = false;
+        continue; // run 长度不等 -> span 内字面，保持 inside
+      }
+      i += 1;
+      continue;
+    }
+    if (mathInside) {
+      // 公式 span 内（镜像规则 1）：转义感知，等长 run 闭合
+      if (ch === "\\") {
+        i += 2;
+        continue;
+      }
+      if (ch === "$") {
+        let run = 0;
+        while (i < n && line[i] === "$") {
+          run += 1;
+          i += 1;
+        }
+        if (run === mathLen) mathInside = false;
+        continue; // run 长度不等 -> span 内字面，保持 inside
+      }
+      i += 1;
+      continue;
+    }
+    // 散文：开 code-span / 开 math-span / 武装 `](`。`\` 转义下一字符——**反引号除外**（镜像规则 2
+    // 「反引号侧不做转义」：`` \` `` 仍按裸 run 计、照常开 span），其余 `\$`/`\]`/`\(` 照旧跳过（镜
+    // 像规则 1/3/4 的转义感知），使 code/math 追踪与规则 2/1 逐位对齐。
+    if (ch === "\\") {
+      if (i + 1 < n && line[i + 1] === "`") {
+        i += 1; // `\` 当字面、让紧邻反引号照常开 span（对齐规则 2 裸计）
+        continue;
+      }
+      i += 2;
+      continue;
+    }
+    if (ch === "`") {
+      let run = 0;
+      while (i < n && line[i] === "`") {
+        run += 1;
+        i += 1;
+      }
+      codeInside = true;
+      codeLen = run;
+      continue;
+    }
+    if (ch === "$") {
+      let run = 0;
+      while (i < n && line[i] === "$") {
+        run += 1;
+        i += 1;
+      }
+      mathInside = true;
+      mathLen = run;
+      continue;
+    }
+    if (ch === "]" && i + 1 < n && line[i + 1] === "(") {
+      const isAngleDestination = i + 2 < n && line[i + 2] === "<";
+      linkPhase = isAngleDestination ? "angle" : "dest";
+      destDepth = 1;
+      i += isAngleDestination ? 3 : 2;
+      continue;
+    }
+    i += 1;
+  }
+  return linkPhase !== null; // 行尾仍在任一链接子相内 = 链接跨软换行、未闭
+}
+
+// F1（review）：一行**任意位置**是否出现「标签形状」的未转义 `<`（`<` 紧跟 ASCII 字母、
+// `/`、`!` 或 `?`——`<span`/`</span`/`<em`/`<!--`/`<?pi` …）。命中即整格拒绝。对应 Python
+// `_has_midline_inline_html`。startsBlockConstruct 的 HTML_BLOCK_RE 是 `^` 锚定的、只认
+// **行首** HTML 块，`前缀 <span>\ncontinued</span>` 这类**行中**起头、跨软换行的行内 HTML
+// 漏网——normalizeImpl 注入空行把它拆断、符号盲的后端 content_invariant 兜不住。认
+// 「`<`+字母/`/`/`!`/`?`」tag 形状（与行首 HTML_BLOCK_RE = `^<[A-Za-z/!?]` 同一字符类）：
+// `a < b`（后接空格）、`x<0`/`i<3`（后接数字）仍可规整；`x<y`（字母）、`foo <!-- x`（`<!`
+// 注释）、`foo <?pi`（`<?` PI）被拒（fail CLOSED，miss vs 腐蚀代价不对称）。F2（本批
+// review）：`!`/`?` 此前漏在字符类外，行中跨软换行的 HTML 注释/PI 漏网——补齐。`\<` 转义跳
+// 过。定界符 `<`/`\` 皆单 UTF-16 单元 ASCII；`nxt` 取自 `line[i+1]`，与 Python `line[i+1]`
+// 在最终布尔上对齐（星际字符作 nxt 取到代理对半、非 ASCII 字母判否，与 Python 见完整码点一致
+// ——都不是 ASCII 字母、也不是 `/`/`!`/`?`）。调用方保证只对非空行调用。
+function isAsciiLetter(ch: string): boolean {
+  return (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z");
+}
+function hasMidlineInlineHtml(line: string): boolean {
+  const n = line.length;
+  let i = 0;
+  while (i < n) {
+    const ch = line[i];
+    if (ch === "\\") {
+      i += 2; // 反斜杠转义下一字符：\< 不是标签起头
+      continue;
+    }
+    if (ch === "<") {
+      const nxt = i + 1 < n ? line[i + 1] : "";
+      if (nxt === "/" || nxt === "!" || nxt === "?" || isAsciiLetter(nxt)) return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// F1/F2：全格（cell-global）强调配对——`*`/`_`/`~` 定界符 run 的 CommonMark-lite 开合，用
+// **三个跨整格的栈——每个定界符字符各一个独立栈**（每个 entry 记它所在的行号）判定是否有一
+// 对强调**跨两个不同的行**成对。成对且跨行 -> true（isRichMarkdown 据此整格拒绝）。对应
+// Python `_has_cross_line_emphasis`。F2：`*`-run 只与 `*` 栈、`_`-run 只与 `_` 栈、`~`-run
+// 只与 `~` 栈交互——旧单一无类型栈会让词内 `_`（BOTH run）弹掉一个 `*` opener（CommonMark
+// 绝不把 `*` 与 `_` 配对），于是 `*open R_C\nclose*` 里真正的 `*...*` 跨行对被 `_` 偷走、检
+// 不出、cell 放行；独立栈彻底规避交错，比单栈严格更精确。
+//
+// F1（review，GFM 删除线 `~`）：`~` 加入本函数（不在 per-line endsWithOpenInlineSpan 的
+// `$`-run 机器里）。remark-gfm 4.0.1（前端 remarkGfm 默认选项）里单个 `~` 就是删除线且跨
+// 软换行成对（repl 实测 `~a\nb~`→`<del>`、`foo~bar\nbaz~qux`→`<del>`、孤立 `约~5ns`→无
+// `<del>`），只有跨整格配对栈能区分「孤立 `~` 须规整」与「跨行成对 `~` 须拒」。`~` 用与
+// `*` **相同**的 BOTH 语义（词内也活跃），不走下面 `_` 的词内字面规则。
+//
+// 为什么必须全格、而非逐行（F1 动机）：词内乘法 `R*C`（两侧都是词字符）是一个 BOTH run，逐
+// 行看它「既能开也能闭」，旧实现判它中性、放行——对孤立 `R*C` 是对的（承重用例）。但
+// `这是*跨行\n强调*内容` 的两个 `*` 同样都是 BOTH run，CommonMark 跨软换行配成一对强调；
+// normalizeImpl 注入空行拆断它，符号盲的后端 content_invariant（`*` 当标点剥掉）兜不住。只有
+// 「跨整格配对、看成对两端是否落在不同行」才能既救 `R*C`、又拒 `这是*跨行\n强调*内容`。
+//
+// F2（review，词内 `_` 字面）：CommonMark 里两侧都是 word char 的下划线既不能开也不能闭
+// （词内下划线是字面，不同于 `*`）。`_outer foo_bar\nclose_` 的真 opener 是行首 `_`、真 closer
+// 是行尾 `_`（跨软换行成对）；`foo_bar` 中间的 `_` 是词内字面。旧 BOTH 分支把它当真 closer
+// 弹掉行首真 opener，跨行对没登记、cell 放行、注入空行拆断强调。修复：仅 `_` run 两侧都过
+// isWordFlank 时整段跳过（不压不弹）；`*`/`~` 保持 BOTH。侧翼是标点/符号（非 word）的 `_`
+// 仍走常规逻辑（保守，兜住 `(_a\n b_)` 这类标点侧翼的真跨行对）。
+//
+// F1（按分隔符**个数**配对）：长度 N 的 run 携带 N 个定界符 unit（旧实现只压/弹一次）。
+// `*outer\n*inner**` 里闭合 `**`（长度 2）须弹两个 unit——弹掉行 1 opener（同行对）后再弹行 0
+// opener（跨行对）-> 拒绝。每个 run 按 CommonMark-lite 分类（行首/行尾算空白）、按 unit 作用：
+// CAN-OPEN-only 压 N 个 unit；CAN-CLOSE-only 弹至多 N（各成一对）；BOTH 栈非空弹至多 N、否
+// 则压 N。每弹一个 unit 即比较两端行号：不同 -> 跨行 -> true。
+//
+// **承重记账**：逐行、按 run 出现先后依次作用到**该字符对应的**全格栈上——一行内自成一对的
+// `**bold**` 不会偷更早一行留栈底的悬空 opener；**未配对 leftover 自身不拒绝**（既救 `R*C`
+// 孤立 run 永不成对，也让永不成对的悬空 opener 不误拒）。`\*`/`\_`/`\~` 转义定界符跳过。
+// 与 Python 孪生逐字符对齐（`*`/`_`/`~`/`\` 皆单 UTF-16 单元 ASCII，反斜杠 i+=2 跳进代理对中段
+// 无害——低代理项恒非定界符，随后 i+=1 跳过，最终布尔与 Python 按 code point 等价）。
+function hasCrossLineEmphasis(lines: string[]): boolean {
+  const starStack: number[] = []; // `*` 未配对 opener 的行号
+  const underStack: number[] = []; // `_` 未配对 opener 的行号
+  const tildeStack: number[] = []; // `~` 未配对 opener 的行号（三个定界符字符各一个独立栈）
+  for (let lineno = 0; lineno < lines.length; lineno++) {
+    const line = lines[lineno];
+    const n = line.length;
+    let i = 0;
+    while (i < n) {
+      const ch = line[i];
+      if (ch === "\\") {
+        i += 2; // 转义 \* / \_ / \~ 不是定界符
+        continue;
+      }
+      if (ch === "*" || ch === "_" || ch === "~") {
+        const runChar = ch;
+        const stack = runChar === "*" ? starStack : runChar === "_" ? underStack : tildeStack; // F2：按分隔符字符分型
+        const start = i;
+        while (i < n && line[i] === runChar) i += 1;
+        const runLen = i - start; // F1（本批）：run 携带的定界符**个数**
+        const prevCh = start > 0 ? line[start - 1] : "";
+        const nextCh = i < n ? line[i] : "";
+        // F2：词内 `_`（且仅 `_`）—— 两侧都是 word char 时既不开也不闭，整段跳过。
+        if (runChar === "_" && isWordFlank(prevCh) && isWordFlank(nextCh)) {
+          continue;
+        }
+        const canOpen = nextCh !== "" && !flankIsSpace(nextCh);
+        const canClose = prevCh !== "" && !flankIsSpace(prevCh);
+        if (canOpen && canClose) {
+          // BOTH（词内形状；`*`/`~` 会成对）：栈非空则弹至多 runLen 个 unit（各成一对），否则整段压栈
+          if (stack.length > 0) {
+            for (let k = 0; k < runLen && stack.length > 0; k++) {
+              if (stack.pop() !== lineno) return true;
+            }
+          } else {
+            for (let k = 0; k < runLen; k++) stack.push(lineno);
+          }
+        } else if (canOpen) {
+          // CAN-OPEN-only：压 runLen 个 unit
+          for (let k = 0; k < runLen; k++) stack.push(lineno);
+        } else if (canClose) {
+          // CAN-CLOSE-only：弹至多 runLen 个 unit，逐个成对
+          for (let k = 0; k < runLen && stack.length > 0; k++) {
+            if (stack.pop() !== lineno) return true;
+          }
+        }
+        continue;
+      }
+      i += 1;
+    }
+  }
+  return false;
+}
+
+// 封闭文法：一行是否落在「可规整」的允许集合内。对应 Python `_line_normalizable`。
+// info 由调用方 isRichMarkdown 预先 classifyLine 传入（同一行只分类一次，也供其跨行
+// 的懒延续判定复用）。
+function lineNormalizable(line: string, info: LineInfo): boolean {
+  if (info.kind === "blank") return true; // 规则 1：空行
+  // F1：CommonMark 硬换行（>=2 尾随空格 / 单个尾随反斜杠）在**任何**非空行上都必须
+  // 整格拒绝——规整会 strip 掉标记并把段内换行改成段落断裂（见 hasHardBreak）。放在
+  // marker/prose 分派之前，故对 list-marker 行（body 会被 classifyLine 的 pyStrip
+  // 悄悄吞掉尾随硬换行）同样生效。
+  if (hasHardBreak(line)) return false;
+  // Batch F 规则 2：CommonMark 主题分隔线必须在 marker 接受**之前**拦截——
+  // `* * *`/`- - -`/`_ _ _`/`***`/`___` 会被当成 list marker 规整、毁掉分隔线。
+  if (isThematicBreak(line)) return false;
+  // 行尾仍开着的行内构造（未闭合的 `$` 公式 / 反引号代码 / `[` 链接·图片文本）会跨软
+  // 换行——normalizeImpl 注入空行会把它拆断，符号盲的 content_invariant 兜不住 -> 整格
+  // 拒绝。放在 marker/prose 分派之前，故对 list-marker 行的正文同样生效。强调 `*`/`_` 与
+  // 删除线 `~` 的跨行配对改由 hasCrossLineEmphasis 在 isRichMarkdown 做全格判定。
+  if (endsWithOpenInlineSpan(line)) return false;
+  // F1（review）：行中「标签形状」的未转义 `<`（`<span`/`</em` …）跨软换行，
+  // normalizeImpl 注入空行拆断它、符号盲 content_invariant 兜不住 -> 整格拒绝。
+  // 放在 marker/prose 分派之前，故对 list-marker 行的正文同样生效。
+  if (hasMidlineInlineHtml(line)) return false;
+  if (info.kind === "bullet" || info.kind === "ordered" || info.kind === "alpha") return markerIndentOk(line); // 规则 2：list-marker 行（含 CommonMark 4 空格消歧）
+  // 规则 3：顶格 prose——有前导 tab/空格的非 marker 行一律拒绝（缩进代码块 /
+  // 列表延续行 / 缩进 prose 一整类），顶格但以其它块级构造开头的也拒绝。
+  if (line[0] === " " || line[0] === "\t") return false;
+  return !startsBlockConstruct(line);
+}
+
+// isRichMarkdown = 「不安全规整」的 allow-list 门（Python is_rich_markdown 的
+// 语义反转，保留导出名以减少改动面）：当且仅当**每一行**都命中 lineNormalizable
+// 的封闭文法、且不含 Batch F 规则 1 的懒延续相邻时返回 false（可规整）；任一行落
+// 在文法之外（或触发懒延续）即返回 true（原样不动）。对未知结构 fail CLOSED。
+// Batch F 规则 1（上下文感知）：顶格 prose 行**紧跟**（无空行）marker 行
+// （bullet/ordered/alpha）时是该列表项的 CommonMark 懒延续，normalizeImpl 会注入空
+// 行拆散它；marker 与 prose 间夹一个空行会按 CommonMark 断开延续，故 marker -> 空行
+// -> prose 仍放行（已规整语料的常见形状）。空/纯空白输入返回 false（交给 normalizeImpl
+// 归一为空串）。F1 强调/删除线跨行配对（全格）：hasCrossLineEmphasis 先做一次跨整格的
+// `*`/`_`/`~` 配对扫描——任一对强调或删除线落在两个不同行即拒绝；孤立词内 `R*C`/`foo~bar`
+// （永不成对）仍放行。
+export function isRichMarkdown(raw: string): boolean {
+  if (!raw || !pyStrip(raw)) return false;
+  const src = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = src.split("\n");
+  if (hasCrossLineEmphasis(lines)) return true; // F1：强调跨行成对，注入空行会拆断
+  let prevKind: LineKind = "blank"; // 首行无前驱：非 marker，规则 1 不触发
+  for (const line of lines) {
+    const info = classifyLine(line);
+    if (!lineNormalizable(line, info)) return true;
+    if (info.kind === "prose" && (prevKind === "bullet" || prevKind === "ordered" || prevKind === "alpha")) {
+      return true; // 规则 1：marker 后紧跟顶格 prose = 懒延续
+    }
+    prevKind = info.kind;
+  }
+  return false;
+}
+
+function normalizeImpl(raw: string): string {
+  if (!raw || !pyStrip(raw)) return "";
+  const src = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = src.split("\n");
+
+  // isRichMarkdown 这道 allow-list 门已保证能走到 normalizeImpl 的 cell 每一行都
+  // 是空行 / list-marker 行 / 顶格 prose，没有围栏、表格、缩进代码块之类需要原样
+  // 透传的块级结构（那些在门口就被整格拒绝，ruleNormalize 直接原样返回）。故这里
+  // 纯逐行分类/重排，不再有 verbatim 区间与保护掩码。
+  const infos: LineInfo[] = lines.map((line) => classifyLine(line));
+  const nonBlank = infos.filter((info) => info.kind !== "blank");
+  const cellMin = nonBlank.length > 0 ? Math.min(...nonBlank.map((info) => info.depth)) : 0;
+
+  const out: string[] = [];
+  let prev: PrevKind = "start";
+  let groupBase: number | null = null; // 当前列表组是否已开始（非 null = 组内）；具体层级判断见 depthStack
+  // P2 修复：每个已打开层级的「源 depth」+ 实际发出的 marker 宽度（"- " ->
+  // 2，"1. " -> 3，"10. " -> 4）。子项的缩进 = 其所有祖先层级宽度之和，而不是
+  // 固定「每层 2 格」——CommonMark 要求子块缩进到父项 marker 之后内容开始的
+  // 那一列；父项是 bullet/alpha（恒渲染成 "- "，宽度 2）时两者恰好相等，但
+  // 父项是 ordered 时 marker 宽度随数字位数变化，固定 2 格会让 "1. parent\n
+  //   - child" 解析成两个并列的顶层列表，而不是嵌套（用真实
+  // remark/GFM 解析器验证过，见 md_normalize.py 对应注释）。
+  //
+  // 层级判断刻意用「栈 + 序数比较」（比当前栈顶更深 / 持平 / 更浅），不用
+  // `info.depth - groupBase` 减法：indentDepth（tab 数 + 前导空格数 // 2）对
+  // 「非 2 的倍数」的缩进宽度是有损的——比如宽度 4（双位数 ordered 的子项）
+  // 反解出来的 depth 是 2 而不是 1，减法会把它错判成多一层，规整结果自身再
+  // 规整一遍（幂等性）就会一次比一次多缩进（已用双位数 ordered / 三层全
+  // ordered 嵌套两个场景验证过这个漂移）。栈序数比较只关心「比当前已打开的
+  // 最深层级更深 / 一样 / 更浅」这个相对关系，而 indentDepth 对纯空格前缀
+  // 始终单调不减，所以序数比较在这种有损换算下仍然稳定、可幂等。随
+  // groupBase 一起重置——新列表组不继承上一组的祖先层级。
+  let depthStack: number[] = []; // 每个已打开层级对应的源 depth，按层级顺序（浅→深）
+  let levelWidth: number[] = []; // 与 depthStack 一一对应：该层级目前的 marker 渲染宽度
+
+  for (const info of infos) {
+    if (info.kind === "blank") continue; // 间距完全由 prev 重推；空行不重置列表组
+
+    // 顶格 alpha（A. / B.，处在 cellMin）= 分节标题 → 加粗段落；缩进的 alpha 是子项
+    if (info.kind === "alpha" && info.depth === cellMin) {
+      if (out.length > 0) out.push("");
+      out.push(`**${info.marker}. ${info.body}**`);
+      prev = "header";
+      groupBase = null;
+      continue;
+    }
+
+    if (info.kind === "bullet" || info.kind === "ordered" || info.kind === "alpha") {
+      if (prev !== "list" || groupBase === null) {
+        groupBase = info.depth; // 新列表组已开始（关键：随 prose/header 重置）
+        depthStack = [];
+        levelWidth = [];
+      }
+      while (depthStack.length > 0 && depthStack[depthStack.length - 1] > info.depth) {
+        depthStack.pop(); // 回到更浅的层级：先弹出已经更深的祖先
+        levelWidth.pop();
+      }
+      let level: number;
+      if (depthStack.length > 0 && depthStack[depthStack.length - 1] === info.depth) {
+        level = depthStack.length - 1; // 命中已打开的同一层级 -> 该层的兄弟项
+      } else {
+        level = depthStack.length; // 比当前已打开的最深层级更深 -> 开一个新层级
+        depthStack.push(info.depth);
+        levelWidth.push(0); // 占位，下面立即写入真实宽度
+      }
+      const marker = info.kind === "ordered" ? `${info.marker}. ` : "- ";
+      const ancestorWidth = levelWidth.slice(0, level).reduce((a, b) => a + b, 0);
+      const indent = " ".repeat(ancestorWidth); // 缩进 = 祖先层级（不含自己）宽度之和
+      // F3：宽度必须按 code point 计（`[...marker].length`），不能用
+      // `marker.length`（UTF-16 单元数）——星际有序 marker 如 `𝟙. `（U+1D7D9 是
+      // 代理对）的 UTF-16 单元数是 4、code point 数是 3，而子项缩进 = 祖先 marker
+      // 宽度之和，用 UTF-16 单元数会比 Python len（按 code point）多缩进一格、两侧
+      // 孪生实现漂移。marker 恒以 `. `/`- ` 收尾，仅 info.marker 可能含星际数字。
+      levelWidth[level] = [...marker].length; // 这一层「当前」宽度（code point），供更深子项引用
+      if (prev === "prose" || prev === "header") {
+        out.push(""); // 列表开始前补空行
+      }
+      out.push(`${indent}${marker}${info.body}`);
+      prev = "list";
+    } else {
+      // prose
+      if (out.length > 0) out.push(""); // 相邻散行各自成段
+      out.push(info.body);
+      prev = "prose";
+      groupBase = null;
+    }
+  }
+
+  // 折叠连续空行（沿用旧版 `\n{3,}` 折叠的用意）。门反转后 normalizeImpl 只处理
+  // 逐行 prose/marker，本身不会发出连续空行，这一步实际是防御性 no-op，保留以兜住
+  // 未来的重排改动。
+  const collapsed: string[] = [];
+  {
+    let j = 0;
+    const m = out.length;
+    while (j < m) {
+      if (out[j] === "") {
+        collapsed.push("");
+        let k = j + 1;
+        while (k < m && out[k] === "") k++;
+        j = k;
+        continue;
+      }
+      collapsed.push(out[j]);
+      j++;
+    }
+  }
+
+  return pyStrip(collapsed.join("\n"));
+}
+
+// 规整入口——永不抛：任何异常返回原文（与 Python rule_normalize 同约定）。
+// 先过 isRichMarkdown 这道保守闸门：命中就直接原样返回 raw（连 CRLF 归一化、
+// pyStrip 都不做——「完全不动」是字面意思），完全不进入 normalizeImpl 的逐行
+// 分类/重排。
+export function ruleNormalize(raw: string): string {
+  try {
+    if (isRichMarkdown(raw)) return raw;
+    return normalizeImpl(raw);
+  } catch {
+    return raw;
+  }
+}
+
+// ===========================================================================
+// knowhow-md-normalize Task 8：编辑器「规整格式」按钮 + 粘贴即时规整
+// ===========================================================================
+
+// --- shouldNormalizePaste：粘贴触发判定 -------------------------------------
+//
+// 与 ruleNormalize 职责分离：ruleNormalize 回答"怎么规整"，这里只回答"要不要
+// 拦截这次粘贴走规整"。
+//
+// 代价不对称，判定必须保守：漏判(miss)代价低——用户仍可手动点工具栏「规整
+// 格式」按钮，那条路径带 before/after 对照预览，可以先看结果再决定接受/
+// 放弃；误判(false positive)代价高且可能不可恢复——粘贴命中后走的插入路径
+// (applyInsertion -> setContent) 是对受控 <textarea> 编程式设置 .value，不
+// 走浏览器原生粘贴，不进原生撤销栈，Cmd+Z 大概率救不回被强行拆散的原文。
+// 因此判定条件收紧为"必须有正的列表证据"，不能仅凭"含 TAB"就触发——曾经的
+// 版本正是这样，会把整段 TAB 缩进的代码（Tcl/Python/Makefile 等）当成 Excel
+// 粘贴内容拆散、逐行插空行（本仓库有专门的「代码」工具栏按钮与代码附件
+// 功能，粘贴代码是预期内容形态，绝不能被误伤）。
+//
+// 现在只有以下两条之一成立才返回 true，其余一律 false（交给浏览器原生粘贴）：
+//   (a) 存在至少一行，其去掉行首缩进（TAB/半角空格）后以 BULLET_GLYPHS 里的
+//       字形开头、紧跟空白——即该字形是「行首 marker」，与 classifyLine 自己
+//       判定 bullet 的标准完全同源（同一个 BULLET_RE，应用在同一次
+//       lstripTabSpace 之后），不是"文本里任意位置出现这个字符"。
+//       I3 修复：BULLET_GLYPHS 含 · (U+00B7)，中文里常见于人名内部的分隔符
+//       （如"弗拉基米尔·普京"）——旧判定"字形出现在任意位置即触发"会把这类
+//       含人名的普通段落误判成 Excel 列表粘贴，进而拆散成每行一段（该插入
+//       路径不进浏览器原生撤销栈，见下）。收紧到"行首 marker"后，人名内部的
+//       · 不再计入证据，但真正顶格或缩进的"· item"列表行不受影响——用同一套
+//       "行首 marker"标准处理了这整类字形（不仅仅是 ·）。
+//   (b) 存在至少一行"缩进"（行首为 TAB 或半角空格），且去掉该缩进后剩余
+//       内容匹配 ORDERED_RE 或 ALPHA_RE（有序数字/单字母 marker）——这是
+//       Excel"缩进子项"的典型形状（如"1. 步骤一"下一行缩进一个"a. 子项"）。
+// 复用 classifyLine 同一套 BULLET_RE / ORDERED_RE / ALPHA_RE / lstripTabSpace，
+// 不再另写判断正则——这里认定"有列表证据"的标准，理应与 ruleNormalize 自身
+// 认定"这是列表行"的标准同源，不搞两份可能漂移的逻辑。注意 (a) 的 BULLET_RE
+// 命中后还要求 marker 字符属于 BULLET_GLYPHS，排除 "-"/"*"/"+" 这几个 ASCII
+// 记号（BULLET_RE 本身也匹配它们）——那几个字符在代码里太常见（CLI 参数
+// "- v"、减法……），且"已是干净 markdown 列表"（如"- 一\n- 二"）本就不该
+// 触发（拦截这次粘贴没有收益，ruleNormalize 对它是 no-op）；同理 (b) 故意不收
+// BULLET_RE 那几个 ASCII 记号，只有数字/字母+分隔符这种更 Excel 特有的形状才
+// 够格当缩进证据。
+//
+// 纯 TAB 分隔的一整行（如 Excel 复制的一行"列1\t列2\t列3"）不再触发：
+// ruleNormalize 对单行输入是 no-op（没有列表 marker，整行归类成一个 prose
+// 段，规整前后逐字相同），拦截这次粘贴没有任何收益，徒增"抢用户原生粘贴"的
+// 风险（knowhow-cell-editor.test.mjs 用实际调用 ruleNormalize 验证了这一点）。
+//
+// BULLET_GLYPHS 与 Python 侧同名常量（backend/app/services/knowhow/
+// md_normalize.py）同一字符集，这里独立导出成常量，不去改造 BULLET_RE 内联的
+// 字符类字面量——那行正则的具体写法已被 parity 单测锁定
+// （knowhow-normalize.test.mjs 与 backend/tests/test_md_normalize_rule.py 的
+// golden fixture），重构成"共享同一个常量拼出字符类"对语义没有增益，却会让
+// 未来 diff review 多一层"这一行到底有没有动语义"的辨认负担，两处各自持有
+// 一份同样的字面量更省心。
+export const BULLET_GLYPHS = "•●◦▪‣·";
+
+export function shouldNormalizePaste(text: string): boolean {
+  if (!text) return false;
+  // 与 ruleNormalize 共用同一道保守闸门：粘贴内容如果已经是真实 markdown
+  // 结构（围栏代码块、GFM 表格、引用块……），不该被当成 Excel 脏排版拦截
+  // 重排——尤其这条插入路径 (applyInsertion -> setContent) 本就不进浏览器
+  // 原生撤销栈（见上方注释），误判代价比 ruleNormalize 自身更高。没有这道
+  // 门时，规则 (a)/(b) 只逐行扫，看不出"这几行合起来是一个围栏/表格"，块的
+  // 内部恰好长得像 Excel 缩进子项（比如代码里一行缩进的 "a. xxx"）就会被
+  // 误判为 true。
+  if (isRichMarkdown(text)) return false;
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  for (const line of lines) {
+    // (a)：去掉行首缩进后必须整行匹配 BULLET_RE，且命中的 marker 字符属于
+    // BULLET_GLYPHS（排除 "-"/"*"/"+"，见上方注释）——与 classifyLine 判定
+    // bullet 的标准同源，不是"字形出现在文本任意位置"。
+    const stripped = lstripTabSpace(line);
+    const bulletMatch = BULLET_RE.exec(stripped);
+    if (bulletMatch && BULLET_GLYPHS.includes(bulletMatch[1])) return true;
+    if (line[0] !== "\t" && line[0] !== " ") continue; // 未缩进：不构成 (b) 的证据
+    if (ORDERED_RE.test(stripped) || ALPHA_RE.test(stripped)) return true;
+  }
+  return false;
+}
+
+// --- P2-f：规整后文本插入——优先走原生撤销栈 --------------------------------
+//
+// 命中 shouldNormalizePaste 的粘贴会被 preventDefault + 程序化插入规整后的文本。
+// 老路径 applyInsertion -> setContent 是对受控 <textarea> 编程式赋值 .value，
+// **不**加入 textarea 的原生编辑事务，Cmd/Ctrl+Z 撤不掉这次自动重排。
+//
+// 改进：先试 document.execCommand("insertText", false, normalized)——它在
+// Chromium/WebKit/Gecko 里于光标处插入并替换选区、**加入原生撤销栈**，并触发
+// input 事件让 React 受控组件的 onChange 照常更新 state（与正常打字同一条路）。
+// execCommand 已废弃、部分环境可能移除或抛错：返回 false 或抛错时回退到旧的
+// applyInsertion 路径（不进撤销栈，但粘贴仍生效）——优雅降级，宁可不可撤销也不
+// 让这次粘贴丢失。
+//
+// 把"试 execCommand、失败回退"的决策抽成纯函数便于单测：尝试与回退都以 thunk
+// 注入（生产传真实闭包，测试传桩：返回 true / 返回 false / 抛错）。返回值=是否
+// 真的走成了 execCommand（true=已进原生撤销栈；false=已回退到 applyInsertion）。
+export function insertViaExecCommandOrFallback(tryExecCommand: () => boolean, fallback: () => void): boolean {
+  let ok = false;
+  try {
+    ok = tryExecCommand();
+  } catch {
+    // execCommand 在部分环境抛错（已废弃/被禁用）——按失败处理，走回退。
+    ok = false;
+  }
+  if (!ok) fallback();
+  return ok;
+}
+
+// --- 规整格式：before/after 对照状态机 --------------------------------------
+//
+// 结构镜像 knowhow-optimize-logic.ts 的 CellOptimizeState（「优化表达」的同一
+// 个 before/after 对照面板既有实现），多一个 "unchanged" 态：reformat_cell 会
+// 返回 changed=false（这一格已经是干净 markdown，规则/LLM 都判定无需改动），
+// 这个语义在"优化表达"那边不存在（LLM 改写几乎总会产生字面差异），此时不该
+// 展示一个左右一模一样的空对照面板，而是走 REFORMAT_UNCHANGED_MESSAGE 的独立
+// 友好提示分支（任务要求：用提示替代空 diff）。
+export type CellReformatState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; candidateMd: string; source: string }
+  | { status: "unchanged"; source: string }
+  // 陈旧态：本次规整候选已对不上眼前该展示的原文，接受会误导地覆盖，故不展示对照
+  // 面板、转入这个友好信息态（非 error——不是出错）。两种成因用 reason 区分、各配
+  // 一句文案：
+  //   · "local"（P1-d）：请求在飞期间用户在**本编辑器**里敲了字（currentContent
+  //     偏离发起时快照）——候选基于的已保存原文已过时，用户的字仍在、重试即可。
+  //   · "server"（F3）：后端回带的 sourceMd（它实际读来喂给 reformat 的原文）≠ 本
+  //     编辑器发起请求那一刻的基线——说明**另一个标签页/进程**在本编辑器打开后又保存
+  //     过这一格，候选是拿本地从没见过的服务器内容算出来的、对照面板左侧的「原文」
+  //     已是旧值，接受会误导地覆盖。此时重试也没用（基线本身旧了），只能关闭后重开。
+  | { status: "stale"; reason: "local" | "server" }
+  | { status: "error"; message: string };
+
+export const CELL_REFORMAT_IDLE: CellReformatState = { status: "idle" };
+
+// 本地陈旧（P1-d）的单例常量（同 CELL_REFORMAT_IDLE 的写法）——到达守卫的本地改动
+// 分支与接受守卫两处都转入它，附带文案是下面的 REFORMAT_STALE_MESSAGE。
+export const CELL_REFORMAT_STALE: CellReformatState = { status: "stale", reason: "local" };
+
+// 服务器陈旧（F3）的单例常量——到达守卫发现 sourceMd 与发起快照不一致时转入它，
+// 附带文案是下面的 REFORMAT_SERVER_STALE_MESSAGE（组件按 reason 选文案）。
+export const CELL_REFORMAT_SERVER_STALE: CellReformatState = { status: "stale", reason: "server" };
+
+// 「规整建议」对照面板右侧标题——与「优化表达」的 OPTIMIZE_SUGGESTION_LABEL
+// （"优化建议"）区分开，避免用户把"规整格式"的结果误当成"优化表达"的结果
+// （左侧"原文"沿用 knowhow-optimize-logic.ts 的 OPTIMIZE_ORIGINAL_LABEL 即可，
+// 两个面板都是"跟已保存原文对照"，不需要为此再造一个同义常量）。
+export const REFORMAT_SUGGESTION_LABEL = "规整建议";
+
+// changed=false 时的友好提示（任务要求：替代空对照面板）。
+export const REFORMAT_UNCHANGED_MESSAGE = "已经是规整格式，无需改动";
+export const REFORMAT_UNCHANGED_DISMISS_LABEL = "知道了";
+
+// P1-d：编辑器内容在规整请求在飞期间被改动，本次候选已对不上眼前的内容，
+// 丢弃并提示重来（用户的字原样留在编辑框，不被覆盖）。「知道了」复用
+// REFORMAT_UNCHANGED_DISMISS_LABEL——两者都只是退出这层提示回到编辑视图。
+export const REFORMAT_STALE_MESSAGE = "编辑器内容已变化，本次规整结果已失效，请重试";
+
+// F3：服务器上的原文在本编辑器打开后被他人改动（后端回带的 sourceMd ≠ 发起快照）。
+// 与本地陈旧不同——重试也没用（对照面板的「原文」基线本身已旧），只能关闭后重开
+// 拿到最新原文再规整。文案刻意与 REFORMAT_STALE_MESSAGE 区分，给用户对得上的指引。
+export const REFORMAT_SERVER_STALE_MESSAGE = "服务器上的内容已被其他人修改，请关闭后重新打开";
+
+// 禁用原因提示文案——同 knowhow-optimize-logic.ts 的 OPTIMIZE_*_HINT 三兄弟。
+export const REFORMAT_LOADING_HINT = "规整中，请稍候";
+export const REFORMAT_UNSAVED_HINT = "有未保存的修改，请先保存后再规整格式";
+export const REFORMAT_EMPTY_HINT = "格子为空，无需规整格式";
+
+export function beginCellReformat(state: CellReformatState): CellReformatState {
+  return state.status === "loading" ? state : { status: "loading" };
+}
+
+// 后端结果到达：changed=true -> ready（候选内容供左右对照）；changed=false ->
+// unchanged（只带 source，供旁边小标签说明"是规则还是 AI 判定的无需改动"）。
+// 同 optimize 侧 resolveCellOptimizeSuggestion，只有"正在请求中"才会被结果
+// 打断——状态若已被其它操作带离 loading（理论上不会发生，按钮在 loading 期间
+// 被禁用），迟到的结果原样丢弃，不覆盖新状态。
+export function resolveCellReformat(
+  state: CellReformatState,
+  result: { candidateMd: string; source: string; changed: boolean },
+): CellReformatState {
+  if (state.status !== "loading") return state;
+  return result.changed
+    ? { status: "ready", candidateMd: result.candidateMd, source: result.source }
+    : { status: "unchanged", source: result.source };
+}
+
+// 规整请求到达时的陈旧丢弃守卫。reformat_cell 读的是**已保存**的格子内容，且
+// 回带它实际读到的原文 sourceMd（并发防护）。请求在飞期间 textarea 并未禁用，且
+// 另一个标签页/进程也可能保存这一格。若照常展示对照面板、用户点「接受」，候选会
+// 整段覆盖掉现场。故到达时按序比对：
+//   · 已不在 loading（状态被后续操作带离，理论上不会发生，按钮 loading 期间禁用）
+//     → 原样返回，迟到结果不覆盖新状态（同 resolveCellReformat 的既有语义）；
+//   · (P1-d) 当前内容 ≠ 发起时快照 → 本地 stale（用户在本编辑器敲了字，候选覆盖会
+//     丢字；用户的字仍在、"重试"即可，故先于服务器判定——本地改动是更贴近用户的成因，
+//     且这保持 P1-d 既有契约不变）；
+//   · (F3) sourceMd ≠ 发起时快照 → 服务器 stale（他人在本编辑器打开后又保存过这一格，
+//     候选是拿本地从没见过的服务器内容算的、对照左侧「原文」已旧，接受会误导覆盖；
+//     与批量规整 reformatResultIsStale 的 originalMd!==sourceMd 同一口径）；
+//   · 都未变 → 委托 resolveCellReformat 照常处理（changed→ready / 无改动→unchanged）。
+// 发起请求那一刻按钮要求「无未保存改动」，故 contentAtRequest 就是当时的已保存基线，
+// 拿它同时当「本地快照」和「服务器基线」两个比对基准是自洽的。刻意复用
+// resolveCellReformat 而非复制它的 ready/unchanged 分支——扩展既有状态机，不另起一份
+// 可能漂移的实现。
+//
+// 注意：兄弟「优化表达」流程（knowhow-optimize-logic.ts 的
+// resolveCellOptimizeSuggestion）有同样的弱点（请求在飞期间内容可变），但那是
+// master 上既有行为，不在本 PR 范围内——此处只加固「规整格式」这一条。
+export function resolveReformatArrival(
+  state: CellReformatState,
+  contentAtRequest: string,
+  currentContent: string,
+  result: { candidateMd: string; source: string; changed: boolean; sourceMd: string },
+): CellReformatState {
+  if (state.status !== "loading") return state;
+  if (currentContent !== contentAtRequest) return CELL_REFORMAT_STALE;
+  if (result.sourceMd !== contentAtRequest) return CELL_REFORMAT_SERVER_STALE;
+  return resolveCellReformat(state, result);
+}
+
+// F（review）：到达解析后是否需要**请父级刷新整表 detail**。仅服务器陈旧（reason
+// ==="server"）需要——他人在本编辑器打开后又保存过这一格，父级 detail 快照（savedContent
+// 之源）已是旧值；只关掉浮窗只清了 modal、快照仍旧，重开撞同一 server-stale 态、永远
+// 循环（这正是 F 修复要堵的洞）。本地陈旧（reason==="local"，用户在本编辑器敲了字）
+// **不**需要：服务器基线没变、重试即可，刷新反而可能打断用户。ready/unchanged/idle/
+// loading/error 亦不需要。组件据此在到达后回调 onServerStale（见 knowhow-cell-editor.tsx）。
+export function reformatArrivalNeedsParentRefresh(state: CellReformatState): boolean {
+  return state.status === "stale" && state.reason === "server";
+}
+
+export function failCellReformat(state: CellReformatState, message: string): CellReformatState {
+  return state.status === "loading" ? { status: "error", message } : state;
+}
+
+// 接受候选 / 放弃候选 / 「知道了」关掉 unchanged 提示，三者都回到同一个
+// idle——组件侧各自的额外副作用（接受时 setContent 回填 textarea）不属于这个
+// 纯状态机，由 knowhow-cell-editor.tsx 的 handler 自己做。
+export function dismissCellReformat(): CellReformatState {
+  return CELL_REFORMAT_IDLE;
+}
+
+export function isCellReformatLoading(state: CellReformatState): boolean {
+  return state.status === "loading";
+}
+
+// 「规整格式」按钮禁用原因（null=可点击）——判定优先级与
+// knowhow-optimize-logic.ts 的 optimizeCellDisabledReason 完全一致（正在
+// 请求中 > 有未保存修改 > 内容为空 > 可点击）：reformat_cell 与 optimize_cell
+// 同样读的是已保存的格子内容而非编辑框里的草稿，若两者不一致仍允许触发，
+// 用户会看到"原文"对不上自己刚打的字，所以有未保存修改时先挡住。两个
+// disabledReason 函数分属 Task 8/Task 9 各自的任务文件，未合并成一个共享
+// helper——参数形状相同不代表应该耦合成一个跨特性共享的函数。
+export function reformatCellDisabledReason(
+  content: string,
+  savedContent: string,
+  state: CellReformatState,
+): string | null {
+  if (isCellReformatLoading(state)) return REFORMAT_LOADING_HINT;
+  if (hasUnsavedChanges(content, savedContent)) return REFORMAT_UNSAVED_HINT;
+  if (!content.trim()) return REFORMAT_EMPTY_HINT;
+  return null;
+}
+
+// --- reformatSourceLabel：后端 source 枚举 -> 友好文案 ----------------------
+//
+// 后端 reformat_cell 的 source ∈ {"llm", "rule/llm-failed", "rule/no-llm"}
+// （backend/app/services/knowhow/api.py 同名函数文档字符串逐字对照）。这三个
+// 原始枚举值本身都不该出现在界面上——本仓库的硬规则是后端枚举值不得直出给
+// 用户，尤其 "rule/llm-failed" 会把"AI 规整格式失败、已退回规则"这类实现
+// 细节暴露给用户，徒增困惑却没有实际帮助；"rule/llm-failed" 与 "rule/no-llm"
+// 对用户而言是同一件事——"这次是规则规整的"，AI 到底是没配置还是配置了但
+// 失败，不值得也不应该展示。任何不在这三个已知值内的输入（后端未来新增
+// 枚举 / 传输异常等防御性场景）一律退化到 REFORMAT_SOURCE_FALLBACK_LABEL，
+// 绝不把原始字符串吐给用户。
+export const REFORMAT_SOURCE_LLM_LABEL = "已用 AI 规整格式";
+export const REFORMAT_SOURCE_RULE_LABEL = "已用规则规整格式";
+export const REFORMAT_SOURCE_FALLBACK_LABEL = "已规整格式";
+
+export function reformatSourceLabel(source: string): string {
+  if (source === "llm") return REFORMAT_SOURCE_LLM_LABEL;
+  if (source === "rule/llm-failed" || source === "rule/no-llm") return REFORMAT_SOURCE_RULE_LABEL;
+  return REFORMAT_SOURCE_FALLBACK_LABEL;
 }

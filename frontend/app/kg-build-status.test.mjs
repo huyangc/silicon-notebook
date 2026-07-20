@@ -1,13 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
 import {
   isTrackedKgTerminal,
+  reconcileTrackedKgPoll,
   ownsKgBuildRequest,
   kgBuildPresentation,
   kgBuildTerminalToast,
 } from "./kg-build-status.ts";
+import {
+  callbackFlowsIn,
+  findFunction,
+  parseModule,
+  stringLiterals,
+} from "./test/semantic-source.mjs";
 
 function job(status, stage, extra = {}) {
   return {
@@ -105,6 +111,30 @@ test("old terminal response cannot finish a newer tracked job", () => {
   );
 });
 
+test("durable poll adopts a newer cross-tab job and later observes its terminal state", () => {
+  assert.deepEqual(
+    reconcileTrackedKgPoll(
+      "old-job",
+      job("running", "extracting", { job_id: "new-job" }),
+    ),
+    { terminal: false, trackedJobId: "new-job" },
+  );
+  assert.deepEqual(
+    reconcileTrackedKgPoll(
+      "new-job",
+      job("failed", "finished", { job_id: "new-job" }),
+    ),
+    { terminal: true, trackedJobId: null },
+  );
+  assert.deepEqual(
+    reconcileTrackedKgPoll(
+      "old-job",
+      job("succeeded", "finished", { job_id: "new-job" }),
+    ),
+    { terminal: true, trackedJobId: null },
+  );
+});
+
 test("KG start callbacks are owned by notebook, workspace, and request epoch", () => {
   const request = {
     notebookId: "notebook-a",
@@ -129,13 +159,21 @@ test("KG start callbacks are owned by notebook, workspace, and request epoch", (
   );
 });
 
-test("durable KG polling never synthesizes completion after a time cap", () => {
-  const source = readFileSync(new URL("./page.tsx", import.meta.url), "utf8");
-  const start = source.indexOf("// While a build runs");
-  const end = source.indexOf("// Backfill completion polling", start);
-  assert.notEqual(start, -1);
-  assert.notEqual(end, -1);
-  const kgPoll = source.slice(start, end);
-  assert.doesNotMatch(kgPoll, /setTimeout\s*\(/);
-  assert.doesNotMatch(kgPoll, /仍在后台进行，请稍后刷新/);
+test("durable KG polling never synthesizes completion after a time cap", async () => {
+  const page = await parseModule("page.tsx");
+  const home = findFunction(page, "Home");
+  const kgPoll = callbackFlowsIn(home, "useEffect").find(
+    ({ otherArguments }) => (
+      otherArguments[0]
+      === "[buildingKg, currentNotebookId, analytics, trackedKgJobId]"
+    ),
+  );
+
+  assert.ok(kgPoll);
+  assert.match(JSON.stringify(kgPoll), /window\.setInterval/);
+  assert.doesNotMatch(JSON.stringify(kgPoll), /setTimeout/);
+  assert.equal(
+    stringLiterals(page).includes("仍在后台进行，请稍后刷新"),
+    false,
+  );
 });

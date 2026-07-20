@@ -603,6 +603,8 @@ def chain_anchor_relevances(inferences: Sequence[InferredChain]) -> dict[str, fl
 def render_follow_chain_context(
     inferences: Sequence[InferredChain],
     id_offset: int = 2000,
+    *,
+    active_notebook_id: str,
 ) -> tuple[str, dict]:
     """Render direct-hop relation anchors plus explicitly transient inference lines.
 
@@ -610,6 +612,20 @@ def render_follow_chain_context(
     is ``k{id_offset + 1}``, hence the default relation-anchor namespace begins
     at ``k2001``.  Both out- and in-discovered chains are always rendered in
     stored ``source -> target`` order.
+
+    ``active_notebook_id`` is the notebook this ask/report is running against.
+    Unlike ``RetrievedChunk``/``RetrievedKnowledge`` (which default
+    ``notebook_id`` to ``""`` and only a federated/cross-tier hit ever sets
+    it), every ``ChainHop`` here carries its *real* owning notebook id — every
+    hop in a chain composed by ``compose_two_hop_paths`` lives in one single
+    notebook (own or one mounted base; see the "must stay inside one notebook"
+    guard there), and that id is read straight off the stored relation row, so
+    it is never blank on its own.  Required (no default) so a caller can't
+    silently forget it and leak the active notebook's own id into every
+    same-notebook hop — echoing it verbatim would show a redundant "来自「本
+    笔记本自己」" badge on ordinary, non-federated follow-chain evidence (the
+    same failure mode ``evidence_context.py``'s ``chunk_context``/
+    ``knowledge_context`` avoid via their ``raw_origin``/``origin`` split).
     """
     if not inferences:
         return "(none)", {}
@@ -654,6 +670,10 @@ def render_follow_chain_context(
                 or str(primary.get("source_title") or "").strip(),
                 "location_label": hop.location_label,
                 "tier": hop.tier,
+                # Own-notebook hop -> "" (matches the raw_origin convention);
+                # a genuinely foreign (mounted-base) hop passes its real id
+                # through, letting the frontend badge resolve a library name.
+                "notebook_id": hop.notebook_id if hop.notebook_id != active_notebook_id else "",
                 # Extra metadata is retained for relation-aware clients.  The
                 # existing AnswerAnchor parser simply ignores unknown fields.
                 "source_id": str(primary.get("source_id") or ""),

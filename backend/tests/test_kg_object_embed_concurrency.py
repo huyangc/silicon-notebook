@@ -5,6 +5,7 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
+from app.services.model_concurrency import activate_model_concurrency
 from app.services.sqlite_repository import SQLiteRepository
 
 
@@ -61,6 +62,27 @@ def test_embed_objects_batch_concurrent_and_persists(repo):
     assert emb.max_concurrent >= 2
 
 
+def test_embed_objects_batch_uses_active_embedding_hard_cap(repo):
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    items = []
+    for i in range(35):
+        oid = repo._test_insert_object(nb.id, "concept", {"name": f"Concept number {i}"})
+        items.append({"_oid": oid, "payload": {"name": f"Concept number {i}"}})
+    emb = _ConcEmbedder(dim=8)
+    repo.embedder = emb
+
+    with activate_model_concurrency(llm_max=2, embed_max=2):
+        repo._embed_objects_batch(nb.id, items)
+
+    with repo._connect() as db:
+        (n,) = db.execute(
+            "SELECT COUNT(*) FROM knowledge_embeddings WHERE notebook_id=?",
+            (nb.id,),
+        ).fetchone()
+    assert n == 35
+    assert emb.max_concurrent == 2
+
+
 def test_embed_objects_batch_failed_batch_isolated(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     items = []
@@ -73,5 +95,4 @@ def test_embed_objects_batch_failed_batch_isolated(repo):
     with repo._connect() as db:
         (n,) = db.execute("SELECT COUNT(*) FROM knowledge_embeddings WHERE notebook_id=?", (nb.id,)).fetchone()
     assert n == 20
-
 

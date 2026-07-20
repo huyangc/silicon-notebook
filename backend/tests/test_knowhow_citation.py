@@ -115,7 +115,7 @@ def test_knowhow_cell_citation_carries_table_and_row_locator():
         }),
     })
     citations = _service(sources).citations_from(
-        [_hit(_evidence("el-cell"))], {"el-cell"}, "KG evidence",
+        [_hit(_evidence("el-cell"))], {"el-cell"}, "KG evidence", notebook_id="nb-1",
     )
     assert len(citations) == 1
     assert citations[0].knowhow is not None
@@ -126,7 +126,7 @@ def test_knowhow_cell_citation_carries_table_and_row_locator():
 def test_non_knowhow_citation_has_no_knowhow_field_and_is_excluded_from_json():
     sources = _SpySources({"el-plain": _element_row({})})
     citations = _service(sources).citations_from(
-        [_hit(_evidence("el-plain"))], {"el-plain"}, "KG evidence",
+        [_hit(_evidence("el-plain"))], {"el-plain"}, "KG evidence", notebook_id="nb-1",
     )
     assert citations[0].knowhow is None
     assert "knowhow" not in citations[0].model_dump(mode="json")
@@ -137,7 +137,7 @@ def test_element_missing_from_batch_result_has_no_knowhow_field():
     # retrieval and citation-building) must resolve to None, never KeyError.
     sources = _SpySources({})
     citations = _service(sources).citations_from(
-        [_hit(_evidence("el-missing"))], {"el-missing"}, "KG evidence",
+        [_hit(_evidence("el-missing"))], {"el-missing"}, "KG evidence", notebook_id="nb-1",
     )
     assert citations[0].knowhow is None
 
@@ -150,7 +150,8 @@ def test_citations_from_batches_every_lookup_into_one_store_call():
     # el-a repeated on purpose: the same element can legitimately back two
     # separate evidence entries (e.g. two hits citing the same cell).
     hit = _hit(_evidence("el-a"), _evidence("el-b"), _evidence("el-a"))
-    citations = _service(sources).citations_from([hit], {"el-a", "el-b"}, "KG evidence")
+    citations = _service(sources).citations_from(
+        [hit], {"el-a", "el-b"}, "KG evidence", notebook_id="nb-1")
 
     assert len(citations) == 3
     assert len(sources.calls) == 1
@@ -166,7 +167,8 @@ def test_mixed_hit_list_only_flags_the_knowhow_ones():
         _hit(_evidence("el-cell"), tier="base"),
         _hit(_evidence("el-plain"), tier="personal"),
     ]
-    citations = _service(sources).citations_from(hits, {"el-cell", "el-plain"}, "KG evidence")
+    citations = _service(sources).citations_from(
+        hits, {"el-cell", "el-plain"}, "KG evidence", notebook_id="nb-1")
 
     by_element = {citation.element_id: citation for citation in citations}
     assert by_element["el-cell"].knowhow is not None
@@ -181,7 +183,7 @@ def test_citations_from_skips_the_store_call_entirely_when_no_element_ids_presen
     # metadata lookup at all (matches the repo's "no incidental calls" bar).
     sources = _SpySources({})
     citations = _service(sources).citations_from(
-        [_hit(_evidence(""))], set(), "KG evidence",
+        [_hit(_evidence(""))], set(), "KG evidence", notebook_id="nb-1",
     )
     assert citations[0].knowhow is None
     assert sources.calls == []

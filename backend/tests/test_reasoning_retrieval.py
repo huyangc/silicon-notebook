@@ -1235,7 +1235,7 @@ def test_run_expand_community_fans_out_peers(rrepo, monkeypatch):
              "reason": "需要同类"},
             {"next_action": "answer", "sufficient": True}])
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
-    monkeypatch.setattr(retriever.communities, "first_base_notebook_id", lambda *a: nb.id)
+    monkeypatch.setattr(retriever.communities, "mounted_base_ids", lambda *a: [nb.id])
     monkeypatch.setattr(
         retriever.communities,
         "resolve_comparison_peers",
@@ -1245,6 +1245,107 @@ def test_run_expand_community_fans_out_peers(rrepo, monkeypatch):
     assert any(t.step_type == "expand_community" for t in res.trace)
     attempted_q = [a["query"] for a in res.attempted]
     assert "RTL综合" in attempted_q and "布线" in attempted_q
+
+
+def test_run_expand_community_fans_out_across_multiple_mounted_bases(rrepo, monkeypatch):
+    """多领域基准库:挂了 ≥2 个参考库时,expand_community 逐个查询并去重合并——
+    不是「只用列表第一个」就沿用了单库时代的行为。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
+        reflects=[
+            {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
+             "reason": "需要同类"},
+            {"next_action": "answer", "sufficient": True}])
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    monkeypatch.setattr(
+        retriever.communities, "mounted_base_ids",
+        lambda *a: ["base-sim", "base-digital"],
+    )
+    calls = []
+
+    def _resolve(base_nb, *a, **k):
+        calls.append(base_nb)
+        if base_nb == "base-sim":
+            return (["RTL综合"], "comention")
+        return (["RTL综合", "布线"], "community")  # 与另一库重叠一个名字,验证去重
+
+    monkeypatch.setattr(retriever.communities, "resolve_comparison_peers", _resolve)
+    res = retriever.run(nb.id, "DeepSeek-V4 相比其他", "")
+    assert calls == ["base-sim", "base-digital"]  # 两个挂载库都被查询,顺序一致
+    attempted_q = [a["query"] for a in res.attempted]
+    assert attempted_q.count("RTL综合") == 1       # 跨库重复的名字只搜一次(去重)
+    assert "布线" in attempted_q
+
+
+def test_run_expand_community_source_sticky_prefers_comention(rrepo, monkeypatch):
+    """peer_source 展示口径:一旦某个挂载库以共提(comention,高精度)命中,不应被
+    后续遍历到的库的社区(community)回退结果覆盖。改前是「最后一个贡献了非空
+    结果的库」口径——若 comention 命中的库先被遍历、community 命中的库后被
+    遍历,会把前者的高精度贡献在展示文案上错误降级成「同社区实体」。改后
+    sticky-prefer comention:一旦命中过 comention 就不再被后写的 community 覆盖。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
+        reflects=[
+            {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
+             "reason": "需要同类"},
+            {"next_action": "answer", "sufficient": True}])
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    # comention 命中的库排在遍历顺序的第一个,community 命中的库在其后——
+    # 若代码退化回「后写覆盖」,source 会被第二个库拖回 "community"。
+    monkeypatch.setattr(
+        retriever.communities, "mounted_base_ids",
+        lambda *a: ["base-comention-first", "base-community-second"],
+    )
+
+    def _resolve(base_nb, *a, **k):
+        if base_nb == "base-comention-first":
+            return (["RTL综合"], "comention")
+        return (["布线"], "community")
+
+    monkeypatch.setattr(retriever.communities, "resolve_comparison_peers", _resolve)
+    res = retriever.run(nb.id, "DeepSeek-V4 相比其他", "")
+    step = next(t for t in res.trace if t.step_type == "expand_community")
+    assert step.detail["source"] == "comention"
+    assert "共提" in step.summary and "同社区实体" not in step.summary
+
+
+def test_run_expand_community_caps_merged_peers_across_bases(rrepo, monkeypatch):
+    """总量帽:多个挂载库合并去重后的兄弟实体数不能无界增长——按
+    community_peers_topk × _COMMUNITY_PEERS_CAP_FACTOR 截断(而不是任其随挂载
+    库数线性到 topk×N)。截断在「合并各库结果后」发生(三个库仍都被查询,不是
+    凑够帽值就提前跳过后面的库),且结果确定——取遍历顺序的前 N 个,不受
+    dict/set 顺序影响。"""
+    from app.services.reasoning_retrieval import ReasoningRetriever
+    nb = _seed_two_nodes(rrepo)
+    rrepo.settings.community_peers_topk = 3          # cap = 3 × factor(2) = 6
+    rrepo.llm_client = _SeqLLM(
+        plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
+        reflects=[
+            {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
+             "reason": "需要同类"},
+            {"next_action": "answer", "sufficient": True}])
+    retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
+    base_ids = ["base-1", "base-2", "base-3"]
+    monkeypatch.setattr(retriever.communities, "mounted_base_ids", lambda *a: base_ids)
+    calls = []
+
+    def _resolve(base_nb, *a, **k):
+        calls.append(base_nb)
+        i = base_ids.index(base_nb)
+        return ([f"peer-{i}-{j}" for j in range(3)], "community")  # 每库 3 个互不重叠
+
+    monkeypatch.setattr(retriever.communities, "resolve_comparison_peers", _resolve)
+    res = retriever.run(nb.id, "DeepSeek-V4 相比其他", "")
+    assert calls == base_ids                        # 三个库都被查询(截断发生在合并后,非提前跳过)
+    step = next(t for t in res.trace if t.step_type == "expand_community")
+    assert len(step.detail["peers"]) == 6            # 9 个去重(无重叠)后截到帽值 6
+    assert step.detail["peers"] == [
+        "peer-0-0", "peer-0-1", "peer-0-2", "peer-1-0", "peer-1-1", "peer-1-2",
+    ]                                                 # 确定性:遍历顺序前 6 个,非随机子集
 
 
 def test_from_repository_passes_configured_sibling_threshold(rrepo):
@@ -1294,7 +1395,7 @@ def test_run_expand_community_no_base_noop(rrepo, monkeypatch):
         called["peers"] += 1
         return []
     monkeypatch.setattr(C, "community_peers", _peers)
-    monkeypatch.setattr(C, "first_base_notebook_id", lambda *a, **k: None)
+    monkeypatch.setattr(C, "mounted_base_ids", lambda *a, **k: [])
     rrepo.llm_client = _SeqLLM(
         plan={"sub_queries": [{"query": "X"}]},
         reflects=[

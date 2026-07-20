@@ -99,8 +99,8 @@ class RetrievalService:
     def has_kg(self, notebook_id):
         return self.candidates._notebook_has_kg(notebook_id)
 
-    def any_base_has_kg(self):
-        return self.candidates._any_base_notebook_has_kg()
+    def any_base_has_kg(self, notebook_id):
+        return self.candidates._any_base_notebook_has_kg(notebook_id)
 
     def graph_is_large(self, notebook_id):
         return self.candidates._federated_graph_is_large(notebook_id)

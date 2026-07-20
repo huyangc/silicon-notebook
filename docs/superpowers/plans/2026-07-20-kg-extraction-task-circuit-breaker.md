@@ -4,7 +4,7 @@
 
 **Goal:** Stop only the current notebook's KG task when its model service stays unavailable, preserve completed source graphs, persist an accurate terminal status, and let the user continue unfinished sources.
 
-**Architecture:** A schema-v20 `kg_build_jobs` store persists one active job per notebook. A task-local run control and KG-client wrapper own bounded KG retries and open a circuit on classified model failures; the lifecycle coordinator cancels and drains only that job's queued work. Existing notebook and index-status projections expose the latest job to a shared frontend status helper.
+**Architecture:** A schema-v22 `kg_build_jobs` store persists one active job per notebook. A task-local run control and KG-client wrapper own bounded KG retries and open a circuit on classified model failures; the lifecycle coordinator cancels and drains only that job's queued work. Existing notebook and index-status projections expose the latest job to a shared frontend status helper.
 
 **Tech Stack:** Python 3, FastAPI, Pydantic v2, SQLite (`sqlite3`), OpenAI Python SDK, `concurrent.futures`, React 19, Next.js 15, TypeScript, Node test runner.
 
@@ -18,7 +18,7 @@
 - Malformed model JSON, empty extraction output, and evidence-grounding misses remain soft window outcomes.
 - Preserve `kg_building`, `kg_ready`, `kg_pending_sources`, existing POST response fields, synchronous repository/CLI entry points, request-context propagation, and the two global KG executor caps.
 - API output exposes reviewed `user_message`; raw provider exceptions remain in existing logs and must not reach the frontend.
-- Schema work is `_migration_20` with `SCHEMA_VERSION = 20`; do not edit migrations 1–19 or the frozen v9 baseline database.
+- Schema work is `_migration_22` with `SCHEMA_VERSION = 22`; do not edit migrations 1–21 or the frozen v9 baseline database.
 - Product behavior, setup, architecture, and constraints must be synchronized across `README.md`, `README_zh.md`, and `AGENTS.md`; update `fangan_done.md` only after verification.
 - User-facing backend changes must ship with their frontend surface in the same change.
 - Do not rename Ask mode protocol ids or display names.
@@ -42,7 +42,7 @@
 
 - `backend/app/core/config.py` — dedicated KG timeout/retry settings.
 - `backend/app/core/llm.py` — precise transient/status/response-format classification.
-- `backend/app/repositories/sqlite/migrations.py` — schema v20 and every-boot recovery.
+- `backend/app/repositories/sqlite/migrations.py` — schema v22 and every-boot recovery.
 - `backend/app/repositories/ports.py` — job and extraction keyword interfaces.
 - `backend/app/services/repository_runtime.py` — compose and inject the job store.
 - `backend/app/models/schemas.py` — `KgBuildJobStatus` and `NotebookSummary.kg_build`.
@@ -60,7 +60,7 @@
 - `backend/tests/test_kg_building_flag.py` — durable building semantics and compatibility set identity.
 - `backend/tests/test_kg_rebuild_relink_api.py` — KG-role guard, job id, duplicate 409, and submission-failure terminal state.
 - `backend/tests/test_schema_version_migration.py` — interrupted KG-job recovery.
-- `backend/tests/test_legacy_db_compat.py` — schema v20 pin and schema contract.
+- `backend/tests/test_legacy_db_compat.py` — schema v22 pin and schema contract.
 - `frontend/app/workspace-model.ts` — shared KG job API/view types.
 - `frontend/app/in-progress-resume.ts` — delegate KG resume/finish semantics to the job helper.
 - `frontend/app/in-progress-resume.test.mjs` — durable job resume compatibility.
@@ -389,7 +389,7 @@ git commit -m "feat: add task-scoped KG model circuit"
 
 ---
 
-### Task 3: Add schema-v20 durable KG build jobs
+### Task 3: Add schema-v22 durable KG build jobs
 
 **Files:**
 
@@ -461,7 +461,7 @@ Expected: missing table/store and schema-version failures.
 
 - [ ] **Step 3: Add migration 20 and every-boot recovery**
 
-Set `SCHEMA_VERSION = 20` and append only `_migration_20()`:
+Set `SCHEMA_VERSION = 22` and append only `_migration_22()`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS kg_build_jobs (
@@ -1276,7 +1276,7 @@ git commit -m "feat: show interrupted KG build status"
 **Interfaces:**
 
 - Consumes: all implemented backend/frontend contracts.
-- Produces: schema-v20 documentation and verified completion record.
+- Produces: schema-v22 documentation and verified completion record.
 
 - [ ] **Step 1: Update setup and behavior documentation**
 
@@ -1335,7 +1335,7 @@ PYTHONPATH=backend python3 -m pytest -q \
   backend/tests/test_schema_version_migration.py
 ```
 
-Expected: all pass with schema 20 and the frozen v9 baseline replay.
+Expected: all pass with schema 22 and the frozen v9 baseline replay.
 
 - [ ] **Step 4: Run the complete offline gate**
 
@@ -1367,7 +1367,7 @@ reliability. State:
 - task-local scope;
 - source-level preservation;
 - durable UI status and manual continuation;
-- schema v20;
+- schema v22;
 - deterministic/offline tests use fakes and do not call a real model; and
 - both required gates passed.
 

@@ -55,7 +55,8 @@ import {
   deriveDefaultTitle,
   extractErrorMessage,
   computePreviewSpans,
-  isBlankTitle,
+  importSubmitDisabledReason,
+  shouldApplyAnchorPreview,
   isSupportedImportFile,
 } from "./knowhow-import-logic.ts";
 import {
@@ -102,6 +103,10 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
   // 每列内容类型（三值，不含 anchor）+ 表级行标题列下标（null=不设置）。
   const [kinds, setKinds] = useState<ColumnKind[]>([]);
   const [anchorIndex, setAnchorIndex] = useState<number | null>(null);
+  // 步骤②改选行标题列后「重取预览」的 loading/error（与初始 previewLoading/
+  // previewError 分开）：重取期间保留旧网格、只轻量置灰，避免整块闪烁。
+  const [anchorPreviewLoading, setAnchorPreviewLoading] = useState(false);
+  const [anchorPreviewError, setAnchorPreviewError] = useState<string | null>(null);
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -126,6 +131,10 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     };
   }, []);
 
+  // 重取预览的请求序号——用户在行标题单选间快速切换会并发多次重取，只让「最新
+  // 一次」落地，丢弃迟到/乱序的旧响应（否则旧响应后到会把网格覆盖回上次选择）。
+  const anchorReqSeqRef = useRef(0);
+
   // 提交中（真正建表的请求，不可撤销/不可取消）时不允许关闭向导：Esc/背景点击
   // /右上角 X 一律经这道守卫。否则用户提前关闭后，导入仍可能在后台悄悄成功，
   // 但面板既不会收到 onDone 也就不会刷新列表——用户会看不到新表，一头雾水。
@@ -147,9 +156,12 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     // 变化时才重新订阅监听器，而不是每次渲染都重新订阅。
   }, [onClose, submitting]);
 
-  // 行标题列 0..1 由单选选择器天然保证（规格①「至多一」）；唯一的提交前置
-  // 校验只剩「标题非空」。
-  const submitDisabled = submitting || isBlankTitle(title);
+  // 行标题列 0..1 由单选选择器天然保证（规格①「至多一」）。提交前置校验集中在
+  // importSubmitDisabledReason：标题非空 + 改锚定后的重取预览已就绪（P2——重取
+  // 中/重取失败都必须挡住提交，否则会拿旧锚定列的预览提交、commit 却按新锚定列
+  // 走，展示≠落库）。submitting 单独 OR 进去（它有自己的按钮文案「导入中…」）。
+  const submitDisabledReason = importSubmitDisabledReason(title, anchorPreviewLoading, anchorPreviewError);
+  const submitDisabled = submitting || submitDisabledReason !== null;
 
   async function handleFileSelected(selected: File) {
     if (!isSupportedImportFile(selected.name)) {
@@ -157,6 +169,14 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
       return;
     }
     setPreviewError(null);
+    // 新文件的初始预览开始：作废任何上一个文件仍在飞的「按行标题列重取预览」
+    // （P1）。递增序号让那条迟到响应失配、被重取守卫 shouldApplyAnchorPreview
+    // 丢弃——否则它迟到返回时序号仍匹配，会把这个新文件的预览覆盖成上一个文件
+    // 的行（列数相等时用户甚至能就此把本文件按上一个文件的列结构导入）。顺带
+    // 清掉上一个文件残留的重取 loading/error 提示。
+    anchorReqSeqRef.current += 1;
+    setAnchorPreviewLoading(false);
+    setAnchorPreviewError(null);
     setPreviewLoading(true);
     try {
       const result = await importKnowhowPreview(notebookId, selected);
@@ -184,12 +204,49 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     if (picked) handleFileSelected(picked);
   }
 
+  // 步骤②用户改/清行标题列 → 即时重取预览，让后端规整跳过的列与用户所选一致
+  // （预览即所得——preview_import 按传入的 anchor_index 跳过该列，与 commit 对齐）。
+  // radio 式单选、无需防抖；重取期间保留旧网格只置灰，避免整块闪烁。初始「猜测
+  // 预选」走 handleFileSelected 里的 setAnchorIndex（**不**经这里、不重取——初始
+  // 预览本就是后端按猜测列规整过的，再取一次是多余往返）。
+  async function handleAnchorChange(nextAnchorIndex: number | null) {
+    setAnchorIndex(nextAnchorIndex);
+    const currentFile = file;
+    if (!currentFile) return; // MapStep 只在有 file/preview 时渲染，理论不达
+    const seq = anchorReqSeqRef.current + 1;
+    anchorReqSeqRef.current = seq;
+    setAnchorPreviewLoading(true);
+    setAnchorPreviewError(null);
+    try {
+      const result = await importKnowhowPreview(notebookId, currentFile, nextAnchorIndex);
+      // 迟到/被更新的选择覆盖：只让最新一次落地，丢弃乱序旧响应；序号在切文件/
+      // 返回选择步骤时也会被推进，故这条守卫同时挡住「文件 A 的重取迟到覆盖已切
+      // 到的文件 B 预览」（P1）。
+      if (!shouldApplyAnchorPreview(mountedRef.current, seq, anchorReqSeqRef.current)) return;
+      // 只换 rows_preview 文本；columns/anchor_suggestion 不变，用户已选的
+      // kinds/anchorIndex 不受影响（不重跑 deriveImportSelection）。
+      setPreview(result);
+    } catch (err) {
+      if (!shouldApplyAnchorPreview(mountedRef.current, seq, anchorReqSeqRef.current)) return;
+      // 保留旧网格（不清空 preview），只在选择器旁提示重取失败。
+      setAnchorPreviewError(extractErrorMessage(err, "更新预览失败，请重试"));
+    } finally {
+      if (mountedRef.current && seq === anchorReqSeqRef.current) setAnchorPreviewLoading(false);
+    }
+  }
+
   function backToSelect() {
+    // 离开映射步骤：作废任何仍在飞的重取预览（P1）——递增序号使其迟到响应失配、
+    // 被 handleAnchorChange 的 shouldApplyAnchorPreview 守卫丢弃，否则它会在用户
+    // 切到另一个文件后覆盖新文件的预览（同 handleFileSelected 的理由）。
+    anchorReqSeqRef.current += 1;
     setStep("select");
     setFile(null);
     setPreview(null);
     setKinds([]);
     setAnchorIndex(null);
+    setAnchorPreviewLoading(false);
+    setAnchorPreviewError(null);
     setTitle("");
     setPreviewError(null);
     setSubmitError(null);
@@ -270,13 +327,16 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
               kinds={kinds}
               onKindChange={setKindAt}
               anchorIndex={anchorIndex}
-              onAnchorChange={setAnchorIndex}
+              onAnchorChange={handleAnchorChange}
+              previewRefreshing={anchorPreviewLoading}
+              refreshError={anchorPreviewError}
               submitting={submitting}
               submitError={submitError}
               onDismissSubmitError={() => setSubmitError(null)}
               onBack={backToSelect}
               onSubmit={handleSubmit}
               submitDisabled={submitDisabled}
+              submitDisabledReason={submitDisabledReason}
             />
           ) : null}
         </div>
@@ -366,12 +426,15 @@ function MapStep({
   onKindChange,
   anchorIndex,
   onAnchorChange,
+  previewRefreshing,
+  refreshError,
   submitting,
   submitError,
   onDismissSubmitError,
   onBack,
   onSubmit,
   submitDisabled,
+  submitDisabledReason,
 }: {
   fileName: string;
   preview: KnowhowImportPreview;
@@ -381,12 +444,19 @@ function MapStep({
   onKindChange: (index: number, kind: ColumnKind) => void;
   anchorIndex: number | null;
   onAnchorChange: (anchorIndex: number | null) => void;
+  /** 改选行标题列后正在重取预览：保留旧网格、轻量置灰、禁用选择器，避免闪烁。 */
+  previewRefreshing: boolean;
+  /** 重取预览失败的提示（保留旧网格，仅在选择器旁提示）；null=无错。 */
+  refreshError: string | null;
   submitting: boolean;
   submitError: string | null;
   onDismissSubmitError: () => void;
   onBack: () => void;
   onSubmit: () => void;
   submitDisabled: boolean;
+  /** 提交置灰的原因（null=可提交）：绑到按钮 title，让「为什么不能点」可见
+   * （P2「置灰必有对得上的原因」）——重取预览中/失败时都由它给出对应文案。 */
+  submitDisabledReason: string | null;
 }) {
   // 预览即所得：与导入后的主网格 G2 看到的形状一致——先把行标题列
   // forward-fill（镜像后端落库前的 forward_fill_column），再把每列相邻同值
@@ -424,7 +494,7 @@ function MapStep({
           <select
             value={anchorIndex === null ? "" : String(anchorIndex)}
             onChange={(event) => onAnchorChange(event.target.value === "" ? null : Number(event.target.value))}
-            disabled={submitting}
+            disabled={submitting || previewRefreshing}
           >
             <option value="">{ANCHOR_NONE_LABEL}</option>
             {preview.columns.map((column, index) => (
@@ -435,9 +505,14 @@ function MapStep({
           </select>
         </label>
         <p className={`knowhow-import-anchor-hint${anchorIndex === null ? " is-none" : ""}`}>{anchorHint(anchorIndex)}</p>
+        {previewRefreshing ? (
+          <span className="knowhow-import-anchor-refresh">按所选行标题列更新预览中…</span>
+        ) : refreshError ? (
+          <span className="knowhow-import-anchor-refresh is-error">{refreshError}</span>
+        ) : null}
       </div>
 
-      <div className="knowhow-import-preview-scroll">
+      <div className={`knowhow-import-preview-scroll${previewRefreshing ? " is-refreshing" : ""}`}>
         <table className="knowhow-import-preview-table">
           <thead>
             <tr>
@@ -509,7 +584,13 @@ function MapStep({
       )}
 
       <div className="knowhow-import-actions">
-        <button type="button" className="new-pill knowhow-import-submit-button" disabled={submitDisabled} onClick={onSubmit}>
+        <button
+          type="button"
+          className="new-pill knowhow-import-submit-button"
+          disabled={submitDisabled}
+          title={submitDisabledReason ?? undefined}
+          onClick={onSubmit}
+        >
           {submitting && <Loader2 size={14} className="knowhow-import-spin" />}
           {submitting ? "导入中…" : "确认导入"}
         </button>
@@ -1160,6 +1241,23 @@ function ImportWizardStyles() {
 
         .knowhow-import-anchor-hint.is-none {
           color: #9a5b00;
+        }
+
+        .knowhow-import-anchor-refresh {
+          font-size: 12px;
+          color: var(--muted);
+          line-height: 1.5;
+        }
+
+        .knowhow-import-anchor-refresh.is-error {
+          color: #b42318;
+        }
+
+        /* 改选行标题列重取预览时，保留旧网格只轻量置灰（避免整块闪烁）。 */
+        .knowhow-import-preview-scroll.is-refreshing {
+          opacity: 0.55;
+          transition: opacity 120ms ease;
+          pointer-events: none;
         }
 
         .knowhow-import-anchor-badge {

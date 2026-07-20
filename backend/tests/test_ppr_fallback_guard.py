@@ -417,6 +417,7 @@ def test_scale_ppr_self_unindexed_keeps_active_brute_force(embed_repo, monkeypat
     monkeypatch.setattr(repo.settings, "ppr_emb_synonym_enabled", False)
     base = _seed_indexed_self_base(repo)          # 联邦 base(有索引)
     active = _seed_two_doc_moe(repo, suffix="2")  # 小 active 库,无索引
+    repo.replace_notebook_bases(active.id, [base.id], "user-local")
     repo._embed_knowledge("e12", active.id, {"name": "Mixture-of-Experts (MoE)"})
     repo._embed_knowledge("e22", active.id, {"name": "Mixture-of-Experts (MoE)"})
 

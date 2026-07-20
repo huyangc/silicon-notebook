@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Callable, Sequence
 
+from app.repositories.sqlite.anchor_normalization import js_trim, sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -19,7 +20,6 @@ VALID_KINDS = frozenset({"anchor", "procedure", "entity", "attribute"})
 #: one exception — its initial column list may name the anchor inline (it
 #: validates the at-most-one rule itself).
 _NON_ANCHOR_KINDS = frozenset({"procedure", "entity", "attribute"})
-
 
 class KnowhowStore:
     """SQLite row persistence for the knowhow-table feature (knowhow-tables
@@ -722,6 +722,415 @@ class KnowhowStore:
                 "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = ?)",
                 (row_ids[0],),
             )
+
+    def update_knowhow_cells_bulk_guarded(
+        self, notebook_id: str, updates: list[tuple[str, str, str, str, str]]
+    ) -> "dict[str, list[tuple[str, str]]]":
+        """Compare-and-write bulk cell writer for
+        ``scripts/backfill_knowhow_md.py``'s ``--apply`` paths (TOCTOU +
+        membership fix). Each update is ``(table_id, row_id, column_id,
+        expected_before, content_md)`` and ``notebook_id`` is the notebook the
+        caller claims every entry belongs to. INSIDE ONE write transaction, for
+        every update this:
+
+        1. VALIDATES MEMBERSHIP (F2): joins the row and the column to their
+           owning table and verifies ``row.table_id == column.table_id ==
+           table_id`` (the id the caller claims for this entry) AND that table
+           belongs to ``notebook_id``. An entry that fails -- ids belonging to
+           another notebook/table, a cross-table (row, column) pair, or a
+           nonexistent row/column/table -- is collected as REJECTED and left
+           byte-for-byte untouched. This closes the hole where the method
+           trusted caller-supplied ids: an entry whose (row, column) lived in a
+           DIFFERENT notebook/table passed the ``before`` compare below and
+           silently overwrote a foreign cell while bumping the CALLER's table.
+           The membership read shares this write transaction, so it cannot race
+           a concurrent table move.
+
+        2. RE-READS the target cell's CURRENT ``content_md`` and writes
+           ``content_md`` ONLY when the stored value still equals
+           ``expected_before``; an update whose cell no longer matches (a live
+           backend user edited it after the plan was reviewed, or the row was
+           deleted so the current value is ``None``) is collected as SKIPPED and
+           left untouched. Neither a skip nor a reject ever aborts the
+           transaction.
+
+        Doing the compare INSIDE the same write transaction that performs the
+        write is the whole point. The CLI used to read the current cells, compare
+        against each plan entry's ``before``, THEN call the plain bulk write in a
+        SEPARATE step: a cell edited BETWEEN that read and the write passed the
+        now-stale comparison and got overwritten on top of the live edit,
+        violating the documented "post-review edits are skipped" guarantee.
+        Re-reading under the write lock closes that window -- the compare and the
+        write see the same committed state, so a cell that moved after the read
+        is refused rather than clobbered.
+
+        A written cell gets the exact per-row effect ``update_knowhow_cell``
+        gives (cell upsert via the same
+        ``ON CONFLICT(row_id, column_id)`` target + that row's ``updated_at`` /
+        ``projection_status`` -> ``'pending'``), and every DISTINCT table with at
+        least one actual write bumps its ``mutation_seq`` exactly once -- a table
+        whose updates were ALL skipped/rejected does not bump (nothing in it
+        changed). Empty ``updates`` is a no-op (no transaction opened).
+
+        Returns ``{"written": [...], "skipped": [...], "already_applied": [...],
+        "rejected": [...]}`` (each a list of ``(row_id, column_id)`` in first-seen
+        order), so the CLI reports each outcome from THIS transaction's own result
+        rather than a separate pre-read. F4: a cell whose CURRENT content already
+        equals the update's ``content_md`` (the AFTER) -- a PRIOR apply committed
+        the write but its separate reprojection step never completed (it threw, or
+        the process exited), leaving the row 'pending'/'failed' -- is reported in
+        the DISTINCT ``already_applied`` bucket, NOT lumped with genuine
+        moved-target ``skipped`` (current != before AND != after). The CLI
+        reprojects tables with written OR already_applied rows (reprojection is
+        idempotent), so a rerun of the same plan recovers such stuck rows even
+        though it writes nothing. Both buckets leave the cell untouched and bump
+        no ``mutation_seq``."""
+        if not updates:
+            return {"written": [], "skipped": [], "already_applied": [], "rejected": []}
+        now = self.now()
+        written: list[tuple[str, str]] = []
+        skipped: list[tuple[str, str]] = []
+        already_applied: list[tuple[str, str]] = []
+        rejected: list[tuple[str, str]] = []
+        written_table_ids: list[str] = []
+        with self.database.write() as db:
+            # F1 (cross-process atomicity): take a RESERVED lock BEFORE the
+            # phase-1 re-reads. write()'s ``write_lock`` only serializes writers
+            # in THIS process; pysqlite (isolation_level="") would otherwise open
+            # the transaction lazily at the first DML below, leaving every
+            # ``SELECT current`` above running in autocommit -- a second PROCESS
+            # (a live backend beside the CLI, another worker) could commit an edit
+            # between the compare and our write, and we would clobber it on top,
+            # defeating the whole compare-and-write. BEGIN IMMEDIATE makes the
+            # read-compare-write one cross-process-atomic critical section; a
+            # writer already holding the lock surfaces as the connection's normal
+            # busy handling (PRAGMA busy_timeout in _new_connection). The
+            # enclosing ``with conn:`` still owns commit/rollback -- once
+            # sqlite3_get_autocommit is 0 pysqlite issues no second implicit
+            # BEGIN, so this integrates without a double-begin.
+            db.execute("BEGIN IMMEDIATE")
+            for table_id, row_id, column_id, expected_before, content_md in updates:
+                # F2: membership -- row and column must both belong to the SAME
+                # table the caller claims, and that table must belong to the
+                # expected notebook. A missing row/column/table yields no join
+                # row and is likewise rejected.
+                membership = db.execute(
+                    "SELECT r.table_id AS row_table, c.table_id AS col_table, "
+                    "t.notebook_id AS tbl_notebook "
+                    "FROM knowhow_rows r, knowhow_columns c, knowhow_tables t "
+                    "WHERE r.id = ? AND c.id = ? AND t.id = ?",
+                    (row_id, column_id, table_id),
+                ).fetchone()
+                if (
+                    membership is None
+                    or membership["row_table"] != table_id
+                    or membership["col_table"] != table_id
+                    or membership["tbl_notebook"] != notebook_id
+                ):
+                    rejected.append((row_id, column_id))
+                    continue
+                current_row = db.execute(
+                    "SELECT content_md FROM knowhow_cells "
+                    "WHERE row_id = ? AND column_id = ?",
+                    (row_id, column_id),
+                ).fetchone()
+                current = current_row["content_md"] if current_row is not None else None
+                if current != expected_before:
+                    # F4: distinguish an ALREADY-APPLIED cell (current == the AFTER
+                    # this update would write -- a prior committed apply, its
+                    # reprojection never finished) from a GENUINE moved target
+                    # (current != before AND != after -- a live edit after review).
+                    # The CLI reprojects already_applied tables (idempotent) but
+                    # not moved ones; both leave the cell untouched.
+                    if current == content_md:
+                        already_applied.append((row_id, column_id))
+                    else:
+                        skipped.append((row_id, column_id))
+                    continue
+                db.execute(
+                    "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(row_id, column_id) DO UPDATE SET "
+                    "content_md = excluded.content_md, updated_at = excluded.updated_at",
+                    (self.new_id("khcel"), row_id, column_id, content_md, now),
+                )
+                db.execute(
+                    "UPDATE knowhow_rows SET updated_at = ?, projection_status = 'pending' "
+                    "WHERE id = ?",
+                    (now, row_id),
+                )
+                written.append((row_id, column_id))
+                if table_id not in written_table_ids:
+                    written_table_ids.append(table_id)
+            for table_id in written_table_ids:
+                db.execute(
+                    "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = ?",
+                    (table_id,),
+                )
+        return {
+            "written": written,
+            "skipped": skipped,
+            "already_applied": already_applied,
+            "rejected": rejected,
+        }
+
+    def update_knowhow_cells_guarded_atomic(
+        self,
+        notebook_id: str,
+        updates: "list[tuple[str, str, str, str, str]]",
+        require_assets: Sequence[str] = (),
+        anchor_column_id: "str | None" = None,
+        expected_anchor: "Sequence[str] | None" = None,
+    ) -> "dict[str, object]":
+        """ALL-OR-NOTHING compare-and-write for the interactive editor's
+        batch-reformat save (concurrency P1 fix b, HTTP 409 on a concurrent
+        edit). Each update is ``(table_id, row_id, column_id, expected_before,
+        content_md)`` and ``notebook_id`` is the notebook every entry must
+        belong to. Same membership + compare guarantees as
+        ``update_knowhow_cells_bulk_guarded``, but the FAILURE MODE is the
+        opposite: where the bulk-guarded backfill collects skips/rejects and
+        presses on (idempotent CLI re-run), THIS method refuses the WHOLE batch
+        the moment any entry fails membership or its stored ``content_md`` no
+        longer equals ``expected_before``.
+
+        It does so in TWO PHASES inside ONE ``self.database.write()``
+        transaction: phase 1 validates membership and re-reads+compares EVERY
+        target's current content; only if EVERY entry clears does phase 2 write
+        them all (same per-row effect as ``update_knowhow_cell`` — cell upsert +
+        that row's ``updated_at``/``projection_status`` -> ``'pending'`` — plus
+        one ``mutation_seq`` bump per distinct written table). A conflict in
+        phase 1 returns BEFORE any write happens, so the transaction commits with
+        nothing changed — all-or-nothing by construction, no rollback needed. The
+        compare sharing the write transaction is the whole point: reading the
+        cells in a SEPARATE step, comparing, then writing would reopen the TOCTOU
+        window a live edit between the read and the write slips through.
+
+        ``require_assets`` (F2) behaves exactly as in ``update_knowhow_cell``:
+        asset ids the new content references that must still be live
+        ``notebook_assets`` rows OF THIS notebook at COMMIT time. Checked INSIDE
+        this same write transaction (after membership+stale clear, before any
+        write), so the guarded save path gets the identical dangling-asset guard
+        the legacy last-write-wins path already had — a missing/foreign asset
+        raises ``ValueError`` and the transaction commits nothing (the caller maps
+        it to the legacy 400 + CELL_ASSET_MISSING_MESSAGE, distinct from the 409).
+        Sharing the write lock is the same anti-TOCTOU reasoning as the compare.
+
+        ANCHOR BASELINE GUARD (round-4 P1, OPTIONAL): the editor's batch fan-out
+        writes a merged/shared cell to every branch row of an anchor GROUP using
+        row ids FROZEN when the modal opened. If another client moves a sibling
+        row's ANCHOR out of that group but leaves the EDITED cell untouched,
+        ``expected_before`` still matches and membership still holds — the
+        candidate would silently land on a row that no longer belongs to the
+        group. When the caller supplies BOTH ``anchor_column_id`` and
+        ``expected_anchor`` (positionally parallel to ``updates`` —
+        ``expected_anchor[i]`` is ``updates[i]``'s row's snapshot anchor value,
+        exactly as ``expected_before`` parallels ``row_ids``), phase 1 also
+        re-reads each target row's anchor-column cell UNDER THE SAME
+        ``BEGIN IMMEDIATE`` and treats a mismatch as a conflict IDENTICAL to a
+        stale ``expected_before``: the whole batch is refused before any write
+        (all-or-nothing). Omitting either argument (both default ``None``) skips
+        the anchor guard entirely — byte-identical to the pre-fix behavior, so
+        the single-cell/manual-editor callers that never pass it are unaffected.
+
+        ANCHOR STRUCTURAL GUARD (round-5 P1): the per-row baseline above catches a
+        frozen target that LEFT the group, but not two drifts that leave EVERY
+        frozen row still matching its snapshot: (a) the table's ANCHOR DESIGNATION
+        moved to a different column (guarded cells all still equal their frozen
+        values, but the grouping is now defined by another column); and (b) a NEW
+        row JOINED the group (its anchor cell set to the group's value), making the
+        fan-out cover only a SUBSET of the current logical group. So when the
+        anchor guard is active, BEFORE any write and under the same
+        ``BEGIN IMMEDIATE``, this method ALSO (1) verifies ``anchor_column_id`` is
+        STILL the table's anchor column (``knowhow_columns.role == 'anchor'``), and
+        (2) checks EXACT membership: for each distinct frozen anchor VALUE, the
+        current member row-id set (rows whose anchor cell ``js_trim`` value equals
+        it, mirroring the frontend ``groupRowsByAnchor`` and queried through the
+        normalized expression index) must EQUAL the frozen target set. Any
+        designation move, joiner, or vanished row refuses
+        the whole batch (nothing written). The server derives membership itself, so
+        no new wire is needed. (The per-row byte-exact baseline stays the value-edit
+        guard; this pair is the structural guard.)
+
+        Returns ``{"written": [(row_id, column_id), ...], "conflict": bool}``.
+        ``conflict=True`` guarantees ``written == []`` (the caller maps it to a
+        409 with a friendly "内容已被其他人修改，请刷新后重试"). Empty ``updates``
+        is a no-op (``{"written": [], "conflict": False}``, no transaction)."""
+        if not updates:
+            return {"written": [], "conflict": False}
+        now = self.now()
+        written: list[tuple[str, str]] = []
+        written_table_ids: list[str] = []
+        with self.database.write() as db:
+            # F1 (cross-process atomicity): reserve the write lock BEFORE phase 1
+            # re-reads, for the same reason as update_knowhow_cells_bulk_guarded
+            # -- write()'s ``write_lock`` is process-local, and pysqlite
+            # (isolation_level="") would otherwise defer the transaction to the
+            # first phase-2 DML, leaving the phase-1 compare running in
+            # autocommit where a second PROCESS could slip a write in between.
+            # BEGIN IMMEDIATE makes the read-compare-write cross-process atomic;
+            # the enclosing ``with conn:`` still commits/rolls back (no double
+            # BEGIN once autocommit is off), and a busy peer surfaces via
+            # PRAGMA busy_timeout.
+            db.execute("BEGIN IMMEDIATE")
+            # Anchor baseline guard active only when BOTH inputs are supplied (the
+            # editor's fan-out); omitted -> byte-identical legacy path. See the
+            # docstring's ANCHOR BASELINE GUARD paragraph.
+            anchor_guard = anchor_column_id is not None and expected_anchor is not None
+            if anchor_guard:
+                if len(expected_anchor) != len(updates):
+                    return {"written": [], "conflict": True}
+                # Round-5 P1: the per-row byte-exact anchor re-read in the phase-1
+                # loop below catches a FROZEN target that LEFT the group, but two
+                # STRUCTURAL drifts leave every per-row baseline still matching while
+                # the fan-out has become a partial/misaimed group write. Both are
+                # caught HERE, under the same BEGIN IMMEDIATE, before any write.
+                #
+                # (a) DESIGNATION: anchor_column_id must STILL be the table's anchor
+                # column. The designation is stored as knowhow_columns.role ==
+                # 'anchor' (moved only by set_knowhow_anchor_column); if another
+                # client repointed it to a different column after the snapshot, the
+                # guarded column's cells may all still equal their frozen values
+                # while the logical grouping is now defined by another column
+                # entirely -> refuse the whole batch (nothing written).
+                anchor_col_row = db.execute(
+                    "SELECT table_id, role FROM knowhow_columns WHERE id = ?",
+                    (anchor_column_id,),
+                ).fetchone()
+                if (
+                    anchor_col_row is None
+                    or anchor_col_row["role"] != "anchor"
+                    or any(
+                        update_table_id != anchor_col_row["table_id"]
+                        for update_table_id, _row, _column, _before, _content in updates
+                    )
+                ):
+                    return {"written": [], "conflict": True}
+                anchor_table_id = anchor_col_row["table_id"]
+                # (b) EXACT MEMBERSHIP: for each DISTINCT frozen anchor VALUE among
+                # the targets, the CURRENT member row-id set must EQUAL the frozen
+                # target set for that value. "Member" MIRRORS the frontend
+                # groupRowsByAnchor (frontend/app/knowhow-grouping-logic.ts): a row
+                # whose anchor cell TRIM-equals the value (see js_trim, which
+                # reproduces JS String.prototype.trim() exactly). A blank-after-trim
+                # value is its OWN group there (never aggregated), so blank keys
+                # carry no multi-row membership and are skipped — the fan-out only
+                # ever targets non-empty groups. A row that JOINED (extra id) or a
+                # frozen row that VANISHED (missing id) makes current != frozen ->
+                # refuse the whole batch. The per-row byte-exact baseline stays the
+                # VALUE-EDIT guard; this set check is the STRUCTURAL guard.
+                frozen_by_key: "dict[str, set[str]]" = {}
+                for (_ut, u_row, _uc, _ub, _um), snapshot in zip(updates, expected_anchor):
+                    key = js_trim(snapshot)
+                    if not key:
+                        continue
+                    frozen_by_key.setdefault(key, set()).add(u_row)
+                if frozen_by_key:
+                    # F2 (round-7 P2): DON'T rescan the table's ENTIRE anchor column
+                    # per guarded call. A unique-anchor table makes every changed cell
+                    # its own singleton coversAnchorGroup unit, so an R×C import fires
+                    # R×C guarded calls, each O(R) -> O(R²C) inside the write lock.
+                    # Instead, for each DISTINCT non-blank frozen key, fetch only
+                    # exact members through the v21 normalized-anchor expression
+                    # index. The SQL expression is shared with that migration and
+                    # exactly matches js_trim, so a whitespace-padded joiner cannot
+                    # hide and no Python post-filter is needed. Same BEGIN IMMEDIATE;
+                    # each call now touches O(group) rows, not O(R). (Blank keys were
+                    # already skipped when frozen_by_key was built, so blank-anchor
+                    # rows never aggregate here -- each is its own group, mirroring
+                    # the frontend.)
+                    current_by_key: "dict[str, set[str]]" = {}
+                    normalized_anchor = sqlite_js_trim_expression("c.content_md")
+                    for key in frozen_by_key:
+                        for cell in db.execute(
+                            "SELECT c.row_id AS row_id "
+                            "FROM knowhow_cells c JOIN knowhow_rows r ON r.id = c.row_id "
+                            "WHERE r.table_id = ? AND c.column_id = ? "
+                            f"AND {normalized_anchor} = ?",
+                            (anchor_table_id, anchor_column_id, key),
+                        ).fetchall():
+                            current_by_key.setdefault(key, set()).add(cell["row_id"])
+                    for key, frozen_ids in frozen_by_key.items():
+                        if current_by_key.get(key, set()) != frozen_ids:
+                            return {"written": [], "conflict": True}
+            # Phase 1: membership + stale compare for ALL entries BEFORE writing.
+            for idx, (table_id, row_id, column_id, expected_before, content_md) in enumerate(updates):
+                membership = db.execute(
+                    "SELECT r.table_id AS row_table, c.table_id AS col_table, "
+                    "t.notebook_id AS tbl_notebook "
+                    "FROM knowhow_rows r, knowhow_columns c, knowhow_tables t "
+                    "WHERE r.id = ? AND c.id = ? AND t.id = ?",
+                    (row_id, column_id, table_id),
+                ).fetchone()
+                if (
+                    membership is None
+                    or membership["row_table"] != table_id
+                    or membership["col_table"] != table_id
+                    or membership["tbl_notebook"] != notebook_id
+                ):
+                    return {"written": [], "conflict": True}
+                current_row = db.execute(
+                    "SELECT content_md FROM knowhow_cells "
+                    "WHERE row_id = ? AND column_id = ?",
+                    (row_id, column_id),
+                ).fetchone()
+                current = current_row["content_md"] if current_row is not None else None
+                if current != expected_before:
+                    return {"written": [], "conflict": True}
+                if anchor_guard:
+                    # Re-read THIS row's anchor cell under the same lock and compare
+                    # to the frozen snapshot value; a moved/cleared anchor (!=
+                    # expected_anchor[idx]) is a conflict identical to a stale
+                    # expected_before — the row left the logical group this fan-out
+                    # targets. F1 (round-7 P2): an ABSENT anchor cell reads as ""
+                    # (NOT None) to MIRROR get_knowhow_table, which represents a
+                    # never-written cell as "" (the column key is simply missing from
+                    # its `cells` dict) and the frontend's
+                    # (row.cells[anchorColumnId] ?? "").trim(); the wire therefore
+                    # sends expected_anchor="" for a blank-anchor row. Mapping the
+                    # missing DB row to None instead made "" != None a PERMANENT 409 —
+                    # blank-anchor rows could never be batch-saved even after a reload.
+                    # (content_md is NOT NULL DEFAULT '', so a stored cell is never
+                    # None; absent is the only source of the missing value.)
+                    anchor_cell = db.execute(
+                        "SELECT content_md FROM knowhow_cells "
+                        "WHERE row_id = ? AND column_id = ?",
+                        (row_id, anchor_column_id),
+                    ).fetchone()
+                    current_anchor = (
+                        anchor_cell["content_md"] if anchor_cell is not None else ""
+                    )
+                    if current_anchor != expected_anchor[idx]:
+                        return {"written": [], "conflict": True}
+            # F2: every entry cleared membership+stale → the new content's newly
+            # referenced assets must still exist in THIS notebook. All entries share
+            # notebook_id (membership just proved it), so checking against any target
+            # row resolves the same notebook (mirrors update_knowhow_cells checking
+            # against row_ids[0]). A miss raises ValueError -> whole tx rolls back,
+            # nothing written -> caller returns the legacy 400 (not a 409).
+            self._require_assets_exist(db, updates[0][1], require_assets)
+            # Phase 2: every entry cleared → write them all in this transaction.
+            for table_id, row_id, column_id, expected_before, content_md in updates:
+                db.execute(
+                    "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(row_id, column_id) DO UPDATE SET "
+                    "content_md = excluded.content_md, updated_at = excluded.updated_at",
+                    (self.new_id("khcel"), row_id, column_id, content_md, now),
+                )
+                db.execute(
+                    "UPDATE knowhow_rows SET updated_at = ?, projection_status = 'pending' "
+                    "WHERE id = ?",
+                    (now, row_id),
+                )
+                written.append((row_id, column_id))
+                if table_id not in written_table_ids:
+                    written_table_ids.append(table_id)
+            for table_id in written_table_ids:
+                db.execute(
+                    "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = ?",
+                    (table_id,),
+                )
+        return {"written": written, "conflict": False}
 
     def validate_cell_target(self, row_id: str, column_id: str) -> None:
         """Assert (row, column) name a real cell slot: both exist AND belong

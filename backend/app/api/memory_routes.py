@@ -34,11 +34,13 @@ from app.models.schemas import (
     MemoryTransferRequest,
     MemoryUpdate,
     PaginatedMemories,
+    PromoteRequest,
     PromotionCandidate,
     UserProfile,
 )
 from app.repositories.ports import AskStateStorePort, MemoryRepository
 from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prompt
+from app.services.knowledge_governance import PromotionTargetError
 from app.services.memory_inputs import MemoryInputError
 
 
@@ -173,11 +175,16 @@ def _not_found(detail: str = "Memory not found") -> HTTPException:
     return HTTPException(status_code=404, detail=detail)
 
 
-async def _memory_call(call, *args):
+async def _memory_call(call, *args, **kwargs):
     try:
-        return await run_in_threadpool(call, *args)
+        return await run_in_threadpool(call, *args, **kwargs)
     except (KeyError, PermissionError):
         raise _not_found()
+    except PromotionTargetError as exc:
+        # 目标(target_base_id)校验失败是「输入不合法」而非「状态冲突」——
+        # 与其它晋升相关 ValueError(如「已在晋升中」,409)语义不同,单独识别
+        # 出来映射 400。子类关系保证这条 except 必须排在下面的 ValueError 之前。
+        raise HTTPException(status_code=400, detail=str(exc))
     except MemoryInputError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except ValueError as exc:
@@ -329,10 +336,14 @@ async def deprecate_memory(
 )
 async def promote_memory(
     memory_id: str,
+    payload: PromoteRequest = PromoteRequest(),
     user: UserProfile = Depends(get_current_user),
     service: MemoryRepository = Depends(memory_service),
 ) -> PromotionCandidate:
-    return await _memory_call(service.propose_memory_promotion, memory_id, user.id)
+    return await _memory_call(
+        service.propose_memory_promotion, memory_id, user.id,
+        target_base_id=payload.target_base_id,
+    )
 
 
 @memory_router.post("/answers/{answer_id}/memory-preview", response_model=MemoryPreview)
