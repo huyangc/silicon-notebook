@@ -7,6 +7,11 @@ from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
 
 
+class _Client:
+    def __init__(self, configured):
+        self.configured = configured
+
+
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
@@ -36,18 +41,16 @@ def test_rebuild_kg_409_llm_not_configured(client, monkeypatch):
 def test_rebuild_kg_200_launches_background_and_returns_rebuilding(client, monkeypatch):
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
 
-    # Patch the repository singleton to have an LLM configured and
-    # capture whether rebuild_notebook_kg is invoked.
     from app.api import deps
+    from app.services import background_jobs
     real_repo = deps.repository()
-
     called = []
 
-    def fake_rebuild(notebook_id):
-        called.append(notebook_id)
+    def fake_submit(fn, *args, **kwargs):
+        called.append((fn, args, kwargs))
 
-    real_repo.llm_client = MagicMock(configured=True)
-    real_repo.rebuild_notebook_kg = fake_rebuild
+    real_repo._kg_llm_client = _Client(True)
+    monkeypatch.setattr(background_jobs, "submit", fake_submit)
     monkeypatch.setattr(deps, "repository", lambda: real_repo)
 
     r = client.post(f"/api/notebooks/{nb}/kg/rebuild")
@@ -55,14 +58,71 @@ def test_rebuild_kg_200_launches_background_and_returns_rebuilding(client, monke
     body = r.json()
     assert body["status"] == "rebuilding"
     assert body["notebook_id"] == nb
+    assert body["job_id"].startswith("kgj-")
+    assert len(called) == 1
+    assert called[0][1] == (nb, body["job_id"], "rebuild")
 
-    # Give the daemon thread a moment to run (TestClient is sync so the
-    # thread may still be running; we just verify the key was accepted).
-    import time
-    deadline = time.time() + 5
-    while not called and time.time() < deadline:
-        time.sleep(0.05)
-    assert called == [nb], f"rebuild_notebook_kg not called; called={called}"
+
+def test_build_uses_resolved_kg_role_not_primary(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    monkeypatch.setattr(
+        type(real_repo),
+        "llm_client",
+        property(lambda _self: _Client(False)),
+    )
+    monkeypatch.setattr(
+        type(real_repo),
+        "kg_llm_client",
+        property(lambda _self: _Client(True)),
+    )
+    monkeypatch.setattr(background_jobs, "submit", lambda *a, **k: None)
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    response = client.post(f"/api/notebooks/{nb}/kg/build")
+
+    assert response.status_code == 200
+    assert response.json()["job_id"].startswith("kgj-")
+
+
+def test_duplicate_running_build_returns_409(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    real_repo._kg_llm_client = _Client(True)
+    monkeypatch.setattr(background_jobs, "submit", lambda *a, **k: None)
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+
+    first = client.post(f"/api/notebooks/{nb}/kg/build")
+    second = client.post(f"/api/notebooks/{nb}/kg/build")
+
+    assert first.status_code == 200
+    assert second.status_code == 409
+
+
+def test_submission_failure_marks_job_failed(client, monkeypatch):
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+    from app.api import deps
+    from app.services import background_jobs
+    real_repo = deps.repository()
+    real_repo._kg_llm_client = _Client(True)
+    monkeypatch.setattr(
+        background_jobs,
+        "submit",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    monkeypatch.setattr(deps, "repository", lambda: real_repo)
+    no_raise_client = TestClient(client.app, raise_server_exceptions=False)
+
+    response = no_raise_client.post(f"/api/notebooks/{nb}/kg/build")
+
+    assert response.status_code == 500
+    latest = real_repo._runtime.kg_build_jobs.latest(nb)
+    assert latest["status"] == "failed"
+    assert latest["error_code"] == "job_submission_failed"
 
 
 # ---------------------------------------------------------------------------
