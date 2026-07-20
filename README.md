@@ -1026,6 +1026,12 @@ PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --us
 
 The **anchor (row-title) column is never reformatted** by any bulk path (import, append, or this backfill) — it's a grouping key that must stay byte-stable, so normalizing it would split freshly-touched rows off from their existing concept group. (Only the explicit per-cell "reformat" action in the editor, where a human reviews the suggestion and all sibling rows are rewritten together, may touch it.)
 
+Interactive row/table reformat batches freeze the complete table snapshot when
+the batch opens. Saving a merged shared cell revalidates the target contents,
+the active anchor designation, and the exact anchor-group membership in one
+SQLite write transaction; concurrent drift rejects the whole save and refreshes
+the table after the batch dialog closes.
+
 Must be run from the main checkout root (it needs the real `.env`/database configuration, same as `batch_ingest.py`/`replay_retrieval.py` above). Safe to re-run: applying the same plan again is a no-op (each already-applied cell no longer matches its recorded "before").
 
 ## Current Limitations
