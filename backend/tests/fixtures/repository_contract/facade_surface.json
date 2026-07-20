@@ -8465,7 +8465,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', updates: 'list', require_assets=()) -> 'dict'"
+    "signature": "(self, notebook_id: 'str', updates: 'list', require_assets=(), anchor_column_id=None, expected_anchor=None) -> 'dict'"
   },
   "update_knowhow_table_meta": {
     "consumers": [
