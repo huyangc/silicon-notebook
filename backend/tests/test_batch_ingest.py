@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.core.config import Settings
+from app.core.request_context import get_request_user, set_request_user, reset_request_user
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.services.model_concurrency import (
@@ -376,8 +377,13 @@ def test_build_notebook_kg_isolates_source_failure(repo, monkeypatch):
 def test_ensure_notebook_explicit_owner(repo):
     u = repo.create_user("a00123456", "pw123456")
     assert u.id != "user-local"
-    nb_id = bi.ensure_notebook(repo, None, "nb", owner="a00123456")
-    nb_id2 = bi.ensure_notebook(repo, None, "nb2", owner="A00123456")  # 大小写不敏感
+    assert bi._resolve_owner_profile(repo, "A00123456").id == u.id
+    token = set_request_user(u)
+    try:
+        nb_id = bi.ensure_notebook(repo, None, "nb")
+        nb_id2 = bi.ensure_notebook(repo, None, "nb2")
+    finally:
+        reset_request_user(token)
     with repo._connect() as db:
         cb = db.execute("SELECT created_by FROM notebooks WHERE id=?", (nb_id,)).fetchone()["created_by"]
         cb2 = db.execute("SELECT created_by FROM notebooks WHERE id=?", (nb_id2,)).fetchone()["created_by"]
@@ -386,12 +392,200 @@ def test_ensure_notebook_explicit_owner(repo):
 
 def test_ensure_notebook_unknown_owner_errors(repo):
     with pytest.raises(SystemExit):
-        bi.ensure_notebook(repo, None, "nb", owner="a00999999")
+        bi._resolve_owner_profile(repo, "a00999999")
+
+
+def test_main_new_notebook_owner_context_drives_model_and_scheduler_worker(
+    repo, tmp_path, monkeypatch
+):
+    from app.services.kg.scheduler import submit_job
+
+    owner = repo.create_user("b00123456", "pw123456")
+    repo.set_user_model_settings(
+        owner.id,
+        {
+            "llm": {
+                "base_url": "https://owner-new.example/v1",
+                "api_key": "owner-key",
+                "model": "owner-new-model",
+            }
+        },
+    )
+    docs = tmp_path / "owner-new-docs"
+    docs.mkdir()
+    seen = {}
+
+    def fake_run_ingest(repo_, notebook_id, files, **kwargs):
+        seen["user_id"] = repo_.current_user().id
+        seen["model"] = repo_.kg_llm_client.model
+        seen["worker_user_id"] = submit_job(
+            lambda: repo_.current_user().id
+        ).result(timeout=5)
+        return {"uploaded": 0, "skipped": 0, "failed": 0}
+
+    monkeypatch.setenv("EMBED_PROVIDER", "")
+    monkeypatch.setattr(bi, "run_ingest", fake_run_ingest)
+    assert get_request_user() is None
+
+    rc = bi.main([
+        "ingest",
+        "--input-dir",
+        str(docs),
+        "--notebook-name",
+        "Owner notebook",
+        "--owner",
+        owner.username,
+        "--allow-no-embed",
+    ])
+
+    assert rc == 0
+    assert seen == {
+        "user_id": owner.id,
+        "model": "owner-new-model",
+        "worker_user_id": owner.id,
+    }
+    assert get_request_user() is None
+    with repo._connect() as db:
+        created_by = db.execute(
+            "SELECT created_by FROM notebooks WHERE name = ?",
+            ("Owner notebook",),
+        ).fetchone()["created_by"]
+    assert created_by == owner.id
+
+
+def test_main_existing_notebook_owner_context_drives_model_and_resets_on_failure(
+    repo, monkeypatch
+):
+    owner = repo.create_user("c00123456", "pw123456")
+    repo.set_user_model_settings(
+        owner.id,
+        {
+            "llm": {
+                "base_url": "https://owner-existing.example/v1",
+                "api_key": "owner-key",
+                "model": "owner-existing-model",
+            }
+        },
+    )
+    token = set_request_user(owner)
+    try:
+        notebook_id = bi.ensure_notebook(
+            repo, None, "Owner existing notebook"
+        )
+    finally:
+        reset_request_user(token)
+    seen = {}
+
+    def fail_reparse(repo_, notebook_id_, **kwargs):
+        seen["notebook_id"] = notebook_id_
+        seen["user_id"] = repo_.current_user().id
+        seen["model"] = repo_.kg_llm_client.model
+        raise RuntimeError("phase failed")
+
+    monkeypatch.setenv("EMBED_PROVIDER", "")
+    monkeypatch.setattr(bi, "run_reparse", fail_reparse)
+    assert get_request_user() is None
+
+    with pytest.raises(RuntimeError, match="phase failed"):
+        bi.main([
+            "reparse",
+            "--notebook-id",
+            notebook_id,
+            "--owner",
+            owner.username,
+            "--allow-no-embed",
+            "--no-rebuild",
+        ])
+
+    assert seen == {
+        "notebook_id": notebook_id,
+        "user_id": owner.id,
+        "model": "owner-existing-model",
+    }
+    assert get_request_user() is None
+
+
+def test_main_owner_context_resets_when_concurrency_setup_fails(
+    repo, monkeypatch
+):
+    owner = repo.create_user("d00123456", "pw123456")
+    token = set_request_user(owner)
+    try:
+        notebook_id = bi.ensure_notebook(
+            repo, None, "Owner setup failure"
+        )
+    finally:
+        reset_request_user(token)
+
+    class _FailingScope:
+        def __enter__(self):
+            assert get_request_user().id == owner.id
+            raise RuntimeError("scope setup failed")
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setenv("EMBED_PROVIDER", "")
+    monkeypatch.setattr(
+        bi,
+        "_batch_concurrency_scope",
+        lambda *_args, **_kwargs: _FailingScope(),
+    )
+
+    with pytest.raises(RuntimeError, match="scope setup failed"):
+        bi.main([
+            "reparse",
+            "--notebook-id",
+            notebook_id,
+            "--owner",
+            owner.username,
+            "--allow-no-embed",
+            "--no-rebuild",
+        ])
+
+    assert get_request_user() is None
+
+
+def test_main_omitted_owner_preserves_active_user_context(
+    repo, monkeypatch
+):
+    owner = repo.create_user("e00123456", "pw123456")
+    token = set_request_user(owner)
+    try:
+        notebook_id = bi.ensure_notebook(
+            repo, None, "Active owner notebook"
+        )
+        seen = []
+        monkeypatch.setattr(
+            bi,
+            "run_index",
+            lambda repo_, notebook_id_: (
+                seen.append((repo_.current_user().id, notebook_id_))
+                or {"indexed_nodes": 0}
+            ),
+        )
+
+        rc = bi.main(["index", "--notebook-id", notebook_id])
+
+        assert rc == 0
+        assert seen == [(owner.id, notebook_id)]
+        assert get_request_user() is owner
+    finally:
+        reset_request_user(token)
+    assert get_request_user() is None
 
 
 def test_arg_parser_has_owner():
     args = bi.build_arg_parser().parse_args(["ingest", "--input-dir", "x", "--owner", "a00123456"])
     assert args.owner == "a00123456"
+
+
+def test_arg_parser_concurrency_help_matches_positive_contract():
+    help_text = bi.build_arg_parser().format_help()
+    normalized = " ".join(help_text.split())
+    assert "<=1" not in normalized
+    assert "1 走原串行路径" in normalized
+    assert "all/kg/reparse 阶段生效" in normalized
 
 
 def test_main_refuses_silent_no_embed(repo, tmp_path, monkeypatch, capsys):
@@ -1400,6 +1594,32 @@ def test_run_index_prints_stage_timings(repo, monkeypatch, capsys):
     assert res["indexed_nodes"] == 2
     assert "  [index] gather: 12ms" in out
     assert "  [index] total: 40ms" in out
+
+
+def test_main_index_stays_outside_model_concurrency_scope(
+    repo, monkeypatch
+):
+    nb_id = bi.ensure_notebook(repo, None, "nb-index-no-model-scope")
+    seen = []
+
+    def forbidden_scope(*_args, **_kwargs):
+        raise AssertionError("index must not activate model concurrency")
+
+    monkeypatch.setattr(bi, "_batch_concurrency_scope", forbidden_scope)
+    monkeypatch.setattr(
+        bi,
+        "run_index",
+        lambda repo_, notebook_id: (
+            seen.append((repo_.current_user().id, notebook_id))
+            or {"indexed_nodes": 0}
+        ),
+    )
+
+    rc = bi.main(["index", "--notebook-id", nb_id])
+
+    assert rc == 0
+    assert seen == [("user-local", nb_id)]
+    assert current_model_concurrency() is None
 
 
 # --- vectors-to-blob backfill CLI --------------------------------------------
