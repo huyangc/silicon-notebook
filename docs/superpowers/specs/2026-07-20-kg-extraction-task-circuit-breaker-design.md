@@ -78,7 +78,7 @@ stopped by this task.
 
 ## 5. Durable Job Model
 
-Schema version 16 adds `kg_build_jobs`:
+Schema version 20 adds `kg_build_jobs`:
 
 | Column | Meaning |
 | --- | --- |
@@ -399,7 +399,7 @@ Implementation follows test-driven development.
 - startup recovery marks leftover running jobs failed;
 - `NotebookSummary` and index status expose the same job;
 - POST responses contain `job_id`; and
-- the v9 fixture upgrades through schema v16.
+- the v9 fixture upgrades through schema v20.
 
 ### 14.4 Frontend tests
 
@@ -427,8 +427,7 @@ The implementation change updates together:
 - `.env.example`; and
 - `fangan_done.md` under the relevant KG reliability/status entry.
 
-The documentation records schema version 16, KG-specific timeout/retry
+The documentation records schema version 20, KG-specific timeout/retry
 configuration, task-scoped failure semantics, durable status fields, retained
 partial completion, manual continuation, and deterministic offline/test
 behavior.
-
