@@ -1129,7 +1129,7 @@ def test_batch_scope_settings_restore_failure_surfaces_after_success(
         scheduler.reset()
 
 
-def test_main_reports_effective_concurrency_to_stdout_and_manifest(
+def test_main_prints_effective_concurrency(
     repo, monkeypatch, capsys
 ):
     nb_id = bi.ensure_notebook(repo, None, "nb-effective-concurrency")
