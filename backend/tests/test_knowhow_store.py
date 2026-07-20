@@ -1451,10 +1451,9 @@ def test_guarded_atomic_membership_trims_whitespace_variant_member(store, notebo
 # F2 -- the structural membership check rebuilt its map by scanning the table's
 # ENTIRE anchor column per guarded call (O(R) each). A unique-anchor table makes
 # every changed cell its own singleton coversAnchorGroup unit -> R×C guarded calls
-# -> O(R²C), all inside the write lock. The fix fetches only LIKE-substring
-# CANDIDATES for each distinct frozen key (the trimmed core is a contiguous
-# substring of any raw value that trim-equals it -> LIKE never UNDER-matches a true
-# member; over-matches are dropped by the exact _anchor_trim filter).
+# -> O(R²C), all inside the write lock. The fix probes each distinct frozen key
+# with equality on the v21 `js_trim` expression index, which returns exact current
+# members without a LIKE candidate scan or a Python post-filter.
 # ---------------------------------------------------------------------------
 
 

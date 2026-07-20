@@ -943,9 +943,10 @@ class KnowhowStore:
         ``BEGIN IMMEDIATE``, this method ALSO (1) verifies ``anchor_column_id`` is
         STILL the table's anchor column (``knowhow_columns.role == 'anchor'``), and
         (2) checks EXACT membership: for each distinct frozen anchor VALUE, the
-        current member row-id set (rows whose anchor cell TRIM-equals it, mirroring
-        the frontend ``groupRowsByAnchor`` — see ``_anchor_trim``) must EQUAL the
-        frozen target set. Any designation move, joiner, or vanished row refuses
+        current member row-id set (rows whose anchor cell ``js_trim`` value equals
+        it, mirroring the frontend ``groupRowsByAnchor`` and queried through the
+        normalized expression index) must EQUAL the frozen target set. Any
+        designation move, joiner, or vanished row refuses
         the whole batch (nothing written). The server derives membership itself, so
         no new wire is needed. (The per-row byte-exact baseline stays the value-edit
         guard; this pair is the structural guard.)

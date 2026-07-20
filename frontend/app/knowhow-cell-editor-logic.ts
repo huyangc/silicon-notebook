@@ -844,8 +844,9 @@ function endsWithOpenInlineSpan(line: string): boolean {
     i += 1;
   }
   if (depth > 0) return true;
-  // 4) 链接目的地 + 标题（F3；round-3 扩展到 title）：`](` 之后进入链接目标区，按 CommonMark 行内
-  //    链接文法追踪三个子相——"dest"（目的地文本：转义感知、圆括号平衡、**空白**结束进入 "gap"）、
+  // 4) 链接目的地 + 标题：`](` 之后进入链接目标区，按 CommonMark 行内链接文法追踪——
+  //    "dest"（裸目的地：转义感知、圆括号平衡、**空白**结束进入 "gap"）、"angle"/"afterAngle"
+  //    （`<...>` 目的地：空格与 `)` 是内容，未转义 `>` 后只接受外层 `)` 或空白）、
   //    "gap"（目的地后：等可选 title opener `"`/`'`/`(` 或链接闭合 `)`）、"title"（标题内：转义感知，
   //    只等对应 title-close `"`/`'`/`)`）。**标题内的 `)` 不减目的地深度**（round-3 核心修复：旧实现
   //    在每个 `)` 都减、把带引号标题里的 `)` 误当目的地闭合括号 -> `[x](url "title )\ncontinued")` 被判
@@ -857,7 +858,7 @@ function endsWithOpenInlineSpan(line: string): boolean {
   //    追踪 code-span（镜像规则 2：无转义、等长 run 闭合）与 math-span（镜像规则 1：转义感知、等长 run
   //    闭合）状态，落在任一已开着 span 内的 `](` **不**武装；散文里的 `](` 仍武装。跨行**开着**的
   //    code/math span 已由规则 1/2 先行拒绝（走不到这里），故此处每个 span 必在行尾前闭合。
-  let linkPhase: "dest" | "gap" | "title" | null = null; // null | 目的地文本 | 目的地后空白 | 标题内
+  let linkPhase: "dest" | "angle" | "afterAngle" | "gap" | "title" | null = null;
   let destDepth = 0; // 目的地圆括号平衡深度（转义感知）
   let titleClose = ""; // 当前标题的闭合字符（" / ' / )）
   let codeInside = false; // 反引号 code-span：镜像规则 2（无转义、等长 run 闭合）
@@ -867,6 +868,23 @@ function endsWithOpenInlineSpan(line: string): boolean {
   i = 0;
   while (i < n) {
     const ch = line[i];
+    if (linkPhase === "angle") {
+      if (ch === "\\") {
+        i += 2;
+        continue;
+      }
+      if (ch === "<") return true;
+      if (ch === ">") linkPhase = "afterAngle";
+      i += 1;
+      continue;
+    }
+    if (linkPhase === "afterAngle") {
+      if (ch === ")") linkPhase = null;
+      else if (ch === " " || ch === "\t") linkPhase = "gap";
+      else return true;
+      i += 1;
+      continue;
+    }
     if (linkPhase === "title") {
       // 标题内：转义感知，只等 titleClose；`)` 不减目的地深度
       if (ch === "\\") {
@@ -970,14 +988,15 @@ function endsWithOpenInlineSpan(line: string): boolean {
       continue;
     }
     if (ch === "]" && i + 1 < n && line[i + 1] === "(") {
-      linkPhase = "dest"; // 散文里的 `](` 起头目的地：`(` 计一层深度，跳过这两个字符
+      const isAngleDestination = i + 2 < n && line[i + 2] === "<";
+      linkPhase = isAngleDestination ? "angle" : "dest";
       destDepth = 1;
-      i += 2;
+      i += isAngleDestination ? 3 : 2;
       continue;
     }
     i += 1;
   }
-  return linkPhase !== null; // 行尾仍在 dest/gap/title 任一子相内 = 链接跨软换行、未闭
+  return linkPhase !== null; // 行尾仍在任一链接子相内 = 链接跨软换行、未闭
 }
 
 // F1（review）：一行**任意位置**是否出现「标签形状」的未转义 `<`（`<` 紧跟 ASCII 字母、

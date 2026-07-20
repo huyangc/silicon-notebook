@@ -1126,6 +1126,12 @@ test("shouldNormalizePaste: 粘贴一个干净的 GFM 表格（行首竖线）->
   assert.strictEqual(shouldNormalizePaste("| A | B |\n| - | - |\n| 1 | 2 |"), false);
 });
 
+test("shouldNormalizePaste: angle 链接跨行标题与真实 Excel 项目符号共存 -> false", () => {
+  const raw = '[x](<1)2> "title )\ncontinued")\n• 项目';
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(shouldNormalizePaste(raw), false);
+});
+
 // --- P2-f：insertViaExecCommandOrFallback —— 优先走原生撤销栈，失败优雅回退 ----
 //
 // 命中 shouldNormalizePaste 的粘贴 preventDefault 后要插入规整文本。老路径

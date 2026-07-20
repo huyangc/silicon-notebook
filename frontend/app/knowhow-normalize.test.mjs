@@ -648,6 +648,12 @@ test("F3-3：同行完整的括号标题 `(title)`（`[x](url (title))`）不 ri
   assert.strictEqual(isRichMarkdown('[x](url (title))'), false);
 });
 
+test("F3-4：angle 目的地内的 `)` 是内容，跨行标题仍拒绝并逐字保留", () => {
+  const raw = '[x](<1)2> "title )\ncontinued")';
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw);
+});
+
 // ---------------------------------------------------------------------------
 // F3 — marker 宽度必须按 CODE POINT 计，不是 UTF-16 单元 —— 镜像
 // test_md_normalize_rule.py 的 test_astral_ordered_marker_child_indented_by_
