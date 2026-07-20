@@ -454,6 +454,22 @@ def test_import_without_orientation_remains_column_oriented(
     assert [column["name"] for column in resp.json()["columns"]] == HEADER
 
 
+def test_import_rejects_unknown_orientation(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    owner_h = _login(client, "a00000537")
+    nb = _mk_notebook(client, owner_h)
+
+    resp = _import_xlsx(
+        client,
+        owner_h,
+        nb,
+        orientation="diagonal",
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "非法的属性排列方式"
+
+
 def test_import_column_count_mismatch_returns_friendly_400(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     owner_h = _login(client, "a00000504")
