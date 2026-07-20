@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-20
 
-**Status:** Approved in conversation; awaiting written-spec review
+**Status:** Approved
 
 ## 1. Problem
 
