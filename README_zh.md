@@ -1046,7 +1046,11 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 测试选择完整委托给 `scripts/check.sh`。
 
 该 workflow 只有读权限，不接收模型或部署 secrets，并把后端 pytest worker
-限制为 4，避免 GitHub 托管 runner 过度抢占。20 分钟 timeout 包含依赖安装，
+限制为 4，避免 GitHub 托管 runner 过度抢占。后端安装设置
+`HNSWLIB_NO_NATIVE=1` 并禁用 pip wheel cache：`hnswlib` 默认会用
+`-march=native` 编译，把这种本机 wheel 缓存后恢复到 CPU 特性不同的托管
+runner，可能以 `SIGILL` 崩溃。CI 使用可移植构建，以少量 ANN 性能换取确定性；
+生产 wheelhouse 仍可按已声明的部署 CPU 定向构建。20 分钟 timeout 包含依赖安装，
 与 Apple Silicon 本地 warm gate 的 60 秒内目标刻意分开。初次接入时
 `CI / full-gate` 仅用于观察；只有在 PR 与合并后的 `master` 都稳定绿跑后，
 并由用户明确批准分支保护变更，才把它设为 `master` 的 required check。

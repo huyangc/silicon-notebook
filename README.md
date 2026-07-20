@@ -1142,6 +1142,11 @@ Node.js 22. The workflow installs from `backend/requirements.txt` and
 
 The workflow is read-only, does not receive model or deployment secrets, and
 uses four backend pytest workers to avoid oversubscribing the hosted runner.
+Backend installation sets `HNSWLIB_NO_NATIVE=1` and disables pip's wheel cache:
+`hnswlib` otherwise builds with `-march=native`, and a cached locally built
+wheel can crash with `SIGILL` when restored on a hosted runner with different
+CPU features. The portable build trades a small ANN speedup for deterministic
+CI; production wheelhouses may still target their declared deployment CPU.
 Its 20-minute timeout includes dependency installation and is intentionally
 separate from the under-60-second local Apple Silicon warm-gate target.
 `CI / full-gate` is initially observational; make it a required `master` check

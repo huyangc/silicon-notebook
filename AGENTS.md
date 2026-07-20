@@ -363,6 +363,11 @@ this is a measured baseline, not a portable timeout assertion for every host.
 - Keep model/deployment secrets out of this workflow. Package-manager caches
   may contain downloads only; do not cache `node_modules`, virtualenvs,
   databases, or `.local` application state.
+- CI must build `hnswlib` portably with `HNSWLIB_NO_NATIVE=1` and
+  `pip --no-cache-dir`. Its source build otherwise uses `-march=native`, so a
+  cached local wheel is unsafe to restore on a hosted runner with different
+  CPU features and can terminate tests with `SIGILL`. Deployment wheelhouses
+  may optimize only for their explicitly declared target CPU.
 - The 20-minute hosted-runner timeout is not the local 60-second warm-gate
   target. Do not make the check required until stable green PR and post-merge
   runs have been observed and the user explicitly approves branch-protection
