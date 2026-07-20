@@ -206,15 +206,30 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
                               gleaning_rounds=gleaning_rounds,
                               base_filter=base_filter)
                 for idx, (w, els) in enumerate(pairs)]
-        for fut in cf.as_completed(futs):
+        # Production submit_window returns concurrent.futures.Future. Some
+        # synchronous compatibility/test schedulers return a minimal
+        # result()-only object; preserve that supported path.
+        completed = (
+            cf.as_completed(futs)
+            if all(isinstance(fut, cf.Future) for fut in futs)
+            else iter(futs)
+        )
+        for fut in completed:
             try:
                 ns, es = fut.result()
                 nodes += ns
                 edges += es
             except KgBuildAborted:
                 for pending in futs:
-                    pending.cancel()
-                cf.wait(futs)
+                    cancel = getattr(pending, "cancel", None)
+                    if cancel is not None:
+                        cancel()
+                real_futures = [
+                    pending for pending in futs
+                    if isinstance(pending, cf.Future)
+                ]
+                if real_futures:
+                    cf.wait(real_futures)
                 raise
             except Exception:
                 failed += 1

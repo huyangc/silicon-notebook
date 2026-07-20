@@ -41,10 +41,11 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 15. The committed v9 compatibility fixture
-upgrades through the existing v10 migration, the v11/v12 SQLite hot-path index
-migrations, the v13 Memory/Agent migration, and the v14/v15 Memory-derived
-source link/index migrations, and remains readable.
+The current schema version is 20. The committed v9 compatibility fixture
+upgrades through v10, the v11/v12 SQLite hot-path indexes, v13 Memory/Agent,
+v14/v15 Memory-derived source links/indexes, v16 Knowhow tables/assets, v17
+paper metadata, v18 Knowhow cell-code/role migration, v19 source-linked assets,
+and v20 durable KG build jobs, and remains readable.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, and graph/answer type marks share `kg-type-mark.tsx`.
 - Boundary regression tests prevent these responsibilities from being copied back into the monoliths. Future extraction should follow the same incremental pattern: preserve endpoints and user behavior, move one cohesive domain, then run the complete offline gate.
 
@@ -432,6 +433,27 @@ The ingest-time decision is `KG_AUTO_EXTRACT or notebook-already-has-KG`:
 - Otherwise extraction runs on upload only if the notebook already contains KG objects.
 
 So you **opt in once** (build the KG, or set `KG_AUTO_EXTRACT=true`); after that, new documents are auto-extracted and fused. Re-extract a whole notebook from scratch with `POST /api/notebooks/{id}/kg/rebuild`. For bulk/offline builds, see the **Offline batch ingestion** section.
+
+### KG build failure isolation
+
+Manual notebook builds/rebuilds create a durable, task-scoped `kg_build_jobs`
+row and allow only one running KG task per notebook. The notebook and index
+status APIs expose `probing → extracting → stopping → finished`, source counts,
+and a safe user-facing failure message; the frontend shows the same state after
+refresh and offers **继续分析未完成内容** after a failure.
+
+Each KG model request uses `KG_LLM_TIMEOUT_SECONDS` (default `60`) and at most
+`KG_LLM_MAX_RETRIES` retries (default `2`, allowed `0..3`). If transient
+unavailability persists, or the service rejects/authenticates the request
+permanently, the shared control for that one job stops new requests, cancels
+queued source/window work, and drains calls already in flight. Other notebooks
+and later tasks are unaffected.
+
+Completed sources remain committed; an interrupted source does not persist a
+partial extraction. A later normal build analyzes only unfinished sources.
+Explicit rebuild is the only action that clears existing KG data, and it probes
+the model before deleting anything. If the process restarts with a running job,
+startup recovery marks that job failed so the UI does not spin indefinitely.
 
 ## Retrieval modes (Ask)
 

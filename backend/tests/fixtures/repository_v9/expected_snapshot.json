@@ -347,6 +347,7 @@
       ],
       "id": "<nb-id-1>",
       "is_shared": true,
+      "kg_build": null,
       "kg_building": false,
       "kg_pending_sources": 0,
       "kg_ready": true,

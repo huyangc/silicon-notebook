@@ -530,8 +530,8 @@ class SQLiteRepository:
             ),
             set_source_status=lambda source_id, status, **kwargs: self._set_source_status(
                 source_id, status, **kwargs),
-            run_extraction=lambda source_id, **kwargs: self._runtime.source_ingestion.run_extraction(
-                source_id, **kwargs),
+            run_extraction=lambda source_id, **kwargs: _call_extraction_compat(
+                self._run_extraction, self._runtime.source_ingestion.run_extraction, source_id, kwargs),
             llm=lambda: self.llm_client,
             kg_llm=lambda: self.kg_llm_client,
             cluster_map=lambda notebook_id: self.cluster_map(notebook_id),
@@ -3493,3 +3493,12 @@ def _snippet(text: str, needle: str) -> str:
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(clean) else ""
     return f"{prefix}{clean[start:end]}{suffix}"
+
+
+def _call_extraction_compat(
+    callback, task_callback, source_id: str, kwargs: dict
+) -> None:
+    """Keep legacy one-argument monkeypatch seats while forwarding task state."""
+    if getattr(callback, "__func__", None) is SQLiteRepository._run_extraction:
+        return task_callback(source_id, **kwargs)
+    return callback(source_id)

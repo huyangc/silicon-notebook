@@ -462,7 +462,7 @@ NOTEBOOK_ASSETS_SOURCE_INDEX = {
         "CREATE INDEX idx_notebook_assets_source ON notebook_assets(source_id)",
 }
 
-MIGRATION_MANIFEST = {
+_MIGRATION_MANIFEST_THROUGH_V19 = {
     # Cumulative delta from the frozen v9 fixture to merged schema v19.
     (9, 19): {
         "tables": {
@@ -1578,6 +1578,53 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result = verify_snapshot(args.database, args.storage_dir)
     _print_report(result)
     return 0 if result.ok else 1
+
+
+# v20: durable notebook-scoped KG build status plus a partial unique index
+# enforcing one running task per notebook. Appended here to keep the verifier's
+# source-audit coordinates stable; compare_snapshots resolves the manifest only
+# when invoked, after module initialization has completed.
+KG_BUILD_JOB_TABLE = {
+    "kg_build_jobs": """CREATE TABLE kg_build_jobs (
+                  id TEXT PRIMARY KEY,
+                  notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
+                  created_by TEXT NOT NULL DEFAULT '',
+                  mode TEXT NOT NULL,
+                  status TEXT NOT NULL DEFAULT 'running',
+                  stage TEXT NOT NULL DEFAULT 'probing',
+                  total_sources INTEGER NOT NULL DEFAULT 0,
+                  completed_sources INTEGER NOT NULL DEFAULT 0,
+                  failed_sources INTEGER NOT NULL DEFAULT 0,
+                  error_code TEXT NOT NULL DEFAULT '',
+                  error_message TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  finished_at TEXT NOT NULL DEFAULT ''
+                )""",
+}
+KG_BUILD_JOB_INDEXES = {
+    "idx_kg_build_jobs_one_running":
+        """CREATE UNIQUE INDEX idx_kg_build_jobs_one_running
+                  ON kg_build_jobs(notebook_id) WHERE status = 'running'""",
+    "idx_kg_build_jobs_nb_created":
+        """CREATE INDEX idx_kg_build_jobs_nb_created
+                  ON kg_build_jobs(notebook_id, created_at DESC, id DESC)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 20, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KG_BUILD_JOB_TABLE},
+        "indexes": {**manifest["indexes"], **KG_BUILD_JOB_INDEXES},
+    }
+    for key, manifest in _MIGRATION_MANIFEST_THROUGH_V19.items()
+}
+MIGRATION_MANIFEST[(19, 20)] = {
+    "tables": KG_BUILD_JOB_TABLE,
+    "columns": {},
+    "indexes": KG_BUILD_JOB_INDEXES,
+    "triggers": {},
+    "views": {},
+}
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-07-16
+更新日期：2026-07-20
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -127,6 +127,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - `backend/app/services/extraction_profiles.py` 当前只维护 `academic_paper` / `textbook` 两类 profile，二者对象集均为 `concept / claim / formula / procedure`；`doc_type` 按单个 source 存储。
 - 配置 `OPENAI_COMPAT_*` 时，`_run_extraction()` 走 LLM KG 抽取并把对象直接写入 `knowledge_objects`（status=approved）与 `knowledge_relations`；`extraction_runs.run_type='kg'`。
 - 未配置 LLM 时，`_run_extraction()` 仍写入 completed run，但 `error_message='no-llm'`，不会生成启发式候选或假 KG。离线本机 beta 仍能解析、搜索、摘要和回答；需要知识召回时必须配置 LLM 或由测试/治理显式写入知识对象。
+- **KG 模型故障隔离（§6.4 / §9.1）**：手动建库与完整重建均创建持久化的 `kg_build_jobs`，只在当前 notebook、本次任务内共享故障熔断状态。单次 LLM 调用受 `KG_LLM_TIMEOUT_SECONDS` 和 `KG_LLM_MAX_RETRIES` 限制；持续超时、连接失败、鉴权失败或服务拒绝会停止继续派发/重试，并把任务置为可恢复的失败状态。已完成 source 的 KG 结果保留，失败 source 不提交局部对象；前端状态栏展示预检、抽取、完成或中断阶段、进度与安全错误文案，并提供“继续分析未完成内容”。只有用户明确选择完整重建时才走清理语义，且会先探测模型可用性，避免模型不可用时先删除既有 KG。后端全量测试、前端测试、TypeScript 与 production build 已通过 `scripts/check.sh`。
 - 旧 `extraction_candidates` 表与候选 API 仍保留兼容，但不再是当前自动抽取的主产物。
 
 ## 11. Curator 审核、正式知识表与知识治理（方案 v0.2）

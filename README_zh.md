@@ -41,7 +41,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
-当前 schema 版本为 15。已提交的 v9 兼容 fixture 会经由既有 v10 migration、v11/v12 SQLite 热路径索引 migration、v13 Memory/Agent migration 与 v14/v15 Memory 派生源 link/index migration 升级，并保持可读。
+当前 schema 版本为 20。已提交的 v9 兼容 fixture 会依次经过 v10、v11/v12 SQLite 热路径索引、v13 Memory/Agent、v14/v15 Memory 派生源 link/index、v16 Knowhow 表/资产、v17 论文元数据、v18 Knowhow 格子代码/角色迁移、v19 来源关联资产与 v20 持久化 KG 构建任务，并保持可读。
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，图谱和答案共用的类型标记位于 `kg-type-mark.tsx`。
 - 结构回归测试会阻止这些职责重新复制回巨型文件。后续拆分沿用同一增量方式：保持端点与用户行为不变，每次只迁移一个高内聚领域，然后运行完整离线门禁。
 
@@ -382,6 +382,23 @@ KB+confirmed-Memory 三种检索条件。
 - 否则仅当该 notebook 已有 KG 对象时，上传才抽。
 
 即：**首次 opt-in**（构建 KG，或设 `KG_AUTO_EXTRACT=true`），之后新文档自动抽取 + 融合。整库重抽用 `POST /api/notebooks/{id}/kg/rebuild`；离线批量构建见「离线批量摄取」一节。
+
+### KG 构建故障隔离
+
+手动整理/全部重新分析会创建持久化、任务级的 `kg_build_jobs` 记录；同一 notebook
+同时只允许一项 KG 任务运行。Notebook 与索引状态 API 会返回
+`probing → extracting → stopping → finished`、来源进度和经过审查的用户提示。
+前端刷新后仍能恢复该状态；失败后显示「继续分析未完成内容」。
+
+每次 KG 模型请求使用 `KG_LLM_TIMEOUT_SECONDS`（默认 `60` 秒），瞬态错误最多重试
+`KG_LLM_MAX_RETRIES` 次（默认 `2`，允许 `0..3`）。若服务持续不可达，或认证失败/
+请求被永久拒绝，本次任务共享的中断控制会阻止继续发起请求，取消尚未开始的
+source/window 工作，并等待已经开始的调用安全退出。中断范围只限当前 notebook 的
+本次 KG 任务，不影响其他 notebook 或之后重新发起的任务。
+
+已完成来源的结果会保留；被中断来源不会写入半成品。之后普通「继续分析」只处理仍
+未完成的来源。只有显式「全部重新分析」会清空已有 KG，而且会在删除前先探测模型
+服务。若进程重启时仍有 running job，启动恢复会把它标为 failed，避免状态栏永久旋转。
 
 ## 检索模式（问答）
 

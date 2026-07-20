@@ -1406,6 +1406,79 @@
           "title": "HTTPValidationError",
           "type": "object"
         },
+        "KgBuildJobStatus": {
+          "properties": {
+            "completed_sources": {
+              "default": 0,
+              "title": "Completed Sources",
+              "type": "integer"
+            },
+            "error_code": {
+              "default": "",
+              "title": "Error Code",
+              "type": "string"
+            },
+            "failed_sources": {
+              "default": 0,
+              "title": "Failed Sources",
+              "type": "integer"
+            },
+            "job_id": {
+              "title": "Job Id",
+              "type": "string"
+            },
+            "mode": {
+              "enum": [
+                "incremental",
+                "rebuild"
+              ],
+              "title": "Mode",
+              "type": "string"
+            },
+            "stage": {
+              "enum": [
+                "probing",
+                "extracting",
+                "stopping",
+                "finished"
+              ],
+              "title": "Stage",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "running",
+                "succeeded",
+                "failed"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "total_sources": {
+              "default": 0,
+              "title": "Total Sources",
+              "type": "integer"
+            },
+            "updated_at": {
+              "default": "",
+              "title": "Updated At",
+              "type": "string"
+            },
+            "user_message": {
+              "default": "",
+              "title": "User Message",
+              "type": "string"
+            }
+          },
+          "required": [
+            "job_id",
+            "mode",
+            "status",
+            "stage"
+          ],
+          "title": "KgBuildJobStatus",
+          "type": "object"
+        },
         "KgSearchHit": {
           "properties": {
             "match": {
@@ -3493,6 +3566,16 @@
               "default": false,
               "title": "Is Shared",
               "type": "boolean"
+            },
+            "kg_build": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/KgBuildJobStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "kg_building": {
               "default": false,
@@ -12698,6 +12781,7 @@
       "expected_questions": [],
       "id": "nb-api",
       "is_shared": true,
+      "kg_build": null,
       "kg_building": false,
       "kg_pending_sources": 0,
       "kg_ready": true,

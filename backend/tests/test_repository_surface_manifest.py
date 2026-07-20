@@ -2595,7 +2595,6 @@ FROZEN_ONLY_MOVED_CONSUMERS = {
     # executor; extraction resolves the explicit client through the service.
     ("build_notebook_kg", "backend/app/api/routes.py:<line>"),
     ("rebuild_notebook_kg", "backend/app/api/routes.py:<line>"),
-    ("_run_extraction", "backend/app/services/sqlite_repository.py:<line>"),
     # Task 1 adds ownership imports above this test module's own facade import.
     ("SQLiteRepository", "backend/tests/test_repository_surface_manifest.py:13"),
     ("_augment_notebook_meta", "backend/app/services/sqlite_repository.py:<line>"),

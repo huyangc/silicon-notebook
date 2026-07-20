@@ -342,7 +342,7 @@ def test_current_docs_describe_reports_and_sharing_without_retired_article_contr
     assert "There is no live collaborative editing or change-password flow" in agents
     assert "Single-user mode for now" not in agents
     assert "no change-password / sharing / collaboration" not in agents
-    assert "更新日期：2026-07-16" in fangan_done
+    assert "更新日期：2026-07-20" in fangan_done
     assert "历史记录：Article Studio（已退役）" in fangan_done
     assert "历史记录（已退役）：Derived Rule Candidate" in fangan_done
 
@@ -586,14 +586,17 @@ def test_report_cancellation_is_the_documented_process_global_runtime_exception(
 
 def test_repository_schema_baseline_wording_is_exact_and_not_stale():
     english_current = (
-        "The current schema version is 15. The committed v9 compatibility fixture\n"
-        "upgrades through the existing v10 migration, the v11/v12 SQLite hot-path index\n"
-        "migrations, the v13 Memory/Agent migration, and the v14/v15 Memory-derived\n"
-        "source link/index migrations, and remains readable."
+        "The current schema version is 20. The committed v9 compatibility fixture\n"
+        "upgrades through v10, the v11/v12 SQLite hot-path indexes, v13 Memory/Agent,\n"
+        "v14/v15 Memory-derived source links/indexes, v16 Knowhow tables/assets, v17\n"
+        "paper metadata, v18 Knowhow cell-code/role migration, v19 source-linked assets,\n"
+        "and v20 durable KG build jobs, and remains readable."
     )
     chinese_current = (
-        "当前 schema 版本为 15。已提交的 v9 兼容 fixture 会经由既有 v10 migration、"
-        "v11/v12 SQLite 热路径索引 migration、v13 Memory/Agent migration 与 v14/v15 Memory 派生源 link/index migration 升级，并保持可读。"
+        "当前 schema 版本为 20。已提交的 v9 兼容 fixture 会依次经过 v10、"
+        "v11/v12 SQLite 热路径索引、v13 Memory/Agent、v14/v15 Memory 派生源 "
+        "link/index、v16 Knowhow 表/资产、v17 论文元数据、v18 Knowhow 格子代码/"
+        "角色迁移、v19 来源关联资产与 v20 持久化 KG 构建任务，并保持可读。"
     )
     historical_chinese = (
         "本次重构不改变其 master 基线已有的 schema 版本（`SCHEMA_VERSION = 10`）。"

@@ -939,12 +939,14 @@ class KnowledgeLifecycleService:
             self.kg_llm_client, self.settings, control
         )
         try:
-            probe_kg_model(controlled_client)
             if mode == "rebuild":
+                probe_kg_model(controlled_client)
                 self.delete_notebook_kg(notebook_id)
             targets, skipped, skipped_no_elements = self._kg_target_state(
                 notebook_id, "incremental"
             )
+            if mode != "rebuild" and targets:
+                probe_kg_model(controlled_client)
             self._warn_skipped_sources(skipped_no_elements)
             self.kg_build_jobs.set_stage(job_id, "extracting")
             result = self._extract_targets(

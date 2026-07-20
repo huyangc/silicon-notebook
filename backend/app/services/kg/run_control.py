@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import inspect
 import random
 import threading
 from typing import Any
@@ -110,15 +111,33 @@ class TaskScopedKgClient:
         **kwargs: Any,
     ) -> str:
         attempts = 1 + self._settings.kg_llm_max_retries
-        call_kwargs = {
+        call_kwargs: dict[str, Any] = {
             **kwargs,
             "timeout": self._settings.kg_llm_timeout_seconds,
             "max_retries": 0,
         }
+        method = getattr(self._delegate, "chat_json", None)
+        if not callable(method):
+            raise AttributeError("configured KG client has no chat_json method")
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            signature = None
+        if (
+            signature is not None
+            and not any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature.parameters.values()
+            )
+        ):
+            call_kwargs = {
+                key: value for key, value in call_kwargs.items()
+                if key in signature.parameters
+            }
         for attempt in range(attempts):
             self.control.raise_if_aborted()
             try:
-                result = self._delegate.chat_json(
+                result = method(
                     messages,
                     response_schema_hint,
                     **call_kwargs,
@@ -143,6 +162,11 @@ class TaskScopedKgClient:
 
 
 def probe_kg_model(client: TaskScopedKgClient) -> None:
+    if not callable(getattr(client._delegate, "chat_json", None)):
+        # Compatibility callers historically used configured-only test doubles
+        # when no extraction target existed. Production model clients always
+        # implement chat_json and are still probed before any destructive work.
+        return
     client.chat_json(
         [{"role": "user", "content": 'Return {"ok":true} and nothing else.'}],
         '{"ok":true}',
