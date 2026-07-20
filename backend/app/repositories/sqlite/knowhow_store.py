@@ -307,40 +307,69 @@ class KnowhowStore:
         with self.database.write() as db:
             db.execute("DELETE FROM knowhow_columns WHERE id = ?", (column_id,))
 
-    def list_knowhow_tables(self, notebook_id: str) -> list[dict]:
-        """Table summaries for one notebook (created_at order) with each
-        table's current row count (one batched COUNT, not N+1)."""
+    def knowhow_table_health_inputs(self, notebook_id: str) -> list[dict]:
         with self.database.connect() as db:
-            rows = db.execute(
-                "SELECT * FROM knowhow_tables WHERE notebook_id = ? "
-                "ORDER BY created_at, id",
+            tables = db.execute(
+                "SELECT id,notebook_id,title,description,created_at,updated_at,"
+                "mutation_seq,hidden_source_id,created_by "
+                "FROM knowhow_tables WHERE notebook_id=? ORDER BY created_at,id",
                 (notebook_id,),
             ).fetchall()
-            table_ids = [row["id"] for row in rows]
-            counts: dict[str, int] = {}
+            table_ids = [row["id"] for row in tables]
+            row_stats = {}
+            cell_activity = {}
+            code_inputs = {table_id: [] for table_id in table_ids}
             if table_ids:
                 placeholders = ",".join("?" for _ in table_ids)
-                count_rows = db.execute(
-                    "SELECT table_id, COUNT(*) AS n FROM knowhow_rows "
-                    f"WHERE table_id IN ({placeholders}) GROUP BY table_id",
+                row_stats = {
+                    row["table_id"]: dict(row)
+                    for row in db.execute(
+                        "SELECT table_id,COUNT(*) AS row_count,"
+                        "COALESCE(SUM(CASE WHEN projection_status IN ('pending','syncing') "
+                        "THEN 1 ELSE 0 END),0) "
+                        "AS projection_pending,"
+                        "COALESCE(SUM(CASE WHEN projection_status='failed' THEN 1 ELSE 0 END),0) "
+                        "AS projection_failed,MAX(updated_at) AS row_activity_at "
+                        f"FROM knowhow_rows WHERE table_id IN ({placeholders}) GROUP BY table_id",
+                        table_ids,
+                    ).fetchall()
+                }
+                cell_activity = {
+                    row["table_id"]: row["cell_activity_at"] or ""
+                    for row in db.execute(
+                        "SELECT r.table_id,MAX(c.updated_at) AS cell_activity_at "
+                        "FROM knowhow_cells c JOIN knowhow_rows r ON r.id=c.row_id "
+                        f"WHERE r.table_id IN ({placeholders}) GROUP BY r.table_id",
+                        table_ids,
+                    ).fetchall()
+                }
+                for row in db.execute(
+                    "SELECT r.table_id,cc.cell_content_hash AS saved_hash,"
+                    "COALESCE(c.content_md,'') AS current_content_md,cc.updated_at "
+                    "FROM knowhow_cell_code cc "
+                    "JOIN knowhow_rows r ON r.id=cc.row_id "
+                    "LEFT JOIN knowhow_cells c "
+                    "ON c.row_id=cc.row_id AND c.column_id=cc.column_id "
+                    f"WHERE r.table_id IN ({placeholders})",
                     table_ids,
-                ).fetchall()
-                counts = {row["table_id"]: row["n"] for row in count_rows}
-        return [
-            {
-                "id": row["id"],
-                "notebook_id": row["notebook_id"],
-                "title": row["title"],
-                "description": row["description"],
-                "mutation_seq": row["mutation_seq"],
-                "hidden_source_id": row["hidden_source_id"],
-                "created_by": row["created_by"],
-                "created_at": row["created_at"],
-                "updated_at": row["updated_at"],
-                "row_count": counts.get(row["id"], 0),
-            }
-            for row in rows
-        ]
+                ).fetchall():
+                    code_inputs[row["table_id"]].append(dict(row))
+        result = []
+        for table in tables:
+            stats = row_stats.get(table["id"], {})
+            result.append({
+                **dict(table),
+                "row_count": int(stats.get("row_count", 0)),
+                "projection_pending": int(stats.get("projection_pending", 0)),
+                "projection_failed": int(stats.get("projection_failed", 0)),
+                "row_activity_at": stats.get("row_activity_at") or "",
+                "cell_activity_at": cell_activity.get(table["id"], ""),
+                "code_inputs": code_inputs[table["id"]],
+            })
+        return result
+
+    def list_knowhow_tables(self, notebook_id: str) -> list[dict]:
+        return self.knowhow_table_health_inputs(notebook_id)
 
     def get_knowhow_table(self, table_id: str) -> dict:
         """Full table detail: columns ordered by position, rows ordered by

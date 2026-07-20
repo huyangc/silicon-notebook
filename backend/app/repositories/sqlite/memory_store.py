@@ -284,6 +284,32 @@ class MemoryStore:
             item, _created = self._insert_memory_on(db, write)
         return item
 
+    def notebook_content_overview(
+        self, user_id: str, notebook_id: str, limit: int = 3
+    ) -> dict[str, Any]:
+        bounded_limit = max(1, min(3, int(limit)))
+        with self.database.connect() as db:
+            counts = db.execute(
+                "SELECT COUNT(*) AS total,"
+                "COALESCE(SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END),0) AS confirmed,"
+                "COALESCE(SUM(CASE WHEN status='candidate' THEN 1 ELSE 0 END),0) AS candidate "
+                "FROM memory_items WHERE created_by=? AND notebook_id=?",
+                (user_id, notebook_id),
+            ).fetchone()
+            rows = db.execute(
+                "SELECT id,title,status,updated_at FROM memory_items "
+                "WHERE created_by=? AND notebook_id=? "
+                "AND status IN ('confirmed','candidate') "
+                "ORDER BY updated_at DESC,id DESC LIMIT ?",
+                (user_id, notebook_id, bounded_limit),
+            ).fetchall()
+        return {
+            "total": int(counts["total"]),
+            "confirmed": int(counts["confirmed"]),
+            "candidate": int(counts["candidate"]),
+            "recent": [dict(row) for row in rows],
+        }
+
     def _insert_memory_on(
         self, db: sqlite3.Connection, write: MemoryWrite
     ) -> tuple[MemoryRecord, bool]:
