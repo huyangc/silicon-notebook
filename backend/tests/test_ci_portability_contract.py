@@ -12,15 +12,15 @@ REQUIREMENTS = ROOT / "backend" / "requirements.txt"
 _REQUIREMENT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
-def _absolute_path_literals(path: Path) -> tuple[tuple[int, str], ...]:
+def _absolute_path_literals(path: Path) -> tuple[str, ...]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-    matches: list[tuple[int, str]] = []
+    matches: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
             continue
         value = node.value
         if PurePosixPath(value).is_absolute() or PureWindowsPath(value).is_absolute():
-            matches.append((node.lineno, value))
+            matches.append(value)
     return tuple(matches)
 
 
