@@ -337,6 +337,13 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
   正式平面隔离和同用户同 notebook 跨 Agent 召回。本次门禁结果：后端 `2939 passed, 1 skipped`、
   前端 `189 passed`、TypeScript 与 Next.js production build 均成功。
 
+## 28. Knowhow 新表双方向导入（2026-07-20）
+
+- **新表导入方向**：`POST /api/notebooks/{id}/knowhow/import/preview` 与 `POST /api/notebooks/{id}/knowhow/import` 支持请求级 `orientation=columns|rows`，默认 `columns` 兼容旧客户端。
+- **服务端统一规范化**：xlsx/csv/Markdown 原始矩阵在校验前按用户选择转置；属性行输入先补齐不等长行，再转成内部“列是属性”的网格。预览和正式导入使用同一方向，追加导入、存储、检索与投影契约不变。
+- **前端闭环**：导入向导第一步可选“属性按列 / 属性按行”，预览显示最终规范化形态；属性按行默认建议首列为行标题，用户可改选或取消。
+- **验证**：相关解析/API/前端契约测试、`scripts/check.sh` 与前端生产构建均通过。
+
 ## 20. 当前边界（后续阶段，未计入已完成）
 
 - **历史 Article 方案**：已退役，不属于当前后续承诺；当前长内容产出路径是 Deep Report。
