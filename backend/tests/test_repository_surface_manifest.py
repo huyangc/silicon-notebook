@@ -2591,6 +2591,11 @@ FROZEN_ONLY_MOVED_CONSUMERS = {
     # the frozen facade methods retain their original signatures for callers.
     ("approve_promotion", "backend/app/api/routes.py:<line>"),
     ("reject_promotion", "backend/app/api/routes.py:<line>"),
+    # KG build routes now prepare durable jobs and submit the task-scoped
+    # executor; extraction resolves the explicit client through the service.
+    ("build_notebook_kg", "backend/app/api/routes.py:<line>"),
+    ("rebuild_notebook_kg", "backend/app/api/routes.py:<line>"),
+    ("_run_extraction", "backend/app/services/sqlite_repository.py:<line>"),
     # Task 1 adds ownership imports above this test module's own facade import.
     ("SQLiteRepository", "backend/tests/test_repository_surface_manifest.py:13"),
     ("_augment_notebook_meta", "backend/app/services/sqlite_repository.py:<line>"),
@@ -3017,6 +3022,81 @@ TEST_CLEANUP_SHIFTED_IMPORTS = {
     ('backend/tests/test_followup_retrieval_grounding.py', 102, 'app.services.sqlite_repository', 'SQLiteRepository'),
 }
 
+# KG task circuit-breaker: these regression tests intentionally compose the
+# compatibility facade while the new durable-job entry points post-date the
+# frozen surface fixture.
+KG_BUILD_CIRCUIT_ALLOWED_IMPORTS = {
+    (
+        "backend/tests/test_kg_build_circuit_breaker.py",
+        14,
+        "app.services.sqlite_repository",
+        "SQLiteRepository",
+    ),
+    (
+        "backend/tests/test_kg_build_job_store.py",
+        9,
+        "app.services.sqlite_repository",
+        "SQLiteRepository",
+    ),
+    (
+        "backend/tests/test_kg_rebuild_relink_api.py",
+        184,
+        "app.services.sqlite_repository",
+        "SQLiteRepository",
+    ),
+}
+KG_BUILD_CIRCUIT_ALLOWED_NEW_MEMBERS = {
+    "prepare_notebook_kg_job",
+    "fail_notebook_kg_job_submission",
+    "execute_notebook_kg_job",
+}
+KG_BUILD_CIRCUIT_ALLOWED_MEMBER_FILES = {
+    (path, member)
+    for path, members in {
+        "backend/tests/test_kg_build_circuit_breaker.py": {
+            "SQLiteRepository", "_connect", "_kg_llm_client", "_runtime",
+            "_write", "create_notebook", "embedder",
+            "execute_notebook_kg_job", "get_notebook",
+            "prepare_notebook_kg_job",
+        },
+        "backend/tests/test_kg_build_job_store.py": {
+            "SQLiteRepository", "_runtime", "create_notebook", "current_user",
+        },
+        "backend/tests/test_kg_building_flag.py": {
+            "SQLiteRepository", "_kg_building", "_mark_unified_kg_dirty",
+            "_runtime", "build_notebook_kg", "create_notebook", "embedder",
+            "get_notebook", "llm_client", "rebuild_notebook_kg",
+        },
+        "backend/tests/test_index_build_consolidation.py": {
+            "SQLiteRepository", "_dequeue_scale_idle", "_runtime",
+            "_scale_building", "_scale_building_lock", "_scale_idle_queue",
+            "_scale_idx_cache", "_write", "build_scale_index",
+            "cancel_scale_index", "create_notebook", "embedder",
+            "get_notebook", "index_status", "rebuild_unified_kg",
+            "scale_index_status", "settings", "unified_kg_status",
+        },
+        "backend/tests/test_kg_llm_client.py": {
+            "SQLiteRepository", "_kg_llm_client", "_run_extraction",
+            "_runtime", "_write", "create_notebook", "embedder",
+            "kg_llm_client", "llm_client", "source_elements",
+        },
+        "backend/tests/test_kg_rebuild_relink_api.py": {
+            "SQLiteRepository", "_kg_llm_client", "_runtime", "llm_client",
+            "rebuild_notebook_kg", "relink_notebook_kg",
+        },
+        "backend/tests/test_resolve_notebook_conflicts.py": {
+            "SQLiteRepository", "_connect", "_runtime", "build_notebook_kg",
+            "create_notebook", "embedder", "llm_client",
+            "pending_conflicts", "relations_for_notebook",
+            "resolve_notebook_conflicts", "settings", "store_kg",
+        },
+    }.items()
+    for member in members
+}
+ALL_TASK_ALLOWED_MEMBER_FILES = (
+    ALL_TASK_ALLOWED_MEMBER_FILES | KG_BUILD_CIRCUIT_ALLOWED_MEMBER_FILES
+)
+
 
 def test_compatibility_exports_and_import_consumers_are_complete():
     surface = _surface()
@@ -3108,6 +3188,7 @@ def test_compatibility_exports_and_import_consumers_are_complete():
                     or site in MEMORY_TRANSFER_STORE_ALLOWED_IMPORTS
                     or site in MEMORY_TRANSFER_SERVICE_ALLOWED_IMPORTS
                     or site in MEMORY_TRANSFER_ROUTES_ALLOWED_IMPORTS
+                    or site in KG_BUILD_CIRCUIT_ALLOWED_IMPORTS
                 )
 
 
@@ -3282,6 +3363,7 @@ EXPECTED_PATCH_DELTAS = {
         ('backend/tests/test_viz_bounded.py', 118, '_unified_graph_full', 'repo'),
     },
     'actual_only': {
+        ('backend/tests/test_kg_llm_client.py', 88, 'source_elements', 'repo'),
         ('backend/tests/test_batch_ingest.py', 288, 'llm_client', 'repo'),
         ('backend/tests/test_batch_ingest.py', 293, '_mark_unified_kg_dirty', 'repo'),
         ('backend/tests/test_batch_ingest.py', 306, 'llm_client', 'repo'),
@@ -3432,7 +3514,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
     actual = _static_repository_consumers()
     allowed_sites = {
         (member, f"{file}:{line}")
-        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS | MERGE_DBS_ALLOWED_IMPORTS
+        for file, line, _module, member in TASK2_ALLOWED_IMPORTS | TASK2_MEMORY_ALLOWED_IMPORTS | TASK5_MEMORY_ALLOWED_IMPORTS | TASK6_MEMORY_ALLOWED_IMPORTS | TASK8_MEMORY_ALLOWED_IMPORTS | TASK7_ALLOWED_IMPORTS | TASK8_ALLOWED_IMPORTS | TASK9_ALLOWED_IMPORTS | TASK23_ALLOWED_IMPORTS | TASK26_ALLOWED_IMPORTS | TASK27_ALLOWED_IMPORTS | TASK28_ALLOWED_IMPORTS | SQLITE_CONN_REUSE_ALLOWED_IMPORTS | MERGE_DBS_ALLOWED_IMPORTS | KG_BUILD_CIRCUIT_ALLOWED_IMPORTS
     }
     allowed_sites |= TASK1_MEMORY_ALLOWED_CONSUMERS | TASK7_MEMORY_ALLOWED_CONSUMERS | TASK2_ALLOWED_CONSUMERS | TASK7_ALLOWED_CONSUMERS | TASK8_ALLOWED_CONSUMERS | TASK9_ALLOWED_CONSUMERS | TASK12_ALLOWED_CONSUMERS | TASK27_ALLOWED_CONSUMERS | TASK28_ALLOWED_CONSUMERS | REVIEW_FIX_ALLOWED_CONSUMERS | SQLITE_CONN_REUSE_ALLOWED_CONSUMERS | TASK4_KNOWHOW_ALLOWED_CONSUMERS | TASK6_KNOWHOW_ALLOWED_CONSUMERS | TASK8_KNOWHOW_PR23_ALLOWED_CONSUMERS | TASK10_KNOWHOW_PR23_ALLOWED_CONSUMERS
     for name, sites in list(actual.items()):
@@ -3484,6 +3566,7 @@ def test_static_repository_consumer_scan_matches_manifest_exactly():
         | TASK3_SOURCE_ASSET_ALLOWED_NEW_MEMBERS
         | FOLLOWUP_A_ALLOWED_NEW_MEMBERS
         | PAPER_META_STATUS_ALLOWED_NEW_MEMBERS
+        | KG_BUILD_CIRCUIT_ALLOWED_NEW_MEMBERS
     ):
         actual.pop(name, None)
         recorded.pop(name, None)

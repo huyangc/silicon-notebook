@@ -9,13 +9,6 @@ from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 
 
-class _ProbeLLM:
-    configured = True
-
-    def chat_json(self, messages, response_schema_hint, **kwargs):
-        return '{"ok":true}'
-
-
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
@@ -36,42 +29,6 @@ def test_get_notebook_reflects_kg_building_set(repo):
     assert repo.get_notebook(nb.id).kg_building is True
     repo._kg_building.discard(nb.id)
     assert repo.get_notebook(nb.id).kg_building is False
-
-
-def test_get_notebook_hydrates_latest_durable_kg_job(repo):
-    nb = repo.create_notebook(NotebookCreate(name="n"))
-    job = repo._runtime.kg_build_jobs.create_job(
-        nb.id,
-        "user-local",
-        "incremental",
-        5,
-    )
-    summary = repo.get_notebook(nb.id)
-    assert summary.kg_building is True
-    assert summary.kg_build is not None
-    assert summary.kg_build.job_id == job["id"]
-    assert summary.kg_build.stage == "probing"
-
-
-def test_terminal_durable_job_does_not_keep_building_true(repo):
-    nb = repo.create_notebook(NotebookCreate(name="n"))
-    job = repo._runtime.kg_build_jobs.create_job(
-        nb.id,
-        "user-local",
-        "incremental",
-        5,
-    )
-    repo._runtime.kg_build_jobs.finish(
-        job["id"],
-        "failed",
-        error_code="model_unavailable",
-        error_message="safe message",
-    )
-    summary = repo.get_notebook(nb.id)
-    assert summary.kg_building is False
-    assert summary.kg_build is not None
-    assert summary.kg_build.status == "failed"
-    assert summary.kg_build.user_message == "safe message"
 
 
 def test_kg_building_set_during_build_and_cleared_after(repo, monkeypatch):
@@ -150,3 +107,46 @@ def test_paper_meta_backfilling_guard_when_source_ingestion_missing(repo):
     assert dead_ref() is None                             # 确认 GC 掉了
     catalog.source_ingestion = dead_ref                   # 弱引用已死分支
     assert repo.get_notebook(nb.id).paper_meta_backfilling is False
+
+
+def test_get_notebook_hydrates_latest_durable_kg_job(repo):
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    job = repo._runtime.kg_build_jobs.create_job(
+        nb.id,
+        "user-local",
+        "incremental",
+        5,
+    )
+    summary = repo.get_notebook(nb.id)
+    assert summary.kg_building is True
+    assert summary.kg_build is not None
+    assert summary.kg_build.job_id == job["id"]
+    assert summary.kg_build.stage == "probing"
+
+
+def test_terminal_durable_job_does_not_keep_building_true(repo):
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    job = repo._runtime.kg_build_jobs.create_job(
+        nb.id,
+        "user-local",
+        "incremental",
+        5,
+    )
+    repo._runtime.kg_build_jobs.finish(
+        job["id"],
+        "failed",
+        error_code="model_unavailable",
+        error_message="safe message",
+    )
+    summary = repo.get_notebook(nb.id)
+    assert summary.kg_building is False
+    assert summary.kg_build is not None
+    assert summary.kg_build.status == "failed"
+    assert summary.kg_build.user_message == "safe message"
+
+
+class _ProbeLLM:
+    configured = True
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        return '{"ok":true}'

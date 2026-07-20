@@ -16,7 +16,6 @@ from app.api.deps import (
     require_notebook_read, require_notebook_write, get_current_user, source_repository, user_error,
 )
 from app.core.config import get_settings
-from app.repositories.sqlite.kg_build_job_store import KgBuildAlreadyRunning
 from app.services.sqlite_repository import KnowledgeGraphTooLargeError
 from app.models.schemas import (
     AdminUserNotebook,
@@ -109,6 +108,7 @@ from app.services.model_config import ModelNotConfiguredError
 from app.services.pending_bus import pending_bus
 from app.repositories.ports import AskStreamPort, UploadedSourceFile
 from app.api.memory_routes import memory_router
+from app.repositories.sqlite.kg_build_job_store import KgBuildAlreadyRunning
 
 router = APIRouter()
 router.include_router(memory_router)
