@@ -251,9 +251,9 @@ class SharingStore:
         Excludes Memory-derived AND knowhow-table hidden synthetic sources
         (source_type IN ('memory', 'knowhow')): this title list is shown to a
         prospective copier/joiner in the /shared/{token} modal — a
-        user-facing surface, hidden the same as list_sources. (The preview's
-        numeric source_count comes from notebook_copy_stats, the
-        copy-materialization true set, deliberately unfiltered.)"""
+        user-facing surface, hidden the same as list_sources. The preview's
+        numeric source_count is hydrated from the same visible NotebookSummary;
+        only copyability and size accounting use physical notebook_copy_stats."""
         with self.database.connect() as db:
             owner = db.execute(
                 "SELECT u.username FROM notebooks nb LEFT JOIN users u ON u.id = nb.created_by "
