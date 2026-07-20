@@ -18,6 +18,7 @@ export type ScaleIndexStatus = {
   state?: ScaleIndexState;
   delta_chunks?: number;
   unindexed_sources?: number;
+  has_unindexed_content?: boolean;
   delta_searchable?: boolean;
   last_built_at?: string;
   n_nodes: number;
@@ -67,6 +68,8 @@ export function describeScaleIndex(s: ScaleIndexStatus): ScaleIndexView {
   const state: ScaleIndexState =
     s.state ?? (s.building ? "building" : s.exists ? (s.stale ? "stale" : "indexed") : "unindexed");
   const busy = s.building || state === "building" || state === "queued";
+  const hasUnindexedContent =
+    s.has_unindexed_content ?? (s.unindexed_sources ?? 0) > 0;
   // 既不达标又没索引 = 小库,走暴力检索,「不需要」索引(纯信息,无动作)。
   const applicable = s.eligible || s.exists;
   const stateLabel = !applicable ? "不需要" : STATE_LABELS[state];
@@ -79,7 +82,7 @@ export function describeScaleIndex(s: ScaleIndexStatus): ScaleIndexView {
         : state === "stale"
           // 过期但没有可增量的新增来源(过期由图谱/概念变更等非-source 写入引起)→ fold 会
           // 命中后端空操作守卫、白点且仍过期,故主按钮直接给全量重建;有新增来源才走 update(fold)。
-          ? ((s.unindexed_sources ?? 0) > 0 ? "update" : "rebuild")
+          ? (hasUnindexedContent ? "update" : "rebuild")
           : null;
   const canRebuild = s.exists && !busy;
   return { state, stateLabel, tone, primaryOp, canRebuild };

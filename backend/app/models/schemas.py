@@ -977,6 +977,7 @@ class ScaleIndexStatus(BaseModel):
     delta_chunks: int = 0
     total_chunks: int = 0
     unindexed_sources: int = 0
+    has_unindexed_content: bool = False
     delta_searchable: bool = False
     last_built_at: str = ""
 

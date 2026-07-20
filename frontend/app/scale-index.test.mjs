@@ -41,6 +41,27 @@ test("stale 但无新增来源(过期由图谱/概念变更引起)→ primary=re
   });
 });
 
+test("stale 且只有派生内容变更 → visible count stays zero but primary=update", () => {
+  assert.deepEqual(describeScaleIndex({
+    ...base,
+    state: "stale",
+    exists: true,
+    stale: true,
+    unindexed_sources: 0,
+    has_unindexed_content: true,
+  }), {
+    state: "stale", stateLabel: "已过期", tone: "warn", primaryOp: "update", canRebuild: true,
+  });
+  assert.match(
+    scaleIndexOpConfirm("update", {
+      ...base,
+      unindexed_sources: 0,
+      has_unindexed_content: true,
+    }),
+    /新增\/变更内容/,
+  );
+});
+
 test("indexed → 最新, no primary but canRebuild", () => {
   assert.deepEqual(describeScaleIndex({ ...base, state: "indexed", exists: true }), {
     state: "indexed", stateLabel: "最新", tone: "ok", primaryOp: null, canRebuild: true,

@@ -140,8 +140,8 @@ class NotebookSummaryQuery:
     def count_pending_kg_sources(
         self, db: sqlite3.Connection, notebook_id: str
     ) -> int:
-        """Count parsed sources that do not have a complete KG extraction."""
-        return self.queries.pending_kg_source_count(db, notebook_id)
+        """Count visible parsed sources without a complete KG extraction."""
+        return self.queries.visible_pending_kg_source_count(db, notebook_id)
 
     def mounted_bases(
         self, notebook_id: str, db: "sqlite3.Connection | None" = None

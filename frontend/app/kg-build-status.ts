@@ -84,10 +84,10 @@ export function kgBuildPresentation(
       };
     }
     return {
-      label: `正在分析 ${job.completed_sources}/${job.total_sources}`,
+      label: `正在分析 ${job.completed_sources}/${job.total_sources} 项内容`,
       detail: job.failed_sources > 0
-        ? `${job.failed_sources} 篇未完成；其余来源继续处理`
-        : "已完成内容会即时保留",
+        ? `${job.failed_sources} 项内容未完成；其余内容继续处理`
+        : "正在提取知识对象与关系",
       tone: "neutral",
       actionLabel: null,
     };
@@ -96,7 +96,7 @@ export function kgBuildPresentation(
   if (job.status === "failed") {
     return {
       label:
-        `分析已中断 · 已完成 ${job.completed_sources}/${job.total_sources}`,
+        `分析已中断 · 已完成 ${job.completed_sources}/${job.total_sources} 项内容`,
       detail: job.user_message || "已完成内容已保留，可继续分析未完成内容。",
       tone: "error",
       actionLabel:
@@ -107,7 +107,7 @@ export function kgBuildPresentation(
   if (job.failed_sources > 0 || pendingSources > 0) {
     const unfinished = Math.max(job.failed_sources, pendingSources);
     return {
-      label: `分析完成 · ${unfinished} 篇未完成`,
+      label: `分析完成 · ${unfinished} 项内容未完成`,
       detail: "已完成内容已保留，可继续处理未完成来源",
       tone: "warning",
       actionLabel:
@@ -117,7 +117,7 @@ export function kgBuildPresentation(
 
   return {
     label: "知识图谱分析完成",
-    detail: `已完成 ${job.completed_sources}/${job.total_sources}`,
+    detail: `已完成 ${job.completed_sources}/${job.total_sources} 项内容`,
     tone: "success",
     actionLabel: null,
   };
@@ -131,7 +131,7 @@ export function kgBuildTerminalToast(
     return job.user_message || "知识图谱分析已中断；已完成内容已保留。";
   }
   if (job.failed_sources > 0) {
-    return `知识图谱分析完成，但有 ${job.failed_sources} 篇未完成`;
+    return `知识图谱分析完成，但有 ${job.failed_sources} 项内容未完成`;
   }
   return "知识图谱分析完成 ✓";
 }

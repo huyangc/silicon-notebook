@@ -70,6 +70,14 @@ class QueryStore:
         return knowledge_counts_cache.pending_source_count(db, notebook_id)
 
     @staticmethod
+    def visible_pending_kg_source_count(
+        db: sqlite3.Connection, notebook_id: str
+    ) -> int:
+        from app.repositories.sqlite import knowledge_counts_cache
+
+        return knowledge_counts_cache.visible_pending_source_count(db, notebook_id)
+
+    @staticmethod
     def visible_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
         """NotebookSummary's user-facing source count — excludes Memory-derived
         AND knowhow-table hidden synthetic sources (source_type IN ('memory',

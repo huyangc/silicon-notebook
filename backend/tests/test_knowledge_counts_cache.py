@@ -21,7 +21,7 @@ def _db() -> sqlite3.Connection:
         "CREATE TABLE knowledge_objects(id TEXT, notebook_id TEXT, object_type TEXT, status TEXT, source_id TEXT DEFAULT '');"
         "CREATE TABLE unified_kg_state(notebook_id TEXT PRIMARY KEY, kg_mutation_seq INTEGER);"
         "CREATE TABLE chunks(id TEXT, notebook_id TEXT, source_id TEXT);"
-        "CREATE TABLE sources(id TEXT, notebook_id TEXT);"
+        "CREATE TABLE sources(id TEXT, notebook_id TEXT, source_type TEXT);"
         "CREATE TABLE source_elements(id TEXT, source_id TEXT);"
         "CREATE TABLE extraction_runs("
         "source_id TEXT, run_type TEXT, status TEXT, created_at TEXT);"
@@ -43,8 +43,13 @@ def _add_chunks(db, nb, n, start=0):
     )
 
 
-def _add_source(db, nb, sid, *, parsed=True, has_kg=False):
-    db.execute("INSERT INTO sources(id,notebook_id) VALUES(?,?)", (sid, nb))
+def _add_source(
+    db, nb, sid, *, source_type="document", parsed=True, has_kg=False
+):
+    db.execute(
+        "INSERT INTO sources(id,notebook_id,source_type) VALUES(?,?,?)",
+        (sid, nb, source_type),
+    )
     if parsed:
         db.execute("INSERT INTO source_elements(id,source_id) VALUES(?,?)",
                    (f"el-{sid}", sid))
@@ -208,6 +213,35 @@ def test_pending_source_count_empty_source_id_does_not_satisfy():
     _set_seq(db, nb, 1)
     db.commit()
     assert kcc.pending_source_count(db, nb) == 1
+
+
+def test_physical_and_visible_pending_source_caches_diverge_and_invalidate():
+    db = _db()
+    nb = "nb-visible-pending"
+    _add_source(db, nb, "s-uploaded", source_type="document")
+    _add_source(db, nb, "s-memory", source_type="memory")
+    _add_source(db, nb, "s-knowhow", source_type="knowhow")
+    _set_seq(db, nb, 1)
+    db.commit()
+
+    assert kcc.pending_source_count(db, nb) == 3
+    assert kcc.visible_pending_source_count(db, nb) == 1
+    kcc.invalidate(nb)
+    assert kcc.visible_pending_source_count(db, nb) == 1
+    assert kcc.pending_source_count(db, nb) == 3
+
+    # Both sibling memos must be cleared by the same explicit invalidation.
+    db.execute(
+        "INSERT INTO knowledge_objects"
+        "(id,notebook_id,object_type,status,source_id) VALUES(?,?,?,?,?)",
+        ("ko-uploaded", nb, "concept", "approved", "s-uploaded"),
+    )
+    db.commit()
+    assert kcc.pending_source_count(db, nb) == 3
+    assert kcc.visible_pending_source_count(db, nb) == 1
+    kcc.invalidate(nb)
+    assert kcc.pending_source_count(db, nb) == 2
+    assert kcc.visible_pending_source_count(db, nb) == 0
 
 
 def test_object_type_total_all_vs_status_slice():

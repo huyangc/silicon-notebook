@@ -62,6 +62,49 @@ def test_index_status_kg_pending_matches_summary(repo):
     assert out["kg"]["pending_sources"] >= 1
 
 
+def test_index_status_mixed_pending_is_visible_but_job_total_is_physical(repo):
+    nb = repo.create_notebook(NotebookCreate(name="mixed pending"))
+    now = "2026-07-20T00:00:00"
+    with repo._write() as db:
+        for source_id, source_type in (
+            ("s-uploaded", "document"),
+            ("s-memory", "memory"),
+            ("s-knowhow", "knowhow"),
+        ):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    source_id,
+                    nb.id,
+                    source_id,
+                    source_type,
+                    "ready",
+                    now,
+                    now,
+                ),
+            )
+            db.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (f"e-{source_id}", source_id, "paragraph", "p1", "text", now),
+            )
+    from app.repositories.sqlite import knowledge_counts_cache
+
+    knowledge_counts_cache.invalidate(nb.id)
+    repo._runtime.kg_build_jobs.create_job(
+        nb.id,
+        "user-local",
+        "incremental",
+        3,
+    )
+    out = repo.index_status(nb.id)
+    assert out["kg"]["pending_sources"] == 1
+    assert out["kg"]["job"]["total_sources"] == 3
+
+
 def test_cancel_dequeues_queued(repo):
     nb = repo.create_notebook(NotebookCreate(name="q"))
     # 手动放入空闲队列(镜像 trigger_scale_index_rebuild(when=idle) 的效果)

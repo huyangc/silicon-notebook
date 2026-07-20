@@ -594,7 +594,7 @@ class NotebookSharingService:
         return {
             "name": notebook.name,
             "owner_display": owner_display,
-            "source_count": stats["size"]["sources"],
+            "source_count": int(notebook.counts.get("sources", 0)),
             "node_count": stats["size"]["nodes"],
             "edge_count": stats["size"]["edges"],
             "source_titles": titles,

@@ -30,7 +30,8 @@ existing invalidate hooks cover them for free):
   * ``chunk_count`` — ``COUNT(*) FROM chunks`` (``/scale-index/status`` open path).
     Sound on ``kg_mutation_seq`` because the sole chunk writer
     (``build_chunks_for_source``) and ``delete_source`` (FK cascade) both bump it.
-  * ``pending_source_count`` — the "N sources pending KG" correlated count
+  * ``pending_source_count`` / ``visible_pending_source_count`` — sibling
+    physical/user-visible "N sources pending KG" correlated counts
     (``from_row`` on every open, ~2s cold at 48k sources). Sound because a bare
     source add is element-less (never pending) and every real transition (parse,
     extract, source/KG delete) bumps the seq or hits ``invalidate``.
@@ -58,6 +59,7 @@ _DEPRECATED = "deprecated"
 _MEMO: "OrderedDict[str, Tuple[int, Dict[Tuple[str, str], int]]]" = OrderedDict()
 # Sibling int memos sharing _LOCK / _MAX_NOTEBOOKS / the kg_mutation_seq gate.
 _PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
+_VISIBLE_PENDING: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _CHUNKS: "OrderedDict[str, Tuple[int, int]]" = OrderedDict()
 _LOCK = threading.Lock()
 _MAX_NOTEBOOKS = 512  # bounded LRU; counts dict per notebook is tiny (types×statuses)
@@ -146,24 +148,16 @@ def object_type_total(
     return sum(c for (ot, _st), c in raw.items() if ot == object_type)
 
 
-def pending_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
-    """Count parsed sources without a complete KG graph.
-
-    A direct/governance graph without extraction history remains complete, but
-    rows left by a failed latest KG run stay pending. This is the "N sources
-    pending KG" badge on ``from_row``. Memoized on
-    ``(notebook_id, kg_mutation_seq)``. Cold it is a 2-predicate correlated scan
-    over every source (~2s at 48k sources); warm it is one PK seq read."""
-    seq = _mutation_seq(db, notebook_id)
-    with _LOCK:
-        hit = _PENDING.get(notebook_id)
-        if hit is not None and hit[0] == seq:
-            _PENDING.move_to_end(notebook_id)
-            return hit[1]
-
+def _pending_source_count_query(
+    db: sqlite3.Connection, notebook_id: str, *, visible_only: bool
+) -> int:
+    visible_clause = (
+        "AND s.source_type NOT IN ('memory','knowhow') " if visible_only else ""
+    )
     row = db.execute(
         "SELECT COUNT(*) FROM sources s WHERE s.notebook_id = ? "
-        "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id) "
+        + visible_clause
+        + "AND EXISTS (SELECT 1 FROM source_elements e WHERE e.source_id = s.id) "
         "AND NOT EXISTS (SELECT 1 FROM knowledge_objects k "
         "WHERE k.source_id = s.id AND k.source_id != '' "
         "AND COALESCE(("
@@ -173,13 +167,49 @@ def pending_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
         "), 'completed')='completed')",
         (notebook_id,),
     ).fetchone()
-    count = int(row[0])
+    return int(row[0])
+
+
+def pending_source_count(db: sqlite3.Connection, notebook_id: str) -> int:
+    """Physical parsed-content count without a complete KG graph.
+
+    A direct/governance graph without extraction history remains complete, but
+    rows left by a failed latest KG run stay pending. Internal scheduling and
+    readiness accounting use this physical count. Memoized on
+    ``(notebook_id, kg_mutation_seq)``."""
+    seq = _mutation_seq(db, notebook_id)
+    with _LOCK:
+        hit = _PENDING.get(notebook_id)
+        if hit is not None and hit[0] == seq:
+            _PENDING.move_to_end(notebook_id)
+            return hit[1]
+
+    count = _pending_source_count_query(db, notebook_id, visible_only=False)
 
     with _LOCK:
         _PENDING[notebook_id] = (seq, count)
         _PENDING.move_to_end(notebook_id)
         while len(_PENDING) > _MAX_NOTEBOOKS:
             _PENDING.popitem(last=False)
+    return count
+
+
+def visible_pending_source_count(
+    db: sqlite3.Connection, notebook_id: str
+) -> int:
+    """User-visible parsed source count without a complete KG graph."""
+    seq = _mutation_seq(db, notebook_id)
+    with _LOCK:
+        hit = _VISIBLE_PENDING.get(notebook_id)
+        if hit is not None and hit[0] == seq:
+            _VISIBLE_PENDING.move_to_end(notebook_id)
+            return hit[1]
+    count = _pending_source_count_query(db, notebook_id, visible_only=True)
+    with _LOCK:
+        _VISIBLE_PENDING[notebook_id] = (seq, count)
+        _VISIBLE_PENDING.move_to_end(notebook_id)
+        while len(_VISIBLE_PENDING) > _MAX_NOTEBOOKS:
+            _VISIBLE_PENDING.popitem(last=False)
     return count
 
 
@@ -209,8 +239,8 @@ def chunk_count(db: sqlite3.Connection, notebook_id: str) -> int:
 
 
 def warm_all(db: sqlite3.Connection, progress=None) -> int:
-    """Prime all three per-notebook open-path memos (``type_status_counts`` /
-    ``pending_source_count`` / ``chunk_count``) for every live notebook, so the
+    """Prime all per-notebook open-path memos (``type_status_counts`` /
+    both pending-source views / ``chunk_count``) for every live notebook, so the
     first open / board / status-poll after a fresh process start is served warm
     instead of paying the cold GROUP BY + correlated scans (see module docstring).
 
@@ -236,6 +266,7 @@ def warm_all(db: sqlite3.Connection, progress=None) -> int:
         try:
             type_status_counts(db, notebook_id)
             pending_source_count(db, notebook_id)
+            visible_pending_source_count(db, notebook_id)
             chunk_count(db, notebook_id)
         except sqlite3.Error:
             continue
@@ -246,7 +277,7 @@ def warm_all(db: sqlite3.Connection, progress=None) -> int:
 
 
 def invalidate(notebook_id: "Optional[str]" = None) -> None:
-    """Drop cached counts (a whole notebook, or everything) across ALL three
+    """Drop cached counts (a whole notebook, or everything) across ALL
     memos. Not required for correctness — the seq gate self-invalidates — but a
     cheap safety valve for tests and for any write path that lands before its seq
     bump commits (extraction begin, notebook-KG delete, test inserts)."""
@@ -254,8 +285,10 @@ def invalidate(notebook_id: "Optional[str]" = None) -> None:
         if notebook_id is None:
             _MEMO.clear()
             _PENDING.clear()
+            _VISIBLE_PENDING.clear()
             _CHUNKS.clear()
         else:
             _MEMO.pop(notebook_id, None)
             _PENDING.pop(notebook_id, None)
+            _VISIBLE_PENDING.pop(notebook_id, None)
             _CHUNKS.pop(notebook_id, None)

@@ -380,13 +380,17 @@ class ScaleArtifactRuntime:
             exists=exists,
             total_chunks=total_chunks,
         )
+        delta_sources = list(delta["delta_sources"])
         result = {
             "exists": exists,
             "building": building,
             "eligible": eligible,
             "delta_chunks": int(delta["delta_chunks"]),
             "total_chunks": int(total_chunks),
-            "unindexed_sources": len(delta["delta_sources"]),
+            "unindexed_sources": len(
+                self.projections.visible_source_ids(notebook_id, delta_sources)
+            ),
+            "has_unindexed_content": bool(delta_sources),
             "delta_searchable": bool(self.settings.scale_search_include_delta),
         }
         if building:

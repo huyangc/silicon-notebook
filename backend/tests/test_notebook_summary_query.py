@@ -124,6 +124,43 @@ def test_base_notebook_projection_survives_the_move(repo):
     assert repo.get_notebook(base.id).tier == "base"
 
 
+def test_summary_source_and_pending_counts_exclude_derived_content(repo):
+    notebook = repo.create_notebook(NotebookCreate(name="mixed sources"))
+    now = "2026-07-20T00:00:00"
+    with repo._write() as db:
+        for source_id, source_type in (
+            ("s-uploaded", "document"),
+            ("s-memory", "memory"),
+            ("s-knowhow", "knowhow"),
+        ):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    source_id,
+                    notebook.id,
+                    source_id,
+                    source_type,
+                    "ready",
+                    now,
+                    now,
+                ),
+            )
+            db.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (f"e-{source_id}", source_id, "paragraph", "p1", "text", now),
+            )
+    from app.repositories.sqlite import knowledge_counts_cache
+
+    knowledge_counts_cache.invalidate(notebook.id)
+    summary = repo.get_notebook(notebook.id)
+    assert summary.counts["sources"] == 1
+    assert summary.kg_pending_sources == 1
+
+
 # ---------------------------------------------------------------------------
 # Task 4 delegation tests: NotebookSummaryQuery / NotebookCatalogService now
 # hold ZERO SQL — every projection primitive is a QueryStore method reached
@@ -185,7 +222,7 @@ def test_t4deleg_notebook_has_kg_delegate(repo, monkeypatch):
     assert calls and calls[0] == notebook.id  # MUT
 
 
-def test_t4deleg_pending_kg_source_count_delegate(repo, monkeypatch):
+def test_t4deleg_visible_pending_kg_source_count_delegate(repo, monkeypatch):
     notebook = repo.create_notebook(NotebookCreate(name="pending"))
     calls = []
 
@@ -193,7 +230,9 @@ def test_t4deleg_pending_kg_source_count_delegate(repo, monkeypatch):
         calls.append(notebook_id)
         return 0
 
-    monkeypatch.setattr(repo._runtime.queries, "pending_kg_source_count", spy)
+    monkeypatch.setattr(
+        repo._runtime.queries, "visible_pending_kg_source_count", spy
+    )
     repo.get_notebook(notebook.id)
     assert calls and calls[0] == notebook.id  # MUT
 
