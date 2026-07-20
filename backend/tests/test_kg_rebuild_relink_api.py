@@ -112,7 +112,9 @@ def test_relink_kg_no_llm_check(client, monkeypatch):
 # Repo unit test: rebuild_notebook_kg calls delete then build
 # ---------------------------------------------------------------------------
 
-def test_repo_rebuild_notebook_kg_calls_delete_then_build(tmp_path, monkeypatch):
+def test_repo_rebuild_notebook_kg_delegates_to_lifecycle_runner(
+    tmp_path, monkeypatch
+):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'r.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
@@ -123,22 +125,16 @@ def test_repo_rebuild_notebook_kg_calls_delete_then_build(tmp_path, monkeypatch)
 
     repo = SQLiteRepository(Settings())
 
-    call_order = []
-    delete_result = {"knowledge_objects": 2}
+    calls = []
     build_result = {"built": [], "failed": [], "skipped": []}
 
-    def fake_delete(notebook_id):
-        call_order.append(("delete", notebook_id))
-        return delete_result
-
-    def fake_build(notebook_id):
-        call_order.append(("build", notebook_id))
+    def fake_rebuild(notebook_id):
+        calls.append(notebook_id)
         return build_result
 
-    repo._runtime.knowledge_lifecycle.delete_notebook_kg = fake_delete
-    repo._runtime.knowledge_lifecycle.build_notebook_kg = fake_build
+    repo._runtime.knowledge_lifecycle.rebuild_notebook_kg = fake_rebuild
 
     result = repo.rebuild_notebook_kg("nb-123")
 
-    assert call_order == [("delete", "nb-123"), ("build", "nb-123")]
+    assert calls == ["nb-123"]
     assert result is build_result

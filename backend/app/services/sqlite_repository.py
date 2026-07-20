@@ -510,6 +510,7 @@ class SQLiteRepository:
             close_local=lambda: self.close_local(),
             write=lambda: self._write(),
             get_notebook=lambda notebook_id: self.get_notebook(notebook_id),
+            current_user_id=lambda: self.current_user().id,
             invalidate_unified_cache=lambda notebook_id: (
                 self._invalidate_unified_cache(notebook_id)
             ),
@@ -528,8 +529,8 @@ class SQLiteRepository:
             source_ids_from_evidence=lambda evidence_json: (
                 self._source_ids_from_evidence(evidence_json)
             ),
-            set_source_status=lambda source_id, status: (
-                self._set_source_status(source_id, status)
+            set_source_status=lambda source_id, status, **kwargs: (
+                self._set_source_status(source_id, status, **kwargs)
             ),
             run_extraction=lambda source_id, **kwargs: (
                 self._runtime.source_ingestion.run_extraction(source_id, **kwargs)
@@ -1529,9 +1530,26 @@ class SQLiteRepository:
     def _should_extract_kg(self, notebook_id: str) -> bool:
         return self._runtime.source_ingestion.should_extract_kg(notebook_id)
 
+    def prepare_notebook_kg_job(self, notebook_id: str, mode: str) -> dict:
+        return self._runtime.knowledge_lifecycle.prepare_notebook_kg_job(
+            notebook_id, mode
+        )
+
+    def fail_notebook_kg_job_submission(self, job_id: str) -> bool:
+        return self._runtime.knowledge_lifecycle.fail_notebook_kg_job_submission(
+            job_id
+        )
+
+    def execute_notebook_kg_job(
+        self, notebook_id: str, job_id: str, mode: str, *, progress=None
+    ) -> dict:
+        return self._runtime.knowledge_lifecycle.execute_notebook_kg_job(
+            notebook_id, job_id, mode, progress=progress
+        )
+
     def build_notebook_kg(self, notebook_id: str, *, progress=None) -> dict:
         """按需构建 KG — KnowledgeLifecycleService 拥有编排(Task 15,含
-        kg_building 单飞守卫与 governance 冲突消解直连);冻结签名 delegate。"""
+        kg_building 单飞守卫与 governance 冲突消解直连)。"""
         return self._runtime.knowledge_lifecycle.build_notebook_kg(
             notebook_id, progress=progress
         )

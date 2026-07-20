@@ -264,6 +264,9 @@ def test_run_kg_limit_extracts_subset(repo, monkeypatch):
 class _StubLLM:
     configured = True
 
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        return '{"ok":true}'
+
 
 def _seed_sources(repo, nb_id, n, prefix):
     now = "2026-01-01T00:00:00"
@@ -288,7 +291,11 @@ def test_build_notebook_kg_concurrent_reports_progress(repo, monkeypatch):
     monkeypatch.setattr(repo, "llm_client", _StubLLM())
     nb_id = bi.ensure_notebook(repo, None, "nb-conc")
     sids = _seed_sources(repo, nb_id, 6, "src-c")
-    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: None)
+    monkeypatch.setattr(
+        repo._runtime.source_ingestion,
+        "run_extraction",
+        lambda sid, **kwargs: None,
+    )
     monkeypatch.setattr(repo._runtime.source_ingestion, "set_source_status", lambda *a, **k: None)
     monkeypatch.setattr(repo, "_mark_unified_kg_dirty", lambda nb: None)
     monkeypatch.setattr(repo._runtime.knowledge_lifecycle, "relink_notebook_kg", lambda nb: 0)
@@ -308,7 +315,7 @@ def test_build_notebook_kg_isolates_source_failure(repo, monkeypatch):
     sids = _seed_sources(repo, nb_id, 3, "src-i")
     bad = sids[1]
 
-    def _extract(sid):
+    def _extract(sid, **kwargs):
         if sid == bad:
             raise RuntimeError("boom")
     monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", _extract)

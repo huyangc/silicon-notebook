@@ -71,7 +71,14 @@ def _make_source(repo, nb_id, sid, status="extracted", with_elements=True):
 
 
 def _configure_llm(repo):
-    repo.llm_client = type("C", (), {"configured": True})()
+    repo.llm_client = type(
+        "C",
+        (),
+        {
+            "configured": True,
+            "chat_json": lambda self, messages, hint, **kwargs: '{"ok":true}',
+        },
+    )()
 
 
 def test_build_notebook_kg_runs_extraction_per_kgless_source(repo, monkeypatch):
@@ -80,7 +87,11 @@ def test_build_notebook_kg_runs_extraction_per_kgless_source(repo, monkeypatch):
     s1 = _make_source(repo, nb.id, "s1")
     s2 = _make_source(repo, nb.id, "s2")
     calls = []
-    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: calls.append(sid))
+    monkeypatch.setattr(
+        repo._runtime.source_ingestion,
+        "run_extraction",
+        lambda sid, **kwargs: calls.append(sid),
+    )
     repo.build_notebook_kg(nb.id)
     assert set(calls) == {"s1", "s2"}
 
@@ -94,7 +105,11 @@ def test_build_notebook_kg_skips_sources_with_kg(repo, monkeypatch):
          "payload": {"name": "X"}, "evidence": []}], [])   # s1 already has KG
     s2 = _make_source(repo, nb.id, "s2")
     calls = []
-    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: calls.append(sid))
+    monkeypatch.setattr(
+        repo._runtime.source_ingestion,
+        "run_extraction",
+        lambda sid, **kwargs: calls.append(sid),
+    )
     repo.build_notebook_kg(nb.id)
     assert calls == ["s2"]                                  # idempotent: skip s1
 
@@ -108,7 +123,11 @@ def test_build_notebook_kg_skips_sources_missing_elements(repo, monkeypatch):
     _make_source(repo, nb.id, "s-ok")                              # 有 elements
     _make_source(repo, nb.id, "s-bad", with_elements=False)        # 无 elements
     calls = []
-    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda sid: calls.append(sid))
+    monkeypatch.setattr(
+        repo._runtime.source_ingestion,
+        "run_extraction",
+        lambda sid, **kwargs: calls.append(sid),
+    )
     out = repo.build_notebook_kg(nb.id)
     assert calls == ["s-ok"]                                  # 只抽有 elements 的
     assert out["skipped_no_elements"] == ["s-bad"]            # 无 elements 记 skipped

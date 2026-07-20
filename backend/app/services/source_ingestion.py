@@ -30,6 +30,7 @@ from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
 from app.services import kg_ingest, remote_sources
 from app.services.extraction_profiles import PROFILES, get_profile
 from app.services.kg.client import safe_json
+from app.services.kg.run_control import KgBuildAborted
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
@@ -979,6 +980,9 @@ class SourceIngestionService:
         ]
 
     def run_extraction(self, source_id: str, *, kg_client: Any | None = None) -> None:
+        control = getattr(kg_client, "control", None)
+        if control is not None:
+            control.raise_if_aborted()
         source: SourceDetail = self.sources.get_source(source_id)
         elements = self.source_elements(source_id)
         # 历史源 catch-up:补论文元数据(幂等,有行即跳)。ensure_paper_metadata 的
@@ -986,6 +990,8 @@ class SourceIngestionService:
         # 抛异常——失败真正不影响 KG 抽取(不会中断下面紧接着的抽取流程),而不只
         # 是注释里的一句希望。
         self.ensure_paper_metadata(source, elements=elements, force=False)
+        if control is not None:
+            control.raise_if_aborted()
         now = self.now()
         run_id = self.new_id("run")
         doc_type_id = (
@@ -1046,6 +1052,8 @@ class SourceIngestionService:
                 relations = relations + self.relink_extra_relations(
                     objects, relations, source.id
                 )
+            if control is not None:
+                control.raise_if_aborted()
             n_obj, n_rel = self.knowledge_lifecycle.store_kg(
                 source.notebook_id, source.id, objects, relations
             )
@@ -1071,6 +1079,13 @@ class SourceIngestionService:
                 f"windows_failed={fw}/{tw} windows_skipped={graph.windows_skipped} "
                 f"concepts_dropped={graph.concepts_dropped} claims_dropped={graph.claims_dropped}",
             )
+        except KgBuildAborted as exc:
+            self.finish_extraction_run(
+                run_id,
+                "failed",
+                f"{exc.failure.code}: {exc.failure.user_message}",
+            )
+            raise
         except Exception as exc:
             self.finish_extraction_run(run_id, "failed", str(exc))
             raise

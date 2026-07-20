@@ -9,6 +9,13 @@ from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 
 
+class _ProbeLLM:
+    configured = True
+
+    def chat_json(self, messages, response_schema_hint, **kwargs):
+        return '{"ok":true}'
+
+
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
@@ -69,7 +76,7 @@ def test_terminal_durable_job_does_not_keep_building_true(repo):
 
 def test_kg_building_set_during_build_and_cleared_after(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="t"))
-    repo.llm_client = types.SimpleNamespace(configured=True)  # 无 sources → 不真抽取
+    repo.llm_client = _ProbeLLM()  # 无 sources，仅执行入口探测
     seen = {}
     orig = repo._mark_unified_kg_dirty
     def spy(nid):
@@ -94,7 +101,7 @@ def test_kg_building_cleared_on_failure(repo):
 def test_kg_building_set_during_rebuild_delete_phase(repo, monkeypatch):
     """rebuild=delete+build：标志必须覆盖 delete 阶段（否则大库 delete>6s 时前端轮询过早停）。"""
     nb = repo.create_notebook(NotebookCreate(name="t"))
-    repo.llm_client = types.SimpleNamespace(configured=True)  # build 不 RuntimeError；无 sources → 快
+    repo.llm_client = _ProbeLLM()  # 无 sources，仅执行入口探测
     seen = {}
     orig_delete = repo._runtime.knowledge_lifecycle.delete_notebook_kg
     def spy_delete(nid):
