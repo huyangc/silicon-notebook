@@ -759,6 +759,138 @@ def test_reparse_llm_and_embedding_peaks_are_independent():
     assert embed_snapshot.active == embed_snapshot.waiting == 0
 
 
+class _RunAllMaintenance:
+    def __init__(self, hash_to_source, resumed):
+        self._hash_to_source = hash_to_source
+        self._resumed = resumed
+
+    def source_id_by_hash(self, notebook_id, digest):
+        return self._hash_to_source.get(digest)
+
+    def kg_covered_source_ids(self, notebook_id):
+        return set()
+
+    def sources_with_elements(self, notebook_id):
+        return set(self._resumed)
+
+    def has_scale_index(self, notebook_id):
+        return False
+
+
+class _RunAllConcurrencyRepo:
+    def __init__(self, llm, embed, hash_to_source, resumed, source_max):
+        self.settings = SimpleNamespace(
+            kg_auto_extract=False,
+            kg_incremental_fusion_enabled=True,
+            kg_job_concurrency=3,
+            kg_extract_workers=3,
+            embed_concurrency=3,
+        )
+        self.maintenance = _RunAllMaintenance(hash_to_source, resumed)
+        self._llm = llm
+        self._embed = embed
+        self._source_max = source_max
+        self._source_lock = threading.Lock()
+        self._source_release = threading.Event()
+        self.source_active = 0
+        self.source_peak = 0
+
+    def _model_work(self, source_id):
+        with self._source_lock:
+            self.source_active += 1
+            self.source_peak = max(self.source_peak, self.source_active)
+            if self.source_active == self._source_max:
+                self._source_release.set()
+        try:
+            if not self._source_release.wait(timeout=1):
+                raise AssertionError("source job pool did not reach configured maximum")
+            state = current_model_concurrency()
+            assert state is not None
+            LimitedJsonChatClient(self._llm, state.llm).chat_json([], "{}")
+            state.embedding.run(self._embed.embed, task_prefix="emb-el")
+            return SimpleNamespace(id=source_id)
+        finally:
+            with self._source_lock:
+                self.source_active -= 1
+
+    def process_source(self, source_id):
+        return self._model_work(source_id)
+
+    def extract_source(self, source_id):
+        return self._model_work(source_id)
+
+    def upload_sources(self, notebook_id, files, scheduler=None):
+        assert scheduler is not None
+        for index, _file in enumerate(files):
+            scheduler(f"src-new-{index}")
+        return []
+
+    def rebuild_unified_kg(
+        self, notebook_id, progress=None, force=False, fresh=False
+    ):
+        return 0
+
+    def get_notebook(self, notebook_id):
+        return SimpleNamespace(tier="personal")
+
+
+def test_run_all_scope_keeps_source_llm_and_embedding_peaks_independent(
+    tmp_path, monkeypatch
+):
+    files = []
+    resumed = set()
+    hash_to_source = {}
+    for index in range(16):
+        path = tmp_path / f"source-{index}.md"
+        path.write_text(f"# Source {index}\n\nunique body {index}", encoding="utf-8")
+        files.append(path)
+        if index < 4:
+            source_id = f"src-resume-{index}"
+            resumed.add(source_id)
+            hash_to_source[bi.sha256_bytes(path.read_bytes())] = source_id
+
+    llm = _PeakRecorder()
+    embed = _PeakRecorder()
+    repo = _RunAllConcurrencyRepo(
+        llm, embed, hash_to_source, resumed, source_max=8
+    )
+    effective = bi.EffectiveConcurrency(
+        workers=8,
+        llm=6,
+        embedding=2,
+        workers_source="cli",
+        llm_source="cli",
+        embedding_source="cli",
+    )
+    monkeypatch.setattr(
+        bi, "backfill_node_embeddings", lambda repo, notebook_id, conc: 0
+    )
+
+    with bi._batch_concurrency_scope(repo, effective) as state:
+        result = bi.run_all(
+            repo,
+            "nb-run-all-peak",
+            files,
+            conc=effective.embedding,
+            report_interval=0,
+        )
+        llm_snapshot = state.llm.snapshot()
+        embed_snapshot = state.embedding.snapshot()
+        from app.services.kg import scheduler as kg_scheduler
+        assert kg_scheduler.job_concurrency() == 8
+        assert kg_scheduler.max_workers() == 6
+
+    assert result["new"] == 12
+    assert result["resumed"] == 4
+    assert result["extracted"] == 16
+    assert result["failed"] == 0
+    assert repo.source_peak == 8
+    assert llm.peak == 6
+    assert embed.peak == 2
+    assert llm_snapshot.active == llm_snapshot.waiting == 0
+    assert embed_snapshot.active == embed_snapshot.waiting == 0
+
+
 def test_batch_scope_restore_failure_does_not_mask_phase_error(
     repo, monkeypatch, capsys
 ):
