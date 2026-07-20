@@ -122,3 +122,28 @@ all other `console.error` calls, and fails after each test if any occurred.
    Start at  23:55:56
    Duration  1.03s (transform 197ms, setup 67ms, collect 333ms, tests 298ms, environment 146ms, prepare 25ms)
 ```
+
+### Mutual-exclusion coverage
+
+The existing mutual-exclusion loop now includes
+`#memory&notebook=nb%201&status=confirmed&item=mem%2F1` and explicitly checks
+that the Memory parser recognizes it while the workspace parser returns `null`.
+
+```text
+$ cd frontend && node --test app/memory-navigation.test.mjs app/knowhow-model.test.mjs
+1..101
+# tests 101
+# suites 0
+# pass 101
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 367.860417
+
+$ cd frontend && npx tsc --noEmit
+(exit 0; no output)
+
+$ git diff --check
+(exit 0; no output)
+```

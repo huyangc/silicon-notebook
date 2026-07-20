@@ -57,18 +57,26 @@ test("workspace hash yields to memory links and ignores unrelated hashes", () =>
 
 
 test("the two hash parsers stay mutually exclusive", () => {
-  for (const hash of [
-    "#notebook=nb-1",
-    "#notebook=nb-1&tab=memory",
-    "#memory",
-    "",
-    "#zzz",
+  for (const { hash, isMemoryHash } of [
+    { hash: "#notebook=nb-1", isMemoryHash: false },
+    { hash: "#notebook=nb-1&tab=memory", isMemoryHash: true },
+    { hash: "#memory", isMemoryHash: true },
+    {
+      hash: "#memory&notebook=nb%201&status=confirmed&item=mem%2F1",
+      isMemoryHash: true,
+    },
+    { hash: "", isMemoryHash: false },
+    { hash: "#zzz", isMemoryHash: false },
   ]) {
     assert.equal(
       parseMemoryHash(hash) !== null && parseWorkspaceHash(hash) !== null,
       false,
       `${hash} 同时被两个解析器认领`,
     );
+    if (isMemoryHash) {
+      assert.notEqual(parseMemoryHash(hash), null, `${hash} 未被 Memory 解析器认领`);
+      assert.equal(parseWorkspaceHash(hash), null, `${hash} 被工作区解析器误认领`);
+    }
   }
 });
 
