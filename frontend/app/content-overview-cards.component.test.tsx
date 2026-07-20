@@ -55,7 +55,7 @@ test("renders content asset metrics, recent items, and navigation callbacks", ()
   expect(screen.getByRole("heading", { name: "Memory" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Knowhow" })).toBeInTheDocument();
   expect(screen.getByText("4 条")).toBeInTheDocument();
-  expect(screen.getByText("投影失败 2 张")).toBeInTheDocument();
+  expect(screen.getByText("同步失败 2 张")).toBeInTheDocument();
   expect(screen.getByText("代码过期 3 格")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "打开记忆 Not shown memory" })).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "打开 Knowhow 表 Not shown table" })).not.toBeInTheDocument();
@@ -70,9 +70,9 @@ test("renders content asset metrics, recent items, and navigation callbacks", ()
   expect(onOpenMemory).toHaveBeenCalledWith(null, "m1");
   fireEvent.click(screen.getByRole("button", { name: "查看全部 Knowhow 表" }));
   expect(onOpenKnowhow).toHaveBeenCalledWith("all", null);
-  fireEvent.click(screen.getByRole("button", { name: "查看 1 张待投影表" }));
+  fireEvent.click(screen.getByRole("button", { name: "查看 1 张待同步表" }));
   expect(onOpenKnowhow).toHaveBeenCalledWith("projection_pending", null);
-  fireEvent.click(screen.getByRole("button", { name: "查看 2 张投影失败表" }));
+  fireEvent.click(screen.getByRole("button", { name: "查看 2 张同步失败表" }));
   expect(onOpenKnowhow).toHaveBeenCalledWith("projection_failed", null);
   fireEvent.click(screen.getByRole("button", { name: "查看含 3 个过期代码单元格的表" }));
   expect(onOpenKnowhow).toHaveBeenCalledWith("stale_code", null);
@@ -118,6 +118,6 @@ test("keeps navigation enabled in read-only mode without edit controls", () => {
 
   expect(screen.getByText("只读")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "查看 2 条已确认记忆" })).toBeEnabled();
-  expect(screen.getByRole("button", { name: "查看 1 张待投影表" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "查看 1 张待同步表" })).toBeEnabled();
   expect(screen.queryByRole("button", { name: /新建|编辑|删除/ })).not.toBeInTheDocument();
 });

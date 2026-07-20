@@ -104,17 +104,17 @@ export function ContentOverviewCards({
             <span>{countLabel(knowhow.row_count, "行")}</span>
             <button
               type="button"
-              aria-label={`查看 ${countLabel(knowhow.projection_pending, "张")}待投影表`}
+              aria-label={`查看 ${countLabel(knowhow.projection_pending, "张")}待同步表`}
               onClick={() => onOpenKnowhow("projection_pending", null)}
             >
-              待投影 {countLabel(knowhow.projection_pending, "张")}
+              待同步 {countLabel(knowhow.projection_pending, "张")}
             </button>
             <button
               type="button"
-              aria-label={`查看 ${countLabel(knowhow.projection_failed, "张")}投影失败表`}
+              aria-label={`查看 ${countLabel(knowhow.projection_failed, "张")}同步失败表`}
               onClick={() => onOpenKnowhow("projection_failed", null)}
             >
-              投影失败 {countLabel(knowhow.projection_failed, "张")}
+              同步失败 {countLabel(knowhow.projection_failed, "张")}
             </button>
             <button
               type="button"

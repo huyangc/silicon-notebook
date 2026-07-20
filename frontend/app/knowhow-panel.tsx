@@ -3295,8 +3295,8 @@ function KnowhowTableList({
             onChange={(event) => onHealthFilterChange(event.target.value as KnowhowHealthFilter)}
           >
             <option value="all">全部表</option>
-            <option value="projection_pending">待投影</option>
-            <option value="projection_failed">投影失败</option>
+            <option value="projection_pending">待同步</option>
+            <option value="projection_failed">同步失败</option>
             <option value="stale_code">代码已过期</option>
           </select>
         </label>

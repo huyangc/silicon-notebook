@@ -38,7 +38,7 @@ def _db() -> sqlite3.Connection:
         "CREATE TABLE knowledge_objects(id TEXT, notebook_id TEXT, object_type TEXT, status TEXT, source_id TEXT DEFAULT '');"
         "CREATE TABLE unified_kg_state(notebook_id TEXT PRIMARY KEY, kg_mutation_seq INTEGER);"
         "CREATE TABLE chunks(id TEXT, notebook_id TEXT, source_id TEXT);"
-        "CREATE TABLE sources(id TEXT, notebook_id TEXT);"
+        "CREATE TABLE sources(id TEXT, notebook_id TEXT, source_type TEXT NOT NULL);"
         "CREATE TABLE source_elements(id TEXT, source_id TEXT);"
         "CREATE TABLE extraction_runs("
         "source_id TEXT, run_type TEXT, status TEXT, created_at TEXT);"
@@ -71,9 +71,11 @@ def test_warm_all_primes_all_three_memos_and_returns_count():
     for nb in ("nb1", "nb2"):
         assert nb in kcc._MEMO
         assert nb in kcc._PENDING
+        assert nb in kcc._VISIBLE_PENDING
         assert nb in kcc._CHUNKS
     # the memoized value is the real breakdown, not a placeholder
     assert kcc._MEMO["nb1"][1] == {("claim", "approved"): 1}
+    assert kcc._VISIBLE_PENDING["nb1"][1] == 0
 
 
 def test_warm_all_reports_progress_once_per_notebook():

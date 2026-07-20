@@ -2142,6 +2142,72 @@
           "title": "KnowhowNewColumnInput",
           "type": "object"
         },
+        "KnowhowOverviewSummary": {
+          "properties": {
+            "projection_failed": {
+              "default": 0,
+              "title": "Projection Failed",
+              "type": "integer"
+            },
+            "projection_pending": {
+              "default": 0,
+              "title": "Projection Pending",
+              "type": "integer"
+            },
+            "recent_tables": {
+              "items": {
+                "$ref": "#/components/schemas/KnowhowOverviewTable"
+              },
+              "title": "Recent Tables",
+              "type": "array"
+            },
+            "row_count": {
+              "default": 0,
+              "title": "Row Count",
+              "type": "integer"
+            },
+            "stale_code_count": {
+              "default": 0,
+              "title": "Stale Code Count",
+              "type": "integer"
+            },
+            "table_count": {
+              "default": 0,
+              "title": "Table Count",
+              "type": "integer"
+            }
+          },
+          "title": "KnowhowOverviewSummary",
+          "type": "object"
+        },
+        "KnowhowOverviewTable": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "last_activity_at": {
+              "default": "",
+              "title": "Last Activity At",
+              "type": "string"
+            },
+            "row_count": {
+              "default": 0,
+              "title": "Row Count",
+              "type": "integer"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "title": "KnowhowOverviewTable",
+          "type": "object"
+        },
         "KnowhowPreviewColumn": {
           "properties": {
             "guessed_kind": {
@@ -2521,13 +2587,33 @@
               "title": "Id",
               "type": "string"
             },
+            "last_activity_at": {
+              "default": "",
+              "title": "Last Activity At",
+              "type": "string"
+            },
             "notebook_id": {
               "title": "Notebook Id",
               "type": "string"
             },
+            "projection_failed": {
+              "default": 0,
+              "title": "Projection Failed",
+              "type": "integer"
+            },
+            "projection_pending": {
+              "default": 0,
+              "title": "Projection Pending",
+              "type": "integer"
+            },
             "row_count": {
               "default": 0,
               "title": "Row Count",
+              "type": "integer"
+            },
+            "stale_code_count": {
+              "default": 0,
+              "title": "Stale Code Count",
               "type": "integer"
             },
             "title": {
@@ -2891,6 +2977,68 @@
             "pending_count"
           ],
           "title": "MemoryNotebookOption",
+          "type": "object"
+        },
+        "MemoryOverviewItem": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "status": {
+              "enum": [
+                "candidate",
+                "confirmed",
+                "rejected",
+                "deprecated"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "updated_at": {
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "status",
+            "updated_at"
+          ],
+          "title": "MemoryOverviewItem",
+          "type": "object"
+        },
+        "MemoryOverviewSummary": {
+          "properties": {
+            "candidate": {
+              "default": 0,
+              "title": "Candidate",
+              "type": "integer"
+            },
+            "confirmed": {
+              "default": 0,
+              "title": "Confirmed",
+              "type": "integer"
+            },
+            "recent": {
+              "items": {
+                "$ref": "#/components/schemas/MemoryOverviewItem"
+              },
+              "title": "Recent",
+              "type": "array"
+            },
+            "total": {
+              "default": 0,
+              "title": "Total",
+              "type": "integer"
+            }
+          },
+          "title": "MemoryOverviewSummary",
           "type": "object"
         },
         "MemoryPreview": {
@@ -3592,6 +3740,18 @@
             }
           },
           "title": "NotebookAnalytics",
+          "type": "object"
+        },
+        "NotebookContentOverview": {
+          "properties": {
+            "knowhow": {
+              "$ref": "#/components/schemas/KnowhowOverviewSummary"
+            },
+            "memory": {
+              "$ref": "#/components/schemas/MemoryOverviewSummary"
+            }
+          },
+          "title": "NotebookContentOverview",
           "type": "object"
         },
         "NotebookCreate": {
@@ -4827,6 +4987,11 @@
             "has_chunk_ann": {
               "default": false,
               "title": "Has Chunk Ann",
+              "type": "boolean"
+            },
+            "has_unindexed_content": {
+              "default": false,
+              "title": "Has Unindexed Content",
               "type": "boolean"
             },
             "last_built_at": {
@@ -8084,6 +8249,45 @@
             }
           },
           "summary": "Notebook Analytics"
+        }
+      },
+      "/api/notebooks/{notebook_id}/analytics/content-overview": {
+        "get": {
+          "operationId": "notebook_content_overview_api_notebooks__notebook_id__analytics_content_overview_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/NotebookContentOverview"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Notebook Content Overview"
         }
       },
       "/api/notebooks/{notebook_id}/answer-memory-links": {
