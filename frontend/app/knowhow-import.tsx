@@ -222,7 +222,12 @@ export function KnowhowImportWizard({ notebookId, onClose, onDone }: KnowhowImpo
     setAnchorPreviewLoading(true);
     setAnchorPreviewError(null);
     try {
-      const result = await importKnowhowPreview(notebookId, currentFile, nextAnchorIndex);
+      const result = await importKnowhowPreview(
+        notebookId,
+        currentFile,
+        orientation,
+        nextAnchorIndex,
+      );
       // 迟到/被更新的选择覆盖：只让最新一次落地，丢弃乱序旧响应；序号在切文件/
       // 返回选择步骤时也会被推进，故这条守卫同时挡住「文件 A 的重取迟到覆盖已切
       // 到的文件 B 预览」（P1）。
