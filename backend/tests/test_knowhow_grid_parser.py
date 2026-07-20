@@ -316,6 +316,70 @@ def test_parse_grid_md_row_length_mismatch_pads_and_truncates():
     assert grid.rows == [["a1", "a2", ""], ["b1", "b2", "b3"]]
 
 
+@pytest.mark.parametrize(
+    ("filename", "data"),
+    [
+        (
+            "rules.xlsx",
+            _xlsx_bytes(
+                [[
+                    ["属性", "记录 A", "记录 B"],
+                    ["现象", "A 现象", "B 现象"],
+                    ["根因", "A 根因", "B 根因"],
+                ]]
+            ),
+        ),
+        (
+            "rules.xlsm",
+            _xlsx_bytes(
+                [[
+                    ["属性", "记录 A", "记录 B"],
+                    ["现象", "A 现象", "B 现象"],
+                    ["根因", "A 根因", "B 根因"],
+                ]]
+            ),
+        ),
+        (
+            "rules.csv",
+            "属性,记录 A,记录 B\n现象,A 现象,B 现象\n根因,A 根因,B 根因\n".encode("utf-8"),
+        ),
+        (
+            "rules.md",
+            (
+                "| 属性 | 记录 A | 记录 B |\n"
+                "| --- | --- | --- |\n"
+                "| 现象 | A 现象 | B 现象 |\n"
+                "| 根因 | A 根因 | B 根因 |\n"
+            ).encode("utf-8"),
+        ),
+    ],
+)
+def test_parse_grid_rows_orientation_transposes_to_column_attributes(filename, data):
+    grid = parse_grid(filename, data, orientation="rows")
+
+    assert grid.columns == ["属性", "现象", "根因"]
+    assert grid.rows == [
+        ["记录 A", "A 现象", "A 根因"],
+        ["记录 B", "B 现象", "B 根因"],
+    ]
+
+
+def test_parse_grid_rows_orientation_pads_ragged_rows_before_transpose():
+    data = (
+        "属性,记录 A,记录 B\n"
+        "现象,A 现象\n"
+        "根因,A 根因,B 根因\n"
+    ).encode("utf-8")
+
+    grid = parse_grid("rules.csv", data, orientation="rows")
+
+    assert grid.columns == ["属性", "现象", "根因"]
+    assert grid.rows == [
+        ["记录 A", "A 现象", "A 根因"],
+        ["记录 B", "", "B 根因"],
+    ]
+
+
 # --- validation errors ------------------------------------------------------
 
 
@@ -349,6 +413,51 @@ def test_parse_grid_zero_data_rows_raise():
 def test_parse_grid_unsupported_suffix_raises():
     with pytest.raises(GridParseError):
         parse_grid("rules.txt", b"whatever")
+
+
+def test_parse_grid_rejects_unknown_orientation():
+    with pytest.raises(GridParseError) as excinfo:
+        parse_grid(
+            "rules.csv",
+            b"name,value\nA,1\n",
+            orientation="diagonal",
+        )
+    assert str(excinfo.value) == "非法的属性排列方式"
+
+
+@pytest.mark.parametrize(
+    ("text", "message_fragment"),
+    [
+        ("属性,记录 A\n,A 现象\n", "空列名"),
+        ("属性,记录 A\n现象,A\n现象,B\n", "重复列名"),
+        ("属性\n现象\n根因\n", "没有数据行"),
+    ],
+)
+def test_parse_grid_rows_orientation_reuses_normalized_header_validation(
+    text, message_fragment
+):
+    with pytest.raises(GridParseError) as excinfo:
+        parse_grid("rules.csv", text.encode("utf-8"), orientation="rows")
+    assert message_fragment in str(excinfo.value)
+
+
+def test_parse_grid_column_orientation_points_transposed_shape_to_ui_choice():
+    data = "属性,,\n现象,A,B\n根因,C,D\n".encode("utf-8")
+
+    with pytest.raises(GridParseError) as excinfo:
+        parse_grid("rules.csv", data, orientation="columns")
+
+    assert str(excinfo.value) == (
+        "这张表看起来是属性按行排列，"
+        "请返回并选择“属性按行”后重新导入。"
+    )
+
+
+def test_parse_grid_default_orientation_remains_columns():
+    data = b"name,value\nA,1\n"
+    assert parse_grid("rules.csv", data) == parse_grid(
+        "rules.csv", data, orientation="columns"
+    )
 
 
 def test_parse_grid_csv_gbk_encoded_chinese_falls_back_and_decodes():
@@ -556,14 +665,14 @@ def test_forward_fill_column_whitespace_only_counts_as_blank():
     assert forward_fill_column(rows, 0) == [["A", "1"], ["A", "2"]]
 
 
-# --- 转置表探测（用户真机踩坑：直接传行列相反的原表，只报「重复列名 ''」
-# 毫无指导意义）。设计上不做自动转置（spec §行列反走 A 方案=用户手动
-# 转置），但报错必须可行动：告诉用户这张表看起来行列相反、该怎么办。
+# --- 属性行表探测：用户若仍以默认“属性按列”解析属性行表，错误提示应引导
+# 回到产品内切换方向，不再要求去 Excel 手工转置。
 
 
-def test_parse_grid_transposed_table_hints_to_transpose():
+def test_parse_grid_transposed_table_hints_to_choose_rows_orientation():
     # 用户的 EDA 违例表原貌：字段名在第一列、每列一个分支，表头行除首格
-    # 外只有第一个分支有值 → 解析成多个空列名。要给转置指引而非「重复列名 ''」。
+    # 外只有第一个分支有值 → 解析成多个空列名。要给产品内方向指引而非
+    # 「重复列名 ''」或 Excel 手工操作。
     data = _xlsx_bytes(
         [
             [
@@ -577,8 +686,8 @@ def test_parse_grid_transposed_table_hints_to_transpose():
     with pytest.raises(GridParseError) as info:
         parse_grid("know-how沉淀.xlsx", data)
     msg = str(info.value)
-    assert "行列相反" in msg
-    assert "转置" in msg
+    assert "属性按行" in msg
+    assert "Excel" not in msg
 
 
 def test_parse_grid_blank_header_without_transposed_shape_asks_to_fill_names():
