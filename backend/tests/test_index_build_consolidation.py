@@ -40,7 +40,20 @@ def test_index_status_aggregates_three_systems(repo, monkeypatch):
     # kg 子字典值级对照 NotebookSummary
     nb2 = repo.get_notebook(nb.id)
     assert out["kg"] == {"ready": bool(nb2.kg_ready), "building": bool(nb2.kg_building),
-                         "pending_sources": int(nb2.kg_pending_sources)}
+                         "pending_sources": int(nb2.kg_pending_sources), "job": None}
+
+
+def test_index_status_reuses_notebook_job_projection(repo):
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    job = repo._runtime.kg_build_jobs.create_job(
+        nb.id,
+        "user-local",
+        "incremental",
+        5,
+    )
+    status = repo.index_status(nb.id)
+    assert status["kg"]["job"]["job_id"] == job["id"]
+    assert status["kg"]["building"] is True
 
 
 def test_index_status_kg_pending_matches_summary(repo):

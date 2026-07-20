@@ -31,6 +31,42 @@ def test_get_notebook_reflects_kg_building_set(repo):
     assert repo.get_notebook(nb.id).kg_building is False
 
 
+def test_get_notebook_hydrates_latest_durable_kg_job(repo):
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    job = repo._runtime.kg_build_jobs.create_job(
+        nb.id,
+        "user-local",
+        "incremental",
+        5,
+    )
+    summary = repo.get_notebook(nb.id)
+    assert summary.kg_building is True
+    assert summary.kg_build is not None
+    assert summary.kg_build.job_id == job["id"]
+    assert summary.kg_build.stage == "probing"
+
+
+def test_terminal_durable_job_does_not_keep_building_true(repo):
+    nb = repo.create_notebook(NotebookCreate(name="n"))
+    job = repo._runtime.kg_build_jobs.create_job(
+        nb.id,
+        "user-local",
+        "incremental",
+        5,
+    )
+    repo._runtime.kg_build_jobs.finish(
+        job["id"],
+        "failed",
+        error_code="model_unavailable",
+        error_message="safe message",
+    )
+    summary = repo.get_notebook(nb.id)
+    assert summary.kg_building is False
+    assert summary.kg_build is not None
+    assert summary.kg_build.status == "failed"
+    assert summary.kg_build.user_message == "safe message"
+
+
 def test_kg_building_set_during_build_and_cleared_after(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="t"))
     repo.llm_client = types.SimpleNamespace(configured=True)  # 无 sources → 不真抽取

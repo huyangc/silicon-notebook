@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable, Dict, List
 
 from app.models.schemas import (
+    KgBuildJobStatus,
     NotebookAnalytics,
     NotebookCreate,
     NotebookSearchResponse,
@@ -17,6 +18,7 @@ from app.models.schemas import (
     NotebookUpdate,
     SearchHit,
 )
+from app.repositories.ports import KgBuildJobStorePort
 # Canonical implementation lives with the SourceFileStore (Task 11); the
 # private alias keeps this module's delete_notebook cleanup call sites and
 # historical importers unchanged.
@@ -59,6 +61,23 @@ def _delete_notebook_asset_dir(storage_dir: Path, notebook_id: str) -> None:
         shutil.rmtree(asset_dir, ignore_errors=True)
 
 
+def kg_build_status(row) -> KgBuildJobStatus | None:
+    if row is None:
+        return None
+    return KgBuildJobStatus(
+        job_id=row["id"],
+        mode=row["mode"],
+        status=row["status"],
+        stage=row["stage"],
+        total_sources=int(row["total_sources"]),
+        completed_sources=int(row["completed_sources"]),
+        failed_sources=int(row["failed_sources"]),
+        error_code=row["error_code"],
+        user_message=row["error_message"],
+        updated_at=row["updated_at"],
+    )
+
+
 class NotebookSummaryQuery:
     """Cross-table NotebookSummary projection: knowledge-type counts, base-KG
     availability and pending-source aggregation over an open connection."""
@@ -74,10 +93,14 @@ class NotebookSummaryQuery:
     }
 
     def __init__(
-        self, database: SqliteDatabase, queries: "QueryStore | None" = None
+        self,
+        database: SqliteDatabase,
+        queries: "QueryStore | None" = None,
+        kg_build_jobs: "KgBuildJobStorePort | None" = None,
     ) -> None:
         self.database = database
         self.queries = queries or QueryStore(database)
+        self.kg_build_jobs = kg_build_jobs
 
     def count(
         self, db: sqlite3.Connection, table: str, column: str, value: str
@@ -211,7 +234,16 @@ class NotebookSummaryQuery:
                 row,
                 memory_count=memory_counts.get((user_id, notebook_id), 0),
             )
-        summary.kg_building = kg_building
+            job_row = (
+                self.kg_build_jobs.latest_on(db, notebook_id)
+                if self.kg_build_jobs is not None
+                else None
+            )
+        summary.kg_build = kg_build_status(job_row)
+        summary.kg_building = kg_building or (
+            summary.kg_build is not None
+            and summary.kg_build.status == "running"
+        )
         summary.paper_meta_backfilling = paper_meta_backfilling
         return summary
 

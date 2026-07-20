@@ -47,6 +47,7 @@ from app.core.event_logging import EventLogger
 from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+from app.repositories.ports import KgBuildJobStorePort
 from app.services.knowledge_governance import KnowledgeGovernanceService
 
 
@@ -92,6 +93,7 @@ class KnowledgeLifecycleService:
         governance_store: GovernanceStore,
         unified_kg: UnifiedKgStore,
         governance: KnowledgeGovernanceService,
+        kg_build_jobs: KgBuildJobStorePort,
         kg_building: set,
         unified_cache: Dict[Any, Any],
         scale_artifacts: Any,
@@ -124,6 +126,7 @@ class KnowledgeLifecycleService:
         self.governance_store = governance_store
         self.unified_kg = unified_kg
         self.governance = governance
+        self.kg_build_jobs = kg_build_jobs
         # KG build/rebuild 的进行中标志(进程内;重启后天然为空=未构建,无需 reconcile)。
         # 集合本体归 NotebookCatalogService 所有(get_notebook 在那读成员资格);
         # 本服务持同一个 set 对象,build/rebuild 路径照旧 add/discard;facade 的

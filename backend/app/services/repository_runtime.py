@@ -20,6 +20,7 @@ from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.index_projection_store import IndexProjectionStore
 from app.repositories.sqlite.knowhow_store import KnowhowStore
 from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
+from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.memory_store import MemoryStore
 from app.repositories.sqlite.notebook_store import NotebookStore
@@ -93,7 +94,16 @@ class RepositoryRuntime:
             new_id=seams.new_id,
             now=seams.now,
         )
-        self.notebook_summaries = NotebookSummaryQuery(self.database, self.queries)
+        self.kg_build_jobs = KgBuildJobStore(
+            self.database,
+            new_id=seams.new_id,
+            now=seams.now,
+        )
+        self.notebook_summaries = NotebookSummaryQuery(
+            self.database,
+            self.queries,
+            self.kg_build_jobs,
+        )
         # Source file persistence resolves storage_dir through the database
         # boundary's resolve_path — no facade seams, so construction is eager.
         # Constructed BEFORE the catalog below so the catalog's storage_dir
@@ -919,6 +929,7 @@ class RepositoryRuntime:
             governance_store=self.governance,
             unified_kg=self.unified_kg,
             governance=self.knowledge_governance,
+            kg_build_jobs=self.kg_build_jobs,
             kg_building=self.catalog.kg_building,
             unified_cache=self.retrieval_snapshots.unified_cache,
             scale_artifacts=self.scale_artifacts,

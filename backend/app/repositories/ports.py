@@ -400,6 +400,41 @@ class NotebookStorePort(Protocol):
     def participant_tiers(self, db: sqlite3.Connection, active_notebook_id: str) -> tuple[list[str], dict[str, str]]: ...
 
 
+class KgBuildJobStorePort(Protocol):
+    def create_job(
+        self,
+        notebook_id: str,
+        created_by: str,
+        mode: str,
+        total_sources: int,
+    ) -> dict: ...
+    def get(self, job_id: str) -> dict: ...
+    def latest(self, notebook_id: str) -> dict | None: ...
+    def latest_on(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> dict | None: ...
+    def set_stage(
+        self,
+        job_id: str,
+        stage: str,
+        *,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> bool: ...
+    def record_source_result(
+        self, job_id: str, *, succeeded: bool
+    ) -> bool: ...
+    def finish(
+        self,
+        job_id: str,
+        status: str,
+        *,
+        error_code: str = "",
+        error_message: str = "",
+    ) -> bool: ...
+    def fail_submission(self, job_id: str) -> bool: ...
+
+
 class SourceStorePort(Protocol):
     def evidence_elements(
         self, element_ids: Sequence[str]

@@ -92,11 +92,18 @@ class KgBuildJobStore:
 
     def latest(self, notebook_id: str) -> dict | None:
         with self.database.connect() as db:
-            row = db.execute(
-                "SELECT * FROM kg_build_jobs WHERE notebook_id=? "
-                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-                (notebook_id,),
-            ).fetchone()
+            return self.latest_on(db, notebook_id)
+
+    def latest_on(
+        self,
+        db: sqlite3.Connection,
+        notebook_id: str,
+    ) -> dict | None:
+        row = db.execute(
+            "SELECT * FROM kg_build_jobs WHERE notebook_id=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (notebook_id,),
+        ).fetchone()
         return self._row(row) if row is not None else None
 
     def set_stage(
