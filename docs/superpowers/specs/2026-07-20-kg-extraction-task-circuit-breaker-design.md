@@ -277,7 +277,10 @@ Model and orchestration failures use `status='failed'`.
 
 ## 11. API Projection
 
-`NotebookSummary` adds an optional nested `kg_build` object:
+`NotebookSummary` adds an optional nested `kg_build` object. The store column is
+`error_message`, but the API deliberately projects that reviewed copy as
+`user_message`; the frontend never reads a generic diagnostic
+`.error_message` field:
 
 ```json
 {
@@ -289,7 +292,7 @@ Model and orchestration failures use `status='failed'`.
   "completed_sources": 12,
   "failed_sources": 0,
   "error_code": "model_unavailable",
-  "error_message": "模型服务暂时不可用，本次分析已停止；已完成内容已保留，请在服务恢复后继续分析未完成内容。",
+  "user_message": "模型服务暂时不可用，本次分析已停止；已完成内容已保留，请在服务恢复后继续分析未完成内容。",
   "updated_at": "2026-07-20T12:00:00+08:00"
 }
 ```
