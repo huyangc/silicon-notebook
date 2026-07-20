@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import ast
+from collections import defaultdict
+from dataclasses import dataclass, field
 import inspect
 from pathlib import Path
 from typing import get_type_hints
@@ -13,11 +15,21 @@ from app.repositories.ports import (
     RetrievalPort,
     SQLiteMaintenancePort,
 )
+from tests.architecture.semantic_source import qualified_scopes
 
 
 ROOT = Path(__file__).resolve().parents[2]
 PRODUCTION_ROOTS = (ROOT / "backend" / "app", ROOT / "scripts")
 EXPECTED_REMEDIATION_SITES = set()
+
+
+@dataclass(frozen=True, order=True)
+class ProtocolCallSite:
+    path: str
+    scope: str
+    member: str
+    count: int
+    diagnostic_lines: tuple[int, ...] = field(compare=False)
 
 
 def _production_files():
@@ -77,7 +89,7 @@ def _protocol_receivers(tree: ast.AST, protocol_name: str) -> set[str]:
     return receivers
 
 
-def protocol_call_sites(protocol_name: str) -> set[tuple[str, int, str]]:
+def protocol_call_sites(protocol_name: str) -> frozenset[ProtocolCallSite]:
     """Return public calls made through the named production protocol seat.
 
     Each consumer-owned port is detected from its annotations and propagated
@@ -90,7 +102,9 @@ def protocol_call_sites(protocol_name: str) -> set[tuple[str, int, str]]:
     }:
         raise ValueError(f"unsupported protocol audit: {protocol_name}")
 
-    calls: set[tuple[str, int, str]] = set()
+    diagnostic_lines_by_site: dict[tuple[str, str, str], list[int]] = defaultdict(
+        list
+    )
     for path, rel in _production_files():
         if rel in {
             "backend/app/services/retrieval_service.py",
@@ -98,6 +112,7 @@ def protocol_call_sites(protocol_name: str) -> set[tuple[str, int, str]]:
         }:
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+        scopes = qualified_scopes(tree)
         if protocol_name == "AskStreamPort":
             for scope in ast.walk(tree):
                 if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -115,7 +130,9 @@ def protocol_call_sites(protocol_name: str) -> set[tuple[str, int, str]]:
                         and isinstance(node.func, ast.Attribute)
                         and _dotted(node.func.value) in stream_args
                     ):
-                        calls.add((rel, node.lineno, node.func.attr))
+                        diagnostic_lines_by_site[
+                            (rel, scopes[node], node.func.attr)
+                        ].append(node.lineno)
             continue
         receivers = _protocol_receivers(tree, protocol_name)
         for node in ast.walk(tree):
@@ -127,18 +144,31 @@ def protocol_call_sites(protocol_name: str) -> set[tuple[str, int, str]]:
                 and receiver.rsplit(".", 1)[-1] in receivers
             )
             if receiver in receivers or loose_match:
-                calls.add((rel, node.lineno, node.func.attr))
-    return calls
+                diagnostic_lines_by_site[
+                    (rel, scopes[node], node.func.attr)
+                ].append(node.lineno)
+    return frozenset(
+        ProtocolCallSite(
+            path=path,
+            scope=scope,
+            member=member,
+            count=len(lines),
+            diagnostic_lines=tuple(sorted(lines)),
+        )
+        for (path, scope, member), lines in diagnostic_lines_by_site.items()
+    )
 
 
 def protocol_calls(protocol_name: str) -> set[str]:
-    return {call for _rel, _line, call in protocol_call_sites(protocol_name)}
+    return {site.member for site in protocol_call_sites(protocol_name)}
 
 
 def test_retrieval_port_declares_every_production_retrieval_call():
     missing = protocol_calls("RetrievalPort") - set(RetrievalPort.__dict__)
     missing_sites = {
-        site for site in protocol_call_sites("RetrievalPort") if site[2] in missing
+        site
+        for site in protocol_call_sites("RetrievalPort")
+        if site.member in missing
     }
     assert missing_sites == EXPECTED_REMEDIATION_SITES
 

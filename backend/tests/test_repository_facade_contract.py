@@ -55,6 +55,7 @@ RUNTIME_COMPONENT_OWNERS = {
     "knowledge_lifecycle": "KnowledgeLifecycleService",
     "knowledge_query": "KnowledgeQueryService",
     "models": "ModelProvider",
+    "memory_service": "MemoryService",
     "set_model_config_cache": "IdentityStore",
     "set_unified_cache": "RetrievalSnapshotCache",
     "set_auto_index_checked": "ScaleArtifactRuntime",
@@ -411,16 +412,16 @@ def facade_body_violations(cls) -> list[tuple[str, int, str]]:
     return sorted(violations)
 
 
-def _class_constant_nodes(cls) -> tuple[dict[str, tuple[ast.AST, int]], int]:
+def _class_constant_nodes(cls) -> tuple[dict[str, ast.AST], int]:
     class_node, offset = _facade_class(cls)
-    constants: dict[str, tuple[ast.AST, int]] = {}
+    constants: dict[str, ast.AST] = {}
     for node in class_node.body:
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name):
-                    constants[target.id] = (node.value, offset + node.lineno)
+                    constants[target.id] = node.value
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            constants[node.target.id] = (node.value, offset + node.lineno)
+            constants[node.target.id] = node.value
     return constants, offset
 
 
@@ -432,7 +433,7 @@ def facade_delegate_evidence(cls, owners_by_member) -> dict[str, str]:
         if node.name in owners_by_member and node.name not in OWNER_CONTRACT_EXCEPTIONS:
             candidates.setdefault(node.name, []).append(_function_contract_owner(node))
     constants, _offset = _class_constant_nodes(cls)
-    for name, (value, _line) in constants.items():
+    for name, value in constants.items():
         if name in owners_by_member:
             owner = _direct_expression_owner(value)
             if owner is None and _is_call_free_value(value):
@@ -475,7 +476,7 @@ def manifest_delegate_mismatches(cls, owners_by_member) -> list[tuple[str, int, 
                 )
             )
     constants, _offset = _class_constant_nodes(cls)
-    for name, (value, line) in constants.items():
+    for name, value in constants.items():
         if name not in owners_by_member:
             continue
         delegate_owner = _direct_expression_owner(value)
@@ -486,7 +487,7 @@ def manifest_delegate_mismatches(cls, owners_by_member) -> list[tuple[str, int, 
             mismatches.append(
                 (
                     FACADE_FILE,
-                    line,
+                    _offset + value.lineno,
                     f"{name}:{manifest_owner}->{delegate_owner or '<missing>'}",
                 )
             )

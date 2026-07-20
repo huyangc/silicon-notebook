@@ -5,6 +5,31 @@
 
 import type { PendingItem, DoneToast } from "./pending-center";
 
+
+export function doneMessage(
+  event: string,
+  message: {
+    notebook_name?: string;
+    stored?: number;
+    not_paper?: number;
+  },
+): string | null {
+  if (event === "index_done") {
+    return `「${message.notebook_name || ""}」索引构建完成,点击查看`;
+  }
+  if (event !== "paper_meta_done") return null;
+  const notebook = message.notebook_name || "该笔记本";
+  const stored = message.stored ?? 0;
+  const notPaper = message.not_paper ?? 0;
+  if (stored > 0 && notPaper > 0) {
+    return `「${notebook}」论文信息补全完成,已补全 ${stored} 篇,另有 ${notPaper} 篇非论文,点击查看`;
+  }
+  if (stored === 0 && notPaper > 0) {
+    return `「${notebook}」论文信息已核对完成,${notPaper} 篇均非论文、无需补全,点击查看`;
+  }
+  return `「${notebook}」论文信息补全完成,已补全 ${stored} 篇,点击查看`;
+}
+
 export function itemSig(it: PendingItem): string {
   if (it.type === "report_outline") return `report:${it.report_id ?? it.notebook_id ?? ""}`;
   if (it.type === "governance") return `gov:${it.notebook_id}:${it.subtype ?? ""}:${it.count ?? 0}`;

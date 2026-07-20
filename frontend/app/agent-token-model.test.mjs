@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 
 import {
   AGENT_ACCESS_PAGE_SIZE,
@@ -13,6 +12,12 @@ import {
   mergeAgentPage,
   localDateTimeToUtcIso,
 } from "./agent-token-model.ts";
+import {
+  declarations,
+  importsFrom,
+  jsxTextValues,
+  parseModule,
+} from "./test/semantic-source.mjs";
 
 test("new token drafts stay least-privileged and default to one notebook", () => {
   const draft = agentTokenDraft("notebook-1");
@@ -68,18 +73,22 @@ test("scope options expose all and only the approved capabilities", () => {
   ]);
 });
 
-test("global Memory page wires profile, token, revoke, and disable actions", () => {
-  const panel = readFileSync(new URL("./memory-panel.tsx", import.meta.url), "utf8");
+test("global Memory owns one semantic Agent-access surface", async () => {
+  const panel = await parseModule("memory-panel.tsx");
+  const declarationNames = new Set(
+    declarations(panel).map((finding) => finding.name),
+  );
+  const modelImports = new Set(
+    importsFrom(panel, "./agent-token-model").map((item) => item.imported),
+  );
+  const visibleCopy = jsxTextValues(panel).join(" ");
 
-  assert.match(panel, /scope === "global" && <AgentAccessManager/);
-  assert.match(panel, /"\/agent-profiles"/);
-  assert.match(panel, /`\/agent-profiles\/\$\{encodeURIComponent\(selectedProfile\)\}\/tokens`/);
-  assert.match(panel, /`\/agent-tokens\/\$\{encodeURIComponent\(tokenId\)\}`/);
-  assert.match(panel, /default_notebook_id/);
-  assert.match(panel, /笔记本白名单/);
-  assert.match(panel, /过期时间/);
-  assert.match(panel, /明文 token 仅显示这一次/);
-  assert.match(panel, /status: "revoked"/);
+  assert.equal(declarationNames.has("AgentAccessManager"), true);
+  assert.equal(modelImports.has("agentTokenRequest"), true);
+  assert.equal(modelImports.has("agentPagePath"), true);
+  assert.match(visibleCopy, /笔记本白名单/);
+  assert.match(visibleCopy, /过期时间/);
+  assert.match(visibleCopy, /明文 token 仅显示这一次/);
 });
 
 test("profile and token page paths retain independent offsets", () => {

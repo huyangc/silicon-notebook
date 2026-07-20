@@ -6,29 +6,19 @@ import {
   askModeIds, askModeLabels, groupOf, groupLabel, modeLabel,
   defaultModeForGroup, requiresKg, canUseMode, modeFromTurn,
 } from "./ask-modes.ts";
+import {
+  appSourceModules,
+  jsxTextValues,
+  stringLiterals,
+} from "./test/semantic-source.mjs";
 
-// frontend/app 下的全部产品源码(递归子目录),排除测试自身。
-// 平铺 readdir 会漏掉 admin/ components/ dev/ —— 守卫必须递归。
-async function appSourceFiles({ exclude = [] } = {}) {
-  const fs = await import("node:fs/promises");
-  const path = await import("node:path");
-  const url = await import("node:url");
-  const appDir = path.dirname(url.fileURLToPath(import.meta.url));
-  const out = [];
-  async function walk(dir) {
-    for (const e of await fs.readdir(dir, { withFileTypes: true })) {
-      const abs = path.join(dir, e.name);
-      if (e.isDirectory()) { await walk(abs); continue; }
-      if (!e.isFile()) continue;
-      if (!/\.(ts|tsx|mts|mjs)$/.test(e.name)) continue;
-      if (/\.test\.mjs$/.test(e.name)) continue;
-      const rel = path.relative(appDir, abs);
-      if (exclude.includes(rel)) continue;
-      out.push({ rel, text: await fs.readFile(abs, "utf8") });
-    }
-  }
-  await walk(appDir);
-  return out;
+async function appSourceCopy({ exclude = [] } = {}) {
+  return (await appSourceModules())
+    .filter(({ path }) => !exclude.includes(path))
+    .map(({ path, module }) => ({
+      path,
+      values: [...stringLiterals(module), ...jsxTextValues(module)],
+    }));
 }
 
 test("user-facing ids and default", () => {
@@ -90,9 +80,11 @@ test("显示名查询函数由注册表派生(单一真源的读取口)", () => 
 test("退休模式名不得在前端源码里复活(含子目录)", async () => {
   const retired = ["严格推理", "深挖推理", "图谱多跳"];
   const offenders = [];
-  for (const { rel, text } of await appSourceFiles()) {
+  for (const { path, values } of await appSourceCopy()) {
     for (const term of retired) {
-      if (text.includes(term)) offenders.push(`${rel}: ${term}`);
+      if (values.some((value) => value.includes(term))) {
+        offenders.push(`${path}: ${term}`);
+      }
     }
   }
   assert.deepEqual(offenders, [], `退休模式名复活: ${offenders.join(", ")}`);
@@ -105,9 +97,11 @@ test("当前模式名不得散落在 ask-modes.ts 之外(单一真源守卫)", a
   const labels = askModeLabels();
   assert.ok(labels.length >= 4, "比对集为空则守卫形同虚设");
   const offenders = [];
-  for (const { rel, text } of await appSourceFiles({ exclude: ["ask-modes.ts"] })) {
+  for (const { path, values } of await appSourceCopy({ exclude: ["ask-modes.ts"] })) {
     for (const label of labels) {
-      if (text.includes(label)) offenders.push(`${rel}: 「${label}」`);
+      if (values.some((value) => value.includes(label))) {
+        offenders.push(`${path}: 「${label}」`);
+      }
     }
   }
   assert.deepEqual(

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""跨栈契约:前端 kg-type-mark.tsx 的 KG_TYPE_LABELS 内置项必须逐字等于后端
+"""跨栈契约:前端 kg-type-model.ts 的 KG_TYPE_LABELS 内置项必须逐字等于后端
 OBJECT_TYPE_LABELS。任一侧改了 object_type 的显示名而另一侧没跟,这里失败。
 object_type 有前后端两份真源(后端 API 下发 + 前端只有 type 字符串时的小表),
 severity 那次的漏网教训就是「没有守卫钉住两份真源」。由 scripts/check.sh 运行。
@@ -10,7 +10,7 @@ severity 那次的漏网教训就是「没有守卫钉住两份真源」。由 s
 模板串、转义、重复键、多份声明——一律 GuardError 硬失败,**绝不静默跳过**。静默跳过等于
 放行:运行时对象已经变了,守卫却还在比一张残缺的表(review 揪出的假绿路径)。
 
-已知的刻意取舍:注释剥离是字符串感知的线性扫描,但不解析正则字面量。若 kg-type-mark.tsx
+已知的刻意取舍:注释剥离是字符串感知的线性扫描,但不解析正则字面量。若 kg-type-model.ts
 里出现含 `//` 或 `/*` 的正则/裸撇号,扫描会误判并抛错——方向是**假红**(吵闹但可修),
 不是假绿。守卫宁可错杀。
 """
@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_TSX = ROOT / "frontend/app/kg-type-mark.tsx"
+DEFAULT_TSX = ROOT / "frontend/app/kg-type-model.ts"
 sys.path.insert(0, str(ROOT / "backend"))
 from app.services.extraction_profiles import OBJECT_TYPE_LABELS  # noqa: E402
 
@@ -181,16 +181,16 @@ def frontend_labels(path: Path | None = None) -> dict[str, str]:
     text = strip_ts_comments(source)
     declarations = _ANY_DECL_RE.findall(text)
     if not declarations:
-        raise GuardError("kg-type-mark.tsx: 未找到 KG_TYPE_LABELS 声明")
+        raise GuardError("kg-type-model.ts: 未找到 KG_TYPE_LABELS 声明")
     if len(declarations) > 1:
         raise GuardError(
-            f"kg-type-mark.tsx: 找到 {len(declarations)} 份 KG_TYPE_LABELS 声明,"
+            f"kg-type-model.ts: 找到 {len(declarations)} 份 KG_TYPE_LABELS 声明,"
             "守卫无法判定哪一份在运行时生效"
         )
     literal = _LITERAL_DECL_RE.search(text)
     if literal is None:
         raise GuardError(
-            "kg-type-mark.tsx: KG_TYPE_LABELS 不是 `= {…}` 对象字面量声明,"
+            "kg-type-model.ts: KG_TYPE_LABELS 不是 `= {…}` 对象字面量声明,"
             "守卫无法零求值判定其内容"
         )
     body = _object_literal_body(text, literal.end() - 1)

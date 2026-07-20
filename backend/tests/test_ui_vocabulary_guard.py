@@ -20,6 +20,7 @@ schema / deprecated 全没进黑名单),而守卫退出码仍是 0。所以这�
 from __future__ import annotations
 
 import importlib.util
+import json
 import pathlib
 import re
 import sys
@@ -227,14 +228,17 @@ def test_兜底即原值检查已搬去前端且仍挂在硬门上():
     """搬家最容易出的事故是「搬走了但没接上」——两边都不跑,还都是绿的。"""
     mjs = _ROOT / "frontend" / "app" / "raw-enum-fallback.test.mjs"
     assert mjs.exists(), f"{mjs} 不见了:兜底即原值检查搬走后没落地"
-    body = mjs.read_text(encoding="utf-8")
-    assert 'require("typescript")' in body, "没用上 TypeScript AST,又退回正则了?"
-    # npm run test 用 `find app -name '*.test.mjs'` 递归收集,check.sh 跑 npm run test。
-    pkg = (_ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
-    assert "find app -name '*.test.mjs'" in pkg, (
+    # npm run test 组合纯逻辑与组件交互两条 lane；raw-enum guard 属于前者。
+    pkg = json.loads(
+        (_ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
+    )
+    assert "find app" in pkg["scripts"]["test:node"], (
         "前端测试收集方式变了,新守卫可能没被 check.sh 跑到"
     )
-    assert "npm run test" in (_ROOT / "scripts" / "check.sh").read_text(encoding="utf-8")
+    assert "test:node" in pkg["scripts"]["test"]
+    assert "npm run test" in (
+        _ROOT / "scripts" / "check_frontend.sh"
+    ).read_text(encoding="utf-8")
 
 
 def test_python_守卫不再自带正则版兜底检查():

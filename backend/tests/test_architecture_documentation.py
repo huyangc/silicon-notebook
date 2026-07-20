@@ -12,13 +12,7 @@ from app.repositories.ownership_manifest import OWNER_BY_MEMBER
 from app.repositories.sqlite.migrations import SCHEMA_VERSION
 from app.services import report_engine, report_execution, repository_runtime
 from tests import test_repository_facade_contract as facade_contract
-from tests.test_repository_callers_static import (
-    EXPECTED_REMEDIATION_SITES as CALLER_REMEDIATION_SITES,
-    INDEPENDENT_PRIVATE_SITES,
-    INDEPENDENT_SQL_SITES,
-    private_repository_sites,
-    product_sql_sites,
-)
+from tests.architecture.repository_callers import collect_caller_contract
 from tests.test_repository_protocol_coverage import protocol_calls
 
 
@@ -433,15 +427,18 @@ def test_repository_documentation_matches_composed_runtime_and_v9_compatibility(
 def test_completed_repository_boundary_claims_are_source_guarded():
     """The completion prose is coupled to production-source architecture guards.
 
-    These helpers are shared with the architecture suites instead of copying or
-    weakening their exact exception/debt ledgers here.
+    The semantic caller contract is checked exactly against its reviewed fixture
+    in the repository dependency suite. Here we additionally pin that every
+    remaining boundary crossing has an explicit architectural reason.
     """
-    assert set(product_sql_sites()) - set(INDEPENDENT_SQL_SITES) == set()
-    assert set(private_repository_sites()) - set(INDEPENDENT_PRIVATE_SITES) == set()
-    assert CALLER_REMEDIATION_SITES == {
-        "product_sql": set(),
-        "private_repository": set(),
-    }
+    caller_contract = collect_caller_contract()
+    assert caller_contract["independent_sql"]
+    assert caller_contract["independent_private"]
+    assert all(
+        entry["reason"]
+        for entries in caller_contract.values()
+        for entry in entries
+    )
     assert facade_contract.facade_body_violations(
         facade_contract.SQLiteRepository
     ) == []

@@ -55,6 +55,28 @@ export const mountCostHint = (count: number): string =>
     ? `已挂 ${count} 个参考库，检索会逐个搜索它们，响应可能变慢。`
     : "";
 
+
+export const shouldShowBorrowedBaseHint = ({
+  strict,
+  kgAvailable,
+  baseKgAvailable,
+  kgReady,
+  baseCount,
+}: {
+  strict: boolean;
+  kgAvailable: boolean;
+  baseKgAvailable: boolean;
+  kgReady: boolean;
+  baseCount: number;
+}): boolean => (
+  strict
+  && kgAvailable
+  && baseKgAvailable
+  && !kgReady
+  && baseCount > 0
+);
+
+
 export const groupMountable = <T extends NotebookRef>(
   list: readonly T[]
 ): { public: T[]; mine: T[] } => ({

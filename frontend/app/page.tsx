@@ -1,7 +1,7 @@
 "use client";
 
-import { ChangeEvent, FormEvent, Fragment, KeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, BarChart3, Bookmark, Check, ChevronDown, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, LogOut, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Square, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { ChangeEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, BarChart3, Check, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -19,6 +19,7 @@ import {
 } from "./memory-model";
 import { KG_TYPE_STYLE, KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import { kgBandTarget, kgBandVelocity, kgTypeBandTargets } from "./kg-layout";
+import { withoutDecidedMerge } from "./kg-merge-model";
 import {
   ASK_MODE_GROUPS, DEFAULT_ASK_MODE, type AskModeId,
   groupOf, groupLabel, modesInGroup, defaultModeForGroup, requiresKg, modeFromTurn,
@@ -41,6 +42,7 @@ import {
   mountedByCount,
   resolvePromotionTarget,
   setBases,
+  shouldShowBorrowedBaseHint,
   toMountedBases,
   type MountedBase,
   type NotebookRef,
@@ -65,6 +67,11 @@ import {
   type SharedByMeItem,
 } from "./notebook-share";
 import { parseUrlLines } from "./url-sources";
+import {
+  defaultNotebookPayload,
+  namedNotebookPayload,
+  normalizedNotebookName,
+} from "./notebook-creation";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
 import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
@@ -74,6 +81,8 @@ import {
   buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
 } from "./model-settings.ts";
 import { AuthGate } from "./AuthGate";
+import { AccountMenu } from "./account-menu";
+import { AskComposer } from "./ask-composer";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
@@ -82,8 +91,17 @@ import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgB
 import { jobPollDone, newTraceSteps, type AskJobDetail } from "./ask-reconnect";
 import { sourceImageAssetUrl } from "./source-image";
 import {
+  doneItemDestination,
+  historyModeForTransition,
+  NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING,
+  openMemoryDeepLink,
+  ownsWorkspaceRun,
+  restoreLatestConversation,
+  workspaceCapabilities,
+  workspaceRequestIsCurrent,
+} from "./workspace-transitions";
+import {
   CHAT_MODES,
-  DEFAULT_NOTEBOOK_NAME,
   EMPTY_KNOWLEDGE,
   KNOWLEDGE_STATUS_OPTIONS,
   SOURCES_PAGE_SIZE,
@@ -644,10 +662,6 @@ const fetchMergeReviewJob = (nb: string) =>
 const fetchAskJob = (nb: string, jobId: string) =>
   api<AskJobDetail>(`/notebooks/${nb}/ask/jobs/${jobId}`);
 
-function mergePairKey(candidate: PendingMerge): string {
-  return [candidate.canonical_a, candidate.canonical_b].sort().join("\u0000");
-}
-
 function formatFileSize(size: number): string {
   if (!size) return "metadata only";
   if (size < 1024) return `${size} B`;
@@ -850,7 +864,6 @@ export default function Home() {
   const [sortMode, setSortMode] = useState("recent");
   const [searchQuery, setSearchQuery] = useState("");
   const [sortOpen, setSortOpen] = useState(false);
-  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const [menuNotebookId, setMenuNotebookId] = useState<string | null>(null);
   const [menuPosition, setMenuPosition] = useState<NotebookMenuPosition | null>(null);
   const [editingNotebook, setEditingNotebook] = useState<NotebookSummary | null>(null);
@@ -1059,9 +1072,13 @@ export default function Home() {
           loadSourcesPage(nb, {
             page: sourcesPageRef.current,
             q: sourceQueryRef.current,
-            guard: () => !cancelled
-              && activeNotebookIdRef.current === nb
-              && workspaceEpochRef.current === workspaceEpoch,
+            guard: () => workspaceRequestIsCurrent(
+              cancelled,
+              workspaceEpoch,
+              workspaceEpochRef.current,
+              nb,
+              activeNotebookIdRef.current,
+            ),
           }).catch(() => {});
         }
       } catch { /* transient error; keep polling */ }
@@ -1163,9 +1180,13 @@ export default function Home() {
             loadSourcesPage(nb, {
               page: sourcesPageRef.current,
               q: sourceQueryRef.current,
-              guard: () => !cancelled
-                && activeNotebookIdRef.current === nb
-                && workspaceEpochRef.current === workspaceEpoch,
+              guard: () => workspaceRequestIsCurrent(
+                cancelled,
+                workspaceEpoch,
+                workspaceEpochRef.current,
+                nb,
+                activeNotebookIdRef.current,
+              ),
             }).catch(() => {});
           }
         }).catch(() => {});
@@ -1423,7 +1444,6 @@ export default function Home() {
     return () => { cancelled = true; window.clearInterval(poll); window.clearTimeout(cap); };
   }, [reconnectJob, currentNotebookId]);
   const notebookMenuRef = useRef<HTMLDivElement | null>(null);
-  const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
   const kgCanvasRef = useRef<HTMLDivElement | null>(null);
   const kgDetailRef = useRef<HTMLElement | null>(null);
@@ -1460,12 +1480,14 @@ export default function Home() {
         if (target?.scope === "global") {
           setOuterView("memory");
         } else if (target?.scope === "notebook" && target.notebookId) {
-          try {
-            await openNotebookMemory(target.notebookId);
-          } catch {
+          await openMemoryDeepLink(
+            target.notebookId,
+            openNotebookMemory,
+            () => {
             showCollection();
             setToast("该记忆链接不可用或已失效");
-          }
+            },
+          );
         } else {
           // 裸 #notebook=<id>:刷新回到笔记本(此前这条 hash 只写不读,刷新必回集合页)。
           const workspace = parseWorkspaceHash(window.location.hash);
@@ -1644,38 +1666,6 @@ export default function Home() {
       window.removeEventListener("scroll", closeMenu, true);
     };
   }, [menuNotebookId]);
-
-  useEffect(() => {
-    if (!accountMenuOpen) return;
-
-    function closeAccountMenu() {
-      setAccountMenuOpen(false);
-    }
-
-    function handlePointerDown(event: PointerEvent) {
-      const target = event.target;
-      if (
-        target instanceof Node &&
-        accountMenuRef.current?.contains(target)
-      ) {
-        return;
-      }
-      closeAccountMenu();
-    }
-
-    function handleKeyDown(event: globalThis.KeyboardEvent) {
-      if (event.key === "Escape") closeAccountMenu();
-    }
-
-    window.addEventListener("pointerdown", handlePointerDown);
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("resize", closeAccountMenu);
-    return () => {
-      window.removeEventListener("pointerdown", handlePointerDown);
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("resize", closeAccountMenu);
-    };
-  }, [accountMenuOpen]);
 
   // 会话历史面板:点面板外部(或按 Esc)关闭。切换按钮(会话/历史/当前会话)排除在外——
   // 交给按钮自己的 onClick 切换,否则 pointerdown 先关、click 再开会「关了又开」。
@@ -2077,7 +2067,7 @@ export default function Home() {
   async function openCreate() {
     const notebook = await api<NotebookSummary>("/notebooks", {
       method: "POST",
-      body: JSON.stringify({ name: DEFAULT_NOTEBOOK_NAME, purpose: "" })
+      body: JSON.stringify(defaultNotebookPayload())
     });
     await loadNotebookCollection();
     await openNotebook(notebook.id);
@@ -2089,7 +2079,7 @@ export default function Home() {
   async function submitCreate() {
     const notebook = await api<NotebookSummary>("/notebooks", {
       method: "POST",
-      body: JSON.stringify({ name: createName.trim() || DEFAULT_NOTEBOOK_NAME, purpose: createDesc.trim() })
+      body: JSON.stringify(namedNotebookPayload(createName, createDesc))
     });
     setCreateOpen(false);
     await loadNotebookCollection();
@@ -2119,6 +2109,9 @@ export default function Home() {
   }
 
   async function openNotebook(notebookId: string, history: "push" | "none" = "push"): Promise<boolean> {
+    const historyMode = history === "push"
+      ? historyModeForTransition(currentNotebookId, notebookId)
+      : null;
     const workspaceEpoch = ++workspaceEpochRef.current;
     askRunEpochRef.current += 1;
     memoryLinksAbortRef.current?.abort();
@@ -2169,21 +2162,17 @@ export default function Home() {
     // 落在最近一条对话(列表已按 updated_at DESC 排序)而非空白新会话。
     // 沿用本次 openNotebook 自己的 epoch:openSession 会新推一个 epoch,
     // 那会让下面的守卫立刻失配。零对话的库自然跳过,维持新会话现状。
-    if (sessionList && sessionList.length > 0) {
-      try {
-        await applySessionDetail(sessionList[0].id, workspaceEpoch);
-      } catch {
-        // 恢复是增强项,不是必需品:失败就静默退回本改动前的空白新会话现状,
-        // 而不是让 api() 抛出的异常冒出去把整个 notebook 打不开——恢复是无条件
-        // 自动发生的,没有失败就不打开的道理。这不是「静默吞错误」,是优雅降级到
-        // 已知良好状态;会话列表仍已加载,用户可自行点历史(那次点击失败才该报错)。
-      }
-      if (workspaceEpochRef.current !== workspaceEpoch) return false;
-    }
+    await restoreLatestConversation(
+      sessionList ?? [],
+      (id) => applySessionDetail(id, workspaceEpoch),
+    );
+    if (workspaceEpochRef.current !== workspaceEpoch) return false;
     // "none" = 挂载还原 / popstate:浏览器已经把 URL 摆对了,再写一次只会多一个
     // 死条目(用户按返回没反应)。默认 "push" 让返回键能退出 notebook。
-    if (history === "push") {
+    if (historyMode === "push") {
       window.history.pushState(null, "", notebookHash(notebookId));
+    } else if (historyMode === "replace") {
+      window.history.replaceState(null, "", notebookHash(notebookId));
     }
     window.scrollTo(0, 0);
     return true;
@@ -2218,7 +2207,9 @@ export default function Home() {
     if (!await openNotebook(d.notebook_id, history)) return;
     // 论文元数据补全完成应停在来源面板(设计稿 §3.3:作者/机构就在来源列表与详情
     // 里),别把用户甩进知识图谱。kind 缺省视作索引完成,索引路径行为逐字不变。
-    if (d.kind !== "paper_meta_done") await openKgView(undefined, d.notebook_id);
+    if (doneItemDestination(d.kind) === "kg") {
+      await openKgView(undefined, d.notebook_id);
+    }
   }
 
   async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {
@@ -2279,7 +2270,7 @@ export default function Home() {
 
   async function saveInlineNotebookName() {
     if (!currentNotebook || titleSaveInFlight) return;
-    const nextName = titleDraft.trim() || DEFAULT_NOTEBOOK_NAME;
+    const nextName = normalizedNotebookName(titleDraft);
     setTitleDraft(nextName);
     if (nextName === currentNotebook.name) return;
     setTitleSaveInFlight(true);
@@ -2545,10 +2536,14 @@ export default function Home() {
     const notebookId = currentNotebookId;
     const workspaceEpoch = workspaceEpochRef.current;
     const runEpoch = ++askRunEpochRef.current;
-    const ownsRun = () =>
-      askRunEpochRef.current === runEpoch
-      && workspaceEpochRef.current === workspaceEpoch
-      && activeNotebookIdRef.current === notebookId;
+    const ownsRun = () => ownsWorkspaceRun(
+      runEpoch,
+      askRunEpochRef.current,
+      workspaceEpoch,
+      workspaceEpochRef.current,
+      notebookId,
+      activeNotebookIdRef.current,
+    );
     setChatMode("ask");
     setQuestion("");
     setPendingQuestion(q);
@@ -2616,13 +2611,6 @@ export default function Home() {
       cancelRequestedRef.current = true;
     }
     askAbortRef.current?.abort();
-  }
-
-  function handleAskInputKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-      event.preventDefault();
-      runAsk().catch(reportError);
-    }
   }
 
   async function loadSessions(
@@ -3098,18 +3086,13 @@ export default function Home() {
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {
     if (!currentNotebookId) return;
     try {
-      const decidedPairKey = mergePairKey(candidate);
       if (confirm) await confirmMergeApi(currentNotebookId, candidate.id);
       else await rejectMergeApi(currentNotebookId, candidate.id);
-      setPendingMerges((items) =>
-        items.filter((item) => item.id !== candidate.id && mergePairKey(item) !== decidedPairKey)
-      );
+      setPendingMerges((items) => withoutDecidedMerge(items, candidate));
       await rebuildUnifiedKg(currentNotebookId);
       const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId, kgLimit), fetchPendingMerges(currentNotebookId)]);
       setUGraph(g); setKgExpandedNodes([]); setKgExpandedEdges([]);
-      setPendingMerges(
-        pend.filter((item) => item.id !== candidate.id && mergePairKey(item) !== decidedPairKey)
-      );
+      setPendingMerges(withoutDecidedMerge(pend, candidate));
       const selected = selectedKgNodeId ? g.nodes.find((node) => node.id === selectedKgNodeId) : null;
       if (selected?.object_type === "concept") setConceptDetail(await fetchConceptDetail(currentNotebookId, selected.id).catch(() => null));
       else setConceptDetail(null);
@@ -3370,7 +3353,6 @@ export default function Home() {
   }
 
   async function handleLogout() {
-    setAccountMenuOpen(false);
     workspaceEpochRef.current += 1;
     askRunEpochRef.current += 1;
     activeNotebookIdRef.current = null;
@@ -3464,12 +3446,10 @@ export default function Home() {
   const isWorkspace = Boolean(currentNotebookId && currentNotebook);
   // 只读共享库(Phase 2):无写权,门控写按钮 + 显示只读徽章/退出入口。
   const isReader = currentNotebook?.access === "reader";
-  const capabilities = {
-    canWriteNotebook: !isReader,
-    canGovernKnowledge: !isReader,
-    canManageReports: !isReader,
-    canManageSchemas: currentUser?.role === "admin",
-  };
+  const capabilities = workspaceCapabilities(
+    currentNotebook?.access,
+    currentUser?.role ?? "",
+  );
   // 挂了几个公共知识库决定「提交晋升」按钮的行为(none=禁用/auto=直接用/choose=弹选择器)。
   const promotionTarget = resolvePromotionTarget(currentNotebookBases);
   const menuNotebook = menuNotebookId
@@ -3488,7 +3468,6 @@ export default function Home() {
   }
 
   const accountName = currentUser.username;
-  const accountRole = currentUser.role === "admin" ? "管理员" : "用户";
   const accountBadge = accountInitials(accountName);
 
   return (
@@ -3514,50 +3493,15 @@ export default function Home() {
             onOpenDone={openDoneItem}
             onDismissDone={pending.dismissDone}
           />
-          <div className="user-menu" ref={accountMenuRef}>
-            <button
-              className="user-menu-trigger"
-              type="button"
-              aria-haspopup="menu"
-              aria-expanded={accountMenuOpen}
-              title="账户菜单"
-              onClick={() => setAccountMenuOpen((open) => !open)}
-            >
-              <span className="user-avatar">{accountBadge}</span>
-              <span className="user-name">{accountName}{currentUser.role === "admin" ? "（管理员）" : ""}</span>
-              <ChevronDown size={14} className="user-menu-chevron" />
-            </button>
-            {accountMenuOpen && (
-              <div className="user-menu-popover" role="menu" aria-label="账户菜单">
-                <div className="user-menu-profile">
-                  <span className="user-avatar large">{accountBadge}</span>
-                  <div>
-                    <strong>{accountName}</strong>
-                    <small>{accountRole}</small>
-                  </div>
-                </div>
-                <button
-                  className={`user-logout ${outerView === "memory" ? "active" : ""}`}
-                  type="button"
-                  role="menuitem"
-                  onClick={() => { setAccountMenuOpen(false); showGlobalMemory(); }}
-                >
-                  <Bookmark size={16} />
-                  <span>私有记忆</span>
-                </button>
-                {canSeeAdminUsage(currentUser.role) && (
-                  <a className="user-logout" role="menuitem" href="/admin/usage" title="用户使用总览">
-                    <BarChart3 size={16} />
-                    <span>用户总览</span>
-                  </a>
-                )}
-                <button className="user-logout" type="button" role="menuitem" onClick={() => handleLogout().catch(reportError)}>
-                  <LogOut size={16} />
-                  <span>退出登录</span>
-                </button>
-              </div>
-            )}
-          </div>
+          <AccountMenu
+            username={accountName}
+            role={currentUser.role}
+            initials={accountBadge}
+            memoryActive={outerView === "memory"}
+            showAdminUsage={canSeeAdminUsage(currentUser.role)}
+            onOpenMemory={showGlobalMemory}
+            onLogout={() => handleLogout().catch(reportError)}
+          />
         </div>
       </header>
 
@@ -3709,7 +3653,7 @@ export default function Home() {
                     maxLength={80}
                     onChange={(event) => setTitleDraft(event.target.value)}
                     onBlur={() => saveInlineNotebookName().catch(reportError)}
-                    onKeyDown={(event: KeyboardEvent<HTMLInputElement>) => {
+                    onKeyDown={(event: ReactKeyboardEvent<HTMLInputElement>) => {
                       if (event.key === "Enter") event.currentTarget.blur();
                       if (event.key === "Escape") {
                         setTitleDraft(currentNotebook.name);
@@ -3977,7 +3921,7 @@ export default function Home() {
                             <span className="tag" style={{ opacity: 0.6 }} title="该来源非学术论文，无需补全论文信息">非论文</span>
                           )}
                           {source.source_url ? (
-                            <a className="source-link-button" href={source.source_url} target="_blank" rel="noreferrer" title={source.source_url} onClick={(e) => e.stopPropagation()}>
+                            <a className="source-link-button" href={source.source_url} target="_blank" rel="noreferrer" title={source.source_url} aria-label="打开原始链接" onClick={(e) => e.stopPropagation()}>
                               <ExternalLink size={13} />
                             </a>
                           ) : null}
@@ -4240,16 +4184,14 @@ export default function Home() {
                 )}
               </div>
               {chatMode === "ask" && (
-                <div className="chat-input-bar">
-                  <textarea
-                    className="chat-input"
-                    rows={1}
-                    placeholder={askHint}
-                    value={question}
-                    disabled={asking}
-                    onChange={(event) => setQuestion(event.target.value)}
-                    onKeyDown={handleAskInputKeyDown}
-                  />
+                <AskComposer
+                  value={question}
+                  placeholder={askHint}
+                  onChange={setQuestion}
+                  onSubmit={() => runAsk().catch(reportError)}
+                  onAbort={abortAsk}
+                  running={asking}
+                >
                   <span>{sources.length} 个来源</span>
                   <div className="ask-mode-control" role="group" aria-label="问答模式">
                     {ASK_MODE_GROUPS.map((g) => (
@@ -4293,21 +4235,17 @@ export default function Home() {
                         </button>
                       </span>
                     )}
-                    {groupOf(askMode) === "strict" && kgAvailable && currentNotebook?.base_kg_available && !currentNotebook?.kg_ready && (currentNotebook?.base_notebooks?.length ?? 0) > 0 && (
-                      <span className="chat-hint">本笔记本尚无知识图谱，将借用参考库「{currentNotebook.base_notebooks?.map((b) => b.name).join("、")}」推理</span>
+                    {shouldShowBorrowedBaseHint({
+                      strict: groupOf(askMode) === "strict",
+                      kgAvailable,
+                      baseKgAvailable: Boolean(currentNotebook?.base_kg_available),
+                      kgReady: Boolean(currentNotebook?.kg_ready),
+                      baseCount: currentNotebook?.base_notebooks?.length ?? 0,
+                    }) && (
+                      <span className="chat-hint">本笔记本尚无知识图谱，将借用参考库「{currentNotebook?.base_notebooks?.map((b) => b.name).join("、")}」推理</span>
                     )}
                   </div>
-                  <button
-                    className={`send-button ${asking ? "stop" : ""}`}
-                    type="button"
-                    aria-label={asking ? "中断生成" : "发送"}
-                    title={asking ? "中断生成" : "发送"}
-                    disabled={!asking && !question.trim()}
-                    onClick={() => asking ? abortAsk() : runAsk().catch(reportError)}
-                  >
-                    {asking ? <Square size={16} strokeWidth={2.5} /> : "→"}
-                  </button>
-                </div>
+                </AskComposer>
               )}
             </section>
 
@@ -4737,7 +4675,7 @@ export default function Home() {
             <div className="source-modal-header">
               <div>
                 <h2>删除笔记本</h2>
-                <p>确定删除 “{deleteNotebook.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；所有成员各自绑定到此笔记本的私有记忆也会按生命周期一并删除。</p>
+                <p>确定删除 “{deleteNotebook.name}” 吗？这个本机 beta 会同时移除它的来源和深度报告；{NOTEBOOK_PRIVATE_MEMORY_DELETE_WARNING}</p>
                 {deleteMountedByCount > 0 && (
                   <p className="delete-mount-warning">
                     {deleteMountedByCount} 个笔记本正在把它作为参考库，删除后这些笔记本会立即失去这条参考库——此操作不可撤销。
