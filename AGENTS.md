@@ -364,6 +364,18 @@ this is a measured baseline, not a portable timeout assertion for every host.
   target. Do not make the check required until stable green PR and post-merge
   runs have been observed and the user explicitly approves branch-protection
   changes.
+- CI-executed tests locate committed fixtures from `Path(__file__)`-anchored
+  repository paths. They must not embed developer checkout paths, depend on
+  `HOME`, or read repository-external source documents.
+- Any third-party package imported during test startup is a direct declared
+  dependency in `backend/requirements.txt`; a developer's preinstalled package
+  is never evidence that CI can install the gate.
+- Hosted-runner lane timings are observational. The under-60-second acceptance
+  target applies to the verified Apple Silicon Homebrew warm gate, not a cold
+  GitHub runner.
+- Developer-only gold-generation/build/validation scripts that consume
+  repository-external PDF parse output remain outside `scripts/check.sh`; this
+  exception never applies to committed tests.
 
 ## Test Architecture
 
