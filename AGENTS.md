@@ -70,7 +70,7 @@ Inside a notebook:
 - Reset scroll to the top when switching into or back from the notebook workspace.
 - The upper-left notebook title should be editable in place and save through the notebook update API.
 - Keep the notebook header compact: do not render the notebook description under the title; show that description in the Ask welcome state when no conversation is active. Top toolbar actions must keep their labels intact across desktop widths.
-- Left column: user-imported source files only.
+- Left column: user-imported source files only. User-facing source counts exclude hidden `source_type` `memory` / `knowhow` projection sources; physical `size.sources`, copy/storage thresholds, and scheduler accounting keep physical-row semantics. `has_unindexed_content` must preserve a derived-content scale-index update decision when the visible imported-source delta is zero.
   - Show how many sources are in the current notebook.
   - Keep source cards compact and readable for long mixed Chinese/English titles and summaries.
   - Source cards should open a source detail preview with element-level parsed text and expose a delete action.
@@ -95,7 +95,7 @@ Inside a notebook:
   - The side panel should provide a type-grouped node overview (Concept, Claim, Formula, Procedure, plus future types) and selected-node relation/evidence details.
 - Do not show a fixed right-column Studio sidebar in the primary notebook workspace.
   - Keep the source column + four-tab (`问答 (Ask) | 知识库 (Knowledge) | 记忆 (Memory) | 深度报告 (Deep Report)`) main column as the two-column workspace.
-  - The Analysis menu itself contains only the promotion queue (admin), tier toggle (admin), and edge-review queue. Dashboard, Schema, and the full-screen Knowledge Graph are separate top-toolbar actions.
+  - The Analysis menu itself contains only the promotion queue (admin), tier toggle (admin), and edge-review queue. Dashboard, Schema, and the full-screen Knowledge Graph are separate top-toolbar actions. The existing analytics view has separate Memory and Knowhow content-asset cards served by `GET /api/notebooks/{id}/analytics/content-overview`: Memory totals/statuses/recent rows are scoped to the authenticated viewer and requested notebook (never admin cross-user analytics); Knowhow table/row, projection pending/failed, stale-code, and recent-table metrics follow notebook read access. Cards navigate only to the existing Memory and Knowhow pages/editors, whose write restrictions remain authoritative; do not add another browser/editor.
   - Do not document or reintroduce retired content-generation, article, or derived-rule controls as current UI.
 - The candidate Review Queue was removed: the KG extractor writes approved knowledge objects directly (no candidate staging). Knowledge governance is dedupe/merge over the objects in the Knowledge browser.
 

@@ -130,8 +130,8 @@ class NotebookSummaryQuery:
     def visible_source_count(
         self, db: sqlite3.Connection, notebook_id: str
     ) -> int:
-        """NotebookSummary's counts["sources"] — excludes Memory-derived
-        synthetic sources (source_type='memory'); see
+        """NotebookSummary's counts["sources"] — excludes Memory-derived and
+        Knowhow-table synthetic sources (source_type IN ('memory', 'knowhow')); see
         QueryStore.visible_source_count. The generic ``count`` helper above
         stays unfiltered (it is a table-agnostic primitive shared with the
         facade's ``_count`` re-export / its equivalence-oracle test)."""
@@ -140,8 +140,17 @@ class NotebookSummaryQuery:
     def count_pending_kg_sources(
         self, db: sqlite3.Connection, notebook_id: str
     ) -> int:
-        """Count parsed sources that do not have a complete KG extraction."""
+        """Count every physical parsed source without a complete KG extraction."""
         return self.queries.pending_kg_source_count(db, notebook_id)
+
+    def visible_pending_kg_sources(
+        self, db: sqlite3.Connection, notebook_id: str
+    ) -> int:
+        """Count user-visible parsed sources without a complete KG extraction.
+
+        Memory-derived and Knowhow-table synthetic sources are excluded.
+        """
+        return self.queries.visible_pending_kg_source_count(db, notebook_id)
 
     def mounted_bases(
         self, notebook_id: str, db: "sqlite3.Connection | None" = None
@@ -204,7 +213,9 @@ class NotebookSummaryQuery:
             kg_ready=self.has_kg(connection, row["id"]),
             base_kg_available=base_has_kg,
             base_notebooks=base_refs,
-            kg_pending_sources=self.count_pending_kg_sources(connection, row["id"]),
+            kg_pending_sources=self.visible_pending_kg_sources(
+                connection, row["id"]
+            ),
             is_shared=bool(row["is_shared"]) if "is_shared" in keys else False,
         )
 

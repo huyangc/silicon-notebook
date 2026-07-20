@@ -28,7 +28,9 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def _insert_source_chunk(repo, nb_id, sid, cid, text, embed_text, day):
+def _insert_source_chunk(
+    repo, nb_id, sid, cid, text, embed_text, day, source_type="md"
+):
     """Insert a source + one chunk + that chunk's embedding (embedding derived
     from `embed_text` so the query vector can be steered independently of the
     chunk's lexical text)."""
@@ -36,7 +38,9 @@ def _insert_source_chunk(repo, nb_id, sid, cid, text, embed_text, day):
         now = f"2026-07-{day:02d}T00:00:00"
         db.execute(
             "INSERT OR IGNORE INTO sources (id,notebook_id,title,source_type,status,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?)", (sid, nb_id, "t", "md", "ready", now, now))
+            "VALUES (?,?,?,?,?,?,?)",
+            (sid, nb_id, "t", source_type, "ready", now, now),
+        )
         db.execute(
             "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
             "VALUES (?,?,?,?,?,?,?)", (cid, nb_id, sid, text, "", "[]", now))
@@ -147,6 +151,71 @@ def test_status_exposes_pending_unindexed(repo, monkeypatch):
     assert "unindexed_sources" in st2 and "delta_searchable" in st2
 
 
+def test_status_exposes_only_visible_unindexed_sources(repo):
+    nb = repo.create_notebook(NotebookCreate(name="mixed delta"))
+    _insert_source_chunk(
+        repo, nb.id, "s-uploaded", "c-uploaded", "uploaded", "uploaded", 1
+    )
+    _insert_source_chunk(
+        repo,
+        nb.id,
+        "s-memory",
+        "c-memory",
+        "memory",
+        "memory",
+        2,
+        source_type="memory",
+    )
+    _insert_source_chunk(
+        repo,
+        nb.id,
+        "s-knowhow",
+        "c-knowhow",
+        "knowhow",
+        "knowhow",
+        3,
+        source_type="knowhow",
+    )
+
+    scale_status = repo.scale_index_status(nb.id)
+    assert scale_status["unindexed_sources"] == 1
+    assert scale_status["has_unindexed_content"] is True
+
+
+def test_derived_only_delta_remains_actionable_physical_content(repo):
+    nb = repo.create_notebook(NotebookCreate(name="derived delta"))
+    _insert_source_chunk(
+        repo, nb.id, "s-uploaded", "c-uploaded", "uploaded", "uploaded", 1
+    )
+    repo.rebuild_unified_kg(nb.id)
+    repo.build_scale_index(nb.id)
+    _insert_source_chunk(
+        repo,
+        nb.id,
+        "s-memory",
+        "c-memory",
+        "memory",
+        "memory",
+        2,
+        source_type="memory",
+    )
+    _insert_source_chunk(
+        repo,
+        nb.id,
+        "s-knowhow",
+        "c-knowhow",
+        "knowhow",
+        "knowhow",
+        3,
+        source_type="knowhow",
+    )
+
+    scale_status = repo.scale_index_status(nb.id)
+    assert scale_status["unindexed_sources"] == 0
+    assert scale_status["has_unindexed_content"] is True
+    assert repo._index_delta(nb.id)["delta_sources"] == ["s-knowhow", "s-memory"]
+
+
 def test_status_delta_searchable_reflects_setting(repo, monkeypatch):
     monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     nb = _build_indexed_nb_with_delta(repo)
@@ -158,12 +227,15 @@ def test_status_delta_searchable_reflects_setting(repo, monkeypatch):
 
 def test_schema_round_trips_new_fields():
     m = ScaleIndexStatus(exists=True, stale=False, building=False, eligible=True,
-                         unindexed_sources=3, delta_searchable=True)
+                         unindexed_sources=3, has_unindexed_content=True,
+                         delta_searchable=True)
     assert m.unindexed_sources == 3
+    assert m.has_unindexed_content is True
     assert m.delta_searchable is True
     # defaults for older callers
     d = ScaleIndexStatus(exists=False, stale=False, building=False, eligible=False)
     assert d.unindexed_sources == 0
+    assert d.has_unindexed_content is False
     assert d.delta_searchable is False
 
 

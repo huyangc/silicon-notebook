@@ -557,7 +557,7 @@ async def import_knowhow_table(
     dependencies=[Depends(require_notebook_read)],
 )
 def list_knowhow_tables(notebook_id: str) -> List[dict]:
-    return repository().list_knowhow_tables(notebook_id)
+    return content_overview_service().knowhow_tables(notebook_id)
 
 
 @router.get(
@@ -2432,3 +2432,9 @@ def transfer_knowhow_table(
             },
         )
     return {"new_table_id": new_table_id}
+
+
+from app.api.content_overview_routes import router as content_overview_router  # noqa: E402
+from app.api.deps import content_overview_service  # noqa: E402
+
+router.include_router(content_overview_router)

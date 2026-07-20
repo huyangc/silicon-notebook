@@ -240,6 +240,35 @@ def test_share_preview_copy_end_to_end(repo, client):
     assert client.post(f"/api/shared/{token}/copy").status_code == 404
 
 
+def test_share_preview_count_is_visible_while_copy_size_stays_physical(repo):
+    nb = _mk_nb(repo, "Mixed")
+    now = _now()
+    with repo._write() as db:
+        for source_id, source_type in (
+            ("s-uploaded", "document"),
+            ("s-memory", "memory"),
+            ("s-knowhow", "knowhow"),
+        ):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    source_id,
+                    nb,
+                    source_id,
+                    source_type,
+                    "ready",
+                    now,
+                    now,
+                ),
+            )
+
+    preview = repo.shared_preview(nb)
+    assert preview["source_count"] == 1
+    assert preview["size"]["sources"] == 3
+
+
 def test_copy_refuses_too_large(repo, tmp_path, monkeypatch):
     # ⚠ 不能用 `client` fixture:它在测试体执行前就已 resolve(fixture 先于测试体运行),
     # 而 `from app.main import app` 只在本进程"首次"导入 app.main 时才跑 create_app()→

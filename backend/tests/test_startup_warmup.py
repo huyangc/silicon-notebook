@@ -1,8 +1,8 @@
 """Startup-readiness warm-up: ``knowledge_counts_cache.warm_all`` (store layer)
 and the ``warm_open_path_caches`` facade delegate the startup daemon calls.
 
-``warm_all`` primes all three per-notebook open-path memos (the per-type GROUP
-BY, the pending-source correlated count and the chunk count) for every live
+``warm_all`` primes all four per-notebook open-path memos (the per-type GROUP
+BY, the physical and user-visible pending-source counts, and the chunk count) for every live
 notebook — skipping ``status='copying'`` half-copies — and reports progress per
 notebook, so the first open / board / status-poll after a fresh process start is
 served warm instead of paying the cold recompute. The facade method is the
@@ -38,7 +38,7 @@ def _db() -> sqlite3.Connection:
         "CREATE TABLE knowledge_objects(id TEXT, notebook_id TEXT, object_type TEXT, status TEXT, source_id TEXT DEFAULT '');"
         "CREATE TABLE unified_kg_state(notebook_id TEXT PRIMARY KEY, kg_mutation_seq INTEGER);"
         "CREATE TABLE chunks(id TEXT, notebook_id TEXT, source_id TEXT);"
-        "CREATE TABLE sources(id TEXT, notebook_id TEXT);"
+        "CREATE TABLE sources(id TEXT, notebook_id TEXT, source_type TEXT NOT NULL);"
         "CREATE TABLE source_elements(id TEXT, source_id TEXT);"
         "CREATE TABLE extraction_runs("
         "source_id TEXT, run_type TEXT, status TEXT, created_at TEXT);"
@@ -57,7 +57,7 @@ def _add_object(db, nb, ot, st):
     )
 
 
-def test_warm_all_primes_all_three_memos_and_returns_count():
+def test_warm_all_primes_all_four_memos_and_returns_count():
     db = _db()
     _add_notebook(db, "nb1")
     _add_notebook(db, "nb2")
@@ -71,9 +71,11 @@ def test_warm_all_primes_all_three_memos_and_returns_count():
     for nb in ("nb1", "nb2"):
         assert nb in kcc._MEMO
         assert nb in kcc._PENDING
+        assert nb in kcc._VISIBLE_PENDING
         assert nb in kcc._CHUNKS
     # the memoized value is the real breakdown, not a placeholder
     assert kcc._MEMO["nb1"][1] == {("claim", "approved"): 1}
+    assert kcc._VISIBLE_PENDING["nb1"][1] == 0
 
 
 def test_warm_all_reports_progress_once_per_notebook():
@@ -156,8 +158,9 @@ def test_warm_open_path_caches_primes_memos_and_reports_progress():
     assert len(calls) == 2
     assert [done for done, _ in calls] == [1, 2]
     assert all(tot == 2 for _, tot in calls)
-    # (c) all three per-notebook memos are now populated
+    # (c) all four per-notebook memos are now populated
     for nb in (nb1.id, nb2.id):
         assert nb in kcc._MEMO
         assert nb in kcc._PENDING
+        assert nb in kcc._VISIBLE_PENDING
         assert nb in kcc._CHUNKS

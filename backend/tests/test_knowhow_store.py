@@ -179,6 +179,34 @@ def test_list_tables_scopes_by_notebook(store, repo):
     assert store.list_knowhow_tables(nb2) == []
 
 
+def test_health_inputs_use_four_selects_and_group_syncing_with_pending(store, notebook_id):
+    row_ids = []
+    for index in range(25):
+        table_id = store.create_knowhow_table(
+            notebook_id, f"T{index}", "", BASE_COLUMNS
+        )
+        row_ids.append(store.add_knowhow_row(table_id, {}))
+    store.set_knowhow_row_projection(row_ids[0], "syncing")
+    store.set_knowhow_row_projection(row_ids[1], "failed")
+    for row_id in row_ids[2:]:
+        store.set_knowhow_row_projection(row_id, "synced")
+
+    statements = []
+    with store.database.connect() as db:
+        db.set_trace_callback(statements.append)
+        result = store.knowhow_table_health_inputs(notebook_id)
+        db.set_trace_callback(None)
+
+    selects = [
+        sql for sql in statements
+        if sql.lstrip().upper().startswith("SELECT")
+    ]
+    assert len(selects) == 4
+    assert len(result) == 25
+    assert sum(row["projection_pending"] for row in result) == 1
+    assert sum(row["projection_failed"] for row in result) == 1
+
+
 # ---------------------------------------------------------------------------
 # get_knowhow_table
 # ---------------------------------------------------------------------------

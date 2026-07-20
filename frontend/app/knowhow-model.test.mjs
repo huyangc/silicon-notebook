@@ -5,8 +5,10 @@ import {
   rewriteAssetUrls,
   cellSummary,
   composeRowTitle,
+  filterKnowhowTables,
   ROLE_LABELS,
   KIND_LABELS,
+  fetchKnowhowTables,
   fetchKnowhowTable,
   patchKnowhowTable,
   addKnowhowColumn,
@@ -31,6 +33,93 @@ import {
   mapCitationKnowhowRef,
   uploadNotebookAsset,
 } from "./knowhow-model.ts";
+
+const healthTables = [
+  {
+    id: "pending",
+    title: "Pending",
+    description: "",
+    rowCount: 1,
+    projectionPending: 1,
+    projectionFailed: 0,
+    staleCodeCount: 0,
+    lastActivityAt: "",
+  },
+  {
+    id: "failed",
+    title: "Failed",
+    description: "",
+    rowCount: 1,
+    projectionPending: 0,
+    projectionFailed: 1,
+    staleCodeCount: 0,
+    lastActivityAt: "",
+  },
+  {
+    id: "stale",
+    title: "Stale",
+    description: "",
+    rowCount: 1,
+    projectionPending: 0,
+    projectionFailed: 0,
+    staleCodeCount: 1,
+    lastActivityAt: "",
+  },
+];
+
+test("filterKnowhowTables selects table-level health", () => {
+  assert.deepEqual(
+    filterKnowhowTables(healthTables, "projection_pending").map((table) => table.id),
+    ["pending"],
+  );
+  assert.deepEqual(
+    filterKnowhowTables(healthTables, "projection_failed").map((table) => table.id),
+    ["failed"],
+  );
+  assert.deepEqual(
+    filterKnowhowTables(healthTables, "stale_code").map((table) => table.id),
+    ["stale"],
+  );
+});
+
+test("fetchKnowhowTables maps health summaries with safe defaults", () => {
+  return withFetchStub([
+    {
+      id: "t1",
+      title: "Health",
+      description: null,
+      row_count: 2,
+      projection_pending: 1,
+      projection_failed: 3,
+      stale_code_count: 4,
+      last_activity_at: "2026-07-20T00:00:00Z",
+    },
+    { id: "t2", title: "Legacy", description: null },
+  ], async () => {
+    assert.deepEqual(await fetchKnowhowTables("nb-1"), [
+      {
+        id: "t1",
+        title: "Health",
+        description: "",
+        rowCount: 2,
+        projectionPending: 1,
+        projectionFailed: 3,
+        staleCodeCount: 4,
+        lastActivityAt: "2026-07-20T00:00:00Z",
+      },
+      {
+        id: "t2",
+        title: "Legacy",
+        description: "",
+        rowCount: 0,
+        projectionPending: 0,
+        projectionFailed: 0,
+        staleCodeCount: 0,
+        lastActivityAt: "",
+      },
+    ]);
+  });
+});
 
 // --- fetch stub helper（镜像 edge-review-queue.test.mjs 的 withFetchStub，
 // 加了可参数化的响应体，供本文件校验 mapper 的 snake->camel 转换）------------

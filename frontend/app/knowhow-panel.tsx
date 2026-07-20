@@ -74,8 +74,10 @@ import {
   optimizeKnowhowCell,
   reformatKnowhowCell,
   fetchKnowhowRowCodeByColumn,
+  filterKnowhowTables,
   patchKnowhowColumn,
   type KnowhowTableSummary,
+  type KnowhowHealthFilter,
   type KnowhowTableDetail,
   type KnowhowRow,
   type KnowhowColumn,
@@ -202,14 +204,24 @@ export interface KnowhowPanelProps {
    * 不需要调用方处理。 */
   initialTableId?: string | null;
   initialRowId?: string | null;
+  initialHealthFilter?: KnowhowHealthFilter;
 }
 
 export function KnowhowPanel({
-  notebookId, apiBase, canEdit, onClose, initialTableId, initialRowId,
+  notebookId, apiBase, canEdit, onClose, initialTableId, initialRowId, initialHealthFilter,
 }: KnowhowPanelProps) {
   const [tables, setTables] = useState<KnowhowTableSummary[] | null>(null);
   const [tablesLoading, setTablesLoading] = useState(false);
   const [tablesError, setTablesError] = useState<string | null>(null);
+  const [healthFilter, setHealthFilter] = useState<KnowhowHealthFilter>(initialHealthFilter ?? "all");
+  const visibleTables = useMemo(
+    () => filterKnowhowTables(tables ?? [], healthFilter),
+    [tables, healthFilter],
+  );
+
+  useEffect(() => {
+    setHealthFilter(initialHealthFilter ?? "all");
+  }, [initialHealthFilter]);
 
   // modal 的显隐：面板自持状态，不经 page.tsx 转发——page.tsx 挂载
   // <KnowhowPanel> 时只传 notebookId/apiBase/canEdit/onClose 四个 prop，
@@ -1121,10 +1133,13 @@ export function KnowhowPanel({
       <div className="knowhow-view-body">
         {selectedTableId === null ? (
           <KnowhowTableList
-            tables={tables}
+            tables={visibleTables}
+            hasUnfilteredTables={(tables?.length ?? 0) > 0}
             loading={tablesLoading}
             error={tablesError}
             canEdit={canEdit}
+            healthFilter={healthFilter}
+            onHealthFilterChange={setHealthFilter}
             onRetry={loadTables}
             onOpen={openTable}
             onImportClick={() => setImportOpen(true)}
@@ -3246,18 +3261,24 @@ export function KnowhowPanel({
 
 function KnowhowTableList({
   tables,
+  hasUnfilteredTables,
   loading,
   error,
   canEdit,
+  healthFilter,
+  onHealthFilterChange,
   onRetry,
   onOpen,
   onImportClick,
   onCreateClick,
 }: {
-  tables: KnowhowTableSummary[] | null;
+  tables: KnowhowTableSummary[];
+  hasUnfilteredTables: boolean;
   loading: boolean;
   error: string | null;
   canEdit: boolean;
+  healthFilter: KnowhowHealthFilter;
+  onHealthFilterChange: (filter: KnowhowHealthFilter) => void;
   onRetry: () => void;
   onOpen: (tableId: string) => void;
   onImportClick: () => void;
@@ -3266,7 +3287,19 @@ function KnowhowTableList({
   return (
     <>
       <div className="knowhow-toolbar">
-        <span className="panel-count">{tables && tables.length > 0 ? `${tables.length} 张表` : ""}</span>
+        <span className="panel-count">{tables.length > 0 ? `${tables.length} 张表` : ""}</span>
+        <label className="knowhow-health-filter">
+          <span>状态</span>
+          <select
+            value={healthFilter}
+            onChange={(event) => onHealthFilterChange(event.target.value as KnowhowHealthFilter)}
+          >
+            <option value="all">全部表</option>
+            <option value="projection_pending">待同步</option>
+            <option value="projection_failed">同步失败</option>
+            <option value="stale_code">代码已过期</option>
+          </select>
+        </label>
         {canEdit && (
           <div className="knowhow-toolbar-actions">
             <button type="button" className="sort-button knowhow-import-button" onClick={onCreateClick}>
@@ -3288,11 +3321,13 @@ function KnowhowTableList({
             重试
           </button>
         </p>
-      ) : !tables || tables.length === 0 ? (
+      ) : tables.length === 0 ? (
         <div className="knowhow-empty">
           <div className="knowhow-empty-icon">▦</div>
-          <strong>还没有 knowhow 表</strong>
-          <p>{canEdit ? "可从 Excel/CSV/Markdown 导入，或新建空表现场定表头" : "当前为只读访问"}</p>
+          <strong>{hasUnfilteredTables ? "当前筛选下没有表" : "还没有 knowhow 表"}</strong>
+          {!hasUnfilteredTables && (
+            <p>{canEdit ? "可从 Excel/CSV/Markdown 导入，或新建空表现场定表头" : "当前为只读访问"}</p>
+          )}
         </div>
       ) : (
         <div className="knowhow-table-cards">

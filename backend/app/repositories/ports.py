@@ -920,3 +920,15 @@ class ReportSourceQueryPort(Protocol):
     def report_source_rows(
         self, notebook_id: str
     ) -> list[dict[str, str]]: ...
+
+
+class ContentOverviewMemoryStorePort(Protocol):
+    def notebook_content_overview(
+        self, user_id: str, notebook_id: str, limit: int = 3
+    ) -> dict[str, Any]: ...
+
+
+class ContentOverviewKnowhowStorePort(Protocol):
+    def knowhow_table_health_inputs(
+        self, notebook_id: str
+    ) -> list[dict[str, Any]]: ...

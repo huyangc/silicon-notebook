@@ -82,6 +82,37 @@ export type MemoryRecord = {
   provenance: Record<string, unknown>;
 };
 
+export type MemoryOverviewItem = {
+  id: string;
+  title: string;
+  status: "candidate" | "confirmed";
+  updated_at: string;
+};
+
+export type KnowhowOverviewTable = {
+  id: string;
+  title: string;
+  row_count: number;
+  last_activity_at: string;
+};
+
+export type NotebookContentOverview = {
+  memory: {
+    total: number;
+    confirmed: number;
+    candidate: number;
+    recent: MemoryOverviewItem[];
+  };
+  knowhow: {
+    table_count: number;
+    row_count: number;
+    projection_pending: number;
+    projection_failed: number;
+    stale_code_count: number;
+    recent_tables: KnowhowOverviewTable[];
+  };
+};
+
 export type PaginatedMemories = {
   items: MemoryRecord[];
   total_count: number;

@@ -36,16 +36,23 @@ test("probing/extracting/stopping labels are explicit", () => {
     kgBuildPresentation(job("running", "probing"), 80, false).label,
     "正在连接模型服务…",
   );
+  const extracting = kgBuildPresentation(
+    job("running", "extracting", {
+      completed_sources: 12,
+      total_sources: 80,
+    }),
+    68,
+    true,
+  );
+  assert.equal(extracting.label, "正在分析 12/80 项内容");
+  assert.equal(extracting.detail, "正在提取知识对象与关系");
   assert.equal(
     kgBuildPresentation(
-      job("running", "extracting", {
-        completed_sources: 12,
-        total_sources: 80,
-      }),
-      68,
+      job("running", "extracting", { failed_sources: 2 }),
+      78,
       true,
-    ).label,
-    "正在分析 12/80",
+    ).detail,
+    "2 项内容未完成；其余内容继续处理",
   );
   assert.equal(
     kgBuildPresentation(job("running", "stopping"), 68, true).label,
@@ -65,7 +72,7 @@ test("model failure preserves progress and exposes continuation", () => {
     68,
     true,
   );
-  assert.equal(view.label, "分析已中断 · 已完成 12/80");
+  assert.equal(view.label, "分析已中断 · 已完成 12/80 项内容");
   assert.equal(view.detail.includes("已完成内容已保留"), true);
   assert.equal(view.actionLabel, "继续分析未完成内容");
   assert.equal(view.tone, "error");
@@ -77,12 +84,13 @@ test("successful completion with source warnings remains retryable", () => {
     failed_sources: 3,
   });
   const view = kgBuildPresentation(completed, 3, true);
-  assert.equal(view.label, "分析完成 · 3 篇未完成");
+  assert.equal(view.label, "分析完成 · 3 项内容未完成");
+  assert.equal(view.detail, "已完成内容已保留，可继续处理未完成来源");
   assert.equal(view.actionLabel, "继续分析未完成内容");
   assert.equal(view.tone, "warning");
   assert.equal(
     kgBuildTerminalToast(completed),
-    "知识图谱分析完成，但有 3 篇未完成",
+    "知识图谱分析完成，但有 3 项内容未完成",
   );
 });
 

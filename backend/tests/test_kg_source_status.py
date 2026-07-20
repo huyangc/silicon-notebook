@@ -26,8 +26,13 @@ def repo(tmp_path, monkeypatch):
     return SQLiteRepository(settings)
 
 
-def _insert_source(repo: SQLiteRepository, notebook_id: str, *,
-                   with_elements: bool = True) -> str:
+def _insert_source(
+    repo: SQLiteRepository,
+    notebook_id: str,
+    *,
+    with_elements: bool = True,
+    source_type: str = "markdown",
+) -> str:
     """Insert a minimal source row; optionally insert a source_elements row.
     Returns the source_id."""
     source_id = f"src-{uuid4().hex[:10]}"
@@ -38,9 +43,9 @@ def _insert_source(repo: SQLiteRepository, notebook_id: str, *,
                (id, notebook_id, title, source_type, status, parse_status,
                 file_name, file_path, file_size, file_hash, summary, doc_type,
                 created_at, updated_at)
-               VALUES (?, ?, 'Test Source', 'markdown', 'extracted', 'parsed',
+               VALUES (?, ?, 'Test Source', ?, 'extracted', 'parsed',
                        'test.md', '', 0, '', '', '', ?, ?)""",
-            (source_id, notebook_id, now, now),
+            (source_id, notebook_id, source_type, now, now),
         )
         if with_elements:
             elem_id = f"el-{uuid4().hex[:10]}"
@@ -133,6 +138,17 @@ def test_pending_count_drops_after_kg_added(repo):
     repo._test_insert_object(nb.id, "concept", {"name": "Vt"}, source_id=src_id)
     with repo._connect() as db:
         assert repo._count_pending_kg_sources(db, nb.id) == 0
+
+
+def test_compat_pending_helper_is_physical_while_summary_is_visible(repo):
+    nb = repo.create_notebook(NotebookCreate(name="mixed pending"))
+    _insert_source(repo, nb.id, source_type="markdown")
+    _insert_source(repo, nb.id, source_type="memory")
+    _insert_source(repo, nb.id, source_type="knowhow")
+
+    with repo._connect() as db:
+        assert repo._count_pending_kg_sources(db, nb.id) == 3
+    assert repo.get_notebook(nb.id).kg_pending_sources == 1
 
 
 # ---------------------------------------------------------------------------

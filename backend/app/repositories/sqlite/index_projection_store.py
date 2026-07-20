@@ -154,6 +154,24 @@ class IndexProjectionStore:
             return [r["id"] for r in db.execute(
                 "SELECT id FROM sources WHERE notebook_id=?", (notebook_id,)).fetchall()]
 
+    def visible_source_ids(
+        self, notebook_id: str, source_ids: List[str]
+    ) -> List[str]:
+        if not source_ids:
+            return []
+        visible = set()
+        with self.connect() as db:
+            for batch in self.in_batches(source_ids):
+                placeholders = ",".join("?" for _ in batch)
+                rows = db.execute(
+                    "SELECT id FROM sources WHERE notebook_id=? "
+                    "AND source_type NOT IN ('memory','knowhow') "
+                    f"AND id IN ({placeholders})",
+                    (notebook_id, *batch),
+                ).fetchall()
+                visible.update(row["id"] for row in rows)
+        return [source_id for source_id in source_ids if source_id in visible]
+
     def notebook_owner(self, notebook_id: str) -> "str | None":
         with self.connect() as db:
             row = db.execute(

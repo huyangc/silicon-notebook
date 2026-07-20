@@ -124,6 +124,43 @@ def test_base_notebook_projection_survives_the_move(repo):
     assert repo.get_notebook(base.id).tier == "base"
 
 
+def test_summary_source_and_pending_counts_exclude_derived_content(repo):
+    notebook = repo.create_notebook(NotebookCreate(name="mixed sources"))
+    now = "2026-07-20T00:00:00"
+    with repo._write() as db:
+        for source_id, source_type in (
+            ("s-uploaded", "document"),
+            ("s-memory", "memory"),
+            ("s-knowhow", "knowhow"),
+        ):
+            db.execute(
+                "INSERT INTO sources "
+                "(id,notebook_id,title,source_type,status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    source_id,
+                    notebook.id,
+                    source_id,
+                    source_type,
+                    "ready",
+                    now,
+                    now,
+                ),
+            )
+            db.execute(
+                "INSERT INTO source_elements "
+                "(id,source_id,element_type,location_label,text,created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (f"e-{source_id}", source_id, "paragraph", "p1", "text", now),
+            )
+    from app.repositories.sqlite import knowledge_counts_cache
+
+    knowledge_counts_cache.invalidate(notebook.id)
+    summary = repo.get_notebook(notebook.id)
+    assert summary.counts["sources"] == 1
+    assert summary.kg_pending_sources == 1
+
+
 # ---------------------------------------------------------------------------
 # Task 4 delegation tests: NotebookSummaryQuery / NotebookCatalogService now
 # hold ZERO SQL — every projection primitive is a QueryStore method reached
@@ -140,9 +177,9 @@ def test_t4deleg_visible_source_count_delegate(repo, monkeypatch):
     """memory-kg-extract Task 5 retargets the counts["sources"] projection
     from the generic count_rows(table, column, value) primitive to the
     dedicated visible_source_count(notebook_id) — it excludes Memory-derived
-    synthetic sources (source_type='memory'), which count_rows cannot express
-    since it is a table-agnostic helper still used elsewhere (the facade's
-    _count re-export). The delegation-proof spy moves with it."""
+    and Knowhow-table synthetic sources, which count_rows cannot express since
+    it is a table-agnostic helper still used elsewhere (the facade's _count
+    re-export). The delegation-proof spy moves with it."""
     notebook = repo.create_notebook(NotebookCreate(name="count-rows"))
     calls = []
 
@@ -185,17 +222,37 @@ def test_t4deleg_notebook_has_kg_delegate(repo, monkeypatch):
     assert calls and calls[0] == notebook.id  # MUT
 
 
-def test_t4deleg_pending_kg_source_count_delegate(repo, monkeypatch):
+def test_t4deleg_from_row_uses_visible_pending_kg_sources(repo, monkeypatch):
     notebook = repo.create_notebook(NotebookCreate(name="pending"))
     calls = []
 
     def spy(db, notebook_id):
         calls.append(notebook_id)
-        return 0
+        return 17
+
+    monkeypatch.setattr(
+        repo._runtime.notebook_summaries, "visible_pending_kg_sources", spy
+    )
+    summary = repo.get_notebook(notebook.id)
+    assert calls and calls[0] == notebook.id  # MUT
+    assert summary.kg_pending_sources == 17
+
+
+def test_t4deleg_count_pending_kg_sources_stays_physical(repo, monkeypatch):
+    notebook = repo.create_notebook(NotebookCreate(name="physical-pending"))
+    calls = []
+
+    def spy(db, notebook_id):
+        calls.append(notebook_id)
+        return 23
 
     monkeypatch.setattr(repo._runtime.queries, "pending_kg_source_count", spy)
-    repo.get_notebook(notebook.id)
+    with repo._connect() as db:
+        count = repo._runtime.notebook_summaries.count_pending_kg_sources(
+            db, notebook.id
+        )
     assert calls and calls[0] == notebook.id  # MUT
+    assert count == 23
 
 
 def test_t4deleg_mounted_bases_row_delegate(repo, monkeypatch):

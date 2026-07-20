@@ -13,7 +13,9 @@ import {
 } from "./workspace-transitions.ts";
 import { CHAT_MODES } from "./workspace-model.ts";
 import {
+  callSitesIn,
   declarations,
+  findFunctionIn,
   importsFrom,
   jsxElements,
   parseModule,
@@ -25,6 +27,9 @@ test("memory count deep-link targets the notebook memory tab", () => {
   assert.deepEqual(parseMemoryHash("#notebook=nb-1&tab=memory"), {
     scope: "notebook",
     notebookId: "nb-1",
+    filterNotebookId: null,
+    status: null,
+    itemId: null,
   });
 });
 
@@ -54,18 +59,26 @@ test("workspace hash yields to memory links and ignores unrelated hashes", () =>
 
 
 test("the two hash parsers stay mutually exclusive", () => {
-  for (const hash of [
-    "#notebook=nb-1",
-    "#notebook=nb-1&tab=memory",
-    "#memory",
-    "",
-    "#zzz",
+  for (const { hash, isMemoryHash } of [
+    { hash: "#notebook=nb-1", isMemoryHash: false },
+    { hash: "#notebook=nb-1&tab=memory", isMemoryHash: true },
+    { hash: "#memory", isMemoryHash: true },
+    {
+      hash: "#memory&notebook=nb%201&status=confirmed&item=mem%2F1",
+      isMemoryHash: true,
+    },
+    { hash: "", isMemoryHash: false },
+    { hash: "#zzz", isMemoryHash: false },
   ]) {
     assert.equal(
       parseMemoryHash(hash) !== null && parseWorkspaceHash(hash) !== null,
       false,
       `${hash} 同时被两个解析器认领`,
     );
+    if (isMemoryHash) {
+      assert.notEqual(parseMemoryHash(hash), null, `${hash} 未被 Memory 解析器认领`);
+      assert.equal(parseWorkspaceHash(hash), null, `${hash} 被工作区解析器误认领`);
+    }
   }
 });
 
@@ -74,7 +87,35 @@ test("global Memory has a stable outer-page location", () => {
   assert.equal(memoryHash(null), "#memory");
   assert.deepEqual(
     parseMemoryHash("#memory"),
-    { scope: "global", notebookId: null },
+    {
+      scope: "global",
+      notebookId: null,
+      filterNotebookId: null,
+      status: null,
+      itemId: null,
+    },
+  );
+});
+
+
+test("global Memory deep-links preserve optional filters and a detail target", () => {
+  assert.equal(
+    memoryHash(null, {
+      notebookId: "nb 1",
+      status: "confirmed",
+      itemId: "mem/1",
+    }),
+    "#memory&notebook=nb%201&status=confirmed&item=mem%2F1",
+  );
+  assert.deepEqual(
+    parseMemoryHash("#memory&notebook=nb%201&status=confirmed&item=mem%2F1"),
+    {
+      scope: "global",
+      notebookId: null,
+      filterNotebookId: "nb 1",
+      status: "confirmed",
+      itemId: "mem/1",
+    },
   );
 });
 
@@ -121,6 +162,45 @@ test("workspace composes the shared Memory surfaces", async () => {
       ),
     ),
     true,
+  );
+});
+
+
+test("global Memory navigation owns and forwards explicit destination state", async () => {
+  const page = await parseModule("page.tsx");
+  const showGlobalMemory = findFunctionIn(page, "Home", "showGlobalMemory");
+  const globalPanel = jsxElements(page, "MemoryPanel").find(
+    ({ attributes }) => attributes.scope === "global",
+  );
+
+  assert.ok(
+    callSitesIn(showGlobalMemory).some(
+      ({ target, arguments: args }) => (
+        target === "setMemoryNavigationTarget"
+        && args[0] === "target"
+      ),
+    ),
+  );
+  assert.ok(
+    callSitesIn(showGlobalMemory).some(
+      ({ target, arguments: args }) => (
+        target === "memoryHash"
+        && args[0] === "null"
+        && args[1] === "target"
+      ),
+    ),
+  );
+  assert.equal(
+    globalPanel?.bindings?.initialNotebookId,
+    "memoryNavigationTarget.notebookId",
+  );
+  assert.equal(
+    globalPanel?.bindings?.initialStatus,
+    "memoryNavigationTarget.status",
+  );
+  assert.equal(
+    globalPanel?.bindings?.initialMemoryId,
+    "memoryNavigationTarget.itemId",
   );
 });
 

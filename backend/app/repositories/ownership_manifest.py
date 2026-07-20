@@ -592,6 +592,7 @@ SURFACE_MEMBERS = (
         kind='instance_attribute',
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.admin_query_repository', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/api/deps.py', scope='<module>.content_overview_service', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.identity_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_access_repository', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.notebook_catalog_repository', kind='attribute', target='_runtime'),
@@ -1902,7 +1903,6 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.list_knowhow_tables', kind='attribute', target='list_knowhow_tables'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.list_tables_for_agent', kind='attribute', target='list_knowhow_tables'),
             ConsumerSite(path='scripts/backfill_knowhow_md.py', scope='<module>.plan_backfill', kind='attribute', target='list_knowhow_tables'),
         ),
