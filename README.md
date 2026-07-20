@@ -41,12 +41,13 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 20. The committed v9 compatibility fixture
-upgrades through migrations v10–v20 and remains readable. Those migrations
+The current schema version is 21. The committed v9 compatibility fixture
+upgrades through migrations v10–v21 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
-reference-library mounts plus promotion targets (v20).
+reference-library mounts plus promotion targets (v20), and the normalized
+interactive-reformat anchor-membership expression index (v21).
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Boundary regression tests prevent these responsibilities from being copied back into the monoliths. Future extraction should follow the same incremental pattern: preserve endpoints and user behavior, move one cohesive domain, then run the complete offline gate.
 
@@ -1025,6 +1026,25 @@ PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --us
 - `--plan PATH` — the reviewed plan file to apply (see `--apply`).
 
 The **anchor (row-title) column is never reformatted** by any bulk path (import, append, or this backfill) — it's a grouping key that must stay byte-stable, so normalizing it would split freshly-touched rows off from their existing concept group. (Only the explicit per-cell "reformat" action in the editor, where a human reviews the suggestion and all sibling rows are rewritten together, may touch it.)
+
+Only an interactive row/table reformat batch's save unit has this guarded
+concurrency contract; ordinary shared-cell edits and ordinary APIs do not gain
+it. When the batch opens, it freezes the complete table snapshot, including the
+exact member set only for each non-empty anchor group covered by a complete
+anchor-group save unit (a merged shared-column fan-out or a singleton complete
+group). One SQLite write transaction revalidates every write target's expected
+content baseline, the active anchor designation, and the exact membership of
+those covered frozen groups. A non-shared column in a multi-row anchor group is
+a valid subset write: it checks only its write-target baselines, not the whole
+group membership guard. Any applicable content, anchor, or membership drift
+rejects the entire save unit with HTTP 409 and zero partial writes. The UI
+retains the generated reformat candidates as stale, requires the user to rerun
+the reformat, and refreshes the table after the batch dialog closes.
+
+Schema v21 indexes `(column_id, JS-trim(content_md), row_id)`. The guarded
+membership check uses that same exact normalization as an equality predicate,
+so complete anchor-group verification remains fail-closed while it seeks the
+group instead of scanning the entire anchor column inside its write transaction.
 
 Must be run from the main checkout root (it needs the real `.env`/database configuration, same as `batch_ingest.py`/`replay_retrieval.py` above). Safe to re-run: applying the same plan again is a no-op (each already-applied cell no longer matches its recorded "before").
 

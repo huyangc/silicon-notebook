@@ -13,6 +13,11 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
+from app.repositories.sqlite.anchor_normalization import (
+    JS_TRIM_WHITESPACE,
+    js_trim,
+    sqlite_js_trim_expression,
+)
 from app.repositories.sqlite.knowhow_store import KnowhowStore
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -1176,3 +1181,461 @@ def test_bulk_guarded_holds_reserved_lock_across_compare_and_write(store, notebo
         "a second connection could BEGIN IMMEDIATE mid-transaction -> the "
         "guarded compare-and-write holds no cross-process write lock"
     )
+
+
+# ---------------------------------------------------------------------------
+# Concurrency P1 (round-4 followup): ANCHOR BASELINE in the atomic guard. The
+# editor's batch fan-out writes a merged/shared cell to every branch row of an
+# anchor group using row ids FROZEN when the modal opened. If another client
+# moves a sibling row's ANCHOR out of that group but leaves the EDITED cell
+# untouched, expected_before still matches and membership still holds -- the old
+# guard let the candidate land on a row that no longer belongs to the group.
+# The fix threads an OPTIONAL per-row anchor baseline (anchor_column_id +
+# expected_anchor, positionally parallel to updates, mirroring expected_before):
+# re-read each target row's anchor cell in the SAME BEGIN IMMEDIATE, and a
+# mismatch is a conflict identical to a stale expected_before (whole batch
+# refused, nothing written). Omitting the anchor guard is byte-identical legacy.
+# ---------------------------------------------------------------------------
+
+
+def _anchor_group(store: KnowhowStore, notebook_id: str):
+    """A table with an anchor column ('违例类型') + a shared 'attribute' column
+    ('修复方法'), and TWO rows in the SAME anchor group (same anchor value, same
+    shared value) -- the merged-cell fan-out shape the batch-reformat save writes
+    as one guarded atomic call. Returns ``(table_id, anchor_col, shared_col, r0,
+    r1, anchor_val, shared_val)``."""
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    anchor_col, shared_col = cols["违例类型"], cols["修复方法"]
+    r0 = store.add_knowhow_row(table_id, {anchor_col: "示波器", shared_col: "旧改法"})
+    r1 = store.add_knowhow_row(table_id, {anchor_col: "示波器", shared_col: "旧改法"})
+    return table_id, anchor_col, shared_col, r0, r1, "示波器", "旧改法"
+
+
+def test_atomic_anchor_guard_rejects_parallel_length_mismatch(store, notebook_id):
+    table_id, anchor_col, shared_col, r0, r1, anchor, before = _anchor_group(
+        store, notebook_id
+    )
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, before, "new"),
+            (table_id, r1, shared_col, before, "new"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=[anchor],
+    )
+    assert result == {"written": [], "conflict": True}
+    rows = {
+        row["id"]: row["cells"]
+        for row in store.get_knowhow_table(table_id)["rows"]
+    }
+    assert rows[r0][shared_col] == before
+    assert rows[r1][shared_col] == before
+
+
+def test_atomic_anchor_guard_rejects_anchor_column_from_another_table(
+    store, notebook_id
+):
+    target = store.create_knowhow_table(notebook_id, "target", "", BASE_COLUMNS)
+    target_cols = _columns_by_name(store, target)
+    row_id = store.add_knowhow_row(
+        target,
+        {target_cols["修复方法"]: "old"},
+    )
+
+    foreign = store.create_knowhow_table(notebook_id, "foreign", "", BASE_COLUMNS)
+    foreign_anchor = _columns_by_name(store, foreign)["违例类型"]
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (
+                target,
+                row_id,
+                target_cols["修复方法"],
+                "old",
+                "new",
+            )
+        ],
+        anchor_column_id=foreign_anchor,
+        expected_anchor=[""],
+    )
+    assert result == {"written": [], "conflict": True}
+    row = store.get_knowhow_table(target)["rows"][0]
+    assert row["cells"][target_cols["修复方法"]] == "old"
+
+
+def test_guarded_atomic_anchor_mismatch_conflicts_writes_nothing(store, notebook_id):
+    table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
+        store, notebook_id
+    )
+    # Another client moves r1 OUT of the group by changing only its anchor cell;
+    # the edited (shared) cell is untouched, so expected_before below still matches.
+    store.update_knowhow_cell(r1, anchor_col, "万用表")
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, shared_val, "新改法"),
+            (table_id, r1, shared_col, shared_val, "新改法"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=[anchor_val, anchor_val],  # frozen snapshot: both were 示波器
+    )
+
+    assert result == {"written": [], "conflict": True}
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == shared_val  # all-or-nothing: nothing written
+    assert rows[r1][shared_col] == shared_val
+
+
+def test_guarded_atomic_anchor_match_writes_all(store, notebook_id):
+    table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
+        store, notebook_id
+    )
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, shared_val, "新改法"),
+            (table_id, r1, shared_col, shared_val, "新改法"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=[anchor_val, anchor_val],  # anchors unchanged -> proceed
+    )
+
+    assert result["conflict"] is False
+    assert result["written"] == [(r0, shared_col), (r1, shared_col)]
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == "新改法"
+    assert rows[r1][shared_col] == "新改法"
+
+
+def test_guarded_atomic_omitted_anchor_guard_is_legacy(store, notebook_id):
+    table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
+        store, notebook_id
+    )
+    # Same "sibling anchor moved" situation as the mismatch test...
+    store.update_knowhow_cell(r1, anchor_col, "万用表")
+
+    # ...but with NO anchor guard supplied: the anchor is never re-read, so the
+    # write proceeds exactly as before this fix (byte-identical legacy behavior).
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, shared_val, "新改法"),
+            (table_id, r1, shared_col, shared_val, "新改法"),
+        ],
+    )
+
+    assert result["conflict"] is False
+    assert result["written"] == [(r0, shared_col), (r1, shared_col)]
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == "新改法"
+    assert rows[r1][shared_col] == "新改法"
+
+
+# ---------------------------------------------------------------------------
+# Concurrency P1 (round-5): the per-row byte-exact anchor re-read above catches a
+# FROZEN target that LEFT the group, but two structural drifts also make the
+# fan-out a partial/misaimed group write while EVERY frozen row still matches its
+# snapshot: (a) the table's ANCHOR DESIGNATION moved to a DIFFERENT column after
+# the snapshot (the guarded column's cells all still equal their frozen values,
+# but the logical grouping is now defined by another column); and (b) a NEW row
+# JOINED the group (its anchor cell set to the group value by another client) --
+# every frozen id still matches, but the write now covers only a SUBSET of the
+# current logical group. The round-5 fix adds, inside the SAME BEGIN IMMEDIATE
+# before any write, a DESIGNATION check (anchor_column_id must still be the
+# table's role=='anchor' column) and an EXACT-MEMBERSHIP check (for each distinct
+# frozen anchor VALUE, the current member row-id set -- rows whose anchor cell
+# TRIM-equals that value, mirroring the frontend groupRowsByAnchor -- must EQUAL
+# the frozen target set). Both refuse the whole batch (409, nothing written).
+# ---------------------------------------------------------------------------
+
+
+def test_guarded_atomic_anchor_designation_moved_conflicts_writes_nothing(store, notebook_id):
+    table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
+        store, notebook_id
+    )
+    other_col = _columns_by_name(store, table_id)["现象识别"]
+    # Another client moves the anchor DESIGNATION to a different column; the OLD
+    # anchor column's cell values are untouched (both rows still read 示波器), so
+    # the per-row byte-exact anchor re-read passes -- only the designation moved.
+    store.set_knowhow_anchor_column(table_id, other_col)
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, shared_val, "新改法"),
+            (table_id, r1, shared_col, shared_val, "新改法"),
+        ],
+        anchor_column_id=anchor_col,  # the column that WAS the anchor at snapshot
+        expected_anchor=[anchor_val, anchor_val],
+    )
+
+    assert result == {"written": [], "conflict": True}
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == shared_val  # all-or-nothing: nothing written
+    assert rows[r1][shared_col] == shared_val
+
+
+def test_guarded_atomic_new_row_joined_group_conflicts_writes_nothing(store, notebook_id):
+    table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
+        store, notebook_id
+    )
+    # Another client adds a NEW row whose anchor cell TRIM-equals the group value
+    # (surrounding whitespace variance) -- the frontend would show it merged into
+    # this group, but the fan-out froze only {r0, r1}. Every frozen row still
+    # matches its baseline; only the membership grew. TRIM here is load-bearing:
+    # a byte-exact member scan would MISS this joiner ("  示波器 " != "示波器").
+    r2 = store.add_knowhow_row(table_id, {anchor_col: "  示波器 ", shared_col: "别的"})
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, shared_val, "新改法"),
+            (table_id, r1, shared_col, shared_val, "新改法"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=[anchor_val, anchor_val],
+    )
+
+    assert result == {"written": [], "conflict": True}
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == shared_val  # nothing written
+    assert rows[r1][shared_col] == shared_val
+    assert rows[r2][shared_col] == "别的"
+
+
+def test_guarded_atomic_membership_trims_whitespace_variant_member(store, notebook_id):
+    # A member whose STORED anchor differs from the group value only by
+    # surrounding whitespace is still an in-group member (frontend groups by
+    # .trim()): the membership check must NOT flag it as drift. Both rows' frozen
+    # anchor snapshots are their byte-exact stored values (so the per-row
+    # byte-exact re-read also passes), yet they TRIM to the SAME key -> the
+    # current member set equals the frozen set -> the write proceeds. (This fails
+    # if the membership check trims the current members but not the frozen keys,
+    # which would split {r0, r1} into two singleton groups and falsely conflict.)
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    anchor_col, shared_col = cols["违例类型"], cols["修复方法"]
+    r0 = store.add_knowhow_row(table_id, {anchor_col: "示波器", shared_col: "旧改法"})
+    r1 = store.add_knowhow_row(table_id, {anchor_col: " 示波器 ", shared_col: "旧改法"})
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, "旧改法", "新改法"),
+            (table_id, r1, shared_col, "旧改法", "新改法"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=["示波器", " 示波器 "],  # byte-exact snapshots; trim-equal
+    )
+
+    assert result["conflict"] is False
+    assert result["written"] == [(r0, shared_col), (r1, shared_col)]
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == "新改法"
+    assert rows[r1][shared_col] == "新改法"
+
+
+# ---------------------------------------------------------------------------
+# Concurrency P1 (round-7 P2 followups): two defects in the anchor guard.
+# F1 -- a row created with EMPTY cells has NO knowhow_cells row for the anchor
+# column. get_knowhow_table represents that absent cell as "" (the column key is
+# simply missing from `cells`, read as ""), so the frontend/wire send
+# expected_anchor="" for it. The per-row anchor baseline read must map an ABSENT
+# cell to "" (not None) to match that wire, else "" != None is a PERMANENT 409 and
+# a blank-anchor row can never be batch-saved -- even right after a reload.
+# F2 -- the structural membership check rebuilt its map by scanning the table's
+# ENTIRE anchor column per guarded call (O(R) each). A unique-anchor table makes
+# every changed cell its own singleton coversAnchorGroup unit -> R×C guarded calls
+# -> O(R²C), all inside the write lock. The fix probes each distinct frozen key
+# with equality on the v21 `js_trim` expression index, which returns exact current
+# members without a LIKE candidate scan or a Python post-filter.
+# ---------------------------------------------------------------------------
+
+
+def test_guarded_atomic_absent_anchor_cell_compares_as_blank(store, notebook_id):
+    # F1: a row whose anchor cell was never written (absent knowhow_cells row) must
+    # compare equal to the wire's expected_anchor="" -- the per-row baseline read
+    # maps the missing DB row to "" (mirroring get_knowhow_table / the frontend's
+    # (row.cells[anchorColumnId] ?? "").trim()), not None. RED before the fix:
+    # None != "" -> a deterministic 409 that no reload can clear.
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    anchor_col, shared_col = cols["违例类型"], cols["修复方法"]
+    # Only the shared column is given -> the anchor column has NO cell row.
+    row_id = store.add_knowhow_row(table_id, {shared_col: "旧改法"})
+    assert _cell_count(store, row_id, anchor_col) == 0  # precondition: absent
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [(table_id, row_id, shared_col, "旧改法", "新改法")],
+        anchor_column_id=anchor_col,
+        expected_anchor=[""],  # the wire's representation of the absent anchor
+    )
+
+    assert result["conflict"] is False
+    assert result["written"] == [(row_id, shared_col)]
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[row_id][shared_col] == "新改法"
+
+
+def test_guarded_atomic_stored_empty_anchor_compares_as_blank(store, notebook_id):
+    # F1 sibling lock: an anchor cell that EXISTS but stores "" (content_md is NOT
+    # NULL DEFAULT '') behaves identically to an absent one -- both are "" to the
+    # per-row baseline read, so expected_anchor="" passes and the write lands.
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    anchor_col, shared_col = cols["违例类型"], cols["修复方法"]
+    row_id = store.add_knowhow_row(table_id, {anchor_col: "", shared_col: "旧改法"})
+    assert _cell_count(store, row_id, anchor_col) == 1  # precondition: stored ""
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [(table_id, row_id, shared_col, "旧改法", "新改法")],
+        anchor_column_id=anchor_col,
+        expected_anchor=[""],
+    )
+
+    assert result["conflict"] is False
+    assert result["written"] == [(row_id, shared_col)]
+
+
+def test_guarded_atomic_blank_anchor_rows_never_form_a_membership_group(store, notebook_id):
+    # F1/round-5 lock: a blank-after-trim anchor is its OWN group on the frontend
+    # (never aggregated), so the structural membership check skips blank keys. Rows
+    # with blank anchors are NOT a group -- a third blank-anchor "joiner" must NOT
+    # trip the membership guard, and both frozen rows still write. (Uses only STORED
+    # blank anchors so it locks the no-aggregation behavior green before AND after.)
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    anchor_col, shared_col = cols["违例类型"], cols["修复方法"]
+    r0 = store.add_knowhow_row(table_id, {anchor_col: "", shared_col: "旧改法"})
+    r1 = store.add_knowhow_row(table_id, {anchor_col: "  ", shared_col: "旧改法"})
+    # Extra blank-anchor row: if blanks aggregated it would be an unexpected member
+    # of the "" group and force a conflict; blanks are per-row, so it is ignored.
+    store.add_knowhow_row(table_id, {anchor_col: "\t", shared_col: "别的"})
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, "旧改法", "新改法"),
+            (table_id, r1, shared_col, "旧改法", "新改法"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=["", "  "],  # both blank-after-trim
+    )
+
+    assert result["conflict"] is False
+    assert result["written"] == [(r0, shared_col), (r1, shared_col)]
+
+
+def test_guarded_atomic_membership_query_uses_normalized_anchor_index(store, notebook_id):
+    # The write-transaction membership lookup is a hot path: a reformat of R
+    # singleton groups and C columns invokes it R×C times. Its observable query
+    # plan must therefore seek the normalized-anchor expression index, rather
+    # than scanning knowhow_cells once per save unit. The expression is the
+    # ECMAScript String.prototype.trim() code-point set; the production helper
+    # owns this spelling once the migration/store change lands.
+    table_id, anchor_col, _shared_col, _r0, _r1, anchor_val, _shared_val = _anchor_group(
+        store, notebook_id
+    )
+    with store.database.connect() as db:
+        plan = db.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT c.row_id "
+            "FROM knowhow_cells c JOIN knowhow_rows r ON r.id = c.row_id "
+            "WHERE c.column_id = ? "
+            f"AND {sqlite_js_trim_expression('c.content_md')} = ? "
+            "AND r.table_id = ?",
+            (anchor_col, anchor_val, table_id),
+        ).fetchall()
+
+    details = [row["detail"] for row in plan]
+    assert any(
+        "idx_knowhow_cells_column_normalized_anchor_row" in detail
+        for detail in details
+    ), details
+    assert not any("SCAN " in detail for detail in details), details
+
+
+@pytest.mark.parametrize("padding", list(JS_TRIM_WHITESPACE))
+def test_sql_normalized_anchor_matches_js_trim_for_every_included_codepoint(store, padding):
+    value = f"{padding}anchor{padding}"
+    with store.database.connect() as db:
+        normalized = db.execute(
+            f"SELECT {sqlite_js_trim_expression('?')}", (value,)
+        ).fetchone()[0]
+    assert js_trim(value) == "anchor"
+    assert normalized == "anchor"
+
+
+@pytest.mark.parametrize("padding", ["\x1c", "\x1d", "\x1e", "\x1f", "\x85"])
+def test_sql_normalized_anchor_keeps_js_trim_excluded_edge_cases(store, padding):
+    value = f"{padding}anchor{padding}"
+    with store.database.connect() as db:
+        normalized = db.execute(
+            f"SELECT {sqlite_js_trim_expression('?')}", (value,)
+        ).fetchone()[0]
+    assert js_trim(value) == value
+    assert normalized == value
+
+
+def test_guarded_atomic_joiner_with_exotic_whitespace_padding_detected(store, notebook_id):
+    # The expression index applies the same ECMAScript trim as the frontend, so a
+    # joiner padded by U+3000 IDEOGRAPHIC SPACE has the same normalized key as
+    # "示波器". Membership grows beyond frozen {r0, r1} and must conflict.
+    table_id, anchor_col, shared_col, r0, r1, anchor_val, shared_val = _anchor_group(
+        store, notebook_id
+    )
+    r2 = store.add_knowhow_row(table_id, {anchor_col: "　示波器", shared_col: "别的"})
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, shared_val, "新改法"),
+            (table_id, r1, shared_col, shared_val, "新改法"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=[anchor_val, anchor_val],
+    )
+
+    assert result == {"written": [], "conflict": True}
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == shared_val  # nothing written
+    assert rows[r1][shared_col] == shared_val
+    assert rows[r2][shared_col] == "别的"
+
+
+def test_guarded_atomic_membership_treats_like_wildcards_as_literal_anchor_text(store, notebook_id):
+    # Membership is equality on the normalized expression, so LIKE metacharacters
+    # and backslashes are ordinary anchor text. A group carrying all three writes
+    # correctly while a wildcard-shaped decoy remains outside the group.
+    table_id = store.create_knowhow_table(notebook_id, "T", "", BASE_COLUMNS)
+    cols = _columns_by_name(store, table_id)
+    anchor_col, shared_col = cols["违例类型"], cols["修复方法"]
+    tricky = "a_b%c\\d"  # underscore + percent + backslash
+    r0 = store.add_knowhow_row(table_id, {anchor_col: tricky, shared_col: "旧改法"})
+    r1 = store.add_knowhow_row(table_id, {anchor_col: tricky, shared_col: "旧改法"})
+    # It resembles a wildcard match but is not the literal normalized anchor.
+    decoy = store.add_knowhow_row(table_id, {anchor_col: "aXbYcZd", shared_col: "别的"})
+
+    result = store.update_knowhow_cells_guarded_atomic(
+        notebook_id,
+        [
+            (table_id, r0, shared_col, "旧改法", "新改法"),
+            (table_id, r1, shared_col, "旧改法", "新改法"),
+        ],
+        anchor_column_id=anchor_col,
+        expected_anchor=[tricky, tricky],
+    )
+
+    assert result["conflict"] is False
+    assert result["written"] == [(r0, shared_col), (r1, shared_col)]
+    rows = {r["id"]: r["cells"] for r in store.get_knowhow_table(table_id)["rows"]}
+    assert rows[r0][shared_col] == "新改法"
+    assert rows[r1][shared_col] == "新改法"
+    assert rows[decoy][shared_col] == "别的"  # decoy never joined the group

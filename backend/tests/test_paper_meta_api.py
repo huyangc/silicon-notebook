@@ -6,6 +6,8 @@ background dispatch polling) and test_notebook_share_readonly.py's
 _client/_login helpers (multi-user owner-gate 404 precedent).
 """
 import time
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
@@ -99,12 +101,12 @@ def test_backfill_endpoint_submits_notify_pending(client, monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        routes_mod.background_jobs, "submit",
-        lambda *a, **k: calls.append(k),
+        routes_mod,
+        "background_jobs",
+        SimpleNamespace(submit=lambda *a, **k: calls.append(k)),
     )
 
     r = client.post(f"/api/notebooks/{nb}/paper-meta/backfill")
     assert r.status_code == 200
     assert r.json() == {"queued": 1}
-    assert len(calls) == 1
-    assert calls[0].get("notify_pending") is True
+    assert calls == [{"name": f"papermeta-{nb}", "notify_pending": True}]

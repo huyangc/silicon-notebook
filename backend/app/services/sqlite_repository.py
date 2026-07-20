@@ -245,7 +245,7 @@ def _make_persist_image(
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 
 @dataclass(frozen=True)
@@ -3339,10 +3339,15 @@ class SQLiteRepository:
         return self._runtime.knowhow_store.update_knowhow_cells_bulk_guarded(notebook_id, updates)
 
     def update_knowhow_cells_guarded_atomic(
-        self, notebook_id: str, updates: list, require_assets=()
+        self,
+        notebook_id: str,
+        updates: list,
+        require_assets=(),
+        anchor_column_id=None,
+        expected_anchor=None,
     ) -> dict:
         return self._runtime.knowhow_store.update_knowhow_cells_guarded_atomic(
-            notebook_id, updates, require_assets
+            notebook_id, updates, require_assets, anchor_column_id, expected_anchor
         )
 
     def delete_knowhow_table(self, table_id: str) -> dict:

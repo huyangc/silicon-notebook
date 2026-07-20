@@ -88,8 +88,16 @@ import {
   reformatResultIsStale,
   markReformatItemRunStale,
 } from "./knowhow-optimize-logic.ts";
+// P1（扇出同源）：合并共享组的实时重算用这套（与 handleCellSave 同源），下面的
+// 「实时组分裂 -> 扇出漂移」逻辑测试据它坐实缺陷机制。
+import {
+  groupRowsByAnchor,
+  isSharedColumn,
+  groupCellWriteTargets,
+} from "./knowhow-grouping-logic.ts";
 import {
   assignmentsIn,
+  callbackFlowsIn,
   callSitesIn,
   controlFlowIn,
   findFunction,
@@ -1680,6 +1688,53 @@ test("planReformatSaves 行作用域：共享列 unit 的 writeTargets 覆盖全
   }
 });
 
+// --- P1（round-4）：写目标还带上快照 anchorMd，让守卫拦住「离组行被冻结扇出误写」---
+// 批量扇出用建批次那一刻冻结的行 id 写共享格。若他人把某兄弟行的 anchor 改掉（移出
+// 本组）但没动被编辑的格，expected_before 仍匹配、后端旧守卫看不见——候选就落到已
+// 离组的行。修复：每个写目标额外带上该行 anchor 列的**快照**值（anchorMd），后端在同
+// 一事务内重读比对，任一离组即整组 409。anchorMd 与 originalMd 同源于传入的那份快照。
+test("planReformatSaves: 共享列 unit 的每个 writeTarget 带上快照 anchorMd（= 建批次那刻该行 anchor 列值）", () => {
+  const changed = [
+    { rowId: "r1", columnId: "c-shared", columnName: "共享说明", originalMd: "旧共享说明", status: "changed", candidateMd: "新共享说明", source: "llm" },
+  ];
+  const units = planReformatSaves(changed, F1_SHARED_ROWS, "c-anchor");
+  assert.strictEqual(units.length, 1);
+  // 三个写目标各带自己那行的 anchor 列快照值（F1_SHARED_ROWS 全组 c-anchor="示波器"）。
+  const anchorByRow = new Map(units[0].writeTargets.map((t) => [t.rowId, t.anchorMd]));
+  assert.deepStrictEqual(
+    [...anchorByRow.entries()].sort(),
+    [["r1", "示波器"], ["r2", "示波器"], ["r3", "示波器"]],
+  );
+});
+
+test("planReformatSaves: writeTarget.anchorMd 在建批次那刻定格——之后改实时行的 anchor 不泄漏进来（快照不可变）", () => {
+  // 局部快照（不污染共享夹具）。planReformatSaves 是纯函数：只读传入这份 rows，
+  // 故 runSave 传 snapshotRef.current.allRows 时 anchor 基线恒为快照值。
+  const snapshot = [
+    { id: "r1", position: 0, cells: { "c-anchor": "示波器", "c-shared": "旧共享说明" } },
+    { id: "r2", position: 1, cells: { "c-anchor": "示波器", "c-shared": "旧共享说明" } },
+  ];
+  const changed = [
+    { rowId: "r1", columnId: "c-shared", columnName: "共享说明", originalMd: "旧共享说明", status: "changed", candidateMd: "新共享说明", source: "llm" },
+  ];
+  const units = planReformatSaves(changed, snapshot, "c-anchor");
+  // 弹窗打开期间实时行被改（模拟 detail 刷新/他人把该行移出组）——已规划的 unit 不受影响。
+  snapshot[0].cells["c-anchor"] = "万用表";
+  snapshot[1].cells["c-anchor"] = "万用表";
+  for (const t of units[0].writeTargets) {
+    assert.strictEqual(t.anchorMd, "示波器"); // 仍是建批次那刻的快照值
+  }
+});
+
+test("planReformatSaves: 记录型表（anchorColumnId=null）——writeTarget.anchorMd 为空串（无 anchor 列可读）", () => {
+  const rows = [{ id: "r1", position: 0, cells: { "c-a": "同内容" } }];
+  const changed = [
+    { rowId: "r1", columnId: "c-a", columnName: "A", originalMd: "同内容", status: "changed", candidateMd: "新内容", source: "llm" },
+  ];
+  const units = planReformatSaves(changed, rows, null);
+  assert.strictEqual(units[0].writeTargets[0].anchorMd, "");
+});
+
 test("isReformatUnitStale 行作用域：非展示兄弟(r3)被并发改动 → 整组判 stale（RED：旧实现只查被选中行，看不见 r3 的改动）", () => {
   const changed = [
     { rowId: "r1", columnId: "c-shared", columnName: "共享说明", originalMd: "旧共享说明", status: "changed", candidateMd: "新共享说明", source: "llm" },
@@ -1716,6 +1771,76 @@ test("planReformatSaves 行作用域：非共享列（c-branch 每行各异）�
   assert.strictEqual(units.length, 1);
   assert.deepStrictEqual(units[0].writeTargets.map((t) => t.rowId), ["r1"]); // 非共享列不扇出
   assert.deepStrictEqual(units[0].members.map((m) => m.rowId), ["r1"]);
+});
+
+// --- P1（round-6）：coversAnchorGroup 门——服务端「组成员精确相等」结构守卫只对**整组写**
+//     成立。planReformatSaves 给每个 unit 标注：它的 writeTargets 是否**恰好**是建批次那一刻
+//     该 anchor 组的完整成员集。true 的两类才由 runSave 下发 anchorGuard、handleCellSave 走
+//     guarded 批量端点：①合并共享列扇写（writeTargets=整组）②**单例组**（组内仅一行，
+//     writeTargets=那一行=整组）。false 的一类是回归防线：多行组里的**非共享列**——writeTargets
+//     是**有意的子集**（只写这一行），若也带守卫，后端「current==frozen」会把「组里本就有别的
+//     兄弟行」误判成 joiner 漂移、把每一次合法的逐行属性规整都**假 409**。记录型表（无 anchor 组）
+//     恒 false。这是「单例组增员漏检」P1 与「非共享列假 409」回归之间的唯一判别位。----------------
+const P1R6_SINGLETON_ROWS = [
+  { id: "r1", position: 0, cells: { "c-anchor": "示波器", "c-x": "内容一" } },
+  { id: "r2", position: 1, cells: { "c-anchor": "万用表", "c-x": "内容二" } },
+];
+
+test("planReformatSaves: 单例组（组内仅一行）——非共享分支但 coversAnchorGroup=true（writeTargets 即整组 → 走 guarded 端点，捕获增员漂移）", () => {
+  const changed = [
+    { rowId: "r1", columnId: "c-x", columnName: "X", originalMd: "内容一", status: "changed", candidateMd: "内容一改", source: "llm" },
+  ];
+  const units = planReformatSaves(changed, P1R6_SINGLETON_ROWS, "c-anchor");
+  assert.strictEqual(units.length, 1);
+  assert.deepStrictEqual(units[0].writeTargets.map((t) => t.rowId), ["r1"]); // 单行组只写自己
+  assert.strictEqual(units[0].coversAnchorGroup, true); // = 整组 → runSave 下发 anchorGuard
+});
+
+test("planReformatSaves: 多行组的非共享列——coversAnchorGroup=false（writeTargets 是有意子集；带守卫会把兄弟行误判 joiner 假 409）", () => {
+  const changed = [
+    { rowId: "r1", columnId: "c-branch", columnName: "分支值", originalMd: "分支甲", status: "changed", candidateMd: "分支甲改", source: "llm" },
+  ];
+  const units = planReformatSaves(changed, F1_SHARED_ROWS, "c-anchor"); // {r1,r2,r3} 同 anchor，c-branch 每行各异
+  assert.strictEqual(units.length, 1);
+  assert.deepStrictEqual(units[0].writeTargets.map((t) => t.rowId), ["r1"]); // 只写这一行（子集）
+  assert.strictEqual(units[0].coversAnchorGroup, false); // 子集 → runSave 不下发 anchorGuard → 单格端点 → 不假 409
+});
+
+test("planReformatSaves: 合并共享列（多行组全同值）——coversAnchorGroup=true（writeTargets=整组扇写）", () => {
+  const changed = F1_SHARED_ROWS.map((r) => ({
+    rowId: r.id, columnId: "c-shared", columnName: "共享说明", originalMd: "旧共享说明", status: "changed", candidateMd: "新共享说明", source: "llm",
+  }));
+  const units = planReformatSaves(changed, F1_SHARED_ROWS, "c-anchor");
+  assert.strictEqual(units.length, 1);
+  assert.deepStrictEqual(units[0].writeTargets.map((t) => t.rowId).slice().sort(), ["r1", "r2", "r3"]); // 整组
+  assert.strictEqual(units[0].coversAnchorGroup, true);
+});
+
+test("planReformatSaves: 记录型表（anchorColumnId=null）——coversAnchorGroup=false（无 anchor 组可精确相等）", () => {
+  const rows = [{ id: "r1", position: 0, cells: { "c-a": "同内容" } }];
+  const changed = [
+    { rowId: "r1", columnId: "c-a", columnName: "A", originalMd: "同内容", status: "changed", candidateMd: "新内容", source: "llm" },
+  ];
+  const units = planReformatSaves(changed, rows, null);
+  assert.strictEqual(units[0].coversAnchorGroup, false);
+});
+
+test("端到端（保存循环，P1 round-6）：单例组遇 409 → 成员落既有 stale_skipped 停靠态（与多目标扇写同一终态）", () => {
+  // 单例组 unit 带 coversAnchorGroup=true → runSave 下发 anchorGuard → handleCellSave 走 guarded
+  // 批量端点。若建批次后有兄弟行 join 该 anchor 组，服务端「组成员精确相等」判 409（frozen {r1}
+  // ≠ current {r1,新增行}）。这条坐实：单例经批量端点拿到的 409 落进**既有** stale-skip 机制，
+  // 不是新终态——runSave 的 409 catch 分支（httpErrorStatus===409）整组 markReformatItemStaleSkipped。
+  const changed = [
+    { rowId: "r1", columnId: "c-x", columnName: "X", originalMd: "内容一", status: "changed", candidateMd: "内容一改", source: "llm" },
+  ];
+  const units = planReformatSaves(changed, P1R6_SINGLETON_ROWS, "c-anchor");
+  assert.strictEqual(units[0].coversAnchorGroup, true); // 前置：确会下发 anchorGuard / 走 guarded 端点
+  let state = batchStateOf("saving", units[0].members.map((m) => makeItem(m.rowId, m.columnId, "changed")));
+  for (const m of units[0].members) state = markReformatItemSaving(state, m.rowId, m.columnId);
+  for (const m of units[0].members) state = markReformatItemStaleSkipped(state, m.rowId, m.columnId, BATCH_REFORMAT_STALE_SKIP_TEXT);
+  assert.strictEqual(reformatBatchSummary(state).stale_skipped, 1);
+  assert.strictEqual(state.items[0].status, "stale_skipped");
+  assert.strictEqual(state.items[0].errorMessage, BATCH_REFORMAT_STALE_SKIP_TEXT);
 });
 
 test("端到端（保存循环，F1）：合并共享格 3 兄弟——只调一次 onSaveCell（representative），三格全部 saved", () => {
@@ -1776,6 +1901,85 @@ test("端到端（保存循环，F1）：非共享列——每格各调一次 on
   }
   assert.strictEqual(saveCalls, 3); // 非共享列不合并——三格三次保存
   assert.strictEqual(reformatBatchSummary(state).saved, 3);
+});
+
+// --- F1（P1 回归）：批量必须从建批次那一刻的**不可变快照**规划，实时(刷新后)行绝不
+//     泄漏进来 -----------------------------------------------------------------------
+// 缺陷（回归）：run 阶段的 stale 修复会在批量弹窗**仍开着**时重载父表 detail。批量条目
+// 保留旧 originalMd，但 planReformatSaves 若读**刷新后**的 allRows，就会拿另一客户端的
+// **新值**当非展示兄弟的 expected_before 基线——带守卫的写据此判 fresh，用旧文算出的候选
+// 覆盖掉那次更新（正是守卫要挡的一类）。下面这条纯逻辑测试锚定「基线完全由传入 rows
+// 决定」这一事实——由此推出 runSave **必须**传建批次快照而非实时 props（接线由
+// knowhow-panel.tsx 的 snapshotRef 源码 pin 守卫，见下方「接线（F1，不可变快照）」）。
+test("planReformatSaves（F1 快照动机）：合并共享格 writeTargets 的 expected_before 基线取自**传入的 rows**——传实时(刷新后)行会把他人新值当基线", () => {
+  const changed = [
+    { rowId: "r1", columnId: "c-shared", columnName: "共享说明", originalMd: "旧共享说明", status: "changed", candidateMd: "新共享说明", source: "llm" },
+  ];
+  // (a) 传建批次快照（r1/r2/r3 都还是「旧共享说明」）——writeTargets 基线都是它。
+  const snapshotUnits = planReformatSaves(changed, F1_SHARED_ROWS, "c-anchor");
+  for (const t of snapshotUnits[0].writeTargets) assert.strictEqual(t.originalMd, "旧共享说明");
+  // (b) 刷新后另一客户端把这个合并共享格整组统一改成新值（仍全分支同值 -> 仍是共享列，
+  //     writeTargets 仍覆盖 r1/r2/r3）。若用这份实时行规划，基线就变成**他人的新值**——
+  //     这正是 P1：带守卫的写会拿它当 expected_before、判 fresh、用旧文候选覆盖他人编辑。
+  const refreshedRows = F1_SHARED_ROWS.map((r) => ({
+    ...r,
+    cells: { ...r.cells, "c-shared": "他人刚统一改的新值" },
+  }));
+  const liveUnits = planReformatSaves(changed, refreshedRows, "c-anchor");
+  assert.deepStrictEqual(liveUnits[0].writeTargets.map((t) => t.rowId).sort(), ["r1", "r2", "r3"]);
+  for (const t of liveUnits[0].writeTargets) assert.strictEqual(t.originalMd, "他人刚统一改的新值");
+  // 结论：writeTargets 基线完全由传入 rows 决定，故 runSave 必须传建批次快照、批量生命
+  // 周期内绝不读实时 allRows（否则 mid-flight 重载后就复现 (b) 的覆盖）。
+});
+
+// --- F1（P1 续）：批量保存的**扇出**也必须同源于冻结快照。上一处修复冻结了「规划」
+//     （写目标/基线取自 snapshotRef 快照），但保存循环仍调最新的 handleCellSave 闭包——而它
+//     从**实时** detail 重算合并共享组的扇出。detail 在弹窗打开期间刷新、某 anchor 组分裂时，
+//     规划校验的是旧成员、回调却按新分组只扇写代表行，循环仍把旧成员整组标 saved = 漏写却
+//     报成功。修复：runSave 把 unit.writeTargets 的行 id 作显式 targetRowIds 下发，handleCellSave
+//     照用、不重算。下面这条纯逻辑测试先坐实「实时重算会漂移成只写代表行」，再证明「下发
+//     unit.writeTargets 的行 id 则整组不漂移」——handleCellSave 照用显式写目标由 knowhow-panel.tsx
+//     源码 pin 守卫（见下方「接线（P1，扇出同源）」）。
+test("端到端（保存循环，P1）：批量保存把**快照**写目标行 id 下发给 onSaveCell——实时组分裂也不漂移成只写代表行", async () => {
+  let state = buildSavingState("table", F1_SHARED_ROWS, F1_COLUMNS, (item) =>
+    // c-shared 全组同值 -> 合并共享 unit；c-anchor/c-branch 无需改动。
+    item.columnId === "c-shared"
+      ? { candidateMd: "新共享说明", source: "llm", changed: true }
+      : { candidateMd: item.originalMd, source: "rule/no-llm", changed: false },
+  );
+  const changed = state.items.filter((item) => item.status === "changed");
+  // units 取自**建批次那一刻的快照**（r1/r2/r3 同组共享列）——写目标覆盖整组。
+  const units = planReformatSaves(changed, F1_SHARED_ROWS, "c-anchor");
+  assert.strictEqual(units.length, 1);
+  assert.deepStrictEqual(units[0].writeTargets.map((t) => t.rowId).slice().sort(), ["r1", "r2", "r3"]);
+
+  // 建 unit 之后，父表 detail 刷新：他人把 r2/r3 的 anchor 改走，该组**分裂**（只剩 r1
+  // 仍是「示波器」）。若 handleCellSave 从这份实时行重算扇出，合并共享组坍缩成单行 ->
+  // 只写代表行 r1（正是 P1：规划的旧成员 r2/r3 漏写，却被循环整组标 saved）。
+  const liveRowsAfterSplit = F1_SHARED_ROWS.map((r) =>
+    r.id === "r1" ? r : { ...r, cells: { ...r.cells, "c-anchor": `另一概念-${r.id}` } },
+  );
+  const liveGroup = groupRowsByAnchor(liveRowsAfterSplit, "c-anchor").find((g) => g.rows.some((x) => x.id === "r1"));
+  const buggyLiveFanout =
+    liveGroup && isSharedColumn(liveGroup, "c-shared") ? groupCellWriteTargets(liveGroup, "c-shared") : ["r1"];
+  assert.deepStrictEqual(buggyLiveFanout, ["r1"]); // 实时重算漂移：只写代表行
+
+  // 修复后的保存循环接线（镜像 runSave）：把 unit.writeTargets 的行 id 作第 5 参
+  // 显式下发。捕获传给 onSaveCell 的写目标，验证它=**快照**全组、不随实时分裂漂移。
+  const calls = [];
+  const onSaveCell = async (rowId, columnId, contentMd, expectedByRowId, targetRowIds) => {
+    calls.push({ rowId, targetRowIds, expectedKeys: [...expectedByRowId.keys()] });
+  };
+  for (const unit of units) {
+    const rep = unit.representative;
+    const expectedByRowId = new Map(unit.writeTargets.map((t) => [t.rowId, t.originalMd]));
+    await onSaveCell(rep.rowId, rep.columnId, rep.candidateMd ?? "", expectedByRowId, unit.writeTargets.map((t) => t.rowId));
+  }
+  assert.strictEqual(calls.length, 1);
+  // 关键：下发的是**快照**全组（r1/r2/r3），不是实时分裂后的 [r1]——扇写整组，报 saved 名副其实。
+  assert.deepStrictEqual(calls[0].targetRowIds.slice().sort(), ["r1", "r2", "r3"]);
+  // 基线也逐行随行（服务端事务内逐行比对；真陈旧 -> 409 -> 既有 stale-skip）。
+  assert.deepStrictEqual(calls[0].expectedKeys.slice().sort(), ["r1", "r2", "r3"]);
 });
 
 // ===========================================================================
@@ -2270,20 +2474,84 @@ test("接线（F1）：runBatch 收尾在 mounted 块内按谓词经 requestStal
   assert.deepEqual(refresh?.thenCalls, ["requestStaleReload"]);
 });
 
-test("接线（F1）：requestStaleReload 是「恰一次」闸——ref 置真后再调即早退（两阶段都跳过也只刷一次）", () => {
+test("接线（F1）：stale 只登记待刷新，真正刷新发生在卸载 cleanup", () => {
+  const modal = findFunction(panelModule, "KnowhowReformatBatchModal");
   const request = findFunctionIn(
     panelModule,
     "KnowhowReformatBatchModal",
     "requestStaleReload",
   );
-  const guard = ifBranchesIn(request).find(
-    ({ condition }) => condition === "staleReloadedRef.current",
-  );
-  assert.equal(guard?.thenReturns, true);
   assert.deepEqual(assignmentsIn(request), [
-    { target: "staleReloadedRef.current", operator: "=", value: "true" },
+    {
+      target: "pendingReloadRef.current",
+      operator: "=",
+      value: "true",
+    },
   ]);
-  assert.ok(callSitesIn(request).some(({ target }) => target === "onStaleReload"));
+  assert.equal(
+    callSitesIn(request).some(({ target }) => target === "onStaleReload"),
+    false,
+  );
+
+  const mountEffect = callbackFlowsIn(modal, "useEffect").find(({ flow }) =>
+    flow.some(({ kind }) => kind === "return-callback"),
+  );
+  const cleanup = mountEffect?.flow.find(
+    ({ kind }) => kind === "return-callback",
+  );
+  assert.ok(cleanup?.flow.some(
+    ({ kind, condition }) =>
+      kind === "if" && condition === "pendingReloadRef.current",
+  ));
+  assert.equal(
+    callSitesIn(modal).filter(
+      ({ target }) => target === "onStaleReload",
+    ).length,
+    1,
+  );
+});
+
+test("接线（F1/P1）：runSave 的规划、写目标和锚点守卫同源于冻结快照", () => {
+  const modal = findFunction(panelModule, "KnowhowReformatBatchModal");
+  const runSave = findFunctionIn(
+    panelModule,
+    "KnowhowReformatBatchModal",
+    "runSave",
+  );
+  assert.deepEqual(
+    variableInitializersIn(modal).find(({ name }) => name === "snapshotRef"),
+    {
+      name: "snapshotRef",
+      initializer: "useRef({ allRows, anchorColumnId })",
+    },
+  );
+  assert.deepEqual(
+    callSitesIn(runSave).find(({ target }) => target === "planReformatSaves"),
+    {
+      target: "planReformatSaves",
+      arguments: [
+        "changed",
+        "snapshotRef.current.allRows",
+        "snapshotRef.current.anchorColumnId",
+      ],
+    },
+  );
+  assert.deepEqual(
+    variableInitializersIn(runSave).find(
+      ({ name }) => name === "targetRowIds",
+    ),
+    {
+      name: "targetRowIds",
+      initializer: "unit.writeTargets.map((t) => t.rowId)",
+    },
+  );
+  const saveCall = callSitesIn(runSave).find(
+    ({ target }) => target === "onSaveCell",
+  );
+  assert.deepEqual(saveCall?.arguments.slice(-2), [
+    "targetRowIds",
+    "anchorGuard",
+  ]);
 });
 
 test("接线（F）：两处 KnowhowReformatBatchModal 都传 onStaleReload={reloadTableDetail}", () => {
@@ -2311,4 +2579,33 @@ test("接线（F2）：编辑器渲染点把 onServerStale 也接到同一个 re
   // 避免两套漂移。
   const editor = jsxElements(panelModule, "KnowhowCellEditor")[0];
   assert.equal(editor?.bindings.onServerStale, "reloadTableDetail");
+});
+
+test("接线（P1）：显式冻结目标优先，anchor guard 强制使用批量端点", () => {
+  const save = findFunctionIn(panelModule, "KnowhowPanel", "handleCellSave");
+  const initializers = variableInitializersIn(save);
+  assert.deepEqual(
+    initializers.find(({ name }) => name === "targets"),
+    {
+      name: "targets",
+      initializer:
+        "targetRowIds ?? (group && isSharedColumn(group, columnId) ? groupCellWriteTargets(group, columnId) : [rowId])",
+    },
+  );
+  assert.deepEqual(
+    initializers.find(({ name }) => name === "useBatchEndpoint"),
+    {
+      name: "useBatchEndpoint",
+      initializer: "targets.length > 1 || Boolean(anchorGuard)",
+    },
+  );
+  const batchCall = callSitesIn(save).find(
+    ({ target }) => target === "batchPatchKnowhowCells",
+  );
+  assert.ok(batchCall);
+  assert.match(batchCall.arguments[2], /anchorColumnId: anchorGuard\.anchorColumnId/);
+  assert.match(batchCall.arguments[2], /expectedAnchor: targets\.map/);
+  assert.ok(
+    callSitesIn(save).some(({ target }) => target === "patchKnowhowCell"),
+  );
 });

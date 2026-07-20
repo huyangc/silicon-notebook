@@ -435,6 +435,45 @@ test("batchPatchKnowhowCells: 响应空列表时返回空数组", () => {
   });
 });
 
+// 并发防护（P1 round-4）：批量扇出还带上 anchor 基线守卫——anchorColumnId +
+// expectedAnchor（按 rowIds 平行），后端在同一事务内重读每行 anchor 列，任一
+// 行的 anchor 自建批次以来被移出组就整组 409（离组行不再被冻结扇出误写）。与
+// expectedBefore 一样是可选的：手动编辑器省略。
+test("batchPatchKnowhowCells: 提供 anchorColumnId + expectedAnchor（按 rowIds 平行）时请求体带 anchor_column_id + expected_anchor", () => {
+  return withFetchStub([], async (calls) => {
+    await batchPatchKnowhowCells("nb-1", "t1", {
+      columnId: "c1",
+      rowIds: ["r1", "r2"],
+      contentMd: "统一改法",
+      expectedBefore: ["旧1", "旧2"],
+      anchorColumnId: "c-anchor",
+      expectedAnchor: ["示波器", "示波器"],
+    });
+    assert.deepStrictEqual(bodyOf(calls[0]), {
+      column_id: "c1",
+      row_ids: ["r1", "r2"],
+      content_md: "统一改法",
+      expected_before: ["旧1", "旧2"],
+      anchor_column_id: "c-anchor",
+      expected_anchor: ["示波器", "示波器"],
+    });
+  });
+});
+
+test("batchPatchKnowhowCells: 省略 anchor 守卫时请求体不含 anchor_column_id / expected_anchor 键（手动编辑器合并格）", () => {
+  return withFetchStub([], async (calls) => {
+    await batchPatchKnowhowCells("nb-1", "t1", {
+      columnId: "c1",
+      rowIds: ["r1"],
+      contentMd: "x",
+      expectedBefore: ["旧1"],
+    });
+    const body = bodyOf(calls[0]);
+    assert.strictEqual("anchor_column_id" in body, false);
+    assert.strictEqual("expected_anchor" in body, false);
+  });
+});
+
 // --- createKnowhowTable（建表向导）--------------------------------------------------
 
 test("createKnowhowTable: POST 到 /notebooks/{nb}/knowhow，body 为 {title,columns,anchor_index}（anchorIndex null 也显式保留）", () => {

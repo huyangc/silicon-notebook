@@ -330,6 +330,110 @@ def test_link_with_balanced_paren_dest_is_one_full_ref():
 
 
 # ---------------------------------------------------------------------------
+# F3 follow-up — inline-link titles are part of the byte-protected reference.
+# A `)` inside a quoted title is title text, not the closing parenthesis of the
+# outer link.  The scanner must keep the complete multiline construct intact so
+# a punctuation-only title edit cannot escape the invariant.
+# ---------------------------------------------------------------------------
+
+
+def test_double_quoted_link_title_punctuation_edit_is_rejected():
+    before = '[x](url "title )\ncontinued")'
+    after = '[x](url "title )\ncontinued-")'
+    assert content_invariant(before, after) is False
+
+
+def test_double_quoted_multiline_link_title_is_one_protected_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    before = '[x](url "title ) and \\"quoted\\"\ncontinued")'
+    after = '[x](url "title ) and \\"quoted\\"\ncontinued-")'
+    assert _link_refs(before) == [before]
+    assert content_invariant(before, after) is False
+
+
+def test_single_quoted_multiline_link_title_is_one_protected_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    before = "[x](url 'title ) and \\\'quoted\\\'\ncontinued')"
+    after = "[x](url 'title ) and \\\'quoted\\\'\ncontinued-')"
+    assert _link_refs(before) == [before]
+    assert content_invariant(before, after) is False
+
+
+def test_parenthesized_multiline_link_title_honors_escaped_close_paren():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    before = "[x](url (title \\) still open\ncontinued))"
+    after = "[x](url (title \\) still open\ncontinued-))"
+    assert _link_refs(before) == [before]
+    assert content_invariant(before, after) is False
+
+
+# ---------------------------------------------------------------------------
+# F3 follow-up — CommonMark angle-enclosed inline-link destinations consume
+# through their unescaped `>`.  Spaces and `)` are destination content, while
+# malformed angle destinations are not captured as links.
+# ---------------------------------------------------------------------------
+
+
+def test_angle_destination_with_spaces_is_one_full_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    md = "[x](<foo bar-baz>)"
+    assert _link_refs(md) == [md]
+
+
+def test_angle_destination_with_literal_close_paren_is_one_full_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    md = "[x](<foo)bar-baz>)"
+    assert _link_refs(md) == [md]
+
+
+def test_angle_destination_punctuation_mutation_is_rejected():
+    before = "[x](<foo)bar-baz>)"
+    after = "[x](<foo)barbaz>)"
+    assert content_invariant(before, after) is False
+
+
+def test_empty_angle_destination_is_one_full_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    md = "[x](<>)"
+    assert _link_refs(md) == [md]
+
+
+def test_angle_destination_with_title_is_one_full_ref():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    md = '[x](<foo bar> "title )")'
+    assert _link_refs(md) == [md]
+
+
+def test_angle_destination_honors_escaped_greater_than():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    md = "[x](<foo\\>bar>)"
+    assert _link_refs(md) == [md]
+
+
+def test_malformed_angle_destinations_are_not_link_refs():
+    from app.services.knowhow.md_normalize import _link_refs
+
+    assert _link_refs("[x](<foo<bar>)") == []
+    assert _link_refs("[x](<foo\nbar>)") == []
+    assert _link_refs("[x](<foo\\\nbar>)") == []
+    assert _link_refs("[x](<foo)") == []
+
+
+def test_format_only_change_around_angle_destination_passes():
+    before = "见 [x](<foo bar-baz>) 效果"
+    after = "**见** [x](<foo bar-baz>) 效果"
+    assert content_invariant(before, after) is True
+
+
+# ---------------------------------------------------------------------------
 # F3 — the balanced-paren scanner must HONOR ESCAPED PARENS. A backslash escapes
 # the next char: `\)` and `\(` neither close nor open depth. The old scanner
 # treats `\)` as a real terminator, so `![x](foo\)bar)` is captured as
@@ -823,6 +927,43 @@ def test_bare_url_between_digits_inside_url_is_protected():
     # would NOT protect the `-` (its left neighbor is a digit, so not a unary
     # minus), but the URL token protects the whole body regardless.
     assert content_invariant("见 https://a/1-2-3", "见 https://a/123") is False
+
+
+# ---------------------------------------------------------------------------
+# F4 (this review) — the bare-autolink word-boundary check must use ASCII-alnum ONLY.
+# `参见https://host/a-b` (CJK immediately before the URL, no space): remark-gfm treats
+# the CJK char as a valid left boundary and autolinks the URL, but the matcher's
+# `prev.isalnum()` (Unicode-aware) counted the CJK `见` as alphanumeric and SKIPPED the
+# URL, leaving it in the punctuation-relaxed prose where a tail edit (`a-b` -> `ab`) was
+# invisible. Fix: `prev.isascii() and prev.isalnum()` -- ASCII letters/digits are the
+# only word chars that block a start; CJK / punctuation / whitespace all count as
+# boundaries. ASCII-adjacent (`abchttps://x`) stays unmatched per GFM. Python-only.
+# ---------------------------------------------------------------------------
+
+
+def test_bare_url_after_cjk_boundary_is_protected():
+    # THE codex example: a bare URL glued to CJK prose (no space). RED before the fix
+    # (CJK counted as a word char -> URL skipped -> unprotected) -> old True.
+    before = "参见https://host/a-b"
+    after = "参见https://host/ab"
+    assert content_invariant(before, after) is False
+
+
+def test_bare_url_after_cjk_boundary_tokenized_in_link_refs():
+    # the URL adjacent to CJK is now captured as one verbatim autolink ref (a CJK char
+    # is a boundary, exactly like a space).
+    from app.services.knowhow.md_normalize import _link_refs
+    assert _link_refs("参见https://host/a-b") == ["https://host/a-b"]
+
+
+def test_bare_url_after_ascii_alnum_still_not_matched():
+    # regression guard: an ASCII-alnum char immediately before the scheme is NOT a
+    # boundary per GFM (`abchttps://x` is one long word) -> still not matched.
+    from app.services.knowhow.md_normalize import _link_refs
+    assert _link_refs("abchttps://x") == []
+    # and a real boundary (CJK / space / string-start) still matches.
+    assert _link_refs("见https://x/y") == ["https://x/y"]
+    assert _link_refs("https://x/y") == ["https://x/y"]
 
 
 # ---------------------------------------------------------------------------

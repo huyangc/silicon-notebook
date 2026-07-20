@@ -1778,6 +1778,17 @@
         },
         "KnowhowCellsBatchPatch": {
           "properties": {
+            "anchor_column_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Anchor Column Id"
+            },
             "column_id": {
               "title": "Column Id",
               "type": "string"
@@ -1785,6 +1796,20 @@
             "content_md": {
               "title": "Content Md",
               "type": "string"
+            },
+            "expected_anchor": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expected Anchor"
             },
             "expected_before": {
               "anyOf": [

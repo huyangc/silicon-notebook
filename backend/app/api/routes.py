@@ -950,6 +950,22 @@ def patch_knowhow_cells_batch(
             (table_id, row_id, body.column_id, expected, body.content_md)
             for row_id, expected in zip(row_ids, body.expected_before)
         ]
+        # Round-4 P1: OPTIONAL anchor baseline guard (see KnowhowCellsBatchPatch),
+        # sent alongside expected_before by the fan-out. Validated for the SAME
+        # positional-parallelism as expected_before, then handed to the store so a
+        # sibling row whose anchor left the shared group refuses the whole batch
+        # (edited cell unchanged → expected_before alone can't catch it). Either
+        # field None → the store never re-reads the anchor (byte-identical to the
+        # expected_before-only guard); the single-cell route deliberately omits it.
+        anchor_column_id = None
+        expected_anchor = None
+        if body.anchor_column_id is not None and body.expected_anchor is not None:
+            if len(body.expected_anchor) != len(row_ids):
+                raise HTTPException(
+                    status_code=400, detail="expected_anchor length must match row_ids"
+                )
+            anchor_column_id = body.anchor_column_id
+            expected_anchor = body.expected_anchor
         # F2: same newly-dangling-asset guard as the single-cell guarded branch —
         # cover EVERY fan-out target's new content (an asset is guarded if it is
         # new to at least one target row), identical to the legacy batch else-branch
@@ -967,7 +983,11 @@ def patch_knowhow_cells_batch(
         )
         try:
             result = repo.update_knowhow_cells_guarded_atomic(
-                notebook_id, updates, require_assets=added_assets
+                notebook_id,
+                updates,
+                require_assets=added_assets,
+                anchor_column_id=anchor_column_id,
+                expected_anchor=expected_anchor,
             )
         except ValueError:
             raise HTTPException(status_code=400, detail=knowhow_api.CELL_ASSET_MISSING_MESSAGE)

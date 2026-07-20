@@ -678,6 +678,40 @@ def test_midline_less_than_non_tag_still_normalizable(raw):
 
 
 # ---------------------------------------------------------------------------
+# F2 (this review) — the mid-line inline-HTML rule must also refuse HTML COMMENT
+# (`<!--`) and PROCESSING-INSTRUCTION (`<?`) openers, not only `<`+letter/`/`. The
+# line-START HTML-block class already accepts `<` + letter/`/`/`!`/`?` (`_HTML_BLOCK_RE
+# = ^<[A-Za-z/!?]`), but `_has_midline_inline_html` matched only `<`+letter/`/`, so a
+# MID-line `foo <!-- x\ny -->` or `foo <?pi\nx?>` slipped through: `_normalize` injects
+# a blank line INSIDE the comment/PI, and the symbol-blind `content_invariant` (`<`,`!`,
+# `?`,`-` are punctuation) misses the corruption. Fix: extend the mid-line tag shape to
+# `<` followed by letter, `/`, `!`, or `?` (mirroring the line-START class). `a < b`,
+# `x<0`, `i<3` stay normalizable.
+# ---------------------------------------------------------------------------
+
+
+def test_midline_inline_html_comment_opener_across_lines_refused_byte_identical():
+    # THE codex repro: a mid-line HTML comment opener (`<!`) crossing a soft break.
+    cell = "foo <!-- x\ny -->"
+    assert is_rich_markdown(cell) is True
+    assert rule_normalize(cell) == cell   # byte-identical no-op
+
+
+def test_midline_inline_html_pi_opener_across_lines_refused_byte_identical():
+    # a mid-line processing-instruction opener (`<?`) crossing a soft break -- same
+    # class, `<`+`?` now tag-shaped.
+    cell = "foo <?pi\nx?>"
+    assert is_rich_markdown(cell) is True
+    assert rule_normalize(cell) == cell
+
+
+def test_midline_inline_html_bang_and_question_tags_refused():
+    # `<!` (declaration/comment) and `<?` (PI) are tag-shaped WHEREVER they appear.
+    assert is_rich_markdown("尾 <!DOCTYPE 收") is True
+    assert is_rich_markdown("尾 <?php 收") is True
+
+
+# ---------------------------------------------------------------------------
 # F3 — marker WIDTH must be counted in CODE POINTS, not UTF-16 units. An astral
 # ordered marker like 𝟙. (U+1D7D9 MATHEMATICAL DOUBLE-STRUCK DIGIT ONE -- a
 # surrogate pair in UTF-16, category Nd so it matches the ordered regex on both
@@ -976,6 +1010,164 @@ def test_balanced_link_text_same_line_still_normalizes():
     # balanced [..] on one line -> depth returns to 0; an inline link on a prose
     # line is allowed (it does not cross the newline).
     assert is_rich_markdown("见 [文档](url) 说明") is False
+
+
+# ---------------------------------------------------------------------------
+# F3 (this review) — the open-span tracker must also refuse a line that ends with an
+# OPEN link DESTINATION. `[docs](/url\n"title")`: bracket depth returns to zero at `]`,
+# but the `(`-destination opened by `](` is unclosed at line end, so the gate passed and
+# `_normalize` split the destination/title across the injected blank line, turning the
+# link to plain text -- symbol-blind `content_invariant` misses it. Fix: after a `](`
+# is seen on a line, track the unclosed destination paren (same escape rules); a line
+# ending inside an open destination refuses. Scoped strictly to link context: a bare
+# `(` in prose WITHOUT a preceding `](` does NOT refuse (plain parens are common).
+# ---------------------------------------------------------------------------
+
+
+def test_link_destination_open_paren_spanning_soft_newline_refused():
+    # THE codex example: the `(`-destination opened by `](` is unclosed on line 1.
+    raw = '[docs](/url\n"title")'
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw          # byte-identical -- link preserved
+
+
+def test_link_destination_closed_same_line_still_normalizes():
+    # `[docs](/url "title")` fully closed on one line -> dest paren returns to zero ->
+    # an inline link on a prose line is allowed (it does not cross the newline).
+    assert is_rich_markdown('[docs](/url "title")') is False
+
+
+def test_bare_open_paren_without_link_bracket_does_not_refuse():
+    # a bare unclosed `(` in prose WITHOUT a preceding `](` must NOT refuse -- the
+    # destination tracker only counts parens AFTER a `](` (strict link scope), so plain
+    # prose parens stay normalizable.
+    assert is_rich_markdown("文本 (未闭合") is False
+    assert rule_normalize("文本 (未闭合") == "文本 (未闭合"
+
+
+def test_link_destination_escaped_close_paren_keeps_it_open():
+    # an escaped `\)` inside the destination does NOT close it (CommonMark escape) -> a
+    # line ending after it is still an open destination -> refused.
+    raw = "[docs](/url\\)\ncont)"
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw
+
+
+# ---------------------------------------------------------------------------
+# F3 round-2 (this review) — the `](`-destination tracker armed on EVERY `](`,
+# including one that sits INSIDE an already-CLOSED inline code / math span on the
+# same line. `A. header\n`x](`` closes the backtick span (the `](` is code-span
+# content, not a link opener), yet the tracker armed and never disarmed -> the cell
+# was classified rich and returned byte-identical, so `A. header` was never bolded.
+# Fix: the rule-4 scan now also tracks the code-span / `$`-span state left-to-right;
+# a `](` seen while inside a closed span does NOT arm the tracker. A `](` in plain
+# text still arms it (the cross-line link regression locks below stay refused).
+# ---------------------------------------------------------------------------
+
+
+def test_link_destination_bracket_paren_inside_closed_code_span_not_refused():
+    # THE codex example line: a `](` INSIDE a backtick code span closed on its own line is
+    # span CONTENT, not a link opener -> it must NOT arm the destination tracker. On the
+    # single line (the only rule that could refuse it) the cell now normalizes:
+    assert is_rich_markdown("`x](`") is False
+    assert rule_normalize("`x](`") == "`x](`"    # code span preserved verbatim (idempotent)
+    # End-to-end "the header gets bolded": a top-level alpha header above that code-span
+    # line normalizes to a bold section header. NB the review's raw `A. header\n`x](``
+    # (marker directly followed by prose, no blank) is refused for a SEPARATE, pre-existing
+    # reason -- the lazy-continuation rule (test_lazy_continuation_after_* pin it) -- which
+    # is independent of this `](` fix; a blank line breaks that continuation and isolates
+    # the fix, so the header below bolds while the code span stays verbatim.
+    raw = "A. header\n\n`x](`"
+    assert is_rich_markdown(raw) is False
+    out = rule_normalize(raw).split("\n")
+    assert "**A. header**" in out                # header bolded
+    assert "`x](`" in out                        # code span preserved verbatim
+
+
+def test_link_destination_bracket_paren_adjacent_alpha_refused_by_lazy_continuation():
+    # regression pin documenting the confound: the review's literal `A. header\n`x](``
+    # (marker directly followed by prose) STAYS rich -- NOT because of the `](` (that line
+    # no longer refuses on its own, asserted above) but because column-0 prose directly
+    # after a marker is a lazy continuation. This is orthogonal to the `](` fix and must
+    # not regress into normalizing (which would blank-line-split a soft-break paragraph).
+    raw = "A. header\n`x](`"
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw
+
+
+def test_link_destination_bracket_paren_inside_closed_code_span_same_line():
+    # `](` inside a code span closed on the SAME line (with trailing prose) -> not rich.
+    assert is_rich_markdown("`](` 同行闭合") is False
+
+
+def test_link_destination_bracket_paren_inside_closed_math_span_not_refused():
+    # `](` inside a `$`-math span closed on the same line -> the math-span state disarms
+    # the tracker just like the code-span state -> not rich.
+    assert is_rich_markdown("$a](b$ 同行") is False
+
+
+def test_link_destination_plain_text_bracket_paren_still_arms_after_closed_span():
+    # regression lock: a `](` in PLAIN text (after a closed code span) with an unclosed
+    # destination must STILL refuse -- the closed-span skip must not swallow real links.
+    raw = '`code` [docs](/url\n"title")'
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw
+
+
+# ---------------------------------------------------------------------------
+# F3 round-3 (this review) — the destination tracker decremented paren depth on
+# EVERY `)`, so a valid inline link whose QUOTED TITLE contains `)` before a soft
+# newline -- `[x](url "title )\ncontinued")` -- had the title's `)` mistaken for
+# the destination's closing paren: line 1 was judged closed/safe, so the gate
+# passed and `_normalize` split the title with a blank line, breaking the link
+# (symbol-blind `content_invariant` misses it). Fix: model CommonMark's inline-link
+# grammar -- after the destination (which runs to whitespace or `)`), an OPTIONAL
+# title opens with `"`/`'`/`(` (closing with `"`/`'`/`)`, escape-aware); a `)`
+# INSIDE an open title does NOT decrement destination depth. A line ending with the
+# link still open (open destination OR open title) refuses (fail-closed unchanged --
+# the bug was only the title's `)` prematurely CLOSING it).
+# ---------------------------------------------------------------------------
+
+
+def test_link_title_close_paren_spanning_soft_newline_refused():
+    # THE codex example: the quoted title contains `)` then a soft newline. The title's
+    # `)` must NOT read as the destination's closing paren -> line 1 ends INSIDE the open
+    # title -> refuse byte-identically (the link is preserved, not blank-line-split).
+    raw = '[x](url "title )\ncontinued")'
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw          # byte-identical -- link preserved
+
+
+def test_escaped_delimiter_in_multiline_link_title_stays_open():
+    # A title delimiter escaped before the soft newline remains title text.  The
+    # line gate must keep the complete link intact instead of injecting a blank
+    # line into its title.
+    raw = '[x](url "title ) and \\"quoted\\"\ncontinued")'
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw
+
+
+def test_link_title_close_paren_complete_same_line_not_rich():
+    # over-refusal lock: a same-line COMPLETE link whose title contains `)` -> the dest
+    # correctly stays open through the title, the real closing `)` closes the link -> not
+    # rich (no cross-line span; the trailing prose is normalizable).
+    assert is_rich_markdown('[x](url "title )") 同行完整') is False
+
+
+def test_link_single_quote_title_spanning_soft_newline_refused():
+    # single-quote title variant: the title closes on line 1 (`'ti)tle'`, its inner `)`
+    # ignored), but the destination's closing `)` sits on line 2 -> line 1 ends after the
+    # title with the link still open -> refuse.
+    raw = "[x](url 'ti)tle'\n)"
+    assert is_rich_markdown(raw) is True
+    assert rule_normalize(raw) == raw
+
+
+def test_link_paren_title_complete_same_line_not_rich():
+    # paren-style title `(title)` complete on one line -> opens on the post-destination
+    # `(` (close `)`), the first `)` closes the title, the link's `)` closes the link ->
+    # not rich. (Nested paren titles parse oddly; only the simple form is exercised.)
+    assert is_rich_markdown('[x](url (title))') is False
 
 
 # ---------------------------------------------------------------------------

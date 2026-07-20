@@ -843,19 +843,174 @@ function endsWithOpenInlineSpan(line: string): boolean {
     else if (ch === "]") depth = Math.max(0, depth - 1);
     i += 1;
   }
-  return depth > 0;
+  if (depth > 0) return true;
+  // 4) 链接目的地 + 标题：`](` 之后进入链接目标区，按 CommonMark 行内链接文法追踪——
+  //    "dest"（裸目的地：转义感知、圆括号平衡、**空白**结束进入 "gap"）、"angle"/"afterAngle"
+  //    （`<...>` 目的地：空格与 `)` 是内容，未转义 `>` 后只接受外层 `)` 或空白）、
+  //    "gap"（目的地后：等可选 title opener `"`/`'`/`(` 或链接闭合 `)`）、"title"（标题内：转义感知，
+  //    只等对应 title-close `"`/`'`/`)`）。**标题内的 `)` 不减目的地深度**（round-3 核心修复：旧实现
+  //    在每个 `)` 都减、把带引号标题里的 `)` 误当目的地闭合括号 -> `[x](url "title )\ncontinued")` 被判
+  //    「已闭合」漏拒、注入空行塞进标题拆断链接）。行尾仍在任一子相内 = 链接跨软换行、未闭 -> 拒绝
+  //    （fail-closed 不变，只是不再被标题的 `)` 提前闭合）。**只**在见过 `](` 后才进入——散文里的裸
+  //    `(未闭合` 不受影响。对应 Python `_ends_with_open_inline_span` 第 4 段。
+  //    Round-2：武装 `](` 前须确认它落在**散文**里、而非同行**已闭合**的行内代码/公式 span 内——
+  //    `` `x](` `` 里 `](` 是代码 span 内容、不是链接起头，旧实现把它也武装、整格误判 rich。本段同时
+  //    追踪 code-span（镜像规则 2：无转义、等长 run 闭合）与 math-span（镜像规则 1：转义感知、等长 run
+  //    闭合）状态，落在任一已开着 span 内的 `](` **不**武装；散文里的 `](` 仍武装。跨行**开着**的
+  //    code/math span 已由规则 1/2 先行拒绝（走不到这里），故此处每个 span 必在行尾前闭合。
+  let linkPhase: "dest" | "angle" | "afterAngle" | "gap" | "title" | null = null;
+  let destDepth = 0; // 目的地圆括号平衡深度（转义感知）
+  let titleClose = ""; // 当前标题的闭合字符（" / ' / )）
+  let codeInside = false; // 反引号 code-span：镜像规则 2（无转义、等长 run 闭合）
+  let codeLen = 0;
+  let mathInside = false; // `$` math-span：镜像规则 1（转义感知、等长 run 闭合）
+  let mathLen = 0;
+  i = 0;
+  while (i < n) {
+    const ch = line[i];
+    if (linkPhase === "angle") {
+      if (ch === "\\") {
+        i += 2;
+        continue;
+      }
+      if (ch === "<") return true;
+      if (ch === ">") linkPhase = "afterAngle";
+      i += 1;
+      continue;
+    }
+    if (linkPhase === "afterAngle") {
+      if (ch === ")") linkPhase = null;
+      else if (ch === " " || ch === "\t") linkPhase = "gap";
+      else return true;
+      i += 1;
+      continue;
+    }
+    if (linkPhase === "title") {
+      // 标题内：转义感知，只等 titleClose；`)` 不减目的地深度
+      if (ch === "\\") {
+        i += 2; // 转义下一字符：\" / \' / \) 既不闭标题也不动深度
+        continue;
+      }
+      if (ch === titleClose) linkPhase = "gap"; // 标题闭合 -> 回到间隙，等链接闭合 `)`（或另一个 title）
+      i += 1;
+      continue;
+    }
+    if (linkPhase === "dest") {
+      // 目的地文本：转义感知、平衡圆括号；空白结束目的地
+      if (ch === "\\") {
+        i += 2; // 转义下一字符：\( / \) 既不开也不合目的地深度
+        continue;
+      }
+      if (ch === "(") destDepth += 1;
+      else if (ch === ")") {
+        destDepth -= 1;
+        if (destDepth === 0) linkPhase = null; // 目的地圆括号归零 = 链接整体闭合（无标题）
+      } else if (ch === " " || ch === "\t") {
+        linkPhase = "gap"; // 空白结束目的地 -> 等可选 title 或闭合 `)`
+      }
+      i += 1;
+      continue;
+    }
+    if (linkPhase === "gap") {
+      // 目的地后：等 title-opener（"/'/(）或链接闭合 `)`
+      if (ch === ")") linkPhase = null; // 无标题（或标题后）的链接闭合 `)`
+      else if (ch === '"' || ch === "'") {
+        linkPhase = "title";
+        titleClose = ch;
+      } else if (ch === "(") {
+        linkPhase = "title";
+        titleClose = ")";
+      }
+      i += 1; // 其余（空白/异常字符）留在 gap，行尾仍开着即拒绝
+      continue;
+    }
+    if (codeInside) {
+      // 代码 span 内（镜像规则 2）：不转义，等长 run 闭合
+      if (ch === "`") {
+        let run = 0;
+        while (i < n && line[i] === "`") {
+          run += 1;
+          i += 1;
+        }
+        if (run === codeLen) codeInside = false;
+        continue; // run 长度不等 -> span 内字面，保持 inside
+      }
+      i += 1;
+      continue;
+    }
+    if (mathInside) {
+      // 公式 span 内（镜像规则 1）：转义感知，等长 run 闭合
+      if (ch === "\\") {
+        i += 2;
+        continue;
+      }
+      if (ch === "$") {
+        let run = 0;
+        while (i < n && line[i] === "$") {
+          run += 1;
+          i += 1;
+        }
+        if (run === mathLen) mathInside = false;
+        continue; // run 长度不等 -> span 内字面，保持 inside
+      }
+      i += 1;
+      continue;
+    }
+    // 散文：开 code-span / 开 math-span / 武装 `](`。`\` 转义下一字符——**反引号除外**（镜像规则 2
+    // 「反引号侧不做转义」：`` \` `` 仍按裸 run 计、照常开 span），其余 `\$`/`\]`/`\(` 照旧跳过（镜
+    // 像规则 1/3/4 的转义感知），使 code/math 追踪与规则 2/1 逐位对齐。
+    if (ch === "\\") {
+      if (i + 1 < n && line[i + 1] === "`") {
+        i += 1; // `\` 当字面、让紧邻反引号照常开 span（对齐规则 2 裸计）
+        continue;
+      }
+      i += 2;
+      continue;
+    }
+    if (ch === "`") {
+      let run = 0;
+      while (i < n && line[i] === "`") {
+        run += 1;
+        i += 1;
+      }
+      codeInside = true;
+      codeLen = run;
+      continue;
+    }
+    if (ch === "$") {
+      let run = 0;
+      while (i < n && line[i] === "$") {
+        run += 1;
+        i += 1;
+      }
+      mathInside = true;
+      mathLen = run;
+      continue;
+    }
+    if (ch === "]" && i + 1 < n && line[i + 1] === "(") {
+      const isAngleDestination = i + 2 < n && line[i + 2] === "<";
+      linkPhase = isAngleDestination ? "angle" : "dest";
+      destDepth = 1;
+      i += isAngleDestination ? 3 : 2;
+      continue;
+    }
+    i += 1;
+  }
+  return linkPhase !== null; // 行尾仍在任一链接子相内 = 链接跨软换行、未闭
 }
 
-// F1（review）：一行**任意位置**是否出现「标签形状」的未转义 `<`（`<` 紧跟 ASCII 字母
-// 或 `/`——`<span`/`</span`/`<em` …）。命中即整格拒绝。对应 Python
+// F1（review）：一行**任意位置**是否出现「标签形状」的未转义 `<`（`<` 紧跟 ASCII 字母、
+// `/`、`!` 或 `?`——`<span`/`</span`/`<em`/`<!--`/`<?pi` …）。命中即整格拒绝。对应 Python
 // `_has_midline_inline_html`。startsBlockConstruct 的 HTML_BLOCK_RE 是 `^` 锚定的、只认
 // **行首** HTML 块，`前缀 <span>\ncontinued</span>` 这类**行中**起头、跨软换行的行内 HTML
-// 漏网——normalizeImpl 注入空行把它拆断、符号盲的后端 content_invariant 兜不住。只认
-// 「`<`+字母/`/`」tag 形状：`a < b`（后接空格）、`x<0`/`i<3`（后接数字）仍可规整；`x<y`
-// （后接字母）被拒（fail CLOSED，miss vs 腐蚀代价不对称）。`\<` 转义跳过。定界符 `<`/`\`
-// 皆单 UTF-16 单元 ASCII；`nxt` 取自 `line[i+1]`，与 Python `line[i+1]` 在最终布尔上对齐
-// （星际字符作 nxt 取到代理对半、非 ASCII 字母判否，与 Python 见完整码点一致——都不是
-// ASCII 字母）。调用方保证只对非空行调用。
+// 漏网——normalizeImpl 注入空行把它拆断、符号盲的后端 content_invariant 兜不住。认
+// 「`<`+字母/`/`/`!`/`?`」tag 形状（与行首 HTML_BLOCK_RE = `^<[A-Za-z/!?]` 同一字符类）：
+// `a < b`（后接空格）、`x<0`/`i<3`（后接数字）仍可规整；`x<y`（字母）、`foo <!-- x`（`<!`
+// 注释）、`foo <?pi`（`<?` PI）被拒（fail CLOSED，miss vs 腐蚀代价不对称）。F2（本批
+// review）：`!`/`?` 此前漏在字符类外，行中跨软换行的 HTML 注释/PI 漏网——补齐。`\<` 转义跳
+// 过。定界符 `<`/`\` 皆单 UTF-16 单元 ASCII；`nxt` 取自 `line[i+1]`，与 Python `line[i+1]`
+// 在最终布尔上对齐（星际字符作 nxt 取到代理对半、非 ASCII 字母判否，与 Python 见完整码点一致
+// ——都不是 ASCII 字母、也不是 `/`/`!`/`?`）。调用方保证只对非空行调用。
 function isAsciiLetter(ch: string): boolean {
   return (ch >= "A" && ch <= "Z") || (ch >= "a" && ch <= "z");
 }
@@ -870,7 +1025,7 @@ function hasMidlineInlineHtml(line: string): boolean {
     }
     if (ch === "<") {
       const nxt = i + 1 < n ? line[i + 1] : "";
-      if (nxt === "/" || isAsciiLetter(nxt)) return true;
+      if (nxt === "/" || nxt === "!" || nxt === "?" || isAsciiLetter(nxt)) return true;
     }
     i += 1;
   }

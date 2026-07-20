@@ -891,18 +891,58 @@ export function KnowhowPanel({
   // 保持既有 last-write-wins：那是真人在主动编辑，不该被自己更早的快照挡下（本
   // 修复刻意不改这条流的语义）。基线按 targets 顺序平行下发；某写目标缺基线时退化
   // 成 ""（几乎必然判陈旧、保守跳过，不盲写）。
+  //
+  // 并发防护（P1 round-4）：`anchorGuard` 也仅由**批量规整保存**传入（快照 anchor 列
+  // id + rowId -> 建批次那刻该行 anchor 快照值）——后端在同一事务内额外重读每行 anchor 列，
+  // 任一行 anchor 自快照以来被移出组就整组 409（离组行不再被冻结扇出误写）；round-5 再加
+  // 「指定未变 + 组成员集与冻结写目标精确相等」结构守卫（增员/减员亦 409）。缺值退化成 ""。
+  // 并发防护（P1 round-6）：`anchorGuard` 一旦传入就**恒**走 guarded 批量端点——**含只有一个
+  // 写目标的单例组**（下方 split：`useBatchEndpoint = targets.length > 1 || anchorGuard`）。此前
+  // 单例组按 targets.length===1 落单格端点、绕过成员校验：建批次那刻组内仅一行，之后有兄弟行
+  // join 该 anchor 组，就只写原行、悄悄把已共享的组留成不一致（round-5 为多目标关掉的同类结构
+  // 漂移，单例组漏在门外）。runSave 侧 `coversAnchorGroup` 门保证 anchorGuard 只对**整组写**
+  // （合并共享列扇写 / 单例组）下发，故「带 anchorGuard ⟺ 该走 guarded 端点」恒成立；多行组的
+  // **非共享列**是有意子集写、不带守卫，仍走单格端点。**手动格子编辑 / 优化整行**不带 anchorGuard、
+  // 单目标恒落单格端点（无组可离、last-write-wins），逐字不变。
   async function handleCellSave(
     rowId: string,
     columnId: string,
     contentMd: string,
     expectedByRowId?: Map<string, string>,
+    targetRowIds?: string[],
+    anchorGuard?: { anchorColumnId: string; expectedAnchorByRowId: Map<string, string> },
   ) {
     if (!selectedTableId || !detail) return;
+    // 扇出写目标（合并共享格写整组）的两条来源，刻意分流（P1）：
+    //  · 批量规整保存（runSave）显式传入 `targetRowIds` = 建批次那一刻**冻结快照**里
+    //    规划好的写目标（planReformatSaves 的 unit.writeTargets 行 id）——此处**照单
+    //    全写、绝不从实时 detail 重算分组**。否则：detail 在弹窗打开期间刷新、某 anchor
+    //    组分裂/合并时，规划校验的是旧成员、回调却按新分组只扇写代表行，保存循环仍把
+    //    旧成员整组标 saved = 漏写却报成功。规划与扇写必须同源于同一份冻结快照。
+    //  · 手动格子编辑（onSave）/「优化整行」接受（onAcceptCell）**不传**——退回从
+    //    **实时** detail 重算分组的既有行为：那是真人在当前表上编辑，本就该按眼前的
+    //    分组扇写（与改动前逐字一致）。`group` 仅这条缺省路径会消费（批量路径照用显式
+    //    写目标、不看它；仍无条件求值，成本等同改动前、无回归）。
+    // 权威裁决在服务端：带守卫的批量写在**同一事务内逐行**校验成员归属 + expected_before，
+    // 任一不符整体 409（nothing written）。故即便快照规划的写目标之一已被他人真正改动，
+    // 也会安全落到既有的 409 -> stale-skip 路径，绝不盲写覆盖——客户端出「意图」，
+    // 服务端裁「真相」。
     const group = detail.anchorColumnId
       ? groupRowsByAnchor(detail.rows, detail.anchorColumnId).find((g) => g.rows.some((r) => r.id === rowId))
       : null;
-    const targets = group && isSharedColumn(group, columnId) ? groupCellWriteTargets(group, columnId) : [rowId];
-    const results = targets.length > 1
+    const targets =
+      targetRowIds ?? (group && isSharedColumn(group, columnId) ? groupCellWriteTargets(group, columnId) : [rowId]);
+    // 端点选路（split，P1 round-6）：走 guarded 批量端点当且仅当——
+    //  · targets.length > 1：合并共享格扇写（手动编辑或规整保存都可能命中），必须整组一事务写；
+    //  · 或带 anchorGuard：**规整保存**对「整组写」单元下发的锚定守卫（runSave 的 coversAnchorGroup
+    //    门保证只有合并共享列扇写 / **单例组** 才带它）。带上它就必须让服务端跑「指定未变 + 组成员
+    //    精确相等 + expected_before」三重校验——否则**单例组**（建批次那刻仅一行、只有一个写目标）
+    //    会走单格端点、无成员校验：若之后有兄弟行 join 该 anchor 组，只写原行、悄悄把已共享的组留成
+    //    不一致（正是 round-5 为多目标单元关掉的同一类结构漂移，单例组此前漏在门外）。成员漂移即整批
+    //    409 → 落既有 stale-skip。**手动格子编辑 / 优化整行**不带 anchorGuard（也不带 targetRowIds），
+    //    单目标恒落下面的单格端点，逐字不变（last-write-wins，无组可离）。
+    const useBatchEndpoint = targets.length > 1 || Boolean(anchorGuard);
+    const results = useBatchEndpoint
       ? await batchPatchKnowhowCells(notebookId, selectedTableId, {
           columnId,
           rowIds: targets,
@@ -910,8 +950,18 @@ export function KnowhowPanel({
           ...(expectedByRowId
             ? { expectedBefore: targets.map((rid) => expectedByRowId.get(rid) ?? "") }
             : {}),
+          // 整组写才带 anchor 守卫（与 expectedBefore 一样按 targets 平行下发；单例组 targets 长度 1
+          // 也照常带——后端 length-validated 平行数组接受 1 行批次，成员校验即在此单行上跑）。
+          ...(anchorGuard
+            ? {
+                anchorColumnId: anchorGuard.anchorColumnId,
+                expectedAnchor: targets.map((rid) => anchorGuard.expectedAnchorByRowId.get(rid) ?? ""),
+              }
+            : {}),
         })
       : [
+          // 单格路径：无 anchorGuard 的手动编辑落到这里，不带 anchor 守卫（见上方 split 说明及
+          // handleCellSave 头注释）。expectedBefore 仍随手动编辑的 last-write-wins 语义按需下发。
           await patchKnowhowCell(
             notebookId,
             selectedTableId,
@@ -4133,13 +4183,22 @@ interface KnowhowReformatBatchModalProps {
   /** 保存：复用面板自己的 handleCellSave——与格子浮窗、「优化整行」保存走
    * 同一条路径（含合并共享格批量写判定），不重复实现。第 4 参 `expectedByRowId`
    * = 本 unit 每个写目标的 originalMd 基线映射（P1-b）：批量保存**总是**传它，触发
-   * 服务端事务内比对（陈旧 -> 409）。handleCellSave 的该参是可选的（手动编辑器省略
-   * 走 last-write-wins），故此处签名要求它、实现放宽它，两侧兼容。 */
+   * 服务端事务内比对（陈旧 -> 409）。第 5 参 `targetRowIds` = 本 unit 的写目标行 id
+   * 全集（取自建批次冻结快照的 unit.writeTargets，P1「扇出同源」）：批量保存**总是**
+   * 传它，令 handleCellSave 照用这份快照写目标、不从实时 detail 重算合并共享组——规划
+   * 与扇写因此同源于同一份快照，杜绝 detail 刷新致组分裂时「只写代表行却整组报成功」。
+   * handleCellSave 的这两个参都是可选的（手动编辑器省略、走实时分组 + last-write-wins），
+   * 故此处签名要求它们、实现放宽它们，两侧兼容。第 6 参 `anchorGuard`（P1 round-4）=
+   * 快照 anchor 列 id + rowId -> 建批次那刻该行 anchor 快照值：只在**有 anchor 列**时下发，
+   * 令 handleCellSave 的合并共享组扇写额外带上 anchor 基线守卫，后端拦「离组行被冻结扇出
+   * 误写」。记录型表（无 anchor 列）传 undefined，故此参可选。 */
   onSaveCell: (
     rowId: string,
     columnId: string,
     contentMd: string,
     expectedByRowId: Map<string, string>,
+    targetRowIds: string[],
+    anchorGuard?: { anchorColumnId: string; expectedAnchorByRowId: Map<string, string> },
   ) => Promise<void>;
   /** F（review）：保存阶段发生过 stale 跳过（preflight 比对 或 409）时回调——请父级重取
    * 整表，把陈旧的 detail 快照（喂给下一次批量的 rows/originalMd 基线之源）换新，否则关掉
@@ -4182,10 +4241,20 @@ function KnowhowReformatBatchModal({
   // aborted=true）仍然走 setBatch，两者各司其职。
   const abortedRef = useRef(false);
   const mountedRef = useRef(true);
-  // F1：run 阶段陈旧跳过与 save 阶段陈旧跳过是两个独立触发源（前者在 runBatch 收尾、
-  // 后者在 runSave 收尾），但父表只需刷新一次就能让下次批量拿到新鲜基线——两个源都
-  // 经 requestStaleReload 汇流，此 ref 保证「恰一次」（两阶段都跳过时也不刷两遍）。
-  const staleReloadedRef = useRef(false);
+  // F1（P1 回归：延迟重载）：run 阶段陈旧跳过与 save 阶段陈旧跳过是两个独立触发源（前者
+  // 在 runBatch 收尾、后者在 runSave 收尾），都经 requestStaleReload **只置此标记**——批量
+  // 进行中**绝不**立即重载父表 detail。原因：进行中重载会让 allRows/handleCellSave 读到刷新
+  // 后的行，planReformatSaves 可能拿另一客户端的**新值**当 expected_before、让带守卫的写覆盖
+  // 掉那次更新（正是守卫要挡的一类）。真正的 reloadTableDetail 延到弹窗**卸载（关闭）**才触发
+  // （见下方 mount effect 的 cleanup）；关窗重开自然从刷新后的 detail 重建，而一个进行中的
+  // 批次全程用建批次那一刻的不可变快照、内部始终自洽。置真幂等，卸载时恰消费一次。
+  const pendingReloadRef = useRef(false);
+  // F1（P1 回归：不可变快照）：建批次那一刻定格整表规划所需的 allRows/anchorColumnId。批量
+  // 生命周期内**一切**写目标/基线（planReformatSaves）都取自它——父级 detail 因任何原因（含
+  // 本批自己延迟触发的刷新、或 handleCellSave 成功后的 setDetail 合并）变化都不泄漏进来，
+  // 保证一个进行中的批次始终对着同一份底稿规划。useRef 首帧初值只求值一次、之后 props 变化
+  // 不改它（关窗重开是一次全新挂载 -> 从刷新后的 detail 拿到新快照）。
+  const snapshotRef = useRef({ allRows, anchorColumnId });
   // 本弹窗没有全屏概念（任务表未列出，同 KnowhowRowOptimizeModal）——不传
   // disabled，拖动/resize 恒生效。
   const floating = useFloatingWindow({ storageKey: "knowhow.reformatBatch.window" });
@@ -4194,7 +4263,14 @@ function KnowhowReformatBatchModal({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // F1（延迟重载）：弹窗卸载=关闭。批量进行中攒下的「需要重载」标记在此唯一消费——run/save
+      // 阶段的 stale 跳过意味着父级 detail 已落后于服务器，关窗时刷新一次整表，下次打开用新鲜
+      // 基线复跑、被跳过的格子不再永远跳过。所有关闭路径（X/背景/Esc/父级清状态）都汇于卸载 ->
+      // 天然「恰一次」；没跳过时标记为假 -> 不调（无谓 refetch 也省了）。onStaleReload 是稳定
+      // useCallback（reloadTableDetail），弹窗生命周期内不变，[] 依赖捕获首帧即对应被编辑的这张表。
+      if (pendingReloadRef.current) onStaleReload?.();
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // 行标题 map：只有表作用域需要在条目列表里区分"这是哪一行"——行作用域下
@@ -4212,13 +4288,12 @@ function KnowhowReformatBatchModal({
     return scope === "table" ? `${rowLabelById.get(item.rowId) ?? ""} · ${item.columnName}` : item.columnName;
   }
 
-  // 「恰一次」父表刷新闸：run 阶段收尾（run-stale）与 save 阶段收尾（save-stale）都
-  // 经这里请父级刷新整表（reloadTableDetail）。首次调用置 ref 后触发，之后早退——
-  // 两阶段都发生过 stale 跳过时，父表也只刷新一次（见 staleReloadedRef 注释）。
+  // F1（P1 回归：延迟重载）：run 阶段收尾（run-stale）与 save 阶段收尾（save-stale）都经这里
+  // ——**只**置「需要重载」标记，**不**立即调用 onStaleReload。批量进行中重载父表 = 用他人新值
+  // 覆盖的口子（见 pendingReloadRef 注释）。真正的 reloadTableDetail 延到弹窗卸载（关闭）才触发
+  // （见 mount effect 的 cleanup）；置真幂等（两阶段都跳过也只置一次），卸载时恰消费一次。
   function requestStaleReload() {
-    if (staleReloadedRef.current) return;
-    staleReloadedRef.current = true;
-    onStaleReload?.();
+    pendingReloadRef.current = true;
   }
 
   // run 循环：按初始化时固定下来的 items 顺序（该数组的长度/顺序全程不变，
@@ -4335,10 +4410,12 @@ function KnowhowReformatBatchModal({
   async function runSave() {
     if (busy) return;
     const changed = batch.items.filter((item) => item.status === "changed");
-    // F1：用**完整** detail.rows（allRows）规划——与 handleCellSave 重算 anchor 组
-    // 的行集同源，让合并共享列 unit 的写目标覆盖 fan-out 会写到的全部兄弟行（含行
-    // 作用域下不展示的那些），保存前一并查陈旧、不静默覆盖他人对兄弟行的并发编辑。
-    const units = planReformatSaves(changed, allRows, anchorColumnId);
+    // F1：用**完整** detail.rows 规划——与 handleCellSave 重算 anchor 组的行集同源，让合并
+    // 共享列 unit 的写目标覆盖 fan-out 会写到的全部兄弟行（含行作用域下不展示的那些），保存前
+    // 一并查陈旧、不静默覆盖他人对兄弟行的并发编辑。**取自建批次那一刻的不可变快照**
+    // （snapshotRef，非实时 allRows/anchorColumnId props）：P1 回归的根因正是进行中重载后
+    // 读到刷新过的行、把他人新值当 expected_before 基线（见 snapshotRef/pendingReloadRef 注释）。
+    const units = planReformatSaves(changed, snapshotRef.current.allRows, snapshotRef.current.anchorColumnId);
     setBusy(true);
     setSaveTargetCount(changed.length); // 定格保存分母（见 saveTargetCount 注释）
     setBatch((state) => beginReformatBatchSave(state));
@@ -4388,8 +4465,38 @@ function KnowhowReformatBatchModal({
       // 下发给 handleCellSave，触发服务端事务内比对——这才是防覆盖他人编辑的**权威**
       // 判定（上面的 preflight refetch 只是省一次注定 409 的往返的廉价前置过滤）。
       const expectedByRowId = new Map(unit.writeTargets.map((t) => [t.rowId, t.originalMd]));
+      // P1（扇出同源）：把本 unit 的写目标行 id（取自建批次冻结快照的 unit.writeTargets，与
+      // 上面 planReformatSaves 用的 snapshotRef 同源）显式下发给 handleCellSave，令其**照用**、
+      // 不从实时 detail 重算合并共享组。若弹窗打开期间 detail 刷新使该组分裂，实时重算只会写
+      // 代表行、循环却整组标 saved（漏写报成功）；显式写目标堵住这条缝。基线（expectedBefore）
+      // 仍逐行随行，服务端事务内逐行比对，真陈旧则 409 -> 落到既有 stale-skip。
+      const targetRowIds = unit.writeTargets.map((t) => t.rowId);
+      // P1（round-4）：把本 unit 每个写目标的**快照** anchor 值（unit.writeTargets[i].anchorMd，
+      // 与 originalMd 同源于 snapshotRef 冻结快照）连同**快照** anchor 列 id 一起下发——服务端
+      // 事务内额外重读每行 anchor 列，任一行 anchor 自建批次以来被移出组就整组 409（落到既有
+      // stale-skip 路径）。anchorColumnId 取自 snapshotRef 而非实时 detail，与写目标同一份底稿。
+      // P1（round-6）：再叠一道 unit.coversAnchorGroup 门——只有「整组写」（合并共享列扇写 /
+      // 单例组）才下发 anchorGuard。多行组里的**非共享列**是有意的子集写（writeTargets ⊊ 组），
+      // 若也带守卫，后端「组成员精确相等」会把「组里本就有别的兄弟行」误判成 joiner 漂移、把每次
+      // 合法的逐行属性规整都假 409。记录型表 anchorColumnId=null（无兄弟组可离）本就 coversAnchorGroup
+      // =false，两条件合一：唯有有 anchor 列且写目标恰为完整组时才带守卫。带上它的（=整组写）会由
+      // handleCellSave 路由到 guarded 批量端点，即便只有一个写目标（单例组），令成员校验必跑。
+      const anchorColumnId = snapshotRef.current.anchorColumnId;
+      const anchorGuard = anchorColumnId && unit.coversAnchorGroup
+        ? {
+            anchorColumnId,
+            expectedAnchorByRowId: new Map(unit.writeTargets.map((t) => [t.rowId, t.anchorMd])),
+          }
+        : undefined;
       try {
-        await onSaveCell(rep.rowId, rep.columnId, rep.candidateMd ?? "", expectedByRowId);
+        await onSaveCell(
+          rep.rowId,
+          rep.columnId,
+          rep.candidateMd ?? "",
+          expectedByRowId,
+          targetRowIds,
+          anchorGuard,
+        );
         if (!mountedRef.current) return;
         setBatch((state) => unit.members.reduce((s, m) => applyReformatSaveSuccess(s, m.rowId, m.columnId), state));
       } catch (err) {

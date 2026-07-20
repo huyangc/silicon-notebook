@@ -304,7 +304,7 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
-def test_deployed_v13_database_verifies_through_migrations_14_15_16_17_18_19_20(tmp_path):
+def test_deployed_v13_database_verifies_through_migrations_14_15_16_17_18_19_20_21(tmp_path):
     """The v13 hop is the one EVERY currently-deployed production database
     takes: v13 was the shipping schema before the memory-kg-extract feature.
     Post-v13 migrations are _migration_14 (sources.memory_id column + its
@@ -317,7 +317,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_15_16_17_18_19_20(
     _migration_19 (notebook_assets.source_id column + its index, MinerU
     image-retention Task 2 — dropping notebook_assets below for
     _migration_16 already clears both, so no extra rollback step is
-    needed), and _migration_20 (notebook_bases table + its index, and
+    needed), _migration_20 (notebook_bases table + its index, and
     promotion_candidates.target_base_id, multi-domain-base Task 1 — neither
     is absorbed by another table's drop here, since promotion_candidates is
     a foundational table nothing else in this rollback removes, so both get
@@ -330,7 +330,8 @@ def test_deployed_v13_database_verifies_through_migrations_14_15_16_17_18_19_20(
     fixture copy to current and rolling back EXACTLY what every post-v13
     migration adds — including _migration_15's index, _migration_16's tables
     (which also absorb _migration_19's column + index), _migration_17's
-    tables, _migration_18's table, and _migration_20's table + column, or
+    tables, _migration_18's table, _migration_20's table + column, and the
+    _migration_21 normalized-anchor index, or
     the constructed 'v13' would retain them and the hop would under-report
     its additions."""
     from app.core.config import Settings
@@ -351,6 +352,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_15_16_17_18_19_20(
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")  # _migration_21
         rollback.execute("DROP TABLE notebook_bases")                     # _migration_20
         rollback.execute(
             "ALTER TABLE promotion_candidates DROP COLUMN target_base_id"
@@ -380,6 +382,29 @@ def test_deployed_v13_database_verifies_through_migrations_14_15_16_17_18_19_20(
     assert result.source_user_version == 13
     assert result.final_user_version == module.SCHEMA_VERSION
     assert result.changed_tables == []
+
+
+def test_deployed_v20_database_verifies_through_normalized_anchor_index(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    rollback = sqlite3.connect(database)
+    try:
+        rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
+        rollback.execute("PRAGMA user_version = 20")
+        rollback.commit()
+    finally:
+        rollback.close()
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 20
+    assert result.final_user_version == module.SCHEMA_VERSION
 
 
 @pytest.mark.parametrize(

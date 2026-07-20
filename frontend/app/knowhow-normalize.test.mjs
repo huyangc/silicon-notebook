@@ -515,6 +515,146 @@ for (const raw of ["a < b", "x<0", "i<3"]) {
 }
 
 // ---------------------------------------------------------------------------
+// F2（本批 review）— 行中内联 HTML 规则必须也拒绝 HTML 注释（`<!--`）与处理指令（`<?`）
+// 起头 —— 镜像 test_md_normalize_rule.py 的 test_midline_inline_html_comment/pi_*。行首
+// HTML 块类已认 `<`+字母/`/`/`!`/`?`（HTML_BLOCK_RE），但 hasMidlineInlineHtml 只认
+// `<`+字母/`/`，于是**行中** `foo <!-- x\ny -->` / `foo <?pi\nx?>` 漏网：normalizeImpl
+// 注入空行塞进构造内部、符号盲的后端 content_invariant 兜不住。修复：行中 tag 形状扩到
+// `<` 后接 字母/`/`/`!`/`?`。`a < b`、`x<0`、`i<3` 仍规整。
+// ---------------------------------------------------------------------------
+
+test("F2：行中 `<!--` 注释起头跨软换行 -> 门拒绝、逐字原样返回", () => {
+  const cell = "foo <!-- x\ny -->";
+  assert.strictEqual(isRichMarkdown(cell), true);
+  assert.strictEqual(ruleNormalize(cell), cell);
+});
+
+test("F2：行中 `<?` 处理指令起头跨软换行 -> 门拒绝、逐字原样返回", () => {
+  const cell = "foo <?pi\nx?>";
+  assert.strictEqual(isRichMarkdown(cell), true);
+  assert.strictEqual(ruleNormalize(cell), cell);
+});
+
+test("F2：行中 `<!`/`<?`（声明/PI 形状）在任意位置都拒绝", () => {
+  assert.strictEqual(isRichMarkdown("尾 <!DOCTYPE 收"), true);
+  assert.strictEqual(isRichMarkdown("尾 <?php 收"), true);
+});
+
+// ---------------------------------------------------------------------------
+// F3（本批 review）— 开着的行内 span 追踪必须也拒绝**行尾仍开着链接目的地**的行 —— 镜像
+// test_md_normalize_rule.py 的 test_link_destination_*。`[docs](/url\n"title")`：`]` 处
+// 方括号深度归零（旧追踪只数 `[`/`]` 看不见它），但 `](` 起头的 `(`-目的地行尾没闭，
+// normalizeImpl 注入空行把目的地/标题拆到两段、链接退化成散文。修复：见到 `](` 后追踪未
+// 闭合的目的地圆括号深度（转义感知）。严格限定链接上下文：散文里的裸 `(未闭合`（无前置
+// `](`）不拒绝。
+// ---------------------------------------------------------------------------
+
+test("F3：链接目的地跨软换行（`[docs](/url\\n\"title\")`）-> 门拒绝、逐字原样返回", () => {
+  const raw = '[docs](/url\n"title")';
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw);
+});
+
+test("F3：单行闭合的链接目的地（`[docs](/url \"title\")`）仍放行", () => {
+  assert.strictEqual(isRichMarkdown('[docs](/url "title")'), false);
+});
+
+test("F3：散文裸 `(未闭合`（无前置 `](`）不拒绝——严格限定链接目的地上下文", () => {
+  assert.strictEqual(isRichMarkdown("文本 (未闭合"), false);
+  assert.strictEqual(ruleNormalize("文本 (未闭合"), "文本 (未闭合");
+});
+
+test("F3：目的地内转义 `\\)` 不闭合、行尾仍开着 -> 拒绝", () => {
+  const raw = "[docs](/url\\)\ncont)";
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw);
+});
+
+// ---------------------------------------------------------------------------
+// F3 round-2（本批 review）— `](` 目的地跟踪器此前对**每个** `](` 都武装，含落在**同行已
+// 闭合**的行内代码/公式 span 内的那个。`A. header\n`x](`` 里 `](` 是代码 span 内容（非链接
+// 起头），旧扫描仍武装了跟踪器、整格被判 rich 逐字返回，`A. header` 从未加粗。修复：rule-4
+// 扫描同时左到右追踪代码 span / `$` span 状态，落在已闭合 span 内的 `](` **不**武装；散文里
+// 的 `](` 仍武装（下面跨行链接的回归锁仍拒绝）。镜像 test_md_normalize_rule.py 同名用例。
+// ---------------------------------------------------------------------------
+
+test("F3-2：已闭合代码 span 内的 `](`（`` `x](` ``）不武装 -> 规整（标题加粗）", () => {
+  // 单行 `` `x](` `` 里 `](` 是代码 span 内容、非链接起头，唯一可能拒绝它的规则不再拒绝：
+  assert.strictEqual(isRichMarkdown("`x](`"), false);
+  assert.strictEqual(ruleNormalize("`x](`"), "`x](`"); // 代码 span 逐字保留（幂等）
+  // 端到端「标题加粗」：顶格 alpha 标题在该代码 span 行之上规整成加粗节标题。注意 review 的裸
+  // `A. header\n`x](``（marker 紧跟 prose、无空行）因**另一条**既有规则——懒延续——被拒（与本 `](`
+  // 修复无关，见下条 pin），空行断开懒延续即可隔离本修复：标题加粗、代码 span 逐字保留。
+  const raw = "A. header\n\n`x](`";
+  assert.strictEqual(isRichMarkdown(raw), false);
+  const out = ruleNormalize(raw).split("\n");
+  assert.ok(out.includes("**A. header**")); // 标题加粗
+  assert.ok(out.includes("`x](`")); // 代码 span 逐字保留
+});
+
+test("F3-2：裸 `A. header\\n`x](``（marker 紧跟 prose）仍因懒延续被拒（与 `](` 修复正交）", () => {
+  // pin 该 confound：review 的裸相邻形态**仍** rich——不是因为 `](`（那行已不再单独拒绝、上条
+  // 已断言），而是列 0 prose 紧跟 marker = 懒延续。与 `](` 修复正交，不得回归成规整。
+  const raw = "A. header\n`x](`";
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw);
+});
+
+test("F3-2：同行闭合代码 span 内的 `](`（`` `](` 同行闭合 ``）不 rich", () => {
+  assert.strictEqual(isRichMarkdown("`](` 同行闭合"), false);
+});
+
+test("F3-2：同行闭合 `$` 公式 span 内的 `](`（`$a](b$ 同行`）不 rich", () => {
+  assert.strictEqual(isRichMarkdown("$a](b$ 同行"), false);
+});
+
+test("F3-2：闭合 span 之后散文里的 `](`（`` `code` [docs](/url\\n\"title\") ``）仍拒绝", () => {
+  const raw = '`code` [docs](/url\n"title")';
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw);
+});
+
+// ---------------------------------------------------------------------------
+// F3 round-3（本批 review）— 目的地跟踪器此前对**每个** `)` 都减目的地深度，于是带**引号
+// 标题**、标题里在软换行前含 `)` 的合法链接 `[x](url "title )\ncontinued")` 里，标题的 `)`
+// 被误当目的地闭合括号：line 1 被判「已闭合」、门放行、normalizeImpl 注入空行把标题拆断、
+// 链接退化（符号盲的 contentInvariant 兜不住）。修复：按 CommonMark 行内链接文法建模——目的地
+// 跑到空白或 `)` 后，可选**标题**以 `"`/`'`/`(` 开、分别由 `"`/`'`/`)` 闭（转义感知）；标题
+// 内的 `)` **不**减目的地深度。行尾仍开着（目的地 OR 标题未闭）= 拒绝（fail-closed 不变，
+// 此前只是被标题的 `)` 提前闭合）。镜像 test_md_normalize_rule.py 的 test_link_title_*。
+// ---------------------------------------------------------------------------
+
+test("F3-3：引号标题内 `)` 跨软换行（`[x](url \"title )\\ncontinued\")`）-> 拒绝、逐字原样返回", () => {
+  const raw = '[x](url "title )\ncontinued")';
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw); // 逐字原样——链接保留
+});
+
+test("F3-3：同行完整、标题含 `)` 的链接（`[x](url \"title )\") 同行完整`）不 rich", () => {
+  // 过度拒绝锁：目的地正确地跨标题保持开着，真正的闭合 `)` 才关掉链接。
+  assert.strictEqual(isRichMarkdown('[x](url "title )") 同行完整'), false);
+});
+
+test("F3-3：单引号标题跨软换行（`[x](url 'ti)tle'\\n)`）-> 拒绝", () => {
+  // 标题在 line 1 闭合（`'ti)tle'`、内部 `)` 忽略），但目的地闭合 `)` 在 line 2 -> line 1
+  // 结束时链接仍开着 -> 拒绝。
+  const raw = "[x](url 'ti)tle'\n)";
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw);
+});
+
+test("F3-3：同行完整的括号标题 `(title)`（`[x](url (title))`）不 rich", () => {
+  // 括号标题在目的地后的 `(` 开（闭 `)`），第一个 `)` 闭标题、链接的 `)` 闭链接 -> 不 rich。
+  assert.strictEqual(isRichMarkdown('[x](url (title))'), false);
+});
+
+test("F3-4：angle 目的地内的 `)` 是内容，跨行标题仍拒绝并逐字保留", () => {
+  const raw = '[x](<1)2> "title )\ncontinued")';
+  assert.strictEqual(isRichMarkdown(raw), true);
+  assert.strictEqual(ruleNormalize(raw), raw);
+});
+
+// ---------------------------------------------------------------------------
 // F3 — marker 宽度必须按 CODE POINT 计，不是 UTF-16 单元 —— 镜像
 // test_md_normalize_rule.py 的 test_astral_ordered_marker_child_indented_by_
 // codepoint_width。星际有序 marker 如 𝟙.（U+1D7D9，UTF-16 里是代理对，category

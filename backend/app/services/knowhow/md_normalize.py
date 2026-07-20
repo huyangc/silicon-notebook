@@ -298,6 +298,18 @@ def _ends_with_open_inline_span(line: str) -> bool:
       3. 链接/图片文本方括号 `[` `]`：**未转义**的方括号深度（`[` +1、`]` 归零 floor 0）。
          行尾深度 >0 = 有个 `[label` 跨行没闭合（`[label\\ncontinued](url)` 会被空行拆断）。
          只认 ASCII `[]`——全角【】是不同字符、不影响（真实语料正是用【】）。
+      4. 链接**目的地 + 标题**（F3；round-3 扩展到 title）：见到 `](` 后进入链接目标区，按
+         CommonMark 行内链接文法追踪三个子相——目的地（转义感知、圆括号平衡、空白结束）、
+         目的地后的间隙、可选标题（`"`/`'`/`(` 开，分别由 `"`/`'`/`)` 闭，转义感知）。**标题内的
+         `)` 不减目的地深度**（round-3 核心修复：旧实现在每个 `)` 都减、把带引号标题里的 `)` 误当
+         目的地闭合括号 -> `[x](url "title )\\ncontinued")` 被判「已闭合」漏拒）。行尾仍在任一子相内
+         = `[docs](/url\\n"title")` / `[x](url "title )\\n…")` 这类链接跨软换行——`]` 处方括号深度已
+         归零（规则 3 看不见它），但链接目标没闭，`_normalize` 注入空行会把目的地/标题拆到两段、链接
+         退化成散文。**严格限定链接上下文**：只在见过 `](` 之后才追踪，散文里的裸 `(未闭合` 不受
+         影响（常见、不该拒）。Round-2：`](` 还须落在**散文**里才武装——同行**已闭合**的行内代码/公式
+         span 内的 `](`（`` `x](` ``、`$a](b$`）是 span 内容、不是链接起头，本段同时镜像规则 2/1
+         的 code/math run 配对、对落在已闭合 span 内的 `](` **不**武装（否则 `` `x](` `` 会误判
+         rich、`A. header` 从不加粗）。
 
     强调 `*`/`_` 与 GFM 删除线 `~` 的跨行配对**不在本函数**——它做不到逐行判定：词内
     `R*C`（两侧都是词字符的孤立 run）绝不能因自身就把整格拒掉，但两行各一个 run 若在
@@ -367,7 +379,90 @@ def _ends_with_open_inline_span(line: str) -> bool:
         elif ch == "]":
             depth = max(0, depth - 1)
         i += 1
-    return depth > 0
+    if depth > 0:
+        return True
+    # 4) 链接目的地 + 标题（F3；round-3 扩展到 title）：`](` 之后进入链接的「目标」区，按
+    #    CommonMark 行内链接文法建模三个子相：
+    #      - "dest"（目的地文本）：转义感知、圆括号**平衡**深度（`(` +1、`)` -1，深度归零=链接
+    #        整体闭合）；**空白**结束目的地、进入 "gap"。
+    #      - "gap"（目的地后）：等一个可选**标题** opener（`"`/`'`/`(`）或链接闭合 `)`。
+    #      - "title"（标题内）：转义感知，只等对应的 title-close（`"`→`"`、`'`→`'`、`(`→`)`）；
+    #        **标题内的 `)` 不减目的地深度**（round-3 修复的核心——旧实现在每个 `)` 都减，把带引号
+    #        标题里的 `)` 误当目的地闭合括号 -> 跨行标题 `[x](url "title )\ncontinued")` 被判「已闭合」
+    #        漏拒、注入空行塞进标题拆断链接）。标题闭合回到 "gap"。
+    #    行尾仍在任一子相内（"dest"/"gap"/"title"）= 链接跨软换行、未闭合 -> 拒绝（既有 fail-closed
+    #    规则不变，只是不再被标题的 `)` 提前闭合）。**只**在见过 `](` 后才进入——散文里的裸 `(` 不受
+    #    影响（严格限定链接上下文，见文档第 4 条）。
+    #
+    #    Round-2：武装 `](` 前必须先确认它落在**散文**里、而非同行**已闭合**的行内代码/公式 span 内——
+    #    `` `x](` `` 里 `](` 是代码 span 内容、不是链接起头，旧实现把它也当链接起头武装、整格误判 rich
+    #    逐字返回（`A. header` 从未加粗）。本段左到右**同时**追踪 code-span 与 math-span 状态，分别精确
+    #    镜像上面规则 2 的反引号 run 配对（无转义）与规则 1 的 `$` run 配对（转义感知）：落在任一已开着
+    #    span 内的 `](` **不**武装；散文里的 `](` 仍武装（下面跨行链接的回归锁不受影响）。跨行**开着**的
+    #    code/math span 已由规则 1/2 先行拒绝（走不到这里），故此处每个进入的 span 必在行尾前闭合。
+    code_inside = False              # 反引号 code-span：镜像规则 2（无转义、等长 run 闭合）
+    code_len = 0
+    math_inside = False              # `$` math-span：镜像规则 1（转义感知、等长 run 闭合）
+    math_len = 0
+    i = 0
+    while i < n:
+        ch = line[i]
+        if code_inside:                          # 代码 span 内（镜像规则 2）：不转义，等长 run 闭合
+            if ch == "`":
+                run = 0
+                while i < n and line[i] == "`":
+                    run += 1
+                    i += 1
+                if run == code_len:
+                    code_inside = False
+                continue                         # run 长度不等 -> span 内字面，保持 inside
+            i += 1
+            continue
+        if math_inside:                          # 公式 span 内（镜像规则 1）：转义感知，等长 run 闭合
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "$":
+                run = 0
+                while i < n and line[i] == "$":
+                    run += 1
+                    i += 1
+                if run == math_len:
+                    math_inside = False
+                continue                         # run 长度不等 -> span 内字面，保持 inside
+            i += 1
+            continue
+        # 散文：开 code-span / 开 math-span / 武装 `](`。`\` 转义下一字符——**反引号除外**（镜像
+        # 规则 2「反引号侧不做转义」：`` \` `` 仍按裸 run 计、照常开 span），其余 `\$`/`\]`/`\(`
+        # 照旧跳过（镜像规则 1/3/4 的转义感知），使 code/math 追踪与规则 2/1 逐位对齐。
+        if ch == "\\":
+            if i + 1 < n and line[i + 1] == "`":
+                i += 1                           # `\` 当字面、让紧邻反引号照常开 span（对齐规则 2 裸计）
+                continue
+            i += 2
+            continue
+        if ch == "`":
+            run = 0
+            while i < n and line[i] == "`":
+                run += 1
+                i += 1
+            code_inside, code_len = True, run
+            continue
+        if ch == "$":
+            run = 0
+            while i < n and line[i] == "$":
+                run += 1
+                i += 1
+            math_inside, math_len = True, run
+            continue
+        if ch == "]" and i + 1 < n and line[i + 1] == "(":
+            after_target = _scan_inline_link_target(line, i + 2, n)
+            if after_target is None:
+                return True                       # 不完整/不合法目标跨软换行：fail closed
+            i = after_target
+            continue
+        i += 1
+    return False
 
 
 def _has_midline_inline_html(line: str) -> bool:
@@ -380,11 +475,15 @@ def _has_midline_inline_html(line: str) -> bool:
     `content_invariant`（`<`/`>` 都是标点 P、内容字符没变）兜不住这种结构腐蚀。门必须
     对它 fail CLOSED、整格拒绝（原样返回）。
 
-    刻意只认「`<` + 字母/`/`」这一 tag 形状：`a < b`（`<` 后空格）、`x<0`/`i<3`（`<` 后
-    数字，是小于号）仍可规整；`x<y`（`<` 后字母）被拒。过度拒绝（miss 一格、用户仍可手动
-    触发）与腐蚀（改坏结构且校验放行）的代价不对称，取 fail-closed、接受偶尔多拒。`\\<`
-    转义的 `<`（反斜杠转义下一字符）不算标签起头。与 TS 孪生 `hasMidlineInlineHtml` 逐
-    字符对齐。调用方保证只对非空行调用（空行由 `_line_normalizable` 的 blank 短路挡掉）。"""
+    刻意只认「`<` + 字母/`/`/`!`/`?`」这一 tag 形状（与**行首** HTML 块的 `_HTML_BLOCK_RE
+    = ^<[A-Za-z/!?]` 同一字符类）：`a < b`（`<` 后空格）、`x<0`/`i<3`（`<` 后数字，是小于
+    号）仍可规整；`x<y`（`<` 后字母）、`foo <!-- x`（`<!` 注释/声明起头）、`foo <?pi`（`<?`
+    处理指令起头）被拒。F2（本批 review）：`!`/`?` 此前漏在字符类外，于是**行中**跨软换行的
+    HTML 注释 `foo <!-- x\\ny -->` / PI `foo <?pi\\nx?>` 漏网——`_normalize` 注入空行塞进
+    构造内部、符号盲的 `content_invariant` 兜不住。过度拒绝（miss 一格、用户仍可手动触发）
+    与腐蚀（改坏结构且校验放行）的代价不对称，取 fail-closed、接受偶尔多拒。`\\<` 转义的
+    `<`（反斜杠转义下一字符）不算标签起头。与 TS 孪生 `hasMidlineInlineHtml` 逐字符对齐。
+    调用方保证只对非空行调用（空行由 `_line_normalizable` 的 blank 短路挡掉）。"""
     i, n = 0, len(line)
     while i < n:
         ch = line[i]
@@ -393,7 +492,7 @@ def _has_midline_inline_html(line: str) -> bool:
             continue
         if ch == "<":
             nxt = line[i + 1] if i + 1 < n else ""
-            if nxt == "/" or (nxt.isascii() and nxt.isalpha()):
+            if nxt in ("/", "!", "?") or (nxt.isascii() and nxt.isalpha()):
                 return True
         i += 1
     return False
@@ -779,15 +878,19 @@ def _trim_gfm_url_end(url: str) -> int:
 
 def _match_bare_autolink(text: str, pos: int) -> "int | None":
     """裸 GFM autolink 字面（URL / www / 邮箱）从 `pos` 起的匹配：命中返回构造之后一位的
-    下标（半开 end），否则 ``None``。要求 `pos` 处于**词边界**——`pos` 前一字符非字母数字
-    （行首/空白/标点/CJK 句读/`_`/`*`/`(` 等都算边界；紧跟在字母数字后的 `http`/`www` 是
-    更长单词/标识符的一部分、不匹配）。URL 先于邮箱尝试（`http://user@host` 是带 userinfo
+    下标（半开 end），否则 ``None``。要求 `pos` 处于**词边界**——`pos` 前一字符非 **ASCII**
+    字母数字（F4，本批 review：只有 ASCII 字母/数字算「词内」而挡下起始；行首/空白/标点/**CJK
+    表意字符**/CJK 句读/`_`/`*`/`(` 等都算边界）。`str.isalnum()` 是 Unicode 感知的、会把 CJK
+    也判成字母数字，于是 `参见https://…`（CJK 紧贴 URL、无空格）被误判成「词内」而跳过，URL 落
+    进散文放宽标点区、`a-b`→`ab` 的改写看不见；但 remark-gfm 把 CJK 当合法左边界、照样把它
+    渲染成链接——两侧分歧。改用 ASCII-alnum 边界与 remark-gfm 对齐（`abchttps://…` 这类 ASCII
+    紧邻仍不匹配、是更长单词的一部分）。URL 先于邮箱尝试（`http://user@host` 是带 userinfo
     的 URL，不是邮箱）。URL 命中后 `_trim_gfm_url_end` 剥尾随标点；剥完只剩裸 scheme 前缀
     （`https://.` -> `https://`、`www.` -> `www`）判为退化、不算构造（返回 None）。见上方
     `_GFM_BARE_URL_RE` 注释块。"""
     prev = text[pos - 1] if pos > 0 else ""
-    if prev.isalnum():
-        return None                        # 非词边界：更长单词/标识符的一部分
+    if prev.isascii() and prev.isalnum():
+        return None                        # 非词边界：ASCII 字母数字紧邻 = 更长单词/标识符的一部分
     m = _GFM_BARE_URL_RE.match(text, pos)
     if m:
         matched = m.group(0)
@@ -820,6 +923,100 @@ def _scan_balanced(text: str, i: int, n: int, open_ch: str, close_ch: str) -> "i
             depth -= 1
         i += 1
     return i if depth == 0 else None
+
+
+def _scan_inline_link_target(text: str, i: int, n: int) -> "int | None":
+    """Consume an inline link target starting just after its outer ``(``.
+
+    Bare destinations may contain balanced, escaped parentheses.  A destination
+    beginning with ``<`` instead consumes through its unescaped ``>``; spaces
+    and ``)`` are content there, while an inner ``<`` or newline is malformed.
+    Once whitespace ends a bare destination, or follows an angle destination,
+    an optional title is either double-quoted, single-quoted, or parenthesized.
+    Escapes consume the next delimiter in all forms.  This is deliberately a
+    small CommonMark-shaped scanner rather than a general Markdown parser: a
+    complete target returns the index after its outer ``)``, and incomplete or
+    malformed input returns ``None``.
+
+    Both the full-text reference scanner and the line-local soft-newline gate
+    use this function.  In particular, a ``)`` in a quoted title cannot be
+    mistaken for the closing parenthesis of the surrounding link.
+    """
+    phase = "angle" if i < n and text[i] == "<" else "dest"
+    if phase == "angle":
+        i += 1
+    destination_depth = 1
+    title_close = ""
+    while i < n:
+        ch = text[i]
+        if phase == "angle":
+            if ch == "\n" or ch == "\r":
+                return None
+            if ch == "\\":
+                if i + 1 < n and (text[i + 1] == "\n" or text[i + 1] == "\r"):
+                    return None
+                i += 2
+                continue
+            if ch == "<":
+                return None
+            if ch == ">":
+                phase = "after_angle"
+            i += 1
+            continue
+        if phase == "after_angle":
+            if ch == ")":
+                return i + 1
+            if ch.isspace():
+                phase = "gap"
+                i += 1
+                continue
+            return None
+        if phase == "dest":
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == "(":
+                destination_depth += 1
+            elif ch == ")":
+                destination_depth -= 1
+                if destination_depth == 0:
+                    return i + 1
+            elif ch.isspace():
+                phase = "gap"
+            i += 1
+            continue
+        if phase == "gap":
+            if ch.isspace():
+                i += 1
+                continue
+            if ch == ")":
+                return i + 1
+            if ch == '"' or ch == "'":
+                phase, title_close = "title", ch
+                i += 1
+                continue
+            if ch == "(":
+                phase, title_close = "title", ")"
+                i += 1
+                continue
+            return None
+        if phase == "title":
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == title_close:
+                phase = "after_title"
+            i += 1
+            continue
+        # Kept as an explicit state rather than folding it into ``gap``: only
+        # whitespace and the outer close may follow a title.
+        if ch.isspace():
+            i += 1
+            continue
+        if ch == ")":
+            return i + 1
+        return None
+    return None
 
 
 def _find_link_constructs(text: str) -> "list[tuple[int, int, str]]":
@@ -861,7 +1058,7 @@ def _find_link_constructs(text: str) -> "list[tuple[int, int, str]]":
             if after_alt is None or after_alt >= n or text[after_alt] != "(":
                 pos += 1                       # alt 未闭合 / 其后不是 `](`：不是链接/图片
                 continue
-            after_dest = _scan_balanced(text, after_alt + 1, n, "(", ")")  # dest 平衡圆括号
+            after_dest = _scan_inline_link_target(text, after_alt + 1, n)
             if after_dest is None:
                 pos += 1                       # 目的地未闭合：不算构造
                 continue
