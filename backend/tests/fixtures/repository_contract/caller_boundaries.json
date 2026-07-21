@@ -473,7 +473,7 @@
       "kind": "independent_sql",
       "path": "scripts/diag_db.py",
       "reason": "read-only host database diagnostic",
-      "scope": "<module>._collect_notebook_counts.count_rows",
+      "scope": "<module>._collect_plans.explain",
       "target": "connection.execute"
     },
     {
@@ -481,7 +481,7 @@
       "kind": "independent_sql",
       "path": "scripts/diag_db.py",
       "reason": "read-only host database diagnostic",
-      "scope": "<module>._collect_plans.explain",
+      "scope": "<module>._count_table.read",
       "target": "connection.execute"
     },
     {
