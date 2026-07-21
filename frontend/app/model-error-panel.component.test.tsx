@@ -104,6 +104,17 @@ test("renders dynamic deduplicated failures and routes role-specific actions", a
 });
 
 
+test("does not copy legacy model-error diagnostics into browser logging", async () => {
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  try {
+    renderAnswer(answer);
+    await waitFor(() => expect(consoleError).not.toHaveBeenCalled());
+  } finally {
+    consoleError.mockRestore();
+  }
+});
+
+
 test("shows per-service pending and stable test results", async () => {
   let resolveReasoner!: (value: ModelServiceStatusItem) => void;
   const onTestModel = vi.fn((service: StatusModelRole) => {

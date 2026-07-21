@@ -3744,10 +3744,6 @@ export default function Home() {
         f.keyDirty ? f.api_key : null);
       // 200 响应挂不上 X-User-Message 头,故 ModelTestResult 用 `code` 承载出处:
       // 后端只回稳定枚举,文案在 vocabulary.ts(这样才落在界面词汇守卫的作用域里)。
-      // `error` 是 `f"{type(exc).__name__}: {exc}"` 的诊断,只进 console。
-      // 这页的用途就是排查配置,一律压成「连接未通过」等于把它废掉——所以要的是
-      // 结构化出处,不是放宽判据。
-      if (!r.ok && r.error) logDiagnostic("model-test", r.error);
       setModelTesting((m) => ({
         ...m,
         [role]: r.ok

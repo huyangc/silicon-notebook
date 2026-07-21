@@ -99,8 +99,6 @@ export async function saveModelSettings(payload: ReturnType<typeof buildPutPaylo
 
 export async function testModelService(
   service: ModelRole, base_url: string, model: string, api_key: string | null,
-  // 两个通道在类型上就分开:error = 诊断(只进 console),code = 稳定枚举,
-  // 文案由前端 vocabulary.ts 的 MODEL_TEST_ERROR 提供。调用点想拿 error 上屏会显得刺眼。
 ): Promise<{ ok: boolean; latency_ms: number; error: string; code: string }> {
   const res = await fetch(`${API_BASE}/me/model-settings/test`, {
     method: "POST",
@@ -108,7 +106,21 @@ export async function testModelService(
     body: JSON.stringify({ service, base_url, model, api_key }),
   });
   if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
-  return res.json();
+  const result = await res.json() as {
+    ok?: unknown; latency_ms?: unknown; error?: unknown; code?: unknown;
+  };
+  const code = typeof result.code === "string"
+    && ["", "unknown_service", "missing_config", "upstream_error"].includes(result.code)
+    ? result.code
+    : "";
+  return {
+    ok: result.ok === true,
+    latency_ms: typeof result.latency_ms === "number" && Number.isFinite(result.latency_ms)
+      ? result.latency_ms
+      : 0,
+    error: "",
+    code,
+  };
 }
 
 export type ModelServicesSummary = {

@@ -2,6 +2,12 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.model_safety import (
+    safe_model_error_code,
+    safe_model_error_service,
+    safe_model_error_stage,
+    safe_model_label,
+)
 from app.services.memory_inputs import (
     normalize_content,
     normalize_reason,
@@ -625,6 +631,26 @@ class ModelError(BaseModel):
     model: str = ""
     message: str
 
+    @field_validator("service", mode="before")
+    @classmethod
+    def validate_service(cls, value: object) -> str:
+        return safe_model_error_service(value)
+
+    @field_validator("stage", mode="before")
+    @classmethod
+    def validate_stage(cls, value: object) -> str:
+        return safe_model_error_stage(value)
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def validate_model(cls, value: object) -> str:
+        return safe_model_label(value)
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def validate_message(cls, value: object) -> str:
+        return safe_model_error_code(value)
+
 
 class AskResponse(BaseModel):
     answer_id: str = ""
@@ -1088,7 +1114,7 @@ class ModelTestRequest(BaseModel):
 class ModelTestResult(BaseModel):
     ok: bool
     latency_ms: int = 0
-    # 诊断字段:失败分支写 f"{type(exc).__name__}: {exc}",给日志和排查,前端不上屏。
+    # Deprecated compatibility field. Raw diagnostics stay in server logs.
     error: str = ""
     # 失败原因的稳定枚举。200 响应挂不上 X-User-Message 头,所以出处由 schema 承载;
     # 这里刻意存 **code 而不是中文文案**——文案归前端(vocabulary.ts 的

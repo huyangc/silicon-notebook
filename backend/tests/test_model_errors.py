@@ -92,9 +92,109 @@ def test_answer_failure_names_dynamic_primary_service_and_persists_error(repo):
     response = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
     error = next(item for item in response.model_errors if item.stage == "answer")
     assert (error.service, error.model) == ("llm", "runtime-primary-name")
+    assert error.message == "upstream_error"
     stored = repo._runtime.identity.get_model_service_statuses("user-local")
     assert stored["llm"]["status"] == "error"
     assert stored["llm"]["trigger"] == "observed_failure"
+
+
+def test_safe_tagged_model_name_remains_dynamic_on_failure(repo):
+    repo.settings.query_rewrite_enabled = False
+    repo.settings.chunk_kg_overlay_enabled = False
+    raising = _RaisingLLM()
+    raising.model = "llama3:70b"
+    repo.llm_client = raising
+    nb = _seed_chunks(repo)
+
+    response = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+
+    error = next(item for item in response.model_errors if item.stage == "answer")
+    assert (error.service, error.model, error.message) == (
+        "llm", "llama3:70b", "upstream_error"
+    )
+
+
+def test_ask_failure_keeps_raw_diagnostic_server_side_only(repo, monkeypatch):
+    repo.settings.query_rewrite_enabled = False
+    repo.settings.chunk_kg_overlay_enabled = False
+    unsafe_model = "https://10.0.0.8/v1?api_key=sk-private-secret"
+
+    class SensitiveFailure:
+        configured = True
+        model = unsafe_model
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            raise RuntimeError(
+                "provider https://10.0.0.8 leaked sk-private-secret"
+            )
+
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    repo.llm_client = SensitiveFailure()
+    nb = _seed_chunks(repo)
+
+    response = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+    serialized = response.model_dump_json()
+    replay = repo.get_conversation(response.conversation_id).model_dump_json()
+    with repo._connect() as db:
+        persisted = db.execute(
+            "SELECT payload FROM answers WHERE id=?", (response.answer_id,)
+        ).fetchone()[0]
+
+    for client_value in (serialized, replay, persisted):
+        for private_value in (
+            "10.0.0.8", "sk-private-secret", "provider", "RuntimeError",
+        ):
+            assert private_value not in client_value
+        assert "upstream_error" in client_value
+    assert all(error.model == "" for error in response.model_errors)
+    assert all(error.message == "upstream_error" for error in response.model_errors)
+    assert any(event.get("model") == unsafe_model for event in events)
+    assert any(
+        "10.0.0.8" in event.get("error", "")
+        and "sk-private-secret" in event.get("error", "")
+        for event in events
+    )
+
+
+def test_legacy_persisted_model_error_is_sanitized_on_replay(repo):
+    nb = repo.create_notebook(NotebookCreate(name="legacy"))
+    raw_payload = {
+        "conclusion": "legacy answer",
+        "model_errors": [{
+            "service": "https://provider.example/v1",
+            "stage": "api_key_sk_private_secret",
+            "model": "https://10.0.0.8/v1?api_key=sk-private-secret",
+            "message": "RuntimeError: provider secret response body",
+        }],
+    }
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO conversations "
+            "(id,notebook_id,title,created_by,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            ("conv-legacy", nb.id, "legacy", repo.current_user().id, _now(), _now()),
+        )
+        db.execute(
+            "INSERT INTO answers "
+            "(id,notebook_id,question,payload,created_at,conversation_id) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                "ans-legacy", nb.id, "q", _j.dumps(raw_payload), _now(),
+                "conv-legacy",
+            ),
+        )
+
+    replay = repo.get_conversation("conv-legacy")
+    error = replay.turns[0].response.model_errors[0]
+    assert (error.service, error.stage, error.model, error.message) == (
+        "llm", "model_call", "", "upstream_error"
+    )
+    encoded = replay.model_dump_json()
+    for private_value in (
+        "api_key", "10.0.0.8", "sk-private-secret", "provider", "RuntimeError",
+    ):
+        assert private_value not in encoded
 
 
 def test_embed_failure_recorded(repo, monkeypatch):

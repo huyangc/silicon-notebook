@@ -6,6 +6,7 @@ import {
   MODEL_ROLES,
   testAllCurrentModelServices,
   testCurrentModelService,
+  testModelService,
 } from "./model-settings.ts";
 
 test("buildPutPayload omits api_key when not dirty", () => {
@@ -73,5 +74,33 @@ test("current and all model tests use authenticated POST endpoints", async () =>
   for (const { init } of calls) {
     assert.equal(init.method, "POST");
     assert.equal(init.headers.Authorization, "Bearer explicit-test-token");
+  }
+});
+
+test("draft model tests discard legacy raw diagnostics from a 200 response", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = globalThis.window;
+  globalThis.window = { localStorage: { getItem: () => "draft-test-token" } };
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    ok: false,
+    latency_ms: 17,
+    code: "upstream_error",
+    error: "RuntimeError: provider https://10.0.0.8 leaked sk-private-secret",
+    provider_diagnostic: "secondary secret response body",
+  }), { status: 200 });
+
+  try {
+    const result = await testModelService(
+      "llm", "https://provider.example/v1", "model-x", null,
+    );
+    assert.equal(result.error, "");
+    assert.equal(result.code, "upstream_error");
+    assert.doesNotMatch(
+      JSON.stringify(result),
+      /10\.0\.0\.8|sk-private-secret|RuntimeError|secondary secret/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.window = originalWindow;
   }
 });

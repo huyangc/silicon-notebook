@@ -290,7 +290,7 @@
             "mode": "reasoning",
             "model_errors": [
               {
-                "message": "RuntimeError: deterministic fallback",
+                "message": "upstream_error",
                 "model": "fixture-rerank",
                 "service": "llm",
                 "stage": "rerank"

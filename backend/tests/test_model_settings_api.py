@@ -96,13 +96,18 @@ def test_precheck_failures_go_in_code_not_error(client, payload, expected):
     assert not re.search(r"[一-鿿]", body["code"])
 
 
-def test_exception_path_fills_error_and_uses_generic_code(client, monkeypatch):
-    """异常分支只给 code,绝不把 str(exc) 送上任何可展示通道。"""
+def test_exception_path_logs_raw_server_side_and_returns_only_code(
+    client, monkeypatch, caplog
+):
+    """异常原文只进服务端日志；200 响应保留空兼容字段与稳定 code。"""
     import app.api.routes as routes
 
     class Boom:
         def __init__(self, *a, **k): pass
-        def chat_json(self, *a, **k): raise RuntimeError("upstream 10.0.0.7:8000 refused")
+        def chat_json(self, *a, **k):
+            raise RuntimeError(
+                "provider https://10.0.0.7:8000 leaked sk-private-secret"
+            )
 
     monkeypatch.setattr("app.core.llm.OpenAICompatibleClient", Boom)
     monkeypatch.setattr(routes, "identity_repository", lambda: _StubRepo())
@@ -113,8 +118,14 @@ def test_exception_path_fills_error_and_uses_generic_code(client, monkeypatch):
     ).json()
     assert body["ok"] is False
     assert body["code"] == "upstream_error"      # ← 用户看到的是这个 code 的中文映射
-    assert "RuntimeError" in body["error"]       # ← 排查侧仍拿得到原文
-    assert "10.0.0.7:8000" in body["error"]
+    assert body["error"] == ""
+    encoded = str(body)
+    for private_value in (
+        "RuntimeError", "10.0.0.7:8000", "sk-private-secret", "provider",
+    ):
+        assert private_value not in encoded
+    assert "10.0.0.7:8000" in caplog.text
+    assert "sk-private-secret" in caplog.text
 
 
 def _install_status_service(monkeypatch, probe):

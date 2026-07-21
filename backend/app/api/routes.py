@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import logging
 import queue
 import zipfile
 from pathlib import Path
@@ -118,6 +119,8 @@ from app.services.pending_bus import pending_bus
 from app.repositories.ports import AskStreamPort, UploadedSourceFile
 from app.api.memory_routes import memory_router
 from app.repositories.sqlite.kg_build_job_store import KgBuildAlreadyRunning
+
+logger = logging.getLogger("silicon_notebook.api.routes")
 
 router = APIRouter()
 router.include_router(memory_router)
@@ -242,10 +245,10 @@ def test_model_service(payload: ModelTestRequest, user: UserProfile = Depends(ge
             OpenAICompatibleClient(settings, base_url=base_url, api_key=api_key, model=model).chat_json(
                 [{"role": "user", "content": "ping"}], "{}", timeout=10, max_retries=0)
         return ModelTestResult(ok=True, latency_ms=round((time.perf_counter() - started) * 1000))
-    except Exception as exc:
+    except Exception:
+        logger.exception("draft model service test failed for %s", payload.service)
         return ModelTestResult(ok=False, latency_ms=round((time.perf_counter() - started) * 1000),
-                               code="upstream_error",
-                               error=f"{type(exc).__name__}: {exc}"[:200])
+                               code="upstream_error")
 
 
 def _model_status_service() -> ModelStatusService:

@@ -23,7 +23,6 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
-import { logDiagnostic } from "./errors.ts";
 import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
@@ -479,16 +478,6 @@ export function AnswerView({
     [answerText, answer.anchors, answer.citations]
   );
   useEffect(() => setCitePopover(null), [answer.answer_id]);
-  // model_errors[].message 是模型服务的原始失败原因(stage + 上游异常文本),
-  // 横幅本身要留(PR#61 的可观测性:让用户分得清「模型挂了」vs「没搜到」),
-  // 但原文不进 title——它会被 hover 出来。原文只落 console。
-  const modelErrorDetails = useMemo(
-    () => answer.model_errors?.map((error) => error.message) ?? [],
-    [answer.model_errors],
-  );
-  useEffect(() => {
-    modelErrorDetails.forEach((detail) => logDiagnostic("model", detail));
-  }, [modelErrorDetails]);
   useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 1400);

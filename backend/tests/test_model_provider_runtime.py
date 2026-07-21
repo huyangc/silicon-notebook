@@ -68,21 +68,29 @@ def test_provider_records_existing_model_error_shape(repo, monkeypatch):
     monkeypatch.setattr(repo.event_log, "emit", events.append)
     token = ask_context._ASK_MODEL_ERRORS.set([])
     try:
-        repo._note_model_error("rerank", "model-x", RuntimeError("boom"))
+        unsafe_model = "https://10.0.0.8/v1?api_key=sk-private-secret"
+        repo._note_model_error(
+            "rerank",
+            unsafe_model,
+            RuntimeError("provider https://10.0.0.8 leaked sk-private-secret"),
+        )
         assert ask_context._ASK_MODEL_ERRORS.get() == [
             {
                 "service": "rerank",
                 "stage": "rerank",
-                "model": "model-x",
-                "message": "RuntimeError: boom",
+                "model": "",
+                "message": "upstream_error",
             }
         ]
         assert events == [
             {
                 "kind": "model_error",
                 "stage": "rerank",
-                "model": "model-x",
-                "error": "RuntimeError: boom",
+                "model": unsafe_model,
+                "error": (
+                    "RuntimeError: provider https://10.0.0.8 leaked "
+                    "sk-private-secret"
+                ),
                 "status": "error",
             }
         ]

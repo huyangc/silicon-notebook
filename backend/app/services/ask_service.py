@@ -691,7 +691,9 @@ class AskService:
             answer_id="", conclusion=msg, conversation_id=conversation_id,
             retrieval_query=question, llm_mode="deterministic")
         response.mode = mode
-        response.model_errors = [ModelError(stage="answer", model="", message=msg)]
+        response.model_errors = [
+            ModelError(stage="answer", model="", message="missing_config")
+        ]
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id, user_id=user_id)
         return response

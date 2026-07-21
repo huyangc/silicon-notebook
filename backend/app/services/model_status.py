@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -11,6 +10,7 @@ from typing import Callable
 
 from app.core.config import Settings
 from app.core.llm import OpenAICompatibleClient
+from app.core.model_safety import safe_model_label
 from app.models.schemas import ModelServiceStatusItem, ModelServicesStatus, UserProfile
 from app.repositories.ports import IdentityRepository
 from app.services.embedding import make_embedder
@@ -26,24 +26,6 @@ logger = logging.getLogger("silicon_notebook.model_status")
 
 _SAFE_STATUS_VALUES = frozenset({"ok", "error"})
 _SAFE_TRIGGER_VALUES = frozenset({"manual_test", "observed_failure"})
-_UNSAFE_MODEL_MARKERS = frozenset({
-    "apikey", "authorization", "bearer", "secret", "token", "password",
-    "credential", "provider", "diagnostic", "error", "exception", "traceback",
-    "runtimeerror", "upstream", "unauthorized", "forbidden", "failure", "failed",
-})
-_URL_SCHEME_RE = re.compile(r"(?i)[a-z][a-z0-9+.-]*://")
-_IPV4_RE = re.compile(
-    r"(?<!\d)(?:25[0-5]|2[0-4]\d|1?\d?\d)"
-    r"(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?!\d)"
-)
-_CREDENTIAL_TOKEN_RE = re.compile(
-    r"(?i)(?:sk|rk|pk|ak)-[A-Za-z0-9_-]{8,}"
-)
-_VENDOR_KEY_TOKEN_RE = re.compile(
-    r"(?i)(?:aiza|ghp_|hf_|xox)[A-Za-z0-9_-]{8,}"
-)
-
-
 @dataclass(frozen=True)
 class ServiceDescriptor:
     service: str
@@ -148,7 +130,7 @@ class ModelStatusService:
         config = descriptor.config
         item = ModelServiceStatusItem(
             service=descriptor.service,
-            model=_display_model(config.model),
+            model=safe_model_label(config.model),
             source=config.source,
             kind=config.kind,
             configured=config.configured,
@@ -180,7 +162,7 @@ class ModelStatusService:
         config = descriptor.config
         return ModelServiceStatusItem(
             service=descriptor.service,
-            model=_display_model(config.model),
+            model=safe_model_label(config.model),
             source=config.source,
             kind=config.kind,
             configured=True,
@@ -274,55 +256,3 @@ def _safe_checked_at(value: object) -> str:
 
 def _safe_trigger(value: object) -> str:
     return value if value in _SAFE_TRIGGER_VALUES else ""
-
-
-def _display_model(value: object) -> str:
-    """Return a model-like label without reflecting arbitrary user config text.
-
-    The raw value remains on ``ResolvedModelConfig`` for fingerprints and provider
-    calls. Status responses only show bounded namespace/tag identifiers, such as
-    ``meta-llama/Llama-3.1-8B-Instruct`` and ``llama3.2:latest``. Explicit scans
-    reject credentials, diagnostics, URLs, IPs, IPv6, and host:port forms first.
-    """
-    if not isinstance(value, str):
-        return ""
-    model = value.strip()
-    if not model or len(model) > 128 or not model[0].isalpha():
-        return ""
-    lowered = model.lower()
-    compact = "".join(char for char in lowered if char.isalnum())
-    if (
-        _URL_SCHEME_RE.search(model)
-        or _IPV4_RE.search(model)
-        or _CREDENTIAL_TOKEN_RE.search(model)
-        or _VENDOR_KEY_TOKEN_RE.search(model)
-        or "localhost" in lowered
-        or "[" in model
-        or "]" in model
-        or model.count(":") > 1
-        or "//" in model
-        or ".." in model
-        or any(marker in compact for marker in _UNSAFE_MODEL_MARKERS)
-        or _has_endpoint_port(model)
-    ):
-        return ""
-    if any(not (char.isalnum() or char in "._/@+:-") for char in model):
-        return ""
-    if ":" in model:
-        namespace, tag = model.split(":")
-        if not namespace or not tag:
-            return ""
-    if model.endswith((".", "/", ":")):
-        return ""
-    return model
-
-
-def _has_endpoint_port(model: str) -> bool:
-    """Treat every valid numeric port as endpoint-like, never as a display tag."""
-    if ":" not in model:
-        return False
-    _, tag = model.rsplit(":", 1)
-    if not tag.isdecimal():
-        return False
-    port = int(tag)
-    return 1 <= port <= 65535

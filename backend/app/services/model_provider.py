@@ -4,6 +4,12 @@ from typing import Any
 
 from app.core.config import Settings
 from app.core.llm import OpenAICompatibleClient
+from app.core.model_safety import (
+    MODEL_ERROR_UPSTREAM,
+    safe_model_error_service,
+    safe_model_error_stage,
+    safe_model_label,
+)
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.services.model_concurrency import (
     LimitedJsonChatClient,
@@ -216,13 +222,13 @@ class RuntimeModelProvider:
         )
         sink = self.ask_context._ASK_MODEL_ERRORS.get()
         if sink is not None:
-            service = service or _service_for_stage(stage)
+            service = safe_model_error_service(service or _service_for_stage(stage))
             sink.append(
                 {
                     "service": service,
-                    "stage": stage,
-                    "model": model or "",
-                    "message": message[:200],
+                    "stage": safe_model_error_stage(stage),
+                    "model": safe_model_label(model),
+                    "message": MODEL_ERROR_UPSTREAM,
                 }
             )
             try:

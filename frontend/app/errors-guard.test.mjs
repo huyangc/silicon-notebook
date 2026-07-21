@@ -32,10 +32,6 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 2,
     reason: "one access is a forbidden sentinel and one is humanized view state",
   },
-  "answer-panel.tsx|<module>.AnswerView|property|message": {
-    count: 1,
-    reason: "model diagnostic detail is sent only to bounded logging",
-  },
   "knowhow-cell-editor.tsx|<module>.KnowhowCellEditor|property|message": {
     count: 2,
     reason: "optimizer and reformatter error states are written through the humanization boundary",
@@ -69,10 +65,6 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
   "memory-panel.tsx|<module>.MemoryPanel.submitTransfer|diagnostic|error": {
     count: 1,
     reason: "per-item transfer diagnostics are selected only for bounded logging",
-  },
-  "page.tsx|<module>.Home.runModelTest|diagnostic|error": {
-    count: 2,
-    reason: "model test diagnostics are gated by result code and sent to logging",
   },
   "page.tsx|<module>.Home.tick|diagnostic|error_message": {
     count: 2,
@@ -298,11 +290,20 @@ test("user copy is not rewrapped or thrown without the humanized brand", async (
 
 test("critical catch boundaries call the shared humanization layer", async () => {
   const page = await parseModule("page.tsx");
+  const answerPanel = await parseModule("answer-panel.tsx");
   const knowhow = await parseModule("knowhow-import-logic.ts");
 
   assert.ok(callsIn(findFunction(page, "reportError")).includes("toUserMessage"));
   assert.ok(callsIn(findFunction(page, "readAskStream")).includes("humanizedError"));
   assert.ok(callsIn(findFunction(page, "readAskStream")).includes("logDiagnostic"));
+  assert.equal(
+    callsIn(findFunction(page, "runModelTest")).includes("logDiagnostic"),
+    false,
+  );
+  assert.equal(
+    callsIn(findFunction(answerPanel, "AnswerView")).includes("logDiagnostic"),
+    false,
+  );
   assert.deepEqual(
     callsIn(findFunction(knowhow, "extractErrorMessage")),
     ["toUserMessage"],
