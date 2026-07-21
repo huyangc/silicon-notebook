@@ -13,11 +13,11 @@ def test_reasoning_stream_emits_progress_before_final(tmp_path, monkeypatch):
     monkeypatch.setenv("EMBED_PROVIDER", "")
 
     from app.core.config import get_settings
-    from app.api import routes
+    from app.api import ask_routes
     from app.main import create_app
 
     get_settings.cache_clear()
-    routes.repository.cache_clear()
+    ask_routes.repository.cache_clear()
 
     client = TestClient(create_app())
     notebook_id = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
