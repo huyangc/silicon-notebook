@@ -34,62 +34,33 @@ _MAX_ROUTE_SEGMENTS = 16
 _MAX_CONCURRENCY_VALUE = 1_000_000
 _NOTEBOOK_ROUTE = re.compile(r"^/api/notebooks/([^/?#]+)(?:/.*)?$")
 _OPAQUE_NOTEBOOK_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
-_STATIC_ROUTE_SEGMENTS = frozenset(
-    {
-        "_diagnostics-test",
-        "agent",
-        "analytics",
+_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
+    ("api", "health"),
+    ("api", "files", None),
+    ("api", "search", None),
+    ("api", "shared", None),
+    ("api", "sources", None),
+    ("api", "sources", None, "elements", None),
+    ("api", "memory", None),
+    ("api", "conversations", None),
+    ("api", "agent", "knowhow", "tables", None),
+    ("api", "agent", "knowhow", "tables", None, "rows", None),
+    (
         "api",
-        "append",
-        "approve",
-        "ask",
-        "auth",
-        "bases",
-        "block",
-        "cancel",
-        "cells",
-        "content-overview",
-        "conversations",
-        "copy",
-        "debug",
-        "docs",
-        "edge-review-queue",
-        "elements",
-        "feedback",
-        "files",
-        "health",
-        "import",
-        "join",
-        "jobs",
-        "knowledge",
-        "knowledge-types",
+        "agent",
         "knowhow",
-        "login",
-        "logout",
-        "mcp",
-        "me",
-        "memory",
-        "notebooks",
-        "openapi.json",
-        "promotion-queue",
-        "register",
-        "reformat",
-        "reject",
-        "relations",
-        "reports",
-        "review",
-        "rows",
-        "search",
-        "share",
-        "shared",
-        "sources",
-        "status",
-        "stream",
         "tables",
-        "tier",
-        "tokens",
-        "unified-kg",
-    }
+        None,
+        "rows",
+        None,
+        "cells",
+        None,
+    ),
+    ("api", "kg", "concept-whitelist", None),
+    ("_diagnostics-test", "block"),
+    ("docs",),
+    ("openapi.json",),
+    ("mcp",),
 )
 _CONCURRENCY_GROUPS = frozenset({"kg", "llm", "embedding"})
 _CONCURRENCY_FIELDS = frozenset(
@@ -173,12 +144,18 @@ def _request_metadata(path: str) -> tuple[str, Optional[str]]:
         candidate = match.group(1)
         notebook_id = candidate if _OPAQUE_NOTEBOOK_ID.fullmatch(candidate) else None
         return "/api/notebooks/{id}", notebook_id
-    segments = path_only.split("/", _MAX_ROUTE_SEGMENTS)
-    normalized = [
-        segment if segment in _STATIC_ROUTE_SEGMENTS else "{id}"
-        for segment in segments
-        if segment
-    ]
+    segments = tuple(
+        segment for segment in path_only.split("/", _MAX_ROUTE_SEGMENTS) if segment
+    )
+    for template in _ROUTE_TEMPLATES:
+        if len(template) != len(segments):
+            continue
+        if all(expected is None or expected == actual for expected, actual in zip(template, segments)):
+            normalized = [
+                expected if expected is not None else "{id}" for expected in template
+            ]
+            return "/" + "/".join(normalized), None
+    normalized = ["api", *("{id}" for _ in segments[1:])] if segments[:1] == ("api",) else ["{id}" for _ in segments]
     return "/" + "/".join(normalized), None
 
 
@@ -320,7 +297,17 @@ class DiagnosticsRuntime:
 
     def _enter_phase(
         self, phase: str
-    ) -> tuple[contextvars.Token[_DiagnosticContext], list[tuple[dict[int, dict[str, Any]], int, Any]]]:
+    ) -> tuple[
+        contextvars.Token[_DiagnosticContext],
+        list[
+            tuple[
+                Optional[dict[int, dict[str, Any]]],
+                int,
+                Any,
+                Optional[dict[str, Any]],
+            ]
+        ],
+    ]:
         previous = _diagnostic_context.get()
         context = _DiagnosticContext(
             request_id=previous.request_id,
@@ -329,7 +316,14 @@ class DiagnosticsRuntime:
             phase=_bounded_text(phase, 160),
         )
         context_token = _diagnostic_context.set(context)
-        changed: list[tuple[dict[int, dict[str, Any]], int, Any]] = []
+        changed: list[
+            tuple[
+                Optional[dict[int, dict[str, Any]]],
+                int,
+                Any,
+                Optional[dict[str, Any]],
+            ]
+        ] = []
         thread_id = threading.get_ident()
         with self._lock:
             for registry in (
@@ -345,10 +339,11 @@ class DiagnosticsRuntime:
                         continue
                     if context.job_id is not None and entry.get("job_id") != context.job_id:
                         continue
-                    changed.append((registry, identifier, entry.get("phase")))
+                    changed.append((registry, identifier, entry.get("phase"), None))
                     entry["phase"] = context.phase
             if self._write_holder is not None and self._write_holder["thread_id"] == thread_id:
-                changed.append(({}, -1, self._write_holder.get("phase")))
+                holder = self._write_holder
+                changed.append((None, -1, holder.get("phase"), holder))
                 self._write_holder["phase"] = context.phase
             if changed:
                 self._changed_locked()
@@ -357,16 +352,25 @@ class DiagnosticsRuntime:
     def _exit_phase(
         self,
         context_token: contextvars.Token[_DiagnosticContext],
-        changed: list[tuple[dict[int, dict[str, Any]], int, Any]],
+        changed: list[
+            tuple[
+                Optional[dict[int, dict[str, Any]]],
+                int,
+                Any,
+                Optional[dict[str, Any]],
+            ]
+        ],
     ) -> None:
         try:
             with self._lock:
                 restored = False
-                for registry, identifier, old_phase in changed:
-                    if identifier == -1:
-                        if self._write_holder is not None:
+                for registry, identifier, old_phase, captured_holder in changed:
+                    if captured_holder is not None:
+                        if self._write_holder is captured_holder:
                             self._write_holder["phase"] = old_phase
                             restored = True
+                        continue
+                    if registry is None:
                         continue
                     entry = registry.get(identifier)
                     if entry is not None:
@@ -594,17 +598,50 @@ class DiagnosticsRuntime:
             self._snapshot_failed()
 
     def _writer(self) -> None:
-        next_write = time.monotonic()
-        while not self._stop.is_set():
-            remaining = max(0.0, next_write - time.monotonic())
-            self._wake.wait(remaining)
-            self._wake.clear()
-            if self._stop.is_set():
-                break
-            if time.monotonic() < next_write:
-                continue
-            self._write_snapshot()
-            next_write = time.monotonic() + self._interval_seconds
+        writer = threading.current_thread()
+        try:
+            next_write = time.monotonic()
+            while not self._stop.is_set():
+                remaining = max(0.0, next_write - time.monotonic())
+                self._wake.wait(remaining)
+                self._wake.clear()
+                if self._stop.is_set():
+                    break
+                if time.monotonic() < next_write:
+                    continue
+                self._write_snapshot()
+                next_write = time.monotonic() + self._interval_seconds
+        finally:
+            self._begin_writer_exit(writer)
+
+    def _begin_writer_exit(self, writer: threading.Thread) -> None:
+        with self._lock:
+            if self._thread is not writer:
+                return
+            self._lifecycle_state = "finalizing"
+        self._release_signal()
+        self._close_dump_handle()
+        reaper = threading.Thread(
+            target=self._reap_writer,
+            args=(writer,),
+            name="diagnostics-finalizer",
+            daemon=True,
+        )
+        try:
+            reaper.start()
+        except Exception:
+            self._snapshot_failed()
+
+    def _reap_writer(self, writer: threading.Thread) -> None:
+        writer.join()
+        self._mark_writer_stopped(writer)
+
+    def _mark_writer_stopped(self, writer: Optional[threading.Thread]) -> None:
+        with self._lock:
+            if self._thread is not writer:
+                return
+            self._thread = None
+            self._lifecycle_state = "stopped"
 
     def _claim_signal(self) -> bool:
         global _signal_owner
@@ -696,7 +733,7 @@ class DiagnosticsRuntime:
 
     def stop(self) -> None:
         with self._lock:
-            if self._lifecycle_state in {"new", "stopped", "cleaning"}:
+            if self._lifecycle_state in {"new", "stopped"}:
                 return
             if self._lifecycle_state == "running":
                 self._lifecycle_state = "stopping"
@@ -707,16 +744,7 @@ class DiagnosticsRuntime:
             thread.join(timeout=2 * self._interval_seconds)
         if thread is not None and thread.is_alive():
             return
-        with self._lock:
-            if self._lifecycle_state != "stopping" or self._thread is not thread:
-                return
-            self._lifecycle_state = "cleaning"
-        self._release_signal()
-        self._close_dump_handle()
-        with self._lock:
-            if self._thread is thread:
-                self._thread = None
-            self._lifecycle_state = "stopped"
+        self._mark_writer_stopped(thread)
 
 
 def current_runtime() -> Optional[DiagnosticsRuntime]:

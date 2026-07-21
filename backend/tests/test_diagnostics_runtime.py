@@ -255,6 +255,37 @@ def test_request_paths_redact_all_arbitrary_segments(path, secrets, expected, tm
         assert secret not in encoded
 
 
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        ("/api/files/status", "/api/files/{id}"),
+        ("/api/search/memory", "/api/search/{id}"),
+        ("/api/shared/status", "/api/shared/{id}"),
+        (
+            "/api/sources/memory/elements/status",
+            "/api/sources/{id}/elements/{id}",
+        ),
+        ("/api/memory/status", "/api/memory/{id}"),
+        (
+            "/api/agent/knowhow/tables/status/rows/memory",
+            "/api/agent/knowhow/tables/{id}/rows/{id}",
+        ),
+        (
+            "/api/kg/concept-whitelist/memory",
+            "/api/kg/concept-whitelist/{id}",
+        ),
+    ],
+)
+def test_request_path_dynamic_positions_redact_values_that_look_static(
+    path, expected, tmp_path
+):
+    runtime = _runtime(tmp_path)
+    with diagnostics.install_runtime(runtime):
+        with diagnostics.request_scope("req-collision", "GET", path):
+            request = runtime.snapshot()["active_requests"][0]
+    assert request["path"] == expected
+
+
 def test_sql_metadata_normalization_is_stable_and_never_exposes_literals():
     first = diagnostics.normalize_sql_metadata(
         " UPDATE [notebooks] SET title = 'private' WHERE id = 123.5 "
@@ -305,6 +336,34 @@ def test_write_lock_tracks_reentry_and_only_matching_waiter_is_cancelled(tmp_pat
         assert runtime.snapshot()["write_lock"]["holder"]["depth"] == 1
         diagnostics.write_released()
         assert runtime.snapshot()["write_lock"]["holder"] is None
+
+
+def test_phase_exit_does_not_restore_a_replacement_write_holder(tmp_path):
+    runtime = _runtime(tmp_path)
+    replacement_acquired = threading.Event()
+    release_replacement = threading.Event()
+
+    def replacement_holder() -> None:
+        with diagnostics.diagnostic_phase("replacement-phase"):
+            diagnostics.write_acquired(None, "replacement")
+            replacement_acquired.set()
+            release_replacement.wait(timeout=1)
+            diagnostics.write_released()
+
+    with diagnostics.install_runtime(runtime):
+        diagnostics.write_acquired(None, "original")
+        with diagnostics.diagnostic_phase("original-phase"):
+            diagnostics.write_released()
+            thread = threading.Thread(target=replacement_holder)
+            thread.start()
+            assert replacement_acquired.wait(timeout=1)
+        try:
+            holder = runtime.snapshot()["write_lock"]["holder"]
+            assert holder["operation"] == "replacement"
+            assert holder["phase"] == "replacement-phase"
+        finally:
+            release_replacement.set()
+            thread.join(timeout=1)
 
 
 def test_active_items_have_context_thread_and_monotonic_duration(tmp_path):
@@ -727,3 +786,52 @@ def test_activate_runtime_installs_starts_and_always_cleans_up(tmp_path):
             assert _wait_for_json(tmp_path / "runtime.json")["pid"] == os.getpid()
             raise RuntimeError("application failure")
     assert diagnostics.current_runtime() is None
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(signal, "SIGUSR1"),
+    reason="SIGUSR1 requires POSIX",
+)
+def test_activate_runtime_late_writer_exit_finalizes_without_second_stop(tmp_path):
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+
+    def blocked_provider() -> dict:
+        provider_entered.set()
+        release_provider.wait(timeout=1)
+        return {}
+
+    runtime = None
+    with diagnostics.activate_runtime(
+        tmp_path / "first",
+        readiness_provider=blocked_provider,
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=True,
+    ) as active:
+        runtime = active
+        assert active.signal_capture_available is True
+        assert provider_entered.wait(timeout=1)
+
+    assert runtime is not None
+    release_provider.set()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and runtime._lifecycle_state != "stopped":
+        time.sleep(0.02)
+    cleaned = (
+        runtime._lifecycle_state == "stopped"
+        and runtime._thread is None
+        and runtime._dump_handle is None
+        and runtime._owns_signal is False
+        and runtime.signal_capture_available is False
+    )
+    assert cleaned
+
+    with diagnostics.activate_runtime(
+        tmp_path / "second",
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=True,
+    ) as second:
+        assert second.signal_capture_available is True

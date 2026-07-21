@@ -244,3 +244,103 @@ git diff --check
 ```
 
 Both returned exit `0` with no diagnostics.
+
+## Third review correction pass
+
+### RED
+
+Before production edits, collision tests were added for dynamic values equal to
+apparently safe route words in raw filename, search, share, source, Memory,
+Knowhow, and KG positions. Separate regressions replaced a write-lock holder
+inside a phase and blocked a provider beyond `activate_runtime()`'s one bounded
+stop call.
+
+Command:
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider -n0 backend/tests/test_diagnostics_runtime.py -q
+```
+
+Result: exit `1` with the expected reviewed failures:
+
+```text
+9 failed, 30 passed in 3.05s
+```
+
+All seven collision paths retained the dynamic safe-looking value, phase exit
+changed the replacement holder's phase from `replacement-phase` to `None`, and
+the late writer exit left the runtime in `stopping` with resources owned.
+
+### GREEN
+
+- Route normalization now matches complete positional templates. Template
+  placeholders always render as `{id}` regardless of their value. Unknown
+  shapes preserve only the structural `/api` root and redact every remaining
+  segment; there is no per-segment safe-word classification.
+- Phase restoration captures the exact holder dictionary and restores it only
+  when that same object remains the current holder.
+- A writer enters `finalizing` in its `finally` block, releases its owned signal,
+  closes the dump handle, and starts a short reaper that waits for the exact
+  writer thread to be dead before clearing the thread and setting `stopped`.
+  `start()` remains blocked during `stopping`/`finalizing`, while normal
+  `stop()` and the reaper share idempotent final state marking.
+
+The first sequential GREEN run returned:
+
+```text
+39 passed in 0.95s
+```
+
+After removing failure-only manual cleanup from the late-activation test so it
+literally performs no second `stop()`, fresh focused runs returned:
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider -n0 backend/tests/test_diagnostics_runtime.py -q
+```
+
+```text
+39 passed in 0.93s
+```
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider backend/tests/test_diagnostics_runtime.py -q
+```
+
+```text
+39 passed in 2.21s
+```
+
+Fresh adjacent core/concurrency verification:
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider backend/tests/test_background_jobs.py backend/tests/test_readiness_gate.py backend/tests/test_db_concurrency.py backend/tests/test_sqlite_database_component.py backend/tests/test_sqlite_connection_reuse.py backend/tests/test_repository_runtime_identity.py backend/tests/test_model_concurrency.py backend/tests/test_kg_scheduler.py backend/tests/test_embed_concurrency.py backend/tests/test_pipeline_concurrency.py -q
+```
+
+```text
+61 passed in 4.21s
+```
+
+### Final third-pass verification
+
+After the report update, verification-before-completion reran the same focused
+suite both sequentially and with the repository's xdist defaults:
+
+```text
+39 passed in 1.48s
+39 passed in 4.13s
+```
+
+The adjacent core/concurrency command was rerun unchanged:
+
+```text
+61 passed in 6.83s
+```
+
+Finally:
+
+```bash
+/opt/homebrew/Caskroom/miniconda/base/bin/python -m py_compile backend/app/core/diagnostics_runtime.py backend/tests/test_diagnostics_runtime.py
+git diff --check
+```
+
+Both returned exit `0` with no diagnostics.
