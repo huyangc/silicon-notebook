@@ -3,16 +3,53 @@ from pathlib import Path
 
 from fastapi.routing import APIRoute
 
-from app.api.routes import router as aggregate_router
+from app.api.admin_routes import router as admin_router
+from app.api.ask_routes import router as ask_router
+from app.api.content_overview_routes import router as content_overview_router
+from app.api.kg_routes import router as kg_router
+from app.api.knowhow_routes import router as knowhow_router
+from app.api.knowledge_routes import router as knowledge_router
+from app.api.memory_routes import memory_router
+from app.api.notebook_routes import router as notebook_router
+from app.api.report_routes import router as report_router
+from app.api.source_routes import router as source_router
+from app.api.system_routes import router as system_router
 
 
 ROOT = Path(__file__).resolve().parents[2]
+DOMAIN_ROUTERS = (
+    memory_router,
+    system_router,
+    notebook_router,
+    content_overview_router,
+    source_router,
+    knowhow_router,
+    knowledge_router,
+    ask_router,
+    report_router,
+    kg_router,
+    admin_router,
+)
+EXPECTED_COMPOSITION_NAMES = (
+    "memory_router",
+    "system_router",
+    "notebook_router",
+    "content_overview_router",
+    "source_router",
+    "knowhow_router",
+    "knowledge_router",
+    "ask_router",
+    "report_router",
+    "kg_router",
+    "admin_router",
+)
 
 
 def _endpoint_modules() -> dict[str, str]:
     return {
         route.name: route.endpoint.__module__
-        for route in aggregate_router.routes
+        for router in DOMAIN_ROUTERS
+        for route in router.routes
         if isinstance(route, APIRoute)
     }
 
@@ -113,6 +150,31 @@ def test_aggregate_routes_module_is_composition_only():
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.decorator_list
     ]
     assert decorated_functions == []
+
+    composition_loops = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.For)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "domain_router"
+    ]
+    assert len(composition_loops) == 1
+    loop = composition_loops[0]
+    assert isinstance(loop.iter, (ast.Tuple, ast.List))
+    assert tuple(
+        item.id for item in loop.iter.elts if isinstance(item, ast.Name)
+    ) == EXPECTED_COMPOSITION_NAMES
+    assert len(loop.body) == 1
+    statement = loop.body[0]
+    assert isinstance(statement, ast.Expr)
+    call = statement.value
+    assert isinstance(call, ast.Call)
+    assert isinstance(call.func, ast.Attribute)
+    assert isinstance(call.func.value, ast.Name)
+    assert (call.func.value.id, call.func.attr) == ("router", "include_router")
+    assert len(call.args) == 1
+    assert isinstance(call.args[0], ast.Name)
+    assert call.args[0].id == "domain_router"
 
 
 def test_domain_routers_do_not_import_the_schema_facade():
