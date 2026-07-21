@@ -19,6 +19,7 @@ Contract under test:
 from __future__ import annotations
 
 import importlib.util
+import gzip
 import json
 import subprocess
 import sys
@@ -110,6 +111,20 @@ def test_latency_reads_per_user_subdirs(tmp_path):
     records = list(diag._read_ask_stage(str(tmp_path / "events.jsonl"), None))
     latencies = sorted(r["latency_ms"] for r in records)
     assert latencies == [10, 90], "must aggregate global + per-user subdir logs"
+
+
+def test_latency_reads_rotated_gzip_file_once(tmp_path):
+    """A daily gzip log is sufficient input for the offline latency command."""
+    with gzip.open(tmp_path / "events-2026-07-13.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(json.dumps(_make_ask_stage("score", 42)) + "\n")
+
+    r = subprocess.run(
+        [sys.executable, str(_DIAG), "latency", "--log", str(tmp_path / "events.jsonl")],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.count("score") == 1
 
 
 # ---------------------------------------------------------------------------

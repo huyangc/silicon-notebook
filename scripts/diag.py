@@ -23,7 +23,6 @@
 """
 from __future__ import annotations
 
-import json
 import math
 import sys
 from pathlib import Path
@@ -31,6 +30,10 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent          # <repo>/scripts
 _REPO_ROOT = _HERE.parent                          # <repo>
 _DEFAULT_EVENTS = _REPO_ROOT / ".local" / "logs" / "events.jsonl"
+
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+import diag_common  # noqa: E402 — stdlib sibling historical log reader
 
 
 # ---------------------------------------------------------------------------
@@ -76,41 +79,12 @@ def _aggregate_stage(records) -> dict:
     return result
 
 
-def _expand_channel_paths(path: str):
-    """Global events file + per-user subdir files (`<dir>/*/<basename>`).
-
-    Stdlib mirror of app.services.log_reader.expand_channel_paths so the offline
-    latency view sees the same per-user-partitioned logs (see per-user-logs).
-    """
-    p = Path(path)
-    paths = [p]
-    parent, base = p.parent, p.name
-    if parent.is_dir():
-        for sub in sorted(parent.iterdir()):
-            if sub.is_dir():
-                paths.append(sub / base)
-    return paths
-
-
 def _read_ask_stage(path: str, last_n):
-    """Stream ask_stage records from global + per-user JSONL files."""
-    parsed: list = []
-    for p in _expand_channel_paths(path):
-        try:
-            raw = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        except (FileNotFoundError, OSError, IsADirectoryError):
-            continue
-        for line in raw:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if rec.get("kind") != "ask_stage":
-                continue
-            parsed.append(rec)
+    """Read ask stages from all historical events layouts, retaining --log as a hint."""
+    explicit = Path(path)
+    parsed = [rec for rec in diag_common.read_channel(
+        explicit.parent, "events", explicit=explicit).records
+        if rec.get("kind") == "ask_stage"]
     if last_n is not None:
         parsed = parsed[-last_n:]
     yield from parsed

@@ -22,29 +22,19 @@ import os
 import sqlite3
 import sys
 import time
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 import diag_slow  # noqa: E402 — stdlib sibling host diagnostic; reuse its helpers
+import diag_common  # noqa: E402 — bounded historical offline log reader
 
 USABLE = ("approved", "reviewed", "project_specific", "conflict")
 
 
 def _fmt(ms: float) -> str:
     return f"{ms/1000:.2f}s" if ms >= 1000 else f"{ms:.0f}ms"
-
-
-def _expand_request_files(local_dir: str):
-    """requests.jsonl(全局 + per-user 子目录),与 log_reader.expand_channel_paths 同义。"""
-    logs = os.path.join(local_dir, "logs")
-    out = [os.path.join(logs, "requests.jsonl")]
-    if os.path.isdir(logs):
-        for sub in sorted(os.listdir(logs)):
-            p = os.path.join(logs, sub)
-            if os.path.isdir(p):
-                out.append(os.path.join(p, "requests.jsonl"))
-    return out
 
 
 def main() -> int:
@@ -201,19 +191,19 @@ def main() -> int:
         print("\n[3] 生产请求日志(requests.jsonl)—— 该 notebook 各端点真实延迟")
         buckets = {}
         seen = 0
-        for f in _expand_request_files(local_dir):
-            for rec in diag_slow._iter_jsonl(f):
-                if rec.get("kind") != "http":
-                    continue
-                path = str(rec.get("path", ""))
-                if nb not in path:
-                    continue
-                lat = rec.get("latency_ms")
-                if not isinstance(lat, (int, float)):
-                    continue
+        request_read = diag_common.read_channel(Path(local_dir) / "logs", "requests")
+        for rec in request_read.records:
+            if rec.get("kind") != "http":
+                continue
+            path = str(rec.get("path", ""))
+            if nb not in path:
+                continue
+            latency = rec.get("latency_ms")
+            if isinstance(latency, (int, float)):
                 seen += 1
-                key = f"{rec.get('method','')} {path.replace(nb, '{id}')}"
-                buckets.setdefault(key, []).append(float(lat))
+                key = f"{rec.get('method', '')} {diag_common.normalize_http_path(path)}"
+                buckets.setdefault(key, []).append(float(latency))
+        print("    " + diag_slow._scan_summary(request_read.stats))
         if not seen:
             print(f"    (requests.jsonl 无该 nb 记录;local={local_dir}。确认该 nb 近期被打开过、"
                   f"且 REQUEST 日志开着)")

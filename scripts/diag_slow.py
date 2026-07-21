@@ -26,6 +26,9 @@ import sqlite3
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import diag_common
 
 MAX_SAMPLES = 50_000
 SECRET_MARKERS = ("KEY", "TOKEN", "PASSWORD", "SECRET")
@@ -61,15 +64,15 @@ def _parse_ts(ts):
 
 
 def _iter_jsonl(path):
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                try:
-                    yield json.loads(line)
-                except Exception:  # noqa: BLE001
-                    continue
-    except OSError:
-        return
+    """Compatibility wrapper for callers that consume JSON records only."""
+    for record, bad, _ in diag_common.iter_jsonl_file(Path(path)):
+        if not bad and record is not None:
+            yield record
+
+
+def _scan_summary(stats):
+    return (f"日志 files={stats.files} matched={stats.matched} malformed={stats.malformed} "
+            f"duplicates={stats.duplicates} retained={stats.retained} truncated={stats.truncated}")
 
 
 def _env_path(root):
@@ -155,34 +158,27 @@ def resolve_local(root):
 
 
 def report_requests(local_dir, since, slow_ms):
-    path = os.path.join(local_dir, "logs", "requests.jsonl")
+    request_read = diag_common.read_channel(
+        Path(local_dir) / "logs", "requests", since_hours=since.total_seconds() / 3600)
     section(f"HTTP 请求(近 {since} 内;慢阈值 {_fmt_ms(slow_ms)})")
-    if not os.path.exists(path):
-        print(f"(缺 {path})")
+    print(_scan_summary(request_read.stats))
+    if not request_read.stats.files:
+        print(f"(没有 requests 日志;local={local_dir})")
         return
-    cutoff = datetime.now() - since
     per_path = defaultdict(Sampler)
     slow_list = []          # (ts, ms, path)
     long_reqs = []          # (start, end, path) 用于并发风暴检测,>10s 的才记
     total = 0
-    for e in _iter_jsonl(path):
+    for e in request_read.records:
         ts = _parse_ts(e.get("ts", ""))
-        if ts is None or ts < cutoff:
+        if ts is None:
             continue
         ms = e.get("latency_ms")
         p = e.get("path", "?")
         if not isinstance(ms, (int, float)):
             continue
         total += 1
-        # 路径归一:把 nb-xxx / src-xxx / 具体 id 折叠,避免每个 id 一行
-        parts = []
-        for seg in p.split("/"):
-            if seg.startswith(("nb-", "src-", "ko-", "conv-", "K-", "KL-", "KF-", "KP-")) or (
-                    len(seg) > 20 and any(c.isdigit() for c in seg)):
-                parts.append("{id}")
-            else:
-                parts.append(seg)
-        norm = "/".join(parts)
+        norm = diag_common.normalize_http_path(p)
         per_path[norm].add(ms)
         if ms >= slow_ms:
             slow_list.append((e.get("ts", "")[:19], ms, norm))
@@ -217,14 +213,13 @@ def report_requests(local_dir, since, slow_ms):
 
 
 def report_events(local_dir, since):
-    paths = sorted(set(
-        glob.glob(os.path.join(local_dir, "logs", "events.jsonl"))
-        + glob.glob(os.path.join(local_dir, "logs", "*", "events.jsonl"))))
-    section(f"事件观测点(近 {since} 内;文件 {len(paths)} 个)")
-    if not paths:
-        print("(没有 events.jsonl)")
+    event_read = diag_common.read_channel(
+        Path(local_dir) / "logs", "events", since_hours=since.total_seconds() / 3600)
+    section(f"事件观测点(近 {since} 内;文件 {event_read.stats.files} 个)")
+    print(_scan_summary(event_read.stats))
+    if not event_read.stats.files:
+        print("(没有 events 日志)")
         return
-    cutoff = datetime.now() - since
     kind_count = Counter()
     bail_reasons = Counter()
     refuse_sites = Counter()
@@ -236,13 +231,12 @@ def report_events(local_dir, since):
     scale_ppr_stage = defaultdict(Sampler)
     last_build = None
     build_stages = {}
-    for path in paths:
-        for e in _iter_jsonl(path):
+    for e in event_read.records:
             k = e.get("kind", "")
             if k not in INTEREST_KINDS:
                 continue
             ts = _parse_ts(e.get("ts", ""))
-            if ts is None or ts < cutoff:
+            if ts is None:
                 continue
             kind_count[k] += 1
             if k == "scale_ppr_bailout":
@@ -323,20 +317,18 @@ def report_events(local_dir, since):
 
 
 def report_llm(local_dir, since):
-    paths = sorted(set(
-        glob.glob(os.path.join(local_dir, "logs", "llm.jsonl"))
-        + glob.glob(os.path.join(local_dir, "logs", "*", "llm.jsonl"))))
-    section(f"LLM 调用(近 {since} 内;文件 {len(paths)} 个)")
-    if not paths:
-        print("(没有 llm.jsonl,或未开 LLM 日志)")
+    llm_read = diag_common.read_channel(
+        Path(local_dir) / "logs", "llm", since_hours=since.total_seconds() / 3600)
+    section(f"LLM 调用(近 {since} 内;文件 {llm_read.stats.files} 个)")
+    print(_scan_summary(llm_read.stats))
+    if not llm_read.stats.files:
+        print("(没有 llm 日志,或未开 LLM 日志)")
         return
-    cutoff = datetime.now() - since
     per_model = defaultdict(Sampler)
     errors = Counter()
-    for path in paths:
-        for e in _iter_jsonl(path):
+    for e in llm_read.records:
             ts = _parse_ts(e.get("ts", ""))
-            if ts is None or ts < cutoff:
+            if ts is None:
                 continue
             model = e.get("model", "?")
             ms = e.get("latency_ms", e.get("duration_ms"))
