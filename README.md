@@ -567,12 +567,30 @@ not carry provider/model-name constants. Ask failure notices identify the
 affected service role and the backend-resolved current model when its safe
 display label is available.
 
+Effective identity also includes runtime protocol switches: embedding provider
+selection and rerank API style are normalized into the internal fingerprint.
+An embedding endpoint with `EMBED_PROVIDER` off remains unconfigured and is not
+probed. Changing either switch invalidates the previous result, and an explicit
+test uses the exact resolved endpoint/model/protocol descriptor.
+
 Embedding is system-managed and read-only in this panel: users can inspect or
 explicitly test its effective service, but cannot edit its endpoint, key, or
 model there. Service-status APIs and UI expose only sanitized status,
 latency, trigger, stable error code, and a safe model label. Raw upstream
 diagnostics (including provider payloads, endpoints, and exception text) stay
 in server logs rather than status responses or tooltips.
+
+Only failures from an actual model-provider call can create an Ask model-error
+notice or observed failed status. Local FTS, ANN, keyword, and index-open
+failures remain server diagnostics and never mark a provider unavailable.
+Per-service results are occurrence-ordered: a late database write cannot replace
+a newer check, and an observed/error result wins a same-time race with manual
+success.
+
+Draft tests are tied to the exact role and form revision they tested. Editing,
+saving, or reopening invalidates stale results; save is locked while a draft
+test is active and editable fields are locked while save is in flight. The
+modal traps keyboard focus and returns it to the exact control that opened it.
 
 Current-status APIs are `GET /api/me/model-services/status`,
 `POST /api/me/model-services/{service}/test`, and

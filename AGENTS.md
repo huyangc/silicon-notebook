@@ -321,10 +321,14 @@ When no LLM key is configured, endpoints may return deterministic fallback data 
 ### Model Service Status and Diagnostics
 
 - Effective model identity is backend-resolved from the authenticated user's saved setting and configured fallbacks. Provider/model names are runtime data; never add frontend product constants for a provider or model name.
+- Effective identity/fingerprints must include normalized runtime protocol switches, including embedding provider and rerank API style. Provider-off embedding is unconfigured even when URL/key/model fields are populated, and probes must use the exact resolved descriptor rather than rebuilding from mismatched global settings.
 - The notebook collection reads each user's persisted, last-known model-service status only. Status reads must never probe an upstream provider or delay/hide the collection; configuration changes invalidate affected saved results, which then read as untested until an explicit test or observed failure records a result.
+- Persist status monotonically by normalized, fixed-precision UTC occurrence time. An older occurrence written later must not replace a newer row; on an exact tie, observed/error wins over manual success, independently per service.
 - The Model Services UI must support explicit tests of one current effective service and all current effective services. Keep `POST /me/model-settings/test` as the separate draft-value test path for unsaved editable LLM/rerank settings.
+- Draft tests are page-owned and bound to an exact role/form revision. Field edits, save, and reopen invalidate stale results; an active draft test blocks save, save-in-flight blocks form edits, and the modal traps focus/restores the exact opener.
 - Embedding configuration is system-managed and read-only in the Model Services UI. It remains inspectable and explicitly testable, but users cannot edit its endpoint, credential, or model there.
 - Ask failure UI identifies the affected service role and the backend-resolved current model when its safe display label is available. Status surfaces may return only sanitized status metadata, a stable error code, and safe model identity; provider payloads, endpoints, IPs, credentials, response bodies, and raw exception strings remain logs-only and must never appear in status responses or tooltips.
+- `ModelErrorSink.note_model_error` callers must explicitly classify provider-call failures. Only actual chat/rewrite/rerank/embedding provider failures may append client-visible `ModelError` data or persist an observed failed service; local FTS/keyword/ANN/index diagnostics remain logs-only and must not change model-service status.
 
 ## Logging / Observability
 
