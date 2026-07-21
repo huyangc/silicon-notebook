@@ -15,6 +15,7 @@ machinery ported from PR-1 is UNCHANGED in spirit — only renamed call sites
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -440,6 +441,111 @@ def test_reprojecting_unchanged_table_makes_zero_additional_embed_calls(repo, pr
 
     projector.project_table(table_id)
     assert embedder.call_count == 1  # nothing changed -> zero additional embed calls
+
+
+def test_synced_is_published_only_after_table_kg_commit(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """A settled row status is the public completion signal for projection.
+
+    The table-wide KG replacement happens after every row has been visited, so
+    no row may become ``synced`` while that terminal transaction is still in
+    flight. Otherwise API pollers can observe every row as settled and then
+    read an empty graph, depending only on thread scheduling.
+    """
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "增加阻尼电阻",
+    })
+    terminal_write_entered = threading.Event()
+    allow_terminal_write = threading.Event()
+    real_delete_relations = projector.knowledge.delete_relations_by_source
+
+    def _block_terminal_write(db, source_id):
+        terminal_write_entered.set()
+        assert allow_terminal_write.wait(2), "test did not release terminal KG write"
+        return real_delete_relations(db, source_id)
+
+    monkeypatch.setattr(
+        projector.knowledge, "delete_relations_by_source", _block_terminal_write
+    )
+    errors = []
+
+    def _project():
+        try:
+            projector.project_table(table_id)
+        except BaseException as exc:  # surfaced on the assertion thread below
+            errors.append(exc)
+
+    worker = threading.Thread(target=_project)
+    worker.start()
+    assert terminal_write_entered.wait(2), "projection did not reach terminal KG write"
+    try:
+        assert _row_projection_status(repo, table_id, row_id) == "syncing"
+    finally:
+        allow_terminal_write.set()
+        worker.join(2)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert _row_projection_status(repo, table_id, row_id) == "synced"
+    assert _row_object_ids(repo, row_id)
+
+
+def test_stale_projection_cannot_overwrite_a_concurrent_edit_pending_status(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """An older pass must never publish its result over a newer row version.
+
+    The edit lands after the old pass has committed its table-wide KG and
+    mutation bump but before it publishes row statuses. A scheduler rerun will
+    eventually project the edit; until then the edited row must remain
+    ``pending`` rather than briefly claiming that the old graph is current.
+    """
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "旧方法",
+    })
+    terminal_bump_done = threading.Event()
+    allow_status_publication = threading.Event()
+    real_bump = store.bump_knowhow_mutation_seq
+
+    def _pause_after_terminal_bump(target_table_id):
+        result = real_bump(target_table_id)
+        terminal_bump_done.set()
+        assert allow_status_publication.wait(2), "test did not release old projection"
+        return result
+
+    monkeypatch.setattr(store, "bump_knowhow_mutation_seq", _pause_after_terminal_bump)
+    errors = []
+
+    def _project_old_snapshot():
+        try:
+            projector.project_table(table_id)
+        except BaseException as exc:  # surfaced on the assertion thread below
+            errors.append(exc)
+
+    worker = threading.Thread(target=_project_old_snapshot)
+    worker.start()
+    assert terminal_bump_done.wait(2), "old projection did not reach terminal bump"
+    try:
+        store.update_knowhow_cell(row_id, cols["修复方法"], "新方法")
+    finally:
+        allow_status_publication.set()
+        worker.join(2)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert _row_projection_status(repo, table_id, row_id) == "pending"
+
+    # The scheduler's subsequent rerun (driven synchronously here) publishes
+    # the newer snapshot and only then settles the row.
+    monkeypatch.setattr(store, "bump_knowhow_mutation_seq", real_bump)
+    projector.project_table(table_id)
+    assert _row_projection_status(repo, table_id, row_id) == "synced"
+    assert "新方法" in _row_chunk_texts(repo, row_id).values()
 
 
 def test_reproject_self_heals_a_missing_chunk_vector(repo, projector, table_id, embedder):
@@ -1509,6 +1615,43 @@ def test_get_scheduler_entry_does_not_pin_repo(repo_factory):
 # ---------------------------------------------------------------------------
 
 
+def _delete_table_after_row_work_before_terminal_kg_write(
+    repo, projector, table_id, hidden_source_id, monkeypatch
+):
+    """Inject teardown at the stable phase boundary after row embedding.
+
+    This models a move/delete landing after the per-row work has completed but
+    before the terminal table-wide KG transaction starts. It deliberately does
+    not key the interleaving off a row-status write: status publication is an
+    observable result, not an implementation phase marker.
+    """
+    from contextlib import contextmanager
+
+    state = {"row_work_done": False, "injected": False}
+    real_embed = projector.embedding.embed_chunk_ids
+
+    def _mark_row_work_done(*args, **kwargs):
+        result = real_embed(*args, **kwargs)
+        state["row_work_done"] = True
+        return result
+
+    monkeypatch.setattr(projector.embedding, "embed_chunk_ids", _mark_row_work_done)
+    database = projector.database
+    real_write = database.write
+
+    @contextmanager
+    def _write_with_teardown_before_terminal_kg():
+        if state["row_work_done"] and not state["injected"]:
+            state["injected"] = True
+            projector.delete_table_projection(hidden_source_id)
+            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
+        with real_write() as db:
+            yield db
+
+    monkeypatch.setattr(database, "write", _write_with_teardown_before_terminal_kg)
+    return state
+
+
 def test_project_table_skips_terminal_write_when_table_deleted_mid_pass(
     repo, projector, table_id, embedder, monkeypatch
 ):
@@ -1533,22 +1676,12 @@ def test_project_table_skips_terminal_write_when_table_deleted_mid_pass(
     store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
     hidden_source_id = projector.ensure_hidden_source(table_id)
 
-    real_set_status = store.set_knowhow_row_projection
-
-    def _concurrent_move_after_last_row(row_id, status):
-        real_set_status(row_id, status)
-        if status in ("synced", "failed"):  # the per-row loop's terminal call
-            projector.delete_table_projection(hidden_source_id)
-            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
-
-    monkeypatch.setattr(
-        store, "set_knowhow_row_projection", _concurrent_move_after_last_row
+    state = _delete_table_after_row_work_before_terminal_kg_write(
+        repo, projector, table_id, hidden_source_id, monkeypatch
     )
 
-    try:
-        projector.project_table(table_id)
-    except KeyError:
-        pass  # pre-fix: bump_knowhow_mutation_seq on the now-gone table_id
+    projector.project_table(table_id)
+    assert state["injected"]
 
     with repo._connect() as db:
         orphaned_kos = db.execute(
@@ -1581,19 +1714,12 @@ def test_project_table_does_not_crash_with_integrity_error_when_source_deleted_m
     })
     hidden_source_id = projector.ensure_hidden_source(table_id)
 
-    real_set_status = store.set_knowhow_row_projection
-
-    def _concurrent_move_after_last_row(row_id, status):
-        real_set_status(row_id, status)
-        if status in ("synced", "failed"):
-            projector.delete_table_projection(hidden_source_id)
-            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
-
-    monkeypatch.setattr(
-        store, "set_knowhow_row_projection", _concurrent_move_after_last_row
+    state = _delete_table_after_row_work_before_terminal_kg_write(
+        repo, projector, table_id, hidden_source_id, monkeypatch
     )
 
     projector.project_table(table_id)  # must not raise
+    assert state["injected"]
 
     with repo._connect() as db:
         orphaned_kos = db.execute(
@@ -1656,59 +1782,25 @@ def test_project_table_existence_check_and_terminal_write_are_atomic(
     """Deterministic interleaving reproducing the TOCTOU: a concurrent move
     (teardown-then-delete, the same order move_table itself uses) is injected
     at the exact instant `project_table` is about to open its TERMINAL
-    `database.write()` call — i.e. after the per-row loop's last status write
-    (same hook point the two tests above use) but before the write lock for
-    the terminal section is acquired. Pre-fix, the existence check upstream
-    of that `write()` call has already run (against the still-live state)
-    and never runs again, so the terminal write proceeds and commits an
-    orphan.
+    `database.write()` call — after the per-row structural/embedding work but
+    before the write lock for the terminal section is acquired. Pre-fix, the
+    existence check upstream of that `write()` call has already run (against
+    the still-live state) and never runs again, so the terminal write proceeds
+    and commits an orphan.
 
-    The hook sits on `database.write` itself rather than on `table_exists`/
-    `source_exists`: the fix changes those calls to a different shape
-    entirely (tx-scoped, called on the connection the write() block hands
-    back), so a hook on the old check methods would simply go unexercised
-    once the fix lands — this test would then pass for the wrong reason
-    (dead injection) instead of proving the check-then-write pair is now
-    atomic. Hooking the lock-acquisition entry point itself stays meaningful
-    on both sides of the fix."""
+    The injection is keyed off completion of row embedding, a stable phase
+    boundary, rather than the timing of a row-status write. The latter is a
+    public result and may move as the completion contract evolves."""
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)
     store.add_knowhow_row(table_id, {cols["违例类型"]: "过冲问题"})
     hidden_source_id = projector.ensure_hidden_source(table_id)
 
-    real_set_status = store.set_knowhow_row_projection
-    state = {"last_row_done": False, "injected": False}
+    state = _delete_table_after_row_work_before_terminal_kg_write(
+        repo, projector, table_id, hidden_source_id, monkeypatch
+    )
 
-    def _mark_last_row(row_id, status):
-        real_set_status(row_id, status)
-        if status in ("synced", "failed"):  # the per-row loop's terminal call
-            state["last_row_done"] = True
-
-    monkeypatch.setattr(store, "set_knowhow_row_projection", _mark_last_row)
-
-    from contextlib import contextmanager
-
-    database = projector.database
-    real_write = database.write
-
-    @contextmanager
-    def _write_with_race_before_terminal_section():
-        if state["last_row_done"] and not state["injected"]:
-            state["injected"] = True
-            # 并发 move 恰好卡在"最后一行状态已落地"和"这次 write() 真正拿到
-            # 写锁"之间完整跑完——旧代码的 existence 检查在这次 write() 调用
-            # 之前就已经跑完并放行了，这里注入进去才是那个未受保护的窗口。
-            projector.delete_table_projection(hidden_source_id)
-            repo._runtime.knowhow_store.delete_knowhow_table(table_id)
-        with real_write() as db:
-            yield db
-
-    monkeypatch.setattr(database, "write", _write_with_race_before_terminal_section)
-
-    try:
-        projector.project_table(table_id)
-    except KeyError:
-        pass  # pre-fix secondary symptom: bump_knowhow_mutation_seq on the now-gone table_id
+    projector.project_table(table_id)
 
     assert state["injected"], "race hook never fired — test setup is broken"
     with repo._connect() as db:

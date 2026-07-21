@@ -62,6 +62,7 @@ def test_memory_ports_expose_store_and_lifecycle_contracts():
 def test_memory_store_owns_sql_and_service_never_imports_facade():
     store_path = ROOT / "app" / "repositories" / "sqlite" / "memory_store.py"
     service_path = ROOT / "app" / "services" / "memory_service.py"
+    memory_inputs_path = ROOT / "app" / "core" / "memory_inputs.py"
     store_source = store_path.read_text(encoding="utf-8")
     service_source = service_path.read_text(encoding="utf-8")
 
@@ -80,9 +81,12 @@ def test_memory_store_owns_sql_and_service_never_imports_facade():
     assert "app.repositories.sqlite.memory_store" not in _imports(ports_path)
     assert "app.models.memory" in _imports(service_path)
     assert "app.models.memory" in _imports(ports_path)
+    assert "app.core.memory_inputs" in _imports(service_path)
+    assert "app.core.memory_inputs" not in _imports(store_path)
+    assert "app.services.memory_inputs" not in _imports(service_path)
     assert "app.services.memory_inputs" not in _imports(store_path)
     assert "app.core.json_safety" in _imports(store_path)
-    assert "app.core.json_safety" in _imports(service_path.parent / "memory_inputs.py")
+    assert "app.core.json_safety" in _imports(memory_inputs_path)
 
 
 def test_runtime_owns_memory_components_and_facade_has_explicit_delegates(tmp_path):

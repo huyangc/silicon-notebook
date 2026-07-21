@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 from xml.etree import ElementTree
 
-from app.models.schemas import SourceElement
+from app.models.sources import SourceElement
 
 
 def parse_source_file(

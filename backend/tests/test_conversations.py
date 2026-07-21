@@ -268,7 +268,7 @@ def test_bulk_delete_conversations_route(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     from app.main import app
-    from app.api.routes import repository
+    from app.api.ask_routes import repository
     client = TestClient(app)
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
     cid = client.post(f"/api/notebooks/{nb}/ask", json={"question": "q"}).json()["conversation_id"]

@@ -11,7 +11,7 @@ import re
 from typing import Any, Iterable, Mapping, Sequence
 
 from app.core.config import Settings
-from app.models.schemas import AnswerAnchor, Citation, CitationKnowhowRef
+from app.models.ask import AnswerAnchor, Citation, CitationKnowhowRef
 from app.repositories.ports import (
     EvidenceKnowledgeContextPort, NotebookStorePort, SourceStorePort,
 )

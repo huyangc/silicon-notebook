@@ -27,8 +27,20 @@ test("workspace composes executable Ask and account components", () => {
     importsFrom(page, "./account-menu").map((item) => item.imported),
     ["AccountMenu"],
   );
+  assert.deepEqual(
+    importsFrom(page, "./ask-session-header").map((item) => item.imported),
+    ["AskSessionHeaderActions"],
+  );
   assert.equal(jsxElements(page, "AskComposer").length, 1);
   assert.equal(jsxElements(page, "AccountMenu").length, 1);
+  const sessionHeaders = jsxElements(page, "AskSessionHeaderActions");
+  assert.equal(sessionHeaders.length, 1);
+  assert.deepEqual(sessionHeaders[0].bindings, {
+    sessionCount: "sessions.length",
+    sessionPanelOpen: "sessionPanelOpen",
+    onToggleSessionPanel: "() => setSessionPanelOpen(open => !open)",
+    onStartNewSession: "startNewSession",
+  });
   const pageFunctions = new Set(
     declarations(page)
       .filter((finding) => finding.kind === "function")
@@ -36,6 +48,26 @@ test("workspace composes executable Ask and account components", () => {
   );
   assert.equal(pageFunctions.has("AskComposer"), false);
   assert.equal(pageFunctions.has("AccountMenu"), false);
+});
+
+
+test("Ask session controls occupy one header row", () => {
+  assert.equal(
+    jsxElements(page, "div").some(
+      ({ attributes }) => attributes.className === "chat-session-context",
+    ),
+    false,
+  );
+  assert.ok(
+    jsxElements(page, "div").some(
+      ({ attributes }) => (
+        attributes.id === "ask-session-manager"
+        && attributes.className === "chat-session-popover"
+        && attributes.role === "dialog"
+        && attributes["aria-label"] === "会话管理"
+      ),
+    ),
+  );
 });
 
 
@@ -58,6 +90,23 @@ test("source actions remain available by accessible meaning", () => {
   const links = jsxElements(page, "a");
   assert.ok(buttons.some(({ attributes }) => attributes.title === "删除来源"));
   assert.ok(links.some(({ attributes }) => attributes["aria-label"] === "打开原始链接"));
+});
+
+
+test("source detail uses the dedicated draggable window shell", () => {
+  assert.deepEqual(
+    importsFrom(page, "./source-detail-window").map((item) => item.imported),
+    ["SourceDetailWindow"],
+  );
+  const windows = jsxElements(page, "SourceDetailWindow");
+  assert.equal(windows.length, 1);
+  assert.deepEqual(windows[0].bindings, {
+    onClose: "() => setSourceDetail(null)",
+  });
+  assert.equal(
+    importsFrom(page, "lucide-react").some(({ imported }) => imported === "PanelRightClose"),
+    false,
+  );
 });
 
 

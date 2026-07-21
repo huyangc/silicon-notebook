@@ -39,7 +39,7 @@ from app.services.cancellation import AskCancelled
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from app.core.event_logging import EventLogger
-    from app.models.schemas import AskRequest, AskResponse
+    from app.models.ask import AskRequest, AskResponse
     from app.repositories.ports import AskStateStorePort
     from app.services.ask_modes import AskMode
 

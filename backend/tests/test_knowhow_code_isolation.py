@@ -32,7 +32,7 @@ across future edits, not a re-derivation of the invariant from first
 principles.
 
 Mirrors test_knowhow_retrieval.py's `client` fixture (the app's own
-lru_cache'd repository singleton, obtained via ``app.api.routes.
+lru_cache'd repository singleton, obtained via ``app.api.knowhow_routes.
 repository()``) — required for the SAME reason that file documents: the
 background projection job the ProjectionScheduler launches runs against
 the app's singleton, so a fake embedder installed on a SEPARATELY
@@ -99,7 +99,7 @@ def client(tmp_path, monkeypatch):
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
 
-    from app.api.routes import repository
+    from app.api.knowhow_routes import repository
     from app.main import app
 
     c = TestClient(app)

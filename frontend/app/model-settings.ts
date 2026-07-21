@@ -1,5 +1,4 @@
-import { API_BASE, authHeaders } from "./auth.ts";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { requestJson } from "./api-client.ts";
 
 export const MODEL_ROLES = ["llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank"] as const;
 export const STATUS_MODEL_ROLES = [...MODEL_ROLES, "embedding"] as const;
@@ -84,62 +83,50 @@ export function buildPutPayload(
 }
 
 export async function fetchModelSettings(): Promise<ModelSettingsView> {
-  const res = await fetch(`${API_BASE}/me/model-settings`, { headers: authHeaders() });
-  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
-  return res.json();
+  return requestJson("/me/model-settings", { tag: "model-settings" });
 }
 
 /** Read the persisted snapshot only; this endpoint never probes a provider. */
 export async function fetchModelServiceStatus(): Promise<ModelServicesStatus> {
-  const res = await fetch(`${API_BASE}/me/model-services/status`, { headers: authHeaders() });
-  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
-  return res.json();
+  return requestJson("/me/model-services/status", { tag: "model-settings" });
 }
 
 /** Explicitly probe the effective saved configuration for one service. */
 export async function testCurrentModelService(
   service: StatusModelRole,
 ): Promise<ModelServiceStatusItem> {
-  const res = await fetch(`${API_BASE}/me/model-services/${service}/test`, {
+  return requestJson(`/me/model-services/${service}/test`, {
     method: "POST",
-    headers: authHeaders(),
+    tag: "model-settings",
   });
-  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
-  return res.json();
 }
 
 /** Explicitly probe every configured effective service. */
 export async function testAllCurrentModelServices(): Promise<ModelServicesStatus> {
-  const res = await fetch(`${API_BASE}/me/model-services/test-all`, {
+  return requestJson("/me/model-services/test-all", {
     method: "POST",
-    headers: authHeaders(),
+    tag: "model-settings",
   });
-  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
-  return res.json();
 }
 
 export async function saveModelSettings(payload: ReturnType<typeof buildPutPayload>): Promise<ModelSettingsView> {
-  const res = await fetch(`${API_BASE}/me/model-settings`, {
+  return requestJson("/me/model-settings", {
     method: "PUT",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload),
+    tag: "model-settings",
   });
-  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
-  return res.json();
 }
 
 export async function testModelService(
   service: ModelRole, base_url: string, model: string, api_key: string | null,
 ): Promise<{ ok: boolean; latency_ms: number; error: string; code: string }> {
-  const res = await fetch(`${API_BASE}/me/model-settings/test`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ service, base_url, model, api_key }),
-  });
-  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
-  const result = await res.json() as {
+  const result = await requestJson<{
     ok?: unknown; latency_ms?: unknown; error?: unknown; code?: unknown;
-  };
+  }>("/me/model-settings/test", {
+    method: "POST",
+    body: JSON.stringify({ service, base_url, model, api_key }),
+    tag: "model-settings",
+  });
   const code = typeof result.code === "string"
     && ["", "unknown_service", "missing_config", "upstream_error"].includes(result.code)
     ? result.code

@@ -551,7 +551,7 @@ def test_import_empty_title_returns_friendly_400(tmp_path, monkeypatch):
     nb = _mk_notebook(client, owner_h)
 
     # Valid grid + roles, but a whitespace-only title: create_knowhow_table's
-    # ValueError must surface through routes.py's existing 400 idiom.
+    # ValueError must surface through knowhow_routes.py's existing 400 idiom.
     resp = _import_xlsx(client, owner_h, nb, title="   ")
     assert resp.status_code == 400, resp.text
     assert "表标题不能为空" in resp.json()["detail"]
@@ -630,7 +630,7 @@ def test_commit_append_forward_fills_anchor_column(tmp_path, monkeypatch, repo):
     the import path doesn't have. Builds the target table directly via
     create_table (mirrors test_import_table_forward_fills_anchor_column's own
     "no HTTP for the facade call" style), fetches its wire-shaped detail
-    (commit_append's own `table` param shape — routes.py's `_require_table`
+    (commit_append's own `table` param shape — knowhow_routes.py's `_require_table`
     always hands it a `to_wire_table` result), then commit_appends a file
     following the same vertical-merge "写一次" convention as the import test
     above."""

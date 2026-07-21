@@ -235,7 +235,7 @@ def test_runtime_registry_identity_and_distinct_from_ask(repo):
 
 
 def test_routes_launch_helpers_delegate_to_runtime_coordinator(repo, monkeypatch):
-    import app.api.routes as routes_mod
+    import app.api.report_routes as routes_mod
     calls = []
 
     class _Coord:

@@ -2,7 +2,8 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bell } from "lucide-react";
-import { API_BASE, authHeaders, getToken } from "./auth";
+import { performApiRequest } from "./api-client.ts";
+import { getToken } from "./auth";
 import { itemSig, currentSigs, doneMessage, pruneSigs, pendingView } from "./pending-actions";
 
 // localStorage 读写(私密模式/SSR 容错):待办的「已读/关掉」状态按用户存本地。
@@ -59,7 +60,7 @@ export function usePendingActions(enabled: boolean) {
     // REST 兜底:先拉一次秒开
     (async () => {
       try {
-        const r = await fetch(`${API_BASE}/me/pending-actions`, { headers: authHeaders() });
+        const r = await performApiRequest("/me/pending-actions", { tag: "pending-actions" });
         if (r.ok) setSnapshot(await r.json());
       } catch { /* 交给流 */ }
     })();
@@ -69,8 +70,9 @@ export function usePendingActions(enabled: boolean) {
       const ac = new AbortController();
       abortRef.current = ac;
       try {
-        const resp = await fetch(`${API_BASE}/me/pending-actions/stream`, {
-          headers: authHeaders(), signal: ac.signal,
+        const resp = await performApiRequest("/me/pending-actions/stream", {
+          signal: ac.signal,
+          tag: "pending-actions",
         });
         if (!resp.ok || !resp.body) throw new Error(`stream ${resp.status}`);
         retryRef.current = 0;

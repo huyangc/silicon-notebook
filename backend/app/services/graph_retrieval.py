@@ -6,7 +6,7 @@ import sqlite3
 import time
 from typing import Dict, List, Optional, Tuple
 
-from app.models.schemas import Evidence
+from app.models.common import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.model_config import model_client_fingerprint
 from app.services.retrieval import RetrievedKnowledge

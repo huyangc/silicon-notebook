@@ -57,7 +57,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { authHeaders } from "./auth.ts";
+import { requestBlob } from "./api-client.ts";
 import { useFloatingWindow } from "./use-floating-window.ts";
 import {
   ROLE_LABELS,
@@ -102,7 +102,7 @@ import {
   isSharedColumn,
 } from "./knowhow-grouping-logic.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
-import { throwHumanizedHttpError, httpErrorStatus } from "./errors.ts";
+import { httpErrorStatus } from "./errors.ts";
 import { rowFallbackTitle, reformatSourceLabel, REFORMAT_SUGGESTION_LABEL } from "./knowhow-cell-editor-logic.ts";
 import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
 import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
@@ -111,7 +111,7 @@ import { KnowhowCodeChip, KnowhowCodeModal } from "./knowhow-code.tsx";
 import { KnowhowMatrixDrawer } from "./knowhow-matrix-drawer.tsx";
 // C3：表级「复制/移动到…」——目标笔记本选择器是 C2 的共享组件（同一层 UI 也
 // 服务 Memory 的 C4），网络客户端与其 409 source_cleanup_failed 专用错误类型
-// 在 knowhow-transfer.ts（纯 fetch 封装，无 JSX，见该文件头注释）。
+// 在 knowhow-transfer.ts（共享 transport 的领域客户端，无 JSX，见该文件头注释）。
 import { DestinationPicker } from "./transfer-picker.tsx";
 import { transferKnowhowTable, KnowhowSourceCleanupError } from "./knowhow-transfer.ts";
 import { resolveCellCodeView, CODE_STATUS_LOAD_ERROR } from "./knowhow-code-logic.ts";
@@ -812,9 +812,7 @@ export function KnowhowPanel({
     setTemplateDownloading(true);
     setActionError(null);
     try {
-      const res = await fetch(knowhowTemplateUrl(notebookId, selectedTableId), { headers: authHeaders() });
-      if (!res.ok) await throwHumanizedHttpError(res, "knowhow");
-      const blob = await res.blob();
+      const blob = await requestBlob(knowhowTemplateUrl(notebookId, selectedTableId), { tag: "knowhow" });
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = objectUrl;

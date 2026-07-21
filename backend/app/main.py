@@ -258,7 +258,7 @@ def create_app() -> FastAPI:
     app.mount("/mcp", mcp_app, name="memory-mcp")
 
     # 待确认中心事件总线：注入 recompute，供后台 job（mark_dirty）与流式端点
-    # 复用同一份快照计算口径（app.api.routes 里初始 snapshot 直接调
+    # 复用同一份快照计算口径（app.api.system_routes 里初始 snapshot 直接调
     # repository().pending_actions，不走这个私有 _recompute）。
     pending_bus.set_recompute(lambda uid: repository().pending_actions(uid))
 

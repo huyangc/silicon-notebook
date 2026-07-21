@@ -4,7 +4,7 @@ import json
 import sqlite3
 from typing import Callable, List, Literal, Sequence
 
-from app.models.schemas import NotebookCreate, NotebookUpdate
+from app.models.notebooks import NotebookCreate, NotebookUpdate
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import (
     MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID, MOUNT_VALID_EXPR,

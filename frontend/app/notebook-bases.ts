@@ -1,50 +1,36 @@
 // 多领域基准库 —— 参考库挂载客户端(纯逻辑部分在 notebook-bases.test.mjs 里单测)。
-// 自带 fetch 封装,与 notebook-tier.ts 同款,以便在 `node --test` 下免 React。
+// 通过共享 transport 发请求；模块本身不依赖 React。
 //
 // ⚠ 重要:listBases/setBases/listMountable 对应的三个后端端点是 owner-only,
 // 非 owner 调用会收到 404(刻意不泄露存在性)。调用方不能在打开笔记本时无条件
 // 调用它们 —— 只读共享的访客会拿到 404。访客的读路径应该走
 // `NotebookSummary.base_notebooks`,不要走这个模块。
 
-import { authHeaders } from "./auth.ts";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { requestJson } from "./api-client.ts";
 
 export type NotebookRef = { id: string; name: string; tier: string };
 export type MountedBase = NotebookRef & { active: boolean; inactive_reason: string };
 
-const API_BASE =
-  (typeof process !== "undefined"
-    ? process.env?.NEXT_PUBLIC_API_BASE_URL
-    : undefined) ?? "http://127.0.0.1:8000/api";
-
-async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(API_BASE + url, {
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    ...init,
-  });
-  if (!res.ok) await throwHumanizedHttpError(res, "bases");
-  return res.json() as Promise<T>;
-}
-
 export const listBases = (notebookId: string): Promise<MountedBase[]> =>
-  apiFetch(`/notebooks/${notebookId}/bases`);
+  requestJson(`/notebooks/${notebookId}/bases`, { tag: "bases" });
 
 export const listMountable = (notebookId: string): Promise<NotebookRef[]> =>
-  apiFetch(`/notebooks/${notebookId}/mountable`);
+  requestJson(`/notebooks/${notebookId}/mountable`, { tag: "bases" });
 
 export const setBases = (
   notebookId: string,
   baseNotebookIds: string[]
 ): Promise<MountedBase[]> =>
-  apiFetch(`/notebooks/${notebookId}/bases`, {
+  requestJson(`/notebooks/${notebookId}/bases`, {
     method: "PUT",
     body: JSON.stringify({ base_notebook_ids: baseNotebookIds }),
+    tag: "bases",
   });
 
 // 必办 4(spec §6):删除确认弹窗要显示"N 个笔记本正在把它作为参考库"—— CASCADE
 // 不可逆,用户点删除前必须看到影响面。owner-only,同 DELETE 端点的权限口径。
 export const mountedByCount = (notebookId: string): Promise<{ count: number }> =>
-  apiFetch(`/notebooks/${notebookId}/mounted-by-count`);
+  requestJson(`/notebooks/${notebookId}/mounted-by-count`, { tag: "bases" });
 
 // 检索开销线性于挂载数(跨层桥是 |active nodes| × topk per participant)。不硬性
 // 拦截,只在超过这个数时提示 —— 用户可能确有同时挂多个领域的正当需求。

@@ -25,7 +25,7 @@ def _auth(client, username="z00123456"):
 
 
 def test_mask_key_never_exposes_full_short_key():
-    from app.api.routes import _mask_key
+    from app.api.system_routes import _mask_key
     assert _mask_key("") == ""
     assert _mask_key("abc") == "…"        # ≤4 位整体隐去
     assert _mask_key("abcd") == "…"       # 恰好 4 位也不暴露
@@ -172,7 +172,7 @@ def test_exception_path_logs_raw_server_side_and_returns_only_code(
     client, monkeypatch, caplog
 ):
     """异常原文只进服务端日志；200 响应保留空兼容字段与稳定 code。"""
-    import app.api.routes as routes
+    import app.api.system_routes as routes
 
     class Boom:
         def __init__(self, *a, **k): pass
@@ -201,13 +201,13 @@ def test_exception_path_logs_raw_server_side_and_returns_only_code(
 
 
 def _install_status_service(monkeypatch, probe):
-    from app.api import routes
+    from app.api import system_routes
     from app.api.deps import identity_repository
     from app.core.config import get_settings
     from app.services.model_status import ModelStatusService
 
     service = ModelStatusService(identity_repository(), get_settings(), probe=probe)
-    monkeypatch.setattr(routes, "_model_status_service", lambda: service)
+    monkeypatch.setattr(system_routes, "_model_status_service", lambda: service)
     return service
 
 

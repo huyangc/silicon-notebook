@@ -336,11 +336,11 @@ def test_真实后端确有可展示文案站点(tmp_path):
 
 
 def test_后端真实文案确实曾经违规过(tmp_path):
-    """变异验证:把 routes.py 的一条 403 改回「基准库」,守卫必须红。
+    """变异验证:把 notebook_routes.py 的一条 403 改回「基准库」,守卫必须红。
 
     没有这条,「守卫扫了后端」和「守卫扫后端但规则对后端不生效」在绿灯下无法区分。
     """
-    routes = guard.BACKEND_APP / "api" / "routes.py"
+    routes = guard.BACKEND_APP / "api" / "notebook_routes.py"
     src = routes.read_text(encoding="utf-8")
     assert "仅管理员可设为公共知识库" in src, "文案又漂了,本变异样本需同步"
     mutated = tmp_path / "routes_mutated.py"

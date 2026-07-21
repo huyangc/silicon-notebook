@@ -3,7 +3,7 @@ import logging
 import threading
 from types import SimpleNamespace
 
-from app.api.routes import _stream_ask_events
+from app.api.ask_routes import _stream_ask_events
 from app.core.config import Settings
 from app.core.llm import OpenAICompatibleClient
 from app.models.schemas import AskRequest

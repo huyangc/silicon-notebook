@@ -211,7 +211,7 @@ def test_candidate_evidence_rejects_cross_notebook_and_cross_owner_records(
 def test_memory_service_enforces_shared_input_limits_and_normalization(
     memory_service, users, notebook
 ):
-    from app.services.memory_inputs import (
+    from app.core.memory_inputs import (
         MEMORY_CONTENT_MAX_CHARS,
         MEMORY_EVIDENCE_MAX_COUNT,
         MEMORY_EVIDENCE_MAX_SERIALIZED_BYTES,
@@ -264,7 +264,7 @@ def test_memory_service_enforces_shared_input_limits_and_normalization(
 def test_shared_tag_normalizer_caps_raw_input_and_rejects_blanks_before_dedup(
     memory_service, users, notebook
 ):
-    from app.services.memory_inputs import MEMORY_TAG_MAX_COUNT, normalize_tags
+    from app.core.memory_inputs import MEMORY_TAG_MAX_COUNT, normalize_tags
 
     with pytest.raises(ValueError, match="at most 20"):
         normalize_tags(["duplicate"] * (MEMORY_TAG_MAX_COUNT + 1))

@@ -14,8 +14,8 @@ import {
   mergeAgentPage,
   type AgentTokenDraft,
 } from "./agent-token-model";
-import { API_BASE, authHeaders, clearToken, getToken } from "./auth";
-import { humanizedError, logDiagnostic, throwHumanizedHttpError, toUserMessage } from "./errors.ts";
+import { requestJson } from "./api-client.ts";
+import { humanizedError, logDiagnostic, toUserMessage } from "./errors.ts";
 import { resolvePromotionTarget, type MountedBase } from "./notebook-bases";
 import {
   canEditMemory,
@@ -57,21 +57,7 @@ import "./memory-panel.css";
 const MEMORY_PAGE_SIZE = 20;
 
 async function memoryApi<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...options,
-    headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...authHeaders(),
-      ...(options.headers || {}),
-    },
-  });
-  if (response.status === 401 && getToken()) {
-    clearToken();
-    window.location.reload();
-  }
-  // 原始诊断(状态码 + detail + requestId)进 console;面向用户抛人话。
-  if (!response.ok) await throwHumanizedHttpError(response, "memory");
-  return response.json() as Promise<T>;
+  return requestJson(path, { ...options, tag: "memory", unauthorized: "clear-and-reload" });
 }
 
 type MemoryDraft = { title: string; content_md: string; tags: string };

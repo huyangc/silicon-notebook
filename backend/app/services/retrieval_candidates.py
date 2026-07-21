@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.core.ask_context import _ASK_EMBED_CACHE
-from app.models.schemas import Evidence
+from app.models.common import Evidence
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 from app.services.knowledge_contracts import USABLE_STATUSES
 from app.services.model_config import model_client_fingerprint

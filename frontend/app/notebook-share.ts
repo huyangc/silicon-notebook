@@ -1,9 +1,7 @@
 // Notebook 分享与拷贝 — 分享客户端(纯逻辑,纯 helper 在 notebook-share.test.mjs
-// 单测)。自带 fetch 封装,可在 `node --test` 下运行而不 import React 页面模块。
-// 镜像 notebook-tier.ts 的样板。
+// 单测)。请求经共享 transport，模块本身不依赖 React。
 
-import { authHeaders } from "./auth.ts";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { requestJson, requestVoid } from "./api-client.ts";
 
 // 复用 tier.ts 里的宽松形状:后端 copy 返回一个完整 NotebookSummary,这里只声明
 // 我们会读到的字段,其余用索引签名兜底。
@@ -52,49 +50,33 @@ export type SharedByMeItem = {
   members: { username: string; added_at: string }[];
 };
 
-const API_BASE =
-  (typeof process !== "undefined"
-    ? process.env?.NEXT_PUBLIC_API_BASE_URL
-    : undefined) ?? "http://127.0.0.1:8000/api";
-
-async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(API_BASE + url, {
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    ...init,
-  });
-  if (!res.ok) await throwHumanizedHttpError(res, "share");
-  // 204 No Content(取消分享)没有 body。
-  if (res.status === 204) return null as T;
-  return res.json() as Promise<T>;
-}
-
 // 开启分享,拿到分享 token / 是否可拷贝 / 规模(仅 owner)。
 export const shareNotebook = (notebookId: string): Promise<ShareResponse> =>
-  apiFetch(`/notebooks/${notebookId}/share`, { method: "POST" });
+  requestJson(`/notebooks/${notebookId}/share`, { method: "POST", tag: "share" });
 
 // 取消分享(仅 owner,期望 204)。
 export const unshareNotebook = (notebookId: string): Promise<void> =>
-  apiFetch<void>(`/notebooks/${notebookId}/share`, { method: "DELETE" });
+  requestVoid(`/notebooks/${notebookId}/share`, { method: "DELETE", tag: "share" });
 
 // 预览分享内容(任意登录用户;错码/已撤销 → 404 → throw)。
 export const previewShared = (token: string): Promise<SharedPreview> =>
-  apiFetch(`/shared/${token}`);
+  requestJson(`/shared/${token}`, { tag: "share" });
 
 // 拷贝分享库到当前用户空间(库太大 → 409 → throw)。
 export const copyShared = (token: string): Promise<NotebookSummaryLike> =>
-  apiFetch(`/shared/${token}/copy`, { method: "POST" });
+  requestJson(`/shared/${token}/copy`, { method: "POST", tag: "share" });
 
 // 加入大库为只读成员(小库应走拷贝 → 400 → throw)。返回该库 summary(access=reader)。
 export const joinShared = (token: string): Promise<NotebookSummaryLike> =>
-  apiFetch(`/shared/${token}/join`, { method: "POST" });
+  requestJson(`/shared/${token}/join`, { method: "POST", tag: "share" });
 
 // 退出只读共享(移除自己的成员身份,期望 204)。
 export const leaveNotebook = (notebookId: string): Promise<void> =>
-  apiFetch<void>(`/notebooks/${notebookId}/membership`, { method: "DELETE" });
+  requestVoid(`/notebooks/${notebookId}/membership`, { method: "DELETE", tag: "share" });
 
 // owner 的「已分享总览」:所有我 owner 且 is_shared 的库(readonly 带成员名单)。
 export const sharedByMe = (): Promise<SharedByMeItem[]> =>
-  apiFetch(`/notebooks/shared-by-me`);
+  requestJson(`/notebooks/shared-by-me`, { tag: "share" });
 
 // --- 纯 helper(单测) --------------------------------------------------------
 

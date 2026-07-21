@@ -15,7 +15,7 @@ from typing import Any, Callable, ContextManager, Iterable, List, Optional
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
 from app.core.llm import cap_kwargs
-from app.models.schemas import (
+from app.models.sources import (
     AddUrlSourcesResult,
     RejectedUrl,
     SourceDetail,

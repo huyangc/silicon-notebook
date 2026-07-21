@@ -4,7 +4,7 @@ import contextvars
 from typing import Any, Callable
 
 from app.core.event_logging import reset_log_owner, set_log_owner
-from app.models.schemas import UserProfile
+from app.models.identity import UserProfile
 
 RequestUserToken = tuple[contextvars.Token, contextvars.Token]
 

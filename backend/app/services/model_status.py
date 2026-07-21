@@ -11,7 +11,8 @@ from typing import Callable
 from app.core.config import Settings
 from app.core.llm import OpenAICompatibleClient
 from app.core.model_safety import safe_model_label
-from app.models.schemas import ModelServiceStatusItem, ModelServicesStatus, UserProfile
+from app.models.identity import UserProfile
+from app.models.model_services import ModelServiceStatusItem, ModelServicesStatus
 from app.repositories.ports import IdentityRepository
 from app.services.embedding import make_embedder
 from app.services.model_config import (

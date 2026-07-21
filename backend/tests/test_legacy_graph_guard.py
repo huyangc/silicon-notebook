@@ -23,14 +23,14 @@ def repo(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client(repo, monkeypatch):
-    """TestClient with app.api.routes.repository() overridden to the fixture
+    """TestClient with app.api.knowledge_routes.repository() overridden to the fixture
     repo (house pattern, see test_edge_review_queue.py). require_notebook_read
     still resolves via app.api.deps.repository() — a separate SQLiteRepository
     instance pointed at the SAME on-disk sqlite file (env vars from `repo`'s
     monkeypatch.setenv are still active when deps.repository() first runs),
     so both can see the same data."""
     from fastapi.testclient import TestClient
-    import app.api.routes as routes_mod
+    import app.api.knowledge_routes as routes_mod
     from app.main import app
     monkeypatch.setattr(routes_mod, "repository", lambda: repo)
     return TestClient(app)

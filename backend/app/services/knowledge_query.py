@@ -3,14 +3,14 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from app.models.schemas import (
+from app.models.ask import RuleCard
+from app.models.knowledge import (
     KnowledgeEdge,
     KnowledgeGraph,
     KnowledgeNode,
     KnowledgeRecord,
     KnowledgeTypeCount,
     PaginatedKnowledge,
-    RuleCard,
 )
 from app.services.retrieval import RetrievedKnowledge
 from app.services.extraction_profiles import OBJECT_SCHEMAS, OBJECT_TYPE_LABELS, ObjectSchema

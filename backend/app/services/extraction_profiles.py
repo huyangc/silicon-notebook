@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence
 
-from app.models.schemas import SourceElement
+from app.models.sources import SourceElement
 
 # Payload fields that carry a list value (the LLM should return an array, and
 # the prompt schema hint renders them as ``[""]``). Everything else is a string.

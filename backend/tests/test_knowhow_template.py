@@ -9,7 +9,7 @@ editing endpoint to seed "already there" rows via plain HTTP — no direct
 facade import needed anywhere in this file, since every fixture need here
 already has an HTTP equivalent). Scheduler dispatch is verified by
 monkeypatching `app.services.knowhow.api.get_scheduler` to a small counting
-fake (routes.py always does a fresh `knowhow_api.get_scheduler(repo)`
+fake (knowhow_routes.py always does a fresh `knowhow_api.get_scheduler(repo)`
 attribute lookup per call, so patching the module attribute intercepts it)
 rather than polling for real background projection to settle — deterministic
 and fast, and this task's brief calls for exactly that ("patch scheduler

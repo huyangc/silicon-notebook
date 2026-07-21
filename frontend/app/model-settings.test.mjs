@@ -113,7 +113,7 @@ test("saved model status reads without a body or an implicit provider test", asy
   assert.match(calls[0].url, /\/me\/model-services\/status$/);
   assert.equal(calls[0].init.method, undefined);
   assert.equal(calls[0].init.body, undefined);
-  assert.equal(calls[0].init.headers.Authorization, "Bearer saved-status-token");
+  assert.equal(calls[0].init.headers.get("Authorization"), "Bearer saved-status-token");
   assert.equal(calls.some((call) => /\/test(?:-all)?$/.test(call.url)), false);
 });
 
@@ -141,7 +141,7 @@ test("current and all model tests use authenticated POST endpoints", async () =>
   ]);
   for (const { init } of calls) {
     assert.equal(init.method, "POST");
-    assert.equal(init.headers.Authorization, "Bearer explicit-test-token");
+    assert.equal(init.headers.get("Authorization"), "Bearer explicit-test-token");
   }
 });
 

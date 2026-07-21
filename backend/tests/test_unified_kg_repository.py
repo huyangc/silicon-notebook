@@ -310,7 +310,7 @@ def test_write_clusters_is_per_type_isolated(repo):
 def test_review_pending_merges_fail_open_on_bad_llm_json(repo):
     """A categorical confidence ("high") from the LLM must not 500 this endpoint.
 
-    The route (routes.py) only catches KeyError; review_merge_candidates must be
+    The KG route only catches KeyError; review_merge_candidates must be
     total so review_pending_merges returns a summary instead of raising ValueError.
     """
     from app.services.sqlite_repository import _now

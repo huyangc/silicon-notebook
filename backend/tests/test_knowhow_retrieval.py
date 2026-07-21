@@ -13,7 +13,7 @@ Mirrors two existing conventions rather than inventing a third:
     background-job poll loop (``_poll_all_rows_settled``).
   - test_trackF_governance_promotion.py / test_kg_search_api.py: grab the
     app's own ``lru_cache``-backed repository singleton via
-    ``app.api.routes.repository()`` and set ``.embedder`` on THAT instance
+    ``app.api.knowhow_routes.repository()`` and set ``.embedder`` on THAT instance
     (not a separate ``SQLiteRepository(...)`` pointed at the same DB file) —
     required so the background projection job (which runs against the app's
     singleton) actually calls a fake, deterministic embedder instead of
@@ -81,7 +81,7 @@ def _xlsx_bytes(header: list[str], rows: list[list[str]]) -> bytes:
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     """The app's own repository singleton (obtained via
-    ``app.api.routes.repository()``, an ``lru_cache``d no-arg function —
+    ``app.api.knowhow_routes.repository()``, an ``lru_cache``d no-arg function —
     calling it constructs-and-caches once per test, and ``TestClient(app)``'s
     ``Depends(repository)`` resolves to that SAME cached instance), with a
     fake embedder installed on it so the background projection job actually
@@ -104,7 +104,7 @@ def client(tmp_path, monkeypatch):
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
 
-    from app.api.routes import repository
+    from app.api.knowhow_routes import repository
     from app.main import app
 
     c = TestClient(app)

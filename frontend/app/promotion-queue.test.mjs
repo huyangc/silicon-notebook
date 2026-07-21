@@ -14,12 +14,10 @@ function withFetchStub(run) {
   const original = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     calls.push({ url, init });
-    return {
-      ok: true,
+    return new Response(JSON.stringify({}), {
       status: 200,
-      json: async () => ({}),
-      text: async () => "",
-    };
+      headers: { "Content-Type": "application/json" },
+    });
   };
   return Promise.resolve(run(calls)).finally(() => {
     globalThis.fetch = original;

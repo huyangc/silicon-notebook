@@ -63,7 +63,7 @@ def run_inference(notebook_id: str,
                   ) -> List[Dict[str, Any]]:
     """对每题:repo.ask -> LLM-judge。返回逐题结果(含 judge)。"""
     from app.core.config import Settings
-    from app.models.schemas import AskRequest
+    from app.models.ask import AskRequest
     from app.services.sqlite_repository import SQLiteRepository
     repo = SQLiteRepository(Settings())
     assert repo.llm_client.configured, "LLM 未配置(.env)"

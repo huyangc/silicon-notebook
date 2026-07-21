@@ -29,7 +29,7 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
     r = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question": "q"})
     assert r.status_code == 409
     # stub 引擎线程:不真跑(单测不起真深挖)
-    import app.api.routes as routes_mod
+    import app.api.report_routes as routes_mod
     monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
     monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
     r = client.post(f"/api/notebooks/{nb['id']}/reports", json={"question": "为什么?", "depth": 8})
@@ -48,7 +48,7 @@ def test_report_endpoints_lifecycle(client, monkeypatch):
 
 
 def test_report_create_rejects_blank_question_and_missing_nb(client, monkeypatch):
-    import app.api.routes as routes_mod
+    import app.api.report_routes as routes_mod
     monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
     monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
     nb = client.post("/api/notebooks", json={"name": "t"}).json()
@@ -62,7 +62,7 @@ def test_cancel_registry_live_thread_path(client, monkeypatch):
     """取消注册表:register → 端点 cancel 置事件返回 cancelling → unregister 后落库标记。"""
     from app.services.report_engine import (
         register_cancel, cancel_report, unregister_cancel)
-    import app.api.routes as routes_mod
+    import app.api.report_routes as routes_mod
     monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
     monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
     nb = client.post("/api/notebooks", json={"name": "t"}).json()
@@ -82,7 +82,7 @@ def test_cancel_registry_live_thread_path(client, monkeypatch):
 
 def _mk_report(client, monkeypatch, nb_id, question, *, done=False, content_md=""):
     """建一个报告;done=True 时用 repo.update_report 直接置 status/content_md。"""
-    import app.api.routes as routes_mod
+    import app.api.report_routes as routes_mod
     monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
     monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
     rid = client.post(f"/api/notebooks/{nb_id}/reports",
@@ -138,7 +138,7 @@ def test_report_export_skips_other_notebook_report(client, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_two_phase_report_lifecycle(client, monkeypatch):
-    import app.api.routes as R
+    import app.api.report_routes as R
     monkeypatch.setattr(R, "_report_llm_ready", lambda repo: True)
     launched = {}
     monkeypatch.setattr(R, "_launch_plan_job", lambda repo,nb,rid,q,h,ag: launched.setdefault("plan", (rid, ag)))
@@ -161,7 +161,7 @@ def test_two_phase_report_lifecycle(client, monkeypatch):
     assert launched["gen"]==rid
 
 def test_generate_rejects_when_not_outline_ready(client, monkeypatch):
-    import app.api.routes as R
+    import app.api.report_routes as R
     monkeypatch.setattr(R,"_report_llm_ready",lambda repo:True)
     monkeypatch.setattr(R,"_launch_plan_job",lambda *a,**k:None)
     nb=client.post("/api/notebooks",json={"name":"t","purpose":"p","primary_domain":"d"}).json()

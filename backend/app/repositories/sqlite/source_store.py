@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
-from app.models.schemas import (
+from app.models.sources import (
     PaginatedSources,
     PaperAuthor,
     PaperMeta,

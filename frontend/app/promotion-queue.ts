@@ -1,10 +1,8 @@
 // Track F — governance / promotion queue API client (pure logic, unit-tested
-// in promotion-queue.test.mjs). Kept self-contained (own fetch wrapper) so it
-// can be exercised in isolation under `node --test` without importing the
-// React page module.
+// in promotion-queue.test.mjs). Uses the shared transport while remaining
+// independently testable without importing the React page module.
 
-import { authHeaders } from "./auth.ts";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { requestJson } from "./api-client.ts";
 
 export type PromotionCandidate = {
   id: string;
@@ -42,24 +40,10 @@ export type PromotionApproveResult = {
   merged_into: string;
 };
 
-const API_BASE =
-  (typeof process !== "undefined"
-    ? process.env?.NEXT_PUBLIC_API_BASE_URL
-    : undefined) ?? "http://127.0.0.1:8000/api";
-
-async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(API_BASE + url, {
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    ...init,
-  });
-  if (!res.ok) await throwHumanizedHttpError(res, "promotion-queue");
-  return res.json() as Promise<T>;
-}
-
 export const fetchPromotionQueue = (
   status?: string
 ): Promise<PromotionCandidate[]> =>
-  apiFetch(`/promotion-queue${status ? `?status=${status}` : ""}`);
+  requestJson(`/promotion-queue${status ? `?status=${status}` : ""}`, { tag: "promotion-queue" });
 
 // targetBaseId 只在笔记本挂了 >1 个公共知识库时才需要显式传(挂 0/1 个由服务端
 // 自行解析/拒绝,见 notebook-bases.ts::resolvePromotionTarget)。不传时不带 body——
@@ -69,23 +53,26 @@ export const proposePromotion = (
   objectId: string,
   targetBaseId?: string
 ): Promise<PromotionCandidate> =>
-  apiFetch(`/notebooks/${notebookId}/knowledge/${objectId}/promote`, {
+  requestJson(`/notebooks/${notebookId}/knowledge/${objectId}/promote`, {
     method: "POST",
     ...(targetBaseId ? { body: JSON.stringify({ target_base_id: targetBaseId }) } : {}),
+    tag: "promotion-queue",
   });
 
 export const approvePromotion = (
   candidateId: string
 ): Promise<PromotionApproveResult> =>
-  apiFetch(`/promotion-queue/${encodeURIComponent(candidateId)}/approve`, {
+  requestJson(`/promotion-queue/${encodeURIComponent(candidateId)}/approve`, {
     method: "POST",
+    tag: "promotion-queue",
   });
 
 export const rejectPromotion = (
   candidateId: string,
   reason = ""
 ): Promise<PromotionCandidate> =>
-  apiFetch(`/promotion-queue/${encodeURIComponent(candidateId)}/reject`, {
+  requestJson(`/promotion-queue/${encodeURIComponent(candidateId)}/reject`, {
     method: "POST",
     body: JSON.stringify({ reason }),
+    tag: "promotion-queue",
   });

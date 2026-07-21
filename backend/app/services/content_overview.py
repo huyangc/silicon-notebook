@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 
-from app.models.schemas import (
+from app.models.content_overview import (
     KnowhowOverviewSummary,
     KnowhowOverviewTable,
-    KnowhowTableSummary,
     MemoryOverviewSummary,
     NotebookContentOverview,
 )
+from app.models.knowhow import KnowhowTableSummary
 from app.repositories.ports import (
     ContentOverviewKnowhowStorePort,
     ContentOverviewMemoryStorePort,

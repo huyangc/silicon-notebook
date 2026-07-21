@@ -8,17 +8,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List
 
-from app.models.schemas import (
-    KgBuildJobStatus,
+from app.models.kg import KgBuildJobStatus
+from app.models.notebooks import (
     NotebookAnalytics,
     NotebookCreate,
     NotebookRef,
-    NotebookSearchResponse,
     NotebookSummary,
     NotebookTemplate,
     NotebookUpdate,
-    SearchHit,
 )
+from app.models.ask import NotebookSearchResponse, SearchHit
 from app.repositories.ports import KgBuildJobStorePort
 # Canonical implementation lives with the SourceFileStore (Task 11); the
 # private alias keeps this module's delete_notebook cleanup call sites and

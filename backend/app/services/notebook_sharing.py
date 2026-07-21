@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
-from app.models.schemas import NotebookSummary
+from app.models.notebooks import NotebookSummary
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.sharing_store import SharingStore
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS

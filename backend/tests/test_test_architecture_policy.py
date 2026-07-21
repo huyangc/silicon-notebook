@@ -152,10 +152,8 @@ def test_backend_parallelism_is_bounded_and_explicit():
     assert "graph_index_contract:" in config
     assert "-n auto" not in config
     assert "worksteal" not in config
-    backend_lane = (
-        ROOT / "scripts" / "check_backend.sh"
-    ).read_text(encoding="utf-8")
-    assert 'BACKEND_PYTEST_WORKERS="${BACKEND_PYTEST_WORKERS:-12}"' in backend_lane
+    backend_lane = (ROOT / "scripts" / "check_backend.sh").read_text(encoding="utf-8")
+    assert 'BACKEND_PYTEST_WORKERS="${BACKEND_PYTEST_WORKERS:-9}"' in backend_lane
 
 
 def test_parallel_graph_tests_share_repo_local_matplotlib_cache():

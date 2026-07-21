@@ -7,9 +7,8 @@ from dataclasses import replace
 from typing import Any, Mapping, Sequence
 
 from app.models.memory import MemoryRevision, MemoryWrite
-from app.models.schemas import (
-    AgentProfile,
-    AgentTokenSummary,
+from app.models.identity import AgentProfile, AgentTokenSummary
+from app.models.memory import (
     MemoryNotebookOption,
     MemoryRecord,
     PaginatedMemories,

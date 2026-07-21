@@ -50,7 +50,7 @@ SURFACE_MEMBERS = (
         kind='constant',
         consumers=(
             ConsumerSite(path='app.services.sqlite_repository', scope='<module>', kind='compatibility', target='KnowledgeGraphTooLargeError'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>', kind='import', target='app.services.sqlite_repository:KnowledgeGraphTooLargeError'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>', kind='import', target='app.services.sqlite_repository:KnowledgeGraphTooLargeError'),
         ),
         patches=(
         ),
@@ -1082,7 +1082,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.add_knowhow_column', kind='attribute', target='add_knowhow_column'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.add_knowhow_column', kind='attribute', target='add_knowhow_column'),
         ),
         patches=(
         ),
@@ -1092,7 +1092,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.add_knowhow_row', kind='attribute', target='add_knowhow_row'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.add_knowhow_row', kind='attribute', target='add_knowhow_row'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.commit_append', kind='attribute', target='add_knowhow_row'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.import_table', kind='attribute', target='add_knowhow_row'),
         ),
@@ -1104,7 +1104,7 @@ SURFACE_MEMBERS = (
         owner='SourceIngestionService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.add_url_sources', kind='attribute', target='add_url_sources'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.add_url_sources', kind='attribute', target='add_url_sources'),
         ),
         patches=(
         ),
@@ -1124,7 +1124,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.approve_promotion', kind='attribute', target='approve_promotion_as_reviewer'),
+            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.approve_promotion', kind='attribute', target='approve_promotion_as_reviewer'),
         ),
         patches=(
         ),
@@ -1134,8 +1134,8 @@ SURFACE_MEMBERS = (
         owner='AskService',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask', kind='attribute', target='ask'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.ask_notebook.run_ask', kind='attribute', target='ask'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.ask', kind='attribute', target='ask'),
             ConsumerSite(path='backend/app/eval/inference.py', scope='<module>.run_inference', kind='attribute', target='ask'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='ask'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='ask'),
@@ -1168,7 +1168,7 @@ SURFACE_MEMBERS = (
         owner='AskStateStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_ask_job', kind='attribute', target='ask_job_detail'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_ask_job', kind='attribute', target='ask_job_detail'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='ask_job_detail'),
         ),
         patches=(
@@ -1189,7 +1189,7 @@ SURFACE_MEMBERS = (
         owner='SourceIngestionService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='backfill_paper_metadata'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='backfill_paper_metadata'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_metadata', kind='attribute', target='backfill_paper_metadata'),
         ),
         patches=(
@@ -1231,7 +1231,7 @@ SURFACE_MEMBERS = (
         owner='AskService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.bulk_delete_conversations', kind='attribute', target='bulk_delete_conversations'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.bulk_delete_conversations', kind='attribute', target='bulk_delete_conversations'),
         ),
         patches=(
         ),
@@ -1252,7 +1252,7 @@ SURFACE_MEMBERS = (
         owner='AskService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='cancel_ask_job'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='cancel_ask_job'),
         ),
         patches=(
         ),
@@ -1262,7 +1262,7 @@ SURFACE_MEMBERS = (
         owner='ScaleArtifactRuntime',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.cancel_scale_index', kind='attribute', target='cancel_scale_index'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.cancel_scale_index', kind='attribute', target='cancel_scale_index'),
         ),
         patches=(
         ),
@@ -1293,7 +1293,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeQueryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_concept_detail', kind='attribute', target='concept_detail'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.get_concept_detail', kind='attribute', target='concept_detail'),
         ),
         patches=(
         ),
@@ -1303,7 +1303,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.add_concept_whitelist', kind='attribute', target='concept_whitelist_add'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.add_concept_whitelist', kind='attribute', target='concept_whitelist_add'),
         ),
         patches=(
         ),
@@ -1313,7 +1313,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.list_concept_whitelist', kind='attribute', target='concept_whitelist_list'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.list_concept_whitelist', kind='attribute', target='concept_whitelist_list'),
         ),
         patches=(
         ),
@@ -1323,7 +1323,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.delete_concept_whitelist', kind='attribute', target='concept_whitelist_remove'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.delete_concept_whitelist', kind='attribute', target='concept_whitelist_remove'),
         ),
         patches=(
         ),
@@ -1343,7 +1343,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.confirm_conflict', kind='attribute', target='confirm_conflict'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.confirm_conflict', kind='attribute', target='confirm_conflict'),
         ),
         patches=(
         ),
@@ -1353,7 +1353,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.confirm_merge', kind='attribute', target='confirm_merge'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.confirm_merge', kind='attribute', target='confirm_merge'),
         ),
         patches=(
         ),
@@ -1401,7 +1401,7 @@ SURFACE_MEMBERS = (
         owner='SchemaRegistryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.create_object_schema', kind='attribute', target='create_object_schema'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.create_object_schema', kind='attribute', target='create_object_schema'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_object_schemas', kind='attribute', target='create_object_schema'),
         ),
         patches=(
@@ -1412,7 +1412,7 @@ SURFACE_MEMBERS = (
         owner='ReportApplicationService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.create_report', kind='attribute', target='create_report'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.create_report', kind='attribute', target='create_report'),
         ),
         patches=(
         ),
@@ -1422,14 +1422,14 @@ SURFACE_MEMBERS = (
         owner='IdentityStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._stream_ask_events', kind='attribute', target='current_user'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='current_user'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_ask_job', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>._resolve_session_user', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.get_current_user', kind='attribute', target='current_user'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>._launch_generate_job', kind='attribute', target='current_user'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>._launch_plan_job', kind='attribute', target='current_user'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>._stream_ask_events', kind='attribute', target='current_user'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.cancel_ask_job', kind='attribute', target='current_user'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_ask_job', kind='attribute', target='current_user'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.upload_notebook_asset', kind='attribute', target='current_user'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._launch_generate_job', kind='attribute', target='current_user'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._launch_plan_job', kind='attribute', target='current_user'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.upload_notebook_asset', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.main', kind='attribute', target='current_user'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__.<lambda>', kind='attribute', target='current_user'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='current_user'),
@@ -1462,7 +1462,7 @@ SURFACE_MEMBERS = (
         owner='AskStateStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.delete_conversation', kind='attribute', target='delete_conversation'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.delete_conversation', kind='attribute', target='delete_conversation'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='delete_conversation'),
         ),
         patches=(
@@ -1483,7 +1483,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.delete_knowhow_column', kind='attribute', target='delete_knowhow_column'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.delete_knowhow_column', kind='attribute', target='delete_knowhow_column'),
         ),
         patches=(
         ),
@@ -1493,7 +1493,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.delete_knowhow_row', kind='attribute', target='delete_knowhow_row'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.delete_knowhow_row', kind='attribute', target='delete_knowhow_row'),
         ),
         patches=(
         ),
@@ -1503,7 +1503,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.delete_knowhow_table', kind='attribute', target='delete_knowhow_table'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.delete_knowhow_table', kind='attribute', target='delete_knowhow_table'),
         ),
         patches=(
         ),
@@ -1533,7 +1533,7 @@ SURFACE_MEMBERS = (
         owner='SchemaRegistryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.delete_object_schema', kind='attribute', target='delete_object_schema'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.delete_object_schema', kind='attribute', target='delete_object_schema'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_object_schemas', kind='attribute', target='delete_object_schema'),
         ),
         patches=(
@@ -1544,7 +1544,7 @@ SURFACE_MEMBERS = (
         owner='ReportStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.delete_report', kind='attribute', target='delete_report'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.delete_report', kind='attribute', target='delete_report'),
         ),
         patches=(
         ),
@@ -1594,8 +1594,8 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='execute_notebook_kg_job'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='execute_notebook_kg_job'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='execute_notebook_kg_job'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='execute_notebook_kg_job'),
         ),
         patches=(
         ),
@@ -1605,7 +1605,7 @@ SURFACE_MEMBERS = (
         owner='ReportStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.export_reports_endpoint', kind='attribute', target='export_reports'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.export_reports_endpoint', kind='attribute', target='export_reports'),
         ),
         patches=(
         ),
@@ -1629,8 +1629,8 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='fail_notebook_kg_job_submission'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='fail_notebook_kg_job_submission'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='fail_notebook_kg_job_submission'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='fail_notebook_kg_job_submission'),
         ),
         patches=(
         ),
@@ -1650,7 +1650,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.find_duplicates', kind='attribute', target='find_duplicates'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.find_duplicates', kind='attribute', target='find_duplicates'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='find_duplicates'),
         ),
         patches=(
@@ -1661,7 +1661,7 @@ SURFACE_MEMBERS = (
         owner='AskStateStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_conversation', kind='attribute', target='get_conversation'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.get_conversation', kind='attribute', target='get_conversation'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='get_conversation'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_conversation'),
         ),
@@ -1701,14 +1701,14 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/knowhow_agent_routes.py', scope='<module>.get_agent_discrimination', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/api/knowhow_agent_routes.py', scope='<module>.get_agent_row', kind='attribute', target='get_knowhow_table'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.add_knowhow_column', kind='attribute', target='get_knowhow_table'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.add_knowhow_row', kind='attribute', target='get_knowhow_table'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.import_knowhow_table', kind='attribute', target='get_knowhow_table'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_cell', kind='attribute', target='get_knowhow_table'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_cells_batch', kind='attribute', target='get_knowhow_table'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_column', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.get_knowhow_discrimination.load', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.get_knowhow_row.load', kind='attribute', target='get_knowhow_table'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.add_knowhow_column', kind='attribute', target='get_knowhow_table'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.add_knowhow_row', kind='attribute', target='get_knowhow_table'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.import_knowhow_table', kind='attribute', target='get_knowhow_table'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cell', kind='attribute', target='get_knowhow_table'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cells_batch', kind='attribute', target='get_knowhow_table'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_column', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.get_cell_code', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.get_table_in_notebook', kind='attribute', target='get_knowhow_table'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.import_table', kind='attribute', target='get_knowhow_table'),
@@ -1736,14 +1736,14 @@ SURFACE_MEMBERS = (
         owner='NotebookCatalogService',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.ask_stream', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='get_notebook'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.review_all_unified_kg_merges', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.list_notebooks.load', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.select_notebook.load', kind='attribute', target='get_notebook'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.ask_stream', kind='attribute', target='get_notebook'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='get_notebook'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='get_notebook'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.relink_kg', kind='attribute', target='get_notebook'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='get_notebook'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.review_all_unified_kg_merges', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.ensure_notebook', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='get_notebook'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_backfill_source_index', kind='attribute', target='get_notebook'),
@@ -1761,7 +1761,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_notebook_asset_file', kind='attribute', target='get_notebook_asset'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.get_notebook_asset_file', kind='attribute', target='get_notebook_asset'),
             ConsumerSite(path='backend/app/services/knowhow/transfer.py', scope='<module>._remap', kind='attribute', target='get_notebook_asset'),
         ),
         patches=(
@@ -1772,9 +1772,9 @@ SURFACE_MEMBERS = (
         owner='ReportStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.generate_report', kind='attribute', target='get_report'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_report', kind='attribute', target='get_report'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.update_report_outline', kind='attribute', target='get_report'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='get_report'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.get_report', kind='attribute', target='get_report'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.update_report_outline', kind='attribute', target='get_report'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='get_report'),
         ),
         patches=(
@@ -1797,8 +1797,8 @@ SURFACE_MEMBERS = (
         owner='IdentityStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_model_settings', kind='attribute', target='get_user_model_settings'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.test_model_service', kind='attribute', target='get_user_model_settings'),
+            ConsumerSite(path='backend/app/api/system_routes.py', scope='<module>.get_model_settings', kind='attribute', target='get_user_model_settings'),
+            ConsumerSite(path='backend/app/api/system_routes.py', scope='<module>.test_model_service', kind='attribute', target='get_user_model_settings'),
         ),
         patches=(
         ),
@@ -1808,7 +1808,7 @@ SURFACE_MEMBERS = (
         owner='ScaleArtifactRuntime',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.index_status', kind='attribute', target='index_status'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.index_status', kind='attribute', target='index_status'),
         ),
         patches=(
         ),
@@ -1818,9 +1818,9 @@ SURFACE_MEMBERS = (
         owner='ModelProvider',
         kind='property',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='kg_llm_client'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='kg_llm_client'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='kg_llm_client'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='kg_llm_client'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='kg_llm_client'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='kg_llm_client'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_metadata', kind='attribute', target='kg_llm_client'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__.<lambda>', kind='attribute', target='kg_llm_client'),
         ),
@@ -1832,7 +1832,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.object_neighbors', kind='attribute', target='kg_neighbors'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.object_neighbors', kind='attribute', target='kg_neighbors'),
         ),
         patches=(
         ),
@@ -1842,7 +1842,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeQueryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.kg_search', kind='attribute', target='kg_search'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.kg_search', kind='attribute', target='kg_search'),
         ),
         patches=(
         ),
@@ -1852,7 +1852,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeQueryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.knowledge_graph', kind='attribute', target='knowledge_graph'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.knowledge_graph', kind='attribute', target='knowledge_graph'),
             ConsumerSite(path='scripts/kg_product_smoke.py', scope='<module>.main', kind='attribute', target='knowledge_graph'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='knowledge_graph'),
         ),
@@ -1864,7 +1864,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeQueryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.knowledge_types', kind='attribute', target='knowledge_types'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.knowledge_types', kind='attribute', target='knowledge_types'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='knowledge_types'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='knowledge_types'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='knowledge_types'),
@@ -1877,7 +1877,7 @@ SURFACE_MEMBERS = (
         owner='AskService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.list_conversations', kind='attribute', target='list_conversations'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.list_conversations', kind='attribute', target='list_conversations'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='list_conversations'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='list_conversations'),
         ),
@@ -1913,7 +1913,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeQueryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.list_knowledge', kind='attribute', target='list_knowledge'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.list_knowledge', kind='attribute', target='list_knowledge'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='list_knowledge'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='list_knowledge'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='list_knowledge'),
@@ -1926,8 +1926,8 @@ SURFACE_MEMBERS = (
         owner='NotebookStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.list_notebook_bases_route', kind='attribute', target='list_notebook_bases'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.set_notebook_bases_route', kind='attribute', target='list_notebook_bases'),
+            ConsumerSite(path='backend/app/api/notebook_routes.py', scope='<module>.list_notebook_bases_route', kind='attribute', target='list_notebook_bases'),
+            ConsumerSite(path='backend/app/api/notebook_routes.py', scope='<module>.set_notebook_bases_route', kind='attribute', target='list_notebook_bases'),
             ConsumerSite(path='scripts/diag_base_report.py', scope='<module>.main', kind='attribute', target='list_notebook_bases'),
         ),
         patches=(
@@ -1948,7 +1948,7 @@ SURFACE_MEMBERS = (
         owner='SchemaRegistryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.list_object_schemas', kind='attribute', target='list_object_schemas'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.list_object_schemas', kind='attribute', target='list_object_schemas'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_object_schemas', kind='attribute', target='list_object_schemas'),
         ),
         patches=(
@@ -1959,7 +1959,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.list_promotion_queue', kind='attribute', target='list_promotion_queue'),
+            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.list_promotion_queue', kind='attribute', target='list_promotion_queue'),
         ),
         patches=(
         ),
@@ -1969,7 +1969,7 @@ SURFACE_MEMBERS = (
         owner='ReportStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.list_reports', kind='attribute', target='list_reports'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.list_reports', kind='attribute', target='list_reports'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='list_reports'),
         ),
         patches=(
@@ -1993,8 +1993,8 @@ SURFACE_MEMBERS = (
         kind='mutable_property',
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.memory_preview_client', kind='attribute', target='llm_client'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='llm_client'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='llm_client'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='llm_client'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='llm_client'),
             ConsumerSite(path='backend/app/eval/inference.py', scope='<module>.run_inference', kind='attribute', target='llm_client'),
             ConsumerSite(path='backend/app/eval/sa_calibration.py', scope='<module>._run_arm', kind='attribute', target='llm_client'),
             ConsumerSite(path='backend/app/eval/speed.py', scope='<module>.measure_speed', kind='attribute', target='llm_client'),
@@ -2113,7 +2113,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.merge_knowledge', kind='attribute', target='merge_knowledge'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.merge_knowledge', kind='attribute', target='merge_knowledge'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='merge_knowledge'),
         ),
         patches=(
@@ -2124,8 +2124,8 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.merge_review_job', kind='attribute', target='merge_review_job_status'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.review_all_unified_kg_merges', kind='attribute', target='merge_review_job_status'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.merge_review_job', kind='attribute', target='merge_review_job_status'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.review_all_unified_kg_merges', kind='attribute', target='merge_review_job_status'),
         ),
         patches=(
         ),
@@ -2157,8 +2157,8 @@ SURFACE_MEMBERS = (
         owner='NotebookStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.mountable_notebooks_route', kind='attribute', target='mountable_notebooks'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.set_notebook_bases_route', kind='attribute', target='mountable_notebooks'),
+            ConsumerSite(path='backend/app/api/notebook_routes.py', scope='<module>.mountable_notebooks_route', kind='attribute', target='mountable_notebooks'),
+            ConsumerSite(path='backend/app/api/notebook_routes.py', scope='<module>.set_notebook_bases_route', kind='attribute', target='mountable_notebooks'),
         ),
         patches=(
         ),
@@ -2168,7 +2168,7 @@ SURFACE_MEMBERS = (
         owner='NotebookStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.mounted_by_count_route', kind='attribute', target='mounted_by_count'),
+            ConsumerSite(path='backend/app/api/notebook_routes.py', scope='<module>.mounted_by_count_route', kind='attribute', target='mounted_by_count'),
         ),
         patches=(
         ),
@@ -2178,7 +2178,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.object_context', kind='attribute', target='node_context'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.object_context', kind='attribute', target='node_context'),
         ),
         patches=(
         ),
@@ -2245,8 +2245,8 @@ SURFACE_MEMBERS = (
         owner='PendingActionsService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.me_pending_actions', kind='attribute', target='pending_actions'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.me_pending_stream.gen', kind='attribute', target='pending_actions'),
+            ConsumerSite(path='backend/app/api/system_routes.py', scope='<module>.me_pending_actions', kind='attribute', target='pending_actions'),
+            ConsumerSite(path='backend/app/api/system_routes.py', scope='<module>.me_pending_stream.gen', kind='attribute', target='pending_actions'),
             ConsumerSite(path='backend/app/main.py', scope='<module>.create_app.<lambda>', kind='attribute', target='pending_actions'),
         ),
         patches=(
@@ -2257,7 +2257,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_pending_conflicts', kind='attribute', target='pending_conflicts'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.get_pending_conflicts', kind='attribute', target='pending_conflicts'),
         ),
         patches=(
         ),
@@ -2267,7 +2267,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_pending_merges', kind='attribute', target='pending_merges'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.get_pending_merges', kind='attribute', target='pending_merges'),
             ConsumerSite(path='backend/tests/test_merge_review_job.py', scope='<module>.test_run_merge_review_job_bounded_sql_queries', kind='patch', target='pending_merges'),
         ),
         patches=(
@@ -2279,8 +2279,8 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.build_kg', kind='attribute', target='prepare_notebook_kg_job'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_kg', kind='attribute', target='prepare_notebook_kg_job'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.build_kg', kind='attribute', target='prepare_notebook_kg_job'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_kg', kind='attribute', target='prepare_notebook_kg_job'),
         ),
         patches=(
         ),
@@ -2290,8 +2290,8 @@ SURFACE_MEMBERS = (
         owner='SourceIngestionService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.add_url_sources.<lambda>', kind='attribute', target='process_source'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.upload_sources.<lambda>', kind='attribute', target='process_source'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.add_url_sources.<lambda>', kind='attribute', target='process_source'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.upload_sources.<lambda>', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all._sched', kind='attribute', target='process_source'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_reparse', kind='attribute', target='process_source'),
@@ -2305,7 +2305,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.propose_promotion', kind='attribute', target='propose_promotion'),
+            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.propose_promotion', kind='attribute', target='propose_promotion'),
         ),
         patches=(
         ),
@@ -2315,7 +2315,7 @@ SURFACE_MEMBERS = (
         owner='SchemaRegistryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.propose_schemas', kind='attribute', target='propose_schemas'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.propose_schemas', kind='attribute', target='propose_schemas'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_object_schemas', kind='attribute', target='propose_schemas'),
         ),
         patches=(
@@ -2326,7 +2326,7 @@ SURFACE_MEMBERS = (
         owner='ModelProvider',
         kind='property',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>._report_llm_ready', kind='attribute', target='reasoning_llm_client'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._report_llm_ready', kind='attribute', target='reasoning_llm_client'),
         ),
         patches=(
         ),
@@ -2336,7 +2336,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_unified_kg', kind='attribute', target='rebuild_unified_kg'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_unified_kg', kind='attribute', target='rebuild_unified_kg'),
             ConsumerSite(path='backend/app/scripts/recluster_kg.py', scope='<module>.main', kind='attribute', target='rebuild_unified_kg'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='rebuild_unified_kg'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_kg', kind='attribute', target='rebuild_unified_kg'),
@@ -2391,7 +2391,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.reject_conflict', kind='attribute', target='reject_conflict'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.reject_conflict', kind='attribute', target='reject_conflict'),
         ),
         patches=(
         ),
@@ -2401,7 +2401,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.reject_merge', kind='attribute', target='reject_merge'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.reject_merge', kind='attribute', target='reject_merge'),
         ),
         patches=(
         ),
@@ -2411,7 +2411,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.reject_promotion', kind='attribute', target='reject_promotion_as_reviewer'),
+            ConsumerSite(path='backend/app/api/admin_routes.py', scope='<module>.reject_promotion', kind='attribute', target='reject_promotion_as_reviewer'),
         ),
         patches=(
         ),
@@ -2431,7 +2431,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.relink_kg', kind='attribute', target='relink_notebook_kg'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.relink_kg', kind='attribute', target='relink_notebook_kg'),
         ),
         patches=(
         ),
@@ -2441,7 +2441,7 @@ SURFACE_MEMBERS = (
         owner='AskStateStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rename_conversation', kind='attribute', target='rename_conversation'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.rename_conversation', kind='attribute', target='rename_conversation'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='rename_conversation'),
         ),
         patches=(
@@ -2452,7 +2452,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_column', kind='attribute', target='rename_knowhow_column'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_column', kind='attribute', target='rename_knowhow_column'),
         ),
         patches=(
         ),
@@ -2462,7 +2462,7 @@ SURFACE_MEMBERS = (
         owner='NotebookStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.set_notebook_bases_route', kind='attribute', target='replace_notebook_bases'),
+            ConsumerSite(path='backend/app/api/notebook_routes.py', scope='<module>.set_notebook_bases_route', kind='attribute', target='replace_notebook_bases'),
         ),
         patches=(
         ),
@@ -2472,8 +2472,8 @@ SURFACE_MEMBERS = (
         owner='ReportEngine',
         kind='property',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>._launch_generate_job', kind='attribute', target='report_execution'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>._launch_plan_job', kind='attribute', target='report_execution'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._launch_generate_job', kind='attribute', target='report_execution'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>._launch_plan_job', kind='attribute', target='report_execution'),
         ),
         patches=(
         ),
@@ -2507,7 +2507,7 @@ SURFACE_MEMBERS = (
         owner='IdentityStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_model_settings', kind='attribute', target='resolve_model_config'),
+            ConsumerSite(path='backend/app/api/system_routes.py', scope='<module>.get_model_settings', kind='attribute', target='resolve_model_config'),
         ),
         patches=(
         ),
@@ -2517,7 +2517,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='resolve_notebook_conflicts'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.resolve_conflicts', kind='attribute', target='resolve_notebook_conflicts'),
         ),
         patches=(
         ),
@@ -2602,7 +2602,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.review_unified_kg_merges', kind='attribute', target='review_pending_merges'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.review_unified_kg_merges', kind='attribute', target='review_pending_merges'),
         ),
         patches=(
         ),
@@ -2612,7 +2612,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.edge_review_queue', kind='attribute', target='review_queue'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.edge_review_queue', kind='attribute', target='review_queue'),
         ),
         patches=(
         ),
@@ -2632,7 +2632,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.review_all_unified_kg_merges', kind='attribute', target='run_merge_review_job'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.review_all_unified_kg_merges', kind='attribute', target='run_merge_review_job'),
         ),
         patches=(
         ),
@@ -2642,7 +2642,7 @@ SURFACE_MEMBERS = (
         owner='ScaleArtifactRuntime',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.scale_index_status', kind='attribute', target='scale_index_status'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.scale_index_status', kind='attribute', target='scale_index_status'),
             ConsumerSite(path='scripts/diag_base_report.py', scope='<module>.main', kind='attribute', target='scale_index_status'),
         ),
         patches=(
@@ -2687,7 +2687,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.review_relation', kind='attribute', target='set_edge_review'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.review_relation', kind='attribute', target='set_edge_review'),
         ),
         patches=(
         ),
@@ -2697,7 +2697,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_table', kind='attribute', target='set_knowhow_anchor_column'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_table', kind='attribute', target='set_knowhow_anchor_column'),
         ),
         patches=(
         ),
@@ -2707,7 +2707,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_column', kind='attribute', target='set_knowhow_column_kind'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_column', kind='attribute', target='set_knowhow_column_kind'),
         ),
         patches=(
         ),
@@ -2778,7 +2778,7 @@ SURFACE_MEMBERS = (
         owner='SourceStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='sources_missing_paper_meta'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.backfill_paper_metadata', kind='attribute', target='sources_missing_paper_meta'),
         ),
         patches=(
         ),
@@ -2788,7 +2788,7 @@ SURFACE_MEMBERS = (
         owner='AskExecutionCoordinator',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>._stream_ask_events', kind='attribute', target='start_ask_stream'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>._stream_ask_events', kind='attribute', target='start_ask_stream'),
         ),
         patches=(
         ),
@@ -2824,7 +2824,7 @@ SURFACE_MEMBERS = (
         owner='AskStateStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.submit_feedback', kind='attribute', target='submit_feedback'),
+            ConsumerSite(path='backend/app/api/ask_routes.py', scope='<module>.submit_feedback', kind='attribute', target='submit_feedback'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='submit_feedback'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='submit_feedback'),
         ),
@@ -2836,7 +2836,7 @@ SURFACE_MEMBERS = (
         owner='ScaleArtifactRuntime',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.rebuild_scale_index', kind='attribute', target='trigger_scale_index_rebuild'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.rebuild_scale_index', kind='attribute', target='trigger_scale_index_rebuild'),
         ),
         patches=(
         ),
@@ -2846,7 +2846,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_unified_kg', kind='attribute', target='unified_graph'),
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.get_unified_kg', kind='attribute', target='unified_graph'),
         ),
         patches=(
         ),
@@ -2856,8 +2856,8 @@ SURFACE_MEMBERS = (
         owner='KnowledgeLifecycleService',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.unified_kg_status', kind='attribute', target='unified_kg_status'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.select_notebook.load', kind='attribute', target='unified_kg_status'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.unified_kg_status', kind='attribute', target='unified_kg_status'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>.exercise_reads', kind='attribute', target='unified_kg_status'),
         ),
         patches=(
@@ -2868,7 +2868,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cell', kind='attribute', target='update_knowhow_cell'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_cell', kind='attribute', target='update_knowhow_cell'),
         ),
         patches=(
         ),
@@ -2878,7 +2878,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cells_batch', kind='attribute', target='update_knowhow_cells'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_cells_batch', kind='attribute', target='update_knowhow_cells'),
         ),
         patches=(
         ),
@@ -2900,8 +2900,8 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cell', kind='attribute', target='update_knowhow_cells_guarded_atomic'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cells_batch', kind='attribute', target='update_knowhow_cells_guarded_atomic'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_cell', kind='attribute', target='update_knowhow_cells_guarded_atomic'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_cells_batch', kind='attribute', target='update_knowhow_cells_guarded_atomic'),
         ),
         patches=(
         ),
@@ -2911,7 +2911,7 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_table', kind='attribute', target='update_knowhow_table_meta'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_table', kind='attribute', target='update_knowhow_table_meta'),
         ),
         patches=(
         ),
@@ -2921,7 +2921,7 @@ SURFACE_MEMBERS = (
         owner='KnowledgeGovernanceService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.update_knowledge', kind='attribute', target='update_knowledge'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.update_knowledge', kind='attribute', target='update_knowledge'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_kg_store_ask_and_conversations', kind='attribute', target='update_knowledge'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='update_knowledge'),
         ),
@@ -2943,7 +2943,7 @@ SURFACE_MEMBERS = (
         owner='SchemaRegistryService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.update_object_schema', kind='attribute', target='update_object_schema'),
+            ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.update_object_schema', kind='attribute', target='update_object_schema'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_object_schemas', kind='attribute', target='update_object_schema'),
         ),
         patches=(
@@ -2954,8 +2954,8 @@ SURFACE_MEMBERS = (
         owner='ReportStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.cancel_report_endpoint', kind='attribute', target='update_report'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.update_report_outline', kind='attribute', target='update_report'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.cancel_report_endpoint', kind='attribute', target='update_report'),
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.update_report_outline', kind='attribute', target='update_report'),
         ),
         patches=(
         ),
@@ -2965,7 +2965,7 @@ SURFACE_MEMBERS = (
         owner='SourceIngestionService',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.upload_sources', kind='attribute', target='upload_sources'),
+            ConsumerSite(path='backend/app/api/source_routes.py', scope='<module>.upload_sources', kind='attribute', target='upload_sources'),
             ConsumerSite(path='backend/app/eval/speed.py', scope='<module>._insert_source', kind='attribute', target='upload_sources'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_all', kind='attribute', target='upload_sources'),
             ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.run_ingest._one', kind='attribute', target='upload_sources'),
@@ -3002,10 +3002,10 @@ SURFACE_MEMBERS = (
         owner='KnowhowStore',
         kind='method',
         consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.optimize_knowhow_cell', kind='attribute', target='validate_cell_target'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cell', kind='attribute', target='validate_cell_target'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.patch_knowhow_cells_batch', kind='attribute', target='validate_cell_target'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.reformat_knowhow_cell', kind='attribute', target='validate_cell_target'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.optimize_knowhow_cell', kind='attribute', target='validate_cell_target'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_cell', kind='attribute', target='validate_cell_target'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.patch_knowhow_cells_batch', kind='attribute', target='validate_cell_target'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.reformat_knowhow_cell', kind='attribute', target='validate_cell_target'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.delete_cell_code', kind='attribute', target='validate_cell_target'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.get_cell_code', kind='attribute', target='validate_cell_target'),
             ConsumerSite(path='backend/app/services/knowhow/api.py', scope='<module>.put_cell_code', kind='attribute', target='validate_cell_target'),

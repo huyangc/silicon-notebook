@@ -260,7 +260,7 @@ def test_chunk_and_graph_ask_execute_on_declared_ports_only():
 
 
 def test_stream_route_helper_uses_ask_stream_port_without_runtime():
-    from app.api.routes import _stream_ask_events
+    from app.api.ask_routes import _stream_ask_events
     from app.services.ask_modes import resolve_mode
 
     class MinimalAskStream:
