@@ -1275,7 +1275,7 @@
     "owner": "ModelProvider",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, stage: 'str', model: 'str', exc: 'Exception') -> 'None'"
+    "signature": "(self, stage: 'str', model: 'str', exc: 'Exception', service: 'str' = '', *, provider_failure: 'bool' = False) -> 'None'"
   },
   "_notebook_has_kg": {
     "consumers": [
