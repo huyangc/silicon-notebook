@@ -37,14 +37,15 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 
 ## 架构边界
 
+- 后端 endpoint body 位于由 `backend/app/api/routes.py` 组合的领域 FastAPI router；聚合层只管 composition 与兼容导出，不承载产品 handler。领域 Pydantic model 位于 `backend/app/models/`；`backend/app/models/schemas.py` 是旧导入的兼容 facade，re-export 同一批 model object。
 - `SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade。application service 不拼装主业务库 SQL。store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。store 共享一个 `SqliteDatabase` 连接工厂、写锁与版本闸 `SqliteMigrator`；service 保留顺序与策略。facade 每个操作要么是显式兼容 adapter，要么是源码守卫验证的单跳委托，真实目标必须与 ownership manifest 一致。消费者依赖 `backend/app/repositories/ports.py` 中可执行、按消费者划分的小型 Protocol；依赖方向单向——facade → runtime → services → stores → SQLite——未来 PostgreSQL adapter 只需在同一 ports 后替换 store 层，调用方不动。`sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim，请求 Context、`_COPY_CHUNK`、`_remap_json_ids` 等旧导出继续可 import。
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
 当前 schema 版本为 22。已提交的 v9 兼容 fixture 会经由 v10–v22 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务。
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，内置 KG 类型文案/样式位于 `kg-type-model.ts`，图谱和答案共用 `kg-type-mark.tsx` 渲染。
-- workspace HTTP 职责拆分到 `system-api.ts`、`notebook-api.ts`、`source-api.ts`、`ask-api.ts`、`knowledge-api.ts`、`report-api.ts` 与 `kg-api.ts`，全部经 `api-client.ts`。`page.tsx` 保留 state、过期结果 guard、轮询与 Blob URL 生命周期；`api-boundary.test.mjs` 用语义扫描禁止 transport core 外的生产 `fetch`。
-- 结构回归测试会阻止这些职责重新复制回巨型文件。后续拆分沿用同一增量方式：保持端点与用户行为不变，每次只迁移一个高内聚领域，然后运行完整离线门禁。
+- workspace HTTP 职责拆分到 `system-api.ts`、`notebook-api.ts`、`source-api.ts`、`ask-api.ts`、`knowledge-api.ts`、`report-api.ts` 与 `kg-api.ts`。共享 `frontend/app/api-client.ts` transport 负责 HTTP mechanics，领域模块保留 endpoint policy；`page.tsx` 保留 state、过期结果 guard、轮询与 Blob URL 生命周期；`api-boundary.test.mjs` 用语义扫描禁止 transport core 外的生产 `fetch`。
+- 结构回归测试只使用 public HTTP contract 或显式 domain seam，不得绑定 private aggregate helper、源码位置、行数或 route/model 总数。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle composition 仍是独立债务。
 
 ## 部署
 
@@ -1039,7 +1040,7 @@ bash scripts/check.sh
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 ```
 
-当前 Apple Silicon 开发基线要求完整 warm gate 在 60 秒内完成；这是本机实测目标，不是对每一台 CI 机器的可移植超时断言。
+完整门禁并发运行三个 lane：backend、contracts、frontend。`check_backend.sh` 默认使用 9 个 backend pytest worker，可用 `BACKEND_PYTEST_WORKERS` 覆盖。Apple Silicon warm gate 硬目标是不超过 60 秒；CI 各 lane 时长仅作观察，因此这不是对每一台 CI 机器的可移植超时断言。
 
 ### GitHub Actions CI
 

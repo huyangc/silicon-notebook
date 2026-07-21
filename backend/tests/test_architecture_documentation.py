@@ -52,6 +52,60 @@ def _assert_phrases(expected: dict[str, str]) -> None:
         assert phrase in _read(name), f"{name} is missing contract phrase: {phrase}"
 
 
+def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():
+    """Documentation records stable ownership, not source layout or totals."""
+    _assert_phrases(
+        {
+            "README.md": "domain FastAPI routers composed by `backend/app/api/routes.py`",
+            "README_zh.md": "由 `backend/app/api/routes.py` 组合的领域 FastAPI router",
+            "AGENTS.md": "New backend endpoints go to the owning domain router, never `routes.py`.",
+            "architecture.md": "`backend/app/api/routes.py` composes the domain FastAPI routers",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "`backend/app/models/schemas.py` is a legacy compatibility facade",
+            "README_zh.md": "`backend/app/models/schemas.py` 是旧导入的兼容 facade",
+            "AGENTS.md": "`schemas.py` is legacy compatibility only.",
+            "architecture.md": "`backend/app/models/schemas.py` is a legacy compatibility facade",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "shared `frontend/app/api-client.ts` transport",
+            "README_zh.md": "共享 `frontend/app/api-client.ts` transport",
+            "AGENTS.md": "Frontend HTTP mechanics go through `api-client.ts`",
+            "architecture.md": "`frontend/app/api-client.ts` is the shared transport",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "default 9 backend pytest workers",
+            "README_zh.md": "默认使用 9 个 backend pytest worker",
+            "AGENTS.md": "default 9 backend pytest workers",
+            "architecture.md": "默认使用 9 个 backend pytest worker",
+        }
+    )
+    for name in ("README.md", "README_zh.md", "AGENTS.md", "architecture.md"):
+        assert "`BACKEND_PYTEST_WORKERS`" in _read(name)
+    _assert_phrases(
+        {
+            "README.md": "CI lane timings are observational only",
+            "README_zh.md": "CI 各 lane 时长仅作观察",
+            "AGENTS.md": "CI lane timings are observational only",
+            "architecture.md": "CI 各 lane 时长仅作观察",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "warm gate hard target is at most 60 seconds",
+            "README_zh.md": "warm gate 硬目标是不超过 60 秒",
+            "AGENTS.md": "warm gate hard target is at most 60 seconds",
+            "architecture.md": "warm gate 硬目标是不超过 60 秒",
+        }
+    )
+
+
 def test_ask_disconnect_documentation_matches_detached_worker_contract():
     _assert_phrases(
         {

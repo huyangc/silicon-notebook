@@ -143,8 +143,11 @@ Confirmed scope:
 ## Architecture Baseline
 
 - `frontend/` is the only frontend path. (The former static `web/` fallback has been removed.)
+- `backend/app/api/routes.py` composes the domain FastAPI routers and owns compatibility exports, not product endpoint bodies. New backend endpoints go to the owning domain router, never `routes.py`.
+- Domain Pydantic models live in `backend/app/models/`; `backend/app/models/schemas.py` is a legacy compatibility facade. New Pydantic models go to the owning domain module; `schemas.py` is legacy compatibility only.
 - `frontend/app/page.tsx` is the workspace orchestrator. Keep shared workspace API/view models in `frontend/app/workspace-model.ts`, answer/citation/reasoning-trace UI in `frontend/app/answer-panel.tsx`, built-in KG labels/styles in `frontend/app/kg-type-model.ts`, and shared KG rendering in `frontend/app/kg-type-mark.tsx`; do not copy those implementations back into `page.tsx`.
-- HTTP endpoint ownership is in the seven `frontend/app/*-api.ts` domain clients (`system`, `notebook`, `source`, `ask`, `knowledge`, `report`, `kg`), all using `api-client.ts`. Keep page-owned state/effects/epochs/stale guards/polling and component-owned Blob URLs there; `api-boundary.test.mjs` semantically rejects direct production `fetch` outside `api-client.ts`.
+- HTTP endpoint ownership is in the seven `frontend/app/*-api.ts` domain clients (`system`, `notebook`, `source`, `ask`, `knowledge`, `report`, `kg`), all using `api-client.ts`. Frontend HTTP mechanics go through `api-client.ts`; product policy remains in domain API modules. Keep page-owned state/effects/epochs/stale guards/polling and component-owned Blob URLs there; `api-boundary.test.mjs` semantically rejects direct production `fetch` outside `api-client.ts`.
+- Tests patch public HTTP contracts or explicit domain seams, never private aggregate helpers. No test may bind architecture to line counts, source positions, or total file/route/model counts. Workspace-state hook extraction and FastAPI lifespan/application lifecycle composition remain outstanding, separate debt.
 - Backend uses FastAPI.
 - Default local persistence is SQLite at `.local/silicon_notebook.db`, implemented with the Python standard library `sqlite3`.
 - Source files are stored under `SILICON_NOTEBOOK_STORAGE_DIR`, defaulting to `.local/storage`.
@@ -341,7 +344,8 @@ bash scripts/check.sh
 ```
 
 `scripts/check.sh` is the complete offline local gate. It runs three bounded
-lanes concurrently: complete backend pytest, syntax/smoke/contract/harness
+lanes concurrently: complete backend pytest with default 9 backend pytest workers
+(override with `BACKEND_PYTEST_WORKERS`), syntax/smoke/contract/harness
 checks, and frontend test/typecheck/build. Each lane owns a process group;
 interrupting or terminating the controller must terminate and reap every
 pytest/npm/Next.js descendant. Acceptance on the current Apple Silicon
@@ -351,8 +355,8 @@ development machine uses:
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 ```
 
-The verified local development target is a complete warm run under 60 seconds;
-this is a measured baseline, not a portable timeout assertion for every host.
+The Apple Silicon warm gate hard target is at most 60 seconds; CI lane timings are observational only, so this measured local target is not a portable timeout
+assertion for every host.
 
 ### GitHub Actions CI
 

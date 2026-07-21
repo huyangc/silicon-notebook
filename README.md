@@ -37,6 +37,7 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 
 ## Architecture Boundaries
 
+- Backend endpoint bodies live in domain FastAPI routers composed by `backend/app/api/routes.py`; the aggregate owns composition and compatibility exports, not product handlers. Domain Pydantic models live under `backend/app/models/`; `backend/app/models/schemas.py` is a legacy compatibility facade that re-exports the same model objects for old imports.
 - `SQLiteRepository` is the compatibility facade over a composed `RepositoryRuntime`. Application services do not assemble product SQL. Stores own product SQL and raw row selection; established application/query components may assemble domain/application projections such as `NotebookSummaryQuery.from_row`. Stores share one `SqliteDatabase` connection factory/write lock and one version-gated `SqliteMigrator`, while services retain sequencing and policy. Every facade operation is an explicit compatibility adapter or one of the source-checked one-hop delegates whose real target must match the ownership manifest. Consumers use executable, consumer-specific Protocols from `backend/app/repositories/ports.py`; dependencies point one way — facade → runtime → services → stores → SQLite — so a future PostgreSQL adapter replaces the store layer behind the same ports without touching callers. `sqlite_identity.py` and `sqlite_notebook_sharing.py` remain compatibility re-export shims, and the legacy request-context, `_COPY_CHUNK`, and `_remap_json_ids` exports stay importable.
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
@@ -50,8 +51,8 @@ reference-library mounts plus promotion targets (v20), and the normalized
 interactive-reformat anchor-membership expression index (v21); v22 adds durable
 notebook-scoped KG build jobs.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
-- Workspace HTTP ownership is split into `system-api.ts`, `notebook-api.ts`, `source-api.ts`, `ask-api.ts`, `knowledge-api.ts`, `report-api.ts`, and `kg-api.ts`. They all use `api-client.ts`; `page.tsx` retains state, stale-result guards, polling, and Blob URL lifecycle. `api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
-- Boundary regression tests prevent these responsibilities from being copied back into the monoliths. Future extraction should follow the same incremental pattern: preserve endpoints and user behavior, move one cohesive domain, then run the complete offline gate.
+- Workspace HTTP ownership is split into `system-api.ts`, `notebook-api.ts`, `source-api.ts`, `ask-api.ts`, `knowledge-api.ts`, `report-api.ts`, and `kg-api.ts`. The shared `frontend/app/api-client.ts` transport owns HTTP mechanics; domain modules retain endpoint policy. `page.tsx` retains state, stale-result guards, polling, and Blob URL lifecycle. `api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
+- Boundary regression tests use public HTTP contracts or explicit domain seams, never private aggregate helpers, source positions, line counts, or total route/model counts. Workspace-state hook extraction and FastAPI lifespan/application lifecycle composition remain separate debt.
 
 ## Deployment
 
@@ -1125,7 +1126,7 @@ Run:
 bash scripts/check.sh
 ```
 
-This is the complete offline local gate. It runs three bounded lanes concurrently: `check_backend.sh` executes the complete backend pytest suite; `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, `tsc --noEmit`, and the production frontend build. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly eleven tools: seven Memory tools plus four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
+This is the complete offline local gate. It runs three bounded lanes concurrently: `check_backend.sh` executes the complete backend pytest suite with default 9 backend pytest workers (override with `BACKEND_PYTEST_WORKERS`); `check_contracts.sh` executes syntax/dependency preflight, hermetic smoke paths, contract checks, and the deterministic extraction-scoring harness; `check_frontend.sh` executes every recursively discovered `*.test.mjs`, every `*.component.test.tsx`, `tsc --noEmit`, and the production frontend build. Each lane has its own process group, so interrupting or terminating the controller also terminates and reaps pytest, npm, and Next.js descendants. The official-client MCP smoke pins exactly eleven tools: seven Memory tools plus four knowhow tools. Missing `frontend/node_modules` is a hard failure rather than a silent skip.
 
 Use the project’s Homebrew/Miniconda interpreter for acceptance:
 
@@ -1133,7 +1134,7 @@ Use the project’s Homebrew/Miniconda interpreter for acceptance:
 PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.sh
 ```
 
-The current Apple Silicon development baseline is a complete warm gate under 60 seconds. This is a measured local target, not a portable timeout assertion for every CI host.
+The Apple Silicon warm gate hard target is at most 60 seconds. CI lane timings are observational only, so this measured local target is not a portable timeout assertion for every CI host.
 
 ### GitHub Actions CI
 

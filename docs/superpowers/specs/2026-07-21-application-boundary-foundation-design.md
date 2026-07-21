@@ -1,7 +1,7 @@
 # Application Boundary Foundation Design
 
 **Date:** 2026-07-21
-**Status:** Approved
+**Status:** Implemented
 **Scope:** FastAPI route boundaries, Pydantic model boundaries, and the shared frontend API client
 **Delivery:** One pull request from an isolated `codex/` worktree branch
 
@@ -32,6 +32,11 @@ reported `contracts=23s`, `backend=95s`, and `frontend=56s`. The test results ar
 green, but the backend lane means this observed baseline does not satisfy the
 existing local warm-gate target of 60 seconds. Implementation must remeasure this
 before broad movement and must not hide or worsen a reproducible timing regression.
+
+Implementation verification recorded two consecutive complete warm gates with
+every lane at or below the local 60-second target: `contracts/backend/frontend`
+were `14s/55s/23s`, then `12s/52s/20s`. These are local Apple Silicon
+measurements; CI lane timing remains observational rather than a portable timeout.
 
 ## 2. Goals
 
