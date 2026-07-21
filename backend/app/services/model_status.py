@@ -42,8 +42,6 @@ _CREDENTIAL_TOKEN_RE = re.compile(
 _VENDOR_KEY_TOKEN_RE = re.compile(
     r"(?i)(?:aiza|ghp_|hf_|xox)[A-Za-z0-9_-]{8,}"
 )
-_FQDN_RE = re.compile(r"(?i)(?:[a-z0-9-]+\.)+[a-z0-9-]+")
-_ENDPOINT_LABELS = frozenset({"api", "host", "server", "gateway", "localhost"})
 
 
 @dataclass(frozen=True)
@@ -320,16 +318,11 @@ def _display_model(value: object) -> str:
 
 
 def _has_endpoint_port(model: str) -> bool:
-    """Separate conventional ``namespace:tag`` from numeric endpoint ports."""
+    """Treat every valid numeric port as endpoint-like, never as a display tag."""
     if ":" not in model:
         return False
-    namespace, tag = model.rsplit(":", 1)
+    _, tag = model.rsplit(":", 1)
     if not tag.isdecimal():
         return False
     port = int(tag)
-    final_label = namespace.rsplit("/", 1)[-1].lower()
-    if 1024 <= port <= 65535:
-        return True
-    if not 1 <= port <= 65535:
-        return False
-    return final_label in _ENDPOINT_LABELS or bool(_FQDN_RE.fullmatch(final_label))
+    return 1 <= port <= 65535

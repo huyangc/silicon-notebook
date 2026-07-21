@@ -182,6 +182,8 @@ def test_snapshot_drops_unsafe_persisted_metadata(identity, user, settings):
         "host:80",
         "server:22",
         "gateway:443",
+        "intranet:80",
+        "custom-host:443",
         "model:65535",
         "model10.0.0.8",
         "modelsk-0123456789abcdefghijklmnop",
