@@ -560,7 +560,12 @@ and after the write, and invalidates only identities that actually changed;
 a no-op save preserves prior results, while inherited LLM variants are
 invalidated only when their resolved fallback changes. A changed configured
 service is then shown as untested until a new explicit check or an observed
-failure records a result.
+failure records a result. The three-state patch (`null`/omitted = unchanged,
+empty string = clear, non-empty string = set), persisted-settings read, all-six
+fingerprint comparison, settings write, and changed-status deletion run in one
+`BEGIN IMMEDIATE` transaction. Concurrent saves therefore serialize without
+losing disjoint field/role updates, and the local settings cache is invalidated
+only after commit.
 
 Open **模型服务** to inspect the effective saved configuration and test either
 one current service or every current effective service. The effective identity
@@ -598,6 +603,11 @@ it. An observed failure is persisted only if that fingerprint is still current;
 an in-flight request from a replaced configuration may still produce its
 sanitized Ask diagnostic, but cannot overwrite the replacement service's
 status. Unstamped test doubles likewise cannot persist provider health.
+Manual and observed results re-read persisted settings and conditionally run
+the monotonic UPSERT inside one `BEGIN IMMEDIATE` transaction. Thus an old
+result committed first is removed by the following settings transaction, an
+old result waiting behind a settings commit is skipped, and a valid result for
+the new identity waiting behind that commit survives.
 Per-service results are occurrence-ordered: a late database write cannot replace
 a newer check, and an observed/error result wins a same-time race with manual
 success.
