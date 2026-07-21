@@ -5,7 +5,7 @@ import { ArrowLeft, BarChart3, Check, ChevronRight, Database, Edit3, ExternalLin
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
-import { takeNdjsonLines, type AskStreamEvent, type ReasoningTraceStep } from "./ask-stream";
+import type { ReasoningTraceStep } from "./ask-stream";
 import { AnswerView, LatexText, ReasoningTracePanel } from "./answer-panel";
 import { MemoryPanel, MemorySaveDialog } from "./memory-panel";
 import { KnowhowPanel } from "./knowhow-panel";
@@ -83,8 +83,17 @@ import {
 } from "./notebook-creation";
 import { fetchEdgeReviewQueue, reviewRelation, type EdgeReviewItem } from "./edge-review-queue";
 import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup";
-import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
-import { humanizedError, logDiagnostic, throwHumanizedHttpError, toUserMessage } from "./errors.ts";
+import { fetchMe, logoutUser, type AuthUser } from "./auth";
+import { API_BASE } from "./api-config";
+import { clearToken, getToken } from "./auth-session";
+import { logDiagnostic, toUserMessage } from "./errors.ts";
+import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
+import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, searchNotebook, updateNotebook } from "./notebook-api";
+import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob } from "./source-api";
+import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, renameConversation, runAskStream, submitFeedback as submitAnswerFeedback } from "./ask-api";
+import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
+import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
+import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
 import {
   MODEL_ROLES, type ModelRole, type ServiceForm,
   buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
@@ -382,72 +391,7 @@ function isAbortError(error: unknown): boolean {
 }
 
 
-async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const method = (options.method || "GET").toUpperCase();
-  const started = performance.now();
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: options.body instanceof FormData ? { ...authHeaders(), ...(options.headers || {}) } : { "Content-Type": "application/json", ...authHeaders(), ...(options.headers || {}) },
-    ...options
-  });
-  const elapsed = Math.round(performance.now() - started);
-  const requestId = response.headers.get("X-Request-Id") || "";
-  // Browser-side trace mirroring the backend request log (DevTools console).
-  console.debug(`[api] ${method} ${path} -> ${response.status} ${elapsed}ms${requestId ? ` (${requestId})` : ""}`);
-  if (response.status === 401 && getToken()) {
-    clearToken();
-    if (typeof window !== "undefined") window.location.reload();
-  }
-  // 原始诊断(状态码 + statusText + 后端 detail + requestId)只进 console 供排查;
-  // 面向用户只抛人话。收口在 errors.ts。
-  if (!response.ok) await throwHumanizedHttpError(response, "api");
-  if (response.status === 204) {
-    return null as T;
-  }
-  return response.json();
-}
-
 // ---- 启动就绪门 ----
-// 后端重启后会在后台先跑迁移 + 缓存预热,期间对所有应用路由(含登录/ /me)返回 503。
-// 匿名探针 /api/ready 恒返回就绪快照;就绪前展示「服务启动中」而非登录表单或空白挂起。
-type ReadySnapshot = {
-  ready: boolean;
-  phase: "starting" | "migrating" | "warming" | "ready" | "error";
-  detail?: string;
-  warmed_notebooks?: number;
-  total_notebooks?: number;
-  error?: string | null;
-};
-
-// 探针绝不抛错:网络异常 / 非 2xx(503) / 解析失败一律视为「未就绪,继续轮询」。
-// URL 复用 API_BASE(已含 /api),命中 `${API_BASE}/ready` = .../api/ready(不会产生 /api/api)。
-async function probeReady(): Promise<ReadySnapshot | null> {
-  try {
-    const res = await fetch(`${API_BASE}/ready`, {
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store",
-    });
-    let body: Partial<ReadySnapshot> | null = null;
-    try { body = await res.json(); } catch { body = null; }
-    const snapshot: ReadySnapshot = !res.ok || !body
-      // 503(应用路由仍在预热)或解析失败:尽量沿用 body 中的进度字段。
-      ? {
-          ready: false,
-          phase: (body?.phase as ReadySnapshot["phase"]) ?? "starting",
-          detail: body?.detail,
-          warmed_notebooks: body?.warmed_notebooks,
-          total_notebooks: body?.total_notebooks,
-          error: body?.error ?? null,
-        }
-      : (body as ReadySnapshot);
-    // 后端把启动失败写成 `f"{type(exc).__name__}: {exc}"`(services/startup_warmup.py)
-    // ——`OperationalError: database is locked` 这种不该出现在启动屏上。原文在
-    // 这条 I/O 边界上落 console(和 readHttpError 一样的位置),界面只给稳定中文。
-    if (snapshot.error) logDiagnostic("ready", snapshot.error);
-    return snapshot;
-  } catch {
-    return null;   // 网络错误:后端还没起来,继续轮询
-  }
-}
 
 // 依据就绪快照给出一句克制、不惊扰的中文阶段文案。
 function startupPhaseText(snap: ReadySnapshot | null): string {
@@ -486,166 +430,12 @@ function StartingScreen({ snapshot, onRetry }: { snapshot: ReadySnapshot | null;
   );
 }
 
-async function readAskStream<TResponse>(
-  path: string,
-  payload: unknown,
-  onProgress: (step: ReasoningTraceStep) => void | Promise<void>,
-  signal?: AbortSignal,
-  onStart?: (jobId: string) => void,
-): Promise<TResponse> {
-  const started = performance.now();
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify(payload),
-    signal,
-  });
-  const elapsed = Math.round(performance.now() - started);
-  const requestId = response.headers.get("X-Request-Id") || "";
-  console.debug(`[api] POST ${path} -> ${response.status} ${elapsed}ms${requestId ? ` (${requestId})` : ""}`);
-  if (response.status === 401 && getToken()) {
-    clearToken();
-    if (typeof window !== "undefined") window.location.reload();
-  }
-  // 原始诊断(状态码 + statusText + 后端 detail + requestId)只进 console 供排查;
-  // 面向用户只抛人话。收口在 errors.ts。
-  if (!response.ok) await throwHumanizedHttpError(response, "api");
-  if (!response.body) {
-    throw new Error("Streaming response body is unavailable");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let finalResponse: TResponse | null = null;
-
-  const yieldToPaint = () => new Promise<void>((resolve) => {
-    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
-      resolve();
-      return;
-    }
-    window.requestAnimationFrame(() => resolve());
-  });
-
-  const consumeLine = async (line: string) => {
-    const event = JSON.parse(line) as AskStreamEvent<TResponse>;
-    if (event.event === "started") {
-      onStart?.(event.job_id);
-    } else if (event.event === "progress") {
-      await onProgress(event.step);
-      await yieldToPaint();
-    } else if (event.event === "final") {
-      finalResponse = event.response;
-    } else if (event.event === "cancelled") {
-      throw new DOMException("已中断回答", "AbortError");  // 走 runAsk 的 isAbortError 干净分支
-    } else if (event.event === "error") {
-      // stream 事件走的是 NDJSON 正文,没有响应头,`event.error` 天然带不上出处
-      // 标记(后端写的是 f"{type(exc).__name__}: {exc}"),按出处模型一律不可信
-      // → 原文只进受限诊断出口。
-      //
-      // ⚠抛的必须是 humanizedError(带品牌),不能是裸 new Error(...)。裸 Error
-      // 会让外层 runAsk → reportError → toUserMessage 认不出这句已经安全化,
-      // 于是**再泛化一次**:「回答没能完成,请重试」被吃成全局兜底「服务出了
-      // 点问题」,而且这句安全文案还会被当成「未翻译的原始错误」多记一条诊断。
-      logDiagnostic("ask-stream", event.error);
-      throw humanizedError("回答没能完成，请重试");
-    } else {
-      const _exhaustive: never = event;   // union 新增 tag 未处理时 tsc 报错
-      throw new Error(`unknown ask stream event: ${JSON.stringify(_exhaustive)}`);
-    }
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parsed = takeNdjsonLines(buffer);
-    buffer = parsed.remainder;
-    for (const line of parsed.lines) {
-      await consumeLine(line);
-    }
-  }
-  buffer += decoder.decode();
-  if (buffer.trim()) {
-    await consumeLine(buffer.trim());
-  }
-  if (!finalResponse) {
-    throw new Error("Streaming response ended without a final answer");
-  }
-  return finalResponse;
-}
-
-const rebuildUnifiedKg = (nb: string) => api<{ clusters: number }>(`/notebooks/${nb}/unified-kg/rebuild`, { method: "POST" });
-type KgBuildStartResponse = {
-  status: string;
-  notebook_id: string;
-  job_id: string;
-};
-const buildKg = (nb: string) => api<KgBuildStartResponse>(`/notebooks/${nb}/kg/build`, { method: "POST" });
-const rebuildKg = (nb: string) => api<KgBuildStartResponse>(`/notebooks/${nb}/kg/rebuild`, { method: "POST" });
-const relinkKg = (nb: string) => api<{ isolated_before: number; edges_added: number; isolated_after: number }>(`/notebooks/${nb}/kg/relink`, { method: "POST" });
-
-// 深度报告(后台 job):类型见 report-view.tsx(与后端 ReportSummary/ReportDetail 对齐)。
-const createReport = (nb: string, question: string, depth: number) =>
-  api<{ report_id: string }>(`/notebooks/${nb}/reports`, { method: "POST", body: JSON.stringify({ question, depth }) });
-const listReports = (nb: string) => api<ReportSummaryT[]>(`/notebooks/${nb}/reports`);
-const getReport = (nb: string, rid: string) => api<ReportDetailT>(`/notebooks/${nb}/reports/${rid}`);
-const cancelReport = (nb: string, rid: string) =>
-  api<{ status: string }>(`/notebooks/${nb}/reports/${rid}/cancel`, { method: "POST" });
-const deleteReport = (nb: string, rid: string) =>
-  api<{ status: string }>(`/notebooks/${nb}/reports/${rid}`, { method: "DELETE" });
-// 两阶段:PATCH 覆盖编辑后的大纲(仅 outline_ready 可改),POST 从 outline_ready 起生成 job。
-const updateReportOutline = (nb: string, rid: string, sections: unknown[]) =>
-  api<{ status: string; sections: number }>(`/notebooks/${nb}/reports/${rid}/outline`, { method: "PATCH", body: JSON.stringify({ sections }) });
-const generateReport = (nb: string, rid: string, depth?: number) =>
-  api<{ status: string }>(`/notebooks/${nb}/reports/${rid}/generate`, { method: "POST", body: JSON.stringify(depth != null ? { depth } : {}) });
-// 批量导出返回 zip 二进制(非 JSON),api<T> 会 .json() 解析故不适用;
-// 走原始 fetch,复用 API_BASE + authHeaders()(与 api()/readAskStream 同款认证),
-// ok 时取 blob 触发下载,非 ok 抛出后端错误详情(如 422)。
-async function downloadReportsZip(nb: string, reportIds: string[]): Promise<void> {
-  const response = await fetch(`${API_BASE}/notebooks/${nb}/reports/export`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    body: JSON.stringify({ report_ids: reportIds }),
-  });
-  if (response.status === 401 && getToken()) {
-    clearToken();
-    if (typeof window !== "undefined") window.location.reload();
-  }
-  // 原始诊断(状态码 + statusText + 后端 detail + requestId)只进 console 供排查;
-  // 面向用户只抛人话。收口在 errors.ts。
-  if (!response.ok) await throwHumanizedHttpError(response, "api");
-  const blob = await response.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "reports.zip";
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-const rebuildScaleIndex = (nb: string, when: "now" | "idle" = "now", mode: "auto" | "fold" | "full" = "auto") =>
-  api<{ status: string; notebook_id: string }>(`/notebooks/${nb}/scale-index/rebuild`, { method: "POST", body: JSON.stringify({ when, mode }) });
 // 取消检索索引构建:排队中→出队(cancelled:true);构建中→不可协作打断(cancelled:false,
 // reason:"building_not_interruptible",前端应提示「正在构建,完成后自动更新」)。
-const cancelScaleIndex = (nb: string) =>
-  api<{ cancelled: boolean; state: string; reason: string }>(`/notebooks/${nb}/scale-index/cancel`, { method: "POST" });
-const fetchScaleIndexStatus = (nb: string) => api<ScaleIndexStatus>(`/notebooks/${nb}/scale-index/status`);
 
 // 三系统构建状态聚合(kg=抽取/unified_kg=概念合并/scale_index=检索索引)——镜像后端
 // index_status() 的返回形状(backend/app/services/sqlite_repository.py)。scale_index
 // 原样复用既有 ScaleIndexStatus 类型,避免重复定义漂移。
-type IndexStatus = {
-  kg: {
-    ready: boolean;
-    building: boolean;
-    pending_sources: number;
-    job: KgBuildJobStatus | null;
-  };
-  unified_kg: { dirty: boolean; building: boolean; last_rebuild_at: string };
-  scale_index: ScaleIndexStatus;
-};
-const fetchIndexStatus = (nb: string) => api<IndexStatus>(`/notebooks/${nb}/index-status`);
 
 // confirmIndexAction 移到组件内部(见 Home() 内定义)——需要闭包 setInfoModal 才能弹
 // 定制样式弹窗,放在模块级够不到 state。
@@ -661,8 +451,6 @@ function formatRelativeTime(iso: string): string {
   return new Date(then).toLocaleDateString();
 }
 // limit>0 只取连接度最高的前 N 个节点(核心子图，避免大图卡顿)；limit=0 取全量。
-const fetchUnifiedGraph = (nb: string, limit = 0) =>
-  api<UnifiedGraphResp>(`/notebooks/${nb}/unified-kg?level=object${limit > 0 ? `&limit=${limit}` : ""}`);
 // 图谱范围档位：核心 80 / 160 / 320 / 全部(0)。打开图谱默认从核心 80 起。
 const KG_RANGE_DEFAULT = 80;
 const KG_RANGE_STEPS: Array<{ value: number; label: string }> = [
@@ -672,26 +460,7 @@ const KG_RANGE_STEPS: Array<{ value: number; label: string }> = [
   { value: 0, label: "全部" },
 ];
 // 服务端搜索：FTS5 + ANN 混合，返回命中列表（不再客户端拉全量图）。命中数由服务端 k 参数控制。
-const fetchKgSearch = (nb: string, q: string, k = 30) => api<KgSearchResp>(`/notebooks/${nb}/kg/search?q=${encodeURIComponent(q)}&k=${k}`);
 // 逐跳展开：返回指定节点的邻居节点+边（bounded）。
-const fetchKgNeighbors = (nb: string, oid: string, cap = 50) => api<KgNeighborsResp>(`/notebooks/${nb}/objects/${encodeURIComponent(oid)}/neighbors?cap=${cap}`);
-const fetchConceptDetail = (nb: string, cid: string) => api<ConceptDetailResp>(`/notebooks/${nb}/concepts/${encodeURIComponent(cid)}/detail`);
-const fetchNodeContext = (nb: string, oid: string) => api<NodeContext>(`/notebooks/${nb}/objects/${encodeURIComponent(oid)}/context`);
-const fetchPendingMerges = (nb: string) => api<PendingMerge[]>(`/notebooks/${nb}/unified-kg/pending-merges`);
-const fetchUnifiedKgStatus = (nb: string) => api<UnifiedKgStatus>(`/notebooks/${nb}/unified-kg/status`);
-const confirmMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/confirm`, { method: "POST" });
-const rejectMergeApi = (nb: string, cid: string) => api<{ ok: boolean }>(`/notebooks/${nb}/unified-kg/merges/${encodeURIComponent(cid)}/reject`, { method: "POST" });
-const reviewPendingMergesApi = (nb: string) =>
-  api<MergeReviewSummary>(`/notebooks/${nb}/unified-kg/merges/review`, {
-    method: "POST",
-    body: JSON.stringify({ limit: 50 }),
-  });
-const reviewAllMergesApi = (nb: string) =>
-  api<{ status: string }>(`/notebooks/${nb}/unified-kg/merges/review-all`, { method: "POST" });
-const fetchMergeReviewJob = (nb: string) =>
-  api<MergeReviewJob>(`/notebooks/${nb}/unified-kg/merges/review-job`);
-const fetchAskJob = (nb: string, jobId: string) =>
-  api<AskJobDetail>(`/notebooks/${nb}/ask/jobs/${jobId}`);
 
 function formatFileSize(size: number): string {
   if (!size) return "metadata only";
@@ -1049,7 +818,7 @@ export default function Home() {
         if (!stillOwned()) return;
         setTrackedKgJobId(started.job_id);
         setToast("已开始整理知识图谱；完成后会自动更新");
-        api<NotebookSummary>(`/notebooks/${nb}`)
+        getNotebook(nb)
           .then((refreshed) => {
             if (stillOwned()) {
               setCurrentNotebook(refreshed);
@@ -1095,7 +864,7 @@ export default function Home() {
           if (!stillOwned()) return;
           setTrackedKgJobId(started.job_id);
           setToast("已开始全部重新分析；完成后会自动更新");
-          api<NotebookSummary>(`/notebooks/${nb}`)
+          getNotebook(nb)
             .then((refreshed) => {
               if (stillOwned()) {
                 setCurrentNotebook(refreshed);
@@ -1144,7 +913,7 @@ export default function Home() {
     let cancelled = false;
     const poll = window.setInterval(async () => {
       try {
-        const refreshed = await api<NotebookSummary>(`/notebooks/${nb}`);
+        const refreshed = await getNotebook(nb);
         if (cancelled) return;
         setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
         const tracked = reconcileTrackedKgPoll(
@@ -1178,7 +947,7 @@ export default function Home() {
     let cancelled = false;
     const poll = window.setInterval(async () => {
       try {
-        const refreshed = await api<NotebookSummary>(`/notebooks/${nb}`);
+        const refreshed = await getNotebook(nb);
         if (cancelled) return;
         if (!refreshed.paper_meta_backfilling) {
           setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
@@ -1271,7 +1040,7 @@ export default function Home() {
         setIndexStatus(s);
         setScaleIndexStatus(s.scale_index);
         if (buildingKg && !s.kg.building) {
-          api<NotebookSummary>(`/notebooks/${nb}`)
+          getNotebook(nb)
             .then((refreshed) => {
               if (cancelled) return;
               setCurrentNotebook((cur) => (
@@ -1310,7 +1079,7 @@ export default function Home() {
       // 那是待确认中心铃铛(paper_meta_done 事件)的职责,聚合 poll 与主 poll
       // 保持一致(见 :984-1009 独立 backfill poll)。
       if (backfillingMeta) {
-        api<NotebookSummary>(`/notebooks/${nb}`).then((refreshed) => {
+        getNotebook(nb).then((refreshed) => {
           if (cancelled) return;
           if (!refreshed.paper_meta_backfilling) {
             setCurrentNotebook((cur) => (cur && cur.id === nb ? refreshed : cur));
@@ -1513,14 +1282,7 @@ export default function Home() {
     memoryLinksAbortRef.current = controller;
     collectSavedAnswerFlags(
       batches,
-      (batch) => api<{ links: Record<string, string> }>(
-        `/notebooks/${notebookId}/answer-memory-links`,
-        {
-          method: "POST",
-          body: JSON.stringify({ answer_ids: batch }),
-          signal: controller.signal,
-        },
-      ),
+      (batch) => fetchAnswerMemoryLinks(notebookId, batch, controller.signal),
       controller.signal,
     )
       .then((savedFlags) => {
@@ -1550,7 +1312,7 @@ export default function Home() {
     let seen = reconnectJob.seen;
     const poll = window.setInterval(async () => {
       try {
-        const d = await fetchAskJob(nb, jobId);
+        const d = await getAskJob(nb, jobId);
         if (cancelled) return;
         const fresh = newTraceSteps(d.trace ?? [], seen);
         if (fresh.length) { seen += fresh.length; setPendingTrace((prev) => [...prev, ...fresh]); }
@@ -1747,7 +1509,7 @@ export default function Home() {
     const timer = window.setTimeout(() => {
       Promise.all(
         notebooks.map(async (notebook) => {
-          const response = await api<{ hits: SearchHit[] }>(`/notebooks/${notebook.id}/search?q=${encodeURIComponent(searchQuery)}`);
+          const response = await searchNotebook(notebook.id, searchQuery);
           return [notebook.id, response.hits] as const;
         })
       )
@@ -1893,7 +1655,7 @@ export default function Home() {
       setStatusText(`正在处理来源（已 ${elapsedSec}s · ${pending.length} 个）`);
       try {
         const updated = await Promise.all(
-          pending.map((source) => api<SourceSummary>(`/sources/${source.id}`))
+          pending.map((source) => getSource(source.id))
         );
         if (cancelled) return;
         const reachedExtracted = updated.some((item) => {
@@ -1924,7 +1686,7 @@ export default function Home() {
         }
         if (reachedExtracted && currentNotebookId) {
           await loadNotebookCollection();
-          const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
+          const refreshed = await getNotebook(currentNotebookId);
           if (!cancelled) setCurrentNotebook(refreshed);
         }
       } catch (error) {
@@ -2193,8 +1955,8 @@ export default function Home() {
   }, [fgData.nodes, kgViewOpen, pendingKgFocusId]);
 
   async function loadNotebookCollection() {
-    const healthResponse = await api<Health>("/health");
-    const notebookResponse = await api<NotebookSummary[]>("/notebooks");
+    const healthResponse = await fetchHealth();
+    const notebookResponse = await listNotebooks();
     setHealth(healthResponse);
     setStatusText(
       healthResponse.status !== "ok"
@@ -2205,17 +1967,14 @@ export default function Home() {
     );
     setNotebooks(notebookResponse);
     if (docTypeOptions.length === 0) {
-      api<Array<{ id: string; label: string }>>("/doc-types")
+      fetchDocumentTypes()
         .then(setDocTypeOptions)
         .catch(() => undefined);
     }
   }
 
   async function openCreate() {
-    const notebook = await api<NotebookSummary>("/notebooks", {
-      method: "POST",
-      body: JSON.stringify(defaultNotebookPayload())
-    });
+    const notebook = await createNotebook(defaultNotebookPayload());
     await loadNotebookCollection();
     await openNotebook(notebook.id);
     setStagedFiles([]);
@@ -2224,10 +1983,7 @@ export default function Home() {
   }
 
   async function submitCreate() {
-    const notebook = await api<NotebookSummary>("/notebooks", {
-      method: "POST",
-      body: JSON.stringify(namedNotebookPayload(createName, createDesc))
-    });
+    const notebook = await createNotebook(namedNotebookPayload(createName, createDesc));
     setCreateOpen(false);
     await loadNotebookCollection();
     await openNotebook(notebook.id);
@@ -2243,9 +1999,7 @@ export default function Home() {
     const pageNum = opts.page ?? 0;
     const q = opts.q ?? sourceQuery;
     const offset = pageNum * SOURCES_PAGE_SIZE;
-    const result = await api<PaginatedSources>(
-      `/notebooks/${notebookId}/sources?offset=${offset}&limit=${SOURCES_PAGE_SIZE}&q=${encodeURIComponent(q)}`,
-    );
+    const result = await listSources(notebookId, offset, SOURCES_PAGE_SIZE, q);
     // 后台轮询发起的刷新可能在途期间用户已切库/切会话——那时落状态会把新库的
     // 来源列表覆盖成旧库的。guard 由调用方按房内 workspaceEpoch 约定给出;
     // 不传 guard 的调用方(用户主动翻页/搜索)行为与此前逐字一致。
@@ -2274,8 +2028,8 @@ export default function Home() {
     setMemoryAnswerId(null);
     setMemorySavedAnswers({});
     const [notebook, sourcesPage] = await Promise.all([
-      api<NotebookSummary>(`/notebooks/${notebookId}`),
-      api<PaginatedSources>(`/notebooks/${notebookId}/sources?offset=0&limit=${SOURCES_PAGE_SIZE}`)
+      getNotebook(notebookId),
+      listSources(notebookId, 0, SOURCES_PAGE_SIZE)
     ]);
     if (workspaceEpochRef.current !== workspaceEpoch) return false;
     activeNotebookIdRef.current = notebookId;
@@ -2368,10 +2122,7 @@ export default function Home() {
 
   async function submitFeedback(answerId: string, rating: "useful" | "not_useful", comment: string) {
     if (!answerId) return;
-    await api(`/answers/${answerId}/feedback`, {
-      method: "POST",
-      body: JSON.stringify({ rating, comment })
-    });
+    await submitAnswerFeedback(answerId, rating, comment);
     setFeedbackSent((prev) => ({ ...prev, [answerId]: rating }));
     setToast("感谢反馈");
   }
@@ -2420,7 +2171,7 @@ export default function Home() {
     setToast("已保存到记忆");
     await loadNotebookCollection();
     if (currentNotebookId) {
-      const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
+      const refreshed = await getNotebook(currentNotebookId);
       if (activeNotebookIdRef.current === currentNotebookId) setCurrentNotebook(refreshed);
     }
   }
@@ -2432,10 +2183,7 @@ export default function Home() {
     if (nextName === currentNotebook.name) return;
     setTitleSaveInFlight(true);
     try {
-      const updated = await api<NotebookSummary>(`/notebooks/${currentNotebook.id}`, {
-        method: "PATCH",
-        body: JSON.stringify({ name: nextName })
-      });
+      const updated = await updateNotebook(currentNotebook.id, { name: nextName });
       setCurrentNotebook(updated);
       setTitleDraft(updated.name);
       await loadNotebookCollection();
@@ -2465,9 +2213,7 @@ export default function Home() {
     const formData = new FormData(event.currentTarget);
     const splitLines = (value: string) =>
       value.split(/[\n;,，；]/).map((s) => s.trim()).filter(Boolean);
-    await api<NotebookSummary>(`/notebooks/${editingNotebook.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({
+    await updateNotebook(editingNotebook.id, {
         name: formData.get("name"),
         purpose: formData.get("purpose"),
         primary_domain: formData.get("primary_domain"),
@@ -2476,12 +2222,11 @@ export default function Home() {
         expected_questions: splitLines(String(formData.get("expected_questions") || "")),
         source_types: splitLines(String(formData.get("source_types") || "")),
         taxonomy: splitLines(String(formData.get("taxonomy") || ""))
-      })
-    });
+      });
     // 参考库挂载在同一次保存里一并写(全量替换);随后重新拉一次 notebook——PATCH 的
     // 响应是挂载写之前的快照,base_notebooks/base_kg_available 要靠这次重拉才最新。
     const bases = await setBases(editingNotebook.id, mountedIds);
-    const updated = await api<NotebookSummary>(`/notebooks/${editingNotebook.id}`);
+    const updated = await getNotebook(editingNotebook.id);
     setEditingNotebook(null);
     if (currentNotebookId === updated.id) {
       setCurrentNotebook(updated);
@@ -2503,7 +2248,7 @@ export default function Home() {
 
   async function confirmDeleteNotebook() {
     if (!deleteNotebook) return;
-    await api<null>(`/notebooks/${deleteNotebook.id}`, { method: "DELETE" });
+    await deleteNotebookRequest(deleteNotebook.id);
     if (currentNotebookId === deleteNotebook.id) {
       showCollection();
     }
@@ -2556,10 +2301,7 @@ export default function Home() {
       const items = await Promise.all(
         textFiles.map(async (file) => ({ name: file.name, sample: await file.slice(0, 8000).text() }))
       );
-      const results = await api<Array<{ name: string; doc_type_id: string }>>("/detect-doc-types", {
-        method: "POST",
-        body: JSON.stringify({ items })
-      });
+      const results = await detectSourceTypes(items);
       const byName: Record<string, string> = {};
       results.forEach((r) => { if (r.doc_type_id) byName[r.name] = r.doc_type_id; });
       if (Object.keys(byName).length === 0) return;
@@ -2588,10 +2330,7 @@ export default function Home() {
     const formData = new FormData();
     stagedFiles.forEach((file) => formData.append("files", file));
     stagedDocTypes.forEach((dt) => formData.append("doc_types", dt));
-    const uploaded = await api<SourceSummary[]>(`/notebooks/${currentNotebookId}/sources`, {
-      method: "POST",
-      body: formData
-    });
+    const uploaded = await uploadSources(currentNotebookId, formData);
     setSources((previous) => [...previous.filter((source) => !uploaded.some((item) => item.id === source.id)), ...uploaded]);
     setSourcesTotal((t) => t + uploaded.length);
     await loadNotebookCollection();
@@ -2611,10 +2350,7 @@ export default function Home() {
     setUrlBusy(true);
     setUrlRejected([]);
     try {
-      const result = await api<{ created: SourceSummary[]; rejected: Array<{ url: string; reason: string }> }>(
-        `/notebooks/${currentNotebookId}/sources/url`,
-        { method: "POST", body: JSON.stringify({ urls }) }
-      );
+      const result = await importUrlSources(currentNotebookId, urls);
       if (result.created.length > 0) {
         setSources((previous) => [
           ...previous.filter((source) => !result.created.some((item) => item.id === source.id)),
@@ -2637,8 +2373,8 @@ export default function Home() {
 
   async function openSourceDetail(source: SourceSummary) {
     const [detail, elements] = await Promise.all([
-      api<SourceSummary>(`/sources/${source.id}`),
-      api<SourceElement[]>(`/sources/${source.id}/elements`)
+      getSource(source.id),
+      getSourceElements(source.id)
     ]);
     setSourceDetail(detail);
     setSourceElements(elements);
@@ -2646,7 +2382,7 @@ export default function Home() {
 
   async function reparseSource() {
     if (!sourceDetail) return;
-    const updated = await api<SourceSummary>(`/sources/${sourceDetail.id}/parse`, { method: "POST" });
+    const updated = await parseSource(sourceDetail.id);
     setSources((previous) => previous.map((source) => source.id === updated.id ? updated : source));
     await openSourceDetail(updated);
     await loadNotebookCollection();
@@ -2666,7 +2402,7 @@ export default function Home() {
 
   async function deleteSource(source: SourceSummary) {
     const notebookId = currentNotebookId ?? source.notebook_id;
-    await api<null>(`/sources/${source.id}`, { method: "DELETE" });
+    await deleteSourceRequest(source.id);
     setSources((previous) => previous.filter((item) => item.id !== source.id));
     setSourcesTotal((t) => Math.max(0, t - 1));
     if (sourceDetail?.id === source.id) {
@@ -2674,7 +2410,7 @@ export default function Home() {
       setSourceElements([]);
     }
     await loadNotebookCollection();
-    const refreshed = await api<NotebookSummary>(`/notebooks/${notebookId}`);
+    const refreshed = await getNotebook(notebookId);
     setCurrentNotebook(refreshed);
     setKnowledge(EMPTY_KNOWLEDGE);
     setDuplicates(null);
@@ -2713,8 +2449,8 @@ export default function Home() {
     askNotebookIdRef.current = notebookId;
     try {
       const payload = { question: q, conversation_id: conversationId ?? undefined, mode: askMode };
-      const response = await readAskStream<AskResponse>(
-        `/notebooks/${notebookId}/ask/stream`,
+      const response = await runAskStream<AskResponse>(
+        notebookId,
         payload,
         (step) => {
           if (ownsRun()) setPendingTrace((previous) => [...previous, step]);
@@ -2726,7 +2462,7 @@ export default function Home() {
           if (cancelRequestedRef.current) {
             // started 落地前已点过「停止」:jobId 当时还不存在,补打 cancel 端点真取消 worker。
             cancelRequestedRef.current = false;
-            api(`/notebooks/${notebookId}/ask/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => {});
+            cancelAskJob(notebookId, jobId).catch(() => {});
           }
         },
       );
@@ -2762,7 +2498,7 @@ export default function Home() {
     // 显式取消 = 打 cancel 端点(真取消后端 worker),再 abort 本地流(立即停读)。
     // 离开/刷新页面不会走这里,故 worker 会继续跑到完(WS2a 的核心)。
     if (jobId && nb) {
-      api(`/notebooks/${nb}/ask/jobs/${jobId}/cancel`, { method: "POST" }).catch(() => {});
+      cancelAskJob(nb, jobId).catch(() => {});
     } else {
       // started 事件还没落地,jobId 未知:记下意图,onStart 拿到 jobId 后补打 cancel(见 runAsk)。
       cancelRequestedRef.current = true;
@@ -2775,7 +2511,7 @@ export default function Home() {
     expectedWorkspaceEpoch = workspaceEpochRef.current,
   ): Promise<ConversationSummary[] | null> {
     if (!notebookId) return null;
-    const list = await api<ConversationSummary[]>(`/notebooks/${notebookId}/conversations`);
+    const list = await listConversations(notebookId);
     if (
       activeNotebookIdRef.current !== notebookId
       || workspaceEpochRef.current !== expectedWorkspaceEpoch
@@ -2788,7 +2524,7 @@ export default function Home() {
   // 自己的 epoch(openSession 新推一个、openNotebook 沿用自己的),内核只做校验。
   // 这是 openNotebook 能复用它而不自撞守卫的唯一原因。
   async function applySessionDetail(id: string, expectedWorkspaceEpoch: number) {
-    const detail = await api<ConversationDetail>(`/conversations/${id}`);
+    const detail = await getConversation(id);
     if (workspaceEpochRef.current !== expectedWorkspaceEpoch) return;
     setTurns(detail.turns.map((turn) => ({ question: turn.question, response: turn.response })));
     setAskMode(modeFromTurn(detail.turns[detail.turns.length - 1]));
@@ -2852,7 +2588,7 @@ export default function Home() {
   }
 
   async function deleteSession(id: string) {
-    await api(`/conversations/${id}`, { method: "DELETE" });
+    await deleteConversation(id);
     if (id === conversationId) {
       setTurns([]);
       setConversationId(null);
@@ -2889,10 +2625,7 @@ export default function Home() {
   }
 
   async function bulkCleanup(days: number, victims: ConversationSummary[]) {
-    const { deleted } = await api<{ deleted: number }>(
-      `/notebooks/${currentNotebookId}/conversations?older_than_days=${days}`,
-      { method: "DELETE" },
-    );
+    const { deleted } = await bulkDeleteConversations(currentNotebookId ?? "", days);
     if (conversationId && victims.some((s) => s.id === conversationId)) {
       setTurns([]);
       setConversationId(null);
@@ -2917,7 +2650,7 @@ export default function Home() {
       setRenamingSessionId(null);
       return;
     }
-    await api(`/conversations/${sessionId}`, { method: "PATCH", body: JSON.stringify({ title: next }) });
+    await renameConversation(sessionId, next);
     await loadSessions(currentNotebookId);
     setRenamingSessionId(null);
     setToast("会话已重命名");
@@ -2928,9 +2661,7 @@ export default function Home() {
     if (!currentNotebookId) return;
     const pageNum = opts.page ?? 0;
     const statusParam = (opts.status && opts.status !== "all") ? opts.status : "";
-    const result = await api<PaginatedKnowledge>(
-      `/notebooks/${currentNotebookId}/knowledge?type=${encodeURIComponent(kind)}&status=${encodeURIComponent(statusParam)}&offset=${pageNum * 50}&limit=50`
-    );
+    const result = await listKnowledge(currentNotebookId, kind, statusParam, pageNum * 50, 50);
     const items: KnowledgeItem[] = result.items.map((record) => ({
       id: record.id,
       status: record.status,
@@ -2948,20 +2679,18 @@ export default function Home() {
 
   async function loadKnowledgeTypes() {
     if (!currentNotebookId) return;
-    const types = await api<KnowledgeTypeCount[]>(
-      `/notebooks/${currentNotebookId}/knowledge-types`
-    );
+    const types = await listKnowledgeTypes(currentNotebookId);
     setKnowledgeTypes(types);
     return types;
   }
 
   async function updateKnowledge(id: string, patch: { status?: string; owner?: string }) {
     if (!currentNotebookId) return;
-    await api(`/notebooks/${currentNotebookId}/knowledge/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
+    await updateKnowledgeRecord(currentNotebookId, id, patch);
     await loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: 0 });
     await loadKnowledgeTypes();
     await loadNotebookCollection();
-    const refreshed = await api<NotebookSummary>(`/notebooks/${currentNotebookId}`);
+    const refreshed = await getNotebook(currentNotebookId);
     setCurrentNotebook(refreshed);
     setToast("知识已更新");
   }
@@ -2975,18 +2704,13 @@ export default function Home() {
 
   async function findDuplicates(kind: KnowledgeKind) {
     if (!currentNotebookId) return;
-    const response = await api<DuplicateGroup[]>(
-      `/notebooks/${currentNotebookId}/duplicates?type=${encodeURIComponent(kind)}`
-    );
+    const response = await findKnowledgeDuplicates(currentNotebookId, kind);
     setDuplicates(response);
   }
 
   async function mergeKnowledge(sourceId: string, intoId: string) {
     if (!currentNotebookId) return;
-    await api(`/notebooks/${currentNotebookId}/knowledge/${sourceId}/merge`, {
-      method: "POST",
-      body: JSON.stringify({ into_id: intoId })
-    });
+    await mergeKnowledgeRecords(currentNotebookId, sourceId, intoId);
     await loadKnowledge(knowledgeKind, { status: knowledgeStatusFilter, page: 0 });
     await loadKnowledgeTypes();
     await findDuplicates(knowledgeKind);
@@ -3015,11 +2739,9 @@ export default function Home() {
     setContentOverviewLoading(true);
     setContentOverviewError("");
     const loads = startAnalyticsLoads({
-      analytics: () => api<NotebookAnalytics>(`/notebooks/${nb}/analytics`),
+      analytics: () => fetchNotebookAnalytics(nb),
       indexStatus: () => fetchIndexStatus(nb),
-      contentOverview: () => api<NotebookContentOverview>(
-        `/notebooks/${nb}/analytics/content-overview`,
-      ),
+      contentOverview: () => fetchNotebookContentOverview(nb),
     });
     // 看板打开时经聚合端点一次拉齐三系统(kg/概念合并/检索索引)当前态(而非上次切库的
     // 快照),取代原先仅单独拉检索索引状态;顺带回填 scaleIndexStatus(供既有
@@ -3076,7 +2798,7 @@ export default function Home() {
   }
 
   async function loadSchemas() {
-    const response = await api<ObjectSchema[]>(`/object-schemas`);
+    const response = await listObjectSchemas();
     setSchemas(response);
   }
 
@@ -3088,10 +2810,7 @@ export default function Home() {
   async function patchSchema(objectType: string, patch: Partial<ObjectSchema> & { status?: string }) {
     setSchemaBusy(true);
     try {
-      await api(`/object-schemas/${encodeURIComponent(objectType)}`, {
-        method: "PATCH",
-        body: JSON.stringify(patch)
-      });
+      await updateObjectSchema(objectType, patch);
       await loadSchemas();
       setToast("内容类型已更新");
     } finally {
@@ -3102,7 +2821,7 @@ export default function Home() {
   async function createSchema(payload: { object_type: string; label: string; fields: string[]; description: string }) {
     setSchemaBusy(true);
     try {
-      await api(`/object-schemas`, { method: "POST", body: JSON.stringify(payload) });
+      await createObjectSchema(payload);
       await loadSchemas();
       setToast("已新增类型");
     } finally {
@@ -3113,7 +2832,7 @@ export default function Home() {
   async function deleteSchema(objectType: string) {
     setSchemaBusy(true);
     try {
-      await api(`/object-schemas/${encodeURIComponent(objectType)}`, { method: "DELETE" });
+      await deleteObjectSchema(objectType);
       await loadSchemas();
       setToast("类型已删除");
     } finally {
@@ -3124,7 +2843,7 @@ export default function Home() {
   async function openGraph() {
     if (!currentNotebookId) return;
     setGraphOpen(true);
-    const response = await api<KnowledgeGraph>(`/notebooks/${currentNotebookId}/graph`);
+    const response = await getKnowledgeGraph(currentNotebookId);
     setGraph(response);
   }
 
@@ -3239,7 +2958,7 @@ export default function Home() {
     setKgReviewBusy(true);
     setToast("正在自动判重（约 1 分钟，请稍候）…");
     try {
-      const summary = await reviewPendingMergesApi(currentNotebookId);
+      const summary = await reviewMerges(currentNotebookId);
       setToast(`已判重 ${summary.reviewed} 项：合并 ${summary.confirmed}，分开 ${summary.rejected}，保留 ${summary.unsure}`);
       const [pend, status] = await Promise.all([
         fetchPendingMerges(currentNotebookId),
@@ -3255,7 +2974,7 @@ export default function Home() {
     if (!currentNotebookId) return;
     const nb = currentNotebookId;
     try {
-      await reviewAllMergesApi(nb);
+      await reviewAllMergesRequest(nb);
       setReviewAllJob({ status: "running", total: pendingMerges.length, done: 0, error: "" });
       setReviewAllRunning(true);
     } catch (err) { reportError(err); }
@@ -3307,8 +3026,8 @@ export default function Home() {
   async function decideMerge(candidate: PendingMerge, confirm: boolean) {
     if (!currentNotebookId) return;
     try {
-      if (confirm) await confirmMergeApi(currentNotebookId, candidate.id);
-      else await rejectMergeApi(currentNotebookId, candidate.id);
+      if (confirm) await confirmMerge(currentNotebookId, candidate.id);
+      else await rejectMerge(currentNotebookId, candidate.id);
       setPendingMerges((items) => withoutDecidedMerge(items, candidate));
       await rebuildUnifiedKg(currentNotebookId);
       const [g, pend] = await Promise.all([fetchUnifiedGraph(currentNotebookId, kgLimit), fetchPendingMerges(currentNotebookId)]);
@@ -3325,10 +3044,7 @@ export default function Home() {
     if (!currentNotebookId) return;
     setSchemaBusy(true);
     try {
-      const proposals = await api<ObjectSchema[]>(
-        `/notebooks/${currentNotebookId}/schema-proposals`,
-        { method: "POST" }
-      );
+      const proposals = await proposeObjectSchemas(currentNotebookId);
       await loadSchemas();
       setToast(proposals.length ? `归纳出 ${proposals.length} 个候选类型` : "未发现可补充的新类型（或未配置 LLM）");
     } finally {
@@ -3426,7 +3142,7 @@ export default function Home() {
     setLeaveBusy(true);
     try {
       await leaveNotebook(leftId);
-      const remaining = await api<NotebookSummary[]>("/notebooks");
+      const remaining = await listNotebooks();
       setNotebooks(remaining);
       const stillThere = remaining.some((n) => n.id === leftId);
       if (!stillThere) {
@@ -4002,10 +3718,7 @@ export default function Home() {
                       // 在 HTTP 往返几百毫秒内就被清 0,轮询 gate 从来没机会跑。
                       setBackfillingMeta(true);
                       try {
-                        const res = await api<{ queued: number }>(
-                          `/notebooks/${currentNotebookId}/paper-meta/backfill`,
-                          { method: "POST" }
-                        );
+                        const res = await backfillPaperMetadata(currentNotebookId);
                         if (res.queued === 0) {
                           setBackfillingMeta(false);
                           setToast("论文信息已是最新，无需补全");
@@ -6021,8 +5734,7 @@ function AuthedImage({ url, alt }: { url: string; alt: string }) {
     if (!url) return;
     let revoked = "";
     let alive = true;
-    fetch(url, { headers: authHeaders() })
-      .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
+    fetchInternalAssetBlob(url)
       .then((blob) => {
         if (!alive) return;
         revoked = URL.createObjectURL(blob);

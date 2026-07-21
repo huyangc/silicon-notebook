@@ -14,10 +14,6 @@ import {
 
 
 const APPROVED_BARE_STATUS_ERRORS = Object.freeze({
-  "page.tsx|<module>.AuthedImage|bare-status-error|Error": {
-    count: 1,
-    reason: "authenticated source image failures become a failed placeholder",
-  },
   "pending-center.tsx|<module>.usePendingActions.connect|bare-status-error|Error": {
     count: 1,
     reason: "stream status is internal reconnect control flow",
@@ -82,11 +78,11 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
     count: 1,
     reason: "source detail uses the field only to select fixed user copy",
   },
-  "page.tsx|<module>.probeReady|diagnostic|error": {
+  "system-api.ts|<module>.probeReady|diagnostic|error": {
     count: 3,
     reason: "startup diagnostics are captured in a snapshot and bounded logging",
   },
-  "page.tsx|<module>.readAskStream.consumeLine|diagnostic|error": {
+  "ask-api.ts|<module>.runAskStream.consumeLine|diagnostic|error": {
     count: 1,
     reason: "stream diagnostics are logged before a branded scenario error",
   },
@@ -294,11 +290,12 @@ test("user copy is not rewrapped or thrown without the humanized brand", async (
 
 test("critical catch boundaries call the shared humanization layer", async () => {
   const page = await parseModule("page.tsx");
+  const ask = await parseModule("ask-api.ts");
   const knowhow = await parseModule("knowhow-import-logic.ts");
 
   assert.ok(callsIn(findFunction(page, "reportError")).includes("toUserMessage"));
-  assert.ok(callsIn(findFunction(page, "readAskStream")).includes("humanizedError"));
-  assert.ok(callsIn(findFunction(page, "readAskStream")).includes("logDiagnostic"));
+  assert.ok(callsIn(findFunction(ask, "runAskStream")).includes("humanizedError"));
+  assert.ok(callsIn(findFunction(ask, "runAskStream")).includes("logDiagnostic"));
   assert.deepEqual(
     callsIn(findFunction(knowhow, "extractErrorMessage")),
     ["toUserMessage"],

@@ -144,6 +144,7 @@ Confirmed scope:
 
 - `frontend/` is the only frontend path. (The former static `web/` fallback has been removed.)
 - `frontend/app/page.tsx` is the workspace orchestrator. Keep shared workspace API/view models in `frontend/app/workspace-model.ts`, answer/citation/reasoning-trace UI in `frontend/app/answer-panel.tsx`, built-in KG labels/styles in `frontend/app/kg-type-model.ts`, and shared KG rendering in `frontend/app/kg-type-mark.tsx`; do not copy those implementations back into `page.tsx`.
+- HTTP endpoint ownership is in the seven `frontend/app/*-api.ts` domain clients (`system`, `notebook`, `source`, `ask`, `knowledge`, `report`, `kg`), all using `api-client.ts`. Keep page-owned state/effects/epochs/stale guards/polling and component-owned Blob URLs there; `api-boundary.test.mjs` semantically rejects direct production `fetch` outside `api-client.ts`.
 - Backend uses FastAPI.
 - Default local persistence is SQLite at `.local/silicon_notebook.db`, implemented with the Python standard library `sqlite3`.
 - Source files are stored under `SILICON_NOTEBOOK_STORAGE_DIR`, defaulting to `.local/storage`.
