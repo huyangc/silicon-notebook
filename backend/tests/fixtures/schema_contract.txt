@@ -324,6 +324,14 @@ merge_review_jobs.done|INTEGER|1|0|0
 merge_review_jobs.started_at|TEXT|1|''|0
 merge_review_jobs.updated_at|TEXT|1|''|0
 merge_review_jobs.error|TEXT|1|''|0
+model_service_status.user_id|TEXT|1|None|1
+model_service_status.service|TEXT|1|None|2
+model_service_status.config_fingerprint|TEXT|1|None|0
+model_service_status.status|TEXT|1|None|0
+model_service_status.latency_ms|INTEGER|1|0|0
+model_service_status.code|TEXT|1|''|0
+model_service_status.trigger|TEXT|1|None|0
+model_service_status.checked_at|TEXT|1|None|0
 notebook_assets.id|TEXT|0|None|1
 notebook_assets.notebook_id|TEXT|1|None|0
 notebook_assets.filename|TEXT|1|None|0
@@ -534,6 +542,7 @@ idx_memory_answer_once
 idx_memory_embeddings_model
 idx_memory_owner_notebook_status
 idx_memory_revisions_memory
+idx_model_service_status_user_checked
 idx_notebook_assets_nb
 idx_notebook_assets_source
 idx_notebook_bases_base

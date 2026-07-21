@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import secrets
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Sequence
 from uuid import uuid4
 
 from app.core.config import Settings
@@ -92,6 +92,70 @@ class IdentityStore:
                 (json.dumps(settings, ensure_ascii=False), _now(), user_id),
             )
         self.model_config_cache.pop(user_id, None)
+
+    def get_model_service_statuses(self, user_id: str) -> dict[str, dict[str, Any]]:
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT service, config_fingerprint, status, latency_ms, code, trigger, checked_at "
+                "FROM model_service_status WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
+        return {
+            row["service"]: {
+                "config_fingerprint": row["config_fingerprint"],
+                "status": row["status"],
+                "latency_ms": row["latency_ms"],
+                "code": row["code"],
+                "trigger": row["trigger"],
+                "checked_at": row["checked_at"],
+            }
+            for row in rows
+        }
+
+    def record_model_service_status(
+        self,
+        user_id: str,
+        service: str,
+        config_fingerprint: str,
+        status: str,
+        latency_ms: int,
+        code: str,
+        trigger: str,
+        checked_at: str,
+    ) -> None:
+        with self.database.write() as db:
+            db.execute(
+                "INSERT INTO model_service_status "
+                "(user_id, service, config_fingerprint, status, latency_ms, code, trigger, checked_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id, service) DO UPDATE SET "
+                "config_fingerprint = excluded.config_fingerprint, "
+                "status = excluded.status, latency_ms = excluded.latency_ms, "
+                "code = excluded.code, trigger = excluded.trigger, "
+                "checked_at = excluded.checked_at",
+                (
+                    user_id, service, config_fingerprint, status, latency_ms,
+                    code, trigger, checked_at,
+                ),
+            )
+
+    def clear_model_service_statuses(
+        self, user_id: str, services: Sequence[str] | None = None
+    ) -> None:
+        if services is not None and not services:
+            return
+        with self.database.write() as db:
+            if services is None:
+                db.execute(
+                    "DELETE FROM model_service_status WHERE user_id = ?", (user_id,)
+                )
+                return
+            placeholders = ", ".join("?" for _ in services)
+            db.execute(
+                "DELETE FROM model_service_status WHERE user_id = ? "
+                f"AND service IN ({placeholders})",
+                (user_id, *services),
+            )
 
     def resolve_model_config(self, user: UserProfile, role: str) -> ResolvedModelConfig:
         return resolve_effective_config(

@@ -245,7 +245,7 @@ def _make_persist_image(
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 
 @dataclass(frozen=True)
