@@ -31,7 +31,7 @@ them.
 At the design baseline, commit `6f4170b347dd8f715023406402f056a03e73f8b6`
 passed the full functional gate with the Homebrew Python runtime. A warm run
 reported `contracts=23s`, `backend=95s`, and `frontend=56s`. The test results are
-were green, but the backend lane meant that observed baseline did not meet the
+green, but the backend lane meant that observed baseline did not meet the
 existing local warm-gate target of 60 seconds. The implementation therefore had
 to remeasure before broad movement without hiding or worsening a reproducible
 timing regression.
