@@ -38,7 +38,8 @@ timing regression.
 
 After rebasing through #315, exact-head publication verification recorded two
 consecutive complete warm gates with every lane at or below the local 60-second
-target: `contracts/backend/frontend` were `10s/52s/22s`, then `14s/55s/23s`.
+target. The authoritative per-lane seconds belong in the PR verification record,
+because committing them here would create a replacement SHA and make them stale.
 These are local Apple Silicon measurements; CI lane timing remains observational
 rather than a portable timeout.
 
