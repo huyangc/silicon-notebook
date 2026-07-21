@@ -73,10 +73,11 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
     design = _read(
         "docs/superpowers/specs/2026-07-21-application-boundary-foundation-design.md"
     )
-    assert "may be re-exported from `routes.py`" not in design
-    assert "Compatibility exports are temporary" not in design
-    assert "passes the full functional gate" not in design
-    assert "does not satisfy the existing local warm-gate target" not in design
+    assert "**Status:** Implemented" in design
+    assert "`routes.py` retains that composition surface only" in design
+    assert "it does not re-export endpoint" in design
+    assert "Three composition hotspots were present at baseline" in design
+    assert "剩余架构计划仅为阶段 5" in _read("fangan_done.md")
     _assert_phrases(
         {
             "README.md": "`backend/app/models/schemas.py` is a legacy compatibility facade",
@@ -429,7 +430,7 @@ def test_current_docs_describe_reports_and_sharing_without_retired_article_contr
     assert "There is no live collaborative editing or change-password flow" in agents
     assert "Single-user mode for now" not in agents
     assert "no change-password / sharing / collaboration" not in agents
-    assert "更新日期：2026-07-20" in fangan_done
+    assert "更新日期：2026-07-21" in fangan_done
     assert "历史记录：Article Studio（已退役）" in fangan_done
     assert "历史记录（已退役）：Derived Rule Candidate" in fangan_done
 

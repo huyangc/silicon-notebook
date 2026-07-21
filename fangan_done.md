@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-07-20
+更新日期：2026-07-21
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -353,7 +353,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **v1.0 企业**：RBAC / source 级权限 / 审计 / SSO / 私有部署 / Confluence·SharePoint·Jira·Git·Slack connectors / 多 notebook 搜索 / rule version diff。
 - 检索：BM25 / FTS5 / pgvector 放量、结构化硬过滤、Knowledge graph（已评估为低 ROI / 基础设施级，暂缓）。
 - 扫描件 OCR、DOCX/PPTX 公式（OMML）解析；MinerU 已覆盖 PDF 的公式/表格/版面（本机 MLX 或 GPU 主机）。
-- **架构渐进整改后续阶段**：阶段 3（FastAPI routers 与前端 API client）与阶段 5（前端 workspace 状态拆分）仍为计划项。阶段 2、4、6 的 Repository 部分已由 Repository composition refactor 交付（见第 19 节账本 2026-07-11 条目）；其中旧阶段 4 的 Pydantic 模型分文件与旧阶段 6 的 FastAPI lifespan / 统一应用生命周期延后为独立工作。
+- **架构渐进整改后续阶段**：阶段 3（FastAPI routers 与前端 API client）和旧阶段 4 的 Pydantic 模型分文件已由 2026-07-21 application-boundary 条目交付。剩余架构计划仅为阶段 5（前端 workspace 状态拆分）与旧阶段 6 的 FastAPI lifespan / 统一应用生命周期；阶段 2、4、6 的 Repository 部分已由 Repository composition refactor 交付（见第 19 节账本 2026-07-11 条目）。
 
 > 已完成里程碑：v0.1 闭环、Tier 1（场景/案例/Checklist/知识库前端 + 上传轮询 + knowledge 向量召回）、PDF MinerU(MLX) + KaTeX/表格渲染、**Tier 2 知识治理（状态生命周期 + 多类型浏览 + 合并 + 冲突检测）**、**检索/抽取算法升级（CJK 分词 + hybrid 融合 + 结构化场景匹配 + payload 级向量 + 全文分窗口抽取 + 鲁棒证据绑定）**、**全链路可观测日志系统（LLM/HTTP/管线三通道 JSONL + 控制台）**。
 
