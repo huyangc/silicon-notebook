@@ -2001,11 +2001,6 @@ export default function Home() {
     for (const nb of notebooks) map[nb.id] = toMountedBases(nb.base_notebooks ?? []);
     return map;
   }, [notebooks]);
-  const currentSession = useMemo(
-    () => sessions.find((session) => session.id === conversationId) ?? null,
-    [conversationId, sessions],
-  );
-
   // 合并视图：核心子图 + 用户展开的邻居节点/边（去重）。搜索时改用服务端命中叠加层。
   const uGraphMerged = useMemo((): UnifiedGraphResp | null => {
     if (!uGraph) return null;
