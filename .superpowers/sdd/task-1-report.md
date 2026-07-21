@@ -109,3 +109,35 @@ reran the same focused command:
 Result: `50 passed in 5.00s`.
 
 `/opt/homebrew/Caskroom/miniconda/base/bin/python -m py_compile scripts/diag_common.py scripts/diag_slow.py scripts/diag_open_latency.py scripts/diag.py` and `git diff --check` both passed with no output.
+
+## Second review remediation (post-commit)
+
+### Changes
+
+- Made `normalize_http_path()` fail closed. It now preserves only a deliberate static route-word allowlist and recognised identifier/token shapes; opaque search terms, filenames, and every other unrecognised path segment render as `{redacted}`.
+- Replaced raw `model_error` error/message/provider output with fixed safe stage/presence classifications. The events report no longer copies exception text, prompts, provider responses, or model strings. Related event labels, LLM model labels, SQLite errors, and `DATABASE_URL` output are likewise metadata-only.
+- Added `_BoundedOutput`, a reusable stdout sink used by the default `diag_slow.py` CLI. The whole report is capped at 32 KiB and, when necessary, emits an `output_truncated=True` marker within that byte budget. Direct report functions remain callable for focused diagnostic tests.
+
+### TDD RED
+
+After adding the opaque-search/filename, raw-model-error, and global-report envelope regressions, before changing production code, I ran:
+
+`PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider backend/tests/test_diag_common.py backend/tests/test_diag_slow.py backend/tests/test_diag_unified.py -q`
+
+Result: `3 failed, 19 passed in 4.48s`.
+
+- A raw search term remained visible in a normalized path.
+- `model_error` output included the injected bearer/auth/prompt text and raw provider model label.
+- The default whole-report envelope constant/sink did not exist.
+
+### TDD GREEN and verification
+
+The focused command passed after the implementation: `22 passed in 2.31s`.
+
+Full compatibility/dependency verification:
+
+`PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider backend/tests/test_diag_common.py backend/tests/test_diag_slow.py backend/tests/test_diag_unified.py backend/tests/test_event_logging.py backend/tests/test_debug_logs_days.py backend/tests/test_repository_dependency_contract.py -q`
+
+Result: `53 passed in 4.78s`.
+
+`/opt/homebrew/Caskroom/miniconda/base/bin/python -m py_compile scripts/diag_common.py scripts/diag_slow.py scripts/diag_open_latency.py scripts/diag.py` and `git diff --check` both passed with no output.

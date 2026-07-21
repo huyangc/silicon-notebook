@@ -92,6 +92,20 @@ def test_http_path_normalization_redacts_opaque_share_tokens():
     assert token not in value
 
 
+def test_http_path_normalization_fails_closed_for_search_terms_and_filenames():
+    common = load_common()
+    term = "confidential-analogue-design"
+    filename = "customer-secret-notes.pdf"
+    assert common.normalize_http_path(
+        f"/api/notebooks/nb-private123/search/{term}"
+    ) == "/api/notebooks/{id}/search/{redacted}"
+    assert common.normalize_http_path(
+        f"/api/notebooks/nb-private123/sources/{filename}"
+    ) == "/api/notebooks/{id}/sources/{redacted}"
+    assert term not in common.normalize_http_path(f"/api/search/{term}")
+    assert filename not in common.normalize_http_path(f"/api/sources/{filename}")
+
+
 def test_reader_does_not_parse_a_gzip_line_larger_than_the_hard_byte_bound(tmp_path, monkeypatch):
     common = load_common()
     payload = json.dumps({"id": "oversized", "payload": "x" * 4096}) + "\n"

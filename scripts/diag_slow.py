@@ -31,6 +31,7 @@ from pathlib import Path
 import diag_common
 
 MAX_SAMPLES = 50_000
+DEFAULT_REPORT_OUTPUT_BYTES = 32 * 1024
 REQUEST_REPORT_OUTPUT_BYTES = 32 * 1024
 _REQUEST_PATH_ROWS_BYTES = 20 * 1024
 _REQUEST_SLOW_ROWS_BYTES = 8 * 1024
@@ -46,6 +47,51 @@ INTEREST_KINDS = (
 # 「大库」画像阈值:对象+chunk 超过它才打印逐项诊断旗标
 BIG_NB_ROWS = 20_000
 _IN_CHUNK = 800   # 只读 IN(...) 批大小,留余量避开 SQLITE_MAX_VARIABLE_NUMBER
+_SAFE_STAGES = frozenset({
+    "answer", "answer_llm", "embed", "embedding", "expand", "extract", "graph", "index", "load_indexes",
+    "parse", "pipeline", "ppr", "report", "retrieval", "score", "seed", "total",
+})
+
+
+class _BoundedOutput:
+    """Write a complete default report within a byte envelope."""
+
+    _MARKER = "\n[output_truncated=True report_budget={budget} bytes]\n"
+
+    def __init__(self, stream, budget):
+        self._stream = stream
+        self._budget = max(1, int(budget))
+        self._marker = self._MARKER.format(budget=self._budget)
+        self._content_budget = max(0, self._budget - len(self._marker.encode("utf-8")))
+        self._used = 0
+        self._truncated = False
+
+    @property
+    def encoding(self):
+        return getattr(self._stream, "encoding", "utf-8")
+
+    def write(self, text):
+        if self._truncated:
+            return len(text)
+        encoded = str(text).encode("utf-8", "replace")
+        remaining = self._content_budget - self._used
+        if len(encoded) <= remaining:
+            self._stream.write(str(text))
+            self._used += len(encoded)
+            return len(text)
+        if remaining > 0:
+            clipped = encoded[:remaining].decode("utf-8", "ignore")
+            self._stream.write(clipped)
+            self._used += len(clipped.encode("utf-8"))
+        self._stream.write(self._marker)
+        self._truncated = True
+        return len(text)
+
+    def flush(self):
+        return self._stream.flush()
+
+    def isatty(self):
+        return self._stream.isatty()
 
 
 def _pct(sorted_vals, p):
@@ -76,6 +122,15 @@ def _iter_jsonl(path):
 def _scan_summary(stats):
     return (f"日志 files={stats.files} matched={stats.matched} malformed={stats.malformed} "
             f"duplicates={stats.duplicates} retained={stats.retained} truncated={stats.truncated}")
+
+
+def _safe_stage(value):
+    stage = str(value).lower()
+    return stage if stage in _SAFE_STAGES else "other"
+
+
+def _safe_presence(value):
+    return "present" if value not in (None, "") else "absent"
 
 
 def _print_bounded_request_rows(lines, byte_budget, label):
@@ -252,7 +307,6 @@ def report_events(local_dir, since):
     refuse_sites = Counter()
     model_errors = Counter()
     last_bail_diag = []
-    last_model_errors = []
     ask_stage = defaultdict(Sampler)
     pipe_stage = defaultdict(Sampler)
     scale_ppr_stage = defaultdict(Sampler)
@@ -267,37 +321,36 @@ def report_events(local_dir, since):
                 continue
             kind_count[k] += 1
             if k == "scale_ppr_bailout":
-                bail_reasons[e.get("reason", "?")] += 1
+                reason = "zero_reset" if e.get("reason") == "zero_reset" else "other"
+                bail_reasons[reason] += 1
                 if e.get("reason") == "zero_reset":
-                    diag = {kk: e.get(kk) for kk in
-                            ("ann_seeds", "active_seeds", "chunk_seeds",
-                             "embed_ok", "ann_sources_skipped") if kk in e}
+                    diag = {kk: (e.get(kk) if isinstance(e.get(kk), (bool, int, float)) else "present")
+                            for kk in ("ann_seeds", "active_seeds", "chunk_seeds",
+                                       "embed_ok", "ann_sources_skipped") if kk in e}
                     last_bail_diag.append((e.get("ts", "")[:19], diag))
             elif k in ("ppr_fallback_refused", "graph_walk_refused",
                        "relation_scoring_skipped", "tier2_skipped",
                        "chunk_bruteforce_skipped", "kg_bruteforce_refused",
                        "element_scoring_skipped", "dim_mismatch",
                        "scale_fold_refused"):
-                refuse_sites[f"{k}:{e.get('site', e.get('reason', ''))}"] += 1
+                refuse_sites[k] += 1
             elif k == "model_error":
-                key = f"{e.get('stage','?')}/{e.get('model','?')}"
+                key = f"{_safe_stage(e.get('stage'))}/{_safe_presence(e.get('error', e.get('message')))}"
                 model_errors[key] += 1
-                msg = str(e.get("error", e.get("message", "")))[:120]
-                last_model_errors.append((e.get("ts", "")[:19], key, msg))
             elif k == "ask_stage":
                 ms = e.get("latency_ms")
                 if isinstance(ms, (int, float)):
-                    ask_stage[e.get("stage", "?")].add(ms)
+                    ask_stage[_safe_stage(e.get("stage"))].add(ms)
             elif k == "pipeline":
                 ms = e.get("latency_ms")
                 if isinstance(ms, (int, float)) and e.get("status") == "done":
-                    pipe_stage[e.get("stage", "?")].add(ms)
+                    pipe_stage[_safe_stage(e.get("stage"))].add(ms)
             elif k == "scale_ppr_stage":
                 ms = e.get("latency_ms")
                 if isinstance(ms, (int, float)):
-                    scale_ppr_stage[e.get("stage", "?")].add(ms)
+                    scale_ppr_stage[_safe_stage(e.get("stage"))].add(ms)
             elif k == "scale_index_build":
-                st, ms = e.get("stage", "?"), e.get("latency_ms", 0)
+                st, ms = _safe_stage(e.get("stage")), e.get("latency_ms", 0)
                 build_stages[st] = ms
                 if st == "total":
                     last_build = (e.get("ts", "")[:19], dict(build_stages))
@@ -319,11 +372,9 @@ def report_events(local_dir, since):
         for r, c in refuse_sites.most_common():
             print(f"  {c:>6}  {r}")
     if model_errors:
-        print("\n[model_error 按 stage/model] — embed 失败会让 KG 检索退回全量暴力,重点看")
+        print("\n[model_error 按安全分类] — 不输出 provider 或异常文本")
         for r, c in model_errors.most_common(8):
             print(f"  {c:>6}  {r}")
-        for ts, key, msg in last_model_errors[-5:]:
-            print(f"  最近: {ts} {key} :: {msg}")
     if ask_stage:
         print("\n[ask 各阶段延迟 — 仅 chunk 模式有埋点;reasoning/graph 模式无 ask_stage(观测盲区)]")
         for st in sorted(ask_stage, key=lambda s: -ask_stage[s].max):
@@ -357,7 +408,7 @@ def report_llm(local_dir, since):
             ts = _parse_ts(e.get("ts", ""))
             if ts is None:
                 continue
-            model = e.get("model", "?")
+            model = "configured" if e.get("model") not in (None, "") else "unspecified"
             ms = e.get("latency_ms", e.get("duration_ms"))
             if isinstance(ms, (int, float)):
                 per_model[model].add(ms)
@@ -368,7 +419,7 @@ def report_llm(local_dir, since):
         return
     for m in sorted(per_model, key=lambda m: -per_model[m].max):
         err = f"  errors={errors[m]}" if errors.get(m) else ""
-        print(f"  {per_model[m].line()}  {m}{err}")
+        print(f"  {per_model[m].line()}  model={m}{err}")
 
 
 def _vec_dim(raw):
@@ -414,8 +465,8 @@ def report_scale_profile(local_dir, runtime_dim=0):
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
-    except sqlite3.Error as exc:
-        print(f"(DB 只读打开失败: {exc})")
+    except sqlite3.Error:
+        print("(DB 只读打开失败: sqlite_error)")
         return
     try:
         tiers = {r["id"]: (r["tier"] if "tier" in r.keys() else "personal")
@@ -562,8 +613,8 @@ def report_reasoning_ppr_audit(local_dir, root):
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
-    except sqlite3.Error as exc:
-        print(f"(DB 只读打开失败: {exc})")
+    except sqlite3.Error:
+        print("(DB 只读打开失败: sqlite_error)")
         return
     try:
         tiers = {r["id"]: r["tier"] for r in conn.execute(
@@ -733,11 +784,11 @@ def report_artifacts(local_dir, deep):
                     f"SELECT typeof(vector) tp, COUNT(*) c FROM {t} GROUP BY 1").fetchall()
                 print(f"  {t}: " + ", ".join(f"{r['tp']}={r['c']}" for r in rows)
                       + ("   ⚠ 仍有 text 行未迁移" if any(r["tp"] == "text" for r in rows) else " ✓"))
-            except sqlite3.Error as exc:
-                print(f"  {t}: 查询失败({exc})")
+            except sqlite3.Error:
+                print(f"  {t}: 查询失败(sqlite_error)")
         conn.close()
-    except sqlite3.Error as exc:
-        print(f"  (DB 只读打开失败: {exc})")
+    except sqlite3.Error:
+        print("  (DB 只读打开失败: sqlite_error)")
 
 
 def _read_env_int(root, key):
@@ -786,6 +837,8 @@ def report_env(root):
     for k, v in raw.items():
         if any(m in k.upper() for m in SECRET_MARKERS):
             seen[k] = "<已配置,值不显示>" if v.strip() else "<空>"
+        elif k == "DATABASE_URL":
+            seen[k] = "<已配置,值不显示>" if v.strip() else "<空>"
         elif k in interesting:
             seen[k] = v.strip()
     for k in interesting:
@@ -821,8 +874,8 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=60)
         conn.row_factory = sqlite3.Row
-    except sqlite3.Error as exc:
-        print(f"(DB 只读打开失败: {exc})")
+    except sqlite3.Error:
+        print("(DB 只读打开失败: sqlite_error)")
         return
     try:
         def _run(sql, params=()):
@@ -839,8 +892,8 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
                 r = _run("SELECT notebook_id nb, COUNT(*) c FROM knowledge_objects "
                          "GROUP BY 1 ORDER BY c DESC LIMIT 1").fetchone()
                 nb = r["nb"] if r else ""
-            except sqlite3.Error as exc:
-                print(f"(选最大 notebook 失败: {exc})")
+            except sqlite3.Error:
+                print("(选最大 notebook 失败: sqlite_error)")
                 return
         if not nb:
             print("(库中无 knowledge_objects)")
@@ -880,8 +933,8 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
             try:
                 plan_rows = _run("EXPLAIN QUERY PLAN " + sql, params).fetchall()
                 details = [str(r["detail"]) for r in plan_rows]
-            except sqlite3.Error as exc:
-                print(f"    {name:32} plan? ({exc})")
+            except sqlite3.Error:
+                print(f"    {name:32} plan? (sqlite_error)")
                 continue
             full = any(d.strip().startswith("SCAN") and "USING" not in d for d in details)
             sort = any("TEMP B-TREE" in d.upper() for d in details)
@@ -896,8 +949,8 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
                 else:
                     res = "(空)"
                 mstr = _fmt_ms(ms)
-            except sqlite3.Error as exc:
-                mstr, res = f"err:{exc}", ""
+            except sqlite3.Error:
+                mstr, res = "err:sqlite_error", ""
             print(f"    {name:32} {mstr:>9}  [{flag}] {'; '.join(details)}  → {res}")
 
         # 复合放大:一次「打开」= from_row 跑 2 遍(GET /notebooks/{id} 与
@@ -941,19 +994,25 @@ def main():
     args = ap.parse_args()
     root = os.path.abspath(args.root)
     since = timedelta(hours=args.since)
-    print(f"silicon-notebook 慢因诊断  root={root}  窗口={args.since}h  "
-          f"生成于 {datetime.now().isoformat(timespec='seconds')}")
-    local_dir = os.path.abspath(args.local) if args.local else resolve_local(root)
-    report_requests(local_dir, since, args.slow_ms)
-    report_events(local_dir, since)
-    report_llm(local_dir, since)
-    report_scale_profile(local_dir, runtime_dim=_read_env_int(root, "EMBED_RUNTIME_DIM"))
-    report_reasoning_ppr_audit(local_dir, root)
-    report_artifacts(local_dir, args.deep)
-    report_notebook_count_hotpaths(local_dir, notebook_id=args.notebook, deep=args.deep)
-    report_env(root)
-    print("\n=== 完 — 把以上整段输出贴回即可 " + "=" * 40)
-    return 0
+    original_stdout = sys.stdout
+    sys.stdout = _BoundedOutput(original_stdout, DEFAULT_REPORT_OUTPUT_BYTES)
+    try:
+        print(f"silicon-notebook 慢因诊断  root={root}  窗口={args.since}h  "
+              f"生成于 {datetime.now().isoformat(timespec='seconds')}")
+        local_dir = os.path.abspath(args.local) if args.local else resolve_local(root)
+        report_requests(local_dir, since, args.slow_ms)
+        report_events(local_dir, since)
+        report_llm(local_dir, since)
+        report_scale_profile(local_dir, runtime_dim=_read_env_int(root, "EMBED_RUNTIME_DIM"))
+        report_reasoning_ppr_audit(local_dir, root)
+        report_artifacts(local_dir, args.deep)
+        report_notebook_count_hotpaths(local_dir, notebook_id=args.notebook, deep=args.deep)
+        report_env(root)
+        print("\n=== 完 — 把以上整段输出贴回即可 " + "=" * 40)
+        return 0
+    finally:
+        sys.stdout.flush()
+        sys.stdout = original_stdout
 
 
 if __name__ == "__main__":

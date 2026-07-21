@@ -18,6 +18,11 @@ _SENSITIVE_ROUTE_SEGMENTS = frozenset({
     "access", "apikey", "auth", "authorization", "invite", "invites", "key", "keys",
     "password", "reset", "session", "sessions", "share", "shared", "shares", "token", "tokens",
 })
+_STATIC_PATH_SEGMENTS = frozenset({
+    "", "api", "analytics", "answer", "ask", "cancel", "cells", "conversations", "deep-report",
+    "diagnostics", "download", "events", "export", "graph", "jobs", "knowledge", "memory", "mcp",
+    "notebooks", "preview", "reports", "search", "shared", "sources", "status", "stream", "tables",
+})
 _READ_CHUNK_BYTES = 64 * 1024
 _DEFAULT_MAX_INPUT_BYTES = 64 * 1024 * 1024
 _MAX_RENDERED_PATH_BYTES = 384
@@ -236,8 +241,10 @@ def normalize_http_path(path: str) -> str:
             parts.append("{token}")
         elif _ID_SEGMENT.match(segment) or (len(segment) > 20 and any(ch.isdigit() for ch in segment)):
             parts.append("{id}")
+        elif segment.lower() in _STATIC_PATH_SEGMENTS:
+            parts.append(segment.lower())
         else:
-            parts.append(segment[:80])
+            parts.append("{redacted}")
         redact_next = segment.lower() in _SENSITIVE_ROUTE_SEGMENTS
     normalized = "/".join(parts)
     encoded = normalized.encode("utf-8", "replace")
