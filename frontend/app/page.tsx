@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, BarChart3, Check, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, MessageSquareText, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { ArrowLeft, BarChart3, Check, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -92,6 +92,7 @@ import {
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
+import { AskSessionHeaderActions } from "./ask-session-header";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
@@ -1813,7 +1814,7 @@ export default function Home() {
     };
   }, [menuNotebookId]);
 
-  // 会话历史面板:点面板外部(或按 Esc)关闭。切换按钮(会话/历史/当前会话)排除在外——
+  // 会话历史面板:点面板外部(或按 Esc)关闭。历史切换按钮排除在外——
   // 交给按钮自己的 onClick 切换,否则 pointerdown 先关、click 再开会「关了又开」。
   useEffect(() => {
     if (!sessionPanelOpen) return;
@@ -1826,8 +1827,7 @@ export default function Home() {
       const target = event.target;
       if (!(target instanceof Node)) return;
       if (sessionPopoverRef.current?.contains(target)) return;
-      if (target instanceof Element &&
-          target.closest(".chat-session-toggle, .chat-current-session")) {
+      if (target instanceof Element && target.closest(".chat-session-toggle")) {
         return;
       }
       closePanel();
@@ -2001,11 +2001,6 @@ export default function Home() {
     for (const nb of notebooks) map[nb.id] = toMountedBases(nb.base_notebooks ?? []);
     return map;
   }, [notebooks]);
-  const currentSession = useMemo(
-    () => sessions.find((session) => session.id === conversationId) ?? null,
-    [conversationId, sessions],
-  );
-
   // 合并视图：核心子图 + 用户展开的邻居节点/边（去重）。搜索时改用服务端命中叠加层。
   const uGraphMerged = useMemo((): UnifiedGraphResp | null => {
     if (!uGraph) return null;
@@ -4227,48 +4222,23 @@ export default function Home() {
                 </div>
                 <div className="chat-header-actions">
                   {chatMode === "ask" && (
-                    <button
-                      className={`chat-session-toggle ${sessionPanelOpen ? "active" : ""}`}
-                      type="button"
-                      onClick={() => setSessionPanelOpen((open) => !open)}
-                    >
-                      <MessageSquareText size={15} />
-                      会话
-                    </button>
+                    <AskSessionHeaderActions
+                      sessionCount={sessions.length}
+                      sessionPanelOpen={sessionPanelOpen}
+                      onToggleSessionPanel={() => setSessionPanelOpen(open => !open)}
+                      onStartNewSession={startNewSession}
+                    />
                   )}
-                  <button className="icon-button compact" title="Clear" onClick={() => setInfoModal({
-                    title: "对话",
-                    message: "开始新对话将清空当前多轮上下文，回到欢迎状态。",
-                    actions: [{ label: "新对话", primary: true, action: startNewSession }]
-                  })}>⋮</button>
                 </div>
               </div>
-              {chatMode === "ask" && (
-                <div className="chat-session-context">
-                  <button
-                    className="chat-current-session"
-                    type="button"
-                    onClick={() => setSessionPanelOpen((open) => !open)}
-                    title={currentSession?.title || "新会话"}
-                  >
-                    <MessageSquareText size={16} />
-                    <span>{currentSession?.title || "新会话"}</span>
-                    <small>{currentSession ? `${formatRelativeTime(currentSession.updated_at)} · ${currentSession.turn_count} 轮` : "下一次提问会创建会话"}</small>
-                  </button>
-                  <button className="chat-session-new" type="button" onClick={startNewSession}>
-                    <Plus size={14} /> 新会话
-                  </button>
-                  <button
-                    className={`chat-session-toggle slim ${sessionPanelOpen ? "active" : ""}`}
-                    type="button"
-                    onClick={() => setSessionPanelOpen((open) => !open)}
-                  >
-                    历史 {sessions.length}
-                  </button>
-                </div>
-              )}
               {chatMode === "ask" && sessionPanelOpen && (
-                <div className="chat-session-popover" role="dialog" aria-label="会话管理" ref={sessionPopoverRef}>
+                <div
+                  id="ask-session-manager"
+                  className="chat-session-popover"
+                  role="dialog"
+                  aria-label="会话管理"
+                  ref={sessionPopoverRef}
+                >
                   <div className="chat-session-popover-top">
                     <div className="chat-session-popover-head">
                       <div>

@@ -27,8 +27,20 @@ test("workspace composes executable Ask and account components", () => {
     importsFrom(page, "./account-menu").map((item) => item.imported),
     ["AccountMenu"],
   );
+  assert.deepEqual(
+    importsFrom(page, "./ask-session-header").map((item) => item.imported),
+    ["AskSessionHeaderActions"],
+  );
   assert.equal(jsxElements(page, "AskComposer").length, 1);
   assert.equal(jsxElements(page, "AccountMenu").length, 1);
+  const sessionHeaders = jsxElements(page, "AskSessionHeaderActions");
+  assert.equal(sessionHeaders.length, 1);
+  assert.deepEqual(sessionHeaders[0].bindings, {
+    sessionCount: "sessions.length",
+    sessionPanelOpen: "sessionPanelOpen",
+    onToggleSessionPanel: "() => setSessionPanelOpen(open => !open)",
+    onStartNewSession: "startNewSession",
+  });
   const pageFunctions = new Set(
     declarations(page)
       .filter((finding) => finding.kind === "function")
@@ -36,6 +48,26 @@ test("workspace composes executable Ask and account components", () => {
   );
   assert.equal(pageFunctions.has("AskComposer"), false);
   assert.equal(pageFunctions.has("AccountMenu"), false);
+});
+
+
+test("Ask session controls occupy one header row", () => {
+  assert.equal(
+    jsxElements(page, "div").some(
+      ({ attributes }) => attributes.className === "chat-session-context",
+    ),
+    false,
+  );
+  assert.ok(
+    jsxElements(page, "div").some(
+      ({ attributes }) => (
+        attributes.id === "ask-session-manager"
+        && attributes.className === "chat-session-popover"
+        && attributes.role === "dialog"
+        && attributes["aria-label"] === "会话管理"
+      ),
+    ),
+  );
 });
 
 
