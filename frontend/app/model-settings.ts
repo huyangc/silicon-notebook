@@ -2,12 +2,39 @@ import { API_BASE, authHeaders } from "./auth.ts";
 import { throwHumanizedHttpError } from "./errors.ts";
 
 export const MODEL_ROLES = ["llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank"] as const;
+export const STATUS_MODEL_ROLES = [...MODEL_ROLES, "embedding"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
+export type StatusModelRole = (typeof STATUS_MODEL_ROLES)[number];
+
+export const MODEL_ROLE_LABELS: Record<StatusModelRole, string> = {
+  llm: "主模型",
+  reasoning_llm: "推理模型",
+  rewrite_llm: "改写模型",
+  kg_llm: "构图模型",
+  rerank: "重排模型",
+  embedding: "嵌入模型",
+};
 
 export type ModelServiceView = {
   base_url: string; model: string; has_key: boolean; key_hint: string; source: string;
 };
 export type ModelSettingsView = Record<ModelRole, ModelServiceView>;
+
+export type ModelServiceStatusItem = {
+  service: StatusModelRole;
+  model: string;
+  source: "user" | "system" | "none";
+  kind: "llm" | "rerank" | "embedding";
+  configured: boolean;
+  required: boolean;
+  status: "ok" | "error" | "untested" | "unconfigured";
+  latency_ms: number;
+  checked_at: string;
+  trigger: "manual_test" | "observed_failure" | "";
+  code: string;
+};
+
+export type ModelServicesStatus = { services: ModelServiceStatusItem[] };
 
 // 表单态：api_key 用单独的「已改动」标记，未改动则 PUT 时省略以保留原 key。
 export type ServiceForm = { base_url: string; model: string; api_key: string; keyDirty: boolean };
@@ -27,6 +54,35 @@ export function buildPutPayload(forms: Record<ModelRole, ServiceForm>) {
 
 export async function fetchModelSettings(): Promise<ModelSettingsView> {
   const res = await fetch(`${API_BASE}/me/model-settings`, { headers: authHeaders() });
+  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
+  return res.json();
+}
+
+/** Read the persisted snapshot only; this endpoint never probes a provider. */
+export async function fetchModelServiceStatus(): Promise<ModelServicesStatus> {
+  const res = await fetch(`${API_BASE}/me/model-services/status`, { headers: authHeaders() });
+  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
+  return res.json();
+}
+
+/** Explicitly probe the effective saved configuration for one service. */
+export async function testCurrentModelService(
+  service: StatusModelRole,
+): Promise<ModelServiceStatusItem> {
+  const res = await fetch(`${API_BASE}/me/model-services/${service}/test`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
+  return res.json();
+}
+
+/** Explicitly probe every configured effective service. */
+export async function testAllCurrentModelServices(): Promise<ModelServicesStatus> {
+  const res = await fetch(`${API_BASE}/me/model-services/test-all`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
   if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
   return res.json();
 }
@@ -53,4 +109,58 @@ export async function testModelService(
   });
   if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
   return res.json();
+}
+
+export type ModelServicesSummary = {
+  text: string;
+  tone: "ok" | "warn" | "bad";
+  abnormal: ModelServiceStatusItem[];
+};
+
+/**
+ * Collection health is based on persisted state. Optional services that have
+ * never been configured are informational, not failures.
+ */
+export function summarizeModelServices(
+  services: ModelServiceStatusItem[],
+): ModelServicesSummary {
+  const abnormal = services.filter((service) =>
+    service.status === "error" || (service.required && !service.configured)
+  );
+  if (abnormal.length > 0) {
+    return {
+      text: `API 正常 · ${abnormal.length} 个模型异常`,
+      tone: "bad",
+      abnormal,
+    };
+  }
+  if (services.some((service) => service.configured && service.status === "untested")) {
+    return { text: "API 正常 · 模型待测试", tone: "warn", abnormal: [] };
+  }
+  return { text: "服务正常", tone: "ok", abnormal: [] };
+}
+
+export function modelFailureText(
+  error: Pick<ModelServiceStatusItem, "service" | "model">,
+): string {
+  const role = MODEL_ROLE_LABELS[error.service];
+  const model = error.model.trim();
+  return model
+    ? `${role} ${model} 调用失败，本次回答可能不完整。`
+    : `${role}尚未配置，本次回答可能不完整。`;
+}
+
+/** Replace rows by their protocol-stable service role without mutating state. */
+export function mergeModelServiceStatus(
+  current: ModelServicesStatus | null,
+  replacement: ModelServiceStatusItem | ModelServicesStatus,
+): ModelServicesStatus {
+  const updates = "services" in replacement ? replacement.services : [replacement];
+  const byService = new Map(updates.map((item) => [item.service, item]));
+  const services = (current?.services ?? []).map((item) => byService.get(item.service) ?? item);
+  const existing = new Set(services.map((item) => item.service));
+  for (const item of updates) {
+    if (!existing.has(item.service)) services.push(item);
+  }
+  return { services };
 }
