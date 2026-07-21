@@ -396,7 +396,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     from fastapi.testclient import TestClient
 
-    from app.api.routes import repository
+    from app.api.admin_routes import repository
     from app.main import app
 
     c = TestClient(app)
@@ -594,4 +594,3 @@ class TestBaseReviewGateEdgeCases:
         hits = repo.federated_retrieve(personal.id, "thermal noise")
         hit_ids = {h.object_id for h in hits}
         assert result["base_object_id"] in hit_ids
-

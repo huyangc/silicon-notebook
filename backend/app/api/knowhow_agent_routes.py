@@ -5,7 +5,7 @@ token (``app.api.deps.require_user_or_agent`` / ``user_or_agent_scope``).
 
 Mounted at bare ``/agent/...`` paths under the API's own ``/api`` prefix (see
 ``app.main.create_app``'s ``app.include_router(agent_router, prefix="/api")``
-call) — deliberately NOT added to the existing ``router`` from
+call) — deliberately NOT added to the composition-only aggregate router in
 ``app.api.routes``, which is mounted with a blanket
 ``dependencies=[Depends(get_current_user)]`` (session-Bearer only). That
 would reject every Agent token outright (a ``snm_...`` value is not a valid
@@ -14,7 +14,7 @@ run.
 
 Row/cell-scoped routes below carry ONLY ``row_id``/``column_id`` in their
 URL — no ``notebook_id`` or ``table_id`` segment at all (unlike every
-session-facing knowhow route in ``app.api.routes``) — so each one resolves
+session-facing knowhow route in ``app.api.knowhow_routes``) — so each one resolves
 row -> table -> notebook via ``repository().get_knowhow_row_location``
 FIRST, then enforces access with the resolved notebook_id, exactly mirroring
 the table-scoped discrimination route's own table -> notebook resolution.

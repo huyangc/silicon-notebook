@@ -86,6 +86,35 @@ def test_ask_and_report_endpoints_have_domain_owners():
         assert modules[endpoint] == module, endpoint
 
 
+def test_kg_and_admin_endpoints_have_domain_owners():
+    modules = _endpoint_modules()
+    expected = {
+        "kg_search": "app.api.kg_routes",
+        "build_kg": "app.api.kg_routes",
+        "rebuild_unified_kg": "app.api.kg_routes",
+        "get_unified_kg": "app.api.kg_routes",
+        "resolve_conflicts": "app.api.kg_routes",
+        "review_unified_kg_merges": "app.api.kg_routes",
+        "propose_promotion": "app.api.admin_routes",
+        "approve_promotion": "app.api.admin_routes",
+        "list_admin_users": "app.api.admin_routes",
+        "list_online_users": "app.api.admin_routes",
+    }
+    for endpoint, module in expected.items():
+        assert modules[endpoint] == module, endpoint
+
+
+def test_aggregate_routes_module_is_composition_only():
+    path = ROOT / "backend" / "app" / "api" / "routes.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    decorated_functions = [
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.decorator_list
+    ]
+    assert decorated_functions == []
+
+
 def test_domain_routers_do_not_import_the_schema_facade():
     api_dir = ROOT / "backend" / "app" / "api"
     route_modules = sorted(api_dir.glob("*_routes.py"))

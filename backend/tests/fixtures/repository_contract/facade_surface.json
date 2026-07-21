@@ -4175,7 +4175,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/admin_routes.py",
         "scope": "<module>.approve_promotion",
         "target": "approve_promotion_as_reviewer"
       }
@@ -4473,7 +4473,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.cancel_scale_index",
         "target": "cancel_scale_index"
       }
@@ -4524,7 +4524,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.get_concept_detail",
         "target": "concept_detail"
       }
@@ -4539,7 +4539,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.add_concept_whitelist",
         "target": "concept_whitelist_add"
       }
@@ -4554,7 +4554,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.list_concept_whitelist",
         "target": "concept_whitelist_list"
       }
@@ -4569,7 +4569,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.delete_concept_whitelist",
         "target": "concept_whitelist_remove"
       }
@@ -4599,7 +4599,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.confirm_conflict",
         "target": "confirm_conflict"
       }
@@ -4614,7 +4614,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.confirm_merge",
         "target": "confirm_merge"
       }
@@ -5070,13 +5070,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.build_kg",
         "target": "execute_notebook_kg_job"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_kg",
         "target": "execute_notebook_kg_job"
       }
@@ -5148,13 +5148,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.build_kg",
         "target": "fail_notebook_kg_job_submission"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_kg",
         "target": "fail_notebook_kg_job_submission"
       }
@@ -5436,6 +5436,36 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.build_kg",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.rebuild_kg",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.relink_kg",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.resolve_conflicts",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.review_all_unified_kg_merges",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
         "scope": "<module>.create_memory_mcp.list_notebooks.load",
         "target": "get_notebook"
@@ -5444,36 +5474,6 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
         "scope": "<module>.create_memory_mcp.select_notebook.load",
-        "target": "get_notebook"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.build_kg",
-        "target": "get_notebook"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.rebuild_kg",
-        "target": "get_notebook"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.relink_kg",
-        "target": "get_notebook"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.resolve_conflicts",
-        "target": "get_notebook"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.review_all_unified_kg_merges",
         "target": "get_notebook"
       },
       {
@@ -5643,7 +5643,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.index_status",
         "target": "index_status"
       }
@@ -5658,13 +5658,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.build_kg",
         "target": "kg_llm_client"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_kg",
         "target": "kg_llm_client"
       },
@@ -5697,7 +5697,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.object_neighbors",
         "target": "kg_neighbors"
       }
@@ -5712,7 +5712,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.kg_search",
         "target": "kg_search"
       }
@@ -5964,7 +5964,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/admin_routes.py",
         "scope": "<module>.list_promotion_queue",
         "target": "list_promotion_queue"
       }
@@ -6033,7 +6033,7 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.resolve_conflicts",
         "target": "llm_client"
       },
@@ -6580,13 +6580,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.merge_review_job",
         "target": "merge_review_job_status"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.review_all_unified_kg_merges",
         "target": "merge_review_job_status"
       }
@@ -6679,7 +6679,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.object_context",
         "target": "node_context"
       }
@@ -6902,7 +6902,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.get_pending_conflicts",
         "target": "pending_conflicts"
       }
@@ -6917,7 +6917,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.get_pending_merges",
         "target": "pending_merges"
       },
@@ -6947,13 +6947,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.build_kg",
         "target": "prepare_notebook_kg_job"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_kg",
         "target": "prepare_notebook_kg_job"
       }
@@ -7013,7 +7013,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/admin_routes.py",
         "scope": "<module>.propose_promotion",
         "target": "propose_promotion"
       }
@@ -7064,7 +7064,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_unified_kg",
         "target": "rebuild_unified_kg"
       },
@@ -7335,7 +7335,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.reject_conflict",
         "target": "reject_conflict"
       }
@@ -7350,7 +7350,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.reject_merge",
         "target": "reject_merge"
       }
@@ -7365,7 +7365,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/admin_routes.py",
         "scope": "<module>.reject_promotion",
         "target": "reject_promotion_as_reviewer"
       }
@@ -7395,7 +7395,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.relink_kg",
         "target": "relink_notebook_kg"
       }
@@ -7554,7 +7554,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.resolve_conflicts",
         "target": "resolve_notebook_conflicts"
       }
@@ -7929,7 +7929,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.review_unified_kg_merges",
         "target": "review_pending_merges"
       }
@@ -7974,7 +7974,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.review_all_unified_kg_merges",
         "target": "run_merge_review_job"
       }
@@ -7989,7 +7989,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.scale_index_status",
         "target": "scale_index_status"
       },
@@ -8459,7 +8459,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.rebuild_scale_index",
         "target": "trigger_scale_index_rebuild"
       }
@@ -8474,7 +8474,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/kg_routes.py",
         "scope": "<module>.get_unified_kg",
         "target": "unified_graph"
       }
@@ -8489,14 +8489,14 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_server.py",
-        "scope": "<module>.create_memory_mcp.select_notebook.load",
+        "path": "backend/app/api/kg_routes.py",
+        "scope": "<module>.unified_kg_status",
         "target": "unified_kg_status"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.unified_kg_status",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.select_notebook.load",
         "target": "unified_kg_status"
       },
       {

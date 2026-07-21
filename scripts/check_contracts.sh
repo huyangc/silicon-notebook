@@ -11,6 +11,8 @@ trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHE
 "$PYTHON_BIN" -m py_compile \
   "$ROOT_DIR/backend/app/main.py" \
   "$ROOT_DIR/backend/app/api/routes.py" \
+  "$ROOT_DIR/backend/app/api/admin_routes.py" \
+  "$ROOT_DIR/backend/app/api/ask_routes.py" \
   "$ROOT_DIR/backend/app/core/config.py" \
   "$ROOT_DIR/backend/app/core/llm.py" \
   "$ROOT_DIR/backend/app/models/common.py" \
@@ -52,6 +54,17 @@ trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHE
   "$ROOT_DIR/backend/app/services/sqlite_repository.py" \
   "$ROOT_DIR/backend/app/api/deps.py" \
   "$ROOT_DIR/backend/app/api/auth_routes.py" \
+  "$ROOT_DIR/backend/app/api/content_overview_routes.py" \
+  "$ROOT_DIR/backend/app/api/kg_routes.py" \
+  "$ROOT_DIR/backend/app/api/knowhow_routes.py" \
+  "$ROOT_DIR/backend/app/api/knowhow_agent_routes.py" \
+  "$ROOT_DIR/backend/app/api/knowledge_routes.py" \
+  "$ROOT_DIR/backend/app/api/memory_routes.py" \
+  "$ROOT_DIR/backend/app/api/notebook_routes.py" \
+  "$ROOT_DIR/backend/app/api/report_routes.py" \
+  "$ROOT_DIR/backend/app/api/source_routes.py" \
+  "$ROOT_DIR/backend/app/api/system_routes.py" \
+  "$ROOT_DIR/backend/app/api/debug_logs.py" \
   "$ROOT_DIR/backend/app/services/auth_utils.py"
 
 PYTHONPATH="$ROOT_DIR/backend" "$PYTHON_BIN" -c \

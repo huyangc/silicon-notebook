@@ -1258,7 +1258,7 @@ Use these owners:
 
 ```text
 test_conflict_endpoints.py               app.api.kg_routes
-test_legacy_graph_guard.py               app.api.kg_routes
+test_legacy_graph_guard.py               app.api.knowledge_routes
 test_trackF_governance_promotion.py      app.api.admin_routes
 test_repository_api_contract.py          app.api.ask_routes
 scripts/smoke_backend.py                 app.api.deps.repository
