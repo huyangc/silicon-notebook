@@ -3485,6 +3485,69 @@
           "title": "ModelError",
           "type": "object"
         },
+        "ModelServiceStatusItem": {
+          "properties": {
+            "checked_at": {
+              "default": "",
+              "title": "Checked At",
+              "type": "string"
+            },
+            "code": {
+              "default": "",
+              "title": "Code",
+              "type": "string"
+            },
+            "configured": {
+              "default": false,
+              "title": "Configured",
+              "type": "boolean"
+            },
+            "kind": {
+              "default": "llm",
+              "title": "Kind",
+              "type": "string"
+            },
+            "latency_ms": {
+              "default": 0,
+              "title": "Latency Ms",
+              "type": "integer"
+            },
+            "model": {
+              "default": "",
+              "title": "Model",
+              "type": "string"
+            },
+            "required": {
+              "default": false,
+              "title": "Required",
+              "type": "boolean"
+            },
+            "service": {
+              "title": "Service",
+              "type": "string"
+            },
+            "source": {
+              "default": "none",
+              "title": "Source",
+              "type": "string"
+            },
+            "status": {
+              "default": "unconfigured",
+              "title": "Status",
+              "type": "string"
+            },
+            "trigger": {
+              "default": "",
+              "title": "Trigger",
+              "type": "string"
+            }
+          },
+          "required": [
+            "service"
+          ],
+          "title": "ModelServiceStatusItem",
+          "type": "object"
+        },
         "ModelServiceUpdate": {
           "properties": {
             "api_key": {
@@ -3522,6 +3585,19 @@
             }
           },
           "title": "ModelServiceUpdate",
+          "type": "object"
+        },
+        "ModelServicesStatus": {
+          "properties": {
+            "services": {
+              "items": {
+                "$ref": "#/components/schemas/ModelServiceStatusItem"
+              },
+              "title": "Services",
+              "type": "array"
+            }
+          },
+          "title": "ModelServicesStatus",
           "type": "object"
         },
         "ModelSettingsUpdate": {
@@ -7362,6 +7438,81 @@
             }
           },
           "summary": "Me"
+        }
+      },
+      "/api/me/model-services/status": {
+        "get": {
+          "operationId": "get_model_services_status_api_me_model_services_status_get",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ModelServicesStatus"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Get Model Services Status"
+        }
+      },
+      "/api/me/model-services/test-all": {
+        "post": {
+          "operationId": "test_all_model_services_api_me_model_services_test_all_post",
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ModelServicesStatus"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            }
+          },
+          "summary": "Test All Model Services"
+        }
+      },
+      "/api/me/model-services/{service}/test": {
+        "post": {
+          "operationId": "test_current_model_service_api_me_model_services__service__test_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "service",
+              "required": true,
+              "schema": {
+                "title": "Service",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/ModelServiceStatusItem"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Test Current Model Service"
         }
       },
       "/api/me/model-settings": {

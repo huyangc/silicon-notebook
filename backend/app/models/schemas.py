@@ -1097,6 +1097,24 @@ class ModelTestResult(BaseModel):
     code: str = ""
 
 
+class ModelServiceStatusItem(BaseModel):
+    service: str
+    model: str = ""
+    source: str = "none"
+    kind: str = "llm"
+    configured: bool = False
+    required: bool = False
+    status: str = "unconfigured"
+    latency_ms: int = 0
+    checked_at: str = ""
+    trigger: str = ""
+    code: str = ""
+
+
+class ModelServicesStatus(BaseModel):
+    services: List[ModelServiceStatusItem] = Field(default_factory=list)
+
+
 class AdminUserUsage(BaseModel):
     id: str
     username: str

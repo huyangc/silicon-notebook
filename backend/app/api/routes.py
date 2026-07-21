@@ -58,6 +58,8 @@ from app.models.schemas import (
     MergeReviewRequest,
     MergeReviewSummary,
     ModelServiceView,
+    ModelServiceStatusItem,
+    ModelServicesStatus,
     ModelSettingsUpdate,
     ModelTestRequest,
     ModelTestResult,
@@ -110,7 +112,8 @@ from app.services.kg import scheduler as kg_scheduler
 from app.services.knowhow import api as knowhow_api
 from app.services.knowhow.assets import AssetService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
-from app.services.model_config import ModelNotConfiguredError
+from app.services.model_config import LLM_VARIANTS, ModelNotConfiguredError, STATUS_SERVICE_ROLES
+from app.services.model_status import ModelStatusService
 from app.services.pending_bus import pending_bus
 from app.repositories.ports import AskStreamPort, UploadedSourceFile
 from app.api.memory_routes import memory_router
@@ -189,10 +192,12 @@ def get_model_settings(user: UserProfile = Depends(get_current_user)):
 def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends(get_current_user)):
     repo = identity_repository()
     stored = dict(repo.get_user_model_settings(user.id))
+    changed_roles = []
     for role in _MODEL_ROLES:
         upd = getattr(payload, role)
         if upd is None:
             continue
+        changed_roles.append(role)
         svc = dict(stored.get(role) or {})
         for field in ("base_url", "api_key", "model"):
             val = getattr(upd, field)
@@ -207,6 +212,10 @@ def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends
         else:
             stored.pop(role, None)
     repo.set_user_model_settings(user.id, stored)
+    invalidated = set(changed_roles)
+    if "llm" in invalidated:
+        invalidated.update(LLM_VARIANTS)
+    repo.clear_model_service_statuses(user.id, sorted(invalidated))
     return get_model_settings(user)
 
 
@@ -237,6 +246,27 @@ def test_model_service(payload: ModelTestRequest, user: UserProfile = Depends(ge
         return ModelTestResult(ok=False, latency_ms=round((time.perf_counter() - started) * 1000),
                                code="upstream_error",
                                error=f"{type(exc).__name__}: {exc}"[:200])
+
+
+def _model_status_service() -> ModelStatusService:
+    return ModelStatusService(identity_repository(), get_settings())
+
+
+@router.get("/me/model-services/status", response_model=ModelServicesStatus)
+def get_model_services_status(user: UserProfile = Depends(get_current_user)):
+    return _model_status_service().snapshot(user)
+
+
+@router.post("/me/model-services/test-all", response_model=ModelServicesStatus)
+def test_all_model_services(user: UserProfile = Depends(get_current_user)):
+    return _model_status_service().test_all(user)
+
+
+@router.post("/me/model-services/{service}/test", response_model=ModelServiceStatusItem)
+def test_current_model_service(service: str, user: UserProfile = Depends(get_current_user)):
+    if service not in STATUS_SERVICE_ROLES:
+        raise HTTPException(status_code=404, detail="unknown model service")
+    return _model_status_service().test_one(user, service)
 
 
 @router.get("/doc-types")

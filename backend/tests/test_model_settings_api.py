@@ -117,6 +117,133 @@ def test_exception_path_fills_error_and_uses_generic_code(client, monkeypatch):
     assert "10.0.0.7:8000" in body["error"]
 
 
+def _install_status_service(monkeypatch, probe):
+    from app.api import routes
+    from app.api.deps import identity_repository
+    from app.core.config import get_settings
+    from app.services.model_status import ModelStatusService
+
+    service = ModelStatusService(identity_repository(), get_settings(), probe=probe)
+    monkeypatch.setattr(routes, "_model_status_service", lambda: service)
+    return service
+
+
+def test_model_service_status_requires_authentication(client):
+    response = client.get("/api/me/model-services/status")
+    assert response.status_code == 401
+
+
+def test_model_service_status_returns_all_roles_without_probing_or_secrets(client, monkeypatch):
+    calls = []
+    _install_status_service(monkeypatch, lambda config: calls.append(config))
+    headers = _auth(client)
+    client.put("/api/me/model-settings", json={
+        "llm": {
+            "base_url": "https://private-provider.invalid/v1",
+            "api_key": "key-private-secret",
+            "model": "current-runtime-model",
+        },
+        "rerank": {
+            "base_url": "https://rerank-provider.invalid/v1",
+            "api_key": "rerank-private-secret",
+            "model": "current-rerank-model",
+        },
+    }, headers=headers)
+
+    response = client.get("/api/me/model-services/status", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert {item["service"] for item in body["services"]} == {
+        "llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank", "embedding"
+    }
+    assert calls == []
+    encoded = str(body)
+    for private_value in (
+        "key-private-secret",
+        "rerank-private-secret",
+        "private-provider.invalid",
+        "rerank-provider.invalid",
+    ):
+        assert private_value not in encoded
+
+
+def test_current_model_service_test_sanitizes_upstream_failure(client, monkeypatch):
+    def fail(_config):
+        raise RuntimeError("provider 10.0.0.8 rejected secret payload")
+
+    _install_status_service(monkeypatch, fail)
+    headers = _auth(client)
+    client.put("/api/me/model-settings", json={
+        "llm": {
+            "base_url": "https://private-provider.invalid/v1",
+            "api_key": "key-private-secret",
+            "model": "current-runtime-model",
+        },
+    }, headers=headers)
+
+    response = client.post("/api/me/model-services/llm/test", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "error"
+    assert body["code"] == "upstream_error"
+    encoded = str(body)
+    for private_value in ("10.0.0.8", "secret", "provider", "private-provider.invalid"):
+        assert private_value not in encoded
+
+
+def test_current_model_service_test_succeeds_and_unknown_service_is_404(client, monkeypatch):
+    _install_status_service(monkeypatch, lambda _config: None)
+    headers = _auth(client)
+    client.put("/api/me/model-settings", json={
+        "llm": {
+            "base_url": "https://private-provider.invalid/v1",
+            "api_key": "key-private-secret",
+            "model": "current-runtime-model",
+        },
+    }, headers=headers)
+
+    success = client.post("/api/me/model-services/llm/test", headers=headers)
+    unknown = client.post("/api/me/model-services/not-a-service/test", headers=headers)
+
+    assert success.status_code == 200
+    assert success.json()["status"] == "ok"
+    assert unknown.status_code == 404
+
+
+def test_put_model_settings_invalidates_status_for_primary_and_inheriting_variants(client, monkeypatch):
+    _install_status_service(monkeypatch, lambda _config: None)
+    headers = _auth(client)
+    initial = {
+        "base_url": "https://private-provider.invalid/v1",
+        "api_key": "key-private-secret",
+        "model": "current-runtime-model",
+    }
+    client.put("/api/me/model-settings", json={"llm": initial}, headers=headers)
+    tested = client.post("/api/me/model-services/test-all", headers=headers)
+    assert tested.status_code == 200
+    assert all(
+        item["status"] == "ok"
+        for item in tested.json()["services"]
+        if item["service"] in {"llm", "reasoning_llm", "rewrite_llm", "kg_llm"}
+    )
+
+    changed = client.put("/api/me/model-settings", json={
+        "llm": {**initial, "model": "rotated-runtime-model"},
+    }, headers=headers)
+    snapshot = client.get("/api/me/model-services/status", headers=headers)
+
+    assert changed.status_code == 200
+    statuses = {item["service"]: item["status"] for item in snapshot.json()["services"]}
+    assert {role: statuses[role] for role in ("llm", "reasoning_llm", "rewrite_llm", "kg_llm")} == {
+        "llm": "untested",
+        "reasoning_llm": "untested",
+        "rewrite_llm": "untested",
+        "kg_llm": "untested",
+    }
+
+
 class _StubRepo:
     def get_user_model_settings(self, _uid):
         return {}
