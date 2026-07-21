@@ -33,15 +33,17 @@ _UNSAFE_MODEL_MARKERS = frozenset({
 })
 _URL_SCHEME_RE = re.compile(r"(?i)[a-z][a-z0-9+.-]*://")
 _IPV4_RE = re.compile(
-    r"(?<![A-Za-z0-9])(?:25[0-5]|2[0-4]\d|1?\d?\d)"
-    r"(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?![A-Za-z0-9])"
+    r"(?<!\d)(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+    r"(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?!\d)"
 )
-_CREDENTIAL_SEGMENT_RE = re.compile(
-    r"(?i)(?:^|[/@:_=+-])(?:sk|rk|pk|ak)-[A-Za-z0-9_-]{8,}(?=$|[/@:_=+-])"
+_CREDENTIAL_TOKEN_RE = re.compile(
+    r"(?i)(?:sk|rk|pk|ak)-[A-Za-z0-9_-]{8,}"
 )
-_VENDOR_KEY_SEGMENT_RE = re.compile(
-    r"(?i)(?:^|[/@:_=+-])(?:aiza|ghp_|hf_|xox)[A-Za-z0-9_-]{8,}"
+_VENDOR_KEY_TOKEN_RE = re.compile(
+    r"(?i)(?:aiza|ghp_|hf_|xox)[A-Za-z0-9_-]{8,}"
 )
+_FQDN_RE = re.compile(r"(?i)(?:[a-z0-9-]+\.)+[a-z0-9-]+")
+_ENDPOINT_LABELS = frozenset({"api", "host", "server", "gateway", "localhost"})
 
 
 @dataclass(frozen=True)
@@ -294,8 +296,8 @@ def _display_model(value: object) -> str:
     if (
         _URL_SCHEME_RE.search(model)
         or _IPV4_RE.search(model)
-        or _CREDENTIAL_SEGMENT_RE.search(model)
-        or _VENDOR_KEY_SEGMENT_RE.search(model)
+        or _CREDENTIAL_TOKEN_RE.search(model)
+        or _VENDOR_KEY_TOKEN_RE.search(model)
         or "localhost" in lowered
         or "[" in model
         or "]" in model
@@ -303,6 +305,7 @@ def _display_model(value: object) -> str:
         or "//" in model
         or ".." in model
         or any(marker in compact for marker in _UNSAFE_MODEL_MARKERS)
+        or _has_endpoint_port(model)
     ):
         return ""
     if any(not (char.isalnum() or char in "._/@+:-") for char in model):
@@ -314,3 +317,19 @@ def _display_model(value: object) -> str:
     if model.endswith((".", "/", ":")):
         return ""
     return model
+
+
+def _has_endpoint_port(model: str) -> bool:
+    """Separate conventional ``namespace:tag`` from numeric endpoint ports."""
+    if ":" not in model:
+        return False
+    namespace, tag = model.rsplit(":", 1)
+    if not tag.isdecimal():
+        return False
+    port = int(tag)
+    final_label = namespace.rsplit("/", 1)[-1].lower()
+    if 1024 <= port <= 65535:
+        return True
+    if not 1 <= port <= 65535:
+        return False
+    return final_label in _ENDPOINT_LABELS or bool(_FQDN_RE.fullmatch(final_label))

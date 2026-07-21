@@ -175,6 +175,16 @@ def test_snapshot_drops_unsafe_persisted_metadata(identity, user, settings):
         "localhost:8000",
         "model/127.0.0.1:8000",
         "model-authorization-diagnostic",
+        "api.example.com:8000",
+        "api.example.com:443",
+        "x/api.example.com:443",
+        "api:8000",
+        "host:80",
+        "server:22",
+        "gateway:443",
+        "model:65535",
+        "model10.0.0.8",
+        "modelsk-0123456789abcdefghijklmnop",
     ],
 )
 def test_status_hides_unsafe_model_but_probe_receives_raw_effective_config(
@@ -206,6 +216,7 @@ def test_status_hides_unsafe_model_but_probe_receives_raw_effective_config(
     "safe_model",
     [
         "llama3.2:latest",
+        "llama3:70b",
         "anthropic.claude-3-5-sonnet-20240620-v1:0",
         "meta-llama/Llama-3.1-8B-Instruct",
     ],
