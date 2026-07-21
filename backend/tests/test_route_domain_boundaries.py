@@ -62,7 +62,7 @@ def test_system_endpoints_are_owned_by_the_system_router():
         "get_model_settings",
         "put_model_settings",
         "test_model_service",
-        "get_model_service_status",
+        "get_model_services_status",
         "test_all_model_services",
         "test_current_model_service",
         "list_doc_types",

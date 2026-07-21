@@ -1229,6 +1229,11 @@ Node.js 22. The workflow installs from `backend/requirements.txt` and
 `frontend/package-lock.json`, then delegates test selection entirely to
 `scripts/check.sh`.
 
+The committed OpenAPI contract is byte-semantically frozen, so
+`backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`
+exactly. Upgrade either framework only together with an intentional OpenAPI
+contract regeneration and a clean-environment full-gate run.
+
 The workflow is read-only, does not receive model or deployment secrets, and
 uses four backend pytest workers to avoid oversubscribing the hosted runner.
 Backend installation sets `HNSWLIB_NO_NATIVE=1` and disables pip's wheel cache:

@@ -1071,6 +1071,11 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 `backend/requirements.txt` 与 `frontend/package-lock.json` 安装依赖，然后把
 测试选择完整委托给 `scripts/check.sh`。
 
+已提交的 OpenAPI 契约是字节语义冻结契约，因此
+`backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic
+`2.12.4`。只能在有意重生 OpenAPI 契约并在干净环境跑完整门禁时，
+才同步升级这两个框架。
+
 该 workflow 只有读权限，不接收模型或部署 secrets，并把后端 pytest worker
 限制为 4，避免 GitHub 托管 runner 过度抢占。后端安装设置
 `HNSWLIB_NO_NATIVE=1` 并禁用 pip wheel cache：`hnswlib` 默认会用

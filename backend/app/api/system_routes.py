@@ -124,7 +124,7 @@ def _model_status_service() -> ModelStatusService:
 
 
 @router.get("/me/model-services/status", response_model=ModelServicesStatus)
-def get_model_service_status(user: UserProfile = Depends(get_current_user)) -> ModelServicesStatus:
+def get_model_services_status(user: UserProfile = Depends(get_current_user)) -> ModelServicesStatus:
     return _model_status_service().snapshot(user)
 
 

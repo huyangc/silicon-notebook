@@ -400,6 +400,10 @@ assertion for every host.
   dependency in `backend/requirements.txt`; a clean CI install uses that file
   and `frontend/package-lock.json`. A developer's preinstalled package is never
   evidence that CI can install the gate.
+- The byte-semantically frozen OpenAPI contract requires exact framework pins:
+  FastAPI `0.135.3` and Pydantic `2.12.4`. Upgrade either pin only together with
+  an intentional OpenAPI contract regeneration and a clean-environment full
+  gate; do not replace these pins with open-ended minimum versions.
 - Hosted-runner lane timings are observational. The under-60-second acceptance
   target applies to the verified Apple Silicon Homebrew warm gate, not a cold
   GitHub runner.
