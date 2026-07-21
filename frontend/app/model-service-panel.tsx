@@ -22,11 +22,15 @@ const BASE_URL_PLACEHOLDERS: Record<ModelRole, string> = {
 };
 
 
-function checkedTime(iso: string): string {
+function checkedTime(
+  iso: string,
+  trigger: ModelServicesStatus["services"][number]["trigger"] | "",
+): string {
   if (!iso) return "尚未测试";
   const timestamp = new Date(iso);
   if (!Number.isFinite(timestamp.getTime())) return "尚未测试";
-  return `上次测试 ${timestamp.toLocaleString("zh-CN", {
+  const prefix = trigger === "observed_failure" ? "最近失败" : "上次测试";
+  return `${prefix} ${timestamp.toLocaleString("zh-CN", {
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
@@ -75,7 +79,9 @@ function EffectiveStatusRow({
       </div>
       <div className="model-service-status-result">
         <strong>{presentation.text}</strong>
-        <time dateTime={status?.checked_at || undefined}>{checkedTime(status?.checked_at || "")}</time>
+        <time dateTime={status?.checked_at || undefined}>
+          {checkedTime(status?.checked_at || "", status?.trigger || "")}
+        </time>
       </div>
       <button type="button" disabled={disabled} onClick={() => onTest(role)}>
         {disabled ? "测试中…" : "测试当前使用"}
@@ -117,8 +123,10 @@ export function ModelServicePanel({
   onClose,
   onSave,
   testingRoles,
+  draftTestingRoles,
   allTesting,
   saving = false,
+  returnFocusTo = null,
 }: {
   forms: Record<ModelRole, ServiceForm>;
   status: ModelServicesStatus | null;
@@ -131,16 +139,20 @@ export function ModelServicePanel({
   onClose: () => void;
   onSave: () => void;
   testingRoles: Partial<Record<StatusModelRole, boolean>>;
+  draftTestingRoles: Partial<Record<ModelRole, boolean>>;
   allTesting: boolean;
   saving?: boolean;
+  returnFocusTo?: HTMLElement | null;
 }) {
   const roleRefs = useRef<Partial<Record<StatusModelRole, HTMLFieldSetElement | null>>>({});
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
   const statusByRole = useMemo(
     () => new Map((status?.services ?? []).map((item) => [item.service, item])),
     [status],
   );
   const anyRoleTesting = Object.values(testingRoles).some(Boolean);
+  const anyDraftTesting = Object.values(draftTestingRoles).some(Boolean);
 
   useEffect(() => {
     if (highlightedRole) {
@@ -156,10 +168,31 @@ export function ModelServicePanel({
   useEffect(() => {
     function onKeyDown(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape" && !saving) onClose();
+      if (event.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      ));
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose, saving]);
+
+  useEffect(() => () => {
+    returnFocusTo?.focus();
+  }, [returnFocusTo]);
 
   async function runCurrentTest(role: StatusModelRole) {
     if (allTesting || testingRoles[role]) return;
@@ -192,6 +225,7 @@ export function ModelServicePanel({
   return (
     <section
       className="utility-modal model-service-modal"
+      ref={dialogRef}
       role="dialog"
       aria-modal="true"
       aria-labelledby="model-service-title"
@@ -223,7 +257,7 @@ export function ModelServicePanel({
             <button
               type="button"
               className="sort-button model-service-test-all"
-              disabled={allTesting || anyRoleTesting || saving}
+              disabled={allTesting || anyRoleTesting || anyDraftTesting || saving}
               onClick={runAllTests}
             >
               {allTesting ? "正在测试全部模型…" : "测试当前使用的全部模型"}
@@ -231,7 +265,10 @@ export function ModelServicePanel({
           </div>
           {MODEL_ROLES.map((role) => {
             const form = forms[role];
-            const roleTesting = allTesting || saving || Boolean(testingRoles[role]);
+            const roleTesting = allTesting
+              || saving
+              || Boolean(testingRoles[role])
+              || Boolean(draftTestingRoles[role]);
             return (
               <fieldset key={role} {...fieldsetProps(role)}>
                 <legend>{MODEL_ROLE_LABELS[role]}</legend>
@@ -245,6 +282,7 @@ export function ModelServicePanel({
                   <label>Base URL
                     <input
                       value={form.base_url}
+                      disabled={saving}
                       placeholder={BASE_URL_PLACEHOLDERS[role]}
                       onChange={(event) => onFormChange(role, { ...form, base_url: event.target.value })}
                     />
@@ -252,6 +290,7 @@ export function ModelServicePanel({
                   <label>Model
                     <input
                       value={form.model}
+                      disabled={saving}
                       onChange={(event) => onFormChange(role, { ...form, model: event.target.value })}
                     />
                   </label>
@@ -260,6 +299,7 @@ export function ModelServicePanel({
                       type="password"
                       placeholder="未改动则保留原 key"
                       value={form.api_key}
+                      disabled={saving}
                       onChange={(event) => onFormChange(role, {
                         ...form,
                         api_key: event.target.value,
@@ -272,7 +312,7 @@ export function ModelServicePanel({
                   <button
                     type="button"
                     className="sort-button"
-                    disabled={allTesting || saving || draftTestResults[role] === "测试中…"}
+                    disabled={roleTesting}
                     onClick={() => onTestDraft(role)}
                   >
                     测试未保存设置
@@ -297,7 +337,7 @@ export function ModelServicePanel({
             <button
               type="button"
               className="new-pill"
-              disabled={saving || allTesting || anyRoleTesting}
+              disabled={saving || allTesting || anyRoleTesting || anyDraftTesting}
               onClick={onSave}
             >
               {saving ? "保存中…" : "保存"}

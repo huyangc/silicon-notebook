@@ -3,6 +3,7 @@ import {
   STATUS_MODEL_ROLES,
   mergeModelServiceStatus,
   summarizeModelServices,
+  type ModelRole,
   type ModelServiceStatusItem,
   type ModelServicesStatus,
   type StatusModelRole,
@@ -144,13 +145,15 @@ export function deriveModelServiceSummaryView({
 export type ModelTestTicket = {
   id: number;
   epoch: number;
-  kind: "one" | "all";
+  kind: "one" | "all" | "draft";
   service?: StatusModelRole;
+  draftRevision?: number;
 };
 
 
 export type ModelTestActivity = {
   roles: Partial<Record<StatusModelRole, boolean>>;
+  drafts: Partial<Record<ModelRole, boolean>>;
   all: boolean;
 };
 
@@ -160,9 +163,15 @@ export class ModelTestCoordinator {
   private nextId = 1;
   private allTicketId: number | null = null;
   private roleTicketIds = new Map<StatusModelRole, number>();
+  private draftTicketIds = new Map<ModelRole, number>();
+  private draftRevisions = new Map<ModelRole, number>();
 
   beginOne(service: StatusModelRole): ModelTestTicket | null {
-    if (this.allTicketId !== null || this.roleTicketIds.has(service)) return null;
+    if (
+      this.allTicketId !== null
+      || this.roleTicketIds.has(service)
+      || this.draftTicketIds.has(service as ModelRole)
+    ) return null;
     const ticket = {
       id: this.nextId++,
       epoch: this.epoch,
@@ -174,7 +183,11 @@ export class ModelTestCoordinator {
   }
 
   beginAll(): ModelTestTicket | null {
-    if (this.allTicketId !== null || this.roleTicketIds.size > 0) return null;
+    if (
+      this.allTicketId !== null
+      || this.roleTicketIds.size > 0
+      || this.draftTicketIds.size > 0
+    ) return null;
     const ticket = {
       id: this.nextId++,
       epoch: this.epoch,
@@ -184,17 +197,58 @@ export class ModelTestCoordinator {
     return ticket;
   }
 
+  beginDraft(service: ModelRole): ModelTestTicket | null {
+    if (
+      this.allTicketId !== null
+      || this.roleTicketIds.has(service)
+      || this.draftTicketIds.has(service)
+    ) return null;
+    const revision = this.draftRevisions.get(service) ?? 0;
+    this.draftRevisions.set(service, revision);
+    const ticket = {
+      id: this.nextId++,
+      epoch: this.epoch,
+      kind: "draft" as const,
+      service,
+      draftRevision: revision,
+    };
+    this.draftTicketIds.set(service, ticket.id);
+    return ticket;
+  }
+
+  invalidateDraft(service: ModelRole): void {
+    this.draftRevisions.set(service, (this.draftRevisions.get(service) ?? 0) + 1);
+  }
+
+  invalidateDrafts(): void {
+    for (const service of this.draftRevisions.keys()) this.invalidateDraft(service);
+  }
+
   invalidateConfiguration(): void {
     this.epoch += 1;
   }
 
   isCurrent(ticket: ModelTestTicket): boolean {
-    return ticket.epoch === this.epoch;
+    if (ticket.epoch !== this.epoch) return false;
+    if (ticket.kind === "all") return this.allTicketId === ticket.id;
+    if (!ticket.service) return false;
+    if (ticket.kind === "draft") {
+      return this.draftTicketIds.get(ticket.service as ModelRole) === ticket.id
+        && (this.draftRevisions.get(ticket.service as ModelRole) ?? 0) === ticket.draftRevision;
+    }
+    return this.roleTicketIds.get(ticket.service) === ticket.id;
   }
 
   finish(ticket: ModelTestTicket): void {
     if (ticket.kind === "all") {
       if (this.allTicketId === ticket.id) this.allTicketId = null;
+      return;
+    }
+    if (ticket.kind === "draft") {
+      const service = ticket.service as ModelRole | undefined;
+      if (service && this.draftTicketIds.get(service) === ticket.id) {
+        this.draftTicketIds.delete(service);
+      }
       return;
     }
     if (ticket.service && this.roleTicketIds.get(ticket.service) === ticket.id) {
@@ -203,7 +257,9 @@ export class ModelTestCoordinator {
   }
 
   hasInFlight(): boolean {
-    return this.allTicketId !== null || this.roleTicketIds.size > 0;
+    return this.allTicketId !== null
+      || this.roleTicketIds.size > 0
+      || this.draftTicketIds.size > 0;
   }
 
   snapshot(): ModelTestActivity {
@@ -211,6 +267,9 @@ export class ModelTestCoordinator {
       roles: Object.fromEntries(
         [...this.roleTicketIds.keys()].map((service) => [service, true]),
       ) as Partial<Record<StatusModelRole, boolean>>,
+      drafts: Object.fromEntries(
+        [...this.draftTicketIds.keys()].map((service) => [service, true]),
+      ) as Partial<Record<ModelRole, boolean>>,
       all: this.allTicketId !== null,
     };
   }

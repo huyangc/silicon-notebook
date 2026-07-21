@@ -63,6 +63,7 @@ function renderPanel(overrides: Partial<React.ComponentProps<typeof ModelService
     onClose: vi.fn(),
     onSave: vi.fn(),
     testingRoles: {},
+    draftTestingRoles: {},
     allTesting: false,
     ...overrides,
   };
@@ -127,6 +128,67 @@ test("focuses a dialog control by default and closes on Escape", async () => {
   expect(screen.getByRole("button", { name: "关闭模型服务" })).toHaveFocus();
   await user.keyboard("{Escape}");
   expect(onClose).toHaveBeenCalledTimes(1);
+});
+
+
+test("traps Tab focus within the modal", async () => {
+  const user = userEvent.setup();
+  renderPanel();
+
+  const close = screen.getByRole("button", { name: "关闭模型服务" });
+  const save = screen.getByRole("button", { name: "保存" });
+  expect(close).toHaveFocus();
+
+  await user.tab({ shift: true });
+  expect(save).toHaveFocus();
+  await user.tab();
+  expect(close).toHaveFocus();
+});
+
+
+test("restores focus to the exact opener when the modal unmounts", () => {
+  const opener = document.createElement("button");
+  opener.textContent = "Ask opener";
+  document.body.append(opener);
+  opener.focus();
+
+  const panel = renderPanel({ returnFocusTo: opener });
+  panel.unmount();
+
+  expect(opener).toHaveFocus();
+  opener.remove();
+});
+
+
+test("checked text distinguishes an observed failure from a manual test", () => {
+  renderPanel({
+    status: {
+      services: [
+        status("llm", "runtime-primary", {
+          status: "error",
+          code: "upstream_error",
+          trigger: "observed_failure",
+        }),
+        status("reasoning_llm", "runtime-reasoner", { trigger: "manual_test" }),
+      ],
+    },
+  });
+
+  expect(screen.getByRole("group", { name: "主模型" })).toHaveTextContent("最近失败");
+  expect(screen.getByRole("group", { name: "推理模型" })).toHaveTextContent("上次测试");
+});
+
+
+test("draft activity blocks save and save activity disables editable inputs", () => {
+  const first = renderPanel({ draftTestingRoles: { llm: true } });
+  expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+  first.unmount();
+
+  renderPanel({ saving: true });
+  for (const input of screen.getAllByRole("textbox")) {
+    expect(input).toBeDisabled();
+  }
+  expect(screen.getAllByPlaceholderText("未改动则保留原 key")[0]).toBeDisabled();
 });
 
 

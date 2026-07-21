@@ -951,7 +951,9 @@ export default function Home() {
   const modelStatusUnavailable = modelStatusState.unavailable;
   const [highlightedModelRole, setHighlightedModelRole] = useState<StatusModelRole | null>(null);
   const [modelPanelSaving, setModelPanelSaving] = useState(false);
-  const [modelTestActivity, setModelTestActivity] = useState<ModelTestActivity>({ roles: {}, all: false });
+  const [modelTestActivity, setModelTestActivity] = useState<ModelTestActivity>({
+    roles: {}, drafts: {}, all: false,
+  });
   const [statusText, setStatusText] = useState("连接中");
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
@@ -1037,6 +1039,7 @@ export default function Home() {
   const modelPanelRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
   const modelPanelSavingRef = useRef(false);
+  const modelPanelReturnFocusRef = useRef<HTMLElement | null>(null);
   const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
   // 「索引与构建」面板统一确认——三系统(知识图谱/概念合并/检索索引)的破坏性动作
@@ -3645,6 +3648,13 @@ export default function Home() {
 
   async function openModelPanel(role: StatusModelRole | null = null) {
     const requestId = ++modelPanelRequestRef.current;
+    modelPanelReturnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const coordinator = modelTestCoordinatorRef.current;
+    coordinator.invalidateDrafts();
+    setModelTesting({});
+    setModelTestActivity(coordinator.snapshot());
     setHighlightedModelRole(role);
     setModelPanelOpen(true);
     void refreshModelStatus();
@@ -3658,6 +3668,7 @@ export default function Home() {
     } catch (e) {
       if (requestId === modelPanelRequestRef.current) {
         setModelPanelOpen(false);
+        modelPanelReturnFocusRef.current?.focus();
         reportError(e);
       }
     }
@@ -3674,6 +3685,7 @@ export default function Home() {
     if (!modelForms || modelPanelSavingRef.current || coordinator.hasInFlight()) return;
     modelPanelSavingRef.current = true;
     coordinator.invalidateConfiguration();
+    setModelTesting({});
     modelStatusRequestRef.current += 1;
     setModelPanelSaving(true);
     try {
@@ -3736,12 +3748,17 @@ export default function Home() {
   }
 
   async function runModelTest(role: ModelRole) {
-    if (!modelForms) return;
+    const coordinator = modelTestCoordinatorRef.current;
+    if (!modelForms || modelPanelSavingRef.current) return;
+    const ticket = coordinator.beginDraft(role);
+    if (!ticket) return;
     const f = modelForms[role];
+    setModelTestActivity(coordinator.snapshot());
     setModelTesting((m) => ({ ...m, [role]: "测试中…" }));
     try {
       const r = await testModelService(role, f.base_url.trim(), f.model.trim(),
         f.keyDirty ? f.api_key : null);
+      if (!coordinator.isCurrent(ticket)) return;
       // 200 响应挂不上 X-User-Message 头,故 ModelTestResult 用 `code` 承载出处:
       // 后端只回稳定枚举,文案在 vocabulary.ts(这样才落在界面词汇守卫的作用域里)。
       setModelTesting((m) => ({
@@ -3751,7 +3768,13 @@ export default function Home() {
           : `失败：${label(MODEL_TEST_ERROR, r.code, "连接未通过")}`,
       }));
     } catch (e) {
-      setModelTesting((m) => ({ ...m, [role]: "失败" })); reportError(e);
+      if (coordinator.isCurrent(ticket)) {
+        setModelTesting((m) => ({ ...m, [role]: "失败" }));
+        reportError(e);
+      }
+    } finally {
+      coordinator.finish(ticket);
+      setModelTestActivity(coordinator.snapshot());
     }
   }
 
@@ -6052,6 +6075,11 @@ export default function Home() {
           highlightedRole={highlightedModelRole}
           draftTestResults={modelTesting}
           onFormChange={(role, form) => {
+            if (modelPanelSavingRef.current) return;
+            const coordinator = modelTestCoordinatorRef.current;
+            coordinator.invalidateDraft(role);
+            setModelTesting((current) => ({ ...current, [role]: "" }));
+            setModelTestActivity(coordinator.snapshot());
             setModelForms((current) => current && ({ ...current, [role]: form }));
           }}
           onTestDraft={(role) => { void runModelTest(role); }}
@@ -6060,8 +6088,10 @@ export default function Home() {
           onClose={closeModelPanel}
           onSave={() => { void saveModelPanel(); }}
           testingRoles={modelTestActivity.roles}
+          draftTestingRoles={modelTestActivity.drafts}
           allTesting={modelTestActivity.all}
           saving={modelPanelSaving}
+          returnFocusTo={modelPanelReturnFocusRef.current}
         />
       )}
     </div>

@@ -173,6 +173,7 @@ test("persisted single and Ask test ownership survives panel close and rejects s
   assert.ok(ticket);
   assert.deepEqual(coordinator.snapshot(), {
     roles: { reasoning_llm: true },
+    drafts: {},
     all: false,
   });
 
@@ -195,9 +196,52 @@ test("all-model ownership blocks role tests and becomes stale after a config epo
   const allTicket = coordinator.beginAll();
   assert.ok(allTicket);
   assert.equal(coordinator.beginOne("llm"), null);
-  assert.deepEqual(coordinator.snapshot(), { roles: {}, all: true });
+  assert.deepEqual(coordinator.snapshot(), { roles: {}, drafts: {}, all: true });
   coordinator.invalidateConfiguration();
   assert.equal(coordinator.isCurrent(allTicket), false);
   coordinator.finish(allTicket);
-  assert.deepEqual(coordinator.snapshot(), { roles: {}, all: false });
+  assert.deepEqual(coordinator.snapshot(), { roles: {}, drafts: {}, all: false });
+});
+
+
+test("draft tests are owned by one role and exact form revision", () => {
+  const coordinator = new ModelTestCoordinator();
+  const llm = coordinator.beginDraft("llm");
+  const rerank = coordinator.beginDraft("rerank");
+
+  assert.ok(llm);
+  assert.ok(rerank);
+  assert.equal(coordinator.beginDraft("llm"), null);
+  assert.equal(coordinator.isCurrent(llm), true);
+  assert.equal(coordinator.isCurrent(rerank), true);
+  assert.deepEqual(coordinator.snapshot(), {
+    roles: {},
+    drafts: { llm: true, rerank: true },
+    all: false,
+  });
+
+  coordinator.invalidateDraft("llm");
+  assert.equal(coordinator.isCurrent(llm), false);
+  assert.equal(coordinator.isCurrent(rerank), true);
+  coordinator.finish(llm);
+  coordinator.finish(rerank);
+  assert.equal(coordinator.hasInFlight(), false);
+});
+
+
+test("save or reopen invalidates every draft completion", () => {
+  const coordinator = new ModelTestCoordinator();
+  const llm = coordinator.beginDraft("llm");
+  const rerank = coordinator.beginDraft("rerank");
+  assert.ok(llm);
+  assert.ok(rerank);
+
+  coordinator.invalidateConfiguration();
+
+  assert.equal(coordinator.isCurrent(llm), false);
+  assert.equal(coordinator.isCurrent(rerank), false);
+  assert.equal(coordinator.hasInFlight(), true);
+  coordinator.finish(llm);
+  coordinator.finish(rerank);
+  assert.equal(coordinator.hasInFlight(), false);
 });
