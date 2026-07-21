@@ -160,3 +160,35 @@ def test_snapshot_drops_unsafe_persisted_metadata(identity, user, settings):
     assert item.checked_at == ""
     assert "10.0.0.8" not in item.model_dump_json()
     assert "secret" not in item.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "unsafe_model",
+    [
+        "https://10.0.0.8/v1?api_key=provider-secret",
+        "sk-0123456789abcdefghijklmnop",
+    ],
+)
+def test_status_hides_unsafe_model_but_probe_receives_raw_effective_config(
+    identity, user, settings, unsafe_model
+):
+    from app.services.model_status import ModelStatusService
+
+    identity.set_user_model_settings(user.id, {
+        "llm": {
+            "base_url": "https://configured.example/v1",
+            "api_key": "configured-key",
+            "model": unsafe_model,
+        }
+    })
+    calls = []
+    service = ModelStatusService(identity, settings, probe=lambda config: calls.append(config.model))
+
+    snapshot = next(item for item in service.snapshot(user).services if item.service == "llm")
+    explicit = service.test_one(user, "llm")
+
+    assert snapshot.model == ""
+    assert explicit.model == ""
+    assert calls == [unsafe_model]
+    assert unsafe_model not in snapshot.model_dump_json()
+    assert unsafe_model not in explicit.model_dump_json()

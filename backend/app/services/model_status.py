@@ -25,6 +25,11 @@ logger = logging.getLogger("silicon_notebook.model_status")
 
 _SAFE_STATUS_VALUES = frozenset({"ok", "error"})
 _SAFE_TRIGGER_VALUES = frozenset({"manual_test", "observed_failure"})
+_UNSAFE_MODEL_MARKERS = frozenset({
+    "apikey", "secret", "token", "password", "credential", "bearer",
+    "provider", "error", "exception", "unauthorized", "forbidden",
+})
+_UNSAFE_MODEL_PREFIXES = ("sk-", "rk-", "pk-", "ak-", "aiza", "ghp_", "hf_", "xox")
 
 
 @dataclass(frozen=True)
@@ -131,7 +136,7 @@ class ModelStatusService:
         config = descriptor.config
         item = ModelServiceStatusItem(
             service=descriptor.service,
-            model=config.model,
+            model=_display_model(config.model),
             source=config.source,
             kind=config.kind,
             configured=config.configured,
@@ -163,7 +168,7 @@ class ModelStatusService:
         config = descriptor.config
         return ModelServiceStatusItem(
             service=descriptor.service,
-            model=config.model,
+            model=_display_model(config.model),
             source=config.source,
             kind=config.kind,
             configured=True,
@@ -257,3 +262,31 @@ def _safe_checked_at(value: object) -> str:
 
 def _safe_trigger(value: object) -> str:
     return value if value in _SAFE_TRIGGER_VALUES else ""
+
+
+def _display_model(value: object) -> str:
+    """Return a model-like label without reflecting arbitrary user config text.
+
+    The raw value remains on ``ResolvedModelConfig`` for fingerprints and provider
+    calls. Status responses only show short model identifiers: a Unicode letter
+    followed by letters/digits or common model-name separators, with dots allowed
+    only for numeric versions (for example ``gpt-4.1``). This rejects URLs, IPs,
+    credential-shaped strings, exception/provider text, and free-form bodies.
+    """
+    if not isinstance(value, str):
+        return ""
+    model = value.strip()
+    if not model or len(model) > 128 or not model[0].isalpha():
+        return ""
+    if model.lower().startswith(_UNSAFE_MODEL_PREFIXES):
+        return ""
+    compact = "".join(char for char in model.lower() if char.isalnum())
+    if any(marker in compact for marker in _UNSAFE_MODEL_MARKERS):
+        return ""
+    for index, char in enumerate(model):
+        if char.isalnum() or char in "_/@+-":
+            continue
+        if char == "." and index + 1 < len(model) and model[index + 1].isdigit():
+            continue
+        return ""
+    return model

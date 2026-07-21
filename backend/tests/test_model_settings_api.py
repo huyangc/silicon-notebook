@@ -193,6 +193,34 @@ def test_current_model_service_test_sanitizes_upstream_failure(client, monkeypat
         assert private_value not in encoded
 
 
+def test_status_endpoints_hide_unsafe_model_but_explicit_probe_uses_raw_model(client, monkeypatch):
+    calls = []
+    _install_status_service(monkeypatch, lambda config: calls.append(config.model))
+    headers = _auth(client)
+    unsafe_model = "https://10.0.0.8/v1?api_key=provider-secret"
+    client.put("/api/me/model-settings", json={
+        "llm": {
+            "base_url": "https://private-provider.invalid/v1",
+            "api_key": "key-private-secret",
+            "model": unsafe_model,
+        },
+    }, headers=headers)
+
+    snapshot = client.get("/api/me/model-services/status", headers=headers)
+    explicit = client.post("/api/me/model-services/llm/test", headers=headers)
+
+    assert snapshot.status_code == 200
+    assert explicit.status_code == 200
+    snapshot_item = next(item for item in snapshot.json()["services"] if item["service"] == "llm")
+    assert snapshot_item["model"] == ""
+    assert explicit.json()["model"] == ""
+    assert calls == [unsafe_model]
+    for body in (snapshot.json(), explicit.json()):
+        encoded = str(body)
+        for private_value in ("https://", "10.0.0.8", "api_key", "provider-secret"):
+            assert private_value not in encoded
+
+
 def test_current_model_service_test_succeeds_and_unknown_service_is_404(client, monkeypatch):
     _install_status_service(monkeypatch, lambda _config: None)
     headers = _auth(client)
