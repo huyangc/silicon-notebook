@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+const originalApiBase = process.env.NEXT_PUBLIC_API_BASE_URL;
+const originalWindow = globalThis.window;
+const originalFetch = globalThis.fetch;
 process.env.NEXT_PUBLIC_API_BASE_URL = "/api";
 
 const storage = new Map();
@@ -21,6 +24,12 @@ const { clearToken, getToken, setToken } = await import("./auth-session.ts");
 const { performApiRequest } = await import("./api-client.ts");
 
 test.afterEach(() => clearToken());
+test.after(() => {
+  if (originalApiBase === undefined) delete process.env.NEXT_PUBLIC_API_BASE_URL;
+  else process.env.NEXT_PUBLIC_API_BASE_URL = originalApiBase;
+  globalThis.window = originalWindow;
+  globalThis.fetch = originalFetch;
+});
 
 test("relative API_BASE resolves browser API paths with bearer authentication", async () => {
   setToken("relative-token");
