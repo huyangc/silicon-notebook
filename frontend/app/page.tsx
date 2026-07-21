@@ -86,9 +86,24 @@ import { conversationsOlderThan, CLEANUP_PRESETS } from "./conversation-cleanup"
 import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type AuthUser } from "./auth";
 import { humanizedError, logDiagnostic, throwHumanizedHttpError, toUserMessage } from "./errors.ts";
 import {
-  MODEL_ROLES, type ModelRole, type ServiceForm,
-  buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
+  MODEL_ROLES,
+  MODEL_ROLE_LABELS,
+  type ModelRole,
+  type ModelServiceStatusItem,
+  type ModelServicesStatus,
+  type ServiceForm,
+  type StatusModelRole,
+  buildPutPayload,
+  fetchModelServiceStatus,
+  fetchModelSettings,
+  mergeModelServiceStatus,
+  saveModelSettings,
+  summarizeModelServices,
+  testAllCurrentModelServices,
+  testCurrentModelService,
+  testModelService,
 } from "./model-settings.ts";
+import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
@@ -923,7 +938,11 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [modelPanelOpen, setModelPanelOpen] = useState(false);
   const [modelForms, setModelForms] = useState<Record<ModelRole, ServiceForm> | null>(null);
-  const [modelTesting, setModelTesting] = useState<Record<string, string>>({});
+  const [modelTesting, setModelTesting] = useState<Partial<Record<ModelRole, string>>>({});
+  const [modelStatus, setModelStatus] = useState<ModelServicesStatus | null>(null);
+  const [modelStatusUnavailable, setModelStatusUnavailable] = useState(false);
+  const [highlightedModelRole, setHighlightedModelRole] = useState<StatusModelRole | null>(null);
+  const [modelPanelSaving, setModelPanelSaving] = useState(false);
   const [statusText, setStatusText] = useState("连接中");
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
@@ -1005,6 +1024,8 @@ export default function Home() {
   // 一次拉齐,面板打开期间任一系统忙碌时轻量轮询保鲜(见下方 effect)。
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
+  const modelStatusRequestRef = useRef(0);
+  const modelPanelRequestRef = useRef(0);
   const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
   // 「索引与构建」面板统一确认——三系统(知识图谱/概念合并/检索索引)的破坏性动作
@@ -2196,9 +2217,28 @@ export default function Home() {
     window.setTimeout(() => focusKgGraphNode(nodeId), 900);
   }, [fgData.nodes, kgViewOpen, pendingKgFocusId]);
 
+  async function refreshModelStatus(): Promise<ModelServicesStatus | null> {
+    const requestId = ++modelStatusRequestRef.current;
+    try {
+      const snapshot = await fetchModelServiceStatus();
+      if (requestId !== modelStatusRequestRef.current) return snapshot;
+      setModelStatus(snapshot);
+      setModelStatusUnavailable(false);
+      return snapshot;
+    } catch {
+      if (requestId === modelStatusRequestRef.current) setModelStatusUnavailable(true);
+      return null;
+    }
+  }
+
   async function loadNotebookCollection() {
-    const healthResponse = await api<Health>("/health");
-    const notebookResponse = await api<NotebookSummary[]>("/notebooks");
+    // The model status request reads only the persisted local snapshot. It is
+    // deliberately detached so a missing status endpoint cannot hide notebooks.
+    void refreshModelStatus();
+    const [healthResponse, notebookResponse] = await Promise.all([
+      api<Health>("/health"),
+      api<NotebookSummary[]>("/notebooks"),
+    ]);
     setHealth(healthResponse);
     setStatusText(
       healthResponse.status !== "ok"
@@ -3591,39 +3631,74 @@ export default function Home() {
     window.location.reload();
   }
 
-  const ROLE_LABELS: Record<ModelRole, string> = {
-    llm: "主 LLM", reasoning_llm: "推理 LLM", rewrite_llm: "改写 LLM",
-    kg_llm: "构图 LLM", rerank: "重排 Rerank",
-  };
-  // Base URL 示例：只填到服务根地址（/v1），由后端自动拼接具体接口路径。
-  // 前四个走 OpenAI 兼容 /chat/completions；rerank 走 DashScope 原生服务路径。
-  const BASE_URL_PLACEHOLDERS: Record<ModelRole, string> = {
-    llm: "https://api.openai.com/v1",
-    reasoning_llm: "https://api.deepseek.com/v1",
-    rewrite_llm: "https://api.openai.com/v1",
-    kg_llm: "https://api.openai.com/v1",
-    rerank: "https://dashscope.aliyuncs.com/api/v1",
-  };
-
-  async function openModelPanel() {
+  async function openModelPanel(role: StatusModelRole | null = null) {
+    const requestId = ++modelPanelRequestRef.current;
+    setHighlightedModelRole(role);
     setModelPanelOpen(true);
+    void refreshModelStatus();
     try {
       const view = await fetchModelSettings();
       const forms = Object.fromEntries(MODEL_ROLES.map((r) => [r, {
         base_url: view[r].base_url, model: view[r].model,
         api_key: "", keyDirty: false,
       }])) as Record<ModelRole, ServiceForm>;
-      setModelForms(forms);
-    } catch (e) { reportError(e); }
+      if (requestId === modelPanelRequestRef.current) setModelForms(forms);
+    } catch (e) {
+      if (requestId === modelPanelRequestRef.current) {
+        setModelPanelOpen(false);
+        reportError(e);
+      }
+    }
+  }
+
+  function closeModelPanel() {
+    modelPanelRequestRef.current += 1;
+    setModelPanelOpen(false);
+    setHighlightedModelRole(null);
   }
 
   async function saveModelPanel() {
-    if (!modelForms) return;
+    if (!modelForms || modelPanelSaving) return;
+    setModelPanelSaving(true);
     try {
-      await saveModelSettings(buildPutPayload(modelForms));
-      setModelPanelOpen(false);
+      const view = await saveModelSettings(buildPutPayload(modelForms));
+      setModelForms(Object.fromEntries(MODEL_ROLES.map((role) => [role, {
+        base_url: view[role].base_url,
+        model: view[role].model,
+        api_key: "",
+        keyDirty: false,
+      }])) as Record<ModelRole, ServiceForm>);
+      await refreshModelStatus();
       setToast("模型服务配置已保存");
-    } catch (e) { reportError(e); }
+    } catch (e) {
+      reportError(e);
+    } finally {
+      setModelPanelSaving(false);
+    }
+  }
+
+  async function runCurrentModelTest(role: StatusModelRole): Promise<ModelServiceStatusItem> {
+    try {
+      const item = await testCurrentModelService(role);
+      modelStatusRequestRef.current += 1;
+      setModelStatus((current) => mergeModelServiceStatus(current, item));
+      setModelStatusUnavailable(false);
+      return item;
+    } catch (e) {
+      reportError(e);
+      throw e;
+    }
+  }
+
+  async function runAllCurrentModelTests() {
+    try {
+      const result = await testAllCurrentModelServices();
+      modelStatusRequestRef.current += 1;
+      setModelStatus((current) => mergeModelServiceStatus(current, result));
+      setModelStatusUnavailable(false);
+    } catch (e) {
+      reportError(e);
+    }
   }
 
   async function runModelTest(role: ModelRole) {
@@ -3680,6 +3755,49 @@ export default function Home() {
   const menuNotebook = menuNotebookId
     ? notebooks.find((item) => item.id === menuNotebookId) ?? null
     : null;
+  const persistedModelSummary = modelStatus
+    ? summarizeModelServices(modelStatus.services)
+    : null;
+  const pendingModelServices = modelStatus?.services.filter(
+    (item) => item.configured && item.status === "untested",
+  ) ?? [];
+  const modelSummaryView: {
+    text: string;
+    tone: "ok" | "warn" | "bad" | "connecting";
+    title: string;
+  } = !health
+    ? {
+        text: statusText || "连接中",
+        tone: statusText && statusText !== "连接中" ? "bad" : "connecting",
+        title: statusText && statusText !== "连接中" ? statusText : "正在连接服务…",
+      }
+    : health.status !== "ok"
+      ? { text: "服务连接异常", tone: "bad", title: "API 服务连接异常" }
+      : modelStatusUnavailable
+        ? {
+            text: "API 正常 · 模型状态未知",
+            tone: "warn",
+            title: "API 正常；模型状态暂时不可用，打开模型服务查看",
+          }
+        : persistedModelSummary
+          ? {
+              text: persistedModelSummary.text,
+              tone: persistedModelSummary.tone,
+              title: persistedModelSummary.abnormal.length > 0
+                ? `模型异常：${persistedModelSummary.abnormal.map((item) =>
+                    `${MODEL_ROLE_LABELS[item.service]} ${item.model || "未配置"}`
+                  ).join("、")}`
+                : pendingModelServices.length > 0
+                  ? `待测试：${pendingModelServices.map((item) =>
+                      `${MODEL_ROLE_LABELS[item.service]} ${item.model || "未配置"}`
+                    ).join("、")}`
+                  : "API 和已配置模型状态正常",
+            }
+          : {
+              text: "API 正常 · 正在读取模型状态",
+              tone: "connecting",
+              title: "正在读取已保存的模型状态，不会自动测试模型",
+            };
 
   // 启动就绪门:在认证/加载分支之前拦截。未就绪时只展示启动屏,绝不露出登录表单或空白挂起。
   if (!serviceReady) return <StartingScreen snapshot={readySnapshot} onRetry={() => setReadyRetry((n) => n + 1)} />;
@@ -3706,10 +3824,12 @@ export default function Home() {
           </div>
         </div>
         <div className="topbar-right">
-          <div className="status" title={health ? `API ${health.status} · 模型${health.llm_configured ? "已配置" : "未配置"}` : "正在连接服务…"}>
-            <span className={`status-dot ${!health ? "connecting" : health.status !== "ok" ? "bad" : !health.llm_configured ? "warn" : ""}`} />
-            <span>{statusText}</span>
-          </div>
+          <ModelServiceSummaryButton
+            text={modelSummaryView.text}
+            tone={modelSummaryView.tone}
+            title={modelSummaryView.title}
+            onOpen={() => { void openModelPanel(); }}
+          />
           <PendingBell
             snapshot={pending.snapshot}
             doneItems={pending.doneItems}
@@ -4374,6 +4494,8 @@ export default function Home() {
                             buildingScaleIndex={buildingScaleIndex}
                             onSaveMemory={(answerId) => setMemoryAnswerId(answerId)}
                             memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
+                            onTestModel={runCurrentModelTest}
+                            onOpenModelSettings={(role) => { void openModelPanel(role); }}
                           />
                         </div>
                       </div>
@@ -5929,48 +6051,21 @@ export default function Home() {
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />
 
       {modelPanelOpen && modelForms && (
-        <section className="utility-modal" role="dialog" aria-modal="true"
-          onClick={(e) => { if (e.currentTarget === e.target) setModelPanelOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
-              <div><h2>模型服务</h2><p>留空则使用系统默认；API Key 只写不回显</p></div>
-              <button className="icon-button" onClick={() => setModelPanelOpen(false)}>×</button>
-            </div>
-            <div className="source-detail-body">
-              <p className="tool-hint" style={{ margin: "0 0 12px" }}>
-                Base URL 只需填到服务根地址（通常以 <code>/v1</code> 结尾），系统会自动拼接 <code>/chat/completions</code> 等接口路径。
-                例如填 <code>https://api.openai.com/v1</code>，而不是 <code>https://api.openai.com/v1/chat/completions</code>。
-              </p>
-              {MODEL_ROLES.map((role) => (
-                <fieldset key={role} className="edit-form" style={{ marginBottom: 12 }}>
-                  <legend>{ROLE_LABELS[role]}</legend>
-                  <label>Base URL
-                    <input value={modelForms[role].base_url}
-                      placeholder={BASE_URL_PLACEHOLDERS[role]}
-                      onChange={(e) => setModelForms((s) => s && ({ ...s, [role]: { ...s[role], base_url: e.target.value } }))} />
-                  </label>
-                  <label>Model
-                    <input value={modelForms[role].model}
-                      onChange={(e) => setModelForms((s) => s && ({ ...s, [role]: { ...s[role], model: e.target.value } }))} />
-                  </label>
-                  <label>API Key
-                    <input type="password" placeholder="未改动则保留原 key"
-                      value={modelForms[role].api_key}
-                      onChange={(e) => setModelForms((s) => s && ({ ...s, [role]: { ...s[role], api_key: e.target.value, keyDirty: true } }))} />
-                  </label>
-                  <div className="modal-actions">
-                    <button type="button" className="sort-button" onClick={() => runModelTest(role)}>测试</button>
-                    <span style={{ fontSize: 12, opacity: 0.8 }}>{modelTesting[role] || ""}</span>
-                  </div>
-                </fieldset>
-              ))}
-              <div className="modal-actions">
-                <button className="sort-button" onClick={() => setModelPanelOpen(false)}>取消</button>
-                <button className="new-pill" onClick={() => saveModelPanel()}>保存</button>
-              </div>
-            </div>
-          </div>
-        </section>
+        <ModelServicePanel
+          forms={modelForms}
+          status={modelStatus}
+          highlightedRole={highlightedModelRole}
+          draftTestResults={modelTesting}
+          onFormChange={(role, form) => {
+            setModelForms((current) => current && ({ ...current, [role]: form }));
+          }}
+          onTestDraft={(role) => { void runModelTest(role); }}
+          onTestCurrent={async (role) => { await runCurrentModelTest(role); }}
+          onTestAll={runAllCurrentModelTests}
+          onClose={closeModelPanel}
+          onSave={() => { void saveModelPanel(); }}
+          saving={modelPanelSaving}
+        />
       )}
     </div>
   );
