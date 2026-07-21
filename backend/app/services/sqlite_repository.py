@@ -46,14 +46,19 @@ from app.models.sources import (
     SourceImportRequest,
     SourceSummary,
 )
-from app.models.schemas import (
+from app.models.ask import (
     AnswerAnchor,
     AskRequest,
     AskResponse,
     Citation,
-    DuplicateGroup,
     FeedbackRequest,
     FeedbackResponse,
+    ModelError,
+    NotebookSearchResponse,
+    RuleCard,
+)
+from app.models.knowledge import (
+    DuplicateGroup,
     KnowledgeEdge,
     KnowledgeFieldValue,
     KnowledgeGraph,
@@ -62,14 +67,11 @@ from app.models.schemas import (
     KnowledgeRef,
     KnowledgeTypeCount,
     KnowledgeUpdate,
-    ModelError,
     ObjectSchemaCreate,
     ObjectSchemaModel,
     ObjectSchemaUpdate,
     MergeRequest,
-    NotebookSearchResponse,
     PaginatedKnowledge,
-    RuleCard,
 )
 from app.services import kg_ingest
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled

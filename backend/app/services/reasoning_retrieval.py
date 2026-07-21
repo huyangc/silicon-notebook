@@ -46,7 +46,7 @@ class _ReasoningRetrieverFactory(Protocol):
         cancel_event: CancelEvent = None,
     ) -> object: ...
 
-from app.models.schemas import TraceStep
+from app.models.ask import TraceStep
 from app.services.prompts import (
     PLAN_SCHEMA_HINT, REFLECT_SCHEMA_HINT, plan_prompt, reflect_prompt,
 )

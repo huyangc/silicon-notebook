@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import repository, require_user_or_agent, user_or_agent_scope
-from app.models.schemas import (
+from app.models.knowhow import (
     KnowhowAgentTable,
     KnowhowCellCodePut,
     KnowhowCellCodeResult,

@@ -15,8 +15,14 @@ DOMAIN_MODULES = (
     "memory",
     "sources",
     "notebooks",
-    "kg",
     "reports",
+    "ask",
+    "knowledge",
+    "kg",
+    "knowhow",
+    "content_overview",
+    "admin",
+    "model_services",
 )
 MOVED_MODEL_OWNERS = {
     "Evidence": "common",
@@ -153,6 +159,20 @@ def test_legacy_schema_exports_resolve_to_domain_objects():
         assert hasattr(facade, name), name
 
 
+def test_schema_facade_contains_no_model_definitions():
+    tree = ast.parse((MODELS / "schemas.py").read_text(encoding="utf-8"))
+    assert not any(isinstance(node, ast.ClassDef) for node in tree.body)
+
+
+def test_legacy_schema_exports_are_object_identical_domain_definitions():
+    facade = importlib.import_module("app.models.schemas")
+    assert sorted(facade.__all__) == LEGACY
+    for name in LEGACY:
+        value = getattr(facade, name)
+        if isinstance(value, type):
+            assert value.__module__ != "app.models.schemas", name
+
+
 def test_moved_legacy_exports_preserve_object_identity():
     facade = importlib.import_module("app.models.schemas")
     for name, module_name in MOVED_MODEL_OWNERS.items():
@@ -183,14 +203,12 @@ def test_moved_facade_reference_helper_allows_unmoved_facade_access():
         assert not moved_facade_references(source)
 
 
-def test_production_consumers_do_not_import_moved_models_from_legacy_facade():
+def test_first_party_production_uses_domain_model_modules():
     app_root = ROOT / "backend" / "app"
-    offenders: dict[str, list[str]] = {}
+    offenders = []
     for path in app_root.rglob("*.py"):
         if path == MODELS / "schemas.py":
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        moved = sorted(moved_facade_references(tree))
-        if moved:
-            offenders[str(path.relative_to(ROOT))] = moved
-    assert not offenders, offenders
+        if "app.models.schemas" in _imports(path):
+            offenders.append(path.relative_to(ROOT).as_posix())
+    assert offenders == []

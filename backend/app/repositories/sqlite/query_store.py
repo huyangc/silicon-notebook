@@ -5,7 +5,7 @@ import sqlite3
 from typing import Any
 
 from app.models.notebooks import NotebookAnalytics
-from app.models.schemas import (
+from app.models.ask import (
     NotebookSearchResponse,
     SearchHit,
 )

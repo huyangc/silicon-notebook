@@ -17,7 +17,7 @@ from app.models.notebooks import (
     NotebookTemplate,
     NotebookUpdate,
 )
-from app.models.schemas import NotebookSearchResponse, SearchHit
+from app.models.ask import NotebookSearchResponse, SearchHit
 from app.repositories.ports import KgBuildJobStorePort
 # Canonical implementation lives with the SourceFileStore (Task 11); the
 # private alias keeps this module's delete_notebook cleanup call sites and

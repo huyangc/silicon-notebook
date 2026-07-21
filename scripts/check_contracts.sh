@@ -13,6 +13,19 @@ trap 'printf "%s=%s\n" "$CHECK_LANE_NAME" "$((SECONDS - START_SECONDS))" > "$CHE
   "$ROOT_DIR/backend/app/api/routes.py" \
   "$ROOT_DIR/backend/app/core/config.py" \
   "$ROOT_DIR/backend/app/core/llm.py" \
+  "$ROOT_DIR/backend/app/models/common.py" \
+  "$ROOT_DIR/backend/app/models/identity.py" \
+  "$ROOT_DIR/backend/app/models/memory.py" \
+  "$ROOT_DIR/backend/app/models/sources.py" \
+  "$ROOT_DIR/backend/app/models/notebooks.py" \
+  "$ROOT_DIR/backend/app/models/reports.py" \
+  "$ROOT_DIR/backend/app/models/ask.py" \
+  "$ROOT_DIR/backend/app/models/knowledge.py" \
+  "$ROOT_DIR/backend/app/models/kg.py" \
+  "$ROOT_DIR/backend/app/models/knowhow.py" \
+  "$ROOT_DIR/backend/app/models/content_overview.py" \
+  "$ROOT_DIR/backend/app/models/admin.py" \
+  "$ROOT_DIR/backend/app/models/model_services.py" \
   "$ROOT_DIR/backend/app/models/schemas.py" \
   "$ROOT_DIR/backend/app/services/ask_modes.py" \
   "$ROOT_DIR/backend/app/services/cancellation.py" \

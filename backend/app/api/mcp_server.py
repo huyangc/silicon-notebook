@@ -24,7 +24,7 @@ from starlette.responses import JSONResponse
 
 from app.core.request_context import reset_request_user, set_request_user
 from app.models.identity import AgentPrincipal, UserProfile
-from app.models.schemas import AskRequest
+from app.models.ask import AskRequest
 from app.core.memory_inputs import (
     normalize_client_request_id,
     normalize_content,

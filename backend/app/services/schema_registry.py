@@ -12,7 +12,7 @@ import json
 from typing import Dict, List
 
 from app.core.config import Settings
-from app.models.schemas import (
+from app.models.knowledge import (
     ObjectSchemaCreate,
     ObjectSchemaModel,
     ObjectSchemaUpdate,

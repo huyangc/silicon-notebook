@@ -38,7 +38,7 @@ from app.models.memory import (
     MemoryUpdate,
     PaginatedMemories,
 )
-from app.models.schemas import PromoteRequest, PromotionCandidate
+from app.models.admin import PromoteRequest, PromotionCandidate
 from app.repositories.ports import AskStateStorePort, MemoryRepository
 from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prompt
 from app.services.knowledge_governance import PromotionTargetError

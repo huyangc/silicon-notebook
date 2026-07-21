@@ -39,12 +39,12 @@ from typing import Any, Callable, Dict, List, Optional
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
 from app.models.common import Evidence
-from app.models.schemas import (
+from app.models.ask import RuleCard
+from app.models.knowledge import (
     DuplicateGroup,
     KnowledgeRef,
     KnowledgeUpdate,
     MergeRequest,
-    RuleCard,
 )
 from app.repositories.sqlite.governance_store import GovernanceStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore

@@ -56,12 +56,14 @@ from app.models.sources import (
     SourceImportRequest,
     SourceSummary,
 )
-from app.models.schemas import (
+from app.models.ask import (
     AnswerAnchor, AskRequest, AskResponse, Citation, ConversationDetail,
-    ConversationSummary, DuplicateGroup, FeedbackRequest, FeedbackResponse,
-    KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
-    NotebookSearchResponse, ObjectSchemaCreate, ObjectSchemaModel, ObjectSchemaUpdate,
-    PaginatedKnowledge, RuleCard,
+    ConversationSummary, FeedbackRequest, FeedbackResponse, NotebookSearchResponse,
+    RuleCard,
+)
+from app.models.knowledge import (
+    DuplicateGroup, KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
+    ObjectSchemaCreate, ObjectSchemaModel, ObjectSchemaUpdate, PaginatedKnowledge,
 )
 from app.services.cancellation import CancelEvent
 from app.services.model_config import ResolvedModelConfig

@@ -52,22 +52,36 @@ from app.models.sources import (
     SourceSummary,
 )
 from app.services.sqlite_repository import KnowledgeGraphTooLargeError
-from app.models.schemas import (
+from app.models.admin import (
     AdminUserNotebook,
     AdminUserUsage,
+    PromoteRequest,
+    PromotionApproveResult,
+    PromotionCandidate,
+    PromotionRejectRequest,
+)
+from app.models.ask import (
     AskRequest,
     AskResponse,
-    ConceptWhitelistAdd,
-    ConceptWhitelistEntry,
     ConversationDetail,
     ConversationRenameRequest,
     ConversationSummary,
-    DuplicateGroup,
-    EdgeReviewItem,
-    EdgeReviewRequest,
     FeedbackRequest,
     FeedbackResponse,
     KgSearchResponse,
+    NotebookSearchResponse,
+)
+from app.models.kg import (
+    ConceptWhitelistAdd,
+    ConceptWhitelistEntry,
+    MergeReviewJob,
+    MergeReviewRequest,
+    MergeReviewSummary,
+    RebuildScaleIndexRequest,
+    ScaleIndexStatus,
+    UnifiedKgStatus,
+)
+from app.models.knowhow import (
     KnowhowCellPatch,
     KnowhowCellPatchResult,
     KnowhowCellsBatchPatch,
@@ -81,34 +95,30 @@ from app.models.schemas import (
     KnowhowTableDetail,
     KnowhowTablePatch,
     KnowhowTableSummary,
+    KnowhowAppendPreview,
+    KnowhowAppendResult,
+    KnowhowCellOptimizeResult,
+    KnowhowCellReformatResult,
+)
+from app.models.knowledge import (
+    DuplicateGroup,
+    EdgeReviewItem,
+    EdgeReviewRequest,
     KnowledgeGraph,
     KnowledgeRecord,
     KnowledgeTypeCount,
     KnowledgeUpdate,
     PaginatedKnowledge,
     MergeRequest,
-    MergeReviewJob,
-    MergeReviewRequest,
-    MergeReviewSummary,
+    ObjectSchemaCreate,
+    ObjectSchemaModel,
+    ObjectSchemaUpdate,
+)
+from app.models.model_services import (
     ModelServiceView,
     ModelSettingsUpdate,
     ModelTestRequest,
     ModelTestResult,
-    NotebookSearchResponse,
-    ObjectSchemaCreate,
-    ObjectSchemaModel,
-    ObjectSchemaUpdate,
-    PromoteRequest,
-    PromotionApproveResult,
-    PromotionCandidate,
-    PromotionRejectRequest,
-    RebuildScaleIndexRequest,
-    ScaleIndexStatus,
-    UnifiedKgStatus,
-    KnowhowAppendPreview,
-    KnowhowAppendResult,
-    KnowhowCellOptimizeResult,
-    KnowhowCellReformatResult,
 )
 from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
@@ -2364,7 +2374,7 @@ def backfill_paper_metadata(notebook_id: str) -> dict:
 # 用同步 def（同 create_report/create_object_schema）——FastAPI 自动放线程池跑，
 # 无需 run_in_threadpool、无需在文件顶部加 import（避免打断行号 pin）。
 from app.api.deps import notebook_access_repository as _kh_access  # noqa: E402
-from app.models.schemas import KnowhowTransferRequest  # noqa: E402
+from app.models.knowhow import KnowhowTransferRequest  # noqa: E402
 from app.services.knowhow import transfer as _kh_transfer  # noqa: E402
 
 

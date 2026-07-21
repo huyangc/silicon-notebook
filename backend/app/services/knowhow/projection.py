@@ -200,7 +200,7 @@ def _split_long_text(text: str, limit: int = _CHUNK_CHAR_LIMIT) -> List[str]:
 
 def _evidence(source_id: str, source_title: str, element_id: str, element_type: str,
              location_label: str, quote: str) -> dict:
-    """Product Evidence shape (app.models.schemas.Evidence) — mirrors
+    """Product Evidence shape (app.models.common.Evidence) — mirrors
     kg_ingest._ev's fields exactly so knowhow-derived KOs/edges are readable
     by every existing evidence consumer (citation rendering, graph
     retrieval's element->chunk bridge) without a special case."""
