@@ -12,7 +12,13 @@ export type ApiRequestOptions = RequestInit & {
 
 function resolveApiUrl(pathOrUrl: string): string {
   try {
-    const base = new URL(API_BASE);
+    let base: URL;
+    try {
+      base = new URL(API_BASE);
+    } catch {
+      if (typeof window === "undefined" || !window.location.origin) throw new TypeError();
+      base = new URL(API_BASE, window.location.origin);
+    }
     const basePath = base.pathname === "/" ? "/" : base.pathname.replace(/\/+$/, "");
     const baseDirectory = new URL(base);
     baseDirectory.pathname = basePath === "/" ? "/" : `${basePath}/`;
