@@ -76,7 +76,11 @@ class ModelStatusService:
         if not descriptor.config.configured:
             return self._snapshot_item(descriptor, None)
         outcome = self._run_probe(descriptor.config, service)
-        self._record(user, descriptor, outcome, "manual_test")
+        if not self._record(user, descriptor, outcome, "manual_test"):
+            return next(
+                item for item in self.snapshot(user).services
+                if item.service == service
+            )
         return self._result_item(descriptor, outcome, "manual_test")
 
     def test_all(self, user: UserProfile) -> ModelServicesStatus:
@@ -105,25 +109,18 @@ class ModelStatusService:
     def record_observed_failure(
         self, user: UserProfile, service: str, failed_fingerprint: str
     ) -> bool:
-        descriptor = self._descriptor_for(user, service)
-        if (
-            not failed_fingerprint
-            or not descriptor.config.configured
-            or model_config_fingerprint(descriptor.config) != failed_fingerprint
-        ):
-            return False
-        self._record(
-            user,
-            descriptor,
-            _ProbeOutcome(
-                status="error",
-                latency_ms=0,
-                code="upstream_error",
-                checked_at=_checked_at(),
-            ),
+        if service not in STATUS_SERVICE_ROLES:
+            raise ValueError(f"unknown model service: {service}")
+        return self.identity.record_model_service_status_if_current(
+            user.id,
+            service,
+            failed_fingerprint,
+            "error",
+            0,
+            "upstream_error",
             "observed_failure",
+            _checked_at(),
         )
-        return True
 
     def _descriptor_for(self, user: UserProfile, service: str) -> ServiceDescriptor:
         for descriptor in self.descriptors(user):
@@ -187,8 +184,8 @@ class ModelStatusService:
         descriptor: ServiceDescriptor,
         outcome: _ProbeOutcome,
         trigger: str,
-    ) -> None:
-        self.identity.record_model_service_status(
+    ) -> bool:
+        return self.identity.record_model_service_status_if_current(
             user.id,
             descriptor.service,
             model_config_fingerprint(descriptor.config),

@@ -5623,12 +5623,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/routes.py",
-        "scope": "<module>.put_model_settings",
-        "target": "get_user_model_settings"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
         "scope": "<module>.test_model_service",
         "target": "get_user_model_settings"
       }
@@ -7542,12 +7536,6 @@
         "path": "backend/app/api/routes.py",
         "scope": "<module>.get_model_settings",
         "target": "resolve_model_config"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.put_model_settings",
-        "target": "resolve_model_config"
       }
     ],
     "kind": "method",
@@ -8167,21 +8155,6 @@
     "patch_targets": [],
     "scope": "module",
     "signature": "(user: 'UserProfile | None') -> 'RequestUserToken'"
-  },
-  "set_user_model_settings": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.put_model_settings",
-        "target": "set_user_model_settings"
-      }
-    ],
-    "kind": "method",
-    "owner": "IdentityStore",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self, user_id: 'str', settings: 'dict') -> 'None'"
   },
   "settings": {
     "consumers": [

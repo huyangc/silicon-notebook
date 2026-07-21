@@ -116,7 +116,6 @@ from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.model_config import (
     ModelNotConfiguredError,
     STATUS_SERVICE_ROLES,
-    model_config_fingerprint,
 )
 from app.services.model_status import ModelStatusService
 from app.services.pending_bus import pending_bus
@@ -198,35 +197,9 @@ def get_model_settings(user: UserProfile = Depends(get_current_user)):
 @router.put("/me/model-settings")
 def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends(get_current_user)):
     repo = identity_repository()
-    stored = dict(repo.get_user_model_settings(user.id))
-    before = {
-        role: model_config_fingerprint(repo.resolve_model_config(user, role))
-        for role in STATUS_SERVICE_ROLES
-    }
-    for role in _MODEL_ROLES:
-        upd = getattr(payload, role)
-        if upd is None:
-            continue
-        svc = dict(stored.get(role) or {})
-        for field in ("base_url", "api_key", "model"):
-            val = getattr(upd, field)
-            if val is None:          # 不变
-                continue
-            if val == "":            # 清除
-                svc.pop(field, None)
-            else:                    # 设置
-                svc[field] = val
-        if svc:
-            stored[role] = svc
-        else:
-            stored.pop(role, None)
-    repo.set_user_model_settings(user.id, stored)
-    invalidated = {
-        role
-        for role in STATUS_SERVICE_ROLES
-        if model_config_fingerprint(repo.resolve_model_config(user, role)) != before[role]
-    }
-    repo.clear_model_service_statuses(user.id, sorted(invalidated))
+    repo.patch_user_model_settings_atomic(
+        user.id, payload.model_dump(exclude_unset=True)
+    )
     return get_model_settings(user)
 
 

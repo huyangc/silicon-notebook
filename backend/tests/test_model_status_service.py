@@ -78,6 +78,29 @@ def test_test_one_returns_dynamic_model_and_sanitized_failure(identity, user, se
     assert "provider" not in item.model_dump_json()
 
 
+def test_manual_probe_rotated_during_call_does_not_persist_or_return_stale_result(
+    identity, user, settings
+):
+    from app.services.model_status import ModelStatusService
+
+    def rotate_after_old_probe_started(_config):
+        identity.patch_user_model_settings_atomic(user.id, {
+            "llm": {
+                "base_url": "https://new.example/v1",
+                "api_key": "new-secret",
+                "model": "new-runtime-model",
+            }
+        })
+
+    service = ModelStatusService(identity, settings, probe=rotate_after_old_probe_started)
+
+    item = service.test_one(user, "llm")
+
+    assert item.model == "new-runtime-model"
+    assert item.status == "untested"
+    assert "llm" not in identity.get_model_service_statuses(user.id)
+
+
 def test_test_all_deduplicates_roles_sharing_one_effective_llm(identity, user, settings):
     from app.services.model_status import ModelStatusService
 

@@ -1798,7 +1798,6 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_model_settings', kind='attribute', target='get_user_model_settings'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.put_model_settings', kind='attribute', target='get_user_model_settings'),
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.test_model_service', kind='attribute', target='get_user_model_settings'),
         ),
         patches=(
@@ -2509,7 +2508,6 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_model_settings', kind='attribute', target='resolve_model_config'),
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.put_model_settings', kind='attribute', target='resolve_model_config'),
         ),
         patches=(
         ),
@@ -2731,16 +2729,6 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='app.services.sqlite_repository', scope='<module>', kind='compatibility', target='set_request_user'),
             ConsumerSite(path='scripts/verify_repository_snapshot.py', scope='<module>', kind='import', target='app.services.sqlite_repository:set_request_user'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
-        name='set_user_model_settings',
-        owner='IdentityStore',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.put_model_settings', kind='attribute', target='set_user_model_settings'),
         ),
         patches=(
         ),
