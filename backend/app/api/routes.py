@@ -3,33 +3,18 @@ import io
 import json
 import queue
 import zipfile
-from pathlib import Path
 from typing import Any, List, Optional, Union
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from app.api.deps import (
     admin_query_repository,
-    notebook_access_repository, notebook_catalog_repository,
-    notebook_sharing_repository, repository, require_notebook_access,
-    require_notebook_read, require_notebook_write, get_current_user, source_repository, user_error,
+    notebook_access_repository, notebook_catalog_repository, repository,
+    require_notebook_access, require_notebook_read, require_notebook_write,
+    get_current_user, user_error,
 )
 from app.models.identity import UserProfile
-from app.models.notebooks import (
-    MountedBase,
-    MountedByCount,
-    NotebookAnalytics,
-    NotebookCreate,
-    NotebookRef,
-    NotebookSummary,
-    NotebookUpdate,
-    SetBasesRequest,
-    SetTierRequest,
-    ShareResponse,
-    SharedByMeItem,
-    SharedPreview,
-)
 from app.models.reports import (
     ReportCreate,
     ReportDetail,
@@ -37,15 +22,6 @@ from app.models.reports import (
     ReportGenerateRequest,
     ReportOutlineUpdate,
     ReportSummary,
-)
-from app.models.sources import (
-    AddUrlSourcesRequest,
-    AddUrlSourcesResult,
-    PaginatedSources,
-    SourceDetail,
-    SourceElement,
-    SourceImportRequest,
-    SourceSummary,
 )
 from app.services.sqlite_repository import KnowledgeGraphTooLargeError
 from app.models.admin import (
@@ -101,7 +77,6 @@ from app.models.knowledge import (
     EdgeReviewItem,
     EdgeReviewRequest,
     KnowledgeGraph,
-    KnowledgeRecord,
     KnowledgeTypeCount,
     KnowledgeUpdate,
     PaginatedKnowledge,
@@ -112,244 +87,21 @@ from app.models.knowledge import (
 )
 from app.services import background_jobs
 from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
-from app.services.kg import scheduler as kg_scheduler
 from app.services.knowhow import api as knowhow_api
-from app.services.knowhow.assets import AssetService
-from app.services.mineru_cloud_client import MinerUCloudNotConfigured
 from app.services.model_config import ModelNotConfiguredError
 from app.services.pending_bus import pending_bus
-from app.repositories.ports import AskStreamPort, UploadedSourceFile
+from app.repositories.ports import AskStreamPort
 from app.api.memory_routes import memory_router
+from app.api.notebook_routes import router as notebook_router
+from app.api.source_routes import router as source_router
 from app.api.system_routes import router as system_router
 from app.repositories.sqlite.kg_build_job_store import KgBuildAlreadyRunning
 
 router = APIRouter()
 router.include_router(memory_router)
 router.include_router(system_router)
-
-SUPPORTED_SOURCE_SUFFIXES = {".pdf", ".md", ".markdown", ".docx", ".pptx", ".csv", ".xlsx", ".xlsm"}
-MAX_SOURCE_UPLOAD_BYTES = 50 * 1024 * 1024
-
-
-def _asset_service() -> AssetService:
-    return AssetService(repository())
-
-
-def _validate_source_file(file_name: str, content_size: int | None = None) -> None:
-    suffix = Path(file_name).suffix.lower()
-    if suffix not in SUPPORTED_SOURCE_SUFFIXES:
-        supported = ", ".join(sorted(SUPPORTED_SOURCE_SUFFIXES))
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported source file type. Supported suffixes: {supported}",
-        )
-    if content_size is not None:
-        if content_size == 0:
-            raise HTTPException(status_code=400, detail="Uploaded source file is empty")
-        if content_size > MAX_SOURCE_UPLOAD_BYTES:
-            raise HTTPException(status_code=413, detail="Uploaded source file is too large")
-
-
-@router.get("/notebooks", response_model=List[NotebookSummary])
-def list_notebooks() -> List[NotebookSummary]:
-    return notebook_catalog_repository().list_notebooks()
-
-
-# 注意:静态段路由必须在 /notebooks/{notebook_id} 之前注册,否则 "shared-by-me" 被当作 {notebook_id}。
-@router.get("/notebooks/shared-by-me", response_model=List[SharedByMeItem])
-def shared_by_me_route(user: UserProfile = Depends(get_current_user)) -> List[SharedByMeItem]:
-    return [SharedByMeItem(**it) for it in notebook_sharing_repository().shared_by_me(user.id)]
-
-
-@router.post("/notebooks", response_model=NotebookSummary)
-def create_notebook(payload: NotebookCreate) -> NotebookSummary:
-    return notebook_catalog_repository().create_notebook(payload)
-
-
-@router.get("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_read)])
-def get_notebook(notebook_id: str) -> NotebookSummary:
-    try:
-        return notebook_catalog_repository().get_notebook(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.get("/notebooks/{notebook_id}/analytics", response_model=NotebookAnalytics, dependencies=[Depends(require_notebook_read)])
-def notebook_analytics(notebook_id: str) -> NotebookAnalytics:
-    try:
-        return notebook_catalog_repository().notebook_analytics(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.patch("/notebooks/{notebook_id}", response_model=NotebookSummary, dependencies=[Depends(require_notebook_access)])
-def update_notebook(
-    notebook_id: str,
-    payload: NotebookUpdate,
-) -> NotebookSummary:
-    try:
-        return notebook_catalog_repository().update_notebook(notebook_id, payload)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.delete("/notebooks/{notebook_id}", status_code=204, dependencies=[Depends(require_notebook_access)])
-def delete_notebook(notebook_id: str) -> None:
-    try:
-        notebook_catalog_repository().delete_notebook(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.get("/notebooks/{notebook_id}/sources", response_model=PaginatedSources, dependencies=[Depends(require_notebook_read)])
-def list_sources(
-    notebook_id: str,
-    offset: int = Query(0, ge=0),
-    limit: int = Query(50, ge=1, le=200),
-    q: str = Query(""),
-) -> PaginatedSources:
-    return source_repository().list_sources_page(notebook_id, offset=offset, limit=limit, q=q)
-
-
-@router.post("/notebooks/{notebook_id}/sources/import", response_model=List[SourceSummary], dependencies=[Depends(require_notebook_access)])
-def import_sources(
-    notebook_id: str,
-    payload: SourceImportRequest,
-) -> List[SourceSummary]:
-    try:
-        for file in payload.files:
-            _validate_source_file(file.file_name)
-        return source_repository().import_sources(notebook_id, payload)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.post("/notebooks/{notebook_id}/sources/url", response_model=AddUrlSourcesResult, dependencies=[Depends(require_notebook_access)])
-def add_url_sources(
-    notebook_id: str,
-    payload: AddUrlSourcesRequest,
-) -> AddUrlSourcesResult:
-    repo = source_repository()
-    try:
-        return repo.add_url_sources(
-            notebook_id,
-            payload.urls,
-            scheduler=lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
-        )
-    except MinerUCloudNotConfigured as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.post("/notebooks/{notebook_id}/sources", response_model=List[SourceSummary], dependencies=[Depends(require_notebook_access)])
-async def upload_sources(
-    notebook_id: str,
-    files: List[UploadFile] = File(...),
-    doc_types: List[str] = Form(default=[]),
-) -> List[SourceSummary]:
-    try:
-        repo = source_repository()
-        uploaded_files = []
-        for index, file in enumerate(files):
-            file_name = file.filename or "source.bin"
-            _validate_source_file(file_name)
-            content = await file.read()
-            _validate_source_file(file_name, len(content))
-            # doc_types is aligned with files by position; missing/extra are tolerated.
-            doc_type = doc_types[index] if index < len(doc_types) else ""
-            uploaded_files.append(
-                UploadedSourceFile(
-                    file_name=file_name,
-                    content_type=file.content_type or "",
-                    content=content,
-                    doc_type=doc_type,
-                )
-            )
-        return repo.upload_sources(
-            notebook_id,
-            uploaded_files,
-            scheduler=lambda source_id: kg_scheduler.submit_job(repo.process_source, source_id),
-        )
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.get("/sources/{source_id}", response_model=SourceDetail)
-def get_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceDetail:
-    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
-        raise HTTPException(status_code=404, detail="Source not found")
-    try:
-        return source_repository().get_source(source_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Source not found")
-
-
-@router.post("/sources/{source_id}/parse", response_model=SourceSummary)
-def parse_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> SourceSummary:
-    if notebook_access_repository().source_owner(source_id) != user.id:
-        raise HTTPException(status_code=404, detail="Source not found")
-    try:
-        return source_repository().parse_source(source_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Source not found")
-
-
-@router.get("/sources/{source_id}/elements", response_model=List[SourceElement])
-def source_elements(source_id: str, user: UserProfile = Depends(get_current_user)) -> List[SourceElement]:
-    if not notebook_access_repository().user_can_read_source(source_id, user.id):  # 读:owner ∪ 只读成员
-        raise HTTPException(status_code=404, detail="Source not found")
-    try:
-        return source_repository().source_elements(source_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Source not found")
-
-
-@router.delete("/sources/{source_id}", status_code=204)
-def delete_source(source_id: str, user: UserProfile = Depends(get_current_user)) -> None:
-    if notebook_access_repository().source_owner(source_id) != user.id:
-        raise HTTPException(status_code=404, detail="Source not found")
-    try:
-        source_repository().delete_source(source_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Source not found")
-
-
-# --- knowhow-tables PR-1 Task 4: notebook image assets (pasted table-cell
-# images). Guards mirror the source endpoints above exactly: POST needs
-# write access (like upload_sources), GET needs read access (like
-# get_source/source_elements) — both 404 on denial, never 403, matching this
-# codebase's "don't leak existence" convention. Route bodies stay thin
-# (param parsing / guard / orchestration only); validation + disk I/O live
-# in AssetService.
-@router.post("/notebooks/{notebook_id}/assets", dependencies=[Depends(require_notebook_access)])
-async def upload_notebook_asset(notebook_id: str, file: UploadFile = File(...)) -> dict:
-    repo = repository()
-    content = await file.read()
-    try:
-        asset = _asset_service().save(
-            notebook_id,
-            file.filename or "asset",
-            file.content_type or "",
-            content,
-            repo.current_user().id,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    return {"id": asset["id"], "url": f"/api/notebooks/{notebook_id}/assets/{asset['id']}"}
-
-
-@router.get("/notebooks/{notebook_id}/assets/{asset_id}", dependencies=[Depends(require_notebook_read)])
-def get_notebook_asset_file(notebook_id: str, asset_id: str) -> FileResponse:
-    asset = repository().get_notebook_asset(asset_id)
-    if asset is None or asset["notebook_id"] != notebook_id:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    path = _asset_service().path_for(asset)
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Asset not found")
-    return FileResponse(
-        path, media_type=asset["mime"], headers={"Cache-Control": "private, max-age=86400"}
-    )
+router.include_router(notebook_router)
+router.include_router(source_router)
 
 
 # --- knowhow-tables PR-1 Task 6: table/import API. Guards mirror the asset
@@ -1454,137 +1206,6 @@ def review_relation(notebook_id: str, rel_id: str,
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@router.post("/notebooks/{notebook_id}/tier", response_model=NotebookSummary, dependencies=[Depends(require_notebook_access)])
-def set_notebook_tier(notebook_id: str, payload: SetTierRequest, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
-    """Set a notebook's federation tier: 'base'(发布为公共知识库,可被任何笔记本
-    挂载为参考库) 或 'personal'(撤回发布)。**不再全局唯一** —— 每个领域可以有自己
-    的公共知识库。"""
-    if user.role != "admin":
-        raise user_error(403, "仅管理员可设为公共知识库")
-    tier = payload.tier.strip().lower()
-    if tier not in {"base", "personal"}:
-        raise HTTPException(status_code=400, detail="tier must be 'base' or 'personal'")
-    try:
-        catalog = notebook_catalog_repository()
-        if tier == "base":
-            catalog.mark_notebook_base(notebook_id)
-        else:
-            catalog.set_notebook_personal(notebook_id)
-        return catalog.get_notebook(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.get("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
-            dependencies=[Depends(require_notebook_access)])
-def list_notebook_bases_route(notebook_id: str) -> List[MountedBase]:
-    """本 notebook 挂载的参考库。含 active=False 的失效边(被挂库易主 / 公共库被
-    降级),前端置灰展示——边保留是为了对方恢复后自动生效。"""
-    return [MountedBase(**edge) for edge in repository().list_notebook_bases(notebook_id)]
-
-
-@router.put("/notebooks/{notebook_id}/bases", response_model=List[MountedBase],
-            dependencies=[Depends(require_notebook_access)])
-def set_notebook_bases_route(
-    notebook_id: str, payload: SetBasesRequest,
-    user: UserProfile = Depends(get_current_user),
-) -> List[MountedBase]:
-    """全量替换挂载集合。只接受本 notebook 的可挂候选(公共知识库 ∪ 同 owner 的库)
-    ∪ 当前已挂载的 id(含失效边),其余一律 400 —— 挂载边不是授权凭证,写入侧也要挡。
-    写权限本身由 require_notebook_access(owner-only,404 on denial)在依赖层挡;
-    这里只做候选集校验,不重复手工判断写权限。
-
-    并入"当前已挂载的 id"是刻意的:mountable_notebooks 与失效边的判定谓词
-    (MOUNT_VALID_EXPR)是同一个表达式,所以一条失效边(被挂库降级/易主后)永远不会
-    出现在 mountable 里。前端编辑表单原样重新提交"保留这条失效边不变"的挂载集合
-    (不做任何前端过滤 —— 那会静默删掉设计上刻意保留、等对方重新发布后自动恢复的边)
-    时,若只拿 mountable 当白名单会把这个合法保留动作也 400 掉,导致表单永久存不了。
-    并入的是"已挂载"而非"任意 id",所以仍然拒绝新挂一个从未属于本笔记本的无效 id。"""
-    repo = repository()
-    allowed = {n["id"] for n in repo.mountable_notebooks(notebook_id)}
-    allowed |= {edge["id"] for edge in repo.list_notebook_bases(notebook_id)}
-    wanted = [nb_id for nb_id in dict.fromkeys(payload.base_notebook_ids) if nb_id]
-    if any(nb_id not in allowed for nb_id in wanted):
-        raise user_error(400, "选择里包含不能作为参考库的知识库")
-    repo.replace_notebook_bases(notebook_id, wanted, user.id)
-    return [MountedBase(**edge) for edge in repo.list_notebook_bases(notebook_id)]
-
-
-@router.get("/notebooks/{notebook_id}/mountable", response_model=List[NotebookRef],
-            dependencies=[Depends(require_notebook_access)])
-def mountable_notebooks_route(notebook_id: str) -> List[NotebookRef]:
-    """可挂候选 = 所有公共知识库 ∪ 与本库同 owner 的库。
-
-    刻意挂在 {notebook_id} 下而非 /notebooks/mountable —— 后者会与既有的
-    /notebooks/{notebook_id} 争路由匹配(FastAPI 按声明序,静态段必须先注册)。"""
-    return [NotebookRef(**n) for n in repository().mountable_notebooks(notebook_id)]
-
-
-@router.get("/notebooks/{notebook_id}/mounted-by-count", response_model=MountedByCount,
-            dependencies=[Depends(require_notebook_access)])
-def mounted_by_count_route(notebook_id: str) -> MountedByCount:
-    """删除确认弹窗专用(spec §6):有多少笔记本正在把本 notebook 挂为参考库——
-    ON DELETE CASCADE 会连同这些边一起清空且不可撤销,用户点删除前必须看到影响面。
-    与 DELETE 端点用同一个 owner-only 依赖(不新开一套权限判断)。"""
-    return MountedByCount(count=repository().mounted_by_count(notebook_id))
-
-
-@router.post("/notebooks/{notebook_id}/share", response_model=ShareResponse,
-             dependencies=[Depends(require_notebook_access)])
-def share_notebook_route(notebook_id: str) -> ShareResponse:
-    try:
-        return ShareResponse(**notebook_sharing_repository().share_notebook(notebook_id))
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.delete("/notebooks/{notebook_id}/share", status_code=204,
-               dependencies=[Depends(require_notebook_access)])
-def unshare_notebook_route(notebook_id: str) -> None:
-    try:
-        notebook_sharing_repository().unshare_notebook(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.get("/shared/{token}", response_model=SharedPreview)
-def shared_preview_route(token: str, user: UserProfile = Depends(get_current_user)) -> SharedPreview:
-    sharing = notebook_sharing_repository()
-    nb_id = sharing.find_notebook_by_share_token(token)
-    if nb_id is None:
-        raise HTTPException(status_code=404, detail="Shared notebook not found")
-    return SharedPreview(**sharing.shared_preview(nb_id))
-
-
-@router.post("/shared/{token}/copy", response_model=NotebookSummary)
-def copy_shared_route(token: str, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
-    sharing = notebook_sharing_repository()
-    nb_id = sharing.find_notebook_by_share_token(token)
-    if nb_id is None:
-        raise HTTPException(status_code=404, detail="Shared notebook not found")
-    if not sharing.notebook_copy_stats(nb_id)["copyable"]:
-        raise HTTPException(status_code=409, detail="notebook too large to copy")
-    return sharing.copy_notebook(nb_id, new_owner_id=user.id)
-
-
-@router.post("/shared/{token}/join", response_model=NotebookSummary)
-def join_shared_route(token: str, user: UserProfile = Depends(get_current_user)) -> NotebookSummary:
-    """大库只读加入:凭 share_token 成为只读成员。小库应走 copy 而非 join。"""
-    sharing = notebook_sharing_repository()
-    nb_id = sharing.find_notebook_by_share_token(token)
-    if nb_id is None:
-        raise HTTPException(status_code=404, detail="Shared notebook not found")
-    if sharing.notebook_copy_stats(nb_id)["copyable"]:
-        raise HTTPException(status_code=400, detail="small notebook — use copy, not join")
-    return sharing.join_shared(nb_id, user.id)
-
-
-@router.delete("/notebooks/{notebook_id}/membership", status_code=204)
-def leave_notebook_route(notebook_id: str, user: UserProfile = Depends(get_current_user)) -> None:
-    """退出只读共享:只删自己的成员记录(幂等,不影响他人)。"""
-    notebook_sharing_repository().leave_notebook(notebook_id, user.id)
-
-
 @router.post("/notebooks/{notebook_id}/kg/build", dependencies=[Depends(require_notebook_access)])
 def build_kg(notebook_id: str) -> dict:
     """按需触发该 notebook 的 KG 建图(后台线程,幂等)。
@@ -2160,29 +1781,6 @@ async def list_online_users(user: UserProfile = Depends(get_current_user)) -> di
     if user.role != "admin":
         raise user_error(403, "仅管理员可查看在线状态")
     return {"online_ids": sorted(pending_bus.online_user_ids())}
-
-
-@router.post(
-    "/notebooks/{notebook_id}/paper-meta/backfill",
-    dependencies=[Depends(require_notebook_access)],
-)
-def backfill_paper_metadata(notebook_id: str) -> dict:
-    """补抽该 notebook 缺论文元数据的源(后台线程,幂等可续跑)。返回排队数;
-    LLM 未配置 409。owner 门控由 require_notebook_access 承担(非 owner 404)。"""
-    repo = repository()
-    llm_ready = getattr(repo.kg_llm_client, "configured", False) or getattr(
-        repo.llm_client, "configured", False
-    )
-    if not llm_ready:
-        raise HTTPException(status_code=409, detail="LLM not configured")
-    queued = len(repo.sources_missing_paper_meta(notebook_id))
-    if queued:
-        background_jobs.submit(
-            repo.backfill_paper_metadata, notebook_id,
-            name=f"papermeta-{notebook_id}",
-            notify_pending=True,   # 兜底刷新 pending 快照
-        )
-    return {"queued": queued}
 
 
 # --- knowhow 表跨 notebook 传输（复制/移动） -------------------------------

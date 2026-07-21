@@ -34,13 +34,32 @@ def test_system_endpoints_are_owned_by_the_system_router():
         assert modules[endpoint] == "app.api.system_routes", endpoint
 
 
-def test_domain_router_does_not_import_the_schema_facade():
-    path = ROOT / "backend" / "app" / "api" / "system_routes.py"
-    assert path.exists()
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    modules = {
-        node.module
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom) and node.module
+def test_notebook_and_source_endpoints_have_domain_owners():
+    modules = _endpoint_modules()
+    expected = {
+        "list_notebooks": "app.api.notebook_routes",
+        "create_notebook": "app.api.notebook_routes",
+        "get_notebook": "app.api.notebook_routes",
+        "set_notebook_tier": "app.api.notebook_routes",
+        "share_notebook_route": "app.api.notebook_routes",
+        "list_sources": "app.api.source_routes",
+        "upload_sources": "app.api.source_routes",
+        "get_source": "app.api.source_routes",
+        "backfill_paper_metadata": "app.api.source_routes",
     }
-    assert "app.models.schemas" not in modules
+    for endpoint, module in expected.items():
+        assert modules[endpoint] == module, endpoint
+
+
+def test_domain_routers_do_not_import_the_schema_facade():
+    api_dir = ROOT / "backend" / "app" / "api"
+    route_modules = sorted(api_dir.glob("*_routes.py"))
+    assert route_modules
+    for path in route_modules:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        modules = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module
+        }
+        assert "app.models.schemas" not in modules, path.name
