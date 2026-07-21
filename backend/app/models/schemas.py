@@ -1,8 +1,9 @@
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.model_safety import (
+    infer_model_error_service,
     safe_model_error_code,
     safe_model_error_service,
     safe_model_error_stage,
@@ -630,6 +631,13 @@ class ModelError(BaseModel):
     stage: str       # "embed" | "rerank" | "answer" | "rewrite"
     model: str = ""
     message: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_service(cls, value: object) -> object:
+        if isinstance(value, dict) and "service" not in value:
+            value = {**value, "service": infer_model_error_service(value.get("stage"))}
+        return value
 
     @field_validator("service", mode="before")
     @classmethod

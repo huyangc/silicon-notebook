@@ -70,7 +70,7 @@ def safe_model_label(value: object) -> str:
     if not isinstance(value, str):
         return ""
     model = value.strip()
-    if not model or len(model) > 128 or not model[0].isalpha():
+    if not model or len(model) > 128 or not model[0].isalnum():
         return ""
     lowered = model.lower()
     compact = "".join(char for char in lowered if char.isalnum())
@@ -91,6 +91,7 @@ def safe_model_label(value: object) -> str:
         or ".." in model
         or any(marker in compact for marker in _UNSAFE_MODEL_MARKERS)
         or _has_endpoint_port(model)
+        or _is_bare_hostname(model)
     ):
         return ""
     if any(not (char.isalnum() or char in "._/@+:-") for char in model):
@@ -102,6 +103,20 @@ def safe_model_label(value: object) -> str:
     if model.endswith((".", "/", ":")):
         return ""
     return model
+
+
+def infer_model_error_service(stage: object) -> str:
+    """Map pre-sanitized legacy stages to the service role they historically implied."""
+    value = stage.lower() if isinstance(stage, str) else ""
+    if "rerank" in value:
+        return "rerank"
+    if "embed" in value or "ann" in value:
+        return "embedding"
+    if "rewrite" in value:
+        return "rewrite_llm"
+    if value.startswith("kg_"):
+        return "kg_llm"
+    return "llm"
 
 
 def safe_model_error_service(value: object) -> str:
@@ -129,3 +144,18 @@ def _has_endpoint_port(model: str) -> bool:
         return False
     port = int(tag)
     return 1 <= port <= 65535
+
+
+def _is_bare_hostname(model: str) -> bool:
+    """Reject endpoint-shaped FQDNs while retaining dotted model/tag identifiers."""
+    if any(char in model for char in "/@:"):
+        return False
+    labels = model.rstrip(".").split(".")
+    if len(labels) < 3 or any(not label for label in labels):
+        return False
+    if len(labels[-1]) < 2 or not labels[-1].isalpha():
+        return False
+    return all(
+        all(char.isalnum() or char in "-_" for char in label)
+        for label in labels
+    )

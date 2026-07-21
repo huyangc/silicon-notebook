@@ -228,16 +228,23 @@ class ModelStatusService:
                 model=config.model,
                 base_url=config.base_url,
                 api_key=config.api_key,
+                api_style=config.api_style,
             )._rerank_batch("ping", ["a", "b"])
             return
         if config.kind == "embedding":
-            make_embedder(self.settings).embed_query("ping")
+            make_embedder(
+                self.settings,
+                provider=config.provider,
+                base_url=config.base_url,
+                api_key=config.api_key,
+                model=config.model,
+            ).embed_query("ping")
             return
         raise ValueError("unsupported model service kind")
 
 
 def _checked_at() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _safe_latency(value: object) -> int:

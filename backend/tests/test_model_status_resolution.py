@@ -60,6 +60,51 @@ def test_embedding_descriptor_is_system_managed():
     assert config.configured is True
 
 
+def test_embedding_provider_off_keeps_complete_endpoint_values_unconfigured():
+    config = resolve_effective_config(
+        {},
+        "embedding",
+        "fallback",
+        system_model_settings(_settings(embed_provider=" OFF ")),
+    )
+
+    assert config.provider == "off"
+    assert config.model == "embed-live"
+    assert config.configured is False
+
+
+def test_embedding_descriptor_uses_the_runtime_whitespace_activation_rule():
+    config = resolve_effective_config(
+        {},
+        "embedding",
+        "fallback",
+        system_model_settings(_settings(embed_api_key="   ")),
+    )
+
+    assert config.configured is False
+
+
+def test_effective_protocol_switches_are_normalized_and_fingerprinted():
+    dashscope = resolve_effective_config(
+        {}, "rerank", "fallback", system_model_settings(_settings(rerank_api_style="dashscope"))
+    )
+    compatible = resolve_effective_config(
+        {}, "rerank", "fallback", system_model_settings(_settings(rerank_api_style=" VLLM "))
+    )
+    assert dashscope.api_style == "dashscope"
+    assert compatible.api_style == "openai"
+    assert model_config_fingerprint(dashscope) != model_config_fingerprint(compatible)
+
+    enabled = resolve_effective_config(
+        {}, "embedding", "fallback", system_model_settings(_settings(embed_provider="DashScope"))
+    )
+    disabled = resolve_effective_config(
+        {}, "embedding", "fallback", system_model_settings(_settings(embed_provider="off"))
+    )
+    assert enabled.provider == "dashscope"
+    assert model_config_fingerprint(enabled) != model_config_fingerprint(disabled)
+
+
 def test_fingerprint_changes_when_credential_or_model_changes():
     settings = system_model_settings(_settings())
     first = resolve_effective_config({}, "llm", "fallback", settings)

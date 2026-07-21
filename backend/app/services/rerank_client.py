@@ -6,6 +6,8 @@ import logging
 from typing import List
 import requests
 
+from app.services.model_config import normalize_rerank_api_style
+
 logger = logging.getLogger("silicon_notebook.rerank")
 
 
@@ -20,8 +22,10 @@ class RerankClient:
         self.base_url = ((base_url if base_url is not None else getattr(settings, "rerank_base_url", "")) or "").rstrip("/")
         self.api_key = (api_key if api_key is not None else getattr(settings, "rerank_api_key", "")) or ""
         self.max_docs = max(1, max_docs if max_docs is not None else getattr(settings, "rerank_max_docs", 500))
-        self.api_style = ((api_style if api_style is not None
-                           else getattr(settings, "rerank_api_style", "dashscope")) or "dashscope").strip().lower()
+        self.api_style = normalize_rerank_api_style(
+            api_style if api_style is not None
+            else getattr(settings, "rerank_api_style", "dashscope")
+        )
 
     @property
     def configured(self) -> bool:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 from uuid import uuid4
 
@@ -23,6 +23,16 @@ def _now() -> str:
 
 def _session_expiry(days: int = 30) -> str:
     return (datetime.now() + timedelta(days=days)).replace(microsecond=0).isoformat()
+
+
+def _status_checked_at(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("checked_at must be an offset-aware ISO timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("checked_at must be an offset-aware ISO timestamp")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _new_user_id() -> str:
@@ -123,6 +133,7 @@ class IdentityStore:
         trigger: str,
         checked_at: str,
     ) -> None:
+        checked_at = _status_checked_at(checked_at)
         with self.database.write() as db:
             db.execute(
                 "INSERT INTO model_service_status "
@@ -132,7 +143,13 @@ class IdentityStore:
                 "config_fingerprint = excluded.config_fingerprint, "
                 "status = excluded.status, latency_ms = excluded.latency_ms, "
                 "code = excluded.code, trigger = excluded.trigger, "
-                "checked_at = excluded.checked_at",
+                "checked_at = excluded.checked_at "
+                "WHERE excluded.checked_at > model_service_status.checked_at "
+                "OR (excluded.checked_at = model_service_status.checked_at AND "
+                "(CASE WHEN excluded.trigger = 'observed_failure' THEN 3 "
+                "      WHEN excluded.status = 'error' THEN 2 ELSE 1 END) > "
+                "(CASE WHEN model_service_status.trigger = 'observed_failure' THEN 3 "
+                "      WHEN model_service_status.status = 'error' THEN 2 ELSE 1 END))",
                 (
                     user_id, service, config_fingerprint, status, latency_ms,
                     code, trigger, checked_at,

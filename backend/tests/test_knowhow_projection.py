@@ -1050,7 +1050,9 @@ def test_embedding_failure_marks_row_failed_without_raising(repo, projector, tab
 def test_embedding_failure_emits_through_model_error_channel(repo, projector, table_id, embedder):
     calls = []
     projector.note_model_error = (
-        lambda stage, model, exc: calls.append((stage, model, type(exc).__name__))
+        lambda stage, model, exc, **kwargs: calls.append(
+            (stage, model, type(exc).__name__)
+        )
     )
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)

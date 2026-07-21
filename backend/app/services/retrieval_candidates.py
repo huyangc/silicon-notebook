@@ -122,13 +122,16 @@ class _RetrievalState:
         model: str,
         exc: Exception,
         service: str = "",
+        *,
+        provider_failure: bool = False,
     ) -> None:
-        if service:
-            self.model_error_sink.note_model_error(
-                stage, model, exc, service=service
-            )
-            return
-        self.model_error_sink.note_model_error(stage, model, exc)
+        self.model_error_sink.note_model_error(
+            stage,
+            model,
+            exc,
+            service=service,
+            provider_failure=provider_failure,
+        )
 
     def _in_batches(self, ids):
         values = list(dict.fromkeys(ids))
@@ -336,7 +339,11 @@ class CandidateRetrievalService(_RetrievalState):
             vec = self.embedder.embed_query(query[:2000])
         except Exception as exc:
             self._note_model_error(
-                "embed", self.settings.embed_model, exc, service="embedding"
+                "embed",
+                self.settings.embed_model,
+                exc,
+                service="embedding",
+                provider_failure=True,
             )
             return None
         from app.services.vector_index import resolve_runtime_dim, truncate_vec

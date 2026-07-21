@@ -39,11 +39,33 @@ class FakeEmbedder:
         return self._vec(text)
 
 
-def make_embedder(settings: Settings) -> Embedder:
-    provider = (settings.embed_provider or "").strip().lower()  # 大小写不敏感:DashScope/DASHSCOPE 皆可
-    if provider == "dashscope" and settings.embedder_configured:
+def make_embedder(
+    settings: Settings,
+    *,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+) -> Embedder:
+    provider_value = settings.embed_provider if provider is None else provider
+    provider_value = (provider_value or "").strip().lower()
+    base_url_value = settings.embed_base_url if base_url is None else base_url
+    api_key_value = settings.embed_api_key if api_key is None else api_key
+    model_value = settings.embed_model if model is None else model
+    configured = bool(
+        provider_value == "dashscope"
+        and (base_url_value or "").strip()
+        and (api_key_value or "").strip()
+        and (model_value or "").strip()
+    )
+    if configured:
         from app.services.embedding_dashscope import DashscopeEmbedder
-        return DashscopeEmbedder(settings)
+        return DashscopeEmbedder(
+            settings,
+            base_url=base_url_value,
+            api_key=api_key_value,
+            model=model_value,
+        )
     return FakeEmbedder(dim=settings.embed_dim)
 
 

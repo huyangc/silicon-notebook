@@ -882,6 +882,7 @@ class GraphRetrievalService(_RetrievalState):
                 getattr(client, "model", ""),
                 exc,
                 service="reasoning_llm",
+                provider_failure=True,
             )
             return kg_hits
     def _follow_chain(

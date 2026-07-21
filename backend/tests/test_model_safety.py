@@ -28,6 +28,9 @@ def test_safe_model_label_preserves_namespaces_and_rejects_diagnostics():
 @pytest.mark.parametrize(
     "unsafe_model",
     [
+        "api.example.com",
+        "models.acme.internal",
+        "api.例子.测试",
         "api.example.com/v1",
         "vendor/api.example.com/v1",
         "api.example.xn--p1ai/v1",
@@ -53,6 +56,7 @@ def test_safe_model_label_rejects_endpoint_and_credential_shapes(unsafe_model):
 @pytest.mark.parametrize(
     "safe_model",
     [
+        "01-ai/Yi-1.5-9B-Chat",
         "runtime-primary-name",
         "llama3.2:latest",
         "anthropic.claude-3-5-sonnet-20240620-v1:0",
@@ -93,3 +97,30 @@ def test_model_error_schema_defaults_and_legacy_values_are_safe():
         "model": "",
         "message": "upstream_error",
     }
+
+
+@pytest.mark.parametrize(
+    ("stage", "service"),
+    [
+        ("rerank", "rerank"),
+        ("embed", "embedding"),
+        ("chunk_ann_query", "embedding"),
+        ("rewrite", "rewrite_llm"),
+        ("kg_extract", "kg_llm"),
+        ("private_diagnostic", "llm"),
+    ],
+)
+def test_legacy_model_error_infers_service_before_stage_is_sanitized(stage, service):
+    error = ModelError(stage=stage, message="RuntimeError: private response")
+
+    assert error.service == service
+
+
+def test_explicit_model_error_service_wins_over_legacy_stage_inference():
+    error = ModelError(
+        service="reasoning_llm",
+        stage="rerank",
+        message="RuntimeError: private response",
+    )
+
+    assert error.service == "reasoning_llm"

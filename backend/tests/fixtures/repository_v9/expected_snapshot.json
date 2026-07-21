@@ -292,7 +292,7 @@
               {
                 "message": "upstream_error",
                 "model": "fixture-rerank",
-                "service": "llm",
+                "service": "rerank",
                 "stage": "rerank"
               }
             ],

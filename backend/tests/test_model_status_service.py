@@ -121,6 +121,72 @@ def test_unconfigured_service_never_probes(identity, user, tmp_path):
     assert calls == []
 
 
+def test_embedding_provider_off_never_runs_the_fake_embedder_probe(tmp_path):
+    from app.services.model_status import ModelStatusService
+
+    off_settings = Settings(
+        _env_file=None,
+        database_url=f"sqlite:///{tmp_path}/provider-off.db",
+        storage_dir=str(tmp_path / "provider-off-storage"),
+        embed_provider="",
+        embed_base_url="https://embed.example/v1",
+        embed_api_key="embed-secret",
+        embed_model="embed-live-model",
+    )
+    off_identity = SQLiteRepository(off_settings)._runtime.identity
+    calls = []
+    service = ModelStatusService(off_identity, off_settings, probe=lambda cfg: calls.append(cfg))
+
+    item = service.test_one(off_identity.current_user(), "embedding")
+
+    assert item.status == "unconfigured"
+    assert item.configured is False
+    assert calls == []
+
+
+def test_default_probes_use_the_exact_resolved_embedding_and_rerank_protocol(
+    identity, user, settings, monkeypatch
+):
+    from app.services import model_status
+
+    embed_calls = []
+    rerank_calls = []
+
+    class _Embedder:
+        def embed_query(self, text):
+            embed_calls.append((text,))
+            return [0.0]
+
+    def fake_make_embedder(_settings, **overrides):
+        embed_calls.append(overrides)
+        return _Embedder()
+
+    class _Reranker:
+        def __init__(self, _settings, **overrides):
+            rerank_calls.append(overrides)
+
+        def _rerank_batch(self, query, documents):
+            rerank_calls.append((query, documents))
+
+    monkeypatch.setattr(model_status, "make_embedder", fake_make_embedder)
+    monkeypatch.setattr(model_status, "RerankClient", _Reranker)
+    settings.rerank_api_style = "vllm"
+    service = model_status.ModelStatusService(identity, settings)
+
+    embedding = identity.resolve_model_config(user, "embedding")
+    rerank = identity.resolve_model_config(user, "rerank")
+    service._probe(embedding)
+    service._probe(rerank)
+
+    assert embed_calls[0] == {
+        "provider": "dashscope",
+        "base_url": "https://embed.example/v1",
+        "api_key": "embed-secret",
+        "model": "embed-live-model",
+    }
+    assert rerank_calls[0]["api_style"] == "openai"
+
+
 def test_record_observed_failure_stores_only_safe_status(identity, user, settings):
     from app.services.model_status import ModelStatusService
 
@@ -141,16 +207,18 @@ def test_snapshot_drops_unsafe_persisted_metadata(identity, user, settings):
 
     service = ModelStatusService(identity, settings)
     config = identity.resolve_model_config(user, "llm")
-    identity.record_model_service_status(
-        user.id,
-        "llm",
-        model_config_fingerprint(config),
-        "error",
-        15,
-        "provider 10.0.0.8 secret body",
-        "manual_test",
-        "provider 10.0.0.8 secret body",
-    )
+    with identity.database.write() as database:
+        database.execute(
+            "INSERT INTO model_service_status "
+            "(user_id, service, config_fingerprint, status, latency_ms, code, trigger, checked_at) "
+            "VALUES (?, 'llm', ?, 'error', 15, ?, 'manual_test', ?)",
+            (
+                user.id,
+                model_config_fingerprint(config),
+                "provider 10.0.0.8 secret body",
+                "provider 10.0.0.8 secret body",
+            ),
+        )
 
     item = next(item for item in service.snapshot(user).services if item.service == "llm")
 

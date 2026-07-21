@@ -7,6 +7,7 @@ from app.core.llm import OpenAICompatibleClient
 from app.core.model_safety import (
     MODEL_ERROR_MISSING_CONFIG,
     MODEL_ERROR_UPSTREAM,
+    infer_model_error_service,
     safe_model_error_service,
     safe_model_error_stage,
     safe_model_label,
@@ -36,19 +37,6 @@ class _UnconfiguredLLMClient:
 
 
 _UNCONFIGURED_LLM = _UnconfiguredLLMClient()
-
-
-def _service_for_stage(stage: str) -> str:
-    value = (stage or "").lower()
-    if "rerank" in value:
-        return "rerank"
-    if "embed" in value or "ann" in value:
-        return "embedding"
-    if "rewrite" in value:
-        return "rewrite_llm"
-    if value.startswith("kg_"):
-        return "kg_llm"
-    return "llm"
 
 
 class RuntimeModelProvider:
@@ -191,6 +179,7 @@ class RuntimeModelProvider:
                     model=cfg.model,
                     base_url=cfg.base_url,
                     api_key=cfg.api_key,
+                    api_style=cfg.api_style,
                 )
                 self._user_rerank_clients[fingerprint] = client
             return client
@@ -210,6 +199,8 @@ class RuntimeModelProvider:
         model: str,
         error: Exception,
         service: str = "",
+        *,
+        provider_failure: bool = False,
     ) -> None:
         message = f"{type(error).__name__}: {error}"
         self.event_log.emit(
@@ -222,8 +213,8 @@ class RuntimeModelProvider:
             }
         )
         sink = self.ask_context._ASK_MODEL_ERRORS.get()
-        if sink is not None:
-            service = safe_model_error_service(service or _service_for_stage(stage))
+        if sink is not None and provider_failure:
+            service = safe_model_error_service(service or infer_model_error_service(stage))
             error_code = (
                 MODEL_ERROR_MISSING_CONFIG
                 if isinstance(error, ModelNotConfiguredError)

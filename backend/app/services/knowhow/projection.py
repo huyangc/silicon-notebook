@@ -244,7 +244,7 @@ class KnowhowProjector:
         chunks: ChunkStore,
         knowledge: KnowledgeStore,
         embedding: SourceEmbeddingService,
-        note_model_error: Callable[[str, str, Exception], None],
+        note_model_error: Callable[..., None],
         invalidate_unified_cache: Callable[[str], None],
         mark_unified_dirty: Callable[[str], None],
         new_id: Callable[[str], str],
@@ -444,7 +444,13 @@ class KnowhowProjector:
                         self.embedding.embed_chunk_ids(notebook_id, embed_targets)
                 except Exception as exc:  # noqa: BLE001 — surfaced via model_error, never raised
                     failed = True
-                    self.note_model_error("knowhow_embed", self.settings.embed_model, exc)
+                    self.note_model_error(
+                        "knowhow_embed",
+                        self.settings.embed_model,
+                        exc,
+                        service="embedding",
+                        provider_failure=True,
+                    )
 
             self.knowhow.set_knowhow_row_projection(row_id, "failed" if failed else "synced")
 

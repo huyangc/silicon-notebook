@@ -1027,7 +1027,13 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
     except ModelNotConfiguredError:
         raise
     except Exception as exc:
-        models.note_model_error("knowhow_optimize", model_label, exc)
+        models.note_model_error(
+            "knowhow_optimize",
+            model_label,
+            exc,
+            service="rewrite_llm",
+            provider_failure=True,
+        )
         raise KnowhowOptimizeUnavailable("优化服务暂时不可用，请稍后再试") from exc
 
 

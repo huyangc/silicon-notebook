@@ -660,7 +660,15 @@ class AskModelClientProvider(ModelClientProvider, Protocol):
 
 
 class ModelErrorSink(Protocol):
-    def note_model_error(self, stage: str, model: str, error: Exception) -> None: ...
+    def note_model_error(
+        self,
+        stage: str,
+        model: str,
+        error: Exception,
+        service: str = "",
+        *,
+        provider_failure: bool = False,
+    ) -> None: ...
 
 
 class FacadePropertyContract(ModelClientProvider, Protocol):

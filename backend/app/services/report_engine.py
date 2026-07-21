@@ -354,7 +354,10 @@ class ReportEngine:
                 "report_section",
                 self.settings.reasoning_llm_model or self.settings.openai_compat_model,
                 RuntimeError(f"report section '{section['title']}' produced empty content after retry "
-                             "(reasoning model likely spent output budget on discarded chain-of-thought)"))
+                             "(reasoning model likely spent output budget on discarded chain-of-thought)"),
+                service="reasoning_llm",
+                provider_failure=True,
+            )
             base["failed"] = True
             base["error"] = "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试"
         return base

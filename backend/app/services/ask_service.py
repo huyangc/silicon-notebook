@@ -592,7 +592,11 @@ class AskService:
                 raise
             except Exception as exc:
                 self.model_errors.note_model_error(
-                    "answer", model_label, exc, service=service
+                    "answer",
+                    model_label,
+                    exc,
+                    service=service,
+                    provider_failure=True,
                 )
                 answer, grounded, anchors = "", False, []
             if answer:
@@ -605,6 +609,7 @@ class AskService:
                 "(reasoning model likely spent output budget on discarded chain-of-thought)"
             ),
             service=service,
+            provider_failure=True,
         )
         return answer, grounded, anchors, False
 
@@ -736,7 +741,11 @@ class AskService:
         try:
             if self._primary_llm_unconfigured():
                 self.model_errors.note_model_error(
-                    "answer", "", ModelNotConfiguredError("请先在设置中配置你的模型服务"))
+                    "answer",
+                    "",
+                    ModelNotConfiguredError("请先在设置中配置你的模型服务"),
+                    provider_failure=True,
+                )
             _t = time.perf_counter()
             from app.services.query_rewrite import expand_query
             from app.services.retrieval import quota_fuse, est_tokens, truncate_by_tokens
@@ -803,6 +812,7 @@ class AskService:
                         getattr(rerank_client, "model", ""),
                         e,
                         service="rerank",
+                        provider_failure=True,
                     ))
                 raise_if_cancelled(cancel_event)
                 ranked = [candidates[i] for i in order]

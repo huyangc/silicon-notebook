@@ -74,6 +74,7 @@ def test_provider_records_existing_model_error_shape(repo, monkeypatch):
             "rerank",
             unsafe_model,
             RuntimeError("provider https://10.0.0.8 leaked sk-private-secret"),
+            provider_failure=True,
         )
         assert ask_context._ASK_MODEL_ERRORS.get() == [
             {
@@ -105,7 +106,8 @@ def test_provider_classifies_missing_configuration_with_stable_code(repo, monkey
     token = ask_context._ASK_MODEL_ERRORS.set([])
     try:
         repo._note_model_error(
-            "answer", "", ModelNotConfiguredError("private configuration detail")
+            "answer", "", ModelNotConfiguredError("private configuration detail"),
+            provider_failure=True,
         )
 
         assert ask_context._ASK_MODEL_ERRORS.get() == [{
@@ -117,5 +119,76 @@ def test_provider_classifies_missing_configuration_with_stable_code(repo, monkey
         assert events[0]["error"] == (
             "ModelNotConfiguredError: private configuration detail"
         )
+    finally:
+        ask_context._ASK_MODEL_ERRORS.reset(token)
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "chunk_fts",
+        "chunk_ann_query",
+        "scale_ann_open_chunk",
+        "tier2_bridge_ann_query",
+    ],
+)
+def test_local_retrieval_and_index_diagnostics_never_become_model_outages(
+    repo, monkeypatch, stage
+):
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    token = ask_context._ASK_MODEL_ERRORS.set([])
+    try:
+        repo._runtime.models.note_model_error(
+            stage,
+            "embedding-runtime",
+            RuntimeError("local index is stale"),
+            service="embedding",
+            provider_failure=False,
+        )
+
+        assert ask_context._ASK_MODEL_ERRORS.get() == []
+        assert repo._runtime.identity.get_model_service_statuses("user-local") == {}
+        assert events[0]["stage"] == stage
+    finally:
+        ask_context._ASK_MODEL_ERRORS.reset(token)
+
+
+@pytest.mark.parametrize(
+    ("stage", "service"),
+    [
+        ("answer", "llm"),
+        ("rewrite", "rewrite_llm"),
+        ("rerank", "rerank"),
+        ("embed", "embedding"),
+    ],
+)
+def test_explicit_provider_failures_update_only_the_exact_service(
+    repo, stage, service
+):
+    repo.settings.openai_compat_base_url = "https://llm.example/v1"
+    repo.settings.openai_compat_api_key = "llm-secret"
+    repo.settings.openai_compat_model = "llm-runtime"
+    repo.settings.rerank_base_url = "https://rerank.example/v1"
+    repo.settings.rerank_api_key = "rerank-secret"
+    repo.settings.rerank_model = "rerank-runtime"
+    repo.settings.embed_provider = "dashscope"
+    repo.settings.embed_base_url = "https://embed.example/v1"
+    repo.settings.embed_api_key = "embed-secret"
+    repo.settings.embed_model = "embed-runtime"
+    token = ask_context._ASK_MODEL_ERRORS.set([])
+    try:
+        repo._runtime.models.note_model_error(
+            stage,
+            f"{service}-runtime",
+            RuntimeError("provider failed"),
+            service=service,
+            provider_failure=True,
+        )
+
+        rows = repo._runtime.identity.get_model_service_statuses("user-local")
+        assert set(rows) == {service}
+        assert rows[service]["status"] == "error"
+        assert ask_context._ASK_MODEL_ERRORS.get()[0]["service"] == service
     finally:
         ask_context._ASK_MODEL_ERRORS.reset(token)
