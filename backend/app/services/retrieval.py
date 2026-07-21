@@ -18,7 +18,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, Optional, Sequence, Set
 
-from app.models.schemas import Evidence
+from app.models.common import Evidence
 
 
 # --- Tunable scoring constants (kept here so they can be tuned in one place) ---

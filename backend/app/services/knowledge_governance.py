@@ -38,9 +38,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 from app.core.config import Settings
 from app.core.event_logging import EventLogger
+from app.models.common import Evidence
 from app.models.schemas import (
     DuplicateGroup,
-    Evidence,
     KnowledgeRef,
     KnowledgeUpdate,
     MergeRequest,

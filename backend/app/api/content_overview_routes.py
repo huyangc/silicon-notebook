@@ -5,7 +5,8 @@ from app.api.deps import (
     get_current_user,
     require_notebook_read,
 )
-from app.models.schemas import NotebookContentOverview, UserProfile
+from app.models.identity import UserProfile
+from app.models.schemas import NotebookContentOverview
 
 
 router = APIRouter()

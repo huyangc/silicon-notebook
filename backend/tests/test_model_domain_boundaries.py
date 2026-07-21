@@ -18,6 +18,68 @@ DOMAIN_MODULES = (
     "kg",
     "reports",
 )
+MOVED_MODEL_OWNERS = {
+    "Evidence": "common",
+    "UserProfile": "identity",
+    "AgentProfile": "identity",
+    "AgentProfileCreate": "identity",
+    "AgentProfileUpdate": "identity",
+    "AgentTokenCreate": "identity",
+    "AgentTokenSummary": "identity",
+    "AgentTokenIssued": "identity",
+    "AgentPrincipal": "identity",
+    "AuthRequest": "identity",
+    "AuthResult": "identity",
+    "MemoryOrigin": "memory",
+    "MemoryStatus": "memory",
+    "MemoryPromotionState": "memory",
+    "MemoryRecord": "memory",
+    "MemoryHit": "memory",
+    "MemoryNotebookOption": "memory",
+    "PaginatedMemories": "memory",
+    "MemoryPreview": "memory",
+    "MemoryCreateFromAnswer": "memory",
+    "AnswerMemoryLinksRequest": "memory",
+    "AnswerMemoryLinksResponse": "memory",
+    "MemoryBulkDeleteRequest": "memory",
+    "MemoryUpdate": "memory",
+    "MemoryReviewRequest": "memory",
+    "MemoryTransferRequest": "memory",
+    "PaperAuthor": "sources",
+    "PaperMeta": "sources",
+    "SourceElement": "sources",
+    "SourceSummary": "sources",
+    "PaginatedSources": "sources",
+    "SourceImportFile": "sources",
+    "SourceImportRequest": "sources",
+    "AddUrlSourcesRequest": "sources",
+    "RejectedUrl": "sources",
+    "AddUrlSourcesResult": "sources",
+    "SourceDetail": "sources",
+    "DetectDocTypeItem": "sources",
+    "DetectDocTypesRequest": "sources",
+    "DetectedDocType": "sources",
+    "NotebookCreate": "notebooks",
+    "NotebookUpdate": "notebooks",
+    "NotebookRef": "notebooks",
+    "MountedBase": "notebooks",
+    "NotebookSummary": "notebooks",
+    "ShareResponse": "notebooks",
+    "SharedPreview": "notebooks",
+    "SharedByMeItem": "notebooks",
+    "NotebookTemplate": "notebooks",
+    "SetTierRequest": "notebooks",
+    "SetBasesRequest": "notebooks",
+    "MountedByCount": "notebooks",
+    "NotebookAnalytics": "notebooks",
+    "KgBuildJobStatus": "kg",
+    "ReportCreate": "reports",
+    "ReportOutlineUpdate": "reports",
+    "ReportGenerateRequest": "reports",
+    "ReportSummary": "reports",
+    "ReportExportRequest": "reports",
+    "ReportDetail": "reports",
+}
 
 
 def _imports(path: Path) -> set[str]:
@@ -50,37 +112,25 @@ def test_legacy_schema_exports_resolve_to_domain_objects():
 
 def test_moved_legacy_exports_preserve_object_identity():
     facade = importlib.import_module("app.models.schemas")
-    owners = {
-        "common": ("Evidence",),
-        "identity": (
-            "UserProfile", "AgentProfile", "AgentProfileCreate", "AgentProfileUpdate",
-            "AgentTokenCreate", "AgentTokenSummary", "AgentTokenIssued", "AgentPrincipal",
-            "AuthRequest", "AuthResult",
-        ),
-        "memory": (
-            "MemoryOrigin", "MemoryStatus", "MemoryPromotionState", "MemoryRecord", "MemoryHit",
-            "MemoryNotebookOption", "PaginatedMemories", "MemoryPreview", "MemoryCreateFromAnswer",
-            "AnswerMemoryLinksRequest", "AnswerMemoryLinksResponse", "MemoryBulkDeleteRequest",
-            "MemoryUpdate", "MemoryReviewRequest", "MemoryTransferRequest",
-        ),
-        "sources": (
-            "PaperAuthor", "PaperMeta", "SourceElement", "SourceSummary", "PaginatedSources",
-            "SourceImportFile", "SourceImportRequest", "AddUrlSourcesRequest", "RejectedUrl",
-            "AddUrlSourcesResult", "SourceDetail", "DetectDocTypeItem", "DetectDocTypesRequest",
-            "DetectedDocType",
-        ),
-        "notebooks": (
-            "NotebookCreate", "NotebookUpdate", "NotebookRef", "MountedBase", "NotebookSummary",
-            "ShareResponse", "SharedPreview", "SharedByMeItem", "NotebookTemplate", "SetTierRequest",
-            "SetBasesRequest", "MountedByCount", "NotebookAnalytics",
-        ),
-        "kg": ("KgBuildJobStatus",),
-        "reports": (
-            "ReportCreate", "ReportOutlineUpdate", "ReportGenerateRequest", "ReportSummary",
-            "ReportExportRequest", "ReportDetail",
-        ),
-    }
-    for module_name, names in owners.items():
+    for name, module_name in MOVED_MODEL_OWNERS.items():
         owner = importlib.import_module(f"app.models.{module_name}")
-        for name in names:
-            assert getattr(facade, name) is getattr(owner, name), name
+        assert getattr(facade, name) is getattr(owner, name), name
+
+
+def test_production_consumers_do_not_import_moved_models_from_legacy_facade():
+    app_root = ROOT / "backend" / "app"
+    offenders: dict[str, list[str]] = {}
+    for path in app_root.rglob("*.py"):
+        if path == MODELS / "schemas.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        moved = sorted(
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "app.models.schemas"
+            for alias in node.names
+            if alias.name in MOVED_MODEL_OWNERS
+        )
+        if moved:
+            offenders[str(path.relative_to(ROOT))] = moved
+    assert not offenders, offenders
