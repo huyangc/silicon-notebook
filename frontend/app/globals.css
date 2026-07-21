@@ -53,14 +53,15 @@ button {
 
 .content-overview-card {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 14px;
   background: var(--panel);
 }
 
-.content-overview-card-head,
-.content-overview-metrics {
+.content-overview-card-head {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -71,14 +72,91 @@ button {
   margin-left: auto;
 }
 
-.content-overview-metrics {
-  margin-top: 12px;
-  color: var(--muted);
+.content-overview-ic {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--ink);
+  background: var(--soft);
 }
 
-.content-overview-metrics > :first-child {
+.content-overview-total {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.content-overview-total strong {
+  margin-right: 2px;
   color: var(--ink);
+  font-size: 28px;
   font-weight: 700;
+  line-height: 1.1;
+}
+
+.content-overview-total-sub {
+  margin-left: 6px;
+}
+
+.content-overview-bar {
+  display: flex;
+  height: 4px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--soft);
+}
+
+.content-overview-bar > span {
+  display: block;
+  height: 100%;
+}
+
+.content-overview-bar .seg-ok,
+.content-overview-legend .dot-ok {
+  background: #1a7f5a;
+}
+
+.content-overview-bar .seg-warn,
+.content-overview-legend .dot-warn {
+  background: #b97a00;
+}
+
+.content-overview-bar .seg-danger,
+.content-overview-legend .dot-danger {
+  background: #b42318;
+}
+
+.content-overview-bar .seg-neutral {
+  background: var(--line);
+}
+
+.content-overview-legend {
+  display: flex;
+  align-items: center;
+  gap: 6px 12px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.content-overview-legend button,
+.content-overview-legend .legend-static {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.content-overview-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex: none;
 }
 
 .content-overview-card button {
@@ -94,10 +172,21 @@ button {
   background: var(--soft);
 }
 
+.content-overview-card button.content-overview-stale {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 5px;
+  margin-top: 10px;
+  color: #b97a00;
+  font-size: 12px;
+}
+
 .content-overview-recent {
   display: grid;
   gap: 4px;
-  margin-top: 12px;
+  margin-top: auto;
+  padding-top: 12px;
 }
 
 .content-overview-recent button {
@@ -113,6 +202,11 @@ button {
 .content-overview-empty {
   margin: 0;
   color: var(--muted);
+}
+
+.content-overview-empty {
+  margin-top: auto;
+  padding-top: 12px;
 }
 
 .content-overview-read-only {

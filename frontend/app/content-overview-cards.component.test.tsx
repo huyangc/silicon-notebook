@@ -31,10 +31,22 @@ const overview: NotebookContentOverview = {
   },
 };
 
+const emptyOverview: NotebookContentOverview = {
+  memory: { total: 0, confirmed: 0, candidate: 0, recent: [] },
+  knowhow: {
+    table_count: 0,
+    row_count: 0,
+    projection_pending: 0,
+    projection_failed: 0,
+    stale_code_count: 0,
+    recent_tables: [],
+  },
+};
+
 function renderCards(overrides: Partial<React.ComponentProps<typeof ContentOverviewCards>> = {}) {
   const onOpenMemory = vi.fn();
   const onOpenKnowhow = vi.fn();
-  render(
+  const { container } = render(
     <ContentOverviewCards
       overview={overview}
       loading={false}
@@ -45,16 +57,22 @@ function renderCards(overrides: Partial<React.ComponentProps<typeof ContentOverv
       {...overrides}
     />,
   );
-  return { onOpenMemory, onOpenKnowhow };
+  return { onOpenMemory, onOpenKnowhow, container };
 }
 
 test("renders content asset metrics, recent items, and navigation callbacks", () => {
-  const { onOpenMemory, onOpenKnowhow } = renderCards();
+  const { onOpenMemory, onOpenKnowhow, container } = renderCards();
 
   expect(screen.getByRole("heading", { name: "内容资产" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Memory" })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Knowhow" })).toBeInTheDocument();
-  expect(screen.getByText("4 条")).toBeInTheDocument();
+
+  const totals = container.querySelectorAll(".content-overview-total");
+  expect(totals[0].textContent).toBe("4 条");
+  expect(totals[1].textContent).toContain("3 张表");
+  expect(totals[1].textContent).toContain("12 行");
+
+  expect(screen.getByText("已同步 0 张")).toBeInTheDocument();
   expect(screen.getByText("同步失败 2 张")).toBeInTheDocument();
   expect(screen.getByText("代码过期 3 格")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "打开记忆 Not shown memory" })).not.toBeInTheDocument();
@@ -80,6 +98,62 @@ test("renders content asset metrics, recent items, and navigation callbacks", ()
   expect(onOpenKnowhow).toHaveBeenCalledWith("all", "t1");
 });
 
+test("renders proportion bars with accessible labels and normalized widths", () => {
+  renderCards();
+
+  const memoryBar = screen.getByRole("img", { name: "已确认 2 条，待确认 2 条" });
+  const memorySegments = memoryBar.querySelectorAll("span");
+  expect(memorySegments).toHaveLength(2);
+  expect(parseFloat(memorySegments[0].style.width)).toBeCloseTo(50, 1);
+  expect(parseFloat(memorySegments[1].style.width)).toBeCloseTo(50, 1);
+
+  const knowhowBar = screen.getByRole("img", {
+    name: "已同步 0 张，待同步 1 张，同步失败 2 张",
+  });
+  const knowhowSegments = knowhowBar.querySelectorAll("span");
+  expect(knowhowSegments).toHaveLength(3);
+  expect(parseFloat(knowhowSegments[0].style.width)).toBeCloseTo(0, 1);
+  expect(parseFloat(knowhowSegments[1].style.width)).toBeCloseTo(33.3, 1);
+  expect(parseFloat(knowhowSegments[2].style.width)).toBeCloseTo(66.7, 1);
+});
+
+test("normalizes segment widths when parts exceed the total", () => {
+  renderCards({
+    overview: {
+      ...overview,
+      memory: { total: 1, confirmed: 2, candidate: 2, recent: [] },
+      knowhow: {
+        ...overview.knowhow,
+        table_count: 3,
+        projection_pending: 2,
+        projection_failed: 2,
+      },
+    },
+  });
+
+  const memoryBar = screen.getByRole("img", { name: "已确认 2 条，待确认 2 条" });
+  const memoryWidths = [...memoryBar.querySelectorAll("span")].map((seg) =>
+    parseFloat(seg.style.width),
+  );
+  expect(memoryWidths.reduce((acc, w) => acc + w, 0)).toBeCloseTo(100, 1);
+
+  const knowhowBar = screen.getByRole("img", {
+    name: "已同步 0 张，待同步 2 张，同步失败 2 张",
+  });
+  const knowhowWidths = [...knowhowBar.querySelectorAll("span")].map((seg) =>
+    parseFloat(seg.style.width),
+  );
+  expect(knowhowWidths.reduce((acc, w) => acc + w, 0)).toBeCloseTo(100, 1);
+});
+
+test("hides proportion bars when totals are zero", () => {
+  renderCards({ overview: emptyOverview });
+
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
+  expect(screen.getByText("还没有已保存的记忆")).toBeInTheDocument();
+  expect(screen.getByText("还没有 Knowhow 表")).toBeInTheDocument();
+});
+
 test("renders a section-only loading state", () => {
   renderCards({ overview: null, loading: true });
 
@@ -92,25 +166,6 @@ test("renders a section-only failure state", () => {
 
   expect(screen.getByText("内容资产暂时不可用")).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "Knowhow" })).not.toBeInTheDocument();
-});
-
-test("renders zero-state copy when both content asset types are empty", () => {
-  renderCards({
-    overview: {
-      memory: { total: 0, confirmed: 0, candidate: 0, recent: [] },
-      knowhow: {
-        table_count: 0,
-        row_count: 0,
-        projection_pending: 0,
-        projection_failed: 0,
-        stale_code_count: 0,
-        recent_tables: [],
-      },
-    },
-  });
-
-  expect(screen.getByText("还没有已保存的记忆")).toBeInTheDocument();
-  expect(screen.getByText("还没有 Knowhow 表")).toBeInTheDocument();
 });
 
 test("keeps navigation enabled in read-only mode without edit controls", () => {
