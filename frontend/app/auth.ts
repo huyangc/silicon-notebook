@@ -2,15 +2,12 @@ import {
   humanizedError,
   humanizeHttpError,
   readHttpError,
-  throwHumanizedHttpError,
 } from "./errors.ts";
+import { performApiRequest, requestJson } from "./api-client.ts";
 
-export const API_BASE =
-  (typeof process !== "undefined"
-    ? process.env?.NEXT_PUBLIC_API_BASE_URL
-    : undefined) ?? "http://127.0.0.1:8000/api";
-
-const TOKEN_KEY = "silicon_notebook_token";
+export { API_BASE } from "./api-config.ts";
+export { authHeaders, clearToken, getToken, setToken } from "./auth-session.ts";
+import { clearToken } from "./auth-session.ts";
 
 export type AuthUser = {
   id: string;
@@ -25,23 +22,10 @@ export function isValidUsername(username: string): boolean {
   return USERNAME_RE.test((username ?? "").trim());
 }
 
-export function getToken(): string {
-  if (typeof window === "undefined") return "";
-  return window.localStorage.getItem(TOKEN_KEY) ?? "";
-}
-export function setToken(token: string): void {
-  if (typeof window !== "undefined") window.localStorage.setItem(TOKEN_KEY, token);
-}
-export function clearToken(): void {
-  if (typeof window !== "undefined") window.localStorage.removeItem(TOKEN_KEY);
-}
-export function authHeaders(): Record<string, string> {
-  const t = getToken();
-  return t ? { Authorization: `Bearer ${t}` } : {};
-}
-
 async function authFetch<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await performApiRequest(path, {
+    auth: "none",
+    tag: "auth",
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -75,15 +59,15 @@ export async function loginUser(
 }
 
 export async function logoutUser(): Promise<void> {
-  await fetch(`${API_BASE}/auth/logout`, {
-    method: "POST",
-    headers: authHeaders(),
-  }).catch(() => undefined);
-  clearToken();
+  try {
+    await performApiRequest("/auth/logout", { method: "POST", tag: "auth" });
+  } catch {
+    // Logout is intentionally fail-open: the locally held credential must still be discarded.
+  } finally {
+    clearToken();
+  }
 }
 
 export async function fetchMe(): Promise<AuthUser> {
-  const res = await fetch(`${API_BASE}/me`, { headers: authHeaders() });
-  if (!res.ok) await throwHumanizedHttpError(res, "auth");
-  return res.json();
+  return requestJson<AuthUser>("/me", { tag: "auth" });
 }
