@@ -56,7 +56,7 @@ anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化�
 
 ### 2.3 API、模型与领域服务
 
-- `backend/app/api/routes.py` composes the domain FastAPI routers，负责聚合顺序与兼容导出，不承载产品 endpoint body。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供十一个工具（七个 Memory/context 与四个 knowhow）的 scoped Streamable HTTP 面；`deps.py` 承载访问控制依赖。
+- `backend/app/api/routes.py` composes the domain FastAPI routers；aggregate 只负责组合顺序，不承载产品 endpoint body，也不提供兼容导出。`system_routes.py`、`notebook_routes.py`、`source_routes.py`、`knowhow_routes.py`、`knowledge_routes.py`、`ask_routes.py`、`report_routes.py`、`kg_routes.py` 与 `admin_routes.py` 各自拥有领域 endpoint；`memory_routes.py`、`auth_routes.py`、`content_overview_routes.py`、`debug_logs.py` 与 Agent Knowhow router 保持独立。`mcp_server.py` 提供十一个工具（七个 Memory/context 与四个 knowhow）的 scoped Streamable HTTP 面；`deps.py` 承载访问控制依赖。
 - 领域 Pydantic model 位于 `backend/app/models/` 的 `common.py`、`identity.py`、`memory.py`、`notebooks.py`、`sources.py`、`knowledge.py`、`kg.py`、`ask.py`、`reports.py`、`knowhow.py`、`content_overview.py`、`admin.py` 与 `model_services.py`。`backend/app/models/schemas.py` is a legacy compatibility facade：它只 re-export 同一 model object；领域模块不得反向 import facade 或 service/router/repository/store。
 - `backend/app/services/kg/`、`kg_ingest.py` 与 `kg_merge.py` 负责 Concept / Claim / Formula / Procedure 的抽取、证据绑定、图推理、PPR、合并、质量过滤与 scale-index 支撑。
 - `retrieval.py`、`retrieval_service.py`、`reasoning_retrieval.py` 与 `ask_modes.py` 负责关键词/向量召回、候选融合、查询改写、mode 注册和 reasoning 迭代。
@@ -217,7 +217,7 @@ FTS/KG，Ask 上下文不含（隔离不变量有专门测试守护）；`implem
 | 区域 | 当前所有者 | 当前边界与约束 |
 |---|---|---|
 | FastAPI 应用 | `backend/app/main.py` | 应用装配、中间件与 router 挂载；同步 SQLite 授权工作不能阻塞 event loop。 |
-| API | `backend/app/api/routes.py` + domain routers、`auth_routes.py`、`deps.py` | aggregate 只组合 domain router/兼容导出；endpoint body 按领域所有权放置，保持路径、依赖与 response schema。 |
+| API | `backend/app/api/routes.py` + domain routers、`auth_routes.py`、`deps.py` | aggregate 只负责组合顺序，不提供兼容导出；endpoint body 按领域所有权放置，保持路径、依赖与 response schema。 |
 | API models | `backend/app/models/*.py` + `schemas.py` | domain module 是唯一 model definition 所有者；`schemas.py` 只作 legacy compatibility facade。 |
 | SQLite facade | `backend/app/services/sqlite_repository.py` | 兼容 facade：显式委托到 `RepositoryRuntime` 组合的 store/service，不再承载领域 SQL；旧 import 与测试接缝保持。 |
 | Repository stores | `backend/app/repositories/`（`sqlite/`、`source_files.py`、`filesystem/`、`ports.py`） | 主业务库 SQL 唯一所在；共享一个 `SqliteDatabase` 与版本闸 `SqliteMigrator`；ports 是消费者契约。 |

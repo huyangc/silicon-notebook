@@ -7,24 +7,26 @@
 
 ## 1. Context
 
-The historical-debt programme has already established a more trustworthy test
-baseline and improved test architecture. The next debt item is the application
-boundary itself.
+At the design baseline, the historical-debt programme had already established a
+more trustworthy test baseline and improved test architecture. The next debt item
+was the application boundary itself.
 
-Three composition hotspots still make unrelated feature work collide:
+Three composition hotspots were present at baseline and made unrelated feature
+work collide:
 
-- `backend/app/api/routes.py` contains 126 route decorators across otherwise
+- `backend/app/api/routes.py` contained 126 route decorators across otherwise
   separate product domains.
-- `backend/app/models/schemas.py` contains 147 Pydantic classes and also reaches
+- `backend/app/models/schemas.py` contained 147 Pydantic classes and also reached
   into service-layer validation code.
-- eight frontend production modules define a local `apiFetch`, so authentication,
-  trusted error handling, downloads, cancellation, and streaming can drift between
+- eight frontend production modules defined a local `apiFetch`, so authentication,
+  trusted error handling, downloads, cancellation, and streaming could drift between
   features.
 
-The current repository already contains useful boundaries that must be preserved,
-including dedicated auth, Memory, content-overview, debug-log, and Agent Knowhow
-routers; storage/runtime composition; shared workspace view models; and Ask stream
-parsing. This design extends those boundaries instead of replacing them.
+The baseline already contained useful boundaries that the implementation needed
+to preserve, including dedicated auth, Memory, content-overview, debug-log, and
+Agent Knowhow routers; storage/runtime composition; shared workspace view models;
+and Ask stream parsing. This design extended those boundaries instead of replacing
+them.
 
 At the design baseline, commit `6f4170b347dd8f715023406402f056a03e73f8b6`
 passes the full functional gate with the Homebrew Python runtime. A warm run
@@ -76,8 +78,8 @@ Use a contract-first strangler migration inside one PR.
 
 - Establish boundary tests and compatibility seams first.
 - Move one coherent domain at a time.
-- Keep the aggregate router and `schemas.py` as compatibility facades while
-  consumers migrate.
+- Keep the aggregate router as the composition boundary and `schemas.py` as the
+  compatibility facade while consumers migrate.
 - Centralize frontend transport policy, then move endpoint calls by domain.
 - Verify focused behaviour after every domain and the complete contract at the
   end.
@@ -90,7 +92,8 @@ artifacts, or CI tooling.
 ## 5. Target backend route architecture
 
 `backend/app/api/routes.py` remains the authenticated aggregate boundary. It owns
-router composition and compatibility exports, not product endpoint bodies.
+router composition order only, not product endpoint bodies or compatibility
+exports.
 
 The migration must not assume that grouping routes by domain automatically
 preserves FastAPI matching order. Before moving endpoints, build a path-shape
@@ -401,7 +404,7 @@ All implementation ships in one PR from the isolated
 - baseline and final gate results and timings;
 - normalized API comparison results;
 - route/model/frontend ownership changes;
-- compatibility facades retained;
+- model/repository compatibility facades retained;
 - explicitly deferred debt.
 
 After the PR exists and the exact head is green, an independent subagent reviews

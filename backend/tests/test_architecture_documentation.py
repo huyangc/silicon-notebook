@@ -64,6 +64,14 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
     )
     _assert_phrases(
         {
+            "README.md": "aggregate is composition-only",
+            "README_zh.md": "聚合层只负责 composition/order",
+            "AGENTS.md": "`routes.py` is composition-only.",
+            "architecture.md": "aggregate 只负责组合顺序",
+        }
+    )
+    _assert_phrases(
+        {
             "README.md": "`backend/app/models/schemas.py` is a legacy compatibility facade",
             "README_zh.md": "`backend/app/models/schemas.py` 是旧导入的兼容 facade",
             "AGENTS.md": "`schemas.py` is legacy compatibility only.",
