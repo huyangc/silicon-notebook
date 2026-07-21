@@ -759,13 +759,14 @@ test("configured untested and failed services have distinct summaries", () => {
     "API 正常 · 1 个模型异常");
 });
 
-test("frontend product source does not hard-code the example provider model", async () => {
-  const source = await fs.readFile(new URL("./model-settings.ts", import.meta.url), "utf8");
-  assert.equal(source.includes("deepseek-reasoner"), false);
-});
 ```
 
-Add fetch tests that assert GET status has no request body and no test endpoint is called, while individual/all tests use POST and authenticated headers.
+The two-input behavior test above is the automated guard that model names come
+from response data. Do not add a front-end test that reads production source;
+the repository's test-governance contract forbids direct production-source
+layout scans. Add fetch tests that assert GET status has no request body and no
+test endpoint is called, while individual/all tests use POST and authenticated
+headers.
 
 - [ ] **Step 2: Run tests and verify RED**
 
