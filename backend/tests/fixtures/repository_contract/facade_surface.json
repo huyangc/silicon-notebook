@@ -27,7 +27,7 @@
       },
       {
         "kind": "import",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>",
         "target": "app.services.sqlite_repository:KnowledgeGraphTooLargeError"
       }
@@ -4103,7 +4103,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.add_knowhow_column",
         "target": "add_knowhow_column"
       }
@@ -4118,7 +4118,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.add_knowhow_row",
         "target": "add_knowhow_row"
       },
@@ -4145,7 +4145,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.add_url_sources",
         "target": "add_url_sources"
       }
@@ -4190,14 +4190,14 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/mcp_server.py",
-        "scope": "<module>.create_memory_mcp.ask_notebook.run_ask",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.ask",
         "target": "ask"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.ask",
+        "path": "backend/app/api/mcp_server.py",
+        "scope": "<module>.create_memory_mcp.ask_notebook.run_ask",
         "target": "ask"
       },
       {
@@ -4259,7 +4259,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.get_ask_job",
         "target": "ask_job_detail"
       },
@@ -4295,7 +4295,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.backfill_paper_metadata",
         "target": "backfill_paper_metadata"
       },
@@ -4422,7 +4422,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.bulk_delete_conversations",
         "target": "bulk_delete_conversations"
       }
@@ -4458,7 +4458,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.cancel_ask_job",
         "target": "cancel_ask_job"
       }
@@ -4722,7 +4722,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.create_object_schema",
         "target": "create_object_schema"
       },
@@ -4743,7 +4743,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.create_report",
         "target": "create_report"
       }
@@ -4758,6 +4758,24 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>._stream_ask_events",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.cancel_ask_job",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.get_ask_job",
+        "target": "current_user"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/deps.py",
         "scope": "<module>._resolve_session_user",
         "target": "current_user"
@@ -4770,37 +4788,19 @@
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>._launch_generate_job",
         "target": "current_user"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>._launch_plan_job",
         "target": "current_user"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>._stream_ask_events",
-        "target": "current_user"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.cancel_ask_job",
-        "target": "current_user"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.get_ask_job",
-        "target": "current_user"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.upload_notebook_asset",
         "target": "current_user"
       },
@@ -4863,7 +4863,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.delete_conversation",
         "target": "delete_conversation"
       },
@@ -4899,7 +4899,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.delete_knowhow_column",
         "target": "delete_knowhow_column"
       }
@@ -4914,7 +4914,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.delete_knowhow_row",
         "target": "delete_knowhow_row"
       }
@@ -4929,7 +4929,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.delete_knowhow_table",
         "target": "delete_knowhow_table"
       }
@@ -4974,7 +4974,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.delete_object_schema",
         "target": "delete_object_schema"
       },
@@ -4995,7 +4995,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.delete_report",
         "target": "delete_report"
       }
@@ -5091,7 +5091,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.export_reports_endpoint",
         "target": "export_reports"
       }
@@ -5184,7 +5184,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.find_duplicates",
         "target": "find_duplicates"
       },
@@ -5205,7 +5205,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.get_conversation",
         "target": "get_conversation"
       },
@@ -5310,6 +5310,42 @@
       },
       {
         "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.add_knowhow_column",
+        "target": "get_knowhow_table"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.add_knowhow_row",
+        "target": "get_knowhow_table"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.import_knowhow_table",
+        "target": "get_knowhow_table"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.patch_knowhow_cell",
+        "target": "get_knowhow_table"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.patch_knowhow_cells_batch",
+        "target": "get_knowhow_table"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.patch_knowhow_column",
+        "target": "get_knowhow_table"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
         "scope": "<module>.create_memory_mcp.get_knowhow_discrimination.load",
         "target": "get_knowhow_table"
@@ -5318,42 +5354,6 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
         "scope": "<module>.create_memory_mcp.get_knowhow_row.load",
-        "target": "get_knowhow_table"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.add_knowhow_column",
-        "target": "get_knowhow_table"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.add_knowhow_row",
-        "target": "get_knowhow_table"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.import_knowhow_table",
-        "target": "get_knowhow_table"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.patch_knowhow_cell",
-        "target": "get_knowhow_table"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.patch_knowhow_cells_batch",
-        "target": "get_knowhow_table"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.patch_knowhow_column",
         "target": "get_knowhow_table"
       },
       {
@@ -5430,6 +5430,12 @@
     "consumers": [
       {
         "kind": "attribute",
+        "path": "backend/app/api/ask_routes.py",
+        "scope": "<module>.ask_stream",
+        "target": "get_notebook"
+      },
+      {
+        "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
         "scope": "<module>.create_memory_mcp.list_notebooks.load",
         "target": "get_notebook"
@@ -5438,12 +5444,6 @@
         "kind": "attribute",
         "path": "backend/app/api/mcp_server.py",
         "scope": "<module>.create_memory_mcp.select_notebook.load",
-        "target": "get_notebook"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.ask_stream",
         "target": "get_notebook"
       },
       {
@@ -5535,7 +5535,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.get_notebook_asset_file",
         "target": "get_notebook_asset"
       },
@@ -5556,19 +5556,19 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.generate_report",
         "target": "get_report"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.get_report",
         "target": "get_report"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.update_report_outline",
         "target": "get_report"
       },
@@ -5616,19 +5616,19 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/system_routes.py",
         "scope": "<module>.get_model_settings",
         "target": "get_user_model_settings"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/system_routes.py",
         "scope": "<module>.put_model_settings",
         "target": "get_user_model_settings"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/system_routes.py",
         "scope": "<module>.test_model_service",
         "target": "get_user_model_settings"
       }
@@ -5659,12 +5659,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/routes.py",
-        "scope": "<module>.backfill_paper_metadata",
-        "target": "kg_llm_client"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/api/routes.py",
         "scope": "<module>.build_kg",
         "target": "kg_llm_client"
       },
@@ -5672,6 +5666,12 @@
         "kind": "attribute",
         "path": "backend/app/api/routes.py",
         "scope": "<module>.rebuild_kg",
+        "target": "kg_llm_client"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.backfill_paper_metadata",
         "target": "kg_llm_client"
       },
       {
@@ -5727,7 +5727,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.knowledge_graph",
         "target": "knowledge_graph"
       },
@@ -5754,7 +5754,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.knowledge_types",
         "target": "knowledge_types"
       },
@@ -5787,7 +5787,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.list_conversations",
         "target": "list_conversations"
       },
@@ -5868,7 +5868,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.list_knowledge",
         "target": "list_knowledge"
       },
@@ -5901,13 +5901,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/notebook_routes.py",
         "scope": "<module>.list_notebook_bases_route",
         "target": "list_notebook_bases"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/notebook_routes.py",
         "scope": "<module>.set_notebook_bases_route",
         "target": "list_notebook_bases"
       },
@@ -5943,7 +5943,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.list_object_schemas",
         "target": "list_object_schemas"
       },
@@ -5979,7 +5979,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.list_reports",
         "target": "list_reports"
       },
@@ -6034,13 +6034,13 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/routes.py",
-        "scope": "<module>.backfill_paper_metadata",
+        "scope": "<module>.resolve_conflicts",
         "target": "llm_client"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
-        "scope": "<module>.resolve_conflicts",
+        "path": "backend/app/api/source_routes.py",
+        "scope": "<module>.backfill_paper_metadata",
         "target": "llm_client"
       },
       {
@@ -6559,7 +6559,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.merge_knowledge",
         "target": "merge_knowledge"
       },
@@ -6643,13 +6643,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/notebook_routes.py",
         "scope": "<module>.mountable_notebooks_route",
         "target": "mountable_notebooks"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/notebook_routes.py",
         "scope": "<module>.set_notebook_bases_route",
         "target": "mountable_notebooks"
       }
@@ -6664,7 +6664,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/notebook_routes.py",
         "scope": "<module>.mounted_by_count_route",
         "target": "mounted_by_count"
       }
@@ -6875,13 +6875,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/system_routes.py",
         "scope": "<module>.me_pending_actions",
         "target": "pending_actions"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/system_routes.py",
         "scope": "<module>.me_pending_stream.gen",
         "target": "pending_actions"
       },
@@ -6968,13 +6968,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.add_url_sources.<lambda>",
         "target": "process_source"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.upload_sources.<lambda>",
         "target": "process_source"
       },
@@ -7028,7 +7028,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.propose_schemas",
         "target": "propose_schemas"
       },
@@ -7049,7 +7049,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>._report_llm_ready",
         "target": "reasoning_llm_client"
       }
@@ -7410,7 +7410,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.rename_conversation",
         "target": "rename_conversation"
       },
@@ -7431,7 +7431,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_column",
         "target": "rename_knowhow_column"
       }
@@ -7446,7 +7446,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/notebook_routes.py",
         "scope": "<module>.set_notebook_bases_route",
         "target": "replace_notebook_bases"
       }
@@ -7461,13 +7461,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>._launch_generate_job",
         "target": "report_execution"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>._launch_plan_job",
         "target": "report_execution"
       }
@@ -7539,7 +7539,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/system_routes.py",
         "scope": "<module>.get_model_settings",
         "target": "resolve_model_config"
       }
@@ -7944,7 +7944,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.edge_review_queue",
         "target": "review_queue"
       }
@@ -8082,7 +8082,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.review_relation",
         "target": "set_edge_review"
       }
@@ -8097,7 +8097,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_table",
         "target": "set_knowhow_anchor_column"
       }
@@ -8112,7 +8112,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_column",
         "target": "set_knowhow_column_kind"
       }
@@ -8166,7 +8166,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/system_routes.py",
         "scope": "<module>.put_model_settings",
         "target": "set_user_model_settings"
       }
@@ -8336,7 +8336,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.backfill_paper_metadata",
         "target": "sources_missing_paper_meta"
       }
@@ -8351,7 +8351,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>._stream_ask_events",
         "target": "start_ask_stream"
       }
@@ -8432,7 +8432,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/ask_routes.py",
         "scope": "<module>.submit_feedback",
         "target": "submit_feedback"
       },
@@ -8516,7 +8516,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_cell",
         "target": "update_knowhow_cell"
       }
@@ -8531,7 +8531,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_cells_batch",
         "target": "update_knowhow_cells"
       }
@@ -8576,13 +8576,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_cell",
         "target": "update_knowhow_cells_guarded_atomic"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_cells_batch",
         "target": "update_knowhow_cells_guarded_atomic"
       }
@@ -8597,7 +8597,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_table",
         "target": "update_knowhow_table_meta"
       }
@@ -8612,7 +8612,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.update_knowledge",
         "target": "update_knowledge"
       },
@@ -8654,7 +8654,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowledge_routes.py",
         "scope": "<module>.update_object_schema",
         "target": "update_object_schema"
       },
@@ -8675,13 +8675,13 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.cancel_report_endpoint",
         "target": "update_report"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.update_report_outline",
         "target": "update_report"
       }
@@ -8696,7 +8696,7 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/source_routes.py",
         "scope": "<module>.upload_sources",
         "target": "upload_sources"
       },
@@ -8783,25 +8783,25 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.optimize_knowhow_cell",
         "target": "validate_cell_target"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_cell",
         "target": "validate_cell_target"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.patch_knowhow_cells_batch",
         "target": "validate_cell_target"
       },
       {
         "kind": "attribute",
-        "path": "backend/app/api/routes.py",
+        "path": "backend/app/api/knowhow_routes.py",
         "scope": "<module>.reformat_knowhow_cell",
         "target": "validate_cell_target"
       },

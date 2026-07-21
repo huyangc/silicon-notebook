@@ -68,6 +68,24 @@ def test_knowhow_and_knowledge_endpoints_have_domain_owners():
         assert modules[endpoint] == module, endpoint
 
 
+def test_ask_and_report_endpoints_have_domain_owners():
+    modules = _endpoint_modules()
+    expected = {
+        "search_notebook": "app.api.ask_routes",
+        "ask": "app.api.ask_routes",
+        "ask_stream": "app.api.ask_routes",
+        "cancel_ask_job": "app.api.ask_routes",
+        "list_conversations": "app.api.ask_routes",
+        "submit_feedback": "app.api.ask_routes",
+        "create_report": "app.api.report_routes",
+        "export_reports_endpoint": "app.api.report_routes",
+        "generate_report": "app.api.report_routes",
+        "cancel_report_endpoint": "app.api.report_routes",
+    }
+    for endpoint, module in expected.items():
+        assert modules[endpoint] == module, endpoint
+
+
 def test_domain_routers_do_not_import_the_schema_facade():
     api_dir = ROOT / "backend" / "app" / "api"
     route_modules = sorted(api_dir.glob("*_routes.py"))

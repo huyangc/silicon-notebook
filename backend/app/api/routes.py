@@ -1,28 +1,16 @@
 import asyncio
-import io
-import json
-import queue
-import zipfile
-from typing import Any, List, Optional
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import (
     admin_query_repository,
-    notebook_access_repository, notebook_catalog_repository, repository,
-    require_notebook_access, require_notebook_read, require_notebook_write,
+    repository,
+    require_notebook_access, require_notebook_read,
     get_current_user, user_error,
 )
+from app.api.ask_routes import router as ask_router
 from app.models.identity import UserProfile
-from app.models.reports import (
-    ReportCreate,
-    ReportDetail,
-    ReportExportRequest,
-    ReportGenerateRequest,
-    ReportOutlineUpdate,
-    ReportSummary,
-)
 from app.models.admin import (
     AdminUserNotebook,
     AdminUserUsage,
@@ -31,17 +19,7 @@ from app.models.admin import (
     PromotionCandidate,
     PromotionRejectRequest,
 )
-from app.models.ask import (
-    AskRequest,
-    AskResponse,
-    ConversationDetail,
-    ConversationRenameRequest,
-    ConversationSummary,
-    FeedbackRequest,
-    FeedbackResponse,
-    KgSearchResponse,
-    NotebookSearchResponse,
-)
+from app.models.ask import KgSearchResponse
 from app.models.kg import (
     ConceptWhitelistAdd,
     ConceptWhitelistEntry,
@@ -53,15 +31,14 @@ from app.models.kg import (
     UnifiedKgStatus,
 )
 from app.services import background_jobs
-from app.services.ask_modes import resolve_mode, UnknownAskMode, ASK_MODES
 from app.services.pending_bus import pending_bus
-from app.repositories.ports import AskStreamPort
 from app.api.knowhow_routes import router as knowhow_router
 from app.api.knowledge_routes import router as knowledge_router
 from app.api.memory_routes import memory_router
 from app.api.notebook_routes import router as notebook_router
 from app.api.source_routes import router as source_router
 from app.api.system_routes import router as system_router
+from app.api.report_routes import router as report_router
 from app.repositories.sqlite.kg_build_job_store import KgBuildAlreadyRunning
 
 router = APIRouter()
@@ -71,19 +48,10 @@ router.include_router(notebook_router)
 router.include_router(source_router)
 router.include_router(knowhow_router)
 router.include_router(knowledge_router)
+router.include_router(ask_router)
+router.include_router(report_router)
 
 
-
-
-@router.get("/notebooks/{notebook_id}/search", response_model=NotebookSearchResponse, dependencies=[Depends(require_notebook_read)])
-def search_notebook(
-    notebook_id: str,
-    q: str = Query(""),
-) -> NotebookSearchResponse:
-    try:
-        return notebook_catalog_repository().search_notebook(notebook_id, q)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
 
 
 @router.get(
@@ -100,155 +68,6 @@ def kg_search(
     try:
         hits = repository().kg_search(notebook_id, q, k)
         return KgSearchResponse(query=q, hits=hits)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.post("/notebooks/{notebook_id}/ask", response_model=AskResponse, dependencies=[Depends(require_notebook_read)])
-def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
-    try:
-        return repository().ask(notebook_id, payload)
-    except UnknownAskMode as exc:
-        raise HTTPException(status_code=422, detail={
-            "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.get("/ask-modes")
-def ask_modes() -> list[dict[str, Any]]:
-    """User-facing ask modes (single source: app/services/ask_modes.py).
-    Copy/labels live in the frontend; this exposes ids + behavioural flags."""
-    return [
-        {"id": m.id, "group": m.group,
-         "requires_kg": m.requires_kg, "streaming": m.streaming}
-        for m in ASK_MODES.values() if m.user_facing
-    ]
-
-
-def _ndjson_line(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False) + "\n"
-
-
-async def _stream_ask_events(
-    repo: AskStreamPort,
-    notebook_id: str,
-    payload: AskRequest,
-    spec,
-    request: Request,
-):
-    # Task 23: 执行编排(begin→register→started→合成 start→copy_context worker→
-    # trace 持久化 fail-open→finish→unregister→空会话清理→终态事件→哨兵)整体在
-    # runtime-owned AskExecutionCoordinator;本函数保留冻结签名,只剩启动编排、
-    # 交付队列消费与断连轮询。Task 24: 执行体 = runtime-owned AskService(三模式
-    # 注册表派发在服务内),不再是 facade runner 回调。
-    events = repo.start_ask_stream(
-        notebook_id, payload, spec,
-        user_id=repo.current_user().id,
-    )
-    # 客户端断连只停止本次流(break),**不** set cancel_event —— worker 脱离连接
-    # 跑到完、答案照存。唯一取消入口是 POST …/ask/jobs/{job_id}/cancel。
-    while True:
-        try:
-            event = events.get_nowait()
-        except queue.Empty:
-            if await request.is_disconnected():
-                break
-            try:
-                event = await asyncio.to_thread(events.get, True, 0.1)
-            except queue.Empty:
-                continue
-        if event is None:
-            break
-        yield _ndjson_line(event)
-
-
-@router.post("/notebooks/{notebook_id}/ask/stream", dependencies=[Depends(require_notebook_read)])
-async def ask_stream(notebook_id: str, request: Request, payload: AskRequest) -> StreamingResponse:
-    repo = repository()
-    try:
-        repo.get_notebook(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-    try:
-        spec = resolve_mode(payload.mode)
-    except UnknownAskMode as exc:
-        raise HTTPException(status_code=422, detail={
-            "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
-    return StreamingResponse(
-        _stream_ask_events(repo, notebook_id, payload, spec, request),
-        media_type="application/x-ndjson",
-    )
-
-
-@router.post("/notebooks/{notebook_id}/ask/jobs/{job_id}/cancel",
-             dependencies=[Depends(require_notebook_read)])
-def cancel_ask_job(notebook_id: str, job_id: str) -> dict:
-    repo = repository()
-    try:
-        return repo.cancel_ask_job(job_id, repo.current_user().id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="ask job not found")
-
-
-@router.get("/notebooks/{notebook_id}/ask/jobs/{job_id}",
-            dependencies=[Depends(require_notebook_read)])
-def get_ask_job(notebook_id: str, job_id: str) -> dict:
-    repo = repository()
-    try:
-        detail = repo.ask_job_detail(job_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="ask job not found")
-    if detail["created_by"] != repo.current_user().id:
-        raise HTTPException(status_code=404, detail="ask job not found")
-    return detail
-
-
-@router.get("/notebooks/{notebook_id}/conversations", response_model=List[ConversationSummary], dependencies=[Depends(require_notebook_read)])
-def list_conversations(notebook_id: str) -> List[ConversationSummary]:
-    try:
-        return repository().list_conversations(notebook_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-
-
-@router.get("/conversations/{conversation_id}", response_model=ConversationDetail)
-def get_conversation(conversation_id: str, user: UserProfile = Depends(get_current_user)) -> ConversationDetail:
-    if notebook_access_repository().conversation_owner(conversation_id) != user.id:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    try:
-        return repository().get_conversation(conversation_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-
-@router.patch("/conversations/{conversation_id}")
-def rename_conversation(conversation_id: str, payload: ConversationRenameRequest, user: UserProfile = Depends(get_current_user)):
-    if notebook_access_repository().conversation_owner(conversation_id) != user.id:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    try:
-        repository().rename_conversation(conversation_id, payload.title)
-        return {"ok": True}
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-
-@router.delete("/conversations/{conversation_id}")
-def delete_conversation(conversation_id: str, user: UserProfile = Depends(get_current_user)):
-    if notebook_access_repository().conversation_owner(conversation_id) != user.id:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    try:
-        repository().delete_conversation(conversation_id)
-        return {"ok": True}
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-
-@router.delete("/notebooks/{notebook_id}/conversations", dependencies=[Depends(require_notebook_read)])  # 仓库层按 created_by scope,成员删自己的旧会话
-def bulk_delete_conversations(notebook_id: str, older_than_days: int = Query(..., ge=1)):
-    try:
-        deleted = repository().bulk_delete_conversations(notebook_id, older_than_days)
-        return {"deleted": deleted}
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 
@@ -335,153 +154,6 @@ def relink_kg(notebook_id: str) -> dict:
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
     return repo.relink_notebook_kg(notebook_id)
-
-
-# --- 深度报告(异步后台 job,轮询取状态) -------------------------------
-
-
-def _report_llm_ready(repo) -> bool:
-    return bool(getattr(repo.reasoning_llm_client, "configured", False))
-
-
-def _launch_plan_job(repo, notebook_id: str, rid: str, question: str, history: str,
-                     auto_generate: bool = False) -> None:
-    """阶段1(规划)后台 job:跑 plan_outline → outline_ready;auto_generate 时
-    在同一 worker 内接生成(一键直出)。depth 从 report 行读(创建时已落库)。
-    Task 25:helper 名保留(测试 monkeypatch 位),编排移交运行时协调器——
-    注册取消(submit 前)→ background_jobs.submit(copy_context)→ 收尾注销。"""
-    repo.report_execution.start_plan(
-        notebook_id, rid, question, history, auto_generate,
-        user_id=repo.current_user().id)
-
-
-def _launch_generate_job(repo, notebook_id: str, rid: str, question: str,
-                         depth: int = 2) -> None:
-    """阶段2(生成)后台 job:用已确认的 outline 跑 generate → done。"""
-    repo.report_execution.start_generate(
-        notebook_id, rid, question, depth,
-        user_id=repo.current_user().id)
-
-
-@router.post("/notebooks/{notebook_id}/reports",
-             dependencies=[Depends(require_notebook_write)])
-def create_report(notebook_id: str, payload: ReportCreate) -> dict:
-    repo = repository()
-    if not payload.question.strip():
-        raise HTTPException(status_code=422, detail="question required")
-    if not _report_llm_ready(repo):
-        raise HTTPException(status_code=409, detail="LLM not configured")
-    depth = max(1, min(16, int(payload.depth)))
-    try:
-        rid = repo.create_report(notebook_id, payload.question.strip(), depth=depth)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Notebook not found")
-    _launch_plan_job(repo, notebook_id, rid, payload.question.strip(), payload.history,
-                     payload.auto_generate)
-    return {"report_id": rid, "status": "pending"}
-
-
-@router.get("/notebooks/{notebook_id}/reports",
-            dependencies=[Depends(require_notebook_read)])
-def list_reports(notebook_id: str) -> List[ReportSummary]:
-    # repo 行含 notebook_id/updated_at 等多余键 → 按模型字段过滤(仓库无 extra=ignore 风格)
-    return [ReportSummary(**{k: v for k, v in r.items() if k in ReportSummary.model_fields})
-            for r in repository().list_reports(notebook_id)]
-
-
-@router.post("/notebooks/{notebook_id}/reports/export",
-             dependencies=[Depends(require_notebook_read)])
-def export_reports_endpoint(notebook_id: str, payload: ReportExportRequest) -> StreamingResponse:
-    # owner∪成员可下(require_notebook_read);只导出该 notebook 下 status='done' 且
-    # content_md 非空的报告,非 done/空/跨 notebook 的 id 静默跳过(repo 层已过滤)。
-    rows = repository().export_reports(notebook_id, payload.report_ids)
-    if not rows:                                 # 空 report_ids 或全部无效
-        raise HTTPException(status_code=422, detail="no exportable reports")
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for name, md in rows:
-            z.writestr(name, md)
-    buf.seek(0)
-    return StreamingResponse(
-        iter([buf.getvalue()]),
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="reports.zip"'})
-
-
-@router.get("/notebooks/{notebook_id}/reports/{report_id}",
-            dependencies=[Depends(require_notebook_read)])
-def get_report(notebook_id: str, report_id: str) -> ReportDetail:
-    try:
-        r = repository().get_report(notebook_id, report_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Report not found")
-    return ReportDetail(**{k: v for k, v in r.items() if k in ReportDetail.model_fields})
-
-
-@router.patch("/notebooks/{notebook_id}/reports/{report_id}/outline",
-              dependencies=[Depends(require_notebook_write)])
-def update_report_outline(notebook_id: str, report_id: str, payload: ReportOutlineUpdate) -> dict:
-    repo = repository()
-    try:
-        cur = repo.get_report(notebook_id, report_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Report not found")
-    if cur.get("status") != "outline_ready":
-        raise HTTPException(status_code=409, detail="outline editable only when outline_ready")
-    secs = [s for s in payload.sections
-            if str(s.get("title", "")).strip() and (s.get("sub_queries") or [])]
-    if not secs:
-        raise HTTPException(status_code=422, detail="at least one valid section required")
-    repo.update_report(notebook_id, report_id, outline=secs)
-    return {"status": "ok", "sections": len(secs)}
-
-
-@router.post("/notebooks/{notebook_id}/reports/{report_id}/generate",
-             dependencies=[Depends(require_notebook_write)])
-def generate_report(notebook_id: str, report_id: str, payload: ReportGenerateRequest) -> dict:
-    repo = repository()
-    try:
-        cur = repo.get_report(notebook_id, report_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Report not found")
-    if cur.get("status") != "outline_ready":
-        raise HTTPException(status_code=409, detail="generate only from outline_ready")
-    depth = max(1, min(16, int(payload.depth or cur.get("depth", 2))))
-    _launch_generate_job(repo, notebook_id, report_id, cur["question"], depth)
-    return {"status": "generating"}
-
-
-@router.post("/notebooks/{notebook_id}/reports/{report_id}/cancel",
-             dependencies=[Depends(require_notebook_write)])
-def cancel_report_endpoint(notebook_id: str, report_id: str) -> dict:
-    from app.services.report_engine import cancel_report as _cancel
-    live = _cancel(report_id)
-    if not live:                               # 线程已结束/不存在:直接落库标记
-        try:
-            repository().update_report(notebook_id, report_id, status="cancelled",
-                                       progress="已取消")
-        except Exception:
-            raise HTTPException(status_code=404, detail="Report not found")
-    return {"status": "cancelling" if live else "cancelled"}
-
-
-@router.delete("/notebooks/{notebook_id}/reports/{report_id}",
-               dependencies=[Depends(require_notebook_write)])
-def delete_report(notebook_id: str, report_id: str) -> dict:
-    repository().delete_report(notebook_id, report_id)
-    return {"status": "deleted"}
-
-
-@router.post("/answers/{answer_id}/feedback", response_model=FeedbackResponse)
-def submit_feedback(answer_id: str, payload: FeedbackRequest, user: UserProfile = Depends(get_current_user)) -> FeedbackResponse:
-    if not notebook_access_repository().user_can_read_answer(answer_id, user.id):  # owner ∪ 成员(spec §3.3)
-        raise HTTPException(status_code=404, detail="Answer not found")
-    try:
-        return repository().submit_feedback(answer_id, payload)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Answer not found")
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ---------------------------------------------------------------------------
