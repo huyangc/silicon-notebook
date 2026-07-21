@@ -32,8 +32,87 @@ _MAX_RECENT_JOBS = 100
 _MAX_IDENTIFIER_LENGTH = 200
 _MAX_ROUTE_SEGMENTS = 16
 _MAX_CONCURRENCY_VALUE = 1_000_000
-_NOTEBOOK_ROUTE = re.compile(r"^/api/notebooks/([^/?#]+)(?:/.*)?$")
+_NOTEBOOK_ROUTE = re.compile(r"^/api/notebooks/([^/?#]+)(?:/(.*))?$")
 _OPAQUE_NOTEBOOK_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
+_NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
+    (),
+    ("analytics",),
+    ("sources",),
+    ("sources", "import"),
+    ("sources", "url"),
+    ("sources", None),
+    ("assets",),
+    ("assets", None),
+    ("knowledge-types",),
+    ("knowledge",),
+    ("knowledge", None),
+    ("knowledge", None, "merge"),
+    ("knowledge", None, "promote"),
+    ("duplicates",),
+    ("graph",),
+    ("search",),
+    ("ask",),
+    ("ask", "stream"),
+    ("ask", "jobs", None),
+    ("ask", "jobs", None, "cancel"),
+    ("conversations",),
+    ("edge-review-queue",),
+    ("relations", None, "review"),
+    ("tier",),
+    ("bases",),
+    ("mountable",),
+    ("mounted-by-count",),
+    ("share",),
+    ("membership",),
+    ("kg", "search"),
+    ("kg", "build"),
+    ("kg", "rebuild"),
+    ("kg", "relink"),
+    ("kg", "conflicts", "resolve"),
+    ("kg", "conflicts", "pending"),
+    ("kg", "conflicts", None, "confirm"),
+    ("kg", "conflicts", None, "reject"),
+    ("reports",),
+    ("reports", "export"),
+    ("reports", None),
+    ("reports", None, "outline"),
+    ("reports", None, "generate"),
+    ("reports", None, "cancel"),
+    ("unified-kg",),
+    ("unified-kg", "rebuild"),
+    ("unified-kg", "status"),
+    ("unified-kg", "pending-merges"),
+    ("unified-kg", "merges", "review"),
+    ("unified-kg", "merges", "review-all"),
+    ("unified-kg", "merges", "review-job"),
+    ("unified-kg", "merges", None, "confirm"),
+    ("unified-kg", "merges", None, "reject"),
+    ("scale-index", "rebuild"),
+    ("scale-index", "cancel"),
+    ("scale-index", "status"),
+    ("index-status",),
+    ("concepts", None, "detail"),
+    ("objects", None, "context"),
+    ("objects", None, "neighbors"),
+    ("schema-proposals",),
+    ("paper-meta", "backfill"),
+    ("knowhow",),
+    ("knowhow", "import"),
+    ("knowhow", "import", "preview"),
+    ("knowhow", None),
+    ("knowhow", None, "reproject"),
+    ("knowhow", None, "columns"),
+    ("knowhow", None, "columns", None),
+    ("knowhow", None, "rows"),
+    ("knowhow", None, "rows", None),
+    ("knowhow", None, "rows", None, "cells", None),
+    ("knowhow", None, "rows", None, "cells", None, "optimize"),
+    ("knowhow", None, "rows", None, "cells", None, "reformat"),
+    ("knowhow", None, "cells"),
+    ("knowhow", None, "template"),
+    ("knowhow", None, "append"),
+    ("knowhow", None, "transfer"),
+)
 _ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("api", "health"),
     ("api", "files", None),
@@ -139,10 +218,28 @@ def _bounded_text(value: Any, maximum: int = _MAX_IDENTIFIER_LENGTH) -> str:
 
 def _request_metadata(path: str) -> tuple[str, Optional[str]]:
     path_only = str(path).split("?", 1)[0].split("#", 1)[0]
+    if path_only == "/api/notebooks/shared-by-me":
+        return path_only, None
     match = _NOTEBOOK_ROUTE.match(path_only)
     if match is not None:
         candidate = match.group(1)
         notebook_id = candidate if _OPAQUE_NOTEBOOK_ID.fullmatch(candidate) else None
+        raw_suffix = match.group(2)
+        suffix = () if not raw_suffix else tuple(raw_suffix.split("/"))
+        for template in _NOTEBOOK_ROUTE_TEMPLATES:
+            if len(template) != len(suffix):
+                continue
+            if all(
+                expected is None or expected == actual
+                for expected, actual in zip(template, suffix)
+            ):
+                normalized_suffix = tuple(
+                    expected if expected is not None else "{id}"
+                    for expected in template
+                )
+                return "/" + "/".join(
+                    ("api", "notebooks", "{id}", *normalized_suffix)
+                ), notebook_id
         return "/api/notebooks/{id}", notebook_id
     segments = tuple(
         segment for segment in path_only.split("/", _MAX_ROUTE_SEGMENTS) if segment
@@ -299,14 +396,7 @@ class DiagnosticsRuntime:
         self, phase: str
     ) -> tuple[
         contextvars.Token[_DiagnosticContext],
-        list[
-            tuple[
-                Optional[dict[int, dict[str, Any]]],
-                int,
-                Any,
-                Optional[dict[str, Any]],
-            ]
-        ],
+        list[tuple[Optional[dict[int, dict[str, Any]]], int, dict[str, Any], object]],
     ]:
         previous = _diagnostic_context.get()
         context = _DiagnosticContext(
@@ -317,12 +407,7 @@ class DiagnosticsRuntime:
         )
         context_token = _diagnostic_context.set(context)
         changed: list[
-            tuple[
-                Optional[dict[int, dict[str, Any]]],
-                int,
-                Any,
-                Optional[dict[str, Any]],
-            ]
+            tuple[Optional[dict[int, dict[str, Any]]], int, dict[str, Any], object]
         ] = []
         thread_id = threading.get_ident()
         with self._lock:
@@ -333,49 +418,94 @@ class DiagnosticsRuntime:
                 self._write_waiters,
             ):
                 for identifier, entry in registry.items():
-                    if entry["thread_id"] != thread_id:
+                    request_handoff = (
+                        registry is self._active_requests
+                        and context.request_id is not None
+                        and context.job_id is None
+                        and entry.get("request_id") == context.request_id
+                    )
+                    same_thread = entry["thread_id"] == thread_id
+                    if not request_handoff and not same_thread:
                         continue
-                    if context.request_id is not None and entry.get("request_id") != context.request_id:
+                    if (
+                        context.request_id is not None
+                        and entry.get("request_id") != context.request_id
+                    ):
                         continue
-                    if context.job_id is not None and entry.get("job_id") != context.job_id:
+                    if (
+                        context.job_id is not None
+                        and entry.get("job_id") != context.job_id
+                    ):
                         continue
-                    changed.append((registry, identifier, entry.get("phase"), None))
-                    entry["phase"] = context.phase
-            if self._write_holder is not None and self._write_holder["thread_id"] == thread_id:
+                    owner = object()
+                    self._push_phase_overlay(entry, owner, context.phase, thread_id)
+                    changed.append((registry, identifier, entry, owner))
+            if (
+                self._write_holder is not None
+                and self._write_holder["thread_id"] == thread_id
+            ):
                 holder = self._write_holder
-                changed.append((None, -1, holder.get("phase"), holder))
-                self._write_holder["phase"] = context.phase
+                owner = object()
+                self._push_phase_overlay(holder, owner, context.phase, thread_id)
+                changed.append((None, -1, holder, owner))
             if changed:
                 self._changed_locked()
         return context_token, changed
+
+    @staticmethod
+    def _push_phase_overlay(
+        entry: dict[str, Any], owner: object, phase: Optional[str], thread_id: int
+    ) -> None:
+        overlays = entry.get("_phase_overlays")
+        if not isinstance(overlays, list):
+            entry["_phase_base"] = (entry.get("phase"), entry["thread_id"])
+            overlays = []
+            entry["_phase_overlays"] = overlays
+        overlays.append((owner, phase, thread_id))
+        entry["phase"] = phase
+        entry["thread_id"] = thread_id
+
+    @staticmethod
+    def _pop_phase_overlay(entry: dict[str, Any], owner: object) -> bool:
+        overlays = entry.get("_phase_overlays")
+        if not isinstance(overlays, list):
+            return False
+        retained = [overlay for overlay in overlays if overlay[0] is not owner]
+        if len(retained) == len(overlays):
+            return False
+        if retained:
+            entry["_phase_overlays"] = retained
+            _, phase, thread_id = retained[-1]
+        else:
+            phase, thread_id = entry.pop(
+                "_phase_base", (entry.get("phase"), entry["thread_id"])
+            )
+            entry.pop("_phase_overlays", None)
+        entry["phase"] = phase
+        entry["thread_id"] = thread_id
+        return True
 
     def _exit_phase(
         self,
         context_token: contextvars.Token[_DiagnosticContext],
         changed: list[
-            tuple[
-                Optional[dict[int, dict[str, Any]]],
-                int,
-                Any,
-                Optional[dict[str, Any]],
-            ]
+            tuple[Optional[dict[int, dict[str, Any]]], int, dict[str, Any], object]
         ],
     ) -> None:
         try:
             with self._lock:
                 restored = False
-                for registry, identifier, old_phase, captured_holder in changed:
-                    if captured_holder is not None:
-                        if self._write_holder is captured_holder:
-                            self._write_holder["phase"] = old_phase
-                            restored = True
-                        continue
+                for registry, identifier, captured_entry, owner in changed:
                     if registry is None:
+                        if self._write_holder is captured_entry:
+                            restored = (
+                                self._pop_phase_overlay(captured_entry, owner)
+                                or restored
+                            )
                         continue
                     entry = registry.get(identifier)
-                    if entry is not None:
-                        entry["phase"] = old_phase
-                        restored = True
+                    if entry is captured_entry:
+                        restored = self._pop_phase_overlay(entry, owner) or restored
                 if restored:
                     self._changed_locked()
         finally:
@@ -499,7 +629,7 @@ class DiagnosticsRuntime:
     @staticmethod
     def _render_entry(entry: dict[str, Any], now: float) -> dict[str, Any]:
         rendered = {
-            key: value for key, value in entry.items() if key != "_started_monotonic"
+            key: value for key, value in entry.items() if not key.startswith("_")
         }
         rendered["duration_ms"] = round(
             max(0.0, now - entry["_started_monotonic"]) * 1_000, 3

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import re
 import threading
 from typing import Callable
 
@@ -25,6 +26,20 @@ from app.core.request_context import request_user_id
 from app.services.pending_bus import pending_bus
 
 _log = logging.getLogger("silicon_notebook.jobs")
+_SAFE_JOB_PREFIXES = (
+    ("knowhow-legacy-reproject-", "knowhow-legacy-reproject"),
+    ("knowhow-asset-sweep:", "knowhow-asset-sweep"),
+    ("knowhow-project-", "knowhow-project"),
+    ("conflictresolve-", "conflictresolve"),
+    ("mergereview-", "mergereview"),
+    ("report-plan-", "report-plan"),
+    ("report-gen-", "report-gen"),
+    ("rebuildkg-", "rebuildkg"),
+    ("papermeta-", "papermeta"),
+    ("buildkg-", "buildkg"),
+)
+_SAFE_ASK_JOB_NAMES = frozenset({"ask-chunk", "ask-reasoning", "ask-graph"})
+_CALLABLE_OPERATION = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,79}$")
 
 
 def _resolve_job_user() -> str | None:
@@ -33,6 +48,18 @@ def _resolve_job_user() -> str | None:
         return request_user_id()
     except Exception:  # noqa: BLE001
         return None
+
+
+def _diagnostic_job_name(fn: Callable, label: str) -> str:
+    if label in _SAFE_ASK_JOB_NAMES:
+        return label
+    for prefix, operation in _SAFE_JOB_PREFIXES:
+        if label.startswith(prefix):
+            return operation
+    callable_name = getattr(fn, "__name__", "")
+    if isinstance(callable_name, str) and _CALLABLE_OPERATION.fullmatch(callable_name):
+        return callable_name
+    return "background_job"
 
 
 def submit(fn: Callable, *args, name: str | None = None,
@@ -46,21 +73,33 @@ def submit(fn: Callable, *args, name: str | None = None,
     """
     ctx = contextvars.copy_context()
     label = name or getattr(fn, "__name__", "job")
+    try:
+        diagnostic_name = _diagnostic_job_name(fn, label)
+    except Exception:  # noqa: BLE001 — diagnostics metadata is best-effort only
+        diagnostic_name = "background_job"
 
     def _run() -> None:
         try:
-            with diagnostics.job_scope(label):
-                fn(*args, **kwargs)
-        except Exception:  # noqa: BLE001 — 后台线程顶层兜底，绝不静默死
-            _log.exception("background job failed: %s", label)
-        finally:
-            if notify_pending:
-                uid = _resolve_job_user()
-                if uid:
-                    try:
-                        pending_bus.mark_dirty(uid)
-                    except Exception:  # noqa: BLE001 — 通知失败绝不影响 job
-                        _log.exception("pending mark_dirty failed: %s", label)
+            with diagnostics.job_scope(diagnostic_name):
+                try:
+                    fn(*args, **kwargs)
+                except Exception:  # noqa: BLE001 — 后台线程顶层兜底，绝不静默死
+                    _log.exception("background job failed: %s", diagnostic_name)
+                    raise
+                finally:
+                    if notify_pending:
+                        uid = _resolve_job_user()
+                        if uid:
+                            try:
+                                pending_bus.mark_dirty(uid)
+                            except Exception:  # noqa: BLE001 — 通知失败绝不影响 job
+                                _log.exception(
+                                    "pending mark_dirty failed: %s", diagnostic_name
+                                )
+        except Exception:
+            # The exception was already logged inside the observed lifecycle;
+            # preserve submit()'s fire-and-forget isolation contract.
+            pass
 
     thread = threading.Thread(target=lambda: ctx.run(_run), name=name, daemon=True)
     thread.start()

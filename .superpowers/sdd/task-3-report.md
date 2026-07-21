@@ -88,3 +88,62 @@ Result: both commands passed with no output.
 - The background-job scope surrounds the submitted callable so failures reach `job_scope` and become `status="error"`; the pre-existing outer catch still isolates/logs the exception, and pending notification remains in the existing `finally` block.
 - Notebook deletion keeps its original ordering and boundary: the committed database deletion completes before source/asset filesystem cleanup begins.
 - All diagnostics calls use Task 2's best-effort, exception-safe module wrappers. No Task 4 SQL or write-lock integration was started.
+
+## Review Follow-up
+
+The initial Task 3 review identified cross-thread and privacy gaps. The follow-up remained within Task 3 and changed no SQL/write-lock behavior.
+
+### Review RED
+
+Command:
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider backend/tests/test_diagnostics_runtime.py backend/tests/test_background_jobs.py backend/tests/test_readiness_gate.py backend/tests/test_request_user_ctx.py -q
+```
+
+Result before review fixes: `15 failed, 57 passed, 1 warning in 7.73s`.
+
+The failures demonstrated that:
+
+- a real synchronous FastAPI route executing in AnyIO's worker thread remained reported as `http.dispatch` on the event-loop thread;
+- pending notification ran after the job had already moved to `recent_jobs`;
+- production labels exposed notebook/report/knowhow identifiers;
+- nested notebook routes collapsed to `/api/notebooks/{id}`;
+- the request-correlated production job still exposed its raw label.
+
+Additional best-effort/privacy RED commands:
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider -n0 backend/tests/test_background_jobs.py::test_diagnostic_label_derivation_cannot_block_a_named_job -q
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider -n0 backend/tests/test_background_jobs.py::test_failed_job_log_uses_safe_operation_instead_of_raw_entity_id -q
+```
+
+Each failed once for the expected missing guard (`1 failed in 0.34s` and `1 failed in 0.33s`).
+
+### Review GREEN
+
+Single-process focused command (explicitly exercises the real thread handoff without xdist scheduling):
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider -n0 backend/tests/test_diagnostics_runtime.py backend/tests/test_background_jobs.py backend/tests/test_readiness_gate.py backend/tests/test_request_user_ctx.py -q
+```
+
+Result: `75 passed in 1.94s`.
+
+Existing deletion and composed-lifespan/API regressions:
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider backend/tests/test_knowhow_asset_gc.py backend/tests/test_notebook_store_component.py backend/tests/test_multi_domain_bases.py backend/tests/test_repository_api_contract.py backend/tests/test_kg_search_api.py -q
+```
+
+Result: `98 passed in 4.45s`.
+
+### Corrected Behavior
+
+- Request phase overlays correlate a propagated request id across the event-loop/worker boundary. While a synchronous delete phase executes, the active request shows the worker thread id and exact `notebook_delete.db` or `notebook_delete.files` phase.
+- Each phase overlay has an identity. Out-of-order scope exit removes only its own overlay; a still-active newer worker phase remains visible, and final exit restores the original request phase/thread.
+- Application exceptions and ASGI task cancellation both remove the active request entry.
+- Pending notification remains inside the active job lifetime. A callable failure still reaches `job_scope` as `error`, is logged once, and is swallowed by the existing fire-and-forget isolation boundary.
+- Caller-visible `threading.Thread.name` behavior is preserved. Diagnostic job entries and failure logs use only allowlisted stable operations or a bounded callable-code identifier; production entity ids are not included.
+- Notebook route normalization now preserves only allowlisted static route shape and `{id}` placeholders for dynamic positions, including source, Ask-cancel, report, and knowledge routes. `/api/notebooks/shared-by-me` is treated as a static collection route, not as a notebook id.
+- Hidden phase-overlay bookkeeping is excluded from snapshots. No request body/query/header/auth data, source/model/Memory/Knowhow content, raw entity parameter, or raw filename was added.

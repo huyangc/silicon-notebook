@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import json
 import os
 import signal
@@ -366,6 +368,44 @@ def test_phase_exit_does_not_restore_a_replacement_write_holder(tmp_path):
             thread.join(timeout=1)
 
 
+def test_overlapping_cross_thread_request_phases_restore_by_scope_identity(tmp_path):
+    runtime = _runtime(tmp_path)
+    worker_entered = threading.Event()
+    release_worker = threading.Event()
+    request_thread_id = threading.get_ident()
+
+    with diagnostics.install_runtime(runtime):
+        with diagnostics.request_scope("req-overlap", "GET", "/api/health"):
+            context = contextvars.copy_context()
+
+            def worker() -> None:
+                with diagnostics.diagnostic_phase("worker-phase"):
+                    worker_entered.set()
+                    assert release_worker.wait(timeout=5)
+
+            with diagnostics.diagnostic_phase("outer-phase"):
+                thread = threading.Thread(target=lambda: context.run(worker))
+                thread.start()
+                assert worker_entered.wait(timeout=5)
+                active = runtime.snapshot()["active_requests"][0]
+                worker_thread_id = thread.ident
+                assert active["phase"] == "worker-phase"
+                assert active["thread_id"] == worker_thread_id
+
+            # The older outer scope has exited out of order. It must remove only
+            # its own overlay and leave the still-running worker as the owner.
+            active = runtime.snapshot()["active_requests"][0]
+            assert active["phase"] == "worker-phase"
+            assert active["thread_id"] == worker_thread_id
+
+            release_worker.set()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            restored = runtime.snapshot()["active_requests"][0]
+            assert restored["phase"] is None
+            assert restored["thread_id"] == request_thread_id
+
+
 def test_active_items_have_context_thread_and_monotonic_duration(tmp_path):
     runtime = _runtime(tmp_path)
     with diagnostics.install_runtime(runtime):
@@ -448,7 +488,7 @@ def test_snapshot_bounds_identifiers_concurrency_width_and_non_finite_values(tmp
     request = snapshot["active_requests"][0]
     assert len(request["request_id"]) <= 200
     assert request["notebook_id"] is None
-    assert request["path"] == "/api/notebooks/{id}"
+    assert request["path"] == "/api/notebooks/{id}/sources/{id}"
     assert snapshot["concurrency"] == {
         "kg": {"window_active": 1, "window_max": 2, "window_waiting": 3},
         "llm": {"active": 1},
@@ -836,6 +876,256 @@ def test_fastapi_lifespan_exposes_blocked_request_before_completion():
     finally:
         release.set()
     assert diagnostics.current_runtime() is None
+
+
+def test_fastapi_sync_notebook_delete_phase_tracks_worker_thread(
+    tmp_path, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    from app.core import readiness
+    from app.main import create_app
+    from app.services import notebook_catalog
+
+    database_entered = threading.Event()
+    release_database = threading.Event()
+    files_entered = threading.Event()
+    release_files = threading.Event()
+    worker_thread_ids: list[int] = []
+    result: dict[str, object] = {}
+
+    class Store:
+        def delete_row_and_orphan_embeddings(self, _notebook_id: str) -> list[str]:
+            worker_thread_ids.append(threading.get_ident())
+            database_entered.set()
+            assert release_database.wait(timeout=5)
+            return ["stored-source"]
+
+    service = object.__new__(notebook_catalog.NotebookCatalogService)
+    service._store = Store()
+    service._storage_dir = lambda: tmp_path
+    service.get_notebook = lambda _notebook_id: object()
+
+    def delete_source(_path: str) -> None:
+        worker_thread_ids.append(threading.get_ident())
+        files_entered.set()
+        assert release_files.wait(timeout=5)
+
+    monkeypatch.setattr(notebook_catalog, "_delete_source_file", delete_source)
+    monkeypatch.setattr(
+        notebook_catalog,
+        "_delete_notebook_asset_dir",
+        lambda _storage, _notebook: None,
+    )
+
+    test_app = create_app()
+
+    @test_app.delete("/_diagnostics-test/delete")
+    def delete_route() -> dict[str, bool]:
+        service.delete_notebook("nb-private")
+        return {"ok": True}
+
+    readiness.mark_ready()
+    try:
+        with TestClient(test_app) as client:
+            runtime = diagnostics.current_runtime()
+            assert runtime is not None
+
+            thread = threading.Thread(
+                target=lambda: result.setdefault(
+                    "response", client.delete("/_diagnostics-test/delete")
+                )
+            )
+            thread.start()
+            assert database_entered.wait(timeout=5)
+            database_snapshot = runtime.snapshot()["active_requests"]
+            assert database_snapshot[0]["phase"] == "notebook_delete.db"
+            assert database_snapshot[0]["thread_id"] == worker_thread_ids[-1]
+
+            release_database.set()
+            assert files_entered.wait(timeout=5)
+            files_snapshot = runtime.snapshot()["active_requests"]
+            assert files_snapshot[0]["phase"] == "notebook_delete.files"
+            assert files_snapshot[0]["thread_id"] == worker_thread_ids[-1]
+
+            release_files.set()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            assert result["response"].status_code == 200
+            assert runtime.snapshot()["active_requests"] == []
+    finally:
+        release_database.set()
+        release_files.set()
+
+
+def test_fastapi_request_scope_cleans_up_after_application_exception():
+    from fastapi.testclient import TestClient
+
+    from app.core import readiness
+    from app.main import create_app
+
+    test_app = create_app()
+
+    @test_app.get("/_diagnostics-test/error")
+    def failing_route() -> None:
+        raise RuntimeError("expected request failure")
+
+    readiness.mark_ready()
+    with TestClient(test_app) as client:
+        runtime = diagnostics.current_runtime()
+        assert runtime is not None
+        with pytest.raises(RuntimeError, match="expected request failure"):
+            client.get("/_diagnostics-test/error")
+        assert runtime.snapshot()["active_requests"] == []
+    assert diagnostics.current_runtime() is None
+
+
+def test_fastapi_request_scope_cleans_up_when_dispatch_is_cancelled(tmp_path):
+    from app.core import readiness
+    from app.main import create_app
+
+    test_app = create_app()
+    entered: asyncio.Event
+    never: asyncio.Event
+
+    @test_app.get("/_diagnostics-test/cancel")
+    async def cancelled_route() -> None:
+        entered.set()
+        await never.wait()
+
+    async def exercise() -> None:
+        nonlocal entered, never
+        entered = asyncio.Event()
+        never = asyncio.Event()
+        readiness.mark_ready()
+        sent_request = False
+
+        async def receive() -> dict[str, object]:
+            nonlocal sent_request
+            if not sent_request:
+                sent_request = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def send(_message: dict[str, object]) -> None:
+            return None
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/_diagnostics-test/cancel",
+            "raw_path": b"/_diagnostics-test/cancel",
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+        with diagnostics.activate_runtime(
+            tmp_path,
+            readiness_provider=readiness.snapshot,
+            concurrency_provider=lambda: {},
+            interval_seconds=0.02,
+            enable_signal=False,
+        ) as runtime:
+            task = asyncio.create_task(test_app(scope, receive, send))
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            assert len(runtime.snapshot()["active_requests"]) == 1
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert runtime.snapshot()["active_requests"] == []
+
+    asyncio.run(exercise())
+    assert diagnostics.current_runtime() is None
+
+
+def test_fastapi_background_job_retains_request_correlation_after_response():
+    from fastapi.testclient import TestClient
+
+    from app.core import readiness
+    from app.main import create_app
+    from app.services import background_jobs
+
+    job_started = threading.Event()
+    release_job = threading.Event()
+    job_thread: list[threading.Thread] = []
+    test_app = create_app()
+
+    def correlated_worker() -> None:
+        job_started.set()
+        assert release_job.wait(timeout=5)
+
+    @test_app.post("/_diagnostics-test/job")
+    def start_job() -> dict[str, bool]:
+        job_thread.append(
+            background_jobs.submit(correlated_worker, name="buildkg-nb-private")
+        )
+        return {"ok": True}
+
+    readiness.mark_ready()
+    try:
+        with TestClient(test_app) as client:
+            runtime = diagnostics.current_runtime()
+            assert runtime is not None
+            response = client.post("/_diagnostics-test/job")
+            assert response.status_code == 200
+            assert job_started.wait(timeout=5)
+            snapshot = runtime.snapshot()
+            assert snapshot["active_requests"] == []
+            assert snapshot["active_jobs"][0]["request_id"] == response.headers[
+                "X-Request-Id"
+            ]
+            assert snapshot["active_jobs"][0]["name"] == "buildkg"
+            assert "nb-private" not in json.dumps(snapshot["active_jobs"])
+            release_job.set()
+            job_thread[0].join(timeout=5)
+            assert not job_thread[0].is_alive()
+    finally:
+        release_job.set()
+
+
+@pytest.mark.parametrize(
+    "path,expected,notebook_id",
+    [
+        ("/api/notebooks/shared-by-me", "/api/notebooks/shared-by-me", None),
+        ("/api/notebooks/nb-private", "/api/notebooks/{id}", "nb-private"),
+        (
+            "/api/notebooks/nb-private/sources/src-private",
+            "/api/notebooks/{id}/sources/{id}",
+            "nb-private",
+        ),
+        (
+            "/api/notebooks/nb-private/ask/jobs/job-private/cancel",
+            "/api/notebooks/{id}/ask/jobs/{id}/cancel",
+            "nb-private",
+        ),
+        (
+            "/api/notebooks/nb-private/reports/report-private/generate",
+            "/api/notebooks/{id}/reports/{id}/generate",
+            "nb-private",
+        ),
+        (
+            "/api/notebooks/nb-private/knowledge/ko-private/merge",
+            "/api/notebooks/{id}/knowledge/{id}/merge",
+            "nb-private",
+        ),
+    ],
+)
+def test_notebook_request_paths_preserve_only_allowlisted_route_shape(
+    tmp_path, path, expected, notebook_id
+):
+    runtime = _runtime(tmp_path)
+    with diagnostics.install_runtime(runtime):
+        with diagnostics.request_scope("req-route", "DELETE", path):
+            request = runtime.snapshot()["active_requests"][0]
+    assert request["path"] == expected
+    assert request["notebook_id"] == notebook_id
+    assert "private" not in request["path"]
 
 
 def test_notebook_delete_reports_database_then_filesystem_phases(tmp_path, monkeypatch):
