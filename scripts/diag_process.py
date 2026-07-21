@@ -99,6 +99,17 @@ class ProcAdapter:
     def __init__(self, root: Path | str = "/proc") -> None:
         self.root = Path(root)
         self.scan_incomplete = False
+        self.process_exited = False
+
+    def reset_scan_state(self) -> None:
+        self.scan_incomplete = False
+        self.process_exited = False
+
+    def _record_process_error(self, exc: OSError) -> None:
+        if exc.errno in {errno.ENOENT, errno.ESRCH}:
+            self.process_exited = True
+        else:
+            self.scan_incomplete = True
 
     def _process_path(self, pid: int, leaf: str) -> Path:
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
@@ -122,8 +133,7 @@ class ProcAdapter:
                 value = handle.read(_MAX_PROC_FILE_BYTES + 1)[:_MAX_PROC_FILE_BYTES]
             return None if _expired(deadline, clock) else value
         except OSError as exc:
-            if exc.errno in {errno.EACCES, errno.EPERM}:
-                self.scan_incomplete = True
+            self._record_process_error(exc)
             return None
         except ValueError:
             return None
@@ -134,7 +144,7 @@ class ProcAdapter:
         deadline: Optional[float] = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> tuple[int, ...]:
-        self.scan_incomplete = False
+        self.reset_scan_state()
         try:
             result: list[int] = []
             with os.scandir(self.root) as entries:
@@ -193,8 +203,7 @@ class ProcAdapter:
             target = os.readlink(self._process_path(pid, "cwd"))
             return None if _expired(deadline, clock) else Path(target)
         except OSError as exc:
-            if exc.errno in {errno.EACCES, errno.EPERM}:
-                self.scan_incomplete = True
+            self._record_process_error(exc)
             return None
         except ValueError:
             return None
@@ -242,9 +251,14 @@ class ProcAdapter:
                 for _entry in entries:
                     count += 1
                     if count >= _MAX_FDS or _expired(deadline, clock):
+                        if count >= _MAX_FDS:
+                            self.scan_incomplete = True
                         break
             return count
-        except (OSError, ValueError):
+        except OSError as exc:
+            self._record_process_error(exc)
+            return 0
+        except ValueError:
             return 0
 
     def task_stats(
@@ -260,6 +274,8 @@ class ProcAdapter:
             with os.scandir(task_root) as entries:
                 for entry in entries:
                     if len(result) >= _MAX_TASKS or _expired(deadline, clock):
+                        if len(result) >= _MAX_TASKS:
+                            self.scan_incomplete = True
                         break
                     if not entry.name.isascii() or not entry.name.isdecimal():
                         continue
@@ -267,10 +283,14 @@ class ProcAdapter:
                         with (task_root / entry.name / "stat").open("rb") as handle:
                             raw = handle.read(_MAX_PROC_FILE_BYTES + 1)[:_MAX_PROC_FILE_BYTES]
                         result.append(raw.decode("ascii", "replace"))
-                    except OSError:
+                    except OSError as exc:
+                        self._record_process_error(exc)
                         continue
             return tuple(result)
-        except (OSError, ValueError):
+        except OSError as exc:
+            self._record_process_error(exc)
+            return ()
+        except ValueError:
             return ()
 
     def identity(
@@ -567,6 +587,27 @@ def _number_prefix(value: str) -> int:
     return _safe_int(match.group(1)) if match else 0
 
 
+def _reset_proc_scan_state(proc: Any) -> None:
+    reset = getattr(proc, "reset_scan_state", None)
+    if callable(reset):
+        reset()
+        return
+    for attribute in ("scan_incomplete", "process_exited"):
+        if hasattr(proc, attribute):
+            try:
+                setattr(proc, attribute, False)
+            except (AttributeError, TypeError):
+                pass
+
+
+def _sample_proc_failure(proc: Any, pid: int) -> Optional[dict[str, Any]]:
+    if bool(getattr(proc, "scan_incomplete", False)):
+        return {"pid": pid, "status": "scan_incomplete"}
+    if bool(getattr(proc, "process_exited", False)):
+        return {"pid": pid, "status": "unavailable"}
+    return None
+
+
 def sample_process(
     pid: int,
     *,
@@ -581,17 +622,19 @@ def sample_process(
     """Take two bounded proc samples and return numeric process metadata."""
 
     adapter = proc or ProcAdapter()
+    _reset_proc_scan_state(adapter)
     ticks_per_second = clock_ticks or int(os.sysconf("SC_CLK_TCK"))
     system_page_size = page_size or int(os.sysconf("SC_PAGE_SIZE"))
     try:
         if _expired(deadline, clock):
             return {"pid": pid, "status": "deadline"}
-        first = parse_proc_stat(
-            _adapter_call(
-                adapter.read_stat, pid, deadline=deadline, clock=clock
-            )
-            or ""
+        first_raw = _adapter_call(
+            adapter.read_stat, pid, deadline=deadline, clock=clock
         )
+        failure = _sample_proc_failure(adapter, pid)
+        if failure is not None:
+            return failure
+        first = parse_proc_stat(first_raw or "")
         first_at = float(clock())
         if first is None:
             return {"pid": pid, "status": "unavailable"}
@@ -610,12 +653,13 @@ def sample_process(
         )
         if _expired(deadline, clock):
             return {"pid": pid, "status": "deadline"}
-        second = parse_proc_stat(
-            _adapter_call(
-                adapter.read_stat, pid, deadline=deadline, clock=clock
-            )
-            or ""
+        second_raw = _adapter_call(
+            adapter.read_stat, pid, deadline=deadline, clock=clock
         )
+        failure = _sample_proc_failure(adapter, pid)
+        if failure is not None:
+            return failure
+        second = parse_proc_stat(second_raw or "")
         second_at = float(clock())
         if second is None or first["starttime_ticks"] != second["starttime_ticks"]:
             return {"pid": pid, "status": "identity_changed"}
@@ -632,13 +676,22 @@ def sample_process(
                 adapter.read_status, pid, deadline=deadline, clock=clock
             )
         )
+        failure = _sample_proc_failure(adapter, pid)
+        if failure is not None:
+            return failure
         io_values = _key_values(
             _adapter_call(adapter.read_io, pid, deadline=deadline, clock=clock)
         )
+        failure = _sample_proc_failure(adapter, pid)
+        if failure is not None:
+            return failure
         d_state_threads = 0
         task_stats = _adapter_call(
             adapter.task_stats, pid, deadline=deadline, clock=clock
         )
+        failure = _sample_proc_failure(adapter, pid)
+        if failure is not None:
+            return failure
         for task_stat in itertools.islice(task_stats, _MAX_TASKS):
             if _expired(deadline, clock):
                 return {"pid": pid, "status": "deadline"}
@@ -648,11 +701,17 @@ def sample_process(
         fds = _adapter_call(
             adapter.count_fds, pid, deadline=deadline, clock=clock
         )
+        failure = _sample_proc_failure(adapter, pid)
+        if failure is not None:
+            return failure
         if _expired(deadline, clock):
             return {"pid": pid, "status": "deadline"}
         final_identity = _safe_identity(
             adapter, pid, deadline=deadline, clock=clock
         )
+        failure = _sample_proc_failure(adapter, pid)
+        if failure is not None:
+            return failure
         if _expired(deadline, clock):
             return {"pid": pid, "status": "deadline"}
         if final_identity != (expected_identity or second_identity):
@@ -686,7 +745,14 @@ def sample_process(
         }
     except TimeoutError:
         return {"pid": pid, "status": "deadline"}
-    except (OSError, ValueError, TypeError, KeyError, StopIteration):
+    except OSError as exc:
+        status = (
+            "unavailable"
+            if exc.errno in {errno.ENOENT, errno.ESRCH}
+            else "scan_incomplete"
+        )
+        return {"pid": pid, "status": status}
+    except (ValueError, TypeError, KeyError, StopIteration):
         return {"pid": pid, "status": "unavailable"}
 
 
@@ -895,10 +961,15 @@ def _sigusr1_is_caught(
     return bool(caught & (1 << (signal_number - 1)))
 
 
-def _capture_result(status: str, **fields: Any) -> dict[str, Any]:
+def _capture_result(
+    status: str,
+    *,
+    identity_verified: bool,
+    **fields: Any,
+) -> dict[str, Any]:
     result = {
         "status": status,
-        "identity_verified": status in {"ok", "partial"},
+        "identity_verified": identity_verified,
         "dump": "",
     }
     result.update(fields)
@@ -955,7 +1026,7 @@ def _capture_files_safe(
         current_dump = os.fstat(dump_fd)
         if _expired(deadline, clock):
             raise TimeoutError
-        return (
+        files_safe = (
             _owned_directory(current_directory)
             and _same_file(current_directory, directory_stat)
             and _directory_path_matches(directory, current_directory)
@@ -969,15 +1040,24 @@ def _capture_files_safe(
             and _path_matches_descriptor(
                 "thread-dumps.log", current_dump, directory_fd=directory_fd
             )
-            and not _expired(deadline, clock)
         )
+        if _expired(deadline, clock):
+            raise TimeoutError
+        return files_safe
+    except TimeoutError:
+        raise
     except OSError:
         return False
 
 
-def _deadline_partial(offset: int) -> dict[str, Any]:
+def _deadline_partial(
+    offset: int,
+    *,
+    identity_verified: bool,
+) -> dict[str, Any]:
     return _capture_result(
         "partial",
+        identity_verified=identity_verified,
         offset=offset,
         bytes=0,
         truncated=False,
@@ -1023,12 +1103,12 @@ def capture_thread_dump(
     """Request the already-installed non-terminating SIGUSR1 dump handler."""
 
     if not hasattr(signal, "SIGUSR1"):
-        return _capture_result("unsupported")
+        return _capture_result("unsupported", identity_verified=False)
     if fcntl is None:
-        return _capture_result("unsupported")
+        return _capture_result("unsupported", identity_verified=False)
     platform_name = sys.platform if platform is None else platform
     if not platform_name.startswith("linux"):
-        return _capture_result("unsupported")
+        return _capture_result("unsupported", identity_verified=False)
     adapter = proc or ProcAdapter()
     open_pidfd = pidfd_open_fn or _default_pidfd_open
     send_pidfd = pidfd_send_fn or _default_pidfd_send
@@ -1041,7 +1121,7 @@ def capture_thread_dump(
     )
     quiescence_deadline = capture_deadline - validation_reserve
     if clock() >= capture_deadline:
-        return _capture_result("deadline")
+        return _capture_result("deadline", identity_verified=False)
     directory = Path(diagnostics_dir)
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     nonblock = getattr(os, "O_NONBLOCK", 0)
@@ -1054,10 +1134,10 @@ def capture_thread_dump(
         try:
             directory_fd = os.open(directory, directory_flags)
         except OSError:
-            return _capture_result("unsafe_path")
+            return _capture_result("unsafe_path", identity_verified=False)
         directory_stat = os.fstat(directory_fd)
         if not _owned_directory(directory_stat) or not _directory_path_matches(directory, directory_stat):
-            return _capture_result("unsafe_path")
+            return _capture_result("unsafe_path", identity_verified=False)
         try:
             lock_fd = os.open(
                 "incident.lock",
@@ -1066,13 +1146,13 @@ def capture_thread_dump(
                 dir_fd=directory_fd,
             )
         except OSError:
-            return _capture_result("unsafe_path")
+            return _capture_result("unsafe_path", identity_verified=False)
         lock_stat = os.fstat(lock_fd)
         if not _owned_regular(lock_stat) or not _path_matches_descriptor(
             "incident.lock", lock_stat, directory_fd=directory_fd
         ):
             os.close(lock_fd)
-            return _capture_result("unsafe_path")
+            return _capture_result("unsafe_path", identity_verified=False)
         with os.fdopen(lock_fd, "a+b") as lock_handle:
             while True:
                 try:
@@ -1082,7 +1162,7 @@ def capture_thread_dump(
                     break
                 except BlockingIOError:
                     if clock() >= capture_deadline:
-                        return _capture_result("lock_timeout")
+                        return _capture_result("lock_timeout", identity_verified=False)
                     sleeper(
                         min(
                             _DUMP_POLL_SECONDS,
@@ -1095,43 +1175,43 @@ def capture_thread_dump(
                 )
             except OSError as exc:
                 if exc.errno == errno.ENOENT:
-                    return _capture_result("dump_unavailable")
-                return _capture_result("unsafe_path")
+                    return _capture_result("dump_unavailable", identity_verified=False)
+                return _capture_result("unsafe_path", identity_verified=False)
             with os.fdopen(dump_fd, "r+b", buffering=0) as dump_handle:
                 dump_stat = os.fstat(dump_handle.fileno())
                 if not _owned_regular(dump_stat) or not _path_matches_descriptor(
                     "thread-dumps.log", dump_stat, directory_fd=directory_fd
                 ):
-                    return _capture_result("unsafe_path")
+                    return _capture_result("unsafe_path", identity_verified=False)
                 offset = dump_stat.st_size
                 before_identity = _safe_identity(
                     adapter, pid, deadline=capture_deadline, clock=clock
                 )
                 if _expired(capture_deadline, clock):
-                    return _capture_result("deadline")
+                    return _capture_result("deadline", identity_verified=False)
                 baseline_identity = expected_identity or before_identity
                 if before_identity is None:
-                    return _capture_result("missing_process")
+                    return _capture_result("missing_process", identity_verified=False)
                 if before_identity != baseline_identity:
-                    return _capture_result("identity_changed")
+                    return _capture_result("identity_changed", identity_verified=False)
                 caught = _sigusr1_is_caught(
                     adapter, pid, deadline=capture_deadline, clock=clock
                 )
                 if _expired(capture_deadline, clock):
-                    return _capture_result("deadline")
+                    return _capture_result("deadline", identity_verified=False)
                 if not caught:
-                    return _capture_result("signal_unavailable")
+                    return _capture_result("signal_unavailable", identity_verified=False)
                 second_identity = _safe_identity(
                     adapter, pid, deadline=capture_deadline, clock=clock
                 )
                 if second_identity != baseline_identity:
-                    return _capture_result("identity_changed")
+                    return _capture_result("identity_changed", identity_verified=False)
                 try:
                     pidfd = open_pidfd(pid, 0)
                 except (OSError, ValueError, PermissionError):
-                    return _capture_result("pidfd_unavailable")
+                    return _capture_result("pidfd_unavailable", identity_verified=False)
                 if _expired(capture_deadline, clock):
-                    return _capture_result("deadline")
+                    return _capture_result("deadline", identity_verified=False)
                 try:
                     files_safe = _capture_files_safe(
                         directory,
@@ -1145,34 +1225,34 @@ def capture_thread_dump(
                         clock=clock,
                     )
                 except TimeoutError:
-                    return _capture_result("deadline")
+                    return _capture_result("deadline", identity_verified=False)
                 if not files_safe:
-                    return _capture_result("unsafe_path")
+                    return _capture_result("unsafe_path", identity_verified=False)
                 third_identity = _safe_identity(
                     adapter, pid, deadline=capture_deadline, clock=clock
                 )
                 if _expired(capture_deadline, clock):
-                    return _capture_result("deadline")
+                    return _capture_result("deadline", identity_verified=False)
                 if third_identity != baseline_identity:
-                    return _capture_result("identity_changed")
+                    return _capture_result("identity_changed", identity_verified=False)
                 caught = _sigusr1_is_caught(
                     adapter, pid, deadline=capture_deadline, clock=clock
                 )
                 if _expired(capture_deadline, clock):
-                    return _capture_result("deadline")
+                    return _capture_result("deadline", identity_verified=False)
                 if not caught:
-                    return _capture_result("signal_unavailable")
+                    return _capture_result("signal_unavailable", identity_verified=False)
                 fourth_identity = _safe_identity(
                     adapter, pid, deadline=capture_deadline, clock=clock
                 )
                 if _expired(capture_deadline, clock):
-                    return _capture_result("deadline")
+                    return _capture_result("deadline", identity_verified=False)
                 if fourth_identity != baseline_identity:
-                    return _capture_result("identity_changed")
+                    return _capture_result("identity_changed", identity_verified=False)
                 try:
                     send_pidfd(pidfd, signal.SIGUSR1, None, 0)
                 except (OSError, ValueError, PermissionError):
-                    return _capture_result("signal_failed")
+                    return _capture_result("signal_failed", identity_verified=False)
                 size = offset
                 last_size = offset
                 stable_polls = 0
@@ -1183,7 +1263,7 @@ def capture_thread_dump(
                             break
                         size = os.fstat(dump_handle.fileno()).st_size
                     except OSError:
-                        return _capture_result("dump_unavailable")
+                        return _capture_result("dump_unavailable", identity_verified=False)
                     if size > offset:
                         grew = True
                         if size == last_size:
@@ -1207,15 +1287,23 @@ def capture_thread_dump(
                     adapter, pid, deadline=capture_deadline, clock=clock
                 )
                 if _expired(capture_deadline, clock):
-                    return _deadline_partial(offset)
+                    return _deadline_partial(offset, identity_verified=False)
                 if after_identity != baseline_identity:
-                    return _capture_result("identity_changed", offset=offset)
+                    return _capture_result(
+                        "identity_changed",
+                        identity_verified=False,
+                        offset=offset,
+                    )
                 if not _sigusr1_is_caught(
                     adapter, pid, deadline=capture_deadline, clock=clock
                 ):
                     if _expired(capture_deadline, clock):
-                        return _deadline_partial(offset)
-                    return _capture_result("signal_unavailable", offset=offset)
+                        return _deadline_partial(offset, identity_verified=False)
+                    return _capture_result(
+                        "signal_unavailable",
+                        identity_verified=False,
+                        offset=offset,
+                    )
                 try:
                     files_safe = _capture_files_safe(
                         directory,
@@ -1229,25 +1317,33 @@ def capture_thread_dump(
                         clock=clock,
                     )
                 except TimeoutError:
-                    return _deadline_partial(offset)
+                    return _deadline_partial(offset, identity_verified=True)
                 if not files_safe:
-                    return _capture_result("unsafe_path", offset=offset)
+                    return _capture_result(
+                        "unsafe_path",
+                        identity_verified=True,
+                        offset=offset,
+                    )
                 if _expired(capture_deadline, clock):
-                    return _deadline_partial(offset)
+                    return _deadline_partial(offset, identity_verified=True)
                 final_size = os.fstat(dump_handle.fileno()).st_size
                 if _expired(capture_deadline, clock):
-                    return _deadline_partial(offset)
+                    return _deadline_partial(offset, identity_verified=True)
                 if final_size != last_size:
                     complete = False
                 try:
                     if _expired(capture_deadline, clock):
-                        return _deadline_partial(offset)
+                        return _deadline_partial(offset, identity_verified=True)
                     dump_handle.seek(offset)
                     appended = dump_handle.read(_DUMP_MAX_BYTES + 1)[:_DUMP_MAX_BYTES]
                 except OSError:
-                    return _capture_result("dump_unavailable", offset=offset)
+                    return _capture_result(
+                        "dump_unavailable",
+                        identity_verified=True,
+                        offset=offset,
+                    )
                 if _expired(capture_deadline, clock):
-                    return _deadline_partial(offset)
+                    return _deadline_partial(offset, identity_verified=True)
                 truncated = final_size - offset > _DUMP_MAX_BYTES
                 degraded: list[str] = []
                 if complete and final_size > _DUMP_FILE_MAX_BYTES:
@@ -1264,11 +1360,15 @@ def capture_thread_dump(
                             clock=clock,
                         )
                         if not files_safe:
-                            return _capture_result("unsafe_path", offset=offset)
+                            return _capture_result(
+                                "unsafe_path",
+                                identity_verified=True,
+                                offset=offset,
+                            )
                         ftruncate_fn(dump_handle.fileno(), 0)
-                    except OSError:
-                        degraded.append("retention_failed")
                     except TimeoutError:
+                        degraded.append("retention_failed")
+                    except OSError:
                         degraded.append("retention_failed")
                 status = "ok" if complete and not truncated else "partial"
                 partial_reason = None
@@ -1282,6 +1382,7 @@ def capture_thread_dump(
                     )
                 return _capture_result(
                     status,
+                    identity_verified=True,
                     offset=offset,
                     bytes=len(appended),
                     truncated=truncated,
@@ -1291,7 +1392,7 @@ def capture_thread_dump(
                     degraded=degraded,
                 )
     except OSError:
-        return _capture_result("lock_unavailable")
+        return _capture_result("lock_unavailable", identity_verified=False)
     finally:
         if pidfd >= 0:
             try:

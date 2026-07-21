@@ -23,6 +23,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import quote
 
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+import diag_common
+
 
 REPORT_LIMIT_BYTES = 32 * 1024
 EVIDENCE_LIMIT_BYTES = 128 * 1024
@@ -40,6 +45,9 @@ MAX_NOTEBOOK_COUNTS = 128
 MAX_PLAN_ROWS = 128
 MAX_LARGEST_TABLES = 20
 MAX_DEGRADED = 64
+MAX_BASE_RECALL_MOUNTS = 64
+MAX_BASE_RECALL_REFERENCES = 256
+MAX_BASE_RECALL_JSON_BYTES = 256 * 1024
 MAX_DEADLINE_SECONDS = 10.0
 MAX_BUSY_TIMEOUT_MS = 1000
 MAX_STALE_WORKSPACES = 8
@@ -180,6 +188,7 @@ def _empty_evidence(notebook_id: Optional[str]) -> Dict[str, Any]:
         "delete_plan": [],
         "source_file_plan": [],
         "relevant_scans": [],
+        "base_recall": {},
         "degraded": [],
         "safety": {
             "open_mode": "read-only-snapshot",
@@ -217,6 +226,10 @@ def _append_degraded(
 
 
 def _error_category(exc: BaseException) -> str:
+    if isinstance(exc, FileNotFoundError):
+        return "missing"
+    if isinstance(exc, PermissionError):
+        return "permission"
     message = str(exc).lower()
     if "interrupted" in message:
         return "interrupted"
@@ -228,10 +241,6 @@ def _error_category(exc: BaseException) -> str:
         return "missing_schema"
     if "not a database" in message or "malformed" in message:
         return "corrupt"
-    if isinstance(exc, FileNotFoundError):
-        return "missing"
-    if isinstance(exc, PermissionError):
-        return "permission"
     return "unavailable"
 
 
@@ -518,7 +527,9 @@ def _open_diagnostics_directory(parent: Path) -> _PinnedDirectory:
         metadata = os.lstat(directory)
     except FileNotFoundError:
         try:
-            os.mkdir(directory, mode=0o755)
+            # This parent is shared with the backend heartbeat writer, whose
+            # fail-closed runtime contract requires an exact owner-only mode.
+            os.mkdir(directory, mode=0o700)
         except FileExistsError:
             pass
         metadata = os.lstat(directory)
@@ -934,14 +945,23 @@ def _open_read_only(
         uri=True,
         timeout=timeout,
     )
-    connection.row_factory = sqlite3.Row
-    if hasattr(connection, "setlimit"):
-        connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024 * 1024)
-        connection.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 1024 * 1024)
-    connection.execute("PRAGMA query_only = ON")
-    connection.execute("PRAGMA foreign_keys = ON")
-    connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
-    connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+    try:
+        connection.row_factory = sqlite3.Row
+        if hasattr(connection, "setlimit"):
+            connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 1024 * 1024)
+            connection.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 1024 * 1024)
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+        connection.set_progress_handler(
+            lambda: int(time.monotonic() >= deadline), 1000
+        )
+    except BaseException:
+        try:
+            connection.close()
+        except BaseException:
+            pass
+        raise
     return connection
 
 
@@ -1349,11 +1369,351 @@ def _collect_largest_tables(
     ]
 
 
+def _base_recall_empty() -> Dict[str, Any]:
+    return {
+        "selected": False,
+        "selection": "none",
+        "notebook": None,
+        "notebook_count": 0,
+        "public_base_count": 0,
+        "mounts_total": 0,
+        "mounts_active": 0,
+        "mounts_inactive": 0,
+        "active_kg_objects": 0,
+        "active_embeddings": 0,
+        "mounted_bases": [],
+        "latest_report": {
+            "exists": False,
+            "references_total": 0,
+            "base_tier_references": 0,
+            "personal_tier_references": 0,
+            "mounted_base_references": 0,
+            "malformed_references": 0,
+        },
+    }
+
+
+def _base_recall_table_columns(
+    connection: sqlite3.Connection,
+    evidence: Dict[str, Any],
+    table: str,
+    deadline: float,
+) -> set[str]:
+    def read():
+        rows, truncated = _fetch_limited(
+            connection.execute(f"PRAGMA table_info({_quote_identifier(table)})"),
+            MAX_INDEX_COLUMNS,
+            deadline,
+        )
+        if truncated:
+            _append_degraded(
+                evidence, "base_recall.schema", "row_limit", RuntimeError()
+            )
+        return {str(row[1]) for row in rows if len(row) > 1}
+
+    return _safe_probe(evidence, "base_recall.schema", deadline, read) or set()
+
+
+def _base_recall_count_map(
+    connection: sqlite3.Connection,
+    evidence: Dict[str, Any],
+    table: str,
+    notebook_ids: Sequence[str],
+    deadline: float,
+) -> Dict[str, int]:
+    if not notebook_ids:
+        return {}
+    placeholders = ",".join("?" for _value in notebook_ids)
+
+    def read():
+        rows, truncated = _fetch_limited(
+            connection.execute(
+                f"SELECT notebook_id, COUNT(*) FROM {_quote_identifier(table)} "
+                f"WHERE notebook_id IN ({placeholders}) GROUP BY notebook_id",
+                tuple(notebook_ids),
+            ),
+            MAX_BASE_RECALL_MOUNTS + 1,
+            deadline,
+        )
+        if truncated:
+            _append_degraded(
+                evidence, f"base_recall.{table}", "row_limit", RuntimeError()
+            )
+        return {str(row[0]): max(0, int(row[1] or 0)) for row in rows}
+
+    return _safe_probe(evidence, f"base_recall.{table}", deadline, read) or {}
+
+
+def _collect_base_recall_evidence(
+    connection: sqlite3.Connection,
+    evidence: Dict[str, Any],
+    requested_notebook_id: Optional[str],
+    table_names: set[str],
+    deadline: float,
+) -> None:
+    """Collect only bounded aggregates from the already-owned DB snapshot."""
+
+    recall = _base_recall_empty()
+    evidence["base_recall"] = recall
+    required_notebooks = {"id", "tier", "created_by", "status"}
+    if "notebooks" not in table_names or not required_notebooks.issubset(
+        _base_recall_table_columns(
+            connection, evidence, "notebooks", deadline
+        )
+    ):
+        _append_degraded(
+            evidence, "base_recall.schema", "missing_schema", RuntimeError()
+        )
+        return
+
+    def notebook_totals():
+        return connection.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN tier='base' THEN 1 ELSE 0 END) "
+            "FROM notebooks"
+        ).fetchone()
+
+    totals = _safe_probe(
+        evidence, "base_recall.notebooks", deadline, notebook_totals
+    )
+    if totals is None:
+        return
+    recall["notebook_count"] = max(0, int(totals[0] or 0))
+    recall["public_base_count"] = max(0, int(totals[1] or 0))
+
+    selected_id: Optional[str] = None
+    selection = "none"
+    candidate = str(requested_notebook_id or "")
+    if candidate and len(candidate.encode("utf-8", "replace")) <= 200:
+        row = _safe_probe(
+            evidence,
+            "base_recall.selection",
+            deadline,
+            lambda: connection.execute(
+                "SELECT id FROM notebooks WHERE id=?", (candidate,)
+            ).fetchone(),
+        )
+        if row is not None:
+            selected_id = str(row[0])
+            selection = "operator"
+
+    report_columns = (
+        _base_recall_table_columns(connection, evidence, "reports", deadline)
+        if "reports" in table_names
+        else set()
+    )
+    required_reports = {
+        "notebook_id",
+        "references_json",
+        "status",
+        "created_at",
+    }
+    if selected_id is None and required_reports.issubset(report_columns):
+        row = _safe_probe(
+            evidence,
+            "base_recall.selection",
+            deadline,
+            lambda: connection.execute(
+                "SELECT notebook_id FROM reports WHERE status='done' "
+                "ORDER BY created_at DESC LIMIT 1"
+            ).fetchone(),
+        )
+        if row is not None:
+            selected_id = str(row[0])
+            selection = "latest_report"
+    if selected_id is None:
+        row = _safe_probe(
+            evidence,
+            "base_recall.selection",
+            deadline,
+            lambda: connection.execute(
+                "SELECT id FROM notebooks WHERE tier!='base' AND status!='copying' "
+                "ORDER BY id LIMIT 1"
+            ).fetchone(),
+        )
+        if row is not None:
+            selected_id = str(row[0])
+            selection = "first_personal"
+    if selected_id is None:
+        row = _safe_probe(
+            evidence,
+            "base_recall.selection",
+            deadline,
+            lambda: connection.execute(
+                "SELECT id FROM notebooks WHERE status!='copying' ORDER BY id LIMIT 1"
+            ).fetchone(),
+        )
+        if row is not None:
+            selected_id = str(row[0])
+            selection = "first"
+    if selected_id is None:
+        return
+    recall["selected"] = True
+    recall["selection"] = selection
+    recall["notebook"] = "notebook#1"
+
+    count_tables = {}
+    for table in (
+        "knowledge_objects",
+        "knowledge_embeddings",
+        "chunks",
+        "knowledge_relations",
+    ):
+        if table in table_names and "notebook_id" in _base_recall_table_columns(
+            connection, evidence, table, deadline
+        ):
+            count_tables[table] = True
+    active_counts = {
+        table: _base_recall_count_map(
+            connection, evidence, table, (selected_id,), deadline
+        ).get(selected_id, 0)
+        for table in count_tables
+    }
+    recall["active_kg_objects"] = active_counts.get("knowledge_objects", 0)
+    recall["active_embeddings"] = active_counts.get("knowledge_embeddings", 0)
+
+    mount_columns = (
+        _base_recall_table_columns(
+            connection, evidence, "notebook_bases", deadline
+        )
+        if "notebook_bases" in table_names
+        else set()
+    )
+    mount_rows: list[sqlite3.Row] = []
+    if {"notebook_id", "base_notebook_id"}.issubset(mount_columns):
+        result = _safe_probe(
+            evidence,
+            "base_recall.mounts",
+            deadline,
+            lambda: _fetch_limited(
+                connection.execute(
+                    "SELECT b.id, b.tier, b.status, b.created_by, a.created_by "
+                    "FROM notebook_bases e "
+                    "JOIN notebooks b ON b.id=e.base_notebook_id "
+                    "JOIN notebooks a ON a.id=e.notebook_id "
+                    "WHERE e.notebook_id=? AND b.id!=e.notebook_id "
+                    "ORDER BY CASE WHEN b.tier='base' THEN 0 ELSE 1 END, b.id",
+                    (selected_id,),
+                ),
+                MAX_BASE_RECALL_MOUNTS,
+                deadline,
+            ),
+        )
+        if result is not None:
+            mount_rows, truncated = result
+            if truncated:
+                _append_degraded(
+                    evidence, "base_recall.mounts", "row_limit", RuntimeError()
+                )
+    elif "notebook_bases" not in table_names:
+        _append_degraded(
+            evidence, "base_recall.mounts", "missing_schema", RuntimeError()
+        )
+
+    mount_ids = [str(row[0]) for row in mount_rows]
+    maps = {
+        table: _base_recall_count_map(
+            connection, evidence, table, mount_ids, deadline
+        )
+        for table in count_tables
+    }
+    active_mount_ids: set[str] = set()
+    mounted: list[Dict[str, Any]] = []
+    for index, row in enumerate(mount_rows, 1):
+        _require_deadline(deadline)
+        base_id = str(row[0])
+        tier = str(row[1] or "personal")
+        status = str(row[2] or "")
+        same_owner = str(row[3] or "") == str(row[4] or "")
+        active = status != "copying" and (tier == "base" or same_owner)
+        if active:
+            active_mount_ids.add(base_id)
+            reason = ""
+        elif status == "copying":
+            reason = "copying"
+        else:
+            reason = "not_authorized"
+        mounted.append(
+            {
+                "notebook": f"base#{index}",
+                "tier": tier if tier in {"base", "personal"} else "unknown",
+                "active": active,
+                "inactive_reason": reason,
+                "kg_objects": maps.get("knowledge_objects", {}).get(base_id, 0),
+                "embeddings": maps.get("knowledge_embeddings", {}).get(base_id, 0),
+                "chunks": maps.get("chunks", {}).get(base_id, 0),
+                "relations": maps.get("knowledge_relations", {}).get(base_id, 0),
+            }
+        )
+    recall["mounted_bases"] = mounted
+    recall["mounts_total"] = len(mounted)
+    recall["mounts_active"] = sum(1 for row in mounted if row["active"])
+    recall["mounts_inactive"] = len(mounted) - recall["mounts_active"]
+
+    if required_reports.issubset(report_columns):
+        row = _safe_probe(
+            evidence,
+            "base_recall.report",
+            deadline,
+            lambda: connection.execute(
+                "SELECT references_json FROM reports "
+                "WHERE notebook_id=? AND status='done' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (selected_id,),
+            ).fetchone(),
+        )
+        if row is not None:
+            report = recall["latest_report"]
+            report["exists"] = True
+            raw = str(row[0] or "[]")
+            if len(raw.encode("utf-8", "replace")) > MAX_BASE_RECALL_JSON_BYTES:
+                _append_degraded(
+                    evidence,
+                    "base_recall.report",
+                    "reference_limit",
+                    RuntimeError(),
+                )
+                return
+            try:
+                references = json.loads(raw)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                references = []
+                report["malformed_references"] = 1
+            if not isinstance(references, list):
+                references = []
+                report["malformed_references"] = 1
+            if len(references) > MAX_BASE_RECALL_REFERENCES:
+                _append_degraded(
+                    evidence,
+                    "base_recall.report",
+                    "reference_limit",
+                    RuntimeError(),
+                )
+                references = references[:MAX_BASE_RECALL_REFERENCES]
+            report["references_total"] = len(references)
+            for reference in references:
+                _require_deadline(deadline)
+                if not isinstance(reference, dict):
+                    report["malformed_references"] += 1
+                    continue
+                tier = reference.get("tier")
+                if tier == "base":
+                    report["base_tier_references"] += 1
+                elif tier == "personal":
+                    report["personal_tier_references"] += 1
+                else:
+                    report["malformed_references"] += 1
+                notebook = reference.get("notebook_id")
+                if isinstance(notebook, str) and notebook in active_mount_ids:
+                    report["mounted_base_references"] += 1
+
+
 def _collect_snapshot_evidence(
     connection: sqlite3.Connection,
     evidence: Dict[str, Any],
     notebook_id: Optional[str],
     deadline: float,
+    projection: Optional[str] = None,
 ) -> None:
     page_count = _pragma_scalar(connection, evidence, "page_count", deadline)
     freelist_count = _pragma_scalar(connection, evidence, "freelist_count", deadline)
@@ -1370,6 +1730,12 @@ def _collect_snapshot_evidence(
     tables = _schema_tables(connection, evidence, deadline)
     table_display = {raw: display for raw, display in tables}
     table_names = set(table_display)
+    if projection == "base-recall":
+        _collect_base_recall_evidence(
+            connection, evidence, notebook_id, table_names, deadline
+        )
+        evidence["safety"]["transaction_open"] = bool(connection.in_transaction)
+        return
     notebook_keys = _collect_fk_evidence(connection, evidence, tables, deadline)
     _collect_notebook_counts(
         connection,
@@ -1454,10 +1820,18 @@ def _bound_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def collect_db_evidence(
-    db_path, notebook_id: Optional[str] = None, deadline_seconds: float = 4.0
+    db_path,
+    notebook_id: Optional[str] = None,
+    deadline_seconds: float = 4.0,
+    projection: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Collect bounded metadata from a validated copy, never a source SQLite open."""
     evidence = _empty_evidence(notebook_id)
+    if projection not in (None, "base-recall"):
+        _append_degraded(
+            evidence, "projection", "unavailable", ValueError()
+        )
+        return _bound_evidence(evidence)
     try:
         requested = float(deadline_seconds)
         if requested != requested:
@@ -1466,15 +1840,26 @@ def collect_db_evidence(
         requested = 4.0
     deadline = time.monotonic() + max(0.001, min(requested, MAX_DEADLINE_SECONDS))
 
-    path = Path(os.path.abspath(os.fspath(db_path)))
-    paths = _source_paths(path)
     try:
+        path = Path(os.path.abspath(os.fspath(db_path)))
+        paths = _source_paths(path)
         initial_state = _validate_source_state(paths)
     except FileNotFoundError as exc:
         _append_degraded(evidence, "open", "missing", exc)
         return _bound_evidence(evidence)
+    except PermissionError as exc:
+        _append_degraded(evidence, "source.validation", "permission", exc)
+        return _bound_evidence(evidence)
     except _UnsafeFile as exc:
         _append_degraded(evidence, "source.validation", "unsafe_file", exc)
+        return _bound_evidence(evidence)
+    except OSError as exc:
+        _append_degraded(
+            evidence, "source.validation", _error_category(exc), exc
+        )
+        return _bound_evidence(evidence)
+    except ValueError as exc:
+        _append_degraded(evidence, "source.validation", "unavailable", exc)
         return _bound_evidence(evidence)
     _set_file_evidence(evidence, initial_state)
     if not _NOATIME_AVAILABLE or _NOATIME_FLAG is None:
@@ -1624,7 +2009,9 @@ def collect_db_evidence(
                 ),
             )
             evidence["safety"]["busy_timeout_ms"] = remaining_ms
-            _collect_snapshot_evidence(connection, evidence, notebook_id, deadline)
+            _collect_snapshot_evidence(
+                connection, evidence, notebook_id, deadline, projection
+            )
         except _UnsafeDiagnostics:
             evidence = _discard_unsafe_diagnostics_evidence(
                 notebook_id, _capture_source_state(paths)
@@ -1790,7 +2177,7 @@ def render_db_report(evidence: Dict[str, Any]) -> str:
     return _bounded_text("\n".join(lines) + "\n")
 
 
-def main(argv=None) -> int:
+def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Collect bounded source-side-effect-free SQLite DFX metadata."
     )
@@ -1805,6 +2192,10 @@ def main(argv=None) -> int:
     )
     sys.stdout.write(render_db_report(evidence))
     return 0
+
+
+def main(argv=None) -> int:
+    return diag_common.run_copy_safe(lambda: _main(argv))
 
 
 if __name__ == "__main__":

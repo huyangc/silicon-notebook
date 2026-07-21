@@ -165,6 +165,11 @@ npm run stop
 覆盖监听地址/端口。后端默认只监听 `127.0.0.1`；显式绑定非 loopback 地址时必须
 配置非默认 `SILICON_NOTEBOOK_ADMIN_PASSWORD`，否则启动直接失败。
 
+生产诊断支持的目标形态是 Ubuntu 24.04 上按上述 `npm run start` 启动、只含一个
+Uvicorn worker 的普通部署。若部署疑似卡住，请保持服务运行，并在**卡顿正在发生时**
+采集事故；见[生产事故即时采集](#生产事故即时采集)。先重启会丢掉命令需要关联的
+活跃请求、锁、进程与线程栈证据。
+
 `npm run stop` 调用 `scripts/stop.sh`:停掉正在监听后端 `PORT` 与前端 `FRONTEND_PORT`
 (缺省 `8000` / `3000`)的进程。它与 start 一样先 source 仓库根 `.env` 解析端口,所以若
 你用自定义 `PORT` / `FRONTEND_PORT` 启动,停止时也传同样的值。脚本先发 `SIGTERM`,等待
@@ -709,13 +714,82 @@ SILICON_NOTEBOOK_CORS_ORIGINS
 
 开发者与 MCP agent 看到的东西不变：后端 `detail` 在 API 响应和日志里保持原样，而完整诊断——状态码、状态文本、原始响应正文、以及能和 `requests.jsonl` 对上的 `X-Request-Id`——在每次请求失败时写进 DevTools console；凡是被界面换成泛化文案的错误，其原文也一并进 console。所以「它说我没权限」这类问题靠 console 里的 request id 定位，而不是猜是哪道校验拒的。
 
-部署机慢因排查可直接在持有 `.local/` 的机器上运行 `python3 scripts/diag_slow.py`。
-脚本除汇总请求、事件和 LLM 延迟外，还会基于 DB 聚合与 scale-index manifest 输出
-strict reasoning / PPR 路径审计，用来判断大库是否只走 indexed core、chunk/relation ANN
-是否齐全、delta 策略是否会放开未索引部分，以及跨 base 的路径是否可能触碰 active 全量向量。
-该报告同时是统一诊断入口 `scripts/diag.py` 的 `slow` 子命令（`diag.py slow | latency | base-recall`）——
-把三个「分析慢现象」的工具收敛到一个命令：离线的 `slow` / `latency` 子命令保持纯 stdlib、不 import app，
-可在裸机上直接跑；`base-recall` 才懒加载 app，用于诊断深度报告为何不引用 base 库。
+### 生产事故即时采集
+
+在 Ubuntu 24.04 上通过 `npm run start` 启动的部署中，SSH 到主机，在**卡顿仍在发生时**
+从仓库根执行主命令：
+
+```bash
+ssh <production-host>
+cd <silicon-notebook-repository>
+python3 scripts/diag.py incident
+```
+
+正常的单 Uvicorn worker 会自动发现。若报告显示进程发现为 missing、ambiguous 或
+incomplete，请从服务管理器或主机监听信息取得**仍在运行**的后端 PID，然后重试；不要重启：
+
+```bash
+python3 scripts/diag.py incident --pid <backend-pid>
+```
+
+默认结果是一段可整体复制、最多 **32 KiB** 的 UTF-8 文本。所有采集共享一个最长 10 秒
+的总截止时间；进程采样、两次线程栈、loopback 健康探测、有界历史日志读取，以及自身最多
+一秒的 DB 探测都消耗同一个时间预算。后端把 `SIGUSR1` 注册为**不终止进程**的全 Python
+线程 faulthandler dump；它只采线程栈，不采任何局部变量值，成功采集后后端继续存活。
+
+运行态心跳每两秒原子写入 `.local/diagnostics/runtime.json`；超过六秒即判 stale，活跃工作
+字段不会参与高置信结论。线程栈采集使用 `.local/diagnostics/incident.lock`，追加到
+`.local/diagnostics/thread-dumps.log`；一次成功采集后 dump 文件保持在 8 MiB 内。只读 DB
+分析使用 `.local/diagnostics/db-snapshots/` 下的有界临时快照。采集器只允许创建、替换或
+截断这些诊断工件。运行时只接受当前用户控制的 `0700` diagnostics 目录，以及同一用户拥有、
+单硬链接、普通文件类型的 `0600` heartbeat/dump 文件；已有路径不安全或目录路径被替换时，
+诊断降级且不会跟随链接或截断敌对目标。
+
+按以下顺序解释输出：
+
+- `Confidence-ranked diagnoses` 最多列三个确定性规则生成的假设。`high` / `medium` / `low`
+  表示证据强度，不等于确定性；单个弱信号不会被宣称为根因。
+- `Observations`、`Relevant stacks`、`Database and host signals`、`Log metadata` 给出排序所用
+  的元数据证据链；`Safe next commands/actions` 只建议下一步检查，不执行修复。
+- `Missing/degraded evidence` 是正式结果而非被隐藏的错误。snapshot stale 通常说明采集太晚；
+  PID 缺失或歧义时用上面的 `--pid` 重试。DB busy/locked、权限不足、deadline、损坏或 malformed
+  日志、信号路径不可用、进程/文件发生竞态时，对应证据会被排除，其余采集继续。
+- 空闲部署可能正确报告没有多信号结论达到有效置信度。应在操作肉眼可见地卡住时重跑，不能用
+  空闲采集臆造根因。
+
+可复制输出绝不打印原始不透明 id：允许出现的 notebook/request/job 引用会一致地映射为假名，
+其它原始 id 直接省略。它也绝不打印用户控制的原始文件名、request body、来源正文、Ask 问题/回答、prompt 或模型消息、Memory/Knowhow 内容、SQL
+文本或参数、authorization header、cookie、token、secret、原始命令行或局部变量。即使输出已
+脱敏，分享给可信团队之外的人之前仍必须人工复核。
+
+`incident` 不需要 root 或第三方 Python 包，不 import `app`，也不会重启或终止进程。六个诊断
+命令对应用数据都只读：不执行 delete/其它业务写入，不做 SQLite checkpoint/vacuum/analyze/reindex，
+不跑 migration，也不自动修复。`incident` 仅可按上述约束维护有界的
+`.local/diagnostics/` 工件。
+
+### 六命令诊断速查
+
+`scripts/diag.py` 只提供以下六个命令：
+
+| 命令 | 用途 | 运行边界 |
+| --- | --- | --- |
+| `python3 scripts/diag.py incident` | 首选的线上即时有界采集；自动发现不能唯一选中 worker 时加 `--pid <backend-pid>`。 | Ubuntu/Linux 活体进程证据；纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py slow --since 24 --deep` | 从历史日志、DB 聚合与 scale-index manifest 分析慢路径；`--deep` 会增加可能耗时数分钟的只读 DB 检查。裸跑 `python3 scripts/diag.py` 仍等于 `slow`。 | 离线、纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py latency --last 500` | 从 `ask_stage` 事件统计各 Ask 阶段 P50/P95/max。 | 离线、纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py open --local .local` | 分析打开笔记本的查询/端点耗时、缓存冷成本与 mutation-sequence churn。 | 离线、纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py db --db .local/silicon_notebook.db` | 有界、源端无副作用地采集 SQLite/WAL/表/FK 索引/query plan 证据。 | 离线、纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py base-recall [active_notebook_id] --db .local/silicon_notebook.db` | 仅用元数据诊断挂载 base 的可用性与最近报告的 tier 引用计数。 | 有界、源端无副作用的 SQLite 快照；纯 stdlib、不 import app；不执行检索、不回显查询/正文、不构造 repository、不迁移、不用 SQLite 打开源库。 |
+
+`base-recall` 与 `db` 共用 `O_NOATIME` pin、非阻塞锁、文件身份复核的 DB/WAL 拷贝，只在自己
+拥有的快照上执行固定聚合投影。安全边界不可用时只输出 category-only 降级信息，绝不回退为活体
+SQLite 连接。单段 UTF-8 报告最多 32 KiB，只含计数、固定状态标签和本次报告内假名；不包含原始
+notebook/user/report/object/chunk id、标题、问题、正文、文件名、路径、异常、凭据或 secret。
+
+历史读取器会覆盖、去重并限制 `requests`、`events`、`llm` 三通道的全部支持布局：legacy
+`<channel>.jsonl`、daily `<channel>-YYYY-MM-DD.jsonl`、daily gzip
+`<channel>-YYYY-MM-DD.jsonl.gz`，以及下一层 per-user 日志目录。malformed 行和字节/时间窗口截断
+会作为 degraded metadata 报告。既有独立引擎脚本继续可用于存量运维笔记与 cron；新操作优先走
+这个六命令统一入口。
 
 **日志可视化页面 — `/dev/logs`。** 针对上述 JSONL 通道的只读 debug 页面（v1 聚焦 LLM 通道）。左侧列表可按 kind / status / model 过滤并全文搜索；详情区完整展示发给 LLM 的内容（`system` / `user` 消息与 `schema_hint`）以及模型回复、token 用量、耗时。由门控的后端接口 `/api/debug/logs/...` 提供，需显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启（默认关闭——完整 LLM 记录可能包含私有来源材料）。
 

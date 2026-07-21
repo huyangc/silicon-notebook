@@ -147,14 +147,6 @@
     {
       "count": 1,
       "kind": "facade_imports",
-      "path": "scripts/diag_base_report.py",
-      "reason": "offline diagnostic composition root",
-      "scope": "<module>",
-      "target": "app.services.sqlite_repository:SQLiteRepository"
-    },
-    {
-      "count": 1,
-      "kind": "facade_imports",
       "path": "scripts/generate_repository_contract_fixtures.py",
       "reason": "contract fixture composition root",
       "scope": "<module>",
@@ -465,6 +457,38 @@
       "kind": "independent_sql",
       "path": "scripts/diag_db.py",
       "reason": "read-only host database diagnostic",
+      "scope": "<module>._base_recall_count_map.read",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._base_recall_table_columns.read",
+      "target": "connection.execute"
+    },
+    {
+      "count": 6,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._collect_base_recall_evidence",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._collect_base_recall_evidence.notebook_totals",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
       "scope": "<module>._collect_largest_tables.read",
       "target": "connection.execute"
     },
@@ -545,7 +569,7 @@
       "kind": "independent_sql",
       "path": "scripts/diag_open_latency.py",
       "reason": "read-only host database diagnostic",
-      "scope": "<module>.main._run",
+      "scope": "<module>._main._run",
       "target": "conn.execute"
     },
     {
@@ -851,7 +875,7 @@
       "kind": "sqlite_connect",
       "path": "scripts/diag_open_latency.py",
       "reason": "read-only host database diagnostic",
-      "scope": "<module>.main",
+      "scope": "<module>._main",
       "target": "sqlite3.connect"
     },
     {

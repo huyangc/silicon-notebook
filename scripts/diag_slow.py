@@ -51,6 +51,16 @@ _SAFE_STAGES = frozenset({
     "answer", "answer_llm", "embed", "embedding", "expand", "extract", "graph", "index", "load_indexes",
     "parse", "pipeline", "ppr", "report", "retrieval", "score", "seed", "total",
 })
+_SAFE_OBJECT_TYPES = frozenset({"concept", "claim", "formula", "procedure"})
+_ENV_BOOL_KEYS = frozenset({
+    "RELATION_RETRIEVAL_ENABLED", "CHUNK_KG_OVERLAY_ENABLED", "CHUNK_ANN_ENABLED",
+    "SCALE_INDEX_AUTO_ENABLED", "SCALE_SEARCH_INCLUDE_DELTA", "SCALE_AUTO_FOLD_ON_ADD",
+    "PPR_EMB_SYNONYM_ENABLED", "PPR_FACT_RERANK_ENABLED", "GRAPH_PPR_ENABLED",
+    "REASONING_QUOTA_ENABLED", "KG_AUTO_EXTRACT",
+})
+_ENV_ENUMS = {"SCALE_INDEX_AUTO_WHEN": frozenset({"idle", "now"})}
+_ENV_READ_LIMIT_BYTES = 64 * 1024
+_MANIFEST_READ_LIMIT_BYTES = 1024 * 1024
 
 
 class _BoundedOutput:
@@ -102,7 +112,10 @@ def _pct(sorted_vals, p):
 
 
 def _fmt_ms(v):
-    return f"{v/1000:.1f}s" if v >= 1000 else f"{int(v)}ms"
+    number = diag_common.finite_number(v)
+    if number is None:
+        return "invalid"
+    return f"{number/1000:.1f}s" if number >= 1000 else f"{int(number)}ms"
 
 
 def _parse_ts(ts):
@@ -131,6 +144,31 @@ def _safe_stage(value):
 
 def _safe_presence(value):
     return "present" if value not in (None, "") else "absent"
+
+
+def _safe_object_type(value):
+    return value if value in _SAFE_OBJECT_TYPES else "other"
+
+
+def _safe_count(value, default=0):
+    number = diag_common.finite_number(value)
+    return int(number) if number is not None else default
+
+
+def _safe_tier(value):
+    return value if value in {"base", "personal"} else "unknown"
+
+
+def _read_manifest(path):
+    try:
+        with open(path, "rb") as handle:
+            payload = handle.read(_MANIFEST_READ_LIMIT_BYTES + 1)
+        if len(payload) > _MANIFEST_READ_LIMIT_BYTES:
+            return {}
+        parsed = json.loads(payload.decode("utf-8", "strict"))
+        return parsed if isinstance(parsed, dict) else {}
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {}
 
 
 def _print_bounded_request_rows(lines, byte_budget, label):
@@ -164,13 +202,17 @@ def _read_env(root):
     if not path:
         return seen
     try:
-        for line in open(path, encoding="utf-8", errors="replace"):
+        with open(path, "rb") as handle:
+            payload = handle.read(_ENV_READ_LIMIT_BYTES + 1)
+        if len(payload) > _ENV_READ_LIMIT_BYTES:
+            return seen
+        for line in payload.decode("utf-8", "strict").splitlines()[:512]:
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
                 continue
             k, v = line.split("=", 1)
             seen[k.strip()] = v.strip()
-    except OSError:
+    except (OSError, UnicodeError):
         return seen
     return seen
 
@@ -191,6 +233,9 @@ class Sampler:
         self.samples = []
 
     def add(self, v):
+        v = diag_common.finite_number(v)
+        if v is None:
+            return
         self.count += 1
         if v > self.max:
             self.max = v
@@ -217,15 +262,17 @@ def resolve_local(root):
         db = os.path.join(d, "silicon_notebook.db")
         if os.path.exists(db):
             st = os.stat(db)
-            cands.append((st.st_mtime, d, st.st_size))
+            label = "root-local" if rel == ".local" else "backend-local"
+            cands.append((st.st_mtime, d, st.st_size, label))
     if not cands:
         d = os.path.join(root, ".local")
-        print(f"(两处都没有 silicon_notebook.db,按默认 {d} 继续 — 请确认 --root 传的是仓库根)")
+        print("(两处都没有 silicon_notebook.db,按默认 root-local 继续 — 请确认 --root 传的是仓库根)")
         return d
     cands.sort(reverse=True)
-    for mtime, d, size in cands:
+    for mtime, d, size, label in cands:
         mark = " ← 采用(mtime 最新)" if d == cands[0][1] else ""
-        print(f"  {d}: db {size/1e9:.2f} GB, mtime {datetime.fromtimestamp(mtime).isoformat(timespec='seconds')}{mark}")
+        print(f"  {label}: db {size/1e9:.2f} GB, "
+              f"mtime {datetime.fromtimestamp(mtime).isoformat(timespec='seconds')}{mark}")
     if len(cands) > 1:
         print("  ⚠ 两个 .local 同时存在:服务实际用哪个取决于部署版本(新版锚定仓库根)。"
               "若此报告的库规模与你的认知不符,用 --local 显式指定另一处重跑")
@@ -238,7 +285,7 @@ def report_requests(local_dir, since, slow_ms):
     section(f"HTTP 请求(近 {since} 内;慢阈值 {_fmt_ms(slow_ms)})")
     print(_scan_summary(request_read.stats))
     if not request_read.stats.files:
-        print(f"(没有 requests 日志;local={local_dir})")
+        print("(没有 requests 日志)")
         return
     per_path = defaultdict(Sampler)
     slow_list = []          # (ts, ms, path)
@@ -248,9 +295,9 @@ def report_requests(local_dir, since, slow_ms):
         ts = _parse_ts(e.get("ts", ""))
         if ts is None:
             continue
-        ms = e.get("latency_ms")
+        ms = diag_common.finite_number(e.get("latency_ms"))
         p = e.get("path", "?")
-        if not isinstance(ms, (int, float)):
+        if ms is None:
             continue
         total += 1
         norm = diag_common.normalize_http_path(p)
@@ -324,9 +371,16 @@ def report_events(local_dir, since):
                 reason = "zero_reset" if e.get("reason") == "zero_reset" else "other"
                 bail_reasons[reason] += 1
                 if e.get("reason") == "zero_reset":
-                    diag = {kk: (e.get(kk) if isinstance(e.get(kk), (bool, int, float)) else "present")
-                            for kk in ("ann_seeds", "active_seeds", "chunk_seeds",
-                                       "embed_ok", "ann_sources_skipped") if kk in e}
+                    diag = {}
+                    for kk in ("ann_seeds", "active_seeds", "chunk_seeds",
+                               "embed_ok", "ann_sources_skipped"):
+                        if kk not in e:
+                            continue
+                        if isinstance(e.get(kk), bool):
+                            diag[kk] = e[kk]
+                        else:
+                            number = diag_common.finite_number(e.get(kk))
+                            diag[kk] = int(number) if number is not None else "present"
                     last_bail_diag.append((e.get("ts", "")[:19], diag))
             elif k in ("ppr_fallback_refused", "graph_walk_refused",
                        "relation_scoring_skipped", "tier2_skipped",
@@ -338,20 +392,22 @@ def report_events(local_dir, since):
                 key = f"{_safe_stage(e.get('stage'))}/{_safe_presence(e.get('error', e.get('message')))}"
                 model_errors[key] += 1
             elif k == "ask_stage":
-                ms = e.get("latency_ms")
-                if isinstance(ms, (int, float)):
+                ms = diag_common.finite_number(e.get("latency_ms"))
+                if ms is not None:
                     ask_stage[_safe_stage(e.get("stage"))].add(ms)
             elif k == "pipeline":
-                ms = e.get("latency_ms")
-                if isinstance(ms, (int, float)) and e.get("status") == "done":
+                ms = diag_common.finite_number(e.get("latency_ms"))
+                if ms is not None and e.get("status") == "done":
                     pipe_stage[_safe_stage(e.get("stage"))].add(ms)
             elif k == "scale_ppr_stage":
-                ms = e.get("latency_ms")
-                if isinstance(ms, (int, float)):
+                ms = diag_common.finite_number(e.get("latency_ms"))
+                if ms is not None:
                     scale_ppr_stage[_safe_stage(e.get("stage"))].add(ms)
             elif k == "scale_index_build":
-                st, ms = _safe_stage(e.get("stage")), e.get("latency_ms", 0)
-                build_stages[st] = ms
+                st = _safe_stage(e.get("stage"))
+                ms = diag_common.finite_number(e.get("latency_ms"))
+                if ms is not None:
+                    build_stages[st] = ms
                 if st == "total":
                     last_build = (e.get("ts", "")[:19], dict(build_stages))
                     build_stages = {}
@@ -409,8 +465,8 @@ def report_llm(local_dir, since):
             if ts is None:
                 continue
             model = "configured" if e.get("model") not in (None, "") else "unspecified"
-            ms = e.get("latency_ms", e.get("duration_ms"))
-            if isinstance(ms, (int, float)):
+            ms = diag_common.finite_number(e.get("latency_ms", e.get("duration_ms")))
+            if ms is not None:
                 per_model[model].add(ms)
             if e.get("status") not in (None, "ok", "done"):
                 errors[model] += 1
@@ -460,7 +516,7 @@ def report_scale_profile(local_dir, runtime_dim=0):
     section("per-notebook 规模画像 + scale 索引诊断")
     db = os.path.join(local_dir, "silicon_notebook.db")
     if not os.path.exists(db):
-        print(f"(缺 {db})")
+        print("(缺 SQLite database)")
         return
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
@@ -469,8 +525,14 @@ def report_scale_profile(local_dir, runtime_dim=0):
         print("(DB 只读打开失败: sqlite_error)")
         return
     try:
-        tiers = {r["id"]: (r["tier"] if "tier" in r.keys() else "personal")
-                 for r in conn.execute("SELECT * FROM notebooks").fetchall()}
+        try:
+            tiers = {
+                r["id"]: _safe_tier(r["tier"] if "tier" in r.keys() else "personal")
+                for r in conn.execute("SELECT * FROM notebooks").fetchall()
+            }
+        except sqlite3.Error:
+            print("(notebooks schema unavailable: sqlite_error)")
+            return
         base_nbs = [n for n, t in tiers.items() if t == "base"]
         print(f"notebook 总数 {len(tiers)},其中 tier=base {len(base_nbs)} 个"
               f"{'(federated 检索会把每个 base 都并进每次查询)' if len(base_nbs) > 1 else ''}")
@@ -486,7 +548,10 @@ def report_scale_profile(local_dir, runtime_dim=0):
             for r in conn.execute(
                     "SELECT notebook_id nb, object_type ot, COUNT(*) c "
                     "FROM knowledge_objects GROUP BY 1, 2").fetchall():
-                ko_by_type[r["nb"]][r["ot"]] = r["c"]
+                object_type = _safe_object_type(r["ot"])
+                ko_by_type[r["nb"]][object_type] = (
+                    ko_by_type[r["nb"]].get(object_type, 0) + _safe_count(r["c"])
+                )
         except sqlite3.Error:
             pass
         chunks = group_count("SELECT notebook_id nb, COUNT(*) c FROM chunks GROUP BY 1")
@@ -508,7 +573,7 @@ def report_scale_profile(local_dir, runtime_dim=0):
             if n_ko + chunks.get(nb, 0) == 0:
                 continue
             ko_desc = " ".join(f"{k}={v}" for k, v in sorted(kos.items(), key=lambda kv: -kv[1]))
-            print(f"\n  {nb} tier={tiers[nb]}: KO {n_ko}({ko_desc}) "
+            print(f"\n  {diag_common.pseudonym('notebook', nb)} tier={tiers[nb]}: KO {n_ko}({ko_desc}) "
                   f"chunks={chunks.get(nb, 0)} edges={rels.get(nb, 0)} sources={srcs.get(nb, 0)}")
             print("    embeddings: " + " ".join(
                 f"{t.split('_')[0]}={emb[t].get(nb, 0)}" for t in emb))
@@ -520,16 +585,17 @@ def report_scale_profile(local_dir, runtime_dim=0):
                 print("    ⚠ 大库但没有 scale 索引 manifest → KG 对象检索/种子全部走"
                       "全量暴力路径(全表 json 解析+分词+GB 级矩阵),reasoning 首查可达数十分钟")
                 continue
-            try:
-                mf = json.load(open(mpath))
-            except Exception:  # noqa: BLE001
-                print(f"    ⚠ manifest 损坏: {mpath} → 索引加载失败=同「无索引」,全量暴力")
+            mf = _read_manifest(mpath)
+            if not mf:
+                print("    ⚠ manifest 损坏或过大 → 索引加载失败=同「无索引」,全量暴力")
                 continue
-            dim = mf.get("dim")
-            print(f"    索引: n_nodes={mf.get('n_nodes')} n_ann={mf.get('n_ann')} "
-                  f"chunk_ann={mf.get('n_chunk_ann', 0)} relation_ann={mf.get('n_relation_ann', 0)} "
+            dim = _safe_count(mf.get("dim"))
+            print(f"    索引: n_nodes={_safe_count(mf.get('n_nodes'))} "
+                  f"n_ann={_safe_count(mf.get('n_ann'))} "
+                  f"chunk_ann={_safe_count(mf.get('n_chunk_ann'))} "
+                  f"relation_ann={_safe_count(mf.get('n_relation_ann'))} "
                   f"dim={dim}")
-            if not mf.get("has_chunk_ann"):
+            if mf.get("has_chunk_ann") is not True:
                 print("    ⚠ 索引无 chunk_ann → PPR 种子/chunk 检索对全部 chunk 逐条分词打分"
                       "(每次查询重付)")
             # 维度失配探测:ANN 静默失效的头号来源(换 embed 模型后没重建索引)。
@@ -541,14 +607,19 @@ def report_scale_profile(local_dir, runtime_dim=0):
                 (nb,)).fetchone()
             live_dim = _vec_dim(r["vector"]) if r else None
             rt = _runtime_dim  # 运行时生效维(0=关,见 report_env 解析)
-            if rt and dim and int(dim) != int(rt):
+            if rt and dim and dim != int(rt):
                 print(f"    ⚠⚠ 维度失配: manifest dim={dim} vs 运行时维 EMBED_RUNTIME_DIM={rt} → "
                       f"索引建在旧空间,ANN 每次静默跳过 — 需 mode=full 重建")
-            elif not rt and dim and live_dim and int(dim) != int(live_dim):
+            elif not rt and dim and live_dim and dim != int(live_dim):
                 print(f"    ⚠⚠ 维度失配: manifest dim={dim} vs 库内向量 dim={live_dim} → "
                       f"ANN 每次静默跳过(无事件!),KG 对象检索悄悄回退全量暴力 — 需重建索引")
             # 水位 delta:对象侧 delta 暴力没有开关,每次查询都付
-            wm = set(mf.get("watermark_sources", []))
+            raw_watermark = mf.get("watermark_sources")
+            wm = set(raw_watermark) if (
+                isinstance(raw_watermark, list)
+                and len(raw_watermark) <= 100_000
+                and all(isinstance(value, str) for value in raw_watermark)
+            ) else set()
             all_src = [r["id"] for r in conn.execute(
                 "SELECT id FROM sources WHERE notebook_id=?", (nb,)).fetchall()]
             delta_src = [s for s in all_src if s not in wm]
@@ -593,7 +664,7 @@ def report_reasoning_ppr_audit(local_dir, root):
     section("strict reasoning / PPR 路径审计(只读,不跑 PPR)")
     db = os.path.join(local_dir, "silicon_notebook.db")
     if not os.path.exists(db):
-        print(f"(缺 {db})")
+        print("(缺 SQLite database)")
         return
     env = _read_env(root)
     graph_ppr = _env_bool(env, "GRAPH_PPR_ENABLED", True)
@@ -617,8 +688,12 @@ def report_reasoning_ppr_audit(local_dir, root):
         print("(DB 只读打开失败: sqlite_error)")
         return
     try:
-        tiers = {r["id"]: r["tier"] for r in conn.execute(
-            "SELECT id, tier FROM notebooks").fetchall()}
+        try:
+            tiers = {r["id"]: _safe_tier(r["tier"]) for r in conn.execute(
+                "SELECT id, tier FROM notebooks").fetchall()}
+        except sqlite3.Error:
+            print("(notebooks schema unavailable: sqlite_error)")
+            return
         base_nbs = [n for n, t in tiers.items() if t == "base"]
 
         def group_count(sql):
@@ -640,11 +715,8 @@ def report_reasoning_ppr_audit(local_dir, root):
             mpath = os.path.join(idx_root, nb, "manifest.json")
             if not os.path.exists(mpath):
                 return None
-            try:
-                with open(mpath, encoding="utf-8") as fh:
-                    return json.load(fh)
-            except Exception:  # noqa: BLE001
-                return {"_broken": True, "_path": mpath}
+            value = _read_manifest(mpath)
+            return value or {"_broken": True}
 
         def pct(a, b):
             return "n/a" if not b else f"{(100.0 * a / b):.1f}%"
@@ -662,39 +734,45 @@ def report_reasoning_ppr_audit(local_dir, root):
             shown += 1
             mf = manifest(nb)
             has_self_idx = bool(mf and not mf.get("_broken"))
-            print(f"\n  active={nb} tier={tiers.get(nb, 'personal')} "
+            print(f"\n  active={diag_common.pseudonym('notebook', nb)} "
+                  f"tier={tiers.get(nb, 'unknown')} "
                   f"KO={ko.get(nb, 0)} chunks={chunks.get(nb, 0)} "
                   f"relations={rels.get(nb, 0)}")
 
             if not has_self_idx:
                 if mf and mf.get("_broken"):
-                    print(f"    ⚠ self scale index manifest 损坏: {mf.get('_path')}")
+                    print("    ⚠ self scale index manifest 损坏或过大")
                 else:
                     print("    ⚠ self 无 scale index: KG 初检索在大库下会拒绝暴力,"
                           "改走 FTS 有界兜底; PPR 会依赖 base participant,"
                           "否则拒绝 rustworkx 全图 fallback")
             else:
-                print(f"    self index: n_nodes={mf.get('n_nodes')} "
-                      f"n_kg_nodes={mf.get('n_kg_nodes')} n_chunks={mf.get('n_chunks')} "
-                      f"n_ann={mf.get('n_ann')}({pct(int(mf.get('n_ann', 0)), kemb.get(nb, 0))} of knowledge_embeddings) "
-                      f"chunk_ann={mf.get('n_chunk_ann', 0)} relation_ann={mf.get('n_relation_ann', 0)} "
+                n_nodes = _safe_count(mf.get("n_nodes"))
+                n_kg_nodes = _safe_count(mf.get("n_kg_nodes"))
+                n_chunks = _safe_count(mf.get("n_chunks"))
+                n_ann = _safe_count(mf.get("n_ann"))
+                print(f"    self index: n_nodes={n_nodes} "
+                      f"n_kg_nodes={n_kg_nodes} n_chunks={n_chunks} "
+                      f"n_ann={n_ann}({pct(n_ann, kemb.get(nb, 0))} of knowledge_embeddings) "
+                      f"chunk_ann={_safe_count(mf.get('n_chunk_ann'))} "
+                      f"relation_ann={_safe_count(mf.get('n_relation_ann'))} "
                       f"graph.npz={graph_size_gb(nb):.2f}GB")
-                if int(mf.get("n_ann", 0)) < kemb.get(nb, 0):
+                if n_ann < kemb.get(nb, 0):
                     print("    注意: KG ANN 只覆盖 manifest.n_ann 这部分 embedding。"
                           "SCALE_SEARCH_INCLUDE_DELTA=false 时,语义 KG 检索/PPR self core"
                           "按设计不搜索未入 ANN 的对象。")
-                if chunk_ann_enabled and not mf.get("has_chunk_ann"):
+                if chunk_ann_enabled and mf.get("has_chunk_ann") is not True:
                     print("    ⚠ self index 缺 chunk_ann: PPR chunk seed 会走 FTS 有界降级,"
                           "不会全量向量扫,但召回/延迟会受 FTS 影响")
-                elif chunk_ann_enabled and mf.get("has_chunk_ann"):
+                elif chunk_ann_enabled and mf.get("has_chunk_ann") is True:
                     print("    chunk seed: 语义候选走 chunk_ann;另有 FTS 词法补召回"
                           "(有界,但可命中未进 chunk_ann 的 chunk)")
-                if not mf.get("has_relation_ann") and remb.get(nb, 0):
+                if mf.get("has_relation_ann") is not True and remb.get(nb, 0):
                     print("    ⚠ self index 缺 relation_ann: relation 检索在大库冷矩阵时会跳过;"
                           "若进程里关系矩阵已暖,仍可能检索全量 relation_embeddings")
                 if include_delta:
-                    delta_ko = max(0, ko.get(nb, 0) - int(mf.get("n_kg_nodes", 0)))
-                    delta_chunks = max(0, chunks.get(nb, 0) - int(mf.get("n_chunks", 0)))
+                    delta_ko = max(0, ko.get(nb, 0) - n_kg_nodes)
+                    delta_chunks = max(0, chunks.get(nb, 0) - n_chunks)
                     print(f"    ⚠ SCALE_SEARCH_INCLUDE_DELTA=true: 查询会尝试纳入索引水位后的"
                           f" delta(约 KO={delta_ko}, chunks={delta_chunks}),这会破坏"
                           "「只搜已索引部分」的性能假设")
@@ -716,10 +794,11 @@ def report_reasoning_ppr_audit(local_dir, root):
                       "大库会直接 ppr_fallback_refused,不再 rustworkx 全图构建")
                 continue
 
-            p_nodes = sum(int(pm.get("n_nodes", 0)) for _pid, pm in participants)
+            p_nodes = sum(_safe_count(pm.get("n_nodes")) for _pid, pm in participants)
             p_graph_gb = sum(graph_size_gb(pid) for pid, _pm in participants)
             p_desc = ", ".join(
-                f"{pid}{'(self)' if pid == nb else '(base)'}:{pm.get('n_nodes')} nodes"
+                f"{diag_common.pseudonym('notebook', pid)}"
+                f"{'(self)' if pid == nb else '(base)'}:{_safe_count(pm.get('n_nodes'))} nodes"
                 for pid, pm in participants)
             print(f"    PPR participants: {p_desc}")
             print(f"    PPR indexed core estimate: nodes={p_nodes} graph.npz={p_graph_gb:.2f}GB; "
@@ -759,18 +838,28 @@ def report_artifacts(local_dir, deep):
         m = os.path.join(d, "manifest.json")
         if not os.path.exists(m):
             continue
-        try:
-            mf = json.load(open(m))
-        except Exception:  # noqa: BLE001
-            print(f"  ⚠ manifest 损坏: {d}")
+        mf = _read_manifest(m)
+        if not mf:
+            print("  ⚠ manifest 损坏或过大")
             continue
         size = sum(os.path.getsize(f) for f in glob.glob(os.path.join(d, "*")))
-        print(f"  {os.path.basename(d)}: nodes={mf.get('n_nodes')} ann={mf.get('n_ann')} "
-              f"chunk_ann={mf.get('n_chunk_ann', 0)} relation_ann={mf.get('n_relation_ann', 0)} "
+        print(f"  {diag_common.pseudonym('notebook', os.path.basename(d))}: "
+              f"nodes={_safe_count(mf.get('n_nodes'))} ann={_safe_count(mf.get('n_ann'))} "
+              f"chunk_ann={_safe_count(mf.get('n_chunk_ann'))} "
+              f"relation_ann={_safe_count(mf.get('n_relation_ann'))} "
               f"工件 {size/1e9:.2f} GB")
-        if mf.get("build_ms"):
-            worst = sorted(mf["build_ms"].items(), key=lambda kv: -kv[1])[:3]
-            print(f"    build_ms 最重三段: " + ", ".join(f"{k}={_fmt_ms(v)}" for k, v in worst))
+        raw_build = mf.get("build_ms")
+        if isinstance(raw_build, dict):
+            build = {}
+            for raw_stage, raw_ms in raw_build.items():
+                number = diag_common.finite_number(raw_ms)
+                if number is not None:
+                    stage = _safe_stage(raw_stage)
+                    build[stage] = max(build.get(stage, 0), number)
+            worst = sorted(build.items(), key=lambda kv: -kv[1])[:3]
+            if worst:
+                print("    build_ms 最重三段: "
+                      + ", ".join(f"{k}={_fmt_ms(v)}" for k, v in worst))
     if not deep:
         print("  (向量 BLOB 迁移进度检查是全表扫描,分钟级 — 需要时加 --deep)")
         return
@@ -793,18 +882,7 @@ def report_artifacts(local_dir, deep):
 
 def _read_env_int(root, key):
     """从 root/.env(或 backend/.env)读一个整型开关;缺失/非法 → 0。"""
-    for cand in (os.path.join(root, ".env"), os.path.join(root, "backend", ".env")):
-        if not os.path.exists(cand):
-            continue
-        for line in open(cand, encoding="utf-8", errors="replace"):
-            line = line.strip()
-            if line.startswith(f"{key}=") or line.startswith(f"{key} ="):
-                try:
-                    return int(line.split("=", 1)[1].strip())
-                except ValueError:
-                    return 0
-        return 0
-    return 0
+    return _safe_count(_read_env(root).get(key))
 
 
 def report_env(root):
@@ -814,7 +892,7 @@ def report_env(root):
         print("(无 .env)")
         return
     if path == os.path.join(root, "backend", ".env"):
-        print(f"(根下无 .env,改用 {path})")
+        print("(根下无 .env,改用 backend dotenv)")
     interesting = (
         "RELATION_RETRIEVAL_ENABLED", "CHUNK_KG_OVERLAY_ENABLED", "CHUNK_ANN_ENABLED",
         "CHUNK_BRUTEFORCE_MAX_CHUNKS",
@@ -840,7 +918,23 @@ def report_env(root):
         elif k == "DATABASE_URL":
             seen[k] = "<已配置,值不显示>" if v.strip() else "<空>"
         elif k in interesting:
-            seen[k] = v.strip()
+            stripped = v.strip()
+            if k in _ENV_BOOL_KEYS:
+                lowered = stripped.lower()
+                if lowered in {"1", "true", "yes", "on"}:
+                    seen[k] = "true"
+                elif lowered in {"0", "false", "no", "off"}:
+                    seen[k] = "false"
+                else:
+                    seen[k] = "<invalid>"
+            elif k in _ENV_ENUMS:
+                seen[k] = stripped if stripped in _ENV_ENUMS[k] else "<invalid>"
+            elif k in {"EMBED_MODEL", "OPENAI_COMPAT_MODEL", "REASONING_LLM_MODEL",
+                       "SILICON_NOTEBOOK_STORAGE_DIR"}:
+                seen[k] = "<已配置,值不显示>" if stripped else "<空>"
+            else:
+                number = diag_common.finite_number(stripped)
+                seen[k] = str(int(number)) if number is not None else "<invalid>"
     for k in interesting:
         if k in seen:
             print(f"  {k}={seen[k]}")
@@ -869,7 +963,7 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
     section("notebook 计数热路径(打开/看板/索引状态卡顿逐条自证)")
     db = os.path.join(local_dir, "silicon_notebook.db")
     if not os.path.exists(db):
-        print(f"(缺 {db})")
+        print("(缺 SQLite database)")
         return
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=60)
@@ -898,7 +992,8 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
         if not nb:
             print("(库中无 knowledge_objects)")
             return
-        print(f"目标 notebook = {nb}  (用 --notebook <id> 指定)")
+        print(f"目标 notebook = {diag_common.pseudonym('notebook', nb)}  "
+              "(用 --notebook <id> 指定)")
 
         ph = ",".join("?" for _ in _USABLE_STATUSES)
         hot = [
@@ -943,9 +1038,15 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
                 rows, ms = _timed(sql, params)
                 ms_by[name] = ms
                 if rows and "object_type" in rows[0].keys():
-                    res = ",".join(f"{r['object_type']}={r['c']}" for r in rows)
+                    grouped = defaultdict(int)
+                    for row in rows:
+                        grouped[_safe_object_type(row["object_type"])] += _safe_count(row["c"])
+                    res = ",".join(f"{key}={value}" for key, value in sorted(grouped.items()))
                 elif rows:
-                    res = " ".join(f"{k}={rows[0][k]}" for k in rows[0].keys())
+                    res = " ".join(
+                        f"{k}={_safe_count(rows[0][k])}"
+                        for k in rows[0].keys()
+                    )
                 else:
                     res = "(空)"
                 mstr = _fmt_ms(ms)
@@ -980,7 +1081,7 @@ def report_notebook_count_hotpaths(local_dir, notebook_id="", deep=False):
         conn.close()
 
 
-def main():
+def _main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=".", help="仓库根(默认当前目录)")
@@ -991,16 +1092,22 @@ def main():
                     help="额外做 DB 检查(typeof 全表扫 + 计数热路径 EXPLAIN/计时,大库分钟级,只读)")
     ap.add_argument("--notebook", default="",
                     help="计数热路径诊断的目标 notebook id(默认自动取最大)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     root = os.path.abspath(args.root)
-    since = timedelta(hours=args.since)
+    since_hours = diag_common.finite_number(args.since, maximum=24 * 366)
+    if since_hours is None:
+        since_hours = 48.0
+    slow_ms = diag_common.finite_number(args.slow_ms, maximum=10**9)
+    if slow_ms is None:
+        slow_ms = 3000.0
+    since = timedelta(hours=since_hours)
     original_stdout = sys.stdout
     sys.stdout = _BoundedOutput(original_stdout, DEFAULT_REPORT_OUTPUT_BYTES)
     try:
-        print(f"silicon-notebook 慢因诊断  root={root}  窗口={args.since}h  "
+        print(f"silicon-notebook 慢因诊断  root=<configured>  窗口={since_hours:g}h  "
               f"生成于 {datetime.now().isoformat(timespec='seconds')}")
         local_dir = os.path.abspath(args.local) if args.local else resolve_local(root)
-        report_requests(local_dir, since, args.slow_ms)
+        report_requests(local_dir, since, slow_ms)
         report_events(local_dir, since)
         report_llm(local_dir, since)
         report_scale_profile(local_dir, runtime_dim=_read_env_int(root, "EMBED_RUNTIME_DIM"))
@@ -1013,6 +1120,10 @@ def main():
     finally:
         sys.stdout.flush()
         sys.stdout = original_stdout
+
+
+def main(argv=None):
+    return diag_common.run_copy_safe(lambda: _main(argv))
 
 
 if __name__ == "__main__":

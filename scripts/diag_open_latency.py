@@ -37,13 +37,13 @@ def _fmt(ms: float) -> str:
     return f"{ms/1000:.2f}s" if ms >= 1000 else f"{ms:.0f}ms"
 
 
-def main() -> int:
+def _main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=".", help="仓库根(默认当前目录)")
     ap.add_argument("--local", default="", help="显式指定 .local 目录(默认自动探测)")
     ap.add_argument("--notebook", default="", help="目标 notebook id(默认自动取最大库)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     root = os.path.abspath(args.root)
     local_dir = os.path.abspath(args.local) if args.local else diag_slow.resolve_local(root)
 
@@ -51,13 +51,13 @@ def main() -> int:
     print("== 打开延迟诊断(#245 落地后残余卡顿定位;只读 mode=ro)==")
     db_path = os.path.join(local_dir, "silicon_notebook.db")
     if not os.path.exists(db_path):
-        print(f"(缺 {db_path};用 --local 指定 .local)")
+        print("(缺 SQLite database;用 --local 指定 local data directory)")
         return 0
     try:
         conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=60)
         conn.row_factory = sqlite3.Row
-    except sqlite3.Error as exc:
-        print(f"(DB 只读打开失败: {exc})")
+    except sqlite3.Error:
+        print("(DB 只读打开失败: sqlite_error)")
         return 0
     try:
         def _run(sql, params=()):
@@ -74,17 +74,22 @@ def main() -> int:
                 r = _run("SELECT notebook_id nb, COUNT(*) c FROM knowledge_objects "
                          "GROUP BY 1 ORDER BY c DESC LIMIT 1").fetchone()
                 nb = r["nb"] if r else ""
-            except sqlite3.Error as exc:
-                print(f"(选最大 notebook 失败: {exc})")
+            except sqlite3.Error:
+                print("(选最大 notebook 失败: sqlite_error)")
                 return 0
         if not nb:
             print("(库中无 knowledge_objects)")
             return 0
 
         # 规模 + seq/dirty 状态
-        by_type = {r["ot"]: r["c"] for r in _run(
-            "SELECT object_type ot, COUNT(*) c FROM knowledge_objects "
-            "WHERE notebook_id=? GROUP BY 1", (nb,)).fetchall()}
+        by_type = {}
+        for row in _run(
+                "SELECT object_type ot, COUNT(*) c FROM knowledge_objects "
+                "WHERE notebook_id=? GROUP BY 1", (nb,)).fetchall():
+            object_type = (row["ot"] if row["ot"] in {
+                "concept", "claim", "formula", "procedure"
+            } else "other")
+            by_type[object_type] = by_type.get(object_type, 0) + int(row["c"])
         n_src = _run("SELECT COUNT(*) c FROM sources WHERE notebook_id=?", (nb,)).fetchone()["c"]
         try:
             st = _run("SELECT COALESCE(kg_mutation_seq,0) ks, COALESCE(cluster_mutation_seq,0) cs, "
@@ -92,14 +97,19 @@ def main() -> int:
                       (nb,)).fetchone()
         except sqlite3.Error:
             st = None
-        print(f"\n目标 notebook = {nb}  (用 --notebook <id> 指定)")
+        print(f"\n目标 notebook = {diag_common.pseudonym('notebook', nb)}  "
+              "(用 --notebook <id> 指定)")
         print("  规模: KO %d(%s) sources=%d" % (
             sum(by_type.values()),
             " ".join(f"{k}={v}" for k, v in sorted(by_type.items(), key=lambda x: -x[1])), n_src))
         if st:
-            print(f"  unified_kg_state: kg_seq={st['ks']} cluster_seq={st['cs']} "
-                  f"mention_seq={st['ms']} dirty={st['dirty']}"
-                  + ("   ⚠dirty=1:有未 rebuild 的 KG 变更,计数/图缓存可能反复失效" if st["dirty"] else ""))
+            kg_seq = int(diag_common.finite_number(st["ks"]) or 0)
+            cluster_seq = int(diag_common.finite_number(st["cs"]) or 0)
+            mention_seq = int(diag_common.finite_number(st["ms"], minimum=-1) or 0)
+            dirty = st["dirty"] in {1, True, "1", "true"}
+            print(f"  unified_kg_state: kg_seq={kg_seq} cluster_seq={cluster_seq} "
+                  f"mention_seq={mention_seq} dirty={int(dirty)}"
+                  + ("   ⚠dirty=1:有未 rebuild 的 KG 变更,计数/图缓存可能反复失效" if dirty else ""))
         else:
             print("  unified_kg_state: (无行;任何 KG 写会建行并推进 seq)")
 
@@ -120,8 +130,8 @@ def main() -> int:
                 mstr = _fmt(t)
                 if not flag and t >= 500:
                     flag = "  ⚠秒级"
-            except sqlite3.Error as exc:
-                mstr, flag = f"err:{exc}", ""
+            except sqlite3.Error:
+                mstr, flag = "err:sqlite_error", ""
             print(f"    {label:54} {mstr:>9}{flag}")
 
         _PENDING = ("SELECT COUNT(*) c FROM sources s WHERE s.notebook_id=? "
@@ -198,15 +208,18 @@ def main() -> int:
             path = str(rec.get("path", ""))
             if nb not in path:
                 continue
-            latency = rec.get("latency_ms")
-            if isinstance(latency, (int, float)):
+            latency = diag_common.finite_number(rec.get("latency_ms"))
+            if latency is not None:
                 seen += 1
-                key = f"{rec.get('method', '')} {diag_common.normalize_http_path(path)}"
-                buckets.setdefault(key, []).append(float(latency))
+                method = str(rec.get("method", "")).upper()
+                if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}:
+                    method = "OTHER"
+                key = f"{method} {diag_common.normalize_http_path(path)}"
+                buckets.setdefault(key, []).append(latency)
         print("    " + diag_slow._scan_summary(request_read.stats))
         if not seen:
-            print(f"    (requests.jsonl 无该 nb 记录;local={local_dir}。确认该 nb 近期被打开过、"
-                  f"且 REQUEST 日志开着)")
+            print("    (requests.jsonl 无该 notebook 记录;确认该 notebook 近期被打开过、"
+                  "且 REQUEST 日志开着)")
         else:
             print(f"    {'endpoint':50} {'n':>5} {'P50':>8} {'P95':>8} {'max':>9}")
             for ep in sorted(buckets, key=lambda k: -diag_slow._pct(sorted(buckets[k]), 95)):
@@ -226,6 +239,10 @@ def main() -> int:
         conn.close()
     print("\n=== 完 — 把以上整段贴回即可 " + "=" * 34)
     return 0
+
+
+def main(argv=None) -> int:
+    return diag_common.run_copy_safe(lambda: _main(argv))
 
 
 if __name__ == "__main__":

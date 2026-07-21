@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
@@ -326,6 +327,32 @@ def test_source_atime_mtime_and_hash_are_unchanged(tmp_path):
             assert evidence["delete_plan"] == []
 
 
+@pytest.mark.parametrize(
+    ("failure", "expected_category"),
+    (
+        (PermissionError(13, "PERMISSION-ERROR-SECRET locked", "PATH-SECRET"), "permission"),
+        (OSError("OS-ERROR-SECRET"), "unavailable"),
+        (ValueError("VALUE-ERROR-SECRET"), "unavailable"),
+    ),
+)
+def test_initial_source_validation_errors_are_fixed_category_only(
+    tmp_path, monkeypatch, failure, expected_category
+):
+    diag_db = load_diag_db(allow_unsafe_noatime_for_logic_tests=False)
+
+    def fail_validation(_paths):
+        raise failure
+
+    monkeypatch.setattr(diag_db, "_validate_source_state", fail_validation)
+    evidence = diag_db.collect_db_evidence(tmp_path / "DB-PATH-SECRET.db")
+
+    assert evidence["evidence_complete"] is False
+    assert [row["category"] for row in evidence["degraded"]] == [expected_category]
+    encoded = json.dumps(evidence, ensure_ascii=False)
+    assert "PATH-SECRET" not in encoded
+    assert "ERROR-SECRET" not in encoded
+
+
 def test_rollback_journal_metadata_and_hash_are_unchanged(tmp_path):
     db_path = tmp_path / "journal-atime.db"
     with sqlite3.connect(db_path) as connection:
@@ -577,6 +604,37 @@ def test_unsafe_diagnostics_symlink_is_never_followed(tmp_path):
     assert list(outside.iterdir()) == []
 
 
+def test_db_collector_creates_runtime_compatible_private_diagnostics_parent(tmp_path):
+    from app.core.diagnostics_runtime import DiagnosticsRuntime
+
+    db_path = tmp_path / "runtime-compatible.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    diag_db = load_diag_db()
+
+    evidence = diag_db.collect_db_evidence(db_path)
+
+    diagnostics = tmp_path / "diagnostics"
+    assert evidence["safety"]["snapshot_used"] is True
+    assert stat.S_IMODE(diagnostics.stat().st_mode) == 0o700
+
+    runtime = DiagnosticsRuntime(
+        diagnostics,
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.01,
+        enable_signal=False,
+    )
+    runtime.start()
+    try:
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline and not (diagnostics / "runtime.json").exists():
+            time.sleep(0.01)
+        assert (diagnostics / "runtime.json").exists()
+    finally:
+        runtime.stop()
+
+
 def test_runtime_created_0755_diagnostics_parent_uses_private_snapshot_root(tmp_path):
     from app.core.diagnostics_runtime import DiagnosticsRuntime
 
@@ -711,8 +769,9 @@ def test_stale_cleanup_skips_hardlinked_artifact_and_reports_degradation(tmp_pat
     )
 
 
-@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="Linux proc-fd contract")
 def test_diagnostics_root_replacement_cannot_redirect_snapshot_open(tmp_path, monkeypatch):
+    if not Path("/proc/self/fd").is_dir():
+        return
     db_path = tmp_path / "root-race.db"
     with sqlite3.connect(db_path) as connection:
         connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
@@ -959,6 +1018,35 @@ def test_snapshot_copy_helper_enforces_remaining_aggregate_budget(tmp_path):
     assert target.stat().st_size <= 4
 
 
+def test_open_read_only_closes_connection_when_post_connect_initialization_raises(
+    tmp_path, monkeypatch
+):
+    diag_db = load_diag_db()
+
+    class InitializationFailure(BaseException):
+        pass
+
+    class FakeConnection:
+        row_factory = None
+        closed = False
+
+        def setlimit(self, *_args):
+            raise InitializationFailure("post-connect failure")
+
+        def close(self):
+            self.closed = True
+
+    connection = FakeConnection()
+    monkeypatch.setattr(diag_db.sqlite3, "connect", lambda *_args, **_kwargs: connection)
+
+    with pytest.raises(InitializationFailure, match="post-connect failure"):
+        diag_db._open_read_only(
+            tmp_path / "snapshot.db", time.monotonic() + 1
+        )
+
+    assert connection.closed is True
+
+
 def test_missing_corrupt_and_old_schema_are_copy_safe_degradations(tmp_path):
     diag_db = load_diag_db()
     missing_path = tmp_path / "customer-name.db"
@@ -1005,7 +1093,7 @@ def test_report_is_bounded_pseudonymized_and_excludes_private_content(tmp_path):
         connection.close()
 
 
-def test_script_is_stdlib_only_and_contains_no_mutating_sql():
+def test_script_uses_only_stdlib_and_the_stdlib_only_shared_boundary_and_no_mutating_sql():
     tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
     imports = set()
     for node in ast.walk(tree):
@@ -1016,6 +1104,7 @@ def test_script_is_stdlib_only_and_contains_no_mutating_sql():
     assert imports <= {
         "__future__",
         "argparse",
+        "diag_common",
         "errno",
         "fcntl",
         "hashlib",
@@ -1031,6 +1120,19 @@ def test_script_is_stdlib_only_and_contains_no_mutating_sql():
         "urllib",
     }
     assert "app" not in imports
+
+    common_tree = ast.parse((SCRIPT.parent / "diag_common.py").read_text(encoding="utf-8"))
+    assert all(
+        not (
+            isinstance(node, ast.Import)
+            and any(alias.name == "app" or alias.name.startswith("app.") for alias in node.names)
+        )
+        and not (
+            isinstance(node, ast.ImportFrom)
+            and (node.module == "app" or (node.module or "").startswith("app."))
+        )
+        for node in ast.walk(common_tree)
+    )
 
     source = SCRIPT.read_text(encoding="utf-8").upper()
     for forbidden in (

@@ -53,7 +53,6 @@ FACADE_IMPORT_REASON_BY_PATH = {
     "scripts/bench_sqlite_writes.py": "synthetic benchmark composition root",
     "scripts/build_chunks.py": "offline CLI composition root",
     "scripts/denoise_reextract_nb.py": "offline CLI composition root",
-    "scripts/diag_base_report.py": "offline diagnostic composition root",
     "scripts/generate_repository_contract_fixtures.py": "contract fixture composition root",
     "scripts/kg_product_smoke.py": "offline smoke composition root",
     "scripts/reextract_notebook.py": "offline CLI composition root",

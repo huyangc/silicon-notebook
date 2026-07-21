@@ -10,6 +10,9 @@ from app.core.config import Settings
 from app.core import diagnostics_runtime as diagnostics
 
 
+_FETCHMANY_OMITTED = object()
+
+
 class _DiagnosticCursor(sqlite3.Cursor):
     """SQLite cursor that retains sanitized statement identity, never values."""
 
@@ -33,35 +36,42 @@ class _DiagnosticCursor(sqlite3.Cursor):
             self._diag_operation,
         )
 
-    def execute(self, sql, parameters=()):
+    def execute(self, sql, parameters=(), /):
         self._remember(sql)
         with diagnostics.sql_scope(self._diag_mode, sql, self._diag_operation):
             return super().execute(sql, parameters)
 
-    def executemany(self, sql, seq_of_parameters):
+    def executemany(self, sql, seq_of_parameters, /):
         self._remember(sql)
         with diagnostics.sql_scope(self._diag_mode, sql, self._diag_operation):
             return super().executemany(sql, seq_of_parameters)
 
-    def fetchone(self):
+    def executescript(self, sql_script, /):
+        self._remember(sql_script)
+        with diagnostics.sql_scope(
+            self._diag_mode, sql_script, self._diag_operation
+        ):
+            return super().executescript(sql_script)
+
+    def fetchone(self, /):
         with self._scope():
             return super().fetchone()
 
-    def fetchmany(self, size=None):
+    def fetchmany(self, /, size=_FETCHMANY_OMITTED):
         with self._scope():
-            if size is None:
+            if size is _FETCHMANY_OMITTED:
                 return super().fetchmany()
             return super().fetchmany(size)
 
-    def fetchall(self):
+    def fetchall(self, /):
         with self._scope():
             return super().fetchall()
 
-    def __next__(self):
+    def __next__(self, /):
         with self._scope():
             return super().__next__()
 
-    def close(self):
+    def close(self, /):
         try:
             return super().close()
         finally:
@@ -97,15 +107,15 @@ class _Conn(sqlite3.Connection):
             cursor._diag_sql = None
         return cursor
 
-    def execute(self, sql, parameters=()):
+    def execute(self, sql, parameters=(), /):
         cursor = self.cursor()
         return cursor.execute(sql, parameters)
 
-    def executemany(self, sql, seq_of_parameters):
+    def executemany(self, sql, seq_of_parameters, /):
         cursor = self.cursor()
         return cursor.executemany(sql, seq_of_parameters)
 
-    def executescript(self, sql_script):
+    def executescript(self, sql_script, /):
         with diagnostics.sql_scope(
             self._diag_mode,
             sql_script,

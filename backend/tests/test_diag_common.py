@@ -136,3 +136,23 @@ def test_reader_checks_deadline_before_parsing_input(tmp_path, monkeypatch):
 
     assert result.records == ()
     assert result.stats.truncated is True
+
+
+def test_report_pseudonyms_are_stable_within_one_report_and_reset_between_reports(capsys):
+    common = load_common()
+    raw_notebook = "customerNotebookAlpha"
+
+    def render():
+        print(common.pseudonym("notebook", raw_notebook))
+        print(common.pseudonym("notebook", raw_notebook))
+        print(common.pseudonym("notebook", "customerNotebookBeta"))
+
+    assert common.run_copy_safe(render) == 0
+    first = capsys.readouterr().out
+    assert raw_notebook not in first
+    assert first.splitlines() == ["notebook#1", "notebook#1", "notebook#2"]
+
+    assert common.run_copy_safe(
+        lambda: print(common.pseudonym("notebook", raw_notebook))
+    ) == 0
+    assert capsys.readouterr().out.splitlines() == ["notebook#1"]

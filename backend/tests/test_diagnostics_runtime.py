@@ -47,6 +47,31 @@ def _wait_for_json(path: Path, *, after: str | None = None) -> dict:
     raise AssertionError(f"timed out waiting for {path}")
 
 
+def test_dump_descriptor_is_closed_when_text_wrapper_creation_fails(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    descriptor = os.open(tmp_path / "dump-fd", os.O_WRONLY | os.O_CREAT, 0o600)
+    real_close = os.close
+    closed = []
+
+    monkeypatch.setattr(
+        runtime,
+        "_open_or_create_private_artifact",
+        lambda *_args, **_kwargs: descriptor,
+    )
+    monkeypatch.setattr(diagnostics.os, "fdopen", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("boom")))
+
+    def record_close(value):
+        closed.append(value)
+        return real_close(value)
+
+    monkeypatch.setattr(diagnostics.os, "close", record_close)
+    runtime.start()
+    try:
+        assert descriptor in closed
+    finally:
+        runtime.stop()
+
+
 def test_request_phase_sql_job_and_lock_snapshot_contains_metadata_only(tmp_path):
     runtime = _runtime(tmp_path)
     secret = "SENSITIVE-SQL-VALUE"
@@ -679,12 +704,12 @@ def test_snapshot_writer_recovers_after_one_replace_failure(tmp_path, monkeypatc
     original_replace = diagnostics.os.replace
     attempts = 0
 
-    def fail_once(source, destination):
+    def fail_once(source, destination, *args, **kwargs):
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             raise OSError("synthetic replace failure")
-        return original_replace(source, destination)
+        return original_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr(diagnostics.os, "replace", fail_once)
     runtime.start()
@@ -701,9 +726,9 @@ def test_state_change_bursts_are_coalesced_to_minimum_interval(tmp_path, monkeyp
     original_replace = diagnostics.os.replace
     replacements: list[float] = []
 
-    def record_replace(source, destination):
+    def record_replace(source, destination, *args, **kwargs):
         replacements.append(time.monotonic())
-        return original_replace(source, destination)
+        return original_replace(source, destination, *args, **kwargs)
 
     monkeypatch.setattr(diagnostics.os, "replace", record_replace)
     runtime.start()
@@ -839,11 +864,9 @@ def test_timed_out_stop_retains_stopping_writer_until_safe_later_cleanup(tmp_pat
     assert runtime._thread is None
 
 
-@pytest.mark.skipif(
-    os.name != "posix" or not hasattr(signal, "SIGUSR1"),
-    reason="SIGUSR1 requires POSIX",
-)
 def test_sigusr1_owner_is_process_global_and_second_runtime_cannot_replace_it(tmp_path):
+    if os.name != "posix" or not hasattr(signal, "SIGUSR1"):
+        return
     code = """
 import os, signal, sys, time
 from pathlib import Path
@@ -884,11 +907,9 @@ print('OK', flush=True)
     assert child.stdout.strip() == "OK"
 
 
-@pytest.mark.skipif(
-    os.name != "posix" or not hasattr(signal, "SIGUSR1"),
-    reason="SIGUSR1 requires POSIX",
-)
 def test_sigusr1_appends_all_threads_without_terminating_child(tmp_path):
+    if os.name != "posix" or not hasattr(signal, "SIGUSR1"):
+        return
     code = """
 import sys, threading, time
 from pathlib import Path
@@ -1379,11 +1400,9 @@ def test_notebook_delete_reports_database_then_filesystem_phases(tmp_path, monke
     ]
 
 
-@pytest.mark.skipif(
-    os.name != "posix" or not hasattr(signal, "SIGUSR1"),
-    reason="SIGUSR1 requires POSIX",
-)
 def test_activate_runtime_late_writer_exit_finalizes_without_second_stop(tmp_path):
+    if os.name != "posix" or not hasattr(signal, "SIGUSR1"):
+        return
     provider_entered = threading.Event()
     release_provider = threading.Event()
 
@@ -1426,3 +1445,144 @@ def test_activate_runtime_late_writer_exit_finalizes_without_second_stop(tmp_pat
         enable_signal=True,
     ) as second:
         assert second.signal_capture_available is True
+
+
+def _artifact_metadata(path: Path):
+    metadata = path.stat(follow_symlinks=False)
+    return metadata, metadata.st_mode & 0o777
+
+
+def test_runtime_artifacts_use_private_directory_and_private_regular_files(tmp_path):
+    diagnostics_dir = tmp_path / "diagnostics"
+    runtime = _runtime(diagnostics_dir)
+    runtime.start()
+    try:
+        _wait_for_json(diagnostics_dir / "runtime.json")
+        directory, directory_mode = _artifact_metadata(diagnostics_dir)
+        dump, dump_mode = _artifact_metadata(diagnostics_dir / "thread-dumps.log")
+        snapshot, snapshot_mode = _artifact_metadata(diagnostics_dir / "runtime.json")
+
+        assert directory_mode == 0o700
+        assert directory.st_uid == os.getuid()
+        for metadata, mode in ((dump, dump_mode), (snapshot, snapshot_mode)):
+            assert mode == 0o600
+            assert metadata.st_uid == os.getuid()
+            assert metadata.st_nlink == 1
+            assert metadata.st_mode & 0o170000 == 0o100000
+    finally:
+        runtime.stop()
+
+
+@pytest.mark.parametrize("artifact", ("thread-dumps.log", "runtime.json", "runtime.json.tmp"))
+@pytest.mark.parametrize("attack", ("symlink", "hardlink", "fifo"))
+def test_runtime_rejects_unsafe_artifacts_without_touching_victim(
+    tmp_path, artifact, attack
+):
+    diagnostics_dir = tmp_path / "diagnostics"
+    diagnostics_dir.mkdir(mode=0o700)
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"DO-NOT-TOUCH")
+    hostile = diagnostics_dir / artifact
+    if attack == "symlink":
+        hostile.symlink_to(victim)
+    elif attack == "hardlink":
+        os.link(victim, hostile)
+    else:
+        os.mkfifo(hostile, mode=0o600)
+
+    runtime = _runtime(diagnostics_dir)
+    starter = threading.Thread(target=runtime.start, daemon=True)
+    starter.start()
+    starter.join(timeout=1)
+    try:
+        assert starter.is_alive() is False
+        time.sleep(0.08)
+        assert victim.read_bytes() == b"DO-NOT-TOUCH"
+        assert hostile.exists() or hostile.is_symlink()
+        assert runtime.snapshot()["snapshot_failures"] >= 1
+    finally:
+        if not starter.is_alive():
+            runtime.stop()
+
+
+def test_runtime_rejects_non_private_existing_diagnostics_directory(tmp_path):
+    diagnostics_dir = tmp_path / "diagnostics"
+    diagnostics_dir.mkdir(mode=0o755)
+    victim = diagnostics_dir / "thread-dumps.log"
+    victim.write_bytes(b"DO-NOT-TRUNCATE")
+    runtime = _runtime(diagnostics_dir)
+
+    runtime.start()
+    time.sleep(0.08)
+    runtime.stop()
+
+    assert victim.read_bytes() == b"DO-NOT-TRUNCATE"
+    assert not (diagnostics_dir / "runtime.json").exists()
+    assert runtime.snapshot()["snapshot_failures"] >= 1
+
+
+def test_runtime_pinned_directory_rejects_path_replacement(tmp_path):
+    diagnostics_dir = tmp_path / "diagnostics"
+    runtime = _runtime(diagnostics_dir)
+    runtime.start()
+    try:
+        first = _wait_for_json(diagnostics_dir / "runtime.json")
+        pinned = tmp_path / "pinned-original"
+        diagnostics_dir.rename(pinned)
+        diagnostics_dir.mkdir(mode=0o700)
+        victim = tmp_path / "victim"
+        victim.write_bytes(b"DO-NOT-TOUCH")
+        (diagnostics_dir / "runtime.json").symlink_to(victim)
+
+        with diagnostics.install_runtime(runtime):
+            with diagnostics.request_scope("req-change", "GET", "/api/health"):
+                pass
+        time.sleep(0.08)
+
+        assert victim.read_bytes() == b"DO-NOT-TOUCH"
+        assert (diagnostics_dir / "runtime.json").is_symlink()
+        assert json.loads((pinned / "runtime.json").read_text())["heartbeat_at"] == first["heartbeat_at"]
+        assert runtime.snapshot()["snapshot_failures"] >= 1
+    finally:
+        runtime.stop()
+
+
+def test_finalizer_thread_start_failure_falls_back_to_stopped_and_restart_safe(
+    tmp_path, monkeypatch
+):
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+
+    def blocked_provider() -> dict:
+        provider_entered.set()
+        release_provider.wait(timeout=1)
+        return {}
+
+    runtime = _runtime(tmp_path, readiness_provider=blocked_provider)
+    runtime.start()
+    assert provider_entered.wait(timeout=1)
+    original_start = threading.Thread.start
+
+    def fail_finalizer_start(thread):
+        if thread.name == "diagnostics-finalizer":
+            raise RuntimeError("synthetic finalizer start failure")
+        return original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", fail_finalizer_start)
+    runtime.stop()
+    release_provider.set()
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline and runtime._lifecycle_state != "stopped":
+        time.sleep(0.01)
+
+    assert runtime._lifecycle_state == "stopped"
+    assert runtime._thread is None
+    assert runtime._dump_handle is None
+    assert runtime._owns_signal is False
+
+    monkeypatch.setattr(threading.Thread, "start", original_start)
+    runtime.start()
+    try:
+        assert _wait_for_json(tmp_path / "runtime.json")["pid"] == os.getpid()
+    finally:
+        runtime.stop()

@@ -54,35 +54,73 @@ KG 对象向量在 `store_kg` 入库时嵌入;并发过高被限流漏掉的,用
 
 ---
 
-## 三、慢因诊断(分析"慢的现象")
+## 三、生产 DFX 诊断
 
-### `diag.py` —— 统一入口(一个命令 + 子命令)
+### 卡顿发生时的首选命令
+
+生产目标是 Ubuntu 24.04，在仓库根通过 `npm run start` 启动前端与单 Uvicorn worker。
+不要先 restart/stop；请在卡顿**正在发生时** SSH 到主机采集：
+
 ```bash
-python3 scripts/diag.py                 # 裸跑 = slow(部署机慢因全量报告)
-python3 scripts/diag.py slow --since 24 --deep
-python3 scripts/diag.py latency --log .local/logs/events.jsonl --last 500
-python3 scripts/diag.py base-recall [active_notebook_id] [查询词]
+ssh <production-host>
+cd <silicon-notebook-repository>
+python3 scripts/diag.py incident
 ```
-把散在三处、三种跑法的慢因诊断收敛到一个入口。三个子命令各委托一个既有引擎(引擎本身保持原样、仍可单独运行,老路径/cron 不受影响):
 
-| 子命令 | 干什么 | 运行要求 | 委托 |
-|--------|--------|----------|------|
-| `slow` | 离线从 `.local` 日志/工件捞慢因证据(请求延迟分位 / 事故观测事件 / LLM 延迟 / 规模画像 / reasoning-PPR 审计 / env),出**可直接粘贴**的文本报告 | **纯 stdlib、只读、脱敏**,可在持有 `.local/` 的**部署机**上跑,不 import app | `diag_slow.py` |
-| `latency` | 从 `events.jsonl` 的 `ask_stage` 事件出**每阶段 P50/P95/max**(自动并入 per-user 子目录) | 纯 stdlib,不 import app | 聚合口径与 `app/eval/ask_latency.py` 一致(有漂移守卫测试) |
-| `base-recall` | 活体连真实库/env,诊断「深度报告 / reasoning 为何不引用参考库」(最常见根因=这个笔记本压根没挂任何参考库,和索引无关——见下方脚本自身的分级说明) | **需 import app**(懒加载:仅此子命令拉起 app),在能加载真实 `.env`+库的机器上跑 | `diag_base_report.py` |
+若输出的 `Missing/degraded evidence` 表明 PID 自动发现 missing/ambiguous/incomplete，
+从服务管理器或监听信息取得仍在运行的后端 PID 后重试：
 
-**离线纯净性是硬约束**:`slow` / `latency` 绝不 import app(`diag.py` 自身零 DB 调用、零 app 依赖),这样在裸机上随手就能跑;只有 `base-recall` 才懒加载 app。
-
-### `diag_open_latency.py` —— 打开大 notebook 仍卡几秒的残余定位
 ```bash
-python3 scripts/diag_open_latency.py                 # 自动取最大 notebook
-python3 scripts/diag_open_latency.py --notebook nb-xxx
+python3 scripts/diag.py incident --pid <backend-pid>
 ```
-主机侧只读诊断(纯 stdlib、mode=ro、不 import app,与 `diag_slow.py` 同款)。计数缓存等读侧修复落地后,若打开最大库仍卡几秒,它把残余定位到:计数缓存**冷成本**(首开/每次 KG 变更后重付)、`from_row` 里未缓存的子查询(`pending_kg_source_count` 相关子查询)、以及**生产请求日志里各端点的真实 P50/P95/max**(哪个 HTTP 请求真的是秒级)+ `dirty`/seq churn(缓存是否被后台变更反复冲掉)。
 
-> 兼容:三个引擎脚本(`diag_slow.py` / `diag_base_report.py` / `app/eval/ask_latency.py`)**未改动、仍可单独运行**——`python3 scripts/diag_slow.py --since 24` 等老命令继续有效。`diag.py` 只是新增的统一入口。
->
-> 区分:`bench_sqlite_writes.py`(合成写吞吐**基准**)与 `replay_retrieval.py`(检索**回归对照**)不属于"慢因诊断",见下表。
+默认 stdout 是一段最多 **32 KiB** 的 UTF-8 文本，可整体复制。所有采集共享最长 10 秒
+deadline，DB 部分最多使用其中一秒。后端每两秒原子刷新
+`.local/diagnostics/runtime.json`；超过六秒即按 stale 处理，不用其活跃工作字段下高置信
+结论。`SIGUSR1` 只触发不终止进程的全线程 Python 栈 dump，不含 locals，后端继续运行。
+采集使用 `.local/diagnostics/incident.lock`，线程栈追加到有 8 MiB retention 上限的
+`.local/diagnostics/thread-dumps.log`；只读 DB 临时快照位于
+`.local/diagnostics/db-snapshots/`。运行时只接受当前用户拥有的 `0700` diagnostics 目录与
+同用户拥有、单硬链接、普通文件类型的 `0600` heartbeat/dump 文件；不安全的已有工件或目录路径
+替换只会让诊断降级，不会跟随链接、阻塞于特殊文件或截断敌对目标。
+
+报告最多给出三个按证据强度排序的假设。`high` / `medium` / `low` 是置信标签，不是根因
+宣判；先看 `Confidence-ranked diagnoses`，再核对 `Observations`、`Relevant stacks`、
+`Database and host signals` 与 `Log metadata`。`Missing/degraded evidence` 会明确列出 stale
+snapshot、PID/权限/信号问题、DB busy/locked/deadline、日志 malformed/corrupt 或竞态；该来源
+会被排除，其余证据仍保留。空闲服务没有有效多信号结论是正常结果，应在卡顿时重跑。
+
+`incident` 纯 stdlib、不 import app、不需要 root 或第三方包，不发送终止信号、不重启、
+不执行 maintenance 或自动修复。所有诊断对业务数据只读：不执行 delete/写库、
+checkpoint/vacuum/analyze/reindex/migration；只允许维护上述有界 `.local/diagnostics/` 工件。
+可复制报告只挑选元数据：notebook/request/job 引用分配本报告内假名，其它原始不透明 id 省略；绝不包含原始 id/用户文件名、request body、
+来源/Ask/prompt/模型消息/Memory/Knowhow 正文、SQL 文本或参数、authorization/cookie/token/secret、
+原始命令行或局部变量。脱敏输出发给可信团队之外的人之前仍须人工复核。
+
+### `diag.py` 六命令矩阵
+
+| 命令 | 用途 | 边界 / 委托 |
+|---|---|---|
+| `python3 scripts/diag.py incident` | 卡顿现场的首选有界采集；必要时加 `--pid <backend-pid>`，删除分析也可显式加 `--notebook <id>`。 | Ubuntu/Linux 活体证据；纯 stdlib、app-free → `diag_incident.py`。 |
+| `python3 scripts/diag.py slow --since 24 --deep` | 历史慢因：请求/事件/LLM 延迟、规模画像、reasoning/PPR 与 scale-index 审计；`--deep` 增加可能耗时数分钟的只读 DB 检查。裸 `python3 scripts/diag.py` 仍等于 `slow`。 | 离线、纯 stdlib、app-free → `diag_slow.py`。 |
+| `python3 scripts/diag.py latency --last 500` | `ask_stage` 的逐阶段 P50/P95/max。 | 离线、纯 stdlib、app-free；口径与 `app/eval/ask_latency.py` 一致。 |
+| `python3 scripts/diag.py open --local .local` | 打开笔记本的查询/端点延迟、计数缓存冷成本、pending 子查询与 mutation-sequence churn。 | 离线、纯 stdlib、app-free → `diag_open_latency.py`。 |
+| `python3 scripts/diag.py db --db .local/silicon_notebook.db` | SQLite/WAL/表/FK 索引/query plan 的有界源端无副作用证据。 | 离线、纯 stdlib、app-free → `diag_db.py`。 |
+| `python3 scripts/diag.py base-recall [active_notebook_id] --db .local/silicon_notebook.db` | 用元数据诊断挂载 base 的可用性与最近报告的 tier 引用计数。 | 有界、源端无副作用的 SQLite 快照；纯 stdlib、app-free → `diag_base_report.py`；不执行检索或回显查询/正文。 |
+
+`base-recall` 复用 `diag_db.py` 的 `O_NOATIME` pin、非阻塞共享锁、源文件身份复核和有界 DB/WAL
+拷贝，只在诊断自己拥有的快照上运行固定聚合投影。它不构造 repository、不加载 application、
+不迁移、也不用 SQLite 打开源库；安全边界不可用时仅输出 category-only 降级信息。stdout 是一段
+最多 32 KiB 的 UTF-8 固定字段报告，只含计数、状态和本次报告内假名，不含原始 notebook/user/
+report/object/chunk id、标题、问题、正文、文件名、路径、异常、凭据或 secret。
+
+历史日志读取覆盖并去重 `requests` / `events` / `llm` 的 legacy `<channel>.jsonl`、daily
+`<channel>-YYYY-MM-DD.jsonl`、daily gzip `<channel>-YYYY-MM-DD.jsonl.gz` 与下一层 per-user
+目录；读取受时间窗、记录数、输入字节和总 deadline 约束，malformed/截断会进入降级信息。
+
+既有独立引擎脚本仍可直接运行，旧运维笔记与 cron 不受影响；新操作优先使用上表六命令。
+`bench_sqlite_writes.py`（合成写吞吐基准）与 `replay_retrieval.py`（检索回归对照）不属于
+生产 DFX 命令，见下表。
 
 ---
 

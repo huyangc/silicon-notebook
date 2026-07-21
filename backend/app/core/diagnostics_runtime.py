@@ -8,6 +8,7 @@ is installed for the process.
 from __future__ import annotations
 
 import contextvars
+import errno
 import faulthandler
 import hashlib
 import itertools
@@ -15,7 +16,9 @@ import json
 import math
 import os
 import re
+import secrets
 import signal
+import stat
 import threading
 import time
 from collections import deque
@@ -32,6 +35,12 @@ _MAX_RECENT_JOBS = 100
 _MAX_IDENTIFIER_LENGTH = 200
 _MAX_ROUTE_SEGMENTS = 16
 _MAX_CONCURRENCY_VALUE = 1_000_000
+_PRIVATE_DIRECTORY_MODE = 0o700
+_PRIVATE_FILE_MODE = 0o600
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _NOTEBOOK_ROUTE = re.compile(r"^/api/notebooks/([^/?#]+)(?:/(.*))?$")
 _OPAQUE_NOTEBOOK_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
@@ -209,6 +218,10 @@ _signal_owner_lock = threading.Lock()
 _signal_owner: Optional["DiagnosticsRuntime"] = None
 
 
+class _UnsafeDiagnosticsArtifact(Exception):
+    """An artifact path failed the private, single-link ownership contract."""
+
+
 def _context_fields(context: _DiagnosticContext) -> dict[str, Optional[str]]:
     return {
         "request_id": context.request_id,
@@ -327,6 +340,8 @@ class DiagnosticsRuntime:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._dump_handle: Any = None
+        self._directory_fd: Optional[int] = None
+        self._directory_identity: Optional[tuple[int, int]] = None
         self._owns_signal = False
         self.signal_capture_available = False
         self._lifecycle_state = "new"
@@ -717,23 +732,67 @@ class DiagnosticsRuntime:
             }
 
     def _write_snapshot(self) -> None:
+        temporary_name: Optional[str] = None
+        temporary_descriptor: Optional[int] = None
         try:
+            directory = self._validated_directory_descriptor()
+            self._validate_optional_artifact(directory, "runtime.json")
+            # A predictable temporary from an older process is never followed
+            # or reused.  Reject unsafe leftovers so this remains fail-closed.
+            self._validate_optional_artifact(directory, "runtime.json.tmp")
             snapshot = self.snapshot()
-            temporary = self.diagnostics_dir / "runtime.json.tmp"
-            destination = self.diagnostics_dir / "runtime.json"
-            with temporary.open("w", encoding="utf-8") as handle:
-                json.dump(
-                    snapshot,
-                    handle,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    separators=(",", ":"),
-                )
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, destination)
-        except Exception:
+            payload = json.dumps(
+                snapshot,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+            ).encode("utf-8", "strict")
+            for _attempt in range(8):
+                candidate = f".runtime.json.{secrets.token_hex(16)}.tmp"
+                try:
+                    temporary_descriptor = self._open_private_artifact(
+                        directory,
+                        candidate,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        created=True,
+                    )
+                except FileExistsError:
+                    continue
+                temporary_name = candidate
+                break
+            if temporary_descriptor is None or temporary_name is None:
+                raise _UnsafeDiagnosticsArtifact()
+            view = memoryview(payload)
+            while view:
+                written = os.write(temporary_descriptor, view)
+                if written <= 0:
+                    raise OSError(errno.EIO, "snapshot write failed")
+                view = view[written:]
+            os.fsync(temporary_descriptor)
+            self._validate_private_file(os.fstat(temporary_descriptor))
+            self._validated_directory_descriptor()
+            self._validate_optional_artifact(directory, "runtime.json")
+            os.replace(
+                temporary_name,
+                "runtime.json",
+                src_dir_fd=directory,
+                dst_dir_fd=directory,
+            )
+            temporary_name = None
+            self._validate_optional_artifact(directory, "runtime.json")
+        except BaseException:
             self._snapshot_failed()
+        finally:
+            if temporary_descriptor is not None:
+                try:
+                    os.close(temporary_descriptor)
+                except OSError:
+                    pass
+            if temporary_name is not None and self._directory_fd is not None:
+                try:
+                    os.unlink(temporary_name, dir_fd=self._directory_fd)
+                except OSError:
+                    pass
 
     def _writer(self) -> None:
         writer = threading.current_thread()
@@ -759,6 +818,7 @@ class DiagnosticsRuntime:
             self._lifecycle_state = "finalizing"
         self._release_signal()
         self._close_dump_handle()
+        self._close_directory_descriptor()
         reaper = threading.Thread(
             target=self._reap_writer,
             args=(writer,),
@@ -769,6 +829,7 @@ class DiagnosticsRuntime:
             reaper.start()
         except Exception:
             self._snapshot_failed()
+            self._mark_writer_stopped(writer)
 
     def _reap_writer(self, writer: threading.Thread) -> None:
         writer.join()
@@ -832,6 +893,121 @@ class DiagnosticsRuntime:
         except Exception:
             pass
 
+    @staticmethod
+    def _directory_key(metadata: os.stat_result) -> tuple[int, int]:
+        return int(metadata.st_dev), int(metadata.st_ino)
+
+    @staticmethod
+    def _validate_private_directory(metadata: os.stat_result) -> None:
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+        ):
+            raise _UnsafeDiagnosticsArtifact()
+
+    @staticmethod
+    def _validate_private_file(metadata: os.stat_result) -> None:
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+            or stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
+        ):
+            raise _UnsafeDiagnosticsArtifact()
+
+    def _open_diagnostics_directory(self) -> int:
+        try:
+            self.diagnostics_dir.mkdir(mode=_PRIVATE_DIRECTORY_MODE, parents=True)
+        except FileExistsError:
+            pass
+        descriptor = os.open(
+            self.diagnostics_dir,
+            os.O_RDONLY | _DIRECTORY | _NOFOLLOW | _CLOEXEC | _NONBLOCK,
+        )
+        try:
+            metadata = os.fstat(descriptor)
+            path_metadata = os.stat(self.diagnostics_dir, follow_symlinks=False)
+            self._validate_private_directory(metadata)
+            self._validate_private_directory(path_metadata)
+            if self._directory_key(metadata) != self._directory_key(path_metadata):
+                raise _UnsafeDiagnosticsArtifact()
+        except BaseException:
+            os.close(descriptor)
+            raise
+        self._directory_fd = descriptor
+        self._directory_identity = self._directory_key(metadata)
+        return descriptor
+
+    def _validated_directory_descriptor(self) -> int:
+        descriptor = self._directory_fd
+        identity = self._directory_identity
+        if descriptor is None or identity is None:
+            raise _UnsafeDiagnosticsArtifact()
+        metadata = os.fstat(descriptor)
+        path_metadata = os.stat(self.diagnostics_dir, follow_symlinks=False)
+        self._validate_private_directory(metadata)
+        self._validate_private_directory(path_metadata)
+        if (
+            self._directory_key(metadata) != identity
+            or self._directory_key(path_metadata) != identity
+        ):
+            raise _UnsafeDiagnosticsArtifact()
+        return descriptor
+
+    def _open_private_artifact(
+        self,
+        directory: int,
+        name: str,
+        flags: int,
+        *,
+        created: bool = False,
+    ) -> int:
+        descriptor = os.open(
+            name,
+            flags | _NOFOLLOW | _CLOEXEC | _NONBLOCK,
+            _PRIVATE_FILE_MODE,
+            dir_fd=directory,
+        )
+        try:
+            if created:
+                os.fchmod(descriptor, _PRIVATE_FILE_MODE)
+            self._validate_private_file(os.fstat(descriptor))
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _open_or_create_private_artifact(
+        self, directory: int, name: str, flags: int
+    ) -> int:
+        try:
+            return self._open_private_artifact(
+                directory,
+                name,
+                flags | os.O_CREAT | os.O_EXCL,
+                created=True,
+            )
+        except FileExistsError:
+            return self._open_private_artifact(directory, name, flags)
+
+    def _validate_optional_artifact(self, directory: int, name: str) -> None:
+        try:
+            metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        self._validate_private_file(metadata)
+
+    def _close_directory_descriptor(self) -> None:
+        descriptor = self._directory_fd
+        self._directory_fd = None
+        self._directory_identity = None
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
     def start(self) -> None:
         with self._lock:
             if self._lifecycle_state not in {"new", "stopped"}:
@@ -840,15 +1016,31 @@ class DiagnosticsRuntime:
             self._stop.clear()
             self._wake.set()
             try:
-                self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
-                dump_path = self.diagnostics_dir / "thread-dumps.log"
-                dump_path.write_bytes(b"")
-                self._dump_handle = dump_path.open(
-                    "a", encoding="utf-8", buffering=1
+                directory = self._open_diagnostics_directory()
+            except BaseException:
+                self._snapshot_failed_locked()
+                self._lifecycle_state = "stopped"
+                return
+            dump_descriptor: Optional[int] = None
+            try:
+                dump_descriptor = self._open_or_create_private_artifact(
+                    directory,
+                    "thread-dumps.log",
+                    os.O_WRONLY | os.O_APPEND,
                 )
-            except Exception:
+                os.ftruncate(dump_descriptor, 0)
+                self._dump_handle = os.fdopen(
+                    dump_descriptor, "a", encoding="utf-8", buffering=1
+                )
+                dump_descriptor = None
+            except BaseException:
                 self._snapshot_failed_locked()
                 self._dump_handle = None
+                if dump_descriptor is not None:
+                    try:
+                        os.close(dump_descriptor)
+                    except OSError:
+                        pass
 
             self.signal_capture_available = self._claim_signal()
             self._owns_signal = self.signal_capture_available
@@ -866,6 +1058,7 @@ class DiagnosticsRuntime:
                 self._lifecycle_state = "stopped"
                 self._release_signal()
                 self._close_dump_handle()
+                self._close_directory_descriptor()
                 return
             self._lifecycle_state = "running"
 

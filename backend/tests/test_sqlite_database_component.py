@@ -164,6 +164,27 @@ def test_write_diagnostics_clean_up_after_body_exception(settings, tmp_path):
         db.write_lock.release()
 
 
+def test_write_acquire_base_exception_removes_waiter_and_propagates(settings, tmp_path):
+    class AcquireFailure(BaseException):
+        pass
+
+    class FailingLock:
+        def acquire(self):
+            raise AcquireFailure("original")
+
+        def release(self):  # pragma: no cover - must not be called
+            raise AssertionError("release called without acquisition")
+
+    db = SqliteDatabase(settings, tmp_path)
+    db.write_lock = FailingLock()
+    runtime = _diagnostics_runtime(tmp_path)
+    with diagnostics.install_runtime(runtime):
+        with pytest.raises(AcquireFailure, match="original"):
+            with db.write(operation="acquire-failure"):
+                raise AssertionError("unreachable")
+        assert runtime.snapshot()["write_lock"] == {"holder": None, "waiters": []}
+
+
 def test_active_sql_is_sanitized_while_sqlite_execute_blocks(settings, tmp_path):
     db = SqliteDatabase(settings, tmp_path)
     with db.write() as conn:

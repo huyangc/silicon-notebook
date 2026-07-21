@@ -530,6 +530,168 @@ def test_sample_process_revalidates_identity_after_all_metric_reads(tmp_path):
     assert sample == {"pid": 42, "status": "identity_changed"}
 
 
+@pytest.mark.parametrize("metric_source", ["status", "io", "tasks", "fds"])
+@pytest.mark.parametrize("error_number", [errno.EACCES, errno.EPERM])
+def test_sample_process_classifies_each_metric_permission_failure_as_incomplete(
+    tmp_path, metric_source, error_number
+):
+    process = load_process_module()
+    row = {
+        "stat": proc_stat(42, start_ticks=8),
+        "status": "VmRSS:\t1 kB\nThreads:\t1\n",
+        "io": "read_bytes: 1\nwrite_bytes: 2\n",
+        "tasks": (proc_stat(42),),
+        "fds": 3,
+    }
+
+    class PermissionMetricProc(FakeProcAdapter):
+        def read_status(self, pid):
+            if metric_source == "status":
+                raise OSError(error_number, "PRIVATE")
+            return super().read_status(pid)
+
+        def read_io(self, pid):
+            if metric_source == "io":
+                raise OSError(error_number, "PRIVATE")
+            return super().read_io(pid)
+
+        def task_stats(self, pid, **kwargs):
+            if metric_source == "tasks":
+                raise OSError(error_number, "PRIVATE")
+            return super().task_stats(pid, **kwargs)
+
+        def count_fds(self, pid, **kwargs):
+            if metric_source == "fds":
+                raise OSError(error_number, "PRIVATE")
+            return super().count_fds(pid, **kwargs)
+
+    result = process.sample_process(
+        42,
+        expected_identity={"pid": 42, "starttime_ticks": 8},
+        proc=PermissionMetricProc(tmp_path, {42: row}),
+        sleeper=lambda _seconds: None,
+    )
+    assert result == {"pid": 42, "status": "scan_incomplete"}
+    assert "PRIVATE" not in repr(result)
+
+
+@pytest.mark.parametrize("metric_source", ["status", "io", "tasks", "fds"])
+def test_sample_process_observes_adapter_metric_incomplete_state(
+    tmp_path, metric_source
+):
+    process = load_process_module()
+    row = {
+        "stat": proc_stat(42, start_ticks=8),
+        "status": "VmRSS:\t1 kB\nThreads:\t1\n",
+        "io": "read_bytes: 1\nwrite_bytes: 2\n",
+        "tasks": (proc_stat(42),),
+        "fds": 3,
+    }
+
+    class SwallowingMetricProc(FakeProcAdapter):
+        scan_incomplete = False
+        process_exited = False
+
+        def reset_scan_state(self):
+            self.scan_incomplete = False
+            self.process_exited = False
+
+        def _fail(self, source):
+            if metric_source == source:
+                self.scan_incomplete = True
+                return True
+            return False
+
+        def read_status(self, pid):
+            return None if self._fail("status") else super().read_status(pid)
+
+        def read_io(self, pid):
+            return None if self._fail("io") else super().read_io(pid)
+
+        def task_stats(self, pid, **kwargs):
+            return () if self._fail("tasks") else super().task_stats(pid, **kwargs)
+
+        def count_fds(self, pid, **kwargs):
+            return 0 if self._fail("fds") else super().count_fds(pid, **kwargs)
+
+    result = process.sample_process(
+        42,
+        expected_identity={"pid": 42, "starttime_ticks": 8},
+        proc=SwallowingMetricProc(tmp_path, {42: row}),
+        sleeper=lambda _seconds: None,
+    )
+    assert result == {"pid": 42, "status": "scan_incomplete"}
+
+
+@pytest.mark.parametrize("metric_source", ["status", "io", "tasks", "fds"])
+def test_sample_process_preserves_benign_metric_exit_category(
+    tmp_path, metric_source
+):
+    process = load_process_module()
+    row = {
+        "stat": proc_stat(42, start_ticks=8),
+        "status": "VmRSS:\t1 kB\nThreads:\t1\n",
+        "io": "read_bytes: 1\nwrite_bytes: 2\n",
+        "tasks": (proc_stat(42),),
+        "fds": 3,
+    }
+
+    class ExitedMetricProc(FakeProcAdapter):
+        def read_status(self, pid):
+            if metric_source == "status":
+                raise OSError(errno.ENOENT, "PRIVATE")
+            return super().read_status(pid)
+
+        def read_io(self, pid):
+            if metric_source == "io":
+                raise OSError(errno.ESRCH, "PRIVATE")
+            return super().read_io(pid)
+
+        def task_stats(self, pid, **kwargs):
+            if metric_source == "tasks":
+                raise OSError(errno.ENOENT, "PRIVATE")
+            return super().task_stats(pid, **kwargs)
+
+        def count_fds(self, pid, **kwargs):
+            if metric_source == "fds":
+                raise OSError(errno.ESRCH, "PRIVATE")
+            return super().count_fds(pid, **kwargs)
+
+    result = process.sample_process(
+        42,
+        expected_identity={"pid": 42, "starttime_ticks": 8},
+        proc=ExitedMetricProc(tmp_path, {42: row}),
+        sleeper=lambda _seconds: None,
+    )
+    assert result == {"pid": 42, "status": "unavailable"}
+
+
+def test_sample_process_resets_prior_adapter_failure_state(tmp_path):
+    process = load_process_module()
+    proc_root = tmp_path / "proc"
+    process_root = proc_root / "42"
+    process_root.mkdir(parents=True)
+    (process_root / "stat").write_text(proc_stat(42, start_ticks=8))
+    (process_root / "status").write_text("VmRSS:\t1 kB\nThreads:\t1\n")
+    (process_root / "io").write_text("read_bytes: 1\nwrite_bytes: 2\n")
+    (process_root / "fd").mkdir()
+    task = process_root / "task" / "42"
+    task.mkdir(parents=True)
+    (task / "stat").write_text(proc_stat(42))
+    adapter = process.ProcAdapter(proc_root)
+    adapter.scan_incomplete = True
+    adapter.process_exited = True
+    result = process.sample_process(
+        42,
+        expected_identity={"pid": 42, "starttime_ticks": 8},
+        proc=adapter,
+        sleeper=lambda _seconds: None,
+    )
+    assert result["pid"] == 42
+    assert "status" not in result
+    assert result["read_bytes"] == 1
+
+
 def test_pid_scan_and_sampling_share_absolute_deadline(tmp_path):
     process = load_process_module()
 
@@ -1035,6 +1197,7 @@ def test_capture_detects_pid_reuse_after_dump_and_discards_segment(tmp_path):
         platform="linux",
     )
     assert result["status"] == "identity_changed"
+    assert result["identity_verified"] is False
     assert result["dump"] == ""
 
 
@@ -1191,9 +1354,53 @@ def test_capture_reserves_deadline_for_post_signal_validation(tmp_path):
         sleeper=lambda _seconds: None,
     )
     assert result["status"] == "partial"
+    assert result["identity_verified"] is False
     assert result["partial_reason"] == "deadline"
     assert result["dump"] == ""
     assert result["bytes"] == 0
+
+
+def test_capture_final_sigcgt_deadline_is_not_identity_verified(tmp_path):
+    process = load_process_module()
+    dump = tmp_path / "thread-dumps.log"
+    dump.write_bytes(b"")
+
+    class Clock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = Clock()
+
+    class SlowFinalStatus(CaptureProc):
+        status_calls = 0
+
+        def read_status(self, pid):
+            self.status_calls += 1
+            result = super().read_status(pid)
+            if self.status_calls == 3:
+                clock.value = 1.0
+            return result
+
+    def append_dump(*_args):
+        dump.write_bytes(b"Thread 0xA (most recent call first):\n")
+
+    result = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=SlowFinalStatus([8] * 8),
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=append_dump,
+        platform="linux",
+        deadline=1.0,
+        clock=clock,
+        sleeper=lambda _seconds: None,
+    )
+    assert result["status"] == "partial"
+    assert result["partial_reason"] == "deadline"
+    assert result["identity_verified"] is False
 
 
 def test_capture_no_growth_is_bounded_partial_deadline(tmp_path):
@@ -1210,6 +1417,7 @@ def test_capture_no_growth_is_bounded_partial_deadline(tmp_path):
         timeout=0.05,
     )
     assert result["status"] == "partial"
+    assert result["identity_verified"] is True
     assert result["partial_reason"] == "deadline"
     assert result["dump"] == ""
     assert result["bytes"] == 0
@@ -1274,9 +1482,34 @@ def test_capture_waits_for_quiescence_and_marks_deadline_partial(tmp_path):
     stop.set()
     writers[-1].join(timeout=1)
     assert partial["status"] == "partial"
+    assert partial["identity_verified"] is True
     assert partial["complete"] is False
     assert partial["partial_reason"] == "deadline"
     assert partial["bytes"] <= 512 * 1024
+
+
+def test_capture_byte_cap_partial_keeps_verified_identity(tmp_path):
+    process = load_process_module()
+    dump = tmp_path / "thread-dumps.log"
+    dump.write_bytes(b"")
+
+    def append_large_dump(*_args):
+        with dump.open("ab") as handle:
+            handle.write(b"x" * (512 * 1024 + 1))
+
+    result = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=CaptureProc([8] * 8),
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=append_large_dump,
+        platform="linux",
+    )
+    assert result["status"] == "partial"
+    assert result["partial_reason"] == "byte_cap"
+    assert result["identity_verified"] is True
+    assert result["bytes"] == 512 * 1024
 
 
 @pytest.mark.parametrize(
@@ -1337,6 +1570,7 @@ def test_capture_rejects_mid_capture_hardlink_and_never_truncates(tmp_path):
         platform="linux",
     )
     assert result["status"] == "unsafe_path"
+    assert result["identity_verified"] is True
     assert dump.read_bytes().startswith(b"existing\n")
     assert late_link.read_bytes() == dump.read_bytes()
 
@@ -1361,9 +1595,158 @@ def test_capture_exposes_retention_failure_without_losing_evidence(tmp_path):
         platform="linux",
     )
     assert result["status"] == "ok"
+    assert result["identity_verified"] is True
     assert result["degraded"] == ["retention_failed"]
     assert result["dump"].startswith("Thread 0xA")
     assert dump.stat().st_size > 8 * 1024 * 1024
+
+
+class CaptureDeadlineClock:
+    value = 0.0
+
+    def __call__(self):
+        return self.value
+
+
+def expire_final_safety_check(process, monkeypatch, clock, target_call):
+    original = process._capture_files_safe
+    safety_calls = 0
+
+    def wrapped(*args, **kwargs):
+        nonlocal safety_calls
+        safety_calls += 1
+        if safety_calls != target_call:
+            return original(*args, **kwargs)
+        check_calls = 0
+
+        def late_clock():
+            nonlocal check_calls
+            check_calls += 1
+            if check_calls == 3:
+                clock.value = 1.0
+            return clock()
+
+        return original(*args, **{**kwargs, "clock": late_clock})
+
+    monkeypatch.setattr(process, "_capture_files_safe", wrapped)
+
+
+def test_capture_post_validation_late_path_deadline_is_partial(
+    tmp_path, monkeypatch
+):
+    process = load_process_module()
+    dump = tmp_path / "thread-dumps.log"
+    dump.write_bytes(b"")
+    clock = CaptureDeadlineClock()
+    expire_final_safety_check(process, monkeypatch, clock, target_call=2)
+
+    def append_dump(*_args):
+        dump.write_bytes(b"Thread 0xA (most recent call first):\n")
+
+    result = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=CaptureProc([8] * 8),
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=append_dump,
+        platform="linux",
+        deadline=1.0,
+        clock=clock,
+        sleeper=lambda _seconds: None,
+    )
+    assert result["status"] == "partial"
+    assert result["partial_reason"] == "deadline"
+    assert result["identity_verified"] is True
+
+
+def test_capture_retention_late_path_deadline_preserves_evidence(
+    tmp_path, monkeypatch
+):
+    process = load_process_module()
+    dump = tmp_path / "thread-dumps.log"
+    dump.write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+    clock = CaptureDeadlineClock()
+    expire_final_safety_check(process, monkeypatch, clock, target_call=3)
+
+    def append_dump(*_args):
+        with dump.open("ab") as handle:
+            handle.write(b"Thread 0xA (most recent call first):\n")
+
+    result = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=CaptureProc([8] * 8),
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=append_dump,
+        platform="linux",
+        deadline=1.0,
+        clock=clock,
+        sleeper=lambda _seconds: None,
+    )
+    assert result["status"] == "ok"
+    assert result["identity_verified"] is True
+    assert result["degraded"] == ["retention_failed"]
+    assert result["dump"].startswith("Thread 0xA")
+    assert dump.stat().st_size > 8 * 1024 * 1024
+
+
+def test_capture_file_safety_re_raises_deadline_instead_of_unsafe_path(tmp_path):
+    process = load_process_module()
+    lock = tmp_path / "incident.lock"
+    dump = tmp_path / "thread-dumps.log"
+    lock.write_bytes(b"")
+    dump.write_bytes(b"")
+    directory_fd = os.open(tmp_path, os.O_RDONLY)
+    lock_fd = os.open(lock, os.O_RDONLY)
+    dump_fd = os.open(dump, os.O_RDONLY)
+    try:
+        with pytest.raises(TimeoutError):
+            process._capture_files_safe(
+                tmp_path,
+                os.fstat(directory_fd),
+                directory_fd,
+                lock_fd,
+                os.fstat(lock_fd),
+                dump_fd,
+                os.fstat(dump_fd),
+                deadline=0.0,
+                clock=lambda: 1.0,
+            )
+    finally:
+        os.close(dump_fd)
+        os.close(lock_fd)
+        os.close(directory_fd)
+
+
+def test_capture_file_safety_re_raises_deadline_after_path_identity_checks(tmp_path):
+    process = load_process_module()
+    lock = tmp_path / "incident.lock"
+    dump = tmp_path / "thread-dumps.log"
+    lock.write_bytes(b"")
+    dump.write_bytes(b"")
+    directory_fd = os.open(tmp_path, os.O_RDONLY)
+    lock_fd = os.open(lock, os.O_RDONLY)
+    dump_fd = os.open(dump, os.O_RDONLY)
+    moments = iter((0.0, 0.0, 1.0))
+    try:
+        with pytest.raises(TimeoutError):
+            process._capture_files_safe(
+                tmp_path,
+                os.fstat(directory_fd),
+                directory_fd,
+                lock_fd,
+                os.fstat(lock_fd),
+                dump_fd,
+                os.fstat(dump_fd),
+                deadline=1.0,
+                clock=lambda: next(moments),
+            )
+    finally:
+        os.close(dump_fd)
+        os.close(lock_fd)
+        os.close(directory_fd)
 
 
 def test_capture_rejects_diagnostics_directory_replacement_before_signal(tmp_path):

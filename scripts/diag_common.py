@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import json
+import math
 import re
+import sys
 import time
 from collections import deque
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -26,6 +30,195 @@ _STATIC_PATH_SEGMENTS = frozenset({
 _READ_CHUNK_BYTES = 64 * 1024
 _DEFAULT_MAX_INPUT_BYTES = 64 * 1024 * 1024
 _MAX_RENDERED_PATH_BYTES = 384
+COPY_REPORT_LIMIT_BYTES = 32 * 1024
+_CAPTURE_LIMIT_BYTES = 4 * COPY_REPORT_LIMIT_BYTES
+_OPAQUE_ID = re.compile(
+    r"\b(?P<prefix>nb|src|req|job|user|mem|report|ko|conv)-[A-Za-z0-9_.-]+\b",
+    re.IGNORECASE,
+)
+_BEARER = re.compile(r"(?i)\bBearer\s+\S+")
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b(?:authorization|cookie|password|token|secret|api[_-]?key)\s*[=:]\s*\S+"
+)
+_SENTINEL = re.compile(r"(?i)\b(?:SENSITIVE|PRIVATE|SECRET)(?:[-_.A-Za-z0-9]*)\b")
+_ABSOLUTE_PATH = re.compile(
+    r"(?<![A-Za-z0-9])/(?!api(?:/|$)|docs(?:/|$)|mcp(?:/|$)|_diagnostics-test(?:/|$))[^\s)\],;]+"
+)
+_RELATIVE_ARTIFACT = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:backend/)?\.local(?:/[^\s)\],;]+)?|"
+    r"(?<![A-Za-z0-9])(?:backend/)?\.env\b|"
+    r"(?<![A-Za-z0-9])storage/[^\s)\],;]+"
+)
+_PSEUDONYM_LABELS = {
+    "nb": "notebook",
+    "src": "source",
+    "req": "request",
+    "job": "job",
+    "user": "user",
+    "mem": "memory",
+    "report": "report",
+    "ko": "knowledge",
+    "conv": "conversation",
+}
+_SAFE_PSEUDONYM_LABELS = frozenset((*_PSEUDONYM_LABELS.values(), "id"))
+
+
+@dataclass
+class _ReportPseudonyms:
+    values: dict[tuple[str, str], str]
+    counters: dict[str, int]
+
+
+_REPORT_PSEUDONYMS: ContextVar[Optional[_ReportPseudonyms]] = ContextVar(
+    "diagnostic_report_pseudonyms", default=None
+)
+
+
+def pseudonym(label: str, value: Any) -> str:
+    """Return a stable, non-reversible identifier scoped to one report."""
+
+    safe_label = str(label).lower()
+    if safe_label not in _SAFE_PSEUDONYM_LABELS:
+        safe_label = "id"
+    registry = _REPORT_PSEUDONYMS.get()
+    if registry is None:
+        registry = _ReportPseudonyms(values={}, counters={})
+        _REPORT_PSEUDONYMS.set(registry)
+    key = (safe_label, str(value))
+    rendered = registry.values.get(key)
+    if rendered is None:
+        registry.counters[safe_label] = registry.counters.get(safe_label, 0) + 1
+        rendered = f"{safe_label}#{registry.counters[safe_label]}"
+        registry.values[key] = rendered
+    return rendered
+
+
+class _BoundedCapture(io.TextIOBase):
+    def __init__(self, maximum: int = _CAPTURE_LIMIT_BYTES) -> None:
+        self._maximum = maximum
+        self._parts: list[str] = []
+        self._used = 0
+        self.truncated = False
+
+    @property
+    def encoding(self) -> str:
+        return "utf-8"
+
+    def write(self, value: str) -> int:
+        text = str(value)
+        encoded = text.encode("utf-8", "replace")
+        remaining = self._maximum - self._used
+        if remaining > 0:
+            kept = encoded[:remaining].decode("utf-8", "ignore")
+            self._parts.append(kept)
+            self._used += len(kept.encode("utf-8"))
+        if len(encoded) > remaining:
+            self.truncated = True
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+    def isatty(self) -> bool:
+        return False
+
+    def getvalue(self) -> str:
+        value = "".join(self._parts)
+        return value + ("\n[capture_truncated=true]\n" if self.truncated else "")
+
+
+def finite_number(
+    value: Any,
+    *,
+    minimum: float = 0.0,
+    maximum: float = 10**15,
+) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(number) or number < minimum or number > maximum:
+        return None
+    return number
+
+
+def sanitize_copy_text(value: Any) -> str:
+    """Fail-closed final scrub for text already selected by an engine."""
+
+    text = str(value).replace("\x00", "").replace("\r", "\n")
+
+    def replace_identifier(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        prefix = match.group("prefix").lower()
+        label = _PSEUDONYM_LABELS.get(prefix, "id")
+        return pseudonym(label, raw)
+
+    text = _BEARER.sub("<auth>", text)
+    text = _SECRET_ASSIGNMENT.sub("<redacted>", text)
+    text = _OPAQUE_ID.sub(replace_identifier, text)
+    text = _SENTINEL.sub("<redacted>", text)
+    text = _RELATIVE_ARTIFACT.sub("<artifact>", text)
+    text = _ABSOLUTE_PATH.sub("<path>", text)
+    return text
+
+
+def bound_copy_text(value: Any, limit_bytes: int = COPY_REPORT_LIMIT_BYTES) -> str:
+    limit = max(1, min(int(limit_bytes), COPY_REPORT_LIMIT_BYTES))
+    text = sanitize_copy_text(value)
+    if not text.endswith("\n"):
+        text += "\n"
+    encoded = text.encode("utf-8", "strict")
+    if len(encoded) <= limit:
+        return text
+    marker = "[output_truncated=true]\n"
+    budget = max(0, limit - len(marker.encode("utf-8")))
+    prefix = encoded[:budget].decode("utf-8", "ignore")
+    newline = prefix.rfind("\n")
+    if newline >= 0:
+        prefix = prefix[: newline + 1]
+    return prefix + marker
+
+
+def run_copy_safe(call, *, limit_bytes: int = COPY_REPORT_LIMIT_BYTES) -> int:
+    """Run one engine behind a global stdout/stderr privacy and byte boundary."""
+
+    registry_token = _REPORT_PSEUDONYMS.set(_ReportPseudonyms(values={}, counters={}))
+    real_stdout, real_stderr = sys.stdout, sys.stderr
+    stdout_capture = _BoundedCapture()
+    stderr_capture = _BoundedCapture()
+    sys.stdout, sys.stderr = stdout_capture, stderr_capture
+    result = 0
+    invalid_arguments = False
+    try:
+        result = int(call() or 0)
+    except SystemExit as exc:
+        try:
+            result = int(exc.code or 0)
+        except (TypeError, ValueError, OverflowError):
+            result = 2
+        invalid_arguments = result != 0
+    except BaseException:
+        stdout_capture = _BoundedCapture()
+        stdout_capture.write("diagnostic_error=unavailable\n")
+        stderr_capture = _BoundedCapture()
+        result = 0
+    finally:
+        sys.stdout, sys.stderr = real_stdout, real_stderr
+
+    if invalid_arguments:
+        payload = "diagnostic_error=invalid_arguments\n"
+    else:
+        payload = stdout_capture.getvalue()
+        if stderr_capture.getvalue():
+            payload += "\n" + stderr_capture.getvalue()
+    try:
+        real_stdout.write(bound_copy_text(payload, limit_bytes))
+        real_stdout.flush()
+        return result
+    finally:
+        _REPORT_PSEUDONYMS.reset(registry_token)
 
 
 @dataclass(frozen=True)
