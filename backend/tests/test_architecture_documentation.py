@@ -70,6 +70,13 @@ def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract
             "architecture.md": "aggregate 只负责组合顺序",
         }
     )
+    design = _read(
+        "docs/superpowers/specs/2026-07-21-application-boundary-foundation-design.md"
+    )
+    assert "may be re-exported from `routes.py`" not in design
+    assert "Compatibility exports are temporary" not in design
+    assert "passes the full functional gate" not in design
+    assert "does not satisfy the existing local warm-gate target" not in design
     _assert_phrases(
         {
             "README.md": "`backend/app/models/schemas.py` is a legacy compatibility facade",

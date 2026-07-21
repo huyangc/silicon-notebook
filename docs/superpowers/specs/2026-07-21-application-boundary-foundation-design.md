@@ -29,11 +29,12 @@ and Ask stream parsing. This design extended those boundaries instead of replaci
 them.
 
 At the design baseline, commit `6f4170b347dd8f715023406402f056a03e73f8b6`
-passes the full functional gate with the Homebrew Python runtime. A warm run
+passed the full functional gate with the Homebrew Python runtime. A warm run
 reported `contracts=23s`, `backend=95s`, and `frontend=56s`. The test results are
-green, but the backend lane means this observed baseline does not satisfy the
-existing local warm-gate target of 60 seconds. Implementation must remeasure this
-before broad movement and must not hide or worsen a reproducible timing regression.
+were green, but the backend lane meant that observed baseline did not meet the
+existing local warm-gate target of 60 seconds. The implementation therefore had
+to remeasure before broad movement without hiding or worsening a reproducible
+timing regression.
 
 Implementation verification recorded two consecutive complete warm gates with
 every lane at or below the local 60-second target: `contracts/backend/frontend`
@@ -140,15 +141,15 @@ create parallel implementations.
 - Router composition must not introduce import-time construction of repositories,
   settings, or model clients.
 
-### 5.4 Compatibility facade
+### 5.4 Aggregate compatibility boundary
 
-During this PR, imports of the aggregate `router` continue to work. Only genuinely
-used legacy symbols may be re-exported from `routes.py`; a compatibility export
-must point to the domain implementation and must not duplicate it.
+Throughout this PR, imports of the aggregate `router` continued to work.
+`routes.py` retains that composition surface only; it does not re-export endpoint
+functions, private helpers, repositories, or other legacy monolith symbols.
 
-Tests and production code are migrated away from patching private monolith helpers.
-Compatibility exports are temporary, explicit, and documented so they do not
-become a second public API by accident.
+Tests and production code migrated away from patching private monolith helpers and
+now use public HTTP behaviour or explicit domain seams. The aggregate therefore
+cannot become a second private API by accident.
 
 ## 6. Target Pydantic model architecture
 
