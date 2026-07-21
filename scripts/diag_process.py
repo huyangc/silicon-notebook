@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import argparse
 import errno
+import itertools
 import json
 import math
 import os
 import re
 import signal
 import socket
+import stat as stat_module
 import sys
+import sysconfig
 import time
 import urllib.error
 import urllib.request
@@ -37,7 +40,10 @@ _MAX_TASKS = 4_096
 _SAMPLE_SECONDS = 0.2
 _SNAPSHOT_MAX_BYTES = 512 * 1024
 _SNAPSHOT_STALE_SECONDS = 6.0
+_SNAPSHOT_FUTURE_SKEW_SECONDS = 1.0
 _DUMP_WAIT_SECONDS = 1.0
+_DUMP_STABLE_POLLS = 3
+_DUMP_POLL_SECONDS = 0.02
 _DUMP_MAX_BYTES = 512 * 1024
 _DUMP_FILE_MAX_BYTES = 8 * 1024 * 1024
 _MAX_DUMP_THREADS = 256
@@ -49,10 +55,8 @@ _THREAD_HEADER = re.compile(
     r"^(?:Current thread|Thread) 0x([0-9a-fA-F]+)(?: \([^\n]*\))?:\s*$"
 )
 _FRAME = re.compile(r'^\s*File "([^"]+)", line (\d+) in ([^\r\n]+)\s*$')
-_ALLOWED_LIBRARY_DIRECTORIES = frozenset(
-    {"sqlite3", "asyncio", "anyio", "urllib", "httpx", "openai"}
-)
-_ALLOWED_LIBRARY_FILES = frozenset({"threading.py", "shutil.py", "os.py"})
+_LIBRARY_PACKAGES = ("sqlite3", "asyncio", "anyio", "urllib", "httpx", "openai")
+_LIBRARY_FILES = ("threading", "shutil", "os")
 _RUNTIME_LIST_FIELDS = (
     "active_requests",
     "active_sql",
@@ -60,6 +64,19 @@ _RUNTIME_LIST_FIELDS = (
     "recent_jobs",
 )
 _RUNTIME_DICT_FIELDS = ("readiness", "concurrency", "write_lock")
+_RUNTIME_REQUIRED_FIELDS = frozenset(
+    {
+        "schema_version",
+        "pid",
+        "process_started_at",
+        "heartbeat_at",
+        "last_state_change_at",
+        "state_revision",
+        "snapshot_failures",
+        *_RUNTIME_LIST_FIELDS,
+        *_RUNTIME_DICT_FIELDS,
+    }
+)
 
 
 def _safe_int(value: str, default: int = 0) -> int:
@@ -69,11 +86,16 @@ def _safe_int(value: str, default: int = 0) -> int:
         return default
 
 
+def _expired(deadline: Optional[float], clock: Callable[[], float]) -> bool:
+    return deadline is not None and clock() >= deadline
+
+
 class ProcAdapter:
     """Small, bounded adapter around the permitted per-process proc entries."""
 
     def __init__(self, root: Path | str = "/proc") -> None:
         self.root = Path(root)
+        self.scan_incomplete = False
 
     def _process_path(self, pid: int, leaf: str) -> Path:
         if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
@@ -82,19 +104,39 @@ class ProcAdapter:
             raise ValueError("unsupported proc entry")
         return self.root / str(pid) / leaf
 
-    def _read_bytes(self, pid: int, leaf: str) -> Optional[bytes]:
+    def _read_bytes(
+        self,
+        pid: int,
+        leaf: str,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> Optional[bytes]:
+        if _expired(deadline, clock):
+            return None
         try:
             with self._process_path(pid, leaf).open("rb") as handle:
-                return handle.read(_MAX_PROC_FILE_BYTES + 1)[:_MAX_PROC_FILE_BYTES]
+                value = handle.read(_MAX_PROC_FILE_BYTES + 1)[:_MAX_PROC_FILE_BYTES]
+            return None if _expired(deadline, clock) else value
         except (OSError, ValueError):
             return None
 
-    def list_pids(self) -> tuple[int, ...]:
+    def list_pids(
+        self,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> tuple[int, ...]:
+        self.scan_incomplete = False
         try:
             result: list[int] = []
             with os.scandir(self.root) as entries:
                 for entry in entries:
-                    if len(result) >= _MAX_PIDS:
+                    if len(result) >= _MAX_PIDS + 1:
+                        self.scan_incomplete = True
+                        break
+                    if _expired(deadline, clock):
+                        self.scan_incomplete = True
                         break
                     if not entry.name.isascii() or not entry.name.isdecimal():
                         continue
@@ -103,13 +145,26 @@ class ProcAdapter:
                         result.append(pid)
             return tuple(sorted(result))
         except OSError:
+            self.scan_incomplete = True
             return ()
 
-    def exists(self, pid: int) -> bool:
-        return self.read_stat(pid) is not None
+    def exists(
+        self,
+        pid: int,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> bool:
+        return self.read_stat(pid, deadline=deadline, clock=clock) is not None
 
-    def read_cmdline(self, pid: int) -> tuple[str, ...]:
-        raw = self._read_bytes(pid, "cmdline")
+    def read_cmdline(
+        self,
+        pid: int,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> tuple[str, ...]:
+        raw = self._read_bytes(pid, "cmdline", deadline=deadline, clock=clock)
         if raw is None:
             return ()
         return tuple(
@@ -118,44 +173,82 @@ class ProcAdapter:
             if part
         )
 
-    def read_cwd(self, pid: int) -> Optional[Path]:
+    def read_cwd(
+        self,
+        pid: int,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> Optional[Path]:
+        if _expired(deadline, clock):
+            return None
         try:
             target = os.readlink(self._process_path(pid, "cwd"))
-            return Path(target)
+            return None if _expired(deadline, clock) else Path(target)
         except (OSError, ValueError):
             return None
 
-    def read_stat(self, pid: int) -> Optional[str]:
-        raw = self._read_bytes(pid, "stat")
+    def read_stat(
+        self,
+        pid: int,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> Optional[str]:
+        raw = self._read_bytes(pid, "stat", deadline=deadline, clock=clock)
         return None if raw is None else raw.decode("ascii", "replace")
 
-    def read_status(self, pid: int) -> Optional[str]:
-        raw = self._read_bytes(pid, "status")
+    def read_status(
+        self,
+        pid: int,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> Optional[str]:
+        raw = self._read_bytes(pid, "status", deadline=deadline, clock=clock)
         return None if raw is None else raw.decode("ascii", "replace")
 
-    def read_io(self, pid: int) -> Optional[str]:
-        raw = self._read_bytes(pid, "io")
+    def read_io(
+        self,
+        pid: int,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> Optional[str]:
+        raw = self._read_bytes(pid, "io", deadline=deadline, clock=clock)
         return None if raw is None else raw.decode("ascii", "replace")
 
-    def count_fds(self, pid: int) -> int:
+    def count_fds(
+        self,
+        pid: int,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> int:
         try:
             count = 0
             with os.scandir(self._process_path(pid, "fd")) as entries:
                 for _entry in entries:
                     count += 1
-                    if count >= _MAX_FDS:
+                    if count >= _MAX_FDS or _expired(deadline, clock):
                         break
             return count
         except (OSError, ValueError):
             return 0
 
-    def task_stats(self, pid: int) -> tuple[str, ...]:
+    def task_stats(
+        self,
+        pid: int,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> tuple[str, ...]:
         try:
             result: list[str] = []
             task_root = self._process_path(pid, "task")
             with os.scandir(task_root) as entries:
                 for entry in entries:
-                    if len(result) >= _MAX_TASKS:
+                    if len(result) >= _MAX_TASKS or _expired(deadline, clock):
                         break
                     if not entry.name.isascii() or not entry.name.isdecimal():
                         continue
@@ -169,8 +262,16 @@ class ProcAdapter:
         except (OSError, ValueError):
             return ()
 
-    def identity(self, pid: int) -> Optional[dict[str, int]]:
-        parsed = parse_proc_stat(self.read_stat(pid) or "")
+    def identity(
+        self,
+        pid: int,
+        *,
+        deadline: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> Optional[dict[str, int]]:
+        parsed = parse_proc_stat(
+            self.read_stat(pid, deadline=deadline, clock=clock) or ""
+        )
         if parsed is None:
             return None
         return {"pid": pid, "starttime_ticks": int(parsed["starttime_ticks"])}
@@ -220,10 +321,35 @@ def _candidate_cwd(root: Path, cwd: Optional[Path]) -> Optional[str]:
     return None
 
 
-def _safe_identity(proc: Any, pid: int) -> Optional[dict[str, int]]:
+def _adapter_call(
+    method: Callable[..., Any],
+    *args: Any,
+    deadline: Optional[float],
+    clock: Callable[[], float],
+) -> Any:
+    if _expired(deadline, clock):
+        raise TimeoutError
     try:
-        identity = proc.identity(pid)
-    except (OSError, ValueError, TypeError, KeyError):
+        value = method(*args, deadline=deadline, clock=clock)
+    except TypeError:
+        value = method(*args)
+    if _expired(deadline, clock):
+        raise TimeoutError
+    return value
+
+
+def _safe_identity(
+    proc: Any,
+    pid: int,
+    *,
+    deadline: Optional[float] = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> Optional[dict[str, int]]:
+    try:
+        identity = _adapter_call(
+            proc.identity, pid, deadline=deadline, clock=clock
+        )
+    except (OSError, ValueError, TypeError, KeyError, TimeoutError, StopIteration):
         return None
     if not isinstance(identity, dict):
         return None
@@ -240,6 +366,8 @@ def resolve_backend_pid(
     *,
     proc: Optional[Any] = None,
     self_pid: Optional[int] = None,
+    deadline: Optional[float] = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Resolve one Uvicorn process without returning its raw command line."""
 
@@ -247,41 +375,70 @@ def resolve_backend_pid(
     repo = Path(root).resolve(strict=False)
     own_pid = os.getpid() if self_pid is None else self_pid
     source = "operator" if pid is not None else "auto"
+    empty = {"pid": None, "source": source, "candidates": []}
+
+    if _expired(deadline, clock):
+        return {"status": "scan_incomplete", **empty}
 
     if pid is not None:
         if pid == own_pid:
-            return {"status": "missing", "pid": None, "source": source, "candidates": []}
-        try:
-            exists = adapter.exists(pid)
-        except (OSError, ValueError, TypeError, KeyError):
-            exists = False
-        identity = _safe_identity(adapter, pid) if exists else None
-        if not exists or identity is None:
-            return {"status": "missing", "pid": None, "source": source, "candidates": []}
+            return {"status": "missing", **empty}
+        before = _safe_identity(adapter, pid, deadline=deadline, clock=clock)
+        after = _safe_identity(adapter, pid, deadline=deadline, clock=clock)
+        if _expired(deadline, clock):
+            return {"status": "scan_incomplete", **empty}
+        if before is None or after is None or before != after:
+            return {"status": "missing", **empty}
         return {
             "status": "ok",
             "pid": pid,
             "source": source,
-            "identity": identity,
+            "identity": before,
             "candidates": [],
         }
 
     candidates: list[dict[str, Any]] = []
     identities: dict[int, dict[str, int]] = {}
+    scan_incomplete = False
     try:
-        pids: Iterable[int] = adapter.list_pids()
-    except (OSError, ValueError, TypeError):
-        pids = ()
-    try:
+        pids: Iterable[int] = _adapter_call(
+            adapter.list_pids, deadline=deadline, clock=clock
+        )
+        scan_incomplete = bool(getattr(adapter, "scan_incomplete", False))
         for index, candidate_pid in enumerate(pids):
             if index >= _MAX_PIDS:
+                scan_incomplete = True
+                break
+            if _expired(deadline, clock):
+                scan_incomplete = True
                 break
             if candidate_pid == own_pid:
                 continue
             try:
-                command = adapter.read_cmdline(candidate_pid)
-                cwd = adapter.read_cwd(candidate_pid)
+                before = _safe_identity(
+                    adapter, candidate_pid, deadline=deadline, clock=clock
+                )
+                command = _adapter_call(
+                    adapter.read_cmdline,
+                    candidate_pid,
+                    deadline=deadline,
+                    clock=clock,
+                )
+                cwd = _adapter_call(
+                    adapter.read_cwd,
+                    candidate_pid,
+                    deadline=deadline,
+                    clock=clock,
+                )
+                after = _safe_identity(
+                    adapter, candidate_pid, deadline=deadline, clock=clock
+                )
+            except TimeoutError:
+                scan_incomplete = True
+                break
             except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                continue
+            if before is None or after is None or before != after:
                 continue
             if not isinstance(command, (tuple, list)):
                 continue
@@ -295,15 +452,19 @@ def resolve_backend_pid(
             safe_cwd = _candidate_cwd(repo, cwd)
             if safe_cwd is None:
                 continue
-            identity = _safe_identity(adapter, candidate_pid)
-            if identity is None:
-                continue
             candidates.append({"pid": candidate_pid, "cwd": safe_cwd})
-            identities[candidate_pid] = identity
-    except (OSError, ValueError, TypeError, KeyError):
-        pass
+            identities[candidate_pid] = before
+    except (OSError, ValueError, TypeError, KeyError, TimeoutError):
+        scan_incomplete = True
 
     candidates.sort(key=lambda item: item["pid"])
+    if scan_incomplete or _expired(deadline, clock):
+        return {
+            "status": "scan_incomplete",
+            "pid": None,
+            "source": source,
+            "candidates": candidates,
+        }
     if len(candidates) == 1:
         selected = candidates[0]
         return {
@@ -340,11 +501,13 @@ def _number_prefix(value: str) -> int:
 def sample_process(
     pid: int,
     *,
+    expected_identity: Optional[dict[str, int]] = None,
     proc: Optional[Any] = None,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
     clock_ticks: Optional[int] = None,
     page_size: Optional[int] = None,
+    deadline: Optional[float] = None,
 ) -> dict[str, Any]:
     """Take two bounded proc samples and return numeric process metadata."""
 
@@ -352,22 +515,72 @@ def sample_process(
     ticks_per_second = clock_ticks or int(os.sysconf("SC_CLK_TCK"))
     system_page_size = page_size or int(os.sysconf("SC_PAGE_SIZE"))
     try:
-        first = parse_proc_stat(adapter.read_stat(pid) or "")
+        if _expired(deadline, clock):
+            return {"pid": pid, "status": "deadline"}
+        first = parse_proc_stat(
+            _adapter_call(
+                adapter.read_stat, pid, deadline=deadline, clock=clock
+            )
+            or ""
+        )
         first_at = float(clock())
         if first is None:
             return {"pid": pid, "status": "unavailable"}
-        sleeper(_SAMPLE_SECONDS)
-        second = parse_proc_stat(adapter.read_stat(pid) or "")
+        first_identity = {
+            "pid": pid,
+            "starttime_ticks": int(first["starttime_ticks"]),
+        }
+        if expected_identity is not None and first_identity != expected_identity:
+            return {"pid": pid, "status": "identity_changed"}
+        if deadline is not None and first_at + _SAMPLE_SECONDS > deadline:
+            return {"pid": pid, "status": "deadline"}
+        sleeper(
+            _SAMPLE_SECONDS
+            if deadline is None
+            else min(_SAMPLE_SECONDS, max(0.0, deadline - first_at))
+        )
+        if _expired(deadline, clock):
+            return {"pid": pid, "status": "deadline"}
+        second = parse_proc_stat(
+            _adapter_call(
+                adapter.read_stat, pid, deadline=deadline, clock=clock
+            )
+            or ""
+        )
         second_at = float(clock())
         if second is None or first["starttime_ticks"] != second["starttime_ticks"]:
             return {"pid": pid, "status": "identity_changed"}
-        status = _key_values(adapter.read_status(pid))
-        io_values = _key_values(adapter.read_io(pid))
+        second_identity = {
+            "pid": pid,
+            "starttime_ticks": int(second["starttime_ticks"]),
+        }
+        if expected_identity is not None and second_identity != expected_identity:
+            return {"pid": pid, "status": "identity_changed"}
+        if _expired(deadline, clock):
+            return {"pid": pid, "status": "deadline"}
+        status = _key_values(
+            _adapter_call(
+                adapter.read_status, pid, deadline=deadline, clock=clock
+            )
+        )
+        io_values = _key_values(
+            _adapter_call(adapter.read_io, pid, deadline=deadline, clock=clock)
+        )
         d_state_threads = 0
-        for task_stat in tuple(adapter.task_stats(pid))[:_MAX_TASKS]:
+        task_stats = _adapter_call(
+            adapter.task_stats, pid, deadline=deadline, clock=clock
+        )
+        for task_stat in itertools.islice(task_stats, _MAX_TASKS):
+            if _expired(deadline, clock):
+                return {"pid": pid, "status": "deadline"}
             parsed_task = parse_proc_stat(task_stat)
             if parsed_task is not None and parsed_task["state"] == "D":
                 d_state_threads += 1
+        fds = _adapter_call(
+            adapter.count_fds, pid, deadline=deadline, clock=clock
+        )
+        if _expired(deadline, clock):
+            return {"pid": pid, "status": "deadline"}
         elapsed = max(0.000_001, second_at - first_at)
         process_tick_delta = max(
             0, int(second["process_ticks"]) - int(first["process_ticks"])
@@ -389,12 +602,14 @@ def sample_process(
             "cpu_percent": cpu_percent,
             "rss_bytes": rss_bytes,
             "threads": _number_prefix(status.get("Threads", "")),
-            "fds": max(0, min(_MAX_FDS, int(adapter.count_fds(pid)))),
+            "fds": max(0, min(_MAX_FDS, int(fds))),
             "read_bytes": _number_prefix(io_values.get("read_bytes", "")),
             "write_bytes": _number_prefix(io_values.get("write_bytes", "")),
             "d_state_threads": d_state_threads,
             "uptime_seconds": round(uptime_seconds, 3),
         }
+    except TimeoutError:
+        return {"pid": pid, "status": "deadline"}
     except (OSError, ValueError, TypeError, KeyError, StopIteration):
         return {"pid": pid, "status": "unavailable"}
 
@@ -440,20 +655,41 @@ def _valid_json_metadata(value: Any, *, depth: int = 0, budget: Optional[list[in
     return False
 
 
+def _owned_regular(stat_result: os.stat_result) -> bool:
+    effective_uid = getattr(os, "geteuid", lambda: stat_result.st_uid)()
+    return (
+        stat_module.S_ISREG(stat_result.st_mode)
+        and stat_result.st_uid == effective_uid
+        and stat_result.st_nlink == 1
+    )
+
+
 def load_runtime_snapshot(
     path: Path | str,
     pid: int,
     *,
     now: Optional[datetime] = None,
+    deadline: Optional[float] = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> dict[str, Any]:
     """Read and validate one bounded runtime heartbeat snapshot."""
 
     snapshot_path = Path(path)
+    if _expired(deadline, clock):
+        return {"status": "deadline", "fresh": False, "snapshot": None}
     try:
-        with snapshot_path.open("rb") as handle:
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(snapshot_path, flags)
+        with os.fdopen(descriptor, "rb", buffering=0) as handle:
+            file_stat = os.fstat(handle.fileno())
+            if not _owned_regular(file_stat) or file_stat.st_size > _SNAPSHOT_MAX_BYTES:
+                return {"status": "malformed", "fresh": False, "snapshot": None}
             raw = handle.read(_SNAPSHOT_MAX_BYTES + 1)
     except OSError:
         return {"status": "missing", "fresh": False, "snapshot": None}
+    if _expired(deadline, clock):
+        return {"status": "deadline", "fresh": False, "snapshot": None}
     if len(raw) > _SNAPSHOT_MAX_BYTES:
         return {"status": "malformed", "fresh": False, "snapshot": None}
     try:
@@ -464,21 +700,36 @@ def load_runtime_snapshot(
         return {"status": "invalid_shape", "fresh": False, "snapshot": None}
     if not _valid_json_metadata(snapshot):
         return {"status": "invalid_shape", "fresh": False, "snapshot": None}
-    if snapshot.get("schema_version") != 1:
+    if not _RUNTIME_REQUIRED_FIELDS.issubset(snapshot):
+        return {"status": "invalid_shape", "fresh": False, "snapshot": None}
+    if type(snapshot.get("schema_version")) is not int or snapshot["schema_version"] != 1:
         return {"status": "unsupported_schema", "fresh": False, "snapshot": None}
-    if snapshot.get("pid") != pid:
+    if type(snapshot.get("pid")) is not int or snapshot["pid"] != pid:
         return {"status": "pid_mismatch", "fresh": False, "snapshot": None}
+    if any(
+        type(snapshot.get(field)) is not int or snapshot[field] < 0
+        for field in ("state_revision", "snapshot_failures")
+    ):
+        return {"status": "invalid_shape", "fresh": False, "snapshot": None}
     if any(not isinstance(snapshot.get(field), list) for field in _RUNTIME_LIST_FIELDS):
         return {"status": "invalid_shape", "fresh": False, "snapshot": None}
     if any(not isinstance(snapshot.get(field), dict) for field in _RUNTIME_DICT_FIELDS):
         return {"status": "invalid_shape", "fresh": False, "snapshot": None}
     heartbeat = _parse_utc(snapshot.get("heartbeat_at"))
-    if heartbeat is None:
+    if heartbeat is None or any(
+        _parse_utc(snapshot.get(field)) is None
+        for field in ("process_started_at", "last_state_change_at")
+    ):
         return {"status": "invalid_shape", "fresh": False, "snapshot": None}
     captured_at = now or datetime.now(timezone.utc)
     if captured_at.tzinfo is None:
         captured_at = captured_at.replace(tzinfo=timezone.utc)
-    age = max(0.0, (captured_at.astimezone(timezone.utc) - heartbeat).total_seconds())
+    age = (captured_at.astimezone(timezone.utc) - heartbeat).total_seconds()
+    if not math.isfinite(age):
+        return {"status": "invalid_shape", "fresh": False, "snapshot": None}
+    if age < -_SNAPSHOT_FUTURE_SKEW_SECONDS:
+        return {"status": "future_heartbeat", "fresh": False, "snapshot": None}
+    age = max(0.0, age)
     fresh = age <= _SNAPSHOT_STALE_SECONDS
     return {
         "status": "ok" if fresh else "stale",
@@ -494,16 +745,24 @@ def probe_http(
     *,
     timeout: float = _HTTP_TIMEOUT_SECONDS,
     clock: Callable[[], float] = time.monotonic,
-    opener: Callable[..., Any] = urllib.request.urlopen,
+    opener: Optional[Callable[..., Any]] = None,
+    deadline: Optional[float] = None,
 ) -> dict[str, Any]:
     """Probe liveness without reading or retaining any response body."""
 
     started = clock()
     status: Optional[int] = None
     result = "error"
+    if opener is None:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+    remaining = _HTTP_TIMEOUT_SECONDS
+    if deadline is not None:
+        remaining = min(remaining, max(0.0, deadline - started))
+    if remaining <= 0:
+        return dict(zip(_HTTP_RESULT_KEYS, (str(role)[:32], None, 0, "timeout")))
     try:
         with opener(
-            url, timeout=min(_HTTP_TIMEOUT_SECONDS, max(0.001, timeout))
+            url, timeout=min(remaining, max(0.001, timeout))
         ) as response:
             status = int(response.status)
             result = "ok" if 200 <= status < 400 else "error"
@@ -522,31 +781,23 @@ def probe_http(
             result = "error"
     except (OSError, ValueError):
         result = "error"
-    elapsed_ms = min(750, max(0, int(round((clock() - started) * 1_000))))
+    elapsed_ms = max(0, int(round((clock() - started) * 1_000)))
     return dict(zip(_HTTP_RESULT_KEYS, (str(role)[:32], status, elapsed_ms, result)))
 
 
-def _pid_alive(pid: int) -> bool:
+def _sigusr1_is_caught(
+    proc: Any,
+    pid: int,
+    *,
+    deadline: Optional[float] = None,
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
     try:
-        os.kill(pid, 0)
-        return True
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-
-
-def _identity_before_signal(proc: Optional[Any], pid: int) -> Optional[dict[str, int]]:
-    if proc is not None:
-        return _safe_identity(proc, pid)
-    if sys.platform.startswith("linux"):
-        return _safe_identity(ProcAdapter(), pid)
-    return {"pid": pid, "starttime_ticks": -1} if _pid_alive(pid) else None
-
-
-def _sigusr1_is_caught(proc: Any, pid: int) -> bool:
-    try:
-        status = _key_values(proc.read_status(pid))
+        status = _key_values(
+            _adapter_call(
+                proc.read_status, pid, deadline=deadline, clock=clock
+            )
+        )
         caught = int(status.get("SigCgt", ""), 16)
     except (AttributeError, OSError, TypeError, ValueError, KeyError):
         return False
@@ -555,9 +806,62 @@ def _sigusr1_is_caught(proc: Any, pid: int) -> bool:
 
 
 def _capture_result(status: str, **fields: Any) -> dict[str, Any]:
-    result = {"status": status, "identity_verified": status == "ok", "dump": ""}
+    result = {
+        "status": status,
+        "identity_verified": status in {"ok", "partial"},
+        "dump": "",
+    }
     result.update(fields)
     return result
+
+
+def _same_file(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _owned_directory(stat_result: os.stat_result) -> bool:
+    effective_uid = getattr(os, "geteuid", lambda: stat_result.st_uid)()
+    return stat_module.S_ISDIR(stat_result.st_mode) and stat_result.st_uid == effective_uid
+
+
+def _path_matches_descriptor(
+    name: str,
+    descriptor_stat: os.stat_result,
+    *,
+    directory_fd: int,
+) -> bool:
+    try:
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return _same_file(current, descriptor_stat)
+
+
+def _directory_path_matches(path: Path, descriptor_stat: os.stat_result) -> bool:
+    try:
+        current = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    return _same_file(current, descriptor_stat)
+
+
+def _default_pidfd_open(pid: int, flags: int) -> int:
+    opener = getattr(os, "pidfd_open", None)
+    if opener is None:
+        raise OSError(errno.ENOSYS, "pidfd unavailable")
+    return opener(pid, flags)
+
+
+def _default_pidfd_send(
+    pidfd: int,
+    signum: int,
+    siginfo: Any,
+    flags: int,
+) -> None:
+    sender = getattr(signal, "pidfd_send_signal", None)
+    if sender is None:
+        raise OSError(errno.ENOSYS, "pidfd signal unavailable")
+    sender(pidfd, signum, siginfo, flags)
 
 
 def capture_thread_dump(
@@ -566,11 +870,13 @@ def capture_thread_dump(
     *,
     proc: Optional[Any] = None,
     expected_identity: Optional[dict[str, int]] = None,
-    kill_fn: Callable[[int, int], None] = os.kill,
+    pidfd_open_fn: Optional[Callable[[int, int], int]] = None,
+    pidfd_send_fn: Optional[Callable[[int, int, Any, int], None]] = None,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
     platform: Optional[str] = None,
     timeout: float = _DUMP_WAIT_SECONDS,
+    deadline: Optional[float] = None,
 ) -> dict[str, Any]:
     """Request the already-installed non-terminating SIGUSR1 dump handler."""
 
@@ -579,24 +885,47 @@ def capture_thread_dump(
     if fcntl is None:
         return _capture_result("unsupported")
     platform_name = sys.platform if platform is None else platform
-    if platform_name.startswith("win"):
+    if not platform_name.startswith("linux"):
         return _capture_result("unsupported")
+    adapter = proc or ProcAdapter()
+    open_pidfd = pidfd_open_fn or _default_pidfd_open
+    send_pidfd = pidfd_send_fn or _default_pidfd_send
+    started = clock()
+    local_deadline = started + min(_DUMP_WAIT_SECONDS, max(0.001, float(timeout)))
+    capture_deadline = local_deadline if deadline is None else min(deadline, local_deadline)
+    if clock() >= capture_deadline:
+        return _capture_result("deadline")
     directory = Path(diagnostics_dir)
-    lock_path = directory / "incident.lock"
-    dump_path = directory / "thread-dumps.log"
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow | nonblock | cloexec
+    file_flags = os.O_RDWR | nofollow | nonblock | cloexec
+    directory_fd = -1
+    pidfd = -1
     try:
-        if directory.is_symlink():
+        try:
+            directory_fd = os.open(directory, directory_flags)
+        except OSError:
             return _capture_result("unsafe_path")
-        directory.mkdir(parents=True, exist_ok=True)
-        if lock_path.is_symlink() or dump_path.is_symlink():
+        directory_stat = os.fstat(directory_fd)
+        if not _owned_directory(directory_stat) or not _directory_path_matches(directory, directory_stat):
             return _capture_result("unsafe_path")
-        nofollow = getattr(os, "O_NOFOLLOW", 0)
-        lock_fd = os.open(
-            lock_path,
-            os.O_RDWR | os.O_CREAT | nofollow,
-            0o600,
-        )
-        deadline = clock() + min(_DUMP_WAIT_SECONDS, max(0.001, float(timeout)))
+        try:
+            lock_fd = os.open(
+                "incident.lock",
+                file_flags | os.O_CREAT,
+                0o600,
+                dir_fd=directory_fd,
+            )
+        except OSError:
+            return _capture_result("unsafe_path")
+        lock_stat = os.fstat(lock_fd)
+        if not _owned_regular(lock_stat) or not _path_matches_descriptor(
+            "incident.lock", lock_stat, directory_fd=directory_fd
+        ):
+            os.close(lock_fd)
+            return _capture_result("unsafe_path")
         with os.fdopen(lock_fd, "a+b") as lock_handle:
             while True:
                 try:
@@ -605,69 +934,223 @@ def capture_thread_dump(
                     )
                     break
                 except BlockingIOError:
-                    if clock() >= deadline:
+                    if clock() >= capture_deadline:
                         return _capture_result("lock_timeout")
-                    sleeper(min(0.02, max(0.0, deadline - clock())))
-            before_identity = _identity_before_signal(proc, pid)
-            if before_identity is None:
-                return _capture_result("missing_process")
-            if expected_identity is not None and before_identity != expected_identity:
-                return _capture_result("identity_changed")
+                    sleeper(
+                        min(
+                            _DUMP_POLL_SECONDS,
+                            max(0.0, capture_deadline - clock()),
+                        )
+                    )
             try:
-                dump_fd = os.open(dump_path, os.O_RDWR | nofollow)
-            except OSError:
-                return _capture_result("dump_unavailable")
+                dump_fd = os.open(
+                    "thread-dumps.log", file_flags, dir_fd=directory_fd
+                )
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    return _capture_result("dump_unavailable")
+                return _capture_result("unsafe_path")
             with os.fdopen(dump_fd, "r+b", buffering=0) as dump_handle:
-                offset = os.fstat(dump_handle.fileno()).st_size
-                # Re-read immediately before signaling to narrow PID-reuse exposure.
-                immediate_identity = _identity_before_signal(proc, pid)
-                if immediate_identity != before_identity:
+                dump_stat = os.fstat(dump_handle.fileno())
+                if not _owned_regular(dump_stat) or not _path_matches_descriptor(
+                    "thread-dumps.log", dump_stat, directory_fd=directory_fd
+                ):
+                    return _capture_result("unsafe_path")
+                offset = dump_stat.st_size
+                before_identity = _safe_identity(
+                    adapter, pid, deadline=capture_deadline, clock=clock
+                )
+                if _expired(capture_deadline, clock):
+                    return _capture_result("deadline")
+                baseline_identity = expected_identity or before_identity
+                if before_identity is None:
+                    return _capture_result("missing_process")
+                if before_identity != baseline_identity:
                     return _capture_result("identity_changed")
-                if platform_name.startswith("linux"):
-                    signal_proc = proc or ProcAdapter()
-                    if not _sigusr1_is_caught(signal_proc, pid):
-                        return _capture_result("signal_unavailable")
+                caught = _sigusr1_is_caught(
+                    adapter, pid, deadline=capture_deadline, clock=clock
+                )
+                if _expired(capture_deadline, clock):
+                    return _capture_result("deadline")
+                if not caught:
+                    return _capture_result("signal_unavailable")
+                second_identity = _safe_identity(
+                    adapter, pid, deadline=capture_deadline, clock=clock
+                )
+                if second_identity != baseline_identity:
+                    return _capture_result("identity_changed")
                 try:
-                    kill_fn(pid, signal.SIGUSR1)
-                except (OSError, ValueError):
+                    pidfd = open_pidfd(pid, 0)
+                except (OSError, ValueError, PermissionError):
+                    return _capture_result("pidfd_unavailable")
+                if _expired(capture_deadline, clock):
+                    return _capture_result("deadline")
+                if not _directory_path_matches(directory, directory_stat):
+                    return _capture_result("unsafe_path")
+                if not _path_matches_descriptor(
+                    "incident.lock", lock_stat, directory_fd=directory_fd
+                ) or not _path_matches_descriptor(
+                    "thread-dumps.log", dump_stat, directory_fd=directory_fd
+                ):
+                    return _capture_result("unsafe_path")
+                third_identity = _safe_identity(
+                    adapter, pid, deadline=capture_deadline, clock=clock
+                )
+                if _expired(capture_deadline, clock):
+                    return _capture_result("deadline")
+                if third_identity != baseline_identity:
+                    return _capture_result("identity_changed")
+                caught = _sigusr1_is_caught(
+                    adapter, pid, deadline=capture_deadline, clock=clock
+                )
+                if _expired(capture_deadline, clock):
+                    return _capture_result("deadline")
+                if not caught:
+                    return _capture_result("signal_unavailable")
+                fourth_identity = _safe_identity(
+                    adapter, pid, deadline=capture_deadline, clock=clock
+                )
+                if _expired(capture_deadline, clock):
+                    return _capture_result("deadline")
+                if fourth_identity != baseline_identity:
+                    return _capture_result("identity_changed")
+                try:
+                    send_pidfd(pidfd, signal.SIGUSR1, None, 0)
+                except (OSError, ValueError, PermissionError):
                     return _capture_result("signal_failed")
                 size = offset
-                while clock() < deadline:
+                last_size = offset
+                stable_polls = 0
+                grew = False
+                while clock() < capture_deadline:
                     try:
                         size = os.fstat(dump_handle.fileno()).st_size
                     except OSError:
                         return _capture_result("dump_unavailable")
                     if size > offset:
-                        break
-                    sleeper(min(0.02, max(0.0, deadline - clock())))
-                if size <= offset:
-                    return _capture_result("timeout", offset=offset)
-                after_identity = _identity_before_signal(proc, pid)
-                if after_identity != before_identity:
+                        grew = True
+                        if size == last_size:
+                            stable_polls += 1
+                        else:
+                            stable_polls = 0
+                            last_size = size
+                        if stable_polls >= _DUMP_STABLE_POLLS:
+                            break
+                    sleeper(
+                        min(
+                            _DUMP_POLL_SECONDS,
+                            max(0.0, capture_deadline - clock()),
+                        )
+                    )
+                complete = grew and stable_polls >= _DUMP_STABLE_POLLS
+                if not grew:
+                    return _capture_result(
+                        "timeout",
+                        offset=offset,
+                        complete=False,
+                        partial_reason="deadline",
+                    )
+                after_identity = _safe_identity(
+                    adapter, pid, deadline=None, clock=clock
+                )
+                if after_identity != baseline_identity:
                     return _capture_result("identity_changed", offset=offset)
+                if not _sigusr1_is_caught(adapter, pid, clock=clock):
+                    return _capture_result("signal_unavailable", offset=offset)
+                if not _directory_path_matches(directory, directory_stat):
+                    return _capture_result("unsafe_path", offset=offset)
+                if not _path_matches_descriptor(
+                    "incident.lock", lock_stat, directory_fd=directory_fd
+                ) or not _path_matches_descriptor(
+                    "thread-dumps.log", dump_stat, directory_fd=directory_fd
+                ):
+                    return _capture_result("unsafe_path", offset=offset)
+                final_size = os.fstat(dump_handle.fileno()).st_size
+                if final_size != last_size:
+                    complete = False
                 try:
                     dump_handle.seek(offset)
                     appended = dump_handle.read(_DUMP_MAX_BYTES + 1)[:_DUMP_MAX_BYTES]
                 except OSError:
                     return _capture_result("dump_unavailable", offset=offset)
-                truncated = size - offset > _DUMP_MAX_BYTES
-                if size > _DUMP_FILE_MAX_BYTES:
+                truncated = final_size - offset > _DUMP_MAX_BYTES
+                if complete and final_size > _DUMP_FILE_MAX_BYTES:
                     try:
                         os.ftruncate(dump_handle.fileno(), 0)
                     except OSError:
                         pass
+                status = "ok" if complete and not truncated else "partial"
+                partial_reason = None
+                if truncated:
+                    partial_reason = "byte_cap"
+                elif not complete:
+                    partial_reason = (
+                        "deadline"
+                        if clock() >= capture_deadline
+                        else "ongoing_write"
+                    )
                 return _capture_result(
-                    "ok",
+                    status,
                     offset=offset,
                     bytes=len(appended),
                     truncated=truncated,
+                    complete=status == "ok",
+                    partial_reason=partial_reason,
                     dump=appended.decode("utf-8", "replace"),
                 )
     except OSError:
         return _capture_result("lock_unavailable")
+    finally:
+        if pidfd >= 0:
+            try:
+                os.close(pidfd)
+            except OSError:
+                pass
+        if directory_fd >= 0:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
 
 
-def _sanitized_frame(line: str, repo: Path) -> Optional[str]:
+def _default_trusted_library_paths() -> dict[str, tuple[Path, ...]]:
+    paths = sysconfig.get_paths()
+    stdlib_roots = tuple(
+        Path(value).resolve(strict=False)
+        for key in ("stdlib", "platstdlib")
+        if (value := paths.get(key))
+    )
+    site_roots = tuple(
+        Path(value).resolve(strict=False)
+        for key in ("purelib", "platlib")
+        if (value := paths.get(key))
+    )
+    result: dict[str, tuple[Path, ...]] = {}
+    for token in _LIBRARY_PACKAGES:
+        roots = stdlib_roots if token in {"sqlite3", "asyncio", "urllib"} else site_roots
+        result[token] = tuple(root / token for root in roots)
+    for token in _LIBRARY_FILES:
+        result[token] = tuple(root / f"{token}.py" for root in stdlib_roots)
+    return result
+
+
+def _matches_trusted_path(path: Path, trusted: Path) -> bool:
+    try:
+        resolved_path = path.resolve(strict=False)
+        resolved_trusted = trusted.resolve(strict=False)
+        if trusted.suffix == ".py":
+            return resolved_path == resolved_trusted
+        resolved_path.relative_to(resolved_trusted)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _sanitized_frame(
+    line: str,
+    repo: Path,
+    trusted_library_paths: dict[str, tuple[Path, ...]],
+) -> Optional[str]:
     match = _FRAME.match(line)
     if match is None:
         return None
@@ -680,20 +1163,27 @@ def _sanitized_frame(line: str, repo: Path) -> Optional[str]:
     safe_function = re.sub(r"[^A-Za-z0-9_<>. -]", "?", function)[:128]
     if relative is not None:
         safe_path = "<repo>/" + relative.as_posix()
-    elif (
-        path.name.lower() in _ALLOWED_LIBRARY_FILES
-        or any(
-            part.lower() in _ALLOWED_LIBRARY_DIRECTORIES
-            for part in path.parts[:-1]
-        )
-    ):
-        safe_path = "<library>/" + path.name
     else:
-        return None
+        token = next(
+            (
+                name
+                for name, trusted_paths in trusted_library_paths.items()
+                if any(_matches_trusted_path(path, trusted) for trusted in trusted_paths)
+            ),
+            None,
+        )
+        if token is None:
+            return None
+        safe_path = f"<library:{token}>"
     return f"{safe_path}:{_safe_int(line_number)} in {safe_function}"
 
 
-def parse_thread_dump(dump: str | bytes, repo_root: Path | str) -> dict[str, list[str]]:
+def parse_thread_dump(
+    dump: str | bytes,
+    repo_root: Path | str,
+    *,
+    trusted_library_paths: Optional[dict[str, tuple[Path, ...]]] = None,
+) -> dict[str, list[str]]:
     """Return bounded frame metadata, omitting all non-allow-listed paths."""
 
     if isinstance(dump, bytes):
@@ -703,6 +1193,11 @@ def parse_thread_dump(dump: str | bytes, repo_root: Path | str) -> dict[str, lis
             "utf-8", "replace"
         )
     repo = Path(repo_root)
+    trusted_paths = (
+        _default_trusted_library_paths()
+        if trusted_library_paths is None
+        else trusted_library_paths
+    )
     result: dict[str, list[str]] = {}
     omitted: dict[str, int] = {}
     current: Optional[str] = None
@@ -719,7 +1214,7 @@ def parse_thread_dump(dump: str | bytes, repo_root: Path | str) -> dict[str, lis
             continue
         if current is None or not line.lstrip().startswith("File "):
             continue
-        safe = _sanitized_frame(line, repo)
+        safe = _sanitized_frame(line, repo, trusted_paths)
         if safe is None:
             omitted[current] += 1
             continue
@@ -750,7 +1245,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     diagnostics = Path(args.diagnostics_dir)
     if not diagnostics.is_absolute():
         diagnostics = root / diagnostics
-    resolution = resolve_backend_pid(root, args.pid)
+    deadline = time.monotonic() + 10.0
+    resolution = resolve_backend_pid(root, args.pid, deadline=deadline)
     candidates = resolution.get("candidates")
     safe_resolution = {
         "status": resolution.get("status"),
@@ -762,15 +1258,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     evidence: dict[str, Any] = {
         "resolution": safe_resolution,
         "health": [
-            probe_http("backend", args.backend_url),
-            probe_http("frontend", args.frontend_url),
+            probe_http("backend", args.backend_url, deadline=deadline),
+            probe_http("frontend", args.frontend_url, deadline=deadline),
         ],
     }
     selected_pid = resolution.get("pid")
     if isinstance(selected_pid, int):
-        evidence["process"] = sample_process(selected_pid)
+        evidence["process"] = sample_process(
+            selected_pid,
+            expected_identity=resolution.get("identity"),
+            deadline=deadline,
+        )
         runtime = load_runtime_snapshot(
-            diagnostics / "runtime.json", selected_pid
+            diagnostics / "runtime.json", selected_pid, deadline=deadline
         )
         evidence["runtime"] = {
             key: runtime[key]
@@ -781,6 +1281,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             selected_pid,
             diagnostics,
             expected_identity=resolution.get("identity"),
+            deadline=deadline,
         )
         evidence["capture"] = {
             key: value for key, value in capture.items() if key != "dump"

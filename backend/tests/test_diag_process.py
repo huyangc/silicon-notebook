@@ -78,7 +78,7 @@ class FakeProcAdapter:
         self.rows = rows
         self.stat_reads: dict[int, int] = {}
 
-    def list_pids(self):
+    def list_pids(self, **_kwargs):
         return sorted(self.rows)
 
     def exists(self, pid: int):
@@ -108,10 +108,10 @@ class FakeProcAdapter:
         value = self.rows[pid].get("io")
         return value if isinstance(value, str) else None
 
-    def count_fds(self, pid: int):
+    def count_fds(self, pid: int, **_kwargs):
         return int(self.rows[pid].get("fds", 0))
 
-    def task_stats(self, pid: int):
+    def task_stats(self, pid: int, **_kwargs):
         return tuple(self.rows[pid].get("tasks", ()))
 
     def identity(self, pid: int):
@@ -138,6 +138,10 @@ def candidate(root: Path, *, cwd: Path | None = None, start_ticks: int = 100):
     }
 
 
+def caught_status():
+    return f"Name:\tpython\nSigCgt:\t{1 << (int(signal.SIGUSR1) - 1):016x}\n"
+
+
 def test_proc_adapter_reads_bounded_per_process_entries(tmp_path):
     process = load_process_module()
     proc_root = tmp_path / "proc"
@@ -162,6 +166,18 @@ def test_proc_adapter_reads_bounded_per_process_entries(tmp_path):
     assert len(adapter.task_stats(17)) == 1
     assert adapter.identity(17) == {"pid": 17, "starttime_ticks": 100}
     assert adapter.read_cmdline(999) == ()
+
+
+def test_unreadable_proc_root_is_scan_incomplete_not_process_missing(tmp_path):
+    process = load_process_module()
+    adapter = process.ProcAdapter(tmp_path / "absent-proc")
+    result = process.resolve_backend_pid(tmp_path, proc=adapter, self_pid=999)
+    assert result == {
+        "status": "scan_incomplete",
+        "pid": None,
+        "source": "auto",
+        "candidates": [],
+    }
 
 
 def test_resolve_backend_pid_requires_exactly_one_sanitized_candidate(tmp_path):
@@ -250,7 +266,7 @@ def test_pid_scan_race_degrades_to_missing_instead_of_escaping(tmp_path):
 
     result = process.resolve_backend_pid(tmp_path, proc=RacingProc(), self_pid=999)
     assert result == {
-        "status": "missing",
+        "status": "scan_incomplete",
         "pid": None,
         "source": "auto",
         "candidates": [],
@@ -297,6 +313,108 @@ def test_parse_stat_handles_spaces_and_parentheses_and_sample_is_bounded(tmp_pat
         "uptime_seconds": 10.25 - 0.25,
     }
     assert "secret-name" not in repr(sample)
+
+
+def test_resolver_identity_sandwich_rejects_reused_candidate(tmp_path):
+    process = load_process_module()
+    root = tmp_path / "repo"
+    (root / "backend").mkdir(parents=True)
+
+    class ReusedProc(FakeProcAdapter):
+        def __init__(self):
+            super().__init__(root, {101: candidate(root)})
+            self.identities = iter(
+                (
+                    {"pid": 101, "starttime_ticks": 100},
+                    {"pid": 101, "starttime_ticks": 101},
+                )
+            )
+
+        def identity(self, _pid):
+            return next(self.identities)
+
+    result = process.resolve_backend_pid(root, proc=ReusedProc(), self_pid=999)
+    assert result == {
+        "status": "missing",
+        "pid": None,
+        "source": "auto",
+        "candidates": [],
+    }
+
+
+def test_sample_process_requires_selected_identity(tmp_path):
+    process = load_process_module()
+    row = {
+        "stats": [proc_stat(42, start_ticks=9), proc_stat(42, start_ticks=9)],
+        "status": "VmRSS:\t1 kB\nThreads:\t1\n",
+        "io": "read_bytes: 0\nwrite_bytes: 0\n",
+    }
+    sample = process.sample_process(
+        42,
+        expected_identity={"pid": 42, "starttime_ticks": 8},
+        proc=FakeProcAdapter(tmp_path, {42: row}),
+        sleeper=lambda _seconds: None,
+    )
+    assert sample == {"pid": 42, "status": "identity_changed"}
+
+
+def test_pid_scan_and_sampling_share_absolute_deadline(tmp_path):
+    process = load_process_module()
+
+    class AdvancingClock:
+        def __init__(self):
+            self.value = 0.0
+
+        def __call__(self):
+            self.value += 0.01
+            return self.value
+
+    clock = AdvancingClock()
+
+    class UnboundedProc:
+        def list_pids(self, **_kwargs):
+            pid = 10
+            while True:
+                yield pid
+                pid += 1
+
+        def read_cmdline(self, _pid):
+            return ()
+
+        def read_cwd(self, _pid):
+            return None
+
+    resolution = process.resolve_backend_pid(
+        tmp_path,
+        proc=UnboundedProc(),
+        self_pid=999,
+        deadline=0.08,
+        clock=clock,
+    )
+    assert resolution["status"] == "scan_incomplete"
+    assert resolution["pid"] is None
+
+    clock = AdvancingClock()
+
+    class SlowSample(FakeProcAdapter):
+        def count_fds(self, pid, **_kwargs):
+            clock.value = 1.0
+            return super().count_fds(pid)
+
+    row = {
+        "stat": proc_stat(42, start_ticks=8),
+        "status": "VmRSS:\t1 kB\nThreads:\t1\n",
+        "io": "read_bytes: 0\nwrite_bytes: 0\n",
+    }
+    sampled = process.sample_process(
+        42,
+        expected_identity={"pid": 42, "starttime_ticks": 8},
+        proc=SlowSample(tmp_path, {42: row}),
+        deadline=0.2,
+        clock=clock,
+        sleeper=lambda _seconds: None,
+    )
+    assert sampled == {"pid": 42, "status": "deadline"}
 
 
 def snapshot(pid: int, heartbeat: datetime):
@@ -361,6 +479,28 @@ def test_load_runtime_snapshot_validates_shape_pid_schema_and_freshness(tmp_path
     path.write_text(json.dumps(non_finite))
     assert process.load_runtime_snapshot(path, 77, now=now)["status"] == "invalid_shape"
 
+    bool_schema = snapshot(77, now)
+    bool_schema["schema_version"] = True
+    path.write_text(json.dumps(bool_schema))
+    assert process.load_runtime_snapshot(path, 77, now=now)["status"] == "unsupported_schema"
+
+    bool_pid = snapshot(1, now)
+    bool_pid["pid"] = True
+    path.write_text(json.dumps(bool_pid))
+    assert process.load_runtime_snapshot(path, 1, now=now)["status"] == "pid_mismatch"
+
+    missing_required = snapshot(77, now)
+    del missing_required["recent_jobs"]
+    path.write_text(json.dumps(missing_required))
+    assert process.load_runtime_snapshot(path, 77, now=now)["status"] == "invalid_shape"
+
+    path.write_text(json.dumps(snapshot(77, now + timedelta(seconds=1.01))))
+    assert process.load_runtime_snapshot(path, 77, now=now)["status"] == "future_heartbeat"
+
+    assert process.load_runtime_snapshot(
+        path, 77, now=now, deadline=1.0, clock=lambda: 2.0
+    ) == {"status": "deadline", "fresh": False, "snapshot": None}
+
 
 def test_probe_http_returns_metadata_only():
     process = load_process_module()
@@ -391,6 +531,39 @@ def test_probe_http_returns_metadata_only():
     assert "SENSITIVE" not in repr(result)
 
 
+def test_probe_http_reports_real_elapsed_and_builds_a_no_proxy_opener(monkeypatch):
+    process = load_process_module()
+    seen = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class DirectOpener:
+        def open(self, _url, timeout):
+            assert timeout == 0.75
+            return Response()
+
+    def build_opener(handler):
+        seen.append(handler)
+        return DirectOpener()
+
+    monkeypatch.setattr(process.urllib.request, "build_opener", build_opener)
+    moments = iter((1.0, 3.0))
+    result = process.probe_http(
+        "backend", "http://127.0.0.1:8000/api/ready", clock=lambda: next(moments)
+    )
+    assert result["elapsed_ms"] == 2000
+    assert len(seen) == 1
+    assert isinstance(seen[0], process.urllib.request.ProxyHandler)
+    assert seen[0].proxies == {}
+
+
 def test_probe_http_classifies_refused_connection_without_raw_error():
     process = load_process_module()
     def refused(_url, timeout):
@@ -409,30 +582,45 @@ def test_probe_http_classifies_refused_connection_without_raw_error():
 def test_parse_thread_dump_keeps_only_sanitized_bounded_frames(tmp_path):
     process = load_process_module()
     root = tmp_path / "repo"
+    trusted = tmp_path / "trusted"
+    stdlib = trusted / "stdlib"
+    site = trusted / "site-packages"
+    (site / "httpx").mkdir(parents=True)
+    stdlib.mkdir(parents=True)
     dump = f'''Thread 0x00000000000000AB (most recent call first):
   File "{root}/backend/app/service.py", line 17 in run
   File "/Users/private/secret_source.py", line 9 in leak
-  File "/opt/python/lib/threading.py", line 1045 in _bootstrap_inner
+  File "{stdlib}/threading.py", line 1045 in _bootstrap_inner
 
 Current thread 0x00000000000000CD (most recent call first):
   File "{root}/scripts/diag_process.py", line 200 in capture_thread_dump
-  File "/private/site-packages/httpx/client.py", line 12 in send
+  File "{site}/httpx/client.py", line 12 in send
   File "/Users/private/token-file.py", line 2 in hidden
   File "/Users/private/customer-openai-secret.py", line 3 in hidden
+  File "/tmp/openai/customer-secret.py", line 4 in hidden
+  File "/tmp/threading.py", line 5 in hidden
 '''
-    parsed = process.parse_thread_dump(dump, root)
+    parsed = process.parse_thread_dump(
+        dump,
+        root,
+        trusted_library_paths={
+            "threading": (stdlib / "threading.py",),
+            "httpx": (site / "httpx",),
+        },
+    )
     assert set(parsed) == {"ab", "cd"}
     rendered = repr(parsed)
     assert f"<repo>/backend/app/service.py:{17} in run" in rendered
-    assert f"<library>/threading.py:{1045} in _bootstrap_inner" in rendered
-    assert f"<library>/client.py:{12} in send" in rendered
+    assert f"<library:threading>:{1045} in _bootstrap_inner" in rendered
+    assert f"<library:httpx>:{12} in send" in rendered
     assert "<1 frame(s) omitted>" in rendered
-    assert "<2 frame(s) omitted>" in rendered
+    assert "<4 frame(s) omitted>" in rendered
     assert "/Users/" not in rendered
     assert str(root) not in rendered
     assert "secret_source" not in rendered
     assert "token-file" not in rendered
     assert "customer-openai-secret" not in rendered
+    assert "customer-secret" not in rendered
 
 
 def test_parse_thread_dump_caps_frames_per_thread(tmp_path):
@@ -450,6 +638,8 @@ def test_parse_thread_dump_caps_frames_per_thread(tmp_path):
 
 
 def test_capture_thread_dump_appends_only_keeps_child_alive_and_leaks_no_secrets(tmp_path):
+    if not sys.platform.startswith("linux"):
+        return
     assert hasattr(signal, "SIGUSR1")
     process = load_process_module()
     code = r'''
@@ -487,7 +677,6 @@ while True:
         result = process.capture_thread_dump(
             child.pid,
             tmp_path,
-            platform="test-posix",
         )
         assert result["status"] == "ok"
         assert result["identity_verified"] is True
@@ -508,38 +697,35 @@ def test_capture_refuses_identity_change_before_signalling(tmp_path):
     dump = tmp_path / "thread-dumps.log"
     dump.write_bytes(b"")
     proc = FakeProcAdapter(tmp_path, {88: {"stat": proc_stat(88, start_ticks=9)}})
-    called = []
+    sent = []
     result = process.capture_thread_dump(
         88,
         tmp_path,
         proc=proc,
         expected_identity={"pid": 88, "starttime_ticks": 8},
-        kill_fn=lambda *_args: called.append(True),
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=lambda *_args: sent.append(True),
         platform="linux",
     )
     assert result["status"] == "identity_changed"
     assert result["identity_verified"] is False
-    assert called == []
+    assert sent == []
 
 
 def test_capture_degrades_without_linux_runtime_or_platform_support(tmp_path):
     process = load_process_module()
-    called = []
     unsupported = process.capture_thread_dump(
         os.getpid(),
         tmp_path,
-        kill_fn=lambda *_args: called.append(True),
         platform="win32",
     )
     assert unsupported["status"] == "unsupported"
     missing_runtime = process.capture_thread_dump(
         os.getpid(),
         tmp_path,
-        kill_fn=lambda *_args: called.append(True),
-        platform="test-posix",
+        platform="linux",
     )
     assert missing_runtime["status"] == "dump_unavailable"
-    assert called == []
 
 
 def test_linux_capture_requires_sigusr1_to_be_caught(tmp_path):
@@ -554,17 +740,18 @@ def test_linux_capture_requires_sigusr1_to_be_caught(tmp_path):
             }
         },
     )
-    called = []
+    sent = []
     result = process.capture_thread_dump(
         88,
         tmp_path,
         proc=proc,
         expected_identity={"pid": 88, "starttime_ticks": 8},
-        kill_fn=lambda *_args: called.append(True),
+        pidfd_open_fn=lambda *_args: 123,
+        pidfd_send_fn=lambda *_args: sent.append(True),
         platform="linux",
     )
     assert result["status"] == "signal_unavailable"
-    assert called == []
+    assert sent == []
 
 
 def test_capture_lock_wait_honors_caller_deadline(tmp_path):
@@ -576,7 +763,7 @@ def test_capture_lock_wait_honors_caller_deadline(tmp_path):
         module.fcntl.flock(held.fileno(), module.fcntl.LOCK_EX)
         started = time.monotonic()
         result = module.capture_thread_dump(
-            os.getpid(), tmp_path, timeout=0.05, platform="test-posix"
+            os.getpid(), tmp_path, timeout=0.05, platform="linux"
         )
         elapsed = time.monotonic() - started
     assert result["status"] == "lock_timeout"
@@ -590,15 +777,16 @@ def test_capture_rejects_dump_symlink_without_signalling(tmp_path):
     diagnostics = tmp_path / "diagnostics"
     diagnostics.mkdir()
     (diagnostics / "thread-dumps.log").symlink_to(outside)
-    called = []
+    sent = []
     result = process.capture_thread_dump(
         os.getpid(),
         diagnostics,
-        kill_fn=lambda *_args: called.append(True),
-        platform="test-posix",
+        pidfd_open_fn=lambda *_args: 123,
+        pidfd_send_fn=lambda *_args: sent.append(True),
+        platform="linux",
     )
     assert result["status"] == "unsafe_path"
-    assert called == []
+    assert sent == []
     assert outside.read_text() == "DO-NOT-MUTATE"
 
 
@@ -615,11 +803,12 @@ def test_capture_detects_pid_reuse_after_dump_and_discards_segment(tmp_path):
                     proc_stat(88, start_ticks=8),
                     proc_stat(88, start_ticks=9),
                 ],
+                "status": caught_status(),
             }
         },
     )
 
-    def append_dump(_pid, _signal):
+    def append_dump(_pidfd, _signal, _siginfo, _flags):
         with dump.open("ab") as handle:
             handle.write(b"Thread 0xA (most recent call first):\n")
 
@@ -628,11 +817,293 @@ def test_capture_detects_pid_reuse_after_dump_and_discards_segment(tmp_path):
         tmp_path,
         proc=proc,
         expected_identity={"pid": 88, "starttime_ticks": 8},
-        kill_fn=append_dump,
-        platform="test-posix",
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=append_dump,
+        platform="linux",
     )
     assert result["status"] == "identity_changed"
     assert result["dump"] == ""
+
+
+class CaptureProc:
+    def __init__(self, identities, *, caught=True):
+        self.identities = list(identities)
+        self.identity_calls = 0
+        self.caught = caught
+
+    def identity(self, pid):
+        index = min(self.identity_calls, len(self.identities) - 1)
+        self.identity_calls += 1
+        return {"pid": pid, "starttime_ticks": self.identities[index]}
+
+    def read_status(self, _pid):
+        return caught_status() if self.caught else "SigCgt:\t0\n"
+
+
+def _fake_pidfd_open(_pid, _flags):
+    return os.open("/dev/null", os.O_RDONLY)
+
+
+@pytest.mark.parametrize("change_at", [1, 2, 3, 4])
+def test_capture_identity_sandwich_never_signals_reused_numeric_pid(tmp_path, change_at):
+    process = load_process_module()
+    (tmp_path / "thread-dumps.log").write_bytes(b"")
+    identities = [8] * 8
+    identities[change_at - 1 :] = [9] * (9 - change_at)
+    proc = CaptureProc(identities)
+    sent = []
+    result = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=proc,
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=lambda *_args: sent.append(True),
+        platform="linux",
+    )
+    assert result["status"] == "identity_changed"
+    assert sent == []
+
+
+def test_capture_uses_pidfd_not_numeric_kill_and_rejects_unavailable_pidfd(tmp_path):
+    process = load_process_module()
+    dump = tmp_path / "thread-dumps.log"
+    dump.write_bytes(b"")
+    proc = CaptureProc([8] * 8)
+    sent = []
+
+    def send(pidfd, signum, siginfo, flags):
+        assert pidfd >= 0
+        assert signum == signal.SIGUSR1
+        assert siginfo is None
+        assert flags == 0
+        sent.append(pidfd)
+        with dump.open("ab") as handle:
+            handle.write(b"Thread 0xA (most recent call first):\n")
+
+    result = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=proc,
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=send,
+        platform="linux",
+    )
+    assert result["status"] == "ok"
+    assert result["complete"] is True
+    assert len(sent) == 1
+
+    sent.clear()
+    result = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=CaptureProc([8] * 8),
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=lambda *_args: (_ for _ in ()).throw(PermissionError()),
+        pidfd_send_fn=lambda *_args: sent.append(True),
+        platform="linux",
+    )
+    assert result["status"] == "pidfd_unavailable"
+    assert sent == []
+
+
+def test_capture_shared_deadline_expires_before_pidfd_signal(tmp_path):
+    process = load_process_module()
+    (tmp_path / "thread-dumps.log").write_bytes(b"")
+
+    class Clock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = Clock()
+
+    class SlowStatus(CaptureProc):
+        def read_status(self, pid):
+            clock.value = 2.0
+            return super().read_status(pid)
+
+    sent = []
+    result = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=SlowStatus([8] * 8),
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=lambda *_args: sent.append(True),
+        platform="linux",
+        deadline=1.0,
+        clock=clock,
+        sleeper=lambda _seconds: None,
+    )
+    assert result["status"] == "deadline"
+    assert sent == []
+
+
+def test_capture_waits_for_quiescence_and_marks_deadline_partial(tmp_path):
+    process = load_process_module()
+    dump = tmp_path / "thread-dumps.log"
+    dump.write_bytes(b"")
+    writers = []
+
+    def send_bursts(_pidfd, _signal, _siginfo, _flags):
+        def write():
+            for index in range(4):
+                with dump.open("ab") as handle:
+                    handle.write(f"chunk-{index}\n".encode())
+                time.sleep(0.015)
+
+        thread = threading.Thread(target=write)
+        thread.start()
+        writers.append(thread)
+
+    complete = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=CaptureProc([8] * 20),
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=send_bursts,
+        platform="linux",
+        timeout=0.5,
+    )
+    for writer in writers:
+        writer.join(timeout=1)
+    assert complete["status"] == "ok"
+    assert complete["complete"] is True
+    assert "chunk-3" in complete["dump"]
+
+    stop = threading.Event()
+
+    def send_continuous(_pidfd, _signal, _siginfo, _flags):
+        def write():
+            while not stop.is_set():
+                with dump.open("ab") as handle:
+                    handle.write(b"growing\n")
+                time.sleep(0.005)
+
+        thread = threading.Thread(target=write)
+        thread.start()
+        writers.append(thread)
+
+    partial = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=CaptureProc([8] * 50),
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=send_continuous,
+        platform="linux",
+        timeout=0.06,
+    )
+    stop.set()
+    writers[-1].join(timeout=1)
+    assert partial["status"] == "partial"
+    assert partial["complete"] is False
+    assert partial["partial_reason"] == "deadline"
+    assert partial["bytes"] <= 512 * 1024
+
+
+@pytest.mark.parametrize(
+    "target,kind",
+    [
+        ("thread-dumps.log", "fifo"),
+        ("thread-dumps.log", "hardlink"),
+        ("incident.lock", "fifo"),
+        ("incident.lock", "hardlink"),
+    ],
+)
+def test_capture_rejects_non_regular_or_multiply_linked_files(tmp_path, target, kind):
+    process = load_process_module()
+    dump = tmp_path / "thread-dumps.log"
+    if target != "thread-dumps.log":
+        dump.write_bytes(b"")
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"SAFE")
+    path = tmp_path / target
+    if kind == "fifo":
+        os.mkfifo(path)
+    else:
+        os.link(victim, path)
+    sent = []
+    result = process.capture_thread_dump(
+        88,
+        tmp_path,
+        proc=CaptureProc([8] * 8),
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=_fake_pidfd_open,
+        pidfd_send_fn=lambda *_args: sent.append(True),
+        platform="linux",
+        timeout=0.05,
+    )
+    assert result["status"] == "unsafe_path"
+    assert sent == []
+    assert victim.read_bytes() == b"SAFE"
+
+
+def test_capture_rejects_diagnostics_directory_replacement_before_signal(tmp_path):
+    process = load_process_module()
+    diagnostics = tmp_path / "diagnostics"
+    diagnostics.mkdir()
+    (diagnostics / "thread-dumps.log").write_bytes(b"")
+    moved = tmp_path / "diagnostics-old"
+    sent = []
+
+    def replace_directory(_pid, _flags):
+        diagnostics.rename(moved)
+        diagnostics.mkdir()
+        (diagnostics / "thread-dumps.log").write_bytes(b"")
+        return _fake_pidfd_open(0, 0)
+
+    result = process.capture_thread_dump(
+        88,
+        diagnostics,
+        proc=CaptureProc([8] * 8),
+        expected_identity={"pid": 88, "starttime_ticks": 8},
+        pidfd_open_fn=replace_directory,
+        pidfd_send_fn=lambda *_args: sent.append(True),
+        platform="linux",
+    )
+    assert result["status"] == "unsafe_path"
+    assert sent == []
+
+
+def test_real_linux_proc_resolves_lightweight_uvicorn_argv(tmp_path):
+    if not sys.platform.startswith("linux"):
+        return
+    process = load_process_module()
+    root = tmp_path / "repo"
+    backend = root / "backend"
+    backend.mkdir(parents=True)
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import time; time.sleep(30)",
+            "uvicorn",
+            "app.main:app",
+            "--workers",
+            "1",
+        ],
+        cwd=backend,
+    )
+    try:
+        deadline = time.monotonic() + 2
+        result = None
+        while time.monotonic() < deadline:
+            result = process.resolve_backend_pid(root, self_pid=os.getpid())
+            if result.get("pid") == child.pid:
+                break
+            time.sleep(0.02)
+        assert result is not None
+        assert result["status"] == "ok"
+        assert result["pid"] == child.pid
+        assert result["identity"]["starttime_ticks"] > 0
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
 
 
 def test_standalone_main_emits_only_bounded_copy_safe_metadata(monkeypatch, capsys, tmp_path):
@@ -648,7 +1119,11 @@ def test_standalone_main_emits_only_bounded_copy_safe_metadata(monkeypatch, caps
             "candidates": [],
         },
     )
-    monkeypatch.setattr(process, "sample_process", lambda _pid: {"pid": 7, "cpu_percent": 1.0})
+    monkeypatch.setattr(
+        process,
+        "sample_process",
+        lambda _pid, **_kwargs: {"pid": 7, "cpu_percent": 1.0},
+    )
     monkeypatch.setattr(
         process,
         "load_runtime_snapshot",
@@ -677,7 +1152,12 @@ def test_standalone_main_emits_only_bounded_copy_safe_metadata(monkeypatch, caps
     monkeypatch.setattr(
         process,
         "probe_http",
-        lambda role, _url: {"role": role, "status": 200, "elapsed_ms": 1, "result": "ok"},
+        lambda role, _url, **_kwargs: {
+            "role": role,
+            "status": 200,
+            "elapsed_ms": 1,
+            "result": "ok",
+        },
     )
     assert process.main(["--root", str(tmp_path), "--pid", "7"]) == 0
     output = capsys.readouterr().out
