@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import ipaddress
 import itertools
 import json
 import math
@@ -22,6 +23,7 @@ import sys
 import sysconfig
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +48,7 @@ _DUMP_STABLE_POLLS = 3
 _DUMP_POLL_SECONDS = 0.02
 _DUMP_MAX_BYTES = 512 * 1024
 _DUMP_FILE_MAX_BYTES = 8 * 1024 * 1024
+_DUMP_VALIDATION_RESERVE_SECONDS = 0.1
 _MAX_DUMP_THREADS = 256
 _MAX_FRAMES_PER_THREAD = 64
 _MAX_PARSED_DUMP_BYTES = 256 * 1024
@@ -118,7 +121,11 @@ class ProcAdapter:
             with self._process_path(pid, leaf).open("rb") as handle:
                 value = handle.read(_MAX_PROC_FILE_BYTES + 1)[:_MAX_PROC_FILE_BYTES]
             return None if _expired(deadline, clock) else value
-        except (OSError, ValueError):
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EPERM}:
+                self.scan_incomplete = True
+            return None
+        except ValueError:
             return None
 
     def list_pids(
@@ -185,7 +192,11 @@ class ProcAdapter:
         try:
             target = os.readlink(self._process_path(pid, "cwd"))
             return None if _expired(deadline, clock) else Path(target)
-        except (OSError, ValueError):
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EPERM}:
+                self.scan_incomplete = True
+            return None
+        except ValueError:
             return None
 
     def read_stat(
@@ -360,6 +371,48 @@ def _safe_identity(
     return {"pid": pid, "starttime_ticks": starttime}
 
 
+class _ProcScanIncomplete(Exception):
+    """Internal, detail-free marker for an incomplete proc scan."""
+
+
+def _resolution_identity(
+    proc: Any,
+    pid: int,
+    *,
+    deadline: Optional[float],
+    clock: Callable[[], float],
+) -> Optional[dict[str, int]]:
+    try:
+        identity = _adapter_call(
+            proc.identity, pid, deadline=deadline, clock=clock
+        )
+    except OSError as exc:
+        if exc.errno in {errno.ENOENT, errno.ESRCH}:
+            return None
+        raise _ProcScanIncomplete from None
+    except (ValueError, TypeError, KeyError, StopIteration):
+        return None
+    if not isinstance(identity, dict):
+        return None
+    identity_pid = identity.get("pid")
+    starttime = identity.get("starttime_ticks")
+    if identity_pid != pid or isinstance(starttime, bool) or not isinstance(starttime, int):
+        return None
+    return {"pid": pid, "starttime_ticks": starttime}
+
+
+def _is_production_uvicorn_command(command: tuple[str, ...]) -> bool:
+    if not command:
+        return False
+    if Path(command[0]).name == "uvicorn":
+        return "app.main:app" in command[1:]
+    python_name = Path(command[0]).name
+    return bool(
+        re.fullmatch(r"python(?:\d+(?:\.\d+)*)?", python_name)
+        and command[1:4] == ("-m", "uvicorn", "app.main:app")
+    )
+
+
 def resolve_backend_pid(
     root: Path | str,
     pid: Optional[int] = None,
@@ -383,8 +436,17 @@ def resolve_backend_pid(
     if pid is not None:
         if pid == own_pid:
             return {"status": "missing", **empty}
-        before = _safe_identity(adapter, pid, deadline=deadline, clock=clock)
-        after = _safe_identity(adapter, pid, deadline=deadline, clock=clock)
+        try:
+            before = _resolution_identity(
+                adapter, pid, deadline=deadline, clock=clock
+            )
+            after = _resolution_identity(
+                adapter, pid, deadline=deadline, clock=clock
+            )
+        except (_ProcScanIncomplete, TimeoutError):
+            return {"status": "scan_incomplete", **empty}
+        if bool(getattr(adapter, "scan_incomplete", False)):
+            return {"status": "scan_incomplete", **empty}
         if _expired(deadline, clock):
             return {"status": "scan_incomplete", **empty}
         if before is None or after is None or before != after:
@@ -415,7 +477,7 @@ def resolve_backend_pid(
             if candidate_pid == own_pid:
                 continue
             try:
-                before = _safe_identity(
+                before = _resolution_identity(
                     adapter, candidate_pid, deadline=deadline, clock=clock
                 )
                 command = _adapter_call(
@@ -430,24 +492,31 @@ def resolve_backend_pid(
                     deadline=deadline,
                     clock=clock,
                 )
-                after = _safe_identity(
+                after = _resolution_identity(
                     adapter, candidate_pid, deadline=deadline, clock=clock
                 )
+                if bool(getattr(adapter, "scan_incomplete", False)):
+                    scan_incomplete = True
+                    break
+            except _ProcScanIncomplete:
+                scan_incomplete = True
+                break
             except TimeoutError:
                 scan_incomplete = True
                 break
-            except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            except OSError as exc:
+                if exc.errno not in {errno.ENOENT, errno.ESRCH}:
+                    scan_incomplete = True
+                    break
+                continue
+            except (ValueError, TypeError, KeyError, AttributeError):
                 continue
             if before is None or after is None or before != after:
                 continue
             if not isinstance(command, (tuple, list)):
                 continue
             command_tokens = tuple(str(part) for part in command[:128])
-            has_uvicorn = any(
-                token == "uvicorn" or Path(token).name == "uvicorn"
-                for token in command_tokens
-            )
-            if not has_uvicorn or "app.main:app" not in command_tokens:
+            if not _is_production_uvicorn_command(command_tokens):
                 continue
             safe_cwd = _candidate_cwd(repo, cwd)
             if safe_cwd is None:
@@ -581,6 +650,13 @@ def sample_process(
         )
         if _expired(deadline, clock):
             return {"pid": pid, "status": "deadline"}
+        final_identity = _safe_identity(
+            adapter, pid, deadline=deadline, clock=clock
+        )
+        if _expired(deadline, clock):
+            return {"pid": pid, "status": "deadline"}
+        if final_identity != (expected_identity or second_identity):
+            return {"pid": pid, "status": "identity_changed"}
         elapsed = max(0.000_001, second_at - first_at)
         process_tick_delta = max(
             0, int(second["process_ticks"]) - int(first["process_ticks"])
@@ -753,6 +829,20 @@ def probe_http(
     started = clock()
     status: Optional[int] = None
     result = "error"
+    try:
+        parsed_url = urllib.parse.urlsplit(url)
+        host = parsed_url.hostname
+        address = ipaddress.ip_address(host or "")
+        valid_target = (
+            parsed_url.scheme in {"http", "https"}
+            and parsed_url.username is None
+            and parsed_url.password is None
+            and address.is_loopback
+        )
+    except (ValueError, TypeError):
+        valid_target = False
+    if not valid_target:
+        return dict(zip(_HTTP_RESULT_KEYS, (str(role)[:32], None, 0, result)))
     if opener is None:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
     remaining = _HTTP_TIMEOUT_SECONDS
@@ -845,6 +935,57 @@ def _directory_path_matches(path: Path, descriptor_stat: os.stat_result) -> bool
     return _same_file(current, descriptor_stat)
 
 
+def _capture_files_safe(
+    directory: Path,
+    directory_stat: os.stat_result,
+    directory_fd: int,
+    lock_fd: int,
+    lock_stat: os.stat_result,
+    dump_fd: int,
+    dump_stat: os.stat_result,
+    *,
+    deadline: float,
+    clock: Callable[[], float],
+) -> bool:
+    try:
+        if _expired(deadline, clock):
+            raise TimeoutError
+        current_directory = os.fstat(directory_fd)
+        current_lock = os.fstat(lock_fd)
+        current_dump = os.fstat(dump_fd)
+        if _expired(deadline, clock):
+            raise TimeoutError
+        return (
+            _owned_directory(current_directory)
+            and _same_file(current_directory, directory_stat)
+            and _directory_path_matches(directory, current_directory)
+            and _owned_regular(current_lock)
+            and _same_file(current_lock, lock_stat)
+            and _path_matches_descriptor(
+                "incident.lock", current_lock, directory_fd=directory_fd
+            )
+            and _owned_regular(current_dump)
+            and _same_file(current_dump, dump_stat)
+            and _path_matches_descriptor(
+                "thread-dumps.log", current_dump, directory_fd=directory_fd
+            )
+            and not _expired(deadline, clock)
+        )
+    except OSError:
+        return False
+
+
+def _deadline_partial(offset: int) -> dict[str, Any]:
+    return _capture_result(
+        "partial",
+        offset=offset,
+        bytes=0,
+        truncated=False,
+        complete=False,
+        partial_reason="deadline",
+    )
+
+
 def _default_pidfd_open(pid: int, flags: int) -> int:
     opener = getattr(os, "pidfd_open", None)
     if opener is None:
@@ -872,6 +1013,7 @@ def capture_thread_dump(
     expected_identity: Optional[dict[str, int]] = None,
     pidfd_open_fn: Optional[Callable[[int, int], int]] = None,
     pidfd_send_fn: Optional[Callable[[int, int, Any, int], None]] = None,
+    ftruncate_fn: Callable[[int, int], None] = os.ftruncate,
     clock: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
     platform: Optional[str] = None,
@@ -893,6 +1035,11 @@ def capture_thread_dump(
     started = clock()
     local_deadline = started + min(_DUMP_WAIT_SECONDS, max(0.001, float(timeout)))
     capture_deadline = local_deadline if deadline is None else min(deadline, local_deadline)
+    capture_window = max(0.0, capture_deadline - started)
+    validation_reserve = min(
+        _DUMP_VALIDATION_RESERVE_SECONDS, capture_window * 0.25
+    )
+    quiescence_deadline = capture_deadline - validation_reserve
     if clock() >= capture_deadline:
         return _capture_result("deadline")
     directory = Path(diagnostics_dir)
@@ -985,13 +1132,21 @@ def capture_thread_dump(
                     return _capture_result("pidfd_unavailable")
                 if _expired(capture_deadline, clock):
                     return _capture_result("deadline")
-                if not _directory_path_matches(directory, directory_stat):
-                    return _capture_result("unsafe_path")
-                if not _path_matches_descriptor(
-                    "incident.lock", lock_stat, directory_fd=directory_fd
-                ) or not _path_matches_descriptor(
-                    "thread-dumps.log", dump_stat, directory_fd=directory_fd
-                ):
+                try:
+                    files_safe = _capture_files_safe(
+                        directory,
+                        directory_stat,
+                        directory_fd,
+                        lock_handle.fileno(),
+                        lock_stat,
+                        dump_handle.fileno(),
+                        dump_stat,
+                        deadline=capture_deadline,
+                        clock=clock,
+                    )
+                except TimeoutError:
+                    return _capture_result("deadline")
+                if not files_safe:
                     return _capture_result("unsafe_path")
                 third_identity = _safe_identity(
                     adapter, pid, deadline=capture_deadline, clock=clock
@@ -1022,8 +1177,10 @@ def capture_thread_dump(
                 last_size = offset
                 stable_polls = 0
                 grew = False
-                while clock() < capture_deadline:
+                while clock() < quiescence_deadline:
                     try:
+                        if _expired(quiescence_deadline, clock):
+                            break
                         size = os.fstat(dump_handle.fileno()).st_size
                     except OSError:
                         return _capture_result("dump_unavailable")
@@ -1039,46 +1196,80 @@ def capture_thread_dump(
                     sleeper(
                         min(
                             _DUMP_POLL_SECONDS,
-                            max(0.0, capture_deadline - clock()),
+                            max(0.0, quiescence_deadline - clock()),
                         )
                     )
                 complete = grew and stable_polls >= _DUMP_STABLE_POLLS
-                if not grew:
-                    return _capture_result(
-                        "timeout",
-                        offset=offset,
-                        complete=False,
-                        partial_reason="deadline",
-                    )
-                after_identity = _safe_identity(
-                    adapter, pid, deadline=None, clock=clock
+                quiescence_exhausted = (
+                    not complete and clock() >= quiescence_deadline
                 )
+                after_identity = _safe_identity(
+                    adapter, pid, deadline=capture_deadline, clock=clock
+                )
+                if _expired(capture_deadline, clock):
+                    return _deadline_partial(offset)
                 if after_identity != baseline_identity:
                     return _capture_result("identity_changed", offset=offset)
-                if not _sigusr1_is_caught(adapter, pid, clock=clock):
-                    return _capture_result("signal_unavailable", offset=offset)
-                if not _directory_path_matches(directory, directory_stat):
-                    return _capture_result("unsafe_path", offset=offset)
-                if not _path_matches_descriptor(
-                    "incident.lock", lock_stat, directory_fd=directory_fd
-                ) or not _path_matches_descriptor(
-                    "thread-dumps.log", dump_stat, directory_fd=directory_fd
+                if not _sigusr1_is_caught(
+                    adapter, pid, deadline=capture_deadline, clock=clock
                 ):
+                    if _expired(capture_deadline, clock):
+                        return _deadline_partial(offset)
+                    return _capture_result("signal_unavailable", offset=offset)
+                try:
+                    files_safe = _capture_files_safe(
+                        directory,
+                        directory_stat,
+                        directory_fd,
+                        lock_handle.fileno(),
+                        lock_stat,
+                        dump_handle.fileno(),
+                        dump_stat,
+                        deadline=capture_deadline,
+                        clock=clock,
+                    )
+                except TimeoutError:
+                    return _deadline_partial(offset)
+                if not files_safe:
                     return _capture_result("unsafe_path", offset=offset)
+                if _expired(capture_deadline, clock):
+                    return _deadline_partial(offset)
                 final_size = os.fstat(dump_handle.fileno()).st_size
+                if _expired(capture_deadline, clock):
+                    return _deadline_partial(offset)
                 if final_size != last_size:
                     complete = False
                 try:
+                    if _expired(capture_deadline, clock):
+                        return _deadline_partial(offset)
                     dump_handle.seek(offset)
                     appended = dump_handle.read(_DUMP_MAX_BYTES + 1)[:_DUMP_MAX_BYTES]
                 except OSError:
                     return _capture_result("dump_unavailable", offset=offset)
+                if _expired(capture_deadline, clock):
+                    return _deadline_partial(offset)
                 truncated = final_size - offset > _DUMP_MAX_BYTES
+                degraded: list[str] = []
                 if complete and final_size > _DUMP_FILE_MAX_BYTES:
                     try:
-                        os.ftruncate(dump_handle.fileno(), 0)
+                        files_safe = _capture_files_safe(
+                            directory,
+                            directory_stat,
+                            directory_fd,
+                            lock_handle.fileno(),
+                            lock_stat,
+                            dump_handle.fileno(),
+                            dump_stat,
+                            deadline=capture_deadline,
+                            clock=clock,
+                        )
+                        if not files_safe:
+                            return _capture_result("unsafe_path", offset=offset)
+                        ftruncate_fn(dump_handle.fileno(), 0)
                     except OSError:
-                        pass
+                        degraded.append("retention_failed")
+                    except TimeoutError:
+                        degraded.append("retention_failed")
                 status = "ok" if complete and not truncated else "partial"
                 partial_reason = None
                 if truncated:
@@ -1086,7 +1277,7 @@ def capture_thread_dump(
                 elif not complete:
                     partial_reason = (
                         "deadline"
-                        if clock() >= capture_deadline
+                        if quiescence_exhausted or clock() >= capture_deadline
                         else "ongoing_write"
                     )
                 return _capture_result(
@@ -1097,6 +1288,7 @@ def capture_thread_dump(
                     complete=status == "ok",
                     partial_reason=partial_reason,
                     dump=appended.decode("utf-8", "replace"),
+                    degraded=degraded,
                 )
     except OSError:
         return _capture_result("lock_unavailable")
@@ -1136,10 +1328,17 @@ def _default_trusted_library_paths() -> dict[str, tuple[Path, ...]]:
 
 def _matches_trusted_path(path: Path, trusted: Path) -> bool:
     try:
-        resolved_path = path.resolve(strict=False)
-        resolved_trusted = trusted.resolve(strict=False)
+        resolved_path = path.resolve(strict=True)
+        resolved_trusted = trusted.resolve(strict=True)
+        if not stat_module.S_ISREG(os.stat(resolved_path).st_mode):
+            return False
         if trusted.suffix == ".py":
-            return resolved_path == resolved_trusted
+            return (
+                stat_module.S_ISREG(os.stat(resolved_trusted).st_mode)
+                and resolved_path == resolved_trusted
+            )
+        if not stat_module.S_ISDIR(os.stat(resolved_trusted).st_mode):
+            return False
         resolved_path.relative_to(resolved_trusted)
         return True
     except (OSError, ValueError):
