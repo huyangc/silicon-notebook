@@ -16,6 +16,7 @@ build/rebuild-KG/conflict-resolve 忘了——正是「手抄易漏」的整类 
 from __future__ import annotations
 
 import contextvars
+import inspect
 import logging
 import re
 import threading
@@ -50,13 +51,17 @@ def _resolve_job_user() -> str | None:
         return None
 
 
-def _diagnostic_job_name(fn: Callable, label: str) -> str:
-    if label in _SAFE_ASK_JOB_NAMES:
-        return label
-    for prefix, operation in _SAFE_JOB_PREFIXES:
-        if label.startswith(prefix):
-            return operation
-    callable_name = getattr(fn, "__name__", "")
+def _diagnostic_job_name(fn: Callable, explicit_name: str | None) -> str:
+    if explicit_name is not None:
+        if explicit_name in _SAFE_ASK_JOB_NAMES:
+            return explicit_name
+        for prefix, operation in _SAFE_JOB_PREFIXES:
+            if explicit_name.startswith(prefix):
+                return operation
+        return "background_job"
+    if not (inspect.isfunction(fn) or inspect.ismethod(fn)):
+        return "background_job"
+    callable_name = fn.__name__
     if isinstance(callable_name, str) and _CALLABLE_OPERATION.fullmatch(callable_name):
         return callable_name
     return "background_job"
@@ -72,9 +77,8 @@ def submit(fn: Callable, *args, name: str | None = None,
     snapshot；通知失败绝不影响/冒泡出 job 本身。
     """
     ctx = contextvars.copy_context()
-    label = name or getattr(fn, "__name__", "job")
     try:
-        diagnostic_name = _diagnostic_job_name(fn, label)
+        diagnostic_name = _diagnostic_job_name(fn, name)
     except Exception:  # noqa: BLE001 — diagnostics metadata is best-effort only
         diagnostic_name = "background_job"
 

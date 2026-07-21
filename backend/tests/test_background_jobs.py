@@ -133,14 +133,14 @@ def test_submit_reports_active_and_completed_job(tmp_path):
         assert started.wait(timeout=5)
         active = runtime.snapshot()["active_jobs"]
         assert len(active) == 1
-        assert active[0]["name"] == "blocked_job"
+        assert active[0]["name"] == "background_job"
 
         release.set()
         thread.join(timeout=5)
         assert not thread.is_alive()
         snapshot = runtime.snapshot()
         assert snapshot["active_jobs"] == []
-        assert snapshot["recent_jobs"][-1]["name"] == "blocked_job"
+        assert snapshot["recent_jobs"][-1]["name"] == "background_job"
         assert snapshot["recent_jobs"][-1]["status"] == "done"
 
 
@@ -162,14 +162,14 @@ def test_submit_reports_failed_job_as_error(tmp_path):
     ) as runtime:
         thread = background_jobs.submit(failing_job, name="failing-diagnostic-job")
         assert started.wait(timeout=5)
-        assert runtime.snapshot()["active_jobs"][0]["name"] == "failing_job"
+        assert runtime.snapshot()["active_jobs"][0]["name"] == "background_job"
 
         release.set()
         thread.join(timeout=5)
         assert not thread.is_alive()
         snapshot = runtime.snapshot()
         assert snapshot["active_jobs"] == []
-        assert snapshot["recent_jobs"][-1]["name"] == "failing_job"
+        assert snapshot["recent_jobs"][-1]["name"] == "background_job"
         assert snapshot["recent_jobs"][-1]["status"] == "error"
 
 
@@ -249,12 +249,14 @@ def test_submit_separates_thread_name_from_safe_diagnostic_operation(
         assert not thread.is_alive()
 
 
-def test_diagnostic_label_derivation_cannot_block_a_named_job():
+def test_explicit_unallowlisted_name_does_not_inspect_callable_metadata():
     done = threading.Event()
+    name_accessed = threading.Event()
 
     class CallableWithBrokenName:
         @property
         def __name__(self):
+            name_accessed.set()
             raise RuntimeError("diagnostic metadata unavailable")
 
         def __call__(self):
@@ -266,6 +268,50 @@ def test_diagnostic_label_derivation_cannot_block_a_named_job():
     assert done.wait(timeout=5)
     thread.join(timeout=5)
     assert not thread.is_alive()
+    assert not name_accessed.is_set()
+
+
+def test_unnamed_callable_object_does_not_inspect_arbitrary_name_property():
+    done = threading.Event()
+    name_accessed = threading.Event()
+
+    class CallableWithBlockingName:
+        @property
+        def __name__(self):
+            name_accessed.set()
+            raise RuntimeError("must not inspect callable objects")
+
+        def __call__(self):
+            done.set()
+
+    thread = background_jobs.submit(CallableWithBlockingName())
+    assert done.wait(timeout=5)
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert not name_accessed.is_set()
+
+
+def test_unnamed_ordinary_function_uses_bounded_code_name(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+
+    def ordinary_worker() -> None:
+        started.set()
+        assert release.wait(timeout=5)
+
+    with diagnostics.activate_runtime(
+        tmp_path,
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=False,
+    ) as runtime:
+        thread = background_jobs.submit(ordinary_worker)
+        assert started.wait(timeout=5)
+        assert runtime.snapshot()["active_jobs"][0]["name"] == "ordinary_worker"
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
 
 
 def test_failed_job_log_uses_safe_operation_instead_of_raw_entity_id(caplog):

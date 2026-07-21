@@ -1128,6 +1128,71 @@ def test_notebook_request_paths_preserve_only_allowlisted_route_shape(
     assert "private" not in request["path"]
 
 
+def test_every_registered_notebook_route_has_exact_safe_normalization(tmp_path):
+    from app.main import create_app
+
+    test_app = create_app()
+    notebook_routes = [
+        route
+        for route in test_app.routes
+        if getattr(route, "path", "").startswith("/api/notebooks")
+    ]
+    route_paths = {route.path for route in notebook_routes}
+    assert route_paths
+    collection_methods = {
+        method
+        for route in notebook_routes
+        if route.path == "/api/notebooks"
+        for method in (getattr(route, "methods", set()) or set())
+    }
+    assert {"GET", "POST"} <= collection_methods
+    runtime = _runtime(tmp_path)
+
+    for route_path in sorted(route_paths):
+        actual_segments: list[str] = []
+        expected_segments: list[str] = []
+        secrets: list[tuple[str, str]] = []
+        for segment in route_path.split("/"):
+            if segment.startswith("{") and segment.endswith("}"):
+                parameter = segment[1:-1]
+                secret = f"opaque-{parameter}-private123"
+                actual_segments.append(secret)
+                expected_segments.append("{id}")
+                secrets.append((parameter, secret))
+            else:
+                actual_segments.append(segment)
+                expected_segments.append(segment)
+        actual_path = "/".join(actual_segments)
+        expected_path = "/".join(expected_segments)
+
+        with diagnostics.install_runtime(runtime):
+            with diagnostics.request_scope("req-contract", "GET", actual_path):
+                request = runtime.snapshot()["active_requests"][0]
+
+        assert request["path"] == expected_path, route_path
+        encoded = json.dumps(request)
+        for parameter, secret in secrets:
+            assert secret not in request["path"]
+            if parameter == "notebook_id":
+                # Exact opaque notebook ids are the one correlation value the
+                # machine-local runtime contract explicitly permits.
+                assert request["notebook_id"] == secret
+            else:
+                assert secret not in encoded
+
+
+def test_unknown_notebook_suffix_fails_closed_without_claiming_root(tmp_path):
+    runtime = _runtime(tmp_path)
+    path = "/api/notebooks/nb-private/customer-secret/raw-private"
+    with diagnostics.install_runtime(runtime):
+        with diagnostics.request_scope("req-unknown", "GET", path):
+            request = runtime.snapshot()["active_requests"][0]
+    assert request["path"] == "/api/notebooks/{id}/{redacted}"
+    assert request["path"] != "/api/notebooks/{id}"
+    assert "customer-secret" not in json.dumps(request)
+    assert "raw-private" not in json.dumps(request)
+
+
 def test_notebook_delete_reports_database_then_filesystem_phases(tmp_path, monkeypatch):
     from app.services import notebook_catalog
 

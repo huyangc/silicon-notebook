@@ -37,6 +37,10 @@ _OPAQUE_NOTEBOOK_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
 _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     (),
     ("analytics",),
+    ("analytics", "content-overview"),
+    ("memories",),
+    ("memories", "from-answer"),
+    ("answer-memory-links",),
     ("sources",),
     ("sources", "import"),
     ("sources", "url"),
@@ -218,7 +222,7 @@ def _bounded_text(value: Any, maximum: int = _MAX_IDENTIFIER_LENGTH) -> str:
 
 def _request_metadata(path: str) -> tuple[str, Optional[str]]:
     path_only = str(path).split("?", 1)[0].split("#", 1)[0]
-    if path_only == "/api/notebooks/shared-by-me":
+    if path_only in {"/api/notebooks", "/api/notebooks/shared-by-me"}:
         return path_only, None
     match = _NOTEBOOK_ROUTE.match(path_only)
     if match is not None:
@@ -240,7 +244,7 @@ def _request_metadata(path: str) -> tuple[str, Optional[str]]:
                 return "/" + "/".join(
                     ("api", "notebooks", "{id}", *normalized_suffix)
                 ), notebook_id
-        return "/api/notebooks/{id}", notebook_id
+        return "/api/notebooks/{id}/{redacted}", notebook_id
     segments = tuple(
         segment for segment in path_only.split("/", _MAX_ROUTE_SEGMENTS) if segment
     )

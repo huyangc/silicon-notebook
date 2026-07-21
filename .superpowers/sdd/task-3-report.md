@@ -147,3 +147,60 @@ Result: `98 passed in 4.45s`.
 - Caller-visible `threading.Thread.name` behavior is preserved. Diagnostic job entries and failure logs use only allowlisted stable operations or a bounded callable-code identifier; production entity ids are not included.
 - Notebook route normalization now preserves only allowlisted static route shape and `{id}` placeholders for dynamic positions, including source, Ask-cancel, report, and knowledge routes. `/api/notebooks/shared-by-me` is treated as a static collection route, not as a notebook id.
 - Hidden phase-overlay bookkeeping is excluded from snapshots. No request body/query/header/auth data, source/model/Memory/Knowhow content, raw entity parameter, or raw filename was added.
+
+## Second Review Follow-up
+
+The second Task 3 review found incomplete live-route coverage and an overly broad callable-name fallback. No Task 4 behavior was changed.
+
+### Second Review RED
+
+Command:
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider -n0 backend/tests/test_diagnostics_runtime.py::test_every_registered_notebook_route_has_exact_safe_normalization backend/tests/test_diagnostics_runtime.py::test_unknown_notebook_suffix_fails_closed_without_claiming_root backend/tests/test_background_jobs.py -q
+```
+
+Result before fixes: `5 failed, 14 passed in 0.73s`.
+
+The failures proved that:
+
+- `/api/notebooks` was incorrectly normalized as `/api/{id}`;
+- unmatched notebook suffixes misleadingly claimed the notebook-root route;
+- explicit unallowlisted job names still derived and exposed callable names;
+- an explicit name caused an arbitrary callable object's `__name__` property to execute.
+
+The live-route contract also identified the missing registered shapes for notebook memories, answer-memory links, answer-to-memory creation, and analytics content overview.
+
+### Second Review GREEN
+
+Focused single-process command:
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider -n0 backend/tests/test_diagnostics_runtime.py backend/tests/test_background_jobs.py backend/tests/test_readiness_gate.py backend/tests/test_request_user_ctx.py -q
+```
+
+Result: `79 passed in 1.91s`.
+
+Existing deletion and composed-lifespan/API regressions:
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider backend/tests/test_knowhow_asset_gc.py backend/tests/test_notebook_store_component.py backend/tests/test_multi_domain_bases.py backend/tests/test_repository_api_contract.py backend/tests/test_kg_search_api.py -q
+```
+
+Result: `98 passed in 4.09s`.
+
+Memory/content-overview/transfer route regressions:
+
+```bash
+PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider backend/tests/test_memory_api.py backend/tests/test_memory_transfer_routes.py backend/tests/test_content_overview_api.py backend/tests/test_knowhow_transfer_routes.py -q
+```
+
+Result: `38 passed in 3.43s`.
+
+### Second Review Corrected Behavior
+
+- A contract test enumerates the live FastAPI `app.routes` notebook surface, substitutes opaque values into every dynamic position, and requires the exact registered static template with `{id}` placeholders. Collection GET/POST remain `/api/notebooks`.
+- The notebook route allowlist now includes `/memories`, `/answer-memory-links`, `/memories/from-answer`, and `/analytics/content-overview` alongside every other currently registered notebook route.
+- Unknown notebook suffixes fail closed as `/api/notebooks/{id}/{redacted}` instead of impersonating notebook root. Their suffix content never enters the snapshot.
+- Exact opaque notebook ids remain only in the dedicated machine-local `notebook_id` correlation field; every other dynamic route value is absent from snapshot metadata.
+- Explicit allowlisted job names map to stable operations. Explicit unallowlisted names map directly to `background_job` without accessing the callable. Only unnamed ordinary Python functions/methods may contribute a bounded code-defined `__name__`; arbitrary callable objects are never introspected.
