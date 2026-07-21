@@ -48,7 +48,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - 向量检索本机实现：embedding 本地持久化，查询时使用有界 float32 矩阵或 scale index；PostgreSQL + pgvector 留作后续放量方向。
 - LLM 通过 OpenAI-compatible 配置接入：`OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL` / `OPENAI_COMPAT_TIMEOUT_SECONDS`；embedding 独立使用 `EMBED_*` 配置。
 - `Settings.llm_configured` 与 `Settings.embedding_configured` 分别控制问答/抽取 LLM 与 embedding 能力是否启用。
-- **历史架构债偿还（2026-07-21，非产品功能）**：领域 FastAPI router 由 `app/api/routes.py` 组合，领域 Pydantic model 以 `app/models/schemas.py` compatibility facade 保持旧 import，七个前端 domain API module 共用 `frontend/app/api-client.ts` transport；等价性与 public/domain seam 测试取代 aggregate-private coupling。两次完整 warm gate 的 `contracts/backend/frontend` 分别为 `14s/55s/23s`、`12s/52s/20s`，每条 lane 均不超过 60 秒；这是本机测量，CI 时长仍只作观察。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle 仍未完成，保留为独立债务。
+- **历史架构债偿还（2026-07-21，非产品功能）**：领域 FastAPI router 由 `app/api/routes.py` 组合，领域 Pydantic model 以 `app/models/schemas.py` compatibility facade 保持旧 import，七个前端 domain API module 共用 `frontend/app/api-client.ts` transport；等价性与 public/domain seam 测试取代 aggregate-private coupling。rebase 到 #315 后，exact PR head 的两次权威完整 warm gate `contracts/backend/frontend` 分别为 `10s/52s/22s`、`14s/55s/23s`，每条 lane 均不超过 60 秒；这是本机测量，CI 时长仍只作观察。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle 仍未完成，保留为独立债务。
 
 ## 3. 用户系统与分享
 

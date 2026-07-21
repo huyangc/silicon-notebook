@@ -36,10 +36,11 @@ existing local warm-gate target of 60 seconds. The implementation therefore had
 to remeasure before broad movement without hiding or worsening a reproducible
 timing regression.
 
-Implementation verification recorded two consecutive complete warm gates with
-every lane at or below the local 60-second target: `contracts/backend/frontend`
-were `14s/55s/23s`, then `12s/52s/20s`. These are local Apple Silicon
-measurements; CI lane timing remains observational rather than a portable timeout.
+After rebasing through #315, exact-head publication verification recorded two
+consecutive complete warm gates with every lane at or below the local 60-second
+target: `contracts/backend/frontend` were `10s/52s/22s`, then `14s/55s/23s`.
+These are local Apple Silicon measurements; CI lane timing remains observational
+rather than a portable timeout.
 
 ## 2. Goals
 
