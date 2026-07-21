@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -26,10 +27,21 @@ logger = logging.getLogger("silicon_notebook.model_status")
 _SAFE_STATUS_VALUES = frozenset({"ok", "error"})
 _SAFE_TRIGGER_VALUES = frozenset({"manual_test", "observed_failure"})
 _UNSAFE_MODEL_MARKERS = frozenset({
-    "apikey", "secret", "token", "password", "credential", "bearer",
-    "provider", "error", "exception", "unauthorized", "forbidden",
+    "apikey", "authorization", "bearer", "secret", "token", "password",
+    "credential", "provider", "diagnostic", "error", "exception", "traceback",
+    "runtimeerror", "upstream", "unauthorized", "forbidden", "failure", "failed",
 })
-_UNSAFE_MODEL_PREFIXES = ("sk-", "rk-", "pk-", "ak-", "aiza", "ghp_", "hf_", "xox")
+_URL_SCHEME_RE = re.compile(r"(?i)[a-z][a-z0-9+.-]*://")
+_IPV4_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:25[0-5]|2[0-4]\d|1?\d?\d)"
+    r"(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?![A-Za-z0-9])"
+)
+_CREDENTIAL_SEGMENT_RE = re.compile(
+    r"(?i)(?:^|[/@:_=+-])(?:sk|rk|pk|ak)-[A-Za-z0-9_-]{8,}(?=$|[/@:_=+-])"
+)
+_VENDOR_KEY_SEGMENT_RE = re.compile(
+    r"(?i)(?:^|[/@:_=+-])(?:aiza|ghp_|hf_|xox)[A-Za-z0-9_-]{8,}"
+)
 
 
 @dataclass(frozen=True)
@@ -268,25 +280,37 @@ def _display_model(value: object) -> str:
     """Return a model-like label without reflecting arbitrary user config text.
 
     The raw value remains on ``ResolvedModelConfig`` for fingerprints and provider
-    calls. Status responses only show short model identifiers: a Unicode letter
-    followed by letters/digits or common model-name separators, with dots allowed
-    only for numeric versions (for example ``gpt-4.1``). This rejects URLs, IPs,
-    credential-shaped strings, exception/provider text, and free-form bodies.
+    calls. Status responses only show bounded namespace/tag identifiers, such as
+    ``meta-llama/Llama-3.1-8B-Instruct`` and ``llama3.2:latest``. Explicit scans
+    reject credentials, diagnostics, URLs, IPs, IPv6, and host:port forms first.
     """
     if not isinstance(value, str):
         return ""
     model = value.strip()
     if not model or len(model) > 128 or not model[0].isalpha():
         return ""
-    if model.lower().startswith(_UNSAFE_MODEL_PREFIXES):
+    lowered = model.lower()
+    compact = "".join(char for char in lowered if char.isalnum())
+    if (
+        _URL_SCHEME_RE.search(model)
+        or _IPV4_RE.search(model)
+        or _CREDENTIAL_SEGMENT_RE.search(model)
+        or _VENDOR_KEY_SEGMENT_RE.search(model)
+        or "localhost" in lowered
+        or "[" in model
+        or "]" in model
+        or model.count(":") > 1
+        or "//" in model
+        or ".." in model
+        or any(marker in compact for marker in _UNSAFE_MODEL_MARKERS)
+    ):
         return ""
-    compact = "".join(char for char in model.lower() if char.isalnum())
-    if any(marker in compact for marker in _UNSAFE_MODEL_MARKERS):
+    if any(not (char.isalnum() or char in "._/@+:-") for char in model):
         return ""
-    for index, char in enumerate(model):
-        if char.isalnum() or char in "_/@+-":
-            continue
-        if char == "." and index + 1 < len(model) and model[index + 1].isdigit():
-            continue
+    if ":" in model:
+        namespace, tag = model.split(":")
+        if not namespace or not tag:
+            return ""
+    if model.endswith((".", "/", ":")):
         return ""
     return model

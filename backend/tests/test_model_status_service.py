@@ -167,6 +167,14 @@ def test_snapshot_drops_unsafe_persisted_metadata(identity, user, settings):
     [
         "https://10.0.0.8/v1?api_key=provider-secret",
         "sk-0123456789abcdefghijklmnop",
+        "model/10.0.0.8",
+        "x/sk-0123456789abcdefghijklmnop",
+        "model/http://provider.example/v1",
+        "model/[2001:db8::1]",
+        "model/fe80::1",
+        "localhost:8000",
+        "model/127.0.0.1:8000",
+        "model-authorization-diagnostic",
     ],
 )
 def test_status_hides_unsafe_model_but_probe_receives_raw_effective_config(
@@ -192,3 +200,34 @@ def test_status_hides_unsafe_model_but_probe_receives_raw_effective_config(
     assert calls == [unsafe_model]
     assert unsafe_model not in snapshot.model_dump_json()
     assert unsafe_model not in explicit.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "safe_model",
+    [
+        "llama3.2:latest",
+        "anthropic.claude-3-5-sonnet-20240620-v1:0",
+        "meta-llama/Llama-3.1-8B-Instruct",
+    ],
+)
+def test_status_preserves_safe_namespace_and_tag_model_identifiers(
+    identity, user, settings, safe_model
+):
+    from app.services.model_status import ModelStatusService
+
+    identity.set_user_model_settings(user.id, {
+        "llm": {
+            "base_url": "https://configured.example/v1",
+            "api_key": "configured-key",
+            "model": safe_model,
+        }
+    })
+    calls = []
+    service = ModelStatusService(identity, settings, probe=lambda config: calls.append(config.model))
+
+    snapshot = next(item for item in service.snapshot(user).services if item.service == "llm")
+    explicit = service.test_one(user, "llm")
+
+    assert snapshot.model == safe_model
+    assert explicit.model == safe_model
+    assert calls == [safe_model]
