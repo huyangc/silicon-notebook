@@ -1,5 +1,4 @@
-import { API_BASE, authHeaders } from "./auth.ts";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { requestJson } from "./api-client.ts";
 
 export const MODEL_ROLES = ["llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
@@ -26,19 +25,15 @@ export function buildPutPayload(forms: Record<ModelRole, ServiceForm>) {
 }
 
 export async function fetchModelSettings(): Promise<ModelSettingsView> {
-  const res = await fetch(`${API_BASE}/me/model-settings`, { headers: authHeaders() });
-  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
-  return res.json();
+  return requestJson("/me/model-settings", { tag: "model-settings" });
 }
 
 export async function saveModelSettings(payload: ReturnType<typeof buildPutPayload>): Promise<ModelSettingsView> {
-  const res = await fetch(`${API_BASE}/me/model-settings`, {
+  return requestJson("/me/model-settings", {
     method: "PUT",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify(payload),
+    tag: "model-settings",
   });
-  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
-  return res.json();
 }
 
 export async function testModelService(
@@ -46,11 +41,9 @@ export async function testModelService(
   // 两个通道在类型上就分开:error = 诊断(只进 console),code = 稳定枚举,
   // 文案由前端 vocabulary.ts 的 MODEL_TEST_ERROR 提供。调用点想拿 error 上屏会显得刺眼。
 ): Promise<{ ok: boolean; latency_ms: number; error: string; code: string }> {
-  const res = await fetch(`${API_BASE}/me/model-settings/test`, {
+  return requestJson("/me/model-settings/test", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ service, base_url, model, api_key }),
+    tag: "model-settings",
   });
-  if (!res.ok) await throwHumanizedHttpError(res, "model-settings");
-  return res.json();
 }

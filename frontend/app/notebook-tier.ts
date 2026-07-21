@@ -2,8 +2,7 @@
 // notebook-tier.test.mjs). Self-contained fetch wrapper so it runs under
 // `node --test` without importing the React page module.
 
-import { authHeaders } from "./auth.ts";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { requestJson } from "./api-client.ts";
 
 export type NotebookTier = "base" | "personal";
 
@@ -13,20 +12,6 @@ export type NotebookSummaryLike = {
   tier?: string;
   [k: string]: unknown;
 };
-
-const API_BASE =
-  (typeof process !== "undefined"
-    ? process.env?.NEXT_PUBLIC_API_BASE_URL
-    : undefined) ?? "http://127.0.0.1:8000/api";
-
-async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(API_BASE + url, {
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    ...init,
-  });
-  if (!res.ok) await throwHumanizedHttpError(res, "tier");
-  return res.json() as Promise<T>;
-}
 
 export type TierAction = "set" | "unset";
 
@@ -49,7 +34,8 @@ export const setNotebookTier = (
   notebookId: string,
   tier: NotebookTier
 ): Promise<NotebookSummaryLike> =>
-  apiFetch(`/notebooks/${notebookId}/tier`, {
+  requestJson(`/notebooks/${notebookId}/tier`, {
     method: "POST",
     body: JSON.stringify({ tier }),
+    tag: "tier",
   });

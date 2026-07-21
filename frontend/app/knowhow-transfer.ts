@@ -2,7 +2,7 @@
 // 单测)。自带 fetch 封装,可在 `node --test` 下运行而不 import React 页面模块。
 // 镜像 notebook-share.ts 的样板。
 
-import { authHeaders } from "./auth.ts";
+import { performApiRequest } from "./api-client.ts";
 import { throwHumanizedHttpError } from "./errors.ts";
 import { knowhowTransferBody, parseCleanupFailure, type TransferMode } from "./transfer-model.ts";
 
@@ -26,15 +26,22 @@ export class KnowhowSourceCleanupError extends Error {
   }
 }
 
-const API_BASE =
-  (typeof process !== "undefined"
-    ? process.env?.NEXT_PUBLIC_API_BASE_URL
-    : undefined) ?? "http://127.0.0.1:8000/api";
-
-async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(API_BASE + url, {
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    ...init,
+// 把一张 knowhow 表复制/移动到另一个 notebook。
+// - copy:源保持不动,目标新增一份独立副本。
+// - move:目标新增副本后删除源;若副本已提交但源没能删掉(清理本身失败,或
+//   源被有意保留以保护一份并发编辑),后端答 409(code 为 source_cleanup_
+//   failed 或 source_changed_kept 之一)——下面在 clone 上保留该专用分流,
+//   其它响应仍交给共享人话层。
+export async function transferKnowhowTable(
+  notebookId: string,
+  tableId: string,
+  targetNotebookId: string,
+  mode: TransferMode,
+): Promise<{ new_table_id: string }> {
+  const res = await performApiRequest(`/notebooks/${notebookId}/knowhow/${tableId}/transfer`, {
+    method: "POST",
+    body: JSON.stringify(knowhowTransferBody(targetNotebookId, mode)),
+    tag: "knowhow-transfer",
   });
   if (!res.ok) {
     // 先在一份 clone 上探测 409 source_cleanup_failed 的结构化形状——body 只能
@@ -53,23 +60,5 @@ async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
     // (401/403/404/409 语义保留),不再裸拼 `${status} ${text}`。
     await throwHumanizedHttpError(res, "knowhow-transfer");
   }
-  if (res.status === 204) return null as T;
-  return res.json() as Promise<T>;
+  return res.json() as Promise<{ new_table_id: string }>;
 }
-
-// 把一张 knowhow 表复制/移动到另一个 notebook。
-// - copy:源保持不动,目标新增一份独立副本。
-// - move:目标新增副本后删除源;若副本已提交但源没能删掉(清理本身失败,或
-//   源被有意保留以保护一份并发编辑),后端答 409(code 为 source_cleanup_
-//   failed 或 source_changed_kept 之一)——上面的 apiFetch 会把它转成
-//   KnowhowSourceCleanupError 抛出(而不是拍扁成字符串),调用方按需 catch。
-export const transferKnowhowTable = (
-  notebookId: string,
-  tableId: string,
-  targetNotebookId: string,
-  mode: TransferMode
-): Promise<{ new_table_id: string }> =>
-  apiFetch(`/notebooks/${notebookId}/knowhow/${tableId}/transfer`, {
-    method: "POST",
-    body: JSON.stringify(knowhowTransferBody(targetNotebookId, mode)),
-  });

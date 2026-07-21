@@ -1500,6 +1500,7 @@ git commit -m "refactor: add the shared frontend api client"
 - Modify: `frontend/app/notebook-tier.ts`
 - Modify: `frontend/app/knowhow-model.ts`
 - Modify: `frontend/app/knowhow-transfer.ts`
+- Create: `frontend/app/knowhow-transfer.test.mjs`
 - Modify: `frontend/app/memory-transfer.ts`
 - Modify: `frontend/app/edge-review-queue.ts`
 - Modify: `frontend/app/promotion-queue.ts`
@@ -1519,7 +1520,7 @@ git commit -m "refactor: add the shared frontend api client"
 
 - [ ] **Step 1: Characterize special policies before replacing transport**
 
-Extend existing tests so they fail if migration flattens these behaviours:
+Create or extend tests so they fail if migration flattens these behaviours:
 
 ```text
 knowhow-transfer.test.mjs:

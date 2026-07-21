@@ -129,12 +129,10 @@ function withFetchStub(responseBody, run) {
   const original = globalThis.fetch;
   globalThis.fetch = async (url, init) => {
     calls.push({ url, init });
-    return {
-      ok: true,
+    return new Response(JSON.stringify(responseBody), {
       status: 200,
-      json: async () => responseBody,
-      text: async () => JSON.stringify(responseBody),
-    };
+      headers: { "Content-Type": "application/json" },
+    });
   };
   return Promise.resolve(run(calls)).finally(() => {
     globalThis.fetch = original;

@@ -5,15 +5,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { authHeaders } from "./auth.ts";
-import { throwHumanizedHttpError, toUserMessage } from "./errors.ts";
+import { requestJson } from "./api-client.ts";
+import { toUserMessage } from "./errors.ts";
 import type { NotebookSummary } from "./workspace-model.ts";
 import { destinationNotebooks, type TransferMode } from "./transfer-model.ts";
-
-const API_BASE =
-  (typeof process !== "undefined"
-    ? process.env?.NEXT_PUBLIC_API_BASE_URL
-    : undefined) ?? "http://127.0.0.1:8000/api";
 
 export function DestinationPicker({
   sourceNotebookId,
@@ -62,11 +57,10 @@ export function DestinationPicker({
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(API_BASE + "/notebooks", {
-      headers: { ...authHeaders() },
+    requestJson<NotebookSummary[]>("/notebooks", {
       signal: controller.signal,
+      tag: "transfer-picker",
     })
-      .then((res) => (res.ok ? res.json() : throwHumanizedHttpError(res, "transfer-picker")))
       .then((all: NotebookSummary[]) => setNotebooks(destinationNotebooks(all, sourceNotebookId)))
       .catch((err) => {
         if (err?.name !== "AbortError") setError("加载笔记本列表失败");

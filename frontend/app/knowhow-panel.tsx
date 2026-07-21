@@ -57,7 +57,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { authHeaders } from "./auth.ts";
+import { requestBlob } from "./api-client.ts";
 import { useFloatingWindow } from "./use-floating-window.ts";
 import {
   ROLE_LABELS,
@@ -102,7 +102,7 @@ import {
   isSharedColumn,
 } from "./knowhow-grouping-logic.ts";
 import { extractErrorMessage } from "./knowhow-import-logic.ts";
-import { throwHumanizedHttpError, httpErrorStatus } from "./errors.ts";
+import { httpErrorStatus } from "./errors.ts";
 import { rowFallbackTitle, reformatSourceLabel, REFORMAT_SUGGESTION_LABEL } from "./knowhow-cell-editor-logic.ts";
 import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
 import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
@@ -812,9 +812,7 @@ export function KnowhowPanel({
     setTemplateDownloading(true);
     setActionError(null);
     try {
-      const res = await fetch(knowhowTemplateUrl(notebookId, selectedTableId), { headers: authHeaders() });
-      if (!res.ok) await throwHumanizedHttpError(res, "knowhow");
-      const blob = await res.blob();
+      const blob = await requestBlob(knowhowTemplateUrl(notebookId, selectedTableId), { tag: "knowhow" });
       const objectUrl = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = objectUrl;
