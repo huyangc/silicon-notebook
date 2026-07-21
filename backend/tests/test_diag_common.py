@@ -82,3 +82,43 @@ def test_http_path_normalization_does_not_return_identifiers():
     assert value == "/api/notebooks/{id}/sources/{id}"
     assert "private" not in value
     assert "token" not in value
+
+
+def test_http_path_normalization_redacts_opaque_share_tokens():
+    common = load_common()
+    token = "shr-opaque-share-token-without-digits"
+    value = common.normalize_http_path(f"/shared/{token}/preview")
+    assert value == "/shared/{token}/preview"
+    assert token not in value
+
+
+def test_reader_does_not_parse_a_gzip_line_larger_than_the_hard_byte_bound(tmp_path, monkeypatch):
+    common = load_common()
+    payload = json.dumps({"id": "oversized", "payload": "x" * 4096}) + "\n"
+    with gzip.open(tmp_path / "events-2026-07-21.jsonl.gz", "wt", encoding="utf-8") as handle:
+        handle.write(payload)
+    loads = common.json.loads
+
+    def reject_oversized(value, *args, **kwargs):
+        assert len(value.encode("utf-8")) <= 128
+        return loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(common.json, "loads", reject_oversized)
+    result = common.read_channel(tmp_path, "events", max_input_bytes=128)
+
+    assert result.records == ()
+    assert result.stats.truncated is True
+
+
+def test_reader_checks_deadline_before_parsing_input(tmp_path, monkeypatch):
+    common = load_common()
+    (tmp_path / "events.jsonl").write_text(line("deadline", "2026-07-21T10:00:00"))
+
+    def fail_if_parsed(*args, **kwargs):
+        raise AssertionError("deadline must stop before JSON parsing")
+
+    monkeypatch.setattr(common.json, "loads", fail_if_parsed)
+    result = common.read_channel(tmp_path, "events", deadline=0)
+
+    assert result.records == ()
+    assert result.stats.truncated is True

@@ -56,3 +56,56 @@ The result included `日志 files=1 matched=1 ... retained=1` and `窗口内请�
 ## Concerns
 
 None.
+
+## Review remediation (post-commit)
+
+The Task 1 review identified three production-hardening gaps. The follow-up
+keeps the same stdlib/offline boundary and changes only the diagnostic reader,
+slow report, and focused regression tests.
+
+### Changes
+
+- `normalize_http_path()` now structurally redacts the segment after sensitive
+  route markers such as `shared`, `share`, `token`, `auth`, and `session`, and
+  also redacts token-prefixed opaque segments. Thus `/shared/shr-opaque...`
+  becomes `/shared/{token}` even when the token has no digits.
+- `iter_jsonl_file()` now reads binary input in bounded chunks, checks the
+  monotonic deadline before every read and before parsing, and sends an
+  internal truncation sentinel without allocating or JSON-parsing an oversized
+  plain or gzip JSONL line. `read_channel()` passes each remaining decoded-byte
+  budget into that iterator and stops on the sentinel.
+- `diag_slow.report_requests()` caps request-path aggregation and Top-15
+  rendering within a 32 KiB default report envelope. It preserves the most
+  useful high-latency rows and writes `output_truncated=True` plus the omitted
+  row count and byte budget when it has to omit rows.
+- Added regression coverage for opaque share-token redaction, gzip oversized
+  lines, deadline-before-parse behavior, and large distinct-path report output.
+
+### TDD RED
+
+After adding the regression tests and before changing production code, I ran:
+
+`PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider backend/tests/test_diag_common.py backend/tests/test_diag_slow.py backend/tests/test_diag_unified.py -q`
+
+Result: `4 failed, 15 passed in 2.39s`.
+
+- Opaque `/shared/shr-...` output retained the token.
+- A gzip line exceeding the 128-byte hard bound was fully passed to JSON
+  parsing.
+- An expired deadline still allowed JSON parsing.
+- The requested report-envelope constant/cap did not exist.
+
+### TDD GREEN
+
+After the minimal bounded streaming/redaction/output-cap implementation, I
+reran the same focused command:
+
+`19 passed in 2.24s`.
+
+### Follow-up verification
+
+`PYTHONPATH=backend /opt/homebrew/Caskroom/miniconda/base/bin/python -m pytest -p no:cacheprovider backend/tests/test_diag_common.py backend/tests/test_diag_slow.py backend/tests/test_diag_unified.py backend/tests/test_event_logging.py backend/tests/test_debug_logs_days.py backend/tests/test_repository_dependency_contract.py -q`
+
+Result: `50 passed in 5.00s`.
+
+`/opt/homebrew/Caskroom/miniconda/base/bin/python -m py_compile scripts/diag_common.py scripts/diag_slow.py scripts/diag_open_latency.py scripts/diag.py` and `git diff --check` both passed with no output.

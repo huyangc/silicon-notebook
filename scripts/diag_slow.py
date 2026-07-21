@@ -31,6 +31,9 @@ from pathlib import Path
 import diag_common
 
 MAX_SAMPLES = 50_000
+REQUEST_REPORT_OUTPUT_BYTES = 32 * 1024
+_REQUEST_PATH_ROWS_BYTES = 20 * 1024
+_REQUEST_SLOW_ROWS_BYTES = 8 * 1024
 SECRET_MARKERS = ("KEY", "TOKEN", "PASSWORD", "SECRET")
 # 这些事件是历次事故修复埋的观测点,出现即是直接证据。
 INTEREST_KINDS = (
@@ -73,6 +76,23 @@ def _iter_jsonl(path):
 def _scan_summary(stats):
     return (f"日志 files={stats.files} matched={stats.matched} malformed={stats.malformed} "
             f"duplicates={stats.duplicates} retained={stats.retained} truncated={stats.truncated}")
+
+
+def _print_bounded_request_rows(lines, byte_budget, label):
+    """Print only the useful prefix of a request table within a byte budget."""
+    used = 0
+    omitted = 0
+    reserve = 160
+    for line in lines:
+        size = len((line + "\n").encode("utf-8", "replace"))
+        if used + size <= byte_budget - reserve:
+            print(line)
+            used += size
+        else:
+            omitted += 1
+    if omitted:
+        print(f"  ... {omitted} {label} omitted; output_truncated=True "
+              f"budget={byte_budget} bytes")
 
 
 def _env_path(root):
@@ -194,12 +214,19 @@ def report_requests(local_dir, since, slow_ms):
         print("没有任何路径出现慢请求 ✓")
     else:
         print("\n[按路径聚合 — 只列出现过慢请求的路径]")
-        for k in sorted(slow_paths, key=lambda k: -slow_paths[k].max):
-            print(f"  {slow_paths[k].line()}  {k}")
+        _print_bounded_request_rows(
+            (f"  {slow_paths[k].line()}  {k}"
+             for k in sorted(slow_paths, key=lambda k: -slow_paths[k].max)),
+            _REQUEST_PATH_ROWS_BYTES,
+            "path rows",
+        )
         slow_list.sort(key=lambda t: -t[1])
         print("\n[单次最慢 Top 15]")
-        for ts, ms, p in slow_list[:15]:
-            print(f"  {ts}  {_fmt_ms(ms):>8}  {p}")
+        _print_bounded_request_rows(
+            (f"  {ts}  {_fmt_ms(ms):>8}  {p}" for ts, ms, p in slow_list[:15]),
+            _REQUEST_SLOW_ROWS_BYTES,
+            "slow rows",
+        )
     # 并发风暴:≥3 个 >10s 请求时间区间重叠(版本探针/建图踩踏的形状)
     long_reqs.sort(key=lambda t: t[0])
     storms = 0
