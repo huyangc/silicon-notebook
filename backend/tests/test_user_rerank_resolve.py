@@ -34,3 +34,17 @@ def test_required_policy_rerank_disabled(tmp_path):
         assert repo.rerank_client.configured is False   # 未配 + required → 禁用(原序)
     finally:
         reset_request_user(tok)
+
+
+def test_rerank_client_trims_whitespace_before_runtime_activation():
+    client = RerankClient(
+        get_settings(),
+        model=" model ",
+        base_url="   ",
+        api_key=" secret ",
+    )
+
+    assert client.configured is False
+    assert client.base_url == ""
+    assert client.api_key == "secret"
+    assert client.model == "model"

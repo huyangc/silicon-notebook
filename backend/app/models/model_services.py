@@ -1,6 +1,6 @@
-from typing import Optional
+from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ModelServiceView(BaseModel):
@@ -36,7 +36,7 @@ class ModelTestRequest(BaseModel):
 class ModelTestResult(BaseModel):
     ok: bool
     latency_ms: int = 0
-    # 诊断字段:失败分支写 f"{type(exc).__name__}: {exc}",给日志和排查,前端不上屏。
+    # Deprecated compatibility field. Raw diagnostics stay in server logs.
     error: str = ""
     # 失败原因的稳定枚举。200 响应挂不上 X-User-Message 头,所以出处由 schema 承载;
     # 这里刻意存 **code 而不是中文文案**——文案归前端(vocabulary.ts 的
@@ -44,3 +44,21 @@ class ModelTestResult(BaseModel):
     # 守卫,「缺少 base_url / model / api_key」这种把字段名甩给用户的文案正是这么漏的。
     # 取值:unknown_service | missing_config | upstream_error(未知 code 前端走兜底)。
     code: str = ""
+
+
+class ModelServiceStatusItem(BaseModel):
+    service: str
+    model: str = ""
+    source: str = "none"
+    kind: str = "llm"
+    configured: bool = False
+    required: bool = False
+    status: str = "unconfigured"
+    latency_ms: int = 0
+    checked_at: str = ""
+    trigger: str = ""
+    code: str = ""
+
+
+class ModelServicesStatus(BaseModel):
+    services: List[ModelServiceStatusItem] = Field(default_factory=list)

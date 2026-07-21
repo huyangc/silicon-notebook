@@ -138,6 +138,19 @@ def test_complete_gate_delegates_every_required_verification_layer():
         )
 
 
+def test_openapi_framework_versions_are_exactly_pinned():
+    requirements = {
+        line.split("#", 1)[0].strip()
+        for line in (ROOT / "backend" / "requirements.txt").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if line.split("#", 1)[0].strip()
+    }
+
+    assert "fastapi==0.135.3" in requirements
+    assert "pydantic==2.12.4" in requirements
+
+
 def test_verification_lanes_do_not_disable_committed_tests():
     forbidden = ('-m "not slow"', "--ignore", "pytest.mark.skip", "xfail")
     for relative in REQUIRED_LAYERS:

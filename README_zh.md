@@ -42,7 +42,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
-当前 schema 版本为 22。已提交的 v9 兼容 fixture 会经由 v10–v22 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务。
+当前 schema 版本为 23。已提交的 v9 兼容 fixture 会经由 v10–v23 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态。
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，内置 KG 类型文案/样式位于 `kg-type-model.ts`，图谱和答案共用 `kg-type-mark.tsx` 渲染。
 - workspace HTTP 职责拆分到 `system-api.ts`、`notebook-api.ts`、`source-api.ts`、`ask-api.ts`、`knowledge-api.ts`、`report-api.ts` 与 `kg-api.ts`。共享 `frontend/app/api-client.ts` transport 负责 HTTP mechanics，领域模块保留 endpoint policy；`page.tsx` 保留 state、过期结果 guard、轮询与 Blob URL 生命周期；`api-boundary.test.mjs` 用语义扫描禁止 transport core 外的生产 `fetch`。
 - 结构回归测试只使用 public HTTP contract 或显式 domain seam，不得绑定 private aggregate helper、源码位置、行数或 route/model 总数。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle composition 仍是独立债务。
@@ -491,6 +491,25 @@ run 进入完成或失败终态后还会精确失效该 notebook 的待处理来
 ## 配置
 
 所有模型服务均通过 URL 端点接入，不启动本地模型服务。
+
+### 模型服务状态与定向诊断
+
+笔记本集合页的服务指示器只读取当前已认证用户**已持久化的最近一次**模型服务状态，加载集合页时绝不会探测 provider。因此 provider 不可用不会阻塞笔记本库。保存配置时，后端会比较六个服务在写入前后的有效身份，只使身份真正变化的服务结果失效：无变化保存会保留已有状态，继承主 LLM 的变体也只有在解析后的回退身份变化时才失效。三态 patch（`null` / 缺省 = 不变、空串 = 清除、非空串 = 设置）、持久化配置读取、六个 fingerprint 比较、配置写入与变化状态删除都在同一个 `BEGIN IMMEDIATE` 事务中完成；并发保存会串行化而不丢失不同字段 / 角色的更新。每次有效配置读取都直接查询这份很小的持久化 JSON；旧的进程内 cache 对象只作为兼容接口保留，既不供应也不填充配置读取，因此暂停的旧读取或另一个进程都不能让后续解析持续陈旧。发生变化且已配置的服务随后显示为「待测试」，直到新的显式测试或一次已观察到的失败记录结果。
+
+打开**模型服务**可查看已保存配置实际解析出的模型，并可测试一个当前服务或全部当前有效服务。有效身份由后端根据用户已保存设置及其配置回退解析，模型名是运行时数据——前端产品代码不得保存 provider / 模型名常量。Ask 失败提示会指出受影响的服务角色；安全的模型显示名可用时，也会显示后端解析出的当前模型。编辑器分别追踪 Base URL、模型名和 API Key 是否改动，只发送已改动角色中的已改动字段；未改动表单产生 `{}`，不会把另一个浏览器标签页刚保存的值覆盖回旧值，明确改动为空串仍表示清除。加载及保存成功后会重置全部 dirty 标记，未改动时「保存」保持禁用。
+
+有效身份也包含会改变运行时协议的开关：嵌入 provider 与 rerank API 风格会先归一化，再进入内部 fingerprint。rerank 的 URL、密钥和模型值在解析、运行时构造、探测与 fingerprint 中统一去除首尾空白；仅含空白的配置视为未配置且不会探测。即使 endpoint / key / model 都有值，只要 `EMBED_PROVIDER` 关闭，嵌入仍视为未配置且不会探测。修改任一协议开关都会使旧结果失效；显式测试严格使用已解析的 endpoint / model / protocol 描述。
+
+嵌入服务由系统管理，在此面板中只读：用户可以查看或显式测试其有效服务，但不能在这里编辑 endpoint、密钥或模型。服务状态 API 与界面只暴露已脱敏的状态、延迟、触发来源、稳定错误码和安全模型显示名。原始上游诊断（包括 provider payload、endpoint 与异常文本）只保留在服务端日志中，不进入状态响应或 tooltip。形似 endpoint 的模型标识（包括双标签、Unicode 后缀与 punycode 后缀主机名）不得作为模型显示名暴露。
+
+除明确、可操作的「服务未配置」指引外，只有真实模型 provider 调用失败才会生成 Ask 模型错误提示；也只有这类真实调用失败才能写入已观察失败状态。本地 FTS、ANN、关键词、索引打开与向量落库失败只进入服务端诊断，不会把 provider 标成异常。每个真实运行时 client 都携带构造它时的准确有效 fingerprint；只有该 fingerprint 仍是当前身份时才持久化已观察失败。旧配置的在途请求仍可生成与其原 client 绑定的脱敏 Ask 提示，但不能覆盖替换配置的服务状态；未标记身份的测试替身也不能持久化 provider 健康状态。手动测试和已观察失败都会在同一个 `BEGIN IMMEDIATE` 事务中重新读取持久化配置、核对当前 fingerprint，再有条件地执行单调 UPSERT：旧结果若先提交，后续配置事务会删除它；旧结果若在配置提交后等待，会因身份不符而跳过；新身份的有效结果若在配置事务后等待，则会保留。每个服务的结果按发生时间单调更新：较早事件即使更晚写库也不能覆盖较新结果；同一时间的竞争中，已观察失败 / 错误优先于手动成功。
+
+草稿测试绑定到被测角色和准确表单版本；编辑、保存或重新打开面板都会使旧结果失效。草稿测试进行中禁止保存，保存进行中禁止编辑字段。弹窗会把 Tab 焦点限制在内部，并在关闭后还给准确的打开按钮；若保存期间暂时没有可用控件，Tab / Shift+Tab 会聚焦弹窗容器本身。已禁用但未在测试的状态按钮保持「测试当前使用」，只有真实运行中的已保存配置测试才显示「测试中…」。
+
+当前状态 API 为 `GET /api/me/model-services/status`、
+`POST /api/me/model-services/{service}/test` 与
+`POST /api/me/model-services/test-all`。既有的
+`POST /api/me/model-settings/test` 仍是未保存、可编辑 LLM/rerank 草稿值的独立测试接口。
 
 **LLM（OpenAI-compatible）：**
 
@@ -1051,6 +1070,11 @@ PYTHON_BIN=/opt/homebrew/Caskroom/miniconda/base/bin/python bash scripts/check.s
 运行，环境固定为 `ubuntu-24.04`、Python 3.13、Node.js 22。workflow 从
 `backend/requirements.txt` 与 `frontend/package-lock.json` 安装依赖，然后把
 测试选择完整委托给 `scripts/check.sh`。
+
+已提交的 OpenAPI 契约是字节语义冻结契约，因此
+`backend/requirements.txt` 精确固定 FastAPI `0.135.3` 与 Pydantic
+`2.12.4`。只能在有意重生 OpenAPI 契约并在干净环境跑完整门禁时，
+才同步升级这两个框架。
 
 该 workflow 只有读权限，不接收模型或部署 secrets，并把后端 pytest worker
 限制为 4，避免 GitHub 托管 runner 过度抢占。后端安装设置

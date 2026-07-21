@@ -657,7 +657,9 @@ def test_draft_section_empty_content_marks_failed_and_observable(repo):
     nb = _mk_nb(repo)
     notes = []
     # spy 可观测(Task 25:引擎经 ModelErrorSink 端口 = runtime 的模型 provider)
-    repo._runtime.models.note_model_error = lambda stage, model, exc: notes.append(stage)
+    repo._runtime.models.note_model_error = (
+        lambda stage, model, exc, **kwargs: notes.append(stage)
+    )
     out = eng._draft_section(nb.id, {"title": "T", "scope": "S"}, "q", ReasoningResult())
     assert stub.calls == 2                                   # 空 markdown 触发重试
     assert out["markdown"] == ""

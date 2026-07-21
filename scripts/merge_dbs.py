@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=22) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=23) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # 注: object_schemas 主键是全局 object_type(非 notebook 隔离); builtin 行 notebook_id=''
@@ -69,7 +69,7 @@ CHILD_TABLES = [
 # 全局表: 主库优先取并集
 GLOBAL_UNION_TABLES = [
     "users", "user_profiles", "agent_profiles", "agent_access_tokens",
-    "concept_whitelist",
+    "concept_whitelist", "model_service_status",
 ]
 
 # 外部内容 FTS —— 导入后 rebuild

@@ -41,6 +41,7 @@ from typing import Any, Callable
 
 from app.repositories.sqlite.knowhow_store import VALID_KINDS as _STORE_KINDS
 from app.services import background_jobs
+from app.services.model_config import model_client_fingerprint
 from app.services.knowhow.grid_parser import ParsedGrid, guess_kinds, parse_grid, forward_fill_column
 from app.services.knowhow.projection import KnowhowProjector
 
@@ -1027,7 +1028,14 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
     except ModelNotConfiguredError:
         raise
     except Exception as exc:
-        models.note_model_error("knowhow_optimize", model_label, exc)
+        models.note_model_error(
+            "knowhow_optimize",
+            model_label,
+            exc,
+            service="rewrite_llm",
+            provider_failure=True,
+            failed_fingerprint=model_client_fingerprint(client),
+        )
         raise KnowhowOptimizeUnavailable("优化服务暂时不可用，请稍后再试") from exc
 
 

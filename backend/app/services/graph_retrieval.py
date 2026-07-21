@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from app.models.common import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.model_config import model_client_fingerprint
 from app.services.retrieval import RetrievedKnowledge
 from app.services.retrieval_candidates import _RetrievalState
 
@@ -472,7 +473,10 @@ class GraphRetrievalService(_RetrievalState):
                 except Exception as _exc:  # noqa: BLE001 — fail-open
                     self._note_model_error(
                         "scale_ppr_xbridge_query",
-                        self.settings.embed_model, _exc)
+                        self.settings.embed_model,
+                        _exc,
+                        service="embedding",
+                    )
                     continue
                 for _lab, _dist in zip(_labs[0], _dists[0]):
                     _base_nid = _bidx.ann_labels[int(_lab)]
@@ -661,7 +665,12 @@ class GraphRetrievalService(_RetrievalState):
                     k = min(top_n, len(idx.ann_labels))
                     labels, distances = ann.knn_query(qarr, k=k)
                 except Exception as exc:  # noqa: BLE001 — fail-open per seed source
-                    self._note_model_error("scale_ppr_ann", self.settings.embed_model, exc)
+                    self._note_model_error(
+                        "scale_ppr_ann",
+                        self.settings.embed_model,
+                        exc,
+                        service="embedding",
+                    )
                     continue
                 for lab, dist in zip(labels[0], distances[0]):
                     node_id = idx.ann_labels[int(lab)]
@@ -871,7 +880,12 @@ class GraphRetrievalService(_RetrievalState):
         except Exception as exc:
             self._note_model_error(
                 "ppr_fact_rerank",
-                self.settings.reasoning_llm_model or self.settings.openai_compat_model, exc)
+                getattr(client, "model", ""),
+                exc,
+                service="reasoning_llm",
+                provider_failure=True,
+                failed_fingerprint=model_client_fingerprint(client),
+            )
             return kg_hits
     def _follow_chain(
         self,

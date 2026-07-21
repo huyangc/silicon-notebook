@@ -230,7 +230,7 @@ def _minimal_ask_service():
         ask_state=_MinimalAskState(), retrieval=_MinimalRetrieval(),
         candidates=_MinimalCandidates(), graph=_MinimalGraph(),
         evidence_context=_MinimalEvidence(), model_clients=_MinimalModels(),
-        model_errors=SimpleNamespace(note_model_error=lambda *args: None),
+        model_errors=SimpleNamespace(note_model_error=lambda *args, **kwargs: None),
         communities=lambda: SimpleNamespace(),
         scale_profiles=lambda: SimpleNamespace(requires_index=lambda *args, **kwargs: False),
         scale_index_probe=lambda notebook_id: False,

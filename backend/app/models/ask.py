@@ -1,7 +1,14 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.model_safety import (
+    infer_model_error_service,
+    safe_model_error_code,
+    safe_model_error_service,
+    safe_model_error_stage,
+    safe_model_label,
+)
 from app.models.common import Evidence
 from app.models.knowledge import KnowledgeRecord
 
@@ -100,9 +107,37 @@ class AnswerAnchor(BaseModel):
 
 
 class ModelError(BaseModel):
+    service: str = "llm"
     stage: str       # "embed" | "rerank" | "answer" | "rewrite"
     model: str = ""
     message: str
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_service(cls, value: object) -> object:
+        if isinstance(value, dict) and "service" not in value:
+            value = {**value, "service": infer_model_error_service(value.get("stage"))}
+        return value
+
+    @field_validator("service", mode="before")
+    @classmethod
+    def validate_service(cls, value: object) -> str:
+        return safe_model_error_service(value)
+
+    @field_validator("stage", mode="before")
+    @classmethod
+    def validate_stage(cls, value: object) -> str:
+        return safe_model_error_stage(value)
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def validate_model(cls, value: object) -> str:
+        return safe_model_label(value)
+
+    @field_validator("message", mode="before")
+    @classmethod
+    def validate_message(cls, value: object) -> str:
+        return safe_model_error_code(value)
 
 
 class AskResponse(BaseModel):

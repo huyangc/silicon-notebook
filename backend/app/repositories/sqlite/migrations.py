@@ -12,7 +12,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1513,6 +1513,27 @@ class SqliteMigrator:
                   ON kg_build_jobs(notebook_id) WHERE status = 'running';
                 CREATE INDEX IF NOT EXISTS idx_kg_build_jobs_nb_created
                   ON kg_build_jobs(notebook_id, created_at DESC, id DESC);
+                """
+            )
+
+    def _migration_23(self) -> None:
+        """Persist each user's latest observed model-service status."""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS model_service_status (
+                  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                  service TEXT NOT NULL,
+                  config_fingerprint TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+                  latency_ms INTEGER NOT NULL DEFAULT 0,
+                  code TEXT NOT NULL DEFAULT '',
+                  trigger TEXT NOT NULL CHECK (trigger IN ('manual_test', 'observed_failure')),
+                  checked_at TEXT NOT NULL,
+                  PRIMARY KEY (user_id, service)
+                );
+                CREATE INDEX IF NOT EXISTS idx_model_service_status_user_checked
+                  ON model_service_status(user_id, checked_at DESC);
                 """
             )
 

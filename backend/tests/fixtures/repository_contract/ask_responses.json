@@ -556,8 +556,9 @@
         "mode": "reasoning",
         "model_errors": [
           {
-            "message": "请先在设置中配置你的模型服务",
+            "message": "missing_config",
             "model": "",
+            "service": "llm",
             "stage": "answer"
           }
         ],
@@ -581,8 +582,9 @@
         "mode": "reasoning",
         "model_errors": [
           {
-            "message": "请先在设置中配置你的模型服务",
+            "message": "missing_config",
             "model": "",
+            "service": "llm",
             "stage": "answer"
           }
         ],

@@ -79,7 +79,7 @@ def _fake_repo(client):
     error_calls: list[tuple[str, str, str]] = []
     models = SimpleNamespace(
         rewrite_llm_client=client,
-        note_model_error=lambda stage, model, exc: error_calls.append(
+        note_model_error=lambda stage, model, exc, **kwargs: error_calls.append(
             (stage, model, type(exc).__name__)
         ),
     )

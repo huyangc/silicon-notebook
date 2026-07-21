@@ -23,11 +23,15 @@ import {
   type AnswerReference,
 } from "./answer-formatting";
 import { AnswerMarkdown } from "./answer-markdown";
-import { logDiagnostic } from "./errors.ts";
 import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
 import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
+import {
+  modelFailureText,
+  type ModelServiceStatusItem,
+  type StatusModelRole,
+} from "./model-settings.ts";
 import {
   formatDuration,
   getReasoningTraceSummary,
@@ -35,7 +39,7 @@ import {
   TRACE_STEP_LABELS,
 } from "./reasoning-trace";
 import type { AskResponse } from "./workspace-model";
-import { label, TIER } from "./vocabulary";
+import { label, MODEL_SERVICE_STATUS_ERROR, TIER } from "./vocabulary";
 
 
 function InlineFormula({ latex }: { latex: string }) {
@@ -332,6 +336,100 @@ export function ReasoningTracePanel({
 }
 
 
+type AnswerModelError = NonNullable<AskResponse["model_errors"]>[number];
+
+
+function modelTestResultText(result: ModelServiceStatusItem): string {
+  if (result.status === "ok") return `正常 ${result.latency_ms}ms`;
+  if (!result.configured || result.status === "unconfigured") return "尚未配置";
+  return `失败：${label(MODEL_SERVICE_STATUS_ERROR, result.code, "连接未通过")}`;
+}
+
+
+function ModelErrorPanel({
+  errors,
+  onTestModel,
+  onOpenModelSettings,
+  testingModelRoles = {},
+  testingAllModels = false,
+}: {
+  errors: AnswerModelError[];
+  onTestModel?: (service: StatusModelRole) => Promise<ModelServiceStatusItem | null>;
+  onOpenModelSettings?: (service: StatusModelRole) => void;
+  testingModelRoles?: Partial<Record<StatusModelRole, boolean>>;
+  testingAllModels?: boolean;
+}) {
+  const uniqueErrors = useMemo(() => {
+    const seen = new Set<string>();
+    return errors.filter((error) => {
+      const key = `${error.service}\0${error.model}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [errors]);
+  const testingServices = useRef(new Set<StatusModelRole>());
+  const [testing, setTesting] = useState<Partial<Record<StatusModelRole, boolean>>>({});
+  const [results, setResults] = useState<Partial<Record<StatusModelRole, string>>>({});
+
+  async function testService(service: StatusModelRole) {
+    if (!onTestModel || testingServices.current.has(service)) return;
+    testingServices.current.add(service);
+    setTesting((current) => ({ ...current, [service]: true }));
+    setResults((current) => ({ ...current, [service]: "" }));
+    try {
+      const result = await onTestModel(service);
+      if (!result) return;
+      setResults((current) => ({ ...current, [service]: modelTestResultText(result) }));
+    } catch {
+      setResults((current) => ({ ...current, [service]: "失败：连接未通过" }));
+    } finally {
+      testingServices.current.delete(service);
+      setTesting((current) => ({ ...current, [service]: false }));
+    }
+  }
+
+  return (
+    <section className="answer-model-error" aria-label="模型服务异常">
+      <div className="answer-model-error-heading">⚠️ 本次回答可能不完整</div>
+      <ul className="answer-model-error-list">
+        {uniqueErrors.map((error) => {
+          const isTesting = testingAllModels
+            || Boolean(testingModelRoles[error.service])
+            || Boolean(testing[error.service]);
+          return (
+            <li key={`${error.service}\0${error.model}`}>
+              <span>{modelFailureText(error)}</span>
+              <div className="answer-model-error-actions">
+                {onTestModel && (
+                  <button
+                    type="button"
+                    disabled={isTesting}
+                    onClick={() => testService(error.service)}
+                  >
+                    {isTesting ? "测试中…" : "测试此模型"}
+                  </button>
+                )}
+                {onOpenModelSettings && (
+                  <button type="button" onClick={() => onOpenModelSettings(error.service)}>
+                    打开模型服务
+                  </button>
+                )}
+                {results[error.service] && (
+                  <span className="answer-model-test-result" role="status">
+                    {results[error.service]}
+                  </span>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+
 export function AnswerView({
   answer,
   feedbackSent,
@@ -344,6 +442,10 @@ export function AnswerView({
   buildingScaleIndex,
   onSaveMemory,
   memorySaved,
+  onTestModel,
+  onOpenModelSettings,
+  testingModelRoles,
+  testingAllModels,
 }: {
   answer: AskResponse;
   feedbackSent: string;
@@ -360,6 +462,10 @@ export function AnswerView({
   buildingScaleIndex: boolean;
   onSaveMemory: (answerId: string) => void;
   memorySaved: boolean;
+  onTestModel?: (service: StatusModelRole) => Promise<ModelServiceStatusItem | null>;
+  onOpenModelSettings?: (service: StatusModelRole) => void;
+  testingModelRoles?: Partial<Record<StatusModelRole, boolean>>;
+  testingAllModels?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const [citePopover, setCitePopover] = useState<{
@@ -372,13 +478,6 @@ export function AnswerView({
     [answerText, answer.anchors, answer.citations]
   );
   useEffect(() => setCitePopover(null), [answer.answer_id]);
-  // model_errors[].message 是模型服务的原始失败原因(stage + 上游异常文本),
-  // 横幅本身要留(PR#61 的可观测性:让用户分得清「模型挂了」vs「没搜到」),
-  // 但原文不进 title——它会被 hover 出来。原文只落 console。
-  const modelErrorDetail = answer.model_errors?.[0]?.message ?? null;
-  useEffect(() => {
-    if (modelErrorDetail) logDiagnostic("model", modelErrorDetail);
-  }, [modelErrorDetail]);
   useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), 1400);
@@ -393,11 +492,13 @@ export function AnswerView({
   return (
     <div className="chat-answer">
       {answer.model_errors && answer.model_errors.length > 0 && (
-        // 不再报具体 stage 名(与设置页的模型条目对不上,embed 在设置页也没有);
-        // 原始 stage/message 不进 title(hover 就能看到),只落 console。
-        <div className="answer-model-error" title="模型服务有部分调用没成功">
-          ⚠️ 这次回答可能不完整——有部分内容没能正常生成。可以重新问一次；如果一直这样，去「模型服务」检查配置。
-        </div>
+        <ModelErrorPanel
+          errors={answer.model_errors}
+          onTestModel={onTestModel}
+          onOpenModelSettings={onOpenModelSettings}
+          testingModelRoles={testingModelRoles}
+          testingAllModels={testingAllModels}
+        />
       )}
       {answer.index_required && (
         <div className="answer-model-error" title="内容较多时检索会走索引；尚未建立索引时结果会受限">

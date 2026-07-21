@@ -24,6 +24,7 @@ def test_user_config_drives_llm_client(tmp_path):
     try:
         c = repo.llm_client
         assert c.base_url == "https://u/v1" and c.model == "m-u"
+        assert repo.resolve_model_config(user, "llm").model == c.model
     finally:
         reset_request_user(tok)
 
@@ -35,15 +36,95 @@ def test_no_user_config_fallback_to_system_and_setter(tmp_path):
     assert repo.llm_client is sentinel   # 无用户配置 → 系统默认
 
 
-def test_variant_uses_user_primary(tmp_path):
+def test_reasoning_role_uses_user_primary_when_dedicated_config_is_absent(tmp_path):
     repo = _repo(tmp_path)
     repo.set_user_model_settings("user-local",
         {"llm": {"base_url": "https://u/v1", "api_key": "sk-u", "model": "m-u"}})
     tok = set_request_user(repo.current_user())
     try:
-        assert repo.kg_llm_client.model == "m-u"   # kg 未配 → 用户主 LLM
+        client = repo.reasoning_llm_client
+        assert client.model == "m-u"   # reasoning 未配 → 用户主 LLM
+        assert (
+            repo.resolve_model_config(repo.current_user(), "reasoning_llm").model
+            == client.model
+        )
     finally:
         reset_request_user(tok)
+
+
+def test_dedicated_reasoning_client_matches_resolved_model(tmp_path):
+    repo = _repo(
+        tmp_path,
+        reasoning_llm_base_url="https://reason.example/v1",
+        reasoning_llm_api_key="reason-secret",
+        reasoning_llm_model="reason-runtime",
+    )
+    tok = set_request_user(repo.current_user())
+    try:
+        client = repo.reasoning_llm_client
+        assert repo.resolve_model_config(repo.current_user(), "reasoning_llm").model == client.model
+    finally:
+        reset_request_user(tok)
+
+
+@pytest.mark.parametrize(
+    ("role", "client_attribute"),
+    [
+        ("llm", "llm_client"),
+        ("reasoning_llm", "reasoning_llm_client"),
+        ("rewrite_llm", "rewrite_llm_client"),
+        ("kg_llm", "kg_llm_client"),
+        ("rerank", "rerank_client"),
+    ],
+)
+def test_every_effective_role_matches_the_runtime_client(tmp_path, role, client_attribute):
+    repo = _repo(
+        tmp_path,
+        openai_compat_base_url="https://primary.example/v1",
+        openai_compat_api_key="primary-secret",
+        openai_compat_model="primary-runtime",
+        reasoning_llm_base_url="https://reason.example/v1",
+        reasoning_llm_api_key="reason-secret",
+        reasoning_llm_model="reason-runtime",
+        rewrite_llm_base_url="https://rewrite.example/v1",
+        rewrite_llm_api_key="rewrite-secret",
+        rewrite_llm_model="rewrite-runtime",
+        kg_llm_base_url="https://kg.example/v1",
+        kg_llm_api_key="kg-secret",
+        kg_llm_model="kg-runtime",
+        rerank_base_url="https://rerank.example/v1",
+        rerank_api_key="rerank-secret",
+        rerank_model="rerank-runtime",
+        rerank_api_style="openai",
+    )
+    tok = set_request_user(repo.current_user())
+    try:
+        config = repo.resolve_model_config(repo.current_user(), role)
+        client = getattr(repo, client_attribute)
+        assert (config.base_url, config.model) == (client.base_url, client.model)
+        if role == "rerank":
+            assert config.api_style == client.api_style
+    finally:
+        reset_request_user(tok)
+
+
+def test_effective_embedding_role_matches_the_runtime_embedder(tmp_path):
+    repo = _repo(
+        tmp_path,
+        embed_provider="DashScope",
+        embed_base_url="https://embed.example/v1",
+        embed_api_key="embed-secret",
+        embed_model="embed-runtime",
+    )
+
+    config = repo.resolve_model_config(repo.current_user(), "embedding")
+
+    assert config.configured is True
+    assert config.provider == "dashscope"
+    assert (config.base_url, config.model) == (
+        repo.embedder.base_url,
+        repo.embedder.model,
+    )
 
 
 def test_required_policy_unconfigured_is_sentinel(tmp_path):

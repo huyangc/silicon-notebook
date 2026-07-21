@@ -9,17 +9,26 @@ _BATCH = 10  # dashscope text-embedding-v3/v4 hard-cap: batch input <= 10 items
 
 
 class DashscopeEmbedder:
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+    ):
         self.settings = settings
         self.dim = settings.embed_dim
-        self.model = settings.embed_model
+        self.base_url = settings.embed_base_url if base_url is None else base_url
+        self.api_key = settings.embed_api_key if api_key is None else api_key
+        self.model = settings.embed_model if model is None else model
         self._client = None
 
     def _ensure(self):
         if self._client is None:
             self._client = OpenAI(
-                api_key=self.settings.embed_api_key,
-                base_url=self.settings.embed_base_url,
+                api_key=self.api_key,
+                base_url=self.base_url,
                 timeout=self.settings.openai_compat_timeout_seconds,
                 max_retries=0,  # don't amplify a network stall (see llm.py fix)
             )

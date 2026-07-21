@@ -92,6 +92,15 @@ export const MODEL_TEST_ERROR: Record<string, string> = {
 };
 
 /**
+ * 已保存模型服务状态的失败 code（`ModelServiceStatusItem.code`）。
+ *
+ * 状态接口只传稳定 code；上游错误详情留在后端日志，不能拼进 UI 文案。
+ */
+export const MODEL_SERVICE_STATUS_ERROR: Record<string, string> = {
+  upstream_error: "连接未通过",
+};
+
+/**
  * 严格查表：命中返回映射值，未命中返回 `fallback`——永远不会是 `value` 本身。
  *
  * 签名强制传 fallback，是为了让「兜底即原值」这个 bug 写不出来。后端每加一个

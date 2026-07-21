@@ -17,6 +17,7 @@ def test_required_unconfigured_ask_surfaces_model_error(tmp_path):
         nb = repo.create_notebook(NotebookCreate(name="t", purpose=""))
         resp = repo.ask(nb.id, AskRequest(question="hi", mode="chunk"))
         assert any(e.stage == "answer" for e in resp.model_errors)
+        assert {e.message for e in resp.model_errors} == {"missing_config"}
         assert resp.answer == ""
     finally:
         reset_request_user(tok)
@@ -29,6 +30,7 @@ def test_required_unconfigured_reasoning_surfaces_model_error(tmp_path):
         nb = repo.create_notebook(NotebookCreate(name="t", purpose=""))
         resp = repo.ask(nb.id, AskRequest(question="hi", mode="reasoning"))
         assert any(e.stage == "answer" for e in resp.model_errors)
+        assert {e.message for e in resp.model_errors} == {"missing_config"}
     finally:
         reset_request_user(tok)
 
@@ -40,5 +42,6 @@ def test_required_unconfigured_graph_surfaces_model_error(tmp_path):
         nb = repo.create_notebook(NotebookCreate(name="t", purpose=""))
         resp = repo.ask(nb.id, AskRequest(question="hi", mode="graph"))
         assert any(e.stage == "answer" for e in resp.model_errors)
+        assert {e.message for e in resp.model_errors} == {"missing_config"}
     finally:
         reset_request_user(tok)

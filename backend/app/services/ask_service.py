@@ -49,7 +49,7 @@ from app.models.knowledge import (
     KnowledgeRecord,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
-from app.services.model_config import ModelNotConfiguredError
+from app.services.model_config import ModelNotConfiguredError, model_client_fingerprint
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     FOLLOWUP_REWRITE_SCHEMA_HINT,
@@ -435,6 +435,7 @@ class AskService:
         cancel_event: CancelEvent = None,
         notebook_id: str = "",
         memory_hits=None,
+        llm_client=None,
     ) -> tuple:
         """长上下文综合:把 MMR 精选的 chunk 原文喂给答案 LLM。返回
         (answer, llm_grounded, anchors)。复用 answer_prompt 的 [k] 标注协议。
@@ -445,7 +446,7 @@ class AskService:
         context_block, id_map = self._append_memory_context(
             context_block, id_map, memory_hits or []
         )
-        llm_client = self.model_clients.llm_client
+        llm_client = llm_client or self.model_clients.llm_client
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
@@ -471,6 +472,7 @@ class AskService:
         cancel_event: CancelEvent = None,
         notebook_id: str = "",
         memory_hits=None,
+        llm_client=None,
     ) -> tuple:
         """mix 长上下文综合:chunk 段(k1..kN)+ KG 段(k1001+),统一 id_map。
         chunk 段不再二次预算(选择阶段已 token 预算),故 budget_chars 给极大值。
@@ -491,7 +493,7 @@ class AskService:
         context_block, id_map = self._append_memory_context(
             context_block, id_map, memory_hits or []
         )
-        llm_client = self.model_clients.llm_client
+        llm_client = llm_client or self.model_clients.llm_client
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
@@ -580,7 +582,9 @@ class AskService:
                              + "\n\n" + context_block)
         return context_block
 
-    def _answer_with_retry(self, synth, model_label):
+    def _answer_with_retry(
+        self, synth, model_label, service="llm", failed_fingerprint=""
+    ):
         """答案合成有界重试(治思考型模型偶发空 content)。synth() 返回
         (answer, grounded, anchors);answer 空(思考型模型偶把输出预算耗在
         reasoning_content 上→content 空→chat_json 兜底 "{}"→空 answer,不抛异常、
@@ -594,13 +598,28 @@ class AskService:
             except AskCancelled:
                 raise
             except Exception as exc:
-                self.model_errors.note_model_error("answer", model_label, exc)
+                self.model_errors.note_model_error(
+                    "answer",
+                    model_label,
+                    exc,
+                    service=service,
+                    provider_failure=True,
+                    failed_fingerprint=failed_fingerprint,
+                )
                 answer, grounded, anchors = "", False, []
             if answer:
                 return answer, grounded, anchors, True
-        self.model_errors.note_model_error("answer", model_label, RuntimeError(
-            "answer synthesis produced empty content after retry "
-            "(reasoning model likely spent output budget on discarded chain-of-thought)"))
+        self.model_errors.note_model_error(
+            "answer",
+            model_label,
+            RuntimeError(
+                "answer synthesis produced empty content after retry "
+                "(reasoning model likely spent output budget on discarded chain-of-thought)"
+            ),
+            service=service,
+            provider_failure=True,
+            failed_fingerprint=failed_fingerprint,
+        )
         return answer, grounded, anchors, False
 
     def _answer_reasoning(
@@ -614,6 +633,7 @@ class AskService:
         chunks=None,
         chains=None,
         memory_hits=None,
+        reasoning_client=None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
@@ -656,7 +676,7 @@ class AskService:
                 for i, el in enumerate(elements[:6])
             )
             context_block = f"{context_block}\n\n补充原文段落(供参考,无引用编号):\n{extra}"
-        reasoning_client = self.model_clients.reasoning_llm_client
+        reasoning_client = reasoning_client or self.model_clients.reasoning_llm_client
         context_block = self._refine_context(
             question, context_block, reasoning_client, cancel_event)
         raw = reasoning_client.chat_json(
@@ -686,7 +706,9 @@ class AskService:
             answer_id="", conclusion=msg, conversation_id=conversation_id,
             retrieval_query=question, llm_mode="deterministic")
         response.mode = mode
-        response.model_errors = [ModelError(stage="answer", model="", message=msg)]
+        response.model_errors = [
+            ModelError(stage="answer", model="", message="missing_config")
+        ]
         response.answer_id = self._save_answer(
             notebook_id, question, response, conversation_id, user_id=user_id)
         return response
@@ -729,7 +751,11 @@ class AskService:
         try:
             if self._primary_llm_unconfigured():
                 self.model_errors.note_model_error(
-                    "answer", "", ModelNotConfiguredError("请先在设置中配置你的模型服务"))
+                    "answer",
+                    "",
+                    ModelNotConfiguredError("请先在设置中配置你的模型服务"),
+                    provider_failure=True,
+                )
             _t = time.perf_counter()
             from app.services.query_rewrite import expand_query
             from app.services.retrieval import quota_fuse, est_tokens, truncate_by_tokens
@@ -788,10 +814,17 @@ class AskService:
                 # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
                 candidates = self.candidates.merge_chunk_candidates(candidates, kw_hits)
                 raise_if_cancelled(cancel_event)
-                order = self.model_clients.rerank_client.rerank(
+                rerank_client = self.model_clients.rerank_client
+                order = rerank_client.rerank(
                     retrieval_query, [c.text for c in candidates],
                     on_error=lambda e: self.model_errors.note_model_error(
-                        "rerank", self.settings.rerank_model, e))
+                        "rerank",
+                        getattr(rerank_client, "model", ""),
+                        e,
+                        service="rerank",
+                        provider_failure=True,
+                        failed_fingerprint=model_client_fingerprint(rerank_client),
+                    ))
                 raise_if_cancelled(cancel_event)
                 ranked = [candidates[i] for i in order]
                 kg_budget = self.settings.max_entity_tokens + self.settings.max_relation_tokens
@@ -831,19 +864,21 @@ class AskService:
             synth_failed = False
             _t = time.perf_counter()
             raise_if_cancelled(cancel_event)
-            if self.model_clients.llm_client.configured and (selected or kg_id_map or memory_hits):
+            answer_client = self.model_clients.llm_client
+            if answer_client.configured and (selected or kg_id_map or memory_hits):
                 # 空 content 有界重试 + 诚实降级 + 可观测(见 _answer_with_retry docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     lambda: (self._answer_mix(
                                  question, selected, kg_block, kg_id_map, history,
                                  cancel_event=cancel_event, notebook_id=notebook_id,
-                                 memory_hits=memory_hits)
+                                 memory_hits=memory_hits, llm_client=answer_client)
                              if overlay_on else
                              self._answer_chunks(
                                  question, selected, history, cancel_event=cancel_event,
-                                 notebook_id=notebook_id, memory_hits=memory_hits)),
-                    getattr(self.model_clients.llm_client, "model", None)
-                    or self.settings.openai_compat_model)
+                                 notebook_id=notebook_id, memory_hits=memory_hits,
+                                 llm_client=answer_client)),
+                    getattr(answer_client, "model", ""),
+                    failed_fingerprint=model_client_fingerprint(answer_client))
                 synth_failed = not _ok
             ask_stage("answer_llm", _t)
 
@@ -1041,15 +1076,19 @@ class AskService:
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
             raise_if_cancelled(cancel_event)
-            if self.model_clients.reasoning_llm_client.configured and (
+            reasoning_client = self.model_clients.reasoning_llm_client
+            if reasoning_client.configured and (
                     top_hits or elements or chunks or chains or memory_hits):
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     lambda: self._answer_reasoning(
                         notebook_id, question, top_hits, elements, history,
                         cancel_event=cancel_event, chunks=chunks, chains=chains,
-                        memory_hits=memory_hits),
-                    self.settings.reasoning_llm_model or self.settings.openai_compat_model)
+                        memory_hits=memory_hits, reasoning_client=reasoning_client),
+                    getattr(reasoning_client, "model", ""),
+                    service="reasoning_llm",
+                    failed_fingerprint=model_client_fingerprint(reasoning_client),
+                )
                 synth_failed = not _ok
 
             # chunks 直接进证据池:RetrievedChunk.object_id 属性=chunk_id,与 chunk 锚的
@@ -1186,13 +1225,15 @@ class AskService:
                         llm_mode="deterministic",
                     )
                 else:
+                    answer_client = self.model_clients.llm_client
                     answer, llm_grounded, anchors, ok = self._answer_with_retry(
                         lambda: self._answer_chunks(
                             question, [], history, cancel_event=cancel_event,
                             notebook_id=notebook_id, memory_hits=memory_hits,
+                            llm_client=answer_client,
                         ),
-                        getattr(self.model_clients.llm_client, "model", None)
-                        or self.settings.openai_compat_model,
+                        getattr(answer_client, "model", ""),
+                        failed_fingerprint=model_client_fingerprint(answer_client),
                     )
                     evidence_level, top_relevance = classify_evidence(
                         memory_hits, anchors, llm_grounded,
@@ -1244,13 +1285,15 @@ class AskService:
                     ppr_chunks = community_chunks + ppr_chunks
                     answer, llm_grounded, anchors = "", False, []
                     synth_failed = False
-                    if getattr(self.model_clients.llm_client, "configured", False):
+                    answer_client = self.model_clients.llm_client
+                    if getattr(answer_client, "configured", False):
                         answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                             lambda: self._answer_chunks(
                                 question, ppr_chunks, history, cancel_event=cancel_event,
-                                notebook_id=notebook_id, memory_hits=memory_hits),
-                            getattr(self.model_clients.llm_client, "model", None)
-                            or self.settings.openai_compat_model)
+                                notebook_id=notebook_id, memory_hits=memory_hits,
+                                llm_client=answer_client),
+                            getattr(answer_client, "model", ""),
+                            failed_fingerprint=model_client_fingerprint(answer_client))
                         synth_failed = not _ok
                     citations: List[Citation] = []
                     by_id = {c.chunk_id: c for c in ppr_chunks}
@@ -1418,14 +1461,15 @@ class AskService:
                     c.source_title = _titles.get(c.source_id, "")
                 answer, llm_grounded, anchors = "", False, []
                 synth_failed = False
-                if getattr(self.model_clients.llm_client, "configured", False):
+                answer_client = self.model_clients.llm_client
+                if getattr(answer_client, "configured", False):
                     answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                         lambda: self._answer_mix(
                             question, src_chunks, mix_kg_block, mix_id_map, history,
                             cancel_event=cancel_event, notebook_id=notebook_id,
-                            memory_hits=memory_hits),
-                        getattr(self.model_clients.llm_client, "model", None)
-                        or self.settings.openai_compat_model)
+                            memory_hits=memory_hits, llm_client=answer_client),
+                        getattr(answer_client, "model", ""),
+                        failed_fingerprint=model_client_fingerprint(answer_client))
                     synth_failed = not _ok
                 citations: List[Citation] = []
                 by_id = {c.chunk_id: c for c in src_chunks}
@@ -1498,9 +1542,10 @@ class AskService:
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
             raise_if_cancelled(cancel_event)
-            if getattr(self.model_clients.llm_client, "configured", False) and id_map:
+            answer_client = self.model_clients.llm_client
+            if getattr(answer_client, "configured", False) and id_map:
                 def _synth_kg():
-                    llm_client = self.model_clients.llm_client
+                    llm_client = answer_client
                     raw = llm_client.chat_json(
                         [{"role": "user",
                           "content": answer_prompt(question, context_block, history)}],
@@ -1525,8 +1570,8 @@ class AskService:
                     return _strip_unbound_markers(_ans, {a.key for a in _anc}), _g, _anc
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     _synth_kg,
-                    getattr(self.model_clients.llm_client, "model", None)
-                    or self.settings.openai_compat_model)
+                    getattr(answer_client, "model", ""),
+                    failed_fingerprint=model_client_fingerprint(answer_client))
                 synth_failed = not _ok
 
             # classify_evidence keys "grounded" off the relevance of the CITED hit.

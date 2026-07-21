@@ -81,7 +81,7 @@ from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
 from app.services import background_jobs
 from app.services.knowhow import textops
-from app.services.source_embedding import SourceEmbeddingService
+from app.services.source_embedding import EmbeddingProviderFailure, SourceEmbeddingService
 from app.services.vector_index import decode_vector
 
 _CHUNK_CHAR_LIMIT = 4000
@@ -244,7 +244,7 @@ class KnowhowProjector:
         chunks: ChunkStore,
         knowledge: KnowledgeStore,
         embedding: SourceEmbeddingService,
-        note_model_error: Callable[[str, str, Exception], None],
+        note_model_error: Callable[..., None],
         invalidate_unified_cache: Callable[[str], None],
         mark_unified_dirty: Callable[[str], None],
         new_id: Callable[[str], str],
@@ -440,21 +440,48 @@ class KnowhowProjector:
 
             failed = False
             if embed and (embed_targets or carry_over_vectors):
-                try:
-                    # Carry-over first: it's a plain re-persist of an already-
-                    # computed vector (no embedder call, must run once the
-                    # structural transaction above has committed — chunk_
-                    # embeddings' FK target must exist first), independent of
-                    # whatever embed_chunk_ids below does.
-                    if carry_over_vectors:
+                # Carry-over first: it's a plain re-persist of an already-
+                # computed vector (no embedder call, must run once the
+                # structural transaction above has committed — chunk_
+                # embeddings' FK target must exist first). Keep this local
+                # persistence failure out of provider-health telemetry.
+                if carry_over_vectors:
+                    try:
                         self.embedding.vectors.replace_chunk_vectors(
                             notebook_id, carry_over_vectors, created_at=now
                         )
-                    if embed_targets:
+                    except Exception as exc:  # noqa: BLE001 — best-effort vector restore
+                        failed = True
+                        self.note_model_error(
+                            "knowhow_vector_restore",
+                            self.settings.embed_model,
+                            exc,
+                            service="embedding",
+                            provider_failure=False,
+                        )
+
+                if embed_targets and not failed:
+                    try:
                         self.embedding.embed_chunk_ids(notebook_id, embed_targets)
-                except Exception as exc:  # noqa: BLE001 — surfaced via model_error, never raised
-                    failed = True
-                    self.note_model_error("knowhow_embed", self.settings.embed_model, exc)
+                    except EmbeddingProviderFailure as exc:
+                        failed = True
+                        self.note_model_error(
+                            "knowhow_embed",
+                            self.settings.embed_model,
+                            exc.__cause__ or exc,
+                            service="embedding",
+                            provider_failure=True,
+                            failed_fingerprint=exc.failed_fingerprint,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — local vector write is best-effort
+                        failed = True
+                        self.note_model_error(
+                            "knowhow_vector_persist",
+                            self.settings.embed_model,
+                            exc,
+                            service="embedding",
+                            provider_failure=False,
+                        )
 
             # ``synced`` is the public completion signal consumed by API
             # pollers. Keep every visited row at ``syncing`` until the

@@ -42,14 +42,14 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 22. The committed v9 compatibility fixture
-upgrades through migrations v10–v22 and remains readable. Those migrations
+The current schema version is 23. The committed v9 compatibility fixture
+upgrades through migrations v10–v23 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
 reference-library mounts plus promotion targets (v20), and the normalized
 interactive-reformat anchor-membership expression index (v21); v22 adds durable
-notebook-scoped KG build jobs.
+notebook-scoped KG build jobs; v23 adds per-user latest model-service status.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Workspace HTTP ownership is split into `system-api.ts`, `notebook-api.ts`, `source-api.ts`, `ask-api.ts`, `knowledge-api.ts`, `report-api.ts`, and `kg-api.ts`. The shared `frontend/app/api-client.ts` transport owns HTTP mechanics; domain modules retain endpoint policy. `page.tsx` retains state, stale-result guards, polling, and Blob URL lifecycle. `api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
 - Boundary regression tests use public HTTP contracts or explicit domain seams, never private aggregate helpers, source positions, line counts, or total route/model counts. Workspace-state hook extraction and FastAPI lifespan/application lifecycle composition remain separate debt.
@@ -553,6 +553,88 @@ The current persistence/API contract is the `reports` table and `/reports` APIs;
 ## Configuration
 
 All model services are reached over URL endpoints — no local model servers are started.
+
+### Model-service status and targeted diagnostics
+
+The collection's service indicator reads the authenticated user's **persisted,
+last-known** model-service snapshot. It never probes a provider while the
+collection is loading, so an unavailable provider cannot block the notebook
+library. Saving settings compares every service's effective identity before
+and after the write, and invalidates only identities that actually changed;
+a no-op save preserves prior results, while inherited LLM variants are
+invalidated only when their resolved fallback changes. A changed configured
+service is then shown as untested until a new explicit check or an observed
+failure records a result. The three-state patch (`null`/omitted = unchanged,
+empty string = clear, non-empty string = set), persisted-settings read, all-six
+fingerprint comparison, settings write, and changed-status deletion run in one
+`BEGIN IMMEDIATE` transaction. Concurrent saves therefore serialize without
+losing disjoint field/role updates. Every effective-settings read queries the
+small persisted JSON directly; the legacy process-local cache object remains a
+compatibility seam only and never serves or fills these reads, so a paused old
+read or another process cannot leave later resolution stale.
+
+Open **模型服务** to inspect the effective saved configuration and test either
+one current service or every current effective service. The effective identity
+is resolved by the backend from the user's saved setting and its configured
+fallbacks, so model names are runtime data — product code in the frontend must
+not carry provider/model-name constants. Ask failure notices identify the
+affected service role and the backend-resolved current model when its safe
+display label is available. The editor tracks Base URL, model, and API key
+dirtiness independently and sends only dirty fields in dirty roles. Untouched
+forms produce `{}` and cannot replay stale values from another browser tab;
+explicit dirty empty strings still clear fields. Loading and successful saves
+reset every dirty flag, and unchanged forms keep Save disabled.
+
+Effective identity also includes runtime protocol switches: embedding provider
+selection and rerank API style are normalized into the internal fingerprint.
+Rerank URL, key, and model values are trimmed consistently by resolution,
+runtime construction, probing, and fingerprinting; whitespace-only values are
+unconfigured and never probed.
+An embedding endpoint with `EMBED_PROVIDER` off remains unconfigured and is not
+probed. Changing either switch invalidates the previous result, and an explicit
+test uses the exact resolved endpoint/model/protocol descriptor.
+
+Embedding is system-managed and read-only in this panel: users can inspect or
+explicitly test its effective service, but cannot edit its endpoint, key, or
+model there. Service-status APIs and UI expose only sanitized status,
+latency, trigger, stable error code, and a safe model label. Raw upstream
+diagnostics (including provider payloads, endpoints, and exception text) stay
+in server logs rather than status responses or tooltips. Endpoint-shaped model
+identifiers, including two-label, Unicode-suffix, and punycode-suffix hostnames,
+are not exposed as model labels.
+
+Apart from the explicit, actionable "service not configured" guidance, only
+failures from an actual model-provider call can create an Ask model-error
+notice; only those actual call failures can create an observed failed status.
+Local FTS, ANN, keyword, index-open, and vector-persistence failures remain
+server diagnostics and never mark a provider unavailable.
+Each real runtime client carries the exact effective fingerprint used to build
+it. An observed failure is persisted only if that fingerprint is still current;
+an in-flight request from a replaced configuration may still produce its
+sanitized Ask diagnostic, but cannot overwrite the replacement service's
+status. Unstamped test doubles likewise cannot persist provider health.
+Manual and observed results re-read persisted settings and conditionally run
+the monotonic UPSERT inside one `BEGIN IMMEDIATE` transaction. Thus an old
+result committed first is removed by the following settings transaction, an
+old result waiting behind a settings commit is skipped, and a valid result for
+the new identity waiting behind that commit survives.
+Per-service results are occurrence-ordered: a late database write cannot replace
+a newer check, and an observed/error result wins a same-time race with manual
+success.
+
+Draft tests are tied to the exact role and form revision they tested. Editing,
+saving, or reopening invalidates stale results; save is locked while a draft
+test is active and editable fields are locked while save is in flight. The
+modal traps keyboard focus and returns it to the exact control that opened it.
+If a save temporarily leaves no enabled control, Tab/Shift+Tab focus the dialog
+container itself. A disabled saved-status test button keeps its normal label;
+only an actively running saved-status test displays `测试中…`.
+
+Current-status APIs are `GET /api/me/model-services/status`,
+`POST /api/me/model-services/{service}/test`, and
+`POST /api/me/model-services/test-all`. The existing
+`POST /api/me/model-settings/test` remains the separate, draft-value test for
+an unsaved editable LLM/rerank setting.
 
 **LLM (OpenAI-compatible):**
 
@@ -1146,6 +1228,11 @@ to `master`, and manual dispatches on `ubuntu-24.04` with Python 3.13 and
 Node.js 22. The workflow installs from `backend/requirements.txt` and
 `frontend/package-lock.json`, then delegates test selection entirely to
 `scripts/check.sh`.
+
+The committed OpenAPI contract is byte-semantically frozen, so
+`backend/requirements.txt` pins FastAPI `0.135.3` and Pydantic `2.12.4`
+exactly. Upgrade either framework only together with an intentional OpenAPI
+contract regeneration and a clean-environment full-gate run.
 
 The workflow is read-only, does not receive model or deployment secrets, and
 uses four backend pytest workers to avoid oversubscribing the hosted runner.

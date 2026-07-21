@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Dict, List
 
 from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
+from app.services.model_config import model_client_fingerprint
 from app.services.report_execution import REPORT_CANCELLATIONS
 
 if TYPE_CHECKING:
@@ -354,7 +355,11 @@ class ReportEngine:
                 "report_section",
                 self.settings.reasoning_llm_model or self.settings.openai_compat_model,
                 RuntimeError(f"report section '{section['title']}' produced empty content after retry "
-                             "(reasoning model likely spent output budget on discarded chain-of-thought)"))
+                             "(reasoning model likely spent output budget on discarded chain-of-thought)"),
+                service="reasoning_llm",
+                provider_failure=True,
+                failed_fingerprint=model_client_fingerprint(client),
+            )
             base["failed"] = True
             base["error"] = "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试"
         return base

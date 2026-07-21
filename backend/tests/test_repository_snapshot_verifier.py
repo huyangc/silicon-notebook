@@ -339,7 +339,7 @@ def test_schema_tables_counts_pks_and_digests_are_preserved(tmp_path):
     assert result.reads["reports"] >= 1
 
 
-def test_deployed_v13_database_verifies_through_migrations_14_to_22(tmp_path):
+def test_deployed_v13_database_verifies_through_migrations_14_to_23(tmp_path):
     """The v13 hop is the one EVERY currently-deployed production database
     takes: v13 was the shipping schema before the memory-kg-extract feature.
     Post-v13 migrations are _migration_14 (sources.memory_id column + its
@@ -366,8 +366,8 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_22(tmp_path):
     migration adds — including _migration_15's index, _migration_16's tables
     (which also absorb _migration_19's column + index), _migration_17's
     tables, _migration_18's table, _migration_20's table + column, and the
-    _migration_21 normalized-anchor index plus _migration_22's durable KG
-    build-job table, or
+    _migration_21 normalized-anchor index, _migration_22's durable KG
+    build-job table, and _migration_23's per-user model-service status, or
     the constructed 'v13' would retain them and the hop would under-report
     its additions."""
     from app.core.config import Settings
@@ -388,6 +388,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_22(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE model_service_status")               # _migration_23
         rollback.execute("DROP TABLE kg_build_jobs")                     # _migration_22
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")  # _migration_21
         rollback.execute("DROP TABLE notebook_bases")                     # _migration_20
@@ -421,7 +422,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_22(tmp_path):
     assert result.changed_tables == []
 
 
-def test_deployed_v20_database_verifies_through_migrations_21_and_22(tmp_path):
+def test_deployed_v20_database_verifies_through_migrations_21_to_23(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -431,6 +432,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_and_22(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
         rollback.execute("PRAGMA user_version = 20")
@@ -445,7 +447,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_and_22(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v21_database_verifies_through_kg_build_jobs(tmp_path):
+def test_deployed_v21_database_verifies_through_migrations_22_and_23(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -455,6 +457,7 @@ def test_deployed_v21_database_verifies_through_kg_build_jobs(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("PRAGMA user_version = 21")
         rollback.commit()
@@ -465,6 +468,29 @@ def test_deployed_v21_database_verifies_through_kg_build_jobs(tmp_path):
 
     assert result.ok, result.discrepancies
     assert result.source_user_version == 21
+    assert result.final_user_version == module.SCHEMA_VERSION
+
+
+def test_deployed_v22_database_verifies_through_model_service_status(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    rollback = sqlite3.connect(database)
+    try:
+        rollback.execute("DROP TABLE model_service_status")
+        rollback.execute("PRAGMA user_version = 22")
+        rollback.commit()
+    finally:
+        rollback.close()
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 22
     assert result.final_user_version == module.SCHEMA_VERSION
 
 

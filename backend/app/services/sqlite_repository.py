@@ -249,7 +249,7 @@ def _make_persist_image(
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 
 
 @dataclass(frozen=True)
@@ -409,9 +409,14 @@ class SQLiteRepository:
             scale_cache=lambda: scale_idx_cache,
             load_lock=lambda: scale_idx_load_lock,
             load_locks=lambda: scale_idx_load_locks,
-            note_model_error=lambda stage, model, exc: (
+            note_model_error=lambda stage, model, exc, service="", provider_failure=False, failed_fingerprint="": (
                 _repository_from_weakref(repository_ref)._note_model_error(
-                    stage, model, exc
+                    stage,
+                    model,
+                    exc,
+                    service=service,
+                    provider_failure=provider_failure,
+                    failed_fingerprint=failed_fingerprint,
                 )
             ),
         )
@@ -547,8 +552,15 @@ class SQLiteRepository:
                 self.relations_for_notebook(notebook_id)
             ),
             notebook_copy_stats=lambda notebook_id: self.notebook_copy_stats(notebook_id),
-            note_model_error=lambda stage, model, exc: (
-                self._note_model_error(stage, model, exc)
+            note_model_error=lambda stage, model, exc, service="", provider_failure=False, failed_fingerprint="": (
+                self._note_model_error(
+                    stage,
+                    model,
+                    exc,
+                    service=service,
+                    provider_failure=provider_failure,
+                    failed_fingerprint=failed_fingerprint,
+                )
             ),
             edge_centrality_map=lambda notebook_id: (
                 self._edge_centrality_map(notebook_id)
@@ -2425,8 +2437,24 @@ class SQLiteRepository:
     def search_notebook(self, notebook_id: str, query: str) -> NotebookSearchResponse:
         return self._runtime.catalog.search_notebook(notebook_id, query)
 
-    def _note_model_error(self, stage: str, model: str, exc: Exception) -> None:
-        return self._runtime.models.note_model_error(stage, model, exc)
+    def _note_model_error(
+        self,
+        stage: str,
+        model: str,
+        exc: Exception,
+        service: str = "",
+        *,
+        provider_failure: bool = False,
+        failed_fingerprint: str = "",
+    ) -> None:
+        return self._runtime.models.note_model_error(
+            stage,
+            model,
+            exc,
+            service=service,
+            provider_failure=provider_failure,
+            failed_fingerprint=failed_fingerprint,
+        )
 
     def _embed_query(self, query: str) -> Optional[List[float]]:
         return self.retrieval.candidates._embed_query(query)

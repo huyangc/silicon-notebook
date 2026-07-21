@@ -156,14 +156,14 @@ Confirmed scope:
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state is runtime-owned, and supported post-composition replacements must update every retained consumer. Synchronous Ask/report submission failures must mark the durable job/report failed, unregister its cancellation entry, and re-raise; preserve the successful worker order and existing Ask transaction checkpoints.
 - Schema changes stay version-gated behind `SqliteMigrator` (append `_migration_N` + bump `SCHEMA_VERSION`); startup recovery/seed/admin-upgrade run every boot outside the version gate. Pre-refactor databases must keep loading: the frozen v9 fixture replay (`backend/tests/fixtures/repository_v9/`, `test_legacy_db_compat.py`) and the backup-only real-database verifier `scripts/verify_repository_snapshot.py` are the guards. The verifier uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, never constructs the repository on an original database/storage path, and reports a retained temporary backup on cleanup failure without private row data. Original DB/WAL metadata and SHM existence/size are guarded; on a live WAL attachment only SHM mtime is exempt.
 
-The current schema version is 22. The committed v9 compatibility fixture
-upgrades through migrations v10–v22 and remains readable. Those migrations
+The current schema version is 23. The committed v9 compatibility fixture
+upgrades through migrations v10–v23 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
 reference-library mounts plus promotion targets (v20), and the normalized
 interactive-reformat anchor-membership expression index (v21); v22 adds durable
-notebook-scoped KG build jobs.
+notebook-scoped KG build jobs; v23 adds per-user latest model-service status.
 - PostgreSQL + pgvector remain the future production/team-beta direction. Do not require them for the current local beta.
 - Until a PostgreSQL repository exists, reject every non-`sqlite:///` `DATABASE_URL` at settings construction; never silently fall back to `.local` for an unsupported database scheme.
 - KG-native tables are live: `knowledge_objects` (object types `concept/claim/formula/procedure`), `knowledge_relations`, knowledge/element/chunk/relation embeddings, `concept_clusters`, `extraction_runs`, `answers`, `conversations`, `feedback`, `ask_jobs`, `ask_trace_steps`, and `reports`; sharing uses notebook share fields plus `notebook_members`. The independent Memory layer uses `memory_items`, `memory_revisions`, `memory_provenance`, `memory_embeddings`, `agent_profiles`, `agent_access_tokens`, and `agent_token_notebooks`; Memory is never inserted into source/chunk/KG tables, and KG promotion creates a separate governed object. Embedding vectors are persisted locally and assembled into versioned float32 matrices or scale indexes. Graph/reasoning paths build or load federated graph state while preserving tier provenance.
@@ -323,6 +323,19 @@ Business logic should call a provider adapter/client, not hard-code a specific m
 
 When no LLM key is configured, endpoints may return deterministic fallback data so the local beta remains usable.
 
+### Model Service Status and Diagnostics
+
+- Effective model identity is backend-resolved from the authenticated user's saved setting and configured fallbacks. Provider/model names are runtime data; never add frontend product constants for a provider or model name.
+- Effective identity/fingerprints must include normalized runtime protocol switches, including embedding provider and rerank API style. Normalize rerank URL/key/model whitespace identically in resolution, runtime clients, probes, and fingerprints; whitespace-only rerank settings are unconfigured and must not be probed. Provider-off embedding is unconfigured even when URL/key/model fields are populated, and probes must use the exact resolved descriptor rather than rebuilding from mismatched global settings.
+- The notebook collection reads each user's persisted, last-known model-service status only. Status reads must never probe an upstream provider or delay/hide the collection. Settings changes must go through one `IdentityStore` `BEGIN IMMEDIATE` patch operation that reads persisted JSON directly (never the cache), applies `None` unchanged / empty clear / non-empty set semantics, compares all six effective fingerprints, writes settings, and deletes only changed-role statuses before the same commit; this prevents lost concurrent patches and the save-vs-status-clear race. Every effective-settings read must query the small persisted JSON directly: the legacy process-local model-settings cache object is compatibility-only and must neither serve nor fill reads, because process-local invalidation cannot make paused readers or another process coherent. No-op saves preserve status, and an inherited LLM variant changes only when its resolved fallback changes. Invalidated configured services read as untested until an explicit test or observed failure records a result.
+- Persist manual and observed status through one identity-conditional `BEGIN IMMEDIATE` operation that directly re-reads persisted settings, verifies the originating fingerprint is still configured/current, and runs the monotonic UPSERT in the same transaction. If an old status writes first, a later settings transaction deletes it; if settings writes first, an old status skips; a valid new-identity status waiting behind the settings transaction survives. Preserve normalized, fixed-precision UTC occurrence ordering: an older occurrence written later must not replace a newer row; on an exact tie, observed/error wins over manual success, independently per service.
+- The Model Services UI must support explicit tests of one current effective service and all current effective services. Keep `POST /me/model-settings/test` as the separate draft-value test path for unsaved editable LLM/rerank settings.
+- Model Services form saves are sparse per field. `ServiceForm` tracks Base URL, model, and API-key dirtiness separately; `buildPutPayload` emits only dirty fields in dirty roles, returns `{}` for an untouched form, and preserves dirty empty strings as clears. Loading and successful saves reset all dirty flags. No-op save is disabled and guarded before configuration/draft-test invalidation, so stale tabs cannot overwrite external changes; disjoint tab edits remain disjoint atomic backend patches.
+- Draft tests are page-owned and bound to an exact role/form revision. Field edits, save, and reopen invalidate stale results; an active draft test blocks save, save-in-flight blocks form edits, and the modal traps focus/restores the exact opener. When no enabled control remains, Tab/Shift+Tab must focus the dialog container. Disabled saved-status controls keep their normal label; only an actual in-flight saved-status probe says `测试中…`.
+- Embedding configuration is system-managed and read-only in the Model Services UI. It remains inspectable and explicitly testable, but users cannot edit its endpoint, credential, or model there.
+- Ask failure UI identifies the affected service role and the safe model label of the exact client that failed when available. Status surfaces may return only sanitized status metadata, a stable error code, and safe model identity; endpoint-shaped model identifiers (including two-label, Unicode-suffix, and punycode-suffix hostnames), provider payloads, endpoints, IPs, credentials, response bodies, and raw exception strings remain logs-only and must never appear in status responses or tooltips.
+- `ModelErrorSink.note_model_error` callers must explicitly classify provider-call failures. Apart from explicit actionable not-configured guidance, only actual chat/rewrite/rerank/embedding provider failures may append client-visible `ModelError` data. Persist an observed failed service only when the exact originating runtime client's fingerprint is present and still matches the current effective service; stale in-flight clients and unstamped test doubles must not update status. Local FTS/keyword/ANN/index/vector-persistence diagnostics remain logs-only and must not change model-service status.
+
 ## Logging / Observability
 
 Structured logs go to `.local/logs/*.jsonl` (gitignored) plus brief console lines, via a single `EventLogger` (`backend/app/core/event_logging.py`). Add observability at the existing chokepoints, not at each call site:
@@ -387,6 +400,10 @@ assertion for every host.
   dependency in `backend/requirements.txt`; a clean CI install uses that file
   and `frontend/package-lock.json`. A developer's preinstalled package is never
   evidence that CI can install the gate.
+- The byte-semantically frozen OpenAPI contract requires exact framework pins:
+  FastAPI `0.135.3` and Pydantic `2.12.4`. Upgrade either pin only together with
+  an intentional OpenAPI contract regeneration and a clean-environment full
+  gate; do not replace these pins with open-ended minimum versions.
 - Hosted-runner lane timings are observational. The under-60-second acceptance
   target applies to the verified Apple Silicon Homebrew warm gate, not a cold
   GitHub runner.

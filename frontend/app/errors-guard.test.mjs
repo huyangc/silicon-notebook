@@ -24,10 +24,6 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 2,
     reason: "one access is a forbidden sentinel and one is humanized view state",
   },
-  "answer-panel.tsx|<module>.AnswerView|property|message": {
-    count: 1,
-    reason: "model diagnostic detail is sent only to bounded logging",
-  },
   "knowhow-cell-editor.tsx|<module>.KnowhowCellEditor|property|message": {
     count: 2,
     reason: "optimizer and reformatter error states are written through the humanization boundary",
@@ -39,6 +35,10 @@ const APPROVED_MESSAGE_READS = Object.freeze({
   "knowhow-transfer.ts|<module>.transferKnowhowTable|property|message": {
     count: 1,
     reason: "validated source-cleanup guidance is copied into its typed error",
+  },
+  "model-settings.ts|<module>.modelFailureText|property|message": {
+    count: 1,
+    reason: "typed ModelFailureCode selects fixed copy and is never logged or rendered verbatim",
   },
   "page.tsx|<module>.Home|property|message": {
     count: 1,
@@ -61,10 +61,6 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
   "memory-panel.tsx|<module>.MemoryPanel.submitTransfer|diagnostic|error": {
     count: 1,
     reason: "per-item transfer diagnostics are selected only for bounded logging",
-  },
-  "page.tsx|<module>.Home.runModelTest|diagnostic|error": {
-    count: 2,
-    reason: "model test diagnostics are gated by result code and sent to logging",
   },
   "page.tsx|<module>.Home.tick|diagnostic|error_message": {
     count: 2,
@@ -291,11 +287,20 @@ test("user copy is not rewrapped or thrown without the humanized brand", async (
 test("critical catch boundaries call the shared humanization layer", async () => {
   const page = await parseModule("page.tsx");
   const ask = await parseModule("ask-api.ts");
+  const answerPanel = await parseModule("answer-panel.tsx");
   const knowhow = await parseModule("knowhow-import-logic.ts");
 
   assert.ok(callsIn(findFunction(page, "reportError")).includes("toUserMessage"));
   assert.ok(callsIn(findFunction(ask, "runAskStream")).includes("humanizedError"));
   assert.ok(callsIn(findFunction(ask, "runAskStream")).includes("logDiagnostic"));
+  assert.equal(
+    callsIn(findFunction(page, "runModelTest")).includes("logDiagnostic"),
+    false,
+  );
+  assert.equal(
+    callsIn(findFunction(answerPanel, "AnswerView")).includes("logDiagnostic"),
+    false,
+  );
   assert.deepEqual(
     callsIn(findFunction(knowhow, "extractErrorMessage")),
     ["toUserMessage"],
@@ -344,11 +349,28 @@ test("migrated clients use the shared transport boundary", async () => {
 test("model and report clients retain bounded diagnostics and scenario copy", async () => {
   const modelSettings = await parseModule("model-settings.ts");
   const report = await parseModule("report-view.tsx");
+  const guardedModelClients = [
+    "fetchModelSettings",
+    "fetchModelServiceStatus",
+    "testCurrentModelService",
+    "testAllCurrentModelServices",
+    "saveModelSettings",
+    "testModelService",
+  ];
+  for (const client of guardedModelClients) {
+    assert.deepEqual(
+      callsIn(findFunction(modelSettings, client))
+        .filter((target) => target === "requestJson"),
+      ["requestJson"],
+      `${client}: every model request must use the shared bounded transport`,
+    );
+  }
   assert.equal(
     callsIn(modelSettings)
       .filter((target) => target === "requestJson")
       .length,
-    3,
+    guardedModelClients.length,
+    "model-settings.ts has an unreviewed or missing HTTP error boundary",
   );
   assert.equal(callsIn(report).includes("console.error"), false);
   assert.equal(callsIn(report).includes("logDiagnostic"), true);

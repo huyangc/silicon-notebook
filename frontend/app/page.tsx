@@ -95,9 +95,29 @@ import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledge
 import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
 import {
-  MODEL_ROLES, type ModelRole, type ServiceForm,
-  buildPutPayload, fetchModelSettings, saveModelSettings, testModelService,
+  MODEL_ROLES,
+  type ModelRole,
+  type ModelServiceStatusItem,
+  type ModelServicesStatus,
+  type ServiceForm,
+  type StatusModelRole,
+  fetchModelServiceStatus,
+  fetchModelSettings,
+  modelSettingsForms,
+  saveModelSettings,
+  testAllCurrentModelServices,
+  testCurrentModelService,
+  testModelService,
 } from "./model-settings.ts";
+import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
+import {
+  ModelTestCoordinator,
+  acceptModelServiceStatusSnapshot,
+  applyModelServiceTestResult,
+  deriveModelServiceSummaryView,
+  prepareModelSettingsSave,
+  type ModelTestActivity,
+} from "./model-service-orchestration.ts";
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
@@ -694,7 +714,18 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [modelPanelOpen, setModelPanelOpen] = useState(false);
   const [modelForms, setModelForms] = useState<Record<ModelRole, ServiceForm> | null>(null);
-  const [modelTesting, setModelTesting] = useState<Record<string, string>>({});
+  const [modelTesting, setModelTesting] = useState<Partial<Record<ModelRole, string>>>({});
+  const [modelStatusState, setModelStatusState] = useState({
+    status: null as ModelServicesStatus | null,
+    unavailable: false,
+  });
+  const modelStatus = modelStatusState.status;
+  const modelStatusUnavailable = modelStatusState.unavailable;
+  const [highlightedModelRole, setHighlightedModelRole] = useState<StatusModelRole | null>(null);
+  const [modelPanelSaving, setModelPanelSaving] = useState(false);
+  const [modelTestActivity, setModelTestActivity] = useState<ModelTestActivity>({
+    roles: {}, drafts: {}, all: false,
+  });
   const [statusText, setStatusText] = useState("连接中");
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
@@ -776,6 +807,11 @@ export default function Home() {
   // 一次拉齐,面板打开期间任一系统忙碌时轻量轮询保鲜(见下方 effect)。
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
+  const modelStatusRequestRef = useRef(0);
+  const modelPanelRequestRef = useRef(0);
+  const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
+  const modelPanelSavingRef = useRef(false);
+  const modelPanelReturnFocusRef = useRef<HTMLElement | null>(null);
   const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
   // 「索引与构建」面板统一确认——三系统(知识图谱/概念合并/检索索引)的破坏性动作
@@ -1954,9 +1990,29 @@ export default function Home() {
     window.setTimeout(() => focusKgGraphNode(nodeId), 900);
   }, [fgData.nodes, kgViewOpen, pendingKgFocusId]);
 
+  async function refreshModelStatus(): Promise<ModelServicesStatus | null> {
+    const requestId = ++modelStatusRequestRef.current;
+    try {
+      const snapshot = await fetchModelServiceStatus();
+      if (requestId !== modelStatusRequestRef.current) return snapshot;
+      setModelStatusState(acceptModelServiceStatusSnapshot(snapshot));
+      return snapshot;
+    } catch {
+      if (requestId === modelStatusRequestRef.current) {
+        setModelStatusState((current) => ({ ...current, unavailable: true }));
+      }
+      return null;
+    }
+  }
+
   async function loadNotebookCollection() {
-    const healthResponse = await fetchHealth();
-    const notebookResponse = await listNotebooks();
+    // The model status request reads only the persisted local snapshot. It is
+    // deliberately detached so a missing status endpoint cannot hide notebooks.
+    void refreshModelStatus();
+    const [healthResponse, notebookResponse] = await Promise.all([
+      fetchHealth(),
+      listNotebooks(),
+    ]);
     setHealth(healthResponse);
     setStatusText(
       healthResponse.status !== "ok"
@@ -3303,54 +3359,115 @@ export default function Home() {
     window.location.reload();
   }
 
-  const ROLE_LABELS: Record<ModelRole, string> = {
-    llm: "主 LLM", reasoning_llm: "推理 LLM", rewrite_llm: "改写 LLM",
-    kg_llm: "构图 LLM", rerank: "重排 Rerank",
-  };
-  // Base URL 示例：只填到服务根地址（/v1），由后端自动拼接具体接口路径。
-  // 前四个走 OpenAI 兼容 /chat/completions；rerank 走 DashScope 原生服务路径。
-  const BASE_URL_PLACEHOLDERS: Record<ModelRole, string> = {
-    llm: "https://api.openai.com/v1",
-    reasoning_llm: "https://api.deepseek.com/v1",
-    rewrite_llm: "https://api.openai.com/v1",
-    kg_llm: "https://api.openai.com/v1",
-    rerank: "https://dashscope.aliyuncs.com/api/v1",
-  };
-
-  async function openModelPanel() {
+  async function openModelPanel(role: StatusModelRole | null = null) {
+    const requestId = ++modelPanelRequestRef.current;
+    modelPanelReturnFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const coordinator = modelTestCoordinatorRef.current;
+    coordinator.invalidateDrafts();
+    setModelTesting({});
+    setModelTestActivity(coordinator.snapshot());
+    setHighlightedModelRole(role);
     setModelPanelOpen(true);
+    void refreshModelStatus();
     try {
       const view = await fetchModelSettings();
-      const forms = Object.fromEntries(MODEL_ROLES.map((r) => [r, {
-        base_url: view[r].base_url, model: view[r].model,
-        api_key: "", keyDirty: false,
-      }])) as Record<ModelRole, ServiceForm>;
-      setModelForms(forms);
-    } catch (e) { reportError(e); }
+      const forms = modelSettingsForms(view);
+      if (requestId === modelPanelRequestRef.current) setModelForms(forms);
+    } catch (e) {
+      if (requestId === modelPanelRequestRef.current) {
+        setModelPanelOpen(false);
+        modelPanelReturnFocusRef.current?.focus();
+        reportError(e);
+      }
+    }
+  }
+
+  function closeModelPanel() {
+    modelPanelRequestRef.current += 1;
+    setModelPanelOpen(false);
+    setHighlightedModelRole(null);
   }
 
   async function saveModelPanel() {
-    if (!modelForms) return;
+    const coordinator = modelTestCoordinatorRef.current;
+    if (!modelForms || modelPanelSavingRef.current || coordinator.hasInFlight()) return;
+    const payload = prepareModelSettingsSave(modelForms);
+    if (!payload) return;
+    modelPanelSavingRef.current = true;
+    coordinator.invalidateConfiguration();
+    setModelTesting({});
+    modelStatusRequestRef.current += 1;
+    setModelPanelSaving(true);
     try {
-      await saveModelSettings(buildPutPayload(modelForms));
-      setModelPanelOpen(false);
+      const view = await saveModelSettings(payload);
+      setModelForms(modelSettingsForms(view));
+      await refreshModelStatus();
       setToast("模型服务配置已保存");
-    } catch (e) { reportError(e); }
+    } catch (e) {
+      reportError(e);
+    } finally {
+      modelPanelSavingRef.current = false;
+      setModelPanelSaving(false);
+    }
+  }
+
+  async function runCurrentModelTest(role: StatusModelRole): Promise<ModelServiceStatusItem | null> {
+    const coordinator = modelTestCoordinatorRef.current;
+    if (modelPanelSavingRef.current) return null;
+    const ticket = coordinator.beginOne(role);
+    if (!ticket) return null;
+    setModelTestActivity(coordinator.snapshot());
+    try {
+      const item = await testCurrentModelService(role);
+      if (!coordinator.isCurrent(ticket)) return null;
+      modelStatusRequestRef.current += 1;
+      setModelStatusState((current) => applyModelServiceTestResult(current, item, "single"));
+      return item;
+    } catch (e) {
+      if (!coordinator.isCurrent(ticket)) return null;
+      reportError(e);
+      throw e;
+    } finally {
+      coordinator.finish(ticket);
+      setModelTestActivity(coordinator.snapshot());
+    }
+  }
+
+  async function runAllCurrentModelTests() {
+    const coordinator = modelTestCoordinatorRef.current;
+    if (modelPanelSavingRef.current) return;
+    const ticket = coordinator.beginAll();
+    if (!ticket) return;
+    setModelTestActivity(coordinator.snapshot());
+    try {
+      const result = await testAllCurrentModelServices();
+      if (!coordinator.isCurrent(ticket)) return;
+      modelStatusRequestRef.current += 1;
+      setModelStatusState((current) => applyModelServiceTestResult(current, result, "all"));
+    } catch (e) {
+      if (coordinator.isCurrent(ticket)) reportError(e);
+    } finally {
+      coordinator.finish(ticket);
+      setModelTestActivity(coordinator.snapshot());
+    }
   }
 
   async function runModelTest(role: ModelRole) {
-    if (!modelForms) return;
+    const coordinator = modelTestCoordinatorRef.current;
+    if (!modelForms || modelPanelSavingRef.current) return;
+    const ticket = coordinator.beginDraft(role);
+    if (!ticket) return;
     const f = modelForms[role];
+    setModelTestActivity(coordinator.snapshot());
     setModelTesting((m) => ({ ...m, [role]: "测试中…" }));
     try {
       const r = await testModelService(role, f.base_url.trim(), f.model.trim(),
         f.keyDirty ? f.api_key : null);
+      if (!coordinator.isCurrent(ticket)) return;
       // 200 响应挂不上 X-User-Message 头,故 ModelTestResult 用 `code` 承载出处:
       // 后端只回稳定枚举,文案在 vocabulary.ts(这样才落在界面词汇守卫的作用域里)。
-      // `error` 是 `f"{type(exc).__name__}: {exc}"` 的诊断,只进 console。
-      // 这页的用途就是排查配置,一律压成「连接未通过」等于把它废掉——所以要的是
-      // 结构化出处,不是放宽判据。
-      if (!r.ok && r.error) logDiagnostic("model-test", r.error);
       setModelTesting((m) => ({
         ...m,
         [role]: r.ok
@@ -3358,7 +3475,13 @@ export default function Home() {
           : `失败：${label(MODEL_TEST_ERROR, r.code, "连接未通过")}`,
       }));
     } catch (e) {
-      setModelTesting((m) => ({ ...m, [role]: "失败" })); reportError(e);
+      if (coordinator.isCurrent(ticket)) {
+        setModelTesting((m) => ({ ...m, [role]: "失败" }));
+        reportError(e);
+      }
+    } finally {
+      coordinator.finish(ticket);
+      setModelTestActivity(coordinator.snapshot());
     }
   }
 
@@ -3392,6 +3515,12 @@ export default function Home() {
   const menuNotebook = menuNotebookId
     ? notebooks.find((item) => item.id === menuNotebookId) ?? null
     : null;
+  const modelSummaryView = deriveModelServiceSummaryView({
+    apiStatus: health?.status ?? null,
+    statusText,
+    modelStatus,
+    modelStatusUnavailable,
+  });
 
   // 启动就绪门:在认证/加载分支之前拦截。未就绪时只展示启动屏,绝不露出登录表单或空白挂起。
   if (!serviceReady) return <StartingScreen snapshot={readySnapshot} onRetry={() => setReadyRetry((n) => n + 1)} />;
@@ -3418,10 +3547,12 @@ export default function Home() {
           </div>
         </div>
         <div className="topbar-right">
-          <div className="status" title={health ? `API ${health.status} · 模型${health.llm_configured ? "已配置" : "未配置"}` : "正在连接服务…"}>
-            <span className={`status-dot ${!health ? "connecting" : health.status !== "ok" ? "bad" : !health.llm_configured ? "warn" : ""}`} />
-            <span>{statusText}</span>
-          </div>
+          <ModelServiceSummaryButton
+            text={modelSummaryView.text}
+            tone={modelSummaryView.tone}
+            title={modelSummaryView.title}
+            onOpen={() => { void openModelPanel(); }}
+          />
           <PendingBell
             snapshot={pending.snapshot}
             doneItems={pending.doneItems}
@@ -4058,6 +4189,10 @@ export default function Home() {
                             buildingScaleIndex={buildingScaleIndex}
                             onSaveMemory={(answerId) => setMemoryAnswerId(answerId)}
                             memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
+                            onTestModel={runCurrentModelTest}
+                            onOpenModelSettings={(role) => { void openModelPanel(role); }}
+                            testingModelRoles={modelTestActivity.roles}
+                            testingAllModels={modelTestActivity.all}
                           />
                         </div>
                       </div>
@@ -5603,48 +5738,30 @@ export default function Home() {
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />
 
       {modelPanelOpen && modelForms && (
-        <section className="utility-modal" role="dialog" aria-modal="true"
-          onClick={(e) => { if (e.currentTarget === e.target) setModelPanelOpen(false); }}>
-          <div className="utility-modal-card">
-            <div className="source-modal-header">
-              <div><h2>模型服务</h2><p>留空则使用系统默认；API Key 只写不回显</p></div>
-              <button className="icon-button" onClick={() => setModelPanelOpen(false)}>×</button>
-            </div>
-            <div className="source-detail-body">
-              <p className="tool-hint" style={{ margin: "0 0 12px" }}>
-                Base URL 只需填到服务根地址（通常以 <code>/v1</code> 结尾），系统会自动拼接 <code>/chat/completions</code> 等接口路径。
-                例如填 <code>https://api.openai.com/v1</code>，而不是 <code>https://api.openai.com/v1/chat/completions</code>。
-              </p>
-              {MODEL_ROLES.map((role) => (
-                <fieldset key={role} className="edit-form" style={{ marginBottom: 12 }}>
-                  <legend>{ROLE_LABELS[role]}</legend>
-                  <label>Base URL
-                    <input value={modelForms[role].base_url}
-                      placeholder={BASE_URL_PLACEHOLDERS[role]}
-                      onChange={(e) => setModelForms((s) => s && ({ ...s, [role]: { ...s[role], base_url: e.target.value } }))} />
-                  </label>
-                  <label>Model
-                    <input value={modelForms[role].model}
-                      onChange={(e) => setModelForms((s) => s && ({ ...s, [role]: { ...s[role], model: e.target.value } }))} />
-                  </label>
-                  <label>API Key
-                    <input type="password" placeholder="未改动则保留原 key"
-                      value={modelForms[role].api_key}
-                      onChange={(e) => setModelForms((s) => s && ({ ...s, [role]: { ...s[role], api_key: e.target.value, keyDirty: true } }))} />
-                  </label>
-                  <div className="modal-actions">
-                    <button type="button" className="sort-button" onClick={() => runModelTest(role)}>测试</button>
-                    <span style={{ fontSize: 12, opacity: 0.8 }}>{modelTesting[role] || ""}</span>
-                  </div>
-                </fieldset>
-              ))}
-              <div className="modal-actions">
-                <button className="sort-button" onClick={() => setModelPanelOpen(false)}>取消</button>
-                <button className="new-pill" onClick={() => saveModelPanel()}>保存</button>
-              </div>
-            </div>
-          </div>
-        </section>
+        <ModelServicePanel
+          forms={modelForms}
+          status={modelStatus}
+          highlightedRole={highlightedModelRole}
+          draftTestResults={modelTesting}
+          onFormChange={(role, form) => {
+            if (modelPanelSavingRef.current) return;
+            const coordinator = modelTestCoordinatorRef.current;
+            coordinator.invalidateDraft(role);
+            setModelTesting((current) => ({ ...current, [role]: "" }));
+            setModelTestActivity(coordinator.snapshot());
+            setModelForms((current) => current && ({ ...current, [role]: form }));
+          }}
+          onTestDraft={(role) => { void runModelTest(role); }}
+          onTestCurrent={async (role) => { await runCurrentModelTest(role); }}
+          onTestAll={runAllCurrentModelTests}
+          onClose={closeModelPanel}
+          onSave={() => { void saveModelPanel(); }}
+          testingRoles={modelTestActivity.roles}
+          draftTestingRoles={modelTestActivity.drafts}
+          allTesting={modelTestActivity.all}
+          saving={modelPanelSaving}
+          returnFocusTo={modelPanelReturnFocusRef.current}
+        />
       )}
     </div>
   );

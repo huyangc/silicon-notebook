@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { label, TIER, PARSE_STATUS, ELEMENT_TYPE, EVIDENCE_LEVEL, PROMOTION_STATUS, KNOWLEDGE_STATUS, SEVERITY, MODEL_TEST_ERROR } from "./vocabulary.ts";
+import { label, TIER, PARSE_STATUS, ELEMENT_TYPE, EVIDENCE_LEVEL, PROMOTION_STATUS, KNOWLEDGE_STATUS, SEVERITY, MODEL_SERVICE_STATUS_ERROR, MODEL_TEST_ERROR } from "./vocabulary.ts";
 import { KNOWLEDGE_STATUS_OPTIONS } from "./workspace-model.ts";
 
 test("label 命中时返回映射值", () => {
@@ -101,4 +101,9 @@ test("MODEL_TEST_ERROR 三个 code 都有人话,且不泄漏后端字段名", ()
 test("未知 code 退到兜底词,绝不回显 code 本身", () => {
   assert.equal(label(MODEL_TEST_ERROR, "rate_limited", "连接未通过"), "连接未通过");
   assert.notEqual(label(MODEL_TEST_ERROR, "rate_limited", "连接未通过"), "rate_limited");
+});
+
+test("模型服务状态 code 使用稳定中文，不展示原始诊断", () => {
+  assert.equal(label(MODEL_SERVICE_STATUS_ERROR, "upstream_error", "连接未通过"), "连接未通过");
+  assert.equal(label(MODEL_SERVICE_STATUS_ERROR, "future_code", "连接未通过"), "连接未通过");
 });
