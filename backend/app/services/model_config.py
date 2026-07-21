@@ -1,8 +1,13 @@
-"""每用户模型服务配置解析。纯函数 resolve_effective_config 便于单测；仓库侧
-resolve_model_config 注入用户的 model_settings + 全局 policy。"""
+"""每用户模型服务配置解析。"""
 from __future__ import annotations
-from dataclasses import dataclass
 
+import hashlib
+from dataclasses import dataclass
+from typing import Mapping
+
+
+MODEL_SERVICE_ROLES = ("llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank")
+STATUS_SERVICE_ROLES = (*MODEL_SERVICE_ROLES, "embedding")
 LLM_VARIANTS = ("reasoning_llm", "rewrite_llm", "kg_llm")
 
 
@@ -16,22 +21,122 @@ class ResolvedModelConfig:
     api_key: str
     model: str
     source: str   # "user" | "system" | "none"
+    kind: str = "llm"
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url and self.api_key and self.model)
 
 
 def _full(svc: dict) -> bool:
     return bool(svc.get("base_url") and svc.get("api_key") and svc.get("model"))
 
 
-def resolve_effective_config(model_settings: dict, role: str, policy: str) -> ResolvedModelConfig:
+def system_model_settings(settings) -> dict[str, dict[str, str]]:
+    primary = {
+        "base_url": settings.openai_compat_base_url,
+        "api_key": settings.openai_compat_api_key,
+        "model": settings.openai_compat_model,
+        "source": "system",
+        "kind": "llm",
+    }
+    reasoning = (
+        {
+            "base_url": settings.reasoning_llm_base_url,
+            "api_key": settings.reasoning_llm_api_key,
+            "model": settings.reasoning_llm_model,
+            "source": "system",
+            "kind": "llm",
+        }
+        if settings.reasoning_llm_configured else primary
+    )
+    rewrite = (
+        {
+            "base_url": settings.rewrite_llm_base_url or settings.openai_compat_base_url,
+            "api_key": settings.rewrite_llm_api_key or settings.openai_compat_api_key,
+            "model": settings.rewrite_llm_model,
+            "source": "system",
+            "kind": "llm",
+        }
+        if settings.rewrite_llm_configured else primary
+    )
+    kg = (
+        {
+            "base_url": settings.kg_llm_base_url,
+            "api_key": settings.kg_llm_api_key,
+            "model": settings.kg_llm_model,
+            "source": "system",
+            "kind": "llm",
+        }
+        if settings.kg_llm_configured else primary
+    )
+    return {
+        "llm": primary,
+        "reasoning_llm": reasoning,
+        "rewrite_llm": rewrite,
+        "kg_llm": kg,
+        "rerank": {
+            "base_url": settings.rerank_base_url,
+            "api_key": settings.rerank_api_key,
+            "model": settings.rerank_model,
+            "source": "system",
+            "kind": "rerank",
+        },
+        "embedding": {
+            "base_url": settings.embed_base_url,
+            "api_key": settings.embed_api_key,
+            "model": settings.embed_model,
+            "source": "system",
+            "kind": "embedding",
+        },
+    }
+
+
+def resolve_effective_config(
+    model_settings: dict,
+    role: str,
+    policy: str,
+    system_settings: Mapping[str, Mapping[str, str]] | None = None,
+) -> ResolvedModelConfig:
+    if role == "embedding":
+        svc = dict((system_settings or {}).get(role) or {})
+        return ResolvedModelConfig(
+            svc.get("base_url", ""),
+            svc.get("api_key", ""),
+            svc.get("model", ""),
+            svc.get("source", "system"),
+            "embedding",
+        )
     svc = (model_settings or {}).get(role) or {}
     if _full(svc):
-        return ResolvedModelConfig(svc["base_url"], svc["api_key"], svc["model"], "user")
+        kind = "rerank" if role == "rerank" else "llm"
+        return ResolvedModelConfig(
+            svc["base_url"], svc["api_key"], svc["model"], "user", kind
+        )
     # 第 1 层：变体 LLM 未配 → 回退到用户自己的主 LLM
     if role in LLM_VARIANTS:
         primary = (model_settings or {}).get("llm") or {}
         if _full(primary):
-            return ResolvedModelConfig(primary["base_url"], primary["api_key"], primary["model"], "user")
+            return ResolvedModelConfig(
+                primary["base_url"], primary["api_key"], primary["model"], "user", "llm"
+            )
     # 第 2 层：用户没配 → 按 policy
     if policy == "required":
-        return ResolvedModelConfig("", "", "", "none")
-    return ResolvedModelConfig("", "", "", "system")
+        return ResolvedModelConfig(
+            "", "", "", "none", "rerank" if role == "rerank" else "llm"
+        )
+    system = dict((system_settings or {}).get(role) or {})
+    return ResolvedModelConfig(
+        system.get("base_url", ""),
+        system.get("api_key", ""),
+        system.get("model", ""),
+        system.get("source", "system"),
+        system.get("kind", "rerank" if role == "rerank" else "llm"),
+    )
+
+
+def model_config_fingerprint(config: ResolvedModelConfig) -> str:
+    material = "\0".join(
+        (config.kind, config.source, config.base_url, config.model, config.api_key)
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()

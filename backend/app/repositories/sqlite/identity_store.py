@@ -10,7 +10,11 @@ from app.core.config import Settings
 from app.core.request_context import get_request_user
 from app.models.schemas import UserProfile
 from app.repositories.sqlite.database import SqliteDatabase
-from app.services.model_config import ResolvedModelConfig, resolve_effective_config
+from app.services.model_config import (
+    ResolvedModelConfig,
+    resolve_effective_config,
+    system_model_settings,
+)
 
 
 def _now() -> str:
@@ -94,6 +98,7 @@ class IdentityStore:
             self.get_user_model_settings(user.id),
             role,
             self.settings.user_model_config_policy,
+            system_model_settings(self.settings),
         )
 
     def create_user(self, username: str, password: str) -> UserProfile:

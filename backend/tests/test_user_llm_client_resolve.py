@@ -24,6 +24,7 @@ def test_user_config_drives_llm_client(tmp_path):
     try:
         c = repo.llm_client
         assert c.base_url == "https://u/v1" and c.model == "m-u"
+        assert repo.resolve_model_config(user, "llm").model == c.model
     finally:
         reset_request_user(tok)
 
@@ -35,13 +36,33 @@ def test_no_user_config_fallback_to_system_and_setter(tmp_path):
     assert repo.llm_client is sentinel   # 无用户配置 → 系统默认
 
 
-def test_variant_uses_user_primary(tmp_path):
+def test_reasoning_role_uses_user_primary_when_dedicated_config_is_absent(tmp_path):
     repo = _repo(tmp_path)
     repo.set_user_model_settings("user-local",
         {"llm": {"base_url": "https://u/v1", "api_key": "sk-u", "model": "m-u"}})
     tok = set_request_user(repo.current_user())
     try:
-        assert repo.kg_llm_client.model == "m-u"   # kg 未配 → 用户主 LLM
+        client = repo.reasoning_llm_client
+        assert client.model == "m-u"   # reasoning 未配 → 用户主 LLM
+        assert (
+            repo.resolve_model_config(repo.current_user(), "reasoning_llm").model
+            == client.model
+        )
+    finally:
+        reset_request_user(tok)
+
+
+def test_dedicated_reasoning_client_matches_resolved_model(tmp_path):
+    repo = _repo(
+        tmp_path,
+        reasoning_llm_base_url="https://reason.example/v1",
+        reasoning_llm_api_key="reason-secret",
+        reasoning_llm_model="reason-runtime",
+    )
+    tok = set_request_user(repo.current_user())
+    try:
+        client = repo.reasoning_llm_client
+        assert repo.resolve_model_config(repo.current_user(), "reasoning_llm").model == client.model
     finally:
         reset_request_user(tok)
 

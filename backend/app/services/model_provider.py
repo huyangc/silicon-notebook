@@ -9,7 +9,11 @@ from app.services.model_concurrency import (
     LimitedJsonChatClient,
     current_model_concurrency,
 )
-from app.services.model_config import ModelNotConfiguredError, ResolvedModelConfig
+from app.services.model_config import (
+    ModelNotConfiguredError,
+    ResolvedModelConfig,
+    model_config_fingerprint,
+)
 from app.services.rerank_client import RerankClient
 
 
@@ -95,7 +99,7 @@ class RuntimeModelProvider:
         return self._system_llm_client
 
     def _user_llm_cached(self, cfg: ResolvedModelConfig):
-        fingerprint = f"{cfg.base_url}|{cfg.api_key}|{cfg.model}"
+        fingerprint = model_config_fingerprint(cfg)
         client = self._user_llm_clients.get(fingerprint)
         if client is None:
             client = OpenAICompatibleClient(
@@ -158,7 +162,7 @@ class RuntimeModelProvider:
             self.identity.current_user(), "rerank"
         )
         if cfg.source == "user":
-            fingerprint = f"{cfg.base_url}|{cfg.api_key}|{cfg.model}"
+            fingerprint = model_config_fingerprint(cfg)
             client = self._user_rerank_clients.get(fingerprint)
             if client is None:
                 client = RerankClient(
