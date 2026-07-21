@@ -89,17 +89,12 @@ class IdentityStore:
         )
 
     def get_user_model_settings(self, user_id: str) -> dict:
-        cached = self.model_config_cache.get(user_id)
-        if cached is not None:
-            return cached
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT model_settings FROM user_profiles WHERE user_id = ?",
                 (user_id,),
             ).fetchone()
-        parsed = _decode_model_settings(row["model_settings"] if row else None)
-        self.model_config_cache[user_id] = parsed
-        return parsed
+        return _decode_model_settings(row["model_settings"] if row else None)
 
     def set_user_model_settings(self, user_id: str, settings: dict) -> None:
         with self.database.write() as db:

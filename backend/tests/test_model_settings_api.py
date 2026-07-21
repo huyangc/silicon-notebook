@@ -1,4 +1,6 @@
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -64,6 +66,76 @@ def test_put_omit_key_preserves_clear_empties(client):
     client.put("/api/me/model-settings", json={"llm": {"base_url": ""}}, headers=h)
     body = client.get("/api/me/model-settings", headers=h).json()
     assert body["llm"]["base_url"] == ""
+
+
+def test_put_response_reads_committed_snapshot_after_paused_old_read(
+    client, monkeypatch
+):
+    from app.api.deps import identity_repository
+    from app.repositories.sqlite import identity_store as identity_store_module
+
+    headers = _auth(client)
+    user_id = client.get("/api/me", headers=headers).json()["id"]
+    initial = {
+        "llm": {
+            "base_url": "https://old.example/v1",
+            "api_key": "old-secret",
+            "model": "old-model",
+        }
+    }
+    assert client.put(
+        "/api/me/model-settings", json=initial, headers=headers
+    ).status_code == 200
+
+    store = identity_repository()
+    store.model_config_cache.pop(user_id, None)
+    selected_old = threading.Event()
+    release_old = threading.Event()
+    committed = threading.Event()
+    stale_request_done = threading.Event()
+    real_decode = identity_store_module._decode_model_settings
+    real_patch = store.patch_user_model_settings_atomic
+
+    def pause_reader_after_select(value):
+        if not selected_old.is_set():
+            selected_old.set()
+            assert release_old.wait(5)
+        return real_decode(value)
+
+    def hold_put_after_commit(patch_user_id, patch):
+        result = real_patch(patch_user_id, patch)
+        committed.set()
+        assert stale_request_done.wait(5)
+        return result
+
+    monkeypatch.setattr(
+        identity_store_module, "_decode_model_settings", pause_reader_after_select
+    )
+    monkeypatch.setattr(store, "patch_user_model_settings_atomic", hold_put_after_commit)
+
+    with (
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="stale-api-read") as reads,
+        ThreadPoolExecutor(max_workers=1, thread_name_prefix="settings-api-write") as writes,
+    ):
+        stale_response = reads.submit(
+            client.get, "/api/me/model-settings", headers=headers
+        )
+        assert selected_old.wait(5)
+        put_response = writes.submit(
+            client.put,
+            "/api/me/model-settings",
+            json={"llm": {"model": "new-model"}},
+            headers=headers,
+        )
+        assert committed.wait(5)
+        release_old.set()
+        assert stale_response.result(timeout=5).json()["llm"]["model"] == "old-model"
+        stale_request_done.set()
+        response = put_response.result(timeout=5)
+
+    assert response.status_code == 200
+    assert response.json()["llm"]["model"] == "new-model"
+    assert store.get_user_model_settings(user_id)["llm"]["model"] == "new-model"
 
 
 def test_test_endpoint_incomplete_returns_not_ok(client):

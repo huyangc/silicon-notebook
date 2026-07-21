@@ -243,6 +243,29 @@ def test_old_real_client_failure_keeps_old_ask_name_but_not_new_status(repo):
         ask_context._ASK_MODEL_ERRORS.reset(token)
 
 
+def test_runtime_client_resolution_observes_another_repository_commit(repo):
+    writer = SQLiteRepository(repo.settings)
+    writer._migrate()
+    writer._seed()
+    repo.set_user_model_settings("user-local", {
+        "llm": {
+            "base_url": "https://old.example/v1",
+            "api_key": "old-secret",
+            "model": "old-runtime-model",
+        }
+    })
+    old_client = repo.llm_client
+    assert old_client.model == "old-runtime-model"
+
+    writer._runtime.identity.patch_user_model_settings_atomic(
+        "user-local", {"llm": {"model": "new-runtime-model"}}
+    )
+
+    new_client = repo.llm_client
+    assert new_client.model == "new-runtime-model"
+    assert new_client is not old_client
+
+
 def test_provider_failure_from_unstamped_test_double_is_not_persisted(repo):
     token = ask_context._ASK_MODEL_ERRORS.set([])
     try:
