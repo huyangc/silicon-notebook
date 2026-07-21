@@ -351,10 +351,14 @@ function ModelErrorPanel({
   errors,
   onTestModel,
   onOpenModelSettings,
+  testingModelRoles = {},
+  testingAllModels = false,
 }: {
   errors: AnswerModelError[];
-  onTestModel?: (service: StatusModelRole) => Promise<ModelServiceStatusItem>;
+  onTestModel?: (service: StatusModelRole) => Promise<ModelServiceStatusItem | null>;
   onOpenModelSettings?: (service: StatusModelRole) => void;
+  testingModelRoles?: Partial<Record<StatusModelRole, boolean>>;
+  testingAllModels?: boolean;
 }) {
   const uniqueErrors = useMemo(() => {
     const seen = new Set<string>();
@@ -376,6 +380,7 @@ function ModelErrorPanel({
     setResults((current) => ({ ...current, [service]: "" }));
     try {
       const result = await onTestModel(service);
+      if (!result) return;
       setResults((current) => ({ ...current, [service]: modelTestResultText(result) }));
     } catch {
       setResults((current) => ({ ...current, [service]: "失败：连接未通过" }));
@@ -389,32 +394,37 @@ function ModelErrorPanel({
     <section className="answer-model-error" aria-label="模型服务异常">
       <div className="answer-model-error-heading">⚠️ 本次回答可能不完整</div>
       <ul className="answer-model-error-list">
-        {uniqueErrors.map((error) => (
-          <li key={`${error.service}\0${error.model}`}>
-            <span>{modelFailureText(error)}</span>
-            <div className="answer-model-error-actions">
-              {onTestModel && (
-                <button
-                  type="button"
-                  disabled={Boolean(testing[error.service])}
-                  onClick={() => testService(error.service)}
-                >
-                  {testing[error.service] ? "测试中…" : "测试此模型"}
-                </button>
-              )}
-              {onOpenModelSettings && (
-                <button type="button" onClick={() => onOpenModelSettings(error.service)}>
-                  打开模型服务
-                </button>
-              )}
-              {results[error.service] && (
-                <span className="answer-model-test-result" role="status">
-                  {results[error.service]}
-                </span>
-              )}
-            </div>
-          </li>
-        ))}
+        {uniqueErrors.map((error) => {
+          const isTesting = testingAllModels
+            || Boolean(testingModelRoles[error.service])
+            || Boolean(testing[error.service]);
+          return (
+            <li key={`${error.service}\0${error.model}`}>
+              <span>{modelFailureText(error)}</span>
+              <div className="answer-model-error-actions">
+                {onTestModel && (
+                  <button
+                    type="button"
+                    disabled={isTesting}
+                    onClick={() => testService(error.service)}
+                  >
+                    {isTesting ? "测试中…" : "测试此模型"}
+                  </button>
+                )}
+                {onOpenModelSettings && (
+                  <button type="button" onClick={() => onOpenModelSettings(error.service)}>
+                    打开模型服务
+                  </button>
+                )}
+                {results[error.service] && (
+                  <span className="answer-model-test-result" role="status">
+                    {results[error.service]}
+                  </span>
+                )}
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </section>
   );
@@ -435,6 +445,8 @@ export function AnswerView({
   memorySaved,
   onTestModel,
   onOpenModelSettings,
+  testingModelRoles,
+  testingAllModels,
 }: {
   answer: AskResponse;
   feedbackSent: string;
@@ -451,8 +463,10 @@ export function AnswerView({
   buildingScaleIndex: boolean;
   onSaveMemory: (answerId: string) => void;
   memorySaved: boolean;
-  onTestModel?: (service: StatusModelRole) => Promise<ModelServiceStatusItem>;
+  onTestModel?: (service: StatusModelRole) => Promise<ModelServiceStatusItem | null>;
   onOpenModelSettings?: (service: StatusModelRole) => void;
+  testingModelRoles?: Partial<Record<StatusModelRole, boolean>>;
+  testingAllModels?: boolean;
 }) {
   const [copied, setCopied] = useState(false);
   const [citePopover, setCitePopover] = useState<{
@@ -493,6 +507,8 @@ export function AnswerView({
           errors={answer.model_errors}
           onTestModel={onTestModel}
           onOpenModelSettings={onOpenModelSettings}
+          testingModelRoles={testingModelRoles}
+          testingAllModels={testingAllModels}
         />
       )}
       {answer.index_required && (

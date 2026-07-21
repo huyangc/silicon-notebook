@@ -87,7 +87,6 @@ import { API_BASE, authHeaders, clearToken, getToken, fetchMe, logoutUser, type 
 import { humanizedError, logDiagnostic, throwHumanizedHttpError, toUserMessage } from "./errors.ts";
 import {
   MODEL_ROLES,
-  MODEL_ROLE_LABELS,
   type ModelRole,
   type ModelServiceStatusItem,
   type ModelServicesStatus,
@@ -98,12 +97,16 @@ import {
   fetchModelSettings,
   mergeModelServiceStatus,
   saveModelSettings,
-  summarizeModelServices,
   testAllCurrentModelServices,
   testCurrentModelService,
   testModelService,
 } from "./model-settings.ts";
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
+import {
+  ModelTestCoordinator,
+  deriveModelServiceSummaryView,
+  type ModelTestActivity,
+} from "./model-service-orchestration.ts";
 import { AuthGate } from "./AuthGate";
 import { AccountMenu } from "./account-menu";
 import { AskComposer } from "./ask-composer";
@@ -943,6 +946,7 @@ export default function Home() {
   const [modelStatusUnavailable, setModelStatusUnavailable] = useState(false);
   const [highlightedModelRole, setHighlightedModelRole] = useState<StatusModelRole | null>(null);
   const [modelPanelSaving, setModelPanelSaving] = useState(false);
+  const [modelTestActivity, setModelTestActivity] = useState<ModelTestActivity>({ roles: {}, all: false });
   const [statusText, setStatusText] = useState("连接中");
   const [titleDraft, setTitleDraft] = useState("");
   const [titleSaveInFlight, setTitleSaveInFlight] = useState(false);
@@ -1026,6 +1030,8 @@ export default function Home() {
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const modelStatusRequestRef = useRef(0);
   const modelPanelRequestRef = useRef(0);
+  const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
+  const modelPanelSavingRef = useRef(false);
   const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
   // 「索引与构建」面板统一确认——三系统(知识图谱/概念合并/检索索引)的破坏性动作
@@ -3658,7 +3664,11 @@ export default function Home() {
   }
 
   async function saveModelPanel() {
-    if (!modelForms || modelPanelSaving) return;
+    const coordinator = modelTestCoordinatorRef.current;
+    if (!modelForms || modelPanelSavingRef.current || coordinator.hasInFlight()) return;
+    modelPanelSavingRef.current = true;
+    coordinator.invalidateConfiguration();
+    modelStatusRequestRef.current += 1;
     setModelPanelSaving(true);
     try {
       const view = await saveModelSettings(buildPutPayload(modelForms));
@@ -3673,31 +3683,51 @@ export default function Home() {
     } catch (e) {
       reportError(e);
     } finally {
+      modelPanelSavingRef.current = false;
       setModelPanelSaving(false);
     }
   }
 
-  async function runCurrentModelTest(role: StatusModelRole): Promise<ModelServiceStatusItem> {
+  async function runCurrentModelTest(role: StatusModelRole): Promise<ModelServiceStatusItem | null> {
+    const coordinator = modelTestCoordinatorRef.current;
+    if (modelPanelSavingRef.current) return null;
+    const ticket = coordinator.beginOne(role);
+    if (!ticket) return null;
+    setModelTestActivity(coordinator.snapshot());
     try {
       const item = await testCurrentModelService(role);
+      if (!coordinator.isCurrent(ticket)) return null;
       modelStatusRequestRef.current += 1;
       setModelStatus((current) => mergeModelServiceStatus(current, item));
       setModelStatusUnavailable(false);
       return item;
     } catch (e) {
+      if (!coordinator.isCurrent(ticket)) return null;
       reportError(e);
       throw e;
+    } finally {
+      coordinator.finish(ticket);
+      setModelTestActivity(coordinator.snapshot());
     }
   }
 
   async function runAllCurrentModelTests() {
+    const coordinator = modelTestCoordinatorRef.current;
+    if (modelPanelSavingRef.current) return;
+    const ticket = coordinator.beginAll();
+    if (!ticket) return;
+    setModelTestActivity(coordinator.snapshot());
     try {
       const result = await testAllCurrentModelServices();
+      if (!coordinator.isCurrent(ticket)) return;
       modelStatusRequestRef.current += 1;
       setModelStatus((current) => mergeModelServiceStatus(current, result));
       setModelStatusUnavailable(false);
     } catch (e) {
-      reportError(e);
+      if (coordinator.isCurrent(ticket)) reportError(e);
+    } finally {
+      coordinator.finish(ticket);
+      setModelTestActivity(coordinator.snapshot());
     }
   }
 
@@ -3755,49 +3785,12 @@ export default function Home() {
   const menuNotebook = menuNotebookId
     ? notebooks.find((item) => item.id === menuNotebookId) ?? null
     : null;
-  const persistedModelSummary = modelStatus
-    ? summarizeModelServices(modelStatus.services)
-    : null;
-  const pendingModelServices = modelStatus?.services.filter(
-    (item) => item.configured && item.status === "untested",
-  ) ?? [];
-  const modelSummaryView: {
-    text: string;
-    tone: "ok" | "warn" | "bad" | "connecting";
-    title: string;
-  } = !health
-    ? {
-        text: statusText || "连接中",
-        tone: statusText && statusText !== "连接中" ? "bad" : "connecting",
-        title: statusText && statusText !== "连接中" ? statusText : "正在连接服务…",
-      }
-    : health.status !== "ok"
-      ? { text: "服务连接异常", tone: "bad", title: "API 服务连接异常" }
-      : modelStatusUnavailable
-        ? {
-            text: "API 正常 · 模型状态未知",
-            tone: "warn",
-            title: "API 正常；模型状态暂时不可用，打开模型服务查看",
-          }
-        : persistedModelSummary
-          ? {
-              text: persistedModelSummary.text,
-              tone: persistedModelSummary.tone,
-              title: persistedModelSummary.abnormal.length > 0
-                ? `模型异常：${persistedModelSummary.abnormal.map((item) =>
-                    `${MODEL_ROLE_LABELS[item.service]} ${item.model || "未配置"}`
-                  ).join("、")}`
-                : pendingModelServices.length > 0
-                  ? `待测试：${pendingModelServices.map((item) =>
-                      `${MODEL_ROLE_LABELS[item.service]} ${item.model || "未配置"}`
-                    ).join("、")}`
-                  : "API 和已配置模型状态正常",
-            }
-          : {
-              text: "API 正常 · 正在读取模型状态",
-              tone: "connecting",
-              title: "正在读取已保存的模型状态，不会自动测试模型",
-            };
+  const modelSummaryView = deriveModelServiceSummaryView({
+    apiStatus: health?.status ?? null,
+    statusText,
+    modelStatus,
+    modelStatusUnavailable,
+  });
 
   // 启动就绪门:在认证/加载分支之前拦截。未就绪时只展示启动屏,绝不露出登录表单或空白挂起。
   if (!serviceReady) return <StartingScreen snapshot={readySnapshot} onRetry={() => setReadyRetry((n) => n + 1)} />;
@@ -4496,6 +4489,8 @@ export default function Home() {
                             memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
                             onTestModel={runCurrentModelTest}
                             onOpenModelSettings={(role) => { void openModelPanel(role); }}
+                            testingModelRoles={modelTestActivity.roles}
+                            testingAllModels={modelTestActivity.all}
                           />
                         </div>
                       </div>
@@ -6064,6 +6059,8 @@ export default function Home() {
           onTestAll={runAllCurrentModelTests}
           onClose={closeModelPanel}
           onSave={() => { void saveModelPanel(); }}
+          testingRoles={modelTestActivity.roles}
+          allTesting={modelTestActivity.all}
           saving={modelPanelSaving}
         />
       )}

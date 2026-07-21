@@ -126,3 +126,40 @@ test("shows per-service pending and stable test results", async () => {
   await user.click(screen.getAllByRole("button", { name: "测试此模型" })[1]);
   await waitFor(() => expect(screen.getByText("失败：连接未通过")).toBeInTheDocument());
 });
+
+
+test("uses page-owned test locks and ignores a stale configuration completion", async () => {
+  const onTestModel = vi.fn(async () => null);
+  const user = userEvent.setup();
+  const { rerender } = renderAnswer(answer, {
+    onTestModel,
+    testingModelRoles: { reasoning_llm: true },
+  });
+
+  expect(screen.getByRole("button", { name: "测试中…" })).toBeDisabled();
+  expect(screen.getAllByRole("button", { name: "测试此模型" })).toHaveLength(1);
+
+  rerender(
+    <AnswerView
+      answer={answer}
+      feedbackSent=""
+      onFeedback={() => undefined}
+      onOpenKnowledgeGraph={() => undefined}
+      onOpenKnowhowRow={() => undefined}
+      notebookId="nb-1"
+      notebookNames={{}}
+      onBuildScaleIndex={() => undefined}
+      buildingScaleIndex={false}
+      onSaveMemory={() => undefined}
+      memorySaved={false}
+      onTestModel={onTestModel}
+      testingModelRoles={{}}
+    />,
+  );
+  await user.click(screen.getAllByRole("button", { name: "测试此模型" })[0]);
+
+  expect(onTestModel).toHaveBeenCalledWith("reasoning_llm");
+  await waitFor(() => {
+    expect(screen.queryByText(/正常 \d+ms|失败：|尚未配置/)).not.toBeInTheDocument();
+  });
+});

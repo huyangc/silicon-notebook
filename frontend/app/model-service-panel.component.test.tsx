@@ -1,4 +1,4 @@
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
@@ -62,10 +62,12 @@ function renderPanel(overrides: Partial<React.ComponentProps<typeof ModelService
     onTestAll: vi.fn(async () => undefined),
     onClose: vi.fn(),
     onSave: vi.fn(),
+    testingRoles: {},
+    allTesting: false,
     ...overrides,
   };
-  render(<ModelServicePanel {...props} />);
-  return props;
+  const view = render(<ModelServicePanel {...props} />);
+  return { props, ...view };
 }
 
 
@@ -87,21 +89,23 @@ test("renders dynamic saved model status and a read-only embedding row without p
 });
 
 
-test("all-model test runs once and locks the action until completion", async () => {
+test("renders the page-owned all-model lock until the orchestrator releases it", async () => {
   let resolveAll!: () => void;
   const onTestAll = vi.fn(() => new Promise<void>((resolve) => { resolveAll = resolve; }));
   const user = userEvent.setup();
-  renderPanel({ onTestAll });
+  const { props, rerender } = renderPanel({ onTestAll });
 
   const button = screen.getByRole("button", { name: "测试当前使用的全部模型" });
   await user.click(button);
-  await user.click(button);
-
   expect(onTestAll).toHaveBeenCalledTimes(1);
+
+  rerender(<ModelServicePanel {...props} allTesting />);
   expect(screen.getByRole("button", { name: "正在测试全部模型…" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
 
   resolveAll();
-  expect(await screen.findByRole("button", { name: "测试当前使用的全部模型" })).toBeEnabled();
+  rerender(<ModelServicePanel {...props} allTesting={false} />);
+  expect(screen.getByRole("button", { name: "测试当前使用的全部模型" })).toBeEnabled();
 });
 
 
@@ -126,19 +130,45 @@ test("focuses a dialog control by default and closes on Escape", async () => {
 });
 
 
-test("locks saved-configuration mutation while an individual current test is running", async () => {
+test("renders page-owned per-role locks and preserves them across panel remount", async () => {
   let resolveTest!: () => void;
   const onTestCurrent = vi.fn(() => new Promise<void>((resolve) => { resolveTest = resolve; }));
+  const user = userEvent.setup();
+  const { props, rerender, unmount } = renderPanel({ onTestCurrent });
+
+  await user.click(screen.getAllByRole("button", { name: "测试当前使用" })[0]);
+  expect(onTestCurrent).toHaveBeenCalledTimes(1);
+
+  rerender(<ModelServicePanel {...props} testingRoles={{ llm: true }} />);
+
+  expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "测试当前使用的全部模型" })).toBeDisabled();
+  expect(screen.getByRole("group", { name: "主模型" }))
+    .toHaveTextContent("测试中…");
+
+  unmount();
+  const reopened = render(<ModelServicePanel {...props} testingRoles={{ llm: true }} />);
+  expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+
+  resolveTest();
+  reopened.rerender(<ModelServicePanel {...props} testingRoles={{}} />);
+  expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+});
+
+
+test("handles a rejected current-model callback without an unhandled rejection", async () => {
+  const onTestCurrent = vi.fn(async () => {
+    throw new Error("diagnostic-only failure");
+  });
   const user = userEvent.setup();
   renderPanel({ onTestCurrent });
 
   await user.click(screen.getAllByRole("button", { name: "测试当前使用" })[0]);
 
-  expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "测试当前使用的全部模型" })).toBeDisabled();
-
-  resolveTest();
-  expect(await screen.findByRole("button", { name: "保存" })).toBeEnabled();
+  expect(onTestCurrent).toHaveBeenCalledWith("llm");
+  await waitFor(() => {
+    expect(screen.getAllByRole("button", { name: "测试当前使用" })[0]).toBeEnabled();
+  });
 });
 
 

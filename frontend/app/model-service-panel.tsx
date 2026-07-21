@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
 import {
   MODEL_ROLES,
@@ -116,6 +116,8 @@ export function ModelServicePanel({
   onTestAll,
   onClose,
   onSave,
+  testingRoles,
+  allTesting,
   saving = false,
 }: {
   forms: Record<ModelRole, ServiceForm>;
@@ -128,14 +130,12 @@ export function ModelServicePanel({
   onTestAll: () => Promise<void>;
   onClose: () => void;
   onSave: () => void;
+  testingRoles: Partial<Record<StatusModelRole, boolean>>;
+  allTesting: boolean;
   saving?: boolean;
 }) {
   const roleRefs = useRef<Partial<Record<StatusModelRole, HTMLFieldSetElement | null>>>({});
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
-  const testingRolesRef = useRef(new Set<StatusModelRole>());
-  const allTestingRef = useRef(false);
-  const [testingRoles, setTestingRoles] = useState<Partial<Record<StatusModelRole, boolean>>>({});
-  const [allTesting, setAllTesting] = useState(false);
   const statusByRole = useMemo(
     () => new Map((status?.services ?? []).map((item) => [item.service, item])),
     [status],
@@ -162,28 +162,20 @@ export function ModelServicePanel({
   }, [onClose, saving]);
 
   async function runCurrentTest(role: StatusModelRole) {
-    if (allTestingRef.current || testingRolesRef.current.has(role)) return;
-    testingRolesRef.current.add(role);
-    setTestingRoles((current) => ({ ...current, [role]: true }));
+    if (allTesting || testingRoles[role]) return;
     try {
       await onTestCurrent(role);
-    } finally {
-      testingRolesRef.current.delete(role);
-      setTestingRoles((current) => ({ ...current, [role]: false }));
+    } catch {
+      // The page-level orchestrator reports the humanized error and owns the lock.
     }
   }
 
   async function runAllTests() {
-    if (allTestingRef.current || testingRolesRef.current.size > 0) return;
-    allTestingRef.current = true;
-    setAllTesting(true);
+    if (allTesting || anyRoleTesting) return;
     try {
       await onTestAll();
     } catch {
-      // The orchestrator reports the humanized error; this panel only unlocks.
-    } finally {
-      allTestingRef.current = false;
-      setAllTesting(false);
+      // The page-level orchestrator reports the humanized error and owns the lock.
     }
   }
 

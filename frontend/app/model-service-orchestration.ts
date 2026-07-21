@@ -1,0 +1,171 @@
+import {
+  MODEL_ROLE_LABELS,
+  summarizeModelServices,
+  type ModelServicesStatus,
+  type StatusModelRole,
+} from "./model-settings.ts";
+
+
+export type ModelServiceSummaryView = {
+  text: string;
+  tone: "ok" | "warn" | "bad" | "connecting";
+  title: string;
+};
+
+
+const IDLE_STATUS_TEXT = new Set([
+  "",
+  "连接中",
+  "服务正常",
+  "服务正常 · 模型未配置",
+  "服务连接异常",
+]);
+
+
+function operationalTone(text: string): ModelServiceSummaryView["tone"] {
+  if (text.startsWith("正在")) return "connecting";
+  if (/失败|异常|超时|错误|问题|失效/.test(text)) return "bad";
+  return "warn";
+}
+
+
+export function deriveModelServiceSummaryView({
+  apiStatus,
+  statusText,
+  modelStatus,
+  modelStatusUnavailable,
+}: {
+  apiStatus: string | null;
+  statusText: string;
+  modelStatus: ModelServicesStatus | null;
+  modelStatusUnavailable: boolean;
+}): ModelServiceSummaryView {
+  if (!apiStatus) {
+    const text = statusText || "连接中";
+    return {
+      text,
+      tone: text === "连接中" ? "connecting" : operationalTone(text),
+      title: text === "连接中" ? "正在连接服务…" : text,
+    };
+  }
+  if (apiStatus !== "ok") {
+    return { text: "服务连接异常", tone: "bad", title: "API 服务连接异常" };
+  }
+
+  const operationalText = statusText.trim();
+  if (!IDLE_STATUS_TEXT.has(operationalText)) {
+    return {
+      text: operationalText,
+      tone: operationalTone(operationalText),
+      title: operationalText,
+    };
+  }
+  if (modelStatusUnavailable) {
+    return {
+      text: "API 正常 · 模型状态未知",
+      tone: "warn",
+      title: "API 正常；模型状态暂时不可用，打开模型服务查看",
+    };
+  }
+  if (!modelStatus) {
+    return {
+      text: "API 正常 · 正在读取模型状态",
+      tone: "connecting",
+      title: "正在读取已保存的模型状态，不会自动测试模型",
+    };
+  }
+
+  const summary = summarizeModelServices(modelStatus.services);
+  const pending = modelStatus.services.filter(
+    (item) => item.configured && item.status === "untested",
+  );
+  return {
+    text: summary.text,
+    tone: summary.tone,
+    title: summary.abnormal.length > 0
+      ? `模型异常：${summary.abnormal.map((item) =>
+          `${MODEL_ROLE_LABELS[item.service]} ${item.model || "未配置"}`
+        ).join("、")}`
+      : pending.length > 0
+        ? `待测试：${pending.map((item) =>
+            `${MODEL_ROLE_LABELS[item.service]} ${item.model || "未配置"}`
+          ).join("、")}`
+        : "API 和已配置模型状态正常",
+  };
+}
+
+
+export type ModelTestTicket = {
+  id: number;
+  epoch: number;
+  kind: "one" | "all";
+  service?: StatusModelRole;
+};
+
+
+export type ModelTestActivity = {
+  roles: Partial<Record<StatusModelRole, boolean>>;
+  all: boolean;
+};
+
+
+export class ModelTestCoordinator {
+  private epoch = 0;
+  private nextId = 1;
+  private allTicketId: number | null = null;
+  private roleTicketIds = new Map<StatusModelRole, number>();
+
+  beginOne(service: StatusModelRole): ModelTestTicket | null {
+    if (this.allTicketId !== null || this.roleTicketIds.has(service)) return null;
+    const ticket = {
+      id: this.nextId++,
+      epoch: this.epoch,
+      kind: "one" as const,
+      service,
+    };
+    this.roleTicketIds.set(service, ticket.id);
+    return ticket;
+  }
+
+  beginAll(): ModelTestTicket | null {
+    if (this.allTicketId !== null || this.roleTicketIds.size > 0) return null;
+    const ticket = {
+      id: this.nextId++,
+      epoch: this.epoch,
+      kind: "all" as const,
+    };
+    this.allTicketId = ticket.id;
+    return ticket;
+  }
+
+  invalidateConfiguration(): void {
+    this.epoch += 1;
+  }
+
+  isCurrent(ticket: ModelTestTicket): boolean {
+    return ticket.epoch === this.epoch;
+  }
+
+  finish(ticket: ModelTestTicket): void {
+    if (ticket.kind === "all") {
+      if (this.allTicketId === ticket.id) this.allTicketId = null;
+      return;
+    }
+    if (ticket.service && this.roleTicketIds.get(ticket.service) === ticket.id) {
+      this.roleTicketIds.delete(ticket.service);
+    }
+  }
+
+  hasInFlight(): boolean {
+    return this.allTicketId !== null || this.roleTicketIds.size > 0;
+  }
+
+  snapshot(): ModelTestActivity {
+    return {
+      roles: Object.fromEntries(
+        [...this.roleTicketIds.keys()].map((service) => [service, true]),
+      ) as Partial<Record<StatusModelRole, boolean>>,
+      all: this.allTicketId !== null,
+    };
+  }
+}
