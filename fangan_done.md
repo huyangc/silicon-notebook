@@ -72,7 +72,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - source card 可打开 source detail，查看元素级文本，支持手动重解析。
 - **来源状态轮询**：上传后对非终态 source 每 ~1.5s 轮询 `GET /sources/{id}`（~3min 上限），实时展示 queued→parsing→parsed→extracting→extracted/failed；到达 extracted 自动刷新候选数与 counts。
 - **主栏当前 tab**：问答 (Ask) / 知识库 (Knowledge) / 记忆 (Memory) / 深度报告 (Deep Report)；Scenario / Case / Checklist 已退役。
-  - 问答：自由提问走 `/ask`（已移除写死 scenario）；支持多个 conversation/session，会话历史通过顶部紧凑上下文栏 + 可展开会话管理面板切换/新建/重命名/删除，避免把主问答区长期切成更窄的左右两栏；欢迎区标题与 prompt chips 会根据 notebook 已导入来源的标题/摘要生成，并触发真实 ask。输入框支持 `Enter` 发送、`Shift+Enter` 换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制并恢复草稿问题。
+  - 问答：自由提问走 `/ask`（已移除写死 scenario）；支持多个 conversation/session，会话历史通过 Ask 顶栏单行 `历史 N` 入口 + 可展开会话管理面板切换/新建/重命名/删除，旁边的 `+` 直接开始新会话，不再保留重复的当前会话上下文栏，避免压缩主问答区；欢迎区标题与 prompt chips 会根据 notebook 已导入来源的标题/摘要生成，并触发真实 ask。输入框支持 `Enter` 发送、`Shift+Enter` 换行；模型处理中锁定输入与模式切换，发送按钮切换为中断控制并恢复草稿问题。
   - 深度报告：两阶段后台 job，先审阅大纲再生成各节；支持实时进度、取消、删除、Markdown 与批量 zip 导出。
   - **知识库（多类型浏览）**：前端从 `/knowledge-types` 动态获取对象类型，再用 `/knowledge?type=...` 浏览任意类型（Concept / Claim / Formula / Procedure 以及 legacy/custom 类型）；卡片含状态徽标 + 状态下拉（reviewed/approved/deprecated/conflict/project_specific）+ owner 内联编辑 → `PATCH /knowledge/{id}`；按状态过滤；「查重」「冲突」面板（重复组带合并按钮、冲突对展示）。
   - 回答含 citation 与 👍/👎 反馈；引用在前端以 `[1]`、`[2]` 顺序编号展示，点击引用会在答案面板内展开详情（避免浮窗越界）；模型直接输出的数字复合引用（如 `[1, 2, 3]`）在每个编号都能映射到已知引用时也会拆成可点击引用；答案正文支持 Markdown/code/formula/table 渲染，并提供复制按钮；chat 菜单可清空对话。
