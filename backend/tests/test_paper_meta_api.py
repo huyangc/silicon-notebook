@@ -92,7 +92,7 @@ def test_backfill_endpoint_submits_notify_pending(client, monkeypatch):
     """兜底刷新：端点提交 job 时带 notify_pending=True（Task 6，铃铛集成 §3.3）。"""
     nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
 
-    from app.api import deps, routes as routes_mod
+    from app.api import deps, source_routes as source_routes_mod
 
     real_repo = deps.repository()
     real_repo.llm_client = MagicMock(configured=True)
@@ -101,7 +101,7 @@ def test_backfill_endpoint_submits_notify_pending(client, monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        routes_mod,
+        source_routes_mod,
         "background_jobs",
         SimpleNamespace(submit=lambda *a, **k: calls.append(k)),
     )

@@ -37,13 +37,16 @@ if TYPE_CHECKING:
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.config import Settings
 from app.core.llm import cap_kwargs
-from app.models.schemas import (
+from app.models.ask import (
     AskRequest,
     AskResponse,
     Citation,
+    ModelError,
+    TraceStep,
+)
+from app.models.knowledge import (
     KnowledgeFieldValue,
     KnowledgeRecord,
-    ModelError,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
 from app.services.model_config import ModelNotConfiguredError
@@ -1298,7 +1301,6 @@ class AskService:
                     else:
                         conclusion = f"PPR retrieved {len(ppr_chunks)} cross-document passage(s)."
                         llm_mode = "deterministic"
-                    from app.models.schemas import TraceStep
                     resp = AskResponse(
                         answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
                         evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
@@ -1472,7 +1474,6 @@ class AskService:
                 else:
                     conclusion = f"Graph retrieved {len(src_chunks)} source passage(s) for this question."
                     llm_mode = "deterministic"
-                from app.models.schemas import TraceStep
                 resp = AskResponse(
                     answer_id="", conclusion=conclusion, answer=answer, grounded=grounded,
                     evidence_level=evidence_level, anchors=anchors, related_knowledge=[],
@@ -1572,7 +1573,6 @@ class AskService:
                     f"{len(use_seeds)} seed(s).")
                 llm_mode = "deterministic"
 
-            from app.models.schemas import TraceStep
             graph_trace = [TraceStep(
                 step_type="graph_verify",
                 summary=(f"chain_trust={verify_result['chain_trust']:.2f}; "

@@ -7,7 +7,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.core.config import get_settings
 from app.core.request_context import set_request_user, reset_request_user
-from app.models.schemas import UserProfile
+from app.models.identity import UserProfile
 from app.repositories.ports import AdminQueryRepository, NotebookRepository, IdentityRepository, NotebookAccessRepository, NotebookCatalogRepository, NotebookSharingRepository, SourceRepository, AskStreamPort, AskStateStorePort, McpMemoryRepository, MemoryRepository
 from app.services.sqlite_repository import SQLiteRepository
 

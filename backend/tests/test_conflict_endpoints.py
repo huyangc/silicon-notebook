@@ -64,7 +64,7 @@ def _make_repo(monkeypatch) -> SQLiteRepository:
 
 
 def _client(repo: SQLiteRepository, monkeypatch) -> TestClient:
-    import app.api.routes as routes_mod
+    import app.api.kg_routes as routes_mod
     from app.main import app
     monkeypatch.setattr(routes_mod, "repository", lambda: repo)
     return TestClient(app)

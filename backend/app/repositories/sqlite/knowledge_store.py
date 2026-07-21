@@ -18,7 +18,7 @@ import json
 import sqlite3
 from typing import Dict, Iterable, List, Optional, Sequence
 
-from app.models.schemas import Evidence
+from app.models.common import Evidence
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import (
     MOUNT_JOIN, MOUNT_VALID, MOUNTED_BASE_IDS_SUBQUERY,

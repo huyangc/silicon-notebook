@@ -1,9 +1,8 @@
 // Track E — edge curation / review-queue API client (pure logic, unit-tested
-// in edge-review-queue.test.mjs). Self-contained fetch wrapper so it runs under
-// `node --test` without importing the React page module. Mirrors promotion-queue.ts.
+// in edge-review-queue.test.mjs). Uses the shared transport without importing
+// the React page module. Mirrors promotion-queue.ts.
 
-import { authHeaders } from "./auth.ts";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { requestJson } from "./api-client.ts";
 
 export type EdgeReviewStatus = "pending" | "verified" | "rejected";
 
@@ -28,26 +27,13 @@ export type ReviewRelationResult = {
   review_status: EdgeReviewStatus;
 };
 
-const API_BASE =
-  (typeof process !== "undefined"
-    ? process.env?.NEXT_PUBLIC_API_BASE_URL
-    : undefined) ?? "http://127.0.0.1:8000/api";
-
-async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(API_BASE + url, {
-    headers: { "Content-Type": "application/json", ...authHeaders() },
-    ...init,
-  });
-  if (!res.ok) await throwHumanizedHttpError(res, "edge-review-queue");
-  return res.json() as Promise<T>;
-}
-
 export const fetchEdgeReviewQueue = (
   notebookId: string,
   limit?: number
 ): Promise<EdgeReviewItem[]> =>
-  apiFetch(
-    `/notebooks/${notebookId}/edge-review-queue${limit != null ? `?limit=${limit}` : ""}`
+  requestJson(
+    `/notebooks/${notebookId}/edge-review-queue${limit != null ? `?limit=${limit}` : ""}`,
+    { tag: "edge-review-queue" },
   );
 
 export const reviewRelation = (
@@ -55,7 +41,7 @@ export const reviewRelation = (
   relId: string,
   status: EdgeReviewStatus
 ): Promise<ReviewRelationResult> =>
-  apiFetch(
+  requestJson(
     `/notebooks/${notebookId}/relations/${encodeURIComponent(relId)}/review`,
-    { method: "POST", body: JSON.stringify({ status }) }
+    { method: "POST", body: JSON.stringify({ status }), tag: "edge-review-queue" }
   );

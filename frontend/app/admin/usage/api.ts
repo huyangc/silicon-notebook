@@ -1,4 +1,4 @@
-import { API_BASE, authHeaders } from "../../auth.ts";
+import { performApiRequest } from "../../api-client.ts";
 import { readHttpError, throwHumanizedHttpError } from "../../errors.ts";
 
 // 「非管理员」哨兵:admin 总览把 403 分流到专门的无权限视图,而不是显示一条
@@ -26,14 +26,14 @@ export type AdminUserUsage = {
 };
 
 export async function fetchAdminUsers(): Promise<AdminUserUsage[]> {
-  const res = await fetch(`${API_BASE}/admin/users`, { headers: authHeaders() });
+  const res = await performApiRequest("/admin/users", { tag: "admin" });
   if (res.status === 403) await throwForbiddenSentinel(res);
   if (!res.ok) await throwHumanizedHttpError(res, "admin");
   return res.json();
 }
 
 export async function fetchOnlineIds(): Promise<string[]> {
-  const res = await fetch(`${API_BASE}/admin/online`, { headers: authHeaders() });
+  const res = await performApiRequest("/admin/online", { tag: "admin" });
   if (res.status === 403) await throwForbiddenSentinel(res);
   if (!res.ok) await throwHumanizedHttpError(res, "admin");
   const data = (await res.json()) as { online_ids: string[] };

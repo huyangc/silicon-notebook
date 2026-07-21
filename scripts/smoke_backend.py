@@ -524,7 +524,7 @@ def check_api_layer() -> None:
                 "SILICON_NOTEBOOK_AUTH_OPTIONAL": "true",
             }
         )
-        from app.api.routes import repository as route_repository
+        from app.api.deps import repository as route_repository
         from app.core import readiness
         from app.core.config import get_settings
         from app.main import create_app

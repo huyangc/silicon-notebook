@@ -24,7 +24,9 @@ from typing import Callable, Iterable, Iterator, List, Mapping, Optional, Protoc
 
 from app.core.config import Settings
 from app.core.request_context import set_request_user, reset_request_user
-from app.models.schemas import NotebookCreate
+from app.models.notebooks import NotebookCreate, NotebookSummary
+from app.models.sources import SourceSummary
+from app.models.identity import UserProfile
 from app.repositories.sqlite.maintenance import VECTOR_TABLES as _VECTOR_TABLES
 from app.services.repository import UploadedSourceFile
 from app.services.sqlite_repository import SQLiteRepository
@@ -35,7 +37,6 @@ from app.services.model_concurrency import (
     current_model_concurrency,
 )
 import sqlite3
-from app.models.schemas import NotebookSummary, SourceSummary, UserProfile
 from app.repositories.ports import (
     ExtractionProgress,
     IndexStageProgress,

@@ -1,4 +1,4 @@
-import { API_BASE, authHeaders } from "../../auth.ts";
+import { performApiRequest } from "../../api-client.ts";
 import { readHttpError, throwHumanizedHttpError } from "../../errors.ts";
 import { label } from "../../vocabulary.ts";
 import { FORBIDDEN_SENTINEL } from "./api.ts";
@@ -15,9 +15,9 @@ export type AdminUserNotebook = {
 };
 
 export async function fetchUserNotebooks(userId: string): Promise<AdminUserNotebook[]> {
-  const res = await fetch(
-    `${API_BASE}/admin/users/${encodeURIComponent(userId)}/notebooks`,
-    { headers: authHeaders() }
+  const res = await performApiRequest(
+    `/admin/users/${encodeURIComponent(userId)}/notebooks`,
+    { tag: "admin" },
   );
   // 同 api.ts:哨兵不带文案,但诊断先落 console(见 FORBIDDEN_SENTINEL 注释)。
   if (res.status === 403) {

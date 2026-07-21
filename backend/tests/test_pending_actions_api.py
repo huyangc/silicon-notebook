@@ -20,7 +20,7 @@ import json as _json
 
 from fastapi.testclient import TestClient
 
-from app.api.routes import me_pending_stream
+from app.api.system_routes import me_pending_stream
 from app.main import app
 from app.models.schemas import UserProfile
 

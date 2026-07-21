@@ -1,4 +1,3 @@
-import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services import remote_sources
@@ -19,10 +18,13 @@ def _env(tmp_path, monkeypatch, token=None):
 
 def _client(repo, monkeypatch):
     from fastapi.testclient import TestClient
-    import app.api.routes as routes_mod
+    import app.api.source_routes as source_routes_mod
     from app.main import app
-    import app.api.deps as deps_mod; monkeypatch.setattr(deps_mod, "repository", lambda: repo); monkeypatch.setattr(routes_mod, "repository", lambda: repo)
-    monkeypatch.setattr(routes_mod.kg_scheduler, "submit_job", lambda fn, *a, **k: None)
+    import app.api.deps as deps_mod
+
+    monkeypatch.setattr(deps_mod, "repository", lambda: repo)
+    monkeypatch.setattr(source_routes_mod, "repository", lambda: repo)
+    monkeypatch.setattr(source_routes_mod.kg_scheduler, "submit_job", lambda fn, *a, **k: None)
     return TestClient(app)
 
 

@@ -21,16 +21,44 @@ from uuid import uuid4
 from app.core.config import Settings
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
 from app.core.llm import OpenAICompatibleClient, cap_kwargs
-from app.models.schemas import (
+from app.models.common import Evidence
+from app.models.identity import (
+    AgentPrincipal,
+    AgentProfile,
+    AgentTokenIssued,
+    AgentTokenSummary,
+    UserProfile,
+)
+from app.models.memory import MemoryRecord, MemoryUpdate, PaginatedMemories
+from app.models.notebooks import (
+    NotebookAnalytics,
+    NotebookCreate,
+    NotebookSummary,
+    NotebookTemplate,
+    NotebookUpdate,
+)
+from app.models.sources import (
     AddUrlSourcesResult,
+    PaginatedSources,
+    RejectedUrl,
+    SourceDetail,
+    SourceElement,
+    SourceImportRequest,
+    SourceSummary,
+)
+from app.models.ask import (
     AnswerAnchor,
     AskRequest,
     AskResponse,
     Citation,
-    DuplicateGroup,
-    Evidence,
     FeedbackRequest,
     FeedbackResponse,
+    ModelError,
+    NotebookSearchResponse,
+    RuleCard,
+)
+from app.models.knowledge import (
+    DuplicateGroup,
     KnowledgeEdge,
     KnowledgeFieldValue,
     KnowledgeGraph,
@@ -39,26 +67,11 @@ from app.models.schemas import (
     KnowledgeRef,
     KnowledgeTypeCount,
     KnowledgeUpdate,
-    ModelError,
     ObjectSchemaCreate,
     ObjectSchemaModel,
     ObjectSchemaUpdate,
     MergeRequest,
-    NotebookAnalytics,
-    NotebookCreate,
-    NotebookSearchResponse,
-    NotebookSummary,
-    NotebookTemplate,
-    NotebookUpdate,
     PaginatedKnowledge,
-    PaginatedSources,
-    RejectedUrl,
-    RuleCard,
-    SourceDetail,
-    SourceElement,
-    SourceImportRequest,
-    SourceSummary,
-    UserProfile,
 )
 from app.services import kg_ingest
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
@@ -116,15 +129,6 @@ from app.services.prompts import (
     schema_induction_prompt,
 )
 from app.services.repository import UploadedSourceFile
-from app.models.schemas import (
-    AgentPrincipal,
-    AgentProfile,
-    AgentTokenIssued,
-    AgentTokenSummary,
-    MemoryRecord,
-    MemoryUpdate,
-    PaginatedMemories,
-)
 from app.services.knowledge_query import KnowledgeQueryService
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.schema_registry import SchemaRegistryService

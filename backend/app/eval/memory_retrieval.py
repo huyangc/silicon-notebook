@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
-from app.models.schemas import MemoryHit, MemoryRecord
+from app.models.memory import MemoryHit, MemoryRecord
 from app.services.embedding import FakeEmbedder
 from app.services.memory_retrieval import MemoryRetriever
 

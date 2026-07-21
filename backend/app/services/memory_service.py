@@ -11,12 +11,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from app.core.event_logging import EventLogger
-from app.models.memory import MemoryRevision, MemoryWrite
-from app.models.schemas import (
+from app.models.identity import (
     AgentPrincipal,
     AgentProfile,
     AgentTokenIssued,
     AgentTokenSummary,
+)
+from app.models.memory import (
+    MemoryRevision,
+    MemoryWrite,
     MemoryRecord,
     MemoryUpdate,
     PaginatedMemories,
@@ -27,7 +30,7 @@ from app.repositories.ports import (
     NotebookAccessRepository,
 )
 from app.services.embedding import Embedder
-from app.services.memory_inputs import (
+from app.core.memory_inputs import (
     normalize_client_request_id,
     normalize_content,
     normalize_evidence_refs,

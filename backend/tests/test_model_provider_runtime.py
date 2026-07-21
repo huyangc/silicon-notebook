@@ -58,9 +58,9 @@ def test_legacy_cache_replacement_updates_every_runtime_owner(repo):
 def test_identity_routes_do_not_require_settings_outside_identity_protocol():
     import inspect
 
-    from app.api import routes
+    from app.api import system_routes
 
-    assert "repo.settings" not in inspect.getsource(routes.test_model_service)
+    assert "repo.settings" not in inspect.getsource(system_routes.test_model_service)
 
 
 def test_provider_records_existing_model_error_shape(repo, monkeypatch):

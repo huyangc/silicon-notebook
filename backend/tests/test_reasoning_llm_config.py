@@ -111,7 +111,7 @@ def test_reasoning_path_routes_through_reasoning_client(repo):
 
 
 def test_health_exposes_reasoning_llm_configured():
-    from app.api.routes import health
+    from app.api.system_routes import health
     from app.core.config import get_settings
     get_settings.cache_clear()
     body = health()

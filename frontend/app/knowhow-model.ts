@@ -1,6 +1,5 @@
 // Knowhow 表 — 前端模型层：类型 + 资产 URL 改写/格子摘要/行标题合成（纯逻辑，
-// 单测见 knowhow-model.test.mjs）+ fetch 封装（镜像 notebook-share.ts 的封装
-// 风格）。覆盖 PR-1（导入+只读总览）与 PR-2+3（编辑维护/模板往返/LLM 表达
+// 单测见 knowhow-model.test.mjs）+ 共享 transport 请求。覆盖 PR-1（导入+只读总览）与 PR-2+3（编辑维护/模板往返/LLM 表达
 // 优化/代码附件/引用跳转）两代 wire 契约。
 // 后端 JSON 为 snake_case（projection_status/row_count/guessed_kind/
 // anchor_column_id/suggestion_md/...），本文件对外一律暴露 camelCase，字段
@@ -12,8 +11,8 @@
 // 派生），使本文件在后端逐任务合入的过程中始终可用，不需要等全部任务落地
 // 才能联调。
 
-import { authHeaders } from "./auth.ts";
-import { throwHumanizedHttpError } from "./errors.ts";
+import { API_BASE } from "./api-config.ts";
+import { requestJson, requestVoid } from "./api-client.ts";
 
 // --- 内容类型（kind）与文案 -----------------------------------------------------
 
@@ -374,33 +373,13 @@ export function mapCitationKnowhowRef(
   return { tableId: wire.table_id, rowId: wire.row_id };
 }
 
-// --- fetch 封装 ----------------------------------------------------------------
-
-const API_BASE =
-  (typeof process !== "undefined"
-    ? process.env?.NEXT_PUBLIC_API_BASE_URL
-    : undefined) ?? "http://127.0.0.1:8000/api";
-
-async function apiFetch<T>(url: string, init?: RequestInit): Promise<T> {
-  // multipart(FormData) 请求不设 Content-Type，交给浏览器自带 boundary。
-  const isForm = init?.body instanceof FormData;
-  const res = await fetch(API_BASE + url, {
-    headers: isForm ? { ...authHeaders() } : { "Content-Type": "application/json", ...authHeaders() },
-    ...init,
-  });
-  if (!res.ok) await throwHumanizedHttpError(res, "knowhow");
-  // 204 No Content(删除/重投影触发)没有 body。
-  if (res.status === 204) return null as T;
-  return res.json() as Promise<T>;
-}
-
 // 表清单（总览网格用）。
 export const fetchKnowhowTables = (notebookId: string): Promise<KnowhowTableSummary[]> =>
-  apiFetch<WireKnowhowTableSummary[]>(`/notebooks/${notebookId}/knowhow`).then((tables) => tables.map(mapSummary));
+  requestJson<WireKnowhowTableSummary[]>(`/notebooks/${notebookId}/knowhow`, { tag: "knowhow" }).then((tables) => tables.map(mapSummary));
 
 // 单表详情（列+行+格+行投影状态+行标题列)。
 export const fetchKnowhowTable = (notebookId: string, tableId: string): Promise<KnowhowTableDetail> =>
-  apiFetch<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow/${tableId}`).then(mapDetail);
+  requestJson<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow/${tableId}`, { tag: "knowhow" }).then(mapDetail);
 
 // 导入预览：上传文件、拿列名+猜测内容类型+行标题列建议+前 5 行预览+总行数，
 // 不建表。`orientation` 决定原始属性按列还是按行；`anchorIndex` 可选——向导在
@@ -424,9 +403,10 @@ export const importKnowhowPreview = (
   form.append("orientation", orientation);
   if (typeof anchorIndex === "number") form.append("anchor_index", String(anchorIndex));
   else if (anchorIndex === null) form.append("anchor_index", "-1");
-  return apiFetch<WireImportPreview>(`/notebooks/${notebookId}/knowhow/import/preview`, {
+  return requestJson<WireImportPreview>(`/notebooks/${notebookId}/knowhow/import/preview`, {
     method: "POST",
     body: form,
+    tag: "knowhow",
   }).then(mapPreview);
 };
 
@@ -454,9 +434,10 @@ export const importKnowhow = (
   form.append("orientation", orientation);
   // null=不设行标题列（记录型表）：不发该字段，走后端 Form(None) 默认。
   if (anchorIndex !== null) form.append("anchor_index", String(anchorIndex));
-  return apiFetch<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow/import`, {
+  return requestJson<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow/import`, {
     method: "POST",
     body: form,
+    tag: "knowhow",
   }).then(mapDetail);
 };
 
@@ -474,22 +455,23 @@ export const createKnowhowTable = (
   notebookId: string,
   input: KnowhowCreateTableInput,
 ): Promise<KnowhowTableDetail> =>
-  apiFetch<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow`, {
+  requestJson<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow`, {
     method: "POST",
     body: JSON.stringify({
       title: input.title,
       columns: input.columns,
       anchor_index: input.anchorIndex,
     }),
+    tag: "knowhow",
   }).then(mapDetail);
 
 // 删表(级联行/格/投影产物/隐藏源)。
 export const deleteKnowhowTable = (notebookId: string, tableId: string): Promise<void> =>
-  apiFetch<void>(`/notebooks/${notebookId}/knowhow/${tableId}`, { method: "DELETE" });
+  requestVoid(`/notebooks/${notebookId}/knowhow/${tableId}`, { method: "DELETE", tag: "knowhow" });
 
 // 全量重投影逃生口(后台执行，不等待完成)。
 export const reprojectKnowhowTable = (notebookId: string, tableId: string): Promise<void> =>
-  apiFetch<void>(`/notebooks/${notebookId}/knowhow/${tableId}/reproject`, { method: "POST" });
+  requestVoid(`/notebooks/${notebookId}/knowhow/${tableId}/reproject`, { method: "POST", tag: "knowhow" });
 
 // --- 编辑 API fetchers（Task 3：表/列/行/格 CRUD + 调度器统一在后端触发）---------
 
@@ -502,13 +484,14 @@ export const patchKnowhowTable = (
   tableId: string,
   patch: KnowhowTablePatch,
 ): Promise<KnowhowTableDetail> =>
-  apiFetch<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow/${tableId}`, {
+  requestJson<WireKnowhowTableDetail>(`/notebooks/${notebookId}/knowhow/${tableId}`, {
     method: "PATCH",
     body: JSON.stringify({
       title: patch.title,
       description: patch.description,
       anchor_column_id: patch.anchorColumnId,
     }),
+    tag: "knowhow",
   }).then(mapDetail);
 
 export const addKnowhowColumn = (
@@ -516,9 +499,10 @@ export const addKnowhowColumn = (
   tableId: string,
   input: KnowhowNewColumnInput,
 ): Promise<KnowhowColumn> =>
-  apiFetch<WireKnowhowColumn>(`/notebooks/${notebookId}/knowhow/${tableId}/columns`, {
+  requestJson<WireKnowhowColumn>(`/notebooks/${notebookId}/knowhow/${tableId}/columns`, {
     method: "POST",
     body: JSON.stringify({ name: input.name, kind: input.kind, position: input.position }),
+    tag: "knowhow",
   }).then(mapColumn);
 
 export const patchKnowhowColumn = (
@@ -527,26 +511,28 @@ export const patchKnowhowColumn = (
   columnId: string,
   patch: KnowhowColumnEdit,
 ): Promise<KnowhowColumn> =>
-  apiFetch<WireKnowhowColumn>(`/notebooks/${notebookId}/knowhow/${tableId}/columns/${columnId}`, {
+  requestJson<WireKnowhowColumn>(`/notebooks/${notebookId}/knowhow/${tableId}/columns/${columnId}`, {
     method: "PATCH",
     body: JSON.stringify({ name: patch.name, kind: patch.kind }),
+    tag: "knowhow",
   }).then(mapColumn);
 
 export const deleteKnowhowColumn = (notebookId: string, tableId: string, columnId: string): Promise<void> =>
-  apiFetch<void>(`/notebooks/${notebookId}/knowhow/${tableId}/columns/${columnId}`, { method: "DELETE" });
+  requestVoid(`/notebooks/${notebookId}/knowhow/${tableId}/columns/${columnId}`, { method: "DELETE", tag: "knowhow" });
 
 export const addKnowhowRow = (
   notebookId: string,
   tableId: string,
   input: KnowhowNewRowInput,
 ): Promise<KnowhowRow> =>
-  apiFetch<WireKnowhowRow>(`/notebooks/${notebookId}/knowhow/${tableId}/rows`, {
+  requestJson<WireKnowhowRow>(`/notebooks/${notebookId}/knowhow/${tableId}/rows`, {
     method: "POST",
     body: JSON.stringify({ cells: input.cells, position: input.position }),
+    tag: "knowhow",
   }).then(mapRow);
 
 export const deleteKnowhowRow = (notebookId: string, tableId: string, rowId: string): Promise<void> =>
-  apiFetch<void>(`/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}`, { method: "DELETE" });
+  requestVoid(`/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}`, { method: "DELETE", tag: "knowhow" });
 
 function mapCellPatchResult(wire: WireKnowhowCellPatchResult): KnowhowCellPatchResult {
   return {
@@ -572,7 +558,7 @@ export const patchKnowhowCell = (
   contentMd: string,
   expectedBefore?: string,
 ): Promise<KnowhowCellPatchResult> =>
-  apiFetch<WireKnowhowCellPatchResult>(
+  requestJson<WireKnowhowCellPatchResult>(
     `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}`,
     {
       method: "PATCH",
@@ -581,6 +567,7 @@ export const patchKnowhowCell = (
           ? { content_md: contentMd }
           : { content_md: contentMd, expected_before: expectedBefore },
       ),
+      tag: "knowhow",
     },
   ).then(mapCellPatchResult);
 
@@ -609,9 +596,10 @@ export const batchPatchKnowhowCells = (
     body.anchor_column_id = input.anchorColumnId;
     body.expected_anchor = input.expectedAnchor;
   }
-  return apiFetch<WireKnowhowCellPatchResult[]>(`/notebooks/${notebookId}/knowhow/${tableId}/cells`, {
+  return requestJson<WireKnowhowCellPatchResult[]>(`/notebooks/${notebookId}/knowhow/${tableId}/cells`, {
     method: "PATCH",
     body: JSON.stringify(body),
+    tag: "knowhow",
   }).then((wireResults) => wireResults.map(mapCellPatchResult));
 };
 
@@ -632,9 +620,10 @@ function appendKnowhowRequest(
   const form = new FormData();
   form.append("file", file);
   form.append("mode", mode);
-  return apiFetch<unknown>(`/notebooks/${notebookId}/knowhow/${tableId}/append`, {
+  return requestJson<unknown>(`/notebooks/${notebookId}/knowhow/${tableId}/append`, {
     method: "POST",
     body: form,
+    tag: "knowhow",
   });
 }
 
@@ -664,9 +653,9 @@ export const optimizeKnowhowCell = (
   rowId: string,
   columnId: string,
 ): Promise<{ suggestionMd: string }> =>
-  apiFetch<{ suggestion_md: string }>(
+  requestJson<{ suggestion_md: string }>(
     `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/optimize`,
-    { method: "POST" },
+    { method: "POST", tag: "knowhow" },
   ).then((wire) => ({ suggestionMd: wire.suggestion_md }));
 
 // --- 排版重排（knowhow-md-normalize Task 4，同样显式触发、不写库）-----------
@@ -684,19 +673,19 @@ export const reformatKnowhowCell = (
   rowId: string,
   columnId: string,
 ) =>
-  apiFetch<{ candidate_md: string; source: string; changed: boolean; source_md: string }>(
+  requestJson<{ candidate_md: string; source: string; changed: boolean; source_md: string }>(
     `/notebooks/${notebookId}/knowhow/${tableId}/rows/${rowId}/cells/${columnId}/reformat`,
-    { method: "POST" },
+    { method: "POST", tag: "knowhow" },
   ).then((w) => ({ candidateMd: w.candidate_md, source: w.source, changed: w.changed, sourceMd: w.source_md }));
 
 // --- 格子级代码附件（Task 10；HTTP 端点 session/agent token 皆可访问，本文件
-// 的调用方(Task 11 用户界面)走既有 session 鉴权，与其余 fetcher 共用
-// apiFetch/authHeaders，不需要为 agent token 走另一套客户端逻辑）-------------
+// 的调用方(Task 11 用户界面)走既有 session 鉴权，与其余请求共用共享 transport，
+// 不需要为 agent token 走另一套客户端逻辑）----------------------------------
 
 // 路径不含 notebookId/tableId 段——行/格子 id 本身已定位到具体表，与本文件
 // 其余"表级"fetcher 的参数形状不同，是端点真实形状使然，不是遗漏。
 export const getCellCode = (rowId: string, columnId: string): Promise<KnowhowCellCode> =>
-  apiFetch<WireKnowhowCellCode>(`/agent/knowhow/rows/${rowId}/cells/${columnId}/code`).then(mapCellCode);
+  requestJson<WireKnowhowCellCode>(`/agent/knowhow/rows/${rowId}/cells/${columnId}/code`, { tag: "knowhow" }).then(mapCellCode);
 
 export const putCellCode = (
   rowId: string,
@@ -704,13 +693,14 @@ export const putCellCode = (
   codeText: string,
   language: string,
 ): Promise<KnowhowCellCode> =>
-  apiFetch<WireKnowhowCellCode>(`/agent/knowhow/rows/${rowId}/cells/${columnId}/code`, {
+  requestJson<WireKnowhowCellCode>(`/agent/knowhow/rows/${rowId}/cells/${columnId}/code`, {
     method: "PUT",
     body: JSON.stringify({ code_text: codeText, language }),
+    tag: "knowhow",
   }).then(mapCellCode);
 
 export const deleteCellCode = (rowId: string, columnId: string): Promise<void> =>
-  apiFetch<void>(`/agent/knowhow/rows/${rowId}/cells/${columnId}/code`, { method: "DELETE" });
+  requestVoid(`/agent/knowhow/rows/${rowId}/cells/${columnId}/code`, { method: "DELETE", tag: "knowhow" });
 
 // 行级代码列表（Task 11 抽屉用）：抽屉展开一行时，若为该行每一列逐格 GET
 // .../cells/{col}/code 会是 N 次网络往返；GET /agent/knowhow/rows/{row_id}
@@ -749,7 +739,7 @@ function mapRowCodeByColumn(entries: WireKnowhowRowCodeEntry[] | undefined): Rec
 }
 
 export const fetchKnowhowRowCodeByColumn = (rowId: string): Promise<Record<string, KnowhowCellCode>> =>
-  apiFetch<WireKnowhowRowDetailCode>(`/agent/knowhow/rows/${rowId}`).then((wire) => mapRowCodeByColumn(wire.code));
+  requestJson<WireKnowhowRowDetailCode>(`/agent/knowhow/rows/${rowId}`, { tag: "knowhow" }).then((wire) => mapRowCodeByColumn(wire.code));
 
 // --- Notebook 资产上传（Task 7；端点本身是 PR-1 既有的
 // `POST /notebooks/{nb}/assets`——起草本文件时 Task 4 遗漏了这个 fetcher，
@@ -769,7 +759,7 @@ export const uploadNotebookAsset = (
 ): Promise<UploadedAsset> => {
   const form = new FormData();
   form.append("file", file);
-  return apiFetch<UploadedAsset>(`/notebooks/${notebookId}/assets`, { method: "POST", body: form, signal });
+  return requestJson<UploadedAsset>(`/notebooks/${notebookId}/assets`, { method: "POST", body: form, signal, tag: "knowhow" });
 };
 
 // --- 纯 helper(单测) ------------------------------------------------------------

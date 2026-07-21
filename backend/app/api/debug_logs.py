@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import get_current_user
 from app.core.config import Settings, get_settings
 from app.core.event_logging import _ROOT_DIR, is_safe_owner
-from app.models.schemas import UserProfile
+from app.models.identity import UserProfile
 from app.services import log_reader
 
 router = APIRouter(prefix="/debug/logs", tags=["debug"])

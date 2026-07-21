@@ -414,7 +414,7 @@ def test_memory_api_rejects_blank_and_oversized_inputs_with_422(tmp_path, monkey
         "/api/notebooks", headers=headers, json={"name": "Input limits"}
     ).json()["id"]
     from app.api.deps import repository
-    from app.services.memory_inputs import MEMORY_CONTENT_MAX_CHARS, MEMORY_REASON_MAX_CHARS
+    from app.core.memory_inputs import MEMORY_CONTENT_MAX_CHARS, MEMORY_REASON_MAX_CHARS
 
     answer_id = _answer(repository(), notebook_id)
     blank = client.post(

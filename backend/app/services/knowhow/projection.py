@@ -200,7 +200,7 @@ def _split_long_text(text: str, limit: int = _CHUNK_CHAR_LIMIT) -> List[str]:
 
 def _evidence(source_id: str, source_title: str, element_id: str, element_type: str,
              location_label: str, quote: str) -> dict:
-    """Product Evidence shape (app.models.schemas.Evidence) — mirrors
+    """Product Evidence shape (app.models.common.Evidence) — mirrors
     kg_ingest._ev's fields exactly so knowhow-derived KOs/edges are readable
     by every existing evidence consumer (citation rendering, graph
     retrieval's element->chunk bridge) without a special case."""
@@ -379,6 +379,7 @@ class KnowhowProjector:
         try/except below."""
         table = self.knowhow.get_knowhow_table(table_id)
         notebook_id = table["notebook_id"]
+        snapshot_mutation_seq = table["mutation_seq"]
         source_id = self.ensure_hidden_source(table_id)
         columns = table["columns"]
         anchor_column = next((c for c in columns if c["role"] == "anchor"), None)
@@ -391,10 +392,13 @@ class KnowhowProjector:
         ko_acc: dict = {}
         edge_rows: List[tuple] = []
         edge_ids_seen: set = set()
+        row_results: List[tuple[str, str]] = []
 
         for row in table["rows"]:
             row_id = row["id"]
-            self.knowhow.set_knowhow_row_projection(row_id, "syncing")
+            self.knowhow.set_knowhow_row_projection_if_table_seq(
+                row_id, "syncing", snapshot_mutation_seq
+            )
             cells = row["cells"]
             cell_nets = {
                 column["id"]: textops.strip_images(cells.get(column["id"], "")).strip()
@@ -425,7 +429,13 @@ class KnowhowProjector:
                 # 'syncing' forever: no other code path ever revisits it, so a
                 # silent-'syncing' row would look perpetually in-progress
                 # instead of honestly failed.
-                self.knowhow.set_knowhow_row_projection(row_id, "failed")
+                for completed_row_id, _status in row_results:
+                    self.knowhow.set_knowhow_row_projection_if_table_seq(
+                        completed_row_id, "failed", snapshot_mutation_seq
+                    )
+                self.knowhow.set_knowhow_row_projection_if_table_seq(
+                    row_id, "failed", snapshot_mutation_seq
+                )
                 raise
 
             failed = False
@@ -446,7 +456,12 @@ class KnowhowProjector:
                     failed = True
                     self.note_model_error("knowhow_embed", self.settings.embed_model, exc)
 
-            self.knowhow.set_knowhow_row_projection(row_id, "failed" if failed else "synced")
+            # ``synced`` is the public completion signal consumed by API
+            # pollers. Keep every visited row at ``syncing`` until the
+            # table-wide KO/edge transaction below has committed; publishing
+            # the row result here creates a window where all rows look settled
+            # while the graph is still empty or stale.
+            row_results.append((row_id, "failed" if failed else "synced"))
 
         object_rows = [
             self._ko_object_row(notebook_id, source_id, ko_id, entry, now)
@@ -485,29 +500,57 @@ class KnowhowProjector:
         # the write AND the mutation-seq bump below -- rather than
         # resurrecting anything a teardown already removed. Mirrors
         # delete_table_projection's own pre-write existence check just below.
-        with self.database.write() as db:
-            # 显式开写事务：write_lock 只互斥本进程写者；离线 CLI/维护进程共库时，
-            # 下面两个存在性 SELECT 在首条 DML 前不开启 SQLite 事务，另一进程可在
-            # 「检查通过」与「首条写入」之间提交删表/删源，让 anchor-only 投影插出
-            # 无 FK 约束的孤儿 knowledge_objects（已删/已移内容仍可检索）。经
-            # SqliteDatabase.begin_immediate（SQL 收在 store 层）让检查与写入对
-            # 跨进程写者也原子——与 snapshot_table/delete_table_if_unchanged 同款。
-            self.database.begin_immediate(db)
-            if (
-                not self.knowhow.table_exists_tx(db, table_id)
-                or not self.sources.source_exists_tx(db, source_id)
-            ):
-                return
-            self.knowledge.delete_relations_by_source(db, source_id)
-            self.knowledge.delete_objects_by_source(db, source_id)
-            if object_rows:
-                self.knowledge.insert_object_chunk(db, object_rows)
-            if edge_rows:
-                self.knowledge.insert_relation_chunk(db, edge_rows)
+        target_exists = True
+        try:
+            with self.database.write() as db:
+                # 显式开写事务：write_lock 只互斥本进程写者；离线 CLI/维护进程共库时，
+                # 下面两个存在性 SELECT 在首条 DML 前不开启 SQLite 事务，另一进程可在
+                # 「检查通过」与「首条写入」之间提交删表/删源，让 anchor-only 投影插出
+                # 无 FK 约束的孤儿 knowledge_objects（已删/已移内容仍可检索）。经
+                # SqliteDatabase.begin_immediate（SQL 收在 store 层）让检查与写入对
+                # 跨进程写者也原子——与 snapshot_table/delete_table_if_unchanged 同款。
+                self.database.begin_immediate(db)
+                if (
+                    not self.knowhow.table_exists_tx(db, table_id)
+                    or not self.sources.source_exists_tx(db, source_id)
+                ):
+                    target_exists = False
+                else:
+                    self.knowledge.delete_relations_by_source(db, source_id)
+                    self.knowledge.delete_objects_by_source(db, source_id)
+                    if object_rows:
+                        self.knowledge.insert_object_chunk(db, object_rows)
+                    if edge_rows:
+                        self.knowledge.insert_relation_chunk(db, edge_rows)
 
-        self.knowhow.bump_knowhow_mutation_seq(table_id)
-        self.invalidate_unified_cache(notebook_id)
-        self.mark_unified_dirty(notebook_id)
+            if not target_exists:
+                for row_id, _status in row_results:
+                    self.knowhow.set_knowhow_row_projection_if_table_seq(
+                        row_id, "failed", snapshot_mutation_seq
+                    )
+                return
+
+            projected_mutation_seq = self.knowhow.bump_knowhow_mutation_seq(table_id)
+            self.invalidate_unified_cache(notebook_id)
+            self.mark_unified_dirty(notebook_id)
+        except Exception:
+            for row_id, _status in row_results:
+                self.knowhow.set_knowhow_row_projection_if_table_seq(
+                    row_id, "failed", snapshot_mutation_seq
+                )
+            raise
+
+        # The projector's own bump is the sole allowed mutation since the
+        # hydrated snapshot. Any larger sequence means a user edit landed
+        # during this pass and the scheduler has a newer rerun queued. Leave
+        # its pending/syncing markers intact. Even in the clean case each row
+        # publication remains sequence-conditional, closing an edit race that
+        # can land between this comparison and an individual status write.
+        if projected_mutation_seq == snapshot_mutation_seq + 1:
+            for row_id, status in row_results:
+                self.knowhow.set_knowhow_row_projection_if_table_seq(
+                    row_id, status, projected_mutation_seq
+                )
         # Hand the owning notebook back to the caller. The scheduler needs it to
         # run the throttled orphan-asset sweep after a projection (see
         # app/services/knowhow/api.py's run_projection_and_sweep) and this pass

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Iterable, Sequence
 
-from app.models.schemas import MemoryHit
+from app.models.memory import MemoryHit
 from app.repositories.ports import MemoryStorePort
 from app.services.embedding import Embedder
 from app.services.retrieval import RELEVANCE_FLOOR, _fuse, cosine, keyword_score

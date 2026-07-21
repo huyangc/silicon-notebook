@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from app.models.schemas import (
+from app.models.ask import (
     ActiveAskJob,
     AskRequest,
     AskResponse,

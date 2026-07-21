@@ -203,22 +203,23 @@ def test_diag_slow_stays_host_safe_and_read_only():
             )
 
 
-def test_routes_use_narrow_ports_not_notebook_repository():
-    path = ROOT / "backend" / "app" / "api" / "routes.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+def test_domain_routes_use_narrow_ports_not_notebook_repository():
+    paths = sorted((ROOT / "backend" / "app" / "api").glob("*_routes.py"))
     offenders: list[tuple[str, str]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        for argument in (*node.args.args, *node.args.kwonlyargs):
-            annotation = argument.annotation
-            name = ""
-            if isinstance(annotation, ast.Name):
-                name = annotation.id
-            elif isinstance(annotation, ast.Attribute):
-                name = annotation.attr
-            if name == "NotebookRepository":
-                offenders.append((node.name, argument.arg))
+    for path in paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for argument in (*node.args.args, *node.args.kwonlyargs):
+                annotation = argument.annotation
+                name = ""
+                if isinstance(annotation, ast.Name):
+                    name = annotation.id
+                elif isinstance(annotation, ast.Attribute):
+                    name = annotation.attr
+                if name == "NotebookRepository":
+                    offenders.append((f"{path.name}:{node.name}", argument.arg))
 
     assert offenders == []
 

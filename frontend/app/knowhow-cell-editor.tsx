@@ -67,7 +67,7 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
-import { authHeaders } from "./auth.ts";
+import { requestBlob } from "./api-client.ts";
 import { useFloatingWindow } from "./use-floating-window.ts";
 import {
   ROLE_LABELS,
@@ -247,13 +247,10 @@ function KnowhowImage({ src, alt, apiBase }: { src?: string; alt?: string; apiBa
     if (!needsAuth || !src) return;
     let cancelled = false;
     let created: string | null = null;
+    const controller = new AbortController();
     setFailed(false);
     setBlobUrl(null);
-    fetch(src, { headers: authHeaders() })
-      .then((res) => {
-        if (!res.ok) throw new Error(String(res.status));
-        return res.blob();
-      })
+    requestBlob(src, { signal: controller.signal, tag: "knowhow" })
       .then((blob) => {
         if (cancelled) return;
         created = URL.createObjectURL(blob);
@@ -264,6 +261,7 @@ function KnowhowImage({ src, alt, apiBase }: { src?: string; alt?: string; apiBa
       });
     return () => {
       cancelled = true;
+      controller.abort();
       if (created) URL.revokeObjectURL(created);
     };
   }, [src, needsAuth]);

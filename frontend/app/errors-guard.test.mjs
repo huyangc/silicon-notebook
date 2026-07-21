@@ -14,14 +14,6 @@ import {
 
 
 const APPROVED_BARE_STATUS_ERRORS = Object.freeze({
-  "knowhow-cell-editor.tsx|<module>.KnowhowImage|bare-status-error|Error": {
-    count: 1,
-    reason: "authenticated image failures become a non-text failed placeholder",
-  },
-  "page.tsx|<module>.AuthedImage|bare-status-error|Error": {
-    count: 1,
-    reason: "authenticated source image failures become a failed placeholder",
-  },
   "pending-center.tsx|<module>.usePendingActions.connect|bare-status-error|Error": {
     count: 1,
     reason: "stream status is internal reconnect control flow",
@@ -44,7 +36,7 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 1,
     reason: "typed source-cleanup error carries server-validated 409 guidance",
   },
-  "knowhow-transfer.ts|<module>.apiFetch|property|message": {
+  "knowhow-transfer.ts|<module>.transferKnowhowTable|property|message": {
     count: 1,
     reason: "validated source-cleanup guidance is copied into its typed error",
   },
@@ -86,11 +78,11 @@ const APPROVED_DIAGNOSTIC_READS = Object.freeze({
     count: 1,
     reason: "source detail uses the field only to select fixed user copy",
   },
-  "page.tsx|<module>.probeReady|diagnostic|error": {
+  "system-api.ts|<module>.probeReady|diagnostic|error": {
     count: 3,
     reason: "startup diagnostics are captured in a snapshot and bounded logging",
   },
-  "page.tsx|<module>.readAskStream.consumeLine|diagnostic|error": {
+  "ask-api.ts|<module>.runAskStream.consumeLine|diagnostic|error": {
     count: 1,
     reason: "stream diagnostics are logged before a branded scenario error",
   },
@@ -298,11 +290,12 @@ test("user copy is not rewrapped or thrown without the humanized brand", async (
 
 test("critical catch boundaries call the shared humanization layer", async () => {
   const page = await parseModule("page.tsx");
+  const ask = await parseModule("ask-api.ts");
   const knowhow = await parseModule("knowhow-import-logic.ts");
 
   assert.ok(callsIn(findFunction(page, "reportError")).includes("toUserMessage"));
-  assert.ok(callsIn(findFunction(page, "readAskStream")).includes("humanizedError"));
-  assert.ok(callsIn(findFunction(page, "readAskStream")).includes("logDiagnostic"));
+  assert.ok(callsIn(findFunction(ask, "runAskStream")).includes("humanizedError"));
+  assert.ok(callsIn(findFunction(ask, "runAskStream")).includes("logDiagnostic"));
   assert.deepEqual(
     callsIn(findFunction(knowhow, "extractErrorMessage")),
     ["toUserMessage"],
@@ -310,12 +303,11 @@ test("critical catch boundaries call the shared humanization layer", async () =>
 });
 
 
-test("independent API clients import and call the error boundary", async () => {
+test("migrated clients use the shared transport boundary", async () => {
   const modules = new Map(
     (await appSourceModules()).map((item) => [item.path, item.module]),
   );
   const clients = [
-    "auth.ts",
     "notebook-share.ts",
     "notebook-tier.ts",
     "promotion-queue.ts",
@@ -324,7 +316,9 @@ test("independent API clients import and call the error boundary", async () => {
     "knowhow-panel.tsx",
     "model-settings.ts",
     "memory-panel.tsx",
-    "page.tsx",
+    "transfer-picker.tsx",
+    "pending-center.tsx",
+    "knowhow-cell-editor.tsx",
     "admin/usage/api.ts",
     "admin/usage/notebooks.ts",
     "dev/logs/api.ts",
@@ -333,20 +327,15 @@ test("independent API clients import and call the error boundary", async () => {
   for (const path of clients) {
     const module = modules.get(path);
     assert.ok(module, path);
-    assert.ok(
-      importsIn(module).some(({ module: imported }) => (
-        imported.endsWith("/errors")
-        || imported.endsWith("/errors.ts")
-        || imported === "./errors"
-        || imported === "./errors.ts"
-      )),
-      `${path}: missing errors import`,
-    );
+    assert.ok(importsIn(module).some(({ module: imported }) => imported.includes("api-client")),
+      `${path}: missing shared api client import`);
     const calls = callsIn(module);
     assert.ok(
-      calls.includes("throwHumanizedHttpError")
-      || calls.includes("readHttpError"),
-      `${path}: missing failure-response boundary`,
+      calls.includes("requestJson")
+      || calls.includes("requestVoid")
+      || calls.includes("requestBlob")
+      || calls.includes("performApiRequest"),
+      `${path}: missing shared transport call`,
     );
   }
 });
@@ -357,7 +346,7 @@ test("model and report clients retain bounded diagnostics and scenario copy", as
   const report = await parseModule("report-view.tsx");
   assert.equal(
     callsIn(modelSettings)
-      .filter((target) => target === "throwHumanizedHttpError")
+      .filter((target) => target === "requestJson")
       .length,
     3,
   );

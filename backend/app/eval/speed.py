@@ -94,7 +94,7 @@ def measure_speed(source_md_path: str, char_steps: Optional[List[int]] = None,
                   llm_log_path: str = ".local/logs/llm.jsonl") -> List[dict]:
     """对一份源 md 按 char_steps 各截一段、真实抽取计时。用临时 notebook,跑完清理。"""
     from app.core.config import Settings
-    from app.models.schemas import NotebookCreate
+    from app.models.notebooks import NotebookCreate
     from app.services.sqlite_repository import SQLiteRepository
     char_steps = char_steps or [5000, 20000, 50000, 100000, 200000]
     settings = Settings()

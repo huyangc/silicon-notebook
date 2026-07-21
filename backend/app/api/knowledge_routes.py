@@ -1,0 +1,190 @@
+"""Knowledge-governance routes for notebook knowledge objects and edges."""
+
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from app.api.deps import (
+    get_current_user,
+    repository,
+    require_notebook_access,
+    require_notebook_read,
+    user_error,
+)
+from app.models.identity import UserProfile
+from app.models.knowledge import (
+    DuplicateGroup,
+    EdgeReviewItem,
+    EdgeReviewRequest,
+    KnowledgeGraph,
+    KnowledgeTypeCount,
+    KnowledgeUpdate,
+    MergeRequest,
+    ObjectSchemaCreate,
+    ObjectSchemaModel,
+    ObjectSchemaUpdate,
+    PaginatedKnowledge,
+)
+from app.services.sqlite_repository import KnowledgeGraphTooLargeError
+
+
+router = APIRouter()
+
+
+@router.get(
+    "/notebooks/{notebook_id}/knowledge-types",
+    response_model=List[KnowledgeTypeCount],
+    dependencies=[Depends(require_notebook_read)],
+)
+def knowledge_types(notebook_id: str) -> List[KnowledgeTypeCount]:
+    try:
+        return repository().knowledge_types(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.get("/notebooks/{notebook_id}/knowledge", response_model=PaginatedKnowledge, dependencies=[Depends(require_notebook_read)])
+def list_knowledge(
+    notebook_id: str,
+    type: str = Query(...),
+    status: Optional[str] = Query(None),
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+) -> PaginatedKnowledge:
+    object_type = _KNOWLEDGE_TYPE_MAP.get(type, type)
+    try:
+        return repository().list_knowledge(notebook_id, object_type, status=status, offset=offset, limit=limit)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+# --- Editable extraction-schema registry ---------------------------------
+@router.get("/object-schemas", response_model=List[ObjectSchemaModel])
+def list_object_schemas() -> List[ObjectSchemaModel]:
+    return repository().list_object_schemas()
+
+
+@router.post("/object-schemas", response_model=ObjectSchemaModel)
+def create_object_schema(payload: ObjectSchemaCreate, user: UserProfile = Depends(get_current_user)) -> ObjectSchemaModel:
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可修改全局配置")
+    try:
+        return repository().create_object_schema(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+@router.patch("/object-schemas/{object_type}", response_model=ObjectSchemaModel)
+def update_object_schema(
+    object_type: str, payload: ObjectSchemaUpdate, user: UserProfile = Depends(get_current_user)
+) -> ObjectSchemaModel:
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可修改全局配置")
+    try:
+        return repository().update_object_schema(object_type, payload)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.delete("/object-schemas/{object_type}")
+def delete_object_schema(object_type: str, user: UserProfile = Depends(get_current_user)):
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可修改全局配置")
+    try:
+        repository().delete_object_schema(object_type)
+        return {"status": "deleted", "object_type": object_type}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Schema not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post(
+    "/notebooks/{notebook_id}/schema-proposals",
+    response_model=List[ObjectSchemaModel],
+    dependencies=[Depends(require_notebook_access)],
+)
+def propose_schemas(notebook_id: str) -> List[ObjectSchemaModel]:
+    try:
+        return repository().propose_schemas(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.patch("/notebooks/{notebook_id}/knowledge/{knowledge_id}", dependencies=[Depends(require_notebook_access)])
+def update_knowledge(notebook_id: str, knowledge_id: str, payload: KnowledgeUpdate):
+    try:
+        return repository().update_knowledge(notebook_id, knowledge_id, payload)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Knowledge object not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+_KNOWLEDGE_TYPE_MAP = {
+    "rules": "rule",
+    "methods": "method",
+    "risks": "risk",
+    "cases": "case",
+    "checklist": "checklist",
+    "glossary": "glossary",
+}
+
+
+@router.get("/notebooks/{notebook_id}/duplicates", response_model=List[DuplicateGroup], dependencies=[Depends(require_notebook_read)])
+def find_duplicates(notebook_id: str, type: str = Query("rules")) -> List[DuplicateGroup]:
+    object_type = _KNOWLEDGE_TYPE_MAP.get(type, type)
+    try:
+        return repository().find_duplicates(notebook_id, object_type)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+
+@router.get("/notebooks/{notebook_id}/graph", response_model=KnowledgeGraph, dependencies=[Depends(require_notebook_read)])
+def knowledge_graph(notebook_id: str) -> KnowledgeGraph:
+    try:
+        return repository().knowledge_graph(notebook_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+    except KnowledgeGraphTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+
+
+@router.post("/notebooks/{notebook_id}/knowledge/{knowledge_id}/merge", dependencies=[Depends(require_notebook_access)])
+def merge_knowledge(notebook_id: str, knowledge_id: str, payload: MergeRequest):
+    try:
+        return repository().merge_knowledge(notebook_id, knowledge_id, payload)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Knowledge object not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# Edge trust & curation (Track E)
+# ---------------------------------------------------------------------------
+
+@router.get("/notebooks/{notebook_id}/edge-review-queue", response_model=List[EdgeReviewItem], dependencies=[Depends(require_notebook_read)])
+def edge_review_queue(notebook_id: str, limit: int = 100) -> List[EdgeReviewItem]:
+    """Return edges ranked by review priority (high centrality × low trust) desc.
+    Excludes already-rejected edges.
+    """
+    try:
+        return repository().review_queue(notebook_id, limit=limit)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Notebook not found")
+
+
+@router.post("/notebooks/{notebook_id}/relations/{rel_id}/review", status_code=200, dependencies=[Depends(require_notebook_access)])
+def review_relation(notebook_id: str, rel_id: str,
+                    payload: EdgeReviewRequest) -> dict:
+    """Mark an edge as 'verified', 'rejected', or 'pending'.
+    Rejected edges are excluded from all future graph-reasoning traversals.
+    """
+    try:
+        repository().set_edge_review(notebook_id, rel_id, payload.status)
+        return {"rel_id": rel_id, "review_status": payload.status}
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

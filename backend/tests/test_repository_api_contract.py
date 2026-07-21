@@ -7,7 +7,7 @@ import threading
 from fastapi.testclient import TestClient
 
 from app import main as app_main
-from app.api import deps, routes
+from app.api import ask_routes, deps
 from app.core import event_logging
 from app.core.config import Settings
 from app.main import app
@@ -90,7 +90,7 @@ def _runtime_serialization(tmp_path, monkeypatch):
     monkeypatch.setattr(app_main, "repository", lambda: repo)
     monkeypatch.setattr(deps, "get_settings", lambda: settings)
     monkeypatch.setattr(deps, "repository", lambda: repo)
-    monkeypatch.setattr(routes, "repository", lambda: repo)
+    monkeypatch.setattr(ask_routes, "repository", lambda: repo)
     monkeypatch.setattr(event_logging._archive_pool, "submit", lambda *_a, **_k: None)
     test_app = app_main.create_app()
 

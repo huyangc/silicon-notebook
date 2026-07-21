@@ -1,13 +1,8 @@
 import type { ChannelsResponse, FullRecord, ListResponse } from "./types";
-import { authHeaders } from "../../auth.ts";
-import { throwHumanizedHttpError } from "../../errors.ts";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000/api";
+import { requestJson } from "../../api-client.ts";
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { headers: authHeaders() });
-  if (!res.ok) await throwHumanizedHttpError(res, "dev-logs");
-  return res.json();
+  return requestJson(path, { tag: "dev-logs" });
 }
 
 export function fetchChannels(owner?: string): Promise<ChannelsResponse> {

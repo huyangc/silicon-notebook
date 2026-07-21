@@ -10,10 +10,10 @@ def _client(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_COMPAT_MODEL", "")
     monkeypatch.setenv("EMBED_PROVIDER", "")
     from app.core.config import get_settings
-    from app.api import routes
+    from app.api import ask_routes
     from app.main import create_app
     get_settings.cache_clear()
-    routes.repository.cache_clear()
+    ask_routes.repository.cache_clear()
     return TestClient(create_app())
 
 
@@ -58,7 +58,7 @@ def test_ask_stream_runs_through_the_runtime_ask_service(tmp_path, monkeypatch):
     """Task 24: 流式端点经 AskExecutionCoordinator 调 runtime-owned AskService
     (不再是 facade 回调)—— stub 掉服务的 ask 即可拦到整条流的 final 响应。"""
     import json
-    from app.api.routes import repository
+    from app.api.ask_routes import repository
     from app.models.schemas import AskResponse
 
     client = _client(tmp_path, monkeypatch)

@@ -608,6 +608,29 @@ class KnowhowStore:
                 (status, row_id),
             )
 
+    def set_knowhow_row_projection_if_table_seq(
+        self, row_id: str, status: str, expected_mutation_seq: int
+    ) -> bool:
+        """Publish a projection status only for the table version that ran.
+
+        Cell/row/column mutations bump ``knowhow_tables.mutation_seq`` and mark
+        affected rows pending. A background projection working from an older
+        hydrated table snapshot must not overwrite that newer pending marker
+        while its scheduler rerun is still queued. The version predicate and
+        status update share one write transaction, closing the check/write
+        race; ``False`` means the caller's snapshot is stale or the row/table
+        was deleted.
+        """
+        with self.database.write() as db:
+            cursor = db.execute(
+                "UPDATE knowhow_rows SET projection_status = ? "
+                "WHERE id = ? AND EXISTS ("
+                "SELECT 1 FROM knowhow_tables t "
+                "WHERE t.id = knowhow_rows.table_id AND t.mutation_seq = ?)",
+                (status, row_id, expected_mutation_seq),
+            )
+        return cursor.rowcount > 0
+
     def delete_knowhow_row(self, row_id: str) -> None:
         """Delete a row; its cells and cell-code attachments go with it
         (``knowhow_cells.row_id`` and ``knowhow_cell_code.row_id`` are both
