@@ -379,6 +379,7 @@ class KnowhowProjector:
         try/except below."""
         table = self.knowhow.get_knowhow_table(table_id)
         notebook_id = table["notebook_id"]
+        snapshot_mutation_seq = table["mutation_seq"]
         source_id = self.ensure_hidden_source(table_id)
         columns = table["columns"]
         anchor_column = next((c for c in columns if c["role"] == "anchor"), None)
@@ -395,7 +396,9 @@ class KnowhowProjector:
 
         for row in table["rows"]:
             row_id = row["id"]
-            self.knowhow.set_knowhow_row_projection(row_id, "syncing")
+            self.knowhow.set_knowhow_row_projection_if_table_seq(
+                row_id, "syncing", snapshot_mutation_seq
+            )
             cells = row["cells"]
             cell_nets = {
                 column["id"]: textops.strip_images(cells.get(column["id"], "")).strip()
@@ -427,8 +430,12 @@ class KnowhowProjector:
                 # silent-'syncing' row would look perpetually in-progress
                 # instead of honestly failed.
                 for completed_row_id, _status in row_results:
-                    self.knowhow.set_knowhow_row_projection(completed_row_id, "failed")
-                self.knowhow.set_knowhow_row_projection(row_id, "failed")
+                    self.knowhow.set_knowhow_row_projection_if_table_seq(
+                        completed_row_id, "failed", snapshot_mutation_seq
+                    )
+                self.knowhow.set_knowhow_row_projection_if_table_seq(
+                    row_id, "failed", snapshot_mutation_seq
+                )
                 raise
 
             failed = False
@@ -518,19 +525,32 @@ class KnowhowProjector:
 
             if not target_exists:
                 for row_id, _status in row_results:
-                    self.knowhow.set_knowhow_row_projection(row_id, "failed")
+                    self.knowhow.set_knowhow_row_projection_if_table_seq(
+                        row_id, "failed", snapshot_mutation_seq
+                    )
                 return
 
-            self.knowhow.bump_knowhow_mutation_seq(table_id)
+            projected_mutation_seq = self.knowhow.bump_knowhow_mutation_seq(table_id)
             self.invalidate_unified_cache(notebook_id)
             self.mark_unified_dirty(notebook_id)
         except Exception:
             for row_id, _status in row_results:
-                self.knowhow.set_knowhow_row_projection(row_id, "failed")
+                self.knowhow.set_knowhow_row_projection_if_table_seq(
+                    row_id, "failed", snapshot_mutation_seq
+                )
             raise
 
-        for row_id, status in row_results:
-            self.knowhow.set_knowhow_row_projection(row_id, status)
+        # The projector's own bump is the sole allowed mutation since the
+        # hydrated snapshot. Any larger sequence means a user edit landed
+        # during this pass and the scheduler has a newer rerun queued. Leave
+        # its pending/syncing markers intact. Even in the clean case each row
+        # publication remains sequence-conditional, closing an edit race that
+        # can land between this comparison and an individual status write.
+        if projected_mutation_seq == snapshot_mutation_seq + 1:
+            for row_id, status in row_results:
+                self.knowhow.set_knowhow_row_projection_if_table_seq(
+                    row_id, status, projected_mutation_seq
+                )
         # Hand the owning notebook back to the caller. The scheduler needs it to
         # run the throttled orphan-asset sweep after a projection (see
         # app/services/knowhow/api.py's run_projection_and_sweep) and this pass

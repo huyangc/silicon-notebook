@@ -493,6 +493,61 @@ def test_synced_is_published_only_after_table_kg_commit(
     assert _row_object_ids(repo, row_id)
 
 
+def test_stale_projection_cannot_overwrite_a_concurrent_edit_pending_status(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """An older pass must never publish its result over a newer row version.
+
+    The edit lands after the old pass has committed its table-wide KG and
+    mutation bump but before it publishes row statuses. A scheduler rerun will
+    eventually project the edit; until then the edited row must remain
+    ``pending`` rather than briefly claiming that the old graph is current.
+    """
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题", cols["修复方法"]: "旧方法",
+    })
+    terminal_bump_done = threading.Event()
+    allow_status_publication = threading.Event()
+    real_bump = store.bump_knowhow_mutation_seq
+
+    def _pause_after_terminal_bump(target_table_id):
+        result = real_bump(target_table_id)
+        terminal_bump_done.set()
+        assert allow_status_publication.wait(2), "test did not release old projection"
+        return result
+
+    monkeypatch.setattr(store, "bump_knowhow_mutation_seq", _pause_after_terminal_bump)
+    errors = []
+
+    def _project_old_snapshot():
+        try:
+            projector.project_table(table_id)
+        except BaseException as exc:  # surfaced on the assertion thread below
+            errors.append(exc)
+
+    worker = threading.Thread(target=_project_old_snapshot)
+    worker.start()
+    assert terminal_bump_done.wait(2), "old projection did not reach terminal bump"
+    try:
+        store.update_knowhow_cell(row_id, cols["修复方法"], "新方法")
+    finally:
+        allow_status_publication.set()
+        worker.join(2)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert _row_projection_status(repo, table_id, row_id) == "pending"
+
+    # The scheduler's subsequent rerun (driven synchronously here) publishes
+    # the newer snapshot and only then settles the row.
+    monkeypatch.setattr(store, "bump_knowhow_mutation_seq", real_bump)
+    projector.project_table(table_id)
+    assert _row_projection_status(repo, table_id, row_id) == "synced"
+    assert "新方法" in _row_chunk_texts(repo, row_id).values()
+
+
 def test_reproject_self_heals_a_missing_chunk_vector(repo, projector, table_id, embedder):
     """Review hardening (ported from PR-1): the carry-over window (structural
     transaction committed, vector re-persist did NOT happen — process death
