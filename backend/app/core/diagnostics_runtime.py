@@ -172,7 +172,9 @@ class SqlMetadata:
     fingerprint: str
 
 
-def normalize_sql_metadata(sql: str) -> SqlMetadata:
+def normalize_sql_metadata(sql: str | SqlMetadata) -> SqlMetadata:
+    if isinstance(sql, SqlMetadata):
+        return sql
     collapsed = " ".join(str(sql).strip().split())
     scrubbed = re.sub(r"'(?:''|[^'])*'|\b\d+(?:\.\d+)?\b", "?", collapsed)
     verb_match = re.match(r"(?i)^([A-Z]+)", scrubbed)
@@ -515,7 +517,9 @@ class DiagnosticsRuntime:
         finally:
             _diagnostic_context.reset(context_token)
 
-    def _enter_sql(self, mode: str, sql: str, operation: str) -> Optional[int]:
+    def _enter_sql(
+        self, mode: str, sql: str | SqlMetadata, operation: str
+    ) -> Optional[int]:
         metadata = normalize_sql_metadata(sql)
         entry = self._active_entry(
             mode=_bounded_text(mode, 24),
@@ -970,7 +974,9 @@ def diagnostic_phase(phase: str) -> Iterator[None]:
 
 
 @contextmanager
-def sql_scope(mode: str, sql: str, operation: str) -> Iterator[None]:
+def sql_scope(
+    mode: str, sql: str | SqlMetadata, operation: str
+) -> Iterator[None]:
     runtime = current_runtime()
     token = None
     if runtime is not None:

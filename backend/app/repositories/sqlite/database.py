@@ -2,11 +2,70 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from app.core.config import Settings
+from app.core import diagnostics_runtime as diagnostics
+
+
+class _DiagnosticCursor(sqlite3.Cursor):
+    """SQLite cursor that retains sanitized statement identity, never values."""
+
+    _diag_sql: diagnostics.SqlMetadata | None = None
+    _diag_mode = "read"
+    _diag_operation = "sqlite.read"
+
+    def _remember(self, sql: Any) -> None:
+        try:
+            self._diag_sql = diagnostics.normalize_sql_metadata(sql)
+        except Exception:
+            self._diag_sql = None
+
+    def _scope(self):
+        metadata = self._diag_sql
+        if metadata is None:
+            return nullcontext()
+        return diagnostics.sql_scope(
+            self._diag_mode,
+            metadata,
+            self._diag_operation,
+        )
+
+    def execute(self, sql, parameters=()):
+        self._remember(sql)
+        with diagnostics.sql_scope(self._diag_mode, sql, self._diag_operation):
+            return super().execute(sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters):
+        self._remember(sql)
+        with diagnostics.sql_scope(self._diag_mode, sql, self._diag_operation):
+            return super().executemany(sql, seq_of_parameters)
+
+    def fetchone(self):
+        with self._scope():
+            return super().fetchone()
+
+    def fetchmany(self, size=None):
+        with self._scope():
+            if size is None:
+                return super().fetchmany()
+            return super().fetchmany(size)
+
+    def fetchall(self):
+        with self._scope():
+            return super().fetchall()
+
+    def __next__(self):
+        with self._scope():
+            return super().__next__()
+
+    def close(self):
+        try:
+            return super().close()
+        finally:
+            self._diag_sql = None
 
 
 class _Conn(sqlite3.Connection):
@@ -25,6 +84,34 @@ class _Conn(sqlite3.Connection):
     写并在外层捕获内层异常**——会静默丢写 / 破坏增量提交(INV-8)。生产中复用连接实际只读,
     所有写经 write()(独立连接、每次独立提交)。
     """
+
+    _diag_mode = "read"
+    _diag_operation = "sqlite.read"
+
+    def cursor(self, factory=None):
+        cursor_factory = _DiagnosticCursor if factory is None else factory
+        cursor = super().cursor(cursor_factory)
+        if isinstance(cursor, _DiagnosticCursor):
+            cursor._diag_mode = self._diag_mode
+            cursor._diag_operation = self._diag_operation
+            cursor._diag_sql = None
+        return cursor
+
+    def execute(self, sql, parameters=()):
+        cursor = self.cursor()
+        return cursor.execute(sql, parameters)
+
+    def executemany(self, sql, seq_of_parameters):
+        cursor = self.cursor()
+        return cursor.executemany(sql, seq_of_parameters)
+
+    def executescript(self, sql_script):
+        with diagnostics.sql_scope(
+            self._diag_mode,
+            sql_script,
+            self._diag_operation,
+        ):
+            return super().executescript(sql_script)
 
     def __enter__(self) -> "_Conn":
         self._txn_depth = getattr(self, "_txn_depth", 0) + 1
@@ -62,13 +149,22 @@ class SqliteDatabase:
         path = Path(value)
         return path if path.is_absolute() else self.root_dir / path
 
-    def _new_connection(self) -> _Conn:
+    def _new_connection(
+        self,
+        mode: str = "read",
+        operation: str = "sqlite.read",
+    ) -> _Conn:
+        pending = getattr(self._local, "new_connection_diagnostics", None)
+        if pending is not None:
+            mode, operation = pending
         conn = sqlite3.connect(
             self.db_path,
             timeout=self.settings.db_busy_timeout_ms / 1000,
             factory=_Conn,
             check_same_thread=True,  # 显式:连接不跨线程(threading.local 保证)
         )
+        conn._diag_mode = mode
+        conn._diag_operation = operation
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
         conn.execute("PRAGMA journal_mode = WAL")
@@ -102,18 +198,43 @@ class SqliteDatabase:
                 pass
 
     @contextmanager
-    def write(self) -> Iterator[sqlite3.Connection]:
+    def write(
+        self, *, operation: str = "sqlite.write"
+    ) -> Iterator[sqlite3.Connection]:
         """写事务:进程内写串行(write_lock)。每次用**独立新连接**(非线程复用读连接),
         使每个 write() 独立提交 —— 保留嵌套增量提交(节点向量 backfill 每批 flush
         独立落库、中断可续跑)的崩溃恢复语义(INV-8)。用完即 close(写串行,写连接峰值
         = 嵌套写深度、fd 用完即还)。深度守卫不作用于 write()。"""
-        with self.write_lock:
-            conn = self._new_connection()
+        waiter = diagnostics.begin_write_wait(operation)
+        acquired = False
+        try:
+            try:
+                self.write_lock.acquire()
+                acquired = True
+            except BaseException:
+                diagnostics.write_wait_cancelled(waiter)
+                raise
+            diagnostics.write_acquired(waiter, operation)
+
+            marker = object()
+            previous = getattr(self._local, "new_connection_diagnostics", marker)
+            self._local.new_connection_diagnostics = ("write", operation)
+            try:
+                conn = self._new_connection()
+            finally:
+                if previous is marker:
+                    del self._local.new_connection_diagnostics
+                else:
+                    self._local.new_connection_diagnostics = previous
             try:
                 with conn:
                     yield conn
             finally:
                 conn.close()
+        finally:
+            if acquired:
+                diagnostics.write_released()
+                self.write_lock.release()
 
     @staticmethod
     def begin_immediate(conn: sqlite3.Connection) -> None:

@@ -1,10 +1,13 @@
 import sqlite3
 import threading
 import concurrent.futures as cf
+import json
+import time
 
 import pytest
 
 from app.core.config import Settings
+from app.core import diagnostics_runtime as diagnostics
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -178,3 +181,67 @@ def test_no_bare_close_on_reused_conn_in_knowledge_lifecycle():  # INV-7
     src = (pathlib.Path(__file__).resolve().parent.parent
            / "app" / "services" / "knowledge_lifecycle.py").read_text(encoding="utf-8")
     assert "scan_db.close()" not in src, "复用连接不得裸 close;用 self._close_local()"
+
+
+def test_fetchall_remains_observable_after_execute_returns(db):
+    with db.write() as conn:
+        conn.execute("CREATE TABLE fetch_probe (value TEXT)")
+        conn.executemany(
+            "INSERT INTO fetch_probe VALUES (?)",
+            (("first",), ("second",)),
+        )
+
+    runtime = diagnostics.DiagnosticsRuntime(
+        db.root_dir / "diagnostics",
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        enable_signal=False,
+    )
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+    execute_finished = threading.Event()
+    failures = []
+
+    def run_query():
+        calls = 0
+        try:
+            conn = db.connect()
+
+            def diag_fetch(value):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    fetch_started.set()
+                    release_fetch.wait(timeout=2)
+                return value
+
+            conn.create_function("diag_fetch", 1, diag_fetch)
+            cursor = conn.execute("SELECT diag_fetch(value) FROM fetch_probe")
+            execute_finished.set()
+            cursor.fetchall()
+        except BaseException as exc:  # preserve worker failures for the assertion thread
+            failures.append(exc)
+        finally:
+            db.close_local()
+
+    with diagnostics.install_runtime(runtime):
+        worker = threading.Thread(target=run_query)
+        worker.start()
+        assert execute_finished.wait(timeout=2)
+        assert fetch_started.wait(timeout=2)
+        try:
+            active = runtime.snapshot()["active_sql"]
+            assert len(active) == 1
+            assert active[0]["verb"] == "SELECT"
+            assert active[0]["table"] == "fetch_probe"
+            encoded = json.dumps(active)
+            assert "diag_fetch" not in encoded
+            assert "first" not in encoded
+            assert "second" not in encoded
+        finally:
+            release_fetch.set()
+            worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert failures == []
+    assert runtime.snapshot()["active_sql"] == []
