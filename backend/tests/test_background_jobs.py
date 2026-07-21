@@ -7,6 +7,7 @@ per-user 日志归属 _log_owner 才能在 worker 线程生效，否则回退 us
 import contextvars
 import threading
 
+from app.core import diagnostics_runtime as diagnostics
 from app.services import background_jobs
 
 _probe = contextvars.ContextVar("bg_probe", default="DEFAULT")
@@ -108,3 +109,62 @@ def test_submit_returns_named_daemon_thread():
     assert t.name == "named-job"
     assert t.daemon is True
     assert done.wait(timeout=5)
+
+
+def test_submit_reports_active_and_completed_job(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_job():
+        started.set()
+        assert release.wait(timeout=5)
+
+    with diagnostics.activate_runtime(
+        tmp_path,
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=False,
+    ) as runtime:
+        thread = background_jobs.submit(blocked_job, name="diagnostic-job")
+        assert started.wait(timeout=5)
+        active = runtime.snapshot()["active_jobs"]
+        assert len(active) == 1
+        assert active[0]["name"] == "diagnostic-job"
+
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        snapshot = runtime.snapshot()
+        assert snapshot["active_jobs"] == []
+        assert snapshot["recent_jobs"][-1]["name"] == "diagnostic-job"
+        assert snapshot["recent_jobs"][-1]["status"] == "done"
+
+
+def test_submit_reports_failed_job_as_error(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+
+    def failing_job():
+        started.set()
+        assert release.wait(timeout=5)
+        raise RuntimeError("expected diagnostic test failure")
+
+    with diagnostics.activate_runtime(
+        tmp_path,
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.02,
+        enable_signal=False,
+    ) as runtime:
+        thread = background_jobs.submit(failing_job, name="failing-diagnostic-job")
+        assert started.wait(timeout=5)
+        assert runtime.snapshot()["active_jobs"][0]["name"] == "failing-diagnostic-job"
+
+        release.set()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        snapshot = runtime.snapshot()
+        assert snapshot["active_jobs"] == []
+        assert snapshot["recent_jobs"][-1]["name"] == "failing-diagnostic-job"
+        assert snapshot["recent_jobs"][-1]["status"] == "error"

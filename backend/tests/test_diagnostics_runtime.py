@@ -788,6 +788,97 @@ def test_activate_runtime_installs_starts_and_always_cleans_up(tmp_path):
     assert diagnostics.current_runtime() is None
 
 
+def test_fastapi_lifespan_exposes_blocked_request_before_completion():
+    from fastapi.testclient import TestClient
+
+    from app.core import readiness
+    from app.main import create_app
+
+    entered = threading.Event()
+    release = threading.Event()
+    result: dict[str, object] = {}
+    test_app = create_app()
+
+    @test_app.get("/_diagnostics-test/block")
+    def blocked_route() -> dict[str, bool]:
+        entered.set()
+        assert release.wait(timeout=5)
+        return {"ok": True}
+
+    readiness.mark_ready()
+    try:
+        with TestClient(test_app) as client:
+            runtime = diagnostics.current_runtime()
+            assert runtime is not None
+
+            def request() -> None:
+                result["response"] = client.get("/_diagnostics-test/block")
+
+            thread = threading.Thread(target=request)
+            thread.start()
+            assert entered.wait(timeout=5)
+            snapshot = runtime.snapshot()
+            active = snapshot["active_requests"]
+            assert len(active) == 1
+            assert active[0]["method"] == "GET"
+            assert active[0]["path"] == "/_diagnostics-test/block"
+            assert active[0]["request_id"].startswith("req-")
+            assert active[0]["phase"] == "http.dispatch"
+            assert snapshot["readiness"]["ready"] is True
+
+            release.set()
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+            response = result["response"]
+            assert response.status_code == 200
+            assert response.headers["X-Request-Id"] == active[0]["request_id"]
+            assert runtime.snapshot()["active_requests"] == []
+    finally:
+        release.set()
+    assert diagnostics.current_runtime() is None
+
+
+def test_notebook_delete_reports_database_then_filesystem_phases(tmp_path, monkeypatch):
+    from app.services import notebook_catalog
+
+    observed: list[tuple[str, str | None]] = []
+    runtime = _runtime(tmp_path)
+
+    class Store:
+        def delete_row_and_orphan_embeddings(self, notebook_id: str) -> list[str]:
+            phase = runtime.snapshot()["active_requests"][0]["phase"]
+            observed.append(("db", phase))
+            return ["stored-source"]
+
+    service = object.__new__(notebook_catalog.NotebookCatalogService)
+    service._store = Store()
+    service._storage_dir = lambda: tmp_path
+    service.get_notebook = lambda _notebook_id: object()
+
+    def delete_source(_path: str) -> None:
+        phase = runtime.snapshot()["active_requests"][0]["phase"]
+        observed.append(("source", phase))
+
+    def delete_assets(_storage_dir: Path, _notebook_id: str) -> None:
+        phase = runtime.snapshot()["active_requests"][0]["phase"]
+        observed.append(("assets", phase))
+
+    monkeypatch.setattr(notebook_catalog, "_delete_source_file", delete_source)
+    monkeypatch.setattr(notebook_catalog, "_delete_notebook_asset_dir", delete_assets)
+
+    with diagnostics.install_runtime(runtime):
+        with diagnostics.request_scope(
+            "req-delete", "DELETE", "/api/notebooks/nb-delete"
+        ):
+            service.delete_notebook("nb-delete")
+
+    assert observed == [
+        ("db", "notebook_delete.db"),
+        ("source", "notebook_delete.files"),
+        ("assets", "notebook_delete.files"),
+    ]
+
+
 @pytest.mark.skipif(
     os.name != "posix" or not hasattr(signal, "SIGUSR1"),
     reason="SIGUSR1 requires POSIX",

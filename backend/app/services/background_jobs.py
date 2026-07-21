@@ -20,6 +20,7 @@ import logging
 import threading
 from typing import Callable
 
+from app.core import diagnostics_runtime as diagnostics
 from app.core.request_context import request_user_id
 from app.services.pending_bus import pending_bus
 
@@ -48,7 +49,8 @@ def submit(fn: Callable, *args, name: str | None = None,
 
     def _run() -> None:
         try:
-            fn(*args, **kwargs)
+            with diagnostics.job_scope(label):
+                fn(*args, **kwargs)
         except Exception:  # noqa: BLE001 — 后台线程顶层兜底，绝不静默死
             _log.exception("background job failed: %s", label)
         finally:
