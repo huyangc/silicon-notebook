@@ -564,8 +564,10 @@ failure records a result. The three-state patch (`null`/omitted = unchanged,
 empty string = clear, non-empty string = set), persisted-settings read, all-six
 fingerprint comparison, settings write, and changed-status deletion run in one
 `BEGIN IMMEDIATE` transaction. Concurrent saves therefore serialize without
-losing disjoint field/role updates, and the local settings cache is invalidated
-only after commit.
+losing disjoint field/role updates. Every effective-settings read queries the
+small persisted JSON directly; the legacy process-local cache object remains a
+compatibility seam only and never serves or fills these reads, so a paused old
+read or another process cannot leave later resolution stale.
 
 Open **模型服务** to inspect the effective saved configuration and test either
 one current service or every current effective service. The effective identity
@@ -573,7 +575,11 @@ is resolved by the backend from the user's saved setting and its configured
 fallbacks, so model names are runtime data — product code in the frontend must
 not carry provider/model-name constants. Ask failure notices identify the
 affected service role and the backend-resolved current model when its safe
-display label is available.
+display label is available. The editor tracks Base URL, model, and API key
+dirtiness independently and sends only dirty fields in dirty roles. Untouched
+forms produce `{}` and cannot replay stale values from another browser tab;
+explicit dirty empty strings still clear fields. Loading and successful saves
+reset every dirty flag, and unchanged forms keep Save disabled.
 
 Effective identity also includes runtime protocol switches: embedding provider
 selection and rerank API style are normalized into the internal fingerprint.
