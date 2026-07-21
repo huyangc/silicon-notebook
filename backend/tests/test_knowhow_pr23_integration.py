@@ -61,7 +61,7 @@ def client(tmp_path, monkeypatch):
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
 
-    from app.api.routes import repository
+    from app.api.knowhow_routes import repository
     from app.main import app
 
     c = TestClient(app)

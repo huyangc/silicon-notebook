@@ -299,9 +299,9 @@ def test_federated_version_key_covers_review_flip_without_eviction(repo, monkeyp
 
 @pytest.fixture
 def client(repo, monkeypatch):
-    """TestClient with app.api.routes.repository() overridden to the fixture repo."""
+    """TestClient with the knowledge router repository overridden to the fixture repo."""
     from fastapi.testclient import TestClient
-    import app.api.routes as routes_mod
+    import app.api.knowledge_routes as routes_mod
     from app.main import app
     monkeypatch.setattr(routes_mod, "repository", lambda: repo)
     return TestClient(app)

@@ -522,7 +522,7 @@ def test_deleting_the_last_table_reclaims_immediately(repo, monkeypatch):
     never matured and the files survived until the notebook was deleted. Note
     this fixture does NOT use ``immediate_sweep``: the production grace period
     is in force, and the route itself must be what drops it."""
-    from app.api import routes as routes_mod
+    from app.api import knowhow_routes as routes_mod
 
     monkeypatch.setattr(routes_mod, "repository", lambda: repo)
     monkeypatch.setattr(
@@ -544,7 +544,7 @@ def test_deleting_one_of_several_tables_still_respects_the_grace(repo, monkeypat
     """The immediate reclaim is justified ONLY by "no cell left to save a draft
     into". While another table survives, a draft can still be saved, so the
     grace period must stay in force."""
-    from app.api import routes as routes_mod
+    from app.api import knowhow_routes as routes_mod
 
     monkeypatch.setattr(routes_mod, "repository", lambda: repo)
     monkeypatch.setattr(
@@ -635,7 +635,7 @@ def _route_repo(monkeypatch, repo):
     """Call the route bodies directly against a real repo. The point is to
     exercise the ROUTES' own wiring — the store-level tests above pass even if
     a route forgets to pass ``require_assets`` at all."""
-    from app.api import routes as routes_mod
+    from app.api import knowhow_routes as routes_mod
 
     monkeypatch.setattr(routes_mod, "repository", lambda: repo)
     return routes_mod

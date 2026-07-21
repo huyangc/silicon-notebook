@@ -51,6 +51,23 @@ def test_notebook_and_source_endpoints_have_domain_owners():
         assert modules[endpoint] == module, endpoint
 
 
+def test_knowhow_and_knowledge_endpoints_have_domain_owners():
+    modules = _endpoint_modules()
+    expected = {
+        "preview_knowhow_import": "app.api.knowhow_routes",
+        "patch_knowhow_cell": "app.api.knowhow_routes",
+        "reformat_knowhow_cell": "app.api.knowhow_routes",
+        "transfer_knowhow_table": "app.api.knowhow_routes",
+        "knowledge_types": "app.api.knowledge_routes",
+        "list_knowledge": "app.api.knowledge_routes",
+        "merge_knowledge": "app.api.knowledge_routes",
+        "edge_review_queue": "app.api.knowledge_routes",
+        "review_relation": "app.api.knowledge_routes",
+    }
+    for endpoint, module in expected.items():
+        assert modules[endpoint] == module, endpoint
+
+
 def test_domain_routers_do_not_import_the_schema_facade():
     api_dir = ROOT / "backend" / "app" / "api"
     route_modules = sorted(api_dir.glob("*_routes.py"))
