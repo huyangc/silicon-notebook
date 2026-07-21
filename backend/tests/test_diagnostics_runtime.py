@@ -499,6 +499,151 @@ def test_snapshot_bounds_identifiers_concurrency_width_and_non_finite_values(tmp
     assert len(encoded.encode("utf-8")) < 100_000
 
 
+def test_runtime_file_reports_live_kg_and_model_concurrency_gates(tmp_path):
+    from app.main import _diagnostic_concurrency_snapshot
+    from app.services.kg import scheduler
+    from app.services.model_concurrency import activate_model_concurrency
+
+    release = threading.Event()
+    kg_window_started = threading.Event()
+    kg_job_started = threading.Event()
+    llm_started = threading.Event()
+    embedding_started = threading.Event()
+    llm_threads: list[threading.Thread] = []
+    embedding_submit_threads: list[threading.Thread] = []
+    embedding_queued = []
+    embedding_errors: list[BaseException] = []
+    kg_futures = []
+    embedding_first = None
+    runtime = None
+
+    def block(started: threading.Event) -> str:
+        started.set()
+        release.wait(timeout=5)
+        return "done"
+
+    scheduler.configure(window_workers=1, job_workers=1)
+    try:
+        with activate_model_concurrency(llm_max=1, embed_max=1) as state:
+            try:
+                kg_futures = [
+                    scheduler.submit_window(block, kg_window_started),
+                    scheduler.submit_job(block, kg_job_started),
+                ]
+                assert kg_window_started.wait(timeout=2)
+                assert kg_job_started.wait(timeout=2)
+                kg_futures.extend(
+                    [
+                        scheduler.submit_window(lambda: "queued-window"),
+                        scheduler.submit_job(lambda: "queued-job"),
+                    ]
+                )
+
+                def hold_llm() -> None:
+                    with state.llm.slot():
+                        llm_started.set()
+                        release.wait(timeout=5)
+
+                def wait_for_llm() -> None:
+                    with state.llm.slot():
+                        return
+
+                llm_threads = [
+                    threading.Thread(target=hold_llm),
+                    threading.Thread(target=wait_for_llm),
+                ]
+                llm_threads[0].start()
+                assert llm_started.wait(timeout=2)
+                llm_threads[1].start()
+
+                embedding_first = state.embedding.submit(
+                    block,
+                    embedding_started,
+                    task_prefix="diagnostic-embedding",
+                )
+                assert embedding_started.wait(timeout=2)
+
+                def submit_waiting_embedding() -> None:
+                    try:
+                        embedding_queued.append(
+                            state.embedding.submit(
+                                lambda: "queued-embedding",
+                                task_prefix="diagnostic-embedding",
+                            )
+                        )
+                    except BaseException as exc:
+                        embedding_errors.append(exc)
+
+                embedding_submit_threads = [
+                    threading.Thread(target=submit_waiting_embedding)
+                ]
+                embedding_submit_threads[0].start()
+
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    kg = scheduler.stats()
+                    if (
+                        kg.get("window_waiting") == 1
+                        and kg.get("job_waiting") == 1
+                        and state.llm.snapshot().waiting == 1
+                        and state.embedding.snapshot().waiting == 1
+                    ):
+                        break
+                    time.sleep(0.01)
+                else:
+                    raise AssertionError("timed out waiting for concurrency queues")
+
+                runtime = _runtime(
+                    tmp_path,
+                    concurrency_provider=_diagnostic_concurrency_snapshot,
+                )
+                runtime.start()
+                snapshot = _wait_for_json(tmp_path / "runtime.json")
+                assert snapshot["concurrency"] == {
+                    "kg": {
+                        "window_active": 1,
+                        "window_max": 1,
+                        "window_waiting": 1,
+                        "job_active": 1,
+                        "job_max": 1,
+                        "job_waiting": 1,
+                    },
+                    "llm": {"active": 1, "maximum": 1, "waiting": 1},
+                    "embedding": {"active": 1, "maximum": 1, "waiting": 1},
+                }
+                assert all(
+                    type(value) in (int, float)
+                    for group in snapshot["concurrency"].values()
+                    for value in group.values()
+                )
+            finally:
+                if runtime is not None:
+                    runtime.stop()
+                release.set()
+                for future in kg_futures:
+                    if not future.cancelled():
+                        future.result(timeout=2)
+                for thread in llm_threads + embedding_submit_threads:
+                    thread.join(timeout=2)
+                    assert not thread.is_alive()
+                if embedding_first is not None:
+                    embedding_first.result(timeout=2)
+                for future in embedding_queued:
+                    future.result(timeout=2)
+                assert embedding_errors == []
+                assert state.llm.snapshot().active == 0
+                assert state.llm.snapshot().waiting == 0
+                assert state.embedding.snapshot().active == 0
+                assert state.embedding.snapshot().waiting == 0
+        assert scheduler.stats()["window_active"] == 0
+        assert scheduler.stats()["window_waiting"] == 0
+        assert scheduler.stats()["job_active"] == 0
+        assert scheduler.stats()["job_waiting"] == 0
+    finally:
+        release.set()
+        scheduler.reset()
+
+
 def test_snapshot_bounds_readiness_counts_and_active_sql_names(tmp_path):
     huge_number = 10**10_000
     huge_verb = "A" * 10_000

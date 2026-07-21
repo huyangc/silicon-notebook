@@ -34,6 +34,8 @@ _job_max = 0
 _active_lock = threading.Lock()
 _window_active = 0
 _job_active = 0
+_window_waiting = 0
+_job_waiting = 0
 
 
 def _build(window_workers: int, job_workers: int) -> None:
@@ -62,10 +64,16 @@ def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Fu
     preserved even when many windows run concurrently."""
     _ensure()
     ctx = contextvars.copy_context()
+    ticket = {"started": False}
+    global _window_waiting
+    with _active_lock:
+        _window_waiting += 1
 
     def _run():
-        global _window_active
+        global _window_active, _window_waiting
         with _active_lock:
+            ticket["started"] = True
+            _window_waiting -= 1
             _window_active += 1
         try:
             return fn(*args, **kwargs)
@@ -73,7 +81,26 @@ def submit_window(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Fu
             with _active_lock:
                 _window_active -= 1
 
-    return _window_pool.submit(ctx.run, _run)
+    try:
+        fut = _window_pool.submit(ctx.run, _run)
+    except BaseException:
+        with _active_lock:
+            if not ticket["started"]:
+                ticket["started"] = True
+                _window_waiting -= 1
+        raise
+
+    def _cancelled_before_start(completed: cf.Future) -> None:
+        global _window_waiting
+        if not completed.cancelled():
+            return
+        with _active_lock:
+            if not ticket["started"]:
+                ticket["started"] = True
+                _window_waiting -= 1
+
+    fut.add_done_callback(_cancelled_before_start)
+    return fut
 
 
 def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Future:
@@ -84,10 +111,16 @@ def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Futur
     (每用户 KG_LLM 的命脉,不得退化成裸 submit(fn))。"""
     _ensure()
     ctx = contextvars.copy_context()
+    ticket = {"started": False}
+    global _job_waiting
+    with _active_lock:
+        _job_waiting += 1
 
     def _run():
-        global _job_active
+        global _job_active, _job_waiting
         with _active_lock:
+            ticket["started"] = True
+            _job_waiting -= 1
             _job_active += 1
         try:
             return ctx.run(fn, *args, **kwargs)   # PRESERVED copy_context propagation
@@ -95,7 +128,25 @@ def submit_job(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> cf.Futur
             with _active_lock:
                 _job_active -= 1
 
-    fut = _job_pool.submit(_run)
+    try:
+        fut = _job_pool.submit(_run)
+    except BaseException:
+        with _active_lock:
+            if not ticket["started"]:
+                ticket["started"] = True
+                _job_waiting -= 1
+        raise
+
+    def _cancelled_before_start(completed: cf.Future) -> None:
+        global _job_waiting
+        if not completed.cancelled():
+            return
+        with _active_lock:
+            if not ticket["started"]:
+                ticket["started"] = True
+                _job_waiting -= 1
+
+    fut.add_done_callback(_cancelled_before_start)
     fut.add_done_callback(_log_job_exception)
     return fut
 
@@ -106,7 +157,9 @@ def stats() -> dict:
     with _active_lock:
         return {
             "window_active": _window_active, "window_max": _window_max,
+            "window_waiting": _window_waiting,
             "job_active": _job_active, "job_max": _job_max,
+            "job_waiting": _job_waiting,
         }
 
 
