@@ -555,9 +555,12 @@ All model services are reached over URL endpoints — no local model servers are
 The collection's service indicator reads the authenticated user's **persisted,
 last-known** model-service snapshot. It never probes a provider while the
 collection is loading, so an unavailable provider cannot block the notebook
-library. A configuration change invalidates the affected saved result; a
-configured service is then shown as untested until a new explicit check or an
-observed failure records a result.
+library. Saving settings compares every service's effective identity before
+and after the write, and invalidates only identities that actually changed;
+a no-op save preserves prior results, while inherited LLM variants are
+invalidated only when their resolved fallback changes. A changed configured
+service is then shown as untested until a new explicit check or an observed
+failure records a result.
 
 Open **模型服务** to inspect the effective saved configuration and test either
 one current service or every current effective service. The effective identity
@@ -569,6 +572,9 @@ display label is available.
 
 Effective identity also includes runtime protocol switches: embedding provider
 selection and rerank API style are normalized into the internal fingerprint.
+Rerank URL, key, and model values are trimmed consistently by resolution,
+runtime construction, probing, and fingerprinting; whitespace-only values are
+unconfigured and never probed.
 An embedding endpoint with `EMBED_PROVIDER` off remains unconfigured and is not
 probed. Changing either switch invalidates the previous result, and an explicit
 test uses the exact resolved endpoint/model/protocol descriptor.
@@ -578,11 +584,20 @@ explicitly test its effective service, but cannot edit its endpoint, key, or
 model there. Service-status APIs and UI expose only sanitized status,
 latency, trigger, stable error code, and a safe model label. Raw upstream
 diagnostics (including provider payloads, endpoints, and exception text) stay
-in server logs rather than status responses or tooltips.
+in server logs rather than status responses or tooltips. Endpoint-shaped model
+identifiers, including two-label, Unicode-suffix, and punycode-suffix hostnames,
+are not exposed as model labels.
 
-Only failures from an actual model-provider call can create an Ask model-error
-notice or observed failed status. Local FTS, ANN, keyword, and index-open
-failures remain server diagnostics and never mark a provider unavailable.
+Apart from the explicit, actionable "service not configured" guidance, only
+failures from an actual model-provider call can create an Ask model-error
+notice; only those actual call failures can create an observed failed status.
+Local FTS, ANN, keyword, index-open, and vector-persistence failures remain
+server diagnostics and never mark a provider unavailable.
+Each real runtime client carries the exact effective fingerprint used to build
+it. An observed failure is persisted only if that fingerprint is still current;
+an in-flight request from a replaced configuration may still produce its
+sanitized Ask diagnostic, but cannot overwrite the replacement service's
+status. Unstamped test doubles likewise cannot persist provider health.
 Per-service results are occurrence-ordered: a late database write cannot replace
 a newer check, and an observed/error result wins a same-time race with manual
 success.
@@ -591,6 +606,9 @@ Draft tests are tied to the exact role and form revision they tested. Editing,
 saving, or reopening invalidates stale results; save is locked while a draft
 test is active and editable fields are locked while save is in flight. The
 modal traps keyboard focus and returns it to the exact control that opened it.
+If a save temporarily leaves no enabled control, Tab/Shift+Tab focus the dialog
+container itself. A disabled saved-status test button keeps its normal label;
+only an actively running saved-status test displays `测试中…`.
 
 Current-status APIs are `GET /api/me/model-services/status`,
 `POST /api/me/model-services/{service}/test`, and
