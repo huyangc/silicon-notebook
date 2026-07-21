@@ -11,8 +11,22 @@ export type ApiRequestOptions = RequestInit & {
 };
 
 function resolveApiUrl(pathOrUrl: string): string {
-  if (pathOrUrl.startsWith("/")) return `${API_BASE}${pathOrUrl}`;
-  if (pathOrUrl === API_BASE || pathOrUrl.startsWith(`${API_BASE}/`)) return pathOrUrl;
+  try {
+    const base = new URL(API_BASE);
+    const basePath = base.pathname === "/" ? "/" : base.pathname.replace(/\/+$/, "");
+    const baseDirectory = new URL(base);
+    baseDirectory.pathname = basePath === "/" ? "/" : `${basePath}/`;
+    baseDirectory.search = "";
+    baseDirectory.hash = "";
+    const candidate = pathOrUrl.startsWith("/")
+      ? new URL(pathOrUrl.slice(1), baseDirectory)
+      : new URL(pathOrUrl);
+    const isBasePath = candidate.pathname === basePath;
+    const isBaseChild = basePath === "/" || candidate.pathname.startsWith(`${basePath}/`);
+    if (candidate.origin === base.origin && (isBasePath || isBaseChild)) return candidate.toString();
+  } catch {
+    // Invalid candidates are confined by the same public TypeError below.
+  }
   throw new TypeError("authenticated API requests must stay under API_BASE");
 }
 

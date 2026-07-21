@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { API_BASE } from "./api-config.ts";
 import { clearToken, getToken, setToken } from "./auth-session.ts";
 import { performApiRequest, requestBlob, requestJson, requestVoid } from "./api-client.ts";
 
@@ -147,4 +148,39 @@ test("authenticated API calls reject URLs outside the configured API base", asyn
     performApiRequest("https://outside.example/api", { tag: "test" }),
     { name: "TypeError", message: "authenticated API requests must stay under API_BASE" },
   );
+});
+
+test("normalized API base and child URLs remain valid", async () => {
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(url);
+    return new Response(null, { status: 204 });
+  };
+
+  await performApiRequest(API_BASE, { tag: "test" });
+  await performApiRequest(`${API_BASE}/me?view=profile`, { tag: "test" });
+  assert.deepEqual(urls, [API_BASE, `${API_BASE}/me?view=profile`]);
+});
+
+test("authenticated requests reject normalized traversal before fetch", async () => {
+  setToken("tok-1");
+  let fetchCalls = 0;
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return new Response(null, { status: 204 });
+  };
+
+  for (const escape of [
+    `${API_BASE}/../me`,
+    `${API_BASE}/%2e%2e/me`,
+    "/../me",
+    "/%2e%2e/me",
+  ]) {
+    await assert.rejects(
+      performApiRequest(escape, { tag: "security" }),
+      { name: "TypeError", message: "authenticated API requests must stay under API_BASE" },
+    );
+  }
+  assert.equal(fetchCalls, 0, "the bearer-bearing request must not reach fetch");
+  assert.equal(getToken(), "tok-1");
 });
