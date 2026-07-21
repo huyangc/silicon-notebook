@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Tuple
 
 from app.models.schemas import Evidence
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.model_config import model_client_fingerprint
 from app.services.retrieval import RetrievedKnowledge
 from app.services.retrieval_candidates import _RetrievalState
 
@@ -883,6 +884,7 @@ class GraphRetrievalService(_RetrievalState):
                 exc,
                 service="reasoning_llm",
                 provider_failure=True,
+                failed_fingerprint=model_client_fingerprint(client),
             )
             return kg_hits
     def _follow_chain(

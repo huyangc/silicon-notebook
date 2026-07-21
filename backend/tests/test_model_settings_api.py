@@ -283,6 +283,84 @@ def test_put_model_settings_invalidates_status_for_primary_and_inheriting_varian
     }
 
 
+def _complete_model_settings(prefix="initial"):
+    return {
+        role: {
+            "base_url": f"https://{role}.example/v1",
+            "api_key": f"{prefix}-{role}-secret",
+            "model": f"{prefix}-{role}-model",
+        }
+        for role in ("llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank")
+    }
+
+
+def _service_statuses(client, headers):
+    body = client.get("/api/me/model-services/status", headers=headers).json()
+    return {item["service"]: item["status"] for item in body["services"]}
+
+
+def test_put_model_settings_noop_all_role_payload_preserves_every_status(client, monkeypatch):
+    _install_status_service(monkeypatch, lambda _config: None)
+    headers = _auth(client)
+    settings = _complete_model_settings()
+    assert client.put("/api/me/model-settings", json=settings, headers=headers).status_code == 200
+    assert client.post("/api/me/model-services/test-all", headers=headers).status_code == 200
+
+    unchanged = client.put("/api/me/model-settings", json=settings, headers=headers)
+
+    assert unchanged.status_code == 200
+    statuses = _service_statuses(client, headers)
+    assert all(statuses[role] == "ok" for role in settings)
+
+
+def test_put_model_settings_rerank_only_effective_change_preserves_llm_statuses(
+    client, monkeypatch
+):
+    _install_status_service(monkeypatch, lambda _config: None)
+    headers = _auth(client)
+    settings = _complete_model_settings()
+    client.put("/api/me/model-settings", json=settings, headers=headers)
+    client.post("/api/me/model-services/test-all", headers=headers)
+    submitted = {
+        **settings,
+        "rerank": {**settings["rerank"], "model": "rotated-rerank-model"},
+    }
+
+    changed = client.put("/api/me/model-settings", json=submitted, headers=headers)
+
+    assert changed.status_code == 200
+    statuses = _service_statuses(client, headers)
+    assert statuses["rerank"] == "untested"
+    assert all(
+        statuses[role] == "ok"
+        for role in ("llm", "reasoning_llm", "rewrite_llm", "kg_llm")
+    )
+
+
+def test_put_primary_change_preserves_independently_configured_variants(
+    client, monkeypatch
+):
+    _install_status_service(monkeypatch, lambda _config: None)
+    headers = _auth(client)
+    settings = _complete_model_settings()
+    client.put("/api/me/model-settings", json=settings, headers=headers)
+    client.post("/api/me/model-services/test-all", headers=headers)
+    submitted = {
+        **settings,
+        "llm": {**settings["llm"], "model": "rotated-primary-model"},
+    }
+
+    changed = client.put("/api/me/model-settings", json=submitted, headers=headers)
+
+    assert changed.status_code == 200
+    statuses = _service_statuses(client, headers)
+    assert statuses["llm"] == "untested"
+    assert all(
+        statuses[role] == "ok"
+        for role in ("reasoning_llm", "rewrite_llm", "kg_llm", "rerank")
+    )
+
+
 class _StubRepo:
     def get_user_model_settings(self, _uid):
         return {}

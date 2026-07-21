@@ -1069,6 +1069,126 @@ def test_embedding_failure_emits_through_model_error_channel(repo, projector, ta
     assert exc_type == "RuntimeError"
 
 
+def test_embedding_failure_reports_the_exact_client_that_made_the_call(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    calls = []
+    projector.note_model_error = (
+        lambda stage, model, exc, **kwargs: calls.append(kwargs)
+    )
+    setattr(embedder, "_model_status_fingerprint", "origin-fingerprint")
+    replacement = _FakeEmbedder()
+    setattr(replacement, "_model_status_fingerprint", "replacement-fingerprint")
+
+    def fail_after_replacement(_texts):
+        repo.embedder = replacement
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(embedder, "embed_texts", fail_after_replacement)
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题",
+        cols["修复方法"]: "增加阻尼电阻",
+    })
+
+    projector.project_table(table_id)
+
+    assert calls == [
+        {
+            "service": "embedding",
+            "provider_failure": True,
+            "failed_fingerprint": "origin-fingerprint",
+        }
+    ]
+
+
+def test_local_vector_restore_failure_is_not_reported_as_provider_outage(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """Re-persisting a retained vector is local SQLite work, not a provider call.
+
+    An anchor edit rewrites sibling chunk metadata while carrying their unchanged
+    vectors forward.  If that local write fails, the row still fails honestly,
+    but the model-service status must not be changed to a provider outage.
+    """
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题",
+        cols["现象识别"]: "- 观察上升沿过冲",
+        cols["修复方法"]: "1. 增加阻尼电阻",
+    })
+    projector.project_table(table_id)
+
+    calls = []
+    projector.note_model_error = (
+        lambda stage, model, exc, **kwargs: calls.append((stage, kwargs))
+    )
+
+    def fail_local_restore(*_args, **_kwargs):
+        raise RuntimeError("sqlite unavailable")
+
+    monkeypatch.setattr(
+        projector.embedding.vectors,
+        "replace_chunk_vectors",
+        fail_local_restore,
+    )
+    store.update_knowhow_cell(row_id, cols["违例类型"], "振铃问题")
+
+    projector.project_table(table_id)
+
+    assert _row_projection_status(repo, table_id, row_id) == "failed"
+    assert calls == [
+        (
+            "knowhow_vector_restore",
+            {
+                "service": "embedding",
+                "provider_failure": False,
+            },
+        )
+    ]
+
+
+def test_local_new_vector_persistence_failure_is_not_reported_as_provider_outage(
+    repo, projector, table_id, embedder, monkeypatch
+):
+    """A provider response can succeed before its local vector write fails."""
+    calls = []
+    projector.note_model_error = (
+        lambda stage, model, exc, **kwargs: calls.append((stage, kwargs))
+    )
+
+    def fail_local_persist(*_args, **_kwargs):
+        raise RuntimeError("sqlite unavailable")
+
+    monkeypatch.setattr(
+        projector.embedding.vectors,
+        "replace_chunk_vectors",
+        fail_local_persist,
+    )
+    store = repo._runtime.knowhow_store
+    cols = _cols_by_name(repo, table_id)
+    row_id = store.add_knowhow_row(table_id, {
+        cols["违例类型"]: "过冲问题",
+        cols["修复方法"]: "1. 增加阻尼电阻",
+    })
+
+    projector.project_table(table_id)
+
+    assert embedder.call_count == 1
+    assert _row_projection_status(repo, table_id, row_id) == "failed"
+    assert calls == [
+        (
+            "knowhow_vector_persist",
+            {
+                "service": "embedding",
+                "provider_failure": False,
+            },
+        )
+    ]
+
+
 def test_embed_false_skips_embedding_entirely(repo, projector, table_id, embedder):
     store = repo._runtime.knowhow_store
     cols = _cols_by_name(repo, table_id)

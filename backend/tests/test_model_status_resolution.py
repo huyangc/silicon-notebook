@@ -105,6 +105,68 @@ def test_effective_protocol_switches_are_normalized_and_fingerprinted():
     assert model_config_fingerprint(enabled) != model_config_fingerprint(disabled)
 
 
+def test_rerank_descriptor_trims_values_before_activation_and_fingerprinting():
+    system = system_model_settings(_settings(rerank_api_style=" openai "))
+    padded = resolve_effective_config(
+        {
+            "rerank": {
+                "base_url": "  https://user-rerank.example/v1/  ",
+                "api_key": "  user-rerank-secret  ",
+                "model": "  user-rerank-model  ",
+            }
+        },
+        "rerank",
+        "required",
+        system,
+    )
+    canonical = resolve_effective_config(
+        {
+            "rerank": {
+                "base_url": "https://user-rerank.example/v1/",
+                "api_key": "user-rerank-secret",
+                "model": "user-rerank-model",
+            }
+        },
+        "rerank",
+        "required",
+        system,
+    )
+
+    assert padded.configured is True
+    assert (padded.base_url, padded.api_key, padded.model) == (
+        "https://user-rerank.example/v1/",
+        "user-rerank-secret",
+        "user-rerank-model",
+    )
+    assert model_config_fingerprint(padded) == model_config_fingerprint(canonical)
+
+
+def test_whitespace_only_rerank_is_unconfigured_for_user_and_system():
+    system = system_model_settings(_settings(
+        rerank_base_url="   ",
+        rerank_api_key=" system-secret ",
+        rerank_model=" system-model ",
+    ))
+    system_config = resolve_effective_config({}, "rerank", "fallback", system)
+    user_config = resolve_effective_config(
+        {
+            "rerank": {
+                "base_url": "   ",
+                "api_key": " user-secret ",
+                "model": " user-model ",
+            }
+        },
+        "rerank",
+        "required",
+        system,
+    )
+
+    assert system_config.configured is False
+    assert system_config.base_url == ""
+    assert user_config.configured is False
+    assert user_config.source == "none"
+
+
 def test_fingerprint_changes_when_credential_or_model_changes():
     settings = system_model_settings(_settings())
     first = resolve_effective_config({}, "llm", "fallback", settings)

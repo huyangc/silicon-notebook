@@ -18,6 +18,7 @@ from app.core.ask_context import _ASK_EMBED_CACHE
 from app.models.schemas import Evidence
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 from app.services.knowledge_contracts import USABLE_STATUSES
+from app.services.model_config import model_client_fingerprint
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
     W_KEYWORD,
@@ -124,6 +125,7 @@ class _RetrievalState:
         service: str = "",
         *,
         provider_failure: bool = False,
+        failed_fingerprint: str = "",
     ) -> None:
         self.model_error_sink.note_model_error(
             stage,
@@ -131,6 +133,7 @@ class _RetrievalState:
             exc,
             service=service,
             provider_failure=provider_failure,
+            failed_fingerprint=failed_fingerprint,
         )
 
     def _in_batches(self, ids):
@@ -344,6 +347,7 @@ class CandidateRetrievalService(_RetrievalState):
                 exc,
                 service="embedding",
                 provider_failure=True,
+                failed_fingerprint=model_client_fingerprint(self.embedder),
             )
             return None
         from app.services.vector_index import resolve_runtime_dim, truncate_vec

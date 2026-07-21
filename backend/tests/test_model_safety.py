@@ -28,6 +28,10 @@ def test_safe_model_label_preserves_namespaces_and_rejects_diagnostics():
 @pytest.mark.parametrize(
     "unsafe_model",
     [
+        "example.com",
+        "service.local",
+        "例子.测试",
+        "example.xn--p1ai",
         "api.example.com",
         "models.acme.internal",
         "api.例子.测试",

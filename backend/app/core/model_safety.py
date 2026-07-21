@@ -151,9 +151,17 @@ def _is_bare_hostname(model: str) -> bool:
     if any(char in model for char in "/@:"):
         return False
     labels = model.rstrip(".").split(".")
-    if len(labels) < 3 or any(not label for label in labels):
+    if len(labels) < 2 or any(not label for label in labels):
         return False
-    if len(labels[-1]) < 2 or not labels[-1].isalpha():
+    suffix = labels[-1].lower()
+    if not (
+        (len(suffix) >= 2 and suffix.isalpha())
+        or (
+            suffix.startswith("xn--")
+            and len(suffix) > 4
+            and all(char.isascii() and (char.isalnum() or char == "-") for char in suffix)
+        )
+    ):
         return False
     return all(
         all(char.isalnum() or char in "-_" for char in label)

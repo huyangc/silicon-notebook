@@ -144,6 +144,31 @@ def test_embedding_provider_off_never_runs_the_fake_embedder_probe(tmp_path):
     assert calls == []
 
 
+def test_whitespace_only_system_rerank_is_unconfigured_and_never_probed(tmp_path):
+    from app.services.model_status import ModelStatusService
+
+    rerank_settings = Settings(
+        _env_file=None,
+        database_url=f"sqlite:///{tmp_path}/rerank-whitespace.db",
+        storage_dir=str(tmp_path / "rerank-whitespace-storage"),
+        rerank_base_url="   ",
+        rerank_api_key=" rerank-secret ",
+        rerank_model=" rerank-model ",
+    )
+    rerank_identity = SQLiteRepository(rerank_settings)._runtime.identity
+    calls = []
+    service = ModelStatusService(
+        rerank_identity, rerank_settings, probe=lambda config: calls.append(config)
+    )
+
+    result = service.test_one(rerank_identity.current_user(), "rerank")
+
+    assert result.configured is False
+    assert result.status == "unconfigured"
+    assert calls == []
+    assert rerank_identity.get_model_service_statuses("user-local").get("rerank") is None
+
+
 def test_default_probes_use_the_exact_resolved_embedding_and_rerank_protocol(
     identity, user, settings, monkeypatch
 ):
@@ -191,7 +216,11 @@ def test_record_observed_failure_stores_only_safe_status(identity, user, setting
     from app.services.model_status import ModelStatusService
 
     service = ModelStatusService(identity, settings)
-    service.record_observed_failure(user, "llm")
+    service.record_observed_failure(
+        user,
+        "llm",
+        model_config_fingerprint(identity.resolve_model_config(user, "llm")),
+    )
 
     stored = identity.get_model_service_statuses(user.id)["llm"]
     assert stored["config_fingerprint"] == model_config_fingerprint(
@@ -200,6 +229,34 @@ def test_record_observed_failure_stores_only_safe_status(identity, user, setting
     assert stored["status"] == "error"
     assert stored["code"] == "upstream_error"
     assert stored["trigger"] == "observed_failure"
+
+
+def test_observed_failure_skips_an_identity_replaced_before_the_failure_arrives(
+    identity, user, settings
+):
+    from app.services.model_status import ModelStatusService
+
+    service = ModelStatusService(identity, settings, probe=lambda _config: None)
+    old_config = identity.resolve_model_config(user, "llm")
+    old_fingerprint = model_config_fingerprint(old_config)
+    identity.set_user_model_settings(user.id, {
+        "llm": {
+            "base_url": "https://new.example/v1",
+            "api_key": "new-secret",
+            "model": "new-runtime-model",
+        }
+    })
+    current = service.test_one(user, "llm")
+
+    recorded = service.record_observed_failure(user, "llm", old_fingerprint)
+
+    assert recorded is False
+    stored = identity.get_model_service_statuses(user.id)["llm"]
+    assert stored["status"] == "ok"
+    assert stored["config_fingerprint"] == model_config_fingerprint(
+        identity.resolve_model_config(user, "llm")
+    )
+    assert current.model == "new-runtime-model"
 
 
 def test_snapshot_drops_unsafe_persisted_metadata(identity, user, settings):

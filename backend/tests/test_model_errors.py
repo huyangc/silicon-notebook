@@ -82,7 +82,7 @@ def test_answer_llm_failure_recorded(repo):
     assert not resp.conclusion.startswith("Retrieved ")
 
 
-def test_answer_failure_names_dynamic_primary_service_and_persists_error(repo):
+def test_answer_failure_names_dynamic_primary_service_without_persisting_unstamped_double(repo):
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
     raising = _RaisingLLM()
@@ -94,8 +94,7 @@ def test_answer_failure_names_dynamic_primary_service_and_persists_error(repo):
     assert (error.service, error.model) == ("llm", "runtime-primary-name")
     assert error.message == "upstream_error"
     stored = repo._runtime.identity.get_model_service_statuses("user-local")
-    assert stored["llm"]["status"] == "error"
-    assert stored["llm"]["trigger"] == "observed_failure"
+    assert "llm" not in stored
 
 
 def test_safe_tagged_model_name_remains_dynamic_on_failure(repo):

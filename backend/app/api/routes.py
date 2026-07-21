@@ -113,7 +113,11 @@ from app.services.kg import scheduler as kg_scheduler
 from app.services.knowhow import api as knowhow_api
 from app.services.knowhow.assets import AssetService
 from app.services.mineru_cloud_client import MinerUCloudNotConfigured
-from app.services.model_config import LLM_VARIANTS, ModelNotConfiguredError, STATUS_SERVICE_ROLES
+from app.services.model_config import (
+    ModelNotConfiguredError,
+    STATUS_SERVICE_ROLES,
+    model_config_fingerprint,
+)
 from app.services.model_status import ModelStatusService
 from app.services.pending_bus import pending_bus
 from app.repositories.ports import AskStreamPort, UploadedSourceFile
@@ -195,12 +199,14 @@ def get_model_settings(user: UserProfile = Depends(get_current_user)):
 def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends(get_current_user)):
     repo = identity_repository()
     stored = dict(repo.get_user_model_settings(user.id))
-    changed_roles = []
+    before = {
+        role: model_config_fingerprint(repo.resolve_model_config(user, role))
+        for role in STATUS_SERVICE_ROLES
+    }
     for role in _MODEL_ROLES:
         upd = getattr(payload, role)
         if upd is None:
             continue
-        changed_roles.append(role)
         svc = dict(stored.get(role) or {})
         for field in ("base_url", "api_key", "model"):
             val = getattr(upd, field)
@@ -215,9 +221,11 @@ def put_model_settings(payload: ModelSettingsUpdate, user: UserProfile = Depends
         else:
             stored.pop(role, None)
     repo.set_user_model_settings(user.id, stored)
-    invalidated = set(changed_roles)
-    if "llm" in invalidated:
-        invalidated.update(LLM_VARIANTS)
+    invalidated = {
+        role
+        for role in STATUS_SERVICE_ROLES
+        if model_config_fingerprint(repo.resolve_model_config(user, role)) != before[role]
+    }
     repo.clear_model_service_statuses(user.id, sorted(invalidated))
     return get_model_settings(user)
 

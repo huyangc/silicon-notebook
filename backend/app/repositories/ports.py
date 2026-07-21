@@ -668,6 +668,7 @@ class ModelErrorSink(Protocol):
         service: str = "",
         *,
         provider_failure: bool = False,
+        failed_fingerprint: str = "",
     ) -> None: ...
 
 

@@ -9,7 +9,16 @@ from app.repositories.sqlite.chunk_store import ChunkStore
 from app.repositories.sqlite.embedding_store import EmbeddingStore
 from app.repositories.sqlite.source_store import SourceStore
 from app.services.model_concurrency import current_model_concurrency
+from app.services.model_config import model_client_fingerprint
 from app.services.retrieval import _payload_text
+
+
+class EmbeddingProviderFailure(RuntimeError):
+    """Marks failures raised by the remote embedding call, not local storage."""
+
+    def __init__(self, message: str, failed_fingerprint: str) -> None:
+        super().__init__(message)
+        self.failed_fingerprint = failed_fingerprint
 
 
 class SourceEmbeddingService:
@@ -266,10 +275,15 @@ class SourceEmbeddingService:
         texts = [r["text"][:trunc] for r in rows]
         embedder = self.embedder()
         self._warm_up(embedder)
-        vectors = self._run_embedding_call(
-            lambda: embedder.embed_texts(texts),
-            task_prefix="emb-ck",
-        )
+        try:
+            vectors = self._run_embedding_call(
+                lambda: embedder.embed_texts(texts),
+                task_prefix="emb-ck",
+            )
+        except Exception as exc:
+            raise EmbeddingProviderFailure(
+                str(exc), model_client_fingerprint(embedder)
+            ) from exc
         pairs = [(r["id"], vector) for r, vector in zip(rows, vectors)]
         self.vectors.replace_chunk_vectors(notebook_id, pairs, created_at=self.now())
 

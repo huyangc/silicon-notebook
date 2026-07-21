@@ -1275,7 +1275,7 @@
     "owner": "ModelProvider",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, stage: 'str', model: 'str', exc: 'Exception', service: 'str' = '', *, provider_failure: 'bool' = False) -> 'None'"
+    "signature": "(self, stage: 'str', model: 'str', exc: 'Exception', service: 'str' = '', *, provider_failure: 'bool' = False, failed_fingerprint: 'str' = '') -> 'None'"
   },
   "_notebook_has_kg": {
     "consumers": [
@@ -7541,6 +7541,12 @@
         "kind": "attribute",
         "path": "backend/app/api/routes.py",
         "scope": "<module>.get_model_settings",
+        "target": "resolve_model_config"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/routes.py",
+        "scope": "<module>.put_model_settings",
         "target": "resolve_model_config"
       }
     ],

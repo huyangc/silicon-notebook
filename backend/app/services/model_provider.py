@@ -20,7 +20,10 @@ from app.services.model_concurrency import (
 from app.services.model_config import (
     ModelNotConfiguredError,
     ResolvedModelConfig,
+    bind_model_status_identity,
     model_config_fingerprint,
+    resolve_effective_config,
+    system_model_settings,
 )
 from app.services.model_status import ModelStatusService
 from app.services.rerank_client import RerankClient
@@ -55,41 +58,49 @@ class RuntimeModelProvider:
         self.ask_context = ask_context
         self.model_config_cache = identity.model_config_cache
 
-        self._system_llm_client = OpenAICompatibleClient(settings)
+        system_configs = system_model_settings(settings)
+
+        def bind_system(client: Any, role: str) -> Any:
+            return bind_model_status_identity(
+                client,
+                resolve_effective_config({}, role, "fallback", system_configs),
+            )
+
+        self._system_llm_client = bind_system(OpenAICompatibleClient(settings), "llm")
         self._user_llm_clients: dict[str, OpenAICompatibleClient] = {}
         self._reasoning_llm_client = (
-            OpenAICompatibleClient(
+            bind_system(OpenAICompatibleClient(
                 settings,
                 base_url=settings.reasoning_llm_base_url,
                 api_key=settings.reasoning_llm_api_key,
                 model=settings.reasoning_llm_model,
-            )
+            ), "reasoning_llm")
             if settings.reasoning_llm_configured
             else None
         )
         self._rewrite_llm_client = (
-            OpenAICompatibleClient(
+            bind_system(OpenAICompatibleClient(
                 settings,
                 base_url=settings.rewrite_llm_base_url
                 or settings.openai_compat_base_url,
                 api_key=settings.rewrite_llm_api_key
                 or settings.openai_compat_api_key,
                 model=settings.rewrite_llm_model,
-            )
+            ), "rewrite_llm")
             if settings.rewrite_llm_configured
             else None
         )
         self._kg_llm_client = (
-            OpenAICompatibleClient(
+            bind_system(OpenAICompatibleClient(
                 settings,
                 base_url=settings.kg_llm_base_url,
                 api_key=settings.kg_llm_api_key,
                 model=settings.kg_llm_model,
-            )
+            ), "kg_llm")
             if settings.kg_llm_configured
             else None
         )
-        self._system_rerank_client = RerankClient(settings)
+        self._system_rerank_client = bind_system(RerankClient(settings), "rerank")
         self._user_rerank_clients: dict[str, RerankClient] = {}
 
         if settings.reasoning_llm_partially_configured:
@@ -111,12 +122,12 @@ class RuntimeModelProvider:
         fingerprint = model_config_fingerprint(cfg)
         client = self._user_llm_clients.get(fingerprint)
         if client is None:
-            client = OpenAICompatibleClient(
+            client = bind_model_status_identity(OpenAICompatibleClient(
                 self.settings,
                 base_url=cfg.base_url,
                 api_key=cfg.api_key,
                 model=cfg.model,
-            )
+            ), cfg)
             self._user_llm_clients[fingerprint] = client
         return client
 
@@ -174,13 +185,13 @@ class RuntimeModelProvider:
             fingerprint = model_config_fingerprint(cfg)
             client = self._user_rerank_clients.get(fingerprint)
             if client is None:
-                client = RerankClient(
+                client = bind_model_status_identity(RerankClient(
                     self.settings,
                     model=cfg.model,
                     base_url=cfg.base_url,
                     api_key=cfg.api_key,
                     api_style=cfg.api_style,
-                )
+                ), cfg)
                 self._user_rerank_clients[fingerprint] = client
             return client
         if cfg.source == "none":
@@ -201,6 +212,7 @@ class RuntimeModelProvider:
         service: str = "",
         *,
         provider_failure: bool = False,
+        failed_fingerprint: str = "",
     ) -> None:
         message = f"{type(error).__name__}: {error}"
         self.event_log.emit(
@@ -228,11 +240,14 @@ class RuntimeModelProvider:
                     "message": error_code,
                 }
             )
-            try:
-                ModelStatusService(
-                    self.identity, self.settings
-                ).record_observed_failure(self.identity.current_user(), service)
-            except Exception:
-                self.event_log.logger.exception(
-                    "failed to persist observed model failure for %s", service
-                )
+            if failed_fingerprint:
+                try:
+                    ModelStatusService(
+                        self.identity, self.settings
+                    ).record_observed_failure(
+                        self.identity.current_user(), service, failed_fingerprint
+                    )
+                except Exception:
+                    self.event_log.logger.exception(
+                        "failed to persist observed model failure for %s", service
+                    )

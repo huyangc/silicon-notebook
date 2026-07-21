@@ -32,6 +32,8 @@ class ResolvedModelConfig:
             return self.provider == "dashscope" and all(
                 value.strip() for value in (self.base_url, self.api_key, self.model)
             )
+        if self.kind == "rerank":
+            return all(value.strip() for value in (self.base_url, self.api_key, self.model))
         return bool(self.base_url and self.api_key and self.model)
 
 
@@ -42,6 +44,13 @@ def normalize_embedding_provider(value: object) -> str:
 def normalize_rerank_api_style(value: object) -> str:
     normalized = str(value or "dashscope").strip().lower()
     return "openai" if normalized in _OPENAI_RERANK_STYLES else "dashscope"
+
+
+def _normalized_rerank_values(values: Mapping[str, object]) -> dict[str, str]:
+    return {
+        field: str(values.get(field) or "").strip()
+        for field in ("base_url", "api_key", "model")
+    }
 
 
 def _full(svc: dict) -> bool:
@@ -96,9 +105,11 @@ def system_model_settings(settings) -> dict[str, dict[str, str]]:
         "rewrite_llm": rewrite,
         "kg_llm": kg,
         "rerank": {
-            "base_url": settings.rerank_base_url,
-            "api_key": settings.rerank_api_key,
-            "model": settings.rerank_model,
+            **_normalized_rerank_values({
+                "base_url": settings.rerank_base_url,
+                "api_key": settings.rerank_api_key,
+                "model": settings.rerank_model,
+            }),
             "source": "system",
             "kind": "rerank",
             "provider": "http",
@@ -132,6 +143,8 @@ def resolve_effective_config(
             normalize_embedding_provider(svc.get("provider", "")),
         )
     svc = (model_settings or {}).get(role) or {}
+    if role == "rerank":
+        svc = _normalized_rerank_values(svc)
     if _full(svc):
         kind = "rerank" if role == "rerank" else "llm"
         system = dict((system_settings or {}).get(role) or {})
@@ -158,6 +171,8 @@ def resolve_effective_config(
             "", "", "", "none", "rerank" if role == "rerank" else "llm"
         )
     system = dict((system_settings or {}).get(role) or {})
+    if role == "rerank":
+        system.update(_normalized_rerank_values(system))
     return ResolvedModelConfig(
         system.get("base_url", ""),
         system.get("api_key", ""),
@@ -182,3 +197,17 @@ def model_config_fingerprint(config: ResolvedModelConfig) -> str:
         )
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def bind_model_status_identity(client, config: ResolvedModelConfig):
+    """Attach the exact resolved identity used to construct a real runtime client."""
+    try:
+        setattr(client, "_model_status_fingerprint", model_config_fingerprint(config))
+    except (AttributeError, TypeError):
+        pass
+    return client
+
+
+def model_client_fingerprint(client: object) -> str:
+    value = getattr(client, "_model_status_fingerprint", "")
+    return value if isinstance(value, str) else ""

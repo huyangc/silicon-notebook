@@ -2509,6 +2509,7 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/routes.py', scope='<module>.get_model_settings', kind='attribute', target='resolve_model_config'),
+            ConsumerSite(path='backend/app/api/routes.py', scope='<module>.put_model_settings', kind='attribute', target='resolve_model_config'),
         ),
         patches=(
         ),

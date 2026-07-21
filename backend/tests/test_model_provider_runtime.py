@@ -5,6 +5,8 @@ import pytest
 from app.core import ask_context
 from app.core.config import Settings
 from app.services.model_config import ModelNotConfiguredError
+from app.services.model_config import model_config_fingerprint
+from app.services.model_status import ModelStatusService
 from app.services.model_provider import RuntimeModelProvider
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -178,17 +180,82 @@ def test_explicit_provider_failures_update_only_the_exact_service(
     repo.settings.embed_model = "embed-runtime"
     token = ask_context._ASK_MODEL_ERRORS.set([])
     try:
+        config = repo.resolve_model_config(repo.current_user(), service)
         repo._runtime.models.note_model_error(
             stage,
             f"{service}-runtime",
             RuntimeError("provider failed"),
             service=service,
             provider_failure=True,
+            failed_fingerprint=model_config_fingerprint(config),
         )
 
         rows = repo._runtime.identity.get_model_service_statuses("user-local")
         assert set(rows) == {service}
         assert rows[service]["status"] == "error"
         assert ask_context._ASK_MODEL_ERRORS.get()[0]["service"] == service
+    finally:
+        ask_context._ASK_MODEL_ERRORS.reset(token)
+
+
+def test_old_real_client_failure_keeps_old_ask_name_but_not_new_status(repo):
+    old_settings = {
+        "llm": {
+            "base_url": "https://old.example/v1",
+            "api_key": "old-secret",
+            "model": "old-runtime-model",
+        }
+    }
+    repo.set_user_model_settings("user-local", old_settings)
+    old_config = repo.resolve_model_config(repo.current_user(), "llm")
+    old_client = repo.llm_client
+    failed_fingerprint = getattr(old_client, "_model_status_fingerprint", "")
+    assert failed_fingerprint == model_config_fingerprint(old_config)
+
+    repo.set_user_model_settings("user-local", {
+        "llm": {
+            "base_url": "https://new.example/v1",
+            "api_key": "new-secret",
+            "model": "new-runtime-model",
+        }
+    })
+    ModelStatusService(
+        repo._runtime.identity, repo.settings, probe=lambda _config: None
+    ).test_one(repo.current_user(), "llm")
+    token = ask_context._ASK_MODEL_ERRORS.set([])
+    try:
+        repo._runtime.models.note_model_error(
+            "answer",
+            old_client.model,
+            RuntimeError("old request failed after save"),
+            service="llm",
+            provider_failure=True,
+            failed_fingerprint=failed_fingerprint,
+        )
+
+        assert ask_context._ASK_MODEL_ERRORS.get()[0]["model"] == "old-runtime-model"
+        stored = repo._runtime.identity.get_model_service_statuses("user-local")["llm"]
+        assert stored["status"] == "ok"
+        assert stored["config_fingerprint"] == model_config_fingerprint(
+            repo.resolve_model_config(repo.current_user(), "llm")
+        )
+    finally:
+        ask_context._ASK_MODEL_ERRORS.reset(token)
+
+
+def test_provider_failure_from_unstamped_test_double_is_not_persisted(repo):
+    token = ask_context._ASK_MODEL_ERRORS.set([])
+    try:
+        repo._runtime.models.note_model_error(
+            "answer",
+            "fake-runtime-model",
+            RuntimeError("fake provider failed"),
+            service="llm",
+            provider_failure=True,
+            failed_fingerprint=getattr(object(), "_model_status_fingerprint", ""),
+        )
+
+        assert ask_context._ASK_MODEL_ERRORS.get()[0]["model"] == "fake-runtime-model"
+        assert repo._runtime.identity.get_model_service_statuses("user-local") == {}
     finally:
         ask_context._ASK_MODEL_ERRORS.reset(token)

@@ -405,13 +405,14 @@ class SQLiteRepository:
             scale_cache=lambda: scale_idx_cache,
             load_lock=lambda: scale_idx_load_lock,
             load_locks=lambda: scale_idx_load_locks,
-            note_model_error=lambda stage, model, exc, service="", provider_failure=False: (
+            note_model_error=lambda stage, model, exc, service="", provider_failure=False, failed_fingerprint="": (
                 _repository_from_weakref(repository_ref)._note_model_error(
                     stage,
                     model,
                     exc,
                     service=service,
                     provider_failure=provider_failure,
+                    failed_fingerprint=failed_fingerprint,
                 )
             ),
         )
@@ -547,13 +548,14 @@ class SQLiteRepository:
                 self.relations_for_notebook(notebook_id)
             ),
             notebook_copy_stats=lambda notebook_id: self.notebook_copy_stats(notebook_id),
-            note_model_error=lambda stage, model, exc, service="", provider_failure=False: (
+            note_model_error=lambda stage, model, exc, service="", provider_failure=False, failed_fingerprint="": (
                 self._note_model_error(
                     stage,
                     model,
                     exc,
                     service=service,
                     provider_failure=provider_failure,
+                    failed_fingerprint=failed_fingerprint,
                 )
             ),
             edge_centrality_map=lambda notebook_id: (
@@ -2439,6 +2441,7 @@ class SQLiteRepository:
         service: str = "",
         *,
         provider_failure: bool = False,
+        failed_fingerprint: str = "",
     ) -> None:
         return self._runtime.models.note_model_error(
             stage,
@@ -2446,6 +2449,7 @@ class SQLiteRepository:
             exc,
             service=service,
             provider_failure=provider_failure,
+            failed_fingerprint=failed_fingerprint,
         )
 
     def _embed_query(self, query: str) -> Optional[List[float]]:

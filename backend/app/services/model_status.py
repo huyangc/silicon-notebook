@@ -102,10 +102,16 @@ class ModelStatusService:
                 self._record(user, descriptor, outcome, "manual_test")
         return self.snapshot(user)
 
-    def record_observed_failure(self, user: UserProfile, service: str) -> None:
+    def record_observed_failure(
+        self, user: UserProfile, service: str, failed_fingerprint: str
+    ) -> bool:
         descriptor = self._descriptor_for(user, service)
-        if not descriptor.config.configured:
-            return
+        if (
+            not failed_fingerprint
+            or not descriptor.config.configured
+            or model_config_fingerprint(descriptor.config) != failed_fingerprint
+        ):
+            return False
         self._record(
             user,
             descriptor,
@@ -117,6 +123,7 @@ class ModelStatusService:
             ),
             "observed_failure",
         )
+        return True
 
     def _descriptor_for(self, user: UserProfile, service: str) -> ServiceDescriptor:
         for descriptor in self.descriptors(user):

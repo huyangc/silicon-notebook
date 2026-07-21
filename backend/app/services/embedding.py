@@ -7,6 +7,7 @@ import struct
 from typing import List, Protocol
 
 from app.core.config import Settings
+from app.services.model_config import ResolvedModelConfig, bind_model_status_identity
 
 
 class Embedder(Protocol):
@@ -58,15 +59,23 @@ def make_embedder(
         and (api_key_value or "").strip()
         and (model_value or "").strip()
     )
+    config = ResolvedModelConfig(
+        base_url_value or "",
+        api_key_value or "",
+        model_value or "",
+        "system",
+        "embedding",
+        provider_value,
+    )
     if configured:
         from app.services.embedding_dashscope import DashscopeEmbedder
-        return DashscopeEmbedder(
+        return bind_model_status_identity(DashscopeEmbedder(
             settings,
             base_url=base_url_value,
             api_key=api_key_value,
             model=model_value,
-        )
-    return FakeEmbedder(dim=settings.embed_dim)
+        ), config)
+    return bind_model_status_identity(FakeEmbedder(dim=settings.embed_dim), config)
 
 
 def embed_in_chunks(embed_fn, texts, chunk_size=200, logger=None):

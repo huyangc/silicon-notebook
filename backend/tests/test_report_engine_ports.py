@@ -145,7 +145,8 @@ class _Errors:
         self.boom = boom
 
     def note_model_error(
-        self, stage, model, error, service="", *, provider_failure=False
+        self, stage, model, error, service="", *, provider_failure=False,
+        failed_fingerprint="",
     ):
         if self.boom:
             raise RuntimeError("sink down")
