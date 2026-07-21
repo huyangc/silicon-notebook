@@ -44,6 +44,10 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 1,
     reason: "validated source-cleanup guidance is copied into its typed error",
   },
+  "model-settings.ts|<module>.modelFailureText|property|message": {
+    count: 1,
+    reason: "typed ModelFailureCode selects fixed copy and is never logged or rendered verbatim",
+  },
   "page.tsx|<module>.Home|property|message": {
     count: 1,
     reason: "application-owned information modal state is not exception text",

@@ -26,19 +26,34 @@ function status(service, serviceStatus, overrides = {}) {
 
 test("model failure text uses the backend model name dynamically", () => {
   assert.equal(
-    modelFailureText({ service: "reasoning_llm", model: "runtime-name-A" }),
+    modelFailureText({
+      service: "reasoning_llm", model: "runtime-name-A", message: "upstream_error",
+    }),
     "推理模型 runtime-name-A 调用失败，本次回答可能不完整。",
   );
   assert.equal(
-    modelFailureText({ service: "reasoning_llm", model: "runtime-name-B" }),
+    modelFailureText({
+      service: "reasoning_llm", model: "runtime-name-B", message: "upstream_error",
+    }),
     "推理模型 runtime-name-B 调用失败，本次回答可能不完整。",
   );
 });
 
-test("blank model failure text states that the role is not configured", () => {
+test("only missing_config describes a blank model as unconfigured", () => {
   assert.equal(
-    modelFailureText({ service: "embedding", model: "" }),
+    modelFailureText({ service: "embedding", model: "", message: "missing_config" }),
     "嵌入模型尚未配置，本次回答可能不完整。",
+  );
+  assert.equal(
+    modelFailureText({ service: "embedding", model: "", code: "missing_config" }),
+    "嵌入模型尚未配置，本次回答可能不完整。",
+  );
+});
+
+test("an upstream failure with a sanitized blank model stays a generic failure", () => {
+  assert.equal(
+    modelFailureText({ service: "embedding", model: "", message: "upstream_error" }),
+    "嵌入模型调用失败，本次回答可能不完整。",
   );
 });
 

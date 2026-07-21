@@ -4,6 +4,7 @@ import pytest
 
 from app.core import ask_context
 from app.core.config import Settings
+from app.services.model_config import ModelNotConfiguredError
 from app.services.model_provider import RuntimeModelProvider
 from app.services.sqlite_repository import SQLiteRepository
 
@@ -94,5 +95,27 @@ def test_provider_records_existing_model_error_shape(repo, monkeypatch):
                 "status": "error",
             }
         ]
+    finally:
+        ask_context._ASK_MODEL_ERRORS.reset(token)
+
+
+def test_provider_classifies_missing_configuration_with_stable_code(repo, monkeypatch):
+    events = []
+    monkeypatch.setattr(repo.event_log, "emit", events.append)
+    token = ask_context._ASK_MODEL_ERRORS.set([])
+    try:
+        repo._note_model_error(
+            "answer", "", ModelNotConfiguredError("private configuration detail")
+        )
+
+        assert ask_context._ASK_MODEL_ERRORS.get() == [{
+            "service": "llm",
+            "stage": "answer",
+            "model": "",
+            "message": "missing_config",
+        }]
+        assert events[0]["error"] == (
+            "ModelNotConfiguredError: private configuration detail"
+        )
     finally:
         ask_context._ASK_MODEL_ERRORS.reset(token)

@@ -55,6 +55,14 @@ _IPV4_RE = re.compile(
 )
 _CREDENTIAL_TOKEN_RE = re.compile(r"(?i)(?:sk|rk|pk|ak)-[A-Za-z0-9_-]{8,}")
 _VENDOR_KEY_TOKEN_RE = re.compile(r"(?i)(?:aiza|ghp_|hf_|xox)[A-Za-z0-9_-]{8,}")
+_HOST_PATH_RE = re.compile(
+    r"(?:^|[/@])(?:[^/.\s@:]+\.)+[^/.\s@:]+\.?(?::\d{1,5})?/"
+)
+_BASIC_AUTH_RE = re.compile(r"(?:^|/)[^:@/\s]+:[^@/\s]+@")
+_AWS_ACCESS_ID_RE = re.compile(
+    r"(?i)(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16}"
+)
+_STRIPE_KEY_RE = re.compile(r"(?i)(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{8,}")
 
 
 def safe_model_label(value: object) -> str:
@@ -71,6 +79,10 @@ def safe_model_label(value: object) -> str:
         or _IPV4_RE.search(model)
         or _CREDENTIAL_TOKEN_RE.search(model)
         or _VENDOR_KEY_TOKEN_RE.search(model)
+        or _HOST_PATH_RE.search(model)
+        or _BASIC_AUTH_RE.search(model)
+        or _AWS_ACCESS_ID_RE.search(model)
+        or _STRIPE_KEY_RE.search(model)
         or "localhost" in lowered
         or "[" in model
         or "]" in model

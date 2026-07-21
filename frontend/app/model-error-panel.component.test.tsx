@@ -3,7 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import { AnswerView } from "./answer-panel";
-import type { ModelServiceStatusItem, StatusModelRole } from "./model-settings";
+import {
+  modelFailureText,
+  type ModelServiceStatusItem,
+  type StatusModelRole,
+} from "./model-settings";
 import type { AskResponse } from "./workspace-model";
 
 
@@ -49,7 +53,7 @@ function renderAnswer(
   );
 }
 
-const answer: AskResponse = {
+const answer = {
   answer_id: "answer-model-error",
   conversation_id: "conversation-1",
   conclusion: "Partial answer",
@@ -79,7 +83,18 @@ const answer: AskResponse = {
       message: "duplicate raw diagnostic",
     },
   ],
-};
+} as unknown as AskResponse;
+
+
+test("formats a typed status snapshot without weakening unknown-code handling", () => {
+  const snapshot = status("embedding", "error");
+  snapshot.model = "";
+  snapshot.code = "missing_config";
+
+  expect(modelFailureText(snapshot)).toBe("嵌入模型尚未配置，本次回答可能不完整。");
+  snapshot.code = "private-provider-diagnostic";
+  expect(modelFailureText(snapshot)).toBe("嵌入模型调用失败，本次回答可能不完整。");
+});
 
 
 test("renders dynamic deduplicated failures and routes role-specific actions", async () => {
@@ -112,6 +127,32 @@ test("does not copy legacy model-error diagnostics into browser logging", async 
   } finally {
     consoleError.mockRestore();
   }
+});
+
+
+test("distinguishes a sanitized upstream failure from missing configuration", () => {
+  renderAnswer({
+    ...answer,
+    model_errors: [
+      {
+        service: "embedding",
+        stage: "embed",
+        model: "",
+        message: "upstream_error",
+      },
+      {
+        service: "kg_llm",
+        stage: "answer",
+        model: "",
+        message: "missing_config",
+      },
+    ],
+  });
+
+  expect(screen.getByText("嵌入模型调用失败，本次回答可能不完整。"))
+    .toBeInTheDocument();
+  expect(screen.getByText("构图模型尚未配置，本次回答可能不完整。"))
+    .toBeInTheDocument();
 });
 
 

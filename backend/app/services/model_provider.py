@@ -5,6 +5,7 @@ from typing import Any
 from app.core.config import Settings
 from app.core.llm import OpenAICompatibleClient
 from app.core.model_safety import (
+    MODEL_ERROR_MISSING_CONFIG,
     MODEL_ERROR_UPSTREAM,
     safe_model_error_service,
     safe_model_error_stage,
@@ -223,12 +224,17 @@ class RuntimeModelProvider:
         sink = self.ask_context._ASK_MODEL_ERRORS.get()
         if sink is not None:
             service = safe_model_error_service(service or _service_for_stage(stage))
+            error_code = (
+                MODEL_ERROR_MISSING_CONFIG
+                if isinstance(error, ModelNotConfiguredError)
+                else MODEL_ERROR_UPSTREAM
+            )
             sink.append(
                 {
                     "service": service,
                     "stage": safe_model_error_stage(stage),
                     "model": safe_model_label(model),
-                    "message": MODEL_ERROR_UPSTREAM,
+                    "message": error_code,
                 }
             )
             try:

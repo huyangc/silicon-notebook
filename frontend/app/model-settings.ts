@@ -5,6 +5,7 @@ export const MODEL_ROLES = ["llm", "reasoning_llm", "rewrite_llm", "kg_llm", "re
 export const STATUS_MODEL_ROLES = [...MODEL_ROLES, "embedding"] as const;
 export type ModelRole = (typeof MODEL_ROLES)[number];
 export type StatusModelRole = (typeof STATUS_MODEL_ROLES)[number];
+export type ModelFailureCode = "missing_config" | "upstream_error";
 
 export const MODEL_ROLE_LABELS: Record<StatusModelRole, string> = {
   llm: "主模型",
@@ -153,13 +154,18 @@ export function summarizeModelServices(
 }
 
 export function modelFailureText(
-  error: Pick<ModelServiceStatusItem, "service" | "model">,
+  error: Pick<ModelServiceStatusItem, "service" | "model"> & {
+    message?: ModelFailureCode;
+    code?: string;
+  },
 ): string {
   const role = MODEL_ROLE_LABELS[error.service];
   const model = error.model.trim();
-  return model
-    ? `${role} ${model} 调用失败，本次回答可能不完整。`
-    : `${role}尚未配置，本次回答可能不完整。`;
+  if (model) return `${role} ${model} 调用失败，本次回答可能不完整。`;
+  const code = error.message ?? error.code;
+  return code === "missing_config"
+    ? `${role}尚未配置，本次回答可能不完整。`
+    : `${role}调用失败，本次回答可能不完整。`;
 }
 
 /** Replace rows by their protocol-stable service role without mutating state. */

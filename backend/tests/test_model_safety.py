@@ -1,3 +1,5 @@
+import pytest
+
 from app.core.model_safety import (
     safe_model_error_code,
     safe_model_error_service,
@@ -21,6 +23,44 @@ def test_safe_model_label_preserves_namespaces_and_rejects_diagnostics():
     assert safe_model_label(
         "https://10.0.0.8/v1?api_key=sk-private-secret"
     ) == ""
+
+
+@pytest.mark.parametrize(
+    "unsafe_model",
+    [
+        "api.example.com/v1",
+        "vendor/api.example.com/v1",
+        "api.example.xn--p1ai/v1",
+        "api.example.com./v1",
+        "user@api.example.com/v1",
+        "api.例子.测试/v1",
+        "api._service.local/v1",
+        "AKIAIOSFODNN7EXAMPLE",
+        "vendor/AKIAIOSFODNN7EXAMPLE",
+        "AKIAIOSFODNN7EXAMPLE/latest",
+        "ASIAIOSFODNN7EXAMPLE",
+        "sk_live_51H8xabcdefghijkl",
+        "vendor/sk_live_51H8xabcdefghijkl",
+        "pk_test_51H8xabcdefghijkl",
+        "alice:s3cr3t@api.example.com",
+        "vendor/alice:s3cr3t@api.example.com",
+    ],
+)
+def test_safe_model_label_rejects_endpoint_and_credential_shapes(unsafe_model):
+    assert safe_model_label(unsafe_model) == ""
+
+
+@pytest.mark.parametrize(
+    "safe_model",
+    [
+        "runtime-primary-name",
+        "llama3.2:latest",
+        "anthropic.claude-3-5-sonnet-20240620-v1:0",
+        "meta-llama/Llama-3.1-8B-Instruct",
+    ],
+)
+def test_safe_model_label_preserves_dynamic_model_names(safe_model):
+    assert safe_model_label(safe_model) == safe_model
 
 
 def test_model_error_metadata_uses_explicit_allowlists():
