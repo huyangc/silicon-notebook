@@ -4,8 +4,8 @@ import json
 import sqlite3
 from typing import Any
 
+from app.models.notebooks import NotebookAnalytics
 from app.models.schemas import (
-    NotebookAnalytics,
     NotebookSearchResponse,
     SearchHit,
 )

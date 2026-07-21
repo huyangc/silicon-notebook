@@ -23,8 +23,9 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 
 from app.core.request_context import reset_request_user, set_request_user
-from app.models.schemas import AgentPrincipal, AskRequest, UserProfile
-from app.services.memory_inputs import (
+from app.models.identity import AgentPrincipal, UserProfile
+from app.models.schemas import AskRequest
+from app.core.memory_inputs import (
     normalize_client_request_id,
     normalize_content,
     normalize_evidence_refs,

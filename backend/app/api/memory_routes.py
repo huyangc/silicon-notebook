@@ -15,13 +15,16 @@ from app.api.deps import (
     notebook_access_repository,
     require_notebook_read,
 )
-from app.models.schemas import (
+from app.models.identity import (
     AgentProfile,
     AgentProfileCreate,
     AgentProfileUpdate,
     AgentTokenCreate,
     AgentTokenIssued,
     AgentTokenSummary,
+    UserProfile,
+)
+from app.models.memory import (
     AnswerMemoryLinksRequest,
     AnswerMemoryLinksResponse,
     MemoryBulkDeleteRequest,
@@ -34,14 +37,12 @@ from app.models.schemas import (
     MemoryTransferRequest,
     MemoryUpdate,
     PaginatedMemories,
-    PromoteRequest,
-    PromotionCandidate,
-    UserProfile,
 )
+from app.models.schemas import PromoteRequest, PromotionCandidate
 from app.repositories.ports import AskStateStorePort, MemoryRepository
 from app.services.prompts import MEMORY_PREVIEW_SCHEMA_HINT, memory_preview_prompt
 from app.services.knowledge_governance import PromotionTargetError
-from app.services.memory_inputs import MemoryInputError
+from app.core.memory_inputs import MemoryInputError
 
 
 memory_router = APIRouter()

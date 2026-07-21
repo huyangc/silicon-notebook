@@ -817,7 +817,7 @@ def test_proposal_helper_rejects_actual_nonfinite_nested_values(value):
 async def test_propose_memory_rejects_unbounded_envelopes_before_live_service_work(
     mcp_env, monkeypatch
 ):
-    from app.services.memory_inputs import (
+    from app.core.memory_inputs import (
         MEMORY_CONTENT_MAX_CHARS,
         MEMORY_EVIDENCE_MAX_COUNT,
         MEMORY_EVIDENCE_MAX_SERIALIZED_BYTES,

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Request
 
 from app.api.deps import identity_repository, user_error
-from app.models.schemas import AuthRequest, AuthResult
+from app.models.identity import AuthRequest, AuthResult
 from app.services.auth_utils import is_valid_username
 
 auth_router = APIRouter(prefix="/auth")

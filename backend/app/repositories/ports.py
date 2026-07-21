@@ -33,14 +33,35 @@ if TYPE_CHECKING:
     from app.services.retrieval_candidates import ChunkRetrievalPlan
 
 from app.core.config import Settings
+from app.models.identity import (
+    AgentPrincipal,
+    AgentProfile,
+    AgentTokenIssued,
+    AgentTokenSummary,
+    UserProfile,
+)
+from app.models.memory import MemoryHit, MemoryRecord, MemoryUpdate, PaginatedMemories
+from app.models.notebooks import (
+    NotebookAnalytics,
+    NotebookCreate,
+    NotebookSummary,
+    NotebookTemplate,
+    NotebookUpdate,
+)
+from app.models.sources import (
+    AddUrlSourcesResult,
+    PaginatedSources,
+    SourceDetail,
+    SourceElement,
+    SourceImportRequest,
+    SourceSummary,
+)
 from app.models.schemas import (
-    AddUrlSourcesResult, AnswerAnchor, AskRequest, AskResponse, Citation, ConversationDetail,
+    AnswerAnchor, AskRequest, AskResponse, Citation, ConversationDetail,
     ConversationSummary, DuplicateGroup, FeedbackRequest, FeedbackResponse,
     KnowledgeGraph, KnowledgeTypeCount, KnowledgeUpdate, MergeRequest,
-    NotebookAnalytics, NotebookCreate, NotebookSearchResponse, NotebookSummary,
-    AgentPrincipal, AgentProfile, AgentTokenIssued, AgentTokenSummary, MemoryHit, MemoryRecord, MemoryUpdate, PaginatedMemories, NotebookTemplate, NotebookUpdate, ObjectSchemaCreate, ObjectSchemaModel,
-    ObjectSchemaUpdate, PaginatedKnowledge, PaginatedSources, RuleCard,
-    SourceDetail, SourceElement, SourceImportRequest, SourceSummary, UserProfile,
+    NotebookSearchResponse, ObjectSchemaCreate, ObjectSchemaModel, ObjectSchemaUpdate,
+    PaginatedKnowledge, RuleCard,
 )
 from app.services.cancellation import CancelEvent
 from app.services.model_config import ResolvedModelConfig

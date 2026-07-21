@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from app.core.config import Settings
 from app.core.request_context import get_request_user
-from app.models.schemas import UserProfile
+from app.models.identity import UserProfile
 from app.repositories.sqlite.database import SqliteDatabase
 from app.services.model_config import ResolvedModelConfig, resolve_effective_config
 
