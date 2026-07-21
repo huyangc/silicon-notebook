@@ -1784,6 +1784,43 @@ MIGRATION_MANIFEST[(21, 22)] = {
     "views": {},
 }
 
+# v23: the latest sanitized health result for each user/model-service role.
+# This is account-scoped application state: one row per (user_id, service),
+# removed automatically when its user is deleted.
+MODEL_SERVICE_STATUS_TABLE = {
+    "model_service_status": """CREATE TABLE model_service_status (
+                  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                  service TEXT NOT NULL,
+                  config_fingerprint TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+                  latency_ms INTEGER NOT NULL DEFAULT 0,
+                  code TEXT NOT NULL DEFAULT '',
+                  trigger TEXT NOT NULL CHECK (trigger IN ('manual_test', 'observed_failure')),
+                  checked_at TEXT NOT NULL,
+                  PRIMARY KEY (user_id, service)
+                )""",
+}
+MODEL_SERVICE_STATUS_INDEXES = {
+    "idx_model_service_status_user_checked":
+        """CREATE INDEX idx_model_service_status_user_checked
+                  ON model_service_status(user_id, checked_at DESC)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 23, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **MODEL_SERVICE_STATUS_TABLE},
+        "indexes": {**manifest["indexes"], **MODEL_SERVICE_STATUS_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(22, 23)] = {
+    "tables": MODEL_SERVICE_STATUS_TABLE,
+    "columns": {},
+    "indexes": MODEL_SERVICE_STATUS_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

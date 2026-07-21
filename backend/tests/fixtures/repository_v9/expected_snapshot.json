@@ -1329,6 +1329,11 @@
         "type": "index"
       },
       {
+        "name": "idx_model_service_status_user_checked",
+        "sql_sha256": "25887295ed2835d69eaab8a435739ab73380bf437ab9620638fb77de1937fdc4",
+        "type": "index"
+      },
+      {
         "name": "idx_notebook_assets_nb",
         "sql_sha256": "d3dd45174a942f0b41549825dcee482ab88dc93cd39b4da488b1ad67ed07cd86",
         "type": "index"
@@ -1719,6 +1724,11 @@
         "type": "table"
       },
       {
+        "name": "model_service_status",
+        "sql_sha256": "61c03df81c3b62670958245669e447fb962445981f8338a5d5454043f8a09315",
+        "type": "table"
+      },
+      {
         "name": "notebook_assets",
         "sql_sha256": "34c671c7927db6a9aa142d813d4742c472e87977e7c2dfc3ce5cdaef0796eb14",
         "type": "table"
@@ -1809,6 +1819,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 22
+    "user_version": 23
   }
 }
