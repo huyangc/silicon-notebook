@@ -463,6 +463,78 @@
     {
       "count": 1,
       "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._collect_largest_tables.read",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._collect_notebook_counts.count_rows",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._collect_plans.explain",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._foreign_keys.read",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._index_prefixes.read_columns",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._index_prefixes.read_indexes",
+      "target": "connection.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._open_read_only",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._pragma_scalar.read",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._schema_tables.read",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
       "path": "scripts/diag_open_latency.py",
       "reason": "read-only host database diagnostic",
       "scope": "<module>.main._run",
@@ -756,6 +828,14 @@
       "path": "scripts/backfill_promotion_targets.py",
       "reason": "operator-supplied offline maintenance database",
       "scope": "<module>.main",
+      "target": "sqlite3.connect"
+    },
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
+      "scope": "<module>._open_read_only",
       "target": "sqlite3.connect"
     },
     {
