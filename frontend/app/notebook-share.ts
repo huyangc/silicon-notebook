@@ -1,6 +1,5 @@
 // Notebook 分享与拷贝 — 分享客户端(纯逻辑,纯 helper 在 notebook-share.test.mjs
-// 单测)。自带 fetch 封装,可在 `node --test` 下运行而不 import React 页面模块。
-// 镜像 notebook-tier.ts 的样板。
+// 单测)。请求经共享 transport，模块本身不依赖 React。
 
 import { requestJson, requestVoid } from "./api-client.ts";
 

@@ -1,7 +1,6 @@
 // Track F — governance / promotion queue API client (pure logic, unit-tested
-// in promotion-queue.test.mjs). Kept self-contained (own fetch wrapper) so it
-// can be exercised in isolation under `node --test` without importing the
-// React page module.
+// in promotion-queue.test.mjs). Uses the shared transport while remaining
+// independently testable without importing the React page module.
 
 import { requestJson } from "./api-client.ts";
 

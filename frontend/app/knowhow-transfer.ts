@@ -1,6 +1,5 @@
 // Knowhow 表跨 notebook 传输(复制/移动)— 网络客户端(纯逻辑在 transfer-model.ts
-// 单测)。自带 fetch 封装,可在 `node --test` 下运行而不 import React 页面模块。
-// 镜像 notebook-share.ts 的样板。
+// 单测)。请求经共享 transport；本模块保留结构化 409 的领域分流。
 
 import { performApiRequest } from "./api-client.ts";
 import { throwHumanizedHttpError } from "./errors.ts";
@@ -47,7 +46,7 @@ export async function transferKnowhowTable(
     // 先在一份 clone 上探测 409 source_cleanup_failed 的结构化形状——body 只能
     // 消费一次(见 errors.ts readHttpError 头注释),原始 res 留给下面
     // throwHumanizedHttpError() 读,不能在这里抢先吃掉。非 JSON(或非该形状)
-    // 一律落回通用的人话层错误,与 notebook-share.ts 的 apiFetch 行为一致。
+    // 一律落回共享的人话层错误,与 notebook-share.ts 的普通请求行为一致。
     let parsed: unknown;
     try {
       parsed = JSON.parse(await res.clone().text());

@@ -1,6 +1,5 @@
 // Knowhow 表 — 前端模型层：类型 + 资产 URL 改写/格子摘要/行标题合成（纯逻辑，
-// 单测见 knowhow-model.test.mjs）+ fetch 封装（镜像 notebook-share.ts 的封装
-// 风格）。覆盖 PR-1（导入+只读总览）与 PR-2+3（编辑维护/模板往返/LLM 表达
+// 单测见 knowhow-model.test.mjs）+ 共享 transport 请求。覆盖 PR-1（导入+只读总览）与 PR-2+3（编辑维护/模板往返/LLM 表达
 // 优化/代码附件/引用跳转）两代 wire 契约。
 // 后端 JSON 为 snake_case（projection_status/row_count/guessed_kind/
 // anchor_column_id/suggestion_md/...），本文件对外一律暴露 camelCase，字段
@@ -680,8 +679,8 @@ export const reformatKnowhowCell = (
   ).then((w) => ({ candidateMd: w.candidate_md, source: w.source, changed: w.changed, sourceMd: w.source_md }));
 
 // --- 格子级代码附件（Task 10；HTTP 端点 session/agent token 皆可访问，本文件
-// 的调用方(Task 11 用户界面)走既有 session 鉴权，与其余 fetcher 共用
-// apiFetch/authHeaders，不需要为 agent token 走另一套客户端逻辑）-------------
+// 的调用方(Task 11 用户界面)走既有 session 鉴权，与其余请求共用共享 transport，
+// 不需要为 agent token 走另一套客户端逻辑）----------------------------------
 
 // 路径不含 notebookId/tableId 段——行/格子 id 本身已定位到具体表，与本文件
 // 其余"表级"fetcher 的参数形状不同，是端点真实形状使然，不是遗漏。

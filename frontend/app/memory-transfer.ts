@@ -1,6 +1,5 @@
 // Memory 跨 notebook 传输(复制/移动)— 网络客户端(纯逻辑在 transfer-model.ts
-// 单测)。自带 fetch 封装,可在 `node --test` 下运行而不 import React 页面模块。
-// 镜像 notebook-share.ts 的样板。
+// 单测)。请求经共享 transport，模块本身不依赖 React。
 
 import { requestJson } from "./api-client.ts";
 import { memoryTransferBody, type TransferMode, type TransferResult } from "./transfer-model.ts";

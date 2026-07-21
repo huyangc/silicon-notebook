@@ -111,7 +111,7 @@ import { KnowhowCodeChip, KnowhowCodeModal } from "./knowhow-code.tsx";
 import { KnowhowMatrixDrawer } from "./knowhow-matrix-drawer.tsx";
 // C3：表级「复制/移动到…」——目标笔记本选择器是 C2 的共享组件（同一层 UI 也
 // 服务 Memory 的 C4），网络客户端与其 409 source_cleanup_failed 专用错误类型
-// 在 knowhow-transfer.ts（纯 fetch 封装，无 JSX，见该文件头注释）。
+// 在 knowhow-transfer.ts（共享 transport 的领域客户端，无 JSX，见该文件头注释）。
 import { DestinationPicker } from "./transfer-picker.tsx";
 import { transferKnowhowTable, KnowhowSourceCleanupError } from "./knowhow-transfer.ts";
 import { resolveCellCodeView, CODE_STATUS_LOAD_ERROR } from "./knowhow-code-logic.ts";

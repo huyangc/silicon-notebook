@@ -1,6 +1,6 @@
 // Track E — edge curation / review-queue API client (pure logic, unit-tested
-// in edge-review-queue.test.mjs). Self-contained fetch wrapper so it runs under
-// `node --test` without importing the React page module. Mirrors promotion-queue.ts.
+// in edge-review-queue.test.mjs). Uses the shared transport without importing
+// the React page module. Mirrors promotion-queue.ts.
 
 import { requestJson } from "./api-client.ts";
 

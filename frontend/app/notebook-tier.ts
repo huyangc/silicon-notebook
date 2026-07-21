@@ -1,6 +1,6 @@
 // Two-tier federation — notebook tier client (pure logic, unit-tested in
-// notebook-tier.test.mjs). Self-contained fetch wrapper so it runs under
-// `node --test` without importing the React page module.
+// notebook-tier.test.mjs). Uses the shared transport without importing the
+// React page module.
 
 import { requestJson } from "./api-client.ts";
 

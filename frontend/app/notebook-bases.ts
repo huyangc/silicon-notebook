@@ -1,5 +1,5 @@
 // 多领域基准库 —— 参考库挂载客户端(纯逻辑部分在 notebook-bases.test.mjs 里单测)。
-// 自带 fetch 封装,与 notebook-tier.ts 同款,以便在 `node --test` 下免 React。
+// 通过共享 transport 发请求；模块本身不依赖 React。
 //
 // ⚠ 重要:listBases/setBases/listMountable 对应的三个后端端点是 owner-only,
 // 非 owner 调用会收到 404(刻意不泄露存在性)。调用方不能在打开笔记本时无条件
