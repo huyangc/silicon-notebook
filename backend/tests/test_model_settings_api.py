@@ -23,7 +23,7 @@ def _auth(client, username="z00123456"):
 
 
 def test_mask_key_never_exposes_full_short_key():
-    from app.api.routes import _mask_key
+    from app.api.system_routes import _mask_key
     assert _mask_key("") == ""
     assert _mask_key("abc") == "…"        # ≤4 位整体隐去
     assert _mask_key("abcd") == "…"       # 恰好 4 位也不暴露
@@ -98,7 +98,7 @@ def test_precheck_failures_go_in_code_not_error(client, payload, expected):
 
 def test_exception_path_fills_error_and_uses_generic_code(client, monkeypatch):
     """异常分支只给 code,绝不把 str(exc) 送上任何可展示通道。"""
-    import app.api.routes as routes
+    import app.api.system_routes as routes
 
     class Boom:
         def __init__(self, *a, **k): pass
