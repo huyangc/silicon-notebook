@@ -355,11 +355,28 @@ test("independent API clients import and call the error boundary", async () => {
 test("model and report clients retain bounded diagnostics and scenario copy", async () => {
   const modelSettings = await parseModule("model-settings.ts");
   const report = await parseModule("report-view.tsx");
+  const guardedModelClients = [
+    "fetchModelSettings",
+    "fetchModelServiceStatus",
+    "testCurrentModelService",
+    "testAllCurrentModelServices",
+    "saveModelSettings",
+    "testModelService",
+  ];
+  for (const client of guardedModelClients) {
+    assert.deepEqual(
+      callsIn(findFunction(modelSettings, client))
+        .filter((target) => target === "throwHumanizedHttpError"),
+      ["throwHumanizedHttpError"],
+      `${client}: every failed HTTP response must cross the bounded error translator`,
+    );
+  }
   assert.equal(
     callsIn(modelSettings)
       .filter((target) => target === "throwHumanizedHttpError")
       .length,
-    3,
+    guardedModelClients.length,
+    "model-settings.ts has an unreviewed or missing HTTP error boundary",
   );
   assert.equal(callsIn(report).includes("console.error"), false);
   assert.equal(callsIn(report).includes("logDiagnostic"), true);
