@@ -550,6 +550,36 @@ The current persistence/API contract is the `reports` table and `/reports` APIs;
 
 All model services are reached over URL endpoints — no local model servers are started.
 
+### Model-service status and targeted diagnostics
+
+The collection's service indicator reads the authenticated user's **persisted,
+last-known** model-service snapshot. It never probes a provider while the
+collection is loading, so an unavailable provider cannot block the notebook
+library. A configuration change invalidates the affected saved result; a
+configured service is then shown as untested until a new explicit check or an
+observed failure records a result.
+
+Open **模型服务** to inspect the effective saved configuration and test either
+one current service or every current effective service. The effective identity
+is resolved by the backend from the user's saved setting and its configured
+fallbacks, so model names are runtime data — product code in the frontend must
+not carry provider/model-name constants. Ask failure notices identify the
+affected service role and the backend-resolved current model when its safe
+display label is available.
+
+Embedding is system-managed and read-only in this panel: users can inspect or
+explicitly test its effective service, but cannot edit its endpoint, key, or
+model there. Service-status APIs and UI expose only sanitized status,
+latency, trigger, stable error code, and a safe model label. Raw upstream
+diagnostics (including provider payloads, endpoints, and exception text) stay
+in server logs rather than status responses or tooltips.
+
+Current-status APIs are `GET /api/me/model-services/status`,
+`POST /api/me/model-services/{service}/test`, and
+`POST /api/me/model-services/test-all`. The existing
+`POST /api/me/model-settings/test` remains the separate, draft-value test for
+an unsaved editable LLM/rerank setting.
+
 **LLM (OpenAI-compatible):**
 
 ```text

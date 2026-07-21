@@ -318,6 +318,14 @@ Business logic should call a provider adapter/client, not hard-code a specific m
 
 When no LLM key is configured, endpoints may return deterministic fallback data so the local beta remains usable.
 
+### Model Service Status and Diagnostics
+
+- Effective model identity is backend-resolved from the authenticated user's saved setting and configured fallbacks. Provider/model names are runtime data; never add frontend product constants for a provider or model name.
+- The notebook collection reads each user's persisted, last-known model-service status only. Status reads must never probe an upstream provider or delay/hide the collection; configuration changes invalidate affected saved results, which then read as untested until an explicit test or observed failure records a result.
+- The Model Services UI must support explicit tests of one current effective service and all current effective services. Keep `POST /me/model-settings/test` as the separate draft-value test path for unsaved editable LLM/rerank settings.
+- Embedding configuration is system-managed and read-only in the Model Services UI. It remains inspectable and explicitly testable, but users cannot edit its endpoint, credential, or model there.
+- Ask failure UI identifies the affected service role and the backend-resolved current model when its safe display label is available. Status surfaces may return only sanitized status metadata, a stable error code, and safe model identity; provider payloads, endpoints, IPs, credentials, response bodies, and raw exception strings remain logs-only and must never appear in status responses or tooltips.
+
 ## Logging / Observability
 
 Structured logs go to `.local/logs/*.jsonl` (gitignored) plus brief console lines, via a single `EventLogger` (`backend/app/core/event_logging.py`). Add observability at the existing chokepoints, not at each call site:
