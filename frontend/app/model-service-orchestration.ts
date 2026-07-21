@@ -1,6 +1,9 @@
 import {
   MODEL_ROLE_LABELS,
+  STATUS_MODEL_ROLES,
+  mergeModelServiceStatus,
   summarizeModelServices,
+  type ModelServiceStatusItem,
   type ModelServicesStatus,
   type StatusModelRole,
 } from "./model-settings.ts";
@@ -11,6 +14,49 @@ export type ModelServiceSummaryView = {
   tone: "ok" | "warn" | "bad" | "connecting";
   title: string;
 };
+
+
+export type ModelServiceStatusState = {
+  status: ModelServicesStatus | null;
+  unavailable: boolean;
+};
+
+
+function isCompleteModelServiceStatus(status: ModelServicesStatus | null): boolean {
+  return status !== null && STATUS_MODEL_ROLES.every(
+    (role) => status.services.some((item) => item.service === role),
+  );
+}
+
+
+export function acceptModelServiceStatusSnapshot(
+  status: ModelServicesStatus,
+): ModelServiceStatusState {
+  return {
+    status,
+    unavailable: !isCompleteModelServiceStatus(status),
+  };
+}
+
+
+/**
+ * A one-role probe can refresh one row, but cannot establish that the other
+ * effective services are known. Only a complete read/test-all response may
+ * recover an unavailable or partial snapshot.
+ */
+export function applyModelServiceTestResult(
+  current: ModelServiceStatusState,
+  replacement: ModelServiceStatusItem | ModelServicesStatus,
+  coverage: "single" | "all",
+): ModelServiceStatusState {
+  const hadCompleteSnapshot = isCompleteModelServiceStatus(current.status);
+  return {
+    status: mergeModelServiceStatus(current.status, replacement),
+    unavailable: coverage === "all"
+      ? false
+      : current.unavailable || !hadCompleteSnapshot,
+  };
+}
 
 
 const IDLE_STATUS_TEXT = new Set([

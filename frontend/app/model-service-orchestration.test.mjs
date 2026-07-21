@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import {
   ModelTestCoordinator,
+  acceptModelServiceStatusSnapshot,
+  applyModelServiceTestResult,
   deriveModelServiceSummaryView,
 } from "./model-service-orchestration.ts";
 
@@ -85,6 +87,83 @@ test("idle service text yields to persisted model state and status availability"
     }).text,
     "API 正常 · 模型状态未知",
   );
+});
+
+
+test("one successful role test keeps a failed or partial status snapshot unavailable", () => {
+  const fromFailedGet = applyModelServiceTestResult(
+    { status: null, unavailable: true },
+    status("llm", "ok"),
+    "single",
+  );
+  assert.equal(fromFailedGet.unavailable, true);
+  assert.deepEqual(fromFailedGet.status.services.map((item) => item.service), ["llm"]);
+  assert.equal(
+    deriveModelServiceSummaryView({
+      apiStatus: "ok",
+      statusText: "服务正常",
+      modelStatus: fromFailedGet.status,
+      modelStatusUnavailable: fromFailedGet.unavailable,
+    }).text,
+    "API 正常 · 模型状态未知",
+  );
+
+  const fromPartialSnapshot = applyModelServiceTestResult(
+    { status: { services: [status("llm", "untested")] }, unavailable: false },
+    status("reasoning_llm", "ok"),
+    "single",
+  );
+  assert.equal(fromPartialSnapshot.unavailable, true);
+});
+
+
+test("single tests update a complete snapshot and all-service tests restore availability", () => {
+  const completeSnapshot = {
+    services: [
+      status("llm", "untested"),
+      status("reasoning_llm", "untested"),
+      status("rewrite_llm", "untested"),
+      status("kg_llm", "untested"),
+      status("rerank", "untested"),
+      status("embedding", "untested"),
+    ],
+  };
+  const afterSingle = applyModelServiceTestResult(
+    { status: completeSnapshot, unavailable: false },
+    status("llm", "ok", { model: "tested-primary" }),
+    "single",
+  );
+  assert.equal(afterSingle.unavailable, false);
+  assert.equal(afterSingle.status.services[0].model, "tested-primary");
+  assert.equal(afterSingle.status.services[0].status, "ok");
+
+  const afterAll = applyModelServiceTestResult(
+    { status: null, unavailable: true },
+    completeSnapshot,
+    "all",
+  );
+  assert.equal(afterAll.unavailable, false);
+  assert.equal(afterAll.status.services.length, 6);
+});
+
+
+test("only a complete GET snapshot clears model status unavailability", () => {
+  const partial = acceptModelServiceStatusSnapshot({
+    services: [status("llm", "ok")],
+  });
+  assert.equal(partial.unavailable, true);
+
+  const complete = acceptModelServiceStatusSnapshot({
+    services: [
+      status("llm", "ok"),
+      status("reasoning_llm", "ok"),
+      status("rewrite_llm", "ok"),
+      status("kg_llm", "ok"),
+      status("rerank", "ok"),
+      status("embedding", "ok"),
+    ],
+  });
+  assert.equal(complete.unavailable, false);
 });
 
 

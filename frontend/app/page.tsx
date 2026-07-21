@@ -95,7 +95,6 @@ import {
   buildPutPayload,
   fetchModelServiceStatus,
   fetchModelSettings,
-  mergeModelServiceStatus,
   saveModelSettings,
   testAllCurrentModelServices,
   testCurrentModelService,
@@ -104,6 +103,8 @@ import {
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
 import {
   ModelTestCoordinator,
+  acceptModelServiceStatusSnapshot,
+  applyModelServiceTestResult,
   deriveModelServiceSummaryView,
   type ModelTestActivity,
 } from "./model-service-orchestration.ts";
@@ -942,8 +943,12 @@ export default function Home() {
   const [modelPanelOpen, setModelPanelOpen] = useState(false);
   const [modelForms, setModelForms] = useState<Record<ModelRole, ServiceForm> | null>(null);
   const [modelTesting, setModelTesting] = useState<Partial<Record<ModelRole, string>>>({});
-  const [modelStatus, setModelStatus] = useState<ModelServicesStatus | null>(null);
-  const [modelStatusUnavailable, setModelStatusUnavailable] = useState(false);
+  const [modelStatusState, setModelStatusState] = useState({
+    status: null as ModelServicesStatus | null,
+    unavailable: false,
+  });
+  const modelStatus = modelStatusState.status;
+  const modelStatusUnavailable = modelStatusState.unavailable;
   const [highlightedModelRole, setHighlightedModelRole] = useState<StatusModelRole | null>(null);
   const [modelPanelSaving, setModelPanelSaving] = useState(false);
   const [modelTestActivity, setModelTestActivity] = useState<ModelTestActivity>({ roles: {}, all: false });
@@ -2228,11 +2233,12 @@ export default function Home() {
     try {
       const snapshot = await fetchModelServiceStatus();
       if (requestId !== modelStatusRequestRef.current) return snapshot;
-      setModelStatus(snapshot);
-      setModelStatusUnavailable(false);
+      setModelStatusState(acceptModelServiceStatusSnapshot(snapshot));
       return snapshot;
     } catch {
-      if (requestId === modelStatusRequestRef.current) setModelStatusUnavailable(true);
+      if (requestId === modelStatusRequestRef.current) {
+        setModelStatusState((current) => ({ ...current, unavailable: true }));
+      }
       return null;
     }
   }
@@ -3698,8 +3704,7 @@ export default function Home() {
       const item = await testCurrentModelService(role);
       if (!coordinator.isCurrent(ticket)) return null;
       modelStatusRequestRef.current += 1;
-      setModelStatus((current) => mergeModelServiceStatus(current, item));
-      setModelStatusUnavailable(false);
+      setModelStatusState((current) => applyModelServiceTestResult(current, item, "single"));
       return item;
     } catch (e) {
       if (!coordinator.isCurrent(ticket)) return null;
@@ -3721,8 +3726,7 @@ export default function Home() {
       const result = await testAllCurrentModelServices();
       if (!coordinator.isCurrent(ticket)) return;
       modelStatusRequestRef.current += 1;
-      setModelStatus((current) => mergeModelServiceStatus(current, result));
-      setModelStatusUnavailable(false);
+      setModelStatusState((current) => applyModelServiceTestResult(current, result, "all"));
     } catch (e) {
       if (coordinator.isCurrent(ticket)) reportError(e);
     } finally {
