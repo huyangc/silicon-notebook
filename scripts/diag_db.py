@@ -18,7 +18,6 @@ import os
 import sqlite3
 import stat
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -44,6 +43,8 @@ MAX_DEGRADED = 64
 MAX_DEADLINE_SECONDS = 10.0
 MAX_BUSY_TIMEOUT_MS = 1000
 MAX_STALE_WORKSPACES = 8
+MAX_DIAGNOSTICS_ENTRIES = 64
+MAX_WORKSPACE_ENTRIES = 8
 STALE_WORKSPACE_AGE_SECONDS = 24 * 60 * 60
 
 _NOATIME_FLAG = getattr(os, "O_NOATIME", None)
@@ -52,6 +53,14 @@ _NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
 _NONBLOCK_FLAG = getattr(os, "O_NONBLOCK", 0)
 _CLOEXEC_FLAG = getattr(os, "O_CLOEXEC", 0)
 _DIRECTORY_FLAG = getattr(os, "O_DIRECTORY", 0)
+_ALLOW_UNSAFE_WORKSPACE_PATH_FOR_TESTS = False
+_NOATIME_UNSUPPORTED_ERRNOS = {
+    errno.EPERM,
+    errno.EACCES,
+    errno.EINVAL,
+    getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+    getattr(errno, "ENOTSUP", errno.EINVAL),
+}
 
 _PENDING_BYTE = 0x40000000
 _SHARED_FIRST = _PENDING_BYTE + 2
@@ -122,6 +131,27 @@ class _PinnedSource:
         self.path = path
         self.descriptor = descriptor
         self.identity = identity
+
+
+class _PinnedDirectory:
+    def __init__(self, path: Path, descriptor: int, identity) -> None:
+        self.path = path
+        self.descriptor = descriptor
+        self.identity = identity
+
+
+class _SnapshotWorkspace(_PinnedDirectory):
+    def __init__(
+        self,
+        path: Path,
+        descriptor: int,
+        identity,
+        name: str,
+        lock_descriptor: int,
+    ) -> None:
+        super().__init__(path, descriptor, identity)
+        self.name = name
+        self.lock_descriptor = lock_descriptor
 
 
 def _pseudonym(value: Optional[str]) -> str:
@@ -345,12 +375,19 @@ def _pin_source_files(
             try:
                 descriptor = os.open(path, flags)
             except OSError as exc:
-                if exc.errno in {errno.EPERM, errno.EACCES} and _NOATIME_FLAG:
+                if exc.errno in _NOATIME_UNSUPPORTED_ERRNOS and _NOATIME_FLAG:
                     raise _NoAtimeUnavailable() from exc
                 if exc.errno in {errno.ELOOP, errno.ENXIO}:
                     raise _UnsafeFile() from exc
                 raise
-            metadata = os.fstat(descriptor)
+            try:
+                metadata = os.fstat(descriptor)
+            except BaseException:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                raise
             identity = _stat_identity(metadata)
             if not stat.S_ISREG(metadata.st_mode):
                 os.close(descriptor)
@@ -361,17 +398,23 @@ def _pin_source_files(
             pinned[name] = _PinnedSource(name, path, descriptor, identity)
     except BaseException:
         for source in pinned.values():
-            os.close(source.descriptor)
+            try:
+                os.close(source.descriptor)
+            except OSError:
+                pass
         raise
     return pinned
 
 
-def _close_pinned_sources(pinned: Dict[str, _PinnedSource]) -> None:
+def _close_pinned_sources(
+    pinned: Dict[str, _PinnedSource], evidence: Optional[Dict[str, Any]] = None
+) -> None:
     for source in pinned.values():
         try:
             os.close(source.descriptor)
-        except OSError:
-            pass
+        except OSError as exc:
+            if evidence is not None:
+                _append_degraded(evidence, "source.close", "cleanup_error", exc)
 
 
 def _pinned_sources_unchanged(pinned: Dict[str, _PinnedSource]) -> bool:
@@ -404,149 +447,477 @@ def _release_source_read_lock(descriptor: int) -> None:
     fcntl.lockf(descriptor, fcntl.LOCK_UN, 1, _SHARED_FIRST, os.SEEK_SET)
 
 
+def _safe_release_source_read_lock(
+    evidence: Dict[str, Any], descriptor: int
+) -> None:
+    try:
+        _release_source_read_lock(descriptor)
+    except OSError as exc:
+        _append_degraded(evidence, "source.unlock", "cleanup_error", exc)
+
+
 def _copy_pinned_file(
-    source: _PinnedSource, target: Path, deadline: float, byte_limit: int
+    source: _PinnedSource, writer, deadline: float, byte_limit: int
 ) -> int:
     copied = 0
     if source.identity[2] > byte_limit:
-        target.touch(mode=0o600, exist_ok=False)
         raise ValueError("snapshot-byte-limit")
     os.lseek(source.descriptor, 0, os.SEEK_SET)
-    with target.open("xb") as writer:
-        while True:
-            _require_deadline(deadline)
-            chunk = os.read(source.descriptor, COPY_CHUNK_BYTES)
-            if not chunk:
-                break
-            if copied + len(chunk) > byte_limit:
-                raise ValueError("snapshot-byte-limit")
-            writer.write(chunk)
-            copied += len(chunk)
+    while True:
+        _require_deadline(deadline)
+        chunk = os.read(source.descriptor, COPY_CHUNK_BYTES)
+        if not chunk:
+            break
+        if copied + len(chunk) > byte_limit:
+            raise ValueError("snapshot-byte-limit")
+        writer.write(chunk)
+        copied += len(chunk)
     return copied
 
 
-def _open_diagnostics_directory(parent: Path) -> Tuple[Path, int, Any]:
+def _directory_identity(metadata) -> Tuple[int, int]:
+    return (int(metadata.st_dev), int(metadata.st_ino))
+
+
+def _valid_directory(metadata, *, private: bool) -> bool:
+    permissions = stat.S_IMODE(metadata.st_mode)
+    return (
+        stat.S_ISDIR(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and (permissions & 0o077 == 0 if private else permissions & 0o022 == 0)
+    )
+
+
+def _open_verified_directory(
+    path: Path, metadata, *, private: bool, dir_fd: Optional[int] = None
+) -> _PinnedDirectory:
+    flags = os.O_RDONLY | _DIRECTORY_FLAG | _NOFOLLOW_FLAG | _CLOEXEC_FLAG
+    descriptor: Optional[int] = None
+    try:
+        descriptor = os.open(path, flags, dir_fd=dir_fd)
+        descriptor_metadata = os.fstat(descriptor)
+        if (
+            not _valid_directory(descriptor_metadata, private=private)
+            or _directory_identity(descriptor_metadata) != _directory_identity(metadata)
+        ):
+            raise _UnsafeDiagnostics()
+        return _PinnedDirectory(path, descriptor, _directory_identity(metadata))
+    except BaseException:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+def _open_diagnostics_directory(parent: Path) -> _PinnedDirectory:
     directory = parent / "diagnostics"
     try:
         metadata = os.lstat(directory)
     except FileNotFoundError:
         try:
-            os.mkdir(directory, mode=0o700)
+            os.mkdir(directory, mode=0o755)
         except FileExistsError:
             pass
         metadata = os.lstat(directory)
-    if (
-        stat.S_ISLNK(metadata.st_mode)
-        or not stat.S_ISDIR(metadata.st_mode)
-        or metadata.st_uid != os.getuid()
-        or stat.S_IMODE(metadata.st_mode) & 0o077
-    ):
+    if not _valid_directory(metadata, private=False):
         raise _UnsafeDiagnostics()
-    flags = os.O_RDONLY | _DIRECTORY_FLAG | _NOFOLLOW_FLAG | _CLOEXEC_FLAG
     try:
-        descriptor = os.open(directory, flags)
+        return _open_verified_directory(directory, metadata, private=False)
     except OSError as exc:
         raise _UnsafeDiagnostics() from exc
-    descriptor_metadata = os.fstat(descriptor)
-    if (
-        not stat.S_ISDIR(descriptor_metadata.st_mode)
-        or _stat_identity(descriptor_metadata) != _stat_identity(metadata)
-    ):
-        os.close(descriptor)
+
+
+def _open_snapshot_root(diagnostics: _PinnedDirectory) -> _PinnedDirectory:
+    name = "db-snapshots"
+    path = diagnostics.path / name
+    try:
+        os.mkdir(name, mode=0o700, dir_fd=diagnostics.descriptor)
+    except FileExistsError:
+        pass
+    try:
+        metadata = os.stat(
+            name, dir_fd=diagnostics.descriptor, follow_symlinks=False
+        )
+    except OSError as exc:
+        raise _UnsafeDiagnostics() from exc
+    if not _valid_directory(metadata, private=True):
         raise _UnsafeDiagnostics()
-    return directory, descriptor, (int(metadata.st_dev), int(metadata.st_ino))
+    try:
+        result = _open_verified_directory(
+            Path(name),
+            metadata,
+            private=True,
+            dir_fd=diagnostics.descriptor,
+        )
+        result.path = path
+        return result
+    except OSError as exc:
+        raise _UnsafeDiagnostics() from exc
 
 
-def _diagnostics_directory_unchanged(
-    directory: Path, descriptor: int, identity
+def _directory_path_unchanged(
+    directory: _PinnedDirectory, *, private: bool
 ) -> bool:
     try:
-        path_metadata = os.lstat(directory)
-        descriptor_metadata = os.fstat(descriptor)
+        path_metadata = os.lstat(directory.path)
+        descriptor_metadata = os.fstat(directory.descriptor)
     except OSError:
         return False
     return (
-        stat.S_ISDIR(path_metadata.st_mode)
-        and not stat.S_ISLNK(path_metadata.st_mode)
-        and stat.S_ISDIR(descriptor_metadata.st_mode)
-        and (int(path_metadata.st_dev), int(path_metadata.st_ino)) == identity
-        and (int(descriptor_metadata.st_dev), int(descriptor_metadata.st_ino))
-        == identity
+        _valid_directory(path_metadata, private=private)
+        and _valid_directory(descriptor_metadata, private=private)
+        and _directory_identity(path_metadata) == directory.identity
+        and _directory_identity(descriptor_metadata) == directory.identity
     )
 
 
-def _cleanup_stale_workspaces(descriptor: int, deadline: float) -> None:
-    """Remove only old, owned workspaces containing known snapshot artifacts."""
+def _create_snapshot_workspace(root: _PinnedDirectory) -> _SnapshotWorkspace:
+    flags = os.O_RDONLY | _DIRECTORY_FLAG | _NOFOLLOW_FLAG | _CLOEXEC_FLAG
+    for attempt in range(8):
+        name = f"diag-db-{os.getpid():x}-{time.monotonic_ns():x}-{attempt}"
+        try:
+            os.mkdir(name, mode=0o700, dir_fd=root.descriptor)
+        except FileExistsError:
+            continue
+        descriptor: Optional[int] = None
+        lock_descriptor: Optional[int] = None
+        try:
+            metadata = os.stat(name, dir_fd=root.descriptor, follow_symlinks=False)
+            if not _valid_directory(metadata, private=True):
+                raise _UnsafeDiagnostics()
+            descriptor = os.open(name, flags, dir_fd=root.descriptor)
+            descriptor_metadata = os.fstat(descriptor)
+            if (
+                not _valid_directory(descriptor_metadata, private=True)
+                or _directory_identity(descriptor_metadata)
+                != _directory_identity(metadata)
+            ):
+                raise _UnsafeDiagnostics()
+            lock_flags = (
+                os.O_RDWR
+                | os.O_CREAT
+                | os.O_EXCL
+                | _NOFOLLOW_FLAG
+                | _CLOEXEC_FLAG
+                | _NONBLOCK_FLAG
+            )
+            lock_descriptor = os.open(
+                ".active.lock", lock_flags, 0o600, dir_fd=descriptor
+            )
+            lock_metadata = os.fstat(lock_descriptor)
+            if (
+                not stat.S_ISREG(lock_metadata.st_mode)
+                or lock_metadata.st_uid != os.getuid()
+                or lock_metadata.st_nlink != 1
+            ):
+                raise _UnsafeDiagnostics()
+            fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return _SnapshotWorkspace(
+                root.path / name,
+                descriptor,
+                _directory_identity(metadata),
+                name,
+                lock_descriptor,
+            )
+        except BaseException:
+            try:
+                if descriptor is not None:
+                    os.unlink(".active.lock", dir_fd=descriptor)
+            except (OSError, TypeError):
+                pass
+            for opened in (lock_descriptor, descriptor):
+                if opened is not None:
+                    try:
+                        os.close(opened)
+                    except OSError:
+                        pass
+            try:
+                os.rmdir(name, dir_fd=root.descriptor)
+            except OSError:
+                pass
+            raise
+    raise _UnsafeDiagnostics()
+
+
+def _copy_workspace_artifact(
+    source: _PinnedSource,
+    workspace: _SnapshotWorkspace,
+    name: str,
+    deadline: float,
+    byte_limit: int,
+    evidence: Dict[str, Any],
+) -> int:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW_FLAG | _CLOEXEC_FLAG
+    descriptor: Optional[int] = None
+    writer = None
+    try:
+        descriptor = os.open(name, flags, 0o600, dir_fd=workspace.descriptor)
+        writer = os.fdopen(descriptor, "wb")
+        descriptor = None
+        metadata = os.fstat(writer.fileno())
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+        ):
+            raise _UnsafeDiagnostics()
+        return _copy_pinned_file(source, writer, deadline, byte_limit)
+    finally:
+        if writer is not None:
+            try:
+                writer.close()
+            except OSError as exc:
+                _append_degraded(evidence, "snapshot.copy_close", "cleanup_error", exc)
+        elif descriptor is not None:
+            _safe_close_descriptor(evidence, descriptor, "snapshot.copy_close")
+
+
+def _workspace_sqlite_path(workspace: _SnapshotWorkspace) -> Path:
+    proc_directory = Path("/proc/self/fd") / str(workspace.descriptor)
+    try:
+        proc_metadata = os.stat(proc_directory)
+        descriptor_metadata = os.fstat(workspace.descriptor)
+        if (
+            _valid_directory(proc_metadata, private=True)
+            and _directory_identity(proc_metadata)
+            == _directory_identity(descriptor_metadata)
+            == workspace.identity
+        ):
+            return proc_directory / "snapshot.db"
+    except OSError:
+        pass
+    if _ALLOW_UNSAFE_WORKSPACE_PATH_FOR_TESTS and _directory_path_unchanged(
+        workspace, private=True
+    ):
+        return workspace.path / "snapshot.db"
+    raise _UnsafeDiagnostics()
+
+
+def _safe_close_descriptor(
+    evidence: Dict[str, Any], descriptor: Optional[int], probe: str
+) -> None:
+    if descriptor is None:
+        return
+    try:
+        os.close(descriptor)
+    except OSError as exc:
+        _append_degraded(evidence, probe, "cleanup_error", exc)
+
+
+def _cleanup_snapshot_workspace(
+    root: _PinnedDirectory,
+    workspace: _SnapshotWorkspace,
+    evidence: Dict[str, Any],
+) -> None:
+    allowed = (
+        "snapshot.db",
+        "snapshot.db-wal",
+        "snapshot.db-shm",
+        "snapshot.db-journal",
+    )
+    for name in allowed:
+        try:
+            metadata = os.stat(
+                name, dir_fd=workspace.descriptor, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _append_degraded(evidence, "snapshot.cleanup", "cleanup_error", exc)
+            continue
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+        ):
+            _append_degraded(
+                evidence, "snapshot.cleanup", "unsafe_cleanup_entry", RuntimeError()
+            )
+            continue
+        try:
+            os.unlink(name, dir_fd=workspace.descriptor)
+        except OSError as exc:
+            _append_degraded(evidence, "snapshot.cleanup", "cleanup_error", exc)
+    try:
+        os.unlink(".active.lock", dir_fd=workspace.descriptor)
+    except OSError as exc:
+        _append_degraded(evidence, "snapshot.cleanup", "cleanup_error", exc)
+    try:
+        current = os.stat(
+            workspace.name, dir_fd=root.descriptor, follow_symlinks=False
+        )
+        if (
+            not _valid_directory(current, private=True)
+            or _directory_identity(current) != workspace.identity
+        ):
+            raise _UnsafeDiagnostics()
+        os.rmdir(workspace.name, dir_fd=root.descriptor)
+    except _UnsafeDiagnostics as exc:
+        _append_degraded(
+            evidence, "snapshot.cleanup", "unsafe_cleanup_entry", exc
+        )
+    except OSError as exc:
+        _append_degraded(evidence, "snapshot.cleanup", "cleanup_error", exc)
+    try:
+        fcntl.flock(workspace.lock_descriptor, fcntl.LOCK_UN)
+    except OSError as exc:
+        _append_degraded(evidence, "snapshot.unlock", "cleanup_error", exc)
+    _safe_close_descriptor(evidence, workspace.lock_descriptor, "snapshot.lock_close")
+    _safe_close_descriptor(evidence, workspace.descriptor, "snapshot.directory_close")
+
+
+def _cleanup_stale_workspaces(
+    root: _PinnedDirectory, evidence: Dict[str, Any], deadline: float
+) -> None:
+    """Bounded cleanup of old inactive workspaces through pinned descriptors."""
     now_ns = time.time_ns()
     inspected = 0
+    total = 0
     try:
-        iterator = os.scandir(descriptor)
-    except OSError:
+        iterator = os.scandir(root.descriptor)
+    except OSError as exc:
+        _append_degraded(evidence, "snapshot.stale_cleanup", "cleanup_error", exc)
         return
     with iterator:
         for entry in iterator:
+            if time.monotonic() >= deadline:
+                _append_degraded(
+                    evidence,
+                    "snapshot.stale_cleanup",
+                    "deadline",
+                    _DeadlineExceeded(),
+                )
+                return
+            total += 1
+            if total > MAX_DIAGNOSTICS_ENTRIES:
+                _append_degraded(
+                    evidence,
+                    "snapshot.stale_cleanup",
+                    "cleanup_entry_limit",
+                    RuntimeError(),
+                )
+                return
             name = entry.name
             if not name.startswith("diag-db-"):
                 continue
-            if inspected >= MAX_STALE_WORKSPACES or time.monotonic() >= deadline:
+            if inspected >= MAX_STALE_WORKSPACES:
+                _append_degraded(
+                    evidence,
+                    "snapshot.stale_cleanup",
+                    "cleanup_workspace_limit",
+                    RuntimeError(),
+                )
                 return
             inspected += 1
+            child: Optional[int] = None
+            marker: Optional[int] = None
+            marker_locked = False
             try:
-                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                metadata = os.stat(
+                    name, dir_fd=root.descriptor, follow_symlinks=False
+                )
                 if (
-                    not stat.S_ISDIR(metadata.st_mode)
-                    or metadata.st_uid != os.getuid()
-                    or stat.S_IMODE(metadata.st_mode) & 0o077
+                    not _valid_directory(metadata, private=True)
                     or now_ns - metadata.st_mtime_ns
                     < STALE_WORKSPACE_AGE_SECONDS * 1_000_000_000
                 ):
                     continue
-                child_flags = (
-                    os.O_RDONLY
-                    | _DIRECTORY_FLAG
-                    | _NOFOLLOW_FLAG
-                    | _CLOEXEC_FLAG
+                flags = os.O_RDONLY | _DIRECTORY_FLAG | _NOFOLLOW_FLAG | _CLOEXEC_FLAG
+                child = os.open(name, flags, dir_fd=root.descriptor)
+                child_metadata = os.fstat(child)
+                if (
+                    not _valid_directory(child_metadata, private=True)
+                    or _directory_identity(child_metadata)
+                    != _directory_identity(metadata)
+                ):
+                    raise _UnsafeDiagnostics()
+                marker_flags = (
+                    os.O_RDWR | _NOFOLLOW_FLAG | _NONBLOCK_FLAG | _CLOEXEC_FLAG
                 )
-                child = os.open(name, child_flags, dir_fd=descriptor)
-            except OSError:
-                continue
-            try:
+                marker = os.open(".active.lock", marker_flags, dir_fd=child)
+                marker_metadata = os.fstat(marker)
+                if (
+                    not stat.S_ISREG(marker_metadata.st_mode)
+                    or marker_metadata.st_uid != os.getuid()
+                    or marker_metadata.st_nlink != 1
+                ):
+                    raise _UnsafeDiagnostics()
+                try:
+                    fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    marker_locked = True
+                except OSError as exc:
+                    if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                        continue
+                    raise
+                entries: List[str] = []
+                with os.scandir(child) as child_iterator:
+                    for child_entry in child_iterator:
+                        if time.monotonic() >= deadline:
+                            raise _DeadlineExceeded()
+                        entries.append(child_entry.name)
+                        if len(entries) > MAX_WORKSPACE_ENTRIES:
+                            raise _UnsafeDiagnostics()
                 allowed = {
+                    ".active.lock",
                     "snapshot.db",
                     "snapshot.db-wal",
                     "snapshot.db-shm",
                     "snapshot.db-journal",
                 }
-                entries: List[str] = []
-                with os.scandir(child) as child_iterator:
-                    for child_entry in child_iterator:
-                        entries.append(child_entry.name)
-                        if len(entries) > len(allowed):
-                            break
-                if len(entries) > len(allowed) or any(
-                    item not in allowed for item in entries
-                ):
-                    continue
-                safe = True
+                if any(item not in allowed for item in entries):
+                    raise _UnsafeDiagnostics()
                 for item in entries:
                     item_metadata = os.stat(
                         item, dir_fd=child, follow_symlinks=False
                     )
-                    if not stat.S_ISREG(item_metadata.st_mode):
-                        safe = False
-                        break
-                if not safe:
-                    continue
+                    if (
+                        not stat.S_ISREG(item_metadata.st_mode)
+                        or item_metadata.st_uid != os.getuid()
+                        or item_metadata.st_nlink != 1
+                    ):
+                        raise _UnsafeDiagnostics()
                 for item in entries:
-                    os.unlink(item, dir_fd=child)
-            except OSError:
+                    if item != ".active.lock":
+                        os.unlink(item, dir_fd=child)
+                os.unlink(".active.lock", dir_fd=child)
+                current = os.stat(
+                    name, dir_fd=root.descriptor, follow_symlinks=False
+                )
+                if (
+                    not _valid_directory(current, private=True)
+                    or _directory_identity(current) != _directory_identity(metadata)
+                ):
+                    raise _UnsafeDiagnostics()
+                os.rmdir(name, dir_fd=root.descriptor)
+            except _DeadlineExceeded as exc:
+                _append_degraded(
+                    evidence, "snapshot.stale_cleanup", "deadline", exc
+                )
+                return
+            except (_UnsafeDiagnostics, OSError) as exc:
+                _append_degraded(
+                    evidence,
+                    "snapshot.stale_cleanup",
+                    "unsafe_cleanup_entry",
+                    exc,
+                )
                 continue
             finally:
-                os.close(child)
-            try:
-                os.rmdir(name, dir_fd=descriptor)
-            except OSError:
-                pass
+                if marker_locked and marker is not None:
+                    try:
+                        fcntl.flock(marker, fcntl.LOCK_UN)
+                    except OSError as exc:
+                        _append_degraded(
+                            evidence,
+                            "snapshot.stale_unlock",
+                            "cleanup_error",
+                            exc,
+                        )
+                _safe_close_descriptor(evidence, marker, "snapshot.stale_lock_close")
+                _safe_close_descriptor(evidence, child, "snapshot.stale_directory_close")
 
 
 def _open_read_only(
@@ -556,7 +927,7 @@ def _open_read_only(
     remaining = max(0.001, deadline - time.monotonic())
     timeout = min(1.0, remaining)
     busy_timeout_ms = max(1, min(MAX_BUSY_TIMEOUT_MS, int(remaining * 1000)))
-    encoded = quote(str(path.resolve()), safe="/")
+    encoded = quote(str(path), safe="/")
     immutable = "&immutable=1" if immutable_snapshot else ""
     connection = sqlite3.connect(
         f"file:{encoded}?mode=ro{immutable}",
@@ -1048,6 +1419,22 @@ def _discard_raced_evidence(
     return discarded
 
 
+def _discard_unsafe_diagnostics_evidence(
+    notebook_id: Optional[str], final_state
+) -> Dict[str, Any]:
+    discarded = _empty_evidence(notebook_id)
+    _set_file_evidence(discarded, final_state)
+    discarded["safety"]["snapshot_used"] = True
+    discarded["safety"]["source_unchanged"] = False
+    _append_degraded(
+        discarded,
+        "diagnostics.validation",
+        "unsafe_diagnostics",
+        _UnsafeDiagnostics(),
+    )
+    return discarded
+
+
 def _bound_evidence(evidence: Dict[str, Any]) -> Dict[str, Any]:
     encoded = json.dumps(evidence, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
     if len(encoded) <= EVIDENCE_LIMIT_BYTES:
@@ -1098,7 +1485,10 @@ def collect_db_evidence(
 
     pinned: Dict[str, _PinnedSource] = {}
     lock_held = False
-    diagnostics_descriptor: Optional[int] = None
+    diagnostics: Optional[_PinnedDirectory] = None
+    snapshot_root: Optional[_PinnedDirectory] = None
+    workspace: Optional[_SnapshotWorkspace] = None
+    before_state = initial_state
     try:
         try:
             pinned = _pin_source_files(paths, initial_state)
@@ -1110,28 +1500,17 @@ def collect_db_evidence(
             return _bound_evidence(evidence)
         except RuntimeError as exc:
             if str(exc) == "source-changed":
-                return _bound_evidence(
-                    _discard_raced_evidence(
-                        evidence, notebook_id, _capture_source_state(paths)
-                    )
+                evidence = _discard_raced_evidence(
+                    evidence, notebook_id, _capture_source_state(paths)
                 )
+                return _bound_evidence(evidence)
             raise
 
         before_state = _capture_source_state(paths)
         _set_file_evidence(evidence, before_state)
         if before_state != initial_state or not _pinned_sources_unchanged(pinned):
-            return _bound_evidence(
-                _discard_raced_evidence(evidence, notebook_id, before_state)
-            )
-        if not _deadline_ok(evidence, "source.lock", deadline):
+            evidence = _discard_raced_evidence(evidence, notebook_id, before_state)
             return _bound_evidence(evidence)
-        try:
-            _acquire_source_read_lock(pinned["database"].descriptor)
-            lock_held = True
-        except _SourceLocked as exc:
-            _append_degraded(evidence, "source.lock", "locked", exc)
-            return _bound_evidence(evidence)
-
         if before_state.get("journal") is not None:
             _append_degraded(
                 evidence,
@@ -1151,98 +1530,137 @@ def collect_db_evidence(
             return _bound_evidence(evidence)
 
         try:
-            diagnostics_dir, diagnostics_descriptor, diagnostics_identity = (
-                _open_diagnostics_directory(path.parent)
-            )
+            diagnostics = _open_diagnostics_directory(path.parent)
+            snapshot_root = _open_snapshot_root(diagnostics)
+            _cleanup_stale_workspaces(snapshot_root, evidence, deadline)
+            if (
+                not _directory_path_unchanged(diagnostics, private=False)
+                or not _directory_path_unchanged(snapshot_root, private=True)
+            ):
+                raise _UnsafeDiagnostics()
+            workspace = _create_snapshot_workspace(snapshot_root)
         except _UnsafeDiagnostics as exc:
             _append_degraded(
                 evidence, "diagnostics.directory", "unsafe_diagnostics", exc
             )
             return _bound_evidence(evidence)
-        _cleanup_stale_workspaces(diagnostics_descriptor, deadline)
-        if not _diagnostics_directory_unchanged(
-            diagnostics_dir, diagnostics_descriptor, diagnostics_identity
-        ):
-            _append_degraded(
+
+        if not _deadline_ok(evidence, "source.lock", deadline):
+            return _bound_evidence(evidence)
+        try:
+            _acquire_source_read_lock(pinned["database"].descriptor)
+            lock_held = True
+        except _SourceLocked as exc:
+            _append_degraded(evidence, "source.lock", "locked", exc)
+            return _bound_evidence(evidence)
+
+        pre_copy_state = _capture_source_state(paths)
+        if pre_copy_state != before_state or not _pinned_sources_unchanged(pinned):
+            evidence = _discard_raced_evidence(evidence, notebook_id, pre_copy_state)
+            return _bound_evidence(evidence)
+
+        middle_state = before_state
+        try:
+            copied = _copy_workspace_artifact(
+                pinned["database"],
+                workspace,
+                "snapshot.db",
+                deadline,
+                MAX_SNAPSHOT_BYTES,
                 evidence,
-                "diagnostics.directory",
-                "unsafe_diagnostics",
-                _UnsafeDiagnostics(),
+            )
+            if "wal" in pinned:
+                copied += _copy_workspace_artifact(
+                    pinned["wal"],
+                    workspace,
+                    "snapshot.db-wal",
+                    deadline,
+                    MAX_SNAPSHOT_BYTES - copied,
+                    evidence,
+                )
+            evidence["safety"]["snapshot_used"] = True
+            evidence["safety"]["snapshot_bytes"] = copied
+            middle_state = _capture_source_state(paths)
+            if middle_state != before_state or not _pinned_sources_unchanged(pinned):
+                evidence = _discard_raced_evidence(
+                    evidence, notebook_id, middle_state
+                )
+                return _bound_evidence(evidence)
+        finally:
+            if lock_held:
+                _safe_release_source_read_lock(
+                    evidence, pinned["database"].descriptor
+                )
+                lock_held = False
+
+        try:
+            snapshot = _workspace_sqlite_path(workspace)
+            if (
+                not _directory_path_unchanged(diagnostics, private=False)
+                or not _directory_path_unchanged(snapshot_root, private=True)
+                or not _directory_path_unchanged(workspace, private=True)
+            ):
+                raise _UnsafeDiagnostics()
+        except _UnsafeDiagnostics:
+            evidence = _discard_unsafe_diagnostics_evidence(
+                notebook_id, _capture_source_state(paths)
             )
             return _bound_evidence(evidence)
 
-        with tempfile.TemporaryDirectory(
-            prefix="diag-db-", dir=diagnostics_dir
-        ) as temporary:
-            snapshot = Path(temporary) / "snapshot.db"
-            middle_state = before_state
-            try:
-                copied = _copy_pinned_file(
-                    pinned["database"], snapshot, deadline, MAX_SNAPSHOT_BYTES
-                )
-                if "wal" in pinned:
-                    copied += _copy_pinned_file(
-                        pinned["wal"],
-                        Path(str(snapshot) + "-wal"),
-                        deadline,
-                        MAX_SNAPSHOT_BYTES - copied,
+        connection: Optional[sqlite3.Connection] = None
+        try:
+            connection = _open_read_only(snapshot, deadline)
+            if (
+                not _directory_path_unchanged(diagnostics, private=False)
+                or not _directory_path_unchanged(snapshot_root, private=True)
+                or not _directory_path_unchanged(workspace, private=True)
+            ):
+                raise _UnsafeDiagnostics()
+            remaining_ms = max(
+                1,
+                min(
+                    MAX_BUSY_TIMEOUT_MS,
+                    int((deadline - time.monotonic()) * 1000),
+                ),
+            )
+            evidence["safety"]["busy_timeout_ms"] = remaining_ms
+            _collect_snapshot_evidence(connection, evidence, notebook_id, deadline)
+        except _UnsafeDiagnostics:
+            evidence = _discard_unsafe_diagnostics_evidence(
+                notebook_id, _capture_source_state(paths)
+            )
+        except _DeadlineExceeded as exc:
+            _append_degraded(evidence, "snapshot.open", "deadline", exc)
+        except (sqlite3.DatabaseError, OSError) as exc:
+            _append_degraded(evidence, "snapshot.open", _error_category(exc), exc)
+        finally:
+            if connection is not None:
+                try:
+                    connection.set_progress_handler(None, 0)
+                    connection.close()
+                except sqlite3.DatabaseError as exc:
+                    _append_degraded(
+                        evidence,
+                        "snapshot.close",
+                        _error_category(exc),
+                        exc,
                     )
-                evidence["safety"]["snapshot_used"] = True
-                evidence["safety"]["snapshot_bytes"] = copied
-                middle_state = _capture_source_state(paths)
-                if (
-                    middle_state != before_state
-                    or not _pinned_sources_unchanged(pinned)
-                    or not _diagnostics_directory_unchanged(
-                        diagnostics_dir,
-                        diagnostics_descriptor,
-                        diagnostics_identity,
-                    )
-                ):
-                    return _bound_evidence(
-                        _discard_raced_evidence(evidence, notebook_id, middle_state)
-                    )
-            finally:
-                if lock_held:
-                    _release_source_read_lock(pinned["database"].descriptor)
-                    lock_held = False
 
-            connection: Optional[sqlite3.Connection] = None
-            try:
-                connection = _open_read_only(snapshot, deadline)
-                remaining_ms = max(
-                    1,
-                    min(
-                        MAX_BUSY_TIMEOUT_MS,
-                        int((deadline - time.monotonic()) * 1000),
-                    ),
-                )
-                evidence["safety"]["busy_timeout_ms"] = remaining_ms
-                _collect_snapshot_evidence(connection, evidence, notebook_id, deadline)
-            except _DeadlineExceeded as exc:
-                _append_degraded(evidence, "snapshot.open", "deadline", exc)
-            except (sqlite3.DatabaseError, OSError) as exc:
-                _append_degraded(evidence, "snapshot.open", _error_category(exc), exc)
-            finally:
-                if connection is not None:
-                    try:
-                        connection.set_progress_handler(None, 0)
-                        connection.close()
-                    except sqlite3.DatabaseError as exc:
-                        _append_degraded(
-                            evidence,
-                            "snapshot.close",
-                            _error_category(exc),
-                            exc,
-                        )
-
-            after_state = _capture_source_state(paths)
-            if after_state != before_state or not _pinned_sources_unchanged(pinned):
-                return _bound_evidence(
-                    _discard_raced_evidence(evidence, notebook_id, after_state)
-                )
-            evidence["safety"]["source_unchanged"] = True
-            evidence["evidence_complete"] = evidence["status"] == "ok"
+        after_state = _capture_source_state(paths)
+        if after_state != before_state or not _pinned_sources_unchanged(pinned):
+            evidence = _discard_raced_evidence(evidence, notebook_id, after_state)
+            return _bound_evidence(evidence)
+        if (
+            not _directory_path_unchanged(diagnostics, private=False)
+            or not _directory_path_unchanged(snapshot_root, private=True)
+            or not _directory_path_unchanged(workspace, private=True)
+        ):
+            evidence = _discard_unsafe_diagnostics_evidence(
+                notebook_id, after_state
+            )
+            return _bound_evidence(evidence)
+        evidence["safety"]["source_unchanged"] = True
+        evidence["evidence_complete"] = evidence["status"] == "ok"
     except _DeadlineExceeded as exc:
         _append_degraded(evidence, "snapshot.copy", "deadline", exc)
     except (sqlite3.DatabaseError, OSError, ValueError) as exc:
@@ -1254,10 +1672,18 @@ def collect_db_evidence(
         _append_degraded(evidence, "snapshot", category, exc)
     finally:
         if lock_held and "database" in pinned:
-            _release_source_read_lock(pinned["database"].descriptor)
-        if diagnostics_descriptor is not None:
-            os.close(diagnostics_descriptor)
-        _close_pinned_sources(pinned)
+            _safe_release_source_read_lock(evidence, pinned["database"].descriptor)
+        if workspace is not None and snapshot_root is not None:
+            _cleanup_snapshot_workspace(snapshot_root, workspace, evidence)
+        if snapshot_root is not None:
+            _safe_close_descriptor(
+                evidence, snapshot_root.descriptor, "snapshot.root_close"
+            )
+        if diagnostics is not None:
+            _safe_close_descriptor(
+                evidence, diagnostics.descriptor, "diagnostics.directory_close"
+            )
+        _close_pinned_sources(pinned, evidence)
     return _bound_evidence(evidence)
 
 

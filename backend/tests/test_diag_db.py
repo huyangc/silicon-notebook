@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import ast
+import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -32,6 +35,7 @@ def load_diag_db(*, allow_unsafe_noatime_for_logic_tests=True):
         # opener; dedicated atime tests exercise the real fail-closed path.
         module._NOATIME_AVAILABLE = True
         module._NOATIME_FLAG = 0
+        module._ALLOW_UNSAFE_WORKSPACE_PATH_FOR_TESTS = True
     return module
 
 
@@ -573,17 +577,54 @@ def test_unsafe_diagnostics_symlink_is_never_followed(tmp_path):
     assert list(outside.iterdir()) == []
 
 
+def test_runtime_created_0755_diagnostics_parent_uses_private_snapshot_root(tmp_path):
+    from app.core.diagnostics_runtime import DiagnosticsRuntime
+
+    local = tmp_path / ".local"
+    local.mkdir(mode=0o755)
+    diagnostics = local / "diagnostics"
+    runtime = DiagnosticsRuntime(
+        diagnostics,
+        readiness_provider=lambda: {"ready": True, "phase": "ready"},
+        concurrency_provider=lambda: {},
+        interval_seconds=0.01,
+        enable_signal=False,
+    )
+    runtime.start()
+    runtime.stop()
+    os.chmod(diagnostics, 0o755)
+    assert diagnostics.stat().st_mode & 0o777 == 0o755
+    db_path = local / "runtime.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    diag_db = load_diag_db()
+
+    evidence = diag_db.collect_db_evidence(db_path)
+
+    assert not [
+        row for row in evidence["degraded"] if row["category"] == "unsafe_diagnostics"
+    ]
+    assert evidence["safety"]["snapshot_used"] is True
+    assert evidence["safety"]["source_unchanged"] is True
+    snapshot_root = diagnostics / "db-snapshots"
+    assert snapshot_root.stat().st_mode & 0o777 == 0o700
+
+
 def test_stale_cleanup_removes_only_owned_known_snapshot_artifacts(tmp_path):
     db_path = tmp_path / "stale-cleanup.db"
     with sqlite3.connect(db_path) as connection:
         connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
     diagnostics = tmp_path / "diagnostics"
-    diagnostics.mkdir(mode=0o700)
-    safe = diagnostics / "diag-db-safe"
+    diagnostics.mkdir(mode=0o755)
+    snapshot_root = diagnostics / "db-snapshots"
+    snapshot_root.mkdir(mode=0o700)
+    safe = snapshot_root / "diag-db-safe"
     safe.mkdir(mode=0o700)
     (safe / "snapshot.db").write_bytes(b"old snapshot")
-    hostile = diagnostics / "diag-db-hostile"
+    (safe / ".active.lock").write_bytes(b"")
+    hostile = snapshot_root / "diag-db-hostile"
     hostile.mkdir(mode=0o700)
+    (hostile / ".active.lock").write_bytes(b"")
     outside = tmp_path / "outside-sentinel"
     outside.write_bytes(b"keep")
     (hostile / "snapshot.db").symlink_to(outside)
@@ -598,6 +639,117 @@ def test_stale_cleanup_removes_only_owned_known_snapshot_artifacts(tmp_path):
     assert hostile.exists()
     assert (hostile / "snapshot.db").is_symlink()
     assert outside.read_bytes() == b"keep"
+
+
+def test_stale_cleanup_is_bounded_by_total_entries_before_prefix_filter(tmp_path):
+    db_path = tmp_path / "bounded-cleanup.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    snapshot_root = tmp_path / "diagnostics" / "db-snapshots"
+    snapshot_root.mkdir(parents=True, mode=0o700)
+    os.chmod(tmp_path / "diagnostics", 0o755)
+    for index in range(2000):
+        (snapshot_root / f"unrelated-{index:04d}").write_bytes(b"")
+    diag_db = load_diag_db()
+    started = time.monotonic()
+
+    evidence = diag_db.collect_db_evidence(db_path, deadline_seconds=0.05)
+
+    assert time.monotonic() - started < 0.25
+    assert any(
+        row["category"] == "cleanup_entry_limit" for row in evidence["degraded"]
+    )
+
+
+def test_stale_cleanup_skips_locked_active_workspace(tmp_path):
+    db_path = tmp_path / "active-cleanup.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    workspace = tmp_path / "diagnostics" / "db-snapshots" / "diag-db-active"
+    workspace.mkdir(parents=True, mode=0o700)
+    os.chmod(tmp_path / "diagnostics", 0o755)
+    os.chmod(tmp_path / "diagnostics" / "db-snapshots", 0o700)
+    marker = workspace / ".active.lock"
+    marker.write_bytes(b"")
+    (workspace / "snapshot.db").write_bytes(b"active")
+    old = time.time_ns() - 2 * 24 * 60 * 60 * 1_000_000_000
+    os.utime(workspace, ns=(old, old))
+    descriptor = os.open(marker, os.O_RDWR)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    diag_db = load_diag_db()
+    try:
+        diag_db.collect_db_evidence(db_path)
+        assert workspace.exists()
+        assert (workspace / "snapshot.db").read_bytes() == b"active"
+    finally:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+
+
+def test_stale_cleanup_skips_hardlinked_artifact_and_reports_degradation(tmp_path):
+    db_path = tmp_path / "hardlink-cleanup.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    workspace = tmp_path / "diagnostics" / "db-snapshots" / "diag-db-hardlink"
+    workspace.mkdir(parents=True, mode=0o700)
+    os.chmod(tmp_path / "diagnostics", 0o755)
+    os.chmod(tmp_path / "diagnostics" / "db-snapshots", 0o700)
+    (workspace / ".active.lock").write_bytes(b"")
+    outside = tmp_path / "outside-hardlink"
+    outside.write_bytes(b"keep")
+    os.link(outside, workspace / "snapshot.db")
+    old = time.time_ns() - 2 * 24 * 60 * 60 * 1_000_000_000
+    os.utime(workspace, ns=(old, old))
+    diag_db = load_diag_db()
+
+    evidence = diag_db.collect_db_evidence(db_path)
+
+    assert workspace.exists()
+    assert outside.read_bytes() == b"keep"
+    assert any(
+        row["category"] == "unsafe_cleanup_entry" for row in evidence["degraded"]
+    )
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="Linux proc-fd contract")
+def test_diagnostics_root_replacement_cannot_redirect_snapshot_open(tmp_path, monkeypatch):
+    db_path = tmp_path / "root-race.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    diagnostics = tmp_path / "diagnostics"
+    diagnostics.mkdir(mode=0o755)
+    diag_db = load_diag_db()
+    original_open = diag_db._open_read_only
+    saved = tmp_path / "diagnostics-saved"
+    attacked = False
+
+    def replace_root(path, *args, **kwargs):
+        nonlocal attacked
+        if not attacked:
+            attacked = True
+            os.replace(diagnostics, saved)
+            diagnostics.mkdir(mode=0o755)
+            redirected = diagnostics / "redirected.db"
+            with sqlite3.connect(redirected) as connection:
+                connection.execute("CREATE TABLE redirected_secret(value TEXT)")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(diag_db, "_open_read_only", replace_root)
+    try:
+        evidence = diag_db.collect_db_evidence(db_path)
+    finally:
+        shutil.rmtree(diagnostics, ignore_errors=True)
+        if saved.exists():
+            os.replace(saved, diagnostics)
+
+    assert attacked is True
+    assert evidence["evidence_complete"] is False
+    assert any(
+        row["category"] == "unsafe_diagnostics" for row in evidence["degraded"]
+    )
+    assert not any(
+        row.get("name") == "redirected_secret" for row in evidence["largest_tables"]
+    )
 
 
 def test_source_lock_is_released_before_snapshot_analysis(tmp_path, monkeypatch):
@@ -632,6 +784,115 @@ def test_source_lock_is_released_before_snapshot_analysis(tmp_path, monkeypatch)
     assert writer_result.returncode == 0, writer_result.stderr
     assert writer_result.stdout.strip() == "acquired"
     assert evidence["mutations_executed"] == 0
+
+
+def test_source_fstat_failure_closes_new_descriptor(tmp_path, monkeypatch):
+    db_path = tmp_path / "fstat-failure.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    diag_db = load_diag_db()
+    original_open = diag_db.os.open
+    original_fstat = diag_db.os.fstat
+    opened = None
+
+    def capture_open(path, *args, **kwargs):
+        nonlocal opened
+        descriptor = original_open(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(db_path):
+            opened = descriptor
+        return descriptor
+
+    def fail_fstat(descriptor):
+        if descriptor == opened:
+            raise OSError(errno.EIO, "injected")
+        return original_fstat(descriptor)
+
+    monkeypatch.setattr(diag_db.os, "open", capture_open)
+    monkeypatch.setattr(diag_db.os, "fstat", fail_fstat)
+    evidence = diag_db.collect_db_evidence(db_path)
+    monkeypatch.setattr(diag_db.os, "fstat", original_fstat)
+
+    assert evidence["evidence_complete"] is False
+    with pytest.raises(OSError) as exc_info:
+        original_fstat(opened)
+    assert exc_info.value.errno == errno.EBADF
+
+
+def test_final_unlock_and_close_failures_are_structured(tmp_path, monkeypatch):
+    db_path = tmp_path / "cleanup-failure.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    diag_db = load_diag_db()
+    original_lockf = diag_db.fcntl.lockf
+    original_close = diag_db.os.close
+    database_descriptor = None
+    original_pin = diag_db._pin_source_files
+
+    def capture_pin(*args, **kwargs):
+        nonlocal database_descriptor
+        pinned = original_pin(*args, **kwargs)
+        database_descriptor = pinned["database"].descriptor
+        return pinned
+
+    def fail_unlock(descriptor, operation, *args, **kwargs):
+        if descriptor == database_descriptor and operation == fcntl.LOCK_UN:
+            raise OSError(errno.EIO, "injected unlock")
+        return original_lockf(descriptor, operation, *args, **kwargs)
+
+    close_failed = False
+
+    def fail_close(descriptor):
+        nonlocal close_failed
+        if descriptor == database_descriptor and not close_failed:
+            close_failed = True
+            raise OSError(errno.EIO, "injected close")
+        return original_close(descriptor)
+
+    monkeypatch.setattr(diag_db, "_pin_source_files", capture_pin)
+    monkeypatch.setattr(diag_db.fcntl, "lockf", fail_unlock)
+    monkeypatch.setattr(diag_db.os, "close", fail_close)
+    evidence = diag_db.collect_db_evidence(db_path)
+    if database_descriptor is not None:
+        try:
+            original_lockf(
+                database_descriptor,
+                fcntl.LOCK_UN,
+                1,
+                diag_db._SHARED_FIRST,
+                os.SEEK_SET,
+            )
+        finally:
+            original_close(database_descriptor)
+
+    assert evidence["evidence_complete"] is False
+    assert any(row["category"] == "cleanup_error" for row in evidence["degraded"])
+
+
+@pytest.mark.parametrize(
+    "unsupported_errno",
+    sorted({errno.EINVAL, getattr(errno, "EOPNOTSUPP", errno.EINVAL)}),
+)
+def test_unsupported_noatime_open_degrades_before_read(tmp_path, monkeypatch, unsupported_errno):
+    db_path = tmp_path / "noatime-unsupported.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    diag_db = load_diag_db()
+    diag_db._NOATIME_AVAILABLE = True
+    diag_db._NOATIME_FLAG = 0x40000000
+    original_open = diag_db.os.open
+
+    def reject_noatime(path, flags, *args, **kwargs):
+        if os.fspath(path) == os.fspath(db_path):
+            raise OSError(unsupported_errno, "unsupported")
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(diag_db.os, "open", reject_noatime)
+    evidence = diag_db.collect_db_evidence(db_path)
+
+    assert any(
+        row["category"] == "noatime_unavailable" for row in evidence["degraded"]
+    )
+    assert evidence["safety"]["snapshot_used"] is False
 
 
 def test_schema_identifiers_and_evidence_are_sanitized_and_bounded(tmp_path):
@@ -684,13 +945,14 @@ def test_snapshot_copy_helper_enforces_remaining_aggregate_budget(tmp_path):
         pinned = diag_db._PinnedSource(
             "wal", source, descriptor, diag_db._descriptor_identity(descriptor)
         )
-        with pytest.raises(ValueError):
-            diag_db._copy_pinned_file(
-                pinned,
-                target,
-                time.monotonic() + 1,
-                4,
-            )
+        with target.open("xb") as writer:
+            with pytest.raises(ValueError):
+                diag_db._copy_pinned_file(
+                    pinned,
+                    writer,
+                    time.monotonic() + 1,
+                    4,
+                )
     finally:
         os.close(descriptor)
 
