@@ -93,6 +93,23 @@ test("source actions remain available by accessible meaning", () => {
 });
 
 
+test("source detail uses the dedicated draggable window shell", () => {
+  assert.deepEqual(
+    importsFrom(page, "./source-detail-window").map((item) => item.imported),
+    ["SourceDetailWindow"],
+  );
+  const windows = jsxElements(page, "SourceDetailWindow");
+  assert.equal(windows.length, 1);
+  assert.deepEqual(windows[0].bindings, {
+    onClose: "() => setSourceDetail(null)",
+  });
+  assert.equal(
+    importsFrom(page, "lucide-react").some(({ imported }) => imported === "PanelRightClose"),
+    false,
+  );
+});
+
+
 test("background responses require the same workspace and notebook", () => {
   assert.equal(
     workspaceRequestIsCurrent(false, 3, 3, "nb-1", "nb-1"),

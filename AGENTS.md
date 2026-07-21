@@ -75,6 +75,7 @@ Inside a notebook:
   - Keep source cards compact and readable for long mixed Chinese/English titles and summaries.
   - Source cards should open a source detail preview with element-level parsed text and expose a delete action.
   - Source detail element text should wrap within the modal width, including long Markdown paths, LaTeX fragments, and mixed Chinese/English text; keep horizontal scrolling local to tables/formulas rather than the entire detail panel.
+  - On desktop, source detail uses a conventional close control and supports dragging by the header; keep narrow-screen geometry fixed and the detail body independently scrollable.
   - Do not enable web/network source search yet; keep it as a disabled future affordance only.
 - Main column: source-grounded knowhow tools, exposed as four tabs: **问答** (Ask), **知识库** (Knowledge), **记忆** (Memory), and **深度报告** (Deep Report).
   - Ask provides KG-grounded Q&A with per-sentence `[k_i]` citations and multi-turn conversation. Knowledge browses/governs extracted objects by type. Deep Report exposes the current two-stage report workflow, outline review, progress, export, cancellation, and deletion. The earlier Scenario query / Case search / Checklist tools are retired.

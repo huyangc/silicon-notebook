@@ -1,7 +1,7 @@
 "use client";
 
 import { ChangeEvent, FormEvent, Fragment, KeyboardEvent as ReactKeyboardEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, BarChart3, Check, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, PanelRightClose, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
+import { ArrowLeft, BarChart3, Check, ChevronRight, Database, Edit3, ExternalLink, FileText, GitMerge, LayoutDashboard, LayoutGrid, List as ListIcon, Network, PanelLeftClose, PanelLeftOpen, Plus, Settings, Share2, Sparkles, Table2, Trash2, Upload, User, X } from "lucide-react";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 import dynamic from "next/dynamic";
@@ -95,6 +95,7 @@ import { AskComposer } from "./ask-composer";
 import { AskSessionHeaderActions } from "./ask-session-header";
 import { Pagination } from "./Pagination";
 import { ReportsPanel, type ReportDetailT, type ReportSummaryT } from "./report-view";
+import { SourceDetailWindow } from "./source-detail-window";
 import { usePendingActions, PendingBell, PendingToast, type PendingItem } from "./pending-center";
 import { canSeeAdminUsage } from "./admin/usage/format.ts";
 import { shouldResumeReviewAll, shouldResumeScaleIndex, shouldResumeKgBuild, kgBuildFinished } from "./in-progress-resume";
@@ -4976,16 +4977,8 @@ export default function Home() {
       )}
 
       {sourceDetail && (
-        <section className="utility-modal" role="dialog" aria-modal="true">
-          <div className="utility-modal-card source-detail-card">
-            <div className="source-detail-shell-header">
-              <h2>来源</h2>
-              <button className="icon-button subtle-icon" onClick={() => setSourceDetail(null)} title="Close">
-                <PanelRightClose size={22} />
-              </button>
-            </div>
-            <div className="source-detail-body">
-              <div className="source-detail-title-row">
+        <SourceDetailWindow onClose={() => setSourceDetail(null)}>
+          <div className="source-detail-title-row">
                 <h1 title={sourceDetail.title}>{sourceDetail.title}</h1>
                 <div className="source-detail-actions">
                   <button className="icon-button subtle-icon" onClick={() => reparseSource().catch(reportError)} title="重新解析">
@@ -5077,10 +5070,8 @@ export default function Home() {
                       : "当前来源还没有解析出元素。"}</p>
                   </article>
                 )}
-              </div>
-            </div>
           </div>
-        </section>
+        </SourceDetailWindow>
       )}
 
       {analytics && (

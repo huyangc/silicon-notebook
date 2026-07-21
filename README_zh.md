@@ -752,7 +752,7 @@ PDF 解析与 GPU 解耦：后端本身不引入 torch，只有在配置 MinerU 
 
 **URL 来源（「添加链接」）优先用本地 MinerU。** 只要配置了本地 MinerU 服务（`MINERU_MODE=http`/`cli`），公开 PDF 链接就由本地解析：后端下载后走与文件上传相同的「本地 MinerU→pypdf」路径。为防 SSRF，下载器会校验初始地址和每次重定向，拒绝 localhost、私网、link-local 与保留地址；内部文档请改用文件上传。`MINERU_API_TOKEN` 云端（mineru.net）仅在未配置本地 MinerU 时作为回退——一旦走本地，绝不会再静默调用云端。添加链接需要本地 MinerU 或云端 token 二者其一。文件上传遵循同一条规则：本地 MinerU 未配置、仅配置了云端 token 时，上传文件同样经该云端 v4 路径解析（含图片、公式、表格），云端调用失败会自动回落 pypdf。
 
-MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级。前端在 source detail 里渲染它们——公式用 KaTeX、表格用其 HTML——所以公式是排版后的样子而不是原始 LaTeX。若 MinerU 不可达或出错，摄取会降级到 pypdf，保证上传不被阻塞，同时 pipeline log 和 source `error_message` 会保留回退诊断；若某 PDF 解析出 0 文本（如扫描/图片型 PDF），会给出提示而不是看起来"空成功"。
+MinerU 输出会映射为结构化 `SourceElement`：公式→`formula` 元素（保留 LaTeX），表格→`table` 元素（HTML 存入 metadata），标题保留层级。前端在 source detail 里渲染它们——公式用 KaTeX、表格用其 HTML——所以公式是排版后的样子而不是原始 LaTeX。若 MinerU 不可达或出错，摄取会降级到 pypdf，保证上传不被阻塞，同时 pipeline log 和 source `error_message` 会保留回退诊断；若某 PDF 解析出 0 文本（如扫描/图片型 PDF），会给出提示而不是看起来"空成功"。桌面端的来源详情窗口使用常规关闭按钮，并可按住标题栏拖动；窄屏继续使用固定弹窗布局，详情正文保持独立滚动。
 
 ### 单文件解析自检(`scripts/mineru_probe.py`)
 
