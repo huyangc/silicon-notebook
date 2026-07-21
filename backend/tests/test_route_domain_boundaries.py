@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fastapi.routing import APIRoute
 
-from app.main import app
+from app.api.routes import router as aggregate_router
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def _endpoint_modules() -> dict[str, str]:
     return {
         route.name: route.endpoint.__module__
-        for route in app.routes
+        for route in aggregate_router.routes
         if isinstance(route, APIRoute)
     }
 
