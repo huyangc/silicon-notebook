@@ -522,7 +522,7 @@ git commit -m "refactor: establish core domain model boundaries"
 
 **Interfaces:**
 - Consumes: the partial facade from Task 3.
-- Produces: all 147 legacy names from `schemas.py` as object-identical re-exports; no first-party production module outside `models/schemas.py` imports the facade.
+- Produces: all 150 legacy names (147 Pydantic classes plus 3 aliases) from `schemas.py` as object-identical re-exports; no first-party production module outside `models/schemas.py` imports the facade.
 
 - [ ] **Step 1: Extend the architecture test to the complete target**
 

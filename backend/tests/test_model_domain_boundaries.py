@@ -99,6 +99,40 @@ def _imports(path: Path) -> set[str]:
     return found
 
 
+def imports_schema_facade(tree_or_source: ast.AST | str) -> bool:
+    tree = ast.parse(tree_or_source) if isinstance(tree_or_source, str) else tree_or_source
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == "app.models.schemas" for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "app.models.schemas":
+                return True
+            if node.module == "app.models" and any(
+                alias.name == "schemas" for alias in node.names
+            ):
+                return True
+    return False
+
+
+def test_schema_facade_import_helper_detects_every_static_facade_form():
+    rejected = (
+        "from app.models import schemas",
+        "from app.models import schemas as legacy_schemas",
+        "import app.models.schemas",
+        "import app.models.schemas as schemas",
+        "from app.models.schemas import AskRequest",
+    )
+    allowed = (
+        "from app.models import memory",
+        "from app.models.ask import AskRequest",
+    )
+    for source in rejected:
+        assert imports_schema_facade(source), source
+    for source in allowed:
+        assert not imports_schema_facade(source), source
+
+
 def moved_facade_references(tree_or_source: ast.AST | str) -> set[str]:
     tree = ast.parse(tree_or_source) if isinstance(tree_or_source, str) else tree_or_source
     found = {
@@ -209,6 +243,6 @@ def test_first_party_production_uses_domain_model_modules():
     for path in app_root.rglob("*.py"):
         if path == MODELS / "schemas.py":
             continue
-        if "app.models.schemas" in _imports(path):
+        if imports_schema_facade(ast.parse(path.read_text(encoding="utf-8"))):
             offenders.append(path.relative_to(ROOT).as_posix())
     assert offenders == []
