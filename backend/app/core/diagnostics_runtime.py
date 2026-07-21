@@ -12,6 +12,7 @@ import faulthandler
 import hashlib
 import itertools
 import json
+import math
 import os
 import re
 import signal
@@ -28,7 +29,82 @@ from typing import Any, Callable, Iterator, Optional
 SCHEMA_VERSION = 1
 _MAX_ACTIVE = 1_000
 _MAX_RECENT_JOBS = 100
+_MAX_IDENTIFIER_LENGTH = 200
+_MAX_ROUTE_SEGMENTS = 16
+_MAX_CONCURRENCY_VALUE = 1_000_000
 _NOTEBOOK_ROUTE = re.compile(r"^/api/notebooks/([^/?#]+)(?:/.*)?$")
+_OPAQUE_NOTEBOOK_ID = re.compile(r"^[A-Za-z0-9_-]{1,200}$")
+_STATIC_ROUTE_SEGMENTS = frozenset(
+    {
+        "_diagnostics-test",
+        "agent",
+        "analytics",
+        "api",
+        "append",
+        "approve",
+        "ask",
+        "auth",
+        "bases",
+        "block",
+        "cancel",
+        "cells",
+        "content-overview",
+        "conversations",
+        "copy",
+        "debug",
+        "docs",
+        "edge-review-queue",
+        "elements",
+        "feedback",
+        "files",
+        "health",
+        "import",
+        "join",
+        "jobs",
+        "knowledge",
+        "knowledge-types",
+        "knowhow",
+        "login",
+        "logout",
+        "mcp",
+        "me",
+        "memory",
+        "notebooks",
+        "openapi.json",
+        "promotion-queue",
+        "register",
+        "reformat",
+        "reject",
+        "relations",
+        "reports",
+        "review",
+        "rows",
+        "search",
+        "share",
+        "shared",
+        "sources",
+        "status",
+        "stream",
+        "tables",
+        "tier",
+        "tokens",
+        "unified-kg",
+    }
+)
+_CONCURRENCY_GROUPS = frozenset({"kg", "llm", "embedding"})
+_CONCURRENCY_FIELDS = frozenset(
+    {
+        "active",
+        "maximum",
+        "waiting",
+        "window_active",
+        "window_max",
+        "window_waiting",
+        "job_active",
+        "job_max",
+        "job_waiting",
+    }
+)
 
 
 def _utc_now() -> str:
@@ -72,6 +148,9 @@ _diagnostic_context: contextvars.ContextVar[_DiagnosticContext] = (
 )
 _runtime_lock = threading.Lock()
 _installed_runtime: Optional["DiagnosticsRuntime"] = None
+_installed_runtime_depth = 0
+_signal_owner_lock = threading.Lock()
+_signal_owner: Optional["DiagnosticsRuntime"] = None
 
 
 def _context_fields(context: _DiagnosticContext) -> dict[str, Optional[str]]:
@@ -83,24 +162,52 @@ def _context_fields(context: _DiagnosticContext) -> dict[str, Optional[str]]:
     }
 
 
+def _bounded_text(value: Any, maximum: int = _MAX_IDENTIFIER_LENGTH) -> str:
+    return str(value)[:maximum]
+
+
 def _request_metadata(path: str) -> tuple[str, Optional[str]]:
     path_only = str(path).split("?", 1)[0].split("#", 1)[0]
     match = _NOTEBOOK_ROUTE.match(path_only)
     if match is not None:
-        return "/api/notebooks/{id}", match.group(1)
-    return path_only, None
+        candidate = match.group(1)
+        notebook_id = candidate if _OPAQUE_NOTEBOOK_ID.fullmatch(candidate) else None
+        return "/api/notebooks/{id}", notebook_id
+    segments = path_only.split("/", _MAX_ROUTE_SEGMENTS)
+    normalized = [
+        segment if segment in _STATIC_ROUTE_SEGMENTS else "{id}"
+        for segment in segments
+        if segment
+    ]
+    return "/" + "/".join(normalized), None
 
 
-def _numeric_tree(value: Any, *, depth: int = 0) -> Any:
-    if isinstance(value, bool) or isinstance(value, (int, float)):
-        return value
-    if isinstance(value, dict) and depth < 3:
-        return {
-            str(key)[:80]: normalized
-            for key, item in value.items()
-            if (normalized := _numeric_tree(item, depth=depth + 1)) is not None
-        }
-    return None
+def _finite_concurrency_value(value: Any) -> Optional[int | float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if value < 0 or value > _MAX_CONCURRENCY_VALUE:
+        return None
+    return value
+
+
+def _normalize_concurrency(value: Any) -> dict[str, dict[str, int | float]]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, dict[str, int | float]] = {}
+    for group in _CONCURRENCY_GROUPS:
+        raw_group = value.get(group)
+        if not isinstance(raw_group, dict):
+            continue
+        normalized: dict[str, int | float] = {}
+        for field in _CONCURRENCY_FIELDS:
+            number = _finite_concurrency_value(raw_group.get(field))
+            if number is not None:
+                normalized[field] = number
+        if normalized:
+            result[group] = normalized
+    return result
 
 
 class DiagnosticsRuntime:
@@ -142,6 +249,7 @@ class DiagnosticsRuntime:
         self._dump_handle: Any = None
         self._owns_signal = False
         self.signal_capture_available = False
+        self._lifecycle_state = "new"
 
     def _changed_locked(self) -> None:
         self._state_revision += 1
@@ -150,9 +258,12 @@ class DiagnosticsRuntime:
 
     def _snapshot_failed(self, count: int = 1) -> None:
         with self._lock:
-            self._snapshot_failures += count
-            self._state_revision += 1
-            self._last_state_change_at = _utc_now()
+            self._snapshot_failed_locked(count)
+
+    def _snapshot_failed_locked(self, count: int = 1) -> None:
+        self._snapshot_failures += count
+        self._state_revision += 1
+        self._last_state_change_at = _utc_now()
 
     def _bounded_add_locked(
         self, registry: dict[int, dict[str, Any]], entry: dict[str, Any]
@@ -179,15 +290,15 @@ class DiagnosticsRuntime:
         normalized_path, notebook_id = _request_metadata(path)
         previous = _diagnostic_context.get()
         context = _DiagnosticContext(
-            request_id=str(request_id),
+            request_id=_bounded_text(request_id),
             job_id=previous.job_id,
             notebook_id=notebook_id,
             phase=previous.phase,
         )
         context_token = _diagnostic_context.set(context)
         entry = self._active_entry(
-            method=str(method).upper()[:16],
-            path=normalized_path[:256],
+            method=_bounded_text(method, 16).upper(),
+            path=normalized_path,
             **_context_fields(context),
         )
         with self._lock:
@@ -215,7 +326,7 @@ class DiagnosticsRuntime:
             request_id=previous.request_id,
             job_id=previous.job_id,
             notebook_id=previous.notebook_id,
-            phase=str(phase)[:160],
+            phase=_bounded_text(phase, 160),
         )
         context_token = _diagnostic_context.set(context)
         changed: list[tuple[dict[int, dict[str, Any]], int, Any]] = []
@@ -269,10 +380,10 @@ class DiagnosticsRuntime:
     def _enter_sql(self, mode: str, sql: str, operation: str) -> Optional[int]:
         metadata = normalize_sql_metadata(sql)
         entry = self._active_entry(
-            mode=str(mode)[:24],
-            operation=str(operation)[:160],
-            verb=metadata.verb,
-            table=metadata.table,
+            mode=_bounded_text(mode, 24),
+            operation=_bounded_text(operation, 160),
+            verb=metadata.verb[:16],
+            table=metadata.table[:128],
             fingerprint=metadata.fingerprint,
             **_context_fields(_diagnostic_context.get()),
         )
@@ -299,7 +410,7 @@ class DiagnosticsRuntime:
         )
         context_token = _diagnostic_context.set(context)
         entry = self._active_entry(
-            name=str(name)[:160],
+            name=_bounded_text(name, 160),
             **_context_fields(context),
         )
         with self._lock:
@@ -340,7 +451,7 @@ class DiagnosticsRuntime:
             ):
                 return None
             entry = self._active_entry(
-                operation=str(operation)[:160],
+                operation=_bounded_text(operation, 160),
                 **_context_fields(_diagnostic_context.get()),
             )
             return self._bounded_add_locked(self._write_waiters, entry)
@@ -365,7 +476,7 @@ class DiagnosticsRuntime:
             if isinstance(waiter, int):
                 self._write_waiters.pop(waiter, None)
             self._write_holder = self._active_entry(
-                operation=str(operation)[:160],
+                operation=_bounded_text(operation, 160),
                 depth=1,
                 **_context_fields(_diagnostic_context.get()),
             )
@@ -414,11 +525,14 @@ class DiagnosticsRuntime:
                 readiness["phase"] = raw_readiness["phase"][:80]
             for key in ("warmed_notebooks", "total_notebooks"):
                 value = raw_readiness.get(key)
-                if isinstance(value, int) and not isinstance(value, bool):
+                if (
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and 0 <= value <= _MAX_CONCURRENCY_VALUE
+                ):
                     readiness[key] = value
 
-        concurrency = _numeric_tree(raw_concurrency)
-        return readiness, concurrency if isinstance(concurrency, dict) else {}
+        return readiness, _normalize_concurrency(raw_concurrency)
 
     def snapshot(self) -> dict[str, Any]:
         readiness, concurrency = self._provider_snapshot()
@@ -457,7 +571,7 @@ class DiagnosticsRuntime:
                 "active_sql": active_sql,
                 "write_lock": {"holder": holder, "waiters": waiters},
                 "active_jobs": active_jobs,
-                "recent_jobs": list(self._recent_jobs),
+                "recent_jobs": [dict(entry) for entry in self._recent_jobs],
             }
 
     def _write_snapshot(self) -> None:
@@ -492,27 +606,19 @@ class DiagnosticsRuntime:
             self._write_snapshot()
             next_write = time.monotonic() + self._interval_seconds
 
-    def start(self) -> None:
-        with self._lock:
-            if self._thread is not None and self._thread.is_alive():
-                return
-        try:
-            self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
-            dump_path = self.diagnostics_dir / "thread-dumps.log"
-            dump_path.write_bytes(b"")
-            self._dump_handle = dump_path.open("a", encoding="utf-8", buffering=1)
-        except Exception:
-            self._snapshot_failed()
-            self._dump_handle = None
-
-        self.signal_capture_available = False
-        if (
+    def _claim_signal(self) -> bool:
+        global _signal_owner
+        if not (
             self._enable_signal
             and os.name == "posix"
             and hasattr(signal, "SIGUSR1")
             and threading.current_thread() is threading.main_thread()
             and self._dump_handle is not None
         ):
+            return False
+        with _signal_owner_lock:
+            if _signal_owner is not None:
+                return False
             try:
                 faulthandler.register(
                     signal.SIGUSR1,
@@ -520,46 +626,97 @@ class DiagnosticsRuntime:
                     all_threads=True,
                     chain=False,
                 )
-                self._owns_signal = True
-                self.signal_capture_available = True
             except Exception:
-                self._snapshot_failed()
+                return False
+            _signal_owner = self
+            return True
 
-        self._stop.clear()
-        self._wake.set()
-        thread = threading.Thread(
-            target=self._writer,
-            name="diagnostics-snapshot",
-            daemon=True,
-        )
-        with self._lock:
-            self._thread = thread
-        thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-        self._wake.set()
-        with self._lock:
-            thread = self._thread
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2 * self._interval_seconds)
-        if self._owns_signal:
+    def _release_signal(self) -> None:
+        global _signal_owner
+        with _signal_owner_lock:
+            if _signal_owner is not self:
+                self._owns_signal = False
+                self.signal_capture_available = False
+                return
             try:
                 faulthandler.unregister(signal.SIGUSR1)
             except Exception:
                 pass
+            _signal_owner = None
             self._owns_signal = False
             self.signal_capture_available = False
+
+    def _close_dump_handle(self) -> None:
         handle = self._dump_handle
         self._dump_handle = None
-        if handle is not None:
-            try:
-                handle.flush()
-                handle.close()
-            except Exception:
-                pass
+        if handle is None:
+            return
+        try:
+            handle.flush()
+            handle.close()
+        except Exception:
+            pass
+
+    def start(self) -> None:
         with self._lock:
-            self._thread = None
+            if self._lifecycle_state not in {"new", "stopped"}:
+                return
+            self._lifecycle_state = "starting"
+            self._stop.clear()
+            self._wake.set()
+            try:
+                self.diagnostics_dir.mkdir(parents=True, exist_ok=True)
+                dump_path = self.diagnostics_dir / "thread-dumps.log"
+                dump_path.write_bytes(b"")
+                self._dump_handle = dump_path.open(
+                    "a", encoding="utf-8", buffering=1
+                )
+            except Exception:
+                self._snapshot_failed_locked()
+                self._dump_handle = None
+
+            self.signal_capture_available = self._claim_signal()
+            self._owns_signal = self.signal_capture_available
+            thread = threading.Thread(
+                target=self._writer,
+                name="diagnostics-snapshot",
+                daemon=True,
+            )
+            self._thread = thread
+            try:
+                thread.start()
+            except Exception:
+                self._snapshot_failed_locked()
+                self._thread = None
+                self._lifecycle_state = "stopped"
+                self._release_signal()
+                self._close_dump_handle()
+                return
+            self._lifecycle_state = "running"
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._lifecycle_state in {"new", "stopped", "cleaning"}:
+                return
+            if self._lifecycle_state == "running":
+                self._lifecycle_state = "stopping"
+                self._stop.set()
+                self._wake.set()
+            thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2 * self._interval_seconds)
+        if thread is not None and thread.is_alive():
+            return
+        with self._lock:
+            if self._lifecycle_state != "stopping" or self._thread is not thread:
+                return
+            self._lifecycle_state = "cleaning"
+        self._release_signal()
+        self._close_dump_handle()
+        with self._lock:
+            if self._thread is thread:
+                self._thread = None
+            self._lifecycle_state = "stopped"
 
 
 def current_runtime() -> Optional[DiagnosticsRuntime]:
@@ -569,20 +726,22 @@ def current_runtime() -> Optional[DiagnosticsRuntime]:
 
 @contextmanager
 def install_runtime(runtime: DiagnosticsRuntime) -> Iterator[DiagnosticsRuntime]:
-    global _installed_runtime
-    installed_here = False
+    global _installed_runtime, _installed_runtime_depth
     with _runtime_lock:
         if _installed_runtime is None:
             _installed_runtime = runtime
-            installed_here = True
+            _installed_runtime_depth = 1
         elif _installed_runtime is not runtime:
             raise RuntimeError("cannot install a different diagnostics runtime")
+        else:
+            _installed_runtime_depth += 1
     try:
         yield runtime
     finally:
-        if installed_here:
-            with _runtime_lock:
-                if _installed_runtime is runtime:
+        with _runtime_lock:
+            if _installed_runtime is runtime:
+                _installed_runtime_depth -= 1
+                if _installed_runtime_depth == 0:
                     _installed_runtime = None
 
 
@@ -602,12 +761,12 @@ def activate_runtime(
         interval_seconds=interval_seconds,
         enable_signal=enable_signal,
     )
-    runtime.start()
-    try:
-        with install_runtime(runtime):
+    with install_runtime(runtime):
+        runtime.start()
+        try:
             yield runtime
-    finally:
-        runtime.stop()
+        finally:
+            runtime.stop()
 
 
 @contextmanager

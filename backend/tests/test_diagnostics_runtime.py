@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
@@ -134,6 +135,62 @@ def test_install_runtime_is_process_global_and_rejects_a_different_runtime(tmp_p
     assert diagnostics.current_runtime() is None
 
 
+def test_overlapping_same_runtime_install_scopes_keep_runtime_until_both_exit(tmp_path):
+    runtime = _runtime(tmp_path)
+    both_installed = threading.Barrier(2)
+    release_worker = threading.Event()
+    worker_done = threading.Event()
+    worker_seen: list[object] = []
+
+    def worker() -> None:
+        with diagnostics.install_runtime(runtime):
+            both_installed.wait(timeout=1)
+            release_worker.wait(timeout=1)
+            worker_seen.append(diagnostics.current_runtime())
+        worker_done.set()
+
+    with diagnostics.install_runtime(runtime):
+        thread = threading.Thread(target=worker)
+        thread.start()
+        both_installed.wait(timeout=1)
+    try:
+        assert diagnostics.current_runtime() is runtime
+    finally:
+        release_worker.set()
+        worker_done.wait(timeout=1)
+        thread.join(timeout=1)
+    assert worker_seen == [runtime]
+    assert diagnostics.current_runtime() is None
+
+
+def test_rejected_activation_has_no_files_writer_or_signal_side_effects(tmp_path):
+    active = _runtime(tmp_path / "active")
+    rejected_path = tmp_path / "rejected"
+    writers_before = {
+        thread.ident
+        for thread in threading.enumerate()
+        if thread.name == "diagnostics-snapshot"
+    }
+    with diagnostics.install_runtime(active):
+        with pytest.raises(RuntimeError, match="different diagnostics runtime"):
+            with diagnostics.activate_runtime(
+                rejected_path,
+                readiness_provider=lambda: {},
+                concurrency_provider=lambda: {},
+                interval_seconds=0.02,
+                enable_signal=True,
+            ):
+                pass
+        assert diagnostics.current_runtime() is active
+    writers_after = {
+        thread.ident
+        for thread in threading.enumerate()
+        if thread.name == "diagnostics-snapshot"
+    }
+    assert writers_after == writers_before
+    assert not rejected_path.exists()
+
+
 def test_module_wrappers_are_noops_without_an_installed_runtime():
     assert diagnostics.current_runtime() is None
     with diagnostics.request_scope("req", "GET", "/api/notebooks/private"):
@@ -144,6 +201,58 @@ def test_module_wrappers_are_noops_without_an_installed_runtime():
                     diagnostics.write_acquired(waiter, "private-op")
                     diagnostics.write_wait_cancelled(waiter)
                     diagnostics.write_released()
+
+
+@pytest.mark.parametrize(
+    "path,secrets,expected",
+    [
+        (
+            "/api/shared/Bearer-secret-share-token",
+            ("Bearer-secret-share-token",),
+            "/api/shared/{id}",
+        ),
+        (
+            "/api/sources/src-private456/elements/el-private789",
+            ("src-private456", "el-private789"),
+            "/api/sources/{id}/elements/{id}",
+        ),
+        (
+            "/api/memory/mem-private456",
+            ("mem-private456",),
+            "/api/memory/{id}",
+        ),
+        (
+            "/api/agent/knowhow/tables/table-private/rows/row-private",
+            ("table-private", "row-private"),
+            "/api/agent/knowhow/tables/{id}/rows/{id}",
+        ),
+        (
+            "/api/conversations/conv-private456",
+            ("conv-private456",),
+            "/api/conversations/{id}",
+        ),
+        (
+            "/api/files/customer-secret-design.pdf",
+            ("customer-secret-design.pdf",),
+            "/api/files/{id}",
+        ),
+        (
+            "/api/search/customer-secret-query?token=Bearer-secret",
+            ("customer-secret-query", "Bearer-secret"),
+            "/api/search/{id}",
+        ),
+    ],
+)
+def test_request_paths_redact_all_arbitrary_segments(path, secrets, expected, tmp_path):
+    runtime = _runtime(tmp_path)
+    with diagnostics.install_runtime(runtime):
+        with diagnostics.request_scope("req-safe", "GET", path):
+            request = runtime.snapshot()["active_requests"][0]
+    assert request["path"] == expected
+    assert request["notebook_id"] is None
+    encoded = json.dumps(request)
+    for secret in secrets:
+        assert secret not in encoded
 
 
 def test_sql_metadata_normalization_is_stable_and_never_exposes_literals():
@@ -214,7 +323,7 @@ def test_active_items_have_context_thread_and_monotonic_duration(tmp_path):
         assert isinstance(entry["thread_id"], int)
         assert entry["started_at"].endswith("+00:00")
         assert entry["duration_ms"] >= 0
-    assert request["path"] == "/ordinary"
+    assert request["path"] == "/{id}"
     assert job["request_id"] == "req-correlation"
     assert sql["request_id"] == "req-correlation"
     assert sql["job_id"] == job["job_id"]
@@ -255,6 +364,280 @@ def test_provider_failures_are_best_effort_and_counted(tmp_path):
         assert "PRIVATE PROVIDER FAILURE" not in json.dumps(snapshot)
     finally:
         runtime.stop()
+
+
+def test_snapshot_bounds_identifiers_concurrency_width_and_non_finite_values(tmp_path):
+    oversized = "private-" + "x" * 10_000
+    concurrency = {
+        **{f"private-group-{index}": {"active": index} for index in range(100)},
+        "kg": {
+            "window_active": 1,
+            "window_max": 2,
+            "window_waiting": 3,
+            "unknown_private_metric": 4,
+            **{f"private-metric-{index}": index for index in range(100)},
+        },
+        "llm": {"active": 1, "maximum": float("inf"), "waiting": float("nan")},
+        "embedding": {"active": 1, "maximum": 2, "waiting": 0},
+    }
+    runtime = _runtime(tmp_path, concurrency_provider=lambda: concurrency)
+    with diagnostics.install_runtime(runtime):
+        with diagnostics.request_scope(
+            oversized, "GET", f"/api/notebooks/{oversized}/sources/{oversized}"
+        ):
+            snapshot = runtime.snapshot()
+    request = snapshot["active_requests"][0]
+    assert len(request["request_id"]) <= 200
+    assert request["notebook_id"] is None
+    assert request["path"] == "/api/notebooks/{id}"
+    assert snapshot["concurrency"] == {
+        "kg": {"window_active": 1, "window_max": 2, "window_waiting": 3},
+        "llm": {"active": 1},
+        "embedding": {"active": 1, "maximum": 2, "waiting": 0},
+    }
+    encoded = json.dumps(snapshot, allow_nan=False)
+    assert oversized not in encoded
+    assert len(encoded.encode("utf-8")) < 100_000
+
+
+def test_snapshot_bounds_readiness_counts_and_active_sql_names(tmp_path):
+    huge_number = 10**10_000
+    huge_verb = "A" * 10_000
+    huge_table = "t" * 10_000
+    runtime = _runtime(
+        tmp_path,
+        readiness_provider=lambda: {
+            "ready": False,
+            "phase": "w" * 10_000,
+            "warmed_notebooks": huge_number,
+            "total_notebooks": huge_number,
+        },
+        concurrency_provider=lambda: {},
+    )
+    with diagnostics.install_runtime(runtime):
+        with diagnostics.sql_scope(
+            "read", f"{huge_verb} FROM {huge_table}", "bounded-sql"
+        ):
+            snapshot = runtime.snapshot()
+    active_sql = snapshot["active_sql"][0]
+    assert len(snapshot["readiness"]["phase"]) <= 80
+    assert "warmed_notebooks" not in snapshot["readiness"]
+    assert "total_notebooks" not in snapshot["readiness"]
+    assert len(active_sql["verb"]) <= 16
+    assert len(active_sql["table"]) <= 128
+    encoded = json.dumps(snapshot, allow_nan=False)
+    assert huge_verb not in encoded
+    assert huge_table not in encoded
+
+
+def test_snapshot_writer_recovers_after_one_replace_failure(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    original_replace = diagnostics.os.replace
+    attempts = 0
+
+    def fail_once(source, destination):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("synthetic replace failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(diagnostics.os, "replace", fail_once)
+    runtime.start()
+    try:
+        snapshot = _wait_for_json(tmp_path / "runtime.json")
+        assert attempts >= 2
+        assert snapshot["snapshot_failures"] >= 1
+    finally:
+        runtime.stop()
+
+
+def test_state_change_bursts_are_coalesced_to_minimum_interval(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path, interval_seconds=0.02)
+    original_replace = diagnostics.os.replace
+    replacements: list[float] = []
+
+    def record_replace(source, destination):
+        replacements.append(time.monotonic())
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(diagnostics.os, "replace", record_replace)
+    runtime.start()
+    try:
+        _wait_for_json(tmp_path / "runtime.json")
+        with diagnostics.install_runtime(runtime):
+            for index in range(100):
+                with diagnostics.request_scope(
+                    f"req-{index}", "GET", "/api/health"
+                ):
+                    pass
+        deadline = time.monotonic() + 0.2
+        while len(replacements) < 3 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        gaps = [later - earlier for earlier, later in zip(replacements, replacements[1:])]
+        assert gaps
+        assert min(gaps) >= 0.015
+    finally:
+        runtime.stop()
+
+
+def test_active_request_registry_is_bounded(tmp_path):
+    runtime = _runtime(tmp_path)
+    with diagnostics.install_runtime(runtime):
+        with ExitStack() as stack:
+            for index in range(1_100):
+                stack.enter_context(
+                    diagnostics.request_scope(f"req-{index}", "GET", "/api/health")
+                )
+            active = runtime.snapshot()["active_requests"]
+    assert len(active) <= 1_000
+
+
+def test_atomic_snapshot_survives_repeated_concurrent_reads(tmp_path):
+    runtime = _runtime(tmp_path)
+    errors: list[BaseException] = []
+    stop_reader = threading.Event()
+    runtime.start()
+    try:
+        path = tmp_path / "runtime.json"
+        _wait_for_json(path)
+
+        def read_repeatedly() -> None:
+            while not stop_reader.is_set():
+                try:
+                    json.loads(path.read_text(encoding="utf-8"))
+                except BaseException as exc:  # pragma: no cover - assertion path
+                    errors.append(exc)
+                    return
+
+        reader = threading.Thread(target=read_repeatedly)
+        reader.start()
+        with diagnostics.install_runtime(runtime):
+            for index in range(50):
+                with diagnostics.request_scope(
+                    f"req-{index}", "GET", "/api/health"
+                ):
+                    time.sleep(0.002)
+        stop_reader.set()
+        reader.join(timeout=1)
+        assert errors == []
+    finally:
+        stop_reader.set()
+        runtime.stop()
+
+
+def test_concurrent_start_creates_one_writer_and_stop_terminates_it(tmp_path, monkeypatch):
+    runtime = _runtime(tmp_path)
+    original_mkdir = Path.mkdir
+
+    def delayed_mkdir(path, *args, **kwargs):
+        if path == tmp_path:
+            time.sleep(0.03)
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", delayed_mkdir)
+    start_barrier = threading.Barrier(8)
+    starters = [
+        threading.Thread(target=lambda: (start_barrier.wait(timeout=1), runtime.start()))
+        for _ in range(8)
+    ]
+    writers_before = set(threading.enumerate())
+    for thread in starters:
+        thread.start()
+    for thread in starters:
+        thread.join(timeout=1)
+    writers = [
+        thread
+        for thread in threading.enumerate()
+        if thread not in writers_before and thread.name == "diagnostics-snapshot"
+    ]
+    try:
+        assert len(writers) == 1
+    finally:
+        runtime.stop()
+        runtime.stop()
+        for writer in writers:
+            writer.join(timeout=1)
+        assert all(not writer.is_alive() for writer in writers)
+
+
+def test_timed_out_stop_retains_stopping_writer_until_safe_later_cleanup(tmp_path):
+    provider_entered = threading.Event()
+    release_provider = threading.Event()
+
+    def blocked_provider() -> dict:
+        provider_entered.set()
+        release_provider.wait(timeout=1)
+        return {}
+
+    runtime = _runtime(
+        tmp_path,
+        readiness_provider=blocked_provider,
+        concurrency_provider=lambda: {},
+    )
+    runtime.start()
+    assert provider_entered.wait(timeout=1)
+    writer = runtime._thread
+    assert writer is not None
+    try:
+        runtime.stop()
+        assert writer.is_alive()
+        assert runtime._thread is writer
+
+        runtime.start()
+        assert runtime._thread is writer
+    finally:
+        release_provider.set()
+        runtime.stop()
+        writer.join(timeout=1)
+    assert not writer.is_alive()
+    runtime.stop()
+    assert runtime._thread is None
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(signal, "SIGUSR1"),
+    reason="SIGUSR1 requires POSIX",
+)
+def test_sigusr1_owner_is_process_global_and_second_runtime_cannot_replace_it(tmp_path):
+    code = """
+import os, signal, sys, time
+from pathlib import Path
+from app.core.diagnostics_runtime import DiagnosticsRuntime
+root = Path(sys.argv[1])
+first = DiagnosticsRuntime(root / 'first', lambda: {}, lambda: {}, interval_seconds=0.02, enable_signal=True)
+second = DiagnosticsRuntime(root / 'second', lambda: {}, lambda: {}, interval_seconds=0.02, enable_signal=True)
+first.start()
+second.start()
+assert first.signal_capture_available is True
+assert second.signal_capture_available is False
+os.kill(os.getpid(), signal.SIGUSR1)
+first_dump = root / 'first' / 'thread-dumps.log'
+deadline = time.monotonic() + 2
+while time.monotonic() < deadline and first_dump.stat().st_size == 0:
+    time.sleep(0.02)
+size = first_dump.stat().st_size
+second.stop()
+os.kill(os.getpid(), signal.SIGUSR1)
+deadline = time.monotonic() + 2
+while time.monotonic() < deadline and first_dump.stat().st_size <= size:
+    time.sleep(0.02)
+assert first_dump.stat().st_size > size
+assert (root / 'second' / 'thread-dumps.log').stat().st_size == 0
+first.stop()
+print('OK', flush=True)
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    child = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=5,
+    )
+    assert child.returncode == 0, child.stderr
+    assert child.stdout.strip() == "OK"
 
 
 @pytest.mark.skipif(
