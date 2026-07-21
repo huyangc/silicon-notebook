@@ -116,7 +116,18 @@ class _RetrievalState:
     def _connect(self):
         return self.database.connect()
 
-    def _note_model_error(self, stage: str, model: str, exc: Exception) -> None:
+    def _note_model_error(
+        self,
+        stage: str,
+        model: str,
+        exc: Exception,
+        service: str = "",
+    ) -> None:
+        if service:
+            self.model_error_sink.note_model_error(
+                stage, model, exc, service=service
+            )
+            return
         self.model_error_sink.note_model_error(stage, model, exc)
 
     def _in_batches(self, ids):
@@ -324,7 +335,9 @@ class CandidateRetrievalService(_RetrievalState):
         try:
             vec = self.embedder.embed_query(query[:2000])
         except Exception as exc:
-            self._note_model_error("embed", self.settings.embed_model, exc)
+            self._note_model_error(
+                "embed", self.settings.embed_model, exc, service="embedding"
+            )
             return None
         from app.services.vector_index import resolve_runtime_dim, truncate_vec
         rd = resolve_runtime_dim(self.settings)
@@ -501,7 +514,12 @@ class CandidateRetrievalService(_RetrievalState):
                     for l, d in zip(labs[0], dists[0]):
                         sims[labels[int(l)]] = max(0.0, 1.0 - float(d))
                 except Exception as exc:  # noqa: BLE001 — fail-open
-                    self._note_model_error("relation_ann_query", self.settings.embed_model, exc)
+                    self._note_model_error(
+                        "relation_ann_query",
+                        self.settings.embed_model,
+                        exc,
+                        service="embedding",
+                    )
                     return {}
         # ⊕ delta 关系(水位后 source)暴力 —— opt-in(scale_search_include_delta,
         # 默认关):与 chunk/KG对象侧同一原则「已索引的库只检索已索引部分」,delta
@@ -522,7 +540,12 @@ class CandidateRetrievalService(_RetrievalState):
                     for rid, s in (query_sims(query_vector, d_ids, d_mat) if d_ids else {}).items():
                         sims[rid] = s
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
-                self._note_model_error("relation_ann_delta", self.settings.embed_model, exc)
+                self._note_model_error(
+                    "relation_ann_delta",
+                    self.settings.embed_model,
+                    exc,
+                    service="embedding",
+                )
         return sims
     def _retrieve_relations_scored(self, notebook_id: str, query: str) -> List["RetrievedRelation"]:
         """对 notebook 关系按 query 打分(关键词 + 关系索引语义)。镜像 _retrieve_scored;
@@ -665,7 +688,12 @@ class CandidateRetrievalService(_RetrievalState):
                     for l, d in zip(labs[0], dists[0]):
                         sims[labels[int(l)]] = max(0.0, 1.0 - float(d))
                 except Exception as exc:  # noqa: BLE001 — fail-open
-                    self._note_model_error("kg_obj_ann", self.settings.embed_model, exc)
+                    self._note_model_error(
+                        "kg_obj_ann",
+                        self.settings.embed_model,
+                        exc,
+                        service="embedding",
+                    )
                     return {}
         # ⊕ delta 对象(水位后 source)暴力 —— opt-in(scale_search_include_delta,
         # 默认关):与 chunk 侧同一原则「已索引的库只检索已索引部分」,delta 由
@@ -685,7 +713,12 @@ class CandidateRetrievalService(_RetrievalState):
                     for oid, s in (query_sims(query_vector, d_ids, d_mat) if d_ids else {}).items():
                         sims[oid] = s
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
-                self._note_model_error("kg_obj_delta", self.settings.embed_model, exc)
+                self._note_model_error(
+                    "kg_obj_delta",
+                    self.settings.embed_model,
+                    exc,
+                    service="embedding",
+                )
         return sims
     def _knowhow_object_types(self, notebook_id: str) -> tuple:
         """Distinct knowhow cell-KO object_types (each a table COLUMN NAME — a
@@ -1127,7 +1160,12 @@ class CandidateRetrievalService(_RetrievalState):
             k = min(recall, len(labels))
             labs, dists = ann.knn_query(qarr, k=k)
         except Exception as exc:  # noqa: BLE001 — fail-open, 回退暴力
-            self._note_model_error("chunk_ann_query", self.settings.embed_model, exc)
+            self._note_model_error(
+                "chunk_ann_query",
+                self.settings.embed_model,
+                exc,
+                service="embedding",
+            )
             return None
         chunk_sims = {labels[int(l)]: max(0.0, 1.0 - float(d)) for l, d in zip(labs[0], dists[0])}
         cand_ids = list(chunk_sims.keys())
@@ -1153,7 +1191,12 @@ class CandidateRetrievalService(_RetrievalState):
                             cand_ids.append(cid)
                         chunk_sims[cid] = s
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮检索,退回仅核候选
-                self._note_model_error("chunk_ann_delta", self.settings.embed_model, exc)
+                self._note_model_error(
+                    "chunk_ann_delta",
+                    self.settings.embed_model,
+                    exc,
+                    service="embedding",
+                )
 
         # ∪ 词法:FTS5 命中补召回(ANN 是语义候选,纯关键词命中可能漏)
         try:

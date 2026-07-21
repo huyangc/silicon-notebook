@@ -558,6 +558,7 @@
           {
             "message": "请先在设置中配置你的模型服务",
             "model": "",
+            "service": "llm",
             "stage": "answer"
           }
         ],
@@ -583,6 +584,7 @@
           {
             "message": "请先在设置中配置你的模型服务",
             "model": "",
+            "service": "llm",
             "stage": "answer"
           }
         ],

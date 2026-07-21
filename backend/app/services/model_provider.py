@@ -14,6 +14,7 @@ from app.services.model_config import (
     ResolvedModelConfig,
     model_config_fingerprint,
 )
+from app.services.model_status import ModelStatusService
 from app.services.rerank_client import RerankClient
 
 
@@ -28,6 +29,19 @@ class _UnconfiguredLLMClient:
 
 
 _UNCONFIGURED_LLM = _UnconfiguredLLMClient()
+
+
+def _service_for_stage(stage: str) -> str:
+    value = (stage or "").lower()
+    if "rerank" in value:
+        return "rerank"
+    if "embed" in value or "ann" in value:
+        return "embedding"
+    if "rewrite" in value:
+        return "rewrite_llm"
+    if value.startswith("kg_"):
+        return "kg_llm"
+    return "llm"
 
 
 class RuntimeModelProvider:
@@ -183,7 +197,13 @@ class RuntimeModelProvider:
     def rerank_client(self, client) -> None:
         self._system_rerank_client = client
 
-    def note_model_error(self, stage: str, model: str, error: Exception) -> None:
+    def note_model_error(
+        self,
+        stage: str,
+        model: str,
+        error: Exception,
+        service: str = "",
+    ) -> None:
         message = f"{type(error).__name__}: {error}"
         self.event_log.emit(
             {
@@ -196,10 +216,20 @@ class RuntimeModelProvider:
         )
         sink = self.ask_context._ASK_MODEL_ERRORS.get()
         if sink is not None:
+            service = service or _service_for_stage(stage)
             sink.append(
                 {
+                    "service": service,
                     "stage": stage,
                     "model": model or "",
                     "message": message[:200],
                 }
             )
+            try:
+                ModelStatusService(
+                    self.identity, self.settings
+                ).record_observed_failure(self.identity.current_user(), service)
+            except Exception:
+                self.event_log.logger.exception(
+                    "failed to persist observed model failure for %s", service
+                )

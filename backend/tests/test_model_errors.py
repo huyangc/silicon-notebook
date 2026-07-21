@@ -20,6 +20,9 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://llm.example.test/v1")
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "test-key")
+    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "configured-primary")
     r = SQLiteRepository(Settings())
     r.embedder = FakeEmbedder(dim=16)
     return r
@@ -79,6 +82,21 @@ def test_answer_llm_failure_recorded(repo):
     assert not resp.conclusion.startswith("Retrieved ")
 
 
+def test_answer_failure_names_dynamic_primary_service_and_persists_error(repo):
+    repo.settings.query_rewrite_enabled = False
+    repo.settings.chunk_kg_overlay_enabled = False
+    raising = _RaisingLLM()
+    raising.model = "runtime-primary-name"
+    repo.llm_client = raising
+    nb = _seed_chunks(repo)
+    response = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
+    error = next(item for item in response.model_errors if item.stage == "answer")
+    assert (error.service, error.model) == ("llm", "runtime-primary-name")
+    stored = repo._runtime.identity.get_model_service_statuses("user-local")
+    assert stored["llm"]["status"] == "error"
+    assert stored["llm"]["trigger"] == "observed_failure"
+
+
 def test_embed_failure_recorded(repo, monkeypatch):
     """embed_query 抛异常(且 embedder_configured 为真)→ model_errors 记一条 stage=embed。"""
     repo.settings.query_rewrite_enabled = False
@@ -98,6 +116,29 @@ def test_embed_failure_recorded(repo, monkeypatch):
 
     stages = [e.stage for e in resp.model_errors]
     assert "embed" in stages
+
+
+def test_embedding_failure_is_embedding_service(repo, monkeypatch):
+    repo.settings.query_rewrite_enabled = False
+    repo.settings.chunk_kg_overlay_enabled = False
+    repo.settings.embed_provider = "dashscope"
+    repo.settings.embed_base_url = "http://fake"
+    repo.settings.embed_api_key = "k"
+    repo.settings.embed_model = "runtime-embedding-name"
+    monkeypatch.setattr(
+        repo.embedder,
+        "embed_query",
+        lambda _query: (_ for _ in ()).throw(RuntimeError("embed boom")),
+    )
+    repo.llm_client = _AnswerLLM()
+    nb = _seed_chunks(repo)
+    response = repo.ask_chunk(
+        nb.id, AskRequest(question="cascode", mode="chunk")
+    )
+    error = next(item for item in response.model_errors if item.stage == "embed")
+    assert (error.service, error.model) == (
+        "embedding", "runtime-embedding-name"
+    )
 
 
 def test_rerank_on_error_called():

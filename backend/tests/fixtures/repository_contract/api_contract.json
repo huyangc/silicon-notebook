@@ -3473,6 +3473,11 @@
               "title": "Model",
               "type": "string"
             },
+            "service": {
+              "default": "llm",
+              "title": "Service",
+              "type": "string"
+            },
             "stage": {
               "title": "Stage",
               "type": "string"

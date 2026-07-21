@@ -292,6 +292,7 @@
               {
                 "message": "RuntimeError: deterministic fallback",
                 "model": "fixture-rerank",
+                "service": "llm",
                 "stage": "rerank"
               }
             ],

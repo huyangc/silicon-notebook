@@ -71,6 +71,7 @@ def test_provider_records_existing_model_error_shape(repo, monkeypatch):
         repo._note_model_error("rerank", "model-x", RuntimeError("boom"))
         assert ask_context._ASK_MODEL_ERRORS.get() == [
             {
+                "service": "rerank",
                 "stage": "rerank",
                 "model": "model-x",
                 "message": "RuntimeError: boom",

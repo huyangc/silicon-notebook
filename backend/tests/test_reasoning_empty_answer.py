@@ -90,6 +90,20 @@ def test_empty_synthesis_degrades_honestly(arepo):
     assert resp.related_knowledge, "降级仍应保留已检索证据"
 
 
+def test_reasoning_answer_failure_is_reasoning_service(arepo):
+    stub = _StubLLM(answers=["{}"])
+    stub.model = "runtime-reasoning-name"
+    arepo._reasoning_llm_client = stub
+    nb = _seed(arepo)
+    response = arepo.ask(
+        nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning")
+    )
+    error = next(item for item in response.model_errors if item.stage == "answer")
+    assert (error.service, error.model) == (
+        "reasoning_llm", "runtime-reasoning-name"
+    )
+
+
 def test_healthy_synthesis_not_retried(arepo):
     # 回归:首次即产出真答案 → 不重试(answer_calls==1),行为不变
     nb = _seed(arepo)

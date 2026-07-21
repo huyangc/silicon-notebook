@@ -620,6 +620,7 @@ class AnswerAnchor(BaseModel):
 
 
 class ModelError(BaseModel):
+    service: str = "llm"
     stage: str       # "embed" | "rerank" | "answer" | "rewrite"
     model: str = ""
     message: str
