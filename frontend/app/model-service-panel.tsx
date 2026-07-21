@@ -61,11 +61,13 @@ function statusPresentation(item: ModelServicesStatus["services"][number] | unde
 function EffectiveStatusRow({
   role,
   status,
+  testing,
   disabled,
   onTest,
 }: {
   role: StatusModelRole;
   status: ModelServicesStatus["services"][number] | undefined;
+  testing: boolean;
   disabled: boolean;
   onTest: (role: StatusModelRole) => void;
 }) {
@@ -84,7 +86,7 @@ function EffectiveStatusRow({
         </time>
       </div>
       <button type="button" disabled={disabled} onClick={() => onTest(role)}>
-        {disabled ? "测试中…" : "测试当前使用"}
+        {testing ? "测试中…" : "测试当前使用"}
       </button>
     </div>
   );
@@ -163,6 +165,9 @@ export function ModelServicePanel({
       return;
     }
     closeButtonRef.current?.focus();
+    if (!dialogRef.current?.contains(document.activeElement)) {
+      dialogRef.current?.focus();
+    }
   }, [highlightedRole]);
 
   useEffect(() => {
@@ -174,7 +179,11 @@ export function ModelServicePanel({
       const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
         'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
       ));
-      if (focusable.length === 0) return;
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       const active = document.activeElement;
@@ -227,6 +236,7 @@ export function ModelServicePanel({
       className="utility-modal model-service-modal"
       ref={dialogRef}
       role="dialog"
+      tabIndex={-1}
       aria-modal="true"
       aria-labelledby="model-service-title"
       onClick={(event) => { if (event.currentTarget === event.target && !saving) onClose(); }}
@@ -265,9 +275,9 @@ export function ModelServicePanel({
           </div>
           {MODEL_ROLES.map((role) => {
             const form = forms[role];
-            const roleTesting = allTesting
+            const savedTesting = allTesting || Boolean(testingRoles[role]);
+            const roleDisabled = savedTesting
               || saving
-              || Boolean(testingRoles[role])
               || Boolean(draftTestingRoles[role]);
             return (
               <fieldset key={role} {...fieldsetProps(role)}>
@@ -275,7 +285,8 @@ export function ModelServicePanel({
                 <EffectiveStatusRow
                   role={role}
                   status={statusByRole.get(role)}
-                  disabled={roleTesting}
+                  testing={savedTesting}
+                  disabled={roleDisabled}
                   onTest={runCurrentTest}
                 />
                 <div className="model-service-draft-grid">
@@ -312,7 +323,7 @@ export function ModelServicePanel({
                   <button
                     type="button"
                     className="sort-button"
-                    disabled={roleTesting}
+                    disabled={roleDisabled}
                     onClick={() => onTestDraft(role)}
                   >
                     测试未保存设置
@@ -327,6 +338,7 @@ export function ModelServicePanel({
             <EffectiveStatusRow
               role="embedding"
               status={statusByRole.get("embedding")}
+              testing={allTesting || Boolean(testingRoles.embedding)}
               disabled={allTesting || saving || Boolean(testingRoles.embedding)}
               onTest={runCurrentTest}
             />

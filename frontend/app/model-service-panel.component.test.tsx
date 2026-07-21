@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
@@ -146,6 +146,26 @@ test("traps Tab focus within the modal", async () => {
 });
 
 
+test("keeps Tab and Shift+Tab inside the dialog when saving disables every control", () => {
+  const outside = document.createElement("button");
+  outside.textContent = "outside target";
+  document.body.append(outside);
+  renderPanel({ saving: true });
+  const dialog = screen.getByRole("dialog", { name: "模型服务" });
+
+  outside.focus();
+  const tab = fireEvent.keyDown(window, { key: "Tab" });
+  expect(tab).toBe(false);
+  expect(dialog).toHaveFocus();
+
+  outside.focus();
+  const shiftTab = fireEvent.keyDown(window, { key: "Tab", shiftKey: true });
+  expect(shiftTab).toBe(false);
+  expect(dialog).toHaveFocus();
+  outside.remove();
+});
+
+
 test("restores focus to the exact opener when the modal unmounts", () => {
   const opener = document.createElement("button");
   opener.textContent = "Ask opener";
@@ -192,6 +212,20 @@ test("draft activity blocks save and save activity disables editable inputs", ()
 });
 
 
+test("save and draft locks do not claim a saved-current test is running", () => {
+  const draft = renderPanel({ draftTestingRoles: { llm: true } });
+  const draftRow = screen.getByRole("group", { name: "主模型" });
+  expect(within(draftRow).getByRole("button", { name: "测试当前使用" })).toBeDisabled();
+  expect(within(draftRow).queryByRole("button", { name: "测试中…" })).not.toBeInTheDocument();
+  draft.unmount();
+
+  renderPanel({ saving: true });
+  const savingRow = screen.getByRole("group", { name: "主模型" });
+  expect(within(savingRow).getByRole("button", { name: "测试当前使用" })).toBeDisabled();
+  expect(within(savingRow).queryByRole("button", { name: "测试中…" })).not.toBeInTheDocument();
+});
+
+
 test("renders page-owned per-role locks and preserves them across panel remount", async () => {
   let resolveTest!: () => void;
   const onTestCurrent = vi.fn(() => new Promise<void>((resolve) => { resolveTest = resolve; }));
@@ -207,6 +241,8 @@ test("renders page-owned per-role locks and preserves them across panel remount"
   expect(screen.getByRole("button", { name: "测试当前使用的全部模型" })).toBeDisabled();
   expect(screen.getByRole("group", { name: "主模型" }))
     .toHaveTextContent("测试中…");
+  expect(within(screen.getByRole("group", { name: "主模型" }))
+    .getByRole("button", { name: "测试中…" })).toBeDisabled();
 
   unmount();
   const reopened = render(<ModelServicePanel {...props} testingRoles={{ llm: true }} />);
