@@ -481,6 +481,14 @@
       "kind": "independent_sql",
       "path": "scripts/diag_db.py",
       "reason": "read-only host database diagnostic",
+      "scope": "<module>._collect_source_file_plan.explain",
+      "target": "connection.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/diag_db.py",
+      "reason": "read-only host database diagnostic",
       "scope": "<module>._count_table.read",
       "target": "connection.execute"
     },

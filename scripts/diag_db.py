@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import sys
 import tempfile
 import time
@@ -42,6 +43,15 @@ MAX_LARGEST_TABLES = 20
 MAX_DEGRADED = 64
 MAX_DEADLINE_SECONDS = 10.0
 MAX_BUSY_TIMEOUT_MS = 1000
+MAX_STALE_WORKSPACES = 8
+STALE_WORKSPACE_AGE_SECONDS = 24 * 60 * 60
+
+_NOATIME_FLAG = getattr(os, "O_NOATIME", None)
+_NOATIME_AVAILABLE = _NOATIME_FLAG is not None
+_NOFOLLOW_FLAG = getattr(os, "O_NOFOLLOW", 0)
+_NONBLOCK_FLAG = getattr(os, "O_NONBLOCK", 0)
+_CLOEXEC_FLAG = getattr(os, "O_CLOEXEC", 0)
+_DIRECTORY_FLAG = getattr(os, "O_DIRECTORY", 0)
 
 _PENDING_BYTE = 0x40000000
 _SHARED_FIRST = _PENDING_BYTE + 2
@@ -54,6 +64,7 @@ _DERIVED_LISTS = (
     "notebook_counts",
     "missing_fk_indexes",
     "delete_plan",
+    "source_file_plan",
     "relevant_scans",
 )
 _EXPLICIT_NOTEBOOK_TABLES = (
@@ -93,6 +104,26 @@ class _SourceLocked(Exception):
     pass
 
 
+class _UnsafeFile(Exception):
+    pass
+
+
+class _NoAtimeUnavailable(Exception):
+    pass
+
+
+class _UnsafeDiagnostics(Exception):
+    pass
+
+
+class _PinnedSource:
+    def __init__(self, name: str, path: Path, descriptor: int, identity) -> None:
+        self.name = name
+        self.path = path
+        self.descriptor = descriptor
+        self.identity = identity
+
+
 def _pseudonym(value: Optional[str]) -> str:
     if not value:
         return "all"
@@ -117,6 +148,7 @@ def _empty_evidence(notebook_id: Optional[str]) -> Dict[str, Any]:
         "notebook_counts": [],
         "missing_fk_indexes": [],
         "delete_plan": [],
+        "source_file_plan": [],
         "relevant_scans": [],
         "degraded": [],
         "safety": {
@@ -233,17 +265,26 @@ def _safe_probe(
     return None
 
 
-def _file_identity(path: Path) -> Optional[Tuple[int, int, int, int]]:
+def _stat_identity(metadata) -> Tuple[int, int, int, int, int]:
+    return (
+        int(metadata.st_dev),
+        int(metadata.st_ino),
+        int(metadata.st_size),
+        int(metadata.st_mtime_ns),
+        int(metadata.st_ctime_ns),
+    )
+
+
+def _path_identity(path: Path):
     try:
-        stat = path.stat()
+        metadata = os.lstat(path)
     except FileNotFoundError:
         return None
-    return (int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns))
+    return _stat_identity(metadata)
 
 
-def _descriptor_identity(descriptor: int) -> Tuple[int, int, int, int]:
-    stat = os.fstat(descriptor)
-    return (int(stat.st_dev), int(stat.st_ino), int(stat.st_size), int(stat.st_mtime_ns))
+def _descriptor_identity(descriptor: int) -> Tuple[int, int, int, int, int]:
+    return _stat_identity(os.fstat(descriptor))
 
 
 def _source_paths(path: Path) -> Dict[str, Path]:
@@ -255,20 +296,96 @@ def _source_paths(path: Path) -> Dict[str, Path]:
     }
 
 
-def _capture_source_state(paths: Dict[str, Path]) -> Dict[str, Optional[Tuple[int, int, int, int]]]:
-    return {name: _file_identity(path) for name, path in paths.items()}
+def _capture_source_state(paths: Dict[str, Path]) -> Dict[str, Any]:
+    return {name: _path_identity(path) for name, path in paths.items()}
+
+
+def _validate_source_state(paths: Dict[str, Path]) -> Dict[str, Any]:
+    state: Dict[str, Any] = {}
+    for name, path in paths.items():
+        try:
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            if name == "database":
+                raise
+            state[name] = None
+            continue
+        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+            raise _UnsafeFile()
+        state[name] = _stat_identity(metadata)
+    return state
 
 
 def _set_file_evidence(evidence: Dict[str, Any], state) -> None:
     evidence["files"] = {
-        "database_bytes": int((state.get("database") or (0, 0, 0, 0))[2]),
-        "wal_bytes": int((state.get("wal") or (0, 0, 0, 0))[2]),
-        "shm_bytes": int((state.get("shm") or (0, 0, 0, 0))[2]),
+        "database_bytes": int((state.get("database") or (0, 0, 0, 0, 0))[2]),
+        "wal_bytes": int((state.get("wal") or (0, 0, 0, 0, 0))[2]),
+        "shm_bytes": int((state.get("shm") or (0, 0, 0, 0, 0))[2]),
     }
 
 
-def _acquire_source_read_lock(path: Path) -> int:
-    descriptor = os.open(path, os.O_RDONLY)
+def _pin_source_files(
+    paths: Dict[str, Path], state: Dict[str, Any]
+) -> Dict[str, _PinnedSource]:
+    if not _NOATIME_AVAILABLE or _NOATIME_FLAG is None:
+        raise _NoAtimeUnavailable()
+    flags = (
+        os.O_RDONLY
+        | _NOATIME_FLAG
+        | _NOFOLLOW_FLAG
+        | _NONBLOCK_FLAG
+        | _CLOEXEC_FLAG
+    )
+    pinned: Dict[str, _PinnedSource] = {}
+    try:
+        for name, path in paths.items():
+            expected = state.get(name)
+            if expected is None:
+                continue
+            try:
+                descriptor = os.open(path, flags)
+            except OSError as exc:
+                if exc.errno in {errno.EPERM, errno.EACCES} and _NOATIME_FLAG:
+                    raise _NoAtimeUnavailable() from exc
+                if exc.errno in {errno.ELOOP, errno.ENXIO}:
+                    raise _UnsafeFile() from exc
+                raise
+            metadata = os.fstat(descriptor)
+            identity = _stat_identity(metadata)
+            if not stat.S_ISREG(metadata.st_mode):
+                os.close(descriptor)
+                raise _UnsafeFile()
+            if identity != expected:
+                os.close(descriptor)
+                raise RuntimeError("source-changed")
+            pinned[name] = _PinnedSource(name, path, descriptor, identity)
+    except BaseException:
+        for source in pinned.values():
+            os.close(source.descriptor)
+        raise
+    return pinned
+
+
+def _close_pinned_sources(pinned: Dict[str, _PinnedSource]) -> None:
+    for source in pinned.values():
+        try:
+            os.close(source.descriptor)
+        except OSError:
+            pass
+
+
+def _pinned_sources_unchanged(pinned: Dict[str, _PinnedSource]) -> bool:
+    try:
+        return all(
+            _descriptor_identity(source.descriptor) == source.identity
+            and stat.S_ISREG(os.fstat(source.descriptor).st_mode)
+            for source in pinned.values()
+        )
+    except OSError:
+        return False
+
+
+def _acquire_source_read_lock(descriptor: int) -> None:
     try:
         fcntl.lockf(
             descriptor,
@@ -278,46 +395,27 @@ def _acquire_source_read_lock(path: Path) -> int:
             os.SEEK_SET,
         )
     except OSError as exc:
-        os.close(descriptor)
         if exc.errno in {errno.EACCES, errno.EAGAIN}:
             raise _SourceLocked() from exc
         raise
-    return descriptor
 
 
 def _release_source_read_lock(descriptor: int) -> None:
-    try:
-        fcntl.lockf(descriptor, fcntl.LOCK_UN, 1, _SHARED_FIRST, os.SEEK_SET)
-    finally:
-        os.close(descriptor)
+    fcntl.lockf(descriptor, fcntl.LOCK_UN, 1, _SHARED_FIRST, os.SEEK_SET)
 
 
-def _copy_source_file(
-    source: Path, target: Path, deadline: float, byte_limit: int
+def _copy_pinned_file(
+    source: _PinnedSource, target: Path, deadline: float, byte_limit: int
 ) -> int:
     copied = 0
-    with source.open("rb") as reader, target.open("xb") as writer:
-        while True:
-            _require_deadline(deadline)
-            chunk = reader.read(COPY_CHUNK_BYTES)
-            if not chunk:
-                break
-            if copied + len(chunk) > byte_limit:
-                raise ValueError("snapshot-byte-limit")
-            writer.write(chunk)
-            copied += len(chunk)
-    return copied
-
-
-def _copy_locked_database(
-    descriptor: int, target: Path, deadline: float, byte_limit: int
-) -> int:
-    copied = 0
-    os.lseek(descriptor, 0, os.SEEK_SET)
+    if source.identity[2] > byte_limit:
+        target.touch(mode=0o600, exist_ok=False)
+        raise ValueError("snapshot-byte-limit")
+    os.lseek(source.descriptor, 0, os.SEEK_SET)
     with target.open("xb") as writer:
         while True:
             _require_deadline(deadline)
-            chunk = os.read(descriptor, COPY_CHUNK_BYTES)
+            chunk = os.read(source.descriptor, COPY_CHUNK_BYTES)
             if not chunk:
                 break
             if copied + len(chunk) > byte_limit:
@@ -325,6 +423,130 @@ def _copy_locked_database(
             writer.write(chunk)
             copied += len(chunk)
     return copied
+
+
+def _open_diagnostics_directory(parent: Path) -> Tuple[Path, int, Any]:
+    directory = parent / "diagnostics"
+    try:
+        metadata = os.lstat(directory)
+    except FileNotFoundError:
+        try:
+            os.mkdir(directory, mode=0o700)
+        except FileExistsError:
+            pass
+        metadata = os.lstat(directory)
+    if (
+        stat.S_ISLNK(metadata.st_mode)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+    ):
+        raise _UnsafeDiagnostics()
+    flags = os.O_RDONLY | _DIRECTORY_FLAG | _NOFOLLOW_FLAG | _CLOEXEC_FLAG
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as exc:
+        raise _UnsafeDiagnostics() from exc
+    descriptor_metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISDIR(descriptor_metadata.st_mode)
+        or _stat_identity(descriptor_metadata) != _stat_identity(metadata)
+    ):
+        os.close(descriptor)
+        raise _UnsafeDiagnostics()
+    return directory, descriptor, (int(metadata.st_dev), int(metadata.st_ino))
+
+
+def _diagnostics_directory_unchanged(
+    directory: Path, descriptor: int, identity
+) -> bool:
+    try:
+        path_metadata = os.lstat(directory)
+        descriptor_metadata = os.fstat(descriptor)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(path_metadata.st_mode)
+        and not stat.S_ISLNK(path_metadata.st_mode)
+        and stat.S_ISDIR(descriptor_metadata.st_mode)
+        and (int(path_metadata.st_dev), int(path_metadata.st_ino)) == identity
+        and (int(descriptor_metadata.st_dev), int(descriptor_metadata.st_ino))
+        == identity
+    )
+
+
+def _cleanup_stale_workspaces(descriptor: int, deadline: float) -> None:
+    """Remove only old, owned workspaces containing known snapshot artifacts."""
+    now_ns = time.time_ns()
+    inspected = 0
+    try:
+        iterator = os.scandir(descriptor)
+    except OSError:
+        return
+    with iterator:
+        for entry in iterator:
+            name = entry.name
+            if not name.startswith("diag-db-"):
+                continue
+            if inspected >= MAX_STALE_WORKSPACES or time.monotonic() >= deadline:
+                return
+            inspected += 1
+            try:
+                metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                if (
+                    not stat.S_ISDIR(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or stat.S_IMODE(metadata.st_mode) & 0o077
+                    or now_ns - metadata.st_mtime_ns
+                    < STALE_WORKSPACE_AGE_SECONDS * 1_000_000_000
+                ):
+                    continue
+                child_flags = (
+                    os.O_RDONLY
+                    | _DIRECTORY_FLAG
+                    | _NOFOLLOW_FLAG
+                    | _CLOEXEC_FLAG
+                )
+                child = os.open(name, child_flags, dir_fd=descriptor)
+            except OSError:
+                continue
+            try:
+                allowed = {
+                    "snapshot.db",
+                    "snapshot.db-wal",
+                    "snapshot.db-shm",
+                    "snapshot.db-journal",
+                }
+                entries: List[str] = []
+                with os.scandir(child) as child_iterator:
+                    for child_entry in child_iterator:
+                        entries.append(child_entry.name)
+                        if len(entries) > len(allowed):
+                            break
+                if len(entries) > len(allowed) or any(
+                    item not in allowed for item in entries
+                ):
+                    continue
+                safe = True
+                for item in entries:
+                    item_metadata = os.stat(
+                        item, dir_fd=child, follow_symlinks=False
+                    )
+                    if not stat.S_ISREG(item_metadata.st_mode):
+                        safe = False
+                        break
+                if not safe:
+                    continue
+                for item in entries:
+                    os.unlink(item, dir_fd=child)
+            except OSError:
+                continue
+            finally:
+                os.close(child)
+            try:
+                os.rmdir(name, dir_fd=descriptor)
+            except OSError:
+                pass
 
 
 def _open_read_only(
@@ -479,7 +701,7 @@ def _collect_fk_evidence(
     tables: Sequence[Tuple[str, str]],
     deadline: float,
 ) -> List[Tuple[str, str, Tuple[str, ...]]]:
-    notebook_keys: List[Tuple[str, str, Tuple[str, ...]]] = []
+    notebook_columns: Dict[str, Tuple[str, List[str]]] = {}
     for raw_table, display_table in tables:
         if not _deadline_ok(evidence, "schema.foreign_keys", deadline):
             break
@@ -503,16 +725,23 @@ def _collect_fk_evidence(
             covered = any(
                 prefix[: len(raw_columns)] == raw_columns for prefix in prefixes
             )
-            if not covered and len(evidence["missing_fk_indexes"]) < MAX_MISSING_INDEXES:
-                evidence["missing_fk_indexes"].append(
-                    {
-                        "table": display_table,
-                        "columns": list(columns[:16]),
-                        "references": reference,
-                    }
-                )
+            if not covered:
+                if len(evidence["missing_fk_indexes"]) < MAX_MISSING_INDEXES:
+                    evidence["missing_fk_indexes"].append(
+                        {
+                            "table": display_table,
+                            "columns": list(columns[:16]),
+                            "references": reference,
+                        }
+                    )
+                else:
+                    _append_degraded(
+                        evidence,
+                        "schema.foreign_keys",
+                        "missing_index_limit",
+                        RuntimeError(),
+                    )
             if raw_reference == "notebooks":
-                notebook_keys.append((raw_table, display_table, raw_columns))
                 if len(evidence["notebook_references"]) < MAX_NOTEBOOK_REFERENCES:
                     evidence["notebook_references"].append(
                         {
@@ -521,22 +750,47 @@ def _collect_fk_evidence(
                             "indexed": covered,
                         }
                     )
-    return notebook_keys[:MAX_NOTEBOOK_REFERENCES]
+                else:
+                    _append_degraded(
+                        evidence,
+                        "schema.foreign_keys",
+                        "notebook_reference_limit",
+                        RuntimeError(),
+                    )
+                entry = notebook_columns.setdefault(raw_table, (display_table, []))
+                for raw_column in raw_columns:
+                    if raw_column not in entry[1]:
+                        entry[1].append(raw_column)
+    result = [
+        (raw_table, display, tuple(columns))
+        for raw_table, (display, columns) in notebook_columns.items()
+    ]
+    if len(result) > MAX_NOTEBOOK_REFERENCES:
+        _append_degraded(
+            evidence,
+            "schema.foreign_keys",
+            "notebook_reference_limit",
+            RuntimeError(),
+        )
+    return result[:MAX_NOTEBOOK_REFERENCES]
 
 
 def _count_table(
     connection: sqlite3.Connection,
     evidence: Dict[str, Any],
     raw_table: str,
-    raw_column: str,
+    raw_columns: Sequence[str],
     notebook_id: str,
     deadline: float,
 ) -> Optional[int]:
     def read():
+        predicate = " OR ".join(
+            f"{_quote_identifier(raw_column)} = ?" for raw_column in raw_columns
+        )
         row = connection.execute(
             f"SELECT COUNT(*) FROM {_quote_identifier(raw_table)} "
-            f"WHERE {_quote_identifier(raw_column)} = ?",
-            (notebook_id,),
+            f"WHERE {predicate}",
+            tuple(notebook_id for _column in raw_columns),
         ).fetchone()
         return 0 if row is None else max(0, int(row[0]))
 
@@ -553,6 +807,10 @@ def _collect_notebook_counts(
 ) -> None:
     if notebook_id is None:
         return
+    notebook_keys = list(notebook_keys)
+    key_columns = {
+        raw_table: columns for raw_table, _display, columns in notebook_keys
+    }
     seen = set()
     for table in _EXPLICIT_NOTEBOOK_TABLES:
         if not _deadline_ok(evidence, "notebook.count", deadline):
@@ -560,7 +818,12 @@ def _collect_notebook_counts(
         if table not in table_names:
             continue
         count = _count_table(
-            connection, evidence, table, "notebook_id", notebook_id, deadline
+            connection,
+            evidence,
+            table,
+            key_columns.get(table, ("notebook_id",)),
+            notebook_id,
+            deadline,
         )
         if count is not None:
             evidence["notebook_counts"].append({"table": table, "rows": count})
@@ -571,10 +834,10 @@ def _collect_notebook_counts(
         if len(evidence["notebook_counts"]) >= MAX_NOTEBOOK_COUNTS:
             _append_degraded(evidence, "notebook.count", "row_limit", RuntimeError())
             return
-        if len(columns) != 1 or raw_table in seen:
+        if not columns or raw_table in seen:
             continue
         count = _count_table(
-            connection, evidence, raw_table, columns[0], notebook_id, deadline
+            connection, evidence, raw_table, columns, notebook_id, deadline
         )
         if count is not None:
             evidence["notebook_counts"].append(
@@ -645,6 +908,43 @@ def _collect_plans(
                         {"table": display_table, "detail": detail}
                     )
                     break
+
+
+def _collect_source_file_plan(
+    connection: sqlite3.Connection,
+    evidence: Dict[str, Any],
+    notebook_id: Optional[str],
+    table_display: Dict[str, str],
+    deadline: float,
+) -> None:
+    parameter = notebook_id if notebook_id is not None else "{id}"
+
+    def explain():
+        cursor = connection.execute(
+            "EXPLAIN QUERY PLAN SELECT file_path FROM sources WHERE notebook_id = ?",
+            (parameter,),
+        )
+        return _fetch_limited(cursor, MAX_PLAN_ROWS, deadline)
+
+    result = _safe_probe(evidence, "plan.source_file_select", deadline, explain)
+    if result is None:
+        return
+    rows, truncated = result
+    if truncated:
+        _append_degraded(
+            evidence, "plan.source_file_select", "row_limit", RuntimeError()
+        )
+    for row in rows:
+        if not _deadline_ok(evidence, "plan.source_file_select", deadline):
+            return
+        evidence["source_file_plan"].append(
+            {
+                "probe": "source_file_select",
+                "id": int(row[0]),
+                "parent": int(row[1]),
+                "detail": _safe_plan_detail(row[3], table_display, str(parameter)),
+            }
+        )
 
 
 def _collect_largest_tables(
@@ -724,6 +1024,13 @@ def _collect_snapshot_evidence(
         table_display,
         deadline,
     )
+    _collect_source_file_plan(
+        connection,
+        evidence,
+        notebook_id,
+        table_display,
+        deadline,
+    )
     _collect_largest_tables(connection, evidence, deadline)
     evidence["safety"]["transaction_open"] = bool(connection.in_transaction)
 
@@ -772,30 +1079,59 @@ def collect_db_evidence(
         requested = 4.0
     deadline = time.monotonic() + max(0.001, min(requested, MAX_DEADLINE_SECONDS))
 
-    path = Path(db_path)
-    if not path.is_file():
-        _append_degraded(evidence, "open", "missing", FileNotFoundError())
-        return _bound_evidence(evidence)
-    path = path.resolve()
+    path = Path(os.path.abspath(os.fspath(db_path)))
     paths = _source_paths(path)
-    initial_state = _capture_source_state(paths)
-    _set_file_evidence(evidence, initial_state)
-    lock_descriptor: Optional[int] = None
     try:
+        initial_state = _validate_source_state(paths)
+    except FileNotFoundError as exc:
+        _append_degraded(evidence, "open", "missing", exc)
+        return _bound_evidence(evidence)
+    except _UnsafeFile as exc:
+        _append_degraded(evidence, "source.validation", "unsafe_file", exc)
+        return _bound_evidence(evidence)
+    _set_file_evidence(evidence, initial_state)
+    if not _NOATIME_AVAILABLE or _NOATIME_FLAG is None:
+        _append_degraded(
+            evidence, "source.open", "noatime_unavailable", _NoAtimeUnavailable()
+        )
+        return _bound_evidence(evidence)
+
+    pinned: Dict[str, _PinnedSource] = {}
+    lock_held = False
+    diagnostics_descriptor: Optional[int] = None
+    try:
+        try:
+            pinned = _pin_source_files(paths, initial_state)
+        except _NoAtimeUnavailable as exc:
+            _append_degraded(evidence, "source.open", "noatime_unavailable", exc)
+            return _bound_evidence(evidence)
+        except _UnsafeFile as exc:
+            _append_degraded(evidence, "source.open", "unsafe_file", exc)
+            return _bound_evidence(evidence)
+        except RuntimeError as exc:
+            if str(exc) == "source-changed":
+                return _bound_evidence(
+                    _discard_raced_evidence(
+                        evidence, notebook_id, _capture_source_state(paths)
+                    )
+                )
+            raise
+
+        before_state = _capture_source_state(paths)
+        _set_file_evidence(evidence, before_state)
+        if before_state != initial_state or not _pinned_sources_unchanged(pinned):
+            return _bound_evidence(
+                _discard_raced_evidence(evidence, notebook_id, before_state)
+            )
         if not _deadline_ok(evidence, "source.lock", deadline):
             return _bound_evidence(evidence)
         try:
-            lock_descriptor = _acquire_source_read_lock(path)
+            _acquire_source_read_lock(pinned["database"].descriptor)
+            lock_held = True
         except _SourceLocked as exc:
             _append_degraded(evidence, "source.lock", "locked", exc)
             return _bound_evidence(evidence)
 
-        before_state = _capture_source_state(paths)
-        _set_file_evidence(evidence, before_state)
-        if before_state.get("database") != _descriptor_identity(lock_descriptor):
-            return _bound_evidence(
-                _discard_raced_evidence(evidence, notebook_id, before_state)
-            )
         if before_state.get("journal") is not None:
             _append_degraded(
                 evidence,
@@ -805,7 +1141,7 @@ def collect_db_evidence(
             )
             return _bound_evidence(evidence)
         source_bytes = sum(
-            int((before_state.get(name) or (0, 0, 0, 0))[2])
+            int((before_state.get(name) or (0, 0, 0, 0, 0))[2])
             for name in ("database", "wal")
         )
         if source_bytes > MAX_SNAPSHOT_BYTES:
@@ -814,33 +1150,72 @@ def collect_db_evidence(
             )
             return _bound_evidence(evidence)
 
-        diagnostics_dir = path.parent / "diagnostics"
-        diagnostics_dir.mkdir(mode=0o700, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="diag-db-", dir=diagnostics_dir) as temporary:
-            snapshot = Path(temporary) / "snapshot.db"
-            copied = _copy_locked_database(
-                lock_descriptor, snapshot, deadline, MAX_SNAPSHOT_BYTES
+        try:
+            diagnostics_dir, diagnostics_descriptor, diagnostics_identity = (
+                _open_diagnostics_directory(path.parent)
             )
-            if before_state.get("wal") is not None:
-                copied += _copy_source_file(
-                    paths["wal"],
-                    Path(str(snapshot) + "-wal"),
-                    deadline,
-                    MAX_SNAPSHOT_BYTES - copied,
+        except _UnsafeDiagnostics as exc:
+            _append_degraded(
+                evidence, "diagnostics.directory", "unsafe_diagnostics", exc
+            )
+            return _bound_evidence(evidence)
+        _cleanup_stale_workspaces(diagnostics_descriptor, deadline)
+        if not _diagnostics_directory_unchanged(
+            diagnostics_dir, diagnostics_descriptor, diagnostics_identity
+        ):
+            _append_degraded(
+                evidence,
+                "diagnostics.directory",
+                "unsafe_diagnostics",
+                _UnsafeDiagnostics(),
+            )
+            return _bound_evidence(evidence)
+
+        with tempfile.TemporaryDirectory(
+            prefix="diag-db-", dir=diagnostics_dir
+        ) as temporary:
+            snapshot = Path(temporary) / "snapshot.db"
+            middle_state = before_state
+            try:
+                copied = _copy_pinned_file(
+                    pinned["database"], snapshot, deadline, MAX_SNAPSHOT_BYTES
                 )
-            evidence["safety"]["snapshot_used"] = True
-            evidence["safety"]["snapshot_bytes"] = copied
-            middle_state = _capture_source_state(paths)
-            if middle_state != before_state:
-                return _bound_evidence(
-                    _discard_raced_evidence(evidence, notebook_id, middle_state)
-                )
+                if "wal" in pinned:
+                    copied += _copy_pinned_file(
+                        pinned["wal"],
+                        Path(str(snapshot) + "-wal"),
+                        deadline,
+                        MAX_SNAPSHOT_BYTES - copied,
+                    )
+                evidence["safety"]["snapshot_used"] = True
+                evidence["safety"]["snapshot_bytes"] = copied
+                middle_state = _capture_source_state(paths)
+                if (
+                    middle_state != before_state
+                    or not _pinned_sources_unchanged(pinned)
+                    or not _diagnostics_directory_unchanged(
+                        diagnostics_dir,
+                        diagnostics_descriptor,
+                        diagnostics_identity,
+                    )
+                ):
+                    return _bound_evidence(
+                        _discard_raced_evidence(evidence, notebook_id, middle_state)
+                    )
+            finally:
+                if lock_held:
+                    _release_source_read_lock(pinned["database"].descriptor)
+                    lock_held = False
 
             connection: Optional[sqlite3.Connection] = None
             try:
                 connection = _open_read_only(snapshot, deadline)
                 remaining_ms = max(
-                    1, min(MAX_BUSY_TIMEOUT_MS, int((deadline - time.monotonic()) * 1000))
+                    1,
+                    min(
+                        MAX_BUSY_TIMEOUT_MS,
+                        int((deadline - time.monotonic()) * 1000),
+                    ),
                 )
                 evidence["safety"]["busy_timeout_ms"] = remaining_ms
                 _collect_snapshot_evidence(connection, evidence, notebook_id, deadline)
@@ -854,10 +1229,15 @@ def collect_db_evidence(
                         connection.set_progress_handler(None, 0)
                         connection.close()
                     except sqlite3.DatabaseError as exc:
-                        _append_degraded(evidence, "snapshot.close", _error_category(exc), exc)
+                        _append_degraded(
+                            evidence,
+                            "snapshot.close",
+                            _error_category(exc),
+                            exc,
+                        )
 
             after_state = _capture_source_state(paths)
-            if after_state != before_state:
+            if after_state != before_state or not _pinned_sources_unchanged(pinned):
                 return _bound_evidence(
                     _discard_raced_evidence(evidence, notebook_id, after_state)
                 )
@@ -873,8 +1253,11 @@ def collect_db_evidence(
         )
         _append_degraded(evidence, "snapshot", category, exc)
     finally:
-        if lock_descriptor is not None:
-            _release_source_read_lock(lock_descriptor)
+        if lock_held and "database" in pinned:
+            _release_source_read_lock(pinned["database"].descriptor)
+        if diagnostics_descriptor is not None:
+            os.close(diagnostics_descriptor)
+        _close_pinned_sources(pinned)
     return _bound_evidence(evidence)
 
 

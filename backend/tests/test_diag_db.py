@@ -4,6 +4,7 @@ import ast
 import hashlib
 import importlib.util
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -11,29 +12,39 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+import pytest
+
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "diag_db.py"
 PYTHON = Path(sys.executable)
 
 
-def load_diag_db():
+def load_diag_db(*, allow_unsafe_noatime_for_logic_tests=True):
     spec = importlib.util.spec_from_file_location("diag_db", SCRIPT)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    if allow_unsafe_noatime_for_logic_tests and not hasattr(os, "O_NOATIME"):
+        # macOS has no O_NOATIME. Logic tests inject an ordinary descriptor
+        # opener; dedicated atime tests exercise the real fail-closed path.
+        module._NOATIME_AVAILABLE = True
+        module._NOATIME_FLAG = 0
     return module
 
 
 def file_fingerprint(path: Path):
     try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
         stat = path.stat()
         return {
             "size": stat.st_size,
+            "atime_ns": stat.st_atime_ns,
             "mtime_ns": stat.st_mtime_ns,
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "ctime_ns": stat.st_ctime_ns,
+            "sha256": digest,
         }
     except FileNotFoundError:
         return None
@@ -44,6 +55,14 @@ def database_fingerprints(path: Path):
         suffix or "database": file_fingerprint(Path(str(path) + suffix))
         for suffix in ("", "-wal", "-shm")
     }
+
+
+def set_detectable_old_atime(path: Path):
+    metadata = path.stat()
+    os.utime(
+        path,
+        ns=(metadata.st_mtime_ns - 7 * 24 * 3600 * 1_000_000_000, metadata.st_mtime_ns),
+    )
 
 
 @contextmanager
@@ -180,6 +199,10 @@ def test_collects_read_only_cascade_index_plan_and_scale_evidence(tmp_path):
             "kg_objects_fts_delete",
             "chunks_fts_delete",
         }
+        assert evidence["source_file_plan"]
+        assert {
+            row["probe"] for row in evidence["source_file_plan"]
+        } == {"source_file_select"}
         counts = {row["table"]: row["rows"] for row in evidence["notebook_counts"]}
         assert counts["knowledge_embeddings"] == 1
         assert counts["kg_objects_fts"] == 1
@@ -215,6 +238,108 @@ def test_delete_journal_exclusive_lock_honors_short_deadline_without_changes(tmp
         encoded = json.dumps(evidence)
         assert "database is locked" not in encoded.lower()
         assert "nb-private" not in encoded
+
+
+def test_fifo_wal_is_rejected_without_blocking(tmp_path):
+    db_path = tmp_path / "fifo.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("CREATE TABLE notebooks (id TEXT PRIMARY KEY)")
+    wal_path = Path(str(db_path) + "-wal")
+    if wal_path.exists():
+        wal_path.unlink()
+    os.mkfifo(wal_path)
+
+    started = time.monotonic()
+    process = subprocess.Popen(
+        [str(PYTHON), str(SCRIPT), "--db", str(db_path), "--deadline-seconds", "0.05"],
+        cwd=REPO,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={},
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=0.25)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        raise AssertionError("FIFO sidecar caused a blocking read")
+
+    assert time.monotonic() - started < 0.25
+    assert process.returncode == 0
+    assert "unsafe_file" in stdout
+    assert stderr == ""
+
+
+@pytest.mark.parametrize("suffix", ["", "-wal", "-shm", "-journal"])
+def test_symlink_database_or_sidecar_is_rejected(tmp_path, suffix):
+    real_db = tmp_path / "real.db"
+    with sqlite3.connect(real_db) as connection:
+        connection.execute("CREATE TABLE notebooks (id TEXT PRIMARY KEY)")
+    db_path = tmp_path / "probe.db"
+    if suffix:
+        db_path.write_bytes(real_db.read_bytes())
+        target = tmp_path / f"target{suffix}"
+        target.write_bytes(b"not a source sidecar")
+        Path(str(db_path) + suffix).symlink_to(target)
+    else:
+        db_path.symlink_to(real_db)
+
+    diag_db = load_diag_db(allow_unsafe_noatime_for_logic_tests=False)
+    evidence = diag_db.collect_db_evidence(db_path, deadline_seconds=0.05)
+
+    assert evidence["evidence_complete"] is False
+    assert any(row["category"] == "unsafe_file" for row in evidence["degraded"])
+    assert evidence["delete_plan"] == []
+
+
+def test_source_atime_mtime_and_hash_are_unchanged(tmp_path):
+    db_path = tmp_path / "atime.db"
+    with held_database(db_path, "WAL"):
+        paths = [db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm")]
+        before_hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+        for path in paths:
+            set_detectable_old_atime(path)
+        before_stats = {
+            path: (path.stat().st_atime_ns, path.stat().st_mtime_ns) for path in paths
+        }
+
+        diag_db = load_diag_db(allow_unsafe_noatime_for_logic_tests=False)
+        evidence = diag_db.collect_db_evidence(db_path)
+
+        after_stats = {
+            path: (path.stat().st_atime_ns, path.stat().st_mtime_ns) for path in paths
+        }
+        after_hashes = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+        assert after_stats == before_stats
+        assert after_hashes == before_hashes
+        if not hasattr(os, "O_NOATIME"):
+            assert any(
+                row["category"] == "noatime_unavailable"
+                for row in evidence["degraded"]
+            )
+            assert evidence["delete_plan"] == []
+
+
+def test_rollback_journal_metadata_and_hash_are_unchanged(tmp_path):
+    db_path = tmp_path / "journal-atime.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks (id TEXT PRIMARY KEY)")
+    journal = Path(str(db_path) + "-journal")
+    journal.write_bytes(b"inert journal sentinel")
+    before_hash = hashlib.sha256(journal.read_bytes()).hexdigest()
+    set_detectable_old_atime(journal)
+    before = (journal.stat().st_atime_ns, journal.stat().st_mtime_ns)
+
+    diag_db = load_diag_db(allow_unsafe_noatime_for_logic_tests=False)
+    evidence = diag_db.collect_db_evidence(db_path)
+
+    after = (journal.stat().st_atime_ns, journal.stat().st_mtime_ns)
+    after_hash = hashlib.sha256(journal.read_bytes()).hexdigest()
+    assert after == before
+    assert after_hash == before_hash
+    assert evidence["evidence_complete"] is False
 
 
 def test_live_wal_analysis_never_changes_source_database_or_sidecars(tmp_path):
@@ -336,6 +461,75 @@ def test_committed_fk_change_during_snapshot_discards_stale_evidence(tmp_path, m
     assert evidence["missing_fk_indexes"] == []
 
 
+def test_replace_copy_restore_wal_is_detected_by_pinned_identity(tmp_path, monkeypatch):
+    db_path = tmp_path / "wal-swap.db"
+    writer = sqlite3.connect(db_path)
+    writer.execute("PRAGMA journal_mode = WAL")
+    writer.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    writer.commit()
+    wal_path = Path(str(db_path) + "-wal")
+    older_wal = wal_path.read_bytes()
+    writer.execute(
+        "CREATE TABLE newest_children(notebook_id TEXT REFERENCES notebooks(id))"
+    )
+    writer.commit()
+
+    diag_db = load_diag_db()
+    original_copy = diag_db._copy_pinned_file
+    swapped = False
+
+    def race_copy(source, *args, **kwargs):
+        nonlocal swapped
+        if source.name == "wal" and not swapped:
+            swapped = True
+            saved = tmp_path / "newest.wal"
+            os.replace(wal_path, saved)
+            wal_path.write_bytes(older_wal)
+            try:
+                return original_copy(source, *args, **kwargs)
+            finally:
+                wal_path.unlink()
+                os.replace(saved, wal_path)
+        return original_copy(source, *args, **kwargs)
+
+    monkeypatch.setattr(diag_db, "_copy_pinned_file", race_copy)
+    try:
+        evidence = diag_db.collect_db_evidence(db_path)
+    finally:
+        writer.close()
+
+    assert swapped is True
+    assert evidence["evidence_complete"] is False
+    assert any(row["category"] == "source_changed" for row in evidence["degraded"])
+    assert evidence["delete_plan"] == []
+
+
+def test_dual_notebook_foreign_keys_count_unique_rows(tmp_path):
+    db_path = tmp_path / "dual-fk.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(
+            """
+            CREATE TABLE notebooks(id TEXT PRIMARY KEY);
+            CREATE TABLE notebook_bases(
+                notebook_id TEXT REFERENCES notebooks(id),
+                base_notebook_id TEXT REFERENCES notebooks(id)
+            );
+            INSERT INTO notebooks VALUES ('nb-private');
+            INSERT INTO notebooks VALUES ('nb-other');
+            INSERT INTO notebook_bases VALUES ('nb-private', 'nb-other');
+            INSERT INTO notebook_bases VALUES ('nb-other', 'nb-private');
+            INSERT INTO notebook_bases VALUES ('nb-private', 'nb-private');
+            """
+        )
+    diag_db = load_diag_db()
+
+    evidence = diag_db.collect_db_evidence(db_path, notebook_id="nb-private")
+    counts = {row["table"]: row["rows"] for row in evidence["notebook_counts"]}
+
+    assert counts["notebook_bases"] == 3
+
+
 def test_fresh_migrated_schema_compiles_all_notebook_delete_statements(
     tmp_path, monkeypatch
 ):
@@ -363,6 +557,83 @@ def test_fresh_migrated_schema_compiles_all_notebook_delete_statements(
     assert not [row for row in evidence["degraded"] if row["probe"].startswith("plan.")]
 
 
+def test_unsafe_diagnostics_symlink_is_never_followed(tmp_path):
+    db_path = tmp_path / "diagnostics-link.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "diagnostics").symlink_to(outside, target_is_directory=True)
+    diag_db = load_diag_db()
+
+    evidence = diag_db.collect_db_evidence(db_path)
+
+    assert evidence["evidence_complete"] is False
+    assert any(row["category"] == "unsafe_diagnostics" for row in evidence["degraded"])
+    assert list(outside.iterdir()) == []
+
+
+def test_stale_cleanup_removes_only_owned_known_snapshot_artifacts(tmp_path):
+    db_path = tmp_path / "stale-cleanup.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    diagnostics = tmp_path / "diagnostics"
+    diagnostics.mkdir(mode=0o700)
+    safe = diagnostics / "diag-db-safe"
+    safe.mkdir(mode=0o700)
+    (safe / "snapshot.db").write_bytes(b"old snapshot")
+    hostile = diagnostics / "diag-db-hostile"
+    hostile.mkdir(mode=0o700)
+    outside = tmp_path / "outside-sentinel"
+    outside.write_bytes(b"keep")
+    (hostile / "snapshot.db").symlink_to(outside)
+    old = time.time_ns() - 2 * 24 * 60 * 60 * 1_000_000_000
+    os.utime(safe, ns=(old, old))
+    os.utime(hostile, ns=(old, old))
+    diag_db = load_diag_db()
+
+    diag_db.collect_db_evidence(db_path)
+
+    assert not safe.exists()
+    assert hostile.exists()
+    assert (hostile / "snapshot.db").is_symlink()
+    assert outside.read_bytes() == b"keep"
+
+
+def test_source_lock_is_released_before_snapshot_analysis(tmp_path, monkeypatch):
+    db_path = tmp_path / "early-unlock.db"
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+    diag_db = load_diag_db()
+    original_open = diag_db._open_read_only
+    writer_result = None
+
+    def probe_open(*args, **kwargs):
+        nonlocal writer_result
+        code = (
+            "import sqlite3,sys;"
+            "c=sqlite3.connect(sys.argv[1],timeout=.1);"
+            "c.execute('BEGIN EXCLUSIVE');"
+            "c.rollback();c.close();print('acquired')"
+        )
+        writer_result = subprocess.run(
+            [str(PYTHON), "-c", code, str(db_path)],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(diag_db, "_open_read_only", probe_open)
+    evidence = diag_db.collect_db_evidence(db_path)
+
+    assert writer_result is not None
+    assert writer_result.returncode == 0, writer_result.stderr
+    assert writer_result.stdout.strip() == "acquired"
+    assert evidence["mutations_executed"] == 0
+
+
 def test_schema_identifiers_and_evidence_are_sanitized_and_bounded(tmp_path):
     db_path = tmp_path / "hostile-schema.db"
     hostile = "private\nidentifier_" + "x" * 500
@@ -383,23 +654,45 @@ def test_schema_identifiers_and_evidence_are_sanitized_and_bounded(tmp_path):
     assert any(row["category"] == "identifier_sanitized" for row in evidence["degraded"])
 
 
+def test_missing_index_and_reference_caps_report_truncation(tmp_path, monkeypatch):
+    db_path = tmp_path / "many-fks.db"
+    diag_db = load_diag_db()
+    monkeypatch.setattr(diag_db, "MAX_MISSING_INDEXES", 2)
+    monkeypatch.setattr(diag_db, "MAX_NOTEBOOK_REFERENCES", 2)
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
+        for index in range(4):
+            connection.execute(
+                f"CREATE TABLE child_{index}(notebook_id TEXT REFERENCES notebooks(id))"
+            )
+
+    evidence = diag_db.collect_db_evidence(db_path)
+    categories = {row["category"] for row in evidence["degraded"]}
+
+    assert "missing_index_limit" in categories
+    assert "notebook_reference_limit" in categories
+
+
 def test_snapshot_copy_helper_enforces_remaining_aggregate_budget(tmp_path):
     diag_db = load_diag_db()
     source = tmp_path / "source-wal"
     target = tmp_path / "snapshot-wal"
     source.write_bytes(b"123456")
 
+    descriptor = os.open(source, os.O_RDONLY)
     try:
-        diag_db._copy_source_file(
-            source,
-            target,
-            time.monotonic() + 1,
-            4,
+        pinned = diag_db._PinnedSource(
+            "wal", source, descriptor, diag_db._descriptor_identity(descriptor)
         )
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("copy must reject bytes beyond the remaining aggregate cap")
+        with pytest.raises(ValueError):
+            diag_db._copy_pinned_file(
+                pinned,
+                target,
+                time.monotonic() + 1,
+                4,
+            )
+    finally:
+        os.close(descriptor)
 
     assert target.stat().st_size <= 4
 
@@ -468,6 +761,7 @@ def test_script_is_stdlib_only_and_contains_no_mutating_sql():
         "os",
         "pathlib",
         "sqlite3",
+        "stat",
         "sys",
         "tempfile",
         "time",
