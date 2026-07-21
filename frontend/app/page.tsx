@@ -92,9 +92,9 @@ import {
   type ModelServicesStatus,
   type ServiceForm,
   type StatusModelRole,
-  buildPutPayload,
   fetchModelServiceStatus,
   fetchModelSettings,
+  modelSettingsForms,
   saveModelSettings,
   testAllCurrentModelServices,
   testCurrentModelService,
@@ -106,6 +106,7 @@ import {
   acceptModelServiceStatusSnapshot,
   applyModelServiceTestResult,
   deriveModelServiceSummaryView,
+  prepareModelSettingsSave,
   type ModelTestActivity,
 } from "./model-service-orchestration.ts";
 import { AuthGate } from "./AuthGate";
@@ -3660,10 +3661,7 @@ export default function Home() {
     void refreshModelStatus();
     try {
       const view = await fetchModelSettings();
-      const forms = Object.fromEntries(MODEL_ROLES.map((r) => [r, {
-        base_url: view[r].base_url, model: view[r].model,
-        api_key: "", keyDirty: false,
-      }])) as Record<ModelRole, ServiceForm>;
+      const forms = modelSettingsForms(view);
       if (requestId === modelPanelRequestRef.current) setModelForms(forms);
     } catch (e) {
       if (requestId === modelPanelRequestRef.current) {
@@ -3683,19 +3681,16 @@ export default function Home() {
   async function saveModelPanel() {
     const coordinator = modelTestCoordinatorRef.current;
     if (!modelForms || modelPanelSavingRef.current || coordinator.hasInFlight()) return;
+    const payload = prepareModelSettingsSave(modelForms);
+    if (!payload) return;
     modelPanelSavingRef.current = true;
     coordinator.invalidateConfiguration();
     setModelTesting({});
     modelStatusRequestRef.current += 1;
     setModelPanelSaving(true);
     try {
-      const view = await saveModelSettings(buildPutPayload(modelForms));
-      setModelForms(Object.fromEntries(MODEL_ROLES.map((role) => [role, {
-        base_url: view[role].base_url,
-        model: view[role].model,
-        api_key: "",
-        keyDirty: false,
-      }])) as Record<ModelRole, ServiceForm>);
+      const view = await saveModelSettings(payload);
+      setModelForms(modelSettingsForms(view));
       await refreshModelStatus();
       setToast("模型服务配置已保存");
     } catch (e) {

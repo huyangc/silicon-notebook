@@ -155,6 +155,10 @@ export function ModelServicePanel({
   );
   const anyRoleTesting = Object.values(testingRoles).some(Boolean);
   const anyDraftTesting = Object.values(draftTestingRoles).some(Boolean);
+  const anyFormDirty = MODEL_ROLES.some((role) => {
+    const form = forms[role];
+    return form.baseUrlDirty || form.modelDirty || form.keyDirty;
+  });
 
   useEffect(() => {
     if (highlightedRole) {
@@ -295,14 +299,22 @@ export function ModelServicePanel({
                       value={form.base_url}
                       disabled={saving}
                       placeholder={BASE_URL_PLACEHOLDERS[role]}
-                      onChange={(event) => onFormChange(role, { ...form, base_url: event.target.value })}
+                      onChange={(event) => onFormChange(role, {
+                        ...form,
+                        base_url: event.target.value,
+                        baseUrlDirty: true,
+                      })}
                     />
                   </label>
                   <label>Model
                     <input
                       value={form.model}
                       disabled={saving}
-                      onChange={(event) => onFormChange(role, { ...form, model: event.target.value })}
+                      onChange={(event) => onFormChange(role, {
+                        ...form,
+                        model: event.target.value,
+                        modelDirty: true,
+                      })}
                     />
                   </label>
                   <label>API Key
@@ -349,7 +361,7 @@ export function ModelServicePanel({
             <button
               type="button"
               className="new-pill"
-              disabled={saving || allTesting || anyRoleTesting || anyDraftTesting}
+              disabled={!anyFormDirty || saving || allTesting || anyRoleTesting || anyDraftTesting}
               onClick={onSave}
             >
               {saving ? "保存中…" : "保存"}

@@ -13,7 +13,14 @@ import {
 
 
 function form(): ServiceForm {
-  return { base_url: "https://models.example/v1", model: "draft-model", api_key: "", keyDirty: false };
+  return {
+    base_url: "https://models.example/v1",
+    model: "draft-model",
+    api_key: "",
+    baseUrlDirty: false,
+    modelDirty: false,
+    keyDirty: false,
+  };
 }
 
 const forms = Object.fromEntries(MODEL_ROLES.map((role) => [role, form()])) as Record<ModelRole, ServiceForm>;
@@ -90,6 +97,71 @@ test("renders dynamic saved model status and a read-only embedding row without p
 });
 
 
+test("unchanged forms disable Save while any dirty field enables it", () => {
+  const unchanged = renderPanel();
+  expect(screen.getByRole("button", { name: "保存" })).toBeDisabled();
+  unchanged.unmount();
+
+  const dirtyForms = {
+    ...forms,
+    llm: { ...forms.llm, modelDirty: true },
+  };
+  renderPanel({ forms: dirtyForms });
+  expect(screen.getByRole("button", { name: "保存" })).toBeEnabled();
+});
+
+
+test("Base URL edits mark only the Base URL field dirty", () => {
+  const onFormChange = vi.fn();
+  renderPanel({ onFormChange });
+  const llm = screen.getByRole("group", { name: "主模型" });
+
+  fireEvent.change(within(llm).getByLabelText("Base URL"), {
+    target: { value: "https://changed.example/v1" },
+  });
+
+  expect(onFormChange).toHaveBeenCalledWith("llm", {
+    ...forms.llm,
+    base_url: "https://changed.example/v1",
+    baseUrlDirty: true,
+  });
+});
+
+
+test("model edits mark only the model field dirty", () => {
+  const onFormChange = vi.fn();
+  renderPanel({ onFormChange });
+  const llm = screen.getByRole("group", { name: "主模型" });
+
+  fireEvent.change(within(llm).getByLabelText("Model"), {
+    target: { value: "changed-model" },
+  });
+
+  expect(onFormChange).toHaveBeenCalledWith("llm", {
+    ...forms.llm,
+    model: "changed-model",
+    modelDirty: true,
+  });
+});
+
+
+test("API Key edits mark only the key field dirty", () => {
+  const onFormChange = vi.fn();
+  renderPanel({ onFormChange });
+  const llm = screen.getByRole("group", { name: "主模型" });
+
+  fireEvent.change(within(llm).getByLabelText("API Key"), {
+    target: { value: "changed-secret" },
+  });
+
+  expect(onFormChange).toHaveBeenCalledWith("llm", {
+    ...forms.llm,
+    api_key: "changed-secret",
+    keyDirty: true,
+  });
+});
+
+
 test("renders the page-owned all-model lock until the orchestrator releases it", async () => {
   let resolveAll!: () => void;
   const onTestAll = vi.fn(() => new Promise<void>((resolve) => { resolveAll = resolve; }));
@@ -133,7 +205,9 @@ test("focuses a dialog control by default and closes on Escape", async () => {
 
 test("traps Tab focus within the modal", async () => {
   const user = userEvent.setup();
-  renderPanel();
+  renderPanel({
+    forms: { ...forms, llm: { ...forms.llm, modelDirty: true } },
+  });
 
   const close = screen.getByRole("button", { name: "关闭模型服务" });
   const save = screen.getByRole("button", { name: "保存" });
@@ -230,7 +304,10 @@ test("renders page-owned per-role locks and preserves them across panel remount"
   let resolveTest!: () => void;
   const onTestCurrent = vi.fn(() => new Promise<void>((resolve) => { resolveTest = resolve; }));
   const user = userEvent.setup();
-  const { props, rerender, unmount } = renderPanel({ onTestCurrent });
+  const { props, rerender, unmount } = renderPanel({
+    onTestCurrent,
+    forms: { ...forms, llm: { ...forms.llm, modelDirty: true } },
+  });
 
   await user.click(screen.getAllByRole("button", { name: "测试当前使用" })[0]);
   expect(onTestCurrent).toHaveBeenCalledTimes(1);

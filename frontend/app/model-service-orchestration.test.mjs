@@ -7,6 +7,7 @@ import {
   applyModelServiceTestResult,
   deriveModelServiceSummaryView,
 } from "./model-service-orchestration.ts";
+import { MODEL_ROLES } from "./model-settings.ts";
 
 
 function status(service, serviceStatus, overrides = {}) {
@@ -244,4 +245,37 @@ test("save or reopen invalidates every draft completion", () => {
   coordinator.finish(llm);
   coordinator.finish(rerank);
   assert.equal(coordinator.hasInFlight(), false);
+});
+
+
+test("save preparation skips no-op state and preserves sparse tab patches and clears", async () => {
+  const orchestration = await import("./model-service-orchestration.ts");
+  assert.equal(typeof orchestration.prepareModelSettingsSave, "function");
+  const makeForms = (overrides = {}) => Object.fromEntries(MODEL_ROLES.map((role) => [
+    role,
+    {
+      base_url: "https://saved.example/v1",
+      model: "saved-model",
+      api_key: "",
+      baseUrlDirty: false,
+      modelDirty: false,
+      keyDirty: false,
+      ...overrides[role],
+    },
+  ]));
+  const coordinator = new ModelTestCoordinator();
+  const draft = coordinator.beginDraft("llm");
+  assert.ok(draft);
+
+  assert.equal(orchestration.prepareModelSettingsSave(makeForms()), null);
+  assert.equal(coordinator.isCurrent(draft), true);
+
+  const tabA = orchestration.prepareModelSettingsSave(makeForms({
+    llm: { model: "tab-a", modelDirty: true },
+  }));
+  const tabB = orchestration.prepareModelSettingsSave(makeForms({
+    rerank: { base_url: "", baseUrlDirty: true },
+  }));
+  assert.deepEqual(tabA, { llm: { model: "tab-a" } });
+  assert.deepEqual(tabB, { rerank: { base_url: "" } });
 });

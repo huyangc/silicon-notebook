@@ -1,11 +1,14 @@
 import {
   MODEL_ROLE_LABELS,
   STATUS_MODEL_ROLES,
+  buildPutPayload,
   mergeModelServiceStatus,
   summarizeModelServices,
   type ModelRole,
+  type ModelSettingsPatch,
   type ModelServiceStatusItem,
   type ModelServicesStatus,
+  type ServiceForm,
   type StatusModelRole,
 } from "./model-settings.ts";
 
@@ -156,6 +159,14 @@ export type ModelTestActivity = {
   drafts: Partial<Record<ModelRole, boolean>>;
   all: boolean;
 };
+
+
+export function prepareModelSettingsSave(
+  forms: Record<ModelRole, ServiceForm>,
+): ModelSettingsPatch | null {
+  const payload = buildPutPayload(forms);
+  return Object.keys(payload).length > 0 ? payload : null;
+}
 
 
 export class ModelTestCoordinator {

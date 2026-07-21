@@ -37,18 +37,48 @@ export type ModelServiceStatusItem = {
 
 export type ModelServicesStatus = { services: ModelServiceStatusItem[] };
 
-// 表单态：api_key 用单独的「已改动」标记，未改动则 PUT 时省略以保留原 key。
-export type ServiceForm = { base_url: string; model: string; api_key: string; keyDirty: boolean };
+// 表单态：每个可编辑字段单独记录是否改动；未改动字段 PUT 时省略。
+export type ServiceForm = {
+  base_url: string;
+  model: string;
+  api_key: string;
+  baseUrlDirty: boolean;
+  modelDirty: boolean;
+  keyDirty: boolean;
+};
 
-export function buildPutPayload(forms: Record<ModelRole, ServiceForm>) {
-  const out: Record<string, { base_url: string; model: string; api_key?: string }> = {};
+export type ModelServicePatch = Partial<{
+  base_url: string;
+  model: string;
+  api_key: string;
+}>;
+
+export type ModelSettingsPatch = Partial<Record<ModelRole, ModelServicePatch>>;
+
+export function modelSettingsForms(
+  view: ModelSettingsView,
+): Record<ModelRole, ServiceForm> {
+  return Object.fromEntries(MODEL_ROLES.map((role) => [role, {
+    base_url: view[role].base_url,
+    model: view[role].model,
+    api_key: "",
+    baseUrlDirty: false,
+    modelDirty: false,
+    keyDirty: false,
+  }])) as Record<ModelRole, ServiceForm>;
+}
+
+export function buildPutPayload(
+  forms: Record<ModelRole, ServiceForm>,
+): ModelSettingsPatch {
+  const out: ModelSettingsPatch = {};
   for (const role of MODEL_ROLES) {
     const f = forms[role];
-    const svc: { base_url: string; model: string; api_key?: string } = {
-      base_url: f.base_url.trim(), model: f.model.trim(),
-    };
+    const svc: ModelServicePatch = {};
+    if (f.baseUrlDirty) svc.base_url = f.base_url.trim();
+    if (f.modelDirty) svc.model = f.model.trim();
     if (f.keyDirty) svc.api_key = f.api_key;   // 改动了才发；"" 表示清除
-    out[role] = svc;
+    if (Object.keys(svc).length > 0) out[role] = svc;
   }
   return out;
 }
