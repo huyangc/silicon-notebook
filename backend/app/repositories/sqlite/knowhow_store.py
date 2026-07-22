@@ -776,7 +776,12 @@ class KnowhowStore:
         版本管理（spec §5）：records ``row_add`` in the same transaction —
         ``cells`` is the caller-supplied initial content (``{}`` for a bare
         row) and ``code`` is always ``[]`` (a brand-new row cannot already
-        carry a code attachment)."""
+        carry a code attachment). ``created_at`` (Task 8 fix round P3) is
+        this row's real creation timestamp, carried so a future ``row_
+        delete``'s payload — and any ``revert`` that has to rebuild this row
+        via ``_rebuild_row`` — restores the SAME timestamp rather than
+        stamping a fresh ``now()`` at rebuild time; keeps the ``row_add``/
+        ``row_delete`` payload shapes identical (spec §4.4)."""
         row_id = self.new_id("khrow")
         now = self.now()
         with self.database.write() as db:
@@ -802,7 +807,7 @@ class KnowhowStore:
                 db, new_id=self.new_id, now=self.now, table_id=table_id,
                 kind="row_add",
                 payload={"rows": [{
-                    "row_id": row_id, "position": position,
+                    "row_id": row_id, "position": position, "created_at": now,
                     "cells": written_cells, "code": [],
                 }]},
                 actor=actor, origin=origin,
@@ -850,14 +855,21 @@ class KnowhowStore:
 
         版本管理（spec §5）：CASCADE means the row's cells and code
         attachments are gone the instant the DELETE below commits, so
-        EVERYTHING needed to rebuild the row (its position, every cell, every
-        code attachment) is read BEFORE the DELETE and stored in the
-        ``row_delete`` payload — the only way this change stays reversible.
-        The silent no-op above is preserved verbatim: nothing was deleted,
-        so nothing is recorded."""
+        EVERYTHING needed to rebuild the row (its position, ``created_at``,
+        every cell, every code attachment) is read BEFORE the DELETE and
+        stored in the ``row_delete`` payload — the only way this change
+        stays reversible. ``created_at`` (Task 8 fix round P3) is the row's
+        REAL creation timestamp, not the delete-time ``now()`` — without it,
+        ``_rebuild_row`` had no choice but to stamp the moment of rebuild,
+        so "revert to that point in time" silently lied about when the row
+        was actually created (the fingerprint doesn't cover this column, so
+        the post-revert guard couldn't see the drift either, but
+        ``get_knowhow_table`` hands the wrong value straight to the
+        frontend). The silent no-op above is preserved verbatim: nothing was
+        deleted, so nothing is recorded."""
         with self.database.write() as db:
             row = db.execute(
-                "SELECT id, table_id, position FROM knowhow_rows WHERE id = ?",
+                "SELECT id, table_id, position, created_at FROM knowhow_rows WHERE id = ?",
                 (row_id,),
             ).fetchone()
             if row is None:
@@ -883,6 +895,7 @@ class KnowhowStore:
                 kind="row_delete",
                 payload={"rows": [{
                     "row_id": row["id"], "position": row["position"],
+                    "created_at": row["created_at"],
                     "cells": cells, "code": code,
                 }]},
                 actor=actor, origin=origin,

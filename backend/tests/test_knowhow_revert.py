@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.core.config import Settings
@@ -327,3 +329,260 @@ def test_revert_of_a_revert_with_row_and_column_both_removed_and_overlapping(
     assert col2 not in payload["rows_removed"][0]["cells"]
     col2_cells = {c["row_id"]: c["content_md"] for c in payload["columns_removed"][0]["cells"]}
     assert col2_cells[row2] == "R2-on-C2"
+
+
+# ---------------------------------------------------------------------------
+# Task 8 修复轮（评审发现的问题）回归测试。
+#
+# 问题 1（P0）：_revert_payload 的行/列定义必须取 head/target 侧的真实状态，
+# 不能从"事件那一刻"折叠——折叠会把区间内的过渡态误当成 head/target 真值
+# 写进 payload，多级回退时后置指纹校验失败（甚至更隐蔽：静默写坏历史，
+# 只有下一次"回退的回退"才会暴露）。三条测试分别覆盖三种触发这个折叠 bug
+# 的操作：改名、改内容类型、anchor 移动（含"提升到区间内新建的列"这个更刁
+# 钻的子场景）。
+# ---------------------------------------------------------------------------
+
+
+def test_revert_of_a_revert_across_a_column_rename_uses_head_side_name(store, hist, notebook_id):
+    """精确复现评审报告的失败序列：建列"旧" → 改名"新" → 回退 → 再回退。
+
+    旧实现（事件折叠）在第三级回退时抛 ``RevertVerifyFailed``：第一次回退
+    产生的 revert 流水（下面的 seq4）里，``columns_removed[0].column.name``
+    被错误地折叠成列被创建时的名字"旧"，而不是 head 侧（seq3 时）真实的
+    "新"；第二次回退（回退的回退）拿这个错误定义重建列，指纹自然对不上。
+    新实现直接比较两侧真实快照，不存在这个折叠步骤。
+    """
+    table_id = store.create_knowhow_table(
+        notebook_id, "表", "", [{"name": "概念", "role": "anchor"}]
+    )
+    col = store.add_knowhow_column(table_id, "旧", "attribute")  # seq2
+    store.rename_knowhow_column(col, "新")  # seq3
+    head3 = hist.head_seq(table_id)
+    assert head3 == 3
+
+    result4 = hist.revert_to(table_id, 1, head3)  # -> seq4：回到列还不存在的那一刻
+    head4 = hist.head_seq(table_id)
+    remaining = [c["id"] for c in store.get_knowhow_table(table_id)["columns"]]
+    assert col not in remaining, '"旧"/"新"那一列必须已被回退删除，只剩建表自带的锚列'
+
+    # payload 必须存 head（seq3）侧的真实定义"新"，不是创建时的"旧"。
+    revert4 = hist.get_change(table_id, result4["seq"])
+    assert revert4["payload"]["columns_removed"][0]["column"]["name"] == "新", (
+        "revert 流水的 columns_removed 必须存 head 侧真实列名，不是事件折叠出的创建时名字"
+    )
+
+    hist.revert_to(table_id, 3, head4)  # 三级回退：回退的回退，重建该列
+
+    names = {c["id"]: c["name"] for c in store.get_knowhow_table(table_id)["columns"]}
+    assert names[col] == "新", "回退的回退必须恢复 head 侧真实列名"
+
+
+def test_revert_of_a_revert_across_a_column_kind_change_uses_head_side_role(store, hist, notebook_id):
+    """同一类折叠 bug 的第二种触发方式：``set_knowhow_column_kind``。"""
+    table_id = store.create_knowhow_table(
+        notebook_id, "表", "", [{"name": "概念", "role": "anchor"}]
+    )
+    col = store.add_knowhow_column(table_id, "字段", "attribute")  # seq2
+    store.set_knowhow_column_kind(col, "entity")  # seq3
+    head3 = hist.head_seq(table_id)
+
+    result4 = hist.revert_to(table_id, 1, head3)  # -> seq4
+    head4 = hist.head_seq(table_id)
+
+    revert4 = hist.get_change(table_id, result4["seq"])
+    assert revert4["payload"]["columns_removed"][0]["column"]["role"] == "entity", (
+        "columns_removed 必须存 head 侧真实 role（entity），不是创建时的 attribute"
+    )
+
+    hist.revert_to(table_id, 3, head4)  # 三级回退
+
+    roles = {c["id"]: c["role"] for c in store.get_knowhow_table(table_id)["columns"]}
+    assert roles[col] == "entity"
+
+
+def test_revert_of_a_revert_across_an_anchor_promotion_of_a_newly_added_column(
+    store, hist, notebook_id
+):
+    """第三种触发方式——评审实测会炸的场景：anchor 提升到区间内新建的列。
+
+    B 列在区间内先被创建（role=attribute），随后被提升为 anchor（同时把原
+    anchor 列 A 降级为 attribute）。两级回退（先回到 B 还不存在的那一刻，
+    再回退回来）必须让 A/B 的 role 都精确复原——旧实现的"首次/末次遇到"折叠
+    对"先诞生、又被另一种事件（anchor_set）改动"的列会算错。
+    """
+    table_id = store.create_knowhow_table(
+        notebook_id, "表", "", [{"name": "概念", "role": "anchor"}]
+    )
+    anchor_a = store.get_knowhow_table(table_id)["columns"][0]["id"]
+    before_add = hist.head_seq(table_id)  # seq1：B 还不存在，A 是 anchor
+
+    col_b = store.add_knowhow_column(table_id, "B", "attribute")  # seq2
+    store.set_knowhow_anchor_column(table_id, col_b)  # seq3：B 提升为 anchor，A 降级
+    head3 = hist.head_seq(table_id)
+
+    hist.revert_to(table_id, before_add, head3)  # -> seq4：回到 B 还不存在的那一刻
+    head4 = hist.head_seq(table_id)
+    detail = store.get_knowhow_table(table_id)
+    assert [c["id"] for c in detail["columns"]] == [anchor_a]
+    assert detail["columns"][0]["role"] == "anchor"
+
+    hist.revert_to(table_id, head3, head4)  # 三级回退：重建 B，且 B 必须带着 anchor 角色
+
+    detail = store.get_knowhow_table(table_id)
+    by_id = {c["id"]: c for c in detail["columns"]}
+    assert by_id[anchor_a]["role"] == "attribute", "A 必须仍是降级后的 attribute，不是折叠误判的原值"
+    assert by_id[col_b]["role"] == "anchor", "B 重建时必须带着 anchor 角色，不是它创建时的 attribute"
+
+
+# ---------------------------------------------------------------------------
+# 问题 2（P1）：后置指纹守卫此前零测试覆盖（既有的
+# test_out_of_band_edit_is_detected_and_refused 测的是前置守卫）。这里直接
+# 改坏一条已落库流水的 payload（模拟"流水被损坏/被手工编辑"），跨越它回退，
+# 断言后置守卫拦截且整表分毫不变。
+# ---------------------------------------------------------------------------
+
+
+def test_corrupted_payload_before_value_fails_post_replay_verification_and_leaves_table_untouched(
+    repo, store, hist, table
+):
+    row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
+    store.update_knowhow_cell(row, table["plain"], "第一版")
+    good = hist.head_seq(table["id"])
+    store.update_knowhow_cell(row, table["plain"], "第二版")
+    corrupt_seq = hist.head_seq(table["id"])
+    store.update_knowhow_cell(row, table["plain"], "第三版")
+    head = hist.head_seq(table["id"])
+
+    # 绕过 store 直接改一条已落库流水的 payload——模拟流水被损坏/被手工编辑。
+    with repo._runtime.database.write() as db:
+        row_data = db.execute(
+            "SELECT payload_json FROM knowhow_changes WHERE table_id = ? AND seq = ?",
+            (table["id"], corrupt_seq),
+        ).fetchone()
+        payload = json.loads(row_data["payload_json"])
+        payload["cells"][0]["before"] = "被篡改的值"
+        db.execute(
+            "UPDATE knowhow_changes SET payload_json = ? WHERE table_id = ? AND seq = ?",
+            (json.dumps(payload), table["id"], corrupt_seq),
+        )
+
+    before_fp = _fp(repo, table["id"])
+    with pytest.raises(RevertVerifyFailed):
+        hist.revert_to(table["id"], good, head)
+
+    assert _fp(repo, table["id"]) == before_fp, "后置校验失败必须整事务回滚，表分毫不变"
+    assert store.get_knowhow_table(table["id"])["rows"][0]["cells"][table["plain"]] == "第三版", (
+        "回滚之后必须还是回退前的最新内容"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 问题 3（P1）：None（格子不存在）与 ""（空串）必须被 _write_cell 严格区分
+# ——三态往返（不存在 → "" → 真实内容）逐点回退都要准确，且"不存在"那一点
+# 上 knowhow_cells 里真的不能有这一行（不是巧合地读出空字符串）。
+# ---------------------------------------------------------------------------
+
+
+def test_cell_none_empty_and_content_round_trip_through_revert(repo, store, hist, table):
+    def _cell_row_exists(row_id, column_id):
+        with repo._runtime.database.connect() as db:
+            return db.execute(
+                "SELECT 1 FROM knowhow_cells WHERE row_id = ? AND column_id = ?",
+                (row_id, column_id),
+            ).fetchone() is not None
+
+    row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
+    absent_seq = hist.head_seq(table["id"])
+    absent_fp = _fp(repo, table["id"])
+    assert not _cell_row_exists(row, table["plain"]), "刚建行时这个格子还没写过，不该有行"
+
+    store.update_knowhow_cell(row, table["plain"], "")
+    empty_seq = hist.head_seq(table["id"])
+    empty_fp = _fp(repo, table["id"])
+    assert _cell_row_exists(row, table["plain"]), "写过空串之后格子行必须存在（写了值，只是值是空串）"
+
+    store.update_knowhow_cell(row, table["plain"], "真实内容")
+    content_seq = hist.head_seq(table["id"])
+    content_fp = _fp(repo, table["id"])
+
+    # 回退到"空串"
+    hist.revert_to(table["id"], empty_seq, hist.head_seq(table["id"]))
+    assert store.get_knowhow_table(table["id"])["rows"][0]["cells"][table["plain"]] == ""
+    assert _fp(repo, table["id"]) == empty_fp
+    assert _cell_row_exists(row, table["plain"]), "空串状态下格子行必须存在"
+
+    # 回退到"不存在"
+    hist.revert_to(table["id"], absent_seq, hist.head_seq(table["id"]))
+    detail = store.get_knowhow_table(table["id"])
+    assert table["plain"] not in detail["rows"][0]["cells"], (
+        "格子不存在时不能出现在 cells 字典里（get_knowhow_table 的稀疏格约定）"
+    )
+    assert _fp(repo, table["id"]) == absent_fp
+    assert not _cell_row_exists(row, table["plain"]), (
+        "回退到「不存在」那一点时，knowhow_cells 里不该有这一行"
+    )
+
+    # 再回到"真实内容"那一点（content_seq 是固定 seq 号，不受中途两次 revert
+    # 追加的新流水影响；expected_head 用当前 head，即上一次回退产生的流水）。
+    hist.revert_to(table_id := table["id"], content_seq, hist.head_seq(table_id))
+    assert store.get_knowhow_table(table["id"])["rows"][0]["cells"][table["plain"]] == "真实内容"
+    assert _fp(repo, table["id"]) == content_fp
+    assert _cell_row_exists(row, table["plain"])
+
+
+# ---------------------------------------------------------------------------
+# 问题 4（P2）：前置指纹守卫必须排在 head==target 早退之前——否则一张被
+# 越权改脏的表做"回退到当前点"（target_seq == expected_head_seq == head）
+# 会绕过守卫直接返回成功。
+# ---------------------------------------------------------------------------
+
+
+def test_out_of_band_edit_is_detected_even_when_target_equals_head(repo, store, hist, table):
+    row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
+    store.update_knowhow_cell(row, table["plain"], "正常内容")
+    head = hist.head_seq(table["id"])
+
+    # 绕过 store 直接改库——模拟"某条写路径漏挂钩"。
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE knowhow_cells SET content_md = '偷偷改的' "
+            "WHERE row_id = ? AND column_id = ?",
+            (row, table["plain"]),
+        )
+
+    with pytest.raises(HistoryInconsistent):
+        # target_seq == expected_head_seq == head：早退分支必须先过前置守卫，
+        # 不能让"回退到当前点"绕过它静默放行。
+        hist.revert_to(table["id"], head, head)
+
+    assert store.get_knowhow_table(table["id"])["rows"][0]["cells"][table["plain"]] == "偷偷改的", (
+        "拒绝回退时必须什么都不改"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 问题 5（P3）：row_delete 的 payload 必须存原始 created_at，_rebuild_row
+# 必须照原样恢复——不能让"回退"把行的创建时间悄悄改写成重建那一刻的
+# now()。指纹不覆盖 created_at（spec §4.3），直接改库不会触碰前后置守卫；
+# 用一个 now() 绝不可能产生的旧时间戳，避免 _now() 只有秒精度导致"重建
+# 时间"与"原始创建时间"在同一次测试运行内巧合相等、让测试失去鉴别力。
+# ---------------------------------------------------------------------------
+
+
+def test_revert_rebuilds_a_deleted_row_with_its_original_created_at(repo, store, hist, table):
+    row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
+    with repo._runtime.database.write() as db:
+        db.execute(
+            "UPDATE knowhow_rows SET created_at = ? WHERE id = ?",
+            ("2001-01-01T00:00:00", row),
+        )
+    good = hist.head_seq(table["id"])
+
+    store.delete_knowhow_row(row)
+    hist.revert_to(table["id"], good, hist.head_seq(table["id"]))
+
+    rebuilt = store.get_knowhow_table(table["id"])["rows"][0]
+    assert rebuilt["id"] == row
+    assert rebuilt["created_at"] == "2001-01-01T00:00:00", (
+        "回退重建的行必须保留真实的创建时间，不是重建那一刻的 now()"
+    )
