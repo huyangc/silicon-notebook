@@ -3234,10 +3234,11 @@ class SQLiteRepository:
     # --- API) build directly on these exact names/signatures.
     def create_knowhow_table(
         self, notebook_id: str, title: str, description: str, columns: list,
-        created_by: str = "",
+        created_by: str = "", actor: str = "", origin: str = "user",
     ) -> str:
         return self._runtime.knowhow_store.create_knowhow_table(
-            notebook_id, title, description, columns, created_by
+            notebook_id, title, description, columns, created_by,
+            actor=actor, origin=origin,
         )
 
     def list_knowhow_tables(self, notebook_id: str) -> list:
@@ -3247,10 +3248,18 @@ class SQLiteRepository:
         return self._runtime.knowhow_store.get_knowhow_table(table_id)
 
     def add_knowhow_row(
-        self, table_id: str, cells: dict, position: Optional[int] = None
+        self, table_id: str, cells: dict, position: Optional[int] = None,
+        actor: str = "", origin: str = "user",
     ) -> str:
         return self._runtime.knowhow_store.add_knowhow_row(
-            table_id, cells, position
+            table_id, cells, position, actor=actor, origin=origin,
+        )
+
+    def add_knowhow_rows(
+        self, table_id: str, rows: list, actor: str = "", origin: str = "user",
+    ) -> list:
+        return self._runtime.knowhow_store.add_knowhow_rows(
+            table_id, rows, actor=actor, origin=origin,
         )
 
     def update_knowhow_cell(
@@ -3269,8 +3278,13 @@ class SQLiteRepository:
             row_ids, column_id, content_md, require_assets, actor=actor, origin=origin
         )
 
-    def update_knowhow_cells_bulk_guarded(self, notebook_id: str, updates: list) -> dict:
-        return self._runtime.knowhow_store.update_knowhow_cells_bulk_guarded(notebook_id, updates)
+    def update_knowhow_cells_bulk_guarded(
+        self, notebook_id: str, updates: list,
+        actor: str = "", origin: str = "user",
+    ) -> dict:
+        return self._runtime.knowhow_store.update_knowhow_cells_bulk_guarded(
+            notebook_id, updates, actor=actor, origin=origin,
+        )
 
     def update_knowhow_cells_guarded_atomic(
         self,
@@ -3347,36 +3361,55 @@ class SQLiteRepository:
     def update_knowhow_table_meta(
         self, table_id: str, title: Optional[str] = None,
         description: Optional[str] = None,
+        actor: str = "", origin: str = "user",
     ) -> None:
         return self._runtime.knowhow_store.update_knowhow_table_meta(
-            table_id, title, description
+            table_id, title, description, actor=actor, origin=origin,
         )
 
     def set_knowhow_anchor_column(
-        self, table_id: str, column_id: Optional[str]
+        self, table_id: str, column_id: Optional[str],
+        actor: str = "", origin: str = "user",
     ) -> Optional[str]:
         return self._runtime.knowhow_store.set_knowhow_anchor_column(
-            table_id, column_id
+            table_id, column_id, actor=actor, origin=origin,
         )
 
     def add_knowhow_column(
-        self, table_id: str, name: str, kind: str, position: Optional[int] = None
+        self, table_id: str, name: str, kind: str, position: Optional[int] = None,
+        actor: str = "", origin: str = "user",
     ) -> str:
         return self._runtime.knowhow_store.add_knowhow_column(
-            table_id, name, kind, position
+            table_id, name, kind, position, actor=actor, origin=origin,
         )
 
-    def rename_knowhow_column(self, column_id: str, name: str) -> None:
-        return self._runtime.knowhow_store.rename_knowhow_column(column_id, name)
+    def rename_knowhow_column(
+        self, column_id: str, name: str, actor: str = "", origin: str = "user",
+    ) -> None:
+        return self._runtime.knowhow_store.rename_knowhow_column(
+            column_id, name, actor=actor, origin=origin,
+        )
 
-    def set_knowhow_column_kind(self, column_id: str, kind: str) -> None:
-        return self._runtime.knowhow_store.set_knowhow_column_kind(column_id, kind)
+    def set_knowhow_column_kind(
+        self, column_id: str, kind: str, actor: str = "", origin: str = "user",
+    ) -> None:
+        return self._runtime.knowhow_store.set_knowhow_column_kind(
+            column_id, kind, actor=actor, origin=origin,
+        )
 
-    def delete_knowhow_column(self, column_id: str) -> None:
-        return self._runtime.knowhow_store.delete_knowhow_column(column_id)
+    def delete_knowhow_column(
+        self, column_id: str, actor: str = "", origin: str = "user",
+    ) -> None:
+        return self._runtime.knowhow_store.delete_knowhow_column(
+            column_id, actor=actor, origin=origin,
+        )
 
-    def delete_knowhow_row(self, row_id: str) -> None:
-        return self._runtime.knowhow_store.delete_knowhow_row(row_id)
+    def delete_knowhow_row(
+        self, row_id: str, actor: str = "", origin: str = "user",
+    ) -> None:
+        return self._runtime.knowhow_store.delete_knowhow_row(
+            row_id, actor=actor, origin=origin,
+        )
 
     def validate_cell_target(self, row_id: str, column_id: str) -> None:
         return self._runtime.knowhow_store.validate_cell_target(row_id, column_id)
@@ -3384,16 +3417,22 @@ class SQLiteRepository:
     def upsert_knowhow_cell_code(
         self, row_id: str, column_id: str, code_text: str, language: str,
         updated_by: str, cell_content_hash: str,
+        actor: str = "", origin: str = "user",
     ) -> str:
         return self._runtime.knowhow_store.upsert_knowhow_cell_code(
-            row_id, column_id, code_text, language, updated_by, cell_content_hash
+            row_id, column_id, code_text, language, updated_by, cell_content_hash,
+            actor=actor, origin=origin,
         )
 
     def get_knowhow_cell_code(self, row_id: str, column_id: str) -> Optional[dict]:
         return self._runtime.knowhow_store.get_knowhow_cell_code(row_id, column_id)
 
-    def delete_knowhow_cell_code(self, row_id: str, column_id: str) -> None:
-        return self._runtime.knowhow_store.delete_knowhow_cell_code(row_id, column_id)
+    def delete_knowhow_cell_code(
+        self, row_id: str, column_id: str, actor: str = "", origin: str = "user",
+    ) -> None:
+        return self._runtime.knowhow_store.delete_knowhow_cell_code(
+            row_id, column_id, actor=actor, origin=origin,
+        )
 
     def list_knowhow_cell_code(self, table_id: str) -> list:
         return self._runtime.knowhow_store.list_knowhow_cell_code(table_id)

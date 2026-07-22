@@ -165,9 +165,12 @@ async def delete_agent_cell_code(row_id: str, column_id: str, request: Request) 
     async with user_or_agent_scope(
         request, location["notebook_id"], "knowhow:code", write=True,
         not_found_detail="Row not found",
-    ):
+    ) as actor:
         try:
-            await run_in_threadpool(knowhow_api.delete_cell_code, repo, row_id, column_id)
+            await run_in_threadpool(
+                knowhow_api.delete_cell_code, repo, row_id, column_id,
+                actor=actor.actor_label,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except KeyError:

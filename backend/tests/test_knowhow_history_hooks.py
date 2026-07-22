@@ -1,11 +1,25 @@
 from __future__ import annotations
 
+import io
+
 import pytest
+from openpyxl import Workbook
 
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.repositories.sqlite import knowhow_fingerprint
 from app.services.sqlite_repository import SQLiteRepository
+
+
+def _xlsx_bytes(header: list[str], rows: list[list[str]]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.append(header)
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 @pytest.fixture
@@ -513,3 +527,90 @@ def test_cell_code_delete_records_the_fingerprint_of_the_state_after_the_write(r
     change = hist.list_changes(table["id"], limit=1)[0]
     assert change["kind"] == "cell_code_delete"
     assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
+
+
+# ---------------------------------------------------------------------------
+# Task 13: 表复制/移动只记一条 table_create 创世流水，历史本身不随传输走
+# （spec §7.3）。
+# ---------------------------------------------------------------------------
+
+
+def test_copied_table_gets_a_genesis_change_naming_its_source(repo, store, notebook_id, table):
+    from app.services.knowhow import transfer as kh_transfer
+
+    other = repo.create_notebook(
+        NotebookCreate(name="目标", purpose="p", primary_domain="d")
+    ).id
+    new_id = kh_transfer.copy_table(repo, table["id"], other, "user-1")
+
+    hist = repo._runtime.knowhow_history_store
+    changes = hist.list_changes(new_id, limit=10)
+    assert len(changes) == 1
+    assert changes[0]["kind"] == "table_create"
+    assert "复制" in changes[0]["note"]
+    assert hist.list_changes(table["id"], limit=100), "源表历史不受影响"
+
+
+def test_moved_table_gets_a_genesis_change_saying_it_moved_here(repo, store, notebook_id, table):
+    """同一份 note 措辞契约的反面：move_table 内部也是靠 copy_table 落的目标
+    表，但 verb 必须换成"移动"——两者共用同一段落地逻辑，唯独这一个字不能
+    共用，否则用户在被搬空的源表原地看到的却是"复制而来"的措辞。"""
+    from app.services.knowhow import transfer as kh_transfer
+
+    other = repo.create_notebook(
+        NotebookCreate(name="目标2", purpose="p", primary_domain="d")
+    ).id
+    new_id = kh_transfer.move_table(repo, table["id"], other, "user-1")
+
+    hist = repo._runtime.knowhow_history_store
+    changes = hist.list_changes(new_id, limit=10)
+    assert len(changes) == 1
+    assert changes[0]["kind"] == "table_create"
+    assert "移动" in changes[0]["note"]
+
+
+# ---------------------------------------------------------------------------
+# Task 13 (spec §5.4 + task-8-report 的已知缺口)：commit_append 追加导入的
+# 整批新行必须记成一条 import_append，不是逐行 row_add——否则回退引擎
+# _apply_before 的 import_append 分支（Task 8 就写好了，但因为从没人产出过
+# 这种流水，至今不可达、未经验证）永远测不到。这条测试首次让它被真实触达：
+# 追加导入 N 行 -> 回退到追加之前 -> 那 N 行必须全部消失，既有行原样还在。
+# ---------------------------------------------------------------------------
+
+
+def test_commit_append_records_one_import_append_and_revert_removes_all_new_rows(
+    repo, store, hist, table,
+):
+    from app.services.knowhow.api import commit_append, to_wire_table
+
+    wire_table = to_wire_table(repo.get_knowhow_table(table["id"]))
+    head_before = hist.head_seq(table["id"])
+
+    # table fixture's second column is named 做法 (see this module's own
+    # `table` fixture above), so the file header must match it BY NAME for
+    # _align_rows_to_table_columns to land the values (not report it as
+    # unmatched).
+    data = _xlsx_bytes(
+        ["概念", "做法"],
+        [["新概念一", "做法一"], ["新概念二", "做法二"], ["新概念三", "做法三"]],
+    )
+    added = commit_append(repo, table["id"], wire_table, "append.xlsx", data)
+    assert added == 3
+
+    changes = hist.list_changes(table["id"], limit=20)
+    import_changes = [c for c in changes if c["kind"] == "import_append"]
+    assert len(import_changes) == 1, "整批新行必须是一条 import_append，不是逐行 row_add"
+    assert len(import_changes[0]["payload"]["rows"]) == 3
+    assert not any(c["kind"] == "row_add" for c in changes if c["seq"] > head_before), (
+        "追加导入之后不该再出现任何 row_add——那正是这条流水要消灭的逐行噪声"
+    )
+
+    detail = repo.get_knowhow_table(table["id"])
+    assert len(detail["rows"]) == 3 + 2  # 既有 row_a/row_b + 新追加的 3 行
+
+    hist.revert_to(table["id"], head_before, hist.head_seq(table["id"]), actor="user-1")
+
+    reverted = repo.get_knowhow_table(table["id"])
+    assert {r["id"] for r in reverted["rows"]} == {table["row_a"], table["row_b"]}, (
+        "回退后追加导入的 3 行必须全部消失，既有的 row_a/row_b 必须原样还在"
+    )
