@@ -414,3 +414,28 @@ def test_http_delete_notebook_route_removes_asset_file_and_dir(tmp_path, monkeyp
     assert resp.status_code == 204, resp.text
     assert not asset_file.exists()
     assert not asset_dir.exists()
+
+
+def test_content_strings_in_payload_rejects_unregistered_kind():
+    """content_strings_in_payload must fail fast on unknown kind to prevent
+    silent asset reference leaks from future kinds that carry cell content
+    but forget to register here."""
+    from app.repositories.sqlite.knowhow_history_store import (
+        content_strings_in_payload,
+    )
+
+    # Known kinds pass (even if they produce empty lists)
+    for kind in (
+        "cell_update", "revert", "row_add", "import_append", "row_delete",
+        "table_create", "column_delete", "column_add", "column_rename",
+        "column_kind", "anchor_set", "table_meta", "cell_code_put",
+        "cell_code_delete", "autolink",
+    ):
+        result = content_strings_in_payload(kind, {})
+        assert isinstance(result, list), f"kind={kind} should return a list"
+
+    # Unknown kind raises
+    with pytest.raises(ValueError) as exc_info:
+        content_strings_in_payload("unknown_kind_future_breach", {})
+    assert "未登记的 kind" in str(exc_info.value)
+    assert "unknown_kind_future_breach" in str(exc_info.value)
