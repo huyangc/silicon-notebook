@@ -211,10 +211,26 @@ def _sqlite_persistence_construction_sites_from_sources(
                     bindings.extend(pattern_bindings(nested))
             return bindings
 
+        def static_assignment_pairs(target, value):
+            if isinstance(target, ast.Name):
+                return [(target.id, target, value)]
+            if (
+                isinstance(target, (ast.Tuple, ast.List))
+                and isinstance(value, (ast.Tuple, ast.List))
+                and len(target.elts) == len(value.elts)
+            ):
+                return [
+                    pair
+                    for target_item, value_item in zip(target.elts, value.elts)
+                    for pair in static_assignment_pairs(target_item, value_item)
+                ]
+            return []
+
         class ScopeCollector(ast.NodeVisitor):
             def __init__(self) -> None:
                 self.imports: list[tuple[str, str, ast.AST]] = []
                 self.bindings: list[tuple[str, ast.AST]] = []
+                self.assignments: list[tuple[str, ast.AST, ast.AST]] = []
 
             def visit_Import(self, node: ast.Import) -> None:
                 for imported in node.names:
@@ -258,6 +274,26 @@ def _sqlite_persistence_construction_sites_from_sources(
             def visit_Name(self, node: ast.Name) -> None:
                 if isinstance(node.ctx, ast.Store):
                     self.bindings.append((node.id, node))
+
+            def visit_Assign(self, node: ast.Assign) -> None:
+                for target in node.targets:
+                    self.assignments.extend(
+                        static_assignment_pairs(target, node.value)
+                    )
+                self.generic_visit(node)
+
+            def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+                if node.value is not None:
+                    self.assignments.extend(
+                        static_assignment_pairs(node.target, node.value)
+                    )
+                self.generic_visit(node)
+
+            def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+                self.assignments.extend(
+                    static_assignment_pairs(node.target, node.value)
+                )
+                self.generic_visit(node)
 
             def visit_ExceptHandler(self, node: ast.ExceptHandler) -> None:
                 if node.name:
@@ -308,10 +344,12 @@ def _sqlite_persistence_construction_sites_from_sources(
                     record(node, label)
                 return
             if isinstance(node, ast.Attribute):
+                resolved = resolve(node, aliases)
                 if (name := constructor_name(node, aliases)):
                     record(node, name)
+                elif label := taint_label(resolved):
+                    record(node, label)
                 else:
-                    resolved = resolve(node, aliases)
                     head = dotted_name(node).partition(".")[0]
                     if aliases.get(head) != "app" or sqlite_namespace(resolved):
                         scan_expr(node.value, aliases)
@@ -439,8 +477,23 @@ def _sqlite_persistence_construction_sites_from_sources(
                     if label and value != chosen:
                         record(node, label)
                 aliases[name] = chosen
+            navigation_names: set[str] = set()
+            changed = True
+            while changed:
+                changed = False
+                for name, _, value in collector.assignments:
+                    resolved = resolve(value, aliases)
+                    if not navigation_namespace(resolved):
+                        continue
+                    if name not in aliases:
+                        aliases[name] = resolved
+                        changed = True
+                    if aliases.get(name) == resolved:
+                        navigation_names.add(name)
             for name, binding in (*parameters, *collector.bindings):
                 if name in aliases:
+                    if name in navigation_names:
+                        continue
                     if label := taint_label(aliases[name]):
                         record(binding, label)
                     aliases.pop(name)
@@ -824,6 +877,86 @@ def test_sqlite_construction_guard_preserves_navigation_across_mixed_imports(sou
 def test_sqlite_construction_guard_allows_navigation_alias_runtime_values(source):
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/navigation_control.py": source}
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "label"),
+    [
+        (
+            "import app.repositories as repos\nconsume(repos.sqlite.database)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "from app import repositories as repos\n"
+            "dbmod = repos.sqlite.database\n",
+            "SqliteDatabase",
+        ),
+        (
+            "import app.services as services\n"
+            "consume(services.sqlite_repository)\n",
+            "*",
+        ),
+        (
+            "import app.repositories as repos\nconsume(repos.sqlite)\n",
+            "*",
+        ),
+    ],
+)
+def test_sqlite_construction_guard_rejects_qualified_module_values(source, label):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/navigation_module_escape.py": source}
+    ) == [f"app/navigation_module_escape.py:2:{label}"]
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "other = repos",
+        "other: object = repos",
+        "(other := repos)",
+        "first = other = repos",
+        "other, services_alias = repos, services",
+        "[other, services_alias] = [repos, services]",
+        "a = repos\nother = a",
+    ],
+)
+def test_sqlite_construction_guard_propagates_navigation_aliases(binding):
+    source = (
+        "import app.repositories as repos\n"
+        "import app.services as services\n"
+        f"{binding}\n"
+        "other.sqlite.database.SqliteDatabase(settings, root)\n"
+    )
+    line = 5 if "\n" in binding else 4
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/navigation_alias_escape.py": source}
+    ) == [f"app/navigation_alias_escape.py:{line}:SqliteDatabase"]
+
+
+def test_sqlite_construction_guard_keeps_navigation_class_locals_out_of_children():
+    source = (
+        "import app.repositories as repos\n"
+        "class Outer:\n"
+        "    Alias = repos\n"
+        "    def method(self):\n"
+        "        consume(Alias.sqlite.database)\n"
+        "    class Nested:\n"
+        "        consume(Alias.sqlite.database)\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/navigation_class_control.py": source}
+    ) == []
+
+
+def test_sqlite_construction_guard_allows_postgres_navigation():
+    source = (
+        "import app.repositories as repos\n"
+        "store = repos\n"
+        "store.postgres.knowledge_store.KnowledgeStore(settings)\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/postgres_navigation_control.py": source}
     ) == []
 
 
