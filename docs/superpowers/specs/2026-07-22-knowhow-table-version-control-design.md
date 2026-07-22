@@ -132,13 +132,14 @@ CREATE INDEX IF NOT EXISTS idx_knowhow_milestones_table
 {"cells": [{"row_id": "...", "column_id": "...",
             "before": "旧 md 或 null(格子当时不存在)", "after": "新 md"}]}
 
-// row_add / import_append —— before 为空
-{"rows": [{"row_id": "...", "position": 3,
+// row_add / import_append —— before 为空；created_at 是这行真实的创建时间
+{"rows": [{"row_id": "...", "position": 3, "created_at": "...",
            "cells": {"<column_id>": "md"},
            "code":  [{"column_id": "...", "code_text": "...", "language": "py",
                       "cell_content_hash": "...", "updated_by": "..."}]}]}
 
 // row_delete —— after 为空；必须存整行所有格子 + 代码附件（CASCADE 会带走它们）
+// + created_at（同 row_add，重建时原样恢复，不是重建那一刻的 now()）
 {"rows": [ /* 同 row_add 形状 */ ]}
 
 // column_add —— before 为空

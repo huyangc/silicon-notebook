@@ -290,6 +290,15 @@ class KnowhowHistoryStore:
         前置/后置两道指纹守卫是这个方法的核心：delta 重放的正确性不能靠
         "看起来对"，必须被独立判据证明。任一守卫不过就中止（前置）或
         整事务回滚（后置），绝不留下半改的表。
+
+        检查顺序（Task 8 修复轮 P2）：陈旧校验 → 目标存在性 → **前置指纹
+        守卫** → ``head == target`` 早退。前置守卫必须排在早退之前——早前
+        的实现把早退放在守卫之前，一张被越权改脏的表做"回退到当前点"
+        （``target_seq == expected_head_seq == head``）会绕过守卫直接返回
+        成功，守卫形同虚设。早退分支本身是 no-op：不产生新流水，返回值里
+        的 ``seq`` 就是"当前 head"，不是"新 revert 流水的 seq"（那要求
+        确实发生了一次回退）——调用方不应把这个分支误读成"回退到了 head
+        这条流水"。
         """
         with self.database.write() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -308,8 +317,6 @@ class KnowhowHistoryStore:
             ).fetchone()
             if target is None:
                 raise KeyError(target_seq)
-            if head == int(target_seq):
-                return {"seq": head, "target_seq": int(target_seq)}  # 已经在目标点
 
             head_change = db.execute(
                 "SELECT fingerprint FROM knowhow_changes WHERE table_id = ? AND seq = ?",
@@ -319,23 +326,28 @@ class KnowhowHistoryStore:
             if current != head_change["fingerprint"]:
                 raise HistoryInconsistent(table_id)
 
+            if head == int(target_seq):
+                return {"seq": head, "target_seq": int(target_seq)}  # no-op，见上面 docstring
+
+            head_snapshot = self._snapshot(db, table_id)
+
             rows = db.execute(
                 "SELECT * FROM knowhow_changes WHERE table_id = ? AND seq > ? "
                 "ORDER BY seq DESC",
                 (table_id, int(target_seq)),
             ).fetchall()
 
-            undone: list[dict] = []
             for row in rows:
                 change = _row_to_change(row)
                 self._apply_before(db, table_id, change)
-                undone.append(change)
 
             after = knowhow_fingerprint.fingerprint_on(db, table_id)
             if after != target["fingerprint"]:
                 raise RevertVerifyFailed(
                     f"table={table_id} target={target_seq} got={after} want={target['fingerprint']}"
                 )
+
+            target_snapshot = self._snapshot(db, table_id)
 
             db.execute(
                 "UPDATE knowhow_rows SET projection_status = 'pending' WHERE table_id = ?",
@@ -349,7 +361,7 @@ class KnowhowHistoryStore:
             seq = record_change(
                 db, new_id=self.new_id, now=self.now, table_id=table_id,
                 kind="revert",
-                payload=self._revert_payload(int(target_seq), undone),
+                payload=self._revert_payload(int(target_seq), head_snapshot, target_snapshot),
                 actor=actor, origin="revert",
                 note=f"回退到 #{int(target_seq)}",
             )
@@ -458,6 +470,9 @@ class KnowhowHistoryStore:
             if "role" in before:
                 sets.append("role = ?")
                 params.append(before["role"])
+            if "position" in before:
+                sets.append("position = ?")
+                params.append(before["position"])
             if sets:
                 params.append(entry["column_id"])
                 db.execute(
@@ -531,14 +546,21 @@ class KnowhowHistoryStore:
         )
 
     def _rebuild_row(self, db, table_id: str, row: dict, now: str) -> None:
-        """用 payload 里存的 ``row_id``/``position`` 原样重建一整行，及它当
-        时的全部格子与代码附件。id 绝不能换新——引用跳转与代码附件都挂在
-        它上面（spec §6.2）。"""
+        """用 payload 里存的 ``row_id``/``position``/``created_at`` 原样重建
+        一整行，及它当时的全部格子与代码附件。id 绝不能换新——引用跳转与
+        代码附件都挂在它上面（spec §6.2）。
+
+        ``created_at``（Task 8 修复轮 P3）：取 payload 里存的原始创建时间；
+        缺失时退回 ``now``——本修复上线前写的 ``row_delete``/``revert``
+        流水没有这个字段，重放到那些老流水时不该炸，静默退化成旧行为
+        （写 ``now``）即可，指纹本来就不覆盖这一列。``updated_at`` 始终是
+        这次重建发生的时间（不是历史值）。"""
+        created_at = row.get("created_at") or now
         db.execute(
             "INSERT INTO knowhow_rows "
             "(id, table_id, position, projection_status, created_at, updated_at) "
             "VALUES (?, ?, ?, 'pending', ?, ?)",
-            (row["row_id"], table_id, row["position"], now, now),
+            (row["row_id"], table_id, row["position"], created_at, now),
         )
         for column_id, content_md in (row.get("cells") or {}).items():
             self._write_cell(db, row["row_id"], column_id, content_md, now)
@@ -560,309 +582,243 @@ class KnowhowHistoryStore:
         for code in payload.get("code", []):
             self._write_cell_code(db, code["row_id"], column["id"], _code_fields(code), now)
 
-    def _revert_payload(self, target_seq: int, undone: list[dict]) -> dict:
-        """把 ``undone``（head→target 途中已应用的原始流水，seq 降序）汇总
-        成这条 revert 自己的 payload（spec §4.4 的 ``revert`` 形状）。
+    def _snapshot(self, db, table_id: str) -> dict:
+        """整表的结构化真值快照：列/行/格子/代码附件/表元。``revert_to`` 在
+        重放前后各拍一次，``_revert_payload`` 靠**比较两次真实状态**（而不
+        是折叠事件流水）算出这条 revert 流水该记什么（Task 8 修复轮 P0）。
 
-        **方向约定**：这条 revert 流水的 ``before`` = 回退前（head）状态，
-        ``after`` = 回退后（target）状态——与 ``undone`` 里每条原始流水自己
-        的 before/after 相反：原始流水的 ``after`` 才是"回退前"的值（它就
-        是被回退掉的那个状态），原始流水的 ``before`` 才是"回退后"要抵达
-        的值。所以按实体（格子/代码/行/列/表元）折叠时要把每条原始触碰的
-        before/after **对调**后再取值。
+        这是替换掉"事件折叠"旧实现的根本修法：旧实现从 ``undone`` 事件
+        列表折叠推导行/列的定义，把"首次/末次遇到某个事件"当作 head/
+        target 侧的真值来源——这个假设不成立。一列的定义（name/role）只在
+        它自己那次改名/改类型事件发生的那一刻正确；如果同一个 (target,
+        head] 区间里它后来又被改了一次，折叠出的"head 侧值"其实是中间某
+        个过渡态，不是 head 真正的状态（这正是问题的原始复现：建列"旧"→
+        改名"新"→回退→再回退，旧实现在 columns_added/columns_removed 里
+        存的列名会是过渡态"旧"，而不是 head 侧真实的"新"，导致再次回退时
+        后置指纹校验失败）。直接从数据库读两侧真实状态再做差，天然规避
+        整类问题——不管中间发生了多少跳、多少种事件交替，读到的都是那
+        一刻数据库里躺着的真值，无需对事件序列做任何"存在性折叠"的推导
+        或穷举验证。
 
-        折叠规则（沿 ``undone`` 的降序自然顺序——降序意味着先遇到的离 head
-        更近）：对每个被触碰的实体键，**首次遇到**记录该次触碰的 ``after``
-        作为 head 侧取值（只记一次，不覆盖）；**每次遇到**都用该次触碰的
-        ``before`` 覆盖 target 侧取值（覆盖到底 = 最后一次遇到 = ``undone``
-        里最小 seq 的那次，也就是离 target 最近的一次）。这与 §6.5"两版
-        对比"的净变化算法同构（那里是升序区间取首 before/末 after），只是
-        遍历方向相反，故取值的首尾也相反。
+        代价是两次全表 SELECT（列/行/格子/代码/表元各一条），表规模在
+        百行级、回退是低频操作，spec §3.2 已判定这个代价可接受。
 
-        行/列的"新建/删除"净判定同理，但判的是存在性而非值：一个 row_id
-        在 ``undone`` 里可能出现多次（例如先被删、又被一条嵌套 revert
-        重建）；只看**首次遇到**触碰的类型（诞生/消失）决定它在 head 侧是
-        否存在，只看**最后一次遇到**触碰的类型决定它在 target 侧是否存
-        在。四种组合：head 有/target 无 → 本次 revert 把它删了
-        （``rows_removed``，需要 head 侧全量内容以便"回退的回退"能重建）；
-        head 无/target 有 → 本次 revert 把它建回来了（``rows_added``，需要
-        target 侧全量内容）；head/target 都有 → 稳定，只把它的格子净变化
-        计入顶层 ``cells``；都没有 → 在区间内"生而复死"或"死而复生"，双端
-        都不存在，对本次 revert 而言完全不可见（不出现在任何字段里；这一
-        点会由 before==after 的等值判据自然过滤，无需另外判定"不可见"）。
-
-        嵌套 ``revert``（"回退的回退"再被回退）按同一套语义递归展开：它自
-        己的 ``rows_removed``/``columns_removed``（它撤销时靠重建复活）等
-        价于 ``row_delete``/``column_delete``；它的 ``rows_added``/
-        ``columns_added``（它撤销时靠删除消灭）等价于 ``row_add``/
-        ``column_add``。
-
-        行/列若同时被移除（都在 head 侧存在、都在 target 侧不存在），且
-        某个被移除行恰好在某个被移除列上有格子——为了 ``_apply_revert_
-        before`` 重建时不出现"列外键还不存在"的失败，这个重叠格子只放进
-        ``columns_removed``（"完整"一侧，重建顺序里列先于行），从
-        ``rows_removed``（"部分"一侧）里排除。"新建"方向（``rows_added``/
-        ``columns_added``）只会被删除消费，不重建，没有这个顾虑，两侧都存
-        全量。
-
-        ``columns_changed`` 的 ``before``/``after`` 只携带真正被
-        column_rename/column_kind/anchor_set 触碰过的字段（``name``/
-        ``role`` 之一或两者都有）——不伪造未被触碰字段的值（比如
-        ``position``：这三种操作都不会改它，纯 undone 折叠也拿不到它当时
-        的真实值，宁可不写这个字段，也不编一个可能就是错的）。
+        返回的 dict 键：
+        - ``columns``: ``{column_id: {"name","role","position"}}``
+        - ``rows``:    ``{row_id: {"position","created_at"}}``——
+          ``created_at`` 供 ``rows_removed``/``rows_added`` 里的行在被
+          "回退的回退"重建时原样恢复（Task 8 修复轮 P3，见 ``_rebuild_
+          row``），不是重建那一刻的 ``now``。
+        - ``cells``:   ``{(row_id, column_id): content_md}``
+        - ``code``:    ``{(row_id, column_id): {code_text,language,
+          updated_by,cell_content_hash}}``
+        - ``table_meta``: ``{"title","description"}``
         """
-        cell_head: dict[tuple[str, str], Any] = {}
-        cell_target: dict[tuple[str, str], Any] = {}
-        code_head: dict[tuple[str, str], Any] = {}
-        code_target: dict[tuple[str, str], Any] = {}
-        row_first_birth: dict[str, bool] = {}
-        row_last_death: dict[str, bool] = {}
-        row_head_position: dict[str, int] = {}
-        row_target_position: dict[str, int] = {}
-        col_first_birth: dict[str, bool] = {}
-        col_last_death: dict[str, bool] = {}
-        col_head_def: dict[str, dict] = {}
-        col_target_def: dict[str, dict] = {}
-        name_head: dict[str, Any] = {}
-        name_target: dict[str, Any] = {}
-        role_head: dict[str, Any] = {}
-        role_target: dict[str, Any] = {}
-        table_meta_head: "dict | None" = None
-        table_meta_target: "dict | None" = None
-
-        def touch_cell(row_id: str, column_id: str, before: Any, after: Any) -> None:
-            key = (row_id, column_id)
-            if key not in cell_head:
-                cell_head[key] = after
-            cell_target[key] = before
-
-        def touch_code(row_id: str, column_id: str, before: Any, after: Any) -> None:
-            key = (row_id, column_id)
-            if key not in code_head:
-                code_head[key] = after
-            code_target[key] = before
-
-        def touch_row_birth(row_id: str, position: int, cells: "dict | None", code: "list | None") -> None:
-            if row_id not in row_first_birth:
-                row_first_birth[row_id] = True
-                row_head_position[row_id] = position
-            row_last_death[row_id] = False
-            row_target_position[row_id] = position
-            for column_id, content_md in (cells or {}).items():
-                touch_cell(row_id, column_id, None, content_md)
-            for entry in code or []:
-                touch_code(row_id, entry["column_id"], None, _code_fields(entry))
-
-        def touch_row_death(row_id: str, position: int, cells: "dict | None", code: "list | None") -> None:
-            if row_id not in row_first_birth:
-                row_first_birth[row_id] = False
-                row_head_position[row_id] = position
-            row_last_death[row_id] = True
-            row_target_position[row_id] = position
-            for column_id, content_md in (cells or {}).items():
-                touch_cell(row_id, column_id, content_md, None)
-            for entry in code or []:
-                touch_code(row_id, entry["column_id"], _code_fields(entry), None)
-
-        def touch_column_birth(column: dict) -> None:
-            cid = column["id"]
-            if cid not in col_first_birth:
-                col_first_birth[cid] = True
-                col_head_def[cid] = dict(column)
-            col_last_death[cid] = False
-            col_target_def[cid] = dict(column)
-
-        def touch_column_death(column: dict, cells: "list | None", code: "list | None") -> None:
-            cid = column["id"]
-            if cid not in col_first_birth:
-                col_first_birth[cid] = False
-                col_head_def[cid] = dict(column)
-            col_last_death[cid] = True
-            col_target_def[cid] = dict(column)
-            for cell in cells or []:
-                touch_cell(cell["row_id"], cid, cell["content_md"], None)
-            for entry in code or []:
-                touch_code(entry["row_id"], cid, _code_fields(entry), None)
-
-        def touch_column_field(column_id: str, field: str, before: Any, after: Any) -> None:
-            head_map, target_map = (
-                (name_head, name_target) if field == "name" else (role_head, role_target)
-            )
-            if column_id not in head_map:
-                head_map[column_id] = after
-            target_map[column_id] = before
-
-        for change in undone:
-            kind = change["kind"]
-            payload = change["payload"]
-
-            if kind == "cell_update":
-                for cell in payload.get("cells", []):
-                    touch_cell(cell["row_id"], cell["column_id"], cell.get("before"), cell.get("after"))
-            elif kind in ("row_add", "import_append"):
-                for row in payload.get("rows", []):
-                    touch_row_birth(row["row_id"], row["position"], row.get("cells"), row.get("code"))
-            elif kind == "row_delete":
-                for row in payload.get("rows", []):
-                    touch_row_death(row["row_id"], row["position"], row.get("cells"), row.get("code"))
-            elif kind == "column_add":
-                touch_column_birth(payload["column"])
-            elif kind == "column_delete":
-                touch_column_death(payload["column"], payload.get("cells"), payload.get("code"))
-            elif kind == "column_rename":
-                touch_column_field(payload["column_id"], "name", payload["before"], payload["after"])
-            elif kind == "column_kind":
-                touch_column_field(payload["column_id"], "role", payload["before"], payload["after"])
-            elif kind == "anchor_set":
-                for entry in payload.get("columns", []):
-                    touch_column_field(entry["column_id"], "role", entry["before"], entry["after"])
-            elif kind == "table_meta":
-                if table_meta_head is None:
-                    table_meta_head = payload["after"]
-                table_meta_target = payload["before"]
-            elif kind in ("cell_code_put", "cell_code_delete"):
-                touch_code(payload["row_id"], payload["column_id"], payload.get("before"), payload.get("after"))
-            elif kind == "revert":
-                nested = payload
-                for cell in nested.get("cells", []):
-                    touch_cell(cell["row_id"], cell["column_id"], cell.get("before"), cell.get("after"))
-                for row in nested.get("rows_added", []):
-                    touch_row_birth(row["row_id"], row["position"], row.get("cells"), row.get("code"))
-                for row in nested.get("rows_removed", []):
-                    touch_row_death(row["row_id"], row["position"], row.get("cells"), row.get("code"))
-                for col in nested.get("columns_added", []):
-                    column = col["column"]
-                    touch_column_birth(column)
-                    for cell in col.get("cells", []):
-                        touch_cell(cell["row_id"], column["id"], None, cell["content_md"])
-                    for entry in col.get("code", []):
-                        touch_code(entry["row_id"], column["id"], None, _code_fields(entry))
-                for col in nested.get("columns_removed", []):
-                    touch_column_death(col["column"], col.get("cells"), col.get("code"))
-                for entry in nested.get("columns_changed", []):
-                    if "name" in entry["before"] or "name" in entry["after"]:
-                        touch_column_field(
-                            entry["column_id"], "name",
-                            entry["before"].get("name"), entry["after"].get("name"),
-                        )
-                    if "role" in entry["before"] or "role" in entry["after"]:
-                        touch_column_field(
-                            entry["column_id"], "role",
-                            entry["before"].get("role"), entry["after"].get("role"),
-                        )
-                nested_tm = nested.get("table_meta")
-                if nested_tm:
-                    if table_meta_head is None:
-                        table_meta_head = nested_tm["after"]
-                    table_meta_target = nested_tm["before"]
-                for code in nested.get("code", []):
-                    touch_code(code["row_id"], code["column_id"], code.get("before"), code.get("after"))
-            # kind == "table_create" 不会出现在 undone 里——revert_to 的
-            # _apply_before 已经在遇到它时抢先抛异常，走不到这里。
-
-        removed_row_ids = {
-            rid for rid, born in row_first_birth.items()
-            if born and not row_last_death.get(rid, False)
+        columns = {
+            row["id"]: {
+                "name": row["name"], "role": row["role"], "position": row["position"],
+            }
+            for row in db.execute(
+                "SELECT id, name, role, position FROM knowhow_columns WHERE table_id = ?",
+                (table_id,),
+            ).fetchall()
         }
-        added_row_ids = {
-            rid for rid, born in row_first_birth.items()
-            if not born and row_last_death.get(rid, False)
+        rows = {
+            row["id"]: {"position": row["position"], "created_at": row["created_at"]}
+            for row in db.execute(
+                "SELECT id, position, created_at FROM knowhow_rows WHERE table_id = ?",
+                (table_id,),
+            ).fetchall()
         }
-        removed_col_ids = {
-            cid for cid, born in col_first_birth.items()
-            if born and not col_last_death.get(cid, False)
+        cells = {
+            (row["row_id"], row["column_id"]): row["content_md"]
+            for row in db.execute(
+                "SELECT c.row_id AS row_id, c.column_id AS column_id, "
+                "c.content_md AS content_md FROM knowhow_cells c "
+                "JOIN knowhow_rows r ON r.id = c.row_id WHERE r.table_id = ?",
+                (table_id,),
+            ).fetchall()
         }
-        added_col_ids = {
-            cid for cid, born in col_first_birth.items()
-            if not born and col_last_death.get(cid, False)
+        code = {
+            (row["row_id"], row["column_id"]): {
+                "code_text": row["code_text"], "language": row["language"],
+                "updated_by": row["updated_by"],
+                "cell_content_hash": row["cell_content_hash"],
+            }
+            for row in db.execute(
+                "SELECT cc.row_id AS row_id, cc.column_id AS column_id, "
+                "cc.code_text AS code_text, cc.language AS language, "
+                "cc.updated_by AS updated_by, cc.cell_content_hash AS cell_content_hash "
+                "FROM knowhow_cell_code cc "
+                "JOIN knowhow_rows r ON r.id = cc.row_id WHERE r.table_id = ?",
+                (table_id,),
+            ).fetchall()
         }
+        table_row = db.execute(
+            "SELECT title, description FROM knowhow_tables WHERE id = ?", (table_id,)
+        ).fetchone()
+        return {
+            "columns": columns, "rows": rows, "cells": cells, "code": code,
+            "table_meta": {
+                "title": table_row["title"], "description": table_row["description"],
+            },
+        }
+
+    def _revert_payload(self, target_seq: int, head: dict, target: dict) -> dict:
+        """比较 ``head``（回退前，``_snapshot`` 在重放之前拍的）与
+        ``target``（回退后，重放并通过后置指纹校验之后拍的）两份真实快照，
+        算出这条 revert 自己的 payload（spec §4.4 的 ``revert`` 形状）。
+
+        **方向约定**（不变）：这条 revert 流水的 ``before`` = 回退前
+        （head）状态，``after`` = 回退后（target）状态。
+
+        判定规则——直接比较两侧快照里"这个 id 在不在、值是否相同"，不再
+        折叠事件序列：
+
+        - 只在 head 出现 → 本次 revert 把它删了：行进 ``rows_removed``、
+          列进 ``columns_removed``，定义与内容取 **head 侧**（供"回退的
+          回退"按原样重建）。
+        - 只在 target 出现 → 本次 revert 把它建回来了：行进
+          ``rows_added``、列进 ``columns_added``，定义与内容取
+          **target 侧**。
+        - 两侧都出现（稳定实体）：列的 name/role/position 逐字段比较，
+          任一不同就产出一条 ``columns_changed``——**这次三个字段都是两侧
+          真实快照值**，不再像旧实现那样只能填被 column_rename/column_
+          kind/anchor_set 事件"顺手触碰"到的字段（``position`` 从未被这
+          三种操作改过，旧实现因此永远不填它；现在直接读快照，改了就能
+          看见，没改就不出现，和 name/role 同等对待）；格子/代码内容不同
+          则分别计入顶层 ``cells``/``code``。
+        - 两侧都不出现（区间内"生而复死"或反过来）：对这条 revert 完全
+          不可见——因为它压根不会被两侧任何一个快照收录，这一点是快照
+          读法本身自然给出的，不需要专门再判一次"不可见"。
+
+        行/列若同时被移除（都在 head、都不在 target），且某个被移除行
+        恰好在某个被移除列上有格子——为了 ``_apply_revert_before`` 重建
+        时不出现"列外键还不存在"的失败，这个重叠格子只放进
+        ``columns_removed``（"完整"一侧，重建顺序里行先于列，见
+        ``_apply_revert_before`` 的文档字符串），从 ``rows_removed``
+        （"部分"一侧）里排除。"新建"方向（``rows_added``/``columns_added``）
+        只会被删除消费、不重建，没有这个顾虑，两侧都存全量。
+
+        嵌套 ``revert``（"回退的回退"再被回退）不需要任何特殊处理——它
+        改过的行/列/格子在这次的 head/target 快照里就是最终真实状态，
+        直接被上面的规则覆盖，不用像旧实现那样对 ``kind == "revert"``
+        单独展开、也不用逐事件维护"首次/末次遇到"的状态机。这正是这次
+        重写要根除的那一整类"多跳生死交替折叠未穷举验证"的顾虑——不是
+        把折叠逻辑写得更细，而是让折叠这件事本身不再必要。
+
+        为避免 Python 的 ``set``/``dict`` 遍历顺序受哈希随机化影响导致
+        payload 里的列表顺序在不同进程间飘移，所有集合遍历都先 ``sorted``
+        成确定顺序。
+        """
+        head_cols, target_cols = head["columns"], target["columns"]
+        head_rows, target_rows = head["rows"], target["rows"]
+        head_cells, target_cells = head["cells"], target["cells"]
+        head_code, target_code = head["code"], target["code"]
+
+        removed_row_ids = set(head_rows) - set(target_rows)
+        added_row_ids = set(target_rows) - set(head_rows)
+        stable_row_ids = set(head_rows) & set(target_rows)
+
+        removed_col_ids = set(head_cols) - set(target_cols)
+        added_col_ids = set(target_cols) - set(head_cols)
+        stable_col_ids = set(head_cols) & set(target_cols)
 
         rows_removed = []
-        for rid in removed_row_ids:
+        for rid in sorted(removed_row_ids):
             cells = {
-                col: value for (r, col), value in cell_head.items()
-                if r == rid and value is not None and col not in removed_col_ids
+                col: value for (r, col), value in head_cells.items()
+                if r == rid and col not in removed_col_ids
             }
             code = [
                 {"column_id": col, **value}
-                for (r, col), value in code_head.items()
-                if r == rid and value is not None and col not in removed_col_ids
+                for (r, col), value in head_code.items()
+                if r == rid and col not in removed_col_ids
             ]
             rows_removed.append({
-                "row_id": rid, "position": row_head_position[rid],
+                "row_id": rid, "position": head_rows[rid]["position"],
+                "created_at": head_rows[rid]["created_at"],
                 "cells": cells, "code": code,
             })
 
         rows_added = []
-        for rid in added_row_ids:
-            cells = {
-                col: value for (r, col), value in cell_target.items()
-                if r == rid and value is not None
-            }
+        for rid in sorted(added_row_ids):
+            cells = {col: value for (r, col), value in target_cells.items() if r == rid}
             code = [
                 {"column_id": col, **value}
-                for (r, col), value in code_target.items()
-                if r == rid and value is not None
+                for (r, col), value in target_code.items()
+                if r == rid
             ]
             rows_added.append({
-                "row_id": rid, "position": row_target_position[rid],
+                "row_id": rid, "position": target_rows[rid]["position"],
+                "created_at": target_rows[rid]["created_at"],
                 "cells": cells, "code": code,
             })
 
         columns_removed = []
-        for cid in removed_col_ids:
+        for cid in sorted(removed_col_ids):
             cells = [
                 {"row_id": r, "content_md": value}
-                for (r, col), value in cell_head.items()
-                if col == cid and value is not None
+                for (r, col), value in head_cells.items()
+                if col == cid
             ]
             code = [
                 {"row_id": r, **value}
-                for (r, col), value in code_head.items()
-                if col == cid and value is not None
+                for (r, col), value in head_code.items()
+                if col == cid
             ]
-            columns_removed.append({"column": col_head_def[cid], "cells": cells, "code": code})
+            columns_removed.append({
+                "column": {"id": cid, **head_cols[cid]}, "cells": cells, "code": code,
+            })
 
         columns_added = []
-        for cid in added_col_ids:
+        for cid in sorted(added_col_ids):
             cells = [
                 {"row_id": r, "content_md": value}
-                for (r, col), value in cell_target.items()
-                if col == cid and value is not None
+                for (r, col), value in target_cells.items()
+                if col == cid
             ]
             code = [
                 {"row_id": r, **value}
-                for (r, col), value in code_target.items()
-                if col == cid and value is not None
+                for (r, col), value in target_code.items()
+                if col == cid
             ]
-            columns_added.append({"column": col_target_def[cid], "cells": cells, "code": code})
+            columns_added.append({
+                "column": {"id": cid, **target_cols[cid]}, "cells": cells, "code": code,
+            })
 
         columns_changed = []
-        for cid in (set(name_head) | set(role_head)) - removed_col_ids - added_col_ids:
-            before: dict = {}
-            after: dict = {}
-            if cid in name_head and name_head[cid] != name_target.get(cid):
-                before["name"] = name_head[cid]
-                after["name"] = name_target[cid]
-            if cid in role_head and role_head[cid] != role_target.get(cid):
-                before["role"] = role_head[cid]
-                after["role"] = role_target[cid]
-            if before:
+        for cid in sorted(stable_col_ids):
+            hd, tg = head_cols[cid], target_cols[cid]
+            if hd != tg:
+                before = {k: v for k, v in hd.items() if v != tg.get(k)}
+                after = {k: v for k, v in tg.items() if v != hd.get(k)}
                 columns_changed.append({"column_id": cid, "before": before, "after": after})
 
+        cell_keys = {
+            key for key in set(head_cells) | set(target_cells)
+            if key[0] in stable_row_ids and key[1] in stable_col_ids
+        }
         cells = [
-            {"row_id": r, "column_id": c, "before": head_value, "after": cell_target[(r, c)]}
-            for (r, c), head_value in cell_head.items()
-            if r not in removed_row_ids and r not in added_row_ids
-            and c not in removed_col_ids and c not in added_col_ids
-            and head_value != cell_target[(r, c)]
+            {
+                "row_id": r, "column_id": c,
+                "before": head_cells.get((r, c)), "after": target_cells.get((r, c)),
+            }
+            for (r, c) in sorted(cell_keys)
+            if head_cells.get((r, c)) != target_cells.get((r, c))
         ]
+
+        code_keys = {
+            key for key in set(head_code) | set(target_code)
+            if key[0] in stable_row_ids and key[1] in stable_col_ids
+        }
         code_list = [
-            {"row_id": r, "column_id": c, "before": head_value, "after": code_target[(r, c)]}
-            for (r, c), head_value in code_head.items()
-            if r not in removed_row_ids and r not in added_row_ids
-            and c not in removed_col_ids and c not in added_col_ids
-            and head_value != code_target[(r, c)]
+            {
+                "row_id": r, "column_id": c,
+                "before": head_code.get((r, c)), "after": target_code.get((r, c)),
+            }
+            for (r, c) in sorted(code_keys)
+            if head_code.get((r, c)) != target_code.get((r, c))
         ]
 
         payload: dict = {"target_seq": int(target_seq), "cells": cells}
@@ -876,8 +832,10 @@ class KnowhowHistoryStore:
             payload["columns_added"] = columns_added
         if columns_changed:
             payload["columns_changed"] = columns_changed
-        if table_meta_head is not None and table_meta_head != table_meta_target:
-            payload["table_meta"] = {"before": table_meta_head, "after": table_meta_target}
+        if head["table_meta"] != target["table_meta"]:
+            payload["table_meta"] = {
+                "before": head["table_meta"], "after": target["table_meta"],
+            }
         if code_list:
             payload["code"] = code_list
         return payload
