@@ -4714,6 +4714,21 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', candidate_id: 'str') -> 'None'"
   },
+  "create_knowhow_milestone": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.create_knowhow_milestone",
+        "target": "create_knowhow_milestone"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowHistoryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str', seq: 'int', name: 'str', note: 'str', created_by: 'str') -> 'dict'"
+  },
   "create_knowhow_table": {
     "consumers": [
       {
@@ -4998,6 +5013,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, column_id: 'str') -> 'None'"
+  },
+  "delete_knowhow_milestone": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.delete_knowhow_milestone",
+        "target": "delete_knowhow_milestone"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowHistoryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str', milestone_id: 'str') -> 'None'"
   },
   "delete_knowhow_row": {
     "consumers": [
@@ -5322,6 +5352,27 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, row_id: 'str', column_id: 'str') -> 'Optional[dict]'"
+  },
+  "get_knowhow_change": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.create_knowhow_milestone",
+        "target": "get_knowhow_change"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.get_knowhow_change",
+        "target": "get_knowhow_change"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowHistoryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str', seq: 'int') -> \"'dict | None'\""
   },
   "get_knowhow_row_location": {
     "consumers": [
@@ -5791,6 +5842,51 @@
     "scope": "facade",
     "signature": "(self, notebook_id: 'str', q: 'str', k: 'int' = 30) -> 'list'"
   },
+  "knowhow_cell_history": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.get_knowhow_cell_history",
+        "target": "knowhow_cell_history"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowHistoryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str', row_id: 'str', column_id: 'str', limit: 'int' = 50) -> 'list'"
+  },
+  "knowhow_changes_between": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.get_knowhow_history_diff",
+        "target": "knowhow_changes_between"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowHistoryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str', from_seq: 'int', to_seq: 'int') -> 'list'"
+  },
+  "knowhow_history_head_seq": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.get_knowhow_history",
+        "target": "knowhow_history_head_seq"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowHistoryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str') -> 'int'"
+  },
   "knowledge_graph": {
     "consumers": [
       {
@@ -5907,6 +6003,36 @@
     ],
     "kind": "method",
     "owner": "KnowhowStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str') -> 'list'"
+  },
+  "list_knowhow_changes": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.get_knowhow_history",
+        "target": "list_knowhow_changes"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowHistoryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str', limit: 'int' = 50, before_seq: \"'int | None'\" = None) -> 'list'"
+  },
+  "list_knowhow_milestones": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.get_knowhow_history",
+        "target": "list_knowhow_milestones"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowHistoryStore",
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, table_id: 'str') -> 'list'"
@@ -7094,6 +7220,21 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'List[ObjectSchemaModel]'"
+  },
+  "prune_knowhow_history": {
+    "consumers": [
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/knowhow_routes.py",
+        "scope": "<module>.prune_knowhow_history",
+        "target": "prune_knowhow_history"
+      }
+    ],
+    "kind": "method",
+    "owner": "KnowhowHistoryStore",
+    "patch_targets": [],
+    "scope": "facade",
+    "signature": "(self, table_id: 'str', before_iso: 'str') -> 'dict'"
   },
   "reasoning_llm_client": {
     "consumers": [
@@ -8548,7 +8689,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, row_id: 'str', column_id: 'str', content_md: 'str', require_assets=()) -> 'None'"
+    "signature": "(self, row_id: 'str', column_id: 'str', content_md: 'str', require_assets=(), actor: 'str' = '', origin: 'str' = 'user') -> 'None'"
   },
   "update_knowhow_cells": {
     "consumers": [
@@ -8563,7 +8704,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, row_ids: 'list', column_id: 'str', content_md: 'str', require_assets=()) -> 'None'"
+    "signature": "(self, row_ids: 'list', column_id: 'str', content_md: 'str', require_assets=(), actor: 'str' = '', origin: 'str' = 'user') -> 'None'"
   },
   "update_knowhow_cells_bulk_guarded": {
     "consumers": [
@@ -8614,7 +8755,7 @@
     "owner": "KnowhowStore",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', updates: 'list', require_assets=(), anchor_column_id=None, expected_anchor=None) -> 'dict'"
+    "signature": "(self, notebook_id: 'str', updates: 'list', require_assets=(), anchor_column_id=None, expected_anchor=None, actor: 'str' = '', origin: 'str' = 'user') -> 'dict'"
   },
   "update_knowhow_table_meta": {
     "consumers": [

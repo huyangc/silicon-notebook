@@ -1845,6 +1845,11 @@
                 }
               ],
               "title": "Expected Before"
+            },
+            "origin": {
+              "default": "user",
+              "title": "Origin",
+              "type": "string"
             }
           },
           "required": [
@@ -1957,6 +1962,11 @@
                 }
               ],
               "title": "Expected Before"
+            },
+            "origin": {
+              "default": "user",
+              "title": "Origin",
+              "type": "string"
             },
             "row_ids": {
               "items": {
@@ -2125,6 +2135,19 @@
           "title": "KnowhowDiscriminationSet",
           "type": "object"
         },
+        "KnowhowHistoryPruneRequest": {
+          "properties": {
+            "before_days": {
+              "title": "Before Days",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "before_days"
+          ],
+          "title": "KnowhowHistoryPruneRequest",
+          "type": "object"
+        },
         "KnowhowImportPreview": {
           "properties": {
             "anchor_suggestion": {
@@ -2166,6 +2189,29 @@
             "total_rows"
           ],
           "title": "KnowhowImportPreview",
+          "type": "object"
+        },
+        "KnowhowMilestoneCreate": {
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "seq": {
+              "title": "Seq",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "seq",
+            "name"
+          ],
+          "title": "KnowhowMilestoneCreate",
           "type": "object"
         },
         "KnowhowNewColumnInput": {
@@ -2274,6 +2320,24 @@
             "guessed_kind"
           ],
           "title": "KnowhowPreviewColumn",
+          "type": "object"
+        },
+        "KnowhowRevertRequest": {
+          "properties": {
+            "expected_head_seq": {
+              "title": "Expected Head Seq",
+              "type": "integer"
+            },
+            "target_seq": {
+              "title": "Target Seq",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "target_seq",
+            "expected_head_seq"
+          ],
+          "title": "KnowhowRevertRequest",
           "type": "object"
         },
         "KnowhowRow": {
@@ -9917,7 +9981,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/cells": {
         "patch": {
-          "description": "Returns one {row_id,column_id,content_md,projection_status} entry per\nrow in body.row_ids, in the same order — same shape patch_knowhow_cell\nreturns for a single row, just as a list.",
+          "description": "Returns one {row_id,column_id,content_md,projection_status} entry per\nrow in body.row_ids, in the same order — same shape patch_knowhow_cell\nreturns for a single row, just as a list.\n\nknowhow 表版本管理 Task 12: ``body.origin`` validated first, same as\npatch_knowhow_cell — this endpoint is the merged-cell fan-out's save path\n(see the module docstring above), so it needs the identical whitelist\ncheck or a batch reformat-accept could never be attributed as\n'llm_reformat' in the history timeline.",
           "operationId": "patch_knowhow_cells_batch_api_notebooks__notebook_id__knowhow__table_id__cells_patch",
           "parameters": [
             {
@@ -10151,6 +10215,395 @@
           "summary": "Patch Knowhow Column"
         }
       },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/history": {
+        "get": {
+          "description": "时间线分页（spec §8.1 行 1）。响应体固定 3 个键：``head_seq``（当前\n最新 seq——前端拿它做\"陈旧\"比对，revert 请求体里的 expected_head_seq 就是\n这个值的回声）、``changes``（seq 倒序，``before_seq`` 严格小于用于向更旧\n翻页）、``milestones``（本表全部命名里程碑，含 stale 标记，§4.2）。\n\n``milestones_only=true`` 时把本页 ``changes`` 按里程碑 seq 集合过滤——这是\n一次性的单页内过滤，不会为了凑够 ``limit`` 条而多轮翻页：里程碑本来就稀疏，\n这只是前端\"只看里程碑\"筛选的展示层需求，不值得为它引入内部多轮翻页的\n复杂度与延迟。",
+          "operationId": "get_knowhow_history_api_notebooks__notebook_id__knowhow__table_id__history_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "title": "Limit",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "before_seq",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Before Seq"
+              }
+            },
+            {
+              "in": "query",
+              "name": "milestones_only",
+              "required": false,
+              "schema": {
+                "default": false,
+                "title": "Milestones Only",
+                "type": "boolean"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Get Knowhow History Api Notebooks  Notebook Id  Knowhow  Table Id  History Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Knowhow History"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/history/diff": {
+        "get": {
+          "description": "两版净变化（spec §8.1 行 3 / §6.5）——纯计算：只读区间 ``(from, to]``\n的流水再折叠，不碰任何写路径，也不校验 from/to 是否真实存在（区间落空\n时 aggregate_diff 对空列表的输出就是全 5 个键的\"无变化\"形状，天然合理）。\n必须注册在 .../history/{seq} 之前，见本节顶部的路由顺序说明。",
+          "operationId": "get_knowhow_history_diff_api_notebooks__notebook_id__knowhow__table_id__history_diff_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "from",
+              "required": true,
+              "schema": {
+                "title": "From",
+                "type": "integer"
+              }
+            },
+            {
+              "in": "query",
+              "name": "to",
+              "required": true,
+              "schema": {
+                "title": "To",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Get Knowhow History Diff Api Notebooks  Notebook Id  Knowhow  Table Id  History Diff Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Knowhow History Diff"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/history/prune": {
+        "post": {
+          "description": "删掉最老的连续前缀（spec §8.1 行 8 / §7.7）。``before_days`` 换算成\nISO 截止时间：用与本仓库各 store 模块的 ``_now()`` 相同的\"去掉微秒的\nnaive 本地时间 isoformat\"形状，才能和 ``knowhow_changes.created_at``\n做字面量字符串比较——两者格式必须一致，否则 SQL 里的字符串 ``<``\n比较会失真。\n\n§7.1 的已知代价在这里兑现：被清理掉的历史很可能是某些图片在库里唯一还\n\"活着\"的引用来源，删完之后这些图片才终于可能被判定为孤儿——所以清理\n完成后主动触发一次绕过节流的资产清扫（``min_interval=0``），而不是干等\n下一次自然节流窗口才释放磁盘；后台执行，不拖慢这次清理请求本身的响应。",
+          "operationId": "prune_knowhow_history_api_notebooks__notebook_id__knowhow__table_id__history_prune_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowHistoryPruneRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Prune Knowhow History Api Notebooks  Notebook Id  Knowhow  Table Id  History Prune Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Prune Knowhow History"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/history/{seq}": {
+        "get": {
+          "description": "单条变更详情（spec §8.1 行 2）——payload 原样返回，前端用它渲染这一次\n改动的红绿 diff。",
+          "operationId": "get_knowhow_change_api_notebooks__notebook_id__knowhow__table_id__history__seq__get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "seq",
+              "required": true,
+              "schema": {
+                "title": "Seq",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Get Knowhow Change Api Notebooks  Notebook Id  Knowhow  Table Id  History  Seq  Get",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Knowhow Change"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/milestones": {
+        "post": {
+          "description": "给一个 ``seq`` 命名（spec §8.1 行 6 / §4.2）——零快照，只是一条指针\n记录。``seq`` 必须已经是这张表的一条真实流水，否则 404（同 revert 的\n\"目标不存在无 oracle\"约定，防止一个里程碑从创建那一刻起就指向空气；\nget_knowhow_change 按 table_id+seq 联合查询，\"seq 不存在\"与\"seq 属于别的\n表\"天然统一成同一个 None）。重名：这张表的 ``UNIQUE(table_id, name)``\n让 store 直接抛 ``sqlite3.IntegrityError``（store 自己的文档字符串明确\n\"这里不做预检，省一次往返\"，把翻译成用户文案的职责留给了这一层）——接住\n它转成 400，而不是让用户看见一坨裸的 500 异常堆栈。",
+          "operationId": "create_knowhow_milestone_api_notebooks__notebook_id__knowhow__table_id__milestones_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowMilestoneCreate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Create Knowhow Milestone Api Notebooks  Notebook Id  Knowhow  Table Id  Milestones Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Create Knowhow Milestone"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/milestones/{milestone_id}": {
+        "delete": {
+          "description": "spec §8.1 行 7。store 的 ``delete_milestone`` 本身按 ``table_id``\n限定作用域，且对\"已经不存在\"静默 no-op（同本文件其余 delete 端点的既定\n约定），所以这里除了确认表本身存在/属于本 notebook 之外不需要再做额外的\n归属校验——一个属于别的表的 milestone_id 传进来，WHERE 子句天然不命中\n任何行，等同于\"什么都没删\"，不会误删。",
+          "operationId": "delete_knowhow_milestone_api_notebooks__notebook_id__knowhow__table_id__milestones__milestone_id__delete",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "milestone_id",
+              "required": true,
+              "schema": {
+                "title": "Milestone Id",
+                "type": "string"
+              }
+            }
+          ],
+          "responses": {
+            "204": {
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Delete Knowhow Milestone"
+        }
+      },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/reproject": {
         "post": {
           "description": "Full-rebuild escape hatch (task brief: \"全量重投影逃生口，后台执行\") —\nschedules KnowhowProjector.project_table (NEVER the seq-gated incremental\npath, and NEVER a raw background_jobs.submit — always through\nProjectionScheduler, PR-2+3 Task 3) and responds immediately with a\nstatus body, mirroring build_kg/rebuild_kg's\nsynchronous-response-then-background-work shape exactly.",
@@ -10200,6 +10653,67 @@
             }
           },
           "summary": "Reproject Knowhow Table"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/revert": {
+        "post": {
+          "description": "整表回退到 ``target_seq``（spec §8.1 行 5 / §6.1）。错误映射（spec\n§8.1 表）：head 已变→409 knowhow_history_stale；前置指纹不一致→400\nknowhow_history_inconsistent；后置校验失败（已整事务回滚，表未被改动）→\n500 knowhow_revert_verify_failed；target_seq 不存在/不属于本表→404（无\noracle，同本文件\"不存在\"与\"越权\"统一 404 的既定约定）。重放本体 + 提交后\n的重投影调度都在 knowhow_history.revert_table 里，这里只做错误码翻译。",
+          "operationId": "revert_knowhow_table_api_notebooks__notebook_id__knowhow__table_id__revert_post",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowhowRevertRequest"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "additionalProperties": true,
+                    "title": "Response Revert Knowhow Table Api Notebooks  Notebook Id  Knowhow  Table Id  Revert Post",
+                    "type": "object"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Revert Knowhow Table"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows": {
@@ -10312,7 +10826,7 @@
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}": {
         "patch": {
-          "description": "Returns {row_id,column_id,content_md,projection_status} so the caller\ncan refresh just this row's sync badge without re-fetching the whole\ntable. row_id/column_id validity is checked twice, deliberately: the\ntable-scoped membership check (belongs to THIS table_id, not merely SOME\ntable) and the store's own validate_cell_target (same-table pairing) —\nboth funnel into the same 400 \"格子定位不合法\" so a client sees one\nconsistent error regardless of which check actually caught it.",
+          "description": "Returns {row_id,column_id,content_md,projection_status} so the caller\ncan refresh just this row's sync badge without re-fetching the whole\ntable. row_id/column_id validity is checked twice, deliberately: the\ntable-scoped membership check (belongs to THIS table_id, not merely SOME\ntable) and the store's own validate_cell_target (same-table pairing) —\nboth funnel into the same 400 \"格子定位不合法\" so a client sees one\nconsistent error regardless of which check actually caught it.\n\nknowhow 表版本管理 Task 12: ``body.origin`` is validated FIRST — a pure\nin-memory check with no DB lookups, and a hard 400 on anything outside\nVALID_ORIGINS (never a lenient default; see KnowhowCellPatch.origin's own\ndocstring for why).",
           "operationId": "patch_knowhow_cell_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__patch",
           "parameters": [
             {
@@ -10385,6 +10899,85 @@
             }
           },
           "summary": "Patch Knowhow Cell"
+        }
+      },
+      "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/history": {
+        "get": {
+          "description": "单格历史时间线（spec §8.1 行 4）——最新在前。row_id/column_id 的\ntable-scoped 校验与 patch_knowhow_cell 同款（同一 URL 形状的姊妹端点，见\n该函数文档字符串）。",
+          "operationId": "get_knowhow_cell_history_api_notebooks__notebook_id__knowhow__table_id__rows__row_id__cells__column_id__history_get",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "notebook_id",
+              "required": true,
+              "schema": {
+                "title": "Notebook Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "table_id",
+              "required": true,
+              "schema": {
+                "title": "Table Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "row_id",
+              "required": true,
+              "schema": {
+                "title": "Row Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "path",
+              "name": "column_id",
+              "required": true,
+              "schema": {
+                "title": "Column Id",
+                "type": "string"
+              }
+            },
+            {
+              "in": "query",
+              "name": "limit",
+              "required": false,
+              "schema": {
+                "default": 50,
+                "title": "Limit",
+                "type": "integer"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "items": {},
+                    "title": "Response Get Knowhow Cell History Api Notebooks  Notebook Id  Knowhow  Table Id  Rows  Row Id  Cells  Column Id  History Get",
+                    "type": "array"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Get Knowhow Cell History"
         }
       },
       "/api/notebooks/{notebook_id}/knowhow/{table_id}/rows/{row_id}/cells/{column_id}/optimize": {
