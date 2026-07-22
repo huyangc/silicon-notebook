@@ -106,3 +106,30 @@ test("summarizeUpload: 新建 + 纯沿用 + 改类型三者并存时分别如实
       "1 个文件的内容已经在本笔记本里，沿用原有来源并改用了新的文档类型，正在按新类型重新分析",
   );
 });
+
+// ------------------------------------------- 批内内容重复：同一 id 只留一张卡
+
+test("summarizeUpload: 折叠去重后一个 id 只留一张卡（sources 可直接并进 state）", () => {
+  // 一次上传里两个内容相同的文件：第 1 个新建（reused=false），第 2 个命中它刚建的
+  // 行（同 id、reused=true）。直接铺进 state 会画出两张同 id 的卡片。
+  const outcome = summarizeUpload([src("a", false), src("a", true), src("b", false)]);
+  assert.deepEqual(outcome.sources.map((s) => s.id), ["a", "b"], "同 id 只留一条");
+});
+
+test("summarizeUpload: 批内自我重复只计一次新增，且不误报为「沿用既有」", () => {
+  const outcome = summarizeUpload([src("a", false), src("a", true)]);
+  assert.equal(outcome.added.length, 1, "新建一次就计一次，回声不该再 +1");
+  assert.deepEqual(outcome.reused, [], "批内自我重复的回声不是「沿用本笔记本已有来源」");
+  assert.equal(outcome.toast, "已上传 1 个来源");
+});
+
+test("summarizeUpload: 折叠取后出现的同 id 快照（第 2 个文件在刚建行上改的类型）", () => {
+  // 同批两个内容相同、类型不同的文件：第 2 个在第 1 个刚建的行上把类型改成 textbook，
+  // 折叠后 state 里的那张卡应反映最新（改后）的快照。
+  const outcome = summarizeUpload([
+    { id: "a", title: "a.pdf", reused: false, doc_type: "" },
+    { id: "a", title: "a.pdf", reused: true, doc_type: "textbook" },
+  ]);
+  assert.deepEqual(outcome.sources.map((s) => s.doc_type), ["textbook"], "留最新快照");
+  assert.equal(outcome.added.length, 1, "仍是本次真正新建的一条");
+});

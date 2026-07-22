@@ -1,13 +1,18 @@
 import type { UploadedSource } from "./workspace-model.ts";
 
 export type UploadOutcome = {
-  /** 这次真正新建的来源——只有这些才该计入来源总数。 */
+  /** 这次真正新建的来源——只有这些才该计入来源总数（按 id 去重后，批内自我重复
+   *  的回声只算一次）。 */
   added: UploadedSource[];
   /** 内容与本笔记本里已有来源完全相同，被沿用的那些（后端没有新建行）。 */
   reused: UploadedSource[];
   /** reused 的子集：这次顺手把文档类型改成了别的那些。后端会把新类型写进原来
    *  那条来源，并按新类型重新抽取知识——所以文案不能只说「沿用，没做别的」。 */
   retyped: UploadedSource[];
+  /** 按 source id 折叠去重后、可直接并进 `sources` state 的列表：一个 id 只留一
+   *  张卡。后端一次上传可能对同一个 id 返回多条（见下），直接铺进 state 会渲染出
+   *  重复卡片（React key 撞车），必须先折叠。 */
+  sources: UploadedSource[];
   /** 上传完成后给用户看的一句话（叫 toast 不叫 message：`.message` 在前端是
    *  「读到了某个原始错误」的守卫信号，这里是我们自己写的界面文案）。 */
   toast: string;
@@ -26,19 +31,35 @@ export type UploadOutcome = {
  *
  *  `previousDocTypes` 是上传前界面上已知的「来源 id → 文档类型」。判「改没改」只
  *  能靠它：后端返回的是改完之后的值，单看返回值区分不出「本来就是这个类型」。查
- *  不到的（比如那条来源不在当前这一页里）一律当作没改，宁可少说也不谎报。 */
+ *  不到的（比如那条来源不在当前这一页里）一律当作没改，宁可少说也不谎报。
+ *
+ *  一次上传可能对**同一个 source id** 返回多条：同一批里两个内容相同的文件，第 2
+ *  个会命中第 1 个刚建的那行（同 id、reused=true）。所以先按 id 折叠——否则会渲染
+ *  出重复卡片、总数也刷高。折叠取后出现的那条（它带这一行最新的快照），但「新增」
+ *  的计数认「该 id 是否被本次真正新建过」（出现过 reused=false），这样批内自我重复
+ *  的回声既不重复计数、也不会被当成「沿用了本笔记本已有来源」而误报。 */
 export function summarizeUpload(
   uploaded: UploadedSource[],
   previousDocTypes: ReadonlyMap<string, string> = new Map(),
 ): UploadOutcome {
-  const added = uploaded.filter((item) => item.reused !== true);
-  const reused = uploaded.filter((item) => item.reused === true);
+  const createdIds = new Set<string>();
+  const byId = new Map<string, UploadedSource>();
+  for (const item of uploaded) {
+    if (item.reused !== true) createdIds.add(item.id);
+    byId.set(item.id, item); // 后出现的同 id 覆盖：留最新快照
+  }
+  const folded = [...byId.values()];
+  const added = folded.filter((item) => createdIds.has(item.id));
+  const reused = folded.filter((item) => !createdIds.has(item.id));
   const retyped = reused.filter((item) => {
     const before = previousDocTypes.get(item.id);
     return before !== undefined && (item.doc_type ?? "") !== before;
   });
   const keptAsIs = reused.filter((item) => !retyped.includes(item));
-  return { added, reused, retyped, toast: uploadToast(added.length, keptAsIs.length, retyped) };
+  return {
+    added, reused, retyped, sources: folded,
+    toast: uploadToast(added.length, keptAsIs.length, retyped),
+  };
 }
 
 function uploadToast(added: number, keptAsIs: number, retyped: UploadedSource[]): string {
