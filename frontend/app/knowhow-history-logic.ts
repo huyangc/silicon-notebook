@@ -16,7 +16,7 @@
 // camelCase 转换（14 种 kind 形状差异很大，转换成本与出错面都不小；payload 类
 // 型本就声明为 Record<string, any> 的宽松透传），所以这里读到的是后端原始
 // snake_case 字段（row_id/column_id/target_seq/rows 等）。summarizeChange /
-// aggregateDiff 的输出（面向展示，不再回旋到网络）才按本文件约定统一用
+// foldLocalChanges 的输出（面向展示，不再回旋到网络）才按本文件约定统一用
 // camelCase。
 
 import type { KnowhowChange, KnowhowChangeKind } from "./knowhow-model.ts";
@@ -110,13 +110,18 @@ export function groupChangesByDay(
 
 // --- 区间净变化（客户端本地折叠，不经网络）--------------------------------------
 //
+// ⚠ 本地折叠 ≠ 服务端全量 diff：两版对比视图请用后者
+// （fetchKnowhowHistoryDiff，knowhow-model.ts），不要用这个函数——接错不会有
+// 类型错误，只会静默漏掉列/表元变化，详见下文范围差异。
+//
 // 这是一次**客户端本地**的折叠，操作对象是调用方已经持有的一段 KnowhowChange
 // 数组（例如时间线里已加载的若干条）——不等价于 fetchKnowhowHistoryDiff() 那次
 // 服务端权威计算（GET .../history/diff，对应后端 aggregate_diff()）。两者刻意
-// 是两个不同的类型/函数：
+// 是两个不同的类型/函数（函数名 foldLocalChanges、结果类型名 LocalDiffResult
+// 都特意带上"Local"，把这条范围差异钉进名字里）：
 //   - 本函数只折叠"格子净变化"与"行的净增删"，不处理列结构变更
 //     （column_add/delete/rename/kind/anchor_set）与表元变更（table_meta）——
-//     DiffResult 类型本身就只有 3 个键，没有地方放这些信息。
+//     LocalDiffResult 类型本身就只有 3 个键，没有地方放这些信息。
 //   - 需要完整净变化（含列结构、表元）时用 fetchKnowhowHistoryDiff()——后端
 //     aggregate_diff() 的 5 键输出由 KnowhowHistoryDiff 类型承载，见
 //     knowhow-model.ts。
@@ -133,20 +138,20 @@ export function groupChangesByDay(
 // 只对 kind==='cell_update'|'revert' 才读 payload.cells，避免把形状不兼容的
 // 数组当成格子净变化误读（哪怕误读也会因 before/after 都读到 undefined 而被
 // 后面的"before===after 跳过"过滤掉，但那是巧合，不该依赖巧合）。
-export interface DiffCell {
+export interface LocalDiffCell {
   rowId: string;
   columnId: string;
   before: string | null;
   after: string | null;
 }
 
-export interface DiffResult {
-  cells: DiffCell[];
+export interface LocalDiffResult {
+  cells: LocalDiffCell[];
   rowsAdded: string[];
   rowsRemoved: string[];
 }
 
-export function aggregateDiff(changes: KnowhowChange[]): DiffResult {
+export function foldLocalChanges(changes: KnowhowChange[]): LocalDiffResult {
   // (row_id -> (column_id -> [区间内第一条 before, 目前为止最后一条 after]))；
   // 用嵌套 Map 而非字符串拼接键，避免 id 里若恰好出现分隔符导致的键冲突
   // （row_id/column_id 目前都是 uuid 派生的短 hex id，本不会有这个问题，但
@@ -193,7 +198,7 @@ export function aggregateDiff(changes: KnowhowChange[]): DiffResult {
     }
   }
 
-  const cells: DiffCell[] = [];
+  const cells: LocalDiffCell[] = [];
   for (const [rowId, byColumn] of cellAcc) {
     for (const [columnId, [before, after]] of byColumn) {
       if (before === after) continue; // 改了又改回去：不出现

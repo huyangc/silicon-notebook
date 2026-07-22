@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  summarizeChange, originLabel, groupChangesByDay, aggregateDiff, isStaleHead,
+  summarizeChange, originLabel, groupChangesByDay, foldLocalChanges, isStaleHead,
 } from "./knowhow-history-logic.ts";
 
 // payload 字段名按后端真实形状（design doc
@@ -110,24 +110,24 @@ test("groupChangesByDay: 全部同一天时只产出一组", () => {
   assert.equal(groups[0].day, "2026-07-22");
 });
 
-test("aggregateDiff: 反复编辑同一格折叠成一条净变化", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: 反复编辑同一格折叠成一条净变化", () => {
+  const result = foldLocalChanges([
     chg({ seq: 1, payload: { cells: [{ row_id: "r1", column_id: "c1", before: "A", after: "B" }] } }),
     chg({ seq: 2, payload: { cells: [{ row_id: "r1", column_id: "c1", before: "B", after: "C" }] } }),
   ]);
   assert.deepEqual(result.cells, [{ rowId: "r1", columnId: "c1", before: "A", after: "C" }]);
 });
 
-test("aggregateDiff: 改回原样的格子不出现在结果里", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: 改回原样的格子不出现在结果里", () => {
+  const result = foldLocalChanges([
     chg({ seq: 1, payload: { cells: [{ row_id: "r1", column_id: "c1", before: "A", after: "B" }] } }),
     chg({ seq: 2, payload: { cells: [{ row_id: "r1", column_id: "c1", before: "B", after: "A" }] } }),
   ]);
   assert.deepEqual(result.cells, []);
 });
 
-test("aggregateDiff: 多个格子各自独立折叠", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: 多个格子各自独立折叠", () => {
+  const result = foldLocalChanges([
     chg({
       seq: 1,
       payload: {
@@ -144,31 +144,31 @@ test("aggregateDiff: 多个格子各自独立折叠", () => {
   ]);
 });
 
-test("aggregateDiff: row_add 新增的行出现在 rowsAdded", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: row_add 新增的行出现在 rowsAdded", () => {
+  const result = foldLocalChanges([
     chg({ kind: "row_add", payload: { rows: [{ row_id: "r1" }] } }),
   ]);
   assert.deepEqual(result.rowsAdded, ["r1"]);
   assert.deepEqual(result.rowsRemoved, []);
 });
 
-test("aggregateDiff: import_append 与 row_add 同记一次「新增」", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: import_append 与 row_add 同记一次「新增」", () => {
+  const result = foldLocalChanges([
     chg({ kind: "import_append", payload: { rows: [{ row_id: "r9" }] } }),
   ]);
   assert.deepEqual(result.rowsAdded, ["r9"]);
 });
 
-test("aggregateDiff: row_delete 删除的行出现在 rowsRemoved", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: row_delete 删除的行出现在 rowsRemoved", () => {
+  const result = foldLocalChanges([
     chg({ kind: "row_delete", payload: { rows: [{ row_id: "r1" }] } }),
   ]);
   assert.deepEqual(result.rowsRemoved, ["r1"]);
   assert.deepEqual(result.rowsAdded, []);
 });
 
-test("aggregateDiff: 同一行先增后删互相抵消，不出现在任何一边", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: 同一行先增后删互相抵消，不出现在任何一边", () => {
+  const result = foldLocalChanges([
     chg({ seq: 1, kind: "row_add", payload: { rows: [{ row_id: "r1" }] } }),
     chg({ seq: 2, kind: "row_delete", payload: { rows: [{ row_id: "r1" }] } }),
   ]);
@@ -176,8 +176,8 @@ test("aggregateDiff: 同一行先增后删互相抵消，不出现在任何一�
   assert.deepEqual(result.rowsRemoved, []);
 });
 
-test("aggregateDiff: 同一行先删后增互相抵消，不出现在任何一边", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: 同一行先删后增互相抵消，不出现在任何一边", () => {
+  const result = foldLocalChanges([
     chg({ seq: 1, kind: "row_delete", payload: { rows: [{ row_id: "r1" }] } }),
     chg({ seq: 2, kind: "row_add", payload: { rows: [{ row_id: "r1" }] } }),
   ]);
@@ -189,8 +189,8 @@ test("aggregateDiff: 同一行先删后增互相抵消，不出现在任何一�
 // 顶层 rows 字段名）——见 knowhow_history_store.py _revert_payload。跨越一次
 // 回退的区间若不识别这两个字段，行级净变化会静默丢失（Task 11 服务端
 // aggregate_diff 曾踩过同一个坑，见 progress.md）。
-test("aggregateDiff: revert 自身携带的 rows_added/rows_removed 同样被折叠", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: revert 自身携带的 rows_added/rows_removed 同样被折叠", () => {
+  const result = foldLocalChanges([
     chg({
       kind: "revert",
       payload: {
@@ -204,8 +204,8 @@ test("aggregateDiff: revert 自身携带的 rows_added/rows_removed 同样被折
   assert.deepEqual(result.rowsRemoved, ["back2"]);
 });
 
-test("aggregateDiff: revert 自身携带的顶层 cells 与 cell_update 同规则折叠", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: revert 自身携带的顶层 cells 与 cell_update 同规则折叠", () => {
+  const result = foldLocalChanges([
     chg({
       kind: "revert",
       payload: { cells: [{ row_id: "r1", column_id: "c1", before: "旧值", after: "回退后的值" }] },
@@ -215,12 +215,12 @@ test("aggregateDiff: revert 自身携带的顶层 cells 与 cell_update 同规�
 });
 
 // column_delete 的顶层 cells 数组形状是 {row_id, content_md}（没有 column_id/
-// before/after）——不属于 cell_update/revert 那套 4 字段形状。aggregateDiff
+// before/after）——不属于 cell_update/revert 那套 4 字段形状。foldLocalChanges
 // 只在 kind 恰为 cell_update/revert 时才读 payload.cells，column_delete 这条
 // 流水应被完全忽略（不产出任何格子净变化条目），而不是把 content_md 误当
 // after 读出一条 {columnId: undefined} 的坏数据。
-test("aggregateDiff: column_delete 的顶层 cells（{row_id,content_md} 形状）不被误读为格子净变化", () => {
-  const result = aggregateDiff([
+test("foldLocalChanges: column_delete 的顶层 cells（{row_id,content_md} 形状）不被误读为格子净变化", () => {
+  const result = foldLocalChanges([
     chg({
       kind: "column_delete",
       payload: {
@@ -232,8 +232,8 @@ test("aggregateDiff: column_delete 的顶层 cells（{row_id,content_md} 形状�
   assert.deepEqual(result.cells, []);
 });
 
-test("aggregateDiff: 空数组返回三个空字段", () => {
-  assert.deepEqual(aggregateDiff([]), { cells: [], rowsAdded: [], rowsRemoved: [] });
+test("foldLocalChanges: 空数组返回三个空字段", () => {
+  assert.deepEqual(foldLocalChanges([]), { cells: [], rowsAdded: [], rowsRemoved: [] });
 });
 
 test("isStaleHead: 看到的 head 落后于实际即为陈旧", () => {

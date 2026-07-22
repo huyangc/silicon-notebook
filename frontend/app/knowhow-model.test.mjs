@@ -38,6 +38,8 @@ import {
   fetchKnowhowHistoryDiff,
   fetchKnowhowCellHistory,
   revertKnowhowTable,
+  parseKnowhowRevertFailure,
+  KnowhowRevertError,
   createKnowhowMilestone,
   deleteKnowhowMilestone,
   pruneKnowhowHistory,
@@ -1283,42 +1285,125 @@ test("revertKnowhowTable: 回退到当前 head 的 no-op 分支——响应 seq 
 // revert_knowhow_table），不是 user_error() 打过 X-User-Message 头的纯字符串。
 // 共享错误层 errors.ts 的可展示通道（pickUserDetail）只认字符串/字符串数组形
 // 状的 detail，对象形状会被判定为"抠不出来"而返回空串——即使能抠出来，这条
-// 路径也没有 X-User-Message 头，闸1（信任）本来就不会放行。三种错误因此都会
-// 被 throwHumanizedHttpError 兜底成按状态码泛化的通用中文（例如 409 统一变成
-// "操作有冲突，请刷新后重试"），后端为这三种场景各写的具体中文
-// （"这张表刚被其他人改过，请刷新后重试" 等）永远不会穿透到界面。
-// 这不是本任务要修的 bug（改 errors.ts 的信任模型是更大的改动，需要独立评
-// 审），而是把这个行为原样钉成一条测试，并在任务报告里作为顾虑标出：状态码
-// 本身（httpErrorStatus）是唯一能穿透过来、可用于分流的信号，consuming UI 若
-// 要在三种场景下给出设计文档要求的专属文案，得自己按 409/400/500 分流，不能
-// 依赖 error.message。
-test("revertKnowhowTable: 结构化错误体（{code,message}）不会穿透共享错误层，只有状态码能分流", () => {
-  const calls = [];
+// 路径也没有 X-User-Message 头，闸1（信任）本来就不会放行，单靠共享层三种错误
+// 都会被 throwHumanizedHttpError 兜底成按状态码泛化的通用中文，后端为这三种
+// 场景各写的具体中文（"这张表刚被其他人改过，请刷新后重试" 等）永远不会穿透
+// 到界面。评审问题 1 的修复：revertKnowhowTable 内部先用
+// parseKnowhowRevertFailure 探测这三种结构化失败，命中就抛 KnowhowRevertError
+// 把后端原文（.message）与机器码（.code）都带出来；未命中（如目标 seq 不存
+// 在的 404，或未来新增而前端还不认识的 code）落回既有 throwHumanizedHttpError
+// ——同 knowhow-transfer.ts parseCleanupFailure/KnowhowSourceCleanupError 的
+// 既有先例。下面三条各验证一个 code，最后一条验证未知 code 时仍正确落回既有
+// 兜底（不会被强行误判命中）。
+test("revertKnowhowTable: 409 knowhow_history_stale——抛 KnowhowRevertError，带出后端原文与 code", () => {
   const original = globalThis.fetch;
-  globalThis.fetch = async (url, init) => {
-    calls.push({ url, init });
-    return new Response(
-      JSON.stringify({ detail: { code: "knowhow_history_stale", message: "这张表刚被其他人改过，请刷新后重试" } }),
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        detail: { code: "knowhow_history_stale", message: "这张表刚被其他人改过，请刷新后重试" },
+      }),
       { status: 409, headers: { "Content-Type": "application/json" } }, // 无 X-User-Message 头
     );
-  };
   return revertKnowhowTable("nb-1", "t1", 12, 50)
     .then(
       () => assert.fail("应当以 409 拒绝"),
       (error) => {
-        // 状态码穿透——调用方仍可靠它分流三种场景。
-        assert.strictEqual(httpErrorStatus(error), 409);
-        // 但后端精心写的具体中文没有穿透，界面看到的是按状态码泛化的通用文案。
-        assert.strictEqual(error.message, "操作有冲突，请刷新后重试");
-        assert.ok(
-          !error.message.includes("其他人改过"),
-          "后端为 knowhow_history_stale 写的专属文案不应出现在这里——这正是本测试要钉住的行为",
-        );
+        assert.ok(error instanceof KnowhowRevertError);
+        assert.strictEqual(error.code, "knowhow_history_stale");
+        assert.strictEqual(error.message, "这张表刚被其他人改过，请刷新后重试");
       },
     )
     .finally(() => {
       globalThis.fetch = original;
     });
+});
+
+test("revertKnowhowTable: 400 knowhow_history_inconsistent——抛 KnowhowRevertError，带出后端原文与 code", () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        detail: {
+          code: "knowhow_history_inconsistent",
+          message: "表的当前内容与变更历史对不上，回退已中止",
+        },
+      }),
+      { status: 400, headers: { "Content-Type": "application/json" } },
+    );
+  return revertKnowhowTable("nb-1", "t1", 12, 50)
+    .then(
+      () => assert.fail("应当以 400 拒绝"),
+      (error) => {
+        assert.ok(error instanceof KnowhowRevertError);
+        assert.strictEqual(error.code, "knowhow_history_inconsistent");
+        assert.strictEqual(error.message, "表的当前内容与变更历史对不上，回退已中止");
+      },
+    )
+    .finally(() => {
+      globalThis.fetch = original;
+    });
+});
+
+test("revertKnowhowTable: 500 knowhow_revert_verify_failed——抛 KnowhowRevertError，带出后端原文与 code", () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({
+        detail: {
+          code: "knowhow_revert_verify_failed",
+          message: "回退结果校验失败，已放弃本次回退，表未被改动",
+        },
+      }),
+      { status: 500, headers: { "Content-Type": "application/json" } },
+    );
+  return revertKnowhowTable("nb-1", "t1", 12, 50)
+    .then(
+      () => assert.fail("应当以 500 拒绝"),
+      (error) => {
+        assert.ok(error instanceof KnowhowRevertError);
+        assert.strictEqual(error.code, "knowhow_revert_verify_failed");
+        assert.strictEqual(error.message, "回退结果校验失败，已放弃本次回退，表未被改动");
+      },
+    )
+    .finally(() => {
+      globalThis.fetch = original;
+    });
+});
+
+test("revertKnowhowTable: 未知 code 时落回既有兜底（不强行误判命中，仍走共享人话层）", () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () =>
+    new Response(
+      JSON.stringify({ detail: { code: "some_future_code", message: "以后可能新增的另一种失败" } }),
+      { status: 409, headers: { "Content-Type": "application/json" } }, // 无 X-User-Message 头
+    );
+  return revertKnowhowTable("nb-1", "t1", 12, 50)
+    .then(
+      () => assert.fail("应当以 409 拒绝"),
+      (error) => {
+        assert.ok(!(error instanceof KnowhowRevertError));
+        // 落回既有共享人话层：状态码穿透可分流，但具体文案被泛化成通用中文
+        // ——parseKnowhowRevertFailure 对不认识的 code 没有强行命中。
+        assert.strictEqual(httpErrorStatus(error), 409);
+        assert.strictEqual(error.message, "操作有冲突，请刷新后重试");
+      },
+    )
+    .finally(() => {
+      globalThis.fetch = original;
+    });
+});
+
+// parseKnowhowRevertFailure 的一条防御性分支单测：code 本身认识（三者之一），
+// 但状态码对不上后端 except 分支实际会用的那个值——理论不应发生（后端每个
+// code 只从一处 raise，status 恒定），但要确认解析函数不会仅凭 code 已知就
+// 误判命中，同 parseCleanupFailure 严格校验 status===409 的既有取向一致。
+test("parseKnowhowRevertFailure: code 已知但 status 对不上时返回 null", () => {
+  assert.strictEqual(
+    parseKnowhowRevertFailure(400, {
+      detail: { code: "knowhow_history_stale", message: "这张表刚被其他人改过，请刷新后重试" },
+    }),
+    null,
+  );
 });
 
 // --- createKnowhowMilestone / deleteKnowhowMilestone --------------------------
