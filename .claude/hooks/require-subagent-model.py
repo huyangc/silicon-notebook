@@ -207,36 +207,54 @@ def _deny(reason: str) -> None:
     sys.exit(0)
 
 
-def main() -> None:
-    payload = json.load(sys.stdin)
+def evaluate(payload: object, project_dir: Path) -> str | None:
+    """判定一次工具调用：放行返回 `None`，拦截返回给主 agent 的理由。
+
+    与进程边界解耦，只读 `.claude/agents/`，所以测试可以直接调它跑判定矩阵，
+    不必为每条用例起一个解释器——那种测法会往测试套件里灌进几十次进程冷启动，
+    把同批跑的、带时间预算的用例挤爆（本仓库的 `test_diag_db.py` 就有一条给
+    「起解释器 + 跑完脚本」只留 0.25 秒的用例）。进程契约另有少量用例专门守。
+    """
+    if not isinstance(payload, dict):
+        return None
 
     if payload.get("tool_name") not in SUBAGENT_TOOLS:
-        _allow()
+        return None
 
     tool_input = payload.get("tool_input")
     if not isinstance(tool_input, dict):
-        _allow()
+        return None
 
     # 调用点写 `model: inherit` 保留的正是本门要禁的语义，等同于没选。
     if _is_chosen_model(tool_input.get("model")):
-        _allow()
+        return None
 
     subagent_type = str(tool_input.get("subagent_type") or "").strip()
     if subagent_type in MODEL_EXEMPT_SUBAGENT_TYPES:
-        _allow()
+        return None
 
-    project_dir = Path(
-        os.environ.get("CLAUDE_PROJECT_DIR") or payload.get("cwd") or "."
-    )
     pinned = _pinned_agent_models(project_dir)
     if subagent_type in pinned:
-        _allow()
+        return None
 
     roster = (
         "\n".join(f"  - {name} → {model}" for name, model in sorted(pinned.items()))
         or "  （当前没有已钉模型的角色定义）"
     )
-    _deny(DENY_REASON.format(roster=roster))
+    return DENY_REASON.format(roster=roster)
+
+
+def _resolve_project_dir(payload: object) -> Path:
+    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+    return Path(os.environ.get("CLAUDE_PROJECT_DIR") or cwd or ".")
+
+
+def main() -> None:
+    payload = json.load(sys.stdin)
+    reason = evaluate(payload, _resolve_project_dir(payload))
+    if reason is None:
+        _allow()
+    _deny(reason)
 
 
 if __name__ == "__main__":
