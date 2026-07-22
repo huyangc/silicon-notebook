@@ -5,6 +5,7 @@ from typing import Callable, Sequence
 
 from app.repositories.sqlite.anchor_normalization import js_trim, sqlite_js_trim_expression
 from app.repositories.sqlite.database import SqliteDatabase
+from app.repositories.sqlite.knowhow_history_store import record_change
 
 
 #: Legal ``knowhow_columns.role`` values post-migration-17 (design doc §①
@@ -681,6 +682,8 @@ class KnowhowStore:
         column_id: str,
         content_md: str,
         require_assets: Sequence[str] = (),
+        actor: str = "",
+        origin: str = "user",
     ) -> None:
         """Upsert one cell's content. One write transaction: the cell
         (insert or update-in-place via the ``UNIQUE(row_id, column_id)``
@@ -697,10 +700,19 @@ class KnowhowStore:
         reference to a deleted asset. Both sides now decide under the same
         write lock, so one of them always loses cleanly — the sweeper's own
         re-check sees the new reference and spares the asset, or this write
-        sees the deletion and refuses."""
+        sees the deletion and refuses.
+
+        版本管理（spec §5）：本方法在同一事务的最后追加一条 ``cell_update``
+        流水，``before`` 取写入前的 ``content_md``（格子当时不存在则为
+        ``None``，与空串区分——回退时 ``None`` 意味着"把这格删掉"）。"""
         now = self.now()
         with self.database.write() as db:
             self._require_assets_exist(db, row_id, require_assets)
+            before_row = db.execute(
+                "SELECT content_md FROM knowhow_cells WHERE row_id = ? AND column_id = ?",
+                (row_id, column_id),
+            ).fetchone()
+            before = before_row["content_md"] if before_row is not None else None
             db.execute(
                 "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
                 "VALUES (?, ?, ?, ?, ?) "
@@ -718,6 +730,23 @@ class KnowhowStore:
                 "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = ?)",
                 (row_id,),
             )
+            table_row = db.execute(
+                "SELECT table_id FROM knowhow_rows WHERE id = ?", (row_id,)
+            ).fetchone()
+            if table_row is not None:
+                record_change(
+                    db,
+                    new_id=self.new_id,
+                    now=self.now,
+                    table_id=table_row["table_id"],
+                    kind="cell_update",
+                    payload={"cells": [{
+                        "row_id": row_id, "column_id": column_id,
+                        "before": before, "after": content_md,
+                    }]},
+                    actor=actor,
+                    origin=origin,
+                )
 
     def update_knowhow_cells(
         self,
@@ -725,6 +754,8 @@ class KnowhowStore:
         column_id: str,
         content_md: str,
         require_assets: Sequence[str] = (),
+        actor: str = "",
+        origin: str = "user",
     ) -> None:
         """Batch upsert the SAME (column, content) across MULTIPLE rows in
         ONE write transaction — the merged-cell "write the whole concept
@@ -748,7 +779,13 @@ class KnowhowStore:
         ``require_assets`` behaves exactly as in ``update_knowhow_cell`` and
         is checked once for the whole batch (every row receives the same
         ``content_md``, so they reference the same assets); a missing asset
-        rolls back the entire batch, preserving all-or-nothing."""
+        rolls back the entire batch, preserving all-or-nothing.
+
+        版本管理（spec §5）：records ONE ``cell_update`` flow entry covering
+        every row in the batch (not one per row — a merged-cell batch write
+        is a single logical edit), appended in the same transaction after the
+        ``mutation_seq`` bump. Each row's ``before`` is its own pre-write
+        ``content_md`` (``None`` when the cell did not exist yet)."""
         if not row_ids:
             return
         now = self.now()
@@ -756,7 +793,17 @@ class KnowhowStore:
             # row_ids share a table (documented above), so any of them resolves
             # the same notebook.
             self._require_assets_exist(db, row_ids[0], require_assets)
+            cells: list[dict] = []
             for row_id in row_ids:
+                before_row = db.execute(
+                    "SELECT content_md FROM knowhow_cells WHERE row_id = ? AND column_id = ?",
+                    (row_id, column_id),
+                ).fetchone()
+                cells.append({
+                    "row_id": row_id, "column_id": column_id,
+                    "before": before_row["content_md"] if before_row is not None else None,
+                    "after": content_md,
+                })
                 db.execute(
                     "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
                     "VALUES (?, ?, ?, ?, ?) "
@@ -774,9 +821,23 @@ class KnowhowStore:
                 "WHERE id = (SELECT table_id FROM knowhow_rows WHERE id = ?)",
                 (row_ids[0],),
             )
+            table_row = db.execute(
+                "SELECT table_id FROM knowhow_rows WHERE id = ?", (row_ids[0],)
+            ).fetchone()
+            if table_row is not None:
+                record_change(
+                    db, new_id=self.new_id, now=self.now,
+                    table_id=table_row["table_id"],
+                    kind="cell_update", payload={"cells": cells},
+                    actor=actor, origin=origin,
+                )
 
     def update_knowhow_cells_bulk_guarded(
-        self, notebook_id: str, updates: list[tuple[str, str, str, str, str]]
+        self,
+        notebook_id: str,
+        updates: list[tuple[str, str, str, str, str]],
+        actor: str = "",
+        origin: str = "user",
     ) -> "dict[str, list[tuple[str, str]]]":
         """Compare-and-write bulk cell writer for
         ``scripts/backfill_knowhow_md.py``'s ``--apply`` paths (TOCTOU +
@@ -836,7 +897,16 @@ class KnowhowStore:
         reprojects tables with written OR already_applied rows (reprojection is
         idempotent), so a rerun of the same plan recovers such stuck rows even
         though it writes nothing. Both buckets leave the cell untouched and bump
-        no ``mutation_seq``."""
+        no ``mutation_seq``.
+
+        版本管理（spec §5）：collect-skips-and-press-on semantics carry over to
+        the flow log — only entries that actually land in ``written`` go into
+        a ``cell_update`` payload, grouped by table (one entry may span several
+        tables), appended after every ``mutation_seq`` bump. A table with zero
+        actual writes (all skipped/rejected/already-applied) gets no entry at
+        all, never one with an empty ``cells`` list. ``before`` reuses the
+        already-verified ``expected_before`` from the phase-1 compare above —
+        no second read."""
         if not updates:
             return {"written": [], "skipped": [], "already_applied": [], "rejected": []}
         now = self.now()
@@ -845,6 +915,7 @@ class KnowhowStore:
         already_applied: list[tuple[str, str]] = []
         rejected: list[tuple[str, str]] = []
         written_table_ids: list[str] = []
+        by_table: "dict[str, list[dict]]" = {}
         with self.database.write() as db:
             # F1 (cross-process atomicity): take a RESERVED lock BEFORE the
             # phase-1 re-reads. write()'s ``write_lock`` only serializes writers
@@ -912,12 +983,23 @@ class KnowhowStore:
                     (now, row_id),
                 )
                 written.append((row_id, column_id))
+                by_table.setdefault(table_id, []).append({
+                    "row_id": row_id, "column_id": column_id,
+                    "before": expected_before, "after": content_md,
+                })
                 if table_id not in written_table_ids:
                     written_table_ids.append(table_id)
             for table_id in written_table_ids:
                 db.execute(
                     "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = ?",
                     (table_id,),
+                )
+            for written_table_id, cells in by_table.items():
+                record_change(
+                    db, new_id=self.new_id, now=self.now,
+                    table_id=written_table_id,
+                    kind="cell_update", payload={"cells": cells},
+                    actor=actor, origin=origin,
                 )
         return {
             "written": written,
@@ -933,6 +1015,8 @@ class KnowhowStore:
         require_assets: Sequence[str] = (),
         anchor_column_id: "str | None" = None,
         expected_anchor: "Sequence[str] | None" = None,
+        actor: str = "",
+        origin: str = "user",
     ) -> "dict[str, object]":
         """ALL-OR-NOTHING compare-and-write for the interactive editor's
         batch-reformat save (concurrency P1 fix b, HTTP 409 on a concurrent
@@ -1006,12 +1090,22 @@ class KnowhowStore:
         Returns ``{"written": [(row_id, column_id), ...], "conflict": bool}``.
         ``conflict=True`` guarantees ``written == []`` (the caller maps it to a
         409 with a friendly "内容已被其他人修改，请刷新后重试"). Empty ``updates``
-        is a no-op (``{"written": [], "conflict": False}``, no transaction)."""
+        is a no-op (``{"written": [], "conflict": False}``, no transaction).
+
+        版本管理（spec §5）：a conflict returns before phase 2 ever runs, so it
+        writes no flow entry (all-or-nothing extends to the log). On success,
+        ``updates`` may span several tables (each entry carries its own
+        ``table_id``), so this records ONE ``cell_update`` entry PER DISTINCT
+        written table — never one entry mixing rows from different tables —
+        appended after every ``mutation_seq`` bump. ``before`` reuses each
+        entry's ``expected_before``, already proven equal to the stored value
+        by phase 1 — no second read."""
         if not updates:
             return {"written": [], "conflict": False}
         now = self.now()
         written: list[tuple[str, str]] = []
         written_table_ids: list[str] = []
+        by_table: "dict[str, list[dict]]" = {}
         with self.database.write() as db:
             # F1 (cross-process atomicity): reserve the write lock BEFORE phase 1
             # re-reads, for the same reason as update_knowhow_cells_bulk_guarded
@@ -1175,12 +1269,23 @@ class KnowhowStore:
                     (now, row_id),
                 )
                 written.append((row_id, column_id))
+                by_table.setdefault(table_id, []).append({
+                    "row_id": row_id, "column_id": column_id,
+                    "before": expected_before, "after": content_md,
+                })
                 if table_id not in written_table_ids:
                     written_table_ids.append(table_id)
             for table_id in written_table_ids:
                 db.execute(
                     "UPDATE knowhow_tables SET mutation_seq = mutation_seq + 1 WHERE id = ?",
                     (table_id,),
+                )
+            for written_table_id, cells in by_table.items():
+                record_change(
+                    db, new_id=self.new_id, now=self.now,
+                    table_id=written_table_id,
+                    kind="cell_update", payload={"cells": cells},
+                    actor=actor, origin=origin,
                 )
         return {"written": written, "conflict": False}
 
