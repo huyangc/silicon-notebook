@@ -36,6 +36,20 @@ VECTOR_TABLES = (
 )
 _VECTOR_TABLE_IDS = dict(VECTOR_TABLES)
 
+# Every character Python's ``str.strip()`` removes (i.e. ``str.isspace()`` is
+# True) - pinned by tests/test_batch_ingest.py against the live Unicode
+# tables. The element-vector missing queries must use EXACTLY this set
+# as the TRIM charset: SourceEmbeddingService.embed_source skips elements whose
+# ``text.strip()`` is empty, so an element these queries call "missing" but the
+# embed path refuses to embed would be reported missing forever - the backfill
+# command would never converge. SQLite's bare TRIM(X) strips U+0020 only, a
+# strictly weaker filter that a tab/newline-only element slips right through.
+PY_WHITESPACE = (
+    "\t\n\x0b\x0c\r\x1c\x1d\x1e\x1f \x85\xa0"
+    "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
+
 
 def _now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
@@ -418,6 +432,41 @@ class SQLiteMaintenanceAdapter:
                     (notebook_id,),
                 ).fetchall()
             ]
+
+    def missing_element_embedding_rows(self, notebook_id: str) -> list[dict]:
+        """该 notebook 下缺 element 向量、且文本非空白的 source_elements 行
+        ([{"id","source_id","text"}, ...])。空白文本必须排除:embed_source 会跳过
+        它们(text.strip() 为空),永远不会有向量——不排除的话补齐命令每次都报「还有
+        N 个缺失」、每次都试着嵌入空串,成为永不收敛的脏状态。TRIM 的字符集用
+        PY_WHITESPACE(= Python str.strip() 的全集),与 embed_source 的过滤逐字符一致。"""
+        with self._runtime.database.connect() as db:
+            return [
+                dict(r)
+                for r in db.execute(
+                    "SELECT e.id, e.source_id, e.text FROM source_elements e "
+                    "JOIN sources s ON s.id = e.source_id "
+                    "WHERE s.notebook_id=? AND TRIM(e.text, ?) != '' "
+                    "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
+                    "WHERE v.element_id = e.id)",
+                    (notebook_id, PY_WHITESPACE),
+                ).fetchall()
+            ]
+
+    def count_missing_element_vectors(self, notebook_id: str) -> int:
+        """missing_element_embedding_rows 的计数版(盘点用)。判据必须与它逐字一致,
+        否则「盘点数」和「实际可补数」会对不上。"""
+        with self._runtime.database.connect() as db:
+            return db.execute(
+                "SELECT COUNT(*) c FROM source_elements e "
+                "JOIN sources s ON s.id = e.source_id "
+                "WHERE s.notebook_id=? AND TRIM(e.text, ?) != '' "
+                "AND NOT EXISTS (SELECT 1 FROM element_embeddings v "
+                "WHERE v.element_id = e.id)",
+                (notebook_id, PY_WHITESPACE),
+            ).fetchone()["c"]
+
+    def embed_elements_batch(self, notebook_id: str, items: list[dict]) -> int:
+        return self._runtime.source_embedding.embed_elements_batch(notebook_id, items)
 
     def embed_chunks_batch(self, notebook_id: str, items: list[dict]) -> None:
         return self._runtime.source_embedding.embed_chunks_batch(notebook_id, items)

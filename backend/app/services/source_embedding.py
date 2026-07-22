@@ -162,6 +162,75 @@ class SourceEmbeddingService:
             "embedded %s/%s elements for source %s", len(rows), len(pending), source_id
         )
 
+    def embed_elements_batch(self, notebook_id: str, items: List[dict]) -> int:
+        """按 element 补向量(只嵌给定的行,不整源重嵌),返回真正落库的行数。
+
+        ``items``: ``[{"element_id": str, "source_id": str, "text": str}, ...]``
+        (缺向量的 element 由 maintenance.missing_element_embedding_rows 查出)。
+        element_embeddings 主键是 element_id、写入走 INSERT OR REPLACE 纯 upsert,
+        所以只补缺失是安全的——不会碰到同源已有的向量。
+
+        与 embed_source(正常路径)**逐字节同构**:同样跳过 text.strip() 为空的元素,
+        同样按 self.settings.embed_truncate_chars 截断原文。刻意不复用
+        embed_chunks_batch——它硬编码 text[:2000],默认值恰好相同所以现在看不出差别,
+        但一旦调大 EMBED_TRUNCATE_CHARS,补出来的向量就和主路径不同构、检索质量静默劣化。
+
+        replace_element_vectors 的签名是 per-source(source_id, notebook_id, rows),
+        故计算按 embed_batch_size 平铺并发、落库时按 source_id 分组逐组写。
+        计算失败按批隔离(记 warning 后跳过该批),不炸整轮。"""
+        if not self.settings.embedder_configured or not items:
+            return 0
+        trunc = self.settings.embed_truncate_chars
+        pending: List[tuple] = []
+        for it in items:
+            text = it.get("text") or ""
+            if not text.strip():
+                continue
+            pending.append((it["element_id"], it["source_id"], text[:trunc]))
+        if not pending:
+            return 0
+
+        size = max(1, self.settings.embed_batch_size)
+        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
+        embedder = self.embedder()
+        self._warm_up(embedder)
+
+        def _embed_only(batch: list) -> list:
+            try:
+                vectors = embedder.embed_texts([t for _, _, t in batch])
+            except Exception as exc:  # noqa: BLE001 — best-effort; isolate per batch
+                self.event_log.logger.warning(
+                    "embed elements batch failed (%d) for %s: %s",
+                    len(batch), notebook_id, exc,
+                )
+                return []
+            return [
+                (eid, sid, vector)
+                for (eid, sid, _), vector in zip(batch, vectors)
+            ]
+
+        by_source: dict[str, list] = {}
+        for part in self._map_embedding_batches(
+            _embed_only, batches, task_prefix="emb-el"
+        ):
+            for element_id, source_id, vector in part:
+                by_source.setdefault(source_id, []).append((element_id, vector))
+        if not by_source:
+            return 0
+
+        now = self.now()
+        written = 0
+        for source_id, rows in by_source.items():
+            self.vectors.replace_element_vectors(
+                source_id, notebook_id, rows, created_at=now
+            )
+            written += len(rows)
+        self.event_log.logger.info(
+            "embedded %s/%s missing elements for notebook %s",
+            written, len(pending), notebook_id,
+        )
+        return written
+
     def embed_objects_batch(self, notebook_id: str, items: List[dict],
                             progress=None, commit_every: Optional[int] = None) -> None:
         """并发计算 payload 向量,**每 commit_every 批 flush 一次**(增量提交:中断可续跑、

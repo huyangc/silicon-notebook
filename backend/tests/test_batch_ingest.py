@@ -173,9 +173,60 @@ def test_run_ingest_dedup_skips_on_rerun(repo, tmp_path):
     bi.run_ingest(repo, nb_id, files, workers=1, conc=2)
     counts2 = bi.run_ingest(repo, nb_id, files, workers=1, conc=2)
     assert counts2["uploaded"] == 0 and counts2["skipped"] == 3
+    assert counts2["reparsed"] == 0               # 有 elements = 真已摄取,不该重 parse
     with repo._connect() as db:
         nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?", (nb_id,)).fetchone()["c"]
     assert nsrc == 3
+
+
+def test_run_ingest_reparses_existing_source_missing_elements(repo, tmp_path, monkeypatch):
+    """hash 已在库、但没有 source_elements 的源(上次 parse 中途中断)必须重新 parse,
+    不能按 hash 认账成 skipped——file_hash 是 INSERT 时写的(早于 parse),旧的二元判定
+    会让这种源永久停在空源状态。行为证据:跑完真的有了 elements。"""
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda s: None)
+    nb_id = bi.ensure_notebook(repo, None, "nb-ingest-reparse")
+    p = tmp_path / "half.md"
+    p.write_text("# Half\n\nBody paragraph " + "z" * 200, encoding="utf-8")
+    digest = bi.sha256_bytes(p.read_bytes())
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:      # 预置:hash 已写、parse_status 看似前进,但 elements 为空
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-half", nb_id, "Half", "document", p.name, str(p), 0, digest,
+             "", "", "parsed", now, now))
+
+    counts = bi.run_ingest(repo, nb_id, [p], workers=1, conc=1)
+
+    assert counts["reparsed"] == 1
+    assert counts["uploaded"] == 0 and counts["skipped"] == 0 and counts["failed"] == 0
+    with repo._connect() as db:
+        n_el = db.execute("SELECT COUNT(*) c FROM source_elements WHERE source_id='src-half'"
+                          ).fetchone()["c"]
+        nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"]
+    assert n_el > 0                # 真的重新 parse 出了 elements
+    assert nsrc == 1               # 复用原源,不新建
+
+
+def test_run_ingest_same_run_duplicate_files_skip_not_reparse(repo, tmp_path):
+    """同一次运行里两个内容相同的文件:第一个 uploaded、第二个 skipped。第二个虽然
+    hash 命中(第一个刚建的源)却不在进池前的 parsed 快照里,若无本次运行的认领集合
+    就会被误判成 reparsed、白跑一遍 parse。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-dup")
+    body = "# Same\n\nIdentical body " + "q" * 200
+    a = tmp_path / "a.md"; a.write_text(body, encoding="utf-8")
+    b = tmp_path / "b.md"; b.write_text(body, encoding="utf-8")
+
+    counts = bi.run_ingest(repo, nb_id, [a, b], workers=1, conc=1)
+
+    assert counts["uploaded"] == 1 and counts["skipped"] == 1
+    assert counts["reparsed"] == 0 and counts["failed"] == 0   # 第二个不该重 parse
+    with repo._connect() as db:
+        nsrc = db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"]
+    assert nsrc == 1                                # 同内容只建一个源
 
 
 def test_run_kg_disables_fusion_and_rebuilds(repo, monkeypatch):
@@ -688,6 +739,193 @@ def test_main_embed_requires_notebook_id(repo, capsys):
     rc = bi.main(["embed"])
     assert rc == 2
     assert "notebook-id" in capsys.readouterr().err
+
+
+# ── element 向量的缺失查询与补齐 ──────────────────────────────────────────────
+# 注意 ingest 阶段刻意零嵌入(run_ingest 把 embed_provider 置空),收尾只补 chunk 向量,
+# 所以刚 ingest 完的库里 element 向量是**全缺**的——正好是补齐路径的真实输入。
+
+class _TextRecordingEmbedder(FakeEmbedder):
+    """FakeEmbedder + 记录每次真正送给 embedder 的文本(断言截断规则/只补缺失用)。"""
+
+    def __init__(self, dim, seen):
+        super().__init__(dim=dim)
+        self.seen = seen
+
+    def embed_texts(self, texts):
+        self.seen.extend(texts)
+        return super().embed_texts(texts)
+
+
+def _element_rows(repo, source_id):
+    with repo._connect() as db:
+        return [dict(r) for r in db.execute(
+            "SELECT id, text FROM source_elements WHERE source_id=? ORDER BY id",
+            (source_id,)).fetchall()]
+
+
+def _source_ids(repo, notebook_id):
+    with repo._connect() as db:
+        return [r["id"] for r in db.execute(
+            "SELECT id FROM sources WHERE notebook_id=? ORDER BY id",
+            (notebook_id,)).fetchall()]
+
+
+def _insert_element(repo, source_id, element_id, text):
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,"
+            "text,metadata,created_at) VALUES (?,?,?,?,?,?,?)",
+            (element_id, source_id, "paragraph", "p1", text, "{}", now))
+
+
+def test_py_whitespace_constant_covers_every_python_strip_char():
+    """PY_WHITESPACE 必须就是 str.strip() 的字符全集——缺失查询拿它当 TRIM 字符集,
+    少一个字符就有一类元素「算缺失但永远补不上」,补齐命令不收敛。"""
+    from app.repositories.sqlite.maintenance import PY_WHITESPACE
+
+    assert set(PY_WHITESPACE) == {
+        chr(c) for c in range(0x110000) if chr(c).isspace()
+    }
+
+
+def test_missing_element_rows_exclude_blank_text(repo, tmp_path):
+    """空白文本元素不算缺失:embed_source 会跳过它们(text.strip() 为空),它们永远不会
+    有向量。若算进缺失,补齐命令每次都报「还有 N 个缺失」、每次都试着嵌入空串 → 永不
+    收敛的脏状态。含纯制表符/换行/全角空格——SQLite 裸 TRIM() 只去半角空格,挡不住。"""
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb-blank")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1, conc=1)
+    sid = _source_ids(repo, nb_id)[0]
+    bi.backfill_element_embeddings(repo, nb_id, conc=1)      # 先把真实元素补齐
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    for i, blank in enumerate(["", "   ", "\t\n", "　　", "\xa0"]):
+        _insert_element(repo, sid, f"el-blank-{i}", blank)   # 全部无向量
+
+    rows = repo.maintenance.missing_element_embedding_rows(nb_id)
+
+    assert [r["id"] for r in rows] == []                     # 一个都不算缺失
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    assert bi.backfill_element_embeddings(repo, nb_id, conc=1) == 0   # 仍然 0 项可补
+    _insert_element(repo, sid, "el-real", " 有内容的段落 ")    # 对照:非空白才算缺失
+    assert [r["id"] for r in repo.maintenance.missing_element_embedding_rows(nb_id)] == [
+        "el-real"]
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 1
+
+
+def test_missing_element_rows_are_scoped_to_the_notebook(repo, tmp_path):
+    """缺失查询按 notebook 限定(source_elements 表本身没有 notebook_id,靠 JOIN sources)。"""
+    d = _make_md_dir(tmp_path, n=1)
+    nb_a = bi.ensure_notebook(repo, None, "nb-a")
+    nb_b = bi.ensure_notebook(repo, None, "nb-b")
+    bi.run_ingest(repo, nb_a, bi.iter_files(d), workers=1, conc=1)
+    n_a = repo.maintenance.count_missing_element_vectors(nb_a)
+
+    assert n_a > 0                                            # A 有缺
+    assert repo.maintenance.count_missing_element_vectors(nb_b) == 0   # B 不受影响
+    assert all(r["source_id"] in _source_ids(repo, nb_a)
+               for r in repo.maintenance.missing_element_embedding_rows(nb_a))
+    assert repo.maintenance.missing_element_embedding_rows(nb_b) == []
+
+
+def test_backfill_element_embeddings_fills_missing_and_is_idempotent(repo, tmp_path):
+    """补齐后全部有向量、第二遍 0 项可补(幂等);再删掉一部分重跑时,只有被删的那些
+    重新送进 embedder(INSERT OR REPLACE upsert 只碰缺的,不整源重嵌)。"""
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb-el")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
+    total = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert total >= 3                                         # 多源、多 element
+
+    assert bi.backfill_element_embeddings(repo, nb_id, conc=2) == total
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    assert bi.backfill_element_embeddings(repo, nb_id, conc=2) == 0   # 幂等
+
+    with repo._connect() as db:                               # 制造部分缺失
+        eids = [r["element_id"] for r in db.execute(
+            "SELECT element_id FROM element_embeddings WHERE notebook_id=? "
+            "ORDER BY element_id", (nb_id,)).fetchall()]
+    deleted = eids[:2]
+    with repo._write() as db:
+        db.executemany("DELETE FROM element_embeddings WHERE element_id=?",
+                       [(eid,) for eid in deleted])
+    seen = []
+    repo.embedder = _TextRecordingEmbedder(dim=16, seen=seen)
+
+    assert bi.backfill_element_embeddings(repo, nb_id, conc=2) == len(deleted)
+
+    assert len(seen) == len(deleted)                          # 只重嵌了被删的那两条
+    with repo._connect() as db:
+        want = {r["text"] for r in db.execute(
+            "SELECT text FROM source_elements WHERE id IN (?,?)", tuple(deleted)
+        ).fetchall()}
+    assert set(seen) == want
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+
+
+def test_backfill_element_embeddings_groups_rows_by_source(repo, tmp_path):
+    """待补行跨多个源:replace_element_vectors 是 per-source 签名(source_id, notebook_id,
+    rows),必须按 source_id 分组逐组落库——落错组会让 element_embeddings.source_id 指向
+    别的源(按源删向量/按源重嵌都会走错)。"""
+    d = _make_md_dir(tmp_path, n=2)
+    nb_id = bi.ensure_notebook(repo, None, "nb-group")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=2, conc=2)
+    sids = _source_ids(repo, nb_id)
+    assert len(sids) >= 2
+    missing = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert len({r["source_id"] for r in
+                repo.maintenance.missing_element_embedding_rows(nb_id)}) == len(sids)
+
+    assert bi.backfill_element_embeddings(repo, nb_id, conc=2) == missing
+
+    with repo._connect() as db:                               # 每行的 source_id 都对得上
+        mismatched = db.execute(
+            "SELECT COUNT(*) c FROM element_embeddings v JOIN source_elements e "
+            "ON e.id = v.element_id WHERE v.notebook_id=? AND v.source_id != e.source_id",
+            (nb_id,)).fetchone()["c"]
+        per_source = {r["source_id"]: r["c"] for r in db.execute(
+            "SELECT source_id, COUNT(*) c FROM element_embeddings WHERE notebook_id=? "
+            "GROUP BY source_id", (nb_id,)).fetchall()}
+    assert mismatched == 0
+    assert set(per_source) == set(sids)                       # 每个源都写到了
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+
+
+def test_backfill_element_embeddings_truncates_by_settings_not_hardcoded_2000(repo, tmp_path):
+    """补齐路径的截断必须用 settings.embed_truncate_chars(与 embed_source 同构),不是
+    embed_chunks_batch 里硬编码的 2000。默认值恰好也是 2000 → 必须把配置调成非 2000
+    才有检出力,这里用 137。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-trunc")
+    p = tmp_path / "long.md"
+    p.write_text("# Long\n\n" + "词" * 5000, encoding="utf-8")
+    bi.run_ingest(repo, nb_id, [p], workers=1, conc=1)
+    sid = _source_ids(repo, nb_id)[0]
+    assert any(len(r["text"]) > 2000 for r in _element_rows(repo, sid))   # 有超长元素
+    seen = []
+    repo.embedder = _TextRecordingEmbedder(dim=16, seen=seen)
+    repo.settings.embed_truncate_chars = 137                  # 非默认值,否则本断言零检出力
+
+    assert bi.backfill_element_embeddings(repo, nb_id, conc=1) > 0
+
+    assert seen
+    assert max(len(t) for t in seen) == 137                   # 真按 137 截,不是 2000
+
+
+def test_run_embed_fills_missing_element_vectors(repo, tmp_path):
+    """run_embed 三侧并列:chunk / element / 节点都盘点 → 补齐 → 复盘归零。"""
+    d = _make_md_dir(tmp_path, n=1)
+    nb_id = bi.ensure_notebook(repo, None, "nb-embed3")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1, conc=2)
+    element_missing = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert element_missing > 0
+
+    out = bi.run_embed(repo, nb_id, conc=2)
+
+    assert out["element_missing_before"] == element_missing
+    assert out["elements_embedded"] == element_missing
+    assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+    assert bi.run_embed(repo, nb_id, conc=2)["element_missing_before"] == 0   # 幂等
 
 
 def test_main_embed_requires_embed_even_with_allow_no_embed(repo, tmp_path, monkeypatch, capsys):

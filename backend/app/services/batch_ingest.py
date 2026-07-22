@@ -374,23 +374,52 @@ def run_ingest(
     conc: int = 4,
     log: LogFn | None = None,
 ) -> dict[str, int]:
-    """Phase 1:解析+分块(摄取期 EMBED 置空)+ 收尾低并发补 chunk 向量。无 LLM。"""
+    """Phase 1:解析+分块(摄取期 EMBED 置空)+ 收尾低并发补 chunk 向量。无 LLM。
+
+    跳过判据是「有没有 source_elements」而非「hash 在不在库」——与 run_all 同一判据。
+    file_hash 是 INSERT 时写的(早于 parse),所以一个 parse 中途被中断的源,hash 已经
+    在库、elements 却是空的:旧的二元判定(hash 命中即 skipped)会把它永久认账成已摄取,
+    这个源就再也补不回来了。两分流(ingest 是无 KG 阶段,没有「已有 KG → 跳过」那一档):
+      hash 未命中        → upload_sources → uploaded
+      命中且有 elements  → 真的已摄取     → skipped
+      命中但无 elements  → process_source → reparsed(重新 parse 补 elements)
+    """
     log = log or (lambda _e: None)
-    counts = {"uploaded": 0, "skipped": 0, "failed": 0}
+    counts = {"uploaded": 0, "skipped": 0, "reparsed": 0, "failed": 0}
     orig_provider = repo.settings.embed_provider
     repo.settings.embed_provider = ""   # 摄取期零嵌入:parse+chunk 快、无 429
+
+    parsed = repo.maintenance.sources_with_elements(notebook_id)   # 进池前取一次快照
+    # `parsed` 是快照,看不见本次运行刚产出的 elements:输入目录里若有两个内容相同的
+    # 文件,第二个会 hash 命中(第一个刚建的源)却不在快照里 → 被误判成需要 reparse,
+    # 白跑一遍 parse。用「本次已认领的内容哈希」集合挡掉(线程安全,_one 在池里并发跑)。
+    # 按 digest 而非 sid 认领:认领发生在做任何事之前,不必等 upload 返回 sid,天然没有
+    # 「先插行、后写 elements」的窗口期竞态;digest → source 本就是一一映射。
+    claimed: set[str] = set()
+    claim_lock = threading.Lock()
 
     def _one(path: Path) -> tuple[str, Path, str | None]:
         try:
             content = path.read_bytes()
-            if already_ingested(repo, notebook_id, sha256_bytes(content)):
+            digest = sha256_bytes(content)
+            with claim_lock:
+                if digest in claimed:
+                    return ("skipped", path, None)   # 本次运行内的重复文件
+                claimed.add(digest)
+            sid = source_id_by_hash(repo, notebook_id, digest)
+            if sid is None:
+                repo.upload_sources(
+                    notebook_id,
+                    [UploadedSourceFile(file_name=path.name, content_type="", content=content)],
+                    scheduler=None,
+                )
+                return ("uploaded", path, None)
+            if sid in parsed:
                 return ("skipped", path, None)
-            repo.upload_sources(
-                notebook_id,
-                [UploadedSourceFile(file_name=path.name, content_type="", content=content)],
-                scheduler=None,
-            )
-            return ("uploaded", path, None)
+            # 已建源但没有 elements(上次 parse 中断/未落地)→ 重新 parse。调的是
+            # upload_sources(scheduler=None) 内部同一个 process_source,不引入新的模型暴露。
+            repo.process_source(sid)
+            return ("reparsed", path, None)
         except Exception as exc:   # noqa: BLE001 — 单文件失败隔离
             return ("failed", path, f"{type(exc).__name__}: {exc}")
 
@@ -448,6 +477,38 @@ def backfill_chunk_embeddings(
             except Exception:   # noqa: BLE001 — best-effort;429 留人工重跑
                 print(f"[embed {i}/{n}] {sid} ✗(留人工重跑)", flush=True)
         return done
+    finally:
+        repo.settings.embed_concurrency = orig_conc
+
+
+def backfill_element_embeddings(
+    repo: BatchIngestRepository,
+    notebook_id: str,
+    conc: int = 4,
+) -> int:
+    """补该 notebook 缺失的 element 向量(只补缺失,幂等),返回落库行数。EMBED 未配则跳过。
+
+    与 chunk/节点两侧并列的第三条补齐路径:此前 element 侧只有「整源重跑」一条路,
+    写了一半的源(部分 element 有向量、部分没有)没有任何增量修法。
+    element_embeddings 走 INSERT OR REPLACE upsert,只补缺失不会动同源已有的向量。"""
+    if not repo.settings.embedder_configured:
+        return 0
+    mnt = repo.maintenance
+    rows = mnt.missing_element_embedding_rows(notebook_id)
+    if not rows:
+        print("[embed] 无缺失 element 向量,跳过", flush=True)
+        return 0
+    print(f"[embed] 补缺失 element 向量:{len(rows)} 个", flush=True)
+    orig_conc = repo.settings.embed_concurrency
+    repo.settings.embed_concurrency = conc
+    try:
+        return mnt.embed_elements_batch(
+            notebook_id,
+            [
+                {"element_id": r["id"], "source_id": r["source_id"], "text": r["text"]}
+                for r in rows
+            ],
+        )
     finally:
         repo.settings.embed_concurrency = orig_conc
 
@@ -817,29 +878,43 @@ def _count_missing_node_vectors(
     return repo.maintenance.count_missing_node_vectors(notebook_id)
 
 
+def _count_missing_element_vectors(
+    repo: BatchIngestRepository, notebook_id: str
+) -> int:
+    return repo.maintenance.count_missing_element_vectors(notebook_id)
+
+
 def run_embed(
     repo: BatchIngestRepository, notebook_id: str, conc: int = 4
 ) -> dict[str, int]:
-    """补该 notebook 缺失的 chunk + 节点向量(幂等,只补缺失)。
+    """补该 notebook 缺失的 chunk + element + 节点向量(幂等,只补缺失)。
 
     先 SQL 盘点缺失数并打印,再 backfill_chunk_embeddings(missing_only=True) +
-    backfill_node_embeddings(节点本就只补缺失),最后打印 after 盘点。
+    backfill_element_embeddings + backfill_node_embeddings(节点本就只补缺失),
+    最后打印 after 盘点。
     """
     chunk_missing = _count_missing_chunk_vectors(repo, notebook_id)
+    element_missing = _count_missing_element_vectors(repo, notebook_id)
     node_missing = _count_missing_node_vectors(repo, notebook_id)
-    print(f"embed: 缺失盘点 chunk={chunk_missing} node={node_missing}", flush=True)
+    print(f"embed: 缺失盘点 chunk={chunk_missing} element={element_missing} "
+          f"node={node_missing}", flush=True)
 
     chunks_embedded = backfill_chunk_embeddings(repo, notebook_id, conc, missing_only=True)
+    elements_embedded = backfill_element_embeddings(repo, notebook_id, conc)
     nodes_embedded = backfill_node_embeddings(repo, notebook_id, conc)
 
     chunk_after = _count_missing_chunk_vectors(repo, notebook_id)
+    element_after = _count_missing_element_vectors(repo, notebook_id)
     node_after = _count_missing_node_vectors(repo, notebook_id)
-    print(f"embed done: 补 chunk={chunks_embedded} node(扫描)={nodes_embedded};"
-          f"剩余缺失 chunk={chunk_after} node={node_after}", flush=True)
+    print(f"embed done: 补 chunk={chunks_embedded} element={elements_embedded} "
+          f"node(扫描)={nodes_embedded};剩余缺失 chunk={chunk_after} "
+          f"element={element_after} node={node_after}", flush=True)
     return {
         "chunks_embedded": chunks_embedded,
+        "elements_embedded": elements_embedded,
         "nodes_embedded": nodes_embedded,
         "chunk_missing_before": chunk_missing,
+        "element_missing_before": element_missing,
         "node_missing_before": node_missing,
     }
 
