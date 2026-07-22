@@ -2,6 +2,12 @@
 """Backup-only verification that the current repository opens a pre-refactor
 SQLite database without changing it.
 
+"Opens" here means a full SERVER start: construct the repository (migrate +
+seed) and then run the startup crash-recovery sweep, which the server's
+lifespan drives explicitly (``app/services/startup_warmup.py::run_startup``)
+rather than the repository constructor. Modelling only the constructor would
+understate what a real boot does to the database.
+
 ~~~text
 python scripts/verify_repository_snapshot.py \
   --database PATH \
@@ -1623,6 +1629,14 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
 
         with _no_network():
             repo = SQLiteRepository(settings)
+            # Startup crash recovery is no longer a construction side effect
+            # (it moved to app/services/startup_warmup.py::run_startup so
+            # offline CLIs stop settling the server's in-progress rows). This
+            # tool must keep modelling a real SERVER start — otherwise it would
+            # report "nothing changes" while the actual boot still normalizes
+            # these rows, i.e. a rosier picture than production. Driven
+            # explicitly here, against the disposable BACKUP copy.
+            repo._recover_interrupted_jobs()
             reads = exercise_reads(repo, backup_path)
 
         column_plan = {

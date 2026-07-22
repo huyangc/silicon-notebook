@@ -1569,12 +1569,17 @@ class SqliteMigrator:
             )
 
     def _recover_interrupted_jobs(self) -> None:
-        """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
+        """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
         的行定义上就是上次崩溃/重启遗留的陈旧行，否则会永久卡死该 notebook 的单飞守卫。
         knowhow 行投影同理：background_jobs 不跨进程存活，重启后仍处 'syncing'/'pending'
         的行定义上是被遗弃的（没有任何代码路径会再回访它们），置 'failed' 以暴露前端的
         「重投影」重试入口，而非让它们看起来永久「同步中/待处理」。
+        解析中的源同理且更严重：'queued'/'parsing' 的源没有任何进程会再回访，留着就是
+        永久「排队中/解析中」的搁浅行——用户既看不到失败也无从重试。置 'failed' 让它落到
+        一个可重试的终态。注意**不能**像 'extracting' 那样回退成 'parsed'：搁浅源可能连
+        source_elements 都没有，标「已解析」是谎报，还会让它从「待处理」视图里消失。
+        只由服务端 lifespan 启动路径调用一次（见 initialize 的说明）。
         幂等——safe every boot。"""
         with self._connect() as db:
             db.execute(
@@ -1591,6 +1596,12 @@ class SqliteMigrator:
                 "UPDATE sources SET status='parsed', parse_status='parsed', "
                 "error_message='', updated_at=? "
                 "WHERE parse_status='extracting'",
+                (now,),
+            )
+            db.execute(
+                "UPDATE sources SET status='failed', parse_status='failed', "
+                "error_message='服务重启导致文档解析中断；文件已保留，可重新解析。', "
+                "updated_at=? WHERE parse_status IN ('queued','parsing')",
                 (now,),
             )
             db.execute(
@@ -1718,7 +1729,14 @@ class SqliteMigrator:
         self._seed()
 
     def initialize(self) -> list[int]:
+        """构造仓储时跑的那部分：migrate + seed，**不含**崩溃兜底。
+
+        恢复（``recover_interrupted_jobs``）已移交服务端 lifespan 启动路径显式调用
+        （``app/services/startup_warmup.py::run_startup``，在 ``mark_ready()`` 之前）。
+        理由：``SQLiteRepository.__init__`` 会无条件跑到这里，而离线 CLI／脚本每次
+        运行都会直接构造一个仓储——它们不是这个库的主人，没有资格把「进行中」的行
+        判成上次崩溃的残骸。旧行为下，跑一次离线脚本就会把服务端正在处理的 pending
+        行刷成 failed。"""
         applied = self.migrate()
-        self.recover_interrupted_jobs()
         self.seed()
         return applied

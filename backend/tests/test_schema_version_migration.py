@@ -75,7 +75,11 @@ def test_add_column_if_missing_skips_absent_table(tmp_path):
 
 def test_interrupted_merge_job_recovered_on_restart_even_via_fast_path(tmp_path):
     """崩溃兜底：卡在 'running' 的 merge_review_jobs 必须在每次重启被标记 failed，
-    即便 schema 已最新、迁移走了快路径也不能漏(否则该 notebook 的单飞守卫永久卡死)。"""
+    即便 schema 已最新、迁移走了快路径也不能漏(否则该 notebook 的单飞守卫永久卡死)。
+
+    清算已从构造副作用改为服务端启动路径显式调用(见
+    tests/test_startup_recovery_ownership.py),但「版本闸快路径不得吞掉它」这条
+    仍然成立且仍需钉住——两者是独立的代码路径,快路径只短路 _migrate。"""
     s = Settings(database_url=f"sqlite:///{tmp_path}/t.db")
     repo = SQLiteRepository(s)
     with repo._write() as db:
@@ -84,8 +88,9 @@ def test_interrupted_merge_job_recovered_on_restart_even_via_fast_path(tmp_path)
             "VALUES ('nb1', 'n', 't', 't')")
         db.execute(
             "INSERT INTO merge_review_jobs (notebook_id, status) VALUES ('nb1', 'running')")
-    # 模拟重启：同库上重建 repo（schema 已最新 → _migrate 走快路径）
-    SQLiteRepository(s)
+    # 模拟服务端重启：同库上重建 repo（schema 已最新 → _migrate 走快路径）+ 显式清算
+    restarted = SQLiteRepository(s)
+    restarted._recover_interrupted_jobs()
     with repo._connect() as db:
         status = db.execute(
             "SELECT status FROM merge_review_jobs WHERE notebook_id='nb1'").fetchone()["status"]
