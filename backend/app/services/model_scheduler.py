@@ -154,16 +154,22 @@ class ServiceScheduler:
         )
 
     def shutdown(self, *, wait: bool = True) -> None:
+        self.stop_admission()
+        self._dispatcher.join()
+        self._executor.shutdown(wait=wait, cancel_futures=False)
+
+    def stop_admission(self) -> None:
+        """Atomically reject new work and cancel queued work without waiting."""
         with self._shutdown_lock:
             with self._condition:
+                if self._shutdown:
+                    return
                 self._shutdown = True
                 queued = self._take_all_queued_locked()
                 self._condition.notify_all()
             for item in queued:
                 self._breaker.abandon(item.permit)
                 item.future.cancel()
-            self._dispatcher.join()
-            self._executor.shutdown(wait=wait, cancel_futures=False)
 
     def _wake_if_cancelled(self, future: Future) -> None:
         if not future.cancelled():

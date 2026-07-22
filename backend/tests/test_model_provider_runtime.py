@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from functools import lru_cache
+import threading
 
 import pytest
 
@@ -120,3 +121,45 @@ def test_create_app_validates_single_process_before_other_startup_work(monkeypat
     )
     with pytest.raises(Rejected, match="process-local"):
         main.create_app()
+
+
+def test_lifespan_waits_off_loop_for_startup_before_shutdown_check(monkeypatch):
+    import app.main as main
+    import app.services.startup_warmup as startup_warmup
+
+    readiness.reset()
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    order = []
+
+    def fake_startup() -> None:
+        started.set()
+        assert release.wait(2)
+        order.append("startup-finished")
+        finished.set()
+
+    monkeypatch.setattr(startup_warmup, "run_startup", fake_startup)
+    monkeypatch.setattr(
+        main,
+        "shutdown_repository_if_initialized",
+        lambda: order.append("shutdown-checked"),
+    )
+
+    async def exercise() -> None:
+        manager = main._lifespan(object())
+        await manager.__aenter__()
+        assert await asyncio.to_thread(started.wait, 1)
+        exit_task = asyncio.create_task(manager.__aexit__(None, None, None))
+        await asyncio.sleep(0.02)
+        assert not exit_task.done()
+        assert order == []
+        release.set()
+        await exit_task
+
+    try:
+        asyncio.run(exercise())
+        assert finished.is_set()
+        assert order == ["startup-finished", "shutdown-checked"]
+    finally:
+        release.set()

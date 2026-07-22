@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from app.core.config import Settings
+from app.core.event_logging import get_log_owner, reset_log_owner, set_log_owner
+from app.services.cancellation import AskCancelled
 from app.services import model_provider as provider_mod
 from app.services.model_registry import ModelServiceDefinition, SystemModelServiceRegistry
 
@@ -136,8 +138,76 @@ def test_unbound_workloads_are_deterministically_offline_and_plan_one_worker():
         assert provider.parallelism("reasoning_agent") == 1
 
         offline_embedder = provider.embedding("source_element_embedding")
+        assert offline_embedder.configured is False
         assert offline_embedder.embed_query("same") == offline_embedder.embed_query("same")
         assert provider.parallelism("source_element_embedding") == 1
+    finally:
+        provider.close()
+
+
+def test_raw_and_queued_chat_cancellation_preserve_ask_cancelled():
+    events = _EventLog()
+
+    class CancellingChat(_Chat):
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            raise AskCancelled()
+
+    provider = _provider(chat=CancellingChat(), events=events)
+    try:
+        with pytest.raises(AskCancelled):
+            provider.chat("ask_answer").chat_json([], "{}")
+        assert events.events[-1]["status"] == "cancelled"
+        assert events.events[-1]["retry_outcome"] == "cancelled"
+    finally:
+        provider.close()
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingChat(_Chat):
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            entered.set()
+            assert release.wait(2)
+            return self.result
+
+    events = _EventLog()
+    provider = _provider(registry=_registry(maximum=1), chat=BlockingChat(), events=events)
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        client = provider.chat("ask_answer")
+        active = executor.submit(client.chat_json, [], "{}")
+        assert entered.wait(1)
+        cancelled = threading.Event()
+        queued = executor.submit(client.chat_json, [], "{}", cancel_event=cancelled)
+        cancelled.set()
+        with pytest.raises(AskCancelled):
+            queued.result(timeout=2)
+        assert events.events[-1]["status"] == "cancelled"
+        release.set()
+        assert active.result(timeout=2) == '{"ok": true}'
+    finally:
+        release.set()
+        provider.close()
+        executor.shutdown()
+
+
+def test_each_submission_copies_the_current_log_owner_context():
+    owners = []
+
+    class OwnerChat(_Chat):
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            owners.append(get_log_owner())
+            return self.result
+
+    provider = _provider(chat=OwnerChat())
+    try:
+        for owner in ("user-1111111111", "user-2222222222"):
+            token = set_log_owner(owner)
+            try:
+                provider.chat("ask_answer").chat_json([], "{}")
+            finally:
+                reset_log_owner(token)
+        assert owners == ["user-1111111111", "user-2222222222"]
     finally:
         provider.close()
 
@@ -263,6 +333,39 @@ def test_rerank_splits_are_separate_visible_scheduled_calls_and_merge_order():
         provider.close()
 
 
+def test_rerank_uses_a_capacity_bounded_submission_window_for_many_batches():
+    raw = _Reranker()
+    provider = _provider(registry=_registry(maximum=2), reranker=raw)
+    documents = list("abcdefghijklmnopqrst")
+    try:
+        order = provider.rerank("retrieval_rerank").rerank("q", documents)
+        assert order == list(reversed(range(len(documents))))
+        assert raw.maximum_active == 2
+    finally:
+        provider.close()
+
+
+def test_malformed_rerank_rows_are_breaker_visible_and_fall_back_with_typed_error():
+    class MalformedReranker(_Reranker):
+        def _rerank_batch(self, query, documents):
+            return [{"index": "bad", "relevance_score": "not-a-number"}]
+
+    errors = []
+    provider = _provider(registry=_registry(maximum=1), reranker=MalformedReranker())
+    try:
+        client = provider.rerank("retrieval_rerank")
+        for _ in range(3):
+            assert client.rerank("q", ["a"], on_error=errors.append) == [0]
+        assert [error.code for error in errors] == [
+            "malformed_response",
+            "malformed_response",
+            "malformed_response",
+        ]
+        assert provider.scheduler_snapshot("rerank").breaker_state == "open"
+    finally:
+        provider.close()
+
+
 def test_close_rejects_new_work_but_drains_the_active_call():
     entered = threading.Event()
     release = threading.Event()
@@ -335,3 +438,101 @@ def test_probe_uses_the_named_service_scheduler_and_returns_safe_observation():
         assert observation.occurred_at.endswith("+00:00")
     finally:
         provider.close()
+
+
+def test_probe_supports_unbound_service_without_product_workload_attribution():
+    service = _service("spare", "chat", 1)
+    events = _EventLog()
+    provider = RuntimeModelProvider(
+        Settings(_env_file=None, event_log_enabled=False, llm_log_enabled=False),
+        events,
+        registry=SystemModelServiceRegistry({"spare": service}, {}),
+        chat_factory=lambda _service: _Chat(),
+    )
+    try:
+        observation = provider.probe("spare", actor_id="admin", allow_half_open=False)
+        assert observation.status == "ok"
+        event = events.events[-1]
+        assert event["workload_id"] == "service_probe"
+        assert event["workload_label"] == "模型服务测试"
+        assert event["service_id"] == "spare"
+    finally:
+        provider.close()
+
+
+def test_close_prevents_unmaterialized_construction_and_closes_raw_once():
+    constructed = []
+    provider = RuntimeModelProvider(
+        Settings(_env_file=None, event_log_enabled=False, llm_log_enabled=False),
+        _EventLog(),
+        registry=_registry(),
+        chat_factory=lambda service: constructed.append(service.id) or _Chat(),
+    )
+    provider.close()
+    provider.close()
+
+    with pytest.raises(Exception) as caught:
+        provider.chat("ask_answer")
+    assert getattr(caught.value, "code", "") == "model_service_unavailable"
+    assert constructed == []
+
+
+def test_close_stops_all_service_admission_before_waiting_for_active_work():
+    services = {
+        "first": _service("first", "chat", 1),
+        "second": _service("second", "chat", 1),
+    }
+    registry = SystemModelServiceRegistry(
+        services,
+        {"ask_answer": "first", "query_rewrite": "second"},
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    class ClosableChat(_Chat):
+        def __init__(self, *, block=False) -> None:
+            super().__init__()
+            self.block = block
+            self.close_calls = 0
+            self.transport_calls = 0
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            self.transport_calls += 1
+            if self.block:
+                entered.set()
+                assert release.wait(2)
+            return self.result
+
+        def close(self):
+            self.close_calls += 1
+
+    raws = {"first": ClosableChat(block=True), "second": ClosableChat()}
+    provider = RuntimeModelProvider(
+        Settings(_env_file=None, event_log_enabled=False, llm_log_enabled=False),
+        _EventLog(),
+        registry=registry,
+        chat_factory=lambda service: raws[service.id],
+    )
+    first = provider.chat("ask_answer")
+    second = provider.chat("query_rewrite")
+    executor = ThreadPoolExecutor(max_workers=2)
+    try:
+        active = executor.submit(first.chat_json, [], "{}")
+        assert entered.wait(1)
+        closing = executor.submit(provider.close)
+        deadline = time.monotonic() + 1
+        while not provider._closed:
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        with pytest.raises(provider_mod.ModelInvocationError) as caught:
+            second.chat_json([], "{}")
+        assert caught.value.code == "model_service_unavailable"
+        assert raws["second"].transport_calls == 0
+        release.set()
+        assert active.result(timeout=2) == '{"ok": true}'
+        closing.result(timeout=2)
+        provider.close()
+        assert [raw.close_calls for raw in raws.values()] == [1, 1]
+    finally:
+        release.set()
+        executor.shutdown()

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import contextvars
 import json
+import math
 import os
 import threading
 import time
@@ -12,6 +14,7 @@ from typing import Any, Callable
 from app.core.config import Settings
 from app.core.llm import OpenAICompatibleClient
 from app.core.llm_logging import interaction_support_scope
+from app.services.cancellation import AskCancelled
 from app.services.embedding import FakeEmbedder
 from app.services.model_registry import (
     ModelServiceDefinition,
@@ -104,6 +107,20 @@ class _UnconfiguredRerankClient:
         return list(range(len(documents)))
 
 
+class _UnconfiguredEmbedder:
+    configured = False
+
+    def __init__(self, dim: int) -> None:
+        self._delegate = FakeEmbedder(dim=dim)
+        self.dim = self._delegate.dim
+
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return self._delegate.embed_texts(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._delegate.embed_query(text)
+
+
 @dataclass
 class _ServiceRuntime:
     service: ModelServiceDefinition
@@ -185,6 +202,28 @@ def _validate_json_object(content: Any) -> str:
     return content
 
 
+def _validate_rerank_rows(rows: Any, document_count: int) -> list[dict]:
+    if not isinstance(rows, list):
+        raise MalformedModelResponse()
+    normalized: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise MalformedModelResponse()
+        index = row.get("index")
+        score = row.get("relevance_score", row.get("score"))
+        if (
+            not isinstance(index, int)
+            or isinstance(index, bool)
+            or not 0 <= index < document_count
+            or not isinstance(score, (int, float))
+            or isinstance(score, bool)
+            or not math.isfinite(float(score))
+        ):
+            raise MalformedModelResponse()
+        normalized.append({"index": index, "relevance_score": float(score)})
+    return normalized
+
+
 class _ScheduledAdapter:
     def __init__(
         self,
@@ -216,12 +255,16 @@ class _ScheduledAdapter:
         timing: dict[str, float] = {}
         queued_at = time.perf_counter()
         breaker_before = self._runtime.scheduler.snapshot().breaker_state
+        submission_context = contextvars.copy_context()
 
         def scheduled() -> Any:
             timing["started"] = time.perf_counter()
             try:
-                with interaction_support_scope(context.support_id):
-                    return invoke()
+                def run_in_submission_context() -> Any:
+                    with interaction_support_scope(context.support_id):
+                        return invoke()
+
+                return submission_context.run(run_in_submission_context)
             finally:
                 timing["finished"] = time.perf_counter()
 
@@ -240,6 +283,14 @@ class _ScheduledAdapter:
         try:
             result = call.future.result()
         except CancelledError:
+            self._emit(call, status="cancelled", error=None)
+            if (
+                call.context.cancel_event is not None
+                and call.context.cancel_event.is_set()
+            ):
+                raise AskCancelled()
+            raise
+        except AskCancelled:
             self._emit(call, status="cancelled", error=None)
             raise
         except BaseException as exc:
@@ -361,30 +412,42 @@ class ScheduledRerankClient(_ScheduledAdapter):
             (start, documents[start : start + maximum])
             for start in range(0, len(documents), maximum)
         ]
-        calls = [
-            (
-                base,
-                self._submit(
-                    lambda docs=docs: self._runtime.raw._rerank_batch(query, docs)
-                ),
-            )
-            for base, docs in batches
-        ]
+        capacity = self._runtime.service.max_concurrency
+        batch_iter = iter(batches)
+        calls: list[tuple[int, _SubmittedCall]] = []
+
+        def fill_window() -> None:
+            while len(calls) < capacity:
+                try:
+                    base, docs = next(batch_iter)
+                except StopIteration:
+                    return
+                calls.append((
+                    base,
+                    self._submit(lambda docs=docs: _validate_rerank_rows(
+                        self._runtime.raw._rerank_batch(query, docs), len(docs)
+                    )),
+                ))
+
+        fill_window()
         scored: list[dict] = []
         failures: list[Exception] = []
-        for base, call in calls:
+        while calls:
+            base, call = calls.pop(0)
             try:
                 rows = self._resolve(call)
             except Exception as exc:
                 failures.append(exc)
-                continue
-            scored.extend(
-                {
-                    "index": base + int(row["index"]),
-                    "relevance_score": float(row.get("relevance_score", row.get("score", 0.0))),
-                }
-                for row in rows
-            )
+            else:
+                scored.extend(
+                    {
+                        "index": base + row["index"],
+                        "relevance_score": row["relevance_score"],
+                    }
+                    for row in rows
+                )
+            if not failures:
+                fill_window()
         if failures:
             if on_error is not None:
                 on_error(failures[0])
@@ -425,7 +488,7 @@ class RuntimeModelProvider:
         self._closed = False
         self._offline_chat = _UnconfiguredChatClient(settings)
         self._offline_rerank = _UnconfiguredRerankClient()
-        self._offline_embeddings: dict[str, FakeEmbedder] = {}
+        self._offline_embeddings: dict[str, _UnconfiguredEmbedder] = {}
 
     def _raw_chat(self, service: ModelServiceDefinition) -> OpenAICompatibleClient:
         return OpenAICompatibleClient(
@@ -470,6 +533,10 @@ class RuntimeModelProvider:
 
     def _runtime(self, service: ModelServiceDefinition) -> _ServiceRuntime:
         with self._lock:
+            if self._closed:
+                raise ModelProviderError(
+                    "model provider is closed", code="model_service_unavailable"
+                )
             runtime = self._runtimes.get(service.id)
             if runtime is not None:
                 return runtime
@@ -488,8 +555,6 @@ class RuntimeModelProvider:
                 raise
             runtime = _ServiceRuntime(service=service, scheduler=scheduler, raw=raw)
             self._runtimes[service.id] = runtime
-            if self._closed:
-                scheduler.shutdown()
             return runtime
 
     def chat(self, workload_id: str):
@@ -511,7 +576,7 @@ class RuntimeModelProvider:
         if service is None:
             with self._lock:
                 return self._offline_embeddings.setdefault(
-                    workload_id, FakeEmbedder(dim=self.settings.embed_dim)
+                    workload_id, _UnconfiguredEmbedder(dim=self.settings.embed_dim)
                 )
         key = ("embedding", workload_id)
         with self._lock:
@@ -552,10 +617,12 @@ class RuntimeModelProvider:
     ) -> ProviderObservation:
         del allow_half_open  # never bypasses the breaker's fixed cooldown
         service = self.registry.service(service_id)
-        workloads = self.registry.workloads_for(service_id)
-        if not workloads:
-            raise ValueError(f"model service {service_id} has no bound workloads")
-        workload = workloads[0]
+        workload = WorkloadSpec(
+            id="service_probe",
+            kind=service.kind,
+            default_priority="interactive",
+            display_label="模型服务测试",
+        )
         runtime = self._runtime(service)
         adapter = _ScheduledAdapter(self, runtime, workload)
 
@@ -642,8 +709,13 @@ class RuntimeModelProvider:
             self._closed = True
             runtimes = tuple(self._runtimes.values())
         for runtime in runtimes:
+            runtime.scheduler.stop_admission()
+        for runtime in runtimes:
             runtime.scheduler.shutdown(wait=True)
         for runtime in runtimes:
             close = getattr(runtime.raw, "close", None)
             if callable(close):
-                close()
+                try:
+                    close()
+                except Exception:
+                    pass

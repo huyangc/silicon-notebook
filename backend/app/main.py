@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import threading
@@ -47,12 +48,18 @@ async def _lifespan(app: FastAPI):
     # Tests mark readiness ready up-front (conftest) and drive the app without a
     # real warm-up; skip spawning the thread there so it can't touch a torn-down
     # tmp DB. In production readiness starts not-ready, so the thread runs.
+    startup_worker: threading.Thread | None = None
     try:
         if not readiness.is_ready():
             readiness.set_phase("starting", "后端启动中")
-            threading.Thread(target=run_startup, name="startup-warmup", daemon=True).start()
+            startup_worker = threading.Thread(
+                target=run_startup, name="startup-warmup", daemon=True
+            )
+            startup_worker.start()
         yield
     finally:
+        if startup_worker is not None:
+            await asyncio.to_thread(startup_worker.join)
         shutdown_repository_if_initialized()
 
 
