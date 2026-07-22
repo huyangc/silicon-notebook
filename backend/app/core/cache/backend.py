@@ -41,3 +41,17 @@ class NoCacheBackend:
 
     def put(self, key: str, value: str, tag: str = "") -> None:
         pass
+
+    # NoCacheBackend 顺带实现 CacheAdmin（零成本）。但这**不意味着** stats/
+    # evict_tag 是必需能力：只实现 CacheBackend 两个方法的后端（例如把 TTL 与
+    # LRU 交给服务端配置的 Redis 后端）是完全合法的。消费侧必须
+    # isinstance(backend, CacheAdmin) 探测后再调用，见 test_cache_admin_is_optional。
+    def evict_tag(self, tag: str) -> int:
+        return 0
+
+    def clear(self) -> int:
+        return 0
+
+    def stats(self) -> dict:
+        return {"entries": 0, "bytes": 0, "by_tag": {},
+                "hits": 0, "misses": 0, "hit_rate": 0.0}

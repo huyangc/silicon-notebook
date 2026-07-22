@@ -95,6 +95,9 @@ class SqliteCacheBackend:
                 "CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v INTEGER NOT NULL);"
                 "INSERT OR IGNORE INTO meta(k, v) VALUES ('total_bytes', 0);"
             )
+        # 进程内命中计数（不落盘：重启归零即可，用于观察当前进程的缓存效用）。
+        self._hits = 0
+        self._misses = 0
 
     def _new_connection(self) -> _Conn:
         conn = sqlite3.connect(
@@ -130,12 +133,15 @@ class SqliteCacheBackend:
                 "SELECT value, created_at, used_at FROM cache WHERE key=?", (key,)
             ).fetchone()
             if row is None:
+                self._misses += 1
                 return None
             if now - row["created_at"] > self.ttl_seconds:
                 self._delete_keys_freed_bytes(db, [key])
+                self._misses += 1
                 return None
             if now - row["used_at"] > self.refresh_window:      # 粗粒度 LRU
                 db.execute("UPDATE cache SET used_at=? WHERE key=?", (now, key))
+            self._hits += 1
             return row["value"]
 
     def put(self, key: str, value: str, tag: str = "") -> None:
@@ -250,7 +256,12 @@ class SqliteCacheBackend:
                 "SELECT COUNT(*) n, COALESCE(SUM(size),0) b FROM cache").fetchone()
             by_tag = {r["tag"]: r["n"] for r in db.execute(
                 "SELECT tag, COUNT(*) n FROM cache GROUP BY tag").fetchall()}
-            return {"entries": row["n"], "bytes": row["b"], "by_tag": by_tag}
+        reads = self._hits + self._misses
+        return {
+            "entries": row["n"], "bytes": row["b"], "by_tag": by_tag,
+            "hits": self._hits, "misses": self._misses,
+            "hit_rate": (self._hits / reads) if reads else 0.0,
+        }
 
     # ------------------------------------------------------------------ 运维
     def recount(self) -> int:
