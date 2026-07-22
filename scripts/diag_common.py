@@ -339,6 +339,14 @@ def iter_jsonl_file(path: Path, *, tail_bytes: Optional[int] = None,
 
 
 def _record_key(channel: str, record: Dict[str, Any]) -> str:
+    # Identity for "the same log line seen twice" (a rotated day file and its
+    # own .gz archive both being present). Every field a record actually
+    # carries must feed the key, or a whole event kind collapses into a single
+    # retained row: db_write_lock_slow / db_write_lock_stats carry none of the
+    # ask/http fields below, so before `site`/`wait_ms`/`hold_ms` were included
+    # every write-lock event in a file hashed identically and all but the first
+    # were dropped as "duplicates". Adding fields can only ever split keys
+    # apart, never merge them, so no existing channel's dedup gets weaker.
     stable = [
         channel,
         str(record.get("id", "")),
@@ -348,6 +356,9 @@ def _record_key(channel: str, record: Dict[str, Any]) -> str:
         str(record.get("method", "")),
         str(record.get("path", "")),
         str(record.get("latency_ms", "")),
+        str(record.get("site", "")),
+        str(record.get("wait_ms", "")),
+        str(record.get("hold_ms", "")),
     ]
     return hashlib.sha256("\x1f".join(stable).encode("utf-8", "replace")).hexdigest()
 

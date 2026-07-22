@@ -237,6 +237,10 @@ class RepositoryRuntime:
                 settings.llm_log_path,
                 settings.event_log_dir,
             )
+        # 写锁观测的出口:走既有 events.jsonl,不新起日志通道。sink 挂在
+        # database 实例上(而非模块级单例),使并发/多实例测试彼此隔离。
+        if self.database.stats is not None:
+            self.database.stats.sink = self.event_log.emit
         self.models = RuntimeModelProvider(
             self.identity,
             settings,
@@ -927,6 +931,7 @@ class RepositoryRuntime:
             connect=connect,
             close_local=close_local,
             write=write,
+            bulk_write=self.database.bulk_write,
             get_notebook=get_notebook, current_user_id=current_user_id,
             invalidate_unified_cache=invalidate_unified_cache,
             mark_unified_kg_dirty=mark_unified_kg_dirty,

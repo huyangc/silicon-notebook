@@ -95,6 +95,25 @@ def _pair_key(a: str, b: str) -> str:
 _DESC_CKPT_FLUSH = 16   # 概念描述每完成多少个 flush 一次 checkpoint(被杀最多丢这么多)
 
 
+def _canonical_scratch_row(
+    notebook_id: str, run_id: str, seed: str, canonical_id: str,
+    canonical_names: Dict[str, str], desc_by_cid: Dict[str, str],
+    desc_sig_by_cid: Dict[str, str],
+) -> tuple:
+    """Build one kg_canonical_scratch row for the write-lock-slimming
+    preparation segment (_write_cluster_map_streamed). Pure dict lookups —
+    no I/O — factored out to its own name so it's a stable point to assert
+    against "runs outside the write lock" (mirrors kg_merge.seed_or_unique,
+    the equivalent per-object hook for the sibling kg_cluster_scratch
+    preparation loop in _stream_seed_reps)."""
+    return (
+        notebook_id, run_id, seed, canonical_id,
+        canonical_names.get(canonical_id, ""),
+        desc_by_cid.get(canonical_id, ""),
+        desc_sig_by_cid.get(canonical_id, ""),
+    )
+
+
 class KnowledgeLifecycleService:
     def __init__(
         self,
@@ -114,6 +133,7 @@ class KnowledgeLifecycleService:
         connect: Callable[[], sqlite3.Connection],
         close_local: Callable[[], None],
         write: Callable[[], Any],
+        bulk_write: Callable[..., int],
         get_notebook: Callable[[str], Any],
         current_user_id: Callable[[], str],
         invalidate_unified_cache: Callable[[str], None],
@@ -155,6 +175,7 @@ class KnowledgeLifecycleService:
         self._connect = connect
         self._close_local = close_local
         self._write = write
+        self._bulk_write = bulk_write
         self.get_notebook = get_notebook
         self._current_user_id = current_user_id
         self._invalidate_unified_cache = invalidate_unified_cache
@@ -1492,7 +1513,6 @@ class KnowledgeLifecycleService:
         # (notebook_id, id, seed) into scratch in batches.
         members_count: Dict[str, int] = {}
         seed_first_name: Dict[str, str] = {}
-        buf: List[tuple] = []
         with self._connect() as rdb:
             # ORDER BY rowid: canonical-name selection here is first-seen per seed
             # (seed_first_name), so the stream order must be deterministic and
@@ -1500,25 +1520,59 @@ class KnowledgeLifecycleService:
             # adding/removing an index silently changes canonical names + desc-cache
             # keys. rowid = insertion order, matching the historical behaviour.
             cur = self.unified_kg.stream_seed_rows(rdb, notebook_id, object_type)
-            with self._write() as wdb:
+            # 写锁瘦身:Python 计算(_fast_loads / seed_or_unique / alias 匹配)留在
+            # 事务外,只有 executemany 进写锁。kg_cluster_scratch 有三个读者——
+            # scratch_vector_rows(Pass B)、stream_scratch_rows(_write_cluster_map_
+            # streamed)、cluster_evidence_rows(concept_desc 阶段)——但三者都只在
+            # 本 Pass A2 循环*之后*才被调用;循环运行期间没有并发读者,分批提交不
+            # 产生任何可见中间态。三者都按 run_id 过滤,这保证了并发 rebuild 之间
+            # 不会串(见下面的不变量注释:这一保证要求本循环跑到耗尽)。
+            #
+            # ⚠ 不变量(勿改行为,仅记录):这个生成器必须跑到耗尽,不得 break/
+            # 提前 return。cur 是 self._connect() 返回的线程本地复用读连接上的一
+            # 个步进游标;它没耗尽之前,这条连接就钉在游标启动时的读快照上。下面
+            # Pass B 的游标在同一条复用连接上打开,能看到本循环写入的 scratch 行,
+            # 前提正是这个循环已经耗尽、旧快照已经释放——谁在这里加 break/提前
+            # return,Pass B 就会静默读到更早的快照(零 scratch 行),聚类结果严重
+            # 错误且不会抛出任何异常。_bulk_write 的 `for batch in batches:` 天然
+            # 跑到 StopIteration 才停(没有 break),这个不变量继续成立。
+            #
+            # 写锁瘦身 + 公平性(Task 7):批提交改走 _bulk_write——它在自己的
+            # for 循环里逐批 `with self.write(): apply(...)`,每批独立提交、
+            # 批间完整释放写锁,不做任何 sleep 或"看 waiters 决定要不要让路"的
+            # 判断(那段机制曾经存在过,已删除——仪器开着时它测不出锁的公平性、
+            # 纯属多余,仪器关着时 stats is None 让它永远不会执行,即在唯一
+            # 需要它的配置里反而是死代码;详见 bulk_write() 自己的 docstring 和
+            # test_bulk_write_never_sleeps)。公平性现在完全由写锁本身
+            # (threading.Lock,靠 PyMutex 的
+            # eventual-fairness handoff 直接交接给排队者)保证,与批数、批间
+            # 是否 sleep、DB_WRITE_LOCK_STATS 开关都无关。_batches() 是生成器,
+            # 惰性求值:_bulk_write 每次 next() 只会推进到下一个 yield,期间跑的
+            # Python 计算(_fast_loads/seed_or_unique/alias 匹配)天然发生在**上一批
+            # write() 块退出之后、下一批 write() 块打开之前**——即仍在写事务外,
+            # 与改造前语义等价,只是提交点从"每 1000 行"变成了"每 1000 行,
+            # 批间不做任何额外判断"。
+            def _batches():
+                local: List[tuple] = []
                 for r in cur:
                     pay = _fast_loads(r["payload"] or "{}")
                     name = pay.get("name", "")
-                    # Pass the full payload-bearing object so seed_fn can use it
-                    # (e.g. seed_procedure appends a steps signature from payload).
-                    # Mirrors the legacy cluster_objects(tobjs={name,payload}, ...).
                     seed = seed_or_unique(
                         _seed_with_alias({"name": name, "payload": pay}, seed_fn, alias_map),
                         r["id"])
                     members_count[seed] = members_count.get(seed, 0) + 1
                     seed_first_name.setdefault(seed, name)
-                    buf.append((notebook_id, run_id, r["id"], seed))
-                    if len(buf) >= 1000:
-                        self.unified_kg.insert_scratch_rows(wdb, buf)
-                        buf.clear()
-                if buf:
-                    self.unified_kg.insert_scratch_rows(wdb, buf)
-                    buf.clear()
+                    local.append((notebook_id, run_id, r["id"], seed))
+                    if len(local) >= 1000:
+                        yield list(local)
+                        local.clear()
+                if local:
+                    yield list(local)
+
+            self._bulk_write(
+                _batches(),
+                lambda wdb, rows: self.unified_kg.insert_scratch_rows(wdb, rows),
+            )
 
         # Pass B: stream vectors joined to seeds → rep mean per seed. Bounded by
         # #unique seeds (rep_sum/rep_cnt), NOT #objects. Dim-mismatched legacy
@@ -1539,6 +1593,10 @@ class KnowledgeLifecycleService:
         rep_sum: Dict[str, "np.ndarray"] = {}
         rep_cnt: Dict[str, int] = {}
         with self._connect() as db:
+            # 依赖 Pass A2 的 for 循环已经跑到耗尽(见那里标注的不变量):Pass B
+            # 与 Pass A2 共用同一条 self._connect() 线程本地读连接,只有旧读快照
+            # 已经释放,这里才能看到 Pass A2 刚提交的 scratch 行,而不是一个更早
+            # 、看不见任何行的快照。
             cur = self.unified_kg.scratch_vector_rows(db, notebook_id, run_id)
             for r in cur:
                 # decode_vector: bytes(BLOB)->frombuffer zero-parse, str(legacy
@@ -1573,38 +1631,81 @@ class KnowledgeLifecycleService:
                                     desc_by_cid: Optional[Dict[str, str]] = None,
                                     desc_sig_by_cid: Optional[Dict[str, str]] = None,
                                     run_id: str = "") -> None:
-        """Persist concept_clusters rows for one type by streaming
-        kg_cluster_scratch (object_id, seed). Matches write_clusters' columns and
-        DELETE scope EXACTLY (clear-by-(notebook_id, object_type), then insert one
-        row per member object). Rows whose seed has no canonical are skipped.
-        Only reads scratch rows matching run_id so concurrent rebuilds don't cross."""
+        """Persist concept_clusters rows for one type: matches write_clusters'
+        columns and DELETE scope EXACTLY (clear-by-(notebook_id, object_type),
+        then insert one row per member object). Rows whose seed has no
+        canonical are skipped. Only reads scratch rows matching run_id so
+        concurrent rebuilds don't cross.
+
+        写锁瘦身改造点 2(design doc §5.5):拆成【预备段 + 切换段】,不再是单个
+        write() 块里"边持锁边流式构造 N 个成员行"(647-1240ms@300-500k,曾是
+        全部持锁时间的 73%)。
+
+        预备段(本函数的前半段):seed_to_canonical/canonical_names/
+        desc_by_cid/desc_sig_by_cid 此时早已是完整的 Python dict(由上面
+        cluster_seeds()/concept_desc 阶段算出,不再变化)——没有跨连接游标要
+        流,只是把这些 dict 逐 seed 打包成行,经 _bulk_write 分批落进
+        kg_canonical_scratch,每批独立提交、批间完整释放写锁(同
+        _stream_seed_reps Pass A2 的模式)。写入前先清空本 run 的行:
+        _write_cluster_map_streamed 每个 object_type 各调一次,不清会让上一个
+        type 的行经 swap 的 (notebook_id, run_id, seed) 连接谓词泄漏进这个
+        type(两种类型的 seed 字符串恰好相同时)——镜像 _stream_seed_reps 对
+        kg_cluster_scratch 的 clear-at-start。
+
+        切换段(本函数的后半段):一个 write() 块,纯 SQL DELETE+INSERT...
+        SELECT(swap_cluster_map_from_scratch)连接 kg_cluster_scratch 与
+        kg_canonical_scratch,不出现任何 Python 逐行构造或跨连接游标步进。
+        cluster_mutation_seq 的 bump 必须落在同一个 write() 块(wdb)里,与
+        DELETE+INSERT 同一次提交——见下面调用处的注释。
+
+        两张 scratch 表在 rebuild 末尾的 finally 里统一清理(run_id 隔离并发
+        rebuild),镜像 clear_scratch_run 已有的处理方式。"""
         now = self._now()
         desc_by_cid = desc_by_cid or {}
         desc_sig_by_cid = desc_sig_by_cid or {}
-        with self._connect() as rdb:
-            cur = self.unified_kg.stream_scratch_rows(rdb, notebook_id, run_id)
-            with self._write() as wdb:
-                def _rows():
-                    for r in cur:
-                        cid = seed_to_canonical.get(r["seed"])
-                        if cid is None:
-                            continue
-                        yield (
-                            self._new_id("cc"), notebook_id, cid, r["object_id"],
-                            canonical_names.get(cid, ""), object_type,
-                            desc_by_cid.get(cid, ""), desc_sig_by_cid.get(cid, ""), now,
-                        )
 
-                self.unified_kg.replace_cluster_rows_streamed(
-                    wdb, notebook_id, object_type, _rows()
-                )
-                # P0-A: same commit as the DELETE+INSERT above (wdb, not rdb) —
-                # every rebuild pass through this streamed writer rewrites
-                # concept_clusters for `object_type`, so it must bump every time
-                # (unconditional, unlike append_clusters' added>0 guard: a
-                # rebuild that clusters down to zero rows for this type is still
-                # a real content change from whatever was there before).
-                self._bump_cluster_mutation_seq(wdb, notebook_id)
+        # --- Preparation segment ------------------------------------------
+        # Clear THIS run's canonical-scratch rows before repopulating (see
+        # docstring above) — its own short write(), not folded into the
+        # batch loop below.
+        with self._write() as db:
+            self.unified_kg.clear_canonical_scratch_run(db, notebook_id, run_id)
+
+        def _batches():
+            local: List[tuple] = []
+            for seed, cid in seed_to_canonical.items():
+                local.append(_canonical_scratch_row(
+                    notebook_id, run_id, seed, cid,
+                    canonical_names, desc_by_cid, desc_sig_by_cid,
+                ))
+                if len(local) >= 1000:
+                    yield list(local)
+                    local.clear()
+            if local:
+                yield list(local)
+
+        self._bulk_write(
+            _batches(),
+            lambda wdb, rows: self.unified_kg.insert_canonical_scratch_rows(wdb, rows),
+        )
+
+        # --- Swap segment ---------------------------------------------------
+        # ONE short write transaction, pure SQL: DELETE the type's old rows,
+        # INSERT...SELECT the new ones by joining the two scratch tables (see
+        # swap_cluster_map_from_scratch's docstring for the exact invariants
+        # it preserves — inner join / no object_type column needed / ORDER BY
+        # rowid / empty-clears / SQL-minted id).
+        with self._write() as wdb:
+            self.unified_kg.swap_cluster_map_from_scratch(
+                wdb, notebook_id, object_type, run_id, now
+            )
+            # P0-A: same commit as the DELETE+INSERT above (wdb, not rdb) —
+            # every rebuild pass through this streamed writer rewrites
+            # concept_clusters for `object_type`, so it must bump every time
+            # (unconditional, unlike append_clusters' added>0 guard: a
+            # rebuild that clusters down to zero rows for this type is still
+            # a real content change from whatever was there before).
+            self._bump_cluster_mutation_seq(wdb, notebook_id)
 
     def rebuild_unified_kg(self, notebook_id: str,
                            progress: Optional[Callable[[str, int, int], None]] = None,
@@ -1699,289 +1800,323 @@ class KnowledgeLifecycleService:
         # notebook never wipe or read each other's scratch rows.
         run_id = _uuid4().hex
 
-        # Sub-stage instrumentation: log each stage's name+counts+elapsed on two
-        # channels (event_log INFO + progress banner). Pure logging — no effect on
-        # clustering results or the progress=None data path.
-        import time as _time
-        _t_total = _time.perf_counter()
-        def _stage(msg: str) -> None:
-            self.event_log.logger.info("kg-rebuild[%s] %s", notebook_id, msg)
-            if progress is not None:
-                try:
-                    progress(msg, 0, 0)
-                except Exception:
-                    pass
+        # The whole rebuild body below runs under try/finally so a crash,
+        # exception, or cancellation ANYWHERE in it (not just during Pass A2
+        # of _stream_seed_reps) still clears this run's kg_cluster_scratch
+        # rows — see the finally at the bottom of this function.
+        try:
+            # Sub-stage instrumentation: log each stage's name+counts+elapsed on two
+            # channels (event_log INFO + progress banner). Pure logging — no effect on
+            # clustering results or the progress=None data path.
+            import time as _time
+            _t_total = _time.perf_counter()
+            def _stage(msg: str) -> None:
+                self.event_log.logger.info("kg-rebuild[%s] %s", notebook_id, msg)
+                if progress is not None:
+                    try:
+                        progress(msg, 0, 0)
+                    except Exception:
+                        pass
 
-        # --- Concepts (vector + name-seed clustering) ----------------------
-        # _stream_seed_reps re-populates kg_cluster_scratch for object_type=concept
-        # (object_id -> seed) and returns seed-level aggregates only.
-        _t = _time.perf_counter()
-        reps, members_count, seed_first_name = self._stream_seed_reps(
-            notebook_id, "concept", lambda o: _norm(o["name"]), run_id=run_id)
-        # IMPORTANT: include seeds with NO vector (name-only) — use members_count
-        # keys, not reps keys, to match the legacy all-objects path.
-        seeds = sorted(members_count)
-        _stage(f"concept: streamed {sum(members_count.values())} objs → "
-               f"{len(seeds)} seeds, {len(reps)} vecs "
-               f"({_time.perf_counter() - _t:.1f}s)")
-        decided = self.decided_seed_pairs(notebook_id)
-        confirmed = {p for p, s in decided.items() if s == "confirmed"}
-        rejected = {p for p, s in decided.items() if s in ("rejected", "deferred")}
-        _t_cluster = _time.perf_counter()
-        sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
-                           conflict_fn=_discriminative_conflict, id_prefix="K-",
-                           rep_ann_max=self.settings.kg_cluster_rep_ann_max,
-                           ann_threads=self.settings.kg_cluster_ann_threads)
-        # LLM 兜底: ≥hi 的 auto_candidates 经复核确认后并入 confirmed, 重聚一次
-        from app.services.concept_merge_review import review_merge_candidates
-        autoc = sd.get("auto_candidates", [])
-        _t_mr = _time.perf_counter()
-        if autoc and getattr(self.kg_llm_client, "configured", False):
-            # Optional LLM adjudication is an enhancement — it must NEVER be able to
-            # crash the rebuild. review_merge_candidates is already fail-open (chunked +
-            # defensive parse); this outer guard covers any other unexpected error in the
-            # block so the rebuild always proceeds to write the cluster map.
-            try:
-                cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
-                              for i, (a, b, s) in enumerate(autoc)]
-                # ac{i} → canonical id 对的稳定键(续跑复用的锚)。
-                id_to_key = {f"ac{i}": _pair_key(a, b) for i, (a, b, s) in enumerate(autoc)}
-                # 已决(同 input_version)命中即跳过 LLM;只把未决候选发出去。
-                cached = self.unified_kg.checkpoint_load(
-                    notebook_id, _ck_ver, "merge_review")
-                todo = [c for c in cand_dicts if id_to_key[c["id"]] not in cached]
-
-                def _persist(chunk_decisions):
-                    rows = [(id_to_key[d["candidate_id"]],
-                             {"decision": d["decision"], "confidence": d["confidence"],
-                              "canonical_name": d.get("canonical_name", "")})
-                            for d in chunk_decisions if d.get("candidate_id") in id_to_key]
-                    if rows:
-                        self.unified_kg.checkpoint_put(
-                            notebook_id, _ck_ver, "merge_review", rows, self._now())
-
-                new = review_merge_candidates(
-                    self.kg_llm_client, todo,
-                    batch_size=self.settings.kg_merge_review_batch_size,
-                    max_workers=self.settings.kg_job_concurrency,
-                    on_chunk=_persist,
-                )
-                # 合并 缓存 ∪ 新决策,按 pair_key 索引。
-                decided = dict(cached)
-                for d in new:
-                    k = id_to_key.get(d.get("candidate_id"))
-                    if k:
-                        decided[k] = {"decision": d["decision"], "confidence": d["confidence"]}
-                extra = set()
-                for i, (a, b, s) in enumerate(autoc):
-                    dec = decided.get(_pair_key(a, b))
-                    if dec and dec.get("decision") == "merge" and \
-                            float(dec.get("confidence", 0)) >= self.settings.kg_merge_confirm_threshold:
-                        extra.add(frozenset((a[2:] if a.startswith("K-") else a,
-                                            b[2:] if b.startswith("K-") else b)))
-            except Exception:
-                self.event_log.logger.exception(
-                    "unified-KG merge-review adjudication failed for %s; proceeding without it",
-                    notebook_id,
-                )
-                extra = set()
-            if extra:
-                confirmed = set(confirmed) | extra
-                sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
-                                   conflict_fn=_discriminative_conflict, id_prefix="K-",
-                                   rep_ann_max=self.settings.kg_cluster_rep_ann_max,
-                                   ann_threads=self.settings.kg_cluster_ann_threads)
-            _stage(f"concept: merge-review {len(autoc)} candidates → "
-                   f"{len(extra)} merged ({_time.perf_counter() - _t_mr:.1f}s)")
-        _stage(f"concept: clustered {len(seeds)} seeds → "
-               f"{len(set(sd['seed_to_canonical'].values()))} canonicals, "
-               f"{len(sd.get('auto_candidates', []))} auto-cand "
-               f"({_time.perf_counter() - _t_cluster:.1f}s)")
-        seed_to_canonical = sd["seed_to_canonical"]
-        desc_by_cid: Dict[str, str] = {}
-        desc_sig_by_cid: Dict[str, str] = {}
-        _t_desc = _time.perf_counter()
-        _desc_ran = self.settings.kg_concept_desc_enabled and getattr(self.kg_llm_client, "configured", False)
-        if _desc_ran:
-            from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
-            # Previous descriptions + their input sigs, keyed by canonical id. DISTINCT
-            # so this is bounded by #canonicals (not #members). Reuse fires only on an
-            # exact sig match with a non-empty stored description → fail-safe: any
-            # miss/mismatch just regenerates (worst case = old behavior).
-            old_desc: Dict[str, tuple] = {}
-            with self._connect() as db:
-                for r in self.unified_kg.cluster_description_rows(db, notebook_id):
-                    old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
-            # 同 input_version 的 checkpoint(写簇前被杀留下的已完成描述)作第一优先复用源。
-            try:
-                desc_ckpt = self.unified_kg.checkpoint_load(
-                    notebook_id, _ck_ver, "concept_desc")
-            except Exception:  # noqa: BLE001 — checkpoint 读失败退化为全量重跑,绝不打断 rebuild
-                self.event_log.logger.warning(
-                    "concept_desc checkpoint load 失败 for %s;本轮全量重跑描述", notebook_id, exc_info=True)
-                desc_ckpt = {}
-            # Total members per canonical = Σ members_count over its seeds. Keep
-            # only multi-member (cross-doc merged) canonicals — same cost bound as
-            # the legacy `len(mids) < 2` gate, but computed from seed aggregates so
-            # no 5M-row member list is materialized.
-            total_by_cid: Dict[str, int] = {}
-            seeds_by_cid: Dict[str, List[str]] = {}
-            for s, cid in seed_to_canonical.items():
-                total_by_cid[cid] = total_by_cid.get(cid, 0) + members_count.get(s, 0)
-                seeds_by_cid.setdefault(cid, []).append(s)
-            # PHASE 1 (serial, cheap DB): fetch quotes per multi-member canonical,
-            # compute its input sig, and either reuse the cached description or
-            # queue an LLM job. DB access stays in the main thread.
-            work: List[tuple] = []
-            for cid, total in total_by_cid.items():
-                if total < 2:
-                    continue   # only fuse cross-doc merged clusters (cost bound)
-                cseeds = seeds_by_cid[cid]
-                # Member evidence is fetched per canonical via the scratch join,
-                # bounded by that canonical's member count (not the whole table).
-                with self._connect() as db:
-                    erows = self.unified_kg.cluster_evidence_rows(
-                        db, notebook_id, run_id, cseeds
-                    )
-                quotes = []
-                for er in erows:
-                    for ev in json.loads(er["evidence"] or "[]"):
-                        q = (ev.get("quoted_span") or "").strip()
-                        if q:
-                            quotes.append(q)
-                # DETERMINISTIC dedup+order so the sig (and prompt) is stable across
-                # rebuilds — scratch row order is otherwise unsorted.
-                quotes = sorted(set(quotes))[:8]
-                if not quotes:
-                    continue
-                name = sd["canonical_names"].get(cid, "")
-                sig = _concept_desc_sig(name, quotes)
-                ck = desc_ckpt.get(cid)
-                if ck and ck.get("sig") == sig and ck.get("description"):
-                    desc_by_cid[cid] = ck["description"]     # checkpoint 命中:复用,跳过 LLM
-                    desc_sig_by_cid[cid] = sig
-                    continue
-                prev = old_desc.get(cid)
-                if prev and prev[0] and prev[1] == sig:
-                    desc_by_cid[cid] = prev[0]               # 跨 rebuild 缓存命中:复用
-                    desc_sig_by_cid[cid] = sig
-                    continue
-                work.append((cid, name, quotes, sig))
-            # PHASE 2 (parallel LLM): the chat_json round-trips are the bottleneck;
-            # run them concurrently. kg_llm_client.chat_json is already invoked
-            # concurrently elsewhere (build_notebook_kg), so per-call thread use is fine.
-            # Resolve the client ONCE in the main thread: kg_llm_client is a property
-            # keyed on the _REQUEST_USER ContextVar, which worker threads don't inherit
-            # (per-user config would otherwise fall back to user-local inside the pool).
-            import concurrent.futures as _cf
-            desc_client = self.kg_llm_client
-            def _gen(item):
-                cid, name, quotes, sig = item
-                block = "\n".join(f"- {q}" for q in quotes)
-                try:
-                    raw = desc_client.chat_json(
-                        [{"role": "user", "content": concept_description_prompt(name, block)}],
-                        CONCEPT_DESC_SCHEMA_HINT)
-                    desc = (json.loads(raw).get("description") or "").strip()
-                except Exception:
-                    desc = ""
-                return cid, desc, sig
-            if work:
-                workers = max(1, min(self.settings.kg_job_concurrency, len(work)))
-                done_n = 0
-                with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kg-desc") as pool:
-                    _ck_buf: List[Tuple[str, dict]] = []
-                    for fut in _cf.as_completed([pool.submit(_gen, it) for it in work]):
-                        cid, desc, sig = fut.result()
-                        done_n += 1
-                        if desc:
-                            desc_by_cid[cid] = desc
-                            desc_sig_by_cid[cid] = sig
-                            _ck_buf.append((cid, {"description": desc, "sig": sig}))
-                            if len(_ck_buf) >= _DESC_CKPT_FLUSH:
-                                try:
-                                    self.unified_kg.checkpoint_put(
-                                        notebook_id, _ck_ver, "concept_desc", _ck_buf, self._now())
-                                except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
-                                    self.event_log.logger.warning(
-                                        "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
-                                _ck_buf = []
-                        if progress is not None:
-                            try:
-                                progress("concept_desc", done_n, len(work))
-                            except Exception:
-                                pass
-                    if _ck_buf:
-                        try:
-                            self.unified_kg.checkpoint_put(
-                                notebook_id, _ck_ver, "concept_desc", _ck_buf, self._now())
-                        except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
-                            self.event_log.logger.warning(
-                                "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
-        if _desc_ran:
-            _stage(f"concept: descriptions {len(desc_by_cid)} "
-                   f"({_time.perf_counter() - _t_desc:.1f}s)")
-        else:
-            _stage("concept: descriptions skipped")
-        _t = _time.perf_counter()
-        self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
-                                         sd["canonical_names"], desc_by_cid,
-                                         desc_sig_by_cid, run_id=run_id)
-        _stage(f"concept: wrote clusters ({_time.perf_counter() - _t:.1f}s)")
-        # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
-        # vector near-dup remains concept-only). Each type isolated by id prefix.
-        # These types carry no vectors → reps_t is empty → cluster_seeds does only
-        # exact-seed grouping, matching the legacy cluster_objects(tobjs, {}, ...).
-        # compute_reps=False skips Pass B entirely (no embeddings join) since
-        # cluster_seeds receives {} anyway — avoids wasted ANN at scale.
-        _TYPE_MERGE = {"claim": (seed_claim, "KL-"),
-                       "formula": (seed_formula, "KF-"),
-                       "procedure": (seed_procedure, "KP-")}
-        for t, (sfn, prefix) in _TYPE_MERGE.items():
+            # --- Concepts (vector + name-seed clustering) ----------------------
+            # _stream_seed_reps re-populates kg_cluster_scratch for object_type=concept
+            # (object_id -> seed) and returns seed-level aggregates only.
             _t = _time.perf_counter()
-            reps_t, mc_t, sfn_t = self._stream_seed_reps(notebook_id, t, sfn,
-                                                          run_id=run_id,
-                                                          compute_reps=False)
-            # Empty type → scratch empty → _write_cluster_map_streamed clears rows
-            # (same as legacy write_clusters([], object_type=t)).
-            sd_t = cluster_seeds(sorted(mc_t), reps_t, mc_t, sfn_t, set(), set(),
-                                 conflict_fn=None, id_prefix=prefix,
-                                 rep_ann_max=self.settings.kg_cluster_rep_ann_max,
-                                 ann_threads=self.settings.kg_cluster_ann_threads)
-            self._write_cluster_map_streamed(notebook_id, t, sd_t["seed_to_canonical"],
-                                             sd_t["canonical_names"], run_id=run_id)
-            _stage(f"{t}: streamed+clustered+wrote ({_time.perf_counter() - _t:.1f}s)")
-        # Refresh pending candidates in ONE transaction (per-candidate inserts
-        # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
-        now = self._now()
-        _t = _time.perf_counter()
-        with self._write() as db:
-            self.governance_store.delete_pending_merges(db, notebook_id)
-            self.governance_store.insert_pending_merge_rows(
-                db,
-                [(self._new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
-                 for sa, sb, ca, cb, score in sd["pending_seeds"]])
-        _stage(f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
-        self._invalidate_unified_cache(notebook_id)
-        # #distinct concept canonicals (== set of cluster_map values in the legacy
-        # path: every canonical has ≥1 seed and every concept seed has a canonical).
-        cluster_count = len(set(seed_to_canonical.values()))
-        with self._write() as db:
-            # CRITICAL: the store's finish_rebuild_state UPSERT stores
-            # cluster_input_version=_ver (captured at ENTRY, reflecting the seq
-            # this rebuild consumed) and clears dirty=0, but MUST NOT touch
-            # kg_mutation_seq — the column is omitted from both the column list
-            # and the SET so an existing row's counter is PRESERVED. Bumping it
-            # here would advance the version past what was just stored (gate
-            # never skips); resetting it would lose mutations that arrived
-            # mid-rebuild.
-            self.unified_kg.finish_rebuild_state(
-                db, notebook_id, _ver, cluster_count, now
-            )
-        # Final cleanup: drop only THIS run's scratch rows (run_id-scoped so a
-        # concurrent rebuild with a different run_id is unaffected).
-        with self._write() as db:
-            self.unified_kg.clear_scratch_run(db, notebook_id, run_id)
+            reps, members_count, seed_first_name = self._stream_seed_reps(
+                notebook_id, "concept", lambda o: _norm(o["name"]), run_id=run_id)
+            # IMPORTANT: include seeds with NO vector (name-only) — use members_count
+            # keys, not reps keys, to match the legacy all-objects path.
+            seeds = sorted(members_count)
+            _stage(f"concept: streamed {sum(members_count.values())} objs → "
+                   f"{len(seeds)} seeds, {len(reps)} vecs "
+                   f"({_time.perf_counter() - _t:.1f}s)")
+            decided = self.decided_seed_pairs(notebook_id)
+            confirmed = {p for p, s in decided.items() if s == "confirmed"}
+            rejected = {p for p, s in decided.items() if s in ("rejected", "deferred")}
+            _t_cluster = _time.perf_counter()
+            sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
+                               conflict_fn=_discriminative_conflict, id_prefix="K-",
+                               rep_ann_max=self.settings.kg_cluster_rep_ann_max,
+                               ann_threads=self.settings.kg_cluster_ann_threads)
+            # LLM 兜底: ≥hi 的 auto_candidates 经复核确认后并入 confirmed, 重聚一次
+            from app.services.concept_merge_review import review_merge_candidates
+            autoc = sd.get("auto_candidates", [])
+            _t_mr = _time.perf_counter()
+            if autoc and getattr(self.kg_llm_client, "configured", False):
+                # Optional LLM adjudication is an enhancement — it must NEVER be able to
+                # crash the rebuild. review_merge_candidates is already fail-open (chunked +
+                # defensive parse); this outer guard covers any other unexpected error in the
+                # block so the rebuild always proceeds to write the cluster map.
+                try:
+                    cand_dicts = [{"id": f"ac{i}", "canonical_a": a, "canonical_b": b, "score": s}
+                                  for i, (a, b, s) in enumerate(autoc)]
+                    # ac{i} → canonical id 对的稳定键(续跑复用的锚)。
+                    id_to_key = {f"ac{i}": _pair_key(a, b) for i, (a, b, s) in enumerate(autoc)}
+                    # 已决(同 input_version)命中即跳过 LLM;只把未决候选发出去。
+                    cached = self.unified_kg.checkpoint_load(
+                        notebook_id, _ck_ver, "merge_review")
+                    todo = [c for c in cand_dicts if id_to_key[c["id"]] not in cached]
+
+                    def _persist(chunk_decisions):
+                        rows = [(id_to_key[d["candidate_id"]],
+                                 {"decision": d["decision"], "confidence": d["confidence"],
+                                  "canonical_name": d.get("canonical_name", "")})
+                                for d in chunk_decisions if d.get("candidate_id") in id_to_key]
+                        if rows:
+                            self.unified_kg.checkpoint_put(
+                                notebook_id, _ck_ver, "merge_review", rows, self._now())
+
+                    new = review_merge_candidates(
+                        self.kg_llm_client, todo,
+                        batch_size=self.settings.kg_merge_review_batch_size,
+                        max_workers=self.settings.kg_job_concurrency,
+                        on_chunk=_persist,
+                    )
+                    # 合并 缓存 ∪ 新决策,按 pair_key 索引。
+                    decided = dict(cached)
+                    for d in new:
+                        k = id_to_key.get(d.get("candidate_id"))
+                        if k:
+                            decided[k] = {"decision": d["decision"], "confidence": d["confidence"]}
+                    extra = set()
+                    for i, (a, b, s) in enumerate(autoc):
+                        dec = decided.get(_pair_key(a, b))
+                        if dec and dec.get("decision") == "merge" and \
+                                float(dec.get("confidence", 0)) >= self.settings.kg_merge_confirm_threshold:
+                            extra.add(frozenset((a[2:] if a.startswith("K-") else a,
+                                                b[2:] if b.startswith("K-") else b)))
+                except Exception:
+                    self.event_log.logger.exception(
+                        "unified-KG merge-review adjudication failed for %s; proceeding without it",
+                        notebook_id,
+                    )
+                    extra = set()
+                if extra:
+                    confirmed = set(confirmed) | extra
+                    sd = cluster_seeds(seeds, reps, members_count, seed_first_name, confirmed, rejected,
+                                       conflict_fn=_discriminative_conflict, id_prefix="K-",
+                                       rep_ann_max=self.settings.kg_cluster_rep_ann_max,
+                                       ann_threads=self.settings.kg_cluster_ann_threads)
+                _stage(f"concept: merge-review {len(autoc)} candidates → "
+                       f"{len(extra)} merged ({_time.perf_counter() - _t_mr:.1f}s)")
+            _stage(f"concept: clustered {len(seeds)} seeds → "
+                   f"{len(set(sd['seed_to_canonical'].values()))} canonicals, "
+                   f"{len(sd.get('auto_candidates', []))} auto-cand "
+                   f"({_time.perf_counter() - _t_cluster:.1f}s)")
+            seed_to_canonical = sd["seed_to_canonical"]
+            desc_by_cid: Dict[str, str] = {}
+            desc_sig_by_cid: Dict[str, str] = {}
+            _t_desc = _time.perf_counter()
+            _desc_ran = self.settings.kg_concept_desc_enabled and getattr(self.kg_llm_client, "configured", False)
+            if _desc_ran:
+                from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
+                # Previous descriptions + their input sigs, keyed by canonical id. DISTINCT
+                # so this is bounded by #canonicals (not #members). Reuse fires only on an
+                # exact sig match with a non-empty stored description → fail-safe: any
+                # miss/mismatch just regenerates (worst case = old behavior).
+                old_desc: Dict[str, tuple] = {}
+                with self._connect() as db:
+                    for r in self.unified_kg.cluster_description_rows(db, notebook_id):
+                        old_desc[r["canonical_id"]] = (r["canonical_description"] or "", r["canonical_desc_sig"] or "")
+                # 同 input_version 的 checkpoint(写簇前被杀留下的已完成描述)作第一优先复用源。
+                try:
+                    desc_ckpt = self.unified_kg.checkpoint_load(
+                        notebook_id, _ck_ver, "concept_desc")
+                except Exception:  # noqa: BLE001 — checkpoint 读失败退化为全量重跑,绝不打断 rebuild
+                    self.event_log.logger.warning(
+                        "concept_desc checkpoint load 失败 for %s;本轮全量重跑描述", notebook_id, exc_info=True)
+                    desc_ckpt = {}
+                # Total members per canonical = Σ members_count over its seeds. Keep
+                # only multi-member (cross-doc merged) canonicals — same cost bound as
+                # the legacy `len(mids) < 2` gate, but computed from seed aggregates so
+                # no 5M-row member list is materialized.
+                total_by_cid: Dict[str, int] = {}
+                seeds_by_cid: Dict[str, List[str]] = {}
+                for s, cid in seed_to_canonical.items():
+                    total_by_cid[cid] = total_by_cid.get(cid, 0) + members_count.get(s, 0)
+                    seeds_by_cid.setdefault(cid, []).append(s)
+                # PHASE 1 (serial, cheap DB): fetch quotes per multi-member canonical,
+                # compute its input sig, and either reuse the cached description or
+                # queue an LLM job. DB access stays in the main thread.
+                work: List[tuple] = []
+                for cid, total in total_by_cid.items():
+                    if total < 2:
+                        continue   # only fuse cross-doc merged clusters (cost bound)
+                    cseeds = seeds_by_cid[cid]
+                    # Member evidence is fetched per canonical via the scratch join,
+                    # bounded by that canonical's member count (not the whole table).
+                    with self._connect() as db:
+                        erows = self.unified_kg.cluster_evidence_rows(
+                            db, notebook_id, run_id, cseeds
+                        )
+                    quotes = []
+                    for er in erows:
+                        for ev in json.loads(er["evidence"] or "[]"):
+                            q = (ev.get("quoted_span") or "").strip()
+                            if q:
+                                quotes.append(q)
+                    # DETERMINISTIC dedup+order so the sig (and prompt) is stable across
+                    # rebuilds — scratch row order is otherwise unsorted.
+                    quotes = sorted(set(quotes))[:8]
+                    if not quotes:
+                        continue
+                    name = sd["canonical_names"].get(cid, "")
+                    sig = _concept_desc_sig(name, quotes)
+                    ck = desc_ckpt.get(cid)
+                    if ck and ck.get("sig") == sig and ck.get("description"):
+                        desc_by_cid[cid] = ck["description"]     # checkpoint 命中:复用,跳过 LLM
+                        desc_sig_by_cid[cid] = sig
+                        continue
+                    prev = old_desc.get(cid)
+                    if prev and prev[0] and prev[1] == sig:
+                        desc_by_cid[cid] = prev[0]               # 跨 rebuild 缓存命中:复用
+                        desc_sig_by_cid[cid] = sig
+                        continue
+                    work.append((cid, name, quotes, sig))
+                # PHASE 2 (parallel LLM): the chat_json round-trips are the bottleneck;
+                # run them concurrently. kg_llm_client.chat_json is already invoked
+                # concurrently elsewhere (build_notebook_kg), so per-call thread use is fine.
+                # Resolve the client ONCE in the main thread: kg_llm_client is a property
+                # keyed on the _REQUEST_USER ContextVar, which worker threads don't inherit
+                # (per-user config would otherwise fall back to user-local inside the pool).
+                import concurrent.futures as _cf
+                desc_client = self.kg_llm_client
+                def _gen(item):
+                    cid, name, quotes, sig = item
+                    block = "\n".join(f"- {q}" for q in quotes)
+                    try:
+                        raw = desc_client.chat_json(
+                            [{"role": "user", "content": concept_description_prompt(name, block)}],
+                            CONCEPT_DESC_SCHEMA_HINT)
+                        desc = (json.loads(raw).get("description") or "").strip()
+                    except Exception:
+                        desc = ""
+                    return cid, desc, sig
+                if work:
+                    workers = max(1, min(self.settings.kg_job_concurrency, len(work)))
+                    done_n = 0
+                    with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kg-desc") as pool:
+                        _ck_buf: List[Tuple[str, dict]] = []
+                        for fut in _cf.as_completed([pool.submit(_gen, it) for it in work]):
+                            cid, desc, sig = fut.result()
+                            done_n += 1
+                            if desc:
+                                desc_by_cid[cid] = desc
+                                desc_sig_by_cid[cid] = sig
+                                _ck_buf.append((cid, {"description": desc, "sig": sig}))
+                                if len(_ck_buf) >= _DESC_CKPT_FLUSH:
+                                    try:
+                                        self.unified_kg.checkpoint_put(
+                                            notebook_id, _ck_ver, "concept_desc", _ck_buf, self._now())
+                                    except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
+                                        self.event_log.logger.warning(
+                                            "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
+                                    _ck_buf = []
+                            if progress is not None:
+                                try:
+                                    progress("concept_desc", done_n, len(work))
+                                except Exception:
+                                    pass
+                        if _ck_buf:
+                            try:
+                                self.unified_kg.checkpoint_put(
+                                    notebook_id, _ck_ver, "concept_desc", _ck_buf, self._now())
+                            except Exception:  # noqa: BLE001 — checkpoint 写失败不打断 rebuild
+                                self.event_log.logger.warning(
+                                    "concept_desc checkpoint put 失败 for %s", notebook_id, exc_info=True)
+            if _desc_ran:
+                _stage(f"concept: descriptions {len(desc_by_cid)} "
+                       f"({_time.perf_counter() - _t_desc:.1f}s)")
+            else:
+                _stage("concept: descriptions skipped")
+            _t = _time.perf_counter()
+            self._write_cluster_map_streamed(notebook_id, "concept", seed_to_canonical,
+                                             sd["canonical_names"], desc_by_cid,
+                                             desc_sig_by_cid, run_id=run_id)
+            _stage(f"concept: wrote clusters ({_time.perf_counter() - _t:.1f}s)")
+            # Cross-doc exact-normalized merge for non-concept types (v1: seed-based;
+            # vector near-dup remains concept-only). Each type isolated by id prefix.
+            # These types carry no vectors → reps_t is empty → cluster_seeds does only
+            # exact-seed grouping, matching the legacy cluster_objects(tobjs, {}, ...).
+            # compute_reps=False skips Pass B entirely (no embeddings join) since
+            # cluster_seeds receives {} anyway — avoids wasted ANN at scale.
+            _TYPE_MERGE = {"claim": (seed_claim, "KL-"),
+                           "formula": (seed_formula, "KF-"),
+                           "procedure": (seed_procedure, "KP-")}
+            for t, (sfn, prefix) in _TYPE_MERGE.items():
+                _t = _time.perf_counter()
+                reps_t, mc_t, sfn_t = self._stream_seed_reps(notebook_id, t, sfn,
+                                                              run_id=run_id,
+                                                              compute_reps=False)
+                # Empty type → scratch empty → _write_cluster_map_streamed clears rows
+                # (same as legacy write_clusters([], object_type=t)).
+                sd_t = cluster_seeds(sorted(mc_t), reps_t, mc_t, sfn_t, set(), set(),
+                                     conflict_fn=None, id_prefix=prefix,
+                                     rep_ann_max=self.settings.kg_cluster_rep_ann_max,
+                                     ann_threads=self.settings.kg_cluster_ann_threads)
+                self._write_cluster_map_streamed(notebook_id, t, sd_t["seed_to_canonical"],
+                                                 sd_t["canonical_names"], run_id=run_id)
+                _stage(f"{t}: streamed+clustered+wrote ({_time.perf_counter() - _t:.1f}s)")
+            # Refresh pending candidates in ONE transaction (per-candidate inserts
+            # were the rebuild hotspot at scale). confirmed/rejected rows untouched.
+            now = self._now()
+            _t = _time.perf_counter()
+            with self._write() as db:
+                self.governance_store.delete_pending_merges(db, notebook_id)
+                self.governance_store.insert_pending_merge_rows(
+                    db,
+                    [(self._new_id("mc"), notebook_id, ca, cb, sa, sb, score, now, now)
+                     for sa, sb, ca, cb, score in sd["pending_seeds"]])
+            _stage(f"pending refresh ({_time.perf_counter() - _t:.1f}s)")
+            self._invalidate_unified_cache(notebook_id)
+            # #distinct concept canonicals (== set of cluster_map values in the legacy
+            # path: every canonical has ≥1 seed and every concept seed has a canonical).
+            cluster_count = len(set(seed_to_canonical.values()))
+            with self._write() as db:
+                # CRITICAL: the store's finish_rebuild_state UPSERT stores
+                # cluster_input_version=_ver (captured at ENTRY, reflecting the seq
+                # this rebuild consumed) and clears dirty=0, but MUST NOT touch
+                # kg_mutation_seq — the column is omitted from both the column list
+                # and the SET so an existing row's counter is PRESERVED. Bumping it
+                # here would advance the version past what was just stored (gate
+                # never skips); resetting it would lose mutations that arrived
+                # mid-rebuild.
+                self.unified_kg.finish_rebuild_state(
+                    db, notebook_id, _ver, cluster_count, now
+                )
+        finally:
+            # Final cleanup: drop only THIS run's scratch rows (run_id-scoped
+            # so a concurrent rebuild with a different run_id is unaffected).
+            # MUST be unconditional (finally, not straight-line): Pass A2 above
+            # now commits each insert_scratch_rows batch independently (see the
+            # comment at its call sites), so a crash/exception/cancellation
+            # anywhere in the try above — not just during Pass A2 — would
+            # otherwise strand this run_id's rows forever: kg_cluster_scratch has
+            # no timestamp column, and every DELETE against it in the codebase is
+            # run_id-scoped, so nothing could ever reclaim them. Before batching,
+            # an interrupted Pass A2 rolled its scratch rows back atomically (one
+            # txn); batching traded that for per-batch durability, so cleanup must
+            # now be explicit here instead. Swallow+log so a cleanup failure never
+            # masks whatever exception is already propagating out of the try.
+            #
+            # kg_canonical_scratch (write-lock slimming improvement point 2's
+            # preparation-segment table) gets the SAME treatment, in the SAME
+            # write() block: _write_cluster_map_streamed only clears its OWN
+            # run's rows at the START of each per-type call (to keep two
+            # back-to-back types in the same run from cross-contaminating —
+            # see its docstring), so nothing clears the LAST type's rows once
+            # the whole rebuild finishes, and a crash inside
+            # _write_cluster_map_streamed (prep or swap) would otherwise
+            # strand them forever for the same reason kg_cluster_scratch rows
+            # would.
+            try:
+                with self._write() as db:
+                    self.unified_kg.clear_scratch_run(db, notebook_id, run_id)
+                    self.unified_kg.clear_canonical_scratch_run(db, notebook_id, run_id)
+            except Exception:  # noqa: BLE001
+                self.event_log.logger.warning(
+                    "rebuild scratch cleanup 失败 for %s run_id=%s",
+                    notebook_id, run_id, exc_info=True)
         _stage(f"DONE {cluster_count} canonicals, total {_time.perf_counter() - _t_total:.1f}s")
         # canonical 关系层(派生):聚类刚重算 → force=True(闸可能误跳)。fail-open。
         try:

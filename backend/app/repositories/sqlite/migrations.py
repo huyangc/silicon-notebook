@@ -12,7 +12,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1534,6 +1534,37 @@ class SqliteMigrator:
                 );
                 CREATE INDEX IF NOT EXISTS idx_model_service_status_user_checked
                   ON model_service_status(user_id, checked_at DESC);
+                """
+            )
+
+    def _migration_24(self) -> None:
+        """写锁瘦身改造点 2:concept_clusters 整表替换拆成【预备段(scratch)+
+        切换段(纯 SQL)】(design doc §5.5)。预备段把每个 object_type 算出的
+        seed→canonical 映射(canonical 名/描述及其签名)落进这张新 scratch 表;
+        切换段再用一条纯 SQL DELETE+INSERT...SELECT,把它和 kg_cluster_scratch
+        (object_id→seed)连接,一次性写 concept_clusters —— 写锁只覆盖切换段的
+        纯 SQL,不再覆盖预备段的 Python 计算与逐行 executemany 构造。
+
+        与 kg_cluster_scratch 同款:无主键、纯 transient、run_id 隔离并发
+        rebuild。不需要 object_type 列——_write_cluster_map_streamed 在写入
+        每个 type 前先清空本 run 的行(镜像 _stream_seed_reps 对
+        kg_cluster_scratch 的 clear-at-start),所以切换时表里只有当前 type
+        的行。索引支持 (notebook_id, run_id, seed) 上的等值连接(切换段的
+        JOIN 谓词)。"""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS kg_canonical_scratch (
+                  notebook_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  seed TEXT NOT NULL,
+                  canonical_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL DEFAULT '',
+                  canonical_description TEXT NOT NULL DEFAULT '',
+                  canonical_desc_sig TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_canonical_scratch_nb_run_seed
+                  ON kg_canonical_scratch(notebook_id, run_id, seed);
                 """
             )
 

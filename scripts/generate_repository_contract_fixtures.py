@@ -2002,12 +2002,41 @@ def _normalize_api_serialization(
     return value
 
 
+def _api_modules_binding_repository() -> list[object]:
+    """Every already-imported ``app.api.*`` module holding a ``repository`` name.
+
+    Scans sys.modules rather than importing anything: the caller has already
+    imported ``app.api.routes``, which imports every router module, so the set is
+    complete by then and this never triggers a fresh import as a side effect.
+    Sorted by module name purely so the patch order is deterministic.
+    """
+    import sys
+
+    found = [
+        module
+        for name, module in sorted(sys.modules.items())
+        if name.startswith("app.api.")
+        and module is not None
+        and "repository" in vars(module)
+    ]
+    if not found:  # pragma: no cover — defensive: means the import above changed
+        raise RuntimeError(
+            "no app.api.* module exposes `repository`; the route composition "
+            "changed and _serialization_contract() would silently build its "
+            "payloads against the real repository instead of the fixture one"
+        )
+    return found
+
+
 def _serialization_contract() -> dict[str, object]:
     """Capture representative payloads from the real repository and routes."""
     from fastapi.testclient import TestClient
 
     from app import main as app_main
-    from app.api import deps, routes
+    # Importing `routes` is what pulls every route module into sys.modules —
+    # it aggregates all the routers — which is what makes the discovery in
+    # _api_modules_binding_repository() below complete.
+    from app.api import deps, routes  # noqa: F401 — imported for its import side effect
     from app.core import event_logging
     from app.models.schemas import AskRequest
     from app.services.repository import UploadedSourceFile
@@ -2022,7 +2051,18 @@ def _serialization_contract() -> dict[str, object]:
             stack.enter_context(mock.patch.object(app_main, "repository", lambda: repo))
             stack.enter_context(mock.patch.object(deps, "get_settings", lambda: repo.settings))
             stack.enter_context(mock.patch.object(deps, "repository", lambda: repo))
-            stack.enter_context(mock.patch.object(routes, "repository", lambda: repo))
+            # `app.api.routes` used to own a module-level `repository`; it is now a
+            # pure router aggregator and the factory lives in app/api/deps.py.
+            # Patching `deps` alone does NOT reach the routes: every route module
+            # does `from app.api.deps import repository`, which binds the name in
+            # that module's own namespace, and nothing resolves it through
+            # Depends(repository) (0 such usages vs 140 direct `repository()`
+            # calls). So patch each module that actually holds the name, and
+            # discover them at runtime rather than hardcoding a list — that is
+            # exactly how the old `routes` line silently rotted into a crash when
+            # routes.py was split.
+            for module in _api_modules_binding_repository():
+                stack.enter_context(mock.patch.object(module, "repository", lambda: repo))
             stack.enter_context(
                 mock.patch.object(event_logging._archive_pool, "submit", lambda *_a, **_k: None)
             )

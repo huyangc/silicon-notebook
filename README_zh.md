@@ -42,7 +42,7 @@ PostgreSQL + pgvector 仍是后续生产/团队 beta 目标，当前本机开发
 - `RepositoryRuntime` 持有或引用组合后的运行态；`REPORT_CANCELLATIONS` 刻意保持 process-global canonical owner，runtime、report coordinator 与 module compatibility function 共享同一 identity reference。其他可变运行态（storage root、embedder、语言 cache、构建集合、Ask cancellation registry 与工件 cache）由 runtime 持有；完成组合后替换受支持的兼容属性时，所有已持有它们的消费者都会同步更新。Ask/report 同步提交失败会把已经创建的持久化 job/report 标记为 failed、注销 cancellation entry，再把提交异常重新抛出；成功 worker 的次序与既有 Ask 事务 checkpoint 不变。
 - 重构前创建的数据库可原样加载。`scripts/verify_repository_snapshot.py` 使用精确的逐版本 migration manifest 与稳定 seed manifest，对 SQLite URI 路径做百分号编码，只在临时 backup 上构造 repository；cleanup 失败时只报告保留的 backup 路径，不输出私有行。它校验原 DB/WAL metadata 以及 SHM 的存在性和大小；连接 live WAL 时只豁免 SHM mtime，因为 SQLite 可能重建它。
 
-当前 schema 版本为 23。已提交的 v9 兼容 fixture 会经由 v10–v23 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态。
+当前 schema 版本为 24。已提交的 v9 兼容 fixture 会经由 v10–v24 migration 升级并保持可读：v10–v12 覆盖兼容与 SQLite 热路径索引，v13–v15 覆盖 Memory/Agent 与 Memory 派生源 link/index，v16/v18 覆盖 knowhow 表与格子代码，v17 覆盖论文元数据，v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升目标，v21 覆盖交互式规整 anchor 成员检查的归一化表达式索引，v22 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 为写锁瘦身的簇映射切换段增加 kg_canonical_scratch 表。
 - `frontend/app/page.tsx` 只承担 notebook workspace 编排，不再持有全部共享模型和面板实现。API/视图类型与常量位于 `workspace-model.ts`，答案/引用/推理轨迹位于 `answer-panel.tsx`，内置 KG 类型文案/样式位于 `kg-type-model.ts`，图谱和答案共用 `kg-type-mark.tsx` 渲染。
 - workspace HTTP 职责拆分到 `system-api.ts`、`notebook-api.ts`、`source-api.ts`、`ask-api.ts`、`knowledge-api.ts`、`report-api.ts` 与 `kg-api.ts`。共享 `frontend/app/api-client.ts` transport 负责 HTTP mechanics，领域模块保留 endpoint policy；`page.tsx` 保留 state、过期结果 guard、轮询与 Blob URL 生命周期；`api-boundary.test.mjs` 用语义扫描禁止 transport core 外的生产 `fetch`。
 - 结构回归测试只使用 public HTTP contract 或显式 domain seam，不得绑定 private aggregate helper、源码位置、行数或 route/model 总数。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle composition 仍是独立债务。
@@ -56,7 +56,9 @@ silicon-notebook 以两个进程运行——FastAPI 后端 + Next.js 前端—�
 
 ### 前置条件
 
-- **Python ≥ 3.11**
+- **Python ≥ 3.13**——SQLite 写锁的公平性依赖 CPython 3.13 中 `threading.Lock`（由
+  `PyMutex` 支撑）的交接语义；更低版本会静默退化为抢占式（barging），写者饿死无声
+  重现（见 `backend/app/repositories/sqlite/database.py`）。
 - **Node.js ≥ 20** 与 npm
 - **git**
 - C/C++ 工具链*仅作兜底*——`numpy`、`rustworkx`、`hnswlib` 在常见平台都有预编译 wheel;
@@ -584,6 +586,9 @@ worker。每多一个 worker 就多一份内存中的状态（大型 KG/ANN 索�
 
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout（毫秒，默认 30000）
+DB_WRITE_LOCK_STATS         # 开启进程级 SQLite 写锁 wait/hold 观测（默认 true）
+DB_WRITE_LOCK_WARN_MS       # wait/hold 超过此毫秒数即记一条限流的 db_write_lock_slow 事件（默认 200）
+DB_WRITE_LOCK_FLUSH_SECONDS # 周期性 db_write_lock_stats 快照的发出间隔（秒），也是 db_write_lock_slow 按调用点的限流窗口（默认 60）
 SQLITE_CACHE_SIZE_KB    # 每连接 SQLite 页缓存(KB,负值=KB)。连接按线程复用,总内存≈线程数×|值|（默认 -16384）
 DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
 SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
@@ -762,20 +767,21 @@ python3 scripts/diag.py incident --pid <backend-pid>
 文本或参数、authorization header、cookie、token、secret、原始命令行或局部变量。即使输出已
 脱敏，分享给可信团队之外的人之前仍必须人工复核。
 
-`incident` 不需要 root 或第三方 Python 包，不 import `app`，也不会重启或终止进程。六个诊断
+`incident` 不需要 root 或第三方 Python 包，不 import `app`，也不会重启或终止进程。七个诊断
 命令对应用数据都只读：不执行 delete/其它业务写入，不做 SQLite checkpoint/vacuum/analyze/reindex，
 不跑 migration，也不自动修复。`incident` 仅可按上述约束维护有界的
 `.local/diagnostics/` 工件。
 
-### 六命令诊断速查
+### 七命令诊断速查
 
-`scripts/diag.py` 只提供以下六个命令：
+`scripts/diag.py` 只提供以下七个命令：
 
 | 命令 | 用途 | 运行边界 |
 | --- | --- | --- |
 | `python3 scripts/diag.py incident` | 首选的线上即时有界采集；自动发现不能唯一选中 worker 时加 `--pid <backend-pid>`。 | Ubuntu/Linux 活体进程证据；纯 stdlib，不 import app。 |
 | `python3 scripts/diag.py slow --since 24 --deep` | 从历史日志、DB 聚合与 scale-index manifest 分析慢路径；`--deep` 会增加可能耗时数分钟的只读 DB 检查。裸跑 `python3 scripts/diag.py` 仍等于 `slow`。 | 离线、纯 stdlib，不 import app。 |
 | `python3 scripts/diag.py latency --last 500` | 从 `ask_stage` 事件统计各 Ask 阶段 P50/P95/max。 | 离线、纯 stdlib，不 import app。 |
+| `python3 scripts/diag.py locks --top 20` | 从 `db_write_lock_slow` / `db_write_lock_stats` 事件按调用点聚合 SQLite 写锁争用。 | 离线、纯 stdlib，不 import app。 |
 | `python3 scripts/diag.py open --local .local` | 分析打开笔记本的查询/端点耗时、缓存冷成本与 mutation-sequence churn。 | 离线、纯 stdlib，不 import app。 |
 | `python3 scripts/diag.py db --db .local/silicon_notebook.db` | 有界、源端无副作用地采集 SQLite/WAL/表/FK 索引/query plan 证据。 | 离线、纯 stdlib，不 import app。 |
 | `python3 scripts/diag.py base-recall [active_notebook_id] --db .local/silicon_notebook.db` | 仅用元数据诊断挂载 base 的可用性与最近报告的 tier 引用计数。 | 有界、源端无副作用的 SQLite 快照；纯 stdlib、不 import app；不执行检索、不回显查询/正文、不构造 repository、不迁移、不用 SQLite 打开源库。 |
@@ -789,7 +795,15 @@ notebook/user/report/object/chunk id、标题、问题、正文、文件名、�
 `<channel>.jsonl`、daily `<channel>-YYYY-MM-DD.jsonl`、daily gzip
 `<channel>-YYYY-MM-DD.jsonl.gz`，以及下一层 per-user 日志目录。malformed 行和字节/时间窗口截断
 会作为 degraded metadata 报告。既有独立引擎脚本继续可用于存量运维笔记与 cron；新操作优先走
-这个六命令统一入口。
+这个七命令统一入口。
+
+`python3 scripts/diag.py locks [--log PATH] [--top N]` —— 从 `events.jsonl` 按调用点聚合
+SQLite 写锁争用。`wait` 是写者排队等锁的时长（用户感知为「页面卡住」），`hold` 是持锁时长
+（谁害的）。按 `hold_max` 降序，最该改的排最前。输出两张表：超阈值违规
+（`db_write_lock_slow`，按 site 限流，只见「尾巴」）与周期性全量快照
+（`db_write_lock_stats`，不做阈值过滤，但只是某一时刻的累计快照）——某个调用点即使从未
+超阈值也可能很忙，这种情况只有第二张表能看见。采集阈值由 `DB_WRITE_LOCK_WARN_MS` 控制
+（默认 200）。
 
 **日志可视化页面 — `/dev/logs`。** 针对上述 JSONL 通道的只读 debug 页面（v1 聚焦 LLM 通道）。左侧列表可按 kind / status / model 过滤并全文搜索；详情区完整展示发给 LLM 的内容（`system` / `user` 消息与 `schema_hint`）以及模型回复、token 用量、耗时。由门控的后端接口 `/api/debug/logs/...` 提供，需显式设置 `DEBUG_LOGS_ENABLED=true` 才会开启（默认关闭——完整 LLM 记录可能包含私有来源材料）。
 

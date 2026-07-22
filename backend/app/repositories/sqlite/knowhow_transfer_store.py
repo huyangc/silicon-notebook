@@ -93,7 +93,7 @@ class KnowhowTransferStore:
         ceiling) is cheap enough to hold the lock for.
 
         PR review round 5 P2: ``write_lock`` alone still leaves a gap —
-        it is a ``threading.RLock`` scoped to THIS PROCESS's
+        it is a ``threading.Lock`` scoped to THIS PROCESS's
         ``SqliteDatabase`` instance, so it excludes every OTHER writer in
         this process (every write in this codebase goes through the same
         ``write()``), but it cannot exclude a second OS process (or any
@@ -442,7 +442,9 @@ class KnowhowTransferStore:
         ``write()`` hands back a brand-new connection with no
         ``isolation_level`` override, so python's sqlite3 module runs a bare
         SELECT in implicit autocommit, opening no real SQLite transaction at
-        all. ``database.write_lock`` (a ``threading.RLock``) excludes every
+        all. ``database.write_lock`` (a ``threading.Lock``; nested ``write()``
+        calls on one thread are handled by ``write_depth``, not by lock
+        reentrancy) excludes every
         OTHER writer IN THIS PROCESS for the method's whole duration, but it
         is a process-local primitive — it cannot exclude a second OS process
         with its own handle on the same SQLite file (this codebase's offline

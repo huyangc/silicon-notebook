@@ -1821,6 +1821,42 @@ MIGRATION_MANIFEST[(22, 23)] = {
     "views": {},
 }
 
+# v24: write-lock slimming improvement point 2 (design doc §5.5) — the
+# kg_canonical_scratch preparation-segment scratch table (seed -> canonical
+# mapping) that swap_cluster_map_from_scratch's pure-SQL swap joins against
+# kg_cluster_scratch. Same appended-here convention as v22/v23 above.
+KG_CANONICAL_SCRATCH_TABLE = {
+    "kg_canonical_scratch": """CREATE TABLE kg_canonical_scratch (
+                  notebook_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  seed TEXT NOT NULL,
+                  canonical_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL DEFAULT '',
+                  canonical_description TEXT NOT NULL DEFAULT '',
+                  canonical_desc_sig TEXT NOT NULL DEFAULT ''
+                )""",
+}
+KG_CANONICAL_SCRATCH_INDEX = {
+    "idx_kg_canonical_scratch_nb_run_seed":
+        """CREATE INDEX idx_kg_canonical_scratch_nb_run_seed
+                  ON kg_canonical_scratch(notebook_id, run_id, seed)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 24, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KG_CANONICAL_SCRATCH_TABLE},
+        "indexes": {**manifest["indexes"], **KG_CANONICAL_SCRATCH_INDEX},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(23, 24)] = {
+    "tables": KG_CANONICAL_SCRATCH_TABLE,
+    "columns": {},
+    "indexes": KG_CANONICAL_SCRATCH_INDEX,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
