@@ -67,7 +67,6 @@ LIFECYCLE_STORE_CALLS = {
         "checkpoint_gc",
         "checkpoint_load",
         "checkpoint_put",
-        "claim_name_rows",
         "clear_mention_bridge",
         "clear_scratch_run",
         "cluster_description_rows",
@@ -83,7 +82,7 @@ LIFECYCLE_STORE_CALLS = {
         "finish_rebuild_state",
         "insert_scratch_rows",
         "mention_edges_count",
-        "mention_scan_matches",
+        "mention_alias_candidates",
         "mention_seed_rows",
         "replace_canonical_relations",
         "replace_cluster_rows_streamed",
@@ -173,6 +172,26 @@ def test_lifecycle_service_is_sql_free_and_uses_exact_store_seams():
         and isinstance(node.func, ast.Attribute)
         and node.func.attr in {"execute", "executemany", "executescript"}
     ]
+
+    from app.repositories import ports
+
+    protocol_by_owner = {
+        "knowledge": ports.KnowledgeStorePort,
+        "governance_store": ports.GovernanceStorePort,
+        "unified_kg": ports.UnifiedKgStorePort,
+    }
+    missing = {}
+    for owner, calls in actual.items():
+        protocol = protocol_by_owner[owner]
+        declared = {
+            name
+            for base in protocol.__mro__
+            for name, value in base.__dict__.items()
+            if callable(value)
+        }
+        if calls - declared:
+            missing[owner] = sorted(calls - declared)
+    assert missing == {}
 
 
 def test_retired_retrieval_privates_have_no_production_callers():

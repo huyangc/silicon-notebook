@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
+import os
+import subprocess
+import sys
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import get_type_hints
@@ -68,6 +72,40 @@ def test_neutral_ports_do_not_import_database_backends():
     assert offenders == {module: set() for module in NEUTRAL_MODULES}, offenders
 
 
+def test_clean_neutral_runtime_and_facade_imports_load_no_backend_modules():
+    script = """
+import json
+import sys
+import app.services.repository_runtime
+import app.services.repository_facade
+print(json.dumps(sorted(
+    name for name in sys.modules
+    if name.startswith(('app.repositories.sqlite.', 'app.repositories.postgres.'))
+)))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "backend")
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert json.loads(completed.stdout) == []
+
+
+def test_neutral_database_and_facade_do_not_expose_sqlite_local_connection_cleanup():
+    from app.repositories.ports import RepositoryDatabasePort
+    from app.services.repository_facade import RepositoryFacade
+    from app.services.sqlite_repository import SQLiteRepository
+
+    assert "close_local" not in RepositoryDatabasePort.__dict__
+    assert "close_local" not in RepositoryFacade.__dict__
+    assert "close_local" in SQLiteRepository.__dict__
+
+
 def test_bundle_is_neutral_and_declares_every_store_seat():
     bundle_path = ROOT / NEUTRAL_MODULES[1]
     assert bundle_path.exists()
@@ -119,3 +157,19 @@ def test_ask_turn_result_is_neutral_and_preserves_the_conversation_history_shape
     )
     assert get_type_hints(AskStateStorePort.prepare_turn)["return"] is PreparedAskTurn
     assert get_type_hints(AskStateStore.prepare_turn)["return"] is PreparedAskTurn
+
+
+def test_mention_alias_scan_is_a_portable_store_operation():
+    from app.repositories.ports import UnifiedKgStorePort
+    from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+
+    assert "mention_alias_candidates" in UnifiedKgStorePort.__dict__
+    assert inspect.signature(UnifiedKgStorePort.mention_alias_candidates) == (
+        inspect.signature(UnifiedKgStore.mention_alias_candidates)
+    )
+    lifecycle_source = (ROOT / "backend/app/services/knowledge_lifecycle.py").read_text(
+        encoding="utf-8"
+    )
+    assert "_close_local" not in lifecycle_source
+    assert ".claim_name_rows(" not in lifecycle_source
+    assert ".mention_scan_matches(" not in lifecycle_source

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import ast
+import builtins
+import inspect
 import sys
 import importlib.util
 from pathlib import Path
@@ -35,6 +37,58 @@ SQLITE_PERSISTENCE_CONSTRUCTORS = {
     "SqliteDatabase",
     "UnifiedKgStore",
 }
+
+
+def _sqlite_persistence_construction_sites_from_sources(
+    sources: dict[str, str],
+) -> list[str]:
+    offenders: list[str] = []
+    for relative, source in sources.items():
+        tree = ast.parse(source, filename=relative)
+        module_aliases: dict[str, str] = {}
+        symbol_aliases: dict[str, str] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    local = alias.asname or alias.name.split(".", 1)[0]
+                    module_aliases[local] = alias.name if alias.asname else local
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    local = alias.asname or alias.name
+                    target = f"{node.module}.{alias.name}"
+                    if node.module == "app.repositories.sqlite":
+                        module_aliases[local] = target
+                    else:
+                        symbol_aliases[local] = target
+
+        def dotted_name(node):
+            if isinstance(node, ast.Name):
+                return node.id
+            if isinstance(node, ast.Attribute):
+                parent = dotted_name(node.value)
+                return f"{parent}.{node.attr}" if parent else node.attr
+            return ""
+
+        def resolve_call(node):
+            dotted = dotted_name(node)
+            head, separator, tail = dotted.partition(".")
+            if not separator and head in symbol_aliases:
+                return symbol_aliases[head]
+            if head in module_aliases:
+                return module_aliases[head] + (f".{tail}" if tail else "")
+            return dotted
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            resolved = resolve_call(node.func)
+            constructor = resolved.rsplit(".", 1)[-1]
+            if (
+                resolved.startswith("app.repositories.sqlite.")
+                and constructor in SQLITE_PERSISTENCE_CONSTRUCTORS
+            ):
+                offenders.append(f"{relative}:{node.lineno}:{constructor}")
+    return offenders
 
 
 def _sqlite_bundle_factory_class():
@@ -125,26 +179,169 @@ def test_runtime_consumes_the_injected_persistence_bundle(tmp_path):
     assert runtime.unified_kg is bundle.unified_kg
 
 
+def test_runtime_late_wiring_uses_declared_methods_on_slot_only_store_ports(tmp_path):
+    class SlotBindingStore:
+        __slots__ = ("delegate", "binding", "method_name")
+
+        def __init__(self, wrapped, method_name):
+            self.delegate = wrapped
+            self.binding = None
+            self.method_name = method_name
+
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+
+        def bind_write(self, write):
+            assert self.method_name == "bind_write"
+            self.binding = write
+
+        def bind_runtime_callbacks(self, **callbacks):
+            assert self.method_name == "bind_runtime_callbacks"
+            self.binding = callbacks
+
+        def bind_insert_row(self, insert_row):
+            assert self.method_name == "bind_insert_row"
+            self.binding = insert_row
+
+    class SlotBundle:
+        __slots__ = (
+            "database", "identity", "notebooks", "sharing", "sources", "chunks",
+            "embeddings", "knowledge", "governance", "index_projection",
+            "kg_build_jobs", "knowhow", "knowhow_transfer", "memory", "queries",
+            "reports", "ask_state", "unified_kg",
+        )
+
+        def __init__(self, delegate):
+            for name in self.__slots__:
+                object.__setattr__(self, name, getattr(delegate, name))
+
+    captured = {}
+    class Factory:
+        def create(self, **kwargs):
+            delegate = _sqlite_bundle_factory_class()().create(**kwargs)
+            bundle = SlotBundle(delegate)
+            bundle.embeddings = SlotBindingStore(delegate.embeddings, "bind_write")
+            bundle.index_projection = SlotBindingStore(
+                delegate.index_projection, "bind_runtime_callbacks"
+            )
+            bundle.sharing = SlotBindingStore(delegate.sharing, "bind_insert_row")
+            captured["bundle"] = bundle
+            return bundle
+
+    runtime = RepositoryRuntime(
+        settings=_settings(tmp_path),
+        root_dir=tmp_path,
+        seams=_seams(),
+        persistence_factory=Factory(),
+    )
+    runtime.wire_persistence(write=lambda: None)
+    runtime.wire_scale_artifacts(
+        connect=lambda: None,
+        in_batches=lambda ids: [list(ids)],
+        ent_chunk_map=lambda _notebook_id: {},
+        mention_extra_edges=lambda _notebook_id: [],
+        vector_matrix=lambda *_args: None,
+        version=lambda _notebook_id: [],
+        scale_cache=lambda: {},
+        load_lock=lambda: object(),
+        load_locks=lambda: {},
+        note_model_error=lambda *_args, **_kwargs: None,
+    )
+    runtime.wire_sharing(
+        insert_row=lambda *_args: None,
+        copy_stats=lambda _notebook_id: {},
+        storage_dir=lambda: tmp_path,
+        schedule_projection=lambda _table_id: None,
+    )
+
+    bundle = captured["bundle"]
+    assert bundle.embeddings.binding is not None
+    assert set(bundle.index_projection.binding) == {
+        "connect", "in_batches", "ent_chunk_map", "mention_extra_edges", "vector_matrix"
+    }
+    assert bundle.sharing.binding is not None
+
+
+@pytest.mark.parametrize(
+    ("port_name", "store_name", "method_name"),
+    [
+        ("EmbeddingStorePort", "EmbeddingStore", "bind_write"),
+        ("IndexProjectionStorePort", "IndexProjectionStore", "bind_runtime_callbacks"),
+        ("SharingStorePort", "SharingStore", "bind_insert_row"),
+    ],
+)
+def test_portable_late_binding_signatures_match_sqlite_stores(
+    port_name, store_name, method_name
+):
+    from app.repositories import ports
+    from app.repositories.sqlite import embedding_store, index_projection_store, sharing_store
+
+    concrete_modules = {
+        "EmbeddingStore": embedding_store,
+        "IndexProjectionStore": index_projection_store,
+        "SharingStore": sharing_store,
+    }
+    port_method = getattr(getattr(ports, port_name), method_name)
+    store_method = getattr(getattr(concrete_modules[store_name], store_name), method_name)
+    assert inspect.signature(port_method) == inspect.signature(store_method)
+
+
 def test_sqlite_bundle_factory_is_the_only_persistence_construction_root():
     app_root = Path(__file__).resolve().parents[1] / "app"
     bundle_path = app_root / "repositories" / "sqlite" / "bundle.py"
-    offenders: list[str] = []
-
-    for path in app_root.rglob("*.py"):
-        if path == bundle_path:
-            continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id in SQLITE_PERSISTENCE_CONSTRUCTORS
-            ):
-                offenders.append(
-                    f"{path.relative_to(app_root.parent)}:{node.lineno}:{node.func.id}"
-                )
+    sources = {
+        path.relative_to(app_root.parent).as_posix(): path.read_text(encoding="utf-8")
+        for path in app_root.rglob("*.py")
+        if path != bundle_path
+    }
+    offenders = _sqlite_persistence_construction_sites_from_sources(sources)
 
     assert offenders == []
+
+
+@pytest.mark.parametrize(
+    ("source", "constructor"),
+    [
+        (
+            "import app.repositories.sqlite.database as sqlite_db\n"
+            "sqlite_db.SqliteDatabase(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "from app.repositories.sqlite.database import SqliteDatabase as DB\n"
+            "DB(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "from app.repositories.sqlite.embedding_store import EmbeddingStore as Vectors\n"
+            "Vectors(write=write)\n",
+            "EmbeddingStore",
+        ),
+        (
+            "from app.repositories.sqlite import sharing_store as stores\n"
+            "stores.SharingStore(database, settings, now=now, insert_row=insert)\n",
+            "SharingStore",
+        ),
+    ],
+)
+def test_sqlite_construction_guard_resolves_qualified_and_aliased_calls(
+    source, constructor
+):
+    findings = _sqlite_persistence_construction_sites_from_sources(
+        {"app/escape.py": source}
+    )
+    assert len(findings) == 1
+    assert findings[0].endswith(f":{constructor}")
+
+
+def test_sqlite_construction_guard_allows_wrapper_static_helper_imports():
+    source = (
+        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+        "helper = KnowledgeStore.source_ids_from_evidence\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/services/sqlite_repository.py": source}
+    ) == []
 
 
 def test_create_repository_selects_sqlite_from_only_the_active_url(monkeypatch, tmp_path):
@@ -182,6 +379,32 @@ def test_postgresql_repository_import_is_lazy(monkeypatch, tmp_path):
     assert factory.create_repository(settings) is postgres_sentinel
 
 
+def test_sqlite_wrapper_mineru_constructor_monkeypatches_remain_authoritative(
+    monkeypatch, tmp_path
+):
+    from app.services import sqlite_repository
+
+    created: list[tuple[str, Settings]] = []
+
+    class FakeMinerUClient:
+        def __init__(self, settings):
+            created.append(("local", settings))
+
+    class FakeMinerUCloudClient:
+        def __init__(self, settings):
+            created.append(("cloud", settings))
+
+    monkeypatch.setattr(sqlite_repository, "MinerUClient", FakeMinerUClient)
+    monkeypatch.setattr(sqlite_repository, "MinerUCloudClient", FakeMinerUCloudClient)
+    settings = _settings(tmp_path)
+
+    repo = sqlite_repository.SQLiteRepository(settings)
+
+    assert repo.mineru_client.__class__ is FakeMinerUClient
+    assert repo.mineru_cloud_client.__class__ is FakeMinerUCloudClient
+    assert created == [("local", settings), ("cloud", settings)]
+
+
 def test_create_repository_fails_closed_if_validated_identity_is_impossible(monkeypatch):
     factory = _repository_factory_module()
 
@@ -196,3 +419,51 @@ def test_create_repository_fails_closed_if_validated_identity_is_impossible(monk
         match="validated settings returned an unsupported scheme",
     ):
         factory.create_repository(SimpleNamespace(database_url="ignored"))
+
+
+def test_real_postgresql_selection_fails_explicitly_without_sqlite_fallback(
+    monkeypatch, tmp_path
+):
+    module_name = "app.repositories.postgres.repository"
+    sys.modules.pop(module_name, None)
+    sys.modules.pop("app.repositories.postgres", None)
+    factory = _repository_factory_module()
+    monkeypatch.setattr(
+        factory,
+        "SQLiteRepository",
+        lambda _settings: pytest.fail("PostgreSQL selection fell back to SQLite"),
+    )
+    settings = _settings(
+        tmp_path,
+        database_url="postgresql://secret-user:secret-password@db.example/notebook",
+    )
+
+    with pytest.raises(factory.RepositoryBackendUnavailableError) as captured:
+        factory.create_repository(settings)
+
+    assert str(captured.value) == "PostgreSQL repository backend is not available"
+    assert "secret-user" not in str(captured.value)
+    assert "secret-password" not in str(captured.value)
+
+
+def test_postgresql_selection_does_not_mask_nested_import_failures(monkeypatch, tmp_path):
+    factory = _repository_factory_module()
+    sys.modules.pop("app.repositories.postgres.repository", None)
+    sys.modules.pop("app.repositories.postgres", None)
+    real_import = builtins.__import__
+
+    def import_with_missing_driver(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "app.repositories.postgres.repository":
+            raise ModuleNotFoundError(
+                "missing nested driver", name="missing_pg_driver"
+            )
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_with_missing_driver)
+    settings = _settings(
+        tmp_path,
+        database_url="postgresql://active:secret@db.example/notebook",
+    )
+
+    with pytest.raises(ModuleNotFoundError, match="missing nested driver"):
+        factory.create_repository(settings)

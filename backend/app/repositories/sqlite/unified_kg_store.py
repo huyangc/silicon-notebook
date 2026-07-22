@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
@@ -169,6 +169,31 @@ class UnifiedKgStore:
             "SELECT rowid FROM temp.mention_scan_fts WHERE mention_scan_fts MATCH ?",
             (match_expr,),
         )
+
+    def mention_alias_candidates(
+        self, claims: Sequence[tuple[str, str]], aliases: Sequence[str]
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Return trigram candidates while owning SQLite TEMP-table lifetime."""
+        rowid_map = {index: claim for index, claim in enumerate(claims, 1)}
+        scan_db = self.database.connect()
+        try:
+            self.claim_name_rows(
+                scan_db,
+                [
+                    (index, folded)
+                    for index, (_claim_id, folded) in enumerate(claims, 1)
+                ],
+            )
+            candidates: dict[str, list[tuple[str, str]]] = {}
+            for alias in aliases:
+                match_expr = '"' + alias.replace('"', '""') + '"'
+                candidates[alias] = [
+                    rowid_map[row["rowid"]]
+                    for row in self.mention_scan_matches(scan_db, match_expr)
+                ]
+            return candidates
+        finally:
+            self.database.close_local()
 
     @staticmethod
     def community_graph_rows(db: sqlite3.Connection, notebook_id: str):

@@ -81,6 +81,14 @@ from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
 from app.services import background_jobs
 from app.services.knowhow import textops
+from app.services.knowhow.ids import (
+    _cell_ko_id,
+    _chunk_row_hash,
+    _h,
+    _relation_id,
+    cell_chunk_id,
+    element_id,
+)
 from app.services.source_embedding import EmbeddingProviderFailure, SourceEmbeddingService
 from app.services.vector_index import decode_vector
 
@@ -97,62 +105,6 @@ _COLUMN_PART_STRIDE = 100
 # KnowhowProjector.reproject_legacy_tables at the bottom of this file): the
 # PR-1 fixed-vocabulary object types this cell-level model replaces.
 _LEGACY_OBJECT_TYPES = ("case", "procedure", "tool")
-
-
-def _h(*parts: str) -> str:
-    """Stable content hash — matches the brief's derived-id contract verbatim
-    (``_h=lambda *p: hashlib.sha1("|".join(p).encode()).hexdigest()``) so ids
-    stay reproducible across processes/restarts, the entire point of
-    "deterministic": Task 4/6/10 and later PRs depend on the exact prefixes
-    below (``ko-kh-``/``el-kh-``/``chunk-kh-``/``kr-kh-``)."""
-    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
-
-
-def _cell_ko_id(table_id: str, column_name: str, val_key: str) -> str:
-    """A knowledge object's id (design doc §④): identity = (table, COLUMN
-    NAME, normalized value) — column NAME, not column_id, so renaming a
-    column re-keys its cells' KOs onto a fresh identity (correct: per the
-    model, a column's name IS its object_type, so renaming it is a type
-    change, not a cosmetic edit). Two rows with the same column + the same
-    ``value_key`` collide onto this SAME id — that collision is the entire
-    "同列同值跨行归并" merge mechanism, not a bug to guard against."""
-    return f"ko-kh-{_h(table_id, column_name, val_key)[:32]}"
-
-
-def element_id(row_id: str, column_id: str) -> str:
-    """A knowhow cell's ``source_elements`` id. Exported (no leading
-    underscore — PR-2+3 Task 13, pure rename/no behavior change) so
-    ``notebook_sharing.NotebookCopyService`` can recompute the SAME id for a
-    remapped ``(row_id, column_id)`` pair during a deep copy instead of
-    duplicating this one-line formula: the copy's freshly-inserted element
-    row then lands on EXACTLY the id ``_write_elements`` will independently
-    recompute the first time it reprojects the copied table."""
-    return f"el-kh-{_h(row_id, column_id)[:32]}"
-
-
-def _chunk_row_hash(row_id: str) -> str:
-    return _h(row_id)[:16]
-
-
-def cell_chunk_id(row_id: str, part: int) -> str:
-    """Public counterpart to ``_write_chunks``'s own inline chunk-id formula
-    (``f"chunk-kh-{row_hash}-{part}"``) — exported (PR-2+3 Task 13) so a deep
-    copy can recompute a knowhow chunk's id for a REMAPPED ``row_id`` without
-    duplicating the row-hash/part-number scheme. ``part``
-    (``col_pos * _COLUMN_PART_STRIDE + split_idx``) is already encoded in the
-    OLD chunk id's own trailing segment; a copy that preserves column
-    ``position`` values (it always does — columns are never reordered by a
-    copy) reads that integer straight off the old id and passes it through
-    unchanged, so only the row-hash segment (a pure function of ``row_id``)
-    ever needs recomputing. Landing on the exact id ``_write_chunks`` will
-    independently recompute for the same (row, column-position) is what lets
-    the post-copy ``project_table`` pass see ``old_specs == new_specs`` and
-    skip straight past the embedder for every untouched cell."""
-    return f"chunk-kh-{_chunk_row_hash(row_id)}-{part}"
-
-
-def _relation_id(source_object_id: str, edge_type: str, target_object_id: str) -> str:
-    return f"kr-kh-{_h(source_object_id, edge_type, target_object_id)[:32]}"
 
 
 def _resolve_row_title(anchor_column, columns, cell_nets, position: int) -> str:

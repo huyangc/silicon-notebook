@@ -440,7 +440,7 @@ SURFACE_MEMBERS = (
     ),
     SurfaceMember(
         name='_migrator',
-        owner='QueryStore',
+        owner='SqliteDatabase',
         kind='instance_attribute',
         consumers=(
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__', kind='attribute', target='_migrator'),
@@ -588,7 +588,7 @@ SURFACE_MEMBERS = (
     ),
     SurfaceMember(
         name='_runtime',
-        owner='QueryStore',
+        owner='RepositoryRuntime',
         kind='instance_attribute',
         consumers=(
             ConsumerSite(path='backend/app/api/deps.py', scope='<module>.admin_query_repository', kind='attribute', target='_runtime'),
@@ -805,7 +805,6 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.bump_knowhow_mutation_seq', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.cancel_ask_job', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.cancel_scale_index', kind='attribute', target='_runtime'),
-            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.close_local', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.concept_detail', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.concept_whitelist_add', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.concept_whitelist_list', kind='attribute', target='_runtime'),
@@ -1007,6 +1006,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.__init__', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository._connect', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository._write_lock', kind='attribute', target='_runtime'),
+            ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.close_local', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.db_path', kind='attribute', target='_runtime'),
             ConsumerSite(path='backend/app/services/sqlite_repository.py', scope='<module>.SQLiteRepository.maintenance', kind='attribute', target='_runtime'),
         ),
@@ -1271,16 +1271,6 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/kg_routes.py', scope='<module>.cancel_scale_index', kind='attribute', target='cancel_scale_index'),
-        ),
-        patches=(
-        ),
-    ),
-    SurfaceMember(
-        name='close_local',
-        owner='SqliteDatabase',
-        kind='method',
-        consumers=(
-            ConsumerSite(path='backend/app/services/repository_facade.py', scope='<module>.RepositoryFacade.__init__.<lambda>', kind='attribute', target='close_local'),
         ),
         patches=(
         ),
@@ -2057,7 +2047,7 @@ SURFACE_MEMBERS = (
     ),
     SurfaceMember(
         name='maintenance',
-        owner='QueryStore',
+        owner='SQLiteMaintenanceAdapter',
         kind='property',
         consumers=(
             ConsumerSite(path='backend/app/scripts/backfill_relation_embeddings.py', scope='<module>.main', kind='attribute', target='maintenance'),

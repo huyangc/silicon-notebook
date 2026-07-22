@@ -1190,7 +1190,7 @@
       }
     ],
     "kind": "instance_attribute",
-    "owner": "QueryStore",
+    "owner": "SqliteDatabase",
     "patch_targets": [],
     "scope": "facade",
     "signature": "<instance attribute>"
@@ -2742,12 +2742,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.close_local",
-        "target": "_runtime"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
         "scope": "<module>.RepositoryFacade.concept_detail",
         "target": "_runtime"
       },
@@ -3954,6 +3948,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/sqlite_repository.py",
+        "scope": "<module>.SQLiteRepository.close_local",
+        "target": "_runtime"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/sqlite_repository.py",
         "scope": "<module>.SQLiteRepository.db_path",
         "target": "_runtime"
       },
@@ -3965,7 +3965,7 @@
       }
     ],
     "kind": "instance_attribute",
-    "owner": "QueryStore",
+    "owner": "RepositoryRuntime",
     "patch_targets": [],
     "scope": "facade",
     "signature": "<instance attribute>"
@@ -4531,21 +4531,6 @@
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self, notebook_id: 'str') -> 'dict'"
-  },
-  "close_local": {
-    "consumers": [
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/repository_facade.py",
-        "scope": "<module>.RepositoryFacade.__init__.<lambda>",
-        "target": "close_local"
-      }
-    ],
-    "kind": "method",
-    "owner": "SqliteDatabase",
-    "patch_targets": [],
-    "scope": "facade",
-    "signature": "(self) -> 'None'"
   },
   "cluster_map": {
     "consumers": [
@@ -6562,7 +6547,7 @@
       }
     ],
     "kind": "property",
-    "owner": "QueryStore",
+    "owner": "SQLiteMaintenanceAdapter",
     "patch_targets": [],
     "scope": "facade",
     "signature": "(self)"

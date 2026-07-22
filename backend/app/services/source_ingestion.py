@@ -23,10 +23,14 @@ from app.models.sources import (
     SourceImportRequest,
     SourceSummary,
 )
-from app.repositories.ports import SourceScheduler, UploadedSourceFile
+from app.repositories.ports import (
+    NotebookStorePort,
+    SourceElementWrite,
+    SourceScheduler,
+    SourceStorePort,
+    UploadedSourceFile,
+)
 from app.repositories.source_files import SourceFileStore, safe_filename
-from app.repositories.sqlite.notebook_store import NotebookStore
-from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
 from app.services import kg_ingest, remote_sources
 from app.services.extraction_profiles import PROFILES, get_profile
 from app.services.kg.client import safe_json
@@ -94,8 +98,8 @@ class SourceIngestionService:
         self,
         *,
         settings: Settings,
-        notebooks: NotebookStore,
-        sources: SourceStore,
+        notebooks: NotebookStorePort,
+        sources: SourceStorePort,
         source_files: SourceFileStore,
         chunking: SourceChunkingService,
         embedding: SourceEmbeddingService,

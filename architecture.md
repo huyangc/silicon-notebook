@@ -27,12 +27,12 @@
 
 - `backend/app/main.py` 创建 FastAPI 应用，挂载认证、请求上下文、CORS、日志中间件和 `/api` 路由。
 - `frontend/` 是唯一前端；Next.js/React/TypeScript 负责 notebook collection 与 notebook workspace。
-- SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。生产 repository 尚未切换到 PostgreSQL；非 `sqlite:///` 的 `DATABASE_URL` 会被拒绝，不能静默回落到本地库。
+- SQLite 默认位于 `.local/silicon_notebook.db`，原始来源文件默认位于 `.local/storage`。DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。SQLite 是当前可用的默认后端。PostgreSQL 选择在 adapter 完成前会以“后端不可用”显式失败；绝不回落到 SQLite。SHADOW_DATABASE_URL 仍不生效。
 - SQLite 使用标准库 `sqlite3`、WAL 与 `busy_timeout`。模型向量以 float32 BLOB 持久化（历史 JSON 文本向量保持可读、可批量转换），并在查询时装配为有界的 float32 numpy 矩阵或显式维护的 scale index。
 
 ### 2.2 Repository 组合与兼容 facade
 
-`backend/app/services/sqlite_repository.py` 中的 `SQLiteRepository` 是现有消费者使用的兼容 facade：它构造并持有内部组合根 `RepositoryRuntime`（`backend/app/services/repository_runtime.py`），公共方法只保留显式兼容 adapter 或单跳委托，不再通过 mixin 继承复用实现。AST guard 会验证每个委托的真实目标与 ownership manifest 一致；facade body 与 ownership debt 均为 0。依赖方向单向：facade → runtime → application services → stores → `SqliteDatabase`；被抽出的 service/store 不得反向 import facade。
+`backend/app/services/repository_facade.py` 中的 `RepositoryFacade` 是注入 `RepositoryRuntime` bundle 之上的后端中立 facade。`backend/app/services/sqlite_repository.py` 中的 `SQLiteRepository` 是现有消费者使用的窄兼容包装器，只拥有 SQLite migration、maintenance 与历史兼容 adapter；唯一 repository factory 负责选择正式后端并构造组合根。公共方法只保留显式兼容 adapter 或单跳委托，不再通过 mixin 继承复用实现。AST guard 会验证每个委托的真实目标与 ownership manifest 一致，并限制包装器成员、SQLite import 与 SQL 执行；facade body 与 ownership debt 均为 0。依赖方向单向：factory/wrapper → facade → runtime → application services → stores；被抽出的 service/store 不得反向 import facade 或具体后端。
 
 - **SQLite 持久化**：`backend/app/repositories/sqlite/` 下是 identity / notebook / sharing / source / chunk / embedding / knowledge / governance / unified-KG / ask-state / report / memory / query / index-projection 等领域 store。这些 store 独占 product SQL 与 raw row selection；既定 application/query component 可组装 domain/application projection，例如 `NotebookSummaryQuery.from_row`。它们共享唯一的 `SqliteDatabase`（connection factory、WAL/busy_timeout PRAGMA、实例级写锁）。application service 不拼装主业务库 SQL，只保留业务顺序、策略与 transaction seat。`SqliteMigrator` 持有 `SCHEMA_VERSION` 与版本化迁移注册表；启动顺序固定为 migrate → 恢复中断的 merge-review/Ask job → seed 与 admin 原地升级，后两步不进版本闸、每次启动照跑。
 - **文件系统工件**：`backend/app/repositories/source_files.py`（原始上传文件）与 `backend/app/repositories/filesystem/`（scale/viz 索引工件）。

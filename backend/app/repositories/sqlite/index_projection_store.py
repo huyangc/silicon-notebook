@@ -62,6 +62,21 @@ class IndexProjectionStore:
         self.mention_extra_edges = mention_extra_edges
         self.vector_matrix = vector_matrix
 
+    def bind_runtime_callbacks(
+        self,
+        *,
+        connect: Callable,
+        in_batches: Callable,
+        ent_chunk_map: Callable,
+        mention_extra_edges: Callable,
+        vector_matrix: Callable,
+    ) -> None:
+        self.connect = connect
+        self.in_batches = in_batches
+        self.ent_chunk_map = ent_chunk_map
+        self.mention_extra_edges = mention_extra_edges
+        self.vector_matrix = vector_matrix
+
     # ────────────────────────────────────────────────── version snapshots ──
     def version_signal(self, notebook_id: str) -> "tuple[int, int, tuple]":
         """Cheap probe: (seq, cseq, settings_tail) — a single unified_kg_state

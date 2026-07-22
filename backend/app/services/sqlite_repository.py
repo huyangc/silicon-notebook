@@ -25,6 +25,8 @@ from app.services.knowledge_contracts import (
     USABLE_STATUSES,
 )
 from app.services.knowledge_lifecycle import _concept_desc_sig, _fast_loads
+from app.services.mineru_client import MinerUClient
+from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services.parsers import parse_source_file
 from app.services.repository import UploadedSourceFile
 from app.services.repository_facade import (
@@ -65,6 +67,10 @@ class SQLiteRepository(RepositoryFacade):
 
     def _connect(self) -> sqlite3.Connection:
         return self._runtime.database.connect()
+
+    def close_local(self) -> None:
+        """关闭并清除当前线程的复用 SQLite 连接。"""
+        self._runtime.database.close_local()
 
     def _clear_source_extraction_state(
         self,

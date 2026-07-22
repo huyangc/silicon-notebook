@@ -40,10 +40,9 @@ Red lines:
 """
 from __future__ import annotations
 
-import sqlite3
-from typing import Callable, ContextManager, List, MutableMapping, Set
+from typing import Any, Callable, ContextManager, List, MutableMapping, Set
 
-from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+from app.repositories.ports import UnifiedKgStorePort
 from app.services.retrieval_snapshot_cache import RetrievalSnapshotCache
 from app.services.vector_cache import VectorCache
 
@@ -51,12 +50,12 @@ from app.services.vector_cache import VectorCache
 class KgMutationCoordinator:
     def __init__(
         self,
-        unified_store: UnifiedKgStore,
+        unified_store: UnifiedKgStorePort,
         snapshots: RetrievalSnapshotCache,
         auto_index_checked: Set[str],
         notebook_languages: MutableMapping[str, List[str]],
         *,
-        write: Callable[[], ContextManager[sqlite3.Connection]],
+        write: Callable[[], ContextManager[Any]],
         now: Callable[[], str],
     ) -> None:
         self.unified_store = unified_store

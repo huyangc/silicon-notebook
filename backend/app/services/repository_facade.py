@@ -363,8 +363,12 @@ class RepositoryFacade:
         from app.services.embedding import make_embedder
         self.embedder = make_embedder(self.settings)
         self._runtime.wire_memory(embedder=self.embedder)
-        self.mineru_client = MinerUClient(settings)
-        self.mineru_cloud_client = MinerUCloudClient(settings)
+        self.mineru_client = _compatibility_value(
+            compatibility_module, "MinerUClient", MinerUClient
+        )(settings)
+        self.mineru_cloud_client = _compatibility_value(
+            compatibility_module, "MinerUCloudClient", MinerUCloudClient
+        )(settings)
         self.event_log = self._runtime.event_log
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         # Task 17: the unified-graph dict and the version-keyed VectorCache
@@ -548,7 +552,6 @@ class RepositoryFacade:
         # (Task 17); the viz-building set is passed BY IDENTITY (no copies).
         self._runtime.wire_knowledge_lifecycle(
             connect=lambda: self._connect(),
-            close_local=lambda: self.close_local(),
             write=lambda: self._write(),
             get_notebook=lambda notebook_id: self.get_notebook(notebook_id), current_user_id=lambda: self.current_user().id,
             invalidate_unified_cache=lambda notebook_id: (
@@ -987,11 +990,6 @@ class RepositoryFacade:
 
     def _connect(self) -> object:
         return self._runtime.database.connect()
-
-    def close_local(self) -> None:
-        """关闭并清除当前线程的复用 DB 连接(短命线程/大扫描/临时表清理)。
-        委托 runtime-owned SqliteDatabase。见 [[sqlite 连接复用]] INV-6/7。"""
-        self._runtime.database.close_local()
 
     @contextmanager
     def _write(self):

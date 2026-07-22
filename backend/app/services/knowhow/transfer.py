@@ -17,7 +17,7 @@ from typing import Any
 
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
 from app.services.knowhow.api import build_projector, get_scheduler
-from app.services.knowhow.projection import cell_chunk_id, element_id
+from app.services.knowhow.ids import cell_chunk_id, element_id
 from app.services.notebook_sharing import _ASSET_REF_RE, _rewrite_asset_refs
 
 _log = logging.getLogger("silicon_notebook.knowhow.transfer")

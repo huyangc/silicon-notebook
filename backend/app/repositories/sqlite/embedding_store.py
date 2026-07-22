@@ -27,6 +27,9 @@ class EmbeddingStore:
     ) -> None:
         self.write = write
 
+    def bind_write(self, write: Callable) -> None:
+        self.write = write
+
     def replace_element_vectors(
         self,
         source_id: str,

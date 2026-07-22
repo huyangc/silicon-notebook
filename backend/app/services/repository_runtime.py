@@ -238,6 +238,7 @@ class RepositoryRuntime:
         # provider (late-bound per-user llm_client property), so it composes
         # after `models`.
         self.schema_registry = SchemaRegistryService(
+            self.database,
             self.notebook_store,
             self.knowledge,
             self.source_store,
@@ -439,7 +440,7 @@ class RepositoryRuntime:
         seam (itself delegating to the shared database write lock), resolved
         at call time so per-instance monkeypatches — transaction counting,
         failure injection — keep observing every vector flush."""
-        self.embedding_store.write = write  # type: ignore[attr-defined]
+        self.embedding_store.bind_write(write)
         return self.embedding_store
 
     def wire_source_pipeline(
@@ -656,11 +657,13 @@ class RepositoryRuntime:
         ``load_locks`` initially resolve the exact LRU + single-flight state
         objects that ``wire_scale_runtime`` transfers by identity.  The final
         runtime then retargets the catalog to its canonical state."""
-        self.index_projections.connect = connect  # type: ignore[attr-defined]
-        self.index_projections.in_batches = in_batches  # type: ignore[attr-defined]
-        self.index_projections.ent_chunk_map = ent_chunk_map  # type: ignore[attr-defined]
-        self.index_projections.mention_extra_edges = mention_extra_edges  # type: ignore[attr-defined]
-        self.index_projections.vector_matrix = vector_matrix  # type: ignore[attr-defined]
+        self.index_projections.bind_runtime_callbacks(
+            connect=connect,
+            in_batches=in_batches,
+            ent_chunk_map=ent_chunk_map,
+            mention_extra_edges=mention_extra_edges,
+            vector_matrix=vector_matrix,
+        )
         self.scale_catalog = ScaleArtifactCatalog(
             artifacts=self.scale_artifact_store,
             settings=self.settings,
@@ -810,7 +813,6 @@ class RepositoryRuntime:
         self,
         *,
         connect: Callable[[], Any],
-        close_local: Callable[[], None],
         write: Callable[[], Any],
         get_notebook: Callable[[str], Any], current_user_id: Callable[[], str],
         invalidate_unified_cache: Callable[[str], None],
@@ -903,7 +905,6 @@ class RepositoryRuntime:
             new_id=self.seams.new_id,
             now=self.seams.now,
             connect=connect,
-            close_local=close_local,
             write=write,
             get_notebook=get_notebook, current_user_id=current_user_id,
             invalidate_unified_cache=invalidate_unified_cache,
@@ -942,7 +943,7 @@ class RepositoryRuntime:
         ``knowhow_api.get_scheduler(repo).schedule`` — late-bound the same way
         as the other three seams, so it always resolves against the fully
         constructed facade even though wire_sharing runs mid-``__init__``."""
-        self.sharing_store.insert_row = insert_row  # type: ignore[attr-defined]
+        self.sharing_store.bind_insert_row(insert_row)
         self.notebook_copies = NotebookCopyService(
             store=self.sharing_store,
             catalog=self.catalog,

@@ -9,10 +9,9 @@ from pathlib import Path
 from typing import Callable, TYPE_CHECKING
 
 from app.models.notebooks import NotebookSummary
-from app.repositories.sqlite.database import SqliteDatabase
-from app.repositories.sqlite.sharing_store import SharingStore
+from app.repositories.ports import RepositoryDatabasePort, SharingStorePort
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS
-from app.services.knowhow.projection import cell_chunk_id, element_id
+from app.services.knowhow.ids import cell_chunk_id, element_id
 from app.services.notebook_catalog import NotebookCatalogService, NotebookSummaryQuery
 
 if TYPE_CHECKING:  # runtime import would be circular (runtime constructs us)
@@ -67,7 +66,7 @@ class NotebookCopyService:
     def __init__(
         self,
         *,
-        store: SharingStore,
+        store: SharingStorePort,
         catalog: NotebookCatalogService,
         seams: "RepositoryCompatibilitySeams",
         storage_dir: Callable[[], Path],
@@ -548,11 +547,11 @@ class NotebookSharingService:
     def __init__(
         self,
         *,
-        store: SharingStore,
+        store: SharingStorePort,
         copies: NotebookCopyService,
         catalog: NotebookCatalogService,
         summaries: NotebookSummaryQuery,
-        database: SqliteDatabase,
+        database: RepositoryDatabasePort,
         copy_stats: Callable[[str], dict],
     ) -> None:
         self._store = store

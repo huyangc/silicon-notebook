@@ -182,7 +182,9 @@ def test_mention_temp_fts_delegates_on_one_private_connection(repo, monkeypatch)
     store = runtime.unified_kg
     events = []
     write_ids = set()
+    close_calls = 0
     original_write = runtime.database.write
+    original_close_local = runtime.database.close_local
 
     @contextmanager
     def traced_write():
@@ -191,6 +193,13 @@ def test_mention_temp_fts_delegates_on_one_private_connection(repo, monkeypatch)
             yield db
 
     monkeypatch.setattr(runtime.database, "write", traced_write)
+
+    def traced_close_local():
+        nonlocal close_calls
+        close_calls += 1
+        return original_close_local()
+
+    monkeypatch.setattr(runtime.database, "close_local", traced_close_local)
 
     def spy(name, *, cursor=False):
         original = getattr(store, name)
@@ -206,21 +215,23 @@ def test_mention_temp_fts_delegates_on_one_private_connection(repo, monkeypatch)
         monkeypatch.setattr(store, name, wrapped)
 
     spy("mention_seed_rows")
-    spy("claim_name_rows")
-    spy("mention_scan_matches", cursor=True)
     spy("replace_mention_bridge")
+    original_candidates = store.mention_alias_candidates
+
+    def traced_candidates(claims, aliases):
+        result = original_candidates(claims, aliases)
+        events.append(("mention_alias_candidates", None, (claims, aliases)))
+        return result
+
+    monkeypatch.setattr(store, "mention_alias_candidates", traced_candidates)
 
     count = getattr(repo, "rebuild_mention_bridge")(nb.id, force=True)
 
     assert count >= 5
     names = [name for name, _db, _args in events]
     assert names[0] == "mention_seed_rows"
-    assert "claim_name_rows" in names and "mention_scan_matches" in names
-    temp_ids = {
-        db_id for name, db_id, _args in events
-        if name in {"claim_name_rows", "mention_scan_matches"}
-    }
-    assert len(temp_ids) == 1
+    assert names.count("mention_alias_candidates") == 1
+    assert close_calls == 1
     replace = next(event for event in events if event[0] == "replace_mention_bridge")
     assert replace[1] in write_ids
 

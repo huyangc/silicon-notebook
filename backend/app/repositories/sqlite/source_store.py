@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
@@ -15,7 +14,7 @@ from app.models.sources import (
     SourceElement,
     SourceSummary,
 )
-from app.repositories.ports import SOURCE_PAPER_META_UNSET
+from app.repositories.ports import SOURCE_PAPER_META_UNSET, SourceElementWrite
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -32,15 +31,6 @@ def _created_label(value: str) -> str:
     except ValueError:
         dt = datetime.now()
     return f"{dt.year}年{dt.month}月{dt.day}日"
-
-
-@dataclass(frozen=True)
-class SourceElementWrite:
-    id: str
-    element_type: str
-    location_label: str
-    text: str
-    metadata: Mapping[str, Any]
 
 
 class SourceStore:

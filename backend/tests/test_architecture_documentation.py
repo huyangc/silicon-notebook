@@ -52,30 +52,41 @@ def _assert_phrases(expected: dict[str, str]) -> None:
         assert phrase in _read(name), f"{name} is missing contract phrase: {phrase}"
 
 
-def test_postgresql_configuration_documentation_keeps_sqlite_as_the_current_runtime():
+def test_repository_backend_selection_documentation_matches_the_interim_runtime():
     _assert_phrases(
         {
-            "README.md": "SQLite remains the shipped default and formal runtime for now.",
-            "README_zh.md": "SQLite 仍是当前随附的默认正式运行时。",
-            "AGENTS.md": "SQLite remains the shipped default and formal runtime for now.",
+            "README.md": "DATABASE_URL selects the formal repository backend through one repository factory.",
+            "README_zh.md": "DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。",
+            "AGENTS.md": "DATABASE_URL selects the formal repository backend through one repository factory.",
+            "architecture.md": "DATABASE_URL 通过唯一的 repository factory 选择正式 repository 后端。",
         }
     )
     _assert_phrases(
         {
-            "README.md": "does not perform a migration or switch the repository",
-            "README_zh.md": "不会执行迁移或切换 repository",
-            "AGENTS.md": "does not perform a migration or switch the repository",
+            "README.md": "SQLite is the available and default backend.",
+            "README_zh.md": "SQLite 是当前可用的默认后端。",
+            "AGENTS.md": "SQLite is the available and default backend.",
+            "architecture.md": "SQLite 是当前可用的默认后端。",
         }
     )
     _assert_phrases(
         {
-            "README.md": "redact credentials and options",
-            "README_zh.md": "会隐藏凭据和连接选项",
-            "AGENTS.md": "redact credentials and options",
+            "README.md": "PostgreSQL selection currently fails closed as unavailable until the adapter is implemented; it never falls back to SQLite.",
+            "README_zh.md": "PostgreSQL 选择在 adapter 完成前会以“后端不可用”显式失败；绝不回落到 SQLite。",
+            "AGENTS.md": "PostgreSQL selection currently fails closed as unavailable until the adapter is implemented; it never falls back to SQLite.",
+            "architecture.md": "PostgreSQL 选择在 adapter 完成前会以“后端不可用”显式失败；绝不回落到 SQLite。",
         }
     )
-    for name in ("README.md", "README_zh.md", "AGENTS.md"):
+    for name in ("README.md", "README_zh.md", "AGENTS.md", "architecture.md"):
         assert "SHADOW_DATABASE_URL" in _read(name)
+    for name in ("README.md", "AGENTS.md"):
+        text = _read(name)
+        assert "SHADOW_DATABASE_URL remains inert" in text
+        assert "does not perform a migration or switch the repository" not in text
+    for name in ("README_zh.md", "architecture.md"):
+        text = _read(name)
+        assert "SHADOW_DATABASE_URL 仍不生效" in text
+        assert "不会执行迁移或切换 repository" not in text
 
 
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():
@@ -475,26 +486,23 @@ def test_architecture_document_keeps_other_current_runtime_boundaries():
 
 
 def test_repository_documentation_matches_composed_runtime_and_v9_compatibility():
-    """Task 28: docs describe the composed repository (runtime + stores +
-    consumer ports), the one-way dependency direction, the PostgreSQL
-    extension boundary, v9 compatibility and the backup-only verifier —
-    and stop presenting the retired mixin-inheritance stage as current."""
+    """Docs describe the neutral facade, narrow SQLite wrapper and guards."""
     _assert_phrases(
         {
             "README.md":
-                "`SQLiteRepository` is the compatibility facade over a composed `RepositoryRuntime`",
-            "README_zh.md": "`SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade",
-            "AGENTS.md": "`SQLiteRepository` is the compatibility facade over `RepositoryRuntime`",
+                "`RepositoryFacade` is backend-neutral over an injected `RepositoryRuntime` bundle",
+            "README_zh.md": "`RepositoryFacade` 是注入 `RepositoryRuntime` bundle 之上的后端中立 facade",
+            "AGENTS.md": "`RepositoryFacade` is backend-neutral over an injected `RepositoryRuntime` bundle",
             "architecture.md": "不再通过 mixin 继承复用实现",
             "fangan_done.md": "组合式 `RepositoryRuntime` 之上的兼容 facade",
         }
     )
     _assert_phrases(
         {
-            "README.md": "a future PostgreSQL adapter replaces the store layer behind the same ports",
-            "README_zh.md": "未来 PostgreSQL adapter 只需在同一 ports 后替换 store 层",
-            "AGENTS.md": "a future PostgreSQL repository swaps the store layer behind the same ports",
-            "architecture.md": "facade → runtime → application services → stores → `SqliteDatabase`",
+            "README.md": "factory/wrapper → facade → runtime → services → stores",
+            "README_zh.md": "factory/wrapper → facade → runtime → services → stores",
+            "AGENTS.md": "factory/wrapper → facade → runtime → services → stores",
+            "architecture.md": "factory/wrapper → facade → runtime → application services → stores",
         }
     )
     for name in LIVE_REFERENCE_DOCS + ("fangan_done.md",):

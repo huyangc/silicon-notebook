@@ -12,7 +12,7 @@ from app.core.model_safety import (
     safe_model_error_stage,
     safe_model_label,
 )
-from app.repositories.sqlite.identity_store import IdentityStore
+from app.repositories.ports import IdentityStorePort
 from app.services.model_concurrency import (
     LimitedJsonChatClient,
     current_model_concurrency,
@@ -47,7 +47,7 @@ class RuntimeModelProvider:
 
     def __init__(
         self,
-        identity: IdentityStore,
+        identity: IdentityStorePort,
         settings: Settings,
         event_log: Any,
         ask_context: Any,
