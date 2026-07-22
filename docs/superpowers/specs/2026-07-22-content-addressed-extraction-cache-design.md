@@ -45,11 +45,23 @@ gleaning 轮数**。文档越大差距越大。
 - `LLMCache`（SQLite）已存在但**只挂在 `OpenAICompatibleClient` 上**，且**默认关闭**
   （`LLM_CACHE_ENABLED=false`），**无任何淘汰机制**。
 
-### 关键发现：占 93% 的路径根本没接缓存
+### 关键发现：占 93% 的路径已在带缓存钩子的客户端上
 
-KG 抽取走的是 `KGClient`（`backend/app/services/kg/client.py`），而 `llm_cache` 的挂载点
-`_get_cache()` 只在 `OpenAICompatibleClient`（`backend/app/core/llm.py`）里。打开
-`LLM_CACHE_ENABLED` 对 KG 抽取**毫无作用**。
+> 本节曾错误断言"KG 抽取走 `KGClient`、未接缓存"。追调用链后更正如下。
+
+产品路径的 KG 抽取客户端来自 `ModelProvider.kg_llm_client` →
+`_llm_for_role("kg_llm")`，其构造的是 **`OpenAICompatibleClient`**
+（`backend/app/services/model_provider.py`），即已挂载 `_get_cache()` 的那个客户端。
+`backend/app/services/kg/client.py` 中的 `KGClient` / `make_client()` 在 backend 与
+scripts 中**没有任何调用方**（产品代码只 import 了它的纯函数 `safe_json`）——它服务于
+外部 gold generator。
+
+`extract_window` / gleaning / refine 均以 `client.chat_json(messages, _KG_SCHEMA_HINT,
+**cap_kwargs(...))` 调用，**不传 `bypass_cache`**。因此 KG 抽取天然经过缓存层，
+`LLM_CACHE_ENABLED` 一开即生效，**无需任何装饰器**。
+
+`bypass_cache=True` 目前仅用于 `kg/run_control.py` 探活与 `model_status.py` 健康
+检查——这是正确的：健康探针必须绕过缓存，否则模型故障时缓存命中会造成假绿。
 
 ### 关键发现：抽取 prompt 是内容的纯函数
 
@@ -116,16 +128,16 @@ diskcache          写 2263/s   读  5179/s   留存 40/150   852KB/1000KB
 ## 架构
 
 ```
-kg_llm()        → CachedKGClient(inner, backend)     # 覆盖 初抽 / gleaning / refine
-make_embedder() → CachedEmbedder(inner, backend)     # 覆盖全部 6 个 embed_texts 调用点
+OpenAICompatibleClient.chat_json   # 已有缓存钩子 → KG 抽取/ask 天然覆盖，零改动
+make_embedder() → CachedEmbedder(inner, backend)   # 新增，覆盖全部 6 个 embed_texts 调用点
                           ↓
                   CacheBackend (Protocol，仅 get/put)
                           ↓
                   SqliteCacheBackend (~160 行)
 ```
 
-装饰器模式，`extract_graph` / `extract_window` / refine / gleaning / 6 个 embed
-调用点**全部零改动**。
+LLM 侧无需任何装饰器——`extract_graph` / `extract_window` / refine / gleaning 均已
+走在带缓存的客户端上。embed 侧用装饰器，6 个 `embed_texts` 调用点**零改动**。
 
 `OpenAICompatibleClient._get_cache()` 内联的开关判断与路径解析一并**删除**，改为向
 `make_cache_backend(settings)` 索取（ask 路径同样受益，全系统只有一套缓存机制、
@@ -178,12 +190,19 @@ embed 缓存**存储 API 原始维度的输出**。4096→1024 的运行时维�
 
 ### 注入点
 
-- KG：`self.kg_llm()`（`backend/app/services/source_ingestion.py`），per-user KG 模型
-  配置在此解析。装饰器**必须透传 `control` 属性**——`run_extraction` 靠
-  `getattr(kg_client, "control", None)` 做取消与并发控制，吞掉它会破坏取消语义。
-- embed：`make_embedder()` 工厂（`backend/app/services/embedding.py`）。注意与
-  `bind_model_status_identity` 的包装次序，不得破坏 model_status 身份绑定与
+- **LLM 侧：无需注入。** `OpenAICompatibleClient._get_cache()` 已是挂载点，改造它
+  的构造来源即可（见上文"唯一构造点"）。
+- **embed 侧：`make_embedder()` 工厂**（`backend/app/services/embedding.py`）。包装
+  须置于 `bind_model_status_identity` 之内层，不得破坏 model_status 身份绑定与
   model_error 上报通道。
+
+### 健康探针必须绕过缓存
+
+`model_status.py` 用 `make_embedder(...)` 构造探针做健康检查。若工厂无条件包缓存，
+**模型服务故障时探针会命中缓存而显示假绿**。必须对称于 LLM 侧既有的
+`bypass_cache=True` 机制：`make_embedder` 增加 `cache: bool = True` 形参，
+`model_status.py` 与 `kg/run_control.py` 同类探活路径显式传 `cache=False`。
+此项须有专门测试。
 
 ## 缓存模块的内聚与可替换性
 
@@ -195,8 +214,8 @@ embed 缓存**存储 API 原始维度的输出**。4096→1024 的运行时维�
 `services/model_provider.py`、`services/sqlite_repository.py`）。最严重的是
 `OpenAICompatibleClient._get_cache()` 内联了**开关名、配置项名、相对路径的仓库根锚定
 规则、具体实现类名**——这些都是缓存的内部事务，却由客户端持有。本设计新增两个消费者
-（`CachedKGClient`、`CachedEmbedder`），若照此模式就会出现三份重复构造逻辑，换组件
-需改三处。
+（`CachedEmbedder` 与运维查询接口），若照此模式就会出现多份重复构造逻辑，换组件需
+逐处修改。
 
 ### 模块结构
 
@@ -245,12 +264,17 @@ app/core/cache/
 
 ## 三个安全阀
 
-### 1. 绝不缓存空响应（最高优先级）
+### 1. 绝不缓存空响应（已实现，重构中必须保持）
 
-`KGClient.chat_json` 在输出预算烧光时返回 `"{}"`（`kg/client.py`，即
+输出预算烧光时 `chat_json` 会落到 `"{}"` 回退（即
 `reasoning-empty-content-degeneration` 记录的那个退化）。**缓存 `"{}"` 等于把一次
-偶发退化永久固化。** 拒绝写入：空串、`"{}"`、`safe_json()` 解析后为空 dict、以及
-任何异常路径。
+偶发退化永久固化。**
+
+现有代码**已经做对了**：`backend/app/core/llm.py` 写入处的条件是
+`if cache and ckey and content != "{}"`。本次重构不得削弱该条件——须补一条守卫
+测试锁定它，并做变异验证（去掉 `content != "{}"` 后测试必须转红）。
+
+embed 侧对称要求：空向量列表、长度与输入不符的响应，一律不写入缓存。
 
 ### 2. 测试隔离
 
@@ -259,7 +283,9 @@ conftest 必须强制 `NoCacheBackend`（或临时目录），且该隔离本身
 
 ### 3. 装饰器属性透传
 
-见上文注入点。`control` 之外的属性一并透传（`__getattr__` 兜底）。
+`CachedEmbedder` 须以 `__getattr__` 兜底透传被包装对象的全部属性（`dim`、
+`embed_query`、model_status 身份等）。LLM 侧的 `LimitedJsonChatClient` 已是此形态
+（`__getattr__` + `chat_json(*args, **kwargs)`），可作参照。
 
 ## 生命周期
 
@@ -308,8 +334,10 @@ TTL 只为两件事存在：
 ## 测试
 
 - **key 稳定性**：同内容、不同 source_id / 文件名 → 同 key；不同 doc_type / tier → 不同 key。
-- **空响应不入缓存**：`""` / `"{}"` / 异常路径，逐一验证；需**变异验证**（改回违规
-  形态确认守卫真的转红）。
+- **空响应不入缓存**：LLM 侧锁定 `llm.py` 既有的 `content != "{}"` 条件（变异验证：
+  删掉该条件后测试必须转红）；embed 侧覆盖空向量列表与长度不符两种情形。
+- **健康探针不吃缓存**：`make_embedder(..., cache=False)` 返回的对象不得命中缓存；
+  变异验证——把 `cache=False` 改回 `True` 后测试必须转红。
 - **embed 批量部分命中**：N 条命中 K 条时，只对 miss 的 N−K 条调用后端，且返回
   **顺序与长度严格对齐**。错配是静默灾难（向量张冠李戴，检索层看不出来），必须
   用「命中项与未命中项交错」的用例覆盖。重组时 miss 子集仍须遵守 dashscope 的
