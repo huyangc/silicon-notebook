@@ -43,6 +43,15 @@ MODEL_EXEMPT_SUBAGENT_TYPES = {"fork"}
 # 角色定义会被误拦。本门要判的是「有没有做出选择」，不是「模型 id 合不合法」。
 NON_CHOICE_MODEL_VALUES = {"", "inherit", "null", "none", "~"}
 
+# 本解析器只认单行标量。块标量（`|` `>`）、锚与别名（`&` `*`）、标签（`!`）、
+# 流式集合（`[` `{`）它读不懂——`model: >-` 后接缩进的 `inherit` 是合法 YAML，
+# Claude Code 解析成 `inherit`，而这里只看得到 `>-`，会误判成钉死了模型。
+#
+# 遇到这些形态一律当作「未选」：宁可误拦（补个 model 就过）也不能放过一个
+# 实际仍会继承父模型的定义。不引 YAML 依赖是刻意的——hook 要在任何解释器下
+# 都能跑，为一个极端边缘形态换掉这个前提不划算。
+UNSUPPORTED_SCALAR_PREFIXES = ("|", ">", "&", "*", "!", "[", "{")
+
 DENY_REASON = """本仓库规范：起子代理必须显式选模型，不得默认继承主 agent（见 CLAUDE.md「子代理规范」）。
 
 请给这次 Agent 调用补一个 `model`，按**任务需要多少判断力**选，不是按任务大小：
@@ -87,9 +96,15 @@ def _yaml_scalar(raw: object) -> str:
     return text
 
 
+def _is_simple_scalar(raw: object) -> bool:
+    """这个值是不是本解析器读得懂的单行标量。"""
+    return not _yaml_scalar(raw).startswith(UNSUPPORTED_SCALAR_PREFIXES)
+
+
 def _is_chosen_model(raw: object) -> bool:
     """这个 model 值算不算「主动做出了选择」。"""
-    return _yaml_scalar(raw).lower() not in NON_CHOICE_MODEL_VALUES
+    value = _yaml_scalar(raw).lower()
+    return bool(value) and value not in NON_CHOICE_MODEL_VALUES and _is_simple_scalar(raw)
 
 
 def _parse_frontmatter(path: Path) -> dict[str, str]:
@@ -131,12 +146,18 @@ def _pinned_agent_models(project_dir: Path) -> dict[str, str]:
     for root in (project_dir, Path.home()):
         for path in _iter_agent_files(root):
             fields = _parse_frontmatter(path)
-            name = _yaml_scalar(fields.get("name")) or path.stem
+            raw_name = fields.get("name")
+            # `name` 用了读不懂的形态时真名无从得知：退回文件名占位，并拒绝让这份
+            # 定义贡献「已钉」条目——否则真名会漏占位，被低优先级作用域的同名
+            # 定义顶掉，退化成上面那条作用域绕过。
+            readable_name = _is_simple_scalar(raw_name)
+            name = (_yaml_scalar(raw_name) if readable_name else "") or path.stem
             if name in claimed:
                 continue
             claimed.add(name)
-            if _is_chosen_model(fields.get("model")):
-                pinned[name] = _yaml_scalar(fields.get("model")).lower()
+            model = fields.get("model")
+            if readable_name and _is_chosen_model(model):
+                pinned[name] = _yaml_scalar(model).lower()
     return pinned
 
 
