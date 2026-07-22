@@ -238,6 +238,44 @@ def test_run_ingest_skips_source_that_parsed_to_zero_elements(repo, tmp_path):
     assert counts["uploaded"] == 0 and counts["failed"] == 0
 
 
+def test_run_ingest_reparses_source_with_elements_but_no_chunks(repo, tmp_path, monkeypatch):
+    """「有 element」不等于「管线跑完」。elements 的原子写入在管线中段,其后还有
+    分块、向量、终态置位——崩在中间的源有 element 却一个 chunk 都没有。
+
+    这种源若按「有 element 即完成」被跳过,就永远补不回来:run_ingest 收尾的
+    backfill_chunk_embeddings 只嵌入**已存在**的 chunk,零 chunk 的源它救不了。
+    所以判据只认管线终态,不看 element 有无。"""
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", lambda s: None)
+    nb_id = bi.ensure_notebook(repo, None, "nb-ingest-no-chunks")
+    p = tmp_path / "halfway.md"
+    p.write_text("# Halfway\n\nBody paragraph " + "q" * 200, encoding="utf-8")
+    digest = bi.sha256_bytes(p.read_bytes())
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:   # 预置:elements 已落库、parse_status 停在过渡态、零 chunk
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,status,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-halfway", nb_id, "Halfway", "document", p.name, str(p), 0, digest,
+             "", "", "parsed", "parsed", now, now))
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,text,"
+            "created_at) VALUES ('el-1','src-halfway','paragraph','p1','stale body',?)",
+            (now,))
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM chunks WHERE source_id='src-halfway'"
+                          ).fetchone()["c"] == 0      # 前提:确实零 chunk
+
+    counts = bi.run_ingest(repo, nb_id, [p], workers=1, conc=1)
+
+    assert counts["reparsed"] == 1, "有 element 但没跑完的源被当成已完成跳过了"
+    assert counts["skipped"] == 0
+    with repo._connect() as db:
+        n_chunks = db.execute("SELECT COUNT(*) c FROM chunks WHERE source_id='src-halfway'"
+                              ).fetchone()["c"]
+    assert n_chunks > 0, "重解析没有补出 chunk,这个源仍然不可检索"
+
+
 def test_run_ingest_reports_failed_when_reparse_does_not_recover(repo, tmp_path, monkeypatch):
     """process_source 对解析异常是自己吞掉的:内部 except 把源置 'failed' 后照常
     return SourceSummary,**不** re-raise。所以 _one 外面的 try/except 对普通解析失败

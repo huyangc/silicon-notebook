@@ -381,23 +381,29 @@ def run_ingest(
     是空的:旧的二元判定(hash 命中即 skipped)会把它永久认账成已摄取,再也补不回来。
     两分流(ingest 是无 KG 阶段,没有「已有 KG → 跳过」那一档):
       hash 未命中         → upload_sources → uploaded
-      命中且 parse 已跑完 → 真的已摄取     → skipped
-      命中且 parse 没跑完 → process_source → reparsed / failed(按真实结果计)
+      命中且管线已跑完    → 真的已摄取     → skipped
+      命中且管线没跑完    → process_source → reparsed / failed(按真实结果计)
 
-    「parse 已跑完」= 有 elements **或** parse_status 已是终态成功。两者都要:一次
-    成功的 parse 可以产出零个 element(扫描版/纯图 PDF 没有文本层,导入的
-    'metadata-only' 源更是永远没有),只看 elements 会把这些**已经成功**的源每次重跑
-    都当成「上次中断」再解析一遍,永远不收敛——与本函数要修的 bug 同类,只是反了个向。
+    「已跑完」只认**管线终态**(sources_with_completed_parse),刻意不看「有没有
+    element」。两个方向都会错:
+      · 只看 element「有」→ 漏判。elements 是管线中段的原子写入,其后还有分块、
+        向量、终态置位;崩在中间的源有 element 却没有 chunk,按「有 element 即完成」
+        会被永远跳过,而收尾只嵌入已存在的 chunk、救不回来。
+      · 只看 element「无」→ 误判。一次成功的 parse 完全可以产出零个 element
+        (扫描版/纯图 PDF 没有文本层,'metadata-only' 导入源更是永远没有),按
+        「无 element 即中断」会把它们每次重跑都再解析一遍,永远不收敛。
     """
     log = log or (lambda _e: None)
     counts = {"uploaded": 0, "skipped": 0, "reparsed": 0, "failed": 0}
     orig_provider = repo.settings.embed_provider
     repo.settings.embed_provider = ""   # 摄取期零嵌入:parse+chunk 快、无 429
 
-    # 进池前各取一次快照。两个都要:见 docstring——零 element 的成功 parse 只有
-    # sources_with_completed_parse 认得出来。
-    done = (repo.maintenance.sources_with_elements(notebook_id)
-            | repo.maintenance.sources_with_completed_parse(notebook_id))
+    # 进池前取一次快照。判据是**管线终态**,不是「有没有 element」:elements 的原子
+    # 写入发生在管线中段(其后还有分块、向量、终态置位),所以「有 element」只证明跑到
+    # 过那一步,不证明跑完了。崩在 elements 已写、chunks 未建之间的源就是这样——按
+    # 「有 element 即完成」会永远跳过它,而收尾的 backfill_chunk_embeddings 只嵌入
+    # **已存在**的 chunk,一个 chunk 都没有的源它救不回来。
+    done = repo.maintenance.sources_with_completed_parse(notebook_id)
     # `parsed` 是快照,看不见本次运行刚产出的 elements:输入目录里若有两个内容相同的
     # 文件,第二个会 hash 命中(第一个刚建的源)却不在快照里 → 被误判成需要 reparse,
     # 白跑一遍 parse。用「本次已认领的内容哈希」集合挡掉(线程安全,_one 在池里并发跑)。
