@@ -38,7 +38,70 @@
 - **效率是一等约束**：新增 LLM / embedding / DB 调用前先问代价——能否合并、缓存、异步、按需 gate。强一致做成 opt-in，默认走低开销路径。
 - 不引入 Docker 作为一期默认工作流；装新包前先问。
 - **加了守卫 ≠ 有效**：必须做**变异验证**——把代码改回违规形态，确认它真的报红。只做「删除」变异不够，还要做「移动」变异。变异本身极易打空（替了字面量但代码用的是常量、按行号插入而行号已漂），先 `grep -c` 确认改到了再跑。
-- 收尾提 PR，不直接合 `master`。分支先 rebase 到 `master` 保持线性，再 push、`gh pr create --base master`。
+- 收尾提 PR，不直接合 `master`。分支先 rebase 到 `master` 保持线性，再 push、`gh pr create --base master`。提 PR 与合入都必须经过 codex 评审，见第三节。
+
+  ⚠️ **已知分歧**：`AGENTS.md`「Feature Completion」第 1 步写的是把最新 `master` **3-way merge 进特性分支**，与本仓库实际使用的 Rebase and merge 冲突——把 `master` 合进来会破坏分支线性，GitHub 会报 `cannot be rebased`。以 **rebase** 为准，并在遇到时提醒用户订正 `AGENTS.md`。这是本文件唯一一处刻意不遵从「冲突时以 `AGENTS.md` 为准」的地方。
+
+---
+
+## 三、提 PR 与合入：codex 评审闭环
+
+**提 PR 之后、合入之前必须有 codex 评审，每一轮的原始输出逐字贴回 PR。**
+
+执行由本机全局的 PostToolUse hook `~/.claude/hooks/codex-pr-review.sh` 承担。**它不是仓库产物**，`git grep` 在本仓库里找不到它；换机器或新 clone 上没有它时规则依然成立，那就手动跑。
+
+### 自动触发只有两个点
+
+1. `gh pr create` 成功 → 第 1 轮评审。
+2. `git push` → **仅当该 PR 状态为 `awaiting_fix`（即上一轮判了 P0/P1）时**才重审。这是刻意设计：无关推送不烧额度。
+
+**推论，很容易踩：上一轮是 🟡 或 🟢 之后再 push 修复，不会自动重审。** 这时必须自己补跑并补贴——hook 只代贴它自己跑的那几轮。手动命令与 hook 内部一致：
+
+```bash
+codex exec review --base <base> --ephemeral \
+  -c 'model_reasoning_effort=medium' -c 'notify=[]' -o <out>
+```
+
+`review --base` 与自定义 PROMPT 位置参数互斥（报 `cannot be used with '[PROMPT]'`），所以不传自定义指令，正文是 codex 原生英文输出。
+
+### 判成败要双判据
+
+**退出码 0 且输出非空。** codex 被 SIGTERM 杀掉时退出码也是 0，只看退出码会贴出一条空评论、假装评审通过。
+
+### 每轮都贴原文
+
+包括零意见的轮次，也包括手动补跑的轮次。评论里带上：触发方式（自动 / 手动）、完整命令、head SHA、退出码与输出字节数。**贴原始输出，不贴我的转述**——用户要能自己核对我确实跑了、且结论没被我复述失真。
+
+### 分级与闸门
+
+| 判定 | 含义 | 动作 |
+| --- | --- | --- |
+| 🔴 P0/P1 | 阻塞 | 状态自动置 `awaiting_fix`；停下来问人。改完 push 会自动触发下一轮 |
+| 🟡 P2/P3 | 非阻塞 | 可以如实说明后不改 |
+| ⚪️ 解析不出标签但正文很长 | 格式可能变了 | 保守拦人，绝不因解析失败默认放行 |
+| 🟢 无输出标签且正文很短 | 通过 | 问人是否合入 |
+
+自动评审上限 5 轮（`CODEX_REVIEW_MAX_ROUNDS`）。人决定放弃修复时，由我显式落状态：
+
+```bash
+~/.claude/hooks/codex-pr-review.sh set-state <PR号> <waived|awaiting_fix|passed>
+~/.claude/hooks/codex-pr-review.sh show-state <PR号>
+```
+
+### 意见不是照单全收
+
+codex 的评审对象是 diff，它未必了解本 harness 的运行时事实。核实后可以驳回，但必须三件事齐全：在 PR 上写明驳回理由与证据、在代码里留下这条取舍的注释、加反向护栏用例钉住它。（PR#322 驳回过「豁免省略 `subagent_type` 的隐式 fork」，照做会把守卫整个掏空。）
+
+### 空 diff 是硬失败
+
+`base..HEAD` 算成空 diff 时 hook 会硬失败，而不是跑出一句「未发现问题」——假绿比不跑更糟。多半是当前目录不是 PR 改动所在的 worktree，`cd` 到正确目录再跑。
+
+### 合入
+
+- **必须先拿到用户明确同意**，绝不自作主张合。
+- 本仓库用 **Rebase and merge**：`gh pr merge <PR号> --rebase`（也有 squash 合入的历史，标题带 `(#NNN)` 后缀的即是）。
+- base 不一定是 `master`——stacked PR 的 base 是它的基分支，别硬写 `master`。
+- 判断分支是否已进 `master`，**只认 `gh pr view --json state` 为 `MERGED`**。别用 SHA 祖先判断（rebase 会改 SHA），也别只信 `git cherry`（squash 合并会把提交全报成未合）。
 
 ---
 
@@ -109,7 +172,7 @@ Claude Code 的通用默认是「评审和验证留在主 agent 循环里，不�
 
 ---
 
-## 三、`AGENTS.md` 章节索引
+## 四、`AGENTS.md` 章节索引
 
 按需查阅，用章节标题定位（不要依赖行号）：
 
