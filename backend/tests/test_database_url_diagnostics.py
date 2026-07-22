@@ -10,7 +10,7 @@ from app.core.config import Settings
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
-SECRET_URL = "mysql://redacted-user:redacted-password@db.example/notebook?access_token=redacted-token"
+SECRET_URL = "mysql://redacted-user:redacted-password@db.example/notebook?access_token=redacted-token#fragment"
 REDACTED_IDENTITY = "postgresql://db.example:5432/notebook"
 
 
@@ -36,14 +36,20 @@ def test_settings_validation_errors_keep_database_url_secrets_out_of_strings(set
     with pytest.raises(ValidationError) as captured:
         Settings(**settings_kwargs)
 
-    diagnostic = str(captured.value)
+    diagnostics = (
+        str(captured.value),
+        repr(captured.value.errors()),
+        captured.value.json(),
+    )
 
-    assert "unsupported database URL scheme" in diagnostic
-    assert "database_url" in diagnostic.lower()
-    assert SECRET_URL not in diagnostic
-    assert "redacted-user" not in diagnostic
-    assert "redacted-password" not in diagnostic
-    assert "access_token=redacted-token" not in diagnostic
+    assert "unsupported database URL scheme" in diagnostics[0]
+    assert "database_url" in diagnostics[0].lower()
+    for diagnostic in diagnostics:
+        assert SECRET_URL not in diagnostic
+        assert "redacted-user" not in diagnostic
+        assert "redacted-password" not in diagnostic
+        assert "access_token=redacted-token" not in diagnostic
+        assert "#fragment" not in diagnostic
 
 
 def test_diag_base_report_redacts_settings_database_url(monkeypatch, capsys):

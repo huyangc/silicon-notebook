@@ -79,3 +79,27 @@ def redact_database_url(raw: str) -> str:
         host = f"[{host}]"
     netloc = f"{host}:{parsed.port}" if parsed.port is not None else host
     return urlunsplit(("postgresql", netloc, parsed.path, "", ""))
+
+
+def sanitize_database_url_for_error(raw: object) -> str:
+    """Return a fail-closed safe input value for validation error structures."""
+    if not isinstance(raw, str):
+        return "<invalid database URL>"
+    try:
+        parsed = urlsplit(raw)
+        host = parsed.hostname
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+    except ValueError:
+        return "<invalid database URL>"
+
+    scheme = parsed.scheme.lower() or "invalid"
+    if host is None:
+        netloc = ""
+    else:
+        if ":" in host:
+            host = f"[{host}]"
+        netloc = f"{host}:{port}" if port is not None else host
+    return urlunsplit((scheme, netloc, "", "", ""))

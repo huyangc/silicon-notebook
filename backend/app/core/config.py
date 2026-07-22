@@ -6,7 +6,12 @@ from typing import Annotated, List, Literal
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from app.core.database_url import database_identity, normalize_database_url, redact_database_url
+from app.core.database_url import (
+    database_identity,
+    normalize_database_url,
+    redact_database_url,
+    sanitize_database_url_for_error,
+)
 
 # 仓库根锚点：backend/app/core/config.py -> parents[3] = 仓库根。与
 # event_logging.py 的 _ROOT_DIR 同口径。相对路径类的设置项（storage_dir、
@@ -40,13 +45,21 @@ def env_file_diagnosis(root: "Path | None" = None) -> "tuple[Path, bool, list[st
     return env_path, False, lookalikes
 
 
+class _InvalidDatabaseUrl(str):
+    """Safe replacement input that preserves a URL-validation reason."""
+
+    def __new__(cls, sanitized: str, reason: str):
+        value = super().__new__(cls, sanitized)
+        value.reason = reason
+        return value
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_ENV_FILE,
         case_sensitive=False,
         extra="ignore",
         populate_by_name=True,
-        hide_input_in_errors=True,
     )
 
     environment: str = Field("development", validation_alias="SILICON_NOTEBOOK_ENV")
@@ -516,14 +529,42 @@ class Settings(BaseSettings):
     @field_validator("database_url", mode="before")
     @classmethod
     def validate_database_url(cls, value):
+        if isinstance(value, _InvalidDatabaseUrl):
+            raise ValueError(value.reason)
         return normalize_database_url(value)
 
     @field_validator("shadow_database_url", mode="before")
     @classmethod
     def validate_shadow_database_url(cls, value):
+        if isinstance(value, _InvalidDatabaseUrl):
+            raise ValueError(value.reason)
         if value is None or (isinstance(value, str) and not value.strip()):
             return None
         return normalize_database_url(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def sanitize_invalid_database_url_inputs(cls, values):
+        if not isinstance(values, dict):
+            return values
+        prepared = dict(values)
+        for key in (
+            "DATABASE_URL",
+            "database_url",
+            "SHADOW_DATABASE_URL",
+            "shadow_database_url",
+        ):
+            raw = prepared.get(key)
+            if raw is None or ("SHADOW" in key.upper() and isinstance(raw, str) and not raw.strip()):
+                continue
+            try:
+                prepared[key] = normalize_database_url(raw)
+            except ValueError as exc:
+                prepared[key] = _InvalidDatabaseUrl(
+                    sanitize_database_url_for_error(raw),
+                    str(exc),
+                )
+        return prepared
 
     @model_validator(mode="after")
     def _validate_runtime_dim(self) -> "Settings":
