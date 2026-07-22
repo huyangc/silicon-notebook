@@ -221,6 +221,35 @@ export function assembleImportColumnKinds(
 export const COLUMN_DELETE_CONFIRM = "删除该列？列下所有格子与代码附件将一并删除";
 export const ROW_DELETE_CONFIRM = "删除该行？行内所有格子与代码附件将一并删除";
 
+// --- 管理面板：清理历史（规格 §8.2③ + §7.1「附加条件」的 head 例外）-------------
+
+// 清理历史二次确认文案。规格 §8.2③ 给的基础句是「清理后将无法回退到该时间点
+// 之前，同时会释放这些历史引用的图片」——但 §7.1「附加条件」（Task 13 code
+// review 实测澄清，非新决策）指出这句话在 head 场景下不成立：prune 按设计
+// 永远保留 head 那一条流水（§7.7，回退的前置指纹守卫需要一个参照）。若某张
+// 图片最后一次被引用恰好落在 head 里，这次清理不会释放它——要等这张表再
+// 发生一次与该图无关的编辑、把 head 挪走之后，下一次清理才会真正释放它。
+// 文案据此补一层「但最后一次改动…」的限定，不承诺「清理后立刻释放」这种在
+// head-引用场景下不成立的确定性表述；不逐字解释 head/指纹机制（spec 原话：
+// 文案不必逐字解释这套机制）。
+export const HISTORY_PRUNE_CONFIRM =
+  "清理历史？将无法回退到该时间点之前，同时会释放这些历史引用的图片；但最后一次改动会一直保留，其引用的图片不受影响";
+
+// 天数输入默认值（brief 指定 180）。
+export const DEFAULT_HISTORY_PRUNE_DAYS = 180;
+
+// 天数输入校验：trim 后必须是纯数字且 > 0（正整数）。空串/带小数点/正负号/
+// 非数字字符/0 一律判非法——后端 before_days 语义是「清理 N 天前的历史」，
+// 0 或负数没有实际意义（0 会把刚发生的编辑也当作待清理，负数更不成立），
+// 小数天在这个粒度上也无意义。调用方据此禁用「清理」按钮，不发注定失败/
+// 无意义的请求。
+export function parseHistoryPruneDays(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const parsed = Number(trimmed);
+  return parsed > 0 ? parsed : null;
+}
+
 // 表信息保存 patch：只装「确实变化」的字段（PATCH 语义：不提供=不触碰）。
 // 标题 trim 后为空不入 patch（表标题不可清空——置空由禁用保存按钮兜底，
 // 这里再挡一道）；描述 trim 后与当前不同才入 patch（空串=清除描述，合法）。
