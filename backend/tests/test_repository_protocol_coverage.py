@@ -42,6 +42,7 @@ BUNDLE_STORE_SEATS = (
     ("ask_state", "ask_state", "AskStateStorePort"),
     ("unified_kg", "unified_kg", "UnifiedKgStorePort"),
 )
+FACADE_PATH = ROOT / "backend" / "app" / "services" / "sqlite_repository.py"
 
 
 @dataclass(frozen=True, order=True)
@@ -225,6 +226,36 @@ def _parameter_contract(callable_):
     ]
 
 
+def _bundle_facade_calls() -> dict[str, set[str]]:
+    """Methods that Task 3 must preserve when it injects the bundle."""
+    tree = ast.parse(FACADE_PATH.read_text(encoding="utf-8"), filename=str(FACADE_PATH))
+    calls = {runtime_name: set() for _, runtime_name, _ in BUNDLE_STORE_SEATS}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+            continue
+        receiver = node.func.value
+        if not (
+            isinstance(receiver, ast.Attribute)
+            and isinstance(receiver.value, ast.Attribute)
+            and isinstance(receiver.value.value, ast.Name)
+            and receiver.value.value.id == "self"
+            and receiver.value.attr == "_runtime"
+            and receiver.attr in calls
+        ):
+            continue
+        calls[receiver.attr].add(node.func.attr)
+    return calls
+
+
+def _protocol_methods(protocol) -> dict[str, object]:
+    methods: dict[str, object] = {}
+    for base in reversed(protocol.__mro__):
+        for name, value in base.__dict__.items():
+            if callable(value) and not name.startswith("__"):
+                methods[name] = value
+    return methods
+
+
 def test_model_client_ports_match_concrete_call_signatures():
     from app.core.llm import OpenAICompatibleClient
     from app.repositories.ports import JsonChatClientPort, RerankClientPort
@@ -313,3 +344,57 @@ def test_sqlite_stores_structurally_satisfy_every_persistence_bundle_port():
     assert isinstance(bundle, PersistenceBundle)
     for bundle_name, _, port_name in BUNDLE_STORE_SEATS:
         assert isinstance(getattr(bundle, bundle_name), getattr(ports, port_name))
+
+
+def test_bundle_ports_cover_facade_store_calls_and_match_sqlite_signatures():
+    from app.repositories import ports
+    from app.repositories.sqlite.ask_state_store import AskStateStore
+    from app.repositories.sqlite.chunk_store import ChunkStore
+    from app.repositories.sqlite.database import SqliteDatabase
+    from app.repositories.sqlite.embedding_store import EmbeddingStore
+    from app.repositories.sqlite.governance_store import GovernanceStore
+    from app.repositories.sqlite.identity_store import IdentityStore
+    from app.repositories.sqlite.index_projection_store import IndexProjectionStore
+    from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
+    from app.repositories.sqlite.knowhow_store import KnowhowStore
+    from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
+    from app.repositories.sqlite.knowledge_store import KnowledgeStore
+    from app.repositories.sqlite.memory_store import MemoryStore
+    from app.repositories.sqlite.notebook_store import NotebookStore
+    from app.repositories.sqlite.query_store import QueryStore
+    from app.repositories.sqlite.report_store import ReportStore
+    from app.repositories.sqlite.sharing_store import SharingStore
+    from app.repositories.sqlite.source_store import SourceStore
+    from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
+
+    sqlite_stores = {
+        "database": SqliteDatabase,
+        "identity": IdentityStore,
+        "notebook_store": NotebookStore,
+        "sharing_store": SharingStore,
+        "source_store": SourceStore,
+        "chunk_store": ChunkStore,
+        "embedding_store": EmbeddingStore,
+        "knowledge": KnowledgeStore,
+        "governance": GovernanceStore,
+        "index_projections": IndexProjectionStore,
+        "kg_build_jobs": KgBuildJobStore,
+        "knowhow_store": KnowhowStore,
+        "knowhow_transfer_store": KnowhowTransferStore,
+        "memory_store": MemoryStore,
+        "queries": QueryStore,
+        "report_store": ReportStore,
+        "ask_state": AskStateStore,
+        "unified_kg": UnifiedKgStore,
+    }
+    calls = _bundle_facade_calls()
+    missing: dict[str, set[str]] = {}
+    for _, runtime_name, port_name in BUNDLE_STORE_SEATS:
+        protocol_methods = _protocol_methods(getattr(ports, port_name))
+        missing[runtime_name] = calls[runtime_name] - set(protocol_methods)
+        for name, protocol_method in protocol_methods.items():
+            store_method = getattr(sqlite_stores[runtime_name], name)
+            assert _parameter_contract(protocol_method) == _parameter_contract(
+                store_method
+            ), (runtime_name, name)
+    assert missing == {runtime_name: set() for _, runtime_name, _ in BUNDLE_STORE_SEATS}

@@ -25,6 +25,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Callable, Iterator, Optional, Sequence
 
+from app.repositories.ports import VectorBatchEncoder
 from app.services.vector_index import decode_vector
 
 # (table, id_column) for every embeddings table maintenance tooling touches.
@@ -636,7 +637,7 @@ class SQLiteMaintenanceAdapter:
         id_col: str,
         notebook_id: Optional[str],
         batch_size: int,
-        encode: Callable[[list], list],
+        encode: VectorBatchEncoder,
     ) -> tuple:
         """One write transaction: select up to batch_size legacy JSON-text
         vector rows, re-encode them via ``encode(rows) -> [(blob, nb, vid)]``
@@ -656,7 +657,10 @@ class SQLiteMaintenanceAdapter:
             ).fetchall()
             if not rows:
                 return 0, 0
-            updates = encode(rows)
+            # sqlite3.Row supports mapping-style lookup but is not a
+            # collections.abc.Mapping. Convert at this dialect boundary so
+            # portable maintenance callbacks receive the neutral row shape.
+            updates = encode([dict(row) for row in rows])
             bad = sum(1 for blob, _nb, _vid in updates if blob == b"")
             db.executemany(
                 f"UPDATE {table} SET vector=? WHERE notebook_id=? AND {id_col}=?",

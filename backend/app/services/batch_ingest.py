@@ -36,13 +36,13 @@ from app.services.model_concurrency import (
     activate_model_concurrency,
     current_model_concurrency,
 )
-import sqlite3
 from app.repositories.ports import (
     ExtractionProgress,
     IndexStageProgress,
     JsonChatClientPort,
     KGBuildResult,
     RebuildProgress,
+    RepositoryRow,
     ScaleBuildManifest,
     SQLiteMaintenancePort,
     SourceScheduler,
@@ -885,7 +885,7 @@ def _parse_encode(pair: Tuple[str, str]) -> Tuple[str, bytes]:
 
 
 def _parse_encode_batch_serial(
-    rows: Sequence[sqlite3.Row],
+    rows: Sequence[RepositoryRow],
 ) -> List[Tuple[bytes, str, str]]:
     """Serial parse+encode of a batch of rows — the exact pre-parallel code
     path. Returns [(blob, notebook_id, vid), ...] ready for executemany."""
@@ -960,7 +960,7 @@ def _backfill_table_to_blob(repo: BatchIngestRepository, notebook_id: Optional[s
             use_pool = False
 
     def _encode(
-        rows: Sequence[sqlite3.Row],
+        rows: Sequence[RepositoryRow],
     ) -> list[tuple[bytes, str, str]]:
         """Parse+encode one selected batch — runs inside the adapter's write
         transaction (same boundary as the old inline block)."""

@@ -15,6 +15,7 @@ from app.models.sources import (
     SourceElement,
     SourceSummary,
 )
+from app.repositories.ports import SOURCE_PAPER_META_UNSET
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -22,7 +23,7 @@ from app.repositories.sqlite.database import SqliteDatabase
 # fetch it itself) from an explicit `paper_meta=None` ("caller already
 # fetched — there is no meta row"). A plain `None` default couldn't tell
 # those two cases apart.
-_UNSET = object()
+_UNSET = SOURCE_PAPER_META_UNSET
 
 
 def _created_label(value: str) -> str:

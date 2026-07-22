@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -47,16 +46,8 @@ from app.models.ask import (
     FeedbackRequest,
     FeedbackResponse,
 )
+from app.repositories.ports import PreparedAskTurn
 from app.repositories.sqlite.database import SqliteDatabase
-
-
-@dataclass(frozen=True)
-class PreparedAskTurn:
-    """One prepared conversation turn: the (created-or-continued) conversation
-    id plus the prior-turns history block the answer prompt consumes."""
-
-    conversation_id: str
-    history: str
 
 
 class AskStateStore:

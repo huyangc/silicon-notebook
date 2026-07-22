@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import get_type_hints
 
@@ -79,3 +80,14 @@ def test_bundle_is_neutral_and_declares_every_store_seat():
     assert set(hints) == set(BUNDLE_STORE_PORTS)
     assert {name: value.__name__ for name, value in hints.items()} == BUNDLE_STORE_PORTS
 
+
+def test_ask_turn_result_is_neutral_and_preserves_the_conversation_history_shape():
+    from app.repositories.ports import AskStateStorePort, PreparedAskTurn
+    from app.repositories.sqlite.ask_state_store import AskStateStore
+
+    assert is_dataclass(PreparedAskTurn)
+    assert tuple(field.name for field in fields(PreparedAskTurn)) == (
+        "conversation_id", "history",
+    )
+    assert get_type_hints(AskStateStorePort.prepare_turn)["return"] is PreparedAskTurn
+    assert get_type_hints(AskStateStore.prepare_turn)["return"] is PreparedAskTurn
