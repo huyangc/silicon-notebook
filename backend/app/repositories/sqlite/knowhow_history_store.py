@@ -34,8 +34,15 @@ def record_change(
     **必须是写事务的最后一步** —— fingerprint 要反映本次变更之后的表状态。
     放在变更 DML 之前会记下变更前的指纹，让回退的前后置守卫全部失准。
 
-    seq 用 ``COALESCE(MAX(seq),0)+1`` 现算：调用方已持写锁，同一张表上不会
-    有第二个写事务同时算，UNIQUE(table_id, seq) 是最后一道保险。
+    seq 用 ``COALESCE(MAX(seq),0)+1`` 现算：``SqliteDatabase.write()`` 靠
+    ``write_lock``（``threading.RLock``）把并发写者串行化，但那把锁**只互斥
+    本进程内**的写者——同一进程里不会有第二个写事务同时算这张表的 seq。
+    离线 CLI 与后端进程共享同一个库文件时（§7.6），跨进程互斥不成立：
+    ``write()`` 块内首条 DML 之前的 SELECT 不会自动开启 SQLite 事务（除非
+    调用方显式 ``begin_immediate()``），另一进程可能在本进程"读到 next
+    seq"与"真正写入"之间插入一条相同 seq 的流水。此时 ``UNIQUE(table_id,
+    seq)`` 是唯一的安全网：后提交的一方会因唯一约束直接失败（可重试），
+    而不是静默产生重复 seq。
     """
     row = db.execute(
         "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM knowhow_changes WHERE table_id = ?",
@@ -66,6 +73,66 @@ def _row_to_change(row: sqlite3.Row) -> dict:
     change = dict(row)
     change["payload"] = json.loads(change.pop("payload_json"))
     return change
+
+
+def _cell_entries_in_change(change: dict, row_id: str, column_id: str) -> list[dict]:
+    """从一条流水的 payload 里抽出这个 (row_id, column_id) 的历次值。
+
+    §4.4 里 6 种携带格子内容的 kind 用了 3 种不同的 payload 形状，不能只读
+    顶层 ``cells`` 列表：
+
+    - ``cell_update`` / ``revert``：顶层 ``cells`` 是列表，条目本身就是
+      ``{row_id, column_id, before, after}``，直接匹配。
+    - ``row_add`` / ``import_append``：顶层是 ``rows`` 列表，格子内容嵌在
+      ``rows[i]['cells']`` —— 一个 ``{column_id: content_md}`` 字典，不是
+      顶层 cells。格子诞生：``before=None``。
+    - ``row_delete``：同 ``row_add`` 形状（整行快照），但语义相反——格子
+      消失：``after=None``。
+    - ``column_delete``：顶层 ``cells`` 列表存在，但条目形状是
+      ``{row_id, content_md}``，没有 ``column_id`` —— 整个 payload 只对应
+      ``payload['column']`` 这一列，必须先核对列 id 相符，否则会把任意
+      列的删除历史错配给别的列。格子消失：``after=None``。
+    """
+    kind = change["kind"]
+    payload = change["payload"]
+    values: list[tuple[Any, Any]] = []
+
+    if kind in ("cell_update", "revert"):
+        for cell in payload.get("cells", []):
+            if cell.get("row_id") == row_id and cell.get("column_id") == column_id:
+                values.append((cell.get("before"), cell.get("after")))
+    elif kind in ("row_add", "import_append"):
+        for entry in payload.get("rows", []):
+            if entry.get("row_id") != row_id:
+                continue
+            cells = entry.get("cells") or {}
+            if column_id in cells:
+                values.append((None, cells[column_id]))
+    elif kind == "row_delete":
+        for entry in payload.get("rows", []):
+            if entry.get("row_id") != row_id:
+                continue
+            cells = entry.get("cells") or {}
+            if column_id in cells:
+                values.append((cells[column_id], None))
+    elif kind == "column_delete":
+        column = payload.get("column") or {}
+        if column.get("id") == column_id:
+            for cell in payload.get("cells", []):
+                if cell.get("row_id") == row_id:
+                    values.append((cell.get("content_md"), None))
+
+    return [
+        {
+            "seq": change["seq"],
+            "actor": change["actor"],
+            "origin": change["origin"],
+            "created_at": change["created_at"],
+            "before": before,
+            "after": after,
+        }
+        for before, after in values
+    ]
 
 
 class KnowhowHistoryStore:
@@ -147,16 +214,7 @@ class KnowhowHistoryStore:
         entries: list[dict] = []
         for row in rows:
             change = _row_to_change(row)
-            for cell in change["payload"].get("cells", []):
-                if cell.get("row_id") == row_id and cell.get("column_id") == column_id:
-                    entries.append({
-                        "seq": change["seq"],
-                        "actor": change["actor"],
-                        "origin": change["origin"],
-                        "created_at": change["created_at"],
-                        "before": cell.get("before"),
-                        "after": cell.get("after"),
-                    })
+            entries.extend(_cell_entries_in_change(change, row_id, column_id))
             if len(entries) >= limit:
                 break
         return entries[:limit]
