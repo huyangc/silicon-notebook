@@ -312,3 +312,23 @@ def shutdown_repository_if_initialized() -> None:
     """Close the cached runtime without constructing it during shutdown."""
     if repository.cache_info().currsize:
         repository().close()  # type: ignore[attr-defined]
+
+
+# System model-service wiring is deliberately appended after the line-pinned
+# repository compatibility sites above. Routes receive the one process-owned
+# status service; they never reconstruct registries, providers, or schedulers.
+from app.services.model_status import ModelStatusService  # noqa: E402
+
+
+def model_status_service() -> ModelStatusService:
+    return repository()._runtime.model_status  # type: ignore[attr-defined]
+
+
+def model_service_binding_summary() -> dict[str, bool]:
+    """Read-only readiness summary with no service identity or live diagnostics."""
+    models = repository()._runtime.models  # type: ignore[attr-defined]
+    return {
+        "llm_configured": models.configured("ask_answer"),
+        "reasoning_llm_configured": models.configured("reasoning_agent"),
+        "embedding_configured": models.configured("retrieval_query_embedding"),
+    }

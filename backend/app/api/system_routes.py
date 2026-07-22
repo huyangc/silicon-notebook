@@ -8,14 +8,17 @@ from fastapi.responses import StreamingResponse
 from app.api.deps import (
     admin_query_repository,
     get_current_user,
+    model_service_binding_summary,
+    model_status_service,
     notebook_catalog_repository,
     repository,
 )
 from app.core.config import get_settings
 from app.models.identity import UserProfile
+from app.models.model_services import ModelServicesStatus
 from app.models.notebooks import NotebookTemplate
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
-from app.services.model_registry import SystemModelServiceRegistry
+from app.services.model_status import ModelStatusService
 from app.services.pending_bus import pending_bus
 
 
@@ -23,20 +26,24 @@ router = APIRouter()
 
 
 @router.get("/health")
-def health() -> dict:
+def health(
+    bindings: dict[str, bool] = Depends(model_service_binding_summary),
+) -> dict:
     settings = get_settings()
-    registry = SystemModelServiceRegistry.load(settings)
     return {
         "status": "ok",
         "environment": settings.environment,
-        "llm_configured": registry.service_for("ask_answer") is not None,
-        "reasoning_llm_configured": (
-            registry.service_for("reasoning_agent") is not None
-        ),
-        "embedding_configured": (
-            registry.service_for("retrieval_query_embedding") is not None
-        ),
+        **bindings,
     }
+
+
+@router.get("/model-services/status", response_model=ModelServicesStatus)
+def get_system_model_services_status(
+    _user: UserProfile = Depends(get_current_user),
+    service: ModelStatusService = Depends(model_status_service),
+) -> ModelServicesStatus:
+    """Return local sanitized state only; opening the panel never probes upstream."""
+    return service.snapshot()
 
 
 @router.get("/me", response_model=UserProfile)

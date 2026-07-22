@@ -151,8 +151,7 @@ def test_answer_failure_names_dynamic_primary_service_without_persisting_unstamp
     assert (error.service_id, error.service_name, error.model) == ("", "", "")
     assert error.workload_id == "ask_answer"
     assert error.message == "upstream_error"
-    stored = repo._runtime.identity.get_model_service_statuses("user-local")
-    assert "llm" not in stored
+    assert repo._runtime.model_status_store.get_all() == {}
 
 
 def test_safe_tagged_model_name_remains_dynamic_on_failure(repo):
@@ -271,15 +270,10 @@ def test_legacy_model_error_replays_into_new_safe_metadata_shape():
 
 
 def test_embed_failure_recorded(repo, monkeypatch):
-    """embed_query 抛异常(且 embedder_configured 为真)→ model_errors 记一条 stage=embed。"""
+    """A configured workload embedder failure is recorded at the embed stage."""
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
-    # 让 embedder_configured 成立,使 _embed_query 走真实调用路径(而非"未配置"早返回)。
-    repo.settings.embed_provider = "dashscope"
-    repo.settings.embed_base_url = "http://fake"
-    repo.settings.embed_api_key = "k"
-    repo.settings.embed_model = "text-embedding-v4"
-    assert repo.settings.embedder_configured
+    repo.embedder.configured = True
     monkeypatch.setattr(repo.embedder, "embed_query",
                         lambda q: (_ for _ in ()).throw(RuntimeError("embed boom")))
     bind_chat_client(repo, "ask_answer", _AnswerLLM())
@@ -294,10 +288,7 @@ def test_embed_failure_recorded(repo, monkeypatch):
 def test_embedding_failure_is_embedding_service(repo, monkeypatch):
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
-    repo.settings.embed_provider = "dashscope"
-    repo.settings.embed_base_url = "http://fake"
-    repo.settings.embed_api_key = "k"
-    repo.settings.embed_model = "runtime-embedding-name"
+    repo.embedder.configured = True
     monkeypatch.setattr(
         repo.embedder,
         "embed_query",
@@ -323,7 +314,12 @@ def test_rerank_on_error_called():
         embed_concurrency = 8
         openai_compat_timeout_seconds = 30
 
-    rc = RerankClient(_S())
+    rc = RerankClient(
+        _S(),
+        model="qwen3-rerank",
+        base_url="http://fake/v1",
+        api_key="k",
+    )
     captured = []
     rc._rerank_batch = lambda q, d: (_ for _ in ()).throw(RuntimeError("rerank boom"))
 

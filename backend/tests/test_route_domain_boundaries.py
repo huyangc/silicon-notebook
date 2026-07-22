@@ -59,12 +59,7 @@ def test_system_endpoints_are_owned_by_the_system_router():
     for endpoint in (
         "health",
         "me",
-        "get_model_settings",
-        "put_model_settings",
-        "test_model_service",
-        "get_model_services_status",
-        "test_all_model_services",
-        "test_current_model_service",
+        "get_system_model_services_status",
         "list_doc_types",
         "detect_doc_types",
         "list_notebook_templates",
@@ -139,6 +134,8 @@ def test_kg_and_admin_endpoints_have_domain_owners():
         "approve_promotion": "app.api.admin_routes",
         "list_admin_users": "app.api.admin_routes",
         "list_online_users": "app.api.admin_routes",
+        "test_system_model_service": "app.api.admin_routes",
+        "test_all_system_model_services": "app.api.admin_routes",
     }
     for endpoint, module in expected.items():
         assert modules[endpoint] == module, endpoint

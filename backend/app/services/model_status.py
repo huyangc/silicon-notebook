@@ -168,6 +168,6 @@ def _safe_trigger(value: object) -> str:
 
 
 def _safe_code(value: object) -> str:
-    if not value:
+    if not value or value == "ok":
         return ""
     return safe_model_error_code(value)

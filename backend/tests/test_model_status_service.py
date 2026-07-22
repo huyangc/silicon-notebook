@@ -194,6 +194,7 @@ def test_test_one_uses_named_service_scheduler_and_persists_observation():
     item = service.test_one("chat_primary", actor_id="admin")
     assert provider.probes == [("chat_primary", "admin", True)]
     assert item.status == "ok"
+    assert item.code == ""
     assert item.support_id == "mdl-probe"
     assert store.records[0]["trigger"] == "manual_test"
 
