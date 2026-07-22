@@ -478,6 +478,14 @@ test("parseHistoryPruneDays: 非数字字符/科学计数法/带正号 → null"
   assert.strictEqual(parseHistoryPruneDays("18 0"), null);
 });
 
+test("parseHistoryPruneDays: 上限内接受、超上限 → null（拦 Number() 溢出 Infinity）", () => {
+  assert.strictEqual(parseHistoryPruneDays("36500"), 36500); // 恰好 100 年，边界内
+  assert.strictEqual(parseHistoryPruneDays("36501"), null); // 越界一天
+  // 309 位纯数字串：旧实现 Number() 溢出成 Infinity、`Infinity > 0` 放行，
+  // 再被 JSON.stringify 静默变 null 撞后端 422；上限把它挡在前端。
+  assert.strictEqual(parseHistoryPruneDays("9".repeat(309)), null);
+});
+
 test("tableMetaPatch: 无变化返回空对象（hasMetaChanges=false）", () => {
   const current = { title: "表", description: "描述" };
   const patch = tableMetaPatch(current, "表", "描述");
