@@ -35,6 +35,29 @@ def test_cache_is_enabled_by_default():
     assert Settings.model_fields["llm_cache_enabled"].default is True
 
 
+def test_test_process_is_isolated_from_the_shared_cache():
+    """测试进程必须**强制**拿到 NoCacheBackend——安全阀 #2，这条守卫锁的就是它。
+
+    缓存默认开、跨用户全局共享、落在仓库根 `.local/llm_cache_v2.db`。带真 .env 跑
+    全量时若隔离失效，断言会读到上一次运行的响应，制造大规模假失败/假成功——本
+    仓库台账里记过的真实事故。
+
+    ⚠ **必须走 env 构造 `Settings()`，不能写 `Settings(LLM_CACHE_ENABLED=...)`**：
+    显式传参绕过了 conftest 那行 `os.environ[...] = "false"`，测的就成了 pydantic
+    的赋值语义而非隔离本身，鉴别力归零。这里断言的是「本进程的**环境**已被置成
+    关闭」这一事实。
+
+    变异验证：注释掉 conftest.py 顶部的 os.environ["LLM_CACHE_ENABLED"] = "false"
+    后本测试必须转红（实测：删掉那行跑 6 个缓存测试文件 61 passed，无一转红，
+    同时 .local/llm_cache_v2.db 被真实创建 28 KB）。
+    """
+    backend = make_cache_backend(Settings())
+    assert isinstance(backend, NoCacheBackend), (
+        "测试进程没有被隔离在共享缓存之外：make_cache_backend(Settings()) 返回了 "
+        f"{type(backend).__name__}。跑全量时断言会读到上次运行留下的响应。"
+    )
+
+
 def test_relative_path_is_anchored_to_repo_root(tmp_path, monkeypatch):
     """相对路径必须锚定到**仓库根**，与进程 CWD 无关。
 
