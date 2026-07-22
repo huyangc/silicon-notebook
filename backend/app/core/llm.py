@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from app.core.config import Settings
-from app.core.llm_cache import CacheBackend, cache_key
+from app.core.cache import CacheBackend, llm_key
 from app.core.llm_logging import LLMInteractionLogger, new_interaction_id
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled, sleep_or_cancel
 
@@ -118,17 +118,9 @@ class OpenAICompatibleClient:
             self._cache = cache
 
     def _get_cache(self):
-        if self._cache is not None:
-            return self._cache
-        if not getattr(self.settings, "llm_cache_enabled", False):
-            return None
-        from pathlib import Path
-        from app.core.llm_cache import LLMCache
-        path = self.settings.llm_cache_path
-        p = Path(path)
-        if not p.is_absolute():
-            p = Path(__file__).resolve().parents[3] / path   # anchor to repo root
-        self._cache = LLMCache(str(p))
+        if self._cache is None:
+            from app.core.cache import make_cache_backend
+            self._cache = make_cache_backend(self.settings)
         return self._cache
 
     @property
@@ -224,11 +216,10 @@ class OpenAICompatibleClient:
         if not bypass_cache:
             try:
                 cache = self._get_cache()
-                if cache is not None:
-                    ckey = cache_key(model, full_messages, response_schema_hint)
-                    cached = cache.get(ckey)
-                    if cached is not None:
-                        return cached
+                ckey = llm_key(model, full_messages, response_schema_hint)
+                cached = cache.get(ckey)
+                if cached is not None:
+                    return cached
             except Exception:
                 cache, ckey = None, ""
         kwargs: Dict[str, Any] = {
@@ -332,7 +323,13 @@ class OpenAICompatibleClient:
                 content = strip_json_fences(response.choices[0].message.content or "")
             # Best-effort write; never cache the empty "{}" fallback so a transient
             # empty/garbage response isn't frozen in for this prompt.
-            if cache and ckey and content != "{}":
+            # NOTE: `cache is not None`, not truthy `cache` — SqliteCacheBackend
+            # defines __len__ for entry-count introspection, so a freshly empty
+            # cache (0 entries) is falsy under `bool()`. A plain `if cache` would
+            # permanently skip every write on a cold cache: it can never accumulate
+            # its first entry, `len()` stays 0 forever, and the cache never turns
+            # "truthy". Identity check sidesteps that trap entirely.
+            if cache is not None and ckey and content != "{}":
                 try:
                     cache.put(ckey, content)
                 except Exception:

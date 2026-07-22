@@ -171,8 +171,12 @@ class Settings(BaseSettings):
     # 会把全部原生维向量当异维残留丢光(全库静默失忆)。真相源永远按原生维落库,
     # 截断只在读取/构建/查询侧(见 docs/superpowers/specs/2026-07-03-runtime-dim-1024-plan.md)。
     embed_runtime_dim: int = Field(0, validation_alias="EMBED_RUNTIME_DIM")
-    llm_cache_enabled: bool = Field(False, validation_alias="LLM_CACHE_ENABLED")
-    llm_cache_path: str = Field(".local/llm_cache.db", validation_alias="LLM_CACHE_PATH")
+    llm_cache_enabled: bool = Field(True, validation_alias="LLM_CACHE_ENABLED")
+    llm_cache_path: str = Field(".local/llm_cache_v2.db", validation_alias="LLM_CACHE_PATH")
+    # 容量上限(字节)与条目寿命(天)。TTL 必须长——reparse/reextract 那种几万源重跑
+    # 可能几个月后才发生，届时命中率接近 100%，短 TTL 会毁掉最大的收益场景。
+    llm_cache_size_limit: int = Field(2 * 2**30, validation_alias="LLM_CACHE_SIZE_LIMIT")
+    llm_cache_ttl_days: int = Field(90, validation_alias="LLM_CACHE_TTL_DAYS")
 
     # --- 大文档摄取/检索旋钮（2026-06-04 大文档加固）---
     # KG 窗口化：相邻 prose 贪心打包到 target 字符、相邻窗口 overlap。
