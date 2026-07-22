@@ -1074,7 +1074,7 @@ def test_guarded_atomic_records_one_change_on_success(store, hist, table):
     before_count = len(_cell_changes(hist, table["id"]))
 
     result = store.update_knowhow_cells_guarded_atomic(
-        table["id"].split("::")[0] if False else _notebook_of(store, table["id"]),
+        _notebook_of(store, table["id"]),
         [(table["id"], table["row_a"], table["plain"], "基线", "新值")],
     )
     assert result["conflict"] is False
