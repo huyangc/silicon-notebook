@@ -102,9 +102,10 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # v25 凭据清除 + 系统模型服务状态表(#328)、v26 knowhow_changes/
     # knowhow_milestones 表 migration(#327)、v27 P1.5 的 sources.chunked_at
     # 完成标记列 migration，以及 v28 app_settings 表 + user_profiles.
-    # upload_document_limit 列 migration，以及 v29 cluster membership 唯一
-    # 索引与确定性存量去重 migration 合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 29
+    # upload_document_limit 列 migration，v29 cluster membership 唯一
+    # 索引与确定性存量去重 migration，以及 v30 sources(notebook_id, file_hash)
+    # 内容哈希去重索引 migration 合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 30
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

@@ -1460,6 +1460,11 @@
         "type": "index"
       },
       {
+        "name": "idx_sources_notebook_file_hash",
+        "sql_sha256": "913277ac4fde897632b15e514cdd3d90d8161e282affffdce275d8fce0018771",
+        "type": "index"
+      },
+      {
         "name": "idx_sources_notebook_status",
         "sql_sha256": "98ac9ec01586941da70d8487ee84cbf00df6be6724affbbc16e09c50179c1cba",
         "type": "index"

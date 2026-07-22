@@ -14,7 +14,9 @@ from app.services.kg.filters import _norm as _wl_norm
 
 # Both sides originally allocated migration 24 independently.  Version 29 is
 # the merge migration that makes either already-deployed lineage converge.
-SCHEMA_VERSION = 29
+# v30 adds idx_sources_notebook_file_hash for content-hash upload dedup /
+# batch_ingest resume (previously a full-table scan).
+SCHEMA_VERSION = 30
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1720,6 +1722,14 @@ class SqliteMigrator:
                 CREATE INDEX IF NOT EXISTS idx_kg_canonical_scratch_nb_run_seed
                   ON kg_canonical_scratch(notebook_id, run_id, seed);
                 """
+            )
+
+    def _migration_30(self) -> None:
+        """按内容哈希查源（上传去重 / batch_ingest 续跑）此前是全表扫。"""
+        with self._connect() as db:
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sources_notebook_file_hash "
+                "ON sources(notebook_id, file_hash)"
             )
 
     def _recover_interrupted_jobs(self) -> None:
