@@ -3,6 +3,10 @@
 给 _migrate 加 PRAGMA user_version 版本闸 + _add_column_if_missing 助手。
 核心不变量：对已部署库(无 user_version 标记)安全、零行为变更、可反复重跑幂等。
 """
+from contextlib import contextmanager
+
+import pytest
+
 from app.core.config import Settings
 from app.services import sqlite_repository as sr
 from app.services.sqlite_repository import SQLiteRepository
@@ -73,6 +77,58 @@ def test_migration_24_irreversibly_scrubs_user_model_credentials_and_old_status(
     assert "service_id TEXT PRIMARY KEY" in table_sql
     assert "config_fingerprint TEXT NOT NULL" in table_sql
     assert "recovery_probe" in table_sql
+
+
+def test_migration_24_rolls_back_scrub_table_and_version_when_stamp_fails(
+    tmp_path, monkeypatch
+):
+    repo = _repo(tmp_path)
+    original_settings = '{"llm":{"api_key":"must-survive-rollback"}}'
+    with repo._write() as db:
+        db.execute(
+            "UPDATE user_profiles SET model_settings = ? WHERE user_id = 'user-local'",
+            (original_settings,),
+        )
+        db.execute(
+            "INSERT INTO model_service_status "
+            "(user_id,service,config_fingerprint,status,latency_ms,code,trigger,checked_at) "
+            "VALUES ('user-local','llm','fp','error',0,'upstream','observed_failure',"
+            "'2030-01-01T00:00:00+00:00')"
+        )
+        db.execute("DROP TABLE system_model_service_status")
+        db.execute("PRAGMA user_version = 23")
+
+    original_write = repo._runtime.database.write
+
+    @contextmanager
+    def fail_final_stamp():
+        with original_write() as db:
+            class FailingConnection:
+                def execute(self, sql, parameters=()):
+                    if "PRAGMA user_version = 24" in str(sql):
+                        raise RuntimeError("injected version stamp failure")
+                    return db.execute(sql, parameters)
+
+                def __getattr__(self, name):
+                    return getattr(db, name)
+
+            yield FailingConnection()
+
+    monkeypatch.setattr(repo._runtime.database, "write", fail_final_stamp)
+
+    with pytest.raises(RuntimeError, match="version stamp failure"):
+        repo._migrate()
+
+    with repo._connect() as db:
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 23
+        assert db.execute(
+            "SELECT model_settings FROM user_profiles WHERE user_id='user-local'"
+        ).fetchone()[0] == original_settings
+        assert db.execute("SELECT COUNT(*) FROM model_service_status").fetchone()[0] == 1
+        assert db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='system_model_service_status'"
+        ).fetchone() is None
 
 
 def test_up_to_date_db_takes_fast_path_and_applies_nothing(tmp_path):

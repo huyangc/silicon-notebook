@@ -8,7 +8,7 @@ import threading
 import time
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from app.core.config import Settings
@@ -31,6 +31,10 @@ from app.services.model_registry import (
     ModelServiceDefinition,
     SystemModelServiceRegistry,
     WorkloadSpec,
+)
+from app.services.model_circuit_breaker import (
+    FailureKind,
+    classify_provider_failure,
 )
 from app.services.model_scheduler import ServiceScheduler
 from app.services.model_work import (
@@ -145,7 +149,7 @@ class _SubmittedCall:
     context: Any
     future: Future
     queued_at: float
-    timing: dict[str, float]
+    timing: dict[str, Any]
     breaker_before: str
     observe: bool
 
@@ -237,6 +241,23 @@ def _validate_rerank_rows(rows: Any, document_count: int) -> list[dict]:
     return normalized
 
 
+def _invocation_error(
+    runtime: _ServiceRuntime,
+    workload: WorkloadSpec,
+    call: _SubmittedCall,
+    error: BaseException,
+) -> ModelInvocationError:
+    if isinstance(error, ModelInvocationError):
+        return error
+    return ModelInvocationError(
+        service=runtime.service,
+        workload=workload,
+        code=_stable_error_code(error),
+        support_id=call.context.support_id,
+        status_code=_status_code(error),
+    )
+
+
 class _ScheduledAdapter:
     def __init__(
         self,
@@ -266,7 +287,7 @@ class _ScheduledAdapter:
             parent_id=parent_id,
             support_id=support_id,
         )
-        timing: dict[str, float] = {}
+        timing: dict[str, Any] = {}
         queued_at = time.perf_counter()
         breaker_before = self._runtime.scheduler.snapshot().breaker_state
         submission_context = contextvars.copy_context()
@@ -281,13 +302,17 @@ class _ScheduledAdapter:
                 return submission_context.run(run_in_submission_context)
             finally:
                 timing["finished"] = time.perf_counter()
+                if observe:
+                    self._provider._mark_completion(
+                        self._runtime.service.id, timing
+                    )
 
         future = self._provider._submit_scheduled(
             self._runtime,
             context=context,
             invoke=scheduled,
         )
-        return _SubmittedCall(
+        call = _SubmittedCall(
             context=context,
             future=future,
             queued_at=queued_at,
@@ -295,6 +320,11 @@ class _ScheduledAdapter:
             breaker_before=breaker_before,
             observe=observe,
         )
+        if observe:
+            self._provider._track_completion(
+                self._runtime, self._workload, call
+            )
+        return call
 
     def _resolve(self, call: _SubmittedCall) -> Any:
         error: BaseException | None = None
@@ -317,22 +347,10 @@ class _ScheduledAdapter:
             self._emit(call, status="error", error=exc)
         else:
             self._emit(call, status="ok", error=None)
-            if call.observe:
-                self._provider._observe_success(self._runtime, call)
             return result
 
         assert error is not None
-        if isinstance(error, ModelInvocationError):
-            raise error
-        typed = ModelInvocationError(
-            service=self._runtime.service,
-            workload=self._workload,
-            code=_stable_error_code(error),
-            support_id=call.context.support_id,
-            status_code=_status_code(error),
-        )
-        if call.observe:
-            self._provider._observe_failure(self._runtime, call, typed, error)
+        typed = _invocation_error(self._runtime, self._workload, call, error)
         raise typed from error
 
     def _emit(
@@ -509,13 +527,23 @@ class RuntimeModelProvider:
         self._lock = threading.RLock()
         self._runtimes: dict[str, _ServiceRuntime] = {}
         self._adapters: dict[tuple[str, str], Any] = {}
+        self._closing = False
         self._closed = False
+        self._close_complete = threading.Event()
         self._observation_sink = observation_sink
         self._observation_executor = ThreadPoolExecutor(
             max_workers=1,
             thread_name_prefix="model-status-observer",
         )
+        self._observation_accepting = True
         self._needs_recovery: set[str] = set()
+        self._completion_counter: dict[str, int] = {}
+        self._completion_next: dict[str, int] = {}
+        self._completion_pending: dict[
+            str,
+            dict[int, tuple[_ServiceRuntime, WorkloadSpec, _SubmittedCall, BaseException | None]],
+        ] = {}
+        self._completion_occurred_at: dict[str, datetime] = {}
         self._offline_chat = _UnconfiguredChatClient(settings)
         self._offline_rerank = _UnconfiguredRerankClient()
         self._offline_embeddings: dict[str, _UnconfiguredEmbedder] = {}
@@ -526,46 +554,97 @@ class RuntimeModelProvider:
         with self._lock:
             self._observation_sink = sink
 
-    def _observe_failure(
+    def _mark_completion(self, service_id: str, timing: dict[str, Any]) -> None:
+        """Stamp actual scheduled-invoke completion, not caller wake order."""
+        with self._lock:
+            sequence = self._completion_counter.get(service_id, 0) + 1
+            self._completion_counter[service_id] = sequence
+            occurred_at = datetime.now(timezone.utc)
+            previous = self._completion_occurred_at.get(service_id)
+            if previous is not None and occurred_at <= previous:
+                occurred_at = previous + timedelta(microseconds=1)
+            self._completion_occurred_at[service_id] = occurred_at
+            timing["completion_seq"] = sequence
+            timing["occurred_at"] = occurred_at.isoformat(timespec="microseconds")
+
+    def _track_completion(
         self,
         runtime: _ServiceRuntime,
+        workload: WorkloadSpec,
         call: _SubmittedCall,
-        typed: ModelInvocationError,
-        original: BaseException,
     ) -> None:
-        if isinstance(original, ModelSchedulingError):
+        def completed(future: Future) -> None:
+            try:
+                error = future.exception()
+            except CancelledError as exc:
+                error = exc
+            self._record_completion(runtime, workload, call, error)
+
+        call.future.add_done_callback(completed)
+
+    def _record_completion(
+        self,
+        runtime: _ServiceRuntime,
+        workload: WorkloadSpec,
+        call: _SubmittedCall,
+        error: BaseException | None,
+    ) -> None:
+        sequence = call.timing.get("completion_seq")
+        if not isinstance(sequence, int):
+            # Work rejected/cancelled before the scheduled invoke started.
+            # Those are scheduler outcomes and never provider health signals.
             return
+        service_id = runtime.service.id
         with self._lock:
-            self._needs_recovery.add(runtime.service.id)
+            pending = self._completion_pending.setdefault(service_id, {})
+            pending[sequence] = (runtime, workload, call, error)
+            expected = self._completion_next.get(service_id, 1)
+            while expected in pending:
+                item = pending.pop(expected)
+                self._apply_completion_locked(*item)
+                expected += 1
+            self._completion_next[service_id] = expected
+            if not pending:
+                self._completion_pending.pop(service_id, None)
+
+    def _apply_completion_locked(
+        self,
+        runtime: _ServiceRuntime,
+        workload: WorkloadSpec,
+        call: _SubmittedCall,
+        error: BaseException | None,
+    ) -> None:
+        service_id = runtime.service.id
+        occurred_at = str(call.timing["occurred_at"])
+        if error is None:
+            if service_id not in self._needs_recovery:
+                return
+            self._needs_recovery.remove(service_id)
+            self._submit_observation(ProviderObservation(
+                service_id=service_id,
+                config_fingerprint=runtime.service.fingerprint,
+                status="ok",
+                code="ok",
+                trigger="recovery_probe",
+                support_id=call.context.support_id,
+                latency_ms=self._execution_latency_ms(call),
+                occurred_at=occurred_at,
+            ))
+            return
+
+        if classify_provider_failure(error) is FailureKind.IGNORED:
+            return
+        self._needs_recovery.add(service_id)
+        typed = _invocation_error(runtime, workload, call, error)
         self._submit_observation(ProviderObservation(
-            service_id=runtime.service.id,
+            service_id=service_id,
             config_fingerprint=runtime.service.fingerprint,
             status="error",
             code=typed.code,
             trigger="observed_failure",
             support_id=call.context.support_id,
             latency_ms=self._execution_latency_ms(call),
-            occurred_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-        ))
-
-    def _observe_success(
-        self, runtime: _ServiceRuntime, call: _SubmittedCall
-    ) -> None:
-        with self._lock:
-            recovering = runtime.service.id in self._needs_recovery
-            if recovering:
-                self._needs_recovery.remove(runtime.service.id)
-        if not recovering:
-            return
-        self._submit_observation(ProviderObservation(
-            service_id=runtime.service.id,
-            config_fingerprint=runtime.service.fingerprint,
-            status="ok",
-            code="ok",
-            trigger="recovery_probe",
-            support_id=call.context.support_id,
-            latency_ms=self._execution_latency_ms(call),
-            occurred_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+            occurred_at=occurred_at,
         ))
 
     @staticmethod
@@ -575,12 +654,6 @@ class RuntimeModelProvider:
         return max(0, round((finished - started) * 1_000))
 
     def _submit_observation(self, observation: ProviderObservation) -> None:
-        with self._lock:
-            sink = self._observation_sink
-            closed = self._closed
-        if sink is None or closed:
-            return
-
         def persist() -> None:
             try:
                 sink(observation)
@@ -596,10 +669,22 @@ class RuntimeModelProvider:
                 except Exception:
                     pass
 
-        try:
-            self._observation_executor.submit(persist)
-        except RuntimeError:
-            pass
+        fallback_inline = False
+        with self._lock:
+            sink = self._observation_sink
+            if sink is None or not self._observation_accepting:
+                return
+            # Submission and the close-side accepting->False transition share
+            # this lock, so shutdown cannot overtake an accepted observation.
+            try:
+                self._observation_executor.submit(persist)
+            except RuntimeError:
+                # Defensive invariant fallback: the model Future is already
+                # resolved before its callbacks run, so preserving this health
+                # signal inline cannot replace the model result/error.
+                fallback_inline = True
+        if fallback_inline:
+            persist()
 
     def _raw_chat(self, service: ModelServiceDefinition) -> OpenAICompatibleClient:
         return OpenAICompatibleClient(
@@ -644,7 +729,7 @@ class RuntimeModelProvider:
 
     def _runtime(self, service: ModelServiceDefinition) -> _ServiceRuntime:
         with self._lock:
-            if self._closed:
+            if self._closing or self._closed:
                 raise ModelProviderError(
                     "model provider is closed", code="model_service_unavailable"
                 )
@@ -676,7 +761,7 @@ class RuntimeModelProvider:
         invoke: Callable[[], Any],
     ) -> Future:
         with self._lock:
-            if self._closed:
+            if self._closing or self._closed:
                 future: Future = Future()
                 future.set_exception(
                     ModelServiceUnavailable(support_id=context.support_id)
@@ -905,12 +990,31 @@ class RuntimeModelProvider:
         with self._lock:
             if self._closed:
                 return
-            self._closed = True
-            runtimes = tuple(self._runtimes.values())
-            for runtime in runtimes:
-                runtime.scheduler.stop_admission()
+            if self._closing:
+                close_complete = self._close_complete
+                owner = False
+                runtimes = ()
+            else:
+                self._closing = True
+                close_complete = self._close_complete
+                owner = True
+                runtimes = tuple(self._runtimes.values())
+        if not owner:
+            close_complete.wait()
+            return
+        # `_closing` is the atomic admission boundary: a submit that completed
+        # its provider-lock section before this point is in a scheduler; every
+        # later submit is rejected. Do not hold the provider lock while
+        # cancelling queued futures—their completion callbacks re-enter it.
+        for runtime in runtimes:
+            runtime.scheduler.stop_admission()
         for runtime in runtimes:
             runtime.scheduler.shutdown(wait=True)
+        # Scheduler shutdown waits for active future completion callbacks,
+        # which have now ordered and enqueued every provider observation.
+        with self._lock:
+            self._observation_accepting = False
+        self._observation_executor.shutdown(wait=True, cancel_futures=False)
         for runtime in runtimes:
             close = getattr(runtime.raw, "close", None)
             if callable(close):
@@ -918,4 +1022,6 @@ class RuntimeModelProvider:
                     close()
                 except Exception:
                     pass
-        self._observation_executor.shutdown(wait=True, cancel_futures=False)
+        with self._lock:
+            self._closed = True
+            self._close_complete.set()

@@ -1559,6 +1559,11 @@ class SqliteMigrator:
                 )
                 """
             )
+            # The irreversible scrub and its version stamp are one commit. A
+            # failed stamp must leave the database wholly at v23 so startup can
+            # safely retry instead of reporting v24 over partially scrubbed
+            # state (or committing the scrub while still reporting v23).
+            db.execute("PRAGMA user_version = 24")
 
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
@@ -1689,8 +1694,12 @@ class SqliteMigrator:
         applied: list[int] = []
         for version in range(current + 1, SCHEMA_VERSION + 1):
             getattr(self, f"_migration_{version}")()
-            with self._connect() as db:
-                db.execute(f"PRAGMA user_version = {version}")
+            # v24 stamps itself inside the same BEGIN IMMEDIATE transaction as
+            # its irreversible credential/status scrub. Preserve the existing
+            # migration/stamp behavior byte-for-byte for v1-v23.
+            if version != 24:
+                with self._connect() as db:
+                    db.execute(f"PRAGMA user_version = {version}")
             applied.append(version)
         return applied
 

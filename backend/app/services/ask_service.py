@@ -14,8 +14,8 @@
 * 持久化身份显式:``user_id`` 关键字由调用方传入(facade delegate 适配
   current_user().id;流式路径由 AskExecutionCoordinator 每次 start 传入),
   本模块绝不读请求 ContextVar、绝不 import facade/runtime、绝不开私有 DB 缝。
-* 模型身份走注入的 provider —— ``_llm_for_role`` 的 ContextVar 链每次属性
-  访问现解析,per-user 模型改配无需重启(PR#84 语义原样保持)。
+* 模型身份走注入的 process-owned provider；每个调用点使用稳定 workload ID
+  解析只读 adapter，不读取请求用户的模型配置。
 * 三模式派发仍以 ask_modes.ASK_MODES 冻结注册表为唯一真源(getattr 派发 +
   fast/global 退役别名);控制流与 facade 基线逐字一致 —— ask goldens
   (test_ask_repository_golden)按字节冻结着每条路径。

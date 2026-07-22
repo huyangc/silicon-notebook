@@ -528,6 +528,261 @@ def test_provider_emits_failure_then_one_recovery_but_not_ordinary_success():
         provider.close()
 
 
+def test_ignored_programming_error_does_not_arm_or_emit_recovery():
+    observations = []
+
+    class InvalidThenSuccessfulChat(_Chat):
+        def __init__(self):
+            super().__init__()
+            self.first = True
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            if self.first:
+                self.first = False
+                raise ValueError("local programming error")
+            return super().chat_json(messages, response_schema_hint, **kwargs)
+
+    provider = _provider(
+        chat=InvalidThenSuccessfulChat(), observation_sink=observations.append
+    )
+    client = provider.chat("ask_answer")
+    with pytest.raises(provider_mod.ModelInvocationError):
+        client.chat_json([], "{}")
+    assert client.chat_json([], "{}") == '{"ok": true}'
+    provider.close()
+
+    assert observations == []
+
+
+@pytest.mark.parametrize("failure", ["malformed", "transient"])
+def test_provider_failure_classes_emit_one_failure_and_one_recovery(failure):
+    observations = []
+    observed = threading.Event()
+
+    class FailingThenSuccessfulChat(_Chat):
+        def __init__(self):
+            super().__init__()
+            self.first = True
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            if not self.first:
+                return super().chat_json(messages, response_schema_hint, **kwargs)
+            self.first = False
+            if failure == "malformed":
+                return "[]"
+            if failure == "transient":
+                raise TimeoutError("provider timeout")
+            raise AssertionError(failure)
+
+    def observer(value):
+        observations.append(value)
+        if len(observations) == 2:
+            observed.set()
+
+    provider = _provider(
+        chat=FailingThenSuccessfulChat(), observation_sink=observer
+    )
+    try:
+        client = provider.chat("ask_answer")
+        with pytest.raises(provider_mod.ModelInvocationError):
+            client.chat_json([], "{}")
+        assert client.chat_json([], "{}") == '{"ok": true}'
+        assert observed.wait(1)
+        assert [(item.status, item.trigger) for item in observations] == [
+            ("error", "observed_failure"),
+            ("ok", "recovery_probe"),
+        ]
+    finally:
+        provider.close()
+
+
+def test_fatal_provider_failure_is_observed_and_opens_without_false_recovery():
+    observations = []
+
+    class FatalProviderError(RuntimeError):
+        status_code = 401
+
+    class FatalChat(_Chat):
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            raise FatalProviderError("provider rejected credentials")
+
+    provider = _provider(chat=FatalChat(), observation_sink=observations.append)
+    client = provider.chat("ask_answer")
+    with pytest.raises(provider_mod.ModelInvocationError):
+        client.chat_json([], "{}")
+    provider.close()
+
+    assert [(item.status, item.trigger) for item in observations] == [
+        ("error", "observed_failure")
+    ]
+    assert provider.scheduler_snapshot("chat").breaker_state == "open"
+
+
+def test_completion_order_not_delayed_caller_resolution_drives_recovery():
+    failure_entered = threading.Event()
+    failure_release = threading.Event()
+    failure_finished = threading.Event()
+    failure_future_done = threading.Event()
+    failure_resolution_release = threading.Event()
+    observed = threading.Event()
+    observations = []
+
+    class OrderedChat(_Chat):
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            if messages == ["fail"]:
+                failure_entered.set()
+                assert failure_release.wait(2)
+                failure_finished.set()
+                raise TimeoutError("older provider failure")
+            assert failure_finished.wait(2)
+            return self.result
+
+    def observer(value):
+        observations.append(value)
+        if len(observations) == 2:
+            observed.set()
+
+    provider = _provider(
+        registry=_registry(maximum=2),
+        chat=OrderedChat(),
+        observation_sink=observer,
+    )
+    client = provider.chat("ask_answer")
+    original_resolve = client._resolve
+
+    def delayed_failure_resolve(call):
+        if threading.current_thread().name.startswith("delayed-failure"):
+            call.future.add_done_callback(lambda _future: failure_future_done.set())
+            assert failure_future_done.wait(2)
+            assert failure_resolution_release.wait(2)
+        return original_resolve(call)
+
+    client._resolve = delayed_failure_resolve
+    failure_executor = ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="delayed-failure"
+    )
+    success_executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        failed = failure_executor.submit(client.chat_json, ["fail"], "{}")
+        assert failure_entered.wait(1)
+        succeeded = success_executor.submit(client.chat_json, ["success"], "{}")
+        failure_release.set()
+        assert failure_future_done.wait(1)
+        assert succeeded.result(timeout=2) == '{"ok": true}'
+        assert observed.wait(1)
+        assert [(item.status, item.trigger) for item in observations] == [
+            ("error", "observed_failure"),
+            ("ok", "recovery_probe"),
+        ]
+        assert observations[0].occurred_at <= observations[1].occurred_at
+        failure_resolution_release.set()
+        with pytest.raises(provider_mod.ModelInvocationError):
+            failed.result(timeout=2)
+    finally:
+        failure_release.set()
+        failure_resolution_release.set()
+        provider.close()
+        failure_executor.shutdown()
+        success_executor.shutdown()
+
+
+def test_close_drains_failure_observation_even_when_caller_resolves_late():
+    transport_entered = threading.Event()
+    transport_release = threading.Event()
+    future_done = threading.Event()
+    resolution_release = threading.Event()
+    observer_entered = threading.Event()
+    observer_release = threading.Event()
+    observations = []
+
+    class BlockingFailureChat(_Chat):
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            transport_entered.set()
+            assert transport_release.wait(2)
+            raise TimeoutError("provider failed during close")
+
+    def observer(value):
+        observations.append(value)
+        observer_entered.set()
+        assert observer_release.wait(2)
+
+    provider = _provider(
+        registry=_registry(maximum=1),
+        chat=BlockingFailureChat(),
+        observation_sink=observer,
+    )
+    client = provider.chat("ask_answer")
+    original_resolve = client._resolve
+
+    def delayed_resolve(call):
+        call.future.add_done_callback(lambda _future: future_done.set())
+        assert future_done.wait(2)
+        assert resolution_release.wait(2)
+        return original_resolve(call)
+
+    client._resolve = delayed_resolve
+    caller = ThreadPoolExecutor(max_workers=1)
+    closer = ThreadPoolExecutor(max_workers=1)
+    try:
+        result = caller.submit(client.chat_json, [], "{}")
+        assert transport_entered.wait(1)
+        closing = closer.submit(provider.close)
+        transport_release.set()
+        assert future_done.wait(1)
+        assert observer_entered.wait(1)
+        time.sleep(0.03)
+        assert not closing.done()
+        observer_release.set()
+        closing.result(timeout=2)
+        assert [(item.status, item.trigger) for item in observations] == [
+            ("error", "observed_failure")
+        ]
+        resolution_release.set()
+        with pytest.raises(provider_mod.ModelInvocationError):
+            result.result(timeout=2)
+    finally:
+        transport_release.set()
+        observer_release.set()
+        resolution_release.set()
+        provider.close()
+        caller.shutdown()
+        closer.shutdown()
+
+
+def test_close_cancels_queued_rerank_call_without_deadlock():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingReranker(_Reranker):
+        def _rerank_batch(self, query, documents):
+            entered.set()
+            assert release.wait(2)
+            return [{"index": 0, "relevance_score": 1.0}]
+
+    provider = _provider(
+        registry=_registry(maximum=1), reranker=BlockingReranker()
+    )
+    client = provider.rerank("retrieval_rerank")
+    executor = ThreadPoolExecutor(max_workers=3)
+    try:
+        active = executor.submit(client.rerank, "q", ["a"])
+        assert entered.wait(1)
+        queued = executor.submit(client.rerank, "q", ["b"])
+        deadline = time.monotonic() + 1
+        while provider.scheduler_snapshot("rerank").queued != 1:
+            assert time.monotonic() < deadline
+            time.sleep(0.005)
+        closing = executor.submit(provider.close)
+        release.set()
+        assert active.result(timeout=2) == [0]
+        assert queued.result(timeout=2) == [0]
+        closing.result(timeout=2)
+    finally:
+        release.set()
+        provider.close()
+        executor.shutdown()
+
+
 def test_close_prevents_unmaterialized_construction_and_closes_raw_once():
     constructed = []
     provider = RuntimeModelProvider(
@@ -589,7 +844,7 @@ def test_close_stops_all_service_admission_before_waiting_for_active_work():
         assert entered.wait(1)
         closing = executor.submit(provider.close)
         deadline = time.monotonic() + 1
-        while not provider._closed:
+        while not provider._closing:
             assert time.monotonic() < deadline
             time.sleep(0.005)
         with pytest.raises(provider_mod.ModelInvocationError) as caught:
@@ -653,7 +908,8 @@ def test_close_and_submit_share_one_atomic_provider_admission_boundary():
     try:
         closing = executor.submit(provider.close)
         assert stop_entered.wait(1)
-        assert provider._closed is True
+        assert provider._closing is True
+        assert provider._closed is False
 
         def submit_after_close_started():
             submit_entered.set()
@@ -661,17 +917,15 @@ def test_close_and_submit_share_one_atomic_provider_admission_boundary():
 
         late_call = executor.submit(submit_after_close_started)
         assert submit_entered.wait(1)
-        time.sleep(0.03)
-        assert not late_call.done()
+        with pytest.raises(provider_mod.ModelInvocationError) as caught:
+            late_call.result(timeout=2)
+        assert caught.value.code == "model_service_unavailable"
         assert raws["second"].transport_calls == 0
 
         concurrent_close = executor.submit(provider.close)
         allow_stop.set()
         closing.result(timeout=2)
         concurrent_close.result(timeout=2)
-        with pytest.raises(provider_mod.ModelInvocationError) as caught:
-            late_call.result(timeout=2)
-        assert caught.value.code == "model_service_unavailable"
         assert raws["second"].transport_calls == 0
         assert [raw.close_calls for raw in raws.values()] == [1, 1]
     finally:
