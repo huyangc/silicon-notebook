@@ -69,17 +69,21 @@ def _dated_paths_in_dir(d: Path, channel: str) -> List[Path]:
     `<channel>-` 匹配，再对切掉前缀后的剩余部分做锚定 match，因此 stem 必须
     整段等于 channel，不会把 `<channel>-<其它东西>-YYYY-MM-DD.jsonl` 误收进来。"""
     prefix = f"{channel}-"
-    found: List[Tuple[str, str, Path]] = []
+    # 每天最多一份：明文与 .gz 会同时存在——_gzip_day_file 在 os.replace(tmp, gz)
+    # 与 plain.unlink() 之间必然两份都在，而且它整段 `except Exception: pass`，
+    # unlink 失败时两份会**永久**并存。两份都收进来会让 parse_llm_log /
+    # read_ask_stage_records 把同一天算两遍（调用数、重试、token、延迟样本全部虚高）。
+    # 取舍与 resolve_day_path 一致：明文优先于 .gz（明文是正在写的那份，且解压零成本）。
+    by_day: dict[str, Path] = {}
     for p in d.glob(f"{channel}-*.jsonl"):
         m = _PLAIN_DATE_RE.match(p.name[len(prefix):])
         if m:
-            found.append((m.group(1), p.name, p))
+            by_day[m.group(1)] = p                    # 明文无条件胜出
     for p in d.glob(f"{channel}-*.jsonl.gz"):
         m = _GZ_DATE_RE.match(p.name[len(prefix):])
         if m:
-            found.append((m.group(1), p.name, p))
-    found.sort(key=lambda t: (t[0], t[1]))
-    return [p for _, _, p in found]
+            by_day.setdefault(m.group(1), p)          # 仅在当天没有明文时才用 .gz
+    return [by_day[day] for day in sorted(by_day)]
 
 
 def expand_channel_paths(channel_file: Path) -> List[Path]:
