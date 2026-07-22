@@ -326,18 +326,41 @@ class AskStateStore:
         user_id: str,
     ) -> str:
         """Mint the answer id, stamp it into the payload JSON and commit the
-        answers row in its own write transaction.  The large-library
-        ``index_required`` decoration stays a facade concern (scale-index
-        domain) and must already be applied to ``response``."""
+        answers row in its own write transaction. A non-null conversation is
+        owner/notebook checked under its row lock before insert because the
+        legacy schema has no answers→conversations FK; ``None`` remains valid
+        for server-owned answer snapshots used outside conversation history.
+        The large-library ``index_required`` decoration stays a facade concern
+        and must already be applied to ``response``."""
         answer_id = self.seams.new_id("ans")
         now = normalize_timestamp(self.seams.now())
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
+            self._lock_answer_conversation_on(
+                db, notebook_id, conversation_id, user_id
+            )
             self._insert_answer_on(
                 db, answer_id, notebook_id, conversation_id, question, payload, now
             )
         return answer_id
+
+    @staticmethod
+    def _lock_answer_conversation_on(
+        db: object,
+        notebook_id: str,
+        conversation_id: Optional[str],
+        user_id: str,
+    ) -> None:
+        if conversation_id is None:
+            return
+        row = db.execute(
+            "SELECT id FROM conversations WHERE id=%s AND notebook_id=%s "
+            "AND created_by=%s FOR UPDATE",
+            (conversation_id, notebook_id, user_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(conversation_id)
 
     @staticmethod
     def _insert_answer_on(
@@ -379,6 +402,9 @@ class AskStateStore:
                 raise KeyError(job_id)
             if row["status"] != "running":
                 return None
+            self._lock_answer_conversation_on(
+                db, notebook_id, conversation_id, user_id
+            )
             self._insert_answer_on(
                 db, answer_id, notebook_id, conversation_id, question, payload, now
             )

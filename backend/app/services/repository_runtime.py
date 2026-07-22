@@ -1033,8 +1033,9 @@ class RepositoryRuntime:
     def ask_service(self) -> AskService:
         """The ONE runtime-owned AskService (Task 24), composed lazily.
 
-        Ports: the Task-22 ask-state store (prepare_turn/save_answer with
-        EXPLICIT user_id), the Task-21 retrieval + evidence-context services,
+        Ports: the Task-22 ask-state store (shared synchronous/streaming
+        durable-job lifecycle and atomic final save with EXPLICIT user_id),
+        the Task-21 retrieval + evidence-context services,
         the model provider doubling as the model-error sink (per-user client
         resolution stays a per-access ContextVar chain), a fresh
         CommunityQueryService PER USE (``sibling_min_bridge`` read at call

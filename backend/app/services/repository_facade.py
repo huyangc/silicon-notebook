@@ -2879,7 +2879,10 @@ class RepositoryFacade:
     def ask(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         """Dispatch to the retrieval handler named by payload.mode, resolved
         through the ask_modes registry. Unknown modes raise UnknownAskMode (the
-        API layer returns 422) — never a silent fall-through to the legacy path."""
+        API layer returns 422) — never a silent fall-through to the legacy
+        path. The blocking surface uses the same internal durable-job and
+        atomic-final-save lifecycle as the streaming coordinator; its job id
+        is not added to the AskResponse protocol."""
         return self._runtime.ask_component.ask_current(notebook_id, payload)
 
     # ask_fast (legacy KG-native, P4-5退役) 和 _ask_global (GraphRAG map-reduce, P4-5退役)

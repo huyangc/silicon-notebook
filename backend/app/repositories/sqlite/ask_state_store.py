@@ -190,6 +190,7 @@ class AskStateStore:
     def cancel_running_job(self, job_id: str, user_id: str) -> dict:
         """Durably cancel a running owned job in one write transaction."""
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
             row = db.execute(
                 "SELECT conversation_id,status FROM ask_jobs "
                 "WHERE id=? AND created_by=?",
@@ -353,18 +354,42 @@ class AskStateStore:
         user_id: str,
     ) -> str:
         """Mint the answer id, stamp it into the payload JSON and commit the
-        answers row in its own write transaction.  The large-library
-        ``index_required`` decoration stays a facade concern (scale-index
-        domain) and must already be applied to ``response``."""
+        answers row in its own guarded write transaction. A non-null
+        conversation is owner/notebook checked before insert because the
+        legacy schema has no answers→conversations FK; ``None`` remains valid
+        for server-owned answer snapshots used outside conversation history.
+        The large-library ``index_required`` decoration stays a facade concern
+        and must already be applied to ``response``."""
         answer_id = self.seams.new_id("ans")
         now = self.seams.now()
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            self._lock_answer_conversation_on(
+                db, notebook_id, conversation_id, user_id
+            )
             self._insert_answer_on(
                 db, answer_id, notebook_id, conversation_id, question, payload, now
             )
         return answer_id
+
+    @staticmethod
+    def _lock_answer_conversation_on(
+        db: sqlite3.Connection,
+        notebook_id: str,
+        conversation_id: Optional[str],
+        user_id: str,
+    ) -> None:
+        if conversation_id is None:
+            return
+        row = db.execute(
+            "SELECT id FROM conversations WHERE id=? AND notebook_id=? "
+            "AND created_by=?",
+            (conversation_id, notebook_id, user_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(conversation_id)
 
     @staticmethod
     def _insert_answer_on(
@@ -408,6 +433,7 @@ class AskStateStore:
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
             row = db.execute(
                 "SELECT status FROM ask_jobs WHERE id=? AND notebook_id=? "
                 "AND conversation_id=? AND created_by=?",
@@ -417,6 +443,9 @@ class AskStateStore:
                 raise KeyError(job_id)
             if row["status"] != "running":
                 return None
+            self._lock_answer_conversation_on(
+                db, notebook_id, conversation_id, user_id
+            )
             self._insert_answer_on(
                 db, answer_id, notebook_id, conversation_id, question, payload, now
             )

@@ -3,7 +3,8 @@
 的唯一所有者。SQLiteRepository 只保留冻结签名 delegate。
 
 组合规则 (Gate 8):
-* 引擎只持窄端口 —— ask_state(prepare_turn/save_answer,Task 22)、
+* 引擎只持窄端口 —— ask_state(prepare_turn/begin_durable_job/
+  save_answer_for_job/finish_job,Task 22)、
   retrieval(candidates+graph,Task 21)、evidence_context(上下文/锚点/引用/
   tier,Task 21)、model_clients/model_errors(RuntimeModelProvider,一个所有
   者:facade 的 llm_client 换针测试仍被观察)、communities 工厂(逐次新建,
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from typing import Any, Callable, Dict, Iterable, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -228,7 +230,46 @@ class AskService:
                        job_id=job_id, cancel_event=cancel_event)
 
     def ask_current(self, notebook_id: str, payload: AskRequest) -> AskResponse:
-        return self.ask(notebook_id, payload, user_id=self.current_user_id())
+        """Run the synchronous Ask surface through the durable job lifecycle.
+
+        Streaming and synchronous callers now share the same state-store
+        primitives: create/touch conversation plus running job atomically,
+        pass the job into the engine's atomic final save, then finalize and
+        unregister. The job id remains internal to this blocking protocol.
+        """
+        from app.services.ask_modes import resolve_mode
+
+        user_id = self.current_user_id()
+        mode = resolve_mode(getattr(payload, "mode", None))
+        cancel_event = threading.Event()
+        job_id, _conversation_id = self.begin_job_current(
+            notebook_id, payload, mode.id, cancel_event
+        )
+        try:
+            response = self.ask(
+                notebook_id,
+                payload,
+                user_id=user_id,
+                job_id=job_id,
+                cancel_event=cancel_event,
+            )
+        except AskCancelled:
+            self.finish_job(job_id, "cancelled")
+            raise
+        except BaseException as exc:
+            self.finish_job(
+                job_id, "failed", error=f"{type(exc).__name__}: {exc}"
+            )
+            raise
+        answer_id = str(getattr(response, "answer_id", "") or "")
+        if not answer_id:
+            error = RuntimeError("synchronous Ask completed without a durable answer")
+            self.finish_job(
+                job_id, "failed", error=f"{type(error).__name__}: {error}"
+            )
+            raise error
+        self.finish_job(job_id, "done", answer_id=answer_id)
+        return response
 
     def ask_chunk_current(
         self, notebook_id: str, payload: AskRequest, cancel_event: CancelEvent = None
@@ -293,6 +334,7 @@ class AskService:
     def finish_job(
         self, job_id: str, status: str, *, answer_id: str = "", error: str = ""
     ) -> None:
+        """Finalize one durable Ask and remove its in-process cancel handle."""
         conversation_id = self.ask_state.finish_job(
             job_id, status, answer_id=answer_id, error=error
         )

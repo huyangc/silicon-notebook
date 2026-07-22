@@ -216,6 +216,72 @@ def test_cancel_endpoint_wins_before_final_answer_save_atomically(tmp_path, monk
     assert count == 0
 
 
+def test_sync_ask_cancel_endpoint_returns_no_final_answer_or_empty_conversation(
+    tmp_path, monkeypatch
+):
+    client = _api_client(tmp_path, monkeypatch)
+    nb = client.post("/api/notebooks", json={"name": "nb"}).json()["id"]
+
+    from app.api import ask_routes
+
+    repo = ask_routes.repository()
+    store = repo._runtime.ask_state
+    job_started = threading.Event()
+    save_entered = threading.Event()
+    release_save = threading.Event()
+    captured: dict[str, str] = {}
+    real_begin = store.begin_durable_job
+    real_save = store.save_answer_for_job
+
+    def capture_begin(notebook_id, payload, mode, user_id):
+        result = real_begin(notebook_id, payload, mode, user_id)
+        captured["job_id"], captured["conversation_id"] = result
+        job_started.set()
+        return result
+
+    def blocked_save(
+        job_id, notebook_id, conversation_id, question, response, user_id
+    ):
+        save_entered.set()
+        assert release_save.wait(timeout=5)
+        return real_save(
+            job_id, notebook_id, conversation_id, question, response, user_id
+        )
+
+    monkeypatch.setattr(store, "begin_durable_job", capture_begin)
+    monkeypatch.setattr(store, "save_answer_for_job", blocked_save)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        ask_future = executor.submit(
+            client.post,
+            f"/api/notebooks/{nb}/ask",
+            json={"question": "cancel synchronous answer", "mode": "chunk"},
+        )
+        try:
+            assert job_started.wait(timeout=5)
+            assert save_entered.wait(timeout=5)
+            cancelled = client.post(
+                f"/api/notebooks/{nb}/ask/jobs/{captured['job_id']}/cancel"
+            )
+            assert cancelled.status_code == 200
+            assert cancelled.json()["status"] == "cancelled"
+        finally:
+            release_save.set()
+        response = ask_future.result(timeout=5)
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Ask cancelled"
+    assert repo.ask_job_status(captured["job_id"])["status"] == "cancelled"
+    with repo._connect() as db:
+        assert db.execute(
+            "SELECT COUNT(*) AS n FROM answers WHERE notebook_id=?", (nb,)
+        ).fetchone()["n"] == 0
+        assert db.execute(
+            "SELECT COUNT(*) AS n FROM conversations WHERE id=?",
+            (captured["conversation_id"],),
+        ).fetchone()["n"] == 0
+
+
 # ---- Task 22: 持久化在 runtime.ask_state 组件;facade 保留取消注册编排 ----
 
 def test_begin_and_finish_delegate_persistence_to_runtime_ask_state(repo, monkeypatch):

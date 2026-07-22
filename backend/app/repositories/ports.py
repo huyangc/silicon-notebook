@@ -1044,8 +1044,9 @@ class AskStateStorePort(Protocol):
     """The raw Ask durable-state store contract (Task 22).
 
     Identity is explicit — ``user_id`` comes from the caller and the store
-    never reads the request ContextVar.  ``begin_durable_job`` opens ONE write
-    transaction that creates/touches the conversation, mutates
+    never reads the request ContextVar. Synchronous and streaming Ask both use
+    ``begin_durable_job``, which opens ONE write transaction that creates or
+    touches the conversation, mutates
     ``payload.conversation_id`` at the same point as baseline and inserts the
     running job row; ``finish_job`` performs only the terminal job-row
     transaction and returns its conversation id — the failed/cancelled empty-

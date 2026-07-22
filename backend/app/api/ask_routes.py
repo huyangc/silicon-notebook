@@ -26,6 +26,7 @@ from app.models.ask import (
 from app.models.identity import UserProfile
 from app.repositories.ports import AskStreamPort
 from app.services.ask_modes import ASK_MODES, UnknownAskMode, resolve_mode
+from app.services.cancellation import AskCancelled
 
 
 router = APIRouter()
@@ -49,6 +50,8 @@ def ask(notebook_id: str, payload: AskRequest) -> AskResponse:
     except UnknownAskMode as exc:
         raise HTTPException(status_code=422, detail={
             "error": "unknown ask mode", "mode": exc.mode, "valid": list(ASK_MODES)})
+    except AskCancelled:
+        raise HTTPException(status_code=409, detail="Ask cancelled")
     except KeyError:
         raise HTTPException(status_code=404, detail="Notebook not found")
 

@@ -7,6 +7,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +29,9 @@ from app.repositories.sqlite.knowhow_transfer_store import (
 from app.repositories.sqlite.memory_store import MemoryStore as SqliteMemoryStore
 from app.repositories.sqlite.report_store import ReportStore as SqliteReportStore
 from app.services.repository_runtime import RepositoryCompatibilitySeams
+from app.services.ask_execution import AskCancellationRegistry
+from app.services.ask_service import AskService
+from app.services.cancellation import AskCancelled, raise_if_cancelled
 
 
 NOW = "2026-07-23T00:00:00+00:00"
@@ -294,6 +298,187 @@ def test_ask_cleanup_preserves_other_running_job_and_terminal_states(
     cancelled_job_state = content_harness.ask.ask_job_status(cancelled_job)
     assert cancelled_job_state["status"] == "cancelled"
     assert cancelled_job_state["answer_id"] == ""
+
+
+def _sync_ask_service(content_harness) -> AskService:
+    service = AskService.__new__(AskService)
+    service.ask_state = content_harness.ask
+    service.current_user_id = lambda: "user-content"
+    service.cancellations = AskCancellationRegistry()
+    service.notebooks = SimpleNamespace(get_notebook=lambda notebook_id: notebook_id)
+    return service
+
+
+def test_sync_ask_running_job_protects_conversation_until_atomic_final_save(
+    content_harness,
+):
+    """The non-streaming production wrapper must use the durable job lease.
+
+    The engine is paused after the real prepare_turn. A cleanup from a
+    cancelled/failed sibling runs to completion before final save; it must see
+    this synchronous Ask's running job and retain the conversation.
+    """
+    service = _sync_ask_service(content_harness)
+    prepared = threading.Event()
+    release = threading.Event()
+    captured: dict[str, str] = {}
+
+    def engine(
+        notebook_id, payload, *, user_id, job_id="", cancel_event=None,
+        on_trace=None,
+    ):
+        del on_trace
+        turn = content_harness.ask.prepare_turn(
+            notebook_id, payload.conversation_id, payload.question, user_id
+        )
+        captured.update(job_id=job_id, conversation_id=turn.conversation_id)
+        prepared.set()
+        assert release.wait(timeout=5)
+        response = AskResponse(
+            answer="sync answer",
+            conclusion="sync answer",
+            conversation_id=turn.conversation_id,
+            citations=[],
+            anchors=[],
+        )
+        if job_id:
+            answer_id = content_harness.ask.save_answer_for_job(
+                job_id,
+                notebook_id,
+                turn.conversation_id,
+                payload.question,
+                response,
+                user_id,
+            )
+            if answer_id is None:
+                raise AskCancelled()
+        else:
+            answer_id = content_harness.ask.save_answer(
+                notebook_id,
+                turn.conversation_id,
+                payload.question,
+                response,
+                user_id,
+            )
+        response.answer_id = answer_id
+        return response
+
+    service.ask = engine
+    request = AskRequest(question="synchronous production path", mode="chunk")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(service.ask_current, "nb-content", request)
+        assert prepared.wait(timeout=5)
+        content_harness.ask.cleanup_empty_conversation(captured["conversation_id"])
+        release.set()
+        response = future.result(timeout=5)
+
+    detail = content_harness.ask.get_conversation(captured["conversation_id"])
+    assert response.conversation_id == captured["conversation_id"]
+    assert detail.turn_count == 1
+    assert detail.turns[0].answer_id == response.answer_id
+    assert detail.active_job is None
+    assert "job_id" not in response.model_dump()
+    assert content_harness.ask.ask_job_status(captured["job_id"])["status"] == "done"
+    mark = "%s" if content_harness.backend == "postgres" else "?"
+    with content_harness.database.connect() as connection:
+        orphan_count = connection.execute(
+            "SELECT COUNT(*) AS n FROM answers a LEFT JOIN conversations c "
+            "ON c.id=a.conversation_id WHERE a.id=" + mark + " AND c.id IS NULL",
+            (response.answer_id,),
+        ).fetchone()["n"]
+    assert orphan_count == 0
+
+
+def test_sync_ask_failure_and_explicit_cancel_leave_no_empty_conversation(
+    content_harness,
+):
+    service = _sync_ask_service(content_harness)
+    failed: dict[str, str] = {}
+
+    def failing_engine(
+        notebook_id, payload, *, user_id, job_id="", cancel_event=None,
+        on_trace=None,
+    ):
+        del cancel_event, on_trace
+        turn = content_harness.ask.prepare_turn(
+            notebook_id, payload.conversation_id, payload.question, user_id
+        )
+        failed.update(job_id=job_id, conversation_id=turn.conversation_id)
+        raise RuntimeError("sync inference failed")
+
+    service.ask = failing_engine
+    with pytest.raises(RuntimeError, match="sync inference failed"):
+        service.ask_current(
+            "nb-content", AskRequest(question="failing sync", mode="chunk")
+        )
+    assert failed["job_id"]
+    assert content_harness.ask.ask_job_status(failed["job_id"])["status"] == "failed"
+    with pytest.raises(KeyError):
+        content_harness.ask.get_conversation(failed["conversation_id"])
+
+    prepared = threading.Event()
+    release = threading.Event()
+    cancelled: dict[str, str] = {}
+
+    def cancellable_engine(
+        notebook_id, payload, *, user_id, job_id="", cancel_event=None,
+        on_trace=None,
+    ):
+        del on_trace
+        turn = content_harness.ask.prepare_turn(
+            notebook_id, payload.conversation_id, payload.question, user_id
+        )
+        cancelled.update(job_id=job_id, conversation_id=turn.conversation_id)
+        prepared.set()
+        assert release.wait(timeout=5)
+        raise_if_cancelled(cancel_event)
+        raise AssertionError("cancelled synchronous Ask continued")
+
+    service.ask = cancellable_engine
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            service.ask_current,
+            "nb-content",
+            AskRequest(question="cancelled sync", mode="chunk"),
+        )
+        assert prepared.wait(timeout=5)
+        assert cancelled["job_id"]
+        state = service.cancel_job(cancelled["job_id"], "user-content")
+        assert state == {"status": "cancelled", "job_id": cancelled["job_id"]}
+        release.set()
+        with pytest.raises(AskCancelled):
+            future.result(timeout=5)
+
+    assert content_harness.ask.ask_job_status(cancelled["job_id"])["status"] == "cancelled"
+    with pytest.raises(KeyError):
+        content_harness.ask.get_conversation(cancelled["conversation_id"])
+
+
+def test_conversation_bound_answer_save_rejects_a_missing_parent(
+    content_harness,
+):
+    """No FK exists on answers.conversation_id; the store must guard it."""
+    response = AskResponse(
+        answer="must not orphan",
+        conclusion="must not orphan",
+        conversation_id="conv-missing-parent",
+        citations=[],
+        anchors=[],
+    )
+    with pytest.raises(KeyError, match="conv-missing-parent"):
+        content_harness.ask.save_answer(
+            "nb-content",
+            "conv-missing-parent",
+            "orphan attempt",
+            response,
+            "user-content",
+        )
+    mark = "%s" if content_harness.backend == "postgres" else "?"
+    with content_harness.database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM answers WHERE conversation_id=" + mark,
+            ("conv-missing-parent",),
+        ).fetchone()["n"] == 0
 
 
 @pytest.mark.postgres_integration

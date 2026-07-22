@@ -5,8 +5,8 @@ communities / scale profile), never over the facade.
 
 Frozen here (the RED items of the move):
 
-1. non-streaming ``repo.ask()`` never creates an ask_jobs row — durable jobs
-   belong exclusively to the streaming AskExecutionCoordinator;
+1. non-streaming ``repo.ask()`` uses the same durable-job and atomic-final-save
+   lifecycle as streaming, while keeping the job id out of its response;
 2. the runtime owns ONE AskService (identity-stable across resolutions) and
    the facade's frozen ``ask_chunk``/``ask_reasoning``/``ask_graph``
    signatures adapt ``current_user().id`` into the service's keyword-only
@@ -48,15 +48,21 @@ def repo(tmp_path, monkeypatch):
     return r
 
 
-def test_non_streaming_ask_creates_no_job(repo):
+def test_non_streaming_ask_uses_hidden_terminal_job(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
 
     response = repo.ask(nb.id, AskRequest(question="q", mode="chunk"))
 
     assert response.answer_id                       # 答案照存(_save_answer 收口)
     with repo._connect() as db:
-        jobs = db.execute("SELECT COUNT(*) AS n FROM ask_jobs").fetchone()["n"]
-    assert jobs == 0                                # 非流式 ask 绝不建 durable job
+        jobs = db.execute(
+            "SELECT status,answer_id FROM ask_jobs"
+        ).fetchall()
+    assert [(row["status"], row["answer_id"]) for row in jobs] == [
+        ("done", response.answer_id)
+    ]
+    assert "job_id" not in response.model_dump()
+    assert repo.get_conversation(response.conversation_id).active_job is None
 
 
 def test_runtime_owns_one_ask_service_and_facade_adapts_identity(repo, monkeypatch):
@@ -67,15 +73,17 @@ def test_runtime_owns_one_ask_service_and_facade_adapts_identity(repo, monkeypat
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     seen: dict = {}
 
-    def fake_chunk(notebook_id, payload, *, user_id, cancel_event=None):
-        seen["args"] = (notebook_id, user_id, cancel_event)
+    def fake_chunk(
+        notebook_id, payload, *, user_id, job_id="", cancel_event=None
+    ):
+        seen["args"] = (notebook_id, user_id, job_id, cancel_event)
         return AskResponse(conclusion="stubbed")
 
     monkeypatch.setattr(service, "ask_chunk", fake_chunk, raising=False)
     out = repo.ask_chunk(nb.id, AskRequest(question="q", mode="chunk"))
 
     assert out.conclusion == "stubbed"
-    assert seen["args"] == (nb.id, repo.current_user().id, None)
+    assert seen["args"] == (nb.id, repo.current_user().id, "", None)
 
 
 def test_per_user_model_changes_resolve_without_restart(repo):
