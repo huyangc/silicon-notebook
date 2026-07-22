@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import time
+import logging
 from datetime import datetime, timezone
 
 import pytest
@@ -139,6 +140,50 @@ def test_pool_reset_restores_server_side_session_defaults(
     }
 
 
+def test_pool_reset_restores_client_transaction_state_and_write_rollback(
+    postgres_database,
+):
+    from psycopg import IsolationLevel
+    from psycopg.pq import TransactionStatus
+    from psycopg.rows import dict_row, tuple_row
+
+    # Force reuse of the exact polluted connection instead of allowing a fresh
+    # second pool member to make the test pass accidentally.
+    postgres_database._pool.resize(1, 1)
+    with postgres_database.write() as conn:
+        conn.execute(
+            "CREATE TABLE client_state_probe (id integer PRIMARY KEY, value text)"
+        )
+
+    with postgres_database.connect() as conn:
+        assert conn.info.transaction_status == TransactionStatus.IDLE
+        conn.autocommit = True
+        conn.isolation_level = IsolationLevel.SERIALIZABLE
+        conn.read_only = True
+        conn.deferrable = True
+        conn.row_factory = tuple_row
+
+    with pytest.raises(RuntimeError, match="rollback probe"):
+        with postgres_database.write() as conn:
+            assert conn.info.transaction_status == TransactionStatus.IDLE
+            assert conn.autocommit is False
+            assert conn.isolation_level == IsolationLevel.READ_COMMITTED
+            assert conn.read_only is False
+            assert conn.deferrable is False
+            assert conn.row_factory is dict_row
+            conn.execute("INSERT INTO client_state_probe VALUES (1, 'must rollback')")
+            raise RuntimeError("rollback probe")
+
+    with postgres_database.connect() as conn:
+        assert conn.autocommit is False
+        assert conn.isolation_level == IsolationLevel.READ_COMMITTED
+        assert conn.read_only is False
+        assert conn.deferrable is False
+        assert conn.row_factory is dict_row
+        row = conn.execute("SELECT count(*) AS count FROM client_state_probe").fetchone()
+    assert row == {"count": 0}
+
+
 def test_statement_timeout_cancels_long_query(postgres_database):
     import psycopg
 
@@ -218,15 +263,34 @@ def test_close_is_idempotent(postgres_database):
             pass
 
 
+@pytest.mark.parametrize(
+    ("secret_url", "specific_secrets"),
+    [
+        (
+            "postgresql://secret-user:secret-password@127.0.0.1:1/"
+            "silicon_notebook_task4_test?sslmode=secret-token&"
+            "application_name=query-secret&target_session_attrs=prefer-standby",
+            (
+                "secret-token",
+                "query-secret",
+                "prefer-standby",
+                "sslmode",
+                "application_name",
+                "target_session_attrs",
+            ),
+        ),
+        (
+            "postgresql://secret-user:secret-password%ZZ@127.0.0.1:1/"
+            "silicon_notebook_task4_test",
+            ("secret-password%ZZ", "%ZZ"),
+        ),
+    ],
+)
 def test_connection_failure_and_repr_redact_credentials_and_query_options(
-    postgres_settings, tmp_path
+    postgres_settings, tmp_path, caplog, secret_url, specific_secrets
 ):
     from app.repositories.postgres.database import PostgresDatabase, PostgresDatabaseError
 
-    secret_url = (
-        "postgresql://secret-user:secret-password@127.0.0.1:1/"
-        "silicon_notebook_task4_test?sslmode=disable&access_token=secret-token"
-    )
     settings = postgres_settings.model_copy(
         update={
             "database_url": secret_url,
@@ -235,6 +299,8 @@ def test_connection_failure_and_repr_redact_credentials_and_query_options(
             "postgres_pool_max_size": 1,
         }
     )
+    caplog.set_level(logging.DEBUG, logger="psycopg")
+    caplog.set_level(logging.DEBUG, logger="psycopg.pool")
     database = PostgresDatabase(settings, tmp_path)
     try:
         diagnostic = repr(database)
@@ -244,8 +310,9 @@ def test_connection_failure_and_repr_redact_credentials_and_query_options(
         diagnostic += str(caught.value) + repr(caught.value)
     finally:
         database.close()
+    diagnostic += "\n".join(record.getMessage() for record in caplog.records)
 
-    for secret in ("secret-user", "secret-password", "secret-token", "sslmode"):
+    for secret in ("secret-user", "secret-password", *specific_secrets):
         assert secret not in diagnostic
     assert "postgresql://127.0.0.1:1/silicon_notebook_task4_test" in diagnostic
 

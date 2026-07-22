@@ -1,6 +1,7 @@
 """Bounded PostgreSQL connection pool and transaction boundary."""
 from __future__ import annotations
 
+import logging
 import sys
 import threading
 from contextlib import contextmanager
@@ -10,6 +11,7 @@ from typing import Iterator
 
 import psycopg
 from psycopg import IsolationLevel
+from psycopg.pq import TransactionStatus
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool, PoolTimeout
 
@@ -40,6 +42,45 @@ _ISOLATION_LEVELS = {
     "repeatable read": IsolationLevel.REPEATABLE_READ,
     "serializable": IsolationLevel.SERIALIZABLE,
 }
+
+
+_CONNECTION_LOG_STATE = threading.local()
+
+
+class _ConnectingThreadLogFilter(logging.Filter):
+    """Suppress raw libpq diagnostics on the thread parsing a secret conninfo."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(_CONNECTION_LOG_STATE, "suppress", False):
+            # Invalid percent encodings and query-option values are rendered
+            # verbatim by Psycopg before its exception reaches the pool. Replace
+            # the complete diagnostic instead of trying to enumerate secrets.
+            record.msg = "PostgreSQL connection diagnostic suppressed"
+            record.args = ()
+            record.exc_info = None
+            record.exc_text = None
+        return True
+
+
+_PSYCOPG_LOG_FILTER = _ConnectingThreadLogFilter()
+logging.getLogger("psycopg").addFilter(_PSYCOPG_LOG_FILTER)
+
+
+class _SafeDiagnosticConnection(psycopg.Connection[PostgresRow]):
+    """Keep raw conninfo failures out of both psycopg and pool loggers."""
+
+    @classmethod
+    def connect(cls, conninfo: str = "", **kwargs):
+        previous = getattr(_CONNECTION_LOG_STATE, "suppress", False)
+        _CONNECTION_LOG_STATE.suppress = True
+        try:
+            return super().connect(conninfo, **kwargs)
+        except Exception:
+            # psycopg_pool logs the exception after connect() returns. Give it
+            # a stable generic error with no original cause or raw conninfo.
+            raise psycopg.OperationalError("PostgreSQL connection failed") from None
+        finally:
+            _CONNECTION_LOG_STATE.suppress = previous
 
 
 class PostgresDatabase:
@@ -75,6 +116,7 @@ class PostgresDatabase:
         self._closed = False
         self._pool: ConnectionPool[psycopg.Connection[PostgresRow]] = ConnectionPool(
             conninfo=self._database_url,
+            connection_class=_SafeDiagnosticConnection,
             min_size=settings.postgres_pool_min_size,
             max_size=settings.postgres_pool_max_size,
             timeout=self._acquire_timeout,
@@ -103,13 +145,26 @@ class PostgresDatabase:
     def _configure_connection(self, conn: psycopg.Connection[PostgresRow]) -> None:
         self._restore_session_defaults(conn)
 
+    @staticmethod
+    def _restore_client_defaults(conn: psycopg.Connection[PostgresRow]) -> None:
+        # Psycopg transaction settings and row_factory are client-side state:
+        # RESET ALL cannot repair them. Roll back first so setters are legal,
+        # then establish the exact contract every borrower receives.
+        if conn.info.transaction_status != TransactionStatus.IDLE:
+            conn.rollback()
+        conn.autocommit = False
+        conn.isolation_level = IsolationLevel.READ_COMMITTED
+        conn.read_only = False
+        conn.deferrable = False
+        conn.row_factory = dict_row
+
     def _restore_session_defaults(
         self, conn: psycopg.Connection[PostgresRow]
     ) -> None:
         # Pool clients may change session-scoped values. Reassert the adapter's
         # contract both for new connections and before a returned connection is
         # reused; the callback must leave the connection idle.
-        conn.isolation_level = IsolationLevel.READ_COMMITTED
+        self._restore_client_defaults(conn)
         # RESET ALL is transactional and restores libpq startup options too,
         # including the fixture/tenant search_path. It also prevents arbitrary
         # client SET values (work_mem, role-adjacent GUCs, etc.) leaking to the
@@ -124,6 +179,10 @@ class PostgresDatabase:
             (f"{self._statement_timeout_ms}ms", f"{self._lock_timeout_ms}ms"),
         )
         conn.commit()
+        if conn.info.transaction_status != TransactionStatus.IDLE:
+            raise psycopg.ProgrammingError(
+                "PostgreSQL pool reset did not leave the connection idle"
+            )
 
     def _reset_connection(self, conn: psycopg.Connection[PostgresRow]) -> None:
         self._restore_session_defaults(conn)
@@ -161,6 +220,12 @@ class PostgresDatabase:
             ) from None
         except Exception:
             raise self._safe_error("pool acquisition") from None
+
+        try:
+            self._restore_client_defaults(conn)
+        except Exception:
+            manager.__exit__(*sys.exc_info())
+            raise self._safe_error("client-state reset") from None
 
         try:
             yield conn
