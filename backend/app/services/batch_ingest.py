@@ -391,8 +391,17 @@ def run_ingest(
     orig_provider = repo.settings.embed_provider
     repo.settings.embed_provider = ""   # 摄取期零嵌入:parse+chunk 快、无 429
 
-    # 同一次运行内的重复文件(输入目录里两个内容相同的文件)按内容哈希认领一次即可,
-    # 省掉第二次的建源/解析。线程安全:_one 在池里并发跑。
+    # 同一次运行内的重复文件(输入目录里两个内容相同的文件)按内容哈希认领一次即可。
+    # 主要作用不是省一次查库,而是挡住并发下的双重建源:没有它时两个同内容文件会同时
+    # 查到「尚未摄取」、双双 upload,建出两个重复源。线程安全:_one 在池里并发跑。
+    #
+    # 已知边界(codex 第 8 轮 P2,经权衡后不修):并发处理时,若副本 B 在认领者 A 失败
+    # **之前**就读到了认领并返回 skipped,A 事后交回认领也救不了 B —— 该内容本轮一份
+    # 都没进来。之所以接受:A 失败时**什么都没提交**,内容不在库里,重跑 ingest 即补上;
+    # 而彻底消除需要 per-digest 的完成条件变量(副本阻塞等认领者出结果),复杂度与收益
+    # 不成比例。对照未引入认领集合时的行为(双双上传、建出重复源),本实现是净改善。
+    # 保留行为由 test_run_ingest_same_run_duplicate_files_skip_not_reparse 与
+    # test_run_ingest_releases_the_claim_when_the_claimant_fails 钉住。
     claimed: set[str] = set()
     claim_lock = threading.Lock()
 
@@ -490,6 +499,15 @@ def backfill_element_embeddings(
 
     与 chunk/节点两侧并列的第三条补齐路径:此前 element 侧只有「整源重跑」一条路,
     写了一半的源(部分 element 有向量、部分没有)没有任何增量修法。
+
+    已知边界(codex 第 5/6/8 轮 P2,经权衡后本 PR 不修):待补行的**文本**是一次
+    fetchall 全读进内存的,大库上这部分内存与待补文本总量成正比。之所以不在这里改:
+    chunk 侧的 missing_chunk_embedding_rows 是**完全同构**的既有实现,只把 element 侧
+    改成分页会让两侧行为不一致、给后续维护埋坑;要治应两侧一起改成 keyset 分页,
+    作为独立改动提。本 PR 已把**向量**侧的内存做了分页——向量才是 GB 级的大头
+    (几十万 element × 1024 维 float),文本通常小一到两个数量级。
+    保留行为(向量确实分页落库)由
+    test_backfill_element_embeddings_persists_before_all_embedding_finishes 钉住。
     element_embeddings 走 INSERT OR REPLACE upsert,只补缺失不会动同源已有的向量。"""
     if not repo.settings.embedder_configured:
         return 0
