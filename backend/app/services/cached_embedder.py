@@ -8,6 +8,7 @@ per-text 而非 per-batch：否则批次边界一变（embed_batch_size 调整�
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List
 
 from app.core.cache import embed_key
@@ -22,8 +23,20 @@ class CachedEmbedder:
         self._truncate_chars = truncate_chars
 
     def __getattr__(self, name: str) -> Any:
-        # dim / embed_query / model_status 身份绑定等一律透传。
-        return getattr(self._inner, name)
+        # dim / model_status 身份绑定 / source_embedding 预热用的 _ensure 等一律透传。
+        #
+        # 只有 __dict__ 里找不到 name 时才会走到这里。此时若 _inner 也不在 __dict__
+        # （unpickle、copy 出的空壳、__init__ 中途抛异常），`self._inner` 会再次落回
+        # 本方法 → 无限递归 RecursionError。直接问实例字典，缺了就如实报 AttributeError。
+        #
+        # 刻意**不**按 name.startswith("_") 一刀切拒绝私有名：source_embedding._warm_up
+        # 靠 getattr(embedder, "_ensure", None) 预建 HTTP 客户端来规避多线程首次触碰的
+        # 懒初始化竞态，一刀切会让预热静默退化成 no-op（那里的 getattr 带默认值，不报错）。
+        try:
+            inner = object.__getattribute__(self, "_inner")
+        except AttributeError:
+            raise AttributeError(name) from None
+        return getattr(inner, name)
 
     def _key(self, text: str) -> str:
         # 必须对截断后的文本取键——后端内部同样只发送截断后的内容。
@@ -38,12 +51,13 @@ class CachedEmbedder:
         for key in set(keys):
             try:
                 raw = self._backend.get(key)
+                # 解码也在 try 之内：坏条目（非 JSON、不是数组）同样只能退化成
+                # miss。放在 try 之外的话，一条损坏的缓存行会把异常抛进主流程。
+                vec = _decode(raw) if raw is not None else None
             except Exception:      # 缓存故障退化为 miss，绝不影响主流程
-                raw = None
-            if raw is not None:
-                vec = _decode(raw)
-                if vec is not None:
-                    cached[key] = vec
+                vec = None
+            if vec is not None:
+                cached[key] = vec
 
         # 未命中的去重后按原序请求：同批重复文本只打一次后端。
         missing: List[str] = []
@@ -57,17 +71,25 @@ class CachedEmbedder:
             missing_keys.append(key)
 
         if missing:
-            vectors = self._inner.embed_texts(missing)
-            # 长度不符说明后端异常——不写缓存，也不假装对齐。
-            if len(vectors) == len(missing):
-                for key, vec in zip(missing_keys, vectors):
-                    cached[key] = list(vec)
-                    try:
-                        self._backend.put(key, _encode(vec), tag=self._model)
-                    except Exception:
-                        pass
-            else:
-                return list(vectors)
+            vectors = list(self._inner.embed_texts(missing))
+            if len(vectors) != len(missing):
+                # 长度不符说明后端异常。**必须抛**，不能把这份响应返回出去：它是对
+                # missing 子集的应答，而调用方按 texts 的下标消费
+                # （embed_in_chunks 的 out[start + offset] = vec），直接返回会把
+                # 后面某条文本的向量装到前面那条头上——正是本层要防的张冠李戴。
+                # 也重建不出正确形状：无从得知返回的向量分别对应 missing 里的哪几条。
+                # 抛出后各调用点的 per-batch except 会把整批记成"没拿到向量"，与
+                # 不带缓存时后端返回短列表的降级结果一致，但没有错配。
+                raise RuntimeError(
+                    f"embedding backend returned {len(vectors)} vectors "
+                    f"for {len(missing)} texts"
+                )
+            for key, vec in zip(missing_keys, vectors):
+                cached[key] = list(vec)
+                try:
+                    self._backend.put(key, _encode(vec), tag=self._model)
+                except Exception:  # 写缓存失败同样不影响主流程
+                    pass
 
         return [cached[key] for key in keys]
 
@@ -76,16 +98,22 @@ class CachedEmbedder:
 
 
 def _encode(vector: Any) -> str:
-    import json
+    # 写侧的 float() 不能省：numpy 标量不是 JSON 可序列化类型。写只发生在 miss 后。
     return json.dumps([float(x) for x in vector])
 
 
 def _decode(raw: str) -> Any:
-    import json
+    """缓存里的一条值 → 向量；任何不像向量的东西一律 None（当 miss）。"""
     try:
         value = json.loads(raw)
     except (ValueError, TypeError):
         return None
     if not isinstance(value, list):
         return None
-    return [float(x) for x in value]
+    # 刻意不做 [float(x) for x in value]：_encode 写进去的就是 float 字面量，
+    # json.loads 出来已经是 float，逐元素转换只是在每次命中（最热的路径）上白跑
+    # 一遍全量扫描、再重建一个上千元素的列表。抽查首元素足以挡住"这压根不是向量"
+    # 的坏值，代价 O(1)。
+    if value and not isinstance(value[0], (int, float)):
+        return None
+    return value
