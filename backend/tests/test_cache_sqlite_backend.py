@@ -33,14 +33,43 @@ def _used_at(cache, key):
         conn.close()
 
 
+def _poke_timestamps(cache, key, *, created_at=None, used_at=None):
+    """直接改写 created_at/used_at，绕过 get()/put() 里两者耦合的语义。
+
+    公开 API 做不到"已过期但 used_at 很新"或"未过期但 used_at 很旧"这类组合：
+    put() 总是把两者一起刷到当前时间；get() 一旦发现已过期就直接删行，根本碰
+    不到"顺手刷新 used_at"这条分支。构造这类状态组合只能直接写库，与
+    `_used_at()` 读库是同一枚硬币的两面。
+    """
+    conn = sqlite3.connect(cache.path)
+    try:
+        if created_at is not None:
+            conn.execute(
+                "UPDATE cache SET created_at=? WHERE key=?", (created_at, key))
+        if used_at is not None:
+            conn.execute(
+                "UPDATE cache SET used_at=? WHERE key=?", (used_at, key))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _clamp_to_deploy_variable_limit(cache):
     """把复用连接的变量上限压到部署机水位，让本机也能复现 too many SQL variables。
 
     连接是 thread-local 复用的，压一次即对本线程后续所有操作生效——这也正是
     "每次操作新建连接"时做不到的事。
+
+    自检：如果连接不是被复用的（比如退回"每次操作新建连接"），下面这行 setlimit
+    压的就是一条随手丢弃的连接，后续操作会在本机 250000 上限的新连接上跑，两条
+    回归测试会假绿。用自检把这个隐式依赖钉成显式断言——一旦连接复用被破坏，
+    这里立刻转红，而不是让后面的测试在错误的前提下"侥幸"通过。
     """
     cache._connect().setlimit(
         sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, DEPLOY_VARIABLE_LIMIT)
+    assert cache._connect().getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER) == (
+        DEPLOY_VARIABLE_LIMIT
+    ), "变量上限没有压在被复用的连接上——clamp 对后续操作不生效"
 
 
 def test_put_get_roundtrip(tmp_path):
@@ -103,9 +132,15 @@ def test_eviction_keeps_utilization_high(tmp_path):
         if after < before + entry:          # 本次 put 触发了裁剪
             evicted_once = True
         if evicted_once:
-            # 裁剪只删到刚好达标为止，利用率不得掉到 headroom 水位以下。
-            assert after >= target, (
-                f"第 {i + 1} 次 put 后裁剪过度：{after} < {target}（上限 {limit}）"
+            # 裁剪只保证删到"刚好达标"——循环一旦发现 remaining <= target 就
+            # 立即停手，最后一个被删条目可能把 remaining 从略高于 target 打到
+            # 最多低于 target 一个条目的量，下界因此是 target - entry 而不是
+            # target 本身。原断言 `after >= target` 能过纯粹因为
+            # 200000/180000/20000 三者恰好整除、淘汰后总是精确落回 target，
+            # entry 一旦改成不整除的数就会假红（对齐 :128 附近兄弟测试的写法）。
+            floor = min((i + 1) * entry, target - entry)
+            assert after >= floor, (
+                f"第 {i + 1} 次 put 后裁剪过度：{after} < {floor}（上限 {limit}）"
             )
     assert evicted_once, "用例没有触发裁剪，等于什么都没测"
 
@@ -149,24 +184,57 @@ def test_hot_entries_survive_eviction(tmp_path):
 
 
 def test_expired_entries_are_swept_before_lru_eviction(tmp_path):
-    """过期清扫分支必须真的被执行到——它需要"短 TTL"与"会越限"同时成立。
+    """过期清扫必须先于 LRU 淘汰执行——不只是"两者最终都会跑"。
 
-    只有短 TTL（size_limit 很大）会在 _evict_if_needed 的第一个 guard 就 return；
-    只有越限（TTL 默认 90 天）则永远没有过期条目。两者都不碰这段代码。
+    只看终态集合锁不住顺序：sweep 是无条件的，不管它在 while 循环之前还是之后
+    调用，同一批过期行迟早都会被删掉；唯一的差异是 LRU 用来判断"是否需要淘汰、
+    删多少"的 total 有没有先扣掉过期条目的字节数。若 LRU 先跑（用未扣减的 total
+    做判断），它可能顺手把一个明明没过期、只是恰好排在最前面的冷条目也搭上，
+    等 sweep 之后再跑时这个冷条目早就被冤枉删掉了——而这正是"顺序错了"的可观测
+    后果。
 
-    断言用可观测副作用证明清扫真的跑了：若跳过清扫直接走 LRU，4 条旧条目里只会
-    被删掉 1 条（110KB → 90KB 即达标），len 是 4 而不是 1。
+    构造对照：
+    - alive_but_cold：未过期，但 used_at 很旧——LRU 按 used_at 升序排最前，
+      "先淘汰它"是错误决策的产物。
+    - expired_but_hot：已过期（created_at 早于 ttl 截止线），但 used_at 很新——
+      只有 sweep 会碰它，LRU 按 used_at 排序会把它当"最近使用"跳过。
+
+    先清扫（生产代码顺序）：total 先被 expired_but_hot 的字节数打下去，直接达标，
+    LRU 循环不必再动 alive_but_cold，它应该存活。
+    后清扫（缺陷顺序）：LRU 用清扫前、虚高的 total 判断还需要腾多少空间，会把
+    alive_but_cold 当垫背删掉；sweep 随后依旧会删掉 expired_but_hot——两条路径
+    的存活集合因此不同，且都不是"len 从 4 变到几"这种容易被终态断言糊弄过去的
+    信号。
     """
     limit = 100_000
-    c = _mk(tmp_path, size_limit=limit, ttl_seconds=0.3)
-    for i in range(4):
-        c.put(f"old{i}", "z" * 20_000)      # 80KB，未越限，不触发裁剪
-    time.sleep(0.5)                         # 4 条全部过期
-    c.put("fresh", "z" * 30_000)            # 110KB > 100KB，触发裁剪
+    entry_cold = 20_000
+    entry_hot = 60_000
+    entry_fresh = 30_000
+    c = _mk(tmp_path, size_limit=limit, ttl_seconds=100_000)  # 长 TTL，靠直接改写造过期，不靠 sleep
+    now = time.time()
 
-    assert c.get("fresh") == "z" * 30_000, "过期清扫误删了未过期条目"
-    assert len(c) == 1, f"过期条目未被清扫：还剩 {len(c)} 条"
-    assert c.volume() == 30_000, f"清扫未归还容量计量：{c.volume()}"
+    c.put("alive_but_cold", "z" * entry_cold)
+    _poke_timestamps(c, "alive_but_cold", used_at=now - 10_000)   # 未过期，但 used_at 最旧
+
+    c.put("expired_but_hot", "z" * entry_hot)
+    _poke_timestamps(
+        c, "expired_but_hot",
+        created_at=now - 200_000,   # 早于 ttl 截止线（now - 100_000），已过期
+        used_at=now - 100,          # 但 used_at 比 alive_but_cold 新，LRU 眼里它更"热"
+    )
+
+    c.put("fresh", "z" * entry_fresh)   # 20K+60K+30K=110K > 100K，触发裁剪
+
+    assert c.get("expired_but_hot") is None, "已过期条目必须被清扫，不因 used_at 新而幸免"
+    assert c.get("alive_but_cold") == "z" * entry_cold, (
+        "先清扫达标后不该殃及未过期的冷条目——若 LRU 先于 sweep 跑，"
+        "会把它错当淘汰候选删掉"
+    )
+    assert c.get("fresh") == "z" * entry_fresh
+    assert len(c) == 2, f"存活集合不对：还剩 {len(c)} 条"
+    assert c.volume() == entry_cold + entry_fresh, (
+        f"清扫/淘汰未归还容量计量：{c.volume()}"
+    )
 
 
 def test_evict_tag_survives_deploy_variable_limit(tmp_path):
@@ -239,6 +307,46 @@ def test_concurrent_put_get_is_consistent(tmp_path):
         for i in range(per_thread):
             assert c.get(f"t{t}-{i}") == f"v{t}-{i}", f"t{t}-{i} 丢失或被写坏"
     assert c.volume() == c.recount(), "并发写后增量计量与实际不符"
+
+
+def test_concurrent_put_same_key_keeps_volume_accounting_correct(tmp_path):
+    """并发 put **同一个 key**：meta 的增量计量不能跟真实内容漂移。
+
+    上面那条并发测试里各线程互不相交的 key，测不到锁真正要防的事：put() 是
+    "先 SELECT prev size，再按 delta 写 meta"——两步之间没有原子性。若两个线程
+    都在对方提交前读到同一个 prev（比如都读到 None），二者都会把自己的完整
+    size 计入 meta，而不是净差值，total_bytes 就会比 SUM(size) 虚高，且这种
+    漂移只会累积、不会自愈。
+
+    对内容寻址缓存而言，"相同内容 → 相同 key → 并发重复 put" 不是边角情况而是
+    最典型的场景（比如多个请求同时算出同一份待缓存内容）。self._lock 存在的
+    意义就是让这组"读 prev、写行、写 meta"原子化；去掉它，这条测试必须转红。
+    """
+    c = _mk(tmp_path)
+    n_threads, per_thread = 10, 30
+    key = "shared-key"
+    errors = []
+
+    def worker(t):
+        try:
+            for i in range(per_thread):
+                c.put(key, f"v{t}-{i}-" + "z" * (t * 7 + i), tag=f"m{t % 3}")
+        except Exception as exc:            # 线程内异常必须带回主线程
+            errors.append(f"{type(exc).__name__}: {exc}")
+
+    threads = [threading.Thread(target=worker, args=(t,)) for t in range(n_threads)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join(timeout=60)
+
+    assert not any(th.is_alive() for th in threads), "并发 worker 超时未结束"
+    assert not errors, f"并发操作抛异常：{errors[:3]}"
+    assert len(c) == 1, f"同一个 key 并发 put 后应只剩 1 行，实际 {len(c)} 行"
+    assert c.volume() == c.recount(), (
+        f"同 key 并发 put 导致 meta 增量计量漂移：volume()={c.volume()} "
+        f"!= recount()={c.recount()}"
+    )
 
 
 def test_coarse_lru_avoids_write_amplification(tmp_path):

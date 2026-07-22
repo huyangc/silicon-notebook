@@ -204,8 +204,8 @@ class SqliteCacheBackend:
             # 取一批候选，但只删到刚好达标为止——不能把整批无条件删光，否则当候选
             # 批大于剩余条目数时会一次清空缓存，把热条目一起带走。
             rows = db.execute(
-                "SELECT key, size FROM cache ORDER BY used_at ASC "
-                f"LIMIT {EVICT_BATCH}"
+                "SELECT key, size FROM cache ORDER BY used_at ASC LIMIT ?",
+                (EVICT_BATCH,),
             ).fetchall()
             if not rows:
                 break
