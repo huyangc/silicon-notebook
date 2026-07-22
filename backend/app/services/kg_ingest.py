@@ -197,14 +197,22 @@ def extract_graph(client: Any, raw_text: str, source_file: str, doc_type: str,
             pairs.append((w, els))
         else:
             windows_skipped += 1
+    # Resolve every workload-bound adapter before spawning window workers.
+    # Plain legacy/test clients remain valid as a single-client shorthand.
+    provider_chat = getattr(client, "chat", None)
+    extract_client = provider_chat("kg_extract") if callable(provider_chat) else client
+    refine_client = provider_chat("kg_refine") if callable(provider_chat) else client
+    glean_client = provider_chat("kg_glean") if callable(provider_chat) else client
     nodes: List[Node] = []
     edges: List[Edge] = []
     failed = 0
     if pairs:
-        futs = [submit_window(extract_window, client, els, w.section_path,
+        futs = [submit_window(extract_window, extract_client, els, w.section_path,
                               doc_type, idx, refine=refine,
                               gleaning_rounds=gleaning_rounds,
-                              base_filter=base_filter)
+                              base_filter=base_filter,
+                              refine_client=refine_client,
+                              glean_client=glean_client)
                 for idx, (w, els) in enumerate(pairs)]
         # Production submit_window returns concurrent.futures.Future. Some
         # synchronous compatibility/test schedulers return a minimal

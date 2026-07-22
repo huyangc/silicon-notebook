@@ -14,6 +14,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository, _concept_desc_sig
+from tests.model_testkit import RecordingModelProvider, bind_chat_client
 
 
 @pytest.fixture
@@ -21,13 +22,10 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")  # embedder_configured=True
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
-    monkeypatch.setenv("EMBED_DIM", "16")
-    r = SQLiteRepository(Settings())
+    provider = RecordingModelProvider()
+    r = SQLiteRepository(Settings(), model_provider=provider)
     r.embedder = FakeEmbedder(dim=16)  # inject; no real model loads (lazy)
+    r.recording_model_provider = provider
     return r
 
 
@@ -108,7 +106,7 @@ def test_concept_desc_sig_deterministic_and_order_insensitive():
 
 def test_all_multimember_canonicals_get_descriptions(repo):
     llm = _DescLLM()
-    repo.llm_client = llm  # -> kg_llm_client resolves to this fake
+    bind_chat_client(repo, "kg_concept_description", llm)
     # two independent merged concepts (each 2 members across sources)
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.store_kg(nb.id, "s1", [
@@ -135,7 +133,7 @@ def test_all_multimember_canonicals_get_descriptions(repo):
 
 def test_rebuild_reuses_cached_descriptions(repo):
     llm = _DescLLM()
-    repo.llm_client = llm
+    bind_chat_client(repo, "kg_concept_description", llm)
     nb = _make_merged_notebook(repo)
 
     repo.rebuild_unified_kg(nb.id)
@@ -157,7 +155,7 @@ def test_rebuild_reuses_cached_descriptions(repo):
 
 def test_rebuild_regenerates_only_changed_cluster(repo):
     llm = _DescLLM()
-    repo.llm_client = llm
+    bind_chat_client(repo, "kg_concept_description", llm)
     # two independent merged concepts
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.store_kg(nb.id, "s1", [
@@ -210,7 +208,7 @@ def test_rebuild_regenerates_only_changed_cluster(repo):
 
 def test_progress_callback_invoked_per_work_item(repo):
     llm = _DescLLM()
-    repo.llm_client = llm
+    bind_chat_client(repo, "kg_concept_description", llm)
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.store_kg(nb.id, "s1", [
         _concept_with_evidence("a1", "MOSFET", "m1"),

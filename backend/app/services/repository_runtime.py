@@ -235,7 +235,7 @@ class RepositoryRuntime:
         # wire_knowledge_lifecycle(): their collaborators (the facade `_write`/
         # `_connect` transaction seats, the facade-owned unified/viz cache
         # objects, the coordinator-backed dirty/invalidate wrappers, the
-        # per-user model-client properties and the Gate-6 scale/viz adapters)
+        # process-owned model provider and the Gate-6 scale/viz adapters)
         # only exist once the facade constructor reaches them.  Construction
         # stays lazy — no seam calls.
         self.knowledge_governance: "KnowledgeGovernanceService | None" = None
@@ -254,9 +254,8 @@ class RepositoryRuntime:
         self.graph_retrieval: "GraphRetrievalService | None" = None
         self.retrieval: "RetrievalService | None" = None
         self._retrieval_wire_lock = threading.Lock()
-        # Task 13: schema CRUD + LLM-backed induction. Depends on the model
-        # provider (late-bound per-user llm_client property), so it composes
-        # after `models`.
+        # Task 13: schema CRUD + LLM-backed induction. It requests the
+        # ``schema_induction`` workload from the process-owned provider.
         self.schema_registry = SchemaRegistryService(
             self.notebook_store,
             self.knowledge,
@@ -517,8 +516,6 @@ class RepositoryRuntime:
         parse_file: Callable[..., list],
         mineru_client: Callable[[], Any],
         mineru_cloud_client: Callable[[], Any],
-        llm: Callable[[], Any],
-        kg_llm: Callable[[], Any],
         normalize_doc_type: Callable[[str], str],
         default_notebook_names: Any,
         clear_source_extraction_state: Callable[..., None],
@@ -538,10 +535,10 @@ class RepositoryRuntime:
         facade-bound seams exist.  ``write`` is the facade's ``_write``
         compatibility seat resolved per call (transaction counting / failure
         injection keep observing every ingestion commit boundary);
-        ``source_elements``/``summarize_source``/``parse_file`` and the model
-        client seams stay facade/module late-bound so frozen patch targets
-        (repo.source_elements, repo._summarize_source, module
-        parse_source_file, per-user llm/kg_llm properties) keep working;
+        ``source_elements``/``summarize_source``/``parse_file`` stay
+        facade/module late-bound so frozen patch targets (repo.source_elements,
+        repo._summarize_source, module parse_source_file) keep working; model
+        calls use explicit workloads on the process-owned provider;
         ``make_persist_image``/``delete_source_images`` are the per-source
         image-persistence factory and the per-source image cascade-delete
         seam (embedded-image retention); the remaining callables are
@@ -576,8 +573,7 @@ class RepositoryRuntime:
             parse_file=parse_file,
             mineru_client=mineru_client,
             mineru_cloud_client=mineru_cloud_client,
-            llm=llm,
-            kg_llm=kg_llm,
+            model_clients=self.models,
             normalize_doc_type=normalize_doc_type,
             default_notebook_names=default_notebook_names,
             clear_source_extraction_state=clear_source_extraction_state,
@@ -855,8 +851,6 @@ class RepositoryRuntime:
         source_ids_from_evidence: Callable[..., set],
         set_source_status: Callable[..., None],
         run_extraction: Callable[..., None],
-        llm: Callable[[], Any],
-        kg_llm: Callable[[], Any],
         cluster_map: Callable[[str], dict],
         annotate_edge_support: Callable[..., list],
         decided_seed_pairs: Callable[[str], dict],
@@ -907,8 +901,7 @@ class RepositoryRuntime:
             get_notebook=get_notebook,
             invalidate_unified_cache=invalidate_unified_cache,
             mark_unified_kg_dirty=mark_unified_kg_dirty,
-            llm=llm,
-            kg_llm=kg_llm,
+            model_clients=self.models,
             relations_for_notebook=relations_for_notebook,
             edge_centrality_map=edge_centrality_map,
             embed_knowledge=embed_knowledge,
@@ -948,8 +941,7 @@ class RepositoryRuntime:
             source_ids_from_evidence=source_ids_from_evidence,
             set_source_status=set_source_status,
             run_extraction=run_extraction,
-            llm=llm,
-            kg_llm=kg_llm,
+            model_clients=self.models,
             cluster_map=cluster_map,
             annotate_edge_support=annotate_edge_support,
             decided_seed_pairs=decided_seed_pairs,

@@ -19,6 +19,7 @@ from app.services import remote_sources
 from app.services.remote_sources import PdfProbe
 from app.services.source_ingestion import SourceIngestionService  # noqa: F401 — Task 12 gate
 from app.services.sqlite_repository import SQLiteRepository, _now
+from tests.model_testkit import RecordingModelProvider, bind_chat_client
 
 
 @pytest.fixture
@@ -27,7 +28,10 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    return SQLiteRepository(Settings())
+    provider = RecordingModelProvider()
+    repository = SQLiteRepository(Settings(), model_provider=provider)
+    repository.recording_model_provider = provider
+    return repository
 
 
 @pytest.fixture
@@ -36,11 +40,13 @@ def embed_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
-    return SQLiteRepository(Settings())
+    settings = Settings()
+    repo = SQLiteRepository(settings)
+    settings.embed_provider = "dashscope"
+    settings.embed_base_url = "https://embedding.example.test"
+    settings.embed_api_key = "test-key"
+    settings.embed_model = "test-model"
+    return repo
 
 
 @pytest.fixture
@@ -192,11 +198,29 @@ def test_metadata_augmentation_model_failure_falls_back_deterministically(repo):
         def chat_json(self, *a, **k):
             raise RuntimeError("llm down")
 
-    repo.llm_client = _BoomLLM()
+    bind_chat_client(repo, "notebook_metadata", _BoomLLM())
     repo._augment_notebook_meta(nb.id)
     got = repo.get_notebook(nb.id)
     assert got.name == "Bandgap Reference Design"      # first title, [:40]
     assert "本笔记本收录了 1 个来源" in got.purpose
+    assert ("chat", "notebook_metadata") in repo.recording_model_provider.calls
+
+
+def test_source_summary_binds_source_summary_workload(repo):
+    class _SummaryLLM:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            return '{"summary":"system summary"}'
+
+    bind_chat_client(repo, "source_summary", _SummaryLLM())
+
+    result = repo._runtime.source_ingestion.summarize(
+        "Doc", [_element("source body")]
+    )
+
+    assert result == "system summary"
+    assert ("chat", "source_summary") in repo.recording_model_provider.calls
 
 
 def test_url_local_parse_never_falls_back_to_cloud(local_repo, monkeypatch):

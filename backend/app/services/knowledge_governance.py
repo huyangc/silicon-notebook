@@ -154,8 +154,7 @@ class KnowledgeGovernanceService:
         get_notebook: Callable[[str], Any],
         invalidate_unified_cache: Callable[[str], None],
         mark_unified_kg_dirty: Callable[[str], None],
-        llm: Callable[[], Any],
-        kg_llm: Callable[[], Any],
+        model_clients: Any,
         relations_for_notebook: Callable[[str], List[dict]],
         edge_centrality_map: Callable[[str], Dict[str, float]],
         embed_knowledge: Callable[[str, str, dict], None],
@@ -176,8 +175,7 @@ class KnowledgeGovernanceService:
         self.get_notebook = get_notebook
         self._invalidate_unified_cache = invalidate_unified_cache
         self._mark_unified_kg_dirty = mark_unified_kg_dirty
-        self._llm = llm
-        self._kg_llm = kg_llm
+        self.model_clients = model_clients
         self._relations_for_notebook = relations_for_notebook
         self._edge_centrality_map = edge_centrality_map
         self._embed_knowledge = embed_knowledge
@@ -198,14 +196,6 @@ class KnowledgeGovernanceService:
     @staticmethod
     def joined_payload(payload: dict) -> str:
         return payload_join(payload)
-
-    # Late-bound model client: resolved per call through the facade's frozen
-    # property, so class-property monkeypatches and the mutable llm_client
-    # setter keep being observed — and the per-user ContextVar resolution
-    # stays on the calling thread.
-    @property
-    def llm_client(self):
-        return self._llm()
 
     # ------------------------------------------------------------------
     # Track E: edge trust review queue + curation feedback loop
@@ -619,7 +609,7 @@ class KnowledgeGovernanceService:
         so the LLM's winner_ref is trusted directly.
         """
         # 1. Guard — no LLM, skip gracefully
-        if not getattr(self._llm(), "configured", False):
+        if not self.model_clients.configured("kg_conflict_review"):
             return {
                 "detected": 0,
                 "auto_applied": 0,
@@ -790,7 +780,9 @@ class KnowledgeGovernanceService:
 
         # 6. Adjudicate
         from app.services.kg.conflict_review import review_conflict_candidates
-        verdicts = review_conflict_candidates(self._kg_llm(), items)
+        verdicts = review_conflict_candidates(
+            self.model_clients.chat("kg_conflict_review"), items
+        )
 
         # 7. Record + (optionally) auto-apply
         auto_applied = 0
@@ -882,9 +874,9 @@ class KnowledgeGovernanceService:
         # route only catches KeyError). Same batching/concurrency as the rebuild site.
         try:
             decisions = review_merge_candidates(
-                self.llm_client, pending,
+                self.model_clients.chat("kg_merge_review"), pending,
                 batch_size=self.settings.kg_merge_review_batch_size,
-                max_workers=self.settings.kg_job_concurrency,
+                max_workers=self.model_clients.parallelism("kg_merge_review"),
             )
         except Exception:
             self.event_log.logger.exception(

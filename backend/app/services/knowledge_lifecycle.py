@@ -54,6 +54,7 @@ from app.services.kg.run_control import (
     KgBuildAborted,
     KgExtractionRunControl,
     TaskScopedKgClient,
+    TaskScopedKgClients,
     probe_kg_model,
 )
 
@@ -124,8 +125,7 @@ class KnowledgeLifecycleService:
         source_ids_from_evidence: Callable[[Optional[str]], set],
         set_source_status: Callable[..., None],
         run_extraction: Callable[..., None],
-        llm: Callable[[], Any],
-        kg_llm: Callable[[], Any],
+        model_clients: Any,
         cluster_map: Callable[[str], Dict[str, str]],
         annotate_edge_support: Callable[[str, List[dict]], List[dict]],
         decided_seed_pairs: Callable[[str], Dict[frozenset, str]],
@@ -165,26 +165,13 @@ class KnowledgeLifecycleService:
         self._source_ids_from_evidence = source_ids_from_evidence
         self._set_source_status = set_source_status
         self._run_extraction = run_extraction
-        self._llm = llm
-        self._kg_llm = kg_llm
+        self.model_clients = model_clients
         self.cluster_map = cluster_map
         self._annotate_edge_support = annotate_edge_support
         self.decided_seed_pairs = decided_seed_pairs
         self.relations_for_notebook = relations_for_notebook
         self.notebook_copy_stats = notebook_copy_stats
         self._note_model_error = note_model_error
-
-    # Late-bound model clients: resolved per call through the facade's frozen
-    # properties, so class-property monkeypatches (type(repo).kg_llm_client)
-    # and the mutable llm_client setter keep being observed — and the per-user
-    # ContextVar resolution stays on the calling thread.
-    @property
-    def llm_client(self):
-        return self._llm()
-
-    @property
-    def kg_llm_client(self):
-        return self._kg_llm()
 
     # ------------------------------------------------------------------
     # KG deletion / store / relink / cluster writes / incremental fusion
@@ -779,7 +766,7 @@ class KnowledgeLifecycleService:
         if mode not in {"incremental", "rebuild"}:
             raise ValueError("unsupported KG build mode")
         self.get_notebook(notebook_id)
-        if not getattr(self.kg_llm_client, "configured", False):
+        if not self.model_clients.configured("kg_extract"):
             raise RuntimeError("LLM not configured; cannot build KG")
         targets, _skipped, _skipped_no_elements = self._kg_target_state(
             notebook_id, mode
@@ -831,7 +818,7 @@ class KnowledgeLifecycleService:
         skipped_no_elements: List[str],
         job_id: str,
         control: KgExtractionRunControl,
-        controlled_client: TaskScopedKgClient,
+        controlled_client: TaskScopedKgClients,
         progress=None,
         on_abort=None,
     ) -> dict:
@@ -1013,9 +1000,10 @@ class KnowledgeLifecycleService:
                 KgBuildAborted(failure)
             ),
         )
-        controlled_client = TaskScopedKgClient(
-            self.kg_llm_client, self.settings, control
+        controlled_clients = TaskScopedKgClients(
+            self.model_clients, self.settings, control
         )
+        controlled_client = controlled_clients.chat("kg_extract")
 
         try:
             if mode == "rebuild":
@@ -1035,7 +1023,7 @@ class KnowledgeLifecycleService:
                 skipped_no_elements,
                 job_id,
                 control,
-                controlled_client,
+                controlled_clients,
                 progress,
                 _mark_stopping,
             )
@@ -1736,7 +1724,7 @@ class KnowledgeLifecycleService:
         from app.services.concept_merge_review import review_merge_candidates
         autoc = sd.get("auto_candidates", [])
         _t_mr = _time.perf_counter()
-        if autoc and getattr(self.kg_llm_client, "configured", False):
+        if autoc and self.model_clients.configured("kg_merge_review"):
             # Optional LLM adjudication is an enhancement — it must NEVER be able to
             # crash the rebuild. review_merge_candidates is already fail-open (chunked +
             # defensive parse); this outer guard covers any other unexpected error in the
@@ -1761,9 +1749,9 @@ class KnowledgeLifecycleService:
                             notebook_id, _ck_ver, "merge_review", rows, self._now())
 
                 new = review_merge_candidates(
-                    self.kg_llm_client, todo,
+                    self.model_clients.chat("kg_merge_review"), todo,
                     batch_size=self.settings.kg_merge_review_batch_size,
-                    max_workers=self.settings.kg_job_concurrency,
+                    max_workers=self.model_clients.parallelism("kg_merge_review"),
                     on_chunk=_persist,
                 )
                 # 合并 缓存 ∪ 新决策,按 pair_key 索引。
@@ -1801,7 +1789,10 @@ class KnowledgeLifecycleService:
         desc_by_cid: Dict[str, str] = {}
         desc_sig_by_cid: Dict[str, str] = {}
         _t_desc = _time.perf_counter()
-        _desc_ran = self.settings.kg_concept_desc_enabled and getattr(self.kg_llm_client, "configured", False)
+        _desc_ran = (
+            self.settings.kg_concept_desc_enabled
+            and self.model_clients.configured("kg_concept_description")
+        )
         if _desc_ran:
             from app.services.prompts import concept_description_prompt, CONCEPT_DESC_SCHEMA_HINT
             # Previous descriptions + their input sigs, keyed by canonical id. DISTINCT
@@ -1867,14 +1858,11 @@ class KnowledgeLifecycleService:
                     desc_sig_by_cid[cid] = sig
                     continue
                 work.append((cid, name, quotes, sig))
-            # PHASE 2 (parallel LLM): the chat_json round-trips are the bottleneck;
-            # run them concurrently. kg_llm_client.chat_json is already invoked
-            # concurrently elsewhere (build_notebook_kg), so per-call thread use is fine.
-            # Resolve the client ONCE in the main thread: kg_llm_client is a property
-            # keyed on the _REQUEST_USER ContextVar, which worker threads don't inherit
-            # (per-user config would otherwise fall back to user-local inside the pool).
+            # PHASE 2 (parallel LLM): resolve the workload-bound scheduled
+            # client once before the raw worker pool. The pool width mirrors
+            # the physical service cap and the scheduler remains authoritative.
             import concurrent.futures as _cf
-            desc_client = self.kg_llm_client
+            desc_client = self.model_clients.chat("kg_concept_description")
             def _gen(item):
                 cid, name, quotes, sig = item
                 block = "\n".join(f"- {q}" for q in quotes)
@@ -1887,7 +1875,13 @@ class KnowledgeLifecycleService:
                     desc = ""
                 return cid, desc, sig
             if work:
-                workers = max(1, min(self.settings.kg_job_concurrency, len(work)))
+                workers = max(
+                    1,
+                    min(
+                        self.model_clients.parallelism("kg_concept_description"),
+                        len(work),
+                    ),
+                )
                 done_n = 0
                 with _cf.ThreadPoolExecutor(max_workers=workers, thread_name_prefix="kg-desc") as pool:
                     _ck_buf: List[Tuple[str, dict]] = []
@@ -2299,7 +2293,10 @@ class KnowledgeLifecycleService:
         row. No-op (returns 0) when disabled or LLM unconfigured. Returns the
         number of communities summarized."""
         self.get_notebook(notebook_id)
-        if not self.settings.kg_community_summary_enabled or not getattr(self.kg_llm_client, "configured", False):
+        if (
+            not self.settings.kg_community_summary_enabled
+            or not self.model_clients.configured("kg_community_summary")
+        ):
             return 0
         from app.services.prompts import community_report_prompt, COMMUNITY_REPORT_SCHEMA_HINT
         with self._connect() as db:
@@ -2325,7 +2322,7 @@ class KnowledgeLifecycleService:
             members_block = "\n".join(mlines)
             relations_block = "\n".join(rlines) if rlines else "(none)"
             try:
-                raw = self.kg_llm_client.chat_json(
+                raw = self.model_clients.chat("kg_community_summary").chat_json(
                     [{"role": "user", "content": community_report_prompt(members_block, relations_block)}],
                     COMMUNITY_REPORT_SCHEMA_HINT)
                 data = json.loads(raw)

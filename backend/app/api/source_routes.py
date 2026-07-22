@@ -213,9 +213,7 @@ def backfill_paper_metadata(notebook_id: str) -> dict:
     """补抽该 notebook 缺论文元数据的源(后台线程,幂等可续跑)。返回排队数;
     LLM 未配置 409。owner 门控由 require_notebook_access 承担(非 owner 404)。"""
     repo = repository()
-    llm_ready = getattr(repo.kg_llm_client, "configured", False) or getattr(
-        repo.llm_client, "configured", False
-    )
+    llm_ready = repo._runtime.models.configured("paper_metadata")
     if not llm_ready:
         raise HTTPException(status_code=409, detail="LLM not configured")
     queued = len(repo.sources_missing_paper_meta(notebook_id))

@@ -14,6 +14,10 @@ from app.services.kg.run_control import (
     TaskScopedKgClient,
     probe_kg_model,
 )
+from tests.model_testkit import RecordingModelProvider
+from app.services.model_work import (
+    ModelQueueFull, ModelQueueTimeout, ModelServiceUnavailable,
+)
 
 
 def _settings(retries):
@@ -141,6 +145,27 @@ def test_other_http_rejection_is_immediate():
     with pytest.raises(KgBuildAborted) as raised:
         client.chat_json([{"role": "user", "content": "x"}], "{}")
     assert raised.value.failure.code == "model_request_rejected"
+    assert delegate.calls == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ModelQueueFull(support_id="mdl-kg-full"),
+        ModelQueueTimeout(support_id="mdl-kg-timeout"),
+        ModelServiceUnavailable(support_id="mdl-kg-unavailable"),
+    ],
+)
+def test_scheduler_admission_failures_pause_kg_as_model_unavailable(error):
+    control = KgExtractionRunControl("job-queue")
+    delegate = _SequenceClient([error])
+    client = TaskScopedKgClient(delegate, _settings(retries=3), control)
+
+    with pytest.raises(KgBuildAborted) as raised:
+        client.chat_json([{"role": "user", "content": "x"}], "{}")
+
+    assert raised.value.failure.code == "model_unavailable"
+    assert raised.value.failure.user_message == MODEL_UNAVAILABLE_MESSAGE
     assert delegate.calls == 1
 
 
@@ -283,3 +308,60 @@ def test_probe_uses_small_bounded_request():
     assert client.configured is True
     assert client.model == "test-model"
     assert client.settings is settings
+
+
+def test_kg_ingest_resolves_extract_refine_and_glean_before_window_submit(
+    monkeypatch,
+):
+    from app.services import kg_ingest
+
+    clients = {
+        workload_id: object()
+        for workload_id in ("kg_extract", "kg_refine", "kg_glean")
+    }
+    provider = RecordingModelProvider(chat_clients=clients)
+    monkeypatch.setattr(
+        kg_ingest, "windows_with_elements",
+        lambda *args, **kwargs: [(SimpleNamespace(section_path="s"), [object()])],
+    )
+    monkeypatch.setattr(
+        kg_ingest, "should_extract_window", lambda *args, **kwargs: (True, "")
+    )
+    seen = {}
+
+    def fake_extract_window(
+        extract_client, elements, section_path, doc_type, index, *,
+        refine, gleaning_rounds, base_filter, refine_client, glean_client,
+    ):
+        seen.update(
+            extract=extract_client, refine=refine_client, glean=glean_client,
+            calls=list(provider.calls),
+        )
+        return [], []
+
+    class ImmediateFuture:
+        def __init__(self, value):
+            self.value = value
+
+        def result(self):
+            return self.value
+
+    monkeypatch.setattr(kg_ingest, "extract_window", fake_extract_window)
+    monkeypatch.setattr(
+        kg_ingest, "submit_window",
+        lambda fn, *args, **kwargs: ImmediateFuture(fn(*args, **kwargs)),
+    )
+
+    kg_ingest.extract_graph(
+        provider, "body", "doc.md", "academic_paper",
+        refine=True, gleaning_rounds=1,
+    )
+
+    assert seen["extract"] is clients["kg_extract"]
+    assert seen["refine"] is clients["kg_refine"]
+    assert seen["glean"] is clients["kg_glean"]
+    assert seen["calls"] == [
+        ("chat", "kg_extract"),
+        ("chat", "kg_refine"),
+        ("chat", "kg_glean"),
+    ]

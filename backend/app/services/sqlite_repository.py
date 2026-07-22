@@ -541,8 +541,6 @@ class SQLiteRepository:
                 source_id, status, **kwargs),
             run_extraction=lambda source_id, **kwargs: _call_extraction_compat(
                 self._run_extraction, self._runtime.source_ingestion.run_extraction, source_id, kwargs),
-            llm=lambda: self.llm_client,
-            kg_llm=lambda: self.kg_llm_client,
             cluster_map=lambda notebook_id: self.cluster_map(notebook_id),
             annotate_edge_support=lambda notebook_id, edges: (
                 self._annotate_edge_support(notebook_id, edges)
@@ -609,8 +607,6 @@ class SQLiteRepository:
             ),
             mineru_client=lambda: self.mineru_client,
             mineru_cloud_client=lambda: self.mineru_cloud_client,
-            llm=lambda: self.llm_client,
-            kg_llm=lambda: self.kg_llm_client,
             normalize_doc_type=_normalize_doc_type,
             default_notebook_names=_DEFAULT_NOTEBOOK_NAMES,
             clear_source_extraction_state=(
