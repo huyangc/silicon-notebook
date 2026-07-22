@@ -35,3 +35,36 @@ export function conversationCleanupToast(deleted: number): string {
     ? `已删除 ${deleted} 条会话`
     : "没有删除会话；这些会话可能已有新活动或问答正在进行";
 }
+
+export type ConversationCleanupResult = {
+  deleted: number;
+  deleted_ids: string[];
+};
+
+/**
+ * Finish a delayed cleanup only while its notebook/session resource is still
+ * current. The caller owns the epoch check; this coordinator keeps every UI
+ * effect (local reconciliation, reload, and notification) behind that check.
+ */
+export async function runOwnedConversationCleanup(
+  response: Promise<ConversationCleanupResult>,
+  isCurrent: () => boolean,
+  applyCurrent: (result: ConversationCleanupResult) => void | Promise<void>,
+  reloadCurrent: () => void | Promise<void>,
+  notifyCurrent: (result: ConversationCleanupResult) => void,
+): Promise<boolean> {
+  let result: ConversationCleanupResult;
+  try {
+    result = await response;
+  } catch (error) {
+    if (isCurrent()) throw error;
+    return false;
+  }
+  if (!isCurrent()) return false;
+  await applyCurrent(result);
+  if (!isCurrent()) return false;
+  await reloadCurrent();
+  if (!isCurrent()) return false;
+  notifyCurrent(result);
+  return true;
+}

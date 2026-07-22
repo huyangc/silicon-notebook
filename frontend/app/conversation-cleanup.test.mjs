@@ -6,7 +6,9 @@ import {
   conversationsOlderThan,
   CLEANUP_PRESETS,
   reconcileConversationCleanup,
+  runOwnedConversationCleanup,
 } from "./conversation-cleanup.ts";
+import { workspaceRequestIsCurrent } from "./workspace-transitions.ts";
 
 // Fixed "now" so the test is deterministic regardless of wall clock / timezone.
 // updated_at strings are naive-local ISO, parsed as local — same basis as NOW.
@@ -58,4 +60,110 @@ test("confirmed current deletion removes only returned ids and clears current", 
   assert.deepEqual(result.sessions.map((session) => session.id), ["other"]);
   assert.equal(result.currentDeleted, true);
   assert.equal(conversationCleanupToast(1), "已删除 1 条会话");
+});
+
+function deferredResponse() {
+  let resolve;
+  const promise = new Promise((accept) => { resolve = accept; });
+  return { promise, resolve };
+}
+
+test("delayed cleanup response cannot mutate a newly opened session resource", async () => {
+  const response = deferredResponse();
+  const owner = { workspaceEpoch: 7, notebookId: "notebook-a" };
+  let currentWorkspaceEpoch = owner.workspaceEpoch;
+  let currentNotebookId = owner.notebookId;
+  const state = {
+    sessions: [conv("conversation-a", "2000-01-01T00:00:00")],
+    conversationId: "conversation-a",
+    turns: ["turn-a"],
+    pendingQuestion: "pending-a",
+    reloads: 0,
+    messages: [],
+  };
+  const isCurrent = () => workspaceRequestIsCurrent(
+    false,
+    owner.workspaceEpoch,
+    currentWorkspaceEpoch,
+    owner.notebookId,
+    currentNotebookId,
+  );
+  const cleanup = runOwnedConversationCleanup(
+    response.promise,
+    isCurrent,
+    (result) => {
+      const reconciled = reconcileConversationCleanup(
+        state.sessions,
+        state.conversationId,
+        result.deleted_ids,
+      );
+      state.sessions = reconciled.sessions;
+      if (reconciled.currentDeleted) {
+        state.conversationId = null;
+        state.turns = [];
+        state.pendingQuestion = "";
+      }
+    },
+    async () => { state.reloads += 1; },
+    (result) => { state.messages.push(conversationCleanupToast(result.deleted)); },
+  );
+
+  // Opening B in the same notebook advances the workspace/session epoch.
+  currentWorkspaceEpoch += 1;
+  state.sessions = [conv("conversation-b", "2026-07-23T00:00:00")];
+  state.conversationId = "conversation-b";
+  state.turns = ["turn-b"];
+  state.pendingQuestion = "pending-b";
+  response.resolve({ deleted: 1, deleted_ids: ["conversation-a"] });
+
+  assert.equal(await cleanup, false);
+  assert.deepEqual(state.sessions.map((session) => session.id), ["conversation-b"]);
+  assert.equal(state.conversationId, "conversation-b");
+  assert.deepEqual(state.turns, ["turn-b"]);
+  assert.equal(state.pendingQuestion, "pending-b");
+  assert.equal(state.reloads, 0);
+  assert.deepEqual(state.messages, []);
+});
+
+test("same-resource delayed cleanup reconciles, reloads, and reports normally", async () => {
+  const response = deferredResponse();
+  const state = {
+    sessions: [
+      conv("conversation-a", "2000-01-01T00:00:00"),
+      conv("conversation-b", "2026-07-23T00:00:00"),
+    ],
+    conversationId: "conversation-a",
+    turns: ["turn-a"],
+    pendingQuestion: "pending-a",
+    reloads: 0,
+    messages: [],
+  };
+  const cleanup = runOwnedConversationCleanup(
+    response.promise,
+    () => true,
+    (result) => {
+      const reconciled = reconcileConversationCleanup(
+        state.sessions,
+        state.conversationId,
+        result.deleted_ids,
+      );
+      state.sessions = reconciled.sessions;
+      if (reconciled.currentDeleted) {
+        state.conversationId = null;
+        state.turns = [];
+        state.pendingQuestion = "";
+      }
+    },
+    async () => { state.reloads += 1; },
+    (result) => { state.messages.push(conversationCleanupToast(result.deleted)); },
+  );
+  response.resolve({ deleted: 1, deleted_ids: ["conversation-a"] });
+
+  assert.equal(await cleanup, true);
+  assert.deepEqual(state.sessions.map((session) => session.id), ["conversation-b"]);
+  assert.equal(state.conversationId, null);
+  assert.deepEqual(state.turns, []);
+  assert.equal(state.pendingQuestion, "");
+  assert.equal(state.reloads, 1);
+  assert.deepEqual(state.messages, ["已删除 1 条会话"]);
 });

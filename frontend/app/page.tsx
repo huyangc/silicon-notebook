@@ -87,6 +87,7 @@ import {
   conversationsOlderThan,
   CLEANUP_PRESETS,
   reconcileConversationCleanup,
+  runOwnedConversationCleanup,
 } from "./conversation-cleanup";
 import { fetchMe, logoutUser, type AuthUser } from "./auth";
 import { API_BASE } from "./api-config";
@@ -2686,25 +2687,46 @@ export default function Home() {
   }
 
   async function bulkCleanup(days: number) {
-    const { deleted, deleted_ids: deletedIds } = await bulkDeleteConversations(
-      currentNotebookId ?? "",
-      days,
+    const notebookId = currentNotebookId;
+    if (!notebookId) return;
+    const workspaceEpoch = workspaceEpochRef.current;
+    const conversationIdAtStart = conversationId;
+    const isCurrent = () => workspaceRequestIsCurrent(
+      false,
+      workspaceEpoch,
+      workspaceEpochRef.current,
+      notebookId,
+      activeNotebookIdRef.current,
     );
-    const reconciled = reconcileConversationCleanup(
-      sessions,
-      conversationId,
-      deletedIds,
+    await runOwnedConversationCleanup(
+      bulkDeleteConversations(notebookId, days),
+      isCurrent,
+      ({ deleted_ids: deletedIds }) => {
+        setSessions((currentSessions) => reconcileConversationCleanup(
+          currentSessions,
+          conversationIdAtStart,
+          deletedIds,
+        ).sessions);
+        const { currentDeleted } = reconcileConversationCleanup(
+          [],
+          conversationIdAtStart,
+          deletedIds,
+        );
+        if (currentDeleted) {
+          setTurns([]);
+          setConversationId(null);
+          setPendingQuestion("");
+          setPendingMode(DEFAULT_ASK_MODE);
+          setPendingTrace([]);
+        }
+      },
+      async () => {
+        await loadSessions(notebookId, workspaceEpoch);
+      },
+      ({ deleted }) => {
+        setToast(conversationCleanupToast(deleted));
+      },
     );
-    setSessions(reconciled.sessions);
-    if (reconciled.currentDeleted) {
-      setTurns([]);
-      setConversationId(null);
-      setPendingQuestion("");
-      setPendingMode(DEFAULT_ASK_MODE);
-      setPendingTrace([]);
-    }
-    await loadSessions(currentNotebookId);
-    setToast(conversationCleanupToast(deleted));
   }
 
   function beginRenameSession(session: ConversationSummary) {
