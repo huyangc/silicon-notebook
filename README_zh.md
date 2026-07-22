@@ -10,7 +10,7 @@
 
 - Python FastAPI 后端；SQLite 持久化路径 `.local/silicon_notebook.db`
 - `frontend/` 下的 Next.js / React / TypeScript 前端
-- OpenAI-compatible LLM 端点，用于 KG 抽取、接地回答和深度报告；embedding 通过 `EMBED_*` 独立配置
+- 由部署者统一管理 OpenAI-compatible chat、embedding 与 rerank 服务；workload 绑定及每服务 `max_concurrency` 集中写入一个 TOML
 - 未配置 LLM/embedder 时全管线可离线运行（deterministic fallback）
 - 干净起点：全新数据库只初始化本机用户，不预置 demo 笔记本或合成来源
 - 支持 PDF、Markdown、DOCX、PPTX、CSV、XLSX 的 multipart 文件上传（经共享 KG job scheduler 异步执行）
@@ -83,23 +83,25 @@ python -m pip install -r backend/requirements.txt
 
 ```bash
 cp .env.example .env
+mkdir -p .local
+cp model-services.example.toml .local/model-services.toml
 ```
 
-服务在全空配置下即可启动——确定性离线模式(仅关键词检索,无 LLM 抽取/作答)。要启用完整
-能力,至少填:
+`MODEL_SERVICES_CONFIG` 指向部署者维护的 TOML。编辑其中的 `[services]` 与
+`[bindings]`，为每个物理服务设置 `max_concurrency`，并只把 `api_key_env` 引用的密钥
+写入 `.env`。删除配置路径或把它置空，会明确进入确定性离线模式（仅关键词检索，无模型
+抽取/作答）。用户不能提供或覆盖模型凭据、端点、模型名和容量。
 
-- **LLM**(KG 抽取、作答、深度报告)—— `OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` /
-  `OPENAI_COMPAT_MODEL`;任意 OpenAI 兼容端点。
-- **嵌入**(语义检索;否则仅关键词)—— `EMBED_PROVIDER=dashscope` 加 `EMBED_MODEL` /
-  `EMBED_BASE_URL` / `EMBED_API_KEY` / `EMBED_DIM`(必须等于模型输出维度)。可选
-  `EMBED_RUNTIME_DIM`(默认 `0`=关)把相似度空间截断到前 N 维 + re-normalize(MRL),
+- **嵌入维度**——`EMBED_DIM` 必须等于所绑定 embedding 模型的输出维度。可选
+  `EMBED_RUNTIME_DIM`（默认 `0`=关）把相似度空间截断到前 N 维 + re-normalize（MRL），
   使进程内矩阵 / ANN 内存约 `EMBED_DIM/N`× 缩减,而库内原生向量保留为真相源。开关它需
   重建 scale 索引,见 [docs/runtime-dim-truncation-runbook.md](docs/runtime-dim-truncation-runbook.md)。
   **切勿改小 `EMBED_DIM` 来降维** —— 那会把全部存量向量当异维丢弃。
 - **PDF 高保真**(可选)—— 一个 MinerU 端点,见 [用 MinerU 解析 PDF](#用-mineru-解析-pdf);
   保持 `MINERU_MODE=off` 则走 pypdf 文本兜底。
 
-`.env.example` 是权威、逐项带注释的完整变量清单;[配置](#配置)按组列出常用项。
+`.env.example` 是非服务变量与密钥槽位的权威清单；`model-services.example.toml` 是
+服务、绑定与容量模板；[配置](#配置)按组列出常用项。
 
 **远程访问——浏览器在另一台机器上**(不是服务器),所以**不能用 `localhost`/`127.0.0.1`**
 (那在每个访客自己机器上解析,连不到服务器)。
@@ -217,7 +219,10 @@ tar xzf silicon_notebook_<version>_<os>-<arch>.tar.gz
 cd    silicon_notebook_<version>_<os>-<arch>
 ./install.sh    # 建用户态 venv;优先用 wheelhouse 离线装依赖
                 # (缺的再从 pip 源在线补);生成 .env
-vi .env         # 填模型服务 URL(同 2 · 配置)
+mkdir -p .local
+cp model-services.example.toml .local/model-services.toml
+vi .local/model-services.toml  # 服务、workload 绑定、每服务 max_concurrency
+vi .env         # MODEL_SERVICES_CONFIG + api_key_env 引用的密钥
 ./start.sh      # 便携 node 跑 standalone 前端 + venv 的 uvicorn 后端
 ./stop.sh       # 停止两者
 ```
@@ -235,7 +240,7 @@ vi .env         # 填模型服务 URL(同 2 · 配置)
 1. 点击「＋ 新建」——系统立即创建 `Untitled notebook` 并进入，无弹窗。
 2. 上传 PDF、Markdown、DOCX、PPTX、CSV 或 XLSX 来源（multipart）。
 3. 后端（异步后台作业）：结构化 Markdown 解析 → 分块 + 向量化——源处理完即可做 chunk-native 问答。
-4. **KG 抽取按需触发**（见下方「KG 抽取触发」）：摄取期仅当该 notebook 已有 KG、或 `KG_AUTO_EXTRACT=true` 时才抽。抽取发生时经**全局抽取池**并发——窗口并发由 `KG_EXTRACT_WORKERS` 跨所有文档封顶、文档并发由 `KG_JOB_CONCURRENCY` 控制——抽完的新源随后增量融入统一 KG。
+4. **KG 抽取按需触发**（见下方「KG 抽取触发」）：摄取期仅当该 notebook 已有 KG、或 `KG_AUTO_EXTRACT=true` 时才抽。`KG_JOB_CONCURRENCY` 只控制并行来源任务；每次抽取模型调用都由 `kg_extract` workload 所绑定服务的系统调度器准入，因此服务 TOML 中的 `max_concurrency` 始终是唯一模型容量上限。抽完的新源随后增量融入统一 KG。
 5. 知识对象写入 `knowledge_objects` + `knowledge_relations`，并绑定元素级 evidence。
 6. 混合检索（bi-gram 关键词 + float32 矩阵语义）驱动 KG-native 问答：答案含逐句 `[k_i]` 引用，支持多轮会话，并沿 KG 关系做 1-hop 邻居扩展。
 7. 统一 KG 跨文档聚合概念；待合并的跨文档概念对可逐一确认或拒绝。
@@ -266,7 +271,7 @@ notebook 内的 **Knowhow 表** 动作（与知识图谱并列，单开一个面
 
 投影状态是整表完成契约，不是逐行进度捷径：整表的 chunk、embedding、知识对象/关系、变更序号与图缓存通知全部完成前，行保持 `pending`/`syncing`；只有这些收尾工作成功后才发布 `synced`。因此调用方观察到所有行均已结束时，可以立即读取完整图谱，不受后台线程调度先后的影响。状态发布还必须匹配本轮读取的表变更序号：旧任务绝不能覆盖并发新编辑留下的 `pending`，新版本由已排队的下一轮任务处理。
 
-每列还带一个**内容类型**——仅作确定性解析提示，从不调用 LLM：**方法步骤**列解析成有序步骤列表，**工具/事物**列按列表项/换行拆分并去重成多个节点，**普通**列整格作为一个节点。格子编辑器与行详情抽屉都提供显式的**优化表达**按钮（绝不自动触发）：调用 notebook 已配置的 LLM，在保持原意的前提下规整结构与措辞，原文与建议对照展示，只有逐格确认后才会回填。
+每列还带一个**内容类型**——仅作确定性解析提示，从不调用 LLM：**方法步骤**列解析成有序步骤列表，**工具/事物**列按列表项/换行拆分并去重成多个节点，**普通**列整格作为一个节点。格子编辑器与行详情抽屉都提供显式的**优化表达**按钮（绝不自动触发）：调用系统为 `knowhow_optimize` 绑定的服务，在保持原意的前提下规整结构与措辞，原文与建议对照展示，只有逐格确认后才会回填。
 
 Ask 引用命中 knowhow 格子时会直接跳转到该行的详情抽屉，而非通用来源视图。notebook 深拷贝会把 knowhow 表完整带过去——表、列、行、格子、代码附件在副本里全部重新映射 id——且不重跑 embedding，未变化的格子文本在副本里复用原向量。
 
@@ -492,88 +497,64 @@ run 进入完成或失败终态后还会精确失效该 notebook 的待处理来
 
 所有模型服务均通过 URL 端点接入，不启动本地模型服务。
 
-### 模型服务状态与定向诊断
+### 系统模型服务、调度与诊断
 
-笔记本集合页的服务指示器只读取当前已认证用户**已持久化的最近一次**模型服务状态，加载集合页时绝不会探测 provider。因此 provider 不可用不会阻塞笔记本库。保存配置时，后端会比较六个服务在写入前后的有效身份，只使身份真正变化的服务结果失效：无变化保存会保留已有状态，继承主 LLM 的变体也只有在解析后的回退身份变化时才失效。三态 patch（`null` / 缺省 = 不变、空串 = 清除、非空串 = 设置）、持久化配置读取、六个 fingerprint 比较、配置写入与变化状态删除都在同一个 `BEGIN IMMEDIATE` 事务中完成；并发保存会串行化而不丢失不同字段 / 角色的更新。每次有效配置读取都直接查询这份很小的持久化 JSON；旧的进程内 cache 对象只作为兼容接口保留，既不供应也不填充配置读取，因此暂停的旧读取或另一个进程都不能让后续解析持续陈旧。发生变化且已配置的服务随后显示为「待测试」，直到新的显式测试或一次已观察到的失败记录结果。
+模型 endpoint、协议、模型名、工作负载绑定与服务容量都由部署者统一管理，不再由用户配置。
+把 `model-services.example.toml` 复制为 `.local/model-services.toml`，设置
+`MODEL_SERVICES_CONFIG=.local/model-services.toml`，并在 `.env` 中只填写各服务
+`api_key_env` 所引用的密钥。仓库中的示例不含凭证；`MODEL_SERVICES_CONFIG` 留空时，
+系统明确进入离线 / 确定性降级。
 
-打开**模型服务**可查看已保存配置实际解析出的模型，并可测试一个当前服务或全部当前有效服务。有效身份由后端根据用户已保存设置及其配置回退解析，模型名是运行时数据——前端产品代码不得保存 provider / 模型名常量。Ask 失败提示会指出受影响的服务角色；安全的模型显示名可用时，也会显示后端解析出的当前模型。编辑器分别追踪 Base URL、模型名和 API Key 是否改动，只发送已改动角色中的已改动字段；未改动表单产生 `{}`，不会把另一个浏览器标签页刚保存的值覆盖回旧值，明确改动为空串仍表示清除。加载及保存成功后会重置全部 dirty 标记，未改动时「保存」保持禁用。
+每个 `[services.<id>]` 表配置 `display_name`、`kind`、`protocol`、`base_url`、
+`model`、`api_key_env` 与 `max_concurrency`；`[bindings]` 把稳定的 workload id
+（如 `ask_answer`、`reasoning_agent`、`kg_extract`、
+`retrieval_query_embedding`、`retrieval_rerank`）映射到物理服务。多个 workload
+可以共用一个服务，它们也会共用该服务唯一的调度器和并发预算。`max_concurrency`
+是唯一的模型容量参数；来源作业数、窗口大小、batch 大小与本地 ANN 线程都不会再创建模型 gate。
 
-有效身份也包含会改变运行时协议的开关：嵌入 provider 与 rerank API 风格会先归一化，再进入内部 fingerprint。rerank 的 URL、密钥和模型值在解析、运行时构造、探测与 fingerprint 中统一去除首尾空白；仅含空白的配置视为未配置且不会探测。即使 endpoint / key / model 都有值，只要 `EMBED_PROVIDER` 关闭，嵌入仍视为未配置且不会探测。修改任一协议开关都会使旧结果失效；显式测试严格使用已解析的 endpoint / model / protocol 描述。
+调度策略固定在代码中：
 
-嵌入服务由系统管理，在此面板中只读：用户可以查看或显式测试其有效服务，但不能在这里编辑 endpoint、密钥或模型。服务状态 API 与界面只暴露已脱敏的状态、延迟、触发来源、稳定错误码和安全模型显示名。原始上游诊断（包括 provider payload、endpoint 与异常文本）只保留在服务端日志中，不进入状态响应或 tooltip。形似 endpoint 的模型标识（包括双标签、Unicode 后缀与 punycode 后缀主机名）不得作为模型显示名暴露。
+- 每个物理服务最多同时运行 `max_concurrency` 个调用；不同服务拥有独立槽位；
+- 总队列上限为 `10 × max_concurrency`，单个 actor 最多排队
+  `2 × max_concurrency` 项；
+- 调度按 8 个 interactive : 2 个 report : 1 个 background 的固定节奏循环，
+  每个优先级内按 actor 轮转，因此持续交互流量下后台工作仍会前进；
+- 排队截止时间固定为 interactive 30 秒、report 300 秒、background 1800 秒，
+  派发前会响应取消；
+- 致命 provider 错误立即打开熔断器；连续 3 次瞬态错误也会打开。冷却 30 秒后只允许
+  1 个 half-open 恢复探针。
 
-除明确、可操作的「服务未配置」指引外，只有真实模型 provider 调用失败才会生成 Ask 模型错误提示；也只有这类真实调用失败才能写入已观察失败状态。本地 FTS、ANN、关键词、索引打开与向量落库失败只进入服务端诊断，不会把 provider 标成异常。每个真实运行时 client 都携带构造它时的准确有效 fingerprint；只有该 fingerprint 仍是当前身份时才持久化已观察失败。旧配置的在途请求仍可生成与其原 client 绑定的脱敏 Ask 提示，但不能覆盖替换配置的服务状态；未标记身份的测试替身也不能持久化 provider 健康状态。手动测试和已观察失败都会在同一个 `BEGIN IMMEDIATE` 事务中重新读取持久化配置、核对当前 fingerprint，再有条件地执行单调 UPSERT：旧结果若先提交，后续配置事务会删除它；旧结果若在配置提交后等待，会因身份不符而跳过；新身份的有效结果若在配置事务后等待，则会保留。每个服务的结果按发生时间单调更新：较早事件即使更晚写库也不能覆盖较新结果；同一时间的竞争中，已观察失败 / 错误优先于手动成功。
+调度器与熔断状态只存在于进程内。生产必须只运行一个后端进程：
+`scripts/prod.sh` 固定 Uvicorn `--workers 1`。多 worker 会把声明的服务并发度成倍放大，
+并把队列、熔断与健康状态分裂到多个进程。
 
-草稿测试绑定到被测角色和准确表单版本；编辑、保存或重新打开面板都会使旧结果失效。草稿测试进行中禁止保存，保存进行中禁止编辑字段。弹窗会把 Tab 焦点限制在内部，并在关闭后还给准确的打开按钮；若保存期间暂时没有可用控件，Tab / Shift+Tab 会聚焦弹窗容器本身。已禁用但未在测试的状态按钮保持「测试当前使用」，只有真实运行中的已保存配置测试才显示「测试中…」。
+普通用户看到的**模型服务**面板是只读的，展示脱敏后的系统服务身份、绑定 workload、
+最近健康状态、active/maximum、排队数、最老等待时间和熔断状态。
+`GET /api/model-services/status` 只读本地状态，绝不自动探测上游。只有 admin 可通过
+`POST /api/admin/model-services/{service_id}/test` 或
+`POST /api/admin/model-services/test-all` 显式测试一个或全部服务。endpoint、凭证、
+provider 响应正文和原始异常只保留在服务端日志。
 
-当前状态 API 为 `GET /api/me/model-services/status`、
-`POST /api/me/model-services/{service}/test` 与
-`POST /api/me/model-services/test-all`。既有的
-`POST /api/me/model-settings/test` 仍是未保存、可编辑 LLM/rerank 草稿值的独立测试接口。
+Ask / 模型错误会尽量携带物理服务、workload、安全模型名与 `support_id`。用户遇到问题时，
+应把 support id 提交给维护人员；维护人员结合服务端日志与只读服务面板即可定位坏掉的模型服务。
+本地检索 / 索引错误不会把 provider 标为异常。
 
-**LLM（OpenAI-compatible）：**
+个人模型配置路由和可编辑配置页面已经删除。schema v24 会在与版本戳相同的事务中，
+不可逆地把历史 `user_profiles.model_settings` 全部覆盖成 `{}`，并删除旧的逐用户健康状态。
+如需把历史凭证留作外部记录，升级前先备份数据库；应用不会恢复或继续使用这些值。
 
-```text
-OPENAI_COMPAT_BASE_URL
-OPENAI_COMPAT_API_KEY
-OPENAI_COMPAT_MODEL
-OPENAI_COMPAT_TIMEOUT_SECONDS   # 默认 60
-OPENAI_COMPAT_MAX_RETRIES       # 默认 2
-```
+模型调用超时、重试、输出预算与 batch 大小仍是普通 workload 调优项。`EMBED_DIM` 必须与绑定的
+embedding 模型输出维度一致。KG 来源级并行仍由 `KG_JOB_CONCURRENCY` 控制，自适应抽取窗口使用
+`kg_extract` 所绑定服务的容量；两者都不能覆盖服务 `max_concurrency`。
 
-**嵌入（向量检索）：**
-
-```text
-EMBED_PROVIDER          # ""=关闭（仅关键词） | dashscope
-EMBED_MODEL             # EMBED_PROVIDER=dashscope 时必填，如 text-embedding-v4
-EMBED_BASE_URL          # 必填的嵌入端点 URL
-EMBED_API_KEY
-EMBED_DIM               # 须与模型输出维度一致（默认 1024）
-EMBED_TRUNCATE_CHARS    # 每段文本喂给 embedder 的最大字符数（默认 2000）
-EMBED_BATCH_SIZE        # 每次嵌入调用的元素数（默认 10）
-EMBED_PERSIST_CHUNK     # 每批落库行数（默认 200）
-EMBED_CONCURRENCY       # 并发嵌入线程数（默认 8；温和值，防 429）
-```
-
-**KG 抽取并发与窗口化：**
-
-```text
-KG_AUTO_EXTRACT             # 所有 notebook 每次上传都抽 KG（默认 false）；为 false 时，
-                            # 若该 notebook 已有 KG，新源仍自动续抽（首次 opt-in，之后自动维护）
-KG_EXTRACT_WORKERS          # 全局并发抽取窗口(LLM 调用)上限，跨所有文档共享(文档内+文档间)（默认 16）
-KG_JOB_CONCURRENCY          # 同时抽取的文档数(作业池)；各文档窗口共享上面的全局预算（默认 8）
-KG_ASK_RESERVE              # 为交互式 Ask 预留的 LLM 连接数，抽取打满时 Ask 不被饿死；连接池=WORKERS+RESERVE（默认 64）
-KG_WINDOW_TARGET_CHARS      # 0=窗口大小自适应（默认）；>0 强制固定窗口字符数
-KG_WINDOW_MIN_CHARS         # 自适应窗口下限（默认 4000）
-KG_WINDOW_MAX_CHARS         # 自适应窗口上限（默认 8000）
-KG_WINDOW_OVERLAP_CHARS     # 相邻窗口重叠字符数（默认 450）
-KG_WINDOW_WARN_THRESHOLD    # 窗口数超此值记 WARNING（默认 1200）
-```
-
-**按核数自动调参：** 只有真正受 CPU 核数约束的旋钮才会按机器核数自动缩放，其余旋钮不论硬件如何都保持固定：
+**按核数自动调参：** 本地 CPU 工作仍可按机器缩放：
 
 ```text
-KG_CLUSTER_ANN_THREADS   # 概念聚类/合并用的 hnswlib ANN 建索引线程数。
-                         # 0（默认）= 自动 min(cpu核数, 32)；检索/KG 相关旋钮里
-                         # 唯一按本机核数推导的一个。
+KG_CLUSTER_ANN_THREADS   # 概念聚类 hnswlib 线程；0（默认）= min(cpu核数, 32)
 ```
 
-`scripts/dev.sh` / `scripts/prod.sh` 会 source `scripts/autotune.sh`，在未显式设置时
-把 `OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS`（以及
-`NUMEXPR_NUM_THREADS`）设为 `min(cpu核数, 8)`；离线回填 CLI 的进程池 worker 默认值同样是
-`min(cpu核数, 32)`。设 `AUTOTUNE=0` 可整体关闭该 shell 层自动调参。以上任何值都可以用
-显式 env 覆盖——显式设置的值永远优先于自动推导的默认值。后端启动时会打印一行已解析的
-实际值（`autotune: kg_cluster_ann_threads=... backfill_default_workers=...` 控制台日志），
-方便确认某次运行到底生效的是什么。
-
-与此刻意相反，`KG_EXTRACT_WORKERS` / `KG_JOB_CONCURRENCY` / `EMBED_CONCURRENCY` 是针对
-远程 LLM/嵌入端点的并发上限，不是本机资源——它们**不**按核数缩放，加核也不会改变它们；
-要提升这块吞吐，应扩容模型/嵌入服务端，而不是调这几个值。
-
-启用多 worker（`--workers N`）是**手动 opt-in**，autotune 不会替你打开——默认仍是单
-worker。每多一个 worker 就多一份内存中的状态（大型 KG/ANN 索引可达 GB 级），内存占用
-大致按 N 倍增长，且后台 KG job 可能落在任意一个 worker 上，会让状态追踪复杂化。只有在
-清楚并接受这两个代价后再开启。
+`scripts/dev.sh` / `scripts/prod.sh` 会通过 `scripts/autotune.sh` 调整本地 OMP/BLAS
+线程，但不会改变任何模型服务容量。
 
 **数据库：**
 
@@ -628,10 +609,7 @@ KG_CANONICAL_FOLD_ENABLED    # 检索时折叠同 canonical 的碎片化 KG 节�
 KG_ABOUT_DOWNWEIGHT_ENABLED  # 关系检索里对弱 about 边降权排序（默认 false）
 CHUNK_RECALL                 # chunk 大召回数（默认 200；mix 候选池 / 无 rerank 时 MMR 候选）
 CHUNK_MMR_K                  # 无 rerank 时 MMR 精选 chunk 数（默认 16）
-CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；需配 qwen3-rerank 才生效）
-RERANK_MODEL                 # qwen3-rerank 模型名；留空=关，mix 回退 MMR（默认空）
-RERANK_BASE_URL              # DashScope 原生 text-rerank 基址（默认 dashscope api/v1；非 compatible-mode）
-RERANK_API_KEY               # rerank 用 DashScope key（启用 mix rerank 必填）
+CHUNK_KG_OVERLAY_ENABLED     # chunk×graph mix：叠加 KG 局部结构+源 chunk（默认 true；rerank 路径需绑定 `retrieval_rerank`）
 RERANK_MAX_DOCS              # 单次 rerank 文档上限，超出自动切 batch 并发（默认 500）
 MAX_ENTITY_TOKENS            # mix KG 实体段 token 预算（默认 6000）
 MAX_RELATION_TOKENS          # mix KG 关系段 token 预算（默认 8000）
@@ -691,9 +669,9 @@ SLOW_REQUEST_MS         # 超过该毫秒数的请求标记 SLOW（默认 3000�
 SILICON_NOTEBOOK_CORS_ORIGINS
 ```
 
-`.env.example` 是每个环境变量的权威完整清单（含默认值与逐行注释）——上面分组只列常用项。其余可调项还包括：可选的推理专用 LLM（`REASONING_LLM_BASE_URL` / `REASONING_LLM_API_KEY` / `REASONING_LLM_MODEL`）及其护栏（`REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`）、检索/接地调参（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`），以及运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
+`.env.example` 是非服务变量与密钥槽位的权威清单，`model-services.example.toml` 是服务、绑定与容量模板；上面分组只列常用项。推理专用模型通过 TOML 把 `reasoning_agent` 绑定到独立服务，其护栏仍是 `REASONING_MAX_STEPS`、`REASONING_MAX_SUBQUERIES`、`REASONING_TIMEOUT_SECONDS`、`REASONING_MAX_RETRIES`。其余可调项还包括检索/接地参数（`PROC_MIN`、`EVIDENCE_TAU_LOW`、`EVIDENCE_TAU_HIGH`）、可选调试日志查看器（`DEBUG_LOGS_ENABLED`）和运行身份（`SILICON_NOTEBOOK_ENV`、`SILICON_NOTEBOOK_SINGLE_USER_EMAIL`、`SILICON_NOTEBOOK_SINGLE_USER_NAME`）。
 
-没有配置 LLM 时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。
+所需 chat workload 未绑定时，摘要和回答退化为 deterministic 行为；source 解析仍会完整执行，KG 抽取阶段记录完成的 `no-llm` run，不生成合成知识。
 
 ## 可观测性 / 日志
 
@@ -824,18 +802,18 @@ PYTHONPATH=backend python scripts/batch_ingest.py all --input-dir /path/to/md_di
 # 为基准层 notebook 构建可伸缩检索索引(离线;静态基准重建 KG 后需重跑)
 PYTHONPATH=backend python scripts/batch_ingest.py index --notebook-id nb-xxxx
 
-# 补该 notebook 缺失的 chunk + 节点向量(幂等;需 EMBED 配好)
+# 补该 notebook 缺失的 chunk + 节点向量（幂等；需绑定 `chunk_embedding`）
 PYTHONPATH=backend python scripts/batch_ingest.py embed --notebook-id nb-xxxx
 
-# 一次性存储迁移:把旧的 JSON 文本向量转成 float32 BLOB(幂等,不需要 EMBED)
+# 一次性存储迁移：把旧的 JSON 文本向量转成 float32 BLOB（幂等，不调用模型）
 PYTHONPATH=backend python scripts/batch_ingest.py vectors-to-blob --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py vectors-to-blob --all-notebooks --workers 8
 
-# 主动回填「来源删除反查表」(幂等,不需要 EMBED)
+# 主动回填「来源删除反查表」（幂等，不调用模型）
 PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py backfill-source-index --all-notebooks
 
-# 补该 notebook 内已解析论文源缺失的元数据(标题/作者/机构/期刊/年份;幂等,需 LLM 已配好,不需要 EMBED)
+# 补已解析论文源缺失的元数据（幂等；需绑定 `paper_metadata`，不调用 embedding）
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx --force
 
@@ -843,13 +821,13 @@ PYTHONPATH=backend python scripts/batch_ingest.py metadata --notebook-id nb-xxxx
 PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 ```
 
-`embed` 子命令只补**缺失**的 chunk 与 KG 节点向量(例如某次被 429 限流后留下的空洞)。必须给 `--notebook-id` 且 EMBED 已配好——它本身就是补向量的命令,故**忽略 `--allow-no-embed`**,EMBED 未配时直接报错退出。
+`embed` 子命令只补**缺失**的 chunk 与 KG 节点向量（例如某次被限流后留下的空洞）。必须给 `--notebook-id` 且系统配置已绑定 `chunk_embedding`——它本身就是补向量的命令，故**忽略 `--allow-no-embed`**，该 workload 未绑定时直接报错退出。
 
-`vectors-to-blob` 子命令是一次性存储迁移:embedding 向量过去以 JSON 文本存 SQLite,导致把几十万行加载成矩阵(建索引、检索冷启动)时大部分时间耗在 `json.loads` 上。现在新写入统一存成 float32 BLOB(`np.frombuffer` 零解析直接重解读字节),且所有读点都已兼容两种格式——所以这个命令是可选但推荐的升级后操作:它把四张 embeddings 表(`chunk_embeddings`、`knowledge_embeddings`、`element_embeddings`、`relation_embeddings`)里仍是 JSON 文本的旧行原地转成 BLOB,分批事务提交(每批 5000 行)并按表打印进度。它**不计算新向量**(故不需要 EMBED 配置),且幂等/可中断重跑——只选 SQLite 仍判定为 `text` 类型的行,跑第二遍时天然无行可转。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 转换全库所有 notebook。`json.loads`/重编码这一步(百万行规模下的单核瓶颈)按 `--workers` 个进程并行(默认 `min(32, CPU核数)`;`--workers 1` 完全不启动进程池)——主进程始终独占全部数据库读写,SQLite 单写者不变;进程池崩溃时自动回退串行,绝不丢run。
+`vectors-to-blob` 子命令是一次性存储迁移:embedding 向量过去以 JSON 文本存 SQLite,导致把几十万行加载成矩阵(建索引、检索冷启动)时大部分时间耗在 `json.loads` 上。现在新写入统一存成 float32 BLOB(`np.frombuffer` 零解析直接重解读字节),且所有读点都已兼容两种格式——所以这个命令是可选但推荐的升级后操作:它把四张 embeddings 表(`chunk_embeddings`、`knowledge_embeddings`、`element_embeddings`、`relation_embeddings`)里仍是 JSON 文本的旧行原地转成 BLOB,分批事务提交(每批 5000 行)并按表打印进度。它**不计算新向量**（故不需要任何模型服务绑定），且幂等/可中断重跑——只选 SQLite 仍判定为 `text` 类型的行,跑第二遍时天然无行可转。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 转换全库所有 notebook。`json.loads`/重编码这一步(百万行规模下的单核瓶颈)按 `--workers` 个进程并行(默认 `min(32, CPU核数)`;`--workers 1` 完全不启动进程池)——主进程始终独占全部数据库读写,SQLite 单写者不变;进程池崩溃时自动回退串行,绝不丢run。
 
-`backfill-source-index` 子命令主动填充 `knowledge_object_sources` 反查表(`object_id, source_id`)——删除或重解析某个来源时,需要找出哪些 KG 对象引用了它;没有这张表,该查找就得逐行 `json.loads` 整本 notebook 的 evidence JSON 才能找到匹配,几十万对象规模下很慢。这张表本来会「首用惰性回填」(未迁移库的第一次来源删除/重解析会付一次全扫描,扫描的同时顺带填表并标记该 notebook,此后每次都是索引直查)——这个命令让你提前批量付这笔成本(有界内存分批 + 打印进度),而不是让某个用户操作(删除来源)撞上它。不需要 EMBED 配置,且幂等/可中断重跑(每次重跑都清空并按当前 evidence 重建该 notebook 的行,再重新标记)。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 覆盖全库所有 notebook。若怀疑某库的反查表与实际 evidence 不一致(例如异常中断后),重跑本命令即是修复手段——它总是按当前 evidence 全量重建。
+`backfill-source-index` 子命令主动填充 `knowledge_object_sources` 反查表(`object_id, source_id`)——删除或重解析某个来源时,需要找出哪些 KG 对象引用了它;没有这张表,该查找就得逐行 `json.loads` 整本 notebook 的 evidence JSON 才能找到匹配,几十万对象规模下很慢。这张表本来会「首用惰性回填」(未迁移库的第一次来源删除/重解析会付一次全扫描,扫描的同时顺带填表并标记该 notebook,此后每次都是索引直查)——这个命令让你提前批量付这笔成本(有界内存分批 + 打印进度),而不是让某个用户操作(删除来源)撞上它。它不调用模型，且幂等/可中断重跑(每次重跑都清空并按当前 evidence 重建该 notebook 的行,再重新标记)。用 `--notebook-id` 限定单个库,或 `--all-notebooks` 覆盖全库所有 notebook。若怀疑某库的反查表与实际 evidence 不一致(例如异常中断后),重跑本命令即是修复手段——它总是按当前 evidence 全量重建。
 
-`metadata` 子命令给 notebook 里还缺论文元数据(标题、作者、机构、期刊、年份)的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库,或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源(doc_type 为空或 `academic_paper`);文本读的是库里已存的解析产物(source elements),原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`(本子命令绝不新建 notebook),且要求 LLM 已配置(`KG_LLM_*`,缺省回退全局 `OPENAI_COMPAT_*`)——两者都未配时直接报错退出,不会静默跳过;不需要 EMBED 配置。幂等、可中断重跑:已有元数据行的源默认跳过,加 `--force` 则对本次范围内所有源强制重抽(例如 prompt/校验升级后)。进度按源逐行打印(`[meta <done>/<total>] <source-id> <status>`),结束打印各状态计数的 JSON 汇总。
+`metadata` 子命令给 notebook 里还缺论文元数据（标题、作者、机构、期刊、年份）的来源补抽——适用于「论文元数据抽取」上线前就已入库的旧库，或抽取 prompt/校验升级后想刷新一遍。它只处理已解析、且看起来是论文的来源（doc_type 为空或 `academic_paper`）；文本读的是库里已存的解析产物（source elements），原始 PDF 不在磁盘上也能跑。必须给 `--notebook-id`（本子命令绝不新建 notebook），且系统模型配置必须绑定 `paper_metadata` workload；未绑定时直接报错退出，不会静默跳过，也不需要 embedding workload。幂等、可中断重跑：已有元数据行的源默认跳过，加 `--force` 则对本次范围内所有源强制重抽（例如 prompt/校验升级后）。进度按源逐行打印（`[meta <done>/<total>] <source-id> <status>`），结束打印各状态计数的 JSON 汇总。
 
 `reparse` 子命令修复一类历史存量:某些源已建、`parse_status` 看似前进,却没有 `source_elements`(上次 parse 中断或未落地)。KG 抽取有一道零-LLM 接地校验——每个 LLM 抽出的节点必须把引文匹配回该源的某个 element,否则丢弃;一个源若没有任何 element,抽出的节点会被**整源丢光**,导致 `knowledge_objects` 一行不增(抽了等于白抽),且直接重抽永远补不出。旧版 `all` 的续跑分流曾用「有没有 KG」当「是否已 parse」,把这类无-elements 源当成「已 parse、缺 KG」直接送去抽取,正是踩中此坑(该分流已修正,新导入不再遇到)。本命令对该 notebook 内所有缺 `source_elements` 的源重新跑 `process_source`(parse → 生成 elements),收尾一次 KG rebuild;有 elements 的源自动跳过(幂等、可中断重跑)。`--limit N` 只处理前 N 个;`--no-rebuild` 跳过收尾聚类(分批场景)。必须给 `--notebook-id`。
 
@@ -864,7 +842,7 @@ PYTHONPATH=backend python scripts/batch_ingest.py reparse --notebook-id nb-xxxx
 # 原维 vs 截断维的相对结论依然成立(稀疏子集读数略偏乐观;边界值请全量复核)
 ( cd backend && python -m app.eval.mrl_truncation --tables relation --sample-rows 50000 )
 
-# gold 模式(需配置 EMBED 端点;每题按原生维 embed 一次):
+# gold 模式（需绑定 `chunk_embedding` workload；每题按原生维 embed 一次）：
 # 对提交在仓库里的 gold 集算各截断档的 recall@12 / MRR 相对衰减
 ( cd backend && python -m app.eval.mrl_truncation --gold app/eval/recall_gold.yaml --notebook nb-b37185f4ae )
 ```
@@ -882,37 +860,31 @@ PYTHONPATH=backend python scripts/batch_ingest.py kg --notebook-id nb-xxxx --reb
 
 `--limit` 只限本轮**抽取**的来源数;最终聚类始终覆盖整个 notebook。大库(见上文 `SCALE_INDEX_AUTO_ENABLED`)在 `kg` 重建后会**自动重建**可伸缩检索索引(不会陈旧)。`KG_CLUSTER_REP_ANN_MAX`(默认 2,000,000)封顶 rep-ANN 规模——超出则分片建索引并 WARNING(绝不静默截断)。
 
-**并发调优。** 三个彼此独立的控制项决定吞吐与 429 压力。显式 CLI 值优先；省略时继承对应的 settings/环境变量：
+**批处理并发。** `--workers` 只控制来源/文档任务，省略时回退 `KG_JOB_CONCURRENCY`。它在 `all` 中分派来源 job、在 `ingest` 中控制文件解析；`vectors-to-blob` 中则表示解析/重编码进程池大小（默认 `min(32, CPU核数)`；`1` 关闭该进程池）。
 
-- `--workers` —— 来源管线并发；回退 `KG_JOB_CONCURRENCY`。它在 `all` 中分派来源 job、在 `ingest` 中控制文件解析。`vectors-to-blob` 中它仍表示解析/重编码进程池大小（默认 `min(32, CPU核数)`；`1` 关闭该进程池）。
-- `--llm-conc` —— 传统 `chat_json` LLM 调用的进程级硬上限；回退 `KG_EXTRACT_WORKERS`（默认 16）。它跨所有来源共享，也覆盖单个来源内部的抽取窗口。
-- `--embed-conc` —— embedding 工作的进程级硬上限；回退 `EMBED_CONCURRENCY`。它跨所有来源共享，不是逐文档上限。
+`all`、`kg`、`reparse`、`metadata`、`ingest` 和 `embed` 里的每次模型调用，都与在线请求共用系统模型服务调度器。各 workload 所绑定服务只从部署 TOML 读取一个模型容量参数 `max_concurrency`；批处理 CLI 不再提供模型并发覆盖项，增大 `--workers` 也不会乘大该服务上限。若一次限流留下缺失向量，之后用 `embed` 子命令补修。
 
-模型 gate 与来源分派相互独立：`--workers` 不会乘大任何模型上限。特别是，embedding 峰值并发始终由跨所有来源的 `--embed-conc` 硬封顶。所有会调用模型的批处理阶段都遵守同一 gate 合同，包括 `all`、`kg`、`reparse`、`metadata`（以及 `ingest` 与 `embed` 中的 embedding 工作）。若一次限流留下缺失向量，之后用 `embed` 子命令补修。
-
-例如：来源管线较大、embedding 端点保守、但 LLM 容量较高时：
+例如：模型容量已经在部署 TOML 声明后，可单独提高来源管线并发：
 
 ```bash
 PYTHONPATH=backend python scripts/batch_ingest.py reparse \
   --notebook-id nb-xxxx \
   --workers 32 \
-  --llm-conc 24 \
-  --embed-conc 4 \
   --pool-report-interval 5
 ```
 
-- `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打一行实时池占用（默认 15；`0` 关闭）。它在来源 job 旁显示 LLM 与 embedding gate 的 `active/max/waiting`，例如 `[pool 17:52:33] LLM 14/24 waiting=2 · embedding 4/4 waiting=9 · source 8/32 · 源完成 5/40`，可直接看出独立上限与排队压力。
+- `--pool-report-interval` —— `all`/`kg`/`reparse` 阶段每 N 秒打印 producer/source 业务线程池占用（默认 15；`0` 关闭）。它不是模型容量权威来源；每个服务的运行数、排队数、健康状态和熔断状态应在只读「模型服务」状态中查看。
 
-选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--llm-conc`（传统 `chat_json` 的进程级上限 = `KG_EXTRACT_WORKERS`）、`--embed-conc`（进程级 embedding 上限 = `EMBED_CONCURRENCY`；跨所有来源避 429）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild，`all` 阶段的末尾聚类同样适用）、`--allow-no-embed`（EMBED 未配时显式允许无向量降级；默认拒绝，不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒自报池占用，显示 LLM 与 embedding 的 `active/max/waiting`；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`：作用于全部 notebook 而非单个）、`--force`（仅 `metadata`：已有元数据行的源也重抽）、`--dry-run`（只扫描预估）。`embed` 子命令只补缺失的 chunk + 节点向量，需 `--notebook-id`。`vectors-to-blob` 子命令把旧 JSON 文本向量迁移成 BLOB，需 `--notebook-id` 或 `--all-notebooks`。`backfill-source-index` 子命令主动构建来源删除反查表，需 `--notebook-id` 或 `--all-notebooks`。`metadata` 子命令给已解析的论文来源补抽元数据（标题/作者/期刊/年份），需 `--notebook-id` 且 LLM 已配置。
+选项：`--owner`（notebook 属主用户名，大小写不敏感，默认 = admin 用户）、`--workers`（来源管线并发 = `KG_JOB_CONCURRENCY`；`vectors-to-blob` 中为解析/编码进程池大小，默认 `min(32, CPU核数)`，`1` = 不启进程池）、`--limit`（kg 抽取子集——聚类仍覆盖全量）、`--no-rebuild` / `--rebuild-only`（分批大库构建时拆分「抽取」与「末尾聚类」）、`--fresh`（清空 rebuild checkpoint，强制 merge 审查 + 概念描述全量重裁；用于只换了 KG 模型/阈值、数据没变时——隐含强制 rebuild，`all` 阶段的末尾聚类同样适用）、`--allow-no-embed`（`chunk_embedding` 未绑定时显式允许无向量降级；默认拒绝、不静默；`embed` 子命令忽略此项）、`--pool-report-interval`（`all`/`kg`/`reparse` 阶段每隔几秒报告 producer/source 业务线程池；默认 15，`0` 关）、`--all-notebooks`（仅 `vectors-to-blob` / `backfill-source-index`：作用于全部 notebook 而非单个）、`--force`（仅 `metadata`：已有元数据行的源也重抽）、`--dry-run`（只扫描预估）。`embed` 子命令只补缺失的 chunk + 节点向量，需 `--notebook-id`。`vectors-to-blob` 子命令把旧 JSON 文本向量迁移成 BLOB，需 `--notebook-id` 或 `--all-notebooks`。`backfill-source-index` 子命令主动构建来源删除反查表，需 `--notebook-id` 或 `--all-notebooks`。`metadata` 子命令给已解析的论文来源补抽元数据（标题/作者/期刊/年份），需 `--notebook-id` 并绑定 `paper_metadata`。
 
-前置:`.env` 配好 EMBED 与 `KG_LLM`(KG 抽取缺省回退全局 `OPENAI_COMPAT_*`)。EMBED 未配时 CLI **默认拒绝运行**——要无向量导入须显式 `--allow-no-embed`(此时跳过 chunk/KG 向量),绝不静默;KG 抽取在无可用 LLM 时报错。重复文件按内容哈希自动跳过;进度写 `<storage>/batch_ingest/<notebook>.jsonl`,中断后重跑自动续。
+前置：用 `MODEL_SERVICES_CONFIG` 指向部署 TOML，按所选阶段绑定所需 workload（尤其是 `chunk_embedding`、`kg_extract` 和 `paper_metadata`），`.env` 只保存 TOML 引用的密钥。`chunk_embedding` 未绑定时 CLI **默认拒绝运行**——要无向量导入须显式 `--allow-no-embed`（此时跳过 chunk/KG 向量），绝不静默；所需 chat workload 未绑定的阶段会明确失败。重复文件按内容哈希自动跳过；进度写 `<storage>/batch_ingest/<notebook>.jsonl`，中断后重跑自动续。
 
 ### 检索回放对照(`scripts/replay_retrieval.py`)
 
 性能优化改动前后,证明"检索效果不变"的验收工具:拿一份固定问题集跑 reasoning 检索原语(`federated_retrieve` + `ppr_retrieve`),**不调用任何答案 LLM**,把命中的 id/分数序列存成 JSON;两次运行的输出可逐问题 diff。
 
 ```bash
-# 记录一次(需 EMBED 端点已配置,用真实查询向量;仅读检索原语,不需要 LLM)
+# 记录一次（需绑定 `chunk_embedding`，使用真实查询向量；仅读检索原语，不需要 chat 模型）
 python scripts/replay_retrieval.py --notebook nb-xxxx --questions questions.txt --out before.json
 
 # --full:额外跑一遍完整 reasoning 编排层(plan/reflect 用固定子查询 + 立即 answer 的 stub 代替 LLM,
@@ -928,7 +900,7 @@ python scripts/replay_retrieval.py --compare before.json after.json --mode topk 
 
 `questions.txt` 每行一个问题;`plan.json` = `{"<问题>": ["子查询1", "子查询2", ...]}`。**必须从主 checkout 根目录运行**(`.env` 按当前工作目录加载,与 `batch_ingest.py` 相同)。`--owner` 复用与 `batch_ingest.py` 相同的属主解析(大小写不敏感,默认 = `"admin"`)。
 
-退出码即验收结果,可直接接入 CI/脚本判定:`0` 成功(记录模式)或 `--compare` 全部一致;`1` `--compare` 发现不一致(两次运行结果有差异);`2` 对照发生前的前置条件失败(EMBED 未配置、notebook 不存在、或属主用户不存在)——CLI **直接报错退出**,绝不用零向量静默跑出误导性的"零召回"对照结果。
+退出码即验收结果,可直接接入 CI/脚本判定:`0` 成功(记录模式)或 `--compare` 全部一致;`1` `--compare` 发现不一致(两次运行结果有差异);`2` 对照发生前的前置条件失败（`retrieval_query_embedding` 未绑定、notebook 不存在、或属主用户不存在）——CLI **直接报错退出**,绝不用零向量静默跑出误导性的"零召回"对照结果。
 
 ### 合并两个共享 base 库的部署(`scripts/merge_dbs.py`)
 
@@ -1012,7 +984,7 @@ PYTHONPATH=backend python scripts/backfill_knowhow_md.py --notebook nb-xxxx --us
 
 - `--notebook`(必填)—— 要回填的 notebook。
 - `--apply` —— 真正写入;它【必须】带 `--plan PATH`,按该评审过的 plan 文件逐条写入。某个格子若在评审后被人改过(当前内容与 plan 记录的 `before` 不一致)会被【跳过并报告】,绝不覆盖已经改动过的目标。每个写入的行标记为 pending,交由投影重算其 KG/步骤(重投影在命令退出前同步完成)。不带 `--plan` 的 `--apply` 是【硬错误】:apply 时从【当前】库重新规划,会把评审后被改过的格子也带进来写入却从未被评审(`--use-llm` 更甚——改写模型随机,重新规划连候选都不同)——所以请先 dry-run、评审其 plan 文件,再按【那份】写入。
-- `--use-llm` —— 改走已配置的改写模型逐格重排(自带零 LLM 的内容不变式校验,校验不过会自动退回确定性规则),而不是默认那套随时可用的规则规整器。若改写模型未配置、或其结果未过校验已退回规则,工具会打印明确的 `WARNING`,不会悄悄假装 LLM 生效了。
+- `--use-llm` —— 改走系统为 `knowhow_reformat` 绑定的服务逐格重排（自带零 LLM 的内容不变式校验，校验不过会自动退回确定性规则），而不是默认那套随时可用的规则规整器。若该 workload 未绑定、或其结果未过校验已退回规则，工具会打印明确的 `WARNING`，不会悄悄假装 LLM 生效了。
 - `--save-plan PATH` —— 覆盖 dry-run 写出 plan 文件的路径。
 - `--plan PATH` —— 要写入的评审过的 plan 文件(见 `--apply`)。
 
@@ -1038,7 +1010,7 @@ v21 为 `(column_id, JS-trim(content_md), row_id)` 建立索引；guarded 成员
 - Ask 不再在请求路径里同步补齐 embedding 或全量扫描 source elements；使用已有的关键词/向量索引，在维护任务运行时仍保持响应；并输出每阶段计时（`ask_stage` 事件）。
 - 统一 KG rebuild 改为显式且可观测（`GET /notebooks/{id}/unified-kg/status`）；摄取来源只标记图谱为 dirty 而非同步重建，打开图谱浮层不再自动重建（按需刷新）。
 - 跨文档概念合并使用确定性别名归一化 + 有界 top-k 向量候选（可扩展到上千概念）；可选 LLM 预审（`POST /notebooks/{id}/unified-kg/merges/review`）对小批量近义词候选做高置信确认/拒绝。
-- KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
+- KG 抽取需要在系统模型 TOML 中绑定 `kg_extract` workload；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
 - 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `chunk`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；把一个 notebook 发布为公共知识库只是让它可被挂载——tier 感知联合检索与 base 优先冲突规则只对显式把它挂为参考库的笔记本生效。
 - Notebook 分享采用链接复制/只读成员方式，不是实时协同编辑；写权限仍归 owner。
 - PostgreSQL + pgvector 暂不阻塞本机 beta，后续再迁移。在 PostgreSQL repository 实现前，非 `sqlite:///` 的 `DATABASE_URL` 会直接报错，不再静默落到本地数据库。

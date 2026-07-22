@@ -346,6 +346,15 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **前端闭环**：导入向导第一步可选“属性按列 / 属性按行”，预览显示最终规范化形态；属性按行默认建议首列为行标题，用户可改选或取消。
 - **验证**：相关解析/API/前端契约测试、`scripts/check.sh` 与前端生产构建均通过。
 
+## 29. 系统模型服务统一管理与全局调度（2026-07-22）
+
+- **部署统一配置**：chat、embedding、rerank 服务改由部署 TOML 集中声明，`.env` 只保存 TOML 通过 `api_key_env` 引用的密钥。31 个稳定 workload 显式绑定到同种类物理服务；用户不能再保存或覆盖 endpoint、凭据、模型名与容量。配置路径留空时明确走离线/确定性降级，非空无效配置启动失败。
+- **按物理服务控制全局并发**：每个服务只认一个容量参数 `max_concurrency`，共用该服务的所有在线、报告、后台与批处理 workload 进入同一个进程级调度器；不同服务容量互相独立。队列总量封顶 `10N`、单 actor 封顶 `2N`，按 interactive:report:background = `8:2:1` 调度并在同优先级内按 actor 轮转，三类排队截止时间分别为 30/300/1800 秒。一次致命错误或连续三次瞬态错误会熔断 30 秒，half-open 只放行一个恢复调用。
+- **单进程容量语义**：生产脚本固定后端 `--workers 1`，避免多进程把 TOML 容量成倍放大或分裂队列、熔断和健康状态。`KG_JOB_CONCURRENCY`、批处理来源 worker、自适应窗口、embedding batch 与本地 CPU/ANN 线程都不能覆盖模型容量。
+- **只读状态与维护诊断**：普通用户的「模型服务」页面只展示脱敏服务身份、workload、容量、运行/排队、熔断及最近健康状态，页面读取不探测上游；只有 admin 可显式测试单服务或全部服务。模型故障向用户返回安全 service/model 标签与 `support_id`，用户把该 id 提交给维护人员，由维护人员结合服务端日志定位具体坏掉的服务；endpoint、凭据、provider body 与 raw exception 不进入状态/UI。
+- **个人配置彻底下线**：个人模型配置路由、草稿测试、保存控件与配置页面已删除。schema v24 在版本事务中不可逆地把历史 `user_profiles.model_settings` 清为 `{}`、删除旧的逐用户健康行，并按部署服务 ID 持久化当前健康状态。
+- **架构边界与验证**：业务代码只按 workload 从 `RuntimeModelProvider` 取得受调度 adapter，raw transport 被限制在审查过的底层边界；repository 不再暴露模型 client 或 embedder。系统模型 registry/scheduler/provider、状态/API/UI、迁移与架构守卫的定向后端和前端测试已通过；完整离线 `scripts/check.sh` 与 production build 在本次发布最终验收阶段统一记录。
+
 ## 20. 当前边界（后续阶段，未计入已完成）
 
 - **历史 Article 方案**：已退役，不属于当前后续承诺；当前长内容产出路径是 Deep Report。
