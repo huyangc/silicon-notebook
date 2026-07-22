@@ -23,6 +23,26 @@ REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "scripts" / "diag_db.py"
 PYTHON = Path(sys.executable)
 
+# 下面两个预算表达的是**活性**（「没有卡死」），不是性能。
+#
+# 被诊断的对象里有 FIFO、被独占锁住的库、两千个待清理条目这类会让天真实现
+# **无限期**阻塞的东西；正确实现要么根本不打开它们（`lstat` 判非普通文件即
+# 拒绝），要么带 `O_NONBLOCK` 打开，要么被 deadline 提前掐断。所以「有限时间内
+# 返回」就足以证成断言——具体是 0.25 秒还是 5 秒，对结论没有任何影响。
+#
+# 数字给得宽，是因为紧的数字只会买到抖动：这些用例和整个后端套件并发跑在共享的
+# 4 核 runner 上，其中一条还要把一次 Python 解释器冷启动装进预算里。曾经的
+# 0.25 秒余量几近于零，在 PR #322 的 full-gate 上随机报红过一次（同一提交重跑
+# 即绿）。
+#
+# 真正承载语义的是各用例里的断言本身——`degraded` 里的类别、`mutations_executed`、
+# 文件指纹不变——那些与机器快慢无关。**若要把这两个数字改小，先确认你要防的
+# 回归确实能被新数字区分出来**：`diag_db` 内部对单次等待已有 1 秒硬顶
+# （`MAX_BUSY_TIMEOUT_MS`、`timeout = min(1.0, remaining)`），所以这里防的是
+# 病理性挂死，不是毫秒级性能。
+IN_PROCESS_LIVENESS_SECONDS = 5.0
+SUBPROCESS_LIVENESS_SECONDS = 10.0
+
 
 def load_diag_db(*, allow_unsafe_noatime_for_logic_tests=True):
     spec = importlib.util.spec_from_file_location("diag_db", SCRIPT)
@@ -224,6 +244,13 @@ def test_collects_read_only_cascade_index_plan_and_scale_evidence(tmp_path):
 
 
 def test_delete_journal_exclusive_lock_honors_short_deadline_without_changes(tmp_path):
+    """独占 DELETE 日志锁下，取证要么让开要么被 deadline 掐断，不能卡在锁上。
+
+    时间断言是**活性**断言：证明它没有一直等锁。真正的语义由下面几条承担——
+    没有写入、`degraded` 里记了 locked/busy、文件指纹不变、不泄漏库名与原始
+    错误串。deadline 传的是 0.05 秒，而预算给到 `IN_PROCESS_LIVENESS_SECONDS`，
+    两者差两个数量级是有意为之，理由见文件头。
+    """
     db_path = tmp_path / "locked.db"
     with held_database(db_path, "DELETE"):
         before = database_fingerprints(db_path)
@@ -236,7 +263,7 @@ def test_delete_journal_exclusive_lock_honors_short_deadline_without_changes(tmp
         )
         elapsed = time.monotonic() - started
 
-        assert elapsed < 0.25
+        assert elapsed < IN_PROCESS_LIVENESS_SECONDS
         assert evidence["mutations_executed"] == 0
         assert any(row["category"] in {"locked", "busy"} for row in evidence["degraded"])
         assert database_fingerprints(db_path) == before
@@ -246,6 +273,15 @@ def test_delete_journal_exclusive_lock_honors_short_deadline_without_changes(tmp
 
 
 def test_fifo_wal_is_rejected_without_blocking(tmp_path):
+    """WAL 边车是 FIFO 时必须被拒，而不是打开它。
+
+    这是本文件里最纯粹的活性断言：对 FIFO 做阻塞式 `open(O_RDONLY)` 会**永久**
+    挂起（没有写端就一直等），所以只要进程有限时间内退出，就证明实现没走阻塞
+    读——`lstat` 判非普通文件即拒，加上真要开也带 `O_NONBLOCK`。
+
+    预算用 `SUBPROCESS_LIVENESS_SECONDS` 而不是毫秒级：这条要起真进程，一次
+    Python 解释器冷启动就吃掉大部分紧预算，而它对结论毫无贡献。
+    """
     db_path = tmp_path / "fifo.db"
     with sqlite3.connect(db_path) as connection:
         connection.execute("PRAGMA journal_mode = WAL")
@@ -265,13 +301,15 @@ def test_fifo_wal_is_rejected_without_blocking(tmp_path):
         env={},
     )
     try:
-        stdout, stderr = process.communicate(timeout=0.25)
+        stdout, stderr = process.communicate(timeout=SUBPROCESS_LIVENESS_SECONDS)
     except subprocess.TimeoutExpired:
         process.kill()
         process.communicate()
         raise AssertionError("FIFO sidecar caused a blocking read")
 
-    assert time.monotonic() - started < 0.25
+    # 上面的 timeout 已经是这条活性断言的本体；这里再兜一次，覆盖 Popen 自身
+    # 耗时（communicate 的计时从 Popen 返回之后才起算）。
+    assert time.monotonic() - started < SUBPROCESS_LIVENESS_SECONDS
     assert process.returncode == 0
     assert "unsafe_file" in stdout
     assert stderr == ""
@@ -700,6 +738,12 @@ def test_stale_cleanup_removes_only_owned_known_snapshot_artifacts(tmp_path):
 
 
 def test_stale_cleanup_is_bounded_by_total_entries_before_prefix_filter(tmp_path):
+    """陈旧快照清理要在**前缀过滤之前**就按总条目数封顶。
+
+    承载语义的是下面那条 `cleanup_entry_limit` —— 它证明封顶真的生效了，且与
+    机器快慢无关。时间断言只是活性兜底：防「两千个条目被逐个走一遍」退化成
+    长时间空转。故用宽预算，见文件头。
+    """
     db_path = tmp_path / "bounded-cleanup.db"
     with sqlite3.connect(db_path) as connection:
         connection.execute("CREATE TABLE notebooks(id TEXT PRIMARY KEY)")
@@ -713,7 +757,7 @@ def test_stale_cleanup_is_bounded_by_total_entries_before_prefix_filter(tmp_path
 
     evidence = diag_db.collect_db_evidence(db_path, deadline_seconds=0.05)
 
-    assert time.monotonic() - started < 0.25
+    assert time.monotonic() - started < IN_PROCESS_LIVENESS_SECONDS
     assert any(
         row["category"] == "cleanup_entry_limit" for row in evidence["degraded"]
     )
