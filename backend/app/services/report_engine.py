@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, Dict, List
 
 from app.core.llm import cap_kwargs
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
-from app.services.model_config import model_client_fingerprint
 from app.services.report_execution import REPORT_CANCELLATIONS
 
 if TYPE_CHECKING:
@@ -96,7 +95,7 @@ class ReportEngine:
     # --- Stage A ---
     def _plan_outline(self, notebook_id: str, question: str, history: str) -> List[dict]:
         from app.services.prompts import report_outline_prompt, REPORT_OUTLINE_SCHEMA_HINT
-        client = self.dependencies.model_clients.reasoning_llm_client
+        client = self.dependencies.model_clients.chat("report_outline")
         try:
             raw = client.chat_json(
                 [{"role": "user", "content": report_outline_prompt(
@@ -120,7 +119,7 @@ class ReportEngine:
             pass
         # 回退骨架:expand_query 的子查询平铺为单节(保证总能出报告)。
         from app.services.query_rewrite import expand_query
-        ex = expand_query(self.dependencies.model_clients.rewrite_llm_client,
+        ex = expand_query(self.dependencies.model_clients.chat("query_rewrite"),
                           question, history)
         return [{"title": "分析", "scope": question,
                  "sub_queries": [s.query for s in ex.sub_queries][:4] or [question]}]
@@ -211,7 +210,7 @@ class ReportEngine:
     def _storm_outline(self, notebook_id, question, history, corpus_map) -> List[dict]:
         from app.services.prompts import report_storm_outline_prompt, REPORT_STORM_SCHEMA_HINT
         try:
-            raw = self.dependencies.model_clients.reasoning_llm_client.chat_json(
+            raw = self.dependencies.model_clients.chat("report_outline").chat_json(
                 [{"role": "user", "content": report_storm_outline_prompt(
                     question, corpus_map, max_sections=self.settings.report_max_sections,
                     history_block=history)}],
@@ -246,7 +245,7 @@ class ReportEngine:
             s.setdefault("action", "keep" if h["hits"] >= 3 else "supplement" if h["hits"] else "external")
         try:
             block = "\n".join(f"- {p['title']}: hits={p['hits']} base_hits={p['base_hits']}" for p in probe)
-            raw = self.dependencies.model_clients.rewrite_llm_client.chat_json(
+            raw = self.dependencies.model_clients.chat("report_sufficiency").chat_json(
                 [{"role": "user", "content": report_sufficiency_prompt(question, block)}],
                 REPORT_SUFFICIENCY_SCHEMA_HINT, cancel_event=self.cancel_event)
             for v in (json.loads(raw).get("verdicts") or []):
@@ -319,7 +318,7 @@ class ReportEngine:
                 context_block = f"{context_block}\n\n[Confirmed Memory]\n{memory_block}"
         except Exception:
             memory_map = {}
-        client = deps.model_clients.reasoning_llm_client
+        client = deps.model_clients.chat("report_section")
         id_map = {**chunk_map, **kg_map, **chain_map, **memory_map}
         # 思考型模型(deepseek-v4-pro)偶发把输出预算耗在 reasoning_content(思维链,被
         # _stream_chat_content 丢弃)上 → content 空 → chat_json 兜底 "{}" → markdown 空
@@ -353,12 +352,9 @@ class ReportEngine:
         if not markdown:
             deps.model_errors.note_model_error(
                 "report_section",
-                self.settings.reasoning_llm_model or self.settings.openai_compat_model,
                 RuntimeError(f"report section '{section['title']}' produced empty content after retry "
                              "(reasoning model likely spent output budget on discarded chain-of-thought)"),
-                service="reasoning_llm",
-                provider_failure=True,
-                failed_fingerprint=model_client_fingerprint(client),
+                workload_id="report_section",
             )
             base["failed"] = True
             base["error"] = "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试"
@@ -429,7 +425,15 @@ class ReportEngine:
             persist(force=True)
             return drafted
 
-        workers = max(1, min(len(outline), int(self.settings.kg_job_concurrency)))
+        # One configured service owns capacity.  Do not create a second report
+        # concurrency knob that can exceed the scheduler's physical limit.
+        workers = max(
+            1,
+            min(
+                len(outline),
+                self.dependencies.model_clients.parallelism("report_section"),
+            ),
+        )
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(contextvars.copy_context().run, _one, i, s)
                        for i, s in enumerate(outline)]
@@ -480,7 +484,7 @@ class ReportEngine:
         try:
             sections_block = "\n\n".join(
                 s["markdown"][:2000] for s in sections if s.get("markdown"))
-            raw = self.dependencies.model_clients.reasoning_llm_client.chat_json(
+            raw = self.dependencies.model_clients.chat("report_summary").chat_json(
                 [{"role": "user", "content": report_summary_prompt(question, sections_block)}],
                 '{"summary":""}', cancel_event=self.cancel_event)
             summary = str(json.loads(raw).get("summary", "")).strip()

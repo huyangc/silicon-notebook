@@ -183,7 +183,14 @@ def test_coordinator_submits_through_background_jobs_with_copied_context():
 
     class _CtxEngine:
         def run(self, *a, **k):
+            from app.services.model_work import (
+                ModelPriority, make_model_work_context,
+            )
             seen["ctx"] = probe.get()
+            seen["model"] = make_model_work_context(
+                workload_id="report_section", priority=ModelPriority.BACKGROUND,
+                parent_id="wrong-parent",
+            )
             done.set()
 
     coord = ReportExecutionCoordinator(
@@ -195,6 +202,8 @@ def test_coordinator_submits_through_background_jobs_with_copied_context():
     coord.start_plan("nb", "rid-ctx", "q", user_id="u")
     assert done.wait(5)
     assert seen["ctx"] == "ctx-report"                 # copy_context 传播不回归
+    assert seen["model"].priority.value == "report"
+    assert seen["model"].parent_id == "rid-ctx"
 
 
 def test_no_restart_recovery_surface_is_added():
