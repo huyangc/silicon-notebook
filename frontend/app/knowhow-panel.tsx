@@ -83,7 +83,6 @@ import {
   type KnowhowRow,
   type KnowhowColumn,
   type KnowhowCellCode,
-  type KnowhowCellPatchResult,
   type Role,
   type ProjectionStatus,
 } from "./knowhow-model.ts";
@@ -945,6 +944,13 @@ export function KnowhowPanel({
   // （合并共享列扇写 / 单例组）下发，故「带 anchorGuard ⟺ 该走 guarded 端点」恒成立；多行组的
   // **非共享列**是有意子集写、不带守卫，仍走单格端点。**手动格子编辑 / 优化整行**不带 anchorGuard、
   // 单目标恒落单格端点（无组可离、last-write-wins），逐字不变。
+  // origin（knowhow 表版本管理 Task 16 评审修复）：格子历史「恢复此版本」与
+  // 手动编辑/批量规整保存共用这同一个函数——三者唯一的区别是变更流水上要留
+  // 下什么 origin，不是"要不要走 anchor 分组批量写判定"（那套判定对三者一视
+  // 同仁）。省略时不进请求体，退回后端默认 "user"——手动编辑器/优化整行既有
+  // 调用点字节不变；恢复的调用点（本文件 KnowhowCellHistory 挂载处）显式传
+  // "revert"。第 7 个位置参数，与 patchKnowhowCell/batchPatchKnowhowCells 的
+  // 同名参数一致（见 knowhow-model.ts 对应注释）。
   async function handleCellSave(
     rowId: string,
     columnId: string,
@@ -952,6 +958,7 @@ export function KnowhowPanel({
     expectedByRowId?: Map<string, string>,
     targetRowIds?: string[],
     anchorGuard?: { anchorColumnId: string; expectedAnchorByRowId: Map<string, string> },
+    origin?: string,
   ) {
     if (!selectedTableId || !detail) return;
     // 扇出写目标（合并共享格写整组）的两条来源，刻意分流（P1）：
@@ -999,6 +1006,9 @@ export function KnowhowPanel({
                 expectedAnchor: targets.map((rid) => anchorGuard.expectedAnchorByRowId.get(rid) ?? ""),
               }
             : {}),
+          // Task 16 评审修复：格子历史恢复走这条批量路径时携带 origin="revert"；
+          // 手动编辑/批量规整保存不传（省略），退回后端默认 "user"/各自既有语义。
+          ...(origin !== undefined ? { origin } : {}),
         })
       : [
           // 单格路径：无 anchorGuard 的手动编辑落到这里，不带 anchor 守卫（见上方 split 说明及
@@ -1010,6 +1020,7 @@ export function KnowhowPanel({
             columnId,
             contentMd,
             expectedByRowId ? expectedByRowId.get(rowId) ?? "" : undefined,
+            origin,
           ),
         ];
     setDetail((prev) => {
@@ -1036,40 +1047,6 @@ export function KnowhowPanel({
     // onAcceptCell 也走本函数，同样受益）。loadRowCode 自带请求号 guard，与
     // 快速切行/连续保存并存时旧响应不会倒灌。
     if (openRowId && targets.includes(openRowId)) loadRowCode(openRowId);
-  }
-
-  // knowhow 表版本管理 Task 16：格子历史「恢复此版本」成功后的回调。真正的
-  // patchKnowhowCell(..., origin: "revert") 调用发生在 KnowhowCellHistory 组件
-  // 内部——镜像 KnowhowHistoryDrawer 自己直接调 revertKnowhowTable、只经
-  // onReverted 回调通知 panel 事后处理的既有分工（见该组件头注释）；本函数只
-  // 负责把拿到的结果"落地"：合并进 detail（规则同 handleCellSave 单格分支——
-  // 只更新命中的这一格与其行的 projectionStatus，不整表重拉，因为
-  // patchKnowhowCell 本身已经返回了更新后的值）。
-  //
-  // 刻意不复用 handleCellSave：那个函数会额外探测 anchor 分组并批量写整个
-  // 「合并共享格」，而单格历史恢复是简报明确要求的简化——"就是一次普通的
-  // 格子保存"，只对这一格、这一行生效（见 knowhow-cell-history.tsx 头注释
-  // "范围之外"一节）。
-  function handleCellRestored(result: KnowhowCellPatchResult) {
-    setDetail((prev) => {
-      if (!prev) return prev;
-      return {
-        ...prev,
-        rows: prev.rows.map((row) =>
-          row.id === result.rowId
-            ? {
-                ...row,
-                cells: { ...row.cells, [result.columnId]: result.contentMd },
-                projectionStatus: result.projectionStatus,
-              }
-            : row,
-        ),
-      };
-    });
-    // 同 handleCellSave 尾部同一条收尾：格子内容一变，该格挂着的代码派生在
-    // 后端立即转 stale——行详情抽屉此刻若恰好展开着这一行，立即重取其代码
-    // 状态，chip 无需等重开抽屉才刷新。
-    if (openRowId === result.rowId) loadRowCode(result.rowId);
   }
 
   // Task 11：打开代码浮层（抽屉 chip 的 onOpen，及"添加代码"安静入口共用同
@@ -1111,6 +1088,9 @@ export function KnowhowPanel({
   // groupRowsByAnchor + isSharedColumn 标准，保证「提示的范围」与「保存时
   // 实际写入的范围」永远一致，不会出现提示说影响 N 个分支、保存却只改了 1
   // 个的错位。记录型表没有 anchorColumnId，恒为 undefined（不显示提示）。
+  // 计算只依赖 cellModal.rowId/columnId，与 mode 无关——Task 16 评审修复起，
+  // KnowhowCellHistory（mode==="history"）复用同一份值驱动确认框里的「恢复
+  // 将同步到全部 N 个分支」提示，不需要另算一遍（见其挂载处）。
   const cellModalGroup = cellModal && detail && detail.anchorColumnId
     ? groupRowsByAnchor(detail.rows, detail.anchorColumnId).find((g) => g.rows.some((r) => r.id === cellModal.rowId))
     : null;
@@ -1361,7 +1341,15 @@ export function KnowhowPanel({
             table={detail}
             rowId={cellModal.rowId}
             canEdit={canEdit}
-            onRestored={handleCellRestored}
+            // 评审修复（Important）：恢复不再在 KnowhowCellHistory 内部直调
+            // patchKnowhowCell——委托给 handleCellSave 本身（与手动编辑/批量
+            // 规整保存同一条 anchor 分组 + 批量写判定），只多传 origin="revert"。
+            // affectedBranchCount 复用同一份 cellModalAffectedBranchCount，驱动
+            // 确认框里的合并格提示（同 KnowhowCellEditor 的 header 提示同源）。
+            affectedBranchCount={cellModalAffectedBranchCount}
+            onRestore={(restoreRowId, restoreColumnId, restoreContentMd) =>
+              handleCellSave(restoreRowId, restoreColumnId, restoreContentMd, undefined, undefined, undefined, "revert")
+            }
             onBack={() => setCellModal((current) => (current ? { ...current, mode: "preview" } : current))}
             onClose={() => setCellModal(null)}
           />
