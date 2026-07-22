@@ -99,7 +99,10 @@ class _Reranker:
         return [{"index": 0, "relevance_score": float(ord(documents[0][0]))}]
 
 
-def _provider(*, registry=None, chat=None, embedder=None, reranker=None, events=None):
+def _provider(
+    *, registry=None, chat=None, embedder=None, reranker=None, events=None,
+    observation_sink=None,
+):
     raw_chat = chat or _Chat()
     raw_embedder = embedder or _Embedder()
     raw_reranker = reranker or _Reranker()
@@ -110,6 +113,7 @@ def _provider(*, registry=None, chat=None, embedder=None, reranker=None, events=
         chat_factory=lambda _service: raw_chat,
         embedding_factory=lambda _service: raw_embedder,
         rerank_factory=lambda _service: raw_reranker,
+        observation_sink=observation_sink,
     )
 
 
@@ -456,6 +460,70 @@ def test_probe_supports_unbound_service_without_product_workload_attribution():
         assert event["workload_id"] == "service_probe"
         assert event["workload_label"] == "模型服务测试"
         assert event["service_id"] == "spare"
+    finally:
+        provider.close()
+
+
+def test_provider_observation_persistence_cannot_delay_or_replace_failure():
+    observer_entered = threading.Event()
+    observer_release = threading.Event()
+
+    class FailingChat(_Chat):
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            raise TimeoutError("private upstream endpoint timed out")
+
+    def blocking_observer(_observation):
+        observer_entered.set()
+        assert observer_release.wait(2)
+        raise RuntimeError("sqlite observation write failed")
+
+    provider = _provider(chat=FailingChat(), observation_sink=blocking_observer)
+    try:
+        started = time.perf_counter()
+        with pytest.raises(provider_mod.ModelInvocationError) as caught:
+            provider.chat("ask_answer").chat_json([], "{}")
+        elapsed = time.perf_counter() - started
+        assert caught.value.code == "provider_unavailable"
+        assert elapsed < 0.5
+        assert observer_entered.wait(1)
+    finally:
+        observer_release.set()
+        provider.close()
+
+
+def test_provider_emits_failure_then_one_recovery_but_not_ordinary_success():
+    observations = []
+    observed = threading.Event()
+
+    class FlakyChat(_Chat):
+        def __init__(self):
+            super().__init__()
+            self.remaining_failures = 1
+
+        def chat_json(self, messages, response_schema_hint, **kwargs):
+            if self.remaining_failures:
+                self.remaining_failures -= 1
+                raise TimeoutError("private timeout")
+            return super().chat_json(messages, response_schema_hint, **kwargs)
+
+    def observer(value):
+        observations.append(value)
+        if len(observations) >= 2:
+            observed.set()
+
+    provider = _provider(chat=FlakyChat(), observation_sink=observer)
+    try:
+        with pytest.raises(provider_mod.ModelInvocationError):
+            provider.chat("ask_answer").chat_json([], "{}")
+        assert provider.chat("ask_answer").chat_json([], "{}") == '{"ok": true}'
+        assert provider.chat("ask_answer").chat_json([], "{}") == '{"ok": true}'
+        assert observed.wait(1)
+        assert [(item.status, item.trigger) for item in observations] == [
+            ("error", "observed_failure"),
+            ("ok", "recovery_probe"),
+        ]
+        assert {item.service_id for item in observations} == {"chat"}
+        assert {item.config_fingerprint for item in observations} == {"fp-chat"}
     finally:
         provider.close()
 

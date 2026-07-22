@@ -22,6 +22,7 @@ from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
 from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
 from app.repositories.sqlite.knowledge_store import KnowledgeStore
 from app.repositories.sqlite.memory_store import MemoryStore
+from app.repositories.sqlite.model_status_store import ModelStatusStore
 from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.query_store import QueryStore
 from app.repositories.sqlite.report_store import ReportStore
@@ -38,6 +39,8 @@ from app.services.model_provider import (
     RuntimeModelProvider,
     validate_process_local_scheduler_deployment,
 )
+from app.services.model_registry import SystemModelServiceRegistry
+from app.services.model_status import ModelStatusService
 from app.services.memory_service import MemoryService
 from app.services.memory_retrieval import MemoryRetriever
 from app.services.kg import scheduler as kg_scheduler
@@ -105,12 +108,19 @@ class RepositoryRuntime:
             job_workers=settings.kg_job_concurrency,
         )
         self.database = SqliteDatabase(settings, root_dir)
-        self.model_config_cache: dict[str, dict[str, Any]] = {}
         self.identity = IdentityStore(
             self.database,
             settings,
-            self.model_config_cache,
         )
+        self.model_status_store = ModelStatusStore(self.database)
+        self.model_status = ModelStatusService(
+            getattr(self.models, "registry", SystemModelServiceRegistry({}, {})),
+            self.models,
+            self.model_status_store,
+        )
+        set_observation_sink = getattr(self.models, "set_observation_sink", None)
+        if callable(set_observation_sink):
+            set_observation_sink(self.model_status.record_provider_observation)
         self.queries = QueryStore(self.database)
         self.notebook_store = NotebookStore(
             self.database,
@@ -370,10 +380,6 @@ class RepositoryRuntime:
             self.kg_mutations.notebook_languages = value
         if self.retrieval is not None:
             self.retrieval.replace_notebook_languages(value)
-
-    def set_model_config_cache(self, value: dict[str, dict[str, Any]]) -> None:
-        self.model_config_cache = value
-        self.identity.model_config_cache = value
 
     def close(self) -> None:
         if self._closed:

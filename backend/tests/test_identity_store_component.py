@@ -32,12 +32,6 @@ def test_facade_identity_delegates_to_runtime(repo, monkeypatch):
 def test_identity_store_owns_identity_persistence_implementation():
     expected = {
         "current_user",
-        "get_user_model_settings",
-        "set_user_model_settings",
-        "get_model_service_statuses",
-        "record_model_service_status",
-        "clear_model_service_statuses",
-        "resolve_model_config",
         "create_user",
         "authenticate_user",
         "create_session",
@@ -46,6 +40,17 @@ def test_identity_store_owns_identity_persistence_implementation():
     }
     assert expected <= IdentityStore.__dict__.keys()
     assert "__getattr__" not in IdentityStore.__dict__
+    retired = {
+        "get_user_model_settings",
+        "set_user_model_settings",
+        "patch_user_model_settings_atomic",
+        "get_model_service_statuses",
+        "record_model_service_status",
+        "record_model_service_status_if_current",
+        "clear_model_service_statuses",
+        "resolve_model_config",
+    }
+    assert retired.isdisjoint(IdentityStore.__dict__)
 
 
 def test_repository_no_longer_inherits_identity_mixin():

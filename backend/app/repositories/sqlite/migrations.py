@@ -12,7 +12,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1534,6 +1534,29 @@ class SqliteMigrator:
                 );
                 CREATE INDEX IF NOT EXISTS idx_model_service_status_user_checked
                   ON model_service_status(user_id, checked_at DESC);
+                """
+            )
+
+    def _migration_24(self) -> None:
+        """Irreversibly retire per-user model credentials and health rows."""
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            db.execute("UPDATE user_profiles SET model_settings = '{}'")
+            db.execute("DELETE FROM model_service_status")
+            db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS system_model_service_status (
+                  service_id TEXT PRIMARY KEY,
+                  config_fingerprint TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+                  latency_ms INTEGER NOT NULL DEFAULT 0,
+                  code TEXT NOT NULL DEFAULT '',
+                  trigger TEXT NOT NULL CHECK (
+                    trigger IN ('manual_test', 'observed_failure', 'recovery_probe')
+                  ),
+                  support_id TEXT NOT NULL DEFAULT '',
+                  checked_at TEXT NOT NULL
+                )
                 """
             )
 

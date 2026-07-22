@@ -11,7 +11,7 @@ def _repo(tmp_path, **over):
 
 
 def test_required_unconfigured_ask_surfaces_model_error(tmp_path):
-    repo = _repo(tmp_path, user_model_config_policy="required")
+    repo = _repo(tmp_path)
     tok = set_request_user(repo.current_user())
     try:
         nb = repo.create_notebook(NotebookCreate(name="t", purpose=""))
@@ -24,7 +24,7 @@ def test_required_unconfigured_ask_surfaces_model_error(tmp_path):
 
 
 def test_required_unconfigured_reasoning_surfaces_model_error(tmp_path):
-    repo = _repo(tmp_path, user_model_config_policy="required")
+    repo = _repo(tmp_path)
     tok = set_request_user(repo.current_user())
     try:
         nb = repo.create_notebook(NotebookCreate(name="t", purpose=""))
@@ -36,7 +36,7 @@ def test_required_unconfigured_reasoning_surfaces_model_error(tmp_path):
 
 
 def test_required_unconfigured_graph_surfaces_model_error(tmp_path):
-    repo = _repo(tmp_path, user_model_config_policy="required")
+    repo = _repo(tmp_path)
     tok = set_request_user(repo.current_user())
     try:
         nb = repo.create_notebook(NotebookCreate(name="t", purpose=""))

@@ -95,7 +95,6 @@ def _normalize_doc_type(doc_type: str) -> str:
 from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services import remote_sources
-from app.services.legacy_model_status_types import ResolvedModelConfig
 from app.services.model_work import ModelNotConfiguredError
 from app.services.notebook_catalog import NotebookSummaryQuery
 from app.services.sqlite_identity import (
@@ -250,7 +249,7 @@ def _make_persist_image(
 
 # Schema 版本号：每次改动表结构 → 追加一个 _migration_N 方法并把此常量 +1。
 # 值 = 已定义的迁移步骤总数（步骤 1 = 全量基线 schema，历来就幂等）。
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 
 @dataclass(frozen=True)
@@ -343,7 +342,6 @@ class SQLiteRepository:
         # are runtime-owned (RetrievalSnapshotCache constructs them eagerly);
         # `_unified_cache` / `_vector_cache` below are write-through property
         # descriptors over those SAME objects — no facade-only copies.
-        self._user_model_cfg_cache = self._runtime.identity.model_config_cache
         # Bilingual-query hints are runtime-owned and shared by every consumer;
         # this compatibility property never retains a facade-only copy.
         # A stale hint affects query expansion only, never storage correctness.
@@ -670,15 +668,6 @@ class SQLiteRepository:
     def _user_profile(self, user, profile) -> UserProfile:
         return self._runtime.identity._user_profile(user, profile)
 
-    def get_user_model_settings(self, user_id: str) -> dict:
-        return self._runtime.identity.get_user_model_settings(user_id)
-
-    def set_user_model_settings(self, user_id: str, settings: dict) -> None:
-        return self._runtime.identity.set_user_model_settings(user_id, settings)
-
-    def resolve_model_config(self, user, role: str) -> ResolvedModelConfig:
-        return self._runtime.identity.resolve_model_config(user, role)
-
     def create_user(self, username: str, password: str) -> UserProfile:
         return self._runtime.identity.create_user(username, password)
 
@@ -734,14 +723,6 @@ class SQLiteRepository:
     @property
     def rerank_client(self):
         return self._runtime.models.rerank("retrieval_rerank")
-
-    @property
-    def _user_model_cfg_cache(self):
-        return self._runtime.identity.model_config_cache
-
-    @_user_model_cfg_cache.setter
-    def _user_model_cfg_cache(self, cache):
-        return self._runtime.set_model_config_cache(cache)
 
     # Task 17: the retrieval caches live on the runtime's RetrievalSnapshotCache
     # (one owner). These handles are write-through descriptors over the SAME

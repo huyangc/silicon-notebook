@@ -1,394 +1,209 @@
-import pytest
+from __future__ import annotations
 
-from app.core.config import Settings
-from app.services.model_config import model_config_fingerprint
-from app.services.sqlite_repository import SQLiteRepository
+from dataclasses import replace
+
+from app.services.model_registry import (
+    ModelServiceDefinition,
+    SystemModelServiceRegistry,
+)
+from app.services.model_status import ModelStatusService
+from app.services.model_work import ProviderObservation, SchedulerSnapshot
 
 
-@pytest.fixture
-def settings(tmp_path):
-    return Settings(
-        _env_file=None,
-        database_url=f"sqlite:///{tmp_path}/model-status.db",
-        storage_dir=str(tmp_path / "storage"),
-        openai_compat_base_url="https://primary.example/v1",
-        openai_compat_api_key="primary-secret",
-        openai_compat_model="primary-live-model",
-        rerank_base_url="https://rerank.example/v1",
-        rerank_api_key="rerank-secret",
-        rerank_model="rerank-live-model",
-        embed_provider="dashscope",
-        embed_base_url="https://embed.example/v1",
-        embed_api_key="embed-secret",
-        embed_model="embed-live-model",
+def _definition(
+    service_id: str,
+    *,
+    kind: str = "chat",
+    fingerprint: str | None = None,
+) -> ModelServiceDefinition:
+    return ModelServiceDefinition(
+        id=service_id,
+        display_name=f"{service_id} display",
+        kind=kind,
+        protocol="openai",
+        base_url=f"https://{service_id}.example/v1",
+        model=f"{service_id}-model",
+        api_key_env=f"{service_id.upper()}_KEY",
+        api_key="secret",
+        max_concurrency=3,
+        fingerprint=fingerprint or f"fp-{service_id}",
     )
 
 
-@pytest.fixture
-def identity(settings):
-    return SQLiteRepository(settings)._runtime.identity
-
-
-@pytest.fixture
-def user(identity):
-    return identity.current_user()
-
-
-def test_snapshot_never_probes_and_invalidates_fingerprint(identity, user, settings):
-    from app.services.model_status import ModelStatusService
-
-    calls = []
-    service = ModelStatusService(identity, settings, probe=lambda cfg: calls.append(cfg))
-    config = identity.resolve_model_config(user, "llm")
-    identity.record_model_service_status(
-        user.id,
-        "llm",
-        "stale-fingerprint",
-        "ok",
-        17,
-        "",
-        "manual_test",
-        "2030-01-01T00:00:00+00:00",
+def _registry() -> SystemModelServiceRegistry:
+    chat = _definition("chat_primary")
+    embed = _definition("embed_primary", kind="embedding")
+    return SystemModelServiceRegistry(
+        {chat.id: chat, embed.id: embed},
+        {"ask_answer": chat.id, "retrieval_query_embedding": embed.id},
     )
 
-    snapshot = service.snapshot(user)
 
-    assert calls == []
-    item = next(item for item in snapshot.services if item.service == "llm")
-    assert item.status == "untested"
-    assert item.code == ""
-    assert item.latency_ms == 0
-    assert item.model == config.model
+class _Store:
+    def __init__(self, rows=None):
+        self.rows = dict(rows or {})
+        self.reads = 0
+        self.records = []
 
+    def get_all(self):
+        self.reads += 1
+        return {key: dict(value) for key, value in self.rows.items()}
 
-def test_test_one_returns_dynamic_model_and_sanitized_failure(identity, user, settings):
-    from app.services.model_status import ModelStatusService
-
-    def fail(_config):
-        raise RuntimeError("provider 10.0.0.8 rejected secret payload")
-
-    service = ModelStatusService(identity, settings, probe=fail)
-    item = service.test_one(user, "reasoning_llm")
-
-    assert item.model == settings.openai_compat_model
-    assert item.status == "error"
-    assert item.code == "upstream_error"
-    assert "10.0.0.8" not in item.model_dump_json()
-    assert "secret" not in item.model_dump_json()
-    assert "provider" not in item.model_dump_json()
-
-
-def test_manual_probe_rotated_during_call_does_not_persist_or_return_stale_result(
-    identity, user, settings
-):
-    from app.services.model_status import ModelStatusService
-
-    def rotate_after_old_probe_started(_config):
-        identity.patch_user_model_settings_atomic(user.id, {
-            "llm": {
-                "base_url": "https://new.example/v1",
-                "api_key": "new-secret",
-                "model": "new-runtime-model",
-            }
-        })
-
-    service = ModelStatusService(identity, settings, probe=rotate_after_old_probe_started)
-
-    item = service.test_one(user, "llm")
-
-    assert item.model == "new-runtime-model"
-    assert item.status == "untested"
-    assert "llm" not in identity.get_model_service_statuses(user.id)
-
-
-def test_test_all_deduplicates_roles_sharing_one_effective_llm(identity, user, settings):
-    from app.services.model_status import ModelStatusService
-
-    calls = []
-    service = ModelStatusService(
-        identity,
-        settings,
-        probe=lambda config: calls.append((config.kind, config.model)),
-    )
-
-    result = service.test_all(user)
-    expected_unique = {
-        (descriptor.config.kind, descriptor.config.model)
-        for descriptor in service.descriptors(user)
-        if descriptor.config.configured
-    }
-
-    assert set(calls) == expected_unique
-    assert len(calls) == len(expected_unique)
-    assert {item.service for item in result.services} >= {
-        "llm", "reasoning_llm", "rewrite_llm", "kg_llm", "rerank", "embedding"
-    }
-
-
-def test_unconfigured_service_never_probes(identity, user, tmp_path):
-    from app.services.model_status import ModelStatusService
-
-    empty_settings = Settings(
-        _env_file=None,
-        database_url=f"sqlite:///{tmp_path}/empty-model-status.db",
-        storage_dir=str(tmp_path / "empty-storage"),
-        user_model_config_policy="required",
-    )
-    empty_identity = SQLiteRepository(empty_settings)._runtime.identity
-    calls = []
-    service = ModelStatusService(empty_identity, empty_settings, probe=lambda cfg: calls.append(cfg))
-
-    item = service.test_one(empty_identity.current_user(), "llm")
-
-    assert item.status == "unconfigured"
-    assert calls == []
-
-
-def test_embedding_provider_off_never_runs_the_fake_embedder_probe(tmp_path):
-    from app.services.model_status import ModelStatusService
-
-    off_settings = Settings(
-        _env_file=None,
-        database_url=f"sqlite:///{tmp_path}/provider-off.db",
-        storage_dir=str(tmp_path / "provider-off-storage"),
-        embed_provider="",
-        embed_base_url="https://embed.example/v1",
-        embed_api_key="embed-secret",
-        embed_model="embed-live-model",
-    )
-    off_identity = SQLiteRepository(off_settings)._runtime.identity
-    calls = []
-    service = ModelStatusService(off_identity, off_settings, probe=lambda cfg: calls.append(cfg))
-
-    item = service.test_one(off_identity.current_user(), "embedding")
-
-    assert item.status == "unconfigured"
-    assert item.configured is False
-    assert calls == []
-
-
-def test_whitespace_only_system_rerank_is_unconfigured_and_never_probed(tmp_path):
-    from app.services.model_status import ModelStatusService
-
-    rerank_settings = Settings(
-        _env_file=None,
-        database_url=f"sqlite:///{tmp_path}/rerank-whitespace.db",
-        storage_dir=str(tmp_path / "rerank-whitespace-storage"),
-        rerank_base_url="   ",
-        rerank_api_key=" rerank-secret ",
-        rerank_model=" rerank-model ",
-    )
-    rerank_identity = SQLiteRepository(rerank_settings)._runtime.identity
-    calls = []
-    service = ModelStatusService(
-        rerank_identity, rerank_settings, probe=lambda config: calls.append(config)
-    )
-
-    result = service.test_one(rerank_identity.current_user(), "rerank")
-
-    assert result.configured is False
-    assert result.status == "unconfigured"
-    assert calls == []
-    assert rerank_identity.get_model_service_statuses("user-local").get("rerank") is None
-
-
-def test_default_probes_use_the_exact_resolved_embedding_and_rerank_protocol(
-    identity, user, settings, monkeypatch
-):
-    from app.services import model_status
-
-    embed_calls = []
-    rerank_calls = []
-
-    class _Embedder:
-        def embed_query(self, text):
-            embed_calls.append((text,))
-            return [0.0]
-
-    def fake_make_embedder(_settings, **overrides):
-        embed_calls.append(overrides)
-        return _Embedder()
-
-    class _Reranker:
-        def __init__(self, _settings, **overrides):
-            rerank_calls.append(overrides)
-
-        def _rerank_batch(self, query, documents):
-            rerank_calls.append((query, documents))
-
-    monkeypatch.setattr(model_status, "make_embedder", fake_make_embedder)
-    monkeypatch.setattr(model_status, "RerankClient", _Reranker)
-    settings.rerank_api_style = "vllm"
-    service = model_status.ModelStatusService(identity, settings)
-
-    embedding = identity.resolve_model_config(user, "embedding")
-    rerank = identity.resolve_model_config(user, "rerank")
-    service._probe(embedding)
-    service._probe(rerank)
-
-    assert embed_calls[0] == {
-        "provider": "dashscope",
-        "base_url": "https://embed.example/v1",
-        "api_key": "embed-secret",
-        "model": "embed-live-model",
-    }
-    assert rerank_calls[0]["api_style"] == "openai"
-
-
-def test_record_observed_failure_stores_only_safe_status(identity, user, settings):
-    from app.services.model_status import ModelStatusService
-
-    service = ModelStatusService(identity, settings)
-    service.record_observed_failure(
-        user,
-        "llm",
-        model_config_fingerprint(identity.resolve_model_config(user, "llm")),
-    )
-
-    stored = identity.get_model_service_statuses(user.id)["llm"]
-    assert stored["config_fingerprint"] == model_config_fingerprint(
-        identity.resolve_model_config(user, "llm")
-    )
-    assert stored["status"] == "error"
-    assert stored["code"] == "upstream_error"
-    assert stored["trigger"] == "observed_failure"
-
-
-def test_observed_failure_skips_an_identity_replaced_before_the_failure_arrives(
-    identity, user, settings
-):
-    from app.services.model_status import ModelStatusService
-
-    service = ModelStatusService(identity, settings, probe=lambda _config: None)
-    old_config = identity.resolve_model_config(user, "llm")
-    old_fingerprint = model_config_fingerprint(old_config)
-    identity.set_user_model_settings(user.id, {
-        "llm": {
-            "base_url": "https://new.example/v1",
-            "api_key": "new-secret",
-            "model": "new-runtime-model",
+    def record(self, **values):
+        self.records.append(values)
+        self.rows[values["service_id"]] = {
+            key: value for key, value in values.items() if key != "service_id"
         }
-    })
-    current = service.test_one(user, "llm")
-
-    recorded = service.record_observed_failure(user, "llm", old_fingerprint)
-
-    assert recorded is False
-    stored = identity.get_model_service_statuses(user.id)["llm"]
-    assert stored["status"] == "ok"
-    assert stored["config_fingerprint"] == model_config_fingerprint(
-        identity.resolve_model_config(user, "llm")
-    )
-    assert current.model == "new-runtime-model"
 
 
-def test_snapshot_drops_unsafe_persisted_metadata(identity, user, settings):
-    from app.services.model_status import ModelStatusService
+class _Provider:
+    def __init__(self):
+        self.probes = []
+        self.snapshots = {}
+        self.observation = None
 
-    service = ModelStatusService(identity, settings)
-    config = identity.resolve_model_config(user, "llm")
-    with identity.database.write() as database:
-        database.execute(
-            "INSERT INTO model_service_status "
-            "(user_id, service, config_fingerprint, status, latency_ms, code, trigger, checked_at) "
-            "VALUES (?, 'llm', ?, 'error', 15, ?, 'manual_test', ?)",
-            (
-                user.id,
-                model_config_fingerprint(config),
-                "provider 10.0.0.8 secret body",
-                "provider 10.0.0.8 secret body",
-            ),
+    def probe(self, service_id, *, actor_id, allow_half_open):
+        self.probes.append((service_id, actor_id, allow_half_open))
+        if self.observation is not None:
+            return self.observation
+        return ProviderObservation(
+            service_id=service_id,
+            config_fingerprint=f"fp-{service_id}",
+            status="ok",
+            code="ok",
+            trigger="manual_test",
+            support_id="mdl-probe",
+            latency_ms=7,
+            occurred_at="2030-01-01T00:00:00+00:00",
         )
 
-    item = next(item for item in service.snapshot(user).services if item.service == "llm")
+    def scheduler_snapshot(self, service_id):
+        return self.snapshots.get(service_id, SchedulerSnapshot(
+            active=0,
+            maximum=3,
+            queued=0,
+            oldest_wait_ms=0,
+            breaker_state="closed",
+            busy=False,
+        ))
 
-    assert item.status == "error"
-    assert item.code == ""
-    assert item.trigger == "manual_test"
-    assert item.checked_at == ""
-    assert "10.0.0.8" not in item.model_dump_json()
-    assert "secret" not in item.model_dump_json()
+
+def _persisted(*, fingerprint="fp-chat_primary", status="ok"):
+    return {
+        "config_fingerprint": fingerprint,
+        "status": status,
+        "latency_ms": 19,
+        "code": "provider_unavailable" if status == "error" else "",
+        "trigger": "observed_failure" if status == "error" else "manual_test",
+        "support_id": "support-persisted",
+        "checked_at": "2030-01-01T00:00:00.000000+00:00",
+    }
 
 
-@pytest.mark.parametrize(
-    "unsafe_model",
-    [
-        "https://10.0.0.8/v1?api_key=provider-secret",
-        "sk-0123456789abcdefghijklmnop",
-        "model/10.0.0.8",
-        "x/sk-0123456789abcdefghijklmnop",
-        "model/http://provider.example/v1",
-        "model/[2001:db8::1]",
-        "model/fe80::1",
-        "localhost:8000",
-        "model/127.0.0.1:8000",
-        "model-authorization-diagnostic",
-        "api.example.com:8000",
-        "api.example.com:443",
-        "x/api.example.com:443",
-        "api:8000",
-        "host:80",
-        "server:22",
-        "gateway:443",
-        "intranet:80",
-        "custom-host:443",
-        "model:65535",
-        "model10.0.0.8",
-        "modelsk-0123456789abcdefghijklmnop",
-    ],
-)
-def test_status_hides_unsafe_model_but_probe_receives_raw_effective_config(
-    identity, user, settings, unsafe_model
-):
-    from app.services.model_status import ModelStatusService
+def _service(rows=None):
+    store = _Store(rows)
+    provider = _Provider()
+    service = ModelStatusService(_registry(), provider, store)
+    return service, provider, store
 
-    identity.set_user_model_settings(user.id, {
-        "llm": {
-            "base_url": "https://configured.example/v1",
-            "api_key": "configured-key",
-            "model": unsafe_model,
-        }
+
+def _item(snapshot, service_id="chat_primary"):
+    return next(item for item in snapshot.services if item.service_id == service_id)
+
+
+def test_snapshot_reads_once_never_probes_and_stale_fingerprint_is_untested():
+    service, provider, store = _service({
+        "chat_primary": _persisted(fingerprint="stale")
     })
-    calls = []
-    service = ModelStatusService(identity, settings, probe=lambda config: calls.append(config.model))
 
-    snapshot = next(item for item in service.snapshot(user).services if item.service == "llm")
-    explicit = service.test_one(user, "llm")
+    snapshot = service.snapshot()
 
-    assert snapshot.model == ""
-    assert explicit.model == ""
-    assert calls == [unsafe_model]
-    assert unsafe_model not in snapshot.model_dump_json()
-    assert unsafe_model not in explicit.model_dump_json()
+    assert store.reads == 1
+    assert provider.probes == []
+    assert _item(snapshot).status == "untested"
+    assert _item(snapshot).latency_ms == 0
 
 
-@pytest.mark.parametrize(
-    "safe_model",
-    [
-        "llama3.2:latest",
-        "llama3:70b",
-        "anthropic.claude-3-5-sonnet-20240620-v1:0",
-        "meta-llama/Llama-3.1-8B-Instruct",
-    ],
-)
-def test_status_preserves_safe_namespace_and_tag_model_identifiers(
-    identity, user, settings, safe_model
-):
-    from app.services.model_status import ModelStatusService
+def test_snapshot_lists_configured_services_and_workloads():
+    service, _, _ = _service()
+    snapshot = service.snapshot()
+    assert [item.service_id for item in snapshot.services] == [
+        "chat_primary", "embed_primary"
+    ]
+    assert [workload.id for workload in _item(snapshot).workloads] == ["ask_answer"]
 
-    identity.set_user_model_settings(user.id, {
-        "llm": {
-            "base_url": "https://configured.example/v1",
-            "api_key": "configured-key",
-            "model": safe_model,
-        }
-    })
-    calls = []
-    service = ModelStatusService(identity, settings, probe=lambda config: calls.append(config.model))
 
-    snapshot = next(item for item in service.snapshot(user).services if item.service == "llm")
-    explicit = service.test_one(user, "llm")
+def test_snapshot_precedence_half_open_open_busy_then_persisted():
+    service, provider, _ = _service({"chat_primary": _persisted(status="error")})
+    cases = [
+        (SchedulerSnapshot(1, 3, 0, 0, "half_open", False), "half_open"),
+        (SchedulerSnapshot(0, 3, 0, 0, "open", False), "circuit_open"),
+        (SchedulerSnapshot(3, 3, 1, 12, "closed", True), "busy"),
+        (SchedulerSnapshot(0, 3, 0, 0, "closed", False), "error"),
+    ]
+    for scheduler, expected in cases:
+        provider.snapshots["chat_primary"] = scheduler
+        assert _item(service.snapshot()).status == expected
 
-    assert snapshot.model == safe_model
-    assert explicit.model == safe_model
-    assert calls == [safe_model]
+
+def test_busy_and_breaker_states_are_live_overlays_only():
+    service, provider, store = _service({"chat_primary": _persisted()})
+    provider.snapshots["chat_primary"] = SchedulerSnapshot(
+        3, 3, 4, 21, "open", True
+    )
+    item = _item(service.snapshot())
+    assert item.status == "circuit_open"
+    assert store.records == []
+    assert store.rows["chat_primary"]["status"] == "ok"
+
+
+def test_provider_failure_updates_shared_service_without_actor_or_workload_key():
+    service, _, store = _service()
+    service.record_provider_observation(ProviderObservation(
+        service_id="chat_primary",
+        config_fingerprint="fp-chat_primary",
+        status="error",
+        code="provider_unavailable",
+        trigger="observed_failure",
+        support_id="support-failed",
+        latency_ms=31,
+        occurred_at="2030-01-01T00:00:00+00:00",
+    ))
+    assert store.records[0]["service_id"] == "chat_primary"
+    assert "actor_id" not in store.records[0]
+    assert "workload_id" not in store.records[0]
+
+
+def test_stale_provider_observation_is_not_persisted():
+    service, _, store = _service()
+    service.record_provider_observation(ProviderObservation(
+        service_id="chat_primary",
+        config_fingerprint="retired-fingerprint",
+        status="error",
+        code="provider_unavailable",
+        trigger="observed_failure",
+        support_id="support-failed",
+        latency_ms=31,
+        occurred_at="2030-01-01T00:00:00+00:00",
+    ))
+    assert store.records == []
+
+
+def test_test_one_uses_named_service_scheduler_and_persists_observation():
+    service, provider, store = _service()
+    item = service.test_one("chat_primary", actor_id="admin")
+    assert provider.probes == [("chat_primary", "admin", True)]
+    assert item.status == "ok"
+    assert item.support_id == "mdl-probe"
+    assert store.records[0]["trigger"] == "manual_test"
+
+
+def test_test_all_probes_each_configured_service_once():
+    service, provider, store = _service()
+    result = service.test_all(actor_id="admin")
+    assert provider.probes == [
+        ("chat_primary", "admin", True),
+        ("embed_primary", "admin", True),
+    ]
+    assert len(store.records) == 2
+    assert {item.status for item in result.services} == {"ok"}

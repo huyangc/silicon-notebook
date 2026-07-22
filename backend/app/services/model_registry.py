@@ -244,6 +244,9 @@ class SystemModelServiceRegistry:
     def service(self, service_id: str) -> ModelServiceDefinition:
         return self._services[service_id]
 
+    def services(self) -> tuple[ModelServiceDefinition, ...]:
+        return tuple(self._services.values())
+
     def service_for(self, workload_id: str) -> ModelServiceDefinition | None:
         service_id = self._bindings.get(workload_id)
         return self._services[service_id] if service_id else None

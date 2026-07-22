@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -46,18 +46,29 @@ class ModelTestResult(BaseModel):
     code: str = ""
 
 
+class ModelWorkloadView(BaseModel):
+    id: str
+    label: str
+
+
 class ModelServiceStatusItem(BaseModel):
-    service: str
+    service_id: str
+    display_name: str
+    kind: Literal["chat", "embedding", "rerank"]
     model: str = ""
-    source: str = "none"
-    kind: str = "llm"
-    configured: bool = False
-    required: bool = False
-    status: str = "unconfigured"
+    workloads: List[ModelWorkloadView] = Field(default_factory=list)
+    status: Literal[
+        "untested", "ok", "busy", "error", "circuit_open", "half_open"
+    ] = "untested"
+    active: int = 0
+    maximum: int = 0
+    queued: int = 0
+    oldest_wait_ms: int = 0
     latency_ms: int = 0
     checked_at: str = ""
     trigger: str = ""
     code: str = ""
+    support_id: str = ""
 
 
 class ModelServicesStatus(BaseModel):

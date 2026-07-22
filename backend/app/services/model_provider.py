@@ -6,7 +6,7 @@ import math
 import os
 import threading
 import time
-from concurrent.futures import CancelledError, Future
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -147,6 +147,7 @@ class _SubmittedCall:
     queued_at: float
     timing: dict[str, float]
     breaker_before: str
+    observe: bool
 
 
 def _status_code(error: BaseException) -> int | None:
@@ -255,6 +256,7 @@ class _ScheduledAdapter:
         actor_id: str | None = None,
         parent_id: str = "",
         support_id: str | None = None,
+        observe: bool = True,
     ) -> _SubmittedCall:
         context = make_model_work_context(
             workload_id=self._workload.id,
@@ -291,6 +293,7 @@ class _ScheduledAdapter:
             queued_at=queued_at,
             timing=timing,
             breaker_before=breaker_before,
+            observe=observe,
         )
 
     def _resolve(self, call: _SubmittedCall) -> Any:
@@ -314,6 +317,8 @@ class _ScheduledAdapter:
             self._emit(call, status="error", error=exc)
         else:
             self._emit(call, status="ok", error=None)
+            if call.observe:
+                self._provider._observe_success(self._runtime, call)
             return result
 
         assert error is not None
@@ -326,6 +331,8 @@ class _ScheduledAdapter:
             support_id=call.context.support_id,
             status_code=_status_code(error),
         )
+        if call.observe:
+            self._provider._observe_failure(self._runtime, call, typed, error)
         raise typed from error
 
     def _emit(
@@ -491,6 +498,7 @@ class RuntimeModelProvider:
         chat_factory: Callable[[ModelServiceDefinition], Any] | None = None,
         embedding_factory: Callable[[ModelServiceDefinition], Any] | None = None,
         rerank_factory: Callable[[ModelServiceDefinition], Any] | None = None,
+        observation_sink: Callable[[ProviderObservation], None] | None = None,
     ) -> None:
         self.settings = settings
         self.event_log = event_log
@@ -502,9 +510,96 @@ class RuntimeModelProvider:
         self._runtimes: dict[str, _ServiceRuntime] = {}
         self._adapters: dict[tuple[str, str], Any] = {}
         self._closed = False
+        self._observation_sink = observation_sink
+        self._observation_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="model-status-observer",
+        )
+        self._needs_recovery: set[str] = set()
         self._offline_chat = _UnconfiguredChatClient(settings)
         self._offline_rerank = _UnconfiguredRerankClient()
         self._offline_embeddings: dict[str, _UnconfiguredEmbedder] = {}
+
+    def set_observation_sink(
+        self, sink: Callable[[ProviderObservation], None] | None
+    ) -> None:
+        with self._lock:
+            self._observation_sink = sink
+
+    def _observe_failure(
+        self,
+        runtime: _ServiceRuntime,
+        call: _SubmittedCall,
+        typed: ModelInvocationError,
+        original: BaseException,
+    ) -> None:
+        if isinstance(original, ModelSchedulingError):
+            return
+        with self._lock:
+            self._needs_recovery.add(runtime.service.id)
+        self._submit_observation(ProviderObservation(
+            service_id=runtime.service.id,
+            config_fingerprint=runtime.service.fingerprint,
+            status="error",
+            code=typed.code,
+            trigger="observed_failure",
+            support_id=call.context.support_id,
+            latency_ms=self._execution_latency_ms(call),
+            occurred_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        ))
+
+    def _observe_success(
+        self, runtime: _ServiceRuntime, call: _SubmittedCall
+    ) -> None:
+        with self._lock:
+            recovering = runtime.service.id in self._needs_recovery
+            if recovering:
+                self._needs_recovery.remove(runtime.service.id)
+        if not recovering:
+            return
+        self._submit_observation(ProviderObservation(
+            service_id=runtime.service.id,
+            config_fingerprint=runtime.service.fingerprint,
+            status="ok",
+            code="ok",
+            trigger="recovery_probe",
+            support_id=call.context.support_id,
+            latency_ms=self._execution_latency_ms(call),
+            occurred_at=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        ))
+
+    @staticmethod
+    def _execution_latency_ms(call: _SubmittedCall) -> int:
+        started = call.timing.get("started", call.queued_at)
+        finished = call.timing.get("finished", started)
+        return max(0, round((finished - started) * 1_000))
+
+    def _submit_observation(self, observation: ProviderObservation) -> None:
+        with self._lock:
+            sink = self._observation_sink
+            closed = self._closed
+        if sink is None or closed:
+            return
+
+        def persist() -> None:
+            try:
+                sink(observation)
+            except Exception:
+                try:
+                    self.event_log.emit({
+                        "kind": "model_status_observer",
+                        "status": "error",
+                        "service_id": observation.service_id,
+                        "support_id": observation.support_id,
+                        "code": "persistence_failed",
+                    })
+                except Exception:
+                    pass
+
+        try:
+            self._observation_executor.submit(persist)
+        except RuntimeError:
+            pass
 
     def _raw_chat(self, service: ModelServiceDefinition) -> OpenAICompatibleClient:
         return OpenAICompatibleClient(
@@ -671,7 +766,7 @@ class RuntimeModelProvider:
             return runtime.raw._rerank_batch("health check", ["health check"])
 
         started = time.perf_counter()
-        call = adapter._submit(invoke, actor_id=actor_id)
+        call = adapter._submit(invoke, actor_id=actor_id, observe=False)
         try:
             adapter._resolve(call)
         except ModelInvocationError as exc:
@@ -823,3 +918,4 @@ class RuntimeModelProvider:
                     close()
                 except Exception:
                     pass
+        self._observation_executor.shutdown(wait=True, cancel_futures=False)
