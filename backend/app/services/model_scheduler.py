@@ -86,7 +86,6 @@ class ServiceScheduler:
         *,
         context: ModelWorkContext,
         invoke: Callable[[], T],
-        allow_half_open: bool = False,
     ) -> Future[T]:
         future: Future[T] = Future()
         stale: list[tuple[_QueuedWork, str]] = []
@@ -107,9 +106,7 @@ class ServiceScheduler:
                 error = ModelQueueFull(support_id=context.support_id)
             else:
                 try:
-                    permit = self._breaker.admit(
-                        allow_half_open=allow_half_open
-                    )
+                    permit = self._breaker.admit()
                 except ModelServiceUnavailable:
                     error = ModelServiceUnavailable(support_id=context.support_id)
                 else:
@@ -203,7 +200,7 @@ class ServiceScheduler:
                 self._executor.submit(self._execute, item)
             except BaseException:
                 self._breaker.abandon(item.permit)
-                self._set_exception_once(
+                self._set_running_exception(
                     item.future,
                     ModelServiceUnavailable(support_id=item.context.support_id),
                 )
@@ -221,12 +218,12 @@ class ServiceScheduler:
             result = item.invoke()
         except BaseException as error:
             transition = self._breaker.record_failure(item.permit, error)
-            self._set_exception_once(item.future, error)
+            self._set_running_exception(item.future, error)
             if transition.opened:
                 self._drain_unavailable()
         else:
             self._breaker.record_success(item.permit)
-            self._set_result_once(item.future, result)
+            self._set_running_result(item.future, result)
         finally:
             self._finish_active()
 
@@ -241,7 +238,7 @@ class ServiceScheduler:
             self._condition.notify_all()
         for item in queued:
             self._breaker.abandon(item.permit)
-            self._set_exception_once(
+            self._settle_queued_exception(
                 item.future,
                 ModelServiceUnavailable(support_id=item.context.support_id),
             )
@@ -305,7 +302,7 @@ class ServiceScheduler:
             if reason == "cancel":
                 item.future.cancel()
             else:
-                self._set_exception_once(
+                self._settle_queued_exception(
                     item.future,
                     ModelQueueTimeout(support_id=item.context.support_id),
                 )
@@ -353,11 +350,16 @@ class ServiceScheduler:
         return timeout
 
     @staticmethod
-    def _set_result_once(future: Future, result: object) -> None:
-        if not future.done():
-            future.set_result(result)
+    def _settle_queued_exception(
+        future: Future, error: BaseException
+    ) -> None:
+        if future.set_running_or_notify_cancel():
+            future.set_exception(error)
 
     @staticmethod
-    def _set_exception_once(future: Future, error: BaseException) -> None:
-        if not future.done():
-            future.set_exception(error)
+    def _set_running_result(future: Future, result: object) -> None:
+        future.set_result(result)
+
+    @staticmethod
+    def _set_running_exception(future: Future, error: BaseException) -> None:
+        future.set_exception(error)

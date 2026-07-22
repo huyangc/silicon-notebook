@@ -8,10 +8,12 @@ import time
 
 import pytest
 
+from app.services import model_scheduler as model_scheduler_module
 from app.services import model_work as model_work_module
 from app.services.model_scheduler import ServiceScheduler
 from app.services.model_work import (
     ModelPriority,
+    ModelProviderError,
     ModelQueueFull,
     ModelQueueTimeout,
     ModelServiceUnavailable,
@@ -578,6 +580,68 @@ def test_breaker_open_drains_queue_fails_fast_and_recovers_half_open():
         assert recovered.result(timeout=2) == "recovered"
         assert scheduler.snapshot().breaker_state == "closed"
     finally:
+        scheduler.shutdown()
+
+
+def test_cancel_winning_queued_settlement_does_not_abort_breaker_drain(
+    monkeypatch,
+):
+    race_window = threading.Event()
+    release_settlement = threading.Event()
+
+    class BarrierFuture(Future):
+        pause_settlement = False
+
+        def done(self) -> bool:
+            observed = super().done()
+            if self.pause_settlement and not observed:
+                race_window.set()
+                assert release_settlement.wait(2)
+            return observed
+
+        def set_running_or_notify_cancel(self) -> bool:
+            if self.pause_settlement and not race_window.is_set():
+                race_window.set()
+                assert release_settlement.wait(2)
+            return super().set_running_or_notify_cancel()
+
+    monkeypatch.setattr(model_scheduler_module, "Future", BarrierFuture)
+    scheduler = ServiceScheduler("atomic-drain", maximum=1)
+    failure_started = threading.Event()
+    release_failure = threading.Event()
+
+    def fatal_failure():
+        failure_started.set()
+        assert release_failure.wait(2)
+        raise ModelProviderError("unknown model", code="unknown_model")
+
+    try:
+        active = scheduler.submit(
+            context=work_context(actor="active"), invoke=fatal_failure
+        )
+        assert failure_started.wait(2)
+        cancellation_winner = scheduler.submit(
+            context=work_context(actor="cancel-winner"), invoke=lambda: None
+        )
+        later = scheduler.submit(
+            context=work_context(actor="later"), invoke=lambda: None
+        )
+        cancellation_winner.pause_settlement = True
+
+        release_failure.set()
+        assert race_window.wait(2)
+        assert cancellation_winner.cancel() is True
+        release_settlement.set()
+
+        with pytest.raises(ModelProviderError):
+            active.result(timeout=2)
+        assert cancellation_winner.cancelled()
+        with pytest.raises(ModelServiceUnavailable):
+            later.result(timeout=2)
+        assert later.done()
+    finally:
+        release_failure.set()
+        release_settlement.set()
         scheduler.shutdown()
 
 

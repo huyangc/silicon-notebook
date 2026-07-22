@@ -163,15 +163,17 @@ def test_cooldown_admits_exactly_one_half_open_probe_and_failure_reopens():
     assert breaker.state == "closed"
 
 
-def test_manual_probe_can_request_the_single_half_open_permit_early():
-    breaker = ServiceCircuitBreaker(clock=FakeClock())
+def test_manual_probe_cannot_bypass_half_open_cooldown():
+    clock = FakeClock()
+    breaker = ServiceCircuitBreaker(clock=clock)
     _open_with_transient_failures(breaker)
 
-    probe = breaker.admit(allow_half_open=True)
-    assert breaker.state == "half_open"
     with pytest.raises(ModelServiceUnavailable):
         breaker.admit(allow_half_open=True)
+    assert breaker.state == "open"
 
+    clock.advance(30)
+    probe = breaker.admit()
     breaker.record_success(probe)
     assert breaker.state == "closed"
 

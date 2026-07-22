@@ -144,6 +144,7 @@ class ServiceCircuitBreaker:
             return self._state
 
     def admit(self, *, allow_half_open: bool = False) -> BreakerPermit:
+        del allow_half_open
         with self._lock:
             if self._state == "closed":
                 return BreakerPermit(epoch=self._epoch, half_open=False)
@@ -154,7 +155,7 @@ class ServiceCircuitBreaker:
             cooldown_elapsed = (
                 self._clock() - self._opened_at >= self.COOLDOWN_SECONDS
             )
-            if not allow_half_open and not cooldown_elapsed:
+            if not cooldown_elapsed:
                 raise ModelServiceUnavailable()
             self._state = "half_open"
             permit = BreakerPermit(epoch=self._epoch, half_open=True)
