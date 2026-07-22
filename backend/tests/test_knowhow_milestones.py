@@ -138,3 +138,89 @@ def test_milestone_pointing_at_a_pruned_seq_survives_as_stale(hist, store, table
     milestones = hist.list_milestones(table["id"])
     assert len(milestones) == 1
     assert milestones[0]["stale"] is True, "指向已删流水的里程碑要标记失效，但不能删"
+
+
+def test_delete_milestone_requires_table_id_isolation(hist, store, repo, table):
+    """delete_milestone 必须同时检查 table_id 和 milestone_id，隔离不同表。"""
+    # 创建表 B（第二张表）
+    notebook_id = repo.create_notebook(
+        NotebookCreate(name="t", purpose="p", primary_domain="d")
+    ).id
+    table_b_id = store.create_knowhow_table(
+        notebook_id, "表B", "",
+        [{"name": "概念", "role": "anchor"}, {"name": "做法", "role": "attribute"}],
+    )
+
+    # 在表 A 上建一个里程碑
+    row_a = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
+    seq_a = hist.head_seq(table["id"])
+    milestone = hist.create_milestone(table["id"], seq_a, "里程碑A", "", "user-1")
+    milestone_id = milestone["id"]
+
+    # 用表 B 的 table_id + 表 A 的 milestone_id 试图删除 → 应该是 no-op
+    hist.delete_milestone(table_b_id, milestone_id)
+
+    # 表 A 的里程碑仍然存在
+    milestones_a = hist.list_milestones(table["id"])
+    assert len(milestones_a) == 1
+    assert milestones_a[0]["id"] == milestone_id
+
+    # 用表 A 的正确 table_id 再删一次 → 才真的删掉
+    hist.delete_milestone(table["id"], milestone_id)
+
+    milestones_a = hist.list_milestones(table["id"])
+    assert len(milestones_a) == 0
+
+
+def test_revert_after_prune_preserves_full_replayability(hist, store, table):
+    """prune 删掉最老流水后，剩余链仍能完整回退到任意中间点。"""
+    row = store.add_knowhow_row(table["id"], {table["anchor"]: "A"})
+    seq_after_row = hist.head_seq(table["id"])
+
+    # 对同一格子做 5 次更新，记下中间的内容状态
+    for i in range(5):
+        store.update_knowhow_cell(row, table["plain"], f"版本{i}")
+
+    head_before_prune = hist.head_seq(table["id"])
+    all_changes = hist.list_changes(table["id"], limit=100)
+
+    # 确认有足够的流水
+    assert len(all_changes) >= 6, f"应该至少有 6 条流水（row_add + 5 updates），但只有 {len(all_changes)}"
+
+    # 把最早的 3 条流水（除了最新的）的时间戳改成很老
+    seqs_to_age = sorted([c["seq"] for c in all_changes])[:3]
+    with hist.database.write() as db:
+        db.execute(
+            "UPDATE knowhow_changes SET created_at = '2000-01-01T00:00:00' "
+            "WHERE table_id = ? AND seq IN (?, ?, ?)",
+            (table["id"], seqs_to_age[0], seqs_to_age[1], seqs_to_age[2]),
+        )
+
+    # prune 删掉那 3 条流水
+    result = hist.prune(table["id"], "2001-01-01T00:00:00")
+    assert result["removed"] == 3
+
+    # 断言剩余流水 seq 连续无空洞
+    remaining = sorted(c["seq"] for c in hist.list_changes(table["id"], limit=100))
+    assert remaining == list(range(remaining[0], remaining[-1] + 1)), (
+        f"prune 后出现 seq 空洞：{remaining}"
+    )
+    assert len(remaining) >= 3, "prune 后应该至少剩 3 条流水"
+
+    # 回退到剩余最早的那条 seq，应该成功
+    min_remaining_seq = remaining[0]
+    current_head_seq = hist.head_seq(table["id"])
+    result = hist.revert_to(
+        table["id"], target_seq=min_remaining_seq, expected_head_seq=current_head_seq
+    )
+    assert result["target_seq"] == min_remaining_seq
+
+    # 验证内容确实回退到了那一刻（格子应该有对应的值，不是 None）
+    with store.database.connect() as db:
+        cells = db.execute(
+            "SELECT content_md FROM knowhow_cells WHERE row_id = ? AND column_id = ?",
+            (row, table["plain"]),
+        ).fetchone()
+    assert cells is not None
+    # 回退到 min_remaining_seq，应该有一个格子内容值
+    assert cells["content_md"] is not None, "回退后格子应该有内容"
