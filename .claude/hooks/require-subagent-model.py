@@ -15,9 +15,20 @@ Claude Code 的 `Agent` 工具在不传 `model` 时会继承主 agent 的模型�
 否则 deny，并把分层判据回给主 agent，让它补一个 `model` 重发。
 
 失败策略是 **fail-open**：任何内部异常（JSON 读坏、agents 目录读不了）都放行。
-这是规范守卫不是安全边界，不该因为自己的 bug 把用户的子代理全堵死。
+这是规范守卫不是安全边界，不该因为自己的 bug 把用户的子代理全堵死。但 fail-open
+的爆炸半径要画在**单份定义**上：一份角色定义读坏只让它自己不算数，绝不能升级成
+整道门静默关闭——那种失败零信号，没人会发现门已经不在了。
+
+已知且可接受的摩擦：插件自带的角色（`~/.claude/plugins/*/agents/*.md`）不在扫描
+范围内，调用它们会被拦。补一个 `model` 即可通过，且按工具契约显式 `model` 本就
+优先于定义里的 frontmatter，所以判据不受影响。
 
 契约：stdin 收 PreToolUse 事件 JSON，stdout 回 `hookSpecificOutput`。
+
+`.claude/settings.json` 里的调用串尾部有 `|| true`，也是为 fail-open：本脚本无论
+放行还是拦截都以 0 退出（拦截靠 stdout 的 JSON），所以非零只可能来自「脚本或
+解释器不存在」。而 PreToolUse 的退出码 2 语义恰是「拦截」，不兜住的话缺文件会
+让守卫翻成 fail-closed，拿一段裸 Python 报错堵掉每一次子代理调用。
 """
 
 from __future__ import annotations
@@ -114,8 +125,11 @@ def _parse_frontmatter(path: Path) -> dict[str, str]:
     `name` 和 `model` 两个标量字段。值一律保持原样，由 `_yaml_scalar` 归一。
     """
     try:
+        # 必须一并接住 UnicodeDecodeError（是 ValueError 不是 OSError）：本仓库的
+        # 角色定义正文是中文，任何一份被存成 GBK，解码异常就会逃出这层 per-file
+        # 容错、一路冒到 main() 的兜底 fail-open，整道门当场静默全失效。
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         return {}
     if not text.startswith("---"):
         return {}
@@ -144,20 +158,33 @@ def _pinned_agent_models(project_dir: Path) -> dict[str, str]:
     pinned: dict[str, str] = {}
     claimed: set[str] = set()
     for root in (project_dir, Path.home()):
+        scope_has_unreadable_name = False
         for path in _iter_agent_files(root):
-            fields = _parse_frontmatter(path)
-            raw_name = fields.get("name")
-            # `name` 用了读不懂的形态时真名无从得知：退回文件名占位，并拒绝让这份
-            # 定义贡献「已钉」条目——否则真名会漏占位，被低优先级作用域的同名
-            # 定义顶掉，退化成上面那条作用域绕过。
-            readable_name = _is_simple_scalar(raw_name)
-            name = (_yaml_scalar(raw_name) if readable_name else "") or path.stem
-            if name in claimed:
+            try:
+                fields = _parse_frontmatter(path)
+                raw_name = fields.get("name")
+                # `name` 用了读不懂的形态时真名无从得知：退回文件名占位，并拒绝
+                # 让这份定义贡献「已钉」条目。
+                readable_name = _is_simple_scalar(raw_name)
+                if not readable_name:
+                    scope_has_unreadable_name = True
+                name = (_yaml_scalar(raw_name) if readable_name else "") or path.stem
+                if name in claimed:
+                    continue
+                claimed.add(name)
+                model = fields.get("model")
+                if readable_name and _is_chosen_model(model):
+                    pinned[name] = _yaml_scalar(model).lower()
+            except Exception:  # noqa: BLE001
+                # per-file 降级：一份定义读坏不该拖垮整轮扫描，更不该冒到
+                # main() 的兜底把整道门关掉。
                 continue
-            claimed.add(name)
-            model = fields.get("model")
-            if readable_name and _is_chosen_model(model):
-                pinned[name] = _yaml_scalar(model).lower()
+        if scope_has_unreadable_name:
+            # 本作用域里有定义的真名读不出来 —— 它可能占着任意一个名字，而
+            # 退回文件名占位只在 stem 恰好等于真名时才堵得住。继续采信低优先级
+            # 作用域的 pin，就可能把那个名字放行、实际跑的却是这份没钉模型的
+            # 定义。到此为止，fail-closed。
+            break
     return pinned
 
 
