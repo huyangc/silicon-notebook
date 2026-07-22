@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 from openai import APIConnectionError, APIStatusError, APITimeoutError, OpenAI
 
 from app.core.config import Settings
-from app.core.cache import CacheBackend, llm_key
+from app.core.cache import CacheBackend, is_cacheable_llm_response, llm_key
 from app.core.llm_logging import LLMInteractionLogger, new_interaction_id
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled, sleep_or_cancel
 
@@ -158,19 +158,32 @@ class OpenAICompatibleClient:
         *,
         json_mode: bool,
         cancel_event: CancelEvent,
-    ) -> str:
+    ) -> tuple[str, Optional[str]]:
+        """Return ``(content, finish_reason)``.
+
+        finish_reason rides along because the caller needs it to decide whether
+        the reply is cacheable: a completion cut off by the token budget
+        ("length") must never be frozen into the cache. It arrives on the final
+        chunk, so it has to be captured here — by the time the joined string
+        gets back to chat_json the stream is already closed.
+        """
         raise_if_cancelled(cancel_event)
         call_kwargs: Dict[str, Any] = {**kwargs, **req_kwargs, "stream": True}
         if json_mode:
             call_kwargs["response_format"] = {"type": "json_object"}
         stream = self.client().chat.completions.create(**call_kwargs)
         parts: List[str] = []
+        finish_reason: Optional[str] = None
         try:
             for chunk in stream:
                 raise_if_cancelled(cancel_event)
                 if not getattr(chunk, "choices", None):
                     continue
-                delta = getattr(chunk.choices[0], "delta", None)
+                choice = chunk.choices[0]
+                reason = getattr(choice, "finish_reason", None)
+                if reason:
+                    finish_reason = reason
+                delta = getattr(choice, "delta", None)
                 content = getattr(delta, "content", None) if delta is not None else None
                 if content:
                     parts.append(content)
@@ -179,7 +192,7 @@ class OpenAICompatibleClient:
             if callable(close):
                 close()
         raise_if_cancelled(cancel_event)
-        return "".join(parts)
+        return "".join(parts), finish_reason
 
     def chat_json(
         self,
@@ -264,7 +277,7 @@ class OpenAICompatibleClient:
                 else self.max_retries
             )
             response = None
-            streamed_content: Optional[str] = None
+            streamed: Optional[tuple[str, Optional[str]]] = None
             for attempt in range(attempts):
                 raise_if_cancelled(cancel_event)
                 try:
@@ -272,7 +285,7 @@ class OpenAICompatibleClient:
                     # the param.
                     try:
                         if cancel_event is not None:
-                            streamed_content = self._stream_chat_content(
+                            streamed = self._stream_chat_content(
                                 kwargs, req_kwargs, json_mode=True, cancel_event=cancel_event)
                         else:
                             response = self.client().chat.completions.create(
@@ -290,7 +303,7 @@ class OpenAICompatibleClient:
                         ):
                             raise
                         if cancel_event is not None:
-                            streamed_content = self._stream_chat_content(
+                            streamed = self._stream_chat_content(
                                 kwargs, req_kwargs, json_mode=False, cancel_event=cancel_event)
                         else:
                             response = self.client().chat.completions.create(**kwargs, **req_kwargs)
@@ -317,21 +330,36 @@ class OpenAICompatibleClient:
                     # the endpoint and gets mass-rejected again.
                     backoff = min(2 ** attempt, 30)
                     sleep_or_cancel(backoff + random.uniform(0, backoff), cancel_event)
-            if streamed_content is not None:
+            if streamed is not None:
+                streamed_content, finish_reason = streamed
                 content = strip_json_fences(streamed_content)
             else:
-                content = strip_json_fences(response.choices[0].message.content or "")
-            # Best-effort write; never cache the empty "{}" fallback so a transient
-            # empty/garbage response isn't frozen in for this prompt.
+                choice = response.choices[0]
+                # getattr: hand-rolled test doubles and thin OpenAI-compatible
+                # servers may omit finish_reason entirely; absent == unknown,
+                # and is_cacheable_llm_response then falls back to parseability.
+                finish_reason = getattr(choice, "finish_reason", None)
+                content = strip_json_fences(choice.message.content or "")
+            # Best-effort write, and only of a reply that is actually usable —
+            # the empty "{}" fallback, unparseable JSON and budget-truncated
+            # completions are all excluded (see is_cacheable_llm_response for
+            # why each gate exists). Writing junk here freezes it for the whole
+            # TTL and, because max_tokens is not part of the key, disarms the
+            # documented remedy of re-running with a larger budget.
             # NOTE: `cache is not None`, not truthy `cache` — SqliteCacheBackend
             # defines __len__ for entry-count introspection, so a freshly empty
             # cache (0 entries) is falsy under `bool()`. A plain `if cache` would
             # permanently skip every write on a cold cache: it can never accumulate
             # its first entry, `len()` stays 0 forever, and the cache never turns
             # "truthy". Identity check sidesteps that trap entirely.
-            if cache is not None and ckey and content != "{}":
+            if cache is not None and ckey and is_cacheable_llm_response(
+                content, finish_reason
+            ):
                 try:
-                    cache.put(ckey, content)
+                    # tag=model: evict_tag(model) is how a model-service swap
+                    # drops exactly this model's entries. An untagged write
+                    # (tag='') can never be evicted that way.
+                    cache.put(ckey, content, tag=model)
                 except Exception:
                     pass
             record["status"] = "ok"

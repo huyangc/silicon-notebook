@@ -10,11 +10,15 @@ from pathlib import Path
 from typing import Any
 
 from app.core.cache.backend import CacheAdmin, CacheBackend, NoCacheBackend
-from app.core.cache.policy import embed_key, llm_key
+from app.core.cache.policy import embed_key, is_cacheable_llm_response, llm_key
+# 仓库根锚点的**唯一定义点**。不在这里重新 `parents[N]` 数一遍目录层数：那是第
+# 二套锚定机制，与 config 的口径会各自漂移（「双 .local」事故正是同一个病）。
+# 同款复用见 llm_logging.py 从 event_logging 取 _ROOT_DIR。
+from app.core.config import _ROOT_DIR
 
 __all__ = [
     "CacheBackend", "CacheAdmin", "NoCacheBackend",
-    "make_cache_backend", "llm_key", "embed_key",
+    "make_cache_backend", "llm_key", "embed_key", "is_cacheable_llm_response",
 ]
 
 
@@ -31,8 +35,11 @@ def make_cache_backend(settings: Any) -> CacheBackend:
     raw = getattr(settings, "llm_cache_path", "") or ".local/llm_cache_v2.db"
     path = Path(raw)
     if not path.is_absolute():
-        # 相对路径锚定到仓库根。此规则归缓存模块所有，调用方不该知道。
-        path = Path(__file__).resolve().parents[4] / raw
+        # 相对路径锚定到**仓库根**（不是 CWD）：`npm run dev` 会 cd 进 backend/
+        # 再起 uvicorn，离线 CLI 从仓库根跑——按 CWD 解析会分裂成两个 .local，
+        # 服务端与 CLI 各写各的缓存（本仓库栽过三次的「双 .local」事故）。
+        # 此规则归缓存模块所有（调用方不该知道），但锚点复用 config._ROOT_DIR。
+        path = _ROOT_DIR / raw
     return SqliteCacheBackend(
         str(path),
         size_limit=int(getattr(settings, "llm_cache_size_limit", 2 * 2**30)),
