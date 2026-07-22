@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ast
+import inspect
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import get_type_hints
@@ -79,6 +80,35 @@ def test_bundle_is_neutral_and_declares_every_store_seat():
     hints = get_type_hints(PersistenceBundle)
     assert set(hints) == set(BUNDLE_STORE_PORTS)
     assert {name: value.__name__ for name, value in hints.items()} == BUNDLE_STORE_PORTS
+
+
+def test_persistence_bundle_factory_create_has_a_pinned_public_contract():
+    from app.core.config import Settings
+    from app.repositories.bundle import PersistenceBundle, PersistenceBundleFactory
+    from app.repositories.ports import RepositorySeams
+
+    signature = inspect.signature(PersistenceBundleFactory.create)
+    parameters = tuple(signature.parameters.values())
+
+    assert tuple(parameter.name for parameter in parameters) == (
+        "self", "settings", "root_dir", "seams", "model_config_cache",
+    )
+    assert tuple(parameter.kind for parameter in parameters) == (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+        inspect.Parameter.KEYWORD_ONLY,
+        inspect.Parameter.KEYWORD_ONLY,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+    assert all(parameter.default is inspect.Parameter.empty for parameter in parameters)
+    assert parameters[0].annotation is inspect.Parameter.empty
+    assert get_type_hints(PersistenceBundleFactory.create) == {
+        "settings": Settings,
+        "root_dir": Path,
+        "seams": RepositorySeams,
+        "model_config_cache": dict[str, object],
+        "return": PersistenceBundle,
+    }
 
 
 def test_ask_turn_result_is_neutral_and_preserves_the_conversation_history_shape():
