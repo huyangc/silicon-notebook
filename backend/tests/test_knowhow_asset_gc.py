@@ -424,12 +424,15 @@ def test_content_strings_in_payload_rejects_unregistered_kind():
         content_strings_in_payload,
     )
 
-    # Known kinds pass (even if they produce empty lists)
+    # Known kinds pass (even if they produce empty lists).
+    # 这 14 个刻意逐字写死、与 spec §4.1 的 kind 枚举一一对应，不从模块反推——
+    # 反推会让断言退化成同义反复。⚠️ 别把 md_normalize.py 里 markdown 分词器的
+    # kind（"autolink" 等）加进来，那是同名不同物、与变更流水无关。
     for kind in (
         "cell_update", "revert", "row_add", "import_append", "row_delete",
         "table_create", "column_delete", "column_add", "column_rename",
         "column_kind", "anchor_set", "table_meta", "cell_code_put",
-        "cell_code_delete", "autolink",
+        "cell_code_delete",
     ):
         result = content_strings_in_payload(kind, {})
         assert isinstance(result, list), f"kind={kind} should return a list"

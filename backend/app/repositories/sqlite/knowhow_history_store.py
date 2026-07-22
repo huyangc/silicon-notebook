@@ -253,7 +253,7 @@ def content_strings_in_payload(kind: str, payload: dict) -> list:
 
     Kinds with no content_md-shaped field at all (``column_add``,
     ``column_rename``, ``column_kind``, ``anchor_set``, ``table_meta``,
-    ``cell_code_put``, ``cell_code_delete``, ``autolink``) fall through every
+    ``cell_code_put``, ``cell_code_delete``) fall through every
     branch below and correctly yield ``[]`` — column/table names and roles are
     never scanned (asset refs only ever live in rendered cell markdown, never
     a column name or table title, and the pre-Task-13 implementation never
@@ -268,11 +268,13 @@ def content_strings_in_payload(kind: str, payload: dict) -> list:
     # catches runtime errors from future changes that add a new kind carrying
     # cell content but forget to register it here, which would silently leak
     # asset references and cause images to be incorrectly garbage-collected.
+    # 与 spec §4.1 的 kind 枚举一一对应。⚠️ 别把 md_normalize.py 里 markdown
+    # 分词器的 kind（"autolink" 等）扫进来——那是同名不同物，与变更流水无关。
     REGISTERED_KINDS = frozenset({
         "cell_update", "revert", "row_add", "import_append", "row_delete",
         "table_create", "column_delete", "column_add", "column_rename",
         "column_kind", "anchor_set", "table_meta", "cell_code_put",
-        "cell_code_delete", "autolink",
+        "cell_code_delete",
     })
     if kind not in REGISTERED_KINDS:
         raise ValueError(f"content_strings_in_payload: 未登记的 kind={kind!r}")
