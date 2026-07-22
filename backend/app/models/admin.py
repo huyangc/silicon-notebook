@@ -1,4 +1,4 @@
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -119,3 +119,33 @@ class AdminUserNotebook(BaseModel):
     reports: int
     created_at: str
     updated_at: str
+
+
+class CacheStats(BaseModel):
+    """内容寻址缓存的当前状况（admin 只读）。
+
+    `by_tag` 的键是模型名——写入时以 model 作 tag，正是为了让"换了模型服务"这件事
+    能按模型精确清理，而不是等 90 天 TTL 自己到期。
+    """
+    enabled: bool
+    admin_supported: bool          # 后端是否实现 CacheAdmin（只有 get/put 的后端为 False）
+    entries: int = 0
+    bytes: int = 0
+    by_tag: Dict[str, int] = {}
+    hits: int = 0
+    misses: int = 0
+    hit_rate: float = 0.0
+
+
+class CacheEvictRequest(BaseModel):
+    """按 tag（模型名）清理，或整库清空。
+
+    两者必须显式二选一：不给默认的"留空即全清"，避免一次手滑把整个缓存清掉。
+    """
+    tag: str = ""
+    clear_all: bool = False
+
+
+class CacheEvictResult(BaseModel):
+    evicted: int
+    scope: str                     # 被清理的 tag 名，或 'all'
