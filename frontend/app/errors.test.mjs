@@ -12,7 +12,7 @@ import {
   toUserMessage,
 } from "./errors.ts";
 import { fetchMe, loginUser, registerUser } from "./auth.ts";
-import { testModelService } from "./model-settings.ts";
+import { testSystemModelService } from "./model-services.ts";
 import { setNotebookTier } from "./notebook-tier.ts";
 import { shareNotebook } from "./notebook-share.ts";
 import { fetchKnowhowTables } from "./knowhow-model.ts";
@@ -417,12 +417,12 @@ test("readHttpError 把 状态码 + detail + requestId 写进 console", async ()
   const { value, logs } = await captureConsole(() =>
     readHttpError(
       jsonResponse(500, { detail: "upstream model timeout" }, { "X-Request-Id": "req-abc123" }),
-      "model-settings"
+      "model-services"
     )
   );
   assert.equal(value.requestId, "req-abc123");
   assert.equal(logs.length, 1);
-  assert.match(logs[0], /\[model-settings\]/);
+  assert.match(logs[0], /\[model-services\]/);
   assert.match(logs[0], /500/);
   assert.match(logs[0], /upstream model timeout/);
   assert.match(logs[0], /req-abc123/);
@@ -571,11 +571,11 @@ test("分享 client 的 403 英文 detail → 中文,状态码和英文都不进
   assert.match(logs[0], /notebook owner required/);
 });
 
-test("model-settings 失败:用户拿中文,console 拿到 状态码+detail+requestId", async () => {
-  // 阻塞 3:此前只 console.error(`[model-settings] HTTP 500`),排查时看不到
+test("model-services 失败:用户拿中文,console 拿到 状态码+detail+requestId", async () => {
+  // 共享 transport 保留状态码、请求编号和仅供维护人员查看的诊断。
   // 供应商到底报了什么。
   const { error, logs } = await callFailing(
-    () => testModelService("llm", "https://u/v1", "m", null),
+    () => testSystemModelService("general"),
     jsonResponse(
       500,
       { detail: "upstream 401 from provider: invalid api key" },
@@ -583,7 +583,7 @@ test("model-settings 失败:用户拿中文,console 拿到 状态码+detail+requ
     )
   );
   assert.equal(error.message, "服务暂时不可用，请稍后再试");
-  assert.match(logs[0], /\[model-settings\]/);
+  assert.match(logs[0], /\[model-services\]/);
   assert.match(logs[0], /500/);
   assert.match(logs[0], /invalid api key/);
   assert.match(logs[0], /req-xyz/);

@@ -36,10 +36,6 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 1,
     reason: "validated source-cleanup guidance is copied into its typed error",
   },
-  "model-settings.ts|<module>.modelFailureText|property|message": {
-    count: 1,
-    reason: "typed ModelFailureCode selects fixed copy and is never logged or rendered verbatim",
-  },
   "page.tsx|<module>.Home|property|message": {
     count: 1,
     reason: "application-owned information modal state is not exception text",
@@ -294,7 +290,7 @@ test("critical catch boundaries call the shared humanization layer", async () =>
   assert.ok(callsIn(findFunction(ask, "runAskStream")).includes("humanizedError"));
   assert.ok(callsIn(findFunction(ask, "runAskStream")).includes("logDiagnostic"));
   assert.equal(
-    callsIn(findFunction(page, "runModelTest")).includes("logDiagnostic"),
+    callsIn(findFunction(page, "runSystemModelTest")).includes("logDiagnostic"),
     false,
   );
   assert.equal(
@@ -319,7 +315,7 @@ test("migrated clients use the shared transport boundary", async () => {
     "edge-review-queue.ts",
     "knowhow-model.ts",
     "knowhow-panel.tsx",
-    "model-settings.ts",
+    "model-services.ts",
     "memory-panel.tsx",
     "transfer-picker.tsx",
     "pending-center.tsx",
@@ -347,30 +343,27 @@ test("migrated clients use the shared transport boundary", async () => {
 
 
 test("model and report clients retain bounded diagnostics and scenario copy", async () => {
-  const modelSettings = await parseModule("model-settings.ts");
+  const modelServices = await parseModule("model-services.ts");
   const report = await parseModule("report-view.tsx");
   const guardedModelClients = [
-    "fetchModelSettings",
     "fetchModelServiceStatus",
-    "testCurrentModelService",
-    "testAllCurrentModelServices",
-    "saveModelSettings",
-    "testModelService",
+    "testSystemModelService",
+    "testAllSystemModelServices",
   ];
   for (const client of guardedModelClients) {
     assert.deepEqual(
-      callsIn(findFunction(modelSettings, client))
+      callsIn(findFunction(modelServices, client))
         .filter((target) => target === "requestJson"),
       ["requestJson"],
       `${client}: every model request must use the shared bounded transport`,
     );
   }
   assert.equal(
-    callsIn(modelSettings)
+    callsIn(modelServices)
       .filter((target) => target === "requestJson")
       .length,
     guardedModelClients.length,
-    "model-settings.ts has an unreviewed or missing HTTP error boundary",
+    "model-services.ts has an unreviewed or missing HTTP error boundary",
   );
   assert.equal(callsIn(report).includes("console.error"), false);
   assert.equal(callsIn(report).includes("logDiagnostic"), true);

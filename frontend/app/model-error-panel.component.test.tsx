@@ -1,35 +1,10 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
 import { AnswerView } from "./answer-panel";
-import {
-  modelFailureText,
-  type ModelServiceStatusItem,
-  type StatusModelRole,
-} from "./model-settings";
 import type { AskResponse } from "./workspace-model";
 
-
-function status(
-  service: StatusModelRole,
-  state: ModelServiceStatusItem["status"],
-  latencyMs = 0,
-): ModelServiceStatusItem {
-  return {
-    service,
-    model: `${service}-runtime`,
-    source: "system",
-    kind: service === "embedding" ? "embedding" : service === "rerank" ? "rerank" : "llm",
-    configured: true,
-    required: service === "llm",
-    status: state,
-    latency_ms: latencyMs,
-    checked_at: "2030-01-01T00:00:00Z",
-    trigger: "manual_test",
-    code: state === "error" ? "upstream_error" : "",
-  };
-}
 
 function renderAnswer(
   answer: AskResponse,
@@ -65,153 +40,74 @@ const answer = {
   llm_mode: "deterministic",
   model_errors: [
     {
-      service: "reasoning_llm",
+      service_id: "reasoner-next",
+      service_name: "推理服务",
+      workload_id: "ask_reasoning",
+      workload_label: "逐步推理",
       stage: "answer",
       model: "runtime-reasoner",
-      message: "secret upstream reasoner payload",
+      message: "upstream_error",
+      support_id: "mdl-ask_789",
     },
     {
-      service: "embedding",
+      service_id: "embed-next",
+      service_name: "",
+      workload_id: "chunk_embed",
+      workload_label: "来源向量化",
       stage: "embed",
       model: "runtime-embed",
-      message: "internal embed endpoint 10.0.0.8",
+      message: "upstream_error",
+      support_id: "",
     },
     {
-      service: "reasoning_llm",
-      stage: "retry",
+      service_id: "reasoner-next",
+      service_name: "推理服务",
+      workload_id: "ask_reasoning",
+      workload_label: "逐步推理",
+      stage: "answer",
       model: "runtime-reasoner",
-      message: "duplicate raw diagnostic",
+      message: "upstream_error",
+      support_id: "mdl-ask_789",
     },
   ],
-} as unknown as AskResponse;
+} as AskResponse;
 
 
-test("formats a typed status snapshot without weakening unknown-code handling", () => {
-  const snapshot = status("embedding", "error");
-  snapshot.model = "";
-  snapshot.code = "missing_config";
-
-  expect(modelFailureText(snapshot)).toBe("嵌入模型尚未配置，本次回答可能不完整。");
-  snapshot.code = "private-provider-diagnostic";
-  expect(modelFailureText(snapshot)).toBe("嵌入模型调用失败，本次回答可能不完整。");
+test("renders safe dynamic names, support ids, and deduplicates failures", () => {
+  renderAnswer(answer);
+  expect(screen.getAllByText("推理服务 runtime-reasoner 调用失败，本次回答可能不完整。"))
+    .toHaveLength(1);
+  expect(screen.getByText("模型服务 runtime-embed 调用失败，本次回答可能不完整。"))
+    .toBeInTheDocument();
+  expect(screen.getByText("支持编号：mdl-ask_789")).toBeInTheDocument();
+  expect(screen.queryByText(/reasoner-next|embed-next/)).not.toBeInTheDocument();
 });
 
 
-test("renders dynamic deduplicated failures and routes role-specific actions", async () => {
+test("查看模型状态 highlights the failing service id", async () => {
+  const onOpenModelStatus = vi.fn();
   const user = userEvent.setup();
-  const onTestModel = vi.fn(async (service: StatusModelRole) => status(service, "ok", 42));
-  const onOpenModelSettings = vi.fn();
+  renderAnswer(answer, { onOpenModelStatus });
+  await user.click(screen.getAllByRole("button", { name: "查看模型状态" })[1]);
+  expect(onOpenModelStatus).toHaveBeenCalledWith("embed-next");
+});
 
-  renderAnswer(answer, { onTestModel, onOpenModelSettings });
 
-  expect(screen.getByText("推理模型 runtime-reasoner 调用失败，本次回答可能不完整。"))
-    .toBeInTheDocument();
-  expect(screen.getByText("嵌入模型 runtime-embed 调用失败，本次回答可能不完整。"))
-    .toBeInTheDocument();
+test("copies the returned support id", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.spyOn(navigator.clipboard, "writeText");
+  renderAnswer(answer);
+  await user.click(screen.getByRole("button", { name: "复制支持编号" }));
+  expect(writeText).toHaveBeenCalledWith("mdl-ask_789");
+  writeText.mockRestore();
+});
+
+
+test("admin-only probe callback is absent unless the page provides it", () => {
+  const withoutProbe = renderAnswer(answer);
+  expect(screen.queryByRole("button", { name: "测试此模型" })).not.toBeInTheDocument();
+  withoutProbe.unmount();
+
+  renderAnswer(answer, { onTestModel: vi.fn(async () => null) });
   expect(screen.getAllByRole("button", { name: "测试此模型" })).toHaveLength(2);
-  expect(screen.queryByText("secret upstream reasoner payload")).not.toBeInTheDocument();
-  expect(screen.queryByTitle(/secret upstream|10\.0\.0\.8|duplicate raw/)).not.toBeInTheDocument();
-
-  await user.click(screen.getAllByRole("button", { name: "测试此模型" })[0]);
-  expect(onTestModel).toHaveBeenCalledWith("reasoning_llm");
-  await user.click(screen.getAllByRole("button", { name: "打开模型服务" })[1]);
-  expect(onOpenModelSettings).toHaveBeenCalledWith("embedding");
-});
-
-
-test("does not copy legacy model-error diagnostics into browser logging", async () => {
-  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-  try {
-    renderAnswer(answer);
-    await waitFor(() => expect(consoleError).not.toHaveBeenCalled());
-  } finally {
-    consoleError.mockRestore();
-  }
-});
-
-
-test("distinguishes a sanitized upstream failure from missing configuration", () => {
-  renderAnswer({
-    ...answer,
-    model_errors: [
-      {
-        service: "embedding",
-        stage: "embed",
-        model: "",
-        message: "upstream_error",
-      },
-      {
-        service: "kg_llm",
-        stage: "answer",
-        model: "",
-        message: "missing_config",
-      },
-    ],
-  });
-
-  expect(screen.getByText("嵌入模型调用失败，本次回答可能不完整。"))
-    .toBeInTheDocument();
-  expect(screen.getByText("构图模型尚未配置，本次回答可能不完整。"))
-    .toBeInTheDocument();
-});
-
-
-test("shows per-service pending and stable test results", async () => {
-  let resolveReasoner!: (value: ModelServiceStatusItem) => void;
-  const onTestModel = vi.fn((service: StatusModelRole) => {
-    if (service === "reasoning_llm") {
-      return new Promise<ModelServiceStatusItem>((resolve) => { resolveReasoner = resolve; });
-    }
-    return Promise.resolve(status(service, "error"));
-  });
-  const user = userEvent.setup();
-
-  renderAnswer(answer, { onTestModel });
-
-  const buttons = screen.getAllByRole("button", { name: "测试此模型" });
-  await user.click(buttons[0]);
-  expect(screen.getByRole("button", { name: "测试中…" })).toBeDisabled();
-
-  resolveReasoner(status("reasoning_llm", "ok", 42));
-  await waitFor(() => expect(screen.getByText("正常 42ms")).toBeInTheDocument());
-
-  await user.click(screen.getAllByRole("button", { name: "测试此模型" })[1]);
-  await waitFor(() => expect(screen.getByText("失败：连接未通过")).toBeInTheDocument());
-});
-
-
-test("uses page-owned test locks and ignores a stale configuration completion", async () => {
-  const onTestModel = vi.fn(async () => null);
-  const user = userEvent.setup();
-  const { rerender } = renderAnswer(answer, {
-    onTestModel,
-    testingModelRoles: { reasoning_llm: true },
-  });
-
-  expect(screen.getByRole("button", { name: "测试中…" })).toBeDisabled();
-  expect(screen.getAllByRole("button", { name: "测试此模型" })).toHaveLength(1);
-
-  rerender(
-    <AnswerView
-      answer={answer}
-      feedbackSent=""
-      onFeedback={() => undefined}
-      onOpenKnowledgeGraph={() => undefined}
-      onOpenKnowhowRow={() => undefined}
-      notebookId="nb-1"
-      notebookNames={{}}
-      onBuildScaleIndex={() => undefined}
-      buildingScaleIndex={false}
-      onSaveMemory={() => undefined}
-      memorySaved={false}
-      onTestModel={onTestModel}
-      testingModelRoles={{}}
-    />,
-  );
-  await user.click(screen.getAllByRole("button", { name: "测试此模型" })[0]);
-
-  expect(onTestModel).toHaveBeenCalledWith("reasoning_llm");
-  await waitFor(() => {
-    expect(screen.queryByText(/正常 \d+ms|失败：|尚未配置/)).not.toBeInTheDocument();
-  });
 });

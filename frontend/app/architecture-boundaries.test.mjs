@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  appSourceModules,
   declarations,
   importsFrom,
   parseModule,
@@ -56,4 +57,28 @@ test("KG type marks are shared by graph and answer panels", () => {
   );
   assert.equal(names(kgTypeMark, "function").has("KgTypeMark"), true);
   assert.equal(names(page, "function").has("KgTypeMark"), false);
+});
+
+
+test("frontend has no retired personal model configuration contract", async () => {
+  const forbidden = [
+    "/me/model-settings",
+    "/me/model-settings/test",
+    "fetchModelSettings",
+    "saveModelSettings",
+    "testModelService",
+    "baseUrlDirty",
+    "keyDirty",
+    "测试未保存设置",
+    "编辑个人设置",
+  ];
+  const violations = [];
+  for (const { path, module } of await appSourceModules()) {
+    if (path === "architecture-boundaries.test.mjs") continue;
+    const source = module.getFullText();
+    for (const value of forbidden) {
+      if (source.includes(value)) violations.push(`${path}: ${value}`);
+    }
+  }
+  assert.deepEqual(violations, []);
 });

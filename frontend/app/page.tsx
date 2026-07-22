@@ -95,27 +95,18 @@ import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledge
 import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
 import { buildKg, cancelScaleIndex, confirmMerge, fetchConceptDetail, fetchIndexStatus, fetchKgNeighbors, fetchKgSearch, fetchMergeReviewJob, fetchNodeContext, fetchPendingMerges, fetchScaleIndexStatus, fetchUnifiedGraph, fetchUnifiedKgStatus, rebuildKg, rebuildScaleIndex, rebuildUnifiedKg, rejectMerge, relinkKg, reviewAllMerges as reviewAllMergesRequest, reviewMerges, type IndexStatus } from "./kg-api";
 import {
-  MODEL_ROLES,
-  type ModelRole,
   type ModelServiceStatusItem,
   type ModelServicesStatus,
-  type ServiceForm,
-  type StatusModelRole,
   fetchModelServiceStatus,
-  fetchModelSettings,
-  modelSettingsForms,
-  saveModelSettings,
-  testAllCurrentModelServices,
-  testCurrentModelService,
-  testModelService,
-} from "./model-settings.ts";
+  testAllSystemModelServices,
+  testSystemModelService,
+} from "./model-services.ts";
 import { ModelServicePanel, ModelServiceSummaryButton } from "./model-service-panel";
 import {
   ModelTestCoordinator,
   acceptModelServiceStatusSnapshot,
   applyModelServiceTestResult,
   deriveModelServiceSummaryView,
-  prepareModelSettingsSave,
   type ModelTestActivity,
 } from "./model-service-orchestration.ts";
 import { AuthGate } from "./AuthGate";
@@ -196,7 +187,7 @@ import {
   type UnifiedGraphResp,
   type UnifiedKgStatus,
 } from "./workspace-model";
-import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY, MODEL_TEST_ERROR } from "./vocabulary";
+import { label, PARSE_STATUS, ELEMENT_TYPE, KNOWLEDGE_STATUS, PROMOTION_STATUS, SEVERITY } from "./vocabulary";
 // react-force-graph-2d uses canvas/window; load client-side only.
 const ForceGraph2D = dynamic(() => import("react-force-graph-2d"), { ssr: false });
 
@@ -713,18 +704,15 @@ export default function Home() {
   const [infoModal, setInfoModal] = useState<InfoModal | null>(null);
   const [toast, setToast] = useState("");
   const [modelPanelOpen, setModelPanelOpen] = useState(false);
-  const [modelForms, setModelForms] = useState<Record<ModelRole, ServiceForm> | null>(null);
-  const [modelTesting, setModelTesting] = useState<Partial<Record<ModelRole, string>>>({});
   const [modelStatusState, setModelStatusState] = useState({
     status: null as ModelServicesStatus | null,
     unavailable: false,
   });
   const modelStatus = modelStatusState.status;
   const modelStatusUnavailable = modelStatusState.unavailable;
-  const [highlightedModelRole, setHighlightedModelRole] = useState<StatusModelRole | null>(null);
-  const [modelPanelSaving, setModelPanelSaving] = useState(false);
+  const [highlightedModelServiceId, setHighlightedModelServiceId] = useState<string | null>(null);
   const [modelTestActivity, setModelTestActivity] = useState<ModelTestActivity>({
-    roles: {}, drafts: {}, all: false,
+    services: {}, all: false,
   });
   const [statusText, setStatusText] = useState("连接中");
   const [titleDraft, setTitleDraft] = useState("");
@@ -808,9 +796,7 @@ export default function Home() {
   const [indexStatus, setIndexStatus] = useState<IndexStatus | null>(null);
   const analyticsLoadScopeRef = useRef(new AnalyticsLoadScope());
   const modelStatusRequestRef = useRef(0);
-  const modelPanelRequestRef = useRef(0);
   const modelTestCoordinatorRef = useRef(new ModelTestCoordinator());
-  const modelPanelSavingRef = useRef(false);
   const modelPanelReturnFocusRef = useRef<HTMLElement | null>(null);
   const [pendingReportFocusId, setPendingReportFocusId] = useState<string | null>(null);
   const pending = usePendingActions(Boolean(authChecked && getToken()));
@@ -2018,8 +2004,8 @@ export default function Home() {
       healthResponse.status !== "ok"
         ? "服务连接异常"
         : healthResponse.llm_configured
-          ? "服务正常"
-          : "服务正常 · 模型未配置",
+        ? "服务正常"
+          : "服务正常 · 模型服务不可用",
     );
     setNotebooks(notebookResponse);
     if (docTypeOptions.length === 0) {
@@ -3102,7 +3088,7 @@ export default function Home() {
     try {
       const proposals = await proposeObjectSchemas(currentNotebookId);
       await loadSchemas();
-      setToast(proposals.length ? `归纳出 ${proposals.length} 个候选类型` : "未发现可补充的新类型（或未配置 LLM）");
+      setToast(proposals.length ? `归纳出 ${proposals.length} 个候选类型` : "未发现可补充的新类型（或模型服务暂不可用）");
     } finally {
       setSchemaBusy(false);
     }
@@ -3359,68 +3345,27 @@ export default function Home() {
     window.location.reload();
   }
 
-  async function openModelPanel(role: StatusModelRole | null = null) {
-    const requestId = ++modelPanelRequestRef.current;
+  function openModelPanel(serviceId: string | null = null) {
     modelPanelReturnFocusRef.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    const coordinator = modelTestCoordinatorRef.current;
-    coordinator.invalidateDrafts();
-    setModelTesting({});
-    setModelTestActivity(coordinator.snapshot());
-    setHighlightedModelRole(role);
+    setHighlightedModelServiceId(serviceId);
     setModelPanelOpen(true);
     void refreshModelStatus();
-    try {
-      const view = await fetchModelSettings();
-      const forms = modelSettingsForms(view);
-      if (requestId === modelPanelRequestRef.current) setModelForms(forms);
-    } catch (e) {
-      if (requestId === modelPanelRequestRef.current) {
-        setModelPanelOpen(false);
-        modelPanelReturnFocusRef.current?.focus();
-        reportError(e);
-      }
-    }
   }
 
   function closeModelPanel() {
-    modelPanelRequestRef.current += 1;
     setModelPanelOpen(false);
-    setHighlightedModelRole(null);
+    setHighlightedModelServiceId(null);
   }
 
-  async function saveModelPanel() {
+  async function runSystemModelTest(serviceId: string): Promise<ModelServiceStatusItem | null> {
     const coordinator = modelTestCoordinatorRef.current;
-    if (!modelForms || modelPanelSavingRef.current || coordinator.hasInFlight()) return;
-    const payload = prepareModelSettingsSave(modelForms);
-    if (!payload) return;
-    modelPanelSavingRef.current = true;
-    coordinator.invalidateConfiguration();
-    setModelTesting({});
-    modelStatusRequestRef.current += 1;
-    setModelPanelSaving(true);
-    try {
-      const view = await saveModelSettings(payload);
-      setModelForms(modelSettingsForms(view));
-      await refreshModelStatus();
-      setToast("模型服务配置已保存");
-    } catch (e) {
-      reportError(e);
-    } finally {
-      modelPanelSavingRef.current = false;
-      setModelPanelSaving(false);
-    }
-  }
-
-  async function runCurrentModelTest(role: StatusModelRole): Promise<ModelServiceStatusItem | null> {
-    const coordinator = modelTestCoordinatorRef.current;
-    if (modelPanelSavingRef.current) return null;
-    const ticket = coordinator.beginOne(role);
+    const ticket = coordinator.beginOne(serviceId);
     if (!ticket) return null;
     setModelTestActivity(coordinator.snapshot());
     try {
-      const item = await testCurrentModelService(role);
+      const item = await testSystemModelService(serviceId);
       if (!coordinator.isCurrent(ticket)) return null;
       modelStatusRequestRef.current += 1;
       setModelStatusState((current) => applyModelServiceTestResult(current, item, "single"));
@@ -3435,50 +3380,18 @@ export default function Home() {
     }
   }
 
-  async function runAllCurrentModelTests() {
+  async function runAllSystemModelTests() {
     const coordinator = modelTestCoordinatorRef.current;
-    if (modelPanelSavingRef.current) return;
     const ticket = coordinator.beginAll();
     if (!ticket) return;
     setModelTestActivity(coordinator.snapshot());
     try {
-      const result = await testAllCurrentModelServices();
+      const result = await testAllSystemModelServices();
       if (!coordinator.isCurrent(ticket)) return;
       modelStatusRequestRef.current += 1;
       setModelStatusState((current) => applyModelServiceTestResult(current, result, "all"));
     } catch (e) {
       if (coordinator.isCurrent(ticket)) reportError(e);
-    } finally {
-      coordinator.finish(ticket);
-      setModelTestActivity(coordinator.snapshot());
-    }
-  }
-
-  async function runModelTest(role: ModelRole) {
-    const coordinator = modelTestCoordinatorRef.current;
-    if (!modelForms || modelPanelSavingRef.current) return;
-    const ticket = coordinator.beginDraft(role);
-    if (!ticket) return;
-    const f = modelForms[role];
-    setModelTestActivity(coordinator.snapshot());
-    setModelTesting((m) => ({ ...m, [role]: "测试中…" }));
-    try {
-      const r = await testModelService(role, f.base_url.trim(), f.model.trim(),
-        f.keyDirty ? f.api_key : null);
-      if (!coordinator.isCurrent(ticket)) return;
-      // 200 响应挂不上 X-User-Message 头,故 ModelTestResult 用 `code` 承载出处:
-      // 后端只回稳定枚举,文案在 vocabulary.ts(这样才落在界面词汇守卫的作用域里)。
-      setModelTesting((m) => ({
-        ...m,
-        [role]: r.ok
-          ? `通 ${r.latency_ms}ms`
-          : `失败：${label(MODEL_TEST_ERROR, r.code, "连接未通过")}`,
-      }));
-    } catch (e) {
-      if (coordinator.isCurrent(ticket)) {
-        setModelTesting((m) => ({ ...m, [role]: "失败" }));
-        reportError(e);
-      }
     } finally {
       coordinator.finish(ticket);
       setModelTestActivity(coordinator.snapshot());
@@ -3798,7 +3711,9 @@ export default function Home() {
                 </button>
                 <button className="workspace-nav-button" onClick={() => setInfoModal({
                   title: "设置",
-                  message: `${health?.llm_configured ? "LLM 已配置" : "LLM 尚未配置"}。当前设置页先保留状态与笔记本编辑入口。`,
+                  message: capabilities.canWriteNotebook
+                    ? "可在这里编辑当前笔记本的信息与参考库。模型服务由系统统一管理。"
+                    : "当前笔记本为只读；模型服务由系统统一管理。",
                   actions: capabilities.canWriteNotebook
                     ? [{ label: "编辑当前笔记本", primary: true, action: () => openNotebookEditor(currentNotebook).catch(reportError) }]
                     : []
@@ -4189,9 +4104,9 @@ export default function Home() {
                             buildingScaleIndex={buildingScaleIndex}
                             onSaveMemory={(answerId) => setMemoryAnswerId(answerId)}
                             memorySaved={Boolean(memorySavedAnswers[turn.response.answer_id])}
-                            onTestModel={runCurrentModelTest}
-                            onOpenModelSettings={(role) => { void openModelPanel(role); }}
-                            testingModelRoles={modelTestActivity.roles}
+                            onTestModel={currentUser.role === "admin" ? runSystemModelTest : undefined}
+                            onOpenModelStatus={(serviceId) => { openModelPanel(serviceId); }}
+                            testingModelServices={modelTestActivity.services}
                             testingAllModels={modelTestActivity.all}
                           />
                         </div>
@@ -5737,29 +5652,16 @@ export default function Home() {
       <PendingToast toast={pending.toast} onClose={() => pending.setToast(null)}
         onClick={() => { if (pending.toast) openDoneItem(pending.toast); }} />
 
-      {modelPanelOpen && modelForms && (
+      {modelPanelOpen && (
         <ModelServicePanel
-          forms={modelForms}
           status={modelStatus}
-          highlightedRole={highlightedModelRole}
-          draftTestResults={modelTesting}
-          onFormChange={(role, form) => {
-            if (modelPanelSavingRef.current) return;
-            const coordinator = modelTestCoordinatorRef.current;
-            coordinator.invalidateDraft(role);
-            setModelTesting((current) => ({ ...current, [role]: "" }));
-            setModelTestActivity(coordinator.snapshot());
-            setModelForms((current) => current && ({ ...current, [role]: form }));
-          }}
-          onTestDraft={(role) => { void runModelTest(role); }}
-          onTestCurrent={async (role) => { await runCurrentModelTest(role); }}
-          onTestAll={runAllCurrentModelTests}
+          highlightedServiceId={highlightedModelServiceId}
+          isAdmin={currentUser.role === "admin"}
+          onTestOne={async (serviceId) => { await runSystemModelTest(serviceId); }}
+          onTestAll={runAllSystemModelTests}
           onClose={closeModelPanel}
-          onSave={() => { void saveModelPanel(); }}
-          testingRoles={modelTestActivity.roles}
-          draftTestingRoles={modelTestActivity.drafts}
+          testingServiceIds={modelTestActivity.services}
           allTesting={modelTestActivity.all}
-          saving={modelPanelSaving}
           returnFocusTo={modelPanelReturnFocusRef.current}
         />
       )}

@@ -1,6 +1,5 @@
 import type { AskModeId } from "./ask-modes";
 import type { ReasoningTraceStep } from "./ask-stream";
-import type { ModelFailureCode, StatusModelRole } from "./model-settings";
 import type { NotebookRef } from "./notebook-bases";
 
 /**
@@ -286,10 +285,14 @@ export type AskResponse = {
   reasoning_trace?: ReasoningTraceStep[];
   mode?: AskModeId;
   model_errors?: {
-    service: StatusModelRole;
+    service_id: string;
+    service_name: string;
+    workload_id: string;
+    workload_label: string;
     stage: string;
     model: string;
-    message: ModelFailureCode;
+    message: string;
+    support_id: string;
   }[];
   index_required?: boolean;
 };

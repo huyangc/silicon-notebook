@@ -4268,10 +4268,6 @@ button.chat-session-card {
   padding: 20px 24px 24px;
 }
 
-.model-service-hint {
-  margin: 0 0 12px;
-}
-
 .model-service-toolbar {
   display: flex;
   justify-content: flex-end;
@@ -4282,158 +4278,154 @@ button.chat-session-card {
   font-weight: 750;
 }
 
-.model-service-fieldset {
+.model-service-status-list {
+  display: grid;
   gap: 12px;
-  margin: 0 0 12px;
+}
+
+.model-service-status-card {
+  position: relative;
+  display: grid;
+  gap: 14px;
   padding: 16px;
   border: 1px solid var(--line);
   border-radius: 12px;
+  background: #fff;
   transition: border-color 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
 }
 
-.model-service-fieldset legend {
-  padding: 0 6px;
-  color: #273244;
-  font-size: 14px;
-  font-weight: 750;
-}
-
-.model-service-fieldset.is-highlighted {
+.model-service-status-card.is-highlighted {
   border-color: #5477ef;
   background: #f7f9ff;
   box-shadow: 0 0 0 3px rgba(84, 119, 239, 0.15);
 }
 
-.model-service-fieldset:focus-visible {
+.model-service-status-card:focus-visible {
   outline: 2px solid rgba(31, 94, 255, 0.35);
   outline-offset: 2px;
 }
 
-.model-service-status-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: center;
+.model-service-status-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 12px;
-  border: 1px solid #dfe5ee;
-  border-radius: 10px;
-  padding: 10px 12px;
-  background: #f8fafc;
 }
 
-.model-service-status-row > div {
-  min-width: 0;
+.model-service-status-card-header h3,
+.model-service-status-card-header p {
+  margin: 0;
 }
 
-.model-service-status-row > div:first-child {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: baseline;
-  gap: 2px 8px;
+.model-service-status-card-header h3 {
+  color: #273244;
+  font-size: 15px;
 }
 
-.model-service-status-row small {
+.model-service-status-card-header p {
+  margin-top: 3px;
   color: var(--muted);
-  font-size: 11px;
-}
-
-.model-service-status-row > div:first-child strong {
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 
-.model-service-status-row > div:first-child span {
-  grid-column: 2;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.model-service-status-result {
-  display: grid;
-  justify-items: end;
-  gap: 2px;
-  white-space: nowrap;
-}
-
-.model-service-status-result time {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.model-service-status-row > button {
-  border: 1px solid #ccd5e2;
-  border-radius: 8px;
-  padding: 6px 9px;
-  background: #fff;
-  color: #344054;
-  font: inherit;
+.model-service-state {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #eef1f5;
+  color: #596273;
   font-size: 12px;
+  font-weight: 750;
+}
+
+.model-service-state.tone-ok {
+  background: #e8f7ef;
+  color: #17643c;
+}
+
+.model-service-state.tone-warn {
+  background: #fff3d7;
+  color: #8a5a00;
+}
+
+.model-service-state.tone-bad {
+  background: #ffe8e5;
+  color: #a12b20;
+}
+
+.model-service-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.model-service-metrics > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  border-radius: 9px;
+  padding: 9px 10px;
+  background: #f7f9fb;
+}
+
+.model-service-metrics small,
+.model-service-workloads small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.model-service-metrics strong {
+  color: #273244;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.model-service-workloads,
+.model-service-status-meta {
+  display: grid;
+  gap: 6px;
+}
+
+.model-service-workloads > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-service-workloads span {
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #eef3ff;
+  color: #3657aa;
+  font-size: 11px;
+}
+
+.model-service-status-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.model-service-support-id {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  overflow-wrap: anywhere;
+}
+
+.model-service-support-id button {
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+  color: #3158d5;
+  font: inherit;
   font-weight: 700;
   cursor: pointer;
 }
 
-.model-service-status-row > button:hover:not(:disabled) {
-  border-color: #5477ef;
-  color: #3158d5;
-}
-
-.model-service-status-row > button:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.model-service-status-row.tone-ok {
-  border-color: #b7e4cf;
-  background: #f0faf5;
-}
-
-.model-service-status-row.tone-warn {
-  border-color: #ead3a5;
-  background: #fff9ec;
-}
-
-.model-service-status-row.tone-bad {
-  border-color: #f0bbb5;
-  background: #fff4f2;
-}
-
-.model-service-status-row.tone-muted {
-  color: #667085;
-}
-
-.model-service-draft-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
-}
-
-.model-service-draft-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.model-service-draft-actions span {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.model-service-admin-guidance {
-  margin: 0;
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: #f2f4f7;
-  color: #596273;
-  font-size: 12px;
-}
-
-.model-service-footer {
-  position: sticky;
-  bottom: -24px;
-  margin: 16px -24px -24px;
-  padding: 16px 24px 24px;
-  border-top: 1px solid var(--line);
-  background: #fff;
+.model-service-test-one {
+  justify-self: end;
 }
 
 /* DestinationPicker(transfer-picker.tsx)—knowhow 表(C3)/Memory(C4)传输共用的
@@ -5022,29 +5014,12 @@ button.chat-session-card {
     white-space: normal;
   }
 
-  .model-service-status-row {
-    grid-template-columns: 1fr;
-    align-items: stretch;
+  .model-service-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .model-service-status-result {
-    justify-items: start;
-    white-space: normal;
-  }
-
-  .model-service-status-row > button {
-    justify-self: start;
-    white-space: normal;
-  }
-
-  .model-service-draft-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .model-service-footer {
-    margin-inline: -14px;
-    padding-inline: 14px;
-    flex-wrap: wrap;
+  .model-service-test-one {
+    justify-self: stretch;
   }
 
   .outer-nav {
