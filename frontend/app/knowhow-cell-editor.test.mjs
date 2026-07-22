@@ -7,6 +7,7 @@ import {
   SAVE_AND_NEXT_LABEL,
   CANCEL_LABEL,
   EDIT_LABEL,
+  HISTORY_LABEL,
   ROW_CONTEXT_TOGGLE_LABEL,
   RESTORE_DRAFT_LABEL,
   DISCARD_DRAFT_LABEL,
@@ -124,6 +125,19 @@ test("底部三按钮文案：与规格②路A 原文逐字一致", () => {
 
 test("EDIT_LABEL: 与规格⑤「编辑」按钮同词", () => {
   assert.strictEqual(EDIT_LABEL, "编辑");
+});
+
+test("HISTORY_LABEL: knowhow 表版本管理 Task 16「历史」入口按钮同词", () => {
+  assert.strictEqual(HISTORY_LABEL, "历史");
+});
+
+// 接线（Task 16）：预览态/编辑态 header 各有一个「历史」按钮，onClick 绑到
+// onHistory——与本文件其余「按 onClick handler 名找按钮」的既有断言手法一致
+// （见上方 handleOptimize/handleReformat 那几条），不依赖源码行号/排版。
+test("接线（Task 16）：预览态与编辑态 header 各有一个按钮 onClick 绑到 onHistory", () => {
+  const buttons = jsxElements(editorModule, "button");
+  const historyButtons = buttons.filter(({ bindings }) => bindings?.onClick === "onHistory");
+  assert.equal(historyButtons.length, 2, "预览态、编辑态各一个，共两个");
 });
 
 test("ROW_CONTEXT_TOGGLE_LABEL: 与任务简报原话「本行其他格子」一致", () => {

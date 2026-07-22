@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   summarizeChange, originLabel, groupChangesByDay, foldLocalChanges, isStaleHead,
-  describeColumnChange, summarizeRevertImpact,
+  describeColumnChange, summarizeRevertImpact, isCellHistoryEntryRestorable,
 } from "./knowhow-history-logic.ts";
 
 // payload 字段名按后端真实形状（design doc
@@ -396,4 +396,24 @@ test("summarizeRevertImpact: 行/格子/列结构/表元四类同时出现——
   assert.ok(text.includes("1 个格子"), `期望提到格子变化，实际："${text}"`);
   assert.ok(text.includes("列结构变化"), `期望提到列结构变化，实际："${text}"`);
   assert.ok(text.includes("表信息变更"), `期望提到表元变化，实际："${text}"`);
+});
+
+// --- isCellHistoryEntryRestorable（单格历史「恢复此版本」可用性，Task 16）---
+
+test("isCellHistoryEntryRestorable: after 为 null（所在行/列当时已被删除）恒不可恢复", () => {
+  assert.equal(isCellHistoryEntryRestorable(null, "任意当前内容"), false);
+  assert.equal(isCellHistoryEntryRestorable(null, ""), false);
+});
+
+test("isCellHistoryEntryRestorable: after 与当前实时内容相同——恢复没有意义，不可恢复", () => {
+  assert.equal(isCellHistoryEntryRestorable("同一段内容", "同一段内容"), false);
+  assert.equal(isCellHistoryEntryRestorable("", ""), false);
+});
+
+test("isCellHistoryEntryRestorable: after 是与当前不同的非空字符串——可恢复", () => {
+  assert.equal(isCellHistoryEntryRestorable("历史上的旧内容", "当前的新内容"), true);
+});
+
+test("isCellHistoryEntryRestorable: after 是空字符串且当前非空——可恢复（清空是合法的可恢复状态，不同于 null）", () => {
+  assert.equal(isCellHistoryEntryRestorable("", "当前非空内容"), true);
 });

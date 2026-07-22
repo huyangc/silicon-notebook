@@ -83,6 +83,7 @@ import {
   type KnowhowRow,
   type KnowhowColumn,
   type KnowhowCellCode,
+  type KnowhowCellPatchResult,
   type Role,
   type ProjectionStatus,
 } from "./knowhow-model.ts";
@@ -108,6 +109,10 @@ import { rowFallbackTitle, reformatSourceLabel, REFORMAT_SUGGESTION_LABEL } from
 import { KnowhowImportWizard, KnowhowAppendWizard } from "./knowhow-import.tsx";
 import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
 import { KnowhowMarkdown, KnowhowCellPreview, KnowhowCellEditor } from "./knowhow-cell-editor.tsx";
+// knowhow 表版本管理 Task 16：格子浮窗第三态（历史）——与 KnowhowCellPreview/
+// KnowhowCellEditor 同一套 cellModal 顶层状态机驱动，见下方 cellModal 类型与
+// 渲染处的三选一分支。
+import { KnowhowCellHistory } from "./knowhow-cell-history.tsx";
 import { KnowhowCodeChip, KnowhowCodeModal } from "./knowhow-code.tsx";
 import { KnowhowMatrixDrawer } from "./knowhow-matrix-drawer.tsx";
 // knowhow 表版本管理 Task 15：历史抽屉（时间线 + 单次改动 diff + 两版对比 +
@@ -282,15 +287,20 @@ export function KnowhowPanel({
   const [retryingReproject, setRetryingReproject] = useState(false);
   const [addingRow, setAddingRow] = useState(false);
 
-  // 格子浮窗顶层状态机（Task 7）：null=未打开；mode="preview"=已填格子的只读
-  // 预览态（右上「编辑」切到 edit）；mode="edit"=编辑态。行标题列格子（网格
-  // 首列）仅在「已填」时不走这里——那时仍走既有的 onOpenRow 打开整行抽屉，
-  // 与规格⑤「点行首/概念列打开」行详情抽屉的既有约定一致；该格为空时和其余
-  // 空格子一样直接进本状态机的编辑态（规格②路A「空格子直接进编辑态」），见
-  // 下方 KnowhowTableGrid 的 `opensRowDrawer = index === 0 && filled` 判定。
-  const [cellModal, setCellModal] = useState<{ rowId: string; columnId: string; mode: "preview" | "edit" } | null>(
-    null,
-  );
+  // 格子浮窗顶层状态机（Task 7；knowhow 表版本管理 Task 16 扩三态）：null=未
+  // 打开；mode="preview"=已填格子的只读预览态（右上「编辑」切到 edit，「历史」
+  // 切到 history）；mode="edit"=编辑态（同样有「历史」入口）；mode="history"=
+  // 历史页签（这一格的历次值 + 恢复此版本，见 knowhow-cell-history.tsx）。行
+  // 标题列格子（网格首列）仅在「已填」时不走这里——那时仍走既有的 onOpenRow
+  // 打开整行抽屉，与规格⑤「点行首/概念列打开」行详情抽屉的既有约定一致；该格
+  // 为空时和其余空格子一样直接进本状态机的编辑态（规格②路A「空格子直接进
+  // 编辑态」），见下方 KnowhowTableGrid 的 `opensRowDrawer = index === 0 &&
+  // filled` 判定。三态共用同一份 useFloatingWindow storageKey / useFullscreen
+  // Toggle 键（见 knowhow-cell-editor.tsx FULLSCREEN_STORAGE_KEY 头注释），切
+  // 页签时浮窗位置/尺寸不跳动。
+  const [cellModal, setCellModal] = useState<
+    { rowId: string; columnId: string; mode: "preview" | "edit" | "history" } | null
+  >(null);
 
   // Task 8（点概念打开矩阵抽屉，规格 §4.3）：当前打开的概念值——null=未打开；
   // 非空时对应 anchor 列某个分组的 anchorValue，驱动下方渲染
@@ -1028,6 +1038,40 @@ export function KnowhowPanel({
     if (openRowId && targets.includes(openRowId)) loadRowCode(openRowId);
   }
 
+  // knowhow 表版本管理 Task 16：格子历史「恢复此版本」成功后的回调。真正的
+  // patchKnowhowCell(..., origin: "revert") 调用发生在 KnowhowCellHistory 组件
+  // 内部——镜像 KnowhowHistoryDrawer 自己直接调 revertKnowhowTable、只经
+  // onReverted 回调通知 panel 事后处理的既有分工（见该组件头注释）；本函数只
+  // 负责把拿到的结果"落地"：合并进 detail（规则同 handleCellSave 单格分支——
+  // 只更新命中的这一格与其行的 projectionStatus，不整表重拉，因为
+  // patchKnowhowCell 本身已经返回了更新后的值）。
+  //
+  // 刻意不复用 handleCellSave：那个函数会额外探测 anchor 分组并批量写整个
+  // 「合并共享格」，而单格历史恢复是简报明确要求的简化——"就是一次普通的
+  // 格子保存"，只对这一格、这一行生效（见 knowhow-cell-history.tsx 头注释
+  // "范围之外"一节）。
+  function handleCellRestored(result: KnowhowCellPatchResult) {
+    setDetail((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        rows: prev.rows.map((row) =>
+          row.id === result.rowId
+            ? {
+                ...row,
+                cells: { ...row.cells, [result.columnId]: result.contentMd },
+                projectionStatus: result.projectionStatus,
+              }
+            : row,
+        ),
+      };
+    });
+    // 同 handleCellSave 尾部同一条收尾：格子内容一变，该格挂着的代码派生在
+    // 后端立即转 stale——行详情抽屉此刻若恰好展开着这一行，立即重取其代码
+    // 状态，chip 无需等重开抽屉才刷新。
+    if (openRowId === result.rowId) loadRowCode(result.rowId);
+  }
+
   // Task 11：打开代码浮层（抽屉 chip 的 onOpen，及"添加代码"安静入口共用同
   // 一个打开函数——两者的区别只在于 KnowhowCodeModal 内部按 code.status 是
   // 否为 none 决定初始 mode 是 view 还是 edit，本函数不需要关心这一点）。
@@ -1303,6 +1347,23 @@ export function KnowhowPanel({
             // F（review）：规整判 server-stale 时刷新整表 detail，下次打开就有新鲜
             // savedContent（否则关掉重开撞同一陈旧态、永远循环）。
             onServerStale={reloadTableDetail}
+            // knowhow 表版本管理 Task 16：切到历史页签——mode 变化即卸载本组件，
+            // 未落盘内容由既有的卸载草稿兜底接住（见 onHistory prop 注释）。
+            onHistory={() => setCellModal((current) => (current ? { ...current, mode: "history" } : current))}
+          />
+        ) : cellModal.mode === "history" ? (
+          <KnowhowCellHistory
+            rowTitle={cellModalRowTitle}
+            column={cellModalColumn}
+            contentMd={cellModalRow.cells[cellModal.columnId] ?? ""}
+            notebookId={notebookId}
+            apiBase={apiBase}
+            table={detail}
+            rowId={cellModal.rowId}
+            canEdit={canEdit}
+            onRestored={handleCellRestored}
+            onBack={() => setCellModal((current) => (current ? { ...current, mode: "preview" } : current))}
+            onClose={() => setCellModal(null)}
           />
         ) : (
           <KnowhowCellPreview
@@ -1321,6 +1382,9 @@ export function KnowhowPanel({
             // KnowhowCellEditor，这里也不需要再判 canEdit（无条件传，查看态
             // 下只读/可写用户行为一致，都是查看→查看）。
             onSwitchCell={switchCell}
+            // knowhow 表版本管理 Task 16：不受 canEdit 门控（规格⑦），只读成员
+            // 也能切到历史页签浏览。
+            onHistory={() => setCellModal((current) => (current ? { ...current, mode: "history" } : current))}
           />
         )
       )}
@@ -2275,6 +2339,14 @@ export function KnowhowPanel({
           border-left-color: #d99a3b;
         }
 
+        /* knowhow 表版本管理 Task 16：历史态——info 蓝左边条，与
+           .kh-mode-tag--history / .knowhow-status-badge--info 同一套蓝色语义
+           （呼应"只读翻阅过去"的性质，区别于查看态的中性灰与编辑态的活跃
+           琥珀）。 */
+        .kh-modal-card--history {
+          border-left-color: #1f5eff;
+        }
+
         /* 全屏切换：kh-modal-overlay 的 padding 已经把卡片缩进 24px，全屏时把
            overlay padding 归零由卡片自己撑满，同时把圆角 / 阴影去掉——真实全屏
            质感（不是「更大一点」）。 */
@@ -2326,9 +2398,9 @@ export function KnowhowPanel({
           );
         }
 
-        /* header 里紧跟面包屑的小态标（「查看」/「编辑中」）——用同一支
-           .kh-mode-tag，靠 --preview / --editor 修饰类换色调，让编辑/查看态在
-           header 里也有明确文本标注（不只靠左侧色条）。 */
+        /* header 里紧跟面包屑的小态标（「查看」/「编辑中」/「历史」）——用同一支
+           .kh-mode-tag，靠 --preview / --editor / --history 修饰类换色调，让
+           三态在 header 里都有明确文本标注（不只靠左侧色条）。 */
         .kh-mode-tag {
           display: inline-flex;
           align-items: center;
@@ -2346,6 +2418,14 @@ export function KnowhowPanel({
           border-color: #f0dab3;
           background: #fdf4e6;
           color: #9a5b00;
+        }
+        /* knowhow 表版本管理 Task 16：历史态徽标——info 蓝，与
+           .kh-modal-card--history / .knowhow-status-badge--info 同一套蓝色
+           语义（见该规则注释）。 */
+        .kh-mode-tag--history {
+          border-color: #c7d6ff;
+          background: #eef2ff;
+          color: #1f5eff;
         }
 
         /* 合并格编辑提示（anchor 分组 spec §4.4）：紧跟 kh-mode-tag--editor

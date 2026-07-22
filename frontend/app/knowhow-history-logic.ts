@@ -346,3 +346,27 @@ export function summarizeRevertImpact(
   }
   return `将影响 ${parts.join("、")}`;
 }
+
+// --- 单格历史「恢复此版本」可用性（knowhow 表版本管理 Task 16）---------------
+//
+// 格子浮窗历史页签（knowhow-cell-history.tsx）为 fetchKnowhowCellHistory 返回
+// 的每条历史条目决定是否展示「恢复此版本」按钮。canEdit 门控（规格⑦「只读
+// 成员看得到历史、看不到恢复按钮」）由调用方在渲染处另行 `canEdit && ...`
+// 判断，不并入本函数——本函数只回答"内容层面是否有必要展示"，与权限判断分离
+// 便于独立单测（同本文件其余函数一贯只管"这一件事"的取向）。
+//
+// after 为 null 的两种可能来源（knowhow_history_store.py _cell_entries_in_change
+// 的 row_delete/column_delete/revert.rows_removed/columns_removed 四个分支）：
+// 这一条历史对应的是"这一格当时所在的行/列被删除"，不是"格子内容被清空"
+// （清空是 after===""，一个合法的可恢复空字符串，与 null 语义不同）。
+// patchKnowhowCell 只能写入字符串内容，没有对应"恢复行/列存在性"的语义，
+// 这类条目恒不可恢复——即便当前这一格确实存在（行/列被删后又被回退带回，
+// 同一个 row_id/column_id 可能在更晚的条目里重新出现 after 有值，那些条目
+// 各自独立判定，不受这一条 after=null 影响）。
+export function isCellHistoryEntryRestorable(after: string | null, currentContentMd: string): boolean {
+  if (after === null) return false;
+  // 与当前实时内容完全相同：恢复等于原样重写一遍，没有意义，不展示（镜像
+  // knowhow-history-drawer.tsx 对当前 head 隐藏「回到这里」按钮的既有取向，
+  // 见该文件 isHead 用法）。
+  return after !== currentContentMd;
+}

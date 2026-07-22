@@ -23,6 +23,11 @@ export const CANCEL_LABEL = "取消";
 // 预览态→编辑态切换按钮（规格⑤「每节「编辑」按钮」同词）。
 export const EDIT_LABEL = "编辑";
 
+// knowhow 表版本管理 Task 16：预览态/编辑态 header 里新增的「历史」入口按钮
+// ——两处（KnowhowCellPreview/KnowhowCellEditor）同词，切到格子浮窗第三态
+// （knowhow-cell-history.tsx 的 KnowhowCellHistory）。
+export const HISTORY_LABEL = "历史";
+
 // 行上下文条展开按钮（我方任务简报原话：「本行其他格子」）。
 export const ROW_CONTEXT_TOGGLE_LABEL = "本行其他格子";
 
