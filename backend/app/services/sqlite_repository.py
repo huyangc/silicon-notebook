@@ -3397,6 +3397,53 @@ class SQLiteRepository:
     def get_knowhow_row_location(self, row_id: str) -> Optional[dict]:
         return self._runtime.knowhow_store.get_knowhow_row_location(row_id)
 
+    # --- knowhow 表版本管理 Task 11: 历史流水/里程碑/回退一跳委托，落在
+    # --- 组合根构造的 knowhow_history_store 上（与上面 knowhow_store 共用
+    # --- 同一对 new_id/now，见 RepositoryRuntime.__init__ 注释）。
+    def knowhow_history_head_seq(self, table_id: str) -> int:
+        return self._runtime.knowhow_history_store.head_seq(table_id)
+
+    def list_knowhow_changes(
+        self, table_id: str, limit: int = 50, before_seq: "int | None" = None
+    ) -> list:
+        return self._runtime.knowhow_history_store.list_changes(table_id, limit, before_seq)
+
+    def get_knowhow_change(self, table_id: str, seq: int) -> "dict | None":
+        return self._runtime.knowhow_history_store.get_change(table_id, seq)
+
+    def knowhow_changes_between(self, table_id: str, from_seq: int, to_seq: int) -> list:
+        return self._runtime.knowhow_history_store.changes_between(table_id, from_seq, to_seq)
+
+    def knowhow_cell_history(
+        self, table_id: str, row_id: str, column_id: str, limit: int = 50
+    ) -> list:
+        return self._runtime.knowhow_history_store.cell_history(
+            table_id, row_id, column_id, limit
+        )
+
+    def revert_knowhow_table(
+        self, table_id: str, target_seq: int, expected_head_seq: int, actor: str = ""
+    ) -> dict:
+        return self._runtime.knowhow_history_store.revert_to(
+            table_id, target_seq, expected_head_seq, actor
+        )
+
+    def create_knowhow_milestone(
+        self, table_id: str, seq: int, name: str, note: str, created_by: str
+    ) -> dict:
+        return self._runtime.knowhow_history_store.create_milestone(
+            table_id, seq, name, note, created_by
+        )
+
+    def delete_knowhow_milestone(self, table_id: str, milestone_id: str) -> None:
+        return self._runtime.knowhow_history_store.delete_milestone(table_id, milestone_id)
+
+    def list_knowhow_milestones(self, table_id: str) -> list:
+        return self._runtime.knowhow_history_store.list_milestones(table_id)
+
+    def prune_knowhow_history(self, table_id: str, before_iso: str) -> dict:
+        return self._runtime.knowhow_history_store.prune(table_id, before_iso)
+
     # --- paper-meta status: backfill progress one-hop delegates ----------
     def paper_meta_backfilling(self, notebook_id: str) -> bool:
         """O(1) 内存 membership；重启后天然为 False（未在跑）。"""
