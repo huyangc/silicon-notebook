@@ -548,10 +548,12 @@ SURFACE_MEMBERS = (
         kind='private_wrapper',
         consumers=(
             ConsumerSite(path='app.services.sqlite_repository', scope='<module>', kind='compatibility', target='_now'),
+            ConsumerSite(path='backend/tests/test_knowhow_history_roundtrip.py', scope='<module>._advancing_clock', kind='patch', target='_now'),
             ConsumerSite(path='backend/tests/test_rebuild_cache.py', scope='<module>._freeze_now', kind='patch', target='_now'),
             ConsumerSite(path='backend/tests/test_repository_runtime.py', scope='<module>.test_runtime_seams_are_late_bound', kind='patch', target='_now'),
         ),
         patches=(
+            ConsumerSite(path='backend/tests/test_knowhow_history_roundtrip.py', scope='<module>._advancing_clock', kind='patch', target='_now'),
             ConsumerSite(path='backend/tests/test_rebuild_cache.py', scope='<module>._freeze_now', kind='patch', target='_now'),
             ConsumerSite(path='backend/tests/test_repository_runtime.py', scope='<module>.test_runtime_seams_are_late_bound', kind='patch', target='_now'),
         ),
