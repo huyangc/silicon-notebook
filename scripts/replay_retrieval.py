@@ -41,8 +41,12 @@ def record_run(notebook_id: str, questions: list, full: bool, plan_map: dict,
     from app.services.batch_ingest import _resolve_owner_profile
 
     repo = SQLiteRepository(Settings())
-    if not repo.settings.embedder_configured:
-        print("ERROR: embed 未配置,回放需要真实查询向量;拒绝静默降级", file=sys.stderr)
+    if not repo.configured("retrieval_query_embedding"):
+        print(
+            "ERROR: retrieval_query_embedding workload 未绑定系统模型服务;"
+            "回放需要真实查询向量,拒绝静默降级",
+            file=sys.stderr,
+        )
         sys.exit(2)
 
     try:

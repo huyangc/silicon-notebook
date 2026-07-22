@@ -377,7 +377,7 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
             else:
                 if not llm_ok:
                     raise RuntimeError(
-                        "KG LLM 未配置(KG_LLM_* 或主 LLM 均未配):--limit 抽取只会产出 no-llm 空结果")
+                        "kg_extract workload 未绑定系统模型服务")
                 all_sids = mnt.source_ids(notebook_id)
                 kgful = mnt.kg_covered_source_ids(notebook_id)
                 targets = [s for s in all_sids if s not in kgful][:max(0, limit)]

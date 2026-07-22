@@ -557,7 +557,10 @@ def test_main_allows_no_embed_with_flag(repo, tmp_path, monkeypatch):
 
 def test_run_kg_limit_requires_llm(repo):
     nb_id = bi.ensure_notebook(repo, None, "nb")
-    with pytest.raises(RuntimeError):            # 无 KG/主 LLM → --limit 直接报错,不静默
+    with pytest.raises(
+        RuntimeError,
+        match="kg_extract workload 未绑定系统模型服务",
+    ):                                           # 未绑定 workload → 直接报错,不静默
         bi.run_kg(repo, nb_id, limit=1)
 
 

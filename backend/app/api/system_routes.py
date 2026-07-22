@@ -27,6 +27,7 @@ from app.models.model_services import (
 from app.models.notebooks import NotebookTemplate
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
 from app.services.legacy_model_status_types import STATUS_SERVICE_ROLES
+from app.services.model_registry import SystemModelServiceRegistry
 from app.services.model_status import ModelStatusService
 from app.services.pending_bus import pending_bus
 
@@ -38,12 +39,17 @@ logger = logging.getLogger("silicon_notebook.model_settings")
 @router.get("/health")
 def health() -> dict:
     settings = get_settings()
+    registry = SystemModelServiceRegistry.load(settings)
     return {
         "status": "ok",
         "environment": settings.environment,
-        "llm_configured": settings.llm_configured,
-        "reasoning_llm_configured": settings.reasoning_llm_configured,
-        "embedding_configured": settings.embedder_configured,
+        "llm_configured": registry.service_for("ask_answer") is not None,
+        "reasoning_llm_configured": (
+            registry.service_for("reasoning_agent") is not None
+        ),
+        "embedding_configured": (
+            registry.service_for("retrieval_query_embedding") is not None
+        ),
     }
 
 

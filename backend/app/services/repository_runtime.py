@@ -817,6 +817,7 @@ class RepositoryRuntime:
             raise RuntimeError("query services require scale runtime")
         self.knowledge_query = KnowledgeQueryService(
             settings=self.settings,
+            model_provider=self.models,
             event_log=self.event_log,
             database=self.database,
             catalog=self.catalog,

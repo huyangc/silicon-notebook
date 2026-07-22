@@ -447,6 +447,22 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_23(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
+def test_offline_settings_use_an_empty_system_model_registry(tmp_path, monkeypatch):
+    module = _load_verifier()
+    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "must-not-leak")
+    database, storage = _copy_fixture(tmp_path)
+
+    settings = module.offline_settings(
+        tmp_path / "snapshot.db", tmp_path / "storage"
+    )
+    registry = module.SystemModelServiceRegistry.load(settings, environ={})
+
+    assert settings.model_services_config == ""
+    assert registry.service_for("ask_answer") is None
+    assert registry.service_for("retrieval_query_embedding") is None
+    assert module.verify_snapshot(database, storage).ok
+
+
 def test_deployed_v21_database_verifies_through_migrations_22_and_23(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)

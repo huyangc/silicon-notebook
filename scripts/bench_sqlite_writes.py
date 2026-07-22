@@ -15,7 +15,7 @@ def _make_repo(db_path):
     os.environ.setdefault("SILICON_NOTEBOOK_STORAGE_DIR", db_path + "_storage")
     os.environ["EVENT_LOG_ENABLED"] = "false"
     os.environ["LLM_LOG_ENABLED"] = "false"
-    # 不配 EMBED_* → embedder_configured False → store_kg 不嵌入(纯写基准)
+    # 不绑定 embedding workloads → store_kg 不嵌入(纯写基准)
     from app.core.config import Settings
     from app.services.sqlite_repository import SQLiteRepository
     return SQLiteRepository(Settings())

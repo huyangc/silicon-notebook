@@ -7,6 +7,10 @@ Task 5 is implemented in two commits:
 - `abdfd7fa refactor: bind embedding workloads to model services`
 - `47af578d refactor: schedule embedding and rerank workloads`
 
+The review-hardening follow-up in this report's commit also removes the last
+live consumers of the deleted endpoint Settings properties from KG semantic
+search, health, relation maintenance, and operational scripts.
+
 Product embedding and rerank traffic now resolves an exact workload from the
 system provider. Physical-service `max_concurrency` is the only provider
 throughput authority; producer pools use `parallelism(workload_id)` only as a
@@ -20,6 +24,13 @@ Initial RED exposed the expected retired `EMBED_*` fixture failures in
 activation variables before repositories could be built. Fixtures were
 migrated to explicit `RecordingModelProvider` workload bindings; no legacy env
 compatibility was restored.
+
+Review RED added direct regressions for KG semantic routing, sanitized health,
+safe KG re-embedding, replay preflight, offline snapshot verification, the
+batch-ingest error contract, and relation backfill. The first focused run was
+`8 failed, 1 error`: every failure was the intended deleted-Settings consumer
+or missing provider injection. After migration the same focused set was
+`9 passed`.
 
 Focused GREEN:
 
@@ -36,6 +47,8 @@ PYTHONPATH=backend python -m pytest -q -n0 \
 289 passed in 19.53s
 ```
 
+The post-review rerun remained green (`289 passed in 24.71s`).
+
 Additional regression coverage:
 
 ```text
@@ -44,6 +57,10 @@ test_pool_report.py + test_knowhow_reformat.py + test_knowhow_optimize.py
 
 76 passed in 4.18s
 ```
+
+The post-review rerun remained green (`76 passed in 5.11s`). All changed-path
+regressions, including the complete snapshot-verifier and relation-embedding
+files, passed together (`49 passed in 8.20s`).
 
 The real-runtime three-source peak test binds multiple embedding workloads to
 one physical service and observes a raw upstream peak exactly equal to that
@@ -91,6 +108,17 @@ Kept intentionally:
 Raw protocol constructors receive explicit service URL/key/model/protocol and
 connection capacity. `make_embedder()` has no Settings endpoint fallback.
 
+KG semantic search now asks the injected provider for exactly
+`retrieval_query_embedding`; a configured regression proves it executes the
+semantic ANN path without the generic retrieval embedder. Only typed provider
+failures are treated as an optional-overlay failure. Programming/index errors
+are no longer swallowed by a broad exception.
+
+Relation maintenance checks the runtime-composed provider's
+`configured("relation_embedding")` port and resolves the exact relation
+adapter. It does not inspect Settings or implicitly reach back through the
+repository facade.
+
 KG window planning and the KG producer pool derive their width from
 `parallelism("kg_extract")`. Knowhow Markdown `--use-llm` requests the system
 `knowhow_reformat` workload and never resolves a notebook owner's endpoint.
@@ -104,6 +132,15 @@ PYTHONPATH=backend python scripts/batch_ingest.py --help
 The help contains `--workers`; it contains neither `--llm-conc` nor
 `--embed-conc`. User-facing help identifies missing system workload bindings
 rather than retired `EMBED_*` configuration.
+
+`reembed_kg` now proves both `knowledge_object_embedding` and
+`relation_embedding` are bound before deleting either vector table.
+`replay_retrieval` likewise requires `retrieval_query_embedding` before doing
+any work. The repository snapshot verifier constructs Settings with only an
+empty `MODEL_SERVICES_CONFIG`, validates the full registry workload catalog is
+unbound, and pins an empty registry while the offline repository is alive so
+hostile process/`.env` legacy variables cannot activate a provider. The
+fixture generator no longer passes deleted Settings fields.
 
 ## Audit and Task 6 handoff
 
@@ -121,6 +158,7 @@ Remaining repository-test imports of the deleted modules are confined to the
 Task 6 deletion/refactor list (`test_model_status_store.py`,
 `test_model_status_resolution.py`, `test_model_status_service.py`,
 `test_model_config_resolve.py`, and `test_user_llm_client_resolve.py`). Legacy
-endpoint kwargs remaining in repository fixture generator/verifier scripts are
-also owned by Task 6's required fixture-regeneration step. They are not runtime
-fallbacks.
+status persistence remains owned by Task 6; this follow-up intentionally did
+not migrate it. A production/script scan found zero live reads or constructor
+kwargs for the deleted endpoint Settings fields and zero stale `KG_LLM_*` /
+`EMBED_*` operator guidance.

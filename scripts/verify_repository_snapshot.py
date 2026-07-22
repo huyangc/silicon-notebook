@@ -48,6 +48,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
+from unittest import mock
 from urllib.parse import quote
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +58,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from app.core.config import Settings
 from app.repositories.sqlite.anchor_normalization import sqlite_js_trim_expression
+from app.services.model_registry import WORKLOADS, SystemModelServiceRegistry
 from app.services.sqlite_repository import (
     SCHEMA_VERSION,
     SQLiteRepository,
@@ -831,25 +833,7 @@ def offline_settings(database: Path, storage: Path) -> Settings:
     settings = Settings(
         database_url=f"sqlite:///{database}",
         storage_dir=str(storage),
-        openai_compat_base_url="",
-        openai_compat_api_key="",
-        openai_compat_model="",
-        reasoning_llm_base_url="",
-        reasoning_llm_api_key="",
-        reasoning_llm_model="",
-        rewrite_llm_base_url="",
-        rewrite_llm_api_key="",
-        rewrite_llm_model="",
-        kg_llm_base_url="",
-        kg_llm_api_key="",
-        kg_llm_model="",
-        embed_provider="",
-        embed_model="",
-        embed_base_url="",
-        embed_api_key="",
-        rerank_model="",
-        rerank_base_url="",
-        rerank_api_key="",
+        model_services_config="",
         mineru_mode="off",
         mineru_api_url="",
         mineru_vlm_server_url="",
@@ -865,14 +849,12 @@ def offline_settings(database: Path, storage: Path) -> Settings:
 
 
 def _assert_offline(settings: Settings) -> None:
+    registry = SystemModelServiceRegistry.load(settings, environ={})
     offline_checks = {
-        "llm_configured": settings.llm_configured,
-        "reasoning_llm_configured": settings.reasoning_llm_configured,
-        "rewrite_llm_configured": settings.rewrite_llm_configured,
-        "kg_llm_configured": settings.kg_llm_configured,
-        "embedder_configured": settings.embedder_configured,
-        "rerank_model": bool(settings.rerank_model),
-        "rerank_base_url": bool(settings.rerank_base_url),
+        "model_services": any(
+            registry.service_for(workload_id) is not None
+            for workload_id in WORKLOADS
+        ),
         "mineru_enabled": settings.mineru_enabled,
         "mineru_cloud_enabled": settings.mineru_cloud_enabled,
         "scale_index_auto_enabled": settings.scale_index_auto_enabled,
@@ -1621,7 +1603,15 @@ def verify_snapshot(database: Path, storage_dir: Path) -> VerificationResult:
         ):
             raise _fail("repository would be constructed with the original storage")
 
-        with _no_network():
+        # Pin registry resolution to an explicit empty registry for the whole
+        # repository lifetime.  This preserves the repository's public
+        # constructor seam used by the verifier's mutation probes and prevents
+        # hostile process/.env model variables from activating any provider.
+        with _no_network(), mock.patch.object(
+            SystemModelServiceRegistry,
+            "load",
+            return_value=SystemModelServiceRegistry({}, {}),
+        ):
             repo = SQLiteRepository(settings)
             reads = exercise_reads(repo, backup_path)
 
