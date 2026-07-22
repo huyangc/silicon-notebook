@@ -31,7 +31,17 @@ from pathlib import Path
 SUBAGENT_TOOLS = {"Agent", "Task"}
 
 # fork 继承父模型是语义要求，不是偷懒（见 Agent 工具说明）。
+#
+# 刻意只豁免**显式**的 `fork`：省略 `subagent_type` 在本 harness 里等于默认
+# general-purpose，而「不带模型的 general-purpose 调用」正是本门的头号拦截
+# 对象，把它当成隐式 fork 豁免掉等于把门整个掏空。
 MODEL_EXEMPT_SUBAGENT_TYPES = {"fork"}
+
+# 「填了但不算做出选择」的值：YAML 的三种空/null 写法，以及显式继承。
+#
+# 刻意**不**用「已知模型白名单」——白名单会随新模型上线而过期，到时候合法的
+# 角色定义会被误拦。本门要判的是「有没有做出选择」，不是「模型 id 合不合法」。
+NON_CHOICE_MODEL_VALUES = {"", "inherit", "null", "none", "~"}
 
 DENY_REASON = """本仓库规范：起子代理必须显式选模型，不得默认继承主 agent（见 CLAUDE.md「子代理规范」）。
 
@@ -43,7 +53,8 @@ DENY_REASON = """本仓库规范：起子代理必须显式选模型，不得默
               补测试、文档同步、照既定模式扩展。
 - `haiku`  —— 纯检索定位清点：找文件、列符号、grep 汇总，只需汇报不需推理。
 
-拿不准就上 `opus`：返工一次的成本远高于模型差价。
+拿不准就上 `opus`：返工一次的成本远高于模型差价。`inherit` 不算已选——它保留的
+正是本门要禁的继承语义。
 
 或者改用已钉好模型的仓库角色（`subagent_type`），无需再传 `model`：
 {roster}"""
@@ -57,11 +68,35 @@ def _iter_agent_files(root: Path):
     yield from sorted(agents_dir.rglob("*.md"))
 
 
+def _yaml_scalar(raw: object) -> str:
+    """把一个 YAML 标量归一到可判定的形态：剥行内注释、剥引号、去空白。
+
+    必须剥注释，否则 `model: inherit # 跟主 agent 走` 会被当成钉死了一个叫
+    `inherit # 跟主 agent 走` 的模型而放行，可 Claude Code 的 YAML 解析看到的
+    是 `inherit`，实际跑起来仍然继承主 agent——硬门被绕过。
+    """
+    text = str(raw or "").strip()
+    if text[:1] in {'"', "'"}:
+        quote = text[0]
+        end = text.find(quote, 1)
+        return (text[1:end] if end > 0 else text[1:]).strip()
+    for idx, ch in enumerate(text):
+        # YAML：`#` 位于行首、或前面是空白时，才起注释作用。
+        if ch == "#" and (idx == 0 or text[idx - 1].isspace()):
+            return text[:idx].strip()
+    return text
+
+
+def _is_chosen_model(raw: object) -> bool:
+    """这个 model 值算不算「主动做出了选择」。"""
+    return _yaml_scalar(raw).lower() not in NON_CHOICE_MODEL_VALUES
+
+
 def _parse_frontmatter(path: Path) -> dict[str, str]:
     """极简 YAML frontmatter 读取：只取顶层 `key: value` 标量。
 
     不引第三方 YAML 依赖——hook 要在任何解释器下都能跑，而我们只需要
-    `name` 和 `model` 两个标量字段。
+    `name` 和 `model` 两个标量字段。值一律保持原样，由 `_yaml_scalar` 归一。
     """
     try:
         text = path.read_text(encoding="utf-8")
@@ -77,7 +112,7 @@ def _parse_frontmatter(path: Path) -> dict[str, str]:
         if not line or line[0].isspace() or ":" not in line:
             continue
         key, _, value = line.partition(":")
-        fields[key.strip()] = value.strip().strip("'\"")
+        fields[key.strip()] = value.strip()
     return fields
 
 
@@ -96,13 +131,12 @@ def _pinned_agent_models(project_dir: Path) -> dict[str, str]:
     for root in (project_dir, Path.home()):
         for path in _iter_agent_files(root):
             fields = _parse_frontmatter(path)
-            name = fields.get("name") or path.stem
+            name = _yaml_scalar(fields.get("name")) or path.stem
             if name in claimed:
                 continue
             claimed.add(name)
-            model = fields.get("model", "")
-            if model and model != "inherit":
-                pinned[name] = model
+            if _is_chosen_model(fields.get("model")):
+                pinned[name] = _yaml_scalar(fields.get("model")).lower()
     return pinned
 
 
@@ -135,7 +169,8 @@ def main() -> None:
     if not isinstance(tool_input, dict):
         _allow()
 
-    if str(tool_input.get("model") or "").strip():
+    # 调用点写 `model: inherit` 保留的正是本门要禁的语义，等同于没选。
+    if _is_chosen_model(tool_input.get("model")):
         _allow()
 
     subagent_type = str(tool_input.get("subagent_type") or "").strip()
