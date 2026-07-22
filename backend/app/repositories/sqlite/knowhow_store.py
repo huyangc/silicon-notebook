@@ -71,6 +71,8 @@ class KnowhowStore:
         description: str,
         columns: list[dict],
         created_by: str = "",
+        actor: str = "",
+        origin: str = "user",
     ) -> str:
         """Create a table + its column definitions (position = list order).
 
@@ -82,7 +84,15 @@ class KnowhowStore:
         "记录型" table that only participates in retrieval, never the KG).
         Violations raise ``ValueError`` with a Chinese-friendly message —
         nothing is written on failure. The stored title is the stripped form.
-        """
+
+        版本管理（spec §5）：records ONE ``table_create`` entry — the table's
+        genesis, always ``seq == 1`` (a brand-new ``table_id`` cannot have
+        any prior flow). ``before`` is implicitly absent; the payload's
+        ``columns`` array carries the id generated for each column INLINE
+        (the insert loop below collects ``(column_id, name, kind)`` per
+        iteration for exactly this — a future rollback that recreates a
+        deleted table must reuse the ORIGINAL column ids). ``rows`` is
+        always ``[]`` — a freshly created table starts with none."""
         title = str(title or "").strip()
         if not title:
             raise ValueError("表标题不能为空")
@@ -101,25 +111,42 @@ class KnowhowStore:
 
         table_id = self.new_id("khtbl")
         now = self.now()
+        description = description or ""
+        created_columns: list[tuple[str, str, str]] = []
         with self.database.write() as db:
             db.execute(
                 "INSERT INTO knowhow_tables "
                 "(id, notebook_id, title, description, created_by, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (table_id, notebook_id, title, description or "", created_by or "", now, now),
+                (table_id, notebook_id, title, description, created_by or "", now, now),
             )
             for position, column in enumerate(columns):
+                column_id = self.new_id("khcol")
                 db.execute(
                     "INSERT INTO knowhow_columns (id, table_id, name, role, position) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (
-                        self.new_id("khcol"),
+                        column_id,
                         table_id,
                         names[position],
                         kinds[position],
                         position,
                     ),
                 )
+                created_columns.append((column_id, names[position], kinds[position]))
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=table_id,
+                kind="table_create",
+                payload={
+                    "table": {"title": title, "description": description},
+                    "columns": [
+                        {"id": cid, "name": n, "role": k, "position": p}
+                        for p, (cid, n, k) in enumerate(created_columns)
+                    ],
+                    "rows": [],
+                },
+                actor=actor, origin=origin,
+            )
         return table_id
 
     def update_knowhow_table_meta(
@@ -127,6 +154,8 @@ class KnowhowStore:
         table_id: str,
         title: "str | None" = None,
         description: "str | None" = None,
+        actor: str = "",
+        origin: str = "user",
     ) -> None:
         """Patch title and/or description in place (each ``None`` argument
         leaves that field untouched — the editing API's PATCH semantics for
@@ -136,7 +165,17 @@ class KnowhowStore:
         description is left alone (there is no "clear description" case
         distinct from passing ``""`` explicitly, unlike title which can never
         legally become empty). Silent no-op if the table is already gone
-        (this codebase's zero-row UPDATE convention)."""
+        (this codebase's zero-row UPDATE convention).
+
+        版本管理（spec §5）：the all-``None`` early return below stays
+        UNRECORDED — no transaction even opens, nothing changed. Once inside
+        the transaction, ``before`` is read via a SELECT preceding the
+        UPDATE; ``after`` is "before overlaid with this call's patch" (a
+        field left ``None`` keeps its ``before`` value in ``after`` too —
+        it never collapses to ``null``, matching the PATCH semantics above).
+        A table that vanished between the caller's check and this call hits
+        the same silent no-op the bare UPDATE always was — the SELECT
+        finding nothing skips both the UPDATE and the record."""
         sets: list[str] = []
         params: list[str] = []
         if title is not None:
@@ -154,8 +193,32 @@ class KnowhowStore:
         params.append(self.now())
         params.append(table_id)
         with self.database.write() as db:
+            before_row = db.execute(
+                "SELECT title, description FROM knowhow_tables WHERE id = ?",
+                (table_id,),
+            ).fetchone()
+            if before_row is None:
+                return  # already gone — nothing updated, nothing to record
             db.execute(
                 f"UPDATE knowhow_tables SET {', '.join(sets)} WHERE id = ?", params
+            )
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=table_id,
+                kind="table_meta",
+                payload={
+                    "before": {
+                        "title": before_row["title"],
+                        "description": before_row["description"],
+                    },
+                    "after": {
+                        "title": title if title is not None else before_row["title"],
+                        "description": (
+                            description if description is not None
+                            else before_row["description"]
+                        ),
+                    },
+                },
+                actor=actor, origin=origin,
             )
 
     # ------------------------------------------------------------ columns
@@ -1501,6 +1564,8 @@ class KnowhowStore:
         language: str,
         updated_by: str,
         cell_content_hash: str,
+        actor: str = "",
+        origin: str = "user",
     ) -> str:
         """Insert-or-replace the ONE code attachment a cell may carry
         (``UNIQUE(row_id, column_id)`` conflict target). On update the row
@@ -1512,9 +1577,26 @@ class KnowhowStore:
         the cell's current hash, never stored. Same-table pairing of
         (row, column) is the caller's job via ``validate_cell_target``
         (mirrors ``update_knowhow_cell``'s contract); the FKs here only
-        guarantee both halves exist."""
+        guarantee both halves exist.
+
+        版本管理（spec §5）：``before`` is the four value fields
+        (``code_text``/``language``/``updated_by``/``cell_content_hash``) of
+        whatever attachment already lived at ``(row_id, column_id)``, read
+        via a SELECT preceding the UPSERT — ``None`` (not ``{}``) on a first
+        write, mirroring ``update_knowhow_cell``'s "cell didn't exist yet"
+        convention. ``table_id`` is resolved from ``row_id`` (this method's
+        own signature carries none) the same way ``update_knowhow_cell``
+        does — AFTER the UPSERT, so its ``FOREIGN KEY(row_id)`` has already
+        confirmed the row is real; the ``is not None`` guard mirrors that
+        call site's defensive style byte-for-byte."""
         now = self.now()
         with self.database.write() as db:
+            before_row = db.execute(
+                "SELECT code_text, language, updated_by, cell_content_hash "
+                "FROM knowhow_cell_code WHERE row_id = ? AND column_id = ?",
+                (row_id, column_id),
+            ).fetchone()
+            before = dict(before_row) if before_row is not None else None
             db.execute(
                 "INSERT INTO knowhow_cell_code "
                 "(id, row_id, column_id, code_text, language, updated_by, "
@@ -1534,6 +1616,26 @@ class KnowhowStore:
                 "SELECT id FROM knowhow_cell_code WHERE row_id = ? AND column_id = ?",
                 (row_id, column_id),
             ).fetchone()
+            table_row = db.execute(
+                "SELECT table_id FROM knowhow_rows WHERE id = ?", (row_id,)
+            ).fetchone()
+            if table_row is not None:
+                record_change(
+                    db, new_id=self.new_id, now=self.now,
+                    table_id=table_row["table_id"],
+                    kind="cell_code_put",
+                    payload={
+                        "row_id": row_id, "column_id": column_id,
+                        "before": before,
+                        "after": {
+                            "code_text": code_text,
+                            "language": language or "",
+                            "updated_by": updated_by or "",
+                            "cell_content_hash": cell_content_hash,
+                        },
+                    },
+                    actor=actor, origin=origin,
+                )
         return row["id"]
 
     def get_knowhow_cell_code(self, row_id: str, column_id: str) -> "dict | None":
@@ -1544,14 +1646,44 @@ class KnowhowStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def delete_knowhow_cell_code(self, row_id: str, column_id: str) -> None:
+    def delete_knowhow_cell_code(
+        self, row_id: str, column_id: str, actor: str = "", origin: str = "user"
+    ) -> None:
         """Silent no-op when there is nothing to delete (zero-row DELETE
-        convention)."""
+        convention).
+
+        版本管理（spec §5）：``before`` is read (same four fields as
+        ``upsert_knowhow_cell_code``) BEFORE the DELETE; nothing there means
+        nothing to delete, so this returns immediately — no DML, no flow
+        entry, the silent no-op preserved verbatim. ``table_id`` resolves
+        from ``row_id`` the same way ``upsert_knowhow_cell_code`` does;
+        ``after`` is always ``None`` (the attachment is gone)."""
         with self.database.write() as db:
+            before_row = db.execute(
+                "SELECT code_text, language, updated_by, cell_content_hash "
+                "FROM knowhow_cell_code WHERE row_id = ? AND column_id = ?",
+                (row_id, column_id),
+            ).fetchone()
+            if before_row is None:
+                return  # nothing to delete — nothing to record
             db.execute(
                 "DELETE FROM knowhow_cell_code WHERE row_id = ? AND column_id = ?",
                 (row_id, column_id),
             )
+            table_row = db.execute(
+                "SELECT table_id FROM knowhow_rows WHERE id = ?", (row_id,)
+            ).fetchone()
+            if table_row is not None:
+                record_change(
+                    db, new_id=self.new_id, now=self.now,
+                    table_id=table_row["table_id"],
+                    kind="cell_code_delete",
+                    payload={
+                        "row_id": row_id, "column_id": column_id,
+                        "before": dict(before_row), "after": None,
+                    },
+                    actor=actor, origin=origin,
+                )
 
     def get_knowhow_row_location(self, row_id: str) -> "dict | None":
         """Resolve a bare ``row_id`` to its owning ``table_id`` + that

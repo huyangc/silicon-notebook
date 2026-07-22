@@ -51,9 +51,18 @@ def _record(repo, table_id, **kwargs):
         )
 
 
-def test_seq_starts_at_one_and_increments(repo, table_id):
-    assert _record(repo, table_id, kind="cell_update", payload={"cells": []}) == 1
-    assert _record(repo, table_id, kind="cell_update", payload={"cells": []}) == 2
+def test_seq_continues_from_the_existing_head_and_increments(repo, table_id, store):
+    """record_change 的 seq 用 COALESCE(MAX(seq),0)+1 现算。``table_id`` 由
+    ``create_knowhow_table`` 建出，knowhow-table-version-control Task 6 之后
+    它自己会先写一条创世 ``table_create`` 流水，所以这里断言"续接当前
+    head"而不是硬编码从 1 开始——真正的"表从零流水开始，第一条是
+    seq==1"边界由 ``test_head_seq_is_zero_for_a_table_with_no_history``
+    （裸表，不经过 ``create_knowhow_table``）和
+    ``test_knowhow_history_hooks.py::test_create_table_records_genesis_change``
+    两处覆盖。"""
+    head = store.head_seq(table_id)
+    assert _record(repo, table_id, kind="cell_update", payload={"cells": []}) == head + 1
+    assert _record(repo, table_id, kind="cell_update", payload={"cells": []}) == head + 2
 
 
 def test_records_fingerprint_of_state_after_the_change(repo, table_id):
@@ -87,12 +96,14 @@ def test_records_fingerprint_of_state_after_the_change(repo, table_id):
 
 
 def test_actor_origin_note_round_trip(repo, table_id, store):
-    _record(
+    # seq 取 _record 的返回值而非硬编码 1——table_id 已带一条创世流水
+    # （create_knowhow_table，Task 6），这条手工记录接在它后面。
+    seq = _record(
         repo, table_id,
         kind="cell_update", payload={"cells": []},
         actor="user-abc", origin="llm_reformat", note="批量规整",
     )
-    change = store.get_change(table_id, 1)
+    change = store.get_change(table_id, seq)
     assert change["actor"] == "user-abc"
     assert change["origin"] == "llm_reformat"
     assert change["note"] == "批量规整"
@@ -100,18 +111,34 @@ def test_actor_origin_note_round_trip(repo, table_id, store):
 
 
 def test_list_changes_is_newest_first_and_paginates(repo, table_id, store):
+    # table_id 自带一条创世流水（Task 6），后面 5 条手工记录接在 head 之后。
+    head = store.head_seq(table_id)
     for _ in range(5):
         _record(repo, table_id, kind="cell_update", payload={"cells": []})
 
     newest = store.list_changes(table_id, limit=2)
-    assert [c["seq"] for c in newest] == [5, 4]
+    assert [c["seq"] for c in newest] == [head + 5, head + 4]
 
-    older = store.list_changes(table_id, limit=2, before_seq=4)
-    assert [c["seq"] for c in older] == [3, 2]
+    older = store.list_changes(table_id, limit=2, before_seq=head + 4)
+    assert [c["seq"] for c in older] == [head + 3, head + 2]
 
 
-def test_head_seq_is_zero_for_a_table_with_no_history(repo, table_id, store):
-    assert store.head_seq(table_id) == 0
+def test_head_seq_is_zero_for_a_table_with_no_history(repo, notebook_id, store):
+    """真正零流水的表——不用 ``table_id`` fixture，因为它经
+    ``create_knowhow_table`` 建出，Task 6 之后自己就会先写一条创世流水
+    （``head_seq`` 会是 1，不是 0）。这里直接裸插一行 ``knowhow_tables``，
+    保住"knowhow_changes 里一行都没有时 head_seq 返回 0"这条真实边界。"""
+    runtime = repo._runtime
+    bare_table_id = runtime.knowhow_store.new_id("khtbl")
+    now = runtime.knowhow_store.now()
+    with runtime.database.write() as db:
+        db.execute(
+            "INSERT INTO knowhow_tables "
+            "(id, notebook_id, title, description, created_by, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (bare_table_id, notebook_id, "裸表", "", "", now, now),
+        )
+    assert store.head_seq(bare_table_id) == 0
 
 
 def test_changes_between_is_left_open_right_closed_ascending(repo, table_id, store):
@@ -124,18 +151,19 @@ def test_changes_between_is_left_open_right_closed_ascending(repo, table_id, sto
 
 
 def test_cell_history_filters_to_one_cell_newest_first(repo, table_id, store):
-    _record(repo, table_id, kind="cell_update", payload={
+    # seq 取返回值而非硬编码 1/3——table_id 自带一条创世流水（Task 6）。
+    seq1 = _record(repo, table_id, kind="cell_update", payload={
         "cells": [{"row_id": "r1", "column_id": "c1", "before": None, "after": "一"}]
     })
     _record(repo, table_id, kind="cell_update", payload={
         "cells": [{"row_id": "r2", "column_id": "c1", "before": None, "after": "别的行"}]
     })
-    _record(repo, table_id, kind="cell_update", payload={
+    seq3 = _record(repo, table_id, kind="cell_update", payload={
         "cells": [{"row_id": "r1", "column_id": "c1", "before": "一", "after": "二"}]
     })
 
     entries = store.cell_history(table_id, "r1", "c1")
-    assert [e["seq"] for e in entries] == [3, 1]
+    assert [e["seq"] for e in entries] == [seq3, seq1]
     assert entries[0]["after"] == "二"
     assert entries[0]["before"] == "一"
 

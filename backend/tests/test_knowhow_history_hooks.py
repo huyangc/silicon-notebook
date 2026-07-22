@@ -404,3 +404,112 @@ def test_anchor_set_records_the_fingerprint_of_the_state_after_the_write(repo, s
     change = hist.list_changes(table["id"], limit=1)[0]
     assert change["kind"] == "anchor_set"
     assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
+
+
+# ---------------------------------------------------------------------------
+# Task 6：最后 4 个写方法——建表、表元信息、格子代码附件的写入与删除。
+# create_knowhow_table 是唯一产生"创世"流水（seq==1，本表此前不可能有别
+# 的流水）的方法；update_knowhow_table_meta 的 PATCH 语义（未传字段维持
+# before 值）必须体现在 after 里；upsert/delete_knowhow_cell_code 都没有
+# table_id 参数，要靠 row_id 反查。
+# ---------------------------------------------------------------------------
+
+
+def test_create_table_records_genesis_change(store, hist, notebook_id):
+    table_id = store.create_knowhow_table(
+        notebook_id, "新表", "说明", [{"name": "概念", "role": "anchor"}]
+    )
+    changes = hist.list_changes(table_id, limit=10)
+    assert len(changes) == 1
+    assert changes[0]["kind"] == "table_create"
+    assert changes[0]["seq"] == 1
+    assert changes[0]["payload"]["table"] == {"title": "新表", "description": "说明"}
+    assert changes[0]["payload"]["columns"][0]["name"] == "概念"
+    assert changes[0]["payload"]["rows"] == []
+
+
+def test_table_meta_records_before_after(store, hist, table):
+    store.update_knowhow_table_meta(table["id"], title="改了标题")
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "table_meta"
+    assert change["payload"]["before"]["title"] == "表"
+    assert change["payload"]["after"]["title"] == "改了标题"
+    assert change["payload"]["before"]["description"] == ""
+    assert change["payload"]["after"]["description"] == ""
+
+
+def test_table_meta_noop_records_nothing(store, hist, table):
+    before = len(hist.list_changes(table["id"], limit=100))
+    store.update_knowhow_table_meta(table["id"])
+    assert len(hist.list_changes(table["id"], limit=100)) == before
+
+
+def test_cell_code_put_and_delete_round_trip(store, hist, table):
+    store.upsert_knowhow_cell_code(
+        table["row_a"], table["plain"], "print(1)", "python", "user-1", "h1"
+    )
+    put = hist.list_changes(table["id"], limit=1)[0]
+    assert put["kind"] == "cell_code_put"
+    assert put["payload"]["before"] is None
+    assert put["payload"]["after"]["code_text"] == "print(1)"
+
+    store.upsert_knowhow_cell_code(
+        table["row_a"], table["plain"], "print(2)", "python", "user-1", "h2"
+    )
+    updated = hist.list_changes(table["id"], limit=1)[0]
+    assert updated["payload"]["before"]["code_text"] == "print(1)"
+    assert updated["payload"]["after"]["code_text"] == "print(2)"
+
+    store.delete_knowhow_cell_code(table["row_a"], table["plain"])
+    removed = hist.list_changes(table["id"], limit=1)[0]
+    assert removed["kind"] == "cell_code_delete"
+    assert removed["payload"]["before"]["code_text"] == "print(2)"
+    assert removed["payload"]["after"] is None
+
+
+def test_deleting_absent_cell_code_records_nothing(store, hist, table):
+    before = len(hist.list_changes(table["id"], limit=100))
+    store.delete_knowhow_cell_code(table["row_a"], table["plain"])
+    assert len(hist.list_changes(table["id"], limit=100)) == before
+
+
+# ---------------------------------------------------------------------------
+# 同一条硬约束（record_change 必须是写事务的最后一步）在 Task 6 的 4 个
+# 方法上各补一条 fingerprint 时序测试，照既有模式：断言"记下的
+# fingerprint == 操作完成后的整表指纹"（变异验证见 task-6-report.md）。
+# ---------------------------------------------------------------------------
+
+
+def test_table_create_records_the_fingerprint_of_the_state_after_the_write(repo, store, notebook_id):
+    table_id = store.create_knowhow_table(
+        notebook_id, "新表", "说明", [{"name": "概念", "role": "anchor"}]
+    )
+    change = repo._runtime.knowhow_history_store.list_changes(table_id, limit=1)[0]
+    assert change["kind"] == "table_create"
+    assert change["fingerprint"] == _table_fingerprint(repo, table_id)
+
+
+def test_table_meta_records_the_fingerprint_of_the_state_after_the_write(repo, store, hist, table):
+    store.update_knowhow_table_meta(table["id"], title="改了标题")
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "table_meta"
+    assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
+
+
+def test_cell_code_put_records_the_fingerprint_of_the_state_after_the_write(repo, store, hist, table):
+    store.upsert_knowhow_cell_code(
+        table["row_a"], table["plain"], "print(1)", "python", "user-1", "h1"
+    )
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "cell_code_put"
+    assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
+
+
+def test_cell_code_delete_records_the_fingerprint_of_the_state_after_the_write(repo, store, hist, table):
+    store.upsert_knowhow_cell_code(
+        table["row_a"], table["plain"], "print(1)", "python", "user-1", "h1"
+    )
+    store.delete_knowhow_cell_code(table["row_a"], table["plain"])
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "cell_code_delete"
+    assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
