@@ -262,7 +262,9 @@ def _record_change(self, db, table_id, kind, payload, *,
 
 5. **后置指纹守卫**：重算指纹，必须 `== T 那条流水的 fingerprint`。不等 → **整事务回滚** + **500** `knowhow_revert_verify_failed`，并记一条事件便于排查。这是重放正确性的硬证明。
 6. 同一事务追加一条 `kind='revert'` 的新流水（`origin='revert'`，`note='回退到 #T'`），其 `fingerprint` 自然等于 T 那条的 fingerprint（表状态已相同）。所有行标 `projection_status='pending'`，bump `mutation_seq`。
-7. **事务提交后**触发**全量重投影**（内部调用 `POST .../reproject` 那条逃生口的实现），**不靠逐行 pending 调度**——回退会删行建行，逐行调度覆盖不到"消失的那些行"。
+7. **事务提交后**触发重投影：调 `knowhow_api.get_scheduler(repo).schedule(table_id)`——与 `POST .../reproject` 逃生口**完全同一个入口**。
+
+   两点澄清（实现时容易搞错）：`KnowhowProjector.project_table` 本身**永远是全量确定性重投影**，不存在需要绕开的"增量投影函数"；而"所有改动 knowhow 内容的路径都必须走 `ProjectionScheduler`、绝不直接 `background_jobs.submit` 或直调 `project_table`"是本仓库反复申明的约定——绕过调度器会丢掉 per-table 防抖与单飞，和同一张表上并发的编辑请求打架。
 
 ### 6.2 id 稳定性（硬约束）
 
@@ -432,15 +434,25 @@ delta 完备性只能这么证明——挑几个点做单点测试证不出来�
 
 ## 10. 派生物连带清单（本仓库反复踩）
 
-实现完成后必须逐项检查：
+实现完成后必须逐项检查。
 
-- `surface_manifest` / `callers_static` 的行号 pin 会因 `knowhow_store.py` 新增方法而移位 → 重生成 `EXPECTED_PATCH_DELTAS`
-- 新端点改 OpenAPI → 重生成 `api_contract.json`，**只重算 openapi 段**、保 `source_commit`/serialization verbatim（仿 commit `59bf99b1`；直调 `generate_api_contract` 会被 `_assert_baseline_sources` 拒）
-- `SCHEMA_VERSION` 23→24 → `MIGRATION_MANIFEST` 加 `(23,24)` hop、v9 replay golden 的 `user_version`、各处 schema 版本断言
-- facade 新成员走 allowlist + 一跳委托
-- `architecture.md` / `AGENTS.md` 的 knowhow 章节补版本管理段落（有 documentation guard test）
-- 无新 CLI，README/README_zh 不需改
-- 本特性需**重启后端**（SCHEMA_VERSION bump）
+**⚠️ 2026-07-22 复核订正**：本仓库过去那套「行号钉死」的守卫（`test_repository_surface_manifest.py` / `test_repository_callers_static.py`，含 `EXPECTED_PATCH_DELTAS` / `LINE_NUMBER_INSENSITIVE_FILES`）**已在 commit `8866a67e`（#307）中删除**，替换为语义化的 `test_repository_surface_contract.py` + `test_repository_dependency_contract.py`。新守卫的 consumer site 只记 `{path, scope, kind, target}`，有一条测试专门断言**不含源码位置**（`test_surface_sites_use_semantic_identity_without_source_positions`）。所以「新增方法导致行号移位」这个连带**不再存在**——其它测试文件里残留的 `EXPECTED_PATCH_DELTAS` 注释是过时文本。
+
+| 连带 | 触发条件 | 处理 |
+|---|---|---|
+| `facade_surface.json` + `ownership_manifest.py` | 新增 facade 成员或新增/移动 consumer 调用点 | `PYTHONPATH=backend python3 scripts/generate_repository_contract_fixtures.py --rebaseline-surface` |
+| `caller_boundaries.json` | 在 `repositories/sqlite/` 之外新写裸 SQL，或新文件访问 `repo._runtime` | `--rebaseline-callers`，并在 `tests/architecture/repository_callers.py` 手写越界理由 |
+| `api_contract.json` | **新增任何 HTTP 端点**（`test_openapi_contract_is_byte_semantically_frozen` 会立刻红） | 默认模式 `PYTHONPATH=backend python3 scripts/generate_repository_contract_fixtures.py`（`_assert_baseline_sources` 只守 `--rebaseline`，默认路径不受限） |
+| `MIGRATION_MANIFEST`（在 `scripts/verify_repository_snapshot.py`，**手工维护**） | `SCHEMA_VERSION` bump | 加 `(23,24)` hop + 字典推导式把历史 `(X,23)` 重基到 `(X,24)`；SQL 文本须与 `_migration_24` 逐字节一致但**去掉 `IF NOT EXISTS`**（`sqlite_master.sql` 会剥掉它） |
+| `test_repository_snapshot_verifier.py` | 同上 | 3 个既有回放测试（v13/v20/v21）的 rollback 各补 `DROP`；新增一个 `test_deployed_v23_...` |
+| 硬编码 `== 23` 的断言 | 同上 | `test_legacy_db_compat.py`、`test_memory_kg_schema.py`、`test_multi_domain_bases.py`、`test_sqlite_migrator_component.py`、`test_source_asset_migration.py`、`test_repository_v9_fixture.py` |
+| `schema_contract.txt` golden | 同上 | `cd backend && UPDATE_SCHEMA_GOLDEN=1 pytest tests/test_legacy_db_compat.py -k contract` |
+| 文档版本号（有 documentation guard） | 同上 | `README.md:45-46`、`README_zh.md:45`、`AGENTS.md:159-160`、`architecture.md:47` 的「schema 版本 23」与「v10–v23」范围，句尾补一句 v24 做什么 |
+| knowhow 章节散文 | 本特性 | `architecture.md` / `AGENTS.md` 补版本管理段落 |
+
+facade 新成员必须是**纯一跳委托**（`return self._runtime.knowhow_store.xxx(...)`，AST 强校验），`RUNTIME_COMPONENT_OWNERS` 已登记 `knowhow_store`，无需碰 owner 映射。
+
+本特性需**重启后端**（SCHEMA_VERSION bump）。无新 CLI，但 README/README_zh 因版本号仍需改。
 
 ## 11. 不做（YAGNI）
 
