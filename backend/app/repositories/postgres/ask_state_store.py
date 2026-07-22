@@ -49,7 +49,8 @@ class AskStateStore:
             # 只接续**调用者自己**的对话:共享库里成员传入 owner/他人的 conv-id 不命中,
             # 落到下面新建一条归自己的对话,杜绝跨用户注入回合(read-only 成员经 ask 触达)。
             row = db.execute(
-                "SELECT id FROM conversations WHERE id = %s AND notebook_id = %s AND created_by = %s",
+                "SELECT id FROM conversations WHERE id = %s AND notebook_id = %s "
+                "AND created_by = %s FOR UPDATE",
                 (conversation_id, notebook_id, user_id),
             ).fetchone()
             if row is not None:
@@ -149,15 +150,10 @@ class AskStateStore:
                 "SELECT conversation_id,status FROM ask_jobs WHERE id=%s FOR UPDATE",
                 (job_id,),
             ).fetchone()
-            may_write = row is not None and (
-                row["status"] == "running"
-                or (status == "cancelled" and row["status"] != "cancelled")
-            )
-            if may_write:
-                guard = "status!='cancelled'" if status == "cancelled" else "status='running'"
+            if row is not None and row["status"] == "running":
                 db.execute(
                     "UPDATE ask_jobs SET status=%s, answer_id=%s, error=%s, updated_at=%s "
-                    f"WHERE id=%s AND {guard}",
+                    "WHERE id=%s AND status='running'",
                     (status, answer_id, error, normalize_timestamp(self.seams.now()), job_id),
                 )
         return row["conversation_id"] if row is not None else None
@@ -187,12 +183,26 @@ class AskStateStore:
         }
 
     def cleanup_empty_conversation(self, conversation_id: str) -> None:
-        """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""
+        """Delete an answer-less conversation once no Ask worker can use it."""
         with self.database.write() as db:
+            conversation = db.execute(
+                "SELECT id FROM conversations WHERE id=%s FOR UPDATE",
+                (conversation_id,),
+            ).fetchone()
+            if conversation is None:
+                return
+            in_use = db.execute(
+                "SELECT 1 WHERE EXISTS "
+                "(SELECT 1 FROM answers WHERE conversation_id=%s) OR EXISTS "
+                "(SELECT 1 FROM ask_jobs WHERE conversation_id=%s AND status='running')",
+                (conversation_id, conversation_id),
+            ).fetchone()
+            if in_use is not None:
+                return
             db.execute(
-                "DELETE FROM conversations WHERE id=%s AND NOT EXISTS "
-                "(SELECT 1 FROM answers WHERE conversation_id=%s)",
-                (conversation_id, conversation_id))
+                "DELETE FROM conversations WHERE id=%s",
+                (conversation_id,),
+            )
 
     def ask_job_status(self, job_id: str) -> dict:
         with self.database.connect() as db:

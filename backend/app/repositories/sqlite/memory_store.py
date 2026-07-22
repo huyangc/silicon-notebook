@@ -1364,13 +1364,11 @@ class MemoryStore:
     def delete_memory_if_unchanged(
         self, memory_id: str, user_id: str, expected_revision: "int | None"
     ) -> bool:
-        """Atomic conditional delete for ``MemoryService.transfer``'s move
-        cleanup (PR review round 3 P1-2): folds the concurrent-edit check
-        directly into the ``DELETE``'s ``WHERE`` clause, so "is it still the
-        row we copied" and "delete it" are ONE statement instead of a
-        separate read-then-write — no other writer can commit an edit
-        between them the way it could across two independent calls (a
-        revision compare, then a later unconditional ``delete_memory``).
+        """Atomic conditional delete for ``MemoryService.transfer``'s move.
+
+        ``BEGIN IMMEDIATE`` is acquired before revision, status, promotion,
+        ownership, and deletion are evaluated in one write transaction. This
+        serializes the decision with writers in other SQLite processes.
 
         Keyed on the ``memory_revisions`` MAX(revision) for this memory, NOT
         ``updated_at``: ``updated_at`` was the first design tried here, but
@@ -1387,16 +1385,14 @@ class MemoryStore:
         content edits and status transitions — ``deprecate`` goes through
         ``transition_with_revision`` too), so any mutation since
         ``expected_revision`` was captured makes MAX(revision) strictly
-        greater, unconditionally. Mirrors ``mark_embedding_failed``'s
-        existing ``(SELECT COALESCE(MAX(revision),0) FROM memory_revisions
-        WHERE memory_id=?)=?`` shape (same file) rather than inventing a new
-        one. ``status='confirmed'`` is redundant with that (any transition
+        greater, unconditionally. ``status='confirmed'`` is redundant with
+        that (any transition
         away from 'confirmed' also advances revision) but kept as an
         explicit, cheap belt-and-suspenders check — a move should never
         delete a row that isn't (still) confirmed, regardless of how that
         came to be true. ``expected_revision=None`` (the source's revision
         couldn't be captured — see caller) can never equal a real revision
-        number, so the DELETE safely matches zero rows. Returns whether the
+        number, so the method safely returns ``False``. Returns whether the
         row was actually deleted (``False`` means the memory was edited or
         transitioned away from 'confirmed', or (round 8, see below) had a
         promotion proposed, since ``expected_revision`` was captured — the
@@ -1421,26 +1417,31 @@ class MemoryStore:
         check a moment later compares against that same, unmoved-since
         number: both sides agree, precisely because the very mutation this
         method needed to catch is what moved the number they now agree on.
-        A revision-only WHERE clause cannot distinguish "unchanged since
+        A revision-only check cannot distinguish "unchanged since
         expected_revision was captured" from "changed, but AFTER capture
-        and by exactly the mutation this delete needs to reject" — folding
-        the ``promotion_state`` check directly into this same atomic
-        statement closes that gap regardless of exactly when, relative to
-        the revision capture, the proposal lands: whatever the DELETE
-        would have matched on revision/status alone, this additional
-        clause still independently vetoes it while ``promotion_state`` is
-        ``'proposed'`` at the instant the DELETE actually runs. A rowcount
-        of 0 caused by this new clause flows through the exact same
+        and by exactly the mutation this delete needs to reject". Rechecking
+        ``promotion_state`` in the same guarded transaction closes that gap
+        regardless of exactly when, relative to the revision capture, the
+        proposal lands. A failed promotion-state check flows through the same
         ``False`` return / retain-and-report-``copied_source_not_removed``
         path as every other "changed since expected_revision" cause above
         — not a new result shape."""
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            locked = self._lock_memory_revision_on(db, memory_id)
+            if locked is None or expected_revision is None:
+                return False
+            item, revision = locked
+            if (
+                item["created_by"] != user_id
+                or item["status"] != "confirmed"
+                or item["promotion_state"] == "proposed"
+                or revision != int(expected_revision)
+            ):
+                return False
             cursor = db.execute(
-                "DELETE FROM memory_items WHERE id=? AND created_by=? "
-                "AND status='confirmed' AND promotion_state NOT IN ('proposed') AND "
-                "(SELECT COALESCE(MAX(revision),0) FROM memory_revisions "
-                " WHERE memory_id=?)=?",
-                (memory_id, user_id, memory_id, expected_revision),
+                "DELETE FROM memory_items WHERE id=? AND created_by=?",
+                (memory_id, user_id),
             )
         return cursor.rowcount == 1
 
@@ -1564,15 +1565,11 @@ class MemoryStore:
     ) -> bool:
         with self.database.write() as db:
             self.database.begin_guarded_write(db)
-            locked = self._lock_embedding_memory_on(db, memory_id)
+            locked = self._lock_memory_revision_on(db, memory_id)
             if locked is None:
                 return False
-            current = db.execute(
-                "SELECT COALESCE(MAX(revision),0) AS revision "
-                "FROM memory_revisions WHERE memory_id=?",
-                (memory_id,),
-            ).fetchone()
-            if int(current["revision"]) != int(expected_revision):
+            _, revision = locked
+            if revision != int(expected_revision):
                 return False
             db.execute(
                 "INSERT OR REPLACE INTO memory_embeddings "
@@ -1587,20 +1584,35 @@ class MemoryStore:
         return True
 
     @staticmethod
-    def _lock_embedding_memory_on(db: sqlite3.Connection, memory_id: str):
-        return db.execute(
-            "SELECT id FROM memory_items WHERE id=?", (memory_id,)
+    def _lock_memory_revision_on(db: sqlite3.Connection, memory_id: str):
+        item = db.execute(
+            "SELECT id,created_by,status,promotion_state FROM memory_items WHERE id=?",
+            (memory_id,),
         ).fetchone()
+        if item is None:
+            return None
+        current = db.execute(
+            "SELECT COALESCE(MAX(revision),0) AS revision "
+            "FROM memory_revisions WHERE memory_id=?",
+            (memory_id,),
+        ).fetchone()
+        return item, int(current["revision"])
 
     def mark_embedding_failed(
         self, memory_id: str, expected_revision: int, error: str
     ) -> bool:
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            locked = self._lock_memory_revision_on(db, memory_id)
+            if locked is None:
+                return False
+            _, revision = locked
+            if revision != int(expected_revision):
+                return False
             cursor = db.execute(
                 "UPDATE memory_items SET embedding_status='failed',embedding_error=? "
-                "WHERE id=? AND (SELECT COALESCE(MAX(revision),0) "
-                "FROM memory_revisions WHERE memory_id=?)=?",
-                (error[:500], memory_id, memory_id, int(expected_revision)),
+                "WHERE id=?",
+                (error[:500], memory_id),
             )
         return cursor.rowcount == 1
 

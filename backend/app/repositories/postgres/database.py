@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import sys
 import threading
 import zlib
@@ -108,6 +109,9 @@ class PostgresDatabase:
         self._diagnostic_url = redact_database_url(settings.database_url)
         self._acquire_timeout = float(
             settings.postgres_pool_acquire_timeout_seconds
+        )
+        self._projection_connect_timeout_seconds = max(
+            1, min(30, math.ceil(self._acquire_timeout))
         )
         self._statement_timeout_ms = int(
             settings.postgres_statement_timeout_seconds * 1000
@@ -216,6 +220,28 @@ class PostgresDatabase:
                 raise self._safe_error("pool startup") from None
             self._opened = True
 
+    def _ensure_projection_lock_open(self) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                raise PostgresDatabaseClosedError(
+                    f"PostgreSQL pool is closed for {self._diagnostic_url}"
+                )
+
+    def _open_projection_lock_connection(self):
+        """Open a dedicated lock session at one lifecycle linearization point."""
+        with self._lifecycle_lock:
+            if self._closed:
+                raise PostgresDatabaseClosedError(
+                    f"PostgreSQL pool is closed for {self._diagnostic_url}"
+                )
+            return _SafeDiagnosticConnection.connect(
+                self._database_url,
+                autocommit=False,
+                row_factory=dict_row,
+                application_name="silicon-notebook-projection-lock",
+                connect_timeout=self._projection_connect_timeout_seconds,
+            )
+
     @contextmanager
     def _acquire(self) -> Iterator[psycopg.Connection[PostgresRow]]:
         self._ensure_open()
@@ -297,47 +323,49 @@ class PostgresDatabase:
         lock_key = zlib.crc32(table_id.encode("utf-8"))
         if lock_key >= 2**31:
             lock_key -= 2**32
+        self._ensure_projection_lock_open()
         self._projection_lock_slots.acquire()
-        connection = None
         try:
-            connection = _SafeDiagnosticConnection.connect(
-                self._database_url,
-                autocommit=False,
-                row_factory=dict_row,
-                application_name="silicon-notebook-projection-lock",
-            )
-            self._restore_session_defaults(connection)
-            # A projection can legitimately outlive the normal query timeout;
-            # a queued pass must wait rather than fail and leave stale state.
-            connection.execute("SET statement_timeout = 0")
-            connection.execute("SET lock_timeout = 0")
-            connection.commit()
-            connection.execute(
-                "SELECT pg_advisory_lock(%s, %s)",
-                (_KNOWHOW_PROJECTION_LOCK_NAMESPACE, lock_key),
-            )
-            connection.commit()
-        except Exception:
-            if connection is not None:
-                connection.close()
-            self._projection_lock_slots.release()
-            raise self._safe_error("projection lock acquisition") from None
-
-        try:
-            yield
-        finally:
+            connection = None
             try:
+                connection = self._open_projection_lock_connection()
+                self._restore_session_defaults(connection)
+                # A projection can legitimately outlive the normal query timeout;
+                # a queued pass must wait rather than fail and leave stale state.
+                connection.execute("SET statement_timeout = 0")
+                connection.execute("SET lock_timeout = 0")
+                connection.commit()
                 connection.execute(
-                    "SELECT pg_advisory_unlock(%s, %s)",
+                    "SELECT pg_advisory_lock(%s, %s)",
                     (_KNOWHOW_PROJECTION_LOCK_NAMESPACE, lock_key),
                 )
                 connection.commit()
+            except PostgresDatabaseClosedError:
+                raise
             except Exception:
-                # Session close below is the authoritative no-leak cleanup.
-                pass
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
+                raise self._safe_error("projection lock acquisition") from None
+
+            try:
+                yield
             finally:
-                connection.close()
-                self._projection_lock_slots.release()
+                try:
+                    connection.execute(
+                        "SELECT pg_advisory_unlock(%s, %s)",
+                        (_KNOWHOW_PROJECTION_LOCK_NAMESPACE, lock_key),
+                    )
+                    connection.commit()
+                except Exception:
+                    # Session close below is the authoritative no-leak cleanup.
+                    pass
+                finally:
+                    connection.close()
+        finally:
+            self._projection_lock_slots.release()
 
     def close(self) -> None:
         """Close the pool once. Closing an unopened/already-closed pool is safe."""

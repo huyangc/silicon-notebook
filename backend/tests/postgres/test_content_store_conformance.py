@@ -237,6 +237,65 @@ def test_ask_and_report_state_shapes_match_sqlite_golden(content_harness):
     assert cancelled["content_md"] == "# State"
 
 
+def test_ask_cleanup_preserves_other_running_job_and_terminal_states(
+    content_harness,
+):
+    first = AskRequest(question="first")
+    first_job, conversation_id = content_harness.ask.begin_durable_job(
+        "nb-content", first, "chunk", "user-content"
+    )
+    second = AskRequest(question="second", conversation_id=conversation_id)
+    second_job, continued_id = content_harness.ask.begin_durable_job(
+        "nb-content", second, "chunk", "user-content"
+    )
+    assert continued_id == conversation_id
+    assert content_harness.ask.cancel_running_job(
+        first_job, "user-content"
+    )["cancelled"] is True
+    content_harness.ask.cleanup_empty_conversation(conversation_id)
+    assert content_harness.ask.ask_job_status(second_job)["status"] == "running"
+    assert content_harness.ask.get_conversation(conversation_id).id == conversation_id
+
+    answer = AskResponse(
+        answer="second answer", conclusion="second answer", citations=[], anchors=[]
+    )
+    answer_id = content_harness.ask.save_answer_for_job(
+        second_job,
+        "nb-content",
+        conversation_id,
+        "second",
+        answer,
+        "user-content",
+    )
+    assert answer_id
+    content_harness.ask.finish_job(second_job, "cancelled")
+    done = content_harness.ask.ask_job_status(second_job)
+    assert done["status"] == "done"
+    assert done["answer_id"] == answer_id
+
+    failed_request = AskRequest(question="failed")
+    failed_job, _ = content_harness.ask.begin_durable_job(
+        "nb-content", failed_request, "chunk", "user-content"
+    )
+    content_harness.ask.finish_job(failed_job, "failed", error="original")
+    content_harness.ask.finish_job(failed_job, "cancelled", error="replacement")
+    content_harness.ask.finish_job(failed_job, "done", answer_id="not-real")
+    failed = content_harness.ask.ask_job_status(failed_job)
+    assert failed["status"] == "failed"
+    assert failed["answer_id"] == ""
+    assert failed["error"] == "original"
+
+    cancelled_request = AskRequest(question="cancelled")
+    cancelled_job, _ = content_harness.ask.begin_durable_job(
+        "nb-content", cancelled_request, "chunk", "user-content"
+    )
+    content_harness.ask.cancel_running_job(cancelled_job, "user-content")
+    content_harness.ask.finish_job(cancelled_job, "done", answer_id="not-real")
+    cancelled_job_state = content_harness.ask.ask_job_status(cancelled_job)
+    assert cancelled_job_state["status"] == "cancelled"
+    assert cancelled_job_state["answer_id"] == ""
+
+
 @pytest.mark.postgres_integration
 def test_postgres_report_cancel_commit_beats_blocked_terminal_write(
     postgres_database,

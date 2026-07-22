@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
@@ -129,6 +130,113 @@ def test_ask_cancel_and_atomic_save_contend_on_the_real_job_row(
         assert [row["id"] for row in answers] == [results["save"]]
 
 
+@pytest.mark.postgres_integration
+def test_conversation_cleanup_cannot_split_continuation_job_creation(
+    postgres_database, monkeypatch
+):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    now = "2026-07-23T00:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("user-conv-race", "conv@example.test", "Conv", "admin", "active",
+             now, now, "q00123456", "", "", 0),
+        )
+        connection.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,created_at,updated_at,tier) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            ("nb-conv-race", "Conv", "", "", "ready", "user-conv-race",
+             now, now, "personal"),
+        )
+    seams = RepositoryCompatibilitySeams(
+        new_id=(
+            lambda _prefix, counter=iter(range(1, 20)): f"conv-race-{next(counter)}"
+        ),
+        now=lambda: now,
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    )
+    store = AskStateStore(postgres_database, seams)
+    first_job, conversation_id = store.begin_durable_job(
+        "nb-conv-race", AskRequest(question="first"), "chunk", "user-conv-race"
+    )
+    store.cancel_running_job(first_job, "user-conv-race")
+
+    selected = threading.Event()
+    cleanup_started = threading.Event()
+    cleanup_finished = threading.Event()
+    thread_role = threading.local()
+    original_write = postgres_database.write
+
+    class CursorProxy:
+        def __init__(self, cursor):
+            self._cursor = cursor
+
+        def fetchone(self):
+            row = self._cursor.fetchone()
+            selected.set()
+            assert cleanup_started.wait(timeout=5)
+            cleanup_finished.wait(timeout=0.25)
+            return row
+
+        def __getattr__(self, name):
+            return getattr(self._cursor, name)
+
+    class ConnectionProxy:
+        def __init__(self, connection):
+            self._connection = connection
+
+        def execute(self, statement, params=None):
+            cursor = self._connection.execute(statement, params)
+            if (
+                "SELECT id FROM conversations" in statement
+                and getattr(thread_role, "value", "") == "begin"
+            ):
+                return CursorProxy(cursor)
+            return cursor
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+    @contextmanager
+    def coordinated_write(*args, **kwargs):
+        with original_write(*args, **kwargs) as connection:
+            if getattr(thread_role, "value", "") == "begin":
+                yield ConnectionProxy(connection)
+            else:
+                yield connection
+
+    monkeypatch.setattr(postgres_database, "write", coordinated_write)
+
+    def begin_continuation():
+        thread_role.value = "begin"
+        return store.begin_durable_job(
+            "nb-conv-race",
+            AskRequest(question="second", conversation_id=conversation_id),
+            "chunk",
+            "user-conv-race",
+        )
+
+    def cleanup():
+        cleanup_started.set()
+        store.cleanup_empty_conversation(conversation_id)
+        cleanup_finished.set()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        begin_future = executor.submit(begin_continuation)
+        assert selected.wait(timeout=5)
+        cleanup_future = executor.submit(cleanup)
+        second_job, continued_id = begin_future.result(timeout=10)
+        cleanup_future.result(timeout=10)
+
+    assert continued_id == conversation_id
+    assert store.ask_job_status(second_job)["status"] == "running"
+    assert store.get_conversation(conversation_id).id == conversation_id
+
+
 def _seed_memory_race(postgres_database, *, member: bool = False) -> None:
     now = "2026-07-23T00:00:00+00:00"
     with postgres_database.write() as connection:
@@ -170,6 +278,131 @@ def _memory_store(postgres_database) -> MemoryStore:
         new_id=new_id,
         now=lambda: "2026-07-23T00:00:00+00:00",
     )
+
+
+def _confirmed_race_memory(store: MemoryStore, memory_id: str) -> MemoryWrite:
+    write = MemoryWrite(
+        id=memory_id,
+        notebook_id="nb-memory-race",
+        created_by="owner-race",
+        origin="external_agent",
+        status="confirmed",
+        title="Race memory",
+        content_md="revision one",
+        tags=[],
+        created_at="2026-07-23T00:00:00+00:00",
+        updated_at="2026-07-23T00:00:00+00:00",
+        confirmed_by="owner-race",
+        confirmed_at="2026-07-23T00:00:00+00:00",
+    )
+    store.create_candidate_with_initial_revision(write, "owner-race", "created")
+    return write
+
+
+def _wait_for_memory_row_lock(postgres_database) -> None:
+    import psycopg
+    from psycopg.rows import dict_row
+
+    deadline = time.monotonic() + 3
+    with psycopg.connect(
+        postgres_database._database_url, autocommit=True, row_factory=dict_row
+    ) as inspector:
+        while time.monotonic() < deadline:
+            waiting = inspector.execute(
+                "SELECT 1 FROM pg_stat_activity WHERE pid<>pg_backend_pid() "
+                "AND wait_event_type='Lock' AND state='active' "
+                "AND query ILIKE '%memory_items%' LIMIT 1"
+            ).fetchone()
+            if waiting is not None:
+                return
+            time.sleep(0.01)
+    raise AssertionError("Memory operation never waited on the aggregate row lock")
+
+
+@pytest.mark.postgres_integration
+def test_stale_conditional_delete_rechecks_revision_after_row_lock(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store = _memory_store(postgres_database)
+    write = _confirmed_race_memory(store, "memory-stale-delete")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.write() as editor:
+            editor.execute(
+                "SELECT id FROM memory_items WHERE id=%s FOR UPDATE", (write.id,)
+            ).fetchone()
+            delete_future = executor.submit(
+                store.delete_memory_if_unchanged, write.id, "owner-race", 1
+            )
+            _wait_for_memory_row_lock(postgres_database)
+            editor.execute(
+                "UPDATE memory_items SET content_md=%s,embedding_status='pending' "
+                "WHERE id=%s",
+                ("revision two", write.id),
+            )
+            store._append_revision_on(
+                editor,
+                write.id,
+                {
+                    "title": write.title,
+                    "content_md": "revision two",
+                    "tags": [],
+                    "status": "confirmed",
+                    "promotion_state": "none",
+                },
+                "owner-race",
+                "edited",
+            )
+        assert delete_future.result(timeout=5) is False
+
+    current = store.memory_for_user(write.id, "owner-race")
+    assert current.content_md == "revision two"
+    assert [r.revision for r in store.revisions_for_user(write.id, "owner-race")] == [1, 2]
+
+
+@pytest.mark.postgres_integration
+def test_stale_embedding_failure_rechecks_revision_after_row_lock(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store = _memory_store(postgres_database)
+    write = _confirmed_race_memory(store, "memory-stale-embedding-failure")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with postgres_database.write() as editor:
+            editor.execute(
+                "SELECT id FROM memory_items WHERE id=%s FOR UPDATE", (write.id,)
+            ).fetchone()
+            failure_future = executor.submit(
+                store.mark_embedding_failed, write.id, 1, "stale provider error"
+            )
+            _wait_for_memory_row_lock(postgres_database)
+            editor.execute(
+                "UPDATE memory_items SET content_md=%s,embedding_status='pending',"
+                "embedding_error='' WHERE id=%s",
+                ("revision two", write.id),
+            )
+            store._append_revision_on(
+                editor,
+                write.id,
+                {
+                    "title": write.title,
+                    "content_md": "revision two",
+                    "tags": [],
+                    "status": "confirmed",
+                    "promotion_state": "none",
+                },
+                "owner-race",
+                "edited",
+            )
+        assert failure_future.result(timeout=5) is False
+
+    current = store.memory_for_user(write.id, "owner-race")
+    assert current.embedding_status == "pending"
+    assert current.embedding_error == ""
 
 
 @pytest.mark.postgres_integration
@@ -602,7 +835,7 @@ def test_memory_embedding_replace_and_edit_preserve_revision_freshness(
     revision = store.embedding_revision(item.id, item)
     embedding_holds_memory = threading.Event()
     edit_started = threading.Event()
-    original_lock = store._lock_embedding_memory_on
+    original_lock = store._lock_memory_revision_on
 
     def pause_after_embedding_lock(connection, memory_id):
         locked = original_lock(connection, memory_id)
@@ -610,7 +843,7 @@ def test_memory_embedding_replace_and_edit_preserve_revision_freshness(
         assert edit_started.wait(timeout=5)
         return locked
 
-    store._lock_embedding_memory_on = pause_after_embedding_lock
+    store._lock_memory_revision_on = pause_after_embedding_lock
 
     def edit():
         assert embedding_holds_memory.wait(timeout=5)

@@ -125,6 +125,7 @@ class AskStateStore:
         write transaction — the exact read-modify block every ask mode engine
         opens today (Task 24 moves the engines onto this port)."""
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
             conversation_id = self.ensure_conversation(
                 db, notebook_id, requested_conversation_id, question, user_id
             )
@@ -151,6 +152,7 @@ class AskStateStore:
         now = self.seams.now()
         job_id = self.seams.new_id("askjob")
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
             conversation_id = self.ensure_conversation(
                 db, notebook_id, payload.conversation_id, question, user_id)
             payload.conversation_id = conversation_id
@@ -177,15 +179,10 @@ class AskStateStore:
             row = db.execute(
                 "SELECT conversation_id,status FROM ask_jobs WHERE id=?", (job_id,)
             ).fetchone()
-            may_write = row is not None and (
-                row["status"] == "running"
-                or (status == "cancelled" and row["status"] != "cancelled")
-            )
-            if may_write:
-                guard = "status!='cancelled'" if status == "cancelled" else "status='running'"
+            if row is not None and row["status"] == "running":
                 db.execute(
                     "UPDATE ask_jobs SET status=?, answer_id=?, error=?, updated_at=? "
-                    f"WHERE id=? AND {guard}",
+                    "WHERE id=? AND status='running'",
                     (status, answer_id, error, self.seams.now(), job_id),
                 )
         return row["conversation_id"] if row is not None else None
@@ -215,12 +212,25 @@ class AskStateStore:
         }
 
     def cleanup_empty_conversation(self, conversation_id: str) -> None:
-        """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""
+        """Delete an answer-less conversation once no Ask worker can use it."""
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
+            conversation = db.execute(
+                "SELECT id FROM conversations WHERE id=?", (conversation_id,)
+            ).fetchone()
+            if conversation is None:
+                return
+            in_use = db.execute(
+                "SELECT 1 WHERE EXISTS "
+                "(SELECT 1 FROM answers WHERE conversation_id=?) OR EXISTS "
+                "(SELECT 1 FROM ask_jobs WHERE conversation_id=? AND status='running')",
+                (conversation_id, conversation_id),
+            ).fetchone()
+            if in_use is not None:
+                return
             db.execute(
-                "DELETE FROM conversations WHERE id=? AND NOT EXISTS "
-                "(SELECT 1 FROM answers WHERE conversation_id=?)",
-                (conversation_id, conversation_id))
+                "DELETE FROM conversations WHERE id=?", (conversation_id,)
+            )
 
     def ask_job_status(self, job_id: str) -> dict:
         with self.database.connect() as db:

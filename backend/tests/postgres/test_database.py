@@ -284,6 +284,148 @@ def test_projection_lock_sessions_are_bounded(postgres_database):
     assert active == 0
 
 
+def test_projection_lock_after_close_never_connects(postgres_database, monkeypatch):
+    from app.repositories.postgres import database as database_module
+    from app.repositories.postgres.database import PostgresDatabaseClosedError
+
+    calls = []
+
+    def forbidden_connect(cls, *_args, **_kwargs):
+        calls.append(cls)
+        raise AssertionError("dedicated connection opened after close")
+
+    monkeypatch.setattr(
+        database_module._SafeDiagnosticConnection,
+        "connect",
+        classmethod(forbidden_connect),
+    )
+    postgres_database.close()
+    with pytest.raises(PostgresDatabaseClosedError):
+        with postgres_database.table_projection_lock("kh-after-close"):
+            pass
+    assert calls == []
+
+
+def test_projection_lock_waiter_rechecks_close_after_slot(
+    postgres_database, monkeypatch
+):
+    from app.repositories.postgres import database as database_module
+    from app.repositories.postgres.database import PostgresDatabaseClosedError
+
+    semaphore = threading.BoundedSemaphore(1)
+    assert semaphore.acquire(blocking=False)
+    postgres_database._projection_lock_slots = semaphore
+    waiter_started = threading.Event()
+    calls = []
+    failures = []
+
+    def forbidden_connect(cls, *_args, **_kwargs):
+        calls.append(cls)
+        raise AssertionError("waiter connected after close")
+
+    monkeypatch.setattr(
+        database_module._SafeDiagnosticConnection,
+        "connect",
+        classmethod(forbidden_connect),
+    )
+
+    def wait_for_slot():
+        waiter_started.set()
+        try:
+            with postgres_database.table_projection_lock("kh-wait-close"):
+                raise AssertionError("closed waiter entered")
+        except BaseException as exc:
+            failures.append(exc)
+
+    worker = threading.Thread(target=wait_for_slot)
+    worker.start()
+    assert waiter_started.wait(timeout=2)
+    postgres_database.close()
+    semaphore.release()
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], PostgresDatabaseClosedError)
+    assert calls == []
+
+
+def test_projection_lock_connect_and_close_failures_release_slot(
+    postgres_database, monkeypatch
+):
+    from app.repositories.postgres import database as database_module
+    from app.repositories.postgres.database import PostgresDatabaseError
+
+    semaphore = threading.BoundedSemaphore(1)
+    postgres_database._projection_lock_slots = semaphore
+
+    def failing_connect(cls, *_args, **_kwargs):
+        raise RuntimeError("connect failed")
+
+    monkeypatch.setattr(
+        database_module._SafeDiagnosticConnection,
+        "connect",
+        classmethod(failing_connect),
+    )
+    with pytest.raises(PostgresDatabaseError):
+        with postgres_database.table_projection_lock("kh-connect-failure"):
+            pass
+    assert semaphore.acquire(blocking=False)
+    semaphore.release()
+
+    class CloseFailureConnection:
+        def execute(self, *_args, **_kwargs):
+            return self
+
+        def commit(self):
+            return None
+
+        def close(self):
+            raise RuntimeError("close failed")
+
+    fake = CloseFailureConnection()
+    monkeypatch.setattr(postgres_database, "_restore_session_defaults", lambda _c: None)
+    monkeypatch.setattr(
+        database_module._SafeDiagnosticConnection,
+        "connect",
+        classmethod(lambda cls, *_args, **_kwargs: fake),
+    )
+    with pytest.raises(RuntimeError, match="close failed"):
+        with postgres_database.table_projection_lock("kh-close-failure"):
+            pass
+    assert semaphore.acquire(blocking=False)
+    semaphore.release()
+
+
+def test_projection_lock_uses_bounded_connect_timeout(
+    postgres_settings, tmp_path, monkeypatch
+):
+    from app.repositories.postgres import database as database_module
+    from app.repositories.postgres.database import PostgresDatabase, PostgresDatabaseError
+
+    settings = postgres_settings.model_copy(
+        update={"postgres_pool_acquire_timeout_seconds": 999}
+    )
+    database = PostgresDatabase(settings, tmp_path)
+    captured = {}
+
+    def capture_connect(cls, *_args, **kwargs):
+        captured.update(kwargs)
+        raise RuntimeError("stop after capture")
+
+    monkeypatch.setattr(
+        database_module._SafeDiagnosticConnection,
+        "connect",
+        classmethod(capture_connect),
+    )
+    try:
+        with pytest.raises(PostgresDatabaseError):
+            with database.table_projection_lock("kh-connect-timeout"):
+                pass
+    finally:
+        database.close()
+    assert captured["connect_timeout"] == 30
+
+
 def test_unrelated_row_can_update_while_another_row_is_locked(postgres_database):
     with postgres_database.write() as conn:
         conn.execute("CREATE TABLE concurrency_probe (id integer PRIMARY KEY, value integer)")
