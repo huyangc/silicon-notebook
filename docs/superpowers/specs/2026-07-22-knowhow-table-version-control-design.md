@@ -190,13 +190,13 @@ CREATE INDEX IF NOT EXISTS idx_knowhow_milestones_table
 
 ## 5. 挂钩机制
 
-### 5.1 `_record_change`
+### 5.1 `record_change`
 
-`KnowhowStore` 内部方法：
+**模块级函数**，住在 `backend/app/repositories/sqlite/knowhow_history_store.py`：
 
 ```python
-def _record_change(self, db, table_id, kind, payload, *,
-                   actor="", origin="user", note="") -> int:
+def record_change(db, *, new_id, now, table_id, kind, payload,
+                  actor="", origin="user", note="") -> int:
     """在调用方已开的写事务内追加一条流水，返回 seq。
 
     必须是写事务的最后一步——fingerprint 要反映本次变更 COMMIT 后的状态。
@@ -204,7 +204,9 @@ def _record_change(self, db, table_id, kind, payload, *,
     """
 ```
 
-职责：算 `seq = COALESCE(MAX(seq),0)+1` → 调 `KnowhowTransferStore._fingerprint_on(db, table_id)` 算指纹 → INSERT。
+职责：算 `seq = COALESCE(MAX(seq),0)+1` → 调 `knowhow_fingerprint.fingerprint_on(db, table_id)` 算指纹 → INSERT。
+
+**为什么是模块级函数而不是 `KnowhowStore` 的方法**：它必须在调用方已开的写事务里跑。做成类/方法就要在组合根接线并让 `KnowhowStore` 持有引用；模块级函数零状态零接线，把 `new_id`/`now` 当参数传进去即可。自带事务的操作（查询/里程碑/prune/回退）才归同文件的 `KnowhowHistoryStore` 类，它在组合根构造，与 `knowhow_store` **共用同一对 `new_id`/`now` 可调用对象**。
 
 `actor` / `origin` 由 service 层（`app/services/knowhow/api.py`）传参进来，**不在 store 层读 ContextVar**——这是既有约定（`create_knowhow_table(created_by=…)` 就是这么传的）。store 方法签名新增可选 `actor` / `origin` / `note` 参数，默认值保证既有调用点不破。
 
@@ -223,9 +225,9 @@ def _record_change(self, db, table_id, kind, payload, *,
 
 ### 5.3 架构守卫
 
-新增测试，扫 `knowhow_store.py` 里所有 `with self.database.write() as db:` 块，断言每块**要么**在其所属方法内调用了 `_record_change`，**要么**方法名在显式豁免白名单里。白名单意味着**将来新增写方法默认报红**。
+新增测试，扫 `knowhow_store.py` 里所有 `with self.database.write() as db:` 块，断言每块**要么**在其所属方法内调用了 `record_change`，**要么**方法名在显式豁免白名单里。白名单意味着**将来新增写方法默认报红**。
 
-该守卫必须做变异验证（见 §9）：删掉一处 `_record_change` 要真红；把一个写块**移动**到别的方法里也要真红（只做删除变异不够——源码断言的 `[\s\S]*?` 会越过块的收尾大括号，须先 slice 到具体方法体再断言）。
+该守卫必须做变异验证（见 §9）：删掉一处 `record_change` 要真红；把一个写块**移动**到别的方法里也要真红（只做删除变异不够——源码断言的 `[\s\S]*?` 会越过块的收尾大括号，须先 slice 到具体方法体再断言）。
 
 ### 5.4 批量操作记一条不记 N 条
 
@@ -414,8 +416,8 @@ delta 完备性只能这么证明——挑几个点做单点测试证不出来�
 
 ### 9.2 架构守卫 + 变异验证
 
-- 24 个写块全覆盖，白名单外必须调 `_record_change`
-- 变异一：删掉一处 `_record_change` → 守卫必须红
+- 24 个写块全覆盖，白名单外必须调 `record_change`
+- 变异一：删掉一处 `record_change` → 守卫必须红
 - 变异二：把一个写块**移动**到别的方法里 → 守卫必须红（源码断言须先 slice 到具体方法体，`[\s\S]*?` 会越过块的收尾大括号）
 - 变异前先 `grep -c` 确认真的改到了目标（避免"替字面量而代码用常量""按行号插入而行号已漂"这类打空）
 
