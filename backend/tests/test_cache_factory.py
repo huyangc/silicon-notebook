@@ -9,7 +9,9 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
-from app.core.cache import NoCacheBackend, llm_key, make_cache_backend
+import pytest
+
+from app.core.cache import CacheAdmin, NoCacheBackend, llm_key, make_cache_backend
 from app.core.config import Settings, _ROOT_DIR
 from app.core.llm import OpenAICompatibleClient
 
@@ -221,8 +223,50 @@ class _FakeOpenAI:
         self.chat = SimpleNamespace(completions=_FakeCompletions(self))
 
 
+class _KeySpy:
+    """透传后端 + 记录生产代码**实际用过**的 key。
+
+    存在的理由：下面那组"绝不入缓存"的断言要落在具体某一条 key 上，而 key 是
+    `llm_key(model, full_messages, schema_hint)`——full_messages 由 chat_json 自己
+    拼上 system 提示词。在测试里重算一遍等于复制生产逻辑：system 提示词一改，测试
+    就会去查一条根本没人写过的 key，永远断言成功而彻底失去鉴别力。
+
+    chat_json 在打 upstream 之前必然先 `cache.get(ckey)`，所以记录 get 的入参就等于
+    白拿到生产用的那把 key，零复制。
+
+    本类只实现 CacheBackend 的 get/put——**不**实现 __len__：整组测试因此只依赖
+    Protocol 面，换任何只有 get/put 的后端（Redis 等）都照样跑。
+    """
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.keys = []
+
+    def get(self, key):
+        self.keys.append(key)
+        return self.inner.get(key)
+
+    def put(self, key, value, tag=""):
+        self.inner.put(key, value, tag=tag)
+
+
+def _cached_value(spy):
+    """生产代码本次查的那条 key 在缓存里的值；None = 它没被写进去。
+
+    比 `len(backend) == 0`（"缓存整体是空的"）更强：锁的是**这一条** key。
+    """
+    assert spy.keys, "本次调用根本没查过缓存——测的不是写入准入规则"
+    return spy.inner.get(spy.keys[-1])
+
+
 def _client(tmp_path, monkeypatch, *, content='{"ok": 1}', finish_reason="stop"):
-    """真 SqliteCacheBackend + fake upstream 的 client。返回 (client, fake, backend)。"""
+    """真 SqliteCacheBackend + fake upstream 的 client。返回 (client, fake, spy)。
+
+    第三个返回值是 _KeySpy（只有 get/put），不是具体后端：整组断言因此走 Protocol
+    面。评审实测过——换上只实现 get/put 的 Redis 后端后，原来靠 `len(backend)` 的
+    8 条安全阀测试全挂在 `TypeError: object of type 'RedisCacheBackend' has no
+    len()`，而 __len__ 既不在 CacheBackend 也不在 CacheAdmin 里。
+    """
     settings = Settings(
         OPENAI_COMPAT_BASE_URL="https://llm.example.test",
         OPENAI_COMPAT_API_KEY="k",
@@ -231,11 +275,11 @@ def _client(tmp_path, monkeypatch, *, content='{"ok": 1}', finish_reason="stop")
         LLM_CACHE_ENABLED=True,
         LLM_CACHE_PATH=str(tmp_path / "cache.db"),
     )
-    backend = make_cache_backend(settings)
-    client = OpenAICompatibleClient(settings, cache=backend)
+    spy = _KeySpy(make_cache_backend(settings))
+    client = OpenAICompatibleClient(settings, cache=spy)
     fake = _FakeOpenAI(content=content, finish_reason=finish_reason)
     monkeypatch.setattr(client, "client", lambda: fake)
-    return client, fake, backend
+    return client, fake, spy
 
 
 # ------------------------------------------------------------------ 写入准入
@@ -244,11 +288,11 @@ def test_empty_json_fallback_is_never_cached(tmp_path, monkeypatch):
 
     行为断言（对删除与移动两种变异都免疫）：条目数 0，且第二次仍真的打了 upstream。
     """
-    client, fake, backend = _client(tmp_path, monkeypatch, content="")
+    client, fake, spy = _client(tmp_path, monkeypatch, content="")
     msgs = [{"role": "user", "content": "q"}]
     assert client.chat_json(msgs, "{}") == "{}"
     assert client.chat_json(msgs, "{}") == "{}"
-    assert len(backend) == 0, "空回退被写进了缓存"
+    assert _cached_value(spy) is None, "空回退被写进了缓存"
     assert fake.calls == 2, "第二次没重新请求 upstream —— 说明命中了缓存里的空回退"
 
 
@@ -260,11 +304,11 @@ def test_truncated_json_is_never_cached(tmp_path, monkeypatch):
     产出 0 个节点。下面两条把两道门各自单独钉死。
     """
     half = '{"objects": [{"name": "a'
-    client, fake, backend = _client(
+    client, fake, spy = _client(
         tmp_path, monkeypatch, content=half, finish_reason="length")
     msgs = [{"role": "user", "content": "extract"}]
     assert client.chat_json(msgs, "{}") == half
-    assert len(backend) == 0, "截断的半截 JSON 被写进了缓存"
+    assert _cached_value(spy) is None, "截断的半截 JSON 被写进了缓存"
     client.chat_json(msgs, "{}")
     assert fake.calls == 2
 
@@ -277,11 +321,11 @@ def test_unparseable_json_is_never_cached_without_finish_reason(tmp_path, monkey
     因为同时带 finish_reason=length 仍会绿，挡不住这个变异）。
     """
     half = '{"objects": [{"name": "a'
-    client, fake, backend = _client(
+    client, fake, spy = _client(
         tmp_path, monkeypatch, content=half, finish_reason=None)
     msgs = [{"role": "user", "content": "extract"}]
     client.chat_json(msgs, "{}")
-    assert len(backend) == 0, "解析不了的内容被写进了缓存"
+    assert _cached_value(spy) is None, "解析不了的内容被写进了缓存"
     client.chat_json(msgs, "{}")
     assert fake.calls == 2
 
@@ -291,11 +335,11 @@ def test_length_truncated_but_parseable_json_is_never_cached(tmp_path, monkeypat
 
     json.loads 那道门放它过，只有 finish_reason == "length" 拦得住。
     """
-    client, fake, backend = _client(
+    client, fake, spy = _client(
         tmp_path, monkeypatch, content='{"objects": []}', finish_reason="length")
     msgs = [{"role": "user", "content": "extract"}]
     client.chat_json(msgs, "{}")
-    assert len(backend) == 0, "finish_reason=length 的响应被写进了缓存"
+    assert _cached_value(spy) is None, "finish_reason=length 的响应被写进了缓存"
     client.chat_json(msgs, "{}")
     assert fake.calls == 2
 
@@ -307,31 +351,31 @@ def test_streamed_length_truncated_response_is_never_cached(tmp_path, monkeypatc
     刻意用「合法 JSON + finish_reason=length」：内容能过 json.loads 那道门，本测试
     因此只依赖流式路径真的把 finish_reason 带了回来。
     """
-    client, fake, backend = _client(
+    client, fake, spy = _client(
         tmp_path, monkeypatch, content='{"objects": []}', finish_reason="length")
     msgs = [{"role": "user", "content": "stream me"}]
     assert client.chat_json(
         msgs, "{}", cancel_event=threading.Event()) == '{"objects": []}'
-    assert len(backend) == 0, "流式截断响应被写进了缓存"
+    assert _cached_value(spy) is None, "流式截断响应被写进了缓存"
 
 
 def test_streamed_unparseable_response_is_never_cached(tmp_path, monkeypatch):
     """流式的半截 JSON（服务端没报 finish_reason）同样不入缓存。"""
     half = '{"objects": [{"name": "a'
-    client, fake, backend = _client(
+    client, fake, spy = _client(
         tmp_path, monkeypatch, content=half, finish_reason=None)
     assert client.chat_json(
         [{"role": "user", "content": "stream me"}], "{}",
         cancel_event=threading.Event()) == half
-    assert len(backend) == 0, "流式的解析不了的内容被写进了缓存"
+    assert _cached_value(spy) is None, "流式的解析不了的内容被写进了缓存"
 
 
 def test_streamed_complete_response_is_cached(tmp_path, monkeypatch):
     """流式的正常响应仍要缓存 —— 上面几条不能靠「流式一律不写」蒙混过关。"""
-    client, fake, backend = _client(tmp_path, monkeypatch, content='{"ok": 1}')
+    client, fake, spy = _client(tmp_path, monkeypatch, content='{"ok": 1}')
     msgs = [{"role": "user", "content": "stream me"}]
     client.chat_json(msgs, "{}", cancel_event=threading.Event())
-    assert len(backend) == 1
+    assert _cached_value(spy) == '{"ok": 1}', "正常的流式响应没能写进缓存"
     assert client.chat_json(msgs, "{}", cancel_event=threading.Event()) == '{"ok": 1}'
     assert fake.calls == 1
 
@@ -342,7 +386,7 @@ def test_raising_max_tokens_refetches_after_truncation(tmp_path, monkeypatch):
     max_tokens 不在缓存键里，所以只要截断响应进了缓存，这条补救手段就彻底失效
     （实测：调大后 upstream 调用数仍是 1，拿回同一段垃圾）。
     """
-    client, fake, backend = _client(
+    client, fake, spy = _client(
         tmp_path, monkeypatch,
         content='{"objects": [{"name": "a', finish_reason="length")
     msgs = [{"role": "user", "content": "extract"}]
@@ -355,26 +399,62 @@ def test_raising_max_tokens_refetches_after_truncation(tmp_path, monkeypatch):
     assert fake.seen[-1]["max_tokens"] == 51200
 
 
-def test_cold_cache_accepts_its_first_write(tmp_path, monkeypatch):
-    """冷启动回归：SqliteCacheBackend 定义了 __len__，0 条目时 bool() 为 False。
+class _FalsyWhenEmptyBackend:
+    """空时 `bool()` 为 False 的最小后端——SqliteCacheBackend 正是这个形态
+    （定义了 __len__，0 条目时 falsy）。
 
-    写入处若用真值判断 `if cache and ...`，一个从未写过的缓存永远写不进第一条
-    （len 恒 0 → 永远为假），默认开启的缓存实际上从不生效。
+    前提由本测试**自己造**，不再依赖生产后端碰巧实现了 __len__：换成 Redis 这类
+    没有 __len__ 的后端时，`not backend` 恒为 False，原来那条前提断言不但会挂，
+    语义还整个反了（"空 backend 应当是 falsy" 直接不成立）。而这条测试要锁的东西
+    与后端无关——它锁的是 llm.py 的写法。
+    """
+
+    def __init__(self):
+        self.stored = {}
+
+    def get(self, key):
+        return self.stored.get(key)
+
+    def put(self, key, value, tag=""):
+        self.stored[key] = value
+
+    def __len__(self):
+        return len(self.stored)
+
+
+def test_cold_cache_accepts_its_first_write(tmp_path, monkeypatch):
+    """冷启动回归：写入处若用真值判断 `if cache and ...`，一个 0 条目时 falsy 的
+    缓存永远写不进第一条（len 恒 0 → 永远为假），默认开启的缓存实际上从不生效。
+
+    锁的是 llm.py 用 `cache is not None` 而非真值判断这一写法。
     变异验证：llm.py 的 `cache is not None` 改回 `cache` 后本测试必须转红。
     """
-    client, fake, backend = _client(tmp_path, monkeypatch)
-    assert len(backend) == 0 and not backend, "前提失效：空 backend 应当是 falsy"
+    settings = Settings(
+        OPENAI_COMPAT_BASE_URL="https://llm.example.test",
+        OPENAI_COMPAT_API_KEY="k",
+        OPENAI_COMPAT_MODEL="m",
+        LLM_LOG_ENABLED=False,
+    )
+    backend = _FalsyWhenEmptyBackend()
+    assert not backend, "前提失效：本测试用的后端在空时必须是 falsy"
+    client = OpenAICompatibleClient(settings, cache=backend)
+    monkeypatch.setattr(client, "client", lambda: _FakeOpenAI())
     client.chat_json([{"role": "user", "content": "q"}], "{}")
-    assert len(backend) == 1, "冷缓存没能完成它的第一次写入"
+    assert backend.stored, "冷缓存没能完成它的第一次写入"
 
 
 def test_llm_writes_are_tagged_with_the_model(tmp_path, monkeypatch):
     """evict_tag 的用途正是「换模型服务后清掉该模型的缓存」，不带 tag 就永远清不掉。
 
-    条目事后无法补 tag，所以这条必须在写入侧锁住。
+    条目事后无法补 tag，所以这条必须在写入侧锁住。本测试**刻意**触碰 CacheAdmin
+    （stats/evict_tag）——它测的就是那组可选能力，所以按 isinstance 探测后跳过：
+    只实现 get/put 的后端（Redis 等）没有 tag 概念，"清不掉"是它如实的降级而不是
+    缺陷。其余安全阀测试一律走 Protocol 面，不需要这个 gate。
     """
-    client, fake, backend = _client(tmp_path, monkeypatch)
+    client, fake, spy = _client(tmp_path, monkeypatch)
+    if not isinstance(spy.inner, CacheAdmin):
+        pytest.skip("当前后端未实现 CacheAdmin：按 tag 清空是可选能力")
     client.chat_json([{"role": "user", "content": "q"}], "{}")
-    assert backend.stats()["by_tag"] == {"m": 1}
-    assert backend.evict_tag("m") == 1
-    assert len(backend) == 0
+    assert spy.inner.stats()["by_tag"] == {"m": 1}
+    assert spy.inner.evict_tag("m") == 1
+    assert _cached_value(spy) is None, "evict_tag 之后这条 key 仍在缓存里"
