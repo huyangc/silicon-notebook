@@ -142,6 +142,9 @@ ROWID_ORDER_EVIDENCE = {
     "chunks": [
         "app.repositories.sqlite.chunk_store:ChunkStore.language_probe_rows",
     ],
+    "concept_merge_candidates": [
+        "app.repositories.sqlite.governance_store:GovernanceStore.pending_merges_batch",
+    ],
     "extraction_runs": [
         "app.repositories.sqlite.maintenance:SQLiteMaintenanceAdapter.count_sources_missing_kg",
         "app.repositories.sqlite.source_store:SourceStore.source_from_row",
@@ -440,7 +443,7 @@ def _sqlite_schema_contract(conn) -> dict[str, Any]:
         "sqlite_version": int(conn.execute("PRAGMA user_version").fetchone()[0]),
         "sqlite_table_count": len(table_rows),
         "sqlite_internal_tables": sorted(sqlite_internal_tables),
-        "postgres_version": 2,
+        "postgres_version": 6,
         "ordinary_table_count": len(ordinary_tables),
         "rebuilt_table_count": len(rebuilt_tables),
         "rebuilt": {
@@ -534,6 +537,7 @@ def _postgres_schema_facts(conn) -> dict[str, Any]:
     columns: dict[str, list[dict[str, Any]]] = {}
     for row in conn.execute(
         "SELECT table_name, column_name, data_type, is_nullable, column_default, "
+        "collation_name, "
         "ordinal_position FROM information_schema.columns "
         "WHERE table_schema=current_schema() ORDER BY table_name, ordinal_position"
     ).fetchall():
@@ -619,6 +623,9 @@ def _postgres_explicit_indexes(conn) -> dict[str, dict[str, Any]]:
         "ARRAY(SELECT pg_get_indexdef(i.indexrelid, position, true) "
         "      FROM generate_series(1, i.indnkeyatts) AS position "
         "      ORDER BY position) AS keys, "
+        "ARRAY(SELECT c.collname FROM unnest(i.indcollation) WITH ORDINALITY x(collation_oid, position) "
+        "      LEFT JOIN pg_collation c ON c.oid=x.collation_oid "
+        "      ORDER BY position) AS collations, "
         "i.indoption::smallint[] AS options "
         "FROM pg_index i JOIN pg_class idx ON idx.oid=i.indexrelid "
         "JOIN pg_class tbl ON tbl.oid=i.indrelid "
@@ -643,6 +650,7 @@ def _postgres_explicit_indexes(conn) -> dict[str, dict[str, Any]]:
             "table": str(row["table_name"]),
             "unique": bool(row["indisunique"]),
             "keys": keys,
+            "collations": list(row["collations"]),
             "predicate": (
                 " ".join(str(row["predicate"]).split())
                 if row["predicate"] is not None
@@ -682,7 +690,11 @@ def test_packaged_postgres_schema_has_bidirectional_semantic_parity(postgres_dat
     assert migrator.migrate() == contract["postgres_version"]
     with postgres_database.connect() as conn:
         facts = _postgres_schema_facts(conn)
+        server_encoding = conn.execute(
+            "SELECT current_setting('server_encoding') AS value"
+        ).fetchone()["value"]
 
+    assert server_encoding == "UTF8"
     expected_business = set(contract["tables"])
     expected_internal = set(contract["postgres_internal_tables"])
     assert set(facts["tables"]) == expected_business | expected_internal
@@ -698,6 +710,9 @@ def test_packaged_postgres_schema_has_bidirectional_semantic_parity(postgres_dat
             actual_columns[: len(expected["columns"])], expected["columns"], strict=True
         ):
             assert actual["data_type"] == column["postgres_type"], (table, column["name"])
+            assert actual["collation_name"] == (
+                "C" if column["postgres_type"] == "text" else None
+            ), (table, column["name"], actual["collation_name"])
             assert (actual["is_nullable"] == "YES") == column["nullable"], (
                 table,
                 column["name"],
@@ -811,6 +826,17 @@ def test_packaged_postgres_schema_has_bidirectional_semantic_parity(postgres_dat
         assert _canonical_predicate(actual_index["predicate"]) == _canonical_predicate(
             expected_index["predicate"]
         )
+    assert all(
+        collation in (None, "C")
+        for index in explicit_indexes.values()
+        for collation in index["collations"]
+    )
+    for name in (
+        "idx_knowhow_cells_column_normalized_anchor_row",
+        "idx_knowledge_objects_name_trgm",
+        "idx_memory_items_tags_trgm",
+    ):
+        assert "C" in explicit_indexes[name]["collations"], name
 
 
 @pytest.mark.postgres_integration
@@ -820,11 +846,11 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 2
-    assert migrator.migrate() == 2
-    assert migrator.current_version() == 2
+    assert migrator.migrate() == 6
+    assert migrator.migrate() == 6
+    assert migrator.current_version() == 6
     assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 23
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 2
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 6
 
 
 @pytest.mark.postgres_integration
@@ -832,7 +858,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 2
+    assert migrator.migrate() == 6
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -886,7 +912,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             worker.join(timeout=20)
         assert not any(worker.is_alive() for worker in workers)
         assert failures == []
-        assert sorted(versions) == [2, 2]
+        assert sorted(versions) == [6, 6]
 
         with psycopg.connect(postgres_scope.base_url, autocommit=True) as conn:
             extension_schema = conn.execute(
@@ -912,7 +938,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 2
+        assert PostgresMigrator(databases[1]).migrate() == 6
     finally:
         for database in databases:
             database.close()
@@ -948,3 +974,82 @@ def test_reviewed_json_and_binary_mappings_cover_only_real_columns(tmp_path):
         "\n".join(sorted(contract["tables"])).encode("utf-8")
     ).hexdigest()
     assert fingerprint == "73cc0da6ca61043d17e5aca51d083fc558b04368500939765908cee3745814da"
+
+
+def test_packaged_index_migration_phases_are_exact():
+    from app.repositories.postgres.migrator import load_migrations
+
+    migrations = {migration.version: migration for migration in load_migrations(MIGRATIONS_PATH)}
+    assert [(version, migrations[version].name) for version in migrations] == [
+        (1, "initial"),
+        (2, "integrity_indexes"),
+        (3, "core_indexes"),
+        (4, "knowledge_indexes"),
+        (5, "memory_knowhow_governance_indexes"),
+        (6, "search_gin"),
+    ]
+
+    def index_declarations(version: int) -> list[tuple[bool, str]]:
+        return [
+            (bool(unique), name)
+            for unique, name in re.findall(
+                r"(?mi)^CREATE\s+(UNIQUE\s+)?INDEX\s+([a-z0-9_]+)",
+                migrations[version].sql,
+            )
+        ]
+
+    integrity_names = {
+        "idx_kg_build_jobs_one_running",
+        "idx_memory_answer_once",
+        "idx_notebooks_share_token",
+        "idx_promotion_object",
+        "idx_sources_memory_id",
+        "idx_users_username",
+    }
+    assert index_declarations(1) == []
+    assert index_declarations(2) == [
+        (True, name)
+        for name in (
+            "idx_kg_build_jobs_one_running",
+            "idx_memory_answer_once",
+            "idx_notebooks_share_token",
+            "idx_promotion_object",
+            "idx_sources_memory_id",
+            "idx_users_username",
+        )
+    ]
+    operational = [
+        declaration
+        for version in (3, 4, 5)
+        for declaration in index_declarations(version)
+    ]
+    assert len(operational) == 73
+    assert not any(unique for unique, _name in operational)
+    gin_names = {
+        "idx_chunks_text_trgm",
+        "idx_knowledge_objects_name_trgm",
+        "idx_memory_items_title_trgm",
+        "idx_memory_items_content_md_trgm",
+        "idx_memory_items_tags_trgm",
+    }
+    gin_declarations = index_declarations(6)
+    assert len(gin_declarations) == 5
+    assert not any(unique for unique, _name in gin_declarations)
+    assert {name for _unique, name in gin_declarations} == gin_names
+    assert all("USING gin" in line for line in re.findall(
+        r"(?mis)^CREATE INDEX idx_.*?;", migrations[6].sql
+    ))
+
+    contract_names = {item["name"] for item in _reviewed_contract()["sqlite_explicit_indexes"]}
+    packaged_names = integrity_names | {name for _unique, name in operational} | gin_names
+    assert packaged_names == contract_names | gin_names
+
+
+def test_initial_migration_guards_utf8_before_business_ddl():
+    from app.repositories.postgres.migrator import load_migrations
+
+    initial = load_migrations(MIGRATIONS_PATH)[0].sql
+    guard_position = initial.index("current_setting('server_encoding')")
+    first_business_ddl = initial.index("CREATE TABLE agent_access_tokens")
+    assert guard_position < first_business_ddl
+    assert "server_encoding must be UTF8" in initial

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 
 import pytest
@@ -42,6 +43,97 @@ def test_migrate_creates_ledger_and_is_idempotent(postgres_database):
     assert [row["version"] for row in rows] == [1, 2]
     assert all(len(row["checksum"]) == 64 for row in rows)
     assert all(row["applied_at"].utcoffset().total_seconds() == 0 for row in rows)
+
+
+def test_migrate_can_stop_at_a_valid_target_then_resume(postgres_database):
+    migrator = _migrator(
+        postgres_database,
+        [
+            _migration(1, "CREATE TABLE target_probe (id integer PRIMARY KEY)"),
+            _migration(2, "ALTER TABLE target_probe ADD COLUMN value text"),
+            _migration(3, "ALTER TABLE target_probe ADD COLUMN note text"),
+        ],
+    )
+
+    assert migrator.migrate(target_version=2) == 2
+    assert migrator.current_version() == 2
+    assert migrator.migrate(target_version=2) == 2
+    assert migrator.migrate() == 3
+    assert migrator.current_version() == 3
+    with pytest.raises(RuntimeError, match="newer than requested target"):
+        migrator.migrate(target_version=2)
+
+
+@pytest.mark.parametrize("target_version", [0, -1, 4, True, 1.5])
+def test_migrate_rejects_invalid_target_versions_before_connect(
+    postgres_database, target_version, monkeypatch
+):
+    migrator = _migrator(
+        postgres_database,
+        [_migration(1, "SELECT 1"), _migration(2, "SELECT 2")],
+    )
+    monkeypatch.setattr(
+        postgres_database,
+        "write",
+        lambda: (_ for _ in ()).throw(AssertionError("database was touched")),
+    )
+    with pytest.raises(ValueError, match="target"):
+        migrator.migrate(target_version=target_version)
+
+
+@pytest.mark.parametrize(
+    "timeout_seconds", [0, -1, True, "3", math.inf, -math.inf, math.nan, 86_401]
+)
+def test_migrate_rejects_invalid_timeout_overrides_before_connect(
+    postgres_database, timeout_seconds, monkeypatch
+):
+    migrator = _migrator(postgres_database, [_migration(1, "SELECT 1")])
+    monkeypatch.setattr(
+        postgres_database,
+        "write",
+        lambda: (_ for _ in ()).throw(AssertionError("database was touched")),
+    )
+    with pytest.raises(ValueError, match="timeout"):
+        migrator.migrate(statement_timeout_seconds=timeout_seconds)
+
+
+def test_migration_timeout_override_is_local_and_bounded(postgres_database):
+    import psycopg
+
+    from app.repositories.postgres.database import PostgresDatabase
+
+    settings = postgres_database.settings.model_copy(
+        update={
+            "postgres_pool_min_size": 1,
+            "postgres_pool_max_size": 1,
+            "postgres_statement_timeout_seconds": 1,
+        }
+    )
+    database = PostgresDatabase(settings, postgres_database.root_dir)
+    try:
+        migrator = _migrator(
+            database,
+            [
+                _migration(
+                    1,
+                    "SELECT pg_sleep(1.1); "
+                    "CREATE TABLE migration_timeout_probe (id integer)",
+                )
+            ],
+        )
+        with pytest.raises(psycopg.errors.QueryCanceled) as cancelled:
+            migrator.migrate()
+        assert cancelled.value.sqlstate == "57014"
+        assert migrator.current_version() == 0
+
+        assert migrator.migrate(statement_timeout_seconds=3) == 1
+        with database.connect() as conn:
+            timeout = conn.execute(
+                "SELECT current_setting('statement_timeout') AS value"
+            ).fetchone()["value"]
+        assert timeout == "1s"
+    finally:
+        database.close()
 
 
 def test_changed_checksum_fails_closed(postgres_database):
@@ -140,19 +232,71 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 2
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 6
     assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 23
-    assert len(PostgresMigrator(postgres_database).migrations) == 2
-    assert PostgresMigrator(postgres_database).migrate() == 2
+    assert len(PostgresMigrator(postgres_database).migrations) == 6
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
         tables = conn.execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema = current_schema() ORDER BY table_name"
         ).fetchall()
+        indexes = {
+            row["indexname"]
+            for row in conn.execute(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE schemaname=current_schema()"
+            ).fetchall()
+        }
+        non_constraint_indexes = {
+            row["index_name"]
+            for row in conn.execute(
+                "SELECT idx.relname AS index_name "
+                "FROM pg_index i "
+                "JOIN pg_class idx ON idx.oid=i.indexrelid "
+                "JOIN pg_class tbl ON tbl.oid=i.indrelid "
+                "JOIN pg_namespace n ON n.oid=tbl.relnamespace "
+                "LEFT JOIN pg_constraint c ON c.conindid=i.indexrelid "
+                "WHERE n.nspname=current_schema() AND c.oid IS NULL"
+            ).fetchall()
+        }
     names = {row["table_name"] for row in tables}
     assert "silicon_schema_migrations" in names
     assert "users" in names
     assert "notebooks" in names
+    integrity_indexes = {
+        "idx_kg_build_jobs_one_running",
+        "idx_memory_answer_once",
+        "idx_notebooks_share_token",
+        "idx_promotion_object",
+        "idx_sources_memory_id",
+        "idx_users_username",
+    }
+    assert non_constraint_indexes == integrity_indexes
+    assert integrity_indexes <= indexes
+    assert "idx_chunks_nb" not in indexes
+    assert "idx_chunks_text_trgm" not in indexes
+    for version in (3, 4, 5, 6):
+        assert migrator.migrate(target_version=version) == version
+    assert migrator.migrate() == 6
+    with postgres_database.connect() as conn:
+        final_indexes = {
+            row["indexname"]
+            for row in conn.execute(
+                "SELECT indexname FROM pg_indexes "
+                "WHERE schemaname=current_schema()"
+            ).fetchall()
+        }
+        ledger_versions = [
+            row["version"]
+            for row in conn.execute(
+                "SELECT version FROM silicon_schema_migrations ORDER BY version"
+            ).fetchall()
+        ]
+    assert "idx_chunks_nb" in final_indexes
+    assert "idx_chunks_text_trgm" in final_indexes
+    assert ledger_versions == [1, 2, 3, 4, 5, 6]
 
 
 def test_migrations_take_the_fixed_transaction_advisory_lock(postgres_database):

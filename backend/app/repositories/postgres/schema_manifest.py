@@ -20,6 +20,7 @@ class PostgresSchemaManifest:
 POSTGRES_ROWID_ORDINAL_TABLES = (
     "answers",
     "chunks",
+    "concept_merge_candidates",
     "extraction_runs",
     "kg_build_jobs",
     "knowledge_objects",
@@ -32,5 +33,5 @@ POSTGRES_ROWID_ORDINAL_TABLES = (
 # rather than assuming that independently numbered schemas remain compatible.
 POSTGRES_SCHEMA_MANIFEST = PostgresSchemaManifest(
     sqlite_version=23,
-    postgres_version=2,
+    postgres_version=6,
 )

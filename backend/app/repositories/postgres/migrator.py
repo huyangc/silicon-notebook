@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +13,7 @@ from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
 
 MIGRATION_ADVISORY_LOCK_NAME = "silicon-notebook:postgres-migrations"
+MAX_MIGRATION_STATEMENT_TIMEOUT_SECONDS = 86_400
 _MIGRATION_FILENAME = re.compile(r"^(?P<version>[0-9]{4})_(?P<name>[a-z0-9_]+)\.sql$")
 _LEDGER_SQL = """
 CREATE TABLE IF NOT EXISTS silicon_schema_migrations (
@@ -130,8 +132,40 @@ class PostgresMigrator:
                 return 0
             return self._validate_ledger(self._ledger_rows(conn))
 
-    def migrate(self) -> int:
+    def migrate(
+        self,
+        target_version: int | None = None,
+        *,
+        statement_timeout_seconds: float | None = None,
+    ) -> int:
         _validate_manifest(self.migrations)
+        latest_version = len(self.migrations)
+        if target_version is None:
+            target_version = latest_version
+        elif (
+            isinstance(target_version, bool)
+            or not isinstance(target_version, int)
+            or not 1 <= target_version <= latest_version
+        ):
+            raise ValueError(
+                f"PostgreSQL migration target must be an integer in 1..{latest_version}"
+            )
+        statement_timeout_ms: int | None = None
+        if statement_timeout_seconds is not None:
+            if (
+                isinstance(statement_timeout_seconds, bool)
+                or not isinstance(statement_timeout_seconds, (int, float))
+                or not math.isfinite(statement_timeout_seconds)
+                or not 0 < statement_timeout_seconds
+                <= MAX_MIGRATION_STATEMENT_TIMEOUT_SECONDS
+            ):
+                raise ValueError(
+                    "PostgreSQL migration statement timeout must be finite and in "
+                    f"(0, {MAX_MIGRATION_STATEMENT_TIMEOUT_SECONDS}] seconds"
+                )
+            statement_timeout_ms = max(
+                1, math.ceil(float(statement_timeout_seconds) * 1000)
+            )
         if not self.migrations:
             with self.database.write() as conn:
                 self._lock(conn)
@@ -139,15 +173,24 @@ class PostgresMigrator:
                 return self._validate_ledger(self._ledger_rows(conn))
 
         current = 0
-        for migration in self.migrations:
+        for migration in self.migrations[:target_version]:
             with self.database.write() as conn:
                 self._lock(conn)
                 conn.execute(_LEDGER_SQL)
                 current = self._validate_ledger(self._ledger_rows(conn))
+                if current > target_version:
+                    raise RuntimeError(
+                        "PostgreSQL migration ledger is newer than requested target"
+                    )
                 if current >= migration.version:
                     continue
                 if current != migration.version - 1:
                     raise RuntimeError("PostgreSQL migration ledger has a version gap")
+                if statement_timeout_ms is not None:
+                    conn.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        (f"{statement_timeout_ms}ms",),
+                    )
                 conn.execute(migration.sql, prepare=False)
                 conn.execute(
                     "INSERT INTO silicon_schema_migrations(version, checksum) "

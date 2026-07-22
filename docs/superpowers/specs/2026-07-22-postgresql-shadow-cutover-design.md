@@ -77,12 +77,12 @@ scripts/migrate_sqlite_to_postgres.py    # shadowctl 的薄 CLI 入口
 `backend/app/migration/shadow/` 内进一步按单一职责拆分：
 
 ```text
-manifest.py        # 表分类、主键、复制顺序、字段规范化规则
+manifest.py        # 表分类、稳定复制键、复制顺序、字段规范化规则
 capture.py         # SQLite/PG change-log DDL 与 trigger 生成
 snapshot.py        # SQLite 一致性 backup 与初始水位
 bulk_copy.py       # FK 顺序全量 COPY、断点和校验
 replicator.py      # 顺序读取、行 hydration、幂等 apply、checkpoint
-verifier.py        # 行数、PK、分块哈希、领域读取与检索对照
+verifier.py        # 行数、复制键集合、分块哈希、领域读取与检索对照
 control.py         # 阶段状态机、不变量和写入闸
 cli.py             # status/preflight/start/freeze/cutover/rollback/retire
 ```
@@ -98,6 +98,8 @@ cli.py             # status/preflight/start/freeze/cutover/rollback/retire
 PostgreSQL schema 采用以下兼容优先策略：
 
 - 现有字符串 ID 保持字符串主键，不在迁移时改 UUID 语义；
+- PostgreSQL `server_encoding` 必须为 `UTF8`，以承载 MVP 的混合中英文来源、标题、Markdown、公式和 Memory；preflight 与首个 schema migration 都在任何 snapshot/业务 DDL/写入前 fail closed，collation 不能替代 encoding；
+- 所有业务 `text` 列显式使用 `COLLATE "C"`，与 SQLite 默认 `BINARY` 排序保持一致；目标数据库默认 locale 可任意，不能靠恰好为 `C` 的测试库掩盖差异，非列传播的文本表达式索引也必须显式指定 `C`；
 - 时间字段使用 `timestamptz`，row mapper 统一转回现有领域层接受的 offset-aware ISO 值；
 - 明确由应用拥有的结构化 JSON 使用 `jsonb`，校验时使用规范化 JSON 而非原始字节；
 - Markdown、来源文本、公式和用户内容保持文本；
@@ -116,7 +118,7 @@ PostgreSQL 使用独立的 schema migration version table。SQLite 与 PostgreSQ
 `manifest.py` 是复制范围的唯一真相源。每张条目至少声明：
 
 - 表名和分类；
-- 单主键或复合主键字段及规范化顺序；
+- 稳定复制键字段及规范化顺序：实际单/复合主键，或经审查并由运行期唯一守卫保护的逻辑复合键；
 - 初始 COPY 的依赖顺序；
 - INSERT/UPDATE/DELETE 是否捕获；
 - SQLite 行到 PostgreSQL 行的字段转换器；
@@ -135,6 +137,31 @@ PostgreSQL 使用独立的 schema migration version table。SQLite 与 PostgreSQ
 CI 将实际 schema 的所有普通用户表与 manifest 做集合对比。新增正式表而未明确归类时测试
 失败，避免静默漏同步。
 
+大多数 replicated 表以数据库已声明的主键作为稳定复制键。以下三张无数据库主键的当前
+业务表保持 replicated，并使用经审查的逻辑复合键：
+
+- `community_members=(notebook_id, level, canonical_id)`；
+- `kg_cluster_scratch=(object_id, notebook_id, run_id)`（唯一语义相同，但该列序不会抢占既有 `(notebook_id, run_id)` 访问路径）；
+- `knowledge_object_sources=(object_id, source_id)`。
+
+preflight 必须在 SQLite 与 PostgreSQL 两端对这三组键做全表 NULL/重复扫描，任何重复都
+fail closed，绝不静默去重。SQLite 侧在一个 `BEGIN IMMEDIATE` 内完成全表查重、三个
+唯一守卫和 capture/freeze trigger 安装，提交时 capture 仍为 disabled；PostgreSQL 侧使用
+独立事务完成自己的查重与守卫。只有两侧独立结果都成功并经验证后，控制面才用 CAS 启用
+capture。这里不存在跨库原子提交；任一侧失败都必须保持 disabled，且两侧接口可幂等重试。
+明确命名且由 shadow 拥有的观察期唯一索引为：`shadow_uq_community_members_replication_key`、
+`shadow_uq_kg_cluster_scratch_replication_key`、
+`shadow_uq_knowledge_object_sources_replication_key`。这些索引不改变业务 schema compatibility
+pair，也不纳入业务索引 parity；它们阻止观察期产生新重复，并在 shadow retirement 中
+显式删除。manifest 的 `replication_key` 同时记录 `key_kind=declared_pk|shadow_unique`，
+totality 检查的是稳定复制键缺失、NULL 或重复，而不是假定每表都有数据库主键。
+
+安装守卫前必须审计三张表的所有无 `ORDER BY` 读取，并以行为测试与查询计划测试证明新
+索引不会改变可观察顺序。尤其 `kg_cluster_scratch WHERE notebook_id=? AND run_id=?` 应继续
+使用既有 `idx_kg_cluster_scratch_nb_run`（或返回与安装前完全相同的流）；这也是 scratch
+守卫以 `object_id` 开头的原因。`community_members` 与 `knowledge_object_sources` 也必须逐
+查询证明列序安全或消费方对顺序不敏感；无证据时不得增加第八个 ordinal。
+
 ## 5. 变更捕获协议
 
 ### 5.1 SQLite 正向日志
@@ -147,7 +174,7 @@ shadow_change_log
   seq INTEGER PRIMARY KEY AUTOINCREMENT
   run_id TEXT NOT NULL
   table_name TEXT NOT NULL
-  pk_json TEXT NOT NULL
+  key_json TEXT NOT NULL
   operation TEXT NOT NULL CHECK(operation IN ('upsert', 'delete'))
   schema_epoch INTEGER NOT NULL
   captured_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -163,10 +190,10 @@ shadow_capture_control
 
 每个 replicated 表由 manifest 生成 AFTER INSERT、AFTER UPDATE、AFTER DELETE trigger：
 
-- INSERT 记录 `upsert` 和 NEW 主键；
-- UPDATE 主键不变时记录 NEW 主键 `upsert`；
-- UPDATE 改变主键时依次记录 OLD 主键 `delete`、NEW 主键 `upsert`；
-- DELETE 记录 OLD 主键 `delete`；
+- INSERT 记录 `upsert` 和 NEW 稳定复制键；
+- UPDATE 稳定复制键不变时记录 NEW 键 `upsert`；
+- UPDATE 改变稳定复制键时依次记录 OLD 键 `delete`、NEW 键 `upsert`；
+- DELETE 记录 OLD 稳定复制键 `delete`；
 - trigger 只在 `shadow_capture_control.enabled=1` 时追加日志；
 - shadow 内部表没有 capture trigger；
 - 写入被冻结且 `apply_active=0` 时，replicated 表的业务写 trigger 使用
@@ -180,7 +207,7 @@ SQLite 事务提交；回滚的业务事务不会留下可见日志。SQLite 单
 ### 5.2 PostgreSQL 反向日志
 
 观察期开始前，PostgreSQL 安装 `shadow_reverse_change_log` 和 capture control。每条事件
-具有唯一 `seq bigint identity`、`source_txid`、表/主键/操作以及 nullable `applied_at`。
+具有唯一 `seq bigint identity`、`source_txid`、表/稳定复制键/操作以及 nullable `applied_at`。
 `seq` 只作为事件身份和诊断顺序，**不能**被当作提交顺序：PostgreSQL sequence 可在事务
 回滚时留洞，也可能由较早取号、较晚提交的事务产生“迟到的小序号”。反向复制因此不使用
 “连续最大 seq”作为正确性 checkpoint。
@@ -209,15 +236,16 @@ lease。这样数据库级冻结仍能阻止意外进程，同时不会挡住受
 初始同步按以下顺序执行：
 
 1. `preflight` 校验源 SQLite 身份、目标 PostgreSQL 身份、schema epoch、扩展、磁盘、连接和空目标约束；
-2. 为 SQLite replicated 表安装并验证 capture trigger，开启正向 capture；
-3. 使用 SQLite backup API 生成一致性临时快照，正常业务写入继续；
-4. 从快照自身读取 `MAX(shadow_change_log.seq)` 作为基线水位 `H0`；
-5. 按 manifest FK 拓扑使用流式批次和 PostgreSQL `COPY` 导入普通表；
-6. embeddings 流式解码并写入 `bytea`，不在内存中全量展开；
-7. 数据装载完成后创建 PostgreSQL secondary/FTS index；
-8. 校验全量表计数、PK 集合、外键、抽样内容及 embedding；
-9. 把 PostgreSQL forward checkpoint 原子设为 `H0`；
-10. 启动增量同步器消费 `H0 + 1` 之后的源日志。
+2. 分别提交 SQLite 与 PostgreSQL 的逻辑键查重/唯一守卫安装；SQLite 同一 `BEGIN IMMEDIATE` 还安装 capture trigger 但保持 disabled，两侧均成功后才 CAS 开启正向 capture；
+3. 通过正式 checksummed migrator 把 PostgreSQL 准备到 COPY-ready v2（表/约束、`pg_trgm` 与六个 partial unique 完整性索引）；
+4. 使用 SQLite backup API 生成一致性临时快照，正常业务写入继续；
+5. 从快照自身读取 `MAX(shadow_change_log.seq)` 作为基线水位 `H0`；
+6. 按 manifest FK 拓扑使用流式批次和 PostgreSQL `COPY` 导入普通表；embeddings 流式解码并写入 `bytea`，不在内存中全量展开；
+7. 对七张 ordinal 表通过受控 catalog 依赖解析 identity sequence（不拼接不可信标识）并 reseed：空表首个新值为 1，非空表首个新值为 `MAX(ordinal)+1`；任何失败都不能标记 COPY 完成；
+8. 使用 shadow 专用、长但有界且可取消的 transaction-local statement timeout，通过同一 migration ledger 逐组执行 v3-v6（73 个 non-unique operational + 5 个 GIN 索引）；每组独立提交/可续跑，不能手工 drop/recreate 或绕过 ledger，连接归还 pool 后恢复默认 timeout；
+9. 校验全量表计数、稳定复制键集合、外键、抽样内容及 embedding；实际主键表检查 PK 集合，三个 `shadow_unique` 表检查受唯一守卫保护的逻辑键集合；
+10. 把 PostgreSQL forward checkpoint 原子设为 `H0`；
+11. 启动增量同步器消费 `H0 + 1` 之后的源日志。
 
 快照携带业务行和同一时点可见的 change log；trigger 的事务原子性保证快照不会出现
 “业务行已进入基线但对应已提交日志不可见”或相反的半状态。
@@ -232,8 +260,8 @@ lease。这样数据库级冻结仍能阻止意外进程，同时不会挡住受
 
 处理规则：
 
-- `upsert`：根据 manifest 主键从当前源库读取行；行存在则转换并在目标 UPSERT；若行已被后续事务删除，则按 delete 收敛；
-- `delete`：在目标按主键幂等删除；
+- `upsert`：根据 manifest 稳定复制键从当前源库读取行；行存在则转换并在目标 UPSERT；若行已被后续事务删除，则按 delete 收敛；
+- `delete`：在目标按稳定复制键幂等删除；
 - SQLite→PostgreSQL 按源 `seq` 保持语句顺序，目标业务变更和
   `shadow_apply_checkpoint.last_seq` 在同一 PostgreSQL 事务提交；其 checkpoint 只能
   连续推进，禁止跳号、跳 poison event 或人工改到未来；
@@ -243,7 +271,7 @@ lease。这样数据库级冻结仍能阻止意外进程，同时不会挡住受
 - target 提交前崩溃则业务变更与 checkpoint/回执都回滚；target 提交后、source 确认前
   崩溃则重放，连续 checkpoint 或事件回执保证最终幂等。
 
-由于 upsert hydration 读取源库当前行，它可能提前把某个主键的更晚状态应用到影子库。
+由于 upsert hydration 读取源库当前行，它可能提前把某个稳定复制键的更晚状态应用到影子库。
 这是有意的最终状态优化；影子库在追赶过程中不承诺逐事务中间态一致。同步到稳定水位后，
 完整 verifier 才能宣布 caught-up。
 
@@ -260,21 +288,21 @@ lease。这样数据库级冻结仍能阻止意外进程，同时不会挡住受
 
 1. 在一个 SQLite 只读 snapshot 中记录校验水位 `Hv` 并流式读取源数据；
 2. 等待 PostgreSQL checkpoint 至少达到 `Hv`，再在 PostgreSQL 只读事务中比较；
-3. 对校验期间发生过 `seq > Hv` 事件的主键标记为 concurrent，不把它们的临时差异计为 drift；
-4. 未发生后续事件的稳定主键必须严格一致；concurrent 主键进入下一轮重试；
+3. 对校验期间发生过 `seq > Hv` 事件的稳定复制键标记为 concurrent，不把它们的临时差异计为 drift；
+4. 未发生后续事件的稳定复制键必须严格一致；concurrent 键进入下一轮重试；
 5. change log 清理水位不得越过任何仍活跃 verifier 的 `Hv`。
 
-hydration 可能提前把更晚状态写入影子库，但该主键必然有 `seq > Hv` 的后续事件，因此会被
-上述屏障识别而不是形成假阳性。周期 verifier 持续累计稳定主键覆盖率；最终切换冻结后，
-不存在 concurrent 主键，必须得到一次 100% 全量校验。
+hydration 可能提前把更晚状态写入影子库，但该稳定复制键必然有 `seq > Hv` 的后续事件，因此会被
+上述屏障识别而不是形成假阳性。周期 verifier 持续累计稳定复制键覆盖率；最终切换冻结后，
+不存在 concurrent 键，必须得到一次 100% 全量校验。
 
 caught-up 必须同时满足：
 
 1. source `MAX(seq)` 等于 target applied checkpoint，并持续稳定至少 60 秒；
 2. 无 poison event、未完成批次、schema epoch/run identity 差异；
 3. replicated 表行数一致；
-4. 每张表主键集合一致；
-5. 按稳定主键范围流式计算规范化内容哈希；
+4. 每张表稳定复制键集合一致（实际 PK 或受唯一守卫保护的逻辑复合键）；
+5. 按稳定复制键范围流式计算规范化内容哈希；
 6. JSON 按排序键、禁止 NaN/Infinity 的规范化形式比较，合法 JSON null 保持 null；
 7. BLOB/embedding 比较长度、维度、字节或容许的数值误差、范数与抽样 cosine；
 8. PostgreSQL 外键、唯一约束和删除级联检查通过；
@@ -287,7 +315,7 @@ caught-up 必须同时满足：
 FTS5、`pg_trgm` 和未来 pgvector 的底层分数不要求逐位相等。校验目标是候选覆盖、稳定
 领域排序、答案引用身份和召回质量，不把数据库私有 rank 当作跨后端协议。
 
-差异报告必须包含 run、表、主键/分块、差异类别和脱敏摘要，不输出来源全文、Memory
+差异报告必须包含 run、表、稳定复制键/分块、差异类别和脱敏摘要，不输出来源全文、Memory
 内容、token 或密码。修复通过可审计的定向回填或 checkpoint 重放执行，禁止直接手改
 影子库后把差异标绿。
 
@@ -319,14 +347,15 @@ FTS5、`pg_trgm` 和未来 pgvector 的底层分数不要求逐位相等。校�
 2. 等待已登记的在途数据库事务、上传和文件删除完成；
 3. 设置 SQLite durable write gate，记录最终水位 `Hfinal`；
 4. 清空正向队列到 `Hfinal`；
-5. 运行最终全表、领域和检索校验；
-6. 保存最终 SQLite 权威快照与 PostgreSQL 切换前备份；
-7. 停止正向 replicator，关闭 SQLite capture；
-8. 停止后端进程，通过下述原子配置交换把正式 `DATABASE_URL` 切到 PostgreSQL，再启动
+5. 正向 worker 的显式 ordinal apply 不会推进 PostgreSQL identity sequence；因此在最终追平后再次 reseed 全部七张 ordinal 表，并校验每个 sequence 的下一值严格大于当前 `MAX(ordinal)`（空表下一值为 1）。失败时保持写闸关闭，不得进入切换或 `resume-writes`；
+6. 运行最终全表、领域和检索校验；
+7. 保存最终 SQLite 权威快照与 PostgreSQL 切换前备份；
+8. 停止正向 replicator，关闭 SQLite capture；
+9. 停止后端进程，通过下述原子配置交换把正式 `DATABASE_URL` 切到 PostgreSQL，再启动
    后端；PostgreSQL durable write gate 仍保持关闭；
-9. 运行登录、notebook、sharing、source、Ask、Knowledge、Memory、Knowhow、report、删除和文件引用 smoke；
-10. smoke 失败则在未产生 PostgreSQL 新业务写入的情况下直接切回 SQLite；
-11. smoke 成功后开启 PostgreSQL reverse capture，启动并确认 reverse worker 心跳，再通过
+10. 运行登录、notebook、sharing、source、Ask、Knowledge、Memory、Knowhow、report、删除和文件引用 smoke；
+11. smoke 失败则在未产生 PostgreSQL 新业务写入的情况下直接切回 SQLite；
+12. smoke 成功后开启 PostgreSQL reverse capture，启动并确认 reverse worker 心跳，再通过
     `resume-writes` 解除只读、允许 PostgreSQL 业务写入。
 
 维护期间前端显示明确的只读/维护状态，不把用户写操作表现为普通 500 或无限重试。
@@ -391,12 +420,13 @@ PostgreSQL 写入之后则必须执行第 10 节的追平式 rollback，不能�
 1. 冻结 PostgreSQL 新写入和后台任务；
 2. 冻结后等待所有 PostgreSQL 权威事务结束，记录最终 reverse 事件集合，并处理到
    `applied_at IS NULL` 为零且稳定至少 60 秒；
-3. 对 SQLite 安全副本运行完整 verifier；
-4. 停止 reverse replicator 和 PostgreSQL capture；
-5. 停止后端，通过 `rollback` 原子交换 active/shadow 配置，把正式 repository 切回
+3. 对七张 ordinal 表验证反向 apply 的显式 PostgreSQL ordinal 已写成 SQLite rowid，并在回滚事务探针中证明下一次隐式 SQLite rowid 不碰撞且仍满足既有顺序语义；失败时不得恢复写入；
+4. 对 SQLite 安全副本运行完整 verifier；
+5. 停止 reverse replicator 和 PostgreSQL capture；
+6. 停止后端，通过 `rollback` 原子交换 active/shadow 配置，把正式 repository 切回
    SQLite，再启动仍为只读的 SQLite 后端；
-6. 运行只读 smoke，成功后通过 `resume-writes` 恢复 SQLite 写入；
-7. 为下一次迁移创建新 run，不复用已终止 run 的 checkpoint。
+7. 运行只读 smoke，成功后通过 `resume-writes` 恢复 SQLite 写入；
+8. 为下一次迁移创建新 run，不复用已终止 run 的 checkpoint。
 
 ## 11. 最终退役门槛
 
@@ -508,7 +538,7 @@ PostgreSQL 反向 outbox 另加硬条件 `applied_at IS NOT NULL`，且对应 SQ
 
 ### 13.2 Capture 与复制
 
-- manifest 中每张 replicated 表执行 INSERT、UPDATE、PK UPDATE、DELETE 和适用的级联删除；
+- manifest 中每张 replicated 表执行 INSERT、UPDATE、稳定复制键 UPDATE、DELETE 和适用的级联删除；
 - 业务事务回滚后 change log 不得留下可见事件；
 - 从目标 apply 到 checkpoint/逐事件回执提交、再到反向源端 `applied_at` 确认之间逐点
   注入崩溃，验证回滚或幂等重放；

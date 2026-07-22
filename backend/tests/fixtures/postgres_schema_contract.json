@@ -41,6 +41,7 @@
     "postgres_ordinal_sequence_reseed_after_copy": [
       "answers",
       "chunks",
+      "concept_merge_candidates",
       "extraction_runs",
       "kg_build_jobs",
       "knowledge_objects",
@@ -65,6 +66,7 @@
     "sqlite_rowid_to_postgres_ordinal": [
       "answers",
       "chunks",
+      "concept_merge_candidates",
       "extraction_runs",
       "kg_build_jobs",
       "knowledge_objects",
@@ -78,6 +80,9 @@
     ],
     "chunks": [
       "app.repositories.sqlite.chunk_store:ChunkStore.language_probe_rows"
+    ],
+    "concept_merge_candidates": [
+      "app.repositories.sqlite.governance_store:GovernanceStore.pending_merges_batch"
     ],
     "extraction_runs": [
       "app.repositories.sqlite.maintenance:SQLiteMaintenanceAdapter.count_sources_missing_kg",
@@ -98,6 +103,7 @@
   "ordinal_tables": [
     "answers",
     "chunks",
+    "concept_merge_candidates",
     "extraction_runs",
     "kg_build_jobs",
     "knowledge_objects",
@@ -113,7 +119,7 @@
   "postgres_internal_tables": [
     "silicon_schema_migrations"
   ],
-  "postgres_version": 2,
+  "postgres_version": 6,
   "rebuilt": {
     "fts_internal_tables": [
       "chunks_fts_config",
