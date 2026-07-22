@@ -1381,6 +1381,16 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='create_knowhow_milestone',
+        owner='KnowhowHistoryStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.create_knowhow_milestone', kind='attribute', target='create_knowhow_milestone'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='create_knowhow_table',
         owner='KnowhowStore',
         kind='method',
@@ -1506,6 +1516,16 @@ SURFACE_MEMBERS = (
         kind='method',
         consumers=(
             ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.delete_knowhow_column', kind='attribute', target='delete_knowhow_column'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='delete_knowhow_milestone',
+        owner='KnowhowHistoryStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.delete_knowhow_milestone', kind='attribute', target='delete_knowhow_milestone'),
         ),
         patches=(
         ),
@@ -1692,6 +1712,17 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='get_knowhow_change',
+        owner='KnowhowHistoryStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.create_knowhow_milestone', kind='attribute', target='get_knowhow_change'),
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.get_knowhow_change', kind='attribute', target='get_knowhow_change'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='get_knowhow_row_location',
         owner='KnowhowStore',
         kind='method',
@@ -1860,6 +1891,36 @@ SURFACE_MEMBERS = (
         ),
     ),
     SurfaceMember(
+        name='knowhow_cell_history',
+        owner='KnowhowHistoryStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.get_knowhow_cell_history', kind='attribute', target='knowhow_cell_history'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='knowhow_changes_between',
+        owner='KnowhowHistoryStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.get_knowhow_history_diff', kind='attribute', target='knowhow_changes_between'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='knowhow_history_head_seq',
+        owner='KnowhowHistoryStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.get_knowhow_history', kind='attribute', target='knowhow_history_head_seq'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
         name='knowledge_graph',
         owner='KnowledgeQueryService',
         kind='method',
@@ -1905,6 +1966,26 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/app/api/knowhow_agent_routes.py', scope='<module>.get_agent_row', kind='attribute', target='list_knowhow_cell_code'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.get_knowhow_discrimination.load', kind='attribute', target='list_knowhow_cell_code'),
             ConsumerSite(path='backend/app/api/mcp_server.py', scope='<module>.create_memory_mcp.get_knowhow_row.load', kind='attribute', target='list_knowhow_cell_code'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='list_knowhow_changes',
+        owner='KnowhowHistoryStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.get_knowhow_history', kind='attribute', target='list_knowhow_changes'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='list_knowhow_milestones',
+        owner='KnowhowHistoryStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.get_knowhow_history', kind='attribute', target='list_knowhow_milestones'),
         ),
         patches=(
         ),
@@ -2326,6 +2407,16 @@ SURFACE_MEMBERS = (
         consumers=(
             ConsumerSite(path='backend/app/api/knowledge_routes.py', scope='<module>.propose_schemas', kind='attribute', target='propose_schemas'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_object_schemas', kind='attribute', target='propose_schemas'),
+        ),
+        patches=(
+        ),
+    ),
+    SurfaceMember(
+        name='prune_knowhow_history',
+        owner='KnowhowHistoryStore',
+        kind='method',
+        consumers=(
+            ConsumerSite(path='backend/app/api/knowhow_routes.py', scope='<module>.prune_knowhow_history', kind='attribute', target='prune_knowhow_history'),
         ),
         patches=(
         ),

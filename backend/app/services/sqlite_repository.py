@@ -3254,17 +3254,19 @@ class SQLiteRepository:
         )
 
     def update_knowhow_cell(
-        self, row_id: str, column_id: str, content_md: str, require_assets=()
+        self, row_id: str, column_id: str, content_md: str, require_assets=(),
+        actor: str = "", origin: str = "user",
     ) -> None:
         return self._runtime.knowhow_store.update_knowhow_cell(
-            row_id, column_id, content_md, require_assets
+            row_id, column_id, content_md, require_assets, actor=actor, origin=origin
         )
 
     def update_knowhow_cells(
-        self, row_ids: list, column_id: str, content_md: str, require_assets=()
+        self, row_ids: list, column_id: str, content_md: str, require_assets=(),
+        actor: str = "", origin: str = "user",
     ) -> None:
         return self._runtime.knowhow_store.update_knowhow_cells(
-            row_ids, column_id, content_md, require_assets
+            row_ids, column_id, content_md, require_assets, actor=actor, origin=origin
         )
 
     def update_knowhow_cells_bulk_guarded(self, notebook_id: str, updates: list) -> dict:
@@ -3277,9 +3279,12 @@ class SQLiteRepository:
         require_assets=(),
         anchor_column_id=None,
         expected_anchor=None,
+        actor: str = "",
+        origin: str = "user",
     ) -> dict:
         return self._runtime.knowhow_store.update_knowhow_cells_guarded_atomic(
-            notebook_id, updates, require_assets, anchor_column_id, expected_anchor
+            notebook_id, updates, require_assets, anchor_column_id, expected_anchor,
+            actor=actor, origin=origin,
         )
 
     def delete_knowhow_table(self, table_id: str) -> dict:
