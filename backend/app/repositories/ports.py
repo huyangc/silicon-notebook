@@ -1048,7 +1048,14 @@ class AskStateStorePort(Protocol):
     ``begin_durable_job``, which opens ONE write transaction that creates or
     touches the conversation, mutates
     ``payload.conversation_id`` at the same point as baseline and inserts the
-    running job row; ``finish_job`` performs only the terminal job-row
+    running job row. Their engines then use ``prepare_turn_for_job``: it locks
+    that exact conversation parent and accepts only the exact running job,
+    returning ``None`` instead of invoking the legacy missing-parent fallback.
+    Conversation-lifecycle operations lock the parent before non-locking job
+    existence/status checks; final save is the only path that holds a job lock
+    while acquiring the parent, so bulk deletion/cleanup must never take a
+    job-row lock while holding the parent.
+    ``finish_job`` performs only the terminal job-row
     transaction and returns its conversation id — the failed/cancelled empty-
     conversation cleanup stays a LATER ``cleanup_empty_conversation``
     transaction, orchestrated by the caller.  The raw ``append_trace`` raises
@@ -1063,6 +1070,13 @@ class AskStateStorePort(Protocol):
         question: str,
         user_id: str,
     ) -> PreparedAskTurn: ...
+    def prepare_turn_for_job(
+        self,
+        job_id: str,
+        notebook_id: str,
+        conversation_id: str | None,
+        user_id: str,
+    ) -> PreparedAskTurn | None: ...
     def begin_durable_job(
         self,
         notebook_id: str,

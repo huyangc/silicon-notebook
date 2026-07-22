@@ -3,7 +3,7 @@
 的唯一所有者。SQLiteRepository 只保留冻结签名 delegate。
 
 组合规则 (Gate 8):
-* 引擎只持窄端口 —— ask_state(prepare_turn/begin_durable_job/
+* 引擎只持窄端口 —— ask_state(prepare_turn_for_job/begin_durable_job/
   save_answer_for_job/finish_job,Task 22)、
   retrieval(candidates+graph,Task 21)、evidence_context(上下文/锚点/引用/
   tier,Task 21)、model_clients/model_errors(RuntimeModelProvider,一个所有
@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         AskCandidatePort,
         AskGraphPort,
         AskModelClientProvider,
+        PreparedAskTurn,
         RetrievalPort,
     )
 
@@ -448,6 +449,33 @@ class AskService:
         except Exception:  # noqa: BLE001 — 判定失败不拖垮 ask,退化为不提示
             return False
 
+    def _prepare_turn(
+        self,
+        notebook_id: str,
+        conversation_id: Optional[str],
+        question: str,
+        *,
+        user_id: str,
+        job_id: str,
+    ) -> "PreparedAskTurn":
+        """Prepare through the durable lease when this is a public Ask job.
+
+        Legacy engine-level compatibility calls without a job keep the old
+        create-or-continue behavior.  Once a durable job exists, however, its
+        exact parent and running status are authoritative: cancellation or
+        deletion raises before any fallback conversation can be created.
+        """
+        if not job_id:
+            return self.ask_state.prepare_turn(
+                notebook_id, conversation_id, question, user_id
+            )
+        turn = self.ask_state.prepare_turn_for_job(
+            job_id, notebook_id, conversation_id, user_id
+        )
+        if turn is None:
+            raise AskCancelled()
+        return turn
+
     def _save_answer(
         self,
         notebook_id: str,
@@ -796,8 +824,13 @@ class AskService:
         self.notebooks.get_notebook(notebook_id)
         question = payload.question.strip()
         raise_if_cancelled(cancel_event)
-        turn = self.ask_state.prepare_turn(
-            notebook_id, payload.conversation_id, question, user_id)
+        turn = self._prepare_turn(
+            notebook_id,
+            payload.conversation_id,
+            question,
+            user_id=user_id,
+            job_id=job_id,
+        )
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
         retrieval_query = self._rewrite_followup_query(history, question, cancel_event)
@@ -1055,8 +1088,13 @@ class AskService:
         self.notebooks.get_notebook(notebook_id)
         question = payload.question.strip()
         raise_if_cancelled(cancel_event)
-        turn = self.ask_state.prepare_turn(
-            notebook_id, payload.conversation_id, question, user_id)
+        turn = self._prepare_turn(
+            notebook_id,
+            payload.conversation_id,
+            question,
+            user_id=user_id,
+            job_id=job_id,
+        )
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, question)
@@ -1243,8 +1281,13 @@ class AskService:
         self.notebooks.get_notebook(notebook_id)
         question = payload.question.strip()
         raise_if_cancelled(cancel_event)
-        turn = self.ask_state.prepare_turn(
-            notebook_id, payload.conversation_id, question, user_id)
+        turn = self._prepare_turn(
+            notebook_id,
+            payload.conversation_id,
+            question,
+            user_id=user_id,
+            job_id=job_id,
+        )
         conversation_id, history = turn.conversation_id, turn.history
         raise_if_cancelled(cancel_event)
         memory_hits = self._memory_hits(user_id, notebook_id, question)

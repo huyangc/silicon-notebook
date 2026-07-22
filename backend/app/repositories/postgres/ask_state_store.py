@@ -103,6 +103,42 @@ class AskStateStore:
             history = self.conversation_history(db, conversation_id)
         return PreparedAskTurn(conversation_id=conversation_id, history=history)
 
+    def prepare_turn_for_job(
+        self,
+        job_id: str,
+        notebook_id: str,
+        conversation_id: "str | None",
+        user_id: str,
+    ) -> "PreparedAskTurn | None":
+        """Prepare only the exact still-running durable job and its parent.
+
+        The conversation row is the lifecycle lease.  Once it is locked, a
+        non-locking job-status check is sufficient: cancellation may still win
+        later, but this transaction can neither recreate a missing parent nor
+        persist into a replacement conversation.  Avoiding a job-row lock here
+        also preserves the canonical no-cycle order with final save
+        (job→conversation).
+        """
+        if not conversation_id:
+            return None
+        with self.database.write() as db:
+            parent = db.execute(
+                "SELECT id FROM conversations WHERE id=%s AND notebook_id=%s "
+                "AND created_by=%s FOR UPDATE",
+                (conversation_id, notebook_id, user_id),
+            ).fetchone()
+            if parent is None:
+                return None
+            running = db.execute(
+                "SELECT 1 FROM ask_jobs WHERE id=%s AND notebook_id=%s "
+                "AND conversation_id=%s AND created_by=%s AND status='running'",
+                (job_id, notebook_id, conversation_id, user_id),
+            ).fetchone()
+            if running is None:
+                return None
+            history = self.conversation_history(db, conversation_id)
+        return PreparedAskTurn(conversation_id=conversation_id, history=history)
+
     # ------------------------------------------------------------------
     # durable job state machine (running → done/failed/cancelled)
     # ------------------------------------------------------------------
@@ -518,27 +554,57 @@ class AskStateStore:
     def bulk_delete_conversations(
         self, notebook_id: str, older_than_days: int, user_id: str
     ) -> int:
-        """Delete the given user's conversations in `notebook_id` whose last
-        activity (`updated_at`) is strictly older than `older_than_days` days,
-        cascading to their answers. Returns the number deleted.  The notebook-
-        existence KeyError guard stays with the facade adapter."""
+        """Delete inactive conversations under their parent-row leases.
+
+        Candidate parents are locked in stable id order, then ownership,
+        cutoff, child-answer completion and absence of a running durable job
+        are revalidated in the same transaction.  Begin/prepare/raw save all
+        need the same parent lock, so none can revive a snapshotted id between
+        child and parent deletion.  Job rows are deliberately not locked while
+        the parent is held, avoiding an inverse edge with final save's
+        job→conversation order.
+        """
         if older_than_days < 1:
             raise ValueError("older_than_days must be >= 1")
         cutoff = normalize_timestamp(
             (datetime.now() - timedelta(days=older_than_days)).replace(microsecond=0)
         )
         with self.database.write() as db:
-            ids = [
+            candidates = [
                 row["id"]
                 for row in db.execute(
                     "SELECT id FROM conversations "
-                    "WHERE notebook_id = %s AND created_by = %s AND updated_at < %s",
+                    "WHERE notebook_id=%s AND created_by=%s AND updated_at<%s "
+                    "ORDER BY id COLLATE \"C\" FOR UPDATE",
                     (notebook_id, user_id, cutoff),
                 ).fetchall()
             ]
-            db.executemany("DELETE FROM answers WHERE conversation_id = %s", [(cid,) for cid in ids])
-            db.executemany("DELETE FROM conversations WHERE id = %s", [(cid,) for cid in ids])
-        return len(ids)
+            deleted = 0
+            for conversation_id in candidates:
+                eligible = db.execute(
+                    "SELECT 1 FROM conversations c WHERE c.id=%s "
+                    "AND c.notebook_id=%s AND c.created_by=%s AND c.updated_at<%s "
+                    "AND NOT EXISTS (SELECT 1 FROM ask_jobs j "
+                    "WHERE j.conversation_id=c.id AND j.status='running')",
+                    (conversation_id, notebook_id, user_id, cutoff),
+                ).fetchone()
+                if eligible is None:
+                    continue
+                db.execute(
+                    "DELETE FROM answers WHERE conversation_id=%s",
+                    (conversation_id,),
+                )
+                parent = db.execute(
+                    "DELETE FROM conversations c WHERE c.id=%s "
+                    "AND c.notebook_id=%s AND c.created_by=%s AND c.updated_at<%s "
+                    "AND NOT EXISTS (SELECT 1 FROM answers a "
+                    "WHERE a.conversation_id=c.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM ask_jobs j "
+                    "WHERE j.conversation_id=c.id AND j.status='running')",
+                    (conversation_id, notebook_id, user_id, cutoff),
+                )
+                deleted += parent.rowcount
+        return deleted
 
     # ------------------------------------------------------------------
     # feedback

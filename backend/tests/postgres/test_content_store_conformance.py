@@ -29,7 +29,7 @@ from app.repositories.sqlite.knowhow_transfer_store import (
 from app.repositories.sqlite.memory_store import MemoryStore as SqliteMemoryStore
 from app.repositories.sqlite.report_store import ReportStore as SqliteReportStore
 from app.services.repository_runtime import RepositoryCompatibilitySeams
-from app.services.ask_execution import AskCancellationRegistry
+from app.services.ask_execution import AskCancellationRegistry, AskExecutionCoordinator
 from app.services.ask_service import AskService
 from app.services.cancellation import AskCancelled, raise_if_cancelled
 
@@ -309,6 +309,146 @@ def _sync_ask_service(content_harness) -> AskService:
     return service
 
 
+class _PausedJobPreparation:
+    """Pause either the legacy or durable preparation entry at one barrier."""
+
+    def __init__(self, delegate, entered: threading.Event, release: threading.Event):
+        self.delegate = delegate
+        self.entered = entered
+        self.release = release
+
+    def __getattr__(self, name):
+        return getattr(self.delegate, name)
+
+    def _wait(self) -> None:
+        self.entered.set()
+        assert self.release.wait(timeout=5)
+
+    def prepare_turn(self, *args, **kwargs):
+        self._wait()
+        return self.delegate.prepare_turn(*args, **kwargs)
+
+    def prepare_turn_for_job(self, *args, **kwargs):
+        self._wait()
+        return self.delegate.prepare_turn_for_job(*args, **kwargs)
+
+
+class _ExecutorSubmitter:
+    def __init__(self, executor: ThreadPoolExecutor):
+        self.executor = executor
+        self.future = None
+
+    def submit(self, fn, *args, **kwargs):
+        kwargs.pop("name", None)
+        kwargs.pop("notify_pending", None)
+        self.future = self.executor.submit(fn, *args, **kwargs)
+        return self.future
+
+
+@pytest.mark.parametrize("surface", ("sync", "stream"))
+def test_cancel_before_job_bound_prepare_never_creates_a_replacement_conversation(
+    content_harness, surface,
+):
+    """Cancellation can win after the engine's first in-memory check.
+
+    Preparation must then validate the exact durable job and exact parent; it
+    must not fall back to creating a second empty conversation after cancel
+    cleanup removed the first one. The same engine path serves sync and stream.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+    service = _sync_ask_service(content_harness)
+    service.ask_state = _PausedJobPreparation(content_harness.ask, entered, release)
+    request = AskRequest(question=f"cancel before prepare ({surface})", mode="chunk")
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        if surface == "sync":
+            future = executor.submit(service.ask_current, "nb-content", request)
+            events = None
+        else:
+            submitter = _ExecutorSubmitter(executor)
+            coordinator = AskExecutionCoordinator(
+                ask_state=service.ask_state,
+                cancellations=service.cancellations,
+                job_submitter=submitter,
+                event_log=SimpleNamespace(
+                    logger=SimpleNamespace(exception=lambda *_args, **_kwargs: None)
+                ),
+                ask=lambda: service,
+            )
+            events = coordinator.start(
+                "nb-content",
+                request,
+                SimpleNamespace(id="chunk"),
+                user_id="user-content",
+            )
+            future = submitter.future
+
+        assert entered.wait(timeout=5)
+        try:
+            assert request.conversation_id
+            active = content_harness.ask.get_conversation(
+                request.conversation_id
+            ).active_job
+            assert active is not None
+            job_id = active.job_id
+            assert service.cancel_job(job_id, "user-content") == {
+                "status": "cancelled",
+                "job_id": job_id,
+            }
+            with pytest.raises(KeyError):
+                content_harness.ask.get_conversation(request.conversation_id)
+        finally:
+            release.set()
+
+        if surface == "sync":
+            with pytest.raises(AskCancelled):
+                future.result(timeout=5)
+        else:
+            delivered = []
+            while True:
+                event = events.get(timeout=5)
+                if event is None:
+                    break
+                delivered.append(event)
+            future.result(timeout=5)
+            assert delivered[0] == {"event": "started", "job_id": job_id}
+            assert any(event["event"] == "cancelled" for event in delivered)
+            assert not any(event["event"] == "final" for event in delivered)
+
+    assert content_harness.ask.ask_job_status(job_id)["status"] == "cancelled"
+    assert content_harness.ask.list_conversations(
+        "nb-content", "user-content"
+    ) == []
+    mark = "%s" if content_harness.backend == "postgres" else "?"
+    with content_harness.database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM answers WHERE notebook_id=" + mark,
+            ("nb-content",),
+        ).fetchone()["n"] == 0
+
+
+def test_bulk_delete_skips_an_old_conversation_with_a_running_job(content_harness):
+    request = AskRequest(question="running old conversation", mode="chunk")
+    job_id, conversation_id = content_harness.ask.begin_durable_job(
+        "nb-content", request, "chunk", "user-content"
+    )
+    mark = "%s" if content_harness.backend == "postgres" else "?"
+    with content_harness.database.write() as connection:
+        if content_harness.backend == "sqlite":
+            content_harness.database.begin_guarded_write(connection)
+        connection.execute(
+            "UPDATE conversations SET updated_at=" + mark + " WHERE id=" + mark,
+            ("2000-01-01T00:00:00+00:00", conversation_id),
+        )
+
+    assert content_harness.ask.bulk_delete_conversations(
+        "nb-content", 1, "user-content"
+    ) == 0
+    assert content_harness.ask.get_conversation(conversation_id).id == conversation_id
+    assert content_harness.ask.ask_job_status(job_id)["status"] == "running"
+
+
 def test_sync_ask_running_job_protects_conversation_until_atomic_final_save(
     content_harness,
 ):
@@ -478,6 +618,139 @@ def test_conversation_bound_answer_save_rejects_a_missing_parent(
         assert connection.execute(
             "SELECT COUNT(*) AS n FROM answers WHERE conversation_id=" + mark,
             ("conv-missing-parent",),
+        ).fetchone()["n"] == 0
+
+
+@pytest.mark.postgres_integration
+def test_postgres_bulk_delete_cannot_remove_a_concurrently_continued_conversation(
+    postgres_database,
+):
+    """A real continuation holds the parent row while bulk deletion starts.
+
+    The bulk store must block on that parent, re-evaluate its now-fresh
+    ``updated_at`` after the continuation commits, and leave the job's final
+    answer reachable. Coordination uses transaction/Event barriers and server
+    lock introspection; there is no timing sleep.
+    """
+    from app.repositories.postgres.database import PostgresDatabase
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    seams = _seams()
+    store = PostgresAskStateStore(postgres_database, seams)
+    old_turn = store.prepare_turn(
+        "nb-content", None, "old conversation", "user-content"
+    )
+    with postgres_database.write() as connection:
+        connection.execute(
+            "UPDATE conversations SET updated_at=%s WHERE id=%s",
+            ("2000-01-01T00:00:00+00:00", old_turn.conversation_id),
+        )
+
+    continuation_database = PostgresDatabase(
+        postgres_database.settings, postgres_database.root_dir
+    )
+    bulk_database = PostgresDatabase(
+        postgres_database.settings, postgres_database.root_dir
+    )
+    continuation_store = PostgresAskStateStore(continuation_database, seams)
+    bulk_store = PostgresAskStateStore(bulk_database, seams)
+    continuation_uncommitted = threading.Event()
+    release_continuation = threading.Event()
+    bulk_connected = threading.Event()
+    bulk_pid: list[int] = []
+    original_continuation_write = continuation_database.write
+    original_bulk_write = bulk_database.write
+
+    @contextmanager
+    def held_continuation_write(*args, **kwargs):
+        with original_continuation_write(*args, **kwargs) as connection:
+            yield connection
+            continuation_uncommitted.set()
+            assert release_continuation.wait(timeout=5)
+
+    @contextmanager
+    def observed_bulk_write(*args, **kwargs):
+        with original_bulk_write(*args, **kwargs) as connection:
+            bulk_pid.append(
+                int(connection.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"])
+            )
+            bulk_connected.set()
+            yield connection
+
+    continuation_database.write = held_continuation_write
+    bulk_database.write = observed_bulk_write
+    request = AskRequest(
+        question="continued while deletion starts",
+        conversation_id=old_turn.conversation_id,
+        mode="chunk",
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            continuation_future = executor.submit(
+                continuation_store.begin_durable_job,
+                "nb-content",
+                request,
+                "chunk",
+                "user-content",
+            )
+            assert continuation_uncommitted.wait(timeout=5)
+            try:
+                bulk_future = executor.submit(
+                    bulk_store.bulk_delete_conversations,
+                    "nb-content",
+                    1,
+                    "user-content",
+                )
+                assert bulk_connected.wait(timeout=5)
+
+                blocked = False
+                deadline = time.monotonic() + 5
+                with postgres_database.connect() as inspector:
+                    while time.monotonic() < deadline:
+                        blockers = inspector.execute(
+                            "SELECT pg_blocking_pids(%s) AS pids", (bulk_pid[0],)
+                        ).fetchone()["pids"]
+                        if blockers:
+                            blocked = True
+                            break
+                assert blocked, "bulk deletion never contended on the conversation parent"
+            finally:
+                release_continuation.set()
+            job_id, continued_id = continuation_future.result(timeout=5)
+            assert continued_id == old_turn.conversation_id
+            assert bulk_future.result(timeout=5) == 0
+    finally:
+        release_continuation.set()
+        continuation_database.close()
+        bulk_database.close()
+
+    response = AskResponse(
+        answer="reachable answer",
+        conclusion="reachable answer",
+        conversation_id=old_turn.conversation_id,
+        citations=[],
+        anchors=[],
+    )
+    answer_id = store.save_answer_for_job(
+        job_id,
+        "nb-content",
+        old_turn.conversation_id,
+        request.question,
+        response,
+        "user-content",
+    )
+    assert answer_id
+    detail = store.get_conversation(old_turn.conversation_id)
+    assert detail.turn_count == 1
+    assert detail.turns[0].answer_id == answer_id
+    assert store.ask_job_status(job_id)["status"] == "done"
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM answers a LEFT JOIN conversations c "
+            "ON c.id=a.conversation_id WHERE a.conversation_id IS NOT NULL "
+            "AND c.id IS NULL"
         ).fetchone()["n"] == 0
 
 

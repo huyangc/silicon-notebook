@@ -158,6 +158,12 @@ def test_ask_turn_result_is_neutral_and_preserves_the_conversation_history_shape
     )
     assert get_type_hints(AskStateStorePort.prepare_turn)["return"] is PreparedAskTurn
     assert get_type_hints(AskStateStore.prepare_turn)["return"] is PreparedAskTurn
+    assert get_type_hints(AskStateStorePort.prepare_turn_for_job)["return"] == (
+        PreparedAskTurn | None
+    )
+    assert get_type_hints(AskStateStore.prepare_turn_for_job)["return"] == (
+        PreparedAskTurn | None
+    )
 
 
 def test_mention_alias_scan_is_a_portable_store_operation():
