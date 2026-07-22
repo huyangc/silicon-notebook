@@ -4,13 +4,14 @@ This file is the working contract for future agents and developers in this repos
 
 ## Documentation Sync
 
-When making changes that affect setup, product behavior, architecture, or development constraints, update all three files together:
+When making changes that affect setup, product behavior, architecture, or development constraints, update all four files together:
 
 - `README.md`
 - `README_zh.md`
 - `AGENTS.md`
+- `CLAUDE.md`
 
-Do not update only one language README when the same information should be available in both.
+Do not update only one language README when the same information should be available in both. `CLAUDE.md` belongs in this set because Claude Code loads it and not this file: leave it out of a constraint change and the standard that actually reaches the agent goes stale while these three look current.
 
 ## Tracking Completed Spec Features
 
@@ -480,7 +481,7 @@ http://localhost:3000
 
 - For every new feature development task, create a new git worktree by default and do the work there on a new feature branch. Do not switch branches directly in the main local checkout for feature work. If the current directory is already an isolated linked worktree, continue there; otherwise create a worktree first, then branch, develop, verify, and open the PR from that branch.
 - Execute approved multi-step implementation plans with subagent-driven development by default: use a fresh implementation subagent per task, then run task-scoped specification and code-quality review before advancing. Pure research, design, status, and review-only work does not require a worktree or subagents.
-- Spawning a subagent must state the model explicitly rather than inheriting the caller's, tiered by how much judgment the task needs: `opus` for judgment work (writing plans, review, architectural trade-offs, hard diagnoses), `sonnet` for transcription-shaped implementation whose spec is already pinned down, `haiku` for pure search and location. `CLAUDE.md` carries the full standard — Claude Code auto-loads only that file, never this one, so `CLAUDE.md` inlines the red lines and indexes the sections here; this file stays the source of truth where the two disagree. The PreToolUse gate `.claude/hooks/require-subagent-model.py` enforces the rule, and `.claude/agents/` ships three roles with the model pinned in their frontmatter: `impl-task` (sonnet), `spec-review` (opus), `code-quality-review` (opus).
+- Spawning a subagent must state the model explicitly rather than inheriting the caller's, tiered by how much judgment the task needs: `opus` for judgment work (writing plans, review, architectural trade-offs, hard diagnoses), `sonnet` for transcription-shaped implementation whose spec is already pinned down, `haiku` for pure search and location. `CLAUDE.md` carries the full subagent-model standard — Claude Code auto-loads only `CLAUDE.md` and `.claude/rules/`, never this file, so `CLAUDE.md` inlines the red lines and indexes the sections here; this file stays the source of truth where the two disagree, and `CLAUDE.md` enumerates the few deliberate exceptions. The PreToolUse gate `.claude/hooks/require-subagent-model.py` enforces the rule, and `.claude/agents/` ships three roles with the model pinned in their frontmatter: `impl-task` (sonnet), `spec-review` (opus), `code-quality-review` (opus).
 - Do not revert user changes.
 - Do not remove generated or user-provided files unless the user explicitly asks.
 - Keep changes scoped to the requested product or engineering task.
