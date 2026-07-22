@@ -223,21 +223,73 @@ def test_eviction_does_not_wipe_cache_when_batch_exceeds_entry_count(tmp_path):
         )
 
 
-def test_hot_entries_survive_eviction(tmp_path):
-    """热条目保护。
+def _run_hot_entry_scenario(cache):
+    """灌 5 条"热"数据，再灌 15 条冷数据，期间持续访问 h0-h2。
 
-    注意：LRU 看的是最后访问时间而非访问次数。有效用例必须在灌入冷数据的过程中
-    交错访问热条目，否则热条目的 used_at 仍旧早于所有冷条目，被淘汰是正确行为。
+    返回 (存活的热条目, 存活的冷条目)。LRU 看的是最后访问时间而非访问次数，所以
+    必须在灌冷数据的**过程中**交错访问热条目——否则热条目的 used_at 早于所有冷
+    条目，被淘汰是正确行为，用例等于什么都没测。
+    """
+    for i in range(5):
+        cache.put(f"h{i}", "z" * 20_000)
+    for i in range(5, 20):
+        cache.put(f"c{i}", "z" * 20_000)
+        for j in range(3):
+            cache.get(f"h{j}")              # h0-h2 持续被访问
+    hot = [f"h{j}" for j in range(3) if cache.get(f"h{j}") is not None]
+    cold = [f"c{i}" for i in range(5, 20) if cache.get(f"c{i}") is not None]
+    return hot, cold
+
+
+def test_hot_entries_are_not_protected_at_the_production_refresh_window(tmp_path):
+    """⚠ 如实记录一个已知权衡：**生产配置下没有热条目保护**。
+
+    refresh_window 默认 3600s，而 make_cache_backend() 不暴露这个参数——生产上它
+    恒为 3600。命中在这一小时窗口内不刷新 used_at（那正是粗粒度 LRU 换掉写放大的
+    方式），于是 used_at ≈ 写入时间，淘汰**退化为近似 FIFO**：反复被访问的条目
+    并不会因此延寿。
+
+    实测（同场景只改这一个参数）：
+        refresh_window=0        hot survivors = 3/3
+        refresh_window=3600.0   hot survivors = 0/3     ← 生产默认值
+    `0/3` 正是设计文档里用来否决 diskcache 的那个数字。
+
+    **刻意不改默认值**：把 refresh_window 调小能换回热条目保护，但代价是把 cache
+    hit 这条最热的路径重新变成写——正是粗粒度 LRU 要消除的写放大，在高命中率场景
+    （reparse 重跑）下非常可观。诚实记录优于加复杂度：缓存条目丢了只是多打一次
+    后端，写放大却是持续成本。
+
+    本测试锁的就是这个真实行为。将来若真要做热条目保护（例如把 refresh_window
+    接进工厂、或改用访问计数），本测试会转红——那时应当连同这段说明一起更新，而
+    不是把断言改回 3/3 了事。
+    """
+    c = _mk(tmp_path, size_limit=200_000)     # 不传 refresh_window = 生产默认 3600
+    assert c.refresh_window == 3600.0, "前提失效：本测试要跑的是生产默认值"
+
+    hot, cold = _run_hot_entry_scenario(c)
+
+    assert hot == [], (
+        f"热条目在生产配置下竟然存活了（{hot}）——refresh_window 的语义变了？"
+        "若确实做了热条目保护，请连同本测试的说明一并更新。"
+    )
+    # 近似 FIFO 的正面特征：活下来的是**最后写入**的那批冷条目，连续且靠后。
+    assert cold, "全被淘汰了，场景没构造对"
+    assert cold == sorted(cold, key=lambda k: int(k[1:])), "存活集合不连续"
+    assert cold[-1] == "c19", f"最后写入的条目没活下来，不是 FIFO 形态：{cold}"
+    assert "c5" not in cold, f"最早写入的冷条目还活着，不是 FIFO 形态：{cold}"
+
+
+def test_hot_entries_survive_eviction_with_fine_grained_lru(tmp_path):
+    """LRU 机器本身是对的：refresh_window=0（每次命中都刷 used_at）时热条目全活。
+
+    ⚠ 这个配置**生产上到不了**——make_cache_backend() 不暴露 refresh_window。保留
+    本测试是为了区分两件事：「淘汰逻辑写错了」与「粗粒度 LRU 是一个刻意的权衡」。
+    上面那条锁生产行为，这条锁机器正确性；将来若把 refresh_window 接进工厂，这条
+    就是它的验收测试。
     """
     c = _mk(tmp_path, size_limit=200_000, refresh_window=0)
-    for i in range(5):
-        c.put(f"h{i}", "z" * 20_000)
-    for i in range(5, 20):
-        c.put(f"c{i}", "z" * 20_000)
-        for j in range(3):
-            c.get(f"h{j}")                  # h0-h2 持续被访问
-    alive = [f"h{j}" for j in range(3) if c.get(f"h{j}") is not None]
-    assert len(alive) == 3, f"热条目被误删：只剩 {alive}"
+    hot, _ = _run_hot_entry_scenario(c)
+    assert len(hot) == 3, f"细粒度 LRU 下热条目仍被误删：只剩 {hot}"
 
 
 def test_expired_entries_are_swept_before_lru_eviction(tmp_path):

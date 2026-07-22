@@ -7,6 +7,15 @@
 cache hit 是热路径，逐次 UPDATE 会把"读"变成"写"，在高命中率场景（reparse 重跑）
 下写放大非常可观。牺牲一点淘汰精度换掉绝大部分写。
 
+⚠ 这个"一点精度"具体是多少，如实写在这里：refresh_window 默认 3600s，而
+make_cache_backend() 刻意不暴露它——**生产上它恒为 3600**。一小时窗口内的命中不刷新
+used_at，于是 used_at ≈ 写入时间，淘汰**退化为近似 FIFO**，反复被访问的条目并不会
+因此延寿。同场景只改这一个参数的实测：refresh_window=0 时热条目存活 3/3，
+refresh_window=3600 时 0/3。**刻意不改默认值**：调小它能换回热条目保护，代价是把
+cache hit 这条最热的路径重新变成写。缓存条目丢了只是多打一次后端（可恢复），写放大
+却是持续成本。测试 test_hot_entries_are_not_protected_at_the_production_refresh_window
+锁的就是这个真实行为——将来若真做热条目保护，请连同这段说明一起改，别把断言改回 3/3。
+
 total_bytes 在 meta 表里增量维护，避免每次裁剪都 SUM() 全表扫。进程崩溃可能让它
 漂移，用 recount() 兜底重算。
 
