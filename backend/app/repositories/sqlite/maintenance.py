@@ -287,6 +287,33 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             }
 
+    def sources_with_completed_parse(self, notebook_id: str) -> set:
+        """该 notebook 下 parse **已跑完**(无论产出几个 element)的 source_id 集合。
+
+        与 sources_with_elements 的区别就是那个「无论产出几个」:一次成功的 parse
+        完全可以产出零个 element —— 扫描版/纯图 PDF 没有文本层就是这样,
+        process_source 照常走完管线、置 'extracted' 并把「No extractable text」
+        写进 error_message 当提示(source_ingestion.py 的 empty_hint)。
+        'metadata-only'(只导入了文件元数据、没有内容)同理,永远不会有 element。
+
+        run_ingest 的重解析判据必须同时看这两个集合:只看 elements 的话,上面两类
+        **已经成功**的源每次重跑都会被当成「上次 parse 中断」再解析一遍,永远不收敛
+        —— 与 A4 本来要消灭的那个 bug 是同一类,只是换了个方向。
+
+        ⚠ 'parsed' **不在**终态集合里,尽管它字面上像「已解析」:它是管线的过渡态
+        (走完会继续置 'extracted'),所以一个静止在 'parsed' 却零 element 的源恰恰是
+        「parse_status 看似前进却没落地」那一类——run_reparse 就是为它存在的,必须重跑。
+        零 element 的**成功** parse 一定走到了 'extracted'。"""
+        with self._runtime.database.connect() as db:
+            return {
+                r["id"]
+                for r in db.execute(
+                    "SELECT id FROM sources WHERE notebook_id = ? "
+                    "AND parse_status IN ('extracted', 'metadata-only')",
+                    (notebook_id,),
+                ).fetchall()
+            }
+
     def count_sources_missing_kg(self, notebook_id: str) -> int:
         with self._runtime.database.connect() as db:
             return db.execute(

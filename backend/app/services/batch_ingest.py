@@ -376,20 +376,28 @@ def run_ingest(
 ) -> dict[str, int]:
     """Phase 1:解析+分块(摄取期 EMBED 置空)+ 收尾低并发补 chunk 向量。无 LLM。
 
-    跳过判据是「有没有 source_elements」而非「hash 在不在库」——与 run_all 同一判据。
-    file_hash 是 INSERT 时写的(早于 parse),所以一个 parse 中途被中断的源,hash 已经
-    在库、elements 却是空的:旧的二元判定(hash 命中即 skipped)会把它永久认账成已摄取,
-    这个源就再也补不回来了。两分流(ingest 是无 KG 阶段,没有「已有 KG → 跳过」那一档):
-      hash 未命中        → upload_sources → uploaded
-      命中且有 elements  → 真的已摄取     → skipped
-      命中但无 elements  → process_source → reparsed(重新 parse 补 elements)
+    跳过判据是「这个源的 parse 到底跑完没有」而非「hash 在不在库」。file_hash 是
+    INSERT 时写的(早于 parse),所以一个 parse 中途被中断的源,hash 已经在库、内容却
+    是空的:旧的二元判定(hash 命中即 skipped)会把它永久认账成已摄取,再也补不回来。
+    两分流(ingest 是无 KG 阶段,没有「已有 KG → 跳过」那一档):
+      hash 未命中         → upload_sources → uploaded
+      命中且 parse 已跑完 → 真的已摄取     → skipped
+      命中且 parse 没跑完 → process_source → reparsed / failed(按真实结果计)
+
+    「parse 已跑完」= 有 elements **或** parse_status 已是终态成功。两者都要:一次
+    成功的 parse 可以产出零个 element(扫描版/纯图 PDF 没有文本层,导入的
+    'metadata-only' 源更是永远没有),只看 elements 会把这些**已经成功**的源每次重跑
+    都当成「上次中断」再解析一遍,永远不收敛——与本函数要修的 bug 同类,只是反了个向。
     """
     log = log or (lambda _e: None)
     counts = {"uploaded": 0, "skipped": 0, "reparsed": 0, "failed": 0}
     orig_provider = repo.settings.embed_provider
     repo.settings.embed_provider = ""   # 摄取期零嵌入:parse+chunk 快、无 429
 
-    parsed = repo.maintenance.sources_with_elements(notebook_id)   # 进池前取一次快照
+    # 进池前各取一次快照。两个都要:见 docstring——零 element 的成功 parse 只有
+    # sources_with_completed_parse 认得出来。
+    done = (repo.maintenance.sources_with_elements(notebook_id)
+            | repo.maintenance.sources_with_completed_parse(notebook_id))
     # `parsed` 是快照,看不见本次运行刚产出的 elements:输入目录里若有两个内容相同的
     # 文件,第二个会 hash 命中(第一个刚建的源)却不在快照里 → 被误判成需要 reparse,
     # 白跑一遍 parse。用「本次已认领的内容哈希」集合挡掉(线程安全,_one 在池里并发跑)。
@@ -414,11 +422,20 @@ def run_ingest(
                     scheduler=None,
                 )
                 return ("uploaded", path, None)
-            if sid in parsed:
+            if sid in done:
                 return ("skipped", path, None)
-            # 已建源但没有 elements(上次 parse 中断/未落地)→ 重新 parse。调的是
+            # 已建源但 parse 没跑完(上次中断/未落地)→ 重新 parse。调的是
             # upload_sources(scheduler=None) 内部同一个 process_source,不引入新的模型暴露。
-            repo.process_source(sid)
+            #
+            # ⚠ process_source 对解析异常是**自己吞掉**的:它在内部 except 里把源置
+            # 'failed' 然后照常 return SourceSummary(source_ingestion.py 的管线 except
+            # 分支不 re-raise)。所以外面这个 try/except 对普通解析失败根本不可达——
+            # 必须查返回值的真实状态,否则失败会被计成 reparsed,汇总数字说谎。
+            summary = repo.process_source(sid)
+            if (summary.parse_status or summary.status) == "failed":
+                # SourceSummary 不暴露 error_message 列,失败详情在 summary 文案里
+                # (管线 except 写的 "Parsing failed; see source error.")。
+                return ("failed", path, summary.summary or "parse failed")
             return ("reparsed", path, None)
         except Exception as exc:   # noqa: BLE001 — 单文件失败隔离
             return ("failed", path, f"{type(exc).__name__}: {exc}")
