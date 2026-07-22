@@ -62,6 +62,13 @@ The post-review rerun remained green (`76 passed in 5.11s`). All changed-path
 regressions, including the complete snapshot-verifier and relation-embedding
 files, passed together (`49 passed in 8.20s`).
 
+The final offline-benchmark review added one more strict boundary test. It was
+RED (`1 failed`) because an ambient checked-in example registry bound model
+workloads in the supposedly offline benchmark, then GREEN (`1 passed`) after
+the benchmark composition root pinned an explicit empty provider. The Task 5
+suite plus the real scheduled-client regressions subsequently passed together
+(`311 passed in 20.96s`).
+
 The real-runtime three-source peak test binds multiple embedding workloads to
 one physical service and observes a raw upstream peak exactly equal to that
 service's configured maximum (`2`), proving the service scheduler—not each
@@ -141,6 +148,13 @@ empty `MODEL_SERVICES_CONFIG`, validates the full registry workload catalog is
 unbound, and pins an empty registry while the offline repository is alive so
 hostile process/`.env` legacy variables cannot activate a provider. The
 fixture generator no longer passes deleted Settings fields.
+
+The SQLite write benchmark is also offline by construction: it passes
+`model_services_config=""` and an explicit empty registry/provider rather than
+building from ambient `Settings()`. A direct probe with
+`MODEL_SERVICES_CONFIG=model-services.example.toml` and all example credential
+variables populated stored `4/4` rows with zero errors and no bound workload or
+model-network path.
 
 ## Audit and Task 6 handoff
 
