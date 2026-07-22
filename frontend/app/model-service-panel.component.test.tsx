@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { expect, test, vi } from "vitest";
 
@@ -60,6 +60,24 @@ function renderPanel(overrides: Partial<React.ComponentProps<typeof ModelService
   };
   const view = render(<ModelServicePanel {...props} />);
   return { props, ...view };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function servicesWithSupportId(supportId: string) {
+  return {
+    services: services.services.map((item) => item.service_id === "reasoner-next"
+      ? { ...item, support_id: supportId }
+      : item),
+  };
 }
 
 
@@ -172,6 +190,50 @@ test("clipboard rejection is contained and leaves accessible manual-copy feedbac
     .toHaveTextContent("复制失败，请手动选择支持编号");
   expect(reasoner).toHaveTextContent("mdl-support_456");
   writeText.mockRestore();
+});
+
+
+test("a stale copy completion cannot change the next support id copy state", async () => {
+  const copyA = deferred<void>();
+  const copyB = deferred<void>();
+  const writeText = vi.spyOn(navigator.clipboard, "writeText")
+    .mockImplementationOnce(() => copyA.promise)
+    .mockImplementationOnce(() => copyB.promise);
+  const user = userEvent.setup();
+  const panel = renderPanel({ status: servicesWithSupportId("mdl-A") });
+
+  await user.click(screen.getByRole("button", { name: "复制支持编号" }));
+  expect(writeText).toHaveBeenLastCalledWith("mdl-A");
+
+  panel.rerender(<ModelServicePanel {...panel.props} status={servicesWithSupportId("mdl-B")} />);
+  const reasoner = screen.getByRole("group", { name: "推理服务" });
+  expect(within(reasoner).getByRole("button", { name: "复制支持编号" })).toBeEnabled();
+  await user.click(within(reasoner).getByRole("button", { name: "复制支持编号" }));
+  expect(writeText).toHaveBeenLastCalledWith("mdl-B");
+  expect(within(reasoner).getByRole("button", { name: "复制中…" })).toBeDisabled();
+
+  await act(async () => { copyA.resolve(); });
+  expect(within(reasoner).queryByRole("status")).not.toBeInTheDocument();
+  expect(within(reasoner).getByRole("button", { name: "复制中…" })).toBeDisabled();
+
+  await act(async () => { copyB.reject(new Error("B denied")); });
+  expect(await within(reasoner).findByRole("status"))
+    .toHaveTextContent("复制失败，请手动选择支持编号");
+});
+
+
+test("an unmounted support id copy ignores its deferred completion", async () => {
+  const copy = deferred<void>();
+  vi.spyOn(navigator.clipboard, "writeText").mockImplementationOnce(() => copy.promise);
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  const user = userEvent.setup();
+  const panel = renderPanel({ status: servicesWithSupportId("mdl-unmount") });
+
+  await user.click(screen.getByRole("button", { name: "复制支持编号" }));
+  panel.unmount();
+  await act(async () => { copy.resolve(); });
+
+  expect(consoleError).not.toHaveBeenCalled();
 });
 
 
