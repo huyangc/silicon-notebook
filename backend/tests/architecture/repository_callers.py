@@ -25,6 +25,9 @@ SQLITE_REPOSITORY_PREFIX = "backend/app/repositories/sqlite/"
 REPO_NAME_RE = re.compile(r"^(?:repo\d*|repository|[A-Za-z_]\w*_repo)$")
 
 SQL_REASON_BY_PATH = {
+    "backend/app/core/cache/sqlite_backend.py": (
+        "independent content-addressed LLM/embedding cache database"
+    ),
     "backend/app/core/llm_cache.py": "independent LLM response cache database",
     "backend/app/eval/db.py": "independent evaluation-results database",
     "scripts/bench_sqlite_writes.py": "synthetic temporary write benchmark database",
@@ -86,6 +89,9 @@ PRIVATE_REASON_BY_PATH = {
 }
 
 SQLITE_CONNECT_REASON_BY_PATH = {
+    "backend/app/core/cache/sqlite_backend.py": (
+        "independent content-addressed LLM/embedding cache database"
+    ),
     "backend/app/core/llm_cache.py": "independent LLM response cache database",
     "backend/app/eval/db.py": "independent evaluation-results database",
     "scripts/backfill_promotion_targets.py": "operator-supplied offline maintenance database",

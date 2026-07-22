@@ -479,6 +479,110 @@
     {
       "count": 1,
       "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend.__init__",
+      "target": "db.executescript"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend.__len__",
+      "target": "db.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend._connect",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend._delete",
+      "target": "db.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend._evict_if_needed",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend._used_at",
+      "target": "db.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend.clear",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend.evict_tag",
+      "target": "db.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend.get",
+      "target": "db.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend.put",
+      "target": "db.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend.recount",
+      "target": "db.execute"
+    },
+    {
+      "count": 2,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend.stats",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend.volume",
+      "target": "db.execute"
+    },
+    {
+      "count": 1,
+      "kind": "independent_sql",
       "path": "backend/app/core/llm_cache.py",
       "reason": "independent LLM response cache database",
       "scope": "<module>.LLMCache.__init__",
@@ -934,6 +1038,14 @@
     }
   ],
   "sqlite_connect": [
+    {
+      "count": 1,
+      "kind": "sqlite_connect",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend._connect",
+      "target": "sqlite3.connect"
+    },
     {
       "count": 1,
       "kind": "sqlite_connect",
