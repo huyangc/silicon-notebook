@@ -3,11 +3,12 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
+from tests.model_testkit import RecordingModelProvider
 
 class FakeLLM:
     configured = True
     def __init__(self): self.last_prompt = None
-    def chat_json(self, messages, schema_hint):
+    def chat_json(self, messages, schema_hint, **kwargs):
         self.last_prompt = messages[0]["content"]
         return json.dumps({"answer": "Engram is a memory module [k1].", "grounded": True})
 
@@ -21,9 +22,24 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("EMBED_API_KEY", "test-key")
     monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
-    r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
-    r.llm_client = FakeLLM()
+    llm = FakeLLM()
+    embedder = FakeEmbedder(dim=16)
+    provider = RecordingModelProvider(
+        chat_clients={
+            workload_id: llm
+            for workload_id in (
+                "ask_answer",
+                "reasoning_agent",
+                "query_rewrite",
+                "evidence_refine",
+                "graph_chain_verify",
+            )
+        },
+        embedding_clients={"retrieval_query_embedding": embedder},
+    )
+    r = SQLiteRepository(Settings(), model_provider=provider)
+    r.embedder = embedder
+    r.recording_model_provider = provider
     return r
 
 def _seed(repo):
@@ -38,7 +54,17 @@ def test_ask_query_excludes_scenario(repo):
     nb = _seed(repo)
     repo.ask(nb.id, AskRequest(question="what is engram", scenario={"domain": "ZZZUNIQUE"}))
     # scenario value must NOT leak into the retrieval/answer prompt
-    assert "ZZZUNIQUE" not in (repo.llm_client.last_prompt or "")
+    assert "ZZZUNIQUE" not in (repo.recording_model_provider.chat_clients["ask_answer"].last_prompt or "")
+
+
+def test_ask_final_synthesis_binds_ask_answer_workload(repo):
+    repo.settings.query_rewrite_enabled = False
+    repo.settings.chunk_kg_overlay_enabled = False
+    nb = _seed(repo)
+
+    repo.ask(nb.id, AskRequest(question="what is engram", mode="chunk"))
+
+    assert ("chat", "ask_answer") in repo.recording_model_provider.calls
 
 def test_retired_fast_mode_routes_to_chunk(repo, monkeypatch):
     # P4-5: mode="fast" is retired; _RETIRED_MODES maps it to "chunk".

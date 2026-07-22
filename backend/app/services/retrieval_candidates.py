@@ -87,18 +87,6 @@ class _RetrievalState:
         return self._retrieval
 
     @property
-    def llm_client(self):
-        return self.model_clients.llm_client
-
-    @property
-    def reasoning_llm_client(self):
-        return self.model_clients.reasoning_llm_client
-
-    @property
-    def rewrite_llm_client(self):
-        return self.model_clients.rewrite_llm_client
-
-    @property
     def rerank_client(self):
         return self.model_clients.rerank_client
 
@@ -120,16 +108,23 @@ class _RetrievalState:
     def _note_model_error(
         self,
         stage: str,
-        model: str,
-        exc: Exception,
+        model_or_error,
+        exc: Exception | None = None,
         service: str = "",
         *,
         provider_failure: bool = False,
         failed_fingerprint: str = "",
+        workload_id: str = "",
     ) -> None:
+        if workload_id:
+            error = exc or model_or_error
+            self.model_error_sink.note_model_error(
+                stage, error, workload_id=workload_id
+            )
+            return
         self.model_error_sink.note_model_error(
             stage,
-            model,
+            model_or_error,
             exc,
             service=service,
             provider_failure=provider_failure,
@@ -1440,7 +1435,7 @@ class CandidateRetrievalService(_RetrievalState):
             return base_seeds
         from app.services.query_rewrite import expand_query
         raise_if_cancelled(cancel_event)
-        exp = expand_query(self.rewrite_llm_client, question,
+        exp = expand_query(self.model_clients.chat("query_rewrite"), question,
                            corpus_langs=self._notebook_langs(notebook_id),
                            cancel_event=cancel_event)
         hl = " ".join(exp.high_level_keywords) or exp.query or question

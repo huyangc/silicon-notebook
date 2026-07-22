@@ -3,11 +3,12 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.core.model_safety import (
-    infer_model_error_service,
+    safe_model_display_name,
     safe_model_error_code,
-    safe_model_error_service,
+    safe_model_metadata_id,
     safe_model_error_stage,
     safe_model_label,
+    safe_model_support_id,
 )
 from app.models.common import Evidence
 from app.models.knowledge import KnowledgeRecord
@@ -107,22 +108,40 @@ class AnswerAnchor(BaseModel):
 
 
 class ModelError(BaseModel):
-    service: str = "llm"
+    service_id: str = ""
+    service_name: str = ""
+    workload_id: str = ""
+    workload_label: str = ""
     stage: str       # "embed" | "rerank" | "answer" | "rewrite"
     model: str = ""
     message: str
+    support_id: str = ""
 
     @model_validator(mode="before")
     @classmethod
-    def infer_legacy_service(cls, value: object) -> object:
-        if isinstance(value, dict) and "service" not in value:
-            value = {**value, "service": infer_model_error_service(value.get("stage"))}
-        return value
+    def normalize_legacy_shape(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        # Old persisted rows exposed a logical role in ``service``.  It is not
+        # a physical system service id, so replay must not invent one.
+        return {
+            **value,
+            "service_id": value.get("service_id", ""),
+            "service_name": value.get("service_name", ""),
+            "workload_id": value.get("workload_id", ""),
+            "workload_label": value.get("workload_label", ""),
+            "support_id": value.get("support_id", ""),
+        }
 
-    @field_validator("service", mode="before")
+    @field_validator("service_id", "workload_id", mode="before")
     @classmethod
-    def validate_service(cls, value: object) -> str:
-        return safe_model_error_service(value)
+    def validate_metadata_id(cls, value: object) -> str:
+        return safe_model_metadata_id(value)
+
+    @field_validator("service_name", "workload_label", mode="before")
+    @classmethod
+    def validate_display_name(cls, value: object) -> str:
+        return safe_model_display_name(value)
 
     @field_validator("stage", mode="before")
     @classmethod
@@ -138,6 +157,11 @@ class ModelError(BaseModel):
     @classmethod
     def validate_message(cls, value: object) -> str:
         return safe_model_error_code(value)
+
+    @field_validator("support_id", mode="before")
+    @classmethod
+    def validate_support_id(cls, value: object) -> str:
+        return safe_model_support_id(value)
 
 
 class AskResponse(BaseModel):

@@ -12,8 +12,19 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from app.core.config import Settings
+from app.core.ask_context import _ASK_MODEL_ERRORS
 from app.core.llm import OpenAICompatibleClient
 from app.core.llm_logging import interaction_support_scope
+from app.core.model_safety import (
+    MODEL_ERROR_MISSING_CONFIG,
+    MODEL_ERROR_UPSTREAM,
+    safe_model_display_name,
+    safe_model_error_code,
+    safe_model_error_stage,
+    safe_model_label,
+    safe_model_metadata_id,
+    safe_model_support_id,
+)
 from app.services.cancellation import AskCancelled
 from app.services.embedding import FakeEmbedder
 from app.services.model_registry import (
@@ -696,6 +707,78 @@ class RuntimeModelProvider:
                 busy=False,
             )
         return runtime.scheduler.snapshot()
+
+    def note_model_error(
+        self,
+        stage: str,
+        error: Exception | str,
+        legacy_error: Exception | None = None,
+        *legacy_args: Any,
+        workload_id: str = "",
+        **legacy_kwargs: Any,
+    ) -> None:
+        """Record raw diagnostics and expose only typed, credential-safe fields.
+
+        ``legacy_error`` keeps embedding/rerank call sites operational until
+        their Task-5 migration.  Legacy role/model hints are logs-only and
+        never become a physical service identity in the Ask payload.
+        """
+        del legacy_args, legacy_kwargs
+        raw_model = error if isinstance(error, str) else ""
+        exc: Exception = legacy_error or (
+            error if isinstance(error, Exception) else RuntimeError("model call failed")
+        )
+        self.event_log.emit({
+            "kind": "model_error",
+            "stage": stage,
+            "workload_id": workload_id,
+            "model": raw_model,
+            "error": f"{type(exc).__name__}: {exc}"[:300],
+            "status": "error",
+        })
+        sink = _ASK_MODEL_ERRORS.get()
+        if sink is None:
+            return
+
+        typed = exc if isinstance(exc, ModelInvocationError) else None
+        resolved_workload_id = (
+            safe_model_metadata_id(getattr(typed, "workload_id", ""))
+            or safe_model_metadata_id(workload_id)
+        )
+        workload_label = safe_model_display_name(
+            getattr(typed, "workload_label", "")
+        )
+        if not workload_label and resolved_workload_id:
+            try:
+                workload_label = safe_model_display_name(
+                    self.registry.workload(resolved_workload_id).display_label
+                )
+            except KeyError:
+                workload_label = ""
+        raw_code = str(getattr(exc, "code", "") or "")
+        if raw_code == "model_not_configured":
+            code = MODEL_ERROR_MISSING_CONFIG
+        elif typed is not None or isinstance(exc, ModelSchedulingError):
+            code = safe_model_error_code(raw_code)
+        else:
+            code = MODEL_ERROR_UPSTREAM
+        sink.append({
+            "service_id": safe_model_metadata_id(
+                getattr(typed, "service_id", "")
+            ),
+            "service_name": safe_model_display_name(
+                getattr(typed, "service_name", "")
+            ),
+            "workload_id": resolved_workload_id,
+            "workload_label": workload_label,
+            "stage": safe_model_error_stage(stage),
+            "model": safe_model_label(getattr(typed, "model", "")),
+            "message": code,
+            "support_id": safe_model_support_id(
+                getattr(typed, "support_id", "")
+                or getattr(exc, "support_id", "")
+            ),
+        })
 
     # Read-only compatibility during the call-site migration. Each property is
     # bound to one explicit workload; there is no role/user resolution or

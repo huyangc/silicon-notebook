@@ -710,6 +710,15 @@ class SQLiteRepository:
     def llm_client(self):
         return self._runtime.models.chat("ask_answer")
 
+    def chat(self, workload_id: str):
+        return self._runtime.models.chat(workload_id)
+
+    def configured(self, workload_id: str) -> bool:
+        return self._runtime.models.configured(workload_id)
+
+    def parallelism(self, workload_id: str) -> int:
+        return self._runtime.models.parallelism(workload_id)
+
     @property
     def reasoning_llm_client(self):
         return self._runtime.models.chat("reasoning_agent")

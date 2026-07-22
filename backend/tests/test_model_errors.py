@@ -10,9 +10,13 @@ import pytest
 
 from app.core.config import Settings
 from app.models.schemas import AskRequest, NotebookCreate
+from app.models.ask import ModelError
 from app.services.embedding import FakeEmbedder
 from app.services.rerank_client import RerankClient
 from app.services.sqlite_repository import SQLiteRepository, _now
+from app.services.model_provider import ModelInvocationError
+from app.services.model_registry import ModelServiceDefinition, WorkloadSpec
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -20,9 +24,6 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://llm.example.test/v1")
-    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "configured-primary")
     r = SQLiteRepository(Settings())
     r.embedder = FakeEmbedder(dim=16)
     return r
@@ -65,13 +66,68 @@ class _RaisingLLM:
         raise RuntimeError("upstream 503")
 
 
+@pytest.mark.parametrize(
+    "code",
+    [
+        "model_queue_full",
+        "model_queue_timeout",
+        "model_service_unavailable",
+    ],
+)
+def test_scheduled_ask_failure_has_safe_support_metadata_and_no_fake_answer(
+    repo, code
+):
+    service = ModelServiceDefinition(
+        id="primary-chat", display_name="主模型服务", kind="chat",
+        protocol="openai_chat", base_url="https://model.invalid/v1",
+        model="safe-model", api_key_env="MODEL_KEY", api_key="secret",
+        max_concurrency=2, fingerprint="fp",
+    )
+    workload = WorkloadSpec(
+        id="ask_answer", kind="chat", default_priority="interactive",
+        display_label="问答回答",
+    )
+
+    class BusyClient:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            raise ModelInvocationError(
+                service=service, workload=workload, code=code,
+                support_id="mdl-support-safe",
+            )
+
+    bind_chat_client(repo, "ask_answer", BusyClient())
+    repo.settings.query_rewrite_enabled = False
+    repo.settings.chunk_kg_overlay_enabled = False
+    notebook = _seed_chunks(repo)
+
+    response = repo.ask_chunk(
+        notebook.id, AskRequest(question="cascode", mode="chunk")
+    )
+
+    error = next(item for item in response.model_errors if item.stage == "answer")
+    assert error.model_dump() == {
+        "service_id": "primary-chat",
+        "service_name": "主模型服务",
+        "workload_id": "ask_answer",
+        "workload_label": "问答回答",
+        "stage": "answer",
+        "model": "safe-model",
+        "message": code,
+        "support_id": "mdl-support-safe",
+    }
+    assert response.answer == ""
+    assert response.llm_mode == "synthesis_failed"
+
+
 def test_answer_llm_failure_recorded(repo):
     """答案 LLM 抛异常 → model_errors 记 stage=answer;答案诚实降级(synthesis_failed)而非中断。
     (合成失败——空 content 或抛错——统一走 _answer_with_retry:有界重试 + 诚实降级 +
     可观测;不再冒充成 "Retrieved N passage(s)" 那样的成功占位。)"""
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
-    repo.llm_client = _RaisingLLM()
+    bind_chat_client(repo, "ask_answer", _RaisingLLM())
     nb = _seed_chunks(repo)
 
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
@@ -87,11 +143,12 @@ def test_answer_failure_names_dynamic_primary_service_without_persisting_unstamp
     repo.settings.chunk_kg_overlay_enabled = False
     raising = _RaisingLLM()
     raising.model = "runtime-primary-name"
-    repo.llm_client = raising
+    bind_chat_client(repo, "ask_answer", raising)
     nb = _seed_chunks(repo)
     response = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
     error = next(item for item in response.model_errors if item.stage == "answer")
-    assert (error.service, error.model) == ("llm", "runtime-primary-name")
+    assert (error.service_id, error.service_name, error.model) == ("", "", "")
+    assert error.workload_id == "ask_answer"
     assert error.message == "upstream_error"
     stored = repo._runtime.identity.get_model_service_statuses("user-local")
     assert "llm" not in stored
@@ -102,14 +159,14 @@ def test_safe_tagged_model_name_remains_dynamic_on_failure(repo):
     repo.settings.chunk_kg_overlay_enabled = False
     raising = _RaisingLLM()
     raising.model = "llama3:70b"
-    repo.llm_client = raising
+    bind_chat_client(repo, "ask_answer", raising)
     nb = _seed_chunks(repo)
 
     response = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
 
     error = next(item for item in response.model_errors if item.stage == "answer")
-    assert (error.service, error.model, error.message) == (
-        "llm", "llama3:70b", "upstream_error"
+    assert (error.service_id, error.model, error.message) == (
+        "", "", "upstream_error"
     )
 
 
@@ -129,7 +186,7 @@ def test_ask_failure_keeps_raw_diagnostic_server_side_only(repo, monkeypatch):
 
     events = []
     monkeypatch.setattr(repo.event_log, "emit", events.append)
-    repo.llm_client = SensitiveFailure()
+    bind_chat_client(repo, "ask_answer", SensitiveFailure())
     nb = _seed_chunks(repo)
 
     response = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
@@ -148,7 +205,6 @@ def test_ask_failure_keeps_raw_diagnostic_server_side_only(repo, monkeypatch):
         assert "upstream_error" in client_value
     assert all(error.model == "" for error in response.model_errors)
     assert all(error.message == "upstream_error" for error in response.model_errors)
-    assert any(event.get("model") == unsafe_model for event in events)
     assert any(
         "10.0.0.8" in event.get("error", "")
         and "sk-private-secret" in event.get("error", "")
@@ -186,14 +242,31 @@ def test_legacy_persisted_model_error_is_sanitized_on_replay(repo):
 
     replay = repo.get_conversation("conv-legacy")
     error = replay.turns[0].response.model_errors[0]
-    assert (error.service, error.stage, error.model, error.message) == (
-        "llm", "model_call", "", "upstream_error"
+    assert (error.service_id, error.stage, error.model, error.message) == (
+        "", "model_call", "", "upstream_error"
     )
     encoded = replay.model_dump_json()
     for private_value in (
         "api_key", "10.0.0.8", "sk-private-secret", "provider", "RuntimeError",
     ):
         assert private_value not in encoded
+
+
+def test_legacy_model_error_replays_into_new_safe_metadata_shape():
+    error = ModelError.model_validate({
+        "service": "llm",
+        "stage": "answer",
+        "model": "legacy-model",
+        "message": "upstream_error",
+    })
+
+    assert error.service_id == ""
+    assert error.service_name == ""
+    assert error.workload_id == ""
+    assert error.workload_label == ""
+    assert error.support_id == ""
+    assert error.stage == "answer"
+    assert error.model == "legacy-model"
 
 
 def test_embed_failure_recorded(repo, monkeypatch):
@@ -208,7 +281,7 @@ def test_embed_failure_recorded(repo, monkeypatch):
     assert repo.settings.embedder_configured
     monkeypatch.setattr(repo.embedder, "embed_query",
                         lambda q: (_ for _ in ()).throw(RuntimeError("embed boom")))
-    repo.llm_client = _AnswerLLM()
+    bind_chat_client(repo, "ask_answer", _AnswerLLM())
     nb = _seed_chunks(repo)
 
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
@@ -229,15 +302,14 @@ def test_embedding_failure_is_embedding_service(repo, monkeypatch):
         "embed_query",
         lambda _query: (_ for _ in ()).throw(RuntimeError("embed boom")),
     )
-    repo.llm_client = _AnswerLLM()
+    bind_chat_client(repo, "ask_answer", _AnswerLLM())
     nb = _seed_chunks(repo)
     response = repo.ask_chunk(
         nb.id, AskRequest(question="cascode", mode="chunk")
     )
     error = next(item for item in response.model_errors if item.stage == "embed")
-    assert (error.service, error.model) == (
-        "embedding", "runtime-embedding-name"
-    )
+    assert (error.service_id, error.service_name, error.model) == ("", "", "")
+    assert error.support_id == ""
 
 
 def test_rerank_on_error_called():
@@ -271,7 +343,7 @@ def test_no_model_errors_on_success(repo):
     """正常 ask_chunk(合规 LLM + FakeEmbedder)→ model_errors 为空。"""
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
-    repo.llm_client = _AnswerLLM()
+    bind_chat_client(repo, "ask_answer", _AnswerLLM())
     nb = _seed_chunks(repo)
 
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))

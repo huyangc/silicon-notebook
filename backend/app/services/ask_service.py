@@ -336,10 +336,7 @@ class AskService:
     # ------------------------------------------------------------------
 
     def _primary_llm_unconfigured(self) -> bool:
-        """policy=required 且当前用户未配主 LLM(resolve_model_config(...)
-        .source == "none")——与基线逐字同一判定;身份经注入 provider 的
-        identity 现解析(per-user 模型命脉,每次调用走 ContextVar 链)。"""
-        return self.model_clients.primary_unconfigured()
+        return not self.model_clients.configured("ask_answer")
 
     def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:
         return self.evidence_context.tier_map(list(notebook_ids))
@@ -446,7 +443,7 @@ class AskService:
         context_block, id_map = self._append_memory_context(
             context_block, id_map, memory_hits or []
         )
-        llm_client = llm_client or self.model_clients.llm_client
+        llm_client = llm_client or self.model_clients.chat("ask_answer")
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
@@ -493,7 +490,7 @@ class AskService:
         context_block, id_map = self._append_memory_context(
             context_block, id_map, memory_hits or []
         )
-        llm_client = llm_client or self.model_clients.llm_client
+        llm_client = llm_client or self.model_clients.chat("ask_answer")
         raw = llm_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
@@ -523,7 +520,7 @@ class AskService:
         back to the raw question on any failure."""
         if not history.strip():
             return question
-        client = self.model_clients.rewrite_llm_client
+        client = self.model_clients.chat("query_rewrite")
         if not getattr(client, "configured", False):
             return question
         raise_if_cancelled(cancel_event)
@@ -599,26 +596,18 @@ class AskService:
                 raise
             except Exception as exc:
                 self.model_errors.note_model_error(
-                    "answer",
-                    model_label,
-                    exc,
-                    service=service,
-                    provider_failure=True,
-                    failed_fingerprint=failed_fingerprint,
+                    "answer", exc, workload_id="ask_answer"
                 )
                 answer, grounded, anchors = "", False, []
             if answer:
                 return answer, grounded, anchors, True
         self.model_errors.note_model_error(
             "answer",
-            model_label,
             RuntimeError(
                 "answer synthesis produced empty content after retry "
                 "(reasoning model likely spent output budget on discarded chain-of-thought)"
             ),
-            service=service,
-            provider_failure=True,
-            failed_fingerprint=failed_fingerprint,
+            workload_id="ask_answer",
         )
         return answer, grounded, anchors, False
 
@@ -676,7 +665,7 @@ class AskService:
                 for i, el in enumerate(elements[:6])
             )
             context_block = f"{context_block}\n\n补充原文段落(供参考,无引用编号):\n{extra}"
-        reasoning_client = reasoning_client or self.model_clients.reasoning_llm_client
+        reasoning_client = reasoning_client or self.model_clients.chat("ask_answer")
         context_block = self._refine_context(
             question, context_block, reasoning_client, cancel_event)
         raw = reasoning_client.chat_json(
@@ -752,9 +741,8 @@ class AskService:
             if self._primary_llm_unconfigured():
                 self.model_errors.note_model_error(
                     "answer",
-                    "",
                     ModelNotConfiguredError("请先在设置中配置你的模型服务"),
-                    provider_failure=True,
+                    workload_id="ask_answer",
                 )
             _t = time.perf_counter()
             from app.services.query_rewrite import expand_query
@@ -762,7 +750,7 @@ class AskService:
             ex = None
             raise_if_cancelled(cancel_event)
             if self.settings.query_rewrite_enabled:
-                ex = expand_query(self.model_clients.rewrite_llm_client,
+                ex = expand_query(self.model_clients.chat("query_rewrite"),
                                   retrieval_query, history,
                                   max_subqueries=self.settings.chunk_max_subqueries,
                                   corpus_langs=self.candidates.notebook_languages(notebook_id),
@@ -864,7 +852,7 @@ class AskService:
             synth_failed = False
             _t = time.perf_counter()
             raise_if_cancelled(cancel_event)
-            answer_client = self.model_clients.llm_client
+            answer_client = self.model_clients.chat("ask_answer")
             if answer_client.configured and (selected or kg_id_map or memory_hits):
                 # 空 content 有界重试 + 诚实降级 + 可观测(见 _answer_with_retry docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
@@ -1076,7 +1064,7 @@ class AskService:
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
             raise_if_cancelled(cancel_event)
-            reasoning_client = self.model_clients.reasoning_llm_client
+            reasoning_client = self.model_clients.chat("ask_answer")
             if reasoning_client.configured and (
                     top_hits or elements or chunks or chains or memory_hits):
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
@@ -1225,7 +1213,7 @@ class AskService:
                         llm_mode="deterministic",
                     )
                 else:
-                    answer_client = self.model_clients.llm_client
+                    answer_client = self.model_clients.chat("ask_answer")
                     answer, llm_grounded, anchors, ok = self._answer_with_retry(
                         lambda: self._answer_chunks(
                             question, [], history, cancel_event=cancel_event,
@@ -1285,7 +1273,7 @@ class AskService:
                     ppr_chunks = community_chunks + ppr_chunks
                     answer, llm_grounded, anchors = "", False, []
                     synth_failed = False
-                    answer_client = self.model_clients.llm_client
+                    answer_client = self.model_clients.chat("ask_answer")
                     if getattr(answer_client, "configured", False):
                         answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                             lambda: self._answer_chunks(
@@ -1424,10 +1412,11 @@ class AskService:
             # the weakest-link confidence over all edges (1.0 when there are no edges).
             verify_result = {"chain_trust": 1.0, "flagged": [], "edge_results": [],
                              "authority_notes": []}
-            if getattr(self.model_clients.reasoning_llm_client, "configured", False):
+            verify_client = self.model_clients.chat("graph_chain_verify")
+            if getattr(verify_client, "configured", False):
                 from app.services.kg.graph_reason import verify_chain_edges
                 verify_result = verify_chain_edges(
-                    subgraph, self.model_clients.reasoning_llm_client,
+                    subgraph, verify_client,
                     votes=1, timeout=self.settings.reasoning_timeout_seconds,
                     cancel_event=cancel_event,
                 )
@@ -1461,7 +1450,7 @@ class AskService:
                     c.source_title = _titles.get(c.source_id, "")
                 answer, llm_grounded, anchors = "", False, []
                 synth_failed = False
-                answer_client = self.model_clients.llm_client
+                answer_client = self.model_clients.chat("ask_answer")
                 if getattr(answer_client, "configured", False):
                     answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                         lambda: self._answer_mix(
@@ -1538,11 +1527,11 @@ class AskService:
                 context_block, id_map, memory_hits
             )
             context_block = self._refine_context(
-                question, context_block, self.model_clients.llm_client, cancel_event)
+                question, context_block, self.model_clients.chat("evidence_refine"), cancel_event)
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
             raise_if_cancelled(cancel_event)
-            answer_client = self.model_clients.llm_client
+            answer_client = self.model_clients.chat("ask_answer")
             if getattr(answer_client, "configured", False) and id_map:
                 def _synth_kg():
                     llm_client = answer_client

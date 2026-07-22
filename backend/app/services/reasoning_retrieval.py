@@ -31,8 +31,7 @@ class _ReasoningRepositoryPort(Protocol):
     @property
     def retrieval(self) -> "RetrievalPort": ...
 
-    @property
-    def reasoning_llm_client(self) -> "JsonChatClientPort": ...
+    def chat(self, workload_id: str) -> "JsonChatClientPort": ...
 
 
 class _ReasoningRetrieverFactory(Protocol):
@@ -233,7 +232,8 @@ class ReasoningRetriever:
         raise_if_cancelled(self.cancel_event)
         from app.services.query_rewrite import expand_query
         fallback = [SubQuery(query=question)]
-        ex = expand_query(self.model_clients.reasoning_llm_client, question, history,
+        client = self.model_clients.chat("reasoning_agent")
+        ex = expand_query(client, question, history,
                           timeout=self.settings.reasoning_timeout_seconds,
                           max_retries=self.settings.reasoning_max_retries,
                           max_subqueries=self.settings.reasoning_max_subqueries,
@@ -246,10 +246,11 @@ class ReasoningRetriever:
     def reflect(self, question, candidates_summary):
         raise_if_cancelled(self.cancel_event)
         answer_decision = ReflectDecision(sufficient=True, next_action="answer")
-        if not getattr(self.model_clients.reasoning_llm_client, "configured", False):
+        client = self.model_clients.chat("reasoning_agent")
+        if not getattr(client, "configured", False):
             return answer_decision
         try:
-            raw = self.model_clients.reasoning_llm_client.chat_json(
+            raw = client.chat_json(
                 [{"role": "user", "content": reflect_prompt(question, candidates_summary)}],
                 REFLECT_SCHEMA_HINT,
                 timeout=self.settings.reasoning_timeout_seconds,

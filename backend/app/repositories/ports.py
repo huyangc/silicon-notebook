@@ -666,19 +666,12 @@ class AskGraphPort(Protocol):
 
 @runtime_checkable
 class ReasoningModelProvider(Protocol):
-    @property
-    def reasoning_llm_client(self) -> JsonChatClientPort: ...
+    def chat(self, workload_id: str) -> JsonChatClientPort: ...
+    def configured(self, workload_id: str) -> bool: ...
+    def parallelism(self, workload_id: str) -> int: ...
 
 
 class ModelClientProvider(ReasoningModelProvider, Protocol):
-    @property
-    def llm_client(self) -> JsonChatClientPort: ...
-    @llm_client.setter
-    def llm_client(self, value: JsonChatClientPort) -> None: ...
-    @property
-    def rewrite_llm_client(self) -> JsonChatClientPort: ...
-    @property
-    def kg_llm_client(self) -> JsonChatClientPort: ...
     @property
     def rerank_client(self) -> RerankClientPort: ...
     @rerank_client.setter
@@ -686,19 +679,16 @@ class ModelClientProvider(ReasoningModelProvider, Protocol):
 
 
 class AskModelClientProvider(ModelClientProvider, Protocol):
-    def primary_unconfigured(self) -> bool: ...
+    pass
 
 
 class ModelErrorSink(Protocol):
     def note_model_error(
         self,
         stage: str,
-        model: str,
         error: Exception,
-        service: str = "",
         *,
-        provider_failure: bool = False,
-        failed_fingerprint: str = "",
+        workload_id: str,
     ) -> None: ...
 
 
