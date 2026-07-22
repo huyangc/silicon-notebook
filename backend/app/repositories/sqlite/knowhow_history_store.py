@@ -401,10 +401,21 @@ class KnowhowHistoryStore:
         ``UNIQUE(table_id, name)`` 由建表 DDL 保证；重名直接让调用方吃
         ``sqlite3.IntegrityError``，这里不做预检省一次往返（也避免 TOCTOU：
         预检通过和 INSERT 之间另一个写者抢先用了同一个名字）。
+
+        ``seq`` 必须是这张表一条**真实存在**的流水，否则 ``raise KeyError(seq)``。
+        校验刻意放在**写事务内**（codex P2）：路由层事务外的预检和这次 INSERT
+        之间，若 prune 恰好删掉了这条 seq，里程碑就会从创建那一刻起指向空气、
+        立即 stale，违反 §4.2 的创建契约。事务内复检 + prune 走各自的
+        ``database.write()`` 写锁串行化，堵死这个 TOCTOU 窗口。
         """
         milestone_id = self.new_id("khms")
         created_at = self.now()
         with self.database.write() as db:
+            if db.execute(
+                "SELECT 1 FROM knowhow_changes WHERE table_id = ? AND seq = ?",
+                (table_id, int(seq)),
+            ).fetchone() is None:
+                raise KeyError(seq)
             db.execute(
                 "INSERT INTO knowhow_milestones "
                 "(id, table_id, seq, name, note, created_by, created_at) "

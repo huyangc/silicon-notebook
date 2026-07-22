@@ -911,7 +911,9 @@ def reformat_knowhow_cell(
 def get_knowhow_history(
     notebook_id: str,
     table_id: str,
-    limit: int = 50,
+    # 纵深防御（codex P2）：limit 必须正且有界。SQLite 把 LIMIT -1 当作"无限"，
+    # 不挡的话任何读者都能一次拉回整表历史（反序列化 + 传输放大）。上限 500。
+    limit: int = Query(50, gt=0, le=500),
     before_seq: Optional[int] = None,
     milestones_only: bool = False,
 ) -> dict:
@@ -978,7 +980,8 @@ def get_knowhow_change(notebook_id: str, table_id: str, seq: int) -> dict:
     dependencies=[Depends(require_notebook_read)],
 )
 def get_knowhow_cell_history(
-    notebook_id: str, table_id: str, row_id: str, column_id: str, limit: int = 50,
+    notebook_id: str, table_id: str, row_id: str, column_id: str,
+    limit: int = Query(50, gt=0, le=500),  # 纵深防御（codex P2）：同 get_knowhow_history
 ) -> list:
     """单格历史时间线（spec §8.1 行 4）——最新在前。row_id/column_id 的
     table-scoped 校验与 patch_knowhow_cell 同款（同一 URL 形状的姊妹端点，见
@@ -1054,12 +1057,17 @@ def create_knowhow_milestone(
     它转成 400，而不是让用户看见一坨裸的 500 异常堆栈。"""
     repo = repository()
     _require_table(repo, notebook_id, table_id)
+    # 事务外预检 = 快速失败给出明确 404；真正堵 TOCTOU 的是 create_milestone
+    # 写事务内的复检（codex P2），那里 seq 不存在会 raise KeyError，下面接住转
+    # 同一个 404（"目标不存在无 oracle"约定）。
     if repo.get_knowhow_change(table_id, body.seq) is None:
         raise HTTPException(status_code=404, detail="Change not found")
     try:
         return repo.create_knowhow_milestone(
             table_id, body.seq, body.name, body.note, user.id
         )
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Change not found")
     except sqlite3.IntegrityError:
         raise user_error(400, "这个里程碑名字已经用过了，换一个试试")
 

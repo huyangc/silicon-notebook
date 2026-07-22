@@ -2138,6 +2138,8 @@
         "KnowhowHistoryPruneRequest": {
           "properties": {
             "before_days": {
+              "exclusiveMinimum": 0.0,
+              "maximum": 36500.0,
               "title": "Before Days",
               "type": "integer"
             }
@@ -10244,6 +10246,8 @@
               "required": false,
               "schema": {
                 "default": 50,
+                "exclusiveMinimum": 0,
+                "maximum": 500,
                 "title": "Limit",
                 "type": "integer"
               }
@@ -10948,6 +10952,8 @@
               "required": false,
               "schema": {
                 "default": 50,
+                "exclusiveMinimum": 0,
+                "maximum": 500,
                 "title": "Limit",
                 "type": "integer"
               }

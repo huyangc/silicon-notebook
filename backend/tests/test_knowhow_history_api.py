@@ -404,3 +404,76 @@ def test_prune_history_deletes_old_prefix_and_leaves_seqs_contiguous(
     assert remaining_seqs == list(range(cutoff_seq + 1, head + 1)), (
         "被清理的前缀必须真的从库里消失，且剩余 seq 连续无空洞"
     )
+
+
+# --- codex 第 1 轮评审 P2：新端点入参边界校验 -------------------------------
+
+def test_prune_rejects_nonpositive_and_oversized_before_days(tmp_path, monkeypatch, repo):
+    """负数 before_days 会算出未来截止时间 → cutoff 落到 head → 除 head 外整段
+    历史被静默删光；0 天/超大值同样无意义。后端契约必须 422 挡下（前端也拦，
+    但后端是边界的最后一道）。"""
+    ctx = _setup(tmp_path, monkeypatch)
+    _patch_cell(ctx, "一")
+    _patch_cell(ctx, "二")
+    before = len(
+        ctx["client"].get(
+            f"/api/notebooks/{ctx['nb']}/knowhow/{ctx['table']['id']}/history",
+            headers=ctx["owner"],
+        ).json()["changes"]
+    )
+
+    for bad in (-1, 0, 36501):
+        resp = ctx["client"].post(
+            f"/api/notebooks/{ctx['nb']}/knowhow/{ctx['table']['id']}/history/prune",
+            json={"before_days": bad}, headers=ctx["owner"],
+        )
+        assert resp.status_code == 422, f"before_days={bad} 必须被拒"
+
+    # 非法请求一条历史都不能删。
+    after = len(
+        ctx["client"].get(
+            f"/api/notebooks/{ctx['nb']}/knowhow/{ctx['table']['id']}/history",
+            headers=ctx["owner"],
+        ).json()["changes"]
+    )
+    assert after == before
+
+
+def test_history_and_cell_history_reject_nonpositive_and_oversized_limit(
+    tmp_path, monkeypatch, repo
+):
+    """SQLite 把 LIMIT -1 当无限——limit 必须正且有界，否则任何读者能一次拉全表
+    历史。两个读端点同款校验。"""
+    ctx = _setup(tmp_path, monkeypatch)
+    _patch_cell(ctx, "x")
+    base = f"/api/notebooks/{ctx['nb']}/knowhow/{ctx['table']['id']}"
+    cell = f"{base}/rows/{ctx['row_id']}/cells/{ctx['plain']}/history"
+    for bad in (-1, 0, 501):
+        assert ctx["client"].get(
+            f"{base}/history?limit={bad}", headers=ctx["owner"]
+        ).status_code == 422, f"history limit={bad} 必须被拒"
+        assert ctx["client"].get(
+            f"{cell}?limit={bad}", headers=ctx["owner"]
+        ).status_code == 422, f"cell-history limit={bad} 必须被拒"
+    # 边界内正常。
+    assert ctx["client"].get(f"{base}/history?limit=500", headers=ctx["owner"]).status_code == 200
+    assert ctx["client"].get(f"{base}/history?limit=1", headers=ctx["owner"]).status_code == 200
+
+
+def test_milestone_creation_rechecks_target_seq_inside_the_write_transaction(
+    tmp_path, monkeypatch, repo
+):
+    """里程碑目标 seq 的存在性在写事务内复检（堵 TOCTOU）：即便绕过路由层预检
+    直接调 store，指向不存在的 seq 也必须 raise KeyError 而不是写出一个立即
+    stale 的里程碑。"""
+    ctx = _setup(tmp_path, monkeypatch)
+    _patch_cell(ctx, "一")
+    table_id = ctx["table"]["id"]
+
+    # 直接打 store，跳过路由层的事务外预检——模拟"预检通过后 seq 恰被 prune 删掉"。
+    with pytest.raises(KeyError):
+        repo.create_knowhow_milestone(table_id, 9999, "不存在的目标", "", "user-x")
+
+    # 库里不能留下这个里程碑。
+    milestones = repo.list_knowhow_milestones(table_id)
+    assert all(m["seq"] != 9999 for m in milestones)
