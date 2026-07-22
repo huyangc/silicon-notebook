@@ -29,6 +29,9 @@ import {
   assembleImportColumnKinds,
   COLUMN_DELETE_CONFIRM,
   ROW_DELETE_CONFIRM,
+  HISTORY_PRUNE_CONFIRM,
+  DEFAULT_HISTORY_PRUNE_DAYS,
+  parseHistoryPruneDays,
   tableMetaPatch,
   hasMetaChanges,
 } from "./knowhow-manage-logic.ts";
@@ -420,6 +423,59 @@ test("assembleImportColumnKinds: 不修改传入数组", () => {
 test("破坏性操作确认文案：删列/删行提示连格子与代码附件一并删除", () => {
   assert.strictEqual(COLUMN_DELETE_CONFIRM, "删除该列？列下所有格子与代码附件将一并删除");
   assert.strictEqual(ROW_DELETE_CONFIRM, "删除该行？行内所有格子与代码附件将一并删除");
+});
+
+// --- 清理历史：确认文案 / 默认天数 / 天数校验（Task 17，规格 §8.2③ + §7.1）-------
+
+test("HISTORY_PRUNE_CONFIRM: 两层意思都要有——①无法回退到该时间点之前 ②会释放历史引用的图片，但 head 例外", () => {
+  assert.strictEqual(
+    HISTORY_PRUNE_CONFIRM,
+    "清理历史？将无法回退到该时间点之前，同时会释放这些历史引用的图片；但最后一次改动会一直保留，其引用的图片不受影响",
+  );
+  // 逐层断言，锁住两个必要子句本身（而非只锁整句字面量——防止未来编辑只改
+  // 措辞时不小心把其中一层意思删没了却仍然「看起来像」一句合理的确认语）。
+  assert.ok(HISTORY_PRUNE_CONFIRM.includes("无法回退到该时间点之前"), "缺少「无法回退」层");
+  assert.ok(HISTORY_PRUNE_CONFIRM.includes("释放"), "缺少「释放图片」层");
+  assert.ok(HISTORY_PRUNE_CONFIRM.includes("最后一次改动"), "缺少 head 例外限定");
+});
+
+test("DEFAULT_HISTORY_PRUNE_DAYS: 默认 180 天（brief 指定值）", () => {
+  assert.strictEqual(DEFAULT_HISTORY_PRUNE_DAYS, 180);
+});
+
+test("parseHistoryPruneDays: 合法正整数字符串原样转数字", () => {
+  assert.strictEqual(parseHistoryPruneDays("180"), 180);
+  assert.strictEqual(parseHistoryPruneDays("1"), 1);
+  assert.strictEqual(parseHistoryPruneDays("365"), 365);
+});
+
+test("parseHistoryPruneDays: 首尾空白 trim 后再校验", () => {
+  assert.strictEqual(parseHistoryPruneDays("  30  "), 30);
+  assert.strictEqual(parseHistoryPruneDays("\t7\n"), 7);
+});
+
+test("parseHistoryPruneDays: 空串/纯空白 → null", () => {
+  assert.strictEqual(parseHistoryPruneDays(""), null);
+  assert.strictEqual(parseHistoryPruneDays("   "), null);
+});
+
+test("parseHistoryPruneDays: 0 与负数 → null（0/负数天没有意义）", () => {
+  assert.strictEqual(parseHistoryPruneDays("0"), null);
+  assert.strictEqual(parseHistoryPruneDays("-1"), null);
+  assert.strictEqual(parseHistoryPruneDays("-180"), null);
+});
+
+test("parseHistoryPruneDays: 小数 → null（天数粒度不支持小数）", () => {
+  assert.strictEqual(parseHistoryPruneDays("1.5"), null);
+  assert.strictEqual(parseHistoryPruneDays("180.0"), null);
+});
+
+test("parseHistoryPruneDays: 非数字字符/科学计数法/带正号 → null", () => {
+  assert.strictEqual(parseHistoryPruneDays("abc"), null);
+  assert.strictEqual(parseHistoryPruneDays("18a"), null);
+  assert.strictEqual(parseHistoryPruneDays("1e2"), null);
+  assert.strictEqual(parseHistoryPruneDays("+180"), null);
+  assert.strictEqual(parseHistoryPruneDays("18 0"), null);
 });
 
 test("tableMetaPatch: 无变化返回空对象（hasMetaChanges=false）", () => {
