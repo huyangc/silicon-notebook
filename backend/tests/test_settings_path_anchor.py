@@ -5,7 +5,8 @@ env_file）必须锚定到仓库根，与进程启动时的 CWD 无关。
 backend/ 再起 uvicorn，CLI 从仓库根跑 —— 同一套相对默认值 `.local/...` 在两种
 启动方式下解析到两个不同目录，导致 CLI 建好的索引服务端看不到。修复：
 Settings 用 model_validator(mode="after") 统一把相对路径重写为仓库根锚定的
-绝对路径，绝对 env 覆盖原样尊重；未实现的 database_url 后端直接拒绝。
+绝对路径，绝对 env 覆盖原样尊重；非 SQLite URL 可以被安全地解析，直到后续
+repository factory 阶段才会选择对应后端。
 """
 import os
 
@@ -109,19 +110,21 @@ class TestRelativeEnvValuesAlsoAnchored:
         assert s.database_url == expected
 
 
-class TestNonSqliteDatabaseUrlRejected:
-    """未实现对应 repository 时必须 fail fast，不能静默写入本地 SQLite。"""
+class TestDatabaseUrlSchemes:
+    """配置阶段只验证 URL；SQLite runtime 仍只能请求 SQLite 路径。"""
 
-    def test_postgres_url_rejected(self, monkeypatch):
+    def test_postgres_url_is_normalized_and_sqlite_path_fails_clearly(self, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "postgres://user:pass@host:5432/db")
         monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
-        with pytest.raises(ValueError, match="only sqlite"):
-            Settings()
+        s = Settings()
+        assert s.database_url == "postgresql://user:pass@host:5432/db"
+        with pytest.raises(ValueError, match="not a SQLite"):
+            _ = s.sqlite_path
 
     def test_mysql_url_rejected(self, monkeypatch):
         monkeypatch.setenv("DATABASE_URL", "mysql://user:pass@host/db")
         monkeypatch.delenv("SILICON_NOTEBOOK_STORAGE_DIR", raising=False)
-        with pytest.raises(ValueError, match="only sqlite"):
+        with pytest.raises(ValueError, match="unsupported database URL scheme"):
             Settings()
 
 
