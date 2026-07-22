@@ -6,10 +6,15 @@
 import pytest
 
 from app.core.cache import CacheBackend, NoCacheBackend
+from app.core.cache.sqlite_backend import SqliteCacheBackend
 
 
 def _make_noop(tmp_path):
     return NoCacheBackend()
+
+
+def _make_sqlite(tmp_path):
+    return SqliteCacheBackend(str(tmp_path / "contract.db"))
 
 
 class MinimalBackend:
@@ -38,6 +43,7 @@ def _make_minimal(tmp_path):
 _BACKENDS = [
     ("noop", _make_noop, False),
     ("minimal", _make_minimal, True),
+    ("sqlite", _make_sqlite, True),
 ]
 
 
