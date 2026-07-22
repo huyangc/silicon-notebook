@@ -91,6 +91,18 @@ function safeModel(value: unknown): string {
   return model;
 }
 
+export function sanitizeModelServiceId(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const candidate = value.trim();
+  return SERVICE_ID.test(candidate) ? candidate : "";
+}
+
+export function sanitizeModelSupportId(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const candidate = value.trim();
+  return SUPPORT_ID.test(candidate) ? candidate : "";
+}
+
 function parseWorkload(value: unknown): { id: string; label: string } {
   const item = record(value);
   const id = stringScalar(item.id, 64).trim();
@@ -100,7 +112,7 @@ function parseWorkload(value: unknown): { id: string; label: string } {
 
 export function parseModelServiceStatusItem(value: unknown): ModelServiceStatusItem {
   const item = record(value);
-  const serviceId = stringScalar(item.service_id, 64).trim();
+  const serviceId = sanitizeModelServiceId(stringScalar(item.service_id, 64));
   const kind = stringScalar(item.kind, 16);
   const status = stringScalar(item.status, 24);
   const trigger = optionalString(item.trigger, 32);
@@ -108,8 +120,9 @@ export function parseModelServiceStatusItem(value: unknown): ModelServiceStatusI
     return invalidStatus();
   }
   if (!Array.isArray(item.workloads)) return invalidStatus();
-  const supportId = optionalString(item.support_id, 84).trim();
-  if (supportId && !SUPPORT_ID.test(supportId)) return invalidStatus();
+  const rawSupportId = optionalString(item.support_id, 84);
+  const supportId = sanitizeModelSupportId(rawSupportId);
+  if (rawSupportId.trim() && !supportId) return invalidStatus();
   return {
     service_id: serviceId,
     display_name: safeDisplayName(item.display_name),
@@ -144,9 +157,10 @@ export async function fetchModelServiceStatus(): Promise<ModelServicesStatus> {
 }
 
 export async function testSystemModelService(serviceId: string): Promise<ModelServiceStatusItem> {
-  if (!SERVICE_ID.test(serviceId)) return invalidStatus();
+  const safeServiceId = sanitizeModelServiceId(serviceId);
+  if (!safeServiceId) return invalidStatus();
   return parseModelServiceStatusItem(await requestJson<unknown>(
-    `/admin/model-services/${encodeURIComponent(serviceId)}/test`,
+    `/admin/model-services/${encodeURIComponent(safeServiceId)}/test`,
     { method: "POST", tag: "model-services" },
   ));
 }

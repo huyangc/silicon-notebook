@@ -7,24 +7,8 @@ import {
   type ModelServiceStatusItem,
   type ModelServicesStatus,
 } from "./model-services.ts";
+import { SupportIdCopy } from "./support-id-copy";
 import { label, MODEL_SERVICE_STATUS_ERROR } from "./vocabulary";
-
-
-async function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  textarea.remove();
-}
 
 function checkedTime(item: ModelServiceStatusItem): string {
   if (!item.checked_at) return "尚未检查";
@@ -113,12 +97,7 @@ function ModelServiceCard({
       <div className="model-service-status-meta">
         <time dateTime={item.checked_at || undefined}>{checkedTime(item)}</time>
         {failure && <span>失败类别：{failure}</span>}
-        {item.support_id && (
-          <span className="model-service-support-id">
-            支持编号：{item.support_id}
-            <button type="button" onClick={() => { void copyText(item.support_id); }}>复制支持编号</button>
-          </span>
-        )}
+        <SupportIdCopy supportId={item.support_id} className="model-service-support-id" />
       </div>
 
       {isAdmin && (
@@ -206,6 +185,11 @@ export function ModelServicePanel({
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !focusable.includes(active)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
       if (event.shiftKey && (active === first || !dialog.contains(active))) {
         event.preventDefault();
         last.focus();

@@ -105,6 +105,7 @@ test("copies support id without exposing raw diagnostics", async () => {
   await user.click(within(screen.getByRole("group", { name: "推理服务" }))
     .getByRole("button", { name: "复制支持编号" }));
   expect(writeText).toHaveBeenCalledWith("mdl-support_456");
+  expect(await screen.findByRole("status")).toHaveTextContent("已复制");
   writeText.mockRestore();
 });
 
@@ -130,6 +131,47 @@ test("focuses the highlighted service, traps focus, closes, and restores opener"
   panel.unmount();
   expect(opener).toHaveFocus();
   opener.remove();
+});
+
+
+test("keeps Tab and Shift+Tab inside when the highlighted read-only card has no actions", async () => {
+  const outside = document.createElement("button");
+  outside.textContent = "outside";
+  document.body.append(outside);
+  const user = userEvent.setup();
+  renderPanel({
+    status: { services: [status("plain-chat", "普通模型服务", "ok")] },
+    highlightedServiceId: "plain-chat",
+    isAdmin: false,
+  });
+
+  const card = screen.getByRole("group", { name: "普通模型服务" });
+  const close = screen.getByRole("button", { name: "关闭模型服务" });
+  expect(card).toHaveFocus();
+  await user.tab();
+  expect(close).toHaveFocus();
+  expect(outside).not.toHaveFocus();
+
+  card.focus();
+  await user.tab({ shift: true });
+  expect(close).toHaveFocus();
+  expect(outside).not.toHaveFocus();
+  outside.remove();
+});
+
+
+test("clipboard rejection is contained and leaves accessible manual-copy feedback", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.spyOn(navigator.clipboard, "writeText")
+    .mockRejectedValueOnce(new Error("clipboard denied"));
+  renderPanel();
+
+  const reasoner = screen.getByRole("group", { name: "推理服务" });
+  await user.click(within(reasoner).getByRole("button", { name: "复制支持编号" }));
+  expect(await within(reasoner).findByRole("status"))
+    .toHaveTextContent("复制失败，请手动选择支持编号");
+  expect(reasoner).toHaveTextContent("mdl-support_456");
+  writeText.mockRestore();
 });
 
 

@@ -25,10 +25,13 @@ import {
 import { AnswerMarkdown } from "./answer-markdown";
 import { type ReasoningTraceStep } from "./ask-stream";
 import { placeCitationPopover } from "./citation-popover";
+import { copyTextSafely } from "./copy-text";
 import { mapCitationKnowhowRef } from "./knowhow-model.ts";
 import { KgTypeMark, kgTypeLabel } from "./kg-type-mark";
 import {
   modelFailureText,
+  sanitizeModelServiceId,
+  sanitizeModelSupportId,
   type ModelServiceStatusItem,
 } from "./model-services.ts";
 import {
@@ -38,6 +41,7 @@ import {
   TRACE_STEP_LABELS,
 } from "./reasoning-trace";
 import type { AskResponse } from "./workspace-model";
+import { SupportIdCopy } from "./support-id-copy";
 import { label, MODEL_SERVICE_STATUS_ERROR, TIER } from "./vocabulary";
 
 
@@ -92,23 +96,6 @@ function referenceSource(reference: AnswerReference): string {
 function referenceLocation(reference: AnswerReference): string {
   if (reference.anchor) return reference.anchor.location_label || "";
   return reference.citation?.location_label || "";
-}
-
-
-async function copyTextToClipboard(text: string) {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  document.body.removeChild(textarea);
 }
 
 
@@ -360,8 +347,12 @@ function ModelErrorPanel({
 }) {
   const uniqueErrors = useMemo(() => {
     const seen = new Set<string>();
-    return errors.filter((error) => {
-      const key = `${error.service_id}\0${error.model}\0${error.support_id}`;
+    return errors.map((error) => ({
+      error,
+      serviceId: sanitizeModelServiceId(error.service_id),
+      supportId: sanitizeModelSupportId(error.support_id),
+    })).filter(({ error, serviceId, supportId }) => {
+      const key = `${serviceId}\0${error.model}\0${supportId}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
@@ -392,39 +383,32 @@ function ModelErrorPanel({
     <section className="answer-model-error" aria-label="模型服务异常">
       <div className="answer-model-error-heading">⚠️ 本次回答可能不完整</div>
       <ul className="answer-model-error-list">
-        {uniqueErrors.map((error) => {
+        {uniqueErrors.map(({ error, serviceId, supportId }) => {
           const isTesting = testingAllModels
-            || Boolean(testingModelServices[error.service_id])
-            || Boolean(testing[error.service_id]);
+            || Boolean(testingModelServices[serviceId])
+            || Boolean(testing[serviceId]);
           return (
-            <li key={`${error.service_id}\0${error.model}\0${error.support_id}`}>
+            <li key={`${serviceId}\0${error.model}\0${supportId}`}>
               <span>{modelFailureText(error)}</span>
               <div className="answer-model-error-actions">
-                {onTestModel && error.service_id && (
+                {onTestModel && serviceId && (
                   <button
                     type="button"
                     disabled={isTesting}
-                    onClick={() => testService(error.service_id)}
+                    onClick={() => testService(serviceId)}
                   >
                     {isTesting ? "测试中…" : "测试此模型"}
                   </button>
                 )}
                 {onOpenModelStatus && (
-                  <button type="button" onClick={() => onOpenModelStatus(error.service_id)}>
+                  <button type="button" onClick={() => onOpenModelStatus(serviceId)}>
                     查看模型状态
                   </button>
                 )}
-                {error.support_id && (
-                  <span className="answer-model-support-id">
-                    支持编号：{error.support_id}
-                    <button type="button" onClick={() => { void copyTextToClipboard(error.support_id); }}>
-                      复制支持编号
-                    </button>
-                  </span>
-                )}
-                {results[error.service_id] && (
+                <SupportIdCopy supportId={supportId} className="answer-model-support-id" />
+                {results[serviceId] && (
                   <span className="answer-model-test-result" role="status">
-                    {results[error.service_id]}
+                    {results[serviceId]}
                   </span>
                 )}
               </div>
@@ -492,8 +476,9 @@ export function AnswerView({
   }, [copied]);
 
   async function copyAnswer() {
-    await copyTextToClipboard(renderTextWithReferenceNumbers(answerText, references));
-    setCopied(true);
+    if (await copyTextSafely(renderTextWithReferenceNumbers(answerText, references))) {
+      setCopied(true);
+    }
   }
 
   return (

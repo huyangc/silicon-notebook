@@ -4424,6 +4424,12 @@ button.chat-session-card {
   cursor: pointer;
 }
 
+.model-service-support-id code,
+.answer-model-support-id code {
+  user-select: all;
+  overflow-wrap: anywhere;
+}
+
 .model-service-test-one {
   justify-self: end;
 }
