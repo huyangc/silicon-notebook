@@ -320,20 +320,25 @@ def _sqlite_persistence_construction_sites_from_sources(
                     scan_expr(child, aliases)
 
         def scan_comprehension(node: ast.AST, aliases: dict[str, str]) -> None:
-            bindings = [
-                (name.id, name)
+            generator_target_names = {
+                name.id
                 for gen in node.generators
                 for name in ast.walk(gen.target)
                 if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)
-            ]
+            }
             local = dict(aliases)
-            for name, binding in bindings:
-                if name in local:
-                    if label := taint_label(local[name]):
-                        record(binding, label)
-                    local.pop(name)
             for gen in node.generators:
                 scan_expr(gen.iter, local)
+                bindings = [
+                    (name.id, name)
+                    for name in ast.walk(gen.target)
+                    if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store)
+                ]
+                for name, binding in bindings:
+                    if name in local:
+                        if label := taint_label(local[name]):
+                            record(binding, label)
+                        local.pop(name)
                 scan_expr(gen.target, local)
                 for condition in gen.ifs:
                     scan_expr(condition, local)
@@ -342,9 +347,8 @@ def _sqlite_persistence_construction_sites_from_sources(
                 scan_expr(node.value, local)
             else:
                 scan_expr(node.elt, local)
-            generator_targets = {name for name, _ in bindings}
             for name, value in local.items():
-                if name not in generator_targets and navigation_namespace(value):
+                if name not in generator_target_names and navigation_namespace(value):
                     aliases[name] = value
 
         def scan_expr(node: ast.AST | None, aliases: dict[str, str]) -> None:
@@ -1032,6 +1036,73 @@ def test_sqlite_construction_guard_exports_comprehension_walrus_navigation(expre
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/comprehension_walrus_escape.py": source}
     ) == ["app/comprehension_walrus_escape.py:3:SqliteDatabase"]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "[item for repos in repos.sqlite.database.SqliteDatabase(settings, root)]",
+        "{item for repos in repos.sqlite.database.SqliteDatabase(settings, root)}",
+        "{repos: item for repos in "
+        "repos.sqlite.database.SqliteDatabase(settings, root)}",
+        "tuple(item for repos in "
+        "repos.sqlite.database.SqliteDatabase(settings, root))",
+        "[item for item in items for repos in "
+        "repos.sqlite.database.SqliteDatabase(settings, root)]",
+        "{item for item in items for repos in "
+        "repos.sqlite.database.SqliteDatabase(settings, root)}",
+        "{item: repos for item in items for repos in "
+        "repos.sqlite.database.SqliteDatabase(settings, root)}",
+        "tuple(item for item in items for repos in "
+        "repos.sqlite.database.SqliteDatabase(settings, root))",
+    ],
+)
+def test_sqlite_construction_guard_scans_each_comprehension_iter_before_target(
+    expression,
+):
+    source = f"import app.repositories as repos\nresult = {expression}\n"
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/comprehension_iter_escape.py": source}
+    ) == ["app/comprehension_iter_escape.py:2:SqliteDatabase"]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "[item for item in repos.sqlite.database.SqliteDatabase(settings, root) "
+        "for repos in values]",
+        "{item for item in repos.sqlite.database.SqliteDatabase(settings, root) "
+        "for repos in values}",
+        "{item: repos for item in "
+        "repos.sqlite.database.SqliteDatabase(settings, root) for repos in values}",
+        "tuple(item for item in "
+        "repos.sqlite.database.SqliteDatabase(settings, root) for repos in values)",
+    ],
+)
+def test_sqlite_construction_guard_does_not_prebind_later_comprehension_targets(
+    expression,
+):
+    source = f"import app.repositories as repos\nresult = {expression}\n"
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/later_comprehension_target_escape.py": source}
+    ) == ["app/later_comprehension_target_escape.py:2:SqliteDatabase"]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "[item for repos in values for item in repos.sqlite.database]",
+        "{item for repos in values if consume(repos.sqlite.database)}",
+        "{item: repos.sqlite.database for repos in values}",
+        "tuple(item for repos in values for item in repos.sqlite.database)",
+        "[item for item in repos.postgres.rows() for repos in values]",
+    ],
+)
+def test_sqlite_construction_guard_comprehension_iteration_controls(expression):
+    source = f"import app.repositories as repos\nresult = {expression}\n"
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/comprehension_iter_control.py": source}
+    ) == []
 
 
 @pytest.mark.parametrize(
