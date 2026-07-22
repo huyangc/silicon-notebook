@@ -869,9 +869,26 @@ from app.core.cache import CacheBackend, llm_key
                     ckey = llm_key(model, full_messages, response_schema_hint)
 ```
 
-> `_get_cache` 现在恒返回一个 backend（关闭时是 `NoCacheBackend`），不再返回
-> `None`。调用处 `if cache is not None` 依然成立且行为不变——NoCacheBackend 永远
-> miss。**不要**顺手删掉写入处的 `content != "{}"` 条件，那是防退化固化的关键守卫
+`_get_cache` 现在**恒返回一个 backend**（关闭时是 `NoCacheBackend`），不再返回
+`None`。因此读取处 `if cache is not None:` 变成恒真判断——把它一并简化，不要留
+死条件。将 `chat_json` 中读取缓存的那段改为：
+
+```python
+        cache = None
+        ckey = ""
+        if not bypass_cache:
+            try:
+                cache = self._get_cache()
+                ckey = llm_key(model, full_messages, response_schema_hint)
+                cached = cache.get(ckey)
+                if cached is not None:
+                    return cached
+            except Exception:
+                cache, ckey = None, ""
+```
+
+> 写入处的 `if cache and ckey and content != "{}"` **保持原样不动**：`cache` 为 None
+> 的情形仍可能由上面的 except 分支产生，而 `content != "{}"` 是防退化固化的关键守卫
 > （Task 3 Step 9 会为它加锁定测试）。
 
 - [ ] **Step 8: 运行相关测试**
@@ -1627,14 +1644,44 @@ git commit -m "feat(cache): 命中率统计，并锁定 CacheAdmin 的可选性"
 跨 notebook 刻意不去重：用户通常确实想在自己库里拥有这份文件，且跨用户共享
 source 行会引爆权限、删除级联与归属问题。
 """
-from app.models.sources import UploadedSourceFile
+import pytest
+
+from app.core.config import Settings
+from app.models.schemas import NotebookCreate
+from app.repositories.ports import UploadedSourceFile
+from app.services.sqlite_repository import SQLiteRepository
 
 
-def _upload(repo, notebook_id, name="a.txt", content=b"hello world"):
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 't.db'}")
+    monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
+    monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
+    monkeypatch.setenv("LLM_LOG_ENABLED", "false")
+    r = SQLiteRepository(Settings())
+    # 不传 scheduler 时 upload_sources 会同步跑完整 parse→extract 流水线；
+    # 本测试只关心去重短路，把它打桩掉。
+    monkeypatch.setattr(
+        r._runtime.source_ingestion, "process_source", lambda sid, hooks: None
+    )
+    return r
+
+
+@pytest.fixture
+def notebook_id(repo):
+    return repo.create_notebook(NotebookCreate(name="nb")).id
+
+
+@pytest.fixture
+def other_notebook_id(repo):
+    return repo.create_notebook(NotebookCreate(name="nb2")).id
+
+
+def _upload(repo, notebook_id, content=b"hello world", name="a.txt"):
     return repo.upload_sources(
         notebook_id,
-        [UploadedSourceFile(file_name=name, content_type="text/plain", content=content)],
-        scheduler=None,
+        [UploadedSourceFile(
+            file_name=name, content_type="text/plain", content=content)],
     )
 
 
@@ -1651,16 +1698,17 @@ def test_different_content_still_creates_a_new_source(repo, notebook_id):
     assert len(repo.list_sources(notebook_id)) == 2
 
 
-def test_same_content_in_another_notebook_is_not_deduped(repo, notebook_id, other_notebook_id):
+def test_same_content_in_another_notebook_is_not_deduped(
+    repo, notebook_id, other_notebook_id
+):
     a = _upload(repo, notebook_id)
     b = _upload(repo, other_notebook_id)
     assert a[0].id != b[0].id, "跨 notebook 刻意不去重"
 ```
 
-> **实现者注意**：`repo` / `notebook_id` / `other_notebook_id` fixture 需按本仓库
-> 既有测试的写法提供。先在 `backend/tests/` 下找一个已有的、构造真实
-> `SQLiteRepository` 与 notebook 的测试（例如 `test_chunk_store_component.py`
-> 或 `test_source_embedding_service.py`）照搬其 fixture 构造方式，不要自造新模式。
+> fixture 写法照搬 `backend/tests/test_source_ingestion_service.py` 与
+> `test_chunk_store_component.py` 的既有模式。注意 `UploadedSourceFile` 来自
+> `app.repositories.ports`（不是 `app.models.sources`）。
 
 - [ ] **Step 2: 运行测试验证失败**
 
