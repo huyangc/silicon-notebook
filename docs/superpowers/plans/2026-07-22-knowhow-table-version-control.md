@@ -3063,14 +3063,48 @@ def revert_knowhow_table(
     return result
 ```
 
-- [ ] **Step 5: 跑测试 + 刷 API 契约**
+- [ ] **Step 5: 跑测试 + 刷 API 契约（只重算 openapi 段）**
 
 ```bash
 PYTHONPATH=backend python3 -m pytest backend/tests/test_knowhow_history_api.py -n0 -q
-PYTHONPATH=backend python3 scripts/generate_repository_contract_fixtures.py
+```
+
+**⚠️ 不要跑 `generate_repository_contract_fixtures.py` 的默认模式。** 它当前是坏的，且**与本特性无关**：`_serialization_contract()` 里 `mock.patch.object(routes, "repository", ...)` 打的是 `app.api.routes`，而那个模块早已被重构成纯路由聚合器、不再有 `repository` 属性（在 master 上就是如此），必抛 `AttributeError`。
+
+按仓库既有先例 commit `59bf99b1`（"scope api-contract golden regen to openapi key"）**只重算 `openapi` 段**，`serialization` 与 `source_commit` 逐字保留：
+
+```bash
+PYTHONPATH=backend python3 - <<'PY'
+import json
+from pathlib import Path
+from app.main import app
+
+path = Path("backend/tests/fixtures/repository_contract/api_contract.json")
+contract = json.loads(path.read_text(encoding="utf-8"))
+contract["openapi"] = app.openapi()          # 只动这一个键
+path.write_text(
+    json.dumps(contract, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+print("openapi 段已刷新；serialization / source_commit 未动")
+PY
+```
+
+写回后**必须核对只有 `openapi` 段变了**：
+
+```bash
+git diff --stat backend/tests/fixtures/repository_contract/api_contract.json
+python3 -c "
+import json,subprocess
+old=json.loads(subprocess.run(['git','show','HEAD:backend/tests/fixtures/repository_contract/api_contract.json'],capture_output=True,text=True).stdout)
+new=json.load(open('backend/tests/fixtures/repository_contract/api_contract.json'))
+assert old['serialization']==new['serialization'], 'serialization 被改了，不该动'
+assert old['source_commit']==new['source_commit'], 'source_commit 被改了，它是 provenance 不是版本号'
+print('只有 openapi 段变化 ✓')
+"
 PYTHONPATH=backend python3 -m pytest backend/tests/test_repository_api_contract.py -n0 -q
 ```
-Expected: 全 PASS
+Expected: 断言全过，测试 PASS
 
 - [ ] **Step 6: 提交**
 
