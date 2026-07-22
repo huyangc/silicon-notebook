@@ -1224,8 +1224,18 @@
         "type": "index"
       },
       {
+        "name": "idx_knowhow_changes_table",
+        "sql_sha256": "836776f01434ca10040e0cc33728bfc7da562475f3f553307ad57b9e3cd755bc",
+        "type": "index"
+      },
+      {
         "name": "idx_knowhow_columns_table",
         "sql_sha256": "cd16d874c9db46a33aef415cff7eb033d1a3f09b008c2a40106ba6f6cb0b8d2e",
+        "type": "index"
+      },
+      {
+        "name": "idx_knowhow_milestones_table",
+        "sql_sha256": "9f90d62e0919b0d3f2ae7aa8cfa27d12af9fe37659f475e866c3ced55c9ff34e",
         "type": "index"
       },
       {
@@ -1649,8 +1659,18 @@
         "type": "table"
       },
       {
+        "name": "knowhow_changes",
+        "sql_sha256": "7d5a1cd0332f579a4b68617eaff68e8da2aae271062ff0fe1aafa6268ff2896a",
+        "type": "table"
+      },
+      {
         "name": "knowhow_columns",
         "sql_sha256": "1225567bf734ae454346b42afa1b0ff07f3b5ec854350a6d217333d8051b9307",
+        "type": "table"
+      },
+      {
+        "name": "knowhow_milestones",
+        "sql_sha256": "186203b845d691af8c40e2a110819e8d53b6d5b9b4ee23c2e6d6c1ec9441ceb3",
         "type": "table"
       },
       {

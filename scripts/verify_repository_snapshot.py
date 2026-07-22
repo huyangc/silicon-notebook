@@ -1866,6 +1866,44 @@ KG_CANONICAL_SCRATCH_INDEX = {
         """CREATE INDEX idx_kg_canonical_scratch_nb_run_seed
                   ON kg_canonical_scratch(notebook_id, run_id, seed)""",
 }
+
+# v25: knowhow table version control — an append-only per-table change log
+# (knowhow_changes) plus user-named checkpoints (knowhow_milestones). The
+# milestone table deliberately has no FK to knowhow_changes: rows survive
+# change-history cleanup as inert "stale" markers instead of cascading away.
+KNOWHOW_HISTORY_TABLES = {
+    "knowhow_changes": """CREATE TABLE knowhow_changes (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  seq INTEGER NOT NULL,
+                  kind TEXT NOT NULL,
+                  actor TEXT NOT NULL DEFAULT '',
+                  origin TEXT NOT NULL DEFAULT 'user',
+                  payload_json TEXT NOT NULL,
+                  fingerprint TEXT NOT NULL,
+                  note TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  UNIQUE(table_id, seq)
+                )""",
+    "knowhow_milestones": """CREATE TABLE knowhow_milestones (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  seq INTEGER NOT NULL,
+                  name TEXT NOT NULL,
+                  note TEXT NOT NULL DEFAULT '',
+                  created_by TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  UNIQUE(table_id, name)
+                )""",
+}
+KNOWHOW_HISTORY_INDEXES = {
+    "idx_knowhow_changes_table":
+        """CREATE INDEX idx_knowhow_changes_table
+                  ON knowhow_changes(table_id, seq DESC)""",
+    "idx_knowhow_milestones_table":
+        """CREATE INDEX idx_knowhow_milestones_table
+                  ON knowhow_milestones(table_id, seq DESC)""",
+}
 MIGRATION_MANIFEST = {
     (key[0], 24, *key[2:]): {
         **manifest,
@@ -1878,6 +1916,23 @@ MIGRATION_MANIFEST[(23, 24)] = {
     "tables": KG_CANONICAL_SCRATCH_TABLE,
     "columns": {},
     "indexes": KG_CANONICAL_SCRATCH_INDEX,
+    "triggers": {},
+    "views": {},
+}
+# v25 层级联在 v24 之上：字典推导把上面每条 (X, 24) 条目再重基到 (X, 25) 并叠加
+# knowhow 历史两表，随后显式登记 (24, 25) hop —— 与 v24 对 v23 所做的一模一样。
+MIGRATION_MANIFEST = {
+    (key[0], 25, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **KNOWHOW_HISTORY_TABLES},
+        "indexes": {**manifest["indexes"], **KNOWHOW_HISTORY_INDEXES},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(24, 25)] = {
+    "tables": KNOWHOW_HISTORY_TABLES,
+    "columns": {},
+    "indexes": KNOWHOW_HISTORY_INDEXES,
     "triggers": {},
     "views": {},
 }

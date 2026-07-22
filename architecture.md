@@ -51,7 +51,8 @@ v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升
 anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化表达式索引，v22
 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 为写锁
 瘦身的簇映射切换段增加 kg_canonical_scratch 表，v25 不可逆清除已存用户模型凭据与
-旧状态，并新增按服务 ID 存储的部署级健康状态；store
+旧状态并新增按服务 ID 存储的部署级健康状态，v26 增加 knowhow 表变更流水与命名
+里程碑；store
 以同一 ECMAScript trim 表达式等值查询，避免在 `BEGIN IMMEDIATE` 中按保存单元扫描整列。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。

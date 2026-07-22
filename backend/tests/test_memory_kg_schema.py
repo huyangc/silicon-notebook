@@ -62,8 +62,9 @@ def test_schema_version_is_25():
     # service status persistence bumped v22 → v23; write-lock slimming
     # improvement point 2's kg_canonical_scratch table bumped v23 → v24;
     # system-owned model services and the irreversible credential/status scrub
-    # bumped v24 → v25.
-    assert sr.SCHEMA_VERSION == 25
+    # bumped v24 → v25; knowhow table version control's _migration_26
+    # (knowhow_changes/knowhow_milestones tables) bumped v25 → v26.
+    assert sr.SCHEMA_VERSION == 26
 
 
 def test_deployed_v13_db_upgrades_via_migration_14(repo):
