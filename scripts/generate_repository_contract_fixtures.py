@@ -934,8 +934,8 @@ def _offline_settings(
     database: Path,
     storage: Path,
     *,
-    required: bool = False,
     configured: bool = False,
+    missing_ask_answer: bool = False,
 ):
     from app.core.config import Settings
     from app.services.model_registry import WORKLOADS
@@ -948,6 +948,7 @@ def _offline_settings(
             f'{workload_id} = "fixture_chat"'
             for workload_id, workload in WORKLOADS.items()
             if workload.kind == "chat"
+            and (not missing_ask_answer or workload_id != "ask_answer")
         )
         config_path.write_text(
             '''[services.fixture_chat]
@@ -981,7 +982,6 @@ max_concurrency = 2
         llm_log_enabled=False,
         debug_logs_enabled=False,
         auth_optional=True,
-        user_model_config_policy="required" if required else "fallback",
         query_rewrite_enabled=False,
         chunk_kg_overlay_enabled=False,
         graph_ppr_enabled=False,
@@ -996,8 +996,8 @@ def _new_offline_repo(
     database: Path,
     storage: Path,
     *,
-    required: bool = False,
     configured: bool = False,
+    missing_ask_answer: bool = False,
 ):
     from app.services.sqlite_repository import SQLiteRepository
 
@@ -1005,8 +1005,8 @@ def _new_offline_repo(
         _offline_settings(
             database,
             storage,
-            required=required,
             configured=configured,
+            missing_ask_answer=missing_ask_answer,
         )
     )
 
@@ -1962,21 +1962,21 @@ def collect_ask_goldens() -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="repository-ask-goldens-") as temporary:
         root = Path(temporary)
         with _deterministic_runtime():
-            for case_name, mode, question, include_kg, required in (
-                ("chunk", "chunk", "fixture gain", True, False),
-                ("reasoning", "reasoning", "fixture gain", True, False),
-                ("graph", "graph", "fixture gain", True, False),
-                ("unconfigured_model", "reasoning", "fixture gain", True, True),
-                ("no_kg", "reasoning", "fixture gain", False, False),
-                ("no_hits", "graph", "unrelated-zqxj", True, False),
-                ("large_graph_refusal", "graph", "fixture gain", True, False),
+            for case_name, mode, question, include_kg in (
+                ("chunk", "chunk", "fixture gain", True),
+                ("reasoning", "reasoning", "fixture gain", True),
+                ("graph", "graph", "fixture gain", True),
+                ("unconfigured_model", "reasoning", "fixture gain", True),
+                ("no_kg", "reasoning", "fixture gain", False),
+                ("no_hits", "graph", "unrelated-zqxj", True),
+                ("large_graph_refusal", "graph", "fixture gain", True),
             ):
                 case_root = root / case_name
                 repo = _new_offline_repo(
                     case_root / "fixture.db",
                     case_root / "storage",
-                    required=required,
-                    configured=case_name != "unconfigured_model",
+                    configured=True,
+                    missing_ask_answer=case_name == "unconfigured_model",
                 )
                 notebook_id = _seed_ask_repository(repo, include_kg=include_kg)
                 # Task 24: the graph engine lives in AskService and consumes the

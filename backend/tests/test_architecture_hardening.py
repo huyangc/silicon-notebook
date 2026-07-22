@@ -31,6 +31,7 @@ OFFLINE_KG_CALLERS = {
 }
 RETIRED_MODEL_SYMBOLS = {
     "USER_MODEL_CONFIG_POLICY",
+    "user_model_config_policy",
     "LimitedJsonChatClient",
     "activate_model_concurrency",
     "KG_EXTRACT_WORKERS",
@@ -175,6 +176,10 @@ def test_retired_model_configuration_and_gate_symbols_are_absent():
         for node in ast.walk(tree):
             if isinstance(node, ast.Name) and node.id in RETIRED_MODEL_SYMBOLS:
                 offenders.append(f"{relative}:{node.lineno}:{node.id}")
+            elif isinstance(node, ast.Attribute) and node.attr in RETIRED_MODEL_SYMBOLS:
+                offenders.append(f"{relative}:{node.lineno}:{node.attr}")
+            elif isinstance(node, ast.keyword) and node.arg in RETIRED_MODEL_SYMBOLS:
+                offenders.append(f"{relative}:{node.lineno}:{node.arg}")
             elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                 for symbol in RETIRED_MODEL_SYMBOLS | retired_routes:
                     if symbol in node.value:

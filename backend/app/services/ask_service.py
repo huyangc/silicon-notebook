@@ -336,7 +336,7 @@ class AskService:
     # ------------------------------------------------------------------
 
     def _primary_llm_unconfigured(self) -> bool:
-        return not self.model_clients.configured("ask_answer")
+        return self.model_clients.primary_unconfigured()
 
     def _tier_map_for(self, notebook_ids: Iterable[str]) -> Dict[str, str]:
         return self.evidence_context.tier_map(list(notebook_ids))
@@ -692,9 +692,8 @@ class AskService:
     def _unconfigured_model_response(self, notebook_id: str, question: str,
                                      conversation_id: str, mode: str,
                                      *, user_id: str) -> AskResponse:
-        """policy=required 且用户未配主 LLM 时的统一短路响应：携带 model_error 让前端
-        横幅提示「请先配置」。优先于"先建 KG"等其它提示——没模型连 KG 都建不了。"""
-        msg = "请先在设置中配置你的模型服务"
+        """系统模型已启用但漏绑问答工作负载时的统一短路响应。"""
+        msg = "系统未配置当前问答所需的模型服务，请联系维护人员"
         response = AskResponse(
             answer_id="", conclusion=msg, conversation_id=conversation_id,
             retrieval_query=question, llm_mode="deterministic")
@@ -745,7 +744,9 @@ class AskService:
             if self._primary_llm_unconfigured():
                 self.model_errors.note_model_error(
                     "answer",
-                    ModelNotConfiguredError("请先在设置中配置你的模型服务"),
+                    ModelNotConfiguredError(
+                        "系统未配置当前问答所需的模型服务，请联系维护人员"
+                    ),
                     workload_id="ask_answer",
                 )
             _t = time.perf_counter()

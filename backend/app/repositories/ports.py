@@ -675,7 +675,7 @@ class ModelClientProvider(ReasoningModelProvider, Protocol):
 
 
 class AskModelClientProvider(ModelClientProvider, Protocol):
-    pass
+    def primary_unconfigured(self) -> bool: ...
 
 
 class ModelErrorSink(Protocol):

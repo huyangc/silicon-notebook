@@ -45,6 +45,7 @@ class RecordingModelProvider:
     chat_clients: Mapping[str, Any] = field(default_factory=dict)
     embedding_clients: Mapping[str, Any] = field(default_factory=dict)
     rerank_clients: Mapping[str, Any] = field(default_factory=dict)
+    system_registry_nonempty: bool = False
     parallelism_by_workload: Mapping[str, int] = field(default_factory=dict)
     calls: list[tuple[str, str]] = field(default_factory=list)
     error_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -76,6 +77,9 @@ class RecordingModelProvider:
 
     def parallelism(self, workload_id: str) -> int:
         return max(1, int(self.parallelism_by_workload.get(workload_id, 1)))
+
+    def primary_unconfigured(self) -> bool:
+        return self.system_registry_nonempty and not self.configured("ask_answer")
 
     def note_model_error(
         self, stage: str, error: Exception, *, workload_id: str

@@ -961,7 +961,10 @@ class RuntimeModelProvider:
         })
 
     def primary_unconfigured(self) -> bool:
-        return not self.configured("ask_answer")
+        # An entirely empty registry is the supported deterministic/offline
+        # runtime.  Once the operator defines any system model service, a
+        # missing ask_answer binding is instead a real deployment error.
+        return bool(self.registry.services()) and not self.configured("ask_answer")
 
     def close(self) -> None:
         with self._lock:

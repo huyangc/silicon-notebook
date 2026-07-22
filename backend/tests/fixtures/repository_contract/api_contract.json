@@ -13327,18 +13327,7 @@
       "kg_required": false,
       "llm_mode": "deterministic",
       "mode": "chunk",
-      "model_errors": [
-        {
-          "message": "missing_config",
-          "model": "",
-          "service_id": "",
-          "service_name": "",
-          "stage": "answer",
-          "support_id": "",
-          "workload_id": "ask_answer",
-          "workload_label": "问答回答"
-        }
-      ],
+      "model_errors": [],
       "reasoning_trace": null,
       "related_knowledge": [],
       "retrieval_query": "fixture gain",
@@ -13377,18 +13366,7 @@
             "kg_required": false,
             "llm_mode": "deterministic",
             "mode": "chunk",
-            "model_errors": [
-              {
-                "message": "missing_config",
-                "model": "",
-                "service_id": "",
-                "service_name": "",
-                "stage": "answer",
-                "support_id": "",
-                "workload_id": "ask_answer",
-                "workload_label": "问答回答"
-              }
-            ],
+            "model_errors": [],
             "reasoning_trace": null,
             "related_knowledge": [],
             "retrieval_query": "fixture gain",
