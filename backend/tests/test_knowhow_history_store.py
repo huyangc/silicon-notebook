@@ -57,16 +57,33 @@ def test_seq_starts_at_one_and_increments(repo, table_id):
 
 
 def test_records_fingerprint_of_state_after_the_change(repo, table_id):
+    """指纹必须反映"变更之后"的表状态——不是随便存哪次算的都行。
+
+    构造一个变更前指纹 != 变更后指纹的场景（真的加一行），断言存下来的
+    指纹等于变更后的、且不等于变更前的。用同一状态前后各测一次算不出
+    区别，锁不住"何时算指纹"这条约束。
+    """
     from app.repositories.sqlite import knowhow_fingerprint
 
-    _record(repo, table_id, kind="table_create", payload={})
-    with repo._runtime.database.connect() as db:
-        expected = knowhow_fingerprint.fingerprint_on(db, table_id)
+    runtime = repo._runtime
+    with runtime.database.connect() as db:
+        before_fp = knowhow_fingerprint.fingerprint_on(db, table_id)
+
+    runtime.knowhow_store.add_knowhow_row(table_id, {})
+
+    with runtime.database.connect() as db:
+        after_fp = knowhow_fingerprint.fingerprint_on(db, table_id)
+    assert after_fp != before_fp  # sanity: 变更真的挪动了指纹
+
+    seq = _record(repo, table_id, kind="row_add", payload={"rows": []})
+
+    with runtime.database.connect() as db:
         stored = db.execute(
-            "SELECT fingerprint FROM knowhow_changes WHERE table_id=? AND seq=1",
-            (table_id,),
+            "SELECT fingerprint FROM knowhow_changes WHERE table_id=? AND seq=?",
+            (table_id, seq),
         ).fetchone()["fingerprint"]
-    assert stored == expected
+    assert stored == after_fp
+    assert stored != before_fp
 
 
 def test_actor_origin_note_round_trip(repo, table_id, store):
@@ -97,6 +114,15 @@ def test_head_seq_is_zero_for_a_table_with_no_history(repo, table_id, store):
     assert store.head_seq(table_id) == 0
 
 
+def test_changes_between_is_left_open_right_closed_ascending(repo, table_id, store):
+    """区间 (from_seq, to_seq]：排除 from_seq 本身，包含 to_seq；升序供 diff 折叠。"""
+    for _ in range(5):
+        _record(repo, table_id, kind="cell_update", payload={"cells": []})
+
+    entries = store.changes_between(table_id, 2, 4)
+    assert [c["seq"] for c in entries] == [3, 4]
+
+
 def test_cell_history_filters_to_one_cell_newest_first(repo, table_id, store):
     _record(repo, table_id, kind="cell_update", payload={
         "cells": [{"row_id": "r1", "column_id": "c1", "before": None, "after": "一"}]
@@ -125,3 +151,74 @@ def test_cell_history_finds_the_cell_inside_a_multi_cell_batch(repo, table_id, s
     entries = store.cell_history(table_id, "rB", "c1")
     assert len(entries) == 1
     assert entries[0]["before"] == "旧B"
+
+
+def test_cell_history_finds_the_cell_born_via_row_add(repo, table_id, store):
+    """row_add 顶层键是 rows，格子内容嵌在 rows[i]['cells'] 字典里，不是顶层 cells 列表。"""
+    _record(repo, table_id, kind="row_add", payload={
+        "rows": [{
+            "row_id": "r1", "position": 0,
+            "cells": {"c1": "新行初始值"},
+            "code": [],
+        }]
+    })
+    entries = store.cell_history(table_id, "r1", "c1")
+    assert len(entries) == 1
+    assert entries[0]["before"] is None
+    assert entries[0]["after"] == "新行初始值"
+
+
+def test_cell_history_finds_the_cell_born_via_import_append(repo, table_id, store):
+    """import_append 与 row_add 同形状——批量导入产生的格子同样要能查到诞生记录。"""
+    _record(repo, table_id, kind="import_append", payload={
+        "rows": [{
+            "row_id": "r1", "position": 0,
+            "cells": {"c1": "导入值"},
+            "code": [],
+        }]
+    })
+    entries = store.cell_history(table_id, "r1", "c1")
+    assert len(entries) == 1
+    assert entries[0]["before"] is None
+    assert entries[0]["after"] == "导入值"
+
+
+def test_cell_history_finds_the_cell_that_died_via_row_delete(repo, table_id, store):
+    """row_delete 存整行快照（同 row_add 形状）；格子消失，before=旧值，after=None。"""
+    _record(repo, table_id, kind="row_delete", payload={
+        "rows": [{
+            "row_id": "r1", "position": 0,
+            "cells": {"c1": "被删前的值"},
+            "code": [],
+        }]
+    })
+    entries = store.cell_history(table_id, "r1", "c1")
+    assert len(entries) == 1
+    assert entries[0]["before"] == "被删前的值"
+    assert entries[0]["after"] is None
+
+
+def test_cell_history_finds_the_cell_that_died_via_column_delete(repo, table_id, store):
+    """column_delete 顶层 cells 列表的条目形状是 {row_id, content_md}，没有 column_id；
+    整个 payload 只对应一列，需先核对 payload['column']['id'] == 请求的 column_id。"""
+    _record(repo, table_id, kind="column_delete", payload={
+        "column": {"id": "c1", "name": "概念", "role": "attribute", "position": 1},
+        "cells": [{"row_id": "r1", "content_md": "列删前的值"}],
+        "code": [],
+    })
+    entries = store.cell_history(table_id, "r1", "c1")
+    assert len(entries) == 1
+    assert entries[0]["before"] == "列删前的值"
+    assert entries[0]["after"] is None
+
+
+def test_cell_history_column_delete_does_not_leak_into_a_different_column(repo, table_id, store):
+    """column_delete 的 cells 条目没有 column_id 字段本身——防回归：错误实现如果忽略
+    payload['column']['id'] 校验，任何列被删都会污染所有列的格子历史。"""
+    _record(repo, table_id, kind="column_delete", payload={
+        "column": {"id": "c1", "name": "概念", "role": "attribute", "position": 1},
+        "cells": [{"row_id": "r1", "content_md": "列删前的值"}],
+        "code": [],
+    })
+    entries = store.cell_history(table_id, "r1", "c2")
+    assert entries == []
