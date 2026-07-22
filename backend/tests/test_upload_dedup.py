@@ -85,7 +85,10 @@ def _patch_parse(monkeypatch, result):
     monkeypatch.setattr(facade_mod, "parse_source_file", fake)
 
 
-def _seed_source(repo, notebook_id, *, file_hash, created_at, status="extracted"):
+def _seed_source(
+    repo, notebook_id, *, file_hash, created_at, status="extracted",
+    source_type="markdown",
+):
     """直接插一行 source（模拟历史库里的既有行）。"""
     sid = f"src-{uuid4().hex[:10]}"
     with repo._write() as db:
@@ -93,10 +96,14 @@ def _seed_source(repo, notebook_id, *, file_hash, created_at, status="extracted"
             "INSERT INTO sources (id,notebook_id,title,source_type,status,parse_status,"
             "file_name,file_path,file_size,file_hash,summary,doc_type,created_at,updated_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (sid, notebook_id, sid, "markdown", status, status,
+            (sid, notebook_id, sid, source_type, status, status,
              "doc.md", "/tmp/s.md", 0, file_hash, "", "", created_at, created_at),
         )
     return sid
+
+
+def _boom(*_args, **_kwargs):
+    raise RuntimeError("kg llm returned 502 Bad Gateway")
 
 
 def test_same_content_twice_in_one_notebook_creates_one_source(repo, notebook_id):
@@ -169,6 +176,64 @@ def test_reupload_of_a_failed_source_reschedules_when_scheduler_is_given(
     assert scheduled == [sid], "失败源重新上传要重新排队"
     assert again[0].id == sid
     assert repo.process_calls == [], "有 scheduler 时绝不同步跑"
+
+
+def test_retrying_a_failed_source_leaves_the_failed_terminal_state_at_once(
+    repo, notebook_id
+):
+    """排队前必须先把行翻出 'failed'，否则这次重试对用户完全隐形。
+
+    scheduler 是异步的，它返回时 process_source 未必已经开始；前端的轮询判据是
+    「extracted/failed 之外一律继续轮」，所以响应里仍是终态 failed 的行会被判定
+    「已结束」，界面停在失败上不动，直到用户自己刷新页面。"""
+    scheduled = []
+    sid = repo.upload_sources(
+        notebook_id,
+        [UploadedSourceFile(file_name="a.txt", content_type="text/plain",
+                            content=b"hello world")],
+        scheduler=scheduled.append,
+    )[0].id
+    repo._runtime.source_ingestion.set_source_status(
+        sid, "failed", error_message="mineru down"
+    )
+    scheduled.clear()
+
+    again = repo.upload_sources(
+        notebook_id,
+        [UploadedSourceFile(file_name="a.txt", content_type="text/plain",
+                            content=b"hello world")],
+        scheduler=scheduled.append,
+    )
+
+    assert scheduled == [sid]
+    assert again[0].parse_status == "queued", (
+        "响应里就得是非终态，前端才会开始轮询这条重试"
+    )
+    row = repo.get_source(sid)
+    assert row.parse_status == "queued"
+    assert row.error_message == "", "上一轮的失败原因已经不描述现状了，不该留着"
+
+
+def test_uploading_a_failed_source_twice_in_a_row_starts_only_one_pipeline(
+    repo, notebook_id
+):
+    """重试排队后、后台真正开跑前，用户又传了一次同一个文件（很自然：界面上
+    还看不出动静）。第二次绝不能把同一条源再排一次——同一行两条流水线会互相
+    清掉对方的产物，还白烧一份解析/模型开销。"""
+    scheduled = []
+    payload = [UploadedSourceFile(file_name="a.txt", content_type="text/plain",
+                                  content=b"hello world")]
+    sid = repo.upload_sources(notebook_id, payload, scheduler=scheduled.append)[0].id
+    repo._runtime.source_ingestion.set_source_status(
+        sid, "failed", error_message="mineru down"
+    )
+    scheduled.clear()
+
+    repo.upload_sources(notebook_id, payload, scheduler=scheduled.append)  # 重试
+    repo.upload_sources(notebook_id, payload, scheduler=scheduled.append)  # 手快又传一次
+
+    assert scheduled == [sid], "只能有一条流水线被排队"
+    assert repo.process_calls == []
 
 
 def test_reupload_of_a_healthy_source_does_not_reprocess(repo, notebook_id):
@@ -362,6 +427,126 @@ def test_retype_with_a_scheduler_reextracts_out_of_band(
     assert repo.extract_calls == [], "绝不在请求线程里同步抽"
 
 
+# ------------------------------------------------------- 重抽失败必须落终态
+
+def test_failed_reextraction_lands_on_failed_with_a_user_readable_reason(
+    repo, notebook_id, settled, monkeypatch
+):
+    """重抽失败必须落 'failed' 并留下原因。
+
+    退回 'parsed' 是两重错：前端只把 extracted/failed 当终态，'parsed' 会让界面
+    一路轮询到假的「处理超时」；而且这个来源在库里看着像「解析好了」，实际抽取
+    从没成功过。错误信息也不能清空——那是唯一还能说明「这里出过事」的痕迹。"""
+    sid = settled()
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", _boom)
+
+    row = _upload(repo, notebook_id, doc_type="textbook")[0]
+
+    assert row.parse_status == "failed", "响应里就得是终态 failed，前端才会停轮询"
+    detail = repo.get_source(sid)
+    assert detail.parse_status == "failed"
+    assert detail.error_message, "错误信息不得被清空"
+    for leaked in ("Traceback", "RuntimeError", "502", "Bad Gateway"):
+        assert leaked not in detail.error_message, (
+            f"面向用户的文案不该暴露技术细节：{detail.error_message!r}"
+        )
+
+
+def test_a_failed_reextraction_is_retryable_by_reuploading_the_same_file(
+    repo, notebook_id, settled, monkeypatch
+):
+    """重抽失败后重传同一个文件必须真的重跑。
+
+    这一条是「落 failed」的真正理由：doc_type 那时已经落库，retyped 为 false，
+    所以只有失败源那条分支能救它；停在 'parsed' 的话整条路径是静默 no-op，用户
+    再传多少次都没有任何反应。"""
+    sid = settled()
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", _boom)
+    _upload(repo, notebook_id, doc_type="textbook")
+    assert repo.get_source(sid).parse_status == "failed"
+    repo.process_calls.clear()
+
+    again = _upload(repo, notebook_id, doc_type="textbook")  # 同一文件 + 同一类型
+
+    assert again[0].id == sid
+    assert repo.process_calls == [sid], "重传必须重跑整条流水线，而不是静默 no-op"
+
+
+# ---------------------------------------- 抽取进行中发生的 retype 不得丢失
+
+def test_retype_during_an_in_flight_reextraction_is_applied_not_lost(
+    repo, notebook_id, settled, monkeypatch
+):
+    """重抽跑到一半用户又改了类型：跑完必须按新类型补跑一次。
+
+    doc_type 在 run_extraction 一开始就被读走（它选 profile、进抽取 prompt），
+    所以这个窗口里改类型，落库的类型会与真正用来抽取的 profile 不一致，而
+    reuse_uploaded_source 对 'extracting' 的行不调度任何东西——没有自校验就
+    没有任何人来纠正它。"""
+    sid = settled(doc_type="academic_paper")
+    seen_while_extracting = []
+
+    def fake_extract(source_id, **_kw):
+        seen_while_extracting.append(repo.get_source(source_id).doc_type)
+        if len(seen_while_extracting) == 1:
+            # 抽取正在跑（这一行此刻就是 'extracting'），用户用另一个类型重传
+            assert repo.get_source(source_id).parse_status == "extracting"
+            _upload(repo, notebook_id, doc_type="academic_paper")
+
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction", fake_extract)
+
+    _upload(repo, notebook_id, doc_type="textbook")
+
+    assert seen_while_extracting == ["textbook", "academic_paper"], (
+        "抽取期间改的类型必须被补跑一次；只有一次说明那次 retype 被丢了"
+    )
+    assert repo.get_source(sid).doc_type == "academic_paper"
+    assert repo.get_source(sid).parse_status == "extracted", "补跑完照样落终态"
+
+
+def test_retype_during_the_first_uploads_extraction_is_applied_not_lost(
+    live_repo, monkeypatch
+):
+    """同一个窗口在「第一次上传」的流水线里也存在，而且更容易撞上：用户嫌慢，
+    用正确的类型把同一个文件又传了一次，这时第一条流水线正卡在 extracting。"""
+    nb = live_repo.create_notebook(NotebookCreate(name="nb")).id
+    ingestion = live_repo._runtime.source_ingestion
+    monkeypatch.setattr(ingestion, "notebook_has_kg", lambda _nb: True)
+    _patch_parse(monkeypatch, [_element("body")])
+    seen_while_extracting = []
+
+    def fake_extract(source_id, **_kw):
+        seen_while_extracting.append(live_repo.get_source(source_id).doc_type)
+        if len(seen_while_extracting) == 1:
+            assert live_repo.get_source(source_id).parse_status == "extracting"
+            _upload(live_repo, nb, doc_type="textbook")
+
+    monkeypatch.setattr(ingestion, "run_extraction", fake_extract)
+
+    sid = _upload(live_repo, nb, doc_type="academic_paper")[0].id
+
+    assert seen_while_extracting == ["academic_paper", "textbook"]
+    assert live_repo.get_source(sid).doc_type == "textbook"
+    assert live_repo.get_source(sid).parse_status == "extracted"
+    assert len(live_repo.list_sources(nb)) == 1
+
+
+def test_an_unchanged_doc_type_costs_exactly_one_extraction(
+    repo, notebook_id, settled, monkeypatch
+):
+    """自校验是一次主键读，不是「总是抽两遍」——类型没动就只抽一次。"""
+    sid = settled(doc_type="academic_paper")
+    calls = []
+    monkeypatch.setattr(
+        repo._runtime.source_ingestion, "run_extraction",
+        lambda source_id, **_kw: calls.append(source_id),
+    )
+
+    _upload(repo, notebook_id, doc_type="textbook")
+
+    assert calls == [sid]
+
+
 # ------------------------------------------------------- 新建/复用要能被调用方区分
 
 def test_upload_result_marks_new_rows_and_reused_rows(repo, notebook_id):
@@ -428,3 +613,55 @@ def test_source_id_by_hash_is_deterministic_when_duplicates_already_exist(
         f"应返回最早的 {older}，实际 {newer} 说明查询顺序未定义"
     )
     assert store.source_id_by_hash(notebook_id, digest) == older, "重复调用必须一致"
+
+
+def test_upload_never_dedups_onto_a_hidden_memory_projection_row(
+    repo, notebook_id, monkeypatch
+):
+    """Memory 投影源是隐藏的派生行，但它的 file_hash **非空**——存的是
+    sha256(title + "\\n" + content) 指纹。上传一个字节恰好等于那段原文的文件时，
+    去重不能落到它身上：那一行不在可见来源列表里，用户会看到「已上传」，刷新后
+    什么都没有，而且他的文件被嫁接到了一条 Memory 投影上。"""
+    import hashlib
+
+    ingestion = repo._runtime.source_ingestion
+    # 真实的 Memory 投影入口建这一行（指纹由生产代码算），只把 KG 抽取打桩掉。
+    monkeypatch.setattr(ingestion, "run_extraction", lambda *_a, **_kw: None)
+    title, body = "记一条 memo", "hello world"
+    memory_sid = ingestion.ingest_memory_source(notebook_id, "memory-1", title, body)
+
+    raw = f"{title}\n{body}".encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()
+    assert repo.get_source(memory_sid).file_hash == digest, "前提：指纹就是这段原文"
+    assert memory_sid not in {s.id for s in repo.list_sources(notebook_id)}, (
+        "前提：它是隐藏行，不出现在用户能看到的来源列表里"
+    )
+
+    store = repo._runtime.source_store
+    assert store.source_id_by_hash(notebook_id, digest) is None, (
+        "隐藏/派生来源不参与内容去重"
+    )
+
+    uploaded = _upload(repo, notebook_id, content=raw, name="memo.txt")
+
+    assert uploaded[0].id != memory_sid, "上传绝不能复用那条隐藏的 Memory 投影行"
+    assert uploaded[0].reused is False
+    assert uploaded[0].id in {s.id for s in repo.list_sources(notebook_id)}, (
+        "新建的这条必须真的出现在可见来源列表里"
+    )
+
+
+def test_hidden_knowhow_projection_rows_are_excluded_from_dedup_too(
+    repo, notebook_id
+):
+    """knowhow 表投影是同一套隐藏源机制（今天它的 file_hash 是空串，靠空指纹
+    那道门也进不来）。这里钉住的是「按 source_type 排除」这一层本身，免得将来
+    有人给它写上指纹就把同一个洞重新打开。"""
+    store = repo._runtime.source_store
+    digest = "e" * 64
+    hidden = _seed_source(
+        repo, notebook_id, file_hash=digest, created_at="2023-01-01T00:00:00",
+        source_type="knowhow",
+    )
+    assert store.source_id_by_hash(notebook_id, digest) is None
+    assert hidden not in {s.id for s in repo.list_sources(notebook_id)}
