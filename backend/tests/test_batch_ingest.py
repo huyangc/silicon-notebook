@@ -276,6 +276,39 @@ def test_run_ingest_reparses_source_with_elements_but_no_chunks(repo, tmp_path, 
     assert n_chunks > 0, "重解析没有补出 chunk,这个源仍然不可检索"
 
 
+def test_run_ingest_reparses_source_that_reached_extracted_without_chunks(repo, tmp_path):
+    """「终态成功」也不能证明分块成功:source_ingestion 把 build_chunks_for_source 包在
+    best-effort 的 try 里(「失败不阻塞既有 parse->extract 流水线」),分块抛错时只记日志,
+    源照样被置成 'extracted'。这样的源有 element、零 chunk,在检索里是不可见的,
+    而 run_ingest 收尾的 backfill_chunk_embeddings 只嵌入**已存在**的 chunk,救不了它。
+
+    所以「终态」这一档必须与「没有 element」合取才算完成(扫描版 PDF 那类),
+    有 element 却零 chunk 的一律重跑。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-extracted-no-chunks")
+    p = tmp_path / "chunkless.md"
+    p.write_text("# Chunkless\n\n" + "u" * 200, encoding="utf-8")
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:   # 预置:终态 extracted、有 element、零 chunk
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,status,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-chunkless", nb_id, "Chunkless", "document", p.name, str(p), 0,
+             bi.sha256_bytes(p.read_bytes()), "", "", "extracted", "extracted", now, now))
+        db.execute(
+            "INSERT INTO source_elements (id,source_id,element_type,location_label,text,"
+            "created_at) VALUES ('el-c1','src-chunkless','paragraph','p1','stale body',?)",
+            (now,))
+
+    counts = bi.run_ingest(repo, nb_id, [p], workers=1, conc=1)
+
+    assert counts["reparsed"] == 1, "终态但零 chunk 的源被当成已完成,检索里永远看不到它"
+    assert counts["skipped"] == 0
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM chunks WHERE source_id='src-chunkless'"
+                          ).fetchone()["c"] > 0
+
+
 def test_run_ingest_skips_source_whose_parse_succeeded_but_kg_failed(repo, tmp_path, monkeypatch):
     """parse 与分块都成功、下游 KG 抽取抛错 → 管线外层 except 把**整个源**记成
     parse_status='failed'。这种源的 parse 产物是完整有效的,不能因为状态是 failed 就
