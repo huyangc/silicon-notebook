@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 from pathlib import Path
 import threading
 
@@ -25,6 +26,14 @@ FIXTURE = (
     / "repository_contract"
     / "api_contract.json"
 )
+PUBLIC_CALLABLES_FIXTURE = (
+    ROOT
+    / "backend"
+    / "tests"
+    / "fixtures"
+    / "repository_contract"
+    / "sqlite_repository_public_callables.json"
+)
 
 REQUIRED_SERIALIZATION = {
     "notebook_summary",
@@ -41,6 +50,29 @@ REQUIRED_SERIALIZATION = {
 def _contract() -> dict[str, object]:
     assert FIXTURE.is_file(), f"missing API contract fixture: {FIXTURE}"
     return json.loads(FIXTURE.read_text(encoding="utf-8"))
+
+
+def _public_callable_signatures() -> dict[str, str]:
+    surface: dict[str, str] = {}
+    for name in sorted(dir(SQLiteRepository)):
+        if name.startswith("_"):
+            continue
+        member = inspect.getattr_static(SQLiteRepository, name)
+        target = member.fget if isinstance(member, property) else member
+        if not callable(target):
+            continue
+        try:
+            surface[name] = str(inspect.signature(target))
+        except (TypeError, ValueError):
+            continue
+    return surface
+
+
+def test_sqlite_repository_public_callable_surface_is_frozen():
+    assert PUBLIC_CALLABLES_FIXTURE.is_file()
+    expected = json.loads(PUBLIC_CALLABLES_FIXTURE.read_text(encoding="utf-8"))
+
+    assert _public_callable_signatures() == expected
 
 
 def _normalize_runtime(value, replacements, temporary_root, key=""):

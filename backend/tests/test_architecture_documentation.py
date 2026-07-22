@@ -536,10 +536,10 @@ def test_completed_repository_boundary_claims_are_source_guarded():
         for entry in entries
     )
     assert facade_contract.facade_body_violations(
-        facade_contract.SQLiteRepository
+        facade_contract.RepositoryFacade
     ) == []
     assert facade_contract.manifest_delegate_mismatches(
-        facade_contract.SQLiteRepository, OWNER_BY_MEMBER
+        facade_contract.RepositoryFacade, OWNER_BY_MEMBER
     ) == []
 
     assert protocol_calls("RetrievalPort") - set(RetrievalPort.__dict__) == set()

@@ -146,9 +146,14 @@ def test_session_resolution_does_not_write_on_every_request(tmp_path):
 
 
 def test_facade_composition_is_flat_and_static(tmp_path):
-    """Task 26: the consolidated facade is a flat class (no mixin MRO) whose
-    members are all statically visible delegates — no dynamic dispatch."""
-    assert SQLiteRepository.__mro__ == (SQLiteRepository, object)
+    """The compatibility wrapper has one neutral facade base and no mixins."""
+    from app.services.repository_facade import RepositoryFacade
+
+    assert SQLiteRepository.__mro__ == (
+        SQLiteRepository,
+        RepositoryFacade,
+        object,
+    )
     assert "__getattr__" not in SQLiteRepository.__dict__
     assert "__getattribute__" not in SQLiteRepository.__dict__
 

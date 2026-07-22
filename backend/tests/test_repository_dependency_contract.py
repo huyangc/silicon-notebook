@@ -138,6 +138,17 @@ def test_facade_import_targets_cover_module_and_symbol_import_forms():
     }
 
 
+def test_api_repository_dependency_uses_the_cached_backend_factory():
+    import inspect
+
+    from app.api import deps
+
+    source = inspect.getsource(deps.repository)
+    assert hasattr(deps.repository, "cache_clear")
+    assert "create_repository(get_settings())" in source
+    assert "SQLiteRepository" not in source
+
+
 def test_lifecycle_service_is_sql_free_and_uses_exact_store_seams():
     path = ROOT / "backend" / "app" / "services" / "knowledge_lifecycle.py"
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

@@ -3,14 +3,6 @@
     {
       "count": 1,
       "kind": "facade_imports",
-      "path": "backend/app/api/deps.py",
-      "reason": "API composition root",
-      "scope": "<module>",
-      "target": "app.services.sqlite_repository:SQLiteRepository"
-    },
-    {
-      "count": 1,
-      "kind": "facade_imports",
       "path": "backend/app/eval/inference.py",
       "reason": "evaluation composition root",
       "scope": "<module>.run_inference",
@@ -38,6 +30,14 @@
       "path": "backend/app/eval/speed.py",
       "reason": "evaluation composition root",
       "scope": "<module>.measure_speed",
+      "target": "app.services.sqlite_repository:SQLiteRepository"
+    },
+    {
+      "count": 1,
+      "kind": "facade_imports",
+      "path": "backend/app/repositories/factory.py",
+      "reason": "formal backend-selection composition root",
+      "scope": "<module>",
       "target": "app.services.sqlite_repository:SQLiteRepository"
     },
     {

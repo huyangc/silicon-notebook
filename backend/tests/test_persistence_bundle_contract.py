@@ -12,11 +12,6 @@ ROOT = Path(__file__).resolve().parents[2]
 NEUTRAL_MODULES = (
     "backend/app/repositories/ports.py",
     "backend/app/repositories/bundle.py",
-)
-# Task 3 extends this guard after it extracts/injects the current SQLite
-# composition root.  Keeping the next phase explicit prevents this Task 2
-# guard from silently becoming a permanent partial boundary.
-TASK_3_NEUTRAL_MODULES = (
     "backend/app/services/repository_runtime.py",
     "backend/app/services/repository_facade.py",
 )
@@ -65,8 +60,12 @@ def _forbidden_imports(modules: set[str]) -> set[str]:
 
 
 def test_neutral_ports_do_not_import_database_backends():
-    offenders = _forbidden_imports(_imports(ROOT / NEUTRAL_MODULES[0]))
-    assert offenders == set(), offenders
+    offenders = {
+        module: _forbidden_imports(_imports(ROOT / module))
+        for module in NEUTRAL_MODULES
+        if (ROOT / module).exists()
+    }
+    assert offenders == {module: set() for module in NEUTRAL_MODULES}, offenders
 
 
 def test_bundle_is_neutral_and_declares_every_store_seat():

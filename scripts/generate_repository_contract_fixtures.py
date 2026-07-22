@@ -348,6 +348,7 @@ def collect_facade_surface(
     from app.services import repository as repository_module
     from app.services import sqlite_repository as module
     from app.services.ask_modes import ASK_MODES
+    from app.services.repository_facade import RepositoryFacade
     from app.services.sqlite_repository import SQLiteRepository
     from tests.test_repository_facade_contract import facade_delegate_evidence
 
@@ -361,13 +362,16 @@ def collect_facade_surface(
             ):
                 class_members[name] = value
 
-    source_tree = ast.parse(
-        (REPO_ROOT / "backend/app/services/sqlite_repository.py").read_text(
-            encoding="utf-8"
+    source_trees = tuple(
+        ast.parse((REPO_ROOT / relative).read_text(encoding="utf-8"))
+        for relative in (
+            "backend/app/services/repository_facade.py",
+            "backend/app/services/sqlite_repository.py",
         )
     )
     instance_attributes = {
         node.targets[0].attr
+        for source_tree in source_trees
         for node in ast.walk(source_tree)
         if isinstance(node, ast.Assign)
         and len(node.targets) == 1
@@ -377,6 +381,7 @@ def collect_facade_surface(
     }
     instance_attributes |= {
         node.target.attr
+        for source_tree in source_trees
         for node in ast.walk(source_tree)
         if isinstance(node, ast.AnnAssign)
         and isinstance(node.target, ast.Attribute)
@@ -393,7 +398,7 @@ def collect_facade_surface(
     delegate_owners = {
         name: owner
         for name, owner in facade_delegate_evidence(
-            SQLiteRepository,
+            RepositoryFacade,
             {name: "" for name in candidate_names},
         ).items()
         if owner
@@ -432,7 +437,7 @@ def collect_facade_surface(
             continue
         scopes = _semantic_scopes(tree)
         module_aliases = {"sqlite_repository"}
-        class_aliases = {"SQLiteRepository"}
+        class_aliases = {"SQLiteRepository", "RepositoryFacade"}
         for import_node in ast.walk(tree):
             if isinstance(import_node, ast.Import):
                 for alias in import_node.names:
@@ -447,10 +452,13 @@ def collect_facade_surface(
                         module_aliases.add(alias.asname or alias.name)
             elif (
                 isinstance(import_node, ast.ImportFrom)
-                and import_node.module == "app.services.sqlite_repository"
+                and import_node.module in {
+                    "app.services.repository_facade",
+                    "app.services.sqlite_repository",
+                }
             ):
                 for alias in import_node.names:
-                    if alias.name == "SQLiteRepository":
+                    if alias.name in {"RepositoryFacade", "SQLiteRepository"}:
                         class_aliases.add(alias.asname or alias.name)
 
         for node in ast.walk(tree):
@@ -493,6 +501,7 @@ def collect_facade_surface(
             )
         }
         facade_classes = {
+            "RepositoryFacade",
             "SQLiteRepository",
             "SQLiteIdentityMixin",
             "SQLiteNotebookSharingMixin",
@@ -871,6 +880,7 @@ def _deterministic_runtime() -> Iterator[None]:
     from app.services import rerank_client
     from app.services import sqlite_identity
     from app.services import sqlite_notebook_sharing
+    from app.services import repository_facade
     from app.services import sqlite_repository
     from app.repositories.sqlite import identity_store
 
@@ -904,16 +914,16 @@ def _deterministic_runtime() -> Iterator[None]:
         stack.enter_context(mock.patch.object(sqlite_notebook_sharing, "_now", lambda: FIXED_TIME))
         stack.enter_context(mock.patch.object(auth_utils, "hash_password", fixed_hash))
         stack.enter_context(
-            mock.patch.object(sqlite_repository, "OpenAICompatibleClient", _FakeChatAdapter)
+            mock.patch.object(repository_facade, "OpenAICompatibleClient", _FakeChatAdapter)
         )
         stack.enter_context(
             mock.patch.object(model_provider, "OpenAICompatibleClient", _FakeChatAdapter)
         )
         stack.enter_context(
-            mock.patch.object(sqlite_repository, "MinerUClient", _FakeMinerUAdapter)
+            mock.patch.object(repository_facade, "MinerUClient", _FakeMinerUAdapter)
         )
         stack.enter_context(
-            mock.patch.object(sqlite_repository, "MinerUCloudClient", _FakeMinerUAdapter)
+            mock.patch.object(repository_facade, "MinerUCloudClient", _FakeMinerUAdapter)
         )
         stack.enter_context(
             mock.patch.object(
@@ -2007,7 +2017,21 @@ def _serialization_contract() -> dict[str, object]:
     from fastapi.testclient import TestClient
 
     from app import main as app_main
-    from app.api import deps, routes
+    from app.api import (
+        admin_routes,
+        ask_routes,
+        content_overview_routes,
+        deps,
+        kg_routes,
+        knowhow_agent_routes,
+        knowhow_routes,
+        knowledge_routes,
+        memory_routes,
+        notebook_routes,
+        report_routes,
+        source_routes,
+        system_routes,
+    )
     from app.core import event_logging
     from app.models.schemas import AskRequest
     from app.services.repository import UploadedSourceFile
@@ -2022,7 +2046,24 @@ def _serialization_contract() -> dict[str, object]:
             stack.enter_context(mock.patch.object(app_main, "repository", lambda: repo))
             stack.enter_context(mock.patch.object(deps, "get_settings", lambda: repo.settings))
             stack.enter_context(mock.patch.object(deps, "repository", lambda: repo))
-            stack.enter_context(mock.patch.object(routes, "repository", lambda: repo))
+            for route_module in (
+                admin_routes,
+                ask_routes,
+                content_overview_routes,
+                kg_routes,
+                knowhow_agent_routes,
+                knowhow_routes,
+                knowledge_routes,
+                memory_routes,
+                notebook_routes,
+                report_routes,
+                source_routes,
+                system_routes,
+            ):
+                if hasattr(route_module, "repository"):
+                    stack.enter_context(
+                        mock.patch.object(route_module, "repository", lambda: repo)
+                    )
             stack.enter_context(
                 mock.patch.object(event_logging._archive_pool, "submit", lambda *_a, **_k: None)
             )

@@ -9,26 +9,15 @@ from typing import Any, Callable
 from app.core import ask_context
 from app.core.config import Settings
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
+from app.repositories.bundle import PersistenceBundleFactory
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
+from app.repositories.ports import (
+    EmbeddingStorePort,
+    IndexProjectionStorePort,
+    RepositorySeams,
+    SharingStorePort,
+)
 from app.repositories.source_files import SourceFileStore
-from app.repositories.sqlite.ask_state_store import AskStateStore
-from app.repositories.sqlite.chunk_store import ChunkStore
-from app.repositories.sqlite.embedding_store import EmbeddingStore
-from app.repositories.sqlite.governance_store import GovernanceStore
-from app.repositories.sqlite.identity_store import IdentityStore
-from app.repositories.sqlite.database import SqliteDatabase
-from app.repositories.sqlite.index_projection_store import IndexProjectionStore
-from app.repositories.sqlite.knowhow_store import KnowhowStore
-from app.repositories.sqlite.knowhow_transfer_store import KnowhowTransferStore
-from app.repositories.sqlite.kg_build_job_store import KgBuildJobStore
-from app.repositories.sqlite.knowledge_store import KnowledgeStore
-from app.repositories.sqlite.memory_store import MemoryStore
-from app.repositories.sqlite.notebook_store import NotebookStore
-from app.repositories.sqlite.query_store import QueryStore
-from app.repositories.sqlite.report_store import ReportStore
-from app.repositories.sqlite.sharing_store import SharingStore
-from app.repositories.sqlite.source_store import SourceStore
-from app.repositories.sqlite.unified_kg_store import UnifiedKgStore
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_governance import KnowledgeGovernanceService
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService
@@ -76,24 +65,28 @@ class RepositoryCompatibilitySeams:
 
 
 class RepositoryRuntime:
-    def __init__(self, settings: Settings, root_dir: Path, seams: RepositoryCompatibilitySeams) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        root_dir: Path,
+        seams: RepositoryCompatibilitySeams,
+        persistence_factory: PersistenceBundleFactory,
+    ) -> None:
         self.settings = settings
         self.root_dir = root_dir
         self.seams = seams
-        self.database = SqliteDatabase(settings, root_dir)
-        self.model_config_cache: dict[str, dict[str, Any]] = {}
-        self.identity = IdentityStore(
-            self.database,
-            settings,
-            self.model_config_cache,
+        self.model_config_cache: dict[str, object] = {}
+        bundle = persistence_factory.create(
+            settings=settings,
+            root_dir=root_dir,
+            seams=seams,
+            model_config_cache=self.model_config_cache,
         )
-        self.queries = QueryStore(self.database)
-        self.notebook_store = NotebookStore(
-            self.database,
-            new_id=seams.new_id,
-            now=seams.now,
-        )
-        self.kg_build_jobs = KgBuildJobStore(self.database, new_id=seams.new_id, now=seams.now)
+        self.database = bundle.database
+        self.identity = bundle.identity
+        self.queries = bundle.queries
+        self.notebook_store = bundle.notebooks
+        self.kg_build_jobs = bundle.kg_build_jobs
         self.notebook_summaries = NotebookSummaryQuery(self.database, self.queries, self.kg_build_jobs)
         # Source files resolve storage_dir through the database. Construct eagerly
         # BEFORE the catalog so its storage_dir callable can bind THIS store
@@ -122,8 +115,8 @@ class RepositoryRuntime:
             # convention as wire_sharing's NotebookCopyService).
             storage_dir=lambda source_files=self.source_files: source_files.storage_dir,
         )
-        self.source_store = SourceStore(self.database, now=seams.now)
-        self.chunk_store = ChunkStore(self.database)
+        self.source_store = bundle.sources
+        self.chunk_store = bundle.chunks
         # Task 25: reports-table row persistence is seam-free (the shared
         # database boundary + the id/clock seams + identity's current_user),
         # so the runtime owns and constructs it eagerly.  The process-global
@@ -132,12 +125,7 @@ class RepositoryRuntime:
         # the execution coordinator is finished by wire_report_execution()
         # because its engine factory rides the lazily wired retrieval and
         # evidence-context ports.
-        self.report_store = ReportStore(
-            self.database,
-            new_id=seams.new_id,
-            now=seams.now,
-            current_user_id=lambda: self.identity.current_user().id,
-        )
+        self.report_store = bundle.reports
         self.report_application = ReportApplicationService(
             self.catalog, self.report_store
         )
@@ -148,18 +136,16 @@ class RepositoryRuntime:
         # facade keeps every transaction/connection boundary (its `_write` /
         # `_connect` compatibility seams stay the observable commit points),
         # so construction is eager and seam-free.
-        self.knowledge = KnowledgeStore(self.database, seams)
-        self.governance = GovernanceStore(self.database, seams)
-        self.unified_kg = UnifiedKgStore(self.database, seams.now)
+        self.knowledge = bundle.knowledge
+        self.governance = bundle.governance
+        self.unified_kg = bundle.unified_kg
         # Task 22: Ask/answer/conversation/job/trace persistence shares the ONE
         # database boundary.  Identity is explicit (user_id per call — the
         # store never reads request ContextVars) and the seams dataclass is
         # stored, never evaluated, so construction is eager and seam-free.
         # Cancel-event registry + fail-open trace logging stay facade-side.
-        self.ask_state = AskStateStore(self.database, seams)
-        self.memory_store = MemoryStore(
-            self.database, new_id=seams.new_id, now=seams.now
-        )
+        self.ask_state = bundle.ask_state
+        self.memory_store = bundle.memory
         self.memory_service: "MemoryService | None" = None
         self.memory_retriever: "MemoryRetriever | None" = None
         self._embedder: Any = None
@@ -175,14 +161,14 @@ class RepositoryRuntime:
         # facade-bound seams that only exist once the facade constructor
         # reaches them.  Construction stays lazy — no seam calls.
         self.scale_artifact_store = ScaleArtifactStore(settings)
-        self.index_projections: "IndexProjectionStore | None" = None
+        self.index_projections: IndexProjectionStorePort = bundle.index_projection
         self.scale_catalog: "ScaleArtifactCatalog | None" = None
         self.scale_builder: "ScaleIndexBuilder | None" = None
         self.scale_artifacts: "ScaleArtifactRuntime | None" = None
         # Vector persistence is finished by wire_persistence(): its write seat
         # is the facade's `_write` compatibility seam, which only exists once
         # the facade constructor reaches it. Construction stays lazy.
-        self.embedding_store: "EmbeddingStore | None" = None
+        self.embedding_store: EmbeddingStorePort = bundle.embeddings
         # The source embed/chunk pipeline is finished by wire_source_pipeline():
         # its mutable embedder and _mark_unified_kg_dirty collaborators plus
         # the wired EmbeddingStore only exist once the facade constructor
@@ -226,7 +212,7 @@ class RepositoryRuntime:
         # collaborators (facade _insert_row seat, notebook_copy_stats memo,
         # storage_dir) are facade-bound seams that only exist once the facade
         # constructor reaches them.  Construction stays lazy — no seam calls.
-        self.sharing_store: "SharingStore | None" = None
+        self.sharing_store: SharingStorePort = bundle.sharing
         self.notebook_copies: "NotebookCopyService | None" = None
         self.sharing: "NotebookSharingService | None" = None
         self.event_log = EventLogger(settings, channel="events", per_user=True)
@@ -284,21 +270,16 @@ class RepositoryRuntime:
         # Task 27: SQLite maintenance face for CLI/batch composition roots —
         # lazily wired by the facade `maintenance` property (it needs the
         # embedder-bound retrieval provider, exactly like `ask` above).
-        self.maintenance: Any = None
         # knowhow-tables PR-1 Task 2: row persistence for the Task-1 schema
         # (knowhow_tables/columns/rows/cells + notebook_assets). Seam-free
         # (only new_id/now, like notebook_store above), so construction is
         # eager. Task 5's projector and Task 6's import/table API depend on
         # the facade's one-hop delegates over this exact instance.
-        self.knowhow_store = KnowhowStore(
-            self.database,
-            new_id=seams.new_id,
-            now=seams.now,
-        )
+        self.knowhow_store = bundle.knowhow
         # knowhow 单表跨 notebook 传输的 SQL（快照+单事务插入+校验）。id/时钟
         # 由 transfer.py 的 _remap 直接从 repo._runtime.seams 取（见该文件头
         # 注释），store 自己不需要——不带 new_id/now 构造参数。
-        self.knowhow_transfer_store = KnowhowTransferStore(self.database)
+        self.knowhow_transfer_store = bundle.knowhow_transfer
 
     @property
     def storage_dir(self) -> Path:
@@ -452,13 +433,13 @@ class RepositoryRuntime:
             self.retrieval = retrieval
             return retrieval
 
-    def wire_persistence(self, *, write: Callable[..., Any]) -> EmbeddingStore:
+    def wire_persistence(self, *, write: Callable[..., Any]) -> EmbeddingStorePort:
         """Compose the vector persistence (Task 10) once the facade-bound
         ``write`` seat exists: it is the facade's ``_write`` compatibility
         seam (itself delegating to the shared database write lock), resolved
         at call time so per-instance monkeypatches — transaction counting,
         failure injection — keep observing every vector flush."""
-        self.embedding_store = EmbeddingStore(write=write)
+        self.embedding_store.write = write  # type: ignore[attr-defined]
         return self.embedding_store
 
     def wire_source_pipeline(
@@ -675,14 +656,11 @@ class RepositoryRuntime:
         ``load_locks`` initially resolve the exact LRU + single-flight state
         objects that ``wire_scale_runtime`` transfers by identity.  The final
         runtime then retargets the catalog to its canonical state."""
-        self.index_projections = IndexProjectionStore(
-            self.settings,
-            connect=connect,
-            in_batches=in_batches,
-            ent_chunk_map=ent_chunk_map,
-            mention_extra_edges=mention_extra_edges,
-            vector_matrix=vector_matrix,
-        )
+        self.index_projections.connect = connect  # type: ignore[attr-defined]
+        self.index_projections.in_batches = in_batches  # type: ignore[attr-defined]
+        self.index_projections.ent_chunk_map = ent_chunk_map  # type: ignore[attr-defined]
+        self.index_projections.mention_extra_edges = mention_extra_edges  # type: ignore[attr-defined]
+        self.index_projections.vector_matrix = vector_matrix  # type: ignore[attr-defined]
         self.scale_catalog = ScaleArtifactCatalog(
             artifacts=self.scale_artifact_store,
             settings=self.settings,
@@ -964,12 +942,7 @@ class RepositoryRuntime:
         ``knowhow_api.get_scheduler(repo).schedule`` — late-bound the same way
         as the other three seams, so it always resolves against the fully
         constructed facade even though wire_sharing runs mid-``__init__``."""
-        self.sharing_store = SharingStore(
-            self.database,
-            self.settings,
-            now=self.seams.now,
-            insert_row=insert_row,
-        )
+        self.sharing_store.insert_row = insert_row  # type: ignore[attr-defined]
         self.notebook_copies = NotebookCopyService(
             store=self.sharing_store,
             catalog=self.catalog,
@@ -1116,16 +1089,3 @@ class RepositoryRuntime:
     @property
     def ask_component(self) -> AskService:
         return self.ask_service()
-
-    def wire_maintenance(self, *, retrieval: Callable[[], Any]) -> Any:
-        if self.maintenance is None:
-            from app.repositories.sqlite.maintenance import SQLiteMaintenanceAdapter
-
-            self.maintenance = SQLiteMaintenanceAdapter(self, retrieval=retrieval)
-        return self.maintenance
-
-    @property
-    def maintenance_component(self) -> Any:
-        if self.maintenance is None:
-            return self.wire_maintenance(retrieval=lambda: self.retrieval_component)
-        return self.maintenance

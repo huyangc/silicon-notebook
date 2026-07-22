@@ -16,7 +16,7 @@ import dataclasses
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-FACADE_SOURCE = ROOT / "backend" / "app" / "services" / "sqlite_repository.py"
+FACADE_SOURCE = ROOT / "backend" / "app" / "services" / "repository_facade.py"
 
 
 def test_every_private_facade_patch_targets_a_manifest_marked_seam():
@@ -43,11 +43,11 @@ def test_every_private_facade_patch_targets_a_manifest_marked_seam():
 def _facade_init() -> ast.FunctionDef:
     tree = ast.parse(FACADE_SOURCE.read_text(encoding="utf-8"))
     for node in tree.body:
-        if isinstance(node, ast.ClassDef) and node.name == "SQLiteRepository":
+        if isinstance(node, ast.ClassDef) and node.name == "RepositoryFacade":
             for member in node.body:
                 if isinstance(member, ast.FunctionDef) and member.name == "__init__":
                     return member
-    raise AssertionError("SQLiteRepository.__init__ not found")
+    raise AssertionError("RepositoryFacade.__init__ not found")
 
 
 def test_manifest_seams_are_late_bound_in_the_facade_wiring():

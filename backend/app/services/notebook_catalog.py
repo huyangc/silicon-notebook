@@ -18,7 +18,7 @@ from app.models.notebooks import (
     NotebookUpdate,
 )
 from app.models.ask import NotebookSearchResponse, SearchHit
-from app.repositories.ports import KgBuildJobStorePort
+from app.repositories.ports import KgBuildJobStorePort, QueryStorePort
 # Canonical implementation lives with the SourceFileStore (Task 11); the
 # private alias keeps this module's delete_notebook cleanup call sites and
 # historical importers unchanged.
@@ -26,7 +26,6 @@ from app.repositories.source_files import delete_source_file as _delete_source_f
 from app.repositories.sqlite.database import SqliteDatabase
 from app.repositories.sqlite.identity_store import IdentityStore
 from app.repositories.sqlite.notebook_store import NotebookStore, USABLE_STATUSES
-from app.repositories.sqlite.query_store import QueryStore
 from app.services.notebook_templates import NOTEBOOK_TEMPLATES
 
 
@@ -95,11 +94,11 @@ class NotebookSummaryQuery:
     def __init__(
         self,
         database: SqliteDatabase,
-        queries: "QueryStore | None" = None,
+        queries: QueryStorePort,
         kg_build_jobs: "KgBuildJobStorePort | None" = None,
     ) -> None:
         self.database = database
-        self.queries = queries or QueryStore(database)
+        self.queries = queries
         self.kg_build_jobs = kg_build_jobs
 
     def count(

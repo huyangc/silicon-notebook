@@ -19,6 +19,7 @@ import pytest
 from app.core.config import Settings
 from app.repositories.ownership_manifest import OWNER_BY_MEMBER
 from app.services import repository, sqlite_repository
+from app.services.repository_facade import RepositoryFacade
 from app.services.sqlite_repository import SQLiteRepository
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +31,7 @@ FIXTURE = (
     / "repository_contract"
     / "facade_surface.json"
 )
-FACADE_FILE = "backend/app/services/sqlite_repository.py"
+FACADE_FILE = "backend/app/services/repository_facade.py"
 
 RUNTIME_COMPONENT_OWNERS = {
     "ask": "AskService",
@@ -650,7 +651,7 @@ def test_facade_matches_frozen_surface_manifest(repo):
 
 
 def test_facade_has_no_getattr_or_sql():
-    source = inspect.getsource(SQLiteRepository)
+    source = inspect.getsource(RepositoryFacade)
     assert "def __getattr__" not in source
     assert ".execute(" not in source
     assert ".executemany(" not in source
@@ -659,18 +660,18 @@ def test_facade_has_no_getattr_or_sql():
 
 def test_task6_facade_has_no_remaining_multi_body_or_ownership_debt():
     """Task 6 closes the exact remediation ledger instead of refreshing it."""
-    assert facade_body_violations(SQLiteRepository) == []
-    assert manifest_delegate_mismatches(SQLiteRepository, OWNER_BY_MEMBER) == []
+    assert facade_body_violations(RepositoryFacade) == []
+    assert manifest_delegate_mismatches(RepositoryFacade, OWNER_BY_MEMBER) == []
 
 
 def test_manifest_owner_matches_facade_delegate_target():
-    assert set(manifest_delegate_mismatches(SQLiteRepository, OWNER_BY_MEMBER)) == (
+    assert set(manifest_delegate_mismatches(RepositoryFacade, OWNER_BY_MEMBER)) == (
         EXPECTED_REMEDIATION_SITES["ownership"]
     )
 
 
 def test_facade_methods_are_properties_adapters_or_one_hop_delegates():
-    assert set(facade_body_violations(SQLiteRepository)) == (
+    assert set(facade_body_violations(RepositoryFacade)) == (
         EXPECTED_REMEDIATION_SITES["facade_body"]
     )
 

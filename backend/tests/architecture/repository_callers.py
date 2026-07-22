@@ -33,7 +33,7 @@ SQL_REASON_BY_PATH = {
 }
 
 FACADE_IMPORT_REASON_BY_PATH = {
-    "backend/app/api/deps.py": "API composition root",
+    "backend/app/repositories/factory.py": "formal backend-selection composition root",
     "backend/app/eval/inference.py": "evaluation composition root",
     "backend/app/eval/run_all.py": "evaluation composition root",
     "backend/app/eval/sa_calibration.py": "evaluation composition root",

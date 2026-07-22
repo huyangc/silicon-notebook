@@ -4,6 +4,7 @@ from app.repositories.sqlite.query_store import QueryStore
 from app.services.sqlite_identity import SQLiteIdentityMixin
 from app.services.sqlite_notebook_sharing import SQLiteNotebookSharingMixin
 from app.services.sqlite_repository import SQLiteRepository
+from app.services.repository_facade import RepositoryFacade
 
 
 IDENTITY_METHODS = (
@@ -57,13 +58,13 @@ def test_sqlite_identity_domain_is_composed_with_explicit_delegates():
     assert not issubclass(SQLiteRepository, SQLiteIdentityMixin)
     for method_name in IDENTITY_METHODS:
         assert method_name in IdentityStore.__dict__
-        assert method_name in SQLiteRepository.__dict__
+        assert method_name in RepositoryFacade.__dict__
 
 
 def test_sqlite_query_domain_is_composed_with_explicit_delegates():
     for method_name in QUERY_METHODS:
         assert method_name in QueryStore.__dict__
-        assert method_name in SQLiteRepository.__dict__
+        assert method_name in RepositoryFacade.__dict__
 
 
 def test_sqlite_sharing_domain_is_composed_with_explicit_delegates():
@@ -77,7 +78,7 @@ def test_sqlite_sharing_domain_is_composed_with_explicit_delegates():
     # member is an explicit facade delegate onto the composed service layer.
     assert not issubclass(SQLiteRepository, SQLiteNotebookSharingMixin)
     for method_name in SHARING_METHODS:
-        assert method_name in SQLiteRepository.__dict__, method_name
+        assert method_name in RepositoryFacade.__dict__, method_name
 
     service_methods = (
         "share_notebook", "unshare_notebook", "find_notebook_by_share_token",
@@ -145,4 +146,9 @@ def test_remaining_sql_bodies_are_composed_with_explicit_delegates():
         "_participant_notebook_ids",
     )
     for method_name in facade_delegates:
-        assert method_name in SQLiteRepository.__dict__, method_name
+        owner = (
+            SQLiteRepository
+            if method_name == "_backfill_relation_embeddings"
+            else RepositoryFacade
+        )
+        assert method_name in owner.__dict__, method_name

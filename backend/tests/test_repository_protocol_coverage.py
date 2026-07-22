@@ -42,7 +42,7 @@ BUNDLE_STORE_SEATS = (
     ("ask_state", "ask_state", "AskStateStorePort"),
     ("unified_kg", "unified_kg", "UnifiedKgStorePort"),
 )
-FACADE_PATH = ROOT / "backend" / "app" / "services" / "sqlite_repository.py"
+FACADE_PATH = ROOT / "backend" / "app" / "services" / "repository_facade.py"
 
 
 @dataclass(frozen=True, order=True)
