@@ -262,6 +262,39 @@ app/core/cache/
 替换为任意组件 = 新增 1 个文件实现 2 个方法 + 改工厂 1 行 + 契约测试通过，
 **零调用方改动**。
 
+### 已验证：Redis 替换路径
+
+原型实测（同一套契约测试跑三个后端）：
+
+```
+noop     PASS
+sqlite   PASS
+redis    PASS          ← 只实现 CacheBackend 的两个方法
+
+redis 实现 CacheAdmin: False   ← 刻意不实现，不影响使用
+redis 仍满足 CacheBackend: True
+```
+
+**Redis 后端反而比 SQLite 后端简单**（约 30 行 vs 160 行），因为两件最麻烦的事都能
+交给服务端：TTL 用 `SET ... EX` 由 Redis 自动过期；容量与 LRU 用 `maxmemory` +
+`maxmemory-policy allkeys-lru` 配置，**零代码**。
+
+替换成本：新增 `redis_backend.py` + 工厂加一个分支与 `LLM_CACHE_BACKEND` 配置项 +
+`redis` 进 requirements + 契约测试登记一行。调用方零改动。
+
+两个实现注意点：
+
+- **redis-py 默认返回 `bytes`**，而 Protocol 要求 `Optional[str]`——后端内部必须
+  decode（或以 `decode_responses=True` 建连接）。
+- **值的编码边界**：`CachedEmbedder` 将向量 JSON 编码为字符串（1024 维约 20KB 文本）。
+  Redis 存字符串可行但内存效率不高。若将来要改为二进制编码，Protocol 的 `str` 需变为
+  `bytes`，那是**破坏性变更**，所有后端都要跟着改。现在不预防（YAGNI），但边界记在此。
+
+`runtime_checkable` Protocol 的 `isinstance` **只检查方法名存在与否，不检查签名**——
+这是 Python 的已知限制。因此契约测试套件不是可选项，它才是行为正确性的真正保障。
+契约套件中固定包含一个只实现两个必需方法的 `MinimalBackend` 参数项，作为可替换性的
+活体标尺：一旦有人把 `stats`/`evict_tag` 变成事实上的必需方法，它会立刻转红。
+
 ## 三个安全阀
 
 ### 1. 绝不缓存空响应（已实现，重构中必须保持）

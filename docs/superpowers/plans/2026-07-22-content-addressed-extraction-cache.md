@@ -130,9 +130,32 @@ def _make_noop(tmp_path):
     return NoCacheBackend()
 
 
+class MinimalBackend:
+    """只实现 CacheBackend 两个必需方法的后端——可替换性的活体标尺。
+
+    未来的 Redis/memcached 后端就是这个形状（TTL 与 LRU 交给服务端配置，
+    不实现 CacheAdmin）。若有人把 stats/evict_tag 悄悄变成事实上的必需方法，
+    本参数化项会立刻转红。不要因为"它看起来没用"而删掉它。
+    """
+
+    def __init__(self):
+        self._d = {}
+
+    def get(self, key):
+        return self._d.get(key)
+
+    def put(self, key, value, tag=""):
+        self._d[key] = value
+
+
+def _make_minimal(tmp_path):
+    return MinimalBackend()
+
+
 # 新 backend 在此登记：(名字, 构造函数, 是否真正持久化)
 _BACKENDS = [
     ("noop", _make_noop, False),
+    ("minimal", _make_minimal, True),
 ]
 
 
@@ -185,7 +208,7 @@ def test_empty_string_value_roundtrips(backend_case):
 cd backend && python -m pytest tests/test_cache_backend_contract.py -v
 ```
 
-Expected: 6 passed（全部以 `noop` 参数运行）
+Expected: 12 passed（6 项 × `noop` / `minimal` 两个后端）
 
 - [ ] **Step 5: 提交**
 
@@ -574,7 +597,7 @@ _BACKENDS = [
 cd backend && python -m pytest tests/test_cache_backend_contract.py -v
 ```
 
-Expected: 12 passed（6 项 × 2 backend）
+Expected: 18 passed（6 项 × `noop` / `minimal` / `sqlite` 三个后端）
 
 - [ ] **Step 7: 加差分测试（与 diskcache 对照）**
 
@@ -1495,29 +1518,90 @@ Expected: FAIL — `KeyError: 'hits'`
         }
 ```
 
-- [ ] **Step 4: 给 NoCacheBackend 也补上 stats（契约一致）**
+- [ ] **Step 4: 让 NoCacheBackend 完整实现 CacheAdmin**
 
 在 `backend/app/core/cache/backend.py` 的 `NoCacheBackend` 中追加：
 
 ```python
+    # NoCacheBackend 顺带实现 CacheAdmin（零成本）。但这**不意味着** stats/
+    # evict_tag 是必需能力：只实现 CacheBackend 两个方法的后端（例如把 TTL 与
+    # LRU 交给服务端配置的 Redis 后端）是完全合法的。消费侧必须
+    # isinstance(backend, CacheAdmin) 探测后再调用，见 test_cache_admin_is_optional。
+    def evict_tag(self, tag: str) -> int:
+        return 0
+
+    def clear(self) -> int:
+        return 0
+
     def stats(self) -> dict:
         return {"entries": 0, "bytes": 0, "by_tag": {},
                 "hits": 0, "misses": 0, "hit_rate": 0.0}
 ```
 
-- [ ] **Step 5: 运行测试**
+- [ ] **Step 5: 加「CacheAdmin 必须保持可选」的守卫**
+
+追加到 `backend/tests/test_cache_observability.py`：
+
+```python
+def test_cache_admin_is_optional_and_consumers_probe_before_calling():
+    """只实现 CacheBackend 的后端必须能正常工作——这是"将来能换 Redis"的命脉。
+
+    Redis 后端只需 get/put 两个方法（TTL 走 SET ... EX，容量与 LRU 走 redis.conf
+    的 maxmemory + maxmemory-policy），不实现 CacheAdmin 是合法且预期的形态。
+    任何无条件调用 backend.stats()/evict_tag() 的消费侧代码都会在换后端时崩溃。
+    """
+    from pathlib import Path
+
+    from app.core.cache import CacheAdmin, CacheBackend
+
+    class OnlyGetPut:
+        def __init__(self):
+            self._d = {}
+
+        def get(self, key):
+            return self._d.get(key)
+
+        def put(self, key, value, tag=""):
+            self._d[key] = value
+
+    minimal = OnlyGetPut()
+    assert isinstance(minimal, CacheBackend), "两个方法就该满足 CacheBackend"
+    assert not isinstance(minimal, CacheAdmin), "CacheAdmin 必须保持可选"
+
+    # 消费侧不得无条件调用运维方法。扫描 app/ 下对 backend 运维方法的裸调用。
+    backend_dir = Path(__file__).resolve().parents[1] / "app"
+    offenders = []
+    for path in backend_dir.rglob("*.py"):
+        if "__pycache__" in path.parts or "core/cache/" in path.as_posix():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for call in (".stats()", ".evict_tag(", ".clear()"):
+            if call in text and "CacheAdmin" not in text:
+                offenders.append(f"{path.name}: {call}")
+    assert not offenders, (
+        "疑似无条件调用缓存运维方法，换成只实现 CacheBackend 的后端会崩：\n  "
+        + "\n  ".join(offenders)
+    )
+```
+
+> `isinstance` 对 `runtime_checkable` Protocol **只检查方法名是否存在，不检查签名**。
+> 这是 Python 的已知限制——所以契约测试套件不是可选项，它才是行为正确性的真正保障。
+
+- [ ] **Step 6: 运行测试**
 
 ```bash
 cd backend && python -m pytest tests/test_cache_observability.py tests/test_cache_sqlite_backend.py tests/test_cache_backend_contract.py -v
 ```
 
-Expected: 全部通过
+Expected: 全部通过。若 `test_cache_admin_is_optional_and_consumers_probe_before_calling`
+报出 offenders，说明确有消费侧裸调用运维方法——改为 `isinstance(backend, CacheAdmin)`
+探测后再调，不要放宽守卫。
 
-- [ ] **Step 6: 提交**
+- [ ] **Step 7: 提交**
 
 ```bash
 git add backend/app/core/cache/ backend/tests/test_cache_observability.py
-git commit -m "feat(cache): 命中率与缓存现状统计"
+git commit -m "feat(cache): 命中率统计，并锁定 CacheAdmin 的可选性"
 ```
 
 ---
@@ -1740,6 +1824,7 @@ EOF
 | 策略与存储分离（`policy.py`） | Task 3 Step 1 |
 | 导入守卫 + 变异验证 | Task 4 |
 | Protocol 契约测试套件 | Task 1 Step 3 / Task 2 Step 5 |
+| CacheAdmin 保持可选（Redis 替换路径） | Task 1 Step 3（`MinimalBackend`）/ Task 6 Step 5 |
 | 差分测试（diskcache oracle） | Task 2 Step 7 |
 | 空响应保护（保持既有） | Task 3 Step 9-10 |
 | 测试隔离 | Task 3 Step 6 / Task 8 Step 2 |
