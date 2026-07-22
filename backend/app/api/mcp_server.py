@@ -1122,9 +1122,15 @@ def create_memory_mcp(
                 location = repo.get_knowhow_row_location(row_id)
                 if location is None or location["notebook_id"] != notebook_id:
                     raise KeyError(row_id)
+                # knowhow 表版本管理 Task 13 code review: this whole MCP server
+                # is wrapped in AgentBearerMiddleware (see the bottom of
+                # create_memory_mcp below) — every tool call, this one
+                # included, is unconditionally an Agent principal, never a
+                # session user — so origin="agent" is not a guess here, it is
+                # the only value that can ever be true for this call site.
                 return knowhow_api.put_cell_code(
                     repo, row_id, column_id, code_text, language,
-                    principal.profile_name,
+                    principal.profile_name, origin="agent",
                 )
 
         return _budget_response(

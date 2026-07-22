@@ -551,6 +551,36 @@ def test_copied_table_gets_a_genesis_change_naming_its_source(repo, store, noteb
     assert hist.list_changes(table["id"], limit=100), "源表历史不受影响"
 
 
+def test_copied_table_genesis_change_has_empty_rows_and_import_origin(
+    repo, store, notebook_id, table,
+):
+    """Task 13 code review fix: the genesis payload used to flatten a full
+    copy of every row's cells+code into ``rows`` — an unconsumed second copy
+    of exactly what the freshly-inserted LIVE cells already carry (nothing
+    reads it: aggregate_diff excludes table_create, _apply_before raises on
+    it, cell_history's kind whitelist omits it). It must match create_
+    knowhow_table's own genesis shape (``rows`` always ``[]``) instead. And
+    ``origin`` must not be the hardcoded "user" — a copy/move is not a human
+    building the table cell-by-cell — "import" is the closest existing
+    VALID_ORIGINS fit (the "复制"/"移动" distinction already lives in
+    ``note``)."""
+    from app.services.knowhow import transfer as kh_transfer
+
+    other = repo.create_notebook(
+        NotebookCreate(name="目标空行", purpose="p", primary_domain="d")
+    ).id
+    new_id = kh_transfer.copy_table(repo, table["id"], other, "user-1")
+
+    hist = repo._runtime.knowhow_history_store
+    change = hist.list_changes(new_id, limit=1)[0]
+    assert change["kind"] == "table_create"
+    assert change["payload"]["rows"] == []
+    assert change["origin"] == "import"
+    # the copied table's LIVE rows are unaffected by this payload change —
+    # only the genesis flow entry's shape changed, not what actually landed.
+    assert len(repo.get_knowhow_table(new_id)["rows"]) == 2
+
+
 def test_moved_table_gets_a_genesis_change_saying_it_moved_here(repo, store, notebook_id, table):
     """同一份 note 措辞契约的反面：move_table 内部也是靠 copy_table 落的目标
     表，但 verb 必须换成"移动"——两者共用同一段落地逻辑，唯独这一个字不能

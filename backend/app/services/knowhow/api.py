@@ -1419,7 +1419,7 @@ def get_cell_code(repo: Any, row_id: str, column_id: str) -> dict:
 
 def put_cell_code(
     repo: Any, row_id: str, column_id: str, code_text: str, language: str,
-    updated_by: str,
+    updated_by: str, origin: str = "user",
 ) -> dict:
     """PUT .../cells/{col}/code service core (design doc §⑥-4): computes and
     stores ``cell_content_hash`` at save time from the CURRENT cell's net
@@ -1433,7 +1433,20 @@ def put_cell_code(
     callers — the HTTP agent route's ``RequestActor.actor_label``, the MCP
     tool's ``principal.profile_name``) doubles as the flow entry's
     ``actor`` — both express the same "who wrote this" concept, so no new
-    parameter/plumbing is needed on top of what already existed here."""
+    parameter/plumbing is needed on top of what already existed here.
+
+    ``origin`` (Task 13 code review fix): defaults to ``"user"`` for
+    backward compatibility, but every ACTUAL caller of this function is the
+    agent surface (HTTP ``knowhow_agent_routes.py`` and the MCP tool in
+    ``mcp_server.py`` — there is no session-facing PUT-code endpoint at all),
+    so leaving this at its default silently mislabels every code write as a
+    human "user" edit. Callers should pass ``origin="agent"`` (HTTP: when
+    ``actor.is_agent`` — a session caller writing through the SAME
+    dual-mode route is still a real "user"; MCP: unconditionally, since the
+    whole MCP surface is Agent-Bearer-only) so ``VALID_ORIGINS``'s
+    ``"agent"`` value — defined since Task 12 but never once produced before
+    this fix — actually gets used, matching this feature's own "honest
+    badge, never a silent default" contract (``models/knowhow.py``)."""
     if not str(code_text or "").strip():
         raise ValueError("代码内容不能为空")
     location = repo.get_knowhow_row_location(row_id)
@@ -1447,24 +1460,31 @@ def put_cell_code(
     content_hash = cell_content_hash(row["cells"].get(column_id, ""))
     repo.upsert_knowhow_cell_code(
         row_id, column_id, code_text, language or "", updated_by, content_hash,
-        actor=updated_by,
+        actor=updated_by, origin=origin,
     )
     attachment = repo.get_knowhow_cell_code(row_id, column_id)
     return cell_code_view(row["cells"], column_id, attachment)
 
 
-def delete_cell_code(repo: Any, row_id: str, column_id: str, actor: str = "") -> None:
+def delete_cell_code(
+    repo: Any, row_id: str, column_id: str, actor: str = "", origin: str = "user",
+) -> None:
     """DELETE .../cells/{col}/code service core. Idempotent (the store's own
     delete is a silent no-op when nothing exists to delete) — but an unknown
     ROW or a cross-table (row, column) pair still fails loud (``KeyError``/
     ``ValueError``), consistent with every other cell-scoped endpoint's
     validation, rather than silently no-op-ing an address that was never
-    valid in the first place."""
+    valid in the first place.
+
+    ``origin`` (Task 13 code review fix): same rationale as ``put_cell_
+    code``'s own — this function's only caller is the agent surface's
+    DELETE route, so it should pass ``origin="agent"``/``"user"`` based on
+    ``actor.is_agent`` rather than silently riding the default."""
     location = repo.get_knowhow_row_location(row_id)
     if location is None:
         raise KeyError(row_id)
     repo.validate_cell_target(row_id, column_id)
-    repo.delete_knowhow_cell_code(row_id, column_id, actor=actor)
+    repo.delete_knowhow_cell_code(row_id, column_id, actor=actor, origin=origin)
 
 
 __all__ = [
