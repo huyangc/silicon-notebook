@@ -251,8 +251,10 @@ def _protocol_methods(protocol) -> dict[str, object]:
     methods: dict[str, object] = {}
     for base in reversed(protocol.__mro__):
         for name, value in base.__dict__.items():
-            if callable(value) and not name.startswith("__"):
-                methods[name] = value
+            if (
+                callable(value) or isinstance(value, (staticmethod, classmethod))
+            ) and not name.startswith("__"):
+                methods[name] = getattr(protocol, name)
     return methods
 
 
@@ -445,6 +447,13 @@ def test_static_store_helpers_remain_static_and_keep_their_first_real_argument()
     def descriptor(cls, name):
         return next(base.__dict__[name] for base in cls.__mro__ if name in base.__dict__)
 
+    def descriptor_kind(value):
+        if isinstance(value, staticmethod):
+            return "static"
+        if isinstance(value, classmethod):
+            return "class"
+        return "instance"
+
     receiver = object()
     for _, runtime_name, port_name in BUNDLE_STORE_SEATS:
         protocol = getattr(ports, port_name)
@@ -452,12 +461,11 @@ def test_static_store_helpers_remain_static_and_keep_their_first_real_argument()
         for name in _protocol_methods(protocol):
             concrete_descriptor = descriptor(concrete, name)
             protocol_descriptor = descriptor(protocol, name)
-            assert isinstance(protocol_descriptor, staticmethod) == isinstance(
-                concrete_descriptor, staticmethod
-            ), (
+            kind = descriptor_kind(concrete_descriptor)
+            assert descriptor_kind(protocol_descriptor) == kind, (
                 protocol.__name__, name,
             )
-            if isinstance(concrete_descriptor, staticmethod):
+            if kind in {"static", "class"}:
                 bound_protocol = protocol_descriptor.__get__(receiver, protocol)
                 bound_concrete = concrete_descriptor.__get__(receiver, concrete)
                 assert _parameter_contract(bound_protocol) == _parameter_contract(

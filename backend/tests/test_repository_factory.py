@@ -51,9 +51,6 @@ def _sqlite_persistence_construction_sites_from_sources(
         )
         if package_parts[-1:] == ["__init__"]:
             package_parts.pop()
-        module_aliases: dict[str, str] = {}
-        symbol_aliases: dict[str, str] = {}
-
         def dotted_name(node):
             if isinstance(node, ast.Name):
                 return node.id
@@ -62,78 +59,209 @@ def _sqlite_persistence_construction_sites_from_sources(
                 return f"{parent}.{node.attr}" if parent else node.attr
             return ""
 
-        def resolve_name(node):
-            dotted = dotted_name(node)
-            head, separator, tail = dotted.partition(".")
-            if not separator and head in symbol_aliases:
-                return symbol_aliases[head]
-            if head in module_aliases:
-                return module_aliases[head] + (f".{tail}" if tail else "")
-            return dotted
+        scope_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
 
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    local = alias.asname or alias.name.split(".", 1)[0]
-                    module_aliases[local] = alias.name if alias.asname else local
-            elif isinstance(node, ast.ImportFrom):
-                if node.level:
-                    keep = len(package_parts) - (node.level - 1)
-                    base_parts = package_parts[:max(0, keep)]
-                    if node.module:
-                        base_parts.extend(node.module.split("."))
-                    resolved_module = ".".join(base_parts)
-                else:
-                    resolved_module = node.module or ""
-                for alias in node.names:
-                    if alias.name == "*" and (
-                        resolved_module == "app.repositories.sqlite"
-                        or resolved_module.startswith("app.repositories.sqlite.")
-                    ):
-                        offenders.append(f"{relative}:{node.lineno}:*")
-                        continue
-                    local = alias.asname or alias.name
-                    target = ".".join(
-                        part for part in (resolved_module, alias.name) if part
+        def scope_nodes(scope):
+            roots = [scope.body] if isinstance(scope, ast.Lambda) else scope.body
+            pending = list(reversed(roots))
+            while pending:
+                node = pending.pop()
+                yield node
+                if isinstance(node, scope_types):
+                    body_nodes = (
+                        {id(node.body)}
+                        if isinstance(node, ast.Lambda)
+                        else {id(statement) for statement in node.body}
                     )
-                    if resolved_module == "app.repositories.sqlite":
-                        module_aliases[local] = target
-                    else:
-                        symbol_aliases[local] = target
+                    pending.extend(
+                        reversed(
+                            [
+                                child
+                                for child in ast.iter_child_nodes(node)
+                                if id(child) not in body_nodes
+                            ]
+                        )
+                    )
+                    continue
+                pending.extend(reversed(list(ast.iter_child_nodes(node))))
 
-        assignments = [
-            node
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and isinstance(node.value, (ast.Name, ast.Attribute))
-        ]
-        changed = True
-        while changed:
-            changed = False
-            for assignment in assignments:
-                target = assignment.targets[0].id
-                resolved = resolve_name(assignment.value)
+        def bound_names(target):
+            if isinstance(target, ast.Name):
+                return {target.id}
+            if isinstance(target, (ast.Tuple, ast.List)):
+                return {
+                    name
+                    for element in target.elts
+                    for name in bound_names(element)
+                }
+            if isinstance(target, ast.Starred):
+                return bound_names(target.value)
+            return set()
+
+        def argument_names(scope):
+            if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return set()
+            args = scope.args
+            names = {
+                argument.arg
+                for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs)
+            }
+            if args.vararg:
+                names.add(args.vararg.arg)
+            if args.kwarg:
+                names.add(args.kwarg.arg)
+            return names
+
+        def scan_scope(scope, inherited_modules, inherited_symbols):
+            nodes = list(scope_nodes(scope))
+            local_names = argument_names(scope)
+            explicit_outer_names: set[str] = set()
+            assignments: list[tuple[str, ast.expr]] = []
+
+            def add_assignment(target, value):
+                if isinstance(target, ast.Name):
+                    local_names.add(target.id)
+                    assignments.append((target.id, value))
+                    return
+                if (
+                    isinstance(target, (ast.Tuple, ast.List))
+                    and isinstance(value, (ast.Tuple, ast.List))
+                    and len(target.elts) == len(value.elts)
+                ):
+                    for target_element, value_element in zip(target.elts, value.elts):
+                        add_assignment(target_element, value_element)
+                    return
+                local_names.update(bound_names(target))
+
+            for node in nodes:
+                if isinstance(node, (ast.Global, ast.Nonlocal)):
+                    explicit_outer_names.update(node.names)
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        add_assignment(target, node.value)
+                elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                    add_assignment(node.target, node.value)
+                elif isinstance(node, ast.NamedExpr):
+                    add_assignment(node.target, node.value)
+                elif isinstance(node, (ast.For, ast.AsyncFor)):
+                    local_names.update(bound_names(node.target))
+                elif isinstance(node, (ast.With, ast.AsyncWith)):
+                    for item in node.items:
+                        if item.optional_vars:
+                            local_names.update(bound_names(item.optional_vars))
+                elif isinstance(node, ast.ExceptHandler) and node.name:
+                    local_names.add(node.name)
+                elif isinstance(node, scope_types) and not isinstance(node, ast.Lambda):
+                    local_names.add(node.name)
+                elif isinstance(node, ast.Import):
+                    local_names.update(
+                        alias.asname or alias.name.split(".", 1)[0]
+                        for alias in node.names
+                    )
+                elif isinstance(node, ast.ImportFrom):
+                    local_names.update(
+                        alias.asname or alias.name
+                        for alias in node.names
+                        if alias.name != "*"
+                    )
+
+            local_names.difference_update(explicit_outer_names)
+            module_aliases = {
+                name: target
+                for name, target in inherited_modules.items()
+                if name not in local_names
+            }
+            symbol_aliases = {
+                name: target
+                for name, target in inherited_symbols.items()
+                if name not in local_names
+            }
+
+            def resolve_name(node):
+                dotted = dotted_name(node)
+                head, separator, tail = dotted.partition(".")
+                suffix = f".{tail}" if separator else ""
+                if head in symbol_aliases:
+                    return symbol_aliases[head] + suffix
+                if head in module_aliases:
+                    return module_aliases[head] + suffix
+                return dotted
+
+            for node in nodes:
+                if isinstance(node, ast.Import):
+                    for alias in node.names:
+                        local = alias.asname or alias.name.split(".", 1)[0]
+                        module_aliases[local] = (
+                            alias.name if alias.asname else local
+                        )
+                elif isinstance(node, ast.ImportFrom):
+                    if node.level:
+                        keep = len(package_parts) - (node.level - 1)
+                        base_parts = package_parts[:max(0, keep)]
+                        if node.module:
+                            base_parts.extend(node.module.split("."))
+                        resolved_module = ".".join(base_parts)
+                    else:
+                        resolved_module = node.module or ""
+                    for alias in node.names:
+                        if alias.name == "*" and (
+                            resolved_module == "app.repositories.sqlite"
+                            or resolved_module.startswith(
+                                "app.repositories.sqlite."
+                            )
+                        ):
+                            offenders.append(f"{relative}:{node.lineno}:*")
+                            continue
+                        local = alias.asname or alias.name
+                        target = ".".join(
+                            part
+                            for part in (resolved_module, alias.name)
+                            if part
+                        )
+                        if resolved_module == "app.repositories.sqlite":
+                            module_aliases[local] = target
+                        else:
+                            symbol_aliases[local] = target
+
+            for target, _value in assignments:
+                module_aliases.pop(target, None)
+                symbol_aliases.pop(target, None)
+            changed = True
+            while changed:
+                changed = False
+                for target, value in assignments:
+                    resolved = resolve_name(value)
+                    constructor = resolved.rsplit(".", 1)[-1]
+                    if (
+                        resolved.startswith("app.repositories.sqlite.")
+                        and constructor in SQLITE_PERSISTENCE_CONSTRUCTORS
+                        and symbol_aliases.get(target) != resolved
+                    ):
+                        symbol_aliases[target] = resolved
+                        changed = True
+
+            for node in nodes:
+                if not isinstance(node, ast.Call):
+                    continue
+                resolved = resolve_name(node.func)
                 constructor = resolved.rsplit(".", 1)[-1]
                 if (
                     resolved.startswith("app.repositories.sqlite.")
                     and constructor in SQLITE_PERSISTENCE_CONSTRUCTORS
-                    and symbol_aliases.get(target) != resolved
                 ):
-                    symbol_aliases[target] = resolved
-                    changed = True
+                    offenders.append(f"{relative}:{node.lineno}:{constructor}")
 
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            resolved = resolve_name(node.func)
-            constructor = resolved.rsplit(".", 1)[-1]
-            if (
-                resolved.startswith("app.repositories.sqlite.")
-                and constructor in SQLITE_PERSISTENCE_CONSTRUCTORS
-            ):
-                offenders.append(f"{relative}:{node.lineno}:{constructor}")
+            child_modules = module_aliases
+            child_symbols = symbol_aliases
+            for node in nodes:
+                if not isinstance(node, scope_types):
+                    continue
+                if isinstance(scope, ast.ClassDef):
+                    scan_scope(node, inherited_modules, inherited_symbols)
+                else:
+                    scan_scope(node, child_modules, child_symbols)
+
+        scan_scope(tree, {}, {})
     return offenders
 
 
@@ -405,6 +533,36 @@ def test_sqlite_bundle_factory_is_the_only_persistence_construction_root():
             "DB = SqliteDatabase\nCtor = DB\nCtor(settings, root)\n",
             "SqliteDatabase",
         ),
+        (
+            "app/escape.py",
+            "from app.repositories.sqlite.database import SqliteDatabase\n"
+            "DB: type = SqliteDatabase\nDB(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "app/escape.py",
+            "from app.repositories.sqlite.database import SqliteDatabase\n"
+            "DB = Alias = SqliteDatabase\nAlias(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "app/escape.py",
+            "from app.repositories.sqlite.database import SqliteDatabase\n"
+            "DB, ignored = SqliteDatabase, object\nDB(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "app/escape.py",
+            "from app.repositories.sqlite.database import SqliteDatabase\n"
+            "[DB, ignored] = [SqliteDatabase, object]\nDB(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "app/escape.py",
+            "from app.repositories.sqlite.database import SqliteDatabase\n"
+            "(DB := SqliteDatabase)\nDB(settings, root)\n",
+            "SqliteDatabase",
+        ),
     ],
 )
 def test_sqlite_construction_guard_resolves_qualified_and_aliased_calls(
@@ -458,6 +616,66 @@ def test_sqlite_construction_guard_ignores_non_sqlite_star_imports_and_aliases()
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/services/sqlite_repository.py": source}
     ) == []
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "DB: type = Fake",
+        "DB = Alias = Fake",
+        "DB, ignored = Fake, object",
+        "[DB, ignored] = [Fake, object]",
+        "(DB := Fake)",
+    ],
+)
+def test_sqlite_construction_guard_ignores_non_sqlite_assignment_forms(binding):
+    source = f"from app.models.sources import SourceDetail as Fake\n{binding}\nDB()\n"
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/ordinary.py": source}
+    ) == []
+
+
+def test_sqlite_construction_guard_keeps_aliases_in_their_lexical_scope():
+    source = (
+        "from app.repositories.sqlite.database import SqliteDatabase\n"
+        "def violation():\n"
+        "    DB = SqliteDatabase\n"
+        "    DB(settings, root)\n"
+        "def parameter_shadow(SqliteDatabase):\n"
+        "    SqliteDatabase(settings, root)\n"
+        "def local_shadow():\n"
+        "    SqliteDatabase = Fake\n"
+        "    SqliteDatabase(settings, root)\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/scoped.py": source}
+    ) == ["app/scoped.py:4:SqliteDatabase"]
+
+
+def test_sqlite_construction_guard_scans_definition_expressions_in_parent_scope():
+    source = (
+        "from app.repositories.sqlite.database import SqliteDatabase\n"
+        "def escaped(default=SqliteDatabase(settings, root)):\n"
+        "    return default\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/defaults.py": source}
+    ) == ["app/defaults.py:2:SqliteDatabase"]
+
+
+def test_sqlite_construction_guard_scans_class_methods_once_without_class_aliases():
+    source = (
+        "from app.repositories.sqlite.database import SqliteDatabase\n"
+        "class Example:\n"
+        "    ClassAlias = SqliteDatabase\n"
+        "    def violation(self):\n"
+        "        SqliteDatabase(settings, root)\n"
+        "    def class_alias_is_not_a_closure(self):\n"
+        "        ClassAlias(settings, root)\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/class_scope.py": source}
+    ) == ["app/class_scope.py:5:SqliteDatabase"]
 
 
 def test_create_repository_selects_sqlite_from_only_the_active_url(monkeypatch, tmp_path):
