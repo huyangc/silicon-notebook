@@ -53,6 +53,24 @@ def _sqlite_persistence_construction_sites_from_sources(
             package_parts.pop()
         module_aliases: dict[str, str] = {}
         symbol_aliases: dict[str, str] = {}
+
+        def dotted_name(node):
+            if isinstance(node, ast.Name):
+                return node.id
+            if isinstance(node, ast.Attribute):
+                parent = dotted_name(node.value)
+                return f"{parent}.{node.attr}" if parent else node.attr
+            return ""
+
+        def resolve_name(node):
+            dotted = dotted_name(node)
+            head, separator, tail = dotted.partition(".")
+            if not separator and head in symbol_aliases:
+                return symbol_aliases[head]
+            if head in module_aliases:
+                return module_aliases[head] + (f".{tail}" if tail else "")
+            return dotted
+
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
@@ -68,6 +86,12 @@ def _sqlite_persistence_construction_sites_from_sources(
                 else:
                     resolved_module = node.module or ""
                 for alias in node.names:
+                    if alias.name == "*" and (
+                        resolved_module == "app.repositories.sqlite"
+                        or resolved_module.startswith("app.repositories.sqlite.")
+                    ):
+                        offenders.append(f"{relative}:{node.lineno}:*")
+                        continue
                     local = alias.asname or alias.name
                     target = ".".join(
                         part for part in (resolved_module, alias.name) if part
@@ -77,27 +101,33 @@ def _sqlite_persistence_construction_sites_from_sources(
                     else:
                         symbol_aliases[local] = target
 
-        def dotted_name(node):
-            if isinstance(node, ast.Name):
-                return node.id
-            if isinstance(node, ast.Attribute):
-                parent = dotted_name(node.value)
-                return f"{parent}.{node.attr}" if parent else node.attr
-            return ""
-
-        def resolve_call(node):
-            dotted = dotted_name(node)
-            head, separator, tail = dotted.partition(".")
-            if not separator and head in symbol_aliases:
-                return symbol_aliases[head]
-            if head in module_aliases:
-                return module_aliases[head] + (f".{tail}" if tail else "")
-            return dotted
+        assignments = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, (ast.Name, ast.Attribute))
+        ]
+        changed = True
+        while changed:
+            changed = False
+            for assignment in assignments:
+                target = assignment.targets[0].id
+                resolved = resolve_name(assignment.value)
+                constructor = resolved.rsplit(".", 1)[-1]
+                if (
+                    resolved.startswith("app.repositories.sqlite.")
+                    and constructor in SQLITE_PERSISTENCE_CONSTRUCTORS
+                    and symbol_aliases.get(target) != resolved
+                ):
+                    symbol_aliases[target] = resolved
+                    changed = True
 
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            resolved = resolve_call(node.func)
+            resolved = resolve_name(node.func)
             constructor = resolved.rsplit(".", 1)[-1]
             if (
                 resolved.startswith("app.repositories.sqlite.")
@@ -357,6 +387,24 @@ def test_sqlite_bundle_factory_is_the_only_persistence_construction_root():
             "from ..database import SqliteDatabase as DB\nDB(settings, root)\n",
             "SqliteDatabase",
         ),
+        (
+            "app/escape.py",
+            "from app.repositories.sqlite.database import SqliteDatabase\n"
+            "DB = SqliteDatabase\nDB(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "app/escape.py",
+            "import app.repositories.sqlite.database as sqlite_db\n"
+            "Ctor = sqlite_db.SqliteDatabase\nCtor(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "app/escape.py",
+            "from app.repositories.sqlite.database import SqliteDatabase\n"
+            "DB = SqliteDatabase\nCtor = DB\nCtor(settings, root)\n",
+            "SqliteDatabase",
+        ),
     ],
 )
 def test_sqlite_construction_guard_resolves_qualified_and_aliased_calls(
@@ -373,6 +421,39 @@ def test_sqlite_construction_guard_allows_wrapper_static_helper_imports():
     source = (
         "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
         "helper = KnowledgeStore.source_ids_from_evidence\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/services/sqlite_repository.py": source}
+    ) == []
+
+
+@pytest.mark.parametrize(
+    ("relative", "source"),
+    [
+        (
+            "app/escape.py",
+            "from app.repositories.sqlite.database import *\n",
+        ),
+        (
+            "app/repositories/sqlite/escape.py",
+            "from .database import *\n",
+        ),
+    ],
+)
+def test_sqlite_construction_guard_fails_closed_on_sqlite_star_imports(
+    relative, source
+):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {relative: source}
+    ) == [f"{relative}:1:*"]
+
+
+def test_sqlite_construction_guard_ignores_non_sqlite_star_imports_and_aliases():
+    source = (
+        "from app.models.sources import *\n"
+        "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
+        "helper = KnowledgeStore.source_ids_from_evidence\n"
+        "ordinary = helper\n"
     )
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/services/sqlite_repository.py": source}

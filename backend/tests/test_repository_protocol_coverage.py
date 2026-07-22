@@ -451,13 +451,21 @@ def test_static_store_helpers_remain_static_and_keep_their_first_real_argument()
         concrete = sqlite_stores[runtime_name]
         for name in _protocol_methods(protocol):
             concrete_descriptor = descriptor(concrete, name)
-            if not isinstance(concrete_descriptor, staticmethod):
-                continue
             protocol_descriptor = descriptor(protocol, name)
-            assert isinstance(protocol_descriptor, staticmethod), (
+            assert isinstance(protocol_descriptor, staticmethod) == isinstance(
+                concrete_descriptor, staticmethod
+            ), (
                 protocol.__name__, name,
             )
-            bound_protocol = protocol_descriptor.__get__(receiver, protocol)
-            assert _parameter_contract(bound_protocol) == _parameter_contract(
-                getattr(concrete, name)
-            ), (protocol.__name__, name)
+            if isinstance(concrete_descriptor, staticmethod):
+                bound_protocol = protocol_descriptor.__get__(receiver, protocol)
+                bound_concrete = concrete_descriptor.__get__(receiver, concrete)
+                assert _parameter_contract(bound_protocol) == _parameter_contract(
+                    bound_concrete
+                ), (protocol.__name__, name)
+            else:
+                assert _parameter_contract(
+                    getattr(protocol, name)
+                ) == _parameter_contract(getattr(concrete, name)), (
+                    protocol.__name__, name,
+                )
