@@ -71,28 +71,47 @@ source_id、文件名、时间戳或任何随机成分：
 | 复用边界 | **全局跨用户共享**。内容上不泄密（复用方自己手里本就有这份文件）；唯一副作用是「秒完成」构成存在性侧信道，内网部署可接受。 |
 | 复用层次 | 在**外部调用边界**缓存，产物仍各自落库。不共享行 → 删除、重解析、权限、归属完全不受影响。 |
 | 范围 | KG 抽取缓存（93%）+ embedding 缓存（11%）。**parse 缓存不做**（1%）。 |
-| 缓存组件 | `diskcache==5.6.3`，经 `CacheBackend` Protocol 适配。 |
+| 缓存组件 | **自研 `SqliteCacheBackend`**（~160 行），经已有 `CacheBackend` Protocol 接入。 |
 | 部署形态 | 单机多用户、单后端进程 → SQLite 后端足够。 |
 | 默认状态 | **默认开**（优化的目的），保留 env 逃生口。 |
 
-### 为什么用 diskcache 而非自研淘汰
+### 为什么自研而非用 diskcache
 
-顾虑是它 12 个月无新发布、文档只测到 CPython 3.10，而本项目跑 3.13。实测
-（Python 3.13.11，8 线程并发写，模拟 `kg_extract_workers`）：
+初始判断是引入 `diskcache==5.6.3`（"别造轮子"），原型对比实测后**结论反转**。
+
+**决定性证据：`cull_limit` 陷阱。** diskcache 每次触发裁剪时剔除固定
+`cull_limit` 条，而非"剔除到刚好达标"。条目越大越致命——20KB 条目 × 默认
+`cull_limit=10` = 200KB，一次就能清空整个缓存。同一场景（size_limit=200KB，
+20KB 条目，交错访问保持 h0-h2 为热）：
 
 ```
-diskcache 5.6.3 on Python 3.13.11
-并发写 150×20KB 耗时 101ms  (1491 写/秒)
-volume=852KB (上限 1000KB)  条目数=40/150 → LRU 裁剪生效
-最近写的还在: True   最早写的已淘汰: True
+cull_limit=10 (默认)   热条目存活 0/3   终态 2条/74KB   ← 浪费 63% 容量
+cull_limit=1           热条目存活 3/3   终态 8条/197KB  ← 正确
+cull_limit=100         热条目存活 0/3   终态 2条/74KB
 ```
 
-真实写入速率约每秒零点几次（每次 LLM 调用本身耗时数秒到数十秒），性能余量 3~4 个
-数量级。它是纯 Python + SQLite，无 C 扩展、无 ABI 风险。
+**KG 抽取响应正是几十 KB 的大条目**，会真实命中此坑。且它不报错——缓存"正常
+工作"，只是留存率与命中率莫名偏低，极难诊断。
 
-自研 LRU + size limit + TTL 约 100 行，但并发裁剪、裁剪抖动、误删热条目这类缺陷
-很难测。而 `CacheBackend` Protocol 已经把风险隔离好了：若 diskcache 将来失效，
-替换为自研实现是**局部改动，不动任何调用点**。锁定版本 `diskcache==5.6.3`。
+**性能对比**（Python 3.13.11，8 线程并发，150×20KB）：
+
+```
+自研 SqliteCache   写 4734/s   读 11514/s   留存 48/150   960KB/1000KB
+diskcache          写 2263/s   读  5179/s   留存 40/150   852KB/1000KB
+```
+
+综合：我们只需要 get / put / TTL / 容量上限 / 按 tag 清空这 5 个能力，是 diskcache
+功能的很小子集；自研约 160 行，性能约 2 倍，大条目下淘汰语义正确，且消除了
+"依赖 12 个月无发布"的长期风险。
+
+**风险与缓解**：自研原型第一版确实带一个真缺陷——`_evict_if_needed` 里
+`ORDER BY used_at ASC LIMIT 64` 无条件删除整批，当候选批大于剩余条目数时一次清空
+缓存、连带淘汰热条目。它**被测试当场捕获**，修复约 12 行（改为按 size 累加、删到
+刚好达标）。这印证该类代码可测、风险可控，但也说明**下列测试是交付的必要条件而非
+可选项**。
+
+**diskcache 保留作为开发期的差分测试 oracle**（`cull_limit=1` 时两者语义一致），
+列为 dev 依赖，不进生产依赖。
 
 ## 架构
 
@@ -102,20 +121,34 @@ make_embedder() → CachedEmbedder(inner, backend)     # 覆盖全部 6 个 embe
                           ↓
                   CacheBackend (已有 Protocol)
                           ↓
-                  DiskCacheBackend (~20 行适配)
+                  SqliteCacheBackend (~160 行)
 ```
 
 装饰器模式，`extract_graph` / `extract_window` / refine / gleaning / 6 个 embed
 调用点**全部零改动**。
 
-`OpenAICompatibleClient._get_cache()` 亦改为返回 `DiskCacheBackend`（ask 路径一并
-受益，全系统只有一套缓存机制）。旧的 `llm_cache.db` 不迁移、直接弃用——缓存冷启动
-重建即可。
+`OpenAICompatibleClient._get_cache()` 亦改为返回 `SqliteCacheBackend`（ask 路径一并
+受益，全系统只有一套缓存机制）。旧的 `llm_cache.db` 表结构不兼容（缺 tag/size/
+used_at 列），不迁移、直接弃用——缓存冷启动重建即可。
+
+### SqliteCacheBackend 要点
+
+- 表 `cache(key PK, value, tag, size, created_at, used_at)` + `idx(used_at)` +
+  `idx(tag)`；`meta.total_bytes` 增量维护，避免每次裁剪 `SUM()` 全表扫，另备
+  `recount()` 修正进程崩溃导致的漂移。
+- **粗粒度 LRU**：命中时仅当距上次刷新超过 `refresh_window`（默认 1h）才写
+  `used_at`。cache hit 是热路径，逐次 `UPDATE` 会把"读"变成"写"，在高命中率场景
+  （reparse 重跑）下写放大可观。牺牲少量淘汰精度换掉绝大部分写。
+- **裁剪必须删到刚好达标**（按 size 累加选取受害者），不可无条件删除整批——这正是
+  diskcache 的 `cull_limit` 陷阱，也是自研原型第一版的缺陷所在。
+- 裁剪先清过期条目（免费空间），不足再按 `used_at` 升序淘汰；裁到
+  `size_limit × 0.9` 留 headroom，避免每次 put 都触发。
+- `PRAGMA synchronous = NORMAL`——缓存丢失可重建，不值得为它付 fsync。
 
 ### 配置
 
 沿用现有 `LLM_CACHE_ENABLED` 作为**总开关**（避免引入第二个开关概念），默认值由
-`false` 改为 **`true`**；`LLM_CACHE_PATH` 改指向 diskcache 目录。新增
+`false` 改为 **`true`**；`LLM_CACHE_PATH` 继续指向 SQLite 文件（换新文件名）。新增
 `LLM_CACHE_SIZE_LIMIT`（字节）与 `LLM_CACHE_TTL_DAYS`（默认 90）。按项目既有约定，
 所有新配置项的环境变量映射必须用 `validation_alias`——pydantic-settings v2 下
 `Field(env=)` 静默失效。
@@ -195,8 +228,8 @@ TTL 只为两件事存在：
 - **容量驱动（主力）**：`size_limit` + LRU。99% 的回收由它完成，热条目自然留存。
 - **TTL（兜底）**：默认 **90 天**，env 可配。必须**长**——短 TTL 会毁掉最大的收益
   场景：`reparse`/`reextract` 那种几万源重跑可能几个月后才发生，届时命中率接近 100%。
-- **显式失效（逃生口）**：借 diskcache 的 `tag` 按 model 名清空——换模型服务时这才是
-  正确操作，而非等 TTL 到期。另加全清。
+- **显式失效（逃生口）**：`evict_tag(model)` 按 model 名清空——换模型服务时这才是
+  正确操作，而非等 TTL 到期。写入时以 model 名作 tag。另加全清。
 
 ## 可观测
 
@@ -224,7 +257,16 @@ TTL 只为两件事存在：
   `_BATCH = 10` 硬上限（重新分批，而非把原批次原样透传）。
 - **重复文本**：同一批内出现两条相同文本时，只应产生一次后端调用，且两个位置都拿到
   向量——这是 per-text key 的直接推论，容易在重组逻辑里写错。
-- **淘汰**：超过 size_limit 时裁剪生效、热条目不被误删。
+- **淘汰**（自研缓存的核心风险面，逐项必测）：
+  - 超过 `size_limit` 时裁剪生效，且**裁剪后容量利用率仍应接近上限**——"缓存被清得
+    只剩零星几条"是 `cull_limit` 类缺陷的特征，只断言"没超限"抓不到它。
+  - **热条目不被误删**：注意测试本身要写对——LRU 看的是最后访问时间而非访问次数。
+    有效用例须在灌入冷数据的**过程中交错访问**热条目，否则热条目的 `used_at` 仍旧
+    早于所有冷条目，被淘汰是正确行为（此坑在原型阶段实际绊倒过一次）。
+  - **候选批大于剩余条目数**时不得清空缓存（原型第一版的真实缺陷）。
+  - **差分测试**：同一随机读写序列下，与 `diskcache(cull_limit=1)` 逐步比对命中/
+    落空判定，分歧数必须为 0。
+  - 覆盖写时 `total_bytes` 按差值更新；`recount()` 与增量计量一致。
 - **测试隔离**：确认测试环境拿到的是 `NoCacheBackend`。
 - **属性透传**：`control` 经装饰器后仍可达，取消语义不变。
 
