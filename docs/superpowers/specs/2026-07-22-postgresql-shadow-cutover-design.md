@@ -144,11 +144,14 @@ CI 将实际 schema 的所有普通用户表与 manifest 做集合对比。新�
 - `kg_cluster_scratch=(object_id, notebook_id, run_id)`（唯一语义相同，但该列序不会抢占既有 `(notebook_id, run_id)` 访问路径）；
 - `knowledge_object_sources=(object_id, source_id)`。
 
-preflight 必须在 SQLite 与 PostgreSQL 两端对这三组键做全表 NULL/重复扫描，任何重复都
-fail closed，绝不静默去重。SQLite 侧在一个 `BEGIN IMMEDIATE` 内完成全表查重、三个
-唯一守卫和 capture/freeze trigger 安装，提交时 capture 仍为 disabled；PostgreSQL 侧使用
-独立事务完成自己的查重与守卫。只有两侧独立结果都成功并经验证后，控制面才用 CAS 启用
-capture。这里不存在跨库原子提交；任一侧失败都必须保持 disabled，且两侧接口可幂等重试。
+初始 UTF8、数据库身份与空目标 preflight 严格只读；通过后，必须先由正式 checksummed
+migrator 把 PostgreSQL 提升到 COPY-ready v2，使目标业务表存在。随后守卫安装接口在 SQLite
+与 PostgreSQL 两端对这三组键做全表 NULL/重复扫描，任何重复都 fail closed，绝不静默去重。
+SQLite 侧在一个 `BEGIN IMMEDIATE` 内完成全表查重、三个唯一守卫和 capture/freeze trigger
+安装，提交时 capture 仍为 disabled；PostgreSQL 侧使用独立事务对已存在的 v2 表完成自己的
+查重与三个守卫。只有两侧独立事务都提交、结果都经验证后，控制面才用两报告 CAS 启用
+capture，之后才生成快照并开始 COPY。这里不存在跨库原子提交；任一侧失败都必须保持
+disabled，且两侧接口可按相同身份和定义幂等重试。
 明确命名且由 shadow 拥有的观察期唯一索引为：`shadow_uq_community_members_replication_key`、
 `shadow_uq_kg_cluster_scratch_replication_key`、
 `shadow_uq_knowledge_object_sources_replication_key`。这些索引不改变业务 schema compatibility
@@ -235,9 +238,9 @@ lease。这样数据库级冻结仍能阻止意外进程，同时不会挡住受
 
 初始同步按以下顺序执行：
 
-1. `preflight` 校验源 SQLite 身份、目标 PostgreSQL 身份、schema epoch、扩展、磁盘、连接和空目标约束；
-2. 分别提交 SQLite 与 PostgreSQL 的逻辑键查重/唯一守卫安装；SQLite 同一 `BEGIN IMMEDIATE` 还安装 capture trigger 但保持 disabled，两侧均成功后才 CAS 开启正向 capture；
-3. 通过正式 checksummed migrator 把 PostgreSQL 准备到 COPY-ready v2（表/约束、`pg_trgm` 与六个 partial unique 完整性索引）；
+1. `preflight` 严格只读地校验 PostgreSQL `server_encoding=UTF8`、源/目标数据库身份、schema epoch、扩展/权限、磁盘、连接和空目标约束；此步不安装 schema、migration、guard 或 trigger，也不创建快照；
+2. 通过正式 checksummed migrator 把 PostgreSQL 准备到 COPY-ready v2（表/约束、`pg_trgm` 与六个 partial unique 完整性索引），先保证三个逻辑键目标业务表存在；
+3. 分别提交 SQLite 与 PostgreSQL 的逻辑键查重/唯一守卫安装事务：SQLite 在同一 `BEGIN IMMEDIATE` 中安装三个守卫及 disabled 的 capture/freeze trigger，PostgreSQL 在独立事务中对 v2 表安装并验证三个守卫；两份已提交报告都验证成功后才通过 CAS 开启正向 capture。任一侧失败都保持 capture disabled，两侧可按相同身份和定义幂等重试，不声称跨库原子提交；
 4. 使用 SQLite backup API 生成一致性临时快照，正常业务写入继续；
 5. 从快照自身读取 `MAX(shadow_change_log.seq)` 作为基线水位 `H0`；
 6. 按 manifest FK 拓扑使用流式批次和 PostgreSQL `COPY` 导入普通表；embeddings 流式解码并写入 `bytea`，不在内存中全量展开；

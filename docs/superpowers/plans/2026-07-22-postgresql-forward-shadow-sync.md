@@ -106,15 +106,19 @@ logical composite keys guarded for the life of shadow sync
 - `kg_cluster_scratch=(object_id, notebook_id, run_id)` (the same unique tuple, ordered so its guard cannot replace the existing `(notebook_id, run_id)` access path);
 - `knowledge_object_sources=(object_id, source_id)`.
 
-Preflight must scan all rows in each exception and fail closed if any key is null or
-duplicated; it must never silently deduplicate. The SQLite installation interface
-performs that scan, creates the three guards, and installs its capture/freeze triggers
-inside one `BEGIN IMMEDIATE`, leaving capture disabled. A separate PostgreSQL
-preflight/guard transaction creates and verifies the corresponding indexes there.
-Only after both independent transactions succeed may control perform a conditional
-CAS that enables SQLite capture. There is no cross-database atomic installation:
-failure on either side leaves capture disabled and both interfaces must be idempotently
-retryable. The explicitly named, shadow-owned unique indexes are
+The initial UTF8/identity/emptiness preflight is strictly read-only. After it succeeds,
+the formal checksummed migrator first prepares PostgreSQL at COPY-ready v2 so every
+target business table exists. Only then may the two guard/install interfaces scan all
+rows in each exception and fail closed if any key is null or duplicated; neither may
+silently deduplicate. The SQLite installation interface performs that scan, creates
+the three guards, and installs its capture/freeze triggers inside one
+`BEGIN IMMEDIATE`, leaving capture disabled. A separate PostgreSQL guard transaction
+scans the now-existing v2 tables and creates and verifies the corresponding indexes.
+Only after both independent transactions commit and their reports verify successfully
+may control perform the two-report CAS that enables SQLite capture. There is no
+cross-database atomic installation: failure on either side leaves capture disabled
+and both interfaces must be idempotently retryable. Snapshot creation and baseline
+COPY begin only after that CAS. The explicitly named, shadow-owned unique indexes are
 `shadow_uq_community_members_replication_key`,
 `shadow_uq_kg_cluster_scratch_replication_key`, and
 `shadow_uq_knowledge_object_sources_replication_key` on both SQLite and PostgreSQL.
@@ -222,7 +226,7 @@ transaction rolls back and an idempotent retry succeeds.
 
 - [ ] **Step 3: Add v24 and generated triggers**
 
-Generate a `BEFORE INSERT/UPDATE/DELETE` freeze trigger and `AFTER` capture triggers per manifest entry. Quote only manifest-owned identifiers; values remain bound. A replication-key UPDATE emits OLD delete then NEW upsert. The SQLite-side install transaction uses one `BEGIN IMMEDIATE` for duplicate scan + named guards + triggers and commits with capture disabled. PostgreSQL duplicate scan + guards use a separate target transaction. Only after both are verified does a run/epoch/revision CAS enable capture; any failure remains disabled and can be retried idempotently. Installation refuses an active different run and never claims cross-database atomicity.
+Generate a `BEFORE INSERT/UPDATE/DELETE` freeze trigger and `AFTER` capture triggers per manifest entry. Quote only manifest-owned identifiers; values remain bound. A replication-key UPDATE emits OLD delete then NEW upsert. Runtime orchestration invokes these interfaces only after the strictly read-only preflight and formal migration to COPY-ready PostgreSQL v2. The SQLite-side install transaction uses one `BEGIN IMMEDIATE` for duplicate scan + named guards + triggers and commits with capture disabled. PostgreSQL duplicate scan + guards then use a separate target transaction against the existing v2 business tables. Only after both committed reports are verified does a run/epoch/revision CAS enable capture; any preparation or guard failure remains disabled and can be retried idempotently. Installation refuses an active different run and never claims cross-database atomicity.
 
 Before fixing any guard column order, audit every unordered read of the three tables and
 lock the result with behavior plus `EXPLAIN QUERY PLAN` tests. In particular,
@@ -291,11 +295,13 @@ def prepare_postgres_replication_key_guards(
 This independently scans all three logical-key tables, fails on NULL/duplicates, and
 creates/verifies the three named shadow-owned PostgreSQL unique indexes in one target
 transaction. It does not enable SQLite capture and is idempotent only for the same
-reviewed definitions.
+reviewed definitions. Runtime orchestration may call it only after the strictly
+read-only preflight has succeeded and the formal checksummed migrator has committed
+COPY-ready PostgreSQL v2, so all three target business tables already exist.
 
 - [ ] **Step 1: Write failing state/identity tests**
 
-Cover database identity fingerprints, same-database rejection, non-empty/unowned target rejection, source path/storage root validation, PostgreSQL UTF8 server-encoding/extension/privilege checks, schema pair mismatch, run reuse, illegal phase transition, and concurrent control updates. A SQL_ASCII/LATIN1 target must fail before `--prepare-target`, capture/guard installation, snapshot creation, or any other write. Cover PostgreSQL logical-key duplicate preflight/guard rollback and retry separately from SQLite installation, then prove capture-enable CAS remains disabled until both side-specific reports are committed and verified.
+Cover database identity fingerprints, same-database rejection, non-empty/unowned target rejection, source path/storage root validation, PostgreSQL UTF8 server-encoding/extension/privilege checks, schema pair mismatch, run reuse, illegal phase transition, and concurrent control updates. A SQL_ASCII/LATIN1 target must fail before formal migration, shadow-schema or capture/guard installation, snapshot creation, or any other write. Cover PostgreSQL logical-key duplicate guard rollback and retry separately from SQLite installation, then prove capture-enable CAS remains disabled until both side-specific reports are committed and verified.
 
 - [ ] **Step 2: Implement shadow schema installation**
 
@@ -307,7 +313,7 @@ Every transition is a conditional update on run id + expected phase + revision. 
 
 - [ ] **Step 4: Implement `preflight`**
 
-Its first target compatibility check requires `current_setting('server_encoding')='UTF8'`; collation does not substitute for encoding. It performs no snapshot or source/target write until that check succeeds. The remaining preflight is read-only except installing the owned shadow schema when explicitly passed `--prepare-target`. It reports disk estimates, connection/pool settings, schema identities, target ownership/emptiness, storage references, and backup prerequisites using redacted identities.
+Its first target compatibility check requires `current_setting('server_encoding')='UTF8'`; collation does not substitute for encoding. The entire preflight is strictly read-only: it neither installs the owned shadow schema nor runs formal migrations, guards, triggers, snapshot, or COPY. It reports disk estimates, connection/pool settings, schema identities, target ownership/emptiness, storage references, and backup prerequisites using redacted identities. The resulting identity-bound confirmation token authorizes `start-forward` to perform the later writes in the documented order.
 
 - [ ] **Step 5: Run tests**
 
@@ -366,7 +372,7 @@ Write under the configured migration work directory, fsync, validate SQLite inte
 
 - [ ] **Step 4: Implement resumable COPY**
 
-Use the formal checksummed migrator to prepare the target at PostgreSQL v2 and verify that only tables/constraints plus the six partial unique integrity indexes are present. Copy by manifest rank and stable replication-key order into that target. Save the last replication key, rows, bytes, and rolling hash per table. Resume only when run/snapshot hash/schema/checkpoint match. For a failed partial table, delete only rows tagged/owned by the current pre-cutover run or restart that table inside a transaction; never truncate an unrelated target.
+Require and reverify an already committed COPY-ready PostgreSQL v2 target, with the PostgreSQL replication-key guard report committed and the two-report capture-enable CAS complete. Copy by manifest rank and stable replication-key order into that target. Save the last replication key, rows, bytes, and rolling hash per table. Resume only when run/snapshot hash/schema/checkpoint match. For a failed partial table, delete only rows tagged/owned by the current pre-cutover run or restart that table inside a transaction; never truncate an unrelated target. Target preparation belongs to `start-forward` before guard installation, never inside snapshot/COPY.
 
 - [ ] **Step 5: Reseed identities, migrate through v3-v6, and analyze**
 
@@ -547,7 +553,7 @@ git commit -m "feat: verify PostgreSQL shadow consistency"
 
 ```text
 status --run-id RUN
-preflight --run-id RUN [--prepare-target]
+preflight --run-id RUN
 start-forward --run-id RUN --work-dir PATH
 verify --run-id RUN --level structural|full
 worker --run-id RUN --direction forward
@@ -563,7 +569,7 @@ Only one live forward worker may hold the direction lease. Heartbeats use databa
 
 - [ ] **Step 3: Implement `start-forward` orchestration**
 
-It validates preflight, commits the SQLite and PostgreSQL guard/install interfaces independently while capture remains disabled, enables capture only through the two-report CAS, creates the snapshot, prepares PG v2, copies/resumes the baseline, reseeds all seven ordinal identities, migrates through resumable v3-v6 index groups with the configured bounded timeout, sets H0, transitions to `sqlite_to_postgres`, and prints the exact foreground worker command. Any guard, reseed, or index-group failure remains visible and cannot mark COPY complete or advance H0. It does not daemonize invisibly.
+It validates the identity-bound result of a strictly read-only UTF8/identity/emptiness preflight, prepares PostgreSQL at COPY-ready v2 through the formal checksummed migrator so the target business tables exist, installs the owned shadow control schema, and commits the SQLite and PostgreSQL guard/install interfaces in independent transactions while capture remains disabled. After verifying both committed reports, it enables capture only through the two-report CAS, creates the snapshot, copies/resumes the baseline, reseeds all seven ordinal identities, migrates through resumable v3-v6 index groups with the configured bounded timeout, sets H0, transitions to `sqlite_to_postgres`, and prints the exact foreground worker command. Any preparation or guard failure remains visible and leaves capture disabled; reseed or index-group failure cannot mark COPY complete or advance H0. Each step is identity-bound and idempotently retryable; the sequence does not claim cross-database atomicity. It does not daemonize invisibly.
 
 - [ ] **Step 4: Implement `scripts/shadow.sh` as an optional local supervisor**
 

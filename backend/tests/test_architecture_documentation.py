@@ -52,6 +52,50 @@ def _assert_phrases(expected: dict[str, str]) -> None:
         assert phrase in _read(name), f"{name} is missing contract phrase: {phrase}"
 
 
+def _assert_ordered(section: str, phrases: tuple[str, ...]) -> None:
+    positions = [section.index(phrase) for phrase in phrases]
+    assert positions == sorted(positions), (
+        f"contract phrases are out of order: {list(zip(phrases, positions))}"
+    )
+
+
+def test_postgres_shadow_bootstrap_orders_v2_before_replication_guards():
+    """PG business tables must exist before target guard indexes are installed."""
+    forward = _between(
+        "docs/superpowers/plans/2026-07-22-postgresql-forward-shadow-sync.md",
+        "- [ ] **Step 3: Implement `start-forward` orchestration**",
+        "- [ ] **Step 4: Implement `scripts/shadow.sh`",
+    )
+    _assert_ordered(
+        forward,
+        (
+            "strictly read-only UTF8/identity/emptiness preflight",
+            "prepares PostgreSQL at COPY-ready v2",
+            "commits the SQLite and PostgreSQL guard/install interfaces",
+            "two-report CAS",
+            "creates the snapshot",
+            "copies/resumes the baseline",
+        ),
+    )
+
+    design = _between(
+        "docs/superpowers/specs/2026-07-22-postgresql-shadow-cutover-design.md",
+        "## 6. 初始全量基线",
+        "## 7. 增量复制与 checkpoint",
+    )
+    _assert_ordered(
+        design,
+        (
+            "1. `preflight`",
+            "2. 通过正式 checksummed migrator",
+            "3. 分别提交 SQLite 与 PostgreSQL",
+            "CAS 开启正向 capture",
+            "4. 使用 SQLite backup API",
+            "6. 按 manifest FK 拓扑使用流式批次和 PostgreSQL `COPY`",
+        ),
+    )
+
+
 def test_repository_backend_selection_documentation_matches_the_interim_runtime():
     _assert_phrases(
         {
