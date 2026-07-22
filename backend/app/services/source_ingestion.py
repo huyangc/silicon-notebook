@@ -22,6 +22,7 @@ from app.models.sources import (
     SourceElement,
     SourceImportRequest,
     SourceSummary,
+    UploadedSourceSummary,
 )
 from app.repositories.ports import (
     NotebookStorePort,
@@ -238,7 +239,7 @@ class SourceIngestionService:
 
     def upload_sources_compat(
         self, notebook_id: str, files: Iterable[UploadedSourceFile], scheduler=None
-    ) -> List[SourceSummary]:
+    ) -> List[UploadedSourceSummary]:
         return self.upload_sources(
             notebook_id, files, scheduler, self.pipeline_hooks()
         )
@@ -393,31 +394,74 @@ class SourceIngestionService:
                 budget -= 1
         return AddUrlSourcesResult(created=created, rejected=rejected)
 
+    def reuse_uploaded_source(
+        self,
+        source_id: str,
+        scheduler: "SourceScheduler | None",
+        hooks: SourcePipelineHooks,
+    ) -> UploadedSourceSummary:
+        """同 notebook 内已有相同内容的源 → 复用那一行，绝不新建第二条。
+
+        复用 ≠ 撒手不管：停在失败终态（parse_status='failed'）的行就地重跑
+        流水线，其余原样返回。理由是 file_hash 的语义：它在
+        insert_source 时（解析之前）就写进去了，只说明「这份内容进过库」，
+        不说明「这份内容成功摄取过」——解析失败（本项目里 MinerU/网络抖动是
+        常态）后指纹照样留着。若无条件短路，用户最自然的重试动作（把同一个
+        文件再传一次）会静默变成 no-op 还弹「已上传」，坏源永远修不好。
+
+        修法刻意不是「失败时清掉 file_hash」（Memory 派生源那条路径的做法）：
+        那会让指纹重新落空，UI 与离线 batch_ingest 的 already_ingested 双双
+        重新建行，把重复源又请回来——正是本特性要治的东西。Memory 那边可以清，
+        是因为它另有 memory_id 唯一键兜住行的身份，上传路径没有。
+
+        崩溃遗留在 queued/parsing 的行由启动期的 recover_interrupted_jobs 统一
+        判死（那里才有「本进程刚起来，不可能有流水线在跑」这个前提），落到
+        'failed' 后同样能被这里重试。反过来，正在跑的行绝不在这里重入：同一行
+        并发跑两条流水线是重复的 LLM/解析开销。
+        """
+        summary = self.sources.get_source(source_id)
+        if summary.parse_status == "failed":
+            if scheduler is not None:
+                scheduler(source_id)
+            else:
+                self.process_source(source_id, hooks)
+            summary = self.sources.get_source(source_id)
+        return UploadedSourceSummary.model_validate(
+            {**summary.model_dump(), "reused": True}
+        )
+
     def upload_sources(
         self,
         notebook_id: str,
         files: Iterable[UploadedSourceFile],
         scheduler: "SourceScheduler | None",
         hooks: SourcePipelineHooks,
-    ) -> List[SourceSummary]:
+    ) -> List[UploadedSourceSummary]:
         """Register uploaded files and kick off processing.
 
         With a ``scheduler`` (e.g. ``BackgroundTasks.add_task``) the heavy
         parse/embed/extract pipeline runs out of band and each source is
         returned in the ``queued`` state. Without one (tests, scripts) the
         pipeline runs synchronously before returning.
+
+        Each returned row carries ``reused``: False for a source this call
+        created, True for an existing same-content source in this notebook
+        that was handed back instead (see ``reuse_uploaded_source``). Callers
+        that report "N sources added" must count the False ones only.
         """
         self.notebooks.get_row(notebook_id)  # KeyError if missing
-        imported: List[SourceSummary] = []
+        imported: List[UploadedSourceSummary] = []
         for file in files:
             source_id = self.new_id("src")
             file_name = safe_filename(file.file_name)
             digest = hashlib.sha256(file.content).hexdigest()
-            # 同 notebook 内相同内容直接复用既有源，与 batch_ingest 的 already_ingested
+            # 同 notebook 内相同内容复用既有源，与 batch_ingest 的 already_ingested
             # 行为一致（此前 UI 路径会建出重复源）。跨 notebook 刻意不去重。
             existing_id = self.sources.source_id_by_hash(notebook_id, digest)
             if existing_id:
-                imported.append(self.sources.get_source(existing_id))
+                imported.append(
+                    self.reuse_uploaded_source(existing_id, scheduler, hooks)
+                )
                 continue
             stored_path = self.source_files.write_upload(
                 notebook_id, source_id, file_name, file.content
@@ -440,7 +484,11 @@ class SourceIngestionService:
                 scheduler(source_id)
             else:
                 self.process_source(source_id, hooks)
-            imported.append(self.sources.get_source(source_id))
+            imported.append(
+                UploadedSourceSummary.model_validate(
+                    {**self.sources.get_source(source_id).model_dump(), "reused": False}
+                )
+            )
         return imported
 
     # ------------------------------------------------------------ pipeline

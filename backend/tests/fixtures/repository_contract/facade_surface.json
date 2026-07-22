@@ -6859,6 +6859,12 @@
         "path": "backend/tests/test_source_ingestion_service.py",
         "scope": "<module>.test_pipeline_status_and_event_order_equals_transaction_phases",
         "target": "parse_source_file"
+      },
+      {
+        "kind": "patch",
+        "path": "backend/tests/test_upload_dedup.py",
+        "scope": "<module>._patch_parse",
+        "target": "parse_source_file"
       }
     ],
     "kind": "method",
@@ -6905,6 +6911,14 @@
         "kind": "patch",
         "path": "backend/tests/test_source_ingestion_service.py",
         "scope": "<module>.test_pipeline_status_and_event_order_equals_transaction_phases",
+        "target": "parse_source_file"
+      },
+      {
+        "base": "facade_mod",
+        "compatibility": "test-only",
+        "kind": "patch",
+        "path": "backend/tests/test_upload_dedup.py",
+        "scope": "<module>._patch_parse",
         "target": "parse_source_file"
       }
     ],
@@ -8666,7 +8680,7 @@
     "owner": "SourceIngestionService",
     "patch_targets": [],
     "scope": "facade",
-    "signature": "(self, notebook_id: 'str', files: 'Iterable[UploadedSourceFile]', scheduler: 'Optional[Callable[[str], None]]' = None) -> 'List[SourceSummary]'"
+    "signature": "(self, notebook_id: 'str', files: 'Iterable[UploadedSourceFile]', scheduler: 'Optional[Callable[[str], None]]' = None) -> 'List[UploadedSourceSummary]'"
   },
   "upsert_knowhow_cell_code": {
     "consumers": [

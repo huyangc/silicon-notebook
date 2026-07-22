@@ -1743,6 +1743,8 @@ class SqliteMigrator:
         永久「排队中/解析中」的搁浅行——用户既看不到失败也无从重试。置 'failed' 让它落到
         一个可重试的终态。注意**不能**像 'extracting' 那样回退成 'parsed'：搁浅源可能连
         source_elements 都没有，标「已解析」是谎报，还会让它从「待处理」视图里消失。
+        落到 'failed' 还让「重新上传同一个文件」能按失败源走重试
+        （见 upload_sources 的 reuse_uploaded_source）。
         只由服务端 lifespan 启动路径调用一次（见 initialize 的说明）。
         幂等——safe every boot。"""
         with self._connect() as db:
@@ -1764,7 +1766,7 @@ class SqliteMigrator:
             )
             db.execute(
                 "UPDATE sources SET status='failed', parse_status='failed', "
-                "error_message='服务重启导致文档解析中断；文件已保留，可重新解析。', "
+                "error_message='服务重启导致文档解析中断；文件已保留，可重新解析或重新上传。', "
                 "updated_at=? WHERE parse_status IN ('queued','parsing')",
                 (now,),
             )

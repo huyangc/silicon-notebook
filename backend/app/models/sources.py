@@ -97,6 +97,20 @@ class SourceDetail(SourceSummary):
     paper_meta: Optional[PaperMeta] = None
 
 
+class UploadedSourceSummary(SourceSummary):
+    """One row of an upload response: a plain ``SourceSummary`` plus whether it
+    is a brand-new source or an existing same-content one that was reused.
+
+    Purely additive — every field the pre-dedup upload contract returned is
+    still here, so any client that ignores ``reused`` behaves exactly as
+    before. Clients that count "how many sources did this upload add" MUST
+    read it: same-notebook content dedup means an upload can return sources it
+    did not create, and counting those inflates the notebook's source total
+    until the page is reloaded."""
+
+    reused: bool = False
+
+
 class DetectDocTypeItem(BaseModel):
     """One file's name + leading text sample for upload-time type detection."""
     name: str

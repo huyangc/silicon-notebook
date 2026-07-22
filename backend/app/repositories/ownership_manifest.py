@@ -2303,6 +2303,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_fresh_hooks_preserve_post_construction_component_monkeypatch', kind='patch', target='parse_source_file'),
             ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_parsed_source_and_elements_commit_before_chunk_build', kind='patch', target='parse_source_file'),
             ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_pipeline_status_and_event_order_equals_transaction_phases', kind='patch', target='parse_source_file'),
+            ConsumerSite(path='backend/tests/test_upload_dedup.py', scope='<module>._patch_parse', kind='patch', target='parse_source_file'),
         ),
         patches=(
             ConsumerSite(path='backend/tests/test_chunk_embed.py', scope='<module>.test_process_source_builds_chunks', kind='patch', target='parse_source_file'),
@@ -2310,6 +2311,7 @@ SURFACE_MEMBERS = (
             ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_fresh_hooks_preserve_post_construction_component_monkeypatch', kind='patch', target='parse_source_file'),
             ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_parsed_source_and_elements_commit_before_chunk_build', kind='patch', target='parse_source_file'),
             ConsumerSite(path='backend/tests/test_source_ingestion_service.py', scope='<module>.test_pipeline_status_and_event_order_equals_transaction_phases', kind='patch', target='parse_source_file'),
+            ConsumerSite(path='backend/tests/test_upload_dedup.py', scope='<module>._patch_parse', kind='patch', target='parse_source_file'),
         ),
     ),
     SurfaceMember(
