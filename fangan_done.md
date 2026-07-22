@@ -1,6 +1,6 @@
 # silicon-notebook 方案已完成情况
 
-更新日期：2026-07-21
+更新日期：2026-07-22
 
 对照依据：`silicon_notebook_fangan.md`（产品方案）。
 
@@ -14,7 +14,7 @@
 -> 保存原始文件
 -> 解析为 source elements（元素级 + location_label）
 -> 生成 source summary
--> 配置 LLM 时抽取 Concept / Claim / Formula / Procedure KG 对象（带 evidence 绑定与关系边）
+-> 系统绑定的 KG workload 可用时抽取 Concept / Claim / Formula / Procedure KG 对象（带 evidence 绑定与关系边）
 -> 通用知识库浏览 / 状态治理 / 合并 / 冲突检测（旧候选治理端点保留兼容）
 -> 混合检索（关键词 + 向量余弦，含 payload 级向量）
 -> KG-native Ask（chunk / graph / reasoning，带 citation 校验）
@@ -46,8 +46,8 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - 原始上传文件保存到 `.local/storage`。
 - repository 边界：`SQLiteRepository` 是组合式 `RepositoryRuntime` 之上的兼容 facade——主业务库 SQL 只在 `backend/app/repositories/sqlite/` 领域 store，编排在 application services，消费者依赖 `backend/app/repositories/ports.py` 小型 Protocol；PostgreSQL adapter 留待将来在同一 ports 后实现。旧库兼容由冻结 v9 fixture、schema golden 与 `scripts/verify_repository_snapshot.py` backup-only 真库验证共同守护。
 - 向量检索本机实现：embedding 本地持久化，查询时使用有界 float32 矩阵或 scale index；PostgreSQL + pgvector 留作后续放量方向。
-- LLM 通过 OpenAI-compatible 配置接入：`OPENAI_COMPAT_BASE_URL` / `OPENAI_COMPAT_API_KEY` / `OPENAI_COMPAT_MODEL` / `OPENAI_COMPAT_TIMEOUT_SECONDS`；embedding 独立使用 `EMBED_*` 配置。
-- `Settings.llm_configured` 与 `Settings.embedding_configured` 分别控制问答/抽取 LLM 与 embedding 能力是否启用。
+- 模型服务由部署者在 `MODEL_SERVICES_CONFIG` 指向的 TOML 中统一声明：物理 chat / embedding / rerank 服务包含协议、endpoint、模型、`api_key_env` 与唯一容量 `max_concurrency`，`.env` 只保存被引用的密钥。
+- 所有模型调用按稳定 workload id 取得绑定服务并进入该物理服务的共享调度器；可用性通过 `RuntimeModelProvider.configured(workload_id)` 判定。用户不能保存或覆盖模型配置，配置路径留空时明确进入离线/确定性降级。
 - **历史架构债偿还（2026-07-21，非产品功能）**：领域 FastAPI router 由 `app/api/routes.py` 组合，领域 Pydantic model 以 `app/models/schemas.py` compatibility facade 保持旧 import，七个前端 domain API module 共用 `frontend/app/api-client.ts` transport；等价性与 public/domain seam 测试取代 aggregate-private coupling。rebase 到 #315 后，exact PR head 已通过连续两次完整 warm gate，所有 lane 均不超过 60 秒；具体权威秒数记录在 PR 验证区，避免 tracked 文档改动把它们变成上一 SHA 的数据。该门槛是本机测量，CI 时长仍只作观察。workspace-state hook 拆分与 FastAPI lifespan/application lifecycle 仍未完成，保留为独立债务。
 
 ## 3. 用户系统与分享
@@ -126,7 +126,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 - 当前主线为 KG-native 抽取：`backend/app/services/kg_ingest.py` 调用 `kg.extract_window`，把 source 分窗后抽取 Concept / Claim / Formula / Procedure 节点与关系边，再由 `build_records()` 绑定到 `SourceElement` evidence。
 - `backend/app/services/extraction_profiles.py` 当前只维护 `academic_paper` / `textbook` 两类 profile，二者对象集均为 `concept / claim / formula / procedure`；`doc_type` 按单个 source 存储。
-- 配置 `OPENAI_COMPAT_*` 时，`_run_extraction()` 走 LLM KG 抽取并把对象直接写入 `knowledge_objects`（status=approved）与 `knowledge_relations`；`extraction_runs.run_type='kg'`。
+- 系统 TOML 为 `kg_extract` workload 绑定可用 chat 服务时，`_run_extraction()` 走 LLM KG 抽取并把对象直接写入 `knowledge_objects`（status=approved）与 `knowledge_relations`；`extraction_runs.run_type='kg'`。
 - 未配置 LLM 时，`_run_extraction()` 仍写入 completed run，但 `error_message='no-llm'`，不会生成启发式候选或假 KG。离线本机 beta 仍能解析、搜索、摘要和回答；需要知识召回时必须配置 LLM 或由测试/治理显式写入知识对象。
 - **KG 模型故障隔离（§6.4 / §9.1）**：手动建库与完整重建均创建持久化的 `kg_build_jobs`，只在当前 notebook、本次任务内共享故障熔断状态。单次 LLM 调用受 `KG_LLM_TIMEOUT_SECONDS` 和 `KG_LLM_MAX_RETRIES` 限制；持续超时、连接失败、鉴权失败或服务拒绝会停止继续派发/重试，首个窗口确认熔断时即持久化 `stopping`，再做窗口级与来源级 drain，并把任务置为可恢复的失败状态。重建预检显式绕过且不写入 LLM 缓存。已完成 source 的 KG 结果保留；同一 source 的 object/relation 分块在一个 SQLite 事务内提交，最新 extraction run 失败的旧残留仍算未完成；terminal extraction run 提交后会失效 notebook 的待处理来源缓存。启动恢复会关闭遗留 run，并把全部 orphan `extracting` source（含创建 run 前中断者）恢复为 `parsed`。前端以 notebook/workspace/request 三重 epoch 防止跨库回写，在 durable job 仍为 running 时持续轮询，不用固定时限伪造完成；状态栏展示预检、抽取、停止、完成或中断阶段、进度与安全错误文案，并提供“继续分析未完成内容”。只有用户明确选择完整重建时才走清理语义，且会先探测模型可用性，避免模型不可用时先删除既有 KG。事件日志只写 started/progress/circuit-opened/stopping/succeeded/failed 的安全任务元数据。后端全量测试、前端测试、TypeScript 与 production build 已通过 `scripts/check.sh`。
 - 旧 `extraction_candidates` 表与候选 API 仍保留兼容，但不再是当前自动抽取的主产物。
@@ -216,7 +216,7 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 - **创建富字段 + 模板（§6.1/§6.2）**：`NotebookCreate/Update/Summary` 增 `target_users/expected_questions/source_types/taxonomy/access_scope`（notebooks 表迁移）；6 套模板 `GET /notebook-templates`，创建按模板预填；前端集合页「从模板…」选择器 + 编辑弹窗富字段。
 - **CSV / Excel 解析（§6.3）**：`parse_csv`(stdlib) + `parse_xlsx`(openpyxl) → `table_row` 元素；上传校验/accept 扩 `.csv/.xlsx/.xlsm`。
 - **质量/分析看板（§16）**：`GET /notebooks/{id}/analytics`（有用率、低分提问=知识缺口、候选状态分布、知识覆盖、来源状态）；前端「看板」弹窗。已补齐 `GET /notebooks/{id}/analytics/content-overview` 的内容资产卡片：Memory 聚合严格按当前查看者和 notebook（不提供 admin 跨用户汇总），Knowhow 指标遵循 notebook 读取权限；卡片展示 Memory 总数/confirmed/candidate/最近三条，以及 Knowhow 表/行数、投影 pending/failed、过时代码和最近三张表，并只跳转到既有的 Memory、Knowhow 浏览/编辑界面。面向用户的来源计数排除隐藏的 `memory` / `knowhow` 投影来源；`size.sources`、复制阈值、存储与调度仍使用物理行，`has_unindexed_content` 在可见来源增量为零但派生内容变化时仍保留 scale-index 更新决策。
-- **测试硬化**：`smoke_backend.py` 三处 `Settings` 清空 `OPENAI_COMPAT_*` + `mineru_mode=off`，`scripts/check.sh` 不再调用真实 LLM/embedding（即便 `.env` 有 key），全程离线 1–2s。
+- **测试硬化**：`smoke_backend.py` 使用空 `MODEL_SERVICES_CONFIG` + `mineru_mode=off`，`scripts/check.sh` 不调用真实 LLM/embedding（即便开发机 `.env` 有密钥），全程离线。
 - **架构硬化（2026-07-10，权限 / 图谱 / 异步状态 / 发布门禁）**：公共 `NotebookUpdate` 不再接受内部 `status`；深拷异常只补偿自身副本，崩溃清理由 `NOTEBOOK_COPY_STALE_SECONDS` 限定为过期 `copying` 行；KG conflict candidate 的读取/状态更新按 `(notebook_id, candidate_id)` 双重作用域，阻断跨库确认/拒绝；rejected relation 在 federated graph、PPR、scale graph 全路径排除，给 LLM 的关系方向保持 `source→target`，大图守卫覆盖 active + 全部 base；多子查询检索为每个 worker 单独传播 Context；URL 来源逐跳拒绝私网/localhost/link-local；认证解析移出 async event loop 且 session 续期节流。前端用 Ask run/workspace epoch 阻断跨 notebook/会话回写，分享/待办统一走原子 notebook opener，退出登录 abort 本地流并 remount。`Settings` 全部迁移到 Pydantic v2 `validation_alias`，非 SQLite URL fail fast；`scripts/check.sh` 禁用仓库 `.env`、运行全量 pytest + 递归前端测试 + tsc + production build，缺前端依赖不再跳过。本次完整门禁通过：后端 `2271 passed, 1 skipped`、前端 `143 passed`、TypeScript 与 Next.js production build 均成功。
 - **架构模块化第二阶段（2026-07-10）**：保持 endpoint、SQLite schema 与 `SQLiteRepository` 公共 API 不变，把账号/用户模型配置/admin 用量/auth session 领域迁入 `sqlite_identity.py` mixin，并把笔记本分享令牌、深复制、成员关系与读取权限迁入 `sqlite_notebook_sharing.py` mixin；`sqlite_repository.py` 从 14,815 行降到 14,059 行，继续兼容 `_REQUEST_USER` / set/reset、`_COPY_CHUNK` 与 `_remap_json_ids` 导出。前端把 workspace API/视图模型迁入 `workspace-model.ts`，答案/引用/推理轨迹迁入 `answer-panel.tsx`，KG 类型标记迁入 `kg-type-mark.tsx`，`page.tsx` 从 6,060 行降到 5,438 行。新增后端继承/导出兼容守卫与前端源码边界测试，防止职责回流。本次完整门禁通过：后端 `2275 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。
 - **架构渐进整改阶段 1：行为契约与文档对齐（2026-07-10）**：以当前代码和绿色测试为行为真相，修复 Ask disconnect、mode-specific federation/tier 次序、三 tab 两列 workspace、source cleanup 与退役能力文档漂移。transport 断连只停止向该客户端推送，detached Ask job 继续执行并持久化，只有显式中断才取消 worker；`chunk` 基线 active-only，KG overlay/PPR 可引入 federated KG/base-backed chunk，`graph`/`reasoning` 走 federated KG；exact-score 的 `base` 次序只适用于知识对象命中，relation hit 仍 score-only；workspace 是来源栏 + 问答/知识库/深度报告主栏两列结构。`architecture.md` 已改为稳定边界说明，文档契约测试进入常规 pytest。本次完整门禁通过：后端 `2281 passed, 1 skipped`、前端 `146 passed`、TypeScript 与 Next.js production build 均成功。阶段 2–6 当时仍为后续规划。
@@ -286,11 +286,11 @@ LLM 未配置时，摘要与回答退化为 deterministic fallback；解析仍�
 
 - **统一结构化解析**：新增 `structural_markdown.py`（markdown-it-py）——代码块整块保真、表格结构化、`<a id>` 锚点丢弃、section 面包屑；`parsers.parse_markdown` 与 `kg/parsing.parse_elements` 复用同一实现。**代码块不进 KG 抽取窗口**（代码内容不再被抽成实体），仍存为元素供检索/引用。
 - **KG 窗口化贪心打包**：`make_windows` 把相邻 prose 合并到目标字符、吸收碎小节，成本随文档线性而非按小节爆炸（实测 Innovus 4330→329 窗口）；窗口数超 `kg_window_warn_threshold` 记 WARN 不截断。
-- **嵌入并发化**：元素向量（`_embed_source`/emb-el）与知识对象向量（`_embed_objects_batch`/emb-kg）都改线程池并发（`embed_concurrency=50`）+ 逐 batch 独立连接落库 + 失败隔离。
+- **嵌入并发化（历史实现）**：当时元素向量与知识对象向量使用独立 `embed_concurrency` 线程池；该模型并发旋钮现已退役并由 §29 的物理服务 `max_concurrency` 共享调度取代，batch/持久化分块仍只是作业形态，不代表额外模型容量。
 - **抽取优先管线**：`process_source` 前台跑 KG 抽取，元素向量化在后台 daemon 线程并发；`extracted`（前端绿）只看抽取完成。`_connect` 开 WAL + `busy_timeout` 支撑并发写。
 - **检索内存/性能**：`ask()` 把向量流式读成每-notebook L2 归一化 **float32 numpy 矩阵**（`vector_index`）+ `vector_cache` 版本键缓存，`query_sims` 单次 matmul。峰值内存大幅下降（实测大 KG 1.3G→约 500M），重复查询亚秒，消除大 KG 下的 OOM/卡死。`_TYPE_WEIGHT`=claim/formula/procedure/concept=1.0/1.0/0.7/0.5。
 - **产品行为**：导入后不再自动生成/覆盖笔记本名字/描述；前端「＋新建」直接创建未命名笔记本并进入（去弹窗）；状态点绿色只给 `extracted`、中间态橙。
-- **配置旋钮**：新增 `kg_window_target_chars/overlap`、`kg_extract_workers`、`kg_window_warn_threshold`、`embed_concurrency/batch_size/truncate_chars/persist_chunk`、`db_busy_timeout_ms`、`retrieval_top_n`。
+- **配置旋钮（历史记录）**：本节当时引入过 `kg_extract_workers`、`embed_concurrency` 等独立模型并发参数；它们不是现行配置，已由 §29 每个物理服务唯一的 `max_concurrency` 取代。窗口大小、batch、持久化分块、SQLite timeout 与检索数量仍属于内容/本地作业调优，不能覆盖模型服务容量。
 - **死代码清理（历史记录修正）**：当时先移除了 `/case-search`、`/checklist`、`/sources/{id}/extract` 等 legacy；其后 articles / derived-rules 也已从当前 runtime 移除。当前保留的是通用 knowledge 治理、duplicates/merge/conflicts、reports 与图谱治理路径。
 - **验证**：`bash scripts/check.sh` 通过（py_compile + KG-native smoke + 前端 `tsc --noEmit`）。
 
