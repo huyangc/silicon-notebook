@@ -195,7 +195,15 @@ def test_coordinator_run_replays_trace_via_conversation_active_job(repo):
     # 门控轨迹与完成时点(与旧 runner 回调同一观察面)。
     service = repo._runtime.ask_service()
 
-    def fake_ask(notebook_id, p, *, user_id, on_trace=None, cancel_event=None):
+    def fake_ask(
+        notebook_id,
+        p,
+        *,
+        user_id,
+        on_trace=None,
+        cancel_event=None,
+        job_id=None,
+    ):
         on_trace(TraceStep(step_type="plan", summary="s1", detail={}))
         assert release.wait(2)
         return AskResponse(answer_id="ans-t23", conversation_id=p.conversation_id,

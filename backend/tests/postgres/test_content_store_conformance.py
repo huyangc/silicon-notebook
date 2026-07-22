@@ -3,6 +3,9 @@ from __future__ import annotations
 import inspect
 import json
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import pytest
@@ -225,6 +228,98 @@ def test_ask_and_report_state_shapes_match_sqlite_golden(content_harness):
     assert report["outline"] == [{"title": "State"}]
     assert report["references"] == [{"answer_id": answer_id}]
     assert report["created_at"].startswith("2026-07-23T00:00:00")
+    assert content_harness.report.cancel_report("nb-content", report_id) is True
+    content_harness.report.update_report(
+        "nb-content", report_id, status="done", content_md="# too late"
+    )
+    cancelled = content_harness.report.get_report("nb-content", report_id)
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["content_md"] == "# State"
+
+
+@pytest.mark.postgres_integration
+def test_postgres_report_cancel_commit_beats_blocked_terminal_write(
+    postgres_database,
+):
+    """Two real PG sessions contend on the report row; cancelled stays sticky."""
+    import psycopg
+    from psycopg.rows import dict_row
+
+    from app.repositories.postgres.database import PostgresDatabase
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    seams = _seams()
+    report = PostgresReportStore(
+        postgres_database,
+        new_id=seams.new_id,
+        now=seams.now,
+        current_user_id=lambda: "user-content",
+    )
+    report_id = report.create_report("nb-content", "race")
+    terminal_database = PostgresDatabase(
+        postgres_database.settings, postgres_database.root_dir
+    )
+    terminal_report = PostgresReportStore(
+        terminal_database,
+        new_id=seams.new_id,
+        now=seams.now,
+        current_user_id=lambda: "user-content",
+    )
+    terminal_pid: list[int] = []
+    terminal_connected = threading.Event()
+    original_write = terminal_database.write
+
+    @contextmanager
+    def observed_terminal_write(*args, **kwargs):
+        with original_write(*args, **kwargs) as connection:
+            terminal_pid.append(
+                int(connection.execute("SELECT pg_backend_pid() AS pid").fetchone()["pid"])
+            )
+            terminal_connected.set()
+            yield connection
+
+    terminal_database.write = observed_terminal_write
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with postgres_database.write() as cancelling:
+                cancelling.execute(
+                    "UPDATE reports SET status='cancelled',progress=%s,updated_at=%s "
+                    "WHERE id=%s AND notebook_id=%s",
+                    ("已取消", NOW, report_id, "nb-content"),
+                )
+                terminal_future = pool.submit(
+                    terminal_report.update_report,
+                    "nb-content",
+                    report_id,
+                    status="done",
+                    content_md="# too late",
+                )
+                assert terminal_connected.wait(timeout=5)
+                lock_wait_seen = False
+                deadline = time.monotonic() + 3
+                with psycopg.connect(
+                    postgres_database.settings.database_url,
+                    row_factory=dict_row,
+                ) as inspector:
+                    while time.monotonic() < deadline:
+                        state = inspector.execute(
+                            "SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s",
+                            (terminal_pid[0],),
+                        ).fetchone()
+                        if state and state["wait_event_type"] == "Lock":
+                            lock_wait_seen = True
+                            break
+                        time.sleep(0.01)
+                assert lock_wait_seen
+            terminal_future.result(timeout=5)
+    finally:
+        terminal_database.close()
+
+    final = report.get_report("nb-content", report_id)
+    assert final["status"] == "cancelled"
+    assert final["content_md"] == ""
 
 
 def test_knowhow_mutation_and_snapshot_shapes_match_sqlite_golden(content_harness):
@@ -342,6 +437,78 @@ def test_knowhow_transfer_fingerprint_and_code_isolation_match_golden(content_ha
     ) is False
 
 
+@pytest.mark.postgres_integration
+@pytest.mark.parametrize("mutation", ("upsert", "delete"))
+def test_postgres_code_mutation_wins_against_conditional_transfer_delete(
+    postgres_database, mutation
+):
+    """Code is fingerprinted business state and locks the table aggregate."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    seams = _seams()
+    knowhow = PostgresKnowhowStore(
+        postgres_database, new_id=seams.new_id, now=seams.now
+    )
+    transfer = PostgresKnowhowTransferStore(postgres_database)
+    table_id = knowhow.create_knowhow_table(
+        "nb-content",
+        "Code race",
+        "",
+        [{"name": "Topic", "role": "anchor"}],
+        "user-content",
+    )
+    column_id = knowhow.get_knowhow_table(table_id)["columns"][0]["id"]
+    row_id = knowhow.add_knowhow_row(table_id, {column_id: "A"})
+    knowhow.upsert_knowhow_cell_code(
+        row_id, column_id, "old", "python", "user-content", "hash-old"
+    )
+    fingerprint = transfer.table_fingerprint(table_id)
+
+    mutation_locked = threading.Event()
+    delete_started = threading.Event()
+    original_lock = knowhow._lock_table_for_row
+
+    def pause_after_aggregate_lock(connection, locked_row_id):
+        table = original_lock(connection, locked_row_id)
+        mutation_locked.set()
+        assert delete_started.wait(timeout=10)
+        return table
+
+    knowhow._lock_table_for_row = pause_after_aggregate_lock
+
+    def mutate_code():
+        if mutation == "upsert":
+            return knowhow.upsert_knowhow_cell_code(
+                row_id,
+                column_id,
+                "new",
+                "python",
+                "user-content",
+                "hash-new",
+            )
+        return knowhow.delete_knowhow_cell_code(row_id, column_id)
+
+    def conditionally_delete():
+        assert mutation_locked.wait(timeout=10)
+        delete_started.set()
+        return transfer.delete_table_if_unchanged(table_id, fingerprint)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        mutation_future = pool.submit(mutate_code)
+        delete_future = pool.submit(conditionally_delete)
+        mutation_future.result(timeout=15)
+        assert delete_future.result(timeout=15) is False
+
+    assert knowhow.get_knowhow_table(table_id)["id"] == table_id
+    code = knowhow.get_knowhow_cell_code(row_id, column_id)
+    if mutation == "upsert":
+        assert code["code_text"] == "new"
+    else:
+        assert code is None
+
+
 def test_memory_revision_provenance_and_json_null_match_sqlite_golden(content_harness):
     write = MemoryWrite(
         id="mem-content",
@@ -404,6 +571,91 @@ def test_memory_rejects_nested_non_finite_json_without_partial_row(content_harne
         ).fetchone() is None
 
 
+@pytest.mark.postgres_integration
+def test_postgres_memory_search_filters_scope_before_candidate_limit(
+    postgres_database,
+):
+    """Other owners cannot crowd a valid hit out of the bounded lexical pool."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from psycopg.types.json import Jsonb
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    seams = _seams()
+    store = PostgresMemoryStore(
+        postgres_database, new_id=seams.new_id, now=seams.now
+    )
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO users(id,email,display_name,role,status,created_at,updated_at,"
+            "username,password_hash,password_salt,password_iterations) "
+            "VALUES (%s,%s,%s,'user','active',%s,%s,%s,'','',0)",
+            (
+                "user-crowdout",
+                "crowdout@example.test",
+                "Crowdout",
+                NOW,
+                NOW,
+                "z00123456",
+            ),
+        )
+        connection.execute(
+            "INSERT INTO notebook_members(notebook_id,user_id,role,added_at) "
+            "VALUES (%s,%s,'reader',%s)",
+            ("nb-content", "user-crowdout", NOW),
+        )
+        noise = [
+            (
+                f"aaa-crowdout-{index:03d}",
+                "nb-content",
+                "user-crowdout",
+                "external_agent",
+                "confirmed",
+                "crowdout-token",
+                "crowdout-token",
+                Jsonb([]),
+                NOW,
+                NOW,
+            )
+            for index in range(220)
+        ]
+        connection.cursor().executemany(
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+            "content_md,tags_json,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            noise,
+        )
+        connection.execute(
+            "INSERT INTO memory_items(id,notebook_id,created_by,origin,status,title,"
+            "content_md,tags_json,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                "zzz-valid-memory",
+                "nb-content",
+                "user-content",
+                "external_agent",
+                "confirmed",
+                "crowdout-token",
+                "crowdout-token",
+                Jsonb([]),
+                NOW,
+                NOW,
+            ),
+        )
+
+    result = store.list_memories(
+        "user-content",
+        notebook_id="nb-content",
+        status="confirmed",
+        origin="external_agent",
+        query="crowdout-token",
+        offset=0,
+        limit=10,
+    )
+    assert result.total_count == 1
+    assert [item.id for item in result.items] == ["zzz-valid-memory"]
+
+
 def test_memory_edit_supersedes_pinned_promotion_atomically(content_harness):
     write = MemoryWrite(
         id="mem-promote",
@@ -460,3 +712,356 @@ def test_memory_edit_supersedes_pinned_promotion_atomically(content_harness):
             ("promo-memory",),
         ).fetchone()
     assert candidate["status"] == "rejected"
+
+
+@pytest.mark.postgres_integration
+def test_postgres_projector_commits_terminal_knowhow_graph(
+    postgres_database, monkeypatch
+):
+    """The real projector reaches its terminal graph transaction on PG."""
+    from types import SimpleNamespace
+
+    from app.repositories.postgres.chunk_store import ChunkStore
+    from app.repositories.postgres.embedding_store import EmbeddingStore
+    from app.repositories.postgres.knowledge_store import KnowledgeStore
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from app.repositories.postgres.source_store import SourceStore
+    from app.services.knowhow.projection import KnowhowProjector
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    seams = _seams()
+    knowhow = PostgresKnowhowStore(
+        postgres_database, new_id=seams.new_id, now=seams.now
+    )
+    sources = SourceStore(postgres_database, now=seams.now)
+    chunks = ChunkStore(postgres_database)
+    knowledge = KnowledgeStore(postgres_database, seams)
+    vectors = EmbeddingStore(write=postgres_database.write)
+    projector = KnowhowProjector(
+        settings=Settings(database_url="sqlite:///unused.db"),
+        database=postgres_database,
+        knowhow=knowhow,
+        sources=sources,
+        chunks=chunks,
+        knowledge=knowledge,
+        embedding=SimpleNamespace(vectors=vectors),
+        note_model_error=lambda *_args, **_kwargs: None,
+        invalidate_unified_cache=lambda _notebook_id: None,
+        mark_unified_dirty=lambda _notebook_id: None,
+        new_id=seams.new_id,
+        now=seams.now,
+    )
+    table_id = knowhow.create_knowhow_table(
+        "nb-content",
+        "稳定性",
+        "",
+        [
+            {"name": "问题", "role": "anchor"},
+            {"name": "方法", "role": "procedure"},
+        ],
+        "user-content",
+    )
+    columns = knowhow.get_knowhow_table(table_id)["columns"]
+    by_name = {column["name"]: column["id"] for column in columns}
+    row_id = knowhow.add_knowhow_row(
+        table_id,
+        {by_name["问题"]: "振荡", by_name["方法"]: "增加阻尼"},
+    )
+
+    assert projector.project_table(table_id, embed=False) == "nb-content"
+
+    table = knowhow.get_knowhow_table(table_id)
+    assert table["rows"][0]["id"] == row_id
+    assert table["rows"][0]["projection_status"] == "synced"
+    source_id = table["hidden_source_id"]
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM source_elements WHERE source_id=%s",
+            (source_id,),
+        ).fetchone()["n"] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM chunks WHERE source_id=%s",
+            (source_id,),
+        ).fetchone()["n"] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM knowledge_objects WHERE source_id=%s",
+            (source_id,),
+        ).fetchone()["n"] == 2
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM knowledge_relations WHERE source_id=%s",
+            (source_id,),
+        ).fetchone()["n"] == 1
+
+    # Pin the PG JSONB legacy discovery path and run the scheduled replacement
+    # synchronously. This must never fall back to SQLite's json_extract SQL.
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO knowledge_objects "
+            "(id,notebook_id,object_type,status,owner,payload,evidence,"
+            "source_candidate_id,source_id,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s,'',%s::jsonb,%s::jsonb,NULL,%s,%s,%s)",
+            (
+                "ko-kh-legacy-content",
+                "nb-content",
+                "procedure",
+                "approved",
+                json.dumps({"table_id": table_id, "name": "legacy"}),
+                "[]",
+                source_id,
+                NOW,
+                NOW,
+            ),
+        )
+    monkeypatch.setattr(
+        "app.services.knowhow.projection.background_jobs.submit",
+        lambda fn, *args, **_kwargs: fn(*args, embed=False),
+    )
+    assert projector.reproject_legacy_tables() == [table_id]
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM knowledge_objects "
+            "WHERE id=%s OR (object_type=%s AND id LIKE %s)",
+            ("ko-kh-legacy-content", "procedure", "ko-kh-%"),
+        ).fetchone()["n"] == 0
+
+
+@pytest.mark.postgres_integration
+def test_postgres_projector_and_delete_leave_no_projection_orphans(
+    postgres_database,
+):
+    """A delete queued behind terminal projection removes the whole aggregate.
+
+    The barriers put teardown exactly at its source-row lock while projection
+    holds the table/source key-share locks.  This pins the lock order without
+    timing sleeps and catches both deadlocks and mixed old/new graph state.
+    """
+    from types import SimpleNamespace
+
+    from app.repositories.postgres.chunk_store import ChunkStore
+    from app.repositories.postgres.embedding_store import EmbeddingStore
+    from app.repositories.postgres.knowledge_store import KnowledgeStore
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from app.repositories.postgres.source_store import SourceStore
+    from app.services.knowhow.projection import KnowhowProjector
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    seams = _seams()
+    knowhow = PostgresKnowhowStore(
+        postgres_database, new_id=seams.new_id, now=seams.now
+    )
+    sources = SourceStore(postgres_database, now=seams.now)
+    chunks = ChunkStore(postgres_database)
+    knowledge = KnowledgeStore(postgres_database, seams)
+    projector = KnowhowProjector(
+        settings=Settings(database_url="sqlite:///unused.db"),
+        database=postgres_database,
+        knowhow=knowhow,
+        sources=sources,
+        chunks=chunks,
+        knowledge=knowledge,
+        embedding=SimpleNamespace(
+            vectors=EmbeddingStore(write=postgres_database.write)
+        ),
+        note_model_error=lambda *_args, **_kwargs: None,
+        invalidate_unified_cache=lambda _notebook_id: None,
+        mark_unified_dirty=lambda _notebook_id: None,
+        new_id=seams.new_id,
+        now=seams.now,
+    )
+    table_id = knowhow.create_knowhow_table(
+        "nb-content",
+        "删除竞态",
+        "",
+        [
+            {"name": "问题", "role": "anchor"},
+            {"name": "方法", "role": "procedure"},
+        ],
+        "user-content",
+    )
+    columns = knowhow.get_knowhow_table(table_id)["columns"]
+    by_name = {column["name"]: column["id"] for column in columns}
+    knowhow.add_knowhow_row(
+        table_id,
+        {by_name["问题"]: "振荡", by_name["方法"]: "增加阻尼"},
+    )
+    assert projector.project_table(table_id, embed=False) == "nb-content"
+    source_id = knowhow.get_knowhow_table(table_id)["hidden_source_id"]
+
+    # Make the next pass materially different so a mixed terminal write would
+    # be observable, then park it after both aggregate locks are held.
+    knowhow.add_knowhow_row(
+        table_id,
+        {by_name["问题"]: "噪声", by_name["方法"]: "增加滤波"},
+    )
+    projection_locked = threading.Event()
+    delete_at_source_lock = threading.Event()
+    projecting = threading.local()
+    original_delete_relations = knowledge.delete_relations_by_source
+    original_source_lock = sources.source_exists_for_update_tx
+
+    def pause_terminal_write(connection, locked_source_id):
+        if getattr(projecting, "active", False):
+            projection_locked.set()
+            assert delete_at_source_lock.wait(timeout=10)
+        return original_delete_relations(connection, locked_source_id)
+
+    def observe_delete_lock(connection, locked_source_id):
+        delete_at_source_lock.set()
+        return original_source_lock(connection, locked_source_id)
+
+    knowledge.delete_relations_by_source = pause_terminal_write
+    sources.source_exists_for_update_tx = observe_delete_lock
+
+    def run_projection():
+        projecting.active = True
+        try:
+            return projector.project_table(table_id, embed=False)
+        finally:
+            projecting.active = False
+
+    def run_delete():
+        assert projection_locked.wait(timeout=10)
+        projector.delete_table_projection(source_id)
+        return knowhow.delete_knowhow_table(table_id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        projection_future = pool.submit(run_projection)
+        delete_future = pool.submit(run_delete)
+        assert projection_future.result(timeout=15) == "nb-content"
+        assert delete_future.result(timeout=15)["hidden_source_id"] == source_id
+
+    with postgres_database.connect() as connection:
+        for table_name, predicate in (
+            ("knowhow_tables", "id=%s"),
+            ("sources", "id=%s"),
+            ("source_elements", "source_id=%s"),
+            ("chunks", "source_id=%s"),
+            ("knowledge_objects", "source_id=%s"),
+            ("knowledge_relations", "source_id=%s"),
+        ):
+            assert connection.execute(
+                f"SELECT COUNT(*) AS n FROM {table_name} WHERE {predicate}",
+                (table_id if table_name == "knowhow_tables" else source_id,),
+            ).fetchone()["n"] == 0
+
+
+@pytest.mark.postgres_integration
+def test_postgres_two_projectors_serialize_whole_pass_and_newest_wins(
+    postgres_database,
+):
+    """A stale pass cannot finish after a newer pass from another worker."""
+    from types import SimpleNamespace
+
+    from app.repositories.postgres.chunk_store import ChunkStore
+    from app.repositories.postgres.embedding_store import EmbeddingStore
+    from app.repositories.postgres.knowledge_store import KnowledgeStore
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from app.repositories.postgres.source_store import SourceStore
+    from app.services.knowhow.projection import KnowhowProjector
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    seams = _seams()
+
+    def make_projector():
+        knowhow_store = PostgresKnowhowStore(
+            postgres_database, new_id=seams.new_id, now=seams.now
+        )
+        source_store = SourceStore(postgres_database, now=seams.now)
+        return knowhow_store, KnowhowProjector(
+            settings=Settings(database_url="sqlite:///unused.db"),
+            database=postgres_database,
+            knowhow=knowhow_store,
+            sources=source_store,
+            chunks=ChunkStore(postgres_database),
+            knowledge=KnowledgeStore(postgres_database, seams),
+            embedding=SimpleNamespace(
+                vectors=EmbeddingStore(write=postgres_database.write)
+            ),
+            note_model_error=lambda *_args, **_kwargs: None,
+            invalidate_unified_cache=lambda _notebook_id: None,
+            mark_unified_dirty=lambda _notebook_id: None,
+            new_id=seams.new_id,
+            now=seams.now,
+        )
+
+    knowhow_a, projector_a = make_projector()
+    knowhow_b, projector_b = make_projector()
+    table_id = knowhow_a.create_knowhow_table(
+        "nb-content",
+        "跨进程投影",
+        "",
+        [
+            {"name": "问题", "role": "anchor"},
+            {"name": "方法", "role": "procedure"},
+        ],
+        "user-content",
+    )
+    columns = knowhow_a.get_knowhow_table(table_id)["columns"]
+    by_name = {column["name"]: column["id"] for column in columns}
+    row_id = knowhow_a.add_knowhow_row(
+        table_id,
+        {by_name["问题"]: "振荡", by_name["方法"]: "旧方法"},
+    )
+
+    stale_snapshot_loaded = threading.Event()
+    release_stale_pass = threading.Event()
+    stale_terminal_done = threading.Event()
+    newer_started = threading.Event()
+    original_get_a = knowhow_a.get_knowhow_table
+    original_locked_a = projector_a._project_table_locked
+    original_get_b = knowhow_b.get_knowhow_table
+
+    def pause_after_stale_snapshot(locked_table_id):
+        table = original_get_a(locked_table_id)
+        stale_snapshot_loaded.set()
+        assert release_stale_pass.wait(timeout=10)
+        return table
+
+    def mark_stale_terminal(locked_table_id, *, embed):
+        result = original_locked_a(locked_table_id, embed=embed)
+        stale_terminal_done.set()
+        return result
+
+    def assert_newer_enters_after_stale(locked_table_id):
+        assert stale_terminal_done.is_set()
+        return original_get_b(locked_table_id)
+
+    knowhow_a.get_knowhow_table = pause_after_stale_snapshot
+    projector_a._project_table_locked = mark_stale_terminal
+    knowhow_b.get_knowhow_table = assert_newer_enters_after_stale
+
+    def run_newer():
+        newer_started.set()
+        return projector_b.project_table(table_id, embed=False)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        stale_future = pool.submit(projector_a.project_table, table_id, embed=False)
+        assert stale_snapshot_loaded.wait(timeout=10)
+        knowhow_b.update_knowhow_cell(row_id, by_name["方法"], "新方法")
+        newer_future = pool.submit(run_newer)
+        assert newer_started.wait(timeout=10)
+        release_stale_pass.set()
+        assert stale_future.result(timeout=15) == "nb-content"
+        assert newer_future.result(timeout=15) == "nb-content"
+
+    table = knowhow_b.get_knowhow_table(table_id)
+    source_id = table["hidden_source_id"]
+    assert table["rows"][0]["projection_status"] == "synced"
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) AS n FROM sources "
+            "WHERE notebook_id=%s AND source_type='knowhow'",
+            ("nb-content",),
+        ).fetchone()["n"] == 1
+        texts = {
+            row["text"]
+            for row in connection.execute(
+                "SELECT payload->>'text' AS text FROM knowledge_objects "
+                "WHERE source_id=%s",
+                (source_id,),
+            ).fetchall()
+        }
+    assert texts == {"振荡", "新方法"}

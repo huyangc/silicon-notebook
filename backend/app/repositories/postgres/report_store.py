@@ -53,7 +53,27 @@ class ReportStore:
                 args.append(jsonb(val) if dump else val)
         args.extend([report_id, notebook_id])
         with self.database.write() as db:
-            db.execute(f"UPDATE reports SET {', '.join(sets)} WHERE id = %s AND notebook_id = %s", args)
+            guard = "" if status == "cancelled" else " AND status <> 'cancelled'"
+            db.execute(
+                f"UPDATE reports SET {', '.join(sets)} "
+                f"WHERE id = %s AND notebook_id = %s{guard}",
+                args,
+            )
+
+    def cancel_report(self, notebook_id: str, report_id: str) -> bool:
+        """Durably publish the sticky terminal state before signalling a worker."""
+        with self.database.write() as db:
+            row = db.execute(
+                "UPDATE reports SET status='cancelled',progress=%s,updated_at=%s "
+                "WHERE id=%s AND notebook_id=%s RETURNING id",
+                (
+                    "已取消",
+                    normalize_timestamp(self.now()),
+                    report_id,
+                    notebook_id,
+                ),
+            ).fetchone()
+        return row is not None
 
     def row_to_dict(self, row, *, full: bool) -> dict:
         d = {"id": row["id"], "notebook_id": row["notebook_id"], "question": row["question"],

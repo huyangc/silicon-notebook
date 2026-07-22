@@ -26,6 +26,17 @@ class _SearchTarget:
     live_predicate: str = ""
 
 
+@dataclass(frozen=True)
+class MemoryCandidateScope:
+    """Reviewed predicates that must be applied before Memory's LIMIT."""
+
+    owner_id: str
+    viewer_id: str
+    notebook_id: str | None = None
+    statuses: tuple[str, ...] = ()
+    origin: str | None = None
+
+
 _SEARCH_TARGETS = {
     (target.table, target.id_column, target.text_expression): target
     for target in (
@@ -173,16 +184,30 @@ def memory_candidate_ids(
     query: str,
     limit: int,
     *,
-    notebook_id: str | None = None,
+    scope: MemoryCandidateScope,
 ) -> list[str]:
     """Return bounded mixed-language Memory candidates using all v6 indexes."""
     if limit <= 0 or not query.strip():
         return []
     pattern = f"%{query}%"
-    scope = "notebook_id=%s AND " if notebook_id is not None else ""
-    params: list[object] = []
-    if notebook_id is not None:
-        params.append(notebook_id)
+    predicates = ["created_by=%s"]
+    params: list[object] = [scope.owner_id]
+    if scope.notebook_id is not None:
+        predicates.append("notebook_id=%s")
+        params.append(scope.notebook_id)
+    if scope.statuses:
+        predicates.append("status=ANY(%s)")
+        params.append(list(scope.statuses))
+    if scope.origin is not None:
+        predicates.append("origin=%s")
+        params.append(scope.origin)
+    predicates.append(
+        "EXISTS (SELECT 1 FROM notebooks access_nb "
+        "WHERE access_nb.id=memory_items.notebook_id AND "
+        "(access_nb.created_by=%s OR EXISTS (SELECT 1 FROM notebook_members access_nm "
+        "WHERE access_nm.notebook_id=access_nb.id AND access_nm.user_id=%s)))"
+    )
+    params.extend([scope.viewer_id, scope.viewer_id])
     params.extend(
         [
             query,
@@ -199,7 +224,7 @@ def memory_candidate_ids(
     )
     rows = connection.execute(
         "SELECT id FROM memory_items WHERE "
-        f"{scope}("
+        f"{' AND '.join(predicates)} AND ("
         "title OPERATOR(public.%%) %s OR title ILIKE %s OR "
         "content_md OPERATOR(public.%%) %s OR content_md ILIKE %s OR "
         f"{TAGS_JSON_EXPRESSION} OPERATOR(public.%%) %s OR "

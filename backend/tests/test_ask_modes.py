@@ -70,7 +70,8 @@ def test_ask_service_dispatches_by_the_same_registry(monkeypatch):
 
     def make(mid):
         def handler(notebook_id, payload, *, user_id,
-                    on_trace=None, cancel_event=None, seed_ids=None):
+                    on_trace=None, cancel_event=None, seed_ids=None,
+                    job_id=None):
             calls["hit"] = (mid, user_id)
             return AskResponse(conclusion=mid)
         return handler

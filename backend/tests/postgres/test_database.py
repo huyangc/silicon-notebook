@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pytest
@@ -220,6 +221,67 @@ def test_pool_acquisition_timeout_is_bounded(postgres_database):
             with postgres_database.connect():
                 pass
         assert time.monotonic() - started < 2.5
+
+
+def test_projection_lock_waits_past_normal_lock_timeout(postgres_database):
+    waiter_started = threading.Event()
+    waiter_acquired = threading.Event()
+    failures: list[BaseException] = []
+
+    def wait_for_same_table() -> None:
+        waiter_started.set()
+        try:
+            with postgres_database.table_projection_lock("kh-lock-timeout"):
+                waiter_acquired.set()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    with postgres_database.table_projection_lock("kh-lock-timeout"):
+        worker = threading.Thread(target=wait_for_same_table)
+        worker.start()
+        assert waiter_started.wait(timeout=1)
+        # Fixture lock_timeout is 1s. Holding longer proves the dedicated
+        # advisory-lock session disabled it rather than failing the waiter.
+        assert not waiter_acquired.wait(timeout=1.2)
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+    assert failures == []
+    assert waiter_acquired.is_set()
+
+
+def test_projection_lock_sessions_are_bounded(postgres_database):
+    capacity = postgres_database._projection_lock_capacity
+    release = threading.Event()
+    reached_capacity = threading.Event()
+    counter_lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def hold_distinct_table(index: int) -> int:
+        nonlocal active, max_active
+        with postgres_database.table_projection_lock(f"kh-capacity-{index}"):
+            with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+                if active == capacity:
+                    reached_capacity.set()
+            assert release.wait(timeout=5)
+            with counter_lock:
+                active -= 1
+        return index
+
+    worker_count = capacity + 4
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = [pool.submit(hold_distinct_table, i) for i in range(worker_count)]
+        assert reached_capacity.wait(timeout=3)
+        with counter_lock:
+            assert active == capacity
+            assert max_active == capacity
+        release.set()
+        assert sorted(future.result(timeout=5) for future in futures) == list(
+            range(worker_count)
+        )
+    assert active == 0
 
 
 def test_unrelated_row_can_update_while_another_row_is_locked(postgres_database):

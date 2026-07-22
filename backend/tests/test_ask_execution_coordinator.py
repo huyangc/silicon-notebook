@@ -122,7 +122,10 @@ class FakeAskService:
     def __init__(self, fn):
         self.fn = fn
 
-    def ask(self, notebook_id, payload, *, user_id, on_trace=None, cancel_event=None):
+    def ask(
+        self, notebook_id, payload, *, user_id, job_id="", on_trace=None,
+        cancel_event=None,
+    ):
         from app.services.ask_modes import resolve_mode
         spec = resolve_mode(getattr(payload, "mode", None))
         if spec.streaming:

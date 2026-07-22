@@ -137,7 +137,23 @@ class SourceStore:
     def source_exists_tx(connection, source_id: str) -> bool:
         return (
             connection.execute(
-                "SELECT 1 FROM sources WHERE id=%s", (source_id,)
+                "SELECT 1 FROM sources WHERE id=%s FOR KEY SHARE", (source_id,)
+            ).fetchone()
+            is not None
+        )
+
+    @staticmethod
+    def source_exists_for_update_tx(connection, source_id: str) -> bool:
+        """Take the aggregate lock before deleting projection children.
+
+        Project completion takes ``FOR KEY SHARE`` on this row.  Teardown
+        takes the conflicting lock first, before touching graph rows, which
+        gives both paths one source -> derived-row lock order and prevents a
+        deadlock or a projection resurrecting children after deletion.
+        """
+        return (
+            connection.execute(
+                "SELECT 1 FROM sources WHERE id=%s FOR UPDATE", (source_id,)
             ).fetchone()
             is not None
         )

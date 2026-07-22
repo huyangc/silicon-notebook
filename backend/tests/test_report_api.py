@@ -1,5 +1,6 @@
 """Task 7: 深度报告 API 端点(创建/列表/详情/取消/删除/导出)+ 取消注册表。"""
 import io
+import threading
 import zipfile
 
 import pytest
@@ -59,7 +60,7 @@ def test_report_create_rejects_blank_question_and_missing_nb(client, monkeypatch
 
 
 def test_cancel_registry_live_thread_path(client, monkeypatch):
-    """取消注册表:register → 端点 cancel 置事件返回 cancelling → unregister 后落库标记。"""
+    """取消先持久化终态，再通知当前进程的活动线程。"""
     from app.services.report_engine import (
         register_cancel, cancel_report, unregister_cancel)
     import app.api.report_routes as routes_mod
@@ -70,7 +71,7 @@ def test_cancel_registry_live_thread_path(client, monkeypatch):
                       json={"question": "q"}).json()["report_id"]
     ev = register_cancel(rid)
     r = client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel")
-    assert r.json()["status"] == "cancelling" and ev.is_set()
+    assert r.json()["status"] == "cancelled" and ev.is_set()
     unregister_cancel(rid)
     assert cancel_report(rid) is False           # 注销后不再命中活动线程
     # 线程已结束路径:再 cancel → 直接落库 cancelled
@@ -78,6 +79,47 @@ def test_cancel_registry_live_thread_path(client, monkeypatch):
     assert r.json()["status"] == "cancelled"
     detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
     assert detail["status"] == "cancelled"
+
+
+def test_cancel_endpoint_wins_race_with_terminal_report_write(client, monkeypatch):
+    import app.api.report_routes as routes_mod
+    from app.api.deps import repository
+
+    monkeypatch.setattr(routes_mod, "_launch_plan_job", lambda *a, **k: None)
+    monkeypatch.setattr(routes_mod, "_report_llm_ready", lambda repo: True)
+    nb = client.post("/api/notebooks", json={"name": "t"}).json()
+    rid = client.post(
+        f"/api/notebooks/{nb['id']}/reports", json={"question": "q"}
+    ).json()["report_id"]
+    store = repository()._runtime.report_store
+    terminal_ready = threading.Event()
+    cancel_committed = threading.Event()
+    original_update = store.update_report
+
+    def blocked_terminal(*args, **kwargs):
+        if kwargs.get("status") == "done":
+            terminal_ready.set()
+            assert cancel_committed.wait(timeout=5)
+        return original_update(*args, **kwargs)
+
+    monkeypatch.setattr(store, "update_report", blocked_terminal)
+    worker = threading.Thread(
+        target=store.update_report,
+        args=(nb["id"], rid),
+        kwargs={"status": "done", "content_md": "# too late"},
+    )
+    worker.start()
+    assert terminal_ready.wait(timeout=5)
+    response = client.post(f"/api/notebooks/{nb['id']}/reports/{rid}/cancel")
+    assert response.status_code == 200
+    assert response.json() == {"status": "cancelled"}
+    cancel_committed.set()
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+
+    detail = client.get(f"/api/notebooks/{nb['id']}/reports/{rid}").json()
+    assert detail["status"] == "cancelled"
+    assert detail["content_md"] == ""
 
 
 def _mk_report(client, monkeypatch, nb_id, question, *, done=False, content_md=""):

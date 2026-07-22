@@ -526,7 +526,7 @@ class KnowhowStore:
         it either fully lands before this block starts (check correctly
         observes "gone") or blocks until this block finishes."""
         return connection.execute(
-            "SELECT 1 FROM knowhow_tables WHERE id = %s", (table_id,)
+            "SELECT 1 FROM knowhow_tables WHERE id = %s FOR KEY SHARE", (table_id,)
         ).fetchone() is not None
 
     def delete_knowhow_table(self, table_id: str) -> dict:
@@ -1280,6 +1280,7 @@ class KnowhowStore:
         guarantee both halves exist."""
         now = self.now()
         with self.database.write() as db:
+            self._lock_table_for_row(db, row_id)
             db.execute(
                 "INSERT INTO knowhow_cell_code "
                 "(id, row_id, column_id, code_text, language, updated_by, "
@@ -1313,6 +1314,7 @@ class KnowhowStore:
         """Silent no-op when there is nothing to delete (zero-row DELETE
         convention)."""
         with self.database.write() as db:
+            self._lock_table_for_row(db, row_id)
             db.execute(
                 "DELETE FROM knowhow_cell_code WHERE row_id = %s AND column_id = %s",
                 (row_id, column_id),

@@ -126,3 +126,18 @@ class SqliteDatabase:
         write() 的 ``with conn:`` 在块尾统一 commit/rollback。SQL 收在本层
         （repositories/sqlite），服务层不出现裸 SQL（callers_static 约束）。"""
         conn.execute("BEGIN IMMEDIATE")
+
+    @staticmethod
+    def begin_guarded_write(conn: sqlite3.Connection) -> None:
+        """Backend-neutral guarded-write seam used by domain services."""
+        conn.execute("BEGIN IMMEDIATE")
+
+    @contextmanager
+    def table_projection_lock(self, table_id: str) -> Iterator[None]:
+        """Backend-neutral projection seam.
+
+        SQLite keeps its existing process-local scheduler and serialized write
+        transactions. PostgreSQL overrides this with a cross-process lock.
+        """
+        del table_id
+        yield

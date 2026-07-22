@@ -209,6 +209,7 @@ class AskService:
         payload: AskRequest,
         *,
         user_id: str,
+        job_id: str = "",
         cancel_event: CancelEvent = None,
         on_trace: "Callable[[Any], None] | None" = None,
     ) -> AskResponse:
@@ -222,9 +223,9 @@ class AskService:
         handler = getattr(self, spec.handler)
         if spec.streaming:
             return handler(notebook_id, payload, user_id=user_id,
-                           on_trace=on_trace, cancel_event=cancel_event)
+                           job_id=job_id, on_trace=on_trace, cancel_event=cancel_event)
         return handler(notebook_id, payload, user_id=user_id,
-                       cancel_event=cancel_event)
+                       job_id=job_id, cancel_event=cancel_event)
 
     def ask_current(self, notebook_id: str, payload: AskRequest) -> AskResponse:
         return self.ask(notebook_id, payload, user_id=self.current_user_id())
@@ -300,14 +301,12 @@ class AskService:
             self.ask_state.cleanup_empty_conversation(conversation_id)
 
     def cancel_job(self, job_id: str, user_id: str) -> dict:
-        state = self.ask_state.ask_job_status(job_id)
-        if state["created_by"] != user_id:
-            raise KeyError(job_id)
-        cancelled = self.cancellations.cancel(job_id)
-        return {
-            "status": "cancelling" if cancelled else state["status"],
-            "job_id": job_id,
-        }
+        state = self.ask_state.cancel_running_job(job_id, user_id)
+        if state["cancelled"]:
+            self.cancellations.cancel(job_id)
+            if state["conversation_id"]:
+                self.ask_state.cleanup_empty_conversation(state["conversation_id"])
+        return {"status": state["status"], "job_id": job_id}
 
     def append_trace_fail_open(self, job_id: str, step: dict) -> None:
         try:
@@ -415,13 +414,27 @@ class AskService:
         conversation_id: Optional[str] = None,
         *,
         user_id: str,
+        job_id: str = "",
     ) -> str:
         # 所有 ask handler 的唯一收口:在持久化/返回前给 response 打大库无索引提示位。
         # 覆盖 chunk/reasoning/graph 三 handler 的全部 return 路径(含早退),避免逐 handler
         # 多 return 点漏赋值。小库/已索引 → False(默认),无副作用。
         response.index_required = self._needs_index(notebook_id)
-        return self.ask_state.save_answer(
-            notebook_id, conversation_id, question, response, user_id)
+        if not job_id:
+            return self.ask_state.save_answer(
+                notebook_id, conversation_id, question, response, user_id
+            )
+        answer_id = self.ask_state.save_answer_for_job(
+            job_id,
+            notebook_id,
+            conversation_id,
+            question,
+            response,
+            user_id,
+        )
+        if answer_id is None:
+            raise AskCancelled()
+        return answer_id
 
     # ------------------------------------------------------------------
     # synthesis helpers
@@ -698,7 +711,7 @@ class AskService:
 
     def _unconfigured_model_response(self, notebook_id: str, question: str,
                                      conversation_id: str, mode: str,
-                                     *, user_id: str) -> AskResponse:
+                                     *, user_id: str, job_id: str = "") -> AskResponse:
         """policy=required 且用户未配主 LLM 时的统一短路响应：携带 model_error 让前端
         横幅提示「请先配置」。优先于"先建 KG"等其它提示——没模型连 KG 都建不了。"""
         msg = "请先在设置中配置你的模型服务"
@@ -710,7 +723,8 @@ class AskService:
             ModelError(stage="answer", model="", message="missing_config")
         ]
         response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id, user_id=user_id)
+            notebook_id, question, response, conversation_id,
+            user_id=user_id, job_id=job_id)
         return response
 
     # ------------------------------------------------------------------
@@ -723,6 +737,7 @@ class AskService:
         payload: AskRequest,
         *,
         user_id: str,
+        job_id: str = "",
         cancel_event: CancelEvent = None,
     ) -> AskResponse:
         """chunk-native 通用问答:大召回 → MMR 多样性精选 → 长上下文综合 →
@@ -972,7 +987,8 @@ class AskService:
         response.model_errors = [ModelError(**e) for e in _err_sink]
         raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id, user_id=user_id)
+            notebook_id, question, response, conversation_id,
+            user_id=user_id, job_id=job_id)
         ask_stage("total", ask_started)
         return response
 
@@ -986,6 +1002,7 @@ class AskService:
         payload: AskRequest,
         *,
         user_id: str,
+        job_id: str = "",
         on_trace=None,
         cancel_event: CancelEvent = None,
     ) -> AskResponse:
@@ -1004,7 +1021,8 @@ class AskService:
 
         if self._primary_llm_unconfigured():
             return self._unconfigured_model_response(
-                notebook_id, question, conversation_id, "reasoning", user_id=user_id)
+                notebook_id, question, conversation_id, "reasoning",
+                user_id=user_id, job_id=job_id)
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
@@ -1019,7 +1037,8 @@ class AskService:
             response.mode = "reasoning"
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
-                notebook_id, question, response, conversation_id, user_id=user_id)
+                notebook_id, question, response, conversation_id,
+                user_id=user_id, job_id=job_id)
             return response
 
         _err_sink: list = []
@@ -1145,7 +1164,8 @@ class AskService:
         response.model_errors = [ModelError(**e) for e in _err_sink]
         raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id, user_id=user_id)
+            notebook_id, question, response, conversation_id,
+            user_id=user_id, job_id=job_id)
         return response
 
     # ------------------------------------------------------------------
@@ -1158,6 +1178,7 @@ class AskService:
         payload: "AskRequest",
         *,
         user_id: str,
+        job_id: str = "",
         seed_ids: Optional[List[str]] = None,
         cancel_event: CancelEvent = None,
     ) -> AskResponse:
@@ -1188,7 +1209,8 @@ class AskService:
 
         if self._primary_llm_unconfigured():
             return self._unconfigured_model_response(
-                notebook_id, question, conversation_id, "graph", user_id=user_id)
+                notebook_id, question, conversation_id, "graph",
+                user_id=user_id, job_id=job_id)
 
         if not memory_hits and not (
                 self.candidates.has_kg(notebook_id)
@@ -1203,7 +1225,8 @@ class AskService:
             response.mode = "graph"
             raise_if_cancelled(cancel_event)
             response.answer_id = self._save_answer(
-                notebook_id, question, response, conversation_id, user_id=user_id)
+                notebook_id, question, response, conversation_id,
+                user_id=user_id, job_id=job_id)
             return response
 
         _err_sink: list = []
@@ -1264,7 +1287,8 @@ class AskService:
                 response.model_errors = [ModelError(**e) for e in _err_sink]
                 raise_if_cancelled(cancel_event)
                 response.answer_id = self._save_answer(
-                    notebook_id, question, response, conversation_id, user_id=user_id)
+                    notebook_id, question, response, conversation_id,
+                    user_id=user_id, job_id=job_id)
                 return response
 
             # HippoRAG 式 PPR 跨文档检索(opt-in)。命中即走 chunk 答案路径:PPR 把
@@ -1357,7 +1381,8 @@ class AskService:
                     resp.model_errors = [ModelError(**e) for e in _err_sink]
                     raise_if_cancelled(cancel_event)
                     resp.answer_id = self._save_answer(
-                        notebook_id, question, resp, conversation_id, user_id=user_id)
+                        notebook_id, question, resp, conversation_id,
+                        user_id=user_id, job_id=job_id)
                     return resp
 
             # 大库守卫(与 PPR 检索的 Fix 1 同一「大」定义):下方
@@ -1390,7 +1415,8 @@ class AskService:
                 response.model_errors = [ModelError(**e) for e in _err_sink]
                 raise_if_cancelled(cancel_event)
                 response.answer_id = self._save_answer(
-                    notebook_id, question, response, conversation_id, user_id=user_id)
+                    notebook_id, question, response, conversation_id,
+                    user_id=user_id, job_id=job_id)
                 return response
 
             base_seeds = seed_ids if seed_ids else [h.object_id for h in top_hits[:5]]
@@ -1530,7 +1556,8 @@ class AskService:
                 resp.mode = "graph"
                 resp.model_errors = [ModelError(**e) for e in _err_sink]
                 resp.answer_id = self._save_answer(
-                    notebook_id, question, resp, conversation_id, user_id=user_id)
+                    notebook_id, question, resp, conversation_id,
+                    user_id=user_id, job_id=job_id)
                 return resp
 
             # Synthesise the answer through the existing LLM + grounding path.
@@ -1640,5 +1667,6 @@ class AskService:
         response.model_errors = [ModelError(**e) for e in _err_sink]
         raise_if_cancelled(cancel_event)
         response.answer_id = self._save_answer(
-            notebook_id, question, response, conversation_id, user_id=user_id)
+            notebook_id, question, response, conversation_id,
+            user_id=user_id, job_id=job_id)
         return response

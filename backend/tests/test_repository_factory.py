@@ -99,8 +99,6 @@ SQLITE_DIRECT_HELPER_ALLOWLIST = {
         "NotebookStore",
         "resolve_participants",
     ),
-    ("app/services/knowhow/projection.py", "EmbeddingStore", "rows_by_ids"),
-    ("app/services/knowhow/projection.py", "KnowledgeStore", "legacy_typed_table_ids"),
     ("app/services/sqlite_repository.py", "AskStateStore", "read_trace"),
     ("app/services/sqlite_repository.py", "GovernanceStore", "merge_evidence"),
     ("app/services/sqlite_repository.py", "GovernanceStore", "seed_for"),

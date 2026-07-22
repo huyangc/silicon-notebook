@@ -22,7 +22,7 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
 )
 from app.repositories.postgres.database import PostgresDatabase
-from app.repositories.postgres.search import memory_candidate_ids
+from app.repositories.postgres.search import MemoryCandidateScope, memory_candidate_ids
 from app.services.vector_index import encode_vector
 
 
@@ -667,6 +667,7 @@ class MemoryStore:
                 ).fetchone()
                 if row is None:
                     raise KeyError(write.source_answer_id)
+                row = self._answer_save_scope_locked_on(db, write, row)
                 payload = _json_object(row["payload"])
                 provenance = {
                     "answer_id": write.source_answer_id,
@@ -685,7 +686,34 @@ class MemoryStore:
                 self._ensure_initial_revision_on(db, item, created, changed_by, reason)
             return item
         except (SerializationFailure, DeadlockDetected):
-            raise RuntimeError("concurrent notebook access change") from None
+            # Recheck after PostgreSQL aborts the serializable transaction:
+            # a revoked scope is the existing 404 domain; a still-live scope
+            # is an honest concurrent-state conflict (ValueError -> API 409).
+            if self._answer_save_scope_exists(write):
+                raise ValueError("concurrent notebook access change") from None
+            raise KeyError(write.source_answer_id) from None
+
+    @staticmethod
+    def _answer_save_scope_locked_on(db: object, write: MemoryWrite, row: object):
+        """Testable seam reached only after notebook/member/answer locks."""
+        del db, write
+        return row
+
+    def _answer_save_scope_exists(self, write: MemoryWrite) -> bool:
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT 1 FROM answers a JOIN notebooks n ON n.id=a.notebook_id "
+                "WHERE a.id=%s AND a.notebook_id=%s AND "
+                "(n.created_by=%s OR EXISTS (SELECT 1 FROM notebook_members nm "
+                "WHERE nm.notebook_id=n.id AND nm.user_id=%s))",
+                (
+                    write.source_answer_id,
+                    write.notebook_id,
+                    write.created_by,
+                    write.created_by,
+                ),
+            ).fetchone()
+        return row is not None
 
     def memory_for_user(self, memory_id: str, user_id: str) -> MemoryRecord:
         with self.database.connect() as db:
@@ -813,16 +841,9 @@ class MemoryStore:
         allowed = {"title", "content_md", "tags"}
         values = {key: value for key, value in fields.items() if key in allowed}
         with self.database.write() as db:
-            row = db.execute(
-                "SELECT m.title,m.content_md,m.tags_json,m.status,m.promotion_state,"
-                "p.payload_json FROM memory_items m "
-                "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
-                "WHERE m.id=%s AND m.created_by=%s AND "
-                f"{self._read_access_clause()} FOR UPDATE OF m",
-                (memory_id, user_id, user_id, user_id),
-            ).fetchone()
-            if row is None:
-                raise KeyError(memory_id)
+            row = self._lock_memory_aggregate_on(
+                db, memory_id, expected_creator=user_id
+            )
             if row["status"] not in expected:
                 destination = target or row["status"]
                 raise ValueError(
@@ -904,6 +925,92 @@ class MemoryStore:
                 reason,
             )
         return self.memory_for_user(memory_id, user_id)
+
+    def _lock_memory_aggregate_on(
+        self,
+        db: object,
+        memory_id: str,
+        *,
+        expected_creator: str | None = None,
+        expected_notebook: str | None = None,
+        permission_error: bool = False,
+    ):
+        """Canonical PG lock order: notebook -> member -> Memory -> proposal.
+
+        The first read only obtains immutable routing fields. Every mutable
+        fact is revalidated after the corresponding row lock is acquired.
+        """
+        routing = db.execute(
+            "SELECT notebook_id,created_by FROM memory_items WHERE id=%s",
+            (memory_id,),
+        ).fetchone()
+        if routing is None or (
+            expected_creator is not None
+            and routing["created_by"] != expected_creator
+        ):
+            raise KeyError(memory_id)
+        notebook_id = str(routing["notebook_id"])
+        creator_id = str(routing["created_by"])
+        if expected_notebook is not None and notebook_id != expected_notebook:
+            raise ValueError("promotion candidate notebook does not match Memory notebook")
+        notebook = db.execute(
+            "SELECT created_by FROM notebooks WHERE id=%s FOR SHARE",
+            (notebook_id,),
+        ).fetchone()
+        if notebook is None:
+            raise KeyError(memory_id)
+        if notebook["created_by"] != creator_id:
+            member = db.execute(
+                "SELECT 1 FROM notebook_members WHERE notebook_id=%s AND user_id=%s "
+                "FOR SHARE",
+                (notebook_id, creator_id),
+            ).fetchone()
+            if member is None:
+                if permission_error:
+                    raise PermissionError(memory_id)
+                raise KeyError(memory_id)
+        row = db.execute(
+            f"SELECT {self._select_columns()} FROM memory_items m "
+            "LEFT JOIN memory_provenance p ON p.memory_id=m.id "
+            "WHERE m.id=%s AND m.notebook_id=%s AND m.created_by=%s FOR UPDATE OF m",
+            (memory_id, notebook_id, creator_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(memory_id)
+        if row["promotion_state"] == "proposed":
+            provenance = _json_object(row["payload_json"])
+            promotion = provenance.get("kg_promotion")
+            proposal_id = (
+                str(promotion.get("proposal_id") or "")
+                if isinstance(promotion, dict)
+                else ""
+            )
+            if proposal_id:
+                self._lock_active_promotion_candidate_on(
+                    db, proposal_id, memory_id
+                )
+        return row
+
+    @staticmethod
+    def _lock_active_promotion_candidate_on(
+        db: object, proposal_id: str, memory_id: str
+    ):
+        return db.execute(
+            "SELECT id FROM promotion_candidates WHERE id=%s AND object_id=%s "
+            "FOR UPDATE",
+            (proposal_id, memory_id),
+        ).fetchone()
+
+    def lock_promotion_memory_on(
+        self, db: object, memory_id: str, candidate_notebook_id: str
+    ) -> MemoryRecord:
+        row = self._lock_memory_aggregate_on(
+            db,
+            memory_id,
+            expected_notebook=candidate_notebook_id,
+            permission_error=True,
+        )
+        return self._record(row)
 
     @staticmethod
     def _supersede_active_promotion_on(
@@ -1494,7 +1601,13 @@ class MemoryStore:
                     db,
                     clean_query,
                     max(200, offset + limit),
-                    notebook_id=notebook_id,
+                    scope=MemoryCandidateScope(
+                        owner_id=user_id,
+                        viewer_id=user_id,
+                        notebook_id=notebook_id,
+                        statuses=(status,) if status else (),
+                        origin=origin,
+                    ),
                 )
                 clauses.append("m.id=ANY(%s)")
                 params.append(candidate_ids)
@@ -1569,6 +1682,9 @@ class MemoryStore:
         vector: Sequence[float],
     ) -> bool:
         with self.database.write() as db:
+            locked = self._lock_embedding_memory_on(db, memory_id)
+            if locked is None:
+                return False
             current = db.execute(
                 "SELECT COALESCE(MAX(revision),0) AS revision "
                 "FROM memory_revisions WHERE memory_id=%s",
@@ -1596,6 +1712,12 @@ class MemoryStore:
                 (memory_id,),
             )
         return True
+
+    @staticmethod
+    def _lock_embedding_memory_on(db: object, memory_id: str):
+        return db.execute(
+            "SELECT id FROM memory_items WHERE id=%s FOR UPDATE", (memory_id,)
+        ).fetchone()
 
     def mark_embedding_failed(
         self, memory_id: str, expected_revision: int, error: str
@@ -1638,7 +1760,15 @@ class MemoryStore:
         select = self._select_columns()
         with self.database.connect() as db:
             candidate_ids = memory_candidate_ids(
-                db, clean_query, lexical_limit, notebook_id=notebook_id
+                db,
+                clean_query,
+                lexical_limit,
+                scope=MemoryCandidateScope(
+                    owner_id=user_id,
+                    viewer_id=user_id,
+                    notebook_id=notebook_id,
+                    statuses=allowed,
+                ),
             )
             lexical_rows = db.execute(
                 f"SELECT {select},me.vector AS retrieval_vector "
@@ -1721,6 +1851,7 @@ class MemoryStore:
         退化成完全相同的形状，服务侧的 ``_schedule_embed`` 兜底照常接管。
         """
         with self.database.write() as db:
+            source_guard = self._lock_copy_source_on(db, source_memory_id)
             item, created = self._insert_memory_on(db, write)
             if item.id != write.id:
                 return item  # 幂等命中已有行（正常不会发生：copy 用全新 id）
@@ -1732,7 +1863,8 @@ class MemoryStore:
                 (source_memory_id, source_memory_id),
             ).fetchone()
             source_is_current = (
-                source_state is not None
+                source_guard is not None
+                and source_state is not None
                 and source_state["embedding_status"] == "ready"
                 and expected_source_revision is not None
                 and int(source_state["revision"]) == int(expected_source_revision)
@@ -1771,3 +1903,10 @@ class MemoryStore:
                         ).fetchone()
                     )
         return item
+
+    @staticmethod
+    def _lock_copy_source_on(db: object, source_memory_id: str):
+        return db.execute(
+            "SELECT embedding_status FROM memory_items WHERE id=%s FOR SHARE",
+            (source_memory_id,),
+        ).fetchone()

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import sys
 import threading
+import zlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -45,6 +46,7 @@ _ISOLATION_LEVELS = {
 
 
 _CONNECTION_LOG_STATE = threading.local()
+_KNOWHOW_PROJECTION_LOCK_NAMESPACE = 0x534E4B48  # "SNKH"
 
 
 class _ConnectingThreadLogFilter(logging.Filter):
@@ -112,6 +114,12 @@ class PostgresDatabase:
         )
         self._lock_timeout_ms = int(settings.postgres_lock_timeout_seconds * 1000)
         self._lifecycle_lock = threading.Lock()
+        self._projection_lock_capacity = max(
+            1, min(4, settings.postgres_pool_max_size)
+        )
+        self._projection_lock_slots = threading.BoundedSemaphore(
+            self._projection_lock_capacity
+        )
         self._opened = False
         self._closed = False
         self._pool: ConnectionPool[psycopg.Connection[PostgresRow]] = ConnectionPool(
@@ -265,6 +273,71 @@ class PostgresDatabase:
                 yield conn
         finally:
             _WRITE_ACTIVE.reset(token)
+
+    @staticmethod
+    def begin_guarded_write(conn: psycopg.Connection[PostgresRow]) -> None:
+        """Backend-neutral guarded-write seam.
+
+        ``write()`` already owns a PostgreSQL transaction. The stores invoked
+        after this seam acquire the concrete parent-row locks that protect the
+        terminal write predicate, so no additional statement is required here.
+        """
+        del conn
+
+    @contextmanager
+    def table_projection_lock(self, table_id: str) -> Iterator[None]:
+        """Serialize one table's complete projection across PG processes.
+
+        A dedicated, non-pooled session is intentional. A waiter must not
+        occupy a pool slot while the lock holder needs pooled connections for
+        the projection itself (a two-slot pool would otherwise deadlock).
+        Closing the dedicated session is the final safety net that releases
+        the session advisory lock even if explicit unlock fails.
+        """
+        lock_key = zlib.crc32(table_id.encode("utf-8"))
+        if lock_key >= 2**31:
+            lock_key -= 2**32
+        self._projection_lock_slots.acquire()
+        connection = None
+        try:
+            connection = _SafeDiagnosticConnection.connect(
+                self._database_url,
+                autocommit=False,
+                row_factory=dict_row,
+                application_name="silicon-notebook-projection-lock",
+            )
+            self._restore_session_defaults(connection)
+            # A projection can legitimately outlive the normal query timeout;
+            # a queued pass must wait rather than fail and leave stale state.
+            connection.execute("SET statement_timeout = 0")
+            connection.execute("SET lock_timeout = 0")
+            connection.commit()
+            connection.execute(
+                "SELECT pg_advisory_lock(%s, %s)",
+                (_KNOWHOW_PROJECTION_LOCK_NAMESPACE, lock_key),
+            )
+            connection.commit()
+        except Exception:
+            if connection is not None:
+                connection.close()
+            self._projection_lock_slots.release()
+            raise self._safe_error("projection lock acquisition") from None
+
+        try:
+            yield
+        finally:
+            try:
+                connection.execute(
+                    "SELECT pg_advisory_unlock(%s, %s)",
+                    (_KNOWHOW_PROJECTION_LOCK_NAMESPACE, lock_key),
+                )
+                connection.commit()
+            except Exception:
+                # Session close below is the authoritative no-leak cleanup.
+                pass
+            finally:
+                connection.close()
+                self._projection_lock_slots.release()
 
     def close(self) -> None:
         """Close the pool once. Closing an unopened/already-closed pool is safe."""

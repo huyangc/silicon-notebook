@@ -575,6 +575,10 @@ class SourceStorePort(Protocol):
     def retrieval_element_rows(db: object, notebook_id: str) -> list[Any]: ...
     def source_titles(self, source_ids: list[str]) -> dict[str, str]: ...
     def get_source(self, source_id: str) -> SourceDetail: ...
+    @staticmethod
+    def source_exists_tx(connection: object, source_id: str) -> bool: ...
+    @staticmethod
+    def source_exists_for_update_tx(connection: object, source_id: str) -> bool: ...
     def source_elements(self, source_id: str) -> list[SourceElement]: ...
     def source_from_row(self, db: object, row: object, *, paper_meta: object = SOURCE_PAPER_META_UNSET) -> SourceSummary: ...
     def sources_from_rows(self, db: object, rows: list[object]) -> list[SourceSummary]: ...
@@ -629,6 +633,10 @@ class EmbeddingStorePort(Protocol):
 
 @runtime_checkable
 class KnowledgeStorePort(Protocol):
+    @staticmethod
+    def legacy_typed_table_ids(
+        connection: object, object_types: Sequence[str], id_prefix: str
+    ) -> list[str]: ...
     @staticmethod
     def active_object_count(db: object, notebook_id: str) -> int: ...
     @staticmethod
@@ -1076,6 +1084,16 @@ class AskStateStorePort(Protocol):
         response: AskResponse,
         user_id: str,
     ) -> str: ...
+    def save_answer_for_job(
+        self,
+        job_id: str,
+        notebook_id: str,
+        conversation_id: str,
+        question: str,
+        response: AskResponse,
+        user_id: str,
+    ) -> str | None: ...
+    def cancel_running_job(self, job_id: str, user_id: str) -> dict: ...
     def finish_job(
         self,
         job_id: str,
@@ -1202,6 +1220,12 @@ class MemoryStorePort(Protocol):
         reason: str,
         expected_source_revision: "int | None",
     ) -> MemoryRecord: ...
+    def lock_promotion_memory_on(
+        self,
+        db: object,
+        memory_id: str,
+        candidate_notebook_id: str,
+    ) -> MemoryRecord: ...
 
 
 class ReportSourceQueryPort(Protocol):
@@ -1241,6 +1265,11 @@ class SharingStorePort(Protocol):
 
 @runtime_checkable
 class GovernanceStorePort(Protocol):
+    @staticmethod
+    def promotion_candidate_identity(
+        connection: object,
+        candidate_id: str,
+    ) -> dict[str, Any] | None: ...
     @staticmethod
     def delete_clusters(connection: object, notebook_id: str, object_type: str) -> None: ...
     @staticmethod

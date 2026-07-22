@@ -52,7 +52,10 @@ def test_disconnect_does_not_cancel_worker_runs_to_completion():
     class _StubAskService:
         """Task 24: 协调器的执行体是 AskService(注册表派发在服务内)。"""
 
-        def ask(self, nb, payload, *, user_id, on_trace=None, cancel_event=None):
+        def ask(
+            self, nb, payload, *, user_id, job_id="", on_trace=None,
+            cancel_event=None,
+        ):
             entered.set()
             saw_cancel.append(cancel_event)
             from app.models.schemas import AskResponse

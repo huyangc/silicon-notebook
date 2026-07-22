@@ -1455,7 +1455,7 @@ def test_find_legacy_projected_table_ids_detects_legacy_object_types(repo, proje
     _insert_legacy_ko(repo, source_id, notebook_id, table_id, object_type="procedure")
 
     with repo._connect() as db:
-        found = find_legacy_projected_table_ids(db)
+        found = find_legacy_projected_table_ids(projector.knowledge, db)
     assert found == [table_id]
 
 
@@ -1466,10 +1466,12 @@ def test_find_legacy_projected_table_ids_ignores_dynamic_type_kos(repo, projecto
     projector.project_table(table_id)  # normal cell-level projection only
 
     with repo._connect() as db:
-        assert find_legacy_projected_table_ids(db) == []
+        assert find_legacy_projected_table_ids(projector.knowledge, db) == []
 
 
-def test_find_legacy_projected_table_ids_ignores_non_knowhow_id_prefix(repo, table_id):
+def test_find_legacy_projected_table_ids_ignores_non_knowhow_id_prefix(
+    repo, projector, table_id
+):
     """A 'case'-typed object from some OTHER pipeline (not knowhow's own
     ko-kh- id prefix) must not false-positive this migration scan."""
     notebook_id = repo._runtime.knowhow_store.get_knowhow_table(table_id)["notebook_id"]
@@ -1482,12 +1484,16 @@ def test_find_legacy_projected_table_ids_ignores_non_knowhow_id_prefix(repo, tab
              json.dumps({"table_id": table_id}), "[]", "src-x", "2020-01-01", "2020-01-01"),
         )
     with repo._connect() as db:
-        assert find_legacy_projected_table_ids(db) == []
+        assert find_legacy_projected_table_ids(
+            projector.knowledge, db
+        ) == []
 
 
-def test_find_legacy_projected_table_ids_empty_db_returns_empty_list(repo):
+def test_find_legacy_projected_table_ids_empty_db_returns_empty_list(repo, projector):
     with repo._connect() as db:
-        assert find_legacy_projected_table_ids(db) == []
+        assert find_legacy_projected_table_ids(
+            projector.knowledge, db
+        ) == []
 
 
 def test_reproject_legacy_tables_returns_empty_and_submits_nothing_when_none_found(

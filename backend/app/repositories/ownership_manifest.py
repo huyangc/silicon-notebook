@@ -1770,6 +1770,7 @@ SURFACE_MEMBERS = (
         owner='ReportStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.cancel_report_endpoint', kind='attribute', target='get_report'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.generate_report', kind='attribute', target='get_report'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.get_report', kind='attribute', target='get_report'),
             ConsumerSite(path='backend/app/api/report_routes.py', scope='<module>.update_report_outline', kind='attribute', target='get_report'),

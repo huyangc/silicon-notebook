@@ -1225,6 +1225,7 @@ class KnowhowStore:
         guarantee both halves exist."""
         now = self.now()
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
             db.execute(
                 "INSERT INTO knowhow_cell_code "
                 "(id, row_id, column_id, code_text, language, updated_by, "
@@ -1258,6 +1259,7 @@ class KnowhowStore:
         """Silent no-op when there is nothing to delete (zero-row DELETE
         convention)."""
         with self.database.write() as db:
+            self.database.begin_guarded_write(db)
             db.execute(
                 "DELETE FROM knowhow_cell_code WHERE row_id = ? AND column_id = ?",
                 (row_id, column_id),

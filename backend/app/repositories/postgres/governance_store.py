@@ -792,6 +792,18 @@ class GovernanceStore:
         )
 
     @staticmethod
+    def promotion_candidate_identity(
+        connection: Any, candidate_id: str
+    ) -> "dict | None":
+        """Plain-read immutable routing fields before aggregate lock ordering."""
+        row = connection.execute(
+            "SELECT id,notebook_id,object_id,object_type FROM promotion_candidates "
+            "WHERE id=%s",
+            (candidate_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    @staticmethod
     def promotion_candidate_row(
         connection: Any, candidate_id: str
     ) -> "dict | None":

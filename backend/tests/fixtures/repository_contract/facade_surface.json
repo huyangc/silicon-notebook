@@ -5590,6 +5590,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/api/report_routes.py",
+        "scope": "<module>.cancel_report_endpoint",
+        "target": "get_report"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/api/report_routes.py",
         "scope": "<module>.generate_report",
         "target": "get_report"
       },

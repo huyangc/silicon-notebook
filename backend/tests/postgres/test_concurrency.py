@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
 from psycopg.types.json import Jsonb
@@ -160,6 +161,63 @@ def test_revoked_member_cannot_commit_save_answer_memory(postgres_database):
         assert connection.execute(
             "SELECT 1 FROM memory_items WHERE id='memory-race-save'"
         ).fetchone() is None
+
+
+@pytest.mark.postgres_integration
+def test_save_answer_holds_access_lock_until_atomic_commit(postgres_database):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database, member=True)
+    store = _memory_store(postgres_database)
+    save_scope_locked = threading.Event()
+    revoke_started = threading.Event()
+    original_scope_hook = store._answer_save_scope_locked_on
+
+    def pause_after_scope_locks(connection, write, row):
+        locked_row = original_scope_hook(connection, write, row)
+        save_scope_locked.set()
+        assert revoke_started.wait(timeout=5)
+        return locked_row
+
+    store._answer_save_scope_locked_on = pause_after_scope_locks
+    write = MemoryWrite(
+        id="memory-race-save-first",
+        notebook_id="nb-memory-race",
+        created_by="member-race",
+        origin="ask_answer",
+        status="confirmed",
+        title="Saved",
+        content_md="Answer",
+        tags=[],
+        created_at="2026-07-23T00:00:00+00:00",
+        updated_at="2026-07-23T00:00:00+00:00",
+        source_answer_id="answer-memory-race",
+        confirmed_by="member-race",
+        confirmed_at="2026-07-23T00:00:00+00:00",
+    )
+
+    def revoke():
+        assert save_scope_locked.wait(timeout=5)
+        revoke_started.set()
+        with postgres_database.write() as connection:
+            connection.execute(
+                "DELETE FROM notebook_members WHERE notebook_id='nb-memory-race' "
+                "AND user_id='member-race'"
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        save_future = executor.submit(
+            store.create_answer_with_initial_revision,
+            write,
+            "member-race",
+            "saved",
+        )
+        revoke_future = executor.submit(revoke)
+        assert save_future.result(timeout=10).id == write.id
+        revoke_future.result(timeout=10)
+    with postgres_database.connect() as connection:
+        assert connection.execute(
+            "SELECT 1 FROM memory_items WHERE id=%s", (write.id,)
+        ).fetchone() is not None
 
 
 @pytest.mark.postgres_integration
@@ -369,3 +427,333 @@ def test_batch_reformat_membership_drift_is_zero_write_conflict(postgres_databas
     assert result == {"written": [], "conflict": True}
     final = store.get_knowhow_table(table_id)
     assert [row["cells"][procedure_id] for row in final["rows"]] == ["old", "old", "old"]
+
+
+def _confirmed_memory_write(memory_id: str, content: str = "Before") -> MemoryWrite:
+    now = "2026-07-23T00:00:00+00:00"
+    return MemoryWrite(
+        id=memory_id,
+        notebook_id="nb-memory-race",
+        created_by="owner-race",
+        origin="external_agent",
+        status="confirmed",
+        title="Memory",
+        content_md=content,
+        tags=[],
+        created_at=now,
+        updated_at=now,
+        confirmed_by="owner-race",
+        confirmed_at=now,
+    )
+
+
+@pytest.mark.postgres_integration
+def test_memory_edit_and_promotion_decision_share_one_lock_order(postgres_database):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store = _memory_store(postgres_database)
+    write = _confirmed_memory_write("memory-lock-order")
+    item = store.create_candidate_with_initial_revision(write, "owner-race", "created")
+    governance = GovernanceStore(
+        postgres_database,
+        type("Seams", (), {"now": lambda self: write.created_at})(),
+    )
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO promotion_candidates(id,notebook_id,object_id,object_type,status,"
+            "created_at,updated_at,target_base_id) VALUES "
+            "('promo-lock-order','nb-memory-race',%s,'memory','proposed',%s,%s,'')",
+            (item.id, write.created_at, write.updated_at),
+        )
+        store.propose_promotion_on(
+            connection,
+            item.id,
+            "owner-race",
+            "promo-lock-order",
+            [{"object_type": "claim", "payload": {"name": "Before"}}],
+            [],
+            item,
+            write.created_at,
+        )
+
+    edit_holds_memory = threading.Event()
+    decision_started = threading.Event()
+    editing = threading.local()
+    original_candidate_lock = store._lock_active_promotion_candidate_on
+
+    def pause_before_edit_candidate_lock(connection, proposal_id, memory_id):
+        if getattr(editing, "active", False):
+            edit_holds_memory.set()
+            assert decision_started.wait(timeout=5)
+        return original_candidate_lock(connection, proposal_id, memory_id)
+
+    store._lock_active_promotion_candidate_on = pause_before_edit_candidate_lock
+
+    def edit():
+        editing.active = True
+        try:
+            return store.update_with_revision(
+                item.id,
+                "owner-race",
+                {"content_md": "After"},
+                expected={"confirmed"},
+                changed_by="owner-race",
+                reason="edited",
+            )
+        finally:
+            editing.active = False
+
+    def decide():
+        assert edit_holds_memory.wait(timeout=5)
+        decision_started.set()
+        with postgres_database.write() as connection:
+            identity = governance.promotion_candidate_identity(
+                connection, "promo-lock-order"
+            )
+            locked = store.lock_promotion_memory_on(
+                connection, identity["object_id"], identity["notebook_id"]
+            )
+            candidate = governance.promotion_candidate_row(
+                connection, "promo-lock-order"
+            )
+            return locked.promotion_state, candidate["status"]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        edit_future = executor.submit(edit)
+        decision_future = executor.submit(decide)
+        assert edit_future.result(timeout=10).content_md == "After"
+        assert decision_future.result(timeout=10) == ("none", "rejected")
+
+
+@pytest.mark.postgres_integration
+def test_memory_embedding_replace_and_edit_preserve_revision_freshness(
+    postgres_database,
+):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store = _memory_store(postgres_database)
+    item = store.create_candidate_with_initial_revision(
+        _confirmed_memory_write("memory-embedding-race", "Old text"),
+        "owner-race",
+        "created",
+    )
+    revision = store.embedding_revision(item.id, item)
+    embedding_holds_memory = threading.Event()
+    edit_started = threading.Event()
+    original_lock = store._lock_embedding_memory_on
+
+    def pause_after_embedding_lock(connection, memory_id):
+        locked = original_lock(connection, memory_id)
+        embedding_holds_memory.set()
+        assert edit_started.wait(timeout=5)
+        return locked
+
+    store._lock_embedding_memory_on = pause_after_embedding_lock
+
+    def edit():
+        assert embedding_holds_memory.wait(timeout=5)
+        edit_started.set()
+        return store.update_with_revision(
+            item.id,
+            "owner-race",
+            {"content_md": "New text"},
+            expected={"confirmed"},
+            changed_by="owner-race",
+            reason="edited",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        embed_future = executor.submit(
+            store.replace_embedding, item.id, revision, "test", [1.0, 0.0]
+        )
+        edit_future = executor.submit(edit)
+        assert embed_future.result(timeout=10) is True
+        edited = edit_future.result(timeout=10)
+    assert edited.embedding_status == "pending"
+    assert store.embedding_revision(item.id, edited) == revision + 1
+
+
+@pytest.mark.postgres_integration
+def test_memory_copy_holds_source_through_vector_snapshot(postgres_database):
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database)
+    store = _memory_store(postgres_database)
+    source_write = _confirmed_memory_write("memory-copy-source-race", "Old text")
+    source = store.create_candidate_with_initial_revision(
+        source_write, "owner-race", "created"
+    )
+    revision = store.embedding_revision(source.id, source)
+    assert store.replace_embedding(source.id, revision, "test", [1.0, 0.0])
+    copy_write = replace(
+        source_write,
+        id="memory-copy-target-race",
+        source_answer_id=None,
+    )
+    copy_holds_source = threading.Event()
+    edit_started = threading.Event()
+    original_copy_lock = store._lock_copy_source_on
+
+    def pause_copy_source(connection, memory_id):
+        locked = original_copy_lock(connection, memory_id)
+        copy_holds_source.set()
+        assert edit_started.wait(timeout=5)
+        return locked
+
+    store._lock_copy_source_on = pause_copy_source
+
+    def edit_and_reembed():
+        assert copy_holds_source.wait(timeout=5)
+        edit_started.set()
+        edited = store.update_with_revision(
+            source.id,
+            "owner-race",
+            {"content_md": "New text"},
+            expected={"confirmed"},
+            changed_by="owner-race",
+            reason="edited",
+        )
+        new_revision = store.embedding_revision(source.id, edited)
+        assert store.replace_embedding(source.id, new_revision, "test", [0.0, 1.0])
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        copy_future = executor.submit(
+            store.create_copy_with_initial_revision,
+            copy_write,
+            source.id,
+            "owner-race",
+            "copied",
+            revision,
+        )
+        edit_future = executor.submit(edit_and_reembed)
+        copied = copy_future.result(timeout=10)
+        edit_future.result(timeout=10)
+    assert copied.content_md == "Old text"
+    assert copied.embedding_status == "ready"
+    with postgres_database.connect() as connection:
+        vectors = {
+            row["memory_id"]: bytes(row["vector"])
+            for row in connection.execute(
+                "SELECT memory_id,vector FROM memory_embeddings WHERE memory_id=ANY(%s)",
+                ([source.id, copied.id],),
+            ).fetchall()
+        }
+    assert vectors[source.id] != vectors[copied.id]
+
+
+@pytest.mark.postgres_integration
+def test_revoked_member_cannot_complete_full_memory_approval(postgres_database):
+    from app.core.config import Settings
+    from app.repositories.postgres.knowledge_store import KnowledgeStore
+    from app.services.knowledge_governance import KnowledgeGovernanceService
+    from app.services.repository_runtime import RepositoryCompatibilitySeams
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_memory_race(postgres_database, member=True)
+    now = "2026-07-23T00:00:00+00:00"
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,purpose,primary_domain,status,created_by,"
+            "created_at,updated_at,tier) VALUES "
+            "('nb-base-race','Base','','','ready','owner-race',%s,%s,'base')",
+            (now, now),
+        )
+    store = _memory_store(postgres_database)
+    write = _confirmed_memory_write("memory-member-approval")
+    write = replace(write, created_by="member-race")
+    item = store.create_candidate_with_initial_revision(
+        write, "member-race", "created"
+    )
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO promotion_candidates(id,notebook_id,object_id,object_type,status,"
+            "created_at,updated_at,target_base_id) VALUES "
+            "('promo-member-approval','nb-memory-race',%s,'memory','proposed',%s,%s,"
+            "'nb-base-race')",
+            (item.id, now, now),
+        )
+        store.propose_promotion_on(
+            connection,
+            item.id,
+            "member-race",
+            "promo-member-approval",
+            [{"object_type": "claim", "payload": {"name": "Private claim"}}],
+            [],
+            item,
+            now,
+        )
+
+    counter = iter(range(1000, 1100))
+    seams = RepositoryCompatibilitySeams(
+        new_id=lambda prefix: f"{prefix}-approval-{next(counter)}",
+        now=lambda: now,
+        copy_chunk_size=lambda: 100,
+        remap_json_ids=lambda value, _mapping: value,
+        in_chunk_size=lambda: 100,
+    )
+    governance_store = GovernanceStore(postgres_database, seams)
+    service = KnowledgeGovernanceService(
+        settings=Settings(database_url="sqlite:///unused.db"),
+        event_log=None,
+        governance_store=governance_store,
+        knowledge=KnowledgeStore(postgres_database, seams),
+        new_id=seams.new_id,
+        now=seams.now,
+        connect=postgres_database.connect,
+        write=postgres_database.write,
+        get_notebook=lambda _notebook_id: None,
+        invalidate_unified_cache=lambda _notebook_id: None,
+        mark_unified_kg_dirty=lambda _notebook_id: None,
+        llm=lambda: None,
+        kg_llm=lambda: None,
+        relations_for_notebook=lambda _notebook_id: [],
+        edge_centrality_map=lambda _notebook_id: {},
+        embed_knowledge=lambda *_args: None,
+        knowledge_objects=lambda *_args, **_kwargs: [],
+        as_retrieved=lambda row, _tier: row,
+        rule_card=lambda row: row,
+        set_conflict_status=lambda *_args: None,
+        memory_store=store,
+    )
+    revoked_uncommitted = threading.Event()
+    approval_started = threading.Event()
+    allow_revoke_commit = threading.Event()
+
+    def revoke():
+        with postgres_database.write() as connection:
+            connection.execute(
+                "DELETE FROM notebook_members WHERE notebook_id='nb-memory-race' "
+                "AND user_id='member-race'"
+            )
+            revoked_uncommitted.set()
+            assert approval_started.wait(timeout=5)
+            assert allow_revoke_commit.wait(timeout=5)
+
+    def approve():
+        assert revoked_uncommitted.wait(timeout=5)
+        approval_started.set()
+        allow_revoke_commit.set()
+        with pytest.raises(PermissionError):
+            service.approve_promotion(
+                "promo-member-approval", reviewer_id="owner-race"
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        revoke_future = executor.submit(revoke)
+        approve_future = executor.submit(approve)
+        revoke_future.result(timeout=10)
+        approve_future.result(timeout=10)
+
+    with postgres_database.connect() as connection:
+        candidate = connection.execute(
+            "SELECT status FROM promotion_candidates WHERE id='promo-member-approval'"
+        ).fetchone()
+        memory = connection.execute(
+            "SELECT promotion_state FROM memory_items WHERE id=%s", (item.id,)
+        ).fetchone()
+        base_count = connection.execute(
+            "SELECT COUNT(*) AS n FROM knowledge_objects "
+            "WHERE source_candidate_id='promo-member-approval'"
+        ).fetchone()["n"]
+    assert candidate["status"] == "proposed"
+    assert memory["promotion_state"] == "proposed"
+    assert base_count == 0

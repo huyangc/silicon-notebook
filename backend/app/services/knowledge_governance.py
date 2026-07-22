@@ -1224,15 +1224,33 @@ class KnowledgeGovernanceService:
         """
         now = self._now()
         with self._write() as db:
+            identity = self.governance_store.promotion_candidate_identity(
+                db, candidate_id
+            )
+            if identity is None:
+                raise KeyError(candidate_id)
+            locked_memory = None
+            if identity["object_type"] == "memory":
+                locked_memory = self.memory_store.lock_promotion_memory_on(
+                    db, identity["object_id"], identity["notebook_id"]
+                )
             cand = self.governance_store.promotion_candidate_row(db, candidate_id)
             if cand is None:
                 raise KeyError(candidate_id)
+            if (
+                cand["object_id"] != identity["object_id"]
+                or cand["notebook_id"] != identity["notebook_id"]
+                or cand["object_type"] != identity["object_type"]
+            ):
+                raise ValueError("promotion candidate routing changed")
             if cand["status"] == "rejected":
                 raise ValueError("cannot approve a rejected promotion candidate")
             if cand["object_type"] == "memory":
                 memory, _legacy_candidates, existing_ids = (
                     self.memory_store.promotion_data_on(db, cand["object_id"])
                 )
+                if locked_memory is None or memory.id != locked_memory.id:
+                    raise KeyError(cand["object_id"])
                 if cand["status"] == "approved" and existing_ids:
                     return {
                         "candidate_id": candidate_id,
@@ -1240,9 +1258,6 @@ class KnowledgeGovernanceService:
                         "base_object_ids": existing_ids,
                         "merged_into": cand["base_match_id"] or "",
                     }
-                self.memory_store.validate_promotion_approval_access_on(
-                    db, memory.id, cand["notebook_id"]
-                )
                 snapshot = self.memory_store.pinned_promotion_snapshot(
                     memory, candidate_id
                 )
@@ -1356,9 +1371,25 @@ class KnowledgeGovernanceService:
         Raises KeyError if missing; ValueError if already approved."""
         now = self._now()
         with self._write() as db:
+            identity = self.governance_store.promotion_candidate_identity(
+                db, candidate_id
+            )
+            if identity is None:
+                raise KeyError(candidate_id)
+            locked_memory = None
+            if identity["object_type"] == "memory":
+                locked_memory = self.memory_store.lock_promotion_memory_on(
+                    db, identity["object_id"], identity["notebook_id"]
+                )
             cand = self.governance_store.promotion_candidate_row(db, candidate_id)
             if cand is None:
                 raise KeyError(candidate_id)
+            if (
+                cand["object_id"] != identity["object_id"]
+                or cand["notebook_id"] != identity["notebook_id"]
+                or cand["object_type"] != identity["object_type"]
+            ):
+                raise ValueError("promotion candidate routing changed")
             if cand["status"] == "approved":
                 raise ValueError("cannot reject an approved promotion candidate")
             if cand["status"] == "rejected":
@@ -1375,6 +1406,8 @@ class KnowledgeGovernanceService:
                 db, candidate_id, reason, now, reviewer
             )
             if cand["object_type"] == "memory":
+                if locked_memory is None:
+                    raise KeyError(cand["object_id"])
                 self.memory_store.record_promotion_decision_on(
                     db,
                     cand["object_id"],

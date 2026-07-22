@@ -170,15 +170,49 @@ class AskStateStore:
         answer_id: str = "",
         error: str = "",
     ) -> "str | None":
-        """终态化 ask_job(仅这一个终态 job 行事务)。返回该 job 的
+        """终态化仍在运行的 ask_job。已写入的终态不可被后来覆盖。返回该 job 的
         conversation_id(job 行不存在 → None);cancelled/failed 的空会话清理
         保持为**之后的另一个**事务(cleanup_empty_conversation),由 facade 编排。"""
         with self.database.write() as db:
-            row = db.execute("SELECT conversation_id FROM ask_jobs WHERE id=?", (job_id,)).fetchone()
-            db.execute(
-                "UPDATE ask_jobs SET status=?, answer_id=?, error=?, updated_at=? WHERE id=?",
-                (status, answer_id, error, self.seams.now(), job_id))
+            row = db.execute(
+                "SELECT conversation_id,status FROM ask_jobs WHERE id=?", (job_id,)
+            ).fetchone()
+            may_write = row is not None and (
+                row["status"] == "running"
+                or (status == "cancelled" and row["status"] != "cancelled")
+            )
+            if may_write:
+                guard = "status!='cancelled'" if status == "cancelled" else "status='running'"
+                db.execute(
+                    "UPDATE ask_jobs SET status=?, answer_id=?, error=?, updated_at=? "
+                    f"WHERE id=? AND {guard}",
+                    (status, answer_id, error, self.seams.now(), job_id),
+                )
         return row["conversation_id"] if row is not None else None
+
+    def cancel_running_job(self, job_id: str, user_id: str) -> dict:
+        """Durably cancel a running owned job in one write transaction."""
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT conversation_id,status FROM ask_jobs "
+                "WHERE id=? AND created_by=?",
+                (job_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            cancelled = row["status"] == "running"
+            if cancelled:
+                db.execute(
+                    "UPDATE ask_jobs SET status='cancelled',answer_id='',error='',updated_at=? "
+                    "WHERE id=? AND status='running'",
+                    (self.seams.now(), job_id),
+                )
+        return {
+            "job_id": job_id,
+            "status": "cancelled" if cancelled else row["status"],
+            "conversation_id": row["conversation_id"],
+            "cancelled": cancelled,
+        }
 
     def cleanup_empty_conversation(self, conversation_id: str) -> None:
         """删掉没有任何 answer 的会话(取消首轮留下的空壳);有答案则保留。"""
@@ -317,17 +351,69 @@ class AskStateStore:
         payload = response.model_dump()
         payload["answer_id"] = answer_id
         with self.database.write() as db:
+            self._insert_answer_on(
+                db, answer_id, notebook_id, conversation_id, question, payload, now
+            )
+        return answer_id
+
+    @staticmethod
+    def _insert_answer_on(
+        db: sqlite3.Connection,
+        answer_id: str,
+        notebook_id: str,
+        conversation_id: Optional[str],
+        question: str,
+        payload: dict,
+        now: str,
+    ) -> None:
+        db.execute(
+            "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                answer_id,
+                notebook_id,
+                question,
+                json.dumps(payload, ensure_ascii=False),
+                now,
+                conversation_id,
+            ),
+        )
+
+    def save_answer_for_job(
+        self,
+        job_id: str,
+        notebook_id: str,
+        conversation_id: Optional[str],
+        question: str,
+        response: AskResponse,
+        user_id: str,
+    ) -> "str | None":
+        """Atomically save the final answer and move a running job to done.
+
+        A durable cancel that wins the transaction ordering returns ``None``
+        and leaves no answer row.
+        """
+        answer_id = self.seams.new_id("ans")
+        now = self.seams.now()
+        payload = response.model_dump()
+        payload["answer_id"] = answer_id
+        with self.database.write() as db:
+            row = db.execute(
+                "SELECT status FROM ask_jobs WHERE id=? AND notebook_id=? "
+                "AND conversation_id=? AND created_by=?",
+                (job_id, notebook_id, conversation_id, user_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(job_id)
+            if row["status"] != "running":
+                return None
+            self._insert_answer_on(
+                db, answer_id, notebook_id, conversation_id, question, payload, now
+            )
             db.execute(
-                "INSERT INTO answers (id, notebook_id, question, payload, created_at, conversation_id) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    answer_id,
-                    notebook_id,
-                    question,
-                    json.dumps(payload, ensure_ascii=False),
-                    now,
-                    conversation_id,
-                ),
+                "UPDATE ask_jobs SET status='done',answer_id=?,error='',updated_at=? "
+                "WHERE id=? AND status='running'",
+                (answer_id, now, job_id),
             )
         return answer_id
 

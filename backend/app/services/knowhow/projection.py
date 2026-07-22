@@ -70,15 +70,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Callable, List
+from typing import Any, Callable, List
 
 from app.core.config import Settings
-from app.repositories.sqlite.chunk_store import ChunkStore, ChunkWrite
-from app.repositories.sqlite.database import SqliteDatabase
-from app.repositories.sqlite.embedding_store import EmbeddingStore
-from app.repositories.sqlite.knowhow_store import KnowhowStore
-from app.repositories.sqlite.knowledge_store import KnowledgeStore
-from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
+from app.repositories.ports import (
+    ChunkStorePort,
+    KnowledgeStorePort,
+    KnowhowStorePort,
+    SourceStorePort,
+)
+from app.repositories.sqlite.chunk_store import ChunkWrite
+from app.repositories.sqlite.source_store import SourceElementWrite
 from app.services import background_jobs
 from app.services.knowhow import textops
 from app.services.knowhow.ids import (
@@ -163,7 +165,7 @@ def _evidence(source_id: str, source_title: str, element_id: str, element_type: 
     }
 
 
-def find_legacy_projected_table_ids(db) -> "list[str]":
+def find_legacy_projected_table_ids(knowledge_store, db) -> "list[str]":
     """Pure detection query for the one-shot startup migration bridge
     (``KnowhowProjector.reproject_legacy_tables`` below, wired in by
     ``app.services.startup_warmup``): every table_id that still has at least
@@ -182,7 +184,9 @@ def find_legacy_projected_table_ids(db) -> "list[str]":
     column happens to be literally named "case"/"procedure"/"tool" — an
     accepted, harmless false positive (reprojecting an already-current table
     is an idempotent no-op, not a correctness bug)."""
-    return KnowledgeStore.legacy_typed_table_ids(db, _LEGACY_OBJECT_TYPES, "ko-kh-")
+    return knowledge_store.legacy_typed_table_ids(
+        db, _LEGACY_OBJECT_TYPES, "ko-kh-"
+    )
 
 
 class KnowhowProjector:
@@ -190,11 +194,11 @@ class KnowhowProjector:
         self,
         *,
         settings: Settings,
-        database: SqliteDatabase,
-        knowhow: KnowhowStore,
-        sources: SourceStore,
-        chunks: ChunkStore,
-        knowledge: KnowledgeStore,
+        database: Any,
+        knowhow: KnowhowStorePort,
+        sources: SourceStorePort,
+        chunks: ChunkStorePort,
+        knowledge: KnowledgeStorePort,
         embedding: SourceEmbeddingService,
         note_model_error: Callable[..., None],
         invalidate_unified_cache: Callable[[str], None],
@@ -329,6 +333,11 @@ class KnowhowProjector:
         must not be silently swallowed and mis-reported as an "embedding
         failure"); see ``_write_elements``/``_write_chunks`` and the per-row
         try/except below."""
+        with self.database.table_projection_lock(table_id):
+            return self._project_table_locked(table_id, embed=embed)
+
+    def _project_table_locked(self, table_id: str, *, embed: bool) -> str:
+        """Run one pass while the backend's table-level projection lock is held."""
         table = self.knowhow.get_knowhow_table(table_id)
         notebook_id = table["notebook_id"]
         snapshot_mutation_seq = table["mutation_seq"]
@@ -488,7 +497,7 @@ class KnowhowProjector:
                 # 无 FK 约束的孤儿 knowledge_objects（已删/已移内容仍可检索）。经
                 # SqliteDatabase.begin_immediate（SQL 收在 store 层）让检查与写入对
                 # 跨进程写者也原子——与 snapshot_table/delete_table_if_unchanged 同款。
-                self.database.begin_immediate(db)
+                self.database.begin_guarded_write(db)
                 if (
                     not self.knowhow.table_exists_tx(db, table_id)
                     or not self.sources.source_exists_tx(db, source_id)
@@ -658,7 +667,7 @@ class KnowhowProjector:
         if unchanged_text_chunks:
             reprint_set = set(reprint_only_ids)
             have: set = set()
-            for r in EmbeddingStore.rows_by_ids(
+            for r in self.embedding.vectors.rows_by_ids(
                 db, "chunk_embeddings", "chunk_id", list(unchanged_text_chunks)
             ):
                 vec = decode_vector(r["vector"])
@@ -832,10 +841,12 @@ class KnowhowProjector:
         now = self.now()
         self.chunks.replace_source_chunks(hidden_source_id, notebook_id, [], created_at=now)
         with self.database.write() as db:
-            self.knowledge.delete_relations_by_source(db, hidden_source_id)
-            self.knowledge.delete_objects_by_source(db, hidden_source_id)
-            self.sources.replace_elements(db, hidden_source_id, [], created_at=now)
-            self.sources.delete_source_row(db, hidden_source_id)
+            self.database.begin_guarded_write(db)
+            if self.sources.source_exists_for_update_tx(db, hidden_source_id):
+                self.knowledge.delete_relations_by_source(db, hidden_source_id)
+                self.knowledge.delete_objects_by_source(db, hidden_source_id)
+                self.sources.replace_elements(db, hidden_source_id, [], created_at=now)
+                self.sources.delete_source_row(db, hidden_source_id)
         self.invalidate_unified_cache(notebook_id)
         self.mark_unified_dirty(notebook_id)
 
@@ -865,7 +876,7 @@ class KnowhowProjector:
         KG swap is atomic, so whichever pass finishes last leaves the same
         deterministic full-table result, never a corrupted mix."""
         with self.database.connect() as db:
-            table_ids = find_legacy_projected_table_ids(db)
+            table_ids = find_legacy_projected_table_ids(self.knowledge, db)
         for table_id in table_ids:
             background_jobs.submit(
                 self.project_table, table_id,

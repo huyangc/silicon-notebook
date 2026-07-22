@@ -142,6 +142,19 @@ class SourceStore:
             "SELECT 1 FROM sources WHERE id = ?", (source_id,)
         ).fetchone() is not None
 
+    @staticmethod
+    def source_exists_for_update_tx(
+        connection: sqlite3.Connection, source_id: str
+    ) -> bool:
+        """Lock-order seam shared with PostgreSQL projection teardown.
+
+        SQLite's caller has already acquired ``BEGIN IMMEDIATE``, so a plain
+        existence probe runs under the database-wide write reservation.
+        """
+        return connection.execute(
+            "SELECT 1 FROM sources WHERE id = ?", (source_id,)
+        ).fetchone() is not None
+
     def source_elements(self, source_id: str) -> List[SourceElement]:
         self.get_source(source_id)          # KeyError guard, same as the facade did
         with self.database.connect() as db:
