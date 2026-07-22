@@ -161,6 +161,13 @@ kg_build_jobs.error_message|TEXT|1|''|0
 kg_build_jobs.created_at|TEXT|1|None|0
 kg_build_jobs.updated_at|TEXT|1|None|0
 kg_build_jobs.finished_at|TEXT|1|''|0
+kg_canonical_scratch.notebook_id|TEXT|1|None|0
+kg_canonical_scratch.run_id|TEXT|1|None|0
+kg_canonical_scratch.seed|TEXT|1|None|0
+kg_canonical_scratch.canonical_id|TEXT|1|None|0
+kg_canonical_scratch.canonical_name|TEXT|1|''|0
+kg_canonical_scratch.canonical_description|TEXT|1|''|0
+kg_canonical_scratch.canonical_desc_sig|TEXT|1|''|0
 kg_cluster_scratch.notebook_id|TEXT|1|None|0
 kg_cluster_scratch.run_id|TEXT|1|None|0
 kg_cluster_scratch.object_id|TEXT|1|None|0
@@ -515,6 +522,7 @@ idx_feedback_answer
 idx_feedback_nb_rating
 idx_kg_build_jobs_nb_created
 idx_kg_build_jobs_one_running
+idx_kg_canonical_scratch_nb_run_seed
 idx_kg_cluster_scratch_nb_run
 idx_knowhow_cell_code_row
 idx_knowhow_cells_column_normalized_anchor_row

@@ -12,7 +12,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1537,6 +1537,37 @@ class SqliteMigrator:
                 """
             )
 
+    def _migration_24(self) -> None:
+        """写锁瘦身改造点 2:concept_clusters 整表替换拆成【预备段(scratch)+
+        切换段(纯 SQL)】(design doc §5.5)。预备段把每个 object_type 算出的
+        seed→canonical 映射(canonical 名/描述及其签名)落进这张新 scratch 表;
+        切换段再用一条纯 SQL DELETE+INSERT...SELECT,把它和 kg_cluster_scratch
+        (object_id→seed)连接,一次性写 concept_clusters —— 写锁只覆盖切换段的
+        纯 SQL,不再覆盖预备段的 Python 计算与逐行 executemany 构造。
+
+        与 kg_cluster_scratch 同款:无主键、纯 transient、run_id 隔离并发
+        rebuild。不需要 object_type 列——_write_cluster_map_streamed 在写入
+        每个 type 前先清空本 run 的行(镜像 _stream_seed_reps 对
+        kg_cluster_scratch 的 clear-at-start),所以切换时表里只有当前 type
+        的行。索引支持 (notebook_id, run_id, seed) 上的等值连接(切换段的
+        JOIN 谓词)。"""
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS kg_canonical_scratch (
+                  notebook_id TEXT NOT NULL,
+                  run_id TEXT NOT NULL,
+                  seed TEXT NOT NULL,
+                  canonical_id TEXT NOT NULL,
+                  canonical_name TEXT NOT NULL DEFAULT '',
+                  canonical_description TEXT NOT NULL DEFAULT '',
+                  canonical_desc_sig TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_canonical_scratch_nb_run_seed
+                  ON kg_canonical_scratch(notebook_id, run_id, seed);
+                """
+            )
+
     def _recover_interrupted_jobs(self) -> None:
         """每次启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，
         merge-review / ask 等 daemon 线程任务无法跨进程重启存活，故启动时仍是 'running'
@@ -1576,6 +1607,15 @@ class SqliteMigrator:
                 "updated_at=?, finished_at=? WHERE status='running'",
                 (now, now),
             )
+            # 重聚类的两张 scratch 表是**纯瞬态**的:只有一次进行中的 rebuild 会读
+            # 自己那个 run_id 的行,进程重启后没有任何代码路径会再回访它们。
+            # rebuild 的 finally 只能兜住异常/取消,兜不住 SIGKILL / 掉电——那种情况
+            # 下 run_id 随进程一起消失,行就永久不可达(每张表都没有时间戳列,事后
+            # 也无从按年龄清理),几次被打断的大库 rebuild 就能把库撑起来。
+            # 与本函数其余各行同一条依据:后端单进程,启动这一刻不可能有 rebuild 在飞,
+            # 所以此时表里的任何行按定义都是上次崩溃的遗留。
+            db.execute("DELETE FROM kg_cluster_scratch")
+            db.execute("DELETE FROM kg_canonical_scratch")
 
     def _seed(self) -> None:
         now = _now()

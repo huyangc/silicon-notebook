@@ -26,13 +26,17 @@ def parse_llm_log(path: str, since_ts: str) -> Dict[str, float]:
     tokens = 0
     retries = 0
     from pathlib import Path
-    from app.services.log_reader import expand_channel_paths
+    from app.services.log_reader import expand_channel_paths, read_lines
     raw: List[str] = []
     for p in expand_channel_paths(Path(path)):
-        try:
-            raw.extend(p.read_text(encoding="utf-8").splitlines())
-        except FileNotFoundError:
-            continue
+        # read_lines transparently handles plain vs. gzipped channel files
+        # (archived dated logs are `.jsonl.gz`) and tolerates a missing/
+        # corrupt path by returning [] rather than raising — see its
+        # docstring in log_reader.py. A bare read_text(encoding="utf-8")
+        # here would raise an uncaught UnicodeDecodeError the first time a
+        # dated `llm-*.jsonl.gz` archive exists (the old FileNotFoundError-
+        # only guard never covered that).
+        raw.extend(read_lines(p))
     if not raw:
         return {"calls": 0, "retries": 0, "latency_p50_s": 0.0,
                 "latency_p95_s": 0.0, "total_tokens": 0}

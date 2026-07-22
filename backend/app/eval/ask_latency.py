@@ -90,9 +90,11 @@ def read_ask_stage_records(
 ) -> Iterator[dict]:
     """Stream ask_stage records from a JSONL channel.
 
-    Aggregates the legacy global file (`path`) and all per-user subdir files
-    (`<log_dir>/*/<basename>`). Skips malformed/blank lines and records where
-    ``kind != "ask_stage"``. Empty iterator if nothing exists.
+    Aggregates the legacy global file (`path`), every per-day dated file and
+    gzip-archived dated file beside it, and all per-user subdir files
+    (`<log_dir>/*/<basename>`, same dated/gz expansion) — see
+    ``log_reader.expand_channel_paths``. Skips malformed/blank lines and
+    records where ``kind != "ask_stage"``. Empty iterator if nothing exists.
 
     Args:
         path:   Path to the global events JSONL file (default:
@@ -100,20 +102,19 @@ def read_ask_stage_records(
                 aggregated automatically.
         last_n: If given, only yield the last N matching records (after merge).
     """
-    from app.services.log_reader import expand_channel_paths
+    from app.services.log_reader import expand_channel_paths, read_lines
 
     parsed: list[dict] = []
     for p in expand_channel_paths(Path(path)):
-        # Defensive read (mirrors scripts/diag.py::_read_ask_stage): a path in
-        # the read-set may be a directory (a subdir literally named like the log
-        # basename -> IsADirectoryError) or hold non-UTF8 bytes; skip/replace
-        # rather than crashing the whole aggregation. IsADirectoryError and
-        # FileNotFoundError are OSError subclasses; listed explicitly for clarity.
-        try:
-            raw_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        except (FileNotFoundError, IsADirectoryError, OSError):
-            continue
-        for line in raw_lines:
+        # read_lines (log_reader.py) is the shared defensive reader (mirrors
+        # scripts/diag.py::_read_lines): it skips a path in the read-set that
+        # is a directory (a subdir literally named like the log basename) or
+        # missing/corrupt, and transparently gunzips archived dated files
+        # (`events-YYYY-MM-DD.jsonl.gz`) instead of decoding their binary
+        # bytes as UTF-8 text — a plain read_text(errors="replace") on a .gz
+        # path decodes to noise that never parses as JSON below, so archived
+        # days would silently vanish from the aggregation rather than error.
+        for line in read_lines(p):
             line = line.strip()
             if not line:
                 continue

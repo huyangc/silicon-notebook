@@ -42,14 +42,16 @@ PostgreSQL + pgvector remain the future production/team-beta direction; local de
 - `RepositoryRuntime` owns or references composed runtime state; `REPORT_CANCELLATIONS` remains the intentionally process-global canonical owner, and the runtime, report coordinator, and module compatibility functions share that same identity reference. Other mutable operational state (storage root, embedder, language caches, build sets, Ask cancellation registry, and artifact caches) is runtime-owned; replacing supported compatibility properties after composition updates every retained consumer. Synchronous Ask/report submission failures mark the already-created durable job/report failed, unregister the cancellation entry, and re-raise the submission error; successful worker ordering and the existing Ask transaction checkpoints remain unchanged.
 - Databases created before the refactor keep loading unchanged. `scripts/verify_repository_snapshot.py` uses exact per-version migration and stable-seed manifests, percent-encodes SQLite URI paths, constructs the repository only on a temporary backup, and reports the retained backup path if cleanup fails without printing private rows. It guards the original database/WAL metadata plus SHM existence and size; for a live WAL attachment only SHM mtime is exempt because SQLite may rebuild it.
 
-The current schema version is 23. The committed v9 compatibility fixture
-upgrades through migrations v10–v23 and remains readable. Those migrations
+The current schema version is 24. The committed v9 compatibility fixture
+upgrades through migrations v10–v24 and remains readable. Those migrations
 cover compatibility and SQLite hot-path indexes (v10–v12), Memory/Agent and
 Memory-derived source links/indexes (v13–v15), knowhow tables and cell code
 (v16/v18), paper metadata (v17), source-linked assets (v19), and multi-domain
 reference-library mounts plus promotion targets (v20), and the normalized
 interactive-reformat anchor-membership expression index (v21); v22 adds durable
-notebook-scoped KG build jobs; v23 adds per-user latest model-service status.
+notebook-scoped KG build jobs; v23 adds per-user latest model-service status;
+v24 adds the kg_canonical_scratch table for the write-lock-slimming cluster-map
+swap.
 - `frontend/app/page.tsx` is the notebook-workspace orchestrator, not the owner of every shared view model or panel. API/view types and constants live in `workspace-model.ts`, the answer/citation/reasoning-trace surface lives in `answer-panel.tsx`, built-in KG labels/styles live in `kg-type-model.ts`, and graph/answer rendering shares `kg-type-mark.tsx`.
 - Workspace HTTP ownership is split into `system-api.ts`, `notebook-api.ts`, `source-api.ts`, `ask-api.ts`, `knowledge-api.ts`, `report-api.ts`, and `kg-api.ts`. The shared `frontend/app/api-client.ts` transport owns HTTP mechanics; domain modules retain endpoint policy. `page.tsx` retains state, stale-result guards, polling, and Blob URL lifecycle. `api-boundary.test.mjs` semantically forbids production `fetch` outside the transport core.
 - Boundary regression tests use public HTTP contracts or explicit domain seams, never private aggregate helpers, source positions, line counts, or total route/model counts. Workspace-state hook extraction and FastAPI lifespan/application lifecycle composition remain separate debt.
@@ -65,7 +67,9 @@ when no model service or MinerU parser is configured.
 
 ### Prerequisites
 
-- **Python ≥ 3.11**
+- **Python ≥ 3.13** — the SQLite write lock's fairness depends on CPython 3.13's
+  `PyMutex`-backed `threading.Lock` handoff; older interpreters silently regress to
+  writer starvation (see `backend/app/repositories/sqlite/database.py`).
 - **Node.js ≥ 20** and npm
 - **git**
 - A C/C++ toolchain is needed *only as a fallback* — `numpy`, `rustworkx`, and `hnswlib`
@@ -719,6 +723,9 @@ tracking. Only turn it on if you have understood and accounted for both costs.
 
 ```text
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout in ms (default 30000)
+DB_WRITE_LOCK_STATS         # enable process-wide SQLite write-lock wait/hold instrumentation (default true)
+DB_WRITE_LOCK_WARN_MS       # wait/hold threshold in ms that logs a rate-limited db_write_lock_slow event (default 200)
+DB_WRITE_LOCK_FLUSH_SECONDS # interval in seconds for the periodic db_write_lock_stats snapshot, and the per-call-site rate-limit window for db_write_lock_slow (default 60)
 SQLITE_CACHE_SIZE_KB    # Per-connection SQLite page cache in KB (negative = KB). Connections are reused per-thread; total memory ≈ threads × |value| (default -16384)
 DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
@@ -941,15 +948,16 @@ with respect to application data: they do not execute deletes or other product w
 checkpoint/vacuum/analyze/reindex SQLite, run migrations, or auto-remediate. `incident`
 may only maintain its bounded `.local/diagnostics/` artifacts as described above.
 
-### Six-command diagnostics reference
+### Seven-command diagnostics reference
 
-`scripts/diag.py` exposes exactly these six commands:
+`scripts/diag.py` exposes exactly these seven commands:
 
 | Command | Intended use | Runtime boundary |
 | --- | --- | --- |
 | `python3 scripts/diag.py incident` | Primary live, bounded incident capture; add `--pid <backend-pid>` when automatic discovery cannot select exactly one worker. | Ubuntu/Linux live process evidence; stdlib-only, app-free. |
 | `python3 scripts/diag.py slow --since 24 --deep` | Historical slow-path report from logs, DB aggregates, and scale-index manifests; `--deep` adds potentially minutes-long read-only DB checks. Bare `python3 scripts/diag.py` still means `slow`. | Offline, stdlib-only, app-free. |
 | `python3 scripts/diag.py latency --last 500` | P50/P95/max by Ask stage from `ask_stage` events. | Offline, stdlib-only, app-free. |
+| `python3 scripts/diag.py locks --top 20` | SQLite write-lock contention aggregated by call site from `db_write_lock_slow` / `db_write_lock_stats` events. | Offline, stdlib-only, app-free. |
 | `python3 scripts/diag.py open --local .local` | Diagnose notebook-open query and endpoint latency, cache cold cost, and mutation-sequence churn. | Offline, stdlib-only, app-free. |
 | `python3 scripts/diag.py db --db .local/silicon_notebook.db` | Bounded source-side-effect-free SQLite/WAL/table/FK-index/query-plan evidence. | Offline, stdlib-only, app-free. |
 | `python3 scripts/diag.py base-recall [active_notebook_id] --db .local/silicon_notebook.db` | Diagnose mounted-base availability and the latest report's tier-reference counts using metadata only. | Bounded source-side-effect-free SQLite snapshot; stdlib-only, app-free; no retrieval, query/content echo, repository construction, migration, or source SQLite open. |
@@ -966,7 +974,16 @@ Historical readers cover, deduplicate, and bound all supported layouts for the
 `<channel>-YYYY-MM-DD.jsonl`, daily gzip `<channel>-YYYY-MM-DD.jsonl.gz`, and one-level
 per-user log directories. Malformed rows and byte/window truncation are reported as
 degraded metadata. Existing standalone engine scripts remain runnable for established
-operator notes and cron jobs; the six-command dispatcher is the preferred entry point.
+operator notes and cron jobs; the seven-command dispatcher is the preferred entry point.
+
+`python3 scripts/diag.py locks [--log PATH] [--top N]` aggregates SQLite write-lock
+contention by call site. `wait` is how long a writer queued for the lock (what users feel
+as a stalled page); `hold` is how long a writer held it (who caused it). Sorted by
+`hold_max`, worst first. It prints two tables: threshold-crossing violations
+(`db_write_lock_slow`, rate-limited, so only the tail above the threshold) and the periodic
+full-distribution snapshot (`db_write_lock_stats`, unfiltered but a point-in-time cumulative
+view) — a call site can be busy without ever crossing the threshold, and that only shows up
+in the second table. Tune the capture threshold with `DB_WRITE_LOCK_WARN_MS` (default 200).
 
 **Log viewer — `/dev/logs`.** A read-only debug page that visualizes these JSONL channels (LLM channel in v1). The left list is filterable by kind / status / model with full-text search; the detail pane shows exactly what was sent to the LLM (the `system` / `user` messages and the `schema_hint`) alongside the model's response, token usage, and latency. It is served by gated backend endpoints under `/api/debug/logs/...` — set `DEBUG_LOGS_ENABLED=false` to hide them.
 

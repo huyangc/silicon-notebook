@@ -203,3 +203,18 @@ class TestReadAskStageRecords:
         p.write_bytes(good.encode("utf-8") + b"\n\xff\xfe not valid utf8\n")
         recs = list(read_ask_stage_records(str(p)))
         assert [r["latency_ms"] for r in recs] == [5]
+
+    def test_reads_gzipped_dated_file(self, tmp_path):
+        """expand_channel_paths (log_reader.py) now also returns archived
+        dated files (`events-YYYY-MM-DD.jsonl.gz`, gzipped by the background
+        archiver once a day rolls over). Previously this reader's own
+        `errors="replace"` on a plain read_text() decoded the gzip binary
+        bytes to noise that never parses as JSON, so archived days silently
+        vanished from the aggregation instead of raising — the very bug this
+        aggregator exists to avoid, just relocated to a quieter failure mode."""
+        import gzip
+        gz_path = tmp_path / "events-2026-07-19.jsonl.gz"
+        with gzip.open(gz_path, "wt", encoding="utf-8") as fh:
+            fh.write(json.dumps({"kind": "ask_stage", "stage": "score", "latency_ms": 77}) + "\n")
+        records = list(read_ask_stage_records(str(tmp_path / "events.jsonl")))
+        assert [r["latency_ms"] for r in records] == [77]

@@ -2398,6 +2398,14 @@ def test_paper_metadata_backfill_uses_source_job_concurrency(repo, monkeypatch):
     lock = threading.Lock()
     active = 0
     peak = 0
+    # 结构性判据,不是墙钟判据:12 个 worker 必须全部到齐 barrier 才有人能继续。
+    # 每个 worker 在 wait() 之前就已经 active += 1,所以「最后一个到齐」这一刻
+    # active 必然等于 12 —— peak == 12 由 barrier 保证,而不是靠「40ms 窗口内恰好
+    # 都在跑」。后者在本仓库默认的 -n 12 并行下会被兄弟 worker 进程抢 CPU 打散,
+    # 实测偶发 peak == 11。参见 test_bulk_write_fairness.py 里同类问题的处理:
+    # 负载相关的 flake 不能靠放宽阈值消除,只能换成结构性断言。
+    barrier = threading.Barrier(12, timeout=10)
+    barrier_broke = threading.Event()
 
     monkeypatch.setattr(
         service.sources,
@@ -2424,7 +2432,13 @@ def test_paper_metadata_backfill_uses_source_job_concurrency(repo, monkeypatch):
             active += 1
             peak = max(peak, active)
         try:
-            time.sleep(0.04)
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError:
+                # 并发度不足 12(或第一个到齐者已超时把 barrier 打破)。记标志后
+                # 正常返回,让剩下的 worker 立即穿过已破的 barrier —— 测试干净地
+                # 红在下面的断言上,而不是挂住。
+                barrier_broke.set()
             return "stored"
         finally:
             with lock:
@@ -2433,6 +2447,10 @@ def test_paper_metadata_backfill_uses_source_job_concurrency(repo, monkeypatch):
     monkeypatch.setattr(service, "ensure_paper_metadata", ensure)
     counts = service.backfill_paper_metadata(nb_id)
 
+    assert not barrier_broke.is_set(), (
+        "12 个 worker 没能同时在途 —— backfill 的并发度低于 "
+        f"kg_job_concurrency=12(最高只观察到 {peak} 路同时活动)"
+    )
     assert counts["total"] == 12
     assert counts["stored"] == 12
     assert peak == 12

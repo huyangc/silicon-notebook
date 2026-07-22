@@ -108,6 +108,61 @@ def test_concurrent_rebuild_scratch_isolated(repo):
     assert cmap1 == cmap2, "cluster map must be identical across sequential rebuilds"
 
 
+def test_interrupted_rebuild_clears_only_its_own_run_scratch_rows(repo, monkeypatch):
+    """Pass A2 now commits each scratch batch independently (off the write
+    lock) instead of one all-or-nothing transaction for the whole rebuild.
+    That means a crash/exception ANYWHERE later in rebuild_unified_kg — not
+    just during Pass A2 itself — can no longer rely on a rollback to erase
+    scratch rows that were already durably committed. rebuild_unified_kg must
+    clear its OWN run_id's rows in a `finally` regardless of where it failed,
+    while leaving a different (concurrent) run_id's rows untouched — same
+    isolation contract as test_concurrent_rebuild_scratch_isolated above, just
+    exercised on the crash path instead of the success path.
+
+    Forces the crash in cluster_seeds — AFTER _stream_seed_reps has streamed
+    and committed every "concept" scratch batch (proving the batches are
+    already durable, not rolled back, by the time the failure hits) but
+    before the run's final cleanup line would otherwise run.
+    """
+    from app.services import kg_merge
+
+    nb = repo.create_notebook(NotebookCreate(name="nb"))
+    repo.store_kg(nb.id, None, [
+        {"local_id": f"o{i}", "object_type": "concept",
+         "payload": {"name": f"c-{i}", "section_path": ""}, "evidence": []}
+        for i in range(2_500)
+    ], [])
+
+    # Stray row under a different run_id, simulating a concurrent rebuild of
+    # the same notebook still in flight.
+    stray_run_id = "other_run_concurrent"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO kg_cluster_scratch (notebook_id, run_id, object_id, seed) VALUES (?,?,?,?)",
+            (nb.id, stray_run_id, "fake-obj-id", "fake-seed"))
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("injected failure after Pass A2 scratch writes")
+
+    monkeypatch.setattr(kg_merge, "cluster_seeds", _boom)
+
+    with pytest.raises(RuntimeError, match="injected failure"):
+        repo.rebuild_unified_kg(nb.id)
+
+    with repo._connect() as db:
+        total = db.execute(
+            "SELECT COUNT(*) AS c FROM kg_cluster_scratch WHERE notebook_id=?",
+            (nb.id,)).fetchone()["c"]
+        stray = db.execute(
+            "SELECT COUNT(*) AS c FROM kg_cluster_scratch WHERE notebook_id=? AND run_id=?",
+            (nb.id, stray_run_id)).fetchone()["c"]
+
+    assert stray == 1, "stray row from a concurrent/other run_id must survive the crash"
+    assert total == 1, (
+        "crashed rebuild must leave zero of its OWN run_id's scratch rows "
+        "(only the pre-existing stray row should remain)", total)
+
+
 @pytest.mark.slow
 def test_rebuild_streaming_scales(repo):
     """Gated scale test: rebuild_unified_kg completes with bounded memory for a
@@ -157,7 +212,21 @@ def test_rebuild_streaming_scales(repo):
     )
 
 
-def test_scratch_seed_and_cluster_replace_keep_streaming_store_seams(repo, monkeypatch):
+def test_scratch_seed_and_cluster_swap_keep_store_seams(repo, monkeypatch):
+    """Pins the store-seam sequence + connection-type contract of
+    rebuild_unified_kg's two scratch tables.
+
+    Updated for write-lock slimming improvement point 2 (design doc §5.5):
+    _write_cluster_map_streamed no longer streams kg_cluster_scratch rows
+    through a cross-connection cursor into a Python-built INSERT
+    (stream_scratch_rows / replace_cluster_rows_streamed, both removed —
+    no callers left once this test stopped exercising them). It now stages
+    the seed->canonical mapping into kg_canonical_scratch (a batched
+    preparation segment, mirroring insert_scratch_rows below) and then
+    swaps concept_clusters in one pure-SQL DELETE+INSERT...SELECT
+    (swap_cluster_map_from_scratch) that joins the two scratch tables —
+    this test's job is to keep pinning THAT sequence instead.
+    """
     import sqlite3
     from contextlib import contextmanager
     runtime = object.__getattribute__(repo, "_runtime")
@@ -204,8 +273,10 @@ def test_scratch_seed_and_cluster_replace_keep_streaming_store_seams(repo, monke
     for name, cursor in (
         ("clear_scratch_run", False), ("seed_payload_rows", True),
         ("stream_seed_rows", True), ("insert_scratch_rows", False),
-        ("scratch_vector_rows", True), ("stream_scratch_rows", True),
-        ("replace_cluster_rows_streamed", False),
+        ("scratch_vector_rows", True),
+        ("clear_canonical_scratch_run", False),
+        ("insert_canonical_scratch_rows", False),
+        ("swap_cluster_map_from_scratch", False),
     ):
         spy(name, cursor=cursor)
     progress = []
@@ -220,10 +291,15 @@ def test_scratch_seed_and_cluster_replace_keep_streaming_store_seams(repo, monke
     assert names.index("seed_payload_rows") < names.index("stream_seed_rows")
     assert names.index("stream_seed_rows") < names.index("insert_scratch_rows")
     assert names.index("insert_scratch_rows") < names.index("scratch_vector_rows")
-    assert names.index("scratch_vector_rows") < names.index("stream_scratch_rows")
-    assert names.index("stream_scratch_rows") < names.index("replace_cluster_rows_streamed")
+    assert names.index("scratch_vector_rows") < names.index("clear_canonical_scratch_run")
+    assert names.index("clear_canonical_scratch_run") < names.index("insert_canonical_scratch_rows")
+    assert names.index("insert_canonical_scratch_rows") < names.index("swap_cluster_map_from_scratch")
     for name, db_id, *_ in events:
-        if name in {"clear_scratch_run", "insert_scratch_rows", "replace_cluster_rows_streamed"}:
+        if name in {
+            "clear_scratch_run", "insert_scratch_rows",
+            "clear_canonical_scratch_run", "insert_canonical_scratch_rows",
+            "swap_cluster_map_from_scratch",
+        }:
             assert db_id in opened_writes
         elif name not in {"write.begin", "write.commit"}:
             assert db_id in opened_reads
