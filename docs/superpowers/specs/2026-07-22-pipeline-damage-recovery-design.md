@@ -36,7 +36,7 @@
 | G5 | element 向量没有 missing/backfill 查询（chunk 侧与 KG 节点侧都有） | 全仓无命中 | 写了一半只能整源重跑 |
 | G6 | 索引水位存「全部 source id」而非「成功索引的 source id」；`rearm_auto_index` 全仓无调用方 | `backend/app/services/scale_index_builder.py:274`、`scale_artifact_runtime.py:677` | delta 恒为 0、fold 空跑；不重启不自愈 |
 | G7 | 增量融合跨 4 个独立写事务、无融合标记 | `knowledge_lifecycle.py:421-546` | 半程崩溃留下「concept 并了、claim 没并」，只能等下次全量 rebuild 纠正 |
-| G8 | `kg_cluster_scratch` 按 run_id 的残留行无 GC/TTL；fold 的 `.old` 目录崩溃后永久占盘 | `migrations.py:478`、`backend/app/repositories/filesystem/scale_artifact_store.py:103` | 磁盘与表膨胀 |
+| G8 | fold 的 `.old` 目录在崩溃窗口后永久占盘 | `backend/app/repositories/filesystem/scale_artifact_store.py:103` | 磁盘膨胀 |
 | G9 | `README.md:1070` 把只写不读的 `.jsonl` 日志描述成「续跑依据」 | — | 文档误导运维 |
 
 ## 目标
@@ -67,8 +67,8 @@
 
 边界（明确不放看板的）：
 
-- **跨库 / 磁盘级残留**（G8：`.tmp`/`.old` 目录、`kg_cluster_scratch` 孤儿行）
-  不属于单个 notebook，进 admin 面，不进看板。
+- **跨库 / 磁盘级残留**（G8：`.tmp` / `.old` 目录）不属于单个 notebook，
+  进 admin 面，不进看板。
 - **待确认中心（铃铛）只做提醒与跳转**，不承载体检详情。铃铛的语义是
   「待你确认的事」，而体检结果绝大多数是「系统能自己修的事」，塞进去会稀释
   它现有的三类待办语义。有异常时冒一条、点击直达看板对应板块即可。
@@ -213,7 +213,7 @@ hash 未命中 → 新文件；命中且有 KG → 跳过；命中且有 element
 
 ### admin 面
 
-G8 的跨库残留（`.tmp` / `.old` 目录、`kg_cluster_scratch` 孤儿行）作为 admin
+G8 的跨库残留（`.tmp` / `.old` 目录）作为 admin
 的运维动作，与看板解耦。
 
 ## 五、分期
