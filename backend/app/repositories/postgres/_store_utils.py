@@ -8,6 +8,10 @@ from typing import Any, Sequence
 from psycopg.types.json import Jsonb
 
 
+_NOTEBOOK_JSON_COLUMNS = ("expected_questions", "source_types", "taxonomy")
+_NOTEBOOK_TIMESTAMP_COLUMNS = ("created_at", "updated_at")
+
+
 def json_value(value: Any, default: Any) -> Any:
     if value is None or value == "":
         return default
@@ -29,6 +33,33 @@ def iso_timestamp(value: Any, *, empty: str = "") -> str:
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)
+
+
+def sqlite_compatible_row(
+    row: dict | None,
+    *,
+    json_columns: Sequence[str] = (),
+    timestamp_columns: Sequence[str] = (),
+) -> dict | None:
+    """Encode PG-native values at raw-row ports consumed like SQLite rows."""
+    if row is None:
+        return None
+    result = dict(row)
+    for column in json_columns:
+        if column in result and not isinstance(result[column], str):
+            result[column] = json.dumps(result[column], ensure_ascii=False)
+    for column in timestamp_columns:
+        if column in result:
+            result[column] = iso_timestamp(result[column])
+    return result
+
+
+def sqlite_compatible_notebook_row(row: dict | None) -> dict | None:
+    return sqlite_compatible_row(
+        row,
+        json_columns=_NOTEBOOK_JSON_COLUMNS,
+        timestamp_columns=_NOTEBOOK_TIMESTAMP_COLUMNS,
+    )
 
 
 def utc_now() -> datetime:

@@ -17,6 +17,7 @@ from app.repositories.postgres.kg_build_job_store import (
     KgBuildJobStore as PostgresKgBuildJobStore,
 )
 from app.repositories.postgres.notebook_store import NotebookStore as PostgresNotebookStore
+from app.repositories.postgres.schema_manifest import POSTGRES_ROWID_ORDINAL_TABLES
 from app.repositories.postgres.sharing_store import SharingStore as PostgresSharingStore
 from app.repositories.postgres.source_store import SourceStore as PostgresSourceStore
 from app.repositories.sqlite.chunk_store import ChunkStore as SqliteChunkStore
@@ -28,6 +29,7 @@ from app.repositories.sqlite.kg_build_job_store import (
 from app.repositories.sqlite.notebook_store import NotebookStore as SqliteNotebookStore
 from app.repositories.sqlite.sharing_store import SharingStore as SqliteSharingStore
 from app.repositories.sqlite.source_store import SourceStore as SqliteSourceStore
+from app.services.notebook_catalog import NotebookSummaryQuery
 
 
 NOW = "2026-07-22T10:00:00+00:00"
@@ -159,6 +161,30 @@ def _fetch_one(
 
 def _iso(value: object) -> str:
     return value.isoformat() if isinstance(value, datetime) else str(value)
+
+
+class _EmptySummaryQueries:
+    """Small neutral projection collaborator for exercising real from_row."""
+
+    @staticmethod
+    def visible_source_count(connection, notebook_id):
+        return 0
+
+    @staticmethod
+    def knowledge_type_count_rows(connection, notebook_id, statuses):
+        return []
+
+    @staticmethod
+    def mounted_bases_row(connection, notebook_id):
+        return []
+
+    @staticmethod
+    def notebook_has_kg(connection, notebook_id):
+        return False
+
+    @staticmethod
+    def visible_pending_kg_source_count(connection, notebook_id):
+        return 0
 
 
 @pytest.mark.parametrize(
@@ -328,6 +354,228 @@ def test_cross_owner_base_visibility_fails_closed_after_downgrade(
     edge = core_stores.notebooks.list_mount_edges_for_notebook(personal_id)[0]
     assert edge["active"] is False
     assert edge["name"] == "已不可用的知识库"
+
+
+def test_replace_mounts_reuses_one_batch_timestamp(core_stores: CoreStores):
+    owner = core_stores.identity.create_user("r00123456", "password-17")
+    active_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Mount active"), owner.id
+    )
+    base_ids = [
+        core_stores.notebooks.create_row(NotebookCreate(name=name), owner.id)
+        for name in ("Mount base A", "Mount base B")
+    ]
+    calls: list[str] = []
+
+    def increasing_clock() -> str:
+        value = f"2026-07-22T10:00:0{len(calls)}+00:00"
+        calls.append(value)
+        return value
+
+    store = type(core_stores.notebooks)(
+        core_stores.database,
+        new_id=_new_id_factory(),
+        now=increasing_clock,
+    )
+    store.replace_mounts(active_id, base_ids, owner.id)
+
+    with core_stores.database.connect() as connection:
+        rows = connection.execute(
+            (
+                "SELECT created_at FROM notebook_bases WHERE notebook_id=%s "
+                'ORDER BY base_notebook_id COLLATE "C"'
+                if core_stores.backend == "postgres"
+                else "SELECT created_at FROM notebook_bases WHERE notebook_id=? "
+                "ORDER BY base_notebook_id"
+            ),
+            (active_id,),
+        ).fetchall()
+    assert calls == ["2026-07-22T10:00:00+00:00"]
+    assert [_iso(row["created_at"]) for row in rows] == [calls[0], calls[0]]
+
+
+def test_notebook_raw_rows_feed_neutral_summary_json_lists(
+    core_stores: CoreStores,
+):
+    owner = core_stores.identity.create_user("s00123456", "password-18")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Raw JSON boundary"), owner.id
+    )
+    core_stores.notebooks.update_row(
+        notebook_id,
+        NotebookUpdate(
+            expected_questions=["怎么验证？", "How to verify?"],
+            source_types=["pdf", "markdown"],
+            taxonomy=["analog", "模拟"],
+        ),
+    )
+    core_stores.sharing.set_share_token(notebook_id, "shr-raw-json")
+    summaries = NotebookSummaryQuery(core_stores.database, _EmptySummaryQueries())
+
+    rows = [
+        core_stores.notebooks.get_row(notebook_id),
+        core_stores.sharing.notebook_row(notebook_id),
+    ]
+    with core_stores.database.connect() as connection:
+        rows.append(core_stores.sharing.notebook_row_on(connection, notebook_id))
+        projected = [summaries.from_row(connection, row) for row in rows]
+
+    for summary in projected:
+        assert summary.expected_questions == ["怎么验证？", "How to verify?"]
+        assert summary.source_types == ["pdf", "markdown"]
+        assert summary.taxonomy == ["analog", "模拟"]
+
+    # This sharing-list projection does not expose any JSON notebook columns,
+    # so it cannot accidentally cross the raw-row summary boundary.
+    shared_rows = core_stores.sharing.list_shared_by_owner(owner.id)
+    assert set(shared_rows[0].keys()) == {"id", "name", "share_token"}
+
+
+def test_copy_snapshot_reinsertion_preserves_all_copied_ordinal_table_order(
+    core_stores: CoreStores,
+):
+    owner = core_stores.identity.create_user("t00123456", "password-19")
+    source_notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Ordinal source"), owner.id
+    )
+    destination_notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Ordinal destination"), owner.id
+    )
+    for source_id, notebook_id in (
+        ("src-ordinal-source", source_notebook_id),
+        ("src-ordinal-destination", destination_notebook_id),
+    ):
+        core_stores.sources.insert_source(
+            source_id=source_id,
+            notebook_id=notebook_id,
+            title=source_id,
+            source_type="markdown",
+            status="parsed",
+            parse_status="parsed",
+            file_name=f"{source_id}.md",
+            file_path=f"uploads/{source_id}.md",
+            file_size=1,
+            file_hash=source_id,
+            summary="",
+            doc_type="",
+        )
+
+    # Physical/insertion and id order is a,z. The explicit observable order is
+    # then reversed to z,a, reproducing imported PostgreSQL rows whose heap
+    # order does not match their historical SQLite rowid/ordinal order.
+    with core_stores.database.write() as connection:
+        core_stores.sources.replace_elements(
+            connection,
+            "src-ordinal-source",
+            [
+                SourceElementWrite("el-a", "paragraph", "a", "a", {"rank": 2}),
+                SourceElementWrite("el-z", "paragraph", "z", "z", {"rank": 1}),
+            ],
+            created_at=NOW,
+        )
+    core_stores.chunks.replace_source_chunks(
+        "src-ordinal-source",
+        source_notebook_id,
+        [
+            ChunkWrite("chunk-a", "a", "a", ("el-a",)),
+            ChunkWrite("chunk-z", "z", "z", ("el-z",)),
+        ],
+        created_at=NOW,
+    )
+    for object_id, rank in (("ko-a", 2), ("ko-z", 1)):
+        _write_sql(
+            core_stores,
+            "INSERT INTO knowledge_objects"
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO knowledge_objects"
+            "(id,notebook_id,object_type,status,owner,payload,evidence,source_id,"
+            "created_at,updated_at) VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)",
+            (
+                object_id,
+                source_notebook_id,
+                "concept",
+                "approved",
+                owner.id,
+                f'{{"name":"{object_id}","rank":{rank}}}',
+                "[]",
+                "src-ordinal-source",
+                NOW,
+                NOW,
+            ),
+        )
+
+    for table, a_id, z_id in (
+        ("source_elements", "el-a", "el-z"),
+        ("chunks", "chunk-a", "chunk-z"),
+        ("knowledge_objects", "ko-a", "ko-z"),
+    ):
+        _write_sql(
+            core_stores,
+            f"UPDATE {table} SET rowid=? WHERE id=?",
+            f"UPDATE {table} SET ordinal=%s WHERE id=%s",
+            (800_001, a_id),
+        )
+        _write_sql(
+            core_stores,
+            f"UPDATE {table} SET rowid=? WHERE id=?",
+            f"UPDATE {table} SET ordinal=%s WHERE id=%s",
+            (800_000, z_id),
+        )
+
+    snapshot = core_stores.sharing.snapshot_copy_rows(source_notebook_id)
+    expected_source_ids = {
+        "source_elements": ["el-z", "el-a"],
+        "chunks": ["chunk-z", "chunk-a"],
+        "knowledge_objects": ["ko-z", "ko-a"],
+    }
+    assert set(POSTGRES_ROWID_ORDINAL_TABLES) & set(snapshot) == set(
+        expected_source_ids
+    )
+    for table, expected_ids in expected_source_ids.items():
+        assert [row["id"] for row in snapshot[table]] == expected_ids
+
+    element_map = {old: f"copy-{old}" for old in expected_source_ids["source_elements"]}
+    for table in ("source_elements", "chunks", "knowledge_objects"):
+        copied_rows = []
+        for row in snapshot[table]:
+            copied = dict(row)
+            copied["id"] = f"copy-{row['id']}"
+            if table == "source_elements":
+                copied["source_id"] = "src-ordinal-destination"
+            elif table == "chunks":
+                copied["notebook_id"] = destination_notebook_id
+                copied["source_id"] = "src-ordinal-destination"
+                copied["element_ids"] = (
+                    f'["{element_map["el-z"]}"]'
+                    if row["id"] == "chunk-z"
+                    else f'["{element_map["el-a"]}"]'
+                )
+            else:
+                copied["notebook_id"] = destination_notebook_id
+                copied["source_id"] = "src-ordinal-destination"
+            copied_rows.append(copied)
+        core_stores.sharing.insert_copy_rows(table, copied_rows, chunk_size=100)
+
+    for table, expected_ids in expected_source_ids.items():
+        where_column = "source_id" if table == "source_elements" else "notebook_id"
+        where_value = (
+            "src-ordinal-destination"
+            if table == "source_elements"
+            else destination_notebook_id
+        )
+        with core_stores.database.connect() as connection:
+            rows = connection.execute(
+                (
+                    f"SELECT id FROM {table} WHERE {where_column}=%s ORDER BY ordinal"
+                    if core_stores.backend == "postgres"
+                    else f"SELECT id FROM {table} WHERE {where_column}=? ORDER BY rowid"
+                ),
+                (where_value,),
+            ).fetchall()
+        assert [row["id"] for row in rows] == [
+            f"copy-{old_id}" for old_id in expected_ids
+        ]
 
 
 def test_copy_snapshot_excludes_backend_ordinals_and_serializes_json(

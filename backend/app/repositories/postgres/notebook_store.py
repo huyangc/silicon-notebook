@@ -3,7 +3,12 @@ from __future__ import annotations
 from typing import Callable, Literal, Sequence
 
 from app.models.notebooks import NotebookCreate, NotebookUpdate
-from app.repositories.postgres._store_utils import execute_many, jsonb, placeholders
+from app.repositories.postgres._store_utils import (
+    execute_many,
+    jsonb,
+    placeholders,
+    sqlite_compatible_notebook_row,
+)
 from app.repositories.postgres.database import PostgresDatabase
 from app.services.knowledge_contracts import USABLE_STATUSES  # noqa: F401
 
@@ -167,6 +172,7 @@ class NotebookStore:
             for value in dict.fromkeys(base_notebook_ids)
             if value and value != notebook_id
         ]
+        now = self.now()
         with self.database.write() as connection:
             connection.execute(
                 "DELETE FROM notebook_bases WHERE notebook_id=%s", (notebook_id,)
@@ -176,7 +182,7 @@ class NotebookStore:
                 "INSERT INTO notebook_bases"
                 "(notebook_id,base_notebook_id,created_at,created_by) VALUES (%s,%s,%s,%s)",
                 [
-                    (notebook_id, base_id, self.now(), created_by)
+                    (notebook_id, base_id, now, created_by)
                     for base_id in wanted
                 ],
             )
@@ -212,7 +218,7 @@ class NotebookStore:
             row = connection.execute(statement, (notebook_id,)).fetchone()
         if row is None:
             raise KeyError(notebook_id)
-        return row
+        return sqlite_compatible_notebook_row(row)
 
     def update_row(self, notebook_id: str, payload: NotebookUpdate) -> None:
         updates: list[str] = []

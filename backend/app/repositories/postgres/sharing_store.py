@@ -8,7 +8,11 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
-from app.repositories.postgres._store_utils import utc_now
+from app.repositories.postgres._store_utils import (
+    sqlite_compatible_notebook_row,
+    sqlite_compatible_row,
+    utc_now,
+)
 from app.repositories.postgres.database import PostgresDatabase
 
 
@@ -29,13 +33,13 @@ _COPY_SNAPSHOT_QUERIES: tuple[tuple[str, str], ...] = (
     (
         "source_elements",
         "SELECT e.* FROM source_elements e JOIN sources s ON s.id=e.source_id "
-        "WHERE s.notebook_id=%s",
+        "WHERE s.notebook_id=%s ORDER BY e.ordinal",
     ),
-    ("chunks", "SELECT * FROM chunks WHERE notebook_id=%s"),
+    ("chunks", "SELECT * FROM chunks WHERE notebook_id=%s ORDER BY ordinal"),
     (
         "knowledge_objects",
         "SELECT * FROM knowledge_objects WHERE notebook_id=%s "
-        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS})",
+        f"AND source_id NOT IN ({_KNOWHOW_SOURCE_IDS}) ORDER BY ordinal",
     ),
     (
         "knowledge_relations",
@@ -112,7 +116,6 @@ _COPY_VALIDATED_JOIN_TABLES = (
 )
 _COPY_TABLES = frozenset(table for table, _query in _COPY_SNAPSHOT_QUERIES)
 _JSON_COLUMNS = {
-    "notebooks": {"expected_questions", "source_types", "taxonomy"},
     "source_paper_meta": {"keywords", "raw_json"},
     "source_elements": {"metadata"},
     "chunks": {"element_ids"},
@@ -122,15 +125,16 @@ _JSON_COLUMNS = {
 
 
 def _snapshot_compat_row(table: str, row: dict) -> dict:
-    result = dict(row)
+    if table == "notebooks":
+        result = sqlite_compatible_notebook_row(row)
+    else:
+        result = sqlite_compatible_row(row, json_columns=_JSON_COLUMNS.get(table, set()))
+    assert result is not None
     # SQLite SELECT * never exposed its implicit rowid. PostgreSQL's explicit
     # compatibility ordinal must likewise stay adapter-private: a deep copy is
     # a new insertion and must allocate a fresh ordinal instead of colliding
     # with the source row's globally unique value.
     result.pop("ordinal", None)
-    for column in _JSON_COLUMNS.get(table, set()):
-        if column in result and not isinstance(result[column], str):
-            result[column] = json.dumps(result[column], ensure_ascii=False)
     return result
 
 
@@ -193,15 +197,17 @@ class SharingStore:
 
     def notebook_row(self, notebook_id: str) -> dict | None:
         with self.database.connect() as connection:
-            return connection.execute(
+            row = connection.execute(
                 "SELECT * FROM notebooks WHERE id=%s", (notebook_id,)
             ).fetchone()
+        return sqlite_compatible_notebook_row(row)
 
     @staticmethod
     def notebook_row_on(connection, notebook_id: str) -> dict | None:
-        return connection.execute(
+        row = connection.execute(
             "SELECT * FROM notebooks WHERE id=%s", (notebook_id,)
         ).fetchone()
+        return sqlite_compatible_notebook_row(row)
 
     def shared_preview_rows(self, notebook_id: str) -> tuple[str, list[str]]:
         with self.database.connect() as connection:
