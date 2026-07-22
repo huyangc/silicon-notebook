@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any
 
 from app.core.cache.backend import CacheAdmin, CacheBackend, NoCacheBackend
-from app.core.cache.policy import embed_key, is_cacheable_llm_response, llm_key
+from app.core.cache.policy import (
+    embed_key,
+    embedding_batch_dim,
+    is_cacheable_embedding,
+    is_cacheable_llm_response,
+    llm_key,
+)
 # 仓库根锚点的**唯一定义点**。不在这里重新 `parents[N]` 数一遍目录层数：那是第
 # 二套锚定机制，与 config 的口径会各自漂移（「双 .local」事故正是同一个病）。
 # 同款复用见 llm_logging.py 从 event_logging 取 _ROOT_DIR。
@@ -19,6 +25,7 @@ from app.core.config import _ROOT_DIR
 __all__ = [
     "CacheBackend", "CacheAdmin", "NoCacheBackend",
     "make_cache_backend", "llm_key", "embed_key", "is_cacheable_llm_response",
+    "embedding_batch_dim", "is_cacheable_embedding",
 ]
 
 

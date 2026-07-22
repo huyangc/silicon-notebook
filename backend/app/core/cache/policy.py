@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 
 def is_cacheable_llm_response(content: str, finish_reason: Optional[str]) -> bool:
@@ -35,6 +35,46 @@ def is_cacheable_llm_response(content: str, finish_reason: Optional[str]) -> boo
     except Exception:
         return False
     return True
+
+
+def embedding_batch_dim(vectors: Sequence[Sequence[float]]) -> int:
+    """这一份 embedding 响应的**公共维度**；不可信时返回 0。
+
+    真实 embedding 服务对同一 model 恒返回定长向量，所以「同一次响应里出现了两种
+    长度」本身就是响应退化的信号：无从判断哪一种才是对的，只能整份作废。返回 0
+    让 is_cacheable_embedding 对该批每一条都判否——0 不可能等于任何合法维度，也
+    不可能被空向量（len 0）蒙混过关，因为那里另有一道非空门。
+
+    与 LLM 侧 is_cacheable_llm_response 对称：宁可多打一次后端，也不把一份可疑
+    响应固化整个 TTL（默认 90 天）。
+    """
+    dims = {len(v) for v in vectors}
+    if len(dims) != 1:
+        return 0
+    return dims.pop()
+
+
+def is_cacheable_embedding(vector: Sequence[float], expected_dim: int) -> bool:
+    """这一条向量值不值得写进缓存。
+
+    退化响应的真实形态是**条数正确、内容为空**（`[[]]`）：长度对得上，上游
+    「返回条数与输入不符 → raise」那道门放它过，于是一次服务抖动被固化 90 天。
+    后果比 LLM 侧更隐蔽——零向量在检索层不报错，只是静默零召回；而且**服务恢复
+    也修不好**：命中缓存就不会再打后端，只能手动删缓存文件，而没人知道要去删。
+
+    两道门：
+
+    1. **空向量**：`[]`（或任何 len 0）一律不写。这是实测到的退化形态。
+    2. **与本批公共维度不符**：`expected_dim` 由 embedding_batch_dim 给出，
+       批内维度不一致时它是 0，于是整批都写不进去。
+
+    expected_dim 是**必填位置参数**，不给默认值：留了默认值，调用方漏传就会静默
+    退化成只剩第 1 道门，而那正是本次评审抓到的缺陷形状。
+    """
+    n = len(vector)
+    if n == 0:
+        return False
+    return n == expected_dim
 
 
 def llm_key(model: str, messages: List[Dict[str, str]], schema_hint: str) -> str:

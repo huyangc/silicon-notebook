@@ -106,6 +106,77 @@ def test_length_mismatch_response_is_not_cached(tmp_path):
     assert backend.stats()["entries"] == 0
 
 
+def test_degraded_empty_vectors_are_not_cached_and_recovery_refetches(tmp_path):
+    """条数正确、内容为空（`[[]]`）的退化响应绝不入缓存。
+
+    这是 embedding 侧真实的退化形态，也是"长度不符 → raise"那道门唯一漏掉的：
+    条数对得上，异常不会抛。写进去的后果比 LLM 侧更隐蔽——零向量在检索层不报错，
+    只是静默零召回；而且**服务恢复也修不好**，命中缓存就不再打后端，只能有人
+    去手动删缓存文件。
+
+    评审实测的缺陷形态：
+        degraded call -> [[]] ; cache entries after degraded call: 1
+        retry after recovery -> [[]] ; backend calls total: 1   ← 根本没重试
+
+    行为断言（后端无关）：这条 key 没被写进去，且服务恢复后第二次真的重打了后端
+    并拿到好向量。
+    变异验证：去掉 cached_embedder 写入循环里的 is_cacheable_embedding 门后转红。
+    """
+
+    class FlakyEmbedder(RecordingEmbedder):
+        """先返回退化的空向量，healthy=True 之后恢复正常。"""
+
+        healthy = False
+
+        def embed_texts(self, texts):
+            self.calls.append(list(texts))
+            if self.healthy:
+                return [self._vec(t) for t in texts]
+            return [[] for _ in texts]          # 条数正确，内容退化
+
+    inner = FlakyEmbedder()
+    backend = SqliteCacheBackend(str(tmp_path / "c.db"))
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000)
+
+    assert cached.embed_texts(["a"]) == [[]], "本次调用照常返回后端给的东西"
+    assert backend.get(cached._key("a")) is None, "退化的空向量被写进了缓存"
+
+    inner.healthy = True
+    assert cached.embed_texts(["a"]) == [inner._vec("a")], "服务恢复后仍在回放坏向量"
+    assert len(inner.calls) == 2, "第二次没重新请求后端——说明命中了缓存里的空向量"
+
+
+def test_inconsistent_vector_dims_in_one_response_are_not_cached(tmp_path):
+    """同一次响应里出现两种长度 → 整份作废，一条都不写。
+
+    真实服务对同一 model 恒返回定长向量，长度不一致说明这份响应本身不可信，
+    无从判断哪一种才是对的。只挡"空向量"那一道门放它过（两条都非空）。
+    变异验证：把 policy.embedding_batch_dim 的维度一致性判断删掉后本测试转红
+    （上面那条因为向量为空仍会绿，挡不住这个变异）。
+    """
+
+    class RaggedEmbedder(RecordingEmbedder):
+        def embed_texts(self, texts):
+            self.calls.append(list(texts))
+            # 两条都非空，但维度不同（截断/拼接类退化的形态）。
+            return [[1.0, 2.0, 3.0, 4.0], [1.0, 2.0]]
+
+    inner = RaggedEmbedder()
+    backend = SqliteCacheBackend(str(tmp_path / "c.db"))
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000)
+
+    cached.embed_texts(["a", "b"])
+    assert backend.get(cached._key("a")) is None, "维度存疑的响应被写进了缓存(a)"
+    assert backend.get(cached._key("b")) is None, "维度存疑的响应被写进了缓存(b)"
+
+
+def test_healthy_response_is_still_cached(tmp_path):
+    """准入规则不能靠"一律不写"蒙混过关——正常响应必须照旧入缓存。"""
+    inner, cached = _mk(tmp_path)
+    cached.embed_texts(["a"])
+    assert cached._backend.get(cached._key("a")) is not None, "正常向量没能写进缓存"
+
+
 def test_length_mismatch_raises_instead_of_returning_misaligned_vectors():
     """部分命中 + 后端短应答：绝不能把这份响应当成对 texts 的应答返回。
 
