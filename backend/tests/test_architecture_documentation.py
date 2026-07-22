@@ -52,6 +52,32 @@ def _assert_phrases(expected: dict[str, str]) -> None:
         assert phrase in _read(name), f"{name} is missing contract phrase: {phrase}"
 
 
+def test_postgresql_configuration_documentation_keeps_sqlite_as_the_current_runtime():
+    _assert_phrases(
+        {
+            "README.md": "SQLite remains the shipped default and formal runtime for now.",
+            "README_zh.md": "SQLite 仍是当前随附的默认正式运行时。",
+            "AGENTS.md": "SQLite remains the shipped default and formal runtime for now.",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "does not perform a migration or switch the repository",
+            "README_zh.md": "不会执行迁移或切换 repository",
+            "AGENTS.md": "does not perform a migration or switch the repository",
+        }
+    )
+    _assert_phrases(
+        {
+            "README.md": "redact credentials and options",
+            "README_zh.md": "会隐藏凭据和连接选项",
+            "AGENTS.md": "redact credentials and options",
+        }
+    )
+    for name in ("README.md", "README_zh.md", "AGENTS.md"):
+        assert "SHADOW_DATABASE_URL" in _read(name)
+
+
 def test_application_boundary_docs_name_actual_facades_clients_and_gate_contract():
     """Documentation records stable ownership, not source layout or totals."""
     _assert_phrases(

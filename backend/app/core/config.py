@@ -46,6 +46,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
         populate_by_name=True,
+        hide_input_in_errors=True,
     )
 
     environment: str = Field("development", validation_alias="SILICON_NOTEBOOK_ENV")

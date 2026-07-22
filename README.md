@@ -714,8 +714,13 @@ tracking. Only turn it on if you have understood and accounted for both costs.
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout in ms (default 30000)
 SQLITE_CACHE_SIZE_KB    # Per-connection SQLite page cache in KB (negative = KB). Connections are reused per-thread; total memory ≈ threads × |value| (default -16384)
 DATABASE_URL            # SQLite path (default .local/silicon_notebook.db)
+SHADOW_DATABASE_URL     # parsed only; inert until the later shadow-sync phase
 SILICON_NOTEBOOK_STORAGE_DIR   # uploaded file storage directory (default .local/storage)
 ```
+
+SQLite remains the shipped default and formal runtime for now. Settings also accepts
+`postgresql://` and legacy `postgres://` URLs (normalizing the legacy scheme), and parses
+`SHADOW_DATABASE_URL` without letting it select the active backend. URL diagnostics redact credentials and options. Configuring PostgreSQL does not perform a migration or switch the repository; it only prepares a validated connection value for the later adapter and shadow work.
 
 **Retrieval:**
 
@@ -1198,7 +1203,7 @@ Must be run from the main checkout root (it needs the real `.env`/database confi
 - LLM-backed KG extraction requires configured `OPENAI_COMPAT_*`; offline smoke tests seed KG objects explicitly when retrieval/governance assertions are needed.
 - Two-tier and deep reasoning are early: the graph-reasoning Ask mode (`mode="graph"`) is opt-in/experimental (the Ask panel toggle still drives the default `chunk`/`reasoning` paths). Marking a notebook `base`/`personal` (via `POST /notebooks/{id}/tier`), the edge-trust review queue, and promotion (personal→base) all now have dedicated front-end controls in the analysis toolbar; publishing a notebook as a public knowledge base only makes it mountable — tier-aware federation and the base-wins conflict rule activate only for notebooks that explicitly mount it as a reference library.
 - Notebook sharing is link-based copy/read-only membership, not live collaborative editing; owners retain write authority.
-- PostgreSQL + pgvector are not required for the local beta and are deferred. Until a PostgreSQL repository exists, non-`sqlite:///` `DATABASE_URL` values fail fast instead of silently falling back to a local database.
+- PostgreSQL + pgvector are not required for the local beta and the shipped formal runtime remains SQLite. PostgreSQL configuration is accepted and safely redacted, but it does not yet migrate data or switch the repository.
 - The `off`-mode PDF fallback uses pypdf layout extraction (decent reading order, no new deps) — formulas, tables, and scanned/image PDFs still need MinerU; see "PDF parsing with MinerU".
 - User memory remains manual opt-in only; no automatic memory behavior has been added.
 

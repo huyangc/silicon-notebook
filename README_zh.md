@@ -581,8 +581,13 @@ worker。每多一个 worker 就多一份内存中的状态（大型 KG/ANN 索�
 DB_BUSY_TIMEOUT_MS      # SQLite busy_timeout（毫秒，默认 30000）
 SQLITE_CACHE_SIZE_KB    # 每连接 SQLite 页缓存(KB,负值=KB)。连接按线程复用,总内存≈线程数×|值|（默认 -16384）
 DATABASE_URL            # SQLite 路径（默认 .local/silicon_notebook.db）
+SHADOW_DATABASE_URL     # 仅解析；在后续影子同步阶段前不生效
 SILICON_NOTEBOOK_STORAGE_DIR   # 上传文件存储目录（默认 .local/storage）
 ```
+
+SQLite 仍是当前随附的默认正式运行时。Settings 也接受 `postgresql://` 与旧版
+`postgres://` URL（后者会归一化），并会解析 `SHADOW_DATABASE_URL`，但不会让它选择
+当前 backend。URL 诊断会隐藏凭据和连接选项。配置 PostgreSQL 不会执行迁移或切换 repository；它只为后续 adapter 与影子同步工作准备经过验证的连接值。
 
 **检索：**
 
@@ -1041,7 +1046,7 @@ v21 为 `(column_id, JS-trim(content_md), row_id)` 建立索引；guarded 成员
 - KG 抽取需要配置 `OPENAI_COMPAT_*`；离线 smoke 在需要验证检索/治理时会显式写入 KG 对象。
 - 两层与深度推理尚属早期：图推理 Ask 模式（`mode="graph"`）为 opt-in / 实验性（Ask 面板开关仍驱动默认的 `chunk`/`reasoning` 路径）。把 notebook 标为 `base`/`personal`（经 `POST /notebooks/{id}/tier`）、边可信审核队列、晋升（个人→基准）现都已有专属前端控件（在分析工具栏）；把一个 notebook 发布为公共知识库只是让它可被挂载——tier 感知联合检索与 base 优先冲突规则只对显式把它挂为参考库的笔记本生效。
 - Notebook 分享采用链接复制/只读成员方式，不是实时协同编辑；写权限仍归 owner。
-- PostgreSQL + pgvector 暂不阻塞本机 beta，后续再迁移。在 PostgreSQL repository 实现前，非 `sqlite:///` 的 `DATABASE_URL` 会直接报错，不再静默落到本地数据库。
+- PostgreSQL + pgvector 暂不阻塞本机 beta，当前随附的正式运行时仍是 SQLite。PostgreSQL 配置可以被接受并安全脱敏，但尚不会迁移数据或切换 repository。
 - `off` 模式 PDF 回退用 pypdf layout 抽取（阅读顺序尚可、零新依赖）；但公式、表格、扫描/图片型 PDF 仍需 MinerU，见"用 MinerU 解析 PDF"。
 - 用户记忆保持手动 opt-in，当前没有自动记忆行为。
 

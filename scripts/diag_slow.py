@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import importlib.util
 import json
 import os
 import sqlite3
@@ -40,6 +41,27 @@ INTEREST_KINDS = (
 # 「大库」画像阈值:对象+chunk 超过它才打印逐项诊断旗标
 BIG_NB_ROWS = 20_000
 _IN_CHUNK = 800   # 只读 IN(...) 批大小,留余量避开 SQLITE_MAX_VARIABLE_NUMBER
+
+
+def _redact_database_url(raw):
+    """Load the isolated core URL redactor without importing the app package."""
+    module_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "..",
+        "backend",
+        "app",
+        "core",
+        "database_url.py",
+    )
+    try:
+        spec = importlib.util.spec_from_file_location("silicon_notebook_database_url", module_path)
+        if spec is None or spec.loader is None:
+            return "<invalid/redacted database URL>"
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.redact_database_url(raw)
+    except Exception:  # diagnostics must fail closed rather than print the raw URL
+        return "<invalid/redacted database URL>"
 
 
 def _pct(sorted_vals, p):
@@ -767,6 +789,8 @@ def report_env(root):
     for k, v in raw.items():
         if any(m in k.upper() for m in SECRET_MARKERS):
             seen[k] = "<已配置,值不显示>" if v.strip() else "<空>"
+        elif k == "DATABASE_URL":
+            seen[k] = _redact_database_url(v.strip())
         elif k in interesting:
             seen[k] = v.strip()
     for k in interesting:

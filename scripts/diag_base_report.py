@@ -33,6 +33,7 @@ for _cand in (os.path.join(_here, "..", "backend"), _here, os.path.join(_here, "
         sys.path.insert(0, os.path.abspath(_cand)); break
 
 from app.core.config import Settings                     # noqa: E402
+from app.core.database_url import redact_database_url    # noqa: E402
 from app.services.sqlite_repository import SQLiteRepository  # noqa: E402
 
 
@@ -46,7 +47,7 @@ def main():
     repo = SQLiteRepository(s)
     print("=" * 60)
     print("== 0. 环境 ==")
-    print("  DATABASE_URL      :", getattr(s, "database_url", "?"))
+    print("  DATABASE_URL      :", redact_database_url(getattr(s, "database_url", "?")))
     print("  storage_dir       :", getattr(s, "silicon_notebook_storage_dir", getattr(s, "storage_dir", "?")))
     print("  copy_max_rows     :", getattr(s, "notebook_copy_max_rows", "?"),
           " copy_max_bytes:", getattr(s, "notebook_copy_max_bytes", "?"))
