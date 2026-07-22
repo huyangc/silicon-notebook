@@ -97,9 +97,10 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # knowhow_cell_code 表 + role 词表重映射 migration、v19
     # notebook_assets.source_id 列 + 索引 migration、v20 notebook_bases 挂载
     # 表 + promotion_candidates.target_base_id 列，以及 v21 normalized-anchor
-    # expression index、v22 kg_build_jobs migration，以及 v23
-    # model_service_status migration 合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 23
+    # expression index、v22 kg_build_jobs migration、v23 legacy
+    # model_service_status，以及 v24 credential scrub + system status table
+    # 合法升级到当前版本。
+    assert snapshot["schema"]["user_version"] == 24
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

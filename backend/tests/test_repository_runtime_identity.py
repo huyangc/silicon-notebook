@@ -33,8 +33,6 @@ def test_settings_storage_and_database_identities(repo):
     assert repo.event_log is runtime.event_log
     assert repo.db_path is runtime.database.db_path
     assert repo._write_lock is runtime.database.write_lock
-    assert repo._user_model_cfg_cache is runtime.identity.model_config_cache
-    assert repo._user_model_cfg_cache is runtime.models.model_config_cache
 
 
 def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_path):
@@ -55,8 +53,11 @@ def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_pa
     assert runtime.source_files.storage_dir is replacement_dir
     assert runtime.notebook_copies._storage_dir() is replacement_dir
     assert runtime.source_ingestion.source_files.storage_dir is replacement_dir
-    assert runtime.source_embedding.embedder() is replacement_embedder
-    assert runtime.source_ingestion.embedding.embedder() is replacement_embedder
+    assert (
+        runtime.source_embedding.embedder("source_element_embedding")
+        is runtime.models.embedding("source_element_embedding")
+    )
+    assert runtime.source_ingestion.embedding is runtime.source_embedding
     assert repo.retrieval.candidates.embedder is replacement_embedder
     assert repo.retrieval.graph.embedder is replacement_embedder
     assert runtime.notebook_languages is replacement_languages
@@ -65,14 +66,11 @@ def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_pa
     assert repo.retrieval.graph._notebook_langs_cache is replacement_languages
 
 
-def test_model_client_setters_write_through_to_the_provider(repo):
-    llm = object()
-    repo.llm_client = llm
-    assert repo._runtime.models._system_llm_client is llm
-    assert repo.llm_client is llm
-    rerank = object()
-    repo.rerank_client = rerank
-    assert repo._runtime.models._system_rerank_client is rerank
+def test_model_clients_are_read_only_workload_adapters(repo):
+    assert repo.llm_client is repo._runtime.models.chat("ask_answer")
+    assert repo.rerank_client is repo._runtime.models.rerank("retrieval_rerank")
+    with pytest.raises(AttributeError):
+        repo.llm_client = object()
 
 
 def test_retrieval_and_evidence_services_have_one_owner(repo):

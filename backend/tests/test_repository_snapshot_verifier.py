@@ -388,6 +388,7 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_23(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE system_model_service_status")        # _migration_24
         rollback.execute("DROP TABLE model_service_status")               # _migration_23
         rollback.execute("DROP TABLE kg_build_jobs")                     # _migration_22
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")  # _migration_21
@@ -432,6 +433,7 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_23(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
@@ -473,6 +475,7 @@ def test_deployed_v21_database_verifies_through_migrations_22_and_23(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("PRAGMA user_version = 21")
@@ -497,6 +500,7 @@ def test_deployed_v22_database_verifies_through_model_service_status(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("PRAGMA user_version = 22")
         rollback.commit()
@@ -508,6 +512,39 @@ def test_deployed_v22_database_verifies_through_model_service_status(tmp_path):
     assert result.ok, result.discrepancies
     assert result.source_user_version == 22
     assert result.final_user_version == module.SCHEMA_VERSION
+
+
+def test_deployed_v23_database_verifies_credential_and_status_scrub(tmp_path):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    with sqlite3.connect(database) as rollback:
+        rollback.execute("DROP TABLE system_model_service_status")
+        rollback.execute(
+            "UPDATE user_profiles SET model_settings=? WHERE user_id='user-local'",
+            ('{"llm":{"api_key":"credential-must-be-scrubbed"}}',),
+        )
+        rollback.execute(
+            "INSERT INTO model_service_status VALUES (?,?,?,?,?,?,?,?)",
+            (
+                "user-local", "llm", "old-fingerprint", "error", 0,
+                "upstream_error", "observed_failure",
+                "2030-01-01T00:00:00+00:00",
+            ),
+        )
+        rollback.execute("PRAGMA user_version = 23")
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.source_user_version == 23
+    assert result.final_user_version == module.SCHEMA_VERSION
+    assert result.normalized["scrubbed_model_profiles"] == 1
+    assert result.normalized["scrubbed_model_statuses"] == 1
 
 
 @pytest.mark.parametrize(

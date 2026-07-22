@@ -29,6 +29,7 @@ import time
 import zipfile
 from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Iterator, Mapping, Sequence
 from unittest import mock
 
@@ -245,8 +246,7 @@ def _owner_for(name: str) -> str:
         return AMBIGUOUS_MEMBER_OWNERS[name]
     identity = {
         "current_user", "create_user", "authenticate_user", "create_session",
-        "resolve_session", "delete_session", "get_user_model_settings",
-        "set_user_model_settings", "resolve_model_config", "list_user_usage",
+        "resolve_session", "delete_session", "list_user_usage",
         "list_user_notebooks",
     }
     provider = {
@@ -925,18 +925,58 @@ def _deterministic_runtime() -> Iterator[None]:
         stack.enter_context(mock.patch.object(rerank_client, "RerankClient", _FakeRerankAdapter))
         stack.enter_context(mock.patch.object(model_provider, "RerankClient", _FakeRerankAdapter))
         stack.enter_context(mock.patch.object(time, "perf_counter", fixed_perf))
+        stack.enter_context(
+            mock.patch.dict(
+                os.environ,
+                {"FIXTURE_MODEL_API_KEY": "fixture-secret"},
+            )
+        )
         stack.enter_context(mock.patch.object(socket, "create_connection", no_network))
         stack.enter_context(mock.patch.object(socket.socket, "connect", no_network))
         yield
 
 
-def _offline_settings(database: Path, storage: Path, *, required: bool = False):
+def _offline_settings(
+    database: Path,
+    storage: Path,
+    *,
+    required: bool = False,
+    configured: bool = False,
+):
     from app.core.config import Settings
+    from app.services.model_registry import WORKLOADS
+
+    model_services_config = ""
+    if configured:
+        config_path = database.parent / "fixture-model-services.toml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        bindings = "\n".join(
+            f'{workload_id} = "fixture_chat"'
+            for workload_id, workload in WORKLOADS.items()
+            if workload.kind == "chat"
+        )
+        config_path.write_text(
+            '''[services.fixture_chat]
+display_name = "FixtureChat"
+kind = "chat"
+protocol = "openai"
+base_url = "https://fixture.invalid/v1"
+model = "fixture-chat"
+api_key_env = "FIXTURE_MODEL_API_KEY"
+max_concurrency = 2
+
+[bindings]
+'''
+            + bindings
+            + "\n",
+            encoding="utf-8",
+        )
+        model_services_config = str(config_path)
 
     return Settings(
         database_url=f"sqlite:///{database}",
         storage_dir=str(storage),
-        model_services_config="",
+        model_services_config=model_services_config,
         embed_dim=4,
         mineru_mode="off",
         mineru_api_url="",
@@ -958,10 +998,23 @@ def _offline_settings(database: Path, storage: Path, *, required: bool = False):
     )
 
 
-def _new_offline_repo(database: Path, storage: Path, *, required: bool = False):
+def _new_offline_repo(
+    database: Path,
+    storage: Path,
+    *,
+    required: bool = False,
+    configured: bool = False,
+):
     from app.services.sqlite_repository import SQLiteRepository
 
-    return SQLiteRepository(_offline_settings(database, storage, required=required))
+    return SQLiteRepository(
+        _offline_settings(
+            database,
+            storage,
+            required=required,
+            configured=configured,
+        )
+    )
 
 
 def _evidence() -> dict[str, object]:
@@ -1926,7 +1979,10 @@ def collect_ask_goldens() -> dict[str, object]:
             ):
                 case_root = root / case_name
                 repo = _new_offline_repo(
-                    case_root / "fixture.db", case_root / "storage", required=required
+                    case_root / "fixture.db",
+                    case_root / "storage",
+                    required=required,
+                    configured=case_name != "unconfigured_model",
                 )
                 notebook_id = _seed_ask_repository(repo, include_kg=include_kg)
                 # Task 24: the graph engine lives in AskService and consumes the
@@ -1989,7 +2045,7 @@ def _serialization_contract() -> dict[str, object]:
     from fastapi.testclient import TestClient
 
     from app import main as app_main
-    from app.api import deps, routes
+    from app.api import deps
     from app.core import event_logging
     from app.models.schemas import AskRequest
     from app.services.repository import UploadedSourceFile
@@ -1999,12 +2055,17 @@ def _serialization_contract() -> dict[str, object]:
         repo = _new_offline_repo(root / "api.db", root / "storage")
         repo.settings.viz_sync_build_max_objects = 1
 
+        def fixture_repository():
+            return repo
+
+        fixture_repository.cache_info = lambda: SimpleNamespace(currsize=1)
+        fixture_repository.cache_clear = lambda: None
+
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(app_main, "get_settings", lambda: repo.settings))
-            stack.enter_context(mock.patch.object(app_main, "repository", lambda: repo))
+            stack.enter_context(mock.patch.object(app_main, "repository", fixture_repository))
             stack.enter_context(mock.patch.object(deps, "get_settings", lambda: repo.settings))
-            stack.enter_context(mock.patch.object(deps, "repository", lambda: repo))
-            stack.enter_context(mock.patch.object(routes, "repository", lambda: repo))
+            stack.enter_context(mock.patch.object(deps, "repository", fixture_repository))
             stack.enter_context(
                 mock.patch.object(event_logging._archive_pool, "submit", lambda *_a, **_k: None)
             )

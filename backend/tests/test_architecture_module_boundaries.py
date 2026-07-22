@@ -8,9 +8,6 @@ from app.services.sqlite_repository import SQLiteRepository
 
 IDENTITY_METHODS = (
     "current_user",
-    "get_user_model_settings",
-    "set_user_model_settings",
-    "resolve_model_config",
     "create_user",
     "authenticate_user",
     "create_session",

@@ -56,7 +56,6 @@ RUNTIME_COMPONENT_OWNERS = {
     "knowledge_query": "KnowledgeQueryService",
     "models": "ModelProvider",
     "memory_service": "MemoryService",
-    "set_model_config_cache": "IdentityStore",
     "set_unified_cache": "RetrievalSnapshotCache",
     "set_auto_index_checked": "ScaleArtifactRuntime",
     "notebook_store": "NotebookStore",

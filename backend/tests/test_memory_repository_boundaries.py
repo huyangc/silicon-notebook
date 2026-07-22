@@ -105,7 +105,10 @@ def test_runtime_owns_memory_components_and_facade_has_explicit_delegates(tmp_pa
     assert runtime.memory_service.store is runtime.memory_store
     assert runtime.memory_service.ask_state is runtime.ask_state
     assert runtime.memory_service.notebooks is runtime.sharing
-    assert runtime.memory_service.embedder is repo.embedder
+    assert (
+        runtime.memory_service.embedder
+        is runtime.models.embedding("memory_embedding")
+    )
 
     for name in (
         "create_memory_candidate",

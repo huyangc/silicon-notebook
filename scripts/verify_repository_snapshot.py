@@ -84,6 +84,7 @@ SPECIAL_TABLES = (
     "sources",
     "extraction_runs",
     "kg_build_jobs",
+    "model_service_status",
 )
 
 # The admin in-place upgrade (`_seed`) rewrites exactly these user-local
@@ -1097,6 +1098,8 @@ def _empty_normalized() -> Dict[str, int]:
         "seeded_concept_whitelist": 0,
         "seeded_object_schemas": 0,
         "admin_upgraded": 0,
+        "scrubbed_model_profiles": 0,
+        "scrubbed_model_statuses": 0,
     }
 
 
@@ -1106,6 +1109,8 @@ def _compare_special_rows(
     post_rows: Dict[Tuple[Any, ...], Dict[str, Any]],
     normalized: Dict[str, int],
     problems: List[str],
+    *,
+    allow_model_scrub: bool = False,
 ) -> None:
     def rows_equal(pre: Dict[str, Any], post: Dict[str, Any], skip: frozenset) -> bool:
         keys = set(pre) | set(post)
@@ -1127,8 +1132,21 @@ def _compare_special_rows(
     for key, pre_row in pre_rows.items():
         post_row = post_rows.get(key)
         if post_row is None:
+            if allow_model_scrub and table == "model_service_status":
+                normalized["scrubbed_model_statuses"] += 1
+                continue
             problems.append(f"table={table} reason=row-deleted")
             continue
+        if allow_model_scrub and table == "user_profiles":
+            if (
+                post_row.get("model_settings") == "{}"
+                and rows_equal(
+                    pre_row, post_row, frozenset({"model_settings"})
+                )
+            ):
+                if pre_row.get("model_settings") != "{}":
+                    normalized["scrubbed_model_profiles"] += 1
+                continue
         if table == "users" and pre_row.get("id") == "user-local":
             if not rows_equal(pre_row, post_row, ADMIN_UPGRADE_COLUMNS):
                 problems.append(f"table={table} reason=admin-row-changed-beyond-upgrade")
@@ -1367,6 +1385,9 @@ def compare_snapshots(
                 post.special_rows.get(name, {}),
                 normalized,
                 problems,
+                allow_model_scrub=(
+                    pre.user_version < 24 <= post.user_version
+                ),
             )
             if problems:
                 for problem in problems:
@@ -1807,6 +1828,39 @@ MIGRATION_MANIFEST[(22, 23)] = {
     "tables": MODEL_SERVICE_STATUS_TABLE,
     "columns": {},
     "indexes": MODEL_SERVICE_STATUS_INDEXES,
+    "triggers": {},
+    "views": {},
+}
+
+# v24: deployment-wide model-service health plus an irreversible data-only
+# scrub of per-user settings and legacy status rows. The retained v23 table and
+# user_profiles column are unchanged structurally; compare_snapshots validates
+# the only permitted row changes separately.
+SYSTEM_MODEL_SERVICE_STATUS_TABLE = {
+    "system_model_service_status": """CREATE TABLE system_model_service_status (
+                  service_id TEXT PRIMARY KEY,
+                  config_fingerprint TEXT NOT NULL,
+                  status TEXT NOT NULL CHECK (status IN ('ok', 'error')),
+                  latency_ms INTEGER NOT NULL DEFAULT 0,
+                  code TEXT NOT NULL DEFAULT '',
+                  trigger TEXT NOT NULL CHECK (
+                    trigger IN ('manual_test', 'observed_failure', 'recovery_probe')
+                  ),
+                  support_id TEXT NOT NULL DEFAULT '',
+                  checked_at TEXT NOT NULL
+                )""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 24, *key[2:]): {
+        **manifest,
+        "tables": {**manifest["tables"], **SYSTEM_MODEL_SERVICE_STATUS_TABLE},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(23, 24)] = {
+    "tables": SYSTEM_MODEL_SERVICE_STATUS_TABLE,
+    "columns": {},
+    "indexes": {},
     "triggers": {},
     "views": {},
 }

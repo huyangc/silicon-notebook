@@ -69,8 +69,12 @@ FACADE_IMPORT_TARGETS = {
 
 PRIVATE_REASON_BY_PATH = {
     "backend/app/api/deps.py": "composition root extracts narrow runtime ports",
+    "backend/app/api/kg_routes.py": "API readiness checks the process-owned model provider",
+    "backend/app/api/report_routes.py": "API readiness checks the process-owned model provider",
+    "backend/app/api/source_routes.py": "API readiness checks the process-owned model provider",
     "backend/app/services/knowhow/api.py": "knowhow orchestration constructs narrow services from runtime ports",
     "backend/app/services/knowhow/transfer.py": "knowhow transfer orchestration constructs its store and runtime seams",
+    "scripts/backfill_kg_embeddings.py": "offline CLI reads process-owned model scheduling limits",
     "scripts/bench_sqlite_writes.py": "synthetic temporary write benchmark",
     "scripts/generate_repository_contract_fixtures.py": "disposable contract fixture databases",
 }

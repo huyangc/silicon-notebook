@@ -292,8 +292,12 @@
               {
                 "message": "upstream_error",
                 "model": "fixture-rerank",
-                "service": "rerank",
-                "stage": "rerank"
+                "service_id": "",
+                "service_name": "",
+                "stage": "rerank",
+                "support_id": "",
+                "workload_id": "",
+                "workload_label": ""
               }
             ],
             "reasoning_trace": [
@@ -1790,6 +1794,11 @@
         "type": "table"
       },
       {
+        "name": "system_model_service_status",
+        "sql_sha256": "e16364cc714469070d4a35fd34f5870ccc811a8ec9c4ab4d34f4d91b2d1ae495",
+        "type": "table"
+      },
+      {
         "name": "unified_kg_state",
         "sql_sha256": "92f537ee8b95c98cc5a2de23dd74ac1e1b88f97a63f6f16782ae3355ab5f9383",
         "type": "table"
@@ -1820,6 +1829,6 @@
         "type": "trigger"
       }
     ],
-    "user_version": 23
+    "user_version": 24
   }
 }

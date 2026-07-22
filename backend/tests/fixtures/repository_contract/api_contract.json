@@ -3473,13 +3473,33 @@
               "title": "Model",
               "type": "string"
             },
-            "service": {
-              "default": "llm",
-              "title": "Service",
+            "service_id": {
+              "default": "",
+              "title": "Service Id",
+              "type": "string"
+            },
+            "service_name": {
+              "default": "",
+              "title": "Service Name",
               "type": "string"
             },
             "stage": {
               "title": "Stage",
+              "type": "string"
+            },
+            "support_id": {
+              "default": "",
+              "title": "Support Id",
+              "type": "string"
+            },
+            "workload_id": {
+              "default": "",
+              "title": "Workload Id",
+              "type": "string"
+            },
+            "workload_label": {
+              "default": "",
+              "title": "Workload Label",
               "type": "string"
             }
           },
@@ -3492,6 +3512,11 @@
         },
         "ModelServiceStatusItem": {
           "properties": {
+            "active": {
+              "default": 0,
+              "title": "Active",
+              "type": "integer"
+            },
             "checked_at": {
               "default": "",
               "title": "Checked At",
@@ -3502,13 +3527,16 @@
               "title": "Code",
               "type": "string"
             },
-            "configured": {
-              "default": false,
-              "title": "Configured",
-              "type": "boolean"
+            "display_name": {
+              "title": "Display Name",
+              "type": "string"
             },
             "kind": {
-              "default": "llm",
+              "enum": [
+                "chat",
+                "embedding",
+                "rerank"
+              ],
               "title": "Kind",
               "type": "string"
             },
@@ -3517,38 +3545,65 @@
               "title": "Latency Ms",
               "type": "integer"
             },
+            "maximum": {
+              "default": 0,
+              "title": "Maximum",
+              "type": "integer"
+            },
             "model": {
               "default": "",
               "title": "Model",
               "type": "string"
             },
-            "required": {
-              "default": false,
-              "title": "Required",
-              "type": "boolean"
+            "oldest_wait_ms": {
+              "default": 0,
+              "title": "Oldest Wait Ms",
+              "type": "integer"
             },
-            "service": {
-              "title": "Service",
-              "type": "string"
+            "queued": {
+              "default": 0,
+              "title": "Queued",
+              "type": "integer"
             },
-            "source": {
-              "default": "none",
-              "title": "Source",
+            "service_id": {
+              "title": "Service Id",
               "type": "string"
             },
             "status": {
-              "default": "unconfigured",
+              "default": "untested",
+              "enum": [
+                "untested",
+                "ok",
+                "busy",
+                "error",
+                "circuit_open",
+                "half_open"
+              ],
               "title": "Status",
+              "type": "string"
+            },
+            "support_id": {
+              "default": "",
+              "title": "Support Id",
               "type": "string"
             },
             "trigger": {
               "default": "",
               "title": "Trigger",
               "type": "string"
+            },
+            "workloads": {
+              "items": {
+                "$ref": "#/components/schemas/ModelWorkloadView"
+              },
+              "title": "Workloads",
+              "type": "array"
             }
           },
           "required": [
-            "service"
+            "service_id",
+            "display_name",
+            "kind"
           ],
           "title": "ModelServiceStatusItem",
           "type": "object"
@@ -3721,6 +3776,24 @@
             "ok"
           ],
           "title": "ModelTestResult",
+          "type": "object"
+        },
+        "ModelWorkloadView": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "ModelWorkloadView",
           "type": "object"
         },
         "MountedBase": {
@@ -13498,7 +13571,18 @@
       "kg_required": false,
       "llm_mode": "deterministic",
       "mode": "chunk",
-      "model_errors": [],
+      "model_errors": [
+        {
+          "message": "missing_config",
+          "model": "",
+          "service_id": "",
+          "service_name": "",
+          "stage": "answer",
+          "support_id": "",
+          "workload_id": "ask_answer",
+          "workload_label": "问答回答"
+        }
+      ],
       "reasoning_trace": null,
       "related_knowledge": [],
       "retrieval_query": "fixture gain",
@@ -13537,7 +13621,18 @@
             "kg_required": false,
             "llm_mode": "deterministic",
             "mode": "chunk",
-            "model_errors": [],
+            "model_errors": [
+              {
+                "message": "missing_config",
+                "model": "",
+                "service_id": "",
+                "service_name": "",
+                "stage": "answer",
+                "support_id": "",
+                "workload_id": "ask_answer",
+                "workload_label": "问答回答"
+              }
+            ],
             "reasoning_trace": null,
             "related_knowledge": [],
             "retrieval_query": "fixture gain",
