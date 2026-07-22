@@ -6,12 +6,15 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.api.deps import (
     admin_query_repository,
     get_current_user,
+    identity_repository,
     repository,
     require_notebook_access,
     user_error,
 )
 from app.models.admin import (
     AdminUserNotebook,
+    AdminUserRoleResult,
+    AdminUserRoleUpdate,
     AdminUserUsage,
     PromoteRequest,
     PromotionApproveResult,
@@ -19,6 +22,10 @@ from app.models.admin import (
     PromotionRejectRequest,
 )
 from app.models.identity import UserProfile
+from app.repositories.sqlite.identity_store import (
+    BuiltinAdminDemotionError,
+    SelfDemotionError,
+)
 from app.services.pending_bus import pending_bus
 
 
@@ -102,7 +109,36 @@ async def list_admin_users(user: UserProfile = Depends(get_current_user)) -> Lis
     loop = asyncio.get_running_loop()
     rows = await loop.run_in_executor(None, admin_query_repository().list_user_usage)
     online = pending_bus.online_user_ids()
-    return [AdminUserUsage(**row, is_online=row["id"] in online) for row in rows]
+    return [
+        AdminUserUsage(
+            **row,
+            is_online=row["id"] in online,
+            role_mutable=row["id"] not in {"user-local", user.id},
+        )
+        for row in rows
+    ]
+
+
+@router.patch("/admin/users/{user_id}/role", response_model=AdminUserRoleResult)
+def update_admin_user_role(
+    user_id: str,
+    payload: AdminUserRoleUpdate,
+    user: UserProfile = Depends(get_current_user),
+) -> AdminUserRoleResult:
+    """Grant or revoke administrator access. Existing sessions observe it next request."""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可管理用户权限")
+    try:
+        result = identity_repository().set_user_role(user.id, user_id, payload.role)
+    except PermissionError:
+        raise user_error(403, "仅管理员可管理用户权限")
+    except KeyError:
+        raise HTTPException(status_code=404, detail="User not found")
+    except BuiltinAdminDemotionError:
+        raise user_error(409, "内置管理员权限不可撤销")
+    except SelfDemotionError:
+        raise user_error(409, "不能撤销当前账户的管理员权限")
+    return AdminUserRoleResult(**result)
 
 
 @router.get("/admin/users/{user_id}/notebooks", response_model=List[AdminUserNotebook])

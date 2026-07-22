@@ -4,7 +4,14 @@ import { Fragment, useEffect, useState } from "react";
 import { fetchMe } from "../../auth.ts";
 import { PageHeader } from "../../components/PageHeader.tsx";
 import { toUserMessage } from "../../errors.ts";
-import { fetchAdminUsers, fetchOnlineIds, FORBIDDEN_SENTINEL, type AdminUserUsage } from "./api.ts";
+import {
+  fetchAdminUsers,
+  fetchOnlineIds,
+  FORBIDDEN_SENTINEL,
+  updateAdminUserRole,
+  type AdminUserRole,
+  type AdminUserUsage,
+} from "./api.ts";
 import { formatLastActive, logsDrillHref } from "./format.ts";
 import { fetchUserNotebooks, notebookStatusLabel, type AdminUserNotebook } from "./notebooks.ts";
 import "./usage.css";
@@ -22,6 +29,10 @@ export default function AdminUsagePage() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [nbCache, setNbCache] = useState<Record<string, NotebookCacheEntry>>({});
   const [onlineIds, setOnlineIds] = useState<Set<string>>(new Set());
+  const [currentUserId, setCurrentUserId] = useState("");
+  const [confirmingRole, setConfirmingRole] = useState<{ userId: string; role: AdminUserRole } | null>(null);
+  const [rolePendingId, setRolePendingId] = useState("");
+  const [roleNotice, setRoleNotice] = useState<{ kind: "ok" | "error"; message: string } | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -31,6 +42,7 @@ export default function AdminUsagePage() {
           setState({ kind: "forbidden" });
           return;
         }
+        setCurrentUserId(me.id);
         const rows = await fetchAdminUsers();
         setState({ kind: "ready", rows });
         setOnlineIds(new Set(rows.filter((r) => r.is_online).map((r) => r.id)));
@@ -74,6 +86,37 @@ export default function AdminUsagePage() {
     }
   }
 
+  async function submitRoleChange(target: AdminUserUsage, role: AdminUserRole) {
+    setRolePendingId(target.id);
+    setRoleNotice(null);
+    try {
+      const updated = await updateAdminUserRole(target.id, role);
+      setState((previous) => previous.kind === "ready"
+        ? {
+            kind: "ready",
+            rows: previous.rows.map((row) => row.id === updated.id
+              ? { ...row, role: updated.role }
+              : row),
+          }
+        : previous);
+      setConfirmingRole(null);
+      setRoleNotice({
+        kind: "ok",
+        message: role === "admin"
+          ? `已授予 ${updated.username} 管理员权限`
+          : `已撤销 ${updated.username} 的管理员权限`,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message === FORBIDDEN_SENTINEL) {
+        setState({ kind: "forbidden" });
+        return;
+      }
+      setRoleNotice({ kind: "error", message: toUserMessage(error, "权限更新失败，请稍后重试") });
+    } finally {
+      setRolePendingId("");
+    }
+  }
+
   if (state.kind === "loading") return <main className="usage-page">加载中…</main>;
   if (state.kind === "forbidden")
     return <main className="usage-page usage-empty">无权限:仅管理员可查看用户使用总览。</main>;
@@ -83,13 +126,19 @@ export default function AdminUsagePage() {
   return (
     <main className="usage-page">
       <PageHeader title="用户使用总览" />
+      <p className="usage-description">查看用户用量，并授予或撤销管理员权限。</p>
+      {roleNotice && (
+        <div className={`usage-role-notice usage-role-notice-${roleNotice.kind}`} role="status">
+          {roleNotice.message}
+        </div>
+      )}
       <table className="usage-table">
         <thead>
           <tr>
             <th className="usage-expand-col"></th>
             <th>用户名</th><th>角色</th><th>注册时间</th>
             <th>笔记本</th><th>来源</th><th>对话</th><th>报告</th>
-            <th>最近活跃</th><th>日志</th>
+            <th>最近活跃</th><th>日志</th><th>权限管理</th>
           </tr>
         </thead>
         <tbody>
@@ -128,10 +177,46 @@ export default function AdminUsagePage() {
                   <td>{u.reports}</td>
                   <td>{formatLastActive(u.last_active)}</td>
                   <td><a href={logsDrillHref(u.id)}>查看日志</a></td>
+                  <td>
+                    {!u.role_mutable ? (
+                      <span className="usage-role-locked">
+                        {u.id === currentUserId ? "当前账户" : "受保护"}
+                      </span>
+                    ) : confirmingRole?.userId === u.id ? (
+                      <span className="usage-role-confirm">
+                        <button
+                          type="button"
+                          className="usage-role-button usage-role-button-confirm"
+                          disabled={rolePendingId === u.id}
+                          onClick={() => void submitRoleChange(u, confirmingRole.role)}
+                        >
+                          {rolePendingId === u.id ? "更新中…" : "确认"}
+                        </button>
+                        <button
+                          type="button"
+                          className="usage-role-button"
+                          disabled={rolePendingId === u.id}
+                          onClick={() => setConfirmingRole(null)}
+                        >取消</button>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        className="usage-role-button"
+                        disabled={Boolean(rolePendingId)}
+                        onClick={() => setConfirmingRole({
+                          userId: u.id,
+                          role: u.role === "admin" ? "user" : "admin",
+                        })}
+                      >
+                        {u.role === "admin" ? "撤销管理员" : "设为管理员"}
+                      </button>
+                    )}
+                  </td>
                 </tr>
                 {isOpen && (
                   <tr className="usage-subrow">
-                    <td colSpan={9}>
+                    <td colSpan={11}>
                       {entry === "loading" && (
                         <div className="usage-subtable-status">加载中…</div>
                       )}

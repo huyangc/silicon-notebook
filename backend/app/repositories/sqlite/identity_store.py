@@ -50,6 +50,14 @@ def _decode_model_settings(value: object) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+class BuiltinAdminDemotionError(ValueError):
+    """The seeded recovery administrator must always retain admin access."""
+
+
+class SelfDemotionError(ValueError):
+    """An administrator cannot remove the authority of the active request."""
+
+
 class IdentityStore:
     """SQLite identity, session, and per-user model-settings persistence."""
 
@@ -407,3 +415,34 @@ class IdentityStore:
     def delete_session(self, token: str) -> None:
         with self.database.write() as db:
             db.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+
+    def set_user_role(self, actor_id: str, user_id: str, role: str) -> dict[str, str]:
+        """Assign a user/admin role with authorization rechecked in the write txn."""
+        if role not in {"admin", "user"}:
+            raise ValueError("invalid role")
+        with self.database.write() as db:
+            self.database.begin_immediate(db)
+            actor = db.execute(
+                "SELECT role FROM users WHERE id = ?", (actor_id,)
+            ).fetchone()
+            if actor is None or actor["role"] != "admin":
+                raise PermissionError("admin role required")
+            target = db.execute(
+                "SELECT id, username, role FROM users WHERE id = ?", (user_id,)
+            ).fetchone()
+            if target is None:
+                raise KeyError(user_id)
+            if role == "user" and user_id == "user-local":
+                raise BuiltinAdminDemotionError("built-in admin cannot be demoted")
+            if role == "user" and user_id == actor_id:
+                raise SelfDemotionError("cannot demote the active administrator")
+            if target["role"] != role:
+                db.execute(
+                    "UPDATE users SET role = ?, updated_at = ? WHERE id = ?",
+                    (role, _now(), user_id),
+                )
+            return {
+                "id": target["id"],
+                "username": target["username"] or target["id"],
+                "role": role,
+            }
