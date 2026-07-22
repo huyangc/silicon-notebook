@@ -238,16 +238,19 @@ export const HISTORY_PRUNE_CONFIRM =
 // 天数输入默认值（brief 指定 180）。
 export const DEFAULT_HISTORY_PRUNE_DAYS = 180;
 
-// 天数输入校验：trim 后必须是纯数字且 > 0（正整数）。空串/带小数点/正负号/
-// 非数字字符/0 一律判非法——后端 before_days 语义是「清理 N 天前的历史」，
+// 天数输入校验：trim 后必须是纯数字且 0 < N ≤ 上限（正整数）。空串/带小数点/
+// 正负号/非数字字符/0 一律判非法——后端 before_days 语义是「清理 N 天前的历史」，
 // 0 或负数没有实际意义（0 会把刚发生的编辑也当作待清理，负数更不成立），
 // 小数天在这个粒度上也无意义。调用方据此禁用「清理」按钮，不发注定失败/
-// 无意义的请求。
+// 无意义的请求。上限 = 100 年：拦住超长数字串经 Number() 溢出成 Infinity
+// 后混过 `> 0`、再被 JSON.stringify 静默变成 null、最终撞后端 422 那条链路
+// （非整数 before_days 后端会拒），也顺带把「大到无意义」的输入挡在前端。
+const MAX_HISTORY_PRUNE_DAYS = 36500;
 export function parseHistoryPruneDays(value: string): number | null {
   const trimmed = value.trim();
   if (!/^\d+$/.test(trimmed)) return null;
   const parsed = Number(trimmed);
-  return parsed > 0 ? parsed : null;
+  return parsed > 0 && parsed <= MAX_HISTORY_PRUNE_DAYS ? parsed : null;
 }
 
 // 表信息保存 patch：只装「确实变化」的字段（PATCH 语义：不提供=不触碰）。
