@@ -64,8 +64,12 @@ test("confirmed current deletion removes only returned ids and clears current", 
 
 function deferredResponse() {
   let resolve;
-  const promise = new Promise((accept) => { resolve = accept; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((accept, decline) => {
+    resolve = accept;
+    reject = decline;
+  });
+  return { promise, resolve, reject };
 }
 
 test("delayed cleanup response cannot mutate a newly opened session resource", async () => {
@@ -166,4 +170,76 @@ test("same-resource delayed cleanup reconciles, reloads, and reports normally", 
   assert.equal(state.pendingQuestion, "");
   assert.equal(state.reloads, 1);
   assert.deepEqual(state.messages, ["已删除 1 条会话"]);
+});
+
+test("reload rejection after a session switch is stale and cannot affect the new resource", async () => {
+  const reload = deferredResponse();
+  const reloadStarted = deferredResponse();
+  const owner = { workspaceEpoch: 11, notebookId: "notebook-a" };
+  let currentWorkspaceEpoch = owner.workspaceEpoch;
+  let currentNotebookId = owner.notebookId;
+  let switched = false;
+  let staleWrites = 0;
+  const state = {
+    conversationId: "conversation-a",
+    turns: ["turn-a"],
+    pendingQuestion: "pending-a",
+    messages: [],
+  };
+  const isCurrent = () => workspaceRequestIsCurrent(
+    false,
+    owner.workspaceEpoch,
+    currentWorkspaceEpoch,
+    owner.notebookId,
+    currentNotebookId,
+  );
+  const cleanup = runOwnedConversationCleanup(
+    Promise.resolve({ deleted: 1, deleted_ids: ["conversation-a"] }),
+    isCurrent,
+    () => {
+      if (switched) staleWrites += 1;
+      state.conversationId = null;
+      state.turns = [];
+      state.pendingQuestion = "";
+    },
+    async () => {
+      reloadStarted.resolve();
+      await reload.promise;
+      if (switched) staleWrites += 1;
+    },
+    (result) => {
+      if (switched) staleWrites += 1;
+      state.messages.push(conversationCleanupToast(result.deleted));
+    },
+  );
+
+  await reloadStarted.promise;
+  switched = true;
+  currentWorkspaceEpoch += 1; // same notebook, newly opened session B
+  state.conversationId = "conversation-b";
+  state.turns = ["turn-b"];
+  state.pendingQuestion = "pending-b";
+  reload.reject(new Error("old session reload failed"));
+
+  assert.equal(await cleanup, false);
+  assert.equal(state.conversationId, "conversation-b");
+  assert.deepEqual(state.turns, ["turn-b"]);
+  assert.equal(state.pendingQuestion, "pending-b");
+  assert.deepEqual(state.messages, []);
+  assert.equal(staleWrites, 0);
+});
+
+test("same-resource reload rejection remains reportable", async () => {
+  const failure = new Error("current session reload failed");
+  let notifications = 0;
+  const cleanup = runOwnedConversationCleanup(
+    Promise.resolve({ deleted: 1, deleted_ids: ["conversation-a"] }),
+    () => true,
+    () => undefined,
+    async () => { throw failure; },
+    () => { notifications += 1; },
+  );
+
+  await assert.rejects(cleanup, (error) => error === failure);
+  assert.equal(notifications, 0);
 });

@@ -53,18 +53,17 @@ export async function runOwnedConversationCleanup(
   reloadCurrent: () => void | Promise<void>,
   notifyCurrent: (result: ConversationCleanupResult) => void,
 ): Promise<boolean> {
-  let result: ConversationCleanupResult;
   try {
-    result = await response;
+    const result = await response;
+    if (!isCurrent()) return false;
+    await applyCurrent(result);
+    if (!isCurrent()) return false;
+    await reloadCurrent();
+    if (!isCurrent()) return false;
+    notifyCurrent(result);
+    return true;
   } catch (error) {
     if (isCurrent()) throw error;
     return false;
   }
-  if (!isCurrent()) return false;
-  await applyCurrent(result);
-  if (!isCurrent()) return false;
-  await reloadCurrent();
-  if (!isCurrent()) return false;
-  notifyCurrent(result);
-  return true;
 }
