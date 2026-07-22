@@ -98,6 +98,7 @@ import { logDiagnostic, toUserMessage } from "./errors.ts";
 import { fetchDocumentTypes, fetchHealth, probeReady, type ReadySnapshot } from "./system-api";
 import { backfillPaperMetadata, createNotebook, deleteNotebook as deleteNotebookRequest, fetchNotebookAnalytics, fetchNotebookContentOverview, getNotebook, listNotebooks, updateNotebook } from "./notebook-api";
 import { deleteSource as deleteSourceRequest, detectSourceTypes, getSource, getSourceElements, importUrlSources, listSources, parseSource, uploadSources, fetchInternalAssetBlob } from "./source-api";
+import { summarizeUpload } from "./source-upload.ts";
 import { bulkDeleteConversations, cancelAskJob, deleteConversation, fetchAnswerMemoryLinks, getAskJob, getConversation, listConversations, renameConversation, runAskStream, searchNotebook, submitFeedback as submitAnswerFeedback } from "./ask-api";
 import { createObjectSchema, deleteObjectSchema, findDuplicates as findKnowledgeDuplicates, getKnowledgeGraph, listKnowledge, listKnowledgeTypes, listObjectSchemas, mergeKnowledge as mergeKnowledgeRecords, proposeObjectSchemas, updateKnowledge as updateKnowledgeRecord, updateObjectSchema } from "./knowledge-api";
 import { cancelReport, createReport, deleteReport, downloadReportsZip, generateReport, getReport, listReports, updateReportOutline } from "./report-api";
@@ -2504,9 +2505,12 @@ export default function Home() {
     stagedFiles.forEach((file) => formData.append("files", file));
     stagedDocTypes.forEach((dt) => formData.append("doc_types", dt));
     const uploaded = await uploadSources(currentNotebookId, formData);
+    const outcome = summarizeUpload(uploaded);
     setSources((previous) => [...previous.filter((source) => !uploaded.some((item) => item.id === source.id)), ...uploaded]);
-    setSourcesTotal((t) => t + uploaded.length);
-    setNotebookSourceTotal((t) => t + uploaded.length);
+    // 只加新建的那些：沿用的既有来源本来就已经在总数里了，重复计入会让
+    //「N 个来源」和分页总数一直偏大到重新打开笔记本为止。
+    setSourcesTotal((t) => t + outcome.added.length);
+    setNotebookSourceTotal((t) => t + outcome.added.length);
     await loadNotebookCollection();
     // P1(codex PR#334 第9轮):快传小文件可能后台已解析完(返回即 extracted),hasPending 保持
     // false → 处理轮询的 reachedExtracted 分支不触发 → ask_available 陈旧为假、对话框空锁。显式
@@ -2515,7 +2519,7 @@ export default function Home() {
     setStagedFiles([]);
     setStagedDocTypes([]);
     setSourceModalOpen(false);
-    setToast(`已上传 ${uploaded.length} 个来源`);
+    setToast(outcome.toast);
   }
 
   async function submitUrlSources() {

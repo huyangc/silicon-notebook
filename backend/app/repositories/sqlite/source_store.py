@@ -382,22 +382,34 @@ class SourceStore:
         """Existing source in this notebook whose content hash matches
         ``digest``, if any (Task 7: backs ``upload_sources``' same-notebook
         dedup short-circuit). One-hop query over ``idx_sources_notebook_
-        file_hash`` (migration 24) — mirrors ``maintenance.source_id_by_hash``
-        used by the offline ``batch_ingest`` composition root's own
-        ``already_ingested`` check; kept as two independent one-hop bodies
-        rather than one delegating to the other because ``SourceStore``
-        (application-service surface) and the maintenance adapter
-        (CLI-composition-root-only surface) are deliberately not wired to
-        depend on each other.
+        file_hash`` (migration 24). Sole owner of this lookup:
+        ``maintenance.source_id_by_hash`` (the offline ``batch_ingest``
+        composition root's ``already_ingested`` check) delegates here, so the
+        CLI and the UI can never dedup by different rules.
+
+        Empty ``digest`` never matches: URL sources and metadata-only imports
+        store ``file_hash=''``, and a bare equality lookup would otherwise
+        report an unrelated source instead of "no match" (same "" sentinel
+        hazard as ``source_id_for_memory``).
+
+        ``ORDER BY created_at, id`` is load-bearing, not decoration: databases
+        deployed before migration 24 can already hold several rows with the
+        same hash (that is the mess this dedup exists to stop growing), and
+        without it SQLite may return either one — so the same re-upload could
+        land on a different source between calls. Oldest row wins: it is the
+        one existing notes/citations already point at.
 
         Scoped to ``notebook_id`` on purpose: cross-notebook content is NEVER
         matched here. A user re-uploading the same file into a different
         notebook usually means they want it there too, and sharing one
         ``sources`` row across notebooks would tangle ownership/ACLs and
         delete cascades — see test_upload_dedup.py's cross-notebook case."""
+        if not digest:
+            return None
         with self.database.connect() as db:
             row = db.execute(
-                "SELECT id FROM sources WHERE notebook_id=? AND file_hash=?",
+                "SELECT id FROM sources WHERE notebook_id=? AND file_hash=? "
+                "ORDER BY created_at, id",
                 (notebook_id, digest),
             ).fetchone()
         return row["id"] if row else None

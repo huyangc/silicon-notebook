@@ -229,12 +229,12 @@ class SQLiteMaintenanceAdapter:
     # -- sources / extraction -------------------------------------------------
 
     def source_id_by_hash(self, notebook_id: str, digest: str) -> Optional[str]:
-        with self._runtime.database.connect() as db:
-            row = db.execute(
-                "SELECT id FROM sources WHERE notebook_id=? AND file_hash=?",
-                (notebook_id, digest),
-            ).fetchone()
-        return row["id"] if row else None
+        """Delegates to the runtime's ``SourceStore`` — the single owner of this
+        query. The maintenance face exists to keep CLI composition roots off
+        private facade members, not to keep a second copy of the same SQL: a
+        duplicated body would drift (ordering, index usage, "" handling) from
+        the one ``upload_sources`` actually dedups against."""
+        return self._runtime.source_store.source_id_by_hash(notebook_id, digest)
 
     def source_ids(self, notebook_id: str) -> list[str]:
         with self._runtime.database.connect() as db:

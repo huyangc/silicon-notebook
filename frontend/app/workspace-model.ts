@@ -212,6 +212,12 @@ export type SourceSummary = {
   paper_meta_status?: "has_meta" | "not_paper" | "missing" | null;
 };
 
+/** 上传接口返回的一条来源：比 SourceSummary 多一个 reused。
+ *  reused=true 表示这条并不是本次新建的，而是本笔记本里内容完全相同的既有来源被
+ *  沿用了（同一个文件传第二遍不会再建一条）。计数与提示文案必须区分二者，否则
+ *  「N 个来源」会一路虚高到重新打开笔记本为止。字段可选：老后端不返回时按 false。 */
+export type UploadedSource = SourceSummary & { reused?: boolean };
+
 export type PaginatedSources = {
   items: SourceSummary[];
   total_count: number;

@@ -22,6 +22,7 @@ from app.models.sources import (
     SourceElement,
     SourceImportRequest,
     SourceSummary,
+    UploadedSourceSummary,
 )
 from app.repositories.ports import UploadedSourceFile
 from app.services import background_jobs
@@ -133,12 +134,15 @@ def add_url_sources(
         raise HTTPException(status_code=404, detail="Notebook not found")
 
 
-@router.post("/notebooks/{notebook_id}/sources", response_model=List[SourceSummary], dependencies=[Depends(require_notebook_access)])
+# response_model 是 SourceSummary 的子类：字段只增不减（多一个 reused），旧客户端
+# 原样可用。上传路径会做同 notebook 内容去重，返回值里可能夹着**没有新建**的既有
+# 源——前端据 reused 分别计数/措辞，别再拿 len(response) 当「新增了几个」。
+@router.post("/notebooks/{notebook_id}/sources", response_model=List[UploadedSourceSummary], dependencies=[Depends(require_notebook_access)])
 async def upload_sources(
     notebook_id: str,
     files: List[UploadFile] = File(...),
     doc_types: List[str] = Form(default=[]),
-) -> List[SourceSummary]:
+) -> List[UploadedSourceSummary]:
     try:
         repo = source_repository()
         # 建源前先挡容量(在读取任何文件内容之前 fail-fast,不为超限的批次白读进内存)。

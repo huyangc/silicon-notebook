@@ -3,6 +3,7 @@ import type {
   PaginatedSources,
   SourceElement,
   SourceSummary,
+  UploadedSource,
 } from "./workspace-model.ts";
 
 const options = { tag: "api", unauthorized: "clear-and-reload" as const };
@@ -17,8 +18,10 @@ export const listSources = (
   options,
 );
 
+// 返回值里可能夹着**没有新建**的既有来源（同笔记本内容相同 → 沿用原条目），
+// 每条用 reused 标出。别拿数组长度当「新增了几个」，交给 summarizeUpload 拆。
 export const uploadSources = (notebookId: string, body: FormData) =>
-  requestJson<SourceSummary[]>(`/notebooks/${notebookId}/sources`, {
+  requestJson<UploadedSource[]>(`/notebooks/${notebookId}/sources`, {
     ...options,
     method: "POST",
     body,
