@@ -493,6 +493,27 @@ class SourceStore:
         with self.database.write() as db:
             db.execute(statement, values)
 
+    def set_doc_type(self, source_id: str, doc_type: str) -> None:
+        """Persist a corrected extraction-profile id on ONE source row.
+
+        Written for the upload path's "same file, different doc_type" case:
+        content dedup hands the existing row back, but the doc_type the user
+        just picked is a real correction — it selects the extraction profile
+        and rides the extraction prompt (hence the LLM cache key), so dropping
+        it silently would leave the source extracted under the wrong profile
+        forever (see SourceIngestionService.reuse_uploaded_source).
+
+        The caller passes an ALREADY normalized value (_normalize_doc_type:
+        known profile id, or '' for auto-detect) — this method is storage, it
+        does not re-judge the vocabulary. Deliberately NOT reusing
+        maintenance.set_sources_doc_type: that one rewrites every source of a
+        notebook (offline seeding), which is the opposite blast radius."""
+        with self.database.write() as db:
+            db.execute(
+                "UPDATE sources SET doc_type = ?, updated_at = ? WHERE id = ?",
+                (doc_type, self.now(), source_id),
+            )
+
     def replace_elements(
         self,
         connection: sqlite3.Connection,

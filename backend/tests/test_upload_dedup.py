@@ -58,11 +58,12 @@ def other_notebook_id(repo):
     return repo.create_notebook(NotebookCreate(name="nb2")).id
 
 
-def _upload(repo, notebook_id, content=b"hello world", name="a.txt"):
+def _upload(repo, notebook_id, content=b"hello world", name="a.txt", doc_type=""):
     return repo.upload_sources(
         notebook_id,
         [UploadedSourceFile(
-            file_name=name, content_type="text/plain", content=content)],
+            file_name=name, content_type="text/plain", content=content,
+            doc_type=doc_type)],
     )
 
 
@@ -223,6 +224,133 @@ def test_restart_fails_out_abandoned_queued_sources_so_reupload_can_retry(
         scheduler=scheduled.append,
     )
     assert again[0].id == queued and scheduled == [queued], "重启后重新上传应能重试"
+
+
+# ------------------------------------------------- 复用不得吞掉用户新选的文档类型
+
+@pytest.fixture
+def settled(repo, notebook_id, monkeypatch):
+    """工厂：造一条「已摄取完成」的源（可带初始 doc_type）。
+
+    同时把 notebook 布置成「已有 KG」——摄取期是否抽 KG 由 should_extract_kg
+    判定（全局开关默认关，或该 notebook 已有 KG），不布置的话重抽根本不会触发，
+    测试就成了空转。真正的抽取打桩成记账，不去点 LLM。"""
+    ingestion = repo._runtime.source_ingestion
+    monkeypatch.setattr(ingestion, "notebook_has_kg", lambda _nb: True)
+    repo.extract_calls = []
+    monkeypatch.setattr(
+        ingestion,
+        "run_extraction",
+        lambda source_id, **_kw: repo.extract_calls.append(source_id),
+    )
+
+    def make(doc_type=""):
+        sid = _upload(repo, notebook_id, doc_type=doc_type)[0].id
+        ingestion.set_source_status(sid, "extracted")
+        repo.process_calls.clear()
+        repo.extract_calls.clear()
+        return sid
+
+    return make
+
+
+def test_reupload_with_a_corrected_doc_type_retypes_and_reextracts(
+    repo, notebook_id, settled
+):
+    """「类型判错了，我改成教材再传一遍」是最自然的纠正动作。内容判重不代表
+    类型选择也该丢：doc_type 决定抽取 profile 并进抽取 prompt（因而进 LLM 缓存
+    键），静默丢掉 = 这条源永远按错的类型入图。"""
+    sid = settled()
+    assert repo.get_source(sid).doc_type == ""
+
+    second = _upload(repo, notebook_id, doc_type="textbook")
+
+    assert second[0].id == sid and second[0].reused is True, "仍然复用同一行"
+    assert repo.get_source(sid).doc_type == "textbook", (
+        "新选的文档类型必须落库；停在 '' 说明去重把它静默吞了"
+    )
+    assert second[0].doc_type == "textbook", "返回值要如实带上现在生效的类型"
+    assert repo.extract_calls == [sid], "类型变了必须按新类型重抽 KG"
+    assert repo.process_calls == [], "内容一模一样，绝不重新解析（白烧且可能打死好源）"
+    assert repo.get_source(sid).parse_status == "extracted", "重抽跑完回到终态"
+
+
+def test_reupload_without_a_doc_type_never_clobbers_the_stored_one(
+    repo, notebook_id, settled
+):
+    """前端在用户没选类型时就是不传——那是「没意见」，不是「改成自动检测」。"""
+    sid = settled(doc_type="textbook")
+
+    second = _upload(repo, notebook_id)
+
+    assert repo.get_source(sid).doc_type == "textbook", "空值不得覆盖已存的非空类型"
+    assert second[0].doc_type == "textbook"
+    assert repo.extract_calls == [], "没改动就没有重抽"
+
+
+def test_reupload_with_the_same_doc_type_does_not_reextract(
+    repo, notebook_id, settled
+):
+    """类型没变就是纯复用：再抽一遍是白烧的模型开销。"""
+    sid = settled(doc_type="textbook")
+
+    _upload(repo, notebook_id, doc_type="textbook")
+
+    assert repo.get_source(sid).doc_type == "textbook"
+    assert repo.extract_calls == []
+    assert repo.process_calls == []
+
+
+def test_unknown_doc_type_counts_as_no_opinion_not_as_a_change(
+    repo, notebook_id, settled
+):
+    """比较在两侧归一化之后做：'auto'/未知值归一成 ''，等同于没意见。"""
+    sid = settled(doc_type="textbook")
+
+    _upload(repo, notebook_id, doc_type="auto")
+
+    assert repo.get_source(sid).doc_type == "textbook"
+    assert repo.extract_calls == []
+
+
+def test_retyping_an_in_flight_source_updates_the_type_but_starts_no_pipeline(
+    repo, notebook_id
+):
+    """还在排队/解析中的行：类型照记，但绝不重入——同一行两条流水线是重复开销。"""
+    sid = _upload(repo, notebook_id)[0].id
+    assert repo.get_source(sid).parse_status == "queued"
+    repo.process_calls.clear()
+
+    _upload(repo, notebook_id, doc_type="textbook")
+
+    assert repo.get_source(sid).doc_type == "textbook"
+    assert repo.process_calls == []
+
+
+def test_retype_with_a_scheduler_reextracts_out_of_band(
+    repo, notebook_id, settled, monkeypatch
+):
+    """真实 API 路径（有 scheduler）：重抽必须离开请求线程，且响应要立刻如实
+    显示「在重抽」，否则前端不会开始轮询，改类型在界面上又成了一次静默 no-op。"""
+    from app.services.kg import scheduler as kg_scheduler
+
+    sid = settled()
+    submitted = []
+    monkeypatch.setattr(
+        kg_scheduler, "submit_job", lambda fn, *args, **_kw: submitted.append(args)
+    )
+
+    row = repo.upload_sources(
+        notebook_id,
+        [UploadedSourceFile(file_name="a.txt", content_type="text/plain",
+                            content=b"hello world", doc_type="textbook")],
+        scheduler=lambda _sid: None,
+    )[0]
+
+    assert repo.get_source(sid).doc_type == "textbook"
+    assert row.parse_status == "extracting"
+    assert [args[0] for args in submitted] == [sid], "重抽要进 KG job 池"
+    assert repo.extract_calls == [], "绝不在请求线程里同步抽"
 
 
 # ------------------------------------------------------- 新建/复用要能被调用方区分

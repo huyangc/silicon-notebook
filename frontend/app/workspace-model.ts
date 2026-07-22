@@ -201,6 +201,10 @@ export type SourceSummary = {
   file_name: string;
   file_size: number;
   source_url?: string;
+  /** 抽取用的文档类型（'' = 自动检测，否则是一个 extraction profile id）。上传
+   *  时同内容判重会沿用既有来源，但用户新选的类型仍会写进那条来源——所以这个字段
+   *  是判断「这次上传到底改没改东西」的依据。 */
+  doc_type?: string;
   created_label: string;
   error_message?: string;
   extraction_warning?: string | null;

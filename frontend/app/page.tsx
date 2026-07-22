@@ -2504,8 +2504,11 @@ export default function Home() {
     const formData = new FormData();
     stagedFiles.forEach((file) => formData.append("files", file));
     stagedDocTypes.forEach((dt) => formData.append("doc_types", dt));
+    // 上传前各来源的文档类型：内容判重会沿用既有来源，但用户新选的类型仍会写进
+    // 去并触发按新类型重抽——只有对着上传前的值才看得出这次到底改没改。
+    const docTypesBefore = new Map(sources.map((source) => [source.id, source.doc_type ?? ""]));
     const uploaded = await uploadSources(currentNotebookId, formData);
-    const outcome = summarizeUpload(uploaded);
+    const outcome = summarizeUpload(uploaded, docTypesBefore);
     setSources((previous) => [...previous.filter((source) => !uploaded.some((item) => item.id === source.id)), ...uploaded]);
     // 只加新建的那些：沿用的既有来源本来就已经在总数里了，重复计入会让
     //「N 个来源」和分页总数一直偏大到重新打开笔记本为止。

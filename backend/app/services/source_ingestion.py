@@ -399,6 +399,8 @@ class SourceIngestionService:
         source_id: str,
         scheduler: "SourceScheduler | None",
         hooks: SourcePipelineHooks,
+        *,
+        doc_type: str = "",
     ) -> UploadedSourceSummary:
         """同 notebook 内已有相同内容的源 → 复用那一行，绝不新建第二条。
 
@@ -418,17 +420,83 @@ class SourceIngestionService:
         判死（那里才有「本进程刚起来，不可能有流水线在跑」这个前提），落到
         'failed' 后同样能被这里重试。反过来，正在跑的行绝不在这里重入：同一行
         并发跑两条流水线是重复的 LLM/解析开销。
+
+        ``doc_type``（本次上传为这个文件选的文档类型，调用方原样传入、这里才
+        归一化）是复用路径上第二件不能撒手的事：内容一样不代表用户的意图一样，
+        「类型判错了，我改成教材再传一遍」是最自然的纠正动作，而 doc_type 决定
+        抽取 profile 并进抽取 prompt（因而也进 LLM 缓存键），静默丢掉等于这条源
+        永远按错的类型入图。空的 doc_type 绝不覆盖已存的非空值——前端在用户没选
+        时就是不传，那是「没意见」而不是「改成自动检测」；比较在两侧都归一化之后
+        做，所以 'auto'/未知值与 '' 等价，不会被当成一次改动。
         """
         summary = self.sources.get_source(source_id)
+        incoming_doc_type = self.normalize_doc_type(doc_type or "")
+        stored_doc_type = self.normalize_doc_type(
+            getattr(summary, "doc_type", "") or ""
+        )
+        retyped = bool(incoming_doc_type) and incoming_doc_type != stored_doc_type
+        if retyped:
+            self.sources.set_doc_type(source_id, incoming_doc_type)
         if summary.parse_status == "failed":
+            # 失败源整条流水线重跑：解析产物本来就不可信，重跑顺带用上新类型。
             if scheduler is not None:
                 scheduler(source_id)
             else:
                 self.process_source(source_id, hooks)
+        elif (
+            retyped
+            and summary.parse_status == "extracted"
+            and hooks.should_extract_kg(summary.notebook_id)
+        ):
+            # 内容没变、只有类型变了 → 只重抽 KG，不重解析（见 _reextract_retyped）。
+            # 状态先同步翻成 extracting：响应里立刻看得见，前端据此开始轮询，
+            # 否则「改类型」在界面上又是一次静默 no-op。
+            self.set_source_status(source_id, "extracting")
+            if scheduler is not None:
+                # 与 build_notebook_kg 同一个 job 池：文档级抽取的并发上限是
+                # 进程全局的，不能在这儿另起线程绕过它。
+                from app.services.kg import scheduler as kg_scheduler
+
+                kg_scheduler.submit_job(
+                    self._reextract_retyped, source_id, summary.notebook_id, hooks
+                )
+            else:
+                self._reextract_retyped(source_id, summary.notebook_id, hooks)
+        if retyped or summary.parse_status == "failed":
             summary = self.sources.get_source(source_id)
         return UploadedSourceSummary.model_validate(
             {**summary.model_dump(), "reused": True}
         )
+
+    def _reextract_retyped(
+        self, source_id: str, notebook_id: str, hooks: SourcePipelineHooks
+    ) -> None:
+        """重跑一条「内容没变、只是 doc_type 改了」的源的 KG 抽取。
+
+        刻意不走 process_source：同一份内容重新解析是纯白烧（MinerU 一趟几十秒
+        到几分钟），而且有真实的破坏性——解析在写 elements 之前就先清了图片资产，
+        网络抖一下就能把一条本来好好的源打成 failed。doc_type 只喂抽取侧，所以
+        只重跑抽取就够。
+
+        状态由调用方先翻成 'extracting'；这里落终态：成功 'extracted'，失败退回
+        'parsed'（与 build_notebook_kg 的单源失败口径一致——解析产物还在，能重
+        试），并且绝不把异常抛回上传请求：用户的其它文件已经建好了。"""
+        try:
+            hooks.extract_source(source_id)
+        except Exception:  # noqa: BLE001 — 一个源的抽取失败不该炸掉整次上传
+            self.set_source_status(source_id, "parsed", error_message="")
+            self.event_log.logger.exception(
+                "doc-type re-extraction failed for %s", source_id
+            )
+            return
+        self.set_source_status(source_id, "extracted")
+        try:
+            hooks.mark_unified_dirty(notebook_id)
+        except Exception:
+            self.event_log.logger.exception(
+                "unified-KG dirty mark failed for source %s", source_id
+            )
+        hooks.maybe_enqueue_scale_fold(notebook_id)
 
     def upload_sources(
         self,
@@ -448,6 +516,12 @@ class SourceIngestionService:
         created, True for an existing same-content source in this notebook
         that was handed back instead (see ``reuse_uploaded_source``). Callers
         that report "N sources added" must count the False ones only.
+
+        A reused row is not necessarily untouched: a non-empty ``doc_type``
+        that differs from the stored one is applied to the existing row (and
+        its KG re-extracted), so the returned ``doc_type`` is the value that
+        now holds — callers that describe the outcome should read it rather
+        than assume "nothing happened".
         """
         self.notebooks.get_row(notebook_id)  # KeyError if missing
         imported: List[UploadedSourceSummary] = []
@@ -457,10 +531,14 @@ class SourceIngestionService:
             digest = hashlib.sha256(file.content).hexdigest()
             # 同 notebook 内相同内容复用既有源，与 batch_ingest 的 already_ingested
             # 行为一致（此前 UI 路径会建出重复源）。跨 notebook 刻意不去重。
+            # doc_type 必须一起递进去：内容判重不代表用户这次的类型选择也该丢
+            # （见 reuse_uploaded_source）。
             existing_id = self.sources.source_id_by_hash(notebook_id, digest)
             if existing_id:
                 imported.append(
-                    self.reuse_uploaded_source(existing_id, scheduler, hooks)
+                    self.reuse_uploaded_source(
+                        existing_id, scheduler, hooks, doc_type=file.doc_type
+                    )
                 )
                 continue
             stored_path = self.source_files.write_upload(
