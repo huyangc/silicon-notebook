@@ -45,6 +45,7 @@ import {
   Copy,
   Download,
   Edit3,
+  History,
   ListChecks,
   ListPlus,
   Loader2,
@@ -109,6 +110,10 @@ import { KnowhowCreateWizard, KnowhowManageModal } from "./knowhow-manage.tsx";
 import { KnowhowMarkdown, KnowhowCellPreview, KnowhowCellEditor } from "./knowhow-cell-editor.tsx";
 import { KnowhowCodeChip, KnowhowCodeModal } from "./knowhow-code.tsx";
 import { KnowhowMatrixDrawer } from "./knowhow-matrix-drawer.tsx";
+// knowhow 表版本管理 Task 15：历史抽屉（时间线 + 单次改动 diff + 两版对比 +
+// 回退 + 里程碑）。与 KnowhowMatrixDrawer 同一挂载模式——面板自持
+// historyOpen 显隐态，本文件只负责打开/关闭 + 回退成功后重拉表详情。
+import { KnowhowHistoryDrawer } from "./knowhow-history-drawer.tsx";
 // C3：表级「复制/移动到…」——目标笔记本选择器是 C2 的共享组件（同一层 UI 也
 // 服务 Memory 的 C4），网络客户端与其 409 source_cleanup_failed 专用错误类型
 // 在 knowhow-transfer.ts（共享 transport 的领域客户端，无 JSX，见该文件头注释）。
@@ -255,6 +260,10 @@ export function KnowhowPanel({
   // scope/rows 参数不同（见该组件定义处注释）。
   const [reformatRowId, setReformatRowId] = useState<string | null>(null);
   const [reformatTableOpen, setReformatTableOpen] = useState(false);
+  // knowhow 表版本管理 Task 15：历史抽屉显隐——与 manageOpen/transferOpen 同级
+  // 的顶层 modal 状态，工具栏「历史」按钮打开，抽屉自己管理时间线/diff/回退/
+  // 里程碑的全部内部状态（本文件只负责显隐 + 回退成功后重拉表详情）。
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
   const [detail, setDetail] = useState<KnowhowTableDetail | null>(null);
@@ -462,6 +471,7 @@ export function KnowhowPanel({
     setReformatRowId(null);
     setReformatTableOpen(false);
     setCodeModal(null);
+    setHistoryOpen(false); // Task 15：与 manageOpen/transferOpen 同级的顶层 modal 状态，一并清空
     jumpRoutedRef.current = null; // Task 11：兜底一并重置，理由见上方声明处注释
   }, [notebookId]);
 
@@ -553,6 +563,7 @@ export function KnowhowPanel({
     setAppendOpen(false);
     setOptimizeRowId(null);
     setCodeModal(null);
+    setHistoryOpen(false); // Task 15：与 manageOpen/transferOpen 同级的顶层 modal 状态，一并清空
   }
 
   function backToList() {
@@ -572,6 +583,7 @@ export function KnowhowPanel({
     setAppendOpen(false);
     setOptimizeRowId(null);
     setCodeModal(null);
+    setHistoryOpen(false); // Task 15：与 manageOpen/transferOpen 同级的顶层 modal 状态，一并清空
   }
 
   async function confirmDeleteTable() {
@@ -773,6 +785,15 @@ export function KnowhowPanel({
   // 管理 modal 里任一写操作成功：重拉表详情（modal 拿到新 detail prop 原地
   // 刷新）+ 表列表（标题/行数在列表卡片上要跟着变）。
   function handleManageChanged() {
+    if (selectedTableId) loadDetail(selectedTableId);
+    loadTables();
+  }
+
+  // knowhow 表版本管理 Task 15：历史抽屉「回到这里」回退成功后的回调——重拉
+  // 当前表详情（行/格内容、列结构、行标题列都可能被回退改动）+ 表清单（行数/
+  // 最近活动时间同样可能变化）。镜像 handleManageChanged 的既有写法；抽屉自己
+  // 只重拉历史时间线，不知道也不需要知道 detail 的形状。
+  function handleReverted() {
     if (selectedTableId) loadDetail(selectedTableId);
     loadTables();
   }
@@ -1180,6 +1201,7 @@ export function KnowhowPanel({
             onAppendClick={() => setAppendOpen(true)}
             onReformatTableClick={() => setReformatTableOpen(true)}
             onRenameColumn={handleRenameColumn}
+            onOpenHistory={() => setHistoryOpen(true)}
           />
         )}
       </div>
@@ -1238,6 +1260,26 @@ export function KnowhowPanel({
           deletingConcept={deletingConcept}
           onDeleteBranch={deleteBranch}
           deletingBranchRowId={deletingBranchRowId}
+        />
+      )}
+
+      {/* knowhow 表版本管理 Task 15：工具栏「历史」→ 历史抽屉（时间线+diff+
+          两版对比+回退+里程碑）。必须排在 cellModal 渲染之前——同上面
+          KnowhowMatrixDrawer 那段注释的同一条规则：两者共用同一个
+          .kh-modal-overlay（z-index 65），DOM 顺序决定层叠。本抽屉当前不提供
+          "编辑格子"之类会在其上再开一层 cellModal 的入口（Task 15 范围内没有
+          嵌套浮窗），但仍照抄这条顺序约定，保持与本文件其余 kh-modal-* 消费
+          方一致、也给未来若真的长出这类入口留好位置。 */}
+      {historyOpen && detail && selectedTableId && (
+        <KnowhowHistoryDrawer
+          notebookId={notebookId}
+          apiBase={apiBase}
+          tableId={selectedTableId}
+          tableTitle={detail.title}
+          columns={detail.columns}
+          canEdit={canEdit}
+          onClose={() => setHistoryOpen(false)}
+          onReverted={handleReverted}
         />
       )}
 
@@ -2174,6 +2216,15 @@ export function KnowhowPanel({
         .knowhow-drawer-edit-button:hover {
           border-color: var(--blue);
           background: #eef2ff;
+        }
+
+        /* Task 15（历史抽屉）新增消费方（「设为里程碑」/「回到这里」/
+           「对比」按钮）会在请求进行中传 disabled——原有两个消费方（「优化
+           整行」/「一键规整」）从未传过 disabled，这条规则对它们是纯增量，
+           不改变既有外观。 */
+        .knowhow-drawer-edit-button:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
         }
 
         /* -------------------------------------------------------------------
@@ -3215,6 +3266,299 @@ export function KnowhowPanel({
           box-shadow: inset 0 0 0 2px var(--blue);
         }
 
+        /* -------------------------------------------------------------------
+           Task 15（历史抽屉，knowhow-history-drawer.tsx 的
+           KnowhowHistoryDrawer 专用）——登记在这里而非该组件自己的
+           <style jsx>，理由同上方 kh-modal-*/kh-matrix-* 两段注释：这是本
+           特性唯一保证任何时候都已挂载的样式容器。
+           ------------------------------------------------------------------- */
+
+        /* 比普通格子浮窗（880px）宽一些——两版对比/单条 diff 的"此前/此后"
+           并排两栏在窄卡片里会太挤；比矩阵抽屉（1040px）窄一点，折中。 */
+        .kh-history-card {
+          width: min(960px, 96vw);
+        }
+
+        .kh-history-toolbar {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+          margin-bottom: 14px;
+        }
+
+        /* 复用既有 .kh-view-switch（knowhow-cell-editor.tsx 编辑/并列/预览
+           三态切换同一套控件，见该组件工具栏）——但那里的 margin-left: auto
+           是为了在"录入按钮 + 切换"这种单侧布局里把自己推到最右；这里切换
+           是本工具栏最左侧的第一个元素，"只看里程碑"复选框在最右侧，需要
+           justify-content: space-between 撑开中间，故清空这个继承来的
+           margin-left——只在本工具栏这个特定祖先选择器下覆盖，不影响格子
+           编辑器那处既有用法（选择器特异度靠祖先类而非 !important）。 */
+        .kh-history-toolbar .kh-view-switch {
+          margin-left: 0;
+        }
+
+        .kh-history-filter-toggle {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          font-size: 12.5px;
+          color: var(--muted);
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .kh-history-days {
+          display: flex;
+          flex-direction: column;
+          gap: 18px;
+        }
+
+        .kh-history-day {
+          font-size: 12.5px;
+          font-weight: 600;
+          color: var(--muted);
+          margin-bottom: 8px;
+        }
+
+        .kh-history-list {
+          list-style: none;
+          margin: 0;
+          padding: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+
+        .kh-history-item {
+          border: 1px solid var(--line);
+          border-radius: 10px;
+          padding: 10px 12px;
+        }
+
+        .kh-history-item-summary {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          flex-wrap: wrap;
+        }
+
+        .kh-history-item-toggle {
+          flex: 1 1 auto;
+          min-width: 0;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          border: 0;
+          background: transparent;
+          padding: 0;
+          font: inherit;
+          color: inherit;
+          text-align: left;
+          cursor: pointer;
+        }
+
+        .kh-history-item-time {
+          color: var(--muted);
+          font-variant-numeric: tabular-nums;
+          white-space: nowrap;
+        }
+
+        .kh-history-item-actions {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-top: 8px;
+          flex-wrap: wrap;
+        }
+
+        /* 「设为里程碑」/「回到这里」两个按钮复用既有 .knowhow-drawer-edit-
+           button（行详情抽屉分节「编辑」按钮同一支 pill 样式）——但那里的
+           margin-left: auto 是为了把自己推到分节标题行的最右端；这里两个
+           按钮就是本行唯一内容，希望紧跟在摘要文字下方左对齐，同上面
+           .kh-view-switch 的覆盖手法，只在本容器下清空继承来的 margin。 */
+        .kh-history-item-actions .knowhow-drawer-edit-button {
+          margin-left: 0;
+        }
+
+        .kh-history-milestone-form {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin-top: 8px;
+        }
+
+        .kh-history-milestone-form input {
+          flex: 1 1 auto;
+          min-width: 0;
+          max-width: 260px;
+          padding: 6px 10px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          font-size: 13px;
+          color: var(--ink);
+        }
+
+        .kh-history-milestone-form input:disabled {
+          opacity: 0.6;
+        }
+
+        .kh-history-milestone-form button {
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          padding: 6px 12px;
+          font-size: 12.5px;
+          font-weight: 600;
+          background: #fff;
+          color: var(--ink);
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .kh-history-milestone-form button:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+
+        .kh-history-detail {
+          margin-top: 10px;
+          padding-top: 10px;
+          border-top: 1px solid var(--line);
+        }
+
+        .kh-history-diff-section + .kh-history-diff-section {
+          margin-top: 12px;
+        }
+
+        .kh-history-diff-cell + .kh-history-diff-cell {
+          margin-top: 12px;
+        }
+
+        .kh-history-diff-cell-head {
+          font-size: 12.5px;
+          font-weight: 600;
+          color: var(--muted);
+          margin-bottom: 6px;
+        }
+
+        .kh-history-diff-pair {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 10px;
+        }
+
+        .kh-history-diff-block {
+          border-radius: 8px;
+          padding: 8px 10px;
+          font-size: 13px;
+          min-width: 0;
+        }
+
+        .kh-history-diff-block--before {
+          background: #fef2f2;
+          border: 1px solid #f0c0c0;
+        }
+
+        .kh-history-diff-block--after {
+          background: #f0faf5;
+          border: 1px solid #b7e4cf;
+        }
+
+        .kh-history-diff-label {
+          font-size: 11px;
+          font-weight: 600;
+          color: var(--muted);
+          margin-bottom: 4px;
+        }
+
+        .kh-history-diff-empty {
+          margin: 0;
+          color: var(--muted);
+          font-size: 12.5px;
+        }
+
+        .kh-history-row-card {
+          border-radius: 8px;
+          padding: 10px 12px;
+          border-left: 3px solid transparent;
+          background: var(--soft);
+        }
+
+        .kh-history-row-card + .kh-history-row-card {
+          margin-top: 10px;
+        }
+
+        /* 新增/删除行卡片左边条——绿/红呼应 .kh-history-diff-block--after/
+           --before 同一套色值，色彩语义在"单格 diff"与"整行增删"之间保持
+           一致（新增=绿，删除=红）。 */
+        .kh-history-row-card--added {
+          border-left-color: #177a55;
+        }
+
+        .kh-history-row-card--removed {
+          border-left-color: #ba2d2d;
+        }
+
+        .kh-history-row-card-cell {
+          margin-top: 6px;
+          font-size: 13px;
+        }
+
+        .kh-history-column-diff-list {
+          list-style: none;
+          margin: 0;
+          padding: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          font-size: 13px;
+          color: var(--ink);
+        }
+
+        .kh-history-stale-milestones {
+          margin-top: 16px;
+          padding-top: 12px;
+          border-top: 1px dashed var(--line);
+        }
+
+        .kh-history-empty {
+          padding: 30px 0;
+          text-align: center;
+          color: var(--muted);
+        }
+
+        .kh-history-compare-bar {
+          display: flex;
+          align-items: flex-end;
+          gap: 16px;
+          flex-wrap: wrap;
+          margin-bottom: 16px;
+        }
+
+        .kh-history-compare-bar label {
+          display: flex;
+          flex-direction: column;
+          gap: 4px;
+          font-size: 12px;
+          color: var(--muted);
+        }
+
+        .kh-history-compare-bar select {
+          min-width: 240px;
+          max-width: 360px;
+          padding: 6px 10px;
+          border: 1px solid var(--line);
+          border-radius: 8px;
+          font-size: 13px;
+          color: var(--ink);
+          background: #fff;
+        }
+
+        .kh-history-compare-result > * + * {
+          margin-top: 14px;
+        }
+
         @media (max-width: 720px) {
           /* 窄屏走整屏浮窗：card 是 100vw，overlay 若还留着 24px padding，卡片就被
              推出视口 24px——右侧的关闭按钮、三态切换、「保存并下一格」会被裁掉
@@ -3245,6 +3589,12 @@ export function KnowhowPanel({
           }
 
           .kh-optimize-compare {
+            grid-template-columns: 1fr;
+          }
+
+          /* Task 15：窄屏下"此前/此后"并排两栏挤不下，同上面几处并列视图
+             一样退回单栏纵向堆叠。 */
+          .kh-history-diff-pair {
             grid-template-columns: 1fr;
           }
         }
@@ -3383,6 +3733,7 @@ function KnowhowTableGrid({
   onAppendClick,
   onReformatTableClick,
   onRenameColumn,
+  onOpenHistory,
 }: {
   detail: KnowhowTableDetail | null;
   loading: boolean;
@@ -3435,6 +3786,10 @@ function KnowhowTableGrid({
   /** 表头列名 inline 改名（canEdit 时启用）：双击列名进入编辑框，回车/失焦
    * 时把新名字丢回来落库。用户不必再翻「管理」抽屉找列改名——就地改。 */
   onRenameColumn: (columnId: string, name: string) => void;
+  /** knowhow 表版本管理 Task 15：打开历史抽屉——同 onTransfer 一样不整体挂在
+   * canEdit 门内（只读成员也能看时间线和 diff，见按钮渲染处注释），面板自持
+   * historyOpen 显隐态，这里只负责打开。 */
+  onOpenHistory: () => void;
 }) {
   const orderedColumns = useMemo(() => (detail ? orderColumnsForGrid(detail.columns) : []), [detail]);
   const filteredRows = useMemo(() => (detail ? filterRows(detail.rows, query) : []), [detail, query]);
@@ -3538,6 +3893,21 @@ function KnowhowTableGrid({
           >
             <Copy size={14} />
             复制/移动到…
+          </button>
+          {/* knowhow 表版本管理 Task 15：「历史」——同「复制/移动到…」一样不
+              整体挂在 canEdit 门内（只读成员也能看时间线和单次改动/两版
+              diff，design doc §8.2 末尾"权限"一节明文；只有回退/里程碑这两个
+              写入口收在抽屉内部按 canEdit 二级门控，见 knowhow-history-
+              drawer.tsx）。 */}
+          <button
+            type="button"
+            className="sort-button knowhow-reproject-button"
+            onClick={onOpenHistory}
+            disabled={!detail || deleting}
+            title="查看这张表的变更历史"
+          >
+            <History size={14} />
+            历史
           </button>
           {canEdit && (
             <>

@@ -32,6 +32,10 @@ const APPROVED_MESSAGE_READS = Object.freeze({
     count: 2,
     reason: "optimizer and reformatter error states are written through the humanization boundary",
   },
+  "knowhow-history-drawer.tsx|<module>.KnowhowHistoryDrawer.handleRevert|property|message": {
+    count: 1,
+    reason: "revert failure is narrowed to KnowhowRevertError before its server-validated guidance is copied out",
+  },
   "knowhow-model.ts|<module>.parseKnowhowRevertFailure|property|message": {
     count: 3,
     reason: "revert failure payload is schema-checked (code+status match) before its guidance is returned",
