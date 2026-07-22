@@ -378,8 +378,8 @@ notebook 整本深拷贝（`notebook_sharing.copy_notebook`）同理不带历史
 | 场景 | HTTP | error_code | 文案 |
 |---|---|---|---|
 | 前置指纹不一致 | 400 | `knowhow_history_inconsistent` | 表的当前内容与变更历史对不上，回退已中止 |
-| head 已变 | 409 | `knowhow_history_stale` | 这张表刚被改过，请刷新后重试 |
-| 后置校验失败 | 500 | `knowhow_revert_verify_failed` | 回退结果校验失败，已放弃本次回退 |
+| head 已变 | 409 | `knowhow_history_stale` | 这张表刚被其他人改过，请刷新后重试 |
+| 后置校验失败 | 500 | `knowhow_revert_verify_failed` | 回退结果校验失败，已放弃本次回退，表未被改动 |
 | 目标 seq 不存在/不属于本表 | 404 | — | 统一无 oracle（`detail` 是普通字符串 `"Change not found"`，既不打 header 也不是结构化 code，走状态码通用兜底） |
 
 ### 8.2 前端（三个入口，全挂既有结构）
