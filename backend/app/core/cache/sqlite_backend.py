@@ -9,6 +9,15 @@ cache hit 是热路径，逐次 UPDATE 会把"读"变成"写"，在高命中率�
 
 total_bytes 在 meta 表里增量维护，避免每次裁剪都 SUM() 全表扫。进程崩溃可能让它
 漂移，用 recount() 兜底重算。
+
+连接**每线程复用一条**（threading.local），不是每次操作新建——建连接 + 三条
+PRAGMA 在 get() 这种热路径上占掉约 98% 墙钟（实测 12.9k ops/s → 538k ops/s）。
+与 app/repositories/sqlite/database.py 同一套做法。
+
+批量删除一律走 WHERE 条件直删，不把 key 列表展开成 IN (?,…)：过期条目数与单个
+tag 下的条目数都没有上限，展开后会撞部署机（Ubuntu 24.04，SQLite ≥ 3.32）的
+SQLITE_LIMIT_VARIABLE_NUMBER=32766。本机 conda 的 SQLite 编到 250000，这类缺陷
+在开发机上测不出来。
 """
 from __future__ import annotations
 
@@ -17,6 +26,44 @@ import threading
 import time
 from pathlib import Path
 from typing import List, Optional
+
+# 一次 LRU 淘汰取多少条候选。这是裁剪循环的支点——原型第一版的真实缺陷正是
+# "把整批候选无条件删光"，候选批大于剩余条目数时会一次清空缓存。提到模块级，
+# 不让它以裸字面量藏在循环体里。同时它是 _delete_keys_freed_bytes 唯一的批量
+# 来源，从而保证那里的 IN (?,…) 占位符数量天然有界。
+EVICT_BATCH = 64
+
+
+class _Conn(sqlite3.Connection):
+    """复用连接 + 嵌套事务守卫（与 app/repositories/sqlite/database.py 同款）。
+
+    连接改为线程内复用后，``with conn:`` 依旧是 **sqlite3 的事务上下文**
+    （提交/回滚），从来就不负责关闭连接——语义与"每次新建连接"时完全一致。
+    原生 ``__exit__`` 每次都 commit/rollback，一旦将来出现嵌套 ``with``，内层
+    退出会提前提交外层未完成的写。用深度计数让**只有最外层**才 commit(无异常)/
+    rollback(任一层异常)，保住"每个 with 块 = 一个逻辑事务边界"。
+
+    不 override __init__（用 getattr 惰性属性），以兼容 sqlite3.connect(factory=)。
+    """
+
+    def __enter__(self) -> "_Conn":
+        self._txn_depth = getattr(self, "_txn_depth", 0) + 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        depth = getattr(self, "_txn_depth", 1) - 1
+        self._txn_depth = depth
+        if exc_type is not None:
+            self._txn_failed = True
+        if depth <= 0:
+            self._txn_depth = 0
+            failed = getattr(self, "_txn_failed", False)
+            self._txn_failed = False
+            if failed:
+                self.rollback()
+            else:
+                self.commit()
+        return False  # 不吞异常(与 sqlite3.Connection.__exit__ 一致)
 
 
 class SqliteCacheBackend:
@@ -35,6 +82,7 @@ class SqliteCacheBackend:
         self.refresh_window = refresh_window
         self.headroom = headroom      # 裁到上限的 90%，避免每次 put 都触发裁剪
         self._lock = threading.Lock()
+        self._local = threading.local()
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as db:
             db.executescript(
@@ -48,12 +96,30 @@ class SqliteCacheBackend:
                 "INSERT OR IGNORE INTO meta(k, v) VALUES ('total_bytes', 0);"
             )
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=30)
+    def _new_connection(self) -> _Conn:
+        conn = sqlite3.connect(
+            self.path,
+            timeout=30,
+            factory=_Conn,
+            check_same_thread=True,  # 显式:连接不跨线程(threading.local 保证)
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 30000")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")   # 缓存丢了可重建，不值 fsync
+        return conn
+
+    def _connect(self) -> _Conn:
+        """返回**本线程复用**的连接（首次懒建）。
+
+        线程结束时 threading.local 释放引用，连接随之关闭；fd 用量是 O(线程数)
+        而非 O(操作数)。所有公开方法都在 self._lock 下操作，同一连接不会被并发
+        使用。
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = self._new_connection()
+            self._local.conn = conn
         return conn
 
     # ------------------------------------------------------------ CacheBackend
@@ -66,7 +132,7 @@ class SqliteCacheBackend:
             if row is None:
                 return None
             if now - row["created_at"] > self.ttl_seconds:
-                self._delete(db, [key])
+                self._delete_keys_freed_bytes(db, [key])
                 return None
             if now - row["used_at"] > self.refresh_window:      # 粗粒度 LRU
                 db.execute("UPDATE cache SET used_at=? WHERE key=?", (now, key))
@@ -91,7 +157,15 @@ class SqliteCacheBackend:
             self._evict_if_needed(db)
 
     # ------------------------------------------------------------------ 淘汰
-    def _delete(self, db: sqlite3.Connection, keys: List[str]) -> int:
+    def _delete_keys_freed_bytes(
+        self, db: sqlite3.Connection, keys: List[str]
+    ) -> int:
+        """按 key 删除，返回**释放的字节数**（不是行数）。
+
+        keys 只来自 LRU 候选批（≤ EVICT_BATCH 条）与单 key 的过期落空，占位符
+        数量因此天然有界。**不要**把"按 tag 清空"或"过期清扫"改成先 SELECT key
+        再喂进来——那两处的条目数没有上限，会撞 SQLITE_LIMIT_VARIABLE_NUMBER。
+        """
         if not keys:
             return 0
         marks = ",".join("?" * len(keys))
@@ -102,6 +176,22 @@ class SqliteCacheBackend:
         db.execute("UPDATE meta SET v = v - ? WHERE k='total_bytes'", (freed,))
         return freed
 
+    def _sweep_expired(self, db: sqlite3.Connection) -> int:
+        """删掉所有过期条目，返回释放的字节数。
+
+        按 created_at 条件直删。过期条目数没有上限（一次上限调整就可能让几十万条
+        同时过期），先 SELECT key 再展开成 IN (?,…) 会在部署机上抛 "too many SQL
+        variables"。这条路径长在 put() 里，而调用方按"缓存故障不影响主流程"用
+        except Exception 吞掉降级为 miss——一旦抛异常，缓存会**无声地永久停止写入**。
+        """
+        cutoff = time.time() - self.ttl_seconds
+        freed = db.execute(
+            "SELECT COALESCE(SUM(size),0) s FROM cache WHERE created_at < ?", (cutoff,)
+        ).fetchone()["s"]
+        db.execute("DELETE FROM cache WHERE created_at < ?", (cutoff,))
+        db.execute("UPDATE meta SET v = v - ? WHERE k='total_bytes'", (freed,))
+        return freed
+
     def _evict_if_needed(self, db: sqlite3.Connection) -> None:
         total = db.execute(
             "SELECT v FROM meta WHERE k='total_bytes'").fetchone()["v"]
@@ -109,15 +199,13 @@ class SqliteCacheBackend:
             return
         target = int(self.size_limit * self.headroom)
         # 先清过期条目（免费空间），不够再按 used_at 升序淘汰最冷的。
-        cutoff = time.time() - self.ttl_seconds
-        expired = [r["key"] for r in db.execute(
-            "SELECT key FROM cache WHERE created_at < ?", (cutoff,)).fetchall()]
-        total -= self._delete(db, expired)
+        total -= self._sweep_expired(db)
         while total > target:
             # 取一批候选，但只删到刚好达标为止——不能把整批无条件删光，否则当候选
             # 批大于剩余条目数时会一次清空缓存，把热条目一起带走。
             rows = db.execute(
-                "SELECT key, size FROM cache ORDER BY used_at ASC LIMIT 64"
+                "SELECT key, size FROM cache ORDER BY used_at ASC "
+                f"LIMIT {EVICT_BATCH}"
             ).fetchall()
             if not rows:
                 break
@@ -130,15 +218,24 @@ class SqliteCacheBackend:
                 remaining -= row["size"]
             if not victims:
                 break
-            total -= self._delete(db, victims)
+            total -= self._delete_keys_freed_bytes(db, victims)
 
     # -------------------------------------------------------------- CacheAdmin
     def evict_tag(self, tag: str) -> int:
+        """清空某个 tag（通常是模型名）下的全部条目，返回删除行数。
+
+        换模型后清缓存正是条目数最大的场景，所以这里**不取 key 列表**：一条聚合
+        拿到行数与字节数，一条条件 DELETE 落库，与条目数无关。
+        """
         with self._lock, self._connect() as db:
-            keys = [r["key"] for r in db.execute(
-                "SELECT key FROM cache WHERE tag=?", (tag,)).fetchall()]
-            self._delete(db, keys)
-            return len(keys)
+            row = db.execute(
+                "SELECT COUNT(*) n, COALESCE(SUM(size),0) s FROM cache WHERE tag=?",
+                (tag,),
+            ).fetchone()
+            db.execute("DELETE FROM cache WHERE tag=?", (tag,))
+            db.execute(
+                "UPDATE meta SET v = v - ? WHERE k='total_bytes'", (row["s"],))
+            return row["n"]
 
     def clear(self) -> int:
         with self._lock, self._connect() as db:
@@ -168,13 +265,6 @@ class SqliteCacheBackend:
         with self._lock, self._connect() as db:
             return db.execute(
                 "SELECT v FROM meta WHERE k='total_bytes'").fetchone()["v"]
-
-    def _used_at(self, key: str) -> Optional[float]:
-        """测试用：读取条目的 used_at，用于验证粗粒度 LRU 的节流。"""
-        with self._lock, self._connect() as db:
-            row = db.execute(
-                "SELECT used_at FROM cache WHERE key=?", (key,)).fetchone()
-            return row["used_at"] if row else None
 
     def __len__(self) -> int:
         with self._lock, self._connect() as db:

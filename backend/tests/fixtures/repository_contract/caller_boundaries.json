@@ -497,19 +497,11 @@
       "kind": "independent_sql",
       "path": "backend/app/core/cache/sqlite_backend.py",
       "reason": "independent content-addressed LLM/embedding cache database",
-      "scope": "<module>.SqliteCacheBackend._connect",
-      "target": "conn.execute"
-    },
-    {
-      "count": 3,
-      "kind": "independent_sql",
-      "path": "backend/app/core/cache/sqlite_backend.py",
-      "reason": "independent content-addressed LLM/embedding cache database",
-      "scope": "<module>.SqliteCacheBackend._delete",
+      "scope": "<module>.SqliteCacheBackend._delete_keys_freed_bytes",
       "target": "db.execute"
     },
     {
-      "count": 3,
+      "count": 2,
       "kind": "independent_sql",
       "path": "backend/app/core/cache/sqlite_backend.py",
       "reason": "independent content-addressed LLM/embedding cache database",
@@ -517,11 +509,19 @@
       "target": "db.execute"
     },
     {
-      "count": 1,
+      "count": 3,
       "kind": "independent_sql",
       "path": "backend/app/core/cache/sqlite_backend.py",
       "reason": "independent content-addressed LLM/embedding cache database",
-      "scope": "<module>.SqliteCacheBackend._used_at",
+      "scope": "<module>.SqliteCacheBackend._new_connection",
+      "target": "conn.execute"
+    },
+    {
+      "count": 3,
+      "kind": "independent_sql",
+      "path": "backend/app/core/cache/sqlite_backend.py",
+      "reason": "independent content-addressed LLM/embedding cache database",
+      "scope": "<module>.SqliteCacheBackend._sweep_expired",
       "target": "db.execute"
     },
     {
@@ -533,7 +533,7 @@
       "target": "db.execute"
     },
     {
-      "count": 1,
+      "count": 3,
       "kind": "independent_sql",
       "path": "backend/app/core/cache/sqlite_backend.py",
       "reason": "independent content-addressed LLM/embedding cache database",
@@ -1043,7 +1043,7 @@
       "kind": "sqlite_connect",
       "path": "backend/app/core/cache/sqlite_backend.py",
       "reason": "independent content-addressed LLM/embedding cache database",
-      "scope": "<module>.SqliteCacheBackend._connect",
+      "scope": "<module>.SqliteCacheBackend._new_connection",
       "target": "sqlite3.connect"
     },
     {
