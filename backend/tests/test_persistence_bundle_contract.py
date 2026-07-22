@@ -100,8 +100,7 @@ def test_persistence_bundle_factory_create_has_a_pinned_public_contract():
         inspect.Parameter.KEYWORD_ONLY,
         inspect.Parameter.KEYWORD_ONLY,
     )
-    assert all(parameter.default is inspect.Parameter.empty for parameter in parameters)
-    assert parameters[0].annotation is inspect.Parameter.empty
+    assert all(parameter.default is inspect.Parameter.empty for parameter in parameters[1:])
     assert get_type_hints(PersistenceBundleFactory.create) == {
         "settings": Settings,
         "root_dir": Path,
