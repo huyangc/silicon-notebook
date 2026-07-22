@@ -10,21 +10,19 @@ from app.api import deps
 from app.core import readiness
 from app.core.config import Settings
 from app.services import model_provider as provider_mod
+from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import RecordingModelProvider
 
 
-class _InjectedProvider:
+class _InjectedProvider(RecordingModelProvider):
     def __init__(self) -> None:
-        self.closed = 0
-
-    def embedding(self, workload_id: str):
-        assert workload_id == "retrieval_query_embedding"
-        from app.services.embedding import FakeEmbedder
-
-        return FakeEmbedder(dim=8)
-
-    def close(self) -> None:
-        self.closed += 1
+        super().__init__(
+            embedding_clients={
+                "retrieval_query_embedding": FakeEmbedder(dim=8),
+            },
+            parallelism_by_workload={"kg_extract": 1},
+        )
 
 
 def _settings(tmp_path) -> Settings:

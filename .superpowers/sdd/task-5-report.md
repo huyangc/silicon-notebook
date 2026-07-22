@@ -69,6 +69,16 @@ the benchmark composition root pinned an explicit empty provider. The Task 5
 suite plus the real scheduled-client regressions subsequently passed together
 (`311 passed in 20.96s`).
 
+A fresh controller run then exposed stale Task 2/3 test construction after the
+Task 5 Settings cleanup (`26 failed, 125 passed`). Raw protocol and cache tests
+now supply service URL/key/model explicitly, the former global-fallback test
+instead proves retired environment endpoints are ignored, and the injected
+repository provider uses the complete test-provider interface including
+`parallelism("kg_extract")`. The exact controller command is GREEN
+(`151 passed in 2.23s`); the Task 5 suite plus the offline-benchmark regression
+also remained GREEN (`290 passed in 20.14s`). No production compatibility
+fallback was added.
+
 The real-runtime three-source peak test binds multiple embedding workloads to
 one physical service and observes a raw upstream peak exactly equal to that
 service's configured maximum (`2`), proving the service scheduler—not each
