@@ -342,14 +342,26 @@ SCALE_INDEX_AUTO_ENABLED   # 为大库自动构建/刷新检索索引（默认 t
 SCALE_INDEX_AUTO_WHEN      # "idle"=排队到低峰窗口（默认）｜ "now"=立即构建
 ```
 
+**内容寻址缓存（LLM + 向量化调用）：**
+
+内容完全相同的重复调用——同一模型、同一 prompt 或文本——直接复用上次结果，
+不再重新请求模型；大规模重跑（例如对已处理过的库重新抽取）是主要受益场景。
+缓存独立存放在自己的 SQLite 文件中，与主数据库分开。健康/可用性探测始终
+绕过缓存，不会被一次缓存里的成功结果掩盖正在发生的模型服务故障。
+
+```text
+LLM_CACHE_ENABLED        # 内容寻址缓存总开关（默认 true）
+LLM_CACHE_PATH           # 缓存文件路径（默认 .local/llm_cache_v2.db）
+LLM_CACHE_SIZE_LIMIT     # 容量上限（字节）；超出后按最近最少使用淘汰（默认 2147483648 = 2 GiB）
+LLM_CACHE_TTL_DAYS       # 条目最长保留天数，超期视为过期（默认 90）
+```
+
 **检索 / KG 增强（GraphRAG + ToG-3 借鉴，Phase 1+2）：**
 
 opt-in（默认关）与默认开混合。默认开：`ANSWER_CONTEXT_*`、`KG_QUERY_REFINE_ENABLED`，以及 KG 质量增强 `KG_REFINE` / `KG_GLEANING` / `KG_CONCEPT_DESC`。其余请**逐个开启**并用
 评测脚本（`backend/app/eval`）验证——RRF + 重排 + 精炼三个全开会回归。
 
 ```text
-LLM_CACHE_ENABLED            # 把 LLM 响应缓存到独立 sqlite（默认 false）
-LLM_CACHE_PATH               # 缓存 DB 路径（默认 .local/llm_cache.db）
 KG_REFINE_ENABLED            # 抽取自校验：丢弃幻觉节点（默认 true）
 KG_GLEANING_ENABLED          # 额外几轮让 LLM 找回漏抽节点（默认 true）
 KG_GLEANING_ROUNDS           # 开启时的 gleaning 轮数（默认 1）

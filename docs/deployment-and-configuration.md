@@ -398,6 +398,21 @@ SCALE_INDEX_AUTO_ENABLED   # auto-build/refresh the scale index for large notebo
 SCALE_INDEX_AUTO_WHEN      # "idle"=queue for the off-peak window (default) | "now"=build immediately
 ```
 
+**Content-addressed cache (LLM + embedding calls):**
+
+Repeat calls with identical content — same model, same prompt or text — reuse the
+previous result instead of hitting the model again; large-scale re-runs (e.g.
+re-extracting an already-processed library) are the main beneficiary. Stored in its
+own SQLite file, separate from the main database. Health/availability probes always
+bypass it, so a cached success can never mask a live model outage.
+
+```text
+LLM_CACHE_ENABLED        # content-addressed cache switch (default true)
+LLM_CACHE_PATH           # cache DB path (default .local/llm_cache_v2.db)
+LLM_CACHE_SIZE_LIMIT     # size cap in bytes; least-recently-used entries evicted first past this (default 2147483648 = 2 GiB)
+LLM_CACHE_TTL_DAYS       # max entry age in days before treated as expired (default 90)
+```
+
 **Retrieval / KG enhancements (GraphRAG + ToG-3 borrow, Phase 1+2):**
 
 A mix of opt-in (default off) and on-by-default knobs. On by default: `ANSWER_CONTEXT_*`,
@@ -407,8 +422,6 @@ harness (`backend/app/eval`) — turning RRF + rerank + refinement on together r
 answer quality in eval.
 
 ```text
-LLM_CACHE_ENABLED            # cache LLM responses in a separate sqlite (default false)
-LLM_CACHE_PATH               # cache DB path (default .local/llm_cache.db)
 KG_REFINE_ENABLED            # extraction self-verify: drop hallucinated nodes (default true)
 KG_GLEANING_ENABLED          # extra rounds asking the LLM for MISSED nodes (default true)
 KG_GLEANING_ROUNDS           # gleaning rounds when enabled (default 1)
