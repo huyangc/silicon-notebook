@@ -77,30 +77,47 @@ def is_cacheable_embedding(vector: Sequence[float], expected_dim: int) -> bool:
     return n == expected_dim
 
 
-def llm_key(model: str, messages: List[Dict[str, str]], schema_hint: str) -> str:
-    """LLM 响应的缓存键 = sha256(model + messages 全文 + schema_hint)。
+def llm_key(
+    model: str, messages: List[Dict[str, str]], schema_hint: str, base_url: str
+) -> str:
+    """LLM 响应的缓存键 = sha256(base_url + model + messages 全文 + schema_hint)。
 
     prompt 全文进 key 意味着改 prompt 即自动全冷，不需要维护版本号。
     temperature 是 chat_json 的固定常量，刻意排除；若将来加了 per-call
     temperature，必须并入 key。
 
-    注意：本函数的输出必须与历史实现逐字节一致，否则已有缓存全部失效。
+    ``base_url`` 是**服务身份**，不是可选项：本仓库有 per-user 模型配置，两个用户
+    可以配同一个 model 名却指向不同 endpoint。缓存是跨用户全局共享的，若 key 只认
+    model 名，第二个用户会拿到第一个 endpoint 的响应——他自己选的模型服务根本没被
+    调用。base_url 足以区分 endpoint（正是这个场景），且它不是秘密（出现在日志、
+    错误信息里）。**绝不把 api_key 放进 key 材料**：key 会经 stats()/日志/调试路径
+    间接暴露；同 endpoint 换 key 由 evict_tag(model) 逃生口兜底，无需入 key。所以
+    这里刻意只取 base_url，不用含 api_key 的 model_config_fingerprint()。
+
+    位置参数、无默认值：漏传就是本次评审抓到的那类缺陷（不同服务静默共用一条
+    缓存），让调用方在签名层就无法忘记，与 is_cacheable_embedding 的 expected_dim
+    同一防呆思路。
     """
     payload = json.dumps(
-        {"model": model, "messages": messages, "schema": schema_hint},
+        {"base_url": base_url, "model": model, "messages": messages, "schema": schema_hint},
         sort_keys=True, ensure_ascii=False,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def embed_key(model: str, truncated_text: str) -> str:
-    """单条文本的向量缓存键。
+def embed_key(model: str, truncated_text: str, base_url: str) -> str:
+    """单条文本的向量缓存键 = sha256(base_url + model + 截断后文本)。
 
     传入的必须是**截断后**的文本（DashscopeEmbedder 内部先做
     `t[:embed_truncate_chars]` 才发 API）。用原文取哈希会让两个前 N 字符相同的
     长文本各占一条缓存却拿到完全相同的向量，白白损失命中率；对截断后文本取哈希
     还顺带捕获了 embed_truncate_chars 的配置变更。
+
+    ``base_url`` 是服务身份，纳入 key 的原因与 llm_key 完全相同（per-user 模型配置
+    下同 model 名可指向不同 endpoint，全局共享缓存不能张冠李戴）。同样**绝不含
+    api_key**：embedder 层本就不持有它，base_url 已足以隔离 endpoint。位置参数、
+    无默认值，理由同上。
     """
-    payload = json.dumps({"model": model, "text": truncated_text},
+    payload = json.dumps({"base_url": base_url, "model": model, "text": truncated_text},
                          sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
