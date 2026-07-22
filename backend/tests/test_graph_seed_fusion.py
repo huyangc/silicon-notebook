@@ -3,6 +3,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_embedding_client
 
 
 def _make_repo(tmp_path, monkeypatch, flag):
@@ -11,7 +12,7 @@ def _make_repo(tmp_path, monkeypatch, flag):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("RELATION_RETRIEVAL_ENABLED", "true" if flag else "false")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 

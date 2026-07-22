@@ -18,6 +18,7 @@ from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.model_provider import ModelInvocationError
 from app.services.model_registry import ModelServiceDefinition, WorkloadSpec
 from tests.model_testkit import bind_chat_client
+from tests.model_testkit import bind_embedding_client
 
 
 @pytest.fixture
@@ -26,7 +27,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 

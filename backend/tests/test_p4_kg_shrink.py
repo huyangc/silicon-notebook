@@ -3,6 +3,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 
 def test_kg_auto_extract_env_override(monkeypatch):
@@ -16,7 +18,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -71,14 +73,27 @@ def _make_source(repo, nb_id, sid, status="extracted", with_elements=True):
 
 
 def _configure_llm(repo):
-    repo.llm_client = type(
+    bind_chat_client(repo, "kg_extract", type(
         "C",
         (),
         {
             "configured": True,
             "chat_json": lambda self, messages, hint, **kwargs: '{"ok":true}',
         },
-    )()
+    )())
+
+
+def _configure_ask(repo):
+    bind_chat_client(repo, "ask_answer", type(
+        "AnswerClient",
+        (),
+        {
+            "configured": True,
+            "chat_json": lambda self, messages, hint, **kwargs: (
+                '{"answer":"ok","grounded":false}'
+            ),
+        },
+    )())
 
 
 def test_build_notebook_kg_runs_extraction_per_kgless_source(repo, monkeypatch):
@@ -135,7 +150,7 @@ def test_build_notebook_kg_skips_sources_missing_elements(repo, monkeypatch):
 
 
 def test_build_notebook_kg_requires_llm(repo):
-    repo.llm_client = type("C", (), {"configured": False})()
+    bind_chat_client(repo, "kg_extract", type("C", (), {"configured": False})())
     nb = repo.create_notebook(NotebookCreate(name="n"))
     with pytest.raises(RuntimeError):
         repo.build_notebook_kg(nb.id)
@@ -217,6 +232,7 @@ from app.models.schemas import AskRequest
 
 
 def test_strict_blocked_when_no_kg_no_base(repo):
+    _configure_ask(repo)
     nb = repo.create_notebook(NotebookCreate(name="n"))
     resp = repo.ask_reasoning(nb.id, AskRequest(question="q", mode="reasoning"))
     assert resp.kg_required is True
@@ -224,6 +240,7 @@ def test_strict_blocked_when_no_kg_no_base(repo):
 
 
 def test_strict_allowed_when_base_has_kg(repo):
+    _configure_ask(repo)
     base = repo.create_notebook(NotebookCreate(name="base"))
     repo.mark_notebook_base(base.id)
     repo.store_kg(base.id, None, [

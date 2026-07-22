@@ -99,7 +99,7 @@ def measure_speed(source_md_path: str, char_steps: Optional[List[int]] = None,
     char_steps = char_steps or [5000, 20000, 50000, 100000, 200000]
     settings = Settings()
     repo = SQLiteRepository(settings)
-    assert repo.llm_client.configured, "LLM 未配置(.env)"
+    assert repo.configured("kg_extract"), "kg_extract workload 未配置"
     full = pathlib.Path(source_md_path).read_text(encoding="utf-8")
     tmpdir = tempfile.mkdtemp()
     results: List[dict] = []

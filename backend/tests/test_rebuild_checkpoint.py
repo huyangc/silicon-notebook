@@ -5,6 +5,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_chat_client, bind_embedding_client
 
 
 @pytest.fixture
@@ -12,13 +13,9 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -117,7 +114,7 @@ class _GroupedFakeEmbedder(FakeEmbedder):
 
 def _seed_mergeable(repo, nb_id):
     """造若干近义 concept(名字接近 → 进 auto_candidates → 触发 merge 审查)。"""
-    repo.embedder = _GroupedFakeEmbedder(dim=repo.settings.embed_dim)
+    bind_embedding_client(repo, _GroupedFakeEmbedder(dim=repo.settings.embed_dim))
     objs = []
     for i in range(6):
         objs.append({"local_id": f"c{i}", "object_type": "concept",
@@ -132,7 +129,7 @@ def _seed_mergeable(repo, nb_id):
 def test_merge_review_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatch):
     """同输入连跑两次 rebuild:第二次 merge 审查 LLM 调用数=0(全部命中 checkpoint)。"""
     fake = _CountingReviewLLM()
-    monkeypatch.setattr(type(repo), "kg_llm_client", property(lambda self: fake))
+    bind_chat_client(repo, "kg_merge_review", fake)
     monkeypatch.setattr(type(repo), "kg_concept_desc_enabled", False, raising=False)  # 隔离描述阶段
     monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", False, raising=False)
 
@@ -150,7 +147,7 @@ def test_merge_review_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatc
 def test_fresh_clears_checkpoint_and_readjudicates(repo, monkeypatch):
     """--fresh(fresh=True)清 checkpoint → 再跑重新裁决(LLM 又被调用)。"""
     fake = _CountingReviewLLM()
-    monkeypatch.setattr(type(repo), "kg_llm_client", property(lambda self: fake))
+    bind_chat_client(repo, "kg_merge_review", fake)
     monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", False, raising=False)
 
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -199,7 +196,7 @@ def test_concept_desc_checkpoint_skips_relled_llm_on_second_run(repo, monkeypatc
         concept_desc checkpoint —— 这就是非掩盖的证明。
     """
     fake = _CountingDescLLM()
-    monkeypatch.setattr(type(repo), "kg_llm_client", property(lambda self: fake))
+    bind_chat_client(repo, "kg_concept_description", fake)
     monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", True, raising=False)
 
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -254,7 +251,7 @@ def test_concept_desc_checkpoint_periodic_flush_at_16(repo, monkeypatch):
     工作项:flush-at-16 一次 + remainder 一次,单次 rebuild 内
     _rebuild_ckpt_put(stage='concept_desc') 必须被调用 ≥2 次。"""
     fake = _CountingDescLLM()
-    monkeypatch.setattr(type(repo), "kg_llm_client", property(lambda self: fake))
+    bind_chat_client(repo, "kg_concept_description", fake)
     monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", True, raising=False)
 
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -299,7 +296,7 @@ def test_concept_desc_checkpoint_put_failure_does_not_abort_rebuild(repo, monkey
     "checkpoint 落库失败,绝不能抛出打断 rebuild"。用单 canonical(autoc 为空、
     不会触发 merge-review)隔离验证,只专注概念描述阶段的 checkpoint 落库路径。"""
     fake = _CountingDescLLM()
-    monkeypatch.setattr(type(repo), "kg_llm_client", property(lambda self: fake))
+    bind_chat_client(repo, "kg_concept_description", fake)
     monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", True, raising=False)
 
     nb = repo.create_notebook(NotebookCreate(name="nb"))
@@ -333,7 +330,7 @@ def test_node_vector_backfill_preserves_merge_review_checkpoint(repo, monkeypatc
     但还没跑完"的中间状态(不经 store_kg/_mark_unified_kg_dirty,seq 不动)。
     """
     fake = _CountingReviewLLM()
-    monkeypatch.setattr(type(repo), "kg_llm_client", property(lambda self: fake))
+    bind_chat_client(repo, "kg_merge_review", fake)
     monkeypatch.setattr(repo.settings, "kg_concept_desc_enabled", False, raising=False)
 
     nb = repo.create_notebook(NotebookCreate(name="nb"))

@@ -334,10 +334,6 @@ class RepositoryRuntime:
     def embedder(self) -> Any:
         return self._embedder
 
-    @embedder.setter
-    def embedder(self, value: Any) -> None:
-        self.set_embedder(value)
-
     def set_embedder(self, value: Any) -> None:
         self._embedder = value
         if self.retrieval is not None:

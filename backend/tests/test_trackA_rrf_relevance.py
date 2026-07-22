@@ -2,6 +2,7 @@
 import pytest
 from unittest.mock import patch
 from app.services.retrieval import Evidence, RetrievedKnowledge
+from tests.model_testkit import bind_embedding_client
 
 
 def _make_repo(tmp_path, monkeypatch):
@@ -15,7 +16,7 @@ def _make_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     settings = Settings(retrieval_rrf_k=60, retrieval_rrf_enabled=True)
     repo = SQLiteRepository(settings)
-    repo.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(repo, FakeEmbedder(dim=16))
     return repo
 
 

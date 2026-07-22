@@ -7,6 +7,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -14,11 +16,10 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    for k, v in {"EMBED_PROVIDER": "dashscope", "EMBED_BASE_URL": "https://e.test",
-                 "EMBED_API_KEY": "k", "EMBED_MODEL": "m", "EMBED_DIM": "16"}.items():
+    for k, v in {"EMBED_DIM": "16"}.items():
         monkeypatch.setenv(k, v)
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -33,7 +34,7 @@ def test_get_notebook_reflects_kg_building_set(repo):
 
 def test_kg_building_set_during_build_and_cleared_after(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="t"))
-    repo.llm_client = _ProbeLLM()  # 无 sources，仅执行入口探测
+    bind_chat_client(repo, "kg_extract", _ProbeLLM())  # 无 sources，仅执行入口探测
     seen = {}
     orig = repo._mark_unified_kg_dirty
     def spy(nid):
@@ -48,7 +49,7 @@ def test_kg_building_set_during_build_and_cleared_after(repo, monkeypatch):
 
 def test_kg_building_cleared_on_failure(repo):
     nb = repo.create_notebook(NotebookCreate(name="t"))
-    repo.llm_client = types.SimpleNamespace(configured=False)  # 入口即 RuntimeError
+    bind_chat_client(repo, "kg_extract", types.SimpleNamespace(configured=False))  # 入口即 RuntimeError
     with pytest.raises(RuntimeError):
         repo.build_notebook_kg(nb.id)
     assert nb.id not in repo._kg_building          # 异常路径 finally 仍清位
@@ -58,7 +59,7 @@ def test_kg_building_cleared_on_failure(repo):
 def test_kg_building_set_during_rebuild_delete_phase(repo, monkeypatch):
     """rebuild=delete+build：标志必须覆盖 delete 阶段（否则大库 delete>6s 时前端轮询过早停）。"""
     nb = repo.create_notebook(NotebookCreate(name="t"))
-    repo.llm_client = _ProbeLLM()  # 无 sources，仅执行入口探测
+    bind_chat_client(repo, "kg_extract", _ProbeLLM())  # 无 sources，仅执行入口探测
     seen = {}
     orig_delete = repo._runtime.knowledge_lifecycle.delete_notebook_kg
     def spy_delete(nid):

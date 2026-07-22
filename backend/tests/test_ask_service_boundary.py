@@ -34,6 +34,7 @@ import asyncio
 import queue
 from types import SimpleNamespace
 from app.services.retrieval import RetrievedChunk, RetrievedKnowledge
+from tests.model_testkit import bind_embedding_client
 
 
 @pytest.fixture
@@ -44,7 +45,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_PROVIDER", "")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 

@@ -5,6 +5,7 @@ from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import RecordingModelProvider, bind_chat_client
+from tests.model_testkit import bind_embedding_client
 
 
 class _ReportLLM:
@@ -24,7 +25,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     provider = RecordingModelProvider()
     r = SQLiteRepository(Settings(), model_provider=provider)
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     r.recording_model_provider = provider
     return r
 

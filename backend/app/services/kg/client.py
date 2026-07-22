@@ -2,9 +2,7 @@
 gold generator (GOLDGEN_) and product ("") can use different endpoints/models."""
 from __future__ import annotations
 
-import json
 import os
-import re
 from typing import Dict, List, Optional
 
 
@@ -86,21 +84,3 @@ def make_client(env_prefix: str = "") -> KGClient:
         max_tokens = 8192
     return KGClient(g("OPENAI_COMPAT_BASE_URL"), g("OPENAI_COMPAT_API_KEY"),
                     g("OPENAI_COMPAT_MODEL"), max_tokens=max_tokens)
-
-
-def safe_json(raw: str) -> dict:
-    if not raw:
-        return {}
-    t = raw.strip()
-    # Reasoning models (e.g. MiniMax) prepend a <think>...</think> block before
-    # the JSON, inline in `content`, even under response_format=json_object.
-    t = re.sub(r"<think>.*?</think>", "", t, flags=re.IGNORECASE | re.DOTALL).strip()
-    t = re.sub(r"^```(?:json)?\s*|\s*```$", "", t).strip()
-    i, j = t.find("{"), t.rfind("}")
-    if i != -1 and j > i:
-        t = t[i:j + 1]
-    try:
-        out = json.loads(t)
-        return out if isinstance(out, dict) else {}
-    except (ValueError, TypeError):
-        return {}

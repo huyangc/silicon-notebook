@@ -29,7 +29,7 @@ from app.repositories.sqlite.notebook_store import NotebookStore
 from app.repositories.sqlite.source_store import SourceElementWrite, SourceStore
 from app.services import kg_ingest, remote_sources
 from app.services.extraction_profiles import PROFILES, get_profile
-from app.services.kg.client import safe_json
+from app.services.kg.json_utils import safe_json
 from app.services.kg.run_control import KgBuildAborted
 from app.services.kg_mutation import KgMutationCoordinator
 from app.services.knowledge_lifecycle import KnowledgeLifecycleService

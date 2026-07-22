@@ -4,6 +4,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -12,7 +14,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings(_env_file=None))
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -76,7 +78,9 @@ def test_reflect_parses_ppr_retrieve_decision():
         pass
 
     class _Models:
-        reasoning_llm_client = _LLM()
+        def chat(self, workload_id):
+            assert workload_id == "reasoning_agent"
+            return _LLM()
 
     class _Communities:
         pass
@@ -104,7 +108,7 @@ class _AnswerOnlyLLM:
 def test_run_seed_pass_populates_cross_doc_chunks_when_flag_on(repo):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_doc_moe(repo)
-    repo._reasoning_llm_client = _AnswerOnlyLLM()
+    bind_chat_client(repo, "reasoning_agent", _AnswerOnlyLLM())
     assert repo.settings.graph_ppr_enabled is True   # 默认开
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
     ids = {c.chunk_id for c in result.chunks}
@@ -115,7 +119,7 @@ def test_run_seed_pass_populates_cross_doc_chunks_when_flag_on(repo):
 def test_run_no_seed_when_flag_off(repo, monkeypatch):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_doc_moe(repo)
-    repo._reasoning_llm_client = _AnswerOnlyLLM()
+    bind_chat_client(repo, "reasoning_agent", _AnswerOnlyLLM())
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
     assert result.chunks == []
@@ -143,9 +147,9 @@ def test_ppr_retrieve_action_caps_at_max(repo, monkeypatch):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_doc_moe(repo)
     monkeypatch.setattr(repo.settings, "reasoning_stale_limit", 99)
-    repo._reasoning_llm_client = _ScriptedReflectLLM(
+    bind_chat_client(repo, "reasoning_agent", _ScriptedReflectLLM(
         reflects=[{"next_action": "ppr_retrieve", "ppr_query": f"q{i}"} for i in range(4)]
-        + [{"next_action": "answer", "sufficient": True}])
+        + [{"next_action": "answer", "sufficient": True}]))
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "对比题")
     ppr_actions = [s for s in result.trace
                    if s.step_type == "ppr" and s.detail.get("phase") == "action"]
@@ -161,9 +165,9 @@ def test_ppr_retrieve_action_skipped_when_flag_off(repo, monkeypatch):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_doc_moe(repo)
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
-    repo._reasoning_llm_client = _ScriptedReflectLLM(
+    bind_chat_client(repo, "reasoning_agent", _ScriptedReflectLLM(
         reflects=[{"next_action": "ppr_retrieve", "ppr_query": "q"},
-                  {"next_action": "answer", "sufficient": True}])
+                  {"next_action": "answer", "sufficient": True}]))
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "对比题")
     assert any(s.step_type == "skip" and s.detail.get("reason") == "ppr_disabled"
                for s in result.trace)
@@ -194,7 +198,7 @@ def test_answer_reasoning_mixes_chunks_as_citable(repo):
         configured = True
         def chat_json(self, messages, schema_hint, **kw):
             return json.dumps({"answer": "跨文档证据 [k1].", "grounded": True})
-    repo._reasoning_llm_client = _Echo()
+    bind_chat_client(repo, "ask_answer", _Echo())
 
     answer, grounded, anchors = repo._answer_reasoning(
         nb.id, "对比 MoE", hits, [], chunks=chunks)
@@ -210,7 +214,7 @@ def test_answer_reasoning_empty_chunks_unchanged(repo):
         configured = True
         def chat_json(self, messages, schema_hint, **kw):
             return json.dumps({"answer": "KG 证据 [k1].", "grounded": True})
-    repo._reasoning_llm_client = _Echo()
+    bind_chat_client(repo, "ask_answer", _Echo())
 
     answer, grounded, anchors = repo._answer_reasoning(nb.id, "MoE", hits, [], chunks=None)
     assert anchors and anchors[0].object_type == "concept"  # k1 = KG 锚(旧行为)
@@ -220,8 +224,9 @@ def test_reasoning_ask_seed_grounds_in_cross_doc_chunk_end_to_end(repo):
     """端到端:flag 开 + reflect 只 answer(纯靠 seed pass)→ 跨文档 chunk 被升为可引用证据
     ([k1] 落在 chunk 段 → resp.anchors 含 chunk 锚),且 seed pass 在轨迹里。"""
     nb = _seed_two_doc_moe(repo)
-    repo.llm_client = _AnswerOnlyLLM()
-    repo._reasoning_llm_client = _AnswerOnlyLLM()
+    llm = _AnswerOnlyLLM()
+    bind_chat_client(repo, "ask_answer", llm)
+    bind_chat_client(repo, "reasoning_agent", llm)
     resp = repo.ask(nb.id, AskRequest(question="DeepSeek-V3 MoE 相比其他模型", mode="reasoning"))
     assert resp.mode == "reasoning"
     assert any(s.step_type == "ppr" for s in (resp.reasoning_trace or []))   # seed pass 跑了
@@ -232,8 +237,9 @@ def test_reasoning_ask_flag_off_no_ppr(repo, monkeypatch):
     """flag 关 → 无 ppr 轨迹,回到今天行为(无跨文档 chunk 注入)。"""
     nb = _seed_two_doc_moe(repo)
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
-    repo.llm_client = _AnswerOnlyLLM()
-    repo._reasoning_llm_client = _AnswerOnlyLLM()
+    llm = _AnswerOnlyLLM()
+    bind_chat_client(repo, "ask_answer", llm)
+    bind_chat_client(repo, "reasoning_agent", llm)
     resp = repo.ask(nb.id, AskRequest(question="MoE", mode="reasoning"))
     assert not any(s.step_type == "ppr" for s in (resp.reasoning_trace or []))
 
@@ -242,6 +248,6 @@ def test_chunk_relevance_within_unit_interval(repo):
     """守 [0,1]:reasoning 累积的 chunk relevance 全在单位区间。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_doc_moe(repo)
-    repo._reasoning_llm_client = _AnswerOnlyLLM()
+    bind_chat_client(repo, "reasoning_agent", _AnswerOnlyLLM())
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "MoE 对比")
     assert all(0.0 <= c.relevance <= 1.0 for c in result.chunks)

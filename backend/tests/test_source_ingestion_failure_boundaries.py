@@ -20,6 +20,7 @@ from app.services.remote_sources import PdfProbe
 from app.services.source_ingestion import SourceIngestionService  # noqa: F401 — Task 12 gate
 from app.services.sqlite_repository import SQLiteRepository, _now
 from tests.model_testkit import RecordingModelProvider, bind_chat_client
+from tests.model_testkit import bind_embedding_client
 
 
 @pytest.fixture
@@ -40,13 +41,7 @@ def embed_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    settings = Settings()
-    repo = SQLiteRepository(settings)
-    settings.embed_provider = "dashscope"
-    settings.embed_base_url = "https://embedding.example.test"
-    settings.embed_api_key = "test-key"
-    settings.embed_model = "test-model"
-    return repo
+    return SQLiteRepository(Settings())
 
 
 @pytest.fixture
@@ -123,7 +118,7 @@ def test_embedding_failure_does_not_fail_pipeline(embed_repo, monkeypatch):
         def _ensure(self):
             pass
 
-    repo.embedder = _BoomEmbedder()
+    bind_embedding_client(repo, _BoomEmbedder())
     repo.process_source(sid)
     src = repo.get_source(sid)
     assert src.parse_status == "extracted"

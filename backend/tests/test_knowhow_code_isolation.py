@@ -48,6 +48,7 @@ from fastapi.testclient import TestClient
 
 from app.models.schemas import AskRequest
 from app.services.embedding import FakeEmbedder
+from tests.model_testkit import bind_embedding_client
 
 EMBED_DIM = 16
 
@@ -90,10 +91,6 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", str(EMBED_DIM))
     for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
@@ -105,8 +102,8 @@ def client(tmp_path, monkeypatch):
     c = TestClient(app)
     c._repo = repository()  # type: ignore[attr-defined]
     c._recorder = RecordingEmbedder(dim=EMBED_DIM)  # type: ignore[attr-defined]
-    c._repo.embedder = c._recorder
-    assert c._repo.settings.embedder_configured
+    bind_embedding_client(c._repo, c._recorder)
+    assert c._repo.configured("knowhow_embedding")
     return c
 
 

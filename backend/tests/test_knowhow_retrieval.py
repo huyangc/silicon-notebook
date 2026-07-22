@@ -33,6 +33,8 @@ from openpyxl import Workbook
 
 from app.models.schemas import AskRequest
 from app.services.embedding import FakeEmbedder
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 EMBED_DIM = 16
 
@@ -91,10 +93,6 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", str(EMBED_DIM))
     # Mirrors test_retrieval_service.py's repo fixture: blank any real LLM
     # keys a developer's shell might export, so ask_chunk's "no LLM
@@ -109,8 +107,8 @@ def client(tmp_path, monkeypatch):
 
     c = TestClient(app)
     c._repo = repository()  # type: ignore[attr-defined]
-    c._repo.embedder = FakeEmbedder(dim=EMBED_DIM)
-    assert c._repo.settings.embedder_configured  # confirm the real embed path is live
+    bind_embedding_client(c._repo, FakeEmbedder(dim=EMBED_DIM))
+    assert c._repo.configured("knowhow_embedding")
     return c
 
 
@@ -544,7 +542,7 @@ def test_kg_rebuild_never_extracts_hidden_knowhow_source(client, imported):
     # without a live LLM/embedder for the "extraction" itself.
     targeted: list[str] = []
     repo._run_extraction = lambda sid: targeted.append(sid)
-    repo.llm_client = MagicMock(configured=True)
+    bind_chat_client(repo, "kg_extract", MagicMock(configured=True))
 
     repo.rebuild_notebook_kg(nb)
 

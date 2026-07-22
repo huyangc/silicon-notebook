@@ -57,9 +57,10 @@ def grounding_ok(repo, nb_id):
 def main():
     settings = Settings()
     repo = SQLiteRepository(settings)
-    print("llm configured:", repo.llm_client.configured, "| model:",
-          getattr(repo.llm_client, "model", "?"), flush=True)
-    assert repo.llm_client.configured, "ask_answer workload not configured"
+    kg_client = repo.chat("kg_extract")
+    print("kg_extract configured:", kg_client.configured, "| model:",
+          getattr(kg_client, "model", "?"), flush=True)
+    assert kg_client.configured, "kg_extract workload not configured"
     tmpdir = tempfile.mkdtemp()
     results = {}
     for name, (md, dt, lim) in SOURCES.items():

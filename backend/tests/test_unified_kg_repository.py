@@ -5,19 +5,17 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.services.vector_index import decode_vector
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 @pytest.fixture
 def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")  # embedder_configured=True
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)               # inject; no real model loads (lazy)
+    bind_embedding_client(r, FakeEmbedder(dim=16))               # inject; no real model loads (lazy)
     return r
 
 def test_store_kg_batch_embeds_nodes(repo):
@@ -194,7 +192,7 @@ def test_rebuild_applies_llm_confirmed_auto_candidate(repo):
                     '"canonical_name":"operational amplifier","confidence":0.99,'
                     '"rationale":"same concept"}]}')
 
-    repo.llm_client = _LLM()
+    bind_chat_client(repo, "kg_merge_review", _LLM())
     repo.rebuild_unified_kg(nb.id)
     cmap = repo.cluster_map(nb.id)
     assert cmap.get(o1) == cmap.get(o2), (
@@ -241,7 +239,7 @@ def test_review_merge_below_confirm_threshold_becomes_deferred(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
-    repo.llm_client = _CannedReviewLLM("merge", 0.88)
+    bind_chat_client(repo, "kg_merge_review", _CannedReviewLLM("merge", 0.88))
     out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
     assert out == {"reviewed": 1, "confirmed": 0, "rejected": 0, "unsure": 1}
     assert _candidate_status(repo, nb.id, cid) == "deferred"
@@ -251,7 +249,7 @@ def test_review_merge_at_confirm_threshold_is_confirmed(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
-    repo.llm_client = _CannedReviewLLM("merge", 0.92)
+    bind_chat_client(repo, "kg_merge_review", _CannedReviewLLM("merge", 0.92))
     out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
     assert out == {"reviewed": 1, "confirmed": 1, "rejected": 0, "unsure": 0}
     assert _candidate_status(repo, nb.id, cid) == "confirmed"
@@ -261,7 +259,7 @@ def test_review_keep_separate_at_threshold_is_rejected(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
-    repo.llm_client = _CannedReviewLLM("keep_separate", 0.85)
+    bind_chat_client(repo, "kg_merge_review", _CannedReviewLLM("keep_separate", 0.85))
     out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
     assert out == {"reviewed": 1, "confirmed": 0, "rejected": 1, "unsure": 0}
     assert _candidate_status(repo, nb.id, cid) == "rejected"
@@ -271,7 +269,7 @@ def test_review_keep_separate_below_threshold_becomes_deferred(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
-    repo.llm_client = _CannedReviewLLM("keep_separate", 0.70)
+    bind_chat_client(repo, "kg_merge_review", _CannedReviewLLM("keep_separate", 0.70))
     out = repo.review_pending_merges(nb.id, confirm_threshold=0.90, separate_threshold=0.80)
     assert out == {"reviewed": 1, "confirmed": 0, "rejected": 0, "unsure": 1}
     assert _candidate_status(repo, nb.id, cid) == "deferred"
@@ -286,7 +284,7 @@ def test_review_defaults_drain_keep_separate_that_old_single_threshold_left_pend
     assert repo.settings.kg_merge_separate_threshold == 0.80
     repo.write_merge_candidate(nb.id, "K1", "K2", 0.8)
     cid = repo.pending_merges(nb.id)[0]["id"]
-    repo.llm_client = _CannedReviewLLM("keep_separate", 0.88)
+    bind_chat_client(repo, "kg_merge_review", _CannedReviewLLM("keep_separate", 0.88))
     out = repo.review_pending_merges(nb.id)  # no thresholds -> settings defaults
     assert out == {"reviewed": 1, "confirmed": 0, "rejected": 1, "unsure": 0}
     assert _candidate_status(repo, nb.id, cid) == "rejected"
@@ -334,7 +332,7 @@ def test_review_pending_merges_fail_open_on_bad_llm_json(repo):
                  "canonical_name": "vco", "confidence": "high", "rationale": "r"},
             ]})
 
-    repo.llm_client = _BadConfLLM()  # inject via setter (system default LLM)
+    bind_chat_client(repo, "kg_merge_review", _BadConfLLM())  # inject via setter (system default LLM)
     summary = repo.review_pending_merges(nb.id)  # must NOT raise / 500
     assert isinstance(summary, dict)
     # "high" confidence coerces to 0.0 -> below thresholds -> counted as unsure, not confirmed.

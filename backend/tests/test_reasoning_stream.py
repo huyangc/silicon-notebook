@@ -1,6 +1,18 @@
 import json
 
 from fastapi.testclient import TestClient
+from tests.model_testkit import bind_chat_client, bind_embedding_client
+
+
+class _ReasoningLLM:
+    configured = True
+
+    def chat_json(self, messages, schema, **kwargs):
+        if "sub_queries" in schema:
+            return json.dumps({"sub_queries": [{"query": "RTL到GDSII流程"}]})
+        if "next_action" in schema:
+            return json.dumps({"next_action": "answer", "sufficient": True})
+        return json.dumps({"answer": "RTL到GDSII流程 [k1].", "grounded": True})
 
 
 def test_reasoning_stream_emits_progress_before_final(tmp_path, monkeypatch):
@@ -24,10 +36,12 @@ def test_reasoning_stream_emits_progress_before_final(tmp_path, monkeypatch):
 
     # 需要至少一个 KG 节点，否则 P4-6 门控直接返回 kg_required=True（无 plan 步骤）
     from app.core.config import get_settings as _gs
-    from app.services.sqlite_repository import SQLiteRepository
     from app.services.embedding import FakeEmbedder
-    repo = SQLiteRepository(_gs())
-    repo.embedder = FakeEmbedder(dim=_gs().embed_dim)
+    repo = ask_routes.repository()
+    bind_embedding_client(repo, FakeEmbedder(dim=_gs().embed_dim))
+    llm = _ReasoningLLM()
+    bind_chat_client(repo, "reasoning_agent", llm)
+    bind_chat_client(repo, "ask_answer", llm)
     repo.store_kg(notebook_id, None, [
         {"local_id": "K1", "object_type": "concept",
          "payload": {"name": "RTL到GDSII流程概述"}, "evidence": []}

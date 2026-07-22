@@ -14,7 +14,11 @@ from app.services.embedding import FakeEmbedder
 from app.services.kg import scheduler as kg_scheduler
 from app.services.kg.run_control import KgBuildAborted
 from app.services.sqlite_repository import SQLiteRepository
-from tests.model_testkit import RecordingModelProvider, bind_chat_client
+from tests.model_testkit import (
+    RecordingModelProvider,
+    bind_chat_client,
+    bind_embedding_client,
+)
 
 
 class _ControlledKgClient:
@@ -124,7 +128,7 @@ def repo(tmp_path, monkeypatch):
     settings.kg_relink_enabled = False
     provider = RecordingModelProvider()
     result = SQLiteRepository(settings, model_provider=provider)
-    result.embedder = FakeEmbedder(dim=settings.embed_dim)
+    bind_embedding_client(result, FakeEmbedder(dim=settings.embed_dim))
     result.recording_model_provider = provider
     kg_scheduler.configure(window_workers=1, job_workers=1)
     try:

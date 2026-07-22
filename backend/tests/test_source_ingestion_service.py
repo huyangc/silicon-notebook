@@ -26,6 +26,8 @@ from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
 from app.services.source_ingestion import SourceIngestionService, SourcePipelineHooks
 from app.services.sqlite_repository import SQLiteRepository, _now
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 ROOT = Path(__file__).resolve().parents[2]
 PHASES = (
@@ -49,10 +51,6 @@ def embed_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     return SQLiteRepository(Settings())
 
 
@@ -209,12 +207,12 @@ def test_background_embedding_overlaps_extraction_and_extracted_gates_on_extract
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = _seed_queued_source(repo, nb.id, file_path=str(md))
     repo.settings.kg_auto_extract = True
-    repo.llm_client = _FakeLLM(json.dumps({
+    bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
         "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
                    "evidence": "Engram is a memory architecture"}],
-        "edges": []}))
+        "edges": []})))
     emb = _ElementBlockingEmbedder()
-    repo.embedder = emb
+    bind_embedding_client(repo, emb)
 
     done = threading.Event()
 
@@ -267,14 +265,14 @@ def test_extraction_relink_ordering_and_stale_source_cleanup_match_master(repo):
     """Relink edges are proposed BEFORE store_kg (same review_status/source_id
     remap as LLM edges) and a re-extraction replaces — never duplicates —
     the source's prior objects."""
-    repo.llm_client = _FakeLLM(json.dumps({
+    bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
         "nodes": [
             {"local_id": "a", "type": "Concept", "name": "Engram",
              "evidence": "Engram is a memory architecture"},
             {"local_id": "b", "type": "Claim", "name": "Engram improves perplexity",
              "evidence": "Engram improves perplexity"},
         ],
-        "edges": []}))
+        "edges": []})))
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     sid = f"src-{uuid4().hex[:10]}"
     now = _now()

@@ -26,6 +26,7 @@ from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.vector_index import encode_vector
+from tests.model_testkit import bind_chat_client, bind_embedding_client
 
 NOW = "2026-07-03T00:00:00"
 
@@ -38,13 +39,12 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_RUNTIME_DIM", "16")
-    for k, v in {"EMBED_PROVIDER": "dashscope", "EMBED_BASE_URL": "https://e.test",
-                 "EMBED_API_KEY": "k", "EMBED_MODEL": "m", "EMBED_DIM": "32"}.items():
+    for k, v in {"EMBED_DIM": "32"}.items():
         monkeypatch.setenv(k, v)
     from app.core.config import get_settings
     get_settings.cache_clear()
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=32)
+    bind_embedding_client(r, FakeEmbedder(dim=32))
     yield r
     get_settings.cache_clear()
 
@@ -234,7 +234,7 @@ def test_conflict_embeddings_gated_by_storage_dim_then_truncated(repo, monkeypat
     class _StubLLM:
         configured = True
 
-    monkeypatch.setattr(repo, "llm_client", _StubLLM())
+    bind_chat_client(repo, "kg_conflict_review", _StubLLM())
     captured = {}
     import app.services.kg.conflict_detect as cd
 

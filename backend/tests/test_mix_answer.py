@@ -6,6 +6,9 @@ from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 from app.models.schemas import AskRequest
 from app.services.retrieval import RetrievedChunk
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_rerank_client
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -16,7 +19,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("CHUNK_KG_OVERLAY_ENABLED", "true")
     for _k in ("RERANK_MODEL", "RERANK_BASE_URL", "RERANK_API_KEY"):
         monkeypatch.delenv(_k, raising=False)
-    r = SQLiteRepository(Settings(_env_file=None)); r.embedder = FakeEmbedder(dim=16); return r
+    r = SQLiteRepository(Settings(_env_file=None)); bind_embedding_client(r, FakeEmbedder(dim=16)); return r
 
 
 def _seed_chunks_and_kg(repo):
@@ -83,7 +86,7 @@ def test_chunk_answer_context_budget_override(repo):
 
 
 def test_answer_mix_resolves_chunk_and_kg_anchors(repo):
-    repo.llm_client = _AnswerLLM("Cascode raises rout [k1]. Related: [k1001].")
+    bind_chat_client(repo, "ask_answer", _AnswerLLM("Cascode raises rout [k1]. Related: [k1001]."))
     chunks = [RetrievedChunk(chunk_id="c1", source_id="s", source_title="D",
                              section_path="1", text="cascode raises rout", relevance=0.8)]
     kg_block = "k1001: [concept][personal] Cascode"
@@ -100,7 +103,7 @@ def test_answer_mix_resolves_chunk_and_kg_anchors(repo):
 def test_ask_chunk_overlay_off_is_chunk_only(repo):
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
-    repo.llm_client = _AnswerLLM("answer [k1]")
+    bind_chat_client(repo, "ask_answer", _AnswerLLM("answer [k1]"))
     nb = _seed_chunks_and_kg(repo)
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
     assert all(a.object_type == "chunk" for a in resp.anchors)
@@ -108,8 +111,8 @@ def test_ask_chunk_overlay_off_is_chunk_only(repo):
 
 def test_ask_chunk_mix_runs_end_to_end(repo):
     repo.settings.query_rewrite_enabled = False
-    repo.llm_client = _AnswerLLM("Cascode raises rout [k1]")
-    repo.rerank_client = _FakeRerank(configured=True)
+    bind_chat_client(repo, "ask_answer", _AnswerLLM("Cascode raises rout [k1]"))
+    bind_rerank_client(repo, _FakeRerank(configured=True))
     nb = _seed_chunks_and_kg(repo)
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
     assert resp.answer
@@ -119,8 +122,8 @@ def test_ask_chunk_mix_runs_end_to_end(repo):
 
 def test_ask_chunk_rerank_unconfigured_falls_back(repo):
     repo.settings.query_rewrite_enabled = False
-    repo.llm_client = _AnswerLLM("answer [k1]")
-    repo.rerank_client = _FakeRerank(configured=False)
+    bind_chat_client(repo, "ask_answer", _AnswerLLM("answer [k1]"))
+    bind_rerank_client(repo, _FakeRerank(configured=False))
     nb = _seed_chunks_and_kg(repo)
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
     assert resp.answer
@@ -129,7 +132,7 @@ def test_ask_chunk_rerank_unconfigured_falls_back(repo):
 
 def test_answer_mix_caps_chunks_below_kg_key_base(repo):
     # 构造 >= _MIX_KG_KEY_BASE 个 chunk,确认被截到 base-1 之下,KG key 不被覆盖
-    repo.llm_client = _AnswerLLM("see [k1] and [k1001]")
+    bind_chat_client(repo, "ask_answer", _AnswerLLM("see [k1] and [k1001]"))
     n = repo._MIX_KG_KEY_BASE + 50
     chunks = [RetrievedChunk(chunk_id=f"c{i}", source_id="s", source_title="D",
                              section_path="1", text="x", relevance=0.5) for i in range(n)]
@@ -149,7 +152,7 @@ def test_ask_chunk_byte_equivalent_when_overlay_and_rerank_off(repo):
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
     assert not repo.rerank_client.configured        # fixture 未配 RERANK_MODEL
-    repo.llm_client = _AnswerLLM("answer [k1]")
+    bind_chat_client(repo, "ask_answer", _AnswerLLM("answer [k1]"))
     nb = _seed_chunks_and_kg(repo)
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))
     assert all(a.object_type == "chunk" for a in resp.anchors)   # 无 KG anchor

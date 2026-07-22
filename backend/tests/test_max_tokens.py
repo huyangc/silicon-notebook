@@ -14,6 +14,8 @@ from app.services.embedding import FakeEmbedder
 from app.services.retrieval import RetrievedChunk
 from app.services.kg.extract import extract_window
 from app.services.kg.parsing import SourceElementQ
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 
 # ---- config: defaults + env override --------------------------------------
@@ -122,7 +124,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings(_env_file=None))
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -139,7 +141,7 @@ class _RecordingLLM:
 def test_answer_synthesis_requests_answer_cap(repo):
     repo.settings.answer_max_tokens = 12345          # deterministic, distinct value
     llm = _RecordingLLM(repo.settings)
-    repo.llm_client = llm
+    bind_chat_client(repo, "ask_answer", llm)
     chunks = [RetrievedChunk(chunk_id="c1", source_id="s", source_title="D",
                              section_path="1", text="cascode raises rout", relevance=0.8)]
     repo._answer_mix("q", chunks, "(none)", {}, "")

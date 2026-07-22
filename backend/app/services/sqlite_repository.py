@@ -328,10 +328,11 @@ class SQLiteRepository:
                 notebook_id
             ),
         )
-        self.embedder = self._runtime.models.embedding("retrieval_query_embedding")
+        query_embedder = self._runtime.models.embedding("retrieval_query_embedding")
+        self._runtime.set_embedder(query_embedder)
         self._runtime.wire_memory(
             persistence_embedder=self._runtime.models.embedding("memory_embedding"),
-            query_embedder=self.embedder,
+            query_embedder=query_embedder,
         )
         self.mineru_client = MinerUClient(settings)
         self.mineru_cloud_client = MinerUCloudClient(settings)
@@ -3230,10 +3231,6 @@ class SQLiteRepository:
     @property
     def embedder(self):
         return self._runtime.embedder
-
-    @embedder.setter
-    def embedder(self, value) -> None:
-        self._runtime.embedder = value
 
     @property
     def _notebook_langs_cache(self):

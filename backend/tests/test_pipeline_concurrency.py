@@ -8,6 +8,8 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository, _now
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -16,10 +18,6 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     return SQLiteRepository(Settings())
 
 
@@ -64,11 +62,11 @@ def test_extracted_set_before_element_embedding_finishes(repo, tmp_path):
                VALUES (?,?,?, 'markdown','queued','queued', 'doc.md', ?, 0, '', '', 'academic_paper', ?, ?)""",
             (sid, nb.id, "Doc", str(md), now, now))
 
-    repo.llm_client = _FakeLLM(json.dumps({
+    bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
         "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0}],
-        "edges": []}))
+        "edges": []})))
     emb = _ElementBlockingEmbedder()
-    repo.embedder = emb
+    bind_embedding_client(repo, emb)
 
     done = threading.Event()
     def run():
@@ -146,7 +144,7 @@ def test_background_embed_thread_inherits_request_context(repo, tmp_path, monkey
         def _ensure(self):
             pass
 
-    repo.embedder = _CtxEmbedder()
+    bind_embedding_client(repo, _CtxEmbedder())
     token = set_request_user(user)
     try:
         repo.process_source(sid)

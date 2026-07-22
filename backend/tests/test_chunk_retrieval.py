@@ -6,6 +6,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import AskRequest, NotebookCreate
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 
 def _ck(cid, text):
@@ -45,16 +47,12 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     for _k in ("OPENAI_COMPAT_API_KEY", "OPENAI_COMPAT_BASE_URL",
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -227,7 +225,7 @@ def test_ask_chunk_deterministic_without_llm(repo):
 
 def test_ask_chunk_binds_anchor_to_chunk_with_llm(repo, monkeypatch):
     nb, _ = _seed_chunks(repo, ["deepseek v3 mixture of experts routing " * 20])
-    repo.llm_client = _FakeLLM("DeepSeek V3 uses MoE routing [k1].")
+    bind_chat_client(repo, "ask_answer", _FakeLLM("DeepSeek V3 uses MoE routing [k1]."))
     resp = repo.ask_chunk(nb.id, AskRequest(question="deepseek experts"))
     assert resp.answer and resp.anchors
     a = resp.anchors[0]
@@ -253,7 +251,7 @@ def test_ask_chunk_comparison_balances_both_entities(repo, monkeypatch):
     monkeypatch.setattr(qr, "expand_query", lambda *a, **k: qr.ExpandedQuery(
         query="V3 vs V2", sub_queries=[qr.SubQuerySpec("DeepSeek-V3 improvements"),
                                        qr.SubQuerySpec("DeepSeek-V2 features")]))
-    repo.llm_client = _FakeLLM("V3 improves on V2 [k1][k2].")
+    bind_chat_client(repo, "ask_answer", _FakeLLM("V3 improves on V2 [k1][k2]."))
     resp = repo.ask_chunk(nb.id, AskRequest(question="deepseekv3相比deepseekv2有什么改进"))
     srcs = " ".join((a.snippet or "") + (a.name or "") for a in resp.anchors).lower()
     cites = " ".join(c.quoted_span.lower() for c in resp.citations)

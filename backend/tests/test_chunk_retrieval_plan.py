@@ -9,6 +9,7 @@ import dataclasses
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_rerank_client
 
 
 class _IdentityRerank:
@@ -57,7 +58,7 @@ def test_plan_strategy_single_vs_multi_when_overlay_off(tmp_path, monkeypatch):
 
 def test_plan_strategy_mix_takes_priority_when_overlay_on(tmp_path, monkeypatch):
     repo, nb = _repo(tmp_path)
-    repo.rerank_client = _IdentityRerank()
+    bind_rerank_client(repo, _IdentityRerank())
     monkeypatch.setattr(repo.retrieval.candidates, "_notebook_has_kg", lambda _nb: True)
     monkeypatch.setattr(repo.retrieval.candidates, "_any_base_notebook_has_kg", lambda _nb: False)
     # 即便 2 个子查询，overlay 优先 → mix（复刻 if overlay/elif multi/else single 顺序）
@@ -70,7 +71,7 @@ def test_plan_overlay_off_when_rerank_unconfigured(tmp_path, monkeypatch):
     repo, nb = _repo(tmp_path)
     monkeypatch.setattr(repo.retrieval.candidates, "_notebook_has_kg", lambda _nb: True)
     monkeypatch.setattr(repo.retrieval.candidates, "_any_base_notebook_has_kg", lambda _nb: False)
-    repo.rerank_client = _UnconfiguredRerank()   # 三元 AND 断在 rerank.configured
+    bind_rerank_client(repo, _UnconfiguredRerank())   # 三元 AND 断在 rerank.configured
     plan = repo.retrieval.candidates._build_chunk_retrieval_plan(nb, ["q"])
     assert plan.overlay_on is False
     assert plan.strategy == "single"

@@ -18,6 +18,7 @@ import json
 import pytest
 
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_embedding_client
 
 
 @pytest.fixture
@@ -27,15 +28,14 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_RUNTIME_DIM", "0")
-    for k, v in {"EMBED_PROVIDER": "dashscope", "EMBED_BASE_URL": "https://e.test",
-                 "EMBED_API_KEY": "k", "EMBED_MODEL": "m", "EMBED_DIM": "32"}.items():
+    for k, v in {"EMBED_DIM": "32"}.items():
         monkeypatch.setenv(k, v)
     from app.core.config import Settings, get_settings
     get_settings.cache_clear()
     from app.services.embedding import FakeEmbedder
     from app.services.sqlite_repository import SQLiteRepository
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=32)
+    bind_embedding_client(r, FakeEmbedder(dim=32))
     return r
 
 

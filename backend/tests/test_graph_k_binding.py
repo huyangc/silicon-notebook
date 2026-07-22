@@ -24,6 +24,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import AskRequest, NotebookCreate
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -37,7 +39,7 @@ def graph_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
 
     nb = r.create_notebook(NotebookCreate(name="nb"))
     r.store_kg(nb.id, None, [
@@ -128,11 +130,13 @@ def _drive_ask_graph(repo, nb, monkeypatch):
             last_reviewed="", evidence=[], notebook_id=notebook_id, tier="personal")]
 
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_scored", _fake_retrieve_scored)
-    repo.llm_client = _CitingLLM(valid_key)
+    bind_chat_client(repo, "ask_answer", _CitingLLM(valid_key))
     # Skip the adversarial chain verifier (and its LLM calls) for a focused test.
-    # reasoning_llm_client is a read-only property that falls back to llm_client
-    # when _reasoning_llm_client is None; install a non-configured stub instead.
-    repo._reasoning_llm_client = type("_NoLLM", (), {"configured": False})()
+    bind_chat_client(
+        repo,
+        "graph_chain_verify",
+        type("_NoLLM", (), {"configured": False})(),
+    )
 
     resp = repo.ask(nb.id, AskRequest(question="oxide breakdown failure", mode="graph"))
     return resp, valid_key, k1_oid, k2_oid

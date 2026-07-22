@@ -64,7 +64,6 @@ class Settings(BaseSettings):
     )
     # 每用户模型配置策略。"fallback"(第一阶段)=用户没配则回退系统 env 默认；
     # "required"(第二阶段)=用户没配则该服务不可用(解析为 none，经 model_error 通道提示)。
-    user_model_config_policy: str = Field("fallback", validation_alias="USER_MODEL_CONFIG_POLICY")
     # Deployment-owned system model-service registry. An empty path explicitly
     # selects deterministic/offline model behavior; relative paths are anchored
     # to the repository root below so startup CWD cannot change the deployment.

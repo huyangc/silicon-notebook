@@ -4,6 +4,9 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_rerank_client
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -12,7 +15,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings(_env_file=None))
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -98,7 +101,7 @@ def test_reasoning_trace_uses_concept_walk_name(repo):
     """reasoning 的 ppr 轨迹 summary 改叫「概念漫游」,机器键 step_type 仍 'ppr'。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_doc_moe(repo)
-    repo._reasoning_llm_client = _AnswerOnlyReasoningLLM()
+    bind_chat_client(repo, "reasoning_agent", _AnswerOnlyReasoningLLM())
     result = ReasoningRetriever.from_repository(repo, repo.settings).run(nb.id, "DeepSeek-V3 MoE 对比")
     ppr_steps = [s for s in result.trace if s.step_type == "ppr"]
     assert ppr_steps                                            # 机器键不变
@@ -110,8 +113,8 @@ def test_ask_chunk_concept_walk_end_to_end(repo):
     """overlay 路 + flag 开:概念漫游把跨文档 chunk 并入候选 → rerank → _answer_mix,
     答案出 chunk 引用。"""
     repo.settings.query_rewrite_enabled = False
-    repo.llm_client = _AnswerLLM("DeepSeek 与 GLM 都用 MoE [k1].")
-    repo.rerank_client = _FakeRerank(configured=True)
+    bind_chat_client(repo, "ask_answer", _AnswerLLM("DeepSeek 与 GLM 都用 MoE [k1]."))
+    bind_rerank_client(repo, _FakeRerank(configured=True))
     nb = _seed_two_doc_moe(repo)
     resp = repo.ask_chunk(nb.id, AskRequest(question="DeepSeek-V3 MoE 相比其他模型", mode="chunk"))
     assert resp.mode == "chunk"
@@ -123,8 +126,8 @@ def test_ask_chunk_concept_walk_off_unchanged(repo, monkeypatch):
     """flag 关 → 不并入 PPR 路,overlay 仍按今天行为出 chunk 答案。"""
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
     repo.settings.query_rewrite_enabled = False
-    repo.llm_client = _AnswerLLM("答案 [k1].")
-    repo.rerank_client = _FakeRerank(configured=True)
+    bind_chat_client(repo, "ask_answer", _AnswerLLM("答案 [k1]."))
+    bind_rerank_client(repo, _FakeRerank(configured=True))
     nb = _seed_two_doc_moe(repo)
     resp = repo.ask_chunk(nb.id, AskRequest(question="MoE", mode="chunk"))
     assert resp.mode == "chunk" and resp.answer

@@ -52,6 +52,7 @@ from app.core.config import Settings
 from app.models.schemas import KnowledgeUpdate, MergeRequest, NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_embedding_client
 
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = ROOT / "backend" / "tests" / "fixtures" / "repository_contract"
@@ -66,13 +67,9 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")  # embedder_configured=True
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings(_env_file=None))
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
 from openai import APIConnectionError, APITimeoutError
 from app.core.llm import cap_kwargs
-from app.services.kg.client import safe_json
+from app.services.kg.json_utils import safe_json
 from app.services.kg.models import Edge, Evidence, Node, Step
 from app.services.kg.parsing import SourceElementQ
 from app.services.kg.run_control import KgBuildAborted

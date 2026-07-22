@@ -4,6 +4,7 @@ from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.core.config import Settings
 from uuid import uuid4
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -137,10 +138,10 @@ class _FakeLLM:
 
 
 def test_run_extraction_kg_path(repo):
-    repo.llm_client = _FakeLLM(json.dumps({
+    bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
         "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
                    "evidence": "Engram is a memory architecture"}],
-        "edges": []}))
+        "edges": []})))
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src = _test_insert_source(repo, nb.id, "Doc", "doc.md", "academic_paper",
                               "Engram is a memory architecture.")
@@ -164,7 +165,7 @@ def test_run_extraction_with_surviving_edge(repo):
     text so both nodes survive evidence-binding.  After _run_extraction the
     knowledge_relations row must reference real knowledge_objects ids.
     """
-    repo.llm_client = _FakeLLM(json.dumps({
+    bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
         "nodes": [
             {"local_id": "a", "type": "Concept", "name": "Engram",
              "evidence": "Engram is a memory architecture"},
@@ -173,7 +174,7 @@ def test_run_extraction_with_surviving_edge(repo):
         ],
         "edges": [{"type": "about", "source": "b", "target": "a",
                    "evidence": "Engram improves perplexity"}],
-    }))
+    })))
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src = _test_insert_source(
         repo, nb.id, "Doc", "doc.md", "academic_paper",
@@ -198,10 +199,10 @@ def test_run_extraction_with_surviving_edge(repo):
 
 
 def test_reextraction_is_idempotent(repo):
-    repo.llm_client = _FakeLLM(json.dumps({
+    bind_chat_client(repo, "kg_extract", _FakeLLM(json.dumps({
         "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram",
                    "evidence": "Engram is a memory architecture"}],
-        "edges": []}))
+        "edges": []})))
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src = _test_insert_source(repo, nb.id, "Doc", "doc.md", "academic_paper",
                               "Engram is a memory architecture.")
@@ -249,7 +250,7 @@ def test_extraction_warning_surfaced_on_failed_windows(repo, monkeypatch):
     src = _test_insert_source(repo, nb.id, "Doc", "doc.md", "academic_paper",
                               "Engram is a memory architecture.")
     # Force a single window, and fail it.
-    repo.llm_client = _FlakyLLM(payload, fail_n=1)
+    bind_chat_client(repo, "kg_extract", _FlakyLLM(payload, fail_n=1))
     repo._run_extraction(src.id)
 
     detail = repo.get_source(src.id)
@@ -271,7 +272,7 @@ def test_extraction_warning_empty_on_clean_run(repo):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     src = _test_insert_source(repo, nb.id, "Doc", "doc.md", "academic_paper",
                               "Engram is a memory architecture.")
-    repo.llm_client = _FlakyLLM(payload, fail_n=0)
+    bind_chat_client(repo, "kg_extract", _FlakyLLM(payload, fail_n=0))
     repo._run_extraction(src.id)
     detail = repo.get_source(src.id)
     assert not detail.extraction_warning

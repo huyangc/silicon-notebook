@@ -2,6 +2,8 @@ import json
 import threading
 
 import pytest
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 
 def test_trace_step_model_shape():
@@ -151,10 +153,6 @@ def rrepo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     # 隔离 LLM/推理端点：清空真实 key，避免本地 .env(env_file=../.env) 让 reasoning
     # 测试打真实网络(reasoning_llm_client 不 configured 时回退到测试桩 llm_client)。
@@ -162,7 +160,7 @@ def rrepo(tmp_path, monkeypatch):
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -245,7 +243,7 @@ class _StubLLM:
 
 def _rr_with_llm(repo, **llm):
     from app.services.reasoning_retrieval import ReasoningRetriever
-    repo.llm_client = _StubLLM(**llm)
+    bind_chat_client(repo, "reasoning_agent", _StubLLM(**llm))
     return ReasoningRetriever.from_repository(repo, repo.settings)
 
 
@@ -285,7 +283,7 @@ def test_answer_reasoning_passes_reasoning_timeout_and_retries(rrepo):
     rrepo.settings.reasoning_timeout_seconds = 88
     rrepo.settings.reasoning_max_retries = 2
     llm = _AnswerRecordingLLM()
-    rrepo.llm_client = llm
+    bind_chat_client(rrepo, "ask_answer", llm)
     rrepo._answer_reasoning(nb.id, "问题", [], [], "")
     assert llm.calls, "_answer_reasoning must call chat_json"
     assert llm.calls[0].get("timeout") == 88
@@ -312,7 +310,7 @@ def test_plan_passes_reasoning_timeout_and_retries(rrepo):
     rrepo.settings.reasoning_timeout_seconds = 90
     rrepo.settings.reasoning_max_retries = 1
     llm = _KwargsRecordingLLM(plan={"sub_queries": [{"query": "q"}]}, reflect={})
-    rrepo.llm_client = llm
+    bind_chat_client(rrepo, "reasoning_agent", llm)
     ReasoningRetriever.from_repository(rrepo, rrepo.settings).plan("问题", "")
     assert llm.calls, "plan must call chat_json"
     _, kwargs = llm.calls[0]
@@ -326,7 +324,7 @@ def test_reflect_passes_reasoning_timeout_and_retries(rrepo):
     rrepo.settings.reasoning_max_retries = 3
     llm = _KwargsRecordingLLM(
         plan={}, reflect={"next_action": "answer", "sufficient": True})
-    rrepo.llm_client = llm
+    bind_chat_client(rrepo, "reasoning_agent", llm)
     ReasoningRetriever.from_repository(rrepo, rrepo.settings).reflect("问题", "summary")
     assert llm.calls, "reflect must call chat_json"
     _, kwargs = llm.calls[0]
@@ -459,9 +457,9 @@ class _SeqLLM:
 def test_run_plan_then_answer(rrepo):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
-        reflects=[{"next_action": "answer", "sufficient": True, "reason": "够了"}])
+        reflects=[{"next_action": "answer", "sufficient": True, "reason": "够了"}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     assert res.top_hits  # 召回到候选
     kinds = [t.step_type for t in res.trace]
@@ -475,12 +473,12 @@ def test_run_expand_graph_records_trace(rrepo):
     nb = _seed_two_nodes(rrepo)
     claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
                  if h.object_type == "claim")
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程", "types": ["claim"]}]},
         reflects=[
             {"next_action": "expand_graph", "expand": {"object_id": claim.object_id},
              "reason": "深挖关系"},
-            {"next_action": "answer", "sufficient": True}])
+            {"next_action": "answer", "sufficient": True}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     assert any(t.step_type == "expand" for t in res.trace)
     assert any(h.object_type == "procedure" for h in res.top_hits)  # 邻居被纳入
@@ -491,7 +489,7 @@ def test_run_follow_chain_records_trace_and_keeps_transient_chain(rrepo):
     nb, ids = _seed_follow_chain(rrepo)
     rrepo.settings.graph_ppr_enabled = False
     streamed = []
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "Premise A derived conclusion"}]},
         reflects=[
             {"next_action": "follow_chain", "follow_chain": {
@@ -499,7 +497,7 @@ def test_run_follow_chain_records_trace_and_keeps_transient_chain(rrepo):
                 "edge_type": "derived_from", "direction": "out"}},
             {"next_action": "answer", "sufficient": True},
         ],
-    )
+    ))
     with rrepo._connect() as db:
         before = db.execute(
             "SELECT COUNT(*) c FROM knowledge_relations WHERE notebook_id=?", (nb.id,)
@@ -529,7 +527,7 @@ def test_run_follow_chain_rejects_start_outside_current_candidates(rrepo, monkey
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
     rrepo.settings.graph_ppr_enabled = False
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[
             {"next_action": "follow_chain", "follow_chain": {
@@ -537,7 +535,7 @@ def test_run_follow_chain_rejects_start_outside_current_candidates(rrepo, monkey
                 "edge_type": "derived_from", "direction": "out"}},
             {"next_action": "answer", "sufficient": True},
         ],
-    )
+    ))
     rr = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
 
     def unexpected_follow_chain(*_args, **_kwargs):
@@ -575,7 +573,7 @@ def test_answer_reasoning_renders_citable_hops_and_uncited_inference(rrepo):
             })
 
     llm = _ChainAnswerLLM()
-    rrepo.llm_client = llm
+    bind_chat_client(rrepo, "ask_answer", llm)
     rrepo.settings.kg_query_refine_enabled = False
     answer, grounded, anchors = rrepo._answer_reasoning(
         nb.id, "derive", chain_result.nodes, [], "",
@@ -613,10 +611,10 @@ def test_run_dedups_expand_and_respects_step_cap(rrepo):
                  if h.object_type == "claim")
     rrepo.settings.reasoning_max_steps = 3
     # 始终要求 expand 同一节点 → 去重后无新增,且步数撞上限强制收尾
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[{"next_action": "expand_graph",
-                   "expand": {"object_id": claim.object_id}}] * 10)
+                   "expand": {"object_id": claim.object_id}}] * 10))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
     assert len(reflect_steps) <= 3                 # circuit breaker 生效
@@ -627,10 +625,10 @@ def test_run_add_subquery_without_payload_continues(rrepo):
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
     # add_subquery 但缺 new_sub_query: 应记 skip 并继续(不提前 break),下一轮才 answer
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程"}]},
         reflects=[{"next_action": "add_subquery"},
-                  {"next_action": "answer", "sufficient": True}])
+                  {"next_action": "answer", "sufficient": True}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
     assert len(reflect_steps) == 2                  # 两轮 reflect 都执行,未提前终止
@@ -669,7 +667,7 @@ def test_run_feeds_no_progress_signal_to_reflect_after_fruitless_retrieval(rrepo
                 "next_action": "answer", "sufficient": True}
             return json.dumps(nxt)
 
-    rrepo.llm_client = _RecordingLLM()
+    bind_chat_client(rrepo, "reasoning_agent", _RecordingLLM())
     ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
 
     assert len(captured_reflect_prompts) == 2
@@ -699,9 +697,9 @@ def test_run_initial_retrieval_is_parallel(rrepo, monkeypatch):
 
     nb = _seed_two_nodes(rrepo)
     subq = [{"query": "q1"}, {"query": "q2"}, {"query": "q3"}]
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": subq},
-        reflects=[{"next_action": "answer", "sufficient": True}])
+        reflects=[{"next_action": "answer", "sufficient": True}]))
 
     barrier = threading.Barrier(len(subq))
 
@@ -736,9 +734,9 @@ def test_run_initial_retrieval_preserves_order_and_dedup(rrepo, monkeypatch):
     from app.services.reasoning_retrieval import ReasoningRetriever
 
     nb = _seed_two_nodes(rrepo)
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "first"}, {"query": "second"}]},
-        reflects=[{"next_action": "answer", "sufficient": True}])
+        reflects=[{"next_action": "answer", "sufficient": True}]))
 
     returns = {
         "first": [_mk_rk("shared", "A-from-first"), _mk_rk("only1", "only1")],
@@ -762,9 +760,9 @@ def test_run_initial_retrieval_swallows_single_search_failure(rrepo, monkeypatch
     from app.services.reasoning_retrieval import ReasoningRetriever
 
     nb = _seed_two_nodes(rrepo)
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "boom"}, {"query": "ok"}]},
-        reflects=[{"next_action": "answer", "sufficient": True}])
+        reflects=[{"next_action": "answer", "sufficient": True}]))
 
     def fake_search(self, notebook_id, query, types=None, prefer="balanced"):
         if query == "boom":
@@ -799,9 +797,9 @@ def test_run_stale_breaker_on_repeated_visited_expand(rrepo, monkeypatch):
                         lambda self, n, q, types=None, prefer="balanced": [_mk_rk("A", "nodeA")])
     monkeypatch.setattr(ReasoningRetriever, "neighbors",
                         lambda self, n, oid, edge_type=None, direction="both": [_mk_rk("B", "nodeB")])
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "q"}]},
-        reflects=[{"next_action": "expand_graph", "expand": {"object_id": "A"}}] * 40)
+        reflects=[{"next_action": "expand_graph", "expand": {"object_id": "A"}}] * 40))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
     assert len(reflect_steps) <= 5             # stale 熔断: 远小于 50
@@ -826,9 +824,9 @@ def test_run_caps_repeated_element_search(rrepo, monkeypatch):
                                  element_type="paragraph", text="原文段")]
 
     monkeypatch.setattr(ReasoningRetriever, "search_elements", fake_elements)
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "q"}]},
-        reflects=[{"next_action": "search_elements", "elements_query": "q"}] * 40)
+        reflects=[{"next_action": "search_elements", "elements_query": "q"}] * 40))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
     assert counter["n"] <= 4                   # 实际执行的 element 检索不超过上限
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
@@ -855,7 +853,7 @@ def test_run_does_not_break_while_progressing(rrepo, monkeypatch):
     reflects = [{"next_action": "expand_graph", "expand": {"object_id": f"x{i}"}}
                 for i in range(5)]                          # 5 轮深挖不同节点
     reflects.append({"next_action": "answer", "sufficient": True})
-    rrepo.llm_client = _SeqLLM(plan={"sub_queries": [{"query": "q"}]}, reflects=reflects)
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(plan={"sub_queries": [{"query": "q"}]}, reflects=reflects))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
     reflect_steps = [t for t in res.trace if t.step_type == "reflect"]
     assert len(reflect_steps) == 6             # 5 轮有进展深挖 + 1 轮 answer, 未误熔断
@@ -886,7 +884,7 @@ def test_run_feeds_visited_nodes_to_reflect(rrepo, monkeypatch):
             prompts.append(messages[-1]["content"])
             return json.dumps(self._r.pop(0) if self._r else {"next_action": "answer", "sufficient": True})
 
-    rrepo.llm_client = _RecLLM()
+    bind_chat_client(rrepo, "reasoning_agent", _RecLLM())
     ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q", "")
     assert len(prompts) >= 2
     # 第1轮 expand A 后, 第2轮 reflect 输入应带"已展开/已访问"节点提示, 含节点标识
@@ -986,9 +984,9 @@ def test_run_quota_path_keeps_both_groups(rrepo, monkeypatch):
     }
     monkeypatch.setattr(ReasoningRetriever, "search",
                         lambda self, n, q, types=None, prefer="balanced": per_q.get(q, []))
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "subV"}, {"query": "subR"}]},
-        reflects=[{"next_action": "answer", "sufficient": True}])
+        reflects=[{"next_action": "answer", "sufficient": True}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "subV subR", "")
     ids = {h.object_id for h in res.top_hits}
     assert "A" in ids and "C" in ids          # 配额救回弱势组 A(全局 top-2 会是 C,D)
@@ -1003,9 +1001,9 @@ def test_run_single_subquery_uses_global(rrepo, monkeypatch):
     rrepo.settings.reasoning_quota_enabled = True
     monkeypatch.setattr(ReasoningRetriever, "search",
                         lambda self, n, q, types=None, prefer="balanced": [_rk("A", 0.9)])
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "only"}]},
-        reflects=[{"next_action": "answer", "sufficient": True}])
+        reflects=[{"next_action": "answer", "sufficient": True}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "only", "")
     ans = next(t for t in res.trace if t.step_type == "answer")
     assert "quota" not in (ans.detail or {})   # 全局路径不带 quota
@@ -1018,9 +1016,9 @@ def test_run_quota_disabled_uses_global(rrepo, monkeypatch):
     rrepo.settings.reasoning_quota_enabled = False
     monkeypatch.setattr(ReasoningRetriever, "search",
                         lambda self, n, q, types=None, prefer="balanced": [_rk("A", 0.9)])
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "q1"}, {"query": "q2"}]},
-        reflects=[{"next_action": "answer", "sufficient": True}])
+        reflects=[{"next_action": "answer", "sufficient": True}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "q1 q2", "")
     ans = next(t for t in res.trace if t.step_type == "answer")
     assert "quota" not in (ans.detail or {})   # 开关关 → 全局路径
@@ -1043,10 +1041,10 @@ def test_run_expand_summary_uses_node_name_not_id(rrepo):
     nb = _seed_two_nodes(rrepo)
     claim = next(h for h in rrepo._retrieve_scored(nb.id, "RTL到GDSII流程")
                  if h.object_type == "claim")
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "RTL到GDSII流程", "types": ["claim"]}]},
         reflects=[{"next_action": "expand_graph", "expand": {"object_id": claim.object_id}},
-                  {"next_action": "answer", "sufficient": True}])
+                  {"next_action": "answer", "sufficient": True}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
     expand = next(t for t in res.trace if t.step_type == "expand")
     assert "RTL到GDSII流程概述" in expand.summary          # 人读名
@@ -1083,7 +1081,7 @@ def test_run_duplicate_subquery_skipped_not_rerun(rrepo, monkeypatch):
                 "next_action": "answer", "sufficient": True}
             return json.dumps(nxt)
 
-    rrepo.llm_client = _RepeatLLM()
+    bind_chat_client(rrepo, "reasoning_agent", _RepeatLLM())
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     calls: list[str] = []
     orig_search = retriever.search
@@ -1133,7 +1131,7 @@ def test_run_feeds_attempted_subqueries_to_reflect(rrepo):
                 "next_action": "answer", "sufficient": True}
             return json.dumps(nxt)
 
-    rrepo.llm_client = _RecordingRepeatLLM()
+    bind_chat_client(rrepo, "reasoning_agent", _RecordingRepeatLLM())
     ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", "")
 
     assert len(captured) == 2
@@ -1196,7 +1194,7 @@ def test_run_exposes_attempted_ledger_and_top_n_override(rrepo):
                 return json.dumps({"sub_queries": [{"query": "RTL到GDSII流程"}]})
             return json.dumps({"next_action": "answer", "sufficient": True})
 
-    rrepo.llm_client = _PlanOnlyLLM()
+    bind_chat_client(rrepo, "reasoning_agent", _PlanOnlyLLM())
     result = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(
         nb.id, "RTL到GDSII流程", "", top_n=1)
     assert len(result.top_hits) <= 1                       # top_n 覆盖生效
@@ -1218,7 +1216,7 @@ def test_run_max_steps_override_caps_reflect_loop(rrepo):
             calls["reflect"] += 1
             return json.dumps({"next_action": "search_elements", "elements_query": "q"})  # 永不 answer
 
-    rrepo.llm_client = _LoopLLM()
+    bind_chat_client(rrepo, "reasoning_agent", _LoopLLM())
     ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "RTL到GDSII流程", max_steps=2)
     assert calls["reflect"] <= 2      # 被 max_steps=2 封顶(而非 settings 的 50)
 
@@ -1228,12 +1226,12 @@ def test_run_expand_community_fans_out_peers(rrepo, monkeypatch):
     from app.services.reasoning_retrieval import ReasoningRetriever
     import app.services.communities as C
     nb = _seed_two_nodes(rrepo)
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
         reflects=[
             {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
              "reason": "需要同类"},
-            {"next_action": "answer", "sufficient": True}])
+            {"next_action": "answer", "sufficient": True}]))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     monkeypatch.setattr(retriever.communities, "mounted_base_ids", lambda *a: [nb.id])
     monkeypatch.setattr(
@@ -1252,12 +1250,12 @@ def test_run_expand_community_fans_out_across_multiple_mounted_bases(rrepo, monk
     不是「只用列表第一个」就沿用了单库时代的行为。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
         reflects=[
             {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
              "reason": "需要同类"},
-            {"next_action": "answer", "sufficient": True}])
+            {"next_action": "answer", "sufficient": True}]))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     monkeypatch.setattr(
         retriever.communities, "mounted_base_ids",
@@ -1287,12 +1285,12 @@ def test_run_expand_community_source_sticky_prefers_comention(rrepo, monkeypatch
     sticky-prefer comention:一旦命中过 comention 就不再被后写的 community 覆盖。"""
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
         reflects=[
             {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
              "reason": "需要同类"},
-            {"next_action": "answer", "sufficient": True}])
+            {"next_action": "answer", "sufficient": True}]))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     # comention 命中的库排在遍历顺序的第一个,community 命中的库在其后——
     # 若代码退化回「后写覆盖」,source 会被第二个库拖回 "community"。
@@ -1322,12 +1320,12 @@ def test_run_expand_community_caps_merged_peers_across_bases(rrepo, monkeypatch)
     from app.services.reasoning_retrieval import ReasoningRetriever
     nb = _seed_two_nodes(rrepo)
     rrepo.settings.community_peers_topk = 3          # cap = 3 × factor(2) = 6
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "DeepSeek-V4"}]},
         reflects=[
             {"next_action": "expand_community", "community_focal": "DeepSeek-V4",
              "reason": "需要同类"},
-            {"next_action": "answer", "sufficient": True}])
+            {"next_action": "answer", "sufficient": True}]))
     retriever = ReasoningRetriever.from_repository(rrepo, rrepo.settings)
     base_ids = ["base-1", "base-2", "base-3"]
     monkeypatch.setattr(retriever.communities, "mounted_base_ids", lambda *a: base_ids)
@@ -1396,11 +1394,11 @@ def test_run_expand_community_no_base_noop(rrepo, monkeypatch):
         return []
     monkeypatch.setattr(C, "community_peers", _peers)
     monkeypatch.setattr(C, "mounted_base_ids", lambda *a, **k: [])
-    rrepo.llm_client = _SeqLLM(
+    bind_chat_client(rrepo, "reasoning_agent", _SeqLLM(
         plan={"sub_queries": [{"query": "X"}]},
         reflects=[
             {"next_action": "expand_community", "community_focal": "X"},
-            {"next_action": "answer", "sufficient": True}])
+            {"next_action": "answer", "sufficient": True}]))
     res = ReasoningRetriever.from_repository(rrepo, rrepo.settings).run(nb.id, "X 相比其他", "")
     assert called["peers"] == 0                     # base 为 None → 根本不调 community_peers
     assert any(t.step_type == "expand_community" for t in res.trace)

@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
+
+from app.services.model_registry import WORKLOADS
 
 
 class UnconfiguredChatClient:
@@ -98,6 +100,59 @@ class RecordingModelProvider:
         self.closed += 1
 
 
+def _bind_provider_client(repo: Any, kind: str, workload_id: str, client: Any) -> None:
+    if WORKLOADS[workload_id].kind != kind:
+        raise ValueError(f"{workload_id} is not a {kind} workload")
+    provider = repo._runtime.models
+    mapping_name = {
+        "chat": "chat_clients",
+        "embedding": "embedding_clients",
+        "rerank": "rerank_clients",
+    }[kind]
+    method_name = {
+        "chat": "chat",
+        "embedding": "embedding",
+        "rerank": "rerank",
+    }[kind]
+    if isinstance(provider, RecordingModelProvider):
+        mapping = getattr(provider, mapping_name)
+        setattr(provider, mapping_name, {**mapping, workload_id: client})
+        return
+
+    overrides_name = f"_test_{kind}_overrides"
+    overrides = getattr(provider, overrides_name, None)
+    if overrides is None:
+        overrides = {}
+        setattr(provider, overrides_name, overrides)
+        calls: list[str] = []
+        setattr(provider, f"_test_{kind}_calls", calls)
+        original = getattr(provider, method_name)
+        setattr(provider, f"_test_original_{method_name}", original)
+
+        def test_client(requested):
+            calls.append(requested)
+            return overrides[requested] if requested in overrides else original(requested)
+
+        setattr(provider, method_name, test_client)
+        original_configured = provider.configured
+        if not hasattr(provider, "_test_original_configured"):
+            provider._test_original_configured = original_configured
+
+            def test_configured(requested):
+                for candidate_kind in ("chat", "embedding", "rerank"):
+                    candidate_overrides = getattr(
+                        provider, f"_test_{candidate_kind}_overrides", {}
+                    )
+                    if requested in candidate_overrides:
+                        return bool(
+                            getattr(candidate_overrides[requested], "configured", True)
+                        )
+                return provider._test_original_configured(requested)
+
+            provider.configured = test_configured
+    overrides[workload_id] = client
+
+
 def bind_chat_client(repo: Any, workload_id: str, client: Any) -> None:
     """Bind one explicit workload on an already-composed test repository.
 
@@ -105,29 +160,40 @@ def bind_chat_client(repo: Any, workload_id: str, client: Any) -> None:
     tests use the process repository, so this helper overrides the provider's
     workload methods without restoring the retired repository role setters.
     """
-    provider = repo._runtime.models
-    if isinstance(provider, RecordingModelProvider):
-        provider.chat_clients = {**provider.chat_clients, workload_id: client}
-        return
+    _bind_provider_client(repo, "chat", workload_id, client)
 
-    overrides = getattr(provider, "_test_chat_overrides", None)
-    if overrides is None:
-        overrides = {}
-        provider._test_chat_overrides = overrides
-        provider._test_chat_calls = []
-        provider._test_original_chat = provider.chat
-        provider._test_original_configured = provider.configured
-        def test_chat(requested):
-            provider._test_chat_calls.append(requested)
-            return (
-                overrides[requested]
-                if requested in overrides
-                else provider._test_original_chat(requested)
-            )
-        provider.chat = test_chat
-        provider.configured = lambda requested: (
-            bool(getattr(overrides[requested], "configured", True))
-            if requested in overrides
-            else provider._test_original_configured(requested)
-        )
-    overrides[workload_id] = client
+
+def bind_embedding_client(
+    repo: Any,
+    client: Any,
+    workload_ids: Iterable[str] | None = None,
+) -> None:
+    """Bind an embedding fake to explicit workloads (all embedding seats by default).
+
+    The default preserves the former repository-wide embedder fixture while
+    still replacing only registered workload seats through the test provider.
+    """
+    if not hasattr(client, "configured"):
+        try:
+            client.configured = True
+        except (AttributeError, TypeError):
+            pass
+    selected = tuple(workload_ids or (
+        workload_id
+        for workload_id, spec in WORKLOADS.items()
+        if spec.kind == "embedding"
+    ))
+    for workload_id in selected:
+        _bind_provider_client(repo, "embedding", workload_id, client)
+
+    # Retrieval and Memory keep already-resolved adapters; refresh those
+    # composed test seats without restoring a production setter.
+    repo._runtime.set_embedder(client)
+    if repo._runtime.source_embedding is not None:
+        repo._runtime.source_embedding.embedder = repo._runtime.models.embedding
+    if repo._runtime.memory_service is not None:
+        repo._runtime.memory_service.embedder = client
+
+
+def bind_rerank_client(repo: Any, client: Any) -> None:
+    _bind_provider_client(repo, "rerank", "retrieval_rerank", client)

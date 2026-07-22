@@ -4,6 +4,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.knowhow import transfer as kh_transfer
+from tests.model_testkit import bind_embedding_client
 
 COLUMNS = [
     {"name": "违例类型", "role": "anchor"},
@@ -24,12 +25,8 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     r = SQLiteRepository(Settings())
-    r.embedder = _FakeEmbedder()
+    bind_embedding_client(r, _FakeEmbedder())
     return r
 
 def _nb(repo, name="KH"):

@@ -5,6 +5,8 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 
 @pytest.fixture
@@ -13,7 +15,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings(_env_file=None))
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -51,8 +53,9 @@ def _seed_one_node_with_chunk(repo):
 def test_bfs_brings_source_chunks(repo, monkeypatch):
     nb = _seed_one_node_with_chunk(repo)
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)   # 强制走 BFS
-    repo.llm_client = _GraphLLM()
-    repo._reasoning_llm_client = _GraphLLM()
+    llm = _GraphLLM()
+    bind_chat_client(repo, "ask_answer", llm)
+    bind_chat_client(repo, "graph_chain_verify", llm)
     resp = repo.ask_graph(nb.id, AskRequest(question="Mamba 的原理", mode="graph"))
     assert resp.mode == "graph"
     src_ids = {c.source_id for c in resp.citations}
@@ -72,8 +75,9 @@ def test_bfs_falls_back_when_no_source_chunk(repo, monkeypatch):
                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
                    ("eX", nb.id, "concept", "approved", "", json.dumps({"name": "Mamba"}), ev, "src-X", now, now))
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)
-    repo.llm_client = _GraphLLM()
-    repo._reasoning_llm_client = _GraphLLM()
+    llm = _GraphLLM()
+    bind_chat_client(repo, "ask_answer", llm)
+    bind_chat_client(repo, "graph_chain_verify", llm)
     resp = repo.ask_graph(nb.id, AskRequest(question="Mamba", mode="graph"))
     assert resp.mode == "graph"
     assert not any(c.source_id for c in resp.citations)   # 回退 KG-only,无 chunk 引用

@@ -64,8 +64,8 @@ def make_embedder(
         and (model_value or "").strip()
     )
     if configured:
-        from app.services.embedding_dashscope import DashscopeEmbedder
-        return DashscopeEmbedder(
+        from app.services.embedding_dashscope import build_dashscope_embedder
+        return build_dashscope_embedder(
             settings,
             base_url=base_url_value,
             api_key=api_key_value,

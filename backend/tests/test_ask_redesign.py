@@ -4,6 +4,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
 from tests.model_testkit import RecordingModelProvider
+from tests.model_testkit import bind_embedding_client
 
 class FakeLLM:
     configured = True
@@ -17,10 +18,6 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     llm = FakeLLM()
     embedder = FakeEmbedder(dim=16)
@@ -38,7 +35,7 @@ def repo(tmp_path, monkeypatch):
         embedding_clients={"retrieval_query_embedding": embedder},
     )
     r = SQLiteRepository(Settings(), model_provider=provider)
-    r.embedder = embedder
+    bind_embedding_client(r, embedder)
     r.recording_model_provider = provider
     return r
 

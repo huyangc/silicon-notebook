@@ -43,6 +43,8 @@ from app.services.evidence_context import EvidenceContextService
 from app.services.knowhow.projection import KnowhowProjector
 from app.services.retrieval import RetrievedKnowledge
 from app.services.sqlite_repository import SQLiteRepository
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_chat_client
 
 
 class _Notebooks:
@@ -357,10 +359,6 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     # Mirrors test_knowhow_retrieval.py's `client` fixture: blank any real LLM
     # keys a developer's shell might export, so ask_chunk's no-LLM
@@ -369,8 +367,8 @@ def repo(tmp_path, monkeypatch):
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
-    assert r.settings.embedder_configured
+    bind_embedding_client(r, FakeEmbedder(dim=16))
+    assert r.configured("knowhow_embedding")
     return r
 
 
@@ -503,7 +501,7 @@ def test_grounded_chunk_answer_puts_knowhow_on_the_chunk_anchor(
     形态里永远不出现。此前的 e2e 只测了无 LLM 的回退路径（anchors 恒空），
     正好错过这条腿。"""
     seeded = _seed_projected_table(repo, projector)
-    repo.llm_client = _ChunkAnswerLLM()
+    bind_chat_client(repo, "ask_answer", _ChunkAnswerLLM())
     calls = _spy_on_evidence_elements(repo, monkeypatch)
 
     resp = repo.ask_chunk(seeded["notebook_id"], AskRequest(question=UNIQUE_TERM))
@@ -589,8 +587,9 @@ def test_ask_graph_src_chunk_citation_carries_knowhow(repo, monkeypatch):
              json.dumps({"name": "增大去耦电容"}), ev, "src-KH", now, now),
         )
     monkeypatch.setattr(repo.settings, "graph_ppr_enabled", False)  # 强制走 BFS
-    repo.llm_client = _GraphAnswerLLM()
-    repo._reasoning_llm_client = _GraphAnswerLLM()
+    llm = _GraphAnswerLLM()
+    bind_chat_client(repo, "ask_answer", llm)
+    bind_chat_client(repo, "graph_chain_verify", llm)
     calls = _spy_on_evidence_elements(repo, monkeypatch)
 
     resp = repo.ask_graph(

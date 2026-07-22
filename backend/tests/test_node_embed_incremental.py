@@ -3,6 +3,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
+from tests.model_testkit import bind_embedding_client
 
 
 @pytest.fixture
@@ -10,15 +11,11 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     monkeypatch.setenv("EMBED_BATCH_SIZE", "2")     # 小批,好数 commit
     monkeypatch.setenv("EMBED_COMMIT_BATCHES", "1") # 每批 commit,便于观测增量
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -56,12 +53,12 @@ def test_node_embed_commits_incrementally_and_resumes(repo, monkeypatch):
     monkeypatch.setattr(repo.__dict__["_runtime"].source_embedding, "flush_object_vectors", flaky_flush)
 
     with pytest.raises(RuntimeError):
-        batch_ingest.backfill_node_embeddings(repo, nb.id, conc=1)
+        batch_ingest.backfill_node_embeddings(repo, nb.id)
     mid = _n_vectors(repo, nb.id)
     assert 0 < mid < 10                      # 中断前已增量落库前几组
 
     monkeypatch.setattr(repo.__dict__["_runtime"].source_embedding, "flush_object_vectors", real_flush)  # 恢复
-    batch_ingest.backfill_node_embeddings(repo, nb.id, conc=1)
+    batch_ingest.backfill_node_embeddings(repo, nb.id)
     assert _n_vectors(repo, nb.id) == 10     # 续跑补齐
 
 

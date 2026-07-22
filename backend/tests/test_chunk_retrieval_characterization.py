@@ -18,6 +18,9 @@ from app.core.config import Settings
 from app.models.schemas import AskRequest, NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository, _now
+from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_rerank_client
+from tests.model_testkit import bind_chat_client
 
 
 # ─────────────────────────── fixtures / helpers ───────────────────────────
@@ -28,10 +31,6 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
     monkeypatch.setenv("EMBED_DIM", "16")
     # 清 LLM/reasoning key:llm_client.configured=False → 答案走确定性兜底,
     # 检索选择照常发生(测试焦点)。个别测试会显式塞 _FakeLLM。
@@ -40,7 +39,7 @@ def repo(tmp_path, monkeypatch):
                "REWRITE_LLM_API_KEY", "REWRITE_LLM_BASE_URL", "REWRITE_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
     r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
+    bind_embedding_client(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -88,7 +87,7 @@ class _IdentityRerank:
 def _enable_overlay(repo, nb_id):
     """让 overlay_on 为真:chunk_kg_overlay_enabled(默认开) ∧ rerank.configured ∧ 有 KG。
     塞一个 concept + 对应源 chunk 的证据,使 _notebook_has_kg=True 且 overlay 有料。"""
-    repo.rerank_client = _IdentityRerank()
+    bind_rerank_client(repo, _IdentityRerank())
     repo.store_kg(
         nb_id, None,
         [{"local_id": "a", "object_type": "concept",
@@ -146,7 +145,7 @@ def test_ask_chunk_strategy_dispatch_is_mutually_exclusive(repo, monkeypatch):
     overlay_on 由 (chunk_kg_overlay_enabled ∧ rerank.configured ∧ (has_kg∨base_has_kg)) 决定。
     """
     nb, _ = _seed_chunks(repo, ["moe routing expert " * 20, "dense baseline " * 20])
-    repo.llm_client = _FakeLLM(markers=())            # 配置好但不引用任何 chunk;焦点=分发
+    bind_chat_client(repo, "ask_answer", _FakeLLM(markers=()))            # 配置好但不引用任何 chunk;焦点=分发
 
     matrix = [
         (True, 1, "mix"), (True, 2, "mix"),
@@ -159,7 +158,7 @@ def test_ask_chunk_strategy_dispatch_is_mutually_exclusive(repo, monkeypatch):
             _enable_overlay(repo, nb.id)
         else:
             # 默认 fixture 的 rerank 未配置 → overlay_on 自然为 False
-            repo.rerank_client = _IdentityRerank().__class__.__new__(_IdentityRerank)
+            bind_rerank_client(repo, _IdentityRerank().__class__.__new__(_IdentityRerank))
             monkeypatch.setattr(repo.rerank_client, "configured", False, raising=False)
 
         repo.ask_chunk(nb.id, AskRequest(question="moe routing"))
@@ -181,7 +180,7 @@ def test_ask_chunk_multi_subquery_quota_fuse_end_to_end(repo, monkeypatch):
                                + [f"beta topic detail body {i} " * 20 for i in range(6)])
     _stub_expand(monkeypatch, 2)
     # overlay 关:fixture rerank 未配置。llm 配好但不引用 → citations 走非 mix「每 selected 一条」。
-    repo.llm_client = _FakeLLM(markers=())
+    bind_chat_client(repo, "ask_answer", _FakeLLM(markers=()))
     monkeypatch.setattr(repo.settings, "chunk_mmr_k", 3)
 
     calls = {"multi": 0}
@@ -209,7 +208,7 @@ def test_ask_chunk_mmr_uses_settings_k_and_lambda(repo, monkeypatch):
     """单查询 MMR 分支:spy _mmr_select_chunks 捕获实参,断言 k/lambda 恰等于 settings 值。"""
     nb, _ = _seed_chunks(repo, [f"shared topic detail {i} " * 20 for i in range(8)])
     _stub_expand(monkeypatch, 1)                      # 单子查询 → MMR 分支
-    repo.llm_client = _FakeLLM(markers=())
+    bind_chat_client(repo, "ask_answer", _FakeLLM(markers=()))
     monkeypatch.setattr(repo.settings, "chunk_mmr_k", 2)
     monkeypatch.setattr(repo.settings, "chunk_mmr_lambda", 0.9)
 
@@ -238,7 +237,7 @@ def test_ask_chunk_multi_fuse_k_equals_mmr_k(repo, monkeypatch):
     nb, _ = _seed_chunks(repo, [f"alpha detail {i} " * 20 for i in range(6)]
                                + [f"beta detail {i} " * 20 for i in range(6)])
     _stub_expand(monkeypatch, 2)                      # 多子查询 → quota_fuse 分支
-    repo.llm_client = _FakeLLM(markers=())
+    bind_chat_client(repo, "ask_answer", _FakeLLM(markers=()))
     monkeypatch.setattr(repo.settings, "chunk_mmr_k", 4)
 
     # quota_fuse 在 ask_chunk 内经 `from app.services.retrieval import quota_fuse` 局部 import,
@@ -268,7 +267,7 @@ def test_ask_chunk_expand_query_uses_chunk_max_subqueries(repo, monkeypatch):
         断言 == settings.chunk_max_subqueries(设非默认值)。
     (b) query_rewrite_enabled=False:sub_queries==[retrieval_query](单查询,不调 expand)。"""
     nb, _ = _seed_chunks(repo, ["topic body detail " * 20])
-    repo.llm_client = _FakeLLM(markers=())
+    bind_chat_client(repo, "ask_answer", _FakeLLM(markers=()))
 
     # (a) 开 rewrite,设非默认 chunk_max_subqueries
     monkeypatch.setattr(repo.settings, "query_rewrite_enabled", True)
@@ -406,7 +405,7 @@ def test_ask_chunk_default_chunk_recall_wiring(repo, monkeypatch):
     走小库全表暴力路径(未建索引 + 关暴力阈值),score_chunks(…, limit=recall) 直接可见。"""
     nb, _ = _seed_chunks(repo, ["topic body detail alpha " * 20])
     _stub_expand(monkeypatch, 1)                      # 单查询 → _retrieve_chunks
-    repo.llm_client = _FakeLLM(markers=())
+    bind_chat_client(repo, "ask_answer", _FakeLLM(markers=()))
     monkeypatch.setattr(repo.settings, "chunk_bruteforce_max_chunks", 0)   # 关守卫 → 全表暴力
     assert repo.settings.chunk_recall == 200          # 保持默认,未被 patch
 
@@ -435,7 +434,7 @@ def test_ask_chunk_mix_token_budget_actually_trims(repo, monkeypatch):
     断言 selected 被 truncate_by_tokens 真实截短(len(selected) < len(candidates))。"""
     nb, _ = _seed_chunks(repo, ["moe routing expert body " * 40])
     _enable_overlay(repo, nb.id)                      # rerank 配齐 + 有 KG → overlay_on=True
-    repo.llm_client = _FakeLLM(markers=())
+    bind_chat_client(repo, "ask_answer", _FakeLLM(markers=()))
 
     from app.services.retrieval import RetrievedChunk
 
@@ -501,7 +500,7 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
                         lambda nb_id, q, hl, subs: (list(selected), "", {}, [], 0))
     monkeypatch.setattr(repo.settings, "max_total_tokens", 30000)  # 够大,不触发截断
-    repo.llm_client = _FakeLLM(markers=("k2",))        # 答案只引用 k2 → 只绑 ck-cite-1
+    bind_chat_client(repo, "ask_answer", _FakeLLM(markers=("k2",)))        # 答案只引用 k2 → 只绑 ck-cite-1
 
     resp_mix = repo.ask_chunk(nb1.id, AskRequest(question="moe routing"))
 
@@ -519,14 +518,14 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     #    与答案引用无关。用真实单查询 MMR 路径不好精确控 selected 集,故直接 stub
     #    _retrieve_chunks + _mmr_select_chunks 令 selected 恰为这 3 条。
     nb2, _ = _seed_chunks(repo, ["moe routing expert " * 20])
-    repo.rerank_client = _IdentityRerank().__class__.__new__(_IdentityRerank)
+    bind_rerank_client(repo, _IdentityRerank().__class__.__new__(_IdentityRerank))
     monkeypatch.setattr(repo.rerank_client, "configured", False, raising=False)  # overlay_on=False
     _stub_expand(monkeypatch, 1)                       # 单查询 → MMR 分支
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks",
                         lambda nb_id, q, recall=0: (list(selected), [], None))
     monkeypatch.setattr(repo.retrieval.candidates, "_mmr_select_chunks",
                         lambda scored, ids, mat, k, lam: list(selected))
-    repo.llm_client = _FakeLLM(markers=("k2",))        # 答案仍只引用 k2
+    bind_chat_client(repo, "ask_answer", _FakeLLM(markers=("k2",)))        # 答案仍只引用 k2
 
     resp_non = repo.ask_chunk(nb2.id, AskRequest(question="moe routing"))
 
@@ -582,7 +581,7 @@ def test_ask_chunk_citation_tier_reflects_cross_tier_ppr_chunk(repo, monkeypatch
     monkeypatch.setattr(repo.retrieval.candidates, "_mix_retrieve",
                         lambda nb_id, q, hl, subs: ([own_chunk, ppr_chunk], "", {}, [], 1))
     monkeypatch.setattr(repo.settings, "max_total_tokens", 30000)
-    repo.llm_client = _FakeLLM(markers=("k1", "k2"))    # 两条都被引用
+    bind_chat_client(repo, "ask_answer", _FakeLLM(markers=("k1", "k2")))    # 两条都被引用
 
     resp = repo.ask_chunk(active_nb.id, AskRequest(question="moe routing"))
 

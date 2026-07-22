@@ -88,3 +88,19 @@ class DashscopeEmbedder:
             close = getattr(client, "close", None)
             if callable(close):
                 close()
+
+
+def build_dashscope_embedder(
+    settings: Settings,
+    *,
+    base_url: str,
+    api_key: str,
+    model: str,
+) -> DashscopeEmbedder:
+    """Construct the raw adapter inside its reviewed transport boundary."""
+    return DashscopeEmbedder(
+        settings,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
+    )

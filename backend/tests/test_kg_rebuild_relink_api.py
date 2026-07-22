@@ -5,6 +5,7 @@ Pattern mirrors test_unified_kg_api.py and the existing build_kg endpoint tests.
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import MagicMock
+from tests.model_testkit import bind_chat_client
 
 
 class _Client:
@@ -49,7 +50,7 @@ def test_rebuild_kg_200_launches_background_and_returns_rebuilding(client, monke
     def fake_submit(fn, *args, **kwargs):
         called.append((fn, args, kwargs))
 
-    real_repo._kg_llm_client = _Client(True)
+    bind_chat_client(real_repo, "kg_extract", _Client(True))
     monkeypatch.setattr(background_jobs, "submit", fake_submit)
     monkeypatch.setattr(deps, "repository", lambda: real_repo)
 
@@ -68,16 +69,8 @@ def test_build_uses_resolved_kg_role_not_primary(client, monkeypatch):
     from app.api import deps
     from app.services import background_jobs
     real_repo = deps.repository()
-    monkeypatch.setattr(
-        type(real_repo),
-        "llm_client",
-        property(lambda _self: _Client(False)),
-    )
-    monkeypatch.setattr(
-        type(real_repo),
-        "kg_llm_client",
-        property(lambda _self: _Client(True)),
-    )
+    bind_chat_client(real_repo, "ask_answer", _Client(False))
+    bind_chat_client(real_repo, "kg_extract", _Client(True))
     monkeypatch.setattr(background_jobs, "submit", lambda *a, **k: None)
     monkeypatch.setattr(deps, "repository", lambda: real_repo)
 
@@ -92,7 +85,7 @@ def test_duplicate_running_build_returns_409(client, monkeypatch):
     from app.api import deps
     from app.services import background_jobs
     real_repo = deps.repository()
-    real_repo._kg_llm_client = _Client(True)
+    bind_chat_client(real_repo, "kg_extract", _Client(True))
     monkeypatch.setattr(background_jobs, "submit", lambda *a, **k: None)
     monkeypatch.setattr(deps, "repository", lambda: real_repo)
 
@@ -108,7 +101,7 @@ def test_submission_failure_marks_job_failed(client, monkeypatch):
     from app.api import deps
     from app.services import background_jobs
     real_repo = deps.repository()
-    real_repo._kg_llm_client = _Client(True)
+    bind_chat_client(real_repo, "kg_extract", _Client(True))
     monkeypatch.setattr(
         background_jobs,
         "submit",
@@ -158,7 +151,7 @@ def test_relink_kg_no_llm_check(client, monkeypatch):
     real_repo = deps.repository()
 
     # Explicitly mark LLM as unconfigured
-    real_repo.llm_client = MagicMock(configured=False)
+    bind_chat_client(real_repo, "kg_extract", MagicMock(configured=False))
     real_repo.relink_notebook_kg = MagicMock(return_value={
         "isolated_before": 0, "edges_added": 0, "isolated_after": 0
     })

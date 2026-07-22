@@ -12,6 +12,7 @@ import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.vector_cache import VectorCache
+from tests.model_testkit import bind_embedding_client
 
 
 @pytest.fixture
@@ -42,7 +43,7 @@ def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_pa
     replacement_languages = {"nb-1": ["zh", "en"]}
 
     repo.storage_dir = replacement_dir
-    repo.embedder = replacement_embedder
+    bind_embedding_client(repo, replacement_embedder)
     repo._notebook_langs_cache = replacement_languages
 
     runtime = repo._runtime
@@ -71,6 +72,10 @@ def test_model_clients_are_read_only_workload_adapters(repo):
     assert repo.rerank_client is repo._runtime.models.rerank("retrieval_rerank")
     with pytest.raises(AttributeError):
         repo.llm_client = object()
+    with pytest.raises(AttributeError):
+        repo.embedder = object()
+    with pytest.raises(AttributeError):
+        repo._runtime.embedder = object()
 
 
 def test_retrieval_and_evidence_services_have_one_owner(repo):
