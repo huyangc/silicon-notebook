@@ -281,6 +281,91 @@ class KnowhowHistoryStore:
                 break
         return entries[:limit]
 
+    # --------------------------------------------------------- milestones
+    def create_milestone(
+        self, table_id: str, seq: int, name: str, note: str, created_by: str
+    ) -> dict:
+        """给某个 ``seq`` 起名——零快照，只是一条指针记录（spec §4.2）。
+
+        ``UNIQUE(table_id, name)`` 由建表 DDL 保证；重名直接让调用方吃
+        ``sqlite3.IntegrityError``，这里不做预检省一次往返（也避免 TOCTOU：
+        预检通过和 INSERT 之间另一个写者抢先用了同一个名字）。
+        """
+        milestone_id = self.new_id("khms")
+        created_at = self.now()
+        with self.database.write() as db:
+            db.execute(
+                "INSERT INTO knowhow_milestones "
+                "(id, table_id, seq, name, note, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (milestone_id, table_id, int(seq), name, note or "", created_by or "", created_at),
+            )
+        return {
+            "id": milestone_id,
+            "table_id": table_id,
+            "seq": int(seq),
+            "name": name,
+            "note": note or "",
+            "created_by": created_by or "",
+            "created_at": created_at,
+        }
+
+    def delete_milestone(self, table_id: str, milestone_id: str) -> None:
+        """删掉一个里程碑（只是指针，不牵动任何流水）。已经不存在时静默
+        no-op——与本文件其余 delete 方法（见 ``KnowhowStore.delete_knowhow_row``
+        /``delete_knowhow_column`` 同款约定）保持一致。"""
+        with self.database.write() as db:
+            db.execute(
+                "DELETE FROM knowhow_milestones WHERE table_id = ? AND id = ?",
+                (table_id, milestone_id),
+            )
+
+    def list_milestones(self, table_id: str) -> list[dict]:
+        """本表全部里程碑，最新（``seq`` 最大）在前。``stale`` = 它指向的
+        ``seq`` 已经被 ``prune`` 删掉——``knowhow_milestones.seq`` 刻意不设
+        FK（§4.2），LEFT JOIN 落空即失效，但行本身仍然保留，供前端灰显。"""
+        with self.database.connect() as db:
+            rows = db.execute(
+                "SELECT m.*, (c.seq IS NULL) AS stale FROM knowhow_milestones m "
+                "LEFT JOIN knowhow_changes c ON c.table_id = m.table_id AND c.seq = m.seq "
+                "WHERE m.table_id = ? ORDER BY m.seq DESC",
+                (table_id,),
+            ).fetchall()
+        return [{**dict(r), "stale": bool(r["stale"])} for r in rows]
+
+    # -------------------------------------------------------------- prune
+    def prune(self, table_id: str, before_iso: str) -> dict:
+        """删掉最老的连续前缀。见 spec §7.7。
+
+        为什么按 seq 而不是直接 ``DELETE WHERE created_at < ?``：反向重放
+        要求流水链从 head 起连续，中间挖洞会让重放走到缺口就断，而前置
+        指纹守卫看的是 head、**发现不了这个洞**。先用时间求出 cutoff_seq、
+        再按 seq 删，即便时钟回拨导致 created_at 局部乱序，删的也一定是前缀。
+
+        head 永远保留：前置指纹守卫拿它当参照，删了整表回退直接不可用。
+        """
+        with self.database.write() as db:
+            head_row = db.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS head FROM knowhow_changes WHERE table_id = ?",
+                (table_id,),
+            ).fetchone()
+            head = int(head_row["head"])
+            if head == 0:
+                return {"removed": 0}
+            cutoff_row = db.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS cutoff FROM knowhow_changes "
+                "WHERE table_id = ? AND created_at < ?",
+                (table_id, before_iso),
+            ).fetchone()
+            cutoff = min(int(cutoff_row["cutoff"]), head - 1)
+            if cutoff <= 0:
+                return {"removed": 0}
+            cursor = db.execute(
+                "DELETE FROM knowhow_changes WHERE table_id = ? AND seq <= ?",
+                (table_id, cutoff),
+            )
+        return {"removed": cursor.rowcount}
+
     # ------------------------------------------------------------- revert
     def revert_to(
         self, table_id: str, target_seq: int, expected_head_seq: int, actor: str = ""
