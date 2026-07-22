@@ -204,17 +204,27 @@ def run_gold_eval(db_path: str, notebook_id: str, questions: List[dict],
                   dims: Sequence[int], k: int = 12, embedder=None,
                   block_rows: int = 20_000) -> dict:
     """gold 集暴力余弦评测:对 gold_object_ids 的题算各维度档 recall@k / MRR。
-    embedder 缺省用 make_embedder(get_settings())(需 embed 端点);测试注入 Fake。
+    embedder 缺省请求系统 ``retrieval_query_embedding`` workload;测试注入 Fake。
     绝对值不做 canonical 折叠(偏保守);判据只看相对差。"""
     qs = [q for q in questions if q.get("gold_object_ids")]
     if not qs:
         return {"n_questions": 0, "dims": {}}
+    owned_provider = None
     if embedder is None:
         from app.core.config import get_settings
-        from app.services.embedding import make_embedder
-        embedder = make_embedder(get_settings())
-    q_vecs = np.asarray([embedder.embed_query(q["question"]) for q in qs],
-                        dtype=np.float32)
+        from app.core.event_logging import EventLogger
+        from app.services.model_provider import RuntimeModelProvider
+        settings = get_settings()
+        owned_provider = RuntimeModelProvider(
+            settings, EventLogger(settings, channel="events", per_user=True)
+        )
+        embedder = owned_provider.embedding("retrieval_query_embedding")
+    try:
+        q_vecs = np.asarray([embedder.embed_query(q["question"]) for q in qs],
+                            dtype=np.float32)
+    finally:
+        if owned_provider is not None:
+            owned_provider.close()
 
     table, id_col = TABLES["knowledge"]
     insp = ReadOnlySQLiteInspector(db_path)

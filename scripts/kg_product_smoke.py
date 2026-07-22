@@ -58,8 +58,8 @@ def main():
     settings = Settings()
     repo = SQLiteRepository(settings)
     print("llm configured:", repo.llm_client.configured, "| model:",
-          getattr(settings, "openai_compat_model", "?"), flush=True)
-    assert repo.llm_client.configured, "product LLM not configured in .env"
+          getattr(repo.llm_client, "model", "?"), flush=True)
+    assert repo.llm_client.configured, "ask_answer workload not configured"
     tmpdir = tempfile.mkdtemp()
     results = {}
     for name, (md, dt, lim) in SOURCES.items():

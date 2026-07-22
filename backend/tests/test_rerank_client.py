@@ -1,20 +1,27 @@
-from app.services.rerank_client import RerankClient
+import pytest
+
+from app.services.rerank_client import RerankClient, normalize_rerank_api_style
 
 
 class _S:
-    rerank_model = "qwen3-rerank"; rerank_base_url = "http://fake/v1"
-    rerank_api_key = "k"; rerank_max_docs = 500; embed_concurrency = 8
+    rerank_max_docs = 500
     openai_compat_timeout_seconds = 30
 
 
+def _client(*, api_style="dashscope", **kwargs):
+    return RerankClient(
+        _S(), model="qwen3-rerank", base_url="http://fake/v1",
+        api_key="k", api_style=api_style, **kwargs,
+    )
+
+
 def test_unconfigured_identity():
-    s = _S(); s.rerank_model = ""
-    rc = RerankClient(s)
+    rc = RerankClient(_S())
     assert not rc.configured and rc.rerank("q", ["a", "b", "c"]) == [0, 1, 2]
 
 
 def test_orders_by_score(monkeypatch):
-    rc = RerankClient(_S())
+    rc = _client()
     monkeypatch.setattr(rc, "_rerank_batch", lambda q, d: [
         {"index": 2, "relevance_score": 0.9}, {"index": 0, "relevance_score": 0.5},
         {"index": 1, "relevance_score": 0.1}])
@@ -22,7 +29,7 @@ def test_orders_by_score(monkeypatch):
 
 
 def test_failure_identity(monkeypatch):
-    rc = RerankClient(_S())
+    rc = _client()
     monkeypatch.setattr(rc, "_rerank_batch", lambda q, d: (_ for _ in ()).throw(RuntimeError()))
     assert rc.rerank("q", ["a", "b"]) == [0, 1]
 
@@ -43,7 +50,7 @@ def test_native_dashscope_request_shape(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr("app.services.rerank_client.requests.post", _post)
-    rc = RerankClient(_S())   # base_url = http://fake/v1
+    rc = _client()
     order = rc.rerank("q", ["a", "b"])
     assert captured["url"] == "http://fake/v1/services/rerank/text-rerank/text-rerank"
     assert captured["json"]["model"] == "qwen3-rerank"
@@ -69,8 +76,7 @@ def test_openai_vllm_request_shape(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr("app.services.rerank_client.requests.post", _post)
-    s = _S(); s.rerank_api_style = "openai"
-    rc = RerankClient(s)                       # base_url = http://fake/v1
+    rc = _client(api_style="openai")
     order = rc.rerank("q", ["a", "b"])
     assert captured["url"] == "http://fake/v1/rerank"
     assert captured["json"]["model"] == "qwen3-rerank"
@@ -89,8 +95,7 @@ def test_openai_score_field_fallback(monkeypatch):
             return {"results": [{"index": 0, "score": 0.9}, {"index": 1, "score": 0.1}]}
 
     monkeypatch.setattr("app.services.rerank_client.requests.post", lambda *a, **k: _Resp())
-    s = _S(); s.rerank_api_style = "openai"
-    assert RerankClient(s).rerank("q", ["a", "b"]) == [0, 1]
+    assert _client(api_style="openai").rerank("q", ["a", "b"]) == [0, 1]
 
 
 def test_api_style_param_overrides_settings(monkeypatch):
@@ -103,12 +108,30 @@ def test_api_style_param_overrides_settings(monkeypatch):
 
     monkeypatch.setattr("app.services.rerank_client.requests.post",
                         lambda url, **k: captured.update(url=url) or _Resp())
-    s = _S(); s.rerank_api_style = "dashscope"          # settings says dashscope
-    RerankClient(s, api_style="openai").rerank("q", ["a"])  # param overrides → openai
+    _client(api_style="openai").rerank("q", ["a"])
     assert captured["url"] == "http://fake/v1/rerank"
 
 
 def test_connection_pool_matches_service_capacity():
-    client = RerankClient(_S(), max_connections=6)
+    client = _client(max_connections=6)
     assert client._session.adapters["https://"]._pool_maxsize == 6
     assert client._session.adapters["http://"]._pool_maxsize == 6
+
+
+def test_raw_config_is_explicit_and_whitespace_is_unconfigured():
+    client = RerankClient(
+        _S(), model=" model ", base_url="   ", api_key=" secret ",
+    )
+    assert client.model == "model"
+    assert client.base_url == ""
+    assert client.api_key == "secret"
+    assert client.configured is False
+
+
+@pytest.mark.parametrize("alias", ["openai", "vllm", "cohere", "compatible"])
+def test_openai_protocol_aliases_are_normalized(alias):
+    assert normalize_rerank_api_style(alias) == "openai"
+
+
+def test_unknown_protocol_normalizes_to_dashscope():
+    assert normalize_rerank_api_style("unknown") == "dashscope"

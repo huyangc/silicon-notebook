@@ -26,7 +26,7 @@ from app.models.model_services import (
 )
 from app.models.notebooks import NotebookTemplate
 from app.models.sources import DetectDocTypesRequest, DetectedDocType
-from app.services.model_config import STATUS_SERVICE_ROLES
+from app.services.legacy_model_status_types import STATUS_SERVICE_ROLES
 from app.services.model_status import ModelStatusService
 from app.services.pending_bus import pending_bus
 

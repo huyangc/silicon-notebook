@@ -1003,7 +1003,7 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
     bad response) AFTER logging it via ``note_model_error`` (502) — routes.py
     maps each to its own status code."""
     from app.core.llm import cap_kwargs
-    from app.services.model_config import ModelNotConfiguredError
+    from app.services.model_work import ModelNotConfiguredError
 
     if not content_md.strip():
         raise ValueError("格子为空，无需优化")
@@ -1095,7 +1095,7 @@ def llm_reformat(client: Any, content_md: str, column_name: str, kind: str) -> "
     解析好后传入，避免同一次调用重复解析，也让本文件新增的 ``_runtime``
     私有面 reach 只多一个落点（在 reformat_cell 里）而不是两个。"""
     from app.core.llm import cap_kwargs
-    from app.services.model_config import ModelNotConfiguredError
+    from app.services.model_work import ModelNotConfiguredError
 
     try:
         prompt = _reformat_cell_prompt(content_md, column_name, kind)
@@ -1130,7 +1130,7 @@ def reformat_cell(repo: Any, content_md: str, column_name: str, kind: str) -> di
     ``configured=False`` 已经会被①挡住，②纯粹是防御性兜底）。除此之外的任何
     异常（网络/超时/JSON 解析失败）或校验不过都仍是真的调了 LLM、只是结果不能
     用 → rule/llm-failed，不受这次改动影响。"""
-    from app.services.model_config import ModelNotConfiguredError
+    from app.services.model_work import ModelNotConfiguredError
 
     raw = content_md or ""
     if not raw.strip():

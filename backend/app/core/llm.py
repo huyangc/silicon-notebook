@@ -99,17 +99,17 @@ class OpenAICompatibleClient:
                  max_connections: Optional[int] = None,
                  cache: Optional[CacheBackend] = None):
         self.settings = settings
-        # 默认取全局 openai_compat_*；显式传入则覆盖（推理专用 client 走此路）。
-        self.base_url = base_url if base_url is not None else settings.openai_compat_base_url
-        self.api_key = api_key if api_key is not None else settings.openai_compat_api_key
-        self.model = model if model is not None else settings.openai_compat_model
+        # Transport identity is always supplied by the system service registry.
+        self.base_url = (base_url or "").strip()
+        self.api_key = (api_key or "").strip()
+        self.model = (model or "").strip()
         self.max_retries = (max_retries if max_retries is not None
                             else settings.openai_compat_max_retries)
         self.max_connections = max(
             1,
             int(max_connections)
             if max_connections is not None
-            else int(settings.kg_extract_workers + settings.kg_ask_reserve),
+            else 1,
         )
         self._client: Optional[OpenAI] = None
         self.interaction_logger = LLMInteractionLogger(settings)

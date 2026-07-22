@@ -100,6 +100,10 @@ class RepositoryRuntime:
                 settings.event_log_dir,
             )
         self.models = model_provider or RuntimeModelProvider(settings, self.event_log)
+        kg_scheduler.initialize(
+            window_workers=self.models.parallelism("kg_extract"),
+            job_workers=settings.kg_job_concurrency,
+        )
         self.database = SqliteDatabase(settings, root_dir)
         self.model_config_cache: dict[str, dict[str, Any]] = {}
         self.identity = IdentityStore(

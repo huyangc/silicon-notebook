@@ -648,7 +648,7 @@ class KnowledgeLifecycleService:
                     ann.set_ef(max(k + 1, 50))
                     labels, distances = ann.knn_query(q, k=k)
                 except Exception as exc:  # noqa: BLE001 — fail-open, mirrors other ANN call sites
-                    self._note_model_error("tier2_bridge_ann_query", self.settings.embed_model, exc)
+                    self._note_model_error("tier2_bridge_ann_query", "", exc)
                     query_failed = True
                     break
                 hits = sorted(zip(labels[0], distances[0]), key=lambda ld: ld[1])

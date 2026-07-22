@@ -49,7 +49,7 @@ from app.models.knowledge import (
     KnowledgeRecord,
 )
 from app.services.cancellation import AskCancelled, CancelEvent, raise_if_cancelled
-from app.services.model_config import ModelNotConfiguredError, model_client_fingerprint
+from app.services.model_work import ModelNotConfiguredError
 from app.services.prompts import (
     ANSWER_SCHEMA_HINT,
     FOLLOWUP_REWRITE_SCHEMA_HINT,
@@ -580,7 +580,7 @@ class AskService:
         return context_block
 
     def _answer_with_retry(
-        self, synth, model_label, service="llm", failed_fingerprint=""
+        self, synth, model_label, service="llm"
     ):
         """答案合成有界重试(治思考型模型偶发空 content)。synth() 返回
         (answer, grounded, anchors);answer 空(思考型模型偶把输出预算耗在
@@ -815,7 +815,6 @@ class AskService:
                         e,
                         service="rerank",
                         provider_failure=True,
-                        failed_fingerprint=model_client_fingerprint(rerank_client),
                     ))
                 raise_if_cancelled(cancel_event)
                 ranked = [candidates[i] for i in order]
@@ -869,8 +868,7 @@ class AskService:
                                  question, selected, history, cancel_event=cancel_event,
                                  notebook_id=notebook_id, memory_hits=memory_hits,
                                  llm_client=answer_client)),
-                    getattr(answer_client, "model", ""),
-                    failed_fingerprint=model_client_fingerprint(answer_client))
+                    getattr(answer_client, "model", ""))
                 synth_failed = not _ok
             ask_stage("answer_llm", _t)
 
@@ -1079,7 +1077,6 @@ class AskService:
                         memory_hits=memory_hits, answer_client=answer_client),
                     getattr(answer_client, "model", ""),
                     service="ask_answer",
-                    failed_fingerprint=model_client_fingerprint(answer_client),
                 )
                 synth_failed = not _ok
 
@@ -1226,7 +1223,6 @@ class AskService:
                             llm_client=answer_client,
                         ),
                         getattr(answer_client, "model", ""),
-                        failed_fingerprint=model_client_fingerprint(answer_client),
                     )
                     evidence_level, top_relevance = classify_evidence(
                         memory_hits, anchors, llm_grounded,
@@ -1286,7 +1282,7 @@ class AskService:
                                 notebook_id=notebook_id, memory_hits=memory_hits,
                                 llm_client=answer_client),
                             getattr(answer_client, "model", ""),
-                            failed_fingerprint=model_client_fingerprint(answer_client))
+                        )
                         synth_failed = not _ok
                     citations: List[Citation] = []
                     by_id = {c.chunk_id: c for c in ppr_chunks}
@@ -1463,7 +1459,7 @@ class AskService:
                             cancel_event=cancel_event, notebook_id=notebook_id,
                             memory_hits=memory_hits, llm_client=answer_client),
                         getattr(answer_client, "model", ""),
-                        failed_fingerprint=model_client_fingerprint(answer_client))
+                    )
                     synth_failed = not _ok
                 citations: List[Citation] = []
                 by_id = {c.chunk_id: c for c in src_chunks}
@@ -1565,7 +1561,7 @@ class AskService:
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     _synth_kg,
                     getattr(answer_client, "model", ""),
-                    failed_fingerprint=model_client_fingerprint(answer_client))
+                )
                 synth_failed = not _ok
 
             # classify_evidence keys "grounded" off the relevance of the CITED hit.

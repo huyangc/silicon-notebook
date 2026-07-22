@@ -1,12 +1,13 @@
-def test_settings_concurrency_knobs(monkeypatch):
+def test_only_business_job_concurrency_remains(monkeypatch):
     from app.core.config import Settings
     s = Settings()
     assert s.kg_job_concurrency == 8
-    assert s.kg_ask_reserve == 64
     monkeypatch.setenv("KG_JOB_CONCURRENCY", "3")
-    monkeypatch.setenv("KG_ASK_RESERVE", "16")
     s2 = Settings()
-    assert s2.kg_job_concurrency == 3 and s2.kg_ask_reserve == 16
+    assert s2.kg_job_concurrency == 3
+    assert not hasattr(s2, "kg_extract_workers")
+    assert not hasattr(s2, "kg_ask_reserve")
+    assert not hasattr(s2, "embed_concurrency")
 
 
 def test_merge_review_batch_size_setting(monkeypatch):
@@ -16,27 +17,25 @@ def test_merge_review_batch_size_setting(monkeypatch):
     assert Settings().kg_merge_review_batch_size == 12
 
 
-def test_llm_client_connection_pool_sized(monkeypatch):
-    monkeypatch.setenv("OPENAI_COMPAT_BASE_URL", "https://example.invalid")
-    monkeypatch.setenv("OPENAI_COMPAT_API_KEY", "k")
-    monkeypatch.setenv("OPENAI_COMPAT_MODEL", "m")
-    monkeypatch.setenv("KG_EXTRACT_WORKERS", "100")
-    monkeypatch.setenv("KG_ASK_RESERVE", "16")
+def test_llm_client_connection_pool_uses_explicit_service_capacity():
     from app.core.config import Settings
     from app.core.llm import OpenAICompatibleClient
-    c = OpenAICompatibleClient(Settings())
+    c = OpenAICompatibleClient(
+        Settings(_env_file=None), base_url="https://example.invalid",
+        api_key="k", model="m", max_connections=7,
+    )
     client = c.client()
     inner = client._client  # httpx.Client
     if hasattr(inner, "_limits"):
         # SDK exposes limits directly
         limits = inner._limits
-        assert limits.max_connections == 116
-        assert limits.max_keepalive_connections == 16
+        assert limits.max_connections == 7
+        assert limits.max_keepalive_connections == 7
     else:
         # Fallback: inspect the transport pool (httpx internals)
         pool = inner._transport._pool
-        assert pool._max_connections == 116
-        assert pool._max_keepalive_connections == 16
+        assert pool._max_connections == 7
+        assert pool._max_keepalive_connections == 7
     assert client.max_retries == 0
 
 

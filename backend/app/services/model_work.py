@@ -130,6 +130,13 @@ class ModelProviderError(Exception):
         self.status_code = status_code
 
 
+class ModelNotConfiguredError(ModelProviderError):
+    """A requested system workload has no physical service binding."""
+
+    def __init__(self, message: str = "system model workload is not configured") -> None:
+        super().__init__(message, code="model_not_configured")
+
+
 class MalformedModelResponse(ModelProviderError):
     def __init__(self, message: str = "malformed model response") -> None:
         super().__init__(message, code="malformed_response")

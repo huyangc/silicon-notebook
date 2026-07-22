@@ -124,7 +124,7 @@ class ScaleArtifactCatalog:
             h = hnswlib.Index(space="cosine", dim=dim)
             h.load_index(path, max_elements=len(labels))
         except Exception as exc:  # noqa: BLE001 — fail-open
-            self.note_model_error(f"scale_ann_open_{kind}", self.settings.embed_model, exc)
+            self.note_model_error(f"scale_ann_open_{kind}", "", exc)
             return None
         setattr(index, attr, h)
         return h

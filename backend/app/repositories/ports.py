@@ -66,7 +66,7 @@ from app.models.knowledge import (
     ObjectSchemaCreate, ObjectSchemaModel, ObjectSchemaUpdate, PaginatedKnowledge,
 )
 from app.services.cancellation import CancelEvent
-from app.services.model_config import ResolvedModelConfig
+from app.services.legacy_model_status_types import ResolvedModelConfig
 from app.services.notebook_scale import NotebookScaleFacts
 from app.services.retrieval import (
     RetrievedChunk, RetrievedElement, RetrievedKnowledge, RetrievedRelation,

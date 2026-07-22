@@ -518,7 +518,7 @@ class CandidateRetrievalService(_RetrievalState):
                 except Exception as exc:  # noqa: BLE001 — fail-open
                     self._note_model_error(
                         "relation_ann_query",
-                        self.settings.embed_model,
+                        "",
                         exc,
                         service="embedding",
                     )
@@ -544,7 +544,7 @@ class CandidateRetrievalService(_RetrievalState):
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
                 self._note_model_error(
                     "relation_ann_delta",
-                    self.settings.embed_model,
+                    "",
                     exc,
                     service="embedding",
                 )
@@ -692,7 +692,7 @@ class CandidateRetrievalService(_RetrievalState):
                 except Exception as exc:  # noqa: BLE001 — fail-open
                     self._note_model_error(
                         "kg_obj_ann",
-                        self.settings.embed_model,
+                        "",
                         exc,
                         service="embedding",
                     )
@@ -717,7 +717,7 @@ class CandidateRetrievalService(_RetrievalState):
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮
                 self._note_model_error(
                     "kg_obj_delta",
-                    self.settings.embed_model,
+                    "",
                     exc,
                     service="embedding",
                 )
@@ -1164,7 +1164,7 @@ class CandidateRetrievalService(_RetrievalState):
         except Exception as exc:  # noqa: BLE001 — fail-open, 回退暴力
             self._note_model_error(
                 "chunk_ann_query",
-                self.settings.embed_model,
+                "",
                 exc,
                 service="embedding",
             )
@@ -1195,7 +1195,7 @@ class CandidateRetrievalService(_RetrievalState):
             except Exception as exc:  # noqa: BLE001 — delta 失败不拖垮检索,退回仅核候选
                 self._note_model_error(
                     "chunk_ann_delta",
-                    self.settings.embed_model,
+                    "",
                     exc,
                     service="embedding",
                 )
@@ -1211,7 +1211,7 @@ class CandidateRetrievalService(_RetrievalState):
                     cand_ids.append(cid)
                     chunk_sims[cid] = 0.0   # 词法命中无语义分;score_chunks 的 keyword 分兜底
         except Exception as exc:  # noqa: BLE001 — 词法失败不拖垮检索
-            self._note_model_error("chunk_fts", self.settings.embed_model, exc)
+            self._note_model_error("chunk_fts", "", exc)
 
         if not cand_ids:
             return [], [], None
@@ -1293,7 +1293,7 @@ class CandidateRetrievalService(_RetrievalState):
             # union where lexical hits get keyword score and semantic 0.
             return score_chunks(needle, chunks, None, None, limit=recall)
         except Exception as exc:  # noqa: BLE001 — lexical补召回失败绝不拖垮检索
-            self._note_model_error("chunk_keyword_union", self.settings.embed_model, exc)
+            self._note_model_error("chunk_keyword_union", "", exc)
             return []
     @staticmethod
     def _union_chunk_candidates(base: list, extra: list) -> list:

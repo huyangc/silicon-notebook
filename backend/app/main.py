@@ -141,13 +141,12 @@ def create_app() -> FastAPI:
     logger.info("paths: db=%s storage=%s log_dir=%s", db_path, storage_dir, log_dir)
 
     # 启动 autotune 报告：一眼可查本次进程实际解析到的核绑定旋钮值（KG_CLUSTER_ANN_THREADS
-    # 未显式设时按 min(cpu,32) 自动推导；回填进程池默认值同理）。模型端并发旋钮
-    # （KG_EXTRACT_WORKERS/KG_JOB_CONCURRENCY/EMBED_CONCURRENCY）不随本机核数缩放，
-    # 升级核数不会改变它们，需要更高吞吐要先扩模型/embed 服务端。
+    # 未显式设时按 min(cpu,32) 自动推导；回填进程池默认值同理）。模型服务容量
+    # 由 MODEL_SERVICES_CONFIG 的 max_concurrency 管理，不随本机核数缩放。
     from app.services.batch_ingest import _BACKFILL_DEFAULT_WORKERS
     logger.info(
         "autotune: kg_cluster_ann_threads=%d backfill_default_workers=%d "
-        "(模型端并发旋钮 EXTRACT/JOB/EMBED 与本机核数无关,不自动缩放)",
+        "(模型服务 max_concurrency 与本机核数无关,不自动缩放)",
         settings.kg_cluster_ann_threads, _BACKFILL_DEFAULT_WORKERS,
     )
 

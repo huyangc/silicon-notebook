@@ -1018,8 +1018,13 @@ class SourceIngestionService:
             raw_text = self.source_files.read_source_text(
                 getattr(source, "file_path", "") or "", elements
             )
+            model_parallelism = (
+                kg_llm_client.parallelism("kg_extract")
+                if callable(getattr(kg_llm_client, "parallelism", None))
+                else 1
+            )
             n_chars = kg_ingest.plan_window_size(
-                len(raw_text), self.settings.kg_extract_workers,
+                len(raw_text), model_parallelism,
                 self.settings.kg_window_min_chars, self.settings.kg_window_max_chars,
                 override=self.settings.kg_window_target_chars,
             )

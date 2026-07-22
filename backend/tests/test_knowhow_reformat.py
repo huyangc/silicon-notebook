@@ -107,7 +107,7 @@ def test_client_raising_not_configured_labeled_no_llm():
     configured=True 但 chat_json 仍抛 ModelNotConfiguredError 的情形（例如未来
     某个未配置形状没有正确暴露 .configured），确认 reformat_cell 靠捕获
     ModelNotConfiguredError 兜底，仍标 rule/no-llm 而不是 rule/llm-failed。"""
-    from app.services.model_config import ModelNotConfiguredError
+    from app.services.model_work import ModelNotConfiguredError
 
     def _raise_not_configured(*a, **k):
         raise ModelNotConfiguredError("尚未配置模型")

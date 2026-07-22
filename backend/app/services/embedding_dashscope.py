@@ -21,9 +21,9 @@ class DashscopeEmbedder:
     ):
         self.settings = settings
         self.dim = settings.embed_dim
-        self.base_url = settings.embed_base_url if base_url is None else base_url
-        self.api_key = settings.embed_api_key if api_key is None else api_key
-        self.model = settings.embed_model if model is None else model
+        self.base_url = (base_url or "").strip()
+        self.api_key = (api_key or "").strip()
+        self.model = (model or "").strip()
         self.max_connections = max(1, int(max_connections or 1))
         self._client = None
 

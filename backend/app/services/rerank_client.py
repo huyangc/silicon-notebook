@@ -6,9 +6,15 @@ from typing import List
 import requests
 from requests.adapters import HTTPAdapter
 
-from app.services.model_config import normalize_rerank_api_style
-
 logger = logging.getLogger("silicon_notebook.rerank")
+
+
+_OPENAI_RERANK_STYLES = frozenset({"openai", "vllm", "cohere", "compatible"})
+
+
+def normalize_rerank_api_style(value: object) -> str:
+    normalized = str(value or "dashscope").strip().lower()
+    return "openai" if normalized in _OPENAI_RERANK_STYLES else "dashscope"
 
 
 class RerankClient:
@@ -16,16 +22,13 @@ class RerankClient:
     # flat body, top-level results). Canonical config value is "openai".
     _OPENAI_STYLES = frozenset({"openai", "vllm", "cohere", "compatible"})
 
-    def __init__(self, settings, *, model=None, base_url=None, api_key=None, max_docs=None, api_style=None, max_connections=None):
+    def __init__(self, settings, *, model="", base_url="", api_key="", max_docs=None, api_style="dashscope", max_connections=None):
         self.settings = settings
-        self.model = ((model if model is not None else getattr(settings, "rerank_model", "")) or "").strip()
-        self.base_url = ((base_url if base_url is not None else getattr(settings, "rerank_base_url", "")) or "").strip().rstrip("/")
-        self.api_key = ((api_key if api_key is not None else getattr(settings, "rerank_api_key", "")) or "").strip()
+        self.model = (model or "").strip()
+        self.base_url = (base_url or "").strip().rstrip("/")
+        self.api_key = (api_key or "").strip()
         self.max_docs = max(1, max_docs if max_docs is not None else getattr(settings, "rerank_max_docs", 500))
-        self.api_style = normalize_rerank_api_style(
-            api_style if api_style is not None
-            else getattr(settings, "rerank_api_style", "dashscope")
-        )
+        self.api_style = normalize_rerank_api_style(api_style)
         self._session = None
         if max_connections is not None:
             maximum = max(1, int(max_connections))

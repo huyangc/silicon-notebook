@@ -472,7 +472,7 @@ class GraphRetrievalService(_RetrievalState):
                 except Exception as _exc:  # noqa: BLE001 — fail-open
                     self._note_model_error(
                         "scale_ppr_xbridge_query",
-                        self.settings.embed_model,
+                        "",
                         _exc,
                         service="embedding",
                     )
@@ -666,7 +666,7 @@ class GraphRetrievalService(_RetrievalState):
                 except Exception as exc:  # noqa: BLE001 — fail-open per seed source
                     self._note_model_error(
                         "scale_ppr_ann",
-                        self.settings.embed_model,
+                        "",
                         exc,
                         service="embedding",
                     )

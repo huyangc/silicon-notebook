@@ -7,7 +7,6 @@ import struct
 from typing import List, Protocol
 
 from app.core.config import Settings
-from app.services.model_config import ResolvedModelConfig, bind_model_status_identity
 
 
 class Embedder(Protocol):
@@ -43,39 +42,36 @@ class FakeEmbedder:
 def make_embedder(
     settings: Settings,
     *,
-    provider: str | None = None,
-    base_url: str | None = None,
-    api_key: str | None = None,
-    model: str | None = None,
+    provider: str = "",
+    base_url: str = "",
+    api_key: str = "",
+    model: str = "",
 ) -> Embedder:
-    provider_value = settings.embed_provider if provider is None else provider
-    provider_value = (provider_value or "").strip().lower()
-    base_url_value = settings.embed_base_url if base_url is None else base_url
-    api_key_value = settings.embed_api_key if api_key is None else api_key
-    model_value = settings.embed_model if model is None else model
+    """Build a raw embedder only from explicit physical-service values.
+
+    Product traffic uses ``RuntimeModelProvider.embedding(workload_id)``;
+    this helper remains for explicit protocol probes and deterministic offline
+    callers, and never resolves retired endpoint Settings.
+    """
+    provider_value = (provider or "").strip().lower()
+    base_url_value = base_url
+    api_key_value = api_key
+    model_value = model
     configured = bool(
         provider_value == "dashscope"
         and (base_url_value or "").strip()
         and (api_key_value or "").strip()
         and (model_value or "").strip()
     )
-    config = ResolvedModelConfig(
-        base_url_value or "",
-        api_key_value or "",
-        model_value or "",
-        "system",
-        "embedding",
-        provider_value,
-    )
     if configured:
         from app.services.embedding_dashscope import DashscopeEmbedder
-        return bind_model_status_identity(DashscopeEmbedder(
+        return DashscopeEmbedder(
             settings,
             base_url=base_url_value,
             api_key=api_key_value,
             model=model_value,
-        ), config)
-    return bind_model_status_identity(FakeEmbedder(dim=settings.embed_dim), config)
+        )
+    return FakeEmbedder(dim=settings.embed_dim)
 
 
 def embed_in_chunks(embed_fn, texts, chunk_size=200, logger=None):

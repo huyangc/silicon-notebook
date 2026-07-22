@@ -95,7 +95,8 @@ def _normalize_doc_type(doc_type: str) -> str:
 from app.services.mineru_client import MinerUClient
 from app.services.mineru_cloud_client import MinerUCloudClient, MinerUCloudNotConfigured
 from app.services import remote_sources
-from app.services.model_config import ResolvedModelConfig, ModelNotConfiguredError
+from app.services.legacy_model_status_types import ResolvedModelConfig
+from app.services.model_work import ModelNotConfiguredError
 from app.services.notebook_catalog import NotebookSummaryQuery
 from app.services.sqlite_identity import (
     _REQUEST_USER,

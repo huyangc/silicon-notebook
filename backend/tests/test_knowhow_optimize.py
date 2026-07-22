@@ -30,7 +30,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.services.knowhow import api as knowhow_api
-from app.services.model_config import ModelNotConfiguredError
+from app.services.model_work import ModelNotConfiguredError
 from tests.model_testkit import bind_chat_client
 from app.services.model_work import (
     ModelQueueFull, ModelQueueTimeout, ModelServiceUnavailable,

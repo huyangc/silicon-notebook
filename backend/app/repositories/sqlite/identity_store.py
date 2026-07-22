@@ -10,13 +10,11 @@ from app.core.config import Settings
 from app.core.request_context import get_request_user
 from app.models.identity import UserProfile
 from app.repositories.sqlite.database import SqliteDatabase
-from app.services.model_config import (
+from app.services.legacy_model_status_types import (
     MODEL_SERVICE_ROLES,
     STATUS_SERVICE_ROLES,
     ResolvedModelConfig,
-    model_config_fingerprint,
-    resolve_effective_config,
-    system_model_settings,
+    unresolved_model_status_config,
 )
 
 
@@ -109,9 +107,7 @@ class IdentityStore:
         user_id: str,
         patch: Mapping[str, Mapping[str, str | None] | None],
     ) -> dict:
-        """Patch settings and invalidate changed effective statuses atomically."""
-        system = system_model_settings(self.settings)
-        policy = self.settings.user_model_config_policy
+        """Legacy storage-only patch; runtime model selection ignores these rows."""
         with self.database.write() as db:
             self.database.begin_immediate(db)
             row = db.execute(
@@ -120,16 +116,12 @@ class IdentityStore:
             ).fetchone()
             stored = _decode_model_settings(row["model_settings"] if row else None)
 
-            before = {
-                role: model_config_fingerprint(
-                    resolve_effective_config(stored, role, policy, system)
-                )
-                for role in STATUS_SERVICE_ROLES
-            }
+            touched: list[str] = []
             for role in MODEL_SERVICE_ROLES:
                 role_patch = patch.get(role)
                 if not isinstance(role_patch, Mapping):
                     continue
+                touched.append(role)
                 service = dict(stored.get(role) or {})
                 for field in ("base_url", "api_key", "model"):
                     if field not in role_patch or role_patch[field] is None:
@@ -148,19 +140,12 @@ class IdentityStore:
                 "UPDATE user_profiles SET model_settings = ?, updated_at = ? WHERE user_id = ?",
                 (json.dumps(stored, ensure_ascii=False), _now(), user_id),
             )
-            changed = [
-                role
-                for role in STATUS_SERVICE_ROLES
-                if model_config_fingerprint(
-                    resolve_effective_config(stored, role, policy, system)
-                ) != before[role]
-            ]
-            if changed:
-                placeholders = ", ".join("?" for _ in changed)
+            if touched:
+                placeholders = ", ".join("?" for _ in touched)
                 db.execute(
                     "DELETE FROM model_service_status WHERE user_id = ? "
                     f"AND service IN ({placeholders})",
-                    (user_id, *changed),
+                    (user_id, *touched),
                 )
         self.model_config_cache.pop(user_id, None)
         return stored
@@ -213,33 +198,10 @@ class IdentityStore:
         trigger: str,
         checked_at: str,
     ) -> bool:
-        """Record status only if the originating effective identity is current."""
+        """Legacy per-user observations are retired; Task 6 replaces this store."""
         if service not in STATUS_SERVICE_ROLES or not expected_fingerprint:
             return False
-        checked_at = _status_checked_at(checked_at)
-        with self.database.write() as db:
-            self.database.begin_immediate(db)
-            row = db.execute(
-                "SELECT model_settings FROM user_profiles WHERE user_id = ?",
-                (user_id,),
-            ).fetchone()
-            stored = _decode_model_settings(row["model_settings"] if row else None)
-            current = resolve_effective_config(
-                stored,
-                service,
-                self.settings.user_model_config_policy,
-                system_model_settings(self.settings),
-            )
-            if (
-                not current.configured
-                or model_config_fingerprint(current) != expected_fingerprint
-            ):
-                return False
-            self._upsert_model_service_status(
-                db, user_id, service, expected_fingerprint, status, latency_ms,
-                code, trigger, checked_at,
-            )
-        return True
+        return False
 
     @staticmethod
     def _upsert_model_service_status(
@@ -293,12 +255,8 @@ class IdentityStore:
             )
 
     def resolve_model_config(self, user: UserProfile, role: str) -> ResolvedModelConfig:
-        return resolve_effective_config(
-            self.get_user_model_settings(user.id),
-            role,
-            self.settings.user_model_config_policy,
-            system_model_settings(self.settings),
-        )
+        del user
+        return unresolved_model_status_config(role)
 
     def create_user(self, username: str, password: str) -> UserProfile:
         from app.services.auth_utils import hash_password, is_valid_username, normalize_username
