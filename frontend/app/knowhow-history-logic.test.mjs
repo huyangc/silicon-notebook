@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   summarizeChange, originLabel, groupChangesByDay, foldLocalChanges, isStaleHead,
+  describeColumnChange, summarizeRevertImpact,
 } from "./knowhow-history-logic.ts";
 
 // payload 字段名按后端真实形状（design doc
@@ -243,4 +244,101 @@ test("isStaleHead: 看到的 head 落后于实际即为陈旧", () => {
 
 test("isStaleHead: 看到的 head 大于实际（理论不应发生，但不应崩）也判定为陈旧", () => {
   assert.equal(isStaleHead(60, 53), true);
+});
+
+// --- describeColumnChange（两版对比 columns[] 桶——新增/删除/改名/改类型/
+// 行标题列切换/顺序变化，逐场景覆盖 aggregate_diff 的 null 编码约定） --------
+
+test("describeColumnChange: 纯新增列——name 为 null 判据，附带类型标签", () => {
+  const result = describeColumnChange(
+    "c1",
+    { name: null, role: null, position: null },
+    { name: "现象", role: "attribute", position: 2 },
+  );
+  assert.equal(result.label, "现象");
+  assert.deepEqual(result.lines, ["新增列「现象」（类型：普通）"]);
+});
+
+test("describeColumnChange: 纯删除列——after.name 为 null 判据", () => {
+  const result = describeColumnChange(
+    "c1",
+    { name: "现象", role: "attribute", position: 2 },
+    { name: null, role: null, position: null },
+  );
+  assert.equal(result.label, "现象");
+  assert.deepEqual(result.lines, ["删除列「现象」"]);
+});
+
+test("describeColumnChange: 只改名", () => {
+  const result = describeColumnChange("c1", { name: "旧名" }, { name: "新名" });
+  assert.equal(result.label, "新名");
+  assert.deepEqual(result.lines, ["列改名：「旧名」→「新名」"]);
+});
+
+test("describeColumnChange: 只改内容类型（非行标题相关）", () => {
+  const result = describeColumnChange("c1", { role: "attribute" }, { role: "procedure" }, "现象");
+  assert.deepEqual(result.lines, ["内容类型：普通 → 方法步骤"]);
+});
+
+test("describeColumnChange: 设为行标题列——role 变化涉及 anchor 时走专属文案，不落到内容类型那句", () => {
+  const result = describeColumnChange("c1", { role: "attribute" }, { role: "anchor" }, "现象");
+  assert.equal(result.label, "现象"); // name 键本身不在场，落到调用方传入的兜底名字
+  assert.deepEqual(result.lines, ["「现象」设为行标题列"]);
+});
+
+test("describeColumnChange: 取消行标题列", () => {
+  const result = describeColumnChange("c1", { role: "anchor" }, { role: "attribute" }, "现象");
+  assert.deepEqual(result.lines, ["「现象」不再是行标题列"]);
+});
+
+test("describeColumnChange: 同一区间内又改名又改类型——两条描述都出现", () => {
+  const result = describeColumnChange(
+    "c1",
+    { name: "旧名", role: "attribute" },
+    { name: "新名", role: "procedure" },
+  );
+  assert.deepEqual(result.lines, ["列改名：「旧名」→「新名」", "内容类型：普通 → 方法步骤"]);
+});
+
+test("describeColumnChange: 只有顺序变化", () => {
+  const result = describeColumnChange("c1", { position: 1 }, { position: 3 }, "现象");
+  assert.deepEqual(result.lines, ["列顺序发生变化"]);
+});
+
+test("describeColumnChange: name/fallbackLabel 都拿不到时落到通用占位", () => {
+  const result = describeColumnChange("c1", { role: "attribute" }, { role: "procedure" });
+  assert.equal(result.label, "（未知列）");
+  assert.deepEqual(result.lines, ["内容类型：普通 → 方法步骤"]);
+});
+
+test("describeColumnChange: 未知角色值原样回显而不是崩掉", () => {
+  const result = describeColumnChange("c1", { role: "future_kind" }, { role: "attribute" }, "X");
+  assert.deepEqual(result.lines, ["内容类型：future_kind → 普通"]);
+});
+
+test("describeColumnChange: 没有任何字段差异时兜底一句通用描述（防御性，正常不应发生）", () => {
+  const result = describeColumnChange("c1", {}, {}, "现象");
+  assert.deepEqual(result.lines, ["列「现象」发生变化"]);
+});
+
+// --- summarizeRevertImpact（回退确认框「将影响 N 行、M 个格子」） -----------------
+
+test("summarizeRevertImpact: 区间内没有任何变更", () => {
+  assert.equal(summarizeRevertImpact(0, 0, 0), "不会撤销任何改动");
+});
+
+test("summarizeRevertImpact: 行与格子都有涉及", () => {
+  assert.equal(summarizeRevertImpact(2, 3, 4), "将影响 2 行、3 个格子");
+});
+
+test("summarizeRevertImpact: 只涉及行", () => {
+  assert.equal(summarizeRevertImpact(2, 0, 2), "将影响 2 行");
+});
+
+test("summarizeRevertImpact: 只涉及格子", () => {
+  assert.equal(summarizeRevertImpact(0, 3, 3), "将影响 3 个格子");
+});
+
+test("summarizeRevertImpact: 区间内有变更但都是表结构/表信息（不涉及行或格子）", () => {
+  assert.equal(summarizeRevertImpact(0, 0, 2), "将撤销一些表结构或表信息的改动（不涉及行或格子内容）");
 });

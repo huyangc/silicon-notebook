@@ -20,6 +20,7 @@
 // camelCase。
 
 import type { KnowhowChange, KnowhowChangeKind } from "./knowhow-model.ts";
+import { ROLE_LABELS, type CellKind } from "./knowhow-model.ts";
 
 export type { KnowhowChange, KnowhowChangeKind };
 
@@ -221,4 +222,105 @@ export function foldLocalChanges(changes: KnowhowChange[]): LocalDiffResult {
 // 里只是让前端能在发请求前就给出提示，不是安全边界（真正的把关在服务端）。
 export function isStaleHead(seenHeadSeq: number, actualHeadSeq: number): boolean {
   return seenHeadSeq !== actualHeadSeq;
+}
+
+// --- 列结构字段级变更描述（两版对比 columns[] 桶专用，Task 15）-----------------
+//
+// 服务端 aggregate_diff() 的 columns[] 桶把 column_add/column_delete/
+// column_rename/column_kind/anchor_set 四种事件按字段（name/role/position）
+// 统一折叠进同一个 {before, after} Partial 形状（app/services/knowhow/
+// history.py note_field/apply_column_added/apply_column_removed 逐字核对）：
+// 新增列表现为 before={name:null,role:null,position:null}/after={真实值}
+// （apply_column_added 对 3 个字段一律先记 before=None）；删除列相反
+// （apply_column_removed 一律后记 after=None）；单纯改名/改类型/切换行标题
+// 列时只有相应的一个字段（name 或 role）会出现在 before/after 里——position
+// 目前没有任何事件单独触发，只会跟随新增/删除一起出现。
+//
+// 这个"key 存在但值为 null 代表原本不存在"的编码，只有聚合 diff 这一个桶
+// 需要——单条变更展开视图不必读这个函数：单条 payload 已经明确知道自己是
+// column_add 还是 column_delete，不需要从字段模式反推"是加是删"（那些 kind
+// 有自己的 payload 形状，直接读 payload.column 即可，见 knowhow-history-
+// drawer.tsx 的按 kind 分派渲染）。
+export type ColumnFieldSnapshot = Partial<{
+  name: string | null;
+  role: string | null;
+  position: number | null;
+}>;
+
+export interface ColumnChangeDescription {
+  columnId: string;
+  /** 这一条目该挂什么名字展示——优先用变化后的名字，该列已被删除时用变化前
+   * 的名字；本次只是字段级改了 role/position、没有触碰 name（比如单独切换
+   * 行标题列）两者都拿不到时，落到调用方传入的兜底名字（通常是当前表里这
+   * 一列的实时名字）；连兜底都没有才用通用占位。 */
+  label: string;
+  /** 人话描述行，可能不止一条（如同一区间内又改名又改类型）。 */
+  lines: string[];
+}
+
+// 导出（非本文件私有）：knowhow-history-drawer.tsx 单条变更展开视图渲染
+// column_kind/anchor_set 时，payload 里的 before/after 就是裸的 role 字符串
+// （不经过本文件的 describeColumnChange），需要同一份"role 值 -> 中文标签"
+// 映射，不另外复制一份可能与这里漂移的翻译表。
+export function roleLabel(value: string | null | undefined): string {
+  if (value == null) return "";
+  return value in ROLE_LABELS ? ROLE_LABELS[value as CellKind] : value;
+}
+
+export function describeColumnChange(
+  columnId: string,
+  before: ColumnFieldSnapshot,
+  after: ColumnFieldSnapshot,
+  fallbackLabel?: string,
+): ColumnChangeDescription {
+  const label = after.name ?? before.name ?? fallbackLabel ?? "（未知列）";
+  // 新增/删除：name 字段一定跟 role/position 一起出现（apply_column_added/
+  // apply_column_removed 对 3 个字段一视同仁地记，见上方头注释），用 name
+  // 是否为 null 当判据就足够，不需要同时核对另外两个字段。
+  const added = "name" in before && before.name == null && after.name != null;
+  const removed = "name" in after && after.name == null && before.name != null;
+  if (added) {
+    const roleSuffix = after.role ? `（类型：${roleLabel(after.role)}）` : "";
+    return { columnId, label, lines: [`新增列「${label}」${roleSuffix}`] };
+  }
+  if (removed) {
+    return { columnId, label, lines: [`删除列「${label}」`] };
+  }
+
+  const lines: string[] = [];
+  if ("name" in before && "name" in after && before.name !== after.name) {
+    lines.push(`列改名：「${before.name ?? ""}」→「${after.name ?? ""}」`);
+  }
+  if ("role" in before && "role" in after && before.role !== after.role) {
+    if (before.role === "anchor") lines.push(`「${label}」不再是行标题列`);
+    else if (after.role === "anchor") lines.push(`「${label}」设为行标题列`);
+    else lines.push(`内容类型：${roleLabel(before.role)} → ${roleLabel(after.role)}`);
+  }
+  if ("position" in before && "position" in after && before.position !== after.position) {
+    lines.push("列顺序发生变化");
+  }
+  if (lines.length === 0) lines.push(`列「${label}」发生变化`);
+  return { columnId, label, lines };
+}
+
+// --- 回退影响预览（确认框「将影响 N 行、M 个格子」，Task 15）-------------------
+//
+// 抽屉在用户点「回到这里」时，用本地已加载的时间线对目标 seq 之后、直到当前
+// head 的这段区间跑一次 foldLocalChanges，拿到粗略的行/格子净变化数目喂给本
+// 函数拼成一句确认文案——这不是权威两版对比（同 knowhow-model.ts
+// fetchKnowhowHistoryDiff 头注释的同一条警告：本地折叠不含列结构/表元变化），
+// 只是确认框里给用户一个大致量级的提示，帮助其判断这次回退动作有多大。
+export function summarizeRevertImpact(
+  rowsTouched: number,
+  cellsTouched: number,
+  changeCount: number,
+): string {
+  if (changeCount === 0) return "不会撤销任何改动";
+  if (rowsTouched === 0 && cellsTouched === 0) {
+    return "将撤销一些表结构或表信息的改动（不涉及行或格子内容）";
+  }
+  const parts: string[] = [];
+  if (rowsTouched > 0) parts.push(`${rowsTouched} 行`);
+  if (cellsTouched > 0) parts.push(`${cellsTouched} 个格子`);
+  return `将影响 ${parts.join("、")}`;
 }
