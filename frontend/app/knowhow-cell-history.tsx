@@ -24,19 +24,31 @@
  * drawer.tsx 用的那一整套），新增的只有「模式徽标第三色」与「卡片左边条第三
  * 色」两条一次性规则。
  *
- * 单格恢复 ≠ 整表回退（简报disambiguation①）：这里直接调 patchKnowhowCell
- * (..., origin: "revert")——普通的单格保存，不调 revertKnowhowTable，不受
- * 整表回退那套 expected_head_seq 指纹守卫约束。真正的网络调用留在本组件内部
- * 完成（镜像 KnowhowHistoryDrawer 自己直接调 revertKnowhowTable、只经
- * onReverted 回调通知 panel 事后合并/刷新的既有分工），成功后把服务端返回的
- * 最新值经 onRestored 报给 panel，由 panel 合并进它自己的 detail 状态（规则
- * 同 handleCellSave 单格分支——见 knowhow-panel.tsx 该函数尾部）。
+ * 单格恢复 ≠ 整表回退（简报disambiguation①）：恢复不调 revertKnowhowTable，
+ * 不受整表回退那套 expected_head_seq 指纹守卫约束——它是一次普通的格子
+ * 保存，origin 传 "revert"。
  *
- * 范围之外（有意，非遗漏）：恢复只对"这一格、这一行"生效，不会像
- * handleCellSave 那样探测 anchor 分组并批量写整个「合并共享格」——若这一格
- * 当前是被概念组内多个分支共享的合并格，恢复后只有这一行会变成历史值，其余
- * 分支仍是当前值，直到有人再手动编辑一次才会重新趋同。这是简报①明确要求的
- * 简化（"就是一次普通的格子保存"），不是本文件的疏漏。
+ * 评审修复（Important，2026-07-23）：初版实现按简报①"就是一次普通的格子
+ * 保存"的简化描述，在本组件内部直调 patchKnowhowCell，绕开了 knowhow-
+ * panel.tsx handleCellSave 的 anchor 分组 + isSharedColumn 批量写判定——若
+ * 这一格恰好是概念组内多分支共享的合并格，只写当前这一行会让组内其余分支
+ * 停留旧值：下次渲染 G2 因该列不再全同值而误判"不再共享"、自动把合并格散
+ * 开，这是静默的数据不一致，不是可接受的范围简化。设计文档 §6.4 原话其实
+ * 早已写明单格恢复走既有 update_knowhow_cell「含既有的 require_assets 校
+ * 验、合并格扇写判定」——是简报①自己把这层要求简化掉了，不是本文件曾经的
+ * 疏漏。
+ *
+ * 现在的分工：真正的网络调用不在本组件内部——落在 onRestore 回调里，由
+ * panel 用 handleCellSave(rowId, columnId, entry.after, undefined, undefined,
+ * undefined, "revert") 实现，与手动编辑器 onSave 走同一个函数、同一套
+ * groupRowsByAnchor + isSharedColumn + batchPatchKnowhowCells 判定——单格
+ * 写还是整组批量写完全由 handleCellSave 决定，本组件不重复算一遍分组，也
+ * 不关心结果是单请求还是批量请求。affectedBranchCount 由 panel 传入（与
+ * KnowhowCellEditor header 提示同源同一份 cellModalAffectedBranchCount），
+ * 供确认框在合并共享格时给出"恢复将同步到全部 N 个分支"提示，避免用户以为
+ * 恢复只影响眼前这一行。成功后 panel 的 setDetail 已经把新值合并回 detail
+ * （同 handleCellSave 尾部），本组件只需 reload() 重新拉一次这一格的历史
+ * 时间线。
  */
 "use client";
 
@@ -46,9 +58,7 @@ import { useFloatingWindow } from "./use-floating-window.ts";
 import {
   ROLE_LABELS,
   fetchKnowhowCellHistory,
-  patchKnowhowCell,
   type KnowhowCellHistoryEntry,
-  type KnowhowCellPatchResult,
   type KnowhowColumn,
   type KnowhowTableDetail,
 } from "./knowhow-model.ts";
@@ -88,9 +98,18 @@ export interface KnowhowCellHistoryProps {
   table: KnowhowTableDetail;
   rowId: string;
   canEdit: boolean;
-  /** 恢复成功后把服务端返回的最新值报给 panel，由 panel 合并进它自己的
-   * detail 状态——本组件自己不持有整表状态、也不负责重拉表详情。 */
-  onRestored: (result: KnowhowCellPatchResult) => void;
+  /** 该格所属概念组的分支数——语义与 KnowhowCellEditorProps.affectedBranchCount
+   * 完全一致（同一份 cellModalAffectedBranchCount，见 knowhow-panel.tsx），只是
+   * 这里驱动确认框里的「恢复将同步到全部 N 个分支」提示，而不是 header 提示。
+   * undefined 或 <=1（记录型表 / 非共享格 / 单行组）时不显示。 */
+  affectedBranchCount?: number;
+  /** 真正落库委托给 panel——panel 接的就是 handleCellSave 本身（多传一个
+   * origin="revert"），与手动编辑走同一套 anchor 分组 + 批量写判定，本组件不
+   * 重复判定、也不关心结果是单请求还是批量请求（见本文件头注释）。reject 时
+   * 本组件原地展示错误。成功后 panel 已经把新值合并进它自己的 detail 状态
+   * （同 handleCellSave 尾部），本组件只需 reload() 重新拉一次这一格的历史
+   * 时间线。 */
+  onRestore: (rowId: string, columnId: string, contentMd: string) => Promise<void>;
   /** 切回预览态（浮窗保持打开，同一个 cellModal.rowId/columnId）。「关闭」
    * 走 onClose 整体关掉浮窗——两者是不同的两件事，故意分开两个回调，不是
    * onBack 的同义重复。 */
@@ -107,7 +126,8 @@ export function KnowhowCellHistory({
   table,
   rowId,
   canEdit,
-  onRestored,
+  affectedBranchCount,
+  onRestore,
   onBack,
   onClose,
 }: KnowhowCellHistoryProps) {
@@ -151,6 +171,14 @@ export function KnowhowCellHistory({
     if (event.currentTarget === event.target) onClose();
   }
 
+  // 「当前」徽标：按 seq 判定（同 knowhow-history-drawer.tsx 的 isHead ===
+  // change.seq === headSeq 用法），不按值比较——历史里出现重复值（如
+  // A→B→A）时值比较会把多条都误判成「当前」，seq 判定保证只有真正最新的
+  // 那一条被标记，不受某条更早的值恰好与当前值相同影响。entries 已按 seq
+  // 降序返回（最新在前，见 fetchKnowhowCellHistory 注释），故 entries[0]
+  // 即对应当前值的那一条。
+  const headSeq = entries.length > 0 ? entries[0].seq : null;
+
   async function handleRestore(entry: KnowhowCellHistoryEntry) {
     // after===null 的条目本就不会渲染出「恢复此版本」按钮（见下方
     // isCellHistoryEntryRestorable 门控），这里再挡一道防御性早退——纯粹是
@@ -159,21 +187,15 @@ export function KnowhowCellHistory({
     setRestoringSeq(entry.seq);
     setRestoreError(null);
     try {
-      // 单格恢复不是「回退」：普通的一次格子保存，只是 origin 传 "revert"
-      // （第 7 个位置参数）——不带 expectedBefore（不受并发防护 P1-b 的基线
-      // 比对约束，同手动格子编辑的既有 last-write-wins 语义），也不调
-      // revertKnowhowTable（不受整表回退的 expected_head_seq 指纹守卫约束）。
-      const result = await patchKnowhowCell(
-        notebookId,
-        table.id,
-        rowId,
-        column.id,
-        entry.after,
-        undefined,
-        "revert",
-      );
+      // 单格恢复不是「回退」：普通的一次格子保存，只是 origin 传 "revert"——
+      // 不带 expectedBefore（不受并发防护 P1-b 的基线比对约束，同手动格子
+      // 编辑的既有 last-write-wins 语义），也不调 revertKnowhowTable（不受
+      // 整表回退的 expected_head_seq 指纹守卫约束）。真正的写入委托给
+      // onRestore（panel 接的是 handleCellSave 本身，见本文件头注释）——单格
+      // 写还是合并格整组批量写，完全由那一层的 anchor 分组判定决定，本组件
+      // 不重复判定。
+      await onRestore(rowId, column.id, entry.after);
       setConfirmSeq(null);
-      onRestored(result);
       reload();
     } catch (err) {
       setRestoreError(extractErrorMessage(err, "恢复失败，请重试"));
@@ -254,7 +276,7 @@ export function KnowhowCellHistory({
               <ul className="kh-history-list">
                 {entries.map((entry) => {
                   const origin = originLabel(entry.origin);
-                  const isCurrent = entry.after === contentMd;
+                  const isCurrent = entry.seq === headSeq;
                   const restorable = canEdit && isCellHistoryEntryRestorable(entry.after, contentMd);
                   return (
                     <li key={entry.seq} className="kh-history-item">
@@ -269,6 +291,15 @@ export function KnowhowCellHistory({
                           {confirmSeq === entry.seq ? (
                             <span className="knowhow-confirm">
                               <span>恢复到这个版本？</span>
+                              {/* 合并共享格提示（同 KnowhowCellEditor header 的 kh-affect-hint，
+                                  anchor 分组 spec §4.4）：恢复也会批量写整组，必须在真正提交
+                                  前就让用户知道范围不止这一行，同一份 affectedBranchCount 判定
+                                  保证提示范围与 handleCellSave 实际写入范围一致。 */}
+                              {affectedBranchCount && affectedBranchCount > 1 && (
+                                <span className="kh-affect-hint">
+                                  恢复将同步到该概念下全部 {affectedBranchCount} 个分支
+                                </span>
+                              )}
                               <button
                                 type="button"
                                 className="knowhow-confirm-yes"
