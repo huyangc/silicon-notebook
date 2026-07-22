@@ -4,8 +4,10 @@ from typing import Callable, Literal, Sequence
 
 from app.models.notebooks import NotebookCreate, NotebookUpdate
 from app.repositories.postgres._store_utils import (
+    TimestampInput,
     execute_many,
     jsonb,
+    normalized_clock,
     placeholders,
     sqlite_compatible_notebook_row,
 )
@@ -34,11 +36,11 @@ class NotebookStore:
         database: PostgresDatabase,
         *,
         new_id: Callable[[str], str],
-        now: Callable[[], str],
+        now: Callable[[], TimestampInput],
     ) -> None:
         self.database = database
         self.new_id = new_id
-        self.now = now
+        self.now = normalized_clock(now)
 
     def tier_map(self, notebook_ids: Sequence[str]) -> dict[str, str]:
         ids = list(dict.fromkeys(value for value in notebook_ids if value))

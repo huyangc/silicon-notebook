@@ -15,9 +15,12 @@ from app.models.sources import (
 )
 from app.repositories.ports import SOURCE_PAPER_META_UNSET, SourceElementWrite
 from app.repositories.postgres._store_utils import (
+    TimestampInput,
     execute_many,
     json_value,
     jsonb,
+    normalized_clock,
+    normalize_timestamp,
     placeholders,
 )
 from app.repositories.postgres.database import PostgresDatabase
@@ -48,9 +51,14 @@ class SourceStore:
 
     IN_CHUNK = 5_000
 
-    def __init__(self, database: PostgresDatabase, *, now: Callable[[], str]) -> None:
+    def __init__(
+        self,
+        database: PostgresDatabase,
+        *,
+        now: Callable[[], TimestampInput],
+    ) -> None:
         self.database = database
-        self.now = now
+        self.now = normalized_clock(now)
 
     def list_sources(self, notebook_id: str) -> list[SourceSummary]:
         with self.database.connect() as connection:
@@ -368,8 +376,9 @@ class SourceStore:
         source_id: str,
         elements: Sequence[SourceElementWrite],
         *,
-        created_at: str,
+        created_at: TimestampInput,
     ) -> None:
+        created_at = normalize_timestamp(created_at)
         connection.execute("DELETE FROM source_elements WHERE source_id=%s", (source_id,))
         execute_many(
             connection,
@@ -399,8 +408,9 @@ class SourceStore:
         source_id: str,
         elements: Sequence[SourceElementWrite],
         *,
-        created_at: str,
+        created_at: TimestampInput,
     ) -> None:
+        created_at = normalize_timestamp(created_at)
         execute_many(
             connection,
             "INSERT INTO source_elements"

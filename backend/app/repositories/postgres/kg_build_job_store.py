@@ -4,7 +4,11 @@ from typing import Callable
 
 from psycopg import errors
 
-from app.repositories.postgres._store_utils import iso_timestamp
+from app.repositories.postgres._store_utils import (
+    TimestampInput,
+    iso_timestamp,
+    normalized_clock,
+)
 from app.repositories.postgres.database import PostgresDatabase
 
 
@@ -18,11 +22,11 @@ class KgBuildJobStore:
         database: PostgresDatabase,
         *,
         new_id: Callable[[str], str],
-        now: Callable[[], str],
+        now: Callable[[], TimestampInput],
     ) -> None:
         self.database = database
         self.new_id = new_id
-        self.now = now
+        self.now = normalized_clock(now)
 
     @staticmethod
     def _row(row) -> dict:

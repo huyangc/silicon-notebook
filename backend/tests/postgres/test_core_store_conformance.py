@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+import os
 import threading
+import time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from app.core.config import Settings
-from app.models.notebooks import NotebookCreate, NotebookUpdate
+from app.models.notebooks import NotebookCreate, NotebookUpdate, SharedByMeItem
 from app.repositories.ports import ChunkWrite, SourceElementWrite
 from app.repositories.postgres.chunk_store import ChunkStore as PostgresChunkStore
 from app.repositories.postgres.identity_store import IdentityStore as PostgresIdentityStore
@@ -67,7 +71,10 @@ def _new_id_factory():
 def core_stores(request, tmp_path) -> CoreStores:
     backend = request.param
     new_id = _new_id_factory()
-    now = lambda: NOW
+
+    def now() -> str:
+        return NOW
+
     model_cache: dict[str, object] = {}
 
     if backend == "sqlite":
@@ -161,6 +168,23 @@ def _fetch_one(
 
 def _iso(value: object) -> str:
     return value.isoformat() if isinstance(value, datetime) else str(value)
+
+
+@contextmanager
+def _process_timezone(name: str):
+    if not hasattr(time, "tzset"):
+        pytest.skip("process timezone control requires time.tzset")
+    previous = os.environ.get("TZ")
+    os.environ["TZ"] = name
+    time.tzset()
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous
+        time.tzset()
 
 
 class _EmptySummaryQueries:
@@ -331,6 +355,170 @@ def test_notebook_mount_and_sharing_semantics(core_stores: CoreStores):
     core_stores.sharing.clear_share(personal_id)
     assert core_stores.sharing.find_by_token(token) is None
     assert core_stores.sharing.list_members(personal_id) == []
+
+
+def test_shared_members_validate_as_shared_by_me_string_fields(
+    core_stores: CoreStores,
+):
+    owner = core_stores.identity.create_user("u00123456", "password-20")
+    reader = core_stores.identity.create_user("v00123456", "password-21")
+    notebook_id = core_stores.notebooks.create_row(
+        NotebookCreate(name="Shared members"), owner.id
+    )
+    core_stores.sharing.add_member(notebook_id, reader.id)
+
+    item = SharedByMeItem(
+        id=notebook_id,
+        name="Shared members",
+        share_token="shr-member-time",
+        mode="readonly",
+        size={"sources": 0},
+        members=core_stores.sharing.list_members(notebook_id),
+    )
+    assert item.members == [
+        {"username": "v00123456", "added_at": "2026-07-22T10:00:00+00:00"}
+    ]
+
+
+@pytest.mark.postgres_integration
+def test_pg_task6_timestamp_inputs_normalize_naive_local_seams(
+    postgres_database,
+    postgres_settings,
+):
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 6
+    local_zone = ZoneInfo("America/Los_Angeles")
+    naive_local = datetime(2026, 7, 22, 3, 0, 0)
+    expected_utc = naive_local.replace(tzinfo=local_zone).astimezone(timezone.utc)
+    new_id = _new_id_factory()
+
+    def clock() -> str:
+        return naive_local.isoformat()
+
+    identity = PostgresIdentityStore(postgres_database, postgres_settings, {})
+    notebooks = PostgresNotebookStore(postgres_database, new_id=new_id, now=clock)
+    sharing = PostgresSharingStore(
+        postgres_database,
+        postgres_settings,
+        now=clock,
+        insert_row=PostgresSharingStore.insert_row_values,
+    )
+    sources = PostgresSourceStore(postgres_database, now=clock)
+    chunks = PostgresChunkStore(postgres_database)
+    jobs = PostgresKgBuildJobStore(postgres_database, new_id=new_id, now=clock)
+
+    with _process_timezone(local_zone.key):
+        owner = identity.create_user("w00123456", "password-22")
+        reader = identity.create_user("x00123456", "password-23")
+        notebook_id = notebooks.create_row(NotebookCreate(name="Local clock"), owner.id)
+        sources.insert_source(
+            source_id="src-local-clock",
+            notebook_id=notebook_id,
+            title="Local clock source",
+            source_type="markdown",
+            status="parsed",
+            parse_status="parsed",
+            file_name="clock.md",
+            file_path="uploads/clock.md",
+            file_size=1,
+            file_hash="clock",
+            summary="",
+            doc_type="",
+        )
+        with postgres_database.write() as connection:
+            sources.replace_elements(
+                connection,
+                "src-local-clock",
+                [SourceElementWrite("el-local-clock", "paragraph", "p", "body", {})],
+                created_at=naive_local.isoformat(),
+            )
+        chunks.replace_source_chunks(
+            "src-local-clock",
+            notebook_id,
+            [ChunkWrite("chunk-local-clock", "body", "p", ("el-local-clock",))],
+            created_at=naive_local.replace(tzinfo=local_zone),
+        )
+        sharing.add_member(notebook_id, reader.id)
+        job = jobs.create_job(notebook_id, owner.id, "incremental", 1)
+
+        with postgres_database.connect() as connection:
+            stored = connection.execute(
+                "SELECT n.created_at AS notebook_created,s.created_at AS source_created,"
+                "e.created_at AS element_created,c.created_at AS chunk_created,"
+                "m.added_at AS member_added,j.created_at AS job_created "
+                "FROM notebooks n JOIN sources s ON s.notebook_id=n.id "
+                "JOIN source_elements e ON e.source_id=s.id "
+                "JOIN chunks c ON c.source_id=s.id "
+                "JOIN notebook_members m ON m.notebook_id=n.id "
+                "JOIN kg_build_jobs j ON j.notebook_id=n.id "
+                "WHERE n.id=%s AND j.id=%s",
+                (notebook_id, job["id"]),
+            ).fetchone()
+    assert set(stored.values()) == {expected_utc}
+
+
+@pytest.mark.postgres_integration
+def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
+    postgres_database,
+    postgres_settings,
+):
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 6
+    settings = postgres_settings.model_copy(
+        update={"notebook_copy_stale_seconds": 60}
+    )
+    new_id = _new_id_factory()
+    local_zone = ZoneInfo("America/Los_Angeles")
+    reference_utc = datetime.now(timezone.utc).replace(microsecond=0)
+    clock_value = reference_utc.astimezone(local_zone).replace(tzinfo=None).isoformat()
+
+    def clock() -> str:
+        return clock_value
+
+    identity = PostgresIdentityStore(postgres_database, settings, {})
+    notebooks = PostgresNotebookStore(postgres_database, new_id=new_id, now=clock)
+    sharing = PostgresSharingStore(
+        postgres_database,
+        settings,
+        now=clock,
+        insert_row=PostgresSharingStore.insert_row_values,
+    )
+
+    with _process_timezone(local_zone.key):
+        owner = identity.create_user("y00123456", "password-24")
+        source_notebook_id = notebooks.create_row(
+            NotebookCreate(name="Sentinel template"), owner.id
+        )
+        template = sharing.snapshot_copy_rows(source_notebook_id)["notebooks"][0]
+
+        def insert_sentinel(notebook_id: str, created_at: str) -> None:
+            row = dict(template)
+            row.update(
+                id=notebook_id,
+                name=notebook_id,
+                status="copying",
+                created_by=owner.id,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+            sharing.insert_copy_rows("notebooks", [row], chunk_size=1)
+
+        insert_sentinel("nb-copy-fresh-local", clock_value)
+        assert sharing.sweep_stale_copies(created_by=owner.id) == 0
+
+        stale_local = (
+            reference_utc - timedelta(seconds=120)
+        ).astimezone(local_zone).replace(tzinfo=None).isoformat()
+        insert_sentinel("nb-copy-stale-local", stale_local)
+        assert sharing.sweep_stale_copies(created_by=owner.id) == 1
+
+        with postgres_database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM notebooks WHERE status='copying' ORDER BY id COLLATE \"C\""
+            ).fetchall()
+    assert [row["id"] for row in rows] == ["nb-copy-fresh-local"]
 
 
 def test_cross_owner_base_visibility_fails_closed_after_downgrade(

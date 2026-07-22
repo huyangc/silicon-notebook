@@ -9,6 +9,10 @@ from psycopg.types.json import Jsonb
 
 from app.core.config import Settings
 from app.repositories.postgres._store_utils import (
+    TimestampInput,
+    iso_timestamp,
+    normalized_clock,
+    normalize_timestamp_row,
     sqlite_compatible_notebook_row,
     sqlite_compatible_row,
     utc_now,
@@ -146,12 +150,12 @@ class SharingStore:
         database: PostgresDatabase,
         settings: Settings,
         *,
-        now: Callable[[], str],
+        now: Callable[[], TimestampInput],
         insert_row: Callable,
     ) -> None:
         self.database = database
         self.settings = settings
-        self.now = now
+        self.now = normalized_clock(now)
         self.insert_row = insert_row
 
     def bind_insert_row(self, insert_row: Callable) -> None:
@@ -268,7 +272,13 @@ class SharingStore:
                 "WHERE m.notebook_id=%s ORDER BY m.added_at,u.username COLLATE \"C\"",
                 (notebook_id,),
             ).fetchall()
-        return [{"username": row["username"], "added_at": row["added_at"]} for row in rows]
+        return [
+            {
+                "username": row["username"],
+                "added_at": iso_timestamp(row["added_at"]),
+            }
+            for row in rows
+        ]
 
     def source_owner(self, source_id: str) -> str | None:
         with self.database.connect() as connection:
@@ -326,7 +336,11 @@ class SharingStore:
         for index in range(0, len(rows), chunk_size):
             with self.database.write() as connection:
                 for data in rows[index : index + chunk_size]:
-                    self.insert_row(connection, table, data)
+                    self.insert_row(
+                        connection,
+                        table,
+                        normalize_timestamp_row(table, data),
+                    )
 
     def insert_fts_rows(self, sql_text: str, rows: Sequence[tuple], *, chunk_size: int) -> None:
         # PostgreSQL GIN/trigram indexes are maintained from base rows; there is
@@ -405,6 +419,7 @@ class SharingStore:
     def insert_row_values(connection, table: str, data: dict) -> None:
         if table not in _COPY_TABLES:
             raise ValueError("unsupported copy table")
+        data = normalize_timestamp_row(table, data)
         columns = list(data)
         values = []
         json_columns = _JSON_COLUMNS.get(table, set())

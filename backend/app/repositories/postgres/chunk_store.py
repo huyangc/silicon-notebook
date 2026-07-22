@@ -5,9 +5,11 @@ from typing import Sequence
 
 from app.repositories.ports import ChunkWrite
 from app.repositories.postgres._store_utils import (
+    TimestampInput,
     execute_many,
     json_value,
     jsonb,
+    normalize_timestamp,
     placeholders,
 )
 from app.repositories.postgres.database import PostgresDatabase
@@ -53,8 +55,9 @@ class ChunkStore:
         notebook_id: str,
         chunks: Sequence[ChunkWrite],
         *,
-        created_at: str,
+        created_at: TimestampInput,
     ) -> None:
+        created_at = normalize_timestamp(created_at)
         rows = [
             (
                 chunk.id,
@@ -103,8 +106,9 @@ class ChunkStore:
         source_id: str,
         rows: Sequence[ChunkWrite],
         *,
-        created_at: str,
+        created_at: TimestampInput,
     ) -> None:
+        created_at = normalize_timestamp(created_at)
         values = [
             (
                 row.id,
