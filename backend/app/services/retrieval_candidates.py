@@ -18,7 +18,6 @@ from app.core.ask_context import _ASK_EMBED_CACHE
 from app.models.common import Evidence
 from app.services.cancellation import CancelEvent, raise_if_cancelled
 from app.services.knowledge_contracts import USABLE_STATUSES
-from app.services.model_config import model_client_fingerprint
 from app.services.retrieval import (
     RELEVANCE_FLOOR,
     W_KEYWORD,
@@ -88,7 +87,7 @@ class _RetrievalState:
 
     @property
     def rerank_client(self):
-        return self.model_clients.rerank_client
+        return self.model_clients.rerank("retrieval_rerank")
 
     @property
     def _vector_cache(self):
@@ -325,7 +324,7 @@ class CandidateRetrievalService(_RetrievalState):
         P1-A:ask 作用域内(_ASK_EMBED_CACHE 非 None)按 query[:2000] 复用同文本
         的截断后向量,砍 federated 双 tier/seed/quota 对同一问题的重复 RTT;
         失败不缓存(保留每次重试语义)。default None(非 ask 路径)行为不变。"""
-        if not self.settings.embedder_configured:
+        if not getattr(self.embedder, "configured", False):
             return None
         cache = _ASK_EMBED_CACHE.get()
         key = query[:2000]
@@ -338,11 +337,8 @@ class CandidateRetrievalService(_RetrievalState):
         except Exception as exc:
             self._note_model_error(
                 "embed",
-                self.settings.embed_model,
                 exc,
-                service="embedding",
-                provider_failure=True,
-                failed_fingerprint=model_client_fingerprint(self.embedder),
+                workload_id="retrieval_query_embedding",
             )
             return None
         from app.services.vector_index import resolve_runtime_dim, truncate_vec

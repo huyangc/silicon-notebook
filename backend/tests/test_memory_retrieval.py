@@ -12,6 +12,7 @@ from app.services.sqlite_repository import (
     reset_request_user,
     set_request_user,
 )
+from tests.model_testkit import RecordingModelProvider
 
 
 @pytest.fixture
@@ -20,7 +21,11 @@ def memory_data(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "storage"))
     monkeypatch.setenv("EVENT_LOG_ENABLED", "false")
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    repo = SQLiteRepository(Settings(_env_file=None))
+    provider = RecordingModelProvider()
+    repo = SQLiteRepository(
+        Settings(_env_file=None, model_services_config=""),
+        model_provider=provider,
+    )
     alice = repo.create_user("a00123456", "pw")
     bob = repo.create_user("b00654321", "pw")
 
@@ -94,11 +99,14 @@ def memory_data(tmp_path, monkeypatch):
         deprecated=deprecated,
         other_memory=other_memory,
         bob_memory=bob_memory,
+        provider=provider,
     )
 
 
 def test_notebook_plane_returns_relevant_confirmed_only(memory_data):
     data = memory_data
+    assert ("embedding", "memory_embedding") in data.provider.calls
+    assert ("embedding", "retrieval_query_embedding") in data.provider.calls
     hits = data.retriever.notebook_memory_hits(
         data.alice.id, data.notebook.id, "timing closure", 10
     )
@@ -191,7 +199,7 @@ def test_ask_uses_confirmed_memory_anchor_without_fake_source_ids(memory_data):
     data = memory_data
     data.repo.settings.query_rewrite_enabled = False
     llm = _MemoryAnswerLLM()
-    data.repo.llm_client = llm
+    data.provider.chat_clients = {"ask_answer": llm}
     token = set_request_user(data.alice)
     try:
         response = data.repo._runtime.ask_service().ask_chunk(
@@ -215,7 +223,7 @@ def test_ask_uses_confirmed_memory_anchor_without_fake_source_ids(memory_data):
 def test_reasoning_synthesis_projects_confirmed_memory_as_first_class_anchor(memory_data):
     data = memory_data
     llm = _MemoryAnswerLLM()
-    data.repo._reasoning_llm_client = llm
+    data.provider.chat_clients = {"ask_answer": llm}
     hits = data.retriever.notebook_memory_hits(
         data.alice.id, data.notebook.id, "timing closure", 8
     )
@@ -238,8 +246,7 @@ def test_reasoning_synthesis_projects_confirmed_memory_as_first_class_anchor(mem
 def test_reasoning_consumes_confirmed_memory_when_no_kg_exists(memory_data, monkeypatch):
     data = memory_data
     llm = _MemoryAnswerLLM()
-    data.repo.llm_client = llm
-    data.repo._reasoning_llm_client = llm
+    data.provider.chat_clients = {"ask_answer": llm}
     service = data.repo._runtime.ask_service()
     monkeypatch.setattr(service.candidates, "has_kg", lambda _nb: False)
     monkeypatch.setattr(service.candidates, "any_base_has_kg", lambda _nb: False)
@@ -260,7 +267,7 @@ def test_reasoning_consumes_confirmed_memory_when_no_kg_exists(memory_data, monk
 def test_graph_memory_only_answer_does_not_build_or_walk_the_graph(memory_data, monkeypatch):
     data = memory_data
     llm = _MemoryAnswerLLM()
-    data.repo.llm_client = llm
+    data.provider.chat_clients = {"ask_answer": llm}
     service = data.repo._runtime.ask_service()
     monkeypatch.setattr(service.candidates, "has_kg", lambda _nb: False)
     monkeypatch.setattr(service.candidates, "any_base_has_kg", lambda _nb: False)

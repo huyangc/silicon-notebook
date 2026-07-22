@@ -323,13 +323,16 @@ class SQLiteRepository:
         # KG-dirty callback late-bound. Object-vector flushes are owned by the
         # source embedding service itself.
         self._runtime.wire_source_pipeline(
-            embedder=lambda: self._runtime.embedder,
+            embedder=self._runtime.models.embedding,
             mark_unified_dirty=lambda notebook_id: self._mark_unified_kg_dirty(
                 notebook_id
             ),
         )
         self.embedder = self._runtime.models.embedding("retrieval_query_embedding")
-        self._runtime.wire_memory(embedder=self.embedder)
+        self._runtime.wire_memory(
+            persistence_embedder=self._runtime.models.embedding("memory_embedding"),
+            query_embedder=self.embedder,
+        )
         self.mineru_client = MinerUClient(settings)
         self.mineru_cloud_client = MinerUCloudClient(settings)
         self.event_log = self._runtime.event_log

@@ -328,28 +328,27 @@ class RepositoryRuntime:
         self._embedder = value
         if self.retrieval is not None:
             self.retrieval.replace_embedder(value)
-        if self.memory_service is not None:
-            self.memory_service.embedder = value
         if self.memory_retriever is not None:
             self.memory_retriever.replace_embedder(value)
 
-    def wire_memory(self, *, embedder: Any) -> MemoryService:
+    def wire_memory(
+        self, *, persistence_embedder: Any, query_embedder: Any
+    ) -> MemoryService:
         """Compose owner-private Memory after sharing/access and embedding exist."""
         if self.sharing is None:
             raise RuntimeError("wire_memory requires wire_sharing first")
-        self.set_embedder(embedder)
         self.memory_service = MemoryService(
             self.memory_store,
             self.ask_state,
             self.sharing,
-            self.embedder,
+            persistence_embedder,
             self.event_log,
             self.seams.new_id,
             self.seams.now,
             embedding_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
             kg_ingest_scheduler=lambda fn, item: kg_scheduler.submit_job(fn, item),
         )
-        self.memory_retriever = MemoryRetriever(self.memory_store, self.embedder)
+        self.memory_retriever = MemoryRetriever(self.memory_store, query_embedder)
         self.catalog.memory_retriever = self.memory_retriever
         return self.memory_service
 
@@ -475,7 +474,7 @@ class RepositoryRuntime:
     def wire_source_pipeline(
         self,
         *,
-        embedder: Callable[[], Any],
+        embedder: Callable[[str], Any],
         mark_unified_dirty: Callable[[str], None],
     ) -> tuple[SourceEmbeddingService, SourceChunkingService]:
         """Compose the source embed/chunk pipeline (Task 11) once the
@@ -492,6 +491,7 @@ class RepositoryRuntime:
             chunks=self.chunk_store,
             vectors=self.embedding_store,
             embedder=embedder,
+            parallelism=self.models.parallelism,
             event_log=self.event_log,
             now=self.seams.now,
         )
