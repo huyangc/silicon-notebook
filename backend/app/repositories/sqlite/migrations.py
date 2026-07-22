@@ -12,7 +12,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1534,6 +1534,29 @@ class SqliteMigrator:
                 );
                 CREATE INDEX IF NOT EXISTS idx_model_service_status_user_checked
                   ON model_service_status(user_id, checked_at DESC);
+                """
+            )
+
+    def _migration_24(self) -> None:
+        """Enforce one cluster membership per notebook, type, and object."""
+        with self._connect() as db:
+            db.executescript(
+                """
+                DELETE FROM concept_clusters
+                WHERE id IN (
+                  SELECT id FROM (
+                    SELECT
+                      id,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY notebook_id, object_type, member_object_id
+                        ORDER BY created_at DESC, id COLLATE BINARY DESC
+                      ) AS duplicate_rank
+                    FROM concept_clusters
+                  ) AS ranked
+                  WHERE duplicate_rank > 1
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_clusters_notebook_type_member
+                  ON concept_clusters(notebook_id, object_type, member_object_id);
                 """
             )
 

@@ -214,7 +214,7 @@ def knowledge_harness(request, tmp_path) -> KnowledgeHarness:
     database = request.getfixturevalue("postgres_database")
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(database).migrate() == 6
+    assert PostgresMigrator(database).migrate() == 7
     _seed_catalog(database, "postgres")
     yield KnowledgeHarness(
         backend="postgres",
@@ -562,7 +562,7 @@ def test_postgres_embedding_bytea_roundtrip_and_fail_closed_validation(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresEmbeddingStore(write=postgres_database.write)
     expected = np.asarray([0.125, -1.5, 3.25, 0.0], dtype=np.float32)
@@ -607,7 +607,7 @@ def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresKnowledgeStore(postgres_database, _seams())
     valid = (
@@ -649,7 +649,7 @@ def test_postgres_jsonb_preserves_nested_null_and_rejects_top_level_null_or_nan(
 def test_postgres_raw_graph_rows_keep_sqlite_json_text_contract(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
@@ -716,7 +716,7 @@ def test_postgres_raw_graph_rows_keep_sqlite_json_text_contract(postgres_databas
 def test_postgres_retrieve_neighbors_consumes_sqlite_compatible_rows(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresKnowledgeStore(postgres_database, _seams())
     objects = [
@@ -763,13 +763,61 @@ def test_postgres_retrieve_neighbors_consumes_sqlite_compatible_rows(postgres_da
     assert hits[0].last_reviewed == ""
 
 
+def test_retrieve_neighbors_excludes_rejected_relations_on_both_backends(
+    knowledge_harness,
+):
+    objects = [
+        (
+            object_id,
+            "nb-personal",
+            "claim",
+            "approved",
+            json.dumps({"name": object_id}),
+            json.dumps(_evidence()),
+            "source-golden",
+            NOW,
+            NOW,
+        )
+        for object_id in ("ko-rejected-neighbor-source", "ko-rejected-neighbor-target")
+    ]
+    relation = (
+        "rel-rejected-neighbor",
+        "nb-personal",
+        "source-golden",
+        "ko-rejected-neighbor-source",
+        "ko-rejected-neighbor-target",
+        "derived_from",
+        json.dumps(_evidence()),
+        NOW,
+    )
+    with knowledge_harness.database.write() as connection:
+        knowledge_harness.knowledge.insert_object_chunk(connection, objects)
+        knowledge_harness.knowledge.insert_relation_chunk(connection, [relation])
+        knowledge_harness.governance.update_edge_review(
+            connection,
+            "nb-personal",
+            "rel-rejected-neighbor",
+            "rejected",
+        )
+
+    service = CandidateRetrievalService.__new__(CandidateRetrievalService)
+    service._connect = knowledge_harness.database.connect
+    service.knowledge = knowledge_harness.knowledge
+
+    assert service._retrieve_neighbors(
+        "nb-personal",
+        "ko-rejected-neighbor-source",
+        edge_type="derived_from",
+    ) == []
+
+
 @pytest.mark.postgres_integration
 def test_postgres_knowledge_list_and_retrieval_normalize_review_timestamps(
     postgres_database,
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresKnowledgeStore(postgres_database, _seams())
     rows = [
@@ -819,10 +867,56 @@ def test_postgres_knowledge_list_and_retrieval_normalize_review_timestamps(
 
 
 @pytest.mark.postgres_integration
+def test_postgres_fts_candidate_window_cannot_be_crowded_out_by_deprecated_rows(
+    postgres_database,
+):
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    store = PostgresKnowledgeStore(postgres_database, _seams())
+    query = "crowdout exact thermal phrase"
+    rows = [
+        (
+            f"ko-crowdout-deprecated-{index:02d}",
+            "nb-personal",
+            "claim",
+            "deprecated",
+            json.dumps({"name": query}),
+            "[]",
+            "source-golden",
+            NOW,
+            NOW,
+        )
+        for index in range(49)
+    ]
+    rows.append(
+        (
+            "ko-crowdout-live-z",
+            "nb-personal",
+            "claim",
+            "approved",
+            json.dumps({"name": query}),
+            "[]",
+            "source-golden",
+            NOW,
+            NOW,
+        )
+    )
+    with postgres_database.write() as connection:
+        store.insert_object_chunk(connection, rows)
+
+    with postgres_database.connect() as connection:
+        hits = store.fts_search(connection, "nb-personal", query, k=12)
+
+    assert [hit["object_id"] for hit in hits] == ["ko-crowdout-live-z"]
+
+
+@pytest.mark.postgres_integration
 def test_postgres_merge_review_job_start_is_single_flight(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     with postgres_database.write() as connection:
@@ -868,6 +962,242 @@ def test_postgres_merge_review_job_start_is_single_flight(postgres_database):
     assert dict(row) == {"status": "running", "total": 1, "done": 0, "error": ""}
 
 
+def test_cluster_append_dedupes_repeated_member_within_one_input(
+    knowledge_harness,
+):
+    with knowledge_harness.database.write() as connection:
+        added = knowledge_harness.governance.insert_clusters(
+            connection,
+            "nb-personal",
+            "concept",
+            [
+                {
+                    "canonical_id": "canonical-first-input",
+                    "member_object_id": "ko-repeated-input-member",
+                    "canonical_name": "first",
+                },
+                {
+                    "canonical_id": "canonical-second-input",
+                    "member_object_id": "ko-repeated-input-member",
+                    "canonical_name": "second",
+                },
+            ],
+            NOW,
+        )
+
+    placeholder = "%s" if knowledge_harness.backend == "postgres" else "?"
+    with knowledge_harness.database.connect() as connection:
+        rows = connection.execute(
+            "SELECT canonical_id,member_object_id FROM concept_clusters "
+            f"WHERE notebook_id={placeholder} AND object_type={placeholder}",
+            ("nb-personal", "concept"),
+        ).fetchall()
+
+    assert added == 1
+    assert [dict(row) for row in rows] == [
+        {
+            "canonical_id": "canonical-first-input",
+            "member_object_id": "ko-repeated-input-member",
+        }
+    ]
+
+
+@pytest.mark.postgres_integration
+def test_postgres_concurrent_cluster_appends_are_member_idempotent(
+    postgres_database,
+):
+    """Two real transactions must not both pass the append membership check."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    store = PostgresGovernanceStore(postgres_database, _seams())
+    first_reached = threading.Event()
+    second_reached = threading.Event()
+    release_first = threading.Event()
+
+    class GateClusterAppend:
+        def __init__(self, connection, role):
+            self.connection = connection
+            self.role = role
+            self.lock_seen = False
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, query, params=None):
+            sql = " ".join(str(query).split())
+            if "pg_advisory_xact_lock" in sql:
+                if self.role == "second":
+                    second_reached.set()
+                cursor = self.connection.execute(query, params)
+                self.lock_seen = True
+                if self.role == "first":
+                    first_reached.set()
+                    assert release_first.wait(timeout=2)
+                return cursor
+            cursor = self.connection.execute(query, params)
+            if (
+                sql.startswith("SELECT member_object_id FROM concept_clusters")
+                and not self.lock_seen
+            ):
+                if self.role == "first":
+                    first_reached.set()
+                    assert second_reached.wait(timeout=2)
+                else:
+                    second_reached.set()
+            return cursor
+
+    def append(role, canonical_id):
+        with postgres_database.write() as connection:
+            return store.insert_clusters(
+                GateClusterAppend(connection, role),
+                "nb-personal",
+                "concept",
+                [
+                    {
+                        "canonical_id": canonical_id,
+                        "member_object_id": "ko-concurrent-cluster-member",
+                        "canonical_name": canonical_id,
+                    }
+                ],
+                NOW,
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(append, "first", "canonical-first")
+        assert first_reached.wait(timeout=2)
+        second = executor.submit(append, "second", "canonical-second")
+        assert second_reached.wait(timeout=2)
+        release_first.set()
+        added = [first.result(timeout=3), second.result(timeout=3)]
+
+    with postgres_database.connect() as connection:
+        rows = connection.execute(
+            "SELECT canonical_id,member_object_id FROM concept_clusters "
+            "WHERE notebook_id=%s AND object_type=%s ORDER BY canonical_id",
+            ("nb-personal", "concept"),
+        ).fetchall()
+
+    assert added == [1, 0]
+    assert rows == [
+        {
+            "canonical_id": "canonical-first",
+            "member_object_id": "ko-concurrent-cluster-member",
+        }
+    ]
+
+
+@pytest.mark.postgres_integration
+def test_postgres_concurrent_cluster_replacements_publish_one_complete_final_set(
+    postgres_database,
+):
+    """A later replacement must erase, not mix with, the prior complete set."""
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
+            "canonical_description,canonical_desc_sig,created_at) "
+            "VALUES (%s,%s,%s,%s,%s,%s,'','',%s)",
+            (
+                "cc-replace-initial",
+                "nb-personal",
+                "canonical-initial",
+                "ko-replace-initial",
+                "initial",
+                "concept",
+                NOW,
+            ),
+        )
+
+    first_deleted = threading.Event()
+    second_started = threading.Event()
+    release_first = threading.Event()
+
+    class GateClusterReplace:
+        def __init__(self, connection, role):
+            self.connection = connection
+            self.role = role
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, query, params=None):
+            sql = " ".join(str(query).split())
+            if self.role == "second" and "pg_advisory_xact_lock" in sql:
+                second_started.set()
+            if self.role == "second" and sql.startswith(
+                "DELETE FROM concept_clusters"
+            ):
+                second_started.set()
+            cursor = self.connection.execute(query, params)
+            if self.role == "first" and sql.startswith(
+                "DELETE FROM concept_clusters"
+            ):
+                first_deleted.set()
+                assert release_first.wait(timeout=2)
+            return cursor
+
+    def replacement_rows(label):
+        return [
+            (
+                f"cc-replace-{label}-{index}",
+                "nb-personal",
+                f"canonical-{label}-{index}",
+                f"ko-replace-member-{index}",
+                f"{label}-{index}",
+                "concept",
+                "",
+                "",
+                NOW,
+            )
+            for index in range(2)
+        ]
+
+    def replace(role, label):
+        with postgres_database.write() as connection:
+            store.replace_cluster_rows_streamed(
+                GateClusterReplace(connection, role),
+                "nb-personal",
+                "concept",
+                iter(replacement_rows(label)),
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(replace, "first", "first")
+        assert first_deleted.wait(timeout=2)
+        second = executor.submit(replace, "second", "second")
+        assert second_started.wait(timeout=2)
+        release_first.set()
+        first.result(timeout=3)
+        second.result(timeout=3)
+
+    with postgres_database.connect() as connection:
+        rows = connection.execute(
+            "SELECT canonical_id,member_object_id FROM concept_clusters "
+            "WHERE notebook_id=%s AND object_type=%s "
+            "ORDER BY member_object_id,canonical_id",
+            ("nb-personal", "concept"),
+        ).fetchall()
+
+    assert rows == [
+        {
+            "canonical_id": "canonical-second-0",
+            "member_object_id": "ko-replace-member-0",
+        },
+        {
+            "canonical_id": "canonical-second-1",
+            "member_object_id": "ko-replace-member-1",
+        },
+    ]
+    assert len({row["member_object_id"] for row in rows}) == len(rows)
+
+
 def _race_evidence(element_id: str) -> list[dict]:
     evidence = dict(_evidence()[0])
     evidence["element_id"] = element_id
@@ -876,10 +1206,193 @@ def _race_evidence(element_id: str) -> list[dict]:
 
 
 @pytest.mark.postgres_integration
+@pytest.mark.parametrize("promotion_kind", ("knowledge", "memory"))
+def test_postgres_promotion_dedup_does_not_overwrite_concurrent_merge_evidence(
+    postgres_database,
+    promotion_kind,
+):
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    store = PostgresGovernanceStore(postgres_database, _seams())
+    knowledge = PostgresKnowledgeStore(postgres_database, _seams())
+    promoted_element = f"promotion-{promotion_kind}"
+    objects = [
+        (
+            "ko-promotion-race-target",
+            "nb-base",
+            "claim",
+            "approved",
+            json.dumps({"name": "promotion evidence race"}),
+            json.dumps(_race_evidence("base-existing")),
+            "",
+            NOW,
+            NOW,
+        ),
+        (
+            "ko-promotion-race-merge-source",
+            "nb-base",
+            "claim",
+            "approved",
+            json.dumps({"name": "merge-only source"}),
+            json.dumps(_race_evidence("concurrent-merge")),
+            "",
+            NOW,
+            NOW,
+        ),
+    ]
+    if promotion_kind == "knowledge":
+        objects.append(
+            (
+                "ko-promotion-race-personal",
+                "nb-personal",
+                "claim",
+                "approved",
+                json.dumps({"name": "promotion evidence race"}),
+                json.dumps(_race_evidence(promoted_element)),
+                "source-golden",
+                NOW,
+                NOW,
+            )
+        )
+    candidate_id = f"promotion-evidence-race-{promotion_kind}"
+    candidate_object_id = (
+        "ko-promotion-race-personal"
+        if promotion_kind == "knowledge"
+        else "memory-promotion-race"
+    )
+    with postgres_database.write() as connection:
+        knowledge.insert_object_chunk(connection, objects)
+        store.insert_promotion_candidate(
+            connection,
+            candidate_id,
+            "nb-personal",
+            candidate_object_id,
+            "claim",
+            NOW,
+            "nb-base",
+        )
+
+    base_rows_read = threading.Event()
+    merge_lock_attempted = threading.Event()
+    merge_committed = threading.Event()
+    release_promotion = threading.Event()
+
+    class GateFetchall:
+        def __init__(self, cursor, locks_rows):
+            self.cursor = cursor
+            self.locks_rows = locks_rows
+
+        def __getattr__(self, name):
+            return getattr(self.cursor, name)
+
+        def fetchall(self):
+            rows = self.cursor.fetchall()
+            base_rows_read.set()
+            if self.locks_rows:
+                assert release_promotion.wait(timeout=2)
+            else:
+                assert merge_committed.wait(timeout=2)
+            return rows
+
+    class GatePromotionBaseRead:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, query, params=None):
+            sql = " ".join(str(query).split())
+            cursor = self.connection.execute(query, params)
+            if (
+                "FROM knowledge_objects WHERE notebook_id=%s" in sql
+                and "object_type=%s" in sql
+                and "status IN" in sql
+                and "evidence" in sql
+            ):
+                return GateFetchall(cursor, "FOR UPDATE" in sql)
+            return cursor
+
+    class ObserveMergeLock:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, query, params=None):
+            sql = " ".join(str(query).split())
+            if (
+                sql.startswith("SELECT * FROM knowledge_objects WHERE notebook_id = %s")
+                and "FOR UPDATE" in sql
+            ):
+                merge_lock_attempted.set()
+            return self.connection.execute(query, params)
+
+    def approve():
+        with postgres_database.write() as connection:
+            gated = GatePromotionBaseRead(connection)
+            if promotion_kind == "memory":
+                return store.approve_memory_promotion_in_transaction(
+                    gated,
+                    candidate_id,
+                    [
+                        {
+                            "object_type": "claim",
+                            "payload": {"name": "promotion evidence race"},
+                        }
+                    ],
+                    _race_evidence(promoted_element),
+                    "curator",
+                    NOW,
+                )
+            return store.approve_promotion_in_transaction(
+                gated,
+                candidate_id,
+                NOW,
+                "curator",
+            )
+
+    def merge():
+        with postgres_database.write() as connection:
+            result = store.merge_objects_in_transaction(
+                ObserveMergeLock(connection),
+                "nb-base",
+                "ko-promotion-race-merge-source",
+                "ko-promotion-race-target",
+                NOW,
+            )
+        merge_committed.set()
+        return result
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        promotion_future = executor.submit(approve)
+        assert base_rows_read.wait(timeout=2)
+        merge_future = executor.submit(merge)
+        assert merge_lock_attempted.wait(timeout=2)
+        release_promotion.set()
+        promotion_future.result(timeout=3)
+        merge_future.result(timeout=3)
+
+    with postgres_database.connect() as connection:
+        evidence = connection.execute(
+            "SELECT evidence FROM knowledge_objects WHERE id=%s",
+            ("ko-promotion-race-target",),
+        ).fetchone()["evidence"]
+    assert {item["element_id"] for item in evidence} == {
+        "base-existing",
+        promoted_element,
+        "concurrent-merge",
+    }
+
+
+@pytest.mark.postgres_integration
 def test_postgres_concurrent_merges_preserve_all_target_evidence(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -972,7 +1485,7 @@ def test_postgres_concurrent_merges_preserve_all_target_evidence(postgres_databa
 def test_postgres_concurrent_partial_updates_do_not_lose_fields(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1046,7 +1559,7 @@ def test_postgres_concurrent_partial_updates_do_not_lose_fields(postgres_databas
 def test_postgres_concurrent_promotion_proposals_are_idempotent(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1126,7 +1639,7 @@ def test_postgres_concurrent_promotion_proposals_are_idempotent(postgres_databas
 def test_postgres_reject_waiting_behind_approve_cannot_overwrite(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
@@ -1245,13 +1758,178 @@ def test_postgres_reject_waiting_behind_approve_cannot_overwrite(postgres_databa
 
 
 @pytest.mark.postgres_integration
+def test_postgres_graph_build_order_and_equal_confidence_fanout_are_physical_order_independent(
+    postgres_database,
+    postgres_settings,
+):
+    from app.repositories.postgres.migrator import PostgresMigrator
+    from app.services.kg.graph_reason import build_rx_graph, multihop_subgraph
+
+    assert PostgresMigrator(postgres_database).migrate() == 7
+    _seed_catalog(postgres_database, "postgres")
+    knowledge = PostgresKnowledgeStore(postgres_database, _seams())
+    unified = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
+    target_ids = [f"ko-fanout-target-{index:02d}" for index in reversed(range(10))]
+    object_ids = ["ko-fanout-source", *target_ids]
+    objects = [
+        (
+            object_id,
+            "nb-personal",
+            "claim",
+            "approved",
+            json.dumps({"name": object_id}),
+            "[]",
+            "source-golden",
+            NOW,
+            NOW,
+        )
+        for object_id in object_ids
+    ]
+    relations = [
+        (
+            f"rel-fanout-{index:02d}",
+            "nb-personal",
+            "source-golden",
+            "ko-fanout-source",
+            f"ko-fanout-target-{index:02d}",
+            "derived_from",
+            "[]",
+            NOW,
+        )
+        for index in reversed(range(10))
+    ]
+    cluster_rows = [
+        (
+            "cc-order-z",
+            "nb-personal",
+            "canonical-b",
+            "ko-fanout-target-00",
+            "b",
+            "concept",
+            "",
+            "",
+            NOW,
+        ),
+        (
+            "cc-order-a2",
+            "nb-personal",
+            "canonical-a",
+            "ko-fanout-target-02",
+            "a",
+            "concept",
+            "",
+            "",
+            NOW,
+        ),
+        (
+            "cc-order-a1",
+            "nb-personal",
+            "canonical-a",
+            "ko-fanout-target-01",
+            "a",
+            "concept",
+            "",
+            "",
+            NOW,
+        ),
+    ]
+    with postgres_database.write() as connection:
+        knowledge.insert_object_chunk(connection, objects)
+        knowledge.insert_relation_chunk(connection, relations)
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                "INSERT INTO concept_clusters "
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,object_type,"
+                "canonical_description,canonical_desc_sig,created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                cluster_rows,
+            )
+
+    projection = PostgresIndexProjectionStore(
+        postgres_settings,
+        connect=postgres_database.connect,
+        in_batches=lambda values: [list(values)],
+        ent_chunk_map=lambda _notebook_id: {},
+        mention_extra_edges=lambda _notebook_id: [],
+        vector_matrix=lambda *_args, **_kwargs: ([], []),
+    )
+
+    def snapshot():
+        with postgres_database.connect() as connection:
+            object_rows = knowledge.graph_object_rows(
+                connection, "nb-personal", USABLE_STATUSES
+            )
+            relation_rows = knowledge.graph_relation_rows(
+                connection, "nb-personal"
+            )
+            members = unified.cluster_member_rows(connection, "nb-personal")
+        nodes = {
+            row["id"]: {
+                "type": row["object_type"],
+                "name": json.loads(row["payload"])["name"],
+            }
+            for row in object_rows
+        }
+        graph, idx_to_oid, oid_to_idx = build_rx_graph(nodes, relation_rows)
+        traversal = multihop_subgraph(
+            graph,
+            oid_to_idx,
+            idx_to_oid,
+            ["ko-fanout-source"],
+            edge_types=frozenset({"derived_from"}),
+            max_depth=1,
+            max_fan_out=3,
+        )
+        artifact = projection.graph_rows("nb-personal", None, synonym_edges=[])
+        return {
+            "object_ids": [row["id"] for row in object_rows],
+            "relation_ids": [row["id"] for row in relation_rows],
+            "members": [dict(row) for row in members],
+            "fanout": [node["object_id"] for node, edge, _source in traversal if edge],
+            "artifact_kg_ids": artifact.kg_node_ids,
+            "artifact_hubs": [node for node in artifact.node_ids if node.startswith("cluster:")],
+        }
+
+    before = snapshot()
+    with postgres_database.write() as connection:
+        connection.execute("CLUSTER knowledge_objects USING pk_knowledge_objects")
+        connection.execute("CLUSTER knowledge_relations USING pk_knowledge_relations")
+        connection.execute("CLUSTER concept_clusters USING pk_concept_clusters")
+    after = snapshot()
+
+    expected = {
+        "object_ids": object_ids,
+        "relation_ids": [f"rel-fanout-{index:02d}" for index in range(10)],
+        "members": [
+            {
+                "canonical_id": "canonical-a",
+                "member_object_id": "ko-fanout-target-01",
+            },
+            {
+                "canonical_id": "canonical-a",
+                "member_object_id": "ko-fanout-target-02",
+            },
+            {
+                "canonical_id": "canonical-b",
+                "member_object_id": "ko-fanout-target-00",
+            },
+        ],
+        "fanout": [f"ko-fanout-target-{index:02d}" for index in range(3)],
+        "artifact_kg_ids": object_ids,
+        "artifact_hubs": ["cluster:canonical-a", "cluster:canonical-b"],
+    }
+    assert before == expected
+    assert after == expected
+
+
+@pytest.mark.postgres_integration
 def test_postgres_graph_rows_follow_persisted_ordinals_for_degree_ties(
     postgres_database,
     postgres_settings,
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     object_ids = ["ko-order-z", "ko-order-a", "ko-order-m"]
@@ -1309,7 +1987,7 @@ def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())
     object_ids = ["ko-follow-start", "ko-follow-a", "ko-follow-m", "ko-follow-z"]
@@ -1377,7 +2055,7 @@ def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
 def test_postgres_query_store_multi_notebook_count_placeholders(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     rows = PostgresQueryStore(postgres_database).list_user_notebooks("user-golden")
     assert {row["id"] for row in rows} == {"nb-base", "nb-personal"}
@@ -1393,7 +2071,7 @@ def test_postgres_notebook_analytics_dedupes_low_rated_questions_by_latest_feedb
 ):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     with postgres_database.write() as connection:
         for answer_id, question, created_at in (
@@ -1428,7 +2106,7 @@ def test_postgres_notebook_analytics_dedupes_low_rated_questions_by_latest_feedb
 def test_postgres_unified_kg_temp_search_and_checkpoint_json(postgres_database):
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresUnifiedKgStore(postgres_database, now=lambda: NOW)
     claims = (
@@ -1469,7 +2147,7 @@ def test_concurrent_equivalent_promotions_serialize_base_dedup(
     from app.repositories.postgres import governance_store as governance_module
     from app.repositories.postgres.migrator import PostgresMigrator
 
-    assert PostgresMigrator(postgres_database).migrate() == 6
+    assert PostgresMigrator(postgres_database).migrate() == 7
     _seed_catalog(postgres_database, "postgres")
     store = PostgresGovernanceStore(postgres_database, _seams())
     knowledge = PostgresKnowledgeStore(postgres_database, _seams())

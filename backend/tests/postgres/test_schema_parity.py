@@ -443,7 +443,7 @@ def _sqlite_schema_contract(conn) -> dict[str, Any]:
         "sqlite_version": int(conn.execute("PRAGMA user_version").fetchone()[0]),
         "sqlite_table_count": len(table_rows),
         "sqlite_internal_tables": sorted(sqlite_internal_tables),
-        "postgres_version": 6,
+        "postgres_version": 7,
         "ordinary_table_count": len(ordinary_tables),
         "rebuilt_table_count": len(rebuilt_tables),
         "rebuilt": {
@@ -480,7 +480,7 @@ def _sqlite_schema_contract(conn) -> dict[str, Any]:
 
 
 def _fresh_sqlite_contract(tmp_path: Path) -> dict[str, Any]:
-    db_path = tmp_path / "fresh-v23.db"
+    db_path = tmp_path / "fresh-v24.db"
     settings = Settings(database_url=f"sqlite:///{db_path}")
     database = SqliteDatabase(settings, REPO_ROOT)
     try:
@@ -496,7 +496,7 @@ def _reviewed_contract() -> dict[str, Any]:
     return json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 
 
-def test_fresh_sqlite_v23_matches_reviewed_postgres_contract(tmp_path):
+def test_fresh_sqlite_v24_matches_reviewed_postgres_contract(tmp_path):
     actual = _fresh_sqlite_contract(tmp_path)
     if os.environ.get("UPDATE_POSTGRES_SCHEMA_CONTRACT") == "1":
         CONTRACT_PATH.write_text(
@@ -513,7 +513,7 @@ def test_fresh_sqlite_v23_matches_reviewed_postgres_contract(tmp_path):
         for table, values in CHECK_CONSTRAINTS.items()
     }
     assert actual["sqlite_check_expressions"] == expected_check_expressions
-    assert len(actual["sqlite_explicit_indexes"]) == 79
+    assert len(actual["sqlite_explicit_indexes"]) == 80
     assert set(actual["ordinal_tables"]) == set(ROWID_ORDER_EVIDENCE)
     assert actual["sqlite_table_count"] == (
         actual["ordinary_table_count"]
@@ -817,7 +817,7 @@ def test_packaged_postgres_schema_has_bidirectional_semantic_parity(postgres_dat
     ):
         assert "USING gin" in index_definitions[name]
         assert "gin_trgm_ops" in index_definitions[name]
-    assert len(contract["sqlite_explicit_indexes"]) == 79
+    assert len(contract["sqlite_explicit_indexes"]) == 80
     for expected_index in contract["sqlite_explicit_indexes"]:
         actual_index = explicit_indexes[expected_index["name"]]
         assert actual_index["table"] == expected_index["table"]
@@ -846,11 +846,11 @@ def test_packaged_migrations_are_idempotent_from_empty_schema(postgres_database)
 
     migrator = PostgresMigrator(postgres_database)
     assert migrator.current_version() == 0
-    assert migrator.migrate() == 6
-    assert migrator.migrate() == 6
-    assert migrator.current_version() == 6
-    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 23
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 6
+    assert migrator.migrate() == 7
+    assert migrator.migrate() == 7
+    assert migrator.current_version() == 7
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 24
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 7
 
 
 @pytest.mark.postgres_integration
@@ -858,7 +858,7 @@ def test_packaged_migration_checksum_drift_is_rejected(postgres_database, tmp_pa
     from app.repositories.postgres.migrator import PostgresMigrator, load_migrations
 
     migrator = PostgresMigrator(postgres_database)
-    assert migrator.migrate() == 6
+    assert migrator.migrate() == 7
 
     copied = tmp_path / "migrations"
     shutil.copytree(MIGRATIONS_PATH, copied)
@@ -912,7 +912,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             worker.join(timeout=20)
         assert not any(worker.is_alive() for worker in workers)
         assert failures == []
-        assert sorted(versions) == [6, 6]
+        assert sorted(versions) == [7, 7]
 
         with psycopg.connect(postgres_scope.base_url, autocommit=True) as conn:
             extension_schema = conn.execute(
@@ -938,7 +938,7 @@ def test_pg_trgm_is_shared_outside_disposable_schema_lifetimes(postgres_scope):
             ).fetchone()["nspname"]
         assert remaining == {"indexname": "idx_chunks_text_trgm"}
         assert extension_schema == "public"
-        assert PostgresMigrator(databases[1]).migrate() == 6
+        assert PostgresMigrator(databases[1]).migrate() == 7
     finally:
         for database in databases:
             database.close()
@@ -987,6 +987,7 @@ def test_packaged_index_migration_phases_are_exact():
         (4, "knowledge_indexes"),
         (5, "memory_knowhow_governance_indexes"),
         (6, "search_gin"),
+        (7, "cluster_membership_unique"),
     ]
 
     def index_declarations(version: int) -> list[tuple[bool, str]]:
@@ -1039,9 +1040,16 @@ def test_packaged_index_migration_phases_are_exact():
     assert all("USING gin" in line for line in re.findall(
         r"(?mis)^CREATE INDEX idx_.*?;", migrations[6].sql
     ))
+    cluster_unique = index_declarations(7)
+    assert cluster_unique == [(True, "uq_clusters_notebook_type_member")]
 
     contract_names = {item["name"] for item in _reviewed_contract()["sqlite_explicit_indexes"]}
-    packaged_names = integrity_names | {name for _unique, name in operational} | gin_names
+    packaged_names = (
+        integrity_names
+        | {name for _unique, name in operational}
+        | gin_names
+        | {name for _unique, name in cluster_unique}
+    )
     assert packaged_names == contract_names | gin_names
 
 

@@ -99,7 +99,7 @@ def test_expected_snapshot_has_rows_reads_context_and_ask_metadata():
     # 表 + promotion_candidates.target_base_id 列，以及 v21 normalized-anchor
     # expression index、v22 kg_build_jobs migration，以及 v23
     # model_service_status migration 合法升级到当前版本。
-    assert snapshot["schema"]["user_version"] == 23
+    assert snapshot["schema"]["user_version"] == 24
     assert snapshot["rows"]["notebooks"]
     assert snapshot["reads"]["notebook"]
     assert snapshot["context"]["source_files"]

@@ -33,6 +33,7 @@ from app.repositories.postgres._store_utils import (
     jsonb,
     normalize_timestamp,
 )
+from app.repositories.postgres.cluster_lock import lock_cluster_artifact_type
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.repositories.postgres.search import (
@@ -102,6 +103,7 @@ class UnifiedKgStore:
         object_type: str,
         rows,
     ) -> None:
+        lock_cluster_artifact_type(db, notebook_id, object_type)
         db.execute(
             "DELETE FROM concept_clusters WHERE notebook_id=%s AND object_type=%s",
             (notebook_id, object_type),
@@ -248,7 +250,9 @@ class UnifiedKgStore:
     def cluster_member_rows(db: Any, notebook_id: str):
         return db.execute(
             "SELECT canonical_id, member_object_id FROM concept_clusters "
-            "WHERE notebook_id = %s", (notebook_id,),
+            "WHERE notebook_id = %s "
+            "ORDER BY canonical_id COLLATE \"C\", member_object_id COLLATE \"C\"",
+            (notebook_id,),
         ).fetchall()
 
     @staticmethod

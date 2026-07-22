@@ -1,6 +1,8 @@
 """PostgreSQL lexical-candidate SQL, centralized to match expression indexes."""
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from psycopg import sql
 
 
@@ -15,35 +17,73 @@ _SEARCH_EXPRESSIONS = {
     "source_title": "title",
     "source_summary": "summary",
 }
-_SEARCH_TABLES = {
-    "knowledge_objects": frozenset({"id"}),
-    "memory_items": frozenset({"id"}),
-    "chunks": frozenset({"id"}),
-    "source_elements": frozenset({"id"}),
-    "sources": frozenset({"id"}),
+@dataclass(frozen=True)
+class _SearchTarget:
+    table: str
+    id_column: str
+    text_expression: str
+    notebook_column: str
+    live_predicate: str = ""
+
+
+_SEARCH_TARGETS = {
+    (target.table, target.id_column, target.text_expression): target
+    for target in (
+        _SearchTarget(
+            "knowledge_objects",
+            "id",
+            PAYLOAD_NAME_EXPRESSION,
+            "notebook_id",
+            "status!='deprecated'",
+        ),
+        _SearchTarget("memory_items", "id", TAGS_JSON_EXPRESSION, "notebook_id"),
+        _SearchTarget("chunks", "id", "text", "notebook_id"),
+        _SearchTarget("source_elements", "id", "text", "notebook_id"),
+        _SearchTarget("sources", "id", "title", "notebook_id"),
+        _SearchTarget("sources", "id", "summary", "notebook_id"),
+    )
 }
 
 
 def lexical_candidate_sql(
-    *, table: str, id_column: str, text_expression: str
+    *,
+    table: str,
+    id_column: str,
+    text_expression: str,
+    scoped: bool = False,
+    live_only: bool = False,
 ) -> str:
-    """Return bounded trigram candidate SQL for a strict identifier whitelist.
+    """Return bounded trigram SQL for one reviewed table/expression pairing.
 
     The similarity value is ordering-only adapter state.  Callers expose their
     backend-neutral relevance scores after deterministic application ranking.
+    Scope and lifecycle predicates are assembled structurally before the match
+    expression; no caller rewrites SQL text or supplies a free-form predicate.
     """
-    if table not in _SEARCH_TABLES or id_column not in _SEARCH_TABLES[table]:
-        raise ValueError("unsupported PostgreSQL lexical search identifier")
-    if text_expression not in _SEARCH_EXPRESSIONS.values():
-        raise ValueError("unsupported PostgreSQL lexical search expression")
-    table_sql = sql.Identifier(table).as_string()
-    id_sql = sql.Identifier(id_column).as_string()
+    try:
+        target = _SEARCH_TARGETS[(table, id_column, text_expression)]
+    except KeyError:
+        raise ValueError(
+            "unsupported PostgreSQL lexical search table/expression pairing"
+        ) from None
+    if live_only and not target.live_predicate:
+        raise ValueError("PostgreSQL lexical target has no lifecycle predicate")
+    table_sql = sql.Identifier(target.table).as_string()
+    id_sql = sql.Identifier(target.id_column).as_string()
+    predicates = []
+    if scoped:
+        predicates.append(f"{sql.Identifier(target.notebook_column).as_string()}=%s")
+    if live_only:
+        predicates.append(target.live_predicate)
+    predicates.append(
+        f"({target.text_expression} OPERATOR(public.%%) %s OR "
+        f"{target.text_expression} ILIKE %s)"
+    )
     return (
         f"SELECT {id_sql} AS candidate_id, "
-        f"public.similarity({text_expression}, %s) AS candidate_similarity "
+        f"public.similarity({target.text_expression}, %s) AS candidate_similarity "
         f"FROM {table_sql} "
-        f"WHERE ({text_expression} OPERATOR(public.%%) %s OR "
-        f"{text_expression} ILIKE %s) "
+        f"WHERE {' AND '.join(predicates)} "
         f"ORDER BY candidate_similarity DESC, {id_sql} COLLATE \"C\" "
         "LIMIT %s"
     )
@@ -61,22 +101,20 @@ def _candidate_rows(
     *,
     table: str,
     id_column: str,
-    notebook_column: str,
     text_expression: str,
     notebook_id: str,
     query: str,
     limit: int,
+    live_only: bool = False,
 ):
-    if notebook_column != "notebook_id":
-        raise ValueError("unsupported PostgreSQL lexical notebook identifier")
     if limit <= 0:
         return []
-    base = lexical_candidate_sql(
-        table=table, id_column=id_column, text_expression=text_expression
-    )
-    statement = base.replace(
-        f"FROM \"{table}\" WHERE ",
-        f"FROM \"{table}\" WHERE \"notebook_id\"=%s AND ",
+    statement = lexical_candidate_sql(
+        table=table,
+        id_column=id_column,
+        text_expression=text_expression,
+        scoped=True,
+        live_only=live_only,
     )
     return connection.execute(
         statement,
@@ -89,11 +127,11 @@ def knowledge_candidate_rows(connection, notebook_id: str, query: str, limit: in
         connection,
         table="knowledge_objects",
         id_column="id",
-        notebook_column="notebook_id",
         text_expression=PAYLOAD_NAME_EXPRESSION,
         notebook_id=notebook_id,
         query=query,
         limit=limit,
+        live_only=True,
     )
 
 
@@ -102,7 +140,6 @@ def chunk_candidate_rows(connection, notebook_id: str, query: str, limit: int):
         connection,
         table="chunks",
         id_column="id",
-        notebook_column="notebook_id",
         text_expression=expression("chunk_text"),
         notebook_id=notebook_id,
         query=query,

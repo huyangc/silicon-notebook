@@ -408,7 +408,8 @@ class KnowledgeStore:
         params = [notebook_id, object_id] + ([edge_type] if edge_type else [])
         return db.execute(
             f"SELECT {selected} FROM knowledge_relations "
-            f"WHERE notebook_id=? AND {endpoint}=?{edge_clause}", params,
+            f"WHERE notebook_id=? AND {endpoint}=? "
+            f"AND review_status!='rejected'{edge_clause}", params,
         ).fetchall()
 
     def usable_object_rows(self, notebook_id: str, object_ids: Sequence[str]):
@@ -449,7 +450,7 @@ class KnowledgeStore:
         ph = ",".join("?" for _ in statuses)
         return db.execute(
             "SELECT id, object_type, payload FROM knowledge_objects "
-            f"WHERE notebook_id = ? AND status IN ({ph})",
+            f"WHERE notebook_id = ? AND status IN ({ph}) ORDER BY rowid, id",
             (notebook_id, *statuses),
         ).fetchall()
 
@@ -461,7 +462,7 @@ class KnowledgeStore:
                    "source_object_id, target_object_id")
         return db.execute(
             f"SELECT {columns} FROM knowledge_relations "
-            "WHERE notebook_id = ? AND review_status != 'rejected'",
+            "WHERE notebook_id = ? AND review_status != 'rejected' ORDER BY id",
             (notebook_id,),
         ).fetchall()
 

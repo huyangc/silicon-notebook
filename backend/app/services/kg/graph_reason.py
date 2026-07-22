@@ -156,8 +156,10 @@ def multihop_subgraph(
     non-seed item's src_object_id is the object_id of the node the edge was
     traversed FROM (so render_subgraph_context can emit full chain annotations).
     Each node appears at most once (visited set guards cycles).  At each hop the
-    eligible out-edges are sorted by confidence desc, then capped to
-    `max_fan_out`.
+    eligible out-edges are sorted by confidence desc, relation id, and target
+    object id, then capped to `max_fan_out`.  The explicit ties are required
+    because rustworkx successor iteration follows node-index order rather than
+    relation insertion order.
 
     TRANSIT-ONLY cluster hubs (kind=="cluster", produced by build_rx_graph from
     cluster_groups): a hub is traversed THROUGH — its successors are still
@@ -215,8 +217,14 @@ def multihop_subgraph(
             edge_data = G.get_edge_data(cur_idx, tgt_idx)
             if use_all or edge_data.get("edge_type") in edge_types:
                 out_edges.append((tgt_idx, edge_data))
-        # Sort by confidence desc, cap fan-out
-        out_edges.sort(key=lambda x: x[1].get("confidence", 1.0), reverse=True)
+        # Stable confidence ties must not inherit rustworkx node-index order.
+        out_edges.sort(
+            key=lambda item: (
+                -float(item[1].get("confidence", 1.0)),
+                str(item[1].get("rel_id", "")),
+                str(idx_to_oid.get(item[0], "")),
+            )
+        )
         out_edges = out_edges[:max_fan_out]
 
         for tgt_idx, edge_data in out_edges:

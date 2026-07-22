@@ -21,6 +21,7 @@ from app.repositories.postgres._store_utils import (
     jsonb,
     normalize_timestamp,
 )
+from app.repositories.postgres.cluster_lock import lock_cluster_artifact_type
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowledge_store import KnowledgeStore
 from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
@@ -83,6 +84,28 @@ def _lock_promotion_object(connection, object_id: str) -> None:
         "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
         (f"silicon-notebook:promotion-object:{object_id}",),
     )
+
+
+def _base_dedup_rows_for_update(
+    connection: Any,
+    base_notebook_id: str,
+    object_type: str,
+):
+    """Read the live dedup corpus while holding every row in stable id order.
+
+    Promotion evidence is derived only after these locks are acquired.  A
+    concurrent merge that won first is therefore visible here; one that loses
+    waits and recomputes from the promotion's committed evidence instead of
+    either writer overwriting the other.
+    """
+    return connection.execute(
+        "SELECT id,payload,evidence FROM knowledge_objects "
+        "WHERE notebook_id=%s AND object_type=%s AND status IN ({}) "
+        "ORDER BY id COLLATE \"C\" FOR UPDATE".format(
+            ",".join("%s" for _ in USABLE_STATUSES)
+        ),
+        (base_notebook_id, object_type, *USABLE_STATUSES),
+    ).fetchall()
 
 
 def seed_fn_for(object_type: str):
@@ -267,6 +290,7 @@ class GovernanceStore:
     def delete_clusters(
         connection: Any, notebook_id: str, object_type: str
     ) -> None:
+        lock_cluster_artifact_type(connection, notebook_id, object_type)
         connection.execute(
             "DELETE FROM concept_clusters WHERE notebook_id=%s AND object_type=%s",
             (notebook_id, object_type))
@@ -283,6 +307,7 @@ class GovernanceStore:
         the (notebook, type) slice — the append_clusters idempotency contract.
         After delete_clusters in the same transaction the existing set is
         empty, so the write_clusters path inserts every row unchanged."""
+        lock_cluster_artifact_type(connection, notebook_id, object_type)
         existing = {r["member_object_id"] for r in connection.execute(
             "SELECT member_object_id FROM concept_clusters WHERE notebook_id=%s AND object_type=%s",
             (notebook_id, object_type)).fetchall()}
@@ -296,6 +321,7 @@ class GovernanceStore:
                 (self.seams.new_id("cc"), notebook_id, r["canonical_id"],
                  r["member_object_id"], r["canonical_name"], object_type,
                  r.get("canonical_description", ""), normalize_timestamp(now)))
+            existing.add(r["member_object_id"])
             added += 1
         return added
 
@@ -1001,13 +1027,9 @@ class GovernanceStore:
                 continue
             if not isinstance(payload, dict) or not payload:
                 continue
-            base_objs = connection.execute(
-                "SELECT id,payload,evidence FROM knowledge_objects "
-                "WHERE notebook_id=%s AND object_type=%s AND status IN ({})".format(
-                    ",".join("%s" for _ in USABLE_STATUSES)
-                ),
-                (base_nb_id, object_type, *USABLE_STATUSES),
-            ).fetchall()
+            base_objs = _base_dedup_rows_for_update(
+                connection, base_nb_id, object_type
+            )
             base_match_id = find_base_dedup_match(object_type, payload, base_objs)
             if base_match_id:
                 matched = next(row for row in base_objs if row["id"] == base_match_id)
@@ -1140,13 +1162,9 @@ class GovernanceStore:
         src_evidence = json_value(src["evidence"], [])
 
         # Cross-corpus dedup against existing base objects of the same type.
-        base_objs = connection.execute(
-            "SELECT id, payload, evidence FROM knowledge_objects "
-            "WHERE notebook_id=%s AND object_type=%s AND status IN ({})".format(
-                ",".join("%s" for _ in USABLE_STATUSES)
-            ),
-            (base_nb_id, object_type, *USABLE_STATUSES),
-        ).fetchall()
+        base_objs = _base_dedup_rows_for_update(
+            connection, base_nb_id, object_type
+        )
         base_match_id = find_base_dedup_match(object_type, src_payload, base_objs)
 
         if base_match_id:

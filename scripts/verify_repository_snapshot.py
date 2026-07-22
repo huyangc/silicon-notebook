@@ -1821,6 +1821,34 @@ MIGRATION_MANIFEST[(22, 23)] = {
     "views": {},
 }
 
+# v24: cluster writers are serialized at the repository boundary, while this
+# database constraint remains the final guard against duplicate membership.
+# Migration 24 deterministically removes legacy duplicates before creating it;
+# row cleanup is validated by the ordinary data-digest comparison, and the
+# schema manifest therefore contains only the new index.
+CLUSTER_MEMBERSHIP_UNIQUE_INDEX = {
+    "uq_clusters_notebook_type_member":
+        """CREATE UNIQUE INDEX uq_clusters_notebook_type_member
+                  ON concept_clusters(notebook_id, object_type, member_object_id)""",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 24, *key[2:]): {
+        **manifest,
+        "indexes": {
+            **manifest["indexes"],
+            **CLUSTER_MEMBERSHIP_UNIQUE_INDEX,
+        },
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(23, 24)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": CLUSTER_MEMBERSHIP_UNIQUE_INDEX,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

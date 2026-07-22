@@ -232,7 +232,8 @@ class UnifiedKgStore:
     def cluster_member_rows(db: sqlite3.Connection, notebook_id: str):
         return db.execute(
             "SELECT canonical_id, member_object_id FROM concept_clusters "
-            "WHERE notebook_id = ?", (notebook_id,),
+            "WHERE notebook_id = ? "
+            "ORDER BY canonical_id, member_object_id", (notebook_id,),
         ).fetchall()
 
     @staticmethod

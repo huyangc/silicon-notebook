@@ -344,7 +344,7 @@ class IndexProjectionStore:
                 for r in db.execute(
                         f"SELECT id, object_type, payload FROM knowledge_objects "
                         f"WHERE notebook_id=%s AND status IN ({ph}){src_clause} "
-                        f"ORDER BY ordinal",
+                        f"ORDER BY ordinal, id COLLATE \"C\"",
                         (notebook_id, *USABLE_STATUSES, *src_params)).fetchall():
                     kg_nodes[r["id"]] = {
                         "type": r["object_type"],
@@ -353,18 +353,21 @@ class IndexProjectionStore:
             for src_clause, src_params in clauses:
                 for r in db.execute(
                         f"SELECT source_object_id, target_object_id FROM knowledge_relations "
-                        f"WHERE notebook_id=%s AND review_status!='rejected'{src_clause}",
+                        f"WHERE notebook_id=%s AND review_status!='rejected'{src_clause} "
+                        f"ORDER BY id COLLATE \"C\"",
                         (notebook_id, *src_params)).fetchall():
                     relations.append(dict(r))
             for src_clause, src_params in clauses:
                 for r in db.execute(
                         f"SELECT id FROM chunks WHERE notebook_id=%s{src_clause} "
-                        f"ORDER BY ordinal",
+                        f"ORDER BY ordinal, id COLLATE \"C\"",
                         (notebook_id, *src_params)).fetchall():
                     chunk_ids.append(r["id"])
             for r in db.execute(
                     "SELECT canonical_id, member_object_id FROM concept_clusters "
-                    "WHERE notebook_id=%s", (notebook_id,)).fetchall():
+                    "WHERE notebook_id=%s "
+                    "ORDER BY canonical_id COLLATE \"C\", member_object_id COLLATE \"C\"",
+                    (notebook_id,)).fetchall():
                 cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
 
         # Memberships: entity ↔ chunk (scoped → limit to gathered objects)

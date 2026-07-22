@@ -219,6 +219,8 @@ class GovernanceStore:
         the (notebook, type) slice — the append_clusters idempotency contract.
         After delete_clusters in the same transaction the existing set is
         empty, so the write_clusters path inserts every row unchanged."""
+        if not connection.in_transaction:
+            connection.execute("BEGIN IMMEDIATE")
         existing = {r["member_object_id"] for r in connection.execute(
             "SELECT member_object_id FROM concept_clusters WHERE notebook_id=? AND object_type=?",
             (notebook_id, object_type)).fetchall()}
@@ -232,6 +234,7 @@ class GovernanceStore:
                 (self.seams.new_id("cc"), notebook_id, r["canonical_id"],
                  r["member_object_id"], r["canonical_name"], object_type,
                  r.get("canonical_description", ""), now))
+            existing.add(r["member_object_id"])
             added += 1
         return added
 

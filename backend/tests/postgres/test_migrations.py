@@ -232,9 +232,9 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
     from app.repositories.postgres.migrator import PostgresMigrator
     from app.repositories.postgres.schema_manifest import POSTGRES_SCHEMA_MANIFEST
 
-    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 6
-    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 23
-    assert len(PostgresMigrator(postgres_database).migrations) == 6
+    assert POSTGRES_SCHEMA_MANIFEST.postgres_version == 7
+    assert POSTGRES_SCHEMA_MANIFEST.sqlite_version == 24
+    assert len(PostgresMigrator(postgres_database).migrations) == 7
     migrator = PostgresMigrator(postgres_database)
     assert migrator.migrate(target_version=2) == 2
     with postgres_database.connect() as conn:
@@ -277,9 +277,9 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
     assert integrity_indexes <= indexes
     assert "idx_chunks_nb" not in indexes
     assert "idx_chunks_text_trgm" not in indexes
-    for version in (3, 4, 5, 6):
+    for version in (3, 4, 5, 6, 7):
         assert migrator.migrate(target_version=version) == version
-    assert migrator.migrate() == 6
+    assert migrator.migrate() == 7
     with postgres_database.connect() as conn:
         final_indexes = {
             row["indexname"]
@@ -296,7 +296,75 @@ def test_packaged_manifest_records_schema_complete_sqlite_pair(postgres_database
         ]
     assert "idx_chunks_nb" in final_indexes
     assert "idx_chunks_text_trgm" in final_indexes
-    assert ledger_versions == [1, 2, 3, 4, 5, 6]
+    assert "uq_clusters_notebook_type_member" in final_indexes
+    assert ledger_versions == [1, 2, 3, 4, 5, 6, 7]
+
+
+def test_cluster_membership_migration_dedupes_before_unique_guard(postgres_database):
+    import psycopg
+
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    migrator = PostgresMigrator(postgres_database)
+    assert migrator.migrate(target_version=6) == 6
+    with postgres_database.write() as connection:
+        connection.execute(
+            "INSERT INTO notebooks(id,name,created_at,updated_at) "
+            "VALUES (%s,%s,%s,%s)",
+            ("nb-cluster-migration", "clusters", "2026-01-01", "2026-01-01"),
+        )
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                "INSERT INTO concept_clusters "
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+                "object_type,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                [
+                    (
+                        "cc-legacy-old",
+                        "nb-cluster-migration",
+                        "canonical-old",
+                        "ko-legacy-duplicate",
+                        "old",
+                        "concept",
+                        "2026-01-01",
+                    ),
+                    (
+                        "cc-legacy-new",
+                        "nb-cluster-migration",
+                        "canonical-new",
+                        "ko-legacy-duplicate",
+                        "new",
+                        "concept",
+                        "2026-01-02",
+                    ),
+                ],
+            )
+
+    assert migrator.migrate() == 7
+    with postgres_database.connect() as connection:
+        rows = connection.execute(
+            "SELECT id,canonical_id FROM concept_clusters "
+            "WHERE notebook_id=%s ORDER BY id",
+            ("nb-cluster-migration",),
+        ).fetchall()
+    assert rows == [{"id": "cc-legacy-new", "canonical_id": "canonical-new"}]
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        with postgres_database.write() as connection:
+            connection.execute(
+                "INSERT INTO concept_clusters "
+                "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+                "object_type,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    "cc-legacy-conflict",
+                    "nb-cluster-migration",
+                    "canonical-conflict",
+                    "ko-legacy-duplicate",
+                    "conflict",
+                    "concept",
+                    "2026-01-03",
+                ),
+            )
 
 
 def test_migrations_take_the_fixed_transaction_advisory_lock(postgres_database):

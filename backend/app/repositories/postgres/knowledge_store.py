@@ -517,7 +517,7 @@ class KnowledgeStore:
                     else "source_object_id")
         statement = sql.SQL(
             "SELECT {} FROM knowledge_relations "
-            "WHERE notebook_id=%s AND {}=%s"
+            "WHERE notebook_id=%s AND {}=%s AND review_status!='rejected'"
         ).format(sql.Identifier(selected), sql.Identifier(endpoint))
         if edge_type:
             statement += sql.SQL(" AND edge_type=%s")
@@ -566,7 +566,8 @@ class KnowledgeStore:
         ph = ",".join("%s" for _ in statuses)
         return _compat_rows(db.execute(
             "SELECT id, object_type, payload FROM knowledge_objects "
-            f"WHERE notebook_id = %s AND status IN ({ph})",
+            f"WHERE notebook_id = %s AND status IN ({ph}) "
+            "ORDER BY ordinal, id COLLATE \"C\"",
             (notebook_id, *statuses),
         ).fetchall(), payload=True)
 
@@ -576,10 +577,12 @@ class KnowledgeStore:
         statement = (
             "SELECT id, source_object_id, target_object_id, edge_type, evidence "
             "FROM knowledge_relations "
-            "WHERE notebook_id = %s AND review_status != 'rejected'"
+            "WHERE notebook_id = %s AND review_status != 'rejected' "
+            "ORDER BY id COLLATE \"C\""
             if include_id_evidence else
             "SELECT source_object_id, target_object_id FROM knowledge_relations "
-            "WHERE notebook_id = %s AND review_status != 'rejected'"
+            "WHERE notebook_id = %s AND review_status != 'rejected' "
+            "ORDER BY id COLLATE \"C\""
         )
         return _compat_rows(db.execute(
             statement,
