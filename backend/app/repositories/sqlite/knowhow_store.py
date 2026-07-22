@@ -160,7 +160,11 @@ class KnowhowStore:
 
     # ------------------------------------------------------------ columns
     def set_knowhow_anchor_column(
-        self, table_id: str, column_id: "str | None"
+        self,
+        table_id: str,
+        column_id: "str | None",
+        actor: str = "",
+        origin: str = "user",
     ) -> "str | None":
         """Designate ``column_id`` as the table's row-title (anchor) column,
         or clear the designation with ``None``. Returns the PREVIOUS anchor
@@ -175,19 +179,31 @@ class KnowhowStore:
 
         A non-``None`` ``column_id`` must belong to this table, else
         ``ValueError`` (friendly Chinese) and nothing is written. Clearing on
-        a missing/anchorless table is a silent no-op returning ``None``."""
+        a missing/anchorless table is a silent no-op returning ``None``.
+
+        版本管理（spec §5）：a real move records ONE ``anchor_set`` entry
+        whose ``columns`` carries up to two sub-entries — the demoted OLD
+        anchor (``before="anchor"``, ``after="attribute"``) and the promoted
+        NEW column (``before=`` its role read BEFORE promotion, ``after=
+        "anchor"``). Clearing the anchor (``column_id=None``) only ever
+        produces the demotion half. The no-op branch above (``column_id ==
+        old_id``, including ``None -> None``) returns before this point on
+        purpose — nothing changed, so nothing is recorded."""
         with self.database.write() as db:
             old_row = db.execute(
                 "SELECT id FROM knowhow_columns WHERE table_id = ? AND role = 'anchor'",
                 (table_id,),
             ).fetchone()
             old_id = old_row["id"] if old_row is not None else None
+            new_role_before = None
             if column_id is not None:
                 target = db.execute(
-                    "SELECT table_id FROM knowhow_columns WHERE id = ?", (column_id,)
+                    "SELECT table_id, role FROM knowhow_columns WHERE id = ?",
+                    (column_id,),
                 ).fetchone()
                 if target is None or target["table_id"] != table_id:
                     raise ValueError("指定的列不属于本表")
+                new_role_before = target["role"]
             if column_id == old_id:
                 return old_id  # no-op move (incl. None -> None)
             if old_id is not None:
@@ -204,10 +220,30 @@ class KnowhowStore:
                 "UPDATE knowhow_tables SET updated_at = ? WHERE id = ?",
                 (self.now(), table_id),
             )
+            columns = []
+            if old_id is not None:
+                columns.append({
+                    "column_id": old_id, "before": "anchor", "after": "attribute",
+                })
+            if column_id is not None:
+                columns.append({
+                    "column_id": column_id, "before": new_role_before, "after": "anchor",
+                })
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=table_id,
+                kind="anchor_set", payload={"columns": columns},
+                actor=actor, origin=origin,
+            )
         return old_id
 
     def add_knowhow_column(
-        self, table_id: str, name: str, kind: str, position: "int | None" = None
+        self,
+        table_id: str,
+        name: str,
+        kind: str,
+        position: "int | None" = None,
+        actor: str = "",
+        origin: str = "user",
     ) -> str:
         """Append a column (default position = MAX(position)+1 — NOT the
         column count: ``delete_knowhow_column`` leaves position gaps, and a
@@ -217,7 +253,11 @@ class KnowhowStore:
         validated like ``create_knowhow_table``'s (non-empty, unique within
         the table). Existing rows get NO backfilled cells — cells are sparse
         by contract (see ``get_knowhow_table``). Raises ``KeyError`` for a
-        missing table."""
+        missing table.
+
+        版本管理（spec §5）：records ``column_add`` in the same transaction as
+        the INSERT — ``before`` is implicitly empty (the column did not exist),
+        so the payload only carries the new definition."""
         name = str(name or "").strip()
         if not name:
             raise ValueError("列名不能为空")
@@ -249,22 +289,40 @@ class KnowhowStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (column_id, table_id, name, kind, position),
             )
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=table_id,
+                kind="column_add",
+                payload={"column": {
+                    "id": column_id, "name": name, "role": kind, "position": position,
+                }},
+                actor=actor, origin=origin,
+            )
         return column_id
 
-    def rename_knowhow_column(self, column_id: str, name: str) -> None:
+    def rename_knowhow_column(
+        self, column_id: str, name: str, actor: str = "", origin: str = "user"
+    ) -> None:
         """Rename one column (stored stripped). Raises ``KeyError`` for a
         missing column; ``ValueError`` for a blank name or a name already
         used by a SIBLING column (renaming to its own current name is a
-        silent success, not a duplicate)."""
+        silent success, not a duplicate).
+
+        版本管理（spec §5）：records ``column_rename`` with the pre-write
+        name as ``before``. Renaming to the SAME name is the silent-success
+        no-op documented above — it returns before touching the row, so it
+        neither writes nor records anything (not even a same-value UPDATE)."""
         name = str(name or "").strip()
         if not name:
             raise ValueError("列名不能为空")
         with self.database.write() as db:
             row = db.execute(
-                "SELECT table_id FROM knowhow_columns WHERE id = ?", (column_id,)
+                "SELECT table_id, name FROM knowhow_columns WHERE id = ?", (column_id,)
             ).fetchone()
             if row is None:
                 raise KeyError(column_id)
+            before = row["name"]
+            if name == before:
+                return  # silent success, nothing changed — see docstring
             duplicate = db.execute(
                 "SELECT 1 FROM knowhow_columns WHERE table_id = ? AND name = ? AND id != ?",
                 (row["table_id"], name, column_id),
@@ -274,29 +332,53 @@ class KnowhowStore:
             db.execute(
                 "UPDATE knowhow_columns SET name = ? WHERE id = ?", (name, column_id)
             )
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=row["table_id"],
+                kind="column_rename",
+                payload={"column_id": column_id, "before": before, "after": name},
+                actor=actor, origin=origin,
+            )
 
-    def set_knowhow_column_kind(self, column_id: str, kind: str) -> None:
+    def set_knowhow_column_kind(
+        self, column_id: str, kind: str, actor: str = "", origin: str = "user"
+    ) -> None:
         """Change one column's content kind. ``anchor`` is rejected here —
         the anchor designation is table-level state with its own setter
         (``set_knowhow_anchor_column``), which is also the only way a column
         currently marked ``anchor`` legitimately changes kind (clearing or
         moving the anchor demotes it to ``attribute``). Raises ``KeyError``
-        for a missing column."""
+        for a missing column.
+
+        版本管理（spec §5）：records ``column_kind`` with the pre-write role
+        as ``before``. Setting the SAME kind it already has is a silent
+        no-op — mirrors ``rename_knowhow_column``'s same-value convention —
+        and records nothing."""
         if kind == "anchor":
             raise ValueError("行标题列请通过表设置指定，不能作为列类型修改")
         if kind not in _NON_ANCHOR_KINDS:
             raise ValueError(f"非法的列类型：{kind}")
         with self.database.write() as db:
             row = db.execute(
-                "SELECT 1 FROM knowhow_columns WHERE id = ?", (column_id,)
+                "SELECT table_id, role FROM knowhow_columns WHERE id = ?", (column_id,)
             ).fetchone()
             if row is None:
                 raise KeyError(column_id)
+            before = row["role"]
+            if kind == before:
+                return  # silent no-op, nothing changed — see docstring
             db.execute(
                 "UPDATE knowhow_columns SET role = ? WHERE id = ?", (kind, column_id)
             )
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=row["table_id"],
+                kind="column_kind",
+                payload={"column_id": column_id, "before": before, "after": kind},
+                actor=actor, origin=origin,
+            )
 
-    def delete_knowhow_column(self, column_id: str) -> None:
+    def delete_knowhow_column(
+        self, column_id: str, actor: str = "", origin: str = "user"
+    ) -> None:
         """Delete a column; its cells and cell-code attachments go with it
         (``knowhow_cells.column_id`` and ``knowhow_cell_code.column_id`` are
         both ``ON DELETE CASCADE`` onto knowhow_columns, and ``PRAGMA
@@ -304,9 +386,51 @@ class KnowhowStore:
         Deleting the anchor column simply leaves the table anchorless — a
         legal state (see ``create_knowhow_table``). Silent no-op when already
         gone. Remaining positions are NOT renumbered (ordering reads sort by
-        position and tolerate gaps)."""
+        position and tolerate gaps).
+
+        版本管理（spec §5）：CASCADE means the column's cells and code
+        attachments are gone the instant the DELETE below commits, so
+        EVERYTHING needed to rebuild the column (its own definition, every
+        cell it held across every row, every code attachment) is read BEFORE
+        the DELETE and stored in the ``column_delete`` payload — the only way
+        this change stays reversible. The silent no-op above is preserved
+        verbatim: nothing was deleted, so nothing is recorded."""
         with self.database.write() as db:
+            column = db.execute(
+                "SELECT id, table_id, name, role, position FROM knowhow_columns "
+                "WHERE id = ?",
+                (column_id,),
+            ).fetchone()
+            if column is None:
+                return  # already gone — nothing deleted, nothing to record
+            cells = [
+                dict(c)
+                for c in db.execute(
+                    "SELECT row_id, content_md FROM knowhow_cells WHERE column_id = ?",
+                    (column_id,),
+                ).fetchall()
+            ]
+            code = [
+                dict(c)
+                for c in db.execute(
+                    "SELECT row_id, code_text, language, updated_by, cell_content_hash "
+                    "FROM knowhow_cell_code WHERE column_id = ?",
+                    (column_id,),
+                ).fetchall()
+            ]
             db.execute("DELETE FROM knowhow_columns WHERE id = ?", (column_id,))
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=column["table_id"],
+                kind="column_delete",
+                payload={
+                    "column": {
+                        "id": column["id"], "name": column["name"],
+                        "role": column["role"], "position": column["position"],
+                    },
+                    "cells": cells, "code": code,
+                },
+                actor=actor, origin=origin,
+            )
 
     def knowhow_table_health_inputs(self, notebook_id: str) -> list[dict]:
         with self.database.connect() as db:
@@ -572,14 +696,24 @@ class KnowhowStore:
 
     # --------------------------------------------------------------- rows
     def add_knowhow_row(
-        self, table_id: str, cells: dict[str, str], position: int | None = None
+        self,
+        table_id: str,
+        cells: dict[str, str],
+        position: int | None = None,
+        actor: str = "",
+        origin: str = "user",
     ) -> str:
         """Insert a row (default position = current row count, i.e.
         append) plus any provided cells, in one write transaction.
         ``projection_status`` starts at its schema default (``'pending'``).
         Does not bump the table's ``mutation_seq`` — callers doing bulk
         inserts (Task 6's import) bump once at the end via
-        ``bump_knowhow_mutation_seq``."""
+        ``bump_knowhow_mutation_seq``.
+
+        版本管理（spec §5）：records ``row_add`` in the same transaction —
+        ``cells`` is the caller-supplied initial content (``{}`` for a bare
+        row) and ``code`` is always ``[]`` (a brand-new row cannot already
+        carry a code attachment)."""
         row_id = self.new_id("khrow")
         now = self.now()
         with self.database.write() as db:
@@ -594,12 +728,22 @@ class KnowhowStore:
                 "VALUES (?, ?, ?, ?, ?)",
                 (row_id, table_id, position, now, now),
             )
-            for column_id, content_md in (cells or {}).items():
+            written_cells = dict(cells or {})
+            for column_id, content_md in written_cells.items():
                 db.execute(
                     "INSERT INTO knowhow_cells (id, row_id, column_id, content_md, updated_at) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (self.new_id("khcel"), row_id, column_id, content_md, now),
                 )
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=table_id,
+                kind="row_add",
+                payload={"rows": [{
+                    "row_id": row_id, "position": position,
+                    "cells": written_cells, "code": [],
+                }]},
+                actor=actor, origin=origin,
+            )
         return row_id
 
     def set_knowhow_row_projection(self, row_id: str, status: str) -> None:
@@ -632,14 +776,54 @@ class KnowhowStore:
             )
         return cursor.rowcount > 0
 
-    def delete_knowhow_row(self, row_id: str) -> None:
+    def delete_knowhow_row(
+        self, row_id: str, actor: str = "", origin: str = "user"
+    ) -> None:
         """Delete a row; its cells and cell-code attachments go with it
         (``knowhow_cells.row_id`` and ``knowhow_cell_code.row_id`` are both
         ``ON DELETE CASCADE`` onto knowhow_rows). Silent no-op when already
         gone. Surviving rows' positions are NOT renumbered (ordering reads
-        sort by position and tolerate gaps)."""
+        sort by position and tolerate gaps).
+
+        版本管理（spec §5）：CASCADE means the row's cells and code
+        attachments are gone the instant the DELETE below commits, so
+        EVERYTHING needed to rebuild the row (its position, every cell, every
+        code attachment) is read BEFORE the DELETE and stored in the
+        ``row_delete`` payload — the only way this change stays reversible.
+        The silent no-op above is preserved verbatim: nothing was deleted,
+        so nothing is recorded."""
         with self.database.write() as db:
+            row = db.execute(
+                "SELECT id, table_id, position FROM knowhow_rows WHERE id = ?",
+                (row_id,),
+            ).fetchone()
+            if row is None:
+                return  # already gone — nothing deleted, nothing to record
+            cells = {
+                c["column_id"]: c["content_md"]
+                for c in db.execute(
+                    "SELECT column_id, content_md FROM knowhow_cells WHERE row_id = ?",
+                    (row_id,),
+                ).fetchall()
+            }
+            code = [
+                dict(c)
+                for c in db.execute(
+                    "SELECT column_id, code_text, language, updated_by, cell_content_hash "
+                    "FROM knowhow_cell_code WHERE row_id = ?",
+                    (row_id,),
+                ).fetchall()
+            ]
             db.execute("DELETE FROM knowhow_rows WHERE id = ?", (row_id,))
+            record_change(
+                db, new_id=self.new_id, now=self.now, table_id=row["table_id"],
+                kind="row_delete",
+                payload={"rows": [{
+                    "row_id": row["id"], "position": row["position"],
+                    "cells": cells, "code": code,
+                }]},
+                actor=actor, origin=origin,
+            )
 
     # -------------------------------------------------------------- cells
     def _require_assets_exist(
