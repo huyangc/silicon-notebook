@@ -60,17 +60,17 @@ test("summarizeUpload: 沿用但改了文档类型 → 单独归类，并说清�
   assert.deepEqual(outcome.added, []);
   assert.equal(
     outcome.toast,
-    "1 个文件的内容已经在本笔记本里，沿用原有来源并改用了新的文档类型，正在按新类型重新抽取知识",
+    "1 个文件的内容已经在本笔记本里，沿用原有来源并改用了新的文档类型，正在按新类型重新分析",
   );
 });
 
-test("summarizeUpload: 类型改了但后端没开抽 → 不谎报「正在重新抽取」", () => {
+test("summarizeUpload: 类型改了但后端没开抽 → 不谎报「正在重新分析」", () => {
   const outcome = summarizeUpload(
     [retyped("a", "textbook", "extracted")],
     new Map([["a", ""]]),
   );
   assert.deepEqual(outcome.retyped.map((s) => s.id), ["a"]);
-  assert.doesNotMatch(outcome.toast, /重新抽取/);
+  assert.doesNotMatch(outcome.toast, /重新分析/);
   assert.match(outcome.toast, /改用了新的文档类型/);
 });
 
@@ -103,6 +103,6 @@ test("summarizeUpload: 新建 + 纯沿用 + 改类型三者并存时分别如实
   assert.equal(
     outcome.toast,
     "已上传 1 个来源；另有 1 个文件的内容已经在本笔记本里，沿用原有来源（名称保持原样），没有重复添加；" +
-      "1 个文件的内容已经在本笔记本里，沿用原有来源并改用了新的文档类型，正在按新类型重新抽取知识",
+      "1 个文件的内容已经在本笔记本里，沿用原有来源并改用了新的文档类型，正在按新类型重新分析",
   );
 });

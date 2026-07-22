@@ -49,12 +49,12 @@ function uploadToast(added: number, keptAsIs: number, retyped: UploadedSource[])
     );
   }
   if (retyped.length > 0) {
-    // 「正在重新抽取」只在后端真的把那条来源翻成 extracting 时才说：笔记本还没
+    // 「正在重新分析」只在后端真的把那条来源翻成 extracting 时才说：笔记本还没
     // 建过知识图谱时只记下新类型、不会立刻开抽，谎报会让用户白等。
     const rerunning = retyped.some((item) => item.parse_status === "extracting");
     clauses.push(
       `${retyped.length} 个文件的内容已经在本笔记本里，沿用原有来源并改用了新的文档类型` +
-        (rerunning ? "，正在按新类型重新抽取知识" : ""),
+        (rerunning ? "，正在按新类型重新分析" : ""),
     );
   }
   if (clauses.length === 0) return `已上传 ${added} 个来源`;

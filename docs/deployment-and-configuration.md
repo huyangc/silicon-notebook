@@ -413,6 +413,30 @@ LLM_CACHE_SIZE_LIMIT     # size cap in bytes; least-recently-used entries evicte
 LLM_CACHE_TTL_DAYS       # max entry age in days before treated as expired (default 90)
 ```
 
+*Inspecting and clearing the cache (admin only).* The cache is keyed by model
+name plus the exact request content, so changing a prompt or switching to a
+differently-named model invalidates itself — nothing to do. The one case that
+needs a manual step is **the weights behind an unchanged model name being
+replaced**: the key does not change, so old answers keep being replayed until
+the 90-day TTL expires. Clear that model's entries after such a swap:
+
+```bash
+# What is in the cache right now: totals, hit rate, entries per model
+curl -H "Authorization: Bearer $TOKEN" http://<host>/api/admin/cache
+
+# Drop one model's entries (do this after replacing a model service)
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"tag": "<model-name>"}' http://<host>/api/admin/cache/evict
+
+# Drop everything (the flag is required — there is no "empty means all")
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"clear_all": true}' http://<host>/api/admin/cache/evict
+```
+
+Use `by_tag` from the first call to see which model names are worth clearing.
+Losing cache entries is always safe — the next call just goes to the model
+again.
+
 **Retrieval / KG enhancements (GraphRAG + ToG-3 borrow, Phase 1+2):**
 
 A mix of opt-in (default off) and on-by-default knobs. On by default: `ANSWER_CONTEXT_*`,

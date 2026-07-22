@@ -356,6 +356,27 @@ LLM_CACHE_SIZE_LIMIT     # 容量上限（字节）；超出后按最近最少�
 LLM_CACHE_TTL_DAYS       # 条目最长保留天数，超期视为过期（默认 90）
 ```
 
+*查看与清理缓存（仅管理员）。* 缓存键 = 模型名 + 请求内容原文，所以改 prompt、
+换成另一个名字的模型都会自动失效，不需要做任何事。唯一需要手动清理的场景是
+**同名模型背后的权重被替换**：模型名没变、缓存键就没变，旧答案会一直被回放到
+90 天 TTL 到期为止。换过模型服务之后，把那个模型的缓存清掉：
+
+```bash
+# 看当前缓存现状：总量、命中率、按模型分布
+curl -H "Authorization: Bearer $TOKEN" http://<host>/api/admin/cache
+
+# 清掉某个模型的缓存（更换该模型服务之后执行）
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"tag": "<模型名>"}' http://<host>/api/admin/cache/evict
+
+# 清空全部（必须显式给这个标志，没有「留空即全清」）
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+     -d '{"clear_all": true}' http://<host>/api/admin/cache/evict
+```
+
+第一条返回里的 `by_tag` 就是「有哪些模型名、各占多少条」，据此决定清哪一份。
+清掉缓存永远是安全操作——下一次调用重新去问模型即可。
+
 **检索 / KG 增强（GraphRAG + ToG-3 借鉴，Phase 1+2）：**
 
 opt-in（默认关）与默认开混合。默认开：`ANSWER_CONTEXT_*`、`KG_QUERY_REFINE_ENABLED`，以及 KG 质量增强 `KG_REFINE` / `KG_GLEANING` / `KG_CONCEPT_DESC`。其余请**逐个开启**并用

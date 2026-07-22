@@ -12,12 +12,17 @@ from app.api.deps import (
     require_notebook_access,
     user_error,
 )
+from app.core.cache import CacheAdmin, make_cache_backend
+from app.core.config import get_settings
 from app.models.admin import (
     AdminUserNotebook,
     AdminUserRoleResult,
     AdminUserRoleUpdate,
     AdminUserUploadLimitResult,
     AdminUserUsage,
+    CacheEvictRequest,
+    CacheEvictResult,
+    CacheStats,
     PromoteRequest,
     PromotionApproveResult,
     PromotionCandidate,
@@ -255,3 +260,65 @@ async def list_online_users(user: UserProfile = Depends(get_current_user)) -> di
     if user.role != "admin":
         raise user_error(403, "仅管理员可查看在线状态")
     return {"online_ids": sorted(pending_bus.online_user_ids())}
+
+
+# --- 内容寻址缓存：只读现状 + 失效逃生口 ------------------------------------
+#
+# 缓存默认开、TTL 90 天、跨用户全局共享。TTL 之所以敢设这么长，正是因为有一个
+# 显式的失效入口兜底：**同名模型的权重被替换**是唯一需要主动清理的场景（模型名
+# 没变，缓存键因此不变，但同一段 prompt 的正确答案已经变了）。没有这两个端点时，
+# evict_tag/clear/stats 全仓零调用方——能力存在但不可达，运维只能去删缓存文件，
+# 而没人知道要去删。
+#
+# 用 isinstance(backend, CacheAdmin) 探测后再调用：只实现 get/put 的后端
+# （Redis 把 TTL/LRU 交给服务端配置）是合法形态，不能假设运维能力一定在。
+
+
+def _cache_admin(user: UserProfile):
+    """取一个具备运维能力的缓存后端；不具备时如实拒绝。"""
+    if user.role != "admin":
+        raise user_error(403, "仅管理员可管理响应缓存")
+    try:
+        backend = make_cache_backend(get_settings())
+    except Exception:
+        # 缓存故障永不影响主流程——这里也一样，只是如实告诉管理员它起不来。
+        raise user_error(503, "响应缓存当前不可用，请稍后再试")
+    if not isinstance(backend, CacheAdmin):
+        raise user_error(501, "当前响应缓存的存储后端不支持查看与清理")
+    return backend
+
+
+@router.get("/admin/cache", response_model=CacheStats)
+def get_cache_stats(user: UserProfile = Depends(get_current_user)) -> CacheStats:
+    """响应缓存现状：总量、命中率、按模型分布。仅 admin，纯读。
+
+    by_tag 按模型名分组——决定「换了哪个模型服务、该清哪一份」时看的就是它。
+    命中/未命中是**进程内**计数（重启归零）：缓存实例按路径记忆化，所以这是全进程
+    的口径，而不是某一个 LLM client 自己的那一份。
+    """
+    backend = _cache_admin(user)
+    stats = backend.stats()
+    return CacheStats(
+        enabled=get_settings().llm_cache_enabled,
+        admin_supported=True,
+        **stats,
+    )
+
+
+@router.post("/admin/cache/evict", response_model=CacheEvictResult)
+def evict_cache(
+    payload: CacheEvictRequest, user: UserProfile = Depends(get_current_user)
+) -> CacheEvictResult:
+    """按模型名清理缓存，或整库清空。仅 admin。
+
+    换模型服务（尤其是同名模型换了权重）后应当按 tag 清掉那一份：模型名没变，
+    缓存键就没变，旧答案会一直被回放到 TTL 到期为止。
+    tag 与 clear_all 必须显式二选一，避免一次手滑清空整库。
+    """
+    backend = _cache_admin(user)
+    if payload.clear_all:
+        return CacheEvictResult(evicted=backend.clear(), scope="all")
+    tag = payload.tag.strip()
+    if not tag:
+        raise user_error(400, "请指定要清理的模型名，或明确选择清空全部缓存")
+    return CacheEvictResult(evicted=backend.evict_tag(tag), scope=tag)
