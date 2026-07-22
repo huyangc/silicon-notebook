@@ -2,20 +2,19 @@ import json
 import pytest
 
 
-def test_settings_have_rewrite_and_evidence_knobs(monkeypatch):
+def test_settings_have_evidence_knobs_and_reject_legacy_rewrite_config(monkeypatch):
     from app.core.config import Settings
     s = Settings()
     assert s.evidence_tau_low == 0.18
     assert s.evidence_tau_high == 0.35
     assert s.proc_min == 2
-    # 专用快改写模型:默认未配 → False
-    assert s.rewrite_llm_configured is False
-
     monkeypatch.setenv("EVIDENCE_TAU_HIGH", "0.5")
     assert Settings().evidence_tau_high == 0.5
-    # 设了 REWRITE_LLM_MODEL → 启用(base_url/api_key 缺省复用主端点)
-    monkeypatch.setenv("REWRITE_LLM_MODEL", "deepseek-v4-fast")
-    assert Settings().rewrite_llm_configured is True
+    from app.services.model_registry import SystemModelServiceRegistry
+    with pytest.raises(ValueError, match="REWRITE_LLM_MODEL.*retired"):
+        SystemModelServiceRegistry.load(
+            Settings(), environ={"REWRITE_LLM_MODEL": "deepseek-v4-fast"}
+        )
 
 
 def test_is_process_query_and_type_weight():
@@ -102,6 +101,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
+from tests.model_testkit import RecordingModelProvider, bind_chat_client
 
 
 class RecordingLLM:
@@ -124,14 +124,16 @@ def repo2(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path/'t.db'}")
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
-    monkeypatch.setenv("EMBED_PROVIDER", "dashscope")
-    monkeypatch.setenv("EMBED_BASE_URL", "https://embedding.example.test")
-    monkeypatch.setenv("EMBED_API_KEY", "test-key")
-    monkeypatch.setenv("EMBED_MODEL", "test-model")
-    monkeypatch.setenv("EMBED_DIM", "16")
-    r = SQLiteRepository(Settings())
-    r.embedder = FakeEmbedder(dim=16)
-    r.llm_client = RecordingLLM()
+    llm = RecordingLLM()
+    embedder = FakeEmbedder(dim=16)
+    provider = RecordingModelProvider(
+        chat_clients={"ask_answer": llm, "query_rewrite": llm},
+        embedding_clients={"retrieval_query_embedding": embedder},
+    )
+    r = SQLiteRepository(Settings(), model_provider=provider)
+    r.embedder = embedder
+    r.recording_llm = llm
+    r.recording_model_provider = provider
     return r
 
 
@@ -147,7 +149,7 @@ def _seed_flow(repo):
 def test_first_turn_not_rewritten(repo2):
     nb = _seed_flow(repo2)
     resp = repo2.ask(nb.id, AskRequest(question="innovus中有哪些常见flow"))
-    assert repo2.llm_client.rewrite_calls == []
+    assert repo2.recording_llm.rewrite_calls == []
     assert resp.retrieval_query == "innovus中有哪些常见flow"
     assert resp.evidence_level in {"grounded", "overview", "inferred"}
 
@@ -157,7 +159,7 @@ def test_followup_triggers_rewrite_and_uses_rewritten_query(repo2):
     t1 = repo2.ask(nb.id, AskRequest(question="innovus中有哪些常见flow"))
     repo2.ask(nb.id, AskRequest(question="展开讲讲这个流程",
                                 conversation_id=t1.conversation_id))
-    assert len(repo2.llm_client.rewrite_calls) == 1
+    assert len(repo2.recording_llm.rewrite_calls) == 1
     last = repo2.ask(nb.id, AskRequest(question="再展开这个流程",
                                        conversation_id=t1.conversation_id))
     assert last.retrieval_query == "RTL到GDSII流程 步骤"
@@ -174,20 +176,21 @@ def test_additive_followup_always_rewritten(repo2):
     # 去掉 looks_like_followup 闸门后:此前漏判的「加上…」式追问现在也会触发改写。
     nb = _seed_flow(repo2)
     t1 = repo2.ask(nb.id, AskRequest(question="innovus中有哪些常见flow"))
-    assert repo2.llm_client.rewrite_calls == []  # 首轮无 history → 不改写
+    assert repo2.recording_llm.rewrite_calls == []  # 首轮无 history → 不改写
     repo2.ask(nb.id, AskRequest(question="加上Qwen系列模型和GLM系列模型的对比",
                                 conversation_id=t1.conversation_id))
-    assert len(repo2.llm_client.rewrite_calls) == 1  # 旧逻辑(闸门漏判)会是 0
-    assert "加上Qwen" in repo2.llm_client.rewrite_calls[0]
+    assert len(repo2.recording_llm.rewrite_calls) == 1  # 旧逻辑(闸门漏判)会是 0
+    assert "加上Qwen" in repo2.recording_llm.rewrite_calls[0]
 
 
 def test_followup_rewrite_uses_dedicated_rewrite_client(repo2):
     # 配了专用快改写 client → 改写走它,不走主 client(答案仍走主 client)。
     fast = RecordingLLM()
-    repo2._rewrite_llm_client = fast
+    bind_chat_client(repo2, "query_rewrite", fast)
     nb = _seed_flow(repo2)
     t1 = repo2.ask(nb.id, AskRequest(question="innovus中有哪些常见flow"))
     repo2.ask(nb.id, AskRequest(question="加上Qwen系列的对比",
                                 conversation_id=t1.conversation_id))
     assert len(fast.rewrite_calls) == 1          # 改写落在专用快 client
-    assert repo2.llm_client.rewrite_calls == []  # 主 client 未收到改写
+    assert repo2.recording_llm.rewrite_calls == []  # 主 client 未收到改写
+    assert ("chat", "query_rewrite") in repo2.recording_model_provider.calls

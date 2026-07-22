@@ -114,13 +114,17 @@ def bind_chat_client(repo: Any, workload_id: str, client: Any) -> None:
     if overrides is None:
         overrides = {}
         provider._test_chat_overrides = overrides
+        provider._test_chat_calls = []
         provider._test_original_chat = provider.chat
         provider._test_original_configured = provider.configured
-        provider.chat = lambda requested: (
-            overrides[requested]
-            if requested in overrides
-            else provider._test_original_chat(requested)
-        )
+        def test_chat(requested):
+            provider._test_chat_calls.append(requested)
+            return (
+                overrides[requested]
+                if requested in overrides
+                else provider._test_original_chat(requested)
+            )
+        provider.chat = test_chat
         provider.configured = lambda requested: (
             bool(getattr(overrides[requested], "configured", True))
             if requested in overrides

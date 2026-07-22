@@ -100,6 +100,7 @@ def test_ask_grounded_answer_has_anchors(repo):
     resp = repo.ask(nb.id, AskRequest(question="what is engram", scenario={}, mode="graph"))
     assert resp is not None
     assert resp.mode == "graph"
+    assert ("chat", "evidence_refine") in repo.recording_model_provider.calls
 
 def test_ask_ungrounded_when_no_hits(repo, monkeypatch):
     # P4-5: ask_fast retired; verify ask() (default=chunk) handles an empty notebook gracefully.
@@ -108,6 +109,27 @@ def test_ask_ungrounded_when_no_hits(repo, monkeypatch):
     # chunk mode on empty notebook: no crash, response is explicitly ungrounded
     assert resp is not None
     assert resp.grounded is False  # chunk path with no hits must not claim grounding
+
+
+def test_graph_edge_verification_binds_graph_chain_verify(repo):
+    nb = repo.create_notebook(NotebookCreate(name="graph"))
+    repo.store_kg(
+        nb.id,
+        None,
+        [
+            {"local_id": "A", "object_type": "claim",
+             "payload": {"name": "Alpha fact"}, "evidence": []},
+            {"local_id": "B", "object_type": "claim",
+             "payload": {"name": "Beta fact"}, "evidence": []},
+        ],
+        [{"source_local_id": "A", "target_local_id": "B",
+          "edge_type": "supports", "confidence": 0.9,
+          "evidence": [{"quote": "Alpha supports Beta"}]}],
+    )
+
+    repo.ask(nb.id, AskRequest(question="Alpha fact", mode="graph"))
+
+    assert ("chat", "graph_chain_verify") in repo.recording_model_provider.calls
 
 def test_concept_dedup_degrades_gracefully_without_clusters(repo):
     # No concept_clusters rows populated -> _concept_cluster_id returns object_id

@@ -52,6 +52,8 @@ def test_reasoning_ask_returns_trace_and_evidence_level(arepo):
         answer={"answer": "RTL到GDSII是标准流程 [k1].", "grounded": True}))
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
     assert resp.reasoning_trace and resp.reasoning_trace[0].step_type == "plan"
+    assert ("chat", "reasoning_agent") in arepo._runtime.models.calls
+    assert ("chat", "ask_answer") in arepo._runtime.models.calls
     assert resp.evidence_level in {"grounded", "overview", "inferred"}
     assert resp.conversation_id
 

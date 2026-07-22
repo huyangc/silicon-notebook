@@ -41,7 +41,6 @@ from typing import Any, Callable
 
 from app.repositories.sqlite.knowhow_store import VALID_KINDS as _STORE_KINDS
 from app.services import background_jobs
-from app.services.model_config import model_client_fingerprint
 from app.services.knowhow.grid_parser import ParsedGrid, guess_kinds, parse_grid, forward_fill_column
 from app.services.knowhow.projection import KnowhowProjector
 
@@ -941,7 +940,7 @@ def commit_append(
 # test_repository_callers_static.py/test_repository_surface_manifest.py;
 # inserting anything ABOVE them would shift those pins. This section needs
 # its OWN, SECOND `_runtime` reach (repo._runtime.models, to resolve the
-# per-user rewrite LLM client + note_model_error) — registered as a new,
+# system-managed workload client + note_model_error) — registered as a new,
 # separate entry in both guards (see task-8-report-pr23.md), not folded into
 # the existing build_projector registration.
 
@@ -990,9 +989,8 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
     的共享后端。**显式触发、suggestion-only、绝不写库**——回填走既有 PATCH cell
     端点（那才触发重投影）。是本特性唯一的新增 LLM 调用。
 
-    走 notebook 既有 LLM 配置（``repo._runtime.models.rewrite_llm_client``，
-    已含 per-user 模型配置解析——不同用户可各自配置改写模型），``cap_kwargs``
-    复用全局生成 max_tokens 上限（不新增专属预算旋钮——效率一等约束）。失败经
+    通过系统统一模型提供者解析 ``knowhow_optimize`` workload，``cap_kwargs``
+    复用该服务的生成 token 上限。失败经
     ``repo._runtime.models.note_model_error`` 走既有 model_error 可观测链路
     （events.jsonl；本调用不在 ask 上下文内，L2 sink 不适用，仅 L1 emit）。
 
@@ -1010,10 +1008,9 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
     if not content_md.strip():
         raise ValueError("格子为空，无需优化")
     models = repo._runtime.models  # type: ignore[attr-defined]
-    client = models.rewrite_llm_client
+    client = models.chat("knowhow_optimize")
     if not client.configured:
         raise ModelNotConfiguredError("尚未配置模型，无法优化表达")
-    model_label = getattr(client, "model", "") or ""
     try:
         raw = client.chat_json(
             [{"role": "user", "content": _optimize_cell_prompt(content_md, column_name, kind)}],
@@ -1029,12 +1026,7 @@ def optimize_cell(repo: Any, content_md: str, column_name: str, kind: str) -> st
         raise
     except Exception as exc:
         models.note_model_error(
-            "knowhow_optimize",
-            model_label,
-            exc,
-            service="rewrite_llm",
-            provider_failure=True,
-            failed_fingerprint=model_client_fingerprint(client),
+            "knowhow_optimize", exc, workload_id="knowhow_optimize"
         )
         raise KnowhowOptimizeUnavailable("优化服务暂时不可用，请稍后再试") from exc
 
@@ -1099,11 +1091,9 @@ def llm_reformat(client: Any, content_md: str, column_name: str, kind: str) -> "
     内容」区分 rule/no-llm 与 rule/llm-failed，详见那边的 except 分支与顶部
     docstring。
 
-    ``client`` 由调用方（``reformat_cell``）解析好后传入，而不是在这里再从
-    ``repo._runtime.models`` 重新取一次——``rewrite_llm_client`` 是走 per-user
-    模型配置解析的 property（见 model_provider.py），避免同一次 reformat_cell
-    调用里把它解析两遍，也让本文件新增的 `_runtime` 私有面 reach 只多一个
-    落点（在 reformat_cell 里）而不是两个。"""
+    ``client`` 由调用方（``reformat_cell``）按 ``knowhow_reformat`` workload
+    解析好后传入，避免同一次调用重复解析，也让本文件新增的 ``_runtime``
+    私有面 reach 只多一个落点（在 reformat_cell 里）而不是两个。"""
     from app.core.llm import cap_kwargs
     from app.services.model_config import ModelNotConfiguredError
 
@@ -1129,12 +1119,10 @@ def reformat_cell(repo: Any, content_md: str, column_name: str, kind: str) -> di
     ``{"llm", "rule/llm-failed", "rule/no-llm"}``。**从不写库**（suggestion-
     only，与 optimize_cell 同规矩——回填走既有 PATCH cell 端点，那才触发重投影）。
 
-    ``rule/llm-failed`` vs ``rule/no-llm`` 不能只靠 client-None 判定区分：生产
-    环境 ``repo._runtime.models.rewrite_llm_client`` 从不是 None——未配置时
-    ``model_provider.py``(``_llm_for_role``)要么返回一个 ``.configured=False``
-    的哨兵（``chat_json`` 抛 ``ModelNotConfiguredError``），要么回退到系统
-    client（同样可能 ``.configured=False``，``chat_json`` 抛普通
-    ``RuntimeError``）。两种未配置形状都必须落 rule/no-llm，因此这里双重把关
+    ``rule/llm-failed`` vs ``rule/no-llm`` 不能只靠 client-None 判定区分：系统
+    provider 对未绑定的 ``knowhow_reformat`` workload 返回
+    ``.configured=False`` 的哨兵，也可能在调用时抛
+    ``ModelNotConfiguredError``。两种未配置形状都必须落 rule/no-llm，因此这里双重把关
     （belt-and-suspenders，两个都留着——见下方两处判定各自覆盖的用例）：
     ①前置 ``.configured`` 判定挡住「未配置且如实暴露 .configured=False」的
     形状，压根不调 LLM；②包一层 ``except ModelNotConfiguredError`` 兜底挡住
@@ -1147,7 +1135,7 @@ def reformat_cell(repo: Any, content_md: str, column_name: str, kind: str) -> di
     raw = content_md or ""
     if not raw.strip():
         return {"candidate_md": raw, "source": "rule/no-llm", "changed": False}
-    client = getattr(repo._runtime.models, "rewrite_llm_client", None)
+    client = repo._runtime.models.chat("knowhow_reformat")
     if client is None or not getattr(client, "configured", True):
         cand = md_normalize.rule_normalize(raw)
         return {"candidate_md": cand, "source": "rule/no-llm", "changed": cand != raw}

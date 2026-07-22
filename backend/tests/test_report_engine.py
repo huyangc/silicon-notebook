@@ -728,6 +728,28 @@ def test_draft_section_empty_content_marks_failed_and_observable(repo):
     assert ("report_section", "report_section") in notes   # 精确工作负载可观测
 
 
+def test_report_section_queue_failure_stays_a_failed_section(repo):
+    from app.services.model_work import ModelQueueFull
+    from app.services.reasoning_retrieval import ReasoningResult
+
+    class _Busy:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            raise ModelQueueFull(support_id="mdl-report-full")
+
+    engine = _mk_engine(repo, _Busy())
+    notebook = _mk_nb(repo)
+    result = engine._draft_section(
+        notebook.id,
+        {"title": "T", "scope": "S", "sub_queries": ["q"]},
+        "q", ReasoningResult(),
+    )
+
+    assert result["failed"] is True
+    assert result["markdown"] == ""
+
+
 def test_deep_dive_uses_configured_sibling_threshold(repo, monkeypatch):
     from app.services.reasoning_retrieval import ReasoningResult, ReasoningRetriever
 

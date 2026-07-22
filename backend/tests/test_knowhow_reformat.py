@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import json
 import types
+import pytest
 
 from fastapi.testclient import TestClient
 
 from app.services.knowhow import api as kh_api
+from tests.model_testkit import bind_chat_client
+from app.services.model_work import ModelQueueFull
 
 RAW = "A. 考量\n\t• 增大 R： 变慢\n\t• 增大 C： 变化"
 
@@ -29,13 +32,22 @@ def _repo_with_llm(reply):
     """构造一个最小 repo stub，其 rewrite client 返回给定内容的 JSON 字符串。"""
     payload = json.dumps({"reformatted_md": reply}, ensure_ascii=False)
     client = types.SimpleNamespace(chat_json=lambda *a, **k: payload)
-    models = types.SimpleNamespace(rewrite_llm_client=client)
+    models = types.SimpleNamespace(
+        chat=lambda workload_id: (
+            client if workload_id == "knowhow_reformat" else None
+        )
+    )
     runtime = types.SimpleNamespace(models=models)
     return types.SimpleNamespace(_runtime=runtime)
 
 
 def _repo_no_llm():
-    models = types.SimpleNamespace(rewrite_llm_client=None)
+    client = types.SimpleNamespace(configured=False)
+    models = types.SimpleNamespace(
+        chat=lambda workload_id: (
+            client if workload_id == "knowhow_reformat" else None
+        )
+    )
     return types.SimpleNamespace(_runtime=types.SimpleNamespace(models=models))
 
 
@@ -66,7 +78,11 @@ def test_empty_cell_no_change():
 
 
 def _repo_with_client(client):
-    models = types.SimpleNamespace(rewrite_llm_client=client)
+    models = types.SimpleNamespace(
+        chat=lambda workload_id: (
+            client if workload_id == "knowhow_reformat" else None
+        )
+    )
     return types.SimpleNamespace(_runtime=types.SimpleNamespace(models=models))
 
 
@@ -99,6 +115,22 @@ def test_client_raising_not_configured_labeled_no_llm():
     client = types.SimpleNamespace(configured=True, chat_json=_raise_not_configured)
     out = kh_api.reformat_cell(_repo_with_client(client), RAW, "修复方法", "procedure")
     assert out["source"] == "rule/no-llm"
+
+
+def test_scheduler_admission_failure_falls_back_to_rules():
+    client = types.SimpleNamespace(
+        configured=True,
+        chat_json=lambda *args, **kwargs: (_ for _ in ()).throw(
+            ModelQueueFull(support_id="mdl-reformat-full")
+        ),
+    )
+
+    out = kh_api.reformat_cell(
+        _repo_with_client(client), RAW, "修复方法", "procedure"
+    )
+
+    assert out["source"] == "rule/llm-failed"
+    assert "•" not in out["candidate_md"]
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +317,7 @@ def test_reformat_endpoint_llm_success_returns_llm_candidate(tmp_path, monkeypat
     # reformat_cell accepts it as the "llm" candidate rather than falling
     # back to rule_normalize.
     fake = _FakeReformatClient("先做A\n\n- 增大 R")
-    _app_repo()._rewrite_llm_client = fake
+    bind_chat_client(_app_repo(), "knowhow_reformat", fake)
 
     resp = _reformat(client, owner_h, nb, table["id"], row["id"], column_id)
 
@@ -319,7 +351,7 @@ def test_reformat_endpoint_unconfigured_still_returns_200_rule_no_llm(tmp_path, 
     client = _client(tmp_path, monkeypatch)
     owner_h, nb, table, row, column_id = _seed(client, "a00002092")
 
-    _app_repo()._rewrite_llm_client = types.SimpleNamespace(configured=False)
+    bind_chat_client(_app_repo(), "knowhow_reformat", types.SimpleNamespace(configured=False))
 
     resp = _reformat(client, owner_h, nb, table["id"], row["id"], column_id)
 

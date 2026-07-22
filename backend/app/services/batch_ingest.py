@@ -40,7 +40,6 @@ import sqlite3
 from app.repositories.ports import (
     ExtractionProgress,
     IndexStageProgress,
-    JsonChatClientPort,
     KGBuildResult,
     RebuildProgress,
     ScaleBuildManifest,
@@ -59,8 +58,8 @@ class BatchIngestRepository(Protocol):
     settings: Settings
     storage_dir: Path
     maintenance: SQLiteMaintenancePort
-    llm_client: JsonChatClientPort
 
+    def configured(self, workload_id: str) -> bool: ...
     def current_user(self) -> UserProfile: ...
     def get_notebook(self, notebook_id: str) -> NotebookSummary: ...
     def create_notebook(self, payload: NotebookCreate) -> NotebookSummary: ...
@@ -487,8 +486,7 @@ def run_kg(repo: BatchIngestRepository, notebook_id: str,
         # ── 抽取阶段(rebuild_only 时跳过) ────────────────────────────────────
         # 抽取驱动 KG-LLM window 池,故用 _PoolReporter 周期自报 KG-LLM vs embed 并发。
         if not rebuild_only:
-            llm_ok = (repo.settings.kg_llm_configured
-                      or getattr(repo.llm_client, "configured", False))
+            llm_ok = repo.configured("kg_extract")
             if limit is None:
                 # no_rebuild=True 且无 LLM 时:跳过抽取(无法抽取,等 rebuild_only 阶段再合并)
                 if llm_ok or not no_rebuild:
@@ -1092,12 +1090,9 @@ def run_backfill_source_index(repo: BatchIngestRepository, notebook_id: Optional
 def run_metadata(repo, args) -> int:
     """phase=metadata:补抽 notebook 内缺论文元数据的源(幂等可续跑;--force 重抽)。
     只作用于已解析的 academic_paper 源;原始 PDF 缺失也可跑(读 DB 内 elements)。"""
-    if not (
-        getattr(repo.kg_llm_client, "configured", False)
-        or getattr(repo.llm_client, "configured", False)
-    ):
-        print("error: LLM 未配置 → 无法抽取论文元数据。配置 OPENAI_COMPAT_* 或 "
-              "KG_LLM_* 后重试(CLI 不静默降级)。", file=sys.stderr)
+    if not repo.configured("paper_metadata"):
+        print("error: paper_metadata workload 未绑定模型服务 → 无法抽取论文元数据。"
+              "请配置 MODEL_SERVICES_CONFIG 后重试(CLI 不静默降级)。", file=sys.stderr)
         return 2
     if not args.notebook_id:
         print("error: --phase metadata 需要 --notebook-id(本 phase 不新建 notebook)。",

@@ -223,6 +223,24 @@ def test_source_summary_binds_source_summary_workload(repo):
     assert ("chat", "source_summary") in repo.recording_model_provider.calls
 
 
+def test_source_summary_queue_failure_uses_deterministic_fallback(repo):
+    from app.services.model_work import ModelQueueTimeout
+
+    class _BusySummary:
+        configured = True
+
+        def chat_json(self, *args, **kwargs):
+            raise ModelQueueTimeout(support_id="mdl-source-timeout")
+
+    bind_chat_client(repo, "source_summary", _BusySummary())
+
+    result = repo._runtime.source_ingestion.summarize(
+        "Doc", [_element("source body")]
+    )
+
+    assert result.startswith("1 parsed text element(s).")
+
+
 def test_url_local_parse_never_falls_back_to_cloud(local_repo, monkeypatch):
     repo = local_repo
     nb = repo.create_notebook(NotebookCreate(name="nb"))
