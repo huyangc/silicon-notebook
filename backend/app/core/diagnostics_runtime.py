@@ -121,10 +121,22 @@ _NOTEBOOK_ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("knowhow", None, "rows", None, "cells", None),
     ("knowhow", None, "rows", None, "cells", None, "optimize"),
     ("knowhow", None, "rows", None, "cells", None, "reformat"),
+    ("knowhow", None, "rows", None, "cells", None, "history"),
     ("knowhow", None, "cells"),
     ("knowhow", None, "template"),
     ("knowhow", None, "append"),
     ("knowhow", None, "transfer"),
+    ("knowhow", None, "history"),
+    # ⚠️ 顺序敏感：_request_metadata 取**首个**同长匹配。同为 4 段的
+    # history/diff、history/prune（字面末段）必须排在 history/{seq}（通配
+    # None 末段）之前，否则 None 会先吞掉 diff/prune，把它们误归一成
+    # history/{id}。这是本白名单里唯一「同长同前缀、末段一字面一通配」的情形。
+    ("knowhow", None, "history", "diff"),
+    ("knowhow", None, "history", "prune"),
+    ("knowhow", None, "history", None),
+    ("knowhow", None, "revert"),
+    ("knowhow", None, "milestones"),
+    ("knowhow", None, "milestones", None),
 )
 _ROUTE_TEMPLATES: tuple[tuple[Optional[str], ...], ...] = (
     ("api", "health"),
