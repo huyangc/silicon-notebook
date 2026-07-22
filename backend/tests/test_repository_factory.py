@@ -143,11 +143,25 @@ def _sqlite_persistence_construction_sites_from_sources(
                 return f"{parent}.{node.attr}" if parent else ""
             return ""
 
+        def repository_sqlite_namespace(value: str) -> bool:
+            return value == "app.repositories.sqlite" or value.startswith(
+                "app.repositories.sqlite."
+            )
+
+        def compatibility_sqlite_namespace(value: str) -> bool:
+            return value.startswith("app.services.sqlite")
+
+        def sqlite_namespace(value: str) -> bool:
+            return repository_sqlite_namespace(value) or compatibility_sqlite_namespace(
+                value
+            )
+
+        def navigation_namespace(value: str) -> bool:
+            return value in {"app.repositories", "app.services"}
+
         def canonicalize(value):
             name = value.rsplit(".", 1)[-1]
-            sqlite_namespace = value.startswith("app.repositories.sqlite.")
-            compat_namespace = value.startswith("app.services.sqlite")
-            if sqlite_namespace or compat_namespace:
+            if sqlite_namespace(value):
                 return SQLITE_CONSTRUCTOR_PATHS.get(name, value)
             return value
 
@@ -212,9 +226,7 @@ def _sqlite_persistence_construction_sites_from_sources(
                 module = import_module(node)
                 for imported in node.names:
                     if imported.name == "*":
-                        if module.startswith(
-                            "app.repositories.sqlite"
-                        ) or module == "app.services.sqlite_repository":
+                        if sqlite_namespace(module):
                             record(node, "*")
                         continue
                     local = imported.asname or imported.name
@@ -273,7 +285,8 @@ def _sqlite_persistence_construction_sites_from_sources(
             local = dict(aliases)
             for name, binding in bindings:
                 if name in local:
-                    record(binding, local[name].rsplit(".", 1)[-1])
+                    if label := taint_label(local[name]):
+                        record(binding, label)
                     local.pop(name)
             for gen in node.generators:
                 scan_expr(gen.iter, local)
@@ -300,9 +313,7 @@ def _sqlite_persistence_construction_sites_from_sources(
                 else:
                     resolved = resolve(node, aliases)
                     head = dotted_name(node).partition(".")[0]
-                    if aliases.get(head) != "app" or resolved.startswith(
-                        ("app.repositories.sqlite", "app.services.sqlite_repository")
-                    ):
+                    if aliases.get(head) != "app" or sqlite_namespace(resolved):
                         scan_expr(node.value, aliases)
                 return
             if isinstance(node, ast.Call):
@@ -330,13 +341,15 @@ def _sqlite_persistence_construction_sites_from_sources(
                 local = dict(aliases)
                 for name, binding in argument_bindings(node.args):
                     if name in local:
-                        record(binding, local[name].rsplit(".", 1)[-1])
+                        if label := taint_label(local[name]):
+                            record(binding, label)
                         local.pop(name)
                 scan_expr(node.body, local)
                 return
             if isinstance(node, ast.NamedExpr):
                 if node.target.id in aliases:
-                    record(node.target, aliases[node.target.id].rsplit(".", 1)[-1])
+                    if label := taint_label(aliases[node.target.id]):
+                        record(node.target, label)
                 scan_expr(node.value, aliases)
                 return
             for child in ast.iter_child_nodes(node):
@@ -396,19 +409,40 @@ def _sqlite_persistence_construction_sites_from_sources(
             names = {name for name, _, _ in collector.imports}
             for name in names:
                 declarations = [item for item in collector.imports if item[0] == name]
-                tainted = [(value, node) for _, value, node in declarations if taint_label(value)]
+                tainted = [
+                    (value, node)
+                    for _, value, node in declarations
+                    if taint_label(value)
+                ]
+                navigation = [
+                    (value, node)
+                    for _, value, node in declarations
+                    if navigation_namespace(value)
+                ]
                 inherited_value = inherited.get(name)
-                if not tainted and inherited_value is None:
+                inherited_tainted = inherited_value and taint_label(
+                    inherited_value
+                )
+                if not tainted and not navigation and inherited_value is None:
                     continue
-                chosen = inherited_value or tainted[0][0]
+                chosen = (
+                    inherited_value
+                    if inherited_tainted
+                    else tainted[0][0]
+                    if tainted
+                    else inherited_value
+                    if inherited_value is not None
+                    else navigation[0][0]
+                )
                 label = taint_label(chosen)
                 for _, value, node in declarations:
-                    if value != chosen:
+                    if label and value != chosen:
                         record(node, label)
                 aliases[name] = chosen
             for name, binding in (*parameters, *collector.bindings):
                 if name in aliases:
-                    record(binding, taint_label(aliases[name]))
+                    if label := taint_label(aliases[name]):
+                        record(binding, label)
                     aliases.pop(name)
             for statement in statements:
                 scan_statement(statement, aliases, kind, class_outer)
@@ -730,6 +764,69 @@ def test_sqlite_construction_guard_resolves_qualified_and_aliased_calls(
     assert findings[0].endswith(f":{constructor}")
 
 
+@pytest.mark.parametrize(
+    ("source", "constructor"),
+    [
+        (
+            "import app.repositories as repos\n"
+            "repos.sqlite.database.SqliteDatabase(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "import app.services as services\n"
+            "services.sqlite_repository.KnowledgeStore(db)\n",
+            "KnowledgeStore",
+        ),
+        (
+            "from app import repositories as repos\n"
+            "repos.sqlite.database.SqliteDatabase(settings, root)\n",
+            "SqliteDatabase",
+        ),
+        (
+            "from app import services as services\n"
+            "services.sqlite_repository.KnowledgeStore(db)\n",
+            "KnowledgeStore",
+        ),
+    ],
+)
+def test_sqlite_construction_guard_resolves_navigation_parent_aliases(
+    source, constructor
+):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/navigation_escape.py": source}
+    ) == [f"app/navigation_escape.py:2:{constructor}"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import app.repositories as navigation\n"
+        "import app.models as navigation\n"
+        "navigation.sqlite.database.SqliteDatabase(settings, root)\n",
+        "import app.models as navigation\n"
+        "from app import repositories as navigation\n"
+        "navigation.sqlite.database.SqliteDatabase(settings, root)\n",
+    ],
+)
+def test_sqlite_construction_guard_preserves_navigation_across_mixed_imports(source):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/navigation_escape.py": source}
+    ) == ["app/navigation_escape.py:3:SqliteDatabase"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import app.repositories as repos\nconsume(repos)\n",
+        "from app import services as services\nconsume(services)\n",
+    ],
+)
+def test_sqlite_construction_guard_allows_navigation_alias_runtime_values(source):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/navigation_control.py": source}
+    ) == []
+
+
 def test_sqlite_construction_guard_allows_wrapper_static_helper_imports():
     source = (
         "from app.repositories.sqlite.knowledge_store import KnowledgeStore\n"
@@ -751,6 +848,10 @@ def test_sqlite_construction_guard_allows_wrapper_static_helper_imports():
             "app/repositories/sqlite/escape.py",
             "from .database import *\n",
         ),
+        (
+            "app/escape.py",
+            "from app.services.sqlite_compat import *\n",
+        ),
     ],
 )
 def test_sqlite_construction_guard_fails_closed_on_sqlite_star_imports(
@@ -759,6 +860,13 @@ def test_sqlite_construction_guard_fails_closed_on_sqlite_star_imports(
     assert _sqlite_persistence_construction_sites_from_sources(
         {relative: source}
     ) == [f"{relative}:1:*"]
+
+
+def test_sqlite_construction_guard_ignores_repository_prefix_star_imports():
+    source = "from app.repositories.sqlite_tools import *\n"
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/star_control.py": source}
+    ) == []
 
 
 def test_sqlite_construction_guard_ignores_non_sqlite_star_imports_and_aliases():
