@@ -44,7 +44,7 @@ from app.services.paper_meta import (
     paper_meta_prompt,
     verify_paper_meta,
 )
-from app.services.parsers import mineru_content_list_to_elements
+from app.services.parsers import mineru_content_list_to_elements, parser_class
 from app.services.prompts import NOTEBOOK_META_SCHEMA_HINT, notebook_meta_prompt
 from app.services.source_chunking import SourceChunkingService
 from app.services.source_embedding import SourceEmbeddingService
@@ -414,6 +414,8 @@ class SourceIngestionService:
         hooks: SourcePipelineHooks,
         *,
         doc_type: str = "",
+        file_name: str = "",
+        content: "bytes | None" = None,
     ) -> UploadedSourceSummary:
         """同 notebook 内已有相同内容的源 → 复用那一行，绝不新建第二条。
 
@@ -448,6 +450,18 @@ class SourceIngestionService:
         _extract_reconciling_doc_type 跑完比对一次再按新类型补跑。绝不在这里
         另起一条任务——KG job 池不按 source 串行，两条任务并发抽同一条源会互相
         清掉对方的 KG 产物（见 _extract_reconciling_doc_type）。
+
+        ``file_name``（本次上传的文件名，含后缀）是复用路径上第三件不能撒手的事，
+        与 doc_type 同构但更狠：后缀决定**解析器**（parse_source_file 按 file_name
+        后缀分派——.csv 逐行、.md 结构块、.docx/.pdf 各不同），所以同一份字节先传
+        .csv 再传 .md，既有行的 elements 其实来自错的解析器。doc_type 只喂抽取、
+        重抽即可；解析器决定的是 parse 本身，必须**整条流水线重跑**（像失败源那样）。
+        判据是 parser_class（后缀→解析器类别，与 parse_source_file 同一真源），
+        .md/.markdown 同类、未知后缀都归 'text'，所以这些互相之间不算变化。只对
+        **已定型**的行（extracted/failed）重跑：在飞行中的行由它自己的流水线拥有那
+        个文件，重排会让同一行并发两条流水线（与「在飞行中不重入」既有语义一致）。
+        ``content`` 供重写落盘文件用（内容与既有指纹一致、字节不变，只是换个带正确
+        后缀的名字，并清掉旧后缀的孤儿文件）；缺省时退化为只改 file_name/source_type。
         """
         summary = self.sources.get_source(source_id)
         incoming_doc_type = self.normalize_doc_type(doc_type or "")
@@ -457,9 +471,21 @@ class SourceIngestionService:
         retyped = bool(incoming_doc_type) and incoming_doc_type != stored_doc_type
         if retyped:
             self.sources.set_doc_type(source_id, incoming_doc_type)
-        if summary.parse_status == "failed":
-            # 失败源整条流水线重跑：解析产物本来就不可信，重跑顺带用上新类型。
-            # 排队前先把状态翻出 'failed'，这一步不是装饰，它同时兑现两件事：
+
+        # 后缀（→解析器）变化：内容相同 ≠ 意图相同（同构于 doc_type）。只对已定型
+        # 的行动手；在飞行中的行留给它自己的流水线，绝不并发重排。见方法 docstring。
+        reparse = (
+            bool(file_name)
+            and parser_class(file_name) != parser_class(summary.file_name or "")
+            and summary.parse_status in ("failed", "extracted")
+        )
+        if reparse:
+            self._repoint_reused_file(source_id, summary, file_name, content)
+
+        if reparse or summary.parse_status == "failed":
+            # 失败源 / 后缀变了的源整条流水线重跑：解析产物本来就不可信（失败）或
+            # 来自错的解析器（换后缀），重跑顺带用上新类型/新解析器。
+            # 排队前先把状态翻出终态，这一步不是装饰，它同时兑现两件事：
             # ① 让重试看得见。scheduler 是异步的，返回时 process_source 未必已经
             #    开始，本次响应里这一行还会是终态 'failed'，而前端只对非终态轮询
             #    （failed/extracted 之外一律轮询），于是这次重试对用户完全隐形，
@@ -493,11 +519,47 @@ class SourceIngestionService:
                 )
             else:
                 self._reextract_retyped(source_id, summary.notebook_id, hooks)
-        if retyped or summary.parse_status == "failed":
+        if retyped or reparse or summary.parse_status == "failed":
             summary = self.sources.get_source(source_id)
         return UploadedSourceSummary.model_validate(
             {**summary.model_dump(), "reused": True}
         )
+
+    def _repoint_reused_file(
+        self, source_id: str, summary: SourceDetail, file_name: str,
+        content: "bytes | None",
+    ) -> None:
+        """后缀（解析器）变了的复用行：把落盘文件按新名重写，并同步更新行的
+        file_name/source_type/file_path，好让紧接着的整条流水线重跑用上新解析器。
+
+        内容与既有指纹一致（这正是复用的前提），所以文件字节不变，只是换个带正确
+        后缀的名字——旧后缀的落盘文件随即成孤儿，清掉它（file_path 的后缀被
+        read_source_text 用来决定「读原文还是从 elements 重建」，与 file_name 同步
+        才不留脏状态）。``content`` 缺省时（防御性；仅上传路径会带内容）退化为只改
+        file_name/source_type、保留旧 file_path——重跑仍按 file_name 选对解析器、
+        读旧字节（内容相同），只是原文窗口读退化为 element 重建。"""
+        new_source_type = self.source_type_from_name(file_name)
+        if content is None:
+            self.sources.rename_source_file(
+                source_id, file_name=file_name, source_type=new_source_type
+            )
+            return
+        old_path = summary.file_path or ""
+        new_path = str(
+            self.source_files.write_upload(
+                summary.notebook_id, source_id, file_name, content
+            )
+        )
+        self.sources.rename_source_file(
+            source_id,
+            file_name=file_name,
+            source_type=new_source_type,
+            file_path=new_path,
+        )
+        if old_path and old_path != new_path:
+            # 旧后缀的文件成了孤儿。delete 仅在目录空时才连删目录，新文件同目录、
+            # 目录非空，不会误删。
+            self.source_files.delete(old_path)
 
     def _reextract_retyped(
         self, source_id: str, notebook_id: str, hooks: SourcePipelineHooks
@@ -608,13 +670,17 @@ class SourceIngestionService:
             digest = hashlib.sha256(file.content).hexdigest()
             # 同 notebook 内相同内容复用既有源，与 batch_ingest 的 already_ingested
             # 行为一致（此前 UI 路径会建出重复源）。跨 notebook 刻意不去重。
-            # doc_type 必须一起递进去：内容判重不代表用户这次的类型选择也该丢
-            # （见 reuse_uploaded_source）。
+            # doc_type 与 file_name 都必须一起递进去：内容判重不代表用户这次的类型
+            # 选择、乃至用的解析器（由后缀决定）也该丢（见 reuse_uploaded_source）。
+            # content 递进去，供后缀（解析器）变化时按新名重写落盘文件。
             existing_id = self.sources.source_id_by_hash(notebook_id, digest)
             if existing_id:
                 imported.append(
                     self.reuse_uploaded_source(
-                        existing_id, scheduler, hooks, doc_type=file.doc_type
+                        existing_id, scheduler, hooks,
+                        doc_type=file.doc_type,
+                        file_name=file_name,
+                        content=file.content,
                     )
                 )
                 continue

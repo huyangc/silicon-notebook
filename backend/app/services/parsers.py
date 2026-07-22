@@ -9,6 +9,38 @@ from xml.etree import ElementTree
 from app.models.sources import SourceElement
 
 
+def parser_class(file_name: str) -> str:
+    """Name the PARSER branch ``parse_source_file`` will dispatch to for this
+    filename's suffix. Single source of truth for the suffix→parser mapping —
+    ``parse_source_file`` dispatches on the very same tokens, so the two can
+    never drift apart (add a format in one place, both agree).
+
+    Why a caller (upload dedup) needs this: two files with identical BYTES but
+    different suffixes are parsed differently (Markdown blocks vs CSV rows vs
+    DOCX vs flat text). Content dedup keys on the hash alone, so without this
+    distinction a ``.md`` re-uploaded as ``.csv`` (or a mis-named file the user
+    is trying to correct) would silently reuse the wrongly-parsed row. Same
+    token ⇒ same parser ⇒ genuinely a duplicate; different token ⇒ re-parse.
+
+    Note ``.md``/``.markdown`` collapse to one token (same parser) and every
+    unknown suffix collapses to ``"text"`` (the plain-text fallback), so those
+    never count as a parser change against each other."""
+    suffix = Path(file_name).suffix.lower()
+    if suffix in {".md", ".markdown"}:
+        return "markdown"
+    if suffix == ".docx":
+        return "docx"
+    if suffix == ".pptx":
+        return "pptx"
+    if suffix == ".pdf":
+        return "pdf"
+    if suffix == ".csv":
+        return "csv"
+    if suffix in {".xlsx", ".xlsm"}:
+        return "xlsx"
+    return "text"
+
+
 def parse_source_file(
     source_id: str,
     file_path: str,
@@ -16,18 +48,18 @@ def parse_source_file(
     mineru_client: Any = None,
     persist_image: Any = None,
 ) -> List[SourceElement]:
-    suffix = Path(file_name).suffix.lower()
-    if suffix in {".md", ".markdown"}:
+    parser = parser_class(file_name)
+    if parser == "markdown":
         return parse_markdown(source_id, Path(file_path))
-    if suffix == ".docx":
+    if parser == "docx":
         return parse_docx(source_id, Path(file_path), file_name, mineru_client, persist_image)
-    if suffix == ".pptx":
+    if parser == "pptx":
         return parse_pptx(source_id, Path(file_path), file_name, mineru_client, persist_image)
-    if suffix == ".pdf":
+    if parser == "pdf":
         return parse_pdf(source_id, Path(file_path), file_name, mineru_client, persist_image)
-    if suffix == ".csv":
+    if parser == "csv":
         return parse_csv(source_id, Path(file_path))
-    if suffix in {".xlsx", ".xlsm"}:
+    if parser == "xlsx":
         return parse_xlsx(source_id, Path(file_path))
     return parse_plain_text(source_id, Path(file_path), "text")
 
