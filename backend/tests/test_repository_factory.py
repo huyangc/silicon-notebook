@@ -42,6 +42,7 @@ SQLITE_PERSISTENCE_CONSTRUCTORS = {
 def _sqlite_persistence_construction_sites_from_sources(
     sources: dict[str, str],
 ) -> list[str]:
+    """Interpret constructor aliases in Python evaluation order, per lexical scope."""
     offenders: list[str] = []
     for relative, source in sources.items():
         tree = ast.parse(source, filename=relative)
@@ -51,6 +52,7 @@ def _sqlite_persistence_construction_sites_from_sources(
         )
         if package_parts[-1:] == ["__init__"]:
             package_parts.pop()
+
         def dotted_name(node):
             if isinstance(node, ast.Name):
                 return node.id
@@ -58,32 +60,6 @@ def _sqlite_persistence_construction_sites_from_sources(
                 parent = dotted_name(node.value)
                 return f"{parent}.{node.attr}" if parent else node.attr
             return ""
-
-        scope_types = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
-
-        def scope_nodes(scope):
-            roots = [scope.body] if isinstance(scope, ast.Lambda) else scope.body
-            pending = list(reversed(roots))
-            while pending:
-                node = pending.pop()
-                yield node
-                if isinstance(node, scope_types):
-                    body_nodes = (
-                        {id(node.body)}
-                        if isinstance(node, ast.Lambda)
-                        else {id(statement) for statement in node.body}
-                    )
-                    pending.extend(
-                        reversed(
-                            [
-                                child
-                                for child in ast.iter_child_nodes(node)
-                                if id(child) not in body_nodes
-                            ]
-                        )
-                    )
-                    continue
-                pending.extend(reversed(list(ast.iter_child_nodes(node))))
 
         def bound_names(target):
             if isinstance(target, ast.Name):
@@ -98,10 +74,7 @@ def _sqlite_persistence_construction_sites_from_sources(
                 return bound_names(target.value)
             return set()
 
-        def argument_names(scope):
-            if not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-                return set()
-            args = scope.args
+        def argument_names(args):
             names = {
                 argument.arg
                 for argument in (*args.posonlyargs, *args.args, *args.kwonlyargs)
@@ -112,156 +85,304 @@ def _sqlite_persistence_construction_sites_from_sources(
                 names.add(args.kwarg.arg)
             return names
 
-        def scan_scope(scope, inherited_modules, inherited_symbols):
-            nodes = list(scope_nodes(scope))
-            local_names = argument_names(scope)
-            explicit_outer_names: set[str] = set()
-            assignments: list[tuple[str, ast.expr]] = []
+        def resolve_name(node, aliases):
+            if isinstance(node, ast.NamedExpr):
+                return resolve_name(node.value, aliases)
+            dotted = dotted_name(node)
+            head, separator, tail = dotted.partition(".")
+            suffix = f".{tail}" if separator else ""
+            return aliases.get(head, head) + suffix
 
-            def add_assignment(target, value):
-                if isinstance(target, ast.Name):
-                    local_names.add(target.id)
-                    assignments.append((target.id, value))
-                    return
-                if (
-                    isinstance(target, (ast.Tuple, ast.List))
-                    and isinstance(value, (ast.Tuple, ast.List))
-                    and len(target.elts) == len(value.elts)
-                ):
-                    for target_element, value_element in zip(target.elts, value.elts):
-                        add_assignment(target_element, value_element)
-                    return
-                local_names.update(bound_names(target))
+        def is_sqlite_reference(value):
+            return value == "app" or value.startswith("app.repositories.sqlite")
 
-            for node in nodes:
-                if isinstance(node, (ast.Global, ast.Nonlocal)):
-                    explicit_outer_names.update(node.names)
-                elif isinstance(node, ast.Assign):
-                    for target in node.targets:
-                        add_assignment(target, node.value)
-                elif isinstance(node, ast.AnnAssign) and node.value is not None:
-                    add_assignment(node.target, node.value)
-                elif isinstance(node, ast.NamedExpr):
-                    add_assignment(node.target, node.value)
-                elif isinstance(node, (ast.For, ast.AsyncFor)):
-                    local_names.update(bound_names(node.target))
-                elif isinstance(node, (ast.With, ast.AsyncWith)):
-                    for item in node.items:
-                        if item.optional_vars:
-                            local_names.update(bound_names(item.optional_vars))
-                elif isinstance(node, ast.ExceptHandler) and node.name:
-                    local_names.add(node.name)
-                elif isinstance(node, scope_types) and not isinstance(node, ast.Lambda):
-                    local_names.add(node.name)
-                elif isinstance(node, ast.Import):
-                    local_names.update(
-                        alias.asname or alias.name.split(".", 1)[0]
-                        for alias in node.names
+        def bind_name(name, value, aliases):
+            if value and is_sqlite_reference(value):
+                aliases[name] = value
+            else:
+                aliases.pop(name, None)
+
+        def binding_values(target, value, aliases):
+            if isinstance(target, ast.Name):
+                return [(target.id, resolve_name(value, aliases))]
+            if (
+                isinstance(target, (ast.Tuple, ast.List))
+                and isinstance(value, (ast.Tuple, ast.List))
+                and len(target.elts) == len(value.elts)
+            ):
+                return [
+                    binding
+                    for target_element, value_element in zip(
+                        target.elts, value.elts
                     )
-                elif isinstance(node, ast.ImportFrom):
-                    local_names.update(
-                        alias.asname or alias.name
-                        for alias in node.names
-                        if alias.name != "*"
+                    for binding in binding_values(
+                        target_element, value_element, aliases
                     )
+                ]
+            return [(name, "") for name in bound_names(target)]
 
-            local_names.difference_update(explicit_outer_names)
-            module_aliases = {
-                name: target
-                for name, target in inherited_modules.items()
-                if name not in local_names
+        def bind_target(target, value, aliases):
+            bindings = binding_values(target, value, aliases)
+            for name, resolved in bindings:
+                bind_name(name, resolved, aliases)
+
+        def unbind_target(target, aliases):
+            for name in bound_names(target):
+                aliases.pop(name, None)
+
+        def resolved_import_module(node):
+            if not node.level:
+                return node.module or ""
+            keep = len(package_parts) - (node.level - 1)
+            base_parts = package_parts[:max(0, keep)]
+            if node.module:
+                base_parts.extend(node.module.split("."))
+            return ".".join(base_parts)
+
+        def pattern_captures(pattern):
+            captures: set[str] = set()
+            if isinstance(pattern, ast.MatchAs):
+                if pattern.name:
+                    captures.add(pattern.name)
+                if pattern.pattern:
+                    captures.update(pattern_captures(pattern.pattern))
+            elif isinstance(pattern, ast.MatchStar):
+                if pattern.name:
+                    captures.add(pattern.name)
+            elif isinstance(pattern, ast.MatchMapping):
+                if pattern.rest:
+                    captures.add(pattern.rest)
+                for nested in pattern.patterns:
+                    captures.update(pattern_captures(nested))
+            elif isinstance(pattern, ast.MatchSequence):
+                for nested in pattern.patterns:
+                    captures.update(pattern_captures(nested))
+            elif isinstance(pattern, ast.MatchClass):
+                for nested in (*pattern.patterns, *pattern.kwd_patterns):
+                    captures.update(pattern_captures(nested))
+            elif isinstance(pattern, ast.MatchOr):
+                for nested in pattern.patterns:
+                    captures.update(pattern_captures(nested))
+            return captures
+
+        def record_call(node, aliases):
+            resolved = resolve_name(node.func, aliases)
+            constructor = resolved.rsplit(".", 1)[-1]
+            if (
+                resolved.startswith("app.repositories.sqlite.")
+                and constructor in SQLITE_PERSISTENCE_CONSTRUCTORS
+            ):
+                offenders.append(f"{relative}:{node.lineno}:{constructor}")
+
+        def scan_comprehension(node, aliases, method_inherited):
+            # Python evaluates each iterable before binding that generator's
+            # target; its ifs and the final elt/key/value see the bound target.
+            first, *remaining = node.generators
+            scan_expression(first.iter, aliases, method_inherited)
+            local_aliases = dict(aliases)
+            unbind_target(first.target, local_aliases)
+            for condition in first.ifs:
+                scan_expression(condition, local_aliases, method_inherited)
+            for generator in remaining:
+                scan_expression(generator.iter, local_aliases, method_inherited)
+                unbind_target(generator.target, local_aliases)
+                for condition in generator.ifs:
+                    scan_expression(condition, local_aliases, method_inherited)
+            if isinstance(node, ast.DictComp):
+                scan_expression(node.key, local_aliases, method_inherited)
+                scan_expression(node.value, local_aliases, method_inherited)
+            else:
+                scan_expression(node.elt, local_aliases, method_inherited)
+
+        def scan_expression(node, aliases, method_inherited=None):
+            if node is None:
+                return
+            if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                scan_comprehension(node, aliases, method_inherited)
+                return
+            if isinstance(node, ast.NamedExpr):
+                scan_expression(node.value, aliases, method_inherited)
+                bind_target(node.target, node.value, aliases)
+                return
+            if isinstance(node, ast.Lambda):
+                for default in (*node.args.defaults, *node.args.kw_defaults):
+                    scan_expression(default, aliases, method_inherited)
+                body_aliases = dict(aliases)
+                for name in argument_names(node.args):
+                    body_aliases.pop(name, None)
+                scan_expression(node.body, body_aliases)
+                return
+            if isinstance(node, ast.Call):
+                scan_expression(node.func, aliases, method_inherited)
+                record_call(node, aliases)
+                for argument in node.args:
+                    scan_expression(argument, aliases, method_inherited)
+                for keyword in node.keywords:
+                    scan_expression(keyword.value, aliases, method_inherited)
+                return
+            for child in ast.iter_child_nodes(node):
+                scan_expression(child, aliases, method_inherited)
+
+        def merge_aliases(target, branches):
+            if not branches:
+                return
+            # A post-branch alias is trusted only when every possible branch
+            # leaves the exact same canonical constructor identity.
+            common = {
+                name: value
+                for name, value in branches[0].items()
+                if all(branch.get(name) == value for branch in branches[1:])
             }
-            symbol_aliases = {
-                name: target
-                for name, target in inherited_symbols.items()
-                if name not in local_names
-            }
+            target.clear()
+            target.update(common)
 
-            def resolve_name(node):
-                dotted = dotted_name(node)
-                head, separator, tail = dotted.partition(".")
-                suffix = f".{tail}" if separator else ""
-                if head in symbol_aliases:
-                    return symbol_aliases[head] + suffix
-                if head in module_aliases:
-                    return module_aliases[head] + suffix
-                return dotted
+        def scan_function_definition(node, aliases, method_inherited):
+            for decorator in node.decorator_list:
+                scan_expression(decorator, aliases, method_inherited)
+            for default in (*node.args.defaults, *node.args.kw_defaults):
+                scan_expression(default, aliases, method_inherited)
+            for argument in (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ):
+                scan_expression(argument.annotation, aliases, method_inherited)
+            if node.args.vararg:
+                scan_expression(node.args.vararg.annotation, aliases, method_inherited)
+            if node.args.kwarg:
+                scan_expression(node.args.kwarg.annotation, aliases, method_inherited)
+            scan_expression(node.returns, aliases, method_inherited)
+            body_aliases = dict(
+                method_inherited if method_inherited is not None else aliases
+            )
+            for name in argument_names(node.args):
+                body_aliases.pop(name, None)
+            scan_block(node.body, body_aliases)
+            aliases.pop(node.name, None)
 
-            for node in nodes:
-                if isinstance(node, ast.Import):
-                    for alias in node.names:
-                        local = alias.asname or alias.name.split(".", 1)[0]
-                        module_aliases[local] = (
-                            alias.name if alias.asname else local
-                        )
-                elif isinstance(node, ast.ImportFrom):
-                    if node.level:
-                        keep = len(package_parts) - (node.level - 1)
-                        base_parts = package_parts[:max(0, keep)]
-                        if node.module:
-                            base_parts.extend(node.module.split("."))
-                        resolved_module = ".".join(base_parts)
-                    else:
-                        resolved_module = node.module or ""
-                    for alias in node.names:
-                        if alias.name == "*" and (
-                            resolved_module == "app.repositories.sqlite"
-                            or resolved_module.startswith(
-                                "app.repositories.sqlite."
-                            )
+        def scan_statement(node, aliases, method_inherited=None):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scan_function_definition(node, aliases, method_inherited)
+            elif isinstance(node, ast.ClassDef):
+                for decorator in node.decorator_list:
+                    scan_expression(decorator, aliases, method_inherited)
+                for base in node.bases:
+                    scan_expression(base, aliases, method_inherited)
+                for keyword in node.keywords:
+                    scan_expression(keyword.value, aliases, method_inherited)
+                outer_aliases = dict(
+                    method_inherited if method_inherited is not None else aliases
+                )
+                # Method bodies close over the surrounding lexical scope;
+                # bare names never inherit the class body's local namespace.
+                scan_block(node.body, dict(aliases), outer_aliases)
+                aliases.pop(node.name, None)
+            elif isinstance(node, ast.Import):
+                for imported in node.names:
+                    local = imported.asname or imported.name.split(".", 1)[0]
+                    aliases[local] = imported.name if imported.asname else local
+            elif isinstance(node, ast.ImportFrom):
+                module = resolved_import_module(node)
+                for imported in node.names:
+                    if imported.name == "*":
+                        if (
+                            module == "app.repositories.sqlite"
+                            or module.startswith("app.repositories.sqlite.")
                         ):
                             offenders.append(f"{relative}:{node.lineno}:*")
-                            continue
-                        local = alias.asname or alias.name
-                        target = ".".join(
-                            part
-                            for part in (resolved_module, alias.name)
-                            if part
-                        )
-                        if resolved_module == "app.repositories.sqlite":
-                            module_aliases[local] = target
-                        else:
-                            symbol_aliases[local] = target
-
-            for target, _value in assignments:
-                module_aliases.pop(target, None)
-                symbol_aliases.pop(target, None)
-            changed = True
-            while changed:
-                changed = False
-                for target, value in assignments:
-                    resolved = resolve_name(value)
-                    constructor = resolved.rsplit(".", 1)[-1]
-                    if (
-                        resolved.startswith("app.repositories.sqlite.")
-                        and constructor in SQLITE_PERSISTENCE_CONSTRUCTORS
-                        and symbol_aliases.get(target) != resolved
-                    ):
-                        symbol_aliases[target] = resolved
-                        changed = True
-
-            for node in nodes:
-                if not isinstance(node, ast.Call):
-                    continue
-                resolved = resolve_name(node.func)
-                constructor = resolved.rsplit(".", 1)[-1]
-                if (
-                    resolved.startswith("app.repositories.sqlite.")
-                    and constructor in SQLITE_PERSISTENCE_CONSTRUCTORS
-                ):
-                    offenders.append(f"{relative}:{node.lineno}:{constructor}")
-
-            child_modules = module_aliases
-            child_symbols = symbol_aliases
-            for node in nodes:
-                if not isinstance(node, scope_types):
-                    continue
-                if isinstance(scope, ast.ClassDef):
-                    scan_scope(node, inherited_modules, inherited_symbols)
+                        continue
+                    local = imported.asname or imported.name
+                    aliases[local] = ".".join(
+                        part for part in (module, imported.name) if part
+                    )
+            elif isinstance(node, ast.Assign):
+                scan_expression(node.value, aliases, method_inherited)
+                bindings = [
+                    binding_values(target, node.value, aliases)
+                    for target in node.targets
+                ]
+                for target_bindings in bindings:
+                    for name, value in target_bindings:
+                        bind_name(name, value, aliases)
+            elif isinstance(node, ast.AnnAssign):
+                scan_expression(node.annotation, aliases, method_inherited)
+                if node.value is not None:
+                    scan_expression(node.value, aliases, method_inherited)
+                    bind_target(node.target, node.value, aliases)
                 else:
-                    scan_scope(node, child_modules, child_symbols)
+                    unbind_target(node.target, aliases)
+            elif isinstance(node, ast.AugAssign):
+                scan_expression(node.target, aliases, method_inherited)
+                scan_expression(node.value, aliases, method_inherited)
+                unbind_target(node.target, aliases)
+            elif isinstance(node, ast.Expr):
+                scan_expression(node.value, aliases, method_inherited)
+            elif isinstance(node, ast.If):
+                scan_expression(node.test, aliases, method_inherited)
+                original = dict(aliases)
+                body_aliases = dict(original)
+                scan_block(node.body, body_aliases, method_inherited)
+                else_aliases = dict(original)
+                scan_block(node.orelse, else_aliases, method_inherited)
+                merge_aliases(aliases, [body_aliases, else_aliases])
+            elif isinstance(node, ast.Match):
+                scan_expression(node.subject, aliases, method_inherited)
+                captures: set[str] = set()
+                for case in node.cases:
+                    case_aliases = dict(aliases)
+                    case_captures = pattern_captures(case.pattern)
+                    captures.update(case_captures)
+                    for name in case_captures:
+                        case_aliases.pop(name, None)
+                    scan_expression(case.guard, case_aliases, method_inherited)
+                    scan_block(case.body, case_aliases, method_inherited)
+                for name in captures:
+                    aliases.pop(name, None)
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                scan_expression(node.iter, aliases, method_inherited)
+                body_aliases = dict(aliases)
+                unbind_target(node.target, body_aliases)
+                scan_block(node.body, body_aliases, method_inherited)
+                scan_block(node.orelse, dict(aliases), method_inherited)
+                unbind_target(node.target, aliases)
+            elif isinstance(node, ast.While):
+                scan_expression(node.test, aliases, method_inherited)
+                scan_block(node.body, dict(aliases), method_inherited)
+                scan_block(node.orelse, dict(aliases), method_inherited)
+            elif isinstance(node, (ast.With, ast.AsyncWith)):
+                body_aliases = dict(aliases)
+                for item in node.items:
+                    scan_expression(item.context_expr, body_aliases, method_inherited)
+                    if item.optional_vars:
+                        unbind_target(item.optional_vars, body_aliases)
+                scan_block(node.body, body_aliases, method_inherited)
+            elif isinstance(node, ast.Try):
+                scan_block(node.body, dict(aliases), method_inherited)
+                for handler in node.handlers:
+                    handler_aliases = dict(aliases)
+                    scan_expression(handler.type, handler_aliases, method_inherited)
+                    if handler.name:
+                        handler_aliases.pop(handler.name, None)
+                    scan_block(handler.body, handler_aliases, method_inherited)
+                scan_block(node.orelse, dict(aliases), method_inherited)
+                scan_block(node.finalbody, dict(aliases), method_inherited)
+            elif isinstance(node, (ast.Return, ast.Raise, ast.Assert)):
+                for child in ast.iter_child_nodes(node):
+                    if isinstance(child, ast.expr):
+                        scan_expression(child, aliases, method_inherited)
+            elif isinstance(node, ast.Delete):
+                for target in node.targets:
+                    unbind_target(target, aliases)
+            else:
+                for child in ast.iter_child_nodes(node):
+                    if isinstance(child, ast.expr):
+                        scan_expression(child, aliases, method_inherited)
 
-        scan_scope(tree, {}, {})
+        def scan_block(statements, aliases, method_inherited=None):
+            for statement in statements:
+                scan_statement(statement, aliases, method_inherited)
+
+        scan_block(tree.body, {})
     return offenders
 
 
@@ -676,6 +797,140 @@ def test_sqlite_construction_guard_scans_class_methods_once_without_class_aliase
     assert _sqlite_persistence_construction_sites_from_sources(
         {"app/class_scope.py": source}
     ) == ["app/class_scope.py:5:SqliteDatabase"]
+
+
+@pytest.mark.parametrize(
+    ("scope", "body", "line"),
+    [
+        (
+            "module",
+            "from app.repositories.sqlite.database import SqliteDatabase as DB\n"
+            "DB(settings, root)\n"
+            "DB = Fake\n",
+            2,
+        ),
+        (
+            "module",
+            "DB = Fake\n"
+            "from app.repositories.sqlite.database import SqliteDatabase as DB\n"
+            "DB(settings, root)\n",
+            3,
+        ),
+        (
+            "function",
+            "def build():\n"
+            "    from app.repositories.sqlite.database import SqliteDatabase as DB\n"
+            "    DB(settings, root)\n"
+            "    DB = Fake\n",
+            3,
+        ),
+        (
+            "function",
+            "def build():\n"
+            "    DB = Fake\n"
+            "    from app.repositories.sqlite.database import SqliteDatabase as DB\n"
+            "    DB(settings, root)\n",
+            4,
+        ),
+        (
+            "class",
+            "class Example:\n"
+            "    from app.repositories.sqlite.database import SqliteDatabase as DB\n"
+            "    DB(settings, root)\n"
+            "    DB = Fake\n",
+            3,
+        ),
+        (
+            "class",
+            "class Example:\n"
+            "    DB = Fake\n"
+            "    from app.repositories.sqlite.database import SqliteDatabase as DB\n"
+            "    DB(settings, root)\n",
+            4,
+        ),
+    ],
+)
+def test_sqlite_construction_guard_respects_statement_order(scope, body, line):
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {f"app/{scope}_order.py": body}
+    ) == [f"app/{scope}_order.py:{line}:SqliteDatabase"]
+
+
+def test_sqlite_construction_guard_respects_comprehension_execution_order():
+    source = (
+        "from app.repositories.sqlite.database import SqliteDatabase\n"
+        "outer = [item for SqliteDatabase in SqliteDatabase()]\n"
+        "shadowed = [SqliteDatabase() for SqliteDatabase in values]\n"
+        "ordered = [\n"
+        "    SqliteDatabase()\n"
+        "    for item in values\n"
+        "    if SqliteDatabase()\n"
+        "    for SqliteDatabase in SqliteDatabase()\n"
+        "    if SqliteDatabase()\n"
+        "]\n"
+        "after = SqliteDatabase()\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/comprehension_order.py": source}
+    ) == [
+        "app/comprehension_order.py:2:SqliteDatabase",
+        "app/comprehension_order.py:7:SqliteDatabase",
+        "app/comprehension_order.py:8:SqliteDatabase",
+        "app/comprehension_order.py:11:SqliteDatabase",
+    ]
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "[SqliteDatabase() for SqliteDatabase in values]",
+        "{SqliteDatabase() for SqliteDatabase in values}",
+        "(SqliteDatabase() for SqliteDatabase in values)",
+        "{SqliteDatabase(): SqliteDatabase() for SqliteDatabase in values}",
+    ],
+)
+def test_sqlite_construction_guard_keeps_comprehension_targets_local(expression):
+    source = (
+        "from app.repositories.sqlite.database import SqliteDatabase\n"
+        f"result = {expression}\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/comprehension_shadow.py": source}
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "SqliteDatabase",
+        "[head, *SqliteDatabase]",
+        "{'key': value, **SqliteDatabase}",
+        "[SqliteDatabase, [nested]]",
+        "Box(value=SqliteDatabase)",
+    ],
+)
+def test_sqlite_construction_guard_honors_match_pattern_captures(pattern):
+    source = (
+        "from app.repositories.sqlite.database import SqliteDatabase\n"
+        "match value:\n"
+        f"    case {pattern}:\n"
+        "        SqliteDatabase(settings, root)\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/match_capture.py": source}
+    ) == []
+
+
+def test_sqlite_construction_guard_does_not_treat_match_class_as_a_capture():
+    source = (
+        "from app.repositories.sqlite.database import SqliteDatabase\n"
+        "match value:\n"
+        "    case SqliteDatabase():\n"
+        "        SqliteDatabase(settings, root)\n"
+    )
+    assert _sqlite_persistence_construction_sites_from_sources(
+        {"app/match_class.py": source}
+    ) == ["app/match_class.py:4:SqliteDatabase"]
 
 
 def test_create_repository_selects_sqlite_from_only_the_active_url(monkeypatch, tmp_path):
