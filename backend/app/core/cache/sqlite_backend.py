@@ -256,11 +256,14 @@ class SqliteCacheBackend:
                 "SELECT COUNT(*) n, COALESCE(SUM(size),0) b FROM cache").fetchone()
             by_tag = {r["tag"]: r["n"] for r in db.execute(
                 "SELECT tag, COUNT(*) n FROM cache GROUP BY tag").fetchall()}
-        reads = self._hits + self._misses
+            # 计数快照必须在锁内一次取齐：并发 get() 下分三次读会让同一份返回值里
+            # 的 hit_rate 与 hits/misses 互相对不上，读者据此排查问题会被误导。
+            hits, misses = self._hits, self._misses
+        reads = hits + misses
         return {
             "entries": row["n"], "bytes": row["b"], "by_tag": by_tag,
-            "hits": self._hits, "misses": self._misses,
-            "hit_rate": (self._hits / reads) if reads else 0.0,
+            "hits": hits, "misses": misses,
+            "hit_rate": (hits / reads) if reads else 0.0,
         }
 
     # ------------------------------------------------------------------ 运维
