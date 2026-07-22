@@ -380,9 +380,10 @@ def run_ingest(
     INSERT 时写的(早于 parse),所以一个 parse 中途被中断的源,hash 已经在库、内容却
     是空的:旧的二元判定(hash 命中即 skipped)会把它永久认账成已摄取,再也补不回来。
     两分流(ingest 是无 KG 阶段,没有「已有 KG → 跳过」那一档):
-      hash 未命中         → upload_sources → uploaded
-      命中且管线已跑完    → 真的已摄取     → skipped
-      命中且管线没跑完    → process_source → reparsed / failed(按真实结果计)
+      hash 未命中           → upload_sources → uploaded
+      命中且管线已跑完      → 真的已摄取     → skipped
+      命中且**可能正在跑**  → 不抢,让出      → in_flight
+      命中且管线没跑完      → process_source → reparsed / failed(按真实结果计)
 
     「已跑完」只认**管线终态**(sources_with_completed_parse),刻意不看「有没有
     element」。两个方向都会错:
@@ -394,7 +395,7 @@ def run_ingest(
         「无 element 即中断」会把它们每次重跑都再解析一遍,永远不收敛。
     """
     log = log or (lambda _e: None)
-    counts = {"uploaded": 0, "skipped": 0, "reparsed": 0, "failed": 0}
+    counts = {"uploaded": 0, "skipped": 0, "reparsed": 0, "in_flight": 0, "failed": 0}
     orig_provider = repo.settings.embed_provider
     repo.settings.embed_provider = ""   # 摄取期零嵌入:parse+chunk 快、无 429
 
@@ -404,6 +405,10 @@ def run_ingest(
     # 「有 element 即完成」会永远跳过它,而收尾的 backfill_chunk_embeddings 只嵌入
     # **已存在**的 chunk,一个 chunk 都没有的源它救不回来。
     done = repo.maintenance.sources_with_completed_parse(notebook_id)
+    # 可能正被别的进程处理的源(服务端在跑、或另一个批处理)。process_source 没有
+    # source 级单飞守卫且会 clear/replace 抽取态,两边同时跑会互相覆盖——离线 CLI
+    # 不该碰服务端进行中的行,与崩溃兜底只在服务端跑是同一条原则。
+    in_flight = repo.maintenance.sources_in_flight_parse(notebook_id)
     # `parsed` 是快照,看不见本次运行刚产出的 elements:输入目录里若有两个内容相同的
     # 文件,第二个会 hash 命中(第一个刚建的源)却不在快照里 → 被误判成需要 reparse,
     # 白跑一遍 parse。用「本次已认领的内容哈希」集合挡掉(线程安全,_one 在池里并发跑)。
@@ -430,6 +435,8 @@ def run_ingest(
                 return ("uploaded", path, None)
             if sid in done:
                 return ("skipped", path, None)
+            if sid in in_flight:
+                return ("in_flight", path, None)   # 别人在处理,不抢
             # 已建源但 parse 没跑完(上次中断/未落地)→ 重新 parse。调的是
             # upload_sources(scheduler=None) 内部同一个 process_source,不引入新的模型暴露。
             #
