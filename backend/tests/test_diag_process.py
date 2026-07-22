@@ -1801,10 +1801,20 @@ def test_real_linux_proc_resolves_lightweight_uvicorn_argv(tmp_path):
         env=env,
     )
     try:
+        class ChildOnlyProcAdapter(process.ProcAdapter):
+            def list_pids(self, **_kwargs):
+                self.reset_scan_state()
+                return (child.pid,)
+
+        proc = ChildOnlyProcAdapter()
         deadline = time.monotonic() + 2
         result = None
         while time.monotonic() < deadline:
-            result = process.resolve_backend_pid(root, self_pid=os.getpid())
+            result = process.resolve_backend_pid(
+                root,
+                proc=proc,
+                self_pid=os.getpid(),
+            )
             if result.get("pid") == child.pid:
                 break
             time.sleep(0.02)
