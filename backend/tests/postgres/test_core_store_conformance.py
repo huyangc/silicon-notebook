@@ -34,6 +34,7 @@ from app.repositories.sqlite.notebook_store import NotebookStore as SqliteNotebo
 from app.repositories.sqlite.sharing_store import SharingStore as SqliteSharingStore
 from app.repositories.sqlite.source_store import SourceStore as SqliteSourceStore
 from app.services.notebook_catalog import NotebookSummaryQuery
+from app.services import repository_facade, sqlite_notebook_sharing
 
 
 NOW = "2026-07-22T10:00:00+00:00"
@@ -209,6 +210,30 @@ class _EmptySummaryQueries:
     @staticmethod
     def visible_pending_kg_source_count(connection, notebook_id):
         return 0
+
+
+def test_canonical_repository_clocks_emit_offset_aware_iso():
+    for clock in (repository_facade._now, sqlite_notebook_sharing._now):
+        value = datetime.fromisoformat(clock())
+        assert value.utcoffset() is not None
+
+
+def test_canonical_repository_clocks_preserve_dst_fold_offset(monkeypatch):
+    local_zone = ZoneInfo("America/Los_Angeles")
+
+    class FoldOneClock:
+        @classmethod
+        def now(cls):
+            return datetime(2026, 11, 1, 1, 30, fold=1)
+
+    monkeypatch.setattr(repository_facade, "datetime", FoldOneClock)
+    monkeypatch.setattr(sqlite_notebook_sharing, "datetime", FoldOneClock)
+    with _process_timezone(local_zone.key):
+        values = [
+            datetime.fromisoformat(clock())
+            for clock in (repository_facade._now, sqlite_notebook_sharing._now)
+        ]
+    assert {value.utcoffset() for value in values} == {timedelta(hours=-8)}
 
 
 @pytest.mark.parametrize(
@@ -519,6 +544,126 @@ def test_pg_copy_sentinel_sweep_respects_naive_local_creation_time(
                 "SELECT id FROM notebooks WHERE status='copying' ORDER BY id COLLATE \"C\""
             ).fetchall()
     assert [row["id"] for row in rows] == ["nb-copy-fresh-local"]
+
+
+@pytest.mark.postgres_integration
+def test_pg_copy_sentinel_sweep_preserves_production_clock_dst_fold(
+    postgres_database,
+    postgres_settings,
+    monkeypatch,
+):
+    from app.repositories.postgres import sharing_store as pg_sharing_store
+    from app.repositories.postgres.migrator import PostgresMigrator
+
+    assert PostgresMigrator(postgres_database).migrate() == 6
+    settings = postgres_settings.model_copy(
+        update={"notebook_copy_stale_seconds": 120}
+    )
+    new_id = _new_id_factory()
+    local_zone = ZoneInfo("America/Los_Angeles")
+
+    class FoldClock:
+        current = datetime(2026, 11, 1, 1, 30, fold=1)
+
+        @classmethod
+        def now(cls):
+            return cls.current
+
+    monkeypatch.setattr(repository_facade, "datetime", FoldClock)
+    monkeypatch.setattr(
+        pg_sharing_store,
+        "utc_now",
+        lambda: datetime(2026, 11, 1, 9, 31, tzinfo=timezone.utc),
+    )
+    identity = PostgresIdentityStore(postgres_database, settings, {})
+    notebooks = PostgresNotebookStore(
+        postgres_database,
+        new_id=new_id,
+        now=repository_facade._now,
+    )
+    sharing = PostgresSharingStore(
+        postgres_database,
+        settings,
+        now=repository_facade._now,
+        insert_row=PostgresSharingStore.insert_row_values,
+    )
+
+    with _process_timezone(local_zone.key):
+        owner = identity.create_user("z00123456", "password-25")
+        source_notebook_id = notebooks.create_row(
+            NotebookCreate(name="Fold sentinel template"), owner.id
+        )
+        template = sharing.snapshot_copy_rows(source_notebook_id)["notebooks"][0]
+
+        def insert_sentinel(notebook_id: str, created_at: str) -> None:
+            row = dict(template)
+            row.update(
+                id=notebook_id,
+                name=notebook_id,
+                status="copying",
+                created_by=owner.id,
+                created_at=created_at,
+                updated_at=created_at,
+            )
+            sharing.insert_copy_rows("notebooks", [row], chunk_size=1)
+
+        fresh = repository_facade._now()
+        assert datetime.fromisoformat(fresh).utcoffset() == timedelta(hours=-8)
+        insert_sentinel("nb-copy-fold-fresh", fresh)
+
+        FoldClock.current = datetime(2026, 11, 1, 1, 27, fold=1)
+        stale = repository_facade._now()
+        assert datetime.fromisoformat(stale).utcoffset() == timedelta(hours=-8)
+        insert_sentinel("nb-copy-fold-stale", stale)
+
+        assert sharing.sweep_stale_copies(created_by=owner.id) == 1
+        with postgres_database.connect() as connection:
+            rows = connection.execute(
+                "SELECT id FROM notebooks WHERE status='copying' ORDER BY id COLLATE \"C\""
+            ).fetchall()
+    assert [row["id"] for row in rows] == ["nb-copy-fold-fresh"]
+
+
+def test_notebook_and_source_created_labels_use_local_calendar_date(
+    core_stores: CoreStores,
+):
+    local_zone = ZoneInfo("Asia/Shanghai")
+    local_created = datetime(2026, 7, 23, 0, 30, tzinfo=local_zone).isoformat()
+
+    def clock() -> str:
+        return local_created
+
+    notebooks = type(core_stores.notebooks)(
+        core_stores.database,
+        new_id=_new_id_factory(),
+        now=clock,
+    )
+    sources = type(core_stores.sources)(core_stores.database, now=clock)
+    with _process_timezone(local_zone.key):
+        owner = core_stores.identity.create_user("a00123456", "password-26")
+        notebook_id = notebooks.create_row(
+            NotebookCreate(name="Local calendar date"), owner.id
+        )
+        sources.insert_source(
+            source_id="src-local-calendar",
+            notebook_id=notebook_id,
+            title="Local calendar source",
+            source_type="markdown",
+            status="parsed",
+            parse_status="parsed",
+            file_name="calendar.md",
+            file_path="uploads/calendar.md",
+            file_size=1,
+            file_hash="calendar",
+            summary="",
+            doc_type="",
+        )
+        summaries = NotebookSummaryQuery(core_stores.database, _EmptySummaryQueries())
+        with core_stores.database.connect() as connection:
+            notebook = summaries.from_row(connection, notebooks.get_row(notebook_id))
+        source = sources.get_source("src-local-calendar")
+    assert notebook.created_label == "2026年7月23日"
+    assert source.created_label == "2026年7月23日"
 
 
 def test_cross_owner_base_visibility_fails_closed_after_downgrade(

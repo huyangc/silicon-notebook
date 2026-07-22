@@ -4,7 +4,7 @@ from datetime import datetime
 
 
 def _now() -> str:
-    return datetime.now().replace(microsecond=0).isoformat()
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
 
 
 def _repository_new_id(prefix: str) -> str:

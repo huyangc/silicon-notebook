@@ -19,6 +19,7 @@ from app.repositories.postgres._store_utils import (
     execute_many,
     json_value,
     jsonb,
+    local_datetime,
     normalized_clock,
     normalize_timestamp,
     placeholders,
@@ -30,13 +31,10 @@ _UNSET = SOURCE_PAPER_META_UNSET
 
 
 def _created_label(value: object) -> str:
-    if isinstance(value, datetime):
-        parsed = value
-    else:
-        try:
-            parsed = datetime.fromisoformat(str(value))
-        except ValueError:
-            parsed = datetime.now()
+    try:
+        parsed = local_datetime(value)
+    except (TypeError, ValueError):
+        parsed = datetime.now().astimezone()
     return f"{parsed.year}年{parsed.month}月{parsed.day}日"
 
 

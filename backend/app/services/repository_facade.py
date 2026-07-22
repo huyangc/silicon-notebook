@@ -3500,7 +3500,7 @@ class RepositoryFacade:
 
 
 def _now() -> str:
-    return datetime.now().replace(microsecond=0).isoformat()
+    return datetime.now().astimezone().replace(microsecond=0).isoformat()
 
 
 def _citation(label: str, evidence: Evidence, tier: str = "personal") -> Citation:

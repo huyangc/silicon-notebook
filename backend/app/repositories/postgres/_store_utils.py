@@ -57,6 +57,18 @@ def iso_timestamp(value: Any, *, empty: str = "") -> str:
     return str(value)
 
 
+def local_datetime(value: Any) -> datetime:
+    """Project an instant onto the system-local calendar and UTC offset."""
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    return parsed.astimezone()
+
+
+def local_iso_timestamp(value: Any, *, empty: str = "") -> str:
+    if value is None:
+        return empty
+    return local_datetime(value).isoformat()
+
+
 def normalize_timestamp(
     value: TimestampInput,
     *,
@@ -113,7 +125,7 @@ def sqlite_compatible_row(
             result[column] = json.dumps(result[column], ensure_ascii=False)
     for column in timestamp_columns:
         if column in result:
-            result[column] = iso_timestamp(result[column])
+            result[column] = local_iso_timestamp(result[column])
     return result
 
 
