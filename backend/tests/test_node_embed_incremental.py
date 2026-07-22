@@ -3,7 +3,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("EMBED_BATCH_SIZE", "2")     # 小批,好数 commit
     monkeypatch.setenv("EMBED_COMMIT_BATCHES", "1") # 每批 commit,便于观测增量
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 

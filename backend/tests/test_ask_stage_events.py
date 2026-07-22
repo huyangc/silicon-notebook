@@ -9,7 +9,7 @@ from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.kg import scale_index as si
 from app.services.sqlite_repository import SQLiteRepository
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 def test_personalized_ppr_stats_reports_iters():
@@ -38,7 +38,7 @@ def repo_factory(tmp_path, monkeypatch):
         monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
         monkeypatch.setenv("LLM_LOG_ENABLED", "false")
         r = SQLiteRepository(Settings())
-        bind_embedding_client(r, FakeEmbedder(dim=16))
+        bind_all_embedding_clients(r, FakeEmbedder(dim=16))
         nb = r.create_notebook(NotebookCreate(name="nb"))
         r.store_kg(nb.id, None, [
             {"local_id": "A", "object_type": "concept",

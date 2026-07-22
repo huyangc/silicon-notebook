@@ -18,7 +18,7 @@ from app.core.config import Settings
 from app.models.schemas import AskRequest, NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository, _now
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_rerank_client
 from tests.model_testkit import bind_chat_client
 
@@ -39,7 +39,7 @@ def repo(tmp_path, monkeypatch):
                "REWRITE_LLM_API_KEY", "REWRITE_LLM_BASE_URL", "REWRITE_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -82,6 +82,10 @@ class _IdentityRerank:
 
     def rerank(self, query, documents, on_error=None):
         return list(range(len(documents)))
+
+
+class _UnconfiguredRerank(_IdentityRerank):
+    configured = False
 
 
 def _enable_overlay(repo, nb_id):
@@ -158,8 +162,7 @@ def test_ask_chunk_strategy_dispatch_is_mutually_exclusive(repo, monkeypatch):
             _enable_overlay(repo, nb.id)
         else:
             # 默认 fixture 的 rerank 未配置 → overlay_on 自然为 False
-            bind_rerank_client(repo, _IdentityRerank().__class__.__new__(_IdentityRerank))
-            monkeypatch.setattr(repo.rerank_client, "configured", False, raising=False)
+            bind_rerank_client(repo, _UnconfiguredRerank())
 
         repo.ask_chunk(nb.id, AskRequest(question="moe routing"))
 
@@ -518,8 +521,7 @@ def test_ask_chunk_citation_binding_parity_mix_vs_nonmix(repo, monkeypatch):
     #    与答案引用无关。用真实单查询 MMR 路径不好精确控 selected 集,故直接 stub
     #    _retrieve_chunks + _mmr_select_chunks 令 selected 恰为这 3 条。
     nb2, _ = _seed_chunks(repo, ["moe routing expert " * 20])
-    bind_rerank_client(repo, _IdentityRerank().__class__.__new__(_IdentityRerank))
-    monkeypatch.setattr(repo.rerank_client, "configured", False, raising=False)  # overlay_on=False
+    bind_rerank_client(repo, _UnconfiguredRerank())  # overlay_on=False
     _stub_expand(monkeypatch, 1)                       # 单查询 → MMR 分支
     monkeypatch.setattr(repo.retrieval.candidates, "_retrieve_chunks",
                         lambda nb_id, q, recall=0: (list(selected), [], None))

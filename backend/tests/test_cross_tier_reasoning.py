@@ -8,7 +8,7 @@ Each relation row carries a "notebook_id" key so build_rx_graph can look up tier
 """
 import json
 import pytest
-from tests.model_testkit import bind_chat_client, bind_embedding_client
+from tests.model_testkit import bind_chat_client, bind_all_embedding_clients
 
 # ── Synthetic fixture ─────────────────────────────────────────────────────────
 
@@ -92,7 +92,7 @@ class TestTask2FederatedRxGraph:
         from app.services.embedding import FakeEmbedder
         from app.models.schemas import NotebookCreate
         r = SQLiteRepository(Settings())
-        bind_embedding_client(r, FakeEmbedder(dim=16))
+        bind_all_embedding_clients(r, FakeEmbedder(dim=16))
 
         class _AnswerLLM:
             configured = True
@@ -467,7 +467,7 @@ class TestTask6AskGraphFederated:
         from app.services.embedding import FakeEmbedder
         from app.models.schemas import NotebookCreate
         r = SQLiteRepository(Settings())
-        bind_embedding_client(r, FakeEmbedder(dim=16))
+        bind_all_embedding_clients(r, FakeEmbedder(dim=16))
 
         class _AnswerLLM:
             configured = True

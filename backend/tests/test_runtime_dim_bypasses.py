@@ -26,7 +26,7 @@ from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.vector_index import encode_vector
-from tests.model_testkit import bind_chat_client, bind_embedding_client
+from tests.model_testkit import bind_chat_client, bind_all_embedding_clients
 
 NOW = "2026-07-03T00:00:00"
 
@@ -44,7 +44,7 @@ def repo(tmp_path, monkeypatch):
     from app.core.config import get_settings
     get_settings.cache_clear()
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=32))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=32))
     yield r
     get_settings.cache_clear()
 
@@ -90,7 +90,7 @@ def test_gather_elements_vector_truncated_and_same_space_as_query(repo):
         db.execute(
             "INSERT INTO element_embeddings (element_id,source_id,notebook_id,vector,created_at) "
             "VALUES (?,?,?,?,?)",
-            ("e1", "s1", nb.id, json.dumps(repo.embedder.embed_texts([text])[0]), NOW))
+            ("e1", "s1", nb.id, json.dumps(repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([text])[0]), NOW))
 
     with repo._connect() as db:
         elements = repo._gather_elements(db, nb.id)
@@ -112,7 +112,7 @@ def test_tier2_bruteforce_bridges_in_runtime_space(repo, monkeypatch):
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _insert_source(repo, nb.id, "s_old")
     _insert_source(repo, nb.id, "s_new")
-    vec = repo.embedder.embed_texts(["precision voltage reference"])[0]  # 32 维原生
+    vec = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["precision voltage reference"])[0]  # 32 维原生
     # 存量概念(已有簇)与新概念:名字不同(不同 canonical)、向量相同(cos=1.0 ≥ lo)
     _insert_ko(repo, nb.id, "eo1", "Bandgap Voltage Reference", source_id="s_old")
     _insert_kvec(repo, nb.id, "eo1", vec)
@@ -177,7 +177,7 @@ def test_tier2_ann_guard_compares_runtime_dim_and_truncates_query(repo):
     _insert_source(repo, nb.id, "s1")
     _insert_ko(repo, nb.id, "ex1", "Bandgap Voltage Reference")   # 命中侧须 alive
     _insert_ko(repo, nb.id, "new1", "Precision Voltage Source")
-    _insert_kvec(repo, nb.id, "new1", repo.embedder.embed_texts(["precision"])[0])
+    _insert_kvec(repo, nb.id, "new1", repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["precision"])[0])
 
     idx = _FakeIdx(dim=16, labels=["ex1"])
     ann = _FakeAnn()
@@ -197,7 +197,7 @@ def test_stream_seed_reps_truncates_both_blob_and_json_branches(repo):
     按存储维过滤(既有语义)通过后、rep 累加前截断;rep 维 == 运行时维。"""
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     _insert_source(repo, nb.id, "s1")
-    v = repo.embedder.embed_texts(["low dropout regulator"])[0]
+    v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["low dropout regulator"])[0]
     _insert_ko(repo, nb.id, "c1", "Low Dropout Regulator")
     _insert_kvec(repo, nb.id, "c1", v, blob=True)            # BLOB 分支
     _insert_ko(repo, nb.id, "c2", "Low Dropout Regulator")
@@ -226,7 +226,7 @@ def test_conflict_embeddings_gated_by_storage_dim_then_truncated(repo, monkeypat
     _insert_source(repo, nb.id, "s1")
     _insert_ko(repo, nb.id, "o1", "gain is high", object_type="claim",
                payload_extra={"statement": "gain is high"})
-    _insert_kvec(repo, nb.id, "o1", repo.embedder.embed_texts(["gain is high"])[0])
+    _insert_kvec(repo, nb.id, "o1", repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["gain is high"])[0])
     _insert_ko(repo, nb.id, "o2", "gain is low", object_type="claim",
                payload_extra={"statement": "gain is low"})
     _insert_kvec(repo, nb.id, "o2", [0.5] * 8)               # 异维残留

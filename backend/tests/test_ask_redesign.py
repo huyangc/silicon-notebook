@@ -4,7 +4,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
 from tests.model_testkit import RecordingModelProvider
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 class FakeLLM:
     configured = True
@@ -35,7 +35,7 @@ def repo(tmp_path, monkeypatch):
         embedding_clients={"retrieval_query_embedding": embedder},
     )
     r = SQLiteRepository(Settings(), model_provider=provider)
-    bind_embedding_client(r, embedder)
+    bind_all_embedding_clients(r, embedder)
     r.recording_model_provider = provider
     return r
 

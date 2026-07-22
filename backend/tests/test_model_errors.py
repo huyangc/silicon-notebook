@@ -18,7 +18,7 @@ from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.model_provider import ModelInvocationError
 from app.services.model_registry import ModelServiceDefinition, WorkloadSpec
 from tests.model_testkit import bind_chat_client
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -274,8 +274,8 @@ def test_embed_failure_recorded(repo, monkeypatch):
     """A configured workload embedder failure is recorded at the embed stage."""
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
-    repo.embedder.configured = True
-    monkeypatch.setattr(repo.embedder, "embed_query",
+    repo._runtime.models.embedding("retrieval_query_embedding").configured = True
+    monkeypatch.setattr(repo._runtime.models.embedding("retrieval_query_embedding"), "embed_query",
                         lambda q: (_ for _ in ()).throw(RuntimeError("embed boom")))
     bind_chat_client(repo, "ask_answer", _AnswerLLM())
     nb = _seed_chunks(repo)
@@ -289,9 +289,9 @@ def test_embed_failure_recorded(repo, monkeypatch):
 def test_embedding_failure_is_embedding_service(repo, monkeypatch):
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
-    repo.embedder.configured = True
+    repo._runtime.models.embedding("retrieval_query_embedding").configured = True
     monkeypatch.setattr(
-        repo.embedder,
+        repo._runtime.models.embedding("retrieval_query_embedding"),
         "embed_query",
         lambda _query: (_ for _ in ()).throw(RuntimeError("embed boom")),
     )

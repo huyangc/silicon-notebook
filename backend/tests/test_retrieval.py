@@ -1,6 +1,6 @@
 import pytest
 from app.services.retrieval import keyword_score
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -14,7 +14,7 @@ def repo(tmp_path, monkeypatch):
     for k, v in {"EMBED_DIM": "16"}.items():
         monkeypatch.setenv(k, v)
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -35,7 +35,7 @@ def test_kg_object_candidates_core_and_delta(repo, monkeypatch):
             db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
                        "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                        (oid, nb.id, "concept", "approved", "", json.dumps({"name": name}), "[]", sid, now, now))
-            v = repo.embedder.embed_texts([name])[0]
+            v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([name])[0]
             db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
                        "VALUES (?,?,?,?)", (oid, nb.id, json.dumps(v), now))
     add("s1", "o1", "current mirror", 1)
@@ -70,7 +70,7 @@ def test_retrieve_scored_bounded_when_indexed(repo, monkeypatch):
             db.execute("INSERT INTO knowledge_objects (id,notebook_id,object_type,status,owner,payload,"
                        "evidence,source_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                        (oid, nb.id, "concept", "approved", "", json.dumps({"name": name}), "[]", sid, now, now))
-            v = repo.embedder.embed_texts([name])[0]
+            v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([name])[0]
             db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) "
                        "VALUES (?,?,?,?)", (oid, nb.id, json.dumps(v), now))
     for i in range(6):

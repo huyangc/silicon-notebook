@@ -350,12 +350,19 @@ class ReportEngine:
                 "id_map": id_map,      # 节内 k -> ctx;仅供 _assemble 全局重编号,不入库
                 "attempted": list(getattr(result, "attempted", []) or [])}
         if not markdown:
-            deps.model_errors.note_model_error(
-                "report_section",
-                RuntimeError(f"report section '{section['title']}' produced empty content after retry "
-                             "(reasoning model likely spent output budget on discarded chain-of-thought)"),
-                workload_id="report_section",
-            )
+            try:
+                deps.model_errors.note_model_error(
+                    "report_section",
+                    RuntimeError(
+                        f"report section '{section['title']}' produced empty content after retry "
+                        "(reasoning model likely spent output budget on discarded chain-of-thought)"
+                    ),
+                    workload_id="report_section",
+                )
+            except Exception:
+                # Observability must not become a second failure channel after
+                # the model request has already degraded to an empty section.
+                pass
             base["failed"] = True
             base["error"] = "答案合成未产出内容(模型可能把输出预算耗在思维链上),已重试"
         return base

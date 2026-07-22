@@ -48,7 +48,7 @@ from fastapi.testclient import TestClient
 
 from app.models.schemas import AskRequest
 from app.services.embedding import FakeEmbedder
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 EMBED_DIM = 16
 
@@ -102,7 +102,7 @@ def client(tmp_path, monkeypatch):
     c = TestClient(app)
     c._repo = repository()  # type: ignore[attr-defined]
     c._recorder = RecordingEmbedder(dim=EMBED_DIM)  # type: ignore[attr-defined]
-    bind_embedding_client(c._repo, c._recorder)
+    bind_all_embedding_clients(c._repo, c._recorder)
     assert c._repo.configured("knowhow_embedding")
     return c
 

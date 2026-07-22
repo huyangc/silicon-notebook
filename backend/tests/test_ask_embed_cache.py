@@ -5,7 +5,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services import sqlite_repository as sr
 
 import pytest
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 class _CountingEmbedder:
@@ -39,7 +39,7 @@ def repo_factory(tmp_path, monkeypatch):
 def _mk_repo(repo_factory):
     repo = repo_factory()
     emb = _CountingEmbedder()
-    bind_embedding_client(repo, emb)
+    bind_all_embedding_clients(repo, emb)
     assert repo.configured("retrieval_query_embedding")
     return repo, emb
 

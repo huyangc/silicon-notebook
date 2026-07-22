@@ -249,10 +249,7 @@ def _owner_for(name: str) -> str:
         "resolve_session", "delete_session", "list_user_usage",
         "list_user_notebooks",
     }
-    provider = {
-        "llm_client", "reasoning_llm_client", "rewrite_llm_client",
-        "kg_llm_client", "rerank_client", "_note_model_error",
-    }
+    provider = {"_note_model_error"}
     sharing_fragments = (
         "share", "member", "copy_notebook", "_sweep_stuck_copies",
         "user_can_", "_owner", "find_notebook_by_share_token",
@@ -318,7 +315,7 @@ def _owner_for(name: str) -> str:
 
 def _patch_compatibility(name: str, kind: str) -> str:
     if kind in {"mutable_property", "constant"} or name in {
-        "_now", "_new_id", "_COPY_CHUNK", "llm_client", "rerank_client",
+        "_now", "_new_id", "_COPY_CHUNK",
     }:
         return "production-compatible"
     return "test-only"
@@ -903,9 +900,6 @@ def _deterministic_runtime() -> Iterator[None]:
         stack.enter_context(mock.patch.object(identity_store, "_session_expiry", lambda *_: FIXED_EXPIRY))
         stack.enter_context(mock.patch.object(sqlite_notebook_sharing, "_now", lambda: FIXED_TIME))
         stack.enter_context(mock.patch.object(auth_utils, "hash_password", fixed_hash))
-        stack.enter_context(
-            mock.patch.object(sqlite_repository, "OpenAICompatibleClient", _FakeChatAdapter)
-        )
         stack.enter_context(
             mock.patch.object(model_provider, "OpenAICompatibleClient", _FakeChatAdapter)
         )

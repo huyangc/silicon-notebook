@@ -3,7 +3,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository, _now
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -106,7 +106,7 @@ def embed_repo(tmp_path, monkeypatch):
         def embed_texts(self, texts):
             return [[0.1, 0.2, 0.3] for _ in texts]
 
-    bind_embedding_client(r, _FakeEmbedder())
+    bind_all_embedding_clients(r, _FakeEmbedder())
     return r
 
 

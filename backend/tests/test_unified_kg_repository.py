@@ -5,7 +5,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.services.vector_index import decode_vector
 from app.models.schemas import NotebookCreate
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))               # inject; no real model loads (lazy)
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))               # inject; no real model loads (lazy)
     return r
 
 def test_store_kg_batch_embeds_nodes(repo):

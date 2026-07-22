@@ -11,7 +11,7 @@ import json as _json
 import pytest
 
 from app.services.query_rewrite import expand_query, ExpandedQuery, SubQuerySpec
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
 
 
@@ -268,7 +268,7 @@ def test_ask_chunk_unions_bilingual_keyword_hit_once(repo, monkeypatch):
     from app.services.embedding import FakeEmbedder
     import app.services.query_rewrite as qr
 
-    bind_embedding_client(repo, FakeEmbedder(dim=repo.settings.embed_dim))
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=repo.settings.embed_dim))
     nb = repo.create_notebook(NotebookCreate(name="nb-e2e"))
     _seed_chunk_texts(repo, nb.id, ["cascode output resistance",
                                     "低噪声放大器 LNA 设计"])

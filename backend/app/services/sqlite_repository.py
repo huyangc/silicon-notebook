@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from app.core.config import Settings
 from app.core.ask_context import _ASK_EMBED_CACHE, _ASK_MODEL_ERRORS
-from app.core.llm import OpenAICompatibleClient, cap_kwargs
+from app.core.llm import cap_kwargs
 from app.models.common import Evidence
 from app.models.identity import (
     AgentPrincipal,
@@ -696,10 +696,6 @@ class SQLiteRepository:
     def pending_actions_projection_rows(self, user_id: str) -> dict:
         return self._runtime.queries.pending_actions_projection_rows(user_id)
 
-    @property
-    def llm_client(self):
-        return self._runtime.models.chat("ask_answer")
-
     def chat(self, workload_id: str):
         return self._runtime.models.chat(workload_id)
 
@@ -708,22 +704,6 @@ class SQLiteRepository:
 
     def parallelism(self, workload_id: str) -> int:
         return self._runtime.models.parallelism(workload_id)
-
-    @property
-    def reasoning_llm_client(self):
-        return self._runtime.models.chat("reasoning_agent")
-
-    @property
-    def rewrite_llm_client(self):
-        return self._runtime.models.chat("query_rewrite")
-
-    @property
-    def kg_llm_client(self):
-        return self._runtime.models.chat("kg_extract")
-
-    @property
-    def rerank_client(self):
-        return self._runtime.models.rerank("retrieval_rerank")
 
     # Task 17: the retrieval caches live on the runtime's RetrievalSnapshotCache
     # (one owner). These handles are write-through descriptors over the SAME
@@ -3227,10 +3207,6 @@ class SQLiteRepository:
     @storage_dir.setter
     def storage_dir(self, value) -> None:
         self._runtime.storage_dir = value
-
-    @property
-    def embedder(self):
-        return self._runtime.embedder
 
     @property
     def _notebook_langs_cache(self):

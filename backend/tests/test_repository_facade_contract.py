@@ -592,12 +592,12 @@ class _NestedDelegateArgumentEscape:
 
 class _NestedSetterRhsEscape:
     @property
-    def llm_client(self):
-        return self._runtime.models.llm_client
+    def escape_property(self):
+        return self._runtime.models.chat("ask_answer")
 
-    @llm_client.setter
-    def llm_client(self, value):
-        self._runtime.models.llm_client = _global_response_helper(value)
+    @escape_property.setter
+    def escape_property(self, value):
+        self._runtime.models.test_adapter = _global_response_helper(value)
 
 
 class _ZeroOwnerSurface:
@@ -717,7 +717,7 @@ def test_facade_checker_rejects_nested_global_delegate_arguments():
 
 def test_facade_checker_rejects_nested_global_property_setter_rhs():
     violations = facade_body_violations(_NestedSetterRhsEscape)
-    assert [site[2] for site in violations] == ["llm_client"]
+    assert [site[2] for site in violations] == ["escape_property"]
 
 
 def test_facade_checker_rejects_zero_owner_properties_and_constants():

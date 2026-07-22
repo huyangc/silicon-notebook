@@ -6,7 +6,7 @@
 * 引擎只持窄端口 —— ask_state(prepare_turn/save_answer,Task 22)、
   retrieval(candidates+graph,Task 21)、evidence_context(上下文/锚点/引用/
   tier,Task 21)、model_clients/model_errors(RuntimeModelProvider,一个所有
-  者:facade 的 llm_client 换针测试仍被观察)、communities 工厂(逐次新建,
+  者，测试仅通过显式 workload 绑定模型替身)、communities 工厂(逐次新建,
   sibling_min_bridge 在调用时读取——镜像 ReportEngine 的 per-launch 构造)、
   scale_profiles 工厂 + scale_index_probe(_needs_index 逐调用现读
   _vector_cache,保 facade 换缓存测试语义)、notebooks(存在性守卫)、
@@ -806,15 +806,13 @@ class AskService:
                 # ∪ bilingual-keyword chunk hits (dedup by chunk_id; keep existing on collision)
                 candidates = self.candidates.merge_chunk_candidates(candidates, kw_hits)
                 raise_if_cancelled(cancel_event)
-                rerank_client = self.model_clients.rerank_client
+                rerank_client = self.model_clients.rerank("retrieval_rerank")
                 order = rerank_client.rerank(
                     retrieval_query, [c.text for c in candidates],
                     on_error=lambda e: self.model_errors.note_model_error(
                         "rerank",
-                        getattr(rerank_client, "model", ""),
                         e,
-                        service="rerank",
-                        provider_failure=True,
+                        workload_id="retrieval_rerank",
                     ))
                 raise_if_cancelled(cancel_event)
                 ranked = [candidates[i] for i in order]

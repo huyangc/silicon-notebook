@@ -3,7 +3,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate, AskRequest
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
 
 class FakeLLM:
@@ -17,7 +17,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path/"s"))
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_DIM", "16")
-    r = SQLiteRepository(Settings()); bind_embedding_client(r, FakeEmbedder(dim=16)); bind_chat_client(r, "ask_answer", FakeLLM())
+    r = SQLiteRepository(Settings()); bind_all_embedding_clients(r, FakeEmbedder(dim=16)); bind_chat_client(r, "ask_answer", FakeLLM())
     return r
 
 def test_schema_has_conversations_and_fk(repo):
@@ -49,7 +49,9 @@ def test_ask_feeds_prior_turns_into_prompt(repo, monkeypatch):
     def cap(messages, schema_hint, **kwargs):
         captured["p"] = messages[0]["content"]
         return json.dumps({"answer": "ok.", "grounded": False})
-    repo.llm_client.chat_json = cap
+    capture_client = FakeLLM()
+    capture_client.chat_json = cap
+    bind_chat_client(repo, "ask_answer", capture_client)
     r1 = repo.ask(nb.id, AskRequest(question="ZZTOPIC question", mode="reasoning"))
     repo.ask(
         nb.id,

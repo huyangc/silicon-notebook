@@ -671,10 +671,7 @@ class ReasoningModelProvider(Protocol):
 
 
 class ModelClientProvider(ReasoningModelProvider, Protocol):
-    @property
-    def rerank_client(self) -> RerankClientPort: ...
-    @rerank_client.setter
-    def rerank_client(self, value: RerankClientPort) -> None: ...
+    def rerank(self, workload_id: str) -> RerankClientPort: ...
 
 
 class AskModelClientProvider(ModelClientProvider, Protocol):
@@ -694,7 +691,6 @@ class ModelErrorSink(Protocol):
 class FacadePropertyContract(ModelClientProvider, Protocol):
     settings: Settings
     storage_dir: Path
-    embedder: Any
     retrieval: RetrievalPort
 
 

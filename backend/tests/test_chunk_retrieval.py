@@ -6,7 +6,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository, _now
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import AskRequest, NotebookCreate
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
 
 
@@ -52,7 +52,7 @@ def repo(tmp_path, monkeypatch):
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -139,7 +139,7 @@ def test_retrieve_chunks_ann_includes_post_build_delta(repo, monkeypatch):
             for cid, txt in pairs:
                 db.execute("INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
                            "VALUES (?,?,?,?,?,?,?)", (cid, nb.id, sid, txt, "", "[]", now))
-                v = repo.embedder.embed_texts([txt])[0]
+                v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts([txt])[0]
                 db.execute("INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                            (cid, nb.id, json.dumps(v), now))
     # 建索引时的存量

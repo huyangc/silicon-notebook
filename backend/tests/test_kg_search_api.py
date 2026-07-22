@@ -10,7 +10,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 EMBED_DIM = 16
 
@@ -25,7 +25,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_DIM", str(EMBED_DIM))
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=EMBED_DIM))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=EMBED_DIM))
     return r
 
 
@@ -186,7 +186,7 @@ def repo_with_embed(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_DIM", str(EMBED_DIM))
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=EMBED_DIM))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=EMBED_DIM))
     return r
 
 

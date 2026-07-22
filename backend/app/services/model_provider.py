@@ -960,29 +960,6 @@ class RuntimeModelProvider:
             ),
         })
 
-    # Read-only compatibility during the call-site migration. Each property is
-    # bound to one explicit workload; there is no role/user resolution or
-    # mutable transport replacement behind this surface.
-    @property
-    def llm_client(self):
-        return self.chat("ask_answer")
-
-    @property
-    def reasoning_llm_client(self):
-        return self.chat("reasoning_agent")
-
-    @property
-    def rewrite_llm_client(self):
-        return self.chat("query_rewrite")
-
-    @property
-    def kg_llm_client(self):
-        return self.chat("kg_extract")
-
-    @property
-    def rerank_client(self):
-        return self.rerank("retrieval_rerank")
-
     def primary_unconfigured(self) -> bool:
         return not self.configured("ask_answer")
 

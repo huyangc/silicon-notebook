@@ -8,7 +8,7 @@ from app.services.sqlite_repository import SQLiteRepository
 
 
 import pytest
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ def repo_factory(tmp_path, monkeypatch):
         monkeypatch.setenv("SILICON_NOTEBOOK_STORAGE_DIR", str(tmp_path / "s"))
         monkeypatch.setenv("LLM_LOG_ENABLED", "false")
         r = SQLiteRepository(Settings())
-        bind_embedding_client(r, FakeEmbedder(dim=16))
+        bind_all_embedding_clients(r, FakeEmbedder(dim=16))
         nb = r.create_notebook(NotebookCreate(name="nb"))
         return r, nb.id
     return _make

@@ -126,17 +126,11 @@ class _Models:
     def __init__(self, llm):
         self._llm = llm
 
-    @property
-    def llm_client(self):
+    def chat(self, workload_id):
         return self._llm
 
-    @property
-    def reasoning_llm_client(self):
-        return self._llm
-
-    @property
-    def rewrite_llm_client(self):
-        return self._llm
+    def parallelism(self, workload_id):
+        return 2
 
 
 class _Errors:
@@ -145,12 +139,11 @@ class _Errors:
         self.boom = boom
 
     def note_model_error(
-        self, stage, model, error, service="", *, provider_failure=False,
-        failed_fingerprint="",
+        self, stage, error, *, workload_id,
     ):
         if self.boom:
             raise RuntimeError("sink down")
-        self.notes.append((stage, model))
+        self.notes.append((stage, workload_id))
 
 
 class _Sources:
@@ -361,7 +354,7 @@ def test_plan_and_generate_statuses_flow_through_reports_port(monkeypatch):
 def test_draft_section_routes_evidence_through_ports():
     deps = _deps()
     eng = _engine(deps)
-    llm = deps.model_clients.llm_client
+    llm = deps.model_clients.chat("report_section")
     out = eng._draft_section("nb", {"title": "T", "scope": "S"}, "q", ReasoningResult())
     assert deps.evidence_context.calls == [
         ("chunk", "nb", deps.settings.report_section_chunk_budget),

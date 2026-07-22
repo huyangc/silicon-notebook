@@ -1,7 +1,7 @@
 import json
 
 from fastapi.testclient import TestClient
-from tests.model_testkit import bind_chat_client, bind_embedding_client
+from tests.model_testkit import bind_chat_client, bind_all_embedding_clients
 
 
 class _ReasoningLLM:
@@ -38,7 +38,7 @@ def test_reasoning_stream_emits_progress_before_final(tmp_path, monkeypatch):
     from app.core.config import get_settings as _gs
     from app.services.embedding import FakeEmbedder
     repo = ask_routes.repository()
-    bind_embedding_client(repo, FakeEmbedder(dim=_gs().embed_dim))
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=_gs().embed_dim))
     llm = _ReasoningLLM()
     bind_chat_client(repo, "reasoning_agent", llm)
     bind_chat_client(repo, "ask_answer", llm)

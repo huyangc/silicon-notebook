@@ -156,8 +156,7 @@ def test_propose_schemas_persists_new_types_and_suppresses_existing(repo, monkey
         '"not-a-dict"'
         ']}'
     )
-    # production-compatible seam: the llm_client setter writes the runtime
-    # model provider the SchemaRegistryService consumes
+    # Bind exactly the runtime workload consumed by SchemaRegistryService.
     bind_chat_client(repo, "schema_induction", fake)
     proposals = repo.propose_schemas(nb.id)
     assert fake.calls == 1

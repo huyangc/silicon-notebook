@@ -6,7 +6,7 @@ from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 import app.services.concept_merge_review as cmr
 from tests.model_testkit import RecordingModelProvider
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -16,7 +16,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     provider = RecordingModelProvider()
     r = SQLiteRepository(Settings(), model_provider=provider)
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     r.recording_model_provider = provider
     return r
 
@@ -112,6 +112,6 @@ def test_startup_reconciles_stuck_running(repo, tmp_path):
     from app.services.sqlite_repository import SQLiteRepository
     from app.services.embedding import FakeEmbedder
     repo2 = SQLiteRepository(Settings())
-    bind_embedding_client(repo2, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(repo2, FakeEmbedder(dim=16))
     st = repo2.merge_review_job_status(nb)
     assert st["status"] == "failed"

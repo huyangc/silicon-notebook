@@ -87,8 +87,8 @@ def _repo_with_client(client):
 
 
 def test_unconfigured_client_labeled_no_llm():
-    """生产环境 rewrite_llm_client 从不是 None——未配置时 model_provider.py 的
-    _llm_for_role 要么返回一个 .configured=False 的哨兵，要么回退到一个同样
+    """生产环境 workload client 从不是 None——未配置时 model_provider.py
+    返回一个 .configured=False 的哨兵，要么回退到一个同样
     .configured=False 的系统 client（见 model_provider.py 106-137/app/core/llm.py
     的 OpenAICompatibleClient.configured）。reformat_cell 必须靠 .configured
     前置判定识别这两种未配置形状，而不是只判 client is None；未配置就不该真的

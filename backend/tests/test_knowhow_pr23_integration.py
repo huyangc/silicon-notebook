@@ -36,7 +36,7 @@ from fastapi.testclient import TestClient
 from app.models.schemas import AskRequest, Evidence
 from app.services.embedding import FakeEmbedder
 from app.services.retrieval import RetrievedKnowledge
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 EMBED_DIM = 16
 
@@ -63,7 +63,7 @@ def client(tmp_path, monkeypatch):
 
     c = TestClient(app)
     c._repo = repository()  # type: ignore[attr-defined]
-    bind_embedding_client(c._repo, FakeEmbedder(dim=EMBED_DIM))
+    bind_all_embedding_clients(c._repo, FakeEmbedder(dim=EMBED_DIM))
     assert c._repo.configured("knowhow_embedding")
     return c
 

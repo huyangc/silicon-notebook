@@ -6,7 +6,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -20,7 +20,7 @@ def repo(tmp_path, monkeypatch):
                 "REASONING_LLM_MODEL"):
         monkeypatch.setenv(key, "")
     result = SQLiteRepository(Settings(_env_file=None))
-    bind_embedding_client(result, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(result, FakeEmbedder(dim=16))
     return result
 
 

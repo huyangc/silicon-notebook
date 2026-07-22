@@ -66,7 +66,10 @@ def test_reasoning_factory_gets_communities_from_public_retrieval_port():
 
     class _Repository:
         retrieval = _Retrieval()
-        reasoning_llm_client = SimpleNamespace(configured=False)
+
+        @staticmethod
+        def chat(workload_id):
+            return SimpleNamespace(configured=False)
 
     retriever = ReasoningRetriever.from_repository(
         _Repository(), SimpleNamespace(reasoning_quota_enabled=False)

@@ -10,7 +10,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -21,7 +21,7 @@ def repo(tmp_path, monkeypatch):
     for k, v in {"EMBED_DIM": "16"}.items():
         monkeypatch.setenv(k, v)
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -38,7 +38,7 @@ def _insert_source_with_object(repo, nb_id, i):
                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                    (oid, nb_id, sid, "claim", json.dumps({"name": f"obj {i}"}), "[]",
                     "approved", "", "", now, now))
-        v = repo.embedder.embed_query(f"obj {i}")
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_query(f"obj {i}")
         db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                    (oid, nb_id, json.dumps(v), now))
     return sid, cid, oid
@@ -61,7 +61,7 @@ def _build_indexed_nb_with_delta_object(repo):
                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                    (oid, nb.id, sid, "claim", json.dumps({"name": "zzz"}), "[]",
                     "approved", "", "", now, now))
-        v = repo.embedder.embed_query("bravo")
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_query("bravo")
         db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                    (oid, nb.id, json.dumps(v), now))
     return nb, oid
@@ -101,7 +101,7 @@ def _build_indexed_nb_with_delta_relation(repo):
             "INSERT INTO knowledge_relations (id,notebook_id,source_object_id,target_object_id,"
             "edge_type,evidence,source_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
             ("rel0", nb.id, "o1", "o2", "depends_on", "[]", "sA", now))
-        v = repo.embedder.embed_texts(["depends_on"])[0]
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_texts(["depends_on"])[0]
         db.execute(
             "INSERT INTO relation_embeddings (relation_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
             ("rel0", nb.id, json.dumps(v), now))
@@ -122,7 +122,7 @@ def _build_indexed_nb_with_delta_relation(repo):
             "INSERT INTO knowledge_relations (id,notebook_id,source_object_id,target_object_id,"
             "edge_type,evidence,source_id,created_at) VALUES (?,?,?,?,?,?,?,?)",
             (rid, nb.id, "o3", "o4", "zzz_unrelated_edge", "[]", "sB", now2))
-        v = repo.embedder.embed_query("bravo")
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_query("bravo")
         db.execute(
             "INSERT INTO relation_embeddings (relation_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
             (rid, nb.id, json.dumps(v), now2))
@@ -133,7 +133,7 @@ def test_relation_delta_excluded_by_default(repo):
     nb, rid = _build_indexed_nb_with_delta_relation(repo)
     assert repo.settings.scale_search_include_delta is False
     sims = repo.retrieval.candidates._relation_ann_candidates(
-        nb.id, repo.embedder.embed_query("bravo"),
+        nb.id, repo._runtime.models.embedding("retrieval_query_embedding").embed_query("bravo"),
         repo._scale_index(nb.id, allow_stale=True), 10)
     assert rid not in sims
 
@@ -142,7 +142,7 @@ def test_relation_delta_included_when_opted_in(repo, monkeypatch):
     nb, rid = _build_indexed_nb_with_delta_relation(repo)
     monkeypatch.setattr(repo.settings, "scale_search_include_delta", True)
     sims = repo.retrieval.candidates._relation_ann_candidates(
-        nb.id, repo.embedder.embed_query("bravo"),
+        nb.id, repo._runtime.models.embedding("retrieval_query_embedding").embed_query("bravo"),
         repo._scale_index(nb.id, allow_stale=True), 10)
     assert rid in sims
 
@@ -162,7 +162,7 @@ def _insert_source_chunk(repo, nb_id, sid, cid, text, embed_text, day):
         db.execute(
             "INSERT INTO chunks (id,notebook_id,source_id,text,section_path,element_ids,created_at) "
             "VALUES (?,?,?,?,?,?,?)", (cid, nb_id, sid, text, "", "[]", now))
-        v = repo.embedder.embed_query(embed_text)
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_query(embed_text)
         db.execute(
             "INSERT INTO chunk_embeddings (chunk_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
             (cid, nb_id, json.dumps(v), now))
@@ -258,7 +258,7 @@ def _insert_source_element(repo, nb_id, sid, eid, text):
         db.execute("INSERT INTO source_elements (id,source_id,element_type,location_label,text,metadata,created_at) "
                    "VALUES (?,?,?,?,?,?,?)",
                    (eid, sid, "paragraph", "p1", text, "{}", now))
-        v = repo.embedder.embed_query(text)
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_query(text)
         db.execute("INSERT INTO element_embeddings (element_id,source_id,notebook_id,vector,created_at) VALUES (?,?,?,?,?)",
                    (eid, sid, nb_id, json.dumps(v), now))
 
@@ -306,7 +306,7 @@ def _build_indexed_nb_with_multi_delta_objects(repo, n=4):
                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                        (oid, nb.id, sid, "claim", json.dumps({"name": f"zzz {oid}"}), "[]",
                         "approved", "", "", now, now))
-            v = repo.embedder.embed_query("bravo")
+            v = repo._runtime.models.embedding("retrieval_query_embedding").embed_query("bravo")
             db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                        (oid, nb.id, json.dumps(v), now))
     return nb, oids

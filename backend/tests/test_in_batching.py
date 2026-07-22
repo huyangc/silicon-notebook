@@ -7,7 +7,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -18,7 +18,7 @@ def repo(tmp_path, monkeypatch):
     for k, v in {"EMBED_DIM": "16"}.items():
         monkeypatch.setenv(k, v)
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -35,7 +35,7 @@ def _insert_source_with_object(repo, nb_id, i):
                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                    (oid, nb_id, sid, "claim", json.dumps({"name": f"obj {i}"}), "[]",
                     "approved", "", "", now, now))
-        v = repo.embedder.embed_query(f"obj {i}")
+        v = repo._runtime.models.embedding("retrieval_query_embedding").embed_query(f"obj {i}")
         db.execute("INSERT INTO knowledge_embeddings (object_id,notebook_id,vector,created_at) VALUES (?,?,?,?)",
                    (oid, nb_id, json.dumps(v), now))
     return sid, cid, oid

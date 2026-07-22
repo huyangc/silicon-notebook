@@ -86,10 +86,6 @@ class _RetrievalState:
         return self._retrieval
 
     @property
-    def rerank_client(self):
-        return self.model_clients.rerank("retrieval_rerank")
-
-    @property
     def _vector_cache(self):
         return self.snapshots.vector_cache
 
@@ -1534,7 +1530,7 @@ class CandidateRetrievalService(_RetrievalState):
         fuse_k 复刻 multi 分支 quota_fuse 复用 chunk_mmr_k 的隐式契约。"""
         s = self.settings
         overlay_on = (s.chunk_kg_overlay_enabled
-                      and self.rerank_client.configured
+                      and self.model_clients.rerank("retrieval_rerank").configured
                       and (self._notebook_has_kg(notebook_id)
                            or self._any_base_notebook_has_kg(notebook_id)))
         if overlay_on:

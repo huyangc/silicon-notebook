@@ -12,7 +12,7 @@ import pytest
 from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.vector_cache import VectorCache
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -43,7 +43,7 @@ def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_pa
     replacement_languages = {"nb-1": ["zh", "en"]}
 
     repo.storage_dir = replacement_dir
-    bind_embedding_client(repo, replacement_embedder)
+    bind_all_embedding_clients(repo, replacement_embedder)
     repo._notebook_langs_cache = replacement_languages
 
     runtime = repo._runtime
@@ -67,13 +67,31 @@ def test_storage_and_embedder_replacements_reach_composed_consumers(repo, tmp_pa
     assert repo.retrieval.graph._notebook_langs_cache is replacement_languages
 
 
-def test_model_clients_are_read_only_workload_adapters(repo):
-    assert repo.llm_client is repo._runtime.models.chat("ask_answer")
-    assert repo.rerank_client is repo._runtime.models.rerank("retrieval_rerank")
-    with pytest.raises(AttributeError):
-        repo.llm_client = object()
-    with pytest.raises(AttributeError):
-        repo.embedder = object()
+def test_retired_model_client_facade_attributes_do_not_exist(repo):
+    assert repo.chat("ask_answer") is repo._runtime.models.chat("ask_answer")
+    assert repo._runtime.models.rerank("retrieval_rerank") is not None
+    for attribute in (
+        "llm_client",
+        "reasoning_llm_client",
+        "rewrite_llm_client",
+        "kg_llm_client",
+        "rerank_client",
+        "embedder",
+    ):
+        with pytest.raises(AttributeError):
+            getattr(repo, attribute)
+    for attribute in (
+        "llm_client",
+        "reasoning_llm_client",
+        "rewrite_llm_client",
+        "kg_llm_client",
+        "rerank_client",
+    ):
+        with pytest.raises(AttributeError):
+            getattr(repo._runtime.models, attribute)
+
+
+def test_runtime_query_embedder_is_read_only(repo):
     with pytest.raises(AttributeError):
         repo._runtime.embedder = object()
 

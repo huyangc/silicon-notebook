@@ -73,7 +73,7 @@ class _RaisingRewriteClient:
 
 def _fake_repo(client):
     """Minimal repo._runtime.models-shaped stand-in — optimize_cell only ever
-    reaches repo._runtime.models.{rewrite_llm_client,note_model_error}, the
+    reaches repo._runtime.models.{chat,note_model_error}, the
     same narrow-runtime-port pattern build_projector uses (see api.py's own
     docstring). Returns (repo, error_calls) where error_calls records every
     note_model_error(stage, model, exc) invocation as (stage, model,

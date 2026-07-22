@@ -459,8 +459,8 @@ def test_confirm_writes_revision_and_duplicate_answer_is_idempotent(
             (first.id,),
         ).fetchone()
     assert embedded is not None
-    assert embedded["dimension"] == repo.embedder.dim
-    assert embedded["size"] == repo.embedder.dim * 4
+    assert embedded["dimension"] == repo._runtime.models.embedding("retrieval_query_embedding").dim
+    assert embedded["size"] == repo._runtime.models.embedding("retrieval_query_embedding").dim * 4
 
 
 def test_stale_embedding_job_cannot_overwrite_newer_memory_version(

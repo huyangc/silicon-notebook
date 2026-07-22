@@ -20,7 +20,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 FIXTURE_SCALE_DIR = (
     Path(__file__).resolve().parent
@@ -36,7 +36,7 @@ def repo(tmp_path, monkeypatch):
     for k, v in {"EMBED_DIM": "16"}.items():
         monkeypatch.setenv(k, v)
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 

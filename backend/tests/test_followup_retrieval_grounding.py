@@ -1,6 +1,6 @@
 import json
 import pytest
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 def test_settings_have_evidence_knobs_and_reject_legacy_rewrite_config(monkeypatch):
@@ -132,7 +132,7 @@ def repo2(tmp_path, monkeypatch):
         embedding_clients={"retrieval_query_embedding": embedder},
     )
     r = SQLiteRepository(Settings(), model_provider=provider)
-    bind_embedding_client(r, embedder)
+    bind_all_embedding_clients(r, embedder)
     r.recording_llm = llm
     r.recording_model_provider = provider
     return r

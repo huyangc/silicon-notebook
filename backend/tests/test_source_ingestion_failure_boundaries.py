@@ -20,7 +20,7 @@ from app.services.remote_sources import PdfProbe
 from app.services.source_ingestion import SourceIngestionService  # noqa: F401 — Task 12 gate
 from app.services.sqlite_repository import SQLiteRepository, _now
 from tests.model_testkit import RecordingModelProvider, bind_chat_client
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -118,7 +118,7 @@ def test_embedding_failure_does_not_fail_pipeline(embed_repo, monkeypatch):
         def _ensure(self):
             pass
 
-    bind_embedding_client(repo, _BoomEmbedder())
+    bind_all_embedding_clients(repo, _BoomEmbedder())
     repo.process_source(sid)
     src = repo.get_source(sid)
     assert src.parse_status == "extracted"

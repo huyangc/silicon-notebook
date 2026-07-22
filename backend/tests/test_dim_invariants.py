@@ -9,7 +9,7 @@ import pathlib
 
 import numpy as np
 import pytest
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 APP = pathlib.Path(__file__).resolve().parents[1] / "app"
 REPO_PY = APP / "services" / "sqlite_repository.py"
@@ -112,7 +112,7 @@ def repo(tmp_path, monkeypatch):
     from app.services.embedding import FakeEmbedder
     from app.services.sqlite_repository import SQLiteRepository
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=32))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=32))
     yield r
     get_settings.cache_clear()
 

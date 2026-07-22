@@ -17,7 +17,7 @@ from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import (
     RecordingModelProvider,
     bind_chat_client,
-    bind_embedding_client,
+    bind_all_embedding_clients,
 )
 
 
@@ -128,7 +128,7 @@ def repo(tmp_path, monkeypatch):
     settings.kg_relink_enabled = False
     provider = RecordingModelProvider()
     result = SQLiteRepository(settings, model_provider=provider)
-    bind_embedding_client(result, FakeEmbedder(dim=settings.embed_dim))
+    bind_all_embedding_clients(result, FakeEmbedder(dim=settings.embed_dim))
     result.recording_model_provider = provider
     kg_scheduler.configure(window_workers=1, job_workers=1)
     try:

@@ -8,7 +8,7 @@ import pytest
 from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.sqlite_repository import SQLiteRepository, _now
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
 
 
@@ -66,7 +66,7 @@ def test_extracted_set_before_element_embedding_finishes(repo, tmp_path):
         "nodes": [{"local_id": "a", "type": "Concept", "name": "Engram", "ev": 0}],
         "edges": []})))
     emb = _ElementBlockingEmbedder()
-    bind_embedding_client(repo, emb)
+    bind_all_embedding_clients(repo, emb)
 
     done = threading.Event()
     def run():
@@ -144,7 +144,7 @@ def test_background_embed_thread_inherits_request_context(repo, tmp_path, monkey
         def _ensure(self):
             pass
 
-    bind_embedding_client(repo, _CtxEmbedder())
+    bind_all_embedding_clients(repo, _CtxEmbedder())
     token = set_request_user(user)
     try:
         repo.process_source(sid)

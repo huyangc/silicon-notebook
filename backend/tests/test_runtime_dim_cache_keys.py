@@ -18,7 +18,7 @@ import json
 import pytest
 
 from app.models.schemas import NotebookCreate
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def repo(tmp_path, monkeypatch):
     from app.services.embedding import FakeEmbedder
     from app.services.sqlite_repository import SQLiteRepository
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=32))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=32))
     return r
 
 

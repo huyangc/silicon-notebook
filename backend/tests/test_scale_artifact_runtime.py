@@ -13,7 +13,7 @@ from app.core.config import Settings
 from app.models.schemas import NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -28,7 +28,7 @@ def _make_repo(tmp_path, monkeypatch):
     for key, value in {"EMBED_DIM": "16"}.items():
         monkeypatch.setenv(key, value)
     repository = SQLiteRepository(Settings(_env_file=None))
-    bind_embedding_client(repository, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(repository, FakeEmbedder(dim=16))
     return repository
 
 

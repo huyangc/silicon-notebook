@@ -5,7 +5,7 @@ from app.core.config import Settings
 from app.services.sqlite_repository import SQLiteRepository
 from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
-from tests.model_testkit import bind_chat_client, bind_embedding_client
+from tests.model_testkit import bind_chat_client, bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -15,7 +15,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_DIM", "16")
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     return r
 
 
@@ -114,7 +114,7 @@ class _GroupedFakeEmbedder(FakeEmbedder):
 
 def _seed_mergeable(repo, nb_id):
     """造若干近义 concept(名字接近 → 进 auto_candidates → 触发 merge 审查)。"""
-    bind_embedding_client(repo, _GroupedFakeEmbedder(dim=repo.settings.embed_dim))
+    bind_all_embedding_clients(repo, _GroupedFakeEmbedder(dim=repo.settings.embed_dim))
     objs = []
     for i in range(6):
         objs.append({"local_id": f"c{i}", "object_type": "concept",

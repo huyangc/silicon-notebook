@@ -17,7 +17,7 @@ from app.repositories.sqlite.source_store import SourceElementWrite
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
 from tests.model_testkit import RecordingModelProvider, bind_chat_client
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 class _FakeKgLLM:
@@ -83,7 +83,7 @@ def repo(tmp_path, monkeypatch):
         monkeypatch.setenv(_k, "")
     provider = RecordingModelProvider()
     r = SQLiteRepository(Settings(), model_provider=provider)
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     r.recording_model_provider = provider
     return r
 

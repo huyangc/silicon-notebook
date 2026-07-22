@@ -17,7 +17,7 @@ from app.services.vector_index import (
     resolve_runtime_dim,
     truncate_vec,
 )
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 def _rows(vectors, blob=True):
@@ -149,7 +149,7 @@ def dual_dim_repo(tmp_path, monkeypatch):
     from app.services.embedding import FakeEmbedder
     from app.services.sqlite_repository import SQLiteRepository
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=32))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=32))
     return r
 
 
@@ -163,7 +163,7 @@ def test_query_and_corpus_same_space_end_to_end(dual_dim_repo):
     """全计划核心回归:_embed_query 输出维 == build_matrix 输出列数
     (查询/语料同空间;不满足 = query_sims 静默返 {} = 零召回)。"""
     from app.services.vector_index import build_matrix, encode_vector, query_sims
-    emb = dual_dim_repo.embedder
+    emb = dual_dim_repo._runtime.models.embedding("retrieval_query_embedding")
     texts = ["bandgap reference", "cascode amplifier", "PLL jitter"]
     rows = [(f"c{i}", encode_vector(emb.embed_query(t))) for i, t in enumerate(texts)]
     ids, mat = build_matrix(rows)                      # settings 路径 → 截断到 16

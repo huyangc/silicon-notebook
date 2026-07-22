@@ -7,7 +7,7 @@ from app.core.config import Settings
 from app.models.schemas import KnowledgeUpdate, MergeRequest, NotebookCreate
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository, _now
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 @pytest.fixture
@@ -76,7 +76,7 @@ def test_delete_source_removes_source_knowledge_embeddings(tmp_path, monkeypatch
     monkeypatch.setenv("LLM_LOG_ENABLED", "false")
     monkeypatch.setenv("EMBED_DIM", "8")
     repo = SQLiteRepository(Settings())
-    bind_embedding_client(repo, FakeEmbedder(dim=8))
+    bind_all_embedding_clients(repo, FakeEmbedder(dim=8))
 
     nb = repo.create_notebook(NotebookCreate(name="nb"))
     source_id = _insert_source_with_element(repo, nb.id)

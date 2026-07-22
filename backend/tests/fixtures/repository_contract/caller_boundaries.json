@@ -271,6 +271,22 @@
       "kind": "independent_private",
       "path": "backend/app/api/deps.py",
       "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.model_service_binding_summary",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
+      "scope": "<module>.model_status_service",
+      "target": "_runtime"
+    },
+    {
+      "count": 1,
+      "kind": "independent_private",
+      "path": "backend/app/api/deps.py",
+      "reason": "composition root extracts narrow runtime ports",
       "scope": "<module>.notebook_access_repository",
       "target": "_runtime"
     },

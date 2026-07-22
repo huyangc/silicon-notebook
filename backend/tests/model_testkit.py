@@ -62,10 +62,6 @@ class RecordingModelProvider:
         self.calls.append(("rerank", workload_id))
         return self.rerank_clients.get(workload_id, UNCONFIGURED_RERANKER)
 
-    @property
-    def rerank_client(self) -> Any:
-        return self.rerank("retrieval_rerank")
-
     def configured(self, workload_id: str) -> bool:
         delegates = (
             self.chat_clients,
@@ -166,33 +162,43 @@ def bind_chat_client(repo: Any, workload_id: str, client: Any) -> None:
 def bind_embedding_client(
     repo: Any,
     client: Any,
-    workload_ids: Iterable[str] | None = None,
+    workload_ids: Iterable[str],
 ) -> None:
-    """Bind an embedding fake to explicit workloads (all embedding seats by default).
-
-    The default preserves the former repository-wide embedder fixture while
-    still replacing only registered workload seats through the test provider.
-    """
+    """Bind a fake only to the named embedding workloads and cached seats."""
     if not hasattr(client, "configured"):
         try:
             client.configured = True
         except (AttributeError, TypeError):
             pass
-    selected = tuple(workload_ids or (
-        workload_id
-        for workload_id, spec in WORKLOADS.items()
-        if spec.kind == "embedding"
-    ))
+    selected = tuple(workload_ids)
+    if not selected:
+        raise ValueError("workload_ids must name at least one embedding workload")
     for workload_id in selected:
         _bind_provider_client(repo, "embedding", workload_id, client)
 
-    # Retrieval and Memory keep already-resolved adapters; refresh those
-    # composed test seats without restoring a production setter.
-    repo._runtime.set_embedder(client)
+    # Only these two workload adapters are cached by composed services.  Other
+    # embedding consumers resolve the provider on every call and need no
+    # refresh.  In particular, binding chunk_embedding must not make query or
+    # Memory embedding available as an accidental side effect.
+    if "retrieval_query_embedding" in selected:
+        repo._runtime.set_embedder(client)
     if repo._runtime.source_embedding is not None:
         repo._runtime.source_embedding.embedder = repo._runtime.models.embedding
-    if repo._runtime.memory_service is not None:
+    if "memory_embedding" in selected and repo._runtime.memory_service is not None:
         repo._runtime.memory_service.embedder = client
+
+
+def bind_all_embedding_clients(repo: Any, client: Any) -> None:
+    """Explicit legacy-fixture convenience: bind every registered embed seat."""
+    bind_embedding_client(
+        repo,
+        client,
+        workload_ids=(
+            workload_id
+            for workload_id, spec in WORKLOADS.items()
+            if spec.kind == "embedding"
+        ),
+    )
 
 
 def bind_rerank_client(repo: Any, client: Any) -> None:

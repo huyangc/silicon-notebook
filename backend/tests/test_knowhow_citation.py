@@ -43,7 +43,7 @@ from app.services.evidence_context import EvidenceContextService
 from app.services.knowhow.projection import KnowhowProjector
 from app.services.retrieval import RetrievedKnowledge
 from app.services.sqlite_repository import SQLiteRepository
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
 
 
@@ -367,7 +367,7 @@ def repo(tmp_path, monkeypatch):
                "REASONING_LLM_API_KEY", "REASONING_LLM_BASE_URL", "REASONING_LLM_MODEL"):
         monkeypatch.setenv(_k, "")
     r = SQLiteRepository(Settings())
-    bind_embedding_client(r, FakeEmbedder(dim=16))
+    bind_all_embedding_clients(r, FakeEmbedder(dim=16))
     assert r.configured("knowhow_embedding")
     return r
 

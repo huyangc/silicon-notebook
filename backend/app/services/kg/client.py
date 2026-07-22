@@ -1,5 +1,10 @@
-"""Minimal OpenAI-compatible JSON client, configured from an env prefix so the
-gold generator (GOLDGEN_) and product ("") can use different endpoints/models."""
+"""Offline-only OpenAI-compatible JSON client for evaluation/gold generation.
+
+Product runtime code must resolve registered workloads through
+``RuntimeModelProvider`` so every request is admitted by the per-service
+scheduler.  This module intentionally accepts only explicit offline-tool
+prefixes such as ``GOLDGEN_`` and ``EVAL_JUDGE_`` at its reviewed call sites.
+"""
 from __future__ import annotations
 
 import os

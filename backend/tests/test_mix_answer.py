@@ -6,7 +6,7 @@ from app.services.embedding import FakeEmbedder
 from app.models.schemas import NotebookCreate
 from app.models.schemas import AskRequest
 from app.services.retrieval import RetrievedChunk
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_rerank_client
 from tests.model_testkit import bind_chat_client
 
@@ -19,7 +19,7 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("CHUNK_KG_OVERLAY_ENABLED", "true")
     for _k in ("RERANK_MODEL", "RERANK_BASE_URL", "RERANK_API_KEY"):
         monkeypatch.delenv(_k, raising=False)
-    r = SQLiteRepository(Settings(_env_file=None)); bind_embedding_client(r, FakeEmbedder(dim=16)); return r
+    r = SQLiteRepository(Settings(_env_file=None)); bind_all_embedding_clients(r, FakeEmbedder(dim=16)); return r
 
 
 def _seed_chunks_and_kg(repo):
@@ -151,7 +151,7 @@ def test_ask_chunk_byte_equivalent_when_overlay_and_rerank_off(repo):
     引用为每个精选 chunk 一条(历史行为)。"""
     repo.settings.query_rewrite_enabled = False
     repo.settings.chunk_kg_overlay_enabled = False
-    assert not repo.rerank_client.configured        # fixture 未配 RERANK_MODEL
+    assert not repo._runtime.models.rerank("retrieval_rerank").configured
     bind_chat_client(repo, "ask_answer", _AnswerLLM("answer [k1]"))
     nb = _seed_chunks_and_kg(repo)
     resp = repo.ask_chunk(nb.id, AskRequest(question="cascode", mode="chunk"))

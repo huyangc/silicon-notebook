@@ -26,7 +26,7 @@ from app.models.schemas import NotebookCreate
 from app.repositories.ports import UploadedSourceFile
 from app.services.source_ingestion import SourceIngestionService, SourcePipelineHooks
 from app.services.sqlite_repository import SQLiteRepository, _now
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 from tests.model_testkit import bind_chat_client
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -212,7 +212,7 @@ def test_background_embedding_overlaps_extraction_and_extracted_gates_on_extract
                    "evidence": "Engram is a memory architecture"}],
         "edges": []})))
     emb = _ElementBlockingEmbedder()
-    bind_embedding_client(repo, emb)
+    bind_all_embedding_clients(repo, emb)
 
     done = threading.Event()
 

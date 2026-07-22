@@ -36,7 +36,7 @@ from app.models.schemas import NotebookCreate
 from app.services.knowhow.assets import ALLOWED_MIME_EXTENSIONS, AssetService
 from app.services.knowhow.projection import KnowhowProjector
 from app.services.sqlite_repository import SQLiteRepository, _now
-from tests.model_testkit import bind_embedding_client
+from tests.model_testkit import bind_all_embedding_clients
 
 
 class _FakeEmbedder:
@@ -80,7 +80,7 @@ def repo(repo_factory):
 @pytest.fixture
 def embedder(repo) -> _FakeEmbedder:
     emb = _FakeEmbedder()
-    bind_embedding_client(repo, emb)
+    bind_all_embedding_clients(repo, emb)
     assert repo.configured("knowhow_embedding")
     return emb
 

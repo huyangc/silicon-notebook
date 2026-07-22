@@ -12,7 +12,7 @@ from app.core.config import Settings
 from app.services import model_provider as provider_mod
 from app.services.embedding import FakeEmbedder
 from app.services.sqlite_repository import SQLiteRepository
-from tests.model_testkit import RecordingModelProvider
+from tests.model_testkit import RecordingModelProvider, bind_embedding_client
 
 
 class _InjectedProvider(RecordingModelProvider):
@@ -41,10 +41,68 @@ def test_repository_uses_injected_provider_before_service_composition(tmp_path):
     repo = SQLiteRepository(_settings(tmp_path), model_provider=provider)
 
     assert repo._runtime.models is provider
-    assert repo.embedder.dim == 8
+    assert repo._runtime.models.embedding("retrieval_query_embedding").dim == 8
     repo.close()
     repo.close()
     assert provider.closed == 1
+
+
+def test_binding_chunk_embedding_does_not_configure_or_replace_cached_query_seats(
+    tmp_path,
+):
+    provider = _InjectedProvider()
+    repo = SQLiteRepository(_settings(tmp_path), model_provider=provider)
+    retrieval = repo.retrieval
+    original_query = provider.embedding("retrieval_query_embedding")
+    original_memory = provider.embedding("memory_embedding")
+    assert provider.configured("retrieval_query_embedding") is True
+    assert provider.configured("memory_embedding") is False
+    assert retrieval.candidates.embedder is original_query
+    assert retrieval.graph.embedder is original_query
+    assert repo._runtime.memory_retriever.embedder is original_query
+    assert repo._runtime.memory_service.embedder is original_memory
+
+    chunk = FakeEmbedder(dim=8)
+    bind_embedding_client(repo, chunk, workload_ids=("chunk_embedding",))
+
+    assert provider.embedding("chunk_embedding") is chunk
+    assert provider.configured("chunk_embedding") is True
+    assert provider.embedding("retrieval_query_embedding") is original_query
+    assert provider.configured("retrieval_query_embedding") is True
+    assert provider.embedding("memory_embedding") is original_memory
+    assert provider.configured("memory_embedding") is False
+    assert retrieval.candidates.embedder is original_query
+    assert retrieval.graph.embedder is original_query
+    assert repo._runtime.memory_retriever.embedder is original_query
+    assert repo._runtime.memory_service.embedder is original_memory
+    assert ("embedding", "chunk_embedding") in provider.calls
+    repo.close()
+
+
+def test_embedding_binding_refreshes_only_the_selected_cached_workload_seats(tmp_path):
+    provider = _InjectedProvider()
+    repo = SQLiteRepository(_settings(tmp_path), model_provider=provider)
+    retrieval = repo.retrieval
+    original_memory = repo._runtime.memory_service.embedder
+
+    query = FakeEmbedder(dim=8)
+    bind_embedding_client(
+        repo, query, workload_ids=("retrieval_query_embedding",)
+    )
+    assert provider.embedding("retrieval_query_embedding") is query
+    assert retrieval.candidates.embedder is query
+    assert retrieval.graph.embedder is query
+    assert repo._runtime.memory_retriever.embedder is query
+    assert repo._runtime.memory_service.embedder is original_memory
+
+    memory = FakeEmbedder(dim=8)
+    bind_embedding_client(repo, memory, workload_ids=("memory_embedding",))
+    assert provider.embedding("memory_embedding") is memory
+    assert repo._runtime.memory_service.embedder is memory
+    assert retrieval.candidates.embedder is query
+    assert retrieval.graph.embedder is query
+    assert repo._runtime.memory_retriever.embedder is query
+    repo.close()
 
 
 @pytest.mark.parametrize("name", ["WEB_CONCURRENCY", "UVICORN_WORKERS"])

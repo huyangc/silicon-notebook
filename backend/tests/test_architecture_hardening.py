@@ -182,46 +182,99 @@ def test_retired_model_configuration_and_gate_symbols_are_absent():
     assert offenders == []
 
 
-def test_repository_tests_bind_model_fakes_through_model_testkit():
+def _retired_model_attribute_offenders(tree: ast.AST, relative: str) -> list[str]:
     offenders: list[str] = []
-    for path, relative in _python_sources("backend/tests"):
+    retired_clients = RETIRED_REPOSITORY_CLIENT_ATTRS - {"embedder"}
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name in retired_clients
+        ):
+            offenders.append(f"{relative}:{node.lineno}:def-{node.name}")
+            continue
+
+        if isinstance(node, ast.Attribute):
+            receiver = _dotted(node.value)
+            direct_repository_receiver = (
+                "." not in receiver
+                and (
+                    receiver in {"r", "repo", "repository", "_repo"}
+                    or receiver.endswith("repo")
+                    or receiver.endswith("repository")
+                )
+            )
+            if (
+                (
+                    node.attr in retired_clients
+                    or (node.attr == "embedder" and direct_repository_receiver)
+                )
+                and not _inside_attribute_error_assertion(node, parents)
+            ):
+                offenders.append(
+                    f"{relative}:{node.lineno}:attribute-{receiver}.{node.attr}"
+                )
+            continue
+
+        if (
+            isinstance(node, ast.Call)
+            and _dotted(node.func) == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+            and node.args[1].value in RETIRED_REPOSITORY_CLIENT_ATTRS
+        ):
+            receiver = _dotted(node.args[0])
+            repository_receiver = any(
+                part in {"r", "repo", "repository", "_repo"}
+                or part.endswith("repo")
+                or part.endswith("repository")
+                or part in {"models", "model_clients", "provider"}
+                for part in receiver.split(".")
+            )
+            if (
+                repository_receiver
+                and not _inside_attribute_error_assertion(node, parents)
+            ):
+                offenders.append(
+                    f"{relative}:{node.lineno}:getattr-{receiver}.{node.args[1].value}"
+                )
+    return offenders
+
+
+def test_retired_repository_model_attributes_cannot_be_read_or_rebound():
+    offenders: list[str] = []
+    for path, relative in _python_sources("backend/app", "backend/tests", "scripts"):
         if relative == "backend/tests/model_testkit.py":
             continue
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=relative)
-        parents = {
-            child: parent
-            for parent in ast.walk(tree)
-            for child in ast.iter_child_nodes(parent)
-        }
-        for node in ast.walk(tree):
-            targets: list[ast.AST] = []
-            if isinstance(node, ast.Assign):
-                targets = list(node.targets)
-            elif isinstance(node, ast.AnnAssign):
-                targets = [node.target]
-            for target in targets:
-                if not isinstance(target, ast.Attribute):
-                    continue
-                receiver = _dotted(target.value)
-                receiver_parts = receiver.split(".")
-                repository_receiver = any(
-                    part == "r"
-                    or part == "repo"
-                    or part == "repository"
-                    or part.endswith("repo")
-                    or part.endswith("repository")
-                    or part == "_repo"
-                    for part in receiver_parts
-                )
-                if (
-                    repository_receiver
-                    and target.attr in RETIRED_REPOSITORY_CLIENT_ATTRS
-                    and not _inside_attribute_error_assertion(node, parents)
-                ):
-                    offenders.append(
-                        f"{relative}:{node.lineno}:{receiver}.{target.attr}"
-                    )
+        offenders.extend(_retired_model_attribute_offenders(tree, relative))
+
     assert offenders == []
+
+
+def test_retired_model_attribute_guard_detects_direct_and_two_step_bypasses():
+    tree = ast.parse(
+        """
+answer = repo.llm_client.chat_json([])
+provider = repo._runtime.models
+reranker = provider.rerank_client
+hidden = getattr(provider, "kg_llm_client")
+vector = repository.embedder.embed_query("q")
+"""
+    )
+
+    offenders = _retired_model_attribute_offenders(tree, "negative.py")
+
+    assert len(offenders) == 4
+    assert any("repo.llm_client" in offender for offender in offenders)
+    assert any("provider.rerank_client" in offender for offender in offenders)
+    assert any("getattr-provider.kg_llm_client" in offender for offender in offenders)
+    assert any("repository.embedder" in offender for offender in offenders)
 
 
 def test_settings_accept_field_names_even_when_fields_have_validation_aliases(tmp_path):
