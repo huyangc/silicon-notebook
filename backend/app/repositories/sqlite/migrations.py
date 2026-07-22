@@ -12,7 +12,7 @@ from app.services.extraction_profiles import LIST_FIELDS, OBJECT_SCHEMAS, OBJECT
 from app.services.auth_utils import hash_password
 from app.services.kg.filters import _norm as _wl_norm
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 def _now() -> str:
     from datetime import datetime, timezone
@@ -1595,6 +1595,51 @@ class SqliteMigrator:
             # safely retry instead of reporting v25 over partially scrubbed
             # state (or committing the scrub while still reporting v24).
             db.execute("PRAGMA user_version = 25")
+
+    def _migration_26(self) -> None:
+        """knowhow 表版本管理：变更流水 + 命名里程碑。
+
+        设计见 docs/superpowers/specs/2026-07-22-knowhow-table-version-control-design.md。
+        与 _migration_16/_migration_17 同款两层写法(仅新建表，不改 _migration_1
+        baseline；全新表无历史行，无列序顾虑)。
+
+        knowhow_milestones.seq 刻意**不设** FK 到 knowhow_changes：流水被
+        "清理历史"删除后里程碑要保留为"已失效标记"(灰显、不可回退)，
+        级联删掉用户亲手命名过的东西是不可接受的。
+        """
+        with self._connect() as db:
+            db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS knowhow_changes (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  seq INTEGER NOT NULL,
+                  kind TEXT NOT NULL,
+                  actor TEXT NOT NULL DEFAULT '',
+                  origin TEXT NOT NULL DEFAULT 'user',
+                  payload_json TEXT NOT NULL,
+                  fingerprint TEXT NOT NULL,
+                  note TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  UNIQUE(table_id, seq)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowhow_changes_table
+                  ON knowhow_changes(table_id, seq DESC);
+
+                CREATE TABLE IF NOT EXISTS knowhow_milestones (
+                  id TEXT PRIMARY KEY,
+                  table_id TEXT NOT NULL REFERENCES knowhow_tables(id) ON DELETE CASCADE,
+                  seq INTEGER NOT NULL,
+                  name TEXT NOT NULL,
+                  note TEXT NOT NULL DEFAULT '',
+                  created_by TEXT NOT NULL DEFAULT '',
+                  created_at TEXT NOT NULL,
+                  UNIQUE(table_id, name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_knowhow_milestones_table
+                  ON knowhow_milestones(table_id, seq DESC);
+                """
+            )
 
     def _recover_interrupted_jobs(self) -> None:
         """服务端启动的崩溃兜底（与版本化 schema 迁移解耦，无条件运行）：后端单进程，

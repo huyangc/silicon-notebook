@@ -370,10 +370,12 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_25(tmp_path):
     build-job table, _migration_23's per-user model-service status, and
     _migration_24's kg_canonical_scratch table (write-lock slimming
     improvement point 2's cluster-map-swap preparation scratch table — no
-    separate index rollback needed, DROP TABLE takes its index with it), and
-    _migration_25's system model-service status table, or
-    the constructed 'v13' would retain them and the hop would under-report
-    its additions."""
+    separate index rollback needed, DROP TABLE takes its index with it),
+    _migration_25's system model-service status table, and
+    _migration_26's two knowhow-history tables (knowhow_changes +
+    knowhow_milestones — leaf tables nothing else absorbs, so each gets its
+    own explicit rollback statement below), or the constructed 'v13' would
+    retain them and the hop would under-report its additions."""
     from app.core.config import Settings
 
     module = _load_verifier()
@@ -410,6 +412,12 @@ def test_deployed_v13_database_verifies_through_migrations_14_to_25(tmp_path):
         rollback.execute("DROP TABLE knowhow_cells")                      # _migration_16
         rollback.execute("DROP TABLE knowhow_rows")                       # _migration_16
         rollback.execute("DROP TABLE knowhow_columns")                    # _migration_16
+        # knowhow_changes / knowhow_milestones FK onto knowhow_tables, so
+        # both must drop before it (same child-before-parent rule as above).
+        rollback.execute("DROP INDEX idx_knowhow_milestones_table")       # _migration_24
+        rollback.execute("DROP INDEX idx_knowhow_changes_table")          # _migration_24
+        rollback.execute("DROP TABLE knowhow_milestones")                 # _migration_24
+        rollback.execute("DROP TABLE knowhow_changes")                    # _migration_24
         rollback.execute("DROP TABLE knowhow_tables")                     # _migration_16
         rollback.execute("DROP TABLE notebook_assets")                   # _migration_16
         rollback.execute("DROP INDEX idx_sources_nb_parse_status_type")  # _migration_15
@@ -440,6 +448,10 @@ def test_deployed_v20_database_verifies_through_migrations_21_to_25(tmp_path):
     try:
         rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE kg_canonical_scratch")
+        rollback.execute("DROP INDEX idx_knowhow_milestones_table")
+        rollback.execute("DROP INDEX idx_knowhow_changes_table")
+        rollback.execute("DROP TABLE knowhow_milestones")
+        rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("DROP INDEX idx_knowhow_cells_column_normalized_anchor_row")
@@ -471,6 +483,7 @@ def test_offline_settings_use_an_empty_system_model_registry(tmp_path, monkeypat
     assert module.verify_snapshot(database, storage).ok
 
 
+
 def test_deployed_v21_database_verifies_through_migrations_22_to_25(tmp_path):
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
@@ -483,6 +496,10 @@ def test_deployed_v21_database_verifies_through_migrations_22_to_25(tmp_path):
     try:
         rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE kg_canonical_scratch")
+        rollback.execute("DROP INDEX idx_knowhow_milestones_table")
+        rollback.execute("DROP INDEX idx_knowhow_changes_table")
+        rollback.execute("DROP TABLE knowhow_milestones")
+        rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("DROP TABLE kg_build_jobs")
         rollback.execute("PRAGMA user_version = 21")
@@ -507,8 +524,19 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_25(tmp_path):
     upgraded.close_local()
     rollback = sqlite3.connect(database)
     try:
+        # current is now four hops past v22 (v23 model_service_status, v24
+        # kg_canonical_scratch, v25 system_model_service_status + credential
+        # scrub, v26 knowhow_changes/knowhow_milestones); all must roll back so
+        # this forged source truly has nothing beyond v22, or those additions
+        # would already be present pre-migration and manifest-addition-missing
+        # would fire (they'd never appear in the after-minus-before "newly
+        # added" set).
         rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE kg_canonical_scratch")
+        rollback.execute("DROP INDEX idx_knowhow_milestones_table")
+        rollback.execute("DROP INDEX idx_knowhow_changes_table")
+        rollback.execute("DROP TABLE knowhow_milestones")
+        rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute("DROP TABLE model_service_status")
         rollback.execute("PRAGMA user_version = 22")
         rollback.commit()
@@ -522,8 +550,12 @@ def test_deployed_v22_database_verifies_through_migrations_23_to_25(tmp_path):
     assert result.final_user_version == module.SCHEMA_VERSION
 
 
-def test_deployed_v23_database_verifies_kg_scratch_and_model_status_scrub(tmp_path):
-    """A v23 database must verify cleanly through both v24 and v25."""
+def test_deployed_v23_database_verifies_through_migrations_24_to_26(tmp_path):
+    """A v23 database (has model_service_status + populated model_settings,
+    missing _migration_24's kg_canonical_scratch, _migration_25's system
+    model-service scrub, and _migration_26's knowhow-history tables) must
+    verify clean through all three hops to the current version, and the v25
+    scrub must fire on the restored credential/status rows."""
     module = _load_verifier()
     database, storage = _copy_fixture(tmp_path)
 
@@ -534,6 +566,10 @@ def test_deployed_v23_database_verifies_kg_scratch_and_model_status_scrub(tmp_pa
     with sqlite3.connect(database) as rollback:
         rollback.execute("DROP TABLE system_model_service_status")
         rollback.execute("DROP TABLE kg_canonical_scratch")
+        rollback.execute("DROP INDEX idx_knowhow_milestones_table")
+        rollback.execute("DROP INDEX idx_knowhow_changes_table")
+        rollback.execute("DROP TABLE knowhow_milestones")
+        rollback.execute("DROP TABLE knowhow_changes")
         rollback.execute(
             "UPDATE user_profiles SET model_settings=? WHERE user_id='user-local'",
             ('{"llm":{"api_key":"credential-must-be-scrubbed"}}',),

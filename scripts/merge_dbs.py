@@ -20,7 +20,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-# --- 表分类(SCHEMA_VERSION=25) --------------------------------------------
+# --- 表分类(SCHEMA_VERSION=26) --------------------------------------------
 NOTEBOOKS_TABLE = "notebooks"  # 按 id 筛(自身即 notebook 行)
 
 # 注: object_schemas 主键是全局 object_type(非 notebook 隔离); builtin 行 notebook_id=''
@@ -61,6 +61,8 @@ CHILD_TABLES = [
     ("knowhow_rows", "knowhow_tables", "table_id", "id"),
     ("knowhow_cells", "knowhow_rows", "row_id", "id"),
     ("knowhow_cell_code", "knowhow_rows", "row_id", "id"),  # _migration_18: 格子代码附件(二级子表)
+    ("knowhow_changes", "knowhow_tables", "table_id", "id"),  # _migration_24: 变更流水
+    ("knowhow_milestones", "knowhow_tables", "table_id", "id"),  # _migration_24: 命名里程碑
     ("memory_provenance", "memory_items", "memory_id", "id"),
     ("memory_revisions", "memory_items", "memory_id", "id"),
     ("memory_embeddings", "memory_items", "memory_id", "id"),
@@ -268,6 +270,8 @@ def merge_core(out_db: Path, primary_db: Path, secondary_db: Path,
             "knowhow_rows":    f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
             "knowhow_cells":     _knowhow_row_scope,
             "knowhow_cell_code": _knowhow_row_scope,
+            "knowhow_changes":    f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
+            "knowhow_milestones": f"table_id IN (SELECT id FROM sec.knowhow_tables WHERE notebook_id IN ({ph}))",
             "memory_provenance": f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
             "memory_revisions":  f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",
             "memory_embeddings": f"memory_id IN (SELECT id FROM sec.memory_items WHERE notebook_id IN ({ph}))",

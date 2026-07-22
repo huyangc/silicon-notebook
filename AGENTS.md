@@ -168,7 +168,7 @@ notebook-scoped KG build jobs; v23 added per-user latest model-service status;
 v24 adds the kg_canonical_scratch table for the write-lock-slimming cluster-map
 swap; v25 irreversibly scrubs stored per-user model credentials and legacy
 status, then adds deployment-wide model-service health persistence keyed by
-service ID.
+service ID; v26 adds knowhow table change history and named milestones.
 - PostgreSQL + pgvector remain the future production/team-beta direction. Do not require them for the current local beta.
 - Until a PostgreSQL repository exists, reject every non-`sqlite:///` `DATABASE_URL` at settings construction; never silently fall back to `.local` for an unsupported database scheme.
 - KG-native tables are live: `knowledge_objects` (object types `concept/claim/formula/procedure`), `knowledge_relations`, knowledge/element/chunk/relation embeddings, `concept_clusters`, `extraction_runs`, `answers`, `conversations`, `feedback`, `ask_jobs`, `ask_trace_steps`, and `reports`; sharing uses notebook share fields plus `notebook_members`. The independent Memory layer uses `memory_items`, `memory_revisions`, `memory_provenance`, `memory_embeddings`, `agent_profiles`, `agent_access_tokens`, and `agent_token_notebooks`; Memory is never inserted into source/chunk/KG tables, and KG promotion creates a separate governed object. Embedding vectors are persisted locally and assembled into versioned float32 matrices or scale indexes. Graph/reasoning paths build or load federated graph state while preserving tier provenance.
