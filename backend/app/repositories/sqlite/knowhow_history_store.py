@@ -253,10 +253,10 @@ def content_strings_in_payload(kind: str, payload: dict) -> list:
 
     Kinds with no content_md-shaped field at all (``column_add``,
     ``column_rename``, ``column_kind``, ``anchor_set``, ``table_meta``,
-    ``cell_code_put``, ``cell_code_delete``) fall through every branch below
-    and correctly yield ``[]`` — column/table names and roles are never
-    scanned (asset refs only ever live in rendered cell markdown, never a
-    column name or table title, and the pre-Task-13 implementation never
+    ``cell_code_put``, ``cell_code_delete``, ``autolink``) fall through every
+    branch below and correctly yield ``[]`` — column/table names and roles are
+    never scanned (asset refs only ever live in rendered cell markdown, never
+    a column name or table title, and the pre-Task-13 implementation never
     scanned those either). Adding a new ``record_change`` ``kind`` that DOES
     carry cell content requires adding it here too — there is no generic
     fallback, by design: guessing "unknown kind, treat the whole payload as
@@ -264,6 +264,19 @@ def content_strings_in_payload(kind: str, payload: dict) -> list:
     unrelated-payload bug this function exists to close, the moment that new
     kind ALSO happens to carry a ``code``/``code_text`` field alongside its
     content."""
+    # Closed set of kinds with explicit routing — failure on unknown kind
+    # catches runtime errors from future changes that add a new kind carrying
+    # cell content but forget to register it here, which would silently leak
+    # asset references and cause images to be incorrectly garbage-collected.
+    REGISTERED_KINDS = frozenset({
+        "cell_update", "revert", "row_add", "import_append", "row_delete",
+        "table_create", "column_delete", "column_add", "column_rename",
+        "column_kind", "anchor_set", "table_meta", "cell_code_put",
+        "cell_code_delete", "autolink",
+    })
+    if kind not in REGISTERED_KINDS:
+        raise ValueError(f"content_strings_in_payload: 未登记的 kind={kind!r}")
+
     texts: list = []
 
     if kind in ("cell_update", "revert"):
