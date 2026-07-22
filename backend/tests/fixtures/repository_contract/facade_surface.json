@@ -5589,12 +5589,6 @@
     "consumers": [
       {
         "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.source_id_in_flight",
-        "target": "get_source"
-      },
-      {
-        "kind": "attribute",
         "path": "scripts/smoke_backend.py",
         "scope": "<module>._source_evidence",
         "target": "get_source"
@@ -6413,12 +6407,6 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.run_ingest",
-        "target": "maintenance"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_kg",
         "target": "maintenance"
       },
@@ -6988,12 +6976,6 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_all._sched",
-        "target": "process_source"
-      },
-      {
-        "kind": "attribute",
-        "path": "backend/app/services/batch_ingest.py",
-        "scope": "<module>.run_ingest._one",
         "target": "process_source"
       },
       {
