@@ -1,6 +1,6 @@
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.common import Evidence
 
@@ -62,6 +62,19 @@ class AdminUserUsage(BaseModel):
     reports: int
     last_active: Optional[str] = None
     is_online: bool = False
+    role_mutable: bool = True
+
+
+class AdminUserRoleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["admin", "user"]
+
+
+class AdminUserRoleResult(BaseModel):
+    id: str
+    username: str
+    role: Literal["admin", "user"]
 
 
 class AdminUserNotebook(BaseModel):

@@ -138,6 +138,8 @@ def test_admin_users_lists_username_and_counts(client):
     assert "admin" in rows and "z00123456" in rows
     assert rows["z00123456"]["notebooks"] == 2
     assert rows["z00123456"]["role"] == "user"
+    assert rows["z00123456"]["role_mutable"] is True
+    assert rows["admin"]["role_mutable"] is False
     # 展示用户名,但内部 id 仍是 user-<hex>(未统一)
     assert rows["z00123456"]["id"].startswith("user-")
 
@@ -176,3 +178,94 @@ def test_admin_online_endpoint_lists_connected(client):
 def test_admin_online_forbidden_for_regular_user(client):
     b = _auth(client, "z00123456")
     assert client.get("/api/admin/online", headers=b).status_code == 403
+
+
+def test_admin_can_grant_and_revoke_role_for_existing_session(client):
+    admin = _auth_admin(client)
+    user_headers = _auth(client, "z00123456")
+    user_id = {
+        row["username"]: row
+        for row in client.get("/api/admin/users", headers=admin).json()
+    }["z00123456"]["id"]
+
+    granted = client.patch(
+        f"/api/admin/users/{user_id}/role",
+        headers=admin,
+        json={"role": "admin"},
+    )
+    assert granted.status_code == 200
+    assert granted.json() == {
+        "id": user_id,
+        "username": "z00123456",
+        "role": "admin",
+    }
+    # resolve_session 每次重新读取 users.role：已有 token 无需重新登录。
+    assert client.get("/api/admin/users", headers=user_headers).status_code == 200
+
+    revoked = client.patch(
+        f"/api/admin/users/{user_id}/role",
+        headers=admin,
+        json={"role": "user"},
+    )
+    assert revoked.status_code == 200
+    assert revoked.json()["role"] == "user"
+    assert client.get("/api/admin/users", headers=user_headers).status_code == 403
+
+
+def test_regular_user_cannot_assign_admin_role(client):
+    admin = _auth_admin(client)
+    user_headers = _auth(client, "z00123456")
+    user_id = {
+        row["username"]: row
+        for row in client.get("/api/admin/users", headers=admin).json()
+    }["z00123456"]["id"]
+    response = client.patch(
+        f"/api/admin/users/{user_id}/role",
+        headers=user_headers,
+        json={"role": "admin"},
+    )
+    assert response.status_code == 403
+    assert response.headers["X-User-Message"] == "1"
+
+
+def test_builtin_admin_and_active_admin_cannot_demote_themselves(client):
+    admin = _auth_admin(client)
+    builtin = client.patch(
+        "/api/admin/users/user-local/role",
+        headers=admin,
+        json={"role": "user"},
+    )
+    assert builtin.status_code == 409
+    assert builtin.json()["detail"] == "内置管理员权限不可撤销"
+
+    promoted_headers = _auth(client, "z00123456")
+    user_id = {
+        row["username"]: row
+        for row in client.get("/api/admin/users", headers=admin).json()
+    }["z00123456"]["id"]
+    assert client.patch(
+        f"/api/admin/users/{user_id}/role",
+        headers=admin,
+        json={"role": "admin"},
+    ).status_code == 200
+    self_demote = client.patch(
+        f"/api/admin/users/{user_id}/role",
+        headers=promoted_headers,
+        json={"role": "user"},
+    )
+    assert self_demote.status_code == 409
+    assert self_demote.json()["detail"] == "不能撤销当前账户的管理员权限"
+
+
+def test_role_update_validates_target_and_role(client):
+    admin = _auth_admin(client)
+    assert client.patch(
+        "/api/admin/users/missing/role",
+        headers=admin,
+        json={"role": "admin"},
+    ).status_code == 404
+    assert client.patch(
+        "/api/admin/users/user-local/role",
+        headers=admin,
+        json={"role": "owner"},
+    ).status_code == 422

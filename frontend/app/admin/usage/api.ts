@@ -23,6 +23,15 @@ export type AdminUserUsage = {
   reports: number;
   last_active: string | null;
   is_online: boolean;
+  role_mutable: boolean;
+};
+
+export type AdminUserRole = "admin" | "user";
+
+export type AdminUserRoleResult = {
+  id: string;
+  username: string;
+  role: AdminUserRole;
 };
 
 export async function fetchAdminUsers(): Promise<AdminUserUsage[]> {
@@ -38,4 +47,17 @@ export async function fetchOnlineIds(): Promise<string[]> {
   if (!res.ok) await throwHumanizedHttpError(res, "admin");
   const data = (await res.json()) as { online_ids: string[] };
   return data.online_ids;
+}
+
+export async function updateAdminUserRole(
+  userId: string,
+  role: AdminUserRole,
+): Promise<AdminUserRoleResult> {
+  const res = await performApiRequest(
+    `/admin/users/${encodeURIComponent(userId)}/role`,
+    { tag: "admin", method: "PATCH", body: JSON.stringify({ role }) },
+  );
+  if (res.status === 403) await throwForbiddenSentinel(res);
+  if (!res.ok) await throwHumanizedHttpError(res, "admin");
+  return res.json();
 }

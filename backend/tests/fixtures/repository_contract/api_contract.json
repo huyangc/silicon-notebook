@@ -121,6 +121,51 @@
           "title": "AdminUserNotebook",
           "type": "object"
         },
+        "AdminUserRoleResult": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "role": {
+              "enum": [
+                "admin",
+                "user"
+              ],
+              "title": "Role",
+              "type": "string"
+            },
+            "username": {
+              "title": "Username",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "username",
+            "role"
+          ],
+          "title": "AdminUserRoleResult",
+          "type": "object"
+        },
+        "AdminUserRoleUpdate": {
+          "additionalProperties": false,
+          "properties": {
+            "role": {
+              "enum": [
+                "admin",
+                "user"
+              ],
+              "title": "Role",
+              "type": "string"
+            }
+          },
+          "required": [
+            "role"
+          ],
+          "title": "AdminUserRoleUpdate",
+          "type": "object"
+        },
         "AdminUserUsage": {
           "properties": {
             "conversations": {
@@ -162,6 +207,11 @@
             "role": {
               "title": "Role",
               "type": "string"
+            },
+            "role_mutable": {
+              "default": true,
+              "title": "Role Mutable",
+              "type": "boolean"
             },
             "sources": {
               "title": "Sources",
@@ -5995,6 +6045,56 @@
             }
           },
           "summary": "List Admin User Notebooks"
+        }
+      },
+      "/api/admin/users/{user_id}/role": {
+        "patch": {
+          "description": "Grant or revoke administrator access. Existing sessions observe it next request.",
+          "operationId": "update_admin_user_role_api_admin_users__user_id__role_patch",
+          "parameters": [
+            {
+              "in": "path",
+              "name": "user_id",
+              "required": true,
+              "schema": {
+                "title": "User Id",
+                "type": "string"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminUserRoleUpdate"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/AdminUserRoleResult"
+                  }
+                }
+              },
+              "description": "Successful Response"
+            },
+            "422": {
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              },
+              "description": "Validation Error"
+            }
+          },
+          "summary": "Update Admin User Role"
         }
       },
       "/api/agent-profiles": {

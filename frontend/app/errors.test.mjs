@@ -16,7 +16,7 @@ import { testModelService } from "./model-settings.ts";
 import { setNotebookTier } from "./notebook-tier.ts";
 import { shareNotebook } from "./notebook-share.ts";
 import { fetchKnowhowTables } from "./knowhow-model.ts";
-import { fetchAdminUsers } from "./admin/usage/api.ts";
+import { fetchAdminUsers, updateAdminUserRole } from "./admin/usage/api.ts";
 
 // ---------------------------------------------------------------------------
 // 纯函数:状态码 → 中文
@@ -643,6 +643,14 @@ test("admin 总览的 403 哨兵不吞诊断(状态码 + detail + request id 进
   assert.match(logs[0], /403/);
   assert.match(logs[0], /仅管理员可查看用户总览/);
   assert.match(logs[0], /req-adm/);
+});
+
+test("管理员权限更新保留后端盖章的冲突原因", async () => {
+  const { error } = await callFailing(
+    () => updateAdminUserRole("user-local", "user"),
+    markedResponse(409, { detail: "内置管理员权限不可撤销" })
+  );
+  assert.equal(error.message, "内置管理员权限不可撤销");
 });
 
 // ---------------------------------------------------------------------------
