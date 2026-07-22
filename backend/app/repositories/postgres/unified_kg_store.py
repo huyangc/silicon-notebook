@@ -34,25 +34,12 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.repositories.postgres.search import (
     drop_mention_scan,
     mention_claim_rows,
     mention_scan_matches as search_mention_scan_matches,
     prepare_mention_scan,
-)
-
-
-MOUNT_JOIN = (
-    "FROM notebook_bases e JOIN notebooks b ON b.id=e.base_notebook_id "
-    "JOIN notebooks a ON a.id=e.notebook_id "
-    "WHERE e.notebook_id=%s AND b.id!=e.notebook_id"
-)
-MOUNT_VALID = (
-    " AND b.status!='copying' AND "
-    "(b.tier='base' OR b.created_by=a.created_by)"
-)
-MOUNT_ORDER = (
-    " ORDER BY CASE WHEN b.tier='base' THEN 0 ELSE 1 END,b.name COLLATE \"C\""
 )
 
 
@@ -244,7 +231,8 @@ class UnifiedKgStore:
             "AND cs.member_object_id=kr.source_object_id "
             "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
             "AND ct.member_object_id=kr.target_object_id "
-            "WHERE kr.notebook_id=%s", (notebook_id,),
+            "WHERE kr.notebook_id=%s AND kr.review_status!='rejected' "
+            "ORDER BY kr.id COLLATE \"C\"", (notebook_id,),
         )
         return names, relations
 
@@ -770,14 +758,17 @@ class UnifiedKgStore:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT canonical_id FROM concept_clusters WHERE notebook_id=%s AND lower(canonical_name)=%s "
-                "GROUP BY canonical_id ORDER BY COUNT(*) DESC LIMIT 1", (notebook_id, focal_key)).fetchone()
+                "GROUP BY canonical_id ORDER BY COUNT(*) DESC, "
+                "canonical_id COLLATE \"C\" ASC LIMIT 1",
+                (notebook_id, focal_key)).fetchone()
         return row["canonical_id"] if row else None
 
     def top_community_for(self, notebook_id: str, canonical_id: str) -> Optional[str]:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT community_id FROM community_members WHERE notebook_id=%s AND canonical_id=%s "
-                "ORDER BY level DESC LIMIT 1", (notebook_id, canonical_id)).fetchone()
+                "ORDER BY level DESC, community_id COLLATE \"C\" ASC LIMIT 1",
+                (notebook_id, canonical_id)).fetchone()
         return row["community_id"] if row else None
 
     def community_member_peers(
@@ -787,7 +778,7 @@ class UnifiedKgStore:
             return db.execute(
                 "SELECT canonical_name, centrality FROM community_members "
                 "WHERE notebook_id=%s AND community_id=%s AND canonical_id!=%s "
-                "ORDER BY centrality DESC LIMIT %s",
+                "ORDER BY centrality DESC, canonical_id COLLATE \"C\" ASC LIMIT %s",
                 (notebook_id, community_id, exclude_canonical_id, limit)
             ).fetchall()
 
@@ -799,8 +790,10 @@ class UnifiedKgStore:
             rows = db.execute(
                 "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions "
                 "WHERE notebook_id=%s AND (canonical_a=%s OR canonical_b=%s) AND bridge_claims>=%s "
-                "ORDER BY bridge_claims DESC LIMIT %s",
-                (notebook_id, canonical_id, canonical_id, min_bridge, limit)).fetchall()
+                "ORDER BY bridge_claims DESC, "
+                "CASE WHEN canonical_a=%s THEN canonical_b ELSE canonical_a END "
+                "COLLATE \"C\" ASC LIMIT %s",
+                (notebook_id, canonical_id, canonical_id, min_bridge, canonical_id, limit)).fetchall()
             out: List[Tuple[str, int]] = []
             for r in rows:
                 other = r["canonical_b"] if r["canonical_a"] == canonical_id else r["canonical_a"]

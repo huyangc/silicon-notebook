@@ -500,6 +500,7 @@ class CandidateRetrievalService(_RetrievalState):
             out.append({
                 "id": r["id"], "source_object_id": r["s"], "target_object_id": r["t"],
                 "edge_type": r["et"],
+                "review_status": r["review_status"],
                 "text": relation_embed_text(src_name, r["et"], tgt_name, spans),
             })
         return out
@@ -621,6 +622,10 @@ class CandidateRetrievalService(_RetrievalState):
         在 O(bounded)。已暖(_vector_cache 命中)或小库:字节不变,走原路径。"""
         from app.services.retrieval import score_relations
         from app.services.vector_index import top_k_sims
+
+        def live_relations(rows: List[dict]) -> List[dict]:
+            return [row for row in rows if row["review_status"] != "rejected"]
+
         with self._connect() as db:
             if not self.knowledge.relation_exists(db, notebook_id):
                 return []
@@ -637,7 +642,11 @@ class CandidateRetrievalService(_RetrievalState):
                         notebook_id, query_vector, idx, self.settings.relation_recall)
                     if cand_sims:
                         top_ids = list(cand_sims.keys())
-                        relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
+                        relations = live_relations(
+                            self._relations_with_names(
+                                db, notebook_id, relation_ids=top_ids
+                            )
+                        )
                         return score_relations(query, relations, query_vector=query_vector,
                                                relation_sims=cand_sims,
                                                downweight_edges=self.settings.kg_about_downweight_enabled)
@@ -657,7 +666,9 @@ class CandidateRetrievalService(_RetrievalState):
                 db, notebook_id, "relation_embeddings", "relation_id")
             if not rel_ids:
                 # 无向量覆盖(未配 embedder/未回填)→ 界定不了候选,回退全量。
-                relations = self._relations_with_names(db, notebook_id)
+                relations = live_relations(
+                    self._relations_with_names(db, notebook_id)
+                )
                 relation_sims = None
             else:
                 top_pairs = top_k_sims(query_vector, rel_ids, rel_mat,
@@ -674,7 +685,11 @@ class CandidateRetrievalService(_RetrievalState):
                     # 有界不炸内存,排序质量让位于可用性。
                     top_ids = rel_ids[: self.settings.relation_recall]
                     relation_sims = {}
-                relations = self._relations_with_names(db, notebook_id, relation_ids=top_ids)
+                relations = live_relations(
+                    self._relations_with_names(
+                        db, notebook_id, relation_ids=top_ids
+                    )
+                )
         return score_relations(query, relations, query_vector=query_vector,
                                relation_sims=relation_sims,
                                downweight_edges=self.settings.kg_about_downweight_enabled)

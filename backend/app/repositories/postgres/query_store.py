@@ -15,6 +15,7 @@ from app.repositories.postgres._store_utils import (
     sqlite_compatible_notebook_row,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER, MOUNT_VALID
 from app.repositories.postgres.search import (
     notebook_element_rows,
     notebook_knowledge_rows,
@@ -23,19 +24,6 @@ from app.repositories.postgres.search import (
 from app.services.extraction_profiles import OBJECT_TYPE_LABELS
 from app.services.notebook_scale import NotebookScaleFacts
 
-
-MOUNT_JOIN = (
-    "FROM notebook_bases e JOIN notebooks b ON b.id=e.base_notebook_id "
-    "JOIN notebooks a ON a.id=e.notebook_id "
-    "WHERE e.notebook_id=%s AND b.id!=e.notebook_id"
-)
-MOUNT_VALID = (
-    " AND b.status!='copying' AND "
-    "(b.tier='base' OR b.created_by=a.created_by)"
-)
-MOUNT_ORDER = (
-    " ORDER BY CASE WHEN b.tier='base' THEN 0 ELSE 1 END,b.name COLLATE \"C\""
-)
 
 _COUNT_IDENTIFIERS = {
     "sources": frozenset({"notebook_id"}),
@@ -344,10 +332,12 @@ class QueryStore:
             low_rated = [
                 row["question"]
                 for row in db.execute(
-                    "SELECT DISTINCT a.question FROM feedback f "
+                    "SELECT a.question FROM feedback f "
                     "JOIN answers a ON a.id = f.answer_id "
                     "WHERE f.notebook_id = %s AND f.rating = 'not_useful' "
-                    "ORDER BY f.created_at DESC LIMIT 10",
+                    "GROUP BY a.question "
+                    "ORDER BY MAX(f.created_at) DESC, a.question COLLATE \"C\" ASC "
+                    "LIMIT 10",
                     (notebook_id,),
                 ).fetchall()
             ]

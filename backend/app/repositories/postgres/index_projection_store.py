@@ -257,7 +257,7 @@ class IndexProjectionStore:
         return db.execute(
             f"SELECT id,object_type,{PAYLOAD_NAME_EXPRESSION} AS name "
             "FROM knowledge_objects "
-            "WHERE notebook_id=%s AND status!='deprecated'",
+            "WHERE notebook_id=%s AND status!='deprecated' ORDER BY ordinal",
             (notebook_id,),
         ).fetchall()
 
@@ -343,7 +343,8 @@ class IndexProjectionStore:
             for src_clause, src_params in clauses:
                 for r in db.execute(
                         f"SELECT id, object_type, payload FROM knowledge_objects "
-                        f"WHERE notebook_id=%s AND status IN ({ph}){src_clause}",
+                        f"WHERE notebook_id=%s AND status IN ({ph}){src_clause} "
+                        f"ORDER BY ordinal",
                         (notebook_id, *USABLE_STATUSES, *src_params)).fetchall():
                     kg_nodes[r["id"]] = {
                         "type": r["object_type"],
@@ -357,7 +358,8 @@ class IndexProjectionStore:
                     relations.append(dict(r))
             for src_clause, src_params in clauses:
                 for r in db.execute(
-                        f"SELECT id FROM chunks WHERE notebook_id=%s{src_clause}",
+                        f"SELECT id FROM chunks WHERE notebook_id=%s{src_clause} "
+                        f"ORDER BY ordinal",
                         (notebook_id, *src_params)).fetchall():
                     chunk_ids.append(r["id"])
             for r in db.execute(

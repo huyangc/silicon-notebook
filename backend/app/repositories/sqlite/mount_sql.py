@@ -39,12 +39,15 @@ MOUNT_VALID_EXPR = (
 # 追加到 MOUNT_JOIN 之后的有效性过滤。
 MOUNT_VALID = " AND " + MOUNT_VALID_EXPR
 
-# 统一次序:公共知识库在前,组内按名字。tier 只有 'base'/'personal' 两个字面量,
+# 统一次序:公共知识库在前,组内按名字、同名按 id。tier 只有
+# 'base'/'personal' 两个字面量,
 # 'base' < 'personal' 字典序——写成 `tier DESC` 曾经因为这份巧合而被顺手打反
 # (DESC 把 'personal' 排到 'base' 前面,与本行注释描述的意图正相反,已被 codex
 # 评审抓出并修正)。改成显式 CASE 钉住"base 恒排最前",不再依赖字典序方向这种
 # 一旦引入第三个 tier 值就会静默失效的隐式假设。
-MOUNT_ORDER = " ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name"
+MOUNT_ORDER = (
+    " ORDER BY CASE WHEN b.tier = 'base' THEN 0 ELSE 1 END, b.name, b.id"
+)
 
 # 供 `IN (...)` 内联的 id 子查询(子查询里 ORDER BY 无意义,故不带)。
 MOUNTED_BASE_IDS_SUBQUERY = "SELECT b.id " + MOUNT_JOIN + MOUNT_VALID

@@ -23,6 +23,7 @@ from app.repositories.postgres._store_utils import (
 )
 from app.repositories.postgres.database import PostgresDatabase
 from app.repositories.postgres.knowledge_store import KnowledgeStore
+from app.repositories.postgres.mount_sql import MOUNT_JOIN, MOUNT_ORDER
 from app.services.knowledge_contracts import (
     KNOWLEDGE_STATUSES,
     USABLE_STATUSES,
@@ -30,16 +31,6 @@ from app.services.knowledge_contracts import (
 )
 
 _REVIEW_STATUSES = frozenset({"pending", "verified", "rejected"})
-MOUNT_JOIN = (
-    "FROM notebook_bases e JOIN notebooks b ON b.id=e.base_notebook_id "
-    "JOIN notebooks a ON a.id=e.notebook_id "
-    "WHERE e.notebook_id=%s AND b.id!=e.notebook_id"
-)
-MOUNT_ORDER = (
-    " ORDER BY CASE WHEN b.tier='base' THEN 0 ELSE 1 END,b.name COLLATE \"C\""
-)
-
-
 def _json_document(value: Any, *, expected: type, field: str):
     if isinstance(value, str):
         value = json.loads(value)
@@ -77,6 +68,20 @@ def _promotion_candidate_for_update(connection, candidate_id: str):
     return (
         _compat_rows([row], timestamp_columns=("created_at", "updated_at"))[0]
         if row is not None else None
+    )
+
+
+def _lock_promotion_object(connection, object_id: str) -> None:
+    """Serialize proposal idempotency across processes for one source object.
+
+    Knowledge and Memory ids are globally unique.  A namespaced hash keeps the
+    lock independent from other advisory-lock users; the partial unique index
+    remains the final integrity guard, while normal contenders now wait and
+    return the winner instead of surfacing ``UniqueViolation``.
+    """
+    connection.execute(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        (f"silicon-notebook:promotion-object:{object_id}",),
     )
 
 
@@ -461,28 +466,26 @@ class GovernanceStore:
         """Single-flight start: returns None when a job is already running,
         else upserts the running row and returns the pending total — one
         atomic block inside the caller's write transaction."""
-        row = connection.execute("SELECT status FROM merge_review_jobs WHERE notebook_id=%s",
-                                 (notebook_id,)).fetchone()
-        if row is not None and row["status"] == "running":
-            return None
         total = connection.execute(
             "SELECT COUNT(*) c FROM concept_merge_candidates "
             "WHERE notebook_id=%s AND status='pending'", (notebook_id,)).fetchone()["c"]
-        connection.execute(
+        row = connection.execute(
             """
             INSERT INTO merge_review_jobs (notebook_id,status,total,done,started_at,updated_at,error)
             VALUES (%s, 'running', %s, 0, %s, %s, '')
             ON CONFLICT(notebook_id) DO UPDATE SET
               status='running', total=excluded.total, done=0,
               started_at=excluded.started_at, updated_at=excluded.updated_at, error=''
+            WHERE merge_review_jobs.status != 'running'
+            RETURNING total
             """,
             (
                 notebook_id,
                 total,
                 normalize_timestamp(now),
                 normalize_timestamp(now),
-            ))
-        return int(total)
+            )).fetchone()
+        return int(row["total"]) if row is not None else None
 
     @staticmethod
     def set_merge_review_progress(
@@ -620,7 +623,8 @@ class GovernanceStore:
         connection: Any, notebook_id: str, object_id: str
     ) -> "dict | None":
         return connection.execute(
-            "SELECT object_type FROM knowledge_objects WHERE id=%s AND notebook_id=%s",
+            "SELECT object_type FROM knowledge_objects "
+            "WHERE id=%s AND notebook_id=%s FOR UPDATE",
             (object_id, notebook_id),
         ).fetchone()
 
@@ -766,7 +770,7 @@ class GovernanceStore:
         connection: Any, candidate_id: str
     ) -> "dict | None":
         row = connection.execute(
-            "SELECT * FROM promotion_candidates WHERE id=%s", (candidate_id,)
+            "SELECT * FROM promotion_candidates WHERE id=%s FOR UPDATE", (candidate_id,)
         ).fetchone()
         return (
             _compat_rows([row], timestamp_columns=("created_at", "updated_at"))[0]
@@ -777,6 +781,7 @@ class GovernanceStore:
     def active_promotion_for_object(
         connection: Any, object_id: str
     ) -> "dict | None":
+        _lock_promotion_object(connection, object_id)
         row = connection.execute(
             "SELECT * FROM promotion_candidates "
             "WHERE object_id=%s AND status NOT IN ('approved','rejected')",
@@ -1245,7 +1250,8 @@ class GovernanceStore:
         partial update and return the refetched row. ``payload`` is the
         KnowledgeUpdate model (status/payload/owner partial edit)."""
         row = connection.execute(
-            "SELECT * FROM knowledge_objects WHERE id = %s AND notebook_id = %s",
+            "SELECT * FROM knowledge_objects WHERE id = %s AND notebook_id = %s "
+            "FOR UPDATE",
             (object_id, notebook_id),
         ).fetchone()
         if row is None:
@@ -1304,14 +1310,14 @@ class GovernanceStore:
         """The in-transaction body of merge_knowledge: fold source evidence
         into the target, maintain the reverse index, deprecate the source in
         place, and return the refetched target row."""
-        src = connection.execute(
-            "SELECT * FROM knowledge_objects WHERE id = %s AND notebook_id = %s",
-            (source_id, notebook_id),
-        ).fetchone()
-        tgt = connection.execute(
-            "SELECT * FROM knowledge_objects WHERE id = %s AND notebook_id = %s",
-            (into_id, notebook_id),
-        ).fetchone()
+        locked = connection.execute(
+            "SELECT * FROM knowledge_objects WHERE notebook_id = %s "
+            "AND id IN (%s, %s) ORDER BY id COLLATE \"C\" FOR UPDATE",
+            (notebook_id, source_id, into_id),
+        ).fetchall()
+        by_id = {row["id"]: row for row in locked}
+        src = by_id.get(source_id)
+        tgt = by_id.get(into_id)
         if src is None or tgt is None:
             raise KeyError(source_id if src is None else into_id)
         if src["object_type"] != tgt["object_type"]:

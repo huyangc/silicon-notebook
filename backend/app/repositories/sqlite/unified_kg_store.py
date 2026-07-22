@@ -216,7 +216,8 @@ class UnifiedKgStore:
             "AND cs.member_object_id=kr.source_object_id "
             "LEFT JOIN concept_clusters ct ON ct.notebook_id=kr.notebook_id "
             "AND ct.member_object_id=kr.target_object_id "
-            "WHERE kr.notebook_id=?", (notebook_id,),
+            "WHERE kr.notebook_id=? AND kr.review_status!='rejected' "
+            "ORDER BY kr.id", (notebook_id,),
         )
         return names, relations
 
@@ -673,14 +674,16 @@ class UnifiedKgStore:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT canonical_id FROM concept_clusters WHERE notebook_id=? AND lower(canonical_name)=? "
-                "GROUP BY canonical_id ORDER BY COUNT(*) DESC LIMIT 1", (notebook_id, focal_key)).fetchone()
+                "GROUP BY canonical_id ORDER BY COUNT(*) DESC, canonical_id ASC LIMIT 1",
+                (notebook_id, focal_key)).fetchone()
         return row["canonical_id"] if row else None
 
     def top_community_for(self, notebook_id: str, canonical_id: str) -> Optional[str]:
         with self.database.connect() as db:
             row = db.execute(
                 "SELECT community_id FROM community_members WHERE notebook_id=? AND canonical_id=? "
-                "ORDER BY level DESC LIMIT 1", (notebook_id, canonical_id)).fetchone()
+                "ORDER BY level DESC, community_id ASC LIMIT 1",
+                (notebook_id, canonical_id)).fetchone()
         return row["community_id"] if row else None
 
     def community_member_peers(
@@ -690,7 +693,7 @@ class UnifiedKgStore:
             return db.execute(
                 "SELECT canonical_name, centrality FROM community_members "
                 "WHERE notebook_id=? AND community_id=? AND canonical_id!=? "
-                "ORDER BY centrality DESC LIMIT ?",
+                "ORDER BY centrality DESC, canonical_id ASC LIMIT ?",
                 (notebook_id, community_id, exclude_canonical_id, limit)
             ).fetchall()
 
@@ -702,8 +705,10 @@ class UnifiedKgStore:
             rows = db.execute(
                 "SELECT canonical_a, canonical_b, bridge_claims FROM concept_comentions "
                 "WHERE notebook_id=? AND (canonical_a=? OR canonical_b=?) AND bridge_claims>=? "
-                "ORDER BY bridge_claims DESC LIMIT ?",
-                (notebook_id, canonical_id, canonical_id, min_bridge, limit)).fetchall()
+                "ORDER BY bridge_claims DESC, "
+                "CASE WHEN canonical_a=? THEN canonical_b ELSE canonical_a END ASC LIMIT ?",
+                (notebook_id, canonical_id, canonical_id, min_bridge,
+                 canonical_id, limit)).fetchall()
             out: List[Tuple[str, int]] = []
             for r in rows:
                 other = r["canonical_b"] if r["canonical_a"] == canonical_id else r["canonical_a"]

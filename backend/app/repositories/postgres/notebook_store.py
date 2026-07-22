@@ -12,20 +12,13 @@ from app.repositories.postgres._store_utils import (
     sqlite_compatible_notebook_row,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.mount_sql import (
+    MOUNT_JOIN as _MOUNT_JOIN,
+    MOUNT_ORDER as _MOUNT_ORDER,
+    MOUNT_VALID as _MOUNT_VALID,
+    MOUNT_VALID_EXPR as _MOUNT_VALID_EXPR,
+)
 from app.services.knowledge_contracts import USABLE_STATUSES  # noqa: F401
-
-
-_MOUNT_JOIN = (
-    "FROM notebook_bases e "
-    "JOIN notebooks b ON b.id=e.base_notebook_id "
-    "JOIN notebooks a ON a.id=e.notebook_id "
-    "WHERE e.notebook_id=%s AND b.id<>e.notebook_id"
-)
-_MOUNT_VALID_EXPR = (
-    "(b.status<>'copying' AND (b.tier='base' OR b.created_by=a.created_by))"
-)
-_MOUNT_VALID = " AND " + _MOUNT_VALID_EXPR
-_MOUNT_ORDER = " ORDER BY CASE WHEN b.tier='base' THEN 0 ELSE 1 END,b.name COLLATE \"C\""
 
 
 class NotebookStore:

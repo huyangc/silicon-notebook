@@ -244,7 +244,9 @@ class KnowledgeStore:
         ).fetchall()
         relations = db.execute(
             f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
-            f"WHERE notebook_id=? AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
+            f"WHERE notebook_id=? AND review_status!='rejected' "
+            f"AND source_object_id IN ({ph}) AND target_object_id IN ({ph}) "
+            f"ORDER BY id",
             [notebook_id, *ids, *ids],
         ).fetchall()
         return objects, relations
@@ -343,7 +345,8 @@ class KnowledgeStore:
                               relation_ids=None, *, batch_size: int = 900):
         base_sql = (
             "SELECT r.id AS id, r.source_object_id AS s, r.target_object_id AS t, "
-            "r.edge_type AS et, r.evidence AS ev, so.payload AS sp, tp.payload AS tpl "
+            "r.edge_type AS et, r.evidence AS ev, r.review_status AS review_status, "
+            "so.payload AS sp, tp.payload AS tpl "
             "FROM knowledge_relations r "
             "JOIN knowledge_objects so ON so.id = r.source_object_id "
             "JOIN knowledge_objects tp ON tp.id = r.target_object_id "

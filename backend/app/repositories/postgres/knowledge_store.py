@@ -29,6 +29,11 @@ from app.repositories.postgres._store_utils import (
     normalize_timestamp,
 )
 from app.repositories.postgres.database import PostgresDatabase
+from app.repositories.postgres.mount_sql import (
+    MOUNT_JOIN,
+    MOUNT_VALID,
+    MOUNTED_BASE_IDS_SUBQUERY,
+)
 from app.repositories.postgres.search import (
     chunk_candidate_documents,
     chunk_candidate_rows,
@@ -38,16 +43,6 @@ from app.repositories.postgres.search import (
 )
 
 
-MOUNT_JOIN = (
-    "FROM notebook_bases e JOIN notebooks b ON b.id=e.base_notebook_id "
-    "JOIN notebooks a ON a.id=e.notebook_id "
-    "WHERE e.notebook_id=%s AND b.id!=e.notebook_id"
-)
-MOUNT_VALID = (
-    " AND b.status!='copying' AND "
-    "(b.tier='base' OR b.created_by=a.created_by)"
-)
-MOUNTED_BASE_IDS_SUBQUERY = "SELECT b.id " + MOUNT_JOIN + MOUNT_VALID
 _GRAPH_RESET_TABLES = frozenset({
     "concept_clusters",
     "concept_merge_candidates",
@@ -302,7 +297,8 @@ class KnowledgeStore:
     def unified_graph_rows(db: Any, notebook_id: str):
         return _compat_rows(db.execute(
             "SELECT id, object_type, payload, status FROM knowledge_objects "
-            "WHERE notebook_id=%s AND status!='deprecated'", (notebook_id,),
+            "WHERE notebook_id=%s AND status!='deprecated' ORDER BY ordinal",
+            (notebook_id,),
         ).fetchall(), payload=True)
 
     @staticmethod
@@ -342,7 +338,9 @@ class KnowledgeStore:
         ).fetchall()
         relations = db.execute(
             f"SELECT source_object_id, target_object_id, edge_type FROM knowledge_relations "
-            f"WHERE notebook_id=%s AND source_object_id IN ({ph}) AND target_object_id IN ({ph})",
+            f"WHERE notebook_id=%s AND review_status!='rejected' "
+            f"AND source_object_id IN ({ph}) AND target_object_id IN ({ph}) "
+            f"ORDER BY id COLLATE \"C\"",
             [notebook_id, *ids, *ids],
         ).fetchall()
         return _compat_rows(objects, payload=True), relations
@@ -444,7 +442,8 @@ class KnowledgeStore:
                               relation_ids=None, *, batch_size: int = 900):
         base_sql = (
             "SELECT r.id AS id, r.source_object_id AS s, r.target_object_id AS t, "
-            "r.edge_type AS et, r.evidence AS ev, so.payload AS sp, tp.payload AS tpl "
+            "r.edge_type AS et, r.evidence AS ev, r.review_status AS review_status, "
+            "so.payload AS sp, tp.payload AS tpl "
             "FROM knowledge_relations r "
             "JOIN knowledge_objects so ON so.id = r.source_object_id "
             "JOIN knowledge_objects tp ON tp.id = r.target_object_id "
@@ -539,10 +538,11 @@ class KnowledgeStore:
             return []
         ph = ",".join("%s" for _ in ids)
         status_ph = ",".join("%s" for _ in statuses)
-        return db.execute(
+        rows = db.execute(
             f"SELECT * FROM knowledge_objects WHERE id IN ({ph}) "
             f"AND status IN ({status_ph})", [*ids, *statuses],
         ).fetchall()
+        return _compat_rows(rows, payload=True, evidence=True)
 
     @staticmethod
     def graph_version_rows(db: Any, notebook_id: str):
@@ -630,7 +630,10 @@ class KnowledgeStore:
             "SELECT r.id,r.notebook_id,r.source_id,r.source_object_id,"
             "r.target_object_id,r.edge_type,r.review_status "
             "FROM knowledge_relations AS r "
-            "WHERE r.notebook_id=%s AND r.{}=%s LIMIT %s"
+            "WHERE r.notebook_id=%s AND r.{}=%s "
+            "ORDER BY CASE r.review_status "
+            "WHEN 'verified' THEN 0 WHEN 'pending' THEN 1 ELSE 2 END, "
+            "r.id COLLATE \"C\" LIMIT %s"
         ).format(sql.Identifier(endpoint))
         return db.execute(
             statement,
@@ -718,7 +721,8 @@ class KnowledgeStore:
             "evidence": [Evidence(**item) for item in json_value(row["evidence"], [])],
             "status": row["status"],
             "owner": row["owner"],
-            "last_reviewed": row["last_reviewed"] if "last_reviewed" in row.keys() else "",
+            "last_reviewed": iso_timestamp(row["last_reviewed"])
+            if "last_reviewed" in row.keys() else "",
         } for row in rows]
 
     def _element_texts(self, db, element_ids, *, with_ordinal: bool = False):
@@ -923,7 +927,8 @@ class KnowledgeStore:
                     ],
                     "status": row["status"],
                     "owner": row["owner"],
-                    "last_reviewed": row["last_reviewed"] if "last_reviewed" in keys else "",
+                    "last_reviewed": iso_timestamp(row["last_reviewed"])
+                    if "last_reviewed" in keys else "",
                 }
             )
         return int(total), objects
