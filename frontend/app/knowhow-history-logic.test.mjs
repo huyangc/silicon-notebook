@@ -322,23 +322,78 @@ test("describeColumnChange: 没有任何字段差异时兜底一句通用描述�
 });
 
 // --- summarizeRevertImpact（回退确认框「将影响 N 行、M 个格子」） -----------------
+//
+// 第三个参数是原始 changes 数组（评审修复后不再是单纯计数，见函数头注释）：
+// 下面凡是只想孤立测试"行/格子计数"文案、不关心列结构/表元的用例，用
+// neutralChanges(n) 造 n 条默认 kind（cell_update，不落在 COLUMN_STRUCTURE_
+// KINDS 或 table_meta 里）的占位变更，只贡献 changes.length，不影响
+// structureCount/metaCount。
+const neutralChanges = (n) => Array.from({ length: n }, (_, i) => chg({ seq: i + 1 }));
 
 test("summarizeRevertImpact: 区间内没有任何变更", () => {
-  assert.equal(summarizeRevertImpact(0, 0, 0), "不会撤销任何改动");
+  assert.equal(summarizeRevertImpact(0, 0, []), "不会撤销任何改动");
 });
 
 test("summarizeRevertImpact: 行与格子都有涉及", () => {
-  assert.equal(summarizeRevertImpact(2, 3, 4), "将影响 2 行、3 个格子");
+  assert.equal(summarizeRevertImpact(2, 3, neutralChanges(4)), "将影响 2 行、3 个格子");
 });
 
 test("summarizeRevertImpact: 只涉及行", () => {
-  assert.equal(summarizeRevertImpact(2, 0, 2), "将影响 2 行");
+  assert.equal(summarizeRevertImpact(2, 0, neutralChanges(2)), "将影响 2 行");
 });
 
 test("summarizeRevertImpact: 只涉及格子", () => {
-  assert.equal(summarizeRevertImpact(0, 3, 3), "将影响 3 个格子");
+  assert.equal(summarizeRevertImpact(0, 3, neutralChanges(3)), "将影响 3 个格子");
 });
 
-test("summarizeRevertImpact: 区间内有变更但都是表结构/表信息（不涉及行或格子）", () => {
-  assert.equal(summarizeRevertImpact(0, 0, 2), "将撤销一些表结构或表信息的改动（不涉及行或格子内容）");
+test("summarizeRevertImpact: 区间内有列结构变化与表元变化（不涉及行或格子）——两类都要出现，不再吞并成笼统提示", () => {
+  const changes = [
+    chg({ seq: 1, kind: "column_add", payload: { column: { name: "根因分析" } } }),
+    chg({ seq: 2, kind: "table_meta", payload: { before: {}, after: {} } }),
+  ];
+  assert.equal(summarizeRevertImpact(0, 0, changes), "将影响 1 处列结构变化、1 处表信息变更");
+});
+
+test("summarizeRevertImpact: 区间内全是既非行列格子、也非列结构/表元的变更（如仅代码附件）——兜底提示不为空", () => {
+  const changes = [chg({ seq: 1, kind: "cell_code_put", payload: {} })];
+  assert.equal(summarizeRevertImpact(0, 0, changes), "将撤销一些改动（不涉及行、格子、列结构或表信息）");
+});
+
+// 评审发现（Moderate，必修）：混合区间（区间内同时有列结构变化与格子变化）
+// 早期实现只从 foldLocalChanges 的行/格子净变化算文案，列结构变化会被完全
+// 吞掉——用户在不知情的情况下确认回退，回退后才发现列名也被撤销。下面两条
+// 分别覆盖"列结构 + 格子"与"表元 + 格子"两种吞掉方式，确保两类各自都不会
+// 被另一类目吞掉。
+test("summarizeRevertImpact: 混合区间（列改名 + 格子改动）——列结构变化不能被格子变化吞掉（评审发现）", () => {
+  const changes = [
+    chg({ seq: 1, kind: "column_rename", payload: { column_id: "c1", before: "旧名", after: "新名" } }),
+    chg({ seq: 2, kind: "cell_update", payload: { cells: [{ row_id: "r1", column_id: "c1", before: "A", after: "B" }] } }),
+  ];
+  const text = summarizeRevertImpact(0, 1, changes);
+  assert.ok(text.includes("个格子"), `期望提到格子变化，实际："${text}"`);
+  assert.ok(text.includes("列结构变化"), `期望提到列结构变化，实际："${text}"`);
+});
+
+test("summarizeRevertImpact: 混合区间（表信息改动 + 格子改动）——表元变化同样不能被格子变化吞掉", () => {
+  const changes = [
+    chg({ seq: 1, kind: "cell_update", payload: { cells: [{ row_id: "r1", column_id: "c1", before: "A", after: "B" }] } }),
+    chg({ seq: 2, kind: "table_meta", payload: { before: { title: "旧标题" }, after: { title: "新标题" } } }),
+  ];
+  const text = summarizeRevertImpact(0, 1, changes);
+  assert.ok(text.includes("个格子"), `期望提到格子变化，实际："${text}"`);
+  assert.ok(text.includes("表信息变更"), `期望提到表元变化，实际："${text}"`);
+});
+
+test("summarizeRevertImpact: 行/格子/列结构/表元四类同时出现——文案里一个都不能少", () => {
+  const changes = [
+    chg({ seq: 1, kind: "row_add", payload: { rows: [{ row_id: "r1" }] } }),
+    chg({ seq: 2, kind: "cell_update", payload: { cells: [{ row_id: "r2", column_id: "c1", before: "A", after: "B" }] } }),
+    chg({ seq: 3, kind: "column_kind", payload: { column_id: "c1", before: "attribute", after: "procedure" } }),
+    chg({ seq: 4, kind: "table_meta", payload: { before: {}, after: {} } }),
+  ];
+  const text = summarizeRevertImpact(1, 1, changes);
+  assert.ok(text.includes("1 行"), `期望提到行变化，实际："${text}"`);
+  assert.ok(text.includes("1 个格子"), `期望提到格子变化，实际："${text}"`);
+  assert.ok(text.includes("列结构变化"), `期望提到列结构变化，实际："${text}"`);
+  assert.ok(text.includes("表信息变更"), `期望提到表元变化，实际："${text}"`);
 });

@@ -3882,8 +3882,9 @@ function KnowhowTableGrid({
               </button>
             </>
           )}
-          {/* C3：「复制/移动到…」——唯一一个不整体挂在 canEdit 门内的表级
-              动作，紧邻「管理」，理由见上方容器注释。 */}
+          {/* C3：「复制/移动到…」——不整体挂在 canEdit 门内的表级动作之一
+              （另一个是紧随其后的「历史」，见该按钮注释），紧邻「管理」，
+              理由见上方容器注释。 */}
           <button
             type="button"
             className="sort-button knowhow-reproject-button"
