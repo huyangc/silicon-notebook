@@ -186,6 +186,13 @@ to reuse an already-built `frontend/.next` (e.g. a prebuilt image). Override
 defaults to `127.0.0.1`; binding it to a non-loopback address requires a non-default
 `SILICON_NOTEBOOK_ADMIN_PASSWORD` and fails fast otherwise.
 
+The supported production diagnostics target is Ubuntu 24.04 running this normal
+`npm run start` flow with its single Uvicorn worker. If that deployment appears hung,
+leave it running and capture the incident **while the hang is still present**; see
+[Live production incident capture](#live-production-incident-capture). Restarting first
+destroys the active-request, lock, process, and stack evidence the command is designed
+to correlate.
+
 `npm run stop` runs `scripts/stop.sh`, which terminates whatever is listening on the
 backend `PORT` and frontend `FRONTEND_PORT` (default `8000` / `3000`) — it sources the
 repo-root `.env` for those ports just like start, so if you launched with a custom
@@ -865,15 +872,101 @@ Error messages are split by audience. What a user sees is always Chinese: the fr
 
 What a developer or an MCP agent sees is unchanged: backend `detail` stays as-is in the API response and in the logs, and the full diagnostic — status, status text, the raw response body, and the `X-Request-Id` that correlates with `requests.jsonl` — is written to the DevTools console on every failed request, alongside the original text of any error the UI replaced with a generic message. So "it says I have no permission" is answered by reading the console's request id, not by guessing which check rejected it.
 
-For deployment slow-path triage, run `python3 scripts/diag_slow.py` on the host that owns
-`.local/`. Besides request/event/LLM summaries, it prints a strict-reasoning / PPR audit
-from DB aggregates and scale-index manifests so large libraries can be checked for
-indexed-core coverage, chunk/relation ANN availability, delta policy, and cross-base paths
-that may still touch full active vectors. This report is also the `slow` subcommand of the
-unified diagnostics entry `scripts/diag.py` (`diag.py slow | latency | base-recall`), which
-gathers the three slow-phenomenon tools under one command — the offline `slow` / `latency`
-subcommands stay stdlib-only and app-free so they run on a bare host, while `base-recall`
-lazily loads the app to diagnose why deep reports skip the base library.
+### Live production incident capture
+
+On an Ubuntu 24.04 deployment started with `npm run start`, SSH to the host and run the
+primary command from the repository root **during the hang**:
+
+```bash
+ssh <production-host>
+cd <silicon-notebook-repository>
+python3 scripts/diag.py incident
+```
+
+The normal single Uvicorn worker is discovered automatically. If the report says process
+discovery was missing, ambiguous, or incomplete, obtain the already-running backend PID
+from the service supervisor or host listener metadata and retry without restarting it:
+
+```bash
+python3 scripts/diag.py incident --pid <backend-pid>
+```
+
+The default result is one copyable UTF-8 text block of at most **32 KiB**. Collection has
+one shared deadline of at most 10 seconds; process sampling, two stack captures, loopback
+health probes, bounded historical-log reads, and a DB probe whose own budget is at most
+one second all consume that same deadline. `SIGUSR1` is registered by the backend as a
+non-terminating, all-Python-thread faulthandler dump. It captures stack frames only—never
+local-variable values—and a successful capture leaves the backend alive.
+
+The live heartbeat is written atomically every two seconds to
+`.local/diagnostics/runtime.json`; a snapshot older than six seconds is treated as stale
+and its active-work fields are excluded from high-confidence findings. Stack capture uses
+`.local/diagnostics/incident.lock` and appends to
+`.local/diagnostics/thread-dumps.log`; the dump file is bounded to 8 MiB after a successful
+capture. Read-only DB analysis uses bounded temporary snapshots below
+`.local/diagnostics/db-snapshots/`. These diagnostic artifacts are the only files the
+collector may create, replace, or truncate. The runtime accepts only an owner-controlled
+`0700` diagnostics directory and owner-owned, single-link regular `0600` heartbeat/dump
+files; unsafe pre-existing paths or path replacement degrade diagnostics without following
+links or truncating the hostile target.
+
+Read the output in this order:
+
+- `Confidence-ranked diagnoses` lists at most three deterministic hypotheses. `high`,
+  `medium`, and `low` describe evidence strength, not certainty; a lone weak signal is not
+  presented as a root cause.
+- `Observations`, `Relevant stacks`, `Database and host signals`, and `Log metadata` show
+  the metadata chain behind the ranking. `Safe next commands/actions` recommends what to
+  inspect next but never performs remediation.
+- `Missing/degraded evidence` is part of the result, not a failure to hide. A stale
+  snapshot usually means the command was run after the incident; a missing/ambiguous PID
+  calls for the explicit `--pid` retry. DB busy/locked, permission denial, deadline,
+  malformed/corrupt logs, an unavailable signal path, or a raced process/file causes that
+  evidence source to be excluded while the remaining collectors continue.
+- An idle deployment may correctly say that no multi-signal diagnosis reached a useful
+  confidence level. Re-run it while the operation is visibly stuck; do not infer a cause
+  from an idle capture.
+
+Copyable output never prints raw opaque identifiers: allow-listed notebook/request/job
+references are pseudonymized consistently, and other raw IDs are omitted. It also never
+prints user-controlled filenames, request bodies, source text, Ask
+questions/answers, prompts or model messages, Memory/Knowhow content, SQL text or
+parameters, authorization headers, cookies, tokens, secrets, raw command lines, or local
+variables. Even sanitized output should be reviewed before it is shared outside the
+trusted team.
+
+The incident path needs no root privileges or third-party Python packages, does not import
+`app`, and never restarts or terminates a process. All diagnostic commands are read-only
+with respect to application data: they do not execute deletes or other product writes,
+checkpoint/vacuum/analyze/reindex SQLite, run migrations, or auto-remediate. `incident`
+may only maintain its bounded `.local/diagnostics/` artifacts as described above.
+
+### Six-command diagnostics reference
+
+`scripts/diag.py` exposes exactly these six commands:
+
+| Command | Intended use | Runtime boundary |
+| --- | --- | --- |
+| `python3 scripts/diag.py incident` | Primary live, bounded incident capture; add `--pid <backend-pid>` when automatic discovery cannot select exactly one worker. | Ubuntu/Linux live process evidence; stdlib-only, app-free. |
+| `python3 scripts/diag.py slow --since 24 --deep` | Historical slow-path report from logs, DB aggregates, and scale-index manifests; `--deep` adds potentially minutes-long read-only DB checks. Bare `python3 scripts/diag.py` still means `slow`. | Offline, stdlib-only, app-free. |
+| `python3 scripts/diag.py latency --last 500` | P50/P95/max by Ask stage from `ask_stage` events. | Offline, stdlib-only, app-free. |
+| `python3 scripts/diag.py open --local .local` | Diagnose notebook-open query and endpoint latency, cache cold cost, and mutation-sequence churn. | Offline, stdlib-only, app-free. |
+| `python3 scripts/diag.py db --db .local/silicon_notebook.db` | Bounded source-side-effect-free SQLite/WAL/table/FK-index/query-plan evidence. | Offline, stdlib-only, app-free. |
+| `python3 scripts/diag.py base-recall [active_notebook_id] --db .local/silicon_notebook.db` | Diagnose mounted-base availability and the latest report's tier-reference counts using metadata only. | Bounded source-side-effect-free SQLite snapshot; stdlib-only, app-free; no retrieval, query/content echo, repository construction, migration, or source SQLite open. |
+
+`base-recall` uses the same `O_NOATIME`-pinned, non-blocking, identity-validated DB/WAL copy as
+`db`, then runs a fixed aggregate projection against the owned snapshot. If that safety boundary
+is unavailable, it emits category-only degraded evidence instead of falling back to a live SQLite
+connection. Its one UTF-8 report is capped at 32 KiB and contains only counts, fixed status labels,
+and per-run pseudonyms—never raw notebook/user/report/object/chunk IDs, titles, questions, content,
+filenames, paths, exceptions, credentials, or secrets.
+
+Historical readers cover, deduplicate, and bound all supported layouts for the
+`requests`, `events`, and `llm` channels: legacy `<channel>.jsonl`, daily
+`<channel>-YYYY-MM-DD.jsonl`, daily gzip `<channel>-YYYY-MM-DD.jsonl.gz`, and one-level
+per-user log directories. Malformed rows and byte/window truncation are reported as
+degraded metadata. Existing standalone engine scripts remain runnable for established
+operator notes and cron jobs; the six-command dispatcher is the preferred entry point.
 
 **Log viewer — `/dev/logs`.** A read-only debug page that visualizes these JSONL channels (LLM channel in v1). The left list is filterable by kind / status / model with full-text search; the detail pane shows exactly what was sent to the LLM (the `system` / `user` messages and the `schema_hint`) alongside the model's response, token usage, and latency. It is served by gated backend endpoints under `/api/debug/logs/...` — set `DEBUG_LOGS_ENABLED=false` to hide them.
 

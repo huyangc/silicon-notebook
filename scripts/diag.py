@@ -1,29 +1,36 @@
 #!/usr/bin/env python3
-"""统一慢因诊断入口:一个命令 + 子命令,分发到既有的三个诊断引擎。
+"""silicon-notebook 生产诊断统一入口（六个命令，全部只读）。
 
     python3 scripts/diag.py                 # 裸跑 = slow(部署机慢因全量报告)
+    python3 scripts/diag.py incident --pid <backend-pid>
     python3 scripts/diag.py slow --since 24 --deep
     python3 scripts/diag.py latency --log .local/logs/events.jsonl --last 500
-    python3 scripts/diag.py base-recall [active_notebook_id] [查询词]
+    python3 scripts/diag.py open --local .local
+    python3 scripts/diag.py db --db .local/silicon_notebook.db
+    python3 scripts/diag.py base-recall [active_notebook_id]
 
 子命令:
+    incident     主要的线上即时采集命令：在统一截止时间内输出有界、脱敏报告。
+                 纯 stdlib，不 import app；委托 scripts/diag_incident.py。
     slow         离线从 .local 日志/工件捞慢因证据,出可粘贴文本报告。
                  纯 stdlib、只读、脱敏 —— 委托 scripts/diag_slow.py(不 import app)。
     latency      从 events.jsonl 的 ask_stage 事件出每阶段 P50/P95/max。
                  纯 stdlib(聚合口径与 app/eval/ask_latency.py 完全一致,有测试守漂移),
                  不 import app,可在持有 .local/ 的裸机上直接跑。
-    base-recall  活体连真实库/env,诊断「深度报告/reasoning 为何不引用 base 库」。
-                 需要能 import app —— 懒加载:只有跑这个子命令才拉起 app。
+    open         离线分析打开笔记本的查询与请求延迟；委托 diag_open_latency.py。
+                 纯 stdlib、只读，不 import app。
+    db           对 SQLite 源文件做有界、源端无副作用的只读快照诊断。
+                 纯 stdlib，不 import app；委托 scripts/diag_db.py。
+    base-recall  对 SQLite 源文件做有界、源端无副作用的参考库召回元数据诊断。
+                 纯 stdlib，不 import app；不执行真实检索或输出查询/内容。
 
-设计:三个引擎(diag_slow.py / ask_latency.py / diag_base_report.py)保持原样、各自
-仍可单独运行(部署机/运维笔记/cron 里的老路径不受影响);本文件只做「统一入口」——
-自身零 DB 调用、零 app 依赖,离线子命令绝不 import app(懒加载仅在 base-recall 生效)。
+各诊断引擎保持原样并可单独运行，部署机、运维笔记和 cron 中的既有路径继续有效。
+本入口自身零 DB 调用、零 app 依赖；六个命令均不 import app，且不得修改产品数据。
 
 纯 stdlib,python3.8+ 可跑。
 """
 from __future__ import annotations
 
-import json
 import math
 import sys
 from pathlib import Path
@@ -31,6 +38,10 @@ from pathlib import Path
 _HERE = Path(__file__).resolve().parent          # <repo>/scripts
 _REPO_ROOT = _HERE.parent                          # <repo>
 _DEFAULT_EVENTS = _REPO_ROOT / ".local" / "logs" / "events.jsonl"
+
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+import diag_common  # noqa: E402 — stdlib sibling historical log reader
 
 
 # ---------------------------------------------------------------------------
@@ -50,19 +61,27 @@ def _percentile_nearest(values: list, p: float) -> float:
     return float(values[idx])
 
 
+_STAGE_ORDER = ["load_indexes", "score", "expand", "answer_llm", "total"]
+_SAFE_STAGES = frozenset(
+    _STAGE_ORDER
+    + ["answer", "embed", "embedding", "extract", "graph", "index", "parse", "pipeline", "ppr", "report", "retrieval", "seed"]
+)
+
+
 def _aggregate_stage(records) -> dict:
     """stage -> {count, p50, p95, max}. Mirrors ask_latency.aggregate_stage_latencies."""
     buckets: dict = {}
     for rec in records:
         if rec.get("kind") != "ask_stage":
             continue
-        stage = rec.get("stage")
-        if not stage:
+        raw_stage = rec.get("stage")
+        if not isinstance(raw_stage, str) or not raw_stage:
             continue
-        latency = rec.get("latency_ms")
+        stage = raw_stage.lower() if raw_stage.lower() in _SAFE_STAGES else "other"
+        latency = diag_common.finite_number(rec.get("latency_ms"))
         if latency is None:
             continue
-        buckets.setdefault(stage, []).append(float(latency))
+        buckets.setdefault(stage, []).append(latency)
 
     result: dict = {}
     for stage, vals in buckets.items():
@@ -76,47 +95,15 @@ def _aggregate_stage(records) -> dict:
     return result
 
 
-def _expand_channel_paths(path: str):
-    """Global events file + per-user subdir files (`<dir>/*/<basename>`).
-
-    Stdlib mirror of app.services.log_reader.expand_channel_paths so the offline
-    latency view sees the same per-user-partitioned logs (see per-user-logs).
-    """
-    p = Path(path)
-    paths = [p]
-    parent, base = p.parent, p.name
-    if parent.is_dir():
-        for sub in sorted(parent.iterdir()):
-            if sub.is_dir():
-                paths.append(sub / base)
-    return paths
-
-
 def _read_ask_stage(path: str, last_n):
-    """Stream ask_stage records from global + per-user JSONL files."""
-    parsed: list = []
-    for p in _expand_channel_paths(path):
-        try:
-            raw = p.read_text(encoding="utf-8", errors="replace").splitlines()
-        except (FileNotFoundError, OSError, IsADirectoryError):
-            continue
-        for line in raw:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            if rec.get("kind") != "ask_stage":
-                continue
-            parsed.append(rec)
+    """Read ask stages from all historical events layouts, retaining --log as a hint."""
+    explicit = Path(path)
+    parsed = [rec for rec in diag_common.read_channel(
+        explicit.parent, "events", explicit=explicit).records
+        if rec.get("kind") == "ask_stage"]
     if last_n is not None:
         parsed = parsed[-last_n:]
     yield from parsed
-
-
-_STAGE_ORDER = ["load_indexes", "score", "expand", "answer_llm", "total"]
 
 
 def _print_latency(stats: dict) -> None:
@@ -140,6 +127,18 @@ def _print_latency(stats: dict) -> None:
 # subcommand handlers
 # ---------------------------------------------------------------------------
 
+def _cmd_incident(rest) -> int:
+    """Delegate in-process to scripts/diag_incident.py (stdlib, app-free)."""
+    if str(_HERE) not in sys.path:
+        sys.path.insert(0, str(_HERE))
+    import diag_incident  # noqa: E402 — stdlib sibling, no app import
+    saved = sys.argv
+    sys.argv = ["diag_incident.py", *rest]
+    try:
+        return int(diag_incident.main() or 0)
+    finally:
+        sys.argv = saved
+
 def _cmd_slow(rest) -> int:
     """Delegate in-process to scripts/diag_slow.py (stdlib, app-free)."""
     if str(_HERE) not in sys.path:
@@ -159,7 +158,8 @@ def _cmd_latency(rest) -> int:
         prog="diag.py latency",
         description="每阶段 ask 延迟(P50/P95/max),来自 events.jsonl 的 ask_stage 事件。")
     ap.add_argument("--log", default=str(_DEFAULT_EVENTS),
-                    help=f"events JSONL 路径(默认 {_DEFAULT_EVENTS};自动并入同级 per-user 子目录)")
+                    help="events JSONL 路径(默认 <repo>/.local/logs/events.jsonl;"
+                         "自动并入同级 per-user 子目录)")
     ap.add_argument("--last", type=int, default=None, metavar="N",
                     help="只统计最近 N 条 ask_stage 记录")
     args = ap.parse_args(rest)
@@ -168,16 +168,37 @@ def _cmd_latency(rest) -> int:
     return 0
 
 
-def _cmd_base_recall(rest) -> int:
-    """Lazily delegate to scripts/diag_base_report.py.
-
-    diag_base_report imports app at module top, so it is imported HERE (inside
-    the handler) — importing diag.py or running the offline subcommands never
-    pulls app. diag_base_report.main() reads sys.argv[1]=notebook_id, [2]=query.
-    """
+def _cmd_open(rest) -> int:
+    """Delegate in-process to scripts/diag_open_latency.py (stdlib, app-free)."""
     if str(_HERE) not in sys.path:
         sys.path.insert(0, str(_HERE))
-    import diag_base_report  # noqa: E402 — lazy: this is the only app-importing path
+    import diag_open_latency  # noqa: E402 — stdlib sibling, no app import
+    saved = sys.argv
+    sys.argv = ["diag_open_latency.py", *rest]
+    try:
+        return int(diag_open_latency.main() or 0)
+    finally:
+        sys.argv = saved
+
+
+def _cmd_db(rest) -> int:
+    """Delegate in-process to scripts/diag_db.py (stdlib, app-free)."""
+    if str(_HERE) not in sys.path:
+        sys.path.insert(0, str(_HERE))
+    import diag_db  # noqa: E402 — stdlib sibling, no app import
+    saved = sys.argv
+    sys.argv = ["diag_db.py", *rest]
+    try:
+        return int(diag_db.main() or 0)
+    finally:
+        sys.argv = saved
+
+
+def _cmd_base_recall(rest) -> int:
+    """Delegate to the stdlib, app-free snapshot metadata diagnosis."""
+    if str(_HERE) not in sys.path:
+        sys.path.insert(0, str(_HERE))
+    import diag_base_report  # noqa: E402 — stdlib sibling, no app import
     saved = sys.argv
     sys.argv = ["diag_base_report.py", *rest]
     try:
@@ -187,8 +208,11 @@ def _cmd_base_recall(rest) -> int:
 
 
 SUBCOMMANDS = {
+    "incident": _cmd_incident,
     "slow": _cmd_slow,
     "latency": _cmd_latency,
+    "open": _cmd_open,
+    "db": _cmd_db,
     "base-recall": _cmd_base_recall,
 }
 
@@ -197,7 +221,7 @@ def _print_help(stream=None) -> None:
     (stream or sys.stdout).write(__doc__)
 
 
-def main(argv=None) -> int:
+def _main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
 
     # explicit help -> stdout (so `diag.py --help | less` works).
@@ -214,10 +238,14 @@ def main(argv=None) -> int:
     handler = SUBCOMMANDS.get(cmd)
     if handler is None:
         # error diagnostics -> stderr.
-        sys.stderr.write(f"未知子命令: {cmd!r}\n\n")
+        sys.stderr.write("未知子命令\n\n")
         _print_help(sys.stderr)
         return 2
     return handler(argv[1:])
+
+
+def main(argv=None) -> int:
+    return diag_common.run_copy_safe(lambda: _main(argv))
 
 
 if __name__ == "__main__":

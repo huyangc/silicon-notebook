@@ -1,10 +1,14 @@
 import sqlite3
 import threading
 import concurrent.futures as cf
+import inspect
+import json
+import time
 
 import pytest
 
 from app.core.config import Settings
+from app.core import diagnostics_runtime as diagnostics
 from app.repositories.sqlite.database import SqliteDatabase
 
 
@@ -178,3 +182,158 @@ def test_no_bare_close_on_reused_conn_in_knowledge_lifecycle():  # INV-7
     src = (pathlib.Path(__file__).resolve().parent.parent
            / "app" / "services" / "knowledge_lifecycle.py").read_text(encoding="utf-8")
     assert "scan_db.close()" not in src, "复用连接不得裸 close;用 self._close_local()"
+
+
+def test_fetchall_remains_observable_after_execute_returns(db):
+    with db.write() as conn:
+        conn.execute("CREATE TABLE fetch_probe (value TEXT)")
+        conn.executemany(
+            "INSERT INTO fetch_probe VALUES (?)",
+            (("first",), ("second",)),
+        )
+
+    runtime = diagnostics.DiagnosticsRuntime(
+        db.root_dir / "diagnostics",
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        enable_signal=False,
+    )
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+    execute_finished = threading.Event()
+    failures = []
+
+    def run_query():
+        calls = 0
+        try:
+            conn = db.connect()
+
+            def diag_fetch(value):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    fetch_started.set()
+                    release_fetch.wait(timeout=2)
+                return value
+
+            conn.create_function("diag_fetch", 1, diag_fetch)
+            cursor = conn.execute("SELECT diag_fetch(value) FROM fetch_probe")
+            execute_finished.set()
+            cursor.fetchall()
+        except BaseException as exc:  # preserve worker failures for the assertion thread
+            failures.append(exc)
+        finally:
+            db.close_local()
+
+    with diagnostics.install_runtime(runtime):
+        worker = threading.Thread(target=run_query)
+        worker.start()
+        assert execute_finished.wait(timeout=2)
+        assert fetch_started.wait(timeout=2)
+        try:
+            active = runtime.snapshot()["active_sql"]
+            assert len(active) == 1
+            assert active[0]["verb"] == "SELECT"
+            assert active[0]["table"] == "fetch_probe"
+            encoded = json.dumps(active)
+            assert "diag_fetch" not in encoded
+            assert "first" not in encoded
+            assert "second" not in encoded
+        finally:
+            release_fetch.set()
+            worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert failures == []
+    assert runtime.snapshot()["active_sql"] == []
+
+
+def test_diagnostic_cursor_preserves_native_argument_contract(db):
+    cursor = db.connect().cursor()
+    for name in ("execute", "executemany", "executescript"):
+        native = inspect.signature(getattr(sqlite3.Cursor, name))
+        wrapped = inspect.signature(getattr(type(cursor), name))
+        assert tuple(item.kind for item in wrapped.parameters.values()) == tuple(
+            item.kind for item in native.parameters.values()
+        )
+    with pytest.raises(TypeError):
+        cursor.execute(sql="SELECT 1")
+    cursor.execute("SELECT 1")
+    with pytest.raises(TypeError, match="integer"):
+        cursor.fetchmany(None)
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ("execute", "executemany", "executescript", "fetchone", "fetchmany", "fetchall", "iteration"),
+)
+def test_every_blocking_cursor_operation_is_observable_and_cleans_up(db, operation):
+    runtime = diagnostics.DiagnosticsRuntime(
+        db.root_dir / "diagnostics",
+        readiness_provider=lambda: {},
+        concurrency_provider=lambda: {},
+        enable_signal=False,
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    failures: list[BaseException] = []
+
+    with db.write() as connection:
+        connection.execute("CREATE TABLE IF NOT EXISTS cursor_probe(value INTEGER)")
+        connection.execute("DELETE FROM cursor_probe")
+        connection.executemany("INSERT INTO cursor_probe VALUES (?)", ((1,), (2,), (3,)))
+
+    def worker() -> None:
+        try:
+            connection = db.connect()
+            calls = 0
+
+            def diag_block(value):
+                nonlocal calls
+                calls += 1
+                if operation in {"execute", "executemany", "executescript"} or calls >= 2:
+                    entered.set()
+                    release.wait(timeout=2)
+                return value
+
+            connection.create_function("diag_block", 1, diag_block)
+            cursor = connection.cursor()
+            if operation == "execute":
+                cursor.execute("SELECT diag_block(1) FROM cursor_probe")
+            elif operation == "executemany":
+                cursor.executemany(
+                    "INSERT INTO cursor_probe(value) VALUES (diag_block(?))",
+                    ((1,),),
+                )
+            elif operation == "executescript":
+                cursor.executescript("SELECT diag_block(1) FROM cursor_probe;")
+            else:
+                cursor.execute(
+                    "SELECT diag_block(value) FROM cursor_probe ORDER BY value"
+                )
+                if operation == "fetchone":
+                    cursor.fetchone()
+                elif operation == "fetchmany":
+                    cursor.fetchmany(2)
+                elif operation == "fetchall":
+                    cursor.fetchall()
+                else:
+                    next(cursor)
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            db.close_local()
+
+    with diagnostics.install_runtime(runtime):
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert entered.wait(timeout=2)
+        active = runtime.snapshot()["active_sql"]
+        assert len(active) == 1
+        assert active[0]["table"] == "cursor_probe"
+        release.set()
+        thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert failures == []
+    assert runtime.snapshot()["active_sql"] == []

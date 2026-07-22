@@ -89,6 +89,54 @@ notebook 内页采用来源栏 + 主区域的两列 workspace，主区域提供 
 
 新增可由环境覆盖的 pydantic v2 setting 必须使用 `validation_alias`；列表类值按现有 `NoDecode` 约定解析。
 
+### 2.6 生产 DFX 诊断边界
+
+生产诊断目标是 Ubuntu 24.04 上从仓库根执行 `npm run start` 的双服务形态，后端保持单
+Uvicorn worker。它是内部基础设施，不新增前端 UI 或 API。卡顿现场的主路径是在操作仍然卡住时
+运行 `python3 scripts/diag.py incident`；自动发现不能唯一选中仓库范围内的生产 Uvicorn 进程时，
+才用 `--pid <backend-pid>` 绑定仍在运行的 worker，不能先重启再采集。
+
+进程内 `backend/app/core/diagnostics_runtime.py` 维护有界 registry：活跃 request/phase、background
+job、SQLite 操作、写锁 holder/waiter，以及 KG/LLM/embedding concurrency/readiness。所有 helper 在
+runtime 未安装时为 no-op，安装后也必须 exception-safe；观测失败不传播到业务调用，不获取 SQLite
+写锁，不改变 transaction 语义，也不按每条 SQL 持久化事件。SQL 只归一化为 verb/table/fingerprint，
+永不持久化参数。运行态每两秒原子更新 `.local/diagnostics/runtime.json`，六秒以上的心跳按 stale
+处理，不能参与高置信推断。machine-local snapshot 可保留精确 opaque notebook id 以关联只读 DB
+证据；copyable report 必须把 notebook/request/job id 稳定映射为本报告内假名，并省略其它原始
+opaque id。
+
+主线程把 `SIGUSR1` 注册为 `faulthandler` 的不终止进程、全 Python 线程栈 dump，`all_threads=True`
+且不采 locals。采集通过 `.local/diagnostics/incident.lock` 串行化，只读取本次追加的栈片段；
+`.local/diagnostics/thread-dumps.log` 在成功采集后保持不超过 8 MiB。SQLite 分析从源 DB/WAL 的有界
+副本读取，临时 workspace 位于 `.local/diagnostics/db-snapshots/`；源库不通过 SQLite 打开，不执行
+checkpoint/vacuum/analyze/reindex/migration 或任何业务写入。诊断只允许维护这些有界工件，不需要
+root，不重启/终止进程，也不自动修复。
+
+运行态文件安全边界固定为当前用户拥有的 `0700` diagnostics 目录，以及同一用户拥有、单硬链接、
+普通文件类型的 `0600` `runtime.json` / `thread-dumps.log`。writer 持有并复核目录 descriptor，临时
+heartbeat 使用不可预测文件名、descriptor-relative 写入和原子替换；符号链接、硬链接、FIFO/device、
+权限过宽或目录路径替换一律只增加降级计数，不跟随、不阻塞、不截断敌对目标。
+
+`scripts/diag_incident.py` 在同一个最长 10 秒的 monotonic deadline 下组合 PID identity、Linux
+`/proc` CPU/RSS/thread/FD/I/O/D-state、两次栈采样、loopback readiness、历史日志和最多一秒的 DB
+probe；任一来源 missing/ambiguous/stale/busy/permission/deadline/corrupt/raced 时记录 category-only
+degradation，并排除不完整信号，剩余采集继续。`scripts/diag_rules.py` 只消费 allow-listed metadata，
+确定性排序最多三个假设，输出 `high`/`medium`/`low` 证据强度和安全下一步；默认 stdout 是一段最多
+32 KiB 的 UTF-8 文本。空闲服务可以没有有效多信号结论，不能据此编造根因。
+
+统一入口精确包含 `incident`、`slow`、`latency`、`open`、`db`、`base-recall` 六命令；裸调用仍为
+`slow`。六个命令及其 reporter 都是纯标准库、app-import-free。`base-recall` 复用 `db` 的
+`O_NOATIME` pin、非阻塞锁、身份复核和有界 DB/WAL 拷贝，只在诊断自己拥有的快照上运行固定聚合
+投影；它不构造 repository、不跑 application retrieval/migration、也不用 SQLite 打开源库。
+legacy `<channel>.jsonl`、daily `<channel>-YYYY-MM-DD.jsonl`、daily gzip
+`<channel>-YYYY-MM-DD.jsonl.gz` 与下一层 per-user 日志目录由共享 reader 有界读取、去重并统计
+malformed/truncated；独立旧引擎入口继续可运行。
+
+runtime snapshot 与 report 只含元数据；`base-recall` 的单段报告同样受 32 KiB 上限约束，只输出固定
+状态、计数与本次报告内假名。诊断不持久化/打印 request body、用户控制的原始文件名、来源与
+Ask/Memory/Knowhow 内容、prompt/model message、SQL 文本/参数、authorization/cookie/token/secret、
+原始进程命令行或局部变量。脱敏报告离开可信团队前仍须人工复核。
+
 ## 3. 核心数据流
 
 ### 3.1 创建与摄取
