@@ -85,15 +85,24 @@ def _pinned_agent_models(project_dir: Path) -> dict[str, str]:
     """{subagent_type: model}，只收 frontmatter 钉了具体模型的定义。
 
     `inherit` 被刻意排除：它就是「跟主 agent 走」，正是本门要拦的行为。
+
+    作用域优先级必须跟 Claude Code 一致——项目级 `.claude/agents/` 压过用户级
+    `~/.claude/agents/`。所以名字**一出现就占位**，不管它钉没钉模型：否则
+    「项目级同名定义没钉模型 + 用户级同名定义钉了模型」会让本门拿用户级那条
+    放行，而真正跑起来的是项目级那条、模型仍然继承主 agent，硬门被绕过。
     """
     pinned: dict[str, str] = {}
+    claimed: set[str] = set()
     for root in (project_dir, Path.home()):
         for path in _iter_agent_files(root):
             fields = _parse_frontmatter(path)
             name = fields.get("name") or path.stem
+            if name in claimed:
+                continue
+            claimed.add(name)
             model = fields.get("model", "")
             if model and model != "inherit":
-                pinned.setdefault(name, model)
+                pinned[name] = model
     return pinned
 
 
