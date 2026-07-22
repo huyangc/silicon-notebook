@@ -197,10 +197,15 @@ def test_reupload_of_an_in_flight_source_does_not_start_a_second_pipeline(
 def test_restart_fails_out_abandoned_queued_sources_so_reupload_can_retry(
     tmp_path, monkeypatch
 ):
-    """崩溃遗留在 queued/parsing 的源在下次启动时判死，从而能被重新上传救回。
+    """崩溃遗留在 queued/parsing 的源在下次服务端启动时判死，从而能被重新上传救回。
 
     这两个状态只由上传/加链接两个入口写下，且都在同一进程里紧接着排队或直接跑
-    process_source，所以启动时还停着的行定义上就是被遗弃的。
+    process_source，所以服务端启动时还停着的行定义上就是被遗弃的。
+
+    ⚠ 兜底**不在** `SQLiteRepository(...)` 构造里跑——它由服务端 lifespan 的
+    `startup_warmup.run_startup()` 显式调用一次（`scripts/` 下 15+ 个 CLI 同样构造
+    repository，若随构造执行会把后端正在 parsing 的源当场判死）。所以这里必须显式
+    调 `_recover_interrupted_jobs()` 来模拟服务端启动，而不能指望构造本身触发。
     """
     settings = _settings(tmp_path, monkeypatch)
     first_boot = SQLiteRepository(settings)
@@ -213,7 +218,11 @@ def test_restart_fails_out_abandoned_queued_sources_so_reupload_can_retry(
     )[0].id
     assert first_boot.get_source(queued).parse_status == "queued"
 
-    second_boot = SQLiteRepository(settings)   # 重启：initialize() 跑崩溃兜底
+    second_boot = SQLiteRepository(settings)   # 重启
+    assert second_boot.get_source(queued).parse_status == "queued", (
+        "构造 repository 本身不得判死任何源——CLI 也走这条路"
+    )
+    second_boot._recover_interrupted_jobs()    # 服务端 lifespan 的那一次
     assert second_boot.get_source(queued).parse_status == "failed"
 
     scheduled = []

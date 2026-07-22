@@ -50,7 +50,7 @@ def test_fresh_db_has_sources_memory_id(repo):
     assert idx is not None and "WHERE memory_id" in idx["sql"]
 
 
-def test_schema_version_is_29():
+def test_schema_version_is_30():
     # paper-metadata Task 1's _migration_17 (source_paper_meta/source_authors
     # tables) bumped v16 → v17; knowhow-tables PR-2+3 Task 1's _migration_18
     # (knowhow_cell_code table + role vocabulary remap) bumped v17 → v18;
