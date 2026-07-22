@@ -178,6 +178,39 @@ def test_run_ingest_dedup_skips_on_rerun(repo, tmp_path):
     assert nsrc == 3
 
 
+def test_run_ingest_releases_the_claim_when_the_claimant_fails(repo, tmp_path, monkeypatch):
+    """认领只代表「这个内容由我这一份来做」,不代表已摄取。认领者失败必须交回认领,
+    否则后面同内容的副本会看到 digest 已被认领而直接 skipped —— 一次瞬时失败
+    (存储/SQLite 抖动)就让这份内容整轮都进不来,而在有认领集合之前它本可以由下一个
+    副本重试成功。workers=1 保证副本按序处理,让「先失败、后重试」可确定性复现。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-claim-release")
+    body = "# Same\n\nIdentical body " + "r" * 200
+    a = tmp_path / "a.md"; a.write_text(body, encoding="utf-8")
+    b = tmp_path / "b.md"; b.write_text(body, encoding="utf-8")
+
+    # 打桩点选在 repo.maintenance 上(认领之后、upload 之前的那次查库),刻意**不**给
+    # facade 的 repo.upload_sources 打桩:那会往冻结的 facade 契约里塞 test-only patch 记录。
+    real_lookup = repo.maintenance.source_id_by_hash
+    calls = {"n": 0}
+
+    def _flaky(notebook_id_, digest_):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient sqlite blip")
+        return real_lookup(notebook_id_, digest_)
+
+    monkeypatch.setattr(repo.maintenance, "source_id_by_hash", _flaky)
+
+    counts = bi.run_ingest(repo, nb_id, [a, b], workers=1, conc=1)
+
+    assert counts["failed"] == 1
+    assert counts["uploaded"] == 1, "认领没被交回,第二个副本失去了重试机会"
+    assert counts["skipped"] == 0
+    with repo._connect() as db:
+        assert db.execute("SELECT COUNT(*) c FROM sources WHERE notebook_id=?",
+                          (nb_id,)).fetchone()["c"] == 1
+
+
 def test_run_ingest_same_run_duplicate_files_skip_not_reparse(repo, tmp_path):
     """同一次运行里两个内容相同的文件:第一个 uploaded、第二个 skipped。
 

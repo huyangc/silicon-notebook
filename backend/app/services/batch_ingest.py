@@ -397,6 +397,7 @@ def run_ingest(
     claim_lock = threading.Lock()
 
     def _one(path: Path) -> tuple[str, Path, str | None]:
+        digest: str | None = None
         try:
             content = path.read_bytes()
             digest = sha256_bytes(content)
@@ -413,6 +414,13 @@ def run_ingest(
             )
             return ("uploaded", path, None)
         except Exception as exc:   # noqa: BLE001 — 单文件失败隔离
+            # 认领失败就交回去:认领只代表「这个内容由我这一份来做」,不代表已摄取。
+            # 不释放的话,后面同内容的副本会看到 digest 已被认领而直接 skipped——
+            # 一次瞬时失败(存储/SQLite 抖动)就让这份内容整轮都进不来,而在有认领集合
+            # 之前它本可以由下一个副本重试成功。
+            if digest is not None:
+                with claim_lock:
+                    claimed.discard(digest)
             return ("failed", path, f"{type(exc).__name__}: {exc}")
 
     total = len(files)
