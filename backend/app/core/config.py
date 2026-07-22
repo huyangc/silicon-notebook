@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     # 每用户模型配置策略。"fallback"(第一阶段)=用户没配则回退系统 env 默认；
     # "required"(第二阶段)=用户没配则该服务不可用(解析为 none，经 model_error 通道提示)。
     user_model_config_policy: str = Field("fallback", validation_alias="USER_MODEL_CONFIG_POLICY")
+    # Deployment-owned system model-service registry. An empty path explicitly
+    # selects deterministic/offline model behavior; relative paths are anchored
+    # to the repository root below so startup CWD cannot change the deployment.
+    model_services_config: str = Field("", validation_alias="MODEL_SERVICES_CONFIG")
 
     openai_compat_base_url: str = Field("", validation_alias="OPENAI_COMPAT_BASE_URL")
     openai_compat_api_key: str = Field("", validation_alias="OPENAI_COMPAT_API_KEY")
@@ -541,6 +545,9 @@ class Settings(BaseSettings):
         """
         if self.storage_dir and not Path(self.storage_dir).is_absolute():
             self.storage_dir = str(_ROOT_DIR / self.storage_dir)
+
+        if self.model_services_config and not Path(self.model_services_config).is_absolute():
+            self.model_services_config = str(_ROOT_DIR / self.model_services_config)
 
         prefix = "sqlite:///"
         if not self.database_url.startswith(prefix):
