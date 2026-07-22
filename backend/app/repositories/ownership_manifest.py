@@ -1785,6 +1785,7 @@ SURFACE_MEMBERS = (
         owner='SourceStore',
         kind='method',
         consumers=(
+            ConsumerSite(path='backend/app/services/batch_ingest.py', scope='<module>.source_id_in_flight', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>._source_evidence', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.check_pipeline_event_logging', kind='attribute', target='get_source'),
             ConsumerSite(path='scripts/smoke_backend.py', scope='<module>.main', kind='attribute', target='get_source'),

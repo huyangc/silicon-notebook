@@ -343,6 +343,22 @@ def source_id_by_hash(repo: BatchIngestRepository, notebook_id: str, digest: str
     return repo.maintenance.source_id_by_hash(notebook_id, digest)
 
 
+_IN_FLIGHT_PARSE = ("queued", "parsing", "extracting")
+
+
+def source_id_in_flight(repo: BatchIngestRepository, source_id: str) -> bool:
+    """这一刻该源的 parse 管线是否可能正在别处跑(主键点查,实时值)。
+
+    run_ingest 的 in_flight 快照是进池前取的一次,重解析前用本函数就地复核,把
+    「取快照之后才被服务端接手」的窗口压到最小。取值集合与
+    maintenance.sources_in_flight_parse 必须一致。"""
+    try:
+        summary = repo.get_source(source_id)
+    except KeyError:      # 期间被删了:也不该由本次运行去重解析
+        return True
+    return (summary.parse_status or summary.status) in _IN_FLIGHT_PARSE
+
+
 def _resolve_owner_profile(
     repo: BatchIngestRepository, owner: Optional[str]
 ) -> UserProfile:
@@ -404,7 +420,15 @@ def run_ingest(
     # 过那一步,不证明跑完了。崩在 elements 已写、chunks 未建之间的源就是这样——按
     # 「有 element 即完成」会永远跳过它,而收尾的 backfill_chunk_embeddings 只嵌入
     # **已存在**的 chunk,一个 chunk 都没有的源它救不回来。
-    done = repo.maintenance.sources_with_completed_parse(notebook_id)
+    # 「已完成」= 管线终态 ∪ 有 chunks。两者都不可少:
+    #   · 终态(extracted/metadata-only)兜住零 element 的成功 parse(扫描版 PDF)。
+    #   · 有 chunks 兜住「parse+分块都成功、下游 KG 抽取抛错」——管线外层 except 会把
+    #     整源记成 parse_status='failed',只按状态判会每次都把有效产物清掉重来,
+    #     LLM 一直不可用就一直不收敛。
+    # 刻意**不**用「有 element」:那是管线中段产物,崩在 elements 已写、chunks 未建
+    # 之间的源有 element 却零 chunk,按它判会被永远跳过、而收尾只嵌入已存在的 chunk。
+    done = (repo.maintenance.sources_with_completed_parse(notebook_id)
+            | repo.maintenance.sources_with_chunks(notebook_id))
     # 可能正被别的进程处理的源(服务端在跑、或另一个批处理)。process_source 没有
     # source 级单飞守卫且会 clear/replace 抽取态,两边同时跑会互相覆盖——离线 CLI
     # 不该碰服务端进行中的行,与崩溃兜底只在服务端跑是同一条原则。
@@ -437,6 +461,13 @@ def run_ingest(
                 return ("skipped", path, None)
             if sid in in_flight:
                 return ("in_flight", path, None)   # 别人在处理,不抢
+            # 快照是进池前取的一次:一个源完全可能在取快照之后才被服务端/另一个批
+            # 处理接手。重解析前就地复核一次(主键点查,只对重解析候选发生,不是每文件
+            # 一次全表扫)。窗口从「整轮运行」缩到「这一次点查到 process_source 之间」。
+            # 真正的原子认领需要 source 级租约/锁,当前管线没有——在有之前,复核是能
+            # 做到的最强收敛,且与「不抢别人正在处理的源」这条意图一致。
+            if source_id_in_flight(repo, sid):
+                return ("in_flight", path, None)
             # 已建源但 parse 没跑完(上次中断/未落地)→ 重新 parse。调的是
             # upload_sources(scheduler=None) 内部同一个 process_source,不引入新的模型暴露。
             #

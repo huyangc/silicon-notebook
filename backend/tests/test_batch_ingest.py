@@ -276,6 +276,70 @@ def test_run_ingest_reparses_source_with_elements_but_no_chunks(repo, tmp_path, 
     assert n_chunks > 0, "重解析没有补出 chunk,这个源仍然不可检索"
 
 
+def test_run_ingest_skips_source_whose_parse_succeeded_but_kg_failed(repo, tmp_path, monkeypatch):
+    """parse 与分块都成功、下游 KG 抽取抛错 → 管线外层 except 把**整个源**记成
+    parse_status='failed'。这种源的 parse 产物是完整有效的,不能因为状态是 failed 就
+    每次 ingest 都清掉重来——LLM 一直不可用就一直不收敛(这是本函数里第三种「永不
+    收敛」的形态)。判据用「有 chunks」兜住它:chunks 是 parse 阶段的最后一个产物。"""
+    d = _make_md_dir(tmp_path, n=1)
+    files = list(bi.iter_files(d))
+    nb_id = bi.ensure_notebook(repo, None, "nb-kg-failed")
+
+    # 第一轮:parse/分块成功,但 KG 抽取抛错 → 源被记成 failed。
+    monkeypatch.setattr(repo.settings, "kg_auto_extract", True)
+    monkeypatch.setattr(repo._runtime.source_ingestion, "run_extraction",
+                        lambda s: (_ for _ in ()).throw(RuntimeError("LLM down")))
+    bi.run_ingest(repo, nb_id, files, workers=1, conc=1)
+    monkeypatch.undo()
+
+    with repo._connect() as db:
+        state = {r["id"]: (r["parse_status"], r["c"]) for r in db.execute(
+            "SELECT s.id, s.parse_status, "
+            "(SELECT COUNT(*) FROM chunks c WHERE c.source_id = s.id) c "
+            "FROM sources s WHERE s.notebook_id=?", (nb_id,))}
+    assert state and all(st == "failed" and n > 0 for st, n in state.values()), (
+        f"前提不成立:需要「状态 failed 但 chunk 齐全」,实际 {state}")
+
+    counts = bi.run_ingest(repo, nb_id, files, workers=1, conc=1)   # 第二轮
+
+    assert counts["skipped"] == len(files), "parse 已完整的源被当成失败重解析了 → 永不收敛"
+    assert counts["reparsed"] == 0
+
+
+def test_run_ingest_rechecks_in_flight_state_right_before_reparsing(repo, tmp_path, monkeypatch):
+    """in_flight 快照是进池前取的一次。一个源完全可能在取快照**之后**才被服务端接手,
+    此时它不在快照里,不复核就会与对方并发跑 process_source(它没有 source 级单飞
+    守卫、还会 clear/replace 抽取态,两边互相覆盖)。重解析前必须就地复核实时状态。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-recheck")
+    p = tmp_path / "taken.md"
+    p.write_text("# Taken\n\n" + "v" * 200, encoding="utf-8")
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:   # 快照时看起来「没跑完、也不在飞」→ 会进重解析分支
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,status,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-taken", nb_id, "Taken", "document", p.name, str(p), 0,
+             bi.sha256_bytes(p.read_bytes()), "", "", "parsed", "parsed", now, now))
+
+    # 模拟「快照之后、重解析之前，别人接手了」:让复核那一刻读到 parsing。
+    with repo._write() as db:
+        db.execute("UPDATE sources SET parse_status='parsing', status='parsing' "
+                   "WHERE id='src-taken'")
+    # 但把快照钉成「不在飞」,复刻 TOCTOU 的真实形态。
+    monkeypatch.setattr(repo.maintenance, "sources_in_flight_parse", lambda nb: set())
+
+    counts = bi.run_ingest(repo, nb_id, [p], workers=1, conc=1)
+
+    # 刻意**不**给 repo.process_source 打桩当哨兵:那会往冻结的 facade 契约里塞一条
+    # test-only patch 记录。计数本身就是证据——in_flight 与 reparsed 互斥。
+    assert counts["in_flight"] == 1
+    assert counts["reparsed"] == 0
+    with repo._connect() as db:   # 状态原样,没被踩
+        assert db.execute("SELECT parse_status FROM sources WHERE id='src-taken'"
+                          ).fetchone()[0] == "parsing"
+
+
 def test_run_ingest_does_not_touch_sources_another_process_is_parsing(repo, tmp_path):
     """停在 'queued'/'parsing'/'extracting' 的源要么正被服务端处理、要么会被下一次
     服务端启动结算——两种情况离线 CLI 都不该抢:process_source 没有 source 级单飞

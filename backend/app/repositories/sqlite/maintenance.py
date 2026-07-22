@@ -314,6 +314,25 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             }
 
+    def sources_with_chunks(self, notebook_id: str) -> set:
+        """该 notebook 下已产出 chunks 的 source_id 集合。
+
+        chunks 是 **parse 阶段的最后一个产物**(elements → summary → 元数据 → chunks),
+        所以「有 chunk」证明 parse 这一段整段跑完了,而「有 element」只证明跑到过中段。
+        run_ingest 用它兜住一类否则永不收敛的源:parse 与分块都成功、但下游 KG 抽取
+        抛错 —— 管线外层 except 会把整个源记成 parse_status='failed',若只按状态判就会
+        每次 ingest 都把已经有效的 parse 产物清掉重来,LLM 一直不可用就一直不收敛。
+        有 chunk 即视为 parse 完整;缺的向量由收尾的 backfill_chunk_embeddings 补
+        (它正是嵌入**已存在**的 chunk)。"""
+        with self._runtime.database.connect() as db:
+            return {
+                r["source_id"]
+                for r in db.execute(
+                    "SELECT DISTINCT source_id FROM chunks WHERE notebook_id = ?",
+                    (notebook_id,),
+                ).fetchall()
+            }
+
     def sources_in_flight_parse(self, notebook_id: str) -> set:
         """该 notebook 下 parse 管线**可能正在进行**的 source_id 集合。
 
