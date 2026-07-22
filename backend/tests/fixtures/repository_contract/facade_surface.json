@@ -6353,6 +6353,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>._count_missing_element_vectors",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>._count_missing_node_vectors",
         "target": "maintenance"
       },
@@ -6377,6 +6383,12 @@
       {
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.backfill_element_embeddings",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.backfill_node_embeddings",
         "target": "maintenance"
       },
@@ -6390,6 +6402,12 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_backfill_source_index",
+        "target": "maintenance"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_ingest",
         "target": "maintenance"
       },
       {
@@ -6964,6 +6982,12 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.run_all._sched",
+        "target": "process_source"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.run_ingest._one",
         "target": "process_source"
       },
       {
@@ -8135,6 +8159,12 @@
         "kind": "attribute",
         "path": "backend/app/services/batch_ingest.py",
         "scope": "<module>.backfill_chunk_embeddings",
+        "target": "settings"
+      },
+      {
+        "kind": "attribute",
+        "path": "backend/app/services/batch_ingest.py",
+        "scope": "<module>.backfill_element_embeddings",
         "target": "settings"
       },
       {
