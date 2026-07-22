@@ -1098,7 +1098,15 @@ git commit -m "test(cache): 内聚导入守卫，锁定具体实现不泄漏到�
 - Create: `backend/app/services/cached_embedder.py`
 - Modify: `backend/app/services/embedding.py:42-78`（`make_embedder` 签名与返回）
 - Modify: `backend/app/services/model_status.py:240`
+- Modify: `backend/app/api/system_routes.py:110`（补 `bypass_cache=True`，见下）
 - Test: `backend/tests/test_cached_embedder.py`
+
+> **本任务范围已扩**：`POST /me/model-settings/test`（前端「测试连接」按钮，
+> `frontend/app/model-settings.ts` 仍在调用）的 `chat_json` 调用缺 `bypass_cache=True`。
+> 全仓 36 个 `chat_json` 调用点中探活性质共 3 处，另两处（`model_status.py:222`、
+> `kg/run_control.py:203`）都已正确绕过，只有它漏了。Task 3 把缓存默认打开后，这条从
+> 死代码变成活缺陷——端点已挂掉仍可能回放 `ok=True` 对用户撒谎。本任务标题就是
+> 「健康探针绕过缓存」，它天然属于这里。补 kwarg 之外还要加一条断言锁住。
 
 **Interfaces:**
 - Consumes: `app.core.cache` 的 `make_cache_backend`、`embed_key`
@@ -1803,6 +1811,8 @@ git commit -m "feat(sources): file_hash 索引与 UI 上传同 notebook 去重"
 
 **Files:**
 - Modify: `README.md`、`README_zh.md`（新配置项说明）
+- Modify: `.env.example`（**别遗漏**：其第 116-117 行仍写着 `LLM_CACHE_ENABLED=false`
+  与旧路径 `llm_cache.db`，与新默认值矛盾）
 
 - [ ] **Step 1: 跑完整后端测试**
 
