@@ -584,9 +584,13 @@ def _make_sqlite(tmp_path):
 # 新 backend 在此登记：(名字, 构造函数, 是否真正持久化)
 _BACKENDS = [
     ("noop", _make_noop, False),
+    ("minimal", _make_minimal, True),      # 保留：可替换性的活体标尺
     ("sqlite", _make_sqlite, True),
 ]
 ```
+
+> **不要删掉 `minimal` 这一项**——它是 Task 1 建立的可替换性活体标尺（只实现两个
+> 必需方法的后端必须能工作）。本步只是往登记表里追加 `sqlite`。
 
 > 契约测试是模块内部的白盒测试，允许 import 具体实现类；Task 4 的内聚守卫会把
 > `backend/tests/test_cache_backend_contract.py` 列入豁免名单。
@@ -605,20 +609,28 @@ Expected: 18 passed（6 项 × `noop` / `minimal` / `sqlite` 三个后端）
 
 ```python
 def test_differential_against_diskcache(tmp_path):
-    """同一随机读写序列下，与 diskcache(cull_limit=1) 的命中/落空判定必须一致。
+    """与 diskcache 对照验证 **KV 语义**：put/get/覆盖/落空判定。
 
-    diskcache 仅作开发期的参照实现，不是生产依赖——未安装即跳过。
-    注意必须用 cull_limit=1：默认的 10 会按固定条数剔除而非删到刚好达标，
-    在大条目下会过度清空。
+    刻意用极大的 size_limit 让两边都不触发淘汰。**不要**把淘汰纳入对比：
+    diskcache 的 `volume()` 计的是 SQLite 文件物理页数（含 schema/WAL/freelist），
+    本实现计的是逻辑内容字节，两者量纲不同，无法互为 oracle；且 diskcache 默认
+    `disk_min_file_size=32KB`，小于该值的条目走内联存储、`size` 记账为 0，其
+    LRU-by-size 判据根本不被触发。实测把淘汰纳入对比会得到 23~37 处分歧且随 seed
+    漂移（seed 42→37、7→29、99→23），而仅比 KV 语义时 4 个 seed 全部归零。
+
+    淘汰行为由本文件其余 11 项测试独立覆盖——我们本就不认同 diskcache 的裁剪
+    语义（`cull_limit` 按固定条数剔除而非删到刚好达标），它不该充当淘汰的标准答案。
+
+    diskcache 仅作开发期参照实现，不是生产依赖——未安装即跳过。
     """
     diskcache = pytest.importorskip("diskcache")
     import random
 
     rng = random.Random(42)
-    limit = 150_000
-    a = _mk(tmp_path, size_limit=limit, refresh_window=0)
+    no_evict = 10**9
+    a = _mk(tmp_path, size_limit=no_evict, refresh_window=0)
     b = diskcache.Cache(
-        str(tmp_path / "dc"), size_limit=limit,
+        str(tmp_path / "dc"), size_limit=no_evict,
         eviction_policy="least-recently-used", cull_limit=1,
     )
     mismatch = 0
@@ -633,7 +645,7 @@ def test_differential_against_diskcache(tmp_path):
             if (ra is None) != (rb is None) or (ra is not None and ra != rb):
                 mismatch += 1
     b.close()
-    assert mismatch == 0, f"与参照实现有 {mismatch} 处判定分歧"
+    assert mismatch == 0, f"与参照实现有 {mismatch} 处 KV 语义分歧"
 ```
 
 - [ ] **Step 8: 运行差分测试**
