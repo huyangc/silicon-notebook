@@ -48,11 +48,12 @@ class RecordingBackend:
         self.store[key] = value
 
 
-def _mk(tmp_path, truncate_chars=2000):
+def _mk(tmp_path, truncate_chars=2000, base_url="https://embed.test"):
     inner = RecordingEmbedder()
     backend = SqliteCacheBackend(str(tmp_path / "c.db"))
     return inner, CachedEmbedder(inner, backend, model="m1",
-                                 truncate_chars=truncate_chars)
+                                 truncate_chars=truncate_chars,
+                                 base_url="https://embed.test")
 
 
 def test_second_call_is_served_from_cache(tmp_path):
@@ -100,7 +101,7 @@ def test_length_mismatch_response_is_not_cached(tmp_path):
 
     inner = BadEmbedder()
     backend = SqliteCacheBackend(str(tmp_path / "c.db"))
-    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000, base_url="https://embed.test")
     with pytest.raises(RuntimeError):
         cached.embed_texts(["a"])
     assert backend.stats()["entries"] == 0
@@ -136,7 +137,7 @@ def test_degraded_empty_vectors_are_not_cached_and_recovery_refetches(tmp_path):
 
     inner = FlakyEmbedder()
     backend = SqliteCacheBackend(str(tmp_path / "c.db"))
-    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000, base_url="https://embed.test")
 
     assert cached.embed_texts(["a"]) == [[]], "本次调用照常返回后端给的东西"
     assert backend.get(cached._key("a")) is None, "退化的空向量被写进了缓存"
@@ -163,7 +164,7 @@ def test_inconsistent_vector_dims_in_one_response_are_not_cached(tmp_path):
 
     inner = RaggedEmbedder()
     backend = SqliteCacheBackend(str(tmp_path / "c.db"))
-    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000, base_url="https://embed.test")
 
     cached.embed_texts(["a", "b"])
     assert backend.get(cached._key("a")) is None, "维度存疑的响应被写进了缓存(a)"
@@ -196,17 +197,17 @@ def test_length_mismatch_raises_instead_of_returning_misaligned_vectors():
 
     good = RecordingEmbedder()
     backend = RecordingBackend()
-    CachedEmbedder(good, backend, model="m1",
-                   truncate_chars=2000).embed_texts(["A", "B"])   # 预热 A、B
+    CachedEmbedder(good, backend, model="m1", truncate_chars=2000,
+                   base_url="https://embed.test").embed_texts(["A", "B"])   # 预热 A、B
 
     bad = MismatchEmbedder()
-    cached = CachedEmbedder(bad, backend, model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(bad, backend, model="m1", truncate_chars=2000, base_url="https://embed.test")
     with pytest.raises(RuntimeError, match="2 vectors for 1 texts"):
         cached.embed_texts(["A", "B", "C"])
     assert bad.calls == [["C"]], "只应请求未命中的 C"
 
     # 已有条目不被这次异常毒化，后续请求仍拿到自己的向量。
-    again = CachedEmbedder(good, backend, model="m1", truncate_chars=2000)
+    again = CachedEmbedder(good, backend, model="m1", truncate_chars=2000, base_url="https://embed.test")
     assert again.embed_texts(["A", "B"]) == [good._vec("A"), good._vec("B")]
 
 
@@ -225,7 +226,7 @@ def test_inner_embedder_exception_propagates_and_caches_nothing():
 
     inner = BoomEmbedder()
     backend = RecordingBackend()
-    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000, base_url="https://embed.test")
     with pytest.raises(RuntimeError, match="upstream 500"):
         cached.embed_texts(["a"])
     assert inner.calls == [["a"]]
@@ -240,7 +241,7 @@ def test_cache_get_failure_degrades_to_miss():
     """
     inner = RecordingEmbedder()
     backend = RecordingBackend(get_error=True)
-    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000, base_url="https://embed.test")
     out = cached.embed_texts(["a", "b"])
     assert out == [inner._vec("a"), inner._vec("b")]
     assert backend.gets, "应当真的尝试过读缓存，否则测的不是这道门"
@@ -254,7 +255,7 @@ def test_cache_put_failure_degrades_silently():
     """
     inner = RecordingEmbedder()
     backend = RecordingBackend(put_error=True)
-    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000, base_url="https://embed.test")
     out = cached.embed_texts(["a"])
     assert out == [inner._vec("a")]
     assert backend.puts, "应当真的尝试过写缓存，否则测的不是这道门"
@@ -264,7 +265,7 @@ def test_corrupt_cache_entry_degrades_to_miss():
     """缓存里躺着一条坏值时当 miss，不能把解码异常抛进主流程。"""
     inner = RecordingEmbedder()
     backend = RecordingBackend()
-    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000, base_url="https://embed.test")
     backend.store[cached._key("a")] = "not-json-at-all"
     backend.store[cached._key("b")] = '["nope", "not", "a", "vector"]'
     assert cached.embed_texts(["a", "b"]) == [inner._vec("a"), inner._vec("b")]
@@ -280,7 +281,7 @@ def test_empty_input_short_circuits():
     """
     inner = RecordingEmbedder()
     backend = RecordingBackend()
-    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(inner, backend, model="m1", truncate_chars=2000, base_url="https://embed.test")
     assert cached.embed_texts([]) == []
     assert inner.calls == []
     assert backend.gets == [] and backend.puts == []
@@ -313,7 +314,7 @@ def test_private_attributes_still_pass_through(tmp_path):
             self.ensured += 1
 
     inner = WarmableEmbedder()
-    cached = CachedEmbedder(inner, NoCacheBackend(), model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(inner, NoCacheBackend(), model="m1", truncate_chars=2000, base_url="https://embed.test")
     ensure = getattr(cached, "_ensure", None)
     assert callable(ensure), "_warm_up 拿不到 _ensure 就会静默跳过预热"
     ensure()
@@ -328,7 +329,7 @@ def test_attributes_pass_through(tmp_path):
 
 def test_noop_backend_disables_caching(tmp_path):
     inner = RecordingEmbedder()
-    cached = CachedEmbedder(inner, NoCacheBackend(), model="m1", truncate_chars=2000)
+    cached = CachedEmbedder(inner, NoCacheBackend(), model="m1", truncate_chars=2000, base_url="https://embed.test")
     cached.embed_texts(["a"])
     cached.embed_texts(["a"])
     assert len(inner.calls) == 2
@@ -407,3 +408,46 @@ def test_model_settings_test_endpoint_bypasses_cache():
     assert idx != -1, "system_routes 里找不到 chat_json 调用"
     window = src[idx:idx + 300]
     assert "bypass_cache=True" in window, "健康探针未绕过缓存，模型故障会被缓存掩盖成假绿"
+
+
+# ---------------------------------------------- 缓存键必须含服务身份（base_url）
+
+def test_embed_cache_is_scoped_to_the_service_endpoint(tmp_path):
+    """同 model 名、不同 base_url 的两个 embedder 绝不能互相命中缓存。
+
+    评审场景：per-user 模型配置下，两个用户配了同一个 model 名却指向不同 endpoint，
+    而缓存跨用户全局共享。若 key 只认 model 名，第二个用户会拿到第一个 endpoint 的
+    向量——他自己选的模型服务根本没被调用（静默零召回还查不出）。
+
+    变异验证：把 policy.embed_key 里的 base_url 从 key 材料里去掉后，本测试转红。
+    """
+    backend = SqliteCacheBackend(str(tmp_path / "c.db"))
+    inner_a = RecordingEmbedder()
+    inner_b = RecordingEmbedder()
+    a = CachedEmbedder(inner_a, backend, model="m1", truncate_chars=2000,
+                       base_url="https://endpoint-a.test")
+    b = CachedEmbedder(inner_b, backend, model="m1", truncate_chars=2000,
+                       base_url="https://endpoint-b.test")
+    a.embed_texts(["x"])
+    assert inner_a.calls == [["x"]]
+    b.embed_texts(["x"])
+    assert inner_b.calls == [["x"]], (
+        "不同 base_url 必须各打各的后端；命中对方的向量 = 张冠李戴"
+    )
+
+
+def test_embed_cache_shared_within_one_endpoint(tmp_path):
+    """同一 base_url 上第二个 embedder 应命中缓存——这是本特性的核心价值，别改坏。
+
+    embedder 层不持有 api_key，所以「同 endpoint、换了 api_key」在这一层天然就是
+    同一条 key（api_key 不在也不该在 key 材料里）。"""
+    backend = SqliteCacheBackend(str(tmp_path / "c.db"))
+    inner_a = RecordingEmbedder()
+    inner_b = RecordingEmbedder()
+    a = CachedEmbedder(inner_a, backend, model="m1", truncate_chars=2000,
+                       base_url="https://endpoint-a.test")
+    b = CachedEmbedder(inner_b, backend, model="m1", truncate_chars=2000,
+                       base_url="https://endpoint-a.test")
+    a.embed_texts(["x"])
+    b.embed_texts(["x"])
+    assert inner_b.calls == [], "同 endpoint 第二个 embedder 应命中缓存，不再打后端"

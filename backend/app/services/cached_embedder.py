@@ -16,11 +16,17 @@ from app.core.cache import embed_key, embedding_batch_dim, is_cacheable_embeddin
 
 class CachedEmbedder:
     def __init__(self, inner: Any, backend: Any, *, model: str,
-                 truncate_chars: int) -> None:
+                 truncate_chars: int, base_url: str) -> None:
         self._inner = inner
         self._backend = backend
         self._model = model
         self._truncate_chars = truncate_chars
+        # 服务身份，进缓存键。per-user 模型配置下同 model 名可指向不同 endpoint，
+        # 而缓存跨用户全局共享——只认 model 名会让第二个用户拿到第一个 endpoint 的
+        # 向量。base_url 足以隔离且非秘密；api_key 绝不入键（本层也不持有它）。
+        # 关键字必填、无默认：唯一生产构造点 make_embedder 必传真实 endpoint，
+        # 让"忘了传 → 不同服务静默共用一条缓存"在签名层就不可能发生。
+        self._base_url = base_url
 
     def __getattr__(self, name: str) -> Any:
         # dim / model_status 身份绑定 / source_embedding 预热用的 _ensure 等一律透传。
@@ -40,7 +46,8 @@ class CachedEmbedder:
 
     def _key(self, text: str) -> str:
         # 必须对截断后的文本取键——后端内部同样只发送截断后的内容。
-        return embed_key(self._model, text[:self._truncate_chars])
+        # base_url 一并入键：见 __init__，隔离不同 endpoint 的同名模型。
+        return embed_key(self._model, text[:self._truncate_chars], self._base_url)
 
     def embed_texts(self, texts: List[str]) -> List[List[float]]:
         texts = list(texts)

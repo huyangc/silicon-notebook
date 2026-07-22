@@ -164,15 +164,39 @@ def test_concurrent_consumers_never_drift_volume_accounting(tmp_path):
 
 def test_llm_key_is_stable_and_content_addressed():
     msgs = [{"role": "user", "content": "hello"}]
-    assert llm_key("m", msgs, "{}") == llm_key("m", msgs, "{}")
-    assert llm_key("m", msgs, "{}") != llm_key("m2", msgs, "{}")
+    u = "https://llm.example.test"
+    assert llm_key("m", msgs, "{}", u) == llm_key("m", msgs, "{}", u)
+    assert llm_key("m", msgs, "{}", u) != llm_key("m2", msgs, "{}", u)
 
 
-def test_llm_key_matches_legacy_implementation():
-    """key 算法不得漂移，否则存量缓存全部失效。"""
+def test_llm_key_includes_service_identity_and_never_api_key():
+    """base_url（服务身份）是 key 的一部分：per-user 模型配置下同 model 名可指向不同
+    endpoint，而缓存跨用户全局共享——只认 model 名会让第二个用户拿到第一个 endpoint
+    的响应。api_key 绝不进 key：它会经 stats()/日志/调试路径间接暴露。
+
+    变异验证：把 policy.llm_key 里的 base_url 从 key 材料里去掉后，第一条断言转红。
+    """
+    import inspect
+
+    from app.core.cache import llm_key as lk
+
+    msgs = [{"role": "user", "content": "hello"}]
+    assert llm_key("m", msgs, "{}", "https://a.test") != llm_key("m", msgs, "{}", "https://b.test"), (
+        "同 model 名、不同 base_url 必须是不同的 key"
+    )
+    # api_key 不是也不该是 key 的入参——从签名层就杜绝它进入 sha256 材料。
+    assert "api_key" not in inspect.signature(lk).parameters, "api_key 绝不能成为 key 材料"
+
+
+def test_llm_key_deliberately_diverges_from_legacy_after_adding_base_url():
+    """历史实现（llm_cache.cache_key）不含 base_url。本特性刻意让 key 纳入服务身份，
+    因此与历史值不再逐字节相同——这是一次性全冷（缓存尚未上线，冷启动重建即可），
+    不是回退。留此测试锁住「确实因为 base_url 而分叉」，避免有人把它改回去。"""
     from app.core.llm_cache import cache_key as legacy
     msgs = [{"role": "user", "content": "中文 content"}]
-    assert llm_key("model-x", msgs, '{"a":""}') == legacy("model-x", msgs, '{"a":""}')
+    assert llm_key("model-x", msgs, '{"a":""}', "https://svc.test") != legacy(
+        "model-x", msgs, '{"a":""}'
+    )
 
 
 # --------------------------------------------------------------- fake upstream
@@ -458,3 +482,60 @@ def test_llm_writes_are_tagged_with_the_model(tmp_path, monkeypatch):
     assert spy.inner.stats()["by_tag"] == {"m": 1}
     assert spy.inner.evict_tag("m") == 1
     assert _cached_value(spy) is None, "evict_tag 之后这条 key 仍在缓存里"
+
+
+# ---------------------------------- LLM 缓存键必须含服务身份（base_url），排除 api_key
+
+def _client_on(tmp_path, monkeypatch, *, base_url, api_key, backend):
+    """一个指向 base_url/api_key、model 名固定为 'm' 的 client，共用传入的 backend。"""
+    settings = Settings(
+        OPENAI_COMPAT_BASE_URL=base_url,
+        OPENAI_COMPAT_API_KEY=api_key,
+        OPENAI_COMPAT_MODEL="m",             # 同名模型：评审场景的前提
+        LLM_LOG_ENABLED=False,
+    )
+    client = OpenAICompatibleClient(settings, cache=backend)
+    fake = _FakeOpenAI()
+    monkeypatch.setattr(client, "client", lambda: fake)
+    return client, fake
+
+
+def test_llm_cache_is_scoped_to_the_service_endpoint(tmp_path, monkeypatch):
+    """同 model 名、不同 base_url 的两个 client 绝不能互相命中缓存——否则第二个用户
+    拿到第一个 endpoint 的响应，自己选的模型服务根本没被调用。
+
+    变异验证：把 llm.py 的 llm_key(... , self.base_url) 里的 base_url 去掉（或把
+    policy.llm_key 的 base_url 从材料里删掉）后，本测试转红（fake_b.calls==0）。
+    """
+    backend = make_cache_backend(Settings(
+        LLM_CACHE_ENABLED=True, LLM_CACHE_PATH=str(tmp_path / "cache.db"),
+        LLM_LOG_ENABLED=False,
+    ))
+    msgs = [{"role": "user", "content": "same question"}]
+    a, fake_a = _client_on(tmp_path, monkeypatch,
+                           base_url="https://a.example.test", api_key="ka", backend=backend)
+    b, fake_b = _client_on(tmp_path, monkeypatch,
+                           base_url="https://b.example.test", api_key="kb", backend=backend)
+    a.chat_json(msgs, "{}")
+    assert fake_a.calls == 1
+    b.chat_json(msgs, "{}")
+    assert fake_b.calls == 1, "不同 base_url 必须各打各的 endpoint，不得复用对方的缓存"
+
+
+def test_llm_cache_key_excludes_api_key(tmp_path, monkeypatch):
+    """同一 base_url 上换 api_key（轮换/多租户同服务）仍命中同一条缓存：api_key 既
+    不参与也绝不该参与 key（它会经 stats()/日志/调试路径间接暴露）。"""
+    backend = make_cache_backend(Settings(
+        LLM_CACHE_ENABLED=True, LLM_CACHE_PATH=str(tmp_path / "cache.db"),
+        LLM_LOG_ENABLED=False,
+    ))
+    msgs = [{"role": "user", "content": "same question"}]
+    a, fake_a = _client_on(tmp_path, monkeypatch,
+                           base_url="https://a.example.test", api_key="ka", backend=backend)
+    c, fake_c = _client_on(tmp_path, monkeypatch,
+                           base_url="https://a.example.test", api_key="TOTALLY-DIFFERENT",
+                           backend=backend)
+    a.chat_json(msgs, "{}")
+    assert fake_a.calls == 1
+    c.chat_json(msgs, "{}")
+    assert fake_c.calls == 0, "同 base_url 只是 api_key 不同应命中缓存（api_key 不在 key 里）"

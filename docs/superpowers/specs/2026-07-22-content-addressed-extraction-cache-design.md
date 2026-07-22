@@ -191,10 +191,28 @@ LLM 侧无需任何装饰器——`extract_graph` / `extract_window` / refine / 
 
 | | key | 依据 |
 |---|---|---|
-| KG | `sha256(model + messages全文 + schema_hint)`，复用现有 `cache_key()` | prompt 已核对为内容的纯函数 |
-| embed | `sha256(model + 单条 text[:embed_truncate_chars])`，**per-text 而非 per-batch** | 见下两条 |
+| KG | `sha256(base_url + model + messages全文 + schema_hint)` | prompt 已核对为内容的纯函数；base_url 见下"服务身份" |
+| embed | `sha256(base_url + model + 单条 text[:embed_truncate_chars])`，**per-text 而非 per-batch** | 见下三条 |
 
-embed key 的两个必须点：
+**服务身份（base_url）必须进 key（已解决）**：本仓库有 per-user 模型配置，不同
+用户/角色可配不同 `base_url` 指向不同 endpoint，而缓存是**跨用户全局共享**的。若
+key 只认 model 名字符串，两个用户配了同一个 model 名却不同 `base_url` 时会共用同
+一条缓存——第二个用户拿到第一个 endpoint 的响应，他自己选的模型服务根本没被调用。
+缓存默认开启，这是活跃的正确性问题，因此 `llm_key`/`embed_key` 各把 `base_url`
+纳入 sha256 材料。
+
+⚠ **只取 `base_url`，绝不放 `api_key`**：key 会经 `stats()`（现回显 tag/计数）、
+日志、可能的调试路径间接暴露，任何秘密都不能进 key 材料。`base_url` 足以区分
+endpoint（正是上面的场景），且它本就不是秘密（出现在日志、错误信息里）；换
+`api_key` 通常伴随换 endpoint，即便同 endpoint 只轮换 key，也有 `evict_tag` 逃生口
+兜底。所以刻意**不**复用含 api_key 的 `model_config_fingerprint()`。⚠ `base_url`
+只进 **key**、不进 **tag**：tag 保持为 model 名，服务于 `evict_tag(model)` 按模型
+清空的语义，混入 base_url 会破坏它。
+
+（此改动让此前**全部**缓存条目 key 变化 = 一次性全冷。缓存尚未上线，冷启动重建
+即可，无迁移成本。）
+
+embed key 的另两个必须点：
 
 - **per-text 而非 per-batch**：否则批次边界一变（`embed_batch_size` 调整、或上游
   chunk 数量变化）就全部 miss。
@@ -351,11 +369,13 @@ conftest 必须强制 `NoCacheBackend`（或临时目录），且该隔离本身
 | 改窗口参数 `n`/`m` | 是（labeled_text 变） | 自动失效 |
 | 改 `should_extract_window` | 是（窗口集合变） | 自动失效 |
 | 换模型（改 model 名） | 是 | 自动失效 |
-| **服务端换掉同名模型的权重** | **否** | ← TTL 存在的理由之一 |
+| 换 endpoint（同 model 名、不同 base_url） | 是（base_url 在 key 里） | 自动失效 |
+| **同一 endpoint 上换掉同名模型的权重** | **否** | ← TTL 存在的理由之一 |
 
 TTL 只为两件事存在：
 
-1. **同名模型权重被替换** —— key 里的 `model` 只是字符串。
+1. **同一 endpoint 上同名模型权重被替换** —— key 里的 `model` 只是字符串，
+   `base_url` 也没变（换权重不换地址）。跨 endpoint 的同名模型已由 base_url 区分。
 2. **删除后残留** —— 缓存 value 是 KG 抽取结果，而 prompt 明确要求
    「Preserve entity/concept names EXACTLY as they appear」，**原文片段留在缓存里**。
    用户删掉 notebook 后，其内容的衍生片段仍在全局缓存中。决策：**TTL 封顶即可**，

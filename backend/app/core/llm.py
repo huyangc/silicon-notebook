@@ -229,7 +229,13 @@ class OpenAICompatibleClient:
         if not bypass_cache:
             try:
                 cache = self._get_cache()
-                ckey = llm_key(model, full_messages, response_schema_hint)
+                # base_url is the service identity: two users can configure the
+                # same model name against different endpoints, and this cache is
+                # global/cross-user — keying on model alone would hand the second
+                # user the first endpoint's response. api_key is deliberately NOT
+                # in the key (it leaks via stats()/logs; evict_tag covers a
+                # same-endpoint key rotation).
+                ckey = llm_key(model, full_messages, response_schema_hint, self.base_url)
                 cached = cache.get(ckey)
                 if cached is not None:
                     return cached
