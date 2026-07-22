@@ -138,13 +138,27 @@ _PROTOCOLS: Mapping[str, frozenset[str]] = MappingProxyType({
     "embedding": frozenset({"openai", "dashscope"}),
     "rerank": frozenset({"openai"}),
 })
-_LEGACY_ENDPOINT_VARS = (
+_LEGACY_MODEL_ACTIVATION_VARS = (
     "OPENAI_COMPAT_BASE_URL",
+    "OPENAI_COMPAT_API_KEY",
+    "OPENAI_COMPAT_MODEL",
     "REASONING_LLM_BASE_URL",
+    "REASONING_LLM_API_KEY",
+    "REASONING_LLM_MODEL",
     "REWRITE_LLM_BASE_URL",
+    "REWRITE_LLM_API_KEY",
+    "REWRITE_LLM_MODEL",
     "KG_LLM_BASE_URL",
+    "KG_LLM_API_KEY",
+    "KG_LLM_MODEL",
+    "EMBED_PROVIDER",
     "EMBED_BASE_URL",
+    "EMBED_API_KEY",
+    "EMBED_MODEL",
     "RERANK_BASE_URL",
+    "RERANK_API_KEY",
+    "RERANK_MODEL",
+    "RERANK_API_STYLE",
 )
 
 
@@ -175,7 +189,7 @@ class SystemModelServiceRegistry:
         effective_env = _effective_environ(settings, environ)
         config_path = (settings.model_services_config or "").strip()
         if not config_path:
-            _reject_legacy_endpoint_configuration(effective_env)
+            _reject_legacy_model_configuration(effective_env)
             return cls({}, {})
 
         path = Path(config_path)
@@ -258,12 +272,17 @@ def _effective_environ(
     return MappingProxyType(values)
 
 
-def _reject_legacy_endpoint_configuration(environ: Mapping[str, str]) -> None:
-    for variable in _LEGACY_ENDPOINT_VARS:
-        if (environ.get(variable) or "").strip():
-            raise ValueError(
-                f"{variable} is retired; configure MODEL_SERVICES_CONFIG instead"
-            )
+def _reject_legacy_model_configuration(environ: Mapping[str, str]) -> None:
+    """Fail closed before retired fields can select an implicit legacy client."""
+    configured = tuple(
+        variable
+        for variable in _LEGACY_MODEL_ACTIVATION_VARS
+        if (environ.get(variable) or "").strip()
+    )
+    if configured:
+        raise ValueError(
+            f"{', '.join(configured)} are retired; configure MODEL_SERVICES_CONFIG instead"
+        )
 
 
 def _parse_service(

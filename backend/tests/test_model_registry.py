@@ -250,11 +250,25 @@ def test_fingerprint_changes_when_identity_material_changes(tmp_path, changed, v
     "legacy_var",
     [
         "OPENAI_COMPAT_BASE_URL",
+        "OPENAI_COMPAT_API_KEY",
+        "OPENAI_COMPAT_MODEL",
         "REASONING_LLM_BASE_URL",
+        "REASONING_LLM_API_KEY",
+        "REASONING_LLM_MODEL",
         "REWRITE_LLM_BASE_URL",
+        "REWRITE_LLM_API_KEY",
+        "REWRITE_LLM_MODEL",
         "KG_LLM_BASE_URL",
+        "KG_LLM_API_KEY",
+        "KG_LLM_MODEL",
+        "EMBED_PROVIDER",
         "EMBED_BASE_URL",
+        "EMBED_API_KEY",
+        "EMBED_MODEL",
         "RERANK_BASE_URL",
+        "RERANK_API_KEY",
+        "RERANK_MODEL",
+        "RERANK_API_STYLE",
     ],
 )
 def test_empty_config_rejects_real_legacy_endpoint_without_leaking_value(monkeypatch, legacy_var):
@@ -265,6 +279,20 @@ def test_empty_config_rejects_real_legacy_endpoint_without_leaking_value(monkeyp
 
     assert legacy_var in str(exc_info.value)
     assert "https://legacy.example/secret" not in str(exc_info.value)
+
+
+def test_empty_config_rejects_legacy_rerank_identity_without_base_url(monkeypatch):
+    monkeypatch.setenv("RERANK_MODEL", "legacy-rerank-model")
+    monkeypatch.setenv("RERANK_API_KEY", "rerank-secret")
+    monkeypatch.delenv("RERANK_BASE_URL", raising=False)
+
+    with pytest.raises(ValueError) as exc_info:
+        SystemModelServiceRegistry.load(_settings())
+
+    error = str(exc_info.value)
+    assert "RERANK_MODEL" in error
+    assert "legacy-rerank-model" not in error
+    assert "rerank-secret" not in error
 
 
 def test_empty_process_variable_suppresses_stale_legacy_value_from_active_env_file(
