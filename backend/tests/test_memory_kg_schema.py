@@ -68,8 +68,9 @@ def test_schema_version_is_29():
     # bumped v26 → v27; the per-notebook document limit's _migration_28
     # (app_settings table + user_profiles.upload_document_limit column) bumped
     # v27 → v28; v29 reconciles the two independently allocated v24
-    # lineages (canonical scratch + cluster membership uniqueness).
-    assert sr.SCHEMA_VERSION == 29
+    # lineages (canonical scratch + cluster membership uniqueness); v30 adds the
+    # sources(notebook_id, file_hash) content-hash dedup index.
+    assert sr.SCHEMA_VERSION == 30
 
 
 def test_deployed_v13_db_upgrades_via_migration_14(repo):

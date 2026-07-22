@@ -413,6 +413,12 @@ class SourceIngestionService:
             source_id = self.new_id("src")
             file_name = safe_filename(file.file_name)
             digest = hashlib.sha256(file.content).hexdigest()
+            # 同 notebook 内相同内容直接复用既有源，与 batch_ingest 的 already_ingested
+            # 行为一致（此前 UI 路径会建出重复源）。跨 notebook 刻意不去重。
+            existing_id = self.sources.source_id_by_hash(notebook_id, digest)
+            if existing_id:
+                imported.append(self.sources.get_source(existing_id))
+                continue
             stored_path = self.source_files.write_upload(
                 notebook_id, source_id, file_name, file.content
             )

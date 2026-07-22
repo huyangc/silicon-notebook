@@ -378,6 +378,30 @@ class SourceStore:
         with self.database.write() as db:
             db.execute(statement, values)
 
+    def source_id_by_hash(self, notebook_id: str, digest: str) -> Optional[str]:
+        """Existing source in this notebook whose content hash matches
+        ``digest``, if any (Task 7: backs ``upload_sources``' same-notebook
+        dedup short-circuit). One-hop query over ``idx_sources_notebook_
+        file_hash`` (migration 24) — mirrors ``maintenance.source_id_by_hash``
+        used by the offline ``batch_ingest`` composition root's own
+        ``already_ingested`` check; kept as two independent one-hop bodies
+        rather than one delegating to the other because ``SourceStore``
+        (application-service surface) and the maintenance adapter
+        (CLI-composition-root-only surface) are deliberately not wired to
+        depend on each other.
+
+        Scoped to ``notebook_id`` on purpose: cross-notebook content is NEVER
+        matched here. A user re-uploading the same file into a different
+        notebook usually means they want it there too, and sharing one
+        ``sources`` row across notebooks would tangle ownership/ACLs and
+        delete cascades — see test_upload_dedup.py's cross-notebook case."""
+        with self.database.connect() as db:
+            row = db.execute(
+                "SELECT id FROM sources WHERE notebook_id=? AND file_hash=?",
+                (notebook_id, digest),
+            ).fetchone()
+        return row["id"] if row else None
+
     def source_id_for_memory(self, memory_id: str) -> Optional[str]:
         """Id of the synthetic source derived from a Memory, if any (at most
         one per the idx_sources_memory_id partial unique index). Guards the

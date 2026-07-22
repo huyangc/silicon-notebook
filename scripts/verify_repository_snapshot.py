@@ -2155,6 +2155,32 @@ MIGRATION_MANIFEST[(28, 29)] = {
     "views": {},
 }
 
+# v30 (Task 7, LLM/embedding content-cache follow-up): sources(notebook_id,
+# file_hash) lookup index backing UI-upload / batch_ingest same-notebook content
+# dedup — previously an unindexed full table scan. No new table/column/trigger/
+# view. Follows the established cascade exactly: broadcast the index onto every
+# prior hop key rebased to v30, then register the explicit (29, 30) single hop.
+# SQL text matches sqlite_master storage verbatim (SQLite strips "IF NOT EXISTS").
+SOURCE_HASH_DEDUP_INDEX = {
+    "idx_sources_notebook_file_hash":
+        "CREATE INDEX idx_sources_notebook_file_hash "
+        "ON sources(notebook_id, file_hash)",
+}
+MIGRATION_MANIFEST = {
+    (key[0], 30, *key[2:]): {
+        **manifest,
+        "indexes": {**manifest["indexes"], **SOURCE_HASH_DEDUP_INDEX},
+    }
+    for key, manifest in MIGRATION_MANIFEST.items()
+}
+MIGRATION_MANIFEST[(29, 30)] = {
+    "tables": {},
+    "columns": {},
+    "indexes": SOURCE_HASH_DEDUP_INDEX,
+    "triggers": {},
+    "views": {},
+}
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
