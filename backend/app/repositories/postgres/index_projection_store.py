@@ -29,6 +29,11 @@ from app.repositories.postgres.search import PAYLOAD_NAME_EXPRESSION
 if TYPE_CHECKING:  # pragma: no cover - typing only
     import numpy
 
+
+def _binary_text_key(value: str) -> bytes:
+    """Match PostgreSQL C collation for identifier ordering."""
+    return value.encode("utf-8", "surrogatepass")
+
 # The two frozen edge encodings the gathered graph produces: the default
 # string path and the build-only int-indexed array fast path.
 ScaleGraphEdges = (
@@ -373,12 +378,23 @@ class IndexProjectionStore:
         # Memberships: entity ↔ chunk (scoped → limit to gathered objects)
         ent_chunk_map = self.ent_chunk_map(notebook_id)
         _kg_keys = set(kg_nodes.keys())
-        memberships = [(oid, cid) for oid, cids in ent_chunk_map.items()
-                       if (not scoped or oid in _kg_keys) for cid in cids]
+        membership_object_ids = sorted(
+            (
+                oid
+                for oid in ent_chunk_map
+                if not scoped or oid in _kg_keys
+            ),
+            key=_binary_text_key,
+        )
+        memberships = [
+            (oid, cid)
+            for oid in membership_object_ids
+            for cid in sorted(ent_chunk_map[oid], key=_binary_text_key)
+        ]
         membership_counts: Dict[str, int] = {
-            oid: len(cids) for oid, cids in ent_chunk_map.items()
-            if (not scoped or oid in _kg_keys)}
-        del ent_chunk_map, _kg_keys
+            oid: len(ent_chunk_map[oid]) for oid in membership_object_ids
+        }
+        del ent_chunk_map, _kg_keys, membership_object_ids
 
         # Extra edges: variant pairs + optional synonym pairs (whole-notebook only)
         extra_edges = []

@@ -1981,6 +1981,131 @@ def test_postgres_graph_rows_follow_persisted_ordinals_for_degree_ties(
     assert graph.node_ids == object_ids + chunk_ids
 
 
+class _OrderedMembershipSet(set):
+    """A real set with a controlled iterator for hash/insertion-order tests."""
+
+    def __init__(self, values):
+        super().__init__(values)
+        self._iteration_order = tuple(values)
+
+    def __iter__(self):
+        return iter(self._iteration_order)
+
+
+class _ProjectionCursor:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+
+class _ProjectionConnection:
+    def execute(self, statement, _params):
+        statement = str(statement)
+        if "FROM knowledge_objects" in statement:
+            return _ProjectionCursor(
+                [
+                    {
+                        "id": "object-a",
+                        "object_type": "concept",
+                        "payload": json.dumps({"name": "A"}),
+                    },
+                    {
+                        "id": "object-b",
+                        "object_type": "concept",
+                        "payload": json.dumps({"name": "B"}),
+                    },
+                ]
+            )
+        if "FROM knowledge_relations" in statement:
+            return _ProjectionCursor([])
+        if "FROM chunks" in statement:
+            return _ProjectionCursor([{"id": "chunk-a"}, {"id": "chunk-z"}])
+        if "FROM concept_clusters" in statement:
+            return _ProjectionCursor([])
+        raise AssertionError(statement)
+
+
+@pytest.mark.parametrize(
+    "store_cls", (SqliteIndexProjectionStore, PostgresIndexProjectionStore)
+)
+def test_projection_membership_artifact_order_ignores_map_and_set_iteration(
+    store_cls,
+):
+    connection = _ProjectionConnection()
+
+    def build(ent_chunk_map):
+        projection = store_cls(
+            SimpleNamespace(ppr_variant_edge_weight=0.35),
+            connect=lambda: nullcontext(connection),
+            in_batches=lambda values: [list(values)],
+            ent_chunk_map=lambda _notebook_id: ent_chunk_map,
+            mention_extra_edges=lambda _notebook_id: [],
+            vector_matrix=lambda *_args, **_kwargs: ([], []),
+        )
+        strings = projection.graph_rows(
+            "nb-personal", None, synonym_edges=[]
+        )
+        arrays = projection.graph_rows(
+            "nb-personal", None, synonym_edges=[], as_arrays=True
+        )
+        return strings, arrays
+
+    reverse, forward = (
+        {
+            "object-b": _OrderedMembershipSet(("chunk-z", "chunk-a")),
+            "object-a": _OrderedMembershipSet(("chunk-z", "chunk-a")),
+        },
+        {
+            "object-a": _OrderedMembershipSet(("chunk-a", "chunk-z")),
+            "object-b": _OrderedMembershipSet(("chunk-a", "chunk-z")),
+        },
+    )
+    reverse_strings, reverse_arrays = build(reverse)
+    forward_strings, forward_arrays = build(forward)
+
+    expected_edges = [
+        ("object-a", "chunk-a", 1.0),
+        ("chunk-a", "object-a", 1.0),
+        ("object-a", "chunk-z", 1.0),
+        ("chunk-z", "object-a", 1.0),
+        ("object-b", "chunk-a", 1.0),
+        ("chunk-a", "object-b", 1.0),
+        ("object-b", "chunk-z", 1.0),
+        ("chunk-z", "object-b", 1.0),
+    ]
+    assert reverse_strings.edges == forward_strings.edges == expected_edges
+    assert reverse_strings.node_ids == forward_strings.node_ids == [
+        "object-a",
+        "object-b",
+        "chunk-a",
+        "chunk-z",
+    ]
+    assert reverse_strings.chunk_ids == forward_strings.chunk_ids == [
+        "chunk-a",
+        "chunk-z",
+    ]
+    assert reverse_strings.kg_node_ids == forward_strings.kg_node_ids == [
+        "object-a",
+        "object-b",
+    ]
+    assert reverse_strings.membership_counts == forward_strings.membership_counts
+    assert list(reverse_strings.membership_counts) == ["object-a", "object-b"]
+
+    reverse_src, reverse_tgt, reverse_weight = reverse_arrays.edges
+    forward_src, forward_tgt, forward_weight = forward_arrays.edges
+    np.testing.assert_array_equal(reverse_src, forward_src)
+    np.testing.assert_array_equal(reverse_tgt, forward_tgt)
+    np.testing.assert_array_equal(reverse_weight, forward_weight)
+    assert reverse_arrays.node_ids == forward_arrays.node_ids
+    assert reverse_arrays.chunk_ids == forward_arrays.chunk_ids
+    assert reverse_arrays.kg_node_ids == forward_arrays.kg_node_ids
+    assert reverse_arrays.membership_counts == forward_arrays.membership_counts
+    assert reverse_src.tolist() == [0, 0, 1, 1, 2, 3, 2, 3]
+    assert reverse_tgt.tolist() == [2, 3, 2, 3, 0, 0, 1, 1]
+
+
 @pytest.mark.postgres_integration
 def test_postgres_follow_endpoint_limit_is_stable_and_prioritizes_live_edges(
     postgres_database,

@@ -51,7 +51,8 @@ v19 覆盖来源内嵌图片资产，v20 覆盖多领域参考库挂载与晋升
 anchor 成员检查加入 `(column_id, JS-trim(content_md), row_id)` 归一化表达式索引，v22
 增加持久化的 notebook 级 KG 构建任务，v23 增加每用户最新模型服务状态，v24 清理
 存量重复 cluster membership，并强制 `(notebook_id, object_type, member_object_id)`
-唯一；store
+唯一。备份 verifier 以流式 count/digest 投影校验 v24 的精确 survivor 集，不把 cluster
+全表纳入启动归一化白名单；store
 以同一 ECMAScript trim 表达式等值查询，避免在 `BEGIN IMMEDIATE` 中按保存单元扫描整列。
 
 `sqlite_identity.py` 与 `sqlite_notebook_sharing.py` 保留为兼容 re-export shim；请求 Context、`_COPY_CHUNK` 与 `_remap_json_ids` 等兼容导出继续有效，既有测试 monkeypatch 接缝保持可用。

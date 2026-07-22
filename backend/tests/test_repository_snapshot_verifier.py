@@ -7,8 +7,8 @@ ever touching the original files: the original is only read via a
 constructed exclusively on the temporary backup + a temporary storage
 directory, and the only rows allowed to change on open are the documented
 startup normalizations (interrupted-job recovery, seed inserts, the admin
-in-place upgrade).  Its stdout may carry table names / counts / digests —
-never row content.
+in-place upgrade) and deterministic versioned migration cleanup.  Its stdout
+may carry table names / counts / digests — never row content.
 """
 from __future__ import annotations
 
@@ -520,6 +520,136 @@ def test_deployed_v23_database_verifies_cluster_membership_unique_index(tmp_path
     assert result.ok, result.discrepancies
     assert result.source_user_version == 23
     assert result.final_user_version == module.SCHEMA_VERSION
+
+
+_V23_CLUSTER_ROWS = (
+    (
+        "cluster-old",
+        "nb-fixture",
+        "canonical-old",
+        "member-duplicate",
+        "old",
+        "concept",
+        "old-description",
+        "old-signature",
+        "2026-07-20T00:00:00+00:00",
+    ),
+    (
+        "cluster-tie-a",
+        "nb-fixture",
+        "canonical-a",
+        "member-duplicate",
+        "a",
+        "concept",
+        "a-description",
+        "a-signature",
+        "2026-07-21T00:00:00+00:00",
+    ),
+    (
+        "cluster-tie-z",
+        "nb-fixture",
+        "canonical-z",
+        "member-duplicate",
+        "z",
+        "concept",
+        "z-description",
+        "z-signature",
+        "2026-07-21T00:00:00+00:00",
+    ),
+    (
+        "cluster-singleton",
+        "nb-fixture",
+        "canonical-singleton",
+        "member-singleton",
+        "singleton",
+        "concept",
+        "singleton-description",
+        "singleton-signature",
+        "2026-07-19T00:00:00+00:00",
+    ),
+)
+
+
+def _prepare_v23_cluster_duplicates(module, database, tmp_path):
+    upgraded = module.SQLiteRepository(
+        module.offline_settings(database, tmp_path / "upgrade-storage")
+    )
+    upgraded.close_local()
+    db = sqlite3.connect(database)
+    try:
+        db.execute("DROP INDEX uq_clusters_notebook_type_member")
+        db.executemany(
+            "INSERT INTO concept_clusters "
+            "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+            "object_type,canonical_description,canonical_desc_sig,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            _V23_CLUSTER_ROWS,
+        )
+        db.execute("PRAGMA user_version = 23")
+        db.commit()
+    finally:
+        db.close()
+
+
+def test_v24_verifier_accepts_only_deterministic_cluster_duplicate_cleanup(tmp_path):
+    module = _load_verifier()
+    assert "concept_clusters" not in module.SPECIAL_TABLES
+    database, storage = _copy_fixture(tmp_path)
+    _prepare_v23_cluster_duplicates(module, database, tmp_path)
+
+    result = module.verify_snapshot(database, storage)
+
+    assert result.ok, result.discrepancies
+    assert result.normalized["concept_clusters"] == 2
+    assert result.changed_tables == []
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("wrong-survivor", "changed-singleton", "deleted-singleton"),
+)
+def test_v24_verifier_rejects_cluster_cleanup_corruption(
+    tmp_path, monkeypatch, corruption
+):
+    module = _load_verifier()
+    database, storage = _copy_fixture(tmp_path)
+    _prepare_v23_cluster_duplicates(module, database, tmp_path)
+    real_repository = module.SQLiteRepository
+
+    class CorruptingRepository(real_repository):
+        def __init__(self, settings):
+            super().__init__(settings)
+            with sqlite3.connect(settings.sqlite_path) as db:
+                if corruption == "wrong-survivor":
+                    db.execute(
+                        "DELETE FROM concept_clusters WHERE id='cluster-tie-z'"
+                    )
+                    db.execute(
+                        "INSERT INTO concept_clusters "
+                        "(id,notebook_id,canonical_id,member_object_id,canonical_name,"
+                        "object_type,canonical_description,canonical_desc_sig,created_at) "
+                        "VALUES (?,?,?,?,?,?,?,?,?)",
+                        _V23_CLUSTER_ROWS[1],
+                    )
+                elif corruption == "changed-singleton":
+                    db.execute(
+                        "UPDATE concept_clusters SET canonical_description='corrupt' "
+                        "WHERE id='cluster-singleton'"
+                    )
+                else:
+                    db.execute(
+                        "DELETE FROM concept_clusters WHERE id='cluster-singleton'"
+                    )
+
+    monkeypatch.setattr(module, "SQLiteRepository", CorruptingRepository)
+    result = module.verify_snapshot(database, storage)
+
+    assert not result.ok
+    assert "concept_clusters" in result.changed_tables
+    assert any(
+        item.startswith("table=concept_clusters reason=")
+        for item in result.discrepancies
+    )
 
 
 @pytest.mark.parametrize(

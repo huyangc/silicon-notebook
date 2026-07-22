@@ -13,6 +13,11 @@ from app.services.retrieval import RetrievedKnowledge
 from app.services.retrieval_candidates import _RetrievalState
 
 
+def _binary_text_key(value: str) -> bytes:
+    """Locale-free identifier order shared with persisted graph artifacts."""
+    return value.encode("utf-8", "surrogatepass")
+
+
 class GraphRetrievalService(_RetrievalState):
     _IN_CHUNK = 900
     _PPR_RERANK_SCHEMA = '{"relevant_ids": ["..."]}'
@@ -265,10 +270,18 @@ class GraphRetrievalService(_RetrievalState):
                         chunk_ids.append(r["id"])
                     for r in self.unified_kg.cluster_member_rows(db, nb):
                         cluster_groups.setdefault(r["canonical_id"], []).append(r["member_object_id"])
-            memberships = [(oid, cid)
-                           for nb in participants
-                           for oid, cids in self._ent_chunk_map(nb).items()
-                           for cid in cids]
+            memberships = sorted(
+                (
+                    (oid, cid)
+                    for nb in participants
+                    for oid, cids in self._ent_chunk_map(nb).items()
+                    for cid in cids
+                ),
+                key=lambda pair: (
+                    _binary_text_key(pair[0]),
+                    _binary_text_key(pair[1]),
+                ),
+            )
             from app.services.kg.ppr import variant_edge_pairs
             extra_edges = variant_edge_pairs(kg_nodes, self.settings.ppr_variant_edge_weight)
             if self.settings.ppr_emb_synonym_enabled:

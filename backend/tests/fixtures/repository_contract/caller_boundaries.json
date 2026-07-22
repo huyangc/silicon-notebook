@@ -677,6 +677,14 @@
       "target": "conn.execute"
     },
     {
+      "count": 1,
+      "kind": "independent_sql",
+      "path": "scripts/verify_repository_snapshot.py",
+      "reason": "read-only backup and probe databases",
+      "scope": "<module>._cluster_v24_projection",
+      "target": "digest_conn.execute"
+    },
+    {
       "count": 2,
       "kind": "independent_sql",
       "path": "scripts/verify_repository_snapshot.py",
