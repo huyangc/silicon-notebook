@@ -1,10 +1,10 @@
 """qwen3-rerank(DashScope text-rerank)。单次批量调用;候选超 max_docs 自动切 batch
 线程池并发 + 按 relevance_score 合并。失败/未配置 → 原序下标(降级)。"""
 from __future__ import annotations
-import concurrent.futures as _cf
 import logging
 from typing import List
 import requests
+from requests.adapters import HTTPAdapter
 
 from app.services.model_config import normalize_rerank_api_style
 
@@ -16,7 +16,7 @@ class RerankClient:
     # flat body, top-level results). Canonical config value is "openai".
     _OPENAI_STYLES = frozenset({"openai", "vllm", "cohere", "compatible"})
 
-    def __init__(self, settings, *, model=None, base_url=None, api_key=None, max_docs=None, api_style=None):
+    def __init__(self, settings, *, model=None, base_url=None, api_key=None, max_docs=None, api_style=None, max_connections=None):
         self.settings = settings
         self.model = ((model if model is not None else getattr(settings, "rerank_model", "")) or "").strip()
         self.base_url = ((base_url if base_url is not None else getattr(settings, "rerank_base_url", "")) or "").strip().rstrip("/")
@@ -26,6 +26,18 @@ class RerankClient:
             api_style if api_style is not None
             else getattr(settings, "rerank_api_style", "dashscope")
         )
+        self._session = None
+        if max_connections is not None:
+            maximum = max(1, int(max_connections))
+            self._session = requests.Session()
+            adapter = HTTPAdapter(
+                pool_connections=maximum,
+                pool_maxsize=maximum,
+                max_retries=0,
+                pool_block=False,
+            )
+            self._session.mount("http://", adapter)
+            self._session.mount("https://", adapter)
 
     @property
     def configured(self) -> bool:
@@ -35,8 +47,7 @@ class RerankClient:
         if not self.configured or not documents:
             return list(range(len(documents)))
         try:
-            scored = (self._rerank_batch(query, documents) if len(documents) <= self.max_docs
-                      else self._rerank_split(query, documents))
+            scored = self._rerank_batch(query, documents)
             order, seen = [], set()
             for r in sorted(scored, key=lambda r: r["relevance_score"], reverse=True):
                 i = r["index"]
@@ -56,7 +67,8 @@ class RerankClient:
         if self.api_style in self._OPENAI_STYLES:
             # OpenAI 兼容(vLLM/Cohere 等):POST {base}/rerank,扁平 body,结果在顶层
             # results[].{index, relevance_score|score}。/v1 与否由 base_url 决定。
-            resp = requests.post(
+            post = self._session.post if self._session is not None else requests.post
+            resp = post(
                 f"{self.base_url}/rerank", headers=headers,
                 json={"model": self.model, "query": query, "documents": documents},
                 timeout=timeout)
@@ -67,7 +79,8 @@ class RerankClient:
         # DashScope text-rerank(原生,默认):POST {base}/services/rerank/text-rerank/text-rerank,
         # body {model, input:{query,documents}, parameters};结果在 output.results[].{index,relevance_score}。
         # 注:DashScope 无 OpenAI-compatible /reranks 端点(compatible-mode 下 404),故走原生服务路径。
-        resp = requests.post(
+        post = self._session.post if self._session is not None else requests.post
+        resp = post(
             f"{self.base_url}/services/rerank/text-rerank/text-rerank", headers=headers,
             json={"model": self.model,
                   "input": {"query": query, "documents": documents},
@@ -76,15 +89,6 @@ class RerankClient:
         resp.raise_for_status()
         return resp.json()["output"]["results"]
 
-    def _rerank_split(self, query: str, documents: List[str]) -> List[dict]:
-        batches = [(i, documents[i:i + self.max_docs]) for i in range(0, len(documents), self.max_docs)]
-        workers = max(1, min(getattr(self.settings, "embed_concurrency", 8), len(batches)))
-        out: List[dict] = []
-        def one(item):
-            base, docs = item
-            return [{"index": base + r["index"], "relevance_score": r["relevance_score"]}
-                    for r in self._rerank_batch(query, docs)]
-        with _cf.ThreadPoolExecutor(max_workers=workers) as ex:
-            for part in ex.map(one, batches):
-                out.extend(part)
-        return out
+    def close(self) -> None:
+        if self._session is not None:
+            self._session.close()

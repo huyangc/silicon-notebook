@@ -96,6 +96,7 @@ class OpenAICompatibleClient:
     def __init__(self, settings: Settings, *, base_url: Optional[str] = None,
                  api_key: Optional[str] = None, model: Optional[str] = None,
                  max_retries: Optional[int] = None,
+                 max_connections: Optional[int] = None,
                  cache: Optional[CacheBackend] = None):
         self.settings = settings
         # 默认取全局 openai_compat_*；显式传入则覆盖（推理专用 client 走此路）。
@@ -104,6 +105,12 @@ class OpenAICompatibleClient:
         self.model = model if model is not None else settings.openai_compat_model
         self.max_retries = (max_retries if max_retries is not None
                             else settings.openai_compat_max_retries)
+        self.max_connections = max(
+            1,
+            int(max_connections)
+            if max_connections is not None
+            else int(settings.kg_extract_workers + settings.kg_ask_reserve),
+        )
         self._client: Optional[OpenAI] = None
         self.interaction_logger = LLMInteractionLogger(settings)
         self._cache = None
@@ -132,16 +139,12 @@ class OpenAICompatibleClient:
         if not (self.base_url and self.api_key):
             raise RuntimeError("OpenAI-compatible API settings are not configured")
         if self._client is None:
-            # Connection pool sized to the global extraction cap PLUS a reserve
-            # for interactive ask, so ask never waits behind extraction for a
-            # free connection. (Default httpx max_connections is only 1000.)
             timeout = self.settings.openai_compat_timeout_seconds
-            max_conn = self.settings.kg_extract_workers + self.settings.kg_ask_reserve
             http_client = httpx.Client(
                 timeout=timeout,
                 limits=httpx.Limits(
-                    max_connections=max_conn,
-                    max_keepalive_connections=self.settings.kg_ask_reserve,
+                    max_connections=self.max_connections,
+                    max_keepalive_connections=self.max_connections,
                 ),
             )
             self._client = OpenAI(
@@ -324,9 +327,9 @@ class OpenAICompatibleClient:
                     backoff = min(2 ** attempt, 30)
                     sleep_or_cancel(backoff + random.uniform(0, backoff), cancel_event)
             if streamed_content is not None:
-                content = strip_json_fences(streamed_content) or "{}"
+                content = strip_json_fences(streamed_content)
             else:
-                content = strip_json_fences(response.choices[0].message.content or "") or "{}"
+                content = strip_json_fences(response.choices[0].message.content or "")
             # Best-effort write; never cache the empty "{}" fallback so a transient
             # empty/garbage response isn't frozen in for this prompt.
             if cache and ckey and content != "{}":
@@ -353,3 +356,11 @@ class OpenAICompatibleClient:
             record["error"] = f"{type(exc).__name__}: {exc}"
             logger.log(record)
             raise
+
+    def close(self) -> None:
+        client = self._client
+        self._client = None
+        if client is not None:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()

@@ -70,6 +70,35 @@ def _make(monkeypatch, create):
     return c
 
 
+def test_client_connection_pool_matches_explicit_service_capacity(monkeypatch):
+    captured = {}
+
+    class _HttpClient:
+        def __init__(self, *, timeout, limits):
+            captured.update(timeout=timeout, limits=limits)
+
+    monkeypatch.setattr(llm_mod.httpx, "Client", _HttpClient)
+    monkeypatch.setattr(llm_mod, "OpenAI", lambda **kwargs: captured.update(openai=kwargs) or object())
+    settings = Settings(
+        _env_file=None,
+        openai_compat_base_url="https://safe.example/v1",
+        openai_compat_api_key="key",
+        openai_compat_model="model",
+    )
+    client = OpenAICompatibleClient(settings, max_connections=7)
+
+    client.client()
+
+    assert captured["limits"].max_connections == 7
+    assert captured["limits"].max_keepalive_connections == 7
+
+
+def test_raw_client_preserves_empty_success_for_scheduled_classification(monkeypatch):
+    create = _FakeCreate([_Resp("")])
+    client = _make(monkeypatch, create)
+    assert client.chat_json([{"role": "user", "content": "hi"}], "{}") == ""
+
+
 def test_kg_llm_limits_have_bounded_defaults(monkeypatch):
     monkeypatch.delenv("KG_LLM_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("KG_LLM_MAX_RETRIES", raising=False)

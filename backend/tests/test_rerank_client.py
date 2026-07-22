@@ -106,3 +106,9 @@ def test_api_style_param_overrides_settings(monkeypatch):
     s = _S(); s.rerank_api_style = "dashscope"          # settings says dashscope
     RerankClient(s, api_style="openai").rerank("q", ["a"])  # param overrides → openai
     assert captured["url"] == "http://fake/v1/rerank"
+
+
+def test_connection_pool_matches_service_capacity():
+    client = RerankClient(_S(), max_connections=6)
+    assert client._session.adapters["https://"]._pool_maxsize == 6
+    assert client._session.adapters["http://"]._pool_maxsize == 6

@@ -16,6 +16,7 @@ from app.api.deps import (
     get_current_user,
     mcp_memory_repository,
     repository,
+    shutdown_repository_if_initialized,
 )
 from app.api.knowhow_agent_routes import agent_router as knowhow_agent_router
 from app.api.mcp_server import create_memory_mcp, validate_mcp_deployment
@@ -23,6 +24,7 @@ from app.api.routes import router
 from app.core import readiness
 from app.core.config import env_file_diagnosis, get_settings
 from app.core.event_logging import EventLogger, new_id
+from app.services.model_provider import validate_process_local_scheduler_deployment
 from app.services.pending_bus import pending_bus
 
 logger = logging.getLogger("silicon_notebook.startup")
@@ -45,10 +47,13 @@ async def _lifespan(app: FastAPI):
     # Tests mark readiness ready up-front (conftest) and drive the app without a
     # real warm-up; skip spawning the thread there so it can't touch a torn-down
     # tmp DB. In production readiness starts not-ready, so the thread runs.
-    if not readiness.is_ready():
-        readiness.set_phase("starting", "后端启动中")
-        threading.Thread(target=run_startup, name="startup-warmup", daemon=True).start()
-    yield
+    try:
+        if not readiness.is_ready():
+            readiness.set_phase("starting", "后端启动中")
+            threading.Thread(target=run_startup, name="startup-warmup", daemon=True).start()
+        yield
+    finally:
+        shutdown_repository_if_initialized()
 
 
 def _env_file_preflight() -> None:
@@ -74,6 +79,7 @@ def _env_file_preflight() -> None:
 
 
 def create_app() -> FastAPI:
+    validate_process_local_scheduler_deployment()
     _env_file_preflight()
     settings = get_settings()
 

@@ -106,7 +106,7 @@ def ask_state_repository() -> AskStateStorePort:
 
 
 def memory_preview_client():
-    return repository().llm_client  # type: ignore[attr-defined]
+    return repository()._runtime.models.chat("memory_preview")  # type: ignore[attr-defined]
 
 
 def mcp_memory_repository() -> McpMemoryRepository:
@@ -306,3 +306,9 @@ from app.services.content_overview import ContentOverviewService  # noqa: E402
 def content_overview_service() -> ContentOverviewService:
     runtime = repository()._runtime  # type: ignore[attr-defined]
     return ContentOverviewService(runtime.memory_store, runtime.knowhow_store)
+
+
+def shutdown_repository_if_initialized() -> None:
+    """Close the cached runtime without constructing it during shutdown."""
+    if repository.cache_info().currsize:
+        repository().close()  # type: ignore[attr-defined]

@@ -70,3 +70,28 @@ def test_dashscope_chunks_at_most_10(monkeypatch):
     out = e.embed_texts([f"t{i}" for i in range(25)])
     assert len(out) == 25                # all embedded
     assert sizes and max(sizes) <= 10    # every request within dashscope's cap
+
+
+def test_dashscope_connection_pool_matches_service_capacity(monkeypatch):
+    import app.services.embedding_dashscope as mod
+
+    captured = {}
+
+    class _HttpClient:
+        def __init__(self, *, timeout, limits):
+            captured["limits"] = limits
+
+    monkeypatch.setattr(mod.httpx, "Client", _HttpClient)
+    monkeypatch.setattr(mod, "OpenAI", lambda **kwargs: captured.update(openai=kwargs) or object())
+    settings = Settings(
+        _env_file=None,
+        embed_base_url="https://safe.example/v1",
+        embed_api_key="key",
+        embed_model="model",
+    )
+    embedder = mod.DashscopeEmbedder(settings, max_connections=5)
+
+    embedder._ensure()
+
+    assert captured["limits"].max_connections == 5
+    assert captured["limits"].max_keepalive_connections == 5

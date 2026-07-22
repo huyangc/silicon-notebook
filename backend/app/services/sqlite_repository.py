@@ -276,7 +276,7 @@ class ChunkRetrievalPlan:
 
 
 class SQLiteRepository:
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, *, model_provider: Any | None = None):
         self.settings = settings
         self.root_dir = Path(__file__).resolve().parents[3]
         repository_ref = weakref.ref(self)
@@ -292,6 +292,7 @@ class SQLiteRepository:
                     repository_ref
                 )._IN_CHUNK,
             ),
+            model_provider=model_provider,
         )
         # Task 26: the resolved storage root has ONE owner — the runtime's
         # SourceFileStore.  The facade attribute is the SAME Path object (the
@@ -327,8 +328,7 @@ class SQLiteRepository:
                 notebook_id
             ),
         )
-        from app.services.embedding import make_embedder
-        self.embedder = make_embedder(self.settings)
+        self.embedder = self._runtime.models.embedding("retrieval_query_embedding")
         self._runtime.wire_memory(embedder=self.embedder)
         self.mineru_client = MinerUClient(settings)
         self.mineru_cloud_client = MinerUCloudClient(settings)
@@ -706,82 +706,25 @@ class SQLiteRepository:
     def pending_actions_projection_rows(self, user_id: str) -> dict:
         return self._runtime.queries.pending_actions_projection_rows(user_id)
 
-    def _system_llm_for(self, role: str):
-        return self._runtime.models._system_llm_for(role)
-
-    def _user_llm_cached(self, cfg: ResolvedModelConfig):
-        return self._runtime.models._user_llm_cached(cfg)
-
-    def _llm_for_role(self, role: str):
-        return self._runtime.models._llm_for_role(role)
-
     @property
     def llm_client(self):
-        return self._runtime.models.llm_client
-
-    @llm_client.setter
-    def llm_client(self, client):
-        self._runtime.models.llm_client = client
+        return self._runtime.models.chat("ask_answer")
 
     @property
     def reasoning_llm_client(self):
-        return self._runtime.models.reasoning_llm_client
+        return self._runtime.models.chat("reasoning_agent")
 
     @property
     def rewrite_llm_client(self):
-        return self._runtime.models.rewrite_llm_client
+        return self._runtime.models.chat("query_rewrite")
 
     @property
     def kg_llm_client(self):
-        return self._runtime.models.kg_llm_client
+        return self._runtime.models.chat("kg_extract")
 
     @property
     def rerank_client(self):
-        return self._runtime.models.rerank_client
-
-    @rerank_client.setter
-    def rerank_client(self, client):
-        self._runtime.models.rerank_client = client
-
-    @property
-    def _system_llm_client(self):
-        return self._runtime.models._system_llm_client
-
-    @_system_llm_client.setter
-    def _system_llm_client(self, client):
-        self._runtime.models._system_llm_client = client
-
-    @property
-    def _reasoning_llm_client(self):
-        return self._runtime.models._reasoning_llm_client
-
-    @_reasoning_llm_client.setter
-    def _reasoning_llm_client(self, client):
-        self._runtime.models._reasoning_llm_client = client
-
-    @property
-    def _rewrite_llm_client(self):
-        return self._runtime.models._rewrite_llm_client
-
-    @_rewrite_llm_client.setter
-    def _rewrite_llm_client(self, client):
-        self._runtime.models._rewrite_llm_client = client
-
-    @property
-    def _kg_llm_client(self):
-        return self._runtime.models._kg_llm_client
-
-    @_kg_llm_client.setter
-    def _kg_llm_client(self, client):
-        self._runtime.models._kg_llm_client = client
-
-    @property
-    def _system_rerank_client(self):
-        return self._runtime.models._system_rerank_client
-
-    @_system_rerank_client.setter
-    def _system_rerank_client(self, client):
-        self._runtime.models._system_rerank_client = client
+        return self._runtime.models.rerank("retrieval_rerank")
 
     @property
     def _user_model_cfg_cache(self):
@@ -790,22 +733,6 @@ class SQLiteRepository:
     @_user_model_cfg_cache.setter
     def _user_model_cfg_cache(self, cache):
         return self._runtime.set_model_config_cache(cache)
-
-    @property
-    def _user_llm_clients(self):
-        return self._runtime.models._user_llm_clients
-
-    @_user_llm_clients.setter
-    def _user_llm_clients(self, clients):
-        self._runtime.models._user_llm_clients = clients
-
-    @property
-    def _user_rerank_clients(self):
-        return self._runtime.models._user_rerank_clients
-
-    @_user_rerank_clients.setter
-    def _user_rerank_clients(self, clients):
-        self._runtime.models._user_rerank_clients = clients
 
     # Task 17: the retrieval caches live on the runtime's RetrievalSnapshotCache
     # (one owner). These handles are write-through descriptors over the SAME
@@ -970,6 +897,10 @@ class SQLiteRepository:
         """关闭并清除当前线程的复用 DB 连接(短命线程/大扫描/临时表清理)。
         委托 runtime-owned SqliteDatabase。见 [[sqlite 连接复用]] INV-6/7。"""
         self._runtime.database.close_local()
+
+    def close(self) -> None:
+        """Drain process-owned model work and release this runtime once."""
+        self._runtime.close()
 
     @contextmanager
     def _write(self):

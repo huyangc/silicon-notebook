@@ -6,7 +6,6 @@ import threading
 import weakref
 from typing import Any, Callable
 
-from app.core import ask_context
 from app.core.config import Settings
 from app.core.event_logging import EventLogger, llm_log_dir_aligned
 from app.repositories.filesystem.scale_artifact_store import ScaleArtifactStore
@@ -35,7 +34,10 @@ from app.services.knowledge_lifecycle import KnowledgeLifecycleService
 from app.services.knowledge_query import KnowledgeQueryService
 from app.services.evidence_context import EvidenceContextService
 from app.services.graph_retrieval import GraphRetrievalService
-from app.services.model_provider import RuntimeModelProvider
+from app.services.model_provider import (
+    RuntimeModelProvider,
+    validate_process_local_scheduler_deployment,
+)
 from app.services.memory_service import MemoryService
 from app.services.memory_retrieval import MemoryRetriever
 from app.services.kg import scheduler as kg_scheduler
@@ -76,10 +78,28 @@ class RepositoryCompatibilitySeams:
 
 
 class RepositoryRuntime:
-    def __init__(self, settings: Settings, root_dir: Path, seams: RepositoryCompatibilitySeams) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        root_dir: Path,
+        seams: RepositoryCompatibilitySeams,
+        *,
+        model_provider: Any | None = None,
+    ) -> None:
+        validate_process_local_scheduler_deployment()
         self.settings = settings
         self.root_dir = root_dir
         self.seams = seams
+        self._closed = False
+        self.event_log = EventLogger(settings, channel="events", per_user=True)
+        if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
+            self.event_log.logger.warning(
+                "LLM_LOG_PATH 的目录(%s)与 EVENT_LOG_DIR(%s)不一致，"
+                "日志查看器将读不到 per-user 的 llm 日志；请对齐两者或都设为同一目录。",
+                settings.llm_log_path,
+                settings.event_log_dir,
+            )
+        self.models = model_provider or RuntimeModelProvider(settings, self.event_log)
         self.database = SqliteDatabase(settings, root_dir)
         self.model_config_cache: dict[str, dict[str, Any]] = {}
         self.identity = IdentityStore(
@@ -229,20 +249,6 @@ class RepositoryRuntime:
         self.sharing_store: "SharingStore | None" = None
         self.notebook_copies: "NotebookCopyService | None" = None
         self.sharing: "NotebookSharingService | None" = None
-        self.event_log = EventLogger(settings, channel="events", per_user=True)
-        if not llm_log_dir_aligned(settings.llm_log_path, settings.event_log_dir):
-            self.event_log.logger.warning(
-                "LLM_LOG_PATH 的目录(%s)与 EVENT_LOG_DIR(%s)不一致，"
-                "日志查看器将读不到 per-user 的 llm 日志；请对齐两者或都设为同一目录。",
-                settings.llm_log_path,
-                settings.event_log_dir,
-            )
-        self.models = RuntimeModelProvider(
-            self.identity,
-            settings,
-            self.event_log,
-            ask_context,
-        )
         self.evidence_context: "EvidenceContextService | None" = None
         self.candidate_retrieval: "CandidateRetrievalService | None" = None
         self.graph_retrieval: "GraphRetrievalService | None" = None
@@ -366,7 +372,13 @@ class RepositoryRuntime:
     def set_model_config_cache(self, value: dict[str, dict[str, Any]]) -> None:
         self.model_config_cache = value
         self.identity.model_config_cache = value
-        self.models.model_config_cache = value
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self.models.close()
+        self.database.close_local()
 
     def set_unified_cache(self, value: dict) -> None:
         self.retrieval_snapshots.unified_cache = value
