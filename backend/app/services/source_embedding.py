@@ -209,22 +209,25 @@ class SourceEmbeddingService:
                 for (eid, sid, _), vector in zip(batch, vectors)
             ]
 
-        by_source: dict[str, list] = {}
+        # 逐批落库,不累积:向量是这里最占内存的东西(几十万 element × 1024 维
+        # float ≈ GB 级),攒到全部算完再写会让这条「修复」命令自己 OOM。每批只在
+        # 内存里活到它写进库为止。同批内仍按 source_id 分组——replace_element_vectors
+        # 的签名是 per-source。
+        now = self.now()
+        written = 0
         for part in self._map_embedding_batches(
             _embed_only, batches, task_prefix="emb-el"
         ):
+            by_source: dict[str, list] = {}
             for element_id, source_id, vector in part:
                 by_source.setdefault(source_id, []).append((element_id, vector))
-        if not by_source:
+            for source_id, rows in by_source.items():
+                self.vectors.replace_element_vectors(
+                    source_id, notebook_id, rows, created_at=now
+                )
+                written += len(rows)
+        if not written:
             return 0
-
-        now = self.now()
-        written = 0
-        for source_id, rows in by_source.items():
-            self.vectors.replace_element_vectors(
-                source_id, notebook_id, rows, created_at=now
-            )
-            written += len(rows)
         self.event_log.logger.info(
             "embedded %s/%s missing elements for notebook %s",
             written, len(pending), notebook_id,
