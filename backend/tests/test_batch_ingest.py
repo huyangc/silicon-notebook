@@ -276,6 +276,38 @@ def test_run_ingest_reparses_source_with_elements_but_no_chunks(repo, tmp_path, 
     assert n_chunks > 0, "重解析没有补出 chunk,这个源仍然不可检索"
 
 
+def test_run_ingest_does_not_touch_sources_another_process_is_parsing(repo, tmp_path):
+    """停在 'queued'/'parsing'/'extracting' 的源要么正被服务端处理、要么会被下一次
+    服务端启动结算——两种情况离线 CLI 都不该抢:process_source 没有 source 级单飞
+    守卫,还会 clear/replace 抽取态,两边同时跑会互相覆盖产物。
+
+    与「崩溃兜底只在服务端跑」是同一条原则:离线 CLI 不是这个库的主人。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-ingest-inflight")
+    now = "2026-01-01T00:00:00"
+    paths = []
+    for i, status in enumerate(("queued", "parsing", "extracting")):
+        p = tmp_path / f"busy{i}.md"
+        p.write_text(f"# Busy {i}\n\n" + "w" * 200, encoding="utf-8")
+        paths.append(p)
+        with repo._write() as db:
+            db.execute(
+                "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+                "file_size,file_hash,summary,doc_type,status,parse_status,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"src-busy{i}", nb_id, f"Busy {i}", "document", p.name, str(p), 0,
+                 bi.sha256_bytes(p.read_bytes()), "", "", status, status, now, now))
+
+    counts = bi.run_ingest(repo, nb_id, paths, workers=1, conc=1)
+
+    assert counts["in_flight"] == 3, "抢了别的进程正在处理的源"
+    assert counts["reparsed"] == 0 and counts["uploaded"] == 0
+    with repo._connect() as db:  # 状态原样不动,没被踩
+        left = {r["id"]: r["parse_status"] for r in db.execute(
+            "SELECT id, parse_status FROM sources WHERE notebook_id=?", (nb_id,))}
+    assert left == {"src-busy0": "queued", "src-busy1": "parsing",
+                    "src-busy2": "extracting"}
+
+
 def test_run_ingest_reports_failed_when_reparse_does_not_recover(repo, tmp_path, monkeypatch):
     """process_source 对解析异常是自己吞掉的:内部 except 把源置 'failed' 后照常
     return SourceSummary,**不** re-raise。所以 _one 外面的 try/except 对普通解析失败
@@ -988,6 +1020,59 @@ def test_backfill_element_embeddings_groups_rows_by_source(repo, tmp_path):
     assert mismatched == 0
     assert set(per_source) == set(sids)                       # 每个源都写到了
     assert repo.maintenance.count_missing_element_vectors(nb_id) == 0
+
+
+def test_backfill_element_embeddings_persists_before_all_embedding_finishes(repo, tmp_path, monkeypatch):
+    """向量必须**分页**推进:每页算完立刻落库,而不是全算完再统一写。
+
+    直接测内存不现实,但分页有个等价的可观测性质:落库会与嵌入**交错**发生。
+    不分页时必然是「所有 embed → 才开始 write」。这条断言正是钉住那个差别——
+    注意光把落库循环写成「逐批」是**无效**的:_map_embedding_batches 返回
+    list[list](内部等全部 future 完成再收集),遍历它时向量早已全在内存里;
+    必须在喂进去之前分页。"""
+    d = _make_md_dir(tmp_path, n=3)
+    nb_id = bi.ensure_notebook(repo, None, "nb-stream")
+    bi.run_ingest(repo, nb_id, bi.iter_files(d), workers=1, conc=1)
+    missing = repo.maintenance.count_missing_element_vectors(nb_id)
+    assert missing >= 3, "样本太小,分不出多页 → 本用例无检出力"
+
+    svc = repo._runtime.source_embedding
+    # 页大小 = embed_concurrency * embed_batch_size,都压到 1 → 每行一页。
+    monkeypatch.setattr(repo.settings, "embed_batch_size", 1)
+    monkeypatch.setattr(repo.settings, "embed_concurrency", 1)
+
+    events: list[str] = []
+    real_embed = svc.embedder
+
+    def _recording_embedder():
+        inner = real_embed()
+
+        class _Rec:
+            def embed_texts(self, texts):
+                events.append("embed")
+                return inner.embed_texts(texts)
+
+            def __getattr__(self, name):
+                return getattr(inner, name)
+
+        return _Rec()
+
+    real_write = svc.vectors.replace_element_vectors
+
+    def _recording_write(*args, **kwargs):
+        events.append("write")
+        return real_write(*args, **kwargs)
+
+    monkeypatch.setattr(svc, "embedder", _recording_embedder)
+    monkeypatch.setattr(svc.vectors, "replace_element_vectors", _recording_write)
+
+    assert bi.backfill_element_embeddings(repo, nb_id, conc=1) == missing
+
+    assert "write" in events and "embed" in events
+    last_embed = len(events) - 1 - events[::-1].index("embed")
+    first_write = events.index("write")
+    assert first_write < last_embed, (
+        "所有 embed 都跑完才开始 write —— 向量没有分页落库,大库上会 OOM", events)
 
 
 def test_backfill_element_embeddings_truncates_by_settings_not_hardcoded_2000(repo, tmp_path):

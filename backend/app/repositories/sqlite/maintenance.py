@@ -314,6 +314,29 @@ class SQLiteMaintenanceAdapter:
                 ).fetchall()
             }
 
+    def sources_in_flight_parse(self, notebook_id: str) -> set:
+        """该 notebook 下 parse 管线**可能正在进行**的 source_id 集合。
+
+        服务端启动时会把上次遗留的进行中行结算掉(_recover_interrupted_jobs),所以
+        在一个服务端会话期间,停在 'queued'/'parsing'/'extracting' 的源要么真的正被
+        处理,要么马上会被下一次启动结算——无论哪种,**离线 CLI 都不该碰它**:
+        process_source 没有 source 级单飞守卫,还会 clear/replace 抽取态,两边同时跑
+        会互相覆盖产物。这与「离线 CLI 不是这个库的主人」是同一条原则(见
+        startup_warmup 里崩溃兜底的归属说明)。
+
+        代价:纯离线工作流(从不起服务端)里被 Ctrl-C 打断的源会停在这些状态、
+        run_ingest 不再自动重解析它。那条路留给显式的 reparse 子命令,或下一次
+        服务端启动把它结算成 failed 之后再跑 ingest。"""
+        with self._runtime.database.connect() as db:
+            return {
+                r["id"]
+                for r in db.execute(
+                    "SELECT id FROM sources WHERE notebook_id = ? "
+                    "AND parse_status IN ('queued', 'parsing', 'extracting')",
+                    (notebook_id,),
+                ).fetchall()
+            }
+
     def count_sources_missing_kg(self, notebook_id: str) -> int:
         with self._runtime.database.connect() as db:
             return db.execute(

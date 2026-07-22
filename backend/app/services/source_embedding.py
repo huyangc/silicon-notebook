@@ -191,7 +191,6 @@ class SourceEmbeddingService:
             return 0
 
         size = max(1, self.settings.embed_batch_size)
-        batches = [pending[i:i + size] for i in range(0, len(pending), size)]
         embedder = self.embedder()
         self._warm_up(embedder)
 
@@ -209,23 +208,31 @@ class SourceEmbeddingService:
                 for (eid, sid, _), vector in zip(batch, vectors)
             ]
 
-        # 逐批落库,不累积:向量是这里最占内存的东西(几十万 element × 1024 维
-        # float ≈ GB 级),攒到全部算完再写会让这条「修复」命令自己 OOM。每批只在
-        # 内存里活到它写进库为止。同批内仍按 source_id 分组——replace_element_vectors
-        # 的签名是 per-source。
+        # 按「页」推进,每页算完立刻落库。向量是这里最占内存的东西(几十万 element
+        # × 1024 维 float ≈ GB 级),这条命令的用途恰恰是修大库,自己 OOM 说不过去。
+        #
+        # ⚠ 只把 for 循环写成「逐批处理」是**无效**的:_map_embedding_batches 返回
+        # list[list](内部 [future.result() for ...] 会等全部 future 完成再收集),
+        # 遍历它时所有向量早已同时在内存里。必须在**喂进去之前**就分页——一页的
+        # 并发度仍是 embed_concurrency,只是活着的向量被限制在一页之内。
+        page_size = max(1, self.settings.embed_concurrency) * size
         now = self.now()
         written = 0
-        for part in self._map_embedding_batches(
-            _embed_only, batches, task_prefix="emb-el"
-        ):
-            by_source: dict[str, list] = {}
-            for element_id, source_id, vector in part:
-                by_source.setdefault(source_id, []).append((element_id, vector))
-            for source_id, rows in by_source.items():
-                self.vectors.replace_element_vectors(
-                    source_id, notebook_id, rows, created_at=now
-                )
-                written += len(rows)
+        for start in range(0, len(pending), page_size):
+            page = pending[start:start + page_size]
+            batches = [page[i:i + size] for i in range(0, len(page), size)]
+            for part in self._map_embedding_batches(
+                _embed_only, batches, task_prefix="emb-el"
+            ):
+                by_source: dict[str, list] = {}
+                for element_id, source_id, vector in part:
+                    by_source.setdefault(source_id, []).append((element_id, vector))
+                # 同页内仍按 source_id 分组——replace_element_vectors 是 per-source 签名。
+                for source_id, rows in by_source.items():
+                    self.vectors.replace_element_vectors(
+                        source_id, notebook_id, rows, created_at=now
+                    )
+                    written += len(rows)
         if not written:
             return 0
         self.event_log.logger.info(
