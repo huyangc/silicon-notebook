@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-from app.core.cache import embed_key
+from app.core.cache import embed_key, embedding_batch_dim, is_cacheable_embedding
 
 
 class CachedEmbedder:
@@ -84,8 +84,16 @@ class CachedEmbedder:
                     f"embedding backend returned {len(vectors)} vectors "
                     f"for {len(missing)} texts"
                 )
+            # 准入规则与 LLM 侧对称，见 policy.is_cacheable_embedding：条数对得上
+            # 但内容退化（`[[]]`）的响应能过上面那道长度门，写进去就是静默零召回，
+            # 且服务恢复后也不会再打后端。本批维度先算一次（O(批大小)）。
+            batch_dim = embedding_batch_dim(vectors)
             for key, vec in zip(missing_keys, vectors):
+                # 本次调用照常返回拿到的向量（缓存准入不改变主流程结果，退化响应的
+                # 处置由上游各调用点的既有降级逻辑负责）——只是不落缓存。
                 cached[key] = list(vec)
+                if not is_cacheable_embedding(vec, batch_dim):
+                    continue
                 try:
                     self._backend.put(key, _encode(vec), tag=self._model)
                 except Exception:  # 写缓存失败同样不影响主流程
