@@ -987,6 +987,7 @@ git commit -m "feat(cache): 唯一构造点接入 LLM 侧，缓存默认开并�
 这条约束是"将来能低成本替换缓存组件"的保障——消费者只依赖 Protocol 与工厂，
 换实现时只改 app/core/cache/ 内部。
 """
+import ast
 from pathlib import Path
 
 import pytest
@@ -1003,7 +1004,8 @@ _EXEMPT = {
     _BACKEND / "tests" / "test_cache_cohesion_guard.py",
 }
 
-_FORBIDDEN = ("app.core.cache.sqlite_backend", "SqliteCacheBackend")
+_FORBIDDEN_MODULE = "app.core.cache.sqlite_backend"
+_FORBIDDEN_NAME = "SqliteCacheBackend"
 
 
 def _is_exempt(path: Path) -> bool:
@@ -1017,13 +1019,37 @@ def _python_files():
         yield path
 
 
+def _concrete_backend_imports(path: Path) -> list[str]:
+    """只看真正的 import 语句。
+
+    **不能用文本包含**：`llm.py` 的注释里合法地提到了 `SqliteCacheBackend`
+    （解释为何用 `cache is not None` 而非真值判断），`repository_callers.py`
+    的 reason 映射里有该文件的路径字符串——两者都不是导入，纯文本扫描会把它们
+    误报成违规，逼着后人删掉有价值的注释来讨好守卫。
+    """
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except SyntaxError:
+        return []
+    hits: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                if module == _FORBIDDEN_MODULE or alias.name == _FORBIDDEN_NAME:
+                    hits.append(f"from {module} import {alias.name}")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == _FORBIDDEN_MODULE:
+                    hits.append(f"import {alias.name}")
+    return hits
+
+
 def test_concrete_backend_is_not_imported_outside_the_cache_module():
     offenders = []
     for path in _python_files():
-        text = path.read_text(encoding="utf-8", errors="replace")
-        for token in _FORBIDDEN:
-            if token in text:
-                offenders.append(f"{path.relative_to(_REPO_ROOT)}: {token}")
+        for hit in _concrete_backend_imports(path):
+            offenders.append(f"{path.relative_to(_REPO_ROOT)}: {hit}")
     assert not offenders, (
         "具体缓存实现泄漏到模块之外，替换组件将不再是局部改动：\n  "
         + "\n  ".join(offenders)
