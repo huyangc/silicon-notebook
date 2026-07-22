@@ -210,6 +210,66 @@ def test_run_ingest_reparses_existing_source_missing_elements(repo, tmp_path, mo
     assert nsrc == 1               # 复用原源,不新建
 
 
+def test_run_ingest_skips_source_that_parsed_to_zero_elements(repo, tmp_path):
+    """一次**成功**的 parse 可以产出零个 element(扫描版/纯图 PDF 没有文本层,
+    process_source 照常走完管线置 'extracted' 并把提示写进 error_message)。
+
+    这种源不能因为「没有 elements」就每次重跑都被重新解析——那样永远不收敛,与
+    本函数要修的 bug 同类只是反了个向。判据里的 sources_with_completed_parse
+    就是为这一格存在的。'metadata-only'(只导入元数据、永远没有 element)同理。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-ingest-empty-ok")
+    p = tmp_path / "scanned.pdf"
+    p.write_bytes(b"%PDF-1.4 fake scanned page with no text layer")
+    digest = bi.sha256_bytes(p.read_bytes())
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:   # 预置:parse 已跑完(extracted),但零 element
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,status,parse_status,error_message,"
+            "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-scan", nb_id, "Scanned", "pdf", p.name, str(p), 0, digest,
+             "", "", "extracted", "extracted",
+             "No extractable text — likely a scanned/image PDF.", now, now))
+
+    counts = bi.run_ingest(repo, nb_id, [p], workers=1, conc=1)
+
+    assert counts["skipped"] == 1
+    assert counts["reparsed"] == 0, "零 element 的成功 parse 被当成中断重跑了 → 永不收敛"
+    assert counts["uploaded"] == 0 and counts["failed"] == 0
+
+
+def test_run_ingest_reports_failed_when_reparse_does_not_recover(repo, tmp_path, monkeypatch):
+    """process_source 对解析异常是自己吞掉的:内部 except 把源置 'failed' 后照常
+    return SourceSummary,**不** re-raise。所以 _one 外面的 try/except 对普通解析失败
+    根本不可达——必须查返回值的真实状态,否则一次失败的重解析会被计成 reparsed,
+    汇总数字说谎(「跑完了 N 个」而那 N 个其实还是空源)。"""
+    nb_id = bi.ensure_notebook(repo, None, "nb-ingest-reparse-fail")
+    p = tmp_path / "broken.md"
+    p.write_text("# Broken\n\n" + "z" * 200, encoding="utf-8")
+    digest = bi.sha256_bytes(p.read_bytes())
+    now = "2026-01-01T00:00:00"
+    with repo._write() as db:
+        db.execute(
+            "INSERT INTO sources (id,notebook_id,title,source_type,file_name,file_path,"
+            "file_size,file_hash,summary,doc_type,parse_status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("src-broken", nb_id, "Broken", "document", p.name, str(p), 0, digest,
+             "", "", "parsed", now, now))
+
+    # 复刻真实形态:解析抛错 → process_source 内部吞掉、置 failed、正常返回。
+    ingestion = repo._runtime.source_ingestion
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("parser exploded")
+
+    monkeypatch.setattr(ingestion, "parse_file", _boom)
+
+    counts = bi.run_ingest(repo, nb_id, [p], workers=1, conc=1)
+
+    assert counts["failed"] == 1, "失败的重解析被计成了 reparsed"
+    assert counts["reparsed"] == 0
+
+
 def test_run_ingest_same_run_duplicate_files_skip_not_reparse(repo, tmp_path):
     """同一次运行里两个内容相同的文件:第一个 uploaded、第二个 skipped。第二个虽然
     hash 命中(第一个刚建的源)却不在进池前的 parsed 快照里,若无本次运行的认领集合
