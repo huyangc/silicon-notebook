@@ -565,7 +565,10 @@ export function KnowhowHistoryDrawer({
     const affected = changes.slice(0, index);
     const folded = foldLocalChanges(affected);
     const rowsTouched = new Set([...folded.rowsAdded, ...folded.rowsRemoved]).size;
-    return summarizeRevertImpact(rowsTouched, folded.cells.length, affected.length);
+    // 第三个参数传原始 affected 数组（不是 affected.length）：summarizeRevertImpact
+    // 需要自己按 kind 从中统计列结构变化/表元变化，foldLocalChanges 的输出
+    // 只覆盖行/格子，见该函数头注释「评审修复」一节。
+    return summarizeRevertImpact(rowsTouched, folded.cells.length, affected);
   }
 
   async function handleRevert(targetSeq: number) {
@@ -798,6 +801,13 @@ export function KnowhowHistoryDrawer({
               ) : (
                 <div className="kh-history-days">
                   {days.map((group) => (
+                    // kh-history-day-group 仅作语义标记（把"这一天的日期
+                    // 标签 + 变更列表"标成一个整体、供 key 挂载），无对应
+                    // CSS 规则、也不需要：父级 .kh-history-days 已是
+                    // flex-direction:column + gap:18px，这个 div 作为默认
+                    // block 的 flex item 天然一个个纵向堆叠、组间距由父级
+                    // gap 给出，组内"日期在上、列表在下"由普通文档流决定，
+                    // 不依赖这个类名本身有任何样式。
                     <div key={group.day} className="kh-history-day-group">
                       <div className="kh-history-day">{group.day}</div>
                       <ul className="kh-history-list">

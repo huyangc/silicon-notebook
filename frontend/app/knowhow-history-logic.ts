@@ -306,21 +306,43 @@ export function describeColumnChange(
 // --- 回退影响预览（确认框「将影响 N 行、M 个格子」，Task 15）-------------------
 //
 // 抽屉在用户点「回到这里」时，用本地已加载的时间线对目标 seq 之后、直到当前
-// head 的这段区间跑一次 foldLocalChanges，拿到粗略的行/格子净变化数目喂给本
-// 函数拼成一句确认文案——这不是权威两版对比（同 knowhow-model.ts
-// fetchKnowhowHistoryDiff 头注释的同一条警告：本地折叠不含列结构/表元变化），
-// 只是确认框里给用户一个大致量级的提示，帮助其判断这次回退动作有多大。
+// head 的这段区间跑一次 foldLocalChanges，拿到粗略的行/格子净变化数目，连同
+// 同一段 changes 原始数组一起喂给本函数拼成一句确认文案——这不是权威两版对比
+// （同 knowhow-model.ts fetchKnowhowHistoryDiff 头注释的同一条警告），只是确认
+// 框里给用户一个大致量级的提示，帮助其判断这次回退动作有多大。
+//
+// ⚠ 评审修复（混合区间漏报列结构变化）：foldLocalChanges 只折叠 cells 与行
+// 增删（其定义如此，不动它），不覆盖列结构变更（column_add/column_delete/
+// column_rename/column_kind/anchor_set）与表元变更（table_meta）。早期实现
+// 只用 foldLocalChanges 的输出算「行数/格子数」喂给本函数，混合区间（比如
+// 区间内同时有一次 column_rename 和一次 cell_update）会整个落到「将影响 N
+// 个格子」分支——列结构变化被完全吞掉，用户在不知情的情况下点确认，回退后
+// 才发现列名也被撤销了。这是破坏性操作的确认框，必须说全。现在第三个参数
+// 直接是原始 changes 数组（不再是单纯的计数），本函数自己按 kind 统计列结构
+// 变化与表元变化这两类，与行/格子一起体现在文案里——任何一类有变化都必须
+// 出现在文案里，不能被其它类目吞掉。
+const COLUMN_STRUCTURE_KINDS: ReadonlySet<string> = new Set([
+  "column_add", "column_delete", "column_rename", "column_kind", "anchor_set",
+]);
+
 export function summarizeRevertImpact(
   rowsTouched: number,
   cellsTouched: number,
-  changeCount: number,
+  changes: KnowhowChange[],
 ): string {
-  if (changeCount === 0) return "不会撤销任何改动";
-  if (rowsTouched === 0 && cellsTouched === 0) {
-    return "将撤销一些表结构或表信息的改动（不涉及行或格子内容）";
-  }
+  if (changes.length === 0) return "不会撤销任何改动";
+  const structureCount = changes.filter((c) => COLUMN_STRUCTURE_KINDS.has(c.kind)).length;
+  const metaCount = changes.filter((c) => c.kind === "table_meta").length;
   const parts: string[] = [];
   if (rowsTouched > 0) parts.push(`${rowsTouched} 行`);
   if (cellsTouched > 0) parts.push(`${cellsTouched} 个格子`);
+  if (structureCount > 0) parts.push(`${structureCount} 处列结构变化`);
+  if (metaCount > 0) parts.push(`${metaCount} 处表信息变更`);
+  // 残余兜底：区间内确实有变更，但既不涉及行/格子，也不是列结构/表元
+  // （如仅代码附件 cell_code_put/cell_code_delete）——理论上少见，但防御性
+  // 地不产出空文案。
+  if (parts.length === 0) {
+    return "将撤销一些改动（不涉及行、格子、列结构或表信息）";
+  }
   return `将影响 ${parts.join("、")}`;
 }
