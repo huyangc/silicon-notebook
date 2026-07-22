@@ -5,6 +5,10 @@ from pathlib import Path
 
 os.environ.setdefault("SILICON_NOTEBOOK_AUTH_OPTIONAL", "true")
 
+# 缓存默认开，但测试进程必须强制关闭：带真 .env 跑全量时，共享的缓存文件会让
+# 断言读到上一次运行的响应，制造大规模假失败/假成功。
+os.environ["LLM_CACHE_ENABLED"] = "false"
+
 # python-igraph imports its drawing adapters lazily on the first graph rebuild,
 # which imports Matplotlib. On macOS, a missing Matplotlib cache invokes the
 # system font enumerator (~8 s). Without a shared prewarm every xdist worker
