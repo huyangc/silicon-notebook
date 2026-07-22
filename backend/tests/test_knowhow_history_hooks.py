@@ -253,3 +253,154 @@ def test_bulk_guarded_records_one_entry_per_table_when_call_spans_tables(store, 
     assert changes2[0]["payload"]["cells"] == [{
         "row_id": row2, "column_id": plain2, "before": None, "after": "表二新值",
     }], "绝不混表：表二的流水只含表二自己的格子"
+
+
+# ---------------------------------------------------------------------------
+# Task 5：行与列的增删改（add/delete row，add/rename/set-kind/delete column，
+# set-anchor）也要各自挂上流水。删除类是核心风险——CASCADE 会带走格子和代码
+# 附件，不在 DELETE 之前存进 payload 就永远回不来。既有的静默 no-op 语义
+# （目标已不存在 / 改成当前值）必须保留，且 no-op 不产生流水噪声。
+# ---------------------------------------------------------------------------
+
+
+def _kinds(hist, table_id):
+    return [c["kind"] for c in hist.list_changes(table_id, limit=100)]
+
+
+def test_delete_row_stores_whole_row_for_reversal(store, hist, table):
+    store.update_knowhow_cell(table["row_a"], table["plain"], "要被删掉的内容")
+    store.upsert_knowhow_cell_code(
+        table["row_a"], table["plain"], "print(1)", "python", "user-1", "hash-x"
+    )
+    store.delete_knowhow_row(table["row_a"])
+
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "row_delete"
+    row = change["payload"]["rows"][0]
+    assert row["row_id"] == table["row_a"]
+    assert row["cells"][table["plain"]] == "要被删掉的内容"
+    assert row["cells"][table["anchor"]] == "A"
+    assert row["code"][0]["code_text"] == "print(1)", (
+        "代码附件随行 CASCADE 消失，不存进 payload 就永远回不来"
+    )
+    assert isinstance(row["position"], int)
+
+
+def test_delete_missing_row_records_nothing(store, hist, table):
+    before = len(hist.list_changes(table["id"], limit=100))
+    store.delete_knowhow_row("khrow-does-not-exist")
+    assert len(hist.list_changes(table["id"], limit=100)) == before
+
+
+def test_delete_column_stores_column_and_all_its_cells(store, hist, table):
+    store.update_knowhow_cell(table["row_a"], table["plain"], "甲")
+    store.update_knowhow_cell(table["row_b"], table["plain"], "乙")
+    store.delete_knowhow_column(table["plain"])
+
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "column_delete"
+    assert change["payload"]["column"]["id"] == table["plain"]
+    assert change["payload"]["column"]["name"] == "做法"
+    assert change["payload"]["column"]["role"] == "attribute"
+    contents = {c["row_id"]: c["content_md"] for c in change["payload"]["cells"]}
+    assert contents == {table["row_a"]: "甲", table["row_b"]: "乙"}
+
+
+def test_add_row_records_its_cells(store, hist, table):
+    row_id = store.add_knowhow_row(table["id"], {table["anchor"]: "新概念"})
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "row_add"
+    assert change["payload"]["rows"][0]["row_id"] == row_id
+    assert change["payload"]["rows"][0]["cells"][table["anchor"]] == "新概念"
+
+
+def test_column_rename_records_before_after(store, hist, table):
+    store.rename_knowhow_column(table["plain"], "新列名")
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "column_rename"
+    assert change["payload"] == {
+        "column_id": table["plain"], "before": "做法", "after": "新列名",
+    }
+
+
+def test_renaming_to_the_same_name_records_nothing(store, hist, table):
+    before = len(hist.list_changes(table["id"], limit=100))
+    store.rename_knowhow_column(table["plain"], "做法")
+    assert len(hist.list_changes(table["id"], limit=100)) == before, (
+        "同名改名是既有的静默成功语义，不该产生噪声流水"
+    )
+
+
+def test_anchor_move_records_both_columns(store, hist, table):
+    store.set_knowhow_anchor_column(table["id"], table["plain"])
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "anchor_set"
+    moves = {c["column_id"]: (c["before"], c["after"]) for c in change["payload"]["columns"]}
+    assert moves[table["anchor"]] == ("anchor", "attribute")
+    assert moves[table["plain"]] == ("attribute", "anchor")
+
+
+def test_anchor_noop_records_nothing(store, hist, table):
+    before = len(hist.list_changes(table["id"], limit=100))
+    store.set_knowhow_anchor_column(table["id"], table["anchor"])
+    assert len(hist.list_changes(table["id"], limit=100)) == before
+
+
+# ---------------------------------------------------------------------------
+# 同一条硬约束（record_change 必须是写事务的最后一步）在 Task 5 的 7 个方法
+# 上各补一条 fingerprint 时序测试，照 test_cell_update_records_the_
+# fingerprint_of_the_state_after_the_write 的写法：断言"记下的 fingerprint
+# == 操作完成后的整表指纹"。挪动 record_change 到 DML 之前应该让这些测试真红
+# （变异验证见 task-5-report.md）。
+# ---------------------------------------------------------------------------
+
+
+def test_row_add_records_the_fingerprint_of_the_state_after_the_write(repo, store, hist, table):
+    store.add_knowhow_row(table["id"], {table["anchor"]: "新概念"})
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "row_add"
+    assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
+
+
+def test_row_delete_records_the_fingerprint_of_the_state_after_the_write(repo, store, hist, table):
+    store.update_knowhow_cell(table["row_a"], table["plain"], "内容")
+    store.delete_knowhow_row(table["row_a"])
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "row_delete"
+    assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
+
+
+def test_column_add_records_the_fingerprint_of_the_state_after_the_write(repo, store, hist, table):
+    store.add_knowhow_column(table["id"], "新列", "entity")
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "column_add"
+    assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
+
+
+def test_column_rename_records_the_fingerprint_of_the_state_after_the_write(repo, store, hist, table):
+    store.rename_knowhow_column(table["plain"], "新列名")
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "column_rename"
+    assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
+
+
+def test_column_kind_records_the_fingerprint_of_the_state_after_the_write(repo, store, hist, table):
+    store.set_knowhow_column_kind(table["plain"], "entity")
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "column_kind"
+    assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
+
+
+def test_column_delete_records_the_fingerprint_of_the_state_after_the_write(repo, store, hist, table):
+    store.update_knowhow_cell(table["row_a"], table["plain"], "甲")
+    store.delete_knowhow_column(table["plain"])
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "column_delete"
+    assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
+
+
+def test_anchor_set_records_the_fingerprint_of_the_state_after_the_write(repo, store, hist, table):
+    store.set_knowhow_anchor_column(table["id"], table["plain"])
+    change = hist.list_changes(table["id"], limit=1)[0]
+    assert change["kind"] == "anchor_set"
+    assert change["fingerprint"] == _table_fingerprint(repo, table["id"])
