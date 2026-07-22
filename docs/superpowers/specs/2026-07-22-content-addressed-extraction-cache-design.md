@@ -119,7 +119,7 @@ diskcache          写 2263/s   读  5179/s   留存 40/150   852KB/1000KB
 kg_llm()        → CachedKGClient(inner, backend)     # 覆盖 初抽 / gleaning / refine
 make_embedder() → CachedEmbedder(inner, backend)     # 覆盖全部 6 个 embed_texts 调用点
                           ↓
-                  CacheBackend (已有 Protocol)
+                  CacheBackend (Protocol，仅 get/put)
                           ↓
                   SqliteCacheBackend (~160 行)
 ```
@@ -127,9 +127,10 @@ make_embedder() → CachedEmbedder(inner, backend)     # 覆盖全部 6 个 embe
 装饰器模式，`extract_graph` / `extract_window` / refine / gleaning / 6 个 embed
 调用点**全部零改动**。
 
-`OpenAICompatibleClient._get_cache()` 亦改为返回 `SqliteCacheBackend`（ask 路径一并
-受益，全系统只有一套缓存机制）。旧的 `llm_cache.db` 表结构不兼容（缺 tag/size/
-used_at 列），不迁移、直接弃用——缓存冷启动重建即可。
+`OpenAICompatibleClient._get_cache()` 内联的开关判断与路径解析一并**删除**，改为向
+`make_cache_backend(settings)` 索取（ask 路径同样受益，全系统只有一套缓存机制、
+一个构造点）。旧的 `llm_cache.db` 表结构不兼容（缺 tag/size/used_at 列），不迁移、
+直接弃用——缓存冷启动重建即可。
 
 ### SqliteCacheBackend 要点
 
@@ -183,6 +184,64 @@ embed 缓存**存储 API 原始维度的输出**。4096→1024 的运行时维�
 - embed：`make_embedder()` 工厂（`backend/app/services/embedding.py`）。注意与
   `bind_model_status_identity` 的包装次序，不得破坏 model_status 身份绑定与
   model_error 上报通道。
+
+## 缓存模块的内聚与可替换性
+
+这是一条**硬性要求**：缓存必须高内聚，将来出现合适组件时能低成本替换。
+
+### 现状问题
+
+缓存代码目前散在 5 个文件（`core/llm_cache.py`、`core/llm.py`、`core/config.py`、
+`services/model_provider.py`、`services/sqlite_repository.py`）。最严重的是
+`OpenAICompatibleClient._get_cache()` 内联了**开关名、配置项名、相对路径的仓库根锚定
+规则、具体实现类名**——这些都是缓存的内部事务，却由客户端持有。本设计新增两个消费者
+（`CachedKGClient`、`CachedEmbedder`），若照此模式就会出现三份重复构造逻辑，换组件
+需改三处。
+
+### 模块结构
+
+```
+app/core/cache/
+  __init__.py        # 唯一公开面: make_cache_backend() / CacheBackend / CacheAdmin
+  backend.py         # Protocol 定义 + NoCacheBackend
+  sqlite_backend.py  # 自研实现（全模块唯一写 SQL 处）
+  policy.py          # key 计算 + 可缓存性判定
+```
+
+消费者只允许 `from app.core.cache import make_cache_backend, CacheBackend`。
+
+### 三条规则
+
+**1. 唯一构造点。** `make_cache_backend(settings)` 是缓存的唯一诞生处，负责读开关、
+解析路径、选实现。消费者不自行 new、不解析路径、不读配置。换组件 = 改工厂一行。
+
+**2. Protocol 分两层。** 这是可替换性的关键：
+
+| 接口 | 方法 | 要求 |
+|---|---|---|
+| `CacheBackend` | `get(key) -> str \| None`、`put(key, value, tag="")` | **必需，仅 2 个** |
+| `CacheAdmin` | `evict_tag(tag)`、`stats()`、`clear()` | 可选，`isinstance` 探测 |
+
+`tag` 是可选参数，不支持的实现忽略即可——降级为"无法按 model 清空"，**不影响
+正确性**。若把 `evict_tag`/`stats` 并入必需接口，将来换任何简单 KV 组件都得先补齐
+管理方法，可替换性即告失效。管理端点在后端不支持 `CacheAdmin` 时如实降级提示。
+
+**3. 策略与存储分离。** key 计算（`llm_key` / `embed_key`）与"什么不该缓存"
+（空响应保护）属策略，留在 `policy.py`；backend 只负责存取字节。换存储不碰策略。
+
+### 把要求变成可执行约束
+
+- **导入守卫**：除 `app/core/cache/` 内部外，任何文件不得 import 具体实现类，只能
+  import Protocol 与工厂。须做变异验证——在别处插入
+  `from app.core.cache.sqlite_backend import SqliteCacheBackend`，守卫必须转红。
+- **Protocol 契约测试套件**：参数化 fixture 覆盖全部 backend，测的是接口行为而非
+  实现细节。这是可替换性的另一半——接口能插上不等于行为正确。新组件接入时跑通这套
+  即可切换。
+
+### 验收标准
+
+替换为任意组件 = 新增 1 个文件实现 2 个方法 + 改工厂 1 行 + 契约测试通过，
+**零调用方改动**。
 
 ## 三个安全阀
 
@@ -269,6 +328,12 @@ TTL 只为两件事存在：
   - 覆盖写时 `total_bytes` 按差值更新；`recount()` 与增量计量一致。
 - **测试隔离**：确认测试环境拿到的是 `NoCacheBackend`。
 - **属性透传**：`control` 经装饰器后仍可达，取消语义不变。
+- **Protocol 契约套件**：参数化 fixture 覆盖全部 backend（`sqlite` / `noop` / 未来
+  新增者），只测接口行为，不碰实现细节——put 后 get 得回原值、缺失 key 返回 None、
+  覆盖写生效、`tag` 参数被接受（即便被忽略）。新组件接入时跑通即可切换。
+- **内聚导入守卫**：除 `app/core/cache/` 内部外，无文件 import 具体实现类。须变异
+  验证：在别处插入 `from app.core.cache.sqlite_backend import SqliteCacheBackend`，
+  守卫必须转红。
 
 ## 不做
 
