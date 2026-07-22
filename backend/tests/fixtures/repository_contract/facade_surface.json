@@ -1371,6 +1371,12 @@
       },
       {
         "kind": "patch",
+        "path": "backend/tests/test_knowhow_history_roundtrip.py",
+        "scope": "<module>._advancing_clock",
+        "target": "_now"
+      },
+      {
+        "kind": "patch",
         "path": "backend/tests/test_rebuild_cache.py",
         "scope": "<module>._freeze_now",
         "target": "_now"
@@ -1388,6 +1394,14 @@
     ],
     "owner": "QueryStore",
     "patch_targets": [
+      {
+        "base": "repo_mod",
+        "compatibility": "production-compatible",
+        "kind": "patch",
+        "path": "backend/tests/test_knowhow_history_roundtrip.py",
+        "scope": "<module>._advancing_clock",
+        "target": "_now"
+      },
       {
         "base": "repo_mod",
         "compatibility": "production-compatible",
