@@ -516,8 +516,8 @@ class AskService:
         prior turns. Runs whenever there IS history (any non-first turn) — the
         rewrite model itself returns the question unchanged when it's already
         standalone, so we no longer pre-gate with a brittle keyword heuristic.
-        Uses the dedicated fast rewrite model (rewrite_llm_client); always falls
-        back to the raw question on any failure."""
+        Uses the dedicated ``query_rewrite`` workload; always falls back to the
+        raw question on any failure."""
         if not history.strip():
             return question
         client = self.model_clients.chat("query_rewrite")
@@ -549,8 +549,8 @@ class AskService:
     ) -> str:
         """问题感知证据精炼:把 context_block 喂给 evidence_refine LLM,抽"相关要点"
         前置成聚焦上下文(参考性,不产生 [k] 锚点)。默认开(kg_query_refine_enabled);
-        client 未配/失败/无内容 → 原样返回。reasoning 传 reasoning_llm_client、graph
-        传 llm_client。"""
+        client 未配/失败/无内容 → 原样返回。所有调用方都必须传入已按
+        ``evidence_refine`` workload 绑定的 client。"""
         if not (self.settings.kg_query_refine_enabled
                 and getattr(client, "configured", False)
                 and context_block.strip() and context_block.strip() != "(none)"):
@@ -622,13 +622,16 @@ class AskService:
         chunks=None,
         chains=None,
         memory_hits=None,
-        reasoning_client=None,
+        answer_client=None,
     ):
         """Synthesise the reasoning-mode answer. When PPR chunks are present they
         become first-class [k]-citable evidence: chunk segment k1..N + KG reasoning
-        chain segment k1001+ (mirrors _answer_mix's keying), still via the reasoning
-        client. Otherwise KG-only (legacy). search_elements passages stay
-        reference-only (no [k] id). Returns (answer, llm_grounded, anchors)."""
+        chain segment k1001+ (mirrors _answer_mix's keying), with final synthesis
+        still handled by ``ask_answer``. Otherwise KG-only (legacy).
+        search_elements passages stay
+        reference-only (no [k] id). Context refinement uses
+        ``evidence_refine`` while final synthesis uses ``ask_answer``. Returns
+        (answer, llm_grounded, anchors)."""
         raise_if_cancelled(cancel_event)
         chunks = chunks or []
         chains = chains or []
@@ -665,16 +668,17 @@ class AskService:
                 for i, el in enumerate(elements[:6])
             )
             context_block = f"{context_block}\n\n补充原文段落(供参考,无引用编号):\n{extra}"
-        reasoning_client = reasoning_client or self.model_clients.chat("ask_answer")
+        answer_client = answer_client or self.model_clients.chat("ask_answer")
+        refine_client = self.model_clients.chat("evidence_refine")
         context_block = self._refine_context(
-            question, context_block, reasoning_client, cancel_event)
-        raw = reasoning_client.chat_json(
+            question, context_block, refine_client, cancel_event)
+        raw = answer_client.chat_json(
             [{"role": "user", "content": answer_prompt(question, context_block, history)}],
             ANSWER_SCHEMA_HINT,
             timeout=self.settings.reasoning_timeout_seconds,
             max_retries=self.settings.reasoning_max_retries,
             cancel_event=cancel_event,
-            **cap_kwargs(reasoning_client, "answer_max_tokens"),
+            **cap_kwargs(answer_client, "answer_max_tokens"),
         )
         raise_if_cancelled(cancel_event)
         data = json.loads(raw)
@@ -1064,18 +1068,18 @@ class AskService:
             answer, llm_grounded, anchors = "", False, []
             synth_failed = False
             raise_if_cancelled(cancel_event)
-            reasoning_client = self.model_clients.chat("ask_answer")
-            if reasoning_client.configured and (
+            answer_client = self.model_clients.chat("ask_answer")
+            if answer_client.configured and (
                     top_hits or elements or chunks or chains or memory_hits):
                 # 空 content 有界重试 + 诚实降级 + 可观测,统一走 _answer_with_retry(见其 docstring)。
                 answer, llm_grounded, anchors, _ok = self._answer_with_retry(
                     lambda: self._answer_reasoning(
                         notebook_id, question, top_hits, elements, history,
                         cancel_event=cancel_event, chunks=chunks, chains=chains,
-                        memory_hits=memory_hits, reasoning_client=reasoning_client),
-                    getattr(reasoning_client, "model", ""),
-                    service="reasoning_llm",
-                    failed_fingerprint=model_client_fingerprint(reasoning_client),
+                        memory_hits=memory_hits, answer_client=answer_client),
+                    getattr(answer_client, "model", ""),
+                    service="ask_answer",
+                    failed_fingerprint=model_client_fingerprint(answer_client),
                 )
                 synth_failed = not _ok
 
@@ -1160,7 +1164,8 @@ class AskService:
         The [k] anchor markers, _parse_answer_anchors, and classify_evidence are
         shared helpers reused across ask modes. There is no longer a "fast path" —
         ask_fast was retired in P4-5; _answer_kg also deleted (dead code). Context
-        is now query-refined via _refine_context before being fed to the answer LLM.
+        is now evidence-refined via the ``evidence_refine`` workload before being
+        fed to the ``ask_answer`` workload.
         """
         from app.services.kg.graph_reason import (
             DEFAULT_REASONING_EDGES, multihop_subgraph, render_subgraph_context,

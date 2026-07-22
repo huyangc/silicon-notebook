@@ -32,6 +32,7 @@ def arepo(tmp_path, monkeypatch):
 
 def _bind_reasoning(repo, client):
     bind_chat_client(repo, "reasoning_agent", client)
+    bind_chat_client(repo, "evidence_refine", client)
     bind_chat_client(repo, "ask_answer", client)
 
 
@@ -53,9 +54,66 @@ def test_reasoning_ask_returns_trace_and_evidence_level(arepo):
     resp = arepo.ask(nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning"))
     assert resp.reasoning_trace and resp.reasoning_trace[0].step_type == "plan"
     assert ("chat", "reasoning_agent") in arepo._runtime.models.calls
+    assert ("chat", "evidence_refine") in arepo._runtime.models.calls
     assert ("chat", "ask_answer") in arepo._runtime.models.calls
     assert resp.evidence_level in {"grounded", "overview", "inferred"}
     assert resp.conversation_id
+
+
+def test_reasoning_uses_distinct_planning_refinement_and_answer_workloads(arepo):
+    class _Planner:
+        configured = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            self.calls += 1
+            if "sub_queries" in schema_hint:
+                return json.dumps({"sub_queries": [{"query": "RTL到GDSII流程"}]})
+            assert "next_action" in schema_hint
+            return json.dumps({"next_action": "answer", "sufficient": True})
+
+    class _Refiner:
+        configured = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            assert '"relevant"' in schema_hint
+            self.calls += 1
+            return json.dumps({"relevant": ["RTL到GDSII是标准实现流程"]})
+
+    class _Answer:
+        configured = True
+
+        def __init__(self):
+            self.calls = 0
+
+        def chat_json(self, messages, schema_hint, **kwargs):
+            assert '"answer"' in schema_hint
+            self.calls += 1
+            return json.dumps({
+                "answer": "RTL到GDSII是标准实现流程 [k1].",
+                "grounded": True,
+            })
+
+    planner, refiner, answer = _Planner(), _Refiner(), _Answer()
+    bind_chat_client(arepo, "reasoning_agent", planner)
+    bind_chat_client(arepo, "evidence_refine", refiner)
+    bind_chat_client(arepo, "ask_answer", answer)
+    arepo.settings.kg_query_refine_enabled = True
+    nb = _seed(arepo)
+
+    response = arepo.ask(
+        nb.id, AskRequest(question="RTL到GDSII流程", mode="reasoning")
+    )
+
+    assert response.answer
+    assert planner.calls >= 2
+    assert refiner.calls == 1
+    assert answer.calls == 1
 
 
 def test_fast_mode_unaffected_and_no_trace(arepo):
